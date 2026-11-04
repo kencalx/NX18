@@ -96,6 +96,14 @@ Left alone, because each could change how a game runs and needs a measurement on
 - **A 30 Hz display for every 30 fps game:** games that time themselves on vsync would run at half speed.
 - **Frame buffering** for every game: steadier frame rates for one frame of input latency. It stays a per-game choice in the start screen.
 
+### Privacy: nothing leaves the device
+
+The app sends no telemetry: no analytics, no crash reporting, and no network code but the web viewer of a game's offline pages (manuals, help). Games' own reports to Nintendo (`nn::prepo` play reports) are answered by the host, which sends nothing (`hle_offline.c`). The one path left open is closed here: a game's offline page could load an image, a script or a fetch from the internet (a tracking pixel, an analytics script); a WebKit content rule list now blocks every `http(s)` and `ws(s)` load of such a page, as navigations away from it already were.
+
+Kept, because they stay on the device and help when something goes wrong:
+- **`log.txt`:** every 5 seconds a few lines on frame times, memory, power and pipelines. It is written in the app's Documents folder, replaced at each start (the previous one is `log.prev.txt`) and never sent anywhere. The sampling is a few system queries every 5 seconds, and part of it feeds the frame-rate statistics.
+- **The notification prompt:** only for games of several programs (Super Mario 3D All-Stars), for the local "Tap to start" note when one program starts another.
+
 ## Testing status
 
 These changes were written and checked on Linux, not on a Mac:
