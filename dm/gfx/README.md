@@ -190,7 +190,7 @@ Comparison and testing:
 | `DM_FPS=30` or `60` | Pins the target frame rate |
 | `DM_NVN_BARRIER=game`, `DM_NVN_CUT` | Pass ordering and segment commits: see [docs/agents/04-graphics.md](../../docs/agents/04-graphics.md) section 7 |
 | `DM_PRESENT_HZ=N` | The frequency of presentation pacing (default 60); 0 means no frame limit and is for performance profiling only |
-| `DM_PRESENT_UPSCALE=metalfx`, `auto` or `off` | How the present scales a picture smaller than its rectangle on the screen: `metalfx` through MetalFX's spatial scaler, `auto` through it only for a picture below 1920x1080 (`fx_auto_below`, settled over `FX_AUTO_SETTLE` presents), `off` (the default) bilinearly. An option on both platforms (the iOS launcher's Upscaling; `env.txt` on the Mac); rendering at the screen's resolution stays the reference for sharpness ([reference](../../docs/reference/rendering.md#the-present-upscales-through-metalfx)) |
+| `DM_PRESENT_UPSCALE=metalfx`, `auto` or `off` | How the present scales a picture smaller than its rectangle on the screen: `metalfx` through MetalFX's spatial scaler, `auto` through it only for a picture below 1920x1080 (`fx_auto_below`; the live present goes bilinear at once at 1080p and takes MetalFX after `FX_AUTO_SETTLE` presents below it), `off` (the default) bilinearly. An option on both platforms (Upscaling in the iOS launcher and in the Mac settings window; `env.txt` on either); rendering at the screen's resolution stays the reference for sharpness ([reference](../../docs/reference/rendering.md#the-present-upscales-through-metalfx)) |
 
 ## Known limitations
 

@@ -117,22 +117,22 @@ int main(void) { @autoreleasepool {
         mtl_present_stretch(0);
         EXPECT("stretch off: letterboxed again",2347,(int)present_viewport(1280,720,2868,1320).width);
     }
-    {   // DM_PRESENT_UPSCALE=auto: MetalFX only for a picture below 1920x1080, and the live present's choice changes only after FX_AUTO_SETTLE presents in a row disagree
+    {   // DM_PRESENT_UPSCALE=auto: MetalFX only for a picture below 1920x1080; the live present goes bilinear at once at 1080p and takes MetalFX after FX_AUTO_SETTLE presents below it
         EXPECT("auto: handheld 1280x720 is below 1080p",1,fx_auto_below(1280,720));
         EXPECT("auto: 1600x900 is below",1,fx_auto_below(1600,900));
         EXPECT("auto: 1952x900 (wider, but shorter than 1080) is below",1,fx_auto_below(1952,900));
         EXPECT("auto: docked 1920x1080 is not below",0,fx_auto_below(1920,1080));
         EXPECT("auto: the taller 1920x1344 is not below",0,fx_auto_below(1920,1344));
         EXPECT("auto: 2560x1440 is not below",0,fx_auto_below(2560,1440));
-        fx_auto_state s={-1,0};
-        EXPECT("auto: the first present decides at once",1,fx_auto_step(&s,1,1280,720));
-        int flips=0,last=1;for(int i=0;i<200;i++){int v=fx_auto_step(&s,i&1,1920,1080);flips+=v!=last;last=v;}
-        EXPECT("auto: a size moving around 1080p every frame never flips it",0,flips);
-        for(int i=0;i<FX_AUTO_SETTLE-1;i++) fx_auto_step(&s,0,1920,1080);
-        EXPECT("auto: still MetalFX one present short of the settle count",1,s.on);
-        EXPECT("auto: bilinear after FX_AUTO_SETTLE presents at 1080p",0,fx_auto_step(&s,0,1920,1080));
-        fx_auto_step(&s,1,1280,720);fx_auto_step(&s,0,1920,1080);
-        EXPECT("auto: a present that agrees again resets the count",0,s.run);
+        fx_auto_state s={FX_AUTO_SETTLE};int v=0;
+        for(int i=0;i<FX_AUTO_SETTLE-1;i++) v=fx_auto_step(&s,1,1280,720);
+        EXPECT("auto: below 1080p, still bilinear one present short of FX_AUTO_SETTLE",0,v);
+        EXPECT("auto: then MetalFX",1,fx_auto_step(&s,1,1280,720));
+        EXPECT("auto: a 1080p picture is bilinear at once",0,fx_auto_step(&s,0,1920,1080));
+        int on=0;for(int i=0;i<200;i++){int w=i&1?1920:1728,h=i&1?1080:972;on+=fx_auto_step(&s,fx_auto_below(w,h),w,h);}   // 1728x972 and 1920x1080 in turn (dynamic resolution)
+        EXPECT("auto: a size moving around 1080p every frame stays bilinear",0,on);
+        for(int i=0;i<FX_AUTO_SETTLE;i++) v=fx_auto_step(&s,1,1728,972);
+        EXPECT("auto: and takes MetalFX once it stays below 1080p for FX_AUTO_SETTLE presents",1,v);
     }
     if([MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]) {   // the present pass through MetalFX into an offscreen canvas (present_offscreen_m4, as DM_NVN_SHOT_OUT uses it)
         g_fx_mode=1;
@@ -184,6 +184,22 @@ int main(void) { @autoreleasepool {
         g_present_n=32;
         EXPECT("same size reuses its scaler",PRESENT_METALFX,check_present_resize(big,192,96));
         EXPECT("reuse makes no new scaler",2,g_fx_present.made);
+        // auto on the live present: a 1080p picture is drawn bilinearly at once and builds no scaler; a picture below 1080p takes MetalFX after FX_AUTO_SETTLE presents, reusing
+        // the scaler kept for it (a handheld <-> docked switch makes none)
+        g_fx_mode=2;g_fx_auto=(fx_auto_state){FX_AUTO_SETTLE};g_present_n=100;
+        MTLTextureDescriptor *hdD=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB width:1920 height:1080 mipmapped:NO];
+        hdD.storageMode=MTLStorageModePrivate;hdD.usage=MTLTextureUsageShaderRead;
+        id<MTLTexture> hd=[g_dev newTextureWithDescriptor:hdD];res_add(hd);res_commit();
+        int madeBefore=g_fx_present.made;
+        EXPECT("auto live: a 1080p picture is drawn bilinearly",PRESENT_STANDARD,check_present_resize(hd,2560,1440));
+        EXPECT("auto live: and builds no scaler",madeBefore,g_fx_present.made);
+        int kind=0;for(int i=0;i<FX_AUTO_SETTLE-1;i++) kind=check_present_resize(big,192,96);
+        EXPECT("auto live: below 1080p, bilinear one present short of FX_AUTO_SETTLE",PRESENT_STANDARD,kind);
+        EXPECT("auto live: then MetalFX",PRESENT_METALFX,check_present_resize(big,192,96));
+        EXPECT("auto live: with the kept scaler",madeBefore,g_fx_present.made);
+        EXPECT("auto live: a 1080p picture again is bilinear at once",PRESENT_STANDARD,check_present_resize(hd,2560,1440));
+        EXPECT("auto live: still no scaler built",madeBefore,g_fx_present.made);
+        res_remove(hd);g_fx_mode=1;
         g_present_n=savedPresent;
 
         // Whole-window capture uses the same upscale and remains asynchronous; its completion includes the final BGRA readback.
