@@ -565,13 +565,21 @@ class Default(unittest.TestCase):
         block = '\n'.join(line[4:] for line in script[start:end].splitlines())
         for p4, pg, expected in [('on', '', 'g18p'), ('on', 'g18p   applegpu_g19p', 'g18p,applegpu_g19p'),
                                  ('off', '', 'none'), ('off', 'g19p', 'none')]:
-            for explicit, setting in [('', ''), ('g17p', ''), ('none', ''), ('', 'g16p')]:
-                with self.subTest(pso_mtl4=p4, pso_gpu=pg, gpu=explicit, setting=setting):
-                    scope = {'args': types.SimpleNamespace(gpu=explicit), 'PSO_GPUS': setting,
+            for explicit, setting, devices in [('', '', ''), ('g17p', '', ''), ('none', '', ''), ('', 'g16p', ''),   # DEVICE_GPUS empty: NXNative's rule
+                                               ('', '', 'g19p,g16g'), ('g17p', '', 'g19p,g16g'), ('none', '', 'g19p,g16g'), ('', 'g16p', 'g19p,g16g')]:
+                with self.subTest(pso_mtl4=p4, pso_gpu=pg, gpu=explicit, setting=setting, devices=devices):
+                    scope = {'args': types.SimpleNamespace(gpu=explicit), 'PSO_GPUS': setting, 'DEVICE_GPUS': devices,
                              'g': types.SimpleNamespace(get={'pso_mtl4': p4, 'pso_gpu': pg}.get),
                              're': re, 'BuildError': RuntimeError}
                     exec(block, scope)
-                    self.assertEqual(scope['gpus'], explicit or setting or expected)
+                    self.assertEqual(scope['gpus'], explicit or setting or devices or expected)   # the devices' archive for every game, whatever its profile
+
+    def test_device_gpus_default_names_the_target_devices(self):   # the A20 Pro of an iPhone 18 Pro Max, the M4 of an iPad Pro
+        spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
+        assert spec and spec.loader
+        nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
+        self.assertEqual(nsp.DEVICE_GPUS, 'g19p,g16g')
+        self.assertEqual([po.arch_name(a) for a in nsp.DEVICE_GPUS.split(',')], ['applegpu_g19p', 'applegpu_g16g'])
 
     def test_breath_of_the_wild(self):   # the profile that turns the Metal 4 path on: its app gets the archive
         r = subprocess.run([sys.executable, str(REPO / 'dm/games/game.py'), '01007EF00011E000', 'pso_mtl4', 'off'], capture_output=True, text=True)
