@@ -37,22 +37,26 @@ The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed ther
 
 ### Upscaling
 
-A game that renders below the screen's resolution is scaled up to the screen. **Standard**, the default, scales smoothly; **MetalFX** uses Apple's MetalFX upscaler, which sharpens edges and text as it scales.
+A game that renders below the screen's resolution is scaled up to the screen. **Standard**, the default, scales smoothly; **MetalFX** uses Apple's MetalFX upscaler, which sharpens edges and text as it scales; **Automatic** uses MetalFX only when the game renders below 1920x1080 (narrower than 1920 or shorter than 1080: handheld mode, a game's own 900p), and scales smoothly a picture of 1080p or more, which MetalFX sharpens less for its GPU time.
 
 ```mermaid
 flowchart LR
     G["Game's picture<br/>handheld 1280x720<br/>docked 1920x1080"] --> S{Upscaling}
     S -->|Standard| B["Smooth scaling"]
     S -->|MetalFX| M["MetalFX: sharper edges and text"]
+    S -->|Automatic| A{"Picture below<br/>1920x1080?"}
+    A -->|yes| M
+    A -->|no| B
     B --> D["Screen<br/>2868x1320 on an iPhone 17 Pro Max"]
     M --> D
 ```
 
 Breath of the Wild renders 1280x720 in handheld mode. Docked it renders its world at 900p and scales that to 1080p itself, before the app sees the picture. MetalFX works in either mode: handheld saves the most GPU time and heat, docked looks sharper than smooth scaling. Rendering at the screen's resolution stays the sharpest picture, where the GPU can afford it.
 
-- **When to change it:** turn it on if the picture looks soft and the device has GPU time to spare: on a Mac, or on an iPhone in handheld mode at 30 fps. For long sessions at 60 fps on an iPhone leave it at Standard.
+- **When to change it:** turn it on if the picture looks soft and the device has GPU time to spare: on a Mac, or on an iPhone in handheld mode at 30 fps. For long sessions at 60 fps on an iPhone leave it at Standard. **Automatic** suits a game you play both docked and handheld: MetalFX where the picture is smallest, smooth scaling at 1080p.
+- **What Automatic looks at:** the picture the game presents. A game that renders its world below 1080p and scales it to 1920x1080 itself (Breath of the Wild docked) presents 1080p, so Automatic scales it smoothly. When the picture's size crosses 1080p, Automatic waits for 60 frames in a row on the other side before it changes, so a game whose resolution moves around 1080p does not flicker between the two.
 - **Cost:** more GPU time each frame, which can increase heat on an iPhone. While the device is hot (iOS's thermal state serious or worse) or in Low Power Mode, the app scales smoothly instead, and MetalFX comes back after 30 s of calm (`DM_THERMAL_CAP=0` keeps MetalFX). [Breath of the Wild's measurements](../dm/games/01007EF00011E000/README.md#upscaling-current) cover Mac and iPhone; the matching iPhone Standard run and MetalFX's share of the thermal cost remain unmeasured. Nothing changes while the game's picture is as large as the screen. Unsupported devices and sizes use Standard scaling.
-- **On the Mac:** choose **MetalFX** under **Upscaling** in the [settings window](#the-mac-settings-window)'s Advanced settings, or set `DM_PRESENT_UPSCALE=metalfx` in its `env.txt` (off by default). It helps in a large window or on a 4K screen.
+- **On the Mac:** choose **MetalFX** or **Automatic** under **Upscaling** in the [settings window](#the-mac-settings-window)'s Advanced settings, or set `DM_PRESENT_UPSCALE=metalfx` or `auto` in its `env.txt` (off by default). It helps in a large window or on a 4K screen.
 
 ### Game's upscaler
 
@@ -274,7 +278,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
-| Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
+| Upscaling | `DM_PRESENT_UPSCALE` | `off`, `auto` (MetalFX below 1920x1080), `metalfx` |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |
 | Metal 4 pipelines | `DM_PSO_MTL4` | `1`, `0` |

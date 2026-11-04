@@ -117,6 +117,23 @@ int main(void) { @autoreleasepool {
         mtl_present_stretch(0);
         EXPECT("stretch off: letterboxed again",2347,(int)present_viewport(1280,720,2868,1320).width);
     }
+    {   // DM_PRESENT_UPSCALE=auto: MetalFX only for a picture below 1920x1080, and the live present's choice changes only after FX_AUTO_SETTLE presents in a row disagree
+        EXPECT("auto: handheld 1280x720 is below 1080p",1,fx_auto_below(1280,720));
+        EXPECT("auto: 1600x900 is below",1,fx_auto_below(1600,900));
+        EXPECT("auto: 1952x900 (wider, but shorter than 1080) is below",1,fx_auto_below(1952,900));
+        EXPECT("auto: docked 1920x1080 is not below",0,fx_auto_below(1920,1080));
+        EXPECT("auto: the taller 1920x1344 is not below",0,fx_auto_below(1920,1344));
+        EXPECT("auto: 2560x1440 is not below",0,fx_auto_below(2560,1440));
+        fx_auto_state s={-1,0};
+        EXPECT("auto: the first present decides at once",1,fx_auto_step(&s,1,1280,720));
+        int flips=0,last=1;for(int i=0;i<200;i++){int v=fx_auto_step(&s,i&1,1920,1080);flips+=v!=last;last=v;}
+        EXPECT("auto: a size moving around 1080p every frame never flips it",0,flips);
+        for(int i=0;i<FX_AUTO_SETTLE-1;i++) fx_auto_step(&s,0,1920,1080);
+        EXPECT("auto: still MetalFX one present short of the settle count",1,s.on);
+        EXPECT("auto: bilinear after FX_AUTO_SETTLE presents at 1080p",0,fx_auto_step(&s,0,1920,1080));
+        fx_auto_step(&s,1,1280,720);fx_auto_step(&s,0,1920,1080);
+        EXPECT("auto: a present that agrees again resets the count",0,s.run);
+    }
     if([MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]) {   // the present pass through MetalFX into an offscreen canvas (present_offscreen_m4, as DM_NVN_SHOT_OUT uses it)
         g_fx_mode=1;
         const int N=64;MTLTextureDescriptor *bd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB width:N height:N mipmapped:NO];bd.storageMode=MTLStorageModeShared;bd.usage=MTLTextureUsageShaderRead;
@@ -144,7 +161,10 @@ int main(void) { @autoreleasepool {
             EXPECT("  quadrant centres keep their colours, raw bytes of the sRGB source (4 checked)",0,bad);
         #undef PX
         }
-        atomic_store(&g_origin_ll,0);g_fx_mode=1;
+        atomic_store(&g_origin_ll,0);
+        g_fx_mode=2;   // auto: a capture decides on its own frame, and the 64x64 picture is below 1080p
+        EXPECT("auto: the offscreen present of a picture below 1080p goes through MetalFX",PRESENT_METALFX,present_offscreen_wait(big,crops[0],out));
+        g_fx_mode=1;
         MTLTextureDescriptor *smallD=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:32 height:32 mipmapped:NO];
         smallD.storageMode=MTLStorageModePrivate;smallD.usage=MTLTextureUsageRenderTarget;
         id<MTLTexture> small=[g_dev newTextureWithDescriptor:smallD];int whole[4]={0},invalidCrop[4]={63,0,2,2};

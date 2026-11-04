@@ -12733,16 +12733,37 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t made_at; int made; NSUInteger refused[6]; } fx_state;
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
 static id<MTL4Compiler> g_fx_comp;
-static int g_fx_mode = -1;   // 1 = metalfx, 0 = off
+static int g_fx_mode = -1;   // 1 = metalfx, 2 = auto (MetalFX for a picture below 1920x1080), 0 = off
 static int fx_mode(void) {
     if (g_fx_mode >= 0) return g_fx_mode;
     const char *e = getenv("DM_PRESENT_UPSCALE"); int v = 0;
     if (e && (!strcmp(e, "metalfx") || !strcmp(e, "1"))) v = 1;
+    else if (e && !strcmp(e, "auto")) v = 2;
     else if (e && (!strcmp(e, "off") || !strcmp(e, "0"))) v = 0;
-    else if (e && *e) MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx or off; keeping %s", e, v ? "metalfx" : "off");
+    else if (e && *e) MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx, auto or off; keeping off", e);
     if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("present upscaling: this GPU has no Metal 4 MetalFX spatial scaler; the present scales bilinearly"); v = 0; }
-    MLOG("present upscaling (DM_PRESENT_UPSCALE): %s", v ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it" : "off, bilinear");
+    MLOG("present upscaling (DM_PRESENT_UPSCALE): %s", v == 1 ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it"
+         : v == 2 ? "auto, MetalFX's spatial scaler where the picture is shown larger than the game renders it and the game renders it below 1920x1080, else bilinear" : "off, bilinear");
     return g_fx_mode = v;
+}
+// Automatic (DM_PRESENT_UPSCALE=auto): MetalFX only for a picture the game renders below 1920x1080, narrower than 1920 or shorter than 1080 (handheld 1280x720, a game's own
+// 1600x900), and the bilinear pass for a picture of 1080p or more (docked 1920x1080, the taller 1920x1344 of DM_SCREEN_ASPECT), which MetalFX sharpens less for its GPU time.
+// The picture is the presented one (the valid rectangle of the present's crop): a game that renders its 3D below 1080p and scales it to 1920x1080 itself counts as 1080p.
+// The live present changes its choice only once the picture has been on the other side of 1080p for FX_AUTO_SETTLE presents in a row (the first present decides at once), so
+// a game whose resolution moves around 1080p (dynamic resolution) does not flicker between the two; a capture (an offscreen present, its own fx state) decides on its own frame
+#define FX_AUTO_W 1920
+#define FX_AUTO_H 1080
+#define FX_AUTO_SETTLE 60
+static int fx_auto_below(NSUInteger cw, NSUInteger ch) { return cw < FX_AUTO_W || ch < FX_AUTO_H; }
+typedef struct { int on, run; } fx_auto_state;   // on: MetalFX now (-1 before the first present); run: presents in a row whose size says otherwise
+static fx_auto_state g_fx_auto = {-1, 0};   // the live present's (present thread only)
+static int fx_auto_step(fx_auto_state *s, int below, NSUInteger cw, NSUInteger ch) {
+    if (s->on < 0 || (below != s->on && ++s->run >= FX_AUTO_SETTLE)) {
+        if (s->on != below) MLOG("present upscaling (auto): %s for the %lux%lu picture%s", below ? "MetalFX" : "bilinear", (unsigned long)cw, (unsigned long)ch,
+                                 below ? ", below 1920x1080" : ", 1920x1080 or more");
+        s->on = below; s->run = 0;
+    } else if (below == s->on) s->run = 0;
+    return s->on;
 }
 // Heat and Low Power Mode: while the device is thermally serious or worse (NSProcessInfo thermalState >= 2, read once a second) or in Low Power Mode, the present's upscaling goes
 // through the bilinear pass instead of MetalFX's spatial scaler, which costs GPU time every frame; MetalFX comes back once the device has been fair or better (and out of Low Power
@@ -12779,7 +12800,9 @@ static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
 // remake_wait: fx is the present thread's, whose textures presents still on the GPU may read: a new scaler waits for them and for FX_REMAKE_PRESENTS presents since the last
 static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTexture> raw, const NSUInteger r[4], MTLViewport vp, MTLPixelFormat out_pf, int remake_wait) {
     NSUInteger cw = r[2], ch = r[3], ow = (NSUInteger)vp.width, oh = (NSUInteger)vp.height;
-    if (fx_mode() != 1 || !fx_wanted(vp, cw, ch)) return nil;
+    int mode = fx_mode();
+    if (!mode || !fx_wanted(vp, cw, ch)) return nil;
+    if (mode == 2) { int below = fx_auto_below(cw, ch); if (!(fx == &g_fx_present ? fx_auto_step(&g_fx_auto, below, cw, ch) : below)) return nil; }   // Automatic: below 1080p only
     if (fx == &g_fx_present && fx_thermal_hold()) return nil;   // hot or in Low Power Mode: the bilinear pass (the scaler and its textures are kept for when it comes back)
     if (!fx->sc || fx->in.width != cw || fx->in.height != ch || fx->in.pixelFormat != raw.pixelFormat || fx->out.width != ow || fx->out.height != oh || fx->out.pixelFormat != out_pf) {
         NSUInteger key[6] = {cw, ch, raw.pixelFormat, ow, oh, out_pf};
