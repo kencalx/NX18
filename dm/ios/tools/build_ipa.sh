@@ -110,6 +110,8 @@ else J=(); [ -f "$(dirname "$ROMFS")/jit/jit.img" ] && J=(--jit "$(dirname "$ROM
 echo "OTHER_LDFLAGS = \$(inherited) \$(DM_FRAMEWORKS) $F" >> Gen/dm.xcconfig
 # The Swift language mode of the app's Swift (project.yml SWIFT_VERSION): 6.0, the newest; DM_SWIFT_VERSION=5 builds in the Swift 5 mode, should a newer compiler find fault with the 6 mode
 echo "DM_SWIFT_VERSION = ${DM_SWIFT_VERSION:-6.0}" >> Gen/dm.xcconfig
+case "${DM_DEVICE_FAMILY:-1,2}" in 1 | 2 | 1,2) ;; *) die "DM_DEVICE_FAMILY must be 1 (iPhone), 2 (iPad) or 1,2: $DM_DEVICE_FAMILY";; esac
+echo "DM_DEVICE_FAMILY = ${DM_DEVICE_FAMILY:-1,2}" >> Gen/dm.xcconfig   # the devices the app installs on (TARGETED_DEVICE_FAMILY, project.yml): the NSP script's --device
 # One program's tables into TD: the rewriter's, the shader tables and the launcher's settings
 program_tables() {
 cp "$PATCHED"/*.fixups.tsv "$PATCHED"/*.gates.tsv "$PATCHED"/*.cuts.tsv "$PATCHED"/*.obs.tsv $TD/ || die "copy rewriter tables"

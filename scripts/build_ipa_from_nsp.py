@@ -81,6 +81,11 @@ DEVICE_GPUS = ''                        # the GPUs of the iPhone and iPad this b
                                         #   adds minutes to a first build and about 650 MB to the app (Breath of the Wild). Empty by default: a bundled archive (g18p) crashed Metal at boot on an
                                         #   iPhone Air with iOS 27.0, cause not found (LNPANDY/NX2Apple#640, open), while the same games started without one; try it on one game first (--gpu g19p,g16g).
                                         #   Empty = NXNative's rule above (the profile's pso_gpu / pso_mtl4)
+DEVICE = ''                             # the device an IPA is for: 'iphone' (the iPhone 18 Pro Max: an iPhone-only app, the A20 Pro's GPU g19p), 'ipad' (the iPad Pro M4: an iPad-only app, the M4's GPU g16g),
+                                        #   empty = both (one app for iPhone and iPad, as before). It sets the app's device family, and when the build makes a pipeline archive (the GPU's own
+                                        #   compiled shaders: PSO_GPUS, DEVICE_GPUS or the profile's rule) it makes it for that device's GPU alone; --gpu / PSO_GPUS still win. The shader
+                                        #   libraries themselves are one for every iOS device. An iPad build leaves out the launcher's Ultrawide (an iPad's screen is not wider than 16:9)
+DEVICE_ARCH = {'iphone': 'g19p', 'ipad': 'g16g'}   # each DEVICE's GPU, as MTLDevice.architecture names it
 SHOW_FPS = True                         # True shows the game's frame rate on the iPhone (frames on screen per second, top left); DM_SHOW_FPS=0 / 1 in the app's Documents/env.txt changes it without a rebuild
 MOTION = True                           # True passes a gyro controller's motion (on iOS also the phone's own) to games that read it; False builds with DM_MOTION=0, for when motion misbehaves (DM_MOTION=1 in the app's Documents/env.txt turns it back on without a rebuild)
 SURVEY_ONLY = False                     # a game with no profile in dm/games: only write the survey, no provisional profile and no IPA
@@ -2857,6 +2862,8 @@ def parse_args(argv):
     ap.add_argument('--gpu', help='NVN games: GPU architectures the app gets its pipeline archive for, made on this Mac with metal-tt, comma-separated: g18p (A19 / A19 Pro), or the name a device\'s log gives when the app has no archive for its GPU; '
                     'none = no archive, the device builds the bases on its first start (default: the PSO_GPUS setting, else the DEVICE_GPUS setting, for instance g19p,g16g: the A20 Pro of an iPhone 18 Pro Max and the M4 of an iPad Pro; when both are empty, a profile with pso_mtl4 on uses its pso_gpu key or g18p, and other profiles use none). '
                     'With --platform mac-app: the Mac app\'s archive, by default for this Mac\'s GPU (none: the app builds the bases on its first start)')
+    ap.add_argument('--device', choices=('iphone', 'ipad', 'both'), help='the device the IPA is for: iphone (an iPhone-only app; a pipeline archive, when one is made, for the A20 Pro, g19p) or ipad (an iPad-only app; '
+                    'the archive for the M4, g16g); both = one app for both (default: the DEVICE setting, else both)')
     ap.add_argument('--seen-shaders', action=argparse.BooleanOptionalAction, help='--platform mac or mac-app: build only the shaders the profile\'s playtests used (its shader_seen.tsv) and those the last runs\' logs reported missing, not the whole map: '
                     'minutes instead of hours, but areas the list does not cover draw without the rest until this runs again (default: the SEEN_SHADERS setting, off)')
     ap.add_argument('--show-fps', action=argparse.BooleanOptionalAction, help='show the game\'s frame rate on the iPhone, frames on screen per second at the top left (default: the SHOW_FPS setting, on)')
@@ -3250,6 +3257,13 @@ def main(args=None):
     gpus = (args.gpu or PSO_GPUS).strip() or DEVICE_GPUS.strip()   # --gpu / PSO_GPUS, else the devices this build is for
     if gpus and not re.fullmatch(r'none|(applegpu_)?g\w+(,(applegpu_)?g\w+)*', gpus): raise BuildError(f'--gpu / PSO_GPUS / DEVICE_GPUS takes GPU architectures such as g19p,g16g, or none: {gpus}')
     if not gpus: gpus = (','.join(g.get('pso_gpu', '').split()) or 'g18p') if g.get('pso_mtl4', 'off') == 'on' else 'none'   # by the profile's pso_gpu (for --gpu: the tokens joined with commas), else g18p for pso_mtl4 on, as build_ipa.sh decides without DM_PSO_GPUS: only the Metal 4 path reads the archive on iOS
+    device = (args.device or DEVICE or 'both').lower()
+    if device not in ('iphone', 'ipad', 'both'): raise BuildError(f'--device / DEVICE takes iphone, ipad or both: {device}')
+    ipa_env['DM_DEVICE_FAMILY'] = {'iphone': '1', 'ipad': '2'}.get(device, '1,2'); ipa_env['SETTINGS_DEVICE'] = device
+    if device != 'both':
+        say(f'device: {"iPhone" if device == "iphone" else "iPad"} only (the app installs on that device family alone)')
+        if not (args.gpu or PSO_GPUS).strip() and gpus != 'none' and gpus != DEVICE_ARCH[device]:   # an archive is made: for this device's GPU alone, not every GPU the rule names
+            say(f'pipeline archive: {DEVICE_ARCH[device]}, this device\'s GPU, instead of {gpus} (--gpu names others)'); gpus = DEVICE_ARCH[device]
     ipa_env['DM_PSO_GPUS'] = gpus
     if gfx == 'nvn': say(f'pipeline archive: {"none, the device builds the bases on its first start if it takes the Metal 4 path (--gpu g18p builds one)" if gpus == "none" else gpus + " (made on this Mac with metal-tt; --gpu none leaves it out)"}')
     if show_fps: say('frame-rate counter: on (DM_SHOW_FPS=0 in the app\'s Documents/env.txt turns it off)')

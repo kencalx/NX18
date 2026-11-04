@@ -397,6 +397,10 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --mods ~/Switch/sdcard
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --no-mods
 
+# an iPhone-only or iPad-only app (DEVICE in Spyder): TARGETED_DEVICE_FAMILY 1 or 2 (build_ipa.sh DM_DEVICE_FAMILY), and a pipeline archive, when one is made, for that device's GPU alone
+# (g19p, the A20 Pro; g16g, the M4) instead of every GPU the rule names; --gpu still wins. The launcher's rows with device:iphone (Ultrawide) are left out of an iPad app
+python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --device iphone
+
 # a damaged NSP (files failing the NCA's hash check) stops the build after listing them; this packs those files as read
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioGalaxy -k ~/keys/prod.keys --allow-damaged
 

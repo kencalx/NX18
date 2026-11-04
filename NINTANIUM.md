@@ -1,6 +1,6 @@
 # Nintanium
 
-Nintanium is a fork of [NXNative](https://github.com/seedds/nxnative) (MIT License, kept in [LICENSE](LICENSE)), which turns your own Switch games into iPhone, iPad and Mac apps. It adds a Stretch picture option, cheats on iPhone and iPad, a mods folder for code patches, replacement files and cheats, High frame rate and Ultrawide toggles for such mods, and tuning for the iPhone 18 Pro Max and iPad Pro (M4) on iOS 27.
+Nintanium is a fork of [NXNative](https://github.com/seedds/nxnative) (MIT License, kept in [LICENSE](LICENSE)), which turns your own Switch games into iPhone, iPad and Mac apps. It adds a Stretch picture option, cheats on iPhone and iPad, a mods folder for code patches, replacement files and cheats, High frame rate and Ultrawide toggles for such mods, iPhone-only or iPad-only builds, a Mac app that builds and installs games, and tuning for the iPhone 18 Pro Max and iPad Pro (M4) on iOS 27.
 
 ## Getting it
 
@@ -73,6 +73,21 @@ A mod whose folder name says it changes the frame rate (`60FPS`, `Frame rate`) o
 - **How it works.** The build rewrites the game's code once more with the mod and keeps only the bytes that change. On iPhone and iPad, each code page the mod touches is packed as signed code, once with and once without the mod, and the app swaps the page in at start. A mod that changes code NXNative's own fixes also change, or data the game's loader adjusts, can't be switched: the build leaves it out and says why.
 - **FPSLocker** patches (FPSLocker-Warehouse) are a different format, for a system module that changes memory while the game runs. They aren't read. Most of the games they cover already have the launcher's Frame rate.
 
+### Nintanium Builder (Mac app)
+
+[builder/](builder/README.md) is a Mac app that does all of this without the terminal:
+
+- it builds a game's app with the NSP script, for the **iPhone** or the **iPad** (`--device`, below);
+- it keeps each game's patches and cheats and adds them at build time;
+- it installs the app and its game files on the device, signed with your Apple account through Xcode, or as an unsigned IPA for a sideloading tool;
+- it pulls this repository's new commits as they are added.
+
+Build it with `builder/make_app.sh`.
+
+### iPhone or iPad builds
+
+`--device iphone` or `--device ipad` (`DEVICE` in Spyder) builds an app for that device family only. When the build makes a pipeline archive (the GPU's own compiled shaders), it makes it for that device's GPU alone: the A20 Pro (`g19p`) or the M4 (`g16g`), rather than every GPU the default rule names. The Metal shader libraries are the same for every iOS device, so there is no other per-device shader output. An iPad build leaves out the Ultrawide toggle. Without `--device`, one app serves both, as before.
+
 ### Tuned for iPhone 18 Pro Max and iPad Pro (M4) on iOS 27
 
 NXNative already requires an A17 Pro or M1 or later with Metal 4, already drives ProMotion's 120 Hz display link, and already asks for the Increased Memory Limit. On top of that:
@@ -119,7 +134,7 @@ Kept, because they stay on the device and help when something goes wrong:
 These changes were written and checked on Linux, not on a Mac:
 
 - **Tested:** the Python side (mods folder, patch formats, game-data overlay, cheat packing, the switchable mods' selection, byte diff and packed pages, the build script's new stages, settings and docs checks) passes NXNative's test suite and the new tests in `dm/tools/tests/test_game_mods.py` and `test_gen_embed_variants.py`.
-- **Not compiled here:** the Objective-C, C and Swift changes (Stretch, the Cheats menu, the High frame rate and Ultrawide toggles in the loader and front end, the default cheats folder, the Metal 4 and texture pool defaults, the Swift 6 language mode), the Xcode project changes (iOS 27 minimum, `-O2`, `-mcpu=apple-m4`) and the shaders compiled for iOS 27 in Metal 4.1, all of which need Xcode. Check them with a build on your Mac before relying on them.
+- **Not compiled here:** Nintanium Builder (the Mac app in `builder/`), the Objective-C, C and Swift changes (Stretch, the Cheats menu, the High frame rate and Ultrawide toggles in the loader and front end, the default cheats folder, the Metal 4 and texture pool defaults, the Swift 6 language mode), the Xcode project changes (iOS 27 minimum, `-O2`, `-mcpu=apple-m4`) and the shaders compiled for iOS 27 in Metal 4.1, all of which need Xcode. Check them with a build on your Mac before relying on them.
 - **Not measured:** the speed-ups. They follow from what the code does, but no frame times were taken on an iPhone 18 Pro Max or an M4 iPad.
 
 ## Sources checked

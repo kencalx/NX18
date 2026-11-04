@@ -567,12 +567,17 @@ class Default(unittest.TestCase):
                                  ('off', '', 'none'), ('off', 'g19p', 'none')]:
             for explicit, setting, devices in [('', '', ''), ('g17p', '', ''), ('none', '', ''), ('', 'g16p', ''),   # DEVICE_GPUS empty: NXNative's rule
                                                ('', '', 'g19p,g16g'), ('g17p', '', 'g19p,g16g'), ('none', '', 'g19p,g16g'), ('', 'g16p', 'g19p,g16g')]:
-                with self.subTest(pso_mtl4=p4, pso_gpu=pg, gpu=explicit, setting=setting, devices=devices):
-                    scope = {'args': types.SimpleNamespace(gpu=explicit), 'PSO_GPUS': setting, 'DEVICE_GPUS': devices,
-                             'g': types.SimpleNamespace(get={'pso_mtl4': p4, 'pso_gpu': pg}.get),
-                             're': re, 'BuildError': RuntimeError}
-                    exec(block, scope)
-                    self.assertEqual(scope['gpus'], explicit or setting or devices or expected)   # the devices' archive for every game, whatever its profile
+                for device in ('', 'iphone', 'ipad'):
+                    with self.subTest(pso_mtl4=p4, pso_gpu=pg, gpu=explicit, setting=setting, devices=devices, device=device):
+                        scope = {'args': types.SimpleNamespace(gpu=explicit, device=device or None), 'PSO_GPUS': setting, 'DEVICE_GPUS': devices, 'DEVICE': '',
+                                 'DEVICE_ARCH': {'iphone': 'g19p', 'ipad': 'g16g'}, 'ipa_env': {}, 'say': lambda m: None,
+                                 'g': types.SimpleNamespace(get={'pso_mtl4': p4, 'pso_gpu': pg}.get),
+                                 're': re, 'BuildError': RuntimeError}
+                        exec(block, scope)
+                        want = explicit or setting or devices or expected   # the devices' archive for every game, whatever its profile
+                        if device and not (explicit or setting) and want != 'none': want = {'iphone': 'g19p', 'ipad': 'g16g'}[device]   # --device: that device's GPU alone
+                        self.assertEqual(scope['gpus'], want)
+                        self.assertEqual(scope['ipa_env']['DM_DEVICE_FAMILY'], {'iphone': '1', 'ipad': '2', '': '1,2'}[device])
 
     def test_device_gpus_is_opt_in(self):   # empty until a bundled archive is known to open on the devices (LNPANDY/NX2Apple#640); the target devices' names as pso_offline.py takes them
         spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')

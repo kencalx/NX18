@@ -88,6 +88,8 @@ class LauncherSettingsTests(unittest.TestCase):
                 return {s['env'] for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}
         self.assertFalse({'DM_MOD_FPS', 'DM_MOD_ULTRAWIDE'} & rows([], 'ios'))
         self.assertTrue({'DM_MOD_FPS', 'DM_MOD_ULTRAWIDE'} <= rows(['fps', 'ultrawide'], 'ios'))
+        with patch.dict(os.environ, {'SETTINGS_DEVICE': 'ipad'}): self.assertNotIn('DM_MOD_ULTRAWIDE', rows(['fps', 'ultrawide'], 'ios'), 'an iPad-only app has no Ultrawide')
+        with patch.dict(os.environ, {'SETTINGS_DEVICE': 'iphone'}): self.assertIn('DM_MOD_ULTRAWIDE', rows(['fps', 'ultrawide'], 'ios'))
         mac = rows(['fps', 'ultrawide'], 'mac')
         self.assertIn('DM_MOD_FPS', mac); self.assertNotIn('DM_MOD_ULTRAWIDE', mac, 'Ultrawide stretches the picture, which only the iPhone and iPad front end does')
 
