@@ -148,9 +148,9 @@ def metallib(msls, out, sdk, extra):
     def comp(m):
         a = m[:-6] + f'.{sdk}.air'
         r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-c', '-fpreserve-invariance', *extra, m, '-o', a], capture_output=True, text=True)
-        if r.returncode and sdk == 'iphoneos':   # the newest Metal Shading Language for iOS 27 rejects it: Metal 3.2, the language it was tested in (as dm/ios/tools/ios_metal.py)
-            print(f'{m}: compiled in Metal 3.2: the newest Metal Shading Language for iOS 27 rejects it ({r.stderr.strip()[:200]})', flush=True)
-            r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-c', '-fpreserve-invariance', *extra, '-std=metal3.2', m, '-o', a], capture_output=True, text=True)
+        if r.returncode and '-std=metal4.1' in extra:   # Metal 4.1 rejects it: Metal 3.2, the language it was tested in (as dm/ios/tools/ios_metal.py)
+            print(f'{m}: compiled in Metal 3.2: Metal 4.1 rejects it ({r.stderr.strip()[:200]})', flush=True)
+            r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-c', '-fpreserve-invariance', *['-std=metal3.2' if x == '-std=metal4.1' else x for x in extra], m, '-o', a], capture_output=True, text=True)
         if r.returncode: red(f'{m}: metal compile failed: {r.stderr.strip()[:400]}')
         return a
     with cf.ThreadPoolExecutor(os.cpu_count()) as ex: airs = list(ex.map(comp, msls))
@@ -184,7 +184,7 @@ def main():
         dirs = [(os.path.join(out, 'vk'), 'macosx', [])]
         # The iPhone library is compiled with -fmetal-math-mode=relaxed, as the NVN chain's (dm/ios/tools/ios_metal.py): the default fast mode lets the GPU compiler assume there is
         # no NaN / Inf, which would let it drop the NaN handling of the precise:: functions above
-        if ios: dirs.append((os.path.join(ios, 'vk'), 'iphoneos', ['-mios-version-min=27.0', '-fmetal-math-mode=relaxed']))   # the app's system, and the newest Metal language for it (ios_metal.py)
+        if ios: dirs.append((os.path.join(ios, 'vk'), 'iphoneos', ['-mios-version-min=27.0', '-std=metal4.1', '-fmetal-math-mode=relaxed']))   # the app's system, and the newest Metal language for it (ios_metal.py)
         for d, sdk, extra in dirs:
             lib = metallib(msls, d, sdk, extra)
             open(os.path.join(d, 'vk_shaders.tsv'), 'w').write('\n'.join(tsv) + '\n')

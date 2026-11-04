@@ -574,12 +574,12 @@ class Default(unittest.TestCase):
                     exec(block, scope)
                     self.assertEqual(scope['gpus'], explicit or setting or devices or expected)   # the devices' archive for every game, whatever its profile
 
-    def test_device_gpus_default_names_the_target_devices(self):   # the A20 Pro of an iPhone 18 Pro Max, the M4 of an iPad Pro
+    def test_device_gpus_is_opt_in(self):   # empty until a bundled archive is known to open on the devices (LNPANDY/NX2Apple#640); the target devices' names as pso_offline.py takes them
         spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
         assert spec and spec.loader
         nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
-        self.assertEqual(nsp.DEVICE_GPUS, 'g19p,g16g')
-        self.assertEqual([po.arch_name(a) for a in nsp.DEVICE_GPUS.split(',')], ['applegpu_g19p', 'applegpu_g16g'])
+        self.assertEqual(nsp.DEVICE_GPUS, '')
+        self.assertEqual([po.arch_name(a) for a in 'g19p,g16g'.split(',')], ['applegpu_g19p', 'applegpu_g16g'])
 
     def test_breath_of_the_wild(self):   # the profile that turns the Metal 4 path on: its app gets the archive
         r = subprocess.run([sys.executable, str(REPO / 'dm/games/game.py'), '01007EF00011E000', 'pso_mtl4', 'off'], capture_output=True, text=True)

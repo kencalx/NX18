@@ -327,7 +327,7 @@ class Compiler(unittest.TestCase):
             # Match dmsh_build.MAC_METAL and ios_metal.METAL;
             # the latter needs relaxed NaN-aware arithmetic.
             flags = ['-fpreserve-invariance'] if sdk == 'macosx' else [
-                '-mios-version-min=27.0', '-fmetal-math-mode=relaxed', '-fpreserve-invariance']
+                '-mios-version-min=27.0', '-std=metal4.1', '-fmetal-math-mode=relaxed', '-fpreserve-invariance']
             air = work / (key + '.' + sdk + '.air')
             library = work / (key + '.' + sdk + '.metallib')
             subprocess.run(['xcrun','-sdk',sdk,'metal','-c',*flags,str(msl),'-o',str(air)],check=True)
