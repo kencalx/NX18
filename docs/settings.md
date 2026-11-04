@@ -169,7 +169,7 @@ flowchart TD
     archive -.->|next start| prepare
 ```
 
-At start, before the game's first frame, the app prepares what it already knows: the pipelines in the archive and those the prewarm lists name (one comes with the game, one grows on the phone as you play); with a warm archive that takes well under a second. A pipeline never seen before is drawn meanwhile with a stand-in for its pair of shaders, a *hybrid* pipeline that reads the draw's vertices in a general way and draws the same picture, while the real pipeline is built in the background and archived for the next start.
+Metal 4 pipelines are on by default for every game, on the iPhone and iPad as on the Mac. At start, before the game's first frame, the app prepares what it already knows: the pipelines in the archive and those the prewarm lists name (one comes with the game, one grows on the phone as you play); with a warm archive that takes well under a second. A pipeline never seen before is drawn meanwhile with a stand-in for its pair of shaders, a *hybrid* pipeline that reads the draw's vertices in a general way and draws the same picture, while the real pipeline is built in the background and archived for the next start.
 
 - **When to change it:** turn it off only if a game crashes or runs out of memory with it.
 - **Cost:** memory for the archive while the game runs, and storage on the phone.
