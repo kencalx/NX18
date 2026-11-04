@@ -12805,9 +12805,11 @@ static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
 // remake_wait: fx is the present thread's, whose textures presents still on the GPU may read: a new scaler waits for them and for FX_REMAKE_PRESENTS presents since the last
 static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTexture> raw, const NSUInteger r[4], MTLViewport vp, MTLPixelFormat out_pf, int remake_wait) {
     NSUInteger cw = r[2], ch = r[3], ow = (NSUInteger)vp.width, oh = (NSUInteger)vp.height;
-    int mode = fx_mode();
-    if (!mode || !fx_wanted(vp, cw, ch)) return nil;
-    if (mode == 2) { int below = fx_auto_below(cw, ch); if (!(fx == &g_fx_present ? fx_auto_step(&g_fx_auto, below, cw, ch) : below)) return nil; }   // Automatic: below 1080p only, so no scaler for 1080p
+    int mode = fx_mode(), auto_ok = 1;
+    // Automatic: below 1080p only, so no scaler for 1080p. The live present's count runs on every present, also one shown at its own size (fx_wanted false: a 1080p TV,
+    // a small window), so a 1080p picture always restarts it
+    if (mode == 2) { int below = fx_auto_below(cw, ch); auto_ok = fx == &g_fx_present ? fx_auto_step(&g_fx_auto, below, cw, ch) : below; }
+    if (!mode || !auto_ok || !fx_wanted(vp, cw, ch)) return nil;
     if (fx == &g_fx_present && fx_thermal_hold()) return nil;   // hot or in Low Power Mode: the bilinear pass (the scaler and its textures are kept for when it comes back)
     if (!fx->sc || fx->in.width != cw || fx->in.height != ch || fx->in.pixelFormat != raw.pixelFormat || fx->out.width != ow || fx->out.height != oh || fx->out.pixelFormat != out_pf) {
         NSUInteger key[6] = {cw, ch, raw.pixelFormat, ow, oh, out_pf};

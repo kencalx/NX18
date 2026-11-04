@@ -199,6 +199,10 @@ int main(void) { @autoreleasepool {
         EXPECT("auto live: with the kept scaler",madeBefore,g_fx_present.made);
         EXPECT("auto live: a 1080p picture again is bilinear at once",PRESENT_STANDARD,check_present_resize(hd,2560,1440));
         EXPECT("auto live: still no scaler built",madeBefore,g_fx_present.made);
+        for(int i=0;i<FX_AUTO_SETTLE;i++) kind=check_present_resize(big,192,96);
+        EXPECT("auto live: MetalFX again after FX_AUTO_SETTLE presents below 1080p",PRESENT_METALFX,kind);
+        check_present_resize(hd,1920,1080);   // a 1080p picture shown at its own size: MetalFX would not scale it, and it still restarts the count
+        EXPECT("auto live: a 1080p picture at its own size restarts the count too",PRESENT_STANDARD,check_present_resize(big,192,96));
         res_remove(hd);g_fx_mode=1;
         g_present_n=savedPresent;
 
