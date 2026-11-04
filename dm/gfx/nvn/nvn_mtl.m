@@ -12667,10 +12667,19 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
     if (!v) { RED_ONCE(69, "present: cannot create a non-sRGB view of the sRGB swapchain texture (format %lu); presenting the decoded values", (unsigned long)src.pixelFormat); return src; }
     return v;
 }
+// Picture Stretch (the iOS front end's DM_PICTURE_FIT=stretch, front_ios.m): the front end makes the canvas the whole screen and asks the present to draw the picture over all of it,
+// its shape not kept. Set by the front end on every layout (off on a TV, in a portrait split and in Fit or Fill), read on the present thread
+static _Atomic int g_present_stretch;
+void mtl_present_stretch(int on) {
+    on = on != 0;
+    if (atomic_exchange_explicit(&g_present_stretch, on, memory_order_relaxed) != on)
+        MLOG("present: picture %s", on ? "stretched over the whole canvas (Picture Stretch)" : "drawn in its own shape");
+}
 // The rectangle of the canvas (dw x dh) the picture (cw x ch) is drawn into: the picture's aspect ratio kept and centred, black bars in the rest (no stretching when the screen's ratio
 // differs from the game's, e.g. iPhone about 19.5:9 against the game's 16:9); when the ratios differ by under 1 % (the remainder from a game width that is a multiple of 8 in the
-// full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels
+// full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels. With Picture Stretch (mtl_present_stretch) the whole canvas always
 static MTLViewport present_viewport(double cw, double ch, double dw, double dh) {
+    if (atomic_load_explicit(&g_present_stretch, memory_order_relaxed)) return (MTLViewport){0, 0, dw, dh, 0, 1};
     double s = fmin(dw / cw, dh / ch);
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
     if (fabs((dw / dh) / (cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
@@ -12734,10 +12743,12 @@ static int fx_mode(void) {
     MLOG("present upscaling (DM_PRESENT_UPSCALE): %s", v ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it" : "off, bilinear");
     return g_fx_mode = v;
 }
-// MetalFX scales the content (cw x ch) to its rectangle on the canvas (vp) when the rectangle is at least as large in both directions and larger in one
+// MetalFX scales the content (cw x ch) to its rectangle on the canvas (vp) when the rectangle is at least as large in both directions and larger in one, and of the content's shape
+// (within present_viewport's 1 %): a picture stretched to another shape (Picture Stretch) is scaled by the bilinear pass, MetalFX's spatial scaler being made for a uniform scale
 static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
     NSUInteger w = (NSUInteger)vp.width, h = (NSUInteger)vp.height;
-    return cw && ch && w >= cw && h >= ch && (w > cw || h > ch);
+    if (!(cw && ch && w && h) || fabs(((double)w / h) / ((double)cw / ch) - 1) >= 0.01) return 0;
+    return w >= cw && h >= ch && (w > cw || h > ch);
 }
 // Encodes the upscale of the rectangle r of raw into cb (see above); returns the scaled picture, which the present pass draws 1:1 into vp, or nil (the bilinear pass).
 // remake_wait: fx is the present thread's, whose textures presents still on the GPU may read: a new scaler waits for them and for FX_REMAKE_PRESENTS presents since the last
