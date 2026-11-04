@@ -4,6 +4,9 @@
 #include "hle.h"
 #include <mach/mach.h>
 #include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#include <os/proc.h>   // os_proc_available_memory: the room left before the system's memory limit
+#endif
 
 static int rd(uint64_t a, void *out, size_t n) { vm_size_t got = 0; return a >= 0x1000 && vm_read_overwrite(mach_task_self(), (vm_address_t)a, n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n; }
 
@@ -17,7 +20,9 @@ uint64_t dm_ue_cvar(const char *name) {
 // ue_texture_pool: r.Streaming.PoolSize, the megabytes Unreal's texture streamer keeps resident; past it the streamer drops the top mips of the textures in view. The game's
 // device profile sets it (DRAGON QUEST VII Reimagined: 200 on the Switch, 1000 on Windows) and the streaming manager reads it again whenever it changes. The host raises a smaller
 // value the game sets to the target, whenever the game sets it back; a larger one, or -1 (no pool size: the engine sizes its pool otherwise), stays. The profile key applies on the
-// Mac and on iOS (the devices this build targets, an A17 Pro or M1 and later with the Increased Memory Limit, have the room; it was Mac-only before). DM_UE_TEXTURE_POOL=0 leaves the game's value
+// Mac and on iOS (the devices this build targets, an A20 iPhone or M4 iPad with the Increased Memory Limit, have the room; it was Mac-only before), there only from the profile when, at the
+// game's first present, the room left before the memory limit is at least UE_POOL_ROOM_MB plus the pool, so a tighter run keeps the game's own pool instead of risking the limit.
+// DM_UE_TEXTURE_POOL sets it whatever the room; DM_UE_TEXTURE_POOL=0 leaves the game's value
 void dm_ue_cvar_tick(void) {
     static int state = -1, target, nlog; static uint64_t obj_off; static const char *src;
     if (!state) return;
@@ -26,6 +31,13 @@ void dm_ue_cvar_tick(void) {
         const char *e = getenv("DM_UE_TEXTURE_POOL");
         target = e ? atoi(e) : DM_GAME_UE_TEXTURE_POOL; src = e ? "DM_UE_TEXTURE_POOL" : "game profile ue_texture_pool";
         if (target <= 0) { if (DM_GAME_UE_TEXTURE_POOL) LOG("main: Unreal r.Streaming.PoolSize left as the game sets it (%s)", src); return; }
+#if TARGET_OS_IPHONE
+        if (!e) {
+            enum { UE_POOL_ROOM_MB = 2048 };   // a margin for the rest of the game's memory after its first present: a cautious choice, not measured on a device
+            unsigned long long room = os_proc_available_memory() >> 20;
+            if (room < (unsigned long long)target + UE_POOL_ROOM_MB) { LOG("main: Unreal r.Streaming.PoolSize left as the game sets it: %llu MB left before the memory limit, under the profile's %d MB pool plus %d MB (DM_UE_TEXTURE_POOL sets it anyway)", room, target, UE_POOL_ROOM_MB); state = 0; return; }
+        }
+#endif
         obj_off = dm_ue_cvar("r.Streaming.PoolSize");
         if (!obj_off) { LOG("[RED] main: Unreal r.Streaming.PoolSize not found in main by the rewriter (ue_cvar.py; %s %d MB not applied)", src, target); return; }
         LOG("main: Unreal r.Streaming.PoolSize at main+%#llx, raised to %d MB (%s)", (unsigned long long)obj_off, target, src);

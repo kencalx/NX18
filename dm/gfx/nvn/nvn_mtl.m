@@ -12744,6 +12744,30 @@ static int fx_mode(void) {
     MLOG("present upscaling (DM_PRESENT_UPSCALE): %s", v ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it" : "off, bilinear");
     return g_fx_mode = v;
 }
+// Heat and Low Power Mode: while the device is thermally serious or worse (NSProcessInfo thermalState >= 2, read once a second) or in Low Power Mode, the present's upscaling goes
+// through the bilinear pass instead of MetalFX's spatial scaler, which costs GPU time every frame; MetalFX comes back once the device has been fair or better (and out of Low Power
+// Mode) for 30 s, as the frame step's thermal cap does (hle_nvn.c thermal_capped), so it does not flap. Only the picture's sharpness changes, never what the game sees.
+// DM_THERMAL_CAP=0 turns it off, with the frame step's cap. The Mac reports no thermal state and no Low Power Mode (hle_nvn.c's weak defaults). Present thread only
+int dm_thermal_now(void);    // front_ios.m; hle_nvn.c's weak default (-1) elsewhere
+int dm_low_power_now(void);  // front_ios.m; hle_nvn.c's weak default (0) elsewhere
+#define FX_CALM_NS 30000000000ull
+static int fx_thermal_hold(void) {
+    static int on = -1, held; static uint64_t last, calm_since;
+    if (on < 0) { const char *e = getenv("DM_THERMAL_CAP"); on = !(e && !strcmp(e, "0")); }
+    if (!on) return 0;
+    uint64_t now = now_ns();
+    if (now - last < 1000000000ull) return held;
+    last = now;
+    int th = dm_thermal_now(), lp = dm_low_power_now();
+    if (th >= 2 || lp) {
+        calm_since = 0;
+        if (!held) { held = 1; MLOG("present upscaling: bilinear while the device is %s (MetalFX comes back after %llu s of calm; DM_THERMAL_CAP=0 turns this off)", lp ? "in Low Power Mode" : "thermally serious", FX_CALM_NS / 1000000000ull); }
+    } else if (held) {
+        if (!calm_since) calm_since = now;
+        else if (now - calm_since >= FX_CALM_NS) { held = 0; MLOG("present upscaling: MetalFX again (thermal state %d, Low Power Mode off, for %llu s)", th, FX_CALM_NS / 1000000000ull); }
+    }
+    return held;
+}
 // MetalFX scales the content (cw x ch) to its rectangle on the canvas (vp) when the rectangle is at least as large in both directions and larger in one, and of the content's shape
 // (within present_viewport's 1 %): a picture stretched to another shape (Picture Stretch) is scaled by the bilinear pass, MetalFX's spatial scaler being made for a uniform scale
 static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
@@ -12756,6 +12780,7 @@ static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
 static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTexture> raw, const NSUInteger r[4], MTLViewport vp, MTLPixelFormat out_pf, int remake_wait) {
     NSUInteger cw = r[2], ch = r[3], ow = (NSUInteger)vp.width, oh = (NSUInteger)vp.height;
     if (fx_mode() != 1 || !fx_wanted(vp, cw, ch)) return nil;
+    if (fx == &g_fx_present && fx_thermal_hold()) return nil;   // hot or in Low Power Mode: the bilinear pass (the scaler and its textures are kept for when it comes back)
     if (!fx->sc || fx->in.width != cw || fx->in.height != ch || fx->in.pixelFormat != raw.pixelFormat || fx->out.width != ow || fx->out.height != oh || fx->out.pixelFormat != out_pf) {
         NSUInteger key[6] = {cw, ch, raw.pixelFormat, ow, oh, out_pf};
         if (!memcmp(key, fx->refused, sizeof key)) return nil;

@@ -8,6 +8,9 @@
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
 #include <errno.h>
+#include <malloc/malloc.h>
+#include <os/proc.h>
+#include <mach/mach.h>
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
@@ -303,7 +306,17 @@ static _Atomic double g_brightness = -1;
 int dm_thermal_now(void) { return (int)NSProcessInfo.processInfo.thermalState; }
 int dm_low_power_now(void) { return NSProcessInfo.processInfo.lowPowerModeEnabled; }   // the frame step does not probe in it (hle_nvn.c fstep_cpu_slowed)
 double dm_brightness_now(void) { return g_brightness; }
+// iOS's memory warning, the last notice before the system ends the app for memory (which leaves no line in the log): the footprint and what is left are logged, so log.txt shows
+// how close a run came, and the allocators hand their free pages back to the system (malloc_zone_pressure_relief). Nothing the game holds is freed, so no game state changes
+static void front_ios_memory_warning(void) {
+    task_vm_info_data_t vi; mach_msg_type_number_t vc = TASK_VM_INFO_COUNT;
+    double fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &vc) == KERN_SUCCESS ? vi.phys_footprint / 1048576.0 : -1;
+    size_t freed = malloc_zone_pressure_relief(NULL, 0);
+    LOG("[RED] front end: iOS memory warning (%.0f s after launch): footprint %.0f MiB, %llu MiB left before the limit; %.1f MiB of free allocator pages handed back", (now_ns() - g_t0_ns) / 1e9, fp,
+        (unsigned long long)(os_proc_available_memory() >> 20), freed / 1048576.0);
+}
 static void front_ios_power_watch(void) {
+    [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidReceiveMemoryWarningNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; front_ios_memory_warning(); }];
     g_brightness = UIScreen.mainScreen.brightness;
     [NSNotificationCenter.defaultCenter addObserverForName:UIScreenBrightnessDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; g_brightness = UIScreen.mainScreen.brightness; }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {

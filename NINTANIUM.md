@@ -81,6 +81,21 @@ To get the most out of the two devices:
 - **On the iPad Pro**, try **Upscaling: MetalFX** in the start screen. The M4 has the GPU time for it, and it sharpens the picture on the 13" screen.
 - **Frame buffering** (Performance section) holds a steadier frame rate in heavy games, at the cost of about one frame of input latency. It stays a per-game choice.
 
+### Memory, CPU/GPU scheduling and heat
+
+A check of these areas found NXNative already well tuned: Metal 4 residency sets, upload staging capped per batch, unmapped guest memory released at once, textures kept lossless-compressed unless a view needs otherwise, ProMotion asked for 60 Hz (30 for a 30 fps target) rather than 120, pipeline building on background (utility) queues, the game's and audio's threads at user-interactive priority, and a 30 fps hold for games whose speed the host controls while iOS reports serious heat. Added, none of which changes what a game sees or how fast it runs:
+
+- **MetalFX steps aside when hot.** With **Upscaling: MetalFX** on, the app scales smoothly instead while the device is thermally serious or in Low Power Mode, and MetalFX comes back after 30 s of calm. This is for every game, including those whose frame rate the host does not control. `DM_THERMAL_CAP=0` keeps MetalFX.
+- **Memory warnings are logged and acted on.** iOS's memory warning, the last notice before it ends an app for memory, now writes the footprint and the room left to `log.txt`, and the app hands its allocators' free pages back to the system.
+- **The larger Unreal texture pool only with room to spare:** on iOS it applies when at least the pool plus 2 GB is left before the memory limit at the game's start; otherwise the game keeps its own pool.
+
+Left alone, because each could change how a game runs and needs a measurement on your devices first:
+
+- **`DM_QOS_MAP=1`** lets low-priority game threads run on the efficiency cores, which could save power. NXNative keeps it off until a phone test shows it drops no frames. Try it per game in `Documents/env.txt` and compare the `[nvn] on-screen` lines in `log.txt`.
+- **Freeing compiled shaders and pipelines under memory pressure:** in-flight pipelines point at them directly, and rebuilding them would bring back stutters.
+- **A 30 Hz display for every 30 fps game:** games that time themselves on vsync would run at half speed.
+- **Frame buffering** for every game: steadier frame rates for one frame of input latency. It stays a per-game choice in the start screen.
+
 ## Testing status
 
 These changes were written and checked on Linux, not on a Mac:
