@@ -1,5 +1,7 @@
 # Nintanium
 
+Optimized NXNative build for latest devices.
+
 **Nintanium** is NXNative with a Stretch picture option, cheats on iPhone and iPad, a mods folder for code patches, replacement files and cheats, and tuning for the iPhone 18 Pro Max and iPad Pro (M4) on iOS 27: see [NINTANIUM.md](NINTANIUM.md). Everything below is NXNative's own README; where it says to clone `seedds/nxnative`, clone `kencalx/Nintanium` instead.
 
 # nxnative
