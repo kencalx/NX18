@@ -386,6 +386,13 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/BreathOfTheWild -k ~/keys/prod.key
 # a diagnostic build with environment switches baked in (one KEY=VALUE per line)
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --env-file diag_env.txt
 
+# the game's mods (MODS in Spyder; by default the folder named mods beside the game's files): code patches (.ips, .ips32, .pchtxt for the packed build) written into the code modules
+# before the rewrite, RomFS files (folders named romfs) in the packed image, cheats (folders named cheats) packed into the app; Atmosphère's, yuzu's and Ryujinx's layouts, a whole SD card too.
+# Other games' folders (named by title ID) are left out; a folder whose name starts with - is off. The modded files are in <id>_build/mods/<version>/, the report in <id>_build/mods/<version>.txt.
+# A patch that changes an instruction the profile's own cuts change stops the rewrite (patch_nso.py checks their original bytes): turn that patch off. dm/tools/game_mods.py has the rules
+python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --mods ~/Switch/sdcard
+python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --no-mods
+
 # a damaged NSP (files failing the NCA's hash check) stops the build after listing them; this packs those files as read
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioGalaxy -k ~/keys/prod.keys --allow-damaged
 

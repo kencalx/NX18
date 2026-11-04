@@ -16,6 +16,10 @@
 # Two ways to run it: open this file in Spyder and press F5 (it uses the values under "Settings" below; an empty NSP folder or prod.keys is asked for at run time);
 #   or in a terminal: python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [options] (values given on the command line override "Settings", -h lists every option;
 #   without keyboard input a missing value is not asked for but reported as an error; exit code 0 on success, 1 on error, 130 when interrupted). Command-line options entered in Spyder's run configuration work the same way.
+# MODS / --mods: a folder of the game's mods, by default the folder named mods beside the game's files when there is one (dm/tools/game_mods.py says what it reads): Atmosphère / yuzu / Ryujinx
+#   code patches (.ips, .ips32, .pchtxt) are written into the code modules before the rewrite (on the iPhone the only way a code patch reaches the game), RomFS file replacements go into
+#   the packed RomFS image, and cheat files are packed into the app (its cheats folder gets them at its first start). The modded files are in <build folder>/mods/<version>/; the
+#   extraction is never changed. MODS = 'none' / --no-mods packs the game without them.
 # Uses only three things: this repository, a folder holding one game's NSPs (the base game, with or without an update; DLC NSPs, when present, are packed too and unlock the add-on content already in the game), and prod.keys.
 #   Instead of NSPs, the folder may hold the game's files as a dump (base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): that needs no prod.keys, and a game profile, since the survey reads NSPs. A dump has no control data: the name comes from the profile, and the app has no icon.
 #   Or the folder may hold the game as one NUP container (a .nup file: base game, updates and DLC; scripts/pack_nup.py), or the .nup file may be given in its place: like a dump it needs no prod.keys and a game profile,
@@ -63,6 +67,8 @@ LANGUAGE = ''                           # game language, a code or a name: 'ja',
                                         #   DM_LANG=<code> in the app's Documents/env.txt changes it without a rebuild
 KEEP_EXTRACTED = True                   # keep the extracted game files after the IPA is built (saves extraction next time; as big as the game files); False deletes them
 DM_ENV_FILE = ''                        # optional: environment switches for a diagnostic build (one KEY=VALUE per line)
+MODS = ''                               # the game's mods: code patches (.ips / .pchtxt), RomFS replacements (romfs/ folders) and cheats (cheats/ folders), in Atmosphère's, yuzu's or Ryujinx's layout
+                                        #   (empty = the folder named mods beside the game's files, when there is one; 'none' = no mods); dm/tools/game_mods.py says what is read
 SEEN_SHADERS = False                    # PLATFORM 'mac' / 'mac-app': build only the shaders the profile's playtests used (shader_seen.tsv) and those the last runs' logs reported missing, not the whole map; areas the list does not cover draw without the rest until this runs again
 PSO_GPUS = ''                           # NVN games: GPU architectures the app gets the shader pairs' pipeline bases for, made on this Mac (metal-tt, comma-separated: 'g18p' = A19 / A19 Pro of the iPhone 17 family;
                                         #   another device's name is in its log when the app has none for it), so the device does not build them on its first start; each adds about 650 MB to the app (Breath of the Wild) and minutes to a first build; 'none' = no archive;
@@ -1325,6 +1331,85 @@ def nro_modules(g, exe_dir, nros):
     why = ', '.join(f'{m} ({k})' for m, k in add.items())
     say(f'modules {" ".join(mods)}: the NROs the game loads import from {why}')
     return set_keys(g, {'modules': (' '.join(mods), f'the NROs the game loads at run time import from {why}, which main does not')}, 'After the NRO collection')
+
+
+def mods_folder(args, nsp_dir):
+    """The game's mods folder (dm/tools/game_mods.py): --mods / MODS, else the folder named mods beside the game's files when there is one; None = no mods (--no-mods, MODS = 'none')"""
+    want = getattr(args, 'mods', None)
+    if want is None: want = MODS
+    if want in ('none', 'off'): return None
+    if want:
+        p = Path(os.path.expanduser(want)).resolve()
+        if not p.is_dir(): raise BuildError(f'--mods / MODS: not a folder: {p}')
+        return p
+    p = nsp_dir / 'mods'
+    return p if p.is_dir() else None
+
+
+def link_tree(src, dst):   # dst: the folder src as hard links (a copy across volumes), so a later write replaces a file of dst, never one of src
+    import game_mods as gm
+    for d, _, files in os.walk(src):
+        to = dst / os.path.relpath(d, src); to.mkdir(parents=True, exist_ok=True)
+        for f in files: gm.link_or_copy(Path(d) / f, to / f)
+
+
+def apply_mods(root, ext, work, ver, app):
+    """The mods of root for the game (dm/tools/game_mods.py) applied to version ver's extraction ext: (the modded extraction, the folder of the cheats to pack), each None when there is
+    nothing of that kind. The modded extraction, <build folder>/mods/<version>/, has ext's layout and hard links of its files, but the code modules the patches change and a RomFS image
+    with the mods' files in it (a clone of ext's on APFS, then a new index): ext is never written. Reused while the mods, ext's code modules and RomFS and the tools are as at the last run"""
+    import game_mods as gm
+    found = gm.scan(root, app)
+    for p, why in found.ignored: say(f'mods: ignored {p.relative_to(root)}: {why}')
+    if not found.any(): say(f'mods: nothing for {app:016X} in {root}'); return None, None
+    PROG.add(1); PROG.stage('mods', step=f'{len(found.ips)} code patch files, {len(found.romfs)} romfs folders, {len(found.cheats)} cheat files')
+    out = work / 'mods'; out.mkdir(parents=True, exist_ok=True)
+    plan, _ = gm.code_patches(found, gm.nso_modules(ext / 'ExeFS'))
+    img, folder = ext / 'RomFS.img', ext / 'RomFS'
+    romfs_stamp = (img.stat().st_size, img.stat().st_mtime_ns) if img.is_file() else None
+    tools = [Path(gm.__file__).resolve().parent / f for f in ('game_mods.py', 'romfs_image.py', 'romfs.py', 'nso.py')]
+    key = fingerprint(('files', tools + found.ips + found.cheats), ('stat', ext / 'ExeFS'), romfs_stamp or ('stat', folder), *[('stat', d) for d in found.romfs], [str(d) for d in found.romfs], app)
+    dst, kf, cheats = out / ver, out / f'{ver}.key', out / f'{ver}_cheats'
+    want_ext = bool(plan or found.romfs)
+    if reused(kf, key) is not None and (dst.is_dir() or not want_ext) and (out / f'{ver}.txt').is_file():
+        for line in (out / f'{ver}.txt').read_text().splitlines(): say(f'mods: {line}')
+        PROG.end('reused (the mods and the game files unchanged)')
+        return (dst if want_ext else None), (cheats if cheats.is_dir() else None)
+    report = []
+    rmtree(cheats); main = ext / 'ExeFS/main'
+    crep, _ = gm.pack_cheats(found, build_id(main)[:16].upper(), cheats) if main.is_file() else ([], [])
+    report += crep
+    if want_ext:
+        tmp = dst.with_name(dst.name + '.partial'); rmtree(tmp); tmp.mkdir(parents=True)
+        for e in sorted(ext.iterdir()):
+            if e.name in ('ExeFS', 'RomFS', 'RomFS.img', 'jit'): continue   # jit/: a capture of the rewritten code, made again from the patched modules (capture_jit)
+            if e.is_dir(): link_tree(e, tmp / e.name)
+            elif e.is_file(): gm.link_or_copy(e, tmp / e.name)
+        PROG.set(step='code patches')
+        crep, changed = gm.patch_exefs(ext / 'ExeFS', tmp / 'ExeFS', found)
+        report += crep
+        if not changed and found.ips: report.append('code: no patch file names a build of this version')
+        PROG.set(step='RomFS')
+        if img.is_file():
+            if found.romfs: report += gm.overlay_image(img, tmp / 'RomFS.img', found.romfs, root)
+            else: gm.link_or_copy(img, tmp / 'RomFS.img')
+        elif folder.is_dir():
+            if found.romfs: report += gm.overlay_folder(folder, tmp / 'RomFS', found.romfs, root)
+            else: link_tree(folder, tmp / 'RomFS')
+        rmtree(dst); swap_in(tmp, dst)
+    else: rmtree(dst)
+    (out / f'{ver}.txt').write_text(''.join(line + '\n' for line in report))
+    for line in report: say(f'mods: {line}')
+    rmtree(kf); kf.write_text(f'{key}\n')
+    PROG.end(f'{"code and RomFS from " + str(dst) if want_ext else "cheats only"}' + (f'; cheats packed from {cheats}' if cheats.is_dir() else ''))
+    return (dst if want_ext else None), (cheats if cheats.is_dir() else None)
+
+
+def install_cheats(src, dst):   # the packed cheat files into a cheats folder the host reads (a Mac app's, a Mac run's); a file already there is kept: the player's own, or their edits
+    dst.mkdir(parents=True, exist_ok=True); n = 0
+    for p in sorted(src.iterdir()):
+        if (dst / p.name).exists(): say(f'mods: cheats: {dst / p.name} is already there, kept (delete it to pack the mods folder\'s)'); continue
+        shutil.copy2(p, dst / p.name); n += 1
+    if n: say(f'mods: cheats: {n} file(s) copied into {dst}')
 
 
 def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
@@ -2713,6 +2798,10 @@ def parse_args(argv):
     ap.add_argument('--keep-extracted', action=argparse.BooleanOptionalAction, help='keep the extracted game files after the IPA is built, for the next build (default: the KEEP_EXTRACTED setting, on)')
     ap.add_argument('--work-dir', help='the game\'s build folder, used as it is (default: the WORK_DIR setting, else <title ID>_build in the NSP folder); the extracted files, shader cache and temporary files live there, and the IPA or Mac app defaults to the folder holding it')
     ap.add_argument('--env-file', help='environment switches for a diagnostic build (one KEY=VALUE per line)')
+    ap.add_argument('--mods', help='a folder of the game\'s mods: code patches (.ips, .ips32, .pchtxt named for the game\'s build), RomFS file replacements (folders named romfs) and cheats '
+                    '(folders named cheats), as Atmosphère, yuzu or Ryujinx lay them out; a whole SD card or emulator mods folder works, other games\' mods are left out, and a folder '
+                    'whose name starts with - is turned off (default: the MODS setting, else the folder named mods beside the game\'s files when there is one)')
+    ap.add_argument('--no-mods', dest='mods', action='store_const', const='none', help='pack the game without its mods folder')
     ap.add_argument('--gpu', help='NVN games: GPU architectures the app gets its pipeline archive for, made on this Mac with metal-tt, comma-separated: g18p (A19 / A19 Pro), or the name a device\'s log gives when the app has no archive for its GPU; '
                     'none = no archive, the device builds the bases on its first start (default: the PSO_GPUS setting; when that is empty, a profile with pso_mtl4 on uses its pso_gpu key or g18p, and other profiles use none). '
                     'With --platform mac-app: the Mac app\'s archive, by default for this Mac\'s GPU (none: the app builds the bases on its first start)')
@@ -2966,6 +3055,11 @@ def main(args=None):
         os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
         g = gamemod.load(g.id)
         say(f'derived game profile for {pkg_ver} ({disp}): {g.dir}')
+    mods_root, packed_cheats = mods_folder(args, nsp_dir), None
+    if mods_root and not getattr(args, 'in_programs', None):   # the game's mods: the packed version's files with them, from here on (dm/tools/game_mods.py)
+        say(f'mods folder: {mods_root}')
+        modded, packed_cheats = apply_mods(mods_root, dirs[pkg_ver], work, pkg_ver, app)
+        if modded: dirs[pkg_ver] = modded
     sv = versions if derived else need   # the versions whose files the shaders come from
     game = dirs[pkg_ver]
     # how the shaders are got follows from the packed version's files (profile_guess.py shader_sources): the graphics API, and the shaders made only at run time
@@ -3060,6 +3154,7 @@ def main(args=None):
         if not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
                 (args.gpu or PSO_GPUS).strip(), programs, control)
+        if packed_cheats: install_cheats(packed_cheats, Path.home() / 'Library/Application Support/nxnative' / f'{app:016X}' / 'cheats')   # the app's DM_ROOT (dm/mac/launcher.c)
         rmtree(work / 'tmp')
         say(f'done: {out_ipa} ({tree_size(out_ipa)[1] / 2**30:.1f} GB); '
             f'open it from Finder. Its save is in ~/Library/Application Support/nxnative/{app:016X}/, its log in ~/Library/Logs/nxnative/{app:016X}.log')
@@ -3071,6 +3166,7 @@ def main(args=None):
         host, font = (first['host'], first['font']) if first else mac_host(py, repo, work, env, logs, g)
         parts = {'font': font}
         cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang, env, logs, g, env_file, partial=seen_shaders, parts=parts, jit=jit)
+        if packed_cheats: install_cheats(packed_cheats, work / 'cheats')   # the run's DM_ROOT is the build folder
         rmtree(work / 'tmp')
         if getattr(args, 'in_programs', False): return parts
         programs = None if PROGRAM_INDEX else mac_programs(args, g, parts)
@@ -3095,6 +3191,7 @@ def main(args=None):
     if icon: ipa_env['DM_ICON'] = str(icon); say(f'app icon: {icon}')   # app icon (found above)
     else: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the home-screen icon will be blank' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the home-screen icon will be blank')
     if env_file: ipa_env['DM_ENV_FILE'] = str(Path(os.path.expanduser(env_file)).resolve())
+    if packed_cheats: ipa_env['DM_PACKED_CHEATS'] = str(packed_cheats); say(f'cheats packed into the app from the mods folder: {", ".join(p.name for p in sorted(packed_cheats.iterdir()))} (the app copies them into its cheats folder; the in-game menu turns them on)')
     show_fps = SHOW_FPS if args.show_fps is None else args.show_fps
     ipa_env['DM_SHOW_FPS'] = '1' if show_fps else '0'
     gpus = (args.gpu or PSO_GPUS).strip()
