@@ -1,3 +1,7 @@
+# Nintanium
+
+**Nintanium** is NXNative with a Stretch picture option, cheats on iPhone and iPad, a mods folder for code patches, replacement files and cheats, and tuning for the iPhone 18 Pro Max and iPad Pro (M4) on iOS 27: see [NINTANIUM.md](NINTANIUM.md). Everything below is NXNative's own README; where it says to clone `seedds/nxnative`, clone `kencalx/Nintanium` instead.
+
 # nxnative
 
 Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game (its NSP files) and your `prod.keys`; one script turns them into an IPA that you sideload.
