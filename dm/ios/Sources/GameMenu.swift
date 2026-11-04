@@ -4,16 +4,21 @@
 // that need the next start (language, pipelines, the frame rate and so on), and the sliders, stay on the settings screen, which the menu's title points to.
 import UIKit
 
-var gameMenuModel: LauncherModel?   // the settings screen's model (Launcher.swift); nil in an app without one: the menu has the layout only
+@MainActor var gameMenuModel: LauncherModel?   // the settings screen's model (Launcher.swift); nil in an app without one: the menu has the layout only
 
+// Called by DmGamepad.m on the main thread. A C entry point is not isolated to the main actor, so its body asserts the main thread (MainActor.assumeIsolated, as the Swift 6
+// language mode wants for UIKit), and the retained menu crosses it as an address
 @_cdecl("dm_game_menu")
 public func dmGameMenu() -> UnsafeMutableRawPointer {
-    let title = gameMenuModel != nil ? "More settings on the start screen" : ""
-    let menu = UIMenu(title: title, children: [UIDeferredMenuElement.uncached { done in done(gameMenuItems()) }])   // built each time it opens, so it shows the current choices
-    return Unmanaged.passRetained(menu).toOpaque()
+    let address = MainActor.assumeIsolated { () -> Int in
+        let title = gameMenuModel != nil ? "More settings on the start screen" : ""
+        let menu = UIMenu(title: title, children: [UIDeferredMenuElement.uncached { done in done(gameMenuItems()) }])   // built each time it opens, so it shows the current choices
+        return Int(bitPattern: Unmanaged.passRetained(menu).toOpaque())
+    }
+    return UnsafeMutableRawPointer(bitPattern: address)!
 }
 
-private func gameMenuItems() -> [UIMenuElement] {
+@MainActor private func gameMenuItems() -> [UIMenuElement] {
     let names = ["2D", "3D", "Tap"]
     let layouts = (0..<3).filter { dm_pad_layout_offered(Int32($0)) }.map { l in
         UIAction(title: names[l], state: dm_pad_layout() == l ? .on : .off) { _ in dm_pad_layout_set(Int32(l)) }
@@ -40,7 +45,7 @@ private func gameMenuItems() -> [UIMenuElement] {
 // folder). An on / off pair is one row; a "set" cheat runs once when tapped. Then the master switch and Reload, which reads the folder again after a file was copied in.
 private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 32   // dm.h DM_CHEAT_*
 
-private func cheatsMenu() -> UIMenuElement? {
+@MainActor private func cheatsMenu() -> UIMenuElement? {
     if String(cString: dm_cheats_dir_path()).isEmpty { return nil }   // no cheats folder (DM_CHEATS=""): no submenu
     let reload = UIAction(title: "Reload cheats", image: UIImage(systemName: "arrow.clockwise")) { _ in dm_cheats_reload() }
     let build = String(cString: dm_cheats_build())
@@ -96,7 +101,7 @@ private func cheatsMenu() -> UIMenuElement? {
     return UIMenu(title: version.isEmpty ? "Cheats" : "Cheats (\(version))", subtitle: subtitle, image: UIImage(systemName: "wand.and.stars"), children: groups)
 }
 
-private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> UIMenuElement {
+@MainActor private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> UIMenuElement {
     let now = m.values[s.env] ?? s.def, fixed = m.fixed.contains(s.env)
     let attributes: UIMenuElement.Attributes = fixed ? .disabled : []
     func pick(_ v: String) { m.choose(s, v); _ = dm_setting_live(s.env, v) }

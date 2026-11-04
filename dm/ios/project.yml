@@ -84,9 +84,10 @@ targets:
       TARGETED_DEVICE_FAMILY: "1,2"
       ENABLE_BITCODE: NO
       GCC_C_LANGUAGE_STANDARD: gnu11
-      OTHER_CFLAGS: $(inherited) -mcpu=apple-a18   # The host assembly contains LSE atomic instructions, which the default baseline does not accept
+      OTHER_CFLAGS: $(inherited) -mcpu=apple-m4   # the CPUs this build is for, the M4 (iPad Pro) and the A20 (iPhone 18 Pro Max): one app runs on both, so the M4's instruction set, which the A20 has whole;
+                                                 # the host assembly also needs its LSE atomic instructions, which the default baseline does not accept
       CLANG_ENABLE_OBJC_ARC: YES
-      SWIFT_VERSION: "5.0"                         # Launcher.swift (SwiftUI)
+      SWIFT_VERSION: $(DM_SWIFT_VERSION)             # Launcher.swift (SwiftUI): the Swift 6 language mode (complete concurrency checking); build_ipa.sh writes DM_SWIFT_VERSION into Gen/dm.xcconfig (6.0 unless the environment says 5)
       SWIFT_OBJC_BRIDGING_HEADER: Sources/DmIOS-Bridging-Header.h   # CloudSaves.h (the cloud-save folder pick)
       DEBUG_INFORMATION_FORMAT: dwarf
       GCC_WARN_INHIBIT_ALL_WARNINGS: YES

@@ -25,7 +25,7 @@ class Unit(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('xcrun'), 'requires Metal compilers')
 class Cut(unittest.TestCase):
-    FLAGS = (('macosx', ()), ('iphoneos', ('-mios-version-min=18.0', '-fmetal-math-mode=relaxed')))
+    FLAGS = (('macosx', ()), ('iphoneos', ('-mios-version-min=27.0', '-fmetal-math-mode=relaxed')))
 
     def compile(self, d, src, sdk, flags):   # → (the .air, the library)
         msl = d / 'u.metal'; air = d / f'{sdk}.air'; lib = d / f'{sdk}.metallib'; msl.write_text(src)

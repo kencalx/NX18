@@ -154,7 +154,7 @@ private struct LauncherView: View {
 
     @ViewBuilder var playButton: some View {
         let button = Button(action: play) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large)
-        if #available(iOS 26.0, *) { button.buttonStyle(.glassProminent) } else { button.buttonStyle(.borderedProminent) }
+        button.buttonStyle(.glassProminent)   // Liquid Glass: every system this app runs on has it (iOS 27 and later)
     }
 
     private func appIcon() -> UIImage? {
@@ -165,28 +165,36 @@ private struct LauncherView: View {
     }
 }
 
+// front_ios.m's callback once the settings are in the environment. A C function captures nothing, so it is safe to call from any closure; the box says so to the Swift 6
+// language mode, whatever it makes of a C function pointer in a @Sendable completion handler
+private struct LauncherDone: @unchecked Sendable { let call: @convention(c) () -> Void }
+
 // Shows the launcher over the root view controller and calls done once the settings are in the environment; false (done is not called) when there is no launcher
 @_cdecl("dm_show_launcher")
 public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @convention(c) () -> Void) -> Bool {
-    // a game of several programs (main.m): the running program's settings, in its dm/p<N>
-    let dir = getenv("DM_APP_DM").map { URL(fileURLWithPath: String(cString: $0)) } ?? Bundle.main.resourceURL?.appendingPathComponent("dm")
-    guard let url = dir?.appendingPathComponent("launcher.json"), let data = try? Data(contentsOf: url) else { return false }
-    guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return false }
-    let model = LauncherModel(file.settings)
-    gameMenuModel = model   // the in-game menu shows and saves the same choices (GameMenu.swift)
-    if ProcessInfo.processInfo.environment["DM_LAUNCHER"] == "0" { fputs("launcher: off (DM_LAUNCHER=0)\n", stderr); model.applySaved(); return false }
-    let parent = Unmanaged<UIViewController>.fromOpaque(viewController).takeUnretainedValue()
-    var host: UIViewController?
-    let view = LauncherView(m: model) {
-        guard let h = host else { return }
-        host = nil
-        model.apply()
-        h.dismiss(animated: false) { done() }
+    // Called by front_ios.m on the main thread: the body asserts it (MainActor.assumeIsolated), as the Swift 6 language mode wants for UIKit and SwiftUI
+    let finish = LauncherDone(call: done)
+    return MainActor.assumeIsolated { () -> Bool in
+        // a game of several programs (main.m): the running program's settings, in its dm/p<N>
+        let dir = getenv("DM_APP_DM").map { URL(fileURLWithPath: String(cString: $0)) } ?? Bundle.main.resourceURL?.appendingPathComponent("dm")
+        guard let url = dir?.appendingPathComponent("launcher.json"), let data = try? Data(contentsOf: url) else { return false }
+        guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { launcherLog("[RED] launcher: dm/launcher.json cannot be read; starting the game\n"); return false }
+        let model = LauncherModel(file.settings)
+        gameMenuModel = model   // the in-game menu shows and saves the same choices (GameMenu.swift)
+        if ProcessInfo.processInfo.environment["DM_LAUNCHER"] == "0" { launcherLog("launcher: off (DM_LAUNCHER=0)\n"); model.applySaved(); return false }
+        let parent = Unmanaged<UIViewController>.fromOpaque(viewController).takeUnretainedValue()
+        var host: UIViewController?
+        let view = LauncherView(m: model) {
+            guard let h = host else { return }
+            host = nil
+            model.apply()
+            h.dismiss(animated: false) { finish.call() }
+        }
+        let h = DmHostingController(rootView: view)
+        h.modalPresentationStyle = .fullScreen
+        host = h
+        parent.present(h, animated: false)
+        launcherLog("launcher: \(file.settings.count) settings shown\n")
+        return true
     }
-    let h = DmHostingController(rootView: view)
-    h.modalPresentationStyle = .fullScreen
-    host = h
-    parent.present(h, animated: false)
-    fputs("launcher: \(file.settings.count) settings shown\n", stderr)
-    return true
 }

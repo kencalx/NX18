@@ -34,6 +34,10 @@ struct Setting: Decodable, Identifiable {
 }
 struct SettingsFile: Decodable { let settings: [Setting] }
 
+// One line to the log (stderr, which main.m sends to Documents/log.txt and the Mac launcher to the game's log): through FileHandle, as the C stream stderr is shared mutable
+// state the Swift 6 language mode refuses (the iOS app builds in it; the Mac launcher, which compiles this file too, in Swift 5)
+func launcherLog(_ line: String) { FileHandle.standardError.write(Data(line.utf8)) }
+
 final class LauncherModel: ObservableObject {
     let settings: [Setting]
     let fixed: Set<String>      // set by an env file or by the launch environment: shown, not changed
@@ -50,7 +54,7 @@ final class LauncherModel: ObservableObject {
         fromLaunch = Set((env["DM_ENV_LAUNCH_KEYS"] ?? "").split(separator: " ").map(String.init))
         fixed = fromLaunch.union((env["DM_ENV_FILE_KEYS"] ?? "").split(separator: " ").map(String.init))
         ignoreSaved = env["DM_SAVED_CHOICES"] == "0"
-        if ignoreSaved { fputs("launcher: saved choices ignored (DM_SAVED_CHOICES=0)\n", stderr) }
+        if ignoreSaved { launcherLog("launcher: saved choices ignored (DM_SAVED_CHOICES=0)\n") }
         for s in settings {
             if fixed.contains(s.env), let v = env[s.env] { values[s.env] = v; continue }
             let saved = ignoreSaved ? nil : defaults.object(forKey: "launcher." + s.env) as? String   // a string, as launcher.c reads it: not string(forKey:), which turns a number into one
@@ -90,7 +94,7 @@ final class LauncherModel: ObservableObject {
     // the defaults (apply() keeps no default), so Quit after Reset keeps them, and a choice a launch override hides is kept
     func reset() {
         for s in settings where !fixed.contains(s.env) { values[s.env] = s.def }
-        fputs("launcher: settings reset to the game's defaults\n", stderr)
+        launcherLog("launcher: settings reset to the game's defaults\n")
     }
 
     // Before the game starts: every setting not set by an env file goes into the environment (DM_LANG replaces the packed language main.m set as a default). Only a choice that
@@ -98,9 +102,9 @@ final class LauncherModel: ObservableObject {
     func apply() {
         for s in settings {
             let v = values[s.env] ?? s.def
-            if fixed.contains(s.env) { fputs("launcher: \(s.env) kept at \(v) (\(fromLaunch.contains(s.env) ? "launch environment" : "env file"))\n", stderr); continue }
+            if fixed.contains(s.env) { launcherLog("launcher: \(s.env) kept at \(v) (\(fromLaunch.contains(s.env) ? "launch environment" : "env file"))\n"); continue }
             store(s, v)
-            setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v)\(s.isDefault(v) ? "" : " (changed)")\n", stderr)
+            setenv(s.env, v, 1); launcherLog("launcher: \(s.env)=\(v)\(s.isDefault(v) ? "" : " (changed)")\n")
         }
     }
     private func store(_ s: Setting, _ v: String) {
@@ -112,14 +116,14 @@ final class LauncherModel: ObservableObject {
     func choose(_ s: Setting, _ v: String) {
         guard !fixed.contains(s.env), s.accepts(v) else { return }
         values[s.env] = v; store(s, v); setenv(s.env, v, 1)
-        fputs("launcher: \(s.env)=\(v) (in-game menu)\n", stderr)
+        launcherLog("launcher: \(s.env)=\(v) (in-game menu)\n")
     }
 
     // DM_LAUNCHER=0: no screen, but the saved choices still apply (only DM_SAVED_CHOICES=0 ignores them); nothing is written
     func applySaved() {
         for s in settings where !fixed.contains(s.env) {
             let v = values[s.env] ?? s.def
-            if !s.isDefault(v) { setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v) (saved choice)\n", stderr) }
+            if !s.isDefault(v) { setenv(s.env, v, 1); launcherLog("launcher: \(s.env)=\(v) (saved choice)\n") }
         }
     }
 }

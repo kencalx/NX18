@@ -108,6 +108,8 @@ if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's modules under its tag (th
 else J=(); [ -f "$(dirname "$ROMFS")/jit/jit.img" ] && J=(--jit "$(dirname "$ROMFS")/jit/jit.img")
   F=$(python3 tools/gen_embed.py ${J[@]+"${J[@]}"} "$PATCHED" Gen/embed.S $MODS) || die "gen_embed"; fi
 echo "OTHER_LDFLAGS = \$(inherited) \$(DM_FRAMEWORKS) $F" >> Gen/dm.xcconfig
+# The Swift language mode of the app's Swift (project.yml SWIFT_VERSION): 6.0, the newest; DM_SWIFT_VERSION=5 builds in the Swift 5 mode, should a newer compiler find fault with the 6 mode
+echo "DM_SWIFT_VERSION = ${DM_SWIFT_VERSION:-6.0}" >> Gen/dm.xcconfig
 # One program's tables into TD: the rewriter's, the shader tables and the launcher's settings
 program_tables() {
 cp "$PATCHED"/*.fixups.tsv "$PATCHED"/*.gates.tsv "$PATCHED"/*.cuts.tsv "$PATCHED"/*.obs.tsv $TD/ || die "copy rewriter tables"
