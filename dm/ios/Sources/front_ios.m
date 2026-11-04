@@ -158,6 +158,15 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
     self.picture = dm_picture_mode(getenv("DM_PICTURE_FIT"));
     if (self.picture == DmPictureFill) LOG("front end: picture Fill (DM_PICTURE_FIT=fill), the 16:9 picture covers the screen in landscape and its edges are cropped");
     if (self.picture == DmPictureStretch) LOG("front end: picture Stretch (DM_PICTURE_FIT=stretch), the picture is stretched to cover the screen in landscape, nothing cropped");
+    // Ultrawide (DM_MOD_ULTRAWIDE=1, a switchable mod from the NSP script's mods folder, put in place by loader.c dm_mod_variants_apply): such mods render a wider view into the game's
+    // 16:9 picture and expect it stretched over a wider screen, so the picture is stretched (Picture Stretch). A screen no wider than 16:9 (an iPad's 4:3) would show it squeezed:
+    // there the mod stays out, before the host reads the switch when the game starts
+    const char *uw = getenv("DM_MOD_ULTRAWIDE");
+    if (uw && !strcmp(uw, "1")) {
+        UIScreen *scr = self.view.window.windowScene.screen; CGSize sz = (scr ?: UIScreen.mainScreen).bounds.size;   // the window's screen; the main one before the view is in a window CGFloat r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
+        if (r < 1.85) { unsetenv("DM_MOD_ULTRAWIDE"); LOG("front end: Ultrawide left off: this screen (%.2f:1) is not wider than 16:9", r); }
+        else { self.picture = DmPictureStretch; LOG("front end: Ultrawide: the picture is stretched over the %.2f:1 screen in landscape", r); }
+    }
     self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen
     self.view.window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategorySmall;   // UIKit draws the in-game menu (GameMenu.swift) in this window: it keeps one compact text size over the game, whatever the system's text size
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];

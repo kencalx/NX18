@@ -65,6 +65,8 @@ def build(gid, patched, control):
     g = game.load(gid)
     macros = dict(re.findall(r'^#define (DM_GAME_\w+) (.*)$', game.header_one(g), re.M))   # the host's own defaults, as it is compiled for this game
     keys = fixups_keys(Path(patched) / 'main.fixups.tsv')
+    mods_tsv = Path(patched) / 'mods.tsv'   # the switchable mods the NSP script packed (build_variants): a role per row
+    mod_roles = {l.split('\t')[0] for l in mods_tsv.read_text(encoding='utf-8').splitlines() if l and not l.startswith('#')} if mods_tsv.is_file() else set()
     have = nacp.languages(control)
     langs = [(c, n) for c, n in nacp.LANGUAGES if not have or c in have]   # no list (a dump or a NUP has no control data, none of its packages may): any language may be the game's, as DM_LANG and the NSP script's check take it
 
@@ -73,7 +75,9 @@ def build(gid, patched, control):
         return macros[name].strip('"')
 
     def shown(cond, n):
+        if '&' in cond: return all(shown(c, n) for c in cond.split('&'))   # every one of them
         if cond == 'always': return True
+        if cond.startswith('mods:'): return cond[5:] in mod_roles
         if cond == 'languages>1': return len(langs) > 1
         if cond.startswith('fixups:'): return cond[7:] in keys
         if cond.startswith('gfxapi:'): return os.environ.get('GFXAPI', '') == cond[7:]

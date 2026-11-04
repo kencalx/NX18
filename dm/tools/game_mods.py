@@ -11,7 +11,7 @@ What belongs to the game: a folder named with a title ID belongs to that title (
 (atmosphere/contents/<title ID>/...), Ryujinx's mods folder or yuzu's load folder can be given as it is; anything else under the mods folder counts. A file or folder whose name
 starts with '.' or '-' is skipped, so renaming a mod's folder to -name turns it off without deleting it.
 Usage on its own (a check, nothing written): game_mods.py <mods folder> <title ID> [ExeFS folder]"""
-import hashlib, os, re, shutil, struct, sys
+import bisect, hashlib, os, re, shutil, struct, sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -197,10 +197,11 @@ def nso_modules(exefs):
     return out
 
 
-def code_patches(found, modules):
-    """{module name: [(source description, [(offset, bytes)])]} of the patch files that name one of the modules' builds, in path order, and the report lines"""
+def code_patches(found, modules, files=None, adapt=None):
+    """{module name: [(source description, [(offset, bytes)])]} of the patch files that name one of the modules' builds, in path order, and the report lines.
+    files: the patch files to take (default: all of found's); adapt(records, what, report) may change a file's records (the ultrawide aspect, adapt_aspect)"""
     plan, report = {}, []
-    for p in found.ips:
+    for p in (found.ips if files is None else files):
         rel = p.relative_to(found.root)
         if p.suffix.lower() == '.pchtxt':
             try: bid, patches = parse_pchtxt(p.read_text(encoding='utf-8', errors='replace'), str(rel))
@@ -209,7 +210,7 @@ def code_patches(found, modules):
             mod = next((m for m, (_, mo) in modules.items() if build_matches(bid, mo.build_id)), None)
             if not mod: report.append(f'not for this version: {rel} (build {bid[:16]})'); continue
             for tp in patches:
-                if tp.enabled: plan.setdefault(mod, []).append((f'{rel}: {tp.name}', tp.records))
+                if tp.enabled: plan.setdefault(mod, []).append((f'{rel}: {tp.name}', adapt(tp.records, f'{rel}: {tp.name}', report) if adapt else tp.records))
                 else: report.append(f'off in its file (@disabled): {rel}: {tp.name}')
             continue
         bid = p.name.split('.')[0]
@@ -217,16 +218,16 @@ def code_patches(found, modules):
         if not mod:
             report.append(f'not for this version: {rel}' + ('' if HEX.fullmatch(bid) else ' (an .ips is named after the build ID of the module it patches)'))
             continue
-        try: plan.setdefault(mod, []).append((str(rel), parse_ips(p.read_bytes(), str(rel))))
+        try: recs = parse_ips(p.read_bytes(), str(rel)); plan.setdefault(mod, []).append((str(rel), adapt(recs, str(rel), report) if adapt else recs))
         except ModError as e: report.append(f'skipped {rel}: {e}')
     return plan, report
 
 
-def patch_exefs(exefs, dst, found):
+def patch_exefs(exefs, dst, found, files=None, adapt=None):
     """dst: a copy of the ExeFS folder with the code patches written into its modules (other files hard-linked, never written through). Returns the report lines,
-    and the names of the modules changed (none: dst is a plain copy)"""
+    and the names of the modules changed (none: dst is a plain copy). files / adapt: as code_patches"""
     modules = nso_modules(exefs)
-    plan, report = code_patches(found, modules)
+    plan, report = code_patches(found, modules, files, adapt)
     dst = Path(dst); dst.mkdir(parents=True, exist_ok=True)
     for p in sorted(Path(exefs).iterdir()):
         if p.is_file() and p.name not in plan: link_or_copy(p, dst / p.name)
@@ -246,6 +247,175 @@ def patch_exefs(exefs, dst, found):
         assert check.image == image and check.build_id == m.build_id
         tmp = dst / (mod + '.part'); tmp.write_bytes(out); os.replace(tmp, dst / mod)
     return report, sorted(plan)
+
+
+# ---------- switchable mods: the launcher's High frame rate and Ultrawide ----------
+# A mod whose folder name says what it does (60FPS, 120 FPS; Ultrawide, 21:9, 32.9) is not written into the modules for good: the NSP script rewrites the modules once more with
+# it (a variant) and keeps only the bytes it changes, which the host puts in place when the game starts with the launcher's toggle on (loader.c dm_mod_variants_apply; on the
+# iPhone the changed code pages are signed pages of their own, gen_embed.py). One mod per kind: of several (a pack's 60, 120 and 240 FPS, its 21:9 and 32:9) the one that fits
+# these devices, and the others are left out with a line in the report.
+ROLES = ('fps', 'ultrawide')   # their bits in the host: 1, 2 (DM_MOD_FPS, DM_MOD_ULTRAWIDE)
+ROLE_BIT = {'fps': 1, 'ultrawide': 2}
+FPS_NAME = re.compile(r'(\d+)\s*-?\s*fps|fps\s*-?\s*(\d+)|\bfps\b|frame\s*rate', re.I)
+UW_NAME = re.compile(r'ultra\s*-?\s*wide|\b(\d{2})\s*[.:x]\s*(9|10)\b|\b(21|32)\s*[.:x]\s*9\b', re.I)
+UW_RATIOS = (64 / 27, 3440 / 1440, 21 / 9, 2.4, 2560 / 1080, 32 / 9, 5120 / 1440)   # aspect values ultrawide mods are made for
+DEVICE_ASPECT = 2868 / 1320   # the iPhone 18 Pro Max's screen in landscape, which Ultrawide is for (an iPad's 4:3 is taller than 16:9: the host leaves Ultrawide off there)
+
+
+def mod_name(p, root):
+    """The mod a patch file belongs to: the folder holding its exefs folder (yuzu, Ryujinx), or the folder it lies in (atmosphere/exefs_patches/<mod>/)"""
+    d = Path(p).parent
+    if d.name.lower() == 'exefs': d = d.parent
+    return str(d.relative_to(root)) if d != Path(root) else d.name
+
+
+def role_of(name):
+    """'fps', 'ultrawide' or None, by the mod's folder name (its last component)"""
+    last = Path(name).name
+    if UW_NAME.search(last): return 'ultrawide'
+    if FPS_NAME.search(last): return 'fps'
+    return None
+
+
+def _fps_of(name):
+    m = FPS_NAME.search(Path(name).name)
+    n = m and (m.group(1) or m.group(2))
+    return int(n) if n else 60
+
+
+def _uw_of(name):
+    m = re.search(r'\b(\d{2})\s*[.:x]\s*(9|10)\b', Path(name).name)
+    return int(m.group(1)) / int(m.group(2)) if m else 21 / 9
+
+
+def split_roles(found, fps_ok=True):
+    """(the patch files written for good, {role: (mod name, [its patch files])}, report lines). fps_ok False: the game's profile has the host's own Frame rate setting,
+    which a frame-rate mod would fight, so such mods are left out. Of several mods of one kind: FPS the one of 60 (these screens show 60, the host paces at most 60 on
+    an iPhone), else the lowest above it; Ultrawide the shape nearest the iPhone's; a mod made for Ryujinx alone ("Ryujinx" in its name) after the others"""
+    by_mod: dict[str, list] = {}
+    for p in found.ips: by_mod.setdefault(mod_name(p, found.root), []).append(p)
+    keep, cands, report = [], {r: [] for r in ROLES}, []
+    for name, files in sorted(by_mod.items()):
+        r = role_of(name)
+        if r == 'fps' and not fps_ok:
+            report.append(f'left out: {name}: this game has the launcher\'s own Frame rate setting, which a frame-rate mod would fight'); continue
+        if r: cands[r].append(name)
+        else: keep += files
+    chosen = {}
+    for r, names in cands.items():
+        if not names: continue
+        ryu = lambda n: 'ryujinx' in Path(n).name.lower()
+        if r == 'fps': names.sort(key=lambda n: (ryu(n), _fps_of(n) != 60, _fps_of(n) if _fps_of(n) >= 60 else 1000 + _fps_of(n), n))
+        else: names.sort(key=lambda n: (ryu(n), abs(_uw_of(n) - DEVICE_ASPECT), n))
+        chosen[r] = (names[0], by_mod[names[0]])
+        report.append(f'switchable ({"High frame rate" if r == "fps" else "Ultrawide"} in the launcher): {names[0]}')
+        report += [f'left out (one {r} mod at a time): {n}' for n in names[1:]]
+    return keep, chosen, report
+
+
+def adapt_aspect(records, what, report, target=DEVICE_ASPECT):
+    """An ultrawide mod's records with its aspect value (a 4-byte float within 1 % of a ratio ultrawide mods are made for) set to the device's, so the wider view is not
+    squeezed or stretched on a screen of another shape. A value held in instructions (fmov, movz / movk) is not found and stays: the report says so"""
+    out, n = [], 0
+    for off, data in records:
+        if len(data) == 4:
+            v = struct.unpack('<f', data)[0]
+            if any(abs(v - r) <= r * 0.01 for r in UW_RATIOS):
+                out.append((off, struct.pack('<f', target))); n += 1; continue
+        out.append((off, data))
+    report.append(f'{what}: aspect value set to {target:.4f} (the iPhone 18 Pro Max\'s screen)' if n else f'{what}: no aspect value found as a float to set to the device\'s shape: the view keeps the mod\'s shape')
+    return out
+
+
+def reloc_slots(image):
+    """The offsets of the 8-byte words the loader relocates in a module image (DT_RELA, DT_RELR and the PLT's DT_JMPREL): a switchable mod's data bytes are put in place
+    after relocation, so they must not touch these"""
+    mod0 = struct.unpack_from('<I', image, 4)[0]
+    if image[mod0:mod0 + 4] != b'MOD0': return set()
+    dyn = mod0 + struct.unpack_from('<i', image, mod0 + 4)[0]
+    tags = {}
+    for i in range(4096):
+        if dyn + i * 16 + 16 > len(image): break
+        t, v = struct.unpack_from('<qQ', image, dyn + i * 16)
+        if t == 0: break
+        tags.setdefault(t, v)
+    slots = set()
+    for at, size in ((7, 8), (23, 2)):   # DT_RELA / DT_RELASZ, DT_JMPREL / DT_PLTRELSZ: 24-byte entries, offset first
+        if at in tags and size in tags:
+            for e in range(tags[at], tags[at] + tags[size], 24): slots.add(struct.unpack_from('<Q', image, e)[0])
+    if 36 in tags and 35 in tags:   # DT_RELR / DT_RELRSZ: an address, then bitmaps of the next 63 words
+        where = 0
+        for e in range(tags[36], tags[36] + tags[35], 8):
+            w = struct.unpack_from('<Q', image, e)[0]
+            if not w & 1: slots.add(w); where = w + 8
+            else:
+                for b in range(63):
+                    if w >> (b + 1) & 1: slots.add(where + 8 * b)
+                where += 63 * 8
+    return slots
+
+
+def file_pieces(fixups, size):
+    """The pieces of a rewritten module's file as gen_embed.py maps them (patch_nso.py's fixups.tsv header): [(file start, file end, image start, code?)].
+    Code: the text with its first ro page, and the patch area(s); the rest (ro, data) is the writable part"""
+    hdr = dict(l[2:].split() for l in Path(fixups).read_text().splitlines() if l.startswith('# ') and len(l[2:].split()) == 2)
+    PG = 0x4000; a = (int(hdr['TEXT_END'], 16) + PG - 1) & ~(PG - 1); po = int(hdr['PATCH_OFF'], 16)
+    if po >= 0: return [(0, a, 0, True), (a, po, a, False), (po, size, po, True)]
+    fl, bl = int(hdr['FILE_IMAGE_LEN'], 16), int(hdr.get('BACK_LEN', '0'), 16)   # patch area before the base (patch_nso.py FAR), maybe a back one (TWO)
+    out = [(0, a, 0, True), (a, fl, a, False), (fl, size - bl, po, True)]
+    if bl: out.append((size - bl, size, int(hdr['BACK_OFF'], 16), True))
+    return out
+
+
+META = ('fixups.tsv', 'gates.tsv', 'sites.tsv', 'cuts.tsv', 'changed.tsv', 'obs.tsv', 'match.tsv')
+
+
+def variant_runs(base_dir, var_dir, module, image):
+    """The byte runs a variant rewrite of module changes against the base rewrite: [(kind 'c' (a code page, swapped whole on the iPhone) or 'w' (data), file offset,
+    image offset, bytes)]. Raises ModError when the two rewrites differ in more than bytes (the mod changed an instruction the rewriter rewrites: its tables differ), in
+    size, or when a data run touches a word the loader relocates (image: the variant module's memory image, for its relocations)"""
+    base_dir, var_dir = Path(base_dir), Path(var_dir)
+    for f in META:
+        a, b = base_dir / f'{module}.{f}', var_dir / f'{module}.{f}'
+        if a.exists() != b.exists() or (a.exists() and a.read_bytes() != b.read_bytes()):
+            raise ModError(f'{module}: the rewrite with the mod differs in {f}, not only in bytes (the mod changes code the rewriter rewrites)')
+    x, y = (base_dir / f'{module}.patched.bin').read_bytes(), (var_dir / f'{module}.patched.bin').read_bytes()
+    if len(x) != len(y): raise ModError(f'{module}: the rewrite with the mod has another size')
+    sz = len(x); pieces = file_pieces(base_dir / f'{module}.fixups.tsv', sz)
+    slots = sorted(reloc_slots(image))
+    runs, B = [], 0x10000
+    for blk in range(0, sz, B):   # whole blocks first: a mod changes a few words of a module of tens of MB
+        if x[blk:blk + B] == y[blk:blk + B]: continue
+        i, end = blk, min(blk + B, sz)
+        while i < end:
+            if x[i] == y[i]: i += 1; continue
+            piece = next(p for p in pieces if p[0] <= i < p[1])
+            j = i
+            while j < min(end, piece[1]) and x[j] != y[j]: j += 1
+            kind, img_off = ('c' if piece[3] else 'w'), piece[2] + (i - piece[0])
+            k = bisect.bisect_left(slots, img_off - 7)
+            if kind == 'w' and k < len(slots) and slots[k] < img_off + (j - i):
+                raise ModError(f'{module}: the mod writes the data at +{img_off:#x}, a word the loader relocates')
+            if runs and runs[-1][0] == kind and runs[-1][1] + len(runs[-1][3]) == i and piece[0] <= runs[-1][1]: runs[-1] = (kind, runs[-1][1], runs[-1][2], runs[-1][3] + bytes(y[i:j]))   # across a block edge
+            else: runs.append((kind, i, img_off, bytes(y[i:j])))
+            i = j
+    return runs
+
+
+def write_variants(path, rows):
+    """<module>.variants: one row per run, role, kind (c / w), file offset, image offset (negative before the base), the bytes in hex (loader.c, gen_embed.py)"""
+    lines = ['# switchable mods (dm/tools/game_mods.py): role\tkind\tfile offset\timage offset\tbytes']
+    for role, (kind, fo, io, data) in rows: lines.append(f'{role}\t{kind}\t{fo:#x}\t{io:#x}\t{data.hex()}')
+    Path(path).write_text('\n'.join(lines) + '\n')
+
+
+def read_variants(path):
+    """[(role, kind, file offset, image offset, bytes)] of a <module>.variants file"""
+    out = []
+    for l in Path(path).read_text().splitlines():
+        if not l or l.startswith('#'): continue
+        r, k, fo, io, h = l.split('\t'); out.append((r, k, int(fo, 16), int(io, 0), bytes.fromhex(h)))
+    return out
 
 
 # ---------- RomFS ----------

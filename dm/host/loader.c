@@ -846,6 +846,71 @@ void load_modules(const char *dir, const char **names, int n) {
                              tm / 1e6, tp / 1e6, tg / 1e6, tr / 1e6, (now_ns() - t0) / 1e6);
 }
 
+// Switchable mods (the launcher's High frame rate and Ultrawide: the NSP script's mods folder, dm/tools/game_mods.py): a mod's bytes are put in place when the game starts, after
+// the launcher (main.c, beside dm_fps_state_apply), while no guest code has run. DM_MOD_FPS=1 / DM_MOD_ULTRAWIDE=1 turn them on. On the iPhone the code is signed: every code
+// page a mod touches is in the executable once per combination of the roles touching it (gen_embed.py __dm<name>v, its table __dm<name>vt), and the page holding exactly the
+// roles turned on among them is vm_remapped over the module's own; a data run is copied into the module's writable part. On the Mac the bytes come from <module>.variants
+// beside the modules and are written in place, a code page made writable for the moment. A data run never touches a word the loader relocated (variant_runs refuses such a mod)
+#include <libkern/OSCacheControl.h>
+static int mod_on(const char *e) { const char *v = getenv(e); return v && !strcmp(v, "1"); }
+#if TARGET_OS_IPHONE
+typedef struct { uint32_t kind, roles, touch, pad; int64_t off; uint64_t len, src; } mod_var_ent;
+static int mod_variants_one(module_t *m, int on) {
+    char sv[17], st[17]; const char *g = embed_tag(); unsigned long zv = 0, zt = 0;
+    snprintf(sv, sizeof sv, "__dm%s%sv", g, m->name); snprintf(st, sizeof st, "__dm%s%svt", g, m->name);
+    const mod_var_ent *t = (const mod_var_ent *)getsectiondata(IMAGE_MH, "__DATA", st, &zt);
+    const uint8_t *v = getsectiondata(IMAGE_MH, "__TEXT", sv, &zv);
+    if (!t || !v) return 0;
+    int n = 0;
+    for (unsigned long i = 0; i < zt / sizeof *t; i++) {
+        const mod_var_ent *e = &t[i];
+        if (e->src + e->len > zv) die("%s: switchable mod entry %lu past its section", m->name, i);
+        if (e->kind == 0) {   // a code page: the one holding exactly the roles turned on among those touching it
+            if (!(on & e->touch) || (on & e->touch) != e->roles) continue;
+            if ((e->off & 0x3FFF) || ((uintptr_t)(v + e->src) & 0x3FFF)) die("%s: switchable mod page at %#llx not on a page", m->name, (unsigned long long)e->off);
+            remap_at(m, (vm_address_t)(m->base + e->off), v + e->src, 0x4000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+            sys_icache_invalidate(m->base + e->off, 0x4000); n++;
+        } else if (on & e->roles) { memcpy(m->base + e->off, v + e->src, e->len); n++; }
+    }
+    return n;
+}
+#else
+static int mod_variants_one(module_t *m, int on) {
+    char path[1100]; snprintf(path, sizeof path, "%s/%s.variants", g_module_dir, m->name);
+    FILE *f = fopen(path, "r"); if (!f) return 0;
+    char *line = NULL; size_t cap = 0; int n = 0;
+    while (getline(&line, &cap, f) > 0) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        char role[16], kind[4], hex[1 << 16]; unsigned long long fo; long long io;
+        if (strlen(line) >= sizeof hex || sscanf(line, "%15s\t%3s\t%llx\t%lli\t%65535s", role, kind, &fo, &io, hex) != 5) { LOG("[RED] %s: a line it cannot read", path); continue; }
+        int bit = !strcmp(role, "fps") ? 1 : !strcmp(role, "ultrawide") ? 2 : 0;
+        if (!(on & bit)) continue;
+        size_t len = strlen(hex) / 2; uint8_t *p = m->base + io;
+        uint8_t *bytes = malloc(len); for (size_t k = 0; k < len; k++) { unsigned b; sscanf(hex + 2 * k, "%2x", &b); bytes[k] = (uint8_t)b; }
+        if (kind[0] == 'c') {   // code: writable for the copy, then read-only executable again
+            uint8_t *lo = (uint8_t *)((uintptr_t)p & ~(uintptr_t)0x3FFF), *hi = (uint8_t *)(((uintptr_t)p + len + 0x3FFF) & ~(uintptr_t)0x3FFF);
+            if (mprotect(lo, hi - lo, PROT_READ | PROT_WRITE)) die("%s: switchable mod: mprotect %p", m->name, lo);
+            memcpy(p, bytes, len);
+            if (mprotect(lo, hi - lo, PROT_READ | PROT_EXEC)) die("%s: switchable mod: mprotect %p", m->name, lo);
+            sys_icache_invalidate(p, len);
+        } else memcpy(p, bytes, len);
+        free(bytes); n++;
+    }
+    free(line); fclose(f);
+    return n;
+}
+#endif
+void dm_mod_variants_apply(void) {
+    int on = mod_on("DM_MOD_FPS") | mod_on("DM_MOD_ULTRAWIDE") << 1;
+    if (!on) return;
+    for (int i = 0; i < g_nmod; i++) {
+        module_t *m = &g_mod[i];
+        if (m->nro) continue;
+        int n = mod_variants_one(m, on);
+        if (n) LOG("%s: switchable mods put in place:%s%s (%d pieces)", m->name, on & 1 ? " High frame rate" : "", on & 2 ? " Ultrawide" : "", n);
+    }
+}
+
 // Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT in forward order of the load list.
 // The timing is decided by nn::init::Start: after nninitStartup and _init_libc2, before nnMain (the 4th argument callback of Start).
 void run_module_inits(void) {

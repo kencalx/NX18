@@ -198,6 +198,72 @@ class Folder(unittest.TestCase):
         self.assertTrue(any('not named after a build ID' in r for r in report))
 
 
+class Switchable(unittest.TestCase):
+    """the launcher's High frame rate and Ultrawide: which mods are switchable, and the bytes a variant rewrite changes"""
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
+        self.root = Path(t.name)
+
+    def test_roles_by_folder_name(self):
+        for n, r in (('60FPS', 'fps'), ('120 FPS', 'fps'), ('Frame Rate Unlock', 'fps'), ('Ultrawide', 'ultrawide'), ('21:9', 'ultrawide'),
+                     ('32.9 Ryujinx', 'ultrawide'), ('Pack/21x9', 'ultrawide'), ('Remove Bloom', None), ('fps/../Bloom', None)):
+            self.assertEqual(gm.role_of(n), r, n)
+
+    def test_one_mod_per_role(self):
+        mods = self.root / 'mods'
+        for rel in ('exefs_patches/30FPS/a.ips', 'exefs_patches/60FPS/a.ips', 'exefs_patches/60FPS Ryujinx/a.ips', 'exefs_patches/120FPS/a.ips',
+                    'exefs_patches/32.9/a.ips', 'exefs_patches/21.9/a.ips', 'exefs_patches/Bloom/a.ips'):
+            (mods / rel).parent.mkdir(parents=True, exist_ok=True); (mods / rel).write_bytes(ips([]))
+        found = gm.scan(mods, TITLE)
+        keep, chosen, report = gm.split_roles(found)
+        self.assertEqual([p.parent.name for p in keep], ['Bloom'])
+        self.assertEqual(chosen['fps'][0], 'exefs_patches/60FPS')
+        self.assertEqual(chosen['ultrawide'][0], 'exefs_patches/21.9', 'the shape nearest the device\'s')
+        self.assertEqual(sum('left out' in r for r in report), 4)
+        keep, chosen, report = gm.split_roles(found, fps_ok=False)
+        self.assertNotIn('fps', chosen); self.assertEqual(len(keep), 1)
+
+    def test_aspect_value(self):
+        recs = [(0x10, struct.pack('<f', 21 / 9)), (0x20, struct.pack('<f', 16 / 9)), (0x30, b'\x1f\x20\x03\xd5\x00\x00')]
+        report = []
+        out = gm.adapt_aspect(recs, 'uw', report)
+        self.assertAlmostEqual(struct.unpack('<f', out[0][1])[0], gm.DEVICE_ASPECT, places=5)
+        self.assertEqual(out[1:], recs[1:]); self.assertIn('aspect value set', report[0])
+        gm.adapt_aspect(recs[1:], 'uw', report); self.assertIn('no aspect value', report[1])
+
+    def test_reloc_slots(self):
+        img = bytearray(0x400)
+        struct.pack_into('<I', img, 4, 0x100); img[0x100:0x104] = b'MOD0'; struct.pack_into('<i', img, 0x104, 0x100)   # dynamic at 0x200
+        dyn = [(7, 0x300), (8, 48), (36, 0x340), (35, 16), (0, 0)]
+        for i, (t, v) in enumerate(dyn): struct.pack_into('<qQ', img, 0x200 + 16 * i, t, v)
+        struct.pack_into('<QQ', img, 0x300, 0x1000, 0); struct.pack_into('<QQ', img, 0x318, 0x1008, 0)
+        struct.pack_into('<QQ', img, 0x340, 0x2000, 0b101)   # 0x2000, then bitmap bit 0 -> 0x2008, bit 1 -> 0x2010
+        self.assertEqual(gm.reloc_slots(img), {0x1000, 0x1008, 0x2000, 0x2010})
+        self.assertEqual(gm.reloc_slots(bytes(0x40)), set())
+
+    def test_file_pieces(self):
+        f = self.root / 'f.tsv'
+        f.write_text('# TEXT_END 0x4100\n# PATCH_OFF 0x10000\nrow\t1\n')
+        self.assertEqual(gm.file_pieces(f, 0x14000), [(0, 0x8000, 0, True), (0x8000, 0x10000, 0x8000, False), (0x10000, 0x14000, 0x10000, True)])
+        f.write_text('# TEXT_END 0x4000\n# PATCH_OFF -0x8000\n# FILE_IMAGE_LEN 0x10000\n# BACK_LEN 0x4000\n# BACK_OFF 0x20000\n')
+        self.assertEqual(gm.file_pieces(f, 0x1c000), [(0, 0x4000, 0, True), (0x4000, 0x10000, 0x4000, False), (0x10000, 0x18000, -0x8000, True), (0x18000, 0x1c000, 0x20000, True)])
+
+    def test_variant_runs(self):
+        a, b = self.root / 'a', self.root / 'b'; a.mkdir(); b.mkdir()
+        hdr = '# TEXT_END 0x4000\n# PATCH_OFF 0x20000\n'
+        x = bytearray(0x24000); y = bytearray(x)
+        y[0x8] = 1; y[0x3fff:0x4001] = b'\x02\x03'; y[0xfffe:0x10002] = b'\x04' * 4; y[0x21000] = 5
+        for d, data in ((a, x), (b, y)): (d / 'main.patched.bin').write_bytes(data); (d / 'main.fixups.tsv').write_text(hdr)
+        runs = gm.variant_runs(a, b, 'main', bytes(0x40))
+        self.assertEqual(runs, [('c', 0x8, 0x8, b'\x01'), ('c', 0x3fff, 0x3fff, b'\x02'), ('w', 0x4000, 0x4000, b'\x03'), ('w', 0xfffe, 0xfffe, b'\x04' * 4), ('c', 0x21000, 0x21000, b'\x05')])
+        rows = [('fps', r) for r in runs]; gm.write_variants(self.root / 'm.variants', rows)
+        self.assertEqual(gm.read_variants(self.root / 'm.variants'), [('fps', *r) for r in runs])
+        with mock.patch.object(gm, 'reloc_slots', lambda img: {0xfff8}):
+            with self.assertRaises(gm.ModError): gm.variant_runs(a, b, 'main', bytes(0x40))
+        (b / 'main.gates.tsv').write_text('x')
+        with self.assertRaises(gm.ModError): gm.variant_runs(a, b, 'main', bytes(0x40))
+
+
 class NspScript(unittest.TestCase):
     """build_ipa_from_nsp.py's mods stage: the modded extraction it packs from, reused while nothing changed"""
     def setUp(self):
@@ -221,8 +287,9 @@ class NspScript(unittest.TestCase):
             (self.mods / rel).parent.mkdir(parents=True, exist_ok=True); (self.mods / rel).write_bytes(data)
 
     def test_modded_extraction_and_reuse(self):
+        (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/speed')   # a mod that is not switchable: written in for good
         work = self.root / 'work'
-        modded, cheats = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        modded, cheats, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
         self.assertEqual(modded, work / 'mods/v0')
         self.assertEqual(nso.read(modded / 'ExeFS/main').image[0x10:0x14], b'\x1f\x20\x03\xd5')
         idx = romfs_image.read_index(modded / 'RomFS.img')
@@ -231,16 +298,46 @@ class NspScript(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in cheats.iterdir()), [f'{BID[:16]}.txt'])
         self.assertEqual(nso.read(self.ext / 'ExeFS/main').image[0x10:0x14], TEXT[0x10:0x14], 'the extraction is never written')
         stamp = os.stat(modded / 'ExeFS/main').st_mtime_ns
-        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (modded, cheats))
+        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (modded, cheats, variants))
         self.assertEqual(os.stat(modded / 'ExeFS/main').st_mtime_ns, stamp, 'reused while nothing changed')
         self.nsp.PROG.end.assert_called_with('reused (the mods and the game files unchanged)')
 
     def test_cheats_alone_need_no_modded_extraction(self):
         for p in sorted(self.mods.rglob('*'), reverse=True):
             if p.is_file() and p.suffix != '.txt': p.unlink()
-        modded, cheats = self.nsp.apply_mods(self.mods, self.ext, self.root / 'work', 'v0', TITLE)
-        self.assertIsNone(modded)
+        modded, cheats, variants = self.nsp.apply_mods(self.mods, self.ext, self.root / 'work', 'v0', TITLE)
+        self.assertIsNone(modded); self.assertEqual(variants, {})
         self.assertTrue((cheats / f'{BID[:16]}.txt').is_file())
+
+    def test_switchable_mods_stay_out_of_the_modded_modules(self):
+        (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/60 FPS')
+        work = self.root / 'work'
+        modded, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertEqual(nso.read(modded / 'ExeFS/main').image[0x10:0x14], TEXT[0x10:0x14], 'the base build is the game without the mod')
+        self.assertEqual(set(variants), {'fps'}); self.assertEqual(variants['fps']['modules'], ['main'])
+        self.assertEqual(nso.read(Path(variants['fps']['exefs']) / 'main').image[0x10:0x14], b'\x1f\x20\x03\xd5')
+        _, _, none = self.nsp.apply_mods(self.mods, self.ext, self.root / 'work2', 'v0', TITLE, fps_ok=False)
+        self.assertEqual(none, {}, 'a profile with its own Frame rate takes no frame-rate mod')
+
+    def test_build_variants(self):
+        patched = self.root / 'patched'; patched.mkdir()
+        hdr = '# TEXT_END 0x4000\n# PATCH_OFF 0x8000\n'
+        base = bytes(0xc000)
+        (patched / 'main.patched.bin').write_bytes(base); (patched / 'main.fixups.tsv').write_text(hdr)
+        (patched / 'old.variants').write_text('stale')
+        exefs = self.root / 'v/ExeFS'; exefs.mkdir(parents=True); (exefs / 'main').write_bytes(bytes(make_nso()))
+        def fake_run(cmd, log, env=None, fatal=True, **kw):
+            rw = Path(cmd[3]); v = bytearray(base); v[0x10:0x14] = b'\x1f\x20\x03\xd5'; v[0x5000:0x5002] = b'\x01\x02'
+            (rw / 'main.patched.bin').write_bytes(v); (rw / 'main.fixups.tsv').write_text(hdr); return 0
+        with mock.patch.object(self.nsp, 'run', fake_run):
+            self.nsp.build_variants(sys.executable, REPO, {'fps': {'mod': '60 FPS', 'exefs': str(exefs), 'modules': ['main']}}, patched, {}, self.root / 'logs')
+        self.assertFalse((patched / 'old.variants').exists(), 'earlier variants are removed')
+        self.assertEqual(gm.read_variants(patched / 'main.variants'), [('fps', 'c', 0x10, 0x10, b'\x1f\x20\x03\xd5'), ('fps', 'w', 0x5000, 0x5000, b'\x01\x02')])
+        self.assertIn('fps\t60 FPS\t2', (patched / 'mods.tsv').read_text())
+        with mock.patch.object(self.nsp, 'run', lambda *a, **k: 1):
+            for f in (exefs.parent / 'rewrite').iterdir(): f.unlink()
+            self.nsp.build_variants(sys.executable, REPO, {'fps': {'mod': '60 FPS', 'exefs': str(exefs), 'modules': ['main']}}, patched, {}, self.root / 'logs')
+        self.assertFalse((patched / 'mods.tsv').exists(), 'a mod the rewriter refuses is not offered')
 
     def test_folder_setting(self):
         args = self.nsp.parse_args(['x'])

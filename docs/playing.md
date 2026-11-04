@@ -22,7 +22,7 @@ Put an Atmosphère cheat file for the game in the Files app, under the app's nam
 
 ## Mods and patches
 
-A folder named `mods` beside the game's NSPs is packed into the app: code patches (`.ips`, `.ips32` or `.pchtxt`, such as 60 fps or resolution patches for the version you pack), replacement game files (folders named `romfs`) and cheat files (folders named `cheats`, which the app copies into its `cheats` folder at its first start). Copy them in as Atmosphère, yuzu or Ryujinx lay them out, or a whole SD card's `atmosphere` folder: only this game's are used. Rename a mod's folder to start with `-` to leave it out. `--mods <folder>` names another folder, `--no-mods` packs without them; the build's console lists what it applied ([the packing script](development.md#the-packing-script-in-detail)).
+A folder named `mods` beside the game's NSPs is packed into the app: code patches (`.ips`, `.ips32` or `.pchtxt`, such as 60 fps or resolution patches for the version you pack), replacement game files (folders named `romfs`) and cheat files (folders named `cheats`, which the app copies into its `cheats` folder at its first start). Copy them in as Atmosphère, yuzu or Ryujinx lay them out, or a whole SD card's `atmosphere` folder: only this game's are used. Rename a mod's folder to start with `-` to leave it out. `--mods <folder>` names another folder, `--no-mods` packs without them; the build's console lists what it applied ([the packing script](development.md#the-packing-script-in-detail)). A frame-rate or ultrawide mod, named so by its folder (`60FPS`, `Ultrawide`, `21.9`), is not written in for good: the launcher's [High frame rate and Ultrawide](settings.md#high-frame-rate-and-ultrawide) turn it on and off.
 
 ## Rumble
 

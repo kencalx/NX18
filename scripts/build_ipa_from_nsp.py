@@ -1359,28 +1359,32 @@ def link_tree(src, dst):   # dst: the folder src as hard links (a copy across vo
         for f in files: gm.link_or_copy(Path(d) / f, to / f)
 
 
-def apply_mods(root, ext, work, ver, app):
-    """The mods of root for the game (dm/tools/game_mods.py) applied to version ver's extraction ext: (the modded extraction, the folder of the cheats to pack), each None when there is
-    nothing of that kind. The modded extraction, <build folder>/mods/<version>/, has ext's layout and hard links of its files, but the code modules the patches change and a RomFS image
-    with the mods' files in it (a clone of ext's on APFS, then a new index): ext is never written. Reused while the mods, ext's code modules and RomFS and the tools are as at the last run"""
+def apply_mods(root, ext, work, ver, app, fps_ok=True):
+    """The mods of root for the game (dm/tools/game_mods.py) applied to version ver's extraction ext: (the modded extraction, the folder of the cheats to pack, the switchable
+    mods), the first two None when there is nothing of that kind. The modded extraction, <build folder>/mods/<version>/, has ext's layout and hard links of its files, but the code
+    modules the patches change and a RomFS image with the mods' files in it (a clone of ext's on APFS, then a new index): ext is never written. The switchable mods (a frame-rate
+    or ultrawide mod, by its folder's name; fps_ok False: the profile has the launcher's own Frame rate, so no frame-rate mod) are not written in: {role: {'mod', 'exefs',
+    'modules'}}, each an ExeFS folder with that mod over the modded one, which build_variants rewrites. Reused while the mods, ext's code modules and RomFS and the tools are as
+    at the last run"""
     import game_mods as gm
     found = gm.scan(root, app)
-    for p, why in found.ignored: say(f'mods: ignored {p.relative_to(root)}: {why}')
-    if not found.any(): say(f'mods: nothing for {app:016X} in {root}'); return None, None
+    for p in found.ignored: say(f'mods: ignored {p[0].relative_to(root)}: {p[1]}')
+    if not found.any(): say(f'mods: nothing for {app:016X} in {root}'); return None, None, {}
     PROG.add(1); PROG.stage('mods', step=f'{len(found.ips)} code patch files, {len(found.romfs)} romfs folders, {len(found.cheats)} cheat files')
     out = work / 'mods'; out.mkdir(parents=True, exist_ok=True)
-    plan, _ = gm.code_patches(found, gm.nso_modules(ext / 'ExeFS'))
+    keep, chosen, role_report = gm.split_roles(found, fps_ok)
+    plan, _ = gm.code_patches(found, gm.nso_modules(ext / 'ExeFS'), keep)
     img, folder = ext / 'RomFS.img', ext / 'RomFS'
     romfs_stamp = (img.stat().st_size, img.stat().st_mtime_ns) if img.is_file() else None
     tools = [Path(gm.__file__).resolve().parent / f for f in ('game_mods.py', 'romfs_image.py', 'romfs.py', 'nso.py')]
-    key = fingerprint(('files', tools + found.ips + found.cheats), ('stat', ext / 'ExeFS'), romfs_stamp or ('stat', folder), *[('stat', d) for d in found.romfs], [str(d) for d in found.romfs], app)
-    dst, kf, cheats = out / ver, out / f'{ver}.key', out / f'{ver}_cheats'
+    key = fingerprint(('files', tools + found.ips + found.cheats), ('stat', ext / 'ExeFS'), romfs_stamp or ('stat', folder), *[('stat', d) for d in found.romfs], [str(d) for d in found.romfs], app, fps_ok)
+    dst, kf, cheats, vjson = out / ver, out / f'{ver}.key', out / f'{ver}_cheats', out / f'{ver}_variants.json'
     want_ext = bool(plan or found.romfs)
-    if reused(kf, key) is not None and (dst.is_dir() or not want_ext) and (out / f'{ver}.txt').is_file():
+    if reused(kf, key) is not None and (dst.is_dir() or not want_ext) and (out / f'{ver}.txt').is_file() and vjson.is_file():
         for line in (out / f'{ver}.txt').read_text().splitlines(): say(f'mods: {line}')
         PROG.end('reused (the mods and the game files unchanged)')
-        return (dst if want_ext else None), (cheats if cheats.is_dir() else None)
-    report = []
+        return (dst if want_ext else None), (cheats if cheats.is_dir() else None), json.loads(vjson.read_text())
+    report = list(role_report)
     rmtree(cheats); main = ext / 'ExeFS/main'
     crep, _ = gm.pack_cheats(found, build_id(main)[:16].upper(), cheats) if main.is_file() else ([], [])
     report += crep
@@ -1391,9 +1395,9 @@ def apply_mods(root, ext, work, ver, app):
             if e.is_dir(): link_tree(e, tmp / e.name)
             elif e.is_file(): gm.link_or_copy(e, tmp / e.name)
         PROG.set(step='code patches')
-        crep, changed = gm.patch_exefs(ext / 'ExeFS', tmp / 'ExeFS', found)
+        crep, changed = gm.patch_exefs(ext / 'ExeFS', tmp / 'ExeFS', found, keep)
         report += crep
-        if not changed and found.ips: report.append('code: no patch file names a build of this version')
+        if not changed and keep: report.append('code: no patch file names a build of this version')
         PROG.set(step='RomFS')
         if img.is_file():
             if found.romfs: report += gm.overlay_image(img, tmp / 'RomFS.img', found.romfs, root)
@@ -1403,11 +1407,53 @@ def apply_mods(root, ext, work, ver, app):
             else: link_tree(folder, tmp / 'RomFS')
         rmtree(dst); swap_in(tmp, dst)
     else: rmtree(dst)
+    variants, base_exefs = {}, (dst if want_ext else ext) / 'ExeFS'
+    for role, (name, files) in chosen.items():   # each switchable mod over the modded modules, an ExeFS folder of its own
+        vdir = out / f'{ver}_{role}' / 'ExeFS'; rmtree(vdir.parent)
+        vrep, vmods = gm.patch_exefs(base_exefs, vdir, found, files, gm.adapt_aspect if role == 'ultrawide' else None)
+        report += vrep
+        if vmods: variants[role] = {'mod': name, 'exefs': str(vdir), 'modules': vmods}
+        else: report.append(f'{role}: {name} names no build of this version: no switchable {role} mod'); rmtree(vdir.parent)
     (out / f'{ver}.txt').write_text(''.join(line + '\n' for line in report))
+    vjson.write_text(json.dumps(variants))
     for line in report: say(f'mods: {line}')
     rmtree(kf); kf.write_text(f'{key}\n')
-    PROG.end(f'{"code and RomFS from " + str(dst) if want_ext else "cheats only"}' + (f'; cheats packed from {cheats}' if cheats.is_dir() else ''))
-    return (dst if want_ext else None), (cheats if cheats.is_dir() else None)
+    PROG.end(f'{"code and RomFS from " + str(dst) if want_ext else "cheats only" if cheats.is_dir() else "switchable mods only"}' + (f'; cheats packed from {cheats}' if cheats.is_dir() else '')
+             + (f'; switchable: {", ".join(variants)}' if variants else ''))
+    return (dst if want_ext else None), (cheats if cheats.is_dir() else None), variants
+
+
+def build_variants(py, repo, variants, patched, env, logs):
+    """The switchable mods' bytes beside the rewritten modules: each mod's ExeFS (apply_mods) is rewritten as the modules were (patch_nso.py), and where the two rewrites differ
+    only in bytes, <module>.variants lists them (dm/tools/game_mods.py variant_runs; the host puts them in place when the game starts with the launcher's toggle on, loader.c;
+    on the iPhone the code pages come signed, gen_embed.py) and mods.tsv names the roles the launcher offers (dm/games/settings.py mods:<role>). A mod whose rewrite differs in
+    more (it changes code the rewriter rewrites, or a word the loader relocates) is left out with the reason. Earlier variants are always removed first. Each variant rewrite is
+    reused while its module and the base rewrite are as at its last run"""
+    import game_mods as gm
+    for p in list(patched.glob('*.variants')) + [patched / 'mods.tsv']: rmtree(p)
+    if not variants: return
+    PROG.add(1); PROG.stage('switchable mods', step=', '.join(variants))
+    rows: dict[str, list] = {}; offered = []
+    rw_tools = [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py')]
+    for role, v in variants.items():
+        exefs, ok, got = Path(v['exefs']), True, {}
+        for m in v['modules']:
+            rw = exefs.parent / 'rewrite'; rw.mkdir(parents=True, exist_ok=True); kf = rw / f'{m}.key'
+            key = fingerprint(('files', rw_tools + [exefs / m, patched / f'{m}.patched.bin', patched / f'{m}.fixups.tsv']), {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')})
+            if not ((rw / f'{m}.patched.bin').is_file() and reused(kf, key) is not None):
+                PROG.set(step=f'{role}: rewriting {m}')
+                rc = run([py, repo / 'dm/tools/patch_nso.py', exefs / m, rw, m], logs / f'rewrite_{m}_{role}.log', env=env, fatal=False)
+                if rc: say(f'mods: {role}: {v["mod"]}: left out: the rewriter refused {m} with it (likely a word the game\'s profile patches too; {logs / f"rewrite_{m}_{role}.log"})'); ok = False; break
+                rmtree(kf); kf.write_text(f'{key}\n')
+            try: got[m] = gm.variant_runs(patched, rw, m, nso.read(exefs / m).image)
+            except gm.ModError as e: say(f'mods: {role}: {v["mod"]}: left out: {e}'); ok = False; break
+        if not ok: continue
+        for m, runs in got.items(): rows.setdefault(m, []).extend((role, r) for r in runs)
+        offered.append((role, v['mod'], sum(len(r) for r in got.values())))
+    for m, rs in rows.items(): gm.write_variants(patched / f'{m}.variants', rs)
+    if offered: (patched / 'mods.tsv').write_text('# switchable mods the launcher offers (dm/games/settings.py mods:<role>): role\tmod\truns\n' + ''.join(f'{r}\t{n}\t{c}\n' for r, n, c in offered))
+    for r, n, c in offered: say(f'mods: {"High frame rate" if r == "fps" else "Ultrawide"} offered in the launcher: {n} ({c} changed byte runs)')
+    PROG.end(', '.join(r for r, _, _ in offered) or 'none could be offered')
 
 
 def install_cheats(src, dst):   # the packed cheat files into a cheats folder the host reads (a Mac app's, a Mac run's); a file already there is kept: the player's own, or their edits
@@ -3061,10 +3107,10 @@ def main(args=None):
         os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
         g = gamemod.load(g.id)
         say(f'derived game profile for {pkg_ver} ({disp}): {g.dir}')
-    mods_root, packed_cheats = mods_folder(args, nsp_dir), None
+    mods_root, packed_cheats, mod_variants = mods_folder(args, nsp_dir), None, {}
     if mods_root and not getattr(args, 'in_programs', None):   # the game's mods: the packed version's files with them, from here on (dm/tools/game_mods.py)
         say(f'mods folder: {mods_root}')
-        modded, packed_cheats = apply_mods(mods_root, dirs[pkg_ver], work, pkg_ver, app)
+        modded, packed_cheats, mod_variants = apply_mods(mods_root, dirs[pkg_ver], work, pkg_ver, app, fps_ok=g.get('fps_target', '0') in ('', '0'))
         if modded: dirs[pkg_ver] = modded
     sv = versions if derived else need   # the versions whose files the shaders come from
     game = dirs[pkg_ver]
@@ -3106,6 +3152,7 @@ def main(args=None):
 
     patched = work / f'patched_{pkg_ver}'
     g = rewrite(py, repo, game / 'ExeFS', patched, env, logs, g, provisional)
+    build_variants(py, repo, mod_variants, patched, env, logs)   # the switchable mods' bytes beside the modules (none: earlier ones removed)
     if nd := captured_nros(patched): env = dict(env, DM_NRO_DIR=str(nd))
     chain_header(py, repo, env, logs)   # before any host is built
     if provisional or derived:   # the keys that need the rewritten modules, then (provisional) the heap check (both only change keys the host is built with, not the rewrite or the shader steps)

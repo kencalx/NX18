@@ -390,6 +390,10 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --
 # before the rewrite, RomFS files (folders named romfs) in the packed image, cheats (folders named cheats) packed into the app; Atmosphère's, yuzu's and Ryujinx's layouts, a whole SD card too.
 # Other games' folders (named by title ID) are left out; a folder whose name starts with - is off. The modded files are in <id>_build/mods/<version>/, the report in <id>_build/mods/<version>.txt.
 # A patch that changes an instruction the profile's own cuts change stops the rewrite (patch_nso.py checks their original bytes): turn that patch off. dm/tools/game_mods.py has the rules
+# Switchable mods: a mod folder named for a frame rate (60FPS) or an ultrawide shape (Ultrawide, 21.9) is not written in. The modules are rewritten once more with it, and where that
+# rewrite differs from the base one only in bytes (the same rewriter tables, no relocated word touched), <module>.variants beside the patched modules lists them and mods.tsv the roles
+# (build_variants). The launcher offers DM_MOD_FPS / DM_MOD_ULTRAWIDE for them; the host writes the bytes in before the game's first instruction (loader.c dm_mod_variants_apply). On iOS
+# each code page a mod touches is embedded signed, once per combination of the roles touching it (gen_embed.py), and remapped over the module's page
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --mods ~/Switch/sdcard
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --no-mods
 

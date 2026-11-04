@@ -1,6 +1,6 @@
 # Nintanium
 
-Nintanium is a fork of [NXNative](https://github.com/seedds/nxnative) (MIT License, kept in [LICENSE](LICENSE)), which turns your own Switch games into iPhone, iPad and Mac apps. It adds a Stretch picture option, cheats on iPhone and iPad, a mods folder for code patches, replacement files and cheats, and tuning for the iPhone 18 Pro Max and iPad Pro (M4) on iOS 27.
+Nintanium is a fork of [NXNative](https://github.com/seedds/nxnative) (MIT License, kept in [LICENSE](LICENSE)), which turns your own Switch games into iPhone, iPad and Mac apps. It adds a Stretch picture option, cheats on iPhone and iPad, a mods folder for code patches, replacement files and cheats, High frame rate and Ultrawide toggles for such mods, and tuning for the iPhone 18 Pro Max and iPad Pro (M4) on iOS 27.
 
 ## Getting it
 
@@ -63,6 +63,16 @@ Limits:
 - If a patch changes an instruction that NXNative's own fixes for that game also change, the rewrite stops with an error naming it. Turn that patch off.
 - A `romfs` mod that replaces the game's shader files can fail NXNative's shader checks.
 
+### High frame rate and Ultrawide toggles
+
+A mod whose folder name says it changes the frame rate (`60FPS`, `Frame rate`) or the picture's shape (`Ultrawide`, `21.9`, `21:9`) is no longer written into the game for good. The build packs it so the launcher's **High frame rate** and **Ultrawide** toggles turn it on and off at the next start, without rebuilding. Mods like those of [Switch-Emulator-Ultrawide-FPS-Mods](https://github.com/Fl4sh9174/Switch-Emulator-Ultrawide-FPS-Mods) work as they come, in yuzu's or Ryujinx's layout. That repository has no license, so its mods are not included here: copy the ones for your game into its mods folder yourself.
+
+- **One mod per kind.** Of several mods (a pack's 30, 60 and 120 FPS, its 21:9 and 32:9), the build takes 60 fps and the ultrawide shape nearest the iPhone 18 Pro Max's screen, and prefers a mod not made for Ryujinx alone. The report lists the others it left out.
+- **Ultrawide on the iPhone.** The mod's aspect value is set to the iPhone 18 Pro Max's screen (2868 x 1320) when the mod keeps it as a number, and the picture is stretched to fill the screen, which is the shape the wider view was drawn for. On an iPad, whose screen is taller than 16:9, Ultrawide stays off.
+- **Games with their own Frame rate setting** (Breath of the Wild, Luigi's Mansion 3 and others) take no frame-rate mod: the launcher's Frame rate already does it, and the two would fight.
+- **How it works.** The build rewrites the game's code once more with the mod and keeps only the bytes that change. On iPhone and iPad, each code page the mod touches is packed as signed code, once with and once without the mod, and the app swaps the page in at start. A mod that changes code NXNative's own fixes also change, or data the game's loader adjusts, can't be switched: the build leaves it out and says why.
+- **FPSLocker** patches (FPSLocker-Warehouse) are a different format, for a system module that changes memory while the game runs. They aren't read. Most of the games they cover already have the launcher's Frame rate.
+
 ### Tuned for iPhone 18 Pro Max and iPad Pro (M4) on iOS 27
 
 NXNative already requires an A17 Pro or M1 or later with Metal 4, already drives ProMotion's 120 Hz display link, and already asks for the Increased Memory Limit. On top of that:
@@ -108,8 +118,8 @@ Kept, because they stay on the device and help when something goes wrong:
 
 These changes were written and checked on Linux, not on a Mac:
 
-- **Tested:** the Python side (mods folder, patch formats, game-data overlay, cheat packing, the build script's new stage, settings and docs checks) passes NXNative's test suite and the new tests in `dm/tools/tests/test_game_mods.py`.
-- **Not compiled here:** the Objective-C and Swift changes (Stretch, the Cheats menu, the default cheats folder, the Metal 4 and texture pool defaults, the Swift 6 language mode), the Xcode project changes (iOS 27 minimum, `-O2`, `-mcpu=apple-m4`) and the shaders compiled for iOS 27 in Metal 4.1, all of which need Xcode. Check them with a build on your Mac before relying on them.
+- **Tested:** the Python side (mods folder, patch formats, game-data overlay, cheat packing, the switchable mods' selection, byte diff and packed pages, the build script's new stages, settings and docs checks) passes NXNative's test suite and the new tests in `dm/tools/tests/test_game_mods.py` and `test_gen_embed_variants.py`.
+- **Not compiled here:** the Objective-C, C and Swift changes (Stretch, the Cheats menu, the High frame rate and Ultrawide toggles in the loader and front end, the default cheats folder, the Metal 4 and texture pool defaults, the Swift 6 language mode), the Xcode project changes (iOS 27 minimum, `-O2`, `-mcpu=apple-m4`) and the shaders compiled for iOS 27 in Metal 4.1, all of which need Xcode. Check them with a build on your Mac before relying on them.
 - **Not measured:** the speed-ups. They follow from what the code does, but no frame times were taken on an iPhone 18 Pro Max or an M4 iPad.
 
 ## Sources checked

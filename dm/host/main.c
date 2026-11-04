@@ -177,6 +177,7 @@ int main(int argc, char **argv) {
         LOG("host loading already finished early in the background (dm_host_preload_start)");
     } else host_preload(argc, argv);
     { void dm_fps_state_apply(void); dm_fps_state_apply(); }   // frame rate and render scale into the frame step state page (loader.c): the iOS launcher sets them after the loading began
+    { void dm_mod_variants_apply(void); dm_mod_variants_apply(); }   // the switchable mods the launcher turned on (loader.c), before any guest code runs
     front_run(guest_main);
     return 0;
 }
