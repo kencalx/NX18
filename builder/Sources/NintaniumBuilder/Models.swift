@@ -62,6 +62,43 @@ struct BuilderSettings: Codable, Sendable {
     var autoPull: Bool = true
     var autoPullMinutes: Int = 30
     var increasedMemoryLimit: Bool = true    // the Increased Memory Limit entitlement (needs an account that can provision it)
+    var paidAccount: Bool = true             // an Apple Developer Program team: Extended Virtual Addressing too, and devices registered as they are installed on
+
+    init() {}
+
+    /// Missing keys take their defaults, so settings saved by an older version still load.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = BuilderSettings()
+        repoPath = try c.decodeIfPresent(String.self, forKey: .repoPath) ?? d.repoPath
+        repoURL = try c.decodeIfPresent(String.self, forKey: .repoURL) ?? d.repoURL
+        branch = try c.decodeIfPresent(String.self, forKey: .branch) ?? d.branch
+        keysPath = try c.decodeIfPresent(String.self, forKey: .keysPath) ?? d.keysPath
+        outputFolder = try c.decodeIfPresent(String.self, forKey: .outputFolder) ?? d.outputFolder
+        teamID = try c.decodeIfPresent(String.self, forKey: .teamID) ?? d.teamID
+        python = try c.decodeIfPresent(String.self, forKey: .python) ?? d.python
+        autoPull = try c.decodeIfPresent(Bool.self, forKey: .autoPull) ?? d.autoPull
+        autoPullMinutes = try c.decodeIfPresent(Int.self, forKey: .autoPullMinutes) ?? d.autoPullMinutes
+        increasedMemoryLimit = try c.decodeIfPresent(Bool.self, forKey: .increasedMemoryLimit) ?? d.increasedMemoryLimit
+        paidAccount = try c.decodeIfPresent(Bool.self, forKey: .paidAccount) ?? d.paidAccount
+    }
+}
+
+/// The entitlements a signed build asks for (build_ipa.sh DM_ENTITLEMENTS). A paid team also gets Extended Virtual Addressing: iOS then lets the app reserve more than the
+/// 5 to 6 GB of address space it has without it (docs/reference/memory.md), which games that reserve a large block need; it changes nothing for the others.
+enum Entitlements {
+    static func file(paid: Bool, memoryLimit: Bool) -> String? {
+        var keys: [String] = []
+        if memoryLimit { keys.append("com.apple.developer.kernel.increased-memory-limit") }
+        if paid { keys.append("com.apple.developer.kernel.extended-virtual-addressing") }
+        if keys.isEmpty { return "" }   // none
+        if keys == ["com.apple.developer.kernel.increased-memory-limit"] { return nil }   // build_ipa.sh's default
+        let body = keys.map { "<key>\($0)</key><true/>" }.joined()
+        let plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\(body)</dict></plist>\n"
+        let url = Paths.support.appendingPathComponent("entitlements.plist")
+        try? plist.write(to: url, atomically: true, encoding: .utf8)
+        return url.path
+    }
 }
 
 /// A device devicectl sees.
@@ -70,6 +107,7 @@ struct Device: Identifiable, Hashable, Sendable {
     var name: String
     var model: String
     var type: String        // iPhone, iPad
+    var udid: String        // the hardware UDID, which xcodebuild's destination takes
     var connected: Bool
 }
 

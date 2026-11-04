@@ -124,10 +124,16 @@ struct SettingsView: View {
                 TextField("Python", text: $model.settings.python)
             }
             Section {
-                TextField("Team ID", text: $model.settings.teamID, prompt: Text("from Xcode › Settings › Apple Accounts"))
+                HStack {
+                    TextField("Team ID", text: $model.settings.teamID, prompt: Text("from Xcode › Settings › Apple Accounts"))
+                    Button("Detect") { Task { if let t = await Devices.teamID() { model.settings.teamID = t } } }
+                }
+                Toggle("Apple Developer Program account", isOn: $model.settings.paidAccount)
                 Toggle("Increased Memory Limit", isOn: $model.settings.increasedMemoryLimit)
             } header: { Text("Signing (Xcode install)") } footer: {
-                Text("Sign in to your Apple account in Xcode once. The bigger games need Increased Memory Limit; an account that cannot provision it builds with it off.").font(.caption)
+                Text(model.settings.paidAccount
+                     ? "Signed builds also ask for Extended Virtual Addressing (more address space for games that reserve a large block), and the chosen device is registered on your account as it is installed on. Apps stay installable for a year."
+                     : "A free Personal Team: Increased Memory Limit only, apps expire after 7 days, and a device must already be in a profile. The bigger games need Increased Memory Limit; turn it off only if signing fails over it.").font(.caption)
             }
             Section("Tools") {
                 ForEach(tools, id: \.0) { t in

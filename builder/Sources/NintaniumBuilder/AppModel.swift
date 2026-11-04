@@ -54,6 +54,7 @@ final class AppModel {
         repo.configure(path: settings.repoPath, branch: settings.branch)
         await repo.refresh()
         await refreshDevices()
+        if settings.teamID.isEmpty, let t = await Devices.teamID() { settings.teamID = t }   // the signing certificate's team, until one is set
         Task { await self.updateLoop() }
     }
 
@@ -178,7 +179,8 @@ final class AppModel {
         guard repo.exists else { phase = .failed("No Nintanium checkout at \(settings.repoPath): clone it under Repository."); return }
         beginJob(g, "Building \(g.name) for \(g.device.label)")
         var env: [String: String] = [:]
-        if !settings.increasedMemoryLimit { env["DM_ENTITLEMENTS"] = "" }
+        if g.install == .xcode, let ent = Entitlements.file(paid: settings.paidAccount, memoryLimit: settings.increasedMemoryLimit) { env["DM_ENTITLEMENTS"] = ent }
+        else if g.install == .sideload, !settings.increasedMemoryLimit { env["DM_ENTITLEMENTS"] = "" }   // a sideloading tool provisions what it can: the default request only
         building = g; lastRed = ""
         let r = await run(settings.python, buildArguments(g), cwd: URL(fileURLWithPath: settings.repoPath), env: env) { [weak self] line in
             guard let self else { return }
@@ -238,8 +240,12 @@ final class AppModel {
               let p = j["project"] as? [String: Any], let scheme = (p["schemes"] as? [String])?.first
         else { phase = .failed("Cannot read the Xcode project's scheme: \(list.reason)"); return false }
         let dd = g.lastDerivedData ?? URL(fileURLWithPath: proj).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("xcode-derived-data").path
-        var args = ["-project", proj, "-scheme", scheme, "-configuration", "Release", "-destination", "generic/platform=iOS", "-allowProvisioningUpdates",
+        // A paid team registers the chosen device on the account as it signs (a profile then covers it); otherwise any iOS device the profile already has
+        let dev = selectedDevice.flatMap { $0.connected && !$0.udid.isEmpty ? $0 : nil }
+        let destination = settings.paidAccount && dev != nil ? "platform=iOS,id=\(dev!.udid)" : "generic/platform=iOS"
+        var args = ["-project", proj, "-scheme", scheme, "-configuration", "Release", "-destination", destination, "-allowProvisioningUpdates",
                     "DM_XCODE_OUTPUT_ROOT=\(dd)", "SYMROOT=\(dd)/Build/Products", "OBJROOT=\(dd)/Build/Intermediates.noindex"]
+        if settings.paidAccount && dev != nil { args.append("-allowProvisioningDeviceRegistration") }
         if !settings.teamID.isEmpty { args.append("DEVELOPMENT_TEAM=\(settings.teamID)") }
         args.append("build")
         let r = await run("xcodebuild", args) { [weak self] line in
@@ -290,7 +296,7 @@ final class AppModel {
         say("✓ installed")
         if g.gameData == .separate { guard await pushGameData(g, dev) else { return } }
         await pushCheats(g, dev)
-        phase = .succeeded("Installed on \(dev.name). Open it on the device" + (g.install == .xcode ? " (first time: trust your developer certificate in Settings › General › VPN & Device Management)." : "."))
+        phase = .succeeded("Installed on \(dev.name). Open it on the device" + (settings.paidAccount ? "." : " (first time: trust your developer certificate in Settings › General › VPN & Device Management)."))
     }
 
     func copyGameData(_ id: UUID) async {
