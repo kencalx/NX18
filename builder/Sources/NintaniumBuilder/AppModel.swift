@@ -179,8 +179,7 @@ final class AppModel {
         guard repo.exists else { phase = .failed("No Nintanium checkout at \(settings.repoPath): clone it under Repository."); return }
         beginJob(g, "Building \(g.name) for \(g.device.label)")
         var env: [String: String] = [:]
-        if g.install == .xcode, let ent = Entitlements.file(paid: settings.paidAccount, memoryLimit: settings.increasedMemoryLimit) { env["DM_ENTITLEMENTS"] = ent }
-        else if g.install == .sideload, !settings.increasedMemoryLimit { env["DM_ENTITLEMENTS"] = "" }   // a sideloading tool provisions what it can: the default request only
+        if let ent = Entitlements.file(paid: settings.paidAccount) { env["DM_ENTITLEMENTS"] = ent }   // both memory entitlements, or Increased Memory Limit alone for a free team
         building = g; lastRed = ""
         let r = await run(settings.python, buildArguments(g), cwd: URL(fileURLWithPath: settings.repoPath), env: env) { [weak self] line in
             guard let self else { return }

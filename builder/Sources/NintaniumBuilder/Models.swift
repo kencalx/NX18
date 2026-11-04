@@ -61,8 +61,7 @@ struct BuilderSettings: Codable, Sendable {
     var python: String = "python3"
     var autoPull: Bool = true
     var autoPullMinutes: Int = 30
-    var increasedMemoryLimit: Bool = true    // the Increased Memory Limit entitlement (needs an account that can provision it)
-    var paidAccount: Bool = true             // an Apple Developer Program team: Extended Virtual Addressing too, and devices registered as they are installed on
+    var paidAccount: Bool = true             // an Apple Developer Program team: both memory entitlements, and devices registered as they are installed on
 
     init() {}
 
@@ -79,23 +78,19 @@ struct BuilderSettings: Codable, Sendable {
         python = try c.decodeIfPresent(String.self, forKey: .python) ?? d.python
         autoPull = try c.decodeIfPresent(Bool.self, forKey: .autoPull) ?? d.autoPull
         autoPullMinutes = try c.decodeIfPresent(Int.self, forKey: .autoPullMinutes) ?? d.autoPullMinutes
-        increasedMemoryLimit = try c.decodeIfPresent(Bool.self, forKey: .increasedMemoryLimit) ?? d.increasedMemoryLimit
         paidAccount = try c.decodeIfPresent(Bool.self, forKey: .paidAccount) ?? d.paidAccount
     }
 }
 
-/// The entitlements a signed build asks for (build_ipa.sh DM_ENTITLEMENTS). A paid team also gets Extended Virtual Addressing: iOS then lets the app reserve more than the
-/// 5 to 6 GB of address space it has without it (docs/reference/memory.md), which games that reserve a large block need; it changes nothing for the others.
+/// The entitlements a build asks for. build_ipa.sh's default is both memory entitlements: Increased Memory Limit and Extended Virtual Addressing (more address space than the
+/// 5 to 6 GB iOS gives without it, docs/reference/memory.md). An Apple Developer Program team provisions both; a free Personal Team only the first, so its builds get a file without
+/// the second (DM_ENTITLEMENTS).
 enum Entitlements {
-    static func file(paid: Bool, memoryLimit: Bool) -> String? {
-        var keys: [String] = []
-        if memoryLimit { keys.append("com.apple.developer.kernel.increased-memory-limit") }
-        if paid { keys.append("com.apple.developer.kernel.extended-virtual-addressing") }
-        if keys.isEmpty { return "" }   // none
-        if keys == ["com.apple.developer.kernel.increased-memory-limit"] { return nil }   // build_ipa.sh's default
-        let body = keys.map { "<key>\($0)</key><true/>" }.joined()
-        let plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\(body)</dict></plist>\n"
-        let url = Paths.support.appendingPathComponent("entitlements.plist")
+    /// nil: build_ipa.sh's default (both); else the path of a plist for DM_ENTITLEMENTS.
+    static func file(paid: Bool) -> String? {
+        if paid { return nil }
+        let plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>com.apple.developer.kernel.increased-memory-limit</key><true/></dict></plist>\n"
+        let url = Paths.support.appendingPathComponent("entitlements-personal-team.plist")
         try? plist.write(to: url, atomically: true, encoding: .utf8)
         return url.path
     }

@@ -94,7 +94,8 @@ class UnsignedIpaTests(unittest.TestCase):
                 result = run_step(SIGNING, root, APP=str(root / 'DmIOS.app'), O=str(root / 'pkg'), **extra)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 shown = subprocess.run(['codesign', '-d', '--entitlements', '-', str(root / 'DmIOS.app/DmIOS')], capture_output=True, text=True)
-                self.assertEqual('com.apple.developer.kernel.increased-memory-limit' in shown.stdout + shown.stderr, expected)
+                for key in ('com.apple.developer.kernel.increased-memory-limit', 'com.apple.developer.kernel.extended-virtual-addressing'):   # both memory entitlements by default
+                    self.assertEqual(key in shown.stdout + shown.stderr, expected, key)
 
 
 if __name__ == '__main__':

@@ -41,11 +41,13 @@ Drag **Nintanium Builder.app** to Applications. It is signed ad-hoc, so the firs
   The device must be connected and unlocked, trust this Mac, and have **Developer Mode** on.
 
   With **Apple Developer Program account** on (the default):
+  - Every build asks for both memory entitlements. **Increased Memory Limit** lets the app use more of the device's RAM before iOS closes it. **Extended Virtual Addressing** lifts the cap of about 5 to 6 GB that iOS otherwise puts on the app's address space ([memory reference](../docs/reference/memory.md)).
   - The chosen device is registered on your account as the app is signed (`-allowProvisioningDeviceRegistration`).
-  - Signed apps ask for **Extended Virtual Addressing** as well as **Increased Memory Limit**. Without it, iOS caps the app's address space at about 5 to 6 GB ([memory reference](../docs/reference/memory.md)); games that reserve a larger block need it, and it changes nothing for the others.
   - Apps stay installable for a year.
 
-  With a free Personal Team, turn the setting off: apps then expire after 7 days, and you trust the certificate on the device the first time (**Settings › General › VPN & Device Management**).
+  The game's log (`Documents/log.txt`) has a `boot: memory:` line at the start. It shows how much RAM iOS allows the app and whether an 8 GB address reservation succeeds, which means Extended Virtual Addressing is in effect.
+
+  With a free Personal Team, turn the setting off. Builds then ask for Increased Memory Limit only, since a free team cannot provision Extended Virtual Addressing. Apps expire after 7 days, and you trust the certificate on the device the first time (**Settings › General › VPN & Device Management**).
 - **Unsigned IPA for a sideloading tool.** Builds the IPA, then **Open in Sideloader** opens it in Sideloadly or AltServer if you have one. Otherwise it shows the IPA in Finder. With the game files kept separate, **Copy Game Data** then copies them. This uses `devicectl`, which can reach the app's files only when the tool signed it for development, as Sideloadly does with your Apple account.
 
 **Copy Cheats** copies the cheat files that are on into the installed app's `cheats` folder, replacing ones of the same name. In the game, open the gear menu, then **Cheats › Reload cheats**.

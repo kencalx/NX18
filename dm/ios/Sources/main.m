@@ -6,7 +6,9 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <os/proc.h>
 #include <unistd.h>
 #include "game_profile.h"   // game profile constants (the RomFS marker path)
 #include "front.h"
@@ -291,7 +293,23 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 - (void)sceneDidBecomeActive:(UIScene *)s { front_ios_focus_event(3); }
 @end
 
+// What iOS gives the app, read before anything else reserves address space and logged at boot: the memory it may still use (os_proc_available_memory: higher with Increased
+// Memory Limit), and whether an 8 GB reservation of address space succeeds, which iOS allows only with Extended Virtual Addressing (6 GB at most without it). The reservation is
+// PROT_NONE and released at once: it costs no memory
+static size_t g_mem_avail; static int g_mem_wide;
+static void memory_probe(void) {
+    g_mem_avail = os_proc_available_memory();
+    void *p = mmap(NULL, 8ull << 30, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    g_mem_wide = p != MAP_FAILED;
+    if (g_mem_wide) munmap(p, 8ull << 30);
+}
+static void memory_report(void) {
+    fprintf(stderr, "boot: memory: %.2f GB available to the app (more with Increased Memory Limit), %s\n", g_mem_avail / 1073741824.0,
+            g_mem_wide ? "an 8 GB address reservation succeeds (Extended Virtual Addressing in effect)" : "an 8 GB address reservation fails (no Extended Virtual Addressing: about 6 GB at most)");
+}
 int main(int argc, char **argv) {
+    memory_probe();
     @autoreleasepool { g_boot_ok = boot_env(); }
+    memory_report();
     @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(App.class)); }
 }

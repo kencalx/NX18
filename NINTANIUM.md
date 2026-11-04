@@ -84,6 +84,14 @@ A mod whose folder name says it changes the frame rate (`60FPS`, `Frame rate`) o
 
 Build it with `builder/make_app.sh`.
 
+### Both memory entitlements in every build
+
+Every build, whether the Xcode project or the unsigned IPA, asks for **Increased Memory Limit** and **Extended Virtual Addressing**:
+- **Increased Memory Limit** lets the app use more of the device's RAM before iOS closes it.
+- **Extended Virtual Addressing** lifts the cap of about 5 to 6 GB that iOS otherwise puts on the app's address space ([memory reference](docs/reference/memory.md)).
+
+An Apple Developer Program team provisions both; a free Personal Team only the first (build with `DM_ENTITLEMENTS=<plist>` holding Increased Memory Limit alone, which Nintanium Builder does when its paid-account setting is off). The log's `boot: memory:` line shows that both are in effect on the device: how much RAM iOS allows the app, and whether an 8 GB address reservation succeeds. The games' memory layouts are their profiles' own, tested within 5 GB, so a game uses more address space only where its profile asks for it.
+
 ### iPhone or iPad builds
 
 `--device iphone` or `--device ipad` (`DEVICE` in Spyder) builds an app for that device family only. When the build makes a pipeline archive (the GPU's own compiled shaders), it makes it for that device's GPU alone: the A20 Pro (`g19p`) or the M4 (`g16g`), rather than every GPU the default rule names. The Metal shader libraries are the same for every iOS device, so there is no other per-device shader output. An iPad build leaves out the Ultrawide toggle. Without `--device`, one app serves both, as before.
@@ -134,7 +142,7 @@ Kept, because they stay on the device and help when something goes wrong:
 These changes were written and checked on Linux, not on a Mac:
 
 - **Tested:** the Python side (mods folder, patch formats, game-data overlay, cheat packing, the switchable mods' selection, byte diff and packed pages, the build script's new stages, settings and docs checks) passes NXNative's test suite and the new tests in `dm/tools/tests/test_game_mods.py` and `test_gen_embed_variants.py`.
-- **Not compiled here:** Nintanium Builder (the Mac app in `builder/`), the Objective-C, C and Swift changes (Stretch, the Cheats menu, the High frame rate and Ultrawide toggles in the loader and front end, the default cheats folder, the Metal 4 and texture pool defaults, the Swift 6 language mode), the Xcode project changes (iOS 27 minimum, `-O2`, `-mcpu=apple-m4`) and the shaders compiled for iOS 27 in Metal 4.1, all of which need Xcode. Check them with a build on your Mac before relying on them.
+- **Not compiled here:** the boot memory line (`main.m`), Nintanium Builder (the Mac app in `builder/`), the Objective-C, C and Swift changes (Stretch, the Cheats menu, the High frame rate and Ultrawide toggles in the loader and front end, the default cheats folder, the Metal 4 and texture pool defaults, the Swift 6 language mode), the Xcode project changes (iOS 27 minimum, `-O2`, `-mcpu=apple-m4`) and the shaders compiled for iOS 27 in Metal 4.1, all of which need Xcode. Check them with a build on your Mac before relying on them.
 - **Not measured:** the speed-ups. They follow from what the code does, but no frame times were taken on an iPhone 18 Pro Max or an M4 iPad.
 
 ## Sources checked

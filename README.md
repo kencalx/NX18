@@ -75,7 +75,7 @@ To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the g
 
 ### Install
 
-Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, Sideloadly or LiveContainer. If your tool offers **Increased Memory Limit**, turn it on: the bigger games need it.
+Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, Sideloadly or LiveContainer. If your tool offers **Increased Memory Limit** and **Extended Virtual Addressing**, turn them on: the bigger games need them (the IPA asks for both).
 
 Game too big to install? Build again with `--romfs separate`, and run the command the script prints once to copy the game files to your phone ([Quick reinstalls](docs/development.md#quick-reinstalls)).
 

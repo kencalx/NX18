@@ -129,11 +129,10 @@ struct SettingsView: View {
                     Button("Detect") { Task { if let t = await Devices.teamID() { model.settings.teamID = t } } }
                 }
                 Toggle("Apple Developer Program account", isOn: $model.settings.paidAccount)
-                Toggle("Increased Memory Limit", isOn: $model.settings.increasedMemoryLimit)
-            } header: { Text("Signing (Xcode install)") } footer: {
+            } header: { Text("Signing") } footer: {
                 Text(model.settings.paidAccount
-                     ? "Signed builds also ask for Extended Virtual Addressing (more address space for games that reserve a large block), and the chosen device is registered on your account as it is installed on. Apps stay installable for a year."
-                     : "A free Personal Team: Increased Memory Limit only, apps expire after 7 days, and a device must already be in a profile. The bigger games need Increased Memory Limit; turn it off only if signing fails over it.").font(.caption)
+                     ? "Every build asks for both memory entitlements: Increased Memory Limit (more of the device's RAM) and Extended Virtual Addressing (more address space than the 5 to 6 GB iOS gives otherwise). The chosen device is registered on your account as it is installed on, and apps stay installable for a year."
+                     : "A free Personal Team: builds ask for Increased Memory Limit only (a free team cannot provision Extended Virtual Addressing), apps expire after 7 days, and a device must already be in a profile.").font(.caption)
             }
             Section("Tools") {
                 ForEach(tools, id: \.0) { t in
