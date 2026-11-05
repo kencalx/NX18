@@ -14,7 +14,8 @@
 #   byte for byte the one this script wrote before the pieces
 #   Writes <out.ipa>.partial and renames it at the end; prints "pack: N entries, X bytes" first (the NSP script's progress total, X = the files' bytes) and a summary line last
 #   Repeat packs reuse a file when its size, mtime_ns, ctime_ns and inode are unchanged (true on APFS). A tool that rewrites in place and restores mtime defeats this if ctime also stays
-#   unchanged; --no-reuse forces a full pack. The index holds only source metadata and compression settings; ZIP metadata comes from the old IPA.
+#   unchanged; --no-reuse forces a full pack. The index holds only source metadata and compression settings (a streamed file's row says whether it was deflated in pieces, so
+#   --threads 1 after a parallel pack, or the other way round, packs it again); ZIP metadata comes from the old IPA.
 #   Only mappings whose source folder is on APFS reuse files; other mappings pack their files again. The kept run needs an APFS clone of the old IPA; if cloning fails, eligible files are copied compressed.
 #   Reused bytes are not checked against their CRC: damage inside the old IPA carries over. Use --no-reuse or delete <out.ipa>.idx to rebuild
 import argparse, collections, concurrent.futures as cf, ctypes, json, os, stat, struct, sys, time, zipfile, zlib
@@ -222,9 +223,9 @@ def load_index(out):   # (the old IPA opened, its index) when <out>.idx describe
     return None
 
 
-def fingerprint(e, deflate):
+def fingerprint(e, deflate, pieces=False):   # pieces: a streamed file deflated in PIECE pieces, which one thread does not reuse (nor more threads one stream's member)
     st = e.st
-    return [st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino, deflate]
+    return [st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino, 'pieces' if pieces else deflate]
 
 
 def match(e, row, info, old, idx, apfs):   # one header comparison for both the kept run and later compressed copies
@@ -282,7 +283,7 @@ def main():
     apfs = {root: fs_type(root) == b'apfs' for root in {src for _, src in maps}}
     disabled = '; '.join(f'reuse off for {arc}: not APFS' for arc, src in maps if not apfs[src])
     flags = [not e.name.lower().endswith(store) if store else True for e in es]   # each file's deflate flag
-    files = {e.name: fingerprint(e, f) for e, f in zip(es, flags) if e.st and stat.S_ISREG(e.st.st_mode)}
+    files = {e.name: fingerprint(e, f, f and threads > 1 and e.st.st_size > BIG) for e, f in zip(es, flags) if e.st and stat.S_ISREG(e.st.st_mode)}
     part, tmp, ipart = a.out + '.partial', a.out + '.clone', a.out + '.idx.partial'
     for path in (part, tmp, ipart):
         if os.path.lexists(path): os.unlink(path)

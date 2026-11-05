@@ -82,9 +82,9 @@ class Pieces(unittest.TestCase):
         self.maps = [f'Payload/DmIOS.app/romfs={rom}', f'Payload/DmIOS.app={app}']
         self.calls = collections.Counter()
 
-    def run_pack(self, name, *opts, env=None, module=pack, stream=None):
+    def run_pack(self, name, *opts, env=None, module=pack, stream=None, reuse=False):   # reuse: a repeat pack as on APFS (fclonefileat stood in for by a copy)
         out = self.tmp / name
-        argv = ['pack_ipa', str(out), '--no-reuse', '--store', '.store', *opts, *self.maps]
+        argv = ['pack_ipa', str(out), *([] if reuse else ['--no-reuse']), '--store', '.store', *opts, *self.maps]
         real = pack.piece
         def counted(b, zdict, last):
             self.calls['pieces'] += 1; self.calls['last'] += last; return real(b, zdict, last)
@@ -94,7 +94,10 @@ class Pieces(unittest.TestCase):
             for key, value in (('BIG', BIG), ('CHUNK', 4096)): stack.enter_context(patch.object(module, key, value))
             if module is pack: stack.enter_context(patch.object(pack, 'PIECE', self.piece)); stack.enter_context(patch.object(pack, 'piece', counted))
             if stream: stack.enter_context(patch.object(module.Zip, 'stream', stream))
-            stack.enter_context(patch.object(sys, 'argv', argv)); stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            if reuse:
+                stack.enter_context(patch.object(module, 'fs_type', lambda root: b'apfs'))
+                stack.enter_context(patch.object(module, 'clone', lambda old, dst: shutil.copyfile(old.name, dst) and True))
+            stack.enter_context(patch.object(sys, 'argv', argv)); self.said = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             module.main()
         for suffix in ('.partial', '.clone', '.idx.partial'): self.assertFalse(Path(str(out) + suffix).exists())
         return out
@@ -155,6 +158,19 @@ class Pieces(unittest.TestCase):
         ref = self.run_pack('old.ipa', module=old).read_bytes()
         self.assertEqual(self.run_pack('env.ipa', env='1').read_bytes(), ref)
         self.assertEqual(self.calls['pieces'], 0)
+
+    def test_a_repeat_pack_keeps_a_streamed_file_only_in_its_mode(self):   # the index row of a file above BIG says whether it was deflated in pieces
+        fresh = {n: self.run_pack(f'fresh{n}.ipa', '--threads', n).read_bytes() for n in ('1', '4')}
+        for first, then in (('4', '1'), ('1', '4'), ('4', '4'), ('1', '1')):
+            with self.subTest(first=first, then=then):
+                name = f'r{first}{then}.ipa'; self.run_pack(name, '--threads', first, reuse=True)
+                out = self.run_pack(name, '--threads', then, reuse=True)
+                self.assertEqual(out.read_bytes(), fresh[then], 'a repeat pack writes what a fresh pack in its mode writes')
+                kept = int(next(ln for ln in self.said.getvalue().splitlines() if ln.startswith('pack: keeping')).split()[2])
+                with zipfile.ZipFile(out) as z: members = z.start_dir
+                if first == then: self.assertEqual(kept, members, 'an unchanged file is kept in its own mode')
+                else: self.assertTrue(0 < kept < members, 'files at or below BIG are still kept; the streamed ones are packed again')
+        self.check(self.tmp / 'r41.ipa')
 
     def test_bad_thread_counts_stop(self):
         for opts, env in (((), 'x'), ((), '0'), ((), '-2'), (('--threads', '0'), None)):
