@@ -575,7 +575,7 @@ class Default(unittest.TestCase):
                                  're': re, 'BuildError': RuntimeError}
                         exec(block, scope)
                         want = explicit or setting or devices or expected   # the devices' archive for every game, whatever its profile
-                        if device and not (explicit or setting) and want != 'none': want = {'iphone': 'g19p', 'ipad': 'g16g'}[device]   # --device: that device's GPU alone
+                        if not (explicit or setting) and want != 'none': want = {'iphone': 'g19p', 'ipad': 'g16g', '': 'g19p,g16g'}[device]   # the GPUs the build is for, never another family's
                         self.assertEqual(scope['gpus'], want)
                         self.assertEqual(scope['ipa_env']['DM_DEVICE_FAMILY'], {'iphone': '1', 'ipad': '2', '': '1,2'}[device])
 

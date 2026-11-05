@@ -73,7 +73,8 @@ SEEN_SHADERS = False                    # PLATFORM 'mac' / 'mac-app': build only
 PSO_GPUS = ''                           # NVN games: GPU architectures the app gets the shader pairs' pipeline bases for, made on this Mac (metal-tt, comma-separated: 'g18p' = A19 / A19 Pro of the iPhone 17 family;
                                         #   another device's name is in its log when the app has none for it), so the device does not build them on its first start; each adds about 650 MB to the app (Breath of the Wild) and minutes to a first build; 'none' = no archive;
                                         #   empty = by the game's profile: its pso_gpu key (whitespace-separated architectures, joined with commas) when it sets pso_mtl4 on (the Metal 4 path, the only one that reads the archive on iOS, is on for it),
-                                        #   else 'g18p' for a game without the key, and 'none' without pso_mtl4 on
+                                        #   else 'g18p' for a game without the key, and 'none' without pso_mtl4 on. An archive the rule makes is then made for the GPUs of the devices this build is for
+                                        #   instead (DEVICE: g19p, g16g, both for both): another family's archive crashed Metal 4 (13 Sentinels on an A20 with g18p). Only PSO_GPUS / --gpu name others
                                         #   PLATFORM 'mac-app': the Mac app's archive (Resources/pso), empty = this Mac's GPU (e.g. 'g14s' for an M2 Max), 'none' = the app builds its bases on its first start
 DEVICE_GPUS = ''                        # the GPUs of the iPhone and iPad this build is for, as their MTLDevice.architecture names them: 'g19p,g16g' = the A20 Pro (iPhone 18 Pro Max) and the M4
                                         #   (iPad Pro; an M4 logs applegpu_g16g). Set, and with --gpu / PSO_GPUS empty, every NVN game's iOS app gets its pipeline archive made offline for these,
@@ -3260,12 +3261,19 @@ def main(args=None):
     device = (args.device or DEVICE or 'both').lower()
     if device not in ('iphone', 'ipad', 'both'): raise BuildError(f'--device / DEVICE takes iphone, ipad or both: {device}')
     ipa_env['DM_DEVICE_FAMILY'] = {'iphone': '1', 'ipad': '2'}.get(device, '1,2'); ipa_env['SETTINGS_DEVICE'] = device
-    if device != 'both':
-        say(f'device: {"iPhone" if device == "iphone" else "iPad"} only (the app installs on that device family alone)')
-        if not (args.gpu or PSO_GPUS).strip() and gpus != 'none' and gpus != DEVICE_ARCH[device]:   # an archive is made: for this device's GPU alone, not every GPU the rule names
-            say(f'pipeline archive: {DEVICE_ARCH[device]}, this device\'s GPU, instead of {gpus} (--gpu names others)'); gpus = DEVICE_ARCH[device]
+    if device != 'both': say(f'device: {"iPhone" if device == "iphone" else "iPad"} only (the app installs on that device family alone)')
+    # A pipeline archive holds one GPU family's compiled pipelines, and an archive for another family than the device's is worse than none: 13 Sentinels: Aegis Rim (US 1.10)
+    # crashed in Metal 4 on an iPhone 18 Pro Max (A20 Pro, g19p) with the default g18p (A19) archive and ran with a g19p one (dm/games/01003FC01670C000/README.md). So the archive
+    # the rule makes (DEVICE_GPUS, the profile's pso_gpu, or g18p for pso_mtl4 on) is made for the GPUs of the devices this build is for, and only --gpu / PSO_GPUS name others
+    targets = DEVICE_ARCH[device] if device != 'both' else ','.join(DEVICE_ARCH.values())
+    explicit = (args.gpu or PSO_GPUS).strip()
+    if not explicit and gpus != 'none' and gpus != targets:
+        say(f'pipeline archive: {targets}, the GPUs this build is for, instead of {gpus} (an archive for another GPU family crashed Metal 4; --gpu names others)'); gpus = targets
+    elif explicit and gpus != 'none':
+        others = [x for x in gpus.split(',') if x.removeprefix('applegpu_') not in targets.split(',')]
+        if others: say(f'[RED] pipeline archive for {",".join(others)}, a GPU this build is not for ({targets}): an archive for another GPU family than the device\'s crashed Metal 4 (13 Sentinels: Aegis Rim on an A20)')
     ipa_env['DM_PSO_GPUS'] = gpus
-    if gfx == 'nvn': say(f'pipeline archive: {"none, the device builds the bases on its first start if it takes the Metal 4 path (--gpu g18p builds one)" if gpus == "none" else gpus + " (made on this Mac with metal-tt; --gpu none leaves it out)"}')
+    if gfx == 'nvn': say(f'pipeline archive: {"none, the device builds the bases on its first start if it takes the Metal 4 path (--gpu g19p builds one)" if gpus == "none" else gpus + " (made on this Mac with metal-tt; --gpu none leaves it out)"}')
     if show_fps: say('frame-rate counter: on (DM_SHOW_FPS=0 in the app\'s Documents/env.txt turns it off)')
     if programs:   # one app holding every program of the game (build_ipa.sh PROGRAMS_TSV)
         tsv = work / 'ipa_programs.tsv'; ipa_env['PROGRAMS_TSV'] = str(tsv)
