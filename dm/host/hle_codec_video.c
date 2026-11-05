@@ -327,20 +327,16 @@ static int cv_hold(cv_dec *d, vpx_image_t *c, int64_t ts) {   // a decoded pictu
 static vpx_image_t *nv12_to_i420(const uint8_t *nv12, unsigned w, unsigned h) {   // VideoToolbox's NV12 as the I420 the pool keeps
     vpx_image_t *c = vpx_img_alloc(NULL, VPX_IMG_FMT_I420, w, h, 1); if (!c) return NULL;
     for (unsigned y = 0; y < h; y++) memcpy(c->planes[0] + (size_t)y * c->stride[0], nv12 + (size_t)y * w, w);
-    const uint8_t *uv = nv12 + (size_t)w * h;
-    for (unsigned y = 0; y < (h + 1) / 2; y++) for (unsigned x = 0; x < (w + 1) / 2; x++) {
-        c->planes[1][(size_t)y * c->stride[1] + x] = uv[(size_t)y * w + 2 * x];
-        c->planes[2][(size_t)y * c->stride[2] + x] = uv[(size_t)y * w + 2 * x + 1]; }
+    const uint8_t *uv = nv12 + (size_t)w * h; int neon = md_neon();
+    for (unsigned y = 0; y < (h + 1) / 2; y++) md_uv_split(uv + (size_t)y * w, c->planes[1] + (size_t)y * c->stride[1], c->planes[2] + (size_t)y * c->stride[2], (int)((w + 1) / 2), neon);
     return c;
 }
 static vpx_image_t *av1_to_i420(const mav1_picture *p) {   // the decoder's NV12, rows at its strides, as the I420 the pool keeps
     vpx_image_t *c = vpx_img_alloc(NULL, VPX_IMG_FMT_I420, (unsigned)p->w, (unsigned)p->h, 1); if (!c) return NULL;
     c->cs = p->matrix == 2 ? VPX_CS_BT_709 : p->matrix == 5 ? VPX_CS_BT_2020 : VPX_CS_BT_601; c->range = p->full_range ? VPX_CR_FULL_RANGE : VPX_CR_STUDIO_RANGE;
     for (int y = 0; y < p->h; y++) memcpy(c->planes[0] + (size_t)y * c->stride[0], p->y + (size_t)y * p->ystride, (size_t)p->w);
-    for (int y = 0; y < (p->h + 1) / 2; y++) {
-        const uint8_t *uv = p->uv + (size_t)y * p->uvstride; uint8_t *u = c->planes[1] + (size_t)y * c->stride[1], *v = c->planes[2] + (size_t)y * c->stride[2];
-        for (int x = 0; x < (p->w + 1) / 2; x++) { u[x] = uv[2 * x]; v[x] = uv[2 * x + 1]; }
-    }
+    int neon = md_neon();
+    for (int y = 0; y < (p->h + 1) / 2; y++) md_uv_split(p->uv + (size_t)y * p->uvstride, c->planes[1] + (size_t)y * c->stride[1], c->planes[2] + (size_t)y * c->stride[2], (p->w + 1) / 2, neon);
     return c;
 }
 // One packet: decoded at once; its pictures wait for released buffers (end of stream marks the last one, or comes as a buffer of its own)
