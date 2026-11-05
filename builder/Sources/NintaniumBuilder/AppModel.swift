@@ -354,7 +354,8 @@ final class AppModel {
     func checkTools() async -> [(String, Bool, String)] {
         var out: [(String, Bool, String)] = []
         for (name, tool, args) in [("Git", "git", ["--version"]), ("Python", settings.python, ["--version"]), ("XcodeGen", "xcodegen", ["--version"]),
-                                   (".NET SDK", "dotnet", ["--version"]), ("Xcode", "xcodebuild", ["-version"]), ("devicectl", "xcrun", ["devicectl", "--version"])] {
+                                   (".NET SDK", "dotnet", ["--version"]), ("zstd", "zstd", ["--version"]), ("glslang", "glslangValidator", ["--version"]),
+                                   ("Xcode", "xcodebuild", ["-version"]), ("devicectl", "xcrun", ["devicectl", "--version"])] {
             let r = await Shell.run(tool, args)
             out.append((name, r.ok, r.ok ? (r.stdout + r.stderr).split(separator: "\n").first.map(String.init) ?? "" : "not found"))
         }
