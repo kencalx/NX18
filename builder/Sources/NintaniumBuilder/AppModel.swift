@@ -245,10 +245,10 @@ final class AppModel {
         if let x = m.firstMatch(of: #/^done: (.+\.ipa) \(/#) { g.lastIPA = String(x.1) }
         if let x = m.firstMatch(of: #/^game project: (.+)$/#) { g.lastProject = String(x.1) }
         if let x = m.firstMatch(of: #/^Xcode derived data: (.+)$/#) { g.lastDerivedData = String(x.1) }
-        if let x = m.firstMatch(of: #/^app name: .*; bundle ID: ([^;\s]+)/#) { g.lastBundleID = String(x.1) }   // every iOS build's, whatever the game files' mode
+        if m.hasPrefix("==== program ") { laterProgram = true }   // another program of the game: its own lines (app name, cheats) are not the app's
+        if !laterProgram, let x = m.firstMatch(of: #/^app name: .*; bundle ID: ([^;\s]+)/#) { g.lastBundleID = String(x.1) }   // every iOS build's, whatever the game files' mode; program 0's is the app's
         if let x = m.firstMatch(of: #/push_romfs\.sh <device UDID> \S+ "(.+)"/#) { g.lastGameData = String(x.1) }
         // game_mods.py pack_cheats: "cheats: <build ID>.txt (this version): ...", main's build ID; program 0's only, when a game of several programs packs each (its own lines come first)
-        if m.hasPrefix("==== program ") { laterProgram = true }
         if !laterProgram, g.lastCheatBuild == nil, let x = m.firstMatch(of: #/^mods: cheats: ([0-9A-Fa-f]{16})\.txt \(this version\)/#) { g.lastCheatBuild = String(x.1).uppercased() }
         if g.gameData == .bundle, m.hasPrefix("done:") || m.hasPrefix("ready:") { g.lastGameData = nil }
     }
