@@ -17,7 +17,8 @@ import romfs_image
 
 GAME = '010015100B514000'
 SCRIPT = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
-SIGNING = SCRIPT[SCRIPT.index('# The entitlements of an unsigned IPA'):SCRIPT.index('\nP=Payload/DmIOS.app\n')]
+ENT_DEFAULT = next(line for line in SCRIPT.splitlines() if line.startswith('ENT_DEFAULT='))   # the default entitlements, defined once above for the Xcode project and the IPA alike
+SIGNING = ENT_DEFAULT + '\n' + SCRIPT[SCRIPT.index('# The entitlements of an unsigned IPA'):SCRIPT.index('\nP=Payload/DmIOS.app\n')]
 PACKING = SCRIPT[SCRIPT.index('\nP=Payload/DmIOS.app\n'):]
 PREAMBLE = 'set -u\nt() { :; }; die() { echo "$*" >&2; exit 1; }\ngp() { python3 "$PROFILE_TOOL" "$GAME" "$1"; }\n'
 CAN_SIGN = sys.platform == 'darwin' and shutil.which('codesign') and shutil.which('cc')

@@ -345,7 +345,7 @@ class NspScript(unittest.TestCase):
         (self.root / 'game/mods').mkdir(parents=True)
         self.assertEqual(self.nsp.mods_folder(args, self.root / 'game'), self.root / 'game/mods', 'the folder named mods beside the game\'s files')
         self.assertIsNone(self.nsp.mods_folder(self.nsp.parse_args(['x', '--no-mods']), self.root / 'game'))
-        self.assertEqual(self.nsp.mods_folder(self.nsp.parse_args(['x', '--mods', str(self.mods)]), self.root / 'game'), self.mods)
+        self.assertEqual(self.nsp.mods_folder(self.nsp.parse_args(['x', '--mods', str(self.mods)]), self.root / 'game'), self.mods.resolve())   # resolved: on macOS the temporary folder is under /var, a link to /private/var
         with self.assertRaises(self.nsp.BuildError): self.nsp.mods_folder(self.nsp.parse_args(['x', '--mods', str(self.root / 'missing')]), self.root)
 
 
