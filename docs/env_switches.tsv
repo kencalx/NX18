@@ -28,6 +28,7 @@ DM_DETCLOCK	switch	`=<step ns>`: from the first present on, the guest clock adva
 DM_DETCLOCK_PACE	switch	`=1` with `DM_DETCLOCK`: each frame takes at least one clock step of wall time, so background loading keeps up with the fixed clock (used by the screenshot gate)
 DM_DEVICE_FAMILY	switch	`build_ipa.sh`: the devices the app installs on (`TARGETED_DEVICE_FAMILY`): `1` iPhone, `2` iPad, `1,2` both (the default); the NSP script sets it from `--device`
 DM_DISPLAY_NAME	switch	Overrides the iOS app's name in `build_ipa.sh` (default the game name in the base NSP's control data)
+DM_DRAWABLE_SHADER_ACCESS	diagnostic	`1` makes the iPhone and iPad game layer's drawables readable and writable by shaders (`framebufferOnly` NO, the old behaviour), for an A/B of the present or a diagnostic that reads a drawable; unset, they are render targets only, as on the Mac (`front_ios.m`; `nvn_mtl.m` logs the drawable's usage once)
 DM_DYNAMIC_RESOLUTION	player	`1` lets NieR:Automata 1.0.3's own dynamic resolution scale between 70 and 100 %, `0` (default) keeps full resolution; only on the builds whose patches.py names the DYNAMIC_RESOLUTION capability (`hle_fpslock.c` `k_nier_dr`). The launcher's Dynamic resolution
 DM_EMBED_TAG	path	Set by the iOS app of a game of several programs: the tag of the running program's embedded sections (`p<N>`, `gen_embed.py --tag`)
 DM_ENTITLEMENTS	path	`=<plist>` gives a prepared Xcode project another entitlements file instead of the default one (Increased Memory Limit and Extended Virtual Addressing; a free Personal Team gives one without the second), and the ad-hoc signature of the unsigned IPA's executable carries them; empty means no entitlements
@@ -75,6 +76,7 @@ DM_HOME_QUIT_TEXT	switch	The texts of the Home button's quit prompt in the playe
 DM_HTML	path	Folder of the offline HTML pages (default: `html` beside the RomFS)
 DM_ICON	path	`=<image>` gives `build_ipa.sh` another app icon (default the `icon.jpg` beside the RomFS)
 DM_IMPORTS	diagnostic	When set, logs each import the loader binds to a host function and each forced takeover
+DM_IPA_LOCK	switch	`build_ipa.sh` (IPA mode): `0` builds without the checkout's build lock. Normally a second IPA build in the same checkout waits from generating `dm/ios/Gen` to the end of xcodebuild, and says which game holds `dm/ios/.ipa-build.lock` (its log line starts "waiting for another IPA build"). On by default; a volume without flock(2) builds without it and says so
 DM_JIT_CAPTURE	path	Folder the Mac host writes what a game's `nn::jit` plugin makes to, one `<key>.jit` per request, for `dm/tools/jit_capture.py`; the NSP script sets it
 DM_JIT_LOG	diagnostic	`1` logs every `nn::jit` `GenerateCode` request
 DM_JIT_MISS_DUMP	diagnostic	Folder for the input of each `nn::jit` request a served image lacks
@@ -226,7 +228,8 @@ DM_OODLE_JOB	path	`=<job file>`: the host runs the game's own Oodle decoder on e
 DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads when `shader_split.py` decodes Trinity packs; set by the NSP script
 DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout with the game's own Oodle (or LZ5) decoder from the guest main thread before the SDK starts, until stdin ends
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
-DM_PACKED_CHEATS	path	Folder of cheat files `build_ipa.sh` packs into the app as `dm/cheats` (the NSP script sets it from the game's mods folder, `dm/tools/game_mods.py`); the iOS app copies them into `Documents/cheats` at its first start, keeping a file already there
+DM_PACKED_CHEATS	path	Folder of cheat files `build_ipa.sh` packs into the app as `dm/cheats` (the NSP script sets it from the game's mods folder, `dm/tools/game_mods.py`); the iOS app copies each into `Documents/cheats` at each start when that folder does not have it, keeping a file already there (a packed file the player deletes comes back at the next start)
+DM_PACK_THREADS	switch	`=<N>` sets the threads `dm/ios/tools/pack_ipa.py` reads and deflates files with (default one per core; its `--threads N` option overrides it); `1` deflates each file above 256 MB in one stream on the writing thread instead of in 16 MB pieces on all threads, and writes the same archive, byte for byte, as before the pieces
 DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
 DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the module base for a long text (`BIG_TEXT`); set only by the rewriter's own rerun with the size it needs
 DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives player 1's six-axis sensor: `auto` (default) while no controller supplies fresh motion, `1` phone only, `0` never; each source keeps its own orientation
@@ -235,7 +238,7 @@ DM_PREEMPT	switch	`0` / `1` overrides the profile's `core_preempt`: also check a
 DM_PRELOAD	diagnostic	Set: on the Mac, runs the host's early background loading (`dm_host_preload_start`) as the iOS app does, to exercise that path
 DM_PRESENT_FIFO	switch	`0` makes the display link take the newest queued frame each tick, as before; by default it shows frames in order, at most one tick behind
 DM_PRESENT_HZ	switch	`=<N>`: the frequency of presentation pacing (default 60); `0` means no frame limit and is for performance profiling only
-DM_PRESENT_INTERVAL	switch	`display` presents one frame per display-link tick whatever interval the game sets; `game` follows the game's present interval (default: the profile's `present_interval`)
+DM_PRESENT_INTERVAL	player	`display` presents one frame per display-link tick whatever interval the game sets; `game` follows the game's present interval (default: the profile's `present_interval`); the launcher's Frame rate (`game` 30 fps, `display` 60 fps) for a game whose profile sets `present_interval_choice on`
 DM_PRESENT_LATENCY	switch	`=1` or `2`: overrides the display link's preferred frame latency for every screen and window mode; larger positive values use 2 (default 2 in variable-refresh fullscreen, 1 otherwise)
 DM_PRESENT_LINK	switch	Present pacing: `0` acquires the drawable itself, `1` (the default) presents on a 60 Hz display link, `2` uses a 120 Hz display link with a frame every other tick
 DM_PRESENT_SNAP	player	`=<n>`: present snapshots, a ring of n host textures (2 to 4; `1` = 2) the presents are copied to so the game's swapchain texture is free at once; `0` off (default: the profile's `present_snap`)
@@ -259,7 +262,7 @@ DM_PROGRAMS	path	Table of a game's programs on the Mac (`programs.tsv`: index, h
 DM_PROGRAM_ID	switch	`=<hex>`: the program ID the host reports from `svcGetInfo(ProgramId)` (default: the profile's `program_id`)
 DM_PSO_ARCHIVE	path	The folder of the per-game Metal 4 pipeline archive of pipeline bases (default `pso_archive/` beside `pso_user.tsv`); `off` keeps no archive
 DM_PSO_BUNDLE	path	The pipeline archive made offline (`<GPU architecture>.mtl4a`, `prebuilt.tsv`), read only; the iOS app and Mac launcher set it to their `pso/` folder; `off` ignores it
-DM_PSO_GPUS	switch	`build_ipa.sh`: the GPU architectures, comma-separated, to build the offline pipeline archive for (`none` builds none); unset, a profile with `pso_mtl4 on` gets its `pso_gpu` list or `g18p` when absent; profiles with `pso_mtl4 off` get none
+DM_PSO_GPUS	switch	`build_ipa.sh`: the GPU architectures, comma-separated, to build the offline pipeline archive for (`none` builds none); unset, a profile with `pso_mtl4 on` gets the archive for the GPUs of the devices the app is for (`DM_DEVICE_FAMILY` `1`: `g19p`, `2`: `g16g`, `1,2` or unset: both, as the NSP script makes it; the profile's `pso_gpu` key is not used); profiles with `pso_mtl4 off` get none
 DM_PSO_HYBRID	switch	`0`: a draw whose pipeline is not built yet waits for it instead of drawing with its shader pair's pulling pipeline meanwhile (on by default with the Metal 4 path)
 DM_PSO_IOS_MIN	switch	`build_ipa.sh`: the minimum iOS version of the offline pipeline archives (default the SDK's major version); a device of another major version cannot open them and builds the bases itself
 DM_PSO_MANIFEST	path	The prewarm manifest to use instead of the profile's `pso_manifest.tsv`; `off` turns the prewarm off
@@ -351,7 +354,7 @@ DM_TOUCH_HAPTICS	player	`0` turns off the light haptic tap when a touch control 
 DM_TOUCH_LOG	diagnostic	`=1` logs each touch-screen read with touch points (sample, finger, position, attributes) and each gesture entry, up to 500 lines
 DM_UDC_SELFTEST	diagnostic	`=1` runs a start-up check of DontCare load and store on private depth-stencil and RGBA8 textures (clear, Load + DontCare, read back) and logs one result line
 DM_UE_SHADERS	path	Folder of the Unreal shader code archives decoded by `uepak.py`, for `shader_split.py` (default `ue_shaders` beside the RomFS); needed when the RomFS has Unreal paks
-DM_UE_TEXTURE_POOL	switch	Megabytes Unreal's texture streaming pool (`r.Streaming.PoolSize`) is raised to, overriding the profile's `ue_texture_pool`; `0` keeps the game's own pool. On iOS only this switch turns it on (`Documents/env.txt`)
+DM_UE_TEXTURE_POOL	switch	Megabytes Unreal's texture streaming pool (`r.Streaming.PoolSize`) is raised to, overriding the profile's `ue_texture_pool`; `0` keeps the game's own pool. On iOS the profile's pool applies only when at least the pool plus 2048 MB is left before the memory limit at the game's first present (`hle_uecvar.c`); this switch (`Documents/env.txt`) sets it whatever the room
 DM_UPSCALER	player	`metalfx` draws the game's own upscaler shaders (agl's NDSR network, found by the shader map) with MetalFX's spatial scaler; `game` (the default) runs them
 DM_VK_CAPTURE	path	`=<dir>` (Mac) writes every SPIR-V module the game creates to `<dir>/<key>.spv`; the NSP script's Vulkan shader capture stage sets it
 DM_VK_LOG	diagnostic	`=1` logs Vulkan object creation in the Vulkan-on-Metal layer

@@ -56,6 +56,22 @@
 - **Fix:** count uncompressed bytes as they are read and compare them with the listed size before completing either streamed method. A mismatch stops the pack and removes the partial archive, preserving the previous IPA and its reuse index. Regression tests cover growth and shrinkage with both deflate and store.
 - **Found on:** synthetic IPA inputs while reviewing [PR #279](https://github.com/seedds/nxnative/pull/279); no game files required.
 
+### A RomFS image is deflated on one core
+
+- **Symptom:** the IPA pack stage of a game packed with its RomFS takes minutes for `romfs.img` alone, on one core, while the other cores wait (Breath of the Wild: 10.9 minutes for its 14 GB image).
+- **Cause:** `pack_ipa.py` streamed every file above `BIG` (256 MB) through one `compressobj` on the writing thread; only the smaller files went through the thread pool. Since the extraction writes the RomFS as one image (`nx_extract --romfs-image`), the whole RomFS is one such file.
+- **Fix:** a streamed file is deflated on the pool too, in 16 MB pieces (`PIECE`), pigz's method: each piece's raw compressor takes the 32 KiB before it as its dictionary (`zdict`) and ends with `Z_SYNC_FLUSH`, the last with `Z_FINISH`, so the pieces join into one standard deflate stream. The writing thread keeps the CRC and writes the pieces in order, with at most two per thread in flight. The archive stays within about 0.02 % of one compressor's size, and is the same for any number of threads above one. `--threads N` or `DM_PACK_THREADS=N` sets the threads; `1` is the old single stream, and writes the old archive byte for byte. On a 4-vCPU Linux VM a 448 MB mixed image packed in 3.4 s instead of 11.7 s; not measured on a Mac yet.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) (its pack time, measured before this fix), in a review of the build's time.
+- **Check:** `dm/tools/tests/test_pack_ipa_parallel.py`: the pieces read back and test clean, also with pieces smaller than deflate's window; one thread writes the old script's archive byte for byte; the pieces in flight are bounded; a source that changes size while streamed in pieces still stops the pack.
+
+### Two IPA builds at once in one checkout
+
+- **Symptom:** xcodebuild fails on missing `Gen/` files, or an IPA carries another game's embedded modules, tables or `Info.plist`, after two IPA builds ran at the same time from one checkout (several folders dropped on the Drag Here droplet, or the Builder and a Terminal).
+- **Cause:** in IPA mode every game's build writes the same `dm/ios/Gen` (its modules, tables, launcher settings, icon and `Info.plist`) and `dm/ios/DmIOS.xcodeproj`: a second build deleted and regenerated `Gen/` under the first one's xcodebuild. The droplet started one build per dropped folder, all at once.
+- **Fix:** `build_ipa.sh` takes a checkout-wide lock, `flock(2)` on `dm/ios/.ipa-build.lock` (`ipa_lock`), from generating `Gen/` to the end of xcodebuild; a second build waits, and its log says `waiting for another IPA build in this checkout ...` and names the game that holds the lock. The lock goes with the build's shell, at any exit; xcodebuild, `pso_offline.py` and git run without its file descriptor, so a process they leave behind cannot keep it. `DM_IPA_LOCK=0` builds without it, and a volume without flock builds without it and says so. Signing and packing run after the lock is released. The droplet now builds the folders dropped together one after another in one Terminal window (`make_drag_here.sh`).
+- **Found on:** no particular game: found in review.
+- **Check:** `dm/tools/tests/test_drop_build.py`: `IpaBuildLock` runs the real function in two bash processes (the order, the waiting line naming the holder, a killed holder releasing the lock, `DM_IPA_LOCK=0`, the fallback without flock, where the lock is taken and released, the lock file ignored by git); `DragHere` checks the generated AppleScript's one `do script` and its escaped checkout path, with `osacompile` stubbed.
+
 ## RomFS images
 
 ### RomFS folder transfers fail or leave stale game files

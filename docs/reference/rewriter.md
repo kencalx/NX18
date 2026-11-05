@@ -364,6 +364,14 @@ To enroll a cut for any game's own module:
 - **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) `main` (its AngelScript call bridges).
 - **Check:** of the 22 games' modules on hand only this `main` has the form (6 sites), so every other rewrite is byte-identical.
 
+### Counter reads into x18
+
+- **Symptom:** none seen; a timer or tick conversion that reads garbage or a stale value, in a function that reads the counter into `x18`.
+- **Cause:** `dm_gate` writes back the guest's x0–x28 but not x18 (`entry.S`: Apple's platform register; the guest's x18 lives in thread slot K18), so the gated `mrs x18, cntpct_el0` / `cntvct_el0` (upstream) and `mrs x18, cntfrq_el0` (since the rule that gives the guest's counter frequency, 9810ff82) left the guest's x18 at its old value.
+- **Fix:** `mrs x18, cntfrq_el0` is an x18 site again (`site_plain`: Apple's 24 MHz into K18, as before the cntfrq rule). `cntpct` / `cntvct` into x18 go through the gate with x16: the block saves x16 / x17 below its push, the gate writes x16, and the block stores it into K18 before it restores them (`site_gate`). An `svc` keeps its plain block: its argument is its number, not a register.
+- **Found on:** no game yet: found in review.
+- **Check:** `dm/tools/tests/test_counter_gates.py` runs the real rewriter's blocks against a model of `dm_gate`: a counter read into x18 reaches K18, `cntfrq` into x18 stays an x18 site, another register and `svc #0x12` are unchanged. A module with no such read is rewritten byte-identical.
+
 ### System register reads that macOS traps
 
 - **Symptom:** SIGILL / trap on a system register read.
