@@ -157,6 +157,7 @@ Kept, because they stay on the device and help when something goes wrong:
 These changes were written and checked on Linux, not on a Mac:
 
 - **Tested:** the Python side (mods folder, patch formats, game-data overlay, cheat packing, the switchable mods' selection, byte diff and packed pages, the build script's new stages, settings and docs checks) passes NXNative's test suite and the new tests in `dm/tools/tests/test_game_mods.py` and `test_gen_embed_variants.py`.
+- **Run on a device (reported, 2026-11-05):** Luigi's Mansion 3 with an ultrawide mod's Ultrawide toggle and Persona 5 Royal's Frame rate 60 on an iPhone 18 Pro Max; the Stretch and Automatic upscaling options, and both memory entitlements (`boot: memory:`).
 - **Not compiled here:** the boot memory line (`main.m`), Nintanium Builder (the Mac app in `builder/`), the Objective-C, C and Swift changes (Stretch, the Cheats menu, the High frame rate and Ultrawide toggles in the loader and front end, the default cheats folder, the Metal 4 and texture pool defaults, the Swift 6 language mode), the Xcode project changes (iOS 27 minimum, `-O2`, `-mcpu=apple-m4`) and the shaders compiled for iOS 27 in Metal 4.1, all of which need Xcode. Check them with a build on your Mac before relying on them.
 - **Not measured:** the speed-ups. They follow from what the code does, but no frame times were taken on an iPhone 18 Pro Max or an M4 iPad.
 

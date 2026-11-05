@@ -65,6 +65,7 @@ A deferred renderer: the scene draws into a G-buffer of two integer targets (R32
 
 ## Found on this game
 
+- **Switchable mods on the iPhone** (Ultrawide from the mods folder, `loader.c` `dm_mod_variants_apply`): the first build stopped at start (`FATAL main vm_remap … → main+0x64000 failed: 2`), since iOS keeps code pages mapped from the app's signed text permanent; the loader now holds a switchable mod's pages back at load and maps one page into each at start. With that, an ultrawide mod ran on an iPhone 18 Pro Max (2026-11-05, as the player reported).
 General host changes first needed here; each applies to every game:
 
 - **Single texture binds recorded in the hardware's layout** (`OP_BIND_TEX1`, `p_bind_tex1`, `bind_rec`): [Recorded commands patched in place by the game (`OP_BIND_TEX1`)](../../../docs/reference/nvn-objects.md#recorded-commands-patched-in-place-by-the-game-op_bind_tex1).
