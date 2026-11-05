@@ -92,6 +92,21 @@ Every build, whether the Xcode project or the unsigned IPA, asks for **Increased
 
 An Apple Developer Program team provisions both; a free Personal Team only the first (build with `DM_ENTITLEMENTS=<plist>` holding Increased Memory Limit alone, which Nintanium Builder does when its paid-account setting is off). The log's `boot: memory:` line shows that both are in effect on the device: how much RAM iOS allows the app, and whether an 8 GB address reservation succeeds. The games' memory layouts are their profiles' own, tested within 5 GB, so a game uses more address space only where its profile asks for it.
 
+### Drag Here: build by dropping a folder
+
+`scripts/make_drag_here.sh` makes **Drag Here.app** on your Desktop. Drop a game's folder on it and Terminal opens and runs the build. The folder holds the game's NSPs, and can also hold its `mods` folder and `prod.keys`.
+
+The build it runs:
+```
+python3 scripts/build_ipa_from_nsp.py "<folder>" -k "<keys>" --device iphone
+```
+- **The keys** are the first one found: `prod.keys` in the folder, beside it, in `~/.switch/`, or one other `.keys` file in the folder.
+- **The mods folder** is packed in as usual.
+- **The window stays open** at the end so you can read the result.
+- **Other devices:** `scripts/make_drag_here.sh ipad` makes an iPad droplet, and `both` makes one for iPhone + iPad builds.
+
+The first drop asks to let it control Terminal: allow it. The droplet runs the build from your `~/Nintanium` checkout, so pulling the repository updates what it runs. `scripts/drop_build.sh "<folder>"` does the same from Terminal.
+
 ### iPhone or iPad builds
 
 `--device iphone` or `--device ipad` (`DEVICE` in Spyder) builds an app for that device family only. When the build makes a pipeline archive (the GPU's own compiled shaders), it makes it for that device's GPU alone: the A20 Pro (`g19p`) or the M4 (`g16g`), rather than every GPU the default rule names. The Metal shader libraries are the same for every iOS device, so there is no other per-device shader output. An iPad build leaves out the Ultrawide toggle. Without `--device`, one app serves both, as before.
