@@ -749,6 +749,15 @@ class SplitShaders(Base):
         with self.assertRaisesRegex(nsp.BuildError, 'differ from game profile'): self.go(g, own=False)   # a failed check is not reused
         self.assertEqual(self.splits, 3)
 
+    def test_romfs_mods_key_the_split(self):   # a mod's file of the same size leaves the RomFS's names and sizes as they were: apply_mods' <ver>.romfs.key counts too
+        for n in self.NAMES[:3]: (self.src / n).write_text(self.table(n))
+        g = game.Game(self.src); rk = self.tmp / 'v0.romfs.key'; rk.write_text('mods A\n'); mods = (('files', [rk]),)
+        go = lambda extra=(): nsp.split_shaders(sys.executable, self.repo, [self.ex / 'RomFS'], [self.ex / 'ExeFS/main'], self.pkg, {}, self.logs, g, False, extra=extra)
+        go(); go(); self.assertEqual(self.splits, 1)
+        go(mods); go(mods); self.assertEqual(self.splits, 2)
+        rk.write_text('mods B\n'); go(mods); self.assertEqual(self.splits, 3)
+        go(); self.assertEqual(self.splits, 4, 'packed without the mods again')
+
     def test_damaged_never_reuses(self):
         g = self.own()
         with mock.patch.object(nsp, 'ALLOW_DAMAGED', True):

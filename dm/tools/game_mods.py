@@ -7,9 +7,10 @@
     game file of the same path, or is added; the game's RomFS image (DMROMFS1, romfs_image.py) gets a new index that names them, its own data kept as it was;
   · cheats: Atmosphère cheat files under a folder named cheats, <build ID>.txt; a .txt with another name is taken as the packed build's. They are packed into the app, which copies
     them into its cheats folder (the iPhone's Documents/cheats), where the in-game menu turns them on.
-What belongs to the game: a folder named with a title ID belongs to that title (and its updates and DLC, which share all but the last three hex digits), so a whole SD card
-(atmosphere/contents/<title ID>/...), Ryujinx's mods folder or yuzu's load folder can be given as it is; anything else under the mods folder counts. A file or folder whose name
-starts with '.' or '-' is skipped, so renaming a mod's folder to -name turns it off without deleting it.
+What belongs to the game: a folder named with a title ID belongs to that title and its update (the title ID + 0x800), so a whole SD card (atmosphere/contents/<title ID>/...),
+Ryujinx's mods folder or yuzu's load folder can be given as it is; anything else under the mods folder counts. A game of several programs (Super Mario 3D All-Stars) packs each
+program with the folders of its own title ID, the application's + the program's index. A DLC's folder (the application's title ID + 0x1000 + its index) is not the game's: a DLC's
+RomFS is not modded, and the report says so. A file or folder whose name starts with '.' or '-' is skipped, so renaming a mod's folder to -name turns it off without deleting it.
 Usage on its own (a check, nothing written): game_mods.py <mods folder> <title ID> [ExeFS folder]"""
 import bisect, hashlib, os, re, shutil, struct, sys
 from dataclasses import dataclass, field
@@ -141,8 +142,14 @@ def skipped(name): return name.startswith(('.', '-')) or name.lower() in JUNK
 
 
 def same_title(component, title_id):
-    """component names a title (16 hex digits): whether it is this game's (base, update, DLC or another program of it share all but the last three digits)"""
-    return int(component, 16) & ~0xFFF == title_id & ~0xFFF
+    """component names a title (16 hex digits): whether it is this program's, title_id itself or its update (+ 0x800). Another program of the application (the same digits but
+    the last three, another index) is not; nor is a DLC (the application's + 0x1000 + its index, dlc_title)"""
+    return int(component, 16) & ~0x800 == title_id & ~0x800
+
+
+def dlc_title(component, title_id):
+    """component names a title (16 hex digits): whether it is a DLC of title_id's application (the application's title ID + 0x1000 + the DLC's index)"""
+    return int(component, 16) & ~0xFFF == (title_id & ~0xFFF) + 0x1000
 
 
 @dataclass
@@ -169,7 +176,9 @@ def scan(root, title_id):
                 if not e.name.startswith('.') and e.name.lower() not in JUNK: f.ignored.append((p, 'its name starts with -: turned off'))
                 continue
             if e.is_dir():
-                if TITLE.fullmatch(e.name) and not same_title(e.name, title_id): continue   # another game's
+                if TITLE.fullmatch(e.name) and not same_title(e.name, title_id):
+                    if dlc_title(e.name, title_id): f.ignored.append((p, 'a DLC\'s folder: a DLC\'s RomFS is not modded'))
+                    continue   # another game's, or another program's of this game
                 low = e.name.lower()
                 if low == 'romfs':   # one with no file changes nothing
                     if any(not skipped(fn) for _, _, files in os.walk(p) for fn in files): f.romfs.append(p)

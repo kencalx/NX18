@@ -19,8 +19,9 @@ class NroPack(unittest.TestCase):
         self.repo = self.tmp / 'repo'; self.exe = self.tmp / 'game/ExeFS'; self.rom = self.exe.parent / 'RomFS'
         self.exe.mkdir(parents=True); self.rom.mkdir(); (self.exe / 'main').write_bytes(b'NSO0' + bytes(0x50))
         (self.rom / 'game.nrr').write_bytes(b'registered')
-        for f in ('dm/tools/nro_collect.py', 'dm/tools/nso_syms.py', 'dm/tools/patch_nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/gfx/tools/smash_arc.py'):
+        for f in ('dm/tools/nro_collect.py', 'dm/tools/nso_syms.py', 'dm/tools/patch_nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/fps_target.py', 'dm/tools/sdk_patches.py', 'dm/gfx/tools/smash_arc.py'):
             p = self.repo / f; p.parent.mkdir(parents=True, exist_ok=True); p.write_text('v1')
+        (self.repo / 'dm/tools/patch_nso.py').write_text('import nso_code, nso_asm, nso_match\nimport fps_target\n')   # the rewrite's tools are what patch_nso.py imports (rewrite_tools)
         self.out = self.tmp / 'patched_test'; self.logs = self.tmp / 'logs'; self.logs.mkdir()
         self.g = types.SimpleNamespace(words=lambda k: ['main'], modules_in=lambda folder: ['main'])
         self.row = 'refused\t' + 'ab' * 32 + '\t128\tgame.nrr\tloose sdk.nro\n'
@@ -77,6 +78,19 @@ class NroPack(unittest.TestCase):
         build(); self.assertEqual(self.rewrites, 3)
         env['DM_GAME'] = foreign.parent.name
         build(); self.assertEqual(self.rewrites, 4)
+
+    def test_every_module_the_rewriter_imports_is_an_input(self):
+        self.build(); self.build(); self.assertEqual(self.rewrites, 1)
+        (self.repo / 'dm/tools/fps_target.py').write_text('v2')   # not in the hand-written list the key had
+        self.build(); self.assertEqual(self.rewrites, 2)
+        (self.repo / 'dm/tools/nro_collect.py').write_text('v2')   # a tool patch_nso.py does not import (the collection has its own key)
+        self.build(); self.assertEqual(self.rewrites, 2)
+
+    def test_rewrite_tools_of_the_repository(self):
+        tools = {p.name for p in nsp.rewrite_tools(REPO)}
+        self.assertLessEqual({'patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'snowdrop_pools.py', 'loader_census.py',
+                              'fps_target.py', 'nso_syms.py'}, tools)
+        self.assertNotIn('game.py', tools, 'the profile rows the rewriter reads are in its key as they are, not the reader')
 
 
 if __name__ == '__main__': unittest.main()

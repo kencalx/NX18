@@ -128,6 +128,24 @@ class Folder(unittest.TestCase):
         self.assertTrue(f.any())
         self.assertFalse(gm.scan(self.root / 'missing', TITLE).any())
 
+    def test_title_folders_of_this_program(self):
+        for tid in (TITLE, TITLE + 0x800, TITLE + 1, TITLE + 2, TITLE + 0x802, TITLE + 0x1001, 0x0100000000AAAA00):
+            self.put(f'atmosphere/contents/{tid:016X}/romfs/Data/a.bin'); self.put(f'atmosphere/contents/{tid:016X}/cheats/inf.txt', '[Inf]\n')
+        def got(tid):
+            f = gm.scan(self.mods, tid)
+            self.assertEqual([p.parent.parent.name for p in f.cheats], [p.parent.name for p in f.romfs], 'cheats from the same folders')
+            return [p.parent.name for p in f.romfs], {p.name: w for p, w in f.ignored}
+        # a game of one program: its base and its update, not another game's or a DLC's (base + 0x1000 + its index), which the report names
+        names, why = got(TITLE)
+        self.assertEqual(names, [f'{TITLE:016X}', f'{TITLE + 0x800:016X}'])
+        self.assertEqual(list(why), [f'{TITLE + 0x1001:016X}']); self.assertIn('DLC', why[f'{TITLE + 0x1001:016X}'])
+        # a game of several programs (Super Mario 3D All-Stars): each program takes its own folders alone
+        self.assertEqual(got(TITLE + 2)[0], [f'{TITLE + 2:016X}', f'{TITLE + 0x802:016X}'])
+        self.assertEqual(got(TITLE + 1)[0], [f'{TITLE + 1:016X}'])
+        self.assertTrue(gm.same_title(f'{TITLE:016x}', TITLE)); self.assertTrue(gm.same_title(f'{TITLE + 0x800:016X}', TITLE))
+        self.assertFalse(gm.same_title(f'{TITLE + 1:016X}', TITLE)); self.assertFalse(gm.same_title(f'{TITLE:016X}', TITLE + 1))
+        self.assertFalse(gm.same_title(f'{TITLE + 0x1000:016X}', TITLE)); self.assertTrue(gm.dlc_title(f'{TITLE + 0x1001:016X}', TITLE + 2))
+
     def test_exefs_patches_reach_the_module_they_name(self):
         exefs = self.root / 'ExeFS'; exefs.mkdir()
         (exefs / 'main').write_bytes(bytes(make_nso()))
@@ -302,6 +320,112 @@ class NspScript(unittest.TestCase):
         self.assertEqual(os.stat(modded / 'ExeFS/main').st_mtime_ns, stamp, 'reused while nothing changed')
         self.nsp.PROG.end.assert_called_with('reused (the mods and the game files unchanged)')
 
+    def test_a_renamed_mod_folder_is_built_again(self):   # the folder's name decides whether a mod is switchable
+        (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/speed')
+        work = self.root / 'work'
+        _, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertEqual(variants, {})
+        (self.mods / 'exefs_patches/speed').rename(self.mods / 'exefs_patches/60 FPS')
+        modded, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertEqual(set(variants), {'fps'})
+        self.assertEqual(nso.read(modded / 'ExeFS/main').image[0x10:0x14], TEXT[0x10:0x14], 'no longer written in for good')
+
+    def test_a_cheat_change_makes_nothing_else_again(self):
+        (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/60 FPS')
+        work = self.root / 'work'; cheat = self.mods / f'contents/{TITLE:016X}/cheats/{BID[:16]}.txt'
+        modded, cheats, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        rw = work / 'mods/v0_fps/rewrite'; rw.mkdir(); (rw / 'main.key').write_text('the variant rewrite\'s cache\n')   # as build_variants leaves it
+        img = os.stat(modded / 'RomFS.img'); main = os.stat(modded / 'ExeFS/main'); packed = os.stat(cheats / f'{BID[:16]}.txt')
+        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (modded, cheats, variants))
+        self.nsp.PROG.end.assert_called_with('reused (the mods and the game files unchanged)')
+        self.assertEqual(os.stat(cheats / f'{BID[:16]}.txt').st_mtime_ns, packed.st_mtime_ns, 'the same cheats: the packed file is kept')
+        cheat.write_text('[Max HP]\n04000000 00000010 000003E7\n[Max MP]\n04000000 00000020 000003E7\n')
+        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (modded, cheats, variants))
+        self.nsp.PROG.end.assert_called_with('reused (the code and RomFS mods and the game files unchanged); the cheats packed again')
+        self.assertIn('[Max MP]', (cheats / f'{BID[:16]}.txt').read_text())
+        report = (work / 'mods/v0.txt').read_text()
+        self.assertIn('2 entries', report); self.assertNotIn('1 entries', report); self.assertIn('switchable', report, 'the report keeps the code mods\' lines')
+        now = os.stat(modded / 'RomFS.img')
+        self.assertEqual((now.st_ino, now.st_mtime_ns, now.st_ctime_ns), (img.st_ino, img.st_mtime_ns, img.st_ctime_ns), 'the RomFS image is not linked again (the IPA packer keys on its ctime)')
+        self.assertEqual(os.stat(modded / 'ExeFS/main').st_mtime_ns, main.st_mtime_ns)
+        cheat.rename(cheat.with_name('-' + cheat.name))   # the Builder turns a cheat file off this way
+        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (modded, None, variants))
+        self.assertFalse(cheats.exists()); self.assertNotIn('cheats: ', (work / 'mods/v0.txt').read_text())
+        (self.mods / f'contents/{TITLE:016X}/romfs/Data/a.bin').write_bytes(b'MOD A, longer')   # a change that makes the modded extraction again
+        self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertNotEqual(os.stat(modded / 'RomFS.img').st_ino, img.st_ino)
+        self.assertTrue((rw / 'main.key').is_file(), 'the variant rewrite\'s cache is kept: its own key says when it is stale')
+
+    def test_a_stopped_rebuild_leaves_no_key(self):
+        work = self.root / 'work'
+        self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        extra = self.mods / f'contents/{TITLE:016X}/B/romfs/Data/b.bin'; extra.parent.mkdir(parents=True); extra.write_bytes(b'B')
+        with mock.patch.object(gm, 'patch_exefs', side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertFalse((work / 'mods/v0.key').exists())
+        extra.unlink()   # back to the first run's mods: made again, not taken for that run's
+        modded, _, _ = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertNotEqual(self.nsp.PROG.end.call_args.args[0], 'reused (the mods and the game files unchanged)')
+        self.assertNotIn('Data/b.bin', romfs_image.read_index(modded / 'RomFS.img'))
+
+    def test_the_romfs_mods_key_the_shader_stages(self):   # a file of the same size leaves the image's names and sizes as they were
+        work = self.root / 'work'; rk = work / 'mods/v0.romfs.key'; mod = self.mods / f'contents/{TITLE:016X}/romfs/Data/a.bin'
+        self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        first = rk.read_text()
+        mod.write_bytes(b'MOD B'); st = mod.stat(); os.utime(mod, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+        self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertNotEqual(rk.read_text(), first)
+        mod.unlink()
+        self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertFalse(rk.exists(), 'no RomFS mods: the shader stages keep their keys')
+
+    def test_a_profile_with_its_own_frame_rate_takes_no_frame_rate_mod(self):
+        sys.path.insert(0, str(REPO / 'dm/games')); import game
+        self.assertFalse(self.nsp.frame_rate_mods_ok(game.load('01005CA01580E000')), 'Persona 5 Royal: present_interval_choice on')
+        self.assertFalse(self.nsp.frame_rate_mods_ok(game.load('0100B04011742000')), 'Monster Hunter Rise: fps_target 60')
+        self.assertTrue(self.nsp.frame_rate_mods_ok({'fps_target': '0'}))
+        (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/60FPS')
+        work = self.root / 'work'
+        _, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE, fps_ok=self.nsp.frame_rate_mods_ok({'present_interval_choice': 'on'}))
+        self.assertEqual(variants, {})
+        self.assertIn('left out: exefs_patches/60FPS', (work / 'mods/v0.txt').read_text())
+
+    def test_an_ipad_only_app_has_no_ultrawide(self):
+        both = lambda: {'fps': {'mod': '60FPS'}, 'ultrawide': {'mod': '21.9'}}
+        self.assertEqual(set(self.nsp.device_variants(both(), 'ipad', False)), {'fps'})
+        self.assertEqual(set(self.nsp.device_variants(both(), 'iphone', False)), {'fps', 'ultrawide'})
+        self.assertEqual(set(self.nsp.device_variants(both(), 'both', False)), {'fps', 'ultrawide'})
+        self.assertEqual(set(self.nsp.device_variants(both(), 'ipad', True)), {'fps', 'ultrawide'}, 'the Mac keeps it (DM_MOD_ULTRAWIDE=1 checks its bytes)')
+
+    def test_programs_cheats_in_one_folder(self):   # a game of several programs: each program's packed cheats, under its builds' IDs
+        a, b = self.root / 'a', self.root / 'b'; a.mkdir(); b.mkdir()
+        (a / '0000000000000001.txt').write_text('[A]\n'); (b / '0000000000000002.txt').write_text('[B]\n')
+        (a / 'FFFFFFFFFFFFFFFF.txt').write_text('[same]\n'); (b / 'FFFFFFFFFFFFFFFF.txt').write_text('[same]\n')
+        dst = self.nsp.merge_cheats([a, b], self.root / 'all')
+        self.assertEqual(sorted(p.name for p in dst.iterdir()), ['0000000000000001.txt', '0000000000000002.txt', 'FFFFFFFFFFFFFFFF.txt'])
+        ino = os.stat(dst / '0000000000000002.txt').st_ino
+        self.nsp.merge_cheats([a, b], self.root / 'all')
+        self.assertEqual(os.stat(dst / '0000000000000002.txt').st_ino, ino, 'unchanged: kept')
+
+    def test_a_later_program_leaves_loose_cheats_to_the_first(self):   # a cheat file not named after a build ID was made for one program's build: the first's, as before
+        for rel in ('cheats/inf.txt', f'contents/{TITLE:016X}/cheats/own.txt', 'cheats/0000000000000001.txt'): (self.mods / rel).parent.mkdir(parents=True, exist_ok=True); (self.mods / rel).write_text('[Inf]\n')
+        packed = lambda first: sorted(p.name for p in self.nsp.apply_mods(self.mods, self.ext, self.root / f'work{first}', 'v0', TITLE, first=first)[1].iterdir())
+        self.assertEqual(packed(True), ['0000000000000001.txt', f'{BID[:16]}.txt'])
+        self.assertEqual(packed(False), ['0000000000000001.txt', f'{BID[:16]}.txt'])
+        first, later = ((self.root / f'work{b}/mods/v0_cheats/{BID[:16]}.txt').read_text() for b in (True, False))
+        self.assertEqual(first.count('[Inf]'), 2, 'the first program: the loose file and its own title folder\'s')
+        self.assertEqual(later.count('[Inf]'), 1, 'a later program: only its own title folder\'s')
+        self.assertIn('cheats/inf.txt is not named after a build ID: left to the first program', (self.root / 'workFalse/mods/v0.txt').read_text())
+
+    def test_settings_are_checked_before_the_build(self):
+        game = self.root / 'game'; game.mkdir()
+        with mock.patch.object(self.nsp, 'DEVICE', 'iPad Pro'), self.assertRaisesRegex(self.nsp.BuildError, '--device / DEVICE'):
+            self.nsp.main(self.nsp.parse_args([str(game)]))
+        with self.assertRaisesRegex(self.nsp.BuildError, 'GPU architectures'):
+            self.nsp.main(self.nsp.parse_args([str(game), '--gpu', 'g19p g16g']))
+        with self.assertRaisesRegex(self.nsp.BuildError, 'not a folder'):
+            self.nsp.main(self.nsp.parse_args([str(game), '--mods', str(self.root / 'missing')]))
+
     def test_cheats_alone_need_no_modded_extraction(self):
         for p in sorted(self.mods.rglob('*'), reverse=True):
             if p.is_file() and p.suffix != '.txt': p.unlink()
@@ -348,6 +472,30 @@ class NspScript(unittest.TestCase):
             for f in (exefs.parent / 'rewrite').iterdir(): f.unlink()
             self.nsp.build_variants(sys.executable, REPO, {'fps': {'mod': '60 FPS', 'exefs': str(exefs), 'modules': ['main']}}, patched, {}, self.root / 'logs')
         self.assertFalse((patched / 'mods.tsv').exists(), 'a mod the rewriter refuses is not offered')
+
+    def test_variant_rewrite_key(self):   # the variant rewrite is reused while the rewriter's inputs are as at its last run, as the base rewrite is
+        patched = self.root / 'patched'; patched.mkdir()
+        hdr = '# TEXT_END 0x4000\n# PATCH_OFF 0x8000\n'
+        (patched / 'main.patched.bin').write_bytes(bytes(0xc000)); (patched / 'main.fixups.tsv').write_text(hdr)
+        exefs = self.root / 'v/ExeFS'; exefs.mkdir(parents=True); (exefs / 'main').write_bytes(bytes(make_nso()))
+        tool = self.root / 'fps_target.py'; tool.write_text('v1')
+        runs = []
+        def fake_run(cmd, log, env=None, fatal=True, **kw):
+            runs.append(cmd); rw = Path(cmd[3]); v = bytearray(0xc000); v[0x10:0x14] = b'\x1f\x20\x03\xd5'
+            (rw / 'main.patched.bin').write_bytes(v); (rw / 'main.fixups.tsv').write_text(hdr)
+            if tool.read_text() == 'stops': raise KeyboardInterrupt
+            return 0
+        build = lambda: self.nsp.build_variants(sys.executable, REPO, {'fps': {'mod': '60 FPS', 'exefs': str(exefs), 'modules': ['main']}}, patched, {}, self.root / 'logs')
+        with mock.patch.object(self.nsp, 'run', fake_run), mock.patch.object(self.nsp, 'rewrite_tools', lambda repo: [tool]):
+            build(); build(); self.assertEqual(len(runs), 1)
+            tool.write_text('v2'); build(); self.assertEqual(len(runs), 2, 'a module patch_nso.py imports')
+            with mock.patch('capstone.__version__', '0.0'): build()
+            self.assertEqual(len(runs), 3, 'capstone')
+            tool.write_text('stops')
+            with self.assertRaises(KeyboardInterrupt): build()
+            self.assertFalse((exefs.parent / 'rewrite/main.key').exists(), 'a rewrite that stopped leaves no key over its outputs')
+            tool.write_text('v2'); build(); self.assertEqual(len(runs), 5, 'back to the inputs of a finished run: rewritten again all the same')
+        self.assertIn('fps\t60 FPS', (patched / 'mods.tsv').read_text())
 
     def test_folder_setting(self):
         args = self.nsp.parse_args(['x'])
