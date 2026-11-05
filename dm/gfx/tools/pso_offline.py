@@ -11,13 +11,15 @@
 #   · a pair whose functions declare function constants is left to the device (rest_pairs.tsv): the host specializes such functions with an empty set of values, and metal-tt makes
 #     no specialized function from a library (applegpu-nt: "cannot find private metadata"), nor the function unspecialized ("cannot lower module with unresolved function constants")
 # Output folder (what the app bundles as pso/, the host's DM_PSO_BUNDLE):
-#   <arch>.mtl4a     one archive per GPU architecture (applegpu_g18p = A19 / A19 Pro); the host opens the one named after its device's architecture
+#   <arch>.mtl4a     one archive per GPU architecture asked for (applegpu_g18p = A19 / A19 Pro); the host opens the one named after its device's architecture
 #   prebuilt.tsv     what the archives cover, in the host's stamp format (pso_prebuild): chain version, depth mode, the pair lists' size and SHA-256. The host skips its prebuild when
 #                    it matches and a probe of a few bases finds them in the archive
 #   rest_pairs.tsv   the pairs the device still builds (only when there are any)
 #   archive.tsv      what was built: architectures, OS minimum, toolchain, bases (for people and logs; the host does not read it)
 # Each archive is made again only when its compiler inputs change (key.<arch> in the work folder): the complete pipeline configuration without library locations,
 # the referenced libraries' bytes, architecture, platform, minimum OS and metal-tt version. Chain/profile stamps are validated and refreshed independently.
+# The archive itself is kept beside its key (<arch>.mtl4a in the work folder) and hard-linked into the output folder (copied where it cannot be linked), so an architecture
+# a build does not ask for keeps its archive for the next build that does: alternating iPhone (g19p) and iPad (g16g) builds compile each once.
 # More bases than --batch-size are compiled in sequential groups (batches.<arch>/<index>/ in the work folder, each cached by its own inputs) and merged with metal-pack: one metal-tt on
 # Super Mario Odyssey's 32,864 bases runs an 8 GB Mac out of paging space (docs/reference/shaders.md, Bounded groups for the offline pipeline compiler). The output is the same single file.
 # Usage: pso_offline.py --msl <b-<chain> folder> --out <folder> --work <folder> [--game <id>] [--pairs <shader_pairs.tsv> [--pairs <pso_pairs.tsv>]] [--gpu g18p[,g17p]]
@@ -263,6 +265,18 @@ def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain
         sys.exit(f'[RED] pso_offline: metal-pack failed for {arch} (exit {r.returncode}): {log_path.read_text()[-2000:]}')
 
 
+def place(src, dst):
+    """dst as the same archive as src: a hard link, else a copy; left as it is when it already is one, so its inode and times stay (pack_ipa.py reuses a file by them)"""
+    try:
+        s, d = src.stat(), dst.stat()
+        if (d.st_dev, d.st_ino) == (s.st_dev, s.st_ino) or (d.st_size, d.st_mtime_ns) == (s.st_size, s.st_mtime_ns): return
+    except OSError: pass
+    dst.unlink(missing_ok=True)
+    try: os.link(src, dst)
+    except OSError:   # another volume, or one without hard links (exFAT)
+        part = dst.with_name(dst.name + '.partial'); shutil.copy2(src, part); os.replace(part, dst)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description='Build the pipeline archive of a game\'s shader pairs offline (metal-tt)')
     ap.add_argument('--msl', required=True, help='the shader libraries, b-<chain version> (with their reflection <key>_b.json)')
@@ -312,18 +326,21 @@ def main(argv=None):
     keys = {arch: archive_key(configuration, libraries, arch, a.platform, osmin, tv) for arch in archs}
     del configuration   # the compiler reads the script from disk
     for arch, key in keys.items():
-        dst, kf = out / f'{arch}.mtl4a', work / f'key.{arch}'
-        if dst.is_file() and kf.is_file() and kf.read_text().strip() == key: print(f'pso_offline: {arch}: reused ({dst.stat().st_size / 2**20:.0f} MB)'); continue
-        kf.unlink(missing_ok=True); dst.unlink(missing_ok=True)
+        kept, dst, kf = work / f'{arch}.mtl4a', out / f'{arch}.mtl4a', work / f'key.{arch}'
+        same = kf.is_file() and kf.read_text().strip() == key
+        if same and not kept.is_file() and dst.is_file(): place(dst, kept)   # an archive made before the work folder kept one
+        if same and kept.is_file():
+            place(kept, dst); print(f'pso_offline: {arch}: reused ({dst.stat().st_size / 2**20:.0f} MB)'); continue
+        kf.unlink(missing_ok=True); kept.unlink(missing_ok=True); dst.unlink(missing_ok=True)
         part = work / f'{arch}.mtl4a.partial'; part.unlink(missing_ok=True)
         t1 = time.time(); print(f'pso_offline: {arch}: metal-tt, {len(bases)} bases (minutes) ...', flush=True)
         if a.batch_size and len(bases) > a.batch_size:
             compile_batches(lib_dir, bases, work, part, arch, a.platform, osmin, tv, a.batch_size)
         else:
             compile_archive(js, part, work, arch, a.platform, osmin, len(bases))
-        os.replace(part, dst); kf.write_text(key + '\n')
+        os.replace(part, kept); kf.write_text(key + '\n'); place(kept, dst)
         print(f'pso_offline: {arch}: {dst.stat().st_size / 2**20:.0f} MB in {time.time() - t1:.0f} s')
-    for f in out.glob('*.mtl4a'):   # architectures no longer asked for
+    for f in [*out.glob('*.mtl4a'), *out.glob('*.mtl4a.partial')]:   # architectures no longer asked for (their archives stay in the work folder), and an interrupted copy (place)
         if f.stem not in archs: f.unlink()
     (out / 'prebuilt.tsv').write_text(st)
     rp = out / 'rest_pairs.tsv'

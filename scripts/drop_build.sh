@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds a game's IPA from its folder: what the "Drag Here" droplet (scripts/make_drag_here.sh) runs in Terminal for each folder dropped on it. Also runs by hand:
+# Builds a game's IPA from its folder: what the "Drag Here" droplet (scripts/make_drag_here.sh) runs in Terminal for each folder dropped on it, one after another in one window. Also runs by hand:
 #   scripts/drop_build.sh "<game folder>" [iphone | ipad | both]
 # The folder holds the game's NSPs (or a dump / a NUP), and may hold its mods folder (mods/, which the NSP script takes on its own) and prod.keys. The keys are the first of:
 # <folder>/prod.keys, the folder above it, ~/.switch/prod.keys, or one other *.keys file in the folder. The device is the second argument, else DEVICE, else iphone.
@@ -21,8 +21,10 @@ if [ -z "$keys" ]; then
     [ "$(printf '%s\n' "$others" | grep -c .)" = 1 ] && keys=$others
 fi
 cmd=(python3 "$repo/scripts/build_ipa_from_nsp.py" "$dir" --device "$device")
+# A dump folder (scripts/pack_dump.py is_dump: base/exefs/main.npdm, and a RomFS in base/ or updates/<version>/) or a NUP needs no keys
+is_dump() { [ -f "$1/base/exefs/main.npdm" ] && { [ -d "$1/base/romfs" ] || ls -d "$1"/updates/*/romfs > /dev/null 2>&1; }; }
 if [ -n "$keys" ]; then cmd+=(-k "$keys")
-elif ! { [ -f "$dir" ] || ls "$dir" | grep -qiE '\.nup$|^exefs$'; }; then fail "no prod.keys: put it in $dir (or ~/.switch/prod.keys)"; fi   # a dump folder or a NUP needs none
+elif ! { [ -f "$dir" ] || is_dump "$dir" || ls "$dir" | grep -qiE '\.nup$'; }; then fail "no prod.keys: put it in $dir (or ~/.switch/prod.keys)"; fi
 [ ! -d "$dir/mods" ] || echo "mods: $dir/mods (patches, replacement files and cheats are packed in)"
 echo "device: $device"
 if [ -n "${DRY_RUN:-}" ]; then printf '%q ' "${cmd[@]}"; echo; exit 0; fi

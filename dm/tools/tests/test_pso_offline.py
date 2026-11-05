@@ -211,6 +211,7 @@ class Build(unittest.TestCase):
         self.assertEqual(self.main('--gpu', 'g17p', '--os-min', '26.0'), 0)   # another minimum: built again; g18p no longer asked for: removed
         self.assertEqual(self.calls[-1][7], '26.0')
         self.assertEqual(sorted(p.name for p in self.out.glob('*.mtl4a')), ['applegpu_g17p.mtl4a'])
+        self.assertTrue((self.work / 'applegpu_g18p.mtl4a').is_file())   # it stays in the work folder, for the next build that asks for it
         (self.prof / 'shader_pairs.tsv').write_text('v\tf\n')   # only a device-specialized pair removed: offline bases unchanged
         self.assertEqual(self.main('--gpu', 'g17p', '--os-min', '26.0'), 0)
         self.assertEqual(len(self.calls), 3)
@@ -275,12 +276,54 @@ class Build(unittest.TestCase):
 
     def test_missing_archive_and_legacy_key_rebuild(self):
         self.main()
-        (self.out / 'applegpu_g18p.mtl4a').unlink()
+        (self.out / 'applegpu_g18p.mtl4a').unlink()   # the bundle's: the work folder's is linked in again
+        self.main()
+        self.assertEqual(len(self.calls), 1)
+        self.assertTrue((self.out / 'applegpu_g18p.mtl4a').samefile(self.work / 'applegpu_g18p.mtl4a'))
+        (self.out / 'applegpu_g18p.mtl4a').unlink(); (self.work / 'applegpu_g18p.mtl4a').unlink()   # in neither place: built again
         self.main()
         self.assertEqual(len(self.calls), 2)
         (self.work / 'key.applegpu_g18p').write_text('legacy-cache-key\n')
         self.main()
         self.assertEqual(len(self.calls), 3)
+
+    def test_alternating_devices_reuse_each_archive(self):   # an iPhone build (g19p), an iPad build (g16g), the iPhone again: each architecture compiled once
+        for gpu in ('g19p', 'g16g', 'g19p', 'g16g'):
+            self.assertEqual(self.main('--gpu', gpu, '--os-min', '27.0'), 0)
+            self.assertEqual([p.name for p in self.out.glob('*.mtl4a')], [f'applegpu_{gpu}.mtl4a'])   # the bundle holds only the one asked for
+        self.assertEqual([c[5] for c in self.calls], ['applegpu_g19p', 'applegpu_g16g'])
+        self.assertEqual((self.out / 'applegpu_g16g.mtl4a').read_bytes(), b'archive applegpu_g16g')
+        self.assertTrue((self.out / 'applegpu_g16g.mtl4a').samefile(self.work / 'applegpu_g16g.mtl4a'), 'a hard link, not a second copy')
+
+    def test_reuse_leaves_the_bundles_archive_alone(self):   # same inode and times: pack_ipa.py reuses the packed entry by them
+        self.main()
+        dst = self.out / 'applegpu_g18p.mtl4a'; before = dst.stat()
+        self.main()
+        after = dst.stat()
+        self.assertEqual((after.st_ino, after.st_mtime_ns, after.st_ctime_ns, after.st_nlink), (before.st_ino, before.st_mtime_ns, before.st_ctime_ns, before.st_nlink))
+
+    def test_archive_of_the_earlier_layout_is_kept(self):   # made when the bundle held the only copy: taken into the work folder, not compiled again
+        self.main()
+        (self.work / 'applegpu_g18p.mtl4a').unlink()
+        self.main()
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual((self.work / 'applegpu_g18p.mtl4a').read_bytes(), b'archive applegpu_g18p')
+        self.main('--gpu', 'g17p'); self.main()   # and it then survives a build for another architecture
+        self.assertEqual([c[5] for c in self.calls], ['applegpu_g18p', 'applegpu_g17p'])
+
+    def test_copied_where_it_cannot_be_linked(self):   # another volume, or one without hard links (exFAT)
+        def no_link(src, dst): raise OSError(1, 'Operation not permitted')
+        with mock.patch.object(po.os, 'link', no_link):
+            self.main()
+            dst, kept = self.out / 'applegpu_g18p.mtl4a', self.work / 'applegpu_g18p.mtl4a'
+            self.assertEqual(dst.read_bytes(), kept.read_bytes()); self.assertFalse(dst.samefile(kept))
+            before = dst.stat()
+            self.main()   # an unchanged copy is not copied again
+            self.assertEqual((dst.stat().st_ino, dst.stat().st_mtime_ns), (before.st_ino, before.st_mtime_ns))
+            (self.out / 'applegpu_g16g.mtl4a.partial').write_bytes(b'half')   # a copy interrupted in an earlier build, of an architecture no longer asked for: not packed
+            self.main('--gpu', 'g17p'); self.main()
+        self.assertEqual(len(self.calls), 2)
+        self.assertFalse(list(self.out.glob('*.partial')))
 
     def test_stale_reflection_cannot_reuse_archive(self):
         self.main()
@@ -519,19 +562,20 @@ class IpaFallback(unittest.TestCase):
 
 
 class Default(unittest.TestCase):
-    """Which games get an archive without DM_PSO_GPUS: build_ipa.sh's own lines, run with game.py's default form, so only a profile with pso_mtl4 on (the Metal 4 path, which alone
-    reads the archive on iOS) gets one — g18p by default, the profile key pso_gpu's architectures when it names them (joined with commas) and g18p on a key the shell guard does not take —
-    and an explicit DM_PSO_GPUS wins, also when empty"""
+    """Which games get an archive without DM_PSO_GPUS: build_ipa.sh's own lines, run with game.py's default form, so only a profile with pso_mtl4 on gets one, made for the GPUs
+    of the devices the app is for (DM_DEVICE_FAMILY: 1 = g19p, 2 = g16g, 1,2 or unset = both, as the NSP script's DEVICE_ARCH), whatever the profile's pso_gpu key names (a line says
+    it is not used); an explicit DM_PSO_GPUS wins, also when empty"""
 
     def lines(self):
         lines = (REPO / 'dm/ios/tools/build_ipa.sh').read_text().splitlines()
         i = next(n for n, ln in enumerate(lines) if ln.startswith('PSO=; P4='))
-        return 'die() { echo "FAIL: $*"; exit 1; }\nt() { echo "$*" >&2; }\n' + '\n'.join(lines[i:i + 4])   # the P4 / pso_gpu reads, the key's shell guard and the GPUS chain
+        j = next(n for n, ln in enumerate(lines) if n > i and ln.startswith('if [ "$GFXAPI" = nvn ]'))
+        return 'die() { echo "FAIL: $*"; exit 1; }\nt() { echo "$*" >&2; }\n' + '\n'.join(lines[i:j])   # the P4 / pso_gpu reads, the devices' GPUs and the GPUS chain
 
     def gpus(self, profile, **env):
         with tempfile.TemporaryDirectory() as d:
             for k, v in profile.items(): Path(d, k).mkdir(); Path(d, k, 'game.tsv').write_text(v)
-            e = {k: v for k, v in os.environ.items() if k != 'DM_PSO_GPUS'}
+            e = {k: v for k, v in os.environ.items() if k not in ('DM_PSO_GPUS', 'DM_DEVICE_FAMILY')}
             e.update(env, DM=str(REPO / 'dm'), DM_GAMES_DIR=d, GD=d)
             return {gid: (r.stdout, r.stderr) for gid, r in
                     ((gid, subprocess.run(['bash', '-c', self.lines() + '\necho "$P4 $GPUS"'], env=dict(e, GAME=gid),
@@ -546,16 +590,26 @@ class Default(unittest.TestCase):
                  '0100000000F0F005': 'title_id\t0100000000F0F005\npso_mtl4\ton\npso_gpu\tnone\n',                                   # none is no token of this key
                  '0100000000F0F006': 'title_id\t0100000000F0F006\npso_mtl4\ton\npso_gpu\tg15s g16s g17p g18p g19p\n',               # 5 architectures: more than the key takes
                  '0100000000F0F007': 'title_id\t0100000000F0F007\npso_mtl4\toff\npso_gpu\tg19p\n'}
+        on = {'0100000000F0F000', '0100000000F0F003', '0100000000F0F004', '0100000000F0F005', '0100000000F0F006'}
+        for family, want in (({}, 'g19p,g16g'), ({'DM_DEVICE_FAMILY': '1,2'}, 'g19p,g16g'), ({'DM_DEVICE_FAMILY': '1'}, 'g19p'), ({'DM_DEVICE_FAMILY': '2'}, 'g16g')):
+            with self.subTest(**family):
+                r = self.gpus(games, **family)
+                self.assertEqual({k: p[0].strip() for k, p in r.items()}, {k: f'on {want}' if k in on else 'off none' for k in games})
+                self.assertEqual({k for k, p in r.items() if 'pso_gpu' in p[1] and 'is not used' in p[1]}, on - {'0100000000F0F000'})   # a profile's pso_gpu: the line says it is not used
         r = self.gpus(games)
-        self.assertEqual({k: p[0].strip() for k, p in r.items()},
-                         {'0100000000F0F000': 'on g18p', '0100000000F0F001': 'off none', '0100000000F0F002': 'off none',
-                          '0100000000F0F003': 'on applegpu_g19p', '0100000000F0F004': 'on g18p,g19p', '0100000000F0F005': 'on g18p',
-                          '0100000000F0F006': 'on g18p', '0100000000F0F007': 'off none'})
-        self.assertEqual({k for k, p in r.items() if 'taking g18p' in p[1]}, {'0100000000F0F005', '0100000000F0F006'})   # a key the guard rejects keeps the default, and says so
         self.assertEqual({k: p[0].strip() for k, p in self.gpus(games, DM_PSO_GPUS='g17p').items()},
                          {k: v.split()[0] + ' g17p' for k, v in {k: p[0].strip() for k, p in r.items()}.items()})
         self.assertEqual(self.gpus(games, DM_PSO_GPUS='none')['0100000000F0F000'][0].strip(), 'on none')
         self.assertEqual(self.gpus(games, DM_PSO_GPUS='')['0100000000F0F000'][0].strip(), 'on')
+
+    def test_device_family_matches_the_nsp_scripts_devices(self):   # build_ipa.sh run by itself makes the archive the NSP script makes for --device
+        spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
+        assert spec and spec.loader
+        nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
+        game = {'0100000000F0F000': 'title_id\t0100000000F0F000\npso_mtl4\ton\n'}
+        for family, devices in (('1', ['iphone']), ('2', ['ipad']), ('1,2', ['iphone', 'ipad'])):
+            with self.subTest(family=family):
+                self.assertEqual(self.gpus(game, DM_DEVICE_FAMILY=family)['0100000000F0F000'][0].split()[1], ','.join(nsp.DEVICE_ARCH[d] for d in devices))
 
     def test_nsp_defaults_follow_the_same_profile_gate(self):
         # Run the NSP script's actual choice block without extracting or building a game.

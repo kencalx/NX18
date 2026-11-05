@@ -1,3 +1,4 @@
 Gen/
 DmIOS.xcodeproj/
 Sources/Info.plist
+.ipa-build.lock

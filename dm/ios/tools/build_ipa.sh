@@ -95,6 +95,28 @@ if [ -n "${PROGRAMS_TSV:-}" ]; then
 fi
 
 t "app: $DM_DISPLAY_NAME $DM_APP_VERSION ($DM_BUNDLE_ID), language $DM_LANG$([ $DM_SHOW_FPS = YES ] && echo ', frame-rate counter on')"
+# One IPA build at a time per checkout, from generating Gen/ to the end of xcodebuild: in IPA mode every game's build writes the same dm/ios/Gen (its modules, tables, launcher settings, icon
+# and Info.plist) and DmIOS.xcodeproj, so two at once (the Drag Here droplet, the Builder, a Terminal) would delete each other's Gen/ or build one game's app from another's code and tables.
+# The lock is flock(2) on dm/ios/.ipa-build.lock (git ignores it), taken by python3 on this shell's fd 9: it holds until that fd closes, after xcodebuild or at any exit (a failure, Ctrl-C,
+# a closed window, kill -9). xcodebuild, pso_offline.py and git (git status can start its fsmonitor daemon, which stays) run without fd 9, so a process they leave behind cannot keep it. The file names its holder. DM_IPA_LOCK=0 builds without it
+ipa_lock() {
+  [ "${DM_IPA_LOCK:-1}" != 0 ] || { t "build lock: off (DM_IPA_LOCK=0)"; return 0; }
+  local L="$IOS_SOURCE/.ipa-build.lock" who err rc
+  local try='import fcntl, sys
+try: fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError: sys.exit(3)
+except OSError as e: sys.exit(e.strerror or str(e))'   # 3: another build holds it
+  exec 9>> "$L" || die "build lock $L"
+  err=$(python3 -I -c "$try" 2>&1); rc=$?
+  if [ "$rc" = 3 ]; then
+    who=$(head -1 "$L" 2> /dev/null)
+    t "waiting for another IPA build in this checkout to finish its app build: ${who:-unknown} (Gen/ and the Xcode project are one per checkout; DM_IPA_LOCK=0 builds without waiting)"
+    python3 -I -c 'import fcntl, signal; signal.signal(signal.SIGINT, signal.SIG_DFL); fcntl.flock(9, fcntl.LOCK_EX)' || die "build lock $L"
+    t "the other IPA build's app is built: going on"
+  elif [ "$rc" != 0 ]; then exec 9>&-; t "build lock: none, flock does not work on $L (${err:-exit $rc}): building without it"; return 0; fi   # a volume without flock (some network shares)
+  echo "$GAME ($DM_DISPLAY_NAME), pid $$, since $(date +%T)" > "$L"
+}
+[ "$PREPARE_XCODE" = YES ] || ipa_lock   # a prepared project has its own folder
 t "generate Gen/ (host sources, embedded modules, tables)"
 rm -rf Gen && mkdir -p Gen/dm || die "mkdir Gen"
 python3 tools/gen_build.py "$DM/host" Gen > Gen/dm.xcconfig || die "gen_build"
@@ -130,27 +152,29 @@ if [ -n "${PROGRAMS_TSV:-}" ]; then
   prog_back
   LJ=Gen/dm/p0/launcher.json
 else TD=Gen/dm; program_tables; LJ=Gen/dm/launcher.json; fi
-# The pipeline archive made offline (dm/gfx/tools/pso_offline.py): the base of every shader pair, compiled here by metal-tt for each GPU architecture in DM_PSO_GPUS (comma-separated:
-# g18p = A19 / A19 Pro; another family's device has its own architecture, applegpu_g19p = the family after the A19 (its archive compiles with the current toolchain); none = no archive), so the device
-# does not build them on its first start (Breath of the Wild: 15,767 bases, 7-8 minutes on an iPhone 17 Pro Max).
-# Only the Metal 4 path reads it, which iOS turns on for a game whose profile sets pso_mtl4 on: the default is what the profile's pso_gpu key names (whitespace-separated architectures, joined for
-# pso_offline.py's --gpu), else g18p, and none for the games that do not set pso_mtl4 on (their app would carry it unread). It goes into the app as pso/ (main.m hands it to the host as
+# The pipeline archive made offline (dm/gfx/tools/pso_offline.py): the base of every shader pair, compiled here by metal-tt for each GPU architecture in DM_PSO_GPUS (comma-separated, as
+# MTLDevice.architecture names them: g19p = the A20 Pro of the iPhone 18 Pro Max, g16g = the M4 of the iPad Pro; none = no archive), so the device does not build them on its first start
+# (Breath of the Wild: 15,767 bases, 7-8 minutes on an iPhone 17 Pro Max). The host opens only the archive named after its device's GPU (nvn_mtl.m pso_bundle_open).
+# Without DM_PSO_GPUS a game whose profile sets pso_mtl4 on gets the archive for the GPUs of the devices the app is for, as the NSP script makes it (its DEVICE_ARCH): DM_DEVICE_FAMILY 1 = g19p,
+# 2 = g16g, 1,2 = both. 13 Sentinels crashed Metal 4 on an A20 Pro with a g18p archive and ran with a g19p one (dm/games/01003FC01670C000/README.md); the profile's pso_gpu key does not
+# change this default. The games that do not set pso_mtl4 on get none. It goes into the app as pso/ (main.m hands it to the host as
 # DM_PSO_BUNDLE), with the pulling vertex libraries the bases are made of. Each architecture adds about 650 MB to the app (Breath of the Wild; 220 MB in the IPA) and 4 minutes to the first build;
 # made again only when its inputs change (the libraries, the pairs, the profile's depth_mode, metal-tt)
 PSO=; P4=$(python3 "$DM/games/game.py" "$GAME" pso_mtl4 off) || die "game profile $GD: pso_mtl4"; PG=$(python3 "$DM/games/game.py" "$GAME" pso_gpu '') || die "game profile $GD: pso_gpu"
-PGK=g18p; N=0; for w in $PG; do case $w in none) N=9; break ;; esac; case ${w#applegpu_} in '' | *[!A-Za-z0-9]*) N=9; break ;; esac; N=$((N+1)); done
-if [ "$P4" = on ] && [ "$PG" ]; then case $N in 1 | 2 | 3 | 4) PGK=$(echo "$PG" | tr -s ' \t' ',') ;; *) t "profile $GD: pso_gpu '$PG' is not 1-4 whitespace-separated GPU architectures (each one such as g18p or applegpu_g19p, with or without the applegpu_ prefix; there is no none: without the key the archive defaults follow pso_mtl4) - taking g18p" ;; esac; fi
-if [ -n "${DM_PSO_GPUS+set}" ]; then GPUS=$DM_PSO_GPUS; elif [ "$P4" = on ]; then GPUS=$PGK; else GPUS=none; fi
+case "${DM_DEVICE_FAMILY:-1,2}" in 1) PGK=g19p ;; 2) PGK=g16g ;; *) PGK=g19p,g16g ;; esac   # the GPUs of the devices the app installs on
+if [ -n "${DM_PSO_GPUS+set}" ]; then GPUS=$DM_PSO_GPUS; elif [ "$P4" = on ]; then GPUS=$PGK
+  [ -z "$PG" ] || t "profile $GD: pso_gpu '$PG' is not used: the archive is made for the GPUs of the devices the app is for, $PGK (DM_PSO_GPUS names others)"
+else GPUS=none; fi
 if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/shader_pairs.tsv" ]; then
   PSO=$W/build/ios/pso/bundle
   t "pipeline archive for $GPUS (metal-tt; minutes when its inputs changed)"
-  python3 "$DM/gfx/tools/pso_offline.py" --game "$GAME" --msl "$MSL_IOS/b-$V" --out "$PSO" --work "$W/build/ios/pso/work" --gpu "$GPUS" ${DM_PSO_IOS_MIN:+--os-min "$DM_PSO_IOS_MIN"} \
+  python3 "$DM/gfx/tools/pso_offline.py" --game "$GAME" --msl "$MSL_IOS/b-$V" --out "$PSO" --work "$W/build/ios/pso/work" --gpu "$GPUS" ${DM_PSO_IOS_MIN:+--os-min "$DM_PSO_IOS_MIN"} 9>&- \
     | while IFS= read -r ln; do t "$ln"; done
   if [ "${PIPESTATUS[0]}" != 0 ]; then   # an optimization: the device builds the bases on its first start without it
     t "[RED] pipeline archive: pso_offline.py failed (its output is above); the app is built without one and the device builds its pipeline bases on its first start (DM_PSO_GPUS=none skips this step)"
     rm -rf "$PSO"; PSO=
   fi
-else [ "$GFXAPI" != nvn ] || t "no pipeline archive ($([ -n "${DM_PSO_GPUS+set}" ] && echo "DM_PSO_GPUS=${GPUS:-empty}" || echo "the profile does not set pso_mtl4 on; DM_PSO_GPUS=g18p builds one")$([ -f "$GD/shader_pairs.tsv" ] || echo ', no shader_pairs.tsv'))"; fi
+else [ "$GFXAPI" != nvn ] || t "no pipeline archive ($([ -n "${DM_PSO_GPUS+set}" ] && echo "DM_PSO_GPUS=${GPUS:-empty}" || echo "the profile does not set pso_mtl4 on; DM_PSO_GPUS=$PGK builds one")$([ -f "$GD/shader_pairs.tsv" ] || echo ', no shader_pairs.tsv'))"; fi
 # The packed language (DMLanguage) is the Game language row's default, which settings.py makes the game's first language when it lacks DM_LANG: the screen and DM_LAUNCHER=0 then agree
 LD=$(python3 -c 'import json, sys; print(next((s["default"] for s in json.load(open(sys.argv[1]))["settings"] if s["env"] == "DM_LANG"), ""))' $LJ) || die "launcher settings ($LJ)"
 if [ -n "$LD" ] && [ "$LD" != "$DM_LANG" ]; then t "game language: the game has no $DM_LANG; packing $LD, its first"; export DM_LANG=$LD; fi
@@ -193,7 +217,7 @@ fi
 [ "${DM_COPY_ROMFS:-YES}" != NO ] || [ "$PREPARE_XCODE" != YES ] || echo "DM_COPY_ROMFS = NO" >> Gen/dm.xcconfig
 xcodegen generate -q > /dev/null || die "xcodegen"
 # DMCommit / DMChain: the checkout that built the app (+dirty with uncommitted changes to tracked files) and the shader chain it carries, which the host logs at start (main.c)
-COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null) && { [ -z "$(git -C "$DM" status --porcelain --untracked-files=no 2> /dev/null)" ] || COMMIT=$COMMIT+dirty
+COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null 9>&-) && { [ -z "$(git -C "$DM" status --porcelain --untracked-files=no 2> /dev/null 9>&-)" ] || COMMIT=$COMMIT+dirty
   /usr/libexec/PlistBuddy -c "Add :DMCommit string $COMMIT" Gen/Info.plist > /dev/null || die "DMCommit"; t "source: $COMMIT"; }
 case "$MSLDIR" in b-*) /usr/libexec/PlistBuddy -c "Add :DMChain string ${MSLDIR#b-}" Gen/Info.plist > /dev/null || die "DMChain";; esac
 # DM_METAL_CAPTURE=1: a development build that may write GPU frame captures (MetalCaptureEnabled; the host's DM_GPU_CAPTURE switch writes them to Documents/gpu_captures)
@@ -214,8 +238,9 @@ t "xcodebuild (Release, unsigned, iPhone + iPad)"
 mkdir -p "$O"
 xcodebuild -project DmIOS.xcodeproj -scheme DmIOS -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$DD" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= DM_COPY_GAME_RESOURCES=NO \
-  DM_XCODE_OUTPUT_ROOT="$DD" SYMROOT="$DD/Build/Products" OBJROOT="$DD/Build/Intermediates.noindex" build > "$O/build.log" 2>&1 \
+  DM_XCODE_OUTPUT_ROOT="$DD" SYMROOT="$DD/Build/Products" OBJROOT="$DD/Build/Intermediates.noindex" build > "$O/build.log" 2>&1 9>&- \
   || { grep -E 'error:' "$O/build.log" | head -20; die "xcodebuild, log $O/build.log"; }
+exec 9>&-   # the build lock (ipa_lock): signing and packing below read only this game's files
 # SYMROOT and OBJROOT above keep the unsigned build separate from the interactive Xcode app.
 APP=$DD/Build/Products/Release-iphoneos/DmIOS.app
 [ -n "$APP" ] && [ -d "$APP" ] || die "no built app"; t "app: $APP"
