@@ -4,10 +4,14 @@
 # deflate level 6, a file whose deflate is not smaller is stored (zip's rule), and names ending in a --store suffix are always stored (the profile's zip_store, compared without regard to case).
 # Speed (Info-ZIP managed about 100 MB/s on the T7): files up to BIG are read, and deflated, by a thread pool (zlib releases the GIL) while this thread writes them in order;
 # bigger files are streamed here, their CRC patched into the local header afterwards (no data descriptors). Zip64 fields wherever a size, an offset or the entry count passes its 32 / 16-bit field.
-# Usage: pack_ipa.py <out.ipa> [--store .a:.b] [--skip <archive path>]... <archive path>=<source file or folder>...
+# A streamed file is deflated by the pool too, pigz style, in PIECE pieces: each piece's compressor starts from the 32 KiB before it (zdict) and ends with a sync flush, the last with Z_FINISH,
+# so the pieces join into one standard deflate stream, as small as one compressor's to within about 0.02 %; this thread reads them, keeps the CRC and writes them in order (at most 2 per thread wait).
+# Usage: pack_ipa.py <out.ipa> [--store .a:.b] [--skip <archive path>]... [--threads N] <archive path>=<source file or folder>...
 #   Mappings are packed in command-line order; put the files that change least first, and the app last
 #   --skip: an archive path left out of the walk of the folder that holds it (folders a stale app build still has, the signature); a mapping of its own still adds it
 #   --skip-suffix: files whose names end so are left out of every walk (build_ipa.sh: the pulling vertex libraries _bp.metallib when the profile's pso_mtl4 is off, unless IOS_PULL overrides it)
+#   --threads: the threads that read and deflate files (default DM_PACK_THREADS, else one per core); 1 deflates a streamed file in one stream on this thread, without pieces: the archive is then
+#   byte for byte the one this script wrote before the pieces
 #   Writes <out.ipa>.partial and renames it at the end; prints "pack: N entries, X bytes" first (the NSP script's progress total, X = the files' bytes) and a summary line last
 #   Repeat packs reuse a file when its size, mtime_ns, ctime_ns and inode are unchanged (true on APFS). A tool that rewrites in place and restores mtime defeats this if ctime also stays
 #   unchanged; --no-reuse forces a full pack. The index holds only source metadata and compression settings; ZIP metadata comes from the old IPA.
@@ -21,6 +25,8 @@ BIG = 256 << 20      # files above this are streamed by the writer; smaller ones
 WINDOW = 2 << 30     # input bytes in the pool at once
 QUEUE = 4096         # entries in the pool at once (folders of tiny files)
 CHUNK = 16 << 20
+PIECE = 16 << 20     # a streamed file's input deflated by one pool thread
+ZDICT = 32 << 10     # deflate's window: the history a piece's compressor is given
 L32, L16 = 0xFFFFFFFF, 0xFFFF
 DIR_MODE = stat.S_IFDIR | 0o755   # a parent folder no source folder stands for (Payload/, msl/); its time is 1980-01-01, so it is the same in every pack
 Entry = collections.namedtuple('Entry', 'name path st root')   # st None: a synthetic parent; root: the mapping's source folder
@@ -64,6 +70,11 @@ def load(path, deflate):   # in the pool: (method, CRC, the bytes to write, unco
     return 0, crc, data, usize
 
 
+def piece(b, zdict, last):   # in the pool: one piece of a streamed file's deflate, ending where the next piece's starts (a sync flush) or the stream (the last)
+    c = zlib.compressobj(LEVEL, zlib.DEFLATED, -15, zdict=zdict) if zdict else zlib.compressobj(LEVEL, zlib.DEFLATED, -15)
+    return c.compress(b) + c.flush(zlib.Z_FINISH if last else zlib.Z_SYNC_FLUSH)
+
+
 def dos_time(t):
     y, mo, d, h, mi, s = time.localtime(t)[:6]
     if y < 1980: y, mo, d, h, mi, s = 1980, 1, 1, 0, 0, 0
@@ -104,6 +115,7 @@ class Zip:
         if keep: self.f.seek(keep)
         self.pos, self.cd, self.written = keep, [], 0   # written: the bytes this pack writes (entries, header patches, the central directory; main adds the index)
         self.stats = collections.Counter()
+        self.pool: cf.Executor | None = None; self.ahead = 0   # the pool that deflates a streamed file's pieces (main sets it for more than one thread) and the pieces it holds at once
 
     def w(self, b):
         self.f.write(b); self.pos += len(b); self.written += len(b)
@@ -141,20 +153,38 @@ class Zip:
     def stream(self, e, deflate):   # a big file: the local header first, its CRC (and a deflated size) patched in afterwards
         usize = e.st.st_size; z64 = usize >= L32   # a deflate that is not smaller is redone stored, so the deflated size stays below usize
         h = self.local(e, 8 if deflate else 0, 0, 0 if deflate else usize, usize, z64)
-        crc, csize, read, c = 0, 0, 0, zlib.compressobj(LEVEL, zlib.DEFLATED, -15) if deflate else None
         with open(e.path, 'rb') as f:
-            while b := f.read(CHUNK):
-                read += len(b); crc = zlib.crc32(b, crc)
-                if c: b = c.compress(b)
-                self.w(b); csize += len(b)
-            if c: b = c.flush(); self.w(b); csize += len(b)
+            if deflate and self.pool: crc, csize, read = self.pieces(f, self.pool)
+            else:
+                crc, csize, read, c = 0, 0, 0, zlib.compressobj(LEVEL, zlib.DEFLATED, -15) if deflate else None
+                while b := f.read(CHUNK):
+                    read += len(b); crc = zlib.crc32(b, crc)
+                    if c: b = c.compress(b)
+                    self.w(b); csize += len(b)
+                if c: b = c.flush(); self.w(b); csize += len(b)
         if read != usize: sys.exit(f'[RED] pack_ipa: {e.path} changed size while it was packed')
-        if c and csize >= usize:   # not smaller: stored instead
+        if deflate and csize >= usize:   # not smaller: stored instead
             self.f.seek(h[0]); self.f.truncate(); self.pos = h[0]; return self.stream(e, False)
         self.patch(h[0] + 14, struct.pack('<I', crc) + (b'' if z64 else struct.pack('<II', csize, usize)))
         if z64: self.patch(h[0] + 30 + len(h[1]) + 4, struct.pack('<QQ', usize, csize))
         self.f.seek(self.pos)
-        self.central(e, h, 8 if c else 0, crc, csize, usize)
+        self.central(e, h, 8 if deflate else 0, crc, csize, usize)
+
+    def pieces(self, f, pool):   # a streamed file deflated by the pool, PIECE bytes a task; returns (CRC, deflated size, bytes read). A piece is read ahead to know which is the last
+        crc, csize, read, zdict, q = 0, 0, 0, b'', collections.deque()
+        def one():
+            nonlocal csize
+            b = q.popleft().result(); self.w(b); csize += len(b)
+        b = f.read(PIECE)
+        while b:
+            n = f.read(PIECE)
+            read += len(b); crc = zlib.crc32(b, crc)
+            q.append(pool.submit(piece, b, zdict, not n))
+            zdict = b[-ZDICT:] if len(b) >= ZDICT else (zdict + b)[-ZDICT:]
+            b = n
+            while len(q) >= self.ahead: one()
+        while q: one()
+        return crc, csize, read
 
     def reuse(self, e, info, h, old):   # copy already compressed bytes, after the checked local header
         method, crc, csize, usize = info.compress_type, info.CRC, info.compress_size, info.file_size
@@ -232,7 +262,12 @@ def main():
     ap.add_argument('--skip', action='append', default=[], help='an archive path left out of the folder walk that would add it')
     ap.add_argument('--skip-suffix', action='append', default=[], help='files whose names end so are left out of every folder walk')
     ap.add_argument('--no-reuse', action='store_true', help='pack every file again, without copying from the old IPA')
+    ap.add_argument('--threads', type=int, help='threads that read and deflate files (default: DM_PACK_THREADS, else one per core); 1 deflates each streamed file in one stream, without pieces')
     a = ap.parse_args()
+    env = os.environ.get('DM_PACK_THREADS', '')
+    if a.threads is None and env and not (env.isascii() and env.isdigit()): sys.exit(f'[RED] pack_ipa: DM_PACK_THREADS is not a number of threads: {env}')
+    threads = a.threads if a.threads is not None else int(env) if env else os.cpu_count() or 1
+    if threads < 1: sys.exit(f'[RED] pack_ipa: {threads} threads (--threads or DM_PACK_THREADS): at least 1')
     maps = []
     for m in a.maps:
         arc, sep, src = m.partition('=')
@@ -272,7 +307,8 @@ def main():
             method, crc, data, usize = value.result()
             if usize != e.st.st_size: sys.exit(f'[RED] pack_ipa: {e.path} changed size while it was packed')
             z.put(e, method, crc, data, usize); return usize
-        with cf.ThreadPoolExecutor(os.cpu_count()) as pool:
+        with cf.ThreadPoolExecutor(threads) as pool:
+            if threads > 1: z.pool, z.ahead = pool, max(2, min(2 * threads, WINDOW // PIECE))   # the pool is idle while a file streams (pend is written first)
             for e, deflate in zip(es[len(keep):], flags[len(keep):]):
                 if not (e.st and stat.S_ISREG(e.st.st_mode)): pend.append(('other', e, None)); continue
                 info = infos.get(e.name)

@@ -188,9 +188,9 @@ class PackIpa(unittest.TestCase):
     def test_stream_drains_pool_before_later_jobs(self):
         load, stream, events, submitted = pack.load, pack.Zip.stream, [], []
         class Pool(pack.cf.ThreadPoolExecutor):
-            def submit(self, fn, path, deflate):
-                submitted.append(Path(path).name)
-                return super().submit(fn, path, deflate)
+            def submit(self, fn, *args):
+                if fn is not pack.piece: submitted.append(Path(args[0]).name)   # a streamed file's pieces carry bytes, not a path
+                return super().submit(fn, *args)
         def loaded(path, deflate):
             result = load(path, deflate); events.append(Path(path).name); return result
         def streamed(z, e, deflate):
