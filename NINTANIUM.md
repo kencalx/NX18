@@ -30,6 +30,10 @@ The **Picture** setting (start screen and the in-game gear menu) now has **Fit**
 
 The picture is drawn once, straight at the screen's resolution, so Stretch isn't blurrier than Fit. Touches on the game's touch screen line up with the stretched picture. In portrait and on a TV the picture keeps its shape. `DM_PICTURE_FIT=stretch` in the app's `Documents/env.txt` sets it from a file. MetalFX upscaling applies only to a picture that keeps its shape, so a stretched picture uses standard smooth scaling.
 
+### The gear appears on a double tap
+
+The gear is hidden while you play: **double-tap** anywhere except on a button, the D-pad or the left stick to show it. It fades out again after 5 seconds if you don't touch it, and stays while its menu is open. It also shows for 5 seconds when the game starts, and always with VoiceOver on. A double tap on a control counts as two presses, not a request for the menu, so pressing a button twice quickly never brings it up.
+
 ### Cheats on iPhone and iPad
 
 - The app now has a `cheats` folder in the Files app, under the app's name, with a `README.txt` in it. Put an Atmosphère cheat file there, named after the game's build ID (`0123456789ABCDEF.txt`), or an SD card's `atmosphere/contents/<title ID>/cheats/` folder.
