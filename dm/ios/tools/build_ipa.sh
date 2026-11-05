@@ -20,6 +20,10 @@
 #   program 0's being GAME / PATCHED / ROMFS / MSL_IOS / GFXAPI (the app's name, version, icon and identity are its). Each program's modules go in sections tagged p<N> (gen_embed.py --tag),
 #   its tables and launcher settings in dm/p<N>/, its RomFS and offline HTML pages in p<N>/, its shader libraries in msl/p<N>/, and the host is built over a table of their profiles
 #   (game.py header_multi, the first program's profile lists them); main.m picks the program the last oe::ExecuteProgram recorded (Documents/program.bin). With --prepare-xcode the project's build phase copies them so (stage_resources.sh)
+#   DM_GEN_REUSE=0 deletes Gen/ and writes all of it again at every run, runs xcodegen every time and signs the executable in Xcode's build folder, as before (default 1: Gen/ is generated in
+#   Gen/.stage and only the files whose bytes changed replace Gen/'s, the Xcode project is generated again only when its inputs changed, and the IPA's executable is signed in a copy of the app);
+#   DM_SIGN_REUSE=0 signs the executable in Xcode's build folder at every build, as before, and packs it from there (default: it is signed in a copy of the app, $O/sign/DmIOS.app, which is
+#   packed instead and kept while the app Xcode built, the entitlements, codesign and macOS are the same)
 set -u
 cd "$(dirname "$0")/.." || exit 1
 IOS_SOURCE=$PWD; IOS=$PWD; DM=$(cd .. && pwd)
@@ -117,23 +121,31 @@ except OSError as e: sys.exit(e.strerror or str(e))'   # 3: another build holds 
   echo "$GAME ($DM_DISPLAY_NAME), pid $$, since $(date +%T)" > "$L"
 }
 [ "$PREPARE_XCODE" = YES ] || ipa_lock   # a prepared project has its own folder
-t "generate Gen/ (host sources, embedded modules, tables)"
-rm -rf Gen && mkdir -p Gen/dm || die "mkdir Gen"
-python3 tools/gen_build.py "$DM/host" Gen > Gen/dm.xcconfig || die "gen_build"
+# Every run makes all of Gen/ again, from nothing, in the generation folder G. With DM_GEN_REUSE on (the default) G is Gen/.stage, and dm/ios/tools/gen_reuse.py sync then makes Gen/ the same
+# as it: a file whose bytes did not change stays as it is, times and all, any other file is replaced, and a file this run did not make (another game's tables, cheats, icon or variants pages)
+# goes. Xcode's build goes by the size and modification time of each input (and keeps working across the NSP script's tar of its derived data, tree_tar.py, which keeps the times), so a
+# repeat build of the same game assembles embed.S, links, runs actool and copies the tables only when they changed, and another game's build gets exactly its own files. embed.S names
+# the sha256 of every file it includes (gen_embed.py), since Xcode cannot see a change in them. Gen/.reuse holds what tells a later run that the icon and the Xcode project are this run's.
+# DM_GEN_REUSE=0: G is Gen/ itself, deleted first, as before
+GEN_REUSE=1; [ "${DM_GEN_REUSE:-1}" != 0 ] || GEN_REUSE=0
+t "generate Gen/ (host sources, embedded modules, tables$([ "$GEN_REUSE" = 1 ] && echo '; only the files that changed replace those in Gen/' || echo '; DM_GEN_REUSE=0: all of them again'))"
+if [ "$GEN_REUSE" = 1 ]; then G=Gen/.stage; { [ -d Gen ] && [ ! -L Gen ]; } || rm -rf Gen; rm -rf "$G" && mkdir -p "$G/dm" Gen/.reuse || die "mkdir $G"
+else G=Gen; rm -rf Gen && mkdir -p Gen/dm || die "mkdir Gen"; fi
+python3 tools/gen_build.py "$DM/host" "$G" > "$G/dm.xcconfig" || die "gen_build"
 if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's modules under its tag (the host is built over a table of the programs' profiles: the first program's profile lists them, game.py header_multi)
-  F=; : > Gen/embed.S
+  F=; : > "$G/embed.S"
   while IFS= read -r row; do prog_set "$row"
     J=(); [ -f "$(dirname "$ROMFS")/jit/jit.img" ] && J=(--jit "$(dirname "$ROMFS")/jit/jit.img")   # the nn::jit image (dm/tools/jit_capture.py), beside the RomFS
-    F="$F $(python3 tools/gen_embed.py --tag "p$PN" ${J[@]+"${J[@]}"} "$PATCHED" "Gen/embed_p$PN.S" $MODS)" || die "gen_embed (program $PN)"
-    cat "Gen/embed_p$PN.S" >> Gen/embed.S && rm "Gen/embed_p$PN.S"
+    F="$F $(python3 tools/gen_embed.py --tag "p$PN" --ref-dir "$IOS/Gen" ${J[@]+"${J[@]}"} "$PATCHED" "$G/embed_p$PN.S" $MODS)" || die "gen_embed (program $PN)"
+    cat "$G/embed_p$PN.S" >> "$G/embed.S" && rm "$G/embed_p$PN.S"
   done < <(prog_rows); prog_back
 else J=(); [ -f "$(dirname "$ROMFS")/jit/jit.img" ] && J=(--jit "$(dirname "$ROMFS")/jit/jit.img")
-  F=$(python3 tools/gen_embed.py ${J[@]+"${J[@]}"} "$PATCHED" Gen/embed.S $MODS) || die "gen_embed"; fi
-echo "OTHER_LDFLAGS = \$(inherited) \$(DM_FRAMEWORKS) $F" >> Gen/dm.xcconfig
+  F=$(python3 tools/gen_embed.py --ref-dir "$IOS/Gen" ${J[@]+"${J[@]}"} "$PATCHED" "$G/embed.S" $MODS) || die "gen_embed"; fi   # --ref-dir: the variants pages' .incbin names Gen/, where they end up
+echo "OTHER_LDFLAGS = \$(inherited) \$(DM_FRAMEWORKS) $F" >> "$G/dm.xcconfig"
 # The Swift language mode of the app's Swift (project.yml SWIFT_VERSION): 6.0, the newest; DM_SWIFT_VERSION=5 builds in the Swift 5 mode, should a newer compiler find fault with the 6 mode
-echo "DM_SWIFT_VERSION = ${DM_SWIFT_VERSION:-6.0}" >> Gen/dm.xcconfig
+echo "DM_SWIFT_VERSION = ${DM_SWIFT_VERSION:-6.0}" >> "$G/dm.xcconfig"
 case "${DM_DEVICE_FAMILY:-1,2}" in 1 | 2 | 1,2) ;; *) die "DM_DEVICE_FAMILY must be 1 (iPhone), 2 (iPad) or 1,2: $DM_DEVICE_FAMILY";; esac
-echo "DM_DEVICE_FAMILY = ${DM_DEVICE_FAMILY:-1,2}" >> Gen/dm.xcconfig   # the devices the app installs on (TARGETED_DEVICE_FAMILY, project.yml): the NSP script's --device
+echo "DM_DEVICE_FAMILY = ${DM_DEVICE_FAMILY:-1,2}" >> "$G/dm.xcconfig"   # the devices the app installs on (TARGETED_DEVICE_FAMILY, project.yml): the NSP script's --device
 # One program's tables into TD: the rewriter's, the shader tables and the launcher's settings
 program_tables() {
 cp "$PATCHED"/*.fixups.tsv "$PATCHED"/*.gates.tsv "$PATCHED"/*.cuts.tsv "$PATCHED"/*.obs.tsv $TD/ || die "copy rewriter tables"
@@ -147,11 +159,11 @@ else cp "$GD/shader_map.tsv" "$GD/pso_manifest.tsv" "$GD/c1_full.tsv" $TD/ || di
 L=$(GFXAPI="$GFXAPI" python3 "$DM/games/settings.py" "$GAME" "$PATCHED" "$VNACP" $TD/launcher.json) || die "launcher settings (dm/games/settings.py)"; t "launcher: $L"
 }
 if [ -n "${PROGRAMS_TSV:-}" ]; then
-  : > Gen/dm/programs.txt
-  while IFS= read -r row; do prog_set "$row"; TD=Gen/dm/p$PN; mkdir -p "$TD" || die "mkdir $TD"; VNACP=$(dirname "$ROMFS")/control.nacp; [ "$PN" != 0 ] || VNACP=${CONTROL:-$VNACP}; program_tables; echo "$PN" >> Gen/dm/programs.txt; done < <(prog_rows)
+  : > "$G/dm/programs.txt"
+  while IFS= read -r row; do prog_set "$row"; TD=$G/dm/p$PN; mkdir -p "$TD" || die "mkdir $TD"; VNACP=$(dirname "$ROMFS")/control.nacp; [ "$PN" != 0 ] || VNACP=${CONTROL:-$VNACP}; program_tables; echo "$PN" >> "$G/dm/programs.txt"; done < <(prog_rows)
   prog_back
-  LJ=Gen/dm/p0/launcher.json
-else TD=Gen/dm; program_tables; LJ=Gen/dm/launcher.json; fi
+  LJ=$G/dm/p0/launcher.json
+else TD=$G/dm; program_tables; LJ=$G/dm/launcher.json; fi
 # The pipeline archive made offline (dm/gfx/tools/pso_offline.py): the base of every shader pair, compiled here by metal-tt for each GPU architecture in DM_PSO_GPUS (comma-separated, as
 # MTLDevice.architecture names them: g19p = the A20 Pro of the iPhone 18 Pro Max, g16g = the M4 of the iPad Pro; none = no archive), so the device does not build them on its first start
 # (Breath of the Wild: 15,767 bases, 7-8 minutes on an iPhone 17 Pro Max). The host opens only the archive named after its device's GPU (nvn_mtl.m pso_bundle_open).
@@ -179,24 +191,33 @@ else [ "$GFXAPI" != nvn ] || t "no pipeline archive ($([ -n "${DM_PSO_GPUS+set}"
 LD=$(python3 -c 'import json, sys; print(next((s["default"] for s in json.load(open(sys.argv[1]))["settings"] if s["env"] == "DM_LANG"), ""))' $LJ) || die "launcher settings ($LJ)"
 if [ -n "$LD" ] && [ "$LD" != "$DM_LANG" ]; then t "game language: the game has no $DM_LANG; packing $LD, its first"; export DM_LANG=$LD; fi
 # Diagnostic build: DM_ENV_FILE=file → dm/env.txt in the bundle (main.m sets one environment variable per line at boot)
-if [ -n "${DM_ENV_FILE:-}" ]; then cp "$DM_ENV_FILE" Gen/dm/env.txt || die "copy DM_ENV_FILE"; t "env: $(grep -v '^#' "$DM_ENV_FILE" | tr '\n' ' ')"; fi
+if [ -n "${DM_ENV_FILE:-}" ]; then cp "$DM_ENV_FILE" "$G/dm/env.txt" || die "copy DM_ENV_FILE"; t "env: $(grep -v '^#' "$DM_ENV_FILE" | tr '\n' ' ')"; fi
 # Cheats from the NSP script's mods folder (DM_PACKED_CHEATS, dm/tools/game_mods.py): dm/cheats in the bundle, which main.m copies into Documents/cheats at the first start (a file the player has there is kept)
-if [ -n "${DM_PACKED_CHEATS:-}" ] && [ -d "$DM_PACKED_CHEATS" ]; then mkdir -p Gen/dm/cheats && cp "$DM_PACKED_CHEATS"/*.txt Gen/dm/cheats/ || die "copy DM_PACKED_CHEATS"; t "cheats: $(cd "$DM_PACKED_CHEATS" && ls *.txt | tr '\n' ' ')"; fi
+if [ -n "${DM_PACKED_CHEATS:-}" ] && [ -d "$DM_PACKED_CHEATS" ]; then mkdir -p "$G/dm/cheats" && cp "$DM_PACKED_CHEATS"/*.txt "$G/dm/cheats/" || die "copy DM_PACKED_CHEATS"; t "cheats: $(cd "$DM_PACKED_CHEATS" && ls *.txt | tr '\n' ' ')"; fi
 # The shader libraries go into the archive as DmIOS.app/msl/<folder> (main.m sets DM_MSL_DIR to it)
 if [ "$GFXAPI" = vulkan ]; then MSLDIR=vk; elif [ "$GFXAPI" = gl ]; then MSLDIR=gl; else MSLDIR=b-$V; fi
 # Shared-font stand-ins: standard = macOS's Arial Unicode (absent on iOS), Nintendo extension = button icons generated by make_ext_font.py (needs fontTools; FONT_PY names a python that has it)
-mkdir -p Gen/dm/font && cp "${STD_FONT:-/System/Library/Fonts/Supplemental/Arial Unicode.ttf}" Gen/dm/font/standard.ttf || die "copy standard font (STD_FONT=a TTF)"
-"${FONT_PY:-python3}" "$DM/tools/make_ext_font.py" Gen/dm/font/nintendo_ext.ttf > /dev/null || die "make_ext_font.py (pip install fonttools, or FONT_PY=python with fontTools)"
+mkdir -p "$G/dm/font" && cp "${STD_FONT:-/System/Library/Fonts/Supplemental/Arial Unicode.ttf}" "$G/dm/font/standard.ttf" || die "copy standard font (STD_FONT=a TTF)"
+# fontTools stamps the font's head table (created, modified) with the time it is made, unless SOURCE_DATE_EPOCH names another (fontTools 4.0 and later, for reproducible builds). With
+# DM_GEN_REUSE on it is a fixed date, 2020-01-01, unless the environment sets one: the same font then has the same bytes and Gen/dm, which Xcode copies whole into the app, stays unchanged.
+# Font readers do not use these dates
+FE=; [ "$GEN_REUSE" != 1 ] || FE=${SOURCE_DATE_EPOCH:-1577836800}
+( [ -z "$FE" ] || export SOURCE_DATE_EPOCH="$FE"; exec "${FONT_PY:-python3}" "$DM/tools/make_ext_font.py" "$G/dm/font/nintendo_ext.ttf" ) > /dev/null || die "make_ext_font.py (pip install fonttools, or FONT_PY=python with fontTools)"
 # App icon: the game's own icon (icon.jpg saved from the control data by nx_extract, the English 256x256 one). DM_ICON can point at another image; by default the icon.jpg next to the RomFS is used.
 # It is scaled to a 1024x1024 PNG in the asset catalog Gen/Assets.xcassets (a single-size app icon; actool generates the other sizes); with neither, no icon is set and the home-screen icon is blank.
 # The catalog is always created (the project always lists it, see project.yml); without an icon it stays empty and DM_APPICON is not set
 ICON=${DM_ICON:-$(dirname "$ROMFS")/icon.jpg}
-mkdir -p Gen/Assets.xcassets && printf '{"info":{"author":"xcode","version":1}}\n' > Gen/Assets.xcassets/Contents.json || die "asset catalog"
+mkdir -p "$G/Assets.xcassets" && printf '{"info":{"author":"xcode","version":1}}\n' > "$G/Assets.xcassets/Contents.json" || die "asset catalog"
+# With DM_GEN_REUSE on, the PNG Gen/ has is used again when the last build made it from an image with the same bytes (Gen/.reuse/icon: that image's sha256 with the macOS build, then the
+# PNG's sha256), so sips does not run and the catalog keeps its bytes, whether or not sips writes the same PNG twice; another image, another game's, is converted
+IK=; IP=Gen/Assets.xcassets/AppIcon.appiconset/icon.png
 if [ -f "$ICON" ]; then
-  AI=Gen/Assets.xcassets/AppIcon.appiconset; mkdir -p "$AI" || die "mkdir $AI"
-  sips -s format png -z 1024 1024 "$ICON" --out "$AI/icon.png" > /dev/null || die "sips: cannot convert the icon $ICON"
+  AI=$G/Assets.xcassets/AppIcon.appiconset; mkdir -p "$AI" || die "mkdir $AI"
+  [ "$GEN_REUSE" != 1 ] || IK=$(python3 -I tools/gen_reuse.py digest --text "sips -s format png -z 1024 1024, macOS $(sw_vers -buildVersion 2> /dev/null)" --file "$ICON") || die "the icon's key"
+  if [ -n "$IK" ] && [ -f "$IP" ] && [ "$(cat Gen/.reuse/icon 2> /dev/null)" = "$IK $(python3 -I tools/gen_reuse.py digest --file "$IP")" ]; then cp "$IP" "$AI/icon.png" || die "copy the icon"
+  else sips -s format png -z 1024 1024 "$ICON" --out "$AI/icon.png" > /dev/null || die "sips: cannot convert the icon $ICON"; fi
   printf '{"images":[{"filename":"icon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}\n' > "$AI/Contents.json"
-  echo "DM_APPICON = AppIcon" >> Gen/dm.xcconfig
+  echo "DM_APPICON = AppIcon" >> "$G/dm.xcconfig"
   t "app icon: $ICON"
 else t "no app icon ($ICON not found): the home-screen icon stays blank"; fi
 # The memory entitlements every build asks for: Increased Memory Limit (iOS lets the app use more of the device's RAM before it closes it; the bigger games need it) and Extended Virtual
@@ -207,25 +228,52 @@ ENT_DEFAULT='<plist version="1.0"><dict><key>com.apple.developer.kernel.increase
 # A prepared Xcode project is signed in Xcode, so it asks for them; DM_ENTITLEMENTS=another plist, or empty for none.
 # The unsigned IPA carries the same request in its executable's ad-hoc signature below; the install tool replaces that signature.
 if [ "$PREPARE_XCODE" = YES ] && [ -n "${DM_ENTITLEMENTS-default}" ]; then
-  if [ -n "${DM_ENTITLEMENTS:-}" ]; then cp "$DM_ENTITLEMENTS" Gen/DmIOS.entitlements || die "copy DM_ENTITLEMENTS"
+  if [ -n "${DM_ENTITLEMENTS:-}" ]; then cp "$DM_ENTITLEMENTS" "$G/DmIOS.entitlements" || die "copy DM_ENTITLEMENTS"
   else printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
-    "$ENT_DEFAULT" > Gen/DmIOS.entitlements || die "entitlements"; fi
-  echo "CODE_SIGN_ENTITLEMENTS = Gen/DmIOS.entitlements" >> Gen/dm.xcconfig
-  t "entitlements: $(plutil -convert json -o - Gen/DmIOS.entitlements)"
+    "$ENT_DEFAULT" > "$G/DmIOS.entitlements" || die "entitlements"; fi
+  echo "CODE_SIGN_ENTITLEMENTS = Gen/DmIOS.entitlements" >> "$G/dm.xcconfig"
+  t "entitlements: $(plutil -convert json -o - "$G/DmIOS.entitlements")"
 fi
 # DM_COPY_ROMFS=NO also for the prepared project: its Copy game resources phase (stage_resources.sh) then leaves the game files out and writes the image's identity; Gen/dm.xcconfig is made again by every run
-[ "${DM_COPY_ROMFS:-YES}" != NO ] || [ "$PREPARE_XCODE" != YES ] || echo "DM_COPY_ROMFS = NO" >> Gen/dm.xcconfig
-xcodegen generate -q > /dev/null || die "xcodegen"
-# DMCommit / DMChain: the checkout that built the app (+dirty with uncommitted changes to tracked files) and the shader chain it carries, which the host logs at start (main.c)
-COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null 9>&-) && { [ -z "$(git -C "$DM" status --porcelain --untracked-files=no 2> /dev/null 9>&-)" ] || COMMIT=$COMMIT+dirty
-  /usr/libexec/PlistBuddy -c "Add :DMCommit string $COMMIT" Gen/Info.plist > /dev/null || die "DMCommit"; t "source: $COMMIT"; }
-case "$MSLDIR" in b-*) /usr/libexec/PlistBuddy -c "Add :DMChain string ${MSLDIR#b-}" Gen/Info.plist > /dev/null || die "DMChain";; esac
-# DM_METAL_CAPTURE=1: a development build that may write GPU frame captures (MetalCaptureEnabled; the host's DM_GPU_CAPTURE switch writes them to Documents/gpu_captures)
-if [ "${DM_METAL_CAPTURE:-0}" = 1 ]; then /usr/libexec/PlistBuddy -c "Add :MetalCaptureEnabled bool true" Gen/Info.plist > /dev/null || die "MetalCaptureEnabled"; t "Metal frame capture: enabled (DM_METAL_CAPTURE=1)"; fi
+[ "${DM_COPY_ROMFS:-YES}" != NO ] || [ "$PREPARE_XCODE" != YES ] || echo "DM_COPY_ROMFS = NO" >> "$G/dm.xcconfig"
 RP=; if [ -n "${PROGRAMS_TSV:-}" ]; then   # a game of several programs: each program's files, which the Xcode build phase copies under p<index> as the IPA has them (stage_resources.sh)
-  RP=Gen/resources_programs.tsv; printf '# program\tRomFS\tmarker\tiOS shaders\tshader folder (build_ipa.sh)\n' > "$RP"
-  M0=$MSLDIR; while IFS= read -r row; do prog_set "$row"; printf '%s\t%s\t%s\t%s\t%s\n' "$PN" "$ROMFS" "$MARKER" "$MSL_IOS/$MSLDIR" "$MSLDIR" >> "$RP"; done < <(prog_rows); prog_back; MSLDIR=$M0; fi
-DM_RESOURCE_BUILD=${PKG:-} GAME=$GAME python3 tools/gen_resources.py "$IOS" "$ROMFS" "$MARKER" "$MSL_IOS/$MSLDIR" "$MSLDIR" "$AOC" "$XCODE_DD" "$DM/gfx/nvn/dmsh_chain.h" "$PSO" $RP || die "generate Xcode resource paths"
+  RP=Gen/resources_programs.tsv; printf '# program\tRomFS\tmarker\tiOS shaders\tshader folder (build_ipa.sh)\n' > "$G/resources_programs.tsv"   # RP: the path resources.env names
+  M0=$MSLDIR; while IFS= read -r row; do prog_set "$row"; printf '%s\t%s\t%s\t%s\t%s\n' "$PN" "$ROMFS" "$MARKER" "$MSL_IOS/$MSLDIR" "$MSLDIR" >> "$G/resources_programs.tsv"; done < <(prog_rows); prog_back; MSLDIR=$M0; fi
+gen_res() { DM_RESOURCE_BUILD=${PKG:-} GAME=$GAME python3 tools/gen_resources.py "$@" "$IOS" "$ROMFS" "$MARKER" "$MSL_IOS/$MSLDIR" "$MSLDIR" "$AOC" "$XCODE_DD" "$DM/gfx/nvn/dmsh_chain.h" "$PSO" $RP || die "generate Xcode resource paths"; }
+if [ "$GEN_REUSE" = 1 ]; then   # resources.env and the derived data line into G too, then G becomes Gen/ (the icon's record goes first and is written again for this run's icon)
+  gen_res --gen "$G" --no-workspace
+  rm -f Gen/.reuse/icon
+  S=$(python3 -I tools/gen_reuse.py sync "$G" Gen --keep .reuse --keep Info.plist) || die "update Gen/ from $G"; t "Gen/: $S"
+  [ -z "$IK" ] || [ ! -f "$IP" ] || echo "$IK $(python3 -I tools/gen_reuse.py digest --file "$IP")" > Gen/.reuse/icon || die "Gen/.reuse/icon"
+fi
+# DMCommit / DMChain: the checkout that built the app (+dirty with uncommitted changes to tracked files) and the shader chain it carries, which the host logs at start (main.c)
+COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null 9>&-) && { [ -z "$(git -C "$DM" status --porcelain --untracked-files=no 2> /dev/null 9>&-)" ] || COMMIT=$COMMIT+dirty; } || COMMIT=
+plist_keys() {   # what this script adds to the Info.plist xcodegen writes
+  [ -z "$COMMIT" ] || /usr/libexec/PlistBuddy -c "Add :DMCommit string $COMMIT" Gen/Info.plist > /dev/null || die "DMCommit"
+  case "$MSLDIR" in b-*) /usr/libexec/PlistBuddy -c "Add :DMChain string ${MSLDIR#b-}" Gen/Info.plist > /dev/null || die "DMChain";; esac
+  # DM_METAL_CAPTURE=1: a development build that may write GPU frame captures (MetalCaptureEnabled; the host's DM_GPU_CAPTURE switch writes them to Documents/gpu_captures)
+  [ "${DM_METAL_CAPTURE:-0}" != 1 ] || /usr/libexec/PlistBuddy -c "Add :MetalCaptureEnabled bool true" Gen/Info.plist > /dev/null || die "MetalCaptureEnabled"
+}
+# With DM_GEN_REUSE on, xcodegen runs only when the project's inputs changed: project.yml, the environment values it names (the app's name, bundle ID, version, language, frame-rate counter,
+# scheme), xcodegen's version, the files it lists (Sources/ and Gen/, not inside the folder Gen/dm or the catalog), Gen/dm.xcconfig, the entitlements and the keys plist_keys adds; and only
+# when the project and Info.plist are still what it wrote then (Gen/.reuse/xcodegen: both digests). Otherwise it runs as before, and an Info.plist with the bytes of the last one keeps its times
+xc_out() { python3 -I tools/gen_reuse.py digest --file DmIOS.xcodeproj/project.pbxproj --file DmIOS.xcodeproj/project.xcworkspace/contents.xcworkspacedata --tree DmIOS.xcodeproj/xcshareddata --file Gen/Info.plist; }
+XK=; [ "$GEN_REUSE" != 1 ] || XK=$(python3 -I tools/gen_reuse.py digest --text "$IOS" --text "$(xcodegen --version 2>&1)" --file project.yml --env-of project.yml --file Gen/dm.xcconfig \
+  --file Gen/DmIOS.entitlements --list Sources --list Gen --skip Gen/.reuse --skip Gen/.stage --skip Gen/Info.plist --shallow Gen/dm --shallow Gen/Assets.xcassets \
+  --text "DMCommit $COMMIT, $MSLDIR, MetalCaptureEnabled ${DM_METAL_CAPTURE:-0}") || die "the Xcode project's inputs"
+if [ -n "$XK" ] && [ "$(cat Gen/.reuse/xcodegen 2> /dev/null)" = "$XK $(xc_out)" ]; then t "Xcode project: its inputs are unchanged, kept (DM_GEN_REUSE=0 generates it again)"
+else
+  [ "$GEN_REUSE" != 1 ] || [ ! -f Gen/Info.plist ] || mv -f Gen/Info.plist Gen/.reuse/Info.plist.last || die "Info.plist"
+  xcodegen generate -q > /dev/null || die "xcodegen"
+  plist_keys
+  if [ "$GEN_REUSE" = 1 ]; then
+    if [ -f Gen/.reuse/Info.plist.last ] && cmp -s Gen/.reuse/Info.plist.last Gen/Info.plist; then mv -f Gen/.reuse/Info.plist.last Gen/Info.plist || die "Info.plist"; else rm -f Gen/.reuse/Info.plist.last; fi
+    echo "$XK $(xc_out)" > Gen/.reuse/xcodegen || die "Gen/.reuse/xcodegen"
+  fi
+fi
+[ -z "$COMMIT" ] || t "source: $COMMIT"
+[ "${DM_METAL_CAPTURE:-0}" != 1 ] || t "Metal frame capture: enabled (DM_METAL_CAPTURE=1)"
+if [ "$GEN_REUSE" = 1 ]; then gen_res --workspace-only; else gen_res; fi   # the workspace settings after xcodegen; DM_GEN_REUSE=0 writes the Gen files here too, as before
 if [ "$PREPARE_XCODE" = YES ]; then
   t "Xcode project: $IOS/DmIOS.xcodeproj"
   t "Xcode derived data: $XCODE_DD"
@@ -253,22 +301,47 @@ rm -rf "$APP/msl" "$O/Payload"   # Payload/: what the copy-and-zip packing left 
 # The entitlements of an unsigned IPA: an unsigned build has no signature for a sideloader to read them from, so the Increased Memory Limit request would be lost (AltStore and others carry over
 # the entitlements of the signature they replace; the Xcode project gets them through CODE_SIGN_ENTITLEMENTS, above). The executable gets an ad-hoc signature that carries them: the sideloader
 # replaces the signature and keeps the entitlements. Only the executable is signed: the bundle's resources are packed from elsewhere and the signature is replaced anyway
+# Where: in a copy of the app, $O/sign/DmIOS.app (an APFS clone where the volume can: no space, no time), which is then packed in its place. Signed in Xcode's own product, the executable
+# looked changed to Xcode, which linked it again at the next build, and to pack_ipa.py, which keeps an IPA entry only while its file's size, times and inode are the same, so it was deflated
+# again. The copy is signed again only when the app Xcode built (every file but the folders the packing skips: codesign signs the app the executable is in, so its resources count), the
+# entitlements, codesign or the macOS build differ from the last signing, or the copy was touched since ($O/sign/key); a repeat build then packs the same signed executable.
+# DM_SIGN_REUSE=0 (or DM_GEN_REUSE=0) signs Xcode's product in place at every build, as before
+PACK_APP=$APP   # the app the IPA is packed from
 if [ -n "${DM_ENTITLEMENTS-default}" ]; then
   ENT=$O/DmIOS.entitlements
   if [ -n "${DM_ENTITLEMENTS:-}" ]; then cp "$DM_ENTITLEMENTS" "$ENT" || die "copy DM_ENTITLEMENTS"
   else printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
     "$ENT_DEFAULT" > "$ENT" || die "entitlements"; fi
   EXE=$APP/DmIOS; [ ! -f "$APP/Info.plist" ] || EXE=$APP/$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist") || die "CFBundleExecutable of $APP"
-  xattr -cr "$EXE" 2> /dev/null   # codesign refuses a file with a resource fork, Finder information or quarantine attributes
-  codesign --force --sign - --entitlements "$ENT" "$EXE" || die "ad-hoc signature with the entitlements"
-  codesign -d --entitlements - "$EXE" > /dev/null 2>&1 || die "the executable's signature has no entitlements"
-  t "entitlements in the executable's ad-hoc signature (the install tool re-signs and keeps them)"
+  if [ "${DM_GEN_REUSE:-1}" != 0 ] && [ "${DM_SIGN_REUSE:-1}" != 0 ]; then
+    SD=$O/sign; SA=$O/sign/DmIOS.app; SX=$SA/${EXE##*/}; CS=(); TS=()
+    for f in _CodeSignature embedded.mobileprovision msl aoc romfs romfs.img romfs.id html jit; do CS+=(--skip "$f"); TS+=(--skip "$APP/$f"); done   # the packing's SKIP below
+    SK=$(python3 -I tools/gen_reuse.py digest --text "codesign --force --sign - --entitlements, $(command -v codesign), macOS $(sw_vers -buildVersion 2> /dev/null)" --file "$ENT" --tree "$APP" "${TS[@]}") ||
+      die "the signature's inputs ($APP)"
+    if [ -f "$SX" ] && [ "$(cat "$SD/key" 2> /dev/null)" = "$SK $(python3 -I tools/gen_reuse.py digest --stat "$SA")" ] && codesign -d --entitlements - "$SX" > /dev/null 2>&1; then
+      t "entitlements: the app is the one signed last time, its ad-hoc signature is kept ($SA; DM_SIGN_REUSE=0 signs it again)"
+    else
+      rm -f "$SD/key"; mkdir -p "$SD" || die "mkdir $SD"
+      python3 -I tools/gen_reuse.py copy-app "$APP" "$SA" "${CS[@]}" || die "copy $APP to $SA"
+      xattr -cr "$SA" 2> /dev/null   # codesign refuses a file with a resource fork, Finder information or quarantine attributes
+      codesign --force --sign - --entitlements "$ENT" "$SX" || die "ad-hoc signature with the entitlements"
+      codesign -d --entitlements - "$SX" > /dev/null 2>&1 || die "the executable's signature has no entitlements"
+      echo "$SK $(python3 -I tools/gen_reuse.py digest --stat "$SA")" > "$SD/key" || die "$SD/key"
+      t "entitlements in the executable's ad-hoc signature (the install tool re-signs and keeps them)"
+    fi
+    PACK_APP=$SA
+  else
+    xattr -cr "$EXE" 2> /dev/null   # codesign refuses a file with a resource fork, Finder information or quarantine attributes
+    codesign --force --sign - --entitlements "$ENT" "$EXE" || die "ad-hoc signature with the entitlements"
+    codesign -d --entitlements - "$EXE" > /dev/null 2>&1 || die "the executable's signature has no entitlements"
+    t "entitlements in the executable's ad-hoc signature (the install tool re-signs and keeps them)"
+  fi
 fi
 P=Payload/DmIOS.app
 SKIP=(--skip $P/_CodeSignature --skip $P/embedded.mobileprovision --skip $P/msl --skip $P/aoc --skip $P/romfs --skip $P/romfs.img --skip $P/romfs.id --skip $P/html --skip $P/jit)
 if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's shader libraries, RomFS, offline HTML pages and nn::jit image under its own folder
   [ "${DM_COPY_ROMFS:-YES}" != NO ] || die "DM_COPY_ROMFS=NO: a game of several programs keeps its programs' files in the app"
-  MAPS=("$P=$APP")
+  MAPS=("$P=${PACK_APP:-$APP}")   # PACK_APP: the signed copy (above)
   if [ -n "$AOC" ] && [ -d "$AOC" ]; then MAPS+=("$P/aoc=$AOC"); fi
   while IFS= read -r row; do prog_set "$row"; SKIP+=(--skip "$P/p$PN")
     if [ -f "$ROMFS" ]; then MAPS+=("$P/p$PN/romfs.img=$ROMFS"); else MAPS+=("$P/p$PN/romfs=$ROMFS"); fi
@@ -289,7 +362,7 @@ if [ "${DM_COPY_ROMFS:-YES}" = NO ]; then
 elif [ -f "$ROMFS" ]; then MAPS=("$P/romfs.img=$ROMFS"); else MAPS=("$P/romfs=$ROMFS"); fi
 if [ -n "$AOC" ] && [ -d "$AOC" ]; then MAPS+=("$P/aoc=$AOC"); t "add-on content: $(ls "$AOC" | tr '\n' ' ')"; fi
 if [ -n "${PSO:-}" ]; then MAPS+=("$P/pso=$PSO"); fi
-MAPS+=("$P/msl/$MSLDIR=$MSL_IOS/$MSLDIR" "$P=$APP")
+MAPS+=("$P/msl/$MSLDIR=$MSL_IOS/$MSLDIR" "$P=${PACK_APP:-$APP}")   # PACK_APP: the signed copy (above)
   if [ -d "$(dirname "$ROMFS")/html" ]; then MAPS+=("$P/html=$(dirname "$ROMFS")/html"); t "offline HTML pages: $(dirname "$ROMFS")/html"; fi   # beside its RomFS, where the host finds them (hle_web.c)
   if [ -d "$(dirname "$ROMFS")/jit" ]; then MAPS+=("$P/jit=$(dirname "$ROMFS")/jit"); t "nn::jit image: $(dirname "$ROMFS")/jit"; fi
 fi

@@ -13,14 +13,28 @@
 # Usage: gen_embed.py [--tag <tag>] <build output dir> <output .S> <module name...>; link flags are printed to stdout (-segprot for the W segments). --tag (an app holding several
 # programs of a multi-program application, build_ipa.sh PROGRAMS_TSV): the program's sections are __dm<tag><name>x0 / __DM<tag><name>W / __dm<tag><name>x1 and __dm<tag>_nro_*, which the
 # loader takes from DM_EMBED_TAG (main.m). --jit <jit.img> (a game whose code comes through nn::jit: dm/tools/jit_capture.py's image, beside the RomFS) puts that image in
-# __TEXT,__dm<tag>_jit, which the host remaps as the code memory's start (hle_jit.c jit_map_image)
-import os, sys
-a = sys.argv[1:]; tag = ''; jit = None
-while a[:1] in (['--tag'], ['--jit']):
+# __TEXT,__dm<tag>_jit, which the host remaps as the code memory's start (hle_jit.c jit_map_image). --ref-dir <dir>: the folder the .S is assembled from, which the .incbin of the switchable
+# mods' pages (<tag><name>.variants.bin, written beside the output .S) names; default: the output's own folder (build_ipa.sh generates into Gen/.stage and moves the files to Gen/)
+# The .S begins with one comment line per file it includes (the modules' patched.bin, the variants pages, jit.img): its sha256 and size. Xcode's build goes by the .S alone (clang's dependency
+# output does not list .incbin files), so the .S has to change whenever an included file's bytes do, and build_ipa.sh keeps an unchanged .S (DM_GEN_REUSE): a module rewritten again then
+# assembles again, and a repeat build with the same modules assembles and links nothing. The .S and the variants pages are written only when their bytes differ
+import hashlib, os, sys
+a = sys.argv[1:]; tag = ''; jit = None; ref = None
+while a[:1] in (['--tag'], ['--jit'], ['--ref-dir']):
     if a[0] == '--tag': tag = a[1]
-    else: jit = os.path.abspath(a[1])
+    elif a[0] == '--jit': jit = os.path.abspath(a[1])
+    else: ref = os.path.abspath(a[1])
     a = a[2:]
 out, dst, names = a[0], a[1], a[2:]
+ref = ref or os.path.dirname(os.path.abspath(dst))
+inputs = {}   # every file an .incbin names → its sha256 and size (None until the end: read then, once per file)
+def write_if_changed(path, data):   # a file whose bytes are already these keeps its times (Xcode then has nothing to do for it)
+    try:
+        if os.path.getsize(path) == len(data) and open(path, 'rb').read() == data: return
+    except OSError: pass
+    tmp = f'{path}.tmp{os.getpid()}'
+    with open(tmp, 'wb') as f: f.write(data)
+    os.replace(tmp, path)
 PG = 0x4000
 def r16(x): return (x + PG - 1) & ~(PG - 1)
 def pieces(n):   # the module's (x0, W, x1[, x2]) as (file start, end)
@@ -36,6 +50,7 @@ def pieces(n):   # the module's (x0, W, x1[, x2]) as (file start, end)
     assert po % PG == 0 and a <= ko and ko + ks <= po and ko % PG == 0 and ks == PG
     return bin_, sz, ((0, a), (a, po), (po, end))
 def place(asm, bin_, sz, lo, hi):   # one piece, 16K aligned at both ends (vm_remap takes whole pages)
+    inputs.setdefault(bin_, None)
     fill = min(hi, sz) - lo
     asm += ['    .p2align 14', f'    .incbin "{bin_}", {lo:#x}, {fill:#x}']
     if hi - lo > fill: asm.append(f'    .space {hi - lo - fill:#x}')
@@ -83,7 +98,9 @@ def variants(n):
     for bit, k, fo, io, data in rows:
         if k == 'w': tab.append((1, bit, 0, io, len(data), len(blob))); blob += data
     if not tab: return
-    vbin = os.path.join(os.path.dirname(os.path.abspath(dst)), f'{tag}{n}.variants.bin'); open(vbin, 'wb').write(blob)
+    vname = f'{tag}{n}.variants.bin'; vbin = os.path.join(ref, vname)
+    write_if_changed(os.path.join(os.path.dirname(os.path.abspath(dst)), vname), bytes(blob))
+    inputs[vbin] = (hashlib.sha256(blob).hexdigest(), len(blob))   # from the bytes: in a generation folder the file is not at vbin yet
     asm.append(f'    .section __TEXT,__dm{tag}{n}v'); place(asm, vbin, len(blob), 0, r16(len(blob)))
     asm.extend([f'    .section __DATA,__dm{tag}{n}vt', '    .p2align 3'])
     for kind, roles, touch, io, ln, at in tab: asm.append(f'    .long {kind}, {roles}, {touch}, 0'); asm.append(f'    .quad {io & 0xffffffffffffffff:#x}, {ln:#x}, {at:#x}')
@@ -110,5 +127,11 @@ if nros:
     flags.append(f'-Wl,-segprot,__DM{tag}_NRO_W,rw,rw')
 if jit:
     asm.append(f'    .section __TEXT,__dm{tag}_jit'); place(asm, jit, os.path.getsize(jit), 0, r16(os.path.getsize(jit)))
-open(dst, 'w').write('\n'.join(asm) + '\n')
+def sha(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for b in iter(lambda: f.read(1 << 20), b''): h.update(b)
+    return h.hexdigest(), os.path.getsize(path)
+asm[1:1] = [f'// input sha256={d} size={z} {p}' for p, (d, z) in ((p, v or sha(p)) for p, v in inputs.items())]
+write_if_changed(dst, ('\n'.join(asm) + '\n').encode())
 print(' '.join(flags))

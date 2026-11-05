@@ -177,8 +177,9 @@ class IpaBuildLock(unittest.TestCase):
 
     def test_held_from_gen_to_the_end_of_xcodebuild(self):   # IPA mode only; nothing after the release reads the shared Gen/
         at = lambda prefix: next(n for n, ln in enumerate(self.lines) if ln.startswith(prefix))
-        take, gen, build, release = at('[ "$PREPARE_XCODE" = YES ] || ipa_lock'), at('rm -rf Gen'), at('xcodebuild -project'), at('exec 9>&-')
+        take, gen, build, release = at('[ "$PREPARE_XCODE" = YES ] || ipa_lock'), at('t "generate Gen/'), at('xcodebuild -project'), at('exec 9>&-')
         self.assertLess(take, gen); self.assertLess(build, release)
+        self.assertLess(gen, at('if [ "$GEN_REUSE" = 1 ]; then G=Gen/.stage'))   # its generation folder, Gen/.stage, after the lock too
         self.assertTrue(any('9>&-' in ln for ln in self.lines[build:release]), 'xcodebuild runs without the lock fd')
         self.assertFalse([ln for ln in self.lines[release + 1:] if 'Gen/' in ln])
         r = subprocess.run(['git', 'check-ignore', '-q', 'dm/ios/.ipa-build.lock'], cwd=REPO)
