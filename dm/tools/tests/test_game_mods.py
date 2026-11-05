@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import os
+import shutil
 from pathlib import Path
 import struct
 import sys
@@ -523,6 +524,158 @@ class NspScript(unittest.TestCase):
         self.assertIsNone(self.nsp.mods_folder(self.nsp.parse_args(['x', '--no-mods']), self.root / 'game'))
         self.assertEqual(self.nsp.mods_folder(self.nsp.parse_args(['x', '--mods', str(self.mods)]), self.root / 'game'), self.mods.resolve())   # resolved: on macOS the temporary folder is under /var, a link to /private/var
         with self.assertRaises(self.nsp.BuildError): self.nsp.mods_folder(self.nsp.parse_args(['x', '--mods', str(self.root / 'missing')]), self.root)
+
+
+FAKE_REWRITER = r"""# patch_nso.py as build_variants starts it (<module> <out folder> <name>): writes <ver>_<role>/want.bin as the rewrite, after a pause; no want.bin: refused (exit 3)
+import os, shutil, sys, time
+src, rw, m = sys.argv[1:4]
+var = os.path.dirname(os.path.dirname(src)); role = os.path.basename(var).split('_', 1)[1]; rec = os.path.join(os.path.dirname(var), 'record.txt')
+with open(rec, 'a') as f: f.write(f'{role} start {time.time()} {os.environ.get("DM_REWRITE_J")}\n')
+print(f'rewriting {m} with the {role} mod', flush=True)
+time.sleep(0.6)
+if not os.path.exists(os.path.join(var, 'want.bin')): print('refused: a word the profile patches too'); sys.exit(3)
+shutil.copyfile(os.path.join(var, 'want.bin'), os.path.join(rw, m + '.patched.bin'))
+with open(os.path.join(rw, m + '.fixups.tsv'), 'w') as f: f.write('# TEXT_END 0x4000\n# PATCH_OFF 0x8000\n')
+with open(rec, 'a') as f: f.write(f'{role} end {time.time()}\n')
+"""
+
+
+class VariantPool(unittest.TestCase):
+    """build_variants' rewrites run together (DM_VARIANT_J), the byte runs kept beside each variant rewrite (DM_VARIANT_RUNS_CACHE), and the files they make, byte for byte those
+    of rewriting one after another and computing the runs at every build, as before; a real process per rewrite (a fake patch_nso.py in a fake repository)"""
+    HDR = '# TEXT_END 0x4000\n# PATCH_OFF 0x8000\n'
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
+        self.nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.nsp)
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
+        self.root = Path(t.name); self.said = []
+        for cm in (mock.patch.object(self.nsp, 'PROG', mock.Mock()), mock.patch.object(self.nsp, 'say', self.said.append)):
+            cm.start(); self.addCleanup(cm.stop)
+        self.repo = self.root / 'repo'; (self.repo / 'dm/tools').mkdir(parents=True); (self.repo / 'dm/tools/patch_nso.py').write_text(FAKE_REWRITER)
+        self.patched = self.root / 'patched'; self.patched.mkdir()
+        self.base = bytes(0xc000)
+        (self.patched / 'main.patched.bin').write_bytes(self.base); (self.patched / 'main.fixups.tsv').write_text(self.HDR)
+        self.mods = self.root / 'mods'; self.variants = {}
+        for role, name, edits in (('fps', '60 FPS', ((0x10, b'\x1f\x20\x03\xd5'), (0x5000, b'\x01\x02'))), ('ultrawide', '21x9', ((0x5100, struct.pack('<f', 21 / 9)),))):
+            exefs = self.mods / f'v0_{role}/ExeFS'; exefs.mkdir(parents=True); (exefs / 'main').write_bytes(bytes(make_nso()))
+            v = bytearray(self.base)
+            for at, b in edits: v[at:at + len(b)] = b
+            (exefs.parent / 'want.bin').write_bytes(bytes(v))
+            self.variants[role] = {'mod': name, 'exefs': str(exefs), 'modules': ['main']}
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith('DM_')}
+
+    def build(self, **env):
+        (self.mods / 'record.txt').unlink(missing_ok=True)
+        self.nsp.build_variants(sys.executable, self.repo, json_copy(self.variants), self.patched, dict(self.env, **env), self.root / 'logs')
+        rec = (self.mods / 'record.txt').read_text().splitlines() if (self.mods / 'record.txt').exists() else []
+        return [l.split() for l in rec]
+
+    def outputs(self):
+        return {p.name: p.read_bytes() for p in sorted(self.patched.iterdir()) if p.suffix in ('.variants', '.tsv') and p.name != 'main.fixups.tsv'}
+
+    def expected(self):   # what the serial build_variants of before wrote: each role's runs (game_mods.variant_runs) in role order, then mods.tsv
+        rows, counts = [], []
+        for role, v in self.variants.items():
+            runs = gm.variant_runs(self.patched, Path(v['exefs']).parent / 'rewrite', 'main', nso.read(Path(v['exefs']) / 'main').image)
+            rows += [(role, r) for r in runs]; counts.append((role, v['mod'], len(runs)))
+        gm.write_variants(self.root / 'expected.variants', rows)
+        return {'main.variants': (self.root / 'expected.variants').read_bytes(),
+                'mods.tsv': ('# switchable mods the launcher offers (dm/games/settings.py mods:<role>): role\tmod\truns\n' + ''.join(f'{r}\t{n}\t{c}\n' for r, n, c in counts)).encode()}
+
+    def test_rewrites_run_together_and_write_what_one_after_another_writes(self):
+        cores = os.cpu_count() or 1
+        cm = mock.patch.object(os, 'cpu_count', lambda: max(2, cores)); cm.start(); self.addCleanup(cm.stop)   # the default pool is at most one rewrite per core: a one-core runner would run them one after another
+        rec = self.build()
+        starts = [float(l[2]) for l in rec if l[1] == 'start']; ends = [float(l[2]) for l in rec if l[1] == 'end']
+        self.assertEqual(len(starts), 2); self.assertLess(max(starts), min(ends), 'both rewrites ran at once')
+        split = str(max(1, (os.cpu_count() or 1) // 2))
+        self.assertEqual({l[3] for l in rec if l[1] == 'start'}, {split}, 'the cores split between them (DM_REWRITE_J)')
+        together = self.outputs()
+        self.assertEqual(together, self.expected())
+        self.assertIn(b'ultrawide\tw\t0x5100\t0x5100\t', together['main.variants'])
+        for role in ('fps', 'ultrawide'): self.assertIn(f'rewriting main with the {role} mod', (self.root / f'logs/rewrite_main_{role}.log').read_text())
+        for f in (self.mods / 'v0_fps/rewrite', self.mods / 'v0_ultrawide/rewrite'): shutil.rmtree(f)
+        rec = self.build(DM_VARIANT_J='1')
+        starts = [float(l[2]) for l in rec if l[1] == 'start']; ends = [float(l[2]) for l in rec if l[1] == 'end']
+        self.assertGreaterEqual(starts[1], ends[0], 'DM_VARIANT_J=1: one after another')
+        self.assertEqual({l[3] for l in rec if l[1] == 'start'}, {'None'}, 'with the environment as it was')
+        self.assertEqual(self.outputs(), together)
+        rec = self.build(DM_REWRITE_J='3')
+        self.assertEqual(rec, [], 'reused: nothing rewritten again')
+        self.assertEqual(self.outputs(), together)
+
+    def test_an_explicit_split_is_kept(self):
+        rec = self.build(DM_REWRITE_J='3')
+        self.assertEqual({l[3] for l in rec if l[1] == 'start'}, {'3'})
+
+    def test_a_refused_role_alone_is_left_out(self):
+        (self.mods / 'v0_ultrawide/want.bin').unlink()
+        self.build()
+        self.assertEqual((self.patched / 'mods.tsv').read_text().splitlines()[1:], ['fps\t60 FPS\t2'])
+        self.assertTrue(any('ultrawide: 21x9: left out: the rewriter refused main' in m and 'rewrite_main_ultrawide.log' in m for m in self.said))
+        self.assertIn('refused: a word the profile patches too', ''.join(str(c) for c in self.nsp.PROG.say.call_args_list), 'the log\'s last lines, as run() prints them')
+        self.assertTrue((self.mods / 'v0_fps/rewrite/main.key').is_file()); self.assertFalse((self.mods / 'v0_ultrawide/rewrite/main.key').exists())
+        self.assertEqual([l[0] for l in self.build() if l[1] == 'start'], ['ultrawide'], 'only the refused rewrite runs again')
+
+    def test_the_runs_are_kept_and_follow_their_inputs(self):
+        self.build(); first = self.outputs()
+        calls = []
+        real = gm.variant_runs
+        def counting(*a): calls.append(a[1].parent.name); return real(*a)
+        with mock.patch.object(gm, 'variant_runs', counting), mock.patch.object(self.nsp.nso, 'read', wraps=self.nsp.nso.read) as read:
+            self.build(); self.assertEqual(calls, []); read.assert_not_called()
+            self.assertEqual(self.outputs(), first, 'the kept runs write the same bytes')
+            self.build(DM_VARIANT_RUNS_CACHE='0'); self.assertEqual(calls, ['v0_fps', 'v0_ultrawide'], 'DM_VARIANT_RUNS_CACHE=0: computed at every build')
+            self.assertEqual(self.outputs(), first); calls.clear()
+            self.build(); self.assertEqual(calls, ['v0_fps', 'v0_ultrawide'], 'that build removed them'); calls.clear()
+            self.build(); self.assertEqual(calls, []); self.assertEqual(self.outputs(), first)
+            rw = self.mods / 'v0_ultrawide/rewrite'
+            d = bytearray((rw / 'main.patched.bin').read_bytes()); d[0x5104] = 7; (rw / 'main.patched.bin').write_bytes(bytes(d))   # the variant's output written behind the step's back
+            self.build(); self.assertEqual(calls, ['v0_ultrawide']); calls.clear()
+            self.assertIn(b'ultrawide\tw\t0x5100\t0x5100\t' + struct.pack('<f', 21 / 9).hex().encode() + b'07', self.outputs()['main.variants'])
+            (rw / 'main.runs.json').write_text('{not json'); self.build(); self.assertEqual(calls, ['v0_ultrawide'], 'a damaged file'); calls.clear()
+            (self.mods / 'v0_fps/want.bin').write_bytes(bytes(self.base[:0x10]) + b'\x1f\x20\x03\xd5' + bytes(self.base[0x14:]))   # another mod: the variant key changes, so its rewrite and runs are made again
+            (self.mods / 'v0_fps/ExeFS/main').write_bytes(bytes(make_nso()) + b'\0')
+            rec = self.build(); self.assertEqual([l[0] for l in rec if l[1] == 'start'], ['fps']); self.assertEqual(calls, ['v0_fps']); calls.clear()
+            self.assertEqual((self.patched / 'mods.tsv').read_text().splitlines()[1], 'fps\t60 FPS\t1')
+            gmf = self.root / 'game_mods.py'; gmf.write_bytes(Path(gm.__file__).read_bytes())
+            with mock.patch.object(gm, '__file__', str(gmf)):
+                self.build(); self.assertEqual(calls, [], 'the same game_mods.py by content')
+                gmf.write_text(gmf.read_text() + '\n# changed\n'); self.build(); self.assertEqual(calls, ['v0_fps', 'v0_ultrawide'], 'game_mods.py, which computes them'); calls.clear()
+                self.build(); self.assertEqual(calls, [])
+            before = self.outputs()
+            (self.patched / 'main.gates.tsv').write_text('gate\n')   # the base rewrite's table changes alone (a base rewrite run again): its patched.bin is the same, so is the variant key
+            rec = self.build(); self.assertEqual(rec, []); self.assertEqual(calls, ['v0_fps', 'v0_ultrawide'], 'the base rewrite\'s tables'); calls.clear()
+            self.assertFalse((self.patched / 'mods.tsv').exists(), 'both refused: their rewrites differ in gates.tsv')
+            refusals = [m for m in self.said if 'differs in gates.tsv' in m]; self.said.clear()
+            self.build(); self.assertEqual(calls, [], 'a refusal is kept too'); self.assertEqual([m for m in self.said if 'differs in gates.tsv' in m], refusals, 'with its message')
+            (self.patched / 'main.gates.tsv').unlink(); self.build(); self.assertEqual(self.outputs(), before)
+
+    def test_the_cache_writes_what_computing_again_writes(self):   # every reuse state, the same bytes as rewriting and computing with the old behaviour (one after another, no kept runs)
+        self.build(DM_VARIANT_J='1', DM_VARIANT_RUNS_CACHE='0'); old = self.outputs(); self.assertEqual(old, self.expected())
+        for env in ({}, {}, {'DM_VARIANT_J': '1'}, {'DM_VARIANT_RUNS_CACHE': '0'}, {}):
+            with self.subTest(env=env): self.build(**env); self.assertEqual(self.outputs(), old)
+
+    def test_switch_values(self):
+        for bad in ('0', '-1', 'two'):
+            with self.subTest(bad=bad), self.assertRaisesRegex(self.nsp.BuildError, 'DM_VARIANT_J must be a positive integer'): self.nsp.variant_workers({'DM_VARIANT_J': bad}, 2)
+        self.assertEqual(self.nsp.variant_workers({'DM_VARIANT_J': '8'}, 2), 2)
+        self.assertEqual(self.nsp.variant_workers({}, 1), 1)
+        self.assertEqual(self.nsp.variant_workers({}, 2), min(2, os.cpu_count() or 1))
+
+    def test_fingerprint_memo_is_the_same_key(self):   # build_variants hashes the base rewrite once for all roles: the keys are those of before
+        files = [self.patched / 'main.patched.bin', self.patched / 'main.fixups.tsv', self.root / 'missing']
+        memo, plain = {}, self.nsp.fingerprint(('files', files), 'x')
+        self.assertEqual(self.nsp.fingerprint(('files', files), 'x', memo=memo), plain)
+        self.assertEqual(memo[str(files[2])], b'missing')
+        with mock.patch.object(self.nsp.rfs.Path, 'read_bytes', side_effect=AssertionError('read again')):
+            self.assertEqual(self.nsp.fingerprint(('files', files), 'x', memo=memo), plain, 'each file read once')
+
+
+def json_copy(v):   # the variants as apply_mods hands them over (a JSON file's): build_variants never changes the caller's
+    import json
+    return json.loads(json.dumps(v))
 
 
 if __name__ == '__main__':

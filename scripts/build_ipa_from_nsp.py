@@ -1123,10 +1123,11 @@ def files_under(d):   # (relative path, stat) of every file under d, sorted; [] 
     return sorted(out, key=lambda x: x[0])
 
 
-def fingerprint(*items, env=None):
+def fingerprint(*items, env=None, memo=None):
     """sha256 over a stage's inputs. Items: ('files', paths) = names and content (a missing file counts too); ('tree', folder) = relative path and size of every file under it
     (a RomFS: check_build pins its version, so names and sizes stand for its content); ('stat', folder) = relative path, size and mtime of every file under it (the translator's binaries);
-    ('cmd', argv) = a tool's version output (run with env); anything else = its repr"""
+    ('cmd', argv) = a tool's version output (run with env); anything else = its repr. memo: a dict the caller keeps for keys it makes together while none of their files can change
+    (build_variants: the base rewrite's patched.bin, the tools); a file's digest is read from it after its first read, and the result is the same as without it"""
     h = hashlib.sha256()
     for it in items:
         kind, v = it if isinstance(it, tuple) and len(it) == 2 and it[0] in ('files', 'tree', 'stat', 'cmd') else ('repr', it)
@@ -1134,8 +1135,12 @@ def fingerprint(*items, env=None):
         if kind == 'files':
             for p in map(rfs.Path, v):
                 h.update(p.name.encode() + b'\0')
-                try: h.update(hashlib.sha256(p.read_bytes()).digest())
-                except OSError: h.update(b'missing')
+                d = memo.get(str(p)) if memo is not None else None
+                if d is None:
+                    try: d = hashlib.sha256(p.read_bytes()).digest()
+                    except OSError: d = b'missing'
+                    if memo is not None: memo[str(p)] = d
+                h.update(d)
         elif kind in ('tree', 'stat'):
             for rel, st in files_under(v): h.update(f'{rel}\0{st.st_size}\0{st.st_mtime_ns if kind == "stat" else ""}\n'.encode())
         elif kind == 'cmd':
@@ -1195,6 +1200,39 @@ def package_key(pkg):   # the shader package's content (file names and bytes): w
 def profile_files(g):   # every file of the game profile (game.tsv and its tables) but the c1 / uniform extent tables, which the iOS shader step makes (chain_tables): no step reads them,
     out = {name for name, _, _ in CHAIN_TABLES} | {'patches.py'}   # and the rewriter's patches, which only the rewrite step reads (patch_files)
     return sorted(p for p in g.dir.iterdir() if p.is_file() and p.name not in out)
+
+
+_REPO_MODULES = {}
+
+
+def repo_module(repo, rel):   # a repository module loaded from its own file, not from sys.path (which may hold another checkout's, or none): once per file as it is (path, size, mtime)
+    p = Path(repo) / rel
+    st = p.stat(); k = (str(p.resolve()), st.st_size, st.st_mtime_ns)
+    if k not in _REPO_MODULES:
+        spec = importlib.util.spec_from_file_location(f'_repo_{p.stem}_{len(_REPO_MODULES)}', p)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        _REPO_MODULES[k] = mod
+    return _REPO_MODULES[k]
+
+
+def shader_profile_inputs(repo, g, env, py=None):
+    """What the NVN shader step (build_shaders) takes from the game profile, as fingerprint items: what dmsh_build.py reads from it (with dmsh_facts.py, the only other chain module that opens
+    the profile), which is what its library stamp names (dmsh_chain.inputs, here untruncated): the profile's id, the tables of dmsh_chain.INPUT_TABLES by content (a missing one counts as such) and
+    the nvn_* / shader_* rows of game.tsv, taken from the file as it is now and as game.py parses it (the chain loads the profile again; game.py is a chain file, so a change of its parser counts
+    there). dmsh_chain.py's list and row filter are used, not copied, so the key cannot drift from the stamp. With py, also the stamp's own digest as dmsh_chain.py --inputs prints it in the
+    step's environment: the chain finds its profile by DM_GAME, DM_GAMES_DIR and DM_GAMES_FIRST, so a folder other than g's would count too. The step's other inputs stay in its key as they
+    were (the package, the chain's tools, the translator, the compilers, the split's pso_pairs.tsv). Not inputs: the profile's notes and test tables (README.md, bench.tsv, smoke.tsv, usage.tsv, validated.tsv), pso_manifest.tsv (the
+    pipeline step's), shader_facts_manual.tsv (the split merges it into shader_facts.tsv, which is one), the rest of game.tsv (its comments, the region check's lines, mem_used, fps_target ...)
+    and the c1 / uniform extent tables the step makes itself (chain_tables checks those at every reuse). An edit of them restored every library from the cache before (Breath of the Wild: about
+    100 s) and remade the folder pack_ipa.py then compressed again. DM_SHADER_KEY_ALL_PROFILE=1 keys every profile file again (profile_files), as before; so does a profile or chain module that cannot be read"""
+    if env.get('DM_SHADER_KEY_ALL_PROFILE') == '1': return [('files', profile_files(g))]
+    try:
+        chain, gamemod = repo_module(repo, 'dm/gfx/tools/dmsh_chain.py'), repo_module(repo, 'dm/games/game.py')
+        now = gamemod.Game(g.dir)
+        stamp = [('cmd', [str(py), str(Path(repo) / 'dm/gfx/tools/dmsh_chain.py'), '--inputs'])] if py else []   # run by fingerprint with its env
+        return ['shader profile inputs', now.id, ('files', [now.table(n) for n in chain.INPUT_TABLES]), chain.profile_rows(now), *stamp]
+    except Exception:   # a profile the chain could not read either (its own error follows), or a repository without these modules: the old, wider key
+        return [('files', profile_files(g))]
 
 
 # ---- Steps ----
@@ -1554,32 +1592,116 @@ def device_variants(variants, device, mac):
     return variants
 
 
+def variant_workers(env, n):
+    """How many of build_variants' n variant rewrites run at once: DM_VARIANT_J=<positive integer> (1: one after another, as before this pool; less memory on a Mac short of it, each
+    rewrite of a large main holds its module several times), else all of them, at most one per core"""
+    try: j = int(env['DM_VARIANT_J']) if env.get('DM_VARIANT_J') else None
+    except ValueError: raise BuildError('DM_VARIANT_J must be a positive integer') from None
+    if j is not None and j < 1: raise BuildError('DM_VARIANT_J must be a positive integer')
+    return max(1, min(n, j if j is not None else os.cpu_count() or 1))
+
+
+def run_rewrites(jobs, env, workers, done):
+    """build_variants' variant rewrites: jobs [(name, step, cmd, log)], at most workers at once, each with all its output in its own log; done(name, exit code) after each, as it ends
+    (a rewrite that finished keeps its key even when a later one is interrupted). workers 1: one after another through run(), exactly as before. More: Popen, as rewrite() runs the modules,
+    with the cores split between them (DM_REWRITE_J, unless the environment sets it: it changes how patch_nso.py splits its scans, not what it writes); a failed one prints its log's last lines
+    as run() does and the others go on; an error or an interrupt stops them all"""
+    if workers <= 1:
+        for name, step, cmd, log in jobs:
+            PROG.set(step=step)
+            done(name, run(cmd, log, env=env, fatal=False))
+        return
+    renv = env if env.get('DM_REWRITE_J') else dict(env, DM_REWRITE_J=str(max(1, (os.cpu_count() or 1) // workers)))
+    PROG.set(step=f'rewriting {len(jobs)} variants, {workers} at once: ' + ', '.join(step for _, step, _, _ in jobs), done=0, total=len(jobs), unit='rewrites')
+    procs, todo, finished = {}, list(jobs), 0
+    try:
+        while todo or procs:
+            while todo and len(procs) < workers:
+                name, _, cmd, log = todo.pop(0); log.parent.mkdir(parents=True, exist_ok=True); f = open(log, 'w')
+                try: procs[name] = (subprocess.Popen([str(c) for c in cmd], env=renv, stdout=f, stderr=subprocess.STDOUT), f, log)
+                except BaseException: f.close(); raise
+            for name in [n for n, (p, _, _) in procs.items() if p.poll() is not None]:
+                p, f, log = procs.pop(name); f.close(); finished += 1; PROG.set(done=finished)
+                if p.returncode:
+                    with open(log, errors='replace') as t: PROG.say(f'---- last lines of {log} ----\n' + ''.join(collections.deque(t, maxlen=40)).rstrip('\n'))
+                done(name, p.returncode)
+            if procs: time.sleep(0.2)
+    finally:   # an error or an interrupt stops the other rewrites
+        for p, f, _ in procs.values():
+            if p.poll() is None: p.terminate(); p.wait()
+            f.close()
+
+
+def variant_runs_cached(gm, patched, rw, m, module, key, env):
+    """gm.variant_runs of module m's variant rewrite (rw) against the base rewrite (patched), kept in rw/<m>.runs.json for the next build: it compares two rewrites of a module of up to
+    150 MB and parses the variant module's relocations after decompressing it (about 2.6 s for each role at every build before). Its key: the variant rewrite's (key: the variant module and the
+    base rewrite's patched.bin and fixups.tsv by content, the rewriter's inputs), the base rewrite's other tables by content (a base rewrite run again can change one of them alone), the variant
+    rewrite's outputs by size, times and inode (only its rewrite writes them, and build_variants removes this file before one starts), and game_mods.py and nso.py, which compute the runs.
+    A refusal (ModError) is kept too and raised again with its message, so the rows and the messages are those computing them again gives. A file that cannot be read or written is computed
+    again, never an error. DM_VARIANT_RUNS_CACHE=0 computes them at every build, as before"""
+    f = rw / f'{m}.runs.json'
+    if env.get('DM_VARIANT_RUNS_CACHE') == '0':
+        rmtree(f); return gm.variant_runs(patched, rw, m, nso.read(module).image)
+    def stat(p):
+        try: s = os.stat(p); return (p.name, s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_ino)
+        except OSError: return (p.name, 'missing')
+    ck = fingerprint('variant runs', key, ('files', [patched / f'{m}.{x}' for x in gm.META] + [Path(gm.__file__), Path(nso.__file__)]),
+                     [stat(rw / f'{m}.{x}') for x in ('patched.bin', *gm.META)])
+    hit = None
+    try:
+        got = json.loads(f.read_text())
+        if got['key'] == ck:
+            hit = ('error', str(got['error'])) if 'error' in got else ('runs', [(str(k), int(fo), int(io), bytes.fromhex(h)) for k, fo, io, h in got['runs']])
+    except (OSError, ValueError, KeyError, TypeError): hit = None   # none, of another key, or damaged: computed again
+    if hit and hit[0] == 'error': raise gm.ModError(hit[1])
+    if hit and all(r[0] in ('c', 'w') for r in hit[1]): return hit[1]
+    try: runs, err = gm.variant_runs(patched, rw, m, nso.read(module).image), None
+    except gm.ModError as e: runs, err = None, e
+    tmp = f.with_name(f.name + '.tmp')
+    try: tmp.write_text(json.dumps({'key': ck, 'error': str(err)} if err else {'key': ck, 'runs': [[k, fo, io, data.hex()] for k, fo, io, data in runs]})); os.replace(tmp, f)
+    except OSError: pass   # the next build computes them again
+    if err: raise err
+    return runs
+
+
 def build_variants(py, repo, variants, patched, env, logs):
     """The switchable mods' bytes beside the rewritten modules: each mod's ExeFS (apply_mods) is rewritten as the modules were (patch_nso.py), and where the two rewrites differ
     only in bytes, <module>.variants lists them (dm/tools/game_mods.py variant_runs; the host puts them in place when the game starts with the launcher's toggle on, loader.c;
     on the iPhone the code pages come signed, gen_embed.py) and mods.tsv names the roles the launcher offers (dm/games/settings.py mods:<role>). A mod whose rewrite differs in
     more (it changes code the rewriter rewrites, or a word the loader relocates) is left out with the reason. Earlier variants are always removed first. Each variant rewrite is
-    reused while its module, the base rewrite and the rewriter's inputs (its tools, the patch files of the module's build, capstone, its switches) are as at its last run"""
+    reused while its module, the base rewrite and the rewriter's inputs (its tools, the patch files of the module's build, capstone, its switches) are as at its last run, and so are the
+    byte runs found in it (variant_runs_cached). The rewrites to run start together (run_rewrites, DM_VARIANT_J: High frame rate and Ultrawide take one rewrite's time, not two); the runs
+    are then taken role by role in the order of before, so <module>.variants, mods.tsv and the messages are those of rewriting one after another, and a role whose rewrite fails is the
+    only one left out. The base rewrite's files are hashed once for all roles (fingerprint's memo): the same keys"""
     import capstone
     import game_mods as gm
     for p in list(patched.glob('*.variants')) + [patched / 'mods.tsv']: rmtree(p)
     if not variants: return
     PROG.add(1); PROG.stage('switchable mods', step=', '.join(variants))
-    rows: dict[str, list] = {}; offered = []
-    rw_tools = rewrite_tools(repo)
+    rw_tools, memo, plan, jobs = rewrite_tools(repo), {}, [], []
     for role, v in variants.items():
-        exefs, ok, got = Path(v['exefs']), True, {}
+        exefs, mods = Path(v['exefs']), []
         for m in v['modules']:
             rw = exefs.parent / 'rewrite'; rw.mkdir(parents=True, exist_ok=True); kf = rw / f'{m}.key'
             key = fingerprint(('files', rw_tools + patch_files(repo, exefs, [m], env.get('DM_GAME')) + [exefs / m, patched / f'{m}.patched.bin', patched / f'{m}.fixups.tsv']),
-                              capstone.__version__, {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')})
+                              capstone.__version__, {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, memo=memo)
             if not ((rw / f'{m}.patched.bin').is_file() and reused(kf, key) is not None):
-                PROG.set(step=f'{role}: rewriting {m}')
                 rmtree(kf)   # the cache outlives apply_mods' rebuilds: a rewrite that stops part way must not leave the last run's key over its outputs
-                rc = run([py, repo / 'dm/tools/patch_nso.py', exefs / m, rw, m], logs / f'rewrite_{m}_{role}.log', env=env, fatal=False)
-                if rc: say(f'mods: {role}: {v["mod"]}: left out: the rewriter refused {m} with it (likely a word the game\'s profile patches too; {logs / f"rewrite_{m}_{role}.log"})'); ok = False; break
-                rmtree(kf); kf.write_text(f'{key}\n')
-            try: got[m] = gm.variant_runs(patched, rw, m, nso.read(exefs / m).image)
+                rmtree(rw / f'{m}.runs.json')   # nor the runs found in the last run's outputs
+                jobs.append(((role, m), f'{role}: rewriting {m}', [py, repo / 'dm/tools/patch_nso.py', exefs / m, rw, m], logs / f'rewrite_{m}_{role}.log'))
+            mods.append((m, rw, kf, key))
+        plan.append((role, v, exefs, mods))
+    keys, failed = {(role, m): (kf, key) for role, _, _, mods in plan for m, _, kf, key in mods}, set()
+    def done(name, rc):
+        if rc: failed.add(name); return
+        kf, key = keys[name]; rmtree(kf); kf.write_text(f'{key}\n')
+    if jobs: run_rewrites(jobs, env, variant_workers(env, len(jobs)), done)
+    rows: dict[str, list] = {}; offered = []
+    for role, v, exefs, mods in plan:
+        ok, got = True, {}
+        for m, rw, _, key in mods:
+            if (role, m) in failed: say(f'mods: {role}: {v["mod"]}: left out: the rewriter refused {m} with it (likely a word the game\'s profile patches too; {logs / f"rewrite_{m}_{role}.log"})'); ok = False; break
+            try: got[m] = variant_runs_cached(gm, patched, rw, m, exefs / m, key, env)
             except gm.ModError as e: say(f'mods: {role}: {v["mod"]}: left out: {e}'); ok = False; break
         if not ok: continue
         for m, runs in got.items(): rows.setdefault(m, []).extend((role, r) for r in runs)
@@ -2606,8 +2728,9 @@ def stale_shaders(py, repo, env, lib_dirs, chain, g):
 
 def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, seen=None):
     """The iOS shader libraries (dmsh_build.py, which also builds the Mac's into sh/cache when the build wants them), or with mac only the Mac's (a Mac-only build: no IOSOUT). Returns the folder the host takes
-    them from. Reused when the shader package (pkg_key, its content; None never reuses) and the chain's tools, translator binaries, profile and compilers are as at the last successful build:
-    dmsh_build.py would only restore every shader from its cache (63,000 for Breath of the Wild: about 100 s). The key of the iOS libraries is sh/ios/b-<chain>.key, that of the Mac's
+    them from. Reused when the shader package (pkg_key, its content; None never reuses) and the chain's tools, translator binaries, the profile's shader inputs (shader_profile_inputs: the tables and
+    game.tsv rows the library stamp names, not the profile's notes or other keys) and compilers are as at the last successful build: dmsh_build.py would only restore every shader from its cache
+    (63,000 for Breath of the Wild: about 100 s). The key of the iOS libraries is sh/ios/b-<chain>.key, that of the Mac's
     sh/mac-b-<chain>.key (not in sh/cache, whose b-* entries dmsh_build.py reads as library folders). Each target writes only its own key (an iOS build that keeps a Mac build's libraries, both); either is taken only
     while the Mac sources and reflection carry a full build's stamp (inputs.tsv) for c1_full.tsv and cb_extent.tsv to name (chain_tables).
     Switching targets translates again (the per-shader keys include the iOS compile convention); the Metal compile cache (dmsh_mtlcache.py) reuses previously compiled MSL for that target.
@@ -2625,7 +2748,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     if not pso_pairs.is_file(): pso_pairs = sh / 'pso_pairs.tsv'   # the split's copy is a shader input too (vs_pad)
     if pkg_key:
         PROG.set(step='checking the inputs')
-        key = fingerprint(pkg_key, ('files', chain_files(repo)), ('stat', xlate.parent), ('files', profile_files(g)), ('files', [pso_pairs]), *toolchain(repo, env), str(xlate),
+        key = fingerprint(pkg_key, ('files', chain_files(repo)), ('stat', xlate.parent), *shader_profile_inputs(repo, g, env, py), ('files', [pso_pairs]), *toolchain(repo, env), str(xlate),
                           {k: env.get(k) for k in ('XLATE_DEBUG', 'XLATE_REDUCED')}, *((seen,) if seen else ()), env=env)
         note = next((n for k in ((kmac,) if seen else (kmac, kf) if mac else (kf,)) if (n := reused(k, key)) is not None), None)
         # the libraries are the last build's, so are tables that name their stamp; a missing or stale one is made from that build's Mac outputs, and without them the step runs again
