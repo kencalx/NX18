@@ -3,7 +3,7 @@ name: DmIOS
 options:
   bundleIdPrefix: ${DM_BUNDLE_ID}
   deploymentTarget:
-    iOS: "27.0"   # Graphics replay uses Metal 4 (MTL4CommandQueue etc., from iOS 26); built for iOS 27 and later only: the devices this build targets (A17 Pro / M1 and later) all run it
+    iOS: "27.0"   # Graphics replay uses Metal 4 (MTL4CommandQueue etc., from iOS 26); built for iOS 27 and later only: the devices this build targets (A20 / M4 and later) all run it
 settings:
   configs:
     Release:

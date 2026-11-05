@@ -19,6 +19,7 @@
 #import "CloudSaves.h"
 
 void dm_gamepad_active(void);
+void dm_gamepad_hint(void);   // DmGamepad.m: the menu button shows for 5 s (main thread)
 #import "DmLayout.h"
 #import "DmGameMenu.h"
 
@@ -47,7 +48,13 @@ static UILabel *front_ios_fps_label(void);
         }];
         CAMetalLayer *l = (CAMetalLayer *)self.layer;
         l.device = MTLCreateSystemDefaultDevice(); l.pixelFormat = MTLPixelFormatBGRA8Unorm;
-        l.contentsScale = MAX(self.traitCollection.displayScale, 1); l.framebufferOnly = NO; l.opaque = YES;
+        l.contentsScale = MAX(self.traitCollection.displayScale, 1); l.opaque = YES;
+        // A drawable is only ever the present pass's colour attachment (nvn_mtl.m present_encode_m4): screenshots, the window grab and DM_NVN_REGLUM read the game's picture or
+        // an offscreen texture. So the drawables are render targets only (framebufferOnly, the default, as on the Mac), which lets Core Animation and Metal keep them in the form
+        // best for display (lossless compression). DM_DRAWABLE_SHADER_ACCESS=1 makes them readable and writable by shaders again, as before (framebufferOnly NO)
+        const char *sa = getenv("DM_DRAWABLE_SHADER_ACCESS"); BOOL shaderAccess = sa && atoi(sa);
+        l.framebufferOnly = !shaderAccess;
+        if (shaderAccess) LOG("front end: the drawables allow shader access (DM_DRAWABLE_SHADER_ACCESS=1)");
         self.backgroundColor = UIColor.blackColor;
     }
     return self;
@@ -88,6 +95,7 @@ static void tv_attach(void);
 @property (nonatomic) BOOL launched;
 @property (nonatomic, strong) id tv;   // the TV scene accessory's registration (iOS 27)
 @property (nonatomic) DmPictureMode picture;   // DM_PICTURE_FIT: fit, fill (in landscape the picture covers the screen, its edges cropped) or stretch (it covers the screen, stretched to its shape) (DmLayout.h dm_layout_picture)
+@property (nonatomic) BOOL ultrawideStretch;   // Ultrawide holds the picture at Stretch (startGame): the in-game menu has no Picture row then (dm_setting_live)
 @property (nonatomic) BOOL partiallyOpen;   // an iPhone Duo's hinge half open (UIHingeInteraction, iOS 27.1)
 @property (nonatomic) NSInteger hingeStatus;
 @property (nonatomic, copy) NSString *layoutLog;   // the last layout line logged
@@ -99,6 +107,7 @@ static void tv_attach(void);
 @end
 static DmRootVC *g_root;
 static CGFloat g_picture_aspect = DM_PICTURE_16_9;   // the presented picture's width / height (front_picture_shape); main thread
+static BOOL g_pictured;   // the game's first picture was reported (front_picture_shape); main thread
 static void launcher_done(void) { [g_root startGame]; }
 void mtl_present_stretch(int on);   // nvn_mtl.m: the present draws the picture over the whole drawable instead of keeping its shape (Picture Stretch)
 static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "Fill" : m == DmPictureStretch ? "Stretch" : "Fit"; }
@@ -166,7 +175,7 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
         UIScreen *scr = self.view.window.windowScene.screen; CGSize sz = (scr ?: UIScreen.mainScreen).bounds.size;   // the window's screen; the main one before the view is in a window
         CGFloat r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
         if (r < 1.85) { unsetenv("DM_MOD_ULTRAWIDE"); LOG("front end: Ultrawide left off: this screen (%.2f:1) is not wider than 16:9", r); }
-        else { self.picture = DmPictureStretch; LOG("front end: Ultrawide: the picture is stretched over the %.2f:1 screen in landscape", r); }
+        else { self.picture = DmPictureStretch; self.ultrawideStretch = YES; LOG("front end: Ultrawide: the picture is stretched over the %.2f:1 screen in landscape", r); }
     }
     self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen
     self.view.window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategorySmall;   // UIKit draws the in-game menu (GameMenu.swift) in this window: it keeps one compact text size over the game, whatever the system's text size
@@ -270,6 +279,7 @@ void front_picture_shape(int w, int h) {   // front.h: the views take the presen
     if (w <= 0 || h <= 0) return;
     CGFloat a = (CGFloat)w / h;
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (!g_pictured) { g_pictured = YES; dm_gamepad_hint(); }   // the first present reports the first shape: the menu button's 5 s at the start count from the game's first picture
         if (a == g_picture_aspect) return;
         g_picture_aspect = a; LOG("front end: picture shape %dx%d, the game's view follows it", w, h);
         [g_root.view setNeedsLayout]; if (g_tv) [g_tv.rootViewController.view setNeedsLayout];
@@ -282,6 +292,7 @@ void front_picture_shape(int w, int h) {   // front.h: the views take the presen
 bool dm_setting_live(const char *env, const char *value) {
     if (!env || !g_root.game) return false;
     if (!strcmp(env, "DM_PICTURE_FIT")) {
+        if (g_root.ultrawideStretch) return false;   // Ultrawide holds Stretch: the row would tick the saved choice, and a pick would squeeze or crop the mod's wider view until the next start
         if (value) { g_root.picture = dm_picture_mode(value); [g_root.view setNeedsLayout]; LOG("front end: picture %s (in-game menu)", picture_name(g_root.picture)); }
         return true;
     }
@@ -362,9 +373,9 @@ void front_progress(const char *title, long done, long total) {
     if (!g_layer) return;
     NSString *tt = title ? @(title) : nil;
     void (*hook)(const char *, long, long) = front_progress_hook;
-    if (hook) { dispatch_async(dispatch_get_main_queue(), ^{ hook(tt.UTF8String, done, total); }); return; }   // the host app draws it (front.h)
+    if (hook) { dispatch_async(dispatch_get_main_queue(), ^{ hook(tt.UTF8String, done, total); if (!tt) dm_gamepad_hint(); }); return; }   // the host app draws it (front.h)
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!tt) { [g_prog removeFromSuperview]; g_prog = nil; return; }
+        if (!tt) { [g_prog removeFromSuperview]; g_prog = nil; dm_gamepad_hint(); return; }   // the screen goes: the menu button it covered shows for 5 s (DmGamepad.m)
         if (!g_prog) {
             UIView *root = g_root.view; if (!root) return;
             g_prog = [[UIView alloc] initWithFrame:root.bounds]; g_prog.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;

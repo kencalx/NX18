@@ -6501,8 +6501,8 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
 // at start, and a base found in one is taken from it directly (MTL4Archive), not through the compiler's lookupArchives, which would capture it again into the next file. A base
 // taken from an archive costs about 0.06 ms, against 10-80 ms to build one.
 // DM_PSO_MTL4=0: the MTLDevice path as before (no bases, no archive). DM_PSO_ARCHIVE=off: no archive; DM_PSO_ARCHIVE=<folder>: the archive in that folder.
-// On by default on the Mac and on iOS, with the hybrid pipelines and the pipeline prebuild (iOS followed the profile key pso_mtl4 before; the devices this build targets, an A17 Pro or
-// M1 and later with the Increased Memory Limit, have the room). The profile key now only decides the pipeline archive made offline (build_ipa.sh). The archive's footprint
+// On by default on the Mac and on iOS, with the hybrid pipelines and the pipeline prebuild (iOS followed the profile key pso_mtl4 before; the devices this build targets, an A20 or
+// M4 and later with the Increased Memory Limit, have the room). The profile key now only decides the pipeline archive made offline (build_ipa.sh). The archive's footprint
 // (with the prebuild, about 850 MB more for Breath of the Wild) is still not measured against an iPhone's limit for every game: DM_PSO_MTL4=0 is the way back. The prebuild's bases can also come made offline, bundled with the
 // app (DM_PSO_BUNDLE, pso_bundle_open). newArchiveWithURL maps a file on the Mac's internal disk (clean pages, not in the footprint) and reads one on an external drive into memory, whole and for the
 // whole run (Kirby Star Allies: 1.13 GB), and it offers no choice: docs/reference/memory.md
@@ -13163,6 +13163,9 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];
     if (!supplied) g_drawable_ns += now_ns() - dt0;
     if (!dr) return 0;
+    // Once: the drawable's usage, 0x4 (render target only) with framebufferOnly YES. It is only the present pass's colour attachment (present_encode_m4): code that samples, blits or
+    // reads it needs a layer with framebufferOnly NO (iOS: DM_DRAWABLE_SHADER_ACCESS=1, front_ios.m)
+    { static int said; if (!said) { said = 1; MLOG("present: drawable %lux%lu, usage %#lx (framebufferOnly %d)", (unsigned long)dr.texture.width, (unsigned long)dr.texture.height, (unsigned long)dr.texture.usage, (int)layer.framebufferOnly); } }
     int alloc_i = (int)(ticket % 3);
     if (g_present_alloc_fence[alloc_i]) {
         pthread_mutex_lock(&g_pq_mu);

@@ -130,7 +130,8 @@ static NSString *program_env(void);
 // Cheats (dm/host/hle_cheats.c): Atmosphère cheat files, <build ID>.txt or the SD card's atmosphere/contents/<title ID>/cheats/ tree, in Documents/cheats unless an env file or the
 // launch environment names another folder with DM_CHEATS (DM_CHEATS= with no folder turns cheats off). The folder is made, with a README, so the Files app shows where they go; the in-game
 // menu's Cheats submenu (GameMenu.swift) turns them on and off and reloads the folder. Cheat files packed into the app (the NSP script's mods folder: <App>/dm/cheats) are copied
-// in once, and a file already there is kept, so the player's own edits and toggles (<build ID>.enabled) stay
+// in at each start when missing, and a file already there is kept, so the player's own edits and toggles (<build ID>.enabled) stay. Nothing records a copy, so a packed file the
+// player deletes is back at the next start: to stop its cheats, turn off the Cheats submenu's master switch (Cheats on, which stops every cheat of the game), or set DM_CHEATS= (empty)
 static void cheats_locate(NSString *doc, NSString *res) {
     if (getenv("DM_CHEATS") && !*getenv("DM_CHEATS")) { fprintf(stderr, "boot: cheats off (DM_CHEATS is empty)\n"); return; }
     NSFileManager *fm = NSFileManager.defaultManager;

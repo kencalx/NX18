@@ -16,6 +16,7 @@
 #include <math.h>
 #include <stdio.h>
 void front_picture_shape(int w, int h);   // front_ios.m (dm/host/front.h)
+void dm_gamepad_hint(void);   // DmGamepad.m: the menu button shows for 5 s
 
 static NSArray<GCController *> *gDuoHarnessControllers;
 static BOOL gDuoHarnessControllerSwizzleInstalled;
@@ -40,6 +41,7 @@ static NSUInteger gDuoHarnessProbeViewClassSerial;
 @interface DuoFakeTouch : NSObject
 @property (nonatomic) CGPoint point;
 @property (nonatomic) NSTimeInterval timestamp;
+@property (nonatomic) NSUInteger tapCount;   // DmGamepad touchesBegan reads it: 2 or more off the drawn controls shows the menu button
 - (CGPoint)locationInView:(UIView *)view;
 @end
 
@@ -122,6 +124,7 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 }
 
 - (void)tearDown {
+    duo_harness_set_web_touch(0);   // a failed page test must not leave the page up for the next
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     if (self.savedLayout) [defaults setObject:self.savedLayout forKey:@"DmPadLayout"];
     else [defaults removeObjectForKey:@"DmPadLayout"];
@@ -710,6 +713,85 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     [self endTouches:@[a] onPad:pad cancelled:YES];
 }
 
+- (void)testDoubleTapOffTheDrawnControlsShowsTheHiddenMenuButton {
+    dm_set_opmode(0);
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    DmLayout layout = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+    UIView *pad = [self padForLayout:layout bounds:bounds];
+    dm_pad_layout_set(0);
+    UIButton *menu = [self menuButtonInPad:pad];
+    XCTAssertFalse(menu.hidden, @"The menu button shows from the start until the game's first picture");
+    menu.hidden = YES; menu.alpha = 0;   // as the hide timer leaves it
+    XCTAssertEqual([pad hitTest:menu.center withEvent:nil], pad, @"A hidden menu button takes no touch");
+
+    DuoFakeTouch *onA = [self touchAt:[self faceAIn:layout bounds:bounds] time:1]; onA.tapCount = 2;
+    [self beginTouches:@[onA] onPad:pad];
+    XCTAssertEqual(duo_harness_input().buttons, DM_BTN_A, @"A double tap on a key is a double press");
+    XCTAssertTrue(menu.hidden, @"and does not show the menu button");
+    [self endTouches:@[onA] onPad:pad cancelled:NO];
+
+    DuoFakeTouch *off = [self touchAt:CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds)) time:2]; off.tapCount = 2;
+    [self beginTouches:@[off] onPad:pad];
+    XCTAssertFalse(menu.hidden, @"A double tap off the drawn controls shows the menu button");
+    XCTAssertEqualWithAccuracy(menu.alpha, 1, 0.001);
+    XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu, @"and it takes touches again");
+    [self endTouches:@[off] onPad:pad cancelled:NO];
+
+    dm_pad_layout_set(2);   // Tap draws no control: a double tap anywhere shows it
+    menu.hidden = YES; menu.alpha = 0;
+    DuoFakeTouch *tap = [self touchAt:[self faceAIn:layout bounds:bounds] time:3]; tap.tapCount = 2;
+    [self beginTouches:@[tap] onPad:pad];
+    XCTAssertFalse(menu.hidden, @"In Tap a double tap where A would be shows the menu button");
+    [self endTouches:@[tap] onPad:pad cancelled:NO];
+    dm_pad_layout_set(0);
+}
+
+- (void)testMenuButtonShowsOnTheStartHintAndWhenAssistiveTechnologyChanges {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    UIView *pad = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    UIButton *menu = [self menuButtonInPad:pad];
+    menu.hidden = YES; menu.alpha = 0;
+    dm_gamepad_hint();   // front_ios.m: the game's first picture, the end of the progress screen
+    XCTAssertFalse(menu.hidden, @"The start hint shows the menu button");
+    XCTAssertEqualWithAccuracy(menu.alpha, 1, 0.001);
+    for (NSNotificationName name in @[UIAccessibilityVoiceOverStatusDidChangeNotification, UIAccessibilitySwitchControlStatusDidChangeNotification]) {
+        menu.hidden = YES; menu.alpha = 0;
+        [NSNotificationCenter.defaultCenter postNotificationName:name object:nil];
+        [self waitForView:menu hidden:NO];   // VoiceOver or Switch Control turned on after the button faded: it shows, so either can reach the menu
+    }
+}
+
+- (void)testAPageOverThePictureTakesTouchesOffTheControls {
+    dm_set_opmode(0);
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    DmLayout layout = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+    UIView *pad = [self padForLayout:layout bounds:bounds];
+    dm_pad_layout_set(0);
+    UIButton *menu = [self menuButtonInPad:pad];
+    CGPoint off = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
+    XCTAssertEqual([pad hitTest:off withEvent:nil], pad, @"Without a page a touch off the controls is the game's touch screen");
+    menu.hidden = YES; menu.alpha = 0;   // as the hide timer leaves it
+    duo_harness_set_web_touch(1);
+    XCTAssertNil([pad hitTest:off withEvent:nil], @"With a page shown a touch off the controls goes to the page");
+    XCTAssertFalse(menu.hidden, @"and the first touch brings the hidden menu button back");
+    XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu, @"which then takes its own touches");
+    XCTAssertEqual([pad hitTest:[self faceAIn:layout bounds:bounds] withEvent:nil], pad, @"A key still takes its touch");
+    duo_harness_set_web_touch(0);
+}
+
+- (void)testUltrawideStretchLeavesThePictureRowOutOfTheInGameMenu {
+    UIViewController *root = [self harnessRootViewController];
+    XCTAssertNotNil(root);
+    XCTAssertTrue(dm_setting_live("DM_PICTURE_FIT", NULL));
+    NSInteger before = [[root valueForKey:@"picture"] integerValue];
+    [root setValue:@YES forKey:@"ultrawideStretch"];   // startGame with Ultrawide on a screen wider than 16:9
+    XCTAssertFalse(dm_setting_live("DM_PICTURE_FIT", NULL), @"While Ultrawide holds Stretch the in-game menu has no Picture row");
+    XCTAssertFalse(dm_setting_live("DM_PICTURE_FIT", before == DmPictureFill ? "fit" : "fill"));
+    XCTAssertEqual([[root valueForKey:@"picture"] integerValue], before, @"and a pick cannot replace the picture mode");
+    [root setValue:@NO forKey:@"ultrawideStretch"];
+    XCTAssertTrue(dm_setting_live("DM_PICTURE_FIT", NULL));
+}
+
 - (void)testDockingDropsTheTapLayout {
     dm_set_opmode(0);
     CGRect bounds = CGRectMake(0, 0, 844, 390);
@@ -1098,7 +1180,7 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 
 - (DuoFakeTouch *)touchAt:(CGPoint)point time:(NSTimeInterval)time {
     DuoFakeTouch *touch = [DuoFakeTouch new];
-    touch.point = point; touch.timestamp = time;
+    touch.point = point; touch.timestamp = time; touch.tapCount = 1;   // a single tap, as UIKit reports one
     return touch;
 }
 

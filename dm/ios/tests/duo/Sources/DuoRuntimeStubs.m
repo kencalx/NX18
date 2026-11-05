@@ -114,6 +114,9 @@ uint64_t mtl_present_count(void) { return 0; }
 static int g_present_stretch;   // what the front end last told the present (Picture Stretch)
 void mtl_present_stretch(int on) { g_present_stretch = on; }
 int duo_harness_present_stretch(void) { return g_present_stretch; }
+static int g_web_touch;   // whether an offline HTML page is shown over the picture (web_apple.m is not in the harness)
+int front_web_touch(void) { return g_web_touch; }
+void duo_harness_set_web_touch(int on) { g_web_touch = on; }
 // The cheats GameMenu.swift lists (hle_cheats.c): no cheats folder in the harness, so the in-game menu has no Cheats submenu
 int dm_cheats_found(void) { return 0; }
 int dm_cheats_ncheats(void) { return 0; }

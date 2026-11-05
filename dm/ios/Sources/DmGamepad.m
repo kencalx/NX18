@@ -2,8 +2,10 @@
 //   Two layouts, three in handheld mode, picked in the in-game menu (GameMenu.swift) that the menu button at the top centre (a gear) opens; the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
 //   The menu button stays while a physical controller is connected, so the menu is there in every layout and with every controller.
 //   The menu button is hidden while playing: a double tap anywhere but on a drawn control (keys, diamond, D-pad, left stick) shows it, and it fades out again after 5 s
-//   without a touch on it (the menu open keeps it; closing the menu starts the 5 s again). It shows for 5 s when the game starts, so a new player sees where it is, and
-//   always with VoiceOver on. A double tap on a control is a double press, not a request for the menu, so it never shows the button
+//   without a touch on it (the menu open keeps it; closing the menu starts the 5 s again). It shows from the start until 5 s after the game's first picture and after the
+//   progress screen of a first start, "Preparing shaders" (dm_gamepad_hint), so a new player sees where it is; it stays while VoiceOver or Switch Control is on (turning either on shows it), and while an
+//   offline HTML page is shown (touches off the controls go to the page, so a double tap cannot reach the pad). A double tap on a control is a double press, not a request
+//   for the menu, so it never shows the button
 //   Tap (touch): no control but the menu button, every other touch goes to the game's local touch viewport; offered only while the game is in handheld mode, the only one in which it reads the touch screen (Balatro, played by touch).
 //   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone);
 //     the A (right) B (bottom) X (top) Y (left) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
@@ -134,6 +136,7 @@ static const CGFloat
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
+int front_web_touch(void);   // web_apple.m: an offline HTML page is shown over the picture (hitTest, below)
 
 @interface DmGamepad : UIView
 - (void)arrange:(DmLayout)layout;
@@ -226,8 +229,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         _menu.menu = CFBridgingRelease(dm_game_menu()); _menu.showsMenuAsPrimaryAction = YES;
         __weak DmGamepad *weakSelf = self;
         [_menu addAction:[UIAction actionWithHandler:^(UIAction *a) { (void)a; [weakSelf menuOpened]; [weakSelf reset]; }] forControlEvents:UIControlEventMenuActionTriggered];   // the menu opens: release every key and touch first
-        [self addSubview:_menu];
-        [self menuShow];   // shown for 5 s at the start, then on a double tap
+        [self addSubview:_menu];   // shown from here until 5 s after the game's first picture (dm_gamepad_hint), then on a double tap
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
         int l = saved ? (int)saved.integerValue : DM_GAME_PAD_LAYOUT;
         if (l == 2 && dm_opmode() != 0) l = 0;   // Tap only in handheld mode (env.txt's DM_OPMODE may have changed it)
@@ -236,6 +238,8 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidConnectNotification object:nil];
         [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidDisconnectNotification object:nil];
+        [nc addObserver:self selector:@selector(assistiveChanged:) name:UIAccessibilityVoiceOverStatusDidChangeNotification object:nil];
+        [nc addObserver:self selector:@selector(assistiveChanged:) name:UIAccessibilitySwitchControlStatusDidChangeNotification object:nil];
         pads_start();
         [self padsChanged:nil];
         motion_start();
@@ -251,6 +255,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
 }
 // The menu button's visibility (see the top of this file): shown, then faded out 5 s after the last show or touch unless its menu is open
 static const NSTimeInterval k_menu_hide_s = 5;
+static BOOL assistive_running(void) { return UIAccessibilityIsVoiceOverRunning() || UIAccessibilityIsSwitchControlRunning(); }   // the menu button stays while either runs
 - (void)menuShow {
     if (_menu.hidden || _menu.alpha < 1) { _menu.hidden = NO; [UIView animateWithDuration:0.2 animations:^{ self->_menu.alpha = 1; }]; }
     [self menuScheduleHide];
@@ -260,10 +265,14 @@ static const NSTimeInterval k_menu_hide_s = 5;
     __weak DmGamepad *w = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(k_menu_hide_s * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         DmGamepad *me = w;
-        if (!me || g != me->_menuGen || me->_menuOpen || UIAccessibilityIsVoiceOverRunning()) return;
+        if (!me || g != me->_menuGen || me->_menuOpen || assistive_running()) return;
+        if (front_web_touch()) { [me menuScheduleHide]; return; }   // an offline HTML page is shown: a double tap off the controls reaches the page, not the pad (hitTest), so the button stays; it fades at most 5 s after the page goes
         [UIView animateWithDuration:0.35 animations:^{ me->_menu.alpha = 0; } completion:^(BOOL done) { (void)done; if (g == me->_menuGen && !me->_menuOpen) me->_menu.hidden = YES; }];
     });
 }
+// VoiceOver or Switch Control turned on or off: the button shows, so either can reach it (a hidden button is no accessibility element, and VoiceOver's double tap activates the
+// focused element instead of reaching touchesBegan); the hide timer keeps it while either runs, and once both are off it fades 5 s later
+- (void)assistiveChanged:(NSNotification *)n { (void)n; dispatch_async(dispatch_get_main_queue(), ^{ [self menuShow]; }); }
 - (void)menuTouched { [self menuShow]; }
 - (void)menuOpened { _menuOpen = YES; _menuGen++; _menu.hidden = NO; _menu.alpha = 1; }
 - (void)menuClosed { _menuOpen = NO; [self menuScheduleHide]; }
@@ -444,7 +453,6 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 }
 // While an offline HTML page is shown over the picture (web_apple.m front_web_touch), a touch no control would take goes to the page instead of the game's touch screen:
 // the gamepad lets it through. The same tests as touchesBegan
-int front_web_touch(void);
 - (BOOL)drawnControlAt:(CGPoint)p {   // a drawn control would take a touch here: a key, the diamond, the D-pad, the left stick (not the right stick's open area)
     if (_padOff || (_layout.separated && !CGRectContainsPoint(_layout.controls, p))) return NO;
     if (_tap) return NO;
@@ -463,8 +471,10 @@ int front_web_touch(void);
     return _full && !_stick[1] && [self inRightArea:p];
 }
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
+    BOOL web = front_web_touch() != 0;
+    if (web && (_menu.hidden || _menu.alpha < 1)) [self menuShow];   // a page shown while the menu button was hidden (front_web_show has no front-end call): the first touch brings it back
     UIView *v = [super hitTest:p withEvent:e];
-    return v == self && front_web_touch() && ![self controlAt:p] ? nil : v;
+    return v == self && web && ![self controlAt:p] ? nil : v;
 }
 - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
     BOOL game = NO;
@@ -673,6 +683,7 @@ UIView *dm_gamepad_view(CGRect frame) { DmGamepad *v = [[DmGamepad alloc] initWi
 void dm_gamepad_arrange(UIView *view, DmLayout layout) { [(DmGamepad *)view arrange:layout]; }
 void dm_gamepad_opmode_changed(void) { [g_view opmodeChanged]; }
 void dm_gamepad_touch_feedback(bool on) { [g_view setTouchFeedback:on]; }
+void dm_gamepad_hint(void) { [g_view menuShow]; }   // main thread: the menu button shows for 5 s (front_ios.m: the game's first picture, the end of the progress screen)
 int dm_pad_layout(void) { return g_view ? [g_view padLayout] : 0; }
 bool dm_pad_layout_offered(int layout) { return layout == 0 || layout == 1 || (layout == 2 && dm_opmode() == 0); }
 void dm_pad_layout_set(int layout) { [g_view setPadLayout:layout]; }
