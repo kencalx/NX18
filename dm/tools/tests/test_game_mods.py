@@ -526,14 +526,14 @@ class NspScript(unittest.TestCase):
         with self.assertRaises(self.nsp.BuildError): self.nsp.mods_folder(self.nsp.parse_args(['x', '--mods', str(self.root / 'missing')]), self.root)
 
 
-FAKE_REWRITER = r"""# patch_nso.py as build_variants starts it (<module> <out folder> <name>): writes <ver>_<role>/want.bin as the rewrite, after a pause; no want.bin: refused (exit 3)
+FAKE_REWRITER = r"""# patch_nso.py as build_variants starts it (<module> <out folder> <name>): writes <ver>_<role>/want.bin as the rewrite, after a pause; no want.bin, or a refuse_<name>: refused (exit 3)
 import os, shutil, sys, time
 src, rw, m = sys.argv[1:4]
 var = os.path.dirname(os.path.dirname(src)); role = os.path.basename(var).split('_', 1)[1]; rec = os.path.join(os.path.dirname(var), 'record.txt')
-with open(rec, 'a') as f: f.write(f'{role} start {time.time()} {os.environ.get("DM_REWRITE_J")}\n')
+with open(rec, 'a') as f: f.write(f'{role} start {time.time()} {os.environ.get("DM_REWRITE_J")} {m}\n')
 print(f'rewriting {m} with the {role} mod', flush=True)
 time.sleep(0.6)
-if not os.path.exists(os.path.join(var, 'want.bin')): print('refused: a word the profile patches too'); sys.exit(3)
+if not os.path.exists(os.path.join(var, 'want.bin')) or os.path.exists(os.path.join(var, 'refuse_' + m)): print('refused: a word the profile patches too'); sys.exit(3)
 shutil.copyfile(os.path.join(var, 'want.bin'), os.path.join(rw, m + '.patched.bin'))
 with open(os.path.join(rw, m + '.fixups.tsv'), 'w') as f: f.write('# TEXT_END 0x4000\n# PATCH_OFF 0x8000\n')
 with open(rec, 'a') as f: f.write(f'{role} end {time.time()}\n')
@@ -617,6 +617,26 @@ class VariantPool(unittest.TestCase):
         self.assertIn('refused: a word the profile patches too', ''.join(str(c) for c in self.nsp.PROG.say.call_args_list), 'the log\'s last lines, as run() prints them')
         self.assertTrue((self.mods / 'v0_fps/rewrite/main.key').is_file()); self.assertFalse((self.mods / 'v0_ultrawide/rewrite/main.key').exists())
         self.assertEqual([l[0] for l in self.build() if l[1] == 'start'], ['ultrawide'], 'only the refused rewrite runs again')
+
+    def test_one_after_another_a_roles_modules_stop_at_its_first_failure(self):   # DM_VARIANT_J=1, as before the pool: a module after the refused one is not rewritten
+        (self.mods / 'v0_fps/ExeFS/sub').write_bytes(bytes(make_nso())); (self.mods / 'v0_fps/refuse_main').write_text('')
+        self.variants['fps']['modules'] = ['main', 'sub']
+        rec = self.build(DM_VARIANT_J='1')
+        self.assertEqual([(l[0], l[4]) for l in rec if l[1] == 'start'], [('fps', 'main'), ('ultrawide', 'main')])
+        self.assertTrue(any('fps: 60 FPS: left out: the rewriter refused main' in m for m in self.said))
+        self.assertFalse((self.mods / 'v0_fps/rewrite/sub.key').exists()); self.assertEqual((self.patched / 'mods.tsv').read_text().splitlines()[1:], ['ultrawide\t21x9\t1'])
+        pooled = self.build(DM_VARIANT_J='3')   # together, every planned rewrite has started before the first one is refused: the files written are the same
+        self.assertEqual(sorted((l[0], l[4]) for l in pooled if l[1] == 'start'), [('fps', 'main'), ('fps', 'sub')])
+        self.assertEqual((self.patched / 'mods.tsv').read_text().splitlines()[1:], ['ultrawide\t21x9\t1'])
+        (self.mods / 'v0_fps/refuse_main').unlink(); self.build(DM_VARIANT_J='1')
+        kept = (self.mods / 'v0_fps/rewrite/sub.key').read_text()
+        (self.mods / 'v0_fps/refuse_main').write_text('')
+        rec = self.build(DM_VARIANT_J='1', DM_PATCH_FRONT='1')   # every key misses; main is refused, so sub is not reached and keeps its key and rewrite, as before the pool
+        self.assertEqual([(l[0], l[4]) for l in rec if l[1] == 'start'], [('fps', 'main'), ('ultrawide', 'main')])
+        self.assertEqual((self.mods / 'v0_fps/rewrite/sub.key').read_text(), kept)
+        (self.mods / 'v0_fps/refuse_main').unlink()
+        rec = self.build(DM_VARIANT_J='1')   # the inputs of before: sub's kept rewrite is reused
+        self.assertEqual([(l[0], l[4]) for l in rec if l[1] == 'start'], [('fps', 'main'), ('ultrawide', 'main')])
 
     def test_the_runs_are_kept_and_follow_their_inputs(self):
         self.build(); first = self.outputs()

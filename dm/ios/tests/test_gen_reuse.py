@@ -2,7 +2,9 @@
 generation lines run with stand-ins for the Apple tools (xcodegen, sips) and for the host's make (gen_build.py), without Xcode or game files.
 What they prove: a repeat run with the same inputs rewrites no file in Gen/ and does not run xcodegen or sips again; a changed input replaces exactly the files it makes; another game's
 build removes what only the first game had; and DM_GEN_REUSE=0 deletes Gen/ and writes every file again"""
+import contextlib
 import hashlib
+import io
 import os
 from pathlib import Path
 import shutil
@@ -90,6 +92,36 @@ class Sync(unittest.TestCase):
         stage = self.root / 'stage'; self.put(stage, 'dm/a', b'a')
         tool('sync', stage, self.gen)
         self.assertEqual((self.gen / 'dm/a').read_bytes(), b'a'); self.assertFalse(stage.exists())
+
+    def test_a_name_changed_only_in_case_on_a_case_insensitive_volume(self):   # the Mac's default APFS and exFAT: the old spelling must not take this run's file away with it
+        self.put(self.gen, 'dm/cheats/0100abcdef012345.txt', b'[inf hp]\n'); self.put(self.stage, 'dm/cheats/0100ABCDEF012345.txt', b'[inf hp]\n')
+        self.put(self.gen, 'dm/p1/main.gates.tsv', b'g'); self.put(self.stage, 'dm/P1/main.gates.tsv', b'g')   # a folder too
+        import builtins, importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location('gen_reuse_ci', TOOL); gr = importlib.util.module_from_spec(spec); spec.loader.exec_module(gr)
+        root, real = str(self.root), {'lstat': os.lstat, 'listdir': os.listdir, 'replace': os.replace, 'unlink': os.unlink, 'open': builtins.open}
+        def ci(p):   # the spelling on disk: each part of the path matched without regard to case, as such a volume does
+            if not isinstance(p, (str, os.PathLike)): return p
+            p = os.path.abspath(p)
+            if not p.startswith(root + os.sep): return p
+            cur = root
+            for part in os.path.relpath(p, root).split(os.sep):
+                try: names = real['listdir'](cur)
+                except OSError: names = []
+                cur = os.path.join(cur, part if part in names else next((x for x in names if x.lower() == part.lower()), part))
+            return cur
+        def replace(s, d):   # a rename onto another case's entry replaces it under the new spelling
+            t = ci(d)
+            if t != os.path.abspath(d) and os.path.lexists(t): (shutil.rmtree if os.path.isdir(t) and not os.path.islink(t) else real['unlink'])(t)
+            real['replace'](ci(s), d)
+        fd = lambda f: lambda p, *a, **k: f(p if k.get('dir_fd') is not None else ci(p), *a, **k)   # shutil.rmtree's calls relative to a folder's descriptor pass as they are
+        with mock.patch('os.lstat', fd(real['lstat'])), mock.patch('os.listdir', lambda p='.': real['listdir'](ci(p))), mock.patch('os.unlink', fd(real['unlink'])), \
+             mock.patch('builtins.open', lambda p, *a, **k: real['open'](ci(p), *a, **k)), mock.patch('os.replace', replace):
+            with contextlib.redirect_stdout(io.StringIO()): gr.sync(str(self.stage), str(self.gen), {'.reuse', 'Info.plist'})
+        self.assertEqual(os.listdir(self.gen / 'dm/cheats'), ['0100ABCDEF012345.txt'])
+        self.assertEqual((self.gen / 'dm/cheats/0100ABCDEF012345.txt').read_bytes(), b'[inf hp]\n')
+        self.assertEqual(sorted(os.listdir(self.gen / 'dm')), ['P1', 'cheats']); self.assertEqual((self.gen / 'dm/P1/main.gates.tsv').read_bytes(), b'g')
+        self.assertFalse(self.stage.exists())
 
 
 class Digest(unittest.TestCase):

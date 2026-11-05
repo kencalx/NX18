@@ -41,6 +41,11 @@ def sync(stage, gen, keep):
         if os.path.lexists(dst) and not (os.path.isdir(dst) and not os.path.islink(dst)): remove(dst); n['removed'] += 1
         if not os.path.lexists(dst): os.mkdir(dst)
         names = sorted(os.listdir(src))
+        # Entries this run did not make go first: on a case-insensitive volume (the Mac's default APFS, exFAT) a name that changed only in case would otherwise be found by the
+        # lstat below, kept under its old spelling, and then deleted here as not wanted, so this run's file would be lost with the stage
+        wanted = set(names) | (keep if top else set())
+        for name in sorted(os.listdir(dst)):
+            if name not in wanted: remove(os.path.join(dst, name)); n['removed'] += 1
         for name in names:
             s, d = os.path.join(src, name), os.path.join(dst, name)
             st = os.lstat(s)
@@ -60,9 +65,6 @@ def sync(stage, gen, keep):
                 if dt is not None and stat.S_ISDIR(dt.st_mode): shutil.rmtree(d)
                 os.replace(s, d); n['written'] += 1
             else: die(f'neither a file, a folder nor a symlink: {s}')
-        wanted = set(names) | (keep if top else set())
-        for name in sorted(os.listdir(dst)):
-            if name not in wanted: remove(os.path.join(dst, name)); n['removed'] += 1
     stage, gen = os.path.normpath(stage), os.path.normpath(gen)
     if not os.path.isdir(stage) or os.path.islink(stage): die(f'no folder {stage}')
     if os.path.dirname(stage) == gen: keep = keep | {os.path.basename(stage)}   # a stage inside the folder it is mirrored into (build_ipa.sh: Gen/.stage)

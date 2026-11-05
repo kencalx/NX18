@@ -23,7 +23,7 @@ A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without
 
 ### Frame rate
 
-Games whose speed the app controls (Breath of the Wild, Tears of the Kingdom and a few others) offer **30 fps** or **60 fps**. 60 is smoother; 30 is what the Switch ran and uses less power, so the phone stays cooler and the battery lasts longer. The game runs at real speed either way. On an iPhone or iPad these games hold 30 fps while the device is hot or in Low Power Mode, and go back to your choice after 30 s without either; `DM_LOW_POWER_CAP=0` in `Documents/env.txt` keeps 60 in Low Power Mode ([Settings in a file](#settings-in-a-file)).
+Games whose speed the app controls (Breath of the Wild, Tears of the Kingdom and a few others) offer **30 fps** or **60 fps**. 60 is smoother; 30 is what the Switch ran and uses less power, so the phone stays cooler and the battery lasts longer. The game runs at real speed either way. On an iPhone or iPad, Breath of the Wild, Tears of the Kingdom, Age of Calamity, Paper Mario: The Thousand-Year Door and Astral Chain hold 30 fps while the device is hot or in Low Power Mode, and go back to your choice after 30 s without either (`DM_LOW_POWER_CAP=0` in `Documents/env.txt` keeps your choice in Low Power Mode, [Settings in a file](#settings-in-a-file)); the other games keep the rate you chose.
 
 Some games choose their own frame rate and time their gameplay by the clock (Persona 5 Royal). Their **Frame rate** offers **30 fps**, the game's own pace, or **60 fps**, where a new frame is shown on every refresh whatever the game asks for. The game runs at the same speed either way; 60 uses more power and heat.
 

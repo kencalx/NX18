@@ -1672,13 +1672,13 @@ def build_variants(py, repo, variants, patched, env, logs):
     reused while its module, the base rewrite and the rewriter's inputs (its tools, the patch files of the module's build, capstone, its switches) are as at its last run, and so are the
     byte runs found in it (variant_runs_cached). The rewrites to run start together (run_rewrites, DM_VARIANT_J: High frame rate and Ultrawide take one rewrite's time, not two); the runs
     are then taken role by role in the order of before, so <module>.variants, mods.tsv and the messages are those of rewriting one after another, and a role whose rewrite fails is the
-    only one left out. The base rewrite's files are hashed once for all roles (fingerprint's memo): the same keys"""
+    only one left out. With DM_VARIANT_J=1 each rewrite runs just before its runs are taken, so a role's modules after its first failure are not rewritten, as before. The base rewrite's files are hashed once for all roles (fingerprint's memo): the same keys"""
     import capstone
     import game_mods as gm
     for p in list(patched.glob('*.variants')) + [patched / 'mods.tsv']: rmtree(p)
     if not variants: return
     PROG.add(1); PROG.stage('switchable mods', step=', '.join(variants))
-    rw_tools, memo, plan, jobs = rewrite_tools(repo), {}, [], []
+    rw_tools, memo, plan, jobs, stale = rewrite_tools(repo), {}, [], [], {}
     for role, v in variants.items():
         exefs, mods = Path(v['exefs']), []
         for m in v['modules']:
@@ -1686,8 +1686,7 @@ def build_variants(py, repo, variants, patched, env, logs):
             key = fingerprint(('files', rw_tools + patch_files(repo, exefs, [m], env.get('DM_GAME')) + [exefs / m, patched / f'{m}.patched.bin', patched / f'{m}.fixups.tsv']),
                               capstone.__version__, {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, memo=memo)
             if not ((rw / f'{m}.patched.bin').is_file() and reused(kf, key) is not None):
-                rmtree(kf)   # the cache outlives apply_mods' rebuilds: a rewrite that stops part way must not leave the last run's key over its outputs
-                rmtree(rw / f'{m}.runs.json')   # nor the runs found in the last run's outputs
+                stale[(role, m)] = (kf, rw / f'{m}.runs.json')   # removed when its rewrite starts (begin): a module the serial path never reaches keeps them, as before the pool
                 jobs.append(((role, m), f'{role}: rewriting {m}', [py, repo / 'dm/tools/patch_nso.py', exefs / m, rw, m], logs / f'rewrite_{m}_{role}.log'))
             mods.append((m, rw, kf, key))
         plan.append((role, v, exefs, mods))
@@ -1695,11 +1694,17 @@ def build_variants(py, repo, variants, patched, env, logs):
     def done(name, rc):
         if rc: failed.add(name); return
         kf, key = keys[name]; rmtree(kf); kf.write_text(f'{key}\n')
-    if jobs: run_rewrites(jobs, env, variant_workers(env, len(jobs)), done)
+    def begin(names):   # the cache outlives apply_mods' rebuilds: a rewrite that stops part way must not leave the last run's key over its outputs, nor the runs found in them
+        for name in names:
+            for f in stale[name]: rmtree(f)
+    workers = variant_workers(env, len(jobs)) if jobs else 1
+    if workers > 1: begin(stale); run_rewrites(jobs, env, workers, done)
+    pending = {job[0]: job for job in jobs} if workers == 1 else {}   # one after another: each rewrite just before its runs, and none after its role's first failure, as before the pool
     rows: dict[str, list] = {}; offered = []
     for role, v, exefs, mods in plan:
         ok, got = True, {}
         for m, rw, _, key in mods:
+            if (role, m) in pending: begin([(role, m)]); run_rewrites([pending[(role, m)]], env, 1, done)
             if (role, m) in failed: say(f'mods: {role}: {v["mod"]}: left out: the rewriter refused {m} with it (likely a word the game\'s profile patches too; {logs / f"rewrite_{m}_{role}.log"})'); ok = False; break
             try: got[m] = variant_runs_cached(gm, patched, rw, m, exefs / m, key, env)
             except gm.ModError as e: say(f'mods: {role}: {v["mod"]}: left out: {e}'); ok = False; break

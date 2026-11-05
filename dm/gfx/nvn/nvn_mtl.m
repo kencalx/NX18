@@ -11119,7 +11119,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
                 if (lo > hi) { RED_ONCE(154, "depth bounds %f..%f: min above max (every fragment would fail); drawn without the test", S.db.mn, S.db.mx); lo = 0; hi = 1; }
                 else on = lo > 0 || hi < 1; }
         }
-        if (on ? !g_ed.dbs || g_ed.db[0] != lo || g_ed.db[1] != hi : g_ed.dbs) { enc_r_depth_bounds(en, lo, hi); g_ed.dbs = on; g_ed.db[0] = lo; g_ed.db[1] = hi; }
+        if (on ? !g_ed.dbs || g_ed.db[0] != lo || g_ed.db[1] != hi : g_ed.dbs) {
+            if (g_mrun.n) geo_mesh_flush_draw();   // a waiting geometry mesh run is drawn with the bounds its draws had (DM_DEPTH_BOUNDS=ab can change phase mid-pass); this draw then starts its own, checked by geo_mesh_run_fits
+            enc_r_depth_bounds(en, lo, hi); g_ed.dbs = on; g_ed.db[0] = lo; g_ed.db[1] = hi; }
         if (on) { g_db_draws++; g_db_span += hi - lo; }
     }
     if (cur_pull) { pull_bind(en); g_hy_draws += !g_geo_mesh.on; }   // a pulling pipeline reads the streams itself (no conversion either: dm_fetch decodes every format)

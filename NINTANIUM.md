@@ -146,7 +146,7 @@ A check of these areas found NXNative already well tuned: Metal 4 residency sets
 
 Changed, the frame rate in Low Power Mode (the game's speed stays the same):
 
-- **Low Power Mode holds 30 fps for frame-step games** (Breath of the Wild, Tears of the Kingdom, Age of Calamity, Paper Mario: The Thousand-Year Door, Astral Chain), and 60 for a game the host lets run at 120, as the heat cap already did: you chose battery over speed, and the clocks are lower in it anyway. The frame rate comes back 30 s after Low Power Mode is turned off. Other games are not affected. `DM_LOW_POWER_CAP=0` in `Documents/env.txt` keeps 60; `DM_THERMAL_CAP=0` turns off the heat cap too.
+- **Low Power Mode holds 30 fps for frame-step games** (Breath of the Wild, Tears of the Kingdom, Age of Calamity, Paper Mario: The Thousand-Year Door, Astral Chain), and 60 for a game the host lets run at 120, as the heat cap already did: you chose battery over speed, and the clocks are lower in it anyway. The frame rate comes back 30 s after Low Power Mode is turned off. Other games are not affected. `DM_LOW_POWER_CAP=0` in `Documents/env.txt` keeps the chosen frame rate; `DM_THERMAL_CAP=0` turns off the heat cap too.
 
 Left alone, because each could change how a game runs and needs a measurement on your devices first:
 
