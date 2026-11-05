@@ -416,9 +416,9 @@ def emit_gate_call():
 def site_gate(ins, kind, arg):
     """svc / mrs cntpct_el0 / cntvct_el0 / cntfrq_el0 → host gate. The gate address is taken from thread slot KGATE; the gate looks up gates.tsv by return point (the address after
     this block's blr).
-    mrs x18, cntpct_el0 / cntvct_el0: dm_gate does not write x18 back (Apple's platform register; the guest's x18 is thread slot K18), so the gate writes x16 and the block stores it
+    mrs x18, cntpct_el0 / cntvct_el0 / cntfrq_el0: dm_gate does not write x18 back (Apple's platform register; the guest's x18 is thread slot K18), so the gate writes x16 and the block stores it
     into K18, the guest's x16 / x17 saved below the gate block's push. Between the blr and the ldp x29 / x30 hold only the gate's sp and return point, so x30 serves for the key page
-    offset. (mrs x18, cntfrq_el0 is an x18 site; an svc's arg is its number, not a register)"""
+    offset. (An svc's arg is its number, not a register)"""
     to18 = kind != 'svc' and arg == 18
     start = here()
     if to18: emit(STP_PRE(16, 17, 31, -16))
@@ -707,10 +707,10 @@ for o in (o for s, e in CODE_RANGES for o in range(s, e, 4)):
     if w & 0xFFFFFFE0 == 0xD53BD060: kinds[o] = ('tpidrro_r', None); continue
     if w & 0xFFFFFFE0 == 0xD53BE020: kinds[o] = ('cntpct', w & 31); continue
     if w & 0xFFFFFFE0 == 0xD53BE040: kinds[o] = ('cntvct', w & 31); continue
-    # mrs xN, cntfrq_el0: the counter's frequency. Apple's reads 24 MHz, while the counter reads above return the guest's ticks (19.2 MHz, 31.25 MHz for the Switch 2): a game that
-    # took the frequency from the register would convert ticks to time about 20 % short. The host gate gives the guest's frequency (hle.c G_CNTFRQ). mrs x18, cntfrq_el0 stays an x18
-    # site, as before this rule (site_plain: Apple's 24 MHz into thread slot K18)
-    if w & 0xFFFFFFE0 == 0xD53BE000 and w & 31 != 18: kinds[o] = ('cntfrq', w & 31); continue
+    # mrs xN, cntfrq_el0: the counter's frequency. The counter reads above return the guest's ticks (19.2 MHz, 31.25 MHz for the Switch 2), while the host's register describes the host's
+    # counter: 24 MHz on earlier Apple chips (ticks 20 % short, 30 % long for the Switch 2), 1 GHz measured on a development Mac (dm/gfx/nvn/nvn_entry.S: 32 to 52 times short). The host gate gives
+    # the guest's frequency (hle.c G_CNTFRQ), into x18 too (site_gate: through x16 into thread slot K18); mrs x18, cntfrq_el0 used to stay an x18 site (site_plain: the host's register into K18)
+    if w & 0xFFFFFFE0 == 0xD53BE000: kinds[o] = ('cntfrq', w & 31); continue
     # mrs xN, ctr_el0 (cache type): the Apple kernel does not expose it to user mode (SIGILL); SDK 16's nn::os::FlushDataCache reads it for the cache line size
     if w & 0xFFFFFFE0 == 0xD53B0020: kinds[o] = ('ctr', w & 31); continue
     # sub sp, sp, xN (extended register, LSL #0): sp may end up misaligned, which Horizon allows and Apple's kernel does not (site_sp_align); with x18 it is an x18 site (site_sp)
@@ -1257,10 +1257,13 @@ def pieces(fa, fb):
         s = cand[j]; cuts.append(s)
     b = [0] + cuts + [n]
     return [(fa + 4 * p, fa + 4 * q) for p, q in zip(b, b[1:])], far
-funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
+# The functions (pieces) that hold x18 sites are analysed, and those that hold mrs x18, cntfrq_el0, as when it was one: an exclusive window around it is still copied whole (site_window: the
+# host's register, as before), not a gate entered between its ldxr and its stxr
+is18 = lambda k, arg: k == 'x18' or (k, arg) == ('cntfrq', 18)
+funcs = sorted({func_of(a) for a, (k, arg) in kinds.items() if is18(k, arg)})
 far_into, rmid_all = [], set()
 if any(fb - fa > BIG_FN for fa, fb in funcs):
-    sites18 = sorted(a for a, (k, _) in kinds.items() if k == 'x18'); split = []
+    sites18 = sorted(a for a, (k, arg) in kinds.items() if is18(k, arg)); split = []
     for fa, fb in funcs:
         if fb - fa <= BIG_FN: split.append((fa, fb)); continue
         ps, far = pieces(fa, fb); far_into += far

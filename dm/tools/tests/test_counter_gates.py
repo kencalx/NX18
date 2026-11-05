@@ -1,7 +1,8 @@
 """The counter-timer reads the rewriter sends to the host gate (patch_nso.py) and the gate kinds the host knows (hle.c gate_register): every kind one emits the other takes,
-and mrs cntpct_el0 / cntvct_el0 / cntfrq_el0 are each classified, cntfrq_el0 returning the guest's frequency (19.2 MHz, 31.25 MHz for the Switch 2), not Apple's 24 MHz.
+and mrs cntpct_el0 / cntvct_el0 / cntfrq_el0 are each classified, cntfrq_el0 returning the guest's frequency (19.2 MHz, 31.25 MHz for the Switch 2), not the host's register.
 The real rewriter's blocks for these reads are run instruction by instruction against a model of dm_gate (entry.S), which writes back x0..x28 but not x18: a read into x18 must reach
-the guest's x18, thread slot K18"""
+the guest's x18, thread slot K18. The rewriter with its cntfrq rule as it was before x18 took the gate rewrites a module without mrs x18, cntfrq_el0, or with one only in an
+exclusive window, to the same bytes"""
 import os
 from pathlib import Path
 import re
@@ -38,11 +39,11 @@ class CounterGates(unittest.TestCase):
 # The module: one function of the reads, at 0x100
 SITES = {0x100: (0xD53BE032, 'cntpct'),   # mrs x18, cntpct_el0
          0x104: (0xD53BE052, 'cntvct'),   # mrs x18, cntvct_el0
-         0x108: (0xD53BE012, 'x18'),      # mrs x18, cntfrq_el0: an x18 site (site_plain), as before the cntfrq rule
+         0x108: (0xD53BE012, 'cntfrq'),   # mrs x18, cntfrq_el0
          0x10c: (0xD53BE000, 'cntfrq'),   # mrs x0, cntfrq_el0
          0x110: (0xD53BE023, 'cntpct'),   # mrs x3, cntpct_el0
          0x114: (0xD4000241, 'svc')}      # svc #0x12: an SVC number, not a register
-TICKS, FREQ, APPLE_FREQ, SVC_RESULT = 0x123456789, 19200000, 24000000, 0x5e
+TICKS, FREQ, HOST_FREQ, SVC_RESULT = 0x123456789, 19200000, 1000000000, 0x5e   # HOST_FREQ: CNTFRQ_EL0 as a development Mac read it (dm/gfx/nvn/nvn_entry.S)
 TSD, GATE, STALE, HOST_X18 = 0x200000, 0x7000000, 0x5151, 0xAAAA   # Apple's tpidrro_el0, the thread's gate stub, the guest's x18 before the read, Apple's platform register
 KEYS = {'K18': 200, 'KTLS': 201, 'KTLR': 202, 'KGATE': 203}   # the thread slots the loader claimed (any numbers: the key page holds number × 8)
 
@@ -50,25 +51,49 @@ KEYS = {'K18': 200, 'KTLS': 201, 'KTLR': 202, 'KGATE': 203}   # the thread slots
 def sx(v, bits): return v - (1 << bits) if v >> (bits - 1) & 1 else v
 
 
+def nro(words):   # one function at 0x100, in an NRO as test_nro_header.py makes it
+    raw = image({0x100: words + [RET]})
+    raw[0x1100:0x111c] = raw[0x20:0x3c]
+    struct.pack_into('<I', raw, 4, 0x1100)
+    struct.pack_into('<ii', raw, 0x1110, 0x3000 - 0x1100, 0x3014 - 0x1100)
+    raw[0x10:0x14] = b'NRO0'
+    struct.pack_into('<I', raw, 0x18, len(raw))
+    struct.pack_into('<6I', raw, 0x20, 0, 0x1000, 0x1000, 0x2000, 0x3000, 0x1000)
+    return raw
+
+
+# The rewriter before mrs x18, cntfrq_el0 took the gate: that read an x18 site, and the functions analysed for x18 sites those that hold one
+BEFORE = (("if w & 0xFFFFFFE0 == 0xD53BE000: kinds[o] = ('cntfrq', w & 31)", "if w & 0xFFFFFFE0 == 0xD53BE000 and w & 31 != 18: kinds[o] = ('cntfrq', w & 31)"),
+          ("is18 = lambda k, arg: k == 'x18' or (k, arg) == ('cntfrq', 18)", "is18 = lambda k, arg: k == 'x18'"))
+
+
+def rewrite(raw, before=False):
+    """patch_nso.py on the NRO raw (with before, its source with BEFORE applied, run as the file itself) → {output file: bytes}"""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / 'input.nro'; src.write_bytes(raw)
+        tool = [str(REPO / 'dm/tools/patch_nso.py')]
+        if before:
+            code = (REPO / 'dm/tools/patch_nso.py').read_text()
+            for a, b in BEFORE:
+                assert code.count(a) == 1, f'the rule this test puts back moved: {a}'
+                code = code.replace(a, b)
+            (Path(tmp) / 'before.py').write_text(code)
+            tool = ['-c', "import os, sys, __main__ as m; m.__file__, f = sys.argv[1:3]; sys.argv = [m.__file__] + sys.argv[3:]; sys.path[0] = os.path.dirname(m.__file__); "
+                           "exec(compile(open(f).read(), m.__file__, 'exec'), vars(m))", tool[0], str(Path(tmp) / 'before.py')]   # in __main__: the rewriter's pool pickles its functions by name
+        run = subprocess.run([sys.executable, *tool, str(src), tmp, 'nro0'], env=os.environ | {'DM_GAME': '010015100B514000'}, capture_output=True, text=True)
+        if run.returncode: raise AssertionError(run.stdout + run.stderr)
+        return {f.name: f.read_bytes() for f in Path(tmp).iterdir() if f.name not in ('input.nro', 'before.py')}
+
+
 class Rewrite(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        raw = image({0x100: [w for w, _ in SITES.values()] + [RET]})   # an NRO, as test_nro_header.py makes it
-        raw[0x1100:0x111c] = raw[0x20:0x3c]
-        struct.pack_into('<I', raw, 4, 0x1100)
-        struct.pack_into('<ii', raw, 0x1110, 0x3000 - 0x1100, 0x3014 - 0x1100)
-        raw[0x10:0x14] = b'NRO0'
-        struct.pack_into('<I', raw, 0x18, len(raw))
-        struct.pack_into('<6I', raw, 0x20, 0, 0x1000, 0x1000, 0x2000, 0x3000, 0x1000)
-        with tempfile.TemporaryDirectory() as tmp:
-            src = Path(tmp) / 'input.nro'; src.write_bytes(raw)
-            run = subprocess.run([sys.executable, str(REPO / 'dm/tools/patch_nso.py'), str(src), tmp, 'nro0'], env=os.environ | {'DM_GAME': '010015100B514000'}, capture_output=True, text=True)
-            if run.returncode: raise AssertionError(run.stdout + run.stderr)
-            out = lambda ext: (Path(tmp) / f'nro0.{ext}').read_text()
-            cls.code = (Path(tmp) / 'nro0.patched.bin').read_bytes()
-            cls.sites = {int(a, 16): k for a, k in (line.split('\t')[:2] for line in out('sites.tsv').splitlines())}
-            cls.gates = {int(r, 16): (k, int(arg), int(o, 16)) for r, k, arg, o in (line.split('\t') for line in out('gates.tsv').splitlines())}
-            fx = dict(line[2:].split('\t') for line in out('fixups.tsv').splitlines() if line.startswith('# '))
+        files = rewrite(nro([w for w, _ in SITES.values()]))
+        out = lambda ext: files[f'nro0.{ext}'].decode()
+        cls.code = files['nro0.patched.bin']
+        cls.sites = {int(a, 16): k for a, k in (line.split('\t')[:2] for line in out('sites.tsv').splitlines())}
+        cls.gates = {int(r, 16): (k, int(arg), int(o, 16)) for r, k, arg, o in (line.split('\t') for line in out('gates.tsv').splitlines())}
+        fx = dict(line[2:].split('\t') for line in out('fixups.tsv').splitlines() if line.startswith('# '))
         cls.key_page = int(fx['KEY_PAGE_OFF'], 16)
         assert int(fx['PATCH_OFF'], 16) > 0   # the file holds the image and then the patch area at its offset
         cls.key_idx = {k: int(fx[f'KEY_{k}_IDX']) for k in KEYS}
@@ -113,7 +138,7 @@ class Rewrite(unittest.TestCase):
                 if w & 0x400000: x[t] = mem[at]
                 else: mem[at] = x[t]
             elif w & 0xFFFFFFE0 == 0xD53BD060: x[t] = TSD          # mrs xT, tpidrro_el0
-            elif w & 0xFFFFFFE0 == 0xD53BE000: x[t] = APPLE_FREQ   # mrs xT, cntfrq_el0: the register as Apple's kernel shows it
+            elif w & 0xFFFFFFE0 == 0xD53BE000: x[t] = HOST_FREQ    # mrs xT, cntfrq_el0: the host's register
             elif w & 0x9F000000 == 0x90000000:                     # adrp
                 x[t] = (pc & ~0xFFF) + (sx((((w >> 5) & 0x7FFFF) << 2) | ((w >> 29) & 3), 21) << 12)
             elif w & 0xFFE0FC00 == 0x8B000000: x[t] = x[n] + x[(w >> 16) & 31]   # add xT, xN, xM
@@ -135,17 +160,12 @@ class Rewrite(unittest.TestCase):
         self.assertEqual(self.sites, {a: k for a, (_, k) in SITES.items()})
 
     def test_a_counter_read_into_x18_reaches_the_guests_x18(self):
-        for a, kind in ((0x100, 'cntpct'), (0x104, 'cntvct')):
+        for a, kind, value in ((0x100, 'cntpct', TICKS), (0x104, 'cntvct', TICKS), (0x108, 'cntfrq', FREQ)):
             with self.subTest(kind=kind):
                 x, x18, entered = self.run_site(a)
                 self.assertEqual(entered, [(kind, 16)])
-                self.assertEqual(x18, TICKS)
+                self.assertEqual(x18, value)
                 self.unchanged(x)   # x16 / x17, which carried it, too
-
-    def test_cntfrq_into_x18_stays_an_x18_site(self):
-        x, x18, entered = self.run_site(0x108)
-        self.assertEqual((entered, x18), ([], APPLE_FREQ))
-        self.unchanged(x)
 
     def test_a_counter_read_into_another_register(self):
         for a, kind, reg, value in ((0x10c, 'cntfrq', 0, FREQ), (0x110, 'cntpct', 3, TICKS)):
@@ -160,6 +180,24 @@ class Rewrite(unittest.TestCase):
         self.assertEqual(entered, [('svc', 0x12)])
         self.assertEqual((x[0], x18), (SVC_RESULT, STALE))
         self.unchanged(x, but=(0,))
+
+
+class Before(unittest.TestCase):
+    """Only mrs x18, cntfrq_el0 outside an exclusive window rewrites differently from before"""
+    def test_a_module_without_cntfrq_into_x18_is_rewritten_as_before(self):
+        raw = nro([0x91000652 if w == 0xD53BE012 else w for w, _ in SITES.values()] + [0x885FFC08, 0x91000652, 0x8809FC08, 0x35FFFFA9])   # add x18, x18, #1 instead; a window of x18
+        self.assertEqual(rewrite(raw, before=True), rewrite(raw))
+
+    def test_cntfrq_into_x18_in_an_exclusive_window_is_copied_with_the_window_as_before(self):
+        # the function's only x18 word: still analysed, so the window is copied (site_window) and no gate is entered between the ldaxr and the stlxr
+        raw = nro([0xD503201F, 0x885FFC08, 0xD53BE012, 0x8809FC08, 0x35FFFFA9])   # nop; ldaxr w8, [x0]; mrs x18, cntfrq_el0; stlxr w9, w8, [x0]; cbnz w9, <the ldaxr>
+        now = rewrite(raw)
+        self.assertEqual((now['nro0.sites.tsv'], now['nro0.gates.tsv']), (b'0x104\tW\t0x114\n', b''))
+        self.assertEqual(rewrite(raw, before=True), now)
+
+    def test_cntfrq_into_x18_was_an_x18_site(self):
+        before = rewrite(nro([w for w, _ in SITES.values()]), before=True)
+        self.assertIn(b'0x108\tx18\n', before['nro0.sites.tsv'])
 
 
 if __name__ == '__main__':

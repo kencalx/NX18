@@ -119,7 +119,7 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
                 regs[g->arg] = t;
                 return t;
             }
-            case G_CNTFRQ: {   // mrs xN, cntfrq_el0: the frequency of the counter above, the guest's (Apple's register reads 24 MHz)
+            case G_CNTFRQ: {   // mrs xN, cntfrq_el0: the frequency of the counter above, the guest's (the host's register reads 24 MHz on earlier Apple chips, 1 GHz on a development Mac, dm/gfx/nvn/nvn_entry.S); arg = N, or 16 for x18 (the block stores x16 into thread slot K18, patch_nso.py site_gate)
                 uint64_t f = dm_sdk_ounce() ? 31250000 : 19200000;
                 regs[g->arg] = f;
                 return f;
