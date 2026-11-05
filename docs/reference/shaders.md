@@ -1535,6 +1535,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#build-performance).
 - **Check:** `test_nsp_incremental.py` covers translation-only hits, transitive readers, extraction settings, auxiliary modules, explicit captures, decoder changes, corrupt outputs and the existing registered/derived, DLC and damaged-input paths. `test_host_msl.py` verifies executable-bound provenance, chain-only reuse and invalidation for decoder/profile/compiler/header changes. `test_nsp_mac.py` checks separate Mac/iOS translation outputs.
 
+### iOS shaders rerun after an edit of the profile's notes
+
+- **Symptom:** after an edit of only `dm/games/<id>/README.md` (or `bench.tsv`, `smoke.tsv`, `usage.tsv`, `validated.tsv`, `pso_manifest.tsv`, a game.tsv key the shaders do not read, or the address region check's comment), the next build's `iOS shaders` stage restores every library from the cache (Breath of the Wild: about 100 s), and `pack_ipa.py` compresses the recreated `msl/` folder again.
+- **Cause:** the stage's key hashed every file of the profile (`profile_files`).
+- **Fix:** `build_shaders` keys the profile by `shader_profile_inputs` in `scripts/build_ipa_from_nsp.py`: the profile's ID, the tables of `dmsh_chain.py` `INPUT_TABLES` by content, the `nvn_*` / `shader_*` rows of game.tsv (`dmsh_chain.py`'s own list and row filter, so the key cannot drift from the library stamp), and the stamp's digest as `dmsh_chain.py --inputs` prints it in the stage's environment. `shader_facts_manual.tsv` reaches the key through `shader_facts.tsv`, which the split rewrites. The Vulkan and GL shader stages keep the whole profile. A profile or chain module that cannot be read falls back to the old key, and `DM_SHADER_KEY_ALL_PROFILE=1` restores it; existing keys miss once after the update.
+- **Found on:** no particular game: found in review (profile and mod iteration, and derived or provisional profiles whose game.tsv the build rewrites).
+- **Check:** `dm/tools/tests/test_nsp_shader_key.py`: the inputs are what the chain names, the notes and test tables leave the key, each input changes it, game.tsv is read as the chain will read it, the profile's ID and folder count, the switch and the fallback; `build_shaders` is reused or runs again with the real fingerprint.
+
 ### Offline pipeline archive rebuilt after a chain-only update
 
 - **Symptom:** rebuilding an unchanged NSP after a shader-chain update runs `metal-tt` for minutes even when all referenced Metal libraries and pipeline settings remain identical.
