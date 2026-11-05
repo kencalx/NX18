@@ -62,6 +62,7 @@
 #include <mach/vm_prot.h>
 #endif
 #include <dispatch/dispatch.h>   // the state files are written off the presenting thread (files_queue)
+#include <dlfcn.h>           // host_owner: the image an address outside the game's memory lies in
 #include <errno.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -236,11 +237,56 @@ static void cheat_kill(cheat_t *c, const char *fmt, ...) {
 // one is counted, and the row's reason text carries the count as a note while the cheat's latest pass had a failure
 // (cheats_pass clears it on the first pass without one, so a cheat that works now shows no stale note). A dry run only
 // describes it
+// DM_CHEATS_DEBUG's per-access lines (every read of a pointer chain, every refused access), which a pass makes 60 times a
+// second: the first 600 are logged, then one in 300, so a chain's addresses and values show without flooding the log
+static void dbg_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void dbg_line(const char *fmt, ...) {
+    static _Atomic uint64_t n;
+    uint64_t k = atomic_fetch_add(&n, 1);
+    if (k == 600) LOG("cheats: debug: further access lines are logged one in 300");
+    if (k >= 600 && k % 300) return;
+    char b[400]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
+    LOG("%s", b);
+}
+
+// What an address the cheat VM refused is, for the log: a cheat whose pointer chain leaves the game's memory (where_get) reads
+// on from a stale register, so the first refused address names the link that went astray. The game's own memory is the
+// modules, the heap and the reserved block; anything else is the host's: an image (dladdr), a malloc allocation (the
+// region's tag), another mapping, or nothing at all. Only read, never touched
+#ifdef VM_MEMORY_MALLOC_MEDIUM
+#define HO_MALLOC_MEDIUM VM_MEMORY_MALLOC_MEDIUM
+#else
+#define HO_MALLOC_MEDIUM VM_MEMORY_MALLOC
+#endif
+static void host_owner(uint64_t addr, char *out, size_t n) {
+    if (addr < 0x100000000ull) { snprintf(out, n, "below the process's memory: a null or small value used as a pointer"); return; }
+    Dl_info di;
+    if (dladdr((const void *)(uintptr_t)addr, &di) && di.dli_fname) {
+        const char *b = strrchr(di.dli_fname, '/');
+        snprintf(out, n, "in the host image %s, not the game's memory", b ? b + 1 : di.dli_fname); return;
+    }
+    vm_address_t a = (vm_address_t)addr; vm_size_t sz = 0; natural_t depth = 0;
+    struct vm_region_submap_info_64 info; mach_msg_type_number_t cnt = VM_REGION_SUBMAP_INFO_COUNT_64;
+    if (vm_region_recurse_64(mach_task_self(), &a, &sz, &depth, (vm_region_recurse_info_t)&info, &cnt) != KERN_SUCCESS || a > addr) {
+        snprintf(out, n, "not mapped in the process"); return;
+    }
+    unsigned t = info.user_tag;
+    const char *kind = t == VM_MEMORY_MALLOC || t == VM_MEMORY_MALLOC_SMALL || t == VM_MEMORY_MALLOC_LARGE || t == VM_MEMORY_MALLOC_HUGE ||
+                       t == VM_MEMORY_MALLOC_TINY || t == VM_MEMORY_MALLOC_NANO || t == HO_MALLOC_MEDIUM ? "the host's malloc heap" :
+                       t == VM_MEMORY_IOKIT || t == VM_MEMORY_IOACCELERATOR ? "a GPU / IOKit mapping" : "a host mapping";
+    snprintf(out, n, "%s (region 0x%llx+0x%llx, tag %u, protection %d), not the game's memory", kind, (unsigned long long)a, (unsigned long long)sz, t, info.protection);
+}
+
 static void cheat_fail(cheat_t *c, const char *what, uint64_t addr, const char *why) {
     if (g_dry) { dry_line("%s at guest address 0x%llx fails (%s): ignored, retried next pass", what, (unsigned long long)addr, why); return; }
     c->pass_fail = 1;
     if (c->fails < UINT32_MAX) c->fails++;
-    if (c->fails == 1) LOG("[RED] cheat \"%s\": %s at guest address 0x%llx fails (%s): ignored like a Switch does, retried every pass (counted on its row from now on)", c->name, what, (unsigned long long)addr, why);
+    if (c->fails == 1 || atomic_load(&g_dbg)) {
+        char owner[200] = "";
+        if (!strcmp(why, "not mapped")) host_owner(addr, owner, sizeof owner);
+        if (c->fails == 1) LOG("[RED] cheat \"%s\": %s at guest address 0x%llx fails (%s%s%s): ignored like a Switch does, retried every pass (counted on its row from now on)", c->name, what, (unsigned long long)addr, why, *owner ? ": " : "", owner);
+        else dbg_line("cheat \"%s\": %s at 0x%llx refused (%s%s%s)", c->name, what, (unsigned long long)addr, why, *owner ? ": " : "", owner);
+    }
     if (c->dead || c->broken) return;   // a dead cheat keeps its own reason (its never-decrease state may still read)
     // The panel reads why without the lock (a stale row is accepted, a torn one is not worth 60 rewrites a second): the
     // note is rewritten only when its count is a power of two or a second has passed since the last rewrite, so a cheat
@@ -690,7 +736,10 @@ static void cheat_write(cheat_t *c, uint64_t addr, uint64_t len, uint64_t val) {
 // where_get accepts; 0, or -1 with the failure counted (cheat_fail) and *out untouched, so the caller leaves its
 // destination as it was (opcode 5 keeps the register, 1 / C0 compare against the 0 they started from)
 static int cheat_read(cheat_t *c, uint64_t addr, uint64_t len, uint64_t *out) {
-    if (mem_read(addr, len, out) == 0) return 0;
+    if (mem_read(addr, len, out) == 0) {
+        if (atomic_load(&g_dbg)) dbg_line("cheat \"%s\": read %llu bytes at 0x%llx = 0x%llx", c->name, (unsigned long long)len, (unsigned long long)addr, (unsigned long long)*out);
+        return 0;
+    }
     cheat_fail(c, "read", addr, "not mapped");
     return -1;
 }
