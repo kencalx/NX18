@@ -1,4 +1,4 @@
-// Block-linear deswizzle unit tests (seconds). A round trip; B hand-calculated addresses; E hand-built 3D.
+// Block-linear deswizzle unit tests (seconds). A round trip; B hand-calculated addresses; E hand-built 3D; R / T region writes and sparse tiles against the per-run loops they replaced.
 // Usage: t_tex
 #include "../nvn_deswizzle.h"
 #include <math.h>
@@ -97,6 +97,180 @@ static void differential_shapes(void) {
     nvn_texdesc sparse = {1, 0x7D, 0x20, 0, 1024, 1024, 1, 5, 0, 0};
     for (unsigned l = 0; l < sparse.levels; l++) { differential(&sparse, l, 0); cases++; }
     printf("  D %u layouts: both directions equal byte-address oracle, including pitch padding and tails\n", cases);
+}
+
+// ---------- R / T hoisted runs (DM_BL_HOIST): nvn_bl_write_region (hle_nvn.c write_region_bl) and nvn_deswizzle_tile against the loops they replaced, one nvn_bl_offset per 16-byte run,
+// kept here as the reference. Each case runs both on two copies of one random buffer and compares all of it: the bytes around the region and the canaries past the end too ----------
+static void ref_write_region(uint8_t *bl, uint32_t x0, uint32_t y0, size_t wb, size_t hb, const uint8_t *src, size_t row, uint32_t lb, uint32_t rows, unsigned th, unsigned td) {
+    for (size_t y = 0; y < hb; y++)
+        for (size_t x = 0; x < wb;) {
+            uint32_t bx = x0 + (uint32_t)x; size_t n = 16 - bx % 16; if (n > wb - x) n = wb - x;
+            memcpy(bl + nvn_bl_offset(bx, y0 + (uint32_t)y, 0, lb, rows, th, td), src + y * row + x, n); x += n;
+        }
+}
+static int ref_tile(const nvn_texdesc *d, unsigned level, uint32_t tx, uint32_t ty, const void *tile, void *dst, size_t pitch, uint32_t *wb, uint32_t *nrows) {
+    uint32_t row_bytes, rows, slices, bpb; uint64_t base; unsigned th, td;
+    *wb = *nrows = 0;
+    if (nvn_deswizzle_geom(d, level, 0, &row_bytes, &rows, &slices, &base, &th, &td, &bpb) || td || slices != 1 || th > 7) return -1;
+    uint32_t trb = (128u >> th) * 64, trows = 8u << th, x0 = tx * trb, y0 = ty * trows;
+    if (x0 >= row_bytes || y0 >= rows) return 0;
+    uint32_t w = row_bytes - x0 < trb ? row_bytes - x0 : trb, h = rows - y0 < trows ? rows - y0 : trows;
+    if (pitch < w) return -1;
+    const uint8_t *s = tile; uint8_t *o = dst;
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x += 16) memcpy(o + (size_t)y * pitch + x, s + nvn_bl_offset(x, y, 0, trb, trows, th, 0), w - x < 16 ? w - x : 16);
+    *wb = w; *nrows = h;
+    return 0;
+}
+static void fill(uint8_t *b, size_t n) { for (size_t i = 0; i < n; i += 8) { rnd(); memcpy(b + i, &rng, n - i < 8 ? n - i : 8); } }   // random bytes, 8 at a time
+static uint8_t *rnd_buf(size_t n) { uint8_t *b = malloc(n); fill(b, n); return b; }
+static size_t bl_bytes(uint32_t lb, uint32_t rows, unsigned th, unsigned td) { return (size_t)((lb + 63) / 64) * ((rows + (8u << th) - 1) >> (3 + th)) * (512u << (th + td)); }
+static uint8_t *g_src; enum { SRC_N = 1 << 20 };   // the source rows: a random 1 MB, read from a random place each case
+static unsigned rcases, rdiff, rpadded;
+// One region written both ways into a and b (n bytes each, equal before): returns whether they are equal after
+static int region_same(uint8_t *a, uint8_t *b, size_t n, uint32_t x0, uint32_t y0, size_t wb, size_t hb, size_t pitch, uint32_t lb, uint32_t rows, unsigned th, unsigned td) {
+    const uint8_t *src = g_src + (hb ? rnd() * 61u % (SRC_N - (hb - 1) * pitch - wb + 1) : 0);
+    ref_write_region(a, x0, y0, wb, hb, src, pitch, lb, rows, th, td); nvn_bl_write_region(b, x0, y0, wb, hb, src, pitch, lb, rows, th, td);
+    rcases++; if (!memcmp(a, b, n)) return 1;
+    if (++rdiff <= 8) printf("  ✗ R x0 %u y0 %u %zu×%zu bytes pitch %zu row %u rows %u block %u/%u order %d hoist %d: storage differs\n", x0, y0, wb, hb, pitch, lb, rows, th, td, nvn_gob_switch2, nvn_bl_hoist);
+    memcpy(b, a, n); return 0;
+}
+static void regions(void) {
+    g_src = rnd_buf(SRC_N);
+    // Every x0 and width of a 136-byte row (2 GOB columns and a part, laid out padded to 3, as a sparse texture's tiled levels are), for blocks 1-32 GOBs high, both GOB orders, a random
+    // block row of 1-3 rows each: first runs from every x0 % 16, every width's last run, whole pieces across GOB and block columns
+    unsigned before = rcases, d0 = rdiff;
+    for (int order = 0; order < 2; order++) for (unsigned th = 0; th <= 5; th++) {
+        nvn_gob_switch2 = order; nvn_bl_hoist = 1;
+        uint32_t R = 136, lb = 192, rows = 8u << th; size_t n = bl_bytes(lb, rows, th, 0) + 64;
+        uint8_t *a = rnd_buf(n), *b = malloc(n); memcpy(b, a, n);
+        for (uint32_t x0 = 0; x0 < R; x0++) for (size_t wb = 0; wb <= R - x0; wb++) {
+            size_t hb = 1 + rnd() % 3; uint32_t y0 = rnd() % (rows - hb + 1);
+            region_same(a, b, n, x0, y0, wb, hb, wb + rnd() % 40, lb, rows, th, 0);
+        }
+        free(a); free(b);
+    }
+    CHECK(rdiff == d0, "R every x0 and width: %u of %u region writes differ", rdiff - d0, rcases - before);
+    printf("  R every x0 and width of a 136-byte row, blocks 1-32 GOBs high, both GOB orders: %u region writes, %u differ\n", rcases - before, rdiff - d0);
+    // Random shapes, both paths of nvn_bl_write_region (hoisted, and DM_BL_HOIST=0's per-run loop): rows of 1-700 bytes, padded or not, blocks 1-128 GOBs high and 1-4 deep (a 2D
+    // array's levels are 1 deep; the block's size still takes the depth), any region in the level; then blocks 256 to 2^15 GOBs high over a narrow level (a packaged layout's nibble reaches 15)
+    before = rcases; d0 = rdiff;
+    for (unsigned i = 0; i < 2016; i++) {
+        nvn_gob_switch2 = i & 1; nvn_bl_hoist = (i >> 1) & 1; int wide = i < 2000;
+        unsigned th = wide ? rnd() % 8 : 8 + (i - 2000) / 2, td = wide && rnd() % 4 == 0 ? 1 + rnd() % 2 : 0;
+        uint32_t R = wide ? 1 + (rnd() | rnd() << 8) % 700 : 1 + rnd() % 64, lb = rnd() & 1 || !wide ? R : (R + 63) / 64 * 64 + 64 * (rnd() % 3);
+        uint32_t rows = 1 + (rnd() | rnd() << 8) % (wide ? 300 : 40); size_t n = bl_bytes(lb, rows, th, td) + 64;
+        uint32_t x0 = rnd() % 4 ? (rnd() | rnd() << 8) % R : 0; size_t wb = rnd() % 8 ? (rnd() | rnd() << 8) % (R - x0 + 1) : R - x0;
+        uint32_t y0 = rnd() % 4 ? (rnd() | rnd() << 8) % rows : 0; size_t hb = rnd() % 8 ? 1 + (rnd() | rnd() << 8) % (rows - y0) : rows - y0;
+        uint8_t *a = rnd_buf(n), *b = malloc(n); memcpy(b, a, n);
+        region_same(a, b, n, x0, y0, wb, hb, wb + rnd() % 64, lb, rows, th, td);
+        free(a); free(b);
+    }
+    CHECK(rdiff == d0, "R random shapes: %u of %u region writes differ", rdiff - d0, rcases - before);
+    printf("  R random rows and regions, blocks 1 to 2^15 GOBs high and 1-4 deep, both paths, both GOB orders: %u region writes, %u differ\n", rcases - before, rdiff - d0);
+    nvn_gob_switch2 = 0; nvn_bl_hoist = 1;
+}
+// As write_region_bl: a texel region of one level and layer of a texture, from its NVNcopyRegion to bytes and block rows, into the whole storage
+static int texel_region(const nvn_texdesc *d, uint8_t *a, uint8_t *b, size_t n, unsigned level, unsigned layer, int xo, int yo, int w, int h) {
+    uint32_t row_bytes, rows, slices, gbpb; uint64_t base; unsigned th, td; int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
+    if (nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &gbpb) || (int)gbpb != bpb) return 1;
+    uint32_t x0 = (uint32_t)(xo / bw) * (uint32_t)bpb, y0 = (uint32_t)(yo / bh);
+    size_t wb = (size_t)((w + bw - 1) / bw) * (size_t)bpb, hb = (size_t)((h + bh - 1) / bh);
+    if (x0 + wb > row_bytes || y0 + hb > rows) return 1;
+    uint32_t lb = nvn_tex_level_gobs(d, level) * 64; if (lb < row_bytes) lb = row_bytes;
+    rpadded += lb > (row_bytes + 63) / 64 * 64;
+    size_t need = hb ? (hb - 1) * (wb + 8) + wb : 0; uint8_t *own = need > SRC_N / 2 ? rnd_buf(need) : NULL;   // a whole large level reads more than g_src holds
+    const uint8_t *src = own ? own : g_src + rnd() * 61u % (SRC_N / 2);
+    ref_write_region(a + base, x0, y0, wb, hb, src, wb + 8, lb, rows, th, td); nvn_bl_write_region(b + base, x0, y0, wb, hb, src, wb + 8, lb, rows, th, td);
+    free(own); rcases++; if (!memcmp(a, b, n)) return 1;
+    if (++rdiff <= 8) printf("  ✗ R format %#x %ux%u level %u layer %u region (%d,%d) %dx%d: storage differs\n", d->format, d->width, d->height, level, layer, xo, yo, w, h);
+    memcpy(b, a, n); return 0;
+}
+static void texel_regions(void) {
+    // Bytes per block 1, 2, 3, 4, 6, 8, 12 and 16, BC1 / BC3 (4x4 blocks), ASTC 6x6 and 12x10; 2D, 2D arrays and cubes; packaged block heights, sparse textures with padded rows
+    static const int formats[] = {0x01, 0x0D, 0x19, 0x25, 0x1D, 0x29, 0x22, 0x2E, 0x42, 0x44, 0x7D, 0x85};
+    static const int targets[] = {1, 4, 7, 1};
+    unsigned before = rcases, d0 = rdiff;
+    for (unsigned i = 0; i < 192; i++) {
+        nvn_texdesc d = {0};
+        d.target = targets[i % 4]; d.format = formats[(i / 4) % 12]; d.levels = 1 + rnd() % 4;
+        d.width = 1 + (rnd() | rnd() << 8) % 400; d.height = d.target == 7 ? d.width : 1 + (rnd() | rnd() << 8) % 300; d.depth = d.target == 4 ? 1 + rnd() % 3 : d.target == 7 ? 6 : 1;
+        if (i % 4 == 3) { d.flags = 0x20; d.width = 300 + (rnd() | rnd() << 8) % 900; d.height = 64 + (rnd() | rnd() << 8) % 400; }   // sparse: tiled levels padded to whole 64 KB tiles
+        if ((i / 48) & 1) d.pkg_block_h = 1 + rnd() % 6;
+        nvn_gob_switch2 = (i / 96) & 1; nvn_bl_hoist = 1;
+        nvn_texlayout L; nvn_tex_layout(&d, &L);
+        size_t n = L.size + 64; uint8_t *a = rnd_buf(n), *b = malloc(n); memcpy(b, a, n);
+        int bw, bh; nvn_fmt_bpb(d.format, &bw, &bh);
+        for (unsigned k = 0; k < 24; k++) {
+            unsigned level = rnd() % d.levels, layer = rnd() % L.layers;
+            int lw = (int)mipd(d.width, level), lh = (int)mipd(d.height, level), xo = rnd() % lw, yo = rnd() % lh;
+            int w = k == 0 ? lw : k == 1 ? 1 : 1 + rnd() % (lw - xo), h = k == 0 ? lh : k == 1 ? 1 : 1 + rnd() % (lh - yo);
+            if (k == 0) xo = yo = 0;
+            texel_region(&d, a, b, n, level, layer, xo, yo, w, h);
+        }
+        free(a); free(b);
+    }
+    // Every texel of small textures written one at a time (Metroid Dread's minimap calls WriteTexels once per texel)
+    for (unsigned f = 0; f < 4; f++) {
+        static const int fm[4] = {0x01, 0x25, 0x19, 0x2E};
+        nvn_texdesc d = {1, fm[f], 0, 0, 37, 21, 1, 1, 0, 0}; nvn_texlayout L; nvn_tex_layout(&d, &L);
+        nvn_gob_switch2 = f & 1;
+        size_t n = L.size + 64; uint8_t *a = rnd_buf(n), *b = malloc(n); memcpy(b, a, n);
+        for (int y = 0; y < 21; y++) for (int x = 0; x < 37; x++) texel_region(&d, a, b, n, 0, 0, x, y, 1, 1);
+        free(a); free(b);
+    }
+    nvn_gob_switch2 = 0;
+    CHECK(rdiff == d0, "R texture regions: %u of %u differ", rdiff - d0, rcases - before);
+    printf("  R texture regions as write_region_bl takes them (bytes per block 1-16, BC, ASTC, arrays, cubes, single texels): %u region writes (%u in sparse rows padded to whole tiles), %u differ\n",
+           rcases - before, rpadded, rdiff - d0);
+}
+static void tiles(void) {
+    static const int formats[] = {0x01, 0x0D, 0x19, 0x25, 0x1D, 0x29, 0x22, 0x2E, 0x42, 0x44, 0x7D};
+    uint8_t *tile = malloc(65536); unsigned cases = 0, diff = 0, written = 0, refused = 0;
+    for (unsigned i = 0; i < 2 * 11 * 10; i++) {
+        nvn_gob_switch2 = i & 1; nvn_bl_hoist = (i >> 1) & 1;
+        int f = formats[(i / 2) % 11], bw, bh, bpb = nvn_fmt_bpb(f, &bw, &bh); unsigned th = (i / 22) % 10;   // 8: a sparse texture's own tile shape, 9: blocks 256 GOBs high (refused)
+        nvn_texdesc d = {1, f, 0x20, 0, 0, 0, 1, 3, 0, th < 8 ? (int)th + 1 : th == 9 ? 9 : 0};
+        uint32_t trb = (128u >> (th < 8 ? th : 3)) * 64, trows = 8u << (th < 8 ? th : 3);
+        d.width = (uint32_t)((trb * 2 + rnd() % trb + 1) / (uint32_t)bpb * (uint32_t)bw); d.height = (uint32_t)((trows * 2 + rnd() % trows + 1) * (uint32_t)bh);   // 2 to 3 tiles each way
+        if (th == 9) { d.width = 64; d.height = 1100 * (uint32_t)bh; }   // tall enough to keep its 256-GOB blocks
+        for (unsigned level = 0; level < 3; level++) {
+            uint32_t rb, rows, sl; dims(&d, level, &rb, &rows, &sl);
+            unsigned lt, ld; nvn_tex_level_tiles(&d, level, &lt, &ld); if (lt > 7) lt = 7;
+            size_t n = ((128u >> lt) * 64 + 40) * (8u << lt) + 64; uint8_t *a = rnd_buf(n), *b = malloc(n); memcpy(b, a, n);   // the tiles of a level decode into one buffer each way
+            for (uint32_t ty = 0; ty <= rows / (8u << lt) + 1; ty++) for (uint32_t tx = 0; tx <= rb / ((128u >> lt) * 64) + 1; tx++) {   // one past the level each way
+                fill(tile, 65536);
+                size_t pitch = (tx + ty) % 7 == 3 ? rb % 64 : (128u >> lt) * 64 + rnd() % 40;   // sometimes too short for the tile's width (−1 both ways)
+                if (!pitch) pitch = 1;
+                uint32_t wa = 7, ra = 7, wn = 9, rn = 9;
+                int rca = ref_tile(&d, level, tx, ty, tile, a, pitch, &wa, &ra), rcn = nvn_deswizzle_tile(&d, level, tx, ty, tile, b, pitch, &wn, &rn);
+                cases++; written += wa != 0; refused += rca < 0;
+                if (rca != rcn || wa != wn || ra != rn || memcmp(a, b, n)) {
+                    if (++diff <= 8) printf("  ✗ T format %#x %ux%u block %u level %u tile (%u,%u) pitch %zu order %d hoist %d: %d %u×%u, reference %d %u×%u%s\n", f, d.width, d.height, th, level, tx, ty, pitch,
+                                            nvn_gob_switch2, nvn_bl_hoist, rcn, wn, rn, rca, wa, ra, memcmp(a, b, n) ? ", bytes differ" : "");
+                    memcpy(b, a, n);
+                }
+            }
+            free(a); free(b);
+        }
+    }
+    nvn_texdesc d3 = {2, 0x25, 0x20, 0, 256, 256, 64, 1, 0, 0}; uint32_t w3, r3;   // a 3D texture's blocks have depth: refused both ways
+    CHECK(nvn_deswizzle_tile(&d3, 0, 0, 0, tile, tile, 65536, &w3, &r3) == -1 && ref_tile(&d3, 0, 0, 0, tile, tile, 65536, &w3, &r3) == -1, "T a 3D tile must be refused");
+    nvn_gob_switch2 = 0; nvn_bl_hoist = 1; free(tile);
+    CHECK(!diff, "T %u of %u tiles differ", diff, cases);
+    printf("  T sparse tiles (bytes per block 1-16, blocks 1-256 GOBs high, edge and past-the-level tiles, short pitches, both paths, both GOB orders): %u tiles (%u with bytes, %u refused), %u differ\n", cases, written, refused, diff);
+}
+// DM_BL_HOIST is read once, at the first call: 0 takes the per-run loop, anything else or nothing the hoisted one
+static void bl_switch(void) {
+    static const struct { const char *v; int want; } S[] = {{NULL, 1}, {"0", 0}, {"1", 1}, {"", 1}};
+    uint8_t st[512] = {0}, src[16] = {1}; int ok = 1;
+    for (unsigned i = 0; i < 4; i++) {
+        if (S[i].v) setenv("DM_BL_HOIST", S[i].v, 1); else unsetenv("DM_BL_HOIST");
+        nvn_bl_hoist = -1; nvn_bl_write_region(st, 0, 0, 16, 1, src, 16, 64, 8, 0, 0); ok &= nvn_bl_hoist == S[i].want;
+        setenv("DM_BL_HOIST", S[i].want ? "0" : "1", 1); nvn_bl_write_region(st, 0, 0, 16, 1, src, 16, 64, 8, 0, 0); ok &= nvn_bl_hoist == S[i].want;   // not read again
+    }
+    unsetenv("DM_BL_HOIST"); nvn_bl_hoist = 1;
+    CHECK(ok, "R DM_BL_HOIST must be read once: unset, 1 or empty hoisted, 0 per run");
 }
 
 int main(void) {
@@ -245,6 +419,9 @@ int main(void) {
         CHECK(nvn_tex_level_offset(&d, 1) == 0x81000 && L.size == 0xBC400 && nvn_tex_level_gobs(&d, 0) == 43, "S not sparse: level 1 %#llx storage %#llx, expected 0x81000 / 0xbc400",
               (unsigned long long)nvn_tex_level_offset(&d, 1), (unsigned long long)L.size);
     }
+
+    printf("R region writes and T sparse tiles: the hoisted runs against one nvn_bl_offset per 16-byte run (DM_BL_HOIST)\n");
+    regions(); texel_regions(); tiles(); bl_switch();
 
     printf("%s: %d/%d checks passed\n", fails ? "RED" : "all passed", checks - fails, checks);
     return fails ? 1 : 0;

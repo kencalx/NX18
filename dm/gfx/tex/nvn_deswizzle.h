@@ -13,6 +13,13 @@ int nvn_deswizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const vo
 int nvn_swizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src_linear, size_t src_pitch, void *dst_storage);
 // One 64 KB tile (tx, ty) of a sparse texture's tiled level, given as its own 64 KB, into dst (block rows of dst_pitch bytes): *wb bytes of *rows block rows, the part inside the level
 int nvn_deswizzle_tile(const nvn_texdesc *d, unsigned level, uint32_t tx, uint32_t ty, const void *tile, void *dst_linear, size_t dst_pitch, uint32_t *wb, uint32_t *rows);
+// A region written into one level and layer from linear src (block rows src_pitch bytes apart): wb bytes from byte x0 of hb block rows from row y0, slice 0, into that level and layer's
+// storage bl (nvn_deswizzle_geom's base); row_bytes, rows, tileH and tileD as nvn_bl_offset takes them. No byte outside the region is written; the caller checks that it lies in the level
+// (hle_nvn.c write_region_bl: WriteTexels, the storage mirrors of GPU copies, movies written into a texture)
+void nvn_bl_write_region(void *bl, uint32_t x0, uint32_t y0, size_t wb, size_t hb, const void *src, size_t src_pitch, uint32_t row_bytes, uint32_t rows, unsigned tileH, unsigned tileD);
+// DM_BL_HOIST: 1 (the default) walks the 16-byte runs of nvn_deswizzle_tile and nvn_bl_write_region with move()'s hoisted terms, 0 with one nvn_bl_offset per run, as before; the same
+// bytes at the same addresses either way (t_tex compares them). −1 until the first call reads the environment; the unit tests set it themselves
+extern int nvn_bl_hoist;
 // nvn_deswizzle from storage given from byte src_at of the whole texture's on (src points at that byte); the level and layer must lie at or after it
 int nvn_deswizzle_from(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, uint64_t src_at, void *dst_linear, size_t dst_pitch);
 // Single-point address: within this level and layer, linear (x byte, y block row, z slice) → block-linear byte offset relative to the start of this level and layer (unit tests verify against hand calculation).

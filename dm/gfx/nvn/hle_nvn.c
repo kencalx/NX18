@@ -2928,11 +2928,7 @@ static int write_region_bl(const tex_t *t, unsigned level, unsigned layer, const
     size_t wb = (size_t)((r->width + bw - 1) / bw) * (size_t)bpb, hb = (size_t)((r->height + bh - 1) / bh);
     if (x0 + wb > row_bytes || y0 + hb > rows) return -1;
     uint32_t lb = nvn_tex_level_gobs(&t->d, level) * 64; if (lb < row_bytes) lb = row_bytes;   // the row as laid out (padded in a sparse texture's tiled levels)
-    for (size_t y = 0; y < hb; y++)
-        for (size_t x = 0; x < wb;) {   // 16-byte runs are contiguous within a GOB
-            uint32_t bx = x0 + (uint32_t)x; size_t n = 16 - bx % 16; if (n > wb - x) n = wb - x;
-            memcpy(t->mem + base + nvn_bl_offset(bx, y0 + (uint32_t)y, 0, lb, rows, th, td), src + y * row + x, n); x += n;
-        }
+    nvn_bl_write_region(t->mem + base, x0, y0, wb, hb, src, row, lb, rows, th, td);   // 16-byte runs, contiguous within a GOB, at hoisted block-linear offsets (DM_BL_HOIST)
     return 0;
 }
 static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
