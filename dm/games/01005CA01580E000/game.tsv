@@ -38,3 +38,9 @@ shader_note	Persona 5 Royal shaders
 # ---- After the rewrite ----
 # The rewritten modules require 76 MB, more than the default 64 MB deducted from the pool.
 mem_used	0x4c00000
+
+# ---- Frame rate ----
+# The game asks for present interval 2 (30 fps) and steps its logic by its own clock: the community 60 fps patch for 1.0.2 (StevensND) only turns that 2 into 1, in the sdk's
+# NVN (sdk+0x486ca0, mov w8, #1), which the host replaces, so the patch has no effect here. present_interval display does the same at the host: 60 fps on an iPhone 18 Pro Max
+# at normal speed (2026-11-05). The launcher offers it as Frame rate 30 / 60 (README.md)
+present_interval_choice	on

@@ -1420,6 +1420,9 @@ def apply_mods(root, ext, work, ver, app, fps_ok=True):
         report += vrep
         if vmods: variants[role] = {'mod': name, 'exefs': str(vdir), 'modules': vmods}
         else: report.append(f'{role}: {name} names no build of this version: no switchable {role} mod'); rmtree(vdir.parent)
+        if vmods and role == 'fps' and set(vmods) <= {'sdk'}:   # Nintendo's SDK: its graphics driver (NVN) and display service are the host's own, so a frame rate set there never takes
+            report.append(f'[RED] {role}: {name} patches only the sdk module (Nintendo\'s system code, whose graphics driver and display service Nintanium replaces): it likely changes '
+                          'nothing here. A mod that turns the present interval 2 into 1 there is what DM_PRESENT_INTERVAL=display does (the profile key present_interval_choice offers it)')
     (out / f'{ver}.txt').write_text(''.join(line + '\n' for line in report))
     vjson.write_text(json.dumps(variants))
     for line in report: say(f'mods: {line}')

@@ -319,6 +319,16 @@ class NspScript(unittest.TestCase):
         _, _, none = self.nsp.apply_mods(self.mods, self.ext, self.root / 'work2', 'v0', TITLE, fps_ok=False)
         self.assertEqual(none, {}, 'a profile with its own Frame rate takes no frame-rate mod')
 
+    def test_a_frame_rate_mod_of_the_sdk_alone_is_flagged(self):
+        sdk = self.ext / 'ExeFS/sdk'; d = bytearray(make_nso()); d[0x40:0x60] = bytes(range(0x20, 0x40)); sdk.write_bytes(bytes(d))
+        sid = bytes(range(0x20, 0x40)).hex().upper()
+        (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/speed')
+        p = self.mods / f'60FPS/exefs/{sid[:40]}.ips'; p.parent.mkdir(parents=True); p.write_bytes(ips([(0x110, b'\x28\x00\x80\x52')]))
+        work = self.root / 'work'
+        _, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertEqual(variants['fps']['modules'], ['sdk'])
+        self.assertIn('patches only the sdk module', (work / 'mods/v0.txt').read_text())
+
     def test_build_variants(self):
         patched = self.root / 'patched'; patched.mkdir()
         hdr = '# TEXT_END 0x4000\n# PATCH_OFF 0x8000\n'
