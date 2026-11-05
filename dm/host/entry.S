@@ -55,7 +55,7 @@ _dm_gate:
     // A collector that records a thread's sp before a blocking call and then scans from there finds pointers its callees left below their returned frames: Streets of Rage 4's BRUTE
     // garbage collector parks a thread in Thread.Sleep with the caller's x20 only in such a word (main+0x2ff4c80's frame), which the old frame here overwrote, so a live array was freed.
     // Layout as before: x0..x30 at +0 (x30 = the return point), q0..q31 at +256, nzcv / fpsr / fpcr at +768 / +776 / +784, and at +792 the gate block's sp
-    // (the guest's x29 / x30 the block pushed; the guest's stack follows at +16)
+    // (the guest's x29 / x30 the block pushed; the guest's stack follows at +16, or at +32 after the saved x16 / x17 of a counter read into x18)
     sub x30, x30, #800
     stp x0, x1, [x30, #0]
     stp x2, x3, [x30, #16]

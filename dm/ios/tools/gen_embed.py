@@ -50,7 +50,8 @@ for n in names:
     flags.append(f'-Wl,-segprot,__DM{tag}{n}W,rw,rw')
 # Switchable mods (<module>.variants, the NSP script's build_variants; dm/tools/game_mods.py): the host puts them in place when the game starts with the launcher's toggle on
 # (loader.c dm_mod_variants_apply). A code page is signed code here like the module's own, so each code page a mod touches is in __TEXT,__dm<tag><name>v once for every
-# combination of the roles that touch it, the base page with those roles' bytes, which the host vm_remaps over the module's page; a data run's bytes follow the pages. The table
+# combination of the roles that touch it, the base page with those roles' bytes. The host holds that page of the module back at load (loader.c remap_code) and at start vm_remaps
+# into it the page of the roles turned on, or the module's own when none is; a data run's bytes follow the pages. The table
 # __DATA,__dm<tag><name>vt lists them: u32 kind (0 code page, 1 data run), u32 roles (a code page: the combination it holds; a data run: its role), u32 touch (a code page: every role
 # touching it), u32 0, i64 image offset, u64 length, u64 offset in the v section. Role bits: fps 1, ultrawide 2
 ROLE = {'fps': 1, 'ultrawide': 2}

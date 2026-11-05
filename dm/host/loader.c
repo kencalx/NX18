@@ -888,13 +888,16 @@ void load_modules(const char *dir, const char **names, int n) {
 
 // Switchable mods (the launcher's High frame rate and Ultrawide: the NSP script's mods folder, dm/tools/game_mods.py): a mod's bytes are put in place when the game starts, after
 // the launcher (main.c, beside dm_fps_state_apply), while no guest code has run. DM_MOD_FPS=1 / DM_MOD_ULTRAWIDE=1 turn them on. On the iPhone the code is signed: every code
-// page a mod touches is in the executable once per combination of the roles touching it (gen_embed.py __dm<name>v, its table __dm<name>vt), and the page holding exactly the
-// roles turned on among them is vm_remapped over the module's own; a data run is copied into the module's writable part. On the Mac the bytes come from <module>.variants
-// beside the modules and are written in place, a code page made writable for the moment. A data run never touches a word the loader relocated (variant_runs refuses such a mod)
+// page a mod touches is in the executable once per combination of the roles touching it (gen_embed.py __dm<name>v, its table __dm<name>vt). map_image holds those pages back
+// (anonymous holes, remap_code above), and here each hole gets one page vm_remapped into it: the page holding exactly the roles turned on among them, or the module's own when
+// none is (iOS refuses a remap over a mapping of the signed text); a data run is copied into the module's writable part. A module in the jit layout's reservation gets neither
+// (map_image leaves its mods off). On the Mac the bytes come from <module>.variants beside the modules and are written in place, a code page made writable for the moment.
+// A data run never touches a word the loader relocated (variant_runs refuses such a mod). mod_variants_one returns the pieces it put in place, and in *did their roles
 #include <libkern/OSCacheControl.h>
 static int mod_on(const char *e) { const char *v = getenv(e); return v && !strcmp(v, "1"); }
 #if TARGET_OS_IPHONE
-static int mod_variants_one(module_t *m, int on) {
+static int mod_variants_one(module_t *m, int on, int *did) {
+    if (g_jit_base && m->base >= g_jit_base && m->base < g_jit_base + g_jit_span) return 0;   // map_image left its mods off (no holes): no data run goes in either, or a mod would be half applied
     unsigned long nt = 0, zv = 0; const uint8_t *v = NULL;
     const mod_var_ent *t = mod_var_table(m, &nt, &v, &zv);
     int n = 0;
@@ -905,7 +908,7 @@ static int mod_variants_one(module_t *m, int on) {
             const mod_var_ent *e = &t[i];
             if (e->kind != 0 || e->off != g_hole[h].off || !(on & e->touch) || (on & e->touch) != e->roles) continue;
             if (e->src + 0x4000 > zv || ((uintptr_t)(v + e->src) & 0x3FFF)) die("%s: switchable mod page at %#llx past its section or not on a page", m->name, (unsigned long long)e->off);
-            page = v + e->src; mod = 1; break;
+            page = v + e->src; mod = 1; *did |= e->roles; break;
         }
         remap_at(m, (vm_address_t)(m->base + g_hole[h].off), page, 0x4000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
         sys_icache_invalidate(m->base + g_hole[h].off, 0x4000);
@@ -915,12 +918,12 @@ static int mod_variants_one(module_t *m, int on) {
         const mod_var_ent *e = &t[i];
         if (e->kind != 1 || !(on & e->roles)) continue;
         if (e->src + e->len > zv) die("%s: switchable mod entry %lu past its section", m->name, i);
-        memcpy(m->base + e->off, v + e->src, e->len); n++;
+        memcpy(m->base + e->off, v + e->src, e->len); n++; *did |= on & e->roles;
     }
     return n;
 }
 #else
-static int mod_variants_one(module_t *m, int on) {
+static int mod_variants_one(module_t *m, int on, int *did) {
     if (!on) return 0;
     char path[1100]; snprintf(path, sizeof path, "%s/%s.variants", g_module_dir, m->name);
     FILE *f = fopen(path, "r"); if (!f) return 0;
@@ -940,7 +943,7 @@ static int mod_variants_one(module_t *m, int on) {
             if (mprotect(lo, hi - lo, PROT_READ | PROT_EXEC)) die("%s: switchable mod: mprotect %p", m->name, lo);
             sys_icache_invalidate(p, len);
         } else memcpy(p, bytes, len);
-        free(bytes); n++;
+        free(bytes); n++; *did |= bit;
     }
     free(line); fclose(f);
     return n;
@@ -951,8 +954,8 @@ void dm_mod_variants_apply(void) {
     for (int i = 0; i < g_nmod; i++) {
         module_t *m = &g_mod[i];
         if (m->nro) continue;
-        int n = mod_variants_one(m, on);
-        if (n) LOG("%s: switchable mods put in place:%s%s (%d pieces)", m->name, on & 1 ? " High frame rate" : "", on & 2 ? " Ultrawide" : "", n);
+        int did = 0, n = mod_variants_one(m, on, &did);   // did: the roles of the pieces put in place in this module, which may be fewer than those turned on
+        if (n) LOG("%s: switchable mods put in place:%s%s (%d pieces)", m->name, did & 1 ? " High frame rate" : "", did & 2 ? " Ultrawide" : "", n);
     }
 }
 

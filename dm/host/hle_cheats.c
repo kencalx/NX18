@@ -238,13 +238,17 @@ static void cheat_kill(cheat_t *c, const char *fmt, ...) {
 // (cheats_pass clears it on the first pass without one, so a cheat that works now shows no stale note). A dry run only
 // describes it
 // DM_CHEATS_DEBUG's per-access lines (every read of a pointer chain, every refused access), which a pass makes 60 times a
-// second: the first 600 are logged, then one in 300, so a chain's addresses and values show without flooding the log
-static void dbg_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-static void dbg_line(const char *fmt, ...) {
+// second: the first 600 are logged, then one in 300, so a chain's addresses and values show without flooding the log.
+// dbg_keep counts one line and says whether it is logged: a line that takes work to make (cheat_fail's host_owner) asks first
+static int dbg_keep(void) {
     static _Atomic uint64_t n;
     uint64_t k = atomic_fetch_add(&n, 1);
     if (k == 600) LOG("cheats: debug: further access lines are logged one in 300");
-    if (k >= 600 && k % 300) return;
+    return k < 600 || k % 300 == 0;
+}
+static void dbg_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void dbg_line(const char *fmt, ...) {
+    if (!dbg_keep()) return;
     char b[400]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
     LOG("%s", b);
 }
@@ -281,11 +285,12 @@ static void cheat_fail(cheat_t *c, const char *what, uint64_t addr, const char *
     if (g_dry) { dry_line("%s at guest address 0x%llx fails (%s): ignored, retried next pass", what, (unsigned long long)addr, why); return; }
     c->pass_fail = 1;
     if (c->fails < UINT32_MAX) c->fails++;
-    if (c->fails == 1 || atomic_load(&g_dbg)) {
+    int first = c->fails == 1;
+    if (first || (atomic_load(&g_dbg) && dbg_keep())) {   // a debug line that would be dropped costs no host_owner (dladdr and a Mach call, under g_lock in the pass)
         char owner[200] = "";
         if (!strcmp(why, "not mapped")) host_owner(addr, owner, sizeof owner);
-        if (c->fails == 1) LOG("[RED] cheat \"%s\": %s at guest address 0x%llx fails (%s%s%s): ignored like a Switch does, retried every pass (counted on its row from now on)", c->name, what, (unsigned long long)addr, why, *owner ? ": " : "", owner);
-        else dbg_line("cheat \"%s\": %s at 0x%llx refused (%s%s%s)", c->name, what, (unsigned long long)addr, why, *owner ? ": " : "", owner);
+        if (first) LOG("[RED] cheat \"%s\": %s at guest address 0x%llx fails (%s%s%s): ignored like a Switch does, retried every pass (counted on its row from now on)", c->name, what, (unsigned long long)addr, why, *owner ? ": " : "", owner);
+        else LOG("cheat \"%s\": %s at 0x%llx refused (%s%s%s)", c->name, what, (unsigned long long)addr, why, *owner ? ": " : "", owner);   // counted by dbg_keep above
     }
     if (c->dead || c->broken) return;   // a dead cheat keeps its own reason (its never-decrease state may still read)
     // The panel reads why without the lock (a stale row is accepted, a torn one is not worth 60 rewrites a second): the
