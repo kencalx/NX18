@@ -69,6 +69,7 @@ enum {
     RO_T_ADDR, RO_T_TEX, RO_T_SAMP,
     RO_LABEL, RO_R_TS, RO_C_TS,   // diagnostics: DM_NVN_ENC_LABEL, DM_NVN_GPUPROF
     RO_NOTE,   // a[0] an _Atomic uint64_t, a[1] a value: the encode thread has made every call before this one (rec_note_wait)
+    RO_R_DBOUNDS,   // setDepthTestMinBound:maxBound: (DM_DEPTH_BOUNDS only), made through db_real, which first asks the real encoder whether it answers it
 };
 typedef struct { uint32_t op, nobj; uint64_t a[15]; } rec_t;   // the first nobj slots hold retained objects (0 for nil), released once the call is made
 enum { REC_BLK = 256 };
@@ -138,6 +139,7 @@ static void rec_exec(const rec_t *r) {
     case RO_R_WINDING: [(id<MTL4RenderCommandEncoder>)e setFrontFacingWinding:a[0]]; break;
     case RO_R_FILL: [(id<MTL4RenderCommandEncoder>)e setTriangleFillMode:a[0]]; break;
     case RO_R_BIAS: [(id<MTL4RenderCommandEncoder>)e setDepthBias:rec_fv(a[0]) slopeScale:rec_fv(a[1]) clamp:rec_fv(a[2])]; break;
+    case RO_R_DBOUNDS: db_real(e, rec_fv(a[0]), rec_fv(a[1])); break;
     case RO_R_CLIP: [(id<MTL4RenderCommandEncoder>)e setDepthClipMode:a[0]]; break;
     case RO_R_SREF: [(id<MTL4RenderCommandEncoder>)e setStencilReferenceValue:(uint32_t)a[0]]; break;
     case RO_R_BLEND: [(id<MTL4RenderCommandEncoder>)e setBlendColorRed:rec_fv(a[0]) green:rec_fv(a[1]) blue:rec_fv(a[2]) alpha:rec_fv(a[3])]; break;
@@ -273,6 +275,7 @@ static inline id rec_table_real(id t) { return [t isKindOfClass:[DmRecTable clas
 - (void)setFrontFacingWinding:(MTLWinding)w { rec_put(RO_R_WINDING, 0)->a[0] = w; }
 - (void)setTriangleFillMode:(MTLTriangleFillMode)m { rec_put(RO_R_FILL, 0)->a[0] = m; }
 - (void)setDepthBias:(float)u slopeScale:(float)s clamp:(float)c { rec_t *r = rec_put(RO_R_BIAS, 0); r->a[0] = rec_f(u); r->a[1] = rec_f(s); r->a[2] = rec_f(c); }
+- (void)setDepthTestMinBound:(float)lo maxBound:(float)hi { rec_t *r = rec_put(RO_R_DBOUNDS, 0); r->a[0] = rec_f(lo); r->a[1] = rec_f(hi); }
 - (void)setDepthClipMode:(MTLDepthClipMode)m { rec_put(RO_R_CLIP, 0)->a[0] = m; }
 - (void)setStencilReferenceValue:(uint32_t)v { rec_put(RO_R_SREF, 0)->a[0] = v; }
 - (void)setBlendColorRed:(float)r_ green:(float)g blue:(float)b alpha:(float)a { rec_t *r = rec_put(RO_R_BLEND, 0); r->a[0] = rec_f(r_); r->a[1] = rec_f(g); r->a[2] = rec_f(b); r->a[3] = rec_f(a); }

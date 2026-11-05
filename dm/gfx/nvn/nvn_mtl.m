@@ -210,6 +210,30 @@ static void ws_report(uint64_t frame, uint64_t frames) {
         if (n && o < sizeof line - 160) o += snprintf(line + o, sizeof line - o, " %s %.2f/frame (blocked %.2f, %.3f ms);", ws_name[i], (double)n / frames, (double)b / frames, ns / 1e6 / frames); }
     MLOG("[waits] up to frame %llu, per frame:%s", (unsigned long long)frame, o ? line : " none");
 }
+// Depth bounds test (DM_DEPTH_BOUNDS=1, opt-in): NVN's SetDepthBounds discards a fragment when the depth already stored at its pixel is outside [min, max]; Metal 4 has the same test
+// (-[MTL4RenderCommandEncoder setDepthTestMinBound:maxBound:], from iOS / macOS 26: "discards fragments with a stored depth" below the min or above the max; off by default and at
+// 0 / 1; both bounds in [0, 1] with min <= max) on GPUs of the Apple10 family or later (Metal feature set tables: A19, M5 and later; the iPad Pro M4 is Apple9). Asked once, from any
+// recording thread (hle_nvn.c h_depth_bounds): 1 = record and run it. The device query is its own (MTLCreateSystemDefaultDevice returns the one device) so command buffers recorded
+// before the first submission see the same answer. Off with DM_NVN_CAPTURE (the capture format has no such op, nvn_obj.h)
+static uint64_t g_db_ops, g_db_en_ops, g_db_draws; static double g_db_span;   // replayed SetDepthBounds, those that enabled it, draws drawn with bounds and the sum of their spans (mtl_db_stats)
+static int g_db_sel = -1;   // the real render encoder answers setDepthTestMinBound:maxBound: (asked on the first one that gets bounds; one thread only: the submit thread, or the encode thread with DM_NVN_ENC_THREAD)
+int mtl_depth_bounds_rec(void) {
+    static dispatch_once_t once; static int on;
+    dispatch_once(&once, ^{ @autoreleasepool {
+        const char *e = getenv("DM_DEPTH_BOUNDS"); if (!e || (atoi(e) <= 0 && strncmp(e, "ab", 2))) return;   // 1, or ab with DM_AB (recorded always, applied in its phases: draw_)
+        id<MTLDevice> d = MTLCreateSystemDefaultDevice();
+        int m4 = d && [d supportsFamily:MTLGPUFamilyMetal4], a10 = m4 && [d supportsFamily:MTLGPUFamilyApple10], cap = getenv("DM_NVN_CAPTURE") != NULL;
+        on = a10 && !cap;
+        MLOG("depth bounds (DM_DEPTH_BOUNDS=%s): %s", e, on ? "run natively (an Apple10-or-later GPU)" : cap ? "off while DM_NVN_CAPTURE runs (dropped as before)" : !m4 ? "off: no Metal 4 GPU family (dropped as before)" : "off: this GPU is below the Apple10 family (dropped as before)");
+    } });
+    return on;
+}
+void mtl_db_stats(uint64_t *ops, uint64_t *en_ops, uint64_t *draws, double *span) { *ops = g_db_ops; *en_ops = g_db_en_ops; *draws = g_db_draws; *span = g_db_span; }   // hle_nvn.c power_line
+static inline void db_real(id e, float lo, float hi) {   // e: the real encoder
+    if (__builtin_expect(g_db_sel < 0, 0)) { g_db_sel = [e respondsToSelector:@selector(setDepthTestMinBound:maxBound:)];
+        if (!g_db_sel) MLOG("[RED] depth bounds: the render encoder %s has no setDepthTestMinBound:maxBound:; the bounds are dropped as before", object_getClassName(e)); }
+    if (g_db_sel) [(id<MTL4RenderCommandEncoder>)e setDepthTestMinBound:lo maxBound:hi];
+}
 #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
 static NSHashTable *g_res_objects;
 static _Atomic unsigned g_image_heap_n, g_big_n;   // g_big_n: large pools in chunks, whose buffers overlap (BIG_MIN)
@@ -894,6 +918,7 @@ void mtl_prepare(void) {
     if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
 }
 static void sub_cut_begin(void);
+static void up_trim(void);   // idle upload staging goes back to its base block (DM_UPLOAD_TRIM)
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL; g_rc_npend = 0; g_rc_skip = 0;
     sub_cut_begin();
@@ -931,6 +956,7 @@ void mtl_sub_begin(void) {
     g_vis = g_vis_ring[pick].buf;
     void pg_sub_begin_ext(uint64_t fence); pg_sub_begin_ext(g_fence + 1);
     void arena_begin(void); arena_begin();
+    up_trim();
 }
 
 static void rp_end(void);
@@ -1063,6 +1089,7 @@ static inline void enc_r_cull(id<MTL4RenderCommandEncoder> e, MTLCullMode m) { [
 static inline void enc_r_winding(id<MTL4RenderCommandEncoder> e, MTLWinding w) { [e setFrontFacingWinding:w]; }
 static inline void enc_r_fill(id<MTL4RenderCommandEncoder> e, MTLTriangleFillMode m) { [e setTriangleFillMode:m]; }
 static inline void enc_r_depth_bias(id<MTL4RenderCommandEncoder> e, float u, float s, float c) { [e setDepthBias:u slopeScale:s clamp:c]; }
+static inline void enc_r_depth_bounds(id<MTL4RenderCommandEncoder> e, float lo, float hi) { if (rec_on()) [e setDepthTestMinBound:lo maxBound:hi]; else db_real(e, lo, hi); }   // the encode thread asks the real encoder (nvn_rec.h RO_R_DBOUNDS)
 static inline void enc_r_depth_clip(id<MTL4RenderCommandEncoder> e, BOOL v) { [e setDepthClipMode:v ? MTLDepthClipModeClip : MTLDepthClipModeClamp]; }
 static inline void enc_r_stencil_ref(id<MTL4RenderCommandEncoder> e, uint32_t f, uint32_t b) { (void)b; [e setStencilReferenceValue:f]; }
 static inline void enc_r_blend_color(id<MTL4RenderCommandEncoder> e, float r, float g, float b, float a) { [e setBlendColorRed:r green:g blue:b alpha:a]; }
@@ -1821,7 +1848,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[153];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[155];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -2247,6 +2274,21 @@ static __strong id<MTLBuffer> g_up_slot_blk[3], g_up_slot_over[3]; static unsign
 static size_t g_up_slot_want[3], g_up_batch_bytes; static int g_up_over_used;
 static int up_reuse(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_UPLOAD_REUSE"); on = !e || atoi(e); } return on; }
 static int up_retained(id<MTLBuffer> b, unsigned slot) { return b && (b == g_up_slot_blk[slot] || b == g_up_slot_over[slot]); }
+// Idle trim of the retained staging (up_trim, at each submission start): a slot that has gone UP_IDLE_SUBS submissions and UP_IDLE_NS without a batch that needed more than its
+// base block (a batch past UP_SLOT_BLOCK, or one that used the overflow) lets go of its overflow and of a primary grown past UP_SLOT_BLOCK, and its want starts again from 0. After a
+// loading screen all three slots usually sit at 32 + 32 MB, 192 MB of private memory in the residency set (and in the app's footprint on iOS) for the rest of the run; steady play
+// that uploads little gives that back, and a new burst pays one allocation, the cost of the first burst. 600 submissions is the scratch arenas' ARENA_IDLE; the time floor keeps a
+// burst every few seconds (games submit several times a frame) from reallocating. Only a slot whose last batch the GPU has finished is touched (g_up_alloc_busy, the flag up_begin
+// waits on), and through defer_obj_release, which drops the block and its residency after one more fence. DM_UPLOAD_TRIM=0 keeps the blocks for good, as before
+#ifndef UP_IDLE_SUBS
+#define UP_IDLE_SUBS 600
+#endif
+#ifndef UP_IDLE_NS
+#define UP_IDLE_NS (20ull * 1000000000ull)
+#endif
+static uint64_t g_up_slot_need_sub[3], g_up_slot_need_ns[3];   // the submission (g_sub_serial) and time of the slot's last batch that needed more than its base block
+static _Atomic uint64_t g_up_trims, g_up_trim_bytes;   // slots trimmed and bytes released, for the memory line (mtl_mem_stat)
+static int up_trim_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_UPLOAD_TRIM"); on = !(e && !strcmp(e, "0")); } return on; }
 typedef struct {
     __unsafe_unretained id<MTLBuffer> src;
     size_t off, row, image;
@@ -2328,6 +2370,7 @@ static void up_flush(void) {
     // (nvnQueueFinish on any thread, up_begin on another) waited for that submission: hand it over now (from PR #141, which found the nvnQueueFinish half)
     if (!g_cb) rec_publish();
     if (up_reuse()) g_up_slot_want[slot] = MAX(g_up_slot_want[slot], g_up_batch_bytes);
+    if (g_up_batch_bytes > UP_SLOT_BLOCK || g_up_over_used) { g_up_slot_need_sub[slot] = g_sub_serial; g_up_slot_need_ns[slot] = now_ns(); }   // this slot still needs its large blocks (up_trim)
     g_up_cb = nil;
     up_diag();
     g_nup_blits = 0;
@@ -2353,6 +2396,29 @@ static void up_begin(void) {
     [g_up_ce setArgumentTable:g_up_ct];
     if (!g_up_texs) g_up_texs = [NSMutableArray array];
     if (!g_up_keep) g_up_keep = [NSMutableArray array];
+}
+// Called by mtl_sub_begin on the submit thread, the only thread that touches the slots' blocks (up_owner_check), after mtl_sub_commit's up_flush closed the last batch. Not in up_begin:
+// that runs only when something is uploaded, so in steady play with no uploads nothing would be freed, and at the next burst it would free the blocks just before up_alloc makes them
+// again. A slot's batch still open (g_up_cb) or still on the GPU (g_up_alloc_busy, cleared by its feedback handler after the GPU finished it) is left alone; the blocks are never in a
+// batch's own staging list (up_retained), so no completion handler touches a released one, and defer_obj_release takes them out of the residency set once (defer_drain checks)
+static void up_trim(void) {
+    if (!up_trim_on()) return;
+    uint64_t now = 0;
+    for (unsigned s = 0; s < 3; s++) {
+        if (g_sub_serial - g_up_slot_need_sub[s] < UP_IDLE_SUBS) continue;
+        id<MTLBuffer> blk = g_up_slot_blk[s], over = g_up_slot_over[s];
+        if (!over && (!blk || blk.length <= UP_SLOT_BLOCK)) continue;   // the base block is always kept, like the 4 MB arenas
+        if ((g_up_cb && s == g_up_cur_slot) || atomic_load(&g_up_alloc_busy[s])) continue;
+        if (!now) now = now_ns();
+        if (now - g_up_slot_need_ns[s] < UP_IDLE_NS) continue;
+        size_t freed = 0;
+        if (over) { freed += over.length; defer_obj_release(over); g_up_slot_over[s] = nil; }
+        if (blk && blk.length > UP_SLOT_BLOCK) { freed += blk.length; defer_obj_release(blk); g_up_slot_blk[s] = nil; }   // the next batch makes a block of the size it needs, UP_SLOT_BLOCK or more
+        g_up_slot_want[s] = 0;
+        uint64_t n = atomic_fetch_add(&g_up_trims, 1) + 1; atomic_fetch_add(&g_up_trim_bytes, freed);
+        if (n == 1) MLOG("upload staging: slot %u idle for %llu submissions and %llu s: %llu MB released; later releases are counted in the memory line (DM_UPLOAD_TRIM=0 keeps the blocks)",
+                         s, (unsigned long long)(g_sub_serial - g_up_slot_need_sub[s]), (unsigned long long)((now - g_up_slot_need_ns[s]) / 1000000000ull), (unsigned long long)(freed >> 20));
+    }
 }
 
 // Diagnostic readout (low frequency; printed only when the block switch count changed and ≥ 1 second since the last line, at most 200 lines per game): how many times an upload batch ran out of staging block and switched blocks midway; GPU allocated, residency set object count, deferred-release queue length.
@@ -3449,7 +3515,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
 #if TARGET_OS_IPHONE
     snprintf(avail, sizeof avail, "%llu MB", (unsigned long long)(os_proc_available_memory() >> 20));
 #endif
-    MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, finalized textures still referenced %u (small table, %llu put in total); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, nghost, (unsigned long long)ghost_puts, avail);
+    MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, idle upload staging released %llu times (%llu MB, DM_UPLOAD_TRIM), finalized textures still referenced %u (small table, %llu put in total); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, (unsigned long long)atomic_load_explicit(&g_up_trims, memory_order_relaxed), (unsigned long long)(atomic_load_explicit(&g_up_trim_bytes, memory_order_relaxed) >> 20), nghost, (unsigned long long)ghost_puts, avail);
     { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tc, tcb;
       mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf, &tc, &tcb);
       MLOG("texture views by texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed, %llu copied into aligned rows (%llu MB) "
@@ -3537,7 +3603,7 @@ void mtl_sm_stats(uint64_t *np, uint64_t *nc, uint64_t *nw) { *np = g_sm_npass; 
 static id<MTLRenderPipelineState> g_enc_pso; static id<MTLDepthStencilState> g_enc_dss;   // Already set on this encoder (not set again if identical)
 // Dynamic state already sent on the open render encoder: each draw used to send all nine (stencil reference, viewport, scissor, cull, winding, fill, depth bias, depth clip, blend colour);
 // now a value is sent only when it differs. g_ed.ok holds one bit per item and is cleared for every new encoder and after a clear triangle (which sets its own)
-static struct { unsigned ok; uint32_t sref; MTLViewport vp; MTLScissorRect sc; int cull, wind, fill, clip; float bias[3], blend[4]; } g_ed;
+static struct { unsigned ok; uint32_t sref; MTLViewport vp; MTLScissorRect sc; int cull, wind, fill, clip; float bias[3], blend[4]; int dbs; float db[2]; } g_ed;   // dbs: depth bounds db[] are set on this encoder (DM_DEPTH_BOUNDS); 0 = the encoder's default, off
 enum { ED_SREF = 1, ED_VP = 2, ED_SC = 4, ED_CULL = 8, ED_WIND = 16, ED_FILL = 32, ED_BIAS = 64, ED_CLIP = 128, ED_BLEND = 256 };
 static int g_enc_vis, g_enc_has_vis;   // This encoder's current visibility count mode (0 off / slot number + 1), and whether a visibility buffer is attached
 static int g_pso_dirty = 1, g_dss_dirty = 1;   // Pipeline / depth-stencil related state was changed during replay
@@ -4263,7 +4329,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         pass_dims(pd, (NSUInteger)R.rt.n, &g_pass.tw, &g_pass.th);
         if (rt_range_on()) { g_pass.reg_gen = reg0; g_pass.ser_gen = ser0; }
         if (rt_range_on()) { g_pass.range_dirty=dirty0; g_pass.range_color=pd.colorAttachments[0].texture; g_pass.range_depth=pd.depthAttachment.texture; }
-        g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0;
+        g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0; g_ed.dbs = 0;   // a new encoder starts with the depth bounds test off
     }
     if (g_vis_on) {
         // Slots used up (one submission exceeds VIS_SLOTS counting passes): continue in a new overflow buffer. A ring buffer must not be retired (it is still used in rotation, and retiring removes it from the residency set); only a previous overflow buffer is
@@ -5517,6 +5583,7 @@ static struct {
     uint64_t tex[6][NTEX], samp[6][128], img[6][32];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; uint8_t vp_sw[16][4];   // vp_sw: viewport swizzles XOR the identity (p_vp_swizzle)
+    p_depth_bounds db;   // SetDepthBounds (DM_DEPTH_BOUNDS only: never recorded otherwise, so en stays 0)
     float blend_color[4], alpha_ref; int64_t copy_stride, copy_img_stride;   // alpha_ref: SetAlphaRef (at_bind)
     uint8_t push[2][DMSH_PUSH_SIZE];   // NVN2 push constants of the graphics stages and of compute (p_push_const), bound as c[24]
     p_tf_bind tf[4]; int tf_on, rast_discard;   // capture buffers and enables; byte offsets and captured count stay on the GPU (nvn_feedback.inc)
@@ -8509,6 +8576,7 @@ static void defer_release_one(defer_t *d) { if (d->active) { g_defer_nact--; if 
 static void defer_clear_all(void) { for (int i = 0; i < 4; i++) defer_release_one(&g_defer_slots[i]); g_defer_nact = g_defer_natq = 0; g_defer_pend = NULL; }
 static int hoist_take(const uint8_t *p) { for (int i = 0; i < g_hoist_n; i++) if (g_hoist_skip[i] == p) { g_hoist_skip[i] = g_hoist_skip[--g_hoist_n]; return 1; } return 0; }
 enum { DS_FREE = 0, DS_USED = 1, DS_RET = 2 };
+static int g_ds_db;   // the depth bounds test is on at that point of the scan (DM_DEPTH_BOUNDS): a draw then reads depth even with depth test and write off
 static int g_ds_why; static int g_ds_scanned; static int g_ds_need;   // g_ds_need: need accumulated during the scan, 1 depth 2 stencil   // Diagnostics: the opcode that triggered the 'used' verdict (for a draw, records 1000 + dt*100 + dw*10 + st), and the number of ops scanned
 static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
     for (int guard = 0; guard < 1000000; guard++) {
@@ -8523,8 +8591,9 @@ static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
             case OP_SET_RT: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_UPDATE_UB: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_DRAW_TEX: case OP_CLEAR_TEX: case OP_DISPATCH: return DS_FREE;
             case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_DLSS: g_ds_why = h.op; return DS_USED;
             case OP_BIND_STATE: { const p_bind_state *b = a; if (b->kind == 5) memcpy(ds, b->bytes, sizeof *ds); break; }
-            case OP_DRAW: case OP_DRAW_IDX: case OP_MULTI_DRAW:   // Depth test / write → depth needed; stencil test → stencil needed; can stop once both are needed
-                g_ds_need |= (ds->dt || ds->dw ? 1 : 0) | (ds->st ? 2 : 0);
+            case OP_DEPTH_BOUNDS: g_ds_db = ((const p_depth_bounds *)a)->en != 0; break;
+            case OP_DRAW: case OP_DRAW_IDX: case OP_MULTI_DRAW:   // Depth test / write (or the depth bounds test) → depth needed; stencil test → stencil needed; can stop once both are needed
+                g_ds_need |= (ds->dt || ds->dw || g_ds_db ? 1 : 0) | (ds->st ? 2 : 0);
                 if (g_ds_need == 3) { g_ds_why = 1000 + ds->dt * 100 + ds->dw * 10 + ds->st; return DS_USED; } break;
             default: break;
         }
@@ -8612,7 +8681,7 @@ static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level) {
     if (!vs || !fs || vs->rf.pos_attr < 0 || fs->rf.may_discard || atest_on() || lop_on() || fs->rf.writes_smask || !(fs->rf.color_mask >> i & 1)) return g_fd_why = 2, 0;   // atest_on: the alpha test may drop fragments; lop_on: the logic operation reads the target
     if (!t || t.sampleCount != 1 || t.textureType == MTLTextureType3D) return g_fd_why = 3, 0;
     if ((S.color.blend_en >> i & 1) || ((S.chmask.mask >> (4 * i)) & 0xf) != 0xf || S.ms.a2c || S.poly.mode != NVN_POLYGON_MODE_FILL) return g_fd_why = 4, 0;
-    if (R.rt.depth && ((S.ds.dt && S.ds.df != NVN_DEPTH_FUNC_ALWAYS) || S.ds.st)) return g_fd_why = 5, 0;
+    if (R.rt.depth && ((S.ds.dt && S.ds.df != NVN_DEPTH_FUNC_ALWAYS) || S.ds.st || S.db.en)) return g_fd_why = 5, 0;   // S.db.en: the depth bounds test may discard pixels (DM_DEPTH_BOUNDS)
     if (n < 3 || n > 64) return g_fd_why = 6, 0;
     float P[64][4]; int why = attr_read(vs->rf.pos_attr, dw, di, P);
     if (why) return g_fd_why = why, 0;
@@ -8678,6 +8747,7 @@ static int state_op(uint32_t op, const void *a) {
             break;
         }
         case OP_POLY_OFFSET: S.po = *(const p_poly_offset *)a; break;
+        case OP_DEPTH_BOUNDS: S.db = *(const p_depth_bounds *)a; break;
         case OP_VIEWPORTS: { const p_viewports *b = a; for (int i = 0; i < b->n; i++) memcpy(S.vp[b->first + i], b->v[i], 16); S.has_vp = 1; break; }
         case OP_DEPTH_RANGE: { const p_depth_range *b = a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
         case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_depth_clamp *)a)->on; break;
@@ -8908,7 +8978,8 @@ static int sm_scan(const uint8_t *p, const p_set_rt *rt, int cur, int *lo, int *
             case OP_UPDATE_UB: if (!ubd_on()) return n; break;
             case OP_DRAW: case OP_DRAW_IDX: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM:
             case OP_BIND_VBUF: case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL: case OP_POLY_OFFSET:
-            case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: break;
+            case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE:
+            case OP_DEPTH_BOUNDS: break;
             default: return n;
         }
         p += h.size;
@@ -9002,12 +9073,12 @@ static int draw_samples_rt(NvProg *pr) {   // Sampled attachments keep the origi
 // The whole render pass's need for depth / stencil (bits: 1 depth 2 stencil; 3 = both needed or cannot be proven). Starting from the draw that opens the render pass, scan in real replay order to the end of the render pass:
 // the attached clears and this draw's state are counted first; later draws accumulate by their depth-stencil state; anything unprovable such as a mid-pass clear or nesting too deep is treated as both needed
 static int pass_ds_need(void) {
-    int need = (R.clear_d || S.ds.dt || S.ds.dw ? 1 : 0) | (R.clear_s || S.ds.st ? 2 : 0);
+    int need = (R.clear_d || S.ds.dt || S.ds.dw || S.db.en ? 1 : 0) | (R.clear_s || S.ds.st ? 2 : 0);
     if (!R.rt.depth || need == 3 || !g_exec_next || g_ret_n > 16) {
         PD("S %llu no lookahead depth=%d clear_d=%d clear_s=%d dt=%d dw=%d st=%d next=%d ret=%d", g_stat_pass + 1, R.rt.depth != NULL, R.clear_d, R.clear_s, (int)S.ds.dt, (int)S.ds.dw, (int)S.ds.st, g_exec_next != NULL, g_ret_n);
         return 3;
     }
-    ds_st ds = S.ds; g_ds_why = -1; g_ds_scanned = 0; g_ds_need = need;
+    ds_st ds = S.ds; g_ds_why = -1; g_ds_scanned = 0; g_ds_need = need; g_ds_db = S.db.en != 0;
     int r = ds_scan(g_exec_next, &ds, 0);
     for (int k = g_ret_n - 1; r == DS_RET && k >= 0; k--) r = ds_scan(g_ret[k], &ds, 0);
     for (int k = 0; r == DS_RET && k < g_nrest; k++) r = ds_scan((const uint8_t *)g_rest[k], &ds, 0);
@@ -9621,10 +9692,10 @@ static void fuse_try(void) {
     if ((cd_f || cs_f) && !depth_from_r2) return;   // The depth is already in use in the earlier pass: the depth clear at the start of the later pass has nowhere to go
     // Four: draws of the earlier pass must not sample attachments brought in by the later pass; when the depth comes from the later pass, depth-stencil testing must not be enabled
     static uint64_t tex[6][NTEX], img[6][32]; memcpy(tex, S.tex, sizeof tex); memcpy(img, S.img, sizeof img);
-    const prog_t *pg = S.prog; ds_st ds = S.ds;
+    const prog_t *pg = S.prog; ds_st ds = S.ds; int dbe = S.db.en != 0;   // dbe: the depth bounds test is on (DM_DEPTH_BOUNDS), which reads depth as a test does
     cur = (fz_cursor){.p = g_exec_next};
     for (;;) {   // The first loop iteration checks the draw that opens the render pass (current state), then checks the draws in the range one by one
-        if (depth_from_r2 && (ds.dt || ds.dw || ds.st)) return;
+        if (depth_from_r2 && (ds.dt || ds.dw || ds.st || dbe)) return;
         for (int j = R.rt.n; j < n; j++) if (prog_samples_ser(pg, tex, img, U.color[j]->serial)) return;
         if (depth_from_r2 && prog_samples_ser(pg, tex, img, U.depth->serial)) return;
         for (;;) {
@@ -9633,6 +9704,7 @@ static void fuse_try(void) {
             if (q == r2op) goto planned;
             if (hq.op == OP_BIND_PROGRAM) pg = ((const p_bind_program *)aq)->prog;
             else if (hq.op == OP_BIND_STATE) { const p_bind_state *b = aq; if (b->kind == 5) memcpy(&ds, b->bytes, sizeof ds); }
+            else if (hq.op == OP_DEPTH_BOUNDS) dbe = ((const p_depth_bounds *)aq)->en != 0;
             else if (hq.op == OP_BIND_TEX || hq.op == OP_BIND_TEX1 || hq.op == OP_BIND_IMG) { p_bind_handles t1; const p_bind_handles *b = bind_rec(hq.op, aq, &t1); bh_fresh(b); int lim = hq.op == OP_BIND_IMG ? 32 : NTEX;
                 if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (hq.op == OP_BIND_IMG) img[b->stage][b->first + k] = b->h[k]; else tex[b->stage][b->first + k] = b->h[k]; } }
             else if (hq.op == OP_DRAW || hq.op == OP_DRAW_IDX) break;
@@ -9816,7 +9888,7 @@ static int scr_proof(NvProg *pr, int locn, NSUInteger W, NSUInteger H) {
 static int fz_p2_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di, uint8_t lmap[8], __strong id<MTLFunction> *fn) {
     NvShader *vs = pr->sh[0], *fs = pr->sh[1]; *fn = nil;
     if (!vs || !fs) { PD("F %llu not provable: no vertex / fragment shader", g_stat_pass); return 0; }
-    if (!g_fz.rt2.depth && R.rt.depth && (S.ds.dt || S.ds.dw || S.ds.st)) { PD("F %llu not provable: depth comes from the previous pass and this draw has depth / stencil testing on", g_stat_pass); return 0; }
+    if (!g_fz.rt2.depth && R.rt.depth && (S.ds.dt || S.ds.dw || S.ds.st || S.db.en)) { PD("F %llu not provable: depth comes from the previous pass and this draw has depth / stencil testing on", g_stat_pass); return 0; }
     int fx[32]; for (int i = 0; i < 32; i++) fx[i] = -1; uint8_t fbmask = 0;
     for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage >= 6) continue;
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; uint64_t h;
@@ -10661,7 +10733,7 @@ static int lc_keeps(uint32_t op) {
         case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
         case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
         case OP_TF_BIND: case OP_TF_STATE: case OP_RAST_DISCARD: case OP_PRIM_RESTART: case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_RENDER_COND:
-        case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: return 1;
+        case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_DEPTH_BOUNDS: return 1;
         default: return 0;
     }
 }
@@ -10755,7 +10827,7 @@ static int csh_dispatch_ahead(void) {
             case OP_ALPHA_REF: case OP_BIND_IMG: case OP_BIND_PROGRAM: case OP_BIND_SAMP: case OP_BIND_SSBO: case OP_BIND_STATE: case OP_BIND_TEX: case OP_BIND_TEX1:
             case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_VATTR: case OP_BIND_VBUF: case OP_BIND_VBUF1: case OP_BIND_VSTREAM: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
             case OP_DEPTH_CLAMP: case OP_DEPTH_RANGE: case OP_POLY_OFFSET: case OP_PRIM_RESTART: case OP_PUSH_CONST: case OP_RAST_DISCARD: case OP_SCISSOR: case OP_SET_SAMP_POOL:
-            case OP_SET_TEX_POOL: case OP_STENCIL: case OP_TF_BIND: case OP_VIEWPORTS: case OP_VP_SWIZZLE:
+            case OP_SET_TEX_POOL: case OP_STENCIL: case OP_TF_BIND: case OP_VIEWPORTS: case OP_VP_SWIZZLE: case OP_DEPTH_BOUNDS:
                 continue;
             default: return 0;   // OP_TF_STATE and everything state_op does not take stop the full scan too
         }
@@ -10919,7 +10991,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         if (k >= 0) { uint64_t s_; int lv, sl; rt_sub(&R.rt, k, &s_, &lv, &sl); const tex_t *t = k == 8 ? R.rt.depth : R.rt.color[0]; if ((int)MAX(t->d.width >> lv, 1u) <= small) return; } } }
     if (S.poly.cull == NVN_FACE_FRONT_AND_BACK && !S.rast_discard) { PD("Z %llu draw skipped (before the pass begins): both faces culled", g_stat_pass + !g_enc); return; }
     // The continued render pass may have been opened with fewer depth / stencil attachments (open modes 2 / 3 / 4): if the plane this draw needs is not attached, split before it (on reopen, attach per the new lookahead)
-    if (g_rt_merged && g_enc_mode != 0 && (((S.ds.dt || S.ds.dw) && !g_pass.hd) || (S.ds.st && !g_pass.hs))) {
+    if (g_rt_merged && g_enc_mode != 0 && (((S.ds.dt || S.ds.dw || S.db.en) && !g_pass.hd) || (S.ds.st && !g_pass.hs))) {
         static int once2; if (!once2++) MLOG("same-target continuation: a draw in the continued pass needs a depth / stencil plane that is not attached; split here (first case pass %llu)", g_stat_pass);
         PD("M %llu a draw in the continued pass needs a depth / stencil plane that is not attached; split here", g_stat_pass); rp_end(); }
     if (g_rt_range_active && (!rt_range_pr_ro(pr) || !S.ds.dt || S.ds.dw || S.ds.st)) rp_end();   // The external write visibility at the original encoder boundary is not removed
@@ -11029,6 +11101,22 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       if (!(g_ed.ok & ED_BIAS) || memcmp(g_ed.bias, bi, sizeof bi)) { enc_r_depth_bias(en, bi[0], bi[1], bi[2]); memcpy(g_ed.bias, bi, sizeof bi); g_ed.ok |= ED_BIAS; }
       if (!(g_ed.ok & ED_CLIP) || g_ed.clip != cl) { enc_r_depth_clip(en, cl); g_ed.clip = cl; g_ed.ok |= ED_CLIP; }
       if (!(g_ed.ok & ED_BLEND) || memcmp(g_ed.blend, S.blend_color, sizeof g_ed.blend)) { enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]); memcpy(g_ed.blend, S.blend_color, sizeof g_ed.blend); g_ed.ok |= ED_BLEND; } }
+    // Depth bounds (DM_DEPTH_BOUNDS=1 on an Apple10-or-later GPU; S.db is never set otherwise and nothing here runs): the bounds compare the depth already stored at the pixel, so
+    // they pass through as the game set them, clamped to [0, 1] (Metal's range; a stored depth is in it). Only in a pass whose depth attachment is in use (g_pass.hd); off in every
+    // draw while DM_NVN_DEPTHOVR is set (its diagnostic compares with ALWAYS); min > max (the hardware then culls every fragment) and NaN are left off with a red line, which draws more than the Switch, as today.
+    // DM_DEPTH_BOUNDS=ab with DM_AB=<frames> applies them in every second phase only, for the [ab] lines' GPU times (the bounds are dynamic state, so a phase may change mid-pass)
+    if (__builtin_expect(S.db.en || g_ed.dbs, 0)) {
+        static int dbm = -1; if (dbm < 0) dbm = mtl_depth_bounds_rec() ? sw_mode("DM_DEPTH_BOUNDS", 0) : 0;   // records from elsewhere (a test) never reach a GPU without the test
+        float lo = 0, hi = 1; int on = 0;
+        if (S.db.en && g_pass.hd && !ndko && sw_on(dbm)) {
+            if (isnan(S.db.mn) || isnan(S.db.mx)) RED_ONCE(153, "depth bounds %f..%f: not a number; drawn without the test", S.db.mn, S.db.mx);
+            else { lo = fminf(fmaxf(S.db.mn, 0.f), 1.f); hi = fminf(fmaxf(S.db.mx, 0.f), 1.f);
+                if (lo > hi) { RED_ONCE(154, "depth bounds %f..%f: min above max (every fragment would fail); drawn without the test", S.db.mn, S.db.mx); lo = 0; hi = 1; }
+                else on = lo > 0 || hi < 1; }
+        }
+        if (on ? !g_ed.dbs || g_ed.db[0] != lo || g_ed.db[1] != hi : g_ed.dbs) { enc_r_depth_bounds(en, lo, hi); g_ed.dbs = on; g_ed.db[0] = lo; g_ed.db[1] = hi; }
+        if (on) { g_db_draws++; g_db_span += hi - lo; }
+    }
     if (cur_pull) { pull_bind(en); g_hy_draws += !g_geo_mesh.on; }   // a pulling pipeline reads the streams itself (no conversion either: dm_fetch decodes every format)
     else {
         bind_vbufs(en);
@@ -12095,6 +12183,7 @@ static void clr_tri(id<MTL4RenderCommandEncoder> en, id<MTLRenderPipelineState> 
     if (g_enc_vis) { enc_r_visibility(en, MTLVisibilityResultModeDisabled, 0); g_enc_vis = 0; }   // not counted by an occlusion query; the next counted draw turns counting back on
     enc_r_viewport(en, (MTLViewport){0, 0, (double)tw, (double)th, 0, 1}); enc_r_scissor(en, sc);
     enc_r_cull(en, MTLCullModeNone); enc_r_fill(en, MTLTriangleFillModeFill); enc_r_depth_bias(en, 0, 0, 0); enc_r_depth_clip(en, YES); enc_r_stencil_ref(en, sref, sref); g_ed.ok = 0;
+    if (g_ed.dbs) { if (en == g_enc) enc_r_depth_bounds(en, 0, 1); g_ed.dbs = 0; }   // a draw's depth bounds (DM_DEPTH_BOUNDS) would cut a clear in the game's pass; the next bounded draw sets them again (a clear's own pass starts with them off)
     enc_r_draw(en, MTLPrimitiveTypeTriangle, 0, 3);
     [en setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [en setArgumentTable:g_ft atStages:MTLRenderStageFragment];
 }
@@ -12316,6 +12405,7 @@ void mtl_exec(const uint8_t *p) {
             case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
             case OP_POLY_OFFSET: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
                 state_op(h.op, a); break;
+            case OP_DEPTH_BOUNDS: { const p_depth_bounds *b = a; g_db_ops++; g_db_en_ops += b->en != 0; PD("Y depth bounds en=%d %.6f..%.6f", b->en, b->mn, b->mx); state_op(h.op, a); break; }   // DM_DEPTH_BOUNDS only
             // PASSDUMP O lines: the viewports the game sets, with the pass they fall in (one set before its pass opens takes that pass's number, as the P lines do). The D line
             // prints the one a draw used, so a viewport the pass set is told from one carried over. Printed here, not in state_op: look-ahead scans replay state_op too
             case OP_VIEWPORTS: { const p_viewports *b = a; state_op(h.op, a);

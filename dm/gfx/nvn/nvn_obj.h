@@ -109,6 +109,11 @@ enum {
     OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
     OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DLSS, OP_MULTI_DRAW, OP_COUNT_
 };
+// Opt-in records numbered past OP_COUNT_, outside the capture format's ops (nvn_capture.c counts OP_COUNT_; nvn_capture.inc refuses any op at or past it): hle_nvn.c records them only
+// behind their switch and never while DM_NVN_CAPTURE runs (mtl_depth_bounds_rec), so a capture and the command stream without the switch are what they were.
+// OP_DEPTH_BOUNDS: nvnCommandBufferSetDepthBounds, DM_DEPTH_BOUNDS=1 on a GPU that runs the depth bounds test (Apple10 or later); otherwise the call is an empty implementation (g_nops)
+enum { OP_DEPTH_BOUNDS = OP_COUNT_ };
+typedef struct { int32_t en; float mn, mx; } p_depth_bounds;   // enable, and the bounds the depth already stored at the pixel is compared with (inclusive), as the game set them
 // Payload (immediately follows op_hdr)
 typedef struct {
     uint64_t ind, cnt, ibuf;

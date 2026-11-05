@@ -93,9 +93,11 @@ t_thermal_tsan: t_thermal.c $(MTL_T_DEP)
 check_t_thermal: t_thermal
 	./t_thermal
 	DM_THERMAL_CAP=0 ./t_thermal
+	DM_LOW_POWER_CAP=0 ./t_thermal
 thermal-tsan: t_thermal_tsan
 	./t_thermal_tsan
 	DM_THERMAL_CAP=0 ./t_thermal_tsan
+	DM_LOW_POWER_CAP=0 ./t_thermal_tsan
 t_fuse_check: t_fuse_check.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_fuse_check.m $(MTL_T_SRC) $(FW)
 t_perf_order: t_perf_order.m $(MTL_T_DEP)
@@ -219,6 +221,13 @@ check_t_queue_origin: t_queue_origin
 	MTL_DEBUG_LAYER=1 ./t_queue_origin
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_queue_origin
 check_t_rast_discard: RUN_ENV = MTL_DEBUG_LAYER=1
+# DM_DEPTH_BOUNDS: the bounded cases run on an Apple10-or-later GPU (an M5 Mac); elsewhere, and in the run without the switch, it checks that nothing is recorded
+t_depth_bounds: t_depth_bounds.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_depth_bounds.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_depth_bounds
+check_t_depth_bounds: t_depth_bounds
+	DM_DEPTH_BOUNDS=1 MTL_DEBUG_LAYER=1 ./t_depth_bounds
+	MTL_DEBUG_LAYER=1 ./t_depth_bounds
 t_cpu_storage: t_cpu_storage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_cpu_storage.m $(MTL_T_SRC) $(FW)
 check_t_cpu_storage: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -231,6 +240,7 @@ t_upload_slots: t_upload_slots.m $(MTL_T_DEP)
 check_t_upload_slots: t_upload_slots
 	MTL_DEBUG_LAYER=1 ./t_upload_slots
 	DM_NVN_UPLOAD_REUSE=0 MTL_DEBUG_LAYER=1 ./t_upload_slots
+	DM_UPLOAD_TRIM=0 MTL_DEBUG_LAYER=1 ./t_upload_slots
 t_sbw: t_sbw.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sbw.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_sbw

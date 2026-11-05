@@ -1331,6 +1331,18 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
 
 // Commands that only affect GPU state / only execute on the GPU: the null device only counts them (the thunk has already counted)
 static void nvn_nop(void) {}
+// Depth bounds (DM_DEPTH_BOUNDS=1, or ab with DM_AB; opt-in): SetDepthBounds stays in g_nops, and its slot then takes this recorder in place of the empty implementation. It records
+// only where the replay can run the test natively (nvn_mtl.m mtl_depth_bounds_rec, which reads the switch at the first call: the switch set, a GPU of the Apple10 family or later, and no
+// DM_NVN_CAPTURE, whose format has no such op); otherwise it returns at once: on the iPad Pro M4 (Apple9), or without the switch, the call is counted and dropped as before, and the
+// command stream is byte for byte what it was. Recording adds 24 bytes per call to the game's command memory, which games measure (Super Mario Odyssey's display-list heap,
+// p_bind_state), one more reason it starts as opt-in
+int mtl_depth_bounds_rec(void);   // nvn_mtl.m
+static void h_depth_bounds(NVNcommandBuffer *c, uint32_t en, float mn, float mx);
+static const NVNT_nvnCommandBufferSetDepthBounds chk_depth_bounds __attribute__((unused)) = h_depth_bounds;
+static void h_depth_bounds(NVNcommandBuffer *c, uint32_t en, float mn, float mx) {
+    if (!mtl_depth_bounds_rec()) return;
+    *REC(c, OP_DEPTH_BOUNDS, p_depth_bounds) = (p_depth_bounds){(en & 0xff) != 0, mn, mx};
+}
 static const char *const g_nops[] = {
     "nvnCommandBufferSetPatchSize",
     "nvnCommandBufferSetDepthBounds",
@@ -1357,6 +1369,9 @@ __attribute__((constructor)) static void nvn_nops_register(void) {
         if (nvn_slot[i].fn != (void *)nvn_unimpl_entry) die("NVN %s has an implementation and is also listed as an empty implementation", g_nops[k]);
         nvn_slot[i].fn = (void *)nvn_nop;
     }
+    // SetDepthBounds takes h_depth_bounds in every run, and it records nothing unless mtl_depth_bounds_rec says so. DM_DEPTH_BOUNDS is read there, at the first call, and not here: on iOS
+    // main.m sets the env.txt and launcher switches after the constructors have run, so a constructor sees only the launch environment, and DM_DEPTH_BOUNDS=1 in env.txt did nothing
+    for (unsigned i = 0; i < NVN_NFUNC; i++) if (!strcmp(nvn_names[i], "nvnCommandBufferSetDepthBounds")) { nvn_slot[i].fn = (void *)h_depth_bounds; break; }
     unsigned nnop = sizeof g_nops / sizeof *g_nops;
     // Implemented functions other than command recording (nvnCommandBuffer*, tens of thousands per frame, where the host only appends records) run on the big host stack: submit / present / object creation do Metal work, and a game thread's stack may be too small (see nvn_entry.S nvn_big_entry)
     unsigned nbig = 0;
@@ -1584,6 +1599,10 @@ static void power_line(uint64_t frame) {
             frame, (unsigned long long)(mn - pmn), (unsigned long long)(mw - pmw), (unsigned long long)(rd - prd), (unsigned long long)(rn - prn),
             (unsigned long long)(re[0] - pre[0]), (unsigned long long)(re[1] - pre[1]), (unsigned long long)(re[2] - pre[2]), (unsigned long long)(re[3] - pre[3]));
         pmn = mn; pmw = mw; prd = rd; prn = rn; memcpy(pre, re, sizeof pre);
+        void mtl_db_stats(uint64_t *, uint64_t *, uint64_t *, double *); static uint64_t pdbo, pdbe, pdbd; static double pdbs; uint64_t dbo, dbe, dbd; double dbs; mtl_db_stats(&dbo, &dbe, &dbd, &dbs);   // DM_DEPTH_BOUNDS (nvn_mtl.m)
+        if (dbo != pdbo || dbd != pdbd) LOG("[nvn] depth bounds up to frame %llu, per frame: %.1f set, %.1f of them enabling, %.1f draws tested (mean bounds span %.3f)",
+            (unsigned long long)frame, (dbo - pdbo) / nf, (dbe - pdbe) / nf, (dbd - pdbd) / nf, dbd > pdbd ? (dbs - pdbs) / (double)(dbd - pdbd) : 0.0);
+        pdbo = dbo; pdbe = dbe; pdbd = dbd; pdbs = dbs;
         void mtl_fb_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *); static uint64_t pfs, pfr, pft, pfw; uint64_t fs_, fr, ft, fw; mtl_fb_stats(&fs_, &fr, &ft, &fw);   // same-pass feedback (nvn_mtl.m fb_prepare)
         if (fs_ != pfs || fr != pfr || ft != pft) LOG("[nvn] same-pass feedback up to frame %llu, per frame: %.1f snapshots taken, %.1f draws reused one, %.1f read the tile (%.1f waited for their pipeline)",
             frame, (fs_ - pfs) / nf, (fr - pfr) / nf, (ft - pft) / nf, (fw - pfw) / nf);
@@ -1731,28 +1750,41 @@ __attribute__((weak)) int dm_movie_playing(void) { return 0; }   // hle_movie.c:
 // Thermal cap (iOS): while the device is thermally serious or worse (NSProcessInfo thermalState >= 2) the frame step holds 30 fps, and it goes back to the cap after the device
 // has been fair or better for THERMAL_CALM_NS, so it does not flap. At "serious" iOS caps the GPU clock to about a third: Breath of the Wild's vistas (about 3,000 G-buffer draws)
 // then took 17-26 ms a frame and dropped a frame in most windows; a steady 30 instead also lets the device cool. DM_THERMAL_CAP=0 turns it off; the Mac reports no thermal state
+// Low Power Mode (iOS, NSProcessInfo lowPowerModeEnabled) is a second cause of the same cap: the player asked for battery over speed, Apple's energy guide asks apps to lower their frame
+// rate in it, and it already lowers the CPU and GPU clocks, so a scene that still held 60 now does half the frames (GPU, game and host work) with the game's speed unchanged (the
+// frame-step stubs and the 120 fps limiter keep game time equal to real time at 30, as for heat and movies). Same scope as heat, nothing else: the frame-step games and the 120 → 60
+// step of a host-written engine limiter; a game the host does not pace (Persona 5 Royal's present interval) never asks. Same 1 s sample and THERMAL_CALM_NS calm after it is
+// turned off. DM_LOW_POWER_CAP=0 keeps 60 in Low Power Mode only; DM_THERMAL_CAP=0 turns off both causes. The Mac front end reports none (the weak dm_low_power_now above returns 0)
 #define THERMAL_CALM_NS 30000000000ull
+enum { CAP_HEAT = 1, CAP_LOW_POWER = 2 };   // thermal_capped's causes
 static int thermal_capped(void) {
     // Acquire, present and the display-link configuration can ask on different
     // threads. Serialize the sample and its recovery timer as one transition;
     // take the clock inside the lock so samples cannot arrive out of order.
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-    static int on = -1, capped; static uint64_t last, calm_since;
+    static int on = -1, lp_on, capped; static uint64_t last, calm_since;
     pthread_mutex_lock(&mu);
-    if (on < 0) { const char *e = getenv("DM_THERMAL_CAP"); on = !(e && !strcmp(e, "0")); }
+    if (on < 0) { const char *e = getenv("DM_THERMAL_CAP"); on = !(e && !strcmp(e, "0")); e = getenv("DM_LOW_POWER_CAP"); lp_on = on && !(e && !strcmp(e, "0")); }
     if (on) {
         uint64_t now = now_ns();
-        if (now - last >= 1000000000ull) {   // the thermal state is read once a second
+        if (now - last >= 1000000000ull) {   // the thermal state and Low Power Mode are read once a second
             last = now;
-            int th = dm_thermal_now();
-            if (th >= 2) { calm_since = 0; if (!capped) { capped = 1; LOG("[nvn] thermal state %d: the frame step holds 30 fps until the device is fair again for %llu s (DM_THERMAL_CAP=0 turns this off)", th, THERMAL_CALM_NS / 1000000000ull); } }
-            else if (capped) { if (!calm_since) calm_since = now; else if (now - calm_since >= THERMAL_CALM_NS) { capped = 0; LOG("[nvn] thermal state %d for %llu s: back to the frame rate cap", th, THERMAL_CALM_NS / 1000000000ull); } }
+            int th = dm_thermal_now(), lp = lp_on && dm_low_power_now(), why = (th >= 2 ? CAP_HEAT : 0) | (lp ? CAP_LOW_POWER : 0);
+            if (why) { calm_since = 0;
+                if (!capped) { if (why & CAP_HEAT) LOG("[nvn] thermal state %d: the frame step holds 30 fps until the device is fair again for %llu s (DM_THERMAL_CAP=0 turns this off)", th, THERMAL_CALM_NS / 1000000000ull);
+                    else LOG("[nvn] Low Power Mode: the frame step holds 30 fps until it has been off for %llu s (DM_LOW_POWER_CAP=0 keeps the frame rate cap in it, DM_THERMAL_CAP=0 turns off both)", THERMAL_CALM_NS / 1000000000ull); }
+                capped = why; }
+            else if (capped) { if (!calm_since) calm_since = now; else if (now - calm_since >= THERMAL_CALM_NS) {
+                if (capped & CAP_HEAT) LOG("[nvn] thermal state %d for %llu s: back to the frame rate cap", th, THERMAL_CALM_NS / 1000000000ull);
+                else LOG("[nvn] Low Power Mode off for %llu s: back to the frame rate cap", THERMAL_CALM_NS / 1000000000ull);
+                capped = 0; } }
         }
     }
     int result = capped;
     pthread_mutex_unlock(&mu);
-    return result;
+    return result;   // 0, or the causes (CAP_HEAT, CAP_LOW_POWER) of the last sample that had one
 }
+static const char *thermal_why(int c) { return c & CAP_HEAT ? "thermal state serious" : "Low Power Mode"; }   // a nonzero thermal_capped(), for the cap-change lines
 // 120 fps (profile fps_max 120, DM_FPS_TARGET=120): an engine limiter the host writes (hle_fpslock.c) follows the frame step, counted here in ticks of 1/120 s: hold 1 is 120 fps, hold 2 is 60.
 // A game may step by its target whatever the frames really take (Fire Emblem Fortune's Weave: 60.0 / target a frame), so a target of 120 at 70 frames a second is a game at 58% speed, and
 // on a 60 Hz screen at half speed: late frames step the hold up (nvn_fstep.h), the target follows the hold, and the game's step stays what the screen shows. The cap is 60 on a screen
@@ -1775,8 +1807,9 @@ static int fstep_hz(void) { return fps_high() ? 120 : 60; }   // the ticks the f
 static void high_cap_tick(void) {
     static int win = -1, link_env = -1;
     if (win < 0) { win = mtl_display_hz() != 0; link_env = getenv("DM_PRESENT_LINK") != NULL; }
-    int ok = !win || front_screen_max_fps() >= 120, cap = ok && !dm_movie_playing() && !thermal_capped() ? 120 : 60;
-    static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : dm_movie_playing() ? "movie playing" : "thermal state serious"); was = cap; }
+    // The movie state is read once, so the cap and the reason it logs agree (a movie that ends between two reads gave 120 with the heat or Low Power Mode cause unread)
+    int ok = !win || front_screen_max_fps() >= 120, mv = ok && dm_movie_playing(), th = ok && !mv ? thermal_capped() : 0, cap = ok && !mv && !th ? 120 : 60;
+    static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : mv ? "movie playing" : thermal_why(th)); was = cap; }
     atomic_store(&g_high_cap, cap);
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
 }
@@ -1978,7 +2011,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (fps_high()) high_cap_tick();
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)dm_movie_playing(), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)
     int c = fps_step_cap();
-    if (dm_fps_state) { static int was; if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? (dm_movie_playing() ? " (movie playing)" : thermal_capped() ? " (thermal state serious)" : "") : ""); was = c; } }
+    if (dm_fps_state) { static int was; int th = 0; if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? (dm_movie_playing() ? " (movie playing)" : (th = thermal_capped()) & CAP_HEAT ? " (thermal state serious)" : th ? " (Low Power Mode)" : "") : ""); was = c; } }
     if (c) fstep_tick(o, c);
     dm_fps_lock_tick();   // after the frame step: at 120 fps the target follows the hold just decided
     static uint64_t prev_in, prev_out, prev_pass, prev_draw;
