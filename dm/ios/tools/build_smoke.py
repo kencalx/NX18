@@ -2,7 +2,8 @@
 """CI build of the production iOS project with synthetic embedded modules.
 
 Requires Xcode and XcodeGen; GAME (or DM_GAME) selects the host profile.
-No game files, keys, shaders, signing or device are needed. The resulting app
+No game files, keys, shaders, signing or device are needed. DM_DEVICE_FAMILY (1, 2 or 1,2,
+the default) and DM_SWIFT_VERSION (default 6.0) are as for build_ipa.sh. The resulting app
 is a compile/link fixture, not a runnable game. All Xcode output stays under
 --output, which must name a new directory; keep it on a scratch drive locally.
 """
@@ -63,7 +64,12 @@ def main():
 
     config = run(sys.executable, ios / 'tools/gen_build.py', REPO / 'dm/host', gen, capture=True).stdout
     flags = run(sys.executable, ios / 'tools/gen_embed.py', patched, gen / 'embed.S', *modules, capture=True).stdout.strip()
-    (gen / 'dm.xcconfig').write_text(config + f'OTHER_LDFLAGS = $(inherited) $(DM_FRAMEWORKS) {flags}\n')
+    # The settings build_ipa.sh adds to Gen/dm.xcconfig and project.yml reads: the Swift language mode and the device family (DM_DEVICE_FAMILY: 1 iPhone, 2 iPad, 1,2 both)
+    family = os.environ.get('DM_DEVICE_FAMILY') or '1,2'
+    if family not in ('1', '2', '1,2'):
+        sys.exit(f'DM_DEVICE_FAMILY must be 1 (iPhone), 2 (iPad) or 1,2: {family}')
+    (gen / 'dm.xcconfig').write_text(config + f'OTHER_LDFLAGS = $(inherited) $(DM_FRAMEWORKS) {flags}\n'
+                                     f"DM_SWIFT_VERSION = {os.environ.get('DM_SWIFT_VERSION') or '6.0'}\nDM_DEVICE_FAMILY = {family}\n")
     run('xcodegen', 'generate')
 
     # Exercise the real resource-copy phase with tiny, clearly synthetic data.
@@ -96,6 +102,9 @@ def main():
                            (shaders / marker, app / 'msl' / f'b-{chain}' / marker)):
         if source.read_bytes() != packed.read_bytes():
             raise RuntimeError(f'Resource staging failed: {packed}')
+    want = [int(f) for f in family.split(',')]
+    if info.get('UIDeviceFamily') != want:
+        raise RuntimeError(f"UIDeviceFamily is {info.get('UIDeviceFamily')}, DM_DEVICE_FAMILY {family} asks for {want}")
     if (app / '_CodeSignature').exists() or (app / 'embedded.mobileprovision').exists():
         raise RuntimeError('The smoke-test app must be unsigned')
     print(f'iOS smoke build passed: {executable}', flush=True)
