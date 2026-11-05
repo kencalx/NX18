@@ -24,6 +24,8 @@ extern char **environ;
 int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=dm_main
 UIViewController *front_ios_root(void);
 void front_ios_focus_event(int ev);
+void front_ios_bg_prepare_register(void);   // front_ios.m: the prepare step's background task (DM_BG_PREPARE=1)
+#import "DmMetrics.h"   // MetricKit's reports into Documents/metrics (DM_METRICS)
 
 static char *g_argv[4]; static int g_argc;
 
@@ -273,6 +275,14 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 @interface App : UIResponder <UIApplicationDelegate>
 @end
 @implementation App
+// Launch: the prepare step's background task is registered here, before launch ends, as BackgroundTasks asks (only with DM_BG_PREPARE=1, which env.txt has set by now), and MetricKit's
+// subscription starts (unless DM_METRICS=0); both return at once, MetricKit's work runs on a queue of its own
+- (BOOL)application:(UIApplication *)a didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *)o {
+    (void)a; (void)o;
+    front_ios_bg_prepare_register();
+    dm_metrics_start();
+    return YES;
+}
 - (UISceneConfiguration *)application:(UIApplication *)a configurationForConnectingSceneSession:(UISceneSession *)s options:(UISceneConnectionOptions *)o {
     return [[UISceneConfiguration alloc] initWithName:[s.role isEqualToString:UIWindowSceneSessionRoleExternalDisplayNonInteractive] ? @"TV" : @"Default" sessionRole:s.role];   // a TV (front_ios.m DmTVSceneDelegate)
 }

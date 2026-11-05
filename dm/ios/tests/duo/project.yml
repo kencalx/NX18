@@ -22,6 +22,7 @@ targets:
       - sdk: QuartzCore.framework
       - sdk: Metal.framework
       - sdk: AVFAudio.framework
+      - sdk: BackgroundTasks.framework   # front_ios.m: the prepare step's background task (DM_BG_PREPARE)
     info:
       path: Info.plist
       properties:

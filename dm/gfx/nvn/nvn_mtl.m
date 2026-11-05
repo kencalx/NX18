@@ -7648,6 +7648,10 @@ int mtl_warm_wait(int timeout_ms) {
 // pressure on iOS), which is when it is needed. DM_PSO_PREPARE=0: the prewarm runs in the background as before (as it does without a window); DM_PSO_PREPARE_THREADS=<n> sets the workers
 void front_progress(const char *title, long done, long total);
 __attribute__((weak)) void front_progress(const char *title, long done, long total) { (void)title; (void)done; (void)total; }   // the front ends' (front.h); none in the unit tests
+// The prepare step is over (warm_start, once, on the submit thread, after both of its screens): the iPhone front end ends the continued processing task that let the step go on while the
+// player was in another app (front_ios.m, DM_BG_PREPARE). front_progress(NULL) cannot say it, since it also ends the first screen before the second; the Mac and the unit tests have none
+void front_prepare_end(void);
+__attribute__((weak)) void front_prepare_end(void) {}
 static int prepare_on(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_PSO_PREPARE");
@@ -7731,6 +7735,7 @@ static void warm_start(void) {
         else MLOG("pipeline prepare: the prewarm lists hold nothing to build");
         warm_finish();
         @autoreleasepool { prepare_prebuild(); }   // then the bases every shader pair's hybrid draws need, before the first frame too (once)
+        front_prepare_end();
         return;
     }
     dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);   // Not optional background work: it decides whether the pipelines are ready before the player enters a run

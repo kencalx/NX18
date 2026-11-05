@@ -26,6 +26,9 @@ targets:
       - path: Gen/src         # Source files from the compile commands of dm/host/Makefile (linked in by tools/gen_build.py)
       - path: Gen/main/main.c
         compilerFlags: "-Dmain=dm_main"
+    dependencies:   # system frameworks the front end's own sources use beyond the host's (Gen/dm.xcconfig links those, from dm/host/Makefile)
+      - sdk: MetricKit.framework         # DmMetrics.m, Metrics.swift: MetricKit's reports kept in Documents/metrics (DM_METRICS)
+      - sdk: BackgroundTasks.framework   # front_ios.m: the prepare step going on in the background (DM_BG_PREPARE)
     postBuildScripts:
       - name: Copy game resources
         script: /bin/bash "${SRCROOT}/tools/stage_resources.sh"
@@ -57,6 +60,8 @@ targets:
         GCSupportedGameControllers:
           - ProfileName: ExtendedGamepad
         CADisableMinimumFrameDurationOnPhone: true
+        BGTaskSchedulerPermittedIdentifiers:   # DM_BG_PREPARE=1: the prepare step's continued processing task (front_ios.m), in the wildcard form iOS asks it for (<bundle ID>.<context>.*); the app registers <bundle ID>.prepare.pipelines.
+          - $(PRODUCT_BUNDLE_IDENTIFIER).prepare.*   # No UIBackgroundModes and no entitlement: the task asks for no GPU (only background GPU use needs one), so a free development team still signs the app
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
           UISceneConfigurations:
@@ -89,7 +94,7 @@ targets:
                                                  # the host assembly also needs its LSE atomic instructions, which the default baseline does not accept
       CLANG_ENABLE_OBJC_ARC: YES
       SWIFT_VERSION: $(DM_SWIFT_VERSION)             # Launcher.swift (SwiftUI): the Swift 6 language mode (complete concurrency checking); build_ipa.sh writes DM_SWIFT_VERSION into Gen/dm.xcconfig (6.0 unless the environment says 5)
-      SWIFT_OBJC_BRIDGING_HEADER: Sources/DmIOS-Bridging-Header.h   # CloudSaves.h (the cloud-save folder pick)
+      SWIFT_OBJC_BRIDGING_HEADER: Sources/DmIOS-Bridging-Header.h   # CloudSaves.h (the cloud-save folder pick), DmGameMenu.h, DmMetrics.h (where Metrics.swift hands MetricKit's reports)
       DEBUG_INFORMATION_FORMAT: dwarf
       GCC_WARN_INHIBIT_ALL_WARNINGS: YES
 schemes:

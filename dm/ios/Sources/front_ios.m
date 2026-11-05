@@ -7,7 +7,9 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
+#import <BackgroundTasks/BackgroundTasks.h>
 #include <errno.h>
+#include <stdatomic.h>
 #include <malloc/malloc.h>
 #include <os/proc.h>
 #include <mach/mach.h>
@@ -35,6 +37,8 @@ static void front_ios_notify_ask(void);
 static void front_ios_power_watch(void);
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
+static void prep_progress(NSString *phase, long done, long total);   // the prepare step in the background (DM_BG_PREPARE), main queue
+static void prep_end(const char *why);
 
 @interface DmGameView : UIView
 @property (nonatomic) CGFloat maxPixelWidth;   // 0: the screen's own pixels; a TV caps the drawable at 1920 across (tv_attach)
@@ -55,6 +59,7 @@ static UILabel *front_ios_fps_label(void);
         const char *sa = getenv("DM_DRAWABLE_SHADER_ACCESS"); BOOL shaderAccess = sa && atoi(sa);
         l.framebufferOnly = !shaderAccess;
         if (shaderAccess) LOG("front end: the drawables allow shader access (DM_DRAWABLE_SHADER_ACCESS=1)");
+        l.name = @"game";   // MetricKit's frame-rate metric (MetalFrameRateMetric, iOS 27) names each CAMetalLayer by this: Documents/metrics reports the game's frame rate as layer "game" (DmMetrics.m); one layer, on the phone or the TV
         self.backgroundColor = UIColor.blackColor;
     }
     return self;
@@ -279,7 +284,7 @@ void front_picture_shape(int w, int h) {   // front.h: the views take the presen
     if (w <= 0 || h <= 0) return;
     CGFloat a = (CGFloat)w / h;
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!g_pictured) { g_pictured = YES; dm_gamepad_hint(); }   // the first present reports the first shape: the menu button's 5 s at the start count from the game's first picture
+        if (!g_pictured) { g_pictured = YES; dm_gamepad_hint(); prep_end("the game showed its first picture"); }   // the first present reports the first shape: the menu button's 5 s at the start count from the game's first picture
         if (a == g_picture_aspect) return;
         g_picture_aspect = a; LOG("front end: picture shape %dx%d, the game's view follows it", w, h);
         [g_root.view setNeedsLayout]; if (g_tv) [g_tv.rootViewController.view setNeedsLayout];
@@ -366,6 +371,131 @@ static UILabel *front_ios_fps_label(void) {
     return l;
 }
 
+// The prepare step in the background (DM_BG_PREPARE=1; off by default until it is measured on the devices). Today leaving the app during "Preparing shaders" or "Preparing pipelines" stops
+// the step: iOS suspends the whole process within seconds. With the switch on, the step asks iOS for a continued processing task (BackgroundTasks, iOS 26 and later) once its screen shows
+// while the player is in the app; iOS then keeps the process running when the player leaves, shows the step's count (front_progress) in a Live Activity and lets the player cancel it there.
+// Nothing else changes: leaving the app still freezes the guest clock, hands the sound to the silent sink and closes the graphics gate (front_ios_focus_event), and the step itself submits no
+// GPU work (hle_nvn.c runs it outside the gate: it loads shaders and makes pipelines), so the game's first submission waits at the closed gate and no command buffer is committed in the
+// background. The task asks for no GPU, so it needs no entitlement (a free development team signs the app) and no background mode, only Info.plist's BGTaskSchedulerPermittedIdentifiers
+// (project.yml: <bundle ID>.prepare.*, the wildcard form iOS asks this task for; the app registers and submits <bundle ID>.prepare.pipelines). It ends when the step ends (front_prepare_end,
+// nvn_mtl.m) or the game shows its first picture; when it expires (the player's cancel, or iOS) it is completed at once, and the step pauses when iOS suspends the app, as without it.
+// One task per process, submitted with the fail strategy (a queued task would start when the step is over or the app suspended). Off by default because the process then runs in the
+// background for as long as the step lasts, where iOS used to suspend it within seconds: guest threads that neither read the clock nor submit (an audio thread the silent sink paces) keep
+// running all that time, and whether Metal's compiler serves a background app at a useful rate is not measured yet
+static NSString *g_prep_id, *g_prep_title, *g_prep_phase;   // the registered task identifier (nil: off), the Live Activity's title (the game's name), the step's screen title last reported; main queue
+static BGContinuedProcessingTask *g_prep_task;   // the running task; main queue
+static int g_prep_state;   // 0 not asked for yet, 1 submitted, 2 running, 3 over (asked for at most once per process); main queue
+static BOOL g_prep_over;   // the step has ended (front_prepare_end) or the game has presented; main queue
+static _Atomic int g_prep_completed;   // setTaskCompletedWithSuccess: was called: the expiration handler may run on another queue
+static double g_prep_t0, g_prep_note_t, g_prep_away_t;   // when the task was asked for; when its subtitle last changed; when the step was first seen going on with the app in the background (0: it is not)
+static long g_prep_done, g_prep_total, g_prep_away_from, g_prep_away_now, g_prep_away_units;   // the count last reported; the count this absence is measured from; what this absence did on an earlier screen; done in the background, all absences
+static void prep_complete(BGTask *t, BOOL ok) { if (t && !atomic_exchange(&g_prep_completed, 1)) [t setTaskCompletedWithSuccess:ok]; }
+static void prep_away_end(double now, const char *why) {   // the player came back, or the step ended in the background: the log says what the time away did
+    long units = g_prep_away_now + g_prep_done - g_prep_away_from; g_prep_away_units += units;
+    LOG("front end: preparing in the background: %s after %.0f s away; %ld shaders or pipelines done meanwhile (%.1f a second), now at %s %ld of %ld", why, now - g_prep_away_t, units,
+        units / MAX(now - g_prep_away_t, 0.001), g_prep_phase.UTF8String, g_prep_done, g_prep_total);
+    g_prep_away_t = 0; g_prep_away_now = 0;
+}
+static void prep_launch(BGTask *task) {   // main queue (registered so): iOS starts the task it took
+    if (![task isKindOfClass:BGContinuedProcessingTask.class] || g_prep_state != 1 || g_prep_over) {   // the step ended before iOS started it: done at once
+        LOG("front end: preparing in the background: iOS started the task after the step %s; it ends at once", g_prep_over ? "ended" : "gave it up");
+        if (g_prep_state == 1) g_prep_state = 3;
+        prep_complete(task, g_prep_over); return;
+    }
+    BGContinuedProcessingTask *t = (BGContinuedProcessingTask *)task; __weak BGContinuedProcessingTask *wt = t;
+    t.expirationHandler = ^{   // the player cancelled it in the Live Activity, or iOS ended it: completed at once, wherever iOS calls this; the step then pauses when iOS suspends the app, as without the task
+        prep_complete(wt, NO);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (g_prep_state != 2) return;
+            g_prep_state = 3; g_prep_task = nil;
+            if (g_prep_away_t) prep_away_end(CACurrentMediaTime(), "the task expired");
+            LOG("front end: preparing in the background: the task expired (cancelled in the Live Activity or ended by iOS) at %s %ld of %ld; the step pauses while iOS suspends the app and goes on when the player comes back",
+                g_prep_phase.UTF8String, g_prep_done, g_prep_total);
+        });
+    };
+    g_prep_task = t; g_prep_state = 2;
+    t.progress.totalUnitCount = MAX(g_prep_total, 1); t.progress.completedUnitCount = MIN(g_prep_done, MAX(g_prep_total, 1));
+    LOG("front end: preparing in the background: iOS started the task %.1f s after it was asked for (%s %ld of %ld): the step goes on if the player leaves the app",
+        CACurrentMediaTime() - g_prep_t0, g_prep_phase.UTF8String, g_prep_done, g_prep_total);
+}
+// main.m, from application:didFinishLaunchingWithOptions: (BackgroundTasks wants launch handlers registered before launch ends, each identifier once: a second registration ends the app)
+void front_ios_bg_prepare_register(void) {
+    const char *e = getenv("DM_BG_PREPARE");
+    if (!e || strcmp(e, "1")) return;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *bid = NSBundle.mainBundle.bundleIdentifier, *wild = bid ? [bid stringByAppendingString:@".prepare.*"] : nil;
+        NSArray *permitted = [NSBundle.mainBundle objectForInfoDictionaryKey:@"BGTaskSchedulerPermittedIdentifiers"];
+        if (!NSClassFromString(@"BGContinuedProcessingTaskRequest")) { LOG("front end: DM_BG_PREPARE=1, but this system has no continued processing task (iOS 26 and later): the prepare step pauses in the background"); return; }
+        if (!wild || ![permitted isKindOfClass:NSArray.class] || ![permitted containsObject:wild]) {   // an install tool that changes the bundle ID leaves the Info.plist entry with the old one
+            LOG("[RED] front end: DM_BG_PREPARE=1, but Info.plist's BGTaskSchedulerPermittedIdentifiers does not hold %s: the prepare step pauses in the background", wild ? wild.UTF8String : "<bundle ID>.prepare.*");
+            return;
+        }
+        NSString *ident = [bid stringByAppendingString:@".prepare.pipelines"]; BOOL ok = NO;
+        @try { ok = [BGTaskScheduler.sharedScheduler registerForTaskWithIdentifier:ident usingQueue:dispatch_get_main_queue() launchHandler:^(BGTask *t) { prep_launch(t); }]; }
+        @catch (NSException *x) { LOG("[RED] front end: the prepare step's background task could not be registered: %s", x.reason.UTF8String); }
+        if (!ok) { LOG("[RED] front end: the prepare step's background task %s was not registered: the prepare step pauses in the background", ident.UTF8String); return; }
+        id name = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleName"];
+        g_prep_title = [name isKindOfClass:NSString.class] && [name length] ? name : @"Game";
+        g_prep_id = ident;
+        LOG("front end: DM_BG_PREPARE=1: the prepare step may go on while the player is in another app (task %s, asked for when its screen shows)", ident.UTF8String);
+    });
+}
+static void prep_submit(NSString *phase) {   // main queue, with the app in the foreground: iOS takes the request from the foreground app only
+    g_prep_state = 1; g_prep_t0 = CACurrentMediaTime();
+    BGTaskScheduler *s = BGTaskScheduler.sharedScheduler;
+    if (![s respondsToSelector:@selector(submitTaskRequest:completionHandler:)]) { g_prep_state = 3; LOG("front end: preparing in the background: this system cannot submit the task (no submitTaskRequest:completionHandler:)"); return; }
+    BGContinuedProcessingTaskRequest *r = [[BGContinuedProcessingTaskRequest alloc] initWithIdentifier:g_prep_id title:g_prep_title subtitle:phase];
+    r.strategy = BGContinuedProcessingTaskRequestSubmissionStrategyFail;   // now or not at all; requiredResources stays the default: compiles need no GPU, and background GPU use would need an entitlement
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{   // BackgroundTasks: not from the main thread (the iOS 27 submission; it replaces the deprecated submitTaskRequest:error:)
+        [s submitTaskRequest:r completionHandler:^(NSError *err) {
+            if (!err) return;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (g_prep_state == 1) g_prep_state = 3;
+                BOOL bg = [err.domain isEqualToString:BGTaskSchedulerErrorDomain];
+                LOG("front end: preparing in the background: iOS did not take the task (%s, code %ld%s): the step pauses in the background, as without it", err.localizedDescription.UTF8String, (long)err.code,
+                    bg && err.code == BGTaskSchedulerErrorCodeImmediateRunIneligible ? ": it could not start now" : bg && err.code == BGTaskSchedulerErrorCodeNotPermitted ? ": the identifier is not in Info.plist's BGTaskSchedulerPermittedIdentifiers" : "");
+            });
+        }];
+    });
+    LOG("front end: preparing in the background: task asked for at %s (fail strategy, no GPU)", phase.UTF8String);
+}
+// Every count front_progress reports, on the main queue: the request at the first one with the app in the foreground, then the task's progress (the system expires a task that reports none)
+// and its Live Activity subtitle at most once a second, and how long the step went on with the app in the background
+static void prep_progress(NSString *phase, long done, long total) {
+    if (!g_prep_id || g_prep_over || g_prep_state == 3) return;
+    UIApplicationState st = UIApplication.sharedApplication.applicationState;
+    if (!g_prep_state) { if (st != UIApplicationStateActive) return; prep_submit(phase); }
+    double now = CACurrentMediaTime(); BOOL other = ![phase isEqualToString:g_prep_phase];
+    if (g_prep_away_t && other) { g_prep_away_now += g_prep_done - g_prep_away_from; g_prep_away_from = 0; }   // the second screen counts from 0
+    g_prep_phase = phase; g_prep_done = done; g_prep_total = total;
+    if (st == UIApplicationStateBackground && g_prep_task && !g_prep_away_t) {
+        g_prep_away_t = now; g_prep_away_from = done;
+        LOG("front end: preparing in the background: the player left the app at %s %ld of %ld; the step goes on", phase.UTF8String, done, total);
+    } else if (st != UIApplicationStateBackground && g_prep_away_t) prep_away_end(now, "the player came back");
+    BGContinuedProcessingTask *t = g_prep_task; if (!t) return;
+    t.progress.totalUnitCount = MAX(total, 1); t.progress.completedUnitCount = MIN(done, MAX(total, 1));
+    if ((other || now - g_prep_note_t >= 1.0) && [t respondsToSelector:@selector(updateTitle:subtitle:)]) {
+        g_prep_note_t = now;
+        [t updateTitle:g_prep_title subtitle:[NSString stringWithFormat:@"%@: %@ of %@", phase, [NSNumberFormatter localizedStringFromNumber:@(done) numberStyle:NSNumberFormatterDecimalStyle],
+                                              [NSNumberFormatter localizedStringFromNumber:@(total) numberStyle:NSNumberFormatterDecimalStyle]]];
+    }
+}
+static void prep_end(const char *why) {   // main queue: the step ended (front_prepare_end) or the game presented its first picture
+    if (g_prep_over) return;
+    g_prep_over = YES;
+    if (!g_prep_id) return;
+    if (g_prep_away_t) prep_away_end(CACurrentMediaTime(), why);
+    BGContinuedProcessingTask *t = g_prep_task; g_prep_task = nil;
+    if (g_prep_state == 2 && t) {
+        t.progress.completedUnitCount = t.progress.totalUnitCount;
+        prep_complete(t, YES);
+        LOG("front end: preparing in the background: task completed (%s) %.1f s after it was asked for; %ld done with the app in the background", why, CACurrentMediaTime() - g_prep_t0, g_prep_away_units);
+    }
+    if (g_prep_state != 1) g_prep_state = 3;   // a task submitted and not started yet: its launch handler completes it
+}
+void front_prepare_end(void) { dispatch_async(dispatch_get_main_queue(), ^{ prep_end("the prepare step ended"); }); }   // nvn_mtl.m warm_start, on the game's submit thread, once the step is over
+
 // Progress screen of the prepare step (front.h front_progress): a dark view over the game's view and the pad, the title, a bar and a count, centered; UIKit views, so it draws while the game's thread waits
 static UIView *g_prog; static UILabel *g_prog_count; static UIProgressView *g_prog_bar; static UILabel *g_prog_title;
 void (*front_progress_hook)(const char *title, long done, long total);
@@ -373,8 +503,9 @@ void front_progress(const char *title, long done, long total) {
     if (!g_layer) return;
     NSString *tt = title ? @(title) : nil;
     void (*hook)(const char *, long, long) = front_progress_hook;
-    if (hook) { dispatch_async(dispatch_get_main_queue(), ^{ hook(tt.UTF8String, done, total); if (!tt) dm_gamepad_hint(); }); return; }   // the host app draws it (front.h)
+    if (hook) { dispatch_async(dispatch_get_main_queue(), ^{ if (tt) prep_progress(tt, done, total); hook(tt.UTF8String, done, total); if (!tt) dm_gamepad_hint(); }); return; }   // the host app draws it (front.h)
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (tt) prep_progress(tt, done, total);   // DM_BG_PREPARE: the background task's progress
         if (!tt) { [g_prog removeFromSuperview]; g_prog = nil; dm_gamepad_hint(); return; }   // the screen goes: the menu button it covered shows for 5 s (DmGamepad.m)
         if (!g_prog) {
             UIView *root = g_root.view; if (!root) return;
