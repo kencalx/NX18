@@ -68,7 +68,7 @@ enum ModsStore {
             return ["cheats: \(src.lastPathComponent)"]
         }
         if patchExtensions.contains(ext) {
-            let name = clean(modName ?? src.deletingPathExtension().lastPathComponent)
+            let name = patchModName(modName ?? src.deletingPathExtension().lastPathComponent)
             let dir = root.appendingPathComponent(name).appendingPathComponent("exefs", isDirectory: true)
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             try replace(src, dir.appendingPathComponent(src.lastPathComponent))
@@ -117,6 +117,12 @@ enum ModsStore {
         if fm.fileExists(atPath: dst.path) { try fm.trashItem(at: dst, resultingItemURL: nil) }
         try fm.copyItem(at: src, to: dst)
     }
+    /// The folder name a patch file's mod gets: a name of 16 hex digits takes " patch", as game_mods.py scan takes such a folder for a title's and skips it unless it is this
+    /// game's (Atmosphère names an .ips after the build ID). Not in clean: a dropped folder named with a title ID keeps it, so another game's mods stay out
+    static func patchModName(_ s: String) -> String {
+        let n = clean(s)
+        return n.wholeMatch(of: #/[0-9A-Fa-f]{16}/#) != nil ? n + " patch" : n
+    }
     private static func clean(_ s: String) -> String {
         let t = s.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ":", with: ".").trimmingCharacters(in: .whitespaces)
         return t.isEmpty ? "Mod" : t
@@ -151,10 +157,19 @@ enum ModsStore {
         }
     }
 
-    /// The cheat files that are on, for copying to the device.
-    static func enabledCheatFiles(_ root: URL) -> [URL] { list(root).filter { $0.kind == .cheat && $0.enabled }.map(\.url) }
-
-    static func hasAnything(_ root: URL) -> Bool { !list(root).filter(\.enabled).isEmpty }
+    /// The cheat files that are on in the cheats folder (as list gives them), for copying to the device. Folder listings only, no mod's tree walked and no cheat
+    /// file read, as a game view asks at each change
+    static func enabledCheatFiles(_ root: URL) -> [URL] {
+        let fm = FileManager.default
+        let dirs = ((try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [])
+            .filter { !$0.lastPathComponent.hasPrefix(".") && displayName($0.lastPathComponent).lowercased() == "cheats" && isDir($0) }
+            .sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
+        return dirs.flatMap { dir in
+            ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension.lowercased() == "txt" && !$0.lastPathComponent.hasPrefix(".") && !$0.lastPathComponent.hasPrefix("-") }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        }
+    }
 }
 
 struct BuilderError: LocalizedError {

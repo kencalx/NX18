@@ -18,6 +18,7 @@ final class Repository {
     var incoming: [Commit] = []
     var localChanges = false
     var busy = false
+    var writing = false      // a pull or a clone changes the checkout's files: no build or copy starts from it meanwhile (a fetch, busy alone, leaves them)
     var lastChecked: Date?
     var message = ""
     /// Lines of the pulled commits that a front end has to act on (docs/frontends.md, Following main).
@@ -59,7 +60,7 @@ final class Repository {
     @discardableResult
     func pull() async -> Bool {
         guard exists, !busy else { return false }
-        busy = true; defer { busy = false }
+        busy = true; writing = true; defer { busy = false; writing = false }
         let before = (await git(["rev-parse", "HEAD"])).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         let r = await git(["pull", "--ff-only", "--quiet", "origin", branch])
         guard r.ok else {
@@ -80,7 +81,7 @@ final class Repository {
 
     func clone(from remote: String) async {
         guard !busy else { return }
-        busy = true; defer { busy = false }
+        busy = true; writing = true; defer { busy = false; writing = false }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         message = "Cloning \(remote)…"
         let r = await Shell.run("git", ["clone", "--branch", branch, remote, path])

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Glibc)
+import Glibc   // killpg (Darwin comes with Foundation)
+#endif
 
 /// One line a command wrote, on stdout or stderr.
 enum OutputLine: Sendable {
@@ -47,13 +50,19 @@ private final class LineSplitter: @unchecked Sendable {
     }
 }
 
-/// A command that is running: its lines in order, then the end of the stream when it exits.
+/// A command that is running: its lines in order, then the end of the stream when its stdout and stderr are both read to their end (its status: after waitUntilExit).
 final class RunningCommand: @unchecked Sendable {
     let process: Process
     let lines: AsyncStream<OutputLine>
     init(process: Process, lines: AsyncStream<OutputLine>) { self.process = process; self.lines = lines }
-    /// Stops it the way Ctrl-C would (the build script exits with 130 and keeps what it can reuse).
-    func interrupt() { if process.isRunning { process.interrupt() } }
+    /// Stops it the way Ctrl-C would (the build script exits with 130 and keeps what it can reuse): SIGINT to its whole process group, which Process makes the child lead
+    /// (env execs the tool, so the group's ID is its pid), so a script's own children get it too (bash waits for its foreground child and goes on when only bash gets it).
+    /// killpg fails when the child leads no group (ESRCH): then the child alone, as before. Its EPERM while the group holds a zombie comes after the live members were signalled,
+    /// so the child is not signalled twice then (a second SIGINT would cut the build script's own clean-up short, as Ctrl-C pressed twice does).
+    func interrupt() {
+        guard process.isRunning else { return }
+        if killpg(process.processIdentifier, SIGINT) != 0 && errno == ESRCH { process.interrupt() }
+    }
     var status: Int32 { process.isRunning ? -1 : process.terminationStatus }
 }
 
@@ -84,17 +93,18 @@ enum Shell {
         let (stream, cont) = AsyncStream<OutputLine>.makeStream()
         let so = LineSplitter { cont.yield(.out($0)) }
         let se = LineSplitter { cont.yield(.err($0)) }
-        out.fileHandleForReading.readabilityHandler = { so.feed($0.availableData) }
-        err.fileHandleForReading.readabilityHandler = { se.feed($0.availableData) }
-        p.terminationHandler = { _ in
-            out.fileHandleForReading.readabilityHandler = nil
-            err.fileHandleForReading.readabilityHandler = nil
-            so.feed(out.fileHandleForReading.readDataToEndOfFile())
-            se.feed(err.fileHandleForReading.readDataToEndOfFile())
-            so.finish(); se.finish()
-            cont.finish()
-        }
         try p.run()
+        // Each pipe is read to its end on a thread of its own, and the stream ends once both are read: a handler that drains the pipes when the process exits races the
+        // readability handlers still running, which lost and reordered lines. The readers start after run(), so a launch that failed leaves none blocked on a pipe
+        let group = DispatchGroup()
+        for (h, s) in [(out.fileHandleForReading, so), (err.fileHandleForReading, se)] {
+            group.enter()
+            Thread.detachNewThread {
+                while true { let d = h.availableData; if d.isEmpty { break }; s.feed(d) }
+                s.finish(); group.leave()
+            }
+        }
+        group.notify(queue: .global()) { cont.finish() }
         return RunningCommand(process: p, lines: stream)
     }
 

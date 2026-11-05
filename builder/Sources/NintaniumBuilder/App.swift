@@ -12,7 +12,7 @@ struct NintaniumBuilderApp: App {
                 .task { await model.start() }
         }
         .commands {
-            CommandGroup(after: .newItem) {
+            CommandGroup(replacing: .newItem) {   // in place of New Window, which also takes Cmd-N and comes first: one window, whose model they all share
                 Button("Add Game…") { model.showAddGame = true }.keyboardShortcut("n")
             }
         }

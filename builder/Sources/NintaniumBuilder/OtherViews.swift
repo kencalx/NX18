@@ -71,7 +71,7 @@ struct RepositoryView: View {
                     HStack {
                         Button("Check Now") { Task { await repo.check() } }
                         Button("Pull \(repo.incoming.count) Commit\(repo.incoming.count == 1 ? "" : "s")") { Task { await repo.pull() } }
-                            .disabled(repo.incoming.isEmpty || model.phase.isRunning)
+                            .disabled(repo.incoming.isEmpty || model.phase.isRunning || repo.busy)   // pull() does nothing while a check or a pull runs
                         if repo.busy { ProgressView().controlSize(.small) }
                         Spacer()
                         if let d = repo.lastChecked { Text("Checked \(d.formatted(.relative(presentation: .named)))").font(.caption).foregroundStyle(.secondary) }

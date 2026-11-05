@@ -43,13 +43,17 @@ final class AppModel {
     private var building: Game?      // the game being built, with what its build's messages said
     private var lastRed = ""
     private var cancelled = false
+    private var laterProgram = false   // the build has moved on to another program of the game ("==== program N"): its cheat lines are that program's, not the application's
     private var loaded = false
+    private var started = false
 
     enum Selection: Hashable { case repository, game(UUID) }
 
     // MARK: - Start, persistence
 
     func start() async {
+        guard !started else { return }   // each window's task calls it (a window opened from the Dock after the last one closed too): one load and one update loop
+        started = true
         load()
         repo.configure(path: settings.repoPath, branch: settings.branch)
         await repo.refresh()
@@ -63,9 +67,20 @@ final class AppModel {
 
     private func load() {
         let dec = JSONDecoder()
-        if let d = try? Data(contentsOf: settingsURL), let s = try? dec.decode(BuilderSettings.self, from: d) { settings = s }
-        if let d = try? Data(contentsOf: libraryURL), let g = try? dec.decode([Game].self, from: d) { games = g }
-        loaded = true
+        var kept = true
+        if let d = try? Data(contentsOf: settingsURL) {
+            if let s = try? dec.decode(BuilderSettings.self, from: d) { settings = s } else if !keepAside(settingsURL) { kept = false }
+        }
+        if let d = try? Data(contentsOf: libraryURL) {
+            if let g = try? dec.decode([Game].self, from: d) { games = g } else if !keepAside(libraryURL) { kept = false }
+        }
+        loaded = kept   // a file that could not be moved aside is never overwritten: nothing is saved then
+    }
+
+    /// A file this version cannot read moves aside (<name>-unreadable-<time>.json), kept for recovery, so that the next save does not overwrite it with an empty library.
+    private func keepAside(_ u: URL) -> Bool {
+        let to = u.deletingLastPathComponent().appendingPathComponent("\(u.deletingPathExtension().lastPathComponent)-unreadable-\(Int(Date().timeIntervalSince1970)).json")
+        return (try? FileManager.default.moveItem(at: u, to: to)) != nil
     }
 
     private func save() {
@@ -87,7 +102,8 @@ final class AppModel {
     private func record(_ g: Game) {
         guard let i = games.firstIndex(where: { $0.id == g.id }) else { return }
         games[i].lastIPA = g.lastIPA; games[i].lastProject = g.lastProject; games[i].lastDerivedData = g.lastDerivedData
-        games[i].lastBundleID = g.lastBundleID; games[i].lastGameData = g.lastGameData; games[i].lastBuilt = g.lastBuilt; games[i].lastBuiltDevice = g.lastBuiltDevice
+        games[i].lastBundleID = g.lastBundleID; games[i].lastGameData = g.lastGameData; games[i].lastCheatBuild = g.lastCheatBuild
+        games[i].lastBuilt = g.lastBuilt; games[i].lastBuiltDevice = g.lastBuiltDevice
     }
 
     func addGame(folder: URL, name: String, titleID: String, device: TargetDevice) {
@@ -161,8 +177,10 @@ final class AppModel {
         if !g.bundleID.isEmpty { a += ["--bundle-id", g.bundleID] }
         if !g.language.isEmpty { a += ["-l", g.language] }
         if g.precompileGPUShaders { a += ["--gpu", g.device.gpu] }
-        let mods = Paths.mods(g.titleID)
-        if !g.useMods { a.append("--no-mods") } else if ModsStore.hasAnything(mods) { a += ["--mods", mods.path] }
+        // the list under Patches & Cheats is what the build takes: with all of it off, no mods, not the mods folder beside the NSPs, which the script takes (its default)
+        // only when the list is empty
+        let mods = Paths.mods(g.titleID), entries = ModsStore.list(mods)
+        if !g.useMods || (!entries.isEmpty && !entries.contains(where: \.enabled)) { a.append("--no-mods") } else if !entries.isEmpty { a += ["--mods", mods.path] }
         if g.install == .xcode {
             a.append("--prepare-xcode")
             if !settings.teamID.isEmpty { a += ["--team-id", settings.teamID] }
@@ -177,10 +195,12 @@ final class AppModel {
     func build(_ id: UUID, thenInstall: Bool) async {
         guard var g = binding(id), !phase.isRunning else { return }
         guard repo.exists else { phase = .failed("No Nintanium checkout at \(settings.repoPath): clone it under Repository."); return }
+        guard !repo.writing else { phase = .failed("The checkout is being updated: build again in a moment."); return }   // a build reads the checkout as it goes
         beginJob(g, "Building \(g.name) for \(g.device.label)")
         var env: [String: String] = [:]
         if let ent = Entitlements.file(paid: settings.paidAccount) { env["DM_ENTITLEMENTS"] = ent }   // both memory entitlements, or Increased Memory Limit alone for a free team
-        building = g; lastRed = ""
+        g.lastCheatBuild = nil   // this build's, if it packs cheats: a stale one would put a cheat file under another version's build ID
+        building = g; lastRed = ""; laterProgram = false
         let r = await run(settings.python, buildArguments(g), cwd: URL(fileURLWithPath: settings.repoPath), env: env) { [weak self] line in
             guard let self else { return }
             guard line.hasPrefix("{"), let d = line.data(using: .utf8), let ev = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any], let kind = ev["ev"] as? String else { self.say(line); return }
@@ -217,7 +237,7 @@ final class AppModel {
         if thenInstall { await install(id) }
     }
 
-    /// Picks what the script's messages say about the result: the IPA, the Xcode project, the bundle ID and the game data to copy.
+    /// Picks what the script's messages say about the result: the IPA, the Xcode project, the bundle ID, the game data to copy and the build ID of this version's cheats.
     private func note(_ raw: String) {
         guard var g = building else { return }
         defer { building = g }
@@ -225,7 +245,11 @@ final class AppModel {
         if let x = m.firstMatch(of: #/^done: (.+\.ipa) \(/#) { g.lastIPA = String(x.1) }
         if let x = m.firstMatch(of: #/^game project: (.+)$/#) { g.lastProject = String(x.1) }
         if let x = m.firstMatch(of: #/^Xcode derived data: (.+)$/#) { g.lastDerivedData = String(x.1) }
-        if let x = m.firstMatch(of: #/push_romfs\.sh <device UDID> (\S+) "(.+)"/#) { g.lastBundleID = String(x.1); g.lastGameData = String(x.2) }
+        if let x = m.firstMatch(of: #/^app name: .*; bundle ID: ([^;\s]+)/#) { g.lastBundleID = String(x.1) }   // every iOS build's, whatever the game files' mode
+        if let x = m.firstMatch(of: #/push_romfs\.sh <device UDID> \S+ "(.+)"/#) { g.lastGameData = String(x.1) }
+        // game_mods.py pack_cheats: "cheats: <build ID>.txt (this version): ...", main's build ID; program 0's only, when a game of several programs packs each (its own lines come first)
+        if m.hasPrefix("==== program ") { laterProgram = true }
+        if !laterProgram, g.lastCheatBuild == nil, let x = m.firstMatch(of: #/^mods: cheats: ([0-9A-Fa-f]{16})\.txt \(this version\)/#) { g.lastCheatBuild = String(x.1).uppercased() }
         if g.gameData == .bundle, m.hasPrefix("done:") || m.hasPrefix("ready:") { g.lastGameData = nil }
     }
 
@@ -235,6 +259,7 @@ final class AppModel {
         stage = "Signing with Xcode"; step = "building the app"; fraction = nil; stageK = 0
         phase = .running("Signing \(g.name) with Xcode")
         let list = await Shell.run("xcodebuild", ["-list", "-json", "-project", proj])
+        if cancelled { phase = .cancelled; return false }   // Stop while -list ran (no command of the job's to interrupt): the build below does not start
         guard let d = list.stdout.data(using: .utf8), let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
               let p = j["project"] as? [String: Any], let scheme = (p["schemes"] as? [String])?.first
         else { phase = .failed("Cannot read the Xcode project's scheme: \(list.reason)"); return false }
@@ -288,27 +313,36 @@ final class AppModel {
         }
         guard let app = signedApp(g) else { phase = .failed("No signed app yet: build first."); return }
         guard let dev = checkDevice(g) else { return }
+        guard !repo.writing else { phase = .failed("The checkout is being updated: install again in a moment."); return }   // push_romfs.sh and the cheats' packing run from it
         beginJob(g, "Installing \(g.name) on \(dev.name)")
         let r = await run("xcrun", ["devicectl", "device", "install", "app", "--device", dev.id, app.path])
         if cancelled { phase = .cancelled; return }
         guard r.ok else { phase = .failed("Install failed: \(r.reason). Unlock the device, trust this Mac, and turn on Developer Mode (Settings › Privacy & Security)."); return }
         say("✓ installed")
         if g.gameData == .separate { guard await pushGameData(g, dev) else { return } }
-        await pushCheats(g, dev)
-        phase = .succeeded("Installed on \(dev.name). Open it on the device" + (settings.paidAccount ? "." : " (first time: trust your developer certificate in Settings › General › VPN & Device Management)."))
+        var cheats = ""   // the app is installed either way: a failed cheat copy is said, not a failed install
+        if g.useMods, case .failed(let why) = await pushCheats(g, dev) { cheats = " The cheats were not copied: \(why)" }
+        if cancelled { phase = .cancelled; return }
+        phase = .succeeded("Installed on \(dev.name). Open it on the device" + (settings.paidAccount ? "." : " (first time: trust your developer certificate in Settings › General › VPN & Device Management).") + cheats)
     }
 
     func copyGameData(_ id: UUID) async {
         guard let g = binding(id), let dev = checkDevice(g) else { return }
+        guard !repo.writing else { phase = .failed("The checkout is being updated: copy again in a moment."); return }   // push_romfs.sh runs from it
         beginJob(g, "Copying \(g.name)'s game data to \(dev.name)")
         if await pushGameData(g, dev) { phase = .succeeded("Game data on \(dev.name).") }
     }
 
     func copyCheats(_ id: UUID) async {
         guard let g = binding(id), let dev = checkDevice(g) else { return }
+        guard !repo.writing else { phase = .failed("The checkout is being updated: copy again in a moment."); return }   // the cheats are packed by its game_mods.py
         beginJob(g, "Copying \(g.name)'s cheats to \(dev.name)")
-        await pushCheats(g, dev)
-        if case .running = phase { phase = .succeeded("Cheats copied. In the game: gear menu › Cheats › Reload cheats.") }
+        switch await pushCheats(g, dev) {
+        case _ where cancelled: phase = .cancelled
+        case .failed(let why): phase = .failed(why)
+        case .copied(let names) where names.isEmpty: phase = .failed("No cheat file is on.")
+        case .copied(let names): phase = .succeeded("Copied \(names.joined(separator: ", ")). In the game: gear menu › Cheats › Reload cheats.")
+        }
     }
 
     /// The game's files onto the device (scripts/push_romfs.sh): the Xcode project's resources.env also brings the DLC; an IPA build's image alone otherwise.
@@ -326,16 +360,46 @@ final class AppModel {
         return true
     }
 
-    /// The game's cheat files that are on, into the app's Documents/cheats (the in-game menu's Reload cheats picks them up). A file of the same name there is replaced.
-    private func pushCheats(_ g: Game, _ dev: Device) async {
-        let files = ModsStore.enabledCheatFiles(Paths.mods(g.titleID))
-        guard !files.isEmpty else { return }
-        stage = "Copying cheats"
-        for f in files {
+    /// What pushCheats did: the files it copied (none: no cheat file is on), or why it stopped.
+    private enum CheatCopy { case copied([String]), failed(String) }
+
+    /// game_mods.py's own scan and pack_cheats over the game's mods folder, so the cheats go in as a build packs them. Arguments: the mods folder, the title ID, this version's
+    /// build ID (empty: not known), the folder to write. Exit 3: a file not named after a build ID, and no build ID to pack it as.
+    private static let packCheats = """
+        import sys
+        sys.path.insert(0, 'dm/tools')
+        import game_mods as gm
+        mods, title, build, dst = sys.argv[1:5]
+        found = gm.scan(mods, int(title, 16))
+        if not build and not all(gm.TITLE.fullmatch(p.stem) for p in found.cheats): sys.exit(3)
+        report, _ = gm.pack_cheats(found, build.upper(), dst)
+        if build: print('\\n'.join(report))   # with no build ID, pack_cheats would call each file another version's
+        """
+
+    /// The game's cheat files that are on, packed as a build packs them (game_mods.py pack_cheats: a file not named after a build ID is this version's, and the files of one
+    /// build are joined into <build ID>.txt, the only name the game reads), into the app's Documents/cheats, where the in-game menu's Reload cheats picks them up. A file of
+    /// the same name there is replaced, the one the app copied in from its own packed cheats too.
+    private func pushCheats(_ g: Game, _ dev: Device) async -> CheatCopy {
+        let root = Paths.mods(g.titleID)
+        guard !ModsStore.enabledCheatFiles(root).isEmpty else { return .copied([]) }
+        guard repo.exists else { return .failed("No Nintanium checkout at \(settings.repoPath) to pack the cheats with: clone it under Repository.") }
+        stage = "Copying cheats"; step = ""
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("nintanium-cheats-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: tmp) }
+        let pack = await run(settings.python, ["-c", Self.packCheats, root.path, g.titleID, g.lastCheatBuild ?? "", tmp.path], cwd: URL(fileURLWithPath: settings.repoPath))
+        if pack.status == 3 {
+            return .failed("A cheat file not named after a build ID goes in as this game version's <build ID>.txt, and no build has named that ID yet: build the game with its cheats on first.")
+        }
+        guard pack.ok else { return .failed("Packing the cheats failed: \(pack.reason)") }
+        let files = ((try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil)) ?? []).filter { $0.pathExtension == "txt" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        var copied: [String] = [], failed: [String] = []
+        for f in files where !cancelled {
             let r = await run("xcrun", ["devicectl", "device", "copy", "to", "--device", dev.id, "--domain-type", "appDataContainer", "--domain-identifier", g.effectiveBundleID,
                                         "--source", f.path, "--destination", "Documents/cheats/\(f.lastPathComponent)", "-q"])
-            if !r.ok { say("⚠︎ \(f.lastPathComponent): \(r.reason)", red: true) }
+            if r.ok { copied.append(f.lastPathComponent) } else { failed.append(f.lastPathComponent); say("⚠︎ \(f.lastPathComponent): \(r.reason)", red: true) }
         }
+        return failed.isEmpty ? .copied(copied) : .failed("Copying \(failed.joined(separator: ", ")) failed (the log says why). The app must be installed first.")
     }
 
     private func openInSideloader(_ ipa: URL) {

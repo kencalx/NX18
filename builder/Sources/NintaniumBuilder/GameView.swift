@@ -12,7 +12,8 @@ struct GameView: View {
 
     var body: some View {
         let g = game.wrappedValue
-        let busy = model.phase.isRunning
+        let running = model.phase.isRunning
+        let busy = running || model.repo.writing   // a pull or a clone rewrites the checkout that builds and copies run from
         let mine = model.jobGame == gameID
         Form {
             Section {
@@ -39,7 +40,10 @@ struct GameView: View {
                 Picker("Install", selection: game.install) { ForEach(InstallMethod.allCases) { Text($0.label).tag($0) } }
                 Toggle("Pre-compile GPU shaders for the \(g.device.label)", isOn: game.precompileGPUShaders)
                 if g.precompileGPUShaders {
-                    Text("The first start skips building them, but the build takes minutes longer and the app grows by about 650 MB. A bundled archive once crashed Metal at boot on an iPhone Air with iOS 27.0 (cause unknown): if the game stops at its first start, build again with this off.")
+                    Text("The first start skips building them, but the build takes minutes longer and the app grows by about 650 MB. A bundled archive once crashed Metal at boot on an iPhone Air with iOS 27.0 (cause unknown): if the game stops at its first start, build again with this off. That does not leave them out of a game whose profile sets pso_mtl4 on (Breath of the Wild, 13 Sentinels: Aegis Rim): it gets them with this off too.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("Off: only a game whose profile sets pso_mtl4 on (Breath of the Wild, 13 Sentinels: Aegis Rim) gets them, made for the \(g.device.label)'s GPU.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Toggle("Frame-rate counter", isOn: game.showFPS)
@@ -64,12 +68,16 @@ struct GameView: View {
                     }
                     Button { Task { await model.copyCheats(gameID) } } label: { Label("Copy Cheats", systemImage: "wand.and.stars") }
                         .disabled(busy || ModsStore.enabledCheatFiles(Paths.mods(g.titleID)).isEmpty)
-                        .help("Copies the cheat files that are on into the installed app; then Reload cheats in the game's gear menu")
+                        .help("Packs the cheat files that are on as a build does, into <build ID>.txt, and copies them into the installed app; then Reload cheats in the game's gear menu")
                 }
                 if let ipa = g.lastIPA, g.install == .sideload {
                     LabeledContent("IPA") { Button(URL(fileURLWithPath: ipa).lastPathComponent) { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: ipa)]) }.buttonStyle(.link) }
                 }
-                if busy && !mine { Text("Another game is building.").foregroundStyle(.secondary) }
+                if running && !mine {
+                    Text("Another game is building.").foregroundStyle(.secondary)
+                } else if model.repo.writing {
+                    Text("The checkout is being updated.").foregroundStyle(.secondary)
+                }
                 if mine { JobView() }
             }
         }
@@ -120,7 +128,7 @@ struct ModsSection: View {
         } header: {
             Text("Patches & Cheats")
         } footer: {
-            Text("A mod named for a frame rate (60FPS) or a wide shape (Ultrawide, 21.9) becomes a High frame rate or Ultrawide toggle in the game's launcher; other patches are built in. Cheats are packed into the app and turned on in the game's gear menu › Cheats.")
+            Text("A mod named for a frame rate (60FPS) or a wide shape (Ultrawide, 21.9) becomes a High frame rate or Ultrawide toggle in the game's launcher; other patches are built in. Cheats are packed into the app and turned on in the game's gear menu › Cheats. With nothing here, a build takes the mods folder beside the game's NSPs, if there is one; with everything here off, it takes no mods.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .onAppear(perform: reload)
@@ -148,8 +156,10 @@ struct ModsSection: View {
     private func add(_ urls: [URL]) {
         for u in urls {
             if ModsStore.patchExtensions.contains(u.pathExtension.lowercased()), urls.count == 1 {
-                let parent = u.deletingLastPathComponent()
-                patchName = parent.lastPathComponent.lowercased() == "exefs" ? parent.deletingLastPathComponent().lastPathComponent : u.deletingPathExtension().lastPathComponent
+                let parent = u.deletingLastPathComponent()   // <mod>/exefs/<file>, or Atmosphère's exefs_patches/<mod>/<build ID>.ips: the mod's name; else the file's (16 hex digits take " patch")
+                patchName = parent.lastPathComponent.lowercased() == "exefs" ? parent.deletingLastPathComponent().lastPathComponent
+                    : parent.deletingLastPathComponent().lastPathComponent.lowercased() == "exefs_patches" ? parent.lastPathComponent
+                    : ModsStore.patchModName(u.deletingPathExtension().lastPathComponent)
                 pendingPatch = PendingPatch(url: u)
                 return
             }

@@ -44,11 +44,40 @@ struct Game: Codable, Identifiable, Hashable, Sendable {
     var lastDerivedData: String?
     var lastBundleID: String?
     var lastGameData: String?
+    var lastCheatBuild: String?      // the build ID a cheat file not named after one is packed as (main's first 16 hex digits), from the build's "mods: cheats:" line
     var lastBuilt: Date?
     var lastBuiltDevice: TargetDevice?
 
     /// The bundle ID the app has: the one the last build named, else the one set here, else the NSP script's default.
     var effectiveBundleID: String { lastBundleID ?? (bundleID.isEmpty ? "org.nxnative.\(titleID.lowercased())" : bundleID) }
+}
+
+extension Game {
+    /// Missing keys and values this version does not know take their defaults, so a library saved by another version still loads (in an extension: the memberwise init stays).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Game(name: "", titleID: "", nspFolder: "")
+        id = (try? c.decodeIfPresent(UUID.self, forKey: .id)) ?? d.id
+        name = try c.decode(String.self, forKey: .name)
+        titleID = try c.decode(String.self, forKey: .titleID)
+        nspFolder = try c.decode(String.self, forKey: .nspFolder)
+        device = (try? c.decodeIfPresent(TargetDevice.self, forKey: .device)) ?? d.device
+        gameData = (try? c.decodeIfPresent(GameDataMode.self, forKey: .gameData)) ?? d.gameData
+        install = (try? c.decodeIfPresent(InstallMethod.self, forKey: .install)) ?? d.install
+        bundleID = (try? c.decodeIfPresent(String.self, forKey: .bundleID)) ?? d.bundleID
+        language = (try? c.decodeIfPresent(String.self, forKey: .language)) ?? d.language
+        useMods = (try? c.decodeIfPresent(Bool.self, forKey: .useMods)) ?? d.useMods
+        precompileGPUShaders = (try? c.decodeIfPresent(Bool.self, forKey: .precompileGPUShaders)) ?? d.precompileGPUShaders
+        showFPS = (try? c.decodeIfPresent(Bool.self, forKey: .showFPS)) ?? d.showFPS
+        lastIPA = try? c.decodeIfPresent(String.self, forKey: .lastIPA)
+        lastProject = try? c.decodeIfPresent(String.self, forKey: .lastProject)
+        lastDerivedData = try? c.decodeIfPresent(String.self, forKey: .lastDerivedData)
+        lastBundleID = try? c.decodeIfPresent(String.self, forKey: .lastBundleID)
+        lastGameData = try? c.decodeIfPresent(String.self, forKey: .lastGameData)
+        lastCheatBuild = try? c.decodeIfPresent(String.self, forKey: .lastCheatBuild)
+        lastBuilt = try? c.decodeIfPresent(Date.self, forKey: .lastBuilt)
+        lastBuiltDevice = try? c.decodeIfPresent(TargetDevice.self, forKey: .lastBuiltDevice)
+    }
 }
 
 struct BuilderSettings: Codable, Sendable {
