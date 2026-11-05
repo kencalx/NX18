@@ -3,7 +3,8 @@
 import SwiftUI
 
 extension LauncherModel {
-    @MainActor func binding(_ s: Setting) -> Binding<String> {   // on the main actor, as the rows that use it: its closures capture the model, which is not Sendable Binding(get: { self.values[s.env] ?? s.def }, set: { self.values[s.env] = $0 }) }
+    // On the main actor, as the rows that use it: its closures capture the model, which is not Sendable
+    @MainActor func binding(_ s: Setting) -> Binding<String> { Binding(get: { self.values[s.env] ?? s.def }, set: { self.values[s.env] = $0 }) }
 }
 
 struct SettingRow: View {

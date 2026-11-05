@@ -174,6 +174,7 @@ private struct LauncherDone: @unchecked Sendable { let call: @convention(c) () -
 public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @convention(c) () -> Void) -> Bool {
     // Called by front_ios.m on the main thread: the body asserts it (MainActor.assumeIsolated), as the Swift 6 language mode wants for UIKit and SwiftUI
     let finish = LauncherDone(call: done)
+    let parentBits = Int(bitPattern: viewController)   // the pointer as a Sendable value: the closure below runs on the main actor, as this function does
     return MainActor.assumeIsolated { () -> Bool in
         // a game of several programs (main.m): the running program's settings, in its dm/p<N>
         let dir = getenv("DM_APP_DM").map { URL(fileURLWithPath: String(cString: $0)) } ?? Bundle.main.resourceURL?.appendingPathComponent("dm")
@@ -182,7 +183,7 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
         let model = LauncherModel(file.settings)
         gameMenuModel = model   // the in-game menu shows and saves the same choices (GameMenu.swift)
         if ProcessInfo.processInfo.environment["DM_LAUNCHER"] == "0" { launcherLog("launcher: off (DM_LAUNCHER=0)\n"); model.applySaved(); return false }
-        let parent = Unmanaged<UIViewController>.fromOpaque(viewController).takeUnretainedValue()
+        let parent = Unmanaged<UIViewController>.fromOpaque(UnsafeRawPointer(bitPattern: parentBits)!).takeUnretainedValue()
         var host: UIViewController?
         let view = LauncherView(m: model) {
             guard let h = host else { return }
