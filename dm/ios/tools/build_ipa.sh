@@ -24,10 +24,15 @@
 #   Gen/.stage and only the files whose bytes changed replace Gen/'s, the Xcode project is generated again only when its inputs changed, and the IPA's executable is signed in a copy of the app);
 #   DM_SIGN_REUSE=0 signs the executable in Xcode's build folder at every build, as before, and packs it from there (default: it is signed in a copy of the app, $O/sign/DmIOS.app, which is
 #   packed instead and kept while the app Xcode built, the entitlements, codesign and macOS are the same)
+#   DM_PYTHON=<python> runs the helper scripts (the NSP script names its own interpreter; default: python3 on PATH); DM_ROMFS_CLONE=0 with --prepare-xcode: the project's Copy game resources
+#   phase copies a changed RomFS image with rsync, as before (Gen/dm.xcconfig carries it; stage_resources.sh)
 set -u
 cd "$(dirname "$0")/.." || exit 1
 IOS_SOURCE=$PWD; IOS=$PWD; DM=$(cd .. && pwd)
 t() { echo "[$(date +%T)] $*"; }; die() { t "FAIL: $*"; exit 1; }
+# The helpers run the NSP script's own Python, which it names in DM_PYTHON (as FONT_PY): python3 on PATH could be an Intel Homebrew's (/usr/local/bin, on a Mac without one in /opt/homebrew),
+# which ran them, and the universal xcrun and metal-tt pso_offline.py starts, as Intel code under Rosetta. Run by hand without DM_PYTHON: python3 on PATH, as before (make's own python3 is PATH's either way)
+[ -z "${DM_PYTHON:-}" ] || python3() { "$DM_PYTHON" "$@"; }
 [ -n "${GAME:-}" ] || die "GAME is not set: GAME=<base game title ID> $0; profiles: $(python3 "$DM/games/game.py" list | awk -F'\t' '{printf "%s (%s)  ", $1, $3}')"
 export GAME; GD=$(python3 "$DM/games/game.py" dir "$GAME") || die "no game profile $GAME"   # dm/games/<id>, or a profile in DM_GAMES_DIR (the NSP script's provisional one); the make that gen_build.py runs uses the same GAME
 gp() { python3 "$DM/games/game.py" "$GAME" "$1" || die "game profile $GD: $1"; }   # read a key of the game profile
@@ -202,7 +207,7 @@ mkdir -p "$G/dm/font" && cp "${STD_FONT:-/System/Library/Fonts/Supplemental/Aria
 # DM_GEN_REUSE on it is a fixed date, 2020-01-01, unless the environment sets one: the same font then has the same bytes and Gen/dm, which Xcode copies whole into the app, stays unchanged.
 # Font readers do not use these dates
 FE=; [ "$GEN_REUSE" != 1 ] || FE=${SOURCE_DATE_EPOCH:-1577836800}
-( [ -z "$FE" ] || export SOURCE_DATE_EPOCH="$FE"; exec "${FONT_PY:-python3}" "$DM/tools/make_ext_font.py" "$G/dm/font/nintendo_ext.ttf" ) > /dev/null || die "make_ext_font.py (pip install fonttools, or FONT_PY=python with fontTools)"
+( [ -z "$FE" ] || export SOURCE_DATE_EPOCH="$FE"; exec "${FONT_PY:-${DM_PYTHON:-python3}}" "$DM/tools/make_ext_font.py" "$G/dm/font/nintendo_ext.ttf" ) > /dev/null || die "make_ext_font.py (pip install fonttools, or FONT_PY=python with fontTools)"
 # App icon: the game's own icon (icon.jpg saved from the control data by nx_extract, the English 256x256 one). DM_ICON can point at another image; by default the icon.jpg next to the RomFS is used.
 # It is scaled to a 1024x1024 PNG in the asset catalog Gen/Assets.xcassets (a single-size app icon; actool generates the other sizes); with neither, no icon is set and the home-screen icon is blank.
 # The catalog is always created (the project always lists it, see project.yml); without an icon it stays empty and DM_APPICON is not set
@@ -236,6 +241,7 @@ if [ "$PREPARE_XCODE" = YES ] && [ -n "${DM_ENTITLEMENTS-default}" ]; then
 fi
 # DM_COPY_ROMFS=NO also for the prepared project: its Copy game resources phase (stage_resources.sh) then leaves the game files out and writes the image's identity; Gen/dm.xcconfig is made again by every run
 [ "${DM_COPY_ROMFS:-YES}" != NO ] || [ "$PREPARE_XCODE" != YES ] || echo "DM_COPY_ROMFS = NO" >> "$G/dm.xcconfig"
+[ "${DM_ROMFS_CLONE:-1}" != 0 ] || [ "$PREPARE_XCODE" != YES ] || echo "DM_ROMFS_CLONE = 0" >> "$G/dm.xcconfig"   # and DM_ROMFS_CLONE=0: a changed image copied with rsync
 RP=; if [ -n "${PROGRAMS_TSV:-}" ]; then   # a game of several programs: each program's files, which the Xcode build phase copies under p<index> as the IPA has them (stage_resources.sh)
   RP=Gen/resources_programs.tsv; printf '# program\tRomFS\tmarker\tiOS shaders\tshader folder (build_ipa.sh)\n' > "$G/resources_programs.tsv"   # RP: the path resources.env names
   M0=$MSLDIR; while IFS= read -r row; do prog_set "$row"; printf '%s\t%s\t%s\t%s\t%s\n' "$PN" "$ROMFS" "$MARKER" "$MSL_IOS/$MSLDIR" "$MSLDIR" >> "$G/resources_programs.tsv"; done < <(prog_rows); prog_back; MSLDIR=$M0; fi

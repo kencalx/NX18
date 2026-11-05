@@ -91,6 +91,7 @@ class XcodePipelineTests(unittest.TestCase):
             self.assertEqual(command[-1], '--prepare-xcode')
             environment = mocks['run'].call_args.kwargs['env']
             self.assertEqual(environment['DM_LANG'], 'ja')
+            self.assertEqual(environment['DM_PYTHON'], sys.executable)   # build_ipa.sh's helpers run the script's own Python, not PATH's python3
             self.assertEqual(environment['DM_SHOW_FPS'], '0')
             self.assertIn('DM_ENV_FILE', environment)   # --no-motion bakes DM_MOTION=0 into the app's dm/env.txt
             self.assertEqual(Path(environment['DM_ENV_FILE']).read_text(), 'DM_MOTION=0\n')

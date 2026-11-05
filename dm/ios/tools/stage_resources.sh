@@ -43,9 +43,17 @@ sync_dir() {   # source folder, destination folder
     if [ ! -d "$2" ] || [ -z "$(ls -A "$2" 2>/dev/null)" ]; then mkdir -p "$2"; /bin/cp -cRp -- "$1/." "$2/" || die "copy $1 to $2"
     else /usr/bin/rsync -a --delete -- "$1/" "$2/" || die "sync $1 to $2"; fi
 }
+# A RomFS image that changed since the last build (another size or modification time to the second, what rsync's quick check compares: an image rsync would skip is never cloned) is cloned again
+# the same way: rsync wrote all of it into a new file, which then shared no blocks with the build's image and took its whole size again. The clone has the bytes, mode and modification time to the
+# second rsync -a gave; cp -p also keeps the time below the second and the image's extended attributes, ACLs and flags, as the first copy does, where macOS rsync (protocol 29) set whole seconds and
+# no extended attributes (nothing reads either from the image). An unchanged image, or a link to one (rsync -a copies the link), goes through rsync as before. DM_ROMFS_CLONE=0: a changed one too
+ROMFS_CLONE=${DM_ROMFS_CLONE:-1}
+size_time() { /usr/bin/stat -f '%z %m' -- "$1"; }   # without -L, as rsync -a sees the destination
 sync_romfs() {   # the RomFS (an image file or a folder), the app folder it goes in
     if [ -f "$1" ]; then
-        if [ -f "$2/romfs.img" ]; then /usr/bin/rsync -a -- "$1" "$2/romfs.img"; else /bin/cp -cp -- "$1" "$2/romfs.img" || die "copy $1"; fi
+        if [ ! -f "$2/romfs.img" ]; then /bin/cp -cp -- "$1" "$2/romfs.img" || die "copy $1"
+        elif [ "$ROMFS_CLONE" = 0 ] || [ -L "$1" ] || [ "$(size_time "$1")" = "$(size_time "$2/romfs.img")" ]; then /usr/bin/rsync -a -- "$1" "$2/romfs.img"
+        else rm -f "$2/romfs.img"; /bin/cp -cp -- "$1" "$2/romfs.img" || die "copy $1"; fi
         rm -rf "$2/romfs"; rm -f "$2/romfs.id"
     else
         sync_dir "$1" "$2/romfs"

@@ -3256,7 +3256,22 @@ def provisional_version(have, builds, requested, profile_root):
     return version
 
 
+CAFFEINATE = None   # keep_awake's caffeinate, one per process (main runs again for each program of a game of several)
+
+
+def keep_awake():
+    """A large game's first build runs unattended for an hour or so (Breath of the Wild's: 53 minutes), and neither this script nor the Terminal or the Builder that starts it held a power
+    assertion, so a MacBook that idle-slept paused it until it woke.
+    caffeinate -i (no idle sleep; the display may sleep, and a closed lid still sleeps) for as long as this process lives: -w ends it with the process, a kill -9 too. It runs in its own session,
+    without this process's pipes (the Builder reads them to their end). Not in Spyder, whose process outlives the build. DM_KEEP_AWAKE=0 starts none; one that does not start never stops the build"""
+    global CAFFEINATE
+    if CAFFEINATE or sys.platform != 'darwin' or in_ipython() or os.environ.get('DM_KEEP_AWAKE') == '0' or not os.path.exists('/usr/bin/caffeinate'): return
+    try: CAFFEINATE = subprocess.Popen(['/usr/bin/caffeinate', '-i', '-w', str(os.getpid())], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except (OSError, subprocess.SubprocessError): pass
+
+
 def main(args=None):
+    keep_awake()
     args = args or parse_args([])
     PROG.mode = progress_mode(args.progress or PROGRESS)
     global ALLOW_DAMAGED; ALLOW_DAMAGED = args.allow_damaged or ALLOW_DAMAGED
@@ -3561,7 +3576,7 @@ def main(args=None):
     if programs and romfs_mode == 'separate': raise BuildError('a game of several programs keeps its files in the app (ROMFS / --romfs bundle): Documents holds one RomFS image, one program\'s')
     if not prepare_xcode and free_gb(out_ipa.parent) < 5: raise BuildError(f'less than 5 GB free on the volume of {out_ipa.parent}')
     say('preparing the Xcode project' if prepare_xcode else f'building the IPA → {out_ipa}')
-    ipa_env = dict(env, GAME=g.id, W=str(work / 'ipa'), PATCHED=str(patched), ROMFS=str(rfs.source(game)), MSL_IOS=str(ios), GFXAPI=gfx, FONT_PY=py, DM_DISPLAY_NAME=app_name, DM_BUNDLE_ID=bundle_id, AOC=str(aoc or ''), DM_XCODE_DERIVED_DATA=str(work / 'xcode-derived-data'), DM_TEAM_ID=team_id, DM_LANG=lang, CONTROL=str(control))
+    ipa_env = dict(env, GAME=g.id, W=str(work / 'ipa'), PATCHED=str(patched), ROMFS=str(rfs.source(game)), MSL_IOS=str(ios), GFXAPI=gfx, FONT_PY=py, DM_PYTHON=py, DM_DISPLAY_NAME=app_name, DM_BUNDLE_ID=bundle_id, AOC=str(aoc or ''), DM_XCODE_DERIVED_DATA=str(work / 'xcode-derived-data'), DM_TEAM_ID=team_id, DM_LANG=lang, CONTROL=str(control))   # DM_PYTHON: build_ipa.sh's helpers run this Python, not PATH's python3 (an Intel Homebrew's ran them under Rosetta)
     if prepare_xcode: ipa_env['DM_XCODE_PROJECT_DIR'] = str(project.parent)
     separate = romfs_mode == 'separate'
     if separate: ipa_env['DM_COPY_ROMFS'] = 'NO'; say('game files: separate (DM_COPY_ROMFS=NO), left out of the app; the image stays at ' + str(rfs.source(game)))
