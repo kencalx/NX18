@@ -1520,12 +1520,26 @@ def build_variants(py, repo, variants, patched, env, logs):
     PROG.end(', '.join(r for r, _, _ in offered) or 'none could be offered')
 
 
+def extracted_leftovers(ex, work, programs, mods_root):
+    """What the build deletes when it keeps no extraction: the extraction and the mods stage's folder (apply_mods: the modded copy, its cheats and variants), the same for each
+    other program of the game. Never the player's mods folder or one that holds it (--work-dir the NSP folder, with the mods beside the game: <work>/mods is theirs)"""
+    mine = mods_root.resolve() if mods_root else None
+    ds = [ex, work / 'mods'] + [x for r in programs.values() for x in (r['ex'], r['ex'].parent / 'mods')]
+    return [d for d in ds if d.exists() and not (mine and (d.resolve() == mine or d.resolve() in mine.parents))]
+
+
 def merge_cheats(dirs, dst):
     """A game of several programs: their packed cheat folders as one, dst, for the app (each file is named after its program's build); made again at every run, and swapped in
-    only when its files differ (swap_in_changed). Of two files of one name with other content the first program's is taken. Returns dst"""
+    only when its files differ (swap_in_changed). dirs: (folder, its program's build, the 16 hex digits pack_mod_cheats names it by, or None). A program's own build's file is
+    taken from that program (a later program's own title folder adds codes the first program does not pack); of two other files of one name with other content the first program's
+    is taken. Returns dst"""
     tmp = dst.with_name(dst.name + '.partial'); rmtree(tmp); tmp.mkdir(parents=True)
-    for d in dirs:
+    own = {}
+    for d, b in dirs:
+        if b and f'{b}.txt' not in own and (d / f'{b}.txt').is_file(): own[f'{b}.txt'] = d
+    for d, _ in dirs:
         for p in sorted(d.iterdir()):
+            if own.get(p.name, d) != d: continue   # the copy of the program whose build it is goes in
             if not (tmp / p.name).exists(): shutil.copy2(p, tmp / p.name)
             elif (tmp / p.name).read_bytes() != p.read_bytes(): say(f'mods: cheats: {p.name} of two programs differs: {p} left out')
     swap_in_changed(tmp, dst)
@@ -3195,9 +3209,10 @@ def main(args=None):
         os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
         g = gamemod.load(g.id)
         say(f'derived game profile for {pkg_ver} ({disp}): {g.dir}')
-    packed_cheats, mod_variants, mods_rom = None, {}, ()
+    packed_cheats, mod_variants, mods_rom, cheat_build = None, {}, (), None
     if mods_root:   # the game's mods: the packed version's files with them, from here on (dm/tools/game_mods.py); a program of a game of several takes its own (game_mods.py same_title)
         say(f'mods folder: {mods_root}')
+        m0 = dirs[pkg_ver] / 'ExeFS/main'; cheat_build = build_id(m0)[:16].upper() if m0.is_file() else None   # the build pack_mod_cheats names this program's own cheat file after (merge_cheats)
         modded, packed_cheats, mod_variants = apply_mods(mods_root, dirs[pkg_ver], work, pkg_ver, app, fps_ok=frame_rate_mods_ok(g), first=getattr(args, 'in_programs', None) is None)
         if modded:
             dirs[pkg_ver] = modded; rk = work / 'mods' / f'{pkg_ver}.romfs.key'
@@ -3291,14 +3306,15 @@ def main(args=None):
     if not motion: say('motion (gyro): off, DM_MOTION=0 is built in (on the iPhone, DM_MOTION=1 in the app\'s Documents/env.txt turns it back on)')
     if mac_pack:   # a Mac app: the Mac host, then the app packed from it and the build's files
         if getattr(args, 'in_programs', None) is not None:   # a program of the game: the app its first program's build packs takes these
-            rmtree(work / 'tmp'); return {'patched': patched, 'romfs': rfs.source(game), 'msl': ios / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl'), 'tables': g.table('shader_map.tsv').parent, 'html': game / 'html', 'gfx': gfx, 'cheats': packed_cheats}
+            rmtree(work / 'tmp'); return {'patched': patched, 'romfs': rfs.source(game), 'msl': ios / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl'), 'tables': g.table('shader_map.tsv').parent, 'html': game / 'html', 'gfx': gfx, 'cheats': packed_cheats, 'build': cheat_build}
         host, font = mac_host(py, repo, work, env, logs, g)
         programs = other_programs(args, g)
         if not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
                 (args.gpu or PSO_GPUS).strip(), programs, control)
-        for c in [packed_cheats] + [r.get('cheats') for r in programs.values()]:   # each program's own cheats too, under its builds' IDs
-            if c: install_cheats(c, Path.home() / 'Library/Application Support/nxnative' / f'{app:016X}' / 'cheats')   # the app's DM_ROOT (dm/mac/launcher.c)
+        cdirs = [(d, b) for d, b in [(packed_cheats, cheat_build)] + [(programs[n].get('cheats'), programs[n].get('build')) for n in sorted(programs)] if d]   # each program's own cheats too, under its builds' IDs
+        c = merge_cheats(cdirs, work / 'mods' / 'programs_cheats') if len(cdirs) > 1 else cdirs[0][0] if cdirs else None
+        if c: install_cheats(c, Path.home() / 'Library/Application Support/nxnative' / f'{app:016X}' / 'cheats')   # the app's DM_ROOT (dm/mac/launcher.c)
         rmtree(work / 'tmp')
         say(f'done: {out_ipa} ({tree_size(out_ipa)[1] / 2**30:.1f} GB); '
             f'open it from Finder. Its save is in ~/Library/Application Support/nxnative/{app:016X}/, its log in ~/Library/Logs/nxnative/{app:016X}.log')
@@ -3322,10 +3338,10 @@ def main(args=None):
         return
 
     if getattr(args, 'in_programs', None) is not None:   # a program of the game: the app its first program's build packs takes these
-        rmtree(work / 'tmp'); return {'row': (PROGRAM_INDEX, g.id, patched, rfs.source(game), ios, gfx), 'ex': ex, 'keep': keep, 'cheats': packed_cheats}
+        rmtree(work / 'tmp'); return {'row': (PROGRAM_INDEX, g.id, patched, rfs.source(game), ios, gfx), 'ex': ex, 'keep': keep, 'cheats': packed_cheats, 'build': cheat_build}
     programs = other_programs(args, g)
-    cheat_dirs = [d for d in [packed_cheats] + [programs[n].get('cheats') for n in sorted(programs)] if d]   # each program's own cheats too, under its builds' IDs: one folder for the app
-    packed_cheats = merge_cheats(cheat_dirs, work / 'mods' / 'programs_cheats') if len(cheat_dirs) > 1 else cheat_dirs[0] if cheat_dirs else None
+    cheat_dirs = [(d, b) for d, b in [(packed_cheats, cheat_build)] + [(programs[n].get('cheats'), programs[n].get('build')) for n in sorted(programs)] if d]   # each program's own cheats too, under its builds' IDs: one folder for the app
+    packed_cheats = merge_cheats(cheat_dirs, work / 'mods' / 'programs_cheats') if len(cheat_dirs) > 1 else cheat_dirs[0][0] if cheat_dirs else None
     if programs and romfs_mode == 'separate': raise BuildError('a game of several programs keeps its files in the app (ROMFS / --romfs bundle): Documents holds one RomFS image, one program\'s')
     if not prepare_xcode and free_gb(out_ipa.parent) < 5: raise BuildError(f'less than 5 GB free on the volume of {out_ipa.parent}')
     say('preparing the Xcode project' if prepare_xcode else f'building the IPA → {out_ipa}')
@@ -3386,7 +3402,7 @@ def main(args=None):
     PROG.end(f'{out_ipa.name}, {amount(out_ipa.stat().st_size, "B")}')
     rmtree(work / 'tmp')
     if not keep:   # and the modded copy of them (apply_mods), a whole RomFS image of its own once the extraction it was cloned or linked from is gone
-        for d in [d for d in [ex, work / 'mods'] + [x for r in programs.values() for x in (r['ex'], r['ex'].parent / 'mods')] if d.exists()]: say(f'deleting the extracted game files: {d}'); rmtree(d)
+        for d in extracted_leftovers(ex, work, programs, mods_root): say(f'deleting the extracted game files: {d}'); rmtree(d)
     say(f'done: {out_ipa} ({out_ipa.stat().st_size / 2**30:.1f} GB)')
     if separate: say_push_romfs(rfs.source(game), bundle_id)
     report_profile_status(g, reg, pkg_ver, derived, provisional, patched=patched)

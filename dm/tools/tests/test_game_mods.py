@@ -401,11 +401,29 @@ class NspScript(unittest.TestCase):
         a, b = self.root / 'a', self.root / 'b'; a.mkdir(); b.mkdir()
         (a / '0000000000000001.txt').write_text('[A]\n'); (b / '0000000000000002.txt').write_text('[B]\n')
         (a / 'FFFFFFFFFFFFFFFF.txt').write_text('[same]\n'); (b / 'FFFFFFFFFFFFFFFF.txt').write_text('[same]\n')
-        dst = self.nsp.merge_cheats([a, b], self.root / 'all')
+        dst = self.nsp.merge_cheats([(a, '0000000000000001'), (b, '0000000000000002')], self.root / 'all')
         self.assertEqual(sorted(p.name for p in dst.iterdir()), ['0000000000000001.txt', '0000000000000002.txt', 'FFFFFFFFFFFFFFFF.txt'])
         ino = os.stat(dst / '0000000000000002.txt').st_ino
-        self.nsp.merge_cheats([a, b], self.root / 'all')
+        self.nsp.merge_cheats([(a, '0000000000000001'), (b, '0000000000000002')], self.root / 'all')
         self.assertEqual(os.stat(dst / '0000000000000002.txt').st_ino, ino, 'unchanged: kept')
+
+    def test_a_programs_own_build_file_comes_from_that_program(self):   # a later program's own title folder adds codes to its build's file that the first program does not pack
+        a, b = self.root / 'a', self.root / 'b'; a.mkdir(); b.mkdir()
+        (a / '0000000000000002.txt').write_text('[loose]\n'); (b / '0000000000000002.txt').write_text('[own]\n\n[loose]\n')
+        (a / 'FFFFFFFFFFFFFFFF.txt').write_text('[first]\n'); (b / 'FFFFFFFFFFFFFFFF.txt').write_text('[later]\n')
+        dst = self.nsp.merge_cheats([(a, '0000000000000001'), (b, '0000000000000002')], self.root / 'all')
+        self.assertEqual((dst / '0000000000000002.txt').read_text(), '[own]\n\n[loose]\n', "program 2's own build: its copy")
+        self.assertEqual((dst / 'FFFFFFFFFFFFFFFF.txt').read_text(), '[first]\n', "no program's build: the first program's copy")
+
+    def test_the_cleanup_keeps_the_players_mods_folder(self):   # --work-dir the NSP folder, the mods beside the game: the extraction's mods/ is the player's
+        nsp_dir = self.root / 'nsp'; work, other = nsp_dir, nsp_dir / 'p1_build'
+        for d in (work / 'extract', work / 'mods/cheats', other / 'extract', other / 'mods/v0_cheats'): d.mkdir(parents=True)
+        programs = {1: {'ex': other / 'extract'}}
+        left = lambda mods_root: self.nsp.extracted_leftovers(work / 'extract', work, programs, mods_root)
+        self.assertEqual(left(work / 'mods'), [work / 'extract', other / 'extract', other / 'mods'], 'the mods folder itself stays')
+        self.assertEqual(left(work / 'mods/cheats'), [work / 'extract', other / 'extract', other / 'mods'], 'and a folder holding it')
+        self.assertEqual(left(self.root / 'elsewhere'), [work / 'extract', work / 'mods', other / 'extract', other / 'mods'])
+        self.assertEqual(left(None), [work / 'extract', work / 'mods', other / 'extract', other / 'mods'])
 
     def test_a_later_program_leaves_loose_cheats_to_the_first(self):   # a cheat file not named after a build ID was made for one program's build: the first's, as before
         for rel in ('cheats/inf.txt', f'contents/{TITLE:016X}/cheats/own.txt', 'cheats/0000000000000001.txt'): (self.mods / rel).parent.mkdir(parents=True, exist_ok=True); (self.mods / rel).write_text('[Inf]\n')
