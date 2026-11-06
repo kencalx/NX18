@@ -174,14 +174,17 @@ def head(f, entry):   # the first block of a file, unscrambled: its magic, to le
 
 def narc_members(d, where='NARC'):
     if d[:4] != b'NARC': raise Error(f'{where}: not a NARC')
+    if len(d) < 0x10: raise Error(f'{where}: a header cut short ({len(d)} bytes)')
     o, n = struct.unpack_from('<HH', d, 0xc); secs = {}
     for _ in range(n):
         if o + 8 > len(d): raise Error(f'{where}: a section past the end')
         s = struct.unpack_from('<I', d, o + 4)[0]; secs[d[o:o + 4]] = o; o += s
     if b'BTAF' not in secs or b'GMIF' not in secs: raise Error(f'{where}: no BTAF or GMIF')
     fat = secs[b'BTAF']; data = secs[b'GMIF'] + 8
+    if fat + 12 > len(d): raise Error(f'{where}: BTAF past the end')
     out = []
     for i in range(struct.unpack_from('<I', d, fat + 8)[0]):
+        if fat + 12 + 8 * (i + 1) > len(d): raise Error(f'{where}: BTAF entry {i} past the end')
         a, b = struct.unpack_from('<II', d, fat + 12 + 8 * i)
         if not data + a <= data + b <= len(d): raise Error(f'{where}: member {i} past the end')
         out.append(d[data + a:data + b])
@@ -217,20 +220,28 @@ def zstd_mod():
     return zstd
 
 
-def undo(d):
-    """A member, unpacked by the kind in its first byte, as the game does (nro0+0x1237c80). Anything else is the member itself"""
+def undo(d, depth=0):
+    """A member, unpacked by the kind in its first byte, as the game does (nro0+0x1237c80). Anything else is the member itself. depth: chunks inside chunks (MMMM), at most 32"""
     if not d: return d
     k = d[0]
     if k == 0x4d and d[:4] == b'MMMM':   # chunks of any kind: u32 total, u32 count, u32 length of each, 16-aligned
+        if depth >= 32: raise Error("MMMM chunks nested more than 32 deep (a damaged member)")
         total, n = struct.unpack_from('<II', d, 4)
         at = (12 + 4 * n + 15) & ~15
         out = []
         for i in range(n):
             s = struct.unpack_from('<I', d, 12 + 4 * i)[0]
-            out.append(undo(d[at:at + s])); at += (s + 15) & ~15
+            out.append(undo(d[at:at + s], depth + 1)); at += (s + 15) & ~15
         return b''.join(out)
-    if k == 0x94 and len(d) >= 8: return lz4.block.decompress(d[8:], uncompressed_size=struct.unpack_from('<I', d, 4)[0])
-    if k == 0x5a and d[:4] == b'Z\0\0\0': return zstd_mod().decompress(d[8:])
+    if k == 0x94 and len(d) >= 8:
+        want = struct.unpack_from('<I', d, 4)[0]
+        if want > 255 * len(d) + 64: raise Error(f'an LZ4 member of {len(d)} bytes says it unpacks to {want}, past LZ4\'s largest ratio (a damaged member)')   # checked before lz4 allocates it
+        try: return lz4.block.decompress(d[8:], uncompressed_size=want)
+        except lz4.block.LZ4BlockError as e: raise Error(f'a damaged LZ4 member ({e})') from None
+    if k == 0x5a and d[:4] == b'Z\0\0\0':
+        z = zstd_mod()
+        try: return z.decompress(d[8:])
+        except z.ZstdError as e: raise Error(f'a damaged zstd member ({e})') from None
     if k == 0x50 and len(d) >= 8: return lz_undo(d, 8)
     if k == 0x60 and len(d) >= 4: return lz_undo(d, 4)
     if k in (0x70, 0x80) and len(d) >= 0x10: return d[0x10:]

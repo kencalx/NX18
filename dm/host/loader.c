@@ -995,18 +995,21 @@ static void rl_write(void *arg) {
         close(fd);
     }
     size_t outn = 0; char *text = dm_runlog_merge(old, oldn, j->block, DM_RUNLOG_KEEP, &outn), why[160] = "out of memory";
-    int ok = 0;
+    int ok = 0, err = 0;   // err: the errno of the call that failed, taken right after it (EIO: a short write)
     if (text) {
         int w = open(j->tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (w < 0) err = errno;
         size_t done = 0;
         while (w >= 0 && done < outn) {
             ssize_t k = write(w, text + done, outn - done);
             if (k < 0 && errno == EINTR) continue;
-            if (k <= 0) break;
+            if (k <= 0) { err = k < 0 ? errno : EIO; break; }
             done += (size_t)k;
         }
-        if (w >= 0 && !close(w) && done == outn && !rename(j->tmp, j->path)) ok = 1;
-        else { strerror_r(errno ? errno : EIO, why, sizeof why); if (w >= 0) unlink(j->tmp); }
+        if (w >= 0 && close(w) && !err) err = errno;
+        if (w >= 0 && !err && rename(j->tmp, j->path)) err = errno;
+        if (w >= 0 && !err) ok = 1;
+        else { strerror_r(err ? err : EIO, why, sizeof why); if (w >= 0) unlink(j->tmp); }
     }
     if (ok) LOG("run layout: pid %lld, started %s: %d modules and %d switchable-mod pieces in run_layouts.txt beside this log (the crash summary reads it)", j->pid, j->utc, j->nmod, j->npiece);
     else LOG("[RED] run layout: %s could not be written (%s): a crash report of this run will show the game's frames as raw addresses", j->path, why);

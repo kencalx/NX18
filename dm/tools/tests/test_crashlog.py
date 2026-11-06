@@ -372,7 +372,7 @@ class Script(unittest.TestCase):
 
     def test_odd_texts(self):
         """A frame chain nested deeper than Python's JSON reader goes is a clean error; a lone surrogate prints"""
-        n = 30000
+        n = 400000   # past the C stack of any platform's main thread: macOS's reads 30,000 levels where Linux's stops
         deep = self.d / 'deep.json'
         deep.write_text('{"crashDiagnostic": {"callStackTree": {"callStackThreads": [{"threadAttributed": true, "rootFrames": ['
                         + '{"address": 1, "subFrames": [' * n + '{"address": 1}' + ']}' * n + ']}]}}, "environment": {"pid": 1}}')
@@ -490,7 +490,7 @@ class Core(unittest.TestCase):
                 r = subprocess.run([c_compiler(), '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', *flags, '-o', str(exe), str(src)], capture_output=True, text=True)
                 if r.returncode and flags: self.skipTest(f'no sanitizers here: {r.stderr.strip()[:200]}')
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-                r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=300, env=dict(os.environ, ASAN_OPTIONS='detect_leaks=1', UBSAN_OPTIONS='halt_on_error=1'))
+                r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=300, env=dict(os.environ, ASAN_OPTIONS='detect_leaks=1' if sys.platform.startswith('linux') else '', UBSAN_OPTIONS='halt_on_error=1'))   # LeakSanitizer: Linux only (macOS's ASan aborts when asked for it)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 self.assertIn('crash summary: OK', r.stdout)
 

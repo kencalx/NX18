@@ -2511,7 +2511,12 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     if d[:4] == b'NARC':   # Camelot's containers (cra.py): each member packed by its first byte, so its size says nothing about the budget above
         import cra
-        for i, m in enumerate(cra.narc_members(d, label)): scan_blob(cra.undo(m), f'{label}/{i}', out, depth + 1)
+        try: members = cra.narc_members(d, label)
+        except cra.Error as e: red(f'{e} (a damaged or cut NARC)')
+        for i, m in enumerate(members):
+            try: u = cra.undo(m)
+            except (cra.Error, struct.error, IndexError) as e: red(f'{label}/{i}: a packed member that does not unpack ({type(e).__name__}: {e})')
+            scan_blob(u, f'{label}/{i}', out, depth + 1)
         return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
     if d[:4] == b'NDSR': out.extend(ndsr_shaders(d, label)); return
