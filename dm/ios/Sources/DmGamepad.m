@@ -179,11 +179,27 @@ static void pads_start(void);   // Physical controllers, below
     UITouch *_game[16];                            // touches on the game's touch screen by finger slot
 }
 
+// Touch control size and opacity (the settings screen's and the in-game menu's rows, DM_TOUCH_SIZE and DM_TOUCH_OPACITY; main thread). The size multiplies u, so every control, its distance from
+// the edges and corners and its hit area follow it: Large (1) is the size the controls always had, Medium 0.85 and Small 0.7. An iPad already draws them larger (u is capped at 1.3, and its
+// points are larger: about 1.5 times an iPhone's physical size), so Small there is about an iPhone's Large. The opacity multiplies each colour's own alpha (Normal, 1, is the look they
+// always had; capped at 1) and the shadows' (at most theirs). The menu button keeps the normal look, so the menu that changes them stays easy to find
+static CGFloat g_touch_size = 1, g_touch_opacity = 1;
+static CGFloat touch_value(const char *name, const char *v, CGFloat lo, CGFloat hi) {   // a size or opacity: 1 when unset or out of range
+    if (!v || !*v) return 1;
+    char *end; double x = strtod(v, &end);
+    if (end == v || *end || !(x >= lo && x <= hi)) { LOG("[RED] front end: %s=%s: a number from %.1f to %.1f; keeping 1", name, v, lo, hi); return 1; }
+    return x;
+}
 static UIColor *k_idle, *k_on, *k_line, *k_ringFill, *k_text, *k_textOn;
+static void make_colors(CGFloat o) {   // each colour carries its own low opacity instead of lowering the whole view's alpha (that would add an off-screen pass for the full-screen layer)
+    k_idle = [UIColor colorWithWhite:1 alpha:MIN(0.14 * o, 1)]; k_on = [UIColor colorWithWhite:1 alpha:MIN(0.45 * o, 1)]; k_line = [UIColor colorWithWhite:1 alpha:MIN(0.38 * o, 1)];
+    k_ringFill = [UIColor colorWithWhite:1 alpha:MIN(0.06 * o, 1)]; k_text = [UIColor colorWithWhite:1 alpha:MIN(0.6 * o, 1)]; k_textOn = [UIColor colorWithWhite:0 alpha:MIN(0.7 * o, 1)];
+}
+static float shadow_opacity(void) { return 0.2f * (float)MIN(g_touch_opacity, 1); }
 static CAShapeLayer *shape(CALayer *parent) {
     CAShapeLayer *l = [CAShapeLayer layer];
     l.fillColor = k_idle.CGColor; l.strokeColor = k_line.CGColor; l.lineWidth = 1.5;
-    l.shadowColor = UIColor.blackColor.CGColor; l.shadowOpacity = 0.2; l.shadowRadius = 3; l.shadowOffset = CGSizeMake(0, 1);
+    l.shadowColor = UIColor.blackColor.CGColor; l.shadowOpacity = shadow_opacity(); l.shadowRadius = 3; l.shadowOffset = CGSizeMake(0, 1);
     [parent addSublayer:l]; return l;
 }
 static CATextLayer *label(CALayer *parent, NSString *s) {
@@ -206,12 +222,10 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             [_touchFeedback prepare];
         }
         _owner = [NSMapTable strongToStrongObjectsMapTable]; _faceOf = [NSMapTable strongToStrongObjectsMapTable];
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{
-            // each colour carries its own low opacity instead of lowering the whole view's alpha (that would add an off-screen pass for the full-screen layer)
-            k_idle = [UIColor colorWithWhite:1 alpha:0.14]; k_on = [UIColor colorWithWhite:1 alpha:0.45]; k_line = [UIColor colorWithWhite:1 alpha:0.38];
-            k_ringFill = [UIColor colorWithWhite:1 alpha:0.06]; k_text = [UIColor colorWithWhite:1 alpha:0.6]; k_textOn = [UIColor colorWithWhite:0 alpha:0.7];
-        });
+        g_touch_size = touch_value("DM_TOUCH_SIZE", getenv("DM_TOUCH_SIZE"), 0.5, 1); g_touch_opacity = touch_value("DM_TOUCH_OPACITY", getenv("DM_TOUCH_OPACITY"), 0.1, 2);
+        if (g_touch_size != 1 || g_touch_opacity != 1) LOG("front end: touch controls at size %.2f, opacity %.2f (DM_TOUCH_SIZE, DM_TOUCH_OPACITY)", g_touch_size, g_touch_opacity);
+        make_colors(1); UIColor *menuFill = k_idle, *menuLine = k_line, *menuText = k_text;   // the menu button's: the normal look
+        make_colors(g_touch_opacity);
         _controls = [CALayer layer]; [self.layer addSublayer:_controls];
         _ring = shape(_controls); _ring.fillColor = k_ringFill.CGColor;
         _knob = shape(_controls);
@@ -223,9 +237,9 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             if (names[b]) _label[b] = label(_key[b], names[b]);   // the D-pad arms carry no label
         }
         _menu = [DmMenuButton buttonWithType:UIButtonTypeCustom];
-        _menu.backgroundColor = k_idle; _menu.layer.borderColor = k_line.CGColor; _menu.layer.borderWidth = 1.5;
+        _menu.backgroundColor = menuFill; _menu.layer.borderColor = menuLine.CGColor; _menu.layer.borderWidth = 1.5;
         _menu.layer.shadowColor = UIColor.blackColor.CGColor; _menu.layer.shadowOpacity = 0.2; _menu.layer.shadowRadius = 3; _menu.layer.shadowOffset = CGSizeMake(0, 1);
-        _menu.tintColor = k_text; _menu.accessibilityLabel = @"Menu";
+        _menu.tintColor = menuText; _menu.accessibilityLabel = @"Menu";
         _menu.menu = CFBridgingRelease(dm_game_menu()); _menu.showsMenuAsPrimaryAction = YES;
         __weak DmGamepad *weakSelf = self;
         [_menu addAction:[UIAction actionWithHandler:^(UIAction *a) { (void)a; [weakSelf menuOpened]; [weakSelf reset]; }] forControlEvents:UIControlEventMenuActionTriggered];   // the menu opens: release every key and touch first
@@ -292,6 +306,21 @@ static BOOL assistive_running(void) { return UIAccessibilityIsVoiceOverRunning()
     if (!on) { _touchFeedback = nil; return; }
     if (!_touchFeedback) { _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [_touchFeedback prepare]; }
 }
+- (void)setTouchSize:(CGFloat)s {   // the in-game menu's Touch control size: every touch released first (a held stick's centre moves), then laid out again, hit areas included
+    if (s == g_touch_size) return;
+    [self reset]; g_touch_size = s; [self setNeedsLayout];
+}
+- (void)setTouchOpacity:(CGFloat)o {   // the in-game menu's Touch control opacity: new colours, and every layer and label takes them (shape() and label() set them only when a layer is made)
+    if (o == g_touch_opacity) return;
+    g_touch_opacity = o; make_colors(o);
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    float sh = shadow_opacity();
+    _ring.strokeColor = _knob.strokeColor = k_line.CGColor; _ring.fillColor = k_ringFill.CGColor; _ring.shadowOpacity = _knob.shadowOpacity = sh;
+    for (CALayer *l in _knob.sublayers) if ([l isKindOfClass:CAShapeLayer.class]) ((CAShapeLayer *)l).strokeColor = k_line.CGColor;   // the knob's inner ring
+    for (int b = 0; b < B_N; b++) { _key[b].strokeColor = k_line.CGColor; _key[b].shadowOpacity = sh; }
+    [CATransaction commit];
+    [self refresh];   // the keys' and the knob's fills and the labels' colour, pressed or not
+}
 
 // ---- Layout (points; computed inside the safe area) ----
 - (void)arrange:(DmLayout)layout {
@@ -302,7 +331,7 @@ static BOOL assistive_running(void) { return UIAccessibilityIsVoiceOverRunning()
 }
 - (CGRect)safe { return CGRectIntersection(_layout.controls, UIEdgeInsetsInsetRect(self.bounds, dm_game_safe_insets(self.bounds, self.safeAreaInsets, _layout.topSafeOnly))); }
 - (CGRect)corner { if (_layout.separated) return self.safe; UIEdgeInsets i = self.safeAreaInsets; i.left *= K_CORNER_IN; i.right *= K_CORNER_IN; return UIEdgeInsetsInsetRect(self.bounds, i); }   // the rectangle the bottom-corner controls use
-- (CGFloat)u { if (_layout.separated) { CGRect s = self.safe; return MIN(MIN(s.size.height / 430.0, s.size.width / 700.0), 1.3); } return MIN(self.bounds.size.height / 430.0, 1.3); }   // 1 = 430 points tall (iPhone Pro Max landscape)
+- (CGFloat)u { if (_layout.separated) { CGRect s = self.safe; return MIN(MIN(s.size.height / 430.0, s.size.width / 700.0), 1.3) * g_touch_size; } return MIN(self.bounds.size.height / 430.0, 1.3) * g_touch_size; }   // 1 = 430 points tall (iPhone Pro Max landscape), times Touch control size
 static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPointMake(right ? CGRectGetMaxX(s) - dx : CGRectGetMinX(s) + dx, y); }
 - (BOOL)portraitControls { return _layout.separated && self.bounds.size.height > self.bounds.size.width; }
 - (CGPoint)portraitThumbCenter:(BOOL)right {
@@ -329,7 +358,7 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
     return side(s, 0, K_STICK_X * self.u, CGRectGetMaxY(s) - K_PAD_Y * self.u);
 }
 - (CGPoint)stickCentre:(int)i { return i ? _rCentre : self.stickHome; }
-- (CGFloat)stickR:(int)i { return (i ? K_RSTICK_R : K_STICK_R) * self.u; }
+- (CGFloat)stickR:(int)i { return i ? K_RSTICK_R * self.u / g_touch_size : K_STICK_R * self.u; }   // the right stick is not drawn: its swipe keeps the Large length whatever Touch control size
 - (BOOL)inRightArea:(CGPoint)p { CGRect b = _layout.controls; return p.x >= CGRectGetMaxX(b) - b.size.width * K_RSWIPE; }
 - (CGPoint)dpadCenter {
     if (self.portraitControls) {
@@ -683,6 +712,13 @@ UIView *dm_gamepad_view(CGRect frame) { DmGamepad *v = [[DmGamepad alloc] initWi
 void dm_gamepad_arrange(UIView *view, DmLayout layout) { [(DmGamepad *)view arrange:layout]; }
 void dm_gamepad_opmode_changed(void) { [g_view opmodeChanged]; }
 void dm_gamepad_touch_feedback(bool on) { [g_view setTouchFeedback:on]; }
+void dm_gamepad_touch_look(const char *env, const char *value) {   // front_ios.m dm_setting_live: DM_TOUCH_SIZE or DM_TOUCH_OPACITY from the in-game menu, at once
+    BOOL size = !strcmp(env, "DM_TOUCH_SIZE");
+    CGFloat v = touch_value(env, value, size ? 0.5 : 0.1, size ? 1 : 2);
+    if (size) [g_view setTouchSize:v]; else [g_view setTouchOpacity:v];
+    LOG("front end: touch control %s %.2f (in-game menu)", size ? "size" : "opacity", v);
+}
+double dm_gamepad_size(void) { return g_touch_size; }   // front_ios.m: the frame-rate counter sits in the top row by the same units
 void dm_gamepad_hint(void) { [g_view menuShow]; }   // main thread: the menu button shows for 5 s (front_ios.m: the game's first picture, the end of the progress screen)
 int dm_pad_layout(void) { return g_view ? [g_view padLayout] : 0; }
 bool dm_pad_layout_offered(int layout) { return layout == 0 || layout == 1 || (layout == 2 && dm_opmode() == 0); }

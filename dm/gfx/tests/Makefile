@@ -106,6 +106,30 @@ t_pso_guard_asan: t_pso_guard.c ../nvn/nvn_pso_guard.h
 .PHONY: pso-guard
 pso-guard: t_pso_guard t_pso_guard_tsan t_pso_guard_asan
 	./t_pso_guard && ./t_pso_guard_tsan && ./t_pso_guard_asan
+# The GPU diagnostics' plain-C core (../nvn/nvn_gpu_diag.h: errors by kind, the failed command buffer's passes, GPU busy time): plain C, also under ThreadSanitizer (a reader
+# formatting records the submit thread writes over) and AddressSanitizer (make gpu-diag)
+t_gpu_diag: t_gpu_diag.c ../nvn/nvn_gpu_diag.h
+	clang -std=c11 -O1 -g -Wall -Wextra -pthread -o $@ t_gpu_diag.c
+t_gpu_diag_tsan: t_gpu_diag.c ../nvn/nvn_gpu_diag.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=thread -o $@ t_gpu_diag.c
+t_gpu_diag_asan: t_gpu_diag.c ../nvn/nvn_gpu_diag.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=address,undefined -o $@ t_gpu_diag.c
+.PHONY: gpu-diag
+gpu-diag: t_gpu_diag t_gpu_diag_tsan t_gpu_diag_asan
+	./t_gpu_diag && ./t_gpu_diag_tsan && ./t_gpu_diag_asan
+# The live in-game menu's plain-C rules: Upscaling's pick taken by the present thread (../nvn/nvn_upscale_pick.h), plain and under ThreadSanitizer (a main thread posting picks while a
+# present thread takes them) and AddressSanitizer, and the frame-rate counter's heat / Low Power mark (../../host/power_mark.h) (make live-menu)
+t_upscale_pick: t_upscale_pick.c ../nvn/nvn_upscale_pick.h
+	clang -std=c11 -O1 -g -Wall -Wextra -pthread -o $@ t_upscale_pick.c
+t_upscale_pick_tsan: t_upscale_pick.c ../nvn/nvn_upscale_pick.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=thread -o $@ t_upscale_pick.c
+t_upscale_pick_asan: t_upscale_pick.c ../nvn/nvn_upscale_pick.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=address,undefined -o $@ t_upscale_pick.c
+t_power_mark: t_power_mark.c ../../host/power_mark.h
+	clang -std=c11 -O1 -g -Wall -Wextra -o $@ t_power_mark.c
+.PHONY: live-menu
+live-menu: t_upscale_pick t_upscale_pick_tsan t_upscale_pick_asan t_power_mark
+	./t_upscale_pick && ./t_upscale_pick_tsan && ./t_upscale_pick_asan && ./t_power_mark
 t_thermal: t_thermal.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_thermal.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_thermal_tsan: t_thermal.c $(MTL_T_DEP)

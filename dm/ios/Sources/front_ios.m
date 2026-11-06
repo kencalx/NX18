@@ -18,6 +18,7 @@
 #include "dm.h"
 #include "haptics_apple.h"
 #include "save_sync.h"
+#include "power_mark.h"   // the frame-rate counter's heat / Low Power mark (fps_show)
 #import "CloudSaves.h"
 
 void dm_gamepad_active(void);
@@ -37,6 +38,8 @@ static void front_ios_notify_ask(void);
 static void front_ios_power_watch(void);
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
+static CGSize front_ios_fps_size(UILabel *l);   // the counter's size: 64 x 22, larger with the heat / Low Power mark
+static CGFloat g_fps_room = 320;   // the top row's free width right of L3, up to the − key (viewDidLayoutSubviews; main thread): the mark wraps to it
 static void prep_progress(NSString *phase, long done, long total);   // the prepare step in the background (DM_BG_PREPARE), main queue
 static void prep_end(const char *why);
 
@@ -115,6 +118,7 @@ static CGFloat g_picture_aspect = DM_PICTURE_16_9;   // the presented picture's 
 static BOOL g_pictured;   // the game's first picture was reported (front_picture_shape); main thread
 static void launcher_done(void) { [g_root startGame]; }
 void mtl_present_stretch(int on);   // nvn_mtl.m: the present draws the picture over the whole drawable instead of keeping its shape (Picture Stretch)
+void mtl_present_upscale_set(const char *mode);   // nvn_mtl.m: the in-game menu's Upscaling, which the present thread takes at its next present
 static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "Fill" : m == DmPictureStretch ? "Stretch" : "Fit"; }
 @implementation DmRootVC
 - (void)loadView { self.view = [DmRootView new]; }
@@ -227,8 +231,11 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
     dm_gamepad_arrange(self.pad, layout);
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = CGRectIntersection(layout.controls, UIEdgeInsetsInsetRect(b, gameInsets));
-        CGFloat u = layout.separated ? MIN(MIN(s.size.height / 430.0, s.size.width / 700.0), 1.3) : MIN(b.size.height / 430.0, 1.3);
-        self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
+        CGFloat u = (layout.separated ? MIN(MIN(s.size.height / 430.0, s.size.width / 700.0), 1.3) : MIN(b.size.height / 430.0, 1.3)) * dm_gamepad_size();   // times Touch control size, as the pad's
+        CGFloat x = floor(CGRectGetMinX(s) + 130 * u);
+        g_fps_room = CGRectGetMidX(s) - 77 * u - 4 - x;   // up to the − key, which starts 77 units left of the middle (DmGamepad.m pillRect: K_PILL_DX 52 + K_PILL_W / 2)
+        CGSize fs = front_ios_fps_size(self.fps);
+        self.fps.frame = CGRectMake(x, floor(CGRectGetMinY(s) + 22 * u - 11), fs.width, fs.height);
     }
 }
 - (void)showFPS:(BOOL)on {   // the frame-rate counter: DM_SHOW_FPS at Play, then the in-game menu
@@ -310,6 +317,8 @@ bool dm_setting_live(const char *env, const char *value) {
     }
     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root showFPS:atoi(value) != 0]; return true; }
     if (!strcmp(env, "DM_TOUCH_HAPTICS")) { if (value) dm_gamepad_touch_feedback(atoi(value) != 0); return true; }
+    if (!strcmp(env, "DM_TOUCH_SIZE") || !strcmp(env, "DM_TOUCH_OPACITY")) { if (value) { dm_gamepad_touch_look(env, value); [g_root.view setNeedsLayout]; } return true; }   // the counter follows the size
+    if (!strcmp(env, "DM_PRESENT_UPSCALE")) { if (value) { mtl_present_upscale_set(value); LOG("front end: upscaling %s (in-game menu)", value); } return true; }   // taken by the present thread (nvn_mtl.m)
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }
     return false;
 }
@@ -356,16 +365,52 @@ static void front_ios_power_watch(void) {
 // On when the IPA was built with it (the NSP script's SHOW_FPS / --show-fps → DMShowFPS in Info.plist); DM_SHOW_FPS=0 / 1 (the launcher, Documents/env.txt) overrides that without a rebuild,
 // and the in-game menu turns it on and off ([DmRootVC showFPS:])
 uint64_t mtl_present_count(void);
+// The heat / Low Power mark: while heat (iOS's thermal state serious or worse) or Low Power Mode holds the frame rate down (hle_nvn.c dm_power_cap_now: a frame-step game's 30, a 120 fps
+// limiter's 60; only where that cap applies) or keeps MetalFX's upscaling off (nvn_mtl.m mtl_fx_power_hold), the counter says so under the count: a thermometer and Hot, or a battery and
+// Low Power, then "30 fps cap", "no MetalFX" or both (power_mark.h pm_note). The two are atomics the host writes when they change, read here with the count once a second: nothing is
+// added to a frame, and with the counter never turned on nothing reads them. Each change of the mark is logged
+int dm_power_cap_now(void);    // hle_nvn.c: the causes (1 heat, 2 Low Power Mode) << 8 | the frame rate held; 0 none
+int mtl_fx_power_hold(void);   // nvn_mtl.m: the causes keeping MetalFX off; 0 none
+static NSAttributedString *fps_marked(NSString *count, BOOL hot, NSString *why, NSString *what) {
+    UIFont *big = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightSemibold], *small = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+    NSMutableAttributedString *s = [[NSMutableAttributedString alloc] initWithString:[count stringByAppendingString:@"\n"] attributes:@{NSFontAttributeName: big}];
+    UIImage *icon = [[UIImage systemImageNamed:hot ? @"thermometer.high" : @"battery.25percent" withConfiguration:[UIImageSymbolConfiguration configurationWithFont:small]]
+                     imageWithTintColor:UIColor.whiteColor renderingMode:UIImageRenderingModeAlwaysOriginal];
+    if (icon) [s appendAttributedString:[NSAttributedString attributedStringWithAttachment:[NSTextAttachment textAttachmentWithImage:icon]]];
+    [s appendAttributedString:[[NSAttributedString alloc] initWithString:[NSString stringWithFormat:@"%@%@\n%@", icon ? @" " : @"", why, what] attributes:@{NSFontAttributeName: small}]];
+    NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.alignment = NSTextAlignmentCenter;
+    [s addAttributes:@{NSForegroundColorAttributeName: UIColor.whiteColor, NSParagraphStyleAttributeName: ps} range:NSMakeRange(0, s.length)];
+    return s;
+}
+static void fps_show(UILabel *l, NSString *count) {   // the count, and the mark under it while heat or Low Power Mode holds something back
+    int cap = dm_power_cap_now(), fx = mtl_fx_power_hold(); NSInteger mark = (NSInteger)cap << 4 | fx;
+    if (!mark) l.text = count;
+    else {
+        char why[16], what[48]; BOOL hot = pm_note(cap, fx, why, sizeof why, what, sizeof what) == PM_HEAT;
+        l.attributedText = fps_marked(count, hot, @(why), @(what));
+        if (l.tag != mark) LOG("front end: frame-rate counter: %s, %s", why, what);
+    }
+    if (l.tag == mark) return;
+    if (!mark) LOG("front end: frame-rate counter: nothing held back by heat or Low Power Mode");
+    l.tag = mark; l.numberOfLines = mark ? 0 : 1;   // the mark's lines, its last one wrapped where the top row is narrow (front_ios_fps_size)
+    CGRect f = l.frame; f.size = front_ios_fps_size(l); l.frame = f;   // the same top left (viewDidLayoutSubviews places it)
+}
+static CGSize front_ios_fps_size(UILabel *l) {   // the count alone: 64 x 22, as always; with the mark, its three lines, wrapped to the free width so it never covers − (a small iPad window)
+    if (!l.tag) return CGSizeMake(64, 22);
+    CGSize s = [l sizeThatFits:CGSizeMake(MIN(MAX(64, g_fps_room), 320) - 14, 120)];
+    return CGSizeMake(MAX(64, ceil(s.width) + 14), ceil(s.height) + 8);
+}
 static UILabel *front_ios_fps_label(void) {
     UILabel *l = [UILabel new];
     l.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightSemibold]; l.textColor = UIColor.whiteColor; l.textAlignment = NSTextAlignmentCenter;
     l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45]; l.layer.cornerRadius = 6; l.layer.masksToBounds = YES; l.userInteractionEnabled = NO;
     l.text = @"-- fps";
-    __block uint64_t n0 = mtl_present_count(); __block double t0 = CACurrentMediaTime();
+    __block uint64_t n0 = mtl_present_count(); __block double t0 = CACurrentMediaTime(); __block NSString *count = @"-- fps";
     [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
         (void)t; uint64_t n = mtl_present_count(); double now = CACurrentMediaTime();
-        if (now - t0 < 1.5) l.text = [NSString stringWithFormat:@"%.0f fps", (n - n0) / (now - t0)];   // a longer span is the time in the background: no reading
+        if (now - t0 < 1.5) count = [NSString stringWithFormat:@"%.0f fps", (n - n0) / (now - t0)];   // a longer span is the time in the background: no reading
         n0 = n; t0 = now;
+        fps_show(l, count);
     }];
     LOG("front end: frame-rate counter on");
     return l;

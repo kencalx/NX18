@@ -203,6 +203,21 @@ int main(void) { @autoreleasepool {
         EXPECT("auto live: MetalFX again after FX_AUTO_SETTLE presents below 1080p",PRESENT_METALFX,kind);
         check_present_resize(hd,1920,1080);   // a 1080p picture shown at its own size: MetalFX would not scale it, and it still restarts the count
         EXPECT("auto live: a 1080p picture at its own size restarts the count too",PRESENT_STANDARD,check_present_resize(big,192,96));
+        // The in-game menu's Upscaling (mtl_present_upscale_set, the main thread's): the live present takes it at its next present, keeps the scaler it made, and restarts Automatic's count itself
+        for(int i=0;i<FX_AUTO_SETTLE;i++) kind=check_present_resize(big,192,96);
+        EXPECT("menu: MetalFX under auto before the picks",PRESENT_METALFX,kind);
+        madeBefore=g_fx_present.made;
+        mtl_present_upscale_set("off");
+        EXPECT("menu: Standard from the next present",PRESENT_STANDARD,check_present_resize(big,192,96));
+        EXPECT("menu: Standard in force",0,(int)g_fx_mode);
+        mtl_present_upscale_set("metalfx");
+        EXPECT("menu: MetalFX from the next present",PRESENT_METALFX,check_present_resize(big,192,96));
+        EXPECT("menu: the kept scaler, none made for the picks",madeBefore,g_fx_present.made);
+        mtl_present_upscale_set("auto");
+        EXPECT("menu: Automatic counts its presents again from its pick",PRESENT_STANDARD,check_present_resize(big,192,96));
+        EXPECT("menu: the count restarted on the present thread",FX_AUTO_SETTLE-1,g_fx_auto.left);
+        mtl_present_upscale_set("sharp");check_present_resize(big,192,96);
+        EXPECT("menu: a value that is no mode is ignored",2,(int)g_fx_mode);
         res_remove(hd);g_fx_mode=1;
         g_present_n=savedPresent;
 

@@ -131,6 +131,11 @@ private struct LauncherView: View {
                     }
                     CloudSavesSection()
                     Section {
+                        Button("Share log") { dmShareLog(from: nil) }   // GameMenu.swift: log.txt, log.prev.txt, run_layouts.txt and the newest reports, copied first
+                    } footer: {
+                        Text("Sends log.txt, the previous run's log.prev.txt and the newest crash and performance reports, for a bug report.")
+                    }
+                    Section {
                         HStack {
                             Text("Memory available")
                             Spacer()
@@ -180,10 +185,13 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
         let dir = getenv("DM_APP_DM").map { URL(fileURLWithPath: String(cString: $0)) } ?? Bundle.main.resourceURL?.appendingPathComponent("dm")
         guard let url = dir?.appendingPathComponent("launcher.json"), let data = try? Data(contentsOf: url) else { return false }
         guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { launcherLog("[RED] launcher: dm/launcher.json cannot be read; starting the game\n"); return false }
-        let model = LauncherModel(file.settings)
+        let parent = Unmanaged<UIViewController>.fromOpaque(UnsafeRawPointer(bitPattern: parentBits)!).takeUnretainedValue()
+        // The screen the app is on, as width / height in landscape (the root view is in its window by now: viewDidAppear), for a setting whose default follows it (Picture shape)
+        let size = parent.view.window?.windowScene?.screen.bounds.size ?? .zero
+        let short = min(size.width, size.height)
+        let model = LauncherModel(file.settings, screen: short > 0 ? Double(max(size.width, size.height) / short) : nil)
         gameMenuModel = model   // the in-game menu shows and saves the same choices (GameMenu.swift)
         if ProcessInfo.processInfo.environment["DM_LAUNCHER"] == "0" { launcherLog("launcher: off (DM_LAUNCHER=0)\n"); model.applySaved(); return false }
-        let parent = Unmanaged<UIViewController>.fromOpaque(UnsafeRawPointer(bitPattern: parentBits)!).takeUnretainedValue()
         var host: UIViewController?
         let view = LauncherView(m: model) {
             guard let h = host else { return }

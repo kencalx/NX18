@@ -16,6 +16,8 @@
 #   label, note  the setting's name and the line under it (may be empty; only for a setting with a cost: latency, memory, heat)
 #   meta      optional, key=value pairs separated by ; (settings.py META lists the keys; docs/frontends.md, The settings list, describes them):
 #             level=basic  a setting a front end shows first;  needs=<VAR>=<value>  a sub-setting, drawn only while the row that sets <VAR> has that value
+#             screen=nearest  a choice of picture shapes (each value a width / height, 0 for 16:9): on an iPhone or iPad the default is the option nearest the screen's own shape in landscape
+#             (the default column's value where the screen is not known); the Mac's list leaves the key out
 DM_FPS_TARGET	choice	30=30 fps,60=60 fps,120=120 fps?DM_GAME_FPS_MAX==120&platform:mac	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate		level=basic
 DM_PRESENT_INTERVAL	choice	game=30 fps,display=60 fps	game	DM_GAME_PRESENT_CHOICE!=0	Game	Frame rate	60 shows a new frame on every refresh; the game's own pace is 30. Uses more power and heat.	level=basic
 DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resolution	Adjusts resolution between 70% and 100% under load. Turn off to keep full resolution for the selected console mode.
@@ -27,13 +29,15 @@ DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=bas
 DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
 DM_PICTURE_FIT	choice	fit=Fit,fill=Fill,stretch=Stretch	fit	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen: health bars, subtitles or maps near the edges can be cut off. Stretch fills the screen without cropping, so the picture looks wider.
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
+DM_TOUCH_SIZE	choice	0.7=Small,0.85=Medium,1=Large	1	platform:ios	Controls	Touch control size
+DM_TOUCH_OPACITY	choice	0.4=Faint,0.7=Light,1=Normal,1.5=Strong	1	platform:ios	Controls	Touch control opacity
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
 DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
 DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBLE=1
 DM_RUMBLE_MIN	range	0:0.9:0.05	0	always	Controls	Rumble cutoff
 DM_MOD_FPS	toggle	-	0	mods:fps	Game	High frame rate	A mod from the game's mods folder, put in place when the game starts. If the mod does not adjust the game's speed, the game can run fast.
 DM_MOD_ULTRAWIDE	toggle	-	0	mods:ultrawide&platform:ios&device:iphone	Game	Ultrawide	A mod from the game's mods folder that shows a wider view, stretched over a screen wider than 16:9 (an iPhone in landscape). Off on an iPad.
-DM_SCREEN_ASPECT	choice	1.43=iPhone Duo screen (1.43:1),0=16:9 (Switch)	1.43|0	DM_GAME_SCREEN_ASPECT!=0	Game	Picture shape	Renders about a quarter more pixels: a little slower and warmer.
+DM_SCREEN_ASPECT	choice	1.43=iPhone Duo screen (1.43:1),0=16:9 (Switch)	1.43|0	DM_GAME_SCREEN_ASPECT!=0	Game	Picture shape	Renders about a quarter more pixels: a little slower and warmer.	screen=nearest
 DM_PRESENT_SNAP	toggle	-	DM_GAME_PRESENT_SNAP	gfxapi:nvn	Performance	Frame buffering	Up to one frame more display latency.
 DM_PSO_MTL4	toggle	-	1	gfxapi:nvn	Performance	Metal 4 pipelines	Keeps a pipeline archive; uses more memory.
 DM_PSO_PREBUILD	toggle	-	1	gfxapi:nvn	Performance	Pipeline prebuild	The first start waits a few minutes for it, once.	needs=DM_PSO_MTL4=1

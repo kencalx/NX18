@@ -1,6 +1,7 @@
 // Exercise the production frame-cap getter with a controlled clock and thermal
 // source. No game files or GPU; concurrent readers model acquire and present.
 #include "../../host/hle.h"
+#include "../../host/power_mark.h"   // the iOS frame-rate counter's mark of what heat or Low Power Mode holds (dm_power_cap_now)
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -8,6 +9,7 @@
 #include <string.h>
 
 int nvn_game_fps(void);
+int dm_power_cap_now(void);
 static _Alignas(8) uint8_t fps_state[0x40];
 uint8_t *dm_fps_state = fps_state;
 static _Atomic uint64_t test_now;
@@ -64,18 +66,22 @@ int main(void) {
         CHECK("inactive frame step: thermal state is not read", nvn_game_fps() == 60 && !atomic_load(&thermal_reads));
         target(60); at(10, -1);
         CHECK("Mac with no thermal state keeps 60 fps", nvn_game_fps() == 60);
+        CHECK("  and the counter's mark is empty", dm_power_cap_now() == 0);
         at(11, 1); CHECK("fair keeps 60 fps", nvn_game_fps() == 60);
         at(12, 2); CHECK("serious holds 30 fps", nvn_game_fps() == 30);
+        CHECK("  the counter's mark: heat holds 30", dm_power_cap_now() == (PM_HEAT << 8 | 30));
         int reads = atomic_load(&thermal_reads);
         at(12, 0); CHECK("a second call uses the cached thermal sample", nvn_game_fps() == 30 && atomic_load(&thermal_reads) == reads);
         at(13, 1); CHECK("fair starts recovery while keeping 30 fps", nvn_game_fps() == 30);
         movie(1); at(14, 2); CHECK("a serious movie keeps 30 fps", nvn_game_fps() == 30);
+        CHECK("  a movie's own 30 is no mark", dm_power_cap_now() == 0);
         CHECK("a movie still samples thermal state", atomic_load(&thermal_reads) == reads + 2);
         at(44, 2); (void)nvn_game_fps();
         movie(0); at(45, 1);
         CHECK("heat during a movie resets the earlier cooling interval", nvn_game_fps() == 30);
         at(74, 1); CHECK("29 calm seconds do not release the cap", nvn_game_fps() == 30);
         at(75, 1); CHECK("30 calm seconds restore 60 fps", nvn_game_fps() == 60);
+        CHECK("  and empty the mark", dm_power_cap_now() == 0);
 
         at(76, 3); CHECK("critical also holds 30 fps", nvn_game_fps() == 30);
         movie(1); at(77, 1); (void)nvn_game_fps();
@@ -85,6 +91,7 @@ int main(void) {
         at(108, 2); (void)nvn_game_fps();
         target(30); at(109, 0); (void)nvn_game_fps();
         at(139, 0); CHECK("a configured 30 fps target keeps its cap", nvn_game_fps() == 30);
+        CHECK("  a 30 target is no mark", dm_power_cap_now() == 0);
         target(60); CHECK("cooling at a 30 fps target is tracked before raising it", nvn_game_fps() == 60);
 
         at(140, 2); (void)nvn_game_fps();
@@ -112,12 +119,14 @@ int main(void) {
         target(60);
         if (lp_enabled) {
             at(301, 0); CHECK("Low Power Mode holds 30 fps", nvn_game_fps() == 30);
+            CHECK("  the counter's mark: Low Power Mode holds 30", dm_power_cap_now() == (PM_LOW_POWER << 8 | 30));
             CHECK("Low Power Mode is read with the thermal sample", atomic_load(&low_power_reads) == lpr + 1);
             low_power(0); at(301, 0); CHECK("a second call uses the cached Low Power Mode sample", nvn_game_fps() == 30 && atomic_load(&low_power_reads) == lpr + 1);
             at(302, 0); CHECK("Low Power Mode off starts the calm interval", nvn_game_fps() == 30);
             at(331, 0); CHECK("29 s after Low Power Mode went off the cap holds", nvn_game_fps() == 30);
             at(332, 0); CHECK("30 s after Low Power Mode went off 60 fps returns", nvn_game_fps() == 60);
             low_power(1); at(333, 2); CHECK("heat and Low Power Mode hold 30 fps", nvn_game_fps() == 30);
+            CHECK("  the mark has both causes", dm_power_cap_now() == ((PM_HEAT | PM_LOW_POWER) << 8 | 30));
             low_power(0); at(334, 2); CHECK("Low Power Mode off while still hot keeps the cap", nvn_game_fps() == 30);
             at(335, 1); (void)nvn_game_fps();
             low_power(1); at(350, 1); CHECK("Low Power Mode during the heat calm keeps 30 fps", nvn_game_fps() == 30);

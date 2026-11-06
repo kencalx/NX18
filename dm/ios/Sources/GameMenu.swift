@@ -36,7 +36,52 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
     }
     if !placed { items.insert(UIMenu(options: .displayInline, children: [layout]), at: 0) }
     if let cheats = cheatsMenu() { items.append(UIMenu(options: .displayInline, children: [cheats])) }
+    let share = UIAction(title: "Share log", image: UIImage(systemName: "square.and.arrow.up")) { action in dmShareLog(from: action.sender as? UIView) }   // the gear, for an iPad's popover
+    items.append(UIMenu(options: .displayInline, children: [share]))
     return items
+}
+
+// Share log: the in-game menu's last row and the settings screen's button (Launcher.swift). One share sheet with Documents/log.txt, log.prev.txt (the run before this one, which main.m
+// keeps under that name at each start: a run that crashed or that iOS ended), run_layouts.txt (the module layout of recent runs, for a crash report's frames) and the newest MetricKit reports of Documents/metrics (DmMetrics.m; their names sort by age), the files
+// docs/playing.md asks for in a bug report. Each is copied into tmp/share-log first, so the sheet reads a snapshot: log.txt is still being written while the app runs (APFS clones the
+// copy, which takes no room until the log grows). A missing file is left out; the copies of the share before are deleted at the next (and iOS empties tmp by itself). On an iPad the
+// sheet is a popover: it points at the view the share came from (the gear), or sits in the middle of the screen (the settings screen)
+private let shareNewestReports = 5
+@MainActor func dmShareLog(from anchor: UIView?) {
+    let fm = FileManager.default
+    guard let doc = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+    let dir = fm.temporaryDirectory.appendingPathComponent("share-log", isDirectory: true)
+    try? fm.removeItem(at: dir)
+    do { try fm.createDirectory(at: dir, withIntermediateDirectories: true) } catch {
+        launcherLog("[RED] share log: \(dir.path) cannot be made: \(error.localizedDescription)\n"); return
+    }
+    let metrics = doc.appendingPathComponent("metrics", isDirectory: true)
+    let names = (try? fm.contentsOfDirectory(atPath: metrics.path)) ?? []
+    let reports = names.filter { name in name.hasSuffix(".json") && (name.first.map { c in c.isASCII && c.isNumber } ?? false) }.sorted().suffix(shareNewestReports)   // metrics_files.h dm_metrics_is_report
+    let sources: [URL] = [doc.appendingPathComponent("log.txt"), doc.appendingPathComponent("log.prev.txt"), doc.appendingPathComponent("run_layouts.txt")] + reports.map { metrics.appendingPathComponent($0) }   // run_layouts.txt: where the game's modules were in recent runs (loader.c), which a crash report needs
+    var files: [URL] = []
+    for src in sources where fm.fileExists(atPath: src.path) {
+        let copy = dir.appendingPathComponent(src.lastPathComponent)
+        do { try fm.copyItem(at: src, to: copy); files.append(copy) } catch { launcherLog("[RED] share log: \(src.lastPathComponent) cannot be copied: \(error.localizedDescription)\n") }
+    }
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let key = scenes.flatMap { $0.windows }.first(where: { $0.isKeyWindow })
+    var top: UIViewController? = anchor?.window?.rootViewController ?? key?.rootViewController
+    while let p = top?.presentedViewController, !p.isBeingDismissed { top = p }
+    guard let presenter = top else { launcherLog("[RED] share log: no window to show the share sheet in\n"); return }
+    if files.isEmpty {
+        let a = UIAlertController(title: "Share log", message: "There is no log yet.", preferredStyle: .alert)
+        a.addAction(UIAlertAction(title: "OK", style: .default))
+        presenter.present(a, animated: true); return
+    }
+    let sheet = UIActivityViewController(activityItems: files, applicationActivities: nil)
+    if let pop = sheet.popoverPresentationController {   // an iPad: a popover needs a place
+        if let a = anchor, a.window != nil { pop.sourceView = a; pop.sourceRect = a.bounds }
+        else { let v: UIView = presenter.view; pop.sourceView = v; pop.sourceRect = CGRect(x: v.bounds.midX, y: v.bounds.midY, width: 1, height: 1); pop.permittedArrowDirections = [] }
+    }
+    presenter.present(sheet, animated: true)
+    let listed = files.map { $0.lastPathComponent }.joined(separator: ", ")
+    launcherLog("share log: \(listed)\n")
 }
 
 // Cheats: the Atmosphère cheat file of this build in the cheats folder (Documents/cheats, which main.m makes; in the Files app under the app's name), as the Mac's Cheats menu

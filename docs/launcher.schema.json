@@ -31,7 +31,8 @@
         "base": {"description": "Render scale only: the 3D views' size the scale multiplies, docked and handheld, from the game's profile; absent for most games.", "type": "object", "required": ["docked", "handheld"],
                  "properties": {"docked": {"$ref": "#/$defs/size"}, "handheld": {"$ref": "#/$defs/size"}}},
         "level": {"description": "basic: a setting a front end shows first. Without it, the front end decides.", "const": "basic"},
-        "needs": {"description": "<VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value. A row naming a variable this list does not have stays drawn.", "type": "string", "pattern": "^DM_[A-Z0-9_]+=[^;=]+$"}
+        "needs": {"description": "<VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value. A row naming a variable this list does not have stays drawn.", "type": "string", "pattern": "^DM_[A-Z0-9_]+=[^;=]+$"},
+        "screen": {"description": "nearest (a choice of picture shapes, each value a width / height, 0 for 16:9; iPhone and iPad lists only): the default is the option nearest the device's screen in landscape. default is the value where the screen is not known.", "const": "nearest"}
       },
       "allOf": [
         {"if": {"properties": {"kind": {"const": "choice"}}}, "then": {"required": ["options"]}},

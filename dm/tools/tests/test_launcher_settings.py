@@ -75,11 +75,21 @@ class LauncherSettingsTests(unittest.TestCase):
     def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter and touch feedback are the iOS front end's (front_ios.m, DmGamepad.m)
         ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
-        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT'})
+        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_TOUCH_SIZE', 'DM_TOUCH_OPACITY', 'DM_PICTURE_FIT'})
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
         self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN'})   # the Mac window's Display mode (front_mac.m reads 1 or 0)
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
+
+    def test_touch_control_size_and_opacity_default_to_the_look_they_always_had(self):   # DmGamepad.m: 1 and 1 are the controls' size and colours before the rows existed
+        rows = build(BOTW, 'nvn')
+        size, opacity = rows['DM_TOUCH_SIZE'], rows['DM_TOUCH_OPACITY']
+        self.assertEqual((size['kind'], size['section'], size['default'], size['options']), ('choice', 'Controls', '1', [['0.7', 'Small'], ['0.85', 'Medium'], ['1', 'Large']]))
+        self.assertEqual((opacity['kind'], opacity['section'], opacity['default']), ('choice', 'Controls', '1'))
+        self.assertEqual([o[1] for o in opacity['options']], ['Faint', 'Light', 'Normal', 'Strong'])
+        self.assertTrue(all(0.5 <= float(o[0]) <= 1 for o in size['options']) and all(0.1 <= float(o[0]) <= 2 for o in opacity['options']), 'within the ranges DmGamepad.m takes')
+        envs = list(rows)
+        self.assertEqual(envs[envs.index('DM_TOUCH_SIZE'):envs.index('DM_TOUCH_SIZE') + 3], ['DM_TOUCH_SIZE', 'DM_TOUCH_OPACITY', 'DM_TOUCH_HAPTICS'])
 
     def test_switchable_mods_only_with_the_mods_packed(self):   # mods.tsv beside the rewritten modules (build_ipa_from_nsp.py build_variants)
         def rows(roles, platform):
@@ -92,6 +102,25 @@ class LauncherSettingsTests(unittest.TestCase):
         with patch.dict(os.environ, {'SETTINGS_DEVICE': 'iphone'}): self.assertIn('DM_MOD_ULTRAWIDE', rows(['fps', 'ultrawide'], 'ios'))
         mac = rows(['fps', 'ultrawide'], 'mac')
         self.assertIn('DM_MOD_FPS', mac); self.assertNotIn('DM_MOD_ULTRAWIDE', mac, 'Ultrawide stretches the picture, which only the iPhone and iPad front end does')
+
+    def test_picture_shape_default_follows_the_screen_on_ios_only(self):   # screen=nearest: the iOS launcher picks the option nearest the device's screen (LauncherSettings.swift nearestShape)
+        for gid in (BOTW, '01006F8002326000'):   # Breath of the Wild and Animal Crossing: screen_aspect on
+            with self.subTest(game=gid):
+                ios, mac = build(gid, 'nvn')['DM_SCREEN_ASPECT'], build(gid, 'nvn', 'mac')['DM_SCREEN_ASPECT']
+                self.assertEqual((ios['default'], ios['screen'], [o[0] for o in ios['options']]), ('1.43', 'nearest', ['1.43', '0']))   # 1.43 for a reader that does not know the field, as before
+                self.assertEqual(mac['default'], '0')
+                self.assertNotIn('screen', mac, 'a Mac window has no fixed shape: its list is as before')
+        self.assertNotIn('DM_SCREEN_ASPECT', build(WONDER, 'nvn'), 'only a profile with screen_aspect on has the row')
+
+    def test_screen_meta_takes_only_a_choice_of_shapes(self):
+        for bad in ('DM_X\ttoggle\t-\t0\talways\tGame\tX\t\tscreen=nearest\n', 'DM_X\tchoice\twide=Wide,0=16:9\t0\talways\tGame\tX\t\tscreen=nearest\n',
+                    'DM_X\tchoice\tlanguages\ten-US\talways\tGame\tX\t\tscreen=nearest\n'):
+            with self.subTest(bad=bad), tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp) / 'settings.tsv').write_text(bad, encoding='utf-8')
+                with patch.object(settings, 'HERE', Path(tmp)), patch.object(settings.nacp, 'languages', return_value=['en-US']), \
+                        self.assertRaisesRegex(SystemExit, 'picture shapes'):
+                    settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
+        with self.assertRaisesRegex(SystemExit, 'does not match'): settings.meta('screen=far', 1)
 
     def test_frame_rate_as_the_present_interval(self):   # present_interval_choice: Persona 5 Royal's 30 / 60 (DM_PRESENT_INTERVAL game / display)
         p5r = build('01005CA01580E000', 'nvn')['DM_PRESENT_INTERVAL']

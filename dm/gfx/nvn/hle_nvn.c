@@ -18,6 +18,7 @@
 #include "nvn_fstep.h"
 #include "nvn_timestamp.h"
 #include "../../host/front.h"
+#include "../../host/power_mark.h"   // the iOS frame-rate counter's heat / Low Power mark (dm_power_cap_now)
 #include "nvn_dirty.h"
 #include <mach/mach_time.h>
 #include <CommonCrypto/CommonDigest.h>
@@ -1566,7 +1567,11 @@ void nvn_gpu_recent(double *avg, double *p95, unsigned *n) {
 }
 static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
 // Power over the window since the last summary, for the whole process: CPU energy (task_energy in nJ, Apple silicon), CPU time (100% = one core) and the share of it on performance cores,
-// wakeups per second (interrupt / out of platform idle), GPU time per second (task_gpu_utilisation), thermal state, and the guest threads that yielded most (hle_thread.c);
+// wakeups per second (interrupt / out of platform idle), GPU time per second, thermal state, and the guest threads that yielded most (hle_thread.c);
+// GPU: the host's own count, the time the Metal 4 queue's command buffers (the game's submissions and segments, uploads, presents, snapshot copies) kept the GPU busy, their
+// GPU start-to-end intervals with overlaps counted once (nvn_mtl.m mtl_gpu_busy_ns), and beside it the system's count (task_power_info's gpu_energy.task_gpu_utilisation)
+// where that is not 0: it read 0 in every window of three games' logs on an iPhone 18 Pro Max, and is filled on the Mac. The timing line's GPU is another measure: per frame, the
+// sum of that frame's game command buffers' intervals (mtl_gpu_ms);
 // then render-target traffic per frame (attachment load / store bytes, passes that load and store everything, stores saved by DM_NVN_UNWRITTEN_DC) and guest-thread CPU by Switch priority
 static void power_line(uint64_t frame) {
     static uint64_t pt, pe, pcpu, pp, piw, ppw, pg, pf, pld, pst, pfu, pudc; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
@@ -1579,10 +1584,12 @@ static void power_line(uint64_t frame) {
     uint64_t e = 0;
 #endif
     uint64_t iw = pw.cpu_energy.task_interrupt_wakeups, idw = pw.cpu_energy.task_platform_idle_wakeups, g = pw.gpu_energy.task_gpu_utilisation;
+    uint64_t mtl_gpu_busy_ns(void); static uint64_t pgb; uint64_t gb = mtl_gpu_busy_ns();   // the host's own GPU busy time (nvn_mtl.m)
     if (pt && t > pt) { double s = (t - pt) / 1e9; char yt[192]; dm_yield_top(yt, sizeof yt);
         double nf = frame > pf ? (double)(frame - pf) : 1;   // per frame: the fair comparison when one build holds the frame rate better than another
-        LOG("[nvn] power up to frame %llu: CPU energy %.2f W, %.1f mJ per frame (%.1f fps); CPU %.0f%% (100 = one core), %.0f%% of it on performance cores; wakeups %.0f/s (out of platform idle %.0f); GPU %.1f ms/s; thermal %d; top yielders: %s", frame,
-            (e - pe) / 1e9 / s, (e - pe) / 1e6 / nf, nf / s, (cpu - pcpu) / 1e7 / s, cpu > pcpu ? 100.0 * (double)(p - pp) / (double)(cpu - pcpu) : 0, (iw - piw) / s, (idw - ppw) / s, (g - pg) / 1e6 / s, dm_thermal_now(), yt);
+        char gt[96] = ""; if (g > pg) snprintf(gt, sizeof gt, ", %.1f ms/s by the system's count (task_gpu_utilisation)", (g - pg) / 1e6 / s);
+        LOG("[nvn] power up to frame %llu: CPU energy %.2f W, %.1f mJ per frame (%.1f fps); CPU %.0f%% (100 = one core), %.0f%% of it on performance cores; wakeups %.0f/s (out of platform idle %.0f); GPU %.1f ms/s busy (the host's command buffers, overlaps merged)%s; thermal %d; top yielders: %s", frame,
+            (e - pe) / 1e9 / s, (e - pe) / 1e6 / nf, nf / s, (cpu - pcpu) / 1e7 / s, cpu > pcpu ? 100.0 * (double)(p - pp) / (double)(cpu - pcpu) : 0, (iw - piw) / s, (idw - ppw) / s, gb > pgb ? (gb - pgb) / 1e6 / s : 0.0, gt, dm_thermal_now(), yt);
         char rs[400]; mtl_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; mtl_barrier_stats(&bs, &bf);
         uint64_t mtl_cut_count(void), mtl_copy_cut_count(void), mtl_blit_splits(void); void mtl_ubd_stats(uint64_t *, uint64_t *); static uint64_t pcut, pccut, pbsp, pud, puc; uint64_t cut = mtl_cut_count(), ccut = mtl_copy_cut_count(), bsp = mtl_blit_splits(), ud, uc; mtl_ubd_stats(&ud, &uc);
         void mtl_ubp_stats(uint64_t *, uint64_t *, uint64_t *); static uint64_t ppm, ppr, ppf; uint64_t pm, pr, pf_; mtl_ubp_stats(&pm, &pr, &pf_);
@@ -1617,7 +1624,7 @@ static void power_line(uint64_t frame) {
         char tc[400]; dm_thread_cpu(tc, sizeof tc, s);
         LOG("[nvn] threads up to frame %llu: CPU %s", frame, tc); }
     else { char yt[192], rs[400], tc[400]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); }   // the first call only takes the baselines
-    pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes();
+    pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pgb = gb; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes();
 }
 static void tsummary(uint64_t frame) {
     char line[1024]; size_t o = 0;
@@ -1792,6 +1799,13 @@ static int thermal_capped(void) {
     return result;   // 0, or the causes (CAP_HEAT, CAP_LOW_POWER) of the last sample that had one
 }
 static const char *thermal_why(int c) { return c & CAP_HEAT ? "thermal state serious" : "Low Power Mode"; }   // a nonzero thermal_capped(), for the cap-change lines
+// What heat or Low Power Mode holds now, for the iOS frame-rate counter's mark (front_ios.m): power_mark.h's pm_frame_cap, thermal_capped's causes << 8 | the frame rate they hold (30
+// for a frame-step game, 60 for a 120 fps limiter), 0 while the cap holds nothing (no cause, a 30 fps target, a movie, a game the host does not pace). Written where the cap is decided,
+// only when it changes; read once a second. No lock, and nothing the game sees
+_Static_assert(CAP_HEAT == PM_HEAT && CAP_LOW_POWER == PM_LOW_POWER, "power_mark.h's causes are thermal_capped's");
+static _Atomic int g_cap_mark;
+static void cap_mark(int v) { if (atomic_load_explicit(&g_cap_mark, memory_order_relaxed) != v) atomic_store_explicit(&g_cap_mark, v, memory_order_relaxed); }
+int dm_power_cap_now(void) { return atomic_load_explicit(&g_cap_mark, memory_order_relaxed); }
 // 120 fps (profile fps_max 120, DM_FPS_TARGET=120): an engine limiter the host writes (hle_fpslock.c) follows the frame step, counted here in ticks of 1/120 s: hold 1 is 120 fps, hold 2 is 60.
 // A game may step by its target whatever the frames really take (Fire Emblem Fortune's Weave: 60.0 / target a frame), so a target of 120 at 70 frames a second is a game at 58% speed, and
 // on a 60 Hz screen at half speed: late frames step the hold up (nvn_fstep.h), the target follows the hold, and the game's step stays what the screen shows. The cap is 60 on a screen
@@ -1816,6 +1830,7 @@ static void high_cap_tick(void) {
     if (win < 0) { win = mtl_display_hz() != 0; link_env = getenv("DM_PRESENT_LINK") != NULL; }
     // The movie state is read once, so the cap and the reason it logs agree (a movie that ends between two reads gave 120 with the heat or Low Power Mode cause unread)
     int ok = !win || front_screen_max_fps() >= 120, mv = ok && dm_movie_playing(), th = ok && !mv ? thermal_capped() : 0, cap = ok && !mv && !th ? 120 : 60;
+    cap_mark(pm_frame_cap(th, 60));
     static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : mv ? "movie playing" : thermal_why(th)); was = cap; }
     atomic_store(&g_high_cap, cap);
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
@@ -1826,8 +1841,9 @@ static int fps_step_cap(void) {
     if (t <= 0) return 0;
     // Movies and a 30 fps target still need thermal samples: heat must reset the
     // calm interval, and cooling during those caps counts towards recovery.
-    int thermal = thermal_capped();
-    return dm_movie_playing() || t <= 30 || thermal ? 30 : 60;   // a movie: its player takes a picture per game frame, paced for the Switch's 30 (hle_movie.c)
+    int thermal = thermal_capped(), mv = dm_movie_playing();
+    cap_mark(pm_step_cap(thermal, mv, t));   // heat or Low Power Mode is what holds 30 only above a 30 target and without a movie
+    return mv || t <= 30 || thermal ? 30 : 60;   // a movie: its player takes a picture per game frame, paced for the Switch's 30 (hle_movie.c)
 }
 static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides the steps in whole vsyncs
 // Engine-native frame limiters have no frame-step state page. Their requested

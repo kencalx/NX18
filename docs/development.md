@@ -513,6 +513,25 @@ Reuse works as for the IPA. Each shader output has its own key, named after the 
 
 Relative output and variant paths are resolved from the terminal's working directory before the host starts in its run folder. Each metric's median and range use the runs that supplied it; a missing optional GPU or game-speed reading leaves a dash when no run supplied one. A failed launch releases `--lock` so another measurement can run. A lock whose process is gone, with no game running, is stale and removed.
 
+### Reading a device log
+
+`scripts/devlog.py` reads the `log.txt` of an iPhone or iPad app (**Share log** sends it with `log.prev.txt`), or a Mac app's log, which has the same host lines:
+
+```
+python3 scripts/devlog.py log.txt                    # a summary of the run
+python3 scripts/devlog.py log.prev.txt log.txt       # the two runs side by side, and what differs
+python3 scripts/devlog.py log.txt --json --top 10    # as JSON; the 10 longest frames and [RED] kinds
+```
+
+- **The run:** the build (commit, shader chain, profile), the device (GPU, architecture, GPU family, the memory iOS allows the app), the switches in effect and those changed in the in-game menu, the controllers.
+- **Pipelines:** the prepare and prebuild times (read by `regress.py`'s own reader), the pipeline archive's files and size, the bases written to it and those compiled while playing; a Vulkan game's `[vk] pipelines` lines, an OpenGL game's pipeline builds.
+- **Frames and power,** from NVN's 300-frame windows (`[nvn] timing`, `on-screen` and `power up to frame`): frame-time p50 / p95 / p99, dropped frames, the frame rate, CPU watts, millijoules per frame, wakeups, GPU ms/s, and the thermal state and Low Power Mode with the caps they set.
+- **Memory:** footprint, GPU allocated, headroom to the memory limit and shared textures, each first, last, least, most and its slope per 10 minutes.
+- **Display link:** game enqueue to target display and submission ahead, and the stretches of windows whose enqueue p50 is more than half a frame above the run's median (a frame more latency), with what the log shows just before them: a return from the background, a focus change, long frames.
+- **Events:** the longest frames and what each spent its time on (new pipelines, texture uploads, GPU, submit, the game's own side, a return from the background); background and resume; audio underruns; save commits and syncs; the `[RED]` kinds, normalized as `regress.py` does.
+
+For two logs, a table gives each number for both, the change and whether it is better or worse (beyond a tenth; from 0 only for a count such as `[RED]` lines, and not for prepare or prebuild seconds under half a second), then the switches that differ and the `[RED]` kinds only one log has. Only an NVN game writes the window, power, display-link and long-frame lines (NVN's present path, `hle_nvn.c`): a Vulkan or OpenGL game's summary has its pipeline and memory lines and the events. The log has no clock, so times are seconds from the start, from the power lines' frame rates and the long-frame lines' own times. `dm/tools/tests/test_devlog.py` fills in the host's format strings, so a log line whose format changes fails there until the script reads it again.
+
 ### The regression harness
 
 One translation chain and one host serve every profile, but a contributor can test only the games they own, and CI has no game files and no Metal 4 (GitHub issue #272). `scripts/regress.py` compares two revisions on every game this Mac has a `--platform mac` build of, and writes a report that holds only numbers, hashes, shader keys, normalized `[RED]` texts and timings, so it can go into a pull request. It builds on the shader regression check the NSP script runs after each shader build ([packing step 6](#the-packing-script-in-detail)): that one compares one game's new build with its previous one when you rebuild it; the harness compares two revisions on every local game without touching their builds, and adds the MSL hashes, the pipeline interface and a run of the game.
@@ -725,7 +744,7 @@ Notes on these steps:
 - In that player build, settings declared in `dm/launcher.json` are controlled by the launcher and its saved choices; environment files cannot lock those rows. The raw `MTL_HUD_ENABLED` override is ignored when the launcher offers the Metal HUD control. `DM_METAL_HUD` supplied to the build sets its initial launcher default, while the control stays editable.
 - `DM_LANG=<code>` is the game language (`DMLanguage` in `Info.plist`, default `en-US`; `main.m` sets `DM_LANG` from it unless `Documents/env.txt` or the baked env file sets it).
 - `DM_METAL_CAPTURE=1` makes a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`, for `DM_GPU_CAPTURE`, [GPU measurement](#gpu-measurement)).
-- `DM_SHOW_FPS=1` turns the frame-rate counter on (`DMShowFPS` in `Info.plist`, which `front_ios.m` reads; `DM_SHOW_FPS` in `Documents/env.txt` overrides it). It counts the frames put on screen each second (`mtl_present_count`), so frames the display link merges away are not counted.
+- `DM_SHOW_FPS=1` turns the frame-rate counter on (`DMShowFPS` in `Info.plist`, which `front_ios.m` reads; `DM_SHOW_FPS` in `Documents/env.txt` overrides it). It counts the frames put on screen each second (`mtl_present_count`), so frames the display link merges away are not counted. While heat or Low Power Mode holds the frame rate or keeps MetalFX off, a line under the count says so (`dm_power_cap_now`, `mtl_fx_power_hold`, `dm/host/power_mark.h`: [The frame-rate counter says what heat or Low Power Mode holds back](reference/frame-rate.md#the-frame-rate-counter-says-what-heat-or-low-power-mode-holds-back)).
 - The unsigned build pins its build product and intermediate directories inside `$W/build/ios/pkg/dd`, independently of Xcode's Locations preference.
 - hactool cannot read every update (Mario 1.2.1's patch NCA gives "Invalid BKTR layout!"), which is why `nx_extract` uses LibHac.
 

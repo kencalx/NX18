@@ -74,6 +74,7 @@ General host changes first needed here; each applies to every game:
 - **Functions with function constants specialized by the pipeline** (`fn_spec`): the HUD's `Compiled 2 shaders … Consider adopting MTL4Compiler` during play on the iPhone with Metal 4 pipelines on: [Functions with function constants specialized by the pipeline, not the library](../../../docs/reference/shaders.md#functions-with-function-constants-specialized-by-the-pipeline-not-the-library).
 - [The alpha test through a library of its own](../../../docs/reference/rendering.md#the-alpha-test-through-a-library-of-its-own): the island map's corruption (issue #73) improved with an alpha test in a downstream runtime (PR #430).
 - **The game's view in the shape the game presents** (`front_picture_shape`; with `DM_SCREEN_ASPECT=1.43` the 1920x1344 picture was fitted into a 16:9 view on the phone): [The picture laid out in the shape the game presents](../../../docs/reference/rendering.md#the-picture-laid-out-in-the-shape-the-game-presents).
+- **Picture shape's default from the device's screen** (`screen=nearest`: 16:9 on an iPhone wider than 16:9, 1.43:1 on a 4:3 iPad, where it was 1.43:1 on every iOS device; not run on a device): [Picture shape's default follows the device's screen](../../../docs/reference/rendering.md#picture-shapes-default-follows-the-devices-screen).
 
 ## Open
 

@@ -244,7 +244,7 @@ static id<MTLBuffer> cap_tex_readback(id<MTLTexture> t, cap_tsub **subs, uint32_
         [e copyFromTexture:t sourceSlice:s->slice sourceLevel:s->level sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(s->w, s->h, s->d) toBuffer:b destinationOffset:off
             destinationBytesPerRow:s->row destinationBytesPerImage:s->img options:cap_plane_opt(t.pixelFormat, (int)s->plane)];
         off += s->bytes; }
-    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    [e endEncoding]; [cb commit]; [cb waitUntilCompleted]; hcb3(cb, HCB_DIAG, "DM_NVN_CAPTURE texture readback");
     return b;
 }
 static nvn_hmap g_cap_mtex = {.klen = 8};   // MTLTextures already read (several serials can share one)
@@ -458,7 +458,7 @@ static int cap_digest(const tex_t *t, uint8_t md[32], uint64_t *bytes, uint32_t 
     id<MTLBuffer> b = [g_dev newBufferWithLength:n options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
     [e copyFromTexture:mt sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(mt.width, mt.height, 1) toBuffer:b destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:n];
-    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    [e endEncoding]; [cb commit]; [cb waitUntilCompleted]; hcb3(cb, HCB_DIAG, "DM_NVN_CAPTURE present digest readback");
     CC_SHA256(b.contents, (CC_LONG)n, md);
     if (pix) cap_buf_put(pix, b.contents, n);
     *bytes = n; *w = (uint32_t)mt.width; *hh = (uint32_t)mt.height; *pf = (uint32_t)mt.pixelFormat;

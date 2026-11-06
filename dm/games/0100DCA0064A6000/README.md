@@ -74,6 +74,7 @@ General host changes first needed here; each applies to every game:
 - **Live dynamic-resolution images backed by shared physical storage** (`image_texture`): [Live resolution variants share physical image storage](../../../docs/reference/rendering.md#live-resolution-variants-share-physical-image-storage).
 - **The engine's `.dict` / `.data` / `.patch` archives** (`nlg_shaders`, `nlg_patch_section`): [01, Compressed RomFS content](../../../docs/agents/01-extract.md#compressed-romfs-content).
 - **The frame limiter's milliseconds written in game memory** (`hle_fpslock.c`, `fps_target` with `present_interval display`): [the profile keys](../README.md#keys).
+- [The power line's GPU time on iOS](../../../docs/reference/frame-rate.md#the-power-lines-gpu-time-on-ios): `GPU 0.0 ms/s` in every window on the iPhone 18 Pro Max; the line now gives the host's own GPU busy time.
 
 ## Open
 

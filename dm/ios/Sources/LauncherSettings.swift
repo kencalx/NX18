@@ -3,7 +3,8 @@ import Foundation
 import Combine
 
 struct Setting: Decodable, Identifiable {
-    let env, kind, label, note, def: String
+    let env, kind, label, note: String
+    var def: String        // the default; LauncherModel sets a screen=nearest row's from the device's screen
     let section: String?   // heading on the settings screen; absent in older bundles
     let needs: String?     // "<VAR>=<value>": a sub-setting, drawn only while that setting has that value
     let level: String?     // "basic": shown first (the Mac window's Basic settings); any other or none: Advanced settings. The iPhone keeps one list
@@ -12,6 +13,7 @@ struct Setting: Decodable, Identifiable {
     let options: [[String]]?   // choice: [value, label]
     let min, max, step: Double?   // range
     let on, off: String?   // toggle: the values the variable takes (1 / 0 when not given)
+    let screen: String?    // "nearest": a choice of picture shapes whose default on an iPhone or iPad is the option nearest the screen's shape (nearestShape)
     var id: String { env }
     var sectionTitle: String { section ?? "Game" }
     var basic: Bool { level == "basic" }
@@ -30,7 +32,19 @@ struct Setting: Decodable, Identifiable {
         default: return true
         }
     }
-    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, on, off }
+    // screen=nearest: the option whose shape (its value as width / height, 0 for 16:9) is nearest a screen of width / height r, as a ratio (a 2.17:1 iPhone: 16:9; a 4:3 iPad: 1.43:1); nil when no option is a shape
+    func nearestShape(_ r: Double) -> String? {
+        var best: String? = nil
+        var bestDistance = Double.infinity
+        for o in options ?? [] {
+            guard let v = o.first, let a = Double(v), a.isFinite, a >= 0 else { continue }
+            let ratio: Double = (a == 0 ? 16.0 / 9.0 : a) / r
+            let distance: Double = abs(log(ratio))   // as a ratio: 1.6 is as far from 2 as 2 from 2.5
+            if distance < bestDistance { best = v; bestDistance = distance }
+        }
+        return best
+    }
+    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, on, off, screen }
 }
 struct SettingsFile: Decodable { let settings: [Setting] }
 
@@ -47,15 +61,21 @@ final class LauncherModel: ObservableObject {
 
     private let defaults: UserDefaults
 
-    init(_ settings: [Setting], defaults: UserDefaults = .standard) {
+    // screen: the device's screen as width / height in landscape (the iOS launcher), for the rows marked screen=nearest; nil (the Mac window, the tests) keeps every list default
+    init(_ settings: [Setting], screen: Double? = nil, defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        self.settings = settings
+        self.settings = settings.map { (s: Setting) -> Setting in
+            guard s.screen == "nearest", let r = screen, r.isFinite, r > 0, let d = s.nearestShape(r) else { return s }
+            let shape = String(format: "%.2f", r)
+            launcherLog("launcher: \(s.env) defaults to \(d) on this \(shape):1 screen, the option nearest its shape (the list's default: \(s.def))\n")
+            var t = s; t.def = d; return t
+        }
         let env = ProcessInfo.processInfo.environment
         fromLaunch = Set((env["DM_ENV_LAUNCH_KEYS"] ?? "").split(separator: " ").map(String.init))
         fixed = fromLaunch.union((env["DM_ENV_FILE_KEYS"] ?? "").split(separator: " ").map(String.init))
         ignoreSaved = env["DM_SAVED_CHOICES"] == "0"
         if ignoreSaved { launcherLog("launcher: saved choices ignored (DM_SAVED_CHOICES=0)\n") }
-        for s in settings {
+        for s in self.settings {   // with the defaults the screen chose
             if fixed.contains(s.env), let v = env[s.env] { values[s.env] = v; continue }
             let saved = ignoreSaved ? nil : defaults.object(forKey: "launcher." + s.env) as? String   // a string, as launcher.c reads it: not string(forKey:), which turns a number into one
             values[s.env] = saved.flatMap { s.accepts($0) ? $0 : nil } ?? s.def   // a saved choice the game no longer offers: its default

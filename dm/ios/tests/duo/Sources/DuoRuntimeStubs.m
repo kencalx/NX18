@@ -114,6 +114,9 @@ uint64_t mtl_present_count(void) { return 0; }
 static int g_present_stretch;   // what the front end last told the present (Picture Stretch)
 void mtl_present_stretch(int on) { g_present_stretch = on; }
 int duo_harness_present_stretch(void) { return g_present_stretch; }
+void mtl_present_upscale_set(const char *mode) { (void)mode; }   // the in-game menu's Upscaling (nvn_mtl.m): no present in the harness
+int dm_power_cap_now(void) { return 0; }   // the frame-rate counter's heat / Low Power mark (hle_nvn.c, nvn_mtl.m): nothing held back
+int mtl_fx_power_hold(void) { return 0; }
 static int g_web_touch;   // whether an offline HTML page is shown over the picture (web_apple.m is not in the harness)
 int front_web_touch(void) { return g_web_touch; }
 void duo_harness_set_web_touch(int on) { g_web_touch = on; }

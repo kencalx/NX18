@@ -17,7 +17,9 @@ SCHEMA = 1   # launcher.json's version (docs/launcher.schema.json); it grows onl
 META = {
     'level': r'basic',                       # a setting a front end shows first; without it, the front end decides
     'needs': r'DM_[A-Z0-9_]+=[^;=]+',        # <VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value
+    'screen': r'nearest',                    # a choice of picture shapes (width / height, 0 = 16:9): on an iPhone or iPad the default is the option nearest the screen's shape
 }
+SCREEN_PLATFORMS = ('ios',)   # the platforms whose front end reads screen=: a Mac window has no fixed shape, so the Mac's list keeps the plain default and no screen field
 
 
 def meta(text, n):
@@ -116,6 +118,10 @@ def build(gid, patched, control):
             can = table[need]
             if can is not None and want not in can: sys.exit(f'settings.tsv:{n}: needs a value {need} never takes: {want} (it takes {", ".join(sorted(can))})')
         if not shown(cond, n): continue
+        if 'screen' in m:
+            if kind != 'choice' or values == 'languages' or not all(re.fullmatch(r'\d+(\.\d+)?', v) for v in takes(kind, values) or ()):
+                sys.exit(f'settings.tsv:{n}: screen= is for a choice of picture shapes, each a width / height (0: 16:9): {values}')
+            if platform not in SCREEN_PLATFORMS: del m['screen']
         s = {'env': var, 'kind': kind, 'section': section, 'label': label, 'note': note, 'default': value(default, n), **m}
         if var == 'DM_RENDER_SCALE' and base: s['base'] = base   # the render scale in pixels, for the console mode chosen
         if kind == 'choice':

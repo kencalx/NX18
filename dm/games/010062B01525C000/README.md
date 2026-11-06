@@ -49,6 +49,13 @@ iPhone: no IPA was built, and the touch layout is untested.
 - Resident memory was 1370 MB with 1672 MB of Metal allocations at the end of a
   long run, after the game had loaded its opening scenes.
 
+## Found on this game
+
+General host changes first needed here; each applies to every game:
+
+- [GPU errors of the host's own command buffers](../../../docs/reference/nvn-objects.md#gpu-errors-of-the-hosts-own-command-buffers): GPU resets on the iPhone 18 Pro Max with Frame buffering on (`DM_PRESENT_SNAP`) whose lines were all victims' (`kIOGPUCommandBufferCallbackErrorInnocentVictim`). Every command buffer the host commits now logs its own error, and a failed game command buffer its passes ([The passes of a failed game command buffer](../../../docs/reference/nvn-objects.md#the-passes-of-a-failed-game-command-buffer)). **Open:** which command buffer faulted; the next such run names it.
+- [The power line's GPU time on iOS](../../../docs/reference/frame-rate.md#the-power-lines-gpu-time-on-ios): `GPU 0.0 ms/s` in every window on the iPhone 18 Pro Max; the line now gives the host's own GPU busy time.
+
 ## Open
 
 - The memory keys are the provisional ones; they hold through the tested route

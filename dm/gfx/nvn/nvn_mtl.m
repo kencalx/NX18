@@ -32,6 +32,9 @@
 #include "nvn_primitive.h"
 #include "nvn_timestamp.h"
 #include "nvn_pso_guard.h"   // the crash guard of the pipeline archive bundled with the app (pso_bundle_open)
+#include "nvn_gpu_diag.h"   // GPU errors of the host's command buffers by kind, the passes of a failed game command buffer, GPU busy time (hcb_fail, g_gd, g_gpu_busy)
+#include "nvn_upscale_pick.h"   // the present's upscaling mode and the in-game menu's pick of it (fx_mode)
+#include "../../host/power_mark.h"   // what heat or Low Power Mode holds back, for the iOS frame-rate counter (mtl_fx_power_hold)
 #include "msl_image.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
@@ -315,6 +318,47 @@ static void res_top_once(NSError *err) {
     static _Atomic int done; if (!err || !strstr(err.description.UTF8String, "OutOfMemory") || atomic_exchange(&done, 1)) return;
     res_top("[RED] GPU out of memory");
 }
+// ---------- GPU errors of the host's own command buffers ----------
+// Every command buffer the host commits besides the game's submissions (which log theirs with what they held: mtl_sub_commit, sub_cut, mdi_wait) checks how it ended where it
+// completes: a Metal 4 commit's feedback for its error, a classic command buffer's status after waitUntilCompleted or in its completed handler. That check is all a success costs.
+// A failure logs a [RED] line at its kind's 1st, 2nd, 4th, 8th ... error (gd_err_due), victims of another command buffer's fault (kIOGPUCommandBufferCallbackErrorInnocentVictim)
+// counted apart from the rest, so a storm of victims never hides the command buffer that faulted. On the iPhone, with Frame buffering on, GPU resets left only victims' lines:
+// the command buffer that faulted had no handler (the present snapshot copy had none), or was another process's
+enum { HCB_DISPLAY, HCB_DISPLAY_FX, HCB_OFFSCREEN, HCB_SNAP, HCB_UPLOAD, HCB_READBACK, HCB_DRAIN, HCB_ZERO, HCB_SHOT, HCB_DIAG, HCB_N };
+static const char *const k_hcb_name[HCB_N] = {"display", "display (through MetalFX)", "offscreen present", "present snapshot copy", "upload", "texture readback",
+                                              "drain", "zero texture clear", "screenshot", "diagnostic"};
+static _Atomic uint32_t g_hcb_errs[HCB_N][2];   // [kind][victim]
+static gd_ring g_gd;          // the passes of the game's command buffers (nvn_gpu_diag.h), written on the submit thread, read by a failed one's feedback handler
+static gd_busy g_gpu_busy;    // the Metal 4 queue's GPU busy time, overlaps merged: its feedback handlers, all on g_feedback_q (gpu_busy_note)
+// An error and the ones under it on one line, each "<domain> <code>[: <description>]": a Metal 4 queue's error has no description of its own, the reason (InnocentVictim,
+// PageFault, Timeout ...) is in the error under it
+static void gpu_err_text(NSError *err, char *out, size_t n) {
+    size_t o = 0; if (n) out[0] = 0;
+    NSError *e = err;   // a local to walk the chain: the parameter is const here (objc_externally_retained, the pragma at the top of this file)
+    for (int d = 0; e && d < 4 && o < n; d++) {
+        NSString *desc = e.userInfo[NSLocalizedDescriptionKey];
+        int w = snprintf(out + o, n - o, "%s%s %ld%s%s", d ? " < " : "", e.domain.UTF8String ?: "(no domain)", (long)e.code, desc ? ": " : "", desc.UTF8String ?: "");
+        if (w < 0) break;
+        o += (size_t)w;
+        id u = e.userInfo[NSUnderlyingErrorKey];
+        if (![u isKindOfClass:[NSError class]]) { NSArray *m = e.userInfo[NSMultipleUnderlyingErrorsKey]; u = [m isKindOfClass:[NSArray class]] && m.count ? m[0] : nil; }
+        e = [u isKindOfClass:[NSError class]] ? u : nil;
+    }
+}
+static int gpu_err_victim(NSError *e) { return e && [e.description containsString:@"InnocentVictim"]; }
+// status: a classic command buffer's MTLCommandBufferStatus, -1 for a Metal 4 commit's feedback; detail: what it held, or NULL
+static void hcb_fail(int kind, long status, NSError *e, const char *detail) {
+    int victim = gpu_err_victim(e);
+    res_top_once(e);
+    uint32_t n = gd_err_due(&g_hcb_errs[kind][victim]);
+    if (!n) return;
+    char t[768]; gpu_err_text(e, t, sizeof t); char st[32]; if (status >= 0) snprintf(st, sizeof st, "status %ld", status); else snprintf(st, sizeof st, "Metal 4 commit feedback");
+    MLOG("[RED] %s command buffer error #%u%s%s%s%s: %s, %s%s; logged at errors 1, 2, 4, 8 ... of its kind", k_hcb_name[kind], n, victim ? " (a victim)" : "", detail ? " (" : "", detail ?: "", detail ? ")" : "",
+         st, e ? t : "no error object", victim ? "; a victim: another command buffer's fault (this process's or another's) reset the GPU, not its own commands" : "");
+}
+static inline void hcb3(id<MTLCommandBuffer> c, int kind, const char *detail) { if (c.status == MTLCommandBufferStatusError) hcb_fail(kind, (long)c.status, c.error, detail); }
+static inline void gpu_busy_note(double g0, double g1) { if (g0 > 0 && g1 > g0) gd_busy_add(&g_gpu_busy, (uint64_t)(g0 * 1e9), (uint64_t)(g1 * 1e9)); }   // g_feedback_q only
+uint64_t mtl_gpu_busy_ns(void) { return gd_busy_ns(&g_gpu_busy); }   // hle_nvn.c power_line: the Metal 4 queue's busy time so far (ns)
 // Since the last call: residency commits (count, time), additions by source line (count, MB; the four largest by bytes) and removals
 void mtl_res_stats(char *out, size_t n) {
     pthread_mutex_lock(&g_res_mu);
@@ -435,7 +479,7 @@ static void udc_selftest(void) {
         id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
         [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:out destinationOffset:0
             destinationBytesPerRow:w * 4 destinationBytesPerImage:w * h * 4 options:depth ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone];
-        [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        [b endEncoding]; [cb commit]; [cb waitUntilCompleted]; hcb3(cb, HCB_DIAG, "DM_UDC_SELFTEST");
         const uint32_t *px = out.contents; NSUInteger bad = 0; for (NSUInteger i = 0; i < w * h; i++) if (px[i] != px[0]) bad++;
         MLOG("UDC self-check %s %s %lux%lu first value %08x, values differing from it %lu / %lu", g_dev.name.UTF8String, depth ? "Depth32F_S8" : "RGBA8", (unsigned long)w, (unsigned long)h, px[0], (unsigned long)bad, (unsigned long)(w * h));
     }
@@ -465,6 +509,7 @@ void mtl_init(void) {
     const char *latency = getenv("DM_PRESENT_LATENCY");
     if (latency && atoi(latency) > 0) g_present_latency = atoi(latency);
     g_res_check_on = getenv("DM_RES_CHECK") != NULL;
+    const char *ring = getenv("DM_NVN_PASS_RING"); g_gd.off = ring && !strcmp(ring, "0");   // the failed command buffer's passes (g_gd), on unless =0; set before any pass
     g_dev = MTLCreateSystemDefaultDevice();
     if (!g_dev) MDIE("no Metal device");
     if (!g_dev.hasUnifiedMemory) MDIE("needs a unified-memory device (zero-copy memory pools)");
@@ -1087,6 +1132,16 @@ static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's las
     MLOG("[gpuprof] frame %llu: render %.2f ms, compute / copy %.2f ms over %d encoders (%d render passes, attachments load %.1f MB store %.1f MB), first start to last end %.2f ms", (unsigned long long)frame, tot[0] / 1e3, tot[1] / 1e3, n, np, ld / 1024.0, st / 1024.0, span / 1e3);
     free(lab); atomic_store(&g_gp_busy, 0);
 }
+// A pass of the game's command buffer that is not a game render pass (those are noted in rp_begin_ex, with their attachments' formats): its record in g_gd, for the line a failed
+// command buffer logs. d: a render pass's descriptor (its first colour attachment's size and format, the depth or stencil attachment's format), nil for the other kinds
+static void gd_pass_host(int kind, MTL4RenderPassDescriptor *d) {
+    if (g_gd.off) return;   // DM_NVN_PASS_RING=0: no record, and none of the descriptor's reads below
+    uint32_t f = (uint32_t)atomic_load_explicit(&g_cur_frame, memory_order_relaxed);
+    if (!d) { gd_pass_begin(&g_gd, kind, f, 0, 0, 0, 0, 0, 0, 0); return; }
+    MTLRenderPassColorAttachmentDescriptor *c = d.colorAttachments[0]; id<MTLTexture> c0 = c.texture, ds = d.depthAttachment.texture ?: d.stencilAttachment.texture, t = c0 ?: ds;
+    NSUInteger lv = c0 ? c.level : d.depthAttachment.texture ? d.depthAttachment.level : d.stencilAttachment.level;
+    gd_pass_begin(&g_gd, kind, f, 0, t ? (unsigned)MAX(t.width >> lv, 1u) : 0, t ? (unsigned)MAX(t.height >> lv, 1u) : 0, c0 ? 1 : 0, c0 ? (unsigned)c0.pixelFormat : 0, ds ? (unsigned)ds.pixelFormat : 0, t ? (unsigned)t.sampleCount : 0);
+}
 static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescriptor *d) {   // the draw passes (rp_begin_ex); see barrier_game
     id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d];
     if (g_last_end_relaxed && !g_game_barrier && barrier_game() && !g_image_heap_n) g_bar_skip++;
@@ -1099,7 +1154,7 @@ static inline void enc_r_end_pass(id e) {
     gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
     [e endEncoding]; g_last_end_relaxed = 1;
 }
-static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
+static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); gd_pass_host(GD_HOST_RENDER, d); return e; }
 static inline void enc_r_end(id e) { m4_end(e); }
 static inline void enc_r_pso(id<MTL4RenderCommandEncoder> e, id<MTLRenderPipelineState> p) { [e setRenderPipelineState:p]; }
 static inline void enc_r_dss(id<MTL4RenderCommandEncoder> e, id<MTLDepthStencilState> s) { [e setDepthStencilState:s]; }
@@ -1131,7 +1186,7 @@ static inline void enc_r_draw_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimit
 static inline void enc_r_draw_indexed(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger n, MTLIndexType t, uint64_t gpu, NSUInteger len, NSUInteger i, NSInteger bv, NSUInteger bi) { [e drawIndexedPrimitives:p indexCount:n indexType:t indexBuffer:gpu indexBufferLength:len instanceCount:i baseVertex:bv baseInstance:bi]; }
 static inline void enc_r_draw_indexed_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, MTLIndexType t, uint64_t gpu, NSUInteger len, uint64_t ind) { [e drawIndexedPrimitives:p indexType:t indexBuffer:gpu indexBufferLength:len indirectBuffer:ind]; }
 static void ubd_land_compute(void);
-static inline id<MTL4ComputeCommandEncoder> enc_c_begin(MTLComputePassDescriptor *d) { (void)d; ubd_land_compute(); id<MTL4ComputeCommandEncoder> e = [g_cb computeCommandEncoder]; [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_ct]; gp_begin(e, 'C', nil); return e; }
+static inline id<MTL4ComputeCommandEncoder> enc_c_begin(MTLComputePassDescriptor *d) { (void)d; ubd_land_compute(); id<MTL4ComputeCommandEncoder> e = [g_cb computeCommandEncoder]; [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_ct]; gp_begin(e, 'C', nil); gd_pass_host(GD_COMPUTE, nil); return e; }
 static inline id<MTLComputeCommandEncoder> enc_c_begin_concurrent(id<MTLCommandBuffer> cb) { return [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent]; }
 static inline void enc_c_end(id e) { m4_end(e); }
 static inline void enc_c_pso(id e, id<MTLComputePipelineState> p) { [e setComputePipelineState:p]; }
@@ -1159,7 +1214,7 @@ static uint64_t g_blit_splits;   // copies / buffer updates / fills that ended a
 uint64_t mtl_blit_splits(void) { return g_blit_splits; }
 static int enc_open(void);
 static int g_blit_ct;   // the open copy encoder has the compute argument table set (dispatches share it, dispatch_enc)
-static id<MTL4ComputeCommandEncoder> blit_open(void) { if (!g_blit) { ser_gate(); g_blit = enc_b_begin(g_cb); [g_blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:blit_vis()]; gp_begin(g_blit, 'C', nil); g_bw_n = g_br_n = 0; g_blit_ops = 0; g_blit_ct = 0; } return g_blit; }
+static id<MTL4ComputeCommandEncoder> blit_open(void) { if (!g_blit) { ser_gate(); g_blit = enc_b_begin(g_cb); [g_blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:blit_vis()]; gp_begin(g_blit, 'C', nil); gd_pass_host(GD_COPY, nil); g_bw_n = g_br_n = 0; g_blit_ops = 0; g_blit_ct = 0; } return g_blit; }
 static void ubd_flush(void); static int g_nubd;   // the inline updates deferred (see mtl_sub_update)
 static int g_ubd_landing;
 static id<MTL4ComputeCommandEncoder> blit_raw(void) {
@@ -1763,6 +1818,22 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
     }
     pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
 }
+// The passes of a game command buffer that failed on its own (not a victim of another's fault), records [first, end) of g_gd, after its error line: kind, size, formats, draws
+// and the first and last program's shader keys of each, so a GPU fault names its passes without DM_NVN_ENC_LABEL. At the 1st, 2nd, 4th ... such failure; at most 32 passes, the
+// first 16 and the last 16 of a longer command buffer. Its feedback handler's thread; what: which command buffer
+static _Atomic uint32_t g_gd_fail;
+static void gd_log_failed(const char *what, uint64_t first, uint64_t end) {
+    uint32_t nf = gd_err_due(&g_gd_fail); if (!nf) return;
+    uint64_t gap, skip; gd_pick(first, end, 32, &gap, &skip);
+    MLOG("[RED] passes of the failed %s (game command buffer failure #%u, logged at 1, 2, 4 ...): %llu%s; R a game render pass, r the host's, C compute, B the copy encoder, D DLSS, M MetalFX; formats are MTLPixelFormat numbers, keys shader_map.tsv's",
+         what, nf, (unsigned long long)(end - first), skip ? ", the first 16 and the last 16 below" : end > first ? ", all below" : g_gd.off ? " (none recorded: DM_NVN_PASS_RING=0)" : " (none recorded)");
+    char t[400];
+    for (uint64_t i = 0; first + i < end; i++) {
+        if (skip && i == gap) { MLOG("  failed %s: ... %llu passes left out ...", what, (unsigned long long)skip); i += skip - 1; continue; }
+        if (gd_pass_text(&g_gd, first + i, t, sizeof t)) MLOG("  failed %s: %s", what, t);
+        else MLOG("  failed %s: pass record %llu is gone (%d newer passes were written before this feedback came)", what, (unsigned long long)(first + i), GD_RING);
+    }
+}
 uint64_t mtl_sub_commit(void) {
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
@@ -1788,11 +1859,12 @@ uint64_t mtl_sub_commit(void) {
     if (!atomic_load(&pr->claimed) && pr->fence) MDIE("post ring: the writes of fence %llu never ran", (unsigned long long)pr->fence);
     pr->n = n; pr->ops = ops; pr->sc = sc; pr->seg_last = seg_last; pr->t_commit = guest_ns(); atomic_store(&pr->claimed, 0); atomic_store(&pr->fence, fence);
     pthread_mutex_unlock(&g_post_mu);
+    uint64_t gd0, gd1; gd_cb_close(&g_gd, &gd0, &gd1);   // this command buffer's passes in g_gd, for the line it logs if it fails
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
-        gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime);
+        gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime); gpu_busy_note(cb.GPUStartTime, cb.GPUEndTime);
         if (ws_on()) ws_fb(fence, cb.GPUEndTime);
         uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
-        if (cb.error) { atomic_store(&g_last_commit_error, 1); res_top_once(cb.error); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String); }
+        if (cb.error) { atomic_store(&g_last_commit_error, 1); res_top_once(cb.error); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); if (!victim) { char w[48]; snprintf(w, sizeof w, "submission fence=%llu", (unsigned long long)fence); gd_log_failed(w, gd0, gd1); } MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String); }
         post_complete(fence, c0, c1);
         defer_drain();
     }];
@@ -1864,7 +1936,7 @@ void mtl_present_flush(void);
 void mtl_finish(void) { mtl_finish_gpu_at(WS_FINISH); }
 static void present_drop_for_suspend(void);
 static void snap_drain(void);
-void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_drain(); mtl_init(); id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; mtl_finish_gpu(); }
+void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_drain(); mtl_init(); id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; hcb3(cb, HCB_DRAIN, NULL); mtl_finish_gpu(); }
 
 // ================= Render replay =================
 #include "../../host/front.h"
@@ -2365,12 +2437,13 @@ static void up_flush(void) {
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     atomic_fetch_add(&g_up_pending, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
-        if (f.error) { MLOG("[RED] upload command buffer execution error: %s", f.error.description.UTF8String); res_top_once(f.error); }
+        if (f.error) { char dt[48]; snprintf(dt, sizeof dt, "%lu textures", (unsigned long)dsts.count); hcb_fail(HCB_UPLOAD, -1, f.error, dt); }   // the line at errors 1, 2, 4 ... (it was every error), and GPU out of memory's residency list
         if (f.error || fake_lost) {
             os_unfair_lock_lock(&g_up_lost_lk); if (!g_up_lost) g_up_lost = [NSHashTable weakObjectsHashTable]; for (id d in dsts) [g_up_lost addObject:d]; int n = (int)g_up_lost.allObjects.count; atomic_store(&g_up_lost_n, n); os_unfair_lock_unlock(&g_up_lost_lk);
             pthread_mutex_lock(&g_smu); g_ser_gen++; pthread_mutex_unlock(&g_smu);   // Make the view cache of every texture ID take the slow path once (on a cache hit tex_mtl is not passed through and this record is not seen)
             MLOG("%supload command buffer dropped: the %lu textures of this batch are marked unwritten and re-uploaded on next use (%d awaiting re-upload)", fake_lost ? "DM_TEST_UP_LOST: " : "", (unsigned long)dsts.count, n);
         }
+        gpu_busy_note(f.GPUStartTime, f.GPUEndTime);
         double d = f.GPUEndTime - f.GPUStartTime;
         if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
         @autoreleasepool {
@@ -4378,6 +4451,11 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     ser_gate();
     g_stat_pass++;   // gp_begin records this pass; match the attachment and draw dump labels
     g_enc = enc_r_begin_pass(pd);
+    if (!g_gd.off) {   // its record for the line a failed command buffer logs (g_gd): the formats g_pass has just taken, no Metal call
+        unsigned nc = 0, c0 = 0; for (int i = 0; i < 8; i++) if (g_pass.cfmt[i]) { nc++; if (!c0) c0 = g_pass.cfmt[i]; }
+        gd_pass_begin(&g_gd, GD_RENDER, (uint32_t)atomic_load_explicit(&g_cur_frame, memory_order_relaxed), (uint32_t)g_stat_pass, (unsigned)g_pass.tw, (unsigned)g_pass.th, nc, c0,
+                      g_pass.dfmt ? g_pass.dfmt : g_pass.sfmt, g_pass.samples);
+    }
     args_dirty_all();
     if (enc_label_on()) { id<MTLTexture> lt = pd.colorAttachments[0].texture ?: pd.depthAttachment.texture ?: pd.stencilAttachment.texture; g_el_w = (int)lt.width; g_el_h = (int)lt.height; g_el_draws = 0; g_el_key[0] = 0; }
     return g_enc;
@@ -4528,7 +4606,7 @@ static void shmap_read(void) {
 }
 
 @interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual)
-    uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+    uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; uint64_t key64; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     uint8_t mesh_kind, mesh_notask; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
@@ -4752,7 +4830,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     NSData *jd = msl_data([NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc]);
     NSDictionary *j = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
     if (j && stage == 2 && [j[@"gs_slice"] isKindOfClass:[NSDictionary class]] && [j[@"chain"] isEqual:@DMSH_CHAIN]) {   // a slice-writing geometry shader has no library: a stub prog_fold_gs replaces
-        NvShader *o = [NvShader new]; o->stage = 2; o->lay_loc = -1; strlcpy(o->key, pc.UTF8String, sizeof o->key);
+        NvShader *o = [NvShader new]; o->stage = 2; o->lay_loc = -1; strlcpy(o->key, pc.UTF8String, sizeof o->key); o->key64 = strtoull(o->key, NULL, 16);
         o->gs_loc = [j[@"gs_slice"][@"loc"] intValue]; o->gs_comp = [[j[@"gs_slice"][@"comp"] description] UTF8String][0];
         return o;
     }
@@ -4795,7 +4873,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
             for (NSUInteger i = 0; i < reads.count; i++) { int k = [reads[i] intValue]; if (k >= 0 && k < GEO_CAPTURE_WORDS) o->geo_slot[k] = (int16_t)i; }
             o->geo_words = (uint32_t)reads.count;
         } }
-    o->fn = fn4_note([lib newFunctionWithName:entry], lib, entry, nil); o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key); o->ventry = entry;
+    o->fn = fn4_note([lib newFunctionWithName:entry], lib, entry, nil); o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key); o->key64 = strtoull(o->key, NULL, 16); o->ventry = entry;   // key64: the key's 16 hex digits (before "_b"), for the failed command buffer's line (g_gd)
     // writes the layer (render_target_array_index, named in the library's metadata): its passes are layered and its pipelines get an input class (pso_desc). A library with layer entry points
     // names it for those alone: its main0 / main0_z write no layer
     if (stage == 0) o->layer_out = layer || (t_lib_layer && !j[@"entry_layer"]);
@@ -8016,7 +8094,7 @@ static id<MTLTexture> dummy_tex(int dtt, int dpf) {
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         if (dpf == NVN_DPF_DEPTH) { rp.depthAttachment.texture = t; rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.clearDepth = 0; rp.depthAttachment.storeAction = MTLStoreActionStore; }
         else { rp.colorAttachments[0].texture = t; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0); rp.colorAttachments[0].storeAction = MTLStoreActionStore; }
-        id<MTLCommandBuffer> cb = [g_q commandBuffer]; [[cb renderCommandEncoderWithDescriptor:rp] endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        id<MTLCommandBuffer> cb = [g_q commandBuffer]; [[cb renderCommandEncoderWithDescriptor:rp] endEncoding]; [cb commit]; [cb waitUntilCompleted]; hcb3(cb, HCB_ZERO, "a multisample slot's zero texture");
         cache[dtt % DMY_NT][dpf & 3] = t; g_dummy_tex_rid[dtt % DMY_NT][dpf & 3] = t.gpuResourceID._impl; res_add(t);
         return t;
     }
@@ -9189,7 +9267,7 @@ static void lp_finish(void) {
         [b copyFromTexture:ref sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(1, 1, 1) toBuffer:br destinationOffset:0 destinationBytesPerRow:bpp destinationBytesPerImage:bpp];
     enc_b_end(b);
         unsigned long long pass = [e[3] unsignedLongLongValue], ser = [e[5] unsignedLongLongValue]; int idx = [e[4] intValue];
-        [dcb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c;
+        [dcb addCompletedHandler:^(id<MTLCommandBuffer> c) { hcb3(c, HCB_DIAG, "load-skip probe readback");
             const uint8_t *p = bt.contents, *r = br.contents; uint64_t left = 0; char at[96] = ""; size_t ao = 0;
             for (NSUInteger k = 0; k < W * H; k++) if (!memcmp(p + k * bpp, r, bpp)) { if (left++ < 4) ao += snprintf(at + ao, sizeof at - ao, " (%lu,%lu)", (unsigned long)(k % W), (unsigned long)(k / W)); }
             if (left) MLOG("[RED] load-skip probe: pass %llu c%d ser=%llu lv%lu sl%lu %lux%lu sentinel pixels left %llu, first positions%s", pass, idx, ser, (unsigned long)lv, (unsigned long)sl, (unsigned long)W, (unsigned long)H, (unsigned long long)left, at);
@@ -10795,7 +10873,19 @@ static void mdi_wait(void) {
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     up_flush(); res_commit();
     [g_cb endCommandBuffer];
-    rec_commit(g_cb, nil);
+    // Its outcome, as a segment's (sub_cut): it had no feedback handler, so a fault in it left no line
+    uint64_t gd0, gd1, sfence = g_fence + 1; gd_cb_close(&g_gd, &gd0, &gd1);
+    MTL4CommitOptions *o = [MTL4CommitOptions new];
+    [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
+        gpu_busy_note(cb.GPUStartTime, cb.GPUEndTime);
+        if (!cb.error) return;
+        atomic_store(&g_last_commit_error, 1); res_top_once(cb.error);
+        static _Atomic uint32_t errs[2]; int victim = gpu_err_victim(cb.error); uint32_t c = gd_err_due(&errs[victim]);
+        if (c) { char t[768]; gpu_err_text(cb.error, t, sizeof t);
+            MLOG("[RED] indirect-count wait command buffer error #%u%s (the part of submission fence=%llu before a draw reads a GPU-written count): %s; logged at errors 1, 2, 4 ...", c, victim ? " (a victim)" : "", (unsigned long long)sfence, t); }
+        if (!victim) { char w[80]; snprintf(w, sizeof w, "indirect-count wait of submission fence=%llu", (unsigned long long)sfence); gd_log_failed(w, gd0, gd1); }
+    }];
+    rec_commit(g_cb, o);
     if (!g_mdi_ev) g_mdi_ev = [g_dev newSharedEvent];
     rec_signal(g_mdi_ev, ++g_mdi_v); rec_drain();
     uint64_t w0 = ws_t0(); int ok = [g_mdi_ev waitUntilSignaledValue:g_mdi_v timeoutMS:10000]; if (ws_on()) ws_put(WS_MDI, w0, 1);
@@ -11419,6 +11509,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         }
     }
     g_stat_draw++;
+    if (gd_count(&g_gd, (__bridge const void *)pr)) gd_prog(&g_gd, (__bridge const void *)pr, pr->sh[0] ? pr->sh[0]->key64 : 0, pr->sh[1] ? pr->sh[1]->key64 : 0);   // the pass's record: a draw, and its program's keys when it changed
     if (enc_label_on() && !g_el_draws++ && pr->sh[1]) { memcpy(g_el_key, pr->sh[1]->key, 8); g_el_key[8] = 0; }
     if (passdump()) {   // Characteristics of a render pass's first draw (to judge whether the load can be omitted: full screen, no blending, writes all channels, does not depend on depth); with DM_NVN_PASSDUMP_ALL every draw is recorded
         static uint64_t last_pass = ~0ull; static int all = -1; if (all < 0) all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
@@ -11649,6 +11740,7 @@ static void dispatch(const p_dispatch *dp) {
         }
         rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
         id<MTLComputeCommandEncoder> ce = pg_compute();
+        if (gd_count(&g_gd, (__bridge const void *)cs)) gd_prog(&g_gd, (__bridge const void *)cs, cs->key64, 0);   // a built-in kernel has no key: 0
         enc_c_pso(ce, ps);
         enc_c_args(ce, ((__bridge id<MTLBuffer>)ub).gpuAddress + uo, 0); enc_c_args(ce, ((__bridge id<MTLBuffer>)sb).gpuAddress + so, 1); enc_c_args(ce, ((__bridge id<MTLBuffer>)db).gpuAddress + dof, 2);   // Built-in compute kernel: cold path, take the addresses directly
         if (dp->ind) enc_c_dispatch_indirect(ce, ig, MTLSizeMake(32, 1, 1)); else enc_c_dispatch(ce, MTLSizeMake(dp->x, dp->y, dp->z), MTLSizeMake(32, 1, 1));
@@ -11666,6 +11758,7 @@ static void dispatch(const p_dispatch *dp) {
     int own = dispatch_own();
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc();
+    if (gd_count(&g_gd, (__bridge const void *)cs)) gd_prog(&g_gd, (__bridge const void *)cs, cs->key64, 0);   // the encoder's record: a dispatch, and its kernel's key when it changed
     enc_c_pso(ce, ps);
     g_dispatch_dim[0] = (uint32_t)dp->x; g_dispatch_dim[1] = (uint32_t)dp->y; g_dispatch_dim[2] = (uint32_t)dp->z;   // read back by the driver segment c0 (encode_args_)
     g_c0_dim_buf = nil;
@@ -11785,7 +11878,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     for (int z = 0; z < nz; z++)
         [b copyFromTexture:mt sourceSlice:is3d ? 0 : layer0 + r->zoffset + z sourceLevel:level sourceOrigin:MTLOriginMake(r->xoffset, r->yoffset, is3d ? r->zoffset + z : 0)
                 sourceSize:MTLSizeMake(r->width, r->height, 1) toBuffer:buf destinationOffset:z * wb * hb destinationBytesPerRow:wb destinationBytesPerImage:wb * hb];
-    enc_b_end(b); [cb commit]; [cb waitUntilCompleted];
+    enc_b_end(b); [cb commit]; [cb waitUntilCompleted]; hcb3(cb, HCB_READBACK, "the game's ReadTexels");
     for (int z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) memcpy(dst + z * img + y * row, (uint8_t *)buf.contents + z * wb * hb + y * wb, wb);
     int shift = rb_copy_shift(t, mt); if (shift) rb_swap_rows(dst, wb, hb, (size_t)nz, row, img, shift);   // into the guest's order
     }
@@ -12235,6 +12328,7 @@ static void dlss_eval(const p_dlss *c) {
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }   // a usage upgrade copies through it
     ubd_land_compute();
     id<MTL4ComputeCommandEncoder> ce = [g_cb computeCommandEncoder];   // the scaler's encoders come after the frame's work so far: MetalFX opens encoders of its own, which take no barrier
+    gd_pass_begin(&g_gd, GD_DLSS, (uint32_t)atomic_load_explicit(&g_cur_frame, memory_order_relaxed), 0, (unsigned)out.width, (unsigned)out.height, 1, (unsigned)out.pixelFormat, (unsigned)dep.pixelFormat, 1);   // its record (g_gd): the output's size and format
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];
     [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
     [ce endEncoding];
@@ -12363,10 +12457,12 @@ static void sub_cut(void) {
     uint32_t k = g_seg++; seg_clk *sc = NULL;   // reports encoded so far keep this segment's GPU times (seg_ts)
     if (seg_ts()) { if (!g_sclk) { g_sclk = calloc(1, sizeof *g_sclk); atomic_store(&g_sclk->refs, 1); } sc = g_sclk; atomic_fetch_add(&sc->refs, 1); }
     MTL4CommitOptions *o = [MTL4CommitOptions new];
+    uint64_t gd0, gd1, sfence = g_fence + 1; gd_cb_close(&g_gd, &gd0, &gd1);   // this segment's passes in g_gd; it belongs to the submission that will take fence sfence
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
-        gpu_tag_done(f, cb.GPUStartTime, cb.GPUEndTime);
+        gpu_tag_done(f, cb.GPUStartTime, cb.GPUEndTime); gpu_busy_note(cb.GPUStartTime, cb.GPUEndTime);
         if (sc) { if (k < SEG_CLK_N) { atomic_store(&sc->t[k][0], gpu_s_guest_ns(cb.GPUStartTime)); atomic_store(&sc->t[k][1], gpu_s_guest_ns(cb.GPUEndTime)); } seg_clk_put(sc); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("[RED] segment command buffer execution error: %s", cb.error.description.UTF8String); res_top_once(cb.error); }
+        if (cb.error && !gpu_err_victim(cb.error)) { char w[64]; snprintf(w, sizeof w, "segment %u of submission fence=%llu", k, (unsigned long long)sfence); gd_log_failed(w, gd0, gd1); }   // k: the segment's
     }];
     res_commit();
     [g_cb endCommandBuffer];
@@ -12763,7 +12859,7 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
         id<MTLCommandBuffer> cb2 = q_cb(); id<MTLBlitCommandEncoder> b = [cb2 blitCommandEncoder];
         [b copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h];
         [b endEncoding];
-        [cb2 addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c;
+        [cb2 addCompletedHandler:^(id<MTLCommandBuffer> c) { hcb3(c, HCB_SHOT, "full-window screenshot readback");
             CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
             CGContextRef ctx = CGBitmapContextCreate(buf.contents, w, h, 8, row, cs, kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
             CGImageRef img = ctx ? CGBitmapContextCreateImage(ctx) : NULL; cb(img);
@@ -12774,7 +12870,7 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
     else {
         id<MTLCommandBuffer> draw = q_cb();
         if (!present_encode(draw, src, out, crop)) { cb(NULL); return; }
-        [draw addCompletedHandler:^(id<MTLCommandBuffer> c) { readback(c.status == MTLCommandBufferStatusCompleted); }]; [draw commit];
+        [draw addCompletedHandler:^(id<MTLCommandBuffer> c) { hcb3(c, HCB_SHOT, "full-window screenshot"); readback(c.status == MTLCommandBufferStatusCompleted); }]; [draw commit];
     }
 }
 void dm_gfx_shot_at(long k, const char *path) {
@@ -12799,7 +12895,7 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
         id<MTLTexture> out = [g_dev newTextureWithDescriptor:d];
         if (!out) { MLOG("[RED] cannot create the screenshot output texture %dx%d", out_w, out_h); return; }
         if (g_q4) { if (!present_offscreen_wait(src, crop, out)) return; }
-        else { id<MTLCommandBuffer> cb = q_cb(); if (!present_encode(cb, src, out, crop)) return; [cb commit]; [cb waitUntilCompleted]; }
+        else { id<MTLCommandBuffer> cb = q_cb(); if (!present_encode(cb, src, out, crop)) return; [cb commit]; [cb waitUntilCompleted]; hcb3(cb, HCB_SHOT, "screenshot's present pass"); }
         read = out;
     }
     if (read.pixelFormat != MTLPixelFormatRGBA8Unorm && read.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB &&
@@ -12810,7 +12906,7 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
     id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
     [b copyFromTexture:read sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
               toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h];
-    [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    [b endEncoding]; [cb commit]; [cb waitUntilCompleted]; hcb3(cb, HCB_SHOT, "screenshot readback");
     if (screen && read == src && atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) {   // lower-left origin: the window image is stored bottom-up (see g_origin_ll)
         uint8_t *p = buf.contents, *tmp = malloc(row);
         if (tmp) { for (size_t y = 0; y < h / 2; y++) { memcpy(tmp, p + y * row, row); memcpy(p + y * row, p + (h - 1 - y) * row, row); memcpy(p + (h - 1 - y) * row, tmp, row); } free(tmp); } }
@@ -12889,7 +12985,7 @@ void dm_gfx_texraw(uint64_t serial, const char *path) {
     MTLBlitOption bo = t.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone;
     for (NSUInteger s = 0; s < ns; s++)
         [b copyFromTexture:t sourceSlice:d3 ? 0 : s sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, d3 ? s : 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:sz * s destinationBytesPerRow:row destinationBytesPerImage:sz options:bo];
-    [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    [b endEncoding]; [cb commit]; [cb waitUntilCompleted]; hcb3(cb, HCB_DIAG, "texraw readback");
     FILE *f = fopen(path, "wb"); if (f) { fprintf(f, "%lu %lu %lu %lu", (unsigned long)w, (unsigned long)h, (unsigned long)t.pixelFormat, (unsigned long)row); if (ns > 1) fprintf(f, " %lu", (unsigned long)ns); fputc('\n', f); fwrite(buf.contents, 1, sz * ns, f); fclose(f); }
     const uint8_t *p = buf.contents;
     MLOG("[texraw] ser=%llu %lux%lu format %lu type %lu → %s; first bytes %02x %02x %02x %02x %02x %02x %02x %02x", (unsigned long long)serial, (unsigned long)w, (unsigned long)h, (unsigned long)t.pixelFormat, (unsigned long)t.textureType, path, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
@@ -12942,7 +13038,7 @@ static void td_dump(void) {
         id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
         MTLBlitOption bo = t.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone;   // depth-stencil: the 32-bit float depth plane only
         [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, dz) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:img options:bo];
-        [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        [b endEncoding]; [cb commit]; [cb waitUntilCompleted]; hcb3(cb, HCB_DIAG, "DM_NVN_TEXRAW readback");
         char path[1024]; snprintf(path, sizeof path, g_td_path, (int)ser); strlcat(path, ".raw", sizeof path);
         FILE *f = fopen(path, "wb"); if (f) { fprintf(f, "%lu %lu %lu %lu %zu\n", (unsigned long)w, (unsigned long)h, (unsigned long)dz, (unsigned long)t.pixelFormat, row); fwrite(buf.contents, 1, img * dz, f); fclose(f); }
         MLOG("[texraw] ser=%llu %lux%lux%lu format %lu → %s", ser, (unsigned long)w, (unsigned long)h, (unsigned long)dz, (unsigned long)t.pixelFormat, path);
@@ -12957,7 +13053,7 @@ static void td_dump(void) {
             id<MTLBuffer> rb = [g_dev newBufferWithLength:rw * rh * bpp options:MTLResourceStorageModeShared];
             id<MTLCommandBuffer> rc = q_cb(); id<MTLBlitCommandEncoder> bb = [rc blitCommandEncoder];
             [bb copyFromTexture:t sourceSlice:0 sourceLevel:lv sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(rw, rh, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:rw * bpp destinationBytesPerImage:rw * rh * bpp];
-            [bb endEncoding]; [rc commit]; [rc waitUntilCompleted];
+            [bb endEncoding]; [rc commit]; [rc waitUntilCompleted]; hcb3(rc, HCB_DIAG, "DM_NVN_SNAPRAW readback");
             char rp_[1024]; snprintf(rp_, sizeof rp_, g_td_path, (int)(ser * 100 + lv));
             if (e.count > 4) { char tail[64]; snprintf(tail, sizeof tail, "_s%03d", [e[4] intValue]); strlcat(rp_, tail, sizeof rp_); }   // TEXSNAP copies of one target: one file per pass
             strlcat(rp_, ".raw", sizeof rp_);
@@ -12973,7 +13069,7 @@ static void td_dump(void) {
         rp.colorAttachments[0].texture = o; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
         [en setRenderPipelineState:ps]; [en setFragmentTexture:v atIndex:0]; [en setFragmentSamplerState:sp atIndex:0];
-        [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding]; [cb commit]; [cb waitUntilCompleted]; hcb3(cb, HCB_DIAG, "DM_NVN_TEXDUMP draw");
         char path[1024]; snprintf(path, sizeof path, g_td_path, (int)(ser * 100 + sl * 10 + lv));
         if (e.count > 4) { snprintf(path, sizeof path, g_td_path, 0); char *dot = strrchr(path, '.'); char ext[16] = ""; if (dot) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
             char tail[64]; snprintf(tail, sizeof tail, "_s%03d_%llu_%lu%s", [e[4] intValue], (unsigned long long)ser, (unsigned long)lv, ext); strlcat(path, tail, sizeof path); }   // TEXSNAP copy
@@ -13139,18 +13235,29 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t made_at; int made; NSUInteger refused[6]; } fx_state;
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
 static id<MTL4Compiler> g_fx_comp;
-static int g_fx_mode = -1;   // 1 = metalfx, 2 = auto (MetalFX for a picture below 1920x1080), 0 = off
-static int fx_mode(void) {
-    if (g_fx_mode >= 0) return g_fx_mode;
-    const char *e = getenv("DM_PRESENT_UPSCALE"); int v = 0;
-    if (e && (!strcmp(e, "metalfx") || !strcmp(e, "1"))) v = 1;
-    else if (e && !strcmp(e, "auto")) v = 2;
-    else if (e && (!strcmp(e, "off") || !strcmp(e, "0"))) v = 0;
-    else if (e && *e) MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx, auto or off; keeping off", e);
-    if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("present upscaling: this GPU has no Metal 4 MetalFX spatial scaler; the present scales bilinearly"); v = 0; }
-    MLOG("present upscaling (DM_PRESENT_UPSCALE): %s", v == 1 ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it"
-         : v == 2 ? "auto, MetalFX's spatial scaler where the picture is shown larger than the game renders it and has stayed below 1920x1080 for 60 presents, else bilinear" : "off, bilinear");
-    return g_fx_mode = v;
+static _Atomic int g_fx_mode = -1;   // 1 = metalfx, 2 = auto (MetalFX for a picture below 1920x1080), 0 = off (nvn_upscale_pick.h UP_*); the live present sets it (fx_mode), a capture reads it
+static _Atomic int g_fx_req = -1;    // the in-game menu's Upscaling (mtl_present_upscale_set, main thread) until the live present takes it at its next present; -1 none
+// The in-game menu's Upscaling while the game runs (front_ios.m dm_setting_live): the live present takes the new mode at its next present (fx_mode, nvn_upscale_pick.h) and restarts
+// Automatic's count itself (fx_encode: the count is the present thread's). A scaler made before is kept, so switching back to a mode that used it makes none for the same sizes
+// (FX_REMAKE_PRESENTS still spaces new ones), and a GPU without the scaler stays bilinear. Nothing the game sees changes
+void mtl_present_upscale_set(const char *mode) {
+    int v = up_parse(mode);
+    if (v < 0) { MLOG("[RED] present upscaling: %s from the in-game menu is not metalfx, auto or off; ignored", mode ? mode : "(none)"); return; }
+    up_post(&g_fx_req, v);
+}
+// fresh: the live present's (NULL for a capture, which never takes the menu's pick): set when the mode in force changed, so that Automatic's count starts again
+static int fx_mode(int *fresh) {
+    int want = -1, v = up_now(&g_fx_mode, &g_fx_req, fresh != NULL, &want);
+    if (fresh) *fresh = 0;
+    if (v >= 0) return v;   // every present but the first and the one after a pick
+    int was = atomic_load_explicit(&g_fx_mode, memory_order_relaxed);
+    if ((v = want) < 0) { const char *e = getenv("DM_PRESENT_UPSCALE"); v = up_parse(e); if (v < 0) { MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx, auto or off; keeping off", e); v = UP_OFF; } }
+    if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("present upscaling: this GPU has no Metal 4 MetalFX spatial scaler; the present scales bilinearly"); v = UP_OFF; }
+    if (v != was) MLOG("present upscaling (%s): %s", want >= 0 ? "in-game menu" : "DM_PRESENT_UPSCALE", v == UP_METALFX ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it"
+         : v == UP_AUTO ? "auto, MetalFX's spatial scaler where the picture is shown larger than the game renders it and has stayed below 1920x1080 for 60 presents, else bilinear" : "off, bilinear");
+    int changed = up_set(&g_fx_mode, v);
+    if (fresh) *fresh = changed;
+    return v;
 }
 // Automatic (DM_PRESENT_UPSCALE=auto): MetalFX only for a picture smaller than 1920x1080, narrower than 1920 or shorter than 1080 (handheld 1280x720, a game presenting
 // 1600x900), and the bilinear pass for a picture of 1080p or more (docked 1920x1080, the taller 1920x1344 of DM_SCREEN_ASPECT): on a phone or an iPad such a picture is
@@ -13183,23 +13290,31 @@ static int fx_auto_step(fx_auto_state *s, int below, NSUInteger cw, NSUInteger c
 int dm_thermal_now(void);    // front_ios.m; hle_nvn.c's weak default (-1) elsewhere
 int dm_low_power_now(void);  // front_ios.m; hle_nvn.c's weak default (0) elsewhere
 #define FX_CALM_NS 30000000000ull
-static int fx_thermal_hold(void) {
-    static int on = -1, held; static uint64_t last, calm_since;
+// wanted: MetalFX is what the live present would draw now. The state is sampled on every live present, wanted or not, so a hold that ended while the present drew bilinearly
+// anyway (Standard, Automatic at 1080p, a stretched picture) has counted its calm by the time MetalFX is wanted again (an in-game menu pick, a docked -> handheld switch).
+// Returns the causes while MetalFX is wanted, else 0; the log lines come only while it is wanted
+static int fx_thermal_hold(int wanted) {
+    static int on = -1, held, said, th; static uint64_t last, calm_since;
     if (on < 0) { const char *e = getenv("DM_THERMAL_CAP"); on = !(e && !strcmp(e, "0")); }
     if (!on) return 0;
     uint64_t now = now_ns();
-    if (now - last < 1000000000ull) return held;
-    last = now;
-    int th = dm_thermal_now(), lp = dm_low_power_now();
-    if (th >= 2 || lp) {
-        calm_since = 0;
-        if (!held) { held = 1; MLOG("present upscaling: bilinear while the device is %s (MetalFX comes back after %llu s of calm; DM_THERMAL_CAP=0 turns this off)", lp ? "in Low Power Mode" : "thermally serious", FX_CALM_NS / 1000000000ull); }
-    } else if (held) {
-        if (!calm_since) calm_since = now;
-        else if (now - calm_since >= FX_CALM_NS) { held = 0; MLOG("present upscaling: MetalFX again (thermal state %d, Low Power Mode off, for %llu s)", th, FX_CALM_NS / 1000000000ull); }
+    if (now - last >= 1000000000ull) {
+        last = now;
+        th = dm_thermal_now(); int lp = dm_low_power_now();
+        if (th >= 2 || lp) { calm_since = 0; held = (th >= 2 ? PM_HEAT : 0) | (lp ? PM_LOW_POWER : 0); }   // the causes, for the frame-rate counter's mark (mtl_fx_power_hold)
+        else if (held) { if (!calm_since) calm_since = now; else if (now - calm_since >= FX_CALM_NS) held = 0; }
     }
+    if (!wanted) return 0;
+    if (held && !said) MLOG("present upscaling: bilinear while the device is %s (MetalFX comes back after %llu s of calm; DM_THERMAL_CAP=0 turns this off)", held & PM_LOW_POWER ? "in Low Power Mode" : "thermally serious", FX_CALM_NS / 1000000000ull);
+    else if (!held && said) MLOG("present upscaling: MetalFX again (thermal state %d, Low Power Mode off, for %llu s)", th, FX_CALM_NS / 1000000000ull);
+    said = held != 0;
     return held;
 }
+// What keeps the live present's MetalFX off now, for the iOS frame-rate counter's mark (front_ios.m): fx_thermal_hold's causes (PM_HEAT, PM_LOW_POWER), 0 while MetalFX runs or is not
+// wanted (Standard, Automatic at 1080p, a stretched picture). The present thread writes it when it changes; the counter reads it once a second
+static _Atomic int g_fx_held;
+static int fx_held_note(int h) { static int was; if (h != was) { was = h; atomic_store_explicit(&g_fx_held, h, memory_order_relaxed); } return h; }   // present thread only
+int mtl_fx_power_hold(void) { return atomic_load_explicit(&g_fx_held, memory_order_relaxed); }
 // MetalFX scales the content (cw x ch) to its rectangle on the canvas (vp) when the rectangle is at least as large in both directions and larger in one, and of the content's shape
 // (within present_viewport's 1 %): a picture stretched to another shape (Picture Stretch) is scaled by the bilinear pass, MetalFX's spatial scaler being made for a uniform scale
 static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
@@ -13211,12 +13326,14 @@ static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
 // remake_wait: fx is the present thread's, whose textures presents still on the GPU may read: a new scaler waits for them and for FX_REMAKE_PRESENTS presents since the last
 static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTexture> raw, const NSUInteger r[4], MTLViewport vp, MTLPixelFormat out_pf, int remake_wait) {
     NSUInteger cw = r[2], ch = r[3], ow = (NSUInteger)vp.width, oh = (NSUInteger)vp.height;
-    int mode = fx_mode(), auto_ok = 1;
+    int fresh = 0, mode = fx_mode(fx == &g_fx_present ? &fresh : NULL), auto_ok = 1;
+    if (fresh) g_fx_auto.left = FX_AUTO_SETTLE;   // a new mode from the in-game menu: Automatic counts its presents below 1080p again (the live present's own count)
     // Automatic: below 1080p only, so no scaler for 1080p. The live present's count runs on every present, also one shown at its own size (fx_wanted false: a 1080p TV,
     // a small window), so a 1080p picture always restarts it
     if (mode == 2) { int below = fx_auto_below(cw, ch); auto_ok = fx == &g_fx_present ? fx_auto_step(&g_fx_auto, below, cw, ch) : below; }
-    if (!mode || !auto_ok || !fx_wanted(vp, cw, ch)) return nil;
-    if (fx == &g_fx_present && fx_thermal_hold()) return nil;   // hot or in Low Power Mode: the bilinear pass (the scaler and its textures are kept for when it comes back)
+    int want = mode && auto_ok && fx_wanted(vp, cw, ch);
+    if (fx == &g_fx_present && fx_held_note(fx_thermal_hold(want))) return nil;   // hot or in Low Power Mode: the bilinear pass (the scaler and its textures are kept for when it comes back)
+    if (!want) return nil;
     if (!fx->sc || fx->in.width != cw || fx->in.height != ch || fx->in.pixelFormat != raw.pixelFormat || fx->out.width != ow || fx->out.height != oh || fx->out.pixelFormat != out_pf) {
         NSUInteger key[6] = {cw, ch, raw.pixelFormat, ow, oh, out_pf};
         if (!memcmp(key, fx->refused, sizeof key)) return nil;
@@ -13389,6 +13506,8 @@ static int up_mfx_encode(NvShader *cs) {
     id<MTLTexture> color = direct ? in : e->in, result = direct ? out : e->out;
     if (!direct && !copy_t2t_draw(in, color, 0, 0, 0, 0, &ir, &at0, 0, 0)) { g_up_mfx_kept++; return 0; }   // into RGBA16F at the origin (a nearest draw: same size)
     id<MTL4ComputeCommandEncoder> ce = [g_cb computeCommandEncoder];   // as dlss_eval: MetalFX opens encoders of its own, which take no barrier
+    gd_pass_begin(&g_gd, GD_METALFX, (uint32_t)atomic_load_explicit(&g_cur_frame, memory_order_relaxed), 0, (unsigned)orr.width, (unsigned)orr.height, 1, (unsigned)result.pixelFormat, 0, 1);   // its record (g_gd): the output rectangle, and the game's shader it stands in for
+    if (gd_count(&g_gd, (__bridge const void *)cs)) gd_prog(&g_gd, (__bridge const void *)cs, cs->key64, 0);
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];
     [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
     [ce endEncoding];
@@ -13455,7 +13574,8 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
     [options addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         (void)al; (void)cb; (void)raw; (void)fx.sc;   // keep the Metal 4 commands, source view and scaler alive too
         res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out);
-        if (f.error) MLOG("[RED] offscreen present: %s", f.error.description.UTF8String);
+        gpu_busy_note(f.GPUStartTime, f.GPUEndTime);
+        if (f.error) { char dt[64]; snprintf(dt, sizeof dt, "%lux%lu%s", (unsigned long)out.width, (unsigned long)out.height, kind == PRESENT_METALFX ? ", through MetalFX" : ""); hcb_fail(HCB_OFFSCREEN, -1, f.error, dt); }
         done(f.error ? PRESENT_FAILED : kind);
     }];
     [g_q4 commit:&cb count:1 options:options];
@@ -13518,7 +13638,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         [b copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:w * h * 4];
         [b endEncoding];
         unsigned long long n = g_present_n, tns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-        [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; const uint8_t *q = rb.contents; uint64_t sum = 0;
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { hcb3(c, HCB_DIAG, "DM_NVN_REGLUM readback"); const uint8_t *q = rb.contents; uint64_t sum = 0;
             uint8_t g[4096]; NSUInteger ng = 0;   // Subsampled grayscale thumbnail (every 4th row / column, at most 4096 points), recorded along with the mean, for per-frame image correlation analysis
             for (NSUInteger y = 0; y < h; y += 4) for (NSUInteger x = 0; x < w && ng < sizeof g; x += 4) { const uint8_t *px = q + 4 * (y * w + x); g[ng++] = (uint8_t)((px[0] + px[1] + px[2]) / 3); }
             for (NSUInteger k = 0; k < w * h; k++) sum += q[4 * k] + q[4 * k + 1] + q[4 * k + 2];
@@ -13569,7 +13689,8 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     [cb endCommandBuffer];
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
-        if (f.error) MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String);
+        gpu_busy_note(f.GPUStartTime, f.GPUEndTime);
+        if (f.error) { char dt[48]; snprintf(dt, sizeof dt, "present ticket %llu", (unsigned long long)ticket); hcb_fail(fx_kind ? HCB_DISPLAY_FX : HCB_DISPLAY, -1, f.error, dt); }   // at errors 1, 2, 4 ... (it was every error)
         pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
         present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind); pthread_mutex_unlock(&g_pq_mu);
     }];
@@ -13939,15 +14060,22 @@ static uint64_t snap_take(const tex_t *t) {
     [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];   // the game's next writes to its texture come after the copy
     [ce endEncoding]; [cb endCommandBuffer];
     uint64_t v = ++g_snap_v;
+    // Its outcome: the copy had no feedback handler, so a fault in it showed only as the victims after it (the iPhone's GPU resets with Frame buffering on had only victims' lines)
+    unsigned sw = (unsigned)src.width, sh = (unsigned)src.height, spf = (unsigned)src.pixelFormat;
+    MTL4CommitOptions *so = [MTL4CommitOptions new];
+    [so addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        gpu_busy_note(f.GPUStartTime, f.GPUEndTime);
+        if (f.error) { char dt[96]; snprintf(dt, sizeof dt, "ring slot %d, %ux%u format %u, copy %llu", k, sw, sh, spf, (unsigned long long)v); hcb_fail(HCB_SNAP, -1, f.error, dt); }
+    }];
     if (rec_on() && g_rb_started) {   // a block of the encode thread's queue, behind the frame's work (see above)
         if (on_sub_thread()) rec_publish();   // what the submitting thread recorded outside a submission goes first
         rec_blk *b = rec_own_begin();
-        rec_t *r = rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = 0; r->a[1] = rec_obj(cb);
+        rec_t *r = rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = rec_obj(so); r->a[1] = rec_obj(cb);
         r = rec_own_put(b, RO_SIGNAL, 1); r->a[0] = rec_obj(g_snap_ev); r->a[1] = v;
         r = rec_own_put(b, RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_snap_cmt; r->a[1] = v;
         rec_own_push(b);
     } else {
-        pthread_mutex_lock(&g_res_mu); [g_q4 commit:&cb count:1]; [g_q4 signalEvent:g_snap_ev value:v]; pthread_mutex_unlock(&g_res_mu);
+        pthread_mutex_lock(&g_res_mu); [g_q4 commit:&cb count:1 options:so]; [g_q4 signalEvent:g_snap_ev value:v]; pthread_mutex_unlock(&g_res_mu);
         atomic_store(&g_snap_cmt, v);
     }
     g_snap[k].ev = v;

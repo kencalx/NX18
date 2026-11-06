@@ -45,6 +45,7 @@ Choose offline mode at the network prompt, then New Game and English voices. Adv
 - [Needle shader containers in main and GFD archives](../../../docs/reference/shaders.md#needle-shader-containers-in-main-and-gfd-archives): descriptor-based extraction of NVN control/code sections.
 
 - [Texture clears with partial channel masks or regions](../../../docs/reference/rendering.md#texture-clears-with-partial-channel-masks-or-regions): a load/store draw applies the requested write mask and rectangle.
+- [The power line's GPU time on iOS](../../../docs/reference/frame-rate.md#the-power-lines-gpu-time-on-ios): `GPU 0.0 ms/s` in every window on the iPhone 18 Pro Max; the line now gives the host's own GPU busy time.
 
 ## Open
 
