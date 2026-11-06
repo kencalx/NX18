@@ -192,8 +192,8 @@ int main(void) { @autoreleasepool {
         EXPECT("guard: the identity names this executable's build", 1, ident.length && ![ident hasSuffix:@"host unknown"]);
         setenv("DM_PSO_BUNDLE", bundle.UTF8String, 1);
         // planted: starts with it did not get past their first frames (as many in a row as this profile needs to leave it out)
-        int out = PSO_GUARD_NEED > 1 ? PG_WITH2 : PG_WITH;
-        pg_format(txt, sizeof txt, out, os, ident.UTF8String); put(rec, @(txt));
+        int out = PSO_GUARD_NEED > 1 ? PSG_WITH2 : PSG_WITH;
+        psg_format(txt, sizeof txt, out, os, ident.UTF8String); put(rec, @(txt));
         // the Mac's default: the guard is off, the record is neither read nor written
         unsetenv("DM_PSO_BUNDLE_GUARD");
         NSMutableArray *list = [NSMutableArray array]; g_arch_bundle = nil; pso_bundle_open(list);
@@ -203,33 +203,33 @@ int main(void) { @autoreleasepool {
         setenv("DM_PSO_BUNDLE_GUARD", "1", 1);
         [list removeAllObjects]; g_arch_bundle = nil; pso_bundle_open(list);
         EXPECT("guard: planted record, archive left out", 0, list.count + (g_arch_bundle != nil));
-        EXPECT("guard: watched without it", PG_WITHOUT, g_pg.armed);
-        EXPECT("guard: the record says so before the first frame", PG_WITHOUT, pg_load(&g_pg));
-        // past its window without it (the prepare step's end with no compile of the prebuild under way, then PG_FRAMES presents): it stays out, start after start
-        pso_guard_prepared(); for (int i = 0; i < PG_FRAMES; i++) pso_guard_frame();
-        for (int i = 0; i < 500 && atomic_load(&g_pg.watching); i++) usleep(10000);   // pg_pass runs on a utility queue
-        EXPECT("guard: past its window", 0, atomic_load(&g_pg.watching));
-        EXPECT("guard: skip on disk", PG_SKIP, pg_load(&g_pg));
+        EXPECT("guard: watched without it", PSG_WITHOUT, g_psg.armed);
+        EXPECT("guard: the record says so before the first frame", PSG_WITHOUT, psg_load(&g_psg));
+        // past its window without it (the prepare step's end with no compile of the prebuild under way, then PSG_FRAMES presents): it stays out, start after start
+        pso_guard_prepared(); for (int i = 0; i < PSG_FRAMES; i++) pso_guard_frame();
+        for (int i = 0; i < 500 && atomic_load(&g_psg.watching); i++) usleep(10000);   // psg_pass runs on a utility queue
+        EXPECT("guard: past its window", 0, atomic_load(&g_psg.watching));
+        EXPECT("guard: skip on disk", PSG_SKIP, psg_load(&g_psg));
         pso_bundle_open(list);
         EXPECT("guard: skip, archive left out again", 0, list.count + (g_arch_bundle != nil));
         // DM_PSO_BUNDLE_GUARD=0: the record is not read, the archive opens
         setenv("DM_PSO_BUNDLE_GUARD", "0", 1); pso_bundle_open(list); setenv("DM_PSO_BUNDLE_GUARD", "1", 1);
         EXPECT("guard off: opened", 1, list.count == 1 && g_arch_bundle != nil);
-        EXPECT("guard off: the record left as it was", PG_SKIP, pg_load(&g_pg));
+        EXPECT("guard off: the record left as it was", PSG_SKIP, psg_load(&g_psg));
         // no record: the archive opens and the record says a start with it is under way; the background puts it back, the foreground writes it again, the window clears it
         [NSFileManager.defaultManager removeItemAtPath:rec error:nil]; [list removeAllObjects]; g_arch_bundle = nil; pso_bundle_open(list);
         EXPECT("guard: no record, opened", 1, list.count == 1 && g_arch_bundle != nil);
-        EXPECT("guard: written before Metal read it", PG_WITH, pg_load(&g_pg));
+        EXPECT("guard: written before Metal read it", PSG_WITH, psg_load(&g_psg));
         mtl_pso_guard_away(1, 1); EXPECT("guard: in the background, no record", 0, [NSFileManager.defaultManager fileExistsAtPath:rec]);
-        mtl_pso_guard_away(1, 0); EXPECT("guard: back, written again", PG_WITH, pg_load(&g_pg));
-        pso_guard_mark("the test's prepare step"); for (int i = 0; i < PG_FRAMES; i++) pso_guard_frame();
-        for (int i = 0; i < 500 && atomic_load(&g_pg.watching); i++) usleep(10000);
+        mtl_pso_guard_away(1, 0); EXPECT("guard: back, written again", PSG_WITH, psg_load(&g_psg));
+        pso_guard_mark("the test's prepare step"); for (int i = 0; i < PSG_FRAMES; i++) pso_guard_frame();
+        for (int i = 0; i < 500 && atomic_load(&g_psg.watching); i++) usleep(10000);
         EXPECT("guard: the record cleared after the window", 0, [NSFileManager.defaultManager fileExistsAtPath:rec]);
         // a record of another system build is no record: the archive is tried again
-        pg_format(txt, sizeof txt, PG_SKIP, "0A000", ident.UTF8String); put(rec, @(txt));
+        psg_format(txt, sizeof txt, PSG_SKIP, "0A000", ident.UTF8String); put(rec, @(txt));
         [list removeAllObjects]; g_arch_bundle = nil; pso_bundle_open(list);
         EXPECT("guard: another system build's record, opened", 1, list.count == 1 && g_arch_bundle != nil);
-        int err = 0; pg_pass(&g_pg, &err);
+        int err = 0; psg_pass(&g_psg, &err);
         unsetenv("DM_PSO_BUNDLE_GUARD");
         g_arch_bundle = real;
     }

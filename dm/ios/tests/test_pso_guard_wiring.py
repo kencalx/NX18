@@ -26,7 +26,7 @@ def body(src, header):
 class Wiring(unittest.TestCase):
     def setUp(self):
         self.guard = read('dm/gfx/nvn/nvn_pso_guard.h'); self.nvn = read('dm/gfx/nvn/nvn_mtl.m'); self.hle = read('dm/gfx/nvn/hle_nvn.c')
-        self.why = {k: int(v) for k, v in re.findall(r'PG_AWAY_(\w+) = (\d+)', self.guard)}
+        self.why = {k: int(v) for k, v in re.findall(r'PSG_AWAY_(\w+) = (\d+)', self.guard)}
 
     def test_the_away_reasons_agree(self):   # hle_nvn.c passes them as numbers (it does not include the header); nvn_mtl.h documents them
         self.assertEqual(self.why, {'BACKGROUND': 1, 'INACTIVE': 2, 'EXIT': 4})
@@ -58,11 +58,27 @@ class Wiring(unittest.TestCase):
         self.assertIn('f\'#define DM_GAME_PSO_MTL4 {int(p4 == "on")}\'', read('dm/games/game.py'))
         begin = body(self.nvn, 'static int pso_guard_begin(NSString *p) {')
         self.assertIn('if (!(e && *e ? strcmp(e, "0") != 0 : TARGET_OS_IPHONE)) {', begin)   # on by default on iOS only; 0 / 1 override
-        self.assertIn('pg_begin(&g_pg, rec.fileSystemRepresentation, os, id_.UTF8String, PSO_GUARD_NEED)', begin)
-        self.assertNotRegex(begin, r'g_pg\.(found|armed|err)')   # the verdict as pg_begin copied it under its lock, not the guard's fields
+        self.assertIn('psg_begin(&g_psg, rec.fileSystemRepresentation, os, id_.UTF8String, PSO_GUARD_NEED)', begin)
+        self.assertNotRegex(begin, r'g_psg\.(found|armed|err)')   # the verdict as psg_begin copied it under its lock, not the guard's fields
         self.assertIn('if (!pso_guard_begin(p)) return;', body(self.nvn, 'static void pso_bundle_open('))
         row = next(ln for ln in read('docs/env_switches.tsv').splitlines() if ln.startswith('DM_PSO_BUNDLE_GUARD\t'))
         self.assertIn('on by default on iOS', row); self.assertIn('off by default on the Mac', row)
+
+    def test_names_are_its_own(self):
+        """nvn_mtl.m includes the header at the top, and its GPU profiler (DM_NVN_GPUPROF) already has file-scope pg_ names (a pg_pass type, a g_pg int): the guard's first
+        version used the same prefix, and its pg_pass function and g_pg variable broke every build of nvn_mtl.m. Every name the header defines carries psg_ / PSG_, and
+        nothing else in the files that include it defines one"""
+        defined = set(re.findall(r'^(?:static inline \w+ \**|typedef struct \{[^}]*\} |#define |static const char \*const )(\w+)', self.guard, re.M))
+        defined |= set(re.findall(r'\b(PSG_[A-Z0-9_]+)\s*(?:=|,|\})', self.guard))
+        self.assertTrue(defined)
+        for name in defined: self.assertRegex(name, r'^(psg_|PSG_)', name)
+        for rel in ('dm/gfx/nvn/nvn_mtl.m', 'dm/gfx/tests/t_pso_bundle.m', 'dm/gfx/tests/t_pso_guard.c'):
+            src = read(rel)
+            for name in defined:
+                n = re.escape(name)
+                self.assertNotRegex(src, rf'(?m)^\s*(?:#define\s+{n}\b|typedef\b.*\b{n}\s*;|(?:static\s+)?(?:inline\s+)?[\w\s\*]+\b{n}\s*\([^;)]*\)\s*\{{)', f'{rel} defines {name}, a name of nvn_pso_guard.h')
+        for var in ('g_psg', 'g_psg_why'):   # the guard's own globals in nvn_mtl.m: one definition each
+            self.assertEqual(len(re.findall(rf'(?m)^static\b[^;=\n]*\b{var}\s*(?:=[^;\n]*)?;', self.nvn)), 1, var)
 
 
 if __name__ == '__main__':
