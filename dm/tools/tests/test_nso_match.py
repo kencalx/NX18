@@ -69,7 +69,7 @@ def imported(name, plt=0x1800, slot=0x2500):
 class Matching(unittest.TestCase):
     def setUp(self):
         self.original = image({0x100: caller(0x100, 0x500), 0x500: [0xd2800020, RET]})
-        self.rule = Image(self.original, 0x2000).recipe(0x108, 'e00317aa', 'e0124091', 'heap')
+        self.rule: dict = Image(self.original, 0x2000).recipe(0x108, 'e00317aa', 'e0124091', 'heap')   # dict: the tests replace its cuts
 
     def test_relocated_function_callee_and_data_addresses(self):
         new = image({0x800: caller(0x800, 0x1200, 0x2980), 0x1200: [0xd2800020, RET]})

@@ -71,6 +71,7 @@ for n in names:
 # touching it), u32 0, i64 image offset, u64 length, u64 offset in the v section. Role bits: fps 1, ultrawide 2
 ROLE = {'fps': 1, 'ultrawide': 2}
 def variants(n):
+    assert ref is not None   # set from the arguments or dst above
     f = os.path.join(out, f'{n}.variants')
     if not os.path.exists(f): return
     rows = []

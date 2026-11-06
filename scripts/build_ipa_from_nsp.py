@@ -1212,6 +1212,7 @@ def repo_module(repo, rel):   # a repository module loaded from its own file, no
     st = p.stat(); k = (str(p.resolve()), st.st_size, st.st_mtime_ns)
     if k not in _REPO_MODULES:
         spec = importlib.util.spec_from_file_location(f'_repo_{p.stem}_{len(_REPO_MODULES)}', p)
+        assert spec and spec.loader, p
         mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
         _REPO_MODULES[k] = mod
     return _REPO_MODULES[k]
@@ -1660,7 +1661,8 @@ def variant_runs_cached(gm, patched, rw, m, module, key, env):
     try: runs, err = gm.variant_runs(patched, rw, m, nso.read(module).image), None
     except gm.ModError as e: runs, err = None, e
     tmp = f.with_name(f.name + '.tmp')
-    try: tmp.write_text(json.dumps({'key': ck, 'error': str(err)} if err else {'key': ck, 'runs': [[k, fo, io, data.hex()] for k, fo, io, data in runs]})); os.replace(tmp, f)
+    entry = {'key': ck, 'error': str(err)} if err or runs is None else {'key': ck, 'runs': [[k, fo, io, data.hex()] for k, fo, io, data in runs]}   # runs is None only with err
+    try: tmp.write_text(json.dumps(entry)); os.replace(tmp, f)
     except OSError: pass   # the next build computes them again
     if err: raise err
     return runs

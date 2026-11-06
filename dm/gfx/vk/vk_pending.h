@@ -56,8 +56,8 @@ static inline void vkp_unqueue(vkp_pool *g, vkp_t *p) {   // under the lock
 }
 static inline void vkp_front(vkp_pool *g, vkp_t *p) {   // under the lock: a queued compile someone waits for is the next handed to Metal
     if (!p->queued || g->qhead == p) return;
-    vkp_unqueue(g, p);   // not the head, so the queue still has one
-    p->queued = 1; p->qnext = g->qhead; g->qhead->qprev = p; g->qhead = p;
+    vkp_unqueue(g, p);   // not the head, so the queue still has one (the else is for the static analyzer, which cannot see that)
+    p->queued = 1; p->qnext = g->qhead; if (g->qhead) g->qhead->qprev = p; else g->qtail = p; g->qhead = p;
 }
 // After vkp_begin, once the compile is ready to go: 1 = the caller hands it to Metal now; 0 (queue only, limit compiles at Metal already) = it waits in the queue, and
 // the vkp_end that frees a slot returns it. queue 0 (DM_VK_PSO_ASYNC=0: the creating thread compiles it) always takes a slot, for the count

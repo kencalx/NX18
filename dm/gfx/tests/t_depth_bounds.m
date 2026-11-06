@@ -45,7 +45,7 @@ int main(void) { @autoreleasepool {
     static prog_t pg = {.serial = 910601}; NvProg *program = [NvProg new];
     program->sh[0] = [NvShader new]; program->sh[0]->fn = [lib newFunctionWithName:@"v"];
     program->sh[1] = [NvShader new]; program->sh[1]->fn = [lib newFunctionWithName:@"f"]; program->sh[1]->stage = 1; serial_put(pg.serial, program);
-    tex_t t = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 910602}, z = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 910603};
+    tex_t t = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 910602}, z = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 910603};   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): serial_put keeps the program for the whole test, as the host's serial table does
     t.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8, .width = 8, .height = 8, .depth = 1, .levels = 1, .samples = 1};
     z.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_DEPTH32F, .width = 8, .height = 8, .depth = 1, .levels = 1, .samples = 1};
     state_reset(); memset(&R, 0, sizeof R);

@@ -257,7 +257,7 @@ int main(void) {
         pthread_join(th, NULL); g_prog_run = 0; pthread_join(pt, NULL);
         if (g_prog_gap < VKP_SLOW_NS / 2) CHECK(g_slow_calls == before, "a long wait while compiles keep ending is not reported (%d)", g_slow_calls - before);
         else printf("the wait with progress not checked: this machine left %.0f ms between two compiles\n", g_prog_gap / 1e6);
-        vkp_rec r; CHECK(vkp_take(&g_pp, vkp_clock(), 0, &r) && r.nwait == 1 && r.wait_ns >= 150000000ull, "the wait counted (%.0f ms)", r.wait_ns / 1e6);
+        vkp_rec r = {0}; CHECK(vkp_take(&g_pp, vkp_clock(), 0, &r) && r.nwait == 1 && r.wait_ns >= 150000000ull, "the wait counted (%.0f ms)", r.wait_ns / 1e6);   // {0}: the message reads it when vkp_take fails
         CHECK(vkp_drop(&p->pend), "freed by vkDestroyPipeline"); pipe_free(p);
     }
     stress(4, 3, 6);   // twice the compiler's workers, as hle_vk.m sets it

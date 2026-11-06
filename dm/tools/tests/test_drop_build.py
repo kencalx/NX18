@@ -103,7 +103,7 @@ class DragHere(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         src = app.read_text()
         m = re.search(r'^property buildScript : "((?:[^"\\]|\\.)*)"$', src, re.M)
-        self.assertTrue(m, src)
+        assert m is not None, src
         self.assertEqual(re.sub(r'\\(.)', r'\1', m.group(1)), str(self.repo / 'scripts/drop_build.sh'), 'the path as one AppleScript string')
         self.assertIn('property targetDevice : "ipad"', src)
         self.assertEqual(src.count('do script'), 1, 'one Terminal window for every folder dropped together')

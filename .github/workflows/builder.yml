@@ -1,0 +1,40 @@
+# Nintanium Builder (builder/, a SwiftUI Mac app): compiled on every change to it, with the same command builder/make_app.sh runs, so a Swift 6 error shows here instead
+# of on the Mac that builds the games. A workflow of its own, so a Builder that does not compile does not turn the host's tests red, and the other way round.
+name: builder
+
+on:
+  pull_request:
+    paths: ['builder/**', .github/workflows/builder.yml]
+  push:
+    branches: [main]
+    paths: ['builder/**', .github/workflows/builder.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: builder-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: swift build (release, arm64)
+    runs-on: xcode-27
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Build the app bundle (builder/make_app.sh)
+        run: builder/make_app.sh "$RUNNER_TEMP/builder" 2>&1 | tee builder-build.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: logs-builder
+          path: builder-build.log
+          retention-days: 7

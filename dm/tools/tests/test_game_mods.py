@@ -547,6 +547,7 @@ class VariantPool(unittest.TestCase):
 
     def setUp(self):
         spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
+        assert spec and spec.loader
         self.nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.nsp)
         t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
         self.root = Path(t.name); self.said = []

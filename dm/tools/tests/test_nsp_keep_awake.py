@@ -7,13 +7,15 @@ import subprocess
 import sys
 import time
 import types
+from typing import Any
 import unittest
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 SCRIPT = REPO / 'scripts/build_ipa_from_nsp.py'
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', SCRIPT)
-nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
+assert spec and spec.loader
+nsp: Any = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)   # Any: the tests set its CAFFEINATE
 
 
 class KeepAwake(unittest.TestCase):
@@ -36,7 +38,8 @@ class KeepAwake(unittest.TestCase):
         self.assertIs(nsp.CAFFEINATE, p.return_value)
 
     def test_none_off_a_mac_in_spyder_without_caffeinate_or_with_the_switch(self):
-        for kw in (dict(platform='linux'), dict(ipython=True), dict(exists=False), dict(env={'DM_KEEP_AWAKE': '0'})):
+        cases: tuple[dict[str, Any], ...] = (dict(platform='linux'), dict(ipython=True), dict(exists=False), dict(env={'DM_KEEP_AWAKE': '0'}))
+        for kw in cases:
             with self.subTest(**kw):
                 nsp.CAFFEINATE = None
                 self.run_it(**kw).assert_not_called(); self.assertIsNone(nsp.CAFFEINATE)
@@ -78,6 +81,7 @@ class KeepAwake(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if k != 'DM_KEEP_AWAKE'}
         child = subprocess.Popen([sys.executable, '-c', code, str(SCRIPT)], stdout=subprocess.PIPE, text=True, env=env)
         try:
+            assert child.stdout
             caf = int(child.stdout.readline())
             args = subprocess.run(['ps', '-o', 'args=', '-p', str(caf)], capture_output=True, text=True).stdout.split()
             self.assertEqual(args[1:], ['-i', '-w', str(child.pid)])

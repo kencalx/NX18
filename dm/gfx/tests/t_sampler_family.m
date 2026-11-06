@@ -75,6 +75,7 @@ static void probe_bias(float bias) {
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = rt; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore; rp.colorAttachments[0].clearColor = MTLClearColorMake(-1, -1, -1, -1);
     id<MTLBuffer> out = [g_dev newBufferWithLength:8 * 8 * 16 options:MTLResourceStorageModeShared];
+    if (!rt || !out) { printf("RESULT error no render target or read-back buffer\n"); return; }
     id<MTLCommandBuffer> cb = q_cb(); id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:rp];
     [re setRenderPipelineState:ps]; [re setFragmentTexture:t atIndex:0]; [re setFragmentSamplerState:s atIndex:0];
     [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [re endEncoding];
@@ -94,7 +95,8 @@ static void probe_reduction(int reduction) {
     if (!s) { printf("RESULT nil -1 %d\n", diag); return; }
     id<MTLTexture> t = tex_new(MTLPixelFormatR8Unorm, 2, NO); const uint8_t px[4] = { 51, 102, 153, 204 };
     [t replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0 withBytes:px bytesPerRow:2];
-    NSError *e = nil; id<MTLComputePipelineState> p = [g_dev newComputePipelineStateWithFunction:[probe_lib() newFunctionWithName:@"kr"] error:&e];
+    id<MTLFunction> fn = [probe_lib() newFunctionWithName:@"kr"]; if (!fn) { printf("RESULT error no function kr\n"); return; }
+    NSError *e = nil; id<MTLComputePipelineState> p = [g_dev newComputePipelineStateWithFunction:fn error:&e];
     if (!p) { printf("RESULT error no compute pipeline: %s\n", e.localizedDescription.UTF8String); return; }
     id<MTLBuffer> out = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
@@ -111,7 +113,8 @@ static void probe_border(MTLPixelFormat pf) {
     id<MTLTexture> t = tex_new(pf, 2, NO);
     if (!t) { printf("RESULT error no texture of Metal format %lu\n", (unsigned long)pf); return; }
     const uint32_t ones[4] = { ~0u, ~0u, ~0u, ~0u }; [t replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0 withBytes:ones bytesPerRow:2 * (pf == MTLPixelFormatRGBA8Unorm ? 4 : 2)];
-    NSError *e = nil; id<MTLComputePipelineState> p = [g_dev newComputePipelineStateWithFunction:[probe_lib() newFunctionWithName:@"kb"] error:&e];
+    id<MTLFunction> fn = [probe_lib() newFunctionWithName:@"kb"]; if (!fn) { printf("RESULT error no function kb\n"); return; }
+    NSError *e = nil; id<MTLComputePipelineState> p = [g_dev newComputePipelineStateWithFunction:fn error:&e];
     if (!p) { printf("RESULT error no compute pipeline: %s\n", e.localizedDescription.UTF8String); return; }
     id<MTLBuffer> out = [g_dev newBufferWithLength:48 options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];

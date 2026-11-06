@@ -180,10 +180,14 @@ class PackIpa(unittest.TestCase):
         self.run_pack(); self.assertEqual(self.kept, 0); self.assertEqual(self.reused, 0); self.same_as_fresh()
 
     def test_streamed_reuse_and_fallback_to_stored(self):
-        self.run_pack(big=1024); self.run_pack(big=1024); self.assertEqual(self.reused, 6)
+        t = ('--threads', '4')   # streamed files are deflated in pieces (with one thread they are not, and their rows say so)
+        self.run_pack(None, *t, big=1024); self.run_pack(None, *t, big=1024); self.assertEqual(self.reused, 6)
         (self.rom / 'random.bin').write_bytes(os.urandom(30000))
-        self.run_pack(big=1024); self.assertEqual(self.reused, 5); self.same_as_fresh(big=1024)
-        self.run_pack(); self.assertEqual(self.reused, 6); self.same_as_fresh()
+        self.run_pack(None, *t, big=1024); self.assertEqual(self.reused, 5); self.same_as_fresh(*t, big=1024)
+        # The five files above 1,024 bytes were deflated in pieces: at the default size they are deflated whole, so only the empty file is kept (the index row says pieces);
+        # the archive is then the one a fresh pack writes, and the next pack keeps all six
+        self.run_pack(None, *t); self.assertEqual(self.reused, 1); self.same_as_fresh(*t)
+        self.run_pack(None, *t); self.assertEqual(self.reused, 6)
 
     def test_stream_drains_pool_before_later_jobs(self):
         load, stream, events, submitted = pack.load, pack.Zip.stream, [], []

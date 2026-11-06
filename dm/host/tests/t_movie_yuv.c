@@ -75,7 +75,8 @@ static long rgba_every_value(void) {
             memset(pu, u, W / 2);
             old_rgba(&im, a, W, 1); md_rgba_to(&im, b, W, 1, 0);
             CHECK(!memcmp(a, b, 4 * W), "scalar md_rgba_to differs from md_rgba (full range %d, BT.709 %d, U %d)", full, m, u);
-            if (NEON_RUNS && (md_rgba_to(&im, c, W, 1, 1), memcmp(a, c, 4 * W))) for (int x = 0; x < W; x++) CHECK(!memcmp(a + 4 * x, c + 4 * x, 4), "NEON md_rgba_to differs: full range %d, BT.709 %d, Y %d U %d V %d: %d %d %d, not %d %d %d",
+            if (NEON_RUNS) md_rgba_to(&im, c, W, 1, 1);
+            if (NEON_RUNS && memcmp(a, c, 4 * W) != 0) for (int x = 0; x < W; x++) CHECK(!memcmp(a + 4 * x, c + 4 * x, 4), "NEON md_rgba_to differs: full range %d, BT.709 %d, Y %d U %d V %d: %d %d %d, not %d %d %d",
                                                                                                                          full, m, x & 255, u, x >> 8, c[4 * x], c[4 * x + 1], c[4 * x + 2], a[4 * x], a[4 * x + 1], a[4 * x + 2]);
             n += W;
         }

@@ -768,7 +768,7 @@ VK(vkCreateDescriptorSetLayout, VkResult, VkDevice d, const VkDescriptorSetLayou
         L->imm = zalloc(umax(1, L->total) * sizeof *L->imm);
         for (uint32_t i = 0, k = 0; i < ci->bindingCount; i++) {
             const VkDescriptorSetLayoutBinding *b = src[i]; if (b->binding >= 128) continue;
-            if (L->b[k].imm) memcpy(&L->imm[L->b[k].base], b->pImmutableSamplers, b->descriptorCount * sizeof *L->imm);
+            if (L->b[k].imm) memcpy(&L->imm[L->b[k].base], b->pImmutableSamplers, b->descriptorCount * sizeof *L->imm);   // NOLINT(clang-analyzer-security.ArrayBound): base + descriptorCount <= total, which L->imm holds (the loop above)
             k++;
         }
     }
@@ -1087,7 +1087,8 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci, int async) {
         }
         if (!pd.vertexFunction && !(j && j->vs)) {   // the noted specializations are compiled here, for the red lines DM_VK_PSO_ASYNC=0 gives
             for (int i = 0; j && i < j->n; i++) (void)spec_make(j->cv[i], j->name[i], j->key[i]);
-            LOG("[vk] [RED] pipeline has no usable vertex shader (%s)", keys); pjob_free(j); pipe_done(p, nil, !j); return p;
+            LOG("[vk] [RED] pipeline has no usable vertex shader (%s)", keys); int slot = !j; pjob_free(j); pipe_done(p, nil, slot);
+            return p;   // NOLINT(clang-analyzer-unix.Malloc): pipe_done frees p only once vkDestroyPipeline has marked it gone, and the game has no handle to it before this return
         }
         const VkPipelineVertexInputStateCreateInfo *vi = ci->pVertexInputState;
         MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
@@ -1172,7 +1173,7 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci, int async) {
         if (j) {   // DM_VK_PSO_ASYNC: nothing of ci is read after this. Handed to Metal now, or queued until a compile ends (pipe_done)
             j->pd = pd; strlcpy(j->keys, keys, sizeof j->keys); p->job = j;
             if (vkp_start(&g_pp, &p->pend, 1)) pjob_step(p, j, 0);
-            return p;
+            return p;   // NOLINT(clang-analyzer-unix.Malloc): a completion handler frees p only once vkDestroyPipeline has marked it gone, and the game has no handle to it before this return
         }
         NSError *err = nil;
         id<MTLRenderPipelineState> pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];

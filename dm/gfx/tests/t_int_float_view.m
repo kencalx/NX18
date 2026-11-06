@@ -26,7 +26,8 @@ int main(void) { @autoreleasepool {
         "vertex float4 vs(uint id [[vertex_id]]) { return float4(id == 1 ? 3.0 : -1.0, id == 2 ? 3.0 : -1.0, 0.0, 1.0); }\n"
         "fragment uint fs(float4 p [[position]], texture2d<float> t [[texture(0)]]) { return as_type<uint>(t.read(uint2(p.xy), 0).x); }\n" options:nil error:&e];
     if (!lib) { printf("shader source: %s\n", e.localizedDescription.UTF8String); return 1; }
-    id<MTLComputePipelineState> cp = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"cs"] error:&e];
+    id<MTLFunction> cf = [lib newFunctionWithName:@"cs"]; if (!cf) { printf("shader source: no function cs\n"); return 1; }
+    id<MTLComputePipelineState> cp = [dev newComputePipelineStateWithFunction:cf error:&e];
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"]; pd.colorAttachments[0].pixelFormat = MTLPixelFormatR32Uint;
     id<MTLRenderPipelineState> rp = [dev newRenderPipelineStateWithDescriptor:pd error:&e];
     if (!cp || !rp) { printf("pipelines: %s\n", e.localizedDescription.UTF8String); return 1; }

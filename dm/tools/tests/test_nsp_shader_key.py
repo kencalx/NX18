@@ -2,7 +2,6 @@
 stamp names (dm/gfx/tools/dmsh_chain.py inputs: the INPUT_TABLES and the nvn_* / shader_* rows of game.tsv), so an edit of the profile's notes, test tables or other keys reuses the libraries,
 and an edit of any shader input builds them again. On a real game.py profile in a temporary folder, with the real fingerprint; no game files, keys or Xcode needed"""
 import importlib.util
-import os
 from pathlib import Path
 import shutil
 import sys
@@ -12,6 +11,7 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
+assert spec and spec.loader
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 chain = nsp.repo_module(REPO, 'dm/gfx/tools/dmsh_chain.py')
 gamemod = nsp.repo_module(REPO, 'dm/games/game.py')
@@ -113,7 +113,7 @@ class Step(Base):   # build_shaders itself, with the real fingerprint: reused or
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
     def fake_run(self, cmd, log, env=None, **kw):   # own_compilers.py <pkg> <out>: a library for each target it builds
-        self.ran += 1
+        self.ran += 1; env = env or {}
         log.parent.mkdir(parents=True, exist_ok=True); log.write_text('shaders 1: ok 1\n')
         for d in [Path(cmd[3])] + ([Path(env['IOSOUT'])] if env.get('IOSOUT') else []):
             (d / f'b-{CHAIN}').mkdir(parents=True, exist_ok=True); (d / f'b-{CHAIN}' / 'k_b.metallib').write_bytes(b'x')
