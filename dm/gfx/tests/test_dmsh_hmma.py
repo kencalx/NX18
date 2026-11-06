@@ -246,7 +246,11 @@ int main(int argc, char **argv) {
 # the helper's scratch and shared memory parameters and its pointers become a slice of the device buffer at abi.TG_SLOT, and its barriers order device memory too
 SPILL_HEAD = HEAD.replace('    threadgroup T& operator [] (size_t pos) threadgroup', '    device T& operator [] (size_t pos) device { return elements[pos]; }\n'
                           '    constexpr const device T& operator [] (size_t pos) const device { return elements[pos]; }\n    threadgroup T& operator [] (size_t pos) threadgroup', 1)
-SPILL_KERNEL = SEQ_KERNEL.replace('kernel void check_seq(', 'kernel void main0(').replace('threadgroup spvUnsafeArray<uint, 1280> shm;', 'threadgroup spvUnsafeArray<uint, 8192> shm;')
+# Metal takes the grid position, the workgroup ID and the workgroup count all scalar or all vectors of one size, and tg_spill adds the last two as uint3, as spirv-cross
+# declares every one of them in a game's compute shader; so the run's kernel takes its grid position as uint3 too
+SPILL_KERNEL = (SEQ_KERNEL.replace('kernel void check_seq(', 'kernel void main0(').replace('threadgroup spvUnsafeArray<uint, 1280> shm;', 'threadgroup spvUnsafeArray<uint, 8192> shm;')
+                .replace('uint gid [[thread_position_in_grid]])\n{\n', 'uint3 gid3 [[thread_position_in_grid]])\n{\n    uint gid = gid3.x;\n'))
+assert 'uint3 gid3 [[thread_position_in_grid]]' in SPILL_KERNEL and 'uint gid [[' not in SPILL_KERNEL
 
 
 def spilled():   # the run's source as the build gives it, and the bytes a workgroup takes from the device buffer
