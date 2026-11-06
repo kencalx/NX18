@@ -27,6 +27,11 @@ LINT_DIRS = ('dm/host', 'dm/gfx')
 SKIP = ('dm/third_party/', 'dm/host/gen/', 'dm/gfx/nvn/include/')   # third-party code, generated headers, the NVN API header
 SOURCES = ('.c', '.m', '.mm', '.cpp')
 DEFAULT_GAME = '010015100B514000'
+# Compiler warnings that count as findings, and the sources the database compiles with them (the build does not turn them on). -Wfunction-effects holds the functions
+# marked RT_NONBLOCKING (dm/host/rt_safe.h: Core Audio's render callback and what it calls) to never lock, allocate or call what may: it is off by default, so
+# only the sources named here are checked, and none has a baseline entry, so any finding fails. A call that is safe in practice is marked RT_ACCEPTED with its reason
+DIAG_FLAGS = {'dm/host/hle_audio.c': ('-Wfunction-effects',)}
+KEPT_DIAGS = {'clang-diagnostic-function-effects'}
 
 def llvm_tool(name):
     if os.environ.get('LLVM'):
@@ -95,11 +100,16 @@ def compdb(game):
     return db
 
 def merge_entries(es):
-    # one entry per linted source, the first command that compiles it (the runs go host first), sorted by file
+    # one entry per linted source, the first command that compiles it (the runs go host first), sorted by file; a source in DIAG_FLAGS gets its warnings before -c
     db, seen = [], set()
     for e in es:
         r = rel(e['file'])
-        if linted(r) and r not in seen: seen.add(r); db.append(e)
+        if linted(r) and r not in seen:
+            seen.add(r)
+            if r in DIAG_FLAGS:
+                a = e['arguments']; i = a.index('-c')
+                e = dict(e, arguments=a[:i] + [f for f in DIAG_FLAGS[r] if f not in a] + a[i:])
+            db.append(e)
     return sorted(db, key=lambda e: e['file'])
 
 # ---------- clang-tidy ----------
@@ -121,8 +131,8 @@ def parse_diags(text):
         r = rel(path)
         if not linted(r): continue
         for check in checks.split(','):
-            # the compiler's own warnings are the build's to report; a parse error is kept (the file was not fully checked)
-            if check.startswith('clang-diagnostic-') and check != 'clang-diagnostic-error': continue
+            # the compiler's own warnings are the build's to report; a parse error is kept (the file was not fully checked), and so are those of KEPT_DIAGS
+            if check.startswith('clang-diagnostic-') and check != 'clang-diagnostic-error' and check not in KEPT_DIAGS: continue
             out.append((r, int(ln), int(col), check, msg))
     return out
 

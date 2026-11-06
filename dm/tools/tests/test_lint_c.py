@@ -120,6 +120,14 @@ class ClangTidyOutput(unittest.TestCase):
             ('dm/host/hle_hid.c', 11, 1, 'clang-diagnostic-error', "unknown type name 'foo'"),   # a parse error stays: the file was not fully checked
         ])
 
+    def test_function_effects_findings_are_kept(self):   # -Wfunction-effects (DIAG_FLAGS) is a finding; other compiler warnings stay the build's
+        out = '\n'.join([
+            f"{REPO}/dm/host/hle_audio.c:134:29: warning: function with 'nonblocking' attribute must not call non-'nonblocking' function 'dispatch_semaphore_signal' [clang-diagnostic-function-effects]",
+            f'{REPO}/dm/host/hle_audio.c:12:1: warning: unused variable \'y\' [clang-diagnostic-unused-variable]',
+        ])
+        self.assertEqual(lint.parse_diags(out), [('dm/host/hle_audio.c', 134, 29, 'clang-diagnostic-function-effects',
+                                                  "function with 'nonblocking' attribute must not call non-'nonblocking' function 'dispatch_semaphore_signal'")])
+
 
 class CompileDatabase(unittest.TestCase):
     def test_compile_line(self):
@@ -139,6 +147,17 @@ class CompileDatabase(unittest.TestCase):
                                  e('dm/third_party/libvpx/vpx_dsp/x.c', '-DHOST'), e('dm/host/gen/profile.c', '-DHOST'), e('dm/host/tests/t_fs.c', '-DTEST')])
         self.assertEqual([(lint.rel(x['file']), x['arguments'][1]) for x in db],
                          [('dm/gfx/vk/hle_vk.m', '-DHOST'), ('dm/host/loader.c', '-DHOST'), ('dm/host/tests/t_fs.c', '-DTEST')])
+
+    def test_diag_flags_go_to_their_source_alone(self):   # hle_audio.c gets -Wfunction-effects before -c, once; the tests that include it do not
+        def e(f, *flags): return {'directory': str(REPO), 'file': str(REPO / f), 'arguments': ['clang', *flags, '-c', str(REPO / f)]}
+        db = lint.merge_entries([e('dm/host/hle_audio.c', '-O1', '-Wall'), e('dm/host/hle_hid.c', '-O1'), e('dm/host/tests/t_audio_stats.c', '-O1'),
+                                 e('dm/host/hle_audio.c', '-DTEST')])
+        args = {lint.rel(x['file']): x['arguments'] for x in db}
+        self.assertEqual(args['dm/host/hle_audio.c'], ['clang', '-O1', '-Wall', '-Wfunction-effects', '-c', str(REPO / 'dm/host/hle_audio.c')])
+        self.assertEqual(args['dm/host/hle_hid.c'], ['clang', '-O1', '-c', str(REPO / 'dm/host/hle_hid.c')])
+        self.assertNotIn('-Wfunction-effects', args['dm/host/tests/t_audio_stats.c'])
+        again = lint.merge_entries([e('dm/host/hle_audio.c', '-Wfunction-effects')])
+        self.assertEqual(again[0]['arguments'].count('-Wfunction-effects'), 1)
 
 
 class Against(unittest.TestCase):

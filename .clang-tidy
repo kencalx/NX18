@@ -29,6 +29,7 @@ Checks:
   - clang-analyzer-osx.*
   - misc-redundant-expression
   - misc-misplaced-const
+  - clang-diagnostic-function-effects             # -Wfunction-effects, which lint_c.py turns on for hle_audio.c alone (DIAG_FLAGS): a call that can block in the render callback (rt_safe.h)
 CheckOptions:
   # `if (!strcmp(a, b))` is house style; comparing with a wrong constant (`strcmp(a, b) == 1`) is still reported
   bugprone-suspicious-string-compare.WarnOnImplicitComparison: false

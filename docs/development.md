@@ -310,6 +310,16 @@ Raising `LLVM_VERSION` takes a new baseline in the same change
 (`tidy --rebaseline`; `dm/tools/tests/test_lint_c.py` checks that the two name
 the same release).
 
+Some compiler warnings count as findings too. `DIAG_FLAGS` in `lint_c.py` names
+the sources the database compiles with them, and `KEPT_DIAGS` the warnings it
+keeps. Today that is `-Wfunction-effects` on `dm/host/hle_audio.c`, which holds
+the AudioUnit render callback and the functions it calls (marked
+`RT_NONBLOCKING`, `dm/host/rt_safe.h`) to never lock, allocate or call what
+may. Such a finding has no baseline entry, so any one fails. Move the call out
+of the callback, or mark it `RT_ACCEPTED("reason", ...)` when it cannot hold
+up the thread ([audio reference](reference/audio.md#real-time-safety-of-the-render-callback-rt_nonblocking)).
+The build itself does not turn the warning on.
+
 ### Triage report
 
 `.github/workflows/triage-report.yml` runs `dm/tools/triage_report.py` every

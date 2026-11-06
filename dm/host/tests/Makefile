@@ -72,10 +72,14 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_symbols
 	$(B)/t_crash_summary
 	$(B)/t_mod_rows
+	$(B)/t_audio_route
+	$(B)/t_audio_lifecycle
 run: $(B)/t_nro
 run: $(B)/t_symbols
 run: $(B)/t_crash_summary
 run: $(B)/t_mod_rows
+run: $(B)/t_audio_route
+run: $(B)/t_audio_lifecycle
 # the crash summary's core (../crash_summary.h, ../run_layout.h: plain C, no game profile): the JSON reader, the run's layout record, the summary of a report of each shape
 $(B)/t_crash_summary: t_crash_summary.c ../crash_summary.h ../run_layout.h | $(B)
 	$(CLANG) -std=gnu11 -O1 -g -Wall -Wextra -Werror -o $@ t_crash_summary.c
@@ -88,6 +92,20 @@ $(B)/t_mod_rows: t_mod_rows.c ../mod_rows.h | $(B)
 .PHONY: mod-rows
 mod-rows: $(B)/t_mod_rows
 	$(B)/t_mod_rows
+# the front ends' audio route and latency rules (../audio_route.h: plain C, no game profile or sound device): the renderer's queue, a device buffer longer than it,
+# the once-per-route warning, the Mac device's latency line
+$(B)/t_audio_route: t_audio_route.c ../audio_route.h | $(B)
+	$(CLANG) -std=gnu11 -O1 -g -Wall -Wextra -Werror -o $@ t_audio_route.c
+.PHONY: audio-route
+audio-route: $(B)/t_audio_route
+	$(B)/t_audio_route
+# the iOS audio session's lifecycle (../audio_lifecycle.h: plain C, no game profile or sound device): the interruption notice, iOS 27's lifecycle notices, the scene
+# events and the media services reset in every order, and what real output does after each (front_ios.m feeds it)
+$(B)/t_audio_lifecycle: t_audio_lifecycle.c ../audio_lifecycle.h | $(B)
+	$(CLANG) -std=gnu11 -O1 -g -Wall -Wextra -Werror -o $@ t_audio_lifecycle.c
+.PHONY: audio-lifecycle
+audio-lifecycle: $(B)/t_audio_lifecycle
+	$(B)/t_audio_lifecycle
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c
 .PHONY: symbols
@@ -95,13 +113,13 @@ symbols: $(B)/t_symbols
 	$(B)/t_symbols
 run: $(B)/t_system_event
 run: $(B)/t_audren_work
-$(B)/t_audren_work: t_audren_work.c ../hle_audren.c ../hle.h ../dm.h $(GAME_H) | $(B)
+$(B)/t_audren_work: t_audren_work.c ../hle_audren.c ../audio_route.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audren_work.c
 .PHONY: audren-work
 audren-work: $(B)/t_audren_work
 	$(B)/t_audren_work
 run: $(B)/t_audren_layout
-$(B)/t_audren_layout: t_audren_layout.c ../hle_audren.c ../hle.h ../dm.h $(GAME_H) | $(B)
+$(B)/t_audren_layout: t_audren_layout.c ../hle_audren.c ../audio_route.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audren_layout.c
 .PHONY: audren-layout
 audren-layout: $(B)/t_audren_layout
@@ -163,23 +181,23 @@ $(B)/t_save_sync_metadata: t_save_sync_metadata.c ../save_sync.c ../save_sync.h 
 save-sync: $(B)/t_save_sync $(B)/t_save_sync_metadata
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_metadata $(QUIET)
-$(B)/t_audio: t_audio.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio.c ../hle_bigstack.c -framework AudioToolbox
-$(B)/t_output_stream: t_output_stream.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_output_stream.c ../hle_bigstack.c -framework AudioToolbox
-$(B)/t_audio_spsc: t_audio_spsc.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c ../hle_bigstack.c -framework AudioToolbox
-$(B)/t_audio_stats: t_audio_stats.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_stats.c ../hle_bigstack.c -framework AudioToolbox
+$(B)/t_audio: t_audio.c ../hle_audio.c ../audio_route.h ../rt_safe.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio.c ../hle_bigstack.c -framework AudioToolbox -framework CoreAudio
+$(B)/t_output_stream: t_output_stream.c ../hle_audio.c ../audio_route.h ../rt_safe.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_output_stream.c ../hle_bigstack.c -framework AudioToolbox -framework CoreAudio
+$(B)/t_audio_spsc: t_audio_spsc.c ../hle_audio.c ../audio_route.h ../rt_safe.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c ../hle_bigstack.c -framework AudioToolbox -framework CoreAudio
+$(B)/t_audio_stats: t_audio_stats.c ../hle_audio.c ../audio_route.h ../rt_safe.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_stats.c ../hle_bigstack.c -framework AudioToolbox -framework CoreAudio
 run: $(B)/t_audio_stats
-$(B)/t_audio_device: t_audio_device.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_device.c ../hle_bigstack.c -framework AudioToolbox
+$(B)/t_audio_device: t_audio_device.c ../hle_audio.c ../audio_route.h ../rt_safe.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_device.c ../hle_bigstack.c -framework AudioToolbox -framework CoreAudio
 .PHONY: audio-device
 audio-device: $(B)/t_audio_device
 	$(B)/t_audio_device
 run: audio-device
-$(B)/t_audio_spsc_tsan: t_audio_spsc.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -O1 -fsanitize=thread -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c ../hle_bigstack.c -framework AudioToolbox
+$(B)/t_audio_spsc_tsan: t_audio_spsc.c ../hle_audio.c ../audio_route.h ../rt_safe.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -O1 -fsanitize=thread -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c ../hle_bigstack.c -framework AudioToolbox -framework CoreAudio
 run: $(B)/t_fpslock
 $(B)/t_fpslock: t_fpslock.c ../hle_fpslock.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function $(GINC) -o $@ t_fpslock.c

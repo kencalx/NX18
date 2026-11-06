@@ -16,6 +16,8 @@ static OSStatus mock_start(AudioUnit);
 static OSStatus mock_stop(AudioUnit);
 static OSStatus mock_uninit(AudioUnit);
 static OSStatus mock_dispose(AudioComponentInstance);
+static OSStatus mock_obj_get(AudioObjectID, const AudioObjectPropertyAddress *, UInt32, const void *, UInt32 *, void *);
+static OSStatus mock_obj_size(AudioObjectID, const AudioObjectPropertyAddress *, UInt32, const void *, UInt32 *);
 #define AudioComponentFindNext mock_find
 #define AudioComponentInstanceNew mock_new
 #define AudioUnitGetProperty mock_get
@@ -27,6 +29,8 @@ static OSStatus mock_dispose(AudioComponentInstance);
 #define AudioOutputUnitStop mock_stop
 #define AudioUnitUninitialize mock_uninit
 #define AudioComponentInstanceDispose mock_dispose
+#define AudioObjectGetPropertyData mock_obj_get
+#define AudioObjectGetPropertyDataSize mock_obj_size
 #include "../hle_audio.c"
 __thread _Atomic int dm_host_work;   // defined by the graphics host in a full build
 
@@ -122,6 +126,29 @@ static OSStatus mock_dispose(AudioComponentInstance au) {
     unit.device = kAudioObjectUnknown;
     changed(kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0);
     unit.disposals++; if (device_disposed) dispatch_semaphore_signal(device_disposed); return noErr;
+}
+
+// The device's latency parts as the HAL would give them (au_latency): 10 + the device's ID frames of latency, a safety offset of 20, one output stream (100 + the
+// device's ID) with 30 of its own. Read off the device itself, never through the unit
+static OSStatus mock_obj_get(AudioObjectID o, const AudioObjectPropertyAddress *p, UInt32 qs, const void *q, UInt32 *size, void *data) {
+    assert(!qs && !q && p->mElement == kAudioObjectPropertyElementMain);
+    UInt32 v;
+    if (o == 100 + unit.device) {   // kAudioStreamPropertyLatency is the device latency's selector, asked of the stream in its global scope
+        assert(p->mSelector == kAudioStreamPropertyLatency && p->mScope == kAudioObjectPropertyScopeGlobal); v = 30;
+    } else {
+        assert(o == unit.device && unit.device != kAudioObjectUnknown && p->mScope == kAudioObjectPropertyScopeOutput);
+        if (p->mSelector == kAudioDevicePropertyStreams) {
+            AudioStreamID s = 100 + o; assert(*size >= sizeof s); memcpy(data, &s, sizeof s); *size = sizeof s; return noErr;
+        }
+        assert(p->mSelector == kAudioDevicePropertyLatency || p->mSelector == kAudioDevicePropertySafetyOffset);
+        v = p->mSelector == kAudioDevicePropertyLatency ? 10 + o : 20;
+    }
+    assert(*size == sizeof v); memcpy(data, &v, sizeof v);
+    return noErr;
+}
+static OSStatus mock_obj_size(AudioObjectID o, const AudioObjectPropertyAddress *p, UInt32 qs, const void *q, UInt32 *size) {
+    assert(o == unit.device && !qs && !q && p->mSelector == kAudioDevicePropertyStreams && p->mScope == kAudioObjectPropertyScopeOutput);
+    *size = sizeof(AudioStreamID); return noErr;
 }
 
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
@@ -230,10 +257,16 @@ int main(void) {
     assert(h_au_OpenDef0(out, prm) == RES_OK);
     check_open_publication = 0;
     assert(unit.frames == 240 && unit.writes == 1 && unit.input_formats == 1 && unit.device_listener && unit.format_listener);
+    // the device's latency, logged once at open: device 11 + safety offset 20 + buffer 240 + stream 30 frames at 48 kHz, nothing to warn about
+    assert(g_lat_lines == 1 && g_lat_dev == 1 && !g_lat_warned.n);
+    assert(g_lat_last.device == 11 && g_lat_last.safety == 20 && g_lat_last.buffer == 240 && g_lat_last.stream == 30 && g_lat_last.rate == 48000 && !g_lat_last.missing);
+    changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);   // a notification that changes nothing: no write, no second latency line
+    assert(unit.frames == 240 && unit.writes == 1 && g_lat_lines == 1);
 
     unit.device = 2; unit.rate = 44100; unit.frames = 512;
     changed(kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0);
     assert(unit.frames == 221 && unit.writes == 2);
+    assert(g_lat_lines == 2 && g_lat_dev == 2 && g_lat_last.device == 12 && g_lat_last.buffer == 221 && g_lat_last.rate == 44100);
     // A device's rate can change without a CurrentDevice notification.
     unit.rate = 96000; changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
     assert(unit.frames == 480 && unit.writes == 3);
@@ -255,7 +288,11 @@ int main(void) {
     unit.range.mMaximum = 4096;
     setenv("DM_DBG_AU_FRAMES", "1024", 1);
     changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0); assert(unit.frames == 1024);
+    // 1024 frames at 48 kHz (21.3 ms) is longer than the renderer's 20 ms queue: warned once for the device, not again on its next notification
+    assert(g_lat_warned.n == 1);
+    changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0); assert(unit.frames == 1024 && g_lat_warned.n == 1);
     unit.device = 4; unit.rate = 44100; changed(kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0); assert(unit.frames == 1024);
+    assert(g_lat_warned.n == 2 && g_lat_dev == 4);   // another device: its own warning
     unsetenv("DM_DBG_AU_FRAMES");
     unsigned before = unit.writes; unit.device = kAudioObjectUnknown;
     changed(kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0); assert(unit.writes == before);
@@ -267,6 +304,6 @@ int main(void) {
     unit.device = 1; unit.rate = 48000; unit.init_error = kAudioUnitErr_FailedInitialization;
     aout failed = {.ch = 2};
     assert(au_create(&failed) == kAudioUnitErr_FailedInitialization && !failed.au && unit.disposals == 3);
-    puts("audio device: buffer configuration, blocked start, callback handoff, retry and lifecycle passed");
+    puts("audio device: buffer configuration, device latency, blocked start, callback handoff, retry and lifecycle passed");
     return 0;
 }

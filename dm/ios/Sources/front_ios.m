@@ -19,6 +19,8 @@
 #include "haptics_apple.h"
 #include "save_sync.h"
 #include "power_mark.h"   // the frame-rate counter's heat / Low Power mark (fps_show)
+#include "audio_route.h"  // the audio renderer's queue a granted I/O buffer is held against, once per route (front_ios_audio_settle)
+#include "audio_lifecycle.h"   // the audio session's lifecycle: what each interruption, lifecycle notice and scene event does to real output (front_ios_audio_on)
 #import "CloudSaves.h"
 
 void dm_gamepad_active(void);
@@ -685,37 +687,175 @@ void front_save_failed(int err) {
 // so every callback came up 1.3 ms short and was zero-filled, about 47 gaps per second (crackling; reproducible on the Mac by forcing 1024-frame callbacks: 1999 underruns in 2000 callbacks). Ask for 5 ms and the system picks the nearest it supports;
 // the category is Playback, as a game's or media app's: the ring / silent switch does not mute it (the default SoloAmbient follows the switch, which silenced the game whenever the phone was on silent) and it still interrupts other apps' audio.
 // Set once at boot and again on return to the foreground (the system may reset it after an interruption)
-static int g_session_off;   // the last activation failed (another app or a call still held the session): tried again when the app becomes active
+// The session's lifecycle (audio_lifecycle.h): the background, an interruption, and a rejected activation (another app or a call still held the session: tried again
+// when the app becomes active). All of it runs on the main queue, like the scene callbacks
+static audio_life g_life;
+static void front_ios_audio_settle(double granted_ms);
 void front_ios_audio_session(void) {
     AVAudioSession *s = AVAudioSession.sharedInstance; NSError *e = nil;
     if (![s setCategory:AVAudioSessionCategoryPlayback error:&e]) LOG("[RED] audio session category could not be set: %s", e.localizedDescription.UTF8String);
     [s setPreferredSampleRate:48000 error:nil];
     if (![s setPreferredIOBufferDuration:0.005 error:&e]) LOG("[RED] audio session I/O buffer duration could not be set: %s", e.localizedDescription.UTF8String);
-    g_session_off = ![s setActive:YES error:&e];
-    if (g_session_off) LOG("[RED] audio session activation failed: %s", e.localizedDescription.UTF8String);
-    LOG("audio session: sample rate %.0f Hz, I/O buffer %.2f ms (asked for 5 ms)", s.sampleRate, s.IOBufferDuration * 1000);
+    BOOL ok = [s setActive:YES error:&e];
+    int ended = audio_life_activated(&g_life, ok);   // a granted activation that takes the session back ends the interruption (audio_lifecycle.h)
+    if (!ok) LOG("[RED] audio session activation failed: %s", e.localizedDescription.UTF8String);
+    LOG("audio session: sample rate %.0f Hz, I/O buffer %.2f ms (asked for 5 ms), output latency %.1f ms", s.sampleRate, s.IOBufferDuration * 1000, s.outputLatency * 1000);
+    if (ended) LOG("audio session: active again after %s; resuming", ended == AUDIO_LIFE_RETAKE_RESET ? "the media services reset" : "a deactivation no other app caused");
+    front_ios_audio_settle(s.IOBufferDuration * 1000);
+}
+
+// The route: what the output plays through, at what rate and buffer, and how late, logged on every route change. iOS posts AVAudioSessionRouteChangeNotification on a
+// secondary thread; it is delivered on the main queue, as everything here. The preferences are asked for again, which Apple allows on an active session, at most once a
+// second (a request that itself changes the route does not ask again); the system grants the nearest it supports, and may grant it late (on iOS 18 the buffer was
+// reported to change after the call returned: forum.juce.com/t/bug-fix-in-iosaudioiodevice-trybuffersize-for-ios-18/62818), so front_ios_audio_settle reads it again
+// half a second later. A granted buffer longer than the audio renderer's queue brings back the
+// crackling above for every game that plays through the renderer (docs/reference/audio.md, A device buffer longer than the renderer's queue): a [RED] line, once per route.
+// Logging and the request only: nothing a game sees changes. DM_AUDIO_ROUTE_REAPPLY=0 logs without asking again
+enum { ROUTE_LINES = 32 };   // route lines logged at most (a route that keeps changing would fill the log)
+static int g_route_lines;
+static audio_route_once g_route_warned;   // routes whose long buffer was warned about
+static double g_route_asked;              // when the preferences were last asked for again (system uptime, s)
+// The route's outputs by port type ("Speaker", "BluetoothA2DPOutput", "HDMIOutput", "AirPlay", ...). Not their names: a port's name can be its owner's
+static NSString *route_outputs(AVAudioSessionRouteDescription *r) {
+    NSMutableArray<NSString *> *a = [NSMutableArray array];
+    for (AVAudioSessionPortDescription *p in r.outputs) [a addObject:p.portType];
+    return a.count ? [a componentsJoinedByString:@" + "] : @"none";
+}
+// What tells one route from another for the warning: each output's type and UID (two pairs of headphones differ). Never logged
+static NSString *route_key(AVAudioSessionRouteDescription *r) {
+    NSMutableArray<NSString *> *a = [NSMutableArray array];
+    for (AVAudioSessionPortDescription *p in r.outputs) [a addObject:[NSString stringWithFormat:@"%@/%@", p.portType, p.UID]];
+    return [a componentsJoinedByString:@","];
+}
+static const char *route_reason(NSUInteger r) {
+    switch (r) {
+        case AVAudioSessionRouteChangeReasonNewDeviceAvailable: return "new device available";
+        case AVAudioSessionRouteChangeReasonOldDeviceUnavailable: return "old device unavailable";
+        case AVAudioSessionRouteChangeReasonCategoryChange: return "category change";
+        case AVAudioSessionRouteChangeReasonOverride: return "override";
+        case AVAudioSessionRouteChangeReasonWakeFromSleep: return "wake from sleep";
+        case AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory: return "no suitable route for the category";
+        case AVAudioSessionRouteChangeReasonRouteConfigurationChange: return "route configuration change";
+        default: return "unknown";
+    }
+}
+// Half a second after the buffer was asked for: the buffer again, logged when it moved, and the once-per-route warning when it is longer than the renderer's queue.
+// The warning waits while the session is not the one playing (the background, an interruption, a rejected activation): the buffer is then another session's. The
+// next activation settles again
+static void front_ios_audio_settle(double granted_ms) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * (int64_t)NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        AVAudioSession *s = AVAudioSession.sharedInstance;
+        double io = s.IOBufferDuration, ms = io * 1000;
+        if ((ms > granted_ms + 0.01 || ms < granted_ms - 0.01) && g_route_lines < ROUTE_LINES) {
+            g_route_lines++;
+            LOG("audio session: the I/O buffer settled at %.2f ms (%.2f ms right after the request), output latency %.1f ms%s", ms, granted_ms, s.outputLatency * 1000,
+                g_route_lines == ROUTE_LINES ? "; route lines not logged from here on" : "");
+        }
+        AVAudioSessionRouteDescription *r = s.currentRoute;
+        if (!audio_life_quiet(&g_life) && audren_buffer_over_queue(io) && audio_route_first(&g_route_warned, route_key(r).UTF8String)) {
+            char q[96]; audren_queue_text(q, sizeof q);
+            LOG("[RED] audio session: the I/O buffer of %.2f ms on %s is longer than %s: games that play through the renderer underrun at every callback (crackling)",
+                ms, route_outputs(r).UTF8String, q);
+        }
+    });
+}
+static void front_ios_audio_route(NSUInteger reason) {
+    AVAudioSession *s = AVAudioSession.sharedInstance;
+    double rate = s.sampleRate, ms = s.IOBufferDuration * 1000, lat = s.outputLatency * 1000, now = NSProcessInfo.processInfo.systemUptime;
+    const char *e = getenv("DM_AUDIO_ROUTE_REAPPLY");
+    int off = e && !atoi(e), soon = g_route_asked > 0 && now - g_route_asked < 1.0;
+    NSError *err = nil; BOOL ok = YES; char got[192];
+    if (off) snprintf(got, sizeof got, "not asked again (DM_AUDIO_ROUTE_REAPPLY=0)");
+    else if (soon) snprintf(got, sizeof got, "not asked again (asked %.0f ms ago)", (now - g_route_asked) * 1000);
+    else {
+        g_route_asked = now;
+        [s setPreferredSampleRate:48000 error:nil];
+        ok = [s setPreferredIOBufferDuration:0.005 error:&err];
+        if (ok) snprintf(got, sizeof got, "asked again for 48 kHz and 5 ms: %.0f Hz, I/O buffer %.2f ms, output latency %.1f ms", s.sampleRate, s.IOBufferDuration * 1000, s.outputLatency * 1000);
+        else snprintf(got, sizeof got, "asking again for 5 ms failed: %s", err.localizedDescription.UTF8String ? err.localizedDescription.UTF8String : "no reason given");
+    }
+    if (g_route_lines < ROUTE_LINES) {
+        g_route_lines++;
+        LOG("%saudio route changed (%s): output %s; sample rate %.0f Hz, I/O buffer %.2f ms, output latency %.1f ms; %s%s", ok ? "" : "[RED] ", route_reason(reason),
+            route_outputs(s.currentRoute).UTF8String, rate, ms, lat, got, g_route_lines == ROUTE_LINES ? "; route lines not logged from here on" : "");
+    }
+    front_ios_audio_settle(s.IOBufferDuration * 1000);
 }
 
 // Real audio output is suspended (the silent sink paces the game) while the app is in the background or another audio session has interrupted ours (Siri, an alarm, a call).
 // Without the interruption observer the AudioUnits stayed "started" while iOS no longer called them, and a game waiting for its buffers back lost its sound until restart.
-// All of this runs on the main queue, like the scene callbacks
-static int g_audio_bg, g_audio_intr;
-static void front_ios_audio_apply(void) { dm_audio_suspend(g_audio_bg || g_audio_intr); }
+// Each notice and scene event goes through audio_life_on (audio_lifecycle.h, whose transitions dm/host/tests/t_audio_lifecycle.c runs in every order), and
+// front_ios_audio_do does what it returns: the session set up again, the outputs' units created again, real output or the silent sink (dm_audio_suspend)
+static audio_life_do front_ios_audio_on(int ev) { return audio_life_on(&g_life, ev, NSProcessInfo.processInfo.systemUptime); }
+static void front_ios_audio_do(audio_life_do d) {
+    if (d.act & AUDIO_LIFE_ACTIVATE) front_ios_audio_session();
+    if (d.act & AUDIO_LIFE_RESET_UNITS) dm_audio_reset();
+    if (d.act & AUDIO_LIFE_APPLY) dm_audio_suspend(audio_life_suspended(&g_life));
+}
+// The lifecycle notices' lines, each kind at most LIFE_LINES (a session that keeps changing would fill the log): deactivations, resumptions, "became active"
+enum { LIFE_LINES = 32 };
+static int g_life_lines[3];
+static int life_line(int kind) { return g_life_lines[kind] < LIFE_LINES ? ++g_life_lines[kind] : 0; }
+static const char *life_end(int n) { return n == LIFE_LINES ? "; lines of this notice not logged from here on" : ""; }
 static void front_ios_audio_watch(void) {
     NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+    const char *lc = getenv("DM_AUDIO_LIFECYCLE");
+    g_life.lifecycle = !lc || atoi(lc);
     [nc addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
         NSUInteger type = [n.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue], reason = [n.userInfo[AVAudioSessionInterruptionReasonKey] unsignedIntegerValue];
-        if (type == AVAudioSessionInterruptionTypeBegan) { LOG("audio session: interrupted (reason %lu)", (unsigned long)reason); g_audio_intr = 1; }
-        else {
-            LOG("audio session: interruption ended"); g_audio_intr = 0;
-            if (!g_audio_bg) front_ios_audio_session();
-        }
-        front_ios_audio_apply();
+        if (type == AVAudioSessionInterruptionTypeBegan) { audio_life_do d = front_ios_audio_on(AUDIO_LIFE_BEGAN); LOG("audio session: interrupted (reason %lu)", (unsigned long)reason); front_ios_audio_do(d); }
+        else { audio_life_do d = front_ios_audio_on(AUDIO_LIFE_ENDED); LOG("audio session: interruption ended"); front_ios_audio_do(d); }
+    }];
+    // iOS 27's session lifecycle notices (the deployment target: no availability check), which Apple says to adopt in place of the interruption notice: they "don't get
+    // out of sync when the system can't deliver an end event", and the resumption recommendation is not tied to the interrupting app's end signal
+    // (developer.apple.com/documentation/avfaudio/handling-audio-interruptions). The interruption notice stays (Apple deprecates it after the 26 releases), as do the
+    // becoming-active fallback and the media services reset, until a device shows the new ones arrive; audio_lifecycle.h has what each does. A deactivation with no
+    // interruption context (no other app: a suspension's late notice, a reset) takes the session back when nothing holds it, and "became active" ends an interruption
+    // whose end never came. Each notice is one line. DM_AUDIO_LIFECYCLE=0 leaves them unobserved, and the reset as before them
+    if (g_life.lifecycle) {
+        [nc addObserverForName:AVAudioSessionDidBecomeInactiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+            id c = n.userInfo[AVAudioSessionDeactivationContextKey];
+            AVAudioSessionDeactivationContext *dc = [c isKindOfClass:AVAudioSessionDeactivationContext.class] ? c : nil;
+            AVAudioSessionInterruptionContext *ic = dc.interruptionContext;   // only when another app interrupted
+            BOOL app = dc && dc.source == AVAudioSessionDeactivationSourceApp;   // the app never deactivates its session itself
+            audio_life_do d = front_ios_audio_on(app ? AUDIO_LIFE_INACTIVE_APP : ic ? AUDIO_LIFE_INACTIVE_SYSTEM : AUDIO_LIFE_INACTIVE_NO_CONTEXT);
+            int k = life_line(0);
+            if (k && app) LOG("audio session: deactivated by the app (lifecycle notice)%s%s", audio_life_note(d.note), life_end(k));
+            else if (k && ic) LOG("audio session: deactivated by the system (lifecycle notice, reason %lu)%s%s", (unsigned long)ic.reason, audio_life_note(d.note), life_end(k));
+            else if (k) LOG("audio session: deactivated by the system (lifecycle notice, no interruption context)%s%s", audio_life_note(d.note), life_end(k));
+            front_ios_audio_do(d);
+        }];
+        [nc addObserverForName:AVAudioSessionResumptionRecommendationNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+            id c = n.userInfo[AVAudioSessionResumptionContextKey];
+            AVAudioSessionResumptionContext *rc = [c isKindOfClass:AVAudioSessionResumptionContext.class] ? c : nil;
+            BOOL should = rc && rc.recommendation == AVAudioSessionResumptionRecommendationShouldResume;
+            audio_life_do d = front_ios_audio_on(should ? AUDIO_LIFE_RESUME : AUDIO_LIFE_RESUME_NOT);
+            int k = life_line(1);
+            if (k) LOG("audio session: resumption recommended (lifecycle notice, %s)%s%s", !rc ? "no recommendation" : should ? "should resume" : "should not resume",
+                       audio_life_note(d.note), life_end(k));
+            front_ios_audio_do(d);
+        }];
+        [nc addObserverForName:AVAudioSessionDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+            (void)n; audio_life_do d = front_ios_audio_on(AUDIO_LIFE_ACTIVE);   // each activation of the app's posts it (boot, every return to the foreground)
+            int k = life_line(2);
+            if (k) LOG("audio session: became active (lifecycle notice)%s%s", audio_life_note(d.note), life_end(k));
+            front_ios_audio_do(d);
+        }];
+    }
+    [nc addObserverForName:AVAudioSessionRouteChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        front_ios_audio_route([n.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue]);
     }];
     [nc addObserverForName:AVAudioSessionMediaServicesWereResetNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
-        (void)n; LOG("audio session: the media services were reset; setting the session and the outputs up again");
-        front_ios_audio_session(); dm_audio_reset();
+        (void)n; audio_life_do d = front_ios_audio_on(AUDIO_LIFE_RESET);
+        LOG("audio session: the media services were reset; setting the session and the outputs up again");
+        front_ios_audio_do(d);
     }];
+}
+// Becoming active again also ends an interruption whose "ended" never came (not every one sends it), and retries a session that would not activate on the way back
+static void front_ios_audio_focus(void) {
+    audio_life_do d = front_ios_audio_on(AUDIO_LIFE_FOCUS);
+    if (d.note == AUDIO_LIFE_NOTE_FALLBACK) LOG("audio session: active again with no interruption-ended notice%s", audio_life_note(d.note));
+    front_ios_audio_do(d);
 }
 
 // Scene lifecycle (called by SceneDelegate in main.m): 0 resign active, 1 enter background, 2 return to foreground, 3 become active. On entering background, freeze the guest clock and suspend after in-flight GPU work completes (submitting GPU work in background gets the process killed).
@@ -736,12 +876,10 @@ void front_ios_focus_event(int ev) {
     if (!g_layer) return;
     switch (ev) {
         case 0: dm_gamepad_reset(); dm_focus_set(2); dm_gfx_inactive(1); break;   // dm_gfx_inactive: a swipe in the app switcher kills the app with no trip to the background
-        case 1: UIApplication.sharedApplication.idleTimerDisabled = NO; dm_focus_set(3); g_audio_bg = 1; front_ios_audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); save_sync_background(); break;
-        case 2: dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); front_ios_audio_session(); g_audio_bg = 0; front_ios_audio_apply(); dm_focus_set(2); break;
-        case 3:   // Becoming active again also ends an interruption whose "ended" never came (not every one sends it), and retries a session that would not activate on the way back
+        case 1: UIApplication.sharedApplication.idleTimerDisabled = NO; dm_focus_set(3); front_ios_audio_do(front_ios_audio_on(AUDIO_LIFE_BACKGROUND)); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); save_sync_background(); break;
+        case 2: dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); front_ios_audio_do(front_ios_audio_on(AUDIO_LIFE_FOREGROUND)); dm_focus_set(2); break;   // the session set up again, then real output
+        case 3:   // the audio interruption whose end never came, and the session retried (front_ios_audio_focus)
             UIApplication.sharedApplication.idleTimerDisabled = YES;
-            if (g_audio_intr) { LOG("audio session: active again with no interruption-ended notice; resuming"); g_audio_intr = 0; g_session_off = 1; }
-            if (g_session_off) front_ios_audio_session();
-            front_ios_audio_apply(); dm_gamepad_active(); dm_focus_set(1); dm_gfx_inactive(0); break;
+            front_ios_audio_focus(); dm_gamepad_active(); dm_focus_set(1); dm_gfx_inactive(0); break;
     }
 }

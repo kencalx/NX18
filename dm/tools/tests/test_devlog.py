@@ -275,6 +275,31 @@ class Formats(unittest.TestCase):
                                                    + '[dm] [nvn-mtl] ' + sample(c_format('dm/gfx/nvn/nvn_mtl.m', 'pipeline prebuild done:')))
         self.assertEqual((prep, pb['done'], pb['secs']), (1.5, True, 1.5))
 
+    def test_audio_output_lines(self):   # the iOS session, route and settle lines (front_ios.m) and the Mac device's latency (hle_audio.c, its text from audio_route.h)
+        front = 'dm/ios/Sources/front_ios.m'
+        got = sample(c_format(front, 'asked again for 48 kHz and 5 ms: %.0f Hz'))
+        lines = ['[dm] ' + sample(c_format(front, 'audio session: sample rate %.0f Hz')),
+                 '[dm] ' + sample(c_format(front, '%saudio route changed (%s)'), ('', 'new device available', 'BluetoothA2DPOutput', got, '')),
+                 '[dm] ' + sample(c_format(front, '%saudio route changed (%s)'), ('', 'override', 'Speaker', sample(c_format(front, 'not asked again (DM_AUDIO_ROUTE_REAPPLY=0)')), '')),
+                 '[dm] ' + sample(c_format(front, 'audio session: the I/O buffer settled at'), ('',)),
+                 '[dm] ' + sample(c_format('dm/host/hle_audio.c', 'audio device %u latency: %s%s%s'),
+                                  (sample(c_format('dm/host/audio_route.h', '%.1f ms (device %s'), ('64', '24', '276')), '', '')),
+                 '[dm] ' + sample(c_format(front, 'audio session: deactivated by the system (lifecycle notice, reason'), ('', '')),
+                 '[dm] ' + sample(c_format(front, 'audio session: deactivated by the system (lifecycle notice, no interruption context)'),
+                                  (sample(c_format('dm/host/audio_lifecycle.h', '; no other app interrupted')), '')),
+                 '[dm] ' + sample(c_format(front, 'audio session: resumption recommended'), ('should resume', '; resuming', '')),
+                 # asking again failed: a red line, still a route change (the asked-again part is not there)
+                 '[dm] ' + sample(c_format(front, '%saudio route changed (%s)'), ('[RED] ', 'old device unavailable', 'HDMIOutput', sample(c_format(front, 'asking again for 5 ms failed: %s'), ('no reason given',)), ''))]
+        g, events, _ = devlog.scan(lines)
+        for kind in ('au_session', 'au_route', 'au_settle', 'au_device'): self.assertTrue(g[kind], kind)
+        self.assertEqual(len(g['au_route']), 3)
+        self.assertEqual([e['what'] for e in events], ['audio route: BluetoothA2DPOutput (new device available)', 'audio route: Speaker (override)',
+                                                       'audio deactivated by the system (lifecycle notice)', 'audio deactivated by the system (lifecycle notice)',
+                                                       'audio resumption recommended (lifecycle notice)', 'audio route: HDMIOutput (old device unavailable)'])
+        out = devlog.read('\n'.join(lines))['audio_output']
+        self.assertEqual((out['io_buffer_ms_max'], out['output_latency_ms_max'], out['route_changes'], out['device_latency_ms_max']), (1.5, 1.5, 3, 1.5))
+        self.assertEqual(out['routes'], ['BluetoothA2DPOutput', 'Speaker', 'HDMIOutput'])
+
     def test_event_texts_are_in_the_sources(self):
         src = ''.join(p.read_text(errors='replace') for d in ('dm/host', 'dm/gfx/nvn', 'dm/ios/Sources') for p in (REPO / d).glob('*.[cm]'))
         for needle, _, _ in devlog.EVENTS: self.assertTrue(needle.split('] ')[-1].removeprefix('audio ') in src, needle)   # hle_audio.c: "audio %s", "suspended (background …"

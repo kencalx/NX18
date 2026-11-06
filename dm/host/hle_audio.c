@@ -3,6 +3,8 @@
 //       iOS defaults to real audio output (the product must have sound), tests that want silence set DM_AUDIO=0 explicitly; Mac defaults to the silent sink (replay / gate checks are silent), DM_AUDIO=1 for real audio output.
 // The contents of AudioOut / AudioOutBuffer / AudioOutParameter are read and written only through the interfaces below; the host defines its own internal layout and only writes the front part of the structs (AudioOut: the SDK's own fields, au_info).
 #include "hle.h"
+#include "audio_route.h"   // the Mac device's latency line and the renderer's queue it is held against
+#include "rt_safe.h"       // RT_NONBLOCKING / RT_ACCEPTED: the render callback's real-time safety, checked by the lint-c job
 #include <AudioToolbox/AudioToolbox.h>
 #include <TargetConditionals.h>
 #include <dispatch/dispatch.h>
@@ -91,7 +93,8 @@ static void *event_notify(void *p) {
 }
 
 // Take n bytes from the pending queue and hand them to the output side; once a whole block has played, move it to released and notify the ordinary thread.
-static void pull(aout *a, uint8_t *dst, uint64_t n) {
+// It runs on Core Audio's real-time I/O thread (au_render), so it is RT_NONBLOCKING (rt_safe.h): no lock, no allocation, no stdio
+static void pull(aout *a, uint8_t *dst, uint64_t n) RT_NONBLOCKING {
     int released = 0;
     int16_t *s16 = (int16_t *)dst; uint64_t ns = n / 2;
     uint32_t qh = atomic_load_explicit(&a->q_head, memory_order_relaxed);
@@ -107,7 +110,10 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
         if (a->pos >= b->size) {
             uint32_t rw = atomic_load_explicit(&a->rel_tail, memory_order_relaxed);
             uint32_t rr = atomic_load_explicit(&a->rel_head, memory_order_acquire);
-            if (rw - rr == RELMAX) die("AudioOut released queue overflow");
+            if (rw - rr == RELMAX) {
+                RT_ACCEPTED("the process ends here, and it cannot be reached: the released ring holds as many buffers as the pending one (RELMAX = QMAX), "
+                            "and a buffer leaves the pending ring only as it enters this one", die("AudioOut released queue overflow");)
+            }
             a->rel[rw & (RELMAX - 1)] = b;
             atomic_store_explicit(&a->rel_tail, rw + 1, memory_order_release);
             qh++;
@@ -121,8 +127,11 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
         for (uint64_t i = 0; i < ns; i++) { float x = s16[i] * v; s16[i] = (int16_t)(x > 32767.f ? 32767.f : x < -32768.f ? -32768.f : x); }
     }
     if (released) {
-        if (a->event) notify_release(a);   // the notify thread only signals the guest's event: outputs without one (the host's renderer output, games that poll) need no wake-up
-        if (a->rel_sem) dispatch_semaphore_signal(a->rel_sem);
+        RT_ACCEPTED("dispatch_semaphore_signal only wakes a waiting thread: an atomic increment, and a Mach semaphore signal when a thread waits, which neither takes "
+                    "a lock nor waits. Real-time threads hand work over this way (Apple: Adding Parallel Real-Time Threads to Audio Workgroups); here it hands the "
+                    "guest's release event to the notifier (notify_release) and wakes the audio renderer's thread (dm_pcmout_wait), so the callback never calls into the guest",
+            if (a->event) notify_release(a);   // the notify thread only signals the guest's event: outputs without one (the host's renderer output, games that poll) need no wake-up
+            if (a->rel_sem) dispatch_semaphore_signal(a->rel_sem);)
     }
 }
 
@@ -130,7 +139,7 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
 // Core Audio's own 6 → 2 mapping keeps only the front pair, so voices on the center (Luigi's Mansion 3) and the back channels were silent. The queue still takes all six guest channels,
 // in blocks through a stack buffer (no allocation in the real-time callback)
 static int device_channels(const aout *a) { return a->ch == 6 ? 2 : a->ch; }
-static void pull_device(aout *a, uint8_t *dst, uint64_t bytes) {
+static void pull_device(aout *a, uint8_t *dst, uint64_t bytes) RT_NONBLOCKING {
     if (a->ch != 6) { pull(a, dst, bytes); return; }
     enum { BLOCK = 128, CF = 32768, CC = 23167, CL = 8224, CB = 23167 };
     int16_t scratch[BLOCK * 6], *out = (int16_t *)dst;
@@ -152,7 +161,8 @@ static void pull_device(aout *a, uint8_t *dst, uint64_t bytes) {
 
 static _Atomic uint64_t g_render_calls;   // Cumulative sound card callbacks (lifecycle verification: must keep growing after resume)
 uint64_t dm_audio_render_calls(void) { return atomic_load_explicit(&g_render_calls, memory_order_relaxed); }
-static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
+// Core Audio's render callback, on its real-time I/O thread: RT_NONBLOCKING, as pull_device and pull below it (rt_safe.h; the lint-c job's -Wfunction-effects holds them to it)
+static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) RT_NONBLOCKING {
     (void)f; (void)ts; (void)bus; (void)frames;
     aout *a = ctx;
     atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed); atomic_fetch_add_explicit(&a->cb_n, 1, memory_order_relaxed);
@@ -177,6 +187,39 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
     return noErr;
 }
 #if !TARGET_OS_IPHONE
+// The output device's latency (Mac), after au_buffer has set its buffer: the parts Core Audio's HAL reports on the device itself (the DefaultOutput unit does not pass
+// these on), added up as audio_route.h does, one line per device and setting (an unchanged reading is not logged again; at most 32 lines). A device buffer longer than
+// the audio renderer's queue underruns at every callback (DM_DBG_AU_FRAMES=1024 does it on purpose): a [RED] line, once per device. Logging only
+static pthread_mutex_t g_lat_lock = PTHREAD_MUTEX_INITIALIZER;   // au_buffer runs on each output's setup thread and on Core Audio's listener thread
+static audio_latency g_lat_last; static AudioDeviceID g_lat_dev = kAudioObjectUnknown; static audio_route_once g_lat_warned; static unsigned g_lat_lines;
+static OSStatus au_u32(AudioObjectID o, AudioObjectPropertySelector sel, AudioObjectPropertyScope scope, uint32_t *v) {
+    AudioObjectPropertyAddress p = {sel, scope, kAudioObjectPropertyElementMain};
+    UInt32 x = 0, sz = sizeof x; OSStatus st = AudioObjectGetPropertyData(o, &p, 0, NULL, &sz, &x);
+    if (!st) *v = x;
+    return st;
+}
+static void au_latency(AudioDeviceID device, UInt32 buffer, Float64 rate, const char *why) {
+    audio_latency l = {.buffer = buffer, .rate = rate};
+    if (au_u32(device, kAudioDevicePropertyLatency, kAudioObjectPropertyScopeOutput, &l.device)) l.missing |= AL_DEVICE;
+    if (au_u32(device, kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeOutput, &l.safety)) l.missing |= AL_SAFETY;
+    // the first output stream's own latency: a stream's properties are in its global scope (kAudioStreamPropertyLatency has the device property's selector)
+    AudioObjectPropertyAddress p = {kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain};
+    UInt32 sz = 0; AudioStreamID *streams = NULL;
+    if (AudioObjectGetPropertyDataSize(device, &p, 0, NULL, &sz) || sz < sizeof *streams || !(streams = malloc(sz)) ||
+        AudioObjectGetPropertyData(device, &p, 0, NULL, &sz, streams) || sz < sizeof *streams ||
+        au_u32(streams[0], kAudioStreamPropertyLatency, kAudioObjectPropertyScopeGlobal, &l.stream)) l.missing |= AL_STREAM;
+    free(streams);
+    char text[160], key[32], queue[96];
+    audio_latency_text(text, sizeof text, &l); snprintf(key, sizeof key, "device %u", (unsigned)device); audren_queue_text(queue, sizeof queue);
+    pthread_mutex_lock(&g_lat_lock);
+    unsigned line = 0;
+    if (device != g_lat_dev || !audio_latency_same(&l, &g_lat_last)) { g_lat_dev = device; g_lat_last = l; line = ++g_lat_lines; }
+    int warn = rate > 0 && audren_buffer_over_queue(buffer / rate) && audio_route_first(&g_lat_warned, key);
+    pthread_mutex_unlock(&g_lat_lock);
+    if (line && line <= 32) LOG("audio device %u latency: %s%s%s", (unsigned)device, text, why ? why : "", line == 32 ? "; not logged from here on" : "");
+    if (warn) LOG("[RED] audio device %u buffer of %u frames (%.2f ms at %.0f Hz) is longer than %s: games that play through the renderer underrun at every callback (crackling)",
+                  (unsigned)device, (unsigned)buffer, buffer * 1000.0 / rate, rate, queue);
+}
 // Mac DefaultOutput's default 512 device frames can exceed the PCM a game has queued, producing zero-filled gaps.
 // Request about 5 ms of device frames, as front_ios.m asks of the iOS audio session; reapply on device or output-rate changes within the supported range.
 // DM_DBG_AU_FRAMES=N asks N frames instead (1024 = the iOS default, which reproduces the crackling)
@@ -199,6 +242,7 @@ static void au_buffer(AudioUnit au, const char *why) {
     if (st || actual != fr) st = AudioUnitSetProperty(au, kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, 0, &fr, sizeof fr);
     if (!st) { sz = sizeof actual; st = AudioUnitGetProperty(au, kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, 0, &actual, &sz); }
     LOG("%saudio device buffer: %u frames at %.0f Hz%s (requested %u, status %d)", st ? "[RED] " : "", actual, df.mSampleRate, why ? why : "", fr, (int)st);
+    if (!st) au_latency(device, actual, df.mSampleRate, why);
 }
 static void au_device_changed(void *ctx, AudioUnit au, AudioUnitPropertyID id, AudioUnitScope scope, AudioUnitElement el) {
     (void)ctx;

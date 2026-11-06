@@ -20,6 +20,9 @@ What it reads (docs/development.md, Reading a device log):
   long frames        [longframe] frame N (T s): the longest, and what each spent its time on (new pipelines, texture uploads, GPU, submit, the game's side, a return from the background)
   events             background and resume, focus changes, thermal state and Low Power Mode changes and the caps they set, memory warnings, in-game menu changes
   audio, saves, RED  audio #N device callbacks … underruns; save commit, save sync; [RED] kinds, normalized as regress.py does (numbers, paths and keys taken out)
+  audio output       the iOS audio session's I/O buffer and output latency (audio session:, audio route changed, settled at), its route changes (a [RED] one when asking
+                     again failed) and lifecycle notices;
+                     the Mac device's latency (audio device N latency)
 Only NVN games write the timing, on-screen, power, display-link and long-frame lines (hle_nvn.c, from the present path): a Vulkan or OpenGL game's summary has its pipeline and memory
 lines and the events. Other lines are skipped, and so is a cut last line. The log has no clock: times are seconds from the start, from the long-frame lines' stamps and the power lines'
 frame rates, or frame numbers at 60 fps where it has neither. Only the numbers and names above are printed (no paths: a switch value that is one prints as its last part;
@@ -82,6 +85,11 @@ RX = {k: re.compile(v) for k, v in {
     'longframe': r'^\[longframe\] frame (\d+) \(([\d.]+) s\) whole frame ([\d.]+) ms, submit\+present ([\d.]+) ms, GPU (-?[\d.]+) ms; new pipelines (\d+) \+ shader libraries (\d+), '
                  r'([\d.]+) ms in all; texture uploads (\d+) first \+ (\d+) re-uploads, ([\d.]+) MB / ([\d.]+) ms',
     'audio': r'^audio #(\d+) device callbacks (\d+): .*; in these (\d+), (\d+) underruns, ([\d.]+) ms zero-padded',
+    'au_session': r'^audio session: sample rate (\d+) Hz, I/O buffer ([\d.]+) ms \(asked for 5 ms\)(?:, output latency ([\d.]+) ms)?',
+    'au_route': r'^(?:\[RED\] )?audio route changed \(([^)]*)\): output ([^;]+); sample rate (\d+) Hz, I/O buffer ([\d.]+) ms, output latency ([\d.]+) ms; '
+                r'(?:asked again for 48 kHz and 5 ms: (\d+) Hz, I/O buffer ([\d.]+) ms, output latency ([\d.]+) ms)?',
+    'au_settle': r'^audio session: the I/O buffer settled at ([\d.]+) ms \(([\d.]+) ms right after the request\), output latency ([\d.]+) ms',
+    'au_device': r'^audio device (\d+) latency: ([\d.]+) ms \(',
     'save_commit': r'^save commit #(\d+): .*\(clone \+ swap (\d+) us',
     'save_sync': r'^save sync: (.*)',
     'front_start': r'^front end: thermal state (-?\d+), brightness [\d.]+, Low Power Mode (on|off)',
@@ -96,6 +104,8 @@ EVENTS = (('[nvn-mtl] entering the background', 'background', 'app'), ('[nvn] gr
           ('audio suspended (background', 'audio suspended', 'audio'), ('audio resumed (foreground', 'audio resumed', 'audio'),
           ('audio session: interrupted', 'audio interrupted', 'audio'), ('audio session: interruption ended', 'audio interruption ended', 'audio'),
           ('audio session: active again', 'audio session back', 'audio'),
+          ('audio session: deactivated by the system', 'audio deactivated by the system (lifecycle notice)', 'audio'),
+          ('audio session: resumption recommended', 'audio resumption recommended (lifecycle notice)', 'audio'),
           ('the frame step holds 30 fps', 'the frame step held at 30 fps', 'cap'), ('back to the frame rate cap', 'the chosen frame rate again', 'cap'),
           ('present upscaling: bilinear while the device is', 'MetalFX off (heat or Low Power Mode)', 'cap'), ('present upscaling: MetalFX again', 'MetalFX again', 'cap'))
 CAUSE_KEY = (('return', 'background'), ('focus', 'focus'), ('new pipelines', 'pipelines'), ('texture', 'uploads'), ('GPU', 'gpu'), ('submit', 'submit'), ("the game's", 'game'))
@@ -183,6 +193,7 @@ def scan(lines: list[str]) -> tuple[dict[str, list[tuple[int, Any, int]]], list[
         elif kind == 'front_change' and m: ev = (f'{m.group(1)} {m.group(2)}', 'power', float(m.group(3)))
         elif kind == 'mem_warning' and m: ev = (f'memory warning, {m.group(3)} MiB left', 'memory', float(m.group(1)))
         elif kind == 'controller' and m: ev = (f"controller '{m.group(1)}' {m.group(2)}", 'controller', None)
+        elif kind == 'au_route' and m: ev = (f'audio route: {m.group(2)} ({m.group(1)})', 'audio', None)
         elif kind == 'launcher' and m and m.group(3) == 'in-game menu': ev = (f'{m.group(1)}={no_path(m.group(2))} (in-game menu)', 'menu', None)
         elif kind is None:
             hit = next(((what, k) for needle, what, k in EVENTS if needle in s), None)
@@ -318,6 +329,12 @@ def read(text: str, top: int = 5) -> Rec:
                     'zero_padded_ms': round(sum(float(m.group(5)) for _, m, _ in au), 1), 'game_reports': len(g['game_underrun']),
                     'windows': [{'t_s': clock.at(f), 'stream': int(m.group(1)), 'underruns': int(m.group(4)), 'ms': float(m.group(5))} for _, m, f in au if int(m.group(4))][:top]
                     } if au or g['game_underrun'] else None
+    # the output's buffer and latency: what iOS granted (at boot and each return, after each route change and its re-request, as it settled) and the Mac device's latency
+    io = [float(m.group(2)) for _, m, _ in g['au_session']] + [float(m.group(7) or m.group(4)) for _, m, _ in g['au_route']] + col('au_settle', 1)
+    lat = [float(m.group(3)) for _, m, _ in g['au_session'] if m.group(3)] + [float(m.group(8) or m.group(5)) for _, m, _ in g['au_route']] + col('au_settle', 3)
+    dev = col('au_device', 2)
+    out['audio_output'] = {'io_buffer_ms_max': max(io, default=None), 'output_latency_ms_max': max(lat, default=None), 'route_changes': len(g['au_route']),
+                           'routes': list(dict.fromkeys(m.group(2) for _, m, _ in g['au_route'])), 'device_latency_ms_max': max(dev, default=None)} if io or lat or dev else None
     sc, ss = g['save_commit'], g['save_sync']
     out['saves'] = {'commits': len(sc), 'commit_us_max': max((int(m.group(2)) for _, m, _ in sc), default=None),
                     'sync': dict(collections.Counter(re.split(r'[:,;]', norm(m.group(1)))[0] for _, m, _ in ss).most_common())} if sc or ss else None
@@ -431,6 +448,11 @@ def render(s: Rec, top: int) -> list[str]:
     au = s['audio']
     if au: row('audio', f"{au['underruns']} underruns in {au['callbacks']} device callbacks ({au['zero_padded_ms']:g} ms zero-padded)" + (f"; the game reported {au['game_reports']}" if au['game_reports'] else ''),
                *(f"{w['t_s']:.0f} s: {w['underruns']} (stream #{w['stream']}, {w['ms']:g} ms)" for w in au['windows']))
+    ao = s['audio_output']
+    if ao: row('audio output', ', '.join(x for x in (f"I/O buffer at most {ao['io_buffer_ms_max']:g} ms" if ao['io_buffer_ms_max'] is not None else '',
+                                                     f"output latency at most {ao['output_latency_ms_max']:g} ms" if ao['output_latency_ms_max'] is not None else '',
+                                                     f"{nof(ao['route_changes'], 'route change')} ({', '.join(ao['routes'])})" if ao['route_changes'] else '',
+                                                     f"device latency at most {ao['device_latency_ms_max']:g} ms" if ao['device_latency_ms_max'] is not None else '') if x))
     sv = s['saves']
     if sv: row('saves', f"{nof(sv['commits'], 'commit')}" + (f" (longest clone + swap {sv['commit_us_max'] / 1000:g} ms)" if sv['commit_us_max'] else '')
                + (', save sync: ' + ', '.join(f'{k} {n}' for k, n in sv['sync'].items()) if sv['sync'] else ''))
@@ -459,7 +481,8 @@ METRICS = (('commit', 'build.commit', 0), ('shader chain', 'build.chain', 0), ('
            ('enqueue to display p50 (ms)', 'display_link.enqueue_p50_ms', -1), ('enqueue to display, most (ms)', 'display_link.enqueue_max_ms', -1),
            ('submission ahead p50 (ms)', 'display_link.ahead_p50_ms', 0), ('stretches a frame above', 'display_link.raised', -1),
            ('long frames', 'long_frames.count', 0), ('long frames per minute', 'long_frames.per_min', -1), ('background / back', 'events.background', 0), ('focus changes', 'events.focus_changes', 0),
-           ('audio underruns', 'audio.underruns', -1), ('save commits', 'saves.commits', 0), ('[RED] lines', 'red.lines', -1), ('[RED] kinds', 'red.kinds', -1))
+           ('audio underruns', 'audio.underruns', -1), ('audio I/O buffer, most (ms)', 'audio_output.io_buffer_ms_max', -1),
+           ('audio output latency, most (ms)', 'audio_output.output_latency_ms_max', -1), ('save commits', 'saves.commits', 0), ('[RED] lines', 'red.lines', -1), ('[RED] kinds', 'red.kinds', -1))
 
 
 def dig(s: Any, path: str) -> Any:
