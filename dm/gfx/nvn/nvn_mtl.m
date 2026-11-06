@@ -438,6 +438,23 @@ static void udc_selftest(void) {
         MLOG("UDC self-check %s %s %lux%lu first value %08x, values differing from it %lu / %lu", g_dev.name.UTF8String, depth ? "Depth32F_S8" : "RGBA8", (unsigned long)w, (unsigned long)h, px[0], (unsigned long)bad, (unsigned long)(w * h));
     }
 }
+// The GPU's highest Apple family, asked by raw value (MTLGPUFamilyApple7 1007 to Apple11 1011) so the build needs no SDK that names the newest; 0 below Apple7. Metal's feature set tables give
+// sampler LOD bias and min / max reduction to Apple10 and later only (A19, M5) and say nothing of what an Apple9 GPU (the iPad Pro M4, A17 Pro, A18) does with them: samp_diag logs the
+// samplers that set them on such a GPU. Set once by mtl_init, which logs it beside the CPU's FEAT_* sysctls (absent: the kernel has no such name), all of it diagnostics only
+static int g_gpu_fam;
+static void gpu_caps_log(void) {
+    for (int f = 1011; f >= 1007 && !g_gpu_fam; f--) if ([g_dev supportsFamily:(MTLGPUFamily)f]) g_gpu_fam = f;
+    static const char *const feat[] = { "CSSC", "SME", "SME2", "SME_F64F64", "SME_I16I64", "BF16", "EBF16", "I8MM", "DotProd", "FHM", "FP16", "RDM", "LSE", "LSE2", "LRCPC", "LRCPC2",
+                                        "JSCVT", "FCMA", "FRINTTS", "AFP", "RPRES", "WFxT", "HBC", "SHA3", "SHA512", "BTI", "MTE", "MTE2", "MTE3", "MTE4" };
+    char on[512] = "", off[512] = "", none[512] = "";
+    for (size_t i = 0; i < sizeof feat / sizeof *feat; i++) {
+        char k[64]; int v = 0; size_t n = sizeof v; snprintf(k, sizeof k, "hw.optional.arm.FEAT_%s", feat[i]);
+        char *o = sysctlbyname(k, &v, &n, NULL, 0) ? none : v ? on : off; size_t l = strlen(o); snprintf(o + l, sizeof on - l, "%s%s", l ? " " : "", feat[i]);
+    }
+    NSString *arch = [(id)g_dev respondsToSelector:@selector(architecture)] ? g_dev.architecture.name : nil; char fam[16] = "below Apple7"; if (g_gpu_fam) snprintf(fam, sizeof fam, "Apple%d", g_gpu_fam - 1000);
+    MLOG("GPU %s, architecture %s: highest Apple GPU family %s, Metal 4 %s; CPU FEAT_* %s; without %s; not reported %s", g_dev.name.UTF8String, arch ? arch.UTF8String : "unknown", fam,
+         [g_dev supportsFamily:MTLGPUFamilyMetal4] ? "yes" : "no", *on ? on : "none", *off ? off : "none", *none ? none : "none");
+}
 void mtl_init(void) {
     if (g_dev) return;
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
@@ -449,6 +466,7 @@ void mtl_init(void) {
     g_dev = MTLCreateSystemDefaultDevice();
     if (!g_dev) MDIE("no Metal device");
     if (!g_dev.hasUnifiedMemory) MDIE("needs a unified-memory device (zero-copy memory pools)");
+    gpu_caps_log();   // here, before the Metal 4 and BC checks, so a device they stop is named too
     g_q = [g_dev newCommandQueue];
     // A device without Metal 4 (the paravirtualized GPU of a virtual Mac, such as GitHub's macos-26 runner: no residency set, no MTL4CommandQueue) cannot run the NVN layer. The GL and
     // Vulkan layers draw on classic queues of their own and need only the device (mtl_device_classic): there the classic part starts and presents are dropped, which is all a
@@ -5494,6 +5512,39 @@ static MTLSamplerAddressMode wrapm(int w) {
         case 6: return MTLSamplerAddressModeMirrorRepeat; }
     return MTLSamplerAddressModeRepeat;
 }
+// Sampler diagnostics by sampler ID, after samp_by_id made (or failed to make) the sampler; nothing in the sampler changes. Caller holds g_rmu; g_sdiag and g_sob_v grow here to g_nsreg. SD_OB: its
+// Metal border colour is opaque black and a wrap mode reaches the border; SD_OBW: the same for its twin, which only a twin binding samples (encode_args_, samp_ob_pair); SD_NIL, SD_TNIL, SD_A10,
+// SD_PAIR4, SD_PAIR5: that line was logged for the ID. A nil sampler leaves g_sview empty, so every bind binds the dummy and asks samp_by_id again: its red line is once per ID; a nil twin leaves the
+// border uncorrected (the twin binding gets the sampler, its bit in the block clear), with a red line too. Below Apple10 (gpu_caps_log) a sampler with an LOD bias or a min / max reduction is logged
+// once per ID: Super Mario Galaxy's GX LOD bias (the Vulkan layer logs its own, vkCreateSampler), Pokémon Legends: Z-A's depth pyramid (151607c7a92386cc, a min reduction)
+enum { SD_OB = 1, SD_NIL = 2, SD_A10 = 4, SD_PAIR4 = 8, SD_PAIR5 = 16, SD_OBW = 32, SD_TNIL = 64 };
+// g_sob_on: an SD_OB / SD_OBW sampler was made and the pairing census has lines left (g_sob_n logged, SOB_MAX at most); g_sob_v: the texture view samp_ob_pair last read the format of, by sampler ID
+static uint8_t *g_sdiag; static void **g_sob_v; static int g_nsdiag, g_sob_on, g_sob_n;
+#define SOB_MAX 16
+// bw: the twin's colour when nvn_border wants one, else -1; tnil: it wanted one and Metal made none. The descriptor is read only for a line
+static void samp_diag(int sid, const samp_par *p, MTLSamplerDescriptor *d, id<MTLSamplerState> s, int bn, int bw, int tnil) {
+    if (sid >= g_nsdiag) { int n = g_nsreg; g_sdiag = realloc_or_die(g_sdiag, (size_t)n, "the sampler diagnostics"); g_sob_v = realloc_or_die(g_sob_v, (size_t)n * sizeof *g_sob_v, "the sampler diagnostics");
+        memset(g_sdiag + g_nsdiag, 0, (size_t)(n - g_nsdiag)); memset(g_sob_v + g_nsdiag, 0, (size_t)(n - g_nsdiag) * sizeof *g_sob_v); g_nsdiag = n; }
+    uint8_t *f = &g_sdiag[sid]; int nil_line = !s && !(*f & SD_NIL), tnil_line = s && tnil && !(*f & SD_TNIL), a10_line = g_gpu_fam < 1010 && (p->lod_bias != 0 || p->reduction == 1 || p->reduction == 2) && !(*f & SD_A10);
+    if (nil_line || tnil_line || a10_line) {
+        static const char *const flt[] = { "nearest", "linear" }, *const mip[] = { "none", "nearest", "linear" };
+        const char *mn = flt[d.minFilter & 1], *mg = flt[d.magFilter & 1], *mp = mip[d.mipFilter % 3], *red = p->reduction == 1 ? "min" : p->reduction == 2 ? "max" : "none";
+        if (nil_line || tnil_line) { *f |= nil_line ? SD_NIL : SD_TNIL; static int n; n++; char cmp[24] = "off"; if (p->cmp_mode) snprintf(cmp, sizeof cmp, "function %lu", (unsigned long)d.compareFunction);
+            int lg = n <= 16 || !(n & (n - 1));   // the two red lines share one count: the sampler IDs Metal made no sampler state or no twin for
+            if (lg && nil_line) MLOG("[RED] sampler ID %d: Metal made no sampler state (filters min %s mag %s mip %s, wrap %d,%d,%d, LOD %g..%g bias %g, anisotropy %lu, compare %s, reduction %s, "
+                                     "border colour %d): bound as the dummy and made again at each bind (%d sampler IDs so far)", sid, mn, mg, mp, (int)p->ws, (int)p->wt, (int)p->wr,
+                                     d.lodMinClamp, d.lodMaxClamp, d.lodBias, (unsigned long)d.maxAnisotropy, cmp, red, bn, n);
+            if (lg && tnil_line) MLOG("[RED] sampler ID %d: Metal made no sampler state for its twin of border colour %d (border colour %g,%g,%g,%g, which Metal lacks; filters min %s mag %s mip %s, wrap %d,%d,%d, "
+                                      "LOD %g..%g bias %g, anisotropy %lu, compare %s): the border is not corrected, its samples keep Metal colour %d (%d sampler IDs so far)", sid, bw, p->border[0], p->border[1],
+                                      p->border[2], p->border[3], mn, mg, mp, (int)p->ws, (int)p->wt, (int)p->wr, d.lodMinClamp, d.lodMaxClamp, d.lodBias, (unsigned long)d.maxAnisotropy, cmp, bn, n); }
+        if (a10_line) { *f |= SD_A10; static int n; n++; char fam[16] = "below Apple7"; if (g_gpu_fam) snprintf(fam, sizeof fam, "Apple%d", g_gpu_fam - 1000);
+            if (n <= 32 || !(n & (n - 1))) MLOG("sampler ID %d: LOD bias %g, reduction %s (filters min %s mag %s mip %s)%s: Metal documents sampler LOD bias and min / max reduction for Apple10 GPUs "
+                                                "and later only, this one is %s (%d sampler IDs so far)", sid, d.lodBias, red, mn, mg, mp, s ? "" : ", Metal made no sampler state", fam, n); }
+    }
+    int reach = wrapm(p->ws) == MTLSamplerAddressModeClampToBorderColor || wrapm(p->wt) == MTLSamplerAddressModeClampToBorderColor || wrapm(p->wr) == MTLSamplerAddressModeClampToBorderColor;
+    *f = (uint8_t)((*f & ~(SD_OB | SD_OBW)) | (s && reach && bn == 1 ? SD_OB : 0) | (s && reach && bw == 1 && !tnil ? SD_OBW : 0)); g_sob_v[sid] = NULL;   // a new sampler: its textures are read again
+    if ((*f & (SD_OB | SD_OBW)) && g_sob_n < SOB_MAX) g_sob_on = 1;
+}
 static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     if (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) { RED_ONCE(12, "sampler ID %d not registered", sid); return nil; }
     if (g_sview[sid]) return (__bridge id<MTLSamplerState>)g_sview[sid];
@@ -5526,6 +5577,7 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
         if (t) { g_sview_w[sid] = (void *)CFBridgingRetain(t); g_srid_w[sid] = t.gpuResourceID._impl; memcpy(g_sbk[sid], k, sizeof k); }
         static int nlog; if (nlog++ < 16) MLOG("sampler ID %d: border colour %g,%g,%g,%g, which Metal lacks: Metal colour %d, corrected in the shaders through a twin of colour %d", sid, p.border[0], p.border[1], p.border[2], p.border[3], bn, bw);
     }
+    samp_diag(sid, &p, d, s, bn, twin ? bw : -1, s && twin && !g_sview_w[sid]);
     return s;
 }
 static inline __attribute__((always_inline)) void *samp_fast(int sid) {
@@ -8194,6 +8246,27 @@ static void c0_sample_rows(uint8_t *d, uint32_t samples) {
 static uint64_t g_geo_bind[5];
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex);
 static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
+// A census, nothing changes: Metal's feature set tables call textures of format A1BGR5Unorm or ABGR4Unorm (NVN's BGR5A1 0x98 and RGBA4, nvn_fmt_mtl.c) incompatible with samplers of the opaque
+// black border colour on every GPU family, and say not what such a sample returns (t_sampler_family probes it on the Mac). nvn_border picks opaque black for a border (0, 0, 0, 1) and the colours
+// nearest it. A sampler binding from a combined handle (SAMPT, SAMPU) names the texture the shader samples with it, whose format is read from the view tex_by_id keeps (none yet: a later encode
+// sees it); a separate sampler (SAMP, SAMPI) names none, one line says so. One line per sampler ID and format, SOB_MAX at most, then encode_args_ stops asking (g_sob_on). encode_args_ calls it
+// only for a binding whose sampler is opaque black there: SD_OB at a plain binding, SD_OBW at a twin binding (b->bw), which samples the twin, so other samplers cost it one byte test. The format is
+// read when the view differs from the last one read for the sampler ID (g_sob_v; a view freed and another made at its address is not read again). Caller holds g_rmu
+static void samp_ob_pair(const char *key, int stage, const nvn_rbind *b, int sid) {
+    if (b->kind != NVN_RB_SAMPT && b->kind != NVN_RB_SAMPU) { static int once; if (!once) { once = 1; MLOG("sampler ID %d of opaque black border colour bound as a separate sampler (shader %s, stage %d): "
+                                                                                                             "the texture it samples is not known at its binding, not checked for A1BGR5Unorm / ABGR4Unorm", sid, key, stage); } return; }
+    int tid = b->kind == NVN_RB_SAMPU ? ubo_tex_id(ubo_bind_handle(stage, b)) : b->reg < NTEX ? (int)(S.tex[stage][b->reg] & 0xfffff) : 0;
+    if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok || !g_treg[tid].view || g_treg[tid].view == g_sob_v[sid]) return;
+    g_sob_v[sid] = g_treg[tid].view;
+    MTLPixelFormat pf = ((__bridge id<MTLTexture>)g_treg[tid].view).pixelFormat; uint8_t bit = pf == MTLPixelFormatABGR4Unorm ? SD_PAIR4 : pf == MTLPixelFormatA1BGR5Unorm ? SD_PAIR5 : 0;
+    if (!bit || (g_sdiag[sid] & bit)) return;
+    g_sdiag[sid] |= bit; if (++g_sob_n >= SOB_MAX) g_sob_on = 0;
+    const samp_par *p = &g_sreg[sid];
+    MLOG("sampler ID %d (border colour %g,%g,%g,%g: Metal opaque black on the %s; wrap %d,%d,%d) samples texture ID %d of Metal format %s in shader %s (stage %d): Metal documents textures of that format "
+         "as incompatible with the opaque black border colour on every GPU family (%d of %d such lines%s)", sid, p->border[0], p->border[1], p->border[2], p->border[3],
+         b->bw ? "twin of the border correction" : "sampler", (int)p->ws, (int)p->wt, (int)p->wr, tid, bit == SD_PAIR4 ? "ABGR4Unorm" : "A1BGR5Unorm", key, stage,
+         g_sob_n, SOB_MAX, g_sob_n >= SOB_MAX ? ", no more pairings are checked" : "");
+}
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
     if (nvn_stage == 1 && !metal_vertex && sh->has_alpha && atest_on()) at_bind(en);   // also for a shader without bindings
     if (nvn_stage == 1 && !metal_vertex && sh->has_logic && lop_on()) lo_bind(en);
@@ -8269,6 +8342,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                 bmask |= 1u << (b->bw - 1); memcpy(bk[b->bw - 1], g_sbk[sid], sizeof bk[0]);
             } else slots[aid] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();   // a twin of any other sampler is never sampled
             USE(ss ? ss : dummy_samp(), MTLResourceUsageRead);
+            if (__builtin_expect(g_sob_on, 0) && ss && sid < g_nsdiag && (g_sdiag[sid] & (b->bw ? SD_OBW : SD_OB))) samp_ob_pair(sh->key, nvn_stage, b, sid);   // opaque black border on a 16-bit texture: a census
             if (bl && sid > 0) { int ok = sid < g_nsreg && g_sreg_ok[sid]; samp_par sp = ok ? g_sreg[sid] : (samp_par){0};   // g_rmu is already held in this section
                 if (ok) PD("B %llu st%d samp reg%d sid=%d mag=%d min=%d (0 nearest / 1 linear; 2–5 with mips) wrap=%d,%d,%d border=%g,%g,%g,%g lod=%g..%g bias=%g aniso=%g cmp=%d/%d %s", g_stat_pass, nvn_stage, reg, sid, (int)sp.magf, (int)sp.minf,
                            (int)sp.ws, (int)sp.wt, (int)sp.wr, sp.border[0], sp.border[1], sp.border[2], sp.border[3], sp.lod_min, sp.lod_max, sp.lod_bias, sp.aniso, (int)sp.cmp_mode, (int)sp.cmp_func, ss ? "real" : "failed"); }

@@ -347,6 +347,11 @@ t_border: t_border.m $(MTL_T_DEP)
 check_t_border: t_border
 	MTL_DEBUG_LAYER=1 ./t_border
 	DM_TEST_BORDER=$(CURDIR)/t_border MTL_DEBUG_LAYER=1 python3 -m unittest test_dmsh_border.py
+t_sampler_family: t_sampler_family.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sampler_family.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_sampler_family
+check_t_sampler_family: t_sampler_family
+	MTL_DEBUG_LAYER=1 ./t_sampler_family
 t_view_levels: t_view_levels.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_view_levels.m $(MTL_T_SRC) $(FW)
 check_t_view_levels: RUN_ENV = MTL_DEBUG_LAYER=1

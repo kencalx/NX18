@@ -707,6 +707,20 @@ VKB(vkCreateSampler, VkResult, VkDevice d, const VkSamplerCreateInfo *ci, const 
         sd.lodBias = fminf(fmaxf(ci->mipLodBias, -15), 15);   // Metal 26's sampler bias; the device reports maxSamplerLodBias 15
         VkSampler s = zalloc(sizeof *s); s->s = [g_dev newSamplerStateWithDescriptor:sd];
         if (!s->s) LOG("[vk] [RED] cannot create the sampler");
+        // Diagnostics only, the sampler is as above. Metal's feature set tables give sampler LOD bias to Apple10 GPUs and later only and say nothing of what an Apple9 GPU (the iPad Pro M4) does
+        // with it; Super Mario Galaxy's GX LOD bias comes here (no reduction: the device is Vulkan 1.1 without samplerFilterMinmax). Opaque black is incompatible with A1BGR5Unorm and ABGR4Unorm
+        // textures (R5G5B5A1, R4G4B4A4 in g_fmts) on every GPU family; the image a sampler samples is known only at a descriptor write and VkSampler_T keeps no border colour, so the sampler half only
+        static _Atomic int pre10 = -1; int p10 = atomic_load_explicit(&pre10, memory_order_relaxed);
+        if (p10 < 0) atomic_store_explicit(&pre10, p10 = ![g_dev supportsFamily:MTLGPUFamilyApple10], memory_order_relaxed);   // decided once (a racing first call stores the same answer)
+        if (p10 && ci->mipLodBias != 0) { static _Atomic int n; int k = atomic_fetch_add(&n, 1) + 1;
+            if (k <= 32 || !(k & (k - 1))) VLOG("sampler with LOD bias %g (filters min %s mag %s mip %s)%s: Metal documents sampler LOD bias for Apple10 GPUs and later only, this one is below Apple10 "
+                                                "(%d such samplers so far)", fminf(fmaxf(ci->mipLodBias, -15), 15), ci->minFilter == VK_FILTER_LINEAR ? "linear" : "nearest", ci->magFilter == VK_FILTER_LINEAR ? "linear" : "nearest",
+                                                ci->mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR ? "linear" : "nearest", s->s ? "" : ", Metal made no sampler state", k); }
+        if ((ci->borderColor == VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK || ci->borderColor == VK_BORDER_COLOR_INT_OPAQUE_BLACK) && (ci->addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER ||
+            ci->addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER || ci->addressModeW == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER)) { static _Atomic int n; int k = atomic_fetch_add(&n, 1) + 1;
+            if (k <= 16 || !(k & (k - 1))) VLOG("sampler with the opaque black border colour, address modes %d,%d,%d (%d such samplers so far): Metal documents A1BGR5Unorm and ABGR4Unorm textures "
+                                                "(R5G5B5A1, R4G4B4A4) as incompatible with it on every GPU family; the images it samples are not known here", (int)ci->addressModeU,
+                                                (int)ci->addressModeV, (int)ci->addressModeW, k); }
         *out = s;
     }
     return VK_SUCCESS;
