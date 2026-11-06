@@ -28,6 +28,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
+#include <mach-o/dyld.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <time.h>
@@ -1035,7 +1036,9 @@ static psg_guard g_va_psg = PSG_GUARD_INIT_FOR("the Vulkan layer's pipeline arch
 #endif
 static void va_exe_uuid(char out[33]) {   // the app's own build: its executable's LC_UUID (empty when not found)
     out[0] = 0;
-    const struct mach_header_64 *h = &_mh_execute_header; const uint8_t *p = (const uint8_t *)(h + 1);
+    const struct mach_header_64 *h = (const struct mach_header_64 *)_dyld_get_image_header(0);   // image 0: the main executable (as nvn_mtl.m exe_uuid)
+    if (!h || h->magic != MH_MAGIC_64) return;
+    const uint8_t *p = (const uint8_t *)(h + 1);
     for (uint32_t i = 0; i < h->ncmds; i++) {
         const struct load_command *lc = (const struct load_command *)p;
         if (lc->cmd == LC_UUID) { const uint8_t *u = ((const struct uuid_command *)p)->uuid; for (int k = 0; k < 16; k++) snprintf(out + 2 * k, 3, "%02x", u[k]); return; }
@@ -1127,7 +1130,7 @@ static void va_init(void) {
     for (NSString *bp in bins) {
         MTLBinaryArchiveDescriptor *d = [MTLBinaryArchiveDescriptor new]; d.url = [NSURL fileURLWithPath:bp]; NSError *ae = nil;
         id<MTLBinaryArchive> a = [g_dev newBinaryArchiveWithDescriptor:d error:&ae];
-        NSString *kp = [bp.stringByDeletingPathExtension stringByAppendingPathExtension:@"keys"]; struct stat fs;
+        NSString *kp = [bp.stringByDeletingPathExtension stringByAppendingPathExtension:@"keys"] ?: [bp.stringByDeletingPathExtension stringByAppendingString:@".keys"]; struct stat fs;   // the first is nullable
         char *txt = a ? vka_read(kp.fileSystemRepresentation, 1 << 20) : NULL;
         if (a && txt && !stat(bp.fileSystemRepresentation, &fs) && vka_keys_parse(txt, (uint64_t)fs.st_size, &g_va_known)) { [list addObject:a]; bytes += (unsigned long long)fs.st_size; }
         else {

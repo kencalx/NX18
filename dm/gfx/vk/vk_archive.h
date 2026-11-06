@@ -142,8 +142,9 @@ static inline int vka_write(const char *path, const void *buf, size_t n) {
 static inline char *vka_read(const char *path, size_t max) {
     FILE *f = fopen(path, "r"); if (!f) return NULL;
     char *b = malloc(max + 1); size_t n = b ? fread(b, 1, max, f) : 0;
-    int more = fgetc(f) != EOF; fclose(f);
-    if (!b || more) { free(b); return NULL; }
+    int bad = !b || ferror(f), more = !bad && n == max && fgetc(f) != EOF;   // a byte past max only after a full read (a short one has met the end, or an error)
+    fclose(f);
+    if (bad || more) { free(b); return NULL; }
     b[n] = 0; return b;
 }
 // A file's identity: its name, size and a digest of its first and last 64 KiB (reading a large archive whole would cost a start its reads). 0, or an errno

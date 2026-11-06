@@ -225,7 +225,7 @@ int main(void) {
           "its record names this archive, not the bundled one (%.60s)", txt ? txt : "none");
     free(txt); psg_unused(&g);
 
-    char cmd[300]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir); if (system(cmd)) {}
+    char cmd[300]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir); if (system(cmd)) {}   // NOLINT(bugprone-command-processor): removes the test's own mkdtemp folder
     printf("vk_archive: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 }
