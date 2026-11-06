@@ -34,6 +34,7 @@ int main(void) { @autoreleasepool {
     id<MTLBuffer> co = [dev newBufferWithLength:32 options:MTLResourceStorageModeShared], fo = [dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
     MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint width:8 height:1 mipmapped:NO]; rd.usage = MTLTextureUsageRenderTarget; rd.storageMode = MTLStorageModePrivate;
     id<MTLTexture> rt = [dev newTextureWithDescriptor:rd];
+    if (!rt || !co || !fo) { printf("render target or output buffers: not made\n"); return 1; }
     id<MTLCommandBuffer> cb = [q commandBuffer];
     id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder]; [ce setComputePipelineState:cp]; [ce setTexture:v atIndex:0]; [ce setBuffer:co offset:0 atIndex:0];
     [ce dispatchThreads:MTLSizeMake(8, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [ce endEncoding];
