@@ -619,6 +619,34 @@ Diagnostics: each replay writes the presented image beside the capture (`.replay
 
 What step 1 does not cover yet (GitHub issue #402): a replay that equals the live frame bit for bit every time (above); more than one frame (pool deltas between frames); multisampled textures and formats that are not plain texels are not captured (a `[RED]` line at capture); sparse virtual pools; addresses stored inside pool contents (the game's own pointers to GPU memory) are not relocated; textures the CPU uploads through `DM_GAME_TEX_DIRTY_UPLOAD`'s flush tracking are uploaded again from the pools in the replay; timing and synchronization (waits, the encode thread, present pacing) are not reproduced.
 
+### HMMA census
+
+`dm/gfx/tools/tensor_census.py` reads the Metal sources of a game's built shader library and reports, for each shader that calls the HMMA helper (`dmsh_hmma16816_f16`, [Ampere HMMA through simdgroup_matrix](reference/shaders.md#ampere-hmma-through-simdgroup_matrix)), what its LDSM, MOVM and HMMA are made of and which planned step of removing their shuffles would apply: the entry's Open line says what each verdict means. The helper exists only for HMMA.16816 with an f16 accumulator in a compute shader (an F32 accumulator or m16n8k8 stays per lane), so the census also reports each other shader whose shuffles are LDSM, MOVM or the per-lane HMMA, marked `no dmsh_hmma16816_f16`. It only reads. It changes no library, decides no build output and is not part of the translation chain. It finds the shaders by searching the library, not from a profile's tables (`game.upscaler_keys` knows only `agl_ndsr.pck`'s): it reads each source up to its kernel, where the helper and spirv-cross's `spvSubgroupShuffle` are defined, and prints a line every 5,000 sources.
+
+The games whose shader map has an NDSR network (compute shaders counted from `shader_map.tsv`):
+
+| Game | Title ID | NDSR compute shaders |
+|---|---|---|
+| Donkey Kong Bananza | `040074A01BF12000` | 24, agl's `agl_ndsr.pck`; HMMA, LDSM and MOVM ([its note](../dm/games/040074A01BF12000/README.md#files)) |
+| Mario Kart World | `0400C3F00006E000` | 30, agl's `agl_ndsr.pck` (3 of them Bananza's) |
+| Splatoon Raiders | `0400380020056000` | 20, agl's `agl_ndsr.pck` (in its debug library) |
+| Star Fox | `0400E88025B1A000` | 20: Splatoon Raiders' same shaders, in `VIPR` containers of `data.zip`, not loaded through agl |
+| The Legend of Zelda: Ocarina of Time | `0400486024DEC000` | 81: agl's `agl_ndsr.pck` (22, 7 of them Splatoon Raiders'), `agl_ndsr_vr.pck` (20) and `agl_ndsr_vr_light.pck` (17), and the movie upscaler in `Movie/Ndve` (22) |
+| Kirby Air Riders | `040077201BE50000` | 20, a network of its own in a loose `Bin/Nvn2-upper_left.ndsr` (phx's engine, not agl) |
+
+HMMA is recorded only for Bananza's; for the others the census tells. On the Mac, in the checkout, with `G` the game's folder (its NSPs, and the build folder `<title ID>_build` the NSP script makes beside them) and `T` its title ID:
+
+```sh
+G="/Volumes/Games/Donkey Kong Bananza"; T=040074A01BF12000
+python3 dm/gfx/tools/tensor_census.py --library "$G/${T}_build" --out "$G/$T-work/tensor_census"
+# only when it finds no library, or reads one of another chain and finds no helper: build with this checkout, then run the census again
+python3 scripts/build_ipa_from_nsp.py "$G" -k ~/keys/prod.keys --platform mac
+```
+
+Any finished build of the game (Mac or iOS) leaves the library's Metal sources in `${T}_build/shader/cache/b-<chain>` (a folder or its `.img`; `shader/partial/` after a `--seen-shaders` build); of all the libraries there, the census reads this checkout's chain's, else the newest, and names the one it read. It prints a line per shader and the totals, and writes `<key>.census` for each shader (JSON, its text summary at the end), `summary.census` and `summary.txt`; without `--out`, into `tensor_census-<chain>` beside the library, and never into the repository. When no shader defines the helper, it says what that means. In a library of this checkout's chain, the game's HMMAs, if any, are forms the helper does not take; the shaders it lists without the helper have them, and building again changes nothing. A library of another chain may be from before the simdgroup HMMA (a `[RED]` line says so); build with this checkout and run the census again. It exits with 1 only when it finds no shader to report. `python3 dm/gfx/tools/tensor_census.py <key>_b.metal` reads one shader (`--json` for the whole report), taking its local size from `<key>_b.json` beside it.
+
+What to send back: the `.census` files and `summary.txt` of that folder, for example `cd "$G/$T-work" && zip -r ~/Desktop/census-$T.zip tensor_census -x '*.metal'`. They hold counts and structure only (shuffle classes, address leaves and pitches, where operands come from, variable names and line numbers of the translated source), no pixels, assets or shader text. `--metal` also writes each shader's Metal source beside its report, to read by hand; that is derived from the game, so it stays out of what is sent.
+
 ### A Mac app
 
 `--platform mac-app` (`PLATFORM = 'mac-app'` in Spyder) builds everything `--platform mac` builds, then packs a Mac app of the game with `dm/mac/pack_app.py`. The app is `<NSP folder>/<game name>.app` (a `:` or `/` in the name becomes ` - `); `-o` names another path ending in `.app`. Open it from Finder, from any folder: it does not need the build folder or the drive it is on. Like the Mac host, it needs a Mac with Apple silicon. Its name, version and bundle ID are the IPA's: the game name and display version from the control data, and `org.nxnative.<title ID>`. Its icon is the game's icon as `AppIcon.icns` (`sips`, `iconutil`).

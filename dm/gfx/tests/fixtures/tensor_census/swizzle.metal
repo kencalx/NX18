@@ -1,0 +1,118 @@
+// LDSM.MT88.x4 with an XOR swizzle of the 16-byte column: ((tid.x >> 4 & 1) ^ (tid.x & 7)) * 16 + (tid.x & 15) * 64, its words stored.
+// The committed translator's output (spirv-cross, XLATE_DEBUG=1) for a synthetic Ampere program, local size 32x1x1: no game's code.
+// Cut down for dm/gfx/tests/test_tensor_census.py: the headers, and the helper's per-lane body (dmsh_build.py hmma_msl replaces it anyway).
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+kernel void main0(uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]], uint gl_SubgroupInvocationID [[thread_index_in_simdgroup]])
+{
+    threadgroup spvUnsafeArray<uint, 2048> _18;
+    float _32 = as_type<float>(gl_LocalInvocationID.x);
+    int _35 = as_type<int>(_32) & 15;
+    uint _38 = uint(int(uint(as_type<int>(_32)) >> uint(4)));
+    int _40 = int(_38) & 1;
+    int _42 = as_type<int>(_32) & 7;
+    int _44 = _40 ^ _42;
+    int _46 = _35 * 64;
+    int _48 = _44 * 16;
+    int _50 = _48 + _46;
+    float _52 = as_type<float>(gl_SubgroupInvocationID);
+    uint _54 = uint(int(uint(as_type<int>(_52)) >> uint(2)));
+    int _56 = as_type<int>(_52) & 3;
+    int _58 = _56 << 1;
+    float _60 = spvSubgroupShuffle(as_type<float>(_50), uint(_58));
+    int _62 = int(_54) << 1;
+    int _64 = as_type<int>(_60) + _62;
+    uint _66 = uint(int(uint(_64) >> uint(2)));
+    float _68 = as_type<float>(_18[int(_66)]);
+    int _70 = _64 & 2;
+    int _72 = _70 << 3;
+    uint _74 = extract_bits(as_type<uint>(_68), uint(_72), 16u);
+    int _76 = _56 << 1;
+    int _78 = _76 + 1;
+    float _80 = spvSubgroupShuffle(as_type<float>(_50), uint(_78));
+    int _82 = int(_54) << 1;
+    int _84 = as_type<int>(_80) + _82;
+    uint _86 = uint(int(uint(_84) >> uint(2)));
+    float _88 = as_type<float>(_18[int(_86)]);
+    int _90 = _84 & 2;
+    int _92 = _90 << 3;
+    uint _94 = extract_bits(as_type<uint>(_88), uint(_92), 16u);
+    int _96 = int(_94) << 16;
+    int _98 = int(_74) | _96;
+    int _100 = _56 << 1;
+    int _102 = _100 + 8;
+    float _104 = spvSubgroupShuffle(as_type<float>(_50), uint(_102));
+    int _106 = int(_54) << 1;
+    int _108 = as_type<int>(_104) + _106;
+    uint _110 = uint(int(uint(_108) >> uint(2)));
+    float _112 = as_type<float>(_18[int(_110)]);
+    int _114 = _108 & 2;
+    int _116 = _114 << 3;
+    uint _118 = extract_bits(as_type<uint>(_112), uint(_116), 16u);
+    int _120 = _56 << 1;
+    int _122 = _120 + 1;
+    int _124 = _122 + 8;
+    float _126 = spvSubgroupShuffle(as_type<float>(_50), uint(_124));
+    int _128 = int(_54) << 1;
+    int _130 = as_type<int>(_126) + _128;
+    uint _132 = uint(int(uint(_130) >> uint(2)));
+    float _134 = as_type<float>(_18[int(_132)]);
+    int _136 = _130 & 2;
+    int _138 = _136 << 3;
+    uint _140 = extract_bits(as_type<uint>(_134), uint(_138), 16u);
+    int _142 = int(_140) << 16;
+    int _144 = int(_118) | _142;
+    int _146 = _56 << 1;
+    int _148 = _146 + 16;
+    float _150 = spvSubgroupShuffle(as_type<float>(_50), uint(_148));
+    int _152 = int(_54) << 1;
+    int _154 = as_type<int>(_150) + _152;
+    uint _156 = uint(int(uint(_154) >> uint(2)));
+    float _158 = as_type<float>(_18[int(_156)]);
+    int _160 = _154 & 2;
+    int _162 = _160 << 3;
+    uint _164 = extract_bits(as_type<uint>(_158), uint(_162), 16u);
+    int _166 = _56 << 1;
+    int _168 = _166 + 1;
+    int _170 = _168 + 16;
+    float _172 = spvSubgroupShuffle(as_type<float>(_50), uint(_170));
+    int _174 = int(_54) << 1;
+    int _176 = as_type<int>(_172) + _174;
+    uint _178 = uint(int(uint(_176) >> uint(2)));
+    float _180 = as_type<float>(_18[int(_178)]);
+    int _182 = _176 & 2;
+    int _184 = _182 << 3;
+    uint _186 = extract_bits(as_type<uint>(_180), uint(_184), 16u);
+    int _188 = int(_186) << 16;
+    int _190 = int(_164) | _188;
+    int _192 = _56 << 1;
+    int _194 = _192 + 24;
+    float _196 = spvSubgroupShuffle(as_type<float>(_50), uint(_194));
+    int _198 = int(_54) << 1;
+    int _200 = as_type<int>(_196) + _198;
+    uint _202 = uint(int(uint(_200) >> uint(2)));
+    float _204 = as_type<float>(_18[int(_202)]);
+    int _206 = _200 & 2;
+    int _208 = _206 << 3;
+    uint _210 = extract_bits(as_type<uint>(_204), uint(_208), 16u);
+    int _212 = _56 << 1;
+    int _214 = _212 + 1;
+    int _216 = _214 + 24;
+    float _218 = spvSubgroupShuffle(as_type<float>(_50), uint(_216));
+    int _220 = int(_54) << 1;
+    int _222 = as_type<int>(_218) + _220;
+    uint _224 = uint(int(uint(_222) >> uint(2)));
+    float _226 = as_type<float>(_18[int(_224)]);
+    int _228 = _222 & 2;
+    int _230 = _228 << 3;
+    uint _232 = extract_bits(as_type<uint>(_226), uint(_230), 16u);
+    int _234 = int(_232) << 16;
+    int _236 = int(_210) | _234;
+    _18[8] = uint(_98);
+    _18[9] = uint(_144);
+    _18[10] = uint(_190);
+    _18[11] = uint(_236);
+}
