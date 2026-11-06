@@ -905,9 +905,18 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
             self.build()
         self.assertFalse(any('--seen-shaders' in m for m in self.said))
 
-    def test_shader_watch_counts_the_list(self):
-        self.assertEqual(nsp.ShaderWatch(self.g, self.tmp, self.tmp).n, 4)
-        self.assertEqual(nsp.ShaderWatch(self.g, self.tmp, self.tmp, seen=self.keys('a', 'b')).n, 2)
+    def test_shader_watch_counts_the_list(self):   # the watch reads the progress file the build is told of (DMSH_PROGRESS), whose total is the keys it was given: the list, else the whole map
+        shown = []
+        def progress_run(cmd, log, env, cwd=None, on_line=None):   # dmsh_build.py: progress() over the keys of its command line, or every key of the map without any
+            self.fake_run(cmd, log, env, cwd, on_line)
+            keys = cmd[4:] or nsp.shader_keys(self.g)
+            Path(env['DMSH_PROGRESS']).write_text(json.dumps({'step': 'compiling', 'done': 1, 'total': len(keys), 'cached': 1, 'misses': len(keys) - 1}))
+            watch, = nsp.PROG.watch.call_args.args; shown.append(watch())
+        with mock.patch.object(nsp, 'run', progress_run):
+            self.build(self.keys('a', 'b'))
+            with mock.patch.object(nsp, 'chain_tables', lambda *a: True), mock.patch.object(nsp, 'stale_shaders', lambda *a: None), mock.patch.object(nsp, 'prune_stale_chains'), mock.patch.object(nsp, 'prune_shader_cache'):
+                self.build()
+        self.assertEqual([s['total'] for s in shown], [2, 4]); self.assertEqual(shown[0]['note'], '1 not cached')
 
     def run_cmd(self, **kw):
         game = self.tmp / 'ex'; game.mkdir(exist_ok=True); (game / 'RomFS').mkdir(exist_ok=True)

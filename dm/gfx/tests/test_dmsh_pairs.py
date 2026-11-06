@@ -21,10 +21,13 @@ import pso_offline
 
 
 def builder():
-    # Use production functions without the CLI's translator/profile initialization.
-    names = {'load_pairs', 'vs_pad', 'vs_depth', 'shader_key', 'pair_keyed'}
+    # Use production functions without the CLI's translator/profile initialization. vs_pad reads a paired pixel shader's MSL through output(): from the output folder while
+    # that shader is in flight, else from the stage in the shader cache (dmsh_build.py commit), here a dict (STAGED); a full build (want empty) reads no older image
+    names = {'load_pairs', 'vs_pad', 'vs_depth', 'shader_key', 'pair_keyed', 'output', 'label_dir'}
     tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    ns = dict(collections=collections, os=os, re=re, sys=sys, hashlib=hashlib)
+    staged = {}
+    ns = dict(collections=collections, os=os, re=re, sys=sys, hashlib=hashlib, IOSOUT='', STAGE='stage/test', want=set(), OLD_IMAGE={},
+              STAGED=staged, STORE=types.SimpleNamespace(get=staged.get))
     exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names],
                             type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
     return ns
@@ -82,6 +85,7 @@ class Pairing(unittest.TestCase):
 
     def test_split_fallback_union_and_defaults(self):
         self.assertEqual(self.ns['PAIRS'], {'v': {'f0', 'f1', 'f6'}})
+        f6 = self.root / 'f6_b.metal'; self.ns['STAGED'][f"{self.ns['STAGE']}/mac/f6_b.metal"] = f6.read_bytes(); f6.unlink()   # finished earlier: staged, off the disk
         src, pad = self.ns['vs_pad']('v', VS)
         self.assertEqual(pad, [1, 6])
         for loc in pad:

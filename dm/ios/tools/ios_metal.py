@@ -14,10 +14,11 @@ METAL = ['xcrun', '-sdk', 'iphoneos', 'metal', '-c', '-O1', '-mios-version-min=2
 METAL_FALLBACK = [FALLBACK_STD if a == STD else a for a in METAL]
 METALLIB = ['xcrun', '-sdk', 'iphoneos', 'metallib']
 RECORD = ' '.join(METAL) + f' (else {FALLBACK_STD}); ' + ' '.join(METALLIB)          # Written into json chain.metal
+DEPTH = ['-fbracket-depth=1024']   # more nested brackets than the front end's 256 (as dmsh_build.py's METAL_DEPTH): no output changes with it, so RECORD does not name it
 
 def compile(msl, air, lib):
-    try: dmsh_pch.compile(METAL, msl, air)
+    try: dmsh_pch.compile(METAL + DEPTH, msl, air)
     except subprocess.CalledProcessError:
         print(f'{msl}: compiled in Metal 3.2 ({FALLBACK_STD}): Metal 4.1 rejects it (its messages are above)', file=sys.stderr, flush=True)
-        dmsh_pch.compile(METAL_FALLBACK, msl, air)
+        dmsh_pch.compile(METAL_FALLBACK + DEPTH, msl, air)
     subprocess.run([*METALLIB, air, '-o', lib], check=True)

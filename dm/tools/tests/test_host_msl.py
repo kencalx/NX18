@@ -79,7 +79,7 @@ class HostMSL(unittest.TestCase):
     def compiles(self):   # the host libraries' compiles (dm/gfx/msl/*.metal)
         return [c for c in self.calls() if c[-1].endswith('.metal') and '/msl/' in c[-1]]
 
-    def chain_compiles(self):   # the self-test kernel's: its source on standard input, as the chain compiles a game shader
+    def chain_compiles(self):   # the self-test kernels': their sources on standard input, as the chain compiles a game shader
         return [c for c in self.calls() if '<stdin>' in c]
 
     def refused(self):   # the compiles TEST_METAL_REFUSE made fail
@@ -99,14 +99,19 @@ class HostMSL(unittest.TestCase):
 
     def test_self_test_kernel_is_compiled_as_each_platforms_game_shaders(self):
         import ios_metal
-        for args, metal, label in ((), hmma_selftest.CHAIN['MAC_METAL'], 'macosx'), (('MSL_SDK=iphoneos',), ios_metal.METAL, 'iphoneos'):
+        libs = tuple(hmma_selftest.LIBRARIES)
+        self.assertIn(f'CHAIN_LIBS = {libs!r}', (REPO / 'dm/gfx/tools/host_msl.py').read_text())   # every kernel of the self-test has its entry in the header
+        # the game chain's compile commands: dmsh_build.py's mac_compile (MAC_METAL with METAL_DEPTH), ios_metal.compile (METAL with DEPTH): the bracket depth, which neither record names
+        for args, metal, label in ((), hmma_selftest.CHAIN['MAC_METAL'] + hmma_selftest.CHAIN['METAL_DEPTH'], 'macosx'), (('MSL_SDK=iphoneos',), ios_metal.METAL + ios_metal.DEPTH, 'iphoneos'):
+            self.assertIn('-fbracket-depth=1024', metal)
             self.make(*args)
-            chain = self.chain_compiles()[-1]
-            self.assertEqual(chain[:chain.index('-x')], metal[1:])   # the chain's own command, without the precompiled header
-            self.assertEqual(chain[-1], hmma_selftest.msl())       # dmsh_build.py's body, as every game gets it
+            chains = self.chain_compiles()[-len(libs):]   # one compile a kernel, in the header's order
             header = (self.root / f'dm/host/gen/msl-{label}/host_msl_gen.h').read_text()
-            self.assertIn(f'{{"hmma_selftest", "{" ".join(metal)} -x metal -; ', header)
-            self.assertRegex(header, r'k_host_msl_chain_hmma, 16\}')   # the fake compiler's 'compiled library'
+            for chain, name in zip(chains, libs):
+                self.assertEqual(chain[:chain.index('-x')], metal[1:])   # the chain's own command, without the precompiled header
+                self.assertEqual(chain[-1], hmma_selftest.msl(name))   # dmsh_build.py's body, as every game gets it
+                self.assertIn(f'{{"{name}", "{" ".join(metal)} -x metal -; ', header)
+            for array in ('k_host_msl_chain_hmma', 'k_host_msl_chain_hmma_flags'): self.assertRegex(header, array + r', 16\}')   # the fake compiler's 'compiled library'
         self.assertIn('-std=metal4.1', chain); self.assertIn('-fmetal-math-mode=relaxed', chain); self.assertIn('-mios-version-min=27.0', chain)
         self.assertEqual(len(self.compiles()), 2)   # the host's libraries keep their own flags
 
@@ -115,13 +120,15 @@ class HostMSL(unittest.TestCase):
         self.env['TEST_METAL_REFUSE'] = ios_metal.STD   # Metal 4.1 refuses it: ios_metal.compile takes its fallback language, as for a game shader
         self.make('MSL_SDK=iphoneos')
         self.assertIn(ios_metal.FALLBACK_STD, self.chain_compiles()[-1])
-        self.assertIn(f'"{" ".join(ios_metal.METAL_FALLBACK)} -x metal -; ', (self.root / 'dm/host/gen/msl-iphoneos/host_msl_gen.h').read_text())
+        fallback = (self.root / 'dm/host/gen/msl-iphoneos/host_msl_gen.h').read_text()
+        for name in hmma_selftest.LIBRARIES: self.assertIn(f'{{"{name}", "{" ".join(ios_metal.METAL_FALLBACK + ios_metal.DEPTH)} -x metal -; ', fallback)   # with the bracket depth too
         self.env['TEST_METAL_REFUSE'] = '-fpreserve-invariance'   # no language takes it: the host is built without it, and says why at run time
         self.env['TEST_METAL_VERSION'] = 'Metal test compiler 2'
         self.make('MSL_SDK=iphoneos')
         ios = self.root / 'dm/host/gen/msl-iphoneos/host_msl_gen.h'
         failed = ios.read_text()
-        self.assertRegex(failed, r'"hmma_selftest", "it did not compile when the host was built \(.*<build folder>.*\)", k_host_msl_chain_hmma, 0\}')
+        for name, array in (('hmma_selftest', 'k_host_msl_chain_hmma'), ('hmma_selftest_flags', 'k_host_msl_chain_hmma_flags')):
+            self.assertRegex(failed, f'"{name}", "it did not compile when the host was built \\(.*<build folder>.*\\)", {array}, 0}}')
         self.assertNotIn(tempfile.gettempdir() + os.sep + 'tmp', failed.split('k_host_msl_chain[]')[1])   # no temporary folder in the record: the same failure, the same header
         self.assertIn('(the self-test kernel did not compile: tried again at the next build)', failed.split('\n')[1])
         n = len(self.refused())
@@ -129,10 +136,11 @@ class HostMSL(unittest.TestCase):
         self.assertGreater(len(self.refused()), n); self.assertEqual(ios.read_text(), failed)
         del self.env['TEST_METAL_REFUSE']   # the cause has passed (the compiler service, a full disk): the next build has the kernel, with nothing else changed
         self.make('MSL_SDK=iphoneos')
-        self.assertRegex(ios.read_text(), r'k_host_msl_chain_hmma, 16\}')
+        self.assertRegex(ios.read_text(), r'k_host_msl_chain_hmma, 16\}'); self.assertRegex(ios.read_text(), r'k_host_msl_chain_hmma_flags, 16\}')
         self.env['TEST_METAL_VERSION'] = ''
         self.make()
         self.assertIn('"hmma_selftest", "no Metal compiler for macosx when the host was built", k_host_msl_chain_hmma, 0}', self.header.read_text())
+        self.assertIn('"hmma_selftest_flags", "no Metal compiler for macosx when the host was built", k_host_msl_chain_hmma_flags, 0}', self.header.read_text())
 
     def test_compiler_installation_recovers_without_cleaning(self):
         self.env['TEST_METAL_VERSION'] = ''

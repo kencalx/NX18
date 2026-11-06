@@ -1,13 +1,30 @@
 #!/usr/bin/env python3
 """The HMMA census: what the LDSM, MOVM and HMMA of a translated Switch 2 compute shader are made of, read from the Metal source the shader build wrote for it, <key>_b.metal (the chain's
-default XLATE_DEBUG=1 leaves one temporary per operation, which is what this reads). It tells, from a game's real shaders, whether the planned stages of removing the subgroup shuffles
-around HMMA would apply (docs/reference/shaders.md, Ampere HMMA through simdgroup_matrix, Open; how to run it on a game: docs/development.md, HMMA census):
-  stage 1  an LDSM's row address computed by each lane instead of shuffled: the address is a function of the lane (SubgroupInvocationID, or LocalInvocationID.x with a local size x that
-           is a multiple of 32) and of warp-uniform values (constants, the workgroup ID, LocalInvocationID.y / z, constant-buffer reads) only
-  stage 2  MOVM folded into the HMMA's B: both B words of an HMMA come from MOVM
-  stage 3  A and B loaded as tiles straight from LDSM's shared memory: a stage-1 address whose 8 rows are one constant pitch apart (16 to 65535 bytes, a multiple of 16) in every
-           matrix of every warp, nothing between the LDSM's loads and each HMMA it feeds that writes or orders memory, calls a function other than the HMMA helper, or leaves the
-           block, and no other use of the words it loads (else the LDSM and its shuffles stay)
+default XLATE_DEBUG=1 leaves one temporary per operation, which is what this reads). It tells, from a game's real shaders, which of upstream's paths for the HMMA helper each call
+takes already (TensorPass's flags, upstream's bd9f422d: docs/reference/shaders.md, HMMA chains keep their matrices in the SIMD-group) and where the planned stages of removing
+what is left of the subgroup shuffles and scratch round trips around HMMA would apply (shaders.md, Ampere HMMA through simdgroup_matrix, Open; how to run it on a game:
+docs/development.md, HMMA census):
+  upstream  each call's flags, read as the translator passes them (constants): A kept from the call before (FlagAReuse), loaded where its LDSM read it (FlagADirect, FlagATrans;
+            only where hmma_msl passed the caller's one shared memory array) or through the scratch; C from an accumulator slot (FlagCSlot), zero (FlagCZero) or through the
+            scratch; D left in its slot (FlagDSlot) or back through the scratch; B through the scratch always. An LDSM whose words go only to A of calls that load A themselves
+            keeps its per-lane code in the Metal text, which the Metal compiler drops (the helper is inlined, its flags constants): counted apart, not as work left. A call in
+            no chain (neither CSlot nor DSlot) that comes while a chain is open in slot 0 is counted: this checkout's body works it in a pair of its own; a library whose
+            functions declare dm_acc[16] has NXNative's body, which works it in slot 0's matrices over that chain's sum ([RED], and not counted as served). A library's call of
+            the translator's 19 arguments (hmma_msl did not rewrite its helper) runs the translator's own body, which reads no flag: [RED], and left out of these paths
+  stage 1   an LDSM still read lane by lane whose row address each lane could compute instead of shuffling it: a function of the lane (SubgroupInvocationID, or
+            LocalInvocationID.x with a local size x that is a multiple of 32) and of warp-uniform values (constants, the workgroup ID, LocalInvocationID.y / z, constant-buffer
+            reads) only
+  stage 2   MOVM folded into the HMMA's B: both B words of an HMMA come from MOVM
+  stage 3   what upstream's paths do not cover, in calls with flags: A through the scratch although it is one LDSM's matrices (behind a shared store, an atomic on shared
+            memory, a barrier or a call; its LDSM in another block; or nothing the census sees in between: rows the translator did not prove strided, or a block boundary the
+            Metal text does not show), accumulators through the scratch (C an earlier HMMA's D carried by a phi, from another block, read elsewhere too, or from a chain that
+            started with all 8 slots taken), and B words from LDSMs that could be tiles, which upstream left in the scratch on purpose (B as matrices slowed an NDVE shader by
+            13 %; not measured for NDSR)
+  tiles     an LDSM whose rows a tile load could read: a stage-1 address whose 8 rows are one constant pitch apart (16 to 65535 bytes, a multiple of 16) in every matrix of every
+            warp, nothing between the LDSM's loads and each HMMA it feeds that writes or orders memory, calls a function other than the HMMA helper, or leaves the block, and no
+            other use of the words it loads (else the LDSM and its shuffles stay)
+A library built before the flags (12-argument calls; its chain says which form to expect) takes every operand through the scratch: the census reads its LDSMs, MOVMs and calls as
+before, and says that upstream's paths and stage 3 are not known for it until it is built again.
 Read only: it writes nothing but its reports, decides no build output and is not part of the translation chain (not in dmsh_chain.FILES, not imported by dmsh_build.py).
 
 Per shader it reports every spvSubgroupShuffle, classified by the lane each lane reads from (evaluated) and where its value goes: an LDSM row address (InstEmitAmpereTensor.cs's
@@ -18,9 +35,11 @@ plain or transposed, its matrices and the row pitch: the address evaluated in 32
 values (buffer words of 32 or 16 random bits, not aligned: an OR or XOR with one is linear only where their bits cannot overlap; the workgroup ID). The pitch is a number when it is
 the same in every matrix, warp and sample; else 'varies' (rows not a constant pitch apart: a swizzle, an OR whose bits overlap), 'uniform' (changes with the uniform values),
 'per warp' or 'per matrix'; 0 for a warp-uniform address. Row alignment is reported apart: 16 when the arithmetic alone makes every row 16-byte aligned. For an address whose only
-blocker is a phi whose values hold nothing that varies, also the pitch the rows would have if the phi were warp-uniform. Per dmsh_hmma16816_f16 call: where A, B and C come from
-(ldsm, ldsm.T, movm(x), Dk.j: D of the k-th HMMA, zero, phi(...), lds: a plain shared-memory read, other), what uses D, and whether it is in a loop. Counts of barriers, shared
-stores and atomics, and one verdict line per stage. A report holds counts and structure, no source text: variable names (_123) and line numbers at most.
+blocker is a phi whose values hold nothing that varies, also the pitch the rows would have if the phi were warp-uniform. Per dmsh_hmma16816_f16 call (12 arguments before the
+flags, 19 as the translator writes them, 21 or 22 after hmma_msl; any other form is counted and said, never read): where A, B and C come from (ldsm, ldsm.T, movm(x), Dk.j: D of
+the k-th HMMA, zero, phi(...), lds: a plain shared-memory read, other), what uses D, whether it is in a loop, its flags and the path each operand takes, and why A or an
+accumulator goes through the scratch. Counts of barriers, shared stores and atomics, and the verdict lines. A report holds counts and structure, no source text: variable names
+(_123) and line numbers at most.
 
 Usage:
   tensor_census.py <shader.metal> [--local X,Y,Z] [--json]   one shader: the summary, or with --json the whole report. The local size comes from <key>_b.json beside the source when
@@ -36,6 +55,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import bisect
 import collections
 import functools
 import json
@@ -52,8 +72,19 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools'))
 import shader_lib  # noqa: E402   (the library reader: a folder or the one-file image)
 
-FORMAT = 2   # of the .census files
+FORMAT = 3   # of the .census files
 HMMA_NAME = 'dmsh_hmma16816_f16'
+# The helper's calls, by their number of arguments: where D1 (the out argument), the scratch and TensorPass's flags are. lane, block, A (4), B (2), C (2) come first in every form
+CALL_FORMS = {
+    12: dict(d1=10, scratch=11, flags=None, direct=None),   # before TensorPass's flags (upstream's bd9f422d): then out D1, the scratch
+    19: dict(d1=17, scratch=18, flags=10, direct=None),     # the translator's: flags, A's LDSM row address, A's four offsets, A's row stride, out D1, the scratch
+    21: dict(d1=17, scratch=18, flags=10, direct=False),    # as dmsh_build.py hmma_msl rewrites them: the caller's matrices (dm_acc, dm_am) added
+    22: dict(d1=17, scratch=18, flags=10, direct=True),     # and the caller's shared memory array, which turns direct A on
+}
+FLAG_A_REUSE, FLAG_C_SLOT, FLAG_D_SLOT, FLAG_C_ZERO, FLAG_A_DIRECT, FLAG_A_TRANS = 1, 2, 4, 8, 16, 32   # TensorPass.cs Flag*; the accumulator slot is flags >> 8
+SLOTS = 8   # TensorPass.cs Slots: accumulator slots a function; a chain that starts with all of them taken goes through the scratch
+SHARED_PAIR = 16   # the size of hmma_msl's dm_acc whose body makes a call in no chain in slot 0's matrices (NXNative's); this checkout's has a pair of its own past the slots (18)
+B_NOTE = "upstream left B in the scratch on purpose: in Ocarina of Time's NDVE networks, B kept as matrices slowed one shader by 13 %; not measured for NDSR"
 M32 = 0xffffffff
 SAMPLES = 4   # random sets of uniform values: buffer words of 32 random bits in the first two, of 16 (an offset in shared memory) in the others; never aligned
 UNKNOWN_LOCAL = [128, 2, 2]   # the local size when none is known: x a multiple of 32, and warps that differ in tid.x >> 5, tid.y and tid.z
@@ -321,10 +352,11 @@ TG_DECL = re.compile(r'^threadgroup\s+(?:spvUnsafeArray<(\w+),\s*(\d+)>|(\w+))\s
 TG_SPILLED = re.compile(r'^device\s+(?:spvUnsafeArray<(\w+),\s*(\d+)>|(\w+))\s*(?:&\s*(\w+)|\(&(\w+)\)\[(\d+)\])\s*=\s*\*\(device\b.*\bdm_tg\b')   # dmsh_build.py tg_spill
 POINTER_CAST = re.compile(r'\((?:(?:const|volatile)\s+)?(?:device|threadgroup|thread|constant)\s+[\w ]+\*\s*\)(?=\s*&)')
 WIDE = re.compile(r'^\*\((?:const\s+)?device\s+\w+\s*\*\)\s*&(.*)$')   # dmsh_wide.py: words of a buffer read as one vector
+MATRICES = re.compile(r'^simdgroup_\w+\s+dm_acc\[(\d+)\],\s*dm_am\[\d+\];$')   # hmma_msl's own declaration in each function that calls the helper: no line of the game's
 CONTROL = re.compile(r'^(if|else|for|while|do|switch|case|default|break|continue|return|discard_fragment)\b')
 LOOP_HEAD = re.compile(r'^(for|while|do)\b')
 WORD_BYTES = {'uint': 4, 'int': 4, 'float': 4, 'half': 2, 'ushort': 2, 'short': 2, 'uchar': 1, 'char': 1}
-BLOCKING = ('barrier', 'fence', 'atomic', 'shared store', 'device store', 'texture write', 'call', 'block', 'other')   # what a stage-3 window must not hold
+BLOCKING = ('barrier', 'fence', 'atomic', 'device atomic', 'shared store', 'device store', 'texture write', 'call', 'block', 'other')   # what a stage-3 window must not hold
 
 
 class Shader:
@@ -332,6 +364,7 @@ class Shader:
 
     def __init__(self, src: str, local: list[int] | None = None):
         self.local = local if isinstance(local, list) and len(local) == 3 and all(isinstance(n, int) and n > 0 for n in local) else None
+        self.acc_size: int | None = None   # hmma_msl's dm_acc declared in the kernel (a library's source): which body the calls run; None in the translator's own text
         self.x_aligned = self.local is None or self.local[0] % 32 == 0   # each warp holds whole rows of x: tid.x is 32 k + lane, tid.y and tid.z the warp's
         self.defs: dict[str, Node | None] = {}   # None: unreadable, or D1 of an HMMA call
         self.types: dict[str, str] = {}
@@ -340,6 +373,7 @@ class Shader:
         self.multi: set[str] = set()   # declared without a value or assigned again: a phi
         self.assigns: dict[str, list[Node | None]] = collections.defaultdict(list)
         self.arrays: dict[str, tuple[str, int]] = {}   # threadgroup arrays: element type, count
+        self.uint_arrays: set[str] = set()   # those declared threadgroup spvUnsafeArray<uint, N>: what hmma_msl takes for the caller's shared memory
         self.stmts: list[tuple[int, str]] = []   # (line, kind): what a stage-3 window must not hold, the braces, the HMMA calls
         self.uses: dict[str, list[str]] = collections.defaultdict(list)   # var -> the vars that read it, or 'store:<line>' / 'ctl:<line>'
         self.buffer_params: set[str] = set()
@@ -353,15 +387,53 @@ class Shader:
         self._warps: dict[tuple[int, bool], list[list[dict[str, Any]]]] = {}
         self._memo: dict[tuple[int, bool, int, int], dict[str, Value]] = {}   # per (sample, phi taken as uniform, warp, lane): every value evaluated so far
         self.read(src)
-        self.calls = [v for v, d in self.defs.items() if d is not None and d[0] == 'call' and callee_name(d) == HMMA_NAME and len(d[2]) == 12]
+        helper = {v: d for v, d in self.defs.items() if d is not None and d[0] == 'call' and callee_name(d) == HMMA_NAME}
+        self.calls = [v for v, d in helper.items() if len(d[2]) in CALL_FORMS]
+        self.unread_calls = len(helper) - len(self.calls)   # a form this reader does not know: counted, never guessed at
         self.call_set = set(self.calls)
-        self.scratch = {a for v in self.calls for a in [self.arg_name(v, 11)] if a}
+        self.form = {v: CALL_FORMS[len(helper[v][2])] for v in self.calls}
+        self.scratch = {a for v in self.calls for a in [self.arg_name(v, self.form[v]['scratch'])] if a}
         self.game_arrays = {a for a in self.arrays if a not in self.scratch}
         self.d1: dict[str, str] = {}   # D1 (the out parameter) -> its call
         for v in self.calls:
-            d1 = self.arg_name(v, 10)
+            d1 = self.arg_name(v, self.form[v]['d1'])
             if d1:
                 self.d1[d1] = v; self.multi.discard(d1); self.defs[d1] = None; self.line_of.setdefault(d1, self.line_of[v])
+        self.direct_a, self.direct_a_how = self.direct()
+
+    def direct(self) -> tuple[bool | None, str]:
+        """Whether a call's FlagADirect loads A from the caller's shared memory: hmma_msl passes that array, and turns direct A on, only when every function that calls the
+        helper declares one threadgroup spvUnsafeArray<uint, N> besides the scratch, the same one; else the flag is ignored and A goes through the scratch. A rewritten call says
+        which (22 arguments: on); for the translator's own form this applies hmma_msl's rule to the kernel, the only function read here"""
+        forms = {f['direct'] for f in self.form.values() if f['flags'] is not None}
+        if not forms: return None, 'no call with TensorPass flags'
+        if True in forms: return True, 'the calls pass the shared memory array (as hmma_msl rewrites them)'
+        if False in forms: return False, 'the calls pass no shared memory array (as hmma_msl rewrites them)'
+        other = self.uint_arrays - self.scratch
+        return len(other) == 1, f'the kernel declares {len(other)} threadgroup uint array{"s" * (len(other) != 1)} besides the scratch (as hmma_msl would decide)'
+
+    def copy_root(self, node: Node) -> Node:
+        """What a chain of copies and conversions copies (spirv-cross passes each argument through a copy of its own)"""
+        node = strip_casts(node)
+        for _ in range(16):
+            if node[0] != 'name' or node[1] in self.multi: break
+            d = self.defs.get(node[1])
+            if d is None or strip_casts(d)[0] not in ('name', 'num'): break   # a constant: compared by its text
+            node = strip_casts(d)
+        return node
+
+    def const_arg(self, call: str, k: int) -> int | None:
+        """A call argument's value when it is a constant (spirv-cross passes each through a copy of its own), else None"""
+        d = self.defs[call]
+        if d is None or k >= len(d[2]): return None
+        a = d[2][k]
+        try:
+            if self.node_leaves(a) != {'const'}: return None
+            ctx = self.warp_contexts(0)[0][0]
+            memo: dict[str, Value] = {}
+            for r in sorted(self.refs(a)): self.evaluate(r, ctx, memo)
+            return wrap('i', self.ev(a, ctx, memo)[1])
+        except Refused: return None
 
     def arg_name(self, call: str, k: int) -> str | None:
         d = self.defs[call]
@@ -389,7 +461,8 @@ class Shader:
         regions, prev = 0, ''
         for n, raw in enumerate(src[start + 1:end].split('\n')):
             line, s = first + n, raw.strip()
-            if not s or s.startswith(('//', '#')): continue
+            if m := MATRICES.match(s): self.acc_size = int(m.group(1))
+            if not s or s.startswith(('//', '#')) or m: continue
             self.lines += 1
             if s == '{':
                 regions += 1; stack.append([regions, int(bool(LOOP_HEAD.match(prev)))]); self.stmts.append((line, 'block')); prev = s; continue
@@ -401,6 +474,11 @@ class Shader:
             prev = s
             loop = next((r for r, is_loop in reversed(stack) if is_loop), 0)
             self.statement(s, line, loop)
+
+    def shared_atomic(self, s: str) -> bool:
+        """Whether a statement's atomic works on shared memory (one of the kernel's threadgroup arrays, spilled ones too): TensorPass.WritesShared counts only those, as a
+        shared store, between an LDSM and the HMMA; an atomic on a buffer or an image does not stop A from being loaded where the LDSM read it"""
+        return any(a in self.arrays for a in re.findall(r'\batomic_\w+\(\s*&\s*\(?\s*(\w+)\b', s))   # an element of an array, or a shared variable of its own
 
     def control(self, s: str, line: int) -> None:
         self.stmts.append((line, 'block'))
@@ -414,14 +492,16 @@ class Shader:
         s = POINTER_CAST.sub('', re.sub(r'/\*.*?\*/', '', s)).strip()   # comments (/* nan */), and the pointer casts of atomics: what is read stays
         if CONTROL.match(s): self.control(s, line); return
         if m := TG_DECL.match(s):
-            self.arrays[m.group(4)] = (m.group(1) or m.group(3), int(m.group(2) or m.group(5) or 1)); return
+            self.arrays[m.group(4)] = (m.group(1) or m.group(3), int(m.group(2) or m.group(5) or 1))
+            if m.group(1) == 'uint': self.uint_arrays.add(m.group(4))
+            return
         if m := TG_SPILLED.match(s):
             self.arrays[m.group(4) or m.group(5)] = (m.group(1) or m.group(3), int(m.group(2) or m.group(6) or 1)); return
         here = []
         if re.search(r'\bthreadgroup_barrier\(', s): here.append('barrier')
         elif re.search(r'\bsimdgroup_barrier\(', s): here.append('simdgroup barrier')
         elif re.search(r'\batomic_thread_fence\(|\bspvImageFence\(', s): here.append('fence')
-        if re.search(r'\batomic_\w+\(', s) and 'atomic_thread_fence' not in s: here.append('atomic')
+        if re.search(r'\batomic_\w+\(', s) and 'atomic_thread_fence' not in s: here.append('atomic' if self.shared_atomic(s) else 'device atomic')
         if re.search(r'\.write\(', s): here.append('texture write')
         self.stmts.extend((line, k) for k in here)
         if m := DECL.match(s):
@@ -820,6 +900,12 @@ def pitch_why(p: Any) -> list[str]:
 D_LABEL = re.compile(r'D\d+\.\d')   # D of the k-th HMMA, in the totals: D
 
 
+def from_d(label: str) -> bool:
+    """Whether an operand's source is an earlier HMMA's D: Dk.j, or a phi with one among its values (an accumulator a loop carries)"""
+    if label.startswith('phi('): return any(D_LABEL.fullmatch(x) for x in label[4:-1].split('|'))
+    return bool(D_LABEL.fullmatch(label))
+
+
 # ---- the census of one shader --------------------------------------------------------------------------------------------------------------------------------------------------
 def lane_pattern(idx: list[int]) -> tuple[str, int, int] | None:
     """Which emulation a shuffle belongs to, from the lane each lane reads (InstEmitAmpereTensor.cs): (kind, matrix or register, half or column)"""
@@ -876,9 +962,10 @@ def rows(tabs: list[list[list[int]]], matrices: int) -> dict[str, Any]:
 
 
 class Census:
-    def __init__(self, src: str, local: list[int] | None = None, name: str = ''):
+    def __init__(self, src: str, local: list[int] | None = None, name: str = '', library: bool = False):
         self.sh = Shader(src, local)
         self.name = name
+        self.library = library   # a built library's source: hmma_msl rewrote every call it could, so a call of the translator's 19 arguments runs the translator's own body
         self.allowed = self.sh.uniform_ok | {'lane'} | ({'tid.x'} if self.sh.x_aligned else set())   # the leaves stage 1's pass would take
         self.shuffles = self.find_shuffles()
         self.shuffle_of = {s['var']: s for s in self.shuffles}
@@ -889,11 +976,14 @@ class Census:
         self.d_of: dict[str, str] = {}
         self._prov: dict[str, tuple[str, list[tuple[int, int, str]]]] = {}   # what a variable is, found once (outside a phi's own loop)
         self._steps = 0
+        self._blocking: list[tuple[int, str]] | None = None   # the statements a window must not hold, by line
+        self._blocking_lines: list[int] = []
         for k, v in enumerate(self.sh.calls):
             self.d_of[v] = f'D{k}.0'
-            d1 = self.sh.arg_name(v, 10)
+            d1 = self.sh.arg_name(v, self.sh.form[v]['d1'])
             if d1: self.d_of[d1] = f'D{k}.1'
         self.hmmas = [self.hmma(k, v) for k, v in enumerate(self.sh.calls)]
+        self.hmma_of = dict(zip(self.sh.calls, self.hmmas))
         self.verdicts()
 
     # ---- every shuffle: the lanes it reads and where its value goes
@@ -1086,7 +1176,24 @@ class Census:
             label, grp = self.provenance(a, 0, frozenset())
             ops[nm] = label
             if grp: groups[nm] = grp
-        return dict(index=k, line=sh.line_of[v], in_loop=bool(sh.loop_of.get(v, 0)), loop=sh.loop_of.get(v, 0), operands=ops, d_uses=self.d_uses(v, sh.arg_name(v, 10)), _groups=groups)
+        form = sh.form[v]
+        flags = sh.const_arg(v, form['flags']) if form['flags'] is not None else None
+        # a library's 19-argument call: hmma_msl's signature did not match and left the helper as the translator wrote it, whose body reads every operand from the registers
+        # lane by lane and no flag; its paths are not upstream's
+        kind = 'unflagged' if form['flags'] is None else 'not rewritten' if self.library and form['direct'] is None else 'flagged'
+        return dict(index=k, line=sh.line_of[v], in_loop=bool(sh.loop_of.get(v, 0)), loop=sh.loop_of.get(v, 0), operands=ops, d_uses=self.d_uses(v, sh.arg_name(v, form['d1'])),
+                    form=kind, flags=flags, **self.paths(None if kind == 'not rewritten' else flags), _groups=groups)
+
+    def paths(self, flags: int | None) -> dict[str, Any]:
+        """The path each operand takes in dmsh_build.py's HMMA_BODY under a call's TensorPass flags: A kept from the call before, loaded where its LDSM read it (direct,
+        perhaps transposed) or through the scratch; C from an accumulator slot, zero (a multiply) or through the scratch; D left in its slot or back through the scratch; B
+        through the scratch always. None without flags (a library built before them, whose body takes every operand through the scratch)"""
+        if flags is None: return dict(paths=None, slot=None)
+        if flags & FLAG_A_REUSE: a = 'kept'
+        elif flags & FLAG_A_DIRECT and self.sh.direct_a: a = 'direct, transposed' if flags & FLAG_A_TRANS else 'direct'
+        else: a = 'scratch'
+        c = 'zero' if flags & FLAG_C_ZERO else 'slot' if flags & FLAG_C_SLOT else 'scratch'
+        return dict(paths=dict(A=a, B='scratch', C=c, D='slot' if flags & FLAG_D_SLOT else 'scratch'), slot=flags >> 8 if flags & (FLAG_C_SLOT | FLAG_D_SLOT) else None)
 
     def provenance(self, node: Node, depth: int, seen: frozenset[str]) -> tuple[str, list[tuple[int, int, str]]]:
         """What an HMMA operand is, and the LDSM words it comes from: [(LDSM, matrix, load variable)]"""
@@ -1180,7 +1287,7 @@ class Census:
                         if w not in seen: seen.add(w); frontier.append(w)
                         continue
                     if w in sh.call_set:
-                        pos = [k for k, a in enumerate(dd[2]) if strip_casts(a) == ('name', u) and k != 10]   # D1, the out parameter, is written there, not read
+                        pos = [k for k, a in enumerate(dd[2]) if strip_casts(a) == ('name', u) and k != sh.form[w]['d1']]   # D1, the out parameter, is written there, not read
                         if pos: uses['hmma.C' if any(p in (8, 9) for p in pos) else 'hmma.AB' if any(2 <= p < 8 for p in pos) else 'other'] += 1
                         continue
                     uses['other'] += 1
@@ -1195,6 +1302,75 @@ class Census:
         for line, kind in self.sh.stmts:
             if start < line < call_line and kind in BLOCKING: return kind
         return 'clean'
+
+    def between(self, first: int, last: int) -> set[str]:
+        """Every kind of statement strictly between two lines that a tile's window must not hold"""
+        if self._blocking is None:
+            self._blocking = sorted((line, kind) for line, kind in self.sh.stmts if kind in BLOCKING)
+            self._blocking_lines = [line for line, _ in self._blocking]
+        return {kind for _, kind in self._blocking[bisect.bisect_right(self._blocking_lines, first):bisect.bisect_left(self._blocking_lines, last)]}
+
+    def reads_a(self, call: str) -> bool:
+        """Whether a call's body reads its A registers: not when A is kept or loaded where its LDSM read it"""
+        p = self.hmma_of[call]['paths']
+        return p is None or p['A'] == 'scratch'
+
+    def word_dropped(self, w: str) -> bool:
+        """Whether a word an LDSM loads goes only, behind copies and a transposed word's halves, to A of calls whose body does not read A. The helper is inlined and its flags
+        are constants there, so the Metal compiler drops that word's load and address shuffle (TensorPass.cs); the Metal text still holds them"""
+        sh, reached = self.sh, False
+        frontier, seen = [w], {w}
+        while frontier:
+            u = frontier.pop()
+            for x in sh.uses.get(u, []):
+                if x in seen: continue
+                d = sh.defs.get(x)
+                if ':' in x or x in sh.multi or d is None: return False
+                if x in sh.call_set:
+                    pos = [k for k, a in enumerate(d[2]) if strip_casts(a) == ('name', u)]
+                    if not pos or any(not 2 <= k < 6 for k in pos) or self.reads_a(x): return False
+                    reached = True; continue
+                if x in self.shuffle_of or not self.carries(d, u): return False
+                seen.add(x); frontier.append(x)
+        return reached
+
+    def after_block(self, h: dict[str, Any]) -> bool:
+        """Whether a flagged call is in another block of the translator's IR than the call before it: TensorPass keeps A (FlagAReuse) whenever the call before it in the
+        same block has the same A, and this one did not. spirv-cross writes blocks that follow each other as one run of statements, so the Metal text may not show it"""
+        if not h['index'] or h['flags'] & FLAG_A_REUSE: return False
+        call, prev = self.sh.calls[h['index']], self.sh.calls[h['index'] - 1]
+        a, b = self.sh.defs[call], self.sh.defs[prev]
+        return a is not None and b is not None and all(self.sh.copy_root(a[2][k]) == self.sh.copy_root(b[2][k]) for k in range(2, 6))
+
+    def a_why(self, h: dict[str, Any]) -> str:
+        """Why a flagged call's A goes through the scratch: what TensorPass's FlagADirect needs (A four matrices of one LDSM of the block, no shared memory write, atomic,
+        barrier or call between, rows U + f(lane) strided) or hmma_msl (one shared memory array) that the census sees missing"""
+        if h['flags'] & FLAG_A_DIRECT: return 'direct A off in the shader'   # hmma_msl found no one shared memory array besides the scratch
+        refs = [h['_groups'].get(f'A{k}', []) for k in range(4)]
+        groups = {gi for r in refs for gi, _, _ in r}
+        if len(groups) != 1 or any(h['operands'][f'A{k}'] not in ('ldsm', 'ldsm.T') for k in range(4)): return 'not one LDSM'
+        g = self.groups[groups.pop()]
+        lines = [self.sh.line_of.get(w, 0) for r in refs for _, _, w in r]
+        kinds = self.between(min(lines), h['line']) if lines and min(lines) < h['line'] else {'block'}
+        if 'block' in kinds or self.after_block(h): return 'its LDSM in another block'
+        if kinds & {'shared store', 'atomic', 'barrier', 'fence', 'call'}: return 'behind a shared store, atomic, barrier or call'
+        if 'other' in kinds: return 'a statement the census does not read in between'
+        # the translator did not prove the rows U + f(lane) strided, or the LDSM is in another block of its IR that the Metal text does not show (DMSH_TENSOR_TRACE=1 tells)
+        return 'nothing seen in between' + ('; the census finds one pitch' if g['lane_function'] and not pitch_why(g['pitch']) else '')
+
+    def acc_why(self, h: dict[str, Any]) -> str | None:
+        """For a flagged call that takes C through the scratch: why, when that C is an earlier HMMA's D (an accumulator that leaves the SIMD-group's matrices); else None"""
+        c0, c1 = h['operands']['C0'], h['operands']['C1']
+        if not (from_d(c0) or from_d(c1)): return None
+        if c0.startswith('phi(') or c1.startswith('phi('): return 'a phi (a loop, or paths meeting)'
+        m0, m1 = re.fullmatch(r'D(\d+)\.(\d)', c0), re.fullmatch(r'D(\d+)\.(\d)', c1)
+        if not (m0 and m1 and m0.group(1) == m1.group(1) and (m0.group(2), m1.group(2)) == ('0', '1')): return "C not one HMMA's D in order"
+        k = int(m0.group(1))
+        p = self.hmmas[k]
+        if 'block' in self.between(p['line'], h['line']) or (k == h['index'] - 1 and self.after_block(h)): return 'D of an HMMA in another block'
+        if p['d_uses'] != {'hmma.C': 2}: return 'that D is read elsewhere too'
+        if p.get('open_before') == SLOTS: return f'all {SLOTS} slots taken'   # TensorPass found no free slot where this chain starts: it goes through the registers
+        return 'nothing seen in between'   # another block of the translator's IR that the Metal text does not show
 
     def verdicts(self) -> None:
         sh = self.sh
@@ -1217,38 +1393,86 @@ class Census:
             if not g['blockers'] and g['why'] is not None: g['blockers'] = [f"not evaluated: {g['why']}"]   # what the pass could not follow either
             g['lane_function'] = not g['blockers']
             g['words_used_elsewhere'] = sum(1 for w, _ in g['_loads'] if self.words_elsewhere(w))
-            rest = []   # what stage 3 needs besides the address
+            rest = []   # what a tile needs besides the address
             if not g['hmma_uses']: rest.append('feeds no HMMA A or B')
             elif g['words_used_elsewhere']: rest.append('words used outside HMMA A / B')   # the LDSM and its shuffles would stay for them
             rest += [f'window: {w}' for w in sorted(g['_windows']) if w != 'clean']
             why = (['not a lane function'] if not g['lane_function'] else []) + pitch_why(g['pitch']) + rest
             g['windows'] = dict(g['_windows'])
-            g['stage3'], g['stage3_why'] = not why, why
-            g['stage3_if_phi_uniform'] = g['blockers'] == ['phi'] and 'pitch_if_phi_uniform' in g and not pitch_why(g['pitch_if_phi_uniform']) and not rest
+            g['tile'], g['tile_why'] = not why, why
+            g['tile_if_phi_uniform'] = g['blockers'] == ['phi'] and 'pitch_if_phi_uniform' in g and not pitch_why(g['pitch_if_phi_uniform']) and not rest
+            loads = [self.loads_of(s['var']) for s in g['_members']]   # each address shuffle's words: dropped with them
+            g['dropped_shuffles'] = sum(1 for ws in loads if ws and all(self.word_dropped(w) for w in ws))
+            g['dropped'] = g['dropped_shuffles'] == g['shuffles']
+        # The slots in text order (a chain stays in one block, and blocks are not interleaved): a DSlot call opens or keeps its slot (flags >> 8), a CSlot call without DSlot ends
+        # its chain. A call with neither while slot 0 is open is in no chain (TensorPass gives slots to chains only) and comes while the first chain of its block holds its sum
+        # there: this checkout's body works it in a pair of its own; NXNative's (dm_acc[16]) works it in slot 0's matrices, over that sum, and the chain's end reads it as C
+        open_slots: dict[int, int] = {}
+        self.shared_pair = self.sh.acc_size == SHARED_PAIR
+        for h in self.hmmas:
+            if h['paths'] is None: continue
+            f = h['flags']
+            h['open_before'] = len(open_slots)
+            if not f & (FLAG_C_SLOT | FLAG_D_SLOT):
+                h['in_no_chain_slot0_open'] = 0 in open_slots
+            elif f & FLAG_D_SLOT: open_slots[f >> 8] = h['index']
+            else: open_slots.pop(f >> 8, None)
+        for h in self.hmmas:
+            p = h['paths']
+            if p is None: continue
+            if p['A'] == 'scratch': h['a_scratch_why'] = self.a_why(h)
+            if p['C'] == 'scratch' and (why := self.acc_why(h)): h['acc_scratch_why'] = why
+            h['c_from_d'] = from_d(h['operands']['C0']) or from_d(h['operands']['C1'])
+            h['b_tile'] = all(h['operands'][op] in ('ldsm', 'ldsm.T') and h['windows'].get(op) == 'clean' and
+                              all(self.groups[gi]['lane_function'] and not pitch_why(self.groups[gi]['pitch']) and not self.groups[gi]['words_used_elsewhere']
+                                  for gi, _, _ in h['_groups'].get(op, [])) for op in ('B0', 'B1'))
 
     def report(self) -> dict[str, Any]:
         sh = self.sh
         kinds = collections.Counter(s['kind'] for s in self.shuffles)
         stmt = collections.Counter(k for _, k in sh.stmts)
-        st1 = [g for g in self.groups if g['lane_function']]
-        st3 = [g for g in self.groups if g['stage3']]
+        live = [g for g in self.groups if not g['dropped']]   # the LDSMs whose per-lane code stays: stage 1's
+        st1 = [g for g in live if g['lane_function']]
+        tiles = [g for g in self.groups if g['tile']]
+        flagged = [h for h in self.hmmas if h['paths'] is not None]
+        a_ldsm = [h for h in flagged if h.get('a_scratch_why', 'not one LDSM') != 'not one LDSM']   # A through the scratch from one LDSM's matrices
+        in_no_chain = [h for h in flagged if h.get('in_no_chain_slot0_open')]
+        over_slot0 = {h['index'] for h in in_no_chain} if self.shared_pair else set()   # the calls that overwrite the sum of the chain open in slot 0
+        paths = collections.Counter(f'{op}:{p}' for h in flagged for op, p in h['paths'].items())
         verdict = {
-            'stage1': dict(ldsm=len(st1), of=len(self.groups), shuffles=sum(g['shuffles'] for g in st1), of_shuffles=sum(g['shuffles'] for g in self.groups),
-                           blockers=dict(collections.Counter(b for g in self.groups for b in g['blockers'])),
-                           phi_only_uniform_inputs=sum(1 for g in self.groups if g['blockers'] == ['phi'] and self.phi_only(g))),
+            'stage1': dict(ldsm=len(st1), of=len(live), shuffles=sum(g['shuffles'] - g['dropped_shuffles'] for g in st1),
+                           of_shuffles=sum(g['shuffles'] - g['dropped_shuffles'] for g in live), blockers=dict(collections.Counter(b for g in live for b in g['blockers'])),
+                           phi_only_uniform_inputs=sum(1 for g in live if g['blockers'] == ['phi'] and self.phi_only(g)),
+                           dropped=len(self.groups) - len(live), dropped_shuffles=sum(g['dropped_shuffles'] for g in self.groups)),
             'stage2': dict(hmma=sum(1 for h in self.hmmas if h['operands']['B0'].startswith('movm(') and h['operands']['B1'].startswith('movm(')), of=len(self.hmmas),
                            b_words=sum(1 for h in self.hmmas for op in ('B0', 'B1') if h['operands'][op].startswith('movm(')), of_b_words=2 * len(self.hmmas)),
-            'stage3': dict(ldsm=len(st3), of=len(self.groups), why_not=dict(collections.Counter(w for g in self.groups for w in g['stage3_why'])),
-                           if_phi_uniform=sum(1 for g in self.groups if g['stage3_if_phi_uniform'])),
+            'upstream': dict(flagged=len(flagged), unflagged=sum(1 for h in self.hmmas if h['form'] == 'unflagged'),
+                             not_rewritten=sum(1 for h in self.hmmas if h['form'] == 'not rewritten'),
+                             in_no_chain_slot0_open=len(in_no_chain), slot0_overwritten=len(over_slot0),
+                             flags_not_read=sum(1 for h in self.hmmas if h['form'] == 'flagged' and h['flags'] is None), direct_a=sh.direct_a,
+                             a_kept=paths['A:kept'], a_direct=paths['A:direct'] + paths['A:direct, transposed'], a_direct_transposed=paths['A:direct, transposed'],
+                             a_scratch=paths['A:scratch'], c_slot=paths['C:slot'], c_zero=paths['C:zero'], c_scratch=paths['C:scratch'], d_slot=paths['D:slot'],
+                             d_scratch=paths['D:scratch'], b_scratch=paths['B:scratch'],
+                             served=sum(1 for h in flagged if h['paths']['A'] != 'scratch' and h['paths']['C'] != 'scratch' and h['index'] not in over_slot0)),
+            'stage3': dict(known=len(flagged) == len(self.hmmas), hmma=len(flagged),
+                           a=len(a_ldsm), a_why=dict(collections.Counter(h['a_scratch_why'] for h in a_ldsm)),
+                           a_not_ldsm=sum(1 for h in flagged if h.get('a_scratch_why') == 'not one LDSM'),
+                           acc=sum(1 for h in flagged if 'acc_scratch_why' in h), of_acc=sum(1 for h in flagged if h['c_from_d']),
+                           acc_why=dict(collections.Counter(h['acc_scratch_why'] for h in flagged if 'acc_scratch_why' in h)),
+                           b=sum(1 for h in flagged if h['b_tile']), b_from_ldsm=sum(1 for h in flagged if all(h['operands'][op] in ('ldsm', 'ldsm.T') for op in ('B0', 'B1')))),
+            'tiles': dict(ldsm=len(tiles), of=len(self.groups), why_not=dict(collections.Counter(w for g in self.groups for w in g['tile_why'])),
+                          if_phi_uniform=sum(1 for g in self.groups if g['tile_if_phi_uniform'])),
         }
         rep: dict[str, Any] = dict(
             census=FORMAT, shader=self.name, local_size=sh.local, lines=sh.lines,
             arrays={a: dict(type=t, count=n, bytes=WORD_BYTES.get(t, 4) * n, role='hmma scratch' if a in sh.scratch else 'shared') for a, (t, n) in sh.arrays.items()},
             shuffles=dict(total=len(self.shuffles), **{k: kinds.get(k, 0) for k in ('ldsm_address', 'movm', 'hmma_lane', 'redux_match', 'other')}),
             counts=dict(ldsm=len(self.groups), hmma=len(self.hmmas), hmma_in_loops=sum(1 for h in self.hmmas if h['in_loop']), barriers=stmt.get('barrier', 0),
-                        simdgroup_barriers=stmt.get('simdgroup barrier', 0), shared_stores=stmt.get('shared store', 0), atomics=stmt.get('atomic', 0),
-                        device_stores=stmt.get('device store', 0), texture_writes=stmt.get('texture write', 0)),
+                        simdgroup_barriers=stmt.get('simdgroup barrier', 0), shared_stores=stmt.get('shared store', 0),
+                        atomics=stmt.get('atomic', 0) + stmt.get('device atomic', 0), shared_atomics=stmt.get('atomic', 0),
+                        device_stores=stmt.get('device store', 0), texture_writes=stmt.get('texture write', 0), hmma_unread=sh.unread_calls),
             operand_sources=dict(sorted(collections.Counter(f'{op[0]}:{D_LABEL.sub("D", lab)}' for h in self.hmmas for op, lab in h['operands'].items()).items())),
+            direct_a=sh.direct_a_how if sh.direct_a is not None else None,
             verdict=verdict,
             ldsm=[{k: v for k, v in g.items() if not k.startswith('_')} for g in self.groups],
             hmma=[{k: v for k, v in h.items() if not k.startswith('_')} for h in self.hmmas])
@@ -1281,13 +1505,54 @@ def summary_lines(rep: dict[str, Any]) -> list[str]:
         du: collections.Counter[str] = collections.Counter()
         for h in rep['hmma']: du.update(h['d_uses'])
         out.append('    D read by: ' + tally(du))
-    s1, s2, s3 = v['stage1'], v['stage2'], v['stage3']
-    out.append(f"  stage 1 (row addresses per lane): {s1['ldsm']} of {s1['of']} LDSMs, {s1['shuffles']} of {s1['of_shuffles']} address shuffles"
-               + (f"; blocked by {tally(s1['blockers'])}" if s1['blockers'] else '')
-               + (f"; {s1['phi_only_uniform_inputs']} blocked by a phi alone whose values have no varying leaf" if s1['phi_only_uniform_inputs'] else ''))
+    if c.get('hmma_unread'):
+        out.append(f"  [RED] {c['hmma_unread']} calls of {HMMA_NAME} in a form the census does not read (not 12, 19, 21 or 22 arguments): left out of every count")
+    return out + verdict_lines(v, c['hmma'])
+
+
+def slot0_lines(up: dict[str, Any]) -> list[str]:
+    """The calls in no chain that come while a chain is open in slot 0: a [RED] line where the body works them in slot 0's matrices"""
+    if up.get('slot0_overwritten'):
+        return [f"  [RED] {up['slot0_overwritten']} calls in no chain work in slot 0's matrices while a chain keeps its sum there (NXNative's body, dm_acc[{SHARED_PAIR}]): that "
+                "chain's end reads a wrong C. Build with this checkout, whose body gives such a call a pair of its own"]
+    if up.get('in_no_chain_slot0_open'):
+        return [f"    {up['in_no_chain_slot0_open']} calls in no chain come while a chain is open in slot 0: each works in a pair of its own"]
+    return []
+
+
+def verdict_lines(v: dict[str, Any], hmma: int) -> list[str]:
+    """Upstream's paths and the stage verdicts, of one shader or of the totals (whose stage 1 has no blockers)"""
+    up, s1, s2, s3, ti = v['upstream'], v['stage1'], v['stage2'], v['stage3'], v['tiles']
+    out = []
+    if up.get('not_rewritten'):
+        out.append(f"  [RED] {up['not_rewritten']} calls of the translator's 19 arguments in a library: hmma_msl did not rewrite the helper, so the translator's per-lane body runs "
+                   "and their flags are unused: left out of upstream's paths")
+    if up['flagged']:
+        out.append(f"  upstream's paths (TensorPass's flags): {up['served']} of {up['flagged']} HMMAs take neither A nor C through the scratch (B goes through it in every call)"
+                   + (f"; {up['unflagged'] + up['flags_not_read']} more without flags it reads" if up['unflagged'] + up['flags_not_read'] else ''))
+        out.append(f"    A kept {up['a_kept']}, loaded where its LDSM read it {up['a_direct']} ({up['a_direct_transposed']} transposed), through the scratch {up['a_scratch']}; "
+                   f"C from a slot {up['c_slot']}, zero {up['c_zero']}, through the scratch {up['c_scratch']}; D left in a slot {up['d_slot']}, through the scratch {up['d_scratch']}"
+                   + ('; direct A on' if up['direct_a'] else '; direct A off: not one shared memory array besides the scratch'))
+        out += slot0_lines(up)
+    elif up['unflagged'] or up['flags_not_read']:
+        out.append(f"  upstream's paths: none known: {up['unflagged'] + up['flags_not_read']} HMMA calls without TensorPass's flags (a library built before them takes every operand "
+                   "through the scratch); build with this checkout and run the census again")
+    out.append(f"  stage 1 (row addresses per lane): {s1['ldsm']} of {s1['of']} LDSMs still read lane by lane, {s1['shuffles']} of {s1['of_shuffles']} address shuffles"
+               + (f"; blocked by {tally(s1['blockers'])}" if s1.get('blockers') else '')
+               + (f"; {s1['phi_only_uniform_inputs']} blocked by a phi alone whose values have no varying leaf" if s1['phi_only_uniform_inputs'] else '')
+               + (f"; the Metal compiler drops {s1['dropped_shuffles']} more address shuffles ({s1['dropped']} whole LDSM{'s' * (s1['dropped'] != 1)}): their words "
+                  "go only to calls that load A themselves" if s1['dropped_shuffles'] else ''))
     out.append(f"  stage 2 (MOVM into B): {s2['hmma']} of {s2['of']} HMMAs take both B words from MOVM ({s2['b_words']} of {s2['of_b_words']} B words)")
-    out.append(f"  stage 3 (tiles from shared memory): {s3['ldsm']} of {s3['of']} LDSMs" + (f"; not: {tally(s3['why_not'])}" if s3['why_not'] else '')
-               + (f"; {s3['if_phi_uniform']} more if their phi is warp-uniform" if s3['if_phi_uniform'] else ''))
+    if not hmma: out.append('  stage 3 (what upstream does not cover): no HMMA')
+    elif not s3['hmma']: out.append("  stage 3 (what upstream does not cover): not known without TensorPass's flags")
+    else:
+        out.append(f"  stage 3 (what upstream does not cover, of {s3['hmma']} HMMAs with flags{'' if s3['hmma'] == hmma else f' of {hmma}'}): "
+                   f"A through the scratch from an LDSM {s3['a']}" + (f" ({tally(s3['a_why'])})" if s3['a_why'] else '')
+                   + (f", {s3['a_not_ldsm']} more not from one LDSM" if s3['a_not_ldsm'] else '')
+                   + f"; accumulators through the scratch {s3['acc']} of the {s3['of_acc']} whose C is an earlier D" + (f" ({tally(s3['acc_why'])})" if s3['acc_why'] else '')
+                   + f"; B as tiles {s3['b']} of the {s3['b_from_ldsm']} whose B words both come from an LDSM ({B_NOTE})")
+    out.append(f"  tiles (LDSM rows one pitch apart, nothing between them and the HMMA): {ti['ldsm']} of {ti['of']} LDSMs" + (f"; not: {tally(ti['why_not'])}" if ti.get('why_not') else '')
+               + (f"; {ti['if_phi_uniform']} more if their phi is warp-uniform" if ti['if_phi_uniform'] else ''))
     return out
 
 
@@ -1368,8 +1633,8 @@ def reflection(lib: str, key: str) -> dict[str, Any]:
     return r if isinstance(r, dict) else {}
 
 
-def census_of(src: str, local: Any, key: str) -> dict[str, Any]:
-    try: return Census(src, local if isinstance(local, list) else None, key).report()
+def census_of(src: str, local: Any, key: str, library: bool = False) -> dict[str, Any]:
+    try: return Census(src, local if isinstance(local, list) else None, key, library).report()
     except (ValueError, RecursionError, KeyError, IndexError, TypeError, AttributeError, AssertionError) as e:   # one shader the reader does not take stops nothing else
         return dict(census=FORMAT, shader=key, error=type(e).__name__, text=[f'{key}: [RED] not read ({type(e).__name__})'])
 
@@ -1382,34 +1647,66 @@ def source_file(source: Any) -> str:
 def one_line(rep: dict[str, Any]) -> str:
     if rep.get('error'): return rep['text'][0]
     c, v = rep['counts'], rep['verdict']
+    up, s1, s3 = v['upstream'], v['stage1'], v['stage3']
     where = source_file(rep.get('source')) + ('' if rep.get('helper', True) else f'; no {HMMA_NAME}')
     return (f"{rep['shader']} ({where}): LDSM {c['ldsm']}, HMMA {c['hmma']}, shuffles {rep['shuffles']['total']}; "
-            f"stage 1 {v['stage1']['ldsm']}/{v['stage1']['of']}, stage 2 {v['stage2']['hmma']}/{v['stage2']['of']}, stage 3 {v['stage3']['ldsm']}/{v['stage3']['of']}")
+            + (f"upstream {up['served']}/{up['flagged']}; " if up['flagged'] else 'no flags; ' if up['unflagged'] + up['flags_not_read'] else '')
+            + f"stage 1 {s1['ldsm']}/{s1['of']}" + (f" (+{s1['dropped']} dropped)" if s1['dropped'] else '') + f", stage 2 {v['stage2']['hmma']}/{v['stage2']['of']}"
+            + (f", stage 3 A {s3['a']}, acc {s3['acc']}, B {s3['b']}" if s3['hmma'] else '')
+            + (f"; [RED] {up['slot0_overwritten']} over slot 0's chain" if up.get('slot0_overwritten') else '')
+            + (f"; [RED] {up['not_rewritten']} not rewritten" if up.get('not_rewritten') else ''))
+
+
+TOTALS = (('stage1', ('ldsm', 'of', 'shuffles', 'of_shuffles', 'phi_only_uniform_inputs', 'dropped', 'dropped_shuffles')), ('stage2', ('hmma', 'of', 'b_words', 'of_b_words')),
+          ('upstream', ('flagged', 'unflagged', 'flags_not_read', 'not_rewritten', 'a_kept', 'a_direct', 'a_direct_transposed', 'a_scratch', 'c_slot', 'c_zero', 'c_scratch',
+                        'd_slot', 'd_scratch', 'b_scratch', 'served', 'in_no_chain_slot0_open', 'slot0_overwritten')),
+          ('stage3', ('hmma', 'a', 'a_why', 'a_not_ldsm', 'acc', 'of_acc', 'acc_why', 'b', 'b_from_ldsm')), ('tiles', ('ldsm', 'of', 'if_phi_uniform')))
 
 
 def totals(reps: list[dict[str, Any]]) -> dict[str, Any]:
     t: dict[str, Any] = dict(shaders=len(reps), not_read=sum(1 for r in reps if r.get('error')))
-    for part, keys in (('shuffles', ('total', 'ldsm_address', 'movm', 'hmma_lane', 'redux_match', 'other')), ('counts', ('ldsm', 'hmma', 'hmma_in_loops', 'barriers', 'shared_stores'))):
+    for part, keys in (('shuffles', ('total', 'ldsm_address', 'movm', 'hmma_lane', 'redux_match', 'other')),
+                       ('counts', ('ldsm', 'hmma', 'hmma_in_loops', 'barriers', 'shared_stores', 'hmma_unread'))):
         t[part] = {k: sum(r.get(part, {}).get(k, 0) for r in reps) for k in keys}
-    for st, keys in (('stage1', ('ldsm', 'of', 'shuffles', 'of_shuffles', 'phi_only_uniform_inputs')), ('stage2', ('hmma', 'of', 'b_words', 'of_b_words')),
-                     ('stage3', ('ldsm', 'of', 'if_phi_uniform'))):
-        t[st] = {k: sum(r.get('verdict', {}).get(st, {}).get(k, 0) for r in reps) for k in keys}
+    for st, keys in TOTALS:
+        t[st] = {}
+        for k in keys:
+            vals = [r.get('verdict', {}).get(st, {}).get(k, 0) for r in reps]
+            if k.endswith('_why'):   # the reasons, counted over every shader
+                why: collections.Counter[str] = collections.Counter()
+                for x in vals: why.update(x or {})
+                t[st][k] = dict(why)
+            else: t[st][k] = sum(vals)
     return t
 
 
 def totals_lines(t: dict[str, Any]) -> list[str]:
-    s, c, s1, s3 = t['shuffles'], t['counts'], t['stage1'], t['stage3']
-    return [f"  in all: {s['total']} shuffles (LDSM row address {s['ldsm_address']}, MOVM {s['movm']}, per-lane HMMA {s['hmma_lane']}, REDUX / MATCH {s['redux_match']}, other {s['other']}), "
-            f"{c['ldsm']} LDSMs, {c['hmma']} HMMAs" + (f"; {t['not_read']} shaders not read" if t['not_read'] else ''),
-            f"  stage 1: {s1['ldsm']} of {s1['of']} LDSMs ({s1['shuffles']} of {s1['of_shuffles']} address shuffles"
-            + (f"; {s1['phi_only_uniform_inputs']} held up by a phi alone whose values have no varying leaf" if s1['phi_only_uniform_inputs'] else '') + '); '
-            f"stage 2: {t['stage2']['hmma']} of {t['stage2']['of']} HMMAs; stage 3: {s3['ldsm']} of {s3['of']} LDSMs"
-            + (f" ({s3['if_phi_uniform']} more if their phi is warp-uniform)" if s3['if_phi_uniform'] else '')]
+    s, c, s1, up, s3, ti = t['shuffles'], t['counts'], t['stage1'], t['upstream'], t['stage3'], t['tiles']
+    out = [f"  in all: {s['total']} shuffles (LDSM row address {s['ldsm_address']}, MOVM {s['movm']}, per-lane HMMA {s['hmma_lane']}, REDUX / MATCH {s['redux_match']}, other {s['other']}), "
+           f"{c['ldsm']} LDSMs, {c['hmma']} HMMAs" + (f"; {t['not_read']} shaders not read" if t['not_read'] else '')
+           + (f"; [RED] {c['hmma_unread']} HMMA calls in a form the census does not read" if c['hmma_unread'] else '')]
+    if up['flagged']:
+        out.append(f"  upstream's paths: {up['served']} of {up['flagged']} HMMAs with TensorPass's flags take neither A nor C through the scratch (A kept {up['a_kept']}, "
+                   f"where its LDSM read it {up['a_direct']}, through the scratch {up['a_scratch']}; C from a slot {up['c_slot']}, zero {up['c_zero']}, through the scratch "
+                   f"{up['c_scratch']}; D left in a slot {up['d_slot']})")
+        out += slot0_lines(up)
+    if up['not_rewritten']:
+        out.append(f"  [RED] {up['not_rewritten']} HMMA calls of the translator's 19 arguments: hmma_msl did not rewrite their helper, so its per-lane body runs and the flags are unused")
+    if up['unflagged'] + up['flags_not_read']: out.append(f"  {up['unflagged'] + up['flags_not_read']} HMMAs without TensorPass's flags: upstream's paths and stage 3 not known for them")
+    out.append(f"  stage 1: {s1['ldsm']} of {s1['of']} LDSMs still read lane by lane ({s1['shuffles']} of {s1['of_shuffles']} address shuffles"
+               + (f"; {s1['phi_only_uniform_inputs']} held up by a phi alone whose values have no varying leaf" if s1['phi_only_uniform_inputs'] else '')
+               + (f"; the Metal compiler drops {s1['dropped_shuffles']} more, {s1['dropped']} whole LDSM{'s' * (s1['dropped'] != 1)}" if s1['dropped_shuffles'] else '') + '); '
+               f"stage 2: {t['stage2']['hmma']} of {t['stage2']['of']} HMMAs; "
+               + (f"stage 3 (of {s3['hmma']} HMMAs with flags): A through the scratch from an LDSM {s3['a']}" + (f" ({tally(s3['a_why'])})" if s3['a_why'] else '')
+                  + f", accumulators through the scratch {s3['acc']} of {s3['of_acc']}" + (f" ({tally(s3['acc_why'])})" if s3['acc_why'] else '')
+                  + f", B as tiles {s3['b']} of {s3['b_from_ldsm']}; " if s3['hmma'] else '')
+               + f"tiles: {ti['ldsm']} of {ti['of']} LDSMs" + (f" ({ti['if_phi_uniform']} more if their phi is warp-uniform)" if ti['if_phi_uniform'] else ''))
+    return out
 
 
 def census_entry(lib: str, key: str, data: bytes, chain: str, helper: bool) -> dict[str, Any]:
     refl = reflection(lib, key)
-    rep = census_of(data.decode('utf-8', 'replace'), refl.get('threadgroup_size'), key)
+    rep = census_of(data.decode('utf-8', 'replace'), refl.get('threadgroup_size'), key, library=True)
     text = rep.pop('text')
     rep.update(helper=helper, source=refl.get('source'), chain=refl.get('chain') or chain, text=text)   # the summary stays last
     return rep
@@ -1450,6 +1747,11 @@ def run_library(given: str, out_arg: str | None, keep_metal: bool) -> int:
     head = [f'{name}: {len(reps)} of {total} shaders define {HMMA_NAME}; {len(others)} of the {len(shuffling)} others that shuffle have LDSM, MOVM or per-lane HMMA shuffles'
             + (f' ([RED] {len(unread)} of them not read)' if unread else '')]
     if reps: head += totals_lines(t)
+    if t['upstream']['unflagged']:   # which call form a library has follows from its chain: this checkout's translator gives every call its flags
+        head.append(f"  [RED] {t['upstream']['unflagged']} HMMA calls without TensorPass's flags in a library of this checkout's chain, whose translator gives every call its flags"
+                    if name == f'b-{chain}' else
+                    f"  a library of chain {name[2:]}, not this checkout's {chain}, built before TensorPass's flags: upstream's paths and stage 3 are not known for it. Build the "
+                    'game with this checkout (scripts/build_ipa_from_nsp.py) and run the census again')
     if others: head += [f'without {HMMA_NAME}:'] + totals_lines(t_others)
     if not reps:
         if name == f'b-{chain}':
