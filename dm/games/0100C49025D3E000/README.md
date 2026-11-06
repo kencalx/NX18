@@ -64,6 +64,7 @@ General changes first needed here; each applies to every game on the same path:
 - **Resolved: a shader with an array of c2 handles and a separate sampler word** (its lights) → [Arrays of c2 handles cover the whole table, with a separate sampler word](../../../docs/reference/shaders.md#arrays-of-c2-handles-cover-the-whole-table-with-a-separate-sampler-word).
 - **Resolved: `[RED] sampler ID 4096 not registered`** at the title, separate textures bound with bit 32 set → [Bound handles are the driver's 32-bit words](../../../docs/reference/nvn-objects.md#bound-handles-are-the-drivers-32-bit-words).
 - **Resolved: a copy to address 0 at the match load**, `nvnBufferMap` of a GPU-only buffer → [`Map` of a pool without CPU access returns NULL](../../../docs/reference/nvn-objects.md#map-of-a-pool-without-cpu-access-returns-null).
+- [The largest block of address space a device reserves](../../../docs/reference/memory.md#the-largest-block-of-address-space-a-device-reserves): its 7 GB guest block is one of those the iOS app's boot line checks. **Open:** whether an iPhone 18 Pro Max or an iPad Pro (M4) reserves it, and then whether the game fits in the rest.
 
 ## Open
 

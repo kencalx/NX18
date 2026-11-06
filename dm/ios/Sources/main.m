@@ -8,12 +8,14 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <time.h>   // clock_gettime_nsec_np (memory_probe)
 #include <os/proc.h>
 #include <unistd.h>
 #include "game_profile.h"   // game profile constants (the RomFS marker path)
 #include "front.h"
 #include "romfs_image.h"
 #include "romfs_identity.h"
+#include "as_ceiling.h"   // the largest block of address space iOS reserves for the app (memory_probe)
 #include "player_env.h"
 #ifndef DM_PLAYER_BUILD
 #define DM_PLAYER_BUILD 0
@@ -306,18 +308,25 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 @end
 
 // What iOS gives the app, read before anything else reserves address space and logged at boot: the memory it may still use (os_proc_available_memory: higher with Increased
-// Memory Limit), and whether an 8 GB reservation of address space succeeds, which iOS allows only with Extended Virtual Addressing (6 GB at most without it). The reservation is
-// PROT_NONE and released at once: it costs no memory
-static size_t g_mem_avail; static int g_mem_wide;
+// Memory Limit), and the largest block of address space iOS reserves for the app (as_ceiling.h: a binary search of PROT_NONE reservations, each released at once, so it costs no
+// memory and the guest's block lands where it would have; 13 tries, expected well under a millisecond, which the line logs). iOS reserves 8 GB or more only with Extended
+// Virtual Addressing (6 GB at most without it). The second line says which of the Mac-only games' blocks the device would reserve, so one boot of any game answers it for that device
+static size_t g_mem_avail; static uint64_t g_as_most, g_as_ns; static int g_as_tries;
 static void memory_probe(void) {
     g_mem_avail = os_proc_available_memory();
-    void *p = mmap(NULL, 8ull << 30, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    g_mem_wide = p != MAP_FAILED;
-    if (g_mem_wide) munmap(p, 8ull << 30);
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    g_as_most = as_ceiling(as_try_mmap, NULL, AS_GRAN, AS_CAP, &g_as_tries);
+    g_as_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
 }
 static void memory_report(void) {
+    int wide = g_as_most >= (8ull << 30);
     fprintf(stderr, "boot: memory: %.2f GB available to the app (more with Increased Memory Limit), %s\n", g_mem_avail / 1073741824.0,
-            g_mem_wide ? "an 8 GB address reservation succeeds (Extended Virtual Addressing in effect)" : "an 8 GB address reservation fails (no Extended Virtual Addressing: about 6 GB at most)");
+            wide ? "an 8 GB address reservation succeeds (Extended Virtual Addressing in effect)" : "an 8 GB address reservation fails (no Extended Virtual Addressing: about 6 GB at most)");
+    char fit[400]; as_fit_text(g_as_most, fit, sizeof fit);
+    fprintf(stderr, "boot: address space: the largest block iOS reserves for the app is %s%.2f GB (to a quarter GB, %d tries, %.2f ms, before the guest's block); this game's guest block "
+            "%.2f GB (mem_reserve) %s; the Mac-only games' blocks: %s; a block that fits is necessary, not sufficient (the memory a game touches, Metal and its alias mappings come on top)\n",
+            g_as_most >= AS_CAP ? "at least " : "", g_as_most / 1073741824.0, g_as_tries, g_as_ns / 1e6, DM_GAME_MEM_RESERVE / 1073741824.0,
+            (uint64_t)DM_GAME_MEM_RESERVE <= g_as_most ? "fits" : "does not fit", fit);
 }
 int main(int argc, char **argv) {
     memory_probe();

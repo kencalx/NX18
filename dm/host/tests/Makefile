@@ -339,6 +339,13 @@ notify-scheduler: $(B)/t_notify_sched
 	$(B)/t_notify_sched
 	$(B)/t_notify_sched --all-peers
 run: notify-scheduler
+# the address-space ceiling probe (../as_ceiling.h): the iOS app's boot line and the line a failed guest reservation dies with
+$(B)/t_as_ceiling: t_as_ceiling.c ../as_ceiling.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wextra -I.. -o $@ t_as_ceiling.c
+.PHONY: as-ceiling
+as-ceiling: $(B)/t_as_ceiling
+	$(B)/t_as_ceiling
+run: as-ceiling
 
 # Sanitizer builds (../../sanitizers/sanitizers.mk): make asan runs every test of run under ASan and UBSan; make tsan-threads runs the tests that start threads under TSan
 # (t_audio_spsc, t_hid and t_svc_memory have their own TSan targets above: tsan, memory-tsan)

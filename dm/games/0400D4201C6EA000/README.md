@@ -56,3 +56,4 @@ The work folder `0400D4201C6EA000-work` beside the dump has `run/boot.sh <log> <
 - [The submission-ready event counted as packets](../../../docs/reference/movies.md#the-submission-ready-event-counted-as-packets): black movies, then corrupt frames.
 - [A passthrough geometry shader that writes the layer](../../../docs/reference/shaders.md#a-passthrough-geometry-shader-that-writes-the-layer): a blue wash over every 3D scene with atmosphere.
 - [Null vertex buffers bound past stream 15](../../../docs/reference/rendering.md#null-vertex-buffers-bound-past-stream-15).
+- [The largest block of address space a device reserves](../../../docs/reference/memory.md#the-largest-block-of-address-space-a-device-reserves): its 25.25 GB guest block is one of those the iOS app's boot line checks. **Open:** whether an iPhone 18 Pro Max or an iPad Pro (M4) reserves it, and then whether the game fits in the rest.
