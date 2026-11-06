@@ -81,7 +81,7 @@ body:
         Attach the whole log from the start of the run (drag the file here), not excerpts:
         - Mac app: `~/Library/Logs/nxnative/<title ID>.log` (the run before is `<title ID>.prev.log`)
         - Terminal (`--platform mac`): the host's output, e.g. the command followed by `2>&1 | tee run.log`
-        - iPhone or iPad: `log.txt` in the Files app under the app's name (the run before is `log.prev.txt`)
+        - iPhone or iPad: `log.txt` in the Files app under the app's name (the run before is `log.prev.txt`); when the game closed by itself, also the newest `metrics/<…>-diagnostic-crash.json` and `run_layouts.txt` from the same folder
         - Graphics problems: also `<title ID>_build/logs/dmsh_build.log` from the build you ran
         - Script or build failures: the script's full console output
     validations:

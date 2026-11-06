@@ -3,7 +3,7 @@
 How to build and install a game: [README](../README.md#how-to-play).
 
 - **Settings:** a screen before the game starts sets frame rate, resolution, docked or handheld mode, language, rumble and more. Tap **Play**; your choices are remembered. What each one does: [Settings](settings.md).
-- **Saves and logs** are in the Files app, under the game's name: `save/` and `log.txt` (the previous run is `log.prev.txt`). When something goes wrong, send `log.txt`. When the game closed by itself, also send the newest files in `metrics/`: iOS's own reports of crashes, hangs and runs ended for using too much memory, kept on the device.
+- **Saves and logs** are in the Files app, under the game's name: `save/` and `log.txt` (the previous run is `log.prev.txt`). When something goes wrong, send `log.txt`. When the game closed by itself, also send the newest files in `metrics/` (iOS's own reports of crashes, hangs and runs ended for using too much memory, kept on the device) and `run_layouts.txt`: when iOS hands the app a crash report, at a later start, `log.txt` gets a summary of it (the lines with `crash:`), which names the game code that crashed and, if the High frame rate or Ultrawide toggle was on, says to try that start with it off; the report and `run_layouts.txt` let it be read again in full.
 - **Reinstalling:** some sideloading tools give a reinstalled app a new data folder. Copy `save/` and `pso_user.tsv` over from the old one to keep your progress.
 
 ## Touch controls

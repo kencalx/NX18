@@ -257,6 +257,8 @@ For a Mac app, it reads the name, title ID and game version from `Info.plist`, l
 
 `scripts/clean_metal_cache.py` (`-h`, `--dry-run`) frees the internal disk of the build folders Metal's pipeline archive compiler leaves in `getconf DARWIN_USER_CACHE_DIR`/`com.apple.gpuarchiver`, up to about 127 MB for each archive flush of a Mac run, which the host cannot remove itself ([Metal's build folders left by pipeline archive flushes](reference/shaders.md#metals-build-folders-left-by-pipeline-archive-flushes)). It removes only folders idle for an hour and older than every running `dmhost`; `scripts/regress.py` runs it too.
 
+`scripts/crashlog.py CRASH.json [run_layouts.txt | log.txt]` prints the crash summary the iPhone app logs for a MetricKit crash report (`Documents/metrics/<…>-diagnostic-crash.json`): the exception and signal by name, the crashed thread's newest frames with the game's as module+offset and the part they are in, from the run's layout record (`Documents/run_layouts.txt`) or a log's module lines, with the bases inferred, and said to be, when the log is of another run; without a second file it looks for them beside the report and in the folder above ([crash reports](reference/memory.md#an-iphone-crash-report-names-the-games-frames-only-by-their-addresses)).
+
 `.github/workflows/fuzz.yml` fuzzes the Python parsers of files a player
 supplies, nightly and by hand (never on pull requests): the RomFS image reader
 (`romfs.py`), the control data (`nacp.py`), the NSO loader, the shader
