@@ -19,7 +19,7 @@ No `patches.py`.
 
 - **Current:** 60 fps (30 on the Switch). At the end of each frame the main thread calls its frame callbacks (`main+0xb7c308`) with the milliseconds since the frame began; the frame limiter among them (`main+0x7a3e70`) runs jobs or sleeps until 33.333 ms have passed, a float in read-only data (`main+0x13c94dc`, read only there), and the game steps by the time that really passed. The host writes the profile's `fps_target` there as a frame time (`hle_fpslock.c`): 16.167 ms at 60, half a millisecond under the vsync so the presents set the pace. At exactly 16.667 the work after the limiter made it 59.6 fps with a frame shown twice every 2.5 s.
 - On the Mac the lobby holds 60.0 fps (display interval p99 16.67 ms); the same 2 s walk and 1.5 s turn from the same save end at the same spot at 30 and 60 fps, and the title's animation matches at time scale 1.00 (`DM_NVN_REGLUM`). `DM_FPS_TARGET=30` keeps the game's 33.333 ms.
-- The limiter also has a phase lock, a nudge of at most 0.05 ms a frame from the layer's frame history, which stays off: the host's `nn::vi::ListFrameHistory` returns no entries.
+- The limiter also has a phase lock, a nudge of at most 0.05 ms a frame from the layer's frame history. It stayed off while the host's `nn::vi::ListFrameHistory` returned no entries. The host now keeps that history ([Layer frame history](../../../docs/reference/services.md#layer-frame-history), made for Minecraft Dungeons II): the call returns up to the last 8 presents, newest first, each marked shown, with its present time, once the present queue has handed it on, and a count query answers 8. So the phase lock can now act; the profile is unchanged. What it does here is not tested yet (see [Open](#open)).
 
 ## Modules and memory
 
@@ -80,4 +80,4 @@ General host changes first needed here; each applies to every game:
 
 - Tessellation (15 hull, 18 domain shaders) and the 10 geometry shaders are not built ([Rendering](#rendering)).
 - [docs/geometry-metal-research.md](../../../docs/geometry-metal-research.md) describes geometry shaders now built as compute kernels, checked on AI: THE SOMNIUM FILES only ("Other games and iOS device execution are unvalidated"); whether this game's 10 build with it is not recorded.
-- The limiter's phase lock stays off while `nn::vi::ListFrameHistory` returns no entries.
+- The limiter's phase lock now gets the layer's frame history (up to 8 entries; none before), untested: re-test on the iPhone at 60 fps with Ultrawide on and off (the `vi::ListFrameHistory: N of the last 8 presents returned` line shows whether the game reads it). The host writes 40-byte `FrameInfo` entries in the layout read from SDK 20.5.15; this game is on SDK 7.3.2, whose `FrameInfo` is not checked (a smaller one would be written past).

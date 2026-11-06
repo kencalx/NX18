@@ -1,13 +1,17 @@
 // Start-up self-tests: checks that need this device's own GPU, asked for with DM_SELFTEST=<name>[,<name>...] (Documents/env.txt on an iPhone or iPad; on the Mac the
 // environment, or a Mac app's env.txt in ~/Library/Application Support/nxnative/<title ID>/). main.c reads the switch: without it nothing here runs and nothing is called. With it,
 // dm_selftest_start runs them once, on a thread of their own started before the host's loading ends (on iOS that loading has usually finished behind the launcher), and
-// dm_selftest_wait holds the game's first instruction until they are done (at most 20 s), so they share no thread, queue or frame with the game. Each logs one line.
+// dm_selftest_wait holds the game's first instruction until they are done (at most 20 s), so they share no thread, queue or frame with the game. Each logs a line a kernel.
 //   hmma: the HMMA.16816 body the shader build writes for Ampere's matrix instructions with an f16 accumulator (dm/gfx/tools/dmsh_build.py hmma_msl: the simdgroup_matrix code of
-//         agl's upscaler networks), compiled when the host was built exactly as this platform's game shaders are (dm/gfx/tools/hmma_selftest.py through host_msl.py: iOS with
-//         ios_metal.py's flags, the Mac with dmsh_build.py's), four calls a lane in a row on one scratch block (each D the next call's C) over 256 tiles of random fragments (a
-//         fixed seed), eight runs, against the CPU reference of PTX mma.m16n8k16 that dm/gfx/tests/test_dmsh_hmma.py uses on the Mac (hmma_check.h, one copy):
-//         `self-test hmma: <GPU> (<architecture>, highest Apple family N): 256 tiles x 4 chained calls, 8 runs: worst output at W% of its bound ...: ok; compiled by <command>`,
-//         or the same line starting `[RED] ` with OVER BOUND or RUNS DIFFER in place of ok, or `[RED] self-test hmma: ... not run: <why>`
+//         agl's upscaler networks and the NDVE movie networks), compiled when the host was built exactly as this platform's game shaders are (dm/gfx/tools/hmma_selftest.py
+//         through host_msl.py: iOS with ios_metal.py's flags, the Mac with dmsh_build.py's), over 256 tiles of random halves (a fixed seed), eight runs, against the CPU
+//         reference of PTX mma.m16n8k16 that dm/gfx/tests/test_dmsh_hmma.py uses on the Mac (hmma_check.h, one copy). Two kernels, two libraries, two lines in this order:
+//         four calls a lane in a row on one scratch block with no flag (each D the next call's C), the path of every call TensorPass gives no flag:
+//         `self-test hmma: <GPU> (<architecture>, highest Apple family N): 256 tiles x 4 chained calls, 8 runs: worst output at W% of its bound ...: ok; compiled by <command>`;
+//         then eight calls with TensorPass's flags (accumulators kept in two slots, a call in no chain while they are open, A kept, C = 0, A loaded from shared memory where an
+//         LDSM read it, plain and transposed):
+//         `self-test hmma: <GPU> (...): 256 tiles x 8 flagged calls (...), 8 runs: worst result at W% of its bound (...); ...: ok; compiled by <command>`.
+//         Either line starts `[RED] ` with OVER BOUND or RUNS DIFFER in place of ok, or is `[RED] self-test hmma: <GPU>: [flagged calls: ]not run: <why>`
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include "host_msl.h"
@@ -25,23 +29,32 @@ enum { SELFTEST_HMMA = 1 };
 static unsigned g_selftest_want;           // written before the thread starts, read only by it
 static dispatch_semaphore_t g_selftest_done;   // main.c's thread only: made by dm_selftest_start, waited for by dm_selftest_wait
 
-static void selftest_hmma(void) {
-    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();   // the process's one device, which the graphics layers use too
-    if (!dev) { STLOG("[RED] self-test hmma: not run: no Metal device"); return; }
-    char gpu[256]; hmma_check_gpu(dev, gpu, sizeof gpu);
+typedef int (*selftest_hmma_run)(id<MTLDevice> dev, id<MTLLibrary> lib, struct hmma_check_result *r, char *line, size_t cap);
+
+// One kernel of the HMMA self-test: its library as the host was built with it (host_msl_chain_lib name), run and checked by run (hmma_check.h), and its line. what names the
+// kernel in a line that says it did not run ("" for the chained calls, "flagged calls: ")
+static void selftest_hmma_kernel(id<MTLDevice> dev, const char *gpu, const char *name, const char *what, selftest_hmma_run run) {
     unsigned long len = 0; const char *record = "";
-    const unsigned char *bytes = host_msl_chain_lib("hmma_selftest", &len, &record);
-    if (!bytes) { STLOG("[RED] self-test hmma: %s: not run: the host has no kernel for it (%s)", gpu, record); return; }
+    const unsigned char *bytes = host_msl_chain_lib(name, &len, &record);
+    if (!bytes) { STLOG("[RED] self-test hmma: %s: %snot run: the host has no kernel for it (%s)", gpu, what, record); return; }
     NSError *e = nil;
     dispatch_data_t data = dispatch_data_create(bytes, len, NULL, ^{});   // static bytes: nothing to free
     id<MTLLibrary> lib = data ? [dev newLibraryWithData:data error:&e] : nil;
     if (!lib) {
         const char *why = e.localizedDescription.UTF8String;
-        STLOG("[RED] self-test hmma: %s: not run: its library does not load (%s; compiled by %s)", gpu, why ? why : "no error", record); return;
+        STLOG("[RED] self-test hmma: %s: %snot run: its library does not load (%s; compiled by %s)", gpu, what, why ? why : "no error", record); return;
     }
     char line[768]; struct hmma_check_result r;
-    int ran = hmma_check_run(dev, lib, &r, line, sizeof line);   // the compile record on the line too: which language and flags this device measured
+    int ran = run(dev, lib, &r, line, sizeof line);   // the compile record on the line too: which language and flags this device measured
     STLOG("%sself-test hmma: %s; compiled by %s", !ran || hmma_check_failed(&r) ? "[RED] " : "", line, record);
+}
+
+static void selftest_hmma(void) {
+    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();   // the process's one device, which the graphics layers use too
+    if (!dev) { STLOG("[RED] self-test hmma: not run: no Metal device"); return; }
+    char gpu[256]; hmma_check_gpu(dev, gpu, sizeof gpu);
+    selftest_hmma_kernel(dev, gpu, "hmma_selftest", "", hmma_check_run);
+    selftest_hmma_kernel(dev, gpu, "hmma_selftest_flags", "flagged calls: ", hmma_flags_run);
 }
 
 static void *selftest_thread(void *done) {

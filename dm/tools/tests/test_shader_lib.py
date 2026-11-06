@@ -142,6 +142,17 @@ class LeaveOutPulling(Base):
         self.assertTrue(shader_lib.pack(self.lib, self.said.append, leave_out=True))
         self.assertEqual((self.image.stat().st_ino, self.image.stat().st_mtime_ns), before)
 
+    def test_an_image_written_without_them_gets_the_marker(self):   # dmsh_build.py writes the image itself (DMSH_IOS_PULL=0: no pulling libraries), so no folder is left to pack
+        shader_lib.write({'k_b.metallib': b'lib', 'inputs.tsv': b'game\t0100\n'}, str(self.image))
+        self.assertFalse(shader_lib.left_out_pulling(self.lib))
+        self.assertTrue(shader_lib.pack(self.lib, self.said.append, leave_out=True))
+        self.assertTrue(shader_lib.left_out_pulling(self.lib)); self.assertEqual(self.names(), ['_bp_left_out', 'inputs.tsv', 'k_b.metallib'])
+        self.assertEqual((shader_lib.view(self.lib) / 'k_b.metallib').read_bytes(), b'lib'); self.assertFalse(self.lib.exists())
+        before = self.image.stat().st_ino, self.image.stat().st_mtime_ns   # written once: the next pack leaves it alone
+        self.assertTrue(shader_lib.pack(self.lib, self.said.append, leave_out=True))
+        self.assertEqual((self.image.stat().st_ino, self.image.stat().st_mtime_ns), before)
+        self.assertTrue(shader_lib.pack(self.lib, self.said.append)); self.assertTrue(shader_lib.left_out_pulling(self.lib))   # without leave_out an image alone is not touched
+
     def test_a_full_build_that_wants_them_drops_the_marker(self):
         self.folder(k_b__metallib=b'lib', k_bp__metallib=b'pull'); shader_lib.pack(self.lib, self.said.append, leave_out=True)
         self.folder(k_b__metallib=b'lib', k_bp__metallib=b'pull'); self.pack()
