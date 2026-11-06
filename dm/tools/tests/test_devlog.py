@@ -253,7 +253,7 @@ class Formats(unittest.TestCase):
         ('mem_warning', 'dm/ios/Sources/front_ios.m', '[RED] front end: iOS memory warning', '[dm] ', ()),
         ('focus', 'dm/host/hle_oe.c', 'oe focus state → %d%s', '[dm] ', (' (library applet open)',)),
         ('vkframe', 'dm/gfx/vk/hle_vk.m', 'frame %llu: draws %llu, passes %llu, submits', '[dm] [vk] ', ()),
-        ('vkpso', 'dm/gfx/vk/hle_vk.m', 'pipelines: %llu compiled %s', '[dm] [vk] ', ('concurrently',)),
+        ('vkpso', 'dm/gfx/vk/hle_vk.m', 'pipelines: %llu compiled %s', '[dm] [vk] ', ('concurrently', '')),   # the second %s: the archive's part (DM_VK_ARCHIVE), empty without it
         ('glpso', 'dm/gfx/gl/hle_gl.m', 'frame %llu: pipeline builds since', '[dm] [gl] ', ()),
         ('glframe', 'dm/gfx/gl/hle_gl.m', 'frame %llu: draws %llu, passes %llu, uploads', '[dm] [gl] ', ()),
         ('glmem', 'dm/gfx/gl/hle_gl.m', 'memory at frame %llu', '[dm] [gl] ', ()))

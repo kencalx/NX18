@@ -171,6 +171,11 @@ void dm_host_preload_start(int argc, char **argv) {
 }
 int main(int argc, char **argv) {
     { int mtl_pso_prebuild_tool(void); if (mtl_pso_prebuild_tool()) return 0; }   // DM_PSO_PREBUILD=tool: the pipeline archive's prebuild alone, no game (nvn_mtl.m)
+    // DM_SELFTEST=hmma: start-up GPU self-tests (dm/gfx/nvn/selftest.m) on a thread of their own, started before the loading below and finished before the game's first instruction; unset, nothing is called
+    const char *selftest = getenv("DM_SELFTEST");
+    if (selftest && (!*selftest || !strcmp(selftest, "0"))) selftest = NULL;   // empty or 0: off, as other switches
+    void dm_selftest_start(const char *names), dm_selftest_wait(void);
+    if (selftest) dm_selftest_start(selftest);
     if (getenv("DM_PRELOAD")) dm_host_preload_start(argc, argv);   // Exercise the early-start path on Mac (on iOS it is called from the App's main())
     if (atomic_load(&g_pre.started)) {
         pthread_join(g_pre.th, NULL);
@@ -181,6 +186,7 @@ int main(int argc, char **argv) {
     } else host_preload(argc, argv);
     { void dm_fps_state_apply(void); dm_fps_state_apply(); }   // frame rate and render scale into the frame step state page (loader.c): the iOS launcher sets them after the loading began
     { void dm_mod_variants_apply(void); dm_mod_variants_apply(); }   // the switchable mods the launcher turned on (loader.c), before any guest code runs
+    if (selftest) dm_selftest_wait();
     front_run(guest_main);
     return 0;
 }

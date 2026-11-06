@@ -5,3 +5,6 @@
 #import <Metal/Metal.h>
 
 id<MTLLibrary> host_msl_lib(id<MTLDevice> dev, id<MTL4Compiler> comp, const char *name, NSError **e);
+// A start-up self-test's kernel (selftest.m), compiled when the host was built as the game chain compiles this platform's game shaders (host_msl.py, hmma_selftest.py): its
+// metallib, or NULL when the build has none; *record says which commands compiled it, or why there is none. Nothing is compiled at run time
+const unsigned char *host_msl_chain_lib(const char *name, unsigned long *len, const char **record);

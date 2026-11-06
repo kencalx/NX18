@@ -161,7 +161,7 @@ int main(void) {
         CHECK(!vkp_finish(&g_pp, &s.pend, 1, 1000), "compiled first (DM_VK_PSO_ASYNC=0: on the creating thread): the handler leaves it to the game"); vkp_end(&g_pp, 0);
         vkp_wait(&g_pp, &s.pend, slow);
         CHECK(vkp_drop(&s.pend), "then vkDestroyPipeline frees it");
-        vkp_rec r;
+        vkp_rec r = {0};   // {0}: the step checks below read its totals even where a take before them failed
         CHECK(!vkp_take(&g_pp, 1100, 500, &r), "no record before the burst has been quiet for 500");
         CHECK(!vkp_take(&g_pp, 900, 0, &r), "a time before the last finish (a clock read before another thread's finish) does not count as quiet");
         CHECK(vkp_take(&g_pp, 1500, 500, &r) && r.n == 2 && r.nfail == 1 && r.first == 100 && r.last == 1000 && r.sum == 200 + 600 && r.peak == 1 && r.nwait == 0 && r.total == 2,
@@ -172,8 +172,36 @@ int main(void) {
         CHECK(!vkp_take(&g_pp, 9000, 0, &r), "no record while a compile is in flight");
         vkp_finish(&g_pp, &b.pend, 0, 2300);
         CHECK(!vkp_take(&g_pp, 9000, 0, &r), "nor before its handler's vkp_end"); vkp_end(&g_pp, 0);
-        CHECK(vkp_take(&g_pp, 9000, 0, &r) && r.n == 2 && r.peak == 2 && r.first == 2000 && r.last == 2300 && r.create_ns == 150 && r.total == 4,
-              "the next burst: 2 at once, from its own first begin; total goes on");
+        CHECK(vkp_take(&g_pp, 9000, 0, &r) && r.n == 2 && r.peak == 2 && r.first == 2000 && r.last == 2300 && r.create_ns == 150 && r.total == 4 && r.nrun == 0 && r.run_sum == 0 && !r.nhit,
+              "the next burst: 2 at once, from its own first begin; total goes on; neither was handed to Metal (vkp_start), so no time at the compiler");
+        // The time at Metal's compiler (from the hand-over to the finish, the part before the pipeline state's hand-over apart) and the archive's hits (DM_VK_ARCHIVE): a hit,
+        // one it missed, one that queued behind the limit and was handed over by the vkp_end of a compile before it, and one never handed over (its specialization failed
+        // first); the same since the start, which the next burst keeps
+        vkp_runs before = r.all;
+        vkp_set_limit(&g_pp, 2);
+        pipe_t h = {0}, m = {0}, w = {0}, n = {0};
+        vkp_begin(&g_pp, &h.pend, vkp_clock()); h.pend.arch = 2; vkp_begin(&g_pp, &m.pend, vkp_clock()); m.pend.arch = 1;
+        vkp_begin(&g_pp, &w.pend, vkp_clock()); w.pend.arch = 2; vkp_begin(&g_pp, &n.pend, vkp_clock()); n.pend.arch = 2;
+        CHECK(vkp_start(&g_pp, &h.pend, 1) && vkp_start(&g_pp, &m.pend, 1) && !vkp_start(&g_pp, &w.pend, 1), "two at the compiler, the third queued");
+        CHECK(h.pend.t1 && m.pend.t1 && !w.pend.t1, "the hand-over's time, none for the one queued");
+        h.pend.t2 = h.pend.t1 + 200; vkp_finish(&g_pp, &h.pend, 0, h.pend.t1 + 700);   // its pipeline state handed over 200 ns after its stages' specializations began
+        CHECK(vkp_end(&g_pp, 1) == &w.pend && w.pend.t1 >= h.pend.t1, "the queued one is handed over when a slot frees, at that time");
+        vkp_finish(&g_pp, &m.pend, 0, m.pend.t1 + 300); vkp_end(&g_pp, 1);   // no pipeline state handed over (no usable vertex shader): all of it specializing
+        w.pend.t2 = w.pend.t1 + 500; vkp_finish(&g_pp, &w.pend, 0, w.pend.t1 + 2000); vkp_end(&g_pp, 1);
+        vkp_finish(&g_pp, &n.pend, 1, vkp_clock()); vkp_end(&g_pp, 0);
+        uint64_t last = vkp_clock() + 1000000000ull;
+        CHECK(vkp_take(&g_pp, last, 0, &r) && r.n == 4 && r.nrun == 3 && r.run_sum == 700 + 300 + 2000 && r.spec_sum == 200 + 300 + 500 && r.nhit == 2 && r.run_hit == 700 + 2000,
+              "3 at the compiler, 3000 ns in all, 1000 of it specializing; 2 hits there, 2700 ns");
+        CHECK(r.all.nrun == before.nrun + 3 && r.all.run_sum == before.run_sum + 3000 && r.all.spec_sum == before.spec_sum + 1000 && r.all.nhit == before.nhit + 2 &&
+              r.all.run_hit == before.run_hit + 2700, "and since the start");
+        vkp_runs since = r.all;
+        vkp_set_limit(&g_pp, 0);
+        CHECK(vkp_drop(&h.pend) && vkp_drop(&m.pend) && vkp_drop(&w.pend) && vkp_drop(&n.pend), "each freed by vkDestroyPipeline");
+        pipe_t z = {0}; z.pend.arch = 2; z.pend.t1 = 5; z.pend.t2 = 7; vkp_begin(&g_pp, &z.pend, 10);
+        CHECK(z.pend.arch == 0 && z.pend.t1 == 0 && z.pend.t2 == 0, "vkp_begin starts a pipeline with no archive mark and no hand-over");
+        vkp_finish(&g_pp, &z.pend, 0, 20); vkp_end(&g_pp, 0);
+        CHECK(vkp_take(&g_pp, last + 1, 0, &r) && r.n == 1 && !r.nrun && !r.spec_sum && !memcmp(&r.all, &since, sizeof since), "the next burst: none at the compiler, the totals kept");
+        (void)vkp_drop(&z.pend);
     }
     // A draw that waits for a compile another thread ends 120 ms later, no other compile ending meanwhile: it sleeps, reads the state, its wait is counted, and reported
     // once (no compile ended for VKP_SLOW_NS)

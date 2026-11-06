@@ -95,6 +95,17 @@ t_vk_pending_asan: t_vk_pending.c ../vk/vk_pending.h
 .PHONY: vk-pending
 vk-pending: t_vk_pending t_vk_pending_tsan t_vk_pending_asan
 	./t_vk_pending && ./t_vk_pending_tsan && ./t_vk_pending_asan
+# The Vulkan layer's pipeline archive (../vk/vk_archive.h, DM_VK_ARCHIVE): its keys, stamp, folder, the gate between its reads and writes and its crash guard's use; plain C,
+# also under ThreadSanitizer and AddressSanitizer (make vk-archive)
+t_vk_archive: t_vk_archive.c ../vk/vk_archive.h ../nvn/nvn_pso_guard.h
+	clang -std=c11 -O1 -g -Wall -Wextra -pthread -o $@ t_vk_archive.c
+t_vk_archive_tsan: t_vk_archive.c ../vk/vk_archive.h ../nvn/nvn_pso_guard.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=thread -o $@ t_vk_archive.c
+t_vk_archive_asan: t_vk_archive.c ../vk/vk_archive.h ../nvn/nvn_pso_guard.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=address,undefined -o $@ t_vk_archive.c
+.PHONY: vk-archive
+vk-archive: t_vk_archive t_vk_archive_tsan t_vk_archive_asan
+	./t_vk_archive && ./t_vk_archive_tsan && ./t_vk_archive_asan
 # The crash guard of the pipeline archive bundled with the app (../nvn/nvn_pso_guard.h, DM_PSO_BUNDLE_GUARD): plain C, also under ThreadSanitizer and AddressSanitizer
 # (make pso-guard); nvn_mtl.m's use of it with a real archive is t_pso_bundle's
 t_pso_guard: t_pso_guard.c ../nvn/nvn_pso_guard.h
@@ -501,9 +512,9 @@ t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_stencil_view.m $(MTL_T_SRC) $(FW)
 check_t_stencil_view: RUN_ENV = MTL_DEBUG_LAYER=1
 # The Vulkan layer (#included) over the whole NVN layer, whose device and present path it uses
-t_vk_desc: t_vk_desc.m ../vk/hle_vk.m ../vk/vk_pending.h $(MTL_T_DEP)
+t_vk_desc: t_vk_desc.m ../vk/hle_vk.m ../vk/vk_pending.h ../vk/vk_archive.h $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
-t_vk_pso: t_vk_pso.m ../vk/hle_vk.m ../vk/vk_pending.h $(MTL_T_DEP)
+t_vk_pso: t_vk_pso.m ../vk/hle_vk.m ../vk/vk_pending.h ../vk/vk_archive.h $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_pso.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_gl_imports: t_gl_imports.m ../gl/hle_gl.m ../../host/hle.c ../../host/hle.h $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gl_imports.m ../../host/hle.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)

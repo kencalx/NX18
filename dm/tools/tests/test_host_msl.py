@@ -14,6 +14,9 @@ from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[3]
 GAME = '010015100B514000'
+# host_msl.py also compiles the start-up self-test's kernel with the game chain's compile (hmma_selftest.py), from these files
+SELFTEST_FILES = ('dm/gfx/tools/hmma_selftest.py', 'dm/gfx/tools/dmsh_build.py', 'dm/gfx/tools/dmsh_pch.py', 'dm/ios/tools/ios_metal.py')
+sys.path.insert(0, str(REPO / 'dm/gfx/tools')); import hmma_selftest
 
 
 def script(name):
@@ -29,7 +32,8 @@ class HostMSL(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        for name in ('dm/host/Makefile', 'dm/mac/min_os.mk', 'dm/gfx/tests/Makefile', 'dm/gfx/tools/host_msl.py', f'dm/games/{GAME}/game.tsv'):
+        for name in ('dm/host/Makefile', 'dm/mac/min_os.mk', 'dm/gfx/tests/Makefile', 'dm/gfx/tools/host_msl.py', f'dm/games/{GAME}/game.tsv',
+                     *SELFTEST_FILES):
             dst = self.root / name
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(REPO / name, dst)
@@ -50,8 +54,11 @@ class HostMSL(unittest.TestCase):
                 if not version: sys.exit(1)
                 print(version)
             else:
+                if os.environ.get('TEST_METAL_REFUSE') and os.environ['TEST_METAL_REFUSE'] in args:
+                    with open(os.environ['TEST_METAL_LOG'], 'a') as f: f.write(json.dumps(['<refused>'] + args) + '\\n')
+                    sys.exit(1)
                 with open(os.environ['TEST_METAL_LOG'], 'a') as f:
-                    f.write(json.dumps(args) + '\\n')
+                    f.write(json.dumps(args + (['<stdin>', sys.stdin.read()] if '-' in args else [])) + '\\n')
                 pathlib.Path(args[args.index('-o') + 1]).write_bytes(b'compiled library')
             '''))
         compiler.chmod(0o755)
@@ -66,8 +73,17 @@ class HostMSL(unittest.TestCase):
                            cwd=self.root, env=self.env, capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
-    def compiles(self):
+    def calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def compiles(self):   # the host libraries' compiles (dm/gfx/msl/*.metal)
+        return [c for c in self.calls() if c[-1].endswith('.metal') and '/msl/' in c[-1]]
+
+    def chain_compiles(self):   # the self-test kernel's: its source on standard input, as the chain compiles a game shader
+        return [c for c in self.calls() if '<stdin>' in c]
+
+    def refused(self):   # the compiles TEST_METAL_REFUSE made fail
+        return [c for c in self.calls() if c[0] == '<refused>']
 
     def host_dirs(self, dirs):
         for d in dirs: (self.root / d).mkdir(parents=True, exist_ok=True)
@@ -80,6 +96,43 @@ class HostMSL(unittest.TestCase):
         self.make('MSL_SDK=iphoneos')
         self.assertIn('-mios-version-min=27.0', self.compiles()[-1])
         self.assertIn('iphoneos', self.compiles()[-1])
+
+    def test_self_test_kernel_is_compiled_as_each_platforms_game_shaders(self):
+        import ios_metal
+        for args, metal, label in ((), hmma_selftest.CHAIN['MAC_METAL'], 'macosx'), (('MSL_SDK=iphoneos',), ios_metal.METAL, 'iphoneos'):
+            self.make(*args)
+            chain = self.chain_compiles()[-1]
+            self.assertEqual(chain[:chain.index('-x')], metal[1:])   # the chain's own command, without the precompiled header
+            self.assertEqual(chain[-1], hmma_selftest.msl())       # dmsh_build.py's body, as every game gets it
+            header = (self.root / f'dm/host/gen/msl-{label}/host_msl_gen.h').read_text()
+            self.assertIn(f'{{"hmma_selftest", "{" ".join(metal)} -x metal -; ', header)
+            self.assertRegex(header, r'k_host_msl_chain_hmma, 16\}')   # the fake compiler's 'compiled library'
+        self.assertIn('-std=metal4.1', chain); self.assertIn('-fmetal-math-mode=relaxed', chain); self.assertIn('-mios-version-min=27.0', chain)
+        self.assertEqual(len(self.compiles()), 2)   # the host's libraries keep their own flags
+
+    def test_self_test_kernel_falls_back_or_is_left_out_without_stopping_the_build(self):
+        import ios_metal
+        self.env['TEST_METAL_REFUSE'] = ios_metal.STD   # Metal 4.1 refuses it: ios_metal.compile takes its fallback language, as for a game shader
+        self.make('MSL_SDK=iphoneos')
+        self.assertIn(ios_metal.FALLBACK_STD, self.chain_compiles()[-1])
+        self.assertIn(f'"{" ".join(ios_metal.METAL_FALLBACK)} -x metal -; ', (self.root / 'dm/host/gen/msl-iphoneos/host_msl_gen.h').read_text())
+        self.env['TEST_METAL_REFUSE'] = '-fpreserve-invariance'   # no language takes it: the host is built without it, and says why at run time
+        self.env['TEST_METAL_VERSION'] = 'Metal test compiler 2'
+        self.make('MSL_SDK=iphoneos')
+        ios = self.root / 'dm/host/gen/msl-iphoneos/host_msl_gen.h'
+        failed = ios.read_text()
+        self.assertRegex(failed, r'"hmma_selftest", "it did not compile when the host was built \(.*<build folder>.*\)", k_host_msl_chain_hmma, 0\}')
+        self.assertNotIn(tempfile.gettempdir() + os.sep + 'tmp', failed.split('k_host_msl_chain[]')[1])   # no temporary folder in the record: the same failure, the same header
+        self.assertIn('(the self-test kernel did not compile: tried again at the next build)', failed.split('\n')[1])
+        n = len(self.refused())
+        self.make('MSL_SDK=iphoneos')   # the same inputs, the same failure: tried again, the header unchanged (the host is not rebuilt for it)
+        self.assertGreater(len(self.refused()), n); self.assertEqual(ios.read_text(), failed)
+        del self.env['TEST_METAL_REFUSE']   # the cause has passed (the compiler service, a full disk): the next build has the kernel, with nothing else changed
+        self.make('MSL_SDK=iphoneos')
+        self.assertRegex(ios.read_text(), r'k_host_msl_chain_hmma, 16\}')
+        self.env['TEST_METAL_VERSION'] = ''
+        self.make()
+        self.assertIn('"hmma_selftest", "no Metal compiler for macosx when the host was built", k_host_msl_chain_hmma, 0}', self.header.read_text())
 
     def test_compiler_installation_recovers_without_cleaning(self):
         self.env['TEST_METAL_VERSION'] = ''

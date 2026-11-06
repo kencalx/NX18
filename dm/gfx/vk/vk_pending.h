@@ -10,7 +10,9 @@
 // the pool's queue in the order they were created, and the vkp_end that frees a slot returns the next for its caller to hand over. One a submission is about to draw
 // with goes to the queue's front (vkp_hurry, vkp_wait), so a frame waits for its own pipelines and not for every one created before them.
 // The pool also counts what the [vk] pipelines line reports (vkp_take): compiles finished and failed, the first begin and the last finish, each one's time from begin
-// to finish, the most in flight and handed to Metal, the creating threads' time in vkCreateGraphicsPipelines (vkp_create) and the waits for a compile
+// to finish and from its hand-over to Metal to finish (and how much of that came before its pipeline state was handed over: vkp_t.t2), the most in flight and handed to Metal,
+// the creating threads' time in vkCreateGraphicsPipelines (vkp_create), the waits for a compile, and those the caller marked as named in its pipeline archive's keys
+// (vkp_t.arch, DM_VK_ARCHIVE); the compiles and their time at Metal also since the start, so the line that ends a boot carries the whole boot even when it came in bursts
 #pragma once
 #include <pthread.h>
 #include <stdatomic.h>
@@ -22,13 +24,17 @@ enum { VKP_BUSY = 1, VKP_GONE = 2 };
 #ifndef VKP_SLOW_NS
 #define VKP_SLOW_NS 5000000000ull   // a wait during which no compile at all has finished for this long is reported (vkp_wait's slow); the test takes less
 #endif
-// st: the word; t0: vkp_begin's time, which vkp_finish reads (the handler runs after the compile was handed to Metal); queued, qprev, qnext: its place in the pool's
-// queue, under the pool's lock
-typedef struct vkp_t { _Atomic uint32_t st; uint32_t queued; uint64_t t0; struct vkp_t *qprev, *qnext; } vkp_t;
+// st: the word; t0: vkp_begin's time, t1: when it was handed to Metal (0: it never was), t2: when the caller handed its last step, the pipeline state, to Metal (0: it never
+// did; the time from t1 to t2 is the stages' specializations), which vkp_finish reads (the handler runs after the compile was handed to Metal); queued, qprev, qnext: its place
+// in the pool's queue, under the pool's lock; arch: set by the caller between vkp_begin and the hand-over: 2 when its pipeline archive's keys name it
+typedef struct vkp_t { _Atomic uint32_t st; uint32_t queued; uint64_t t0, t1, t2; struct vkp_t *qprev, *qnext; uint32_t arch; } vkp_t;
 // One burst of compiles, as vkp_take hands it out: compiles finished (n, failed ones too: nfail), first begin and last finish, the sum of begin-to-finish times, the
 // time in vkCreateGraphicsPipelines summed over the creating threads, waits that slept (all their time, the longest), the most in flight (queued ones too) and the
-// most handed to Metal at once; total: compiles finished since the start
-typedef struct { uint64_t n, nfail, first, last, sum, create_ns, nwait, wait_ns, wait_max, total; uint32_t peak, peak_run; } vkp_rec;
+// most handed to Metal at once; total: compiles finished since the start; nrun, run_sum: those handed to Metal and their times from the hand-over to the finish, spec_sum the
+// part of those times before the pipeline state was handed over (t2; all of it for one that never got there); nhit, run_hit: the same for those of them marked as named in the
+// archive's keys (arch 2); all: nrun, run_sum, spec_sum, nhit, run_hit since the start (kept by vkp_take, as total)
+typedef struct { uint64_t nrun, run_sum, spec_sum, nhit, run_hit; } vkp_runs;
+typedef struct { uint64_t n, nfail, first, last, sum, create_ns, nwait, wait_ns, wait_max, total; uint32_t peak, peak_run; uint64_t nrun, run_sum, spec_sum, nhit, run_hit; vkp_runs all; } vkp_rec;
 typedef struct {
     pthread_mutex_t mu; pthread_cond_t cv;
     uint32_t inflight, waiting;   // compiles begun and not ended (vkp_end), queued ones too; threads asleep in vkp_wait / vkp_wait_all (a finish or an end wakes them only when there are some)
@@ -42,13 +48,13 @@ static inline uint64_t vkp_clock(void) { struct timespec t; clock_gettime(CLOCK_
 static inline void vkp_set_limit(vkp_pool *g, uint32_t n) { pthread_mutex_lock(&g->mu); g->limit = n; pthread_mutex_unlock(&g->mu); }
 // Before the pipeline is handed out: vkCreateGraphicsPipelines' return publishes the word to the game's threads
 static inline void vkp_begin(vkp_pool *g, vkp_t *p, uint64_t now) {
-    p->t0 = now; atomic_store_explicit(&p->st, VKP_BUSY, memory_order_relaxed);
+    p->t0 = now; p->t1 = p->t2 = 0; p->arch = 0; atomic_store_explicit(&p->st, VKP_BUSY, memory_order_relaxed);
     pthread_mutex_lock(&g->mu);
     if (!g->inflight && !g->b.n) g->b.first = now;   // the first compile since the last vkp_take
     if (++g->inflight > g->b.peak) g->b.peak = g->inflight;
     pthread_mutex_unlock(&g->mu);
 }
-static inline void vkp_run(vkp_pool *g) { if (++g->running > g->b.peak_run) g->b.peak_run = g->running; }   // under the lock: a compile takes a slot
+static inline void vkp_run(vkp_pool *g, vkp_t *p, uint64_t now) { p->t1 = now; if (++g->running > g->b.peak_run) g->b.peak_run = g->running; }   // under the lock: a compile takes a slot (now: read before the lock)
 static inline void vkp_unqueue(vkp_pool *g, vkp_t *p) {   // under the lock
     if (p->qprev) p->qprev->qnext = p->qnext; else g->qhead = p->qnext;
     if (p->qnext) p->qnext->qprev = p->qprev; else g->qtail = p->qprev;
@@ -62,9 +68,10 @@ static inline void vkp_front(vkp_pool *g, vkp_t *p) {   // under the lock: a que
 // After vkp_begin, once the compile is ready to go: 1 = the caller hands it to Metal now; 0 (queue only, limit compiles at Metal already) = it waits in the queue, and
 // the vkp_end that frees a slot returns it. queue 0 (DM_VK_PSO_ASYNC=0: the creating thread compiles it) always takes a slot, for the count
 static inline int vkp_start(vkp_pool *g, vkp_t *p, int queue) {
+    uint64_t t = vkp_clock();   // the hand-over's time, if it is handed over now: read outside the lock, which the clock would hold longer
     pthread_mutex_lock(&g->mu);
     int now = !queue || !g->limit || g->running < g->limit;
-    if (now) vkp_run(g);
+    if (now) vkp_run(g, p, t);
     else { p->queued = 1; p->qnext = NULL; p->qprev = g->qtail; if (g->qtail) g->qtail->qnext = p; else g->qhead = p; g->qtail = p; }
     pthread_mutex_unlock(&g->mu);
     return now;
@@ -72,10 +79,15 @@ static inline int vkp_start(vkp_pool *g, vkp_t *p, int queue) {
 // The handler, once the pipeline's Metal objects are stored (failed: it has none); the draws waiting for it wake. 1: the game destroyed the pipeline meanwhile, and the
 // caller frees it. After the exchange a pipeline the game still has may be destroyed and freed at any time, so p is not touched again. Then vkp_end, after that free
 static inline int vkp_finish(vkp_pool *g, vkp_t *p, int failed, uint64_t now) {
-    uint64_t t0 = p->t0;
+    uint64_t t0 = p->t0, t1 = p->t1, t2 = p->t2; uint32_t arch = p->arch;
+    uint64_t d = t1 && now > t1 ? now - t1 : 0, sp = t2 >= t1 && t2 && t2 - t1 < d ? t2 - t1 : d;   // at the compiler; of that, before the pipeline state's hand-over
     pthread_mutex_lock(&g->mu);
     uint32_t old = atomic_fetch_and_explicit(&p->st, ~(uint32_t)VKP_BUSY, memory_order_acq_rel);
     g->b.n++; g->b.total++; g->b.nfail += failed != 0; g->b.sum += now > t0 ? now - t0 : 0; if (now > g->b.last) g->b.last = now;
+    if (t1) {
+        g->b.nrun++; g->b.run_sum += d; g->b.spec_sum += sp; g->b.all.nrun++; g->b.all.run_sum += d; g->b.all.spec_sum += sp;
+        if (arch == 2) { g->b.nhit++; g->b.run_hit += d; g->b.all.nhit++; g->b.all.run_hit += d; }
+    }
     if (g->waiting) pthread_cond_broadcast(&g->cv);
     pthread_mutex_unlock(&g->mu);
     return (old & VKP_GONE) != 0;
@@ -83,10 +95,10 @@ static inline int vkp_finish(vkp_pool *g, vkp_t *p, int failed, uint64_t now) {
 // The handler's last call: its compile is no longer in flight, so vkp_wait_all returns only once no handler touches a pipeline. slot: the compile had one (vkp_start).
 // The oldest queued compile then takes it and is returned, for the caller to hand to Metal (NULL: none); it is still in flight, so vkp_wait_all waits for it too
 static inline vkp_t *vkp_end(vkp_pool *g, int slot) {
-    vkp_t *n = NULL;
+    vkp_t *n = NULL; uint64_t t = slot ? vkp_clock() : 0;   // the next one's hand-over, if a slot frees: read outside the lock
     pthread_mutex_lock(&g->mu);
     g->inflight--;
-    if (slot) { g->running--; if (g->qhead && (!g->limit || g->running < g->limit)) { n = g->qhead; vkp_unqueue(g, n); vkp_run(g); } }
+    if (slot) { g->running--; if (g->qhead && (!g->limit || g->running < g->limit)) { n = g->qhead; vkp_unqueue(g, n); vkp_run(g, n, t); } }
     if (g->waiting) pthread_cond_broadcast(&g->cv);
     pthread_mutex_unlock(&g->mu);
     return n;
@@ -130,7 +142,7 @@ static inline void vkp_create(vkp_pool *g, uint64_t ns) { pthread_mutex_lock(&g-
 static inline int vkp_take(vkp_pool *g, uint64_t now, uint64_t quiet, vkp_rec *r) {
     pthread_mutex_lock(&g->mu);
     int ok = g->b.n && !g->inflight && now >= g->b.last && now - g->b.last >= quiet;
-    if (ok) { *r = g->b; uint64_t total = g->b.total; memset(&g->b, 0, sizeof g->b); g->b.total = total; }
+    if (ok) { *r = g->b; uint64_t total = g->b.total; vkp_runs all = g->b.all; memset(&g->b, 0, sizeof g->b); g->b.total = total; g->b.all = all; }
     pthread_mutex_unlock(&g->mu);
     return ok;
 }

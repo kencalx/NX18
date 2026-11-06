@@ -40,3 +40,13 @@ id<MTLLibrary> host_msl_lib(id<MTLDevice> dev, id<MTL4Compiler> comp, const char
     os_unfair_lock_unlock(&lk);
     return lib;
 }
+
+const unsigned char *host_msl_chain_lib(const char *name, unsigned long *len, const char **record) {
+    for (size_t i = 0; name && i < sizeof k_host_msl_chain / sizeof *k_host_msl_chain; i++) {
+        if (strcmp(k_host_msl_chain[i].name, name)) continue;
+        *len = k_host_msl_chain[i].lib_len; *record = k_host_msl_chain[i].record;
+        return *len ? k_host_msl_chain[i].lib : NULL;
+    }
+    *len = 0; *record = "the host has no such kernel";
+    return NULL;
+}

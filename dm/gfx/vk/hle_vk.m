@@ -13,11 +13,13 @@
 //     vertex buffers sit at slot 30 - binding;
 //   · swapchain images are registered with the NVN layer's present path (mtl_ext_tex), which shows a frame once g_ev reaches the value of the frame's last submit.
 // Environment: DM_VK_LOG=1 logs object creation; DM_VK_CAPTURE=<dir> writes every SPIR-V module the game creates (sh_capture); DM_VK_PSO_ASYNC=0 compiles each pipeline
-// on the thread that creates it, as before (pipe_make).
+// on the thread that creates it, as before (pipe_make); DM_VK_ARCHIVE=1 keeps the compiled pipelines in Metal binary archives for the next start (off by default; va_init).
 #define VK_NO_PROTOTYPES
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
+#include "../nvn/nvn_pso_guard.h"
 #include "vk_pending.h"
+#include "vk_archive.h"
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_vi.h>
 #import <Metal/Metal.h>
@@ -136,6 +138,8 @@ static _Atomic uint64_t g_n_draw, g_n_pass, g_n_submit, g_n_copy, g_n_pso, g_mem
 static int g_pso_async = 1;                     // DM_VK_PSO_ASYNC (dev_init_once): pipelines compile on Metal's compiler after vkCreateGraphicsPipelines returns; 0: on the creating thread
 static vkp_pool g_pp = VKP_POOL_INIT;           // their compiles (vk_pending.h)
 static void pipe_report(uint64_t quiet);        // the [vk] pipelines line (Shaders and pipelines)
+static void va_init(void);                      // the pipeline archive (DM_VK_ARCHIVE, Pipeline archive below)
+static uint64_t g_dev_t0;                       // vkp_clock() when the device was made (dev_init_once), for the [vk] pipelines line
 
 // Shader table (<DM_MSL_DIR>/vk/vk_shaders.tsv): resource kind u / b / t / s / c, its (set, binding) in the game's SPIR-V and the Metal slot it was moved to;
 // kind p is the push-constant block (set and binding 0), whose bytes are set straight into its buffer slot
@@ -174,6 +178,7 @@ static void sh_load(void) {
 static const shinfo *sh_find(const char *key) { shinfo k; memcpy(k.key, key, 16); return g_nsh ? bsearch(&k, g_sh, g_nsh, sizeof *g_sh, sh_cmp) : NULL; }
 
 static void dev_init_once(void) {
+    g_dev_t0 = vkp_clock();
     @autoreleasepool {
         g_dev = (__bridge id<MTLDevice>)mtl_device_classic();
         g_q = [g_dev newCommandQueueWithMaxCommandBufferCount:64]; g_q.label = @"vk";
@@ -191,6 +196,7 @@ static void dev_init_once(void) {
         if (g_pso_async) VLOG("pipelines compile after vkCreateGraphicsPipelines returns, at most %u handed to Metal's compiler at a time, which runs %lu at once (DM_VK_PSO_ASYNC=0: on "
                               "the thread that creates them)", lim, (unsigned long)mc);
         else VLOG("pipelines compile on the thread that creates them (DM_VK_PSO_ASYNC=0); Metal's compiler runs %lu compiles at once", (unsigned long)mc);
+        va_init();
     }
 }
 static void dev_init(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, dev_init_once); }
@@ -249,6 +255,7 @@ struct VkPipeline_T {
     // pipeline keeps its depth-stencil description and builds the state for the masks set (one cached)
     VkLogicOp logic;   // not implemented (0 = none: VK_LOGIC_OP_CLEAR is not met)
     int dyn_sref, dyn_smask, stencil; VkStencilOpState sf, sb; MTLCompareFunction dcmp; int dwrite; uint64_t dss_key; __strong id<MTLDepthStencilState> dss_dyn;
+    uint64_t va_key; int va_read, va_new;   // DM_VK_ARCHIVE (va_attach): its key; its descriptor names the archives (a reader of the gate until its compile ends); not in them
 };
 struct VkCommandPool_T { struct VkCommandBuffer_T *cbs; };
 struct VkCommandBuffer_T { void *loader; VkCommandPool pool; struct VkCommandBuffer_T *prev, *next; uint8_t *buf; size_t n, cap; };
@@ -992,6 +999,321 @@ static id<MTLFunction> spec_make(MTLFunctionConstantValues *cv, NSString *name, 
 }
 static id<MTLFunction> spec_fn(id<MTLFunction> fn, const char *key, int dual, const VkSpecializationInfo *si) { MTLFunctionConstantValues *cv = spec_cv(fn, si); return cv ? spec_make(cv, spec_name(key, dual), key) : fn; }
 
+// ---------- Pipeline archive (DM_VK_ARCHIVE) ----------
+// DM_VK_ARCHIVE=1 (off by default until it is measured on a device: docs/reference/rendering.md, A pipeline archive for the Vulkan layer): the pipelines a start compiles are
+// added to Metal binary archives in vk_archive/ beside the save (Documents/vk_archive on iOS; DM_VK_ARCHIVE=<absolute folder>: that folder), and the starts after it name those
+// archives in every pipeline's descriptor (binaryArchives, without MTLPipelineOptionFailOnBinaryArchiveMiss): Metal takes a pipeline it finds there from them and compiles one it
+// does not exactly as without them. The folder's files, the keys, the stamp that keeps an archive of another system, host, GPU, game build or shader library from being read,
+// and the gate that keeps the writes apart from the layer's compiles are vk_archive.h's. A start opens the files once, at the device, and never changes that list in the run.
+// Writes go on a utility queue, off the game's threads, once a burst of compiles has ended (pipe_report) and when the app goes to the background (dm_vk_archive_away; not in
+// the exit, which would cut a write short): the pipelines compiled since, VA_CHUNK at a time, are added to a new archive (addRenderPipelineFunctionsWithDescriptor) and
+// serialized as the next p<seq>.bin, read from the next start on; once the writes stop for the run (VKA_FILES, a failed write) nothing more is held for them. The start
+// that reads the archive, or writes its first file, is watched by the crash guard (../nvn/nvn_pso_guard.h, its record guard.tsv; one start that ends early leaves the archive out,
+// since the layer never had one before) until PSG_FRAMES frames after its first burst's writes ended (PSG_FRAMES_MAX without that); a start that leaves it out reads and writes
+// nothing, as with the switch off. The guard is on by default on iOS and off on the Mac, as the bundled archive's (DM_VK_ARCHIVE_GUARD=0 / 1). With the switch off nothing here
+// runs but the guard's note of the app's comings and goings (psg_away, which writes no record while no start is watched): no file is read, no descriptor names an archive, the
+// [vk] pipelines line has no archive part, and a frame costs one relaxed load
+enum { VA_CHUNK = 2048, VA_PEND = 16384 };   // pipelines per file (VKA_FILES files at most); pipelines waiting to be added at most (the rest go at the next start)
+static _Atomic int g_va_on, g_va_hook;             // the archive is used this run / its hooks run (used, or its crash guard watches a start without it): va_init, then unchanged
+static NSString *g_va_dir;
+static NSArray<id<MTLBinaryArchive>> *g_va_list;   // the archives every pipeline names, opened at the device (va_init) and never changed
+static vka_set g_va_known;                         // the keys in them (va_init; then only read)
+static vka_gate g_va_gate = VKA_GATE_INIT;
+static pthread_mutex_t g_va_mu = PTHREAD_MUTEX_INITIALIZER;   // g_va_queued and the waiting pipelines
+static vka_set g_va_queued;                        // keys of pipelines handed to the writer this run (each is added once)
+static NSMutableArray<MTLRenderPipelineDescriptor *> *g_va_pend; static uint64_t *g_va_pend_k;   // the pipelines waiting to be added, their keys (VA_PEND at most)
+static int g_va_seq, g_va_files;                   // the writer's queue alone: the next file's number, the files there are
+static _Atomic int g_va_stop, g_va_exiting;        // no more writes this run (va_init, va_write; the game's threads then hold nothing for them); the app is exiting (no write starts)
+static dispatch_queue_t g_va_q;
+static _Atomic int g_va_sched, g_va_marked, g_va_guard;   // a write pass is queued; the guard's window was marked; the guard watches this start
+static _Atomic uint64_t g_va_added, g_va_dropped;   // pipelines written into a file this run; not handed to the writer (VA_PEND reached)
+static psg_guard g_va_psg = PSG_GUARD_INIT_FOR("the Vulkan layer's pipeline archive in this folder (hle_vk.m, DM_VK_ARCHIVE)");   // its record's comment names it
+#if TARGET_OS_IPHONE
+#define VA_RETRY "delete vk_archive/guard.tsv (the Files app, in the app's folder) or put DM_VK_ARCHIVE_GUARD=0 in Documents/env.txt"
+#else
+#define VA_RETRY "delete vk_archive/guard.tsv or set DM_VK_ARCHIVE_GUARD=0"
+#endif
+static void va_exe_uuid(char out[33]) {   // the app's own build: its executable's LC_UUID (empty when not found)
+    out[0] = 0;
+    const struct mach_header_64 *h = &_mh_execute_header; const uint8_t *p = (const uint8_t *)(h + 1);
+    for (uint32_t i = 0; i < h->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)p;
+        if (lc->cmd == LC_UUID) { const uint8_t *u = ((const struct uuid_command *)p)->uuid; for (int k = 0; k < 16; k++) snprintf(out + 2 * k, 3, "%02x", u[k]); return; }
+        if (lc->cmdsize < sizeof *lc) return;
+        p += lc->cmdsize;
+    }
+}
+// What the archive is made for: system build, app build, GPU, the game's build (main's build ID) and the shader library (vka_lib_id of vk_shaders.metallib: its function list)
+static void va_stamp(vka_stamp *s) {
+    memset(s, 0, sizeof *s);
+    size_t n = sizeof s->v[VKA_OS]; if (sysctlbyname("kern.osversion", s->v[VKA_OS], &n, NULL, 0)) s->v[VKA_OS][0] = 0;
+    va_exe_uuid(s->v[VKA_HOST]);
+    NSString *gpu = [(id)g_dev respondsToSelector:@selector(architecture)] ? g_dev.architecture.name : g_dev.name;
+    snprintf(s->v[VKA_GPU], sizeof s->v[VKA_GPU], "%s", gpu.UTF8String ?: "");
+    snprintf(s->v[VKA_GAME], sizeof s->v[VKA_GAME], "%s", dm_main_build());
+    const char *d = getenv("DM_MSL_DIR"); char p[1024];
+    if (!d || snprintf(p, sizeof p, "%s/vk/vk_shaders.metallib", d) >= (int)sizeof p || vka_lib_id(p, s->v[VKA_SHADERS], sizeof s->v[VKA_SHADERS])) s->v[VKA_SHADERS][0] = 0;
+    for (int i = 0; i < VKA_FIELDS; i++) for (char *c = s->v[i]; *c; c++) if (*c == '\n' || *c == '\t') *c = ' ';   // one line each in stamp.tsv
+}
+static NSString *va_path(NSString *name) { return [g_va_dir stringByAppendingPathComponent:name]; }
+static NSString *va_name(int seq, const char *ext) { return [NSString stringWithFormat:@"p%05d.%s", seq, ext]; }
+// The archive's identity for the crash guard's record: its files' (vka_file_id) and the app's build; "none yet" before its first file
+static void va_identity(NSArray<NSString *> *bins, const char *host, char *out, size_t n) {
+    uint64_t h = VKA_FNV0; unsigned long long bytes = 0; char id_[512];
+    for (NSString *b in bins) {
+        struct stat st; if (!stat(b.fileSystemRepresentation, &st)) bytes += (unsigned long long)st.st_size;
+        if (vka_file_id(b.fileSystemRepresentation, id_, sizeof id_)) snprintf(id_, sizeof id_, "%s unreadable", b.lastPathComponent.UTF8String);
+        h = vka_fnv(h, id_, strlen(id_) + 1);
+    }
+    if (bins.count) snprintf(out, n, "%lu files %llu bytes %016llx host %s", (unsigned long)bins.count, bytes, (unsigned long long)h, host);
+    else snprintf(out, n, "none yet host %s", host);
+}
+static void va_guard_atexit(void) { psg_exit(&g_va_psg); }   // exit(): a clean end. The graceful exit puts the record back in dm_vk_archive_away, its first step
+static void va_atexit(void) { atomic_store(&g_va_exiting, 1); }   // exit() (the Mac): no further file is begun; one under way may be cut short, which leaves the files as they were
+// Whether this start uses the archive of this identity (before Metal reads or writes any of it): the record's verdict, with a [RED] line when it leaves it out
+static int va_guard_begin(const char *os, const char *ident) {
+    NSString *rec = va_path(@"guard.tsv");
+    psg_start s = psg_begin(&g_va_psg, rec.fileSystemRepresentation, os, ident, 1);   // copied under its lock: the background hook may write the guard meanwhile
+    if (s.armed != PSG_NONE) { static dispatch_once_t once; dispatch_once(&once, ^{ atexit(va_guard_atexit); }); }
+    atomic_store(&g_va_guard, s.armed != PSG_NONE);
+    const char *r = rec.UTF8String;
+    switch (s.found) {
+    case PSG_WITH: case PSG_WITH2:
+        VLOG("[RED] pipeline archive: a start with it (%s) on this system build (%s) did not get past its first frames (it crashed, or iOS ended it in the foreground): this start "
+             "runs without it, reading and writing nothing, as with DM_VK_ARCHIVE off. %s(crash guard: %s). An app or system update tries it again by itself; to try it now, " VA_RETRY,
+             ident, os, s.err ? "" : "If this start gets past its first frames, the archive stays out for this archive, app build and system build; if it does not either, the "
+                                     "archive is not shown to be the cause and the next start uses it again ", r);
+        break;
+    case PSG_WITHOUT:
+        VLOG("[RED] pipeline archive: the start without it did not get past its first frames either, after one with it did not: the archive is not shown to be what ended them, so this "
+             "start uses it again%s (crash guard: %s)", s.err ? "" : ", watched as a first start", r);
+        break;
+    case PSG_SKIP:
+        VLOG("[RED] pipeline archive: left out on this system build (%s): a start with it (%s) did not get past its first frames and the start without it did (crash guard: %s), so "
+             "every pipeline compiles as without it. An app or system update tries it again by itself; to try it now, " VA_RETRY, os, ident, r);
+        break;
+    default: if (s.armed == PSG_WITH) VLOG("pipeline archive: crash guard on until this start is past its first frames (%s: archive %s, system build %s)", r, ident, os); break;
+    }
+    if (s.err) VLOG("[RED] pipeline archive: the crash guard cannot write %s (%s): this start is not watched and the record stays as it is, so until it can be written every start %s",
+                    r, strerror(s.err), s.use ? "uses the archive unwatched" : "runs without it");
+    return s.use;
+}
+// At the device (dev_init_once): the switch, the folder, the stamp (an old archive's files go), the crash guard's verdict, then the archives opened. One line says what was found
+static void va_init(void) {
+    const char *e = getenv("DM_VK_ARCHIVE");
+    if (!e || !*e || !strcmp(e, "0")) return;   // off, the default: nothing is read or written, and no descriptor names an archive
+    const char *save = getenv("DM_SAVE");
+    g_va_dir = e[0] == '/' ? @(e) : save && *save ? [[@(save) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"vk_archive"] : nil;
+    vka_stamp st; va_stamp(&st); char why[512] = "";
+    for (int i = 0; i < VKA_FIELDS && !why[0]; i++) if (!st.v[i][0]) snprintf(why, sizeof why, "what it would be made for is not known (its %s)", vka_field[i]);
+    if (!g_va_dir) snprintf(why, sizeof why, "no folder for it (DM_SAVE is not set; DM_VK_ARCHIVE=<absolute folder> names one)");
+    else if (!g_lib) snprintf(why, sizeof why, "no Vulkan shader library");
+    else if (![(id)g_dev respondsToSelector:@selector(newBinaryArchiveWithDescriptor:error:)]) snprintf(why, sizeof why, "this Metal device makes no binary archives");
+    if (why[0]) { VLOG("[RED] DM_VK_ARCHIVE=%s: %s, so the layer runs without its pipeline archive", e, why); return; }
+    NSFileManager *fm = NSFileManager.defaultManager;
+    [fm createDirectoryAtPath:g_va_dir withIntermediateDirectories:YES attributes:nil error:nil];
+    vka_folder fo; int serr = vka_scan(g_va_dir.fileSystemRepresentation, &st, &fo);   // before anything reads a file: an old archive's files go (vk_archive.h)
+    if (serr) { VLOG("[RED] DM_VK_ARCHIVE: %s cannot be made ready for this start (%s: %s), so the layer runs without its pipeline archive", g_va_dir.UTF8String,
+                     serr == ENOTEMPTY ? "an old archive's files could not all be removed" : "stamp.tsv cannot be written", strerror(serr)); return; }
+    if (fo.diff >= 0 && fo.diff < VKA_FIELDS) VLOG("pipeline archive %s: made for another %s (stamp.tsv), so its files are removed and it starts again", g_va_dir.UTF8String, vka_field[fo.diff]);
+    else if (fo.removed) VLOG("pipeline archive %s: %d files of writes cut short removed", g_va_dir.UTF8String, fo.removed);
+    NSMutableArray<NSString *> *bins = [NSMutableArray array];
+    for (int i = 0; i < fo.n; i++) [bins addObject:va_path(va_name(fo.seq[i], "bin"))];
+    const char *ge = getenv("DM_VK_ARCHIVE_GUARD"); int guard = ge && *ge ? strcmp(ge, "0") != 0 : TARGET_OS_IPHONE;
+    if (ge && *ge) VLOG("DM_VK_ARCHIVE_GUARD=%s: the Vulkan pipeline archive's crash guard is %s", ge, guard ? "on" : "off (no record read or written)");
+    char ident[1024]; va_identity(bins, st.v[VKA_HOST], ident, sizeof ident);
+    if (guard && !va_guard_begin(st.v[VKA_OS], ident)) { atomic_store(&g_va_hook, atomic_load(&g_va_guard)); return; }   // left out: its window is still watched
+    uint64_t t0 = vkp_clock(); unsigned long long bytes = 0; NSMutableArray<id<MTLBinaryArchive>> *list = [NSMutableArray array];
+    for (NSString *bp in bins) {
+        MTLBinaryArchiveDescriptor *d = [MTLBinaryArchiveDescriptor new]; d.url = [NSURL fileURLWithPath:bp]; NSError *ae = nil;
+        id<MTLBinaryArchive> a = [g_dev newBinaryArchiveWithDescriptor:d error:&ae];
+        NSString *kp = [bp.stringByDeletingPathExtension stringByAppendingPathExtension:@"keys"]; struct stat fs;
+        char *txt = a ? vka_read(kp.fileSystemRepresentation, 1 << 20) : NULL;
+        if (a && txt && !stat(bp.fileSystemRepresentation, &fs) && vka_keys_parse(txt, (uint64_t)fs.st_size, &g_va_known)) { [list addObject:a]; bytes += (unsigned long long)fs.st_size; }
+        else {
+            VLOG("[RED] pipeline archive file %s not usable (%s): removed, and its pipelines are compiled and added again", bp.UTF8String,
+                 a ? "its keys cannot be read" : ae ? ae.localizedDescription.UTF8String : "Metal opened nothing");
+            [fm removeItemAtPath:bp error:nil]; [fm removeItemAtPath:kp error:nil];
+        }
+        free(txt);
+    }
+    if (bins.count && !list.count && guard) {   // Metal took none of them: nothing of that archive ran, and this start writes a new one, watched as such
+        psg_unused(&g_va_psg); atomic_store(&g_va_guard, 0); va_identity(@[], st.v[VKA_HOST], ident, sizeof ident);
+        if (!va_guard_begin(st.v[VKA_OS], ident)) { atomic_store(&g_va_hook, atomic_load(&g_va_guard)); return; }
+    }
+    g_va_list = list; g_va_seq = fo.next; g_va_files = (int)list.count;
+    g_va_pend = [NSMutableArray array]; g_va_pend_k = malloc(VA_PEND * sizeof *g_va_pend_k);
+    if (!g_va_pend_k) { VLOG("[RED] DM_VK_ARCHIVE: out of memory, so the layer runs without its pipeline archive"); g_va_list = nil; if (guard) psg_unused(&g_va_psg); return; }
+    g_va_q = dispatch_queue_create("dm.vk.pipeline-archive", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+    if (g_va_files >= VKA_FILES) atomic_store(&g_va_stop, 1);
+    atexit(va_atexit);
+    if (list.count) VLOG("pipeline archive %s: %lu files, %zu pipelines, %.1f MB, opened in %.1f ms; pipelines Metal finds in it are not compiled again, and this start's new ones are "
+                         "added once their burst has ended%s", g_va_dir.UTF8String, (unsigned long)list.count, g_va_known.n, bytes / 1048576.0, (vkp_clock() - t0) / 1e6,
+                         atomic_load(&g_va_stop) ? " (no: it has its most files, VKA_FILES)" : "");
+    else VLOG("pipeline archive %s: none yet: this start's pipelines are added to it once their burst has ended, for the next start", g_va_dir.UTF8String);
+    atomic_store(&g_va_on, 1); atomic_store(&g_va_hook, 1);
+}
+// A pipeline's key: what pipe_make reads from the create info into the Metal descriptor (stages and their specialization, vertex input, topology, rasterizer discard,
+// samples, alpha to coverage, the render pass's formats, blending). Not what stays outside the pipeline state (viewport, depth-stencil state, cull, dynamic state)
+static uint64_t va_key(const VkGraphicsPipelineCreateInfo *ci) {
+    uint64_t h = vka_u32(VKA_FNV0, ci->stageCount);
+    for (uint32_t s = 0; s < ci->stageCount; s++) {
+        const VkPipelineShaderStageCreateInfo *st = &ci->pStages[s]; const VkSpecializationInfo *si = st->pSpecializationInfo;
+        h = vka_fnv(vka_u32(h, st->stage), st->module->key, 16);
+        h = vka_u32(h, si ? si->mapEntryCount : UINT32_MAX);
+        for (uint32_t i = 0; si && i < si->mapEntryCount; i++) h = vka_u32(vka_u32(vka_u32(h, si->pMapEntries[i].constantID), si->pMapEntries[i].offset), (uint32_t)si->pMapEntries[i].size);
+        if (si && si->pData) h = vka_fnv(vka_u32(h, (uint32_t)si->dataSize), si->pData, si->dataSize);
+    }
+    const VkPipelineVertexInputStateCreateInfo *vi = ci->pVertexInputState;
+    h = vka_u32(h, vi ? vi->vertexAttributeDescriptionCount : 0);
+    for (uint32_t i = 0; vi && i < vi->vertexAttributeDescriptionCount; i++) {
+        const VkVertexInputAttributeDescription *a = &vi->pVertexAttributeDescriptions[i];
+        h = vka_u32(vka_u32(vka_u32(vka_u32(h, a->location), a->binding), (uint32_t)a->format), a->offset);
+    }
+    h = vka_u32(h, vi ? vi->vertexBindingDescriptionCount : 0);
+    for (uint32_t i = 0; vi && i < vi->vertexBindingDescriptionCount; i++) {
+        const VkVertexInputBindingDescription *b = &vi->pVertexBindingDescriptions[i];
+        h = vka_u32(vka_u32(vka_u32(h, b->binding), b->stride), (uint32_t)b->inputRate);
+    }
+    h = vka_u32(h, ci->pInputAssemblyState ? (uint32_t)ci->pInputAssemblyState->topology : UINT32_MAX);
+    const VkPipelineRasterizationStateCreateInfo *rs = ci->pRasterizationState; const VkPipelineMultisampleStateCreateInfo *ms = ci->pMultisampleState;
+    h = vka_u32(vka_u32(vka_u32(h, rs && rs->rasterizerDiscardEnable), ms ? (uint32_t)ms->rasterizationSamples : 0), ms && ms->alphaToCoverageEnable);
+    VkRenderPass rp = ci->renderPass; h = vka_u32(h, rp->ncol);
+    for (uint32_t i = 0; i < rp->ncol; i++) { int at = rp->col[i]; h = vka_u32(vka_u32(h, (uint32_t)at), at >= 0 ? (uint32_t)rp->att[at].fmt : 0); }
+    h = vka_u32(h, rp->depth >= 0 ? (uint32_t)rp->att[rp->depth].fmt : 0);
+    const VkPipelineColorBlendStateCreateInfo *cb = ci->pColorBlendState; h = vka_u32(h, cb ? cb->attachmentCount : UINT32_MAX);
+    for (uint32_t i = 0; cb && i < cb->attachmentCount; i++) {
+        const VkPipelineColorBlendAttachmentState *b = &cb->pAttachments[i];
+        uint32_t f[8] = {b->blendEnable, b->srcColorBlendFactor, b->dstColorBlendFactor, b->colorBlendOp, b->srcAlphaBlendFactor, b->dstAlphaBlendFactor, b->alphaBlendOp, b->colorWriteMask};
+        for (int k = 0; k < 8; k++) h = vka_u32(h, f[k]);
+    }
+    return vka_end(h);
+}
+// pipe_make, the descriptor complete but its functions possibly not yet (their specializations compile later): the pipeline's key; unless a write runs, the gate's reader
+// until pipe_done (every compile, with archives to name or not: no write begins while one is under way, in the start that writes the first file too), and the archives named.
+// pend.arch says for the [vk] pipelines line whether the archives' keys name it (2), it is looked up in them without (1) or not looked up (0). va_new: kept for the writer
+static void va_attach(VkPipeline p, MTLRenderPipelineDescriptor *pd, const VkGraphicsPipelineCreateInfo *ci) {
+    p->va_key = va_key(ci); int known = vka_has(&g_va_known, p->va_key);
+    p->va_new = !known && !atomic_load_explicit(&g_va_stop, memory_order_relaxed);
+    if (!vka_read_begin(&g_va_gate)) return;   // a write runs: this one compiles without the archives, alongside it (the write's line counts these)
+    p->va_read = 1;
+    if (g_va_list.count) { pd.binaryArchives = g_va_list; p->pend.arch = known ? 2 : 1; }
+}
+// A pipeline built from pd that the archive does not hold: kept for the writer (once per key; the descriptor's functions are set by now, and nothing else uses it again)
+static void va_note(MTLRenderPipelineDescriptor *pd, uint64_t k) {
+    if (atomic_load_explicit(&g_va_stop, memory_order_relaxed)) return;   // the writes have stopped for this run: nothing is held for them
+    pthread_mutex_lock(&g_va_mu);
+    int add = g_va_pend.count < VA_PEND && vka_add(&g_va_queued, k) == 1;
+    if (add) { g_va_pend_k[g_va_pend.count] = k; [g_va_pend addObject:pd]; }
+    else if (!vka_has(&g_va_queued, k)) g_va_dropped++;
+    pthread_mutex_unlock(&g_va_mu);
+}
+static void va_mark(void) {   // the first burst's writes have ended (or there were none): the guard's window ends PSG_FRAMES frames from here
+    if (atomic_exchange(&g_va_marked, 1) || !atomic_load(&g_va_guard)) return;
+    psg_mark(&g_va_psg);
+}
+static void va_write(void);
+static void va_stop_writes(void) {   // the writer's queue: no more writes this run, and the pipelines held for them go
+    atomic_store(&g_va_stop, 1);
+    pthread_mutex_lock(&g_va_mu); [g_va_pend removeAllObjects]; pthread_mutex_unlock(&g_va_mu);
+}
+static void va_schedule(uint64_t delay_ns) {   // one write pass queued at a time; it takes every pipeline waiting when it runs
+    if (atomic_exchange(&g_va_sched, 1)) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delay_ns), g_va_q, ^{ @autoreleasepool { atomic_store(&g_va_sched, 0); va_write(); } });
+}
+// The writer (g_va_q): the waiting pipelines, VA_CHUNK at a time, into a new archive each, written as p<seq>.bin and then p<seq>.keys (both whole or not at all). It begins a
+// file only while no compile of the layer is under way (vka_write_begin), else it tries again in a second, and none once the app is exiting; a failure stops the writes for
+// this run (the files written stay). A pass that wrote and leaves nothing waiting says so, the line to wait for before the next start
+static void va_write(void) {
+    int wrote = 0, drained = 0;
+    for (;;) @autoreleasepool {
+        pthread_mutex_lock(&g_va_mu); NSUInteger n = MIN(g_va_pend.count, (NSUInteger)VA_CHUNK); pthread_mutex_unlock(&g_va_mu);
+        if (!n) { drained = 1; break; }
+        if (atomic_load(&g_va_stop) || atomic_load(&g_va_exiting)) break;
+        if (!vka_write_begin(&g_va_gate)) { va_schedule(1000000000ull); return; }
+        pthread_mutex_lock(&g_va_mu);
+        NSArray<MTLRenderPipelineDescriptor *> *pds = [g_va_pend subarrayWithRange:NSMakeRange(0, n)]; [g_va_pend removeObjectsInRange:NSMakeRange(0, n)];
+        uint64_t *keys = malloc(n * sizeof *keys); int oom = !keys;
+        if (keys) memcpy(keys, g_va_pend_k, n * sizeof *keys);
+        memmove(g_va_pend_k, g_va_pend_k + n, g_va_pend.count * sizeof *g_va_pend_k);
+        pthread_mutex_unlock(&g_va_mu);
+        uint64_t t0 = vkp_clock(); NSError *err = nil; size_t nok = 0; int nfail = 0;
+        id<MTLBinaryArchive> a = keys ? [g_dev newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&err] : nil;
+        for (NSUInteger i = 0; a && i < n; i++) {
+            MTLRenderPipelineDescriptor *pd = pds[i]; pd.binaryArchives = nil; NSError *ae = nil;
+            if ([a addRenderPipelineFunctionsWithDescriptor:pd error:&ae]) keys[nok++] = keys[i];
+            else if (nfail++ < 3) VLOG("[RED] pipeline archive: a pipeline could not be added (%s): it compiles at every start as without the archive", ae ? ae.localizedDescription.UTF8String : "no error");
+        }
+        uint64_t t1 = vkp_clock();
+        NSString *bp = va_path(va_name(g_va_seq, "bin")), *kp = va_path(va_name(g_va_seq, "keys")), *tmp = [bp stringByAppendingString:@".tmp"];
+        BOOL ok = a && nok && [a serializeToURL:[NSURL fileURLWithPath:tmp] error:&err];
+        int rerr = ok && rename(tmp.fileSystemRepresentation, bp.fileSystemRepresentation) ? errno : 0;
+        uint32_t during = vka_write_end(&g_va_gate);   // compiles begun meanwhile, without the archives: they overlapped the write
+        struct stat fs = {0}; size_t len = 0; char *txt = NULL; int kerr = 0;
+        if (ok && !rerr) {
+            if (stat(bp.fileSystemRepresentation, &fs)) kerr = errno;
+            else if (!(txt = vka_keys_format((uint64_t)fs.st_size, keys, nok, &len))) kerr = ENOMEM;
+            else kerr = vka_write(kp.fileSystemRepresentation, txt, len);
+        }
+        free(txt); free(keys);
+        if (!a || !ok || rerr || kerr) {
+            unlink(tmp.fileSystemRepresentation); if (rerr || kerr) { unlink(bp.fileSystemRepresentation); unlink(kp.fileSystemRepresentation); }
+            VLOG("[RED] pipeline archive: writing %s failed (%s): no more is written this run, and the next start compiles these %lu pipelines as without the archive",
+                 bp.lastPathComponent.UTF8String, rerr || kerr ? strerror(rerr ? rerr : kerr) : a && !nok ? "none of them could be added" : err ? err.localizedDescription.UTF8String
+                 : oom ? "out of memory" : "Metal made no archive", (unsigned long)n);
+            va_stop_writes(); break;
+        }
+        g_va_seq++; g_va_files++; g_va_added += nok; wrote = 1;
+        VLOG("pipeline archive: %zu pipelines added in %.2f s (%d could not be), written to %s, %.1f MB, in %.0f ms; %u compiles began during it; %llu this run, read from the next start",
+             nok, (t1 - t0) / 1e9, nfail, bp.lastPathComponent.UTF8String, fs.st_size / 1048576.0, (vkp_clock() - t1) / 1e6, during, (unsigned long long)g_va_added);
+        if (g_va_files >= VKA_FILES) { va_stop_writes(); VLOG("pipeline archive: %d files, the most it has (VKA_FILES): no more are written; delete the folder to make it again", g_va_files); }
+    }
+    if (wrote && drained) VLOG("pipeline archive: all written, nothing waiting (%llu this run%s)", (unsigned long long)g_va_added,
+                               atomic_load(&g_va_dropped) ? "; some were left for a later start: VA_PEND" : "");
+    va_mark();
+}
+// The [vk] pipelines line's archive part, for the burst r and since the start: the compiles the archive's keys name, against the others. Metal looks a pipeline up by its own
+// key, so only their times say whether it took them from the archive; with a cold system shader cache (the app reinstalled, its vk_archive kept) they say it alone
+static void va_line(const vkp_rec *r, char *b, size_t n) {
+    pthread_mutex_lock(&g_va_mu); unsigned long w = (unsigned long)g_va_pend.count; pthread_mutex_unlock(&g_va_mu);
+    uint64_t other = r->nrun - r->nhit, aother = r->all.nrun - r->all.nhit;
+    snprintf(b, n, "; pipeline archive (DM_VK_ARCHIVE): %llu of them in its keys, %.1f ms each at the compiler, the other %llu %.1f ms each (since the start %llu, %.1f ms each, "
+             "and %llu, %.1f ms each); %lu waiting to be added%s", (unsigned long long)r->nhit, r->nhit ? r->run_hit / 1e6 / r->nhit : 0.0, (unsigned long long)other,
+             other ? (r->run_sum - r->run_hit) / 1e6 / other : 0.0, (unsigned long long)r->all.nhit, r->all.nhit ? r->all.run_hit / 1e6 / r->all.nhit : 0.0,
+             (unsigned long long)aother, aother ? (r->all.run_sum - r->all.run_hit) / 1e6 / aother : 0.0, w,
+             atomic_load(&g_va_dropped) ? " (some left for a later start: VA_PEND)" : "");
+}
+static void va_burst_end(void) {   // pipe_report: a burst has ended
+    if (!atomic_load(&g_va_on)) { va_mark(); return; }   // a start the guard runs without it: its window runs from its first burst's end
+    if (!atomic_load(&g_va_exiting)) va_schedule(0);
+}
+static void va_frame(void) {   // a frame presented (frame_end) while the hooks run: the frame that ends the guard's window hands the record to a utility queue
+    if (!atomic_load(&g_va_psg.watching) || !psg_frame(&g_va_psg)) return;
+    uint32_t frames = atomic_load(&g_va_psg.frames), at = atomic_load(&g_va_psg.mark_at);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        int err = 0, was = psg_pass(&g_va_psg, &err);
+        if (was == PSG_WITH || was == PSG_WITH2) VLOG("pipeline archive: this start got past its first frames with it (%u frames %s): the crash guard's record is taken back",
+                                                    at != PSG_UNMARKED ? frames - at : frames, at != PSG_UNMARKED ? "after its first burst's writes" : "presented");
+        else if (was == PSG_WITHOUT) VLOG("[RED] pipeline archive: this start got past its first frames without it, after one with it did not: it stays out for this archive, app build and "
+                                         "system build (%s; to try it again, " VA_RETRY ")", g_va_psg.path);
+        if (err) VLOG("[RED] pipeline archive: the crash guard cannot write %s (%s)", g_va_psg.path, strerror(err));
+    });
+}
+// hle_nvn.c, beside the bundled archive's guard: the app goes away (on 1) or comes back (0), why 1 the background (dm_gfx_suspend), 2 inactive (dm_gfx_inactive), 4 the graceful
+// exit (dm_gfx_exiting). The guard always notes it (nvn_pso_guard.h psg_away), as the bundled archive's does, from the first call on: psg_begin reads these bits, so an app that
+// is away before the device is made, or while va_init opens the files, has the record written as the start's end would leave it. It writes a record only while it watches a
+// start, so without the switch it keeps the bits and nothing else. Going to the background also starts a write of what waits (one that iOS suspends leaves the files as they
+// were); the graceful exit starts none, nor does the background step that follows it: the exit ends the process within 1.5 s (hle_lifecycle.c), before a write could finish
+void dm_vk_archive_away(int why, int on) {
+    if (why == PSG_AWAY_EXIT && on) atomic_store(&g_va_exiting, 1);
+    int err = 0, was = psg_away(&g_va_psg, why, on, &err);
+    if (was != PSG_NONE) VLOG("pipeline archive: %s before this start got past its first frames: the crash guard's record %s",
+                              !on ? "back in the foreground" : why == PSG_AWAY_INACTIVE ? "inactive (the app switcher, a system sheet)" : why == PSG_AWAY_EXIT ? "in the graceful exit" : "in the background",
+                              on ? "is as the start's end would leave it (an app ended while away is not counted)" : "is written again");
+    if (err) VLOG("[RED] pipeline archive: the crash guard cannot write %s (%s)", g_va_psg.path, strerror(err));
+    if (on && why == PSG_AWAY_BACKGROUND && !atomic_load(&g_va_exiting) && atomic_load(&g_va_on)) va_schedule(0);
+}
+
 // DM_VK_PSO_ASYNC (on by default): vkCreateGraphicsPipelines reads everything a pipeline takes from its create info (pointers valid only during the call) into Metal
 // descriptors and its VkPipeline_T, and returns; only the Metal compiles go on after it, through Metal's asynchronous calls, each started once the one before has ended:
 // the stages' specializations in stage order, each setting its stage's function as spec_fn did, then the pipeline state. Metal's compiler service runs several at once
@@ -1009,6 +1331,7 @@ static void pjob_step(VkPipeline p, pjob_t *j, int i);
 // the game destroyed meanwhile is freed here, before vkp_end lets vkDestroyDevice return. slot: it had one of the limit (vkp_start), which goes to the oldest queued
 // pipeline, or the one a submission waits for; its compiles start from a global queue, not inside this handler
 static void pipe_done(VkPipeline p, id<MTLRenderPipelineState> pso, int slot) {
+    if (p->va_read) vka_read_end(&g_va_gate);   // DM_VK_ARCHIVE: its compile no longer reads the archives
     p->pso = pso;
     if (pso) g_n_pso++;
     if (vkp_finish(&g_pp, &p->pend, !pso, vkp_clock())) pipe_free(p);
@@ -1040,8 +1363,10 @@ static void pjob_step(VkPipeline p, pjob_t *j, int i) {
     }
     MTLRenderPipelineDescriptor *pd = j->pd;
     if (!pd.vertexFunction) { LOG("[vk] [RED] pipeline has no usable vertex shader (%s)", j->keys); pjob_free(j); pipe_done(p, nil, 1); return; }
+    p->pend.t2 = vkp_clock();   // the specializations are done: the pipeline state's own time at the compiler starts here (the [vk] pipelines line)
     [g_dev newRenderPipelineStateWithDescriptor:pd completionHandler:^(id<MTLRenderPipelineState> pso, NSError *err) { @autoreleasepool {
         if (!pso) pso_failed(j->keys, err);
+        else if (p->va_new) va_note(pd, p->va_key);   // DM_VK_ARCHIVE: not in the archives yet
         pjob_free(j); pipe_done(p, pso, 1);
     } }];
 }
@@ -1051,17 +1376,29 @@ static void pipe_slow(uint64_t w, uint32_t n) {
 }
 static id<MTLRenderPipelineState> pipe_pso(VkPipeline p) { vkp_wait(&g_pp, &p->pend, pipe_slow); return p->pso; }   // a pipeline's state, once its compile has ended (one load after that)
 // The [vk] pipelines line, once a burst of compiles has ended (frame_end: none in flight and none finished for 0.5 s; vkDestroyDevice): what the burst cost the game, in
-// both modes, so a cold boot can be compared with DM_VK_PSO_ASYNC=0 and with a warm one (Metal's shader cache). After 16 lines, at most one every 10 s: the bursts in
-// between are not taken, so they add up into the next line
+// both modes, so a cold boot can be compared with DM_VK_PSO_ASYNC=0 and with a warm one (Metal's shader cache, DM_VK_ARCHIVE). After 16 lines, at most one every 10 s: the
+// bursts in between are not taken, so they add up into the next line. The time at Metal's compiler runs from a compile's hand-over (vkp_start, or the slot vkp_end gives it)
+// to its finish: without its wait in the layer's queue, with its wait in Metal's own (the layer hands over twice what Metal runs at once). Of that, the part before the
+// pipeline state was handed over (vkp_t.t2) is the stages' specializations, which a binary archive of render pipelines does not keep. The same since the start, so the line at
+// which "since the start" reaches a boot's count carries the whole boot, however many bursts it came in. The burst's end is given from the device's creation (dev_init_once:
+// the shader library and the archive opened, the shader modules created) and from the process's creation (main.c g_t0_ns; on iOS that includes the time on the start screen):
+// now_ns and vkp_clock are different clocks, so the latter is the time since the start less the time since the burst's last finish. With DM_VK_ARCHIVE the line ends with
+// what the archive did (va_line)
 static void pipe_report(uint64_t quiet) {
     static _Atomic int lines; static _Atomic uint64_t last; uint64_t now = vkp_clock();
     if (quiet && lines >= 16 && now - last < 10000000000ull) return;
     vkp_rec r; if (!vkp_take(&g_pp, now, quiet, &r)) return;
     lines++; last = now;
+    double end_s = ((double)(now_ns() - g_t0_ns) - (double)(now - r.last)) / 1e9, dev_s = r.last > g_dev_t0 ? (r.last - g_dev_t0) / 1e9 : 0.0;
+    char va[512] = ""; if (atomic_load_explicit(&g_va_on, memory_order_relaxed)) va_line(&r, va, sizeof va);
     VLOG("pipelines: %llu compiled %s in %.2f s from the first create to the last finish, %.2f s inside vkCreateGraphicsPipelines summed over the creating threads, %.1f ms each from "
          "create to finish, at most %u in flight and %u handed to Metal at once, %llu failed; submissions waited for a compile %llu times, %.1f ms in all (longest %.1f ms); %llu since "
-         "the start", (unsigned long long)r.n, g_pso_async ? "concurrently" : "on the creating threads (DM_VK_PSO_ASYNC=0)", (r.last - r.first) / 1e9, r.create_ns / 1e9,
-         r.sum / 1e6 / r.n, r.peak, r.peak_run, (unsigned long long)r.nfail, (unsigned long long)r.nwait, r.wait_ns / 1e6, r.wait_max / 1e6, (unsigned long long)r.total);
+         "the start; %.2f s at Metal's compiler summed, %.1f ms each, %.2f s of it specializing (since the start %.2f s, %.2f s of it specializing); the burst ended %.2f s after the "
+         "Vulkan device was made, %.2f s after the process started%s", (unsigned long long)r.n, g_pso_async ? "concurrently" : "on the creating threads (DM_VK_PSO_ASYNC=0)",
+         (r.last - r.first) / 1e9, r.create_ns / 1e9, r.sum / 1e6 / r.n, r.peak, r.peak_run, (unsigned long long)r.nfail, (unsigned long long)r.nwait, r.wait_ns / 1e6,
+         r.wait_max / 1e6, (unsigned long long)r.total, r.run_sum / 1e9, r.nrun ? r.run_sum / 1e6 / r.nrun : 0.0, r.spec_sum / 1e9, r.all.run_sum / 1e9, r.all.spec_sum / 1e9,
+         dev_s, end_s, va);
+    if (atomic_load_explicit(&g_va_hook, memory_order_relaxed)) va_burst_end();
 }
 static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci, int async) {   // async: DM_VK_PSO_ASYNC, the compiles end after the return
     VkPipeline p = zalloc(sizeof *p); p->layout = ci->layout;
@@ -1170,14 +1507,17 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci, int async) {
         const VkPipelineViewportStateCreateInfo *vs = ci->pViewportState;
         if (!p->dyn_vp && vs && vs->pViewports && vs->viewportCount) { p->vp = vp_of(&vs->pViewports[0]); p->has_vp = 1; }
         if (!p->dyn_sc && vs && vs->pScissors && vs->scissorCount) { p->sc = vs->pScissors[0]; p->has_sc = 1; }
+        if (atomic_load_explicit(&g_va_on, memory_order_relaxed)) va_attach(p, pd, ci);   // DM_VK_ARCHIVE: its key, and the archives named in the descriptor (set before the device was handed out)
         if (j) {   // DM_VK_PSO_ASYNC: nothing of ci is read after this. Handed to Metal now, or queued until a compile ends (pipe_done)
             j->pd = pd; strlcpy(j->keys, keys, sizeof j->keys); p->job = j;
             if (vkp_start(&g_pp, &p->pend, 1)) pjob_step(p, j, 0);
             return p;   // NOLINT(clang-analyzer-unix.Malloc): a completion handler frees p only once vkDestroyPipeline has marked it gone, and the game has no handle to it before this return
         }
         NSError *err = nil;
+        p->pend.t2 = vkp_clock();   // as pjob_step: the stages were specialized above, while the create info was read
         id<MTLRenderPipelineState> pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
         if (!pso) pso_failed(keys, err);
+        else if (p->va_new) va_note(pd, p->va_key);
         pipe_done(p, pso, 1);
     }
     return p;
@@ -1863,6 +2203,7 @@ static void frame_end(void) {
              (unsigned long long)(pa - pp), (unsigned long long)(su - ps), (unsigned long long)(co - pc), (unsigned long long)(f <= 3 ? 1 : 300), (unsigned long long)g_n_pso, g_mem_bytes / 1048576.0);
     if (f <= 3 || f % 300 == 0) { pd = dr; pp = pa; ps = su; pc = co; }
     pipe_report(500000000ull);   // once a burst of pipeline compiles has ended
+    if (atomic_load_explicit(&g_va_hook, memory_order_relaxed)) va_frame();   // DM_VK_ARCHIVE: its crash guard's window (a plain load: it changes once, and a stale 0 skips one frame's count)
     dm_guest_frame_tick();
 }
 VKB(vkQueuePresentKHR, VkResult, VkQueue q, const VkPresentInfoKHR *pi) {

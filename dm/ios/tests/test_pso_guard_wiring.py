@@ -30,8 +30,8 @@ class Wiring(unittest.TestCase):
 
     def test_the_away_reasons_agree(self):   # hle_nvn.c passes them as numbers (it does not include the header); nvn_mtl.h documents them
         self.assertEqual(self.why, {'BACKGROUND': 1, 'INACTIVE': 2, 'EXIT': 4})
-        self.assertIn(f'void dm_gfx_inactive(int on) {{ mtl_pso_guard_away({self.why["INACTIVE"]}, on); }}', self.hle)
-        self.assertIn(f'void dm_gfx_exiting(void) {{ mtl_pso_guard_away({self.why["EXIT"]}, 1); }}', self.hle)
+        self.assertIn(f'void dm_gfx_inactive(int on) {{ mtl_pso_guard_away({self.why["INACTIVE"]}, on); ', self.hle)   # the Vulkan archive's guard follows (test_vk_archive_wiring.py)
+        self.assertIn(f'void dm_gfx_exiting(void) {{ mtl_pso_guard_away({self.why["EXIT"]}, 1); ', self.hle)
         suspend = body(self.hle, 'void dm_gfx_suspend(int on) {')
         self.assertTrue(suspend.split('\n')[1].strip().startswith(f'mtl_pso_guard_away({self.why["BACKGROUND"]}, on);'))   # first, before the waits
         h = read('dm/gfx/nvn/nvn_mtl.h')

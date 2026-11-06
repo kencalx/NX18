@@ -61,6 +61,7 @@ jobs:
           ./t_perf_order --cpu 2>&1 | tee ../../../logs/t_perf_order.log
           make GAME="$GAME" -j3 perf-order-tsan 2>&1 | tee ../../../logs/t_perf_order-tsan.log
           make GAME="$GAME" vk-pending 2>&1 | tee ../../../logs/vk-pending.log   # the Vulkan layer's pipeline compiles that end while the game goes on (vk_pending.h): plain, TSan, ASan
+          make GAME="$GAME" vk-archive 2>&1 | tee ../../../logs/vk-archive.log   # the Vulkan layer's pipeline archive (vk_archive.h: keys, stamp, folder, gate, crash guard use): plain, TSan, ASan
           make GAME="$GAME" pso-guard 2>&1 | tee ../../../logs/pso-guard.log   # the bundled pipeline archive's crash guard (nvn_pso_guard.h): plain, TSan, ASan
           make GAME="$GAME" gpu-diag 2>&1 | tee ../../../logs/gpu-diag.log   # the GPU diagnostics' core (nvn_gpu_diag.h: errors by kind, a failed command buffer's passes, GPU busy time): plain, TSan, ASan
           make GAME="$GAME" live-menu 2>&1 | tee ../../../logs/live-menu.log   # the in-game menu's Upscaling pick (nvn_upscale_pick.h: plain, TSan, ASan) and the frame-rate counter's heat mark (power_mark.h)

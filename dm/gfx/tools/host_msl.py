@@ -6,6 +6,9 @@
 # is missing) and the metallib compiled for the SDK. Without the Metal toolchain the header has the sources only: the host then compiles them and says so in a [RED] line.
 # Each run rechecks the compiler, SDK, deployment target and source contents. Matching inputs reuse the header without compiling; a toolchain installed after a source-only
 # build regenerates the libraries. The header is written only when it changes, so an unchanged run does not rebuild the host.
+# The header also holds the kernels of the start-up self-tests (DM_SELFTEST, dm/gfx/nvn/selftest.m: k_host_msl_chain, read through host_msl_chain_lib), which are compiled not
+# as these libraries are but as the game chain compiles game shaders for the SDK (dm/gfx/tools/hmma_selftest.py), so a self-test measures what games get. A kernel that does not
+# compile leaves the host without it ([RED] line) and the build goes on; the header's stamp then matches nothing, so the next build tries the kernel again.
 # Usage: host_msl.py --sdk macosx|iphoneos [--min <OS version>] <header> <name.metal>...
 import argparse, hashlib, os, subprocess, sys, tempfile
 
@@ -25,8 +28,14 @@ ver = subprocess.run(['xcrun', '-sdk', a.sdk, 'metal', '--version'], capture_out
 ver = ver.stdout.splitlines()[0].strip() if ver.returncode == 0 and ver.stdout else ''
 sdk = subprocess.run(['xcrun', '-sdk', a.sdk, '--show-sdk-path'], capture_output=True, text=True).stdout.strip()
 sources = [(src, open(src).read()) for src in sorted(a.sources)]
+selftest, chain_in, chain_why = None, '', ''
+try:   # the self-test kernel: its source and its compile, from the chain's own files
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import hmma_selftest
+    selftest, chain_in = hmma_selftest, hmma_selftest.inputs(a.sdk)
+except Exception as e:   # the host is built without it: a diagnostic never stops a build
+    chain_why = f'its source could not be made ({type(e).__name__}: {e})'
 # The generator itself is an input too: a changed compile flag or header format must invalidate an existing library.
-inputs = hashlib.sha256(repr((a.sdk, a.min, ver, sdk, sources)).encode() + open(__file__, 'rb').read()).hexdigest()
+inputs = hashlib.sha256(repr((a.sdk, a.min, ver, sdk, sources, chain_in, chain_why)).encode() + open(__file__, 'rb').read()).hexdigest()
 stamp = f'// Inputs: {inputs}'
 if os.path.exists(a.out):
     with open(a.out) as f:
@@ -48,7 +57,21 @@ with tempfile.TemporaryDirectory() as td:
         out.append(f'static const char k_host_msl_src_{name}[] =\n{c_str(text)};')
         out.append(f'static const unsigned char k_host_msl_lib_{name}[] = {{' + ','.join(str(b) for b in lib or b'\0') + '};')
         ents.append(f'    {{"{name}", k_host_msl_src_{name}, k_host_msl_lib_{name}, {len(lib)}}},')
+    chain_lib, record = b'', ''
+    if selftest and ver:
+        try:
+            path, record = selftest.build(a.sdk, td)
+            with open(path, 'rb') as f: chain_lib = f.read()
+        except Exception as e:   # a compile error, or anything else: the build goes on without it
+            chain_why = f'it did not compile when the host was built ({str(e).replace(td, "<build folder>")})'   # the same text for the same failure, so the header stays as it is
+            out[1] = stamp + ' (the self-test kernel did not compile: tried again at the next build)'   # never matches: a failure from a passing cause (the compiler service, a full disk) is not kept
+    if chain_why: print(f'host_msl.py: [RED] the HMMA self-test kernel for {a.sdk} is left out of the host: {chain_why}', file=sys.stderr)
+    elif not ver: chain_why = f'no Metal compiler for {a.sdk} when the host was built'
+    out.append('static const unsigned char k_host_msl_chain_hmma[] = {' + ','.join(str(b) for b in chain_lib or b'\0') + '};')
 out.append('static const struct { const char *name, *src; const unsigned char *lib; unsigned long lib_len; } k_host_msl[] = {\n' + '\n'.join(ents) + '\n};\n')
+# record: the commands that compiled the kernel, or why the build has none (lib_len 0)
+out.append('static const struct { const char *name, *record; const unsigned char *lib; unsigned long lib_len; } k_host_msl_chain[] = {\n'
+           f'    {{"hmma_selftest", {c_str(chain_why or record).strip()}, k_host_msl_chain_hmma, {len(chain_lib)}}},\n}};\n')
 text = '\n'.join(out)
 if not os.path.exists(a.out) or open(a.out).read() != text:
     os.makedirs(os.path.dirname(a.out) or '.', exist_ok=True)

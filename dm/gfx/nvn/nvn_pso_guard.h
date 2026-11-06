@@ -55,15 +55,18 @@ enum { PSG_AWAY_BACKGROUND = 1, PSG_AWAY_INACTIVE = 2, PSG_AWAY_EXIT = 4 };   //
 // need: how many starts in a row with the archive that end early leave it out (1 or 2, psg_begin); found: the record this start read; armed: the state it keeps written while
 // watched (PSG_WITH, PSG_WITH2 or PSG_WITHOUT; PSG_NONE: not watched); away: PSG_AWAY_* bits (kept across psg_begin: an app away when the archive opens writes the record as the
 // start's end would); err: errno of a record that could not be written (the guard then does not watch). watching: armed, read by the present path without the lock; mark_at: the
-// frame count when the prepare step and the prebuild ended (PSG_UNMARKED before); due: psg_frame reported the end of the window; frames: presents while watched
+// frame count when the prepare step and the prebuild ended (PSG_UNMARKED before); due: psg_frame reported the end of the window; frames: presents while watched; what: the
+// archive the record is for, in its comment line (NULL: the one bundled with the app; another user of the guard names its own, PSG_GUARD_INIT_FOR)
 typedef struct {
     pthread_mutex_t mu;
     char path[1024], os[64], arch[512];
     int need, found, armed, away, err;
     _Atomic int watching, due;
     _Atomic uint32_t frames, mark_at;
+    const char *what;
 } psg_guard;
-#define PSG_GUARD_INIT {.mu = PTHREAD_MUTEX_INITIALIZER, .need = 1, .mark_at = PSG_UNMARKED}
+#define PSG_GUARD_INIT_FOR(w) {.mu = PTHREAD_MUTEX_INITIALIZER, .need = 1, .mark_at = PSG_UNMARKED, .what = (w)}
+#define PSG_GUARD_INIT PSG_GUARD_INIT_FOR(NULL)
 
 // The state a record's text holds for this archive and system build (lines "state\t<name>", "os\t<build>", "archive\t<identity>"; # comments), PSG_NONE for another one or none
 static inline int psg_parse(const char *txt, const char *os, const char *arch) {
@@ -81,14 +84,16 @@ static inline int psg_parse(const char *txt, const char *os, const char *arch) {
     }
     return os_ok && arch_ok && *os && *arch ? st : PSG_NONE;
 }
-static inline int psg_format(char *buf, size_t n, int st, const char *os, const char *arch) {
-    return snprintf(buf, n, "# the crash guard of the pipeline archive bundled with the app (nvn_mtl.m, nvn_pso_guard.h): delete this file to try the archive again\n"
-                    "state\t%s\nos\t%s\narchive\t%s\n", psg_name[st], os, arch);
+// The record's text; what: the archive it is for, in the comment line (NULL: the one bundled with the app)
+static inline int psg_format_for(char *buf, size_t n, const char *what, int st, const char *os, const char *arch) {
+    return snprintf(buf, n, "# the crash guard of %s: delete this file to try the archive again\nstate\t%s\nos\t%s\narchive\t%s\n",
+                    what ? what : "the pipeline archive bundled with the app (nvn_mtl.m, nvn_pso_guard.h)", psg_name[st], os, arch);
 }
+static inline int psg_format(char *buf, size_t n, int st, const char *os, const char *arch) { return psg_format_for(buf, n, NULL, st, os, arch); }
 // The record as state st leaves it (PSG_NONE: no file), written whole or not at all (a temporary file renamed over it). 0, or an errno
 static inline int psg_store(const psg_guard *g, int st) {
     if (st == PSG_NONE) return unlink(g->path) && errno != ENOENT ? errno : 0;
-    char buf[2048], tmp[1100]; int n = psg_format(buf, sizeof buf, st, g->os, g->arch);
+    char buf[2048], tmp[1100]; int n = psg_format_for(buf, sizeof buf, g->what, st, g->os, g->arch);
     if (n < 0 || (size_t)n >= sizeof buf || snprintf(tmp, sizeof tmp, "%s.tmp", g->path) >= (int)sizeof tmp) return ENAMETOOLONG;
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd < 0) return errno;
     ssize_t w = write(fd, buf, (size_t)n);

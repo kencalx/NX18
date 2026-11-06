@@ -45,6 +45,7 @@ The layer was written for this game (Super Mario Galaxy extended it later: [0100
 General host changes first needed here; each applies to every game:
 
 - **The Vulkan layer on Metal** (`dm/gfx/vk/hle_vk.m`) and the SPIR-V translation (`vk_shaders.py`), described above; [dm/games/README.md, What the game files decide at every build](../README.md#what-the-game-files-decide-at-every-build).
+- **An on-device pipeline archive for the Vulkan layer** (`DM_VK_ARCHIVE=1`, off by default, not yet measured on a device), for the pipelines it compiles at every boot: [A pipeline archive for the Vulkan layer](../../../docs/reference/rendering.md#a-pipeline-archive-for-the-vulkan-layer-opt-in).
 - **A host notification event** for `oe::GetNotificationMessageEvent` (`hle_oe.c`), described above.
 - **A network request on hold for its first query only** (`hle_net.c`, `nn::nifm`): [Network requests stay on hold before they settle](../../../docs/reference/services.md#network-requests-stay-on-hold-before-they-settle).
 - **A wait at two yields gets the back-off** (`thr_yield`, `hle_thread.c`): [A wait at two yields is not progress](../../../docs/reference/threads.md#a-wait-at-two-yields-is-not-progress).
