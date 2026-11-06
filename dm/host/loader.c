@@ -370,7 +370,9 @@ static void register_gates(module_t *m, const char *dir) {
             if (sscanf(line, "%lx %15s %d %lx", &ret, kind, &arg, &orig) == 4) { gate_register((uint64_t)m->base + ret, kind, arg, orig); ng++; }
         fclose(f);
     }
-    LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu", m->name, ng, m->patch_off, g_key18, g_keytls, g_keytlr, g_keygate);
+    // key_page and text_end: scripts/crashlog.py takes a module's layout from another run's log by them, to place the modules of a crash report's run (crash_summary.h)
+    LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu key_page %#llx text_end %#llx", m->name, ng, m->patch_off, g_key18, g_keytls, g_keytlr, g_keygate,
+        (unsigned long long)m->key_page_off, (unsigned long long)m->text_end);
 }
 
 // DT_RELR (from SDK 20; all three modules of The Legend of Zelda: Breath of the Wild 1.9.0 have it): a compact table of relative relocations with the addend in the slot (*slot += base).
@@ -637,7 +639,7 @@ void loader_hash_log(void) {
 // A host that runs no code made at run time (iOS; the Mac with DM_JIT_SERVE=<dir>) serves the JIT plugin's output from an image built on the Mac. Its code reaches the modules
 // with PC-relative addresses, so the modules are mapped at the image's canonical layout: one reservation holding the code memory at 0 and every module at the offset jit.tsv gives
 // it (mod rows), the distances the image was built for. Modules the layout does not name are mapped as before
-static uint8_t *g_jit_base; static uint64_t g_jit_span;
+static uint8_t *g_jit_base; static uint64_t g_jit_span, g_jit_rx, g_jit_img;   // rx: the code memory at the base, img: how much of it the served image fills (jit.tsv layout row)
 static struct { char name[16]; uint64_t off, size, pre; } g_jit_mod[256]; static int g_njit_mod;
 // Where the image is: DM_JIT_SERVE; on iOS also the folder "jit" beside the RomFS folder (the app's jit/, staged with the RomFS). NULL: the plugin runs (the Mac's default)
 const char *dm_jit_serve_dir(void) {
@@ -672,6 +674,7 @@ static void jit_layout_init(void) {
     }
     fclose(f);
     if (!rx || !g_njit_mod) die("%s: no layout", path);
+    g_jit_rx = rx; g_jit_img = img;
 #if TARGET_OS_IPHONE
     vm_address_t a = 0;
     if (vm_allocate(mach_task_self(), &a, g_jit_span, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) die("jit layout: cannot reserve %#llx bytes", (unsigned long long)g_jit_span);
@@ -895,6 +898,15 @@ void load_modules(const char *dir, const char **names, int n) {
 // A data run never touches a word the loader relocated (variant_runs refuses such a mod). mod_variants_one returns the pieces it put in place, and in *did their roles
 #include <libkern/OSCacheControl.h>
 static int mod_on(const char *e) { const char *v = getenv(e); return v && !strcmp(v, "1"); }
+// The pieces put in place, for the run's layout record (run_layout_write below): code pages (16 KB) and data runs, each with its roles
+#include "run_layout.h"
+enum { RL_PIECES_MAX = 1024 };
+static dm_runlog_piece g_rl_piece[RL_PIECES_MAX]; static int g_rl_npiece, g_rl_more;
+static void rl_piece(const module_t *m, int64_t off, uint64_t len, int code, unsigned roles) {
+    if (g_rl_npiece == RL_PIECES_MAX) { g_rl_more++; return; }
+    dm_runlog_piece *p = &g_rl_piece[g_rl_npiece++];
+    strlcpy(p->module, m->name, sizeof p->module); p->off = off; p->len = len; p->code = code; p->roles = roles;
+}
 #if TARGET_OS_IPHONE
 static int mod_variants_one(module_t *m, int on, int *did) {
     if (g_jit_base && m->base >= g_jit_base && m->base < g_jit_base + g_jit_span) return 0;   // map_image left its mods off (no holes): no data run goes in either, or a mod would be half applied
@@ -908,7 +920,7 @@ static int mod_variants_one(module_t *m, int on, int *did) {
             const mod_var_ent *e = &t[i];
             if (e->kind != 0 || e->off != g_hole[h].off || !(on & e->touch) || (on & e->touch) != e->roles) continue;
             if (e->src + 0x4000 > zv || ((uintptr_t)(v + e->src) & 0x3FFF)) die("%s: switchable mod page at %#llx past its section or not on a page", m->name, (unsigned long long)e->off);
-            page = v + e->src; mod = 1; *did |= e->roles; break;
+            page = v + e->src; mod = 1; *did |= e->roles; rl_piece(m, g_hole[h].off, 0x4000, 1, e->roles); break;
         }
         remap_at(m, (vm_address_t)(m->base + g_hole[h].off), page, 0x4000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
         sys_icache_invalidate(m->base + g_hole[h].off, 0x4000);
@@ -918,7 +930,7 @@ static int mod_variants_one(module_t *m, int on, int *did) {
         const mod_var_ent *e = &t[i];
         if (e->kind != 1 || !(on & e->roles)) continue;
         if (e->src + e->len > zv) die("%s: switchable mod entry %lu past its section", m->name, i);
-        memcpy(m->base + e->off, v + e->src, e->len); n++; *did |= on & e->roles;
+        memcpy(m->base + e->off, v + e->src, e->len); n++; *did |= on & e->roles; rl_piece(m, e->off, e->len, 0, on & e->roles);
     }
     return n;
 }
@@ -943,12 +955,98 @@ static int mod_variants_one(module_t *m, int on, int *did) {
             if (mprotect(lo, hi - lo, PROT_READ | PROT_EXEC)) die("%s: switchable mod: mprotect %p", m->name, lo);
             sys_icache_invalidate(p, len);
         } else memcpy(p, bytes, len);
-        free(bytes); n++; *did |= bit;
+        free(bytes); n++; *did |= bit; rl_piece(m, io, len, kind[0] == 'c', (unsigned)bit);
     }
     free(line); fclose(f);
     return n;
 }
 #endif
+// The run's layout record (run_layout.h): one block in run_layouts.txt beside log.txt (Documents on the iPhone), which the crash summary of a later start (DmMetrics.m) and
+// scripts/crashlog.py read to name the game's frames in an iOS crash report: the pid, the start time, the build, each module's base and parts, the pieces above. Written once the
+// mods are in place, from a copy made here (a few hundred bytes), on a utility queue: the file's read, prune to the newest DM_RUNLOG_KEEP runs and replace (a temporary file renamed
+// over it) stay off the game's thread, and guest_main waits for it (dm_run_layout_wait, at most 200 ms) before the game's first instruction, so a crash in the game's first moments
+// still finds its record. A failure is one log line. The Mac writes none: its crash report in the log (crash.c) names module offsets itself
+#include <dispatch/dispatch.h>
+#include <sys/sysctl.h>
+__attribute__((weak)) const char *dm_build_commit(void) { return ""; }   // main.c's: the app's DMCommit (the host tests link loader.c without main.c)
+static dispatch_group_t g_rl_group;
+typedef struct { char *block, path[1100], tmp[1100], utc[32]; long long pid; int nmod, npiece; } rl_job;   // tmp: hidden (the Files app shows no dot file), one name, so a run stopped mid-write leaves nothing new
+static int rl_dir(char *out, size_t n) {   // the folder of log.txt: stderr's file (main.m), else Documents in the app's home
+#if TARGET_OS_IPHONE
+    char p[PATH_MAX]; struct stat st;
+    if (!fstat(fileno(stderr), &st) && S_ISREG(st.st_mode) && fcntl(fileno(stderr), F_GETPATH, p) != -1) {
+        char *s = strrchr(p, '/');
+        if (s && s > p) { *s = 0; strlcpy(out, p, n); return 1; }
+    }
+    const char *h = getenv("HOME");
+    if (h && *h) { snprintf(out, n, "%s/Documents", h); return 1; }
+#endif
+    (void)out; (void)n;
+    return 0;
+}
+static void rl_write(void *arg) {
+    rl_job *j = arg; char *old = NULL; size_t oldn = 0; struct stat st;
+    int fd = open(j->path, O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        if (!fstat(fd, &st) && st.st_size > 0 && st.st_size < (8 << 20) && (old = malloc((size_t)st.st_size))) {
+            ssize_t r = read(fd, old, (size_t)st.st_size);
+            oldn = r > 0 ? (size_t)r : 0;
+        }
+        close(fd);
+    }
+    size_t outn = 0; char *text = dm_runlog_merge(old, oldn, j->block, DM_RUNLOG_KEEP, &outn), why[160] = "out of memory";
+    int ok = 0;
+    if (text) {
+        int w = open(j->tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        size_t done = 0;
+        while (w >= 0 && done < outn) {
+            ssize_t k = write(w, text + done, outn - done);
+            if (k < 0 && errno == EINTR) continue;
+            if (k <= 0) break;
+            done += (size_t)k;
+        }
+        if (w >= 0 && !close(w) && done == outn && !rename(j->tmp, j->path)) ok = 1;
+        else { strerror_r(errno ? errno : EIO, why, sizeof why); if (w >= 0) unlink(j->tmp); }
+    }
+    if (ok) LOG("run layout: pid %lld, started %s: %d modules and %d switchable-mod pieces in run_layouts.txt beside this log (the crash summary reads it)", j->pid, j->utc, j->nmod, j->npiece);
+    else LOG("[RED] run layout: %s could not be written (%s): a crash report of this run will show the game's frames as raw addresses", j->path, why);
+    free(old); free(text); free(j->block); free(j);
+}
+static void run_layout_write(int on) {
+    char dir[1024];
+    if (!rl_dir(dir, sizeof dir)) return;
+    struct kinfo_proc kp; size_t kn = sizeof kp; int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+    long long start = !sysctl(mib, 4, &kp, &kn, NULL, 0) && kn ? (long long)kp.kp_proc.p_starttime.tv_sec : (long long)time(NULL);
+    dm_runlog_mod *mods = calloc((size_t)(g_nmod > 0 ? g_nmod : 1), sizeof *mods);
+    rl_job *j = calloc(1, sizeof *j);
+    if (!mods || !j) { LOG("[RED] run layout: out of memory; not written"); free(mods); free(j); return; }
+    dm_runlog_run run = {.pid = getpid(), .start = start, .mods = (unsigned)on, .nmod = g_nmod, .npiece = g_rl_npiece, .mod = mods, .piece = g_rl_piece};
+    for (int i = 0; i < g_nmod; i++) {
+        const module_t *m = &g_mod[i]; dm_runlog_mod *r = &mods[i];
+        strlcpy(r->name, m->name, sizeof r->name); strlcpy(r->build, m->build_id, sizeof r->build);
+        r->base = (uint64_t)(uintptr_t)m->base; r->size = m->size; r->text_end = m->text_end; r->key = m->key_page_off; r->fps = m->fps_state_off;
+        r->patch = m->patch_off; r->patch_len = m->patch_off < 0 ? m->patch_len : m->size > (uint64_t)m->patch_off ? m->size - (uint64_t)m->patch_off : 0;   // after the image: the rest of size
+        r->back = m->back_off; r->back_len = m->back_len; r->nro = m->nro;
+    }
+    if (g_jit_base) { run.jit_base = (uint64_t)(uintptr_t)g_jit_base; run.jit_size = g_jit_rx; run.jit_image = g_jit_img; }   // the JIT layout's code memory (the game runs code there)
+    const char *prog = getenv("DM_PROGRAM");   // a game of several programs (main.m program_env): which one ran
+    snprintf(run.title, sizeof run.title, "%s%s%s", DM_GAME_ID, prog && *prog ? "/p" : "", prog && *prog ? prog : "");
+    strlcpy(run.commit, dm_build_commit(), sizeof run.commit);
+    size_t need = dm_runlog_block(NULL, 0, &run);
+    if (!(j->block = malloc(need + 1))) { LOG("[RED] run layout: out of memory; not written"); free(mods); free(j); return; }
+    dm_runlog_block(j->block, need + 1, &run);
+    free(mods);
+    if (g_rl_more) LOG("[RED] run layout: %d switchable-mod pieces past the first %d are not in the record", g_rl_more, RL_PIECES_MAX);
+    snprintf(j->path, sizeof j->path, "%s/run_layouts.txt", dir); snprintf(j->tmp, sizeof j->tmp, "%s/.run_layouts.txt.tmp", dir); dm_rl_utc(j->utc, start); j->pid = run.pid; j->nmod = run.nmod; j->npiece = run.npiece;
+    g_rl_group = dispatch_group_create();
+    dispatch_group_async_f(g_rl_group, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), j, rl_write);
+}
+// guest_main (main.c), before the game's first instruction: the record is on disk by then, unless the file system took longer than 200 ms (then the game starts and it follows)
+void dm_run_layout_wait(void) {
+    if (g_rl_group && dispatch_group_wait(g_rl_group, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)))
+        LOG("run layout: still being written after 200 ms; the game starts without waiting for it");
+}
+
 void dm_mod_variants_apply(void) {
     int on = mod_on("DM_MOD_FPS") | mod_on("DM_MOD_ULTRAWIDE") << 1;   // with none on, still called: the iPhone fills its held-back code pages with the modules' own
     for (int i = 0; i < g_nmod; i++) {
@@ -957,6 +1055,7 @@ void dm_mod_variants_apply(void) {
         int did = 0, n = mod_variants_one(m, on, &did);   // did: the roles of the pieces put in place in this module, which may be fewer than those turned on
         if (n) LOG("%s: switchable mods put in place:%s%s (%d pieces)", m->name, did & 1 ? " High frame rate" : "", did & 2 ? " Ultrawide" : "", n);
     }
+    run_layout_write(on);   // after the pieces, before any guest code runs (main.c calls this right before front_run)
 }
 
 // Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT in forward order of the load list.

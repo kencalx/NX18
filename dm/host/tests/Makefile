@@ -69,8 +69,16 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
 	$(B)/t_nro
 	$(B)/t_symbols
+	$(B)/t_crash_summary
 run: $(B)/t_nro
 run: $(B)/t_symbols
+run: $(B)/t_crash_summary
+# the crash summary's core (../crash_summary.h, ../run_layout.h: plain C, no game profile): the JSON reader, the run's layout record, the summary of a report of each shape
+$(B)/t_crash_summary: t_crash_summary.c ../crash_summary.h ../run_layout.h | $(B)
+	$(CLANG) -std=gnu11 -O1 -g -Wall -Wextra -Werror -o $@ t_crash_summary.c
+.PHONY: crash-summary
+crash-summary: $(B)/t_crash_summary
+	$(B)/t_crash_summary
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c
 .PHONY: symbols

@@ -5,5 +5,6 @@
 void dm_metrics_start(void);
 
 /// Writes one report (its JSON) into Documents/metrics as <UTC time>-<sequence>-<kind>.json (metrics_files.h), drops the oldest past 30 and logs a line. kind: "metrics", or "diagnostic-" and what happened
-/// (crash, hang, memoryException, cpuException, diskWriteException, appLaunch). Any thread; the write goes to the metrics queue, never a game thread.
+/// (crash, hang, memoryException, cpuException, diskWriteException, appLaunch). A crash report's line is followed by its summary (crash_summary.h, by the layout record of the run
+/// that crashed, Documents/run_layouts.txt). Any thread; the write and the summary go to the metrics queue, never a game thread.
 void dm_metrics_store(NSData *_Nonnull json, NSString *_Nonnull kind);

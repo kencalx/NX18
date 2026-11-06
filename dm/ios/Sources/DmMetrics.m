@@ -1,7 +1,7 @@
 // MetricKit, kept on the device (DM_METRICS): iOS collects crash, hang, CPU and disk-write exception reports, on iOS 27 also the memory-limit exits with the call stacks of that moment, and
 // daily metrics (launch and resume times, hitches, peak memory, the game layer's frame rate: front_ios.m names the layer "game"). The app subscribes at launch and writes each report, as it
 // arrives, into Documents/metrics (in the Files app beside log.txt; the newest 30 are kept), and log.txt gets a line naming it: an end for going over the memory limit otherwise leaves no line
-// in any log. Nothing is sent anywhere. iOS 27 delivers through MetricManager (Metrics.swift; MXMetricManager is deprecated from iOS 27.3), a system without it or DM_METRICS=mx through the
+// in any log; a crash report also gets a summary in log.txt (metrics_crash_summary). Nothing is sent anywhere. iOS 27 delivers through MetricManager (Metrics.swift; MXMetricManager is deprecated from iOS 27.3), a system without it or DM_METRICS=mx through the
 // MXMetricManager subscriber below. A run's diagnostics arrive at a later start, its daily metrics at most once a day. All of it runs on MetricKit's queues, Swift's task pool and the metrics
 // queue here, never on the game's threads; DM_METRICS=0 subscribes to nothing
 #import <Foundation/Foundation.h>
@@ -10,6 +10,7 @@
 #include <string.h>
 #include "dm.h"
 #include "metrics_files.h"
+#include "crash_summary.h"
 #import "DmMetrics.h"
 
 bool dm_metrics_modern_start(void);   // Metrics.swift: MetricManager's two report sequences, read until the app ends; false where it is missing (before iOS 27)
@@ -31,6 +32,18 @@ static void metrics_log(NSString *kind, const char *name, int gone) {
     else LOG("front end: MetricKit: metrics (%s): Documents/metrics/%s%s", kind.UTF8String, name, older);
 }
 
+// The crash summary (crash_summary.h), after the line naming a crash report: the exception, the crashed thread's newest frames with the game's own named by the layout record of
+// the run that crashed (Documents/run_layouts.txt, which loader.c writes at each start), and the switchable mods that run had in place. Both delivery paths come here (Metrics.swift's
+// MetricManager and the MXMetricManager subscriber below); it runs on the metrics queue, as their writes do
+static void metrics_crash_line(void *ctx, const char *line) { (void)ctx; LOG("[RED] front end: crash: %s", line); }
+static void metrics_crash_summary(NSData *json) {
+    NSData *lay = [NSData dataWithContentsOfFile:[[g_metrics_dir stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"run_layouts.txt"]];   // nil when there is none: the summary says so
+    int n = dm_crash_summary(json.bytes, json.length, lay ? (lay.bytes ?: "") : NULL, lay.length, metrics_crash_line, NULL);   // every crash report gets a line
+    if (n == 0) LOG("[RED] front end: crash: the report holds no crash diagnostic the summary knows; Documents/metrics keeps it as it came");
+    else if (n == -2) LOG("[RED] front end: crash: the report is larger or nested deeper than the summary reads; Documents/metrics keeps it as it came");
+    else if (n < 0) LOG("[RED] front end: crash: the report is not JSON the summary can read; Documents/metrics keeps it as it came");
+}
+
 void dm_metrics_store(NSData *json, NSString *kind) {
     if (!g_metrics_q || !json.length || !kind.length) return;
     NSData *data = [json copy]; NSString *k = [kind copy];
@@ -43,8 +56,13 @@ void dm_metrics_store(NSData *json, NSString *kind) {
         }
         if (!path) return;
         NSError *e = nil;
-        if (![data writeToFile:path options:NSDataWritingAtomic error:&e]) { LOG("[RED] front end: MetricKit: Documents/metrics/%s could not be written: %s", name, e.localizedDescription.UTF8String); return; }
+        if (![data writeToFile:path options:NSDataWritingAtomic error:&e]) {
+            LOG("[RED] front end: MetricKit: Documents/metrics/%s could not be written: %s", name, e.localizedDescription.UTF8String);
+            if ([k isEqualToString:@"diagnostic-crash"]) metrics_crash_summary(data);   // then the summary is all that is left of it
+            return;
+        }
         metrics_log(k, name, dm_metrics_prune(g_metrics_dir.fileSystemRepresentation, DM_METRICS_KEEP));
+        if ([k isEqualToString:@"diagnostic-crash"]) metrics_crash_summary(data);
     });
 }
 
