@@ -895,7 +895,9 @@ void load_modules(const char *dir, const char **names, int n) {
 // page a mod touches is in the executable once per combination of the roles touching it (gen_embed.py __dm<name>v, its table __dm<name>vt). map_image holds those pages back
 // (anonymous holes, remap_code above), and here each hole gets one page vm_remapped into it: the page holding exactly the roles turned on among them, or the module's own when
 // none is (iOS refuses a remap over a mapping of the signed text); a data run is copied into the module's writable part. A module in the jit layout's reservation gets neither
-// (map_image leaves its mods off). On the Mac the bytes come from <module>.variants beside the modules and are written in place, a code page made writable for the moment.
+// (map_image leaves its mods off). On the Mac the bytes come from <module>.variants beside the modules and are written in place, a code page made writable for the moment:
+// every row of every module's file is read first (mod_rows.h, mod_variants_read), so a role with a row that cannot be read goes in nowhere, as the iPhone has a role whole or
+// not at all.
 // A data run never touches a word the loader relocated (variant_runs refuses such a mod). mod_variants_one returns the pieces it put in place, and in *did their roles
 #include <libkern/OSCacheControl.h>
 static int mod_on(const char *e) { const char *v = getenv(e); return v && !strcmp(v, "1"); }
@@ -936,29 +938,42 @@ static int mod_variants_one(module_t *m, int on, int *did) {
     return n;
 }
 #else
-static int mod_variants_one(module_t *m, int on, int *did) {
-    if (!on) return 0;
-    char path[1100]; snprintf(path, sizeof path, "%s/%s.variants", g_module_dir, m->name);
-    FILE *f = fopen(path, "r"); if (!f) return 0;
-    char *line = NULL; size_t cap = 0; int n = 0;
-    while (getline(&line, &cap, f) > 0) {
-        if (line[0] == '#' || line[0] == '\n') continue;
-        char role[16], kind[4], hex[1 << 16]; unsigned long long fo; long long io;
-        if (strlen(line) >= sizeof hex || sscanf(line, "%15s\t%3s\t%llx\t%lli\t%65535s", role, kind, &fo, &io, hex) != 5) { LOG("[RED] %s: a line it cannot read", path); continue; }
-        int bit = !strcmp(role, "fps") ? 1 : !strcmp(role, "ultrawide") ? 2 : 0;
-        if (!(on & bit)) continue;
-        size_t len = strlen(hex) / 2; uint8_t *p = m->base + io;
-        uint8_t *bytes = malloc(len); for (size_t k = 0; k < len; k++) { unsigned b; sscanf(hex + 2 * k, "%2x", &b); bytes[k] = (uint8_t)b; }
-        if (kind[0] == 'c') {   // code: writable for the copy, then read-only executable again
-            uint8_t *lo = (uint8_t *)((uintptr_t)p & ~(uintptr_t)0x3FFF), *hi = (uint8_t *)(((uintptr_t)p + len + 0x3FFF) & ~(uintptr_t)0x3FFF);
-            if (mprotect(lo, hi - lo, PROT_READ | PROT_WRITE)) die("%s: switchable mod: mprotect %p", m->name, lo);
-            memcpy(p, bytes, len);
-            if (mprotect(lo, hi - lo, PROT_READ | PROT_EXEC)) die("%s: switchable mod: mprotect %p", m->name, lo);
-            sys_icache_invalidate(p, len);
-        } else memcpy(p, bytes, len);
-        free(bytes); n++; *did |= bit; rl_piece(m, io, len, kind[0] == 'c', (unsigned)bit);
+#include "mod_rows.h"
+static dm_mod_rows *g_mod_rows; static unsigned g_mod_skip;   // every module's rows, and the roles with a row that cannot be read in any module's file (mod_variants_read)
+// Before any is put in place: every module's <module>.variants, so a role with a row that cannot be read goes in nowhere, never in one module and not another
+static void mod_variants_read(int on) {
+    g_mod_skip = 0;
+    if (!on) return;
+    if (!(g_mod_rows = calloc((size_t)(g_nmod > 0 ? g_nmod : 1), sizeof *g_mod_rows))) { LOG("[RED] switchable mods: out of memory; none put in place"); return; }
+    for (int i = 0; i < g_nmod; i++) {
+        if (g_mod[i].nro) continue;
+        char path[1100]; snprintf(path, sizeof path, "%s/%s.variants", g_module_dir, g_mod[i].name);
+        FILE *f = fopen(path, "r"); if (!f) continue;
+        dm_mod_rows *rows = &g_mod_rows[i];
+        dm_mod_rows_read(f, (unsigned)on, rows); fclose(f);
+        unsigned bad = rows->bad & (unsigned)on;
+        if (bad) LOG("[RED] %s: line %ld cannot be read: %s%s%s not put in place, in any module", path, rows->bad_line[bad & 1 ? 0 : 1], bad & 1 ? "High frame rate" : "", bad == 3 ? " and " : "", bad & 2 ? "Ultrawide" : "");
+        g_mod_skip |= bad;
     }
-    free(line); fclose(f);
+}
+static int mod_variants_one(module_t *m, int on, int *did) {
+    if (!on || !g_mod_rows) return 0;
+    dm_mod_rows *rows = &g_mod_rows[m - g_mod];
+    int n = 0;
+    for (size_t i = 0; i < rows->n; i++) {
+        const dm_mod_row *r = &rows->row[i];
+        if (!(on & (int)r->role) || (g_mod_skip & r->role)) continue;
+        uint8_t *p = m->base + r->io;
+        if (r->code) {   // code: writable for the copy, then read-only executable again
+            uint8_t *lo = (uint8_t *)((uintptr_t)p & ~(uintptr_t)0x3FFF), *hi = (uint8_t *)(((uintptr_t)p + r->len + 0x3FFF) & ~(uintptr_t)0x3FFF);
+            if (mprotect(lo, hi - lo, PROT_READ | PROT_WRITE)) die("%s: switchable mod: mprotect %p", m->name, lo);
+            memcpy(p, r->bytes, r->len);
+            if (mprotect(lo, hi - lo, PROT_READ | PROT_EXEC)) die("%s: switchable mod: mprotect %p", m->name, lo);
+            sys_icache_invalidate(p, r->len);
+        } else memcpy(p, r->bytes, r->len);
+        n++; *did |= (int)r->role; rl_piece(m, r->io, r->len, r->code, r->role);
+    }
+    dm_mod_rows_free(rows);
     return n;
 }
 #endif
@@ -1053,12 +1068,18 @@ void dm_run_layout_wait(void) {
 
 void dm_mod_variants_apply(void) {
     int on = mod_on("DM_MOD_FPS") | mod_on("DM_MOD_ULTRAWIDE") << 1;   // with none on, still called: the iPhone fills its held-back code pages with the modules' own
+#if !TARGET_OS_IPHONE
+    mod_variants_read(on);
+#endif
     for (int i = 0; i < g_nmod; i++) {
         module_t *m = &g_mod[i];
         if (m->nro) continue;
         int did = 0, n = mod_variants_one(m, on, &did);   // did: the roles of the pieces put in place in this module, which may be fewer than those turned on
         if (n) LOG("%s: switchable mods put in place:%s%s (%d pieces)", m->name, did & 1 ? " High frame rate" : "", did & 2 ? " Ultrawide" : "", n);
     }
+#if !TARGET_OS_IPHONE
+    free(g_mod_rows); g_mod_rows = NULL;   // each module's rows freed as it was put in place (an NRO's never read)
+#endif
     run_layout_write(on);   // after the pieces, before any guest code runs (main.c calls this right before front_run)
 }
 
