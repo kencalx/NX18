@@ -1,0 +1,533 @@
+#!/usr/bin/env python3
+"""Read the log.txt of an iPhone or iPad game app: a summary of one run, or two runs side by side with what differs (before and after a change, two settings, two devices).
+
+    python3 scripts/devlog.py LOG          the summary
+    python3 scripts/devlog.py A B          both side by side, then what differs
+    --top N    how many of the longest frames, [RED] kinds and worst windows to list (default 5)
+    --json     the same as one JSON object (for two logs: {"a", "b", "rows", "switches", "red"})
+
+LOG is the app's Documents/log.txt or log.prev.txt (Share log, on the start screen and in the gear's menu, sends both), or a Mac app's log, which has the same host lines.
+What it reads (docs/development.md, Reading a device log):
+  build, device      build: commit … (main.c); GPU …, architecture … (nvn_mtl.m); boot: memory / address space (main.m); the launcher: and boot: env lines (the switches in effect,
+                     and those changed in the in-game menu); controller … connected
+  pipelines          pipeline prepare and prebuild (read by scripts/regress.py's read_log, as in its Mac runs); pipeline archive … files, MB; bases written; bases compiled while
+                     playing ([nvn] pipelines up to frame); a Vulkan game's [vk] pipelines lines, an OpenGL game's [gl] pipeline builds
+  frames, power      [nvn] timing, on-screen and power up to frame N (one each per 300 frames): frame-time percentiles, dropped frames, frame rate, CPU watts, mJ per frame,
+                     wakeups, GPU ms/s, thermal state
+  memory             [nvn-mtl] memory up to frame N and the on-screen lines' footprint; [gl] memory at frame N; [vk] frame N … buffer memory: first, last, least, most, slope per 10 min
+  display link       [nvn-mtl] display link up to tick N: submission ahead of / game enqueue to target display; the stretches of windows whose enqueue p50 is more than half a frame
+                     period above the run's median (the display link counts whole frames: a frame more latency), and what the log shows just before them
+  long frames        [longframe] frame N (T s): the longest, and what each spent its time on (new pipelines, texture uploads, GPU, submit, the game's side, a return from the background)
+  events             background and resume, focus changes, thermal state and Low Power Mode changes and the caps they set, memory warnings, in-game menu changes
+  audio, saves, RED  audio #N device callbacks … underruns; save commit, save sync; [RED] kinds, normalized as regress.py does (numbers, paths and keys taken out)
+Only NVN games write the timing, on-screen, power, display-link and long-frame lines (hle_nvn.c, from the present path): a Vulkan or OpenGL game's summary has its pipeline and memory
+lines and the events. Other lines are skipped, and so is a cut last line. The log has no clock: times are seconds from the start, from the long-frame lines' stamps and the power lines'
+frame rates, or frame numbers at 60 fps where it has neither. Only the numbers and names above are printed (no paths: a switch value that is one prints as its last part;
+no save contents).
+Exit code: 0 done, 2 a log could not be read."""
+import argparse, bisect, collections, importlib.util, json, re, statistics, sys
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+REPO = Path(__file__).resolve().parent.parent
+Rec = dict[str, Any]
+
+
+def no_path(v: str) -> str:
+    """A switch value that is a path (a file a diagnostic switch writes, in env.txt) as its last part: devlog prints no paths"""
+    return '…/' + v.rstrip('/').rsplit('/', 1)[-1] if re.match(r'(/|~/|\.\.?/)', v) else v
+
+
+def load_module(name: str, path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None: raise ImportError(f'cannot load {path}')
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    return mod
+
+
+regress = load_module('regress', REPO / 'scripts/regress.py')   # read_log: prepare and prebuild times, [RED] kinds, a crash line; normalize_red: numbers, paths and keys out of a text
+
+# The host's lines, from their format strings, after a leading "[dm] ". The first pattern that matches a line takes it.
+RX = {k: re.compile(v) for k, v in {
+    'build': r'^build: commit (\S+), shader chain (\S+), profile (\w+)',
+    'gpu': r'^\[nvn-mtl\] GPU (.+?), architecture (\S+): highest Apple GPU family (\S+), Metal 4 (\w+)',
+    'device': r'^\[nvn-mtl\] Metal device (.+)',
+    'mem_boot': r'^boot: memory: ([\d.]+) GB available to the app .*?, an 8 GB address reservation (succeeds|fails)',
+    'as_boot': r'^boot: address space: the largest block iOS reserves for the app is (at least )?([\d.]+) GB',
+    'sdk': r'^sdk: NintendoSDK (\S+)',
+    'env_file': r'^boot: env (DM_\w+)=(.*) \(([^()]*)\)$',
+    'launcher': r'^launcher: (DM_\w+)=(.*?)(?: \((changed|in-game menu|saved choice)\))?$',
+    'kept': r'^launcher: (DM_\w+) kept at (.*) \((launch environment|env file)\)$',
+    'controller': r"^controller '(.+?)' (?:\(HID\) )?(connected|disconnected)(?:: player (\d+))?",
+    'tick': r'^\[nvn\] present tick (\d+) Hz, interval mode (\w+)',
+    'timing': r'^\[nvn\] timing up to frame (\d+): frame time p50 ([\d.]+) / p95 ([\d.]+) / max ([\d.]+) ms \((\d+) frames\);(?:.*? GPU p50 ([\d.]+) / p95 ([\d.]+))?',
+    'onscreen': r'^\[nvn\] on-screen up to frame (\d+): (\d+) frames, dropped (\d+) \(discarded (\d+)\), p99 ([\d.]+) ms; footprint (-?\d+) MiB; brightness (-?[\d.]+); thermal (-?\d+)',
+    'power': r'^\[nvn\] power up to frame (\d+): CPU energy ([\d.]+) W, ([\d.]+) mJ per frame \(([\d.]+) fps\); CPU (\d+)% \(100 = one core\), (\d+)% of it on performance cores; '
+             r'wakeups (\d+)/s \(out of platform idle (\d+)\); GPU ([\d.]+) ms/s[^;]*; thermal (-?\d+)',
+    'psoline': r'^\[nvn\] pipelines up to frame (\d+): .*?bases compiled (\d+) / ([\d.]+) ms',
+    'memory': r'^\[nvn-mtl\] memory up to frame (\d+): resident (\d+) MB, GPU allocated (\d+) MB, .*?shared textures (\d+) \(.*headroom to the system memory limit (?:(\d+) MB|none)',   # none: the Mac
+    'glmem': r'^\[gl\] memory at frame (\d+): footprint ([\d.]+) MB, Metal allocated ([\d.]+) MB; (\d+) textures',
+    'vkframe': r'^\[vk\] frame (\d+): draws .*? buffer memory ([\d.]+) MB',
+    'glpso': r'^\[gl\] frame (\d+): pipeline builds since the last record (\d+), ([\d.]+) ms; in all (\d+), ([\d.]+) ms, the longest ([\d.]+) ms; (\d+) of them after the first frame, ([\d.]+) ms',
+    'glframe': r'^\[gl\] frame (\d+): ',
+    'vkpso': r'^\[vk\] pipelines: (\d+) compiled .*? in ([\d.]+) s from the first create .*?, (\d+) failed; submissions waited for a compile (\d+) times, ([\d.]+) ms in all .*?; (\d+) since the start',
+    'archive': r'^\[nvn-mtl\] pipeline archive .*: (\d+) files \((\d+) of bases without a vertex layout\), ([\d.]+) MB, opened in ([\d.]+) ms',
+    'bundled': r'^\[nvn-mtl\] pipeline archive bundled with the app: .*, ([\d.]+) MB, opened in ([\d.]+) ms',
+    'bundle_out': r'^\[nvn-mtl\] (?:\[RED\] )?pipeline archive bundled with the app: (?:.* is left out|none for this GPU|this system cannot open)',
+    'written': r'^\[nvn-mtl\] pipeline archive: (\d+) new pipeline bases written to \S+ \(([\d.]+) MB, (\d+) ms\)',
+    'prepare': r'^\[nvn-mtl\] pipeline prepare: (\d+) lines .*?progress screen (shown|not shown); bases (\d+) compiled, (\d+) from the archive, (\d+) reused',
+    'link': r'^\[nvn-mtl\] display link up to tick (\d+): ticks \d+, presents (\d+), empty ticks (\d+) .*?merging (\d+); submission ahead of target display p50 ([\d.]+) ms / min ([\d.]+) ms; '
+            r'game enqueue to target display p50 ([\d.]+) ms / min ([\d.]+) / max ([\d.]+) ms',
+    'longframe': r'^\[longframe\] frame (\d+) \(([\d.]+) s\) whole frame ([\d.]+) ms, submit\+present ([\d.]+) ms, GPU (-?[\d.]+) ms; new pipelines (\d+) \+ shader libraries (\d+), '
+                 r'([\d.]+) ms in all; texture uploads (\d+) first \+ (\d+) re-uploads, ([\d.]+) MB / ([\d.]+) ms',
+    'audio': r'^audio #(\d+) device callbacks (\d+): .*; in these (\d+), (\d+) underruns, ([\d.]+) ms zero-padded',
+    'save_commit': r'^save commit #(\d+): .*\(clone \+ swap (\d+) us',
+    'save_sync': r'^save sync: (.*)',
+    'front_start': r'^front end: thermal state (-?\d+), brightness [\d.]+, Low Power Mode (on|off)',
+    'front_change': r'^front end: (thermal state|Low Power Mode) → (\S+) \((\d+) s after launch\)',
+    'mem_warning': r'front end: iOS memory warning \((\d+) s after launch\): footprint (\d+) MiB, (\d+) MiB left',
+    'focus': r'^oe focus state → (\d+)( \(library applet (?:open|closed)\))?',
+}.items()}
+MARKS = {'timing': 1, 'onscreen': 1, 'power': 1, 'longframe': 1, 'vkframe': 1, 'glframe': 1, 'glpso': 1}   # lines that carry a frame number (its group): the "now" of the lines after them
+# (not the display link's line: its count is of presents, not frames; its windows take the frame the log was at)
+# Lines that only mark an event: text in the line, what the summary calls it, its kind
+EVENTS = (('[nvn-mtl] entering the background', 'background', 'app'), ('[nvn] graphics suspended', 'graphics suspended', 'app'), ('[nvn] graphics resumed', 'resumed', 'app'),
+          ('audio suspended (background', 'audio suspended', 'audio'), ('audio resumed (foreground', 'audio resumed', 'audio'),
+          ('audio session: interrupted', 'audio interrupted', 'audio'), ('audio session: interruption ended', 'audio interruption ended', 'audio'),
+          ('audio session: active again', 'audio session back', 'audio'),
+          ('the frame step holds 30 fps', 'the frame step held at 30 fps', 'cap'), ('back to the frame rate cap', 'the chosen frame rate again', 'cap'),
+          ('present upscaling: bilinear while the device is', 'MetalFX off (heat or Low Power Mode)', 'cap'), ('present upscaling: MetalFX again', 'MetalFX again', 'cap'))
+CAUSE_KEY = (('return', 'background'), ('focus', 'focus'), ('new pipelines', 'pipelines'), ('texture', 'uploads'), ('GPU', 'gpu'), ('submit', 'submit'), ("the game's", 'game'))
+API = {'nvn': 'NVN', 'vk': 'Vulkan', 'gl': 'OpenGL'}
+
+
+def med(xs: list[float]) -> float | None: return round(statistics.median(xs), 3) if xs else None   # the median of an even count is a mean: no float noise in the output
+
+
+def norm(text: str) -> str:   # a text with its numbers, paths and keys taken out, as regress.py normalizes a [RED] line
+    return regress.normalize_red('[RED] ' + text)
+
+
+def lerp(pts: list[tuple[int, float]], f: float, slope: bool = True) -> float:   # piecewise linear through (frame, value); beyond the ends the end segment's slope, or flat
+    if len(pts) == 1 or not slope and (f <= pts[0][0] or f >= pts[-1][0]): return pts[0][1] if f <= pts[0][0] or len(pts) == 1 else pts[-1][1]
+    i = min(max(bisect.bisect_left(pts, (f, float('-inf'))), 1), len(pts) - 1)   # the segment that holds f, or the nearest one at either end
+    (f0, t0), (f1, t1) = pts[i - 1], pts[i]
+    return t0 + (f - f0) * (t1 - t0) / (f1 - f0)
+
+
+class Clock:
+    """Seconds from the start for a frame number. A power line's window lasts its frames over its frame rate, in wall time, a stay in the background included (the first window
+    starts 300 frames before its line: the first summary only takes the baselines). A long-frame line stamps a frame with its own time: the power windows' times are moved onto
+    each stamp, by an offset taken linearly between stamps (the windows' frame rates are rounded, so their sum drifts). Without power lines, the stamps alone; without either,
+    frame numbers at 60 fps."""
+    def __init__(self, power: list[tuple[int, float]], stamps: list[tuple[int, float]]):
+        self.pts: list[tuple[int, float]] = []; self.fix: list[tuple[int, float]] = []
+        st = sorted(dict(stamps).items())
+        self.basis = 'frame numbers at 60 fps'
+        if power:
+            prev, t = power[0][0] - 300, 0.0; self.pts.append((prev, 0.0))
+            for f, fps in power:
+                if f > prev and fps > 0: t += (f - prev) / fps; self.pts.append((f, t)); prev = f
+            f0 = self.pts[0][0]
+            self.fix = [(f, s - lerp(self.pts, f)) for f, s in st] or [(f0, f0 / power[0][1] if power[0][1] > 0 else f0 / 60)]   # no stamps: the frames before at the first window's rate
+            self.basis = 'the power lines' + (' and the long-frame stamps' if st else '')
+        elif st:
+            for f, s in st:
+                if not self.pts or s >= self.pts[-1][1]: self.pts.append((f, s))
+            self.basis = 'the long-frame stamps'
+
+    def at(self, f: float) -> float:
+        if not self.pts: return round(f / 60, 1)
+        t = lerp(self.pts, f) if len(self.pts) > 1 else self.pts[0][1] + (f - self.pts[0][0]) / 60
+        return round(max(0.0, t + (lerp(self.fix, f, slope=False) if self.fix else 0.0)), 1)
+
+
+def spread(points: list[tuple[float, float]]) -> Rec | None:   # (seconds, value) → first, last, least, most, and the least-squares slope per 10 minutes over two minutes or more
+    if not points: return None
+    vs = [v for _, v in points]; ts = [t for t, _ in points]
+    out: Rec = {'first': vs[0], 'last': vs[-1], 'min': min(vs), 'max': max(vs), 'per_10min': None, 'samples': len(vs)}
+    if len(points) >= 3 and ts[-1] - ts[0] >= 120 and len(set(ts)) > 1: out['per_10min'] = round(600 * statistics.linear_regression(ts, vs).slope, 1)
+    return out
+
+
+def lf_causes(r: Rec, after: list[str], frame_ms: float) -> list[str]:   # what a long frame spent its time on, most telling first
+    c = []
+    if {'resumed', 'background', 'graphics suspended'} & set(after): c.append('return from the background')
+    elif any(a.startswith('focus') for a in after): c.append('focus change')
+    if r['pipelines'] + r['libraries'] and r['make_ms'] >= max(2.0, 0.25 * r['ms']): c.append(f"new pipelines ({r['pipelines']} + {r['libraries']} libraries, {r['make_ms']:.0f} ms)")
+    if r['uploads'] + r['reuploads'] and r['upload_ms'] >= max(2.0, 0.25 * r['ms']): c.append(f"texture uploads ({r['uploads'] + r['reuploads']}, {r['upload_mb']:.1f} MB, {r['upload_ms']:.0f} ms)")
+    if r['gpu_ms'] > 1.5 * frame_ms: c.append(f"GPU {r['gpu_ms']:.0f} ms")
+    if not c: c.append(f"submit+present {r['submit_ms']:.0f} ms" if r['submit_ms'] >= 0.5 * r['ms'] else "the game's side (its code or its waits)")
+    return c
+
+
+def scan(lines: list[str]) -> tuple[dict[str, list[tuple[int, Any, int]]], list[Rec], list[list[str]]]:
+    """Every known line: kind → [(line index, match, the frame the log was at)]; the events [{i, frame, what, kind, t}]; per long-frame line, the events since the line before it that
+    carried a frame number"""
+    g: dict[str, list[tuple[int, Any, int]]] = collections.defaultdict(list); events: list[Rec] = []; lf_after: list[list[str]] = []
+    cur, pending = 0, []
+    for i, line in enumerate(lines):
+        s = line[5:] if line.startswith('[dm] ') else line
+        kind, m = None, None
+        for k, rx in RX.items():
+            m = rx.search(s)
+            if m: kind = k; break
+        if kind in MARKS and m:
+            cur = max(cur, int(m.group(MARKS[kind])))
+            if kind == 'longframe': lf_after.append(pending)
+            pending = []
+        if kind: g[kind].append((i, m, cur))
+        ev: tuple[str, str, float | None] | None = None
+        if kind == 'focus' and m: ev = (f'focus {m.group(1)}' + (' (applet)' if m.group(2) else ''), 'focus', None)
+        elif kind == 'front_change' and m: ev = (f'{m.group(1)} {m.group(2)}', 'power', float(m.group(3)))
+        elif kind == 'mem_warning' and m: ev = (f'memory warning, {m.group(3)} MiB left', 'memory', float(m.group(1)))
+        elif kind == 'controller' and m: ev = (f"controller '{m.group(1)}' {m.group(2)}", 'controller', None)
+        elif kind == 'launcher' and m and m.group(3) == 'in-game menu': ev = (f'{m.group(1)}={no_path(m.group(2))} (in-game menu)', 'menu', None)
+        elif kind is None:
+            hit = next(((what, k) for needle, what, k in EVENTS if needle in s), None)
+            if hit: ev = (hit[0], hit[1], None)
+            elif s.startswith('[game]') and 'underrun' in s: g['game_underrun'].append((i, None, cur))
+        if ev: events.append({'i': i, 'frame': cur, 'what': ev[0], 'kind': ev[1], 't': ev[2]}); pending.append(ev[0])
+    return g, events, lf_after
+
+
+def read(text: str, top: int = 5) -> Rec:
+    """The summary of one log, in JSON types"""
+    lines = text.splitlines()
+    red, crash, prepare_s, prebuild = regress.read_log(text)
+    g, events, lf_after = scan(lines)
+    one = {k: v[0][1] for k, v in g.items() if v and v[0][1] is not None}   # the first line of each kind
+
+    def col(k: str, n: int) -> list[float]: return [float(m.group(n)) for _, m, _ in g[k]]
+    power = [(int(m.group(1)), float(m.group(4))) for _, m, _ in g['power']]
+    clock = Clock(power, [(int(m.group(1)), float(m.group(2))) for _, m, _ in g['longframe']])
+    for e in events: e['t'] = e['t'] if e['t'] is not None else clock.at(e['frame'])
+    last = max((f for v in g.values() for _, _, f in v), default=0)
+    out: Rec = {'lines': len(lines), 'time_basis': clock.basis, 'last_frame': last, 'duration_s': clock.at(last) if last else None}
+    # build, device, switches, controllers
+    b, gp, mb, ab, tk = (one.get(k) for k in ('build', 'gpu', 'mem_boot', 'as_boot', 'tick'))
+    name = None
+    if b:
+        tsv = REPO / 'dm/games' / b.group(3) / 'game.tsv'
+        name = next((ln.split('\t', 1)[1].strip() for ln in (tsv.read_text(errors='replace').splitlines() if tsv.is_file() else []) if ln.startswith('name\t')), None)
+    out['build'] = {'commit': b.group(1), 'chain': b.group(2), 'profile': b.group(3), 'name': name} if b else None
+    out['device'] = {'gpu': gp.group(1) if gp else one['device'].group(1) if 'device' in one else None, 'arch': gp.group(2) if gp else None, 'family': gp.group(3) if gp else None,
+                     'metal4': gp.group(4) if gp else None, 'memory_gb': float(mb.group(1)) if mb else None, 'eva': (mb.group(2) == 'succeeds') if mb else None,
+                     'address_space_gb': float(ab.group(2)) if ab else None, 'sdk': one['sdk'].group(1) if 'sdk' in one else None}
+    out['api'] = 'vk' if g['vkframe'] or g['vkpso'] else 'gl' if g['glframe'] or g['glmem'] or g['glpso'] else 'nvn' if g['timing'] or g['link'] or g['memory'] else None
+    out['present'] = f'{tk.group(1)} Hz, interval mode {tk.group(2)}' if tk else None
+    frame_ms = 1000 / int(tk.group(1)) if tk and int(tk.group(1)) else 1000 / 60
+    env: Rec = {}; env_from: Rec = {}; changes: list[Rec] = []
+    for _, m, f in sorted(g['env_file'] + g['kept'] + g['launcher'], key=lambda x: x[0]):
+        if m.re is RX['launcher'] and m.group(3) == 'in-game menu': changes.append({'t_s': clock.at(f), 'key': m.group(1), 'value': no_path(m.group(2))}); continue
+        env[m.group(1)] = no_path(m.group(2)); env_from[m.group(1)] = (m.group(3) or 'default') if m.re is RX['launcher'] else m.group(3)
+    out['env'], out['env_from'], out['env_changes'] = env, env_from, changes
+    out['controllers'] = list(dict.fromkeys(f'{m.group(1)} (player {m.group(3)})' if m.group(3) else m.group(1) for _, m, _ in g['controller'] if m.group(2) == 'connected'))
+    # pipelines
+    pp, ar, bu = one.get('prepare'), one.get('archive'), one.get('bundled')
+    wr = [(int(m.group(1)), float(m.group(2))) for _, m, _ in g['written']]
+    play = [(int(m.group(2)), float(m.group(3))) for _, m, _ in g['psoline'] if int(m.group(1)) > 300]   # the first window holds the prepare step's
+    vk, gl = (g['vkpso'][-1][1] if g['vkpso'] else None), (g['glpso'][-1][1] if g['glpso'] else None)
+    out['pipelines'] = {
+        'prepare_s': prepare_s, 'prebuild': prebuild,
+        'prepare': {'lines': int(pp.group(1)), 'progress_screen': pp.group(2) == 'shown', 'bases_compiled': int(pp.group(3)), 'bases_from_archive': int(pp.group(4)),
+                    'reused': int(pp.group(5))} if pp else None,
+        'archive': {'files': int(ar.group(1)), 'mb': float(ar.group(3)), 'open_ms': float(ar.group(4))} if ar else None,
+        'bundled': {'mb': float(bu.group(1)), 'open_ms': float(bu.group(2))} if bu else 'left out' if 'bundle_out' in one else None,
+        'written': {'files': len(wr), 'bases': sum(n for n, _ in wr), 'mb': round(sum(x for _, x in wr), 1)} if wr else None,
+        'in_play': {'bases': sum(n for n, _ in play), 'ms': round(sum(x for _, x in play), 1)} if g['psoline'] else None,
+        'vk': {'compiled': int(vk.group(6)), 'failed': sum(int(m.group(3)) for _, m, _ in g['vkpso']), 'waits': sum(int(m.group(4)) for _, m, _ in g['vkpso']),
+               'wait_ms': round(sum(float(m.group(5)) for _, m, _ in g['vkpso']), 1)} if vk else None,
+        'gl': {'built': int(gl.group(4)), 'ms': float(gl.group(5)), 'longest_ms': float(gl.group(6)), 'after_first_frame': int(gl.group(7)), 'after_ms': float(gl.group(8))} if gl else None}
+    # frames on screen
+    on = [m for _, m, _ in g['onscreen']]
+    out['frames'] = None
+    if g['timing'] or on:
+        shown, dropped = sum(int(m.group(2)) for m in on), sum(int(m.group(3)) for m in on)
+        out['frames'] = {'windows': len(g['timing']), 'p50_ms': med(col('timing', 2)), 'p95_ms': med(col('timing', 3)), 'p95_worst_ms': max(col('timing', 3), default=None),
+                         'max_ms': max(col('timing', 4), default=None), 'p99_onscreen_ms': med(col('onscreen', 5)), 'p99_onscreen_worst_ms': max(col('onscreen', 5), default=None),
+                         'gpu_p50_ms': med([float(m.group(6)) for _, m, _ in g['timing'] if m.group(6)]), 'on_screen': shown, 'dropped': dropped,
+                         'discarded': sum(int(m.group(4)) for m in on), 'dropped_pct': round(100 * dropped / shown, 2) if shown else None, 'fps': med([fps for _, fps in power]),
+                         'worst': [{'t_s': clock.at(int(m.group(1))), 'frame': int(m.group(1)), 'dropped': int(m.group(3)), 'p99_ms': float(m.group(5))}
+                                   for m in sorted(on, key=lambda m: -int(m.group(3)))[:top] if int(m.group(3))]}
+    # power and heat
+    out['power'] = None
+    if power:
+        starts = [power[0][0] - 300] + [f for f, _ in power]; dur = [(f - starts[k]) / fps if fps > 0 else 0.0 for k, (f, fps) in enumerate(power)]
+        w = col('power', 2)
+        out['power'] = {'windows': len(power), 'watts_p50': med(w), 'watts_mean': round(sum(a * d for a, d in zip(w, dur)) / sum(dur), 2) if sum(dur) else None,
+                        'mj_per_frame_p50': med(col('power', 3)), 'cpu_pct_p50': med(col('power', 5)), 'pcore_pct_p50': med(col('power', 6)), 'wakeups_p50': med(col('power', 7)),
+                        'gpu_ms_s_p50': med(col('power', 9)), 'thermal_max': max(int(m.group(10)) for _, m, _ in g['power'])}
+    fs = one.get('front_start')
+    tl: list[Rec] = [{'t_s': 0.0, 'what': f'thermal state {fs.group(1)}, Low Power Mode {fs.group(2)}'}] if fs else []
+    if not g['front_change']:   # a log without the front end's change lines (the Mac, an older app): the thermal state as the windows saw it
+        th0 = int(fs.group(1)) if fs else 0
+        for _, m, _ in g['onscreen'] or g['power']:
+            th = int(m.group(8) if g['onscreen'] else m.group(10))
+            if th != th0: tl.append({'t_s': clock.at(int(m.group(1))), 'what': f'thermal state {th} (a window\'s)'}); th0 = th
+    tl += [{'t_s': e['t'], 'what': e['what']} for e in events if e['kind'] in ('power', 'cap')]
+    out['timeline'] = sorted(tl, key=lambda x: x['t_s'])
+    # memory
+    fp = sorted([(int(m.group(1)), float(m.group(2))) for _, m, _ in g['memory']] + [(int(m.group(1)), float(m.group(6))) for m in on if int(m.group(6)) >= 0])
+
+    def by_t(k: str, n: int) -> Rec | None: return spread([(clock.at(int(m.group(1))), float(m.group(n))) for _, m, _ in g[k] if m.group(n) is not None])
+    mem: Rec = {'footprint_mb': spread([(clock.at(f), v) for f, v in fp]), 'gpu_mb': by_t('memory', 3), 'headroom_mb': by_t('memory', 5), 'shared_textures': by_t('memory', 4)}
+    if g['glmem']: mem.update(footprint_mb=by_t('glmem', 2), gpu_mb=by_t('glmem', 3), gl_textures=by_t('glmem', 4))
+    if g['vkframe']: mem['vk_buffer_mb'] = by_t('vkframe', 2)
+    out['memory'] = {k: v for k, v in mem.items() if v} or None
+    # display-link latency
+    win = [{'i': i, 't_s': clock.at(f or int(m.group(2))), 'p50': float(m.group(7)), 'max': float(m.group(9)), 'ahead': float(m.group(5)), 'ahead_min': float(m.group(6))}
+           for i, m, f in g['link']]   # at the frame of the window's own lines before it (its presents only when none came before)
+    out['display_link'] = None
+    if win:
+        base = round(statistics.median(x['p50'] for x in win), 3); lim = base + 0.5 * frame_ms; raised: list[Rec] = []; k = 0
+        while k < len(win):
+            if win[k]['p50'] <= lim: k += 1; continue
+            j = k
+            while j + 1 < len(win) and win[j + 1]['p50'] > lim: j += 1
+            lo, hi = (win[k - 2]['i'] if k >= 2 else -1), win[k]['i']   # just before: since the window two before the first raised one
+            nlf = sum(1 for i, _, _ in g['longframe'] if lo < i < hi)
+            raised.append({'from_s': win[k - 1]['t_s'] if k else 0.0, 'to_s': win[j]['t_s'], 'windows': j - k + 1, 'p50_max_ms': max(x['p50'] for x in win[k:j + 1]),
+                           'before': list(dict.fromkeys(e['what'] for e in events if lo < e['i'] < hi)) + ([nof(nlf, 'long frame')] if nlf else []), 'to_the_end': j == len(win) - 1})
+            k = j + 1
+        lm = g['link'][-1][1]
+        out['display_link'] = {'windows': len(win), 'frame_ms': round(frame_ms, 2), 'enqueue_p50_ms': base, 'enqueue_max_ms': max(x['max'] for x in win),
+                               'ahead_p50_ms': med([x['ahead'] for x in win]), 'ahead_min_ms': min(x['ahead_min'] for x in win),
+                               'empty_ticks': int(lm.group(3)), 'merged': int(lm.group(4)), 'raised': raised, 'p50_by_window': [[x['t_s'], x['p50']] for x in win]}
+    # long frames
+    lfs: list[Rec] = []
+    for (_, m, _), after in zip(g['longframe'], lf_after):
+        r: Rec = {'frame': int(m.group(1)), 't_s': float(m.group(2)), 'ms': float(m.group(3)), 'submit_ms': float(m.group(4)), 'gpu_ms': float(m.group(5)), 'pipelines': int(m.group(6)),
+                  'libraries': int(m.group(7)), 'make_ms': float(m.group(8)), 'uploads': int(m.group(9)), 'reuploads': int(m.group(10)), 'upload_mb': float(m.group(11)),
+                  'upload_ms': float(m.group(12))}
+        r['causes'] = lf_causes(r, after, frame_ms); lfs.append(r)
+    by = collections.Counter(next(key for word, key in CAUSE_KEY if r['causes'][0].startswith(word)) for r in lfs)
+    mins_run = (out['duration_s'] or 0) / 60
+    out['long_frames'] = {'count': len(lfs), 'per_min': round(len(lfs) / mins_run, 2) if mins_run else None, 'by_cause': dict(by.most_common()),
+                          'top': sorted(lfs, key=lambda r: -r['ms'])[:top]} if lfs else None
+    # events
+    sus = [e for e in events if e['what'] == 'graphics suspended'] or [e for e in events if e['what'] == 'background']
+    res = [e for e in events if e['what'] == 'resumed']
+    out['events'] = {'background': len(sus), 'resumed': len(res), 'focus_changes': sum(1 for e in events if e['kind'] == 'focus'),
+                     'ended_in_background': bool(sus) and (not res or res[-1]['i'] < sus[-1]['i']),
+                     'list': [{'t_s': e['t'], 'what': e['what']} for e in events if e['kind'] in ('app', 'focus', 'audio', 'menu', 'controller', 'memory')]}
+    # audio, saves, RED
+    au = g['audio']
+    out['audio'] = {'callbacks': sum(int(m.group(3)) for _, m, _ in au), 'underruns': sum(int(m.group(4)) for _, m, _ in au),
+                    'zero_padded_ms': round(sum(float(m.group(5)) for _, m, _ in au), 1), 'game_reports': len(g['game_underrun']),
+                    'windows': [{'t_s': clock.at(f), 'stream': int(m.group(1)), 'underruns': int(m.group(4)), 'ms': float(m.group(5))} for _, m, f in au if int(m.group(4))][:top]
+                    } if au or g['game_underrun'] else None
+    sc, ss = g['save_commit'], g['save_sync']
+    out['saves'] = {'commits': len(sc), 'commit_us_max': max((int(m.group(2)) for _, m, _ in sc), default=None),
+                    'sync': dict(collections.Counter(re.split(r'[:,;]', norm(m.group(1)))[0] for _, m, _ in ss).most_common())} if sc or ss else None
+    out['red'] = {'lines': sum(red.values()), 'kinds': dict(red.most_common())}
+    out['crash'] = crash
+    return out
+
+
+# ---------------------------------------------------------------- text
+
+def g3(v: Any) -> str:   # a number as the log gives it, short
+    if v is None: return '–'
+    if isinstance(v, bool): return 'yes' if v else 'no'
+    if isinstance(v, float): return f'{v:.4g}' if abs(v) < 1e4 else f'{v:.0f}'
+    return str(v)
+
+
+def nof(n: int, word: str) -> str: return f'{n} {word}' + ('' if n == 1 else 'es' if word.endswith('s') else 's')
+
+
+def mins(s: float | None) -> str: return '–' if s is None else f'{s:.0f} s' if s < 120 else f'{s / 60:.1f} min'
+
+
+def wrap(items: list[str], width: int = 120) -> list[str]:
+    out, cur = [], ''
+    for x in items:
+        if cur and len(cur) + 2 + len(x) > width: out.append(cur + ','); cur = x
+        else: cur = f'{cur}, {x}' if cur else x
+    return out + ([cur] if cur else [])
+
+
+def at_times(evs: list[Rec], limit: int) -> list[str]:   # events grouped by the second they came at: "1218 s: focus 2, background, …"
+    groups: list[tuple[float, list[str]]] = []
+    for e in evs:
+        if groups and abs(groups[-1][0] - e['t_s']) < 1: groups[-1][1].append(e['what'])
+        else: groups.append((e['t_s'], [e['what']]))
+    out = [f"{t:.0f} s: {', '.join(dict.fromkeys(ws))}" for t, ws in groups[:limit]]
+    return out + ([f'… {len(groups) - limit} more'] if len(groups) > limit else [])
+
+
+def spread_text(x: Rec | None, unit: str = ' MB') -> str:
+    if not x: return '–'
+    slope = f", {x['per_10min']:+g}{unit} per 10 min" if x['per_10min'] is not None else ''
+    return f"{x['first']:g} → {x['last']:g}{unit} (least {x['min']:g}, most {x['max']:g}{slope})"
+
+
+def title(s: Rec) -> str:
+    b = s['build'] or {}
+    return (f"{b.get('name') or 'game'} ({b.get('profile') or 'no build line'}): {s['lines']} lines, up to frame {s['last_frame']}, about {mins(s['duration_s'])} in "
+            f"(times from {s['time_basis']})")
+
+
+def render(s: Rec, top: int) -> list[str]:
+    L = [title(s)]
+
+    def row(label: str, *texts: str) -> None:
+        for k, t in enumerate(x for x in texts if x): L.append(f"{label if k == 0 else '':<13}{t}")
+    b, d, p, f = s['build'] or {}, s['device'], s['pipelines'], s['frames']
+    row('build', f"commit {b['commit']}, shader chain {b['chain']}" + (f", {d['sdk']}" if d['sdk'] else '') if b else 'no build line')
+    row('device', ', '.join(x for x in (d['gpu'], d['arch'], d['family'] and f"GPU family {d['family']}", d['metal4'] and f"Metal 4 {d['metal4']}") if x) or 'no GPU line',
+        f"{d['memory_gb']:.2f} GB for the app, Extended Virtual Addressing {'in effect' if d['eva'] else 'not in effect'}"
+        + (f", largest address block {d['address_space_gb']:.2f} GB" if d['address_space_gb'] else '') if d['memory_gb'] is not None else '')
+    row('graphics', API.get(s['api'] or '', 'graphics API not in the log') + (f", present tick {s['present']}" if s['present'] else ''))
+    row('controller', ', '.join(s['controllers']) or 'none connected (touch controls)')
+    sw = [f'{k}={v}' + ('' if s['env_from'].get(k) == 'default' else f" ({s['env_from'][k]})") for k, v in sorted(s['env'].items())]
+    row('switches', *(wrap(sw) or ['no launcher or env lines']), *(f"{c['t_s']:.0f} s: {c['key']}={c['value']} (in-game menu)" for c in s['env_changes']))
+    pr, pb, ar, wr, ip = p['prepare'], p['prebuild'], p['archive'], p['written'], p['in_play']
+    done = 'done' if not pb or pb.get('done') else f"not done in the log, at {pb.get('at', 0):.0f} of"
+    ptexts = (
+        f"prepare {p['prepare_s']:g} s" + (f" ({pr['lines']} lines, progress screen {'shown' if pr['progress_screen'] else 'not shown'}; bases {pr['bases_compiled']} compiled, "
+                                          f"{pr['bases_from_archive']} from the archive, {pr['reused']} reused)" if pr else '') if p['prepare_s'] is not None else '',
+        f"prebuild {done}: {pb['pairs']:.0f} pairs, {pb['built']:.0f} built, {pb['archived']:.0f} already archived, {pb['failed']:.0f} failed, "
+        f"{pb['secs']:g} s" if pb else '',
+        ', '.join(x for x in (f"archive {ar['files']} files, {ar['mb']:g} MB (opened in {ar['open_ms']:g} ms)" if ar else '',
+                              f"the app's own archive {p['bundled']['mb']:g} MB" if isinstance(p['bundled'], dict) else "the app's own archive left out" if p['bundled'] else '',
+                              f"written this run {wr['bases']} bases in {wr['files']} files, {wr['mb']:g} MB" if wr else '',
+                              f"compiled while playing {ip['bases']} bases ({ip['ms'] / 1000:.3g} s of compiling, all threads)" if ip else '') if x),
+        f"Vulkan: {p['vk']['compiled']} compiled, {p['vk']['failed']} failed, submissions waited {p['vk']['waits']} times, {p['vk']['wait_ms']:g} ms" if p['vk'] else '',
+        f"OpenGL: {p['gl']['built']} built in {p['gl']['ms']:g} ms (longest {p['gl']['longest_ms']:g} ms), {p['gl']['after_first_frame']} after the first frame, {p['gl']['after_ms']:g} ms"
+        if p['gl'] else '')
+    row('pipelines', *([x for x in ptexts if x] or ['no pipeline lines']))
+    if f:
+        row('frames', f"{f['windows']} windows: frame time p50 {g3(f['p50_ms'])} ms, p95 {g3(f['p95_ms'])} (worst window {g3(f['p95_worst_ms'])}), on screen p99 {g3(f['p99_onscreen_ms'])} "
+                      f"(worst {g3(f['p99_onscreen_worst_ms'])}), longest {g3(f['max_ms'])} ms; GPU p50 {g3(f['gpu_p50_ms'])} ms",
+            f"{f['on_screen']} frames on screen, {f['dropped']} dropped ({g3(f['dropped_pct'])}%), {f['discarded']} of them discarded; {g3(f['fps'])} fps (the power windows' median)",
+            'worst windows: ' + '; '.join(f"{w['t_s']:.0f} s {w['dropped']} dropped (p99 {w['p99_ms']:g} ms)" for w in f['worst']) if f['worst'] else '')
+    else: row('frames', 'no on-screen or timing lines (they come from NVN\'s present: a Vulkan or OpenGL game has none)')
+    pw = s['power']
+    if pw: row('power', f"CPU {g3(pw['watts_p50'])} W (median; {g3(pw['watts_mean'])} W over the run), {g3(pw['mj_per_frame_p50'])} mJ per frame, CPU {g3(pw['cpu_pct_p50'])}% of a core "
+                        f"({g3(pw['pcore_pct_p50'])}% on performance cores), wakeups {g3(pw['wakeups_p50'])}/s, GPU {g3(pw['gpu_ms_s_p50'])} ms/s; thermal state at most {pw['thermal_max']}")
+    row('heat', *(at_times([{'t_s': x['t_s'], 'what': x['what']} for x in s['timeline']], 3 * top) or ['no thermal or Low Power Mode lines']))
+    mm = s['memory'] or {}
+    row('memory', *(f'{label} {spread_text(mm[k], unit)}' for k, label, unit in (('footprint_mb', 'footprint', ' MB'), ('gpu_mb', 'GPU allocated', ' MB'),
+                                                                                ('headroom_mb', 'headroom to the limit', ' MB'), ('shared_textures', 'shared textures', ''),
+                                                                                ('gl_textures', 'OpenGL textures', ''), ('vk_buffer_mb', 'Vulkan buffers', ' MB')) if k in mm))
+    if not mm: row('memory', 'no memory lines')
+    dl = s['display_link']
+    if dl:
+        row('display link', f"game enqueue to target display p50 {g3(dl['enqueue_p50_ms'])} ms (median of {dl['windows']} windows; most {g3(dl['enqueue_max_ms'])}), submission ahead "
+                            f"{g3(dl['ahead_p50_ms'])} ms (least {g3(dl['ahead_min_ms'])}); {nof(dl['empty_ticks'], 'empty tick')}, {dl['merged']} merged",
+            *(f"{r['from_s']:.0f}–{r['to_s']:.0f} s: {nof(r['windows'], 'window')} up to {g3(r['p50_max_ms'])} ms{', to the end' if r['to_the_end'] else ''}; just before: "
+              f"{', '.join(r['before']) or 'nothing in the log'}" for r in dl['raised'][:3 * top]))
+        if not dl['raised']: row('', f"no window more than half a frame ({g3(dl['frame_ms'] / 2)} ms) above the median")
+    lf = s['long_frames']
+    if lf:
+        row('long frames', f"{lf['count']} ({g3(lf['per_min'])} a minute): " + ', '.join(f'{k} {n}' for k, n in lf['by_cause'].items()) + ' (by what each spent its time on first)',
+            *(f"{r['t_s']:.0f} s frame {r['frame']}: {r['ms']:g} ms, {'; '.join(r['causes'])}" for r in lf['top']))
+    ev = s['events']
+    row('events', f"in the background {nof(ev['background'], 'time')}, back {ev['resumed']}, {nof(ev['focus_changes'], 'focus change')}" + ('; the log ends in the background' if ev['ended_in_background'] else ''),
+        *at_times(ev['list'], 3 * top))
+    au = s['audio']
+    if au: row('audio', f"{au['underruns']} underruns in {au['callbacks']} device callbacks ({au['zero_padded_ms']:g} ms zero-padded)" + (f"; the game reported {au['game_reports']}" if au['game_reports'] else ''),
+               *(f"{w['t_s']:.0f} s: {w['underruns']} (stream #{w['stream']}, {w['ms']:g} ms)" for w in au['windows']))
+    sv = s['saves']
+    if sv: row('saves', f"{nof(sv['commits'], 'commit')}" + (f" (longest clone + swap {sv['commit_us_max'] / 1000:g} ms)" if sv['commit_us_max'] else '')
+               + (', save sync: ' + ', '.join(f'{k} {n}' for k, n in sv['sync'].items()) if sv['sync'] else ''))
+    rd = s['red']
+    row('RED', f"{nof(rd['lines'], 'line')} of {nof(len(rd['kinds']), 'kind')}" + (':' if rd['kinds'] else ''), *(f'{n}× {k}' for k, n in list(rd['kinds'].items())[:top]))
+    if s['crash']: row('crash', s['crash'])
+    return L
+
+
+# ---------------------------------------------------------------- two logs
+
+# (label, path in the summary, direction: -1 lower is better, +1 higher is better, 0 neither, as for the totals that grow with a run's length)
+METRICS = (('commit', 'build.commit', 0), ('shader chain', 'build.chain', 0), ('profile', 'build.profile', 0), ('GPU', 'device.gpu', 0), ('architecture', 'device.arch', 0),
+           ('GPU family', 'device.family', 0), ('memory for the app (GB)', 'device.memory_gb', 0), ('graphics', 'api', 0), ('present', 'present', 0),
+           ('frames', 'last_frame', 0), ('duration (s)', 'duration_s', 0),
+           ('prepare (s)', 'pipelines.prepare_s', -1), ('prebuild (s)', 'pipelines.prebuild.secs', -1), ('archive files', 'pipelines.archive.files', 0), ('archive (MB)', 'pipelines.archive.mb', 0),
+           ('bases written', 'pipelines.written.bases', 0), ('bases compiled while playing', 'pipelines.in_play.bases', 0),
+           ('frame time p50 (ms)', 'frames.p50_ms', -1), ('frame time p95 (ms)', 'frames.p95_ms', -1), ('worst window p95 (ms)', 'frames.p95_worst_ms', -1),
+           ('on-screen p99 (ms)', 'frames.p99_onscreen_ms', -1), ('worst window p99 (ms)', 'frames.p99_onscreen_worst_ms', -1), ('longest frame (ms)', 'frames.max_ms', -1),
+           ('dropped (%)', 'frames.dropped_pct', -1), ('frames per second', 'frames.fps', 1), ('GPU p50 (ms)', 'frames.gpu_p50_ms', -1),
+           ('CPU W (median)', 'power.watts_p50', -1), ('CPU W (over the run)', 'power.watts_mean', -1), ('mJ per frame', 'power.mj_per_frame_p50', -1), ('CPU % of a core', 'power.cpu_pct_p50', -1),
+           ('on performance cores (%)', 'power.pcore_pct_p50', 0), ('wakeups per second', 'power.wakeups_p50', -1), ('GPU ms/s', 'power.gpu_ms_s_p50', -1), ('thermal state at most', 'power.thermal_max', -1),
+           ('footprint, last (MB)', 'memory.footprint_mb.last', 0), ('footprint, most (MB)', 'memory.footprint_mb.max', 0), ('footprint per 10 min (MB)', 'memory.footprint_mb.per_10min', -1),
+           ('GPU allocated, last (MB)', 'memory.gpu_mb.last', 0), ('GPU allocated per 10 min', 'memory.gpu_mb.per_10min', -1), ('headroom, least (MB)', 'memory.headroom_mb.min', 1),
+           ('shared textures, last', 'memory.shared_textures.last', 0), ('shared textures per 10 min', 'memory.shared_textures.per_10min', -1),
+           ('enqueue to display p50 (ms)', 'display_link.enqueue_p50_ms', -1), ('enqueue to display, most (ms)', 'display_link.enqueue_max_ms', -1),
+           ('submission ahead p50 (ms)', 'display_link.ahead_p50_ms', 0), ('stretches a frame above', 'display_link.raised', -1),
+           ('long frames', 'long_frames.count', 0), ('long frames per minute', 'long_frames.per_min', -1), ('background / back', 'events.background', 0), ('focus changes', 'events.focus_changes', 0),
+           ('audio underruns', 'audio.underruns', -1), ('save commits', 'saves.commits', 0), ('[RED] lines', 'red.lines', -1), ('[RED] kinds', 'red.kinds', -1))
+
+
+def dig(s: Any, path: str) -> Any:
+    for k in path.split('.'): s = s.get(k) if isinstance(s, dict) else None
+    return len(s) if isinstance(s, (list, dict)) else s
+
+
+COUNTS = {'thermal state at most', 'stretches a frame above', 'audio underruns', '[RED] lines', '[RED] kinds'}   # counts: from none, any is a change
+FLOOR = {'prepare (s)': 0.5, 'prebuild (s)': 0.5}   # seconds under this are the noise of a start (an archive hit reads 0)
+
+
+def change(a: Any, b: Any, sense: int, label: str = '') -> str:
+    if a == b: return ''
+    if isinstance(a, bool) or isinstance(b, bool) or not isinstance(a, (int, float)) or not isinstance(b, (int, float)): return 'differs'
+    d = b - a; rel = d / abs(a) if a else None
+    # a tenth: the noise of one run against another; from 0 there is no tenth, so only a count says better or worse
+    noise = (abs(rel) < 0.1 if rel is not None else label not in COUNTS) or abs(d) < FLOOR.get(label, 0)
+    word = '' if not sense or noise else ' better' if d * sense > 0 else ' worse'
+    return f'{d:+.4g}' + (f' ({rel:+.0%})' if rel is not None else '') + word
+
+
+def compare(a: Rec, b: Rec) -> Rec:
+    rows = [{'label': lb, 'a': dig(a, p), 'b': dig(b, p), 'change': change(dig(a, p), dig(b, p), sense, lb)} for lb, p, sense in METRICS if dig(a, p) is not None or dig(b, p) is not None]
+    keys = sorted(set(a['env']) | set(b['env']))
+    sw = {k: [a['env'].get(k), b['env'].get(k)] for k in keys if a['env'].get(k) != b['env'].get(k)}
+    ra, rb = a['red']['kinds'], b['red']['kinds']
+    red = {'only_a': {k: n for k, n in ra.items() if k not in rb}, 'only_b': {k: n for k, n in rb.items() if k not in ra},
+           'changed': {k: [ra[k], rb[k]] for k in ra if k in rb and ra[k] != rb[k]}}
+    return {'rows': rows, 'switches': sw, 'red': red}
+
+
+def render_pair(a: Rec, b: Rec, c: Rec, names: tuple[str, str], top: int) -> list[str]:
+    w = max(16, min(30, max(len(g3(r[k])) for r in c['rows'] for k in ('a', 'b')) + 1))
+    L = [f'A {names[0]}: {title(a)}', f'B {names[1]}: {title(b)}', '', f"{'':<32}{'A':>{w}}{'B':>{w}}  change"]
+    L += [f"{r['label']:<32}{g3(r['a'])[:w - 1]:>{w}}{g3(r['b'])[:w - 1]:>{w}}  {r['change']}" for r in c['rows']]
+    if c['switches']: L += ['', 'switches that differ (A | B):'] + [f'  {k}: {g3(va)} | {g3(vb)}' for k, (va, vb) in c['switches'].items()]
+    else: L += ['', 'the same switches']
+    for side, s in (('A', a), ('B', b)):
+        if s['env_changes']: L.append(f'{side} in-game menu: ' + ', '.join(f"{x['t_s']:.0f} s {x['key']}={x['value']}" for x in s['env_changes']))
+    rd = c['red']
+    for label, d in (('[RED] kinds only in A', rd['only_a']), ('[RED] kinds only in B', rd['only_b'])):
+        if d: L += ['', f'{label}:'] + [f'  {n}× {k}' for k, n in list(d.items())[:top]] + ([f'  … {len(d) - top} more'] if len(d) > top else [])
+    if rd['changed']: L += ['', '[RED] kinds in both, other counts (A | B):'] + [f'  {na} | {nb}  {k}' for k, (na, nb) in list(rd['changed'].items())[:top]]
+    for side, s in (('A', a), ('B', b)):
+        dl, lf = s['display_link'], s['long_frames']
+        for r in (dl or {}).get('raised', [])[:top]:
+            L.append(f"{side} display link {r['from_s']:.0f}–{r['to_s']:.0f} s up to {r['p50_max_ms']:g} ms; just before: {', '.join(r['before']) or 'nothing in the log'}")
+        if lf: L.append(f'{side} longest frames: ' + '; '.join(f"{r['t_s']:.0f} s {r['ms']:g} ms: {r['causes'][0]}" for r in lf['top']))
+    return L
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description='Summarize an iPhone or iPad log.txt, or compare two.', epilog='Documented in docs/development.md, Reading a device log.')
+    ap.add_argument('logs', nargs='+', metavar='LOG', help='one log for a summary, two to compare')
+    ap.add_argument('--top', type=int, default=5, metavar='N', help='how many of the longest frames, [RED] kinds and worst windows to list (default 5)')
+    ap.add_argument('--json', action='store_true', help='machine-readable output')
+    a = ap.parse_args(argv)
+    if len(a.logs) > 2: ap.error('one log, or two to compare')
+    sums = []
+    for p in a.logs:
+        try: sums.append(read(Path(p).read_text(errors='replace'), max(1, a.top)))
+        except OSError as e: print(f'devlog: cannot read {p}: {e.strerror or e}', file=sys.stderr); return 2
+    if len(sums) == 1: print(json.dumps(sums[0], indent=1) if a.json else '\n'.join(render(sums[0], max(1, a.top))))
+    else:
+        c = compare(*sums)
+        print(json.dumps({'a': sums[0], 'b': sums[1], **c}, indent=1) if a.json else '\n'.join(render_pair(sums[0], sums[1], c, (Path(a.logs[0]).name, Path(a.logs[1]).name), max(1, a.top))))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

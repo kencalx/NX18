@@ -71,7 +71,7 @@
 #   baseline (a deleted bindless access, extra entry points: shader_regressions.losses), the interface check, a crash, a hang, the frame not reached), REGRESSION (new [RED] lines, a screenshot beyond the tolerance, frame time, memory or prepare time worse beyond it), CHANGED (MSL or numbers differ, nothing worse),
 #   PASS. "known" lists failures the baseline has too (they do not fail the check).
 # Exit status: 0 = no regression, 1 = a regression (NEW-FAIL or REGRESSION) in some game, 2 = a harness error (and no regression found).
-import argparse, collections, concurrent.futures as cf, ctypes, datetime, fcntl, hashlib, importlib.util, json, os, re, shutil, signal, struct, subprocess, sys, time, traceback
+import argparse, collections, concurrent.futures as cf, ctypes, datetime, fcntl, functools, hashlib, importlib.util, json, os, re, shutil, signal, struct, subprocess, sys, time, traceback
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -815,12 +815,14 @@ def run_heavy(cmd, log, cwd, env, a, what):
 
 # ---------------------------------------------------------------- one game run
 
-_libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
+@functools.cache
+def _libproc():   # loaded at the first measurement, not at import: the log readers below import on any system (scripts/devlog.py reads iPhone logs with them)
+    return ctypes.CDLL('/usr/lib/libproc.dylib')
 
 
 def footprint(pid):   # (current, lifetime peak) physical footprint in bytes (proc_pid_rusage, RUSAGE_INFO_V4)
     buf = ctypes.create_string_buffer(512)
-    if _libproc.proc_pid_rusage(pid, 4, buf) != 0: return None
+    if _libproc().proc_pid_rusage(pid, 4, buf) != 0: return None
     v = struct.unpack_from('<16x35Q', buf.raw)
     return v[7], v[28]
 
