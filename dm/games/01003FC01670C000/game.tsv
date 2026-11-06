@@ -40,6 +40,7 @@ shader_groups	ROBO=cpk
 shader_note	13 Sentinels: Aegis Rim shaders
 # the NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0): the pipeline archive made offline holds the main0_z vertex entries (dm/gfx/tools/pso_offline.py)
 depth_mode	zero
-# Metal 4 pipelines on the iPhone take an archive made for the device's own GPU: with the generic g18p (A19) archive the game crashed in Metal 4 on an iPhone 18 Pro Max (A20 Pro),
-# with --gpu g19p it ran (2026-11-05, README.md). pso_mtl4 on gives every iOS build an archive, which the NSP script makes for the GPUs the build is for (g19p, g16g)
+# Metal 4 pipelines on the iPhone take their bases from an archive made for the device's own GPU: a build with the generic g18p (A19) archive, which an A20 never opens, so it
+# compiled the bases itself, crashed in Metal 4 on an iPhone 18 Pro Max (A20 Pro); with --gpu g19p it ran (2026-11-05, README.md). pso_mtl4 on gives every iOS build an archive,
+# which the NSP script makes for the GPUs the build is for (g19p, g16g)
 pso_mtl4	on

@@ -178,7 +178,8 @@ else TD=$G/dm; program_tables; LJ=$G/dm/launcher.json; fi
 # MTLDevice.architecture names them: g19p = the A20 Pro of the iPhone 18 Pro Max, g16g = the M4 of the iPad Pro; none = no archive), so the device does not build them on its first start
 # (Breath of the Wild: 15,767 bases, 7-8 minutes on an iPhone 17 Pro Max). The host opens only the archive named after its device's GPU (nvn_mtl.m pso_bundle_open).
 # Without DM_PSO_GPUS a game whose profile sets pso_mtl4 on gets the archive for the GPUs of the devices the app is for, as the NSP script makes it (its DEVICE_ARCH): DM_DEVICE_FAMILY 1 = g19p,
-# 2 = g16g, 1,2 = both. 13 Sentinels crashed Metal 4 on an A20 Pro with a g18p archive and ran with a g19p one (dm/games/01003FC01670C000/README.md); the profile's pso_gpu key does not
+# 2 = g16g, 1,2 = both: another family's archive is never opened. 13 Sentinels' build with a g18p archive compiled its bases on an A20 Pro and crashed in Metal 4; with a g19p one it ran
+# (dm/games/01003FC01670C000/README.md). The profile's pso_gpu key does not
 # change this default. The games that do not set pso_mtl4 on get none. It goes into the app as pso/ (main.m hands it to the host as
 # DM_PSO_BUNDLE), with the pulling vertex libraries the bases are made of. Each architecture adds about 650 MB to the app (Breath of the Wild; 220 MB in the IPA) and 4 minutes to the first build;
 # made again only when its inputs change (the libraries, the pairs, the profile's depth_mode, metal-tt)
