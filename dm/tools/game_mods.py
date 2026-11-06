@@ -2,7 +2,9 @@
 """A game's mods, packed into its app by the NSP script (scripts/build_ipa_from_nsp.py, MODS / --mods; by default the folder named mods beside the game's files):
   · code patches: Atmosphère IPS / IPS32 files named after a module's build ID (atmosphere/exefs_patches/<mod>/<build ID>.ips) and IPSwitch text patches (*.pchtxt, which name
     their build in an @nsobid line), as yuzu, Ryujinx and Atmosphère apply them, written into the decompressed code module (main, subsdk*, sdk, rtld) before the rewriter
-    (patch_nso.py) reads it. An iPhone app's code pages are signed, so this is the only way a code patch (a 60 fps patch, a resolution patch) reaches the game there;
+    (patch_nso.py) reads it. An iPhone app's code pages are signed, so this is the only way a code patch (a 60 fps patch, a resolution patch) reaches the game there. A patch
+    (one @enabled block of a .pchtxt, or one IPS file) that writes outside the module's text, ro and data (a code cave in its bss, which only an emulator runs), or whose code
+    branches out of the module's text, is left out whole, with a [RED] line; of a patch that holds a code cave and the hook into it, only those (judge_patches);
   · RomFS file replacements (LayeredFS): every file under a folder named romfs (atmosphere/contents/<title ID>/romfs/..., <mods>/<title ID>/<mod>/romfs/...) replaces the
     game file of the same path, or is added; the game's RomFS image (DMROMFS1, romfs_image.py) gets a new index that names them, its own data kept as it was;
   · cheats: Atmosphère cheat files under a folder named cheats, <build ID>.txt; a .txt with another name is taken as the packed build's. They are packed into the app, which copies
@@ -13,10 +15,13 @@ program with the folders of its own title ID, the application's + the program's 
 RomFS is not modded, and the report says so. A file or folder whose name starts with '.' or '-' is skipped, so renaming a mod's folder to -name turns it off without deleting it.
 Usage on its own (a check, nothing written): game_mods.py <mods folder> <title ID> [ExeFS folder]"""
 import bisect, hashlib, os, re, shutil, struct, sys
+from array import array
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import a64_words as a64
 import nso
 
 NSO_HEADER = 0x100   # IPS offsets count from the NSO's header, as Atmosphère's loader patches the module (ldr_patcher.cpp: the header is protected, the module's memory follows)
@@ -206,56 +211,341 @@ def nso_modules(exefs):
     return out
 
 
+class Item(NamedTuple):
+    """One code patch, written or left out whole: an @enabled block of a .pchtxt, or an IPS / IPS32 file"""
+    what: str        # its name in the report: '<file>: <block>', or the file
+    records: list    # [(offset as the file gives it, bytes)]
+    mod: str         # the mod it belongs to (mod_name): a patch that needs another one of its mod is looked for there
+
+
+class LeftOut(NamedTuple):
+    """A patch patch_exefs did not write, and why (its [RED] line in the report)"""
+    module: str
+    what: str
+    mod: str
+    why: str
+
+
 def code_patches(found, modules, files=None, adapt=None):
-    """{module name: [(source description, [(offset, bytes)])]} of the patch files that name one of the modules' builds, in path order, and the report lines.
+    """{module name: [Item]} of the patch files that name one of the modules' builds, in path order, and the report lines.
     files: the patch files to take (default: all of found's); adapt(records, what, report) may change a file's records (the ultrawide aspect, adapt_aspect)"""
-    plan, report = {}, []
+    plan: dict[str, list[Item]] = {}
+    report = []
     for p in (found.ips if files is None else files):
-        rel = p.relative_to(found.root)
+        rel, mod = p.relative_to(found.root), mod_name(p, found.root)
         if p.suffix.lower() == '.pchtxt':
             try: bid, patches = parse_pchtxt(p.read_text(encoding='utf-8', errors='replace'), str(rel))
             except ModError as e: report.append(f'skipped {rel}: {e}'); continue
             if not bid: report.append(f'skipped {rel}: no @nsobid line names its build'); continue
-            mod = next((m for m, (_, mo) in modules.items() if build_matches(bid, mo.build_id)), None)
-            if not mod: report.append(f'not for this version: {rel} (build {bid[:16]})'); continue
+            module = next((m for m, (_, mo) in modules.items() if build_matches(bid, mo.build_id)), None)
+            if not module: report.append(f'not for this version: {rel} (build {bid[:16]})'); continue
             for tp in patches:
-                if tp.enabled: plan.setdefault(mod, []).append((f'{rel}: {tp.name}', adapt(tp.records, f'{rel}: {tp.name}', report) if adapt else tp.records))
-                else: report.append(f'off in its file (@disabled): {rel}: {tp.name}')
+                what = f'{rel}: {tp.name}'
+                if tp.enabled: plan.setdefault(module, []).append(Item(what, adapt(tp.records, what, report) if adapt else tp.records, mod))
+                else: report.append(f'off in its file (@disabled): {what}')
             continue
         bid = p.name.split('.')[0]
-        mod = next((m for m, (_, mo) in modules.items() if build_matches(bid, mo.build_id)), None)
-        if not mod:
+        module = next((m for m, (_, mo) in modules.items() if build_matches(bid, mo.build_id)), None)
+        if not module:
             report.append(f'not for this version: {rel}' + ('' if HEX.fullmatch(bid) else ' (an .ips is named after the build ID of the module it patches)'))
             continue
-        try: recs = parse_ips(p.read_bytes(), str(rel)); plan.setdefault(mod, []).append((str(rel), adapt(recs, str(rel), report) if adapt else recs))
+        try: recs = parse_ips(p.read_bytes(), str(rel)); plan.setdefault(module, []).append(Item(str(rel), adapt(recs, str(rel), report) if adapt else recs, mod))
         except ModError as e: report.append(f'skipped {rel}: {e}')
     return plan, report
 
 
+# A patch is judged before anything is written (judge_patches), since what it does is one change, and its records only together:
+#  · (a) its records, past the NSO header, must write only the module's text, ro and data. A byte in its bss (a code cave there: on a Switch Atmosphère maps the bss writable
+#    and not executable, so only an emulator runs it), in the padding between two segments (the module's file does not hold it) or past the module is a change Nintanium cannot
+#    carry, and the patch is left out whole. A zero byte there changes nothing (that memory is zero at start, or is not the module's) and is not counted: apply_records cuts
+#    those past the data with its note, as before. One exception, the shape of a hook and its cave in one block: when each run of those records (records within NEAR bytes of
+#    each other) is entered by a direct branch of the patch's own code in the text, the cave and the records of the patch's text that branch or refer into it (to a fixpoint)
+#    are left out, and the rest is kept as a patch of its own (judged as one by (b) and (c)), unless nothing is left or a record left lies within NEAR bytes of a record taken out
+#    of the text (a hook's neighbour belongs to the hook);
+#  · (b) the direct branches its code makes (the aligned words of the text it writes, all or part of, as they read once the patches kept are in: B / BL, B.cond, CBZ / CBNZ,
+#    TBZ / TBNZ) must land in the text: the iPhone runs only the module's signed pages, so a branch into its ro, data or bss ends the app. A word several patches write is
+#    blamed on the last of them without whose bytes it would be no such branch (_culprit), so an earlier patch fine on its own is judged again without the later one. A word
+#    that a literal load of the patches' code reads is data and is not decoded. Indirect jumps (an address made by ADRP / ADR or loaded, then BR / BLR) are not followed;
+#  · (c) a patch whose code refers (any of the above, or an ADR, an ADRP with its ADD / LDR / STR, a literal load) into what a left-out part of the same mod and module writes is
+#    left out too, to a fixpoint: a hook in one block whose cave is another block.
+# ro and data are never decoded as code. A patch that writes only the module's segments (and zeros), and whose branches stay in its text, is written as before, byte for byte.
+SEGMENT_NAMES = ('text', 'ro', 'data')
+ADRP_USER_WORDS = 8   # an add / ldr / str up to 8 instructions after an adrp takes the page's low bits (nso_match's and cheat_anchor's rule)
+NEAR = 16   # records closer than this belong together: the runs of a code cave, a hook and the records beside it
+
+
+class Verdict(NamedTuple):
+    """judge_patches' verdict on one patch: the indices of its records to write (all of them, none, or those left once its code cave is taken out), and each part of it left
+    out, as (its name, its [RED] report line)"""
+    write: tuple
+    left: tuple
+
+
+class _Part(NamedTuple):   # a patch, or one of the two parts of a patch whose code cave is taken out
+    item: int     # the patch's index
+    recs: list    # [(index into the patch's records, image offset, bytes)]
+    what: str
+    mod: str
+
+
+def _image_records(recs, header=NSO_HEADER):
+    """[(index, image offset, bytes)] of the records as they land in the module's memory image: the header's part cut (it is never patched), empty ones dropped
+    (apply_records' rule)"""
+    out = []
+    for i, (off, data) in enumerate(recs):
+        at = off - header
+        if at < 0: data, at = data[-at:], 0
+        if data: out.append((i, at, bytes(data)))
+    return out
+
+
+def _first_outside(m, at, d):
+    """The first image offset of the record (at, d) that is in none of module m's segments and is not zero, or None. Two segments that touch, with no padding between them,
+    count as one; a zero byte outside them changes nothing (its memory is zero at start, or is not the module's)"""
+    k, n = at, at + len(d)
+    while k < n:
+        seg = next(((mo, sz) for mo, sz in m.segments if mo <= k < mo + sz), None)
+        if seg: k = seg[0] + seg[1]; continue
+        hi = min([mo for mo, _ in m.segments if mo > k] + [n])
+        nz = next((j for j in range(k - at, hi - at) if d[j]), None)
+        if nz is not None: return at + nz
+        k = hi
+    return None
+
+
+def _bss_end(m):
+    (do, ds) = m.segments[2]
+    return (do + ds + m.bss + 0xfff) & ~0xfff
+
+
+def _offset(module, a):
+    return f'{module}+{a:#x}' if a >= 0 else f'{module}-{-a:#x}'
+
+
+def _where(m, a):
+    """What lies at image offset a of module m (nso.Module): one of its segments, the padding between two, its bss, or nothing of it"""
+    (_, _), (ro, _), (do, _) = m.segments
+    if a < 0: return 'before the module'
+    for name, (mo, sz) in zip(SEGMENT_NAMES, m.segments):
+        if mo <= a < mo + sz: return f'in its {name}'
+    if a < ro: return 'in the padding between its text and ro, which the module\'s file does not hold'
+    if a < do: return 'in the padding between its ro and data, which the module\'s file does not hold'
+    if a < _bss_end(m): return 'in its bss, past its data (memory the module\'s file does not hold)'
+    return 'past the module\'s end (after its bss)'
+
+
+def _cannot(m, a):
+    """Why Nintanium cannot carry a byte at image offset a, outside module m's segments (_where says where that is)"""
+    if m.text_end <= a < (m.text_end + 0xfff) & ~0xfff: return 'a Switch runs code there, in the rest of its text\'s last page, but Nintanium carries only what the module\'s file holds'
+    if a < m.segments[2][0]: return 'Nintanium carries only what the module\'s file holds'
+    return 'Nintanium cannot carry a code cave or a bss write, which only an emulator runs'
+
+
+def _text_with(m, recs):
+    """Module m's text, [0, text_end) of its image, with the records recs [(index, image offset, bytes)] written over it in order (what lies past the text cut)"""
+    te = m.text_end; text = bytearray(m.image[:te])
+    for _, at, d in recs:
+        hi = min(at + len(d), te)
+        if at < hi: text[at:hi] = d[:hi - at]
+    return text
+
+
+def _word(text, a):
+    """The aligned word at image offset a of a text (_text_with)"""
+    return int.from_bytes(text[a:a + 4], 'little')
+
+
+def _literal_size(w):
+    """The bytes a literal load (a PC-relative LDR, LDRSW, or LDR of an FP / SIMD register) reads: 4, 8 or 16; 0 for a PRFM or any other word"""
+    if w & 0x3b000000 != 0x18000000: return 0
+    return ((4, 8, 4, 0), (4, 8, 16, 0))[w >> 26 & 1][w >> 30]
+
+
+def _refers(m, text, a, w):
+    """(lo, hi): the bytes the word w at image offset a refers to (pc_relative_target: a branch's target, the bytes a literal load reads, an ADRP's page or the address it makes
+    with the add / ldr / str after it that takes its low bits), or None for a word that refers to nothing"""
+    lo = a64.pc_relative_target(w, a)
+    if lo is None: return None
+    if w & 0x3b000000 == 0x18000000: n = _literal_size(w); return (lo, lo + n) if n else None   # a PRFM reads nothing
+    if not a64.is_adrp(w): return lo, lo + 1
+    for k in range(1, ADRP_USER_WORDS + 1):
+        if a + 4 * k + 4 > m.text_end: break
+        u = _word(text, a + 4 * k); low = a64.adrp_user_lo(u, w & 31)
+        if low is not None: return lo + low, lo + low + 1
+        if a64.ends_pairing(u, w & 31): break
+    return lo, lo + 0x1000
+
+
+def _written_by(ranges, lo, hi):
+    """The name of the first patch of ranges [(start, end, name)] that writes a byte of [lo, hi), or None"""
+    return next((what for a, b, what in ranges if lo < b and a < hi), None)
+
+
+def _bad_branch(w, a, te):
+    t = a64.direct_branch_target(w, a)
+    return t is not None and not 0 <= t < te
+
+
+def _culprit(m, writers, a):
+    """The part to blame for the aligned word at a, a direct branch out of the text: writers [(part, image offset, bytes)] are the kept parts' records that cross the word,
+    in the order they are written. Of the parts whose bytes the word holds, the last one without whose bytes (each back to what was there before it) the word is no such branch;
+    if there is none, the last of them"""
+    stack = [[(-1, m.image[k])] for k in range(a, a + 4)]
+    for p, at, d in writers:
+        for k in range(max(a, at), min(a + 4, at + len(d))): stack[k - a].append((p, d[k - at]))
+    own = sorted({s[-1][0] for s in stack} - {-1}, reverse=True)
+    for c in own:
+        w = bytes(next(v for p, v in reversed(s) if p != c) for s in stack)
+        if not _bad_branch(int.from_bytes(w, 'little'), a, m.text_end): return c
+    return own[0]
+
+
+def _cave_split(m, recs, first):
+    """Rule (a)'s exception: (the indices of the records to take out, None) when a patch's records outside module m's segments are a code cave its own code enters, else
+    (None, None, or (the offset of a record left, of a record of the text taken out) when the first lies next to the second). recs: the patch's _image_records; first:
+    {index: its _first_outside}"""
+    te = m.text_end
+    full = _text_with(m, recs)
+    cut = {i for i, _, _ in recs if first[i] is not None}
+    while True:   # the records of the text whose words, as they read with the records left, branch or refer into those taken out: the hook
+        text = _text_with(m, [r for r in recs if r[0] not in cut])
+        cave = [(at, at + len(d), 'cave') for i, at, d in recs if i in cut]
+        more = set()
+        for i, at, d in recs:
+            if i in cut: continue
+            for a in range(at & ~3, min(at + len(d), te - 3), 4):
+                ref = _refers(m, text, a, _word(text, a))
+                if ref and _written_by(cave, *ref): more.add(i); break
+        if not more: break
+        cut |= more
+    hooks = sorted((at, at + len(d)) for i, at, d in recs if i in cut and first[i] is None)
+    entries = {a64.direct_branch_target(_word(full, a), a) for lo, hi in hooks for a in range(lo & ~3, min(hi, te - 3), 4)}
+    runs: list[list[int]] = []
+    for at, n in sorted((at, len(d)) for i, at, d in recs if first[i] is not None):
+        if runs and at < runs[-1][1] + NEAR: runs[-1][1] = max(runs[-1][1], at + n)
+        else: runs.append([at, at + n])
+    if not all(any(t is not None and lo <= t < hi for t in entries) for lo, hi in runs): return None, None   # not a cave its code enters: a write, or another patch's cave
+    rest = sorted((at, at + len(d)) for i, at, d in recs if i not in cut)
+    if not rest: return None, None
+    near = next(((r[0], h[0]) for r in rest for h in hooks if r[0] < h[1] + NEAR and h[0] < r[1] + NEAR), None)
+    return (None, near) if near else (cut, None)
+
+
+def judge_patches(module, m, items):
+    """[Verdict] of the patches of module (nso.Module m), one per item, by the rules above. items: [Item] in the order they are written"""
+    te = m.text_end
+    parts: list[_Part] = []
+    out: dict[int, str] = {}   # the parts left out: their [RED] lines
+    for i, it in enumerate(items):
+        recs = _image_records(it.records)
+        first = {k: _first_outside(m, at, d) for k, at, d in recs}
+        bad = [f for f in first.values() if f is not None]
+        if not bad: parts.append(_Part(i, recs, it.what, it.mod)); continue
+        f = min(bad); cut, near = _cave_split(m, recs, first)
+        if cut is None:
+            why = '' if near is None else (f'; its other records are left out with them, as its record at {_offset(module, near[0])} lies next to its code that enters '
+                                           f'them, at {_offset(module, near[1])}, and may belong to it')
+            out[len(parts)] = (f'[RED] {module}: {it.what}: left out: {len(bad)} of its {len(recs)} records lie outside {module}\'s text, ro and data, the first at '
+                               f'{_offset(module, f)}, {_where(m, f)}: {_cannot(m, f)}{why}')
+            parts.append(_Part(i, recs, it.what, it.mod)); continue
+        hooks = sorted(at for k, at, _ in recs if k in cut and first[k] is None)
+        nr = len(recs) - len(cut)
+        out[len(parts)] = (f'[RED] {module}: {it.what}: left out of it: its code cave, {len(bad)} records outside {module}\'s text, ro and data from {_offset(module, f)}, '
+                           f'{_where(m, f)}, and {"the record" if len(hooks) == 1 else f"the {len(hooks)} records"} of its code in the text that '
+                           f'{"leads" if len(hooks) == 1 else "lead"} there, at {_offset(module, hooks[0])}{"" if len(hooks) == 1 else " and on"}: {_cannot(m, f)}. '
+                           f'The rest of it, {nr} of its {len(recs)} records, is kept as a patch of its own')
+        parts.append(_Part(i, [r for r in recs if r[0] in cut], f'{it.what}: its code cave at {_offset(module, f)} and the code that enters it', it.mod))
+        parts.append(_Part(i, [r for r in recs if r[0] not in cut], it.what, it.mod))
+    while True:   # the parts kept so far, written in order: who writes each byte of the text last, and the words as they then read
+        kept = [p for p in range(len(parts)) if p not in out]
+        text = _text_with(m, [r for p in kept for r in parts[p].recs])
+        owner = array('i', [-1]) * te
+        for p in kept:
+            for _, at, d in parts[p].recs:
+                hi = min(at + len(d), te)
+                if at < hi: owner[at:hi] = array('i', [p]) * (hi - at)
+        words = sorted({a for p in kept for _, at, d in parts[p].recs for a in range(at & ~3, min(at + len(d), te - 3), 4)})
+        data: set[int] = set()   # the words a literal load of those reads: data, not code
+        for a in words:
+            w = _word(text, a); n = _literal_size(w)
+            t = a64.pc_relative_target(w, a) if n else None
+            if t is not None: data.update(range((t + 3) & ~3, t + n - 3, 4))
+        left: dict[str, list] = {}   # what each mod's parts left out write
+        for p in out:
+            for _, at, d in parts[p].recs: left.setdefault(parts[p].mod, []).append((at, at + len(d), parts[p].what))
+        new: dict[int, str] = {}
+        for a in words:
+            own = set(owner[a:a + 4]) - {-1}
+            if a in data or own <= new.keys(): continue
+            w = _word(text, a); t = a64.direct_branch_target(w, a)
+            if t is not None and not 0 <= t < te:
+                c = _culprit(m, [(p, at, d) for p in kept for _, at, d in parts[p].recs if at < a + 4 and a < at + len(d)], a)
+                if c not in new:
+                    cave = _written_by(left.get(parts[c].mod, []), t, t + 1)
+                    new[c] = (f'[RED] {module}: {parts[c].what}: left out: the patch\'s code at {_offset(module, a)} branches to {_offset(module, t)}, outside the module\'s code '
+                              f'({_where(m, t)}{f", where {cave} puts its code" if cave else ""}): the iPhone runs only signed pages')
+                continue
+            ref = _refers(m, text, a, w)
+            if ref is None: continue
+            for p in sorted(own - new.keys()):
+                dep = _written_by(left.get(parts[p].mod, []), *ref)
+                if dep: new[p] = (f'[RED] {module}: {parts[p].what}: left out: its code at {_offset(module, a)} refers to {_offset(module, ref[0])}, which {dep} writes, and that '
+                                  'is left out (this code may need it, as a hook needs its cave)')
+        if not new: break
+        out.update(new)
+    verdicts = []
+    for i, it in enumerate(items):
+        ps = [p for p in range(len(parts)) if parts[p].item == i]
+        whole = len(ps) == 1 and ps[0] not in out
+        write = tuple(range(len(it.records))) if whole else tuple(sorted(k for p in ps if p not in out for k, _, _ in parts[p].recs))
+        verdicts.append(Verdict(write, tuple((parts[p].what, out[p]) for p in ps if p in out)))
+    return verdicts
+
+
 def patch_exefs(exefs, dst, found, files=None, adapt=None):
     """dst: a copy of the ExeFS folder with the code patches written into its modules (other files hard-linked, never written through). Returns the report lines,
-    and the names of the modules changed (none: dst is a plain copy). files / adapt: as code_patches"""
+    the names of the modules changed (none: dst is a plain copy) and the patches left out ([LeftOut], judge_patches; each has its [RED] line in the report, in its
+    place). A module whose patches kept write nothing once some are left out is not changed. files / adapt: as code_patches"""
     modules = nso_modules(exefs)
-    plan, report = code_patches(found, modules, files, adapt)
+    notes: dict[str, list[str]] = {}
+    def noting(recs, what, rep, adapt=adapt):   # adapt's lines by patch: a patch left out whole loses its line, which would read as if its change were in
+        assert adapt is not None
+        n = len(rep); out = adapt(recs, what, rep); notes.setdefault(what, []).extend(rep[n:]); return out
+    plan, report = code_patches(found, modules, files, noting if adapt else None)
+    verdict = {mod: judge_patches(mod, modules[mod][1], items) for mod, items in plan.items()}
+    for mod, items in plan.items():
+        for it, v in zip(items, verdict[mod]):
+            if v.left and not v.write:
+                for line in notes.pop(it.what, []): report.remove(line)
+    def writes(mod):   # the bytes the patches kept write into the module's image
+        size = len(modules[mod][1].image)
+        return sum(max(0, min(len(d), size - at)) for it, v in zip(plan[mod], verdict[mod]) for _, at, d in _image_records([it.records[k] for k in v.write]))
+    changed = sorted(mod for mod in plan if not any(v.left for v in verdict[mod]) or writes(mod))
     dst = Path(dst); dst.mkdir(parents=True, exist_ok=True)
     for p in sorted(Path(exefs).iterdir()):
-        if p.is_file() and p.name not in plan: link_or_copy(p, dst / p.name)
+        if p.is_file() and p.name not in changed: link_or_copy(p, dst / p.name)
+    left = []
     for mod, items in plan.items():
         path, m = modules[mod]
         image = bytearray(m.image)
         written: dict[int, str] = {}
-        for what, recs in items:
+        for it, v in zip(items, verdict[mod]):
+            for name, line in v.left: report.append(line); left.append(LeftOut(mod, name, it.mod, line))
+            if v.left and not v.write: continue
+            recs = [it.records[k] for k in v.write]
             for off, data in recs:   # a byte two patches both write: the later one (in path order) wins, and the report says so
                 for k in range(off, off + len(data)):
-                    if k in written and written[k] != what: report.append(f'[RED] {what} overwrites {written[k]} at {mod}+{k - NSO_HEADER:#x}'); break
-                for k in range(off, off + len(data)): written[k] = what
-            n, outside = apply_records(image, recs)
-            report.append(f'{mod}: {what}: {n} bytes in {len(recs)} records' + (f', {outside} records past the module\'s end ignored' if outside else ''))
+                    if k in written and written[k] != it.what: report.append(f'[RED] {it.what} overwrites {written[k]} at {mod}+{k - NSO_HEADER:#x}'); break
+                for k in range(off, off + len(data)): written[k] = it.what
+            n, outside = apply_records(image, recs)   # outside: records cut at the image's end, past which judge_patches kept only zeros (no change)
+            report.append(f'{mod}: {it.what}: {n} bytes in {len(recs)}{"" if len(recs) == len(it.records) else f" of its {len(it.records)}"} records'
+                          + (f', {outside} records past the module\'s end ignored' if outside else ''))
+        if mod not in changed: continue
         out = nso_with_image(path.read_bytes(), image)
         check = nso.load(out, f'{mod} (patched)')
-        assert check.image == image and check.build_id == m.build_id
+        assert check.image == image and check.build_id == m.build_id   # every byte written that the file does not hold is zero, as it was (judge_patches)
         tmp = dst / (mod + '.part'); tmp.write_bytes(out); os.replace(tmp, dst / mod)
-    return report, sorted(plan)
+    return report, changed, left
 
 
 # ---------- switchable mods: the launcher's High frame rate and Ultrawide ----------
@@ -364,10 +654,15 @@ def reloc_slots(image):
     return slots
 
 
+def fixups_header(fixups):
+    """{key: value text} of a rewritten module's fixups.tsv header lines ('# TEXT_END 0x...'; patch_nso.py)"""
+    return dict(l[2:].split() for l in Path(fixups).read_text().splitlines() if l.startswith('# ') and len(l[2:].split()) == 2)
+
+
 def file_pieces(fixups, size):
     """The pieces of a rewritten module's file as gen_embed.py maps them (patch_nso.py's fixups.tsv header): [(file start, file end, image start, code?)].
     Code: the text with its first ro page, and the patch area(s); the rest (ro, data) is the writable part"""
-    hdr = dict(l[2:].split() for l in Path(fixups).read_text().splitlines() if l.startswith('# ') and len(l[2:].split()) == 2)
+    hdr = fixups_header(fixups)
     PG = 0x4000; a = (int(hdr['TEXT_END'], 16) + PG - 1) & ~(PG - 1); po = int(hdr['PATCH_OFF'], 16)
     if po >= 0: return [(0, a, 0, True), (a, po, a, False), (po, size, po, True)]
     fl, bl = int(hdr['FILE_IMAGE_LEN'], 16), int(hdr.get('BACK_LEN', '0'), 16)   # patch area before the base (patch_nso.py FAR), maybe a back one (TWO)
@@ -382,7 +677,10 @@ META = ('fixups.tsv', 'gates.tsv', 'sites.tsv', 'cuts.tsv', 'changed.tsv', 'obs.
 def variant_runs(base_dir, var_dir, module, image):
     """The byte runs a variant rewrite of module changes against the base rewrite: [(kind 'c' (a code page, swapped whole on the iPhone) or 'w' (data), file offset,
     image offset, bytes)]. Raises ModError when the two rewrites differ in more than bytes (the mod changed an instruction the rewriter rewrites: its tables differ), in
-    size, or when a data run touches a word the loader relocates (image: the variant module's memory image, for its relocations)"""
+    size, when a data run touches a word the loader relocates (image: the variant module's memory image, for its relocations), or when a changed word of the text is a
+    direct branch out of the module's code (the text to its 16 KB page's end, and the patch areas: the iPhone runs only those signed pages). A backstop behind
+    patch_exefs, which leaves such a patch out before the rewrite (judge_patches): only the text's words are decoded, never the first ro page's or the patch area's
+    (before the base or after the module), nor a word a literal load of the changed words reads"""
     base_dir, var_dir = Path(base_dir), Path(var_dir)
     for f in META:
         a, b = base_dir / f'{module}.{f}', var_dir / f'{module}.{f}'
@@ -408,6 +706,20 @@ def variant_runs(base_dir, var_dir, module, image):
             if runs and runs[-1][0] == kind and runs[-1][1] + len(runs[-1][3]) == i and piece[0] <= runs[-1][1]: runs[-1] = (kind, runs[-1][1], runs[-1][2], runs[-1][3] + bytes(y[i:j]))   # across a block edge
             else: runs.append((kind, i, img_off, bytes(y[i:j])))
             i = j
+    te = int(fixups_header(base_dir / f'{module}.fixups.tsv')['TEXT_END'], 16)
+    code = [(p[2], p[2] + p[1] - p[0]) for p in pieces if p[3]]   # image ranges the iPhone maps as signed code
+    # the changed words of the text, which is at file offset = image offset (file_pieces' first piece); what a literal load of them reads is data, not code
+    words = sorted({a for kind, _, io, data in runs if kind == 'c' and 0 <= io < te for a in range(io & ~3, min(io + len(data), te - 3), 4)})
+    data = set()
+    for a in words:
+        w = struct.unpack_from('<I', y, a)[0]; n = _literal_size(w)
+        t = a64.pc_relative_target(w, a) if n else None
+        if t is not None: data.update(range((t + 3) & ~3, t + n - 3, 4))
+    for a in words:
+        t = a64.direct_branch_target(struct.unpack_from('<I', y, a)[0], a)
+        if a not in data and t is not None and not any(lo <= t < hi for lo, hi in code):
+            raise ModError(f'{module}: the mod\'s code at +{a:#x} branches to {"+" if t >= 0 else "-"}{abs(t):#x}, outside the module\'s code (its text and patch area): '
+                           'the iPhone runs only signed pages')
     return runs
 
 
@@ -583,7 +895,10 @@ if __name__ == '__main__':
     print(f'{len(found.ips)} code patch files, {len(found.romfs)} romfs folders, {len(found.cheats)} cheat files')
     for p, why in found.ignored: print(f'ignored {p}: {why}')
     if len(sys.argv) > 3:
-        plan, rep = code_patches(found, nso_modules(sys.argv[3]))
+        modules = nso_modules(sys.argv[3])
+        plan, rep = code_patches(found, modules)
         for line in rep: print(line)
-        for mod, items in plan.items():
-            for what, recs in items: print(f'{mod}: {what}: {len(recs)} records')
+        for mod, items in plan.items():   # what patch_exefs would write, and leave out with its [RED] lines
+            for it, v in zip(items, judge_patches(mod, modules[mod][1], items)):
+                for _, line in v.left: print(line)
+                if v.write or not v.left: print(f'{mod}: {it.what}: {len(v.write)}{"" if len(v.write) == len(it.records) else f" of its {len(it.records)}"} records')

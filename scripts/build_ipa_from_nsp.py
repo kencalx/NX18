@@ -1519,8 +1519,10 @@ def apply_mods(root, ext, work, ver, app, fps_ok=True, first=True):
     mods), the first two None when there is nothing of that kind. The modded extraction, <build folder>/mods/<version>/, has ext's layout and hard links of its files, but the code
     modules the patches change and a RomFS image with the mods' files in it (a clone of ext's on APFS, then a new index): ext is never written. The switchable mods (a frame-rate
     or ultrawide mod, by its folder's name; fps_ok False: the profile has the launcher's own Frame rate, so no frame-rate mod) are not written in: {role: {'mod', 'exefs',
-    'modules'}}, each an ExeFS folder with that mod over the modded one, which build_variants rewrites. Reused while the code patches (with their paths: a folder's name makes a
-    mod switchable), the RomFS mods, ext's code modules and RomFS and the tools are as at the last run. The cheats are not in that key: they are packed again at every run
+    'modules', and 'left_out': the names of its patches gm.patch_exefs left out, when there are any}}, each an ExeFS folder with that mod over the modded one, which build_variants
+    rewrites. A patch gm.patch_exefs leaves out (it writes past the module's data, or its code branches out of the module's code: an iPhone would end the app; of a patch with a
+    code cave, the cave and its hook) is not written, of a kept mod or a switchable one, with its [RED] line; a switchable mod with something left to write is still offered, with a
+    [RED] line naming what it lacks, and one with nothing left is not. Reused while the code patches (with their paths: a folder's name makes a mod switchable), the RomFS mods, ext's code modules and RomFS and the tools are as at the last run. The cheats are not in that key: they are packed again at every run
     (pack_mod_cheats; first False: a program of a game of several but its first), so a cheat's change makes nothing else again. <version>.romfs.key, written at every run, keys the RomFS mods alone (the shader stages take it)"""
     import game_mods as gm
     found = gm.scan(root, app)
@@ -1534,7 +1536,7 @@ def apply_mods(root, ext, work, ver, app, fps_ok=True, first=True):
     plan, _ = gm.code_patches(found, gm.nso_modules(ext / 'ExeFS'), keep)
     img, folder = ext / 'RomFS.img', ext / 'RomFS'
     romfs_stamp = (img.stat().st_size, img.stat().st_mtime_ns) if img.is_file() else None
-    tools = [Path(gm.__file__).resolve().parent / f for f in ('game_mods.py', 'romfs_image.py', 'romfs.py', 'nso.py')]
+    tools = [Path(gm.__file__).resolve().parent / f for f in ('game_mods.py', 'a64_words.py', 'romfs_image.py', 'romfs.py', 'nso.py')]
     romfs_mods = [*[('stat', d) for d in found.romfs], [str(d) for d in found.romfs]]
     key = fingerprint(('files', tools + found.ips), ('stat', ext / 'ExeFS'), romfs_stamp or ('stat', folder), *romfs_mods, [str(p.relative_to(root)) for p in found.ips], app, fps_ok)
     rk = out / f'{ver}.romfs.key'   # a mod's file of the same size leaves the image's names and sizes as they were, which is what the shader stages key a RomFS on
@@ -1556,9 +1558,10 @@ def apply_mods(root, ext, work, ver, app, fps_ok=True, first=True):
             if e.is_dir(): link_tree(e, tmp / e.name)
             elif e.is_file(): gm.link_or_copy(e, tmp / e.name)
         PROG.set(step='code patches')
-        crep, changed = gm.patch_exefs(ext / 'ExeFS', tmp / 'ExeFS', found, keep)
-        report += crep
-        if not changed and keep: report.append('code: no patch file names a build of this version')
+        crep, changed, left = gm.patch_exefs(ext / 'ExeFS', tmp / 'ExeFS', found, keep)
+        report += crep   # a patch left out has its [RED] line there: it is not written
+        if not changed and keep: report.append('code: nothing is left to write for this version once the patches above are left out: the code is the game\'s own' if left else
+                                               'code: no patch file names a build of this version')
         PROG.set(step='RomFS')
         if img.is_file():
             if found.romfs: report += gm.overlay_image(img, tmp / 'RomFS.img', found.romfs, root)
@@ -1571,10 +1574,18 @@ def apply_mods(root, ext, work, ver, app, fps_ok=True, first=True):
     variants, base_exefs = {}, (dst if want_ext else ext) / 'ExeFS'
     for role, (name, files) in chosen.items():   # each switchable mod over the modded modules, an ExeFS folder of its own
         vdir = out / f'{ver}_{role}' / 'ExeFS'; rmtree(vdir)   # <ver>_<role>/rewrite/ stays: build_variants reuses it by its own key, which hashes these modules
-        vrep, vmods = gm.patch_exefs(base_exefs, vdir, found, files, gm.adapt_aspect if role == 'ultrawide' else None)
+        vrep, vmods, vleft = gm.patch_exefs(base_exefs, vdir, found, files, gm.adapt_aspect if role == 'ultrawide' else None)
         report += vrep
-        if vmods: variants[role] = {'mod': name, 'exefs': str(vdir), 'modules': vmods}
-        else: report.append(f'{role}: {name} names no build of this version: no switchable {role} mod'); rmtree(vdir.parent)
+        label = 'High frame rate' if role == 'fps' else 'Ultrawide'
+        if vmods:
+            variants[role] = {'mod': name, 'exefs': str(vdir), 'modules': vmods}
+            if vleft:
+                variants[role]['left_out'] = [lo.what for lo in vleft]   # build_variants names them where it offers the role
+                report.append(f'[RED] {role}: {name}: left out of it (above): {"; ".join(lo.what for lo in vleft)}. The rest of the mod is offered ({label} in the launcher)')
+        else:
+            report.append(f'[RED] {role}: {name}: nothing of it is left to write for this version once the patches above are left out: {label} is not offered' if vleft else
+                          f'{role}: {name} names no build of this version: no switchable {role} mod')
+            rmtree(vdir.parent)
         if vmods and role == 'fps' and set(vmods) <= {'sdk'}:   # Nintendo's SDK: its graphics driver (NVN) and display service are the host's own, so a frame rate set there never takes
             report.append(f'[RED] {role}: {name} patches only the sdk module (Nintendo\'s system code, whose graphics driver and display service Nintanium replaces): it likely changes '
                           'nothing here. A mod that turns the present interval 2 into 1 there is what DM_PRESENT_INTERVAL=display does (the profile key present_interval_choice offers it)')
@@ -1644,7 +1655,7 @@ def variant_runs_cached(gm, patched, rw, m, module, key, env):
     """gm.variant_runs of module m's variant rewrite (rw) against the base rewrite (patched), kept in rw/<m>.runs.json for the next build: it compares two rewrites of a module of up to
     150 MB and parses the variant module's relocations after decompressing it (about 2.6 s for each role at every build before). Its key: the variant rewrite's (key: the variant module and the
     base rewrite's patched.bin and fixups.tsv by content, the rewriter's inputs), the base rewrite's other tables by content (a base rewrite run again can change one of them alone), the variant
-    rewrite's outputs by size, times and inode (only its rewrite writes them, and build_variants removes this file before one starts), and game_mods.py and nso.py, which compute the runs.
+    rewrite's outputs by size, times and inode (only its rewrite writes them, and build_variants removes this file before one starts), and game_mods.py, a64_words.py and nso.py, which compute the runs.
     A refusal (ModError) is kept too and raised again with its message, so the rows and the messages are those computing them again gives. A file that cannot be read or written is computed
     again, never an error. DM_VARIANT_RUNS_CACHE=0 computes them at every build, as before"""
     f = rw / f'{m}.runs.json'
@@ -1653,7 +1664,7 @@ def variant_runs_cached(gm, patched, rw, m, module, key, env):
     def stat(p):
         try: s = os.stat(p); return (p.name, s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_ino)
         except OSError: return (p.name, 'missing')
-    ck = fingerprint('variant runs', key, ('files', [patched / f'{m}.{x}' for x in gm.META] + [Path(gm.__file__), Path(nso.__file__)]),
+    ck = fingerprint('variant runs', key, ('files', [patched / f'{m}.{x}' for x in gm.META] + [Path(gm.__file__), Path(gm.a64.__file__), Path(nso.__file__)]),
                      [stat(rw / f'{m}.{x}') for x in ('patched.bin', *gm.META)])
     hit = None
     try:
@@ -1714,16 +1725,19 @@ def build_variants(py, repo, variants, patched, env, logs):
         ok, got = True, {}
         for m, rw, _, key in mods:
             if (role, m) in pending: begin([(role, m)]); run_rewrites([pending[(role, m)]], env, 1, done)
-            if (role, m) in failed: say(f'mods: {role}: {v["mod"]}: left out: the rewriter refused {m} with it (likely a word the game\'s profile patches too; {logs / f"rewrite_{m}_{role}.log"})'); ok = False; break
+            if (role, m) in failed: say(f'mods: [RED] {role}: {v["mod"]}: left out: the rewriter refused {m} with it (likely a word the game\'s profile patches too; {logs / f"rewrite_{m}_{role}.log"})'); ok = False; break
             try: got[m] = variant_runs_cached(gm, patched, rw, m, exefs / m, key, env)
-            except gm.ModError as e: say(f'mods: {role}: {v["mod"]}: left out: {e}'); ok = False; break
+            except gm.ModError as e: say(f'mods: [RED] {role}: {v["mod"]}: left out: {e}'); ok = False; break
         if not ok: continue
         for m, runs in got.items(): rows.setdefault(m, []).extend((role, r) for r in runs)
-        offered.append((role, v['mod'], sum(len(r) for r in got.values())))
+        offered.append((role, v['mod'], sum(len(r) for r in got.values()), v.get('left_out', [])))
     for m, rs in rows.items(): gm.write_variants(patched / f'{m}.variants', rs)
-    if offered: (patched / 'mods.tsv').write_text('# switchable mods the launcher offers (dm/games/settings.py mods:<role>): role\tmod\truns\n' + ''.join(f'{r}\t{n}\t{c}\n' for r, n, c in offered))
-    for r, n, c in offered: say(f'mods: {"High frame rate" if r == "fps" else "Ultrawide"} offered in the launcher: {n} ({c} changed byte runs)')
-    PROG.end(', '.join(r for r, _, _ in offered) or 'none could be offered')
+    if offered: (patched / 'mods.tsv').write_text('# switchable mods the launcher offers (dm/games/settings.py mods:<role>): role\tmod\truns\n' + ''.join(f'{r}\t{n}\t{c}\n' for r, n, c, _ in offered))
+    for r, n, c, lo in offered:   # a role the mods stage offers without some of its patches says so here too, where the build says what the launcher offers
+        label = "High frame rate" if r == "fps" else "Ultrawide"
+        say(f'mods: [RED] {label} offered in the launcher without part of it: {n} ({c} changed byte runs); left out in the mods stage: {"; ".join(lo)}' if lo else
+            f'mods: {label} offered in the launcher: {n} ({c} changed byte runs)')
+    PROG.end(', '.join(r for r, _, _, _ in offered) or 'none could be offered')
 
 
 def extracted_leftovers(ex, work, programs, mods_root):

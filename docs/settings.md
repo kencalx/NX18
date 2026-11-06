@@ -35,7 +35,7 @@ Shown only for a game packed with such a mod in its [mods folder](playing.md#mod
 
 **Ultrawide** is for the iPhone, whose screen is wider than 16:9. It renders a wider view, sets the mod's shape to the iPhone's screen where the mod keeps it as a number, and shows the picture as [Stretch](#picture) does, filling the screen. While it does, the [in-game menu](#in-game-menu) has no **Picture** row: the picture stays at Stretch until Ultrawide is turned off at the next start. On an iPad, whose screen is taller than 16:9, it stays off, and an iPad-only build (`--device ipad`) does not pack the Ultrawide mod at all (the build says `mods: Ultrawide left out`). A wider view draws more of the world, so it can run slower and warmer; a frame-rate mod doubles the work per second, so it uses more power and heat.
 
-A mod that changes code the app's own fixes for the game also change can't be switched. The packing script then leaves it out and says why.
+A mod that changes code the app's own fixes for the game also change can't be switched. The packing script then leaves it out and says why. A mod with a patch only an emulator runs ([Mods and patches](playing.md#mods-and-patches)) is offered without that patch, with a red line in the report; with nothing else left to write, it is not offered.
 
 ### Render scale
 

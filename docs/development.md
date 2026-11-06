@@ -394,6 +394,9 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --
 # the folders named with its own title ID (the application's + the program's index), and mods outside title folders go to every program. A DLC's folder (the application's + 0x1000 + its index)
 # is not packed: the report lists it as ignored ('a DLC's folder: a DLC's RomFS is not modded'). A folder whose name starts with - is off. The modded files are in <id>_build/mods/<version>/, the report in <id>_build/mods/<version>.txt.
 # A patch that changes an instruction the profile's own cuts change stops the rewrite (patch_nso.py checks their original bytes): turn that patch off. dm/tools/game_mods.py has the rules
+# A patch (one @enabled block of a .pchtxt, or one .ips) that writes past the module's text, ro and data (a code cave in its bss, which only an emulator runs), whose code branches out of
+# the module's text, or whose code needs a patch of its mod left out, is left out whole with a [RED] line; of a block that holds a cave and the hook into it, only those (game_mods.py
+# judge_patches; docs/reference/packing.md, Mods). game_mods.py <mods folder> <title ID> <ExeFS folder> prints what would be written and left out
 # Switchable mods: a mod folder named for a frame rate (60FPS) or an ultrawide shape (Ultrawide, 21.9) is not written in. The modules are rewritten once more with it, and where that
 # rewrite differs from the base one only in bytes (the same rewriter tables, no relocated word touched), <module>.variants beside the patched modules lists them and mods.tsv the roles
 # (build_variants). The launcher offers DM_MOD_FPS / DM_MOD_ULTRAWIDE for them; the host puts them in place before the game's first instruction (loader.c dm_mod_variants_apply), on the Mac by

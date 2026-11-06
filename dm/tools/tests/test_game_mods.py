@@ -5,6 +5,7 @@ import os
 import shutil
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,7 +18,7 @@ import game_mods as gm
 import nso
 import romfs
 import romfs_image
-from test_nso import make_nso, TEXT, RO
+from test_nso import make_nso, TEXT, RO, DATA
 
 TITLE = 0x0100ABCD12340000
 BUILD = bytes(range(0x20))   # make_nso's build ID
@@ -32,6 +33,30 @@ def ips(records, rle=()):
 
 def ips32(records):
     return b'IPS32' + b''.join(o.to_bytes(4, 'big') + len(d).to_bytes(2, 'big') + d for o, d in records) + b'EEOF'
+
+
+def pchtxt(*blocks, bid=BID[:40]):
+    """An IPSwitch text patch of @enabled blocks (name, [(image offset, bytes)]), with offset_shift 0x100 as mods write them, so an offset is the module image's"""
+    out = [f'@nsobid-{bid}', '@flag offset_shift 0x100', '']
+    for name, recs in blocks: out += [f'// {name}', '@enabled'] + [f'{at:08X} {d.hex().upper()}' for at, d in recs] + ['']
+    return '\n'.join(out) + '\n'
+
+
+# AArch64 words for synthetic patches
+NOP, MOV_W0_1, MOV_W0_2, BR_X16 = (struct.pack('<I', w) for w in (0xd503201f, 0x52800020, 0x52800040, 0xd61f0200))
+def enc_b(pc, to, link=False): return struct.pack('<I', (0x94000000 if link else 0x14000000) | ((to - pc) >> 2 & 0x3ffffff))
+def enc_bcond(pc, to): return struct.pack('<I', 0x54000000 | ((to - pc) >> 2 & 0x7ffff) << 5)
+def enc_cbz(pc, to): return struct.pack('<I', 0xb4000000 | ((to - pc) >> 2 & 0x7ffff) << 5)
+def enc_tbz(pc, to): return struct.pack('<I', 0x36000000 | ((to - pc) >> 2 & 0x3fff) << 5)
+def enc_adrp(pc, to, rd):
+    imm = ((to & ~0xfff) - (pc & ~0xfff)) >> 12
+    return struct.pack('<I', 0x90000000 | (imm & 3) << 29 | ((imm >> 2) & 0x7ffff) << 5 | rd)
+def enc_add(rd, rn, lo): return struct.pack('<I', 0x91000000 | lo << 10 | rn << 5 | rd)
+def enc_ldr_lit(pc, to, rt=0): return struct.pack('<I', 0x58000000 | ((to - pc) >> 2 & 0x7ffff) << 5 | rt)
+def enc_ldr_d_lit(pc, to, rt=0): return struct.pack('<I', 0x5c000000 | ((to - pc) >> 2 & 0x7ffff) << 5 | rt)   # ldr d<rt>, a literal of 8 bytes
+def enc_adr(pc, to, rd):
+    imm = to - pc
+    return struct.pack('<I', 0x10000000 | (imm & 3) << 29 | ((imm >> 2) & 0x7ffff) << 5 | rd)
 
 
 class Formats(unittest.TestCase):
@@ -155,8 +180,8 @@ class Folder(unittest.TestCase):
         self.put('exefs_patches/b/0000000000000000000000000000000000000000.ips', ips([(0x100, b'\xff')]))   # another build
         self.put('Mod/exefs/fps.pchtxt', f'@nsobid-{BID[:40]}\n@flag offset_shift 0x100\n// Fast\n@enabled\n00000020 AABBCCDD\n// Off\n@disabled\n00000030 11223344\n')
         dst = self.root / 'out'
-        report, changed = gm.patch_exefs(exefs, dst, gm.scan(self.mods, TITLE))
-        self.assertEqual(changed, ['main'])
+        report, changed, left = gm.patch_exefs(exefs, dst, gm.scan(self.mods, TITLE))
+        self.assertEqual(changed, ['main']); self.assertEqual(left, [])
         img = nso.read(dst / 'main').image
         self.assertEqual(img[0x10:0x14], b'\x1f\x20\x03\xd5')
         self.assertEqual(img[0x20:0x24], bytes.fromhex('AABBCCDD'))
@@ -215,6 +240,188 @@ class Folder(unittest.TestCase):
         mine = (out / f'{BID[:16]}.txt').read_text()
         self.assertIn('[Max HP]', mine); self.assertIn('[Moon Jump]', mine)
         self.assertTrue(any('not named after a build ID' in r for r in report))
+
+
+class Guard(unittest.TestCase):
+    """patch_exefs judges each patch before writing: records outside the module's text, ro and data (but a code cave its own code enters, taken out with its hook), a branch
+    out of its text, or code that needs a patch left out"""
+    TEXT = NOP * 0x500   # text 0..0x1400; make_nso puts ro at 0x2000..0x2bb8, data at 0x3000..0x4200, the bss after it to 0x9200 (0xa000 on whole pages)
+
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
+        self.root = Path(t.name); self.mods = self.root / 'mods'
+        self.exefs = self.root / 'ExeFS'; self.exefs.mkdir()
+        (self.exefs / 'main').write_bytes(bytes(make_nso((self.TEXT, RO, DATA))))
+
+    def put(self, rel, data: bytes | str):
+        p = self.mods / rel; p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data if isinstance(data, bytes) else data.encode())
+
+    def patch(self, files):   # files: {path in the mods folder: its content}; returns the report, the modules changed, the patches left out, main's image
+        for rel, data in files.items(): self.put(rel, data)
+        dst = self.root / 'out'
+        report, changed, left = gm.patch_exefs(self.exefs, dst, gm.scan(self.mods, TITLE))
+        return report, changed, left, nso.read(dst / 'main').image
+
+    def red(self, report): return [line for line in report if line.startswith('[RED]')]
+
+    def test_a_record_in_the_bss_leaves_its_patch_out_whole(self):
+        report, changed, left, img = self.patch({'Mod/exefs/p.pchtxt': pchtxt(('Cave', [(0x10, MOV_W0_1), (0x5000, NOP)]), ('Keep', [(0x20, MOV_W0_1)]))})
+        self.assertEqual(changed, ['main'])
+        self.assertEqual(img[0x10:0x14], NOP, 'none of the patch is written')
+        self.assertEqual(img[0x20:0x24], MOV_W0_1, 'the other patch is')
+        why = ("[RED] main: Mod/exefs/p.pchtxt: Cave: left out: 1 of its 2 records lie outside main's text, ro and data, the first at main+0x5000, in its bss, past its data "
+               "(memory the module's file does not hold): Nintanium cannot carry a code cave or a bss write, which only an emulator runs")
+        self.assertEqual(self.red(report), [why])
+        self.assertEqual(left, [gm.LeftOut('main', 'Mod/exefs/p.pchtxt: Cave', 'Mod', why)])
+        self.assertIn('main: Mod/exefs/p.pchtxt: Keep: 4 bytes in 1 records', report)
+
+    def test_padding_and_past_the_module_no_longer_stop_the_build(self):   # nso_with_image keeps only the segments: a byte in the padding failed its check (AssertionError)
+        report, changed, left, img = self.patch({f'{n}/{BID[:40]}.ips': ips([(0x100 + at, NOP)]) for n, at in (('a', 0x1400), ('b', 0x2c00), ('c', 0xa000), ('d', 0x13fe))})
+        self.assertEqual(changed, [], 'every patch left out: the module is the game\'s own')
+        self.assertEqual((self.root / 'out/main').read_bytes(), (self.exefs / 'main').read_bytes())
+        self.assertEqual([lo.what for lo in left], [f'{n}/{BID[:40]}.ips' for n in 'abcd'])
+        text = ("in the padding between its text and ro, which the module's file does not hold: a Switch runs code there, in the rest of its text's last page, but Nintanium "
+                "carries only what the module's file holds")
+        self.assertEqual([line.split(', the first at ')[1].split(', ', 1)[1] for line in self.red(report)],
+                         [text, "in the padding between its ro and data, which the module's file does not hold: Nintanium carries only what the module's file holds",
+                          "past the module's end (after its bss): Nintanium cannot carry a code cave or a bss write, which only an emulator runs", text])
+        self.assertIn('the first at main+0x1400,', self.red(report)[3], 'a record that runs past the text: its first byte outside')
+        self.assertEqual(img, nso.read(self.exefs / 'main').image)
+
+    def test_zeros_outside_the_segments_change_nothing(self):   # zero bytes in the padding or the bss, where the memory is zero at start: written, or cut with the note, as before
+        report, changed, left, img = self.patch({f'A/{BID[:40]}.ips': ips([(0x100 + 0x10, MOV_W0_1), (0x100 + 0x41f0, bytes(0x20)), (0x100 + 0x1400, bytes(0x10)), (0x100 + 0x6000, bytes(4))])})
+        self.assertEqual((left, changed), ([], ['main']))
+        self.assertEqual(report, [f"main: A/{BID[:40]}.ips: 36 bytes in 4 records, 2 records past the module's end ignored"])
+        self.assertEqual(img[0x10:0x14], MOV_W0_1); self.assertEqual(img[0x41f0:0x4200], bytes(0x10))
+
+    def test_the_hook_and_its_cave_in_one_block(self):   # Super Mario Odyssey's Ultrawide mod's shape: the mod, a hook into the bss and the cave's code there, in one block
+        cave = 0x5000
+        uw = [(0x40, MOV_W0_1), (0x100, enc_b(0x100, cave))] + [(cave + 4 * k, NOP) for k in range(16)] + [(cave + 0x40, enc_b(cave + 0x40, 0x104))]
+        report, changed, left, img = self.patch({'UW/exefs/p.pchtxt': pchtxt(('Ultrawide and HUD', uw), ('Layout', [(0x80, MOV_W0_2)]))})
+        why = ("[RED] main: UW/exefs/p.pchtxt: Ultrawide and HUD: left out of it: its code cave, 17 records outside main's text, ro and data from main+0x5000, in its bss, past "
+               "its data (memory the module's file does not hold), and the record of its code in the text that leads there, at main+0x100: Nintanium cannot carry a code cave or "
+               "a bss write, which only an emulator runs. The rest of it, 1 of its 19 records, is kept as a patch of its own")
+        self.assertEqual(left, [gm.LeftOut('main', 'UW/exefs/p.pchtxt: Ultrawide and HUD: its code cave at main+0x5000 and the code that enters it', 'UW', why)])
+        self.assertEqual(report, [why, 'main: UW/exefs/p.pchtxt: Ultrawide and HUD: 4 bytes in 1 of its 19 records', 'main: UW/exefs/p.pchtxt: Layout: 4 bytes in 1 records'])
+        self.assertEqual((img[0x40:0x44], img[0x100:0x104], img[0x80:0x84]), (MOV_W0_1, NOP, MOV_W0_2), 'the hook is not written, the rest of its block and the other block are')
+        self.assertEqual(changed, ['main'])
+
+    def test_a_block_with_a_cave_is_left_out_whole_unless_the_rest_stands_apart(self):
+        cave = [(0x5000 + 4 * k, NOP) for k in range(4)]
+        blocks = (('Next to the hook', [(0x40, MOV_W0_1), (0x108, MOV_W0_2), (0x100, enc_b(0x100, 0x5000))] + cave),   # a record beside the hook may belong to it
+                  ('Through a register', [(0x240, MOV_W0_1), (0x300, enc_adrp(0x300, 0x6000, 16)), (0x304, enc_add(16, 16, 0)), (0x308, BR_X16), (0x6000, NOP)]),   # no direct branch enters it
+                  ('A run no branch enters', [(0x440, MOV_W0_1), (0x500, enc_b(0x500, 0x7000)), (0x7000, NOP), (0x8000, NOP)]),
+                  ('Only the hook', [(0x600, enc_b(0x600, 0x8800)), (0x8800, NOP)]))
+        report, _, left, img = self.patch({'M/exefs/p.pchtxt': pchtxt(*blocks)})
+        self.assertEqual([lo.what.split(': ')[1] for lo in left], [b[0] for b in blocks])
+        self.assertTrue(left[0].why.endswith("; its other records are left out with them, as its record at main+0x108 lies next to its code that enters them, at main+0x100, and "
+                                             "may belong to it"), left[0].why)
+        self.assertIn('left out: 1 of its 5 records lie outside', left[1].why); self.assertIn('left out: 2 of its 4 records lie outside', left[2].why)
+        self.assertEqual(img[0:0x1400], self.TEXT)
+
+    def test_a_patch_whose_code_needs_one_left_out(self):
+        cave = 0x400   # a patch's own code in the text, with a record in the bss: left out, and every patch of its mod that goes there with it
+        blocks = (('Cave', [(cave, MOV_W0_1), (cave + 4, enc_b(cave + 4, 0x104)), (0x6000, NOP)]),
+                  ('Hook', [(0x100, enc_b(0x100, cave))]),                                                        # a branch into the cave's code
+                  ('Far hook', [(0x200, enc_adrp(0x200, cave, 16)), (0x204, enc_add(16, 16, cave & 0xfff)), (0x208, BR_X16)]),   # adrp + add + br there
+                  ('Chain', [(0x300, enc_b(0x300, 0x100))]),                                                       # into Hook's code: left out once Hook is
+                  ('Other', [(0x500, enc_b(0x500, 0x600)), (0x504, enc_ldr_lit(0x504, 0x3000))]),                   # nothing of the cave's
+                  ('Adr', [(0x340, enc_adr(0x340, cave + 4, 1))]), ('Literal', [(0x344, enc_ldr_lit(0x344, cave))]),
+                  ('Page', [(0x348, enc_adrp(0x348, cave, 2)), (0x34c, MOV_W0_1)]),                                     # an adrp whose add is not found: its whole page
+                  ('Prefetch', [(0x350, struct.pack('<I', 0xd8000000 | ((cave - 0x350) >> 2) << 5))]))                  # prfm (literal) reads nothing
+        report, changed, left, img = self.patch({'Mod/exefs/p.pchtxt': pchtxt(*blocks), 'Mod2/exefs/q.pchtxt': pchtxt(('Another mod', [(0x700, enc_b(0x700, cave))]))})
+        self.assertEqual([lo.what.split(': ')[1] for lo in left], ['Cave', 'Hook', 'Far hook', 'Chain', 'Adr', 'Literal', 'Page'])
+        self.assertEqual(left[1].why, "[RED] main: Mod/exefs/p.pchtxt: Hook: left out: its code at main+0x100 refers to main+0x400, which Mod/exefs/p.pchtxt: Cave writes, "
+                                      "and that is left out (this code may need it, as a hook needs its cave)")
+        self.assertIn('its code at main+0x200 refers to main+0x400, which Mod/exefs/p.pchtxt: Cave writes', left[2].why, 'the address adrp and add make')
+        self.assertIn('refers to main+0x100, which Mod/exefs/p.pchtxt: Hook writes', left[3].why)
+        self.assertEqual([lo.why.split('its code at ')[1].split(', which')[0] for lo in left[4:]], ['main+0x340 refers to main+0x404', 'main+0x344 refers to main+0x400',
+                                                                                                      'main+0x348 refers to main+0x0'])
+        self.assertEqual(img[0x350:0x354], struct.pack('<I', 0xd8000000 | ((cave - 0x350) >> 2) << 5))
+        self.assertEqual((img[0x100:0x104], img[0x200:0x204], img[0x300:0x304], img[cave:cave + 4]), (NOP,) * 4)
+        self.assertEqual(img[0x500:0x504], enc_b(0x500, 0x600)); self.assertEqual(img[0x700:0x704], enc_b(0x700, cave), 'another mod\'s patch is not judged by this one\'s')
+        self.assertEqual(report.index(left[0].why) + 1, report.index(left[1].why), 'each [RED] line in its patch\'s place')
+
+    def test_a_branch_out_of_the_text(self):
+        blocks = (('Into ro', [(0x100, enc_b(0x100, 0x2000))]), ('Into data', [(0x104, enc_b(0x104, 0x3000, link=True))]), ('B.cond', [(0x108, enc_bcond(0x108, 0x2100))]),
+                  ('CBZ', [(0x10c, enc_cbz(0x10c, 0x4300))]), ('TBZ', [(0x110, enc_tbz(0x110, 0x1400))]), ('Before', [(0x114, enc_b(0x114, -0x10))]),
+                  ('In the text', [(0x118, enc_b(0x118, 0x13fc)), (0x11c, enc_cbz(0x11c, 0)), (0x120, enc_tbz(0x120, 0x200))]))
+        report, changed, left, img = self.patch({'Mod/exefs/p.pchtxt': pchtxt(*blocks)})
+        self.assertEqual([lo.what.split(': ')[1] for lo in left], ['Into ro', 'Into data', 'B.cond', 'CBZ', 'TBZ', 'Before'])
+        self.assertEqual(left[0].why, "[RED] main: Mod/exefs/p.pchtxt: Into ro: left out: the patch's code at main+0x100 branches to main+0x2000, outside the module's code (in its ro): "
+                                      'the iPhone runs only signed pages')
+        self.assertEqual([lo.why.split('code (')[1].split(')')[0] for lo in left[1:]],
+                         ['in its data', 'in its ro', "in its bss, past its data (memory the module's file does not hold", "in the padding between its text and ro, which the module's file does not hold",
+                          'before the module'])
+        self.assertIn('branches to main-0x10,', left[5].why)
+        self.assertEqual(img[0x118:0x124], enc_b(0x118, 0x13fc) + enc_cbz(0x11c, 0) + enc_tbz(0x120, 0x200)); self.assertEqual(img[0x100:0x118], NOP * 6)
+
+    def test_a_branch_into_the_cave_of_a_patch_left_out_names_it(self):
+        report, _, left, _ = self.patch({'Mod/exefs/p.pchtxt': pchtxt(('Cave', [(0x5000, NOP)]), ('Hook', [(0x100, enc_b(0x100, 0x5000))]))})
+        self.assertIn("branches to main+0x5000, outside the module's code (in its bss, past its data (memory the module's file does not hold), where Mod/exefs/p.pchtxt: Cave puts its code)", left[1].why)
+
+    def test_part_of_a_word_makes_the_branch(self):   # the words as they read with the patch in: a record of one byte or two can turn a word into a branch
+        report, _, left, img = self.patch({'Mod/exefs/p.pchtxt': pchtxt(('Top byte', [(0x203, b'\x14')]), ('Halves', [(0x300, bytes.fromhex('0080')), (0x302, bytes.fromhex('0014'))]),
+                                                                       ('A word kept', [(0x403, b'\x52')]))})
+        self.assertEqual([lo.what.split(': ')[1] for lo in left], ['Top byte', 'Halves'])
+        self.assertIn('code at main+0x200 branches to main+0xc827c', left[0].why)   # 1f 20 03 14: b +0x3201f words
+        self.assertIn('code at main+0x300 branches to main+0x20300', left[1].why)
+        self.assertEqual(img[0x200:0x204] + img[0x300:0x304], NOP * 2); self.assertEqual(img[0x400:0x404], NOP[:3] + b'\x52')
+
+    def test_overwritten_bytes_belong_to_the_later_patch(self):   # a word the later patch writes whole is judged as its, not the earlier patch's
+        report, _, left, img = self.patch({'A/exefs/p.pchtxt': pchtxt(('Out', [(0x100, enc_b(0x100, 0x2000))])), 'B/exefs/p.pchtxt': pchtxt(('Over it', [(0x100, MOV_W0_1)]))})
+        self.assertEqual(left, []); self.assertEqual(img[0x100:0x104], MOV_W0_1)
+        self.assertIn('[RED] B/exefs/p.pchtxt: Over it overwrites A/exefs/p.pchtxt: Out at main+0x100', report)
+
+    def test_a_word_two_patches_write_is_blamed_on_the_one_that_makes_it_a_branch(self):
+        report, _, left, img = self.patch({'A/exefs/p.pchtxt': pchtxt(('Move', [(0x100, MOV_W0_1)])), 'B/exefs/p.pchtxt': pchtxt(('Top byte', [(0x103, b'\x17')]))})
+        self.assertEqual([lo.what for lo in left], ['B/exefs/p.pchtxt: Top byte'], 'the later patch made the move a branch: the earlier one is fine on its own')
+        self.assertEqual(img[0x100:0x104], MOV_W0_1)
+        out = enc_b(0x200, 0x2000)   # c0 07 00 14: a later byte that keeps it a branch out of the text leaves out the earlier patch, which made it one
+        report, _, left, img = self.patch({'A/exefs/p.pchtxt': pchtxt(('Move', [(0x100, MOV_W0_1)]), ('Out', [(0x200, out)])), 'B/exefs/p.pchtxt': pchtxt(('Top byte', [(0x103, b'\x17')]), ('Low', [(0x202, b'\x01')]))})
+        self.assertEqual([lo.what for lo in left], ['A/exefs/p.pchtxt: Out', 'B/exefs/p.pchtxt: Top byte'])
+        self.assertEqual(img[0x200:0x204], NOP[:2] + b'\x01' + NOP[3:], 'judged again without it: its byte over the game\'s word is no branch')
+
+    def test_the_check_on_its_own_says_what_is_left_out(self):   # game_mods.py <mods> <title ID> <ExeFS>: what patch_exefs would write, nothing written
+        cave = [(0x5000 + 4 * k, NOP) for k in range(4)]
+        for rel, data in {'UW/exefs/p.pchtxt': pchtxt(('Ultrawide', [(0x40, MOV_W0_1), (0x100, enc_b(0x100, 0x5000))] + cave), ('Out', [(0x200, enc_b(0x200, 0x2000))]))}.items():
+            self.put(rel, data)
+        r = subprocess.run([sys.executable, str(REPO / 'dm/tools/game_mods.py'), str(self.mods), f'{TITLE:016X}', str(self.exefs)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.splitlines()
+        self.assertEqual([line.split(': left out')[0] for line in lines if line.startswith('[RED]')], ['[RED] main: UW/exefs/p.pchtxt: Ultrawide', '[RED] main: UW/exefs/p.pchtxt: Out'])
+        self.assertIn('main: UW/exefs/p.pchtxt: Ultrawide: 1 of its 6 records', lines); self.assertNotIn('main: UW/exefs/p.pchtxt: Out: 1 records', lines)
+
+    def test_a_literal_the_code_loads_is_data(self):   # the low word of the double 0.0333 reads as a BL far out of the text
+        lit = struct.pack('<d', 0.0333); self.assertIsNotNone(gm.a64.direct_branch_target(struct.unpack('<I', lit[:4])[0], 0x108))
+        report, _, left, img = self.patch({'M/exefs/p.pchtxt': pchtxt(('Pool', [(0x100, enc_ldr_d_lit(0x100, 0x108)), (0x104, enc_b(0x104, 0x110)), (0x108, lit)]),
+                                                                      ('No load', [(0x200, lit)]))})
+        self.assertEqual([lo.what.split(': ')[1] for lo in left], ['No load'], 'a word no literal load reads is taken for code')
+        self.assertEqual(img[0x100:0x110], enc_ldr_d_lit(0x100, 0x108) + enc_b(0x104, 0x110) + lit)
+
+    def test_in_text_branches_ro_and_data_patches_are_written_as_before(self):   # the module and the report byte for byte what patch_exefs wrote before the judge
+        m = nso.read(self.exefs / 'main'); f = struct.pack('<f', 21 / 9)
+        blocks = (('Branches', [(0x100, enc_b(0x100, 0x13fc)), (0x104, enc_b(0x104, 0, link=True)), (0x108, enc_bcond(0x108, 0x400)), (0x10c, enc_cbz(0x10c, 0x10)),
+                                (0x110, enc_tbz(0x110, 0x120)), (0x114, enc_adrp(0x114, 0x3010, 1)), (0x118, enc_add(1, 1, 0x10)), (0x11c, enc_ldr_lit(0x11c, 0x2000))]),
+                  ('ro', [(0x2000, b'Hello, ro'), (0x2bb0, b'\xaa' * 8)]), ('data', [(0x3000, f), (0x41fc, b'\x01\x02\x03\x04')]),
+                  ('zeros', [(0x41f0, bytes(0x20)), (0x1400, bytes(0x10))]), ('empty', []))   # zeros into the bss and the padding; an @enabled block with no record
+        files = {'Mod/exefs/p.pchtxt': pchtxt(*blocks),
+                 f'Z/{BID[:40]}.ips': ips([(0x100 + 0x500, enc_b(0x500, 0x504)), (0x100 + 0x100, MOV_W0_2), (0xfe, b'\xee\xee' + MOV_W0_1[:2])])}   # its first two bytes in the NSO header, never patched
+        report, changed, left, img = self.patch(files)
+        self.assertEqual(left, []); self.assertEqual(changed, ['main'])
+        ref, lines, written = bytearray(m.image), [], {}
+        plan, _ = gm.code_patches(gm.scan(self.mods, TITLE), gm.nso_modules(self.exefs))
+        for what, recs, _ in plan['main']:   # patch_exefs before the judge
+            for off, data in recs:
+                for k in range(off, off + len(data)):
+                    if k in written and written[k] != what: lines.append(f'[RED] {what} overwrites {written[k]} at main+{k - 0x100:#x}'); break
+                for k in range(off, off + len(data)): written[k] = what
+            n, outside = gm.apply_records(ref, recs)
+            lines.append(f'main: {what}: {n} bytes in {len(recs)} records' + (f', {outside} records past the module\'s end ignored' if outside else ''))
+        self.assertEqual((self.root / 'out/main').read_bytes(), gm.nso_with_image((self.exefs / 'main').read_bytes(), ref))
+        self.assertEqual(report, lines); self.assertIn("main: Mod/exefs/p.pchtxt: zeros: 32 bytes in 2 records, 1 records past the module's end ignored", lines)
+        self.assertEqual(img[0x100:0x104], MOV_W0_2, 'the later file wins, as before'); self.assertEqual(img[0:2], MOV_W0_1[:2])
 
 
 class Switchable(unittest.TestCase):
@@ -281,6 +488,29 @@ class Switchable(unittest.TestCase):
             with self.assertRaises(gm.ModError): gm.variant_runs(a, b, 'main', bytes(0x40))
         (b / 'main.gates.tsv').write_text('x')
         with self.assertRaises(gm.ModError): gm.variant_runs(a, b, 'main', bytes(0x40))
+
+    def test_variant_runs_refuse_a_branch_out_of_the_code(self):   # the backstop behind patch_exefs: a changed word of the text that branches out of the signed code
+        a, b = self.root / 'a', self.root / 'b'; a.mkdir(); b.mkdir()
+        def runs(hdr, size, *edits):
+            x = bytearray(size); y = bytearray(x)
+            for at, w in edits: y[at:at + len(w)] = w
+            for d, data in ((a, x), (b, y)): (d / 'main.patched.bin').write_bytes(data); (d / 'main.fixups.tsv').write_text(hdr)
+            return gm.variant_runs(a, b, 'main', bytes(0x40))
+        near = '# TEXT_END 0x3800\n# PATCH_OFF 0x20000\n'   # the text to 0x3800, its 16 KB page to 0x4000 (code too), the patch area from 0x20000
+        self.assertTrue(runs(near, 0x24000, (0x10, enc_b(0x10, 0x37fc)), (0x14, enc_b(0x14, 0x20010)), (0x18, enc_b(0x18, 0x3f00, link=True))), 'into the code: kept')
+        self.assertTrue(runs(near, 0x24000, (0x3900, enc_b(0x3900, 0x8000)), (0x21000, enc_b(0x21000, 0x8000))), 'the first ro page and the patch area are not decoded')
+        with self.assertRaisesRegex(gm.ModError, r"main: the mod's code at \+0x10 branches to \+0x8000, outside the module's code \(its text and patch area\): the iPhone runs only signed pages"):
+            runs(near, 0x24000, (0x10, enc_b(0x10, 0x8000)))
+        with self.assertRaisesRegex(gm.ModError, r'at \+0x20 branches to \+0x400020'): runs(near, 0x24000, (0x22, b'\x10\x14'))   # two bytes that make a b +0x100000 words
+        with self.assertRaisesRegex(gm.ModError, r'at \+0x30 branches'): runs(near, 0x24000, (0x30, enc_cbz(0x30, 0x5000)))
+        far = '# TEXT_END 0x4000\n# PATCH_OFF -0x8000\n# FILE_IMAGE_LEN 0x10000\n'   # the patch area before the base
+        self.assertTrue(runs(far, 0x18000, (0x10, enc_b(0x10, -0x7ff0))), 'into the patch area before the base')
+        with self.assertRaisesRegex(gm.ModError, r'branches to -0x10000'): runs(far, 0x18000, (0x10, enc_b(0x10, -0x10000)))
+        two = far + '# BACK_OFF 0x10000\n# BACK_LEN 0x4000\n'   # and a back one after the image: a run before the base is not the text, whatever its image offset reads in the file
+        self.assertTrue(runs(two, 0x1c000, (0x10010, NOP), (0x14010, enc_b(0x14010, 0x8000))), 'a patch area word changed, a branch-like word elsewhere in it')
+        lit = struct.pack('<d', 0.0333)   # a literal the changed code loads is data; the same word no load reads is taken for a branch
+        self.assertTrue(runs(near, 0x24000, (0x100, enc_ldr_d_lit(0x100, 0x108) + enc_b(0x104, 0x110) + lit)))
+        with self.assertRaisesRegex(gm.ModError, r'at \+0x200 branches'): runs(near, 0x24000, (0x200, lit))
 
 
 class NspScript(unittest.TestCase):
@@ -462,6 +692,67 @@ class NspScript(unittest.TestCase):
         _, _, none = self.nsp.apply_mods(self.mods, self.ext, self.root / 'work2', 'v0', TITLE, fps_ok=False)
         self.assertEqual(none, {}, 'a profile with its own Frame rate takes no frame-rate mod')
 
+    def test_a_switchable_mod_is_offered_without_the_patches_left_out(self):
+        uw = self.mods / '21.9 Ultrawide/exefs/uw.pchtxt'; uw.parent.mkdir(parents=True)
+        uw.write_text(pchtxt(('Aspect', [(0x20, MOV_W0_1)]), ('Joy-Con fix', [(0x24, enc_b(0x24, 0x4300)), (0x4300, NOP)])))   # the hook and its cave in the bss
+        work = self.root / 'work'
+        _, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertEqual(set(variants), {'fps', 'ultrawide'}); self.assertEqual(variants['ultrawide']['left_out'], ['21.9 Ultrawide/exefs/uw.pchtxt: Joy-Con fix'])
+        self.assertNotIn('left_out', variants['fps'])
+        img = nso.read(Path(variants['ultrawide']['exefs']) / 'main').image
+        self.assertEqual(img[0x20:0x24], MOV_W0_1); self.assertEqual(img[0x24:0x28], TEXT[0x24:0x28], 'the hook is not written')
+        report = (work / 'mods/v0.txt').read_text()
+        self.assertIn("[RED] main: 21.9 Ultrawide/exefs/uw.pchtxt: Joy-Con fix: left out: 1 of its 2 records lie outside main's text, ro and data, the first at main+0x4300, in its bss", report)
+        self.assertIn('21.9 Ultrawide/exefs/uw.pchtxt: Aspect: no aspect value found', report)
+        self.assertNotIn('Joy-Con fix: no aspect value found', report, 'adapt_aspect\'s line goes with a patch left out whole')
+        self.assertIn('[RED] ultrawide: 21.9 Ultrawide: left out of it (above): 21.9 Ultrawide/exefs/uw.pchtxt: Joy-Con fix. The rest of the mod is offered (Ultrawide in the launcher)\n', report)
+        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)[2], variants)
+        self.assertIn('[RED] ultrawide: 21.9 Ultrawide: left out of it', (work / 'mods/v0.txt').read_text(), 'a reuse keeps the lines')
+        uw.write_text(pchtxt(('Joy-Con fix', [(0x24, enc_b(0x24, 0x4300)), (0x4300, NOP)]), ('Header note', [])))   # nothing of it left to write: a block of no record is nothing
+        _, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertEqual(set(variants), {'fps'}); self.assertFalse((work / 'mods/v0_ultrawide').exists())
+        self.assertIn('[RED] ultrawide: 21.9 Ultrawide: nothing of it is left to write for this version once the patches above are left out: Ultrawide is not offered\n',
+                      (work / 'mods/v0.txt').read_text())
+
+    def test_a_mod_whose_code_cave_shares_its_block_is_offered_without_the_cave(self):   # Super Mario Odyssey's Ultrawide pack: the mod, the hook and the cave in one block
+        uw = self.mods / '21.9 Ultrawide/exefs/uw.pchtxt'; uw.parent.mkdir(parents=True)
+        uw.write_text(pchtxt(('Ultrawide, uses a codecave at 4300', [(0x20, MOV_W0_1), (0x80, enc_b(0x80, 0x4300))] + [(0x4300 + 4 * k, NOP) for k in range(4)])))
+        work = self.root / 'work'
+        _, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertEqual(variants['ultrawide']['left_out'], ['21.9 Ultrawide/exefs/uw.pchtxt: Ultrawide, uses a codecave at 4300: its code cave at main+0x4300 and the code that enters it'])
+        img = nso.read(Path(variants['ultrawide']['exefs']) / 'main').image
+        self.assertEqual((img[0x20:0x24], img[0x80:0x84]), (MOV_W0_1, TEXT[0x80:0x84]), 'the mod is offered, its hook not written')
+        report = (work / 'mods/v0.txt').read_text()
+        self.assertIn('main: 21.9 Ultrawide/exefs/uw.pchtxt: Ultrawide, uses a codecave at 4300: 4 bytes in 1 of its 6 records\n', report)
+        self.assertIn('[RED] ultrawide: 21.9 Ultrawide: left out of it (above): 21.9 Ultrawide/exefs/uw.pchtxt: Ultrawide, uses a codecave at 4300: its code cave at main+0x4300 '
+                      'and the code that enters it. The rest of the mod is offered (Ultrawide in the launcher)\n', report)
+
+    def test_a_kept_mods_patch_left_out_is_not_written(self):
+        (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/speed')   # written in for good: NOP at 0x10
+        p = self.mods / 'HUD/exefs/hud.pchtxt'; p.parent.mkdir(parents=True)
+        p.write_text(pchtxt(('Into ro', [(0x30, enc_b(0x30, 0x2000))]), ('Kept', [(0x40, MOV_W0_2)])))
+        work = self.root / 'work'
+        modded, _, _ = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        img = nso.read(modded / 'ExeFS/main').image
+        self.assertEqual((img[0x10:0x14], img[0x30:0x34], img[0x40:0x44]), (b'\x1f\x20\x03\xd5', TEXT[0x30:0x34], MOV_W0_2))
+        self.assertIn("[RED] main: HUD/exefs/hud.pchtxt: Into ro: left out: the patch's code at main+0x30 branches to main+0x2000", (work / 'mods/v0.txt').read_text())
+        p.write_text(pchtxt(('Into ro', [(0x30, enc_b(0x30, 0x2000))])))
+        (self.mods / 'exefs_patches/speed').rename(self.mods / 'exefs_patches/-speed')
+        modded, _, _ = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertEqual((modded / 'ExeFS/main').read_bytes(), (self.ext / 'ExeFS/main').read_bytes(), 'nothing left: the game\'s own module')
+        self.assertIn("code: nothing is left to write for this version once the patches above are left out: the code is the game's own", (work / 'mods/v0.txt').read_text())
+
+    def test_the_mods_key_covers_the_code_that_judges_patches(self):   # a changed a64_words.py (the branch decoders) makes the modded modules again
+        tools = self.root / 'tools'; tools.mkdir()
+        for f in ('game_mods.py', 'a64_words.py', 'romfs_image.py', 'romfs.py', 'nso.py'): shutil.copy(Path(gm.__file__).parent / f, tools / f)
+        work = self.root / 'work'
+        with mock.patch.object(gm, '__file__', str(tools / 'game_mods.py')):
+            self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE); self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+            self.nsp.PROG.end.assert_called_with('reused (the mods and the game files unchanged)')
+            (tools / 'a64_words.py').write_text((tools / 'a64_words.py').read_text() + '\n# changed\n')
+            self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+            self.assertNotIn('reused', self.nsp.PROG.end.call_args.args[0])
+
     def test_a_frame_rate_mod_of_the_sdk_alone_is_flagged(self):
         sdk = self.ext / 'ExeFS/sdk'; d = bytearray(make_nso()); d[0x40:0x60] = bytes(range(0x20, 0x40)); sdk.write_bytes(bytes(d))
         sid = bytes(range(0x20, 0x40)).hex().upper()
@@ -491,6 +782,23 @@ class NspScript(unittest.TestCase):
             for f in (exefs.parent / 'rewrite').iterdir(): f.unlink()
             self.nsp.build_variants(sys.executable, REPO, {'fps': {'mod': '60 FPS', 'exefs': str(exefs), 'modules': ['main']}}, patched, {}, self.root / 'logs')
         self.assertFalse((patched / 'mods.tsv').exists(), 'a mod the rewriter refuses is not offered')
+        def out_of_code(cmd, log, env=None, fatal=True, **kw):   # a variant whose text branches into the writable part: variant_runs refuses it
+            rw = Path(cmd[3]); v = bytearray(base); v[0x10:0x14] = enc_b(0x10, 0x5000)
+            (rw / 'main.patched.bin').write_bytes(v); (rw / 'main.fixups.tsv').write_text(hdr); return 0
+        said = []
+        with mock.patch.object(self.nsp, 'run', out_of_code), mock.patch.object(self.nsp, 'say', said.append):
+            for f in (exefs.parent / 'rewrite').iterdir(): f.unlink()
+            self.nsp.build_variants(sys.executable, REPO, {'fps': {'mod': '60 FPS', 'exefs': str(exefs), 'modules': ['main']}}, patched, {}, self.root / 'logs')
+        self.assertFalse((patched / 'mods.tsv').exists()); self.assertFalse((patched / 'main.variants').exists())
+        self.assertIn("mods: [RED] fps: 60 FPS: left out: main: the mod's code at +0x10 branches to +0x5000, outside the module's code (its text and patch area): the iPhone runs only "
+                      'signed pages', said)
+        said.clear()
+        with mock.patch.object(self.nsp, 'run', fake_run), mock.patch.object(self.nsp, 'say', said.append):   # a role the mods stage offers without some of its patches
+            for f in (exefs.parent / 'rewrite').iterdir(): f.unlink()
+            self.nsp.build_variants(sys.executable, REPO, {'fps': {'mod': '60 FPS', 'exefs': str(exefs), 'modules': ['main'], 'left_out': ['60 FPS/exefs/a.pchtxt: Cave']}}, patched, {},
+                                    self.root / 'logs')
+        self.assertEqual((patched / 'mods.tsv').read_text().splitlines()[1:], ['fps\t60 FPS\t2'])
+        self.assertIn('mods: [RED] High frame rate offered in the launcher without part of it: 60 FPS (2 changed byte runs); left out in the mods stage: 60 FPS/exefs/a.pchtxt: Cave', said)
 
     def test_variant_rewrite_key(self):   # the variant rewrite is reused while the rewriter's inputs are as at its last run, as the base rewrite is
         patched = self.root / 'patched'; patched.mkdir()
@@ -692,6 +1000,63 @@ class VariantPool(unittest.TestCase):
         self.assertEqual(memo[str(files[2])], b'missing')
         with mock.patch.object(self.nsp.rfs.Path, 'read_bytes', side_effect=AssertionError('read again')):
             self.assertEqual(self.nsp.fingerprint(('files', files), 'x', memo=memo), plain, 'each file read once')
+
+
+MAC_READER = r'''#include "mod_rows.h"
+int main(int argc, char **argv) {   // the rows the Mac host puts in place from a .variants file with both roles on (loader.c), one per line: role, kind, image offset, bytes in hex
+    FILE *f = argc > 1 ? fopen(argv[1], "r") : NULL;
+    if (!f) return 2;
+    dm_mod_rows rows; dm_mod_rows_read(f, 3, &rows); fclose(f);
+    printf("bad %u %ld %ld\n", rows.bad, rows.bad_line[0], rows.bad_line[1]);
+    for (size_t i = 0; i < rows.n; i++) {
+        const dm_mod_row *r = &rows.row[i];
+        if (rows.bad & r->role) continue;   // a role with a row it cannot read: none of it
+        printf("%s\t%c\t%lld\t", r->role == DM_MOD_ROLE_FPS ? "fps" : "ultrawide", r->code ? 'c' : 'w', r->io);
+        for (size_t k = 0; k < r->len; k++) printf("%02x", r->bytes[k]);
+        putchar('\n');
+    }
+    dm_mod_rows_free(&rows);
+    return 0;
+}
+'''
+
+
+class MacReader(unittest.TestCase):
+    """dm/host/mod_rows.h, the Mac host's reader of <module>.variants (loader.c mod_variants_one): what write_variants writes, read back as read_variants reads it, rows past
+    64 KB included, and a role with a row it cannot read left out whole; and dm/host/tests/t_mod_rows.c (the host tests run it on the Mac), plain and under ASan and UBSan"""
+    HOST = REPO / 'dm/host'
+
+    def cc(self, out, src, *flags):
+        c = os.environ.get('CC') or shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
+        if not c: self.skipTest('no C compiler')
+        return subprocess.run([c, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', *flags, '-I', str(self.HOST), '-o', str(out), str(src)], capture_output=True, text=True)
+
+    def test_what_write_variants_writes(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t); (t / 'drv.c').write_text(MAC_READER)
+            r = self.cc(t / 'drv', t / 'drv.c'); self.assertEqual(r.returncode, 0, r.stderr)
+            rows = [('fps', ('c', 0x10, 0x10, NOP)), ('ultrawide', ('w', 0x24000, -0x8000, bytes(range(256)) * 400)), ('fps', ('w', 0x5000, 0x5000, b'\x01'))]
+            gm.write_variants(t / 'main.variants', rows)
+            def mac():
+                out = subprocess.run([str(t / 'drv'), str(t / 'main.variants')], capture_output=True, text=True, timeout=60)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                head, *lines = out.stdout.splitlines()
+                return head, [(r, k, int(io), bytes.fromhex(h)) for r, k, io, h in (line.split('\t') for line in lines)]
+            self.assertEqual(mac(), ('bad 0 0 0', [(r, k, io, d) for r, k, _, io, d in gm.read_variants(t / 'main.variants')]))
+            self.assertGreater(len((t / 'main.variants').read_text().splitlines()[2]), 1 << 16, 'a row the fixed 64 KB buffer skipped')
+            text = (t / 'main.variants').read_text().splitlines()
+            (t / 'main.variants').write_text('\n'.join(text[:-1] + [text[-1][:-1]]) + '\n')   # the last fps row cut short: none of fps
+            self.assertEqual(mac(), ('bad 1 4 0', [('ultrawide', 'w', -0x8000, bytes(range(256)) * 400)]))
+
+    def test_the_host_unit_test(self):
+        for flags in ([], ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as t:
+                exe = Path(t) / 't_mod_rows'
+                r = self.cc(exe, self.HOST / 'tests/t_mod_rows.c', *flags)
+                if r.returncode and flags: self.skipTest(f'no sanitizers here: {r.stderr.strip()[:200]}')
+                self.assertEqual(r.returncode, 0, r.stderr)
+                r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=120, env=dict(os.environ, ASAN_OPTIONS='detect_leaks=1' if sys.platform.startswith('linux') else '', UBSAN_OPTIONS='halt_on_error=1'))
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertIn(', 0 failed', r.stdout)
 
 
 def json_copy(v):   # the variants as apply_mods hands them over (a JSON file's): build_variants never changes the caller's
