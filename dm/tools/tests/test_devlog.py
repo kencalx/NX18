@@ -256,7 +256,12 @@ class Formats(unittest.TestCase):
         ('vkpso', 'dm/gfx/vk/hle_vk.m', 'pipelines: %llu compiled %s', '[dm] [vk] ', ('concurrently', '')),   # the second %s: the archive's part (DM_VK_ARCHIVE), empty without it
         ('glpso', 'dm/gfx/gl/hle_gl.m', 'frame %llu: pipeline builds since', '[dm] [gl] ', ()),
         ('glframe', 'dm/gfx/gl/hle_gl.m', 'frame %llu: draws %llu, passes %llu, uploads', '[dm] [gl] ', ()),
-        ('glmem', 'dm/gfx/gl/hle_gl.m', 'memory at frame %llu', '[dm] [gl] ', ()))
+        ('glmem', 'dm/gfx/gl/hle_gl.m', 'memory at frame %llu', '[dm] [gl] ', ()),
+        ('vp9_vt', 'dm/host/hle_movie_avc.c', '[movie] VP9 in VideoToolbox: hardware decoder %s', '[dm] ', ('no', 'no', 'iOS', '27.3', '24D60', 'iPhone18,2')),
+        ('aac_order', 'dm/host/hle_movie.c', "[movie] AAC: %d channels in AudioToolbox's order %s (layout tag %#x), handed out", '[dm] ', ('C L R Ls Rs LFE', 'L R C LFE Ls Rs')),
+        ('aac_order', 'dm/host/hle_movie.c', "[movie] AAC: %d channels in AudioToolbox's order %s (layout tag %#x), already", '[dm] ', ('L R C LFE Ls Rs',)),
+        ('aac_order', 'dm/host/hle_movie.c', "[movie] AAC: %d channels in AudioToolbox's order %s (layout tag %#x), kept", '[dm] ', ('C L R Ls Rs LFE', 'L R C LFE Ls Rs')),
+        ('vt_rebuild', 'dm/host/hle_movie_vt_rebuild.h', '%s: VideoToolbox session made again after', '[dm] [movie] ', ('H.264', 'kVTInvalidSessionErr', 'IDR')))
 
     def test_each_line_is_read(self):
         for kind, src, start, prefix, strs in self.LINES:
@@ -299,6 +304,25 @@ class Formats(unittest.TestCase):
         out = devlog.read('\n'.join(lines))['audio_output']
         self.assertEqual((out['io_buffer_ms_max'], out['output_latency_ms_max'], out['route_changes'], out['device_latency_ms_max']), (1.5, 1.5, 3, 1.5))
         self.assertEqual(out['routes'], ['BluetoothA2DPOutput', 'Speaker', 'HDMIOutput'])
+
+    def test_movie_lines(self):   # the VP9 check, an AAC stream's order each way, two sessions made again (one of each codec) and a red one, which RED counts
+        log = '\n'.join(['[dm] ' + sample(c_format('dm/host/hle_movie_avc.c', '[movie] VP9 in VideoToolbox: hardware decoder %s'), ('no', 'no', 'iOS', '27.3', '24D60', 'iPhone18,2')),
+                         '[dm] ' + sample(c_format('dm/host/hle_movie.c', "[movie] AAC: %d channels in AudioToolbox's order %s (layout tag %#x), handed out"),
+                                          ('C L R Ls Rs LFE', 'L R C LFE Ls Rs')),
+                         '[dm] ' + sample(c_format('dm/host/hle_movie.c', "[movie] AAC: %d channels in AudioToolbox's order %s (layout tag %#x), kept"), ('C L R Ls Rs LFE', 'L R C LFE Ls Rs')),
+                         '[dm] [movie] ' + sample(c_format('dm/host/hle_movie_vt_rebuild.h', '%s: VideoToolbox session made again after'), ('H.264', 'kVTInvalidSessionErr', 'IDR')),
+                         '[dm] [movie] ' + sample(c_format('dm/host/hle_movie_vt_rebuild.h', '%s: VideoToolbox session made again after'), ('AV1', 'kVTInvalidSessionErr', 'key frame')),
+                         '[dm] [RED] movie: ' + sample(c_format('dm/host/hle_movie_vt_rebuild.h', '%s: VideoToolbox session lost (%d, %s) and made again past'),
+                                                       ('H.264', 'kVTInvalidSessionErr', 'IDR', 'IDR'))])
+        mv = devlog.read(log)['movies']
+        self.assertEqual((mv['vp9_hardware'], mv['vp9_before_register'], mv['os'], mv['model'], mv['vt_rebuilds'], mv['vt_refed']), (False, False, 'iOS 27.3', 'iPhone18,2', 2, 14))
+        self.assertEqual(mv['aac'], [{'channels': 7, 'audiotoolbox': 'C L R Ls Rs LFE', 'console': 'L R C LFE Ls Rs', 'set': 'reordered'},
+                                     {'channels': 7, 'audiotoolbox': 'C L R Ls Rs LFE', 'console': 'L R C LFE Ls Rs', 'set': 'kept (DM_AAC_LAYOUT=0)'}])
+        text = '\n'.join(devlog.render(devlog.read(log), 5))
+        for t in ('VP9 hardware decoder in VideoToolbox: no (iOS 27.3, iPhone18,2', "AAC 7 channels: AudioToolbox's order C L R Ls Rs LFE, handed out as L R C LFE Ls Rs",
+                  'VideoToolbox sessions made again: 2 (14 packets decoded again)', '1 line of 1 kind'):
+            self.assertIn(t, text)
+        self.assertIsNone(devlog.read('[dm] nothing about movies')['movies'])
 
     def test_event_texts_are_in_the_sources(self):
         src = ''.join(p.read_text(errors='replace') for d in ('dm/host', 'dm/gfx/nvn', 'dm/ios/Sources') for p in (REPO / d).glob('*.[cm]'))

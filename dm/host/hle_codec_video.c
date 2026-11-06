@@ -247,6 +247,7 @@ static void cv_open(cv_dec *d) {   // (re)creates the codec state: a new stream 
     vpx_codec_dec_cfg_t cfg = {.threads = 2, .w = d->w, .h = d->h};
     d->vpx_ok = vpx_codec_dec_init(&d->vpx, d->codec == CV_VP8 ? vpx_codec_vp8_dx() : vpx_codec_vp9_dx(), &cfg, 0) == VPX_CODEC_OK;
     if (!d->vpx_ok) LOG("[RED] nn::codec %s decoder: libvpx init failed", k_cv_name[d->codec]);
+    if (d->codec == CV_VP9) mvt_vp9_check();   // whether VideoToolbox has a VP9 hardware decoder: once a run, queued to a background queue (hle_movie_avc.c)
 }
 static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t in, uint32_t out, const void *csd, uint64_t csd_n) {
     cv_dec *d = calloc(1, sizeof *d);

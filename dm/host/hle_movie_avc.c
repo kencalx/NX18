@@ -5,10 +5,17 @@
 // in presentation order, so pictures wait in a queue sorted by coded sequence then presentation time and leave it once more than `depth` are queued,
 // once their sequence is complete, or all at the end of the stream.
 // SPS pic_order_cnt_type 2 has decode order equal to output order: even High profile needs no reorder queue in that case
+// A session iOS lost while the app was suspended is made again and brought back to the packet it lost (hle_movie_vt_rebuild.h, DM_VT_REBUILD): the packets since the last IDR go in again,
+// their pictures thrown away, so the reorder queue keeps the pictures it holds and gets each picture once, as from an uninterrupted decode
 #include "hle.h"
 #include <VideoToolbox/VideoToolbox.h>
 #include <arm_neon.h>
+#include <dispatch/dispatch.h>
+#include <stdatomic.h>
+#include <sys/sysctl.h>
 #include "hle_movie_avc.h"
+#include "hle_movie_vt_rebuild.h"
+_Static_assert(VTR_INVALID_SESSION == kVTInvalidSessionErr && VTR_DECODER_MALFUNCTION == kVTVideoDecoderMalfunctionErr, "hle_movie_vt_rebuild.h's errors are VTErrors.h's");
 
 #define QMAX 16
 struct mavc {
@@ -18,6 +25,8 @@ struct mavc {
     uint64_t sequence; int saw_picture;
     uint8_t *au; size_t aucap;   // length-prefixed copy of the access unit being decoded
     int red, rgba;               // rgba: pictures as 4-byte RGBA (native texture mode, Monster Hunter Rise) instead of NV12
+    vtr_state vt; int discard; OSStatus cb_st; int64_t cur_pts;   // the session made again when lost (hle_movie_vt_rebuild.h); discard: a packet decoded again, its picture thrown away; cb_st: the callback's error
+    uint64_t said;   // open_session's last line (size, profile, depth): a session made again prints it only when it says something new
 };
 
 int mavc_bt709(const mavc *a, int h) {
@@ -25,13 +34,13 @@ int mavc_bt709(const mavc *a, int h) {
     if (m && CFGetTypeID(m) == CFStringGetTypeID()) return CFEqual(m, kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2);
     return h >= 720;
 }
-mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); return a; }
+mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); vtr_init(&a->vt, vtr_switch()); return a; }
 static void close_session(mavc *a) {
     if (a->vs) { VTDecompressionSessionWaitForAsynchronousFrames(a->vs); VTDecompressionSessionInvalidate(a->vs); CFRelease(a->vs); a->vs = NULL; }
     if (a->fd) { CFRelease(a->fd); a->fd = NULL; }
 }
-void mavc_drop(mavc *a) { for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb); a->nq = 0; a->sequence = 0; a->saw_picture = 0; }
-void mavc_free(mavc *a) { if (!a) return; close_session(a); mavc_drop(a); free(a->au); free(a); }
+void mavc_drop(mavc *a) { for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb); a->nq = 0; a->sequence = 0; a->saw_picture = 0; vtr_reset(&a->vt); }
+void mavc_free(mavc *a) { if (!a) return; close_session(a); mavc_drop(a); vtr_free(&a->vt); free(a->au); free(a); }
 int mavc_queued(const mavc *a) { return a->nq; }
 
 // Read only the SPS prefix through pic_order_cnt_type (H.264 7.4.2.1.1, 8.2.1.3).
@@ -124,7 +133,8 @@ void mavc_avcc(mavc *a, const uint8_t *p, size_t n) {
 
 static void on_frame(void *ref, void *src, OSStatus st, VTDecodeInfoFlags fl, CVImageBufferRef img, CMTime pts, CMTime dur) {
     (void)fl; (void)dur; mavc *a = ref;
-    if (st || !img) { if (!a->red++) LOG("[RED] movie: AVC decode error (VideoToolbox %d, first case)", (int)st); return; }
+    if (st || !img) { a->cb_st = st; if (!a->red++) LOG("[RED] movie: AVC decode error (VideoToolbox %d, first case)", (int)st); return; }
+    if (a->discard) return;   // a packet decoded again into a session made again: its picture left already, or waits in the queue
     if (a->nq == QMAX) { if (!a->red++) LOG("[RED] movie: AVC reorder queue full, dropping the oldest frame"); CVPixelBufferRelease(a->q[0].pb); memmove(a->q, a->q + 1, --a->nq * sizeof a->q[0]); }
     int64_t t = pts.timescale ? pts.value * 1000000 / pts.timescale : 0;
     uint64_t sequence = src ? (uint64_t)(uintptr_t)src - 1 : a->sequence;
@@ -133,7 +143,7 @@ static void on_frame(void *ref, void *src, OSStatus st, VTDecodeInfoFlags fl, CV
                     (a->q[k - 1].sequence == sequence && a->q[k - 1].pts > t))) { a->q[k] = a->q[k - 1]; k--; }
     a->q[k].pb = CVPixelBufferRetain(img); a->q[k].pts = t; a->q[k].sequence = sequence; a->nq++;
 }
-static int open_session(mavc *a) {
+static int open_session(mavc *a, int again) {   // again: made again after a loss (avc_vt_remake), its line only when it says something new
     close_session(a);
     if (!a->nsps || !a->npps) { if (!a->red++) LOG("[RED] movie: AVC has no SPS / PPS, outputting black frames"); return 0; }
     const uint8_t *ps[2] = {a->sps, a->pps}; size_t sz[2] = {(size_t)a->nsps, (size_t)a->npps};
@@ -146,9 +156,10 @@ static int open_session(mavc *a) {
     VTDecompressionOutputCallbackRecord cb = {on_frame, a};
     st = VTDecompressionSessionCreate(NULL, a->fd, NULL, attrs, &cb, &a->vs); CFRelease(attrs);
     if (st) { if (!a->red++) LOG("[RED] movie: VideoToolbox cannot create an AVC decode session (%d), outputting black frames", (int)st); a->vs = NULL; return 0; }
-    CMVideoDimensions dm = CMVideoFormatDescriptionGetDimensions(a->fd);
-    LOG("[movie] AVC: VideoToolbox decoding %d×%d, profile %d, reorder depth %d", dm.width, dm.height, a->nsps > 1 ? a->sps[1] : 0, a->depth);
-    a->dirty = 0; return 1;
+    CMVideoDimensions dm = CMVideoFormatDescriptionGetDimensions(a->fd); int prof = a->nsps > 1 ? a->sps[1] : 0;
+    uint64_t said = (uint64_t)(uint32_t)dm.width << 32 | (uint64_t)(uint16_t)dm.height << 16 | (uint64_t)(uint8_t)prof << 8 | (uint8_t)a->depth;
+    if (!again || said != a->said) LOG("[movie] AVC: VideoToolbox decoding %d×%d, profile %d, reorder depth %d", dm.width, dm.height, prof, a->depth);
+    a->said = said; a->dirty = 0; return 1;
 }
 typedef struct { mavc *a; size_t len; int idr, picture; } au_ctx;
 static void au_add(void *ctx, const uint8_t *nal, size_t n) {
@@ -170,18 +181,34 @@ static void avc_picture_sequence(mavc *a, int idr) {
     if (idr && a->saw_picture) a->sequence++;
     a->saw_picture = 1;
 }
+// One length-prefixed access unit into the session (hle_movie_vt_rebuild.h's decode); discard: its picture is thrown away. A lost session the callback reports is the call's
+// answer under DM_VT_REBUILD; with it off the answer is the call's own, as before (0 for an error only the callback gives)
+static int32_t avc_vt_decode(void *ctx, const uint8_t *p, size_t n, int discard) {
+    mavc *a = ctx;
+    if (!a->vs || !a->fd) return VTR_INVALID_SESSION;   // lost, and not made again
+    CMBlockBufferRef bb = NULL; CMSampleBufferRef sb = NULL;
+    OSStatus st = CMBlockBufferCreateWithMemoryBlock(NULL, NULL, n, NULL, NULL, 0, n, 0, &bb);
+    if (!st) st = CMBlockBufferReplaceDataBytes(p, bb, 0, n);
+    CMSampleTimingInfo ti = {kCMTimeInvalid, CMTimeMake(a->cur_pts, 1000000), kCMTimeInvalid}; size_t ssz = n;
+    if (!st) st = CMSampleBufferCreateReady(NULL, bb, a->fd, 1, 1, &ti, 1, &ssz, &sb);
+    a->discard = discard; a->cb_st = 0;
+    if (!st) st = VTDecompressionSessionDecodeFrame(a->vs, sb, 0, (void *)(uintptr_t)(a->sequence + 1), NULL);   // flags 0: synchronous, the picture is queued before this returns
+    a->discard = 0;
+    if (sb) CFRelease(sb); if (bb) CFRelease(bb);
+    return !st && a->vt.on && vtr_lost_err(a->cb_st) ? a->cb_st : st;
+}
+static int avc_vt_remake(void *ctx) { return open_session(ctx, 1); }   // invalidates the lost session and makes one from the same parameter sets; the reorder queue keeps its pictures
 int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) {
     au_ctx c = {a, 0}; each_nal(p, (size_t)n, au_add, &c);
     if (!c.len) return 0;
-    if ((a->dirty || !a->vs) && !open_session(a)) return -1;
+    if (!a->vt.lost && (a->dirty || !a->vs) && !open_session(a, 0)) return -1;   // a lost session is made again by vtr_decode (from the parameter sets as they are now), which brings it back to this packet
     if (c.picture) avc_picture_sequence(a, c.idr);
-    CMBlockBufferRef bb = NULL; CMSampleBufferRef sb = NULL;
-    OSStatus st = CMBlockBufferCreateWithMemoryBlock(NULL, NULL, c.len, NULL, NULL, 0, c.len, 0, &bb);
-    if (!st) st = CMBlockBufferReplaceDataBytes(a->au, bb, 0, c.len);
-    CMSampleTimingInfo ti = {kCMTimeInvalid, CMTimeMake(pts_us, 1000000), kCMTimeInvalid}; size_t ssz = c.len;
-    if (!st) st = CMSampleBufferCreateReady(NULL, bb, a->fd, 1, 1, &ti, 1, &ssz, &sb);
-    if (!st) st = VTDecompressionSessionDecodeFrame(a->vs, sb, 0, (void *)(uintptr_t)(a->sequence + 1), NULL);   // flags 0: synchronous, the picture is queued before this returns
-    if (sb) CFRelease(sb); if (bb) CFRelease(bb);
+    a->cur_pts = pts_us;
+    vtr_ops ops = {a, avc_vt_decode, avc_vt_remake}; vtr_report r;
+    OSStatus st = vtr_decode(&a->vt, &ops, a->au, c.len, c.idr, &r);
+    char line[320]; int say = r.err && vtr_log_due(&a->vt) ? vtr_report_text(&a->vt, &r, "H.264", "IDR", line, sizeof line) : 0;
+    if (say) LOG("%s%s", say > 1 ? "[RED] movie: " : "[movie] ", line);
+    if (st == VTR_DROPPED) return 0;   // made again without the packets since the IDR: none decoded until the next IDR (the last picture stays)
     if (st) { if (!a->red++) LOG("[RED] movie: AVC decode submission failed (%d, first case)", (int)st); return -1; }
     return 0;
 }
@@ -214,4 +241,31 @@ int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
     CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
     CVPixelBufferRelease(pb);
     return 1;
+}
+
+// ---------- VP9 in VideoToolbox: a check only ----------
+// VP9 decodes with libvpx (hle_movie.c, hle_codec_video.c). VideoToolbox has a VP9 decoder that is not registered by default: VTRegisterSupplementalVideoDecoderIfAvailable
+// (VTUtilities.h: macOS 11 and later, iOS and iPadOS 26.2 and later; the host's deployment targets are macOS 26.6, dm/mac/min_os.mk, and iOS 27.0, dm/ios/project.yml, so it
+// is called plainly, with no availability check or weak link) registers it, and VTIsHardwareDecodeSupported then says whether it is hardware. Apple's A20 Pro and M4 pages
+// list H.264, HEVC, AV1 and ProRes, not VP9, so the answer is what this is for: once a run, at the first VP9 stream of either decoder API, on a background queue (it may load
+// the decoder; the caller only queues it), one line. A "yes" would allow a VideoToolbox VP9 path next, used only after a bit-for-bit comparison with libvpx over the games'
+// movies, as was done for AV1 (docs/reference/movies.md). DM_VP9_PROBE=0 leaves VideoToolbox alone, as before. Open: the registration may run while other threads make
+// or use H.264 / AV1 sessions, and Apple's page says nothing about its thread safety; a VideoToolbox VP9 path would register once at the host's start, before any decoder
+static void vp9_probe(void *ctx) {
+    (void)ctx;
+    Boolean before = VTIsHardwareDecodeSupported(kCMVideoCodecType_VP9);
+    VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9);
+    Boolean after = VTIsHardwareDecodeSupported(kCMVideoCodecType_VP9);
+    char os[32] = "", build[32] = "", model[64] = ""; size_t n = sizeof os;
+    if (sysctlbyname("kern.osproductversion", os, &n, NULL, 0)) os[0] = 0;
+    n = sizeof build; if (sysctlbyname("kern.osversion", build, &n, NULL, 0)) build[0] = 0;
+    n = sizeof model; if (sysctlbyname(TARGET_OS_IPHONE ? "hw.machine" : "hw.model", model, &n, NULL, 0)) model[0] = 0;
+    LOG("[movie] VP9 in VideoToolbox: hardware decoder %s after VTRegisterSupplementalVideoDecoderIfAvailable (%s before); %s %s (%s), %s. A check only: VP9 decodes with libvpx",
+        after ? "yes" : "no", before ? "yes" : "no", TARGET_OS_IPHONE ? "iOS" : "macOS", os, build, model);
+}
+void mvt_vp9_check(void) {
+    static atomic_flag once = ATOMIC_FLAG_INIT;
+    const char *e = getenv("DM_VP9_PROBE");
+    if ((e && !strcmp(e, "0")) || atomic_flag_test_and_set(&once)) return;
+    dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), NULL, vp9_probe);
 }

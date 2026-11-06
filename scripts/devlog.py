@@ -23,6 +23,8 @@ What it reads (docs/development.md, Reading a device log):
   audio output       the iOS audio session's I/O buffer and output latency (audio session:, audio route changed, settled at), its route changes (a [RED] one when asking
                      again failed) and lifecycle notices;
                      the Mac device's latency (audio device N latency)
+  movies             [movie] VP9 in VideoToolbox (whether a VP9 hardware decoder is there, hle_movie_avc.c); [movie] AAC: … channels in AudioToolbox's order (the console's order
+                     set or kept, hle_movie.c); [movie] H.264 / AV1: VideoToolbox session made again (after iOS lost it, hle_movie_vt_rebuild.h)
 Only NVN games write the timing, on-screen, power, display-link and long-frame lines (hle_nvn.c, from the present path): a Vulkan or OpenGL game's summary has its pipeline and memory
 lines and the events. Other lines are skipped, and so is a cut last line. The log has no clock: times are seconds from the start, from the long-frame lines' stamps and the power lines'
 frame rates, or frame numbers at 60 fps where it has neither. Only the numbers and names above are printed (no paths: a switch value that is one prints as its last part;
@@ -96,6 +98,9 @@ RX = {k: re.compile(v) for k, v in {
     'front_change': r'^front end: (thermal state|Low Power Mode) → (\S+) \((\d+) s after launch\)',
     'mem_warning': r'front end: iOS memory warning \((\d+) s after launch\): footprint (\d+) MiB, (\d+) MiB left',
     'focus': r'^oe focus state → (\d+)( \(library applet (?:open|closed)\))?',
+    'vp9_vt': r'^\[movie\] VP9 in VideoToolbox: hardware decoder (yes|no) after VTRegisterSupplementalVideoDecoderIfAvailable \((yes|no) before\); (\w+) (\S*) \(([^()]*)\), ([^.]*)\.',
+    'aac_order': r"^\[movie\] AAC: (\d+) channels in AudioToolbox's order (.+?) \(layout tag \S+\), (handed out in|already|kept)(?:.*? order (.+?) \(DM_AAC_LAYOUT\)|.*? is (.+)|.*)$",
+    'vt_rebuild': r'^\[movie\] (H\.264|AV1): VideoToolbox session made again after (-?\d+) \((\w+)\): (\d+) packets since the last',
 }.items()}
 MARKS = {'timing': 1, 'onscreen': 1, 'power': 1, 'longframe': 1, 'vkframe': 1, 'glframe': 1, 'glpso': 1}   # lines that carry a frame number (its group): the "now" of the lines after them
 # (not the display link's line: its count is of presents, not frames; its windows take the frame the log was at)
@@ -338,6 +343,13 @@ def read(text: str, top: int = 5) -> Rec:
     sc, ss = g['save_commit'], g['save_sync']
     out['saves'] = {'commits': len(sc), 'commit_us_max': max((int(m.group(2)) for _, m, _ in sc), default=None),
                     'sync': dict(collections.Counter(re.split(r'[:,;]', norm(m.group(1)))[0] for _, m, _ in ss).most_common())} if sc or ss else None
+    # movies: VideoToolbox's VP9 check, each AAC stream's channel order, sessions made again after iOS lost them (their red lines are in RED)
+    vp, aac, vt = one.get('vp9_vt'), g['aac_order'], g['vt_rebuild']
+    out['movies'] = {'vp9_hardware': vp.group(1) == 'yes' if vp else None, 'vp9_before_register': vp.group(2) == 'yes' if vp else None,
+                     'os': f'{vp.group(3)} {vp.group(4)}'.strip() if vp else None, 'model': vp.group(6) if vp else None,
+                     'aac': [{'channels': int(m.group(1)), 'audiotoolbox': m.group(2), 'console': m.group(4) or m.group(5) or m.group(2),
+                              'set': {'handed out in': 'reordered', 'already': 'already', 'kept': 'kept (DM_AAC_LAYOUT=0)'}[m.group(3)]} for _, m, _ in aac],
+                     'vt_rebuilds': len(vt), 'vt_refed': sum(int(m.group(4)) for _, m, _ in vt)} if vp or aac or vt else None
     out['red'] = {'lines': sum(red.values()), 'kinds': dict(red.most_common())}
     out['crash'] = crash
     return out
@@ -456,6 +468,13 @@ def render(s: Rec, top: int) -> list[str]:
     sv = s['saves']
     if sv: row('saves', f"{nof(sv['commits'], 'commit')}" + (f" (longest clone + swap {sv['commit_us_max'] / 1000:g} ms)" if sv['commit_us_max'] else '')
                + (', save sync: ' + ', '.join(f'{k} {n}' for k, n in sv['sync'].items()) if sv['sync'] else ''))
+    mv = s.get('movies')
+    if mv:
+        row('movies', f"VP9 hardware decoder in VideoToolbox: {'yes' if mv['vp9_hardware'] else 'no'} ({mv['os']}, {mv['model'] or 'model not given'}; VP9 decodes with libvpx)"
+            if mv['vp9_hardware'] is not None else '',
+            *(f"AAC {a['channels']} channels: AudioToolbox's order {a['audiotoolbox']}, " + (f"handed out as {a['console']}" if a['set'] == 'reordered' else
+              'the console\'s already' if a['set'] == 'already' else f"kept (DM_AAC_LAYOUT=0), the console's {a['console']}") for a in mv['aac']),
+            f"VideoToolbox sessions made again: {mv['vt_rebuilds']} ({mv['vt_refed']} packets decoded again)" if mv['vt_rebuilds'] else '')
     rd = s['red']
     row('RED', f"{nof(rd['lines'], 'line')} of {nof(len(rd['kinds']), 'kind')}" + (':' if rd['kinds'] else ''), *(f'{n}× {k}' for k, n in list(rd['kinds'].items())[:top]))
     if s['crash']: row('crash', s['crash'])
@@ -482,7 +501,8 @@ METRICS = (('commit', 'build.commit', 0), ('shader chain', 'build.chain', 0), ('
            ('submission ahead p50 (ms)', 'display_link.ahead_p50_ms', 0), ('stretches a frame above', 'display_link.raised', -1),
            ('long frames', 'long_frames.count', 0), ('long frames per minute', 'long_frames.per_min', -1), ('background / back', 'events.background', 0), ('focus changes', 'events.focus_changes', 0),
            ('audio underruns', 'audio.underruns', -1), ('audio I/O buffer, most (ms)', 'audio_output.io_buffer_ms_max', -1),
-           ('audio output latency, most (ms)', 'audio_output.output_latency_ms_max', -1), ('save commits', 'saves.commits', 0), ('[RED] lines', 'red.lines', -1), ('[RED] kinds', 'red.kinds', -1))
+           ('audio output latency, most (ms)', 'audio_output.output_latency_ms_max', -1), ('save commits', 'saves.commits', 0),
+           ('VideoToolbox sessions made again', 'movies.vt_rebuilds', 0), ('[RED] lines', 'red.lines', -1), ('[RED] kinds', 'red.kinds', -1))
 
 
 def dig(s: Any, path: str) -> Any:
@@ -490,7 +510,7 @@ def dig(s: Any, path: str) -> Any:
     return len(s) if isinstance(s, (list, dict)) else s
 
 
-COUNTS = {'thermal state at most', 'stretches a frame above', 'audio underruns', '[RED] lines', '[RED] kinds'}   # counts: from none, any is a change
+COUNTS = {'thermal state at most', 'stretches a frame above', 'audio underruns', 'VideoToolbox sessions made again', '[RED] lines', '[RED] kinds'}   # counts: from none, any is a change
 FLOOR = {'prepare (s)': 0.5, 'prebuild (s)': 0.5}   # seconds under this are the noise of a start (an archive hit reads 0)
 
 

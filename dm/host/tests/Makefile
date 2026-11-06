@@ -74,6 +74,8 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_mod_rows
 	$(B)/t_audio_route
 	$(B)/t_audio_lifecycle
+	$(B)/t_aac_layout
+	$(B)/t_vt_rebuild
 run: $(B)/t_nro
 run: $(B)/t_symbols
 run: $(B)/t_crash_summary
@@ -106,6 +108,19 @@ $(B)/t_audio_lifecycle: t_audio_lifecycle.c ../audio_lifecycle.h | $(B)
 .PHONY: audio-lifecycle
 audio-lifecycle: $(B)/t_audio_lifecycle
 	$(B)/t_audio_lifecycle
+# a movie's AAC channel order (../hle_movie_aac_order.h: MediaCodec's order from AudioToolbox's labels) and a VideoToolbox session made again after iOS lost it
+# (../hle_movie_vt_rebuild.h, driven with a fake decoder): plain C, no game profile, no Apple framework (make movie-logic: both, also with AddressSanitizer and UBSan)
+run: $(B)/t_aac_layout $(B)/t_vt_rebuild
+$(B)/t_aac_layout: t_aac_layout.c ../hle_movie_aac_order.h | $(B)
+	$(CLANG) -std=gnu11 -O1 -g -Wall -Wextra -Werror -o $@ t_aac_layout.c
+$(B)/t_vt_rebuild: t_vt_rebuild.c ../hle_movie_vt_rebuild.h | $(B)
+	$(CLANG) -std=gnu11 -O1 -g -Wall -Wextra -Werror -o $@ t_vt_rebuild.c
+.PHONY: movie-logic
+movie-logic: $(B)/t_aac_layout $(B)/t_vt_rebuild
+	$(B)/t_aac_layout
+	$(B)/t_vt_rebuild
+	$(CLANG) -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -o $(B)/t_aac_layout_asan t_aac_layout.c && $(B)/t_aac_layout_asan
+	$(CLANG) -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -o $(B)/t_vt_rebuild_asan t_vt_rebuild.c && $(B)/t_vt_rebuild_asan
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c
 .PHONY: symbols
@@ -298,12 +313,12 @@ $(B)/t_movie_yuv: t_movie_yuv.c ../hle_movie_yuv.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I../../third_party/libvpx -o $@ t_movie_yuv.c
 $(B)/t_movie_yuv_O2: t_movie_yuv.c ../hle_movie_yuv.h | $(B)
 	$(CLANG) -O2 -g -Wall -Werror -Wno-unused-function -I../../third_party/libvpx -o $@ t_movie_yuv.c
-$(B)/t_movie_avc: t_movie_avc.c ../hle_movie.c ../hle_movie_yuv.h ../hle_movie_avc.c ../hle_movie_avc.h $(GAME_H) ../gen/vpx/libvpx.a | $(B)
+$(B)/t_movie_avc: t_movie_avc.c ../hle_movie.c ../hle_movie_yuv.h ../hle_movie_aac_order.h ../hle_movie_avc.c ../hle_movie_avc.h ../hle_movie_vt_rebuild.h $(GAME_H) ../gen/vpx/libvpx.a | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip -o $@ t_movie_avc.c ../gen/vpx/libvpx.a \
 		-framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
-$(B)/t_movie_vpx: t_movie_vpx.c ../hle_movie.c ../hle_movie_yuv.h $(GAME_H) ../gen/vpx/libvpx.a | $(B)
+$(B)/t_movie_vpx: t_movie_vpx.c ../hle_movie.c ../hle_movie_yuv.h ../hle_movie_aac_order.h $(GAME_H) ../gen/vpx/libvpx.a | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip -o $@ t_movie_vpx.c ../gen/vpx/libvpx.a -framework AudioToolbox
-$(B)/t_codec_video: t_codec_video.c ../hle_codec_video.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h ../hle_movie_av1.c ../hle_movie_av1.h ../hle_movie_yuv.h $(GAME_H) ../gen/vpx/libvpx.a ../gen/dav1d/libdav1d.a | $(B)
+$(B)/t_codec_video: t_codec_video.c ../hle_codec_video.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h ../hle_movie_av1.c ../hle_movie_av1.h ../hle_movie_yuv.h ../hle_movie_aac_order.h ../hle_movie_vt_rebuild.h $(GAME_H) ../gen/vpx/libvpx.a ../gen/dav1d/libdav1d.a | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-tautological-compare -fsanitize=address,undefined $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/dav1d/include -I../../third_party/stb_vorbis -o $@ t_codec_video.c ../gen/vpx/libvpx.a ../gen/dav1d/libdav1d.a \
 		-framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
 ../gen/vpx/libvpx.a: FORCE

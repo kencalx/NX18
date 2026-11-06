@@ -5,6 +5,7 @@
 #define HLE_FORCE(mangled, why, ret, cname, ...) static ret cname(__VA_ARGS__)
 #include "../hle_movie.c"
 #include <assert.h>
+#include <math.h>
 
 static const uint8_t vp8[] = {
     0xf0,0x02,0x00,0x9d,0x01,0x2a,0x10,0x00,0x10,0x00,0x00,0x47,0x08,0x85,0x85,0x88,
@@ -38,6 +39,15 @@ uint64_t now_ns(void) { return test_now; }
 __thread _Atomic int dm_host_work;   // hle_thread.c
 void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
 void mavc_drop(mavc *a) { (void)a; }   // hle_movie_avc.c: no H.264 here
+// The decoder thread (md_worker, which the AAC test's Flush uses) reaches hle_movie_avc.c's H.264 calls, which no VP8, VP9 or audio decoder makes: not linked here
+mavc *mavc_new(void) { abort(); }
+void mavc_free(mavc *a) { (void)a; abort(); }
+void mavc_set_rgba(mavc *a) { (void)a; abort(); }
+int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) { (void)a; (void)p; (void)n; (void)pts_us; abort(); }
+int mavc_take(mavc *a, int flush, uint8_t *nv12, int w, int h, int64_t *pts_us) { (void)a; (void)flush; (void)nv12; (void)w; (void)h; (void)pts_us; abort(); }
+static int g_vp9_checks;
+void mvt_vp9_check(void) { g_vp9_checks++; }   // hle_movie_avc.c: VideoToolbox's VP9 check, asked for by each VP9 decoder libvpx opens (once a run there)
+void dm_host_helper_qos(qos_class_t q) { (void)q; }   // hle_thread.c (the decoder thread, md_worker, which the AAC test's Flush uses)
 static void playing(void) {
     static mdec_t video = { .type = MD_TYPE_VP9, .nout = MD_NOUT_VIDEO, .started = 1 }, audio = { .type = MD_TYPE_VORBIS, .nout = MD_NOUT, .started = 1 };
     pthread_mutex_init(&video.mu, NULL); pthread_mutex_init(&audio.mu, NULL);
@@ -163,6 +173,90 @@ static void movie_buffer_exports(void) {
     }
     memset(&G, 0, sizeof G);
 }
+// AAC 5.1 through AudioToolbox both ways, no game data: a tone in each channel (L R C LFE Ls Rs), encoded by AudioToolbox's AAC encoder told that order
+// (kAudioConverterInputChannelLayout MPEG_5_1_A), then decoded by md_aac as a movie's AAC decoder decodes it: with DM_AAC_LAYOUT off (AudioToolbox's own order, printed),
+// then after a Flush with it on, then after another Flush. On, each slot holds the console's channel (L R C LFE Ls Rs); each slot's samples are one of the off run's slots,
+// value for value (the order moves channels and changes no sample); and a Flush starts the stream afresh (the same samples again: DM_AAC_FLUSH)
+static const double k_tone[6] = {440, 660, 990, 60, 1320, 1760};   // L R C LFE Ls Rs (AAC codes only an LFE channel's lowest lines)
+enum { AAC_IN = 48000, AAC_PKTS = 80, AAC_OUT = 64 * 1024 };
+typedef struct { const int16_t *pcm; UInt32 at; } aac_src;
+static OSStatus aac_src_feed(AudioConverterRef c, UInt32 *np, AudioBufferList *bl, AudioStreamPacketDescription **pd, void *ud) {
+    (void)c; (void)pd; aac_src *s = ud; UInt32 n = AAC_IN - s->at; if (n > *np) n = *np;
+    bl->mNumberBuffers = 1; bl->mBuffers[0].mNumberChannels = 6; bl->mBuffers[0].mData = (void *)(s->pcm + (size_t)s->at * 6); bl->mBuffers[0].mDataByteSize = n * 12;
+    s->at += n; *np = n; return 0;   // 0 frames: the end, the encoder flushes
+}
+static double goertzel(const int16_t *x, size_t n, double hz) {   // the power of one frequency in channel x (every 6th sample)
+    double c = 2 * cos(2 * M_PI * hz / 48000), s1 = 0, s2 = 0;
+    for (size_t i = 0; i < n; i++) { double s0 = x[i * 6] + c * s1 - s2; s2 = s1; s1 = s0; }
+    return s1 * s1 + s2 * s2 - c * s1 * s2;
+}
+static int aac_tone(const int16_t *pcm, int slot) {   // the tone a slot carries, -1 for none (silent)
+    double best = 1e9; int k = -1;   // well above rounding noise over 16384 samples
+    for (int t = 0; t < 6; t++) { double p = goertzel(pcm + 4096 * 6 + slot, 16384, k_tone[t]); if (p > best) { best = p; k = t; } }
+    return k;
+}
+static size_t aac_run(mdec_t *d, uint8_t *const *pk, const UInt32 *pn, int np, int16_t *pcm) {
+    size_t got = 0;
+    for (int i = 0; i < np; i++) if (md_aac(d, pk[i], (int)pn[i], 0)) {
+        size_t f = d->out[0].bytes / 12; if (got + f > AAC_OUT) f = AAC_OUT - got;
+        memcpy(pcm + got * 6, d->out[0].frm, f * 12); got += f;
+    }
+    return got;
+}
+static void aac_order(void) {
+    static int16_t in[AAC_IN * 6], off[AAC_OUT * 6], on[AAC_OUT * 6], again[AAC_OUT * 6];
+    for (int i = 0; i < AAC_IN; i++) for (int c = 0; c < 6; c++) in[i * 6 + c] = (int16_t)lrint(8000 * sin(2 * M_PI * k_tone[c] * i / 48000));
+    AudioStreamBasicDescription pcm = {.mSampleRate = 48000, .mFormatID = kAudioFormatLinearPCM, .mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
+                                       .mBytesPerPacket = 12, .mFramesPerPacket = 1, .mBytesPerFrame = 12, .mChannelsPerFrame = 6, .mBitsPerChannel = 16};
+    AudioStreamBasicDescription aac = {.mSampleRate = 48000, .mFormatID = kAudioFormatMPEG4AAC, .mFormatFlags = kMPEG4Object_AAC_LC, .mFramesPerPacket = 1024, .mChannelsPerFrame = 6};
+    AudioConverterRef enc = NULL; OSStatus st = AudioConverterNew(&pcm, &aac, &enc);
+    if (st) { printf("AAC 5.1: no AudioToolbox AAC encoder for 6 channels here (%d), skipped\n", (int)st); return; }
+    AudioChannelLayout lay = {.mChannelLayoutTag = kAudioChannelLayoutTag_MPEG_5_1_A};
+    int told = !AudioConverterSetProperty(enc, kAudioConverterInputChannelLayout, sizeof lay, &lay);
+    UInt32 maxp = 0, sz = sizeof maxp; AudioConverterGetProperty(enc, kAudioConverterPropertyMaximumOutputPacketSize, &sz, &maxp);
+    if (!maxp) maxp = 6 * 768;
+    uint8_t *pk[AAC_PKTS], *buf = malloc(maxp); UInt32 pn[AAC_PKTS]; int np = 0; aac_src src = {in, 0}; OSStatus est = 0;
+    while (np < AAC_PKTS) {
+        UInt32 n = 1; AudioStreamPacketDescription pd = {0}; AudioBufferList ob = {1, {{6, maxp, buf}}};
+        if ((est = AudioConverterFillComplexBuffer(enc, aac_src_feed, &src, &n, &ob, &pd)) || !n) break;
+        UInt32 len = pd.mDataByteSize ? pd.mDataByteSize : ob.mBuffers[0].mDataByteSize;
+        pk[np] = malloc(len); memcpy(pk[np], buf + pd.mStartOffset, len); pn[np++] = len;
+    }
+    AudioConverterDispose(enc); free(buf);
+    if (np <= 40) {   // 47 frames of 1024 and the encoder's priming expected: an encoder that made a converter and gave less is this test's setup, not the host's decoder
+        printf("AAC 5.1: AudioToolbox's AAC encoder gave %d packets for 6 channels here (%d, input order %s), skipped\n", np, (int)est, told ? "told" : "NOT told");
+        for (int i = 0; i < np; i++) free(pk[i]);
+        return;
+    }
+    static mdec_t d = { .type = MD_TYPE_AAC, .nout = MD_NOUT_AAC, .started = 1, .ch = 6, .rate = 48000 };   // no csd-0: md_aac_open makes the AAC-LC configuration (48 kHz, 6 channels)
+    pthread_mutex_init(&d.mu, NULL); pthread_mutex_init(&d.dmu, NULL); pthread_mutex_init(&d.wmu, NULL); pthread_cond_init(&d.wcv, NULL);
+    assert(!pthread_create(&d.wk, NULL, md_worker, &d));   // a Flush disposes the converter on the decoder's thread
+    void *self[2] = { NULL, &d };
+    g_aac_layout = 0; size_t n0 = aac_run(&d, pk, pn, np, off);
+    assert(h_movie_Flush(self) == 0 && !d.aac && d.aac_reopen);   // the converter goes, as at a Stop; the next packet opens it
+    g_aac_layout = 1; size_t n1 = aac_run(&d, pk, pn, np, on);
+    assert(!d.aac_reopen && h_movie_Flush(self) == 0 && !d.aac);
+    size_t n2 = aac_run(&d, pk, pn, np, again);
+    assert(n0 > 4096 + 16384 && n0 == n1 && n1 == n2);
+    assert(!memcmp(on, again, n1 * 12));   // a Flush starts the stream afresh: no overlap of the old position, the same samples as after the first one
+    char a[64] = "", b[64] = ""; uint32_t lab[6]; int t_off[6], t_on[6];
+    for (int c = 0; c < 6; c++) { t_off[c] = aac_tone(off, c); t_on[c] = aac_tone(on, c); }
+    for (int c = 0; c < 6; c++) { lab[c] = t_off[c] < 0 ? 0 : (uint32_t[]){AACL_LEFT, AACL_RIGHT, AACL_CENTER, AACL_LFE, AACL_LS, AACL_RS}[t_off[c]]; }
+    aac_labels_text(lab, 6, a, sizeof a);
+    for (int c = 0; c < 6; c++) { lab[c] = t_on[c] < 0 ? 0 : (uint32_t[]){AACL_LEFT, AACL_RIGHT, AACL_CENTER, AACL_LFE, AACL_LS, AACL_RS}[t_on[c]]; }
+    aac_labels_text(lab, 6, b, sizeof b);
+    printf("AAC 5.1 (AudioToolbox encoder %s the input order): AudioToolbox's own order %s; with DM_AAC_LAYOUT %s\n", told ? "told" : "NOT told", a, b);
+    for (int j = 0; j < 6; j++) {   // each slot on is one slot off, every sample the same
+        int match = -1;
+        for (int i = 0; i < 6 && match < 0; i++) { size_t f = 0; while (f < n1 && on[f * 6 + j] == off[f * 6 + i]) f++; if (f == n1) match = i; }
+        assert(match >= 0);
+    }
+    if (told) for (int c = 0; c < 6; c++) if (c != 3) assert(t_on[c] == c);   // L R C _ Ls Rs in their slots; the LFE slot is the one left (its tone may be filtered)
+    dm_host_lock(&d.dmu); md_job(&d, MDJ_QUIT); pthread_mutex_unlock(&d.dmu); pthread_join(d.wk, NULL);
+    for (int i = 0; i < np; i++) free(pk[i]);
+    free(d.out[0].frm);
+    puts("AAC 5.1: handed out in the console's order (L R C LFE Ls Rs), the samples unchanged, and a Flush starts the sound afresh");
+}
 int main(void) {
     movie_buffer_exports();
     playing();
@@ -176,5 +270,7 @@ int main(void) {
         decode(3, format, vp9, sizeof vp9);
         decode(2, format, vp8, sizeof vp8);
     }
+    assert(g_vp9_checks == 2);   // each VP9 decoder asks for VideoToolbox's VP9 check, no VP8 one does
     puts("VP8 and VP9 key frames: NV12 and RGBA pixels match");
+    aac_order();
 }
