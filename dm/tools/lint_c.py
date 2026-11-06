@@ -220,8 +220,11 @@ def tidy(args):
         print(f'{f}: {c}: {n} findings, the baseline has {b}')
         md.append(f'- `{f}` {c}: {n} findings, the baseline has {b}')
         for ff, l, col, cc, msg in found:   # each finding of the pair, annotated on its line: which of them is new, counts cannot tell
-            if ff == f and cc == c: print(f'::error file={f},line={l},col={col}::{msg} [{c}] ({n} in this file, the baseline has {b})'); md.append(f'  - line {l}: {msg}')
+            if ff == f and cc == c:   # the location as plain text too: a job log shows an annotation's message without its file and line
+                print(f'  {f}:{l}:{col}: {msg} [{c}]')
+                print(f'::error file={f},line={l},col={col}::{msg} [{c}] ({n} in this file, the baseline has {b})'); md.append(f'  - line {l}: {msg}')
     for (f, c), n, b in better:
+        print(f'  {f}: {c}: below the baseline')   # the file as plain text too (a job log drops the annotation's file)
         print(f'::error file={f}::{c}: {n} findings, the baseline still has {b}: shrink it (python3 dm/tools/lint_c.py tidy --update)')
     line = f'baseline {sum(base.values())} findings; {len(worse)} file/check pairs above it, {len(better)} below it'
     print(line)
