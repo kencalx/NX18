@@ -2017,7 +2017,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[157];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[158];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -11958,7 +11958,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         if (S.db.en && g_pass.hd && !ndko && sw_on(dbm)) {
             if (isnan(S.db.mn) || isnan(S.db.mx)) RED_ONCE(156, "depth bounds %f..%f: not a number; drawn without the test", S.db.mn, S.db.mx);
             else { lo = fminf(fmaxf(S.db.mn, 0.f), 1.f); hi = fminf(fmaxf(S.db.mx, 0.f), 1.f);
-                if (lo > hi) { RED_ONCE(154, "depth bounds %f..%f: min above max (every fragment would fail); drawn without the test", S.db.mn, S.db.mx); lo = 0; hi = 1; }
+                if (lo > hi) { RED_ONCE(157, "depth bounds %f..%f: min above max (every fragment would fail); drawn without the test", S.db.mn, S.db.mx); lo = 0; hi = 1; }
                 else on = lo > 0 || hi < 1; }
         }
         if (on ? !g_ed.dbs || g_ed.db[0] != lo || g_ed.db[1] != hi : g_ed.dbs) {
