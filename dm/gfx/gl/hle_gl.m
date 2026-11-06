@@ -139,6 +139,14 @@ static id<MTLCommandBuffer> g_cb;
 static id<MTLRenderCommandEncoder> g_enc;
 static _Atomic uint64_t g_n_draw, g_n_pass, g_n_up, g_n_blit, g_n_pso, g_n_cb;
 static _Atomic uint64_t g_sk_prog, g_sk_pass, g_sk_attr, g_sk_pso;   // draws dropped in draw_setup, by reason
+// Pipeline builds, each made in the draw (pso_get) or the clear (glClear's quad) that first needs it, which waits for it: how many, their time in all and the longest, and those
+// after the first frame (frame_end sets g_pb_live), a stall in play that a prewarm list would move to the program's link. Counted for the frame line, nothing else changes
+static _Atomic uint64_t g_pb_n, g_pb_ns, g_pb_max, g_pb_late, g_pb_late_ns; static _Atomic int g_pb_live;
+static void pb_note(uint64_t t0) {
+    uint64_t d = now_ns() - t0, m = g_pb_max; g_pb_n++; g_pb_ns += d;
+    if (g_pb_live) { g_pb_late++; g_pb_late_ns += d; }
+    while (d > m && !atomic_compare_exchange_weak(&g_pb_max, &m, d)) {}
+}
 
 // ---------- Shader table (<DM_MSL_DIR>/gl/gl_shaders.tsv) ----------
 enum { T_FLOAT, T_VEC2, T_VEC3, T_VEC4, T_INT, T_IVEC2, T_IVEC3, T_IVEC4, T_UINT, T_UVEC2, T_UVEC3, T_UVEC4, T_BOOL, T_MAT2, T_MAT3, T_MAT4,
@@ -776,7 +784,7 @@ static GLenum bdecode(uint8_t c) { return c < 2 ? c : c < 11 ? GL_SRC_COLOR + c 
 
 static id<MTLRenderPipelineState> pso_get(prog_t *p, const pkey_t *k) {
     for (int i = 0; i < p->npc; i++) if (!memcmp(&p->pc[i].k, k, sizeof *k)) return (__bridge id<MTLRenderPipelineState>)p->pc[i].pso;
-    id<MTLRenderPipelineState> pso = nil;
+    id<MTLRenderPipelineState> pso = nil; uint64_t t0 = now_ns();   // the build's time (pb_note)
     @autoreleasepool {
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         pd.vertexFunction = p->fn[0]; pd.fragmentFunction = p->fn[1];
@@ -812,6 +820,7 @@ static id<MTLRenderPipelineState> pso_get(prog_t *p, const pkey_t *k) {
         if (!pso) { static int n; if (n++ < 20) GLOG("[RED] cannot build the pipeline (vs %s, fs %s): %s", p->si[0]->key, p->si[1]->key, err.localizedDescription.UTF8String); }
         else g_n_pso++;
     }
+    pb_note(t0);
     if (p->npc == p->cappc) { p->cappc = p->cappc ? p->cappc * 2 : 4; p->pc = realloc(p->pc, p->cappc * sizeof *p->pc); }
     p->pc[p->npc].k = *k; p->pc[p->npc].pso = pso ? (__bridge_retained void *)pso : NULL; p->npc++;
     return pso;
@@ -1090,6 +1099,7 @@ GLB(glClear, void, GLbitfield mask) {
         id<MTLRenderPipelineState> pso = nil;
         for (int i = 0; i < nc; i++) if (ck[i] == key) pso = cache[i];
         if (!pso && g_util) {
+            uint64_t t0 = now_ns();   // the build's time (pb_note)
             MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
             pd.vertexFunction = [g_util newFunctionWithName:@"clr_vs"];
             pd.fragmentFunction = [g_util newFunctionWithName:P.cpf ? @"clr_fs" : @"clr_fs_none"];
@@ -1097,7 +1107,7 @@ GLB(glClear, void, GLbitfield mask) {
             int m = (bits & GL_COLOR_BUFFER_BIT) ? S.cmask : 0;
             pd.colorAttachments[0].writeMask = (m & 1 ? MTLColorWriteMaskRed : 0) | (m & 2 ? MTLColorWriteMaskGreen : 0) | (m & 4 ? MTLColorWriteMaskBlue : 0) | (m & 8 ? MTLColorWriteMaskAlpha : 0);
             pd.depthAttachmentPixelFormat = P.dpf; pd.stencilAttachmentPixelFormat = P.spf;
-            NSError *err = nil; pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
+            NSError *err = nil; pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err]; pb_note(t0);
             if (!pso) { RED1("clear pipeline: %s", err.localizedDescription.UTF8String); return; }
             if (nc < 16) { ck[nc] = key; cache[nc++] = pso; }
         }
@@ -1917,7 +1927,12 @@ static void frame_end(void) {
         if (sp || sq || sa || so) { GLOG("frame %llu: dropped draws since the last record: %llu no program, %llu no pass, %llu no attribute buffer, %llu no pipeline",
              (unsigned long long)f, (unsigned long long)(sp - pd2), (unsigned long long)(sq - pq), (unsigned long long)(sa - pa2), (unsigned long long)(so - po));
             pd2 = sp; pq = sq; pa2 = sa; po = so; }
+        uint64_t bn = g_pb_n, bns = g_pb_ns; static uint64_t pbn, pbns;
+        if (bn != pbn) { GLOG("frame %llu: pipeline builds since the last record %llu, %.1f ms; in all %llu, %.1f ms, the longest %.1f ms; %llu of them after the first frame, %.1f ms",
+             (unsigned long long)f, (unsigned long long)(bn - pbn), (bns - pbns) / 1e6, (unsigned long long)bn, bns / 1e6, g_pb_max / 1e6, (unsigned long long)g_pb_late, g_pb_late_ns / 1e6);
+            pbn = bn; pbns = bns; }
     }
+    g_pb_live = 1;   // builds from here on come after the first frame
     if (f % 1800 == 0) {
         task_vm_info_data_t vi; mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
         uint64_t foot = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &n) == KERN_SUCCESS ? vi.phys_footprint : 0;

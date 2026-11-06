@@ -85,6 +85,16 @@ t_timestamp: t_timestamp.c ../nvn/nvn_timestamp.h
 	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ $<
 t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 	clang -O1 -Wall -o $@ t_fstep.c
+# The Vulkan layer's pipeline compiles that end while the game goes on (../vk/vk_pending.h, DM_VK_PSO_ASYNC): plain C, also under ThreadSanitizer and AddressSanitizer (make vk-pending)
+t_vk_pending: t_vk_pending.c ../vk/vk_pending.h
+	clang -std=c11 -O1 -g -Wall -Wextra -pthread -o $@ t_vk_pending.c
+t_vk_pending_tsan: t_vk_pending.c ../vk/vk_pending.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=thread -o $@ t_vk_pending.c
+t_vk_pending_asan: t_vk_pending.c ../vk/vk_pending.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=address,undefined -o $@ t_vk_pending.c
+.PHONY: vk-pending
+vk-pending: t_vk_pending t_vk_pending_tsan t_vk_pending_asan
+	./t_vk_pending && ./t_vk_pending_tsan && ./t_vk_pending_asan
 t_thermal: t_thermal.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_thermal.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_thermal_tsan: t_thermal.c $(MTL_T_DEP)
@@ -451,8 +461,10 @@ t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_stencil_view.m $(MTL_T_SRC) $(FW)
 check_t_stencil_view: RUN_ENV = MTL_DEBUG_LAYER=1
 # The Vulkan layer (#included) over the whole NVN layer, whose device and present path it uses
-t_vk_desc: t_vk_desc.m ../vk/hle_vk.m $(MTL_T_DEP)
+t_vk_desc: t_vk_desc.m ../vk/hle_vk.m ../vk/vk_pending.h $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_vk_pso: t_vk_pso.m ../vk/hle_vk.m ../vk/vk_pending.h $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_pso.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_gl_imports: t_gl_imports.m ../gl/hle_gl.m ../../host/hle.c ../../host/hle.h $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gl_imports.m ../../host/hle.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 .PHONY: check_t_gl_imports gl-imports

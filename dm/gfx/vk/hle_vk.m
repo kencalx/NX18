@@ -12,14 +12,17 @@
 //     row says which Metal slot each (set, binding) went to (an array of n descriptors: n slots from there; push constants: their own buffer slot);
 //     vertex buffers sit at slot 30 - binding;
 //   · swapchain images are registered with the NVN layer's present path (mtl_ext_tex), which shows a frame once g_ev reaches the value of the frame's last submit.
-// Environment: DM_VK_LOG=1 logs object creation; DM_VK_CAPTURE=<dir> writes every SPIR-V module the game creates (sh_capture).
+// Environment: DM_VK_LOG=1 logs object creation; DM_VK_CAPTURE=<dir> writes every SPIR-V module the game creates (sh_capture); DM_VK_PSO_ASYNC=0 compiles each pipeline
+// on the thread that creates it, as before (pipe_make).
 #define VK_NO_PROTOTYPES
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
+#include "vk_pending.h"
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_vi.h>
 #import <Metal/Metal.h>
 #include <CommonCrypto/CommonDigest.h>
+#include <sys/sysctl.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
@@ -130,6 +133,9 @@ static _Atomic uint64_t g_done;                 // highest value whose command b
 static pthread_mutex_t g_qmu = PTHREAD_MUTEX_INITIALIZER, g_done_mu = PTHREAD_MUTEX_INITIALIZER, g_mem_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_done_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic uint64_t g_n_draw, g_n_pass, g_n_submit, g_n_copy, g_n_pso, g_mem_bytes;
+static int g_pso_async = 1;                     // DM_VK_PSO_ASYNC (dev_init_once): pipelines compile on Metal's compiler after vkCreateGraphicsPipelines returns; 0: on the creating thread
+static vkp_pool g_pp = VKP_POOL_INIT;           // their compiles (vk_pending.h)
+static void pipe_report(uint64_t quiet);        // the [vk] pipelines line (Shaders and pipelines)
 
 // Shader table (<DM_MSL_DIR>/vk/vk_shaders.tsv): resource kind u / b / t / s / c, its (set, binding) in the game's SPIR-V and the Metal slot it was moved to;
 // kind p is the push-constant block (set and binding 0), whose bytes are set straight into its buffer slot
@@ -175,6 +181,16 @@ static void dev_init_once(void) {
         g_dss_off = [g_dev newDepthStencilStateWithDescriptor:[MTLDepthStencilDescriptor new]];
         sh_load();
         VLOG("Metal device %s; %d shader table entries", g_dev.name.UTF8String, g_nsh);
+        const char *pa = getenv("DM_VK_PSO_ASYNC"); g_pso_async = !(pa && !strcmp(pa, "0"));
+        // At most twice what Metal's compiler runs at once are handed to it (vk_pending.h): it always has the next, between the steps of a pipeline's compiles too, and
+        // the rest wait in creation order where a submission's own can go first, not 4,535 requests at the compiler service (Super Mario Galaxy's boot)
+        // Asked as nvn_mtl.m compile_tasks asks (respondsToSelector, else the active cores): a device without the property must not stop every Vulkan game at its device
+        NSUInteger mc = [(id)g_dev respondsToSelector:@selector(maximumConcurrentCompilationTaskCount)] ? g_dev.maximumConcurrentCompilationTaskCount : 0;
+        if (mc < 2) { int c = 0; size_t sz = sizeof c; mc = sysctlbyname("hw.activecpu", &c, &sz, NULL, 0) || c < 2 ? 2 : (NSUInteger)c; }
+        uint32_t lim = 2 * (uint32_t)mc; vkp_set_limit(&g_pp, lim);
+        if (g_pso_async) VLOG("pipelines compile after vkCreateGraphicsPipelines returns, at most %u handed to Metal's compiler at a time, which runs %lu at once (DM_VK_PSO_ASYNC=0: on "
+                              "the thread that creates them)", lim, (unsigned long)mc);
+        else VLOG("pipelines compile on the thread that creates them (DM_VK_PSO_ASYNC=0); Metal's compiler runs %lu compiles at once", (unsigned long)mc);
     }
 }
 static void dev_init(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, dev_init_once); }
@@ -224,7 +240,7 @@ typedef struct { VkFormat fmt; VkAttachmentLoadOp load, sload; VkAttachmentStore
 struct VkRenderPass_T { uint32_t natt, ncol; ratt att[16]; int col[8], res[8], depth; };
 struct VkFramebuffer_T { uint32_t n, w, h, layers; VkImageView v[16]; };
 struct VkPipeline_T {
-    __strong id<MTLRenderPipelineState> pso; __strong id<MTLDepthStencilState> dss;
+    __strong id<MTLRenderPipelineState> pso; __strong id<MTLDepthStencilState> dss; vkp_t pend; void *job;   // pend: pso's compile (vk_pending.h): pso is read through pipe_pso; job: its pjob_t while queued
     const shinfo *vs, *fs; uint32_t vb_mask; VkPipelineLayout layout;
     MTLPrimitiveType prim; MTLCullMode cull; MTLWinding wind; MTLTriangleFillMode fill; MTLDepthClipMode clip;
     int bias; float bias_c, bias_s, bias_cl; float blend[4]; uint32_t sref_f, sref_b;
@@ -420,7 +436,7 @@ VKB(vkCreateDevice, VkResult, VkPhysicalDevice pd, const VkDeviceCreateInfo *ci,
     VLOG("CreateDevice: %u queues; extensions %s", nq, ext);
     *out = &g_device; return VK_SUCCESS;
 }
-VK(vkDestroyDevice, void, VkDevice d, const VkAllocationCallbacks *a) { (void)d; (void)a; }
+VK(vkDestroyDevice, void, VkDevice d, const VkAllocationCallbacks *a) { (void)d; (void)a; dm_host_work++; vkp_wait_all(&g_pp); dm_host_work--; pipe_report(0); }   // no completion handler touches a pipeline after it
 VK(vkGetDeviceQueue, void, VkDevice d, uint32_t fam, uint32_t idx, VkQueue *q) { (void)d; (void)fam; (void)idx; *q = &g_queue; }
 
 // ---------- Memory and buffers ----------
@@ -953,8 +969,8 @@ static int dual_source(const VkPipelineColorBlendStateCreateInfo *cb) {   // a b
 }
 // Specialization constants: SPIRV-Cross keeps each SpecId as a Metal function constant of the same index, and Metal builds no pipeline from a function that has constants
 // until they are given (Super Mario 3D All-Stars' Super Mario 64). The values the pipeline gives are set; the others keep the defaults the translation wrote
-static id<MTLFunction> spec_fn(id<MTLFunction> fn, const char *key, int dual, const VkSpecializationInfo *si) {
-    if (!fn || !fn.functionConstantsDictionary.count) return fn;
+static MTLFunctionConstantValues *spec_cv(id<MTLFunction> fn, const VkSpecializationInfo *si) {   // nil: fn takes no constants and goes into the pipeline as it is
+    if (!fn || !fn.functionConstantsDictionary.count) return nil;
     MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
     for (MTLFunctionConstant *c in fn.functionConstantsDictionary.allValues)
         for (uint32_t i = 0; si && i < si->mapEntryCount; i++) {
@@ -965,31 +981,114 @@ static id<MTLFunction> spec_fn(id<MTLFunction> fn, const char *key, int dual, co
             else if (c.type == MTLDataTypeInt || c.type == MTLDataTypeUInt || c.type == MTLDataTypeFloat) [cv setConstantValue:&w type:c.type atIndex:c.index];
             else RED1("specialization constant of Metal type %lu not handled", (unsigned long)c.type);
         }
+    return cv;
+}
+static NSString *spec_name(const char *key, int dual) { return [NSString stringWithFormat:@"vk_%s%s", key, dual ? "_d" : ""]; }
+static id<MTLFunction> spec_make(MTLFunctionConstantValues *cv, NSString *name, const char *key) {   // compiled on this thread
     NSError *err = nil;
-    id<MTLFunction> f = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s%s", key, dual ? "_d" : ""] constantValues:cv error:&err];
+    id<MTLFunction> f = [g_lib newFunctionWithName:name constantValues:cv error:&err];
     if (!f) LOG("[vk] [RED] shader %s with its specialization constants: %s", key, err.localizedDescription.UTF8String);
     return f;
 }
-static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
+static id<MTLFunction> spec_fn(id<MTLFunction> fn, const char *key, int dual, const VkSpecializationInfo *si) { MTLFunctionConstantValues *cv = spec_cv(fn, si); return cv ? spec_make(cv, spec_name(key, dual), key) : fn; }
+
+// DM_VK_PSO_ASYNC (on by default): vkCreateGraphicsPipelines reads everything a pipeline takes from its create info (pointers valid only during the call) into Metal
+// descriptors and its VkPipeline_T, and returns; only the Metal compiles go on after it, through Metal's asynchronous calls, each started once the one before has ended:
+// the stages' specializations in stage order, each setting its stage's function as spec_fn did, then the pipeline state. Metal's compiler service runs several at once
+// (maximumConcurrentCompilationTaskCount; compiles scale 3-7 times over one worker, docs/development.md) without holding a thread of ours, where each pipeline cost its
+// creating thread a 3-5 ms build: Super Mario Galaxy creates 4,535 at every boot ("Initializing system...", about 15 s on the Mac), Hades 1,856 before its first frame.
+// The game sees the same handles and results: a submission waits for its pipelines' compiles before the graphics gate (pipe_wait_sub), a draw reads the state through
+// pipe_pso, and a failed one ends as before (no state, its draws skipped, the same red lines). At most twice Metal's concurrent compiles are handed to it at a time, the
+// others queued (vk_pending.h). Metal's compiler settings stay as they are (NVN measured shouldMaximizeConcurrentCompilation and leaves it off)
+typedef struct { __strong MTLRenderPipelineDescriptor *pd; __strong NSString *name[2]; __strong MTLFunctionConstantValues *cv[2]; int frag[2], n, vs; char key[2][17], keys[64]; } pjob_t;   // vs: a vertex specialization is noted
+static void pjob_free(pjob_t *j) { if (!j) return; j->pd = nil; for (int i = 0; i < 2; i++) { j->name[i] = nil; j->cv[i] = nil; } free(j); }
+static void pipe_free(VkPipeline p) { p->pso = nil; p->dss = nil; p->dss_dyn = nil; free(p); }
+static void pso_failed(const char *keys, NSError *err) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 20) LOG("[vk] [RED] cannot build the pipeline (%s): %s", keys, err.localizedDescription.UTF8String); }
+static void pjob_step(VkPipeline p, pjob_t *j, int i);
+// The end of a pipeline's compile, on the creating thread or in its last completion handler: the state is stored, then published to the draws (vkp_finish), and a pipeline
+// the game destroyed meanwhile is freed here, before vkp_end lets vkDestroyDevice return. slot: it had one of the limit (vkp_start), which goes to the oldest queued
+// pipeline, or the one a submission waits for; its compiles start from a global queue, not inside this handler
+static void pipe_done(VkPipeline p, id<MTLRenderPipelineState> pso, int slot) {
+    p->pso = pso;
+    if (pso) g_n_pso++;
+    if (vkp_finish(&g_pp, &p->pend, !pso, vkp_clock())) pipe_free(p);
+    vkp_t *n = vkp_end(&g_pp, slot);
+    if (n) { VkPipeline q = (VkPipeline)(void *)((char *)n - offsetof(struct VkPipeline_T, pend));
+             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { pjob_step(q, q->job, 0); } }); }
+}
+// A stage's function: spec_fn's; with DM_VK_PSO_ASYNC (j) nil while its specialization waits in j for pjob_step, unless it takes no constants
+static id<MTLFunction> stage_fn(pjob_t *j, int frag, id<MTLFunction> fn, const char *key, int dual, const VkSpecializationInfo *si) {
+    if (!j) return spec_fn(fn, key, dual, si);
+    MTLFunctionConstantValues *cv = spec_cv(fn, si);
+    if (!cv) return fn;
+    if (j->n == 2) return spec_make(cv, spec_name(key, dual), key);   // a third stage with a function, which Vulkan does not allow: compiled here
+    j->name[j->n] = spec_name(key, dual); j->cv[j->n] = cv; j->frag[j->n] = frag; strlcpy(j->key[j->n], key, sizeof j->key[0]); j->vs |= !frag; j->n++;
+    return nil;
+}
+// Step i of a pipeline's compiles: specialization i, or once there are no more the pipeline state; each step starts once the one before has ended, from a global queue
+// rather than inside Metal's completion handler, so no Metal call is made from Metal's own callback. The arguments are held in locals for the call: its handler may run
+// before it returns and free the job
+static void pjob_step(VkPipeline p, pjob_t *j, int i) {
+    if (i < j->n) {
+        NSString *name = j->name[i]; MTLFunctionConstantValues *cv = j->cv[i];
+        [g_lib newFunctionWithName:name constantValues:cv completionHandler:^(id<MTLFunction> f, NSError *err) { @autoreleasepool {
+            if (!f) LOG("[vk] [RED] shader %s with its specialization constants: %s", j->key[i], err.localizedDescription.UTF8String);
+            if (j->frag[i]) j->pd.fragmentFunction = f; else j->pd.vertexFunction = f;
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { pjob_step(p, j, i + 1); } });
+        } }];
+        return;
+    }
+    MTLRenderPipelineDescriptor *pd = j->pd;
+    if (!pd.vertexFunction) { LOG("[vk] [RED] pipeline has no usable vertex shader (%s)", j->keys); pjob_free(j); pipe_done(p, nil, 1); return; }
+    [g_dev newRenderPipelineStateWithDescriptor:pd completionHandler:^(id<MTLRenderPipelineState> pso, NSError *err) { @autoreleasepool {
+        if (!pso) pso_failed(j->keys, err);
+        pjob_free(j); pipe_done(p, pso, 1);
+    } }];
+}
+static void pipe_slow(uint64_t w, uint32_t n) {
+    LOG("[vk] [RED] a submission has waited %.0f s for a pipeline's compile and Metal's compiler has finished none in the last %.0f s (%u pipelines in flight): a compile has not returned",
+        w / 1e9, VKP_SLOW_NS / 1e9, n);
+}
+static id<MTLRenderPipelineState> pipe_pso(VkPipeline p) { vkp_wait(&g_pp, &p->pend, pipe_slow); return p->pso; }   // a pipeline's state, once its compile has ended (one load after that)
+// The [vk] pipelines line, once a burst of compiles has ended (frame_end: none in flight and none finished for 0.5 s; vkDestroyDevice): what the burst cost the game, in
+// both modes, so a cold boot can be compared with DM_VK_PSO_ASYNC=0 and with a warm one (Metal's shader cache). After 16 lines, at most one every 10 s: the bursts in
+// between are not taken, so they add up into the next line
+static void pipe_report(uint64_t quiet) {
+    static _Atomic int lines; static _Atomic uint64_t last; uint64_t now = vkp_clock();
+    if (quiet && lines >= 16 && now - last < 10000000000ull) return;
+    vkp_rec r; if (!vkp_take(&g_pp, now, quiet, &r)) return;
+    lines++; last = now;
+    VLOG("pipelines: %llu compiled %s in %.2f s from the first create to the last finish, %.2f s inside vkCreateGraphicsPipelines summed over the creating threads, %.1f ms each from "
+         "create to finish, at most %u in flight and %u handed to Metal at once, %llu failed; submissions waited for a compile %llu times, %.1f ms in all (longest %.1f ms); %llu since "
+         "the start", (unsigned long long)r.n, g_pso_async ? "concurrently" : "on the creating threads (DM_VK_PSO_ASYNC=0)", (r.last - r.first) / 1e9, r.create_ns / 1e9,
+         r.sum / 1e6 / r.n, r.peak, r.peak_run, (unsigned long long)r.nfail, (unsigned long long)r.nwait, r.wait_ns / 1e6, r.wait_max / 1e6, (unsigned long long)r.total);
+}
+static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci, int async) {   // async: DM_VK_PSO_ASYNC, the compiles end after the return
     VkPipeline p = zalloc(sizeof *p); p->layout = ci->layout;
+    vkp_begin(&g_pp, &p->pend, vkp_clock());   // ended by pipe_done on every path
+    if (!async) (void)vkp_start(&g_pp, &p->pend, 0);   // this thread compiles it: a slot, for the count
     @autoreleasepool {
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         char keys[64] = ""; int dual = dual_source(ci->pColorBlendState);
+        pjob_t *j = async ? zalloc(sizeof *j) : NULL;
         for (uint32_t s = 0; s < ci->stageCount; s++) {
             const VkPipelineShaderStageCreateInfo *st = &ci->pStages[s]; VkShaderModule m = st->module;
-            if (st->stage == VK_SHADER_STAGE_VERTEX_BIT) { pd.vertexFunction = spec_fn(m->fn, m->key, 0, st->pSpecializationInfo); p->vs = m->si; }
+            if (st->stage == VK_SHADER_STAGE_VERTEX_BIT) { pd.vertexFunction = stage_fn(j, 0, m->fn, m->key, 0, st->pSpecializationInfo); p->vs = m->si; }
             else if (st->stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
                 if (dual && m->fn) {   // pipelines may be built on several threads
                     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&mu);
                     if (!m->tried_d) { m->tried_d = 1; m->fn_d = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s_d", m->key]]; }
                     pthread_mutex_unlock(&mu);
                 }
-                pd.fragmentFunction = spec_fn(dual && m->fn_d ? m->fn_d : m->fn, m->key, dual && m->fn_d, st->pSpecializationInfo); p->fs = m->si;
+                pd.fragmentFunction = stage_fn(j, 1, dual && m->fn_d ? m->fn_d : m->fn, m->key, dual && m->fn_d, st->pSpecializationInfo); p->fs = m->si;
             }
             else RED1("shader stage %#x not implemented", st->stage);
             strlcat(keys, s ? " " : "", sizeof keys); strlcat(keys, m->key, sizeof keys);
         }
-        if (!pd.vertexFunction) { LOG("[vk] [RED] pipeline has no usable vertex shader (%s)", keys); return p; }
+        if (!pd.vertexFunction && !(j && j->vs)) {   // the noted specializations are compiled here, for the red lines DM_VK_PSO_ASYNC=0 gives
+            for (int i = 0; j && i < j->n; i++) (void)spec_make(j->cv[i], j->name[i], j->key[i]);
+            LOG("[vk] [RED] pipeline has no usable vertex shader (%s)", keys); pjob_free(j); pipe_done(p, nil, !j); return p;
+        }
         const VkPipelineVertexInputStateCreateInfo *vi = ci->pVertexInputState;
         MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
         uint32_t used = 0;   // bindings some mapped attribute reads: Metal's validation rejects a buffer layout no attribute uses
@@ -1070,19 +1169,27 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
         const VkPipelineViewportStateCreateInfo *vs = ci->pViewportState;
         if (!p->dyn_vp && vs && vs->pViewports && vs->viewportCount) { p->vp = vp_of(&vs->pViewports[0]); p->has_vp = 1; }
         if (!p->dyn_sc && vs && vs->pScissors && vs->scissorCount) { p->sc = vs->pScissors[0]; p->has_sc = 1; }
+        if (j) {   // DM_VK_PSO_ASYNC: nothing of ci is read after this. Handed to Metal now, or queued until a compile ends (pipe_done)
+            j->pd = pd; strlcpy(j->keys, keys, sizeof j->keys); p->job = j;
+            if (vkp_start(&g_pp, &p->pend, 1)) pjob_step(p, j, 0);
+            return p;
+        }
         NSError *err = nil;
-        p->pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
-        if (!p->pso) { static int n; if (n++ < 20) LOG("[vk] [RED] cannot build the pipeline (%s): %s", keys, err.localizedDescription.UTF8String); }
-        else g_n_pso++;
+        id<MTLRenderPipelineState> pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        if (!pso) pso_failed(keys, err);
+        pipe_done(p, pso, 1);
     }
     return p;
 }
 VKB(vkCreateGraphicsPipelines, VkResult, VkDevice d, VkPipelineCache c, uint32_t n, const VkGraphicsPipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *out) {
     (void)d; (void)c; (void)a; dev_init();
-    for (uint32_t i = 0; i < n; i++) out[i] = pipe_make(&ci[i]);   // a pipeline Metal refuses is still handed out: its draws are skipped
+    uint64_t t0 = vkp_clock();
+    for (uint32_t i = 0; i < n; i++) out[i] = pipe_make(&ci[i], g_pso_async);   // a pipeline Metal refuses is still handed out: its draws are skipped
+    vkp_create(&g_pp, vkp_clock() - t0);
     return VK_SUCCESS;
 }
-VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->dss = nil; free(p); } }
+// A pipeline whose compile is still queued or running is freed by its completion handler (pipe_done), so a game that destroys one right after creating it does not wait for Metal
+VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p && vkp_drop(&p->pend)) pipe_free(p); }
 
 // ---------- Command buffers: recording ----------
 enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND, C_CLEARI, C_STENCIL };
@@ -1358,7 +1465,7 @@ static int pre_draw(rs_t *s) {
     if (!s->re && s->cut) resume_rp(s);
     VkPipeline p = s->pipe; id<MTLRenderCommandEncoder> re = s->re;
     if (!re) { RED1("draw outside a render pass"); return 0; }
-    if (!p || !p->pso) return 0;
+    if (!p || !pipe_pso(p)) return 0;   // its compile has ended (pipe_wait_sub waited for it, so one load); p->pso below is the state it published
     if (p->logic) { static uint64_t n; if (!n++) LOG("[vk] [RED] logic op %d not implemented: the pipeline draws with its shader's colour", p->logic); if (!(n % 1000)) LOG("[vk] logic op draws so far: %llu", (unsigned long long)n); }
     if (s->applied != p) {
         [re setRenderPipelineState:p->pso]; [re setDepthStencilState:p->dss ? p->dss : g_dss_off];
@@ -1575,8 +1682,26 @@ static void done_advance(uint64_t v) {
     pthread_cond_broadcast(&g_done_cv);
     pthread_mutex_unlock(&g_done_mu);
 }
+// DM_VK_PSO_ASYNC: before the graphics gate and g_qmu, the submission waits for the compiles of the pipelines it binds, first moved to the front of the queue, so that
+// pre_draw's wait is one load. In the gate, a draw that waited held going to the background for as long as the compiles took (dm_gfx_suspend, on the main thread, waits
+// for every submit inside), as NVN's prepare step once did (docs/reference/nvn-objects.md); it stays host work for the guest scheduler. Nothing compiling: one lock
+static void pipe_wait_sub(uint32_t n, const VkSubmitInfo *si) {
+    if (!g_pso_async || vkp_idle(&g_pp)) return;
+    dm_host_work++;
+    for (int pass = 0; pass < 2; pass++)   // all of them to the front first, then the waits
+        for (uint32_t i = 0; i < n; i++)
+            for (uint32_t j = 0; j < si[i].commandBufferCount; j++) {
+                VkCommandBuffer c = si[i].pCommandBuffers[j];
+                for (size_t o = 0; o < c->n; o += ((const chdr *)(c->buf + o))->size) {
+                    const chdr *h = (const chdr *)(c->buf + o); VkPipeline p = h->op == C_PIPE ? ((const c_pipe *)(h + 1))->p : NULL;
+                    if (p) { if (pass) (void)pipe_pso(p); else vkp_hurry(&g_pp, &p->pend); }
+                }
+            }
+    dm_host_work--;
+}
 VKB(vkQueueSubmit, VkResult, VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFence f) {
-    (void)q; dm_gfx_enter();   // blocks while the app is in the background (iOS allows no GPU work there)
+    (void)q; pipe_wait_sub(n, si);
+    dm_gfx_enter();   // blocks while the app is in the background (iOS allows no GPU work there)
     @autoreleasepool {
         conv_sync();
         pthread_mutex_lock(&g_qmu);
@@ -1736,6 +1861,7 @@ static void frame_end(void) {
         VLOG("frame %llu: draws %llu, passes %llu, submits %llu, copies %llu (since the last record, %llu frames); pipelines so far %llu, buffer memory %.1f MB", (unsigned long long)f, (unsigned long long)(dr - pd),
              (unsigned long long)(pa - pp), (unsigned long long)(su - ps), (unsigned long long)(co - pc), (unsigned long long)(f <= 3 ? 1 : 300), (unsigned long long)g_n_pso, g_mem_bytes / 1048576.0);
     if (f <= 3 || f % 300 == 0) { pd = dr; pp = pa; ps = su; pc = co; }
+    pipe_report(500000000ull);   // once a burst of pipeline compiles has ended
     dm_guest_frame_tick();
 }
 VKB(vkQueuePresentKHR, VkResult, VkQueue q, const VkPresentInfoKHR *pi) {
