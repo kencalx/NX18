@@ -276,7 +276,7 @@ static void tile_case(const char *dir) {
     CHECK(g_enc == first && g_fb_n == 0 && g_fb_count == copies + 1 && g_fb_tseq == g_draw_seq && g_fb_tfn && g_fb_tile_draws == tiles + 1 && g_fb_tdesc.fbmask == 1 && g_fb_tdesc.fx[0] == 0,
           "after a barrier the draw reads the tile: no snapshot, the pass stays open");
     {   // bf_fn's numeric memo: the same shader, redirections, mask and map give the function the draw got; another mask is another specialization, not the remembered one
-        int fx[32] = {0}; for (int i = 0; i < 32; i++) fx[i] = g_fb_tdesc.fx[i]; uint8_t lm[8]; memcpy(lm, g_fb_tlmap, 8);
+        int fx[32] = {0}; for (int i = 0; i < 32; i++) fx[i] = (int)g_fb_tdesc.fx[i]; uint8_t lm[8]; memcpy(lm, g_fb_tlmap, 8);   // fx: signed slots, -1 for none
         id<MTLFunction> a = bf_fn(fs, fx, g_fb_tdesc.fbmask, lm), b = bf_fn(fs, fx, g_fb_tdesc.fbmask, lm), c = bf_fn(fs, fx, (uint8_t)(g_fb_tdesc.fbmask | 2), lm);
         CHECK(a && a == g_fb_tfn && b == a && c != a, "the readable-tile function is remembered by its numbers, and a different attachment mask is not taken for it");
     }
@@ -421,10 +421,10 @@ static void shape_case(void) {
 static void pool_depth_case(void) {
     tex_t colour, depth, same, other;
     target(&colour, 99800);
-    depth = (tex_t){.magic=MAGIC('T','E','X',0), .serial=99801};
+    depth = (tex_t){.magic=MAGIC('T','E','X',0), .serial=99801};   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns colour's texture (target's serial_put, CFBridgingRetain) for the rest of the run, not a leak
     depth.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_DEPTH32F, .width=4, .height=4, .depth=1, .levels=1, .samples=1};
     id<MTLTexture> dt = [g_dev newTextureWithDescriptor:tex_desc(&depth, 0)]; res_add(dt); mtl_tex_init(&depth); serial_put(depth.serial, dt);
-    static pool_t pool; depth.pool = &pool; depth.off = 0x1000;
+    static pool_t pool; depth.pool = &pool; depth.off = 0x1000;   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns dt (serial_put's CFBridgingRetain) for the rest of the run, not a leak
     same = depth; same.serial = 99802; same.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;   // a second object over the same storage, one Metal texture (alias_key)
     other = depth; other.serial = 99803; other.off = 0x2000;
     NvProg *pr = [NvProg new]; NvShader *fs = [NvShader new]; pr->sh[1] = fs; fs->rf.pool = 1; fs->rf.bindless = 1;
