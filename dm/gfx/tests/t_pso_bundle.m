@@ -3,7 +3,10 @@
 // bases without a vertex layout; with a matching stamp the prebuild builds only the pairs left to the device (a function with constants) and takes nothing from the compiler otherwise,
 // and a draw of a covered pair takes its base from the bundle and captures nothing for the device's own archive;
 // a stamp of another depth mode or other pairs runs the device's prebuild, which still takes the bundled bases it finds; an archive whose bases the probe does not find is not trusted;
-// a folder without this GPU's file and a file that is no archive leave no archive. Without metal-tt (no Metal toolchain) it says so and passes
+// a folder without this GPU's file and a file that is no archive leave no archive. The crash guard (nvn_pso_guard.h; its rules are t_pso_guard.c's), which the Mac runs only with
+// DM_PSO_BUNDLE_GUARD=1: unset, a planted record is not read; with it, a record planted for this archive and system build (one early end, or two in a row for a profile that
+// sets pso_mtl4 on) leaves it out, the start without it past its window keeps it out, DM_PSO_BUNDLE_GUARD=0 opens it all the same, a start with it writes the record before Metal
+// reads it, the background puts it back and the window clears it, and another system build's record is none. Without metal-tt (no Metal toolchain) it says so and passes
 #include "../nvn/nvn_mtl.m"
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
@@ -179,6 +182,55 @@ int main(void) { @autoreleasepool {
         EXPECT("not an archive: refused before Metal", 0, arch_file_ok([other stringByAppendingFormat:@"/%@.mtl4a", gpu]));
         setenv("DM_PSO_BUNDLE", "off", 1); pso_bundle_open(list);
         EXPECT("off: none opened", 0, list.count);
+        g_arch_bundle = real;
+    }
+    // The crash guard: the record beside the device's own archive folder (DM_PSO_ARCHIVE's parent, root here), as pso_bundle_open reads and writes it
+    @autoreleasepool {
+        id<MTL4Archive> real = g_arch_bundle; NSString *p = [bundle stringByAppendingFormat:@"/%@.mtl4a", gpu], *rec = [root stringByAppendingPathComponent:@"pso_bundle_guard.tsv"];
+        NSString *ident = pso_bundle_identity(p); char os[64] = "", txt[2048]; size_t n = sizeof os; sysctlbyname("kern.osversion", os, &n, NULL, 0);
+        EXPECT("guard: the archive has an identity", 1, ident.length > 0);
+        EXPECT("guard: the identity names this executable's build", 1, ident.length && ![ident hasSuffix:@"host unknown"]);
+        setenv("DM_PSO_BUNDLE", bundle.UTF8String, 1);
+        // planted: starts with it did not get past their first frames (as many in a row as this profile needs to leave it out)
+        int out = PSO_GUARD_NEED > 1 ? PG_WITH2 : PG_WITH;
+        pg_format(txt, sizeof txt, out, os, ident.UTF8String); put(rec, @(txt));
+        // the Mac's default: the guard is off, the record is neither read nor written
+        unsetenv("DM_PSO_BUNDLE_GUARD");
+        NSMutableArray *list = [NSMutableArray array]; g_arch_bundle = nil; pso_bundle_open(list);
+        EXPECT("guard: off by default on the Mac, opened", 1, list.count == 1 && g_arch_bundle != nil);
+        EXPECT("guard: off by default, the record left as it was", 1, [[NSString stringWithContentsOfFile:rec encoding:NSUTF8StringEncoding error:nil] isEqualToString:@(txt)]);
+        // DM_PSO_BUNDLE_GUARD=1: this start leaves it out and is watched without it
+        setenv("DM_PSO_BUNDLE_GUARD", "1", 1);
+        [list removeAllObjects]; g_arch_bundle = nil; pso_bundle_open(list);
+        EXPECT("guard: planted record, archive left out", 0, list.count + (g_arch_bundle != nil));
+        EXPECT("guard: watched without it", PG_WITHOUT, g_pg.armed);
+        EXPECT("guard: the record says so before the first frame", PG_WITHOUT, pg_load(&g_pg));
+        // past its window without it (the prepare step's end with no compile of the prebuild under way, then PG_FRAMES presents): it stays out, start after start
+        pso_guard_prepared(); for (int i = 0; i < PG_FRAMES; i++) pso_guard_frame();
+        for (int i = 0; i < 500 && atomic_load(&g_pg.watching); i++) usleep(10000);   // pg_pass runs on a utility queue
+        EXPECT("guard: past its window", 0, atomic_load(&g_pg.watching));
+        EXPECT("guard: skip on disk", PG_SKIP, pg_load(&g_pg));
+        pso_bundle_open(list);
+        EXPECT("guard: skip, archive left out again", 0, list.count + (g_arch_bundle != nil));
+        // DM_PSO_BUNDLE_GUARD=0: the record is not read, the archive opens
+        setenv("DM_PSO_BUNDLE_GUARD", "0", 1); pso_bundle_open(list); setenv("DM_PSO_BUNDLE_GUARD", "1", 1);
+        EXPECT("guard off: opened", 1, list.count == 1 && g_arch_bundle != nil);
+        EXPECT("guard off: the record left as it was", PG_SKIP, pg_load(&g_pg));
+        // no record: the archive opens and the record says a start with it is under way; the background puts it back, the foreground writes it again, the window clears it
+        [NSFileManager.defaultManager removeItemAtPath:rec error:nil]; [list removeAllObjects]; g_arch_bundle = nil; pso_bundle_open(list);
+        EXPECT("guard: no record, opened", 1, list.count == 1 && g_arch_bundle != nil);
+        EXPECT("guard: written before Metal read it", PG_WITH, pg_load(&g_pg));
+        mtl_pso_guard_away(1, 1); EXPECT("guard: in the background, no record", 0, [NSFileManager.defaultManager fileExistsAtPath:rec]);
+        mtl_pso_guard_away(1, 0); EXPECT("guard: back, written again", PG_WITH, pg_load(&g_pg));
+        pso_guard_mark("the test's prepare step"); for (int i = 0; i < PG_FRAMES; i++) pso_guard_frame();
+        for (int i = 0; i < 500 && atomic_load(&g_pg.watching); i++) usleep(10000);
+        EXPECT("guard: the record cleared after the window", 0, [NSFileManager.defaultManager fileExistsAtPath:rec]);
+        // a record of another system build is no record: the archive is tried again
+        pg_format(txt, sizeof txt, PG_SKIP, "0A000", ident.UTF8String); put(rec, @(txt));
+        [list removeAllObjects]; g_arch_bundle = nil; pso_bundle_open(list);
+        EXPECT("guard: another system build's record, opened", 1, list.count == 1 && g_arch_bundle != nil);
+        int err = 0; pg_pass(&g_pg, &err);
+        unsetenv("DM_PSO_BUNDLE_GUARD");
         g_arch_bundle = real;
     }
     [NSFileManager.defaultManager removeItemAtPath:root error:nil];

@@ -10,6 +10,7 @@ void hlecount_flush(void); void dm_rec_finish(void);
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) {
     static _Atomic int once; if (atomic_exchange(&once, 1)) return;
     uint64_t t0 = now_ns(); LOG("received %s: graceful exit", why);
+    dm_gfx_exiting();                               // first: the bundled pipeline archive's crash guard does not count a start that ends here, whatever the steps below take (nvn_pso_guard.h)
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
         LOG("[RED] graceful exit not done in 1.5 seconds, exiting at once"); if (then) then(arg); _exit(0); });
     hlecount_flush();                               // DM_HLECOUNT: _exit does not run atexit, write a copy here

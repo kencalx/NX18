@@ -221,7 +221,12 @@ class Nvn(Base):
         self.assertTrue(want(g('on'), 'none', False, {})); self.assertFalse(want(g('on'), 'none', False, {'IOS_PULL': '0'})); self.assertTrue(want(g(), 'none', False, {'IOS_PULL': '1'}))
         self.assertTrue(want(g(pairs=True), 'g18p', False, {}))   # the archive is made of them
         self.assertFalse(want(g(), 'g18p', False, {'IOS_PULL': '0'}))   # no pairs: build_ipa.sh makes no archive
-        self.assertEqual(nsp.ios_gpus('', g()), 'none'); self.assertEqual(nsp.ios_gpus('', g('on')), 'g18p'); self.assertEqual(nsp.ios_gpus('', g('on', gpu='g18p g17p')), 'g18p,g17p'); self.assertEqual(nsp.ios_gpus('g16p', g()), 'g16p')
+        # the archive's GPUs (ios_gpus: --gpu / PSO_GPUS, DEVICE_GPUS, the build's device): the devices' GPUs for every game by default, whatever its pso_mtl4 or pso_gpu; an explicit
+        # value as given; DEVICE_GPUS none keeps NXNative's rule (pso_mtl4 on only)
+        self.assertEqual(nsp.ios_gpus('', '', 'both', g()), 'g19p,g16g'); self.assertEqual(nsp.ios_gpus('', '', 'iphone', g()), 'g19p'); self.assertEqual(nsp.ios_gpus('', '', 'ipad', g('on')), 'g16g')
+        self.assertEqual(nsp.ios_gpus('', '', 'ipad', g('on', gpu='g18p g17p')), 'g16g'); self.assertEqual(nsp.ios_gpus('g16p', '', 'iphone', g()), 'g16p'); self.assertEqual(nsp.ios_gpus('none', '', 'both', g('on')), 'none')
+        self.assertEqual(nsp.ios_gpus('', 'none', 'both', g()), 'none'); self.assertEqual(nsp.ios_gpus('', 'none', 'iphone', g('on')), 'g19p'); self.assertEqual(nsp.ios_gpus('', 'g19p,g16g', 'ipad', g()), 'g16g')
+        self.assertTrue(want(g(pairs=True), nsp.ios_gpus('', '', 'iphone', g(pairs=True)), False, {'IOS_PULL': '0'}))   # the default archive is made of the pulling libraries
 
     def test_old_chain_images_go_too(self):
         self.build(True)

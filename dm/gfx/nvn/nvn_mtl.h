@@ -47,6 +47,7 @@ int mtl_wait(uint64_t fence, uint64_t timeout_ns);   // Returns 1 when the GPU h
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns);   // the same for a sync WindowAcquireTexture handed out (its own line in the wait ledger, DM_NVN_WAITS)
 void mtl_finish(void);                               // Wait for all submitted commands to complete
 void mtl_drain(void);                                // Wait for all commands on the queue (including presents) to complete: submit an empty command buffer and wait for it
+void mtl_pso_guard_away(int why, int on);            // the app goes away (on 1) or comes back (0), why: 1 the background (dm_gfx_suspend), 2 inactive (dm_gfx_inactive), 4 the graceful exit (dm_gfx_exiting): the bundled pipeline archive's crash guard (nvn_pso_guard.h) does not count a start that ends meanwhile
 void mtl_xv_window_tex(uint64_t serial);   // Register a window (swapchain) texture: the cross-submit validity ledger never collects it
 // External producers (the Vulkan layer, dm/gfx/vk): the shared Metal device; a serial for one of their textures; present it once their event reaches ev_val (ticket for mtl_present_wait)
 void *mtl_device(void);

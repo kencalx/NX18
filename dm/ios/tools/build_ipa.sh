@@ -175,19 +175,22 @@ if [ -n "${PROGRAMS_TSV:-}" ]; then
   LJ=$G/dm/p0/launcher.json
 else TD=$G/dm; program_tables; LJ=$G/dm/launcher.json; fi
 # The pipeline archive made offline (dm/gfx/tools/pso_offline.py): the base of every shader pair, compiled here by metal-tt for each GPU architecture in DM_PSO_GPUS (comma-separated, as
-# MTLDevice.architecture names them: g19p = the A20 Pro of the iPhone 18 Pro Max, g16g = the M4 of the iPad Pro; none = no archive), so the device does not build them on its first start
-# (Breath of the Wild: 15,767 bases, 7-8 minutes on an iPhone 17 Pro Max). The host opens only the archive named after its device's GPU (nvn_mtl.m pso_bundle_open).
-# Without DM_PSO_GPUS a game whose profile sets pso_mtl4 on gets the archive for the GPUs of the devices the app is for, as the NSP script makes it (its DEVICE_ARCH): DM_DEVICE_FAMILY 1 = g19p,
-# 2 = g16g, 1,2 = both: another family's archive is never opened. 13 Sentinels' build with a g18p archive compiled its bases on an A20 Pro and crashed in Metal 4; with a g19p one it ran
-# (dm/games/01003FC01670C000/README.md). The profile's pso_gpu key does not
-# change this default. The games that do not set pso_mtl4 on get none. It goes into the app as pso/ (main.m hands it to the host as
-# DM_PSO_BUNDLE), with the pulling vertex libraries the bases are made of. Each architecture adds about 650 MB to the app (Breath of the Wild; 220 MB in the IPA) and 4 minutes to the first build;
-# made again only when its inputs change (the libraries, the pairs, the profile's depth_mode, metal-tt)
-PSO=; P4=$(python3 "$DM/games/game.py" "$GAME" pso_mtl4 off) || die "game profile $GD: pso_mtl4"; PG=$(python3 "$DM/games/game.py" "$GAME" pso_gpu '') || die "game profile $GD: pso_gpu"
+# MTLDevice.architecture names them: g19p = the A20 Pro of the iPhone 18 Pro Max, g16g = the M4 of the iPad Pro; none or empty = no archive), so the device does not build them on its
+# first start (Breath of the Wild: 15,767 bases, 7-8 minutes on an iPhone 17 Pro Max, 0.53 s with its archive). The host opens only the archive named after its device's GPU
+# (nvn_mtl.m pso_bundle_open), and its crash guard (nvn_pso_guard.h) leaves it out at the next start by itself after a start with it that crashed in its first frames (two in a row
+# for a profile that sets pso_mtl4 on).
+# Without DM_PSO_GPUS every NVN game gets the archive for the GPUs of the devices the app is for, as the NSP script makes it by default (its DEVICE_ARCH): DM_DEVICE_FAMILY 1 = g19p,
+# 2 = g16g, 1,2 = both: another family's archive is never opened (13 Sentinels' build with a g18p archive compiled its bases on an A20 Pro and crashed in Metal 4; with a g19p one it
+# ran: dm/games/01003FC01670C000/README.md). The profile's pso_gpu key does not change this default, and neither does pso_mtl4 (Metal 4 pipelines, which read the archive, are on for
+# every game on iOS). It goes into the app as pso/ (main.m hands it to the host as DM_PSO_BUNDLE), with the pulling vertex libraries the bases are made of. Each architecture adds
+# to the app and the first build, more with more shader pairs: 650 MB and 4 minutes for Breath of the Wild (220 MB in the IPA; M2 Max), about 1 GB and 9 minutes for Super Mario
+# Odyssey (8 GB M2); for Mario Party Superstars' 140,036 pairs metal-tt failed after 76 minutes, and the app is then built without one (below). Made again only when its inputs
+# change (the libraries, the pairs, the profile's depth_mode, metal-tt)
+PSO=; PG=$(python3 "$DM/games/game.py" "$GAME" pso_gpu '') || die "game profile $GD: pso_gpu"
 case "${DM_DEVICE_FAMILY:-1,2}" in 1) PGK=g19p ;; 2) PGK=g16g ;; *) PGK=g19p,g16g ;; esac   # the GPUs of the devices the app installs on
-if [ -n "${DM_PSO_GPUS+set}" ]; then GPUS=$DM_PSO_GPUS; elif [ "$P4" = on ]; then GPUS=$PGK
+if [ -n "${DM_PSO_GPUS+set}" ]; then GPUS=$DM_PSO_GPUS; else GPUS=$PGK
   [ -z "$PG" ] || t "profile $GD: pso_gpu '$PG' is not used: the archive is made for the GPUs of the devices the app is for, $PGK (DM_PSO_GPUS names others)"
-else GPUS=none; fi
+fi
 if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/shader_pairs.tsv" ]; then
   PSO=$W/build/ios/pso/bundle
   t "pipeline archive for $GPUS (metal-tt; minutes when its inputs changed)"
@@ -197,7 +200,7 @@ if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/sha
     t "[RED] pipeline archive: pso_offline.py failed (its output is above); the app is built without one and the device builds its pipeline bases on its first start (DM_PSO_GPUS=none skips this step)"
     rm -rf "$PSO"; PSO=
   fi
-else [ "$GFXAPI" != nvn ] || t "no pipeline archive ($([ -n "${DM_PSO_GPUS+set}" ] && echo "DM_PSO_GPUS=${GPUS:-empty}" || echo "the profile does not set pso_mtl4 on; DM_PSO_GPUS=$PGK builds one")$([ -f "$GD/shader_pairs.tsv" ] || echo ', no shader_pairs.tsv'))"; fi
+else [ "$GFXAPI" != nvn ] || t "no pipeline archive ($([ -n "${DM_PSO_GPUS+set}" ] && echo "DM_PSO_GPUS=${GPUS:-empty}" || echo "the devices' GPUs, $GPUS")$([ -f "$GD/shader_pairs.tsv" ] || echo ', no shader_pairs.tsv')): the device builds the bases on its first start"; fi
 # The packed language (DMLanguage) is the Game language row's default, which settings.py makes the game's first language when it lacks DM_LANG: the screen and DM_LAUNCHER=0 then agree
 LD=$(python3 -c 'import json, sys; print(next((s["default"] for s in json.load(open(sys.argv[1]))["settings"] if s["env"] == "DM_LANG"), ""))' $LJ) || die "launcher settings ($LJ)"
 if [ -n "$LD" ] && [ "$LD" != "$DM_LANG" ]; then t "game language: the game has no $DM_LANG; packing $LD, its first"; export DM_LANG=$LD; fi

@@ -136,6 +136,7 @@ int dm_cheats_master(void) { return 1; }
 void dm_cheats_master_set(int on) { (void)on; }
 __thread _Atomic int dm_host_work;
 void dm_gfx_suspend(int on) { (void)on; }
+void dm_gfx_inactive(int on) { (void)on; }   // the bundled pipeline archive's crash guard (hle_nvn.c): no archive in the harness
 void dm_audio_suspend(int on) { (void)on; }
 void dm_audio_reset(void) {}
 void dm_focus_set(int state) { (void)state; }

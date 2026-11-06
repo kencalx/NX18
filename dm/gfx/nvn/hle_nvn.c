@@ -1290,7 +1290,14 @@ void dm_gfx_enter(void) { gfx_enter(); }   // the same gate for the Vulkan layer
 void dm_gfx_leave(void) { gfx_leave(); }
 __attribute__((weak)) void dm_vk_drain(void) {}   // dm/gfx/vk/hle_vk.m: wait for the Vulkan layer's queue (the graphics unit tests do not link it)
 __attribute__((weak)) void dm_gl_drain(void) {}   // dm/gfx/gl/hle_gl.m: the same for the GL layer
+// The scene resigns active (on 1: the app switcher, a system sheet; a swipe there kills the app without a trip to the background) or becomes active (0): only the bundled
+// pipeline archive's crash guard takes it (a start that ends meanwhile is no crash of the archive); the game goes on as before
+void dm_gfx_inactive(int on) { mtl_pso_guard_away(2, on); }
+// The host's graceful exit begins (hle_lifecycle.c, its first step, before the waits that come before dm_gfx_suspend and before its 1.5 s fallback can end it): only the crash
+// guard takes it, so a start that ends there is no crash of the archive
+void dm_gfx_exiting(void) { mtl_pso_guard_away(4, 1); }
 void dm_gfx_suspend(int on) {
+    mtl_pso_guard_away(1, on);   // first, before any wait: a start that ends while the app is in the background (swiped away, jetsam) is no crash of the bundled pipeline archive
     pthread_mutex_lock(&g_susp_mu);
     g_susp = on != 0;
     if (on) while (g_inflight_api) pthread_cond_wait(&g_susp_cv, &g_susp_mu);

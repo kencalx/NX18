@@ -176,7 +176,7 @@ final class AppModel {
         if FileManager.default.fileExists(atPath: settings.keysPath) { a += ["-k", settings.keysPath] }
         if !g.bundleID.isEmpty { a += ["--bundle-id", g.bundleID] }
         if !g.language.isEmpty { a += ["-l", g.language] }
-        if g.precompileGPUShaders { a += ["--gpu", g.device.gpu] }
+        a += ["--gpu", g.pipelineArchive ? g.device.gpu : "none"]   // off is no archive at all, also for a game whose profile sets pso_mtl4 on
         // the list under Patches & Cheats is what the build takes: with all of it off, no mods, not the mods folder beside the NSPs, which the script takes (its default)
         // only when the list is empty
         let mods = Paths.mods(g.titleID), entries = ModsStore.list(mods)

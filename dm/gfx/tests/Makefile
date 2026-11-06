@@ -95,6 +95,17 @@ t_vk_pending_asan: t_vk_pending.c ../vk/vk_pending.h
 .PHONY: vk-pending
 vk-pending: t_vk_pending t_vk_pending_tsan t_vk_pending_asan
 	./t_vk_pending && ./t_vk_pending_tsan && ./t_vk_pending_asan
+# The crash guard of the pipeline archive bundled with the app (../nvn/nvn_pso_guard.h, DM_PSO_BUNDLE_GUARD): plain C, also under ThreadSanitizer and AddressSanitizer
+# (make pso-guard); nvn_mtl.m's use of it with a real archive is t_pso_bundle's
+t_pso_guard: t_pso_guard.c ../nvn/nvn_pso_guard.h
+	clang -std=c11 -O1 -g -Wall -Wextra -pthread -o $@ t_pso_guard.c
+t_pso_guard_tsan: t_pso_guard.c ../nvn/nvn_pso_guard.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=thread -o $@ t_pso_guard.c
+t_pso_guard_asan: t_pso_guard.c ../nvn/nvn_pso_guard.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=address,undefined -o $@ t_pso_guard.c
+.PHONY: pso-guard
+pso-guard: t_pso_guard t_pso_guard_tsan t_pso_guard_asan
+	./t_pso_guard && ./t_pso_guard_tsan && ./t_pso_guard_asan
 t_thermal: t_thermal.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_thermal.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_thermal_tsan: t_thermal.c $(MTL_T_DEP)

@@ -36,7 +36,11 @@ struct Game: Codable, Identifiable, Hashable, Sendable {
     var bundleID: String = ""
     var language: String = ""
     var useMods: Bool = true
-    var precompileGPUShaders: Bool = false
+    /// The pipeline archive made offline for the device's GPU (the NSP script's --gpu with its GPU; off: --gpu none). On by default: the first start then skips building the
+    /// pipelines, and the app leaves an archive that crashed a start out at the next start by itself (the host's crash guard, nvn_pso_guard.h). The key replaces
+    /// precompileGPUShaders, which was off by default and is no longer read: a library saved before has false there for every game it never changed, so each game
+    /// takes this default once (builder/README.md says so).
+    var pipelineArchive: Bool = true
     var showFPS: Bool = false
     // what the last build said
     var lastIPA: String?
@@ -67,7 +71,7 @@ extension Game {
         bundleID = (try? c.decodeIfPresent(String.self, forKey: .bundleID)) ?? d.bundleID
         language = (try? c.decodeIfPresent(String.self, forKey: .language)) ?? d.language
         useMods = (try? c.decodeIfPresent(Bool.self, forKey: .useMods)) ?? d.useMods
-        precompileGPUShaders = (try? c.decodeIfPresent(Bool.self, forKey: .precompileGPUShaders)) ?? d.precompileGPUShaders
+        pipelineArchive = (try? c.decodeIfPresent(Bool.self, forKey: .pipelineArchive)) ?? d.pipelineArchive
         showFPS = (try? c.decodeIfPresent(Bool.self, forKey: .showFPS)) ?? d.showFPS
         lastIPA = try? c.decodeIfPresent(String.self, forKey: .lastIPA)
         lastProject = try? c.decodeIfPresent(String.self, forKey: .lastProject)

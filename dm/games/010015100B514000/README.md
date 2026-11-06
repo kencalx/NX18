@@ -73,7 +73,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ### Offline pipeline archive probe
 
-**Current: Mac build evidence; device acceptance open.** [PR #653](https://github.com/seedds/nxnative/pull/653) reports a `pso_offline.py --gpu g19p` probe of the contributor's Wonder shader build on an Apple M2 Pro with toolchain `metalfe-32023.922`: 3,698 pairs gave 3,697 bases in a 67 MB archive, built in 113 s including 27.5 s of planning. One layer-writing pair was left to the device; no pair declared function constants. Opening the archive on an iPhone, hybrid rendering, cold preparation time, steady GPU time and peak device memory remain unmeasured. Wonder's `pso_mtl4` default remains off pending device acceptance.
+**Current: Mac build evidence; device acceptance open.** [PR #653](https://github.com/seedds/nxnative/pull/653) reports a `pso_offline.py --gpu g19p` probe of the contributor's Wonder shader build on an Apple M2 Pro with toolchain `metalfe-32023.922`: 3,698 pairs gave 3,697 bases in a 67 MB archive, built in 113 s including 27.5 s of planning. One layer-writing pair was left to the device; no pair declared function constants. Its iOS build now carries the archive by default, as every NVN game's does since the [crash guard](../../../docs/reference/shaders.md#a-bundled-pipeline-archive-that-crashes-at-boot), which leaves it out by itself after a start with it that ended early; its profile's `pso_mtl4` stays off, which only matters to the NSP script's `DEVICE_GPUS = 'none'` and to the guard (one early end, not two in a row). Opening the archive on an iPhone, hybrid rendering, cold preparation time, steady GPU time and peak device memory remain unmeasured: open.
 
 ## Audio
 
@@ -100,7 +100,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ## Found on this game
 
-- [Offline pipeline archive missing for the device GPU](../../../docs/reference/shaders.md#offline-pipeline-archive-missing-for-the-device-gpu): archive targets can follow profile metadata while iOS Metal 4 remains opt-in; [the probe above](#offline-pipeline-archive-probe) records the build evidence and open device checks.
+- [Offline pipeline archive missing for the device GPU](../../../docs/reference/shaders.md#offline-pipeline-archive-missing-for-the-device-gpu): archive targets followed profile metadata while the iOS archive was opt-in (now every NVN game's iOS build carries one for its devices' GPUs); [the probe above](#offline-pipeline-archive-probe) records the build evidence and open device checks.
 General host changes first needed here; each applies to every game:
 
 - **Resolved: Mac launcher metadata matches native defaults**: [A Mac front end's default settings change Metal execution paths](../../../docs/reference/packing.md#a-mac-front-ends-default-settings-change-metal-execution-paths), found by metadata generation and source inspection; no gameplay measurement.

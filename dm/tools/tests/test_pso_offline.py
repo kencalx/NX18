@@ -562,15 +562,23 @@ class IpaFallback(unittest.TestCase):
 
 
 class Default(unittest.TestCase):
-    """Which games get an archive without DM_PSO_GPUS: build_ipa.sh's own lines, run with game.py's default form, so only a profile with pso_mtl4 on gets one, made for the GPUs
-    of the devices the app is for (DM_DEVICE_FAMILY: 1 = g19p, 2 = g16g, 1,2 or unset = both, as the NSP script's DEVICE_ARCH), whatever the profile's pso_gpu key names (a line says
-    it is not used); an explicit DM_PSO_GPUS wins, also when empty"""
+    """Which games get an archive: every NVN game, made for the GPUs of the devices the app is for (DM_DEVICE_FAMILY: 1 = g19p, 2 = g16g, 1,2 or unset = both, as the NSP script's
+    DEVICE_ARCH), whatever the profile's pso_mtl4 or pso_gpu says (a line says pso_gpu is not used), with build_ipa.sh's own lines and the NSP script's own choice block run as
+    they are; an explicit DM_PSO_GPUS / --gpu / PSO_GPUS wins (DM_PSO_GPUS also when empty), none leaves the archive out, and the NSP script's DEVICE_GPUS none keeps NXNative's
+    rule (pso_mtl4 on only). The Mac app's archive does not follow it"""
+
+    @staticmethod
+    def nsp():
+        spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
+        assert spec and spec.loader
+        nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
+        return nsp
 
     def lines(self):
         lines = (REPO / 'dm/ios/tools/build_ipa.sh').read_text().splitlines()
-        i = next(n for n, ln in enumerate(lines) if ln.startswith('PSO=; P4='))
+        i = next(n for n, ln in enumerate(lines) if ln.startswith('PSO=; PG='))
         j = next(n for n, ln in enumerate(lines) if n > i and ln.startswith('if [ "$GFXAPI" = nvn ]'))
-        return 'die() { echo "FAIL: $*"; exit 1; }\nt() { echo "$*" >&2; }\n' + '\n'.join(lines[i:j])   # the P4 / pso_gpu reads, the devices' GPUs and the GPUS chain
+        return 'die() { echo "FAIL: $*"; exit 1; }\nt() { echo "$*" >&2; }\n' + '\n'.join(lines[i:j])   # the pso_gpu read, the devices' GPUs and the GPUS choice
 
     def gpus(self, profile, **env):
         with tempfile.TemporaryDirectory() as d:
@@ -578,68 +586,78 @@ class Default(unittest.TestCase):
             e = {k: v for k, v in os.environ.items() if k not in ('DM_PSO_GPUS', 'DM_DEVICE_FAMILY')}
             e.update(env, DM=str(REPO / 'dm'), DM_GAMES_DIR=d, GD=d)
             return {gid: (r.stdout, r.stderr) for gid, r in
-                    ((gid, subprocess.run(['bash', '-c', self.lines() + '\necho "$P4 $GPUS"'], env=dict(e, GAME=gid),
+                    ((gid, subprocess.run(['bash', '-c', self.lines() + '\necho "[$GPUS]"'], env=dict(e, GAME=gid),
                                           capture_output=True, text=True)) for gid in profile)}
 
-    def test_by_profile(self):
-        games = {'0100000000F0F000': 'title_id\t0100000000F0F000\npso_mtl4\ton\n',
-                 '0100000000F0F001': 'title_id\t0100000000F0F001\n',
-                 '0100000000F0F002': 'title_id\t0100000000F0F002\npso_mtl4\toff\n',
-                 '0100000000F0F003': 'title_id\t0100000000F0F003\npso_mtl4\ton\npso_gpu\tapplegpu_g19p\n',
-                 '0100000000F0F004': 'title_id\t0100000000F0F004\npso_mtl4\ton\npso_gpu\tg18p   g19p\n',
-                 '0100000000F0F005': 'title_id\t0100000000F0F005\npso_mtl4\ton\npso_gpu\tnone\n',                                   # none is no token of this key
-                 '0100000000F0F006': 'title_id\t0100000000F0F006\npso_mtl4\ton\npso_gpu\tg15s g16s g17p g18p g19p\n',               # 5 architectures: more than the key takes
-                 '0100000000F0F007': 'title_id\t0100000000F0F007\npso_mtl4\toff\npso_gpu\tg19p\n'}
-        on = {'0100000000F0F000', '0100000000F0F003', '0100000000F0F004', '0100000000F0F005', '0100000000F0F006'}
+    GAMES = {'0100000000F0F000': 'title_id\t0100000000F0F000\npso_mtl4\ton\n',
+             '0100000000F0F001': 'title_id\t0100000000F0F001\n',
+             '0100000000F0F002': 'title_id\t0100000000F0F002\npso_mtl4\toff\n',
+             '0100000000F0F003': 'title_id\t0100000000F0F003\npso_mtl4\ton\npso_gpu\tapplegpu_g19p\n',
+             '0100000000F0F004': 'title_id\t0100000000F0F004\npso_mtl4\ton\npso_gpu\tg18p   g19p\n',
+             '0100000000F0F005': 'title_id\t0100000000F0F005\npso_mtl4\ton\npso_gpu\tnone\n',                                   # none is no token of this key
+             '0100000000F0F006': 'title_id\t0100000000F0F006\npso_mtl4\ton\npso_gpu\tg15s g16s g17p g18p g19p\n',               # 5 architectures: more than the key takes
+             '0100000000F0F007': 'title_id\t0100000000F0F007\npso_mtl4\toff\npso_gpu\tg19p\n'}
+
+    def test_every_game_by_default(self):   # build_ipa.sh run by itself: every profile, whatever its pso_mtl4, gets the devices' archive
+        with_gpu = {'0100000000F0F003', '0100000000F0F004', '0100000000F0F005', '0100000000F0F006', '0100000000F0F007'}
         for family, want in (({}, 'g19p,g16g'), ({'DM_DEVICE_FAMILY': '1,2'}, 'g19p,g16g'), ({'DM_DEVICE_FAMILY': '1'}, 'g19p'), ({'DM_DEVICE_FAMILY': '2'}, 'g16g')):
             with self.subTest(**family):
-                r = self.gpus(games, **family)
-                self.assertEqual({k: p[0].strip() for k, p in r.items()}, {k: f'on {want}' if k in on else 'off none' for k in games})
-                self.assertEqual({k for k, p in r.items() if 'pso_gpu' in p[1] and 'is not used' in p[1]}, on - {'0100000000F0F000'})   # a profile's pso_gpu: the line says it is not used
-        r = self.gpus(games)
-        self.assertEqual({k: p[0].strip() for k, p in self.gpus(games, DM_PSO_GPUS='g17p').items()},
-                         {k: v.split()[0] + ' g17p' for k, v in {k: p[0].strip() for k, p in r.items()}.items()})
-        self.assertEqual(self.gpus(games, DM_PSO_GPUS='none')['0100000000F0F000'][0].strip(), 'on none')
-        self.assertEqual(self.gpus(games, DM_PSO_GPUS='')['0100000000F0F000'][0].strip(), 'on')
+                r = self.gpus(self.GAMES, **family)
+                self.assertEqual({k: p[0].strip() for k, p in r.items()}, {k: f'[{want}]' for k in self.GAMES})
+                self.assertEqual({k for k, p in r.items() if 'FAIL' in p[0]}, set())
+                self.assertEqual({k for k, p in r.items() if 'pso_gpu' in p[1] and 'is not used' in p[1]}, with_gpu)   # a profile's pso_gpu: the line says it is not used
+
+    def test_explicit_wins(self):
+        for value in ('g17p', 'none', '', 'g19p,g16g'):
+            with self.subTest(DM_PSO_GPUS=value):
+                r = self.gpus(self.GAMES, DM_PSO_GPUS=value, DM_DEVICE_FAMILY='1')
+                self.assertEqual({k: p[0].strip() for k, p in r.items()}, {k: f'[{value}]' for k in self.GAMES})
+                self.assertEqual({k for k, p in r.items() if 'is not used' in p[1]}, set())   # an explicit value says nothing of the key
 
     def test_device_family_matches_the_nsp_scripts_devices(self):   # build_ipa.sh run by itself makes the archive the NSP script makes for --device
-        spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
-        assert spec and spec.loader
-        nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
-        game = {'0100000000F0F000': 'title_id\t0100000000F0F000\npso_mtl4\ton\n'}
-        for family, devices in (('1', ['iphone']), ('2', ['ipad']), ('1,2', ['iphone', 'ipad'])):
+        nsp = self.nsp()
+        game = {'0100000000F0F002': 'title_id\t0100000000F0F002\npso_mtl4\toff\n'}
+        for family, device in (('1', 'iphone'), ('2', 'ipad'), ('1,2', 'both')):
             with self.subTest(family=family):
-                self.assertEqual(self.gpus(game, DM_DEVICE_FAMILY=family)['0100000000F0F000'][0].split()[1], ','.join(nsp.DEVICE_ARCH[d] for d in devices))
+                self.assertEqual(self.gpus(game, DM_DEVICE_FAMILY=family)['0100000000F0F002'][0].strip(), f'[{nsp.device_gpus(device)}]')
+                self.assertEqual(nsp.ios_gpus('', '', device, types.SimpleNamespace(get={'pso_mtl4': 'off'}.get)), nsp.device_gpus(device))
 
-    def test_nsp_defaults_follow_the_same_profile_gate(self):
+    def test_nsp_choice_block(self):
         # Run the NSP script's actual choice block without extracting or building a game.
         script = (REPO / 'scripts/build_ipa_from_nsp.py').read_text()
-        start = script.index("    gpus = (args.gpu or PSO_GPUS).strip()")
+        start = script.index("    explicit = (args.gpu or PSO_GPUS).strip()   # --gpu / PSO_GPUS")
         end = script.index("    ipa_env['DM_PSO_GPUS'] = gpus", start)
         block = '\n'.join(line[4:] for line in script[start:end].splitlines())
-        block = script[script.index('def ios_gpus('):script.index('def ios_wants_pulling(')] + block   # the choice itself, which the shader step shares
-        for p4, pg, expected in [('on', '', 'g18p'), ('on', 'g18p   applegpu_g19p', 'g18p,applegpu_g19p'),
-                                 ('off', '', 'none'), ('off', 'g19p', 'none')]:
-            for explicit, setting, devices in [('', '', ''), ('g17p', '', ''), ('none', '', ''), ('', 'g16p', ''),   # DEVICE_GPUS empty: NXNative's rule
-                                               ('', '', 'g19p,g16g'), ('g17p', '', 'g19p,g16g'), ('none', '', 'g19p,g16g'), ('', 'g16p', 'g19p,g16g')]:
-                for device in ('', 'iphone', 'ipad'):
-                    with self.subTest(pso_mtl4=p4, pso_gpu=pg, gpu=explicit, setting=setting, devices=devices, device=device):
+        block = script[script.index('def device_gpus('):script.index('def ios_wants_pulling(')] + block   # the choice itself, which the shader step shares
+        for p4 in ('on', 'off'):
+            for explicit, setting, devices in [('', '', ''), ('g17p', '', ''), ('none', '', ''), ('', 'g16p', ''), ('', 'none', ''), ('g19p', '', ''),
+                                               ('', '', 'none'), ('g17p', '', 'none'), ('none', '', 'none'), ('', '', 'g19p,g16g'), ('', 'g16g', 'none')]:
+                for device in ('', 'iphone', 'ipad', 'both'):
+                    with self.subTest(pso_mtl4=p4, gpu=explicit, setting=setting, devices=devices, device=device):
+                        said = []
                         scope = {'args': types.SimpleNamespace(gpu=explicit, device=device or None), 'PSO_GPUS': setting, 'DEVICE_GPUS': devices, 'DEVICE': '',
-                                 'DEVICE_ARCH': {'iphone': 'g19p', 'ipad': 'g16g'}, 'ipa_env': {}, 'say': lambda m: None,
-                                 'g': types.SimpleNamespace(get={'pso_mtl4': p4, 'pso_gpu': pg}.get),
+                                 'DEVICE_ARCH': {'iphone': 'g19p', 'ipad': 'g16g'}, 'ipa_env': {}, 'say': said.append,
+                                 'g': types.SimpleNamespace(get={'pso_mtl4': p4, 'pso_gpu': 'g18p'}.get),
                                  're': re, 'BuildError': RuntimeError}
                         exec(block, scope)
-                        want = explicit or setting or devices or expected   # the devices' archive for every game, whatever its profile
-                        if not (explicit or setting) and want != 'none': want = {'iphone': 'g19p', 'ipad': 'g16g', '': 'g19p,g16g'}[device]   # the GPUs the build is for, never another family's
+                        targets = {'iphone': 'g19p', 'ipad': 'g16g'}.get(device, 'g19p,g16g')
+                        want = explicit or setting or ('none' if devices == 'none' and p4 != 'on' else targets)   # the devices' archive for every game, whatever its profile
                         self.assertEqual(scope['gpus'], want)
-                        self.assertEqual(scope['ipa_env']['DM_DEVICE_FAMILY'], {'iphone': '1', 'ipad': '2', '': '1,2'}[device])
+                        self.assertEqual(scope['ipa_env']['DM_DEVICE_FAMILY'], {'iphone': '1', 'ipad': '2'}.get(device, '1,2'))
+                        red = [m for m in said if m.startswith('[RED] pipeline archive for')]
+                        self.assertEqual(bool(red), bool((explicit or setting) and want != 'none' and any(x not in targets.split(',') for x in want.split(','))))
 
-    def test_device_gpus_is_opt_in(self):   # empty until a bundled archive is known to open on the devices (LNPANDY/NX2Apple#640); the target devices' names as pso_offline.py takes them
-        spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
-        assert spec and spec.loader
-        nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
-        self.assertEqual(nsp.DEVICE_GPUS, '')
-        self.assertEqual([po.arch_name(a) for a in 'g19p,g16g'.split(',')], ['applegpu_g19p', 'applegpu_g16g'])
+    def test_the_default_is_the_devices_archive(self):   # on by default since the host's crash guard (nvn_pso_guard.h) leaves a crashing archive out by itself (LNPANDY/NX2Apple#640)
+        nsp = self.nsp()
+        self.assertEqual((nsp.PSO_GPUS, nsp.DEVICE_GPUS), ('', ''))
+        self.assertEqual(nsp.device_gpus('both'), 'g19p,g16g')
+        self.assertEqual([po.arch_name(a) for a in nsp.device_gpus('both').split(',')], ['applegpu_g19p', 'applegpu_g16g'])   # the target devices' names as pso_offline.py takes them
+        script = (REPO / 'scripts/build_ipa_from_nsp.py').read_text()
+        # the Mac app's archive is --gpu / PSO_GPUS alone (empty: this Mac's GPU), never the iOS default
+        call = script[script.index('        mac_app(py, repo, out_ipa, app,'):]
+        call = call[:call.index('\n', call.index('programs, control)'))]
+        self.assertIn('(args.gpu or PSO_GPUS).strip(), programs, control)', call)
+        self.assertNotIn('DEVICE_GPUS', script[script.index('def mac_pso('):script.index('def mac_app(')])
 
     def test_breath_of_the_wild(self):   # the profile that turns the Metal 4 path on: its app gets the archive
         r = subprocess.run([sys.executable, str(REPO / 'dm/games/game.py'), '01007EF00011E000', 'pso_mtl4', 'off'], capture_output=True, text=True)

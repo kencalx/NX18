@@ -81,7 +81,7 @@ Each item was found from a red line or a pass dump on the way through the langua
 | Content key: archive reused | 10.10 s |
 | Saved | 452.68 s (7m33s), 97.8% |
 
-- **Current:** this game's profile does not set `pso_mtl4`, so its default iOS build makes no offline archive and gains nothing from this stage. No gameplay run used the reused archive; `regress.py check` compared its 28,603 shaders only, since the game has no `smoke.tsv`.
+- **Current:** its iOS build makes the offline archive too: every NVN game's does by default since the [crash guard](../../../docs/reference/shaders.md#a-bundled-pipeline-archive-that-crashes-at-boot), so it gains from this stage there as well. No gameplay run used the reused archive; `regress.py check` compared its 28,603 shaders only, since the game has no `smoke.tsv`.
 
 ### Shader extraction reuse
 

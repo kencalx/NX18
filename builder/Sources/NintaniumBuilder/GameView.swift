@@ -34,16 +34,16 @@ struct GameView: View {
                     ForEach(TargetDevice.allCases) { d in Label(d.label, systemImage: d.symbol).tag(d) }
                 }
                 .pickerStyle(.segmented)
-                Text("An \(g.device.label)-only app for the \(g.device.model). Pre-compiled GPU shaders, when the build makes them, are made for its GPU (\(g.device.gpu)) alone." + (g.device == .ipad ? " Ultrawide is left out: the iPad's screen is not wider than 16:9." : ""))
+                Text("An \(g.device.label)-only app for the \(g.device.model). Pre-compiled GPU shaders are made for its GPU (\(g.device.gpu)) alone." + (g.device == .ipad ? " Ultrawide is left out: the iPad's screen is not wider than 16:9." : ""))
                     .font(.caption).foregroundStyle(.secondary)
                 Picker("Game files", selection: game.gameData) { ForEach(GameDataMode.allCases) { Text($0.label).tag($0) } }
                 Picker("Install", selection: game.install) { ForEach(InstallMethod.allCases) { Text($0.label).tag($0) } }
-                Toggle("Pre-compile GPU shaders for the \(g.device.label)", isOn: game.precompileGPUShaders)
-                if g.precompileGPUShaders {
-                    Text("The first start skips building them, but the build takes minutes longer and the app grows by about 650 MB. A bundled archive once crashed Metal at boot on an iPhone Air with iOS 27.0 (cause unknown): if the game stops at its first start, build again with this off. That does not leave them out of a game whose profile sets pso_mtl4 on (Breath of the Wild, 13 Sentinels: Aegis Rim): it gets them with this off too.")
+                Toggle("Pre-compile GPU shaders for the \(g.device.label)", isOn: game.pipelineArchive)
+                if g.pipelineArchive {
+                    Text("On (the default): the first start skips Preparing pipelines (Breath of the Wild: half a second instead of 7 to 8 minutes). A game's first build takes longer (minutes, up to an hour or more for a game with very many shaders; later builds reuse them) and the app grows by several hundred MB to about 1 GB. A bundled archive once crashed Metal at boot on an iPhone Air with iOS 27.0, cause unknown: if a start with them crashes in its first seconds, the app leaves them out at the next start by itself and builds its own instead. An iOS update or a build with new shaders tries them again; to retry the same build, delete pso_bundle_guard.tsv in the app's folder.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
-                    Text("Off: only a game whose profile sets pso_mtl4 on (Breath of the Wild, 13 Sentinels: Aegis Rim) gets them, made for the \(g.device.label)'s GPU.")
+                    Text("Off: the app has none, and its first start builds them on the \(g.device.label) (Preparing pipelines: minutes, once). 13 Sentinels: Aegis Rim crashed on an A20 Pro without them.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Toggle("Frame-rate counter", isOn: game.showFPS)

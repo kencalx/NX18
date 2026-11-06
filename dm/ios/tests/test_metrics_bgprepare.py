@@ -167,7 +167,10 @@ class Wiring(unittest.TestCase):
         self.assertIn('__attribute__((weak)) void front_prepare_end(void) {}', self.nvn)   # the Mac and the graphics unit tests link without a front end's
         branch = self.nvn[self.nvn.index('static void warm_start(void) {'):]
         branch = branch[branch.index('if (prepare_on()) {'):branch.index('dispatch_queue_attr_t attr')]
-        self.assertRegex(branch, r'prepare_prebuild\(\); \}[^\n]*\n\s*front_prepare_end\(\);\n\s*return;')
+        # right after the prebuild, with only the bundled pipeline archive's crash guard told first (its window starts at the prepare step's end, or at the end of the prebuild's
+        # compiles still under way: nvn_pso_guard.h)
+        self.assertRegex(branch, r'prepare_prebuild\(\); \}[^\n]*\n(\s*pso_guard_prepared\(\);[^\n]*\n)?\s*front_prepare_end\(\);\n\s*return;')
+        self.assertIn('pso_guard_prepared();', branch)
         self.assertRegex(self.front, r'\nvoid front_prepare_end\(void\) \{ dispatch_async\(dispatch_get_main_queue\(\)')
         self.assertIn('prep_end("the game showed its first picture")', self.front)
 

@@ -168,7 +168,7 @@ Before the GPU can draw something, the app has to build a *pipeline* for it: the
 ```mermaid
 flowchart TD
     start([Game starts]) --> prepare["Prepare, before the first frame:<br/>build what the archive<br/>and the prewarm lists name"]
-    prepare --> pre{"Prebuild done for<br/>this game version?"}
+    prepare --> pre{"Prebuild done for<br/>this game version,<br/>or in the app?"}
     pre -->|no: first start,<br/>game or app update| prebuild["Pipeline prebuild:<br/>a stand-in for every shader pair<br/>(Preparing pipelines, a few minutes, once)"]
     prebuild --> archive
     pre -->|yes| draw
@@ -190,12 +190,12 @@ Metal 4 pipelines are on by default for every game, on the iPhone and iPad as on
 
 ### Pipeline prebuild
 
-Builds a stand-in for every pair of shaders the game has (15,767 for Breath of the Wild) and puts them into the pipeline archive, so that a scene you have never seen has a stand-in for each of its draws instead of a stutter. It runs before the game's first frame, behind a **Preparing pipelines** screen: the first start waits a few minutes for it, once, and so does the first start after a game update or an app update that brings new shaders. Every other start skips it. It needs Metal 4 pipelines, and its row shows only while that option is on.
+Builds a stand-in for every pair of shaders the game has (15,767 for Breath of the Wild) and puts them into the pipeline archive, so that a scene you have never seen has a stand-in for each of its draws instead of a stutter. It runs before the game's first frame, behind a **Preparing pipelines** screen: the first start waits a few minutes for it, once, and so does the first start after a game update or an app update that brings new shaders. Every other start skips it. An app that carries these stand-ins already built for its device's GPU skips it at its first start too: in Nintanium every NVN game's app does by default (unless built with `--gpu none`, or after the app's crash guard left them out: [NINTANIUM.md](../NINTANIUM.md#tuned-for-iphone-18-pro-max-and-ipad-pro-m4-on-ios-27)). It needs Metal 4 pipelines, and its row shows only while that option is on.
 
 Built in the background while playing instead, the stand-ins took an iPhone 17 Pro Max's GPU from about 13 to 15–18 ms a frame in Breath of the Wild, so the app does the work up front.
 
-- **When to change it:** turn it off if you don't want to wait at that first start.
-- **Cost:** on, a wait of a few minutes once. Off, no wait, but a pipeline seen for the first time makes the game stall briefly while it is built, until the archive holds it.
+- **When to change it:** turn it off if you don't want to wait at that first start (an app that carries the stand-ins does not wait).
+- **Cost:** on, a wait of a few minutes once, unless the app carries them. Off, no wait, but a pipeline seen for the first time makes the game stall briefly while it is built, until the archive holds it.
 
 ### Encode thread
 
