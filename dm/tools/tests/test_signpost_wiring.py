@@ -123,6 +123,10 @@ class Wiring(unittest.TestCase):
         self.assertGreater(mtl.index('DM_SP_END(DM_SP_GPU, "gpu-present"'), mtl.index('present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind); pthread_mutex_unlock(&g_pq_mu);'),
                            'the gpu-present handler goes after the one that releases the ticket the game\'s acquire waits for')
 
+    def test_tick_says_empty_only_for_the_ticks_g_link_empty_counts(self):   # with the link not taking frames (present thread, rescue mode) a tick is "not taking", even with the queue empty
+        mtl = read('dm/gfx/nvn/nvn_mtl.m')
+        self.assertIn('if (g_dm_present_link && !g_rescue_mode) g_link_empty++; int sp_empty = g_dm_present_link && !g_rescue_mode;', mtl)
+
     def test_categories_and_subsystem_agree_with_the_docs(self):
         self.assertIn('enum { DM_SP_POI, DM_SP_FRAME, DM_SP_GPU, DM_SP_DISPLAY, DM_SP_SHADERS, DM_SP_NLOG };', self.hdr)
         self.assertIn('{OS_LOG_CATEGORY_POINTS_OF_INTEREST, "Frame", "GPU", "Display", "Shaders"}', self.hdr)   # in the enum's order
