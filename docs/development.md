@@ -598,6 +598,46 @@ Limits: the replay matches the recording read for read only while the game's rea
 
 The benchmark gives each frame's GPU time; these switches split it by pass, on the Mac or on an iPhone (`Documents/env.txt`), and are off by default: `DM_NVN_GPUPROF=every:<n>` (each encoder's GPU time and attachment traffic in one frame of every n), `DM_NVN_PASSDUMP=every:<n>`, `DM_AB=<frames>` (switches set to `ab` alternate in phases of one run) and `DM_GPU_CAPTURE` (Metal GPU traces for Xcode, written to `DM_GPU_CAPTURE_DIR`, by default `gpu_captures/` in the working directory, which keeps the newest `DM_GPU_CAPTURE_KEEP`; an IPA built with `DM_METAL_CAPTURE=1`, or `MTL_CAPTURE_ENABLED=1` on the Mac). `dm/tools/gpuprof.py` reads their log lines. How to use them: [05, GPU time on the device](agents/05-debugging.md#gpu-time-on-the-device).
 
+### Instruments lanes (`DM_SIGNPOST`)
+
+`DM_SIGNPOST=1` makes the host emit os_signpost intervals and events, so that Instruments shows where each frame's time goes, in lanes beside Metal System Trace's GPU and display tracks: the game's frame and present, the host's pacing wait, submits and the encode thread, each command buffer from its commit to its completion, the display link, pipeline and shader library builds, texture uploads and save commits. Only the exact value `1` turns it on; it is read once at start, and the log then says `signposts on (DM_SIGNPOST=1): subsystem org.nintanium.host, …`. Off (the default) each site costs one load and a branch that is never taken: nothing is formatted, allocated or locked, and nothing a game sees changes (`dm/host/dm_signpost.h`). On, emits go to the system's in-memory log buffer even when nothing records, so set it only for a recording; a frame makes about 25 to 50 of them, estimated at a few microseconds in all (not measured yet: compare a run with and without it before reading small differences).
+
+To record:
+
+- **Mac app:** put `DM_SIGNPOST=1` in the game app's `env.txt` in `~/Library/Application Support/nxnative/<title ID>/` (or in the environment of a `dmhost` run) and start the game. In Instruments choose the **Metal System Trace** template, add the **os_signpost** and **Points of Interest** instruments from the library (+), pick the game's process and record. From a terminal: `xcrun xctrace record --template 'Metal System Trace' --instrument os_signpost --attach <pid> --time-limit 15s`.
+- **iPhone or iPad:** put `DM_SIGNPOST=1` in the app's `Documents/env.txt` (the Files app), connect the device to the Mac and start the game. In Instruments (Xcode › Open Developer Tool › Instruments) pick the device, the game's process and the same template and instruments; the Deferred or Windowed recording mode keeps the cost down. Attaching to an app needs one signed for development (an Xcode build, [Build and run on a device with Xcode](#build-and-run-on-a-device-with-xcode)); recording all processes may work with a sideloaded IPA, untested.
+
+To read: filter the os_signpost track on subsystem `org.nintanium.host`; its Summary table gives the count, minimum, average and maximum of each name. `frame=N` in every lane is the same guest frame, the timing line's `frame N` in `log.txt`. A `gpu` interval runs from the submit's commit request to the command buffer's feedback, so it includes the wait in the queue and on the encode thread and is not GPU time: the GPU's own time is `exec_ms` in its end metadata, the command buffer on Metal System Trace's GPU track (matched by `frame` and `fence`), and `frame-gpu`'s `gpu_ms`, the timing line's GPU number. For named encoders on the GPU track add `DM_NVN_ENC_LABEL=1`. The game's own frame limiter sleeps in its own code: it shows as the gap between `present` and the frame's next `acquire` or `submit`.
+
+The names are kept for saved Instruments templates; `dm/tools/tests/test_signpost_wiring.py` checks that the sources emit exactly these:
+
+| Name | Category | Kind | What it covers | Where |
+|---|---|---|---|---|
+| `frame` | PointsOfInterest | interval | the timing line's frame work: from the end of one present to the next present | `hle_nvn.c` `nvnQueuePresentTexture` |
+| `pso-wait` | PointsOfInterest | interval | a draw held up on the submit thread for a pipeline it needs (a cache miss) | `nvn_mtl.m` `pso_get_` |
+| `save` | PointsOfInterest | interval | a save commit (clone and atomic swap); timing only | `hle_fs.c` Commit and CommitList |
+| `longframe` | PointsOfInterest | event | the long-frame line, emitted with the line, 8 frames after the frame | `hle_nvn.c` |
+| `present` | Frame | interval | the game's present call | `hle_nvn.c` `nvnQueuePresentTexture` |
+| `acquire` | Frame | interval | the host's own pacing: display link, 60 Hz clock, snapshot ring and present queue waits | `hle_nvn.c` `nvnWindowAcquireTexture` |
+| `syncwait` | Frame | interval | a game thread blocked in `nvnSyncWait` | `hle_nvn.c` `nvnSyncWait` |
+| `submit` | Frame | interval | `nvnQueueSubmitCommands`: replay and commit | `hle_nvn.c` |
+| `encode` | Frame | interval | the encode thread busy (`DM_NVN_ENC_THREAD`), from leaving its wait to the next | `nvn_rec.h` `rec_thread` |
+| `upload` | Frame | interval | a texture's deswizzle and upload encoding on the CPU | `nvn_mtl.m` `pkg_upload` |
+| `vsync` | Frame | event | the vsync event the game paces on | `hle_sdk16.c` `vsync_tick` |
+| `hold` | Frame | event | the present interval (vsyncs a frame is held) changed | `hle_nvn.c` |
+| `gpu` | GPU | interval | a main command buffer or segment, from its commit request to its feedback (`exec_ms`, `queued_ms`, `err` at the end) | `nvn_mtl.m` `mtl_sub_commit`, `sub_cut` |
+| `gpu-upload` | GPU | interval | an upload batch from its commit request to its feedback | `nvn_mtl.m` `up_flush` |
+| `gpu-present` | GPU | interval | the present pass from its commit to its feedback | `nvn_mtl.m` `present_now` |
+| `frame-gpu` | GPU | event | a frame's GPU time and its first-start-to-last-end span, 8 frames late | `hle_nvn.c` |
+| `takeover` | GPU | event | aliased textures taken over (`n`) | `nvn_mtl.m` `alias_take_over` |
+| `link` | Display | interval | one frame's present on the display link's callback or the present thread (`lead_ms` before its target) | `nvn_mtl.m` |
+| `shown` | Display | event | the frame reached the screen (`late_ms` after its target), emitted when the system reports it | `nvn_mtl.m` `present_now` |
+| `tick` | Display | event | a display-link tick that took no frame (`empty`, `held`, `not taking`) | `nvn_mtl.m` display-link callback |
+| `pipeline` | Shaders | interval | a render or compute pipeline build | `nvn_mtl.m` `pso_build_ex`, `dispatch` |
+| `library` | Shaders | interval | a shader library load | `nvn_mtl.m` `shader_load` |
+
+Not covered yet: the Vulkan and OpenGL layers' own submits and presents (their frames reach `link`, `gpu-present` and `shown`). `make -C dm/host/tests signpost` checks the switch and the macros (only `1` turns them on; off, no os_signpost call is made and no macro argument is evaluated).
+
 ### GPU self-tests
 
 `DM_SELFTEST=hmma` checks, on the device itself, the `simdgroup_matrix` body the shader build writes for Ampere's HMMA.16816 ([Ampere HMMA through simdgroup_matrix](reference/shaders.md#ampere-hmma-through-simdgroup_matrix)), before any game that uses it runs there. Put it in `Documents/env.txt` on an iPhone or iPad; on the Mac, set it in the environment, or in a Mac app's `env.txt` in `~/Library/Application Support/nxnative/<title ID>/`, which the launcher hands to the host (empty or `0` is off). Any game works: the check runs once at start, on a thread of its own (`dm/gfx/nvn/selftest.m`) that starts before the host's loading ends (on the Mac it overlaps the loading; on an iPhone the loading has usually finished behind the launcher), and the game's first instruction waits for it (20 s at most; it has not been timed on a device). It runs two kernels and logs a line for each, in this order, in `log.txt` or the Mac app's log:

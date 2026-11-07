@@ -58,6 +58,7 @@ static inline uint64_t tex_slot_h(const uint64_t *tex, const uint64_t *img, unsi
 static uint64_t c2_handle(int stage, unsigned b);   // the handle c2 holds at byte b (defined with the draw state, TEXA / SAMPA)
 #include "nvn_hmap.h"
 #include "../../host/dm.h"
+#include "../../host/dm_signpost.h"   // DM_SIGNPOST: Instruments lanes
 #import <CommonCrypto/CommonDigest.h>
 #include <stdarg.h>
 #include <mach-o/dyld.h>
@@ -1978,6 +1979,13 @@ uint64_t mtl_sub_commit(void) {
     res_commit();
     if (g_gp_state == 1 && !gp_active()) { int gn = g_gp_n; gp_lab *gl = malloc(sizeof(gp_lab) * (gn ? gn : 1)); memcpy(gl, g_gp_lab, sizeof(gp_lab) * gn); uint64_t gf = g_gp_frame; g_gp_state = 2; atomic_store(&g_gp_busy, 1);
         [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(gn, gl, gf); }]; }
+    if (DM_SP_ON()) {   // DM_SIGNPOST's gpu interval: from this commit request (the encode thread may commit it later) to its feedback; exec_ms is the GPU's own time
+        dm_sp_id sp = DM_SP_ID(DM_SP_GPU); double sp_t = CACurrentMediaTime();
+        DM_SP_BEGIN(DM_SP_GPU, "gpu", sp, "frame=%llu fence=%llu seg=%u", (unsigned long long)gpu_f, (unsigned long long)fence, seg_last);
+        [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
+            DM_SP_END(DM_SP_GPU, "gpu", sp, "frame=%llu fence=%llu seg=%u exec_ms=%.3f queued_ms=%.3f err=%d", (unsigned long long)gpu_f, (unsigned long long)fence, seg_last,
+                      (cb.GPUEndTime - cb.GPUStartTime) * 1e3, cb.GPUStartTime > 0 ? (cb.GPUStartTime - sp_t) * 1e3 : -1.0, cb.error != nil); }];
+    }
     [g_cb endCommandBuffer];
     rec_commit(g_cb, o);
     rec_signal(g_ev, fence);
@@ -2207,7 +2215,7 @@ static void alias_take_over(const alias_key *nk) {
         if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
         if (serial_holds(&g_ghost, o)) defer_obj_unref(o); else defer_obj_release(o);
     }
-    if (n) { ser_note(0); g_alias_taken += n; }
+    if (n) { ser_note(0); g_alias_taken += n; DM_SP_EVENT(DM_SP_GPU, "takeover", "n=%u", n); }
 }
 static __unsafe_unretained id serial_get(uint64_t k) { pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k); pthread_mutex_unlock(&g_smu); return o; }
 static void serial_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { held_add((__bridge void *)old, -1); if (alias_has(old)) defer_obj_unref(old); else defer_obj_release(old); } hm_put_id(&g_by_serial, &k, o); held_add((__bridge void *)o, 1); ser_note(k); pthread_mutex_unlock(&g_smu); }
@@ -2637,6 +2645,11 @@ static void up_flush(void) {
         atomic_fetch_sub(&g_up_pending, 1);
         up_wake();
     }];
+    if (DM_SP_ON()) {   // DM_SIGNPOST's gpu-upload interval: this batch from its commit request to its feedback
+        dm_sp_id sp = DM_SP_ID(DM_SP_GPU); unsigned sp_n = (unsigned)dsts.count, sp_blits = (unsigned)g_nup_blits;
+        DM_SP_BEGIN(DM_SP_GPU, "gpu-upload", sp, "textures=%u copies=%u", sp_n, sp_blits);
+        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { DM_SP_END(DM_SP_GPU, "gpu-upload", sp, "textures=%u exec_ms=%.3f err=%d", sp_n, (f.GPUEndTime - f.GPUStartTime) * 1e3, f.error != nil); }];
+    }
     res_commit();
     [cb endCommandBuffer];
     rec_commit_upload(cb, o);
@@ -2789,7 +2802,9 @@ int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uin
 // second texture and a copy of every level for each re-upload, and its spare (of other usage) was never reused
 static id<MTLTexture> pkg_upload(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, MTLTextureUsage keep) {
     struct timespec a, b; clock_gettime(CLOCK_MONOTONIC, &a);
+    dm_sp_id sp = DM_SP_ID(DM_SP_FRAME); DM_SP_BEGIN(DM_SP_FRAME, "upload", sp, "w=%u h=%u reuse=%d", (unsigned)t->d.width, (unsigned)t->d.height, reuse != nil);
     id<MTLTexture> r = pkg_upload_(t, stamp, reuse, keep);
+    DM_SP_END(DM_SP_FRAME, "upload", sp, "ok=%d", r != nil);
     clock_gettime(CLOCK_MONOTONIC, &b); uint64_t d_ = (uint64_t)((b.tv_sec - a.tv_sec) * 1000000000ll + b.tv_nsec - a.tv_nsec);
     atomic_fetch_add(&g_upload_ns, d_); g_up_total_ns += d_;
     return r;
@@ -5083,7 +5098,16 @@ static id<MTLFunction> fn_dev(id<MTLFunction> f) {
     }
 }
 // layer: a vertex shader's layer entry points (entry_layer / entry_layer_z, which also write the layer) instead of main0 / main0_z, for a program whose geometry shader is a slice writer (prog_fold_gs)
+static NvShader *shader_load_(NSString *pc, int stage, int layer);
+// Every shader library load (draw time, prefetch, prewarm): DM_SIGNPOST's library interval wraps it
 static NvShader *shader_load(NSString *pc, int stage, int layer) {
+    if (!DM_SP_ON()) return shader_load_(pc, stage, layer);
+    dm_sp_id sp = DM_SP_ID(DM_SP_SHADERS); DM_SP_BEGIN(DM_SP_SHADERS, "library", sp, "key=%{public}s stage=%d", pc.UTF8String, stage);
+    NvShader *o = shader_load_(pc, stage, layer);
+    DM_SP_END(DM_SP_SHADERS, "library", sp, "ok=%d", o != nil);
+    return o;
+}
+static NvShader *shader_load_(NSString *pc, int stage, int layer) {
     NSError *e = nil;
     NSData *jd = msl_data([NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc]);
     NSDictionary *j = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
@@ -7571,7 +7595,16 @@ static MTL4RenderPipelineDescriptor *spec_desc(id base, _Atomic int *own) {   //
 static _Atomic int g_spec_own;
 // The pipeline pso_desc describes: its base (built, from the archive or already made), then specialized with its colour state. Called on several threads.
 // compile 0: nil on an archive miss (*e untouched), with no MTLDevice fallback. Prewarm compaction may still refresh a found base for serialization.
+static id<MTLRenderPipelineState> pso_build_ex_(MTLRenderPipelineDescriptor *d, NSError **e, int compile);
+// The funnel of every render pipeline build (draw time, background, hybrid, prebuild): DM_SIGNPOST's pipeline interval wraps it (builds on several threads overlap: an id each)
 static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, NSError **e, int compile) {
+    if (!DM_SP_ON()) return pso_build_ex_(d, e, compile);
+    dm_sp_id sp = DM_SP_ID(DM_SP_SHADERS); DM_SP_BEGIN(DM_SP_SHADERS, "pipeline", sp, "how=render compile=%d", compile);
+    id<MTLRenderPipelineState> ps = pso_build_ex_(d, e, compile);
+    DM_SP_END(DM_SP_SHADERS, "pipeline", sp, "ok=%d", ps != nil);
+    return ps;
+}
+static id<MTLRenderPipelineState> pso_build_ex_(MTLRenderPipelineDescriptor *d, NSError **e, int compile) {
     // Do not send conflicting or non-renderable aspect formats to Metal, which can
     // abort instead of returning an NSError (also on the MTLDevice fallback).
     if (!pso_ds_valid((uint32_t)d.depthAttachmentPixelFormat, (uint32_t)d.stencilAttachmentPixelFormat)) {
@@ -8077,6 +8110,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
     id<MTLRenderPipelineState> ps = nil; int took = 0;
     NSError *e = nil; uint64_t bt = bp_now(), pred0 = g_pt_pred_ns;
     g_pso_pull = 0; int why = g_pso_lmap ? 1 : ms_fn ? 2 : 0;
+    dm_sp_id sp_w = DM_SP_ID(DM_SP_POI); DM_SP_BEGIN(DM_SP_POI, "pso-wait", sp_w, "vs=%{public}s fs=%{public}s", vs->key, fs ? fs->key : "-");   // the submit thread held up by a pipeline its draw needs (a cache miss)
     if (!took && !g_pso_lmap && !ms_fn && hybrid_on()) {
         why = !vs->has_pull || vs->layer_out ? 3 : 4;
         int st = pso_pend_try(&k, &ps);
@@ -8090,6 +8124,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
                     if (st == 0) pso_pend_demand(&k, vs, fs);
                     g_pso_pull = 1; g_hy_ns += bp_now() - bt;
                     if (g_pp_submit_mark != g_sub_serial) { g_pp_submit_mark = g_sub_serial; uint64_t t0 = bp_now(); pso_predict_rest(); g_bp_pso_ns += bp_now() - t0; }
+                    DM_SP_END(DM_SP_POI, "pso-wait", sp_w, "took=hybrid why=%d", why);
                     return h;
                 }
             }
@@ -8114,6 +8149,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
         if (lg > 0 && w > 20000000) { lg--; MLOG("pipeline wait %.1f ms (%s): vertex %s fragment %s, %u samples", w / 1e6, g_pw_why[why], vs->key, fs ? fs->key : "-", k.samples); }
     }
     g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
+    DM_SP_END(DM_SP_POI, "pso-wait", sp_w, "took=%d why=%d ok=%d", took, why, ps != nil);
     if (!ps) { char hint[200]; MLOG("[RED] failed to create render pipeline (vertex %s fragment %s): %s%s", vs->key, fs ? fs->key : "-", e.localizedDescription.UTF8String, pso_fout_hint(fs, g_pass.cfmt, hint, sizeof hint));
                hm_put_id(&g_pso_fail, &k, NSNull.null); return nil; }
     if (!ms_fn) { pso_skey sk; char shex[sizeof sk * 2 + 1]; pso_skey_from(&k, vs, fs, g_pso_lmap != NULL, g_pso_lmap ? &g_pso_fz : NULL, &sk); pso_skey_hex(&sk, shex);
@@ -12458,8 +12494,10 @@ static void dispatch(const p_dispatch *dp) {
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
     if (!ps) {
         if (cs->cps_failed) return;   // the same function fails the same way: asked again at every dispatch, Mario Kart World's refused shaders took 3,138 pipeline builds in 60 s
+        dm_sp_id sp = DM_SP_ID(DM_SP_SHADERS); DM_SP_BEGIN(DM_SP_SHADERS, "pipeline", sp, "how=compute key=%{public}s", cs->key);
         NSError *e = nil; uint64_t bt = bp_now(); ps = [g_dev newComputePipelineStateWithFunction:cs->fn error:&e];
         g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
+        DM_SP_END(DM_SP_SHADERS, "pipeline", sp, "ok=%d", ps != nil);
         if (!ps) { cs->cps_failed = 1; MLOG("[RED] failed to create compute pipeline for %s: %s (its dispatches are skipped)", cs->key, e.localizedDescription.UTF8String); return; }
         pso_record("C\t%s\n", cs->key);
         if (cs->key[0]) pso_user_record("C\t%s\n", cs->key);
@@ -13232,6 +13270,13 @@ static void sub_cut(void) {
         if (cb.error && !gpu_err_victim(cb.error)) { char w[64]; snprintf(w, sizeof w, "segment %u of submission fence=%llu", k, (unsigned long long)sfence); gd_log_failed(w, gd0, gd1); }   // k: the segment's
         char where[64]; snprintf(where, sizeof where, "fence %llu, segment %u", (unsigned long long)cbs_fence, k); cbs_feedback(cbs, cb.error, where);
     }];
+    if (DM_SP_ON()) {   // DM_SIGNPOST's gpu interval for a segment (as in mtl_sub_commit)
+        dm_sp_id sp = DM_SP_ID(DM_SP_GPU); double sp_t = CACurrentMediaTime();
+        DM_SP_BEGIN(DM_SP_GPU, "gpu", sp, "frame=%llu fence=%llu seg=%u", (unsigned long long)f, (unsigned long long)sfence, k);
+        [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
+            DM_SP_END(DM_SP_GPU, "gpu", sp, "frame=%llu fence=%llu seg=%u exec_ms=%.3f queued_ms=%.3f err=%d", (unsigned long long)f, (unsigned long long)sfence, k,
+                      (cb.GPUEndTime - cb.GPUStartTime) * 1e3, cb.GPUStartTime > 0 ? (cb.GPUStartTime - sp_t) * 1e3 : -1.0, cb.error != nil); }];
+    }
     gmem_commit_patch();
     res_commit();
     [g_cb endCommandBuffer];
@@ -14478,6 +14523,11 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     int fx_kind = kind == PRESENT_METALFX;
     [cb endCommandBuffer];
     MTL4CommitOptions *o = [MTL4CommitOptions new];
+    if (DM_SP_ON()) {   // DM_SIGNPOST's gpu-present interval: the present pass from its commit to its feedback
+        dm_sp_id sp = DM_SP_ID(DM_SP_GPU);
+        DM_SP_BEGIN(DM_SP_GPU, "gpu-present", sp, "ticket=%llu frame=%llu fx=%d", (unsigned long long)ticket, (unsigned long long)frame, fx_kind);
+        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { DM_SP_END(DM_SP_GPU, "gpu-present", sp, "ticket=%llu exec_ms=%.3f err=%d", (unsigned long long)ticket, (f.GPUEndTime - f.GPUStartTime) * 1e3, f.error != nil); }];
+    }
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         gpu_busy_note(f.GPUStartTime, f.GPUEndTime);
         if (f.error) { char dt[48]; snprintf(dt, sizeof dt, "present ticket %llu", (unsigned long long)ticket); hcb_fail(fx_kind ? HCB_DISPLAY_FX : HCB_DISPLAY, -1, f.error, dt); }   // at errors 1, 2, 4 ... (it was every error)
@@ -14511,6 +14561,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     [dr addPresentedHandler:^(id<MTLDrawable> d) {   // Actual presentation time (the time this frame is really put on screen, CACurrentMediaTime base)
         CFTimeInterval tt = d.presentedTime;
         g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt : -1};
+        DM_SP_EVENT(DM_SP_DISPLAY, "shown", "ticket=%llu frame=%llu shown=%d late_ms=%.3f", (unsigned long long)pn, (unsigned long long)frame, tt > 0, tt > 0 && target_ts > 0 ? (tt - target_ts) * 1e3 : 0.0);   // emitted when the handler runs, after the fact
     }];
     // Each frame is displayed for at least one present period: when the GPU completion time jitters around a 120 Hz refresh boundary, the paired "25 ms + 8.33 ms" stutter no longer appears
     if (target_ts > 0) [dr present];
@@ -14580,10 +14631,10 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_cond_broadcast(&g_link_cv);
     pthread_mutex_unlock(&g_link_mu);
     pthread_mutex_lock(&g_pq_mu);
-    if (!g_dm_present_link || g_rescue_mode || g_pq_read == g_pq_in) { if (g_dm_present_link && !g_rescue_mode) g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
+    if (!g_dm_present_link || g_rescue_mode || g_pq_read == g_pq_in) { if (g_dm_present_link && !g_rescue_mode) g_link_empty++; DM_SP_EVENT(DM_SP_DISPLAY, "tick", "why=%{public}s", g_pq_read == g_pq_in ? "empty" : "not taking"); pthread_mutex_unlock(&g_pq_mu); return; }
     // The previous frame's present interval was >= 2 (period > 25 ms): keep it on screen for its whole period before taking the next one, as the Switch flips only every N vertical syncs. This also holds while the link runs at 60 Hz (Mario 1.2.1 sets 2 for single frames, see nvn_game_fps in hle_nvn.c);
     //   before, every tick took the newest frame, so that frame, carrying the extra time step the game advanced for it, was shown for only 16.7 ms and the game looked like it jumped ahead
-    if (g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol) { g_link_held++; pthread_mutex_unlock(&g_pq_mu); return; }
+    if (g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol) { g_link_held++; DM_SP_EVENT(DM_SP_DISPLAY, "tick", "why=%{public}s", "held"); pthread_mutex_unlock(&g_pq_mu); return; }
     uint64_t first = g_pq_read + 1, ticket = g_pq_in;
     // In order, one frame per tick and at most one behind the newest: two waiting, the older now and the newer on the next tick; three or more, the older ones are dropped. Taking the newest
     // dropped the one before whenever two frames landed in the same refresh, as frames of a 60 fps game that take 16-17.5 ms do, and the next frame then stayed up 33 ms
@@ -14599,7 +14650,9 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_mutex_unlock(&g_pq_mu);
     int submitted;
     ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
+    dm_sp_id sp = DM_SP_ID(DM_SP_DISPLAY); DM_SP_BEGIN(DM_SP_DISPLAY, "link", sp, "ticket=%llu frame=%llu lead_ms=%.3f", (unsigned long long)ticket, (unsigned long long)it.frame, (update.targetPresentationTimestamp - cb) * 1e3);
     @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); }
+    DM_SP_END(DM_SP_DISPLAY, "link", sp, "submitted=%d", submitted);
     g_link_hold_until = submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
     if (!submitted) {
         pthread_mutex_lock(&g_pq_mu);
@@ -14723,7 +14776,9 @@ static void *present_main(void *arg) {
         pthread_mutex_unlock(&g_pq_mu);
         int submitted;
         ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
+        dm_sp_id sp = DM_SP_ID(DM_SP_DISPLAY); DM_SP_BEGIN(DM_SP_DISPLAY, "link", sp, "ticket=%llu frame=%llu present thread", (unsigned long long)ticket, (unsigned long long)it.frame);
         @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, nil, 0); }
+        DM_SP_END(DM_SP_DISPLAY, "link", sp, "submitted=%d", submitted);
         pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
         if (!submitted) {
             pthread_mutex_lock(&g_pq_mu);

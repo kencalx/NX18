@@ -19,6 +19,7 @@
 #include "nvn_timestamp.h"
 #include "../../host/front.h"
 #include "../../host/power_mark.h"   // the iOS frame-rate counter's heat / Low Power mark (dm_power_cap_now)
+#include "../../host/dm_signpost.h"   // DM_SIGNPOST: Instruments lanes
 #include "nvn_dirty.h"
 #include <mach/mach_time.h>
 #include <CommonCrypto/CommonDigest.h>
@@ -771,7 +772,9 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
     int (*w)(uint64_t, uint64_t) = o->fenced == 2 ? mtl_wait_acq : mtl_wait;
     if (w(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+    dm_sp_id sp = DM_SP_ID(DM_SP_FRAME); DM_SP_BEGIN(DM_SP_FRAME, "syncwait", sp, "fence=%llu acq=%d", (unsigned long long)o->fence, o->fenced == 2);   // waits on several threads overlap: an id each
     uint64_t t0 = now_ns(); int ok = w(o->fence, timeout); atomic_fetch_add(&g_sync_ns, now_ns() - t0);   // the frame's blocked SyncWait time (@sync_ms)
+    DM_SP_END(DM_SP_FRAME, "syncwait", sp, "ok=%d", ok);
     return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
 NVN(nvnEventBuilderSetDefaults, void, NVNeventBuilder *b) { memset(b, 0, sizeof(ev_builder_t)); }
@@ -1353,6 +1356,7 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     dm_host_work++; mtl_prepare(); dm_host_work--;
     gfx_enter();
     uint64_t t0 = now_ns(), c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), i0, y0, s0 = thr_sys_ns(); thr_counts(&i0, &y0);
+    DM_SP_BEGIN(DM_SP_FRAME, "submit", DM_SP_EXCL, "cmdbufs=%d", n);   // one at a time (g_sub_mu)
     ((queue_t *)q)->submits++;
     mtl_queue_activate(((const queue_t *)q)->serial);
     mtl_set_queue_origin_lower_left(((const queue_t *)q)->origin_ll);
@@ -1362,7 +1366,8 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     mtl_sub_index((const uint64_t *)h, n);
     for (int i = 0; i < n; i++) { mtl_exec_rest((const uint64_t *)h + i + 1, n - i - 1); mtl_exec((const uint8_t *)h[i]); }
     mtl_exec_rest(NULL, 0);
-    mtl_sub_commit();
+    uint64_t sp_fence = mtl_sub_commit();
+    DM_SP_END(DM_SP_FRAME, "submit", DM_SP_EXCL, "fence=%llu", (unsigned long long)sp_fence);
     pthread_mutex_unlock(&g_sub_mu);
     uint64_t dw = now_ns() - t0;
     atomic_fetch_add(&g_nvn_ns, dw); atomic_fetch_add(&g_sub_wall_ns, dw);
@@ -1493,6 +1498,7 @@ extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
     win_t *o = (win_t *)w;
     *idx = o->ntex ? o->next++ % o->ntex : 0;
+    dm_sp_id sp = DM_SP_ID(DM_SP_FRAME); DM_SP_BEGIN(DM_SP_FRAME, "acquire", sp, "index=%d", *idx);   // the host's own frame pacing: the display link, the 60 Hz clock, the snapshot ring and the present queue
     // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
     uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0;
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
@@ -1520,6 +1526,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     if (tk) { uint64_t w0 = now_ns(); mtl_present_wait(tk); g_pq_wait_ns += now_ns() - w0; }
     if (s) { ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
     if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
+    DM_SP_END(DM_SP_FRAME, "acquire", sp, "frame=%llu pace_ms=%.3f pq_wait=%d", (unsigned long long)g_frame, pace_ns / 1e6, tk != 0);
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
 // The older API (NVN 53, Super Mario 3D World + Bowser's Fury): the queue waits for the texture on the GPU and no sync object is handed out. The host replays in submission order, so later commands already come after earlier presents; the same as WindowAcquireTexture without a sync object
@@ -2070,6 +2077,7 @@ static const int *present_crop(const int win[4], int tw, int th, int lc[4]) {
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
+    DM_SP_BEGIN(DM_SP_FRAME, "present", DM_SP_EXCL, "frame=%llu", (unsigned long long)g_frame);   // presents never overlap (the game serializes them)
     dm_ue_cvar_tick();
     if (fps_high()) high_cap_tick();
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)dm_movie_playing(), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)
@@ -2098,6 +2106,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     }
     gfx_enter();
     uint64_t t0 = now_ns();
+    // DM_SIGNPOST's frame interval is the timing line's frame work (t0 - prev_out): from the end of the previous present to here
+    static int sp_frame_open; if (DM_SP_ON() && sp_frame_open) { sp_frame_open = 0; DM_SP_END(DM_SP_POI, "frame", DM_SP_EXCL, "frame=%llu", (unsigned long long)g_frame); }
     if (idx >= 0 && idx < o->ntex && idx < 4) {   // enqueue only, return immediately
         const tex_t *t = CTX(o->tex[idx]); int lc[4]; const int *crop = present_crop(o->crop, (int)t->d.width, (int)t->d.height, lc);
         nvn_cap_present(t, crop);   // DM_NVN_CAPTURE (nvn_capture.inc)
@@ -2168,6 +2178,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     } else atomic_store(&g_nvn_ns, 0);
     g_acq_wait_ns = g_pq_wait_ns = 0;
     if (f >= 8) { double g = mtl_gpu_ms(f - 8); if (g >= 0) { tpush(3, g); trow(f - 8, "@gpu_ms", g); g_hr[g_hn++ % HRN] = g; }   // GPU time is taken 8 frames late (already completed)
+        if (DM_SP_ON() && g >= 0) { uint64_t s0 = 0, s1 = 0; int sp_span = mtl_gpu_span(f - 8, &s0, &s1);   // the timing line's GPU number, and its first start to last end
+            DM_SP_EVENT(DM_SP_GPU, "frame-gpu", "frame=%llu gpu_ms=%.3f span_ms=%.3f", (unsigned long long)(f - 8), g, sp_span ? (s1 - s0) / 1e6 : -1.0); }
         { lf_rec *r = &g_lf[(f - 8) % LFN]; if (g >= 0 && r->f == f - 8) mtl_ab_gpu(f - 8, g, r->fr); }   // DM_AB phases
         { lf_rec *r = &g_lf[(f - 8) % LFN];   // long-frame log (on by default, DM_LONGFRAME=0 turns it off): a line is printed only when the whole frame > 20 ms or GPU > 16.7 ms, and it is clearly above recent conditions
           static int on = -1; if (on < 0) { const char *e = getenv("DM_LONGFRAME"); on = !(e && !strcmp(e, "0")); }
@@ -2178,6 +2190,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
               snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms; draws with a hybrid pipeline %u",
                        (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->hy);
               // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
+              DM_SP_EVENT(DM_SP_POI, "longframe", "%{public}s", b);
               dm_longframe_note(b); } }
         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
     prev_in = t0; prev_pass = ps; prev_draw = dr;
@@ -2188,6 +2201,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     // Real-device semantics: present only enqueues and returns immediately; this frame's display time is scheduled by the pacer, and the texture can be acquired again only at "display time + one period" (blocking in AcquireTexture)
     uint64_t period = present_period(o), now = dm_detclock_enabled() ? guest_ns() : now_ns();
     g_hold_ring[o->presents % 16] = (uint8_t)present_itv(o);
+    if (DM_SP_ON()) { static int sp_itv; int v = present_itv(o); if (v != sp_itv) { sp_itv = v; DM_SP_EVENT(DM_SP_FRAME, "hold", "vsyncs=%d frame=%llu", v, (unsigned long long)f); } }   // the present interval / frame step changed
     nvn_pacer pc = {o->pace};
     uint64_t slot = now + nvn_pace(&pc, now, period);
     o->pace = pc.target;
@@ -2207,6 +2221,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         if (g_tsv && mtl_link_tick(n, &lt, &ll, &lk, &lg)) { trow(f - 8, "@link_target_ms", lt * 1e3 - g_t0_ns / 1e6); trow(f - 8, "@link_lead_ms", ll); trow(f - 8, "@link_ticks", lk); trow(f - 8, "@link_gap_ms", lg); } }
     if (f >= 8 && slow_on()) slow_emit(f - 8);
     prev_out = now_ns();
+    if (DM_SP_ON()) { sp_frame_open = 1; DM_SP_BEGIN(DM_SP_POI, "frame", DM_SP_EXCL, "frame=%llu", (unsigned long long)g_frame); }
+    DM_SP_END(DM_SP_FRAME, "present", DM_SP_EXCL, "frame=%llu ticket=%llu", (unsigned long long)f, (unsigned long long)(idx >= 0 && idx < 4 ? o->ticket[idx] : 0));
 }
 
 // ---------- State-only interfaces used by newer-SDK games (SMBW): buffer objects, pool / sampler / texture queries, views, color state, device and window ----------

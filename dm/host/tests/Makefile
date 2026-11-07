@@ -77,6 +77,9 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_audio_lifecycle
 	$(B)/t_aac_layout
 	$(B)/t_vt_rebuild
+	$(B)/t_signpost_stub
+	$(B)/t_signpost_none
+	$(B)/t_signpost
 run: $(B)/t_nro
 run: $(B)/t_symbols
 run: $(B)/t_crash_summary
@@ -122,6 +125,21 @@ movie-logic: $(B)/t_aac_layout $(B)/t_vt_rebuild
 	$(B)/t_vt_rebuild
 	$(CLANG) -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -o $(B)/t_aac_layout_asan t_aac_layout.c && $(B)/t_aac_layout_asan
 	$(CLANG) -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -o $(B)/t_vt_rebuild_asan t_vt_rebuild.c && $(B)/t_vt_rebuild_asan
+# DM_SIGNPOST's switch and macros (../dm_signpost.h: plain C, no game profile): against a stand-in that counts the os_signpost calls (only DM_SIGNPOST=1 turns the lanes on;
+# off, no call is made and no macro argument is evaluated), in the no-op form (-DDM_SP_NONE, as the Linux parse check builds it) and against the system's <os/signpost.h>
+# (the real os_signpost on a Mac, the no-op form on Linux)
+run: $(B)/t_signpost_stub $(B)/t_signpost_none $(B)/t_signpost
+$(B)/t_signpost_stub: t_signpost.c ../dm_signpost.h signpost_stub/os/signpost.h | $(B)
+	$(CLANG) -std=gnu11 -O1 -g -Wall -Wextra -Werror -DT_SP_STUB -Isignpost_stub -o $@ t_signpost.c
+$(B)/t_signpost_none: t_signpost.c ../dm_signpost.h | $(B)
+	$(CLANG) -std=gnu11 -O1 -g -Wall -Wextra -Werror -DDM_SP_NONE -o $@ t_signpost.c
+$(B)/t_signpost: t_signpost.c ../dm_signpost.h | $(B)
+	$(CLANG) -std=gnu11 -O1 -g -Wall -Wextra -Werror -o $@ t_signpost.c
+.PHONY: signpost
+signpost: $(B)/t_signpost_stub $(B)/t_signpost_none $(B)/t_signpost
+	$(B)/t_signpost_stub
+	$(B)/t_signpost_none
+	$(B)/t_signpost
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c
 .PHONY: symbols

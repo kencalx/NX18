@@ -18,6 +18,7 @@
 #include <sys/xattr.h>
 #include "romfs_image.h"
 #include "save_sync.h"
+#include "dm_signpost.h"   // DM_SIGNPOST: the save interval (timing only; nothing about the commit changes)
 
 // Every take-over in this file runs on the big host stack (hle_bigstack.c): path buffers are sized by PATH_MAX and one file open takes 6-7 KB of stack, while a game's save thread can have as little as 8 KB (Super Mario 3D World + Bowser's Fury)
 #undef HLE_FORCE
@@ -734,7 +735,10 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv; transactional save: the whole work d
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
     int i = 0; while (i < g_nmnt && strcmp(g_mnt[i].name, name)) i++;
     if (i == g_nmnt || !g_mnt[i].commit[0]) { pthread_mutex_unlock(&g_lock); return RES_OK; }   // non-transactional mount: nothing to commit
-    int notify_error = 0; Result r = commit_mount_locked(i, &notify_error);
+    int notify_error = 0;
+    DM_SP_BEGIN(DM_SP_POI, "save", DM_SP_EXCL, "mount=%d", i);   // commits are serialized by g_lock
+    Result r = commit_mount_locked(i, &notify_error);
+    DM_SP_END(DM_SP_POI, "save", DM_SP_EXCL, "ok=%d", r == RES_OK);
     pthread_mutex_unlock(&g_lock);
     if (notify_error) front_save_failed(notify_error);
     return r;
@@ -760,7 +764,11 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKPKci", "fsp-srv; commit a validated mount list sha
         }
         if (target < 0) target = i;
     }
-    r = target < 0 ? RES_OK : commit_mount_locked(target, &notify_error);
+    if (target >= 0) {
+        DM_SP_BEGIN(DM_SP_POI, "save", DM_SP_EXCL, "mount=%d list=%d", target, count);
+        r = commit_mount_locked(target, &notify_error);
+        DM_SP_END(DM_SP_POI, "save", DM_SP_EXCL, "ok=%d", r == RES_OK);
+    } else r = RES_OK;
 out:
     pthread_mutex_unlock(&g_lock);
     if (notify_error) front_save_failed(notify_error);

@@ -1,6 +1,7 @@
 // System service interfaces used by games on newer SDKs (16.x): oe / time / pl (shared font) / vi vsync / diag.
 // On the real device all of these go through Horizon system services (IPC); the host gives values directly or makes them "unavailable".
 #include "hle.h"
+#include "dm_signpost.h"   // DM_SIGNPOST: the vsync event
 #include <fcntl.h>
 #include <pthread.h>
 #include <pthread/qos.h>
@@ -289,6 +290,7 @@ typedef struct vsync_event { void *ev; uint64_t binding; struct vsync_event *nex
 static pthread_mutex_t g_vs_mu = PTHREAD_MUTEX_INITIALIZER;
 static vsync_event_t *g_vs_events;
 static int vsync_tick(vsync_event_t *v) {   // 0: the event is gone and this thread has left the table
+    DM_SP_EVENT(DM_SP_FRAME, "vsync", "binding=%llu", (unsigned long long)v->binding);   // the event the game paces on
     if (hle_signal_system_event_binding(v->binding)) return 1;
     pthread_mutex_lock(&g_vs_mu);
     vsync_event_t **p = &g_vs_events; while (*p && *p != v) p = &(*p)->next;

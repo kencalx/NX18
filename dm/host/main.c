@@ -2,6 +2,7 @@
 #include "dm.h"
 #include "front.h"
 #include "../gfx/nvn/dmsh_chain.h"
+#include "dm_signpost.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <stdatomic.h>
 #include <sys/resource.h>
@@ -104,6 +105,7 @@ const char *dm_build_commit(void) { return g_commit; }   // the run's layout rec
 static void host_preload(int argc, char **argv) {
     g_t0_ns = proc_start_mono_ns();
     flags_init();
+    if (dm_sp_init()) LOG("signposts on (DM_SIGNPOST=1): subsystem " DM_SP_SUBSYSTEM ", categories PointsOfInterest Frame GPU Display Shaders, for Instruments' os_signpost and Points of Interest lanes");   // before any thread that emits them starts
     if (argc < 2) die("usage: dmhost <dir> [mod...] [-- game arguments...]");
     // Time zone: the game converts absolute time to local time along two paths, both ending in the host libc -- nn::time::ToCalendarTime (hle_time.c, localtime_r) and the guest libc's
     // localtime_r / mktime (hle_table.c wires them straight to the host). So only when the host follows the system time zone do the original game's screens (chronicle discovery time etc.) show this machine's time.
