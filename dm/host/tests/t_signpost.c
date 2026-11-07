@@ -18,7 +18,7 @@ static int n_create, n_gen, n_emit; static const char *created[8];
 static struct { int kind; os_log_t log; os_signpost_id_t id; const char *name, *fmt; int a0; } last;
 os_log_t os_log_create(const char *subsystem, const char *category) {
     if (strcmp(subsystem, "org.nintanium.host")) { printf("FAIL subsystem %s\n", subsystem); fails++; }
-    if (n_create < 8) created[n_create] = category;
+    if (n_create >= 0 && n_create < 8) created[n_create] = category;
     return (os_log_t)(uintptr_t)(0x1000 + 0x10 * n_create++);
 }
 os_signpost_id_t os_signpost_id_generate(os_log_t log) { (void)log; return 100 + (os_signpost_id_t)n_gen++; }
