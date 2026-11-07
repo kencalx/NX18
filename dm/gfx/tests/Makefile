@@ -15,12 +15,15 @@ CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H)) -I$
 GFX=$(filter-out ../nvn/hle_nvn.c,$(sort $(wildcard ../nvn/*.c ../nvn/*.m ../nvn/*.S ../tex/*.c ../tex/*.m)))
 GFX_H=$(wildcard ../nvn/*.h ../nvn/*.inc ../nvn/include/*.h ../tex/*.h) $(GAME_H) $(MSL_H)
 .DEFAULT_GOAL := t_nvn   # the profile header rule comes first, so keep the default goal as before
-$(GAME_H):
+# Both headers are remade on every make (FORCE) by the host Makefile's own rules (game_profile, host_msl), as the host build and dm/host/tests do. game.py writes the profile
+# header and host_msl.py the shader header only when its content changes, so an unchanged header rebuilds no test. game_profile.h had no prerequisites here, so one from an
+# older game.py was kept once it existed and the tests did not compile (DM_GAME_DRAW_BARRIERS_GAME, a header of a host built before b1d7c707)
+$(GAME_H): FORCE
 	$(MAKE) -C ../../host game_profile GAME=$(GAME)
-$(MSL_H): $(wildcard ../msl/*.metal) ../tools/host_msl.py host_msl_force
+$(MSL_H): $(wildcard ../msl/*.metal) ../tools/host_msl.py FORCE
 	$(MAKE) -C ../../host host_msl GAME=$(GAME)
-.PHONY: host_msl_force
-host_msl_force:
+.PHONY: FORCE
+FORCE:
 FW=-framework Metal -framework MetalFX -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework UniformTypeIdentifiers
 # Host crash.c is linked in as well: the write-protect unit tests go through the same page-fault hook as production
 # Tests that #include nvn_mtl.m link the rest of the NVN layer beside it (hle_nvn.c: memory pools, sparse pools, serials) and the host's large stack, with weak stubs of what they need of the host (t_host_stubs.c)

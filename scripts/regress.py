@@ -1364,7 +1364,7 @@ def replayer_for(tree, g, a):
     say(f'  {g.id}: building the replayer of {tree.id}')
     logs = game_root(g) / 'tmp'; logs.mkdir(parents=True, exist_ok=True); env = g.env(tree)
     (tree.path / 'dm/gfx/tests/nvn_replay').unlink(missing_ok=True)   # one binary per tree but one header per game: make would keep another game's binary, newer than this game's header
-    for d, target in (('dm/host', 'game_profile'), ('dm/gfx/tests', 'nvn_replay')):   # the profile header first: the tests' rule keeps a stale one
+    for d, target in (('dm/host', 'game_profile'), ('dm/gfx/tests', 'nvn_replay')):   # the profile header first (dm/gfx/tests also remakes it through the host Makefile)
         log = logs / f'replayer-{tree.id}-{g.id}-{target}.log'
         rc, _ = run_heavy(['make', '-C', tree.path / d, f'GAME={g.id}', target], log, tree.path, env, a, f'{g.id} {target}')
         if rc: raise HarnessError(f'{g.id}: the replayer of {tree.id} does not build (see {log})')

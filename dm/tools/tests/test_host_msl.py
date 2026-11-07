@@ -159,6 +159,19 @@ class HostMSL(unittest.TestCase):
         self.make(gfx=True)
         self.assertEqual(len(self.compiles()), 1)
 
+    def test_gfx_tests_regenerate_a_stale_profile_header(self):
+        # a header left by a host built before game.py gained a key: the graphics tests' make remakes it through the host Makefile, and leaves an unchanged one as it is
+        shutil.copyfile(REPO / 'dm/games/game.py', self.root / 'dm/games/game.py')
+        profile = self.root / f'dm/host/gen/{GAME}/game_profile.h'; profile.parent.mkdir(parents=True); profile.write_text('#define DM_GAME_OLD 1\n')
+        def make():
+            p = subprocess.run(['make', '-s', '-C', 'dm/gfx/tests', f'GAME={GAME}', f'../../host/gen/{GAME}/game_profile.h'], cwd=self.root, env=self.env, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        make()
+        self.assertIn('#define DM_GAME_DRAW_BARRIERS_GAME ', profile.read_text())
+        before = profile.stat().st_mtime_ns
+        make()
+        self.assertEqual(profile.stat().st_mtime_ns, before)
+
     def test_unchanged_inputs_preserve_header_and_skip_compilation(self):
         self.make()
         before = self.header.stat().st_mtime_ns
