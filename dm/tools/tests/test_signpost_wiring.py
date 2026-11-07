@@ -108,6 +108,21 @@ class Wiring(unittest.TestCase):
                 plain = re.sub(r'"(\\.|[^"\\])*"', '""', arg)
                 with self.subTest(f=f, name=name, arg=arg): self.assertNotRegex(plain, bad)
 
+    def test_on_the_lanes_ask_nothing_again_and_hold_no_lock_the_game_takes(self):   # on, a site must not call state-changing or locking code a second time, nor emit under a lock
+        for f in sources():
+            for ln in read(f).splitlines():
+                m = re.search(r'\bDM_SP_(BEGIN|END|EVENT)\s*\(', ln)
+                if m:
+                    with self.subTest(f=f, line=ln.strip()[:80]): self.assertNotIn('pthread_mutex_unlock(', ln[m.start():], 'emitted with a lock held: emit after the unlock')
+        nvn = read('dm/gfx/nvn/hle_nvn.c')
+        hold = [ln for ln in nvn.splitlines() if '"hold"' in ln]
+        self.assertEqual(len(hold), 1)
+        self.assertNotIn('present_itv(', hold[0], 'present_itv takes thermal_capped\'s lock and samples the heat state: reuse the value g_hold_ring stores')
+        self.assertIn('int itv = present_itv(o); g_hold_ring[o->presents % 16] = (uint8_t)itv;', nvn)
+        mtl = read('dm/gfx/nvn/nvn_mtl.m')
+        self.assertGreater(mtl.index('DM_SP_END(DM_SP_GPU, "gpu-present"'), mtl.index('present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind); pthread_mutex_unlock(&g_pq_mu);'),
+                           'the gpu-present handler goes after the one that releases the ticket the game\'s acquire waits for')
+
     def test_categories_and_subsystem_agree_with_the_docs(self):
         self.assertIn('enum { DM_SP_POI, DM_SP_FRAME, DM_SP_GPU, DM_SP_DISPLAY, DM_SP_SHADERS, DM_SP_NLOG };', self.hdr)
         self.assertIn('{OS_LOG_CATEGORY_POINTS_OF_INTEREST, "Frame", "GPU", "Display", "Shaders"}', self.hdr)   # in the enum's order

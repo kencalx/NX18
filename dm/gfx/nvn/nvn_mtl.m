@@ -14523,17 +14523,17 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     int fx_kind = kind == PRESENT_METALFX;
     [cb endCommandBuffer];
     MTL4CommitOptions *o = [MTL4CommitOptions new];
-    if (DM_SP_ON()) {   // DM_SIGNPOST's gpu-present interval: the present pass from its commit to its feedback
-        dm_sp_id sp = DM_SP_ID(DM_SP_GPU);
-        DM_SP_BEGIN(DM_SP_GPU, "gpu-present", sp, "ticket=%llu frame=%llu fx=%d", (unsigned long long)ticket, (unsigned long long)frame, fx_kind);
-        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { DM_SP_END(DM_SP_GPU, "gpu-present", sp, "ticket=%llu exec_ms=%.3f err=%d", (unsigned long long)ticket, (f.GPUEndTime - f.GPUStartTime) * 1e3, f.error != nil); }];
-    }
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         gpu_busy_note(f.GPUStartTime, f.GPUEndTime);
         if (f.error) { char dt[48]; snprintf(dt, sizeof dt, "present ticket %llu", (unsigned long long)ticket); hcb_fail(fx_kind ? HCB_DISPLAY_FX : HCB_DISPLAY, -1, f.error, dt); }   // at errors 1, 2, 4 ... (it was every error)
         pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
         present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind); pthread_mutex_unlock(&g_pq_mu);
     }];
+    if (DM_SP_ON()) {   // DM_SIGNPOST's gpu-present interval: the present pass from its commit to its feedback; its handler goes after the one above, which releases the ticket the game's acquire waits for (g_pq_done)
+        dm_sp_id sp = DM_SP_ID(DM_SP_GPU);
+        DM_SP_BEGIN(DM_SP_GPU, "gpu-present", sp, "ticket=%llu frame=%llu fx=%d", (unsigned long long)ticket, (unsigned long long)frame, fx_kind);
+        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { DM_SP_END(DM_SP_GPU, "gpu-present", sp, "ticket=%llu exec_ms=%.3f err=%d", (unsigned long long)ticket, (f.GPUEndTime - f.GPUStartTime) * 1e3, f.error != nil); }];
+    }
     id<MTL4CommandBuffer> buffers[] = {cb};
     pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
     [g_q4 commit:buffers count:1 options:o];
@@ -14631,10 +14631,10 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_cond_broadcast(&g_link_cv);
     pthread_mutex_unlock(&g_link_mu);
     pthread_mutex_lock(&g_pq_mu);
-    if (!g_dm_present_link || g_rescue_mode || g_pq_read == g_pq_in) { if (g_dm_present_link && !g_rescue_mode) g_link_empty++; DM_SP_EVENT(DM_SP_DISPLAY, "tick", "why=%{public}s", g_pq_read == g_pq_in ? "empty" : "not taking"); pthread_mutex_unlock(&g_pq_mu); return; }
+    if (!g_dm_present_link || g_rescue_mode || g_pq_read == g_pq_in) { if (g_dm_present_link && !g_rescue_mode) g_link_empty++; int sp_empty = g_pq_read == g_pq_in; pthread_mutex_unlock(&g_pq_mu); DM_SP_EVENT(DM_SP_DISPLAY, "tick", "why=%{public}s", sp_empty ? "empty" : "not taking"); return; }   // DM_SIGNPOST emits after the unlock: the game's present enqueue takes g_pq_mu
     // The previous frame's present interval was >= 2 (period > 25 ms): keep it on screen for its whole period before taking the next one, as the Switch flips only every N vertical syncs. This also holds while the link runs at 60 Hz (Mario 1.2.1 sets 2 for single frames, see nvn_game_fps in hle_nvn.c);
     //   before, every tick took the newest frame, so that frame, carrying the extra time step the game advanced for it, was shown for only 16.7 ms and the game looked like it jumped ahead
-    if (g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol) { g_link_held++; DM_SP_EVENT(DM_SP_DISPLAY, "tick", "why=%{public}s", "held"); pthread_mutex_unlock(&g_pq_mu); return; }
+    if (g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol) { g_link_held++; pthread_mutex_unlock(&g_pq_mu); DM_SP_EVENT(DM_SP_DISPLAY, "tick", "why=%{public}s", "held"); return; }
     uint64_t first = g_pq_read + 1, ticket = g_pq_in;
     // In order, one frame per tick and at most one behind the newest: two waiting, the older now and the newer on the next tick; three or more, the older ones are dropped. Taking the newest
     // dropped the one before whenever two frames landed in the same refresh, as frames of a 60 fps game that take 16-17.5 ms do, and the next frame then stayed up 33 ms

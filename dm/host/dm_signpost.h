@@ -5,7 +5,7 @@
 // dm_sp_init() reads the switch once, from main.c host_preload (after iOS main.m has applied Documents/env.txt, before any graphics, encode, display-link or vsync
 // thread starts, so a plain int needs no atomics). Unit tests never call it and run with signposts off.
 // Names and formats must be string literals (os_signpost puts them in __TEXT,__oslogstring), hence macros. The subsystem, the categories and the names are an interface
-// for saved Instruments templates: docs/development.md lists them and dm/tools/tests/test_signpost_names.py keeps the two in step.
+// for saved Instruments templates: docs/development.md lists them and dm/tools/tests/test_signpost_wiring.py keeps the two in step.
 #pragma once
 #include <stdint.h>
 #include <stdlib.h>

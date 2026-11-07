@@ -2200,8 +2200,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     mtl_set_frame(g_frame);
     // Real-device semantics: present only enqueues and returns immediately; this frame's display time is scheduled by the pacer, and the texture can be acquired again only at "display time + one period" (blocking in AcquireTexture)
     uint64_t period = present_period(o), now = dm_detclock_enabled() ? guest_ns() : now_ns();
-    g_hold_ring[o->presents % 16] = (uint8_t)present_itv(o);
-    if (DM_SP_ON()) { static int sp_itv; int v = present_itv(o); if (v != sp_itv) { sp_itv = v; DM_SP_EVENT(DM_SP_FRAME, "hold", "vsyncs=%d frame=%llu", v, (unsigned long long)f); } }   // the present interval / frame step changed
+    int itv = present_itv(o); g_hold_ring[o->presents % 16] = (uint8_t)itv;   // one call: present_itv can take thermal_capped's lock and sample the heat state, so DM_SIGNPOST reuses this value rather than ask again
+    if (DM_SP_ON()) { static int sp_itv; if (itv != sp_itv) { sp_itv = itv; DM_SP_EVENT(DM_SP_FRAME, "hold", "vsyncs=%d frame=%llu", itv, (unsigned long long)f); } }   // the present interval / frame step changed
     nvn_pacer pc = {o->pace};
     uint64_t slot = now + nvn_pace(&pc, now, period);
     o->pace = pc.target;
