@@ -70,7 +70,12 @@ HLE_FORCE("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE", "the layer's latest
 // was presented again. FrameInfo is 40 bytes, as the SDK's ListFrameHistory (sdk 20.5.15, sdk+0x4510a0) fills it from the compositor's records: status (2 shown with a present
 // time, 1 queued and not shown yet), frame number (the numbering of GetLatestFrameNumber), the queue tick and the present tick twice; sorted by frame number, newest first.
 // A frame is shown once the present queue has handed it on (nvn_mtl.m g_pq_done) and the system did not drop it; its present time is the drawable's presented time when Metal
-// reports one, else (headless, or before the handler runs) the time it was first seen handed on
+// reports one, else (headless, or before the handler runs) the time it was first seen handed on.
+// Off (profile key frame_history off; DM_VI_FRAME_HISTORY=0 / 1 overrides the profile either way), every call returns 0, the count query too, as the host answered before it kept
+// the history. A workaround, kept for the one game it is set for: Luigi's Mansion 3 is held to 60 fps by two overrides its own code cannot see, the frame limiter's float
+// (hle_fpslock.c) and present_interval display, which ignores the interval 2 the game sets. Given a history, its frame pacing (the readers at main+0xb7a4f0..0xb7d9dc; the
+// community 60 fps mod also sets the interval to 1 at main+0xb7add0) settles at 30 fps on the iPhone, 24-26 on the Mac, with the GPU time unchanged; with none it ran at 53-60.
+// Which reader does it is open until those functions are disassembled (dm/games/0100DCA0064A6000/README.md)
 #define VFH 8
 typedef struct { uint64_t frame, ticket, queued_ns, seen_ns; } vfh_ent;
 static vfh_ent g_vfh[VFH]; static pthread_mutex_t g_vfh_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -81,12 +86,42 @@ void dm_vi_frame_queued(uint64_t frame) {   // hle_nvn.c, at each present the ga
     pthread_mutex_lock(&g_vfh_mu); g_vfh[frame % VFH] = (vfh_ent){frame, q, guest_ns(), 0}; pthread_mutex_unlock(&g_vfh_mu);
 }
 static uint64_t vfh_ticks(uint64_t ns) { return dm_sdk_ounce() ? ns / 32 : ns * 12 / 625; }   // as guest_ticks (hle_os.c)
+static _Atomic int g_vfh_on = -1;   // -1 until the first call decides
+static int vfh_on(void) {
+    int v = g_vfh_on;
+    if (v >= 0) return v;
+    const char *e = getenv("DM_VI_FRAME_HISTORY");
+    int set = e && (!strcmp(e, "0") || !strcmp(e, "off") || !strcmp(e, "1") || !strcmp(e, "on"));
+    v = set ? e[0] == '1' || !strcmp(e, "on") : DM_GAME_FRAME_HISTORY;
+    int was = -1;
+    if (atomic_compare_exchange_strong(&g_vfh_on, &was, v)) {
+        if (e && !set) LOG("[RED] DM_VI_FRAME_HISTORY=%s: not 0, 1, off or on; the profile's frame_history %s is kept", e, v ? "on" : "off");
+        LOG("vi::ListFrameHistory: the layer's frame history is %s (%s)%s", v ? "on" : "off", set ? "DM_VI_FRAME_HISTORY" : "game profile frame_history",
+            v ? "" : ": every call returns 0 entries, the count query too, as before the host kept the history");
+    }
+    return g_vfh_on;
+}
+// One line per 300 presents: how the game asks (a count query, 1 entry, more) and what it gets, so a log shows whether a game reads the history and how often, also with it off
+typedef struct { uint64_t from, calls, count, one, more, ents, shown; } vfh_stats;
+static vfh_stats g_vfs;   // under g_vfh_mu
+static void vfh_window(uint64_t latest, int n, int k, int shown, int on) {
+    pthread_mutex_lock(&g_vfh_mu);
+    g_vfs.calls++; g_vfs.ents += (uint64_t)k; g_vfs.shown += (uint64_t)shown;
+    if (n <= 0) g_vfs.count++; else if (n == 1) g_vfs.one++; else g_vfs.more++;
+    int due = latest >= g_vfs.from + 300; vfh_stats w = g_vfs;
+    if (due) g_vfs = (vfh_stats){.from = latest};
+    pthread_mutex_unlock(&g_vfh_mu);
+    if (due) LOG("vi::ListFrameHistory, presents %llu-%llu: %llu calls (%llu count queries, %llu for 1 entry, %llu for more), %llu entries returned, %llu of them shown%s",
+                 (unsigned long long)w.from, (unsigned long long)latest, (unsigned long long)w.calls, (unsigned long long)w.count, (unsigned long long)w.one, (unsigned long long)w.more,
+                 (unsigned long long)w.ents, (unsigned long long)w.shown, on ? "" : " (the history is off)");
+}
 HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the layer's frame history: the last 8 presents, newest first, shown once the present queue handed them on", int, h_vi_FrameHist, void *out, int n, const void *layer) {
     (void)layer;
-    if (!out || n <= 0) return VFH;
+    if (!vfh_on()) { vfh_window(dm_nvn_frame_count(), out ? n : 0, 0, 0, 0); return 0; }
+    if (!out || n <= 0) { vfh_window(dm_nvn_frame_count(), 0, 0, 0, 1); return VFH; }
     uint64_t q, d; mtl_present_progress(&q, &d); (void)q;
-    uint64_t gnow = guest_ns(), hnow = now_ns(), latest = dm_nvn_frame_count();
-    int k = 0;
+    uint64_t gnow = guest_ns(), hnow = now_ns(), latest = dm_nvn_frame_count();   // read in this order as before the switch: the frame count after the queue's progress
+    int k = 0, nshown = 0;
     pthread_mutex_lock(&g_vfh_mu);
     for (uint64_t f = latest; f > 0 && latest - f < VFH && k < n; f--) {
         vfh_ent *e = &g_vfh[f % VFH]; if (e->frame != f) continue;
@@ -95,8 +130,10 @@ HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the lay
         if (pt > 0) { uint64_t ago = hnow > (uint64_t)(pt * 1e9) ? hnow - (uint64_t)(pt * 1e9) : 0; shown = gnow > ago ? gnow - ago : 1; }
         else if (pt == 0) { if (!e->seen_ns) e->seen_ns = gnow; shown = e->seen_ns; }
         o[0] = shown ? 2 : 1; o[1] = f; o[2] = vfh_ticks(e->queued_ns); o[3] = o[4] = shown ? vfh_ticks(shown) : 0;
+        nshown += shown != 0;
     }
     pthread_mutex_unlock(&g_vfh_mu);
+    vfh_window(latest, n, k, nshown, 1);
     static int once; if (k && !once++) LOG("vi::ListFrameHistory: %d of the last %d presents returned (up to frame %llu, the present queue at %llu)", k, VFH, (unsigned long long)latest, (unsigned long long)d);
     return k;
 }

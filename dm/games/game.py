@@ -162,6 +162,8 @@ def header_one(g):
     pic = g.get('present_interval_choice', 'off')   # on: the launcher offers Frame rate 30 / 60 as DM_PRESENT_INTERVAL game / display (a game whose logic runs on its own clock, checked at both rates)
     if pic not in ('on', 'off'): sys.exit(f'{g.id}: present_interval_choice must be on or off: {pic}')
     if pic == 'on' and int(g.get('fps_target', '0') or 0): sys.exit(f'{g.id}: present_interval_choice and fps_target both make a Frame rate row: give the profile one of them')
+    fhi = g.get('frame_history', 'on')   # nn::vi::ListFrameHistory's entries (hle_vi.c; DM_VI_FRAME_HISTORY overrides): on = the last 8 presents, off = none, as before the host kept them (a workaround: Luigi's Mansion 3)
+    if fhi not in ('on', 'off'): sys.exit(f'{g.id}: frame_history must be on or off: {fhi}')
     ft = g.get('fps_target', '0')   # frame rate cap of the rewriter's frame step (FRAME_STEP in the profile's patches.py: Tears of the Kingdom 1.4.3, Breath of the Wild 1.9.0) or of the engine's own frame limit (hle_fpslock.c): 0 = the game's own step, 30 / 60
     if ft not in ('0', '30', '60'): sys.exit(f'{g.id}: fps_target must be 0, 30 or 60: {ft}')
     fm = g.get('fps_max', '60')   # the highest rate fps_target and the player's Frame rate may take: 120 only for a game checked at that speed (hle_nvn.c fps_high)
@@ -246,6 +248,7 @@ def header_one(g):
          f'#define DM_GAME_DISPLAY_VERSIONS {vers}',
          f'#define DM_GAME_PRESENT_DISPLAY {int(pi == "display")}',
          f'#define DM_GAME_PRESENT_CHOICE {int(pic == "on")}',   # the launcher's Frame rate as the present interval (settings.tsv DM_PRESENT_INTERVAL)
+         f'#define DM_GAME_FRAME_HISTORY {int(fhi == "on")}',
          f'#define DM_GAME_CORE_PREEMPT {int(cp == "on")}',
          f'#define DM_GAME_ALLOC_BIG_ALIGN {int(aba == "on")}',
          f'#define DM_GAME_FPS_TARGET {int(ft)}',

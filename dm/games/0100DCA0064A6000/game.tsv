@@ -42,6 +42,10 @@ mem_used	0x4600000
 # steps by the time that really passed (the same walk in the lobby ends at the same spot at 30 and 60 fps). The game asks for present interval 2 as well, which display ignores
 fps_target	60
 present_interval	display
+# A workaround: no layer frame history (nn::vi::ListFrameHistory returns 0 entries, as before the host kept one; hle_vi.c). The game's own frame pacing reads the history
+# (main+0xb7a4f0..0xb7d9dc) and, given one, holds the game to the interval 2 it set (the two overrides above do not reach it): 30 fps on the iPhone, 24-26 on the Mac. Which
+# reader does it is open until disassembled; DM_VI_FRAME_HISTORY=1 turns the history back on for a test (README.md, Frame rate)
+frame_history	off
 
 # ---- Input ----
 # Luigi moves with the left stick and aims with the right; the D-pad calls up the Virtual Boo: the iPhone pad starts in the 3D layout, which has both
