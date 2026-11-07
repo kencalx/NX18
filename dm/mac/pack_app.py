@@ -82,13 +82,23 @@ def copy(srcs, dst, clone):   # cp -R of each source to dst (a new path for one 
     if batch: run(cmd + batch + [dst])
 
 
-def min_os(host):   # the host's deployment target (LC_BUILD_VERSION minos): the launcher is built for the same and Info.plist says it
+def macos_min():   # MACOS_MIN of min_os.mk: the Mac host's minimum macOS, on its compile lines (dm/host/Makefile)
+    m = re.search(r'^MACOS_MIN\s*:?=\s*(\S+)', (HERE / 'min_os.mk').read_text(encoding='utf-8'), re.M)
+    if not m: raise SystemExit(f'no MACOS_MIN in {HERE / "min_os.mk"}')
+    return m.group(1)
+
+
+def min_os(host):   # the host's deployment target (LC_BUILD_VERSION minos): the launcher is built for the same and Info.plist says it; a host without one: MACOS_MIN, which it is built for
     m = re.search(r'cmd LC_BUILD_VERSION.*?minos (\S+)', run(['otool', '-l', host]), re.S)
-    return m.group(1) if m else '14.0'
+    return m.group(1) if m else macos_min()
 
 
 def swift_sources():   # the settings window, with the iOS launcher's model and rows
     return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift']
+
+
+def swift_header():   # the C declaration of dm_mac_launcher, which launcher.c includes and Launcher.swift implements (@c @implementation checks the Swift signature against it)
+    return HERE / 'launcher_window.h'
 
 
 def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and the host's cloud-save code (its send after the host exits), linked by swiftc with the settings window (no Swift main: -parse-as-library)
@@ -96,8 +106,9 @@ def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and th
         objs = [Path(t) / 'launcher.o', Path(t) / 'save_sync.o']
         for obj, src in zip(objs, (HERE / 'launcher.c', HERE.parent / 'host/save_sync.c')):
             run([clang, '-isysroot', sdk, '-arch', 'arm64', f'-mmacosx-version-min={minos}', '-O2', '-Wall', '-I', HERE.parent / 'host', '-c', '-o', obj, src])
-        run([swiftc, '-sdk', sdk, '-target', f'arm64-apple-macos{minos}', '-O', '-swift-version', '5', '-parse-as-library', '-module-cache-path', Path(t) / 'module-cache',
-             '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI'])
+        # Swift 6, as the iOS app's Swift; the header gives @c @implementation the C declaration it checks the window's entry against
+        run([swiftc, '-sdk', sdk, '-target', f'arm64-apple-macos{minos}', '-O', '-swift-version', '6', '-parse-as-library', '-module-cache-path', Path(t) / 'module-cache',
+             '-import-objc-header', swift_header(), '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI'])
 
 
 def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .icns holds
@@ -286,7 +297,7 @@ def pack(a):
         if not codesign: raise SystemExit('codesign is not available')
         codesign = Path(codesign).resolve()
         minos = min_os(a.host)
-        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
+        sources = [Path(__file__).resolve(), HERE / 'launcher.c', swift_header(), HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
         inputs = {'options': vars(a), 'files': [(str(p), p.stat().st_mode, digest(p), os.readlink(p) if p.is_symlink() else None) for p in files + sources],
                   'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [

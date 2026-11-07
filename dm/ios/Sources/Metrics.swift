@@ -6,9 +6,9 @@ import Foundation
 import MetricKit
 
 /// Starts the two report loops. Called once by DmMetrics.m, on its metrics queue. Returns false where MetricManager is missing (before iOS 27), and DmMetrics.m subscribes the older
-/// MXMetricManager instead.
-@_cdecl("dm_metrics_modern_start")
-public func dmMetricsModernStart() -> Bool {
+/// MXMetricManager instead. The C declaration is DmMetrics.h's (through the bridging header), which @c @implementation checks this signature against.
+@c @implementation
+public func dm_metrics_modern_start() -> Bool {
     guard #available(iOS 27.0, *) else { return false }
     DmMetricReports.start()
     return true

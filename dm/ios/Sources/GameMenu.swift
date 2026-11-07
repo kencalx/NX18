@@ -7,9 +7,10 @@ import UIKit
 @MainActor var gameMenuModel: LauncherModel?   // the settings screen's model (Launcher.swift); nil in an app without one: the menu has the layout only
 
 // Called by DmGamepad.m on the main thread. A C entry point is not isolated to the main actor, so its body asserts the main thread (MainActor.assumeIsolated, as the Swift 6
-// language mode wants for UIKit), and the retained menu crosses it as an address
-@_cdecl("dm_game_menu")
-public func dmGameMenu() -> UnsafeMutableRawPointer {
+// language mode wants for UIKit), and the retained menu crosses it as an address: +1, which DmGamepad.m hands to ARC with CFBridgingRelease. The C declaration is DmGameMenu.h's,
+// which @c @implementation checks this signature against
+@c @implementation
+public func dm_game_menu() -> UnsafeMutableRawPointer {
     let address = MainActor.assumeIsolated { () -> Int in
         let title = gameMenuModel != nil ? "More settings on the start screen" : ""
         let menu = UIMenu(title: title, children: [UIDeferredMenuElement.uncached { done in done(gameMenuItems()) }])   // built each time it opens, so it shows the current choices
@@ -91,7 +92,7 @@ private let shareNewestReports = 5
 private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 32   // dm.h DM_CHEAT_*
 
 @MainActor private func cheatsMenu() -> UIMenuElement? {
-    if String(cString: dm_cheats_dir_path()).isEmpty { return nil }   // no cheats folder (DM_CHEATS=""): no submenu
+    if String(cString: dm_cheats_dir_path()).isEmpty { return nil }   // no cheats folder (DM_CHEATS=""), or the host is still loading them (hle_cheats.c): no submenu, until an open after that
     let reload = UIAction(title: "Reload cheats", image: UIImage(systemName: "arrow.clockwise")) { _ in dm_cheats_reload() }
     let build = String(cString: dm_cheats_build())
     let n = Int(dm_cheats_ncheats())
@@ -149,7 +150,7 @@ private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 
 @MainActor private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> UIMenuElement {
     let now = m.values[s.env] ?? s.def, fixed = m.fixed.contains(s.env)
     let attributes: UIMenuElement.Attributes = fixed ? .disabled : []
-    func pick(_ v: String) { m.choose(s, v); _ = dm_setting_live(s.env, v) }
+    func pick(_ v: String) { if m.choose(s, v) { dm_setting_env(s.env, v) }; _ = dm_setting_live(s.env, v) }   // saved, into the environment (under front_ios.m's lock), then applied
     if s.kind == "toggle" {
         let a = UIAction(title: s.label, attributes: attributes, state: now == s.onValue ? .on : .off) { _ in pick(now == s.onValue ? s.offValue : s.onValue) }
         if fixed { a.subtitle = "Set in env.txt" }

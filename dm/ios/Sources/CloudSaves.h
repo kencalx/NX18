@@ -8,7 +8,12 @@
 // bookmark is bound to the app's signing identity, so a re-signed build cannot resolve it, and the
 // launcher asks the player to pick the folder again.
 
-#import <Foundation/Foundation.h>
+#pragma once
+#import <Foundation/Foundation.h>   // outside the extern "C" block: a C++ reader may not import a module inside one
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /// The picked folder, or nil when there is none or it no longer resolves. `stale` (optional) is set
 /// when a bookmark exists but cannot be used under this signature.
@@ -21,6 +26,11 @@ BOOL dm_store_cloud_saves(NSURL *url);
 void dm_clear_cloud_saves(void);
 
 /// Puts the picked folder into DM_SAVE_SYNC before the game starts (front_ios.m, at Play), its
-/// security scope held for the session. A DM_SAVE_SYNC from an env file or the launch environment
-/// wins. Turning cloud saves off in the launcher clears the one this set.
+/// security scope held for the session (CloudSaves.m: picking another folder or turning cloud saves off
+/// stops it). A DM_SAVE_SYNC from an env file or the launch environment wins. Turning cloud saves off
+/// in the launcher clears the one this set.
 void dm_cloud_saves_env(void);
+
+#ifdef __cplusplus
+}
+#endif

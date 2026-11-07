@@ -118,7 +118,9 @@ struct CloudSavesSection: View {
     }
 }
 
-private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
+// @MainActor on the class, not only through its delegates: AppKit's NSApplicationDelegate and NSWindowDelegate are not main-actor protocols (only their methods are, unlike UIKit's
+// UIApplicationDelegate), so without it init, fit and finish would be nonisolated and every NSWindow and NSApp use in them a Swift 6 isolation diagnostic. dm_mac_launcher makes it on the main actor
+@MainActor private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model: LauncherModel
     var window: NSWindow?
     var play = false
@@ -147,7 +149,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
     func applicationDidBecomeActive(_ n: Notification) { window?.makeKeyAndOrderFront(nil) }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {   // ⌘Q, or a logout or restart: the app ends without the game (exit 0, as Quit)
-        fputs("launcher: quit without starting the game\n", stderr)
+        launcherLog("launcher: quit without starting the game\n")
         return .terminateNow   // not terminateCancel, which a logout or restart takes as a refusal and stops
     }
     func windowWillClose(_ n: Notification) { finish(false) }
@@ -162,7 +164,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         guard let w = window else { return }
         window = nil; self.play = play
         // The main thread blocks in launcher.c's waitpid once run() returns, so the window must leave the screen now: no fade-out (it runs on later run-loop passes),
-        // and dmMacLauncher flushes the order-out (AppKit commits it at the end of a pass). Without both, the window stayed on screen, not responding, until the game ended
+        // and dm_mac_launcher flushes the order-out (AppKit commits it at the end of a pass). Without both, the window stayed on screen, not responding, until the game ended
         w.animationBehavior = .none
         w.delegate = nil; w.orderOut(nil)
         NSApp.stop(nil)
@@ -178,24 +180,28 @@ enum LauncherWindowLayout {
     }
 }
 
-// 1: Play (the window's settings are in the environment), 0: the player quit, 2: no window (no launcher.json, or "Show this window at launch" off): launcher.c applies the saved choices
-@_cdecl("dm_mac_launcher")
-public func dmMacLauncher() -> Int32 {
-    guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/launcher.json"), let data = try? Data(contentsOf: url) else { return 2 }
-    guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return 2 }
-    if (UserDefaults.standard.object(forKey: "window.show") as? Bool) == false && !NSEvent.modifierFlags.contains(.option) {
-        fputs("launcher: settings window off (hold Option at launch to show it)\n", stderr)
-        return 2
+// 1: Play (the window's settings are in the environment), 0: the player quit, 2: no window (no launcher.json, or "Show this window at launch" off): launcher.c applies the saved choices.
+// The C declaration is launcher_window.h's (pack_app.py gives swiftc it with -import-objc-header), which @c @implementation checks this signature against. launcher.c's main calls
+// it on the main thread; a C entry point is not isolated to the main actor, so its body asserts the main thread (MainActor.assumeIsolated), as the Swift 6 language mode wants for AppKit
+@c @implementation
+public func dm_mac_launcher() -> Int32 {
+    MainActor.assumeIsolated { () -> Int32 in
+        guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/launcher.json"), let data = try? Data(contentsOf: url) else { return 2 }
+        guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { launcherLog("[RED] launcher: dm/launcher.json cannot be read; starting the game\n"); return 2 }
+        if (UserDefaults.standard.object(forKey: "window.show") as? Bool) == false && !NSEvent.modifierFlags.contains(.option) {
+            launcherLog("launcher: settings window off (hold Option at launch to show it)\n")
+            return 2
+        }
+        let model = LauncherModel(file.settings)
+        let app = NSApplication.shared, launcher = Launcher(model)
+        app.setActivationPolicy(.regular)
+        app.delegate = launcher
+        launcherLog("launcher: \(file.settings.count) settings shown\n")
+        app.run()
+        CATransaction.flush()   // finish's order-out
+        app.setActivationPolicy(.prohibited)   // the host is the game's app from here on
+        guard launcher.play else { launcherLog("launcher: quit without starting the game\n"); return 0 }
+        model.apply()
+        return 1
     }
-    let model = LauncherModel(file.settings)
-    let app = NSApplication.shared, launcher = Launcher(model)
-    app.setActivationPolicy(.regular)
-    app.delegate = launcher
-    fputs("launcher: \(file.settings.count) settings shown\n", stderr)
-    app.run()
-    CATransaction.flush()   // finish's order-out
-    app.setActivationPolicy(.prohibited)   // the host is the game's app from here on
-    guard launcher.play else { fputs("launcher: quit without starting the game\n", stderr); return 0 }
-    model.apply()
-    return 1
 }

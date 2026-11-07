@@ -28,6 +28,7 @@ nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 spec = importlib.util.spec_from_file_location('pack_app', REPO / 'dm/mac/pack_app.py')
 pack_app = importlib.util.module_from_spec(spec); spec.loader.exec_module(pack_app)
 TID = '01008CF01BAAC000'
+MACOS_MIN = pack_app.macos_min()   # the Mac host's minimum (dm/mac/min_os.mk), read before a test points pack_app.HERE elsewhere
 TEST_ROOT = Path(os.environ.get('NXNATIVE_TEST_ROOT', tempfile.gettempdir()))
 
 HOST_C = r'''#include <signal.h>
@@ -117,7 +118,7 @@ class PackReuse(unittest.TestCase):
             'romfs/marker': b'game', 'msl/k.metallib': b'lib', 'msl/k.json': b'{}', 'msl/inputs.tsv': b'stamp',
             'font/nintendo_ext.ttf': b'font', 'aoc/1/data': b'dlc', 'pso/gpu.mtl4a': b'archive',
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
-            'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
+            'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher', 'source/launcher_window.h': b'entry',
             'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows',
         }
@@ -139,7 +140,7 @@ class PackReuse(unittest.TestCase):
             cmd = [str(c) for c in cmd]; self.commands.append(cmd)
             name = Path(cmd[0]).name
             if self.failed_tool == name and (name not in ('clang', 'swiftc') or '-o' in cmd): raise SystemExit('fixture ' + name + ' failed')
-            if name == 'otool': return 'cmd LC_BUILD_VERSION\n minos 14.0\n'
+            if name == 'otool': return f'cmd LC_BUILD_VERSION\n minos {MACOS_MIN}\n'   # a host built as dm/host/Makefile builds it
             if name == 'xcrun':
                 if '--find' in cmd: return str(self.swiftc if 'swiftc' in cmd else self.clang) + '\n'
                 if '--show-sdk-path' in cmd: return str(self.sdk) + '\n'
@@ -199,6 +200,7 @@ class PackReuse(unittest.TestCase):
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
                  'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift',   # the settings window's sources
+                 'source/launcher_window.h',   # its entry's C declaration, which launcher.c includes and swiftc checks the Swift against
                  'host/save_sync.c', 'host/save_sync.h']   # the cloud-save code the launcher links (its send after the host exits)
         names += ['profile/' + n for n in pack_app.TABLES]
         for name in names:
@@ -260,6 +262,9 @@ class PackReuse(unittest.TestCase):
         sync = next(c for c in self.commands if Path(c[0]).name == 'clang' and '-o' in c and c[-1].endswith('save_sync.c'))
         self.assertIn(sync[sync.index('-o') + 1], s)   # save_sync.c's object: the launcher sends the save once the host has exited
         self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], ['Launcher.swift', 'LauncherSettings.swift', 'LauncherRow.swift'])
+        self.assertEqual(s[s.index('-swift-version') + 1], '6')   # the iOS app's language mode
+        self.assertEqual(s[s.index('-target') + 1], f'arm64-apple-macos{MACOS_MIN}')   # the host's minos (otool)
+        self.assertEqual(s[s.index('-import-objc-header') + 1], str(self.tmp / 'source/launcher_window.h'))   # dm_mac_launcher's C declaration, for @c @implementation
 
     def test_selected_file_modes_and_file_additions_and_removals_invalidate(self):
         self.pack()
@@ -332,7 +337,7 @@ class PackReuse(unittest.TestCase):
     def test_missing_selected_inputs_fail_before_reuse_or_partial_creation(self):
         self.pack()
         for name in ('dmhost', 'patched/main.fixups.tsv', 'msl/k.metallib', 'romfs/marker', 'pso/prebuilt.tsv', 'env.txt', 'icon.jpg',
-                     'font', 'aoc', 'profile', 'bin/clang', 'bin/swiftc', 'sdk', 'bin/codesign', 'source/launcher.c', 'source/Launcher.swift', 'ios/Sources/LauncherRow.swift'):
+                     'font', 'aoc', 'profile', 'bin/clang', 'bin/swiftc', 'sdk', 'bin/codesign', 'source/launcher.c', 'source/launcher_window.h', 'source/Launcher.swift', 'ios/Sources/LauncherRow.swift'):
             with self.subTest(name=name):
                 p = self.tmp / name; hidden = p.with_name(p.name + '.hidden'); p.rename(hidden)
                 try:
@@ -413,6 +418,15 @@ class PackReuse(unittest.TestCase):
         self.assertFalse(Path(str(self.key) + '.partial').exists())
         self.assertEqual((Path(self.args.out) / 'Contents/Info.plist').read_bytes(), before)
         self.assert_repacked()
+
+
+class MinOS(unittest.TestCase):
+    def test_the_host_minos_and_without_one_the_hosts_minimum(self):   # the launcher is built for it and Info.plist says it (LSMinimumSystemVersion)
+        self.assertEqual(MACOS_MIN, (REPO / 'dm/mac/min_os.mk').read_text().split('MACOS_MIN := ')[1].split()[0])
+        with mock.patch.object(pack_app, 'run', return_value='Load command 1\n      cmd LC_BUILD_VERSION\n  cmdsize 32\n platform 1\n    minos 27.1\n      sdk 27.2\n'):
+            self.assertEqual(pack_app.min_os('dmhost'), '27.1')
+        with mock.patch.object(pack_app, 'run', return_value='Load command 0\n      cmd LC_SEGMENT_64\n'):   # no LC_BUILD_VERSION: MACOS_MIN, which dm/host/Makefile builds the host for, not an older guess
+            self.assertEqual(pack_app.min_os('dmhost'), MACOS_MIN)
 
 
 @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('codesign'), 'needs macOS (clang, codesign, sips, iconutil)')

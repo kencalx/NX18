@@ -81,6 +81,30 @@ class LiveMenu(unittest.TestCase):
         self.assertIn('fx_mode(fx == &g_fx_present ? &fresh : NULL)', self.nvn)   # a capture takes no pick
         self.assertIn('[MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]', body(self.nvn, 'static int fx_mode(int *fresh) {'))   # a pick on a GPU without the scaler stays bilinear
 
+    def test_a_pick_reaches_the_environment_under_the_lock_the_present_thread_reads_it_under(self):   # setenv rewrites or reallocates a value another thread's getenv points at
+        swift = read('dm/ios/Sources/LauncherSettings.swift'); menu = read('dm/ios/Sources/GameMenu.swift')
+        self.assertNotIn('setenv', body(swift, 'func choose(_ s: Setting, _ v: String) -> Bool {'))   # the model saves; the menu sets the environment
+        self.assertIn('func pick(_ v: String) { if m.choose(s, v) { dm_setting_env(s.env, v) }; _ = dm_setting_live(s.env, v) }', menu)
+        self.assertIn('void dm_setting_env(const char *env, const char *value);', read('dm/ios/Sources/DmGameMenu.h'))
+        setter, copier = body(self.front, 'void dm_setting_env(const char *env, const char *value) {'), body(self.front, 'int front_env_copy(const char *name, char *out, size_t cap) {')
+        for b, call in ((setter, 'setenv(env, value, 1)'), (copier, 'getenv(name)')):
+            self.assertLess(b.index('pthread_mutex_lock(&g_env_lock)'), b.index(call)); self.assertLess(b.index(call), b.index('pthread_mutex_unlock(&g_env_lock)'))
+        self.assertIn('int front_env_copy(const char *name, char *out, size_t cap);', read('dm/host/front.h'))
+        self.assertIn('__attribute__((weak)) int front_env_copy(const char *name, char *out, size_t cap) {', self.nvn)   # the Mac and the graphics unit tests link without the iPhone's
+        mode = body(self.nvn, 'static int fx_mode(int *fresh) {')
+        self.assertIn('front_env_copy("DM_PRESENT_UPSCALE", e, sizeof e)', mode); self.assertNotIn('getenv(', mode)
+        # the other live settings: read on the main thread before the menu exists, or once and kept (dm_opmode), never by a host thread while the game runs
+        live = set(re.findall(r'!strcmp\(env, "(DM_[A-Z0-9_]+)"\)', self.live)) - {'DM_PRESENT_UPSCALE'}
+        readers = {}
+        for d in ('dm/host', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/vk', 'dm/gfx/gl', 'dm/gfx/tex', 'dm/ios/Sources'):
+            for p in sorted((REPO / d).glob('*.[cm]')):
+                for env in re.findall(r'getenv\("(DM_[A-Z0-9_]+)"\)', p.read_text(encoding='utf-8', errors='replace')):
+                    if env in live: readers.setdefault(env, set()).add(p.name)
+        self.assertEqual(readers, {'DM_PICTURE_FIT': {'front_ios.m'}, 'DM_SHOW_FPS': {'front_ios.m'}, 'DM_TOUCH_HAPTICS': {'DmGamepad.m'}, 'DM_TOUCH_SIZE': {'DmGamepad.m'},
+                                   'DM_TOUCH_OPACITY': {'DmGamepad.m'}, 'DM_RUMBLE': {'haptics_apple.m'}, 'DM_OPMODE': {'hle_oe.c'}})
+        self.assertIn('if (m < 0) { const char *e = getenv("DM_OPMODE");', read('dm/host/hle_oe.c'))   # once, then kept; the menu's opening asks it first (dm_pad_layout_offered)
+        self.assertIn('dm_opmode() == 0', body(self.pad, 'bool dm_pad_layout_offered(int layout) {'))
+
     def test_share_log_snapshots_and_anchors(self):
         menu = read('dm/ios/Sources/GameMenu.swift'); share = body(menu, '@MainActor func dmShareLog(from anchor: UIView?) {')
         for part in ('"log.txt"', '"log.prev.txt"', '"run_layouts.txt"', '"metrics"', 'temporaryDirectory', 'copyItem(at: src, to: copy)', 'UIActivityViewController(activityItems: files',

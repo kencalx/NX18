@@ -11,9 +11,7 @@
 #include "dm.h"
 #include "metrics_files.h"
 #include "crash_summary.h"
-#import "DmMetrics.h"
-
-bool dm_metrics_modern_start(void);   // Metrics.swift: MetricManager's two report sequences, read until the app ends; false where it is missing (before iOS 27)
+#import "DmMetrics.h"   // with dm_metrics_modern_start, which Metrics.swift implements
 
 static dispatch_queue_t g_metrics_q;   // the folder's writes and deletions, one at a time, at utility QoS
 static NSString *g_metrics_dir;   // Documents/metrics

@@ -9,6 +9,10 @@ static inline void front_hud_env(void) {
     // Spatial scaling has no temporal exposure: showing that HUD metric makes the MetalFX rows flicker.
     setenv("MTL_HUD_HIDE_METALFX_METRICS", "1", 0);
 }
+// An environment variable that a front end's menu may change while the game runs (iOS: the in-game menu, front_ios.m dm_setting_env), for a host thread that reads it then: copied
+// into out (cut to cap - 1 bytes) under the lock the menu sets it under, as a pointer from getenv may be rewritten or freed by that setenv. 1 set, 0 unset (out ""). nvn_mtl.m has
+// a weak plain getenv copy for the Mac, whose front end changes no variable while the game runs, and for the unit tests
+int front_env_copy(const char *name, char *out, size_t cap);
 // Run the guest: with a window the guest runs on its own thread and the main thread belongs to the system UI; without a window it runs directly on the current thread.
 void front_run(void (*guest)(void));
 // The CAMetalLayer the graphics backend presents frames to (NULL when there is no window)

@@ -32,7 +32,7 @@ void front_ios_boot(void);
 int front_ios_boot_ok(void);
 const char *front_ios_boot_message(void);   // main.m: why a build that keeps the game files off the IPA found none usable (NULL = the generic hint)
 const char *front_ios_device_check(void);   // main.m: why this device cannot run the games (its GPU has no BC textures; NULL = supported); makes the first Metal device
-bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
+#import "DmLauncher.h"   // Launcher.swift dm_show_launcher: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
 
 static CAMetalLayer *g_layer;
 static void front_ios_notify_setup(void);
@@ -118,7 +118,7 @@ static void tv_attach(void);
 static DmRootVC *g_root;
 static CGFloat g_picture_aspect = DM_PICTURE_16_9;   // the presented picture's width / height (front_picture_shape); main thread
 static BOOL g_pictured;   // the game's first picture was reported (front_picture_shape); main thread
-static void launcher_done(void) { [g_root startGame]; }
+static void launcher_done(void) { [g_root startGame]; }   // dm_show_launcher's done: on the main thread (UIKit's dismiss completion), as startGame makes views
 void mtl_present_stretch(int on);   // nvn_mtl.m: the present draws the picture over the whole drawable instead of keeping its shape (Picture Stretch)
 void mtl_present_upscale_set(const char *mode);   // nvn_mtl.m: the in-game menu's Upscaling, which the present thread takes at its next present
 static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "Fill" : m == DmPictureStretch ? "Stretch" : "Fit"; }
@@ -300,8 +300,24 @@ void front_picture_shape(int w, int h) {   // front.h: the views take the presen
     });
 }
 
+// The in-game menu's picks go into the environment under one lock (dm_setting_env, from GameMenu.swift), and a host thread that reads one of those variables while the game runs
+// copies it under the same lock (front_env_copy, front.h): Darwin's setenv rewrites a value string it allocated in place, or reallocates it, under a pointer getenv handed another
+// thread before. Of the variables the menu sets, only DM_PRESENT_UPSCALE is read so (nvn_mtl.m fx_mode, on the present thread, at its first present). The others are read on the
+// main thread, which picks run on: DM_PICTURE_FIT, DM_SHOW_FPS and DM_RUMBLE in startGame, DM_TOUCH_* in the gamepad's init, both before the menu exists; DM_OPMODE once, by
+// hle_oe.c dm_opmode, which caches it, and the menu's own opening calls it (dm_pad_layout_offered) before a pick can be made. A host thread that comes to read one of them while
+// the game runs takes it through front_env_copy, or is handed the pick by dm_setting_live below, as the present thread is (mtl_present_upscale_set)
+static pthread_mutex_t g_env_lock = PTHREAD_MUTEX_INITIALIZER;
+void dm_setting_env(const char *env, const char *value) { pthread_mutex_lock(&g_env_lock); setenv(env, value, 1); pthread_mutex_unlock(&g_env_lock); }
+int front_env_copy(const char *name, char *out, size_t cap) {
+    pthread_mutex_lock(&g_env_lock);
+    const char *e = getenv(name);
+    if (cap) strlcpy(out, e ? e : "", cap);
+    pthread_mutex_unlock(&g_env_lock);
+    return e != NULL;
+}
+
 // The settings the in-game menu offers (GameMenu.swift, from the gamepad's menu button), each taking effect while the game runs; the launcher's other settings need the next start.
-// value NULL: only whether env is one of them; otherwise apply it (GameMenu.swift has saved it and put it in the environment). Console mode changes as on a Switch put in or taken out of its
+// value NULL: only whether env is one of them; otherwise apply it (GameMenu.swift has saved it and put it in the environment, dm_setting_env). Console mode changes as on a Switch put in or taken out of its
 // dock (the operation mode change notification); while a TV shows the picture the game stays docked, and the choice applies when the TV is unplugged
 bool dm_setting_live(const char *env, const char *value) {
     if (!env || !g_root.game) return false;

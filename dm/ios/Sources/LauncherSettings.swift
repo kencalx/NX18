@@ -49,8 +49,9 @@ struct Setting: Decodable, Identifiable {
 struct SettingsFile: Decodable { let settings: [Setting] }
 
 // One line to the log (stderr, which main.m sends to Documents/log.txt and the Mac launcher to the game's log): through FileHandle, as the C stream stderr is shared mutable
-// state the Swift 6 language mode refuses (the iOS app builds in it; the Mac launcher, which compiles this file too, in Swift 5)
-func launcherLog(_ line: String) { FileHandle.standardError.write(Data(line.utf8)) }
+// state the Swift 6 language mode refuses (the iOS app and the Mac launcher, which compiles this file too, build in it). The throwing write(contentsOf:): write(_:) raises an
+// Objective-C exception when the write fails (a full disk), which Swift cannot catch and which ended the app; a line that cannot be written is lost, as the host's fprintf loses it
+func launcherLog(_ line: String) { try? FileHandle.standardError.write(contentsOf: Data(line.utf8)) }
 
 final class LauncherModel: ObservableObject {
     let settings: [Setting]
@@ -131,12 +132,14 @@ final class LauncherModel: ObservableObject {
         if !ignoreSaved { if s.isDefault(v) { defaults.removeObject(forKey: "launcher." + s.env) } else { defaults.set(v, forKey: "launcher." + s.env) } }
     }
 
-    // A choice made while the game runs (the iOS in-game menu, GameMenu.swift): saved as Play saves it, so the settings screen shows it at the next start, and put in the environment.
-    // A value an env file or the launch fixed stays
-    func choose(_ s: Setting, _ v: String) {
-        guard !fixed.contains(s.env), s.accepts(v) else { return }
-        values[s.env] = v; store(s, v); setenv(s.env, v, 1)
+    // A choice made while the game runs (the iOS in-game menu, GameMenu.swift): saved as Play saves it, so the settings screen shows it at the next start. A value an env file or the
+    // launch fixed stays. Returns whether it took the value; the menu then puts it into the environment through front_ios.m's dm_setting_env, not setenv here: the host's threads run
+    // by then, and setenv rewrites or reallocates the value a pointer from another thread's getenv points at (dm_setting_env holds the lock such a reader copies it under)
+    func choose(_ s: Setting, _ v: String) -> Bool {
+        guard !fixed.contains(s.env), s.accepts(v) else { return false }
+        values[s.env] = v; store(s, v)
         launcherLog("launcher: \(s.env)=\(v) (in-game menu)\n")
+        return true
     }
 
     // DM_LAUNCHER=0: no screen, but the saved choices still apply (only DM_SAVED_CHOICES=0 ignores them); nothing is written

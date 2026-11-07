@@ -2,6 +2,7 @@
 #import "DuoHarnessRuntime.h"
 #include "dm.h"
 #include "dm_input.h"
+#include "DmLauncher.h"   // dm_show_launcher's declaration, which Launcher.swift implements in the app: the stand-in below is checked against it
 #include "haptics_apple.h"
 #include "hle.h"
 #include <pthread.h>
@@ -106,7 +107,7 @@ void dm_haptics_apple_controller(int player, GCController *controller) { (void)p
 
 int front_ios_boot_ok(void) { return 1; }
 void front_ios_boot(void) {}
-bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewController; (void)done; return false; }
+bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewController; (void)done; return false; }   // no launcher in the harness (Launcher.swift is not in it)
 
 uint64_t g_t0_ns;
 uint64_t now_ns(void) { return 1; }

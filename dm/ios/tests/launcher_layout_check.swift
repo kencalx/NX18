@@ -2,7 +2,7 @@
 import AppKit
 import SwiftUI
 
-func checkLauncherLayout(_ model: LauncherModel, defaults: UserDefaults) -> Int {
+@MainActor func checkLauncherLayout(_ model: LauncherModel, defaults: UserDefaults) -> Int {   // AppKit and SwiftUI: on the main actor, as Check.main (@main) runs
     NSApplication.shared.setActivationPolicy(.prohibited)
     var failed = 0
     func expect(_ c: Bool, _ what: String) { print((c ? "PASS " : "FAIL ") + what); if !c { failed += 1 } }

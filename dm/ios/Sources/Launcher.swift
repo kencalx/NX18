@@ -170,13 +170,15 @@ private struct LauncherView: View {
     }
 }
 
-// front_ios.m's callback once the settings are in the environment. A C function captures nothing, so it is safe to call from any closure; the box says so to the Swift 6
-// language mode, whatever it makes of a C function pointer in a @Sendable completion handler
+// front_ios.m's callback once the settings are in the environment. A C function captures nothing, so the box may carry it into the @Sendable dismiss completion; it says so to
+// the Swift 6 language mode, whatever it makes of a C function pointer there. That makes it safe to send, not to call anywhere: done must run on the main thread (front_ios.m's
+// launcher_done starts the game's views), as it does from UIKit's dismiss completion
 private struct LauncherDone: @unchecked Sendable { let call: @convention(c) () -> Void }
 
-// Shows the launcher over the root view controller and calls done once the settings are in the environment; false (done is not called) when there is no launcher
-@_cdecl("dm_show_launcher")
-public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @convention(c) () -> Void) -> Bool {
+// Shows the launcher over the root view controller and calls done once the settings are in the environment; false (done is not called) when there is no launcher. The C
+// declaration is DmLauncher.h's (through the bridging header), which @c @implementation checks this signature against
+@c @implementation
+public func dm_show_launcher(_ viewController: UnsafeMutableRawPointer, _ done: @convention(c) () -> Void) -> Bool {
     // Called by front_ios.m on the main thread: the body asserts it (MainActor.assumeIsolated), as the Swift 6 language mode wants for UIKit and SwiftUI
     let finish = LauncherDone(call: done)
     let parentBits = Int(bitPattern: viewController)   // the pointer as a Sendable value: the closure below runs on the main actor, as this function does

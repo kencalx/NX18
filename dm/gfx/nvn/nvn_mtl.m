@@ -14019,6 +14019,12 @@ static fx_state g_fx_present;   // only the present thread encodes or replaces t
 static id<MTL4Compiler> g_fx_comp;
 static _Atomic int g_fx_mode = -1;   // 1 = metalfx, 2 = auto (MetalFX for a picture below 1920x1080), 0 = off (nvn_upscale_pick.h UP_*); the live present sets it (fx_mode), a capture reads it
 static _Atomic int g_fx_req = -1;    // the in-game menu's Upscaling (mtl_present_upscale_set, main thread) until the live present takes it at its next present; -1 none
+// The front ends' (front.h): the iPhone's copies under its in-game menu's lock; the Mac's menus change no variable while the game runs, and the unit tests have no front end
+__attribute__((weak)) int front_env_copy(const char *name, char *out, size_t cap) {
+    const char *e = getenv(name);
+    if (cap) strlcpy(out, e ? e : "", cap);
+    return e != NULL;
+}
 // The in-game menu's Upscaling while the game runs (front_ios.m dm_setting_live): the live present takes the new mode at its next present (fx_mode, nvn_upscale_pick.h) and restarts
 // Automatic's count itself (fx_encode: the count is the present thread's). A scaler made before is kept, so switching back to a mode that used it makes none for the same sizes
 // (FX_REMAKE_PRESENTS still spaces new ones), and a GPU without the scaler stays bilinear. Nothing the game sees changes
@@ -14033,7 +14039,10 @@ static int fx_mode(int *fresh) {
     if (fresh) *fresh = 0;
     if (v >= 0) return v;   // every present but the first and the one after a pick
     int was = atomic_load_explicit(&g_fx_mode, memory_order_relaxed);
-    if ((v = want) < 0) { const char *e = getenv("DM_PRESENT_UPSCALE"); v = up_parse(e); if (v < 0) { MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx, auto or off; keeping off", e); v = UP_OFF; } }
+    if ((v = want) < 0) {   // a copy taken under the in-game menu's lock (front.h front_env_copy): the menu may set the variable on the main thread right now
+        char e[256]; v = up_parse(front_env_copy("DM_PRESENT_UPSCALE", e, sizeof e) ? e : NULL);
+        if (v < 0) { MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx, auto or off; keeping off", e); v = UP_OFF; }
+    }
     if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("present upscaling: this GPU has no Metal 4 MetalFX spatial scaler; the present scales bilinearly"); v = UP_OFF; }
     if (v != was) MLOG("present upscaling (%s): %s", want >= 0 ? "in-game menu" : "DM_PRESENT_UPSCALE", v == UP_METALFX ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it"
          : v == UP_AUTO ? "auto, MetalFX's spatial scaler where the picture is shown larger than the game renders it and has stayed below 1920x1080 for 60 presents, else bilinear" : "off, bilinear");

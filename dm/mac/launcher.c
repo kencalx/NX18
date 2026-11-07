@@ -24,11 +24,11 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "launcher_window.h"   // dm_mac_launcher (Launcher.swift): 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
 #include "romfs_image.h"
 #include "save_sync.h"
 
 extern char **environ;
-int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
 static pid_t g_child;
 static char *g_file_keys, *g_launch_keys;   // the variables the env files set, and the settings the launch environment set (DM_ENV_FILE_KEYS, DM_ENV_LAUNCH_KEYS)
 

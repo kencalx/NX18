@@ -1,7 +1,8 @@
 // Atmosphère-format cheat codes (the dmnt cheat VM) applied to the running game: the `.txt` files that cheat sites share as
 // atmosphere/contents/<title ID>/cheats/<build ID>.txt, loaded by the first 16 hex digits (8 bytes) of the main NSO's
 // build ID (dm_main_build(), from the rewriter's fixups header). The Mac front end shows them in the window's Cheats menu
-// and panel (front_mac.m); toggles are remembered per build in <build>.enabled in the cheats folder and restored at the next launch.
+// and panel (front_mac.m), the iPhone's in-game menu in its Cheats submenu (GameMenu.swift); toggles are remembered per build
+// in <build>.enabled in the cheats folder and restored at the next launch.
 // The host applies the enabled cheats once per presented frame (hle_nvn.c dump_frame -> dm_cheats_present) and at a fixed
 // ~60 Hz from its own thread when the game is not presenting (window minimized, graphics suspended, start-up).
 // The cheat VM follows the reference implementation (Atmosphère stratosphere/dmnt/source/cheat/impl/dmnt_cheat_vm.cpp and
@@ -149,6 +150,7 @@ static int g_safe;             // safe mode: the last run ended without a clean 
 static _Atomic uint64_t g_present_ns;   // the last present: the ~60 Hz thread stands down while it is recent
 static _Atomic int g_dbg;      // DM_CHEATS_DEBUG
 static int g_any;              // DM_CHEATS_ANY_BUILD
+static _Atomic int g_ready;    // dm_cheats_init has finished: stored with release at its end, loaded with acquire by the menus' accessors (menus_ready, below)
 
 // Region 0: the guest main NSO as the loader mapped it (dm/host/loader.c map_image: text pages and the patch area
 // read+execute, data and bss read+write, the host's key page read-only at the image's end); region 1: the heap,
@@ -1933,6 +1935,7 @@ void dm_cheats_init(void) {
         if (g_main_mod) { pthread_mutex_lock(&g_lock); load_all(); pthread_mutex_unlock(&g_lock); }   // load_all maps the writable alias once a file is picked
         atexit(dm_cheats_exit);   // exit() paths (⌘Q, closing the window); dm_host_exit's _exit calls it itself
     }
+    atomic_store_explicit(&g_ready, 1, memory_order_release);   // the menus read the state from here on (the iPhone's in-game menu may be open while this runs: menus_ready)
 }
 
 // A clean exit: no cheat runs any more, so the safe-mode flag goes (atexit, and dm_host_exit before its _exit)
@@ -1944,66 +1947,73 @@ void dm_cheats_exit(void) {
     unlink(p);
 }
 
-// ---------- the Mac cheats menu and panel (callers: front_mac.m; nothing else uses these) ----------
-// Cheap accessors read straight from the shared state: the list itself is rebuilt only from the main thread (this
-// menu's own actions, and init on the Mac's main thread), and a VM pass mutates only its own cheat's dead / why / fails /
-// noted fields, the on / restore_once flags of a one-pass cheat, the never-decrease state, and (through the files queue)
-// <build>.enabled and the safe-mode flag when a one-pass cheat fired; the worst-case tear shows as one stale row in a
-// row rebuilt in that instant. Each accessor's meaning is in dm.h
+// ---------- the cheats menus: the Mac's Cheats menu and panel (front_mac.m) and the iPhone's in-game menu (GameMenu.swift) ----------
+// The menus see nothing until dm_cheats_init has finished. On the iPhone it runs on the host's preload thread (main.c host_preload, started at app launch by main.m), and the
+// in-game menu can be open before it ends (with no launcher, startGame makes the menu button as soon as the window appears) while init writes g_dir, g_build and the list. Until
+// then every accessor answers as before init (no folder and no cheats, so the in-game menu has no Cheats submenu; it builds its items again at each open, so the next open has
+// it) and the actions do nothing. g_ready is stored with release at init's end and loaded with acquire here, so a menu that sees it sees everything init wrote. On the Mac init
+// runs on the main thread before any menu exists. No accessor takes g_lock: a cheat pass only tries it (pthread_mutex_trylock), so a menu holding it would skip that pass.
+// After init the list is rebuilt only from the main thread (the menus' own actions, Reload), and a VM pass mutates only its own cheat's dead / why / fails / noted fields, the
+// on / restore_once flags of a one-pass cheat, the never-decrease state, and (through the files queue) <build>.enabled and the safe-mode flag when a one-pass cheat fired; the
+// worst-case tear shows as one stale row in a row rebuilt in that instant. A string returned points into this file's static arrays (or is ""), so it stays valid for the whole
+// run, and Reload rewrites what it holds: both menus copy the text as they build a row (NSString, String(cString:)). Each accessor's meaning is in dm.h
+static int menus_ready(void) { return atomic_load_explicit(&g_ready, memory_order_acquire); }
+static int entry_listed(int i) { return menus_ready() && i >= 0 && i < g_ncheat; }   // entry i of the loaded file
+static int other_listed(int i) { return menus_ready() && i >= 0 && i < g_nothers; }   // the i-th file of another build
 
-int dm_cheats_found(void) { return atomic_load(&g_active) || g_ncheat > 0; }   // a file, of this build or another
+int dm_cheats_found(void) { return menus_ready() && (atomic_load(&g_active) || g_ncheat > 0); }   // a file, of this build or another
 
-int dm_cheats_ncheats(void) { return g_ncheat; }
+int dm_cheats_ncheats(void) { return menus_ready() ? g_ncheat : 0; }
 
-const char *dm_cheats_build(void) { return g_build; }   // static after init
+const char *dm_cheats_build(void) { return menus_ready() ? g_build : ""; }   // static after init
 
-const char *dm_cheats_dir_path(void) { return g_dir; }   // "" when neither DM_CHEATS nor DM_ROOT is set
+const char *dm_cheats_dir_path(void) { return menus_ready() ? g_dir : ""; }   // "" when neither DM_CHEATS nor DM_ROOT is set
 
-int dm_cheats_nothers(void) { return g_nothers; }
+int dm_cheats_nothers(void) { return menus_ready() ? g_nothers : 0; }
 
-const char *dm_cheats_other(int i) { return i >= 0 && i < g_nothers ? g_others[i] : ""; }
+const char *dm_cheats_other(int i) { return other_listed(i) ? g_others[i] : ""; }
 
-const char *dm_cheats_other_version(int i) { return i >= 0 && i < g_nothers ? g_other_ver[i] : ""; }
+const char *dm_cheats_other_version(int i) { return other_listed(i) ? g_other_ver[i] : ""; }
 
-const char *dm_cheats_version(void) { return g_version; }
+const char *dm_cheats_version(void) { return menus_ready() ? g_version : ""; }
 
-const char *dm_cheat_name_at(int i) { return i >= 0 && i < g_ncheat ? g_cheat[i].name : ""; }
+const char *dm_cheat_name_at(int i) { return entry_listed(i) ? g_cheat[i].name : ""; }
 
-const char *dm_cheat_why_at(int i) { return i >= 0 && i < g_ncheat ? g_cheat[i].why : ""; }
+const char *dm_cheat_why_at(int i) { return entry_listed(i) ? g_cheat[i].why : ""; }
 
-const char *dm_cheat_section_at(int i) { return i >= 0 && i < g_ncheat ? g_cheat[i].section : ""; }
+const char *dm_cheat_section_at(int i) { return entry_listed(i) ? g_cheat[i].section : ""; }
 
-const char *dm_cheat_note_at(int i) { return i >= 0 && i < g_ncheat ? g_cheat[i].note : ""; }
+const char *dm_cheat_note_at(int i) { return entry_listed(i) ? g_cheat[i].note : ""; }
 
-const char *dm_cheat_type_at(int i) { return i >= 0 && i < g_ncheat ? g_cheat[i].type : ""; }
+const char *dm_cheat_type_at(int i) { return entry_listed(i) ? g_cheat[i].type : ""; }
 
-int dm_cheat_pair_at(int i) { return i >= 0 && i < g_ncheat ? g_cheat[i].pair : -1; }
+int dm_cheat_pair_at(int i) { return entry_listed(i) ? g_cheat[i].pair : -1; }
 
 // The row's kind, for the menu's builder: 0 = a plain cheat (click toggles), 1 = master (always on, no click),
 // 2 = broken / off (disabled), 3 = a label (credits, a section marker: no checkbox). The checkmark itself: dm_cheat_on_at
 int dm_cheat_kind_at(int i) {
-    if (i < 0 || i >= g_ncheat) return 2;
+    if (!entry_listed(i)) return 2;
     const cheat_t *c = &g_cheat[i];
     return c->label ? 3 : c->broken || c->dead ? 2 : c->master ? 1 : 0;
 }
 
 // The row's DM_CHEAT_* flags (dm.h)
 int dm_cheat_flags_at(int i) {
-    if (i < 0 || i >= g_ncheat) return 0;
+    if (!entry_listed(i)) return 0;
     const cheat_t *c = &g_cheat[i];
     return (c->label ? DM_CHEAT_LABEL : 0) | (c->sec_mark == 1 ? DM_CHEAT_SECTION_START : 0) | (c->sec_mark == 2 ? DM_CHEAT_SECTION_END : 0)
          | (c->pair >= 0 ? (c->pair_off ? DM_CHEAT_PAIR_OFF : DM_CHEAT_PAIR_ON) : 0) | (c->once ? DM_CHEAT_ONCE : 0)
          | (c->ask ? DM_CHEAT_ASK : 0) | (c->nd ? DM_CHEAT_HOST : 0) | (c->weak ? DM_CHEAT_WEAK : 0);
 }
 
-int dm_cheat_on_at(int i) { return i >= 0 && i < g_ncheat ? g_cheat[i].on != 0 : 0; }
+int dm_cheat_on_at(int i) { return entry_listed(i) ? g_cheat[i].on != 0 : 0; }
 
 // The menu's toggle: flip the cheat, save the states. A pair is one switch: turning its on half off runs the off half (the
 // restore) for one pass, turning the on half on turns the off half off, and turning the off half on turns the on half off.
 // Turning a cheat on ends safe mode (the player chose: the saved toggles come back too) and starts a never-decrease from
 // the value there now
 void dm_cheat_toggle(int i) {
-    if (i < 0 || i >= g_ncheat) return;
+    if (!entry_listed(i)) return;
     pthread_mutex_lock(&g_lock);
     cheat_t *c = &g_cheat[i];
     if (!c->master && !c->broken && !c->dead && !c->label) {
@@ -2025,6 +2035,7 @@ void dm_cheat_toggle(int i) {
 
 // "Reload cheats": re-read the file (the same path), so edits during play do not need a re-launch
 void dm_cheats_reload(void) {
+    if (!menus_ready()) return;
     pthread_mutex_lock(&g_lock);
     load_all();
     pthread_mutex_unlock(&g_lock);
@@ -2039,7 +2050,7 @@ void dm_cheats_reload(void) {
 int dm_cheat_preview(int i, char *out, size_t cap) {
     if (!out || !cap) return 0;
     out[0] = 0;
-    if (i < 0 || i >= g_ncheat) return 0;
+    if (!entry_listed(i)) return 0;
     pthread_mutex_lock(&g_lock);
     cheat_t *c = &g_cheat[i];
     g_dry_out = out; g_dry_cap = cap; g_dry_len = 0; g_dry_writes = 0;
@@ -2083,7 +2094,7 @@ int dm_cheat_preview(int i, char *out, size_t cap) {
 int dm_cheat_value_get(int i, char *out, size_t cap) {
     if (!out || !cap) return 0;
     out[0] = 0;
-    if (i < 0 || i >= g_ncheat || !g_cheat[i].ask) return 0;
+    if (!entry_listed(i) || !g_cheat[i].ask) return 0;
     pthread_mutex_lock(&g_lock);
     value_get(&g_cheat[i], out, cap);
     pthread_mutex_unlock(&g_lock);
@@ -2092,7 +2103,7 @@ int dm_cheat_value_get(int i, char *out, size_t cap) {
 
 // Set an "ask" cheat's value (text in its type, within its bounds) and remember it in <build>.values: 0 done, -1 refused
 int dm_cheat_value_set(int i, const char *text) {
-    if (i < 0 || i >= g_ncheat) return -1;
+    if (!entry_listed(i)) return -1;
     pthread_mutex_lock(&g_lock);
     int r = value_set_locked(&g_cheat[i], text);
     if (!r) values_save();
@@ -2104,7 +2115,7 @@ int dm_cheat_value_set(int i, const char *text) {
 const char *dm_cheat_value_bounds(int i) {
     static char b[64];
     b[0] = 0;
-    if (i < 0 || i >= g_ncheat || !g_cheat[i].ask) return b;
+    if (!entry_listed(i) || !g_cheat[i].ask) return b;
     const cheat_t *c = &g_cheat[i];
     char lo[24] = "", hi[24] = "";
     if (c->has_min) snprintf(lo, sizeof lo, "%g", c->vmin);
@@ -2117,6 +2128,7 @@ const char *dm_cheat_value_bounds(int i) {
 int dm_cheats_master(void) { return atomic_load(&g_master); }
 
 void dm_cheats_master_set(int on) {
+    if (!menus_ready()) return;
     pthread_mutex_lock(&g_lock);
     atomic_store(&g_master, !!on);
     if (g_dir[0]) {
@@ -2130,10 +2142,11 @@ void dm_cheats_master_set(int on) {
 }
 
 // Safe mode (the last run ended without a clean exit while cheats were on): 1 while every cheat waits for the player
-int dm_cheats_safe(void) { return g_safe; }
+int dm_cheats_safe(void) { return menus_ready() && g_safe; }
 
 // Leave safe mode: the masters run again and the saved toggles come back
 void dm_cheats_safe_restore(void) {
+    if (!menus_ready()) return;
     pthread_mutex_lock(&g_lock);
     if (g_safe) {
         g_safe = 0;
@@ -2144,14 +2157,14 @@ void dm_cheats_safe_restore(void) {
     pthread_mutex_unlock(&g_lock);
 }
 
-const char *dm_cheats_report(void) { return g_report; }
+const char *dm_cheats_report(void) { return menus_ready() ? g_report : ""; }
 
-int dm_cheats_nskipped(void) { return g_nskip; }
+int dm_cheats_nskipped(void) { return menus_ready() ? g_nskip : 0; }
 
-const char *dm_cheats_skipped_name(int i) { return i >= 0 && i < g_nskip ? g_skip_name[i] : ""; }
+const char *dm_cheats_skipped_name(int i) { return menus_ready() && i >= 0 && i < g_nskip ? g_skip_name[i] : ""; }
 
-const char *dm_cheats_skipped_why(int i) { return i >= 0 && i < g_nskip ? g_skip_why[i] : ""; }
+const char *dm_cheats_skipped_why(int i) { return menus_ready() && i >= 0 && i < g_nskip ? g_skip_why[i] : ""; }
 
-int dm_cheats_nsources(void) { return g_nsrc; }
+int dm_cheats_nsources(void) { return menus_ready() ? g_nsrc : 0; }
 
-const char *dm_cheats_source(int i) { return i >= 0 && i < g_nsrc ? g_src[i] : ""; }
+const char *dm_cheats_source(int i) { return menus_ready() && i >= 0 && i < g_nsrc ? g_src[i] : ""; }

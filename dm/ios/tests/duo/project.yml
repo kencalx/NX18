@@ -62,6 +62,7 @@ targets:
           - $(SRCROOT)/../../Sources
           - $(SRCROOT)/Sources/Fixtures
         SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/../../Sources/DmIOS-Bridging-Header.h
+        SWIFT_VERSION: "6.0"   # the app's language mode (dm/ios/project.yml), not XcodeGen's 5.0 preset: the production Swift is checked here as it ships
         CLANG_ENABLE_OBJC_ARC: YES
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: ""
@@ -87,6 +88,7 @@ targets:
           - $(SRCROOT)/Sources
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/DuoHarness.app/DuoHarness
         BUNDLE_LOADER: $(TEST_HOST)
+        SWIFT_VERSION: "6.0"   # as the app target above
         CLANG_ENABLE_OBJC_ARC: YES
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: ""

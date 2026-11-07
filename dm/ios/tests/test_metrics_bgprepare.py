@@ -1,7 +1,9 @@
 """MetricKit's reports kept in Documents/metrics (DmMetrics.m, Metrics.swift, DM_METRICS) and the prepare step's background task (front_ios.m, DM_BG_PREPARE): what can be checked off the device.
 
 The report files' names and their cap of 30 run as C (metrics_files.h) with any compiler. Metrics.swift typechecks against the iPhone SDK on a Mac with Xcode 27, and elsewhere, with a
-swiftc on PATH (or SWIFTC=), against a stand-in of MetricKit's iOS 27 Swift API written from Apple's declarations (metrics_stub/). The rest checks that the pieces agree: the Info.plist
+swiftc on PATH (or SWIFTC=; Swift 6.3 or later, for @c @implementation: an older one skips the typecheck), against a stand-in of MetricKit's iOS 27 Swift API written from Apple's
+declarations (metrics_stub/). Both read the real DmMetrics.h (-import-objc-header), whose dm_metrics_modern_start @c @implementation checks Metrics.swift's entry against; off a Mac,
+where Swift reads no Objective-C, a Swift stand-in gives the header's Objective-C dm_metrics_store (metrics_stub/bridge.swift). The rest checks that the pieces agree: the Info.plist
 identifier and the one the app registers, the framework links, the prepare step's end hook, the launch calls and the switches' defaults."""
 import os
 from pathlib import Path
@@ -103,10 +105,16 @@ def swift_command():
             return ['xcrun', '-sdk', 'iphoneos', 'swiftc', '-target', 'arm64-apple-ios27.0'], False
         return None
     sw = os.environ.get('SWIFTC') or shutil.which('swiftc')
-    return ([sw], True) if sw else None
+    if not sw: return None
+    try:
+        v = subprocess.run([sw, '--version'], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r'Swift version (\d+)\.(\d+)', v.stdout + v.stderr)
+    return ([sw], True) if m and (int(m[1]), int(m[2])) >= (6, 3) else None   # an older one does not know @c @implementation: skipped, not failed
 
 
-@unittest.skipUnless(swift_command(), 'needs the iOS 27 SDK (a Mac) or a swiftc (SWIFTC=)')
+@unittest.skipUnless(swift_command(), 'needs the iOS 27 SDK (a Mac) or a swiftc of Swift 6.3 or later (SWIFTC=), for @c @implementation')
 class MetricsSwift(unittest.TestCase):
     def test_metrics_swift_typechecks_in_swift_6(self):
         found_cmd = swift_command()
@@ -119,8 +127,9 @@ class MetricsSwift(unittest.TestCase):
                                           str(STUB / 'MetricKit.swift')], capture_output=True, text=True, timeout=300)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 extra = ['-I', t]
-            r = subprocess.run(cmd + ['-typecheck', '-swift-version', '6', '-parse-as-library', '-module-cache-path', f'{t}/mc', *extra, str(SRC / 'Metrics.swift'), str(STUB / 'bridge.swift')],
-                               capture_output=True, text=True, timeout=300)
+            bridge = [str(STUB / 'bridge.swift')] if stand_in else []   # a Mac reads dm_metrics_store from the header itself
+            r = subprocess.run(cmd + ['-typecheck', '-swift-version', '6', '-parse-as-library', '-module-cache-path', f'{t}/mc', *extra, '-import-objc-header', str(SRC / 'DmMetrics.h'),
+                                      str(SRC / 'Metrics.swift'), *bridge], capture_output=True, text=True, timeout=300)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertNotIn('error:', r.stderr)
 
