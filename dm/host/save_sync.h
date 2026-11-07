@@ -4,8 +4,14 @@
 // whole but syncs a folder file by file, and a save that is half one device's and half the other's is worse than either.
 // When: the cloud's copy comes in at the game's first save mount (hle_fs.c, before the work directory is cloned from the committed save); the committed save goes out a few
 // seconds after a Commit, on a thread of its own (the game never waits), when the iPhone app goes to the background, and from the Mac launcher once the host has exited.
-// Which way: <DM_SAVE>.sync keeps the hash of the save last known to be the same here and in the cloud. Only the cloud's changed: it comes in; only this one changed: it goes out;
-// both changed (played on both without syncing in between, or the first sync of a device that has a save of its own): the newer one wins and the other is kept.
+// Which way: <DM_SAVE>.sync keeps the hash of the save last known to be the same here and in the cloud (base), and which cloud file that was (cloud). Only the cloud's changed: it comes
+// in; only this one changed: it goes out; both changed (played on both without syncing in between, or the first sync of a device that has a save of its own): the newer one wins and
+// the other is kept. Another folder picked is a first sync with it: a base kept for another cloud file counts only when this one holds that very save (a .sync an older build wrote
+// names no cloud file, and its base counts as it did there, also for a folder picked before the game's first sync with this build). A save the first mount finds to send goes then,
+// also when it is the base, which the sender otherwise skips: the cloud has no file (a folder new to this device, or the file removed) or the folder changed. That push is kept in
+// memory, not in <DM_SAVE>.sync: it goes from that start to the cloud as the mount found it (a cloud changed meanwhile is the next start's to compare), or from the Mac launcher
+// after it when the cloud has no file, and a push that does not go out leaves the next start to decide again. A cloud file it cannot read (damaged, or a newer build's format,
+// which it cannot keep first) is replaced only by a save that differs from the base.
 // Every save this replaces, here or in the cloud, is kept first in <DM_SAVE>-backups/<date> <side>; the newest 10 of each side stay.
 #pragma once
 #include <stdint.h>

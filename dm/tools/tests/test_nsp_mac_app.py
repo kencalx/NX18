@@ -39,10 +39,10 @@ extern char **environ;
 static void term(int s) { (void)s; _exit(3); }
 int main(int argc, char **argv) {
     char p[1024]; snprintf(p, sizeof p, "%s/host_run.txt", getenv("HOME")); FILE *f = fopen(p, "w");
+    printf("standin host output\n"); fflush(stdout); fprintf(stderr, "standin host error output\n");   // while host_run.txt is open: a 1 or 2 the launcher left free is that file's
     for (char **e = environ; *e; e++) fprintf(f, "%s\n", *e);
     for (int i = 0; i < argc; i++) fprintf(f, "argv%d=%s\n", i, argv[i]);
     char cwd[1024]; fprintf(f, "cwd=%s\n", getcwd(cwd, sizeof cwd)); fclose(f);
-    printf("standin host output\n"); fflush(stdout);
     if (getenv("STANDIN_WAIT")) { signal(SIGTERM, term); for (;;) pause(); }
     return 7;
 }
@@ -466,11 +466,13 @@ class App(unittest.TestCase):
     @classmethod
     def tearDownClass(cls): shutil.rmtree(cls.tmp)
 
-    def launch(self, wait=False, app=None, args=(), **env):
+    def launch(self, wait=False, app=None, args=(), closed=None, **env):
         home = self.tmp / 'home'
         e = dict(HOME=str(home), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin', **{'DM_LAUNCHER': '0', **env})   # never the settings window in a test
         if wait: e['STANDIN_WAIT'] = '1'
-        return subprocess.Popen([(app or self.app) / 'Contents/MacOS/nxnative', *args], env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        cmd = [(app or self.app) / 'Contents/MacOS/nxnative', *args]
+        if closed is not None: cmd = ['/bin/sh', '-c', f'exec "$@" {closed}>&-', 'sh', *cmd]   # started with that descriptor closed
+        return subprocess.Popen(cmd, env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
     def host_run(self):
         out = {}
@@ -611,6 +613,20 @@ class App(unittest.TestCase):
         p = self.launch(); p.communicate(timeout=30)
         self.assertIn('standin host output', (logs / f'{TID}.prev.log').read_text())
         self.assertEqual(self.host_run()['DM_LANG'], 'fr')   # Info.plist DMLanguage
+
+    def test_launch_with_a_standard_descriptor_closed(self):
+        """Started with 2 (or 1) closed, open() gives the log that very descriptor: the launcher keeps it, so the log gets every line, its own and the host's, and the file the
+        host opens first (host_run.txt) gets none. It used to close it after the dup2s, and the next file opened took the descriptor"""
+        log, run = self.tmp / f'home/Library/Logs/nxnative/{TID}.log', self.tmp / 'home/host_run.txt'
+        for closed in (2, 1):
+            with self.subTest(closed=closed):
+                p = self.launch(closed=closed); out = p.communicate(timeout=30)[0]
+                self.assertEqual(p.returncode, 7)
+                text = log.read_text()
+                for line in (f'launcher: Game: Test ({TID}), host ', 'launcher: no settings window', 'launcher: the host exited with 7', 'standin host output', 'standin host error output'):
+                    self.assertIn(line, text)
+                self.assertNotIn('standin host', run.read_text()); self.assertNotIn('launcher:', run.read_text())
+                self.assertNotIn(b'launcher:', out)
 
     def test_sigterm(self):   # forwarded to the host, whose exit code comes back
         p = self.launch(wait=True)

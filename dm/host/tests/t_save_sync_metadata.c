@@ -1,4 +1,5 @@
-// Exercise the real metadata writer with stdio failures, without cloud or game files.
+// Exercise the real metadata writer with stdio failures, without cloud or game files; then the file's format both ways: what an older build reads of a file this one
+// writes (its reader, copied below), and what this one reads of an older build's file (no cloud line).
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -61,10 +62,24 @@ static int checks, failures;
 #define CHECK(c, label) do { checks++; if (!(c)) { failures++; fprintf(stderr, "FAIL: %s (%s)\n", name, label); } } while (0)
 static const char old_hash[] = "00000000000000000000000000000000";
 static const char new_hash[] = "123456789abcdef0123456789abcdef0";
+static const char cloud[] = "/Users/p/Library/Mobile Documents/com~apple~CloudDocs/nxnative Saves/0100ABC/save.dmsync";
+
+// The reader of the build before the cloud line (fa92bb0e save_sync.c), as it is: an older build on another device, or this one's app before an update
+static void older_build_read_base(const char *save, char *out) {   // <save>.sync: the hash of the save last known to be the same here and in the cloud ("" for none)
+    char p[PATH_MAX], ln[128]; out[0] = 0;
+    snprintf(p, sizeof p, "%s.sync", save);
+    FILE *f = fopen(p, "r"); if (!f) return;
+    while (fgets(ln, sizeof ln, f)) if (!strncmp(ln, "base\t", 5) && strspn(ln + 5, "0123456789abcdef") == SS_HASH) { memcpy(out, ln + 5, SS_HASH); out[SS_HASH] = 0; }
+    fclose(f);
+}
+static void put_sync(const char *save, const char *text) {   // a <save>.sync as another build left it
+    char path[PATH_MAX]; snprintf(path, sizeof path, "%s.sync", save);
+    FILE *f = fopen(path, "w"); if (!f || fputs(text, f) < 0 || fclose(f)) abort();
+}
 
 static void run_case(const char *save, const char *name, int open_error, int write_error,
                      int close_error, int rename_error, int expected_errno) {
-    char path[PATH_MAX], temp[PATH_MAX + 8], hash[SS_HASH + 1];
+    char path[PATH_MAX], temp[PATH_MAX + 8]; sync_state st;
     snprintf(path, sizeof path, "%s.sync", save);
     snprintf(temp, sizeof temp, "%s.tmp", path);
     FILE *f = fopen(path, "w");
@@ -72,7 +87,7 @@ static void run_case(const char *save, const char *name, int open_error, int wri
     fail_open = open_error; fail_write = write_error; fail_close = close_error; fail_rename = rename_error;
     cleanup_errno = EBUSY; // Cleanup must not replace the original diagnostic.
     closes = renames = unlinks = 0; metadata_fd = -1; metadata = NULL; diagnostic[0] = 0;
-    write_base(save, new_hash);
+    write_base(save, new_hash, cloud);
     CHECK(closes == !open_error, "every opened stream is closed exactly once");
     if (!open_error) CHECK(fcntl(metadata_fd, F_GETFD) == -1 && errno == EBADF, "file descriptor is closed");
     CHECK(renames == !(open_error || write_error || close_error), "rename only follows successful write and close");
@@ -84,8 +99,36 @@ static void run_case(const char *save, const char *name, int open_error, int wri
     CHECK(access(temp, F_OK) == -1 && errno == ENOENT, "no temporary file remains");
     // Keep the failing implementation's leaked stream from affecting later cases.
     if (metadata) { fclose(metadata); metadata = NULL; }
-    read_base(save, hash);
-    CHECK(!strcmp(hash, expected_errno ? old_hash : new_hash), "failed updates preserve previous metadata; success replaces it");
+    read_base(save, &st);
+    CHECK(!strcmp(st.base, expected_errno ? old_hash : new_hash), "failed updates preserve previous metadata; success replaces it");
+    CHECK(expected_errno ? !st.named && !st.cloud[0] : st.named && !strcmp(st.cloud, cloud), "the cloud file comes with the base, and only with a write that went through");
+}
+
+static void formats(const char *save) {
+    const char *name = "formats"; char old[SS_HASH + 1], text[3 * PATH_MAX]; sync_state st;
+    write_base(save, new_hash, cloud);
+    older_build_read_base(save, old); read_base(save, &st);
+    CHECK(!strcmp(old, new_hash), "an older build reads this one's base");
+    CHECK(!strcmp(st.base, new_hash) && st.named && !strcmp(st.cloud, cloud), "this one reads its base and cloud file back");
+    put_sync(save, "# save sync (dm/host/save_sync.h): the save last known to be the same here and in the cloud\nbase\t123456789abcdef0123456789abcdef0\n");
+    read_base(save, &st);
+    CHECK(!strcmp(st.base, new_hash) && !st.named && !st.cloud[0], "an older build's file: its base, and no cloud file named");
+    put_sync(save, "base\t123456789abcdef0123456789abcdef0\nlater\tsomething a newer build knows\ncloud\t/c/save.dmsync\n");
+    read_base(save, &st);
+    CHECK(!strcmp(st.base, new_hash) && st.named && !strcmp(st.cloud, "/c/save.dmsync"), "a line it does not know is skipped");
+    // A cloud path with a base line's text where the older reader's 127-byte pieces begin: the real base line comes after it, and the last one read is the base
+    char path[PATH_MAX]; size_t k = 0;
+    k += (size_t)snprintf(path + k, sizeof path - k, "/x");
+    while (k < 2 * 127 - 6) path[k++] = 'a';
+    path[k] = 0; snprintf(path + k, sizeof path - k, "base\t%s/save.dmsync", old_hash);
+    write_base(save, new_hash, path);
+    older_build_read_base(save, old); read_base(save, &st);
+    CHECK(!strcmp(old, new_hash), "an older build is not misled by a long cloud path");
+    CHECK(!strcmp(st.base, new_hash) && !strcmp(st.cloud, path), "this one reads the long path whole");
+    memset(text, 'p', sizeof text); memcpy(text, "cloud\t/", 7); memcpy(text + sizeof text - 50, "\nbase\t123456789abcdef0123456789abcdef0\n", 40); text[sizeof text - 10] = 0;
+    put_sync(save, text);
+    read_base(save, &st);
+    CHECK(!strcmp(st.base, new_hash) && st.named && !st.cloud[0], "a cloud line longer than any path names no cloud file this build can have");
 }
 int main(void) {
     char folder[] = "/tmp/dm-save-sync-metadata-XXXXXX", save[PATH_MAX], path[PATH_MAX];
@@ -97,6 +140,7 @@ int main(void) {
     run_case(save, "close failure", 0, 0, 1, 0, EIO);
     run_case(save, "rename failure", 0, 0, 0, 1, EROFS);
     run_case(save, "success", 0, 0, 0, 0, 0);
+    formats(save);
     snprintf(path, sizeof path, "%s.sync", save); unlink(path); rmdir(folder);
     printf("save-sync metadata: %d checks, %d failed\n", checks, failures);
     return failures != 0;

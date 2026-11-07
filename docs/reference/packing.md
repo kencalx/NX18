@@ -253,6 +253,14 @@
 - **Fix:** `finish` sets the window's `animationBehavior` to `.none` before the order-out, and `dm_mac_launcher` calls `CATransaction.flush()` after `run()` returns, before it hands back to `launcher.c`. Neither alone was enough. Check: a copy of the window with a timed Play and a `CGWindowListCopyWindowInfo` probe while the thread then blocks; the window was still listed 2 and 4 s after Play before the fix, and gone 3 times in 3 after it. `test_launcher_storage.py` and `test_nsp_mac_app.py` pass.
 - **Found on:** the Mac app of [Breath of the Wild](../../dm/games/01007EF00011E000/README.md); applies to every Mac app.
 
+### The Mac app's log lines go into another file when it starts with its error output closed
+
+- **Symptom:** a Mac app started with descriptor 2 closed (a shell's `2>&-`, a parent that closed it) logs neither the launcher's lines nor the host's error output: they are lost, or written into whichever file took descriptor 2 next (the host's first file it keeps open). With descriptor 1 closed, the host's standard output goes there instead.
+- **Cause:** `dm/mac/launcher.c` opened the log and moved it onto 1 and 2 with `dup2`, then closed it. `open` takes the lowest free descriptor, so with 2 closed the log came on 2 itself, and the `close` freed the descriptor just set up; the next file opened took it. The iPhone app's `log_open` (`dm/ios/Sources/main.m`) already moves the log onto 2 only when it is not there.
+- **Fix:** `log_open` in `launcher.c` closes the log's own descriptor only when it is above 2; one that came on 0 (the launch left 0 closed too) stays there, so 0 is not free either. A log that cannot be opened leaves 1 and 2 where the launch put them, or puts `/dev/null` on one the launch left closed, as `main.m` does. A normal start (Finder, the Dock, `open`, a terminal) has all three open and is unchanged.
+- **Found on:** reading the source (no game); applies to every Mac app.
+- **Check:** `test_nsp_mac_app.py` `App.test_launch_with_a_standard_descriptor_closed` (macOS) starts the app with 2, then 1, closed and finds every line in the log and none in the stand-in host's first file. The same with fa92bb0e's lines, on Linux with the extracted function, puts the lines into that file.
+
 ## External drives
 
 ### A game folder on an exFAT drive reads one update as two, or fails to remove a folder

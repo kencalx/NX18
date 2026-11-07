@@ -268,21 +268,36 @@ ss_way ss_decide(const char *local, const char *base, const char *remote, int64_
 }
 
 // ---------- the sync state, backups, the cloud's file ----------
-static void read_base(const char *save, char *out) {   // <save>.sync: the hash of the save last known to be the same here and in the cloud ("" for none)
-    char p[PATH_MAX], ln[128]; out[0] = 0;
+// <save>.sync: base, the hash of the save last known to be the same here and in the cloud ("" for none), and cloud, the cloud file it was the same as. named: the file has a
+// cloud line (one an older build wrote has none, and named no cloud). Lines it does not know are skipped, as an older build skips the cloud line
+typedef struct { char base[SS_HASH + 1], cloud[PATH_MAX]; int named; } sync_state;
+static void read_base(const char *save, sync_state *s) {
+    char p[PATH_MAX], ln[PATH_MAX + 16];   // the longest line write_base writes: "cloud\t", a cloud file's path (cloud_file: under PATH_MAX), "\n"
+    memset(s, 0, sizeof *s);
     snprintf(p, sizeof p, "%s.sync", save);
     FILE *f = fopen(p, "r"); if (!f) return;
-    while (fgets(ln, sizeof ln, f)) if (!strncmp(ln, "base\t", 5) && strspn(ln + 5, "0123456789abcdef") == SS_HASH) { memcpy(out, ln + 5, SS_HASH); out[SS_HASH] = 0; }
+    for (int at = 1; fgets(ln, sizeof ln, f); ) {   // at: this piece begins a line (a longer line comes in pieces)
+        size_t n = strlen(ln); int whole = n && ln[n - 1] == '\n';
+        if (whole) ln[--n] = 0;
+        if (at && !strncmp(ln, "base\t", 5) && strspn(ln + 5, "0123456789abcdef") == SS_HASH) { memcpy(s->base, ln + 5, SS_HASH); s->base[SS_HASH] = 0; }
+        else if (at && !strncmp(ln, "cloud\t", 6)) {   // one longer than any path names no cloud file this build can have
+            s->named = 1;
+            if (!(whole || feof(f)) || snprintf(s->cloud, sizeof s->cloud, "%s", ln + 6) >= (int)sizeof s->cloud) s->cloud[0] = 0;
+        }
+        at = whole;
+    }
     fclose(f);
 }
 
-static void write_base(const char *save, const char *hash) {   // written beside it and renamed over it: a cut-off write must not read as another base
+// Written beside it and renamed over it: a cut-off write must not read as another base. The cloud line comes first: an older build reads the last base line it finds, in
+// pieces of 127 bytes, so a long path is never read as the base
+static void write_base(const char *save, const char *hash, const char *cloud) {
     char p[PATH_MAX], t[PATH_MAX + 8];
     snprintf(p, sizeof p, "%s.sync", save); snprintf(t, sizeof t, "%s.tmp", p);
     FILE *f = fopen(t, "w");
     int err = f ? 0 : errno;
     if (f) {
-        if (fprintf(f, "# save sync (dm/host/save_sync.h): the save last known to be the same here and in the cloud\nbase\t%s\n", hash) < 0) err = errno;
+        if (fprintf(f, "# save sync (dm/host/save_sync.h): the save last known to be the same here and in the cloud, and that cloud's file\ncloud\t%s\nbase\t%s\n", cloud, hash) < 0) err = errno;
         // Close even after a write error, and keep that error if close or cleanup fails too.
         if (fclose(f) && !err) err = errno;
         if (!err && rename(t, p)) err = errno;
@@ -411,9 +426,12 @@ static int pull(const char *save, const char *bundle, ss_meta *r, char *kept, si
 
 // What this device committed goes to the cloud, unless the cloud already has it. A cloud save changed since this device's last sync (another device sent it) is kept first.
 // 1 = in step with the cloud, 0 = not: the cloud cannot be read or written now (the next Commit, a flush or the Mac launcher tries again)
-static int send_save(const char *save, const char *title, const char *cloud) {
-    char tmp[PATH_MAX], snap[PATH_MAX], packed[PATH_MAX], theirs[PATH_MAX], base[SS_HASH + 1], dir[PATH_MAX], kept[PATH_MAX], t[32];
-    ss_meta mine, other; int ok = 0, got;
+// The base it compares with is this device's last sync, whichever cloud file that was with: the same save again has nothing new to send, unless `seen` says it is to go
+// (another folder picked, or the cloud's file gone: mount_once, save_sync_after_exit). Then it goes only to the cloud as it was found: seen "" no file, or the hash of the
+// save there. A cloud that changed since (another device sent its save, or a file it cannot read) is the next start's to compare: nothing is sent, and that is 1 too
+static int send_save(const char *save, const char *title, const char *cloud, const char *seen) {
+    char tmp[PATH_MAX], snap[PATH_MAX], packed[PATH_MAX], theirs[PATH_MAX], dir[PATH_MAX], kept[PATH_MAX], t[32];
+    ss_meta mine, other; sync_state st; int ok = 0, got, bad, again;
     snprintf(tmp, sizeof tmp, "%s.sync-tmp/out", save); snprintf(snap, sizeof snap, "%s/s", tmp);
     snprintf(packed, sizeof packed, "%s/save.dmsync", tmp); snprintf(theirs, sizeof theirs, "%s/cloud.dmsync", tmp);
     if (rm_tree(tmp) || mkdirs(tmp)) { SRED("cannot make %s (errno=%d)", tmp, errno); goto done; }
@@ -423,19 +441,24 @@ static int send_save(const char *save, const char *title, const char *cloud) {
         if (has_entries(from) && dm_fs_clone_committed(from, to)) { SRED("cloning %s failed (errno=%d)", from, errno); goto done; }
     }
     if (ss_pack(snap, title, packed, &mine)) { SRED("packing %s failed (errno=%d)", save, errno); goto done; }
-    read_base(save, base);
-    if (!mine.files || !strcmp(mine.hash, base)) { ok = 1; goto done; }   // no save yet, or the one already in step
+    read_base(save, &st);
+    again = !strcmp(mine.hash, st.base);   // the save this device last synced
+    if (!mine.files || (again && !seen)) { ok = 1; goto done; }   // no save yet, or the one already in step
     if ((got = fetch_timed(cloud, theirs, FETCH_MS)) < 0) { SLOG("the cloud's save %s cannot be read now; sending later", cloud); goto done; }
-    if (got && ss_read(theirs, NULL, &other)) SRED("the cloud's save %s is damaged; this device's replaces it", cloud);
-    else if (got && !strcmp(other.hash, mine.hash)) { write_base(save, mine.hash); ok = 1; goto done; }
-    else if (got && other.files && strcmp(other.hash, base)) {
+    bad = got && ss_read(theirs, NULL, &other);
+    if (got && !bad && !strcmp(other.hash, mine.hash)) { write_base(save, mine.hash, cloud); ok = 1; goto done; }
+    if (again && (bad || strcmp(got ? other.hash : "", seen))) {
+        SLOG("the cloud's save %s changed meanwhile: this device's, the one it last synced, is not sent; the next start compares the two", cloud); ok = 1; goto done;
+    }
+    if (bad) SRED("the cloud's save %s is damaged; this device's replaces it", cloud);
+    else if (got && other.files && strcmp(other.hash, st.base)) {
         if (backup_dir(save, "cloud", kept, sizeof kept) || ss_read(theirs, kept, &other)) { SRED("cannot keep the cloud's save before replacing it (errno=%d); not sent", errno); goto done; }
         when(other.saved, t, sizeof t);
         SLOG("the cloud's save (from %s, saved %s) changed since this device's last sync; this device's newer one replaces it, and it is kept in %s", other.device, t, kept);
     }
     snprintf(dir, sizeof dir, "%s", cloud); *strrchr(dir, '/') = 0;
     if (mkdirs(dir) || front_save_sync_store(packed, cloud) != 1) { SRED("sending to %s failed (errno=%d)", cloud, errno); goto done; }
-    write_base(save, mine.hash); ok = 1;
+    write_base(save, mine.hash, cloud); ok = 1;
     when(mine.saved, t, sizeof t);
     SLOG("sent: %d files, saved %s, to %s", mine.files, t, cloud);
 done:
@@ -448,8 +471,9 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER, g_mount_mu = PTHREAD_MU
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic int g_on;
 static int g_mounted, g_want, g_busy, g_failed;   // the mount ran; a send asked for without a Commit (the mount found this save newer, a flush); a send running; the last one failed
+static int g_force;                               // the mount found the save its base names is to go (send_save's seen: g_seen) and it has not gone yet
 static uint64_t g_commits, g_sent;                // Commits seen; the Commits the last send covered
-static char g_save[PATH_MAX], g_title[24], g_cloud[PATH_MAX];
+static char g_save[PATH_MAX], g_title[24], g_cloud[PATH_MAX], g_seen[SS_HASH + 1];
 
 static void *sender(void *arg) {
     (void)arg;
@@ -464,42 +488,59 @@ static void *sender(void *arg) {
             seen = g_commits;
         }
         uint64_t upto = g_commits; g_want = 0; g_busy = 1;
+        const char *seen = g_force ? g_seen : NULL;
         pthread_mutex_unlock(&g_mu);
-        int ok = send_save(g_save, g_title, g_cloud);
+        int ok = send_save(g_save, g_title, g_cloud, seen);
         pthread_mutex_lock(&g_mu);
-        g_busy = 0; g_sent = upto; g_failed = !ok;
+        g_busy = 0; g_sent = upto; g_failed = !ok; if (ok) g_force = 0;
         pthread_cond_broadcast(&g_cv);
     }
     return NULL;
 }
 
 static void mount_once(const char *save, const char *title) {
-    char cloud[PATH_MAX], tmp[PATH_MAX], theirs[PATH_MAX], base[SS_HASH + 1], kept[PATH_MAX], t[32];
-    ss_meta mine, other; memset(&other, 0, sizeof other);
+    char cloud[PATH_MAX], tmp[PATH_MAX], theirs[PATH_MAX], kept[PATH_MAX], t[32];
+    ss_meta mine, other; sync_state st; memset(&other, 0, sizeof other);
     if (!cloud_file(title, cloud, sizeof cloud)) return;
     SLOG("on: %s", cloud);
     snprintf(tmp, sizeof tmp, "%s.sync-tmp", save); snprintf(theirs, sizeof theirs, "%s/in.dmsync", tmp);
     if (rm_tree(tmp) || mkdirs(tmp)) { SRED("cannot make %s (errno=%d): off", tmp, errno); return; }   // rm_tree: what an earlier session left
     if (ss_scan(save, &mine)) { SRED("this device's save %s cannot be read (errno=%d): off", save, errno); return; }
-    read_base(save, base);
-    int got = fetch_timed(cloud, theirs, FETCH_MS), both = 0, failed = 0;
-    if (got > 0 && ss_read(theirs, NULL, &other)) { SRED("the cloud's save %s is damaged: playing on with this device's, which replaces it", cloud); got = 0; }
+    read_base(save, &st);
+    int got = fetch_timed(cloud, theirs, FETCH_MS), both = 0, failed = 0, damaged = 0;
+    if (got > 0 && ss_read(theirs, NULL, &other)) { SRED("the cloud's save %s is damaged: playing on with this device's, which replaces it", cloud); got = 0; damaged = 1; }
     else if (got > 0 && strcasecmp(other.title, title)) { SRED("the cloud's save %s is %s's, not %s's: not used", cloud, other.title, title); got = -1; }
+    // The base counts for the cloud file it was recorded with (a file an older build wrote names none: it counts as it did there), and for one that holds that very save.
+    // Another folder's says nothing about this one: the first sync with it compares the two saves (the newer wins), never "only the cloud's changed"
+    const char *base = !st.named || !strcmp(st.cloud, cloud) || (got > 0 && !strcmp(other.hash, st.base)) ? st.base : "";
+    if (*st.base && !*base) SLOG("this device last synced with %s, not this folder's file: a first sync with it", *st.cloud ? st.cloud : "another cloud file");
     if (got < 0) { SLOG("playing on with this device's save; it is sent after the game saves, unless the cloud's has changed meanwhile (then that one is kept)"); failed = 1; }
     switch (got < 0 ? SS_KEEP : ss_decide(mine.hash, base, got ? other.hash : "", mine.saved, other.saved, &both)) {
     case SS_PULL:
         when(other.saved, t, sizeof t);
         if (pull(save, theirs, &other, kept, sizeof kept)) { SRED("bringing the cloud's save in failed (errno=%d): playing on with this device's", errno); failed = 1; break; }
-        write_base(save, other.hash);
-        SLOG("brought in the cloud's save (from %s, saved %s%s)%s%s", other.device, t, both ? ", the newer of two that both changed" : "", *kept ? "; this device's is kept in " : "", kept);
+        write_base(save, other.hash, cloud);
+        SLOG("brought in the cloud's save (from %s, saved %s%s)%s%s", other.device, t, !both ? "" : *base ? ", the newer of two that both changed" : ", the newer of the two",
+             *kept ? "; this device's is kept in " : "", kept);
         break;
     case SS_PUSH:
         when(mine.saved, t, sizeof t);
-        SLOG("this device's save (saved %s) %s: it goes to the cloud", t, !got ? "is not in the cloud yet" : both ? "is the newer of two that both changed" : "changed since the last sync");
+        // The sender skips the save its base names (send_save). This is that save: this start's sender sends it anyway, to the cloud as found here (no file, or the save it
+        // was compared with), so it goes now, not only once the game saves again. Only in memory: <save>.sync changes once it has gone, and a push that does not go out
+        // (the app killed, the cloud not written) leaves the next start to decide again. Not over a file it cannot read (damaged, or a newer build's format, which it
+        // could not keep first): that one is replaced only by a save that differs, as before
+        if (!strcmp(mine.hash, st.base)) {
+            if (damaged) { SLOG("this device's save (saved %s) is the one it last synced: it replaces the cloud's damaged file once the game saves", t); break; }
+            g_force = 1; snprintf(g_seen, sizeof g_seen, "%s", got ? other.hash : "");
+        }
+        // No file: a base this cloud file had says it was there once; one an older build wrote says nothing about which file had it
+        SLOG("this device's save (saved %s) %s: it goes to the cloud", t, damaged ? "replaces the cloud's damaged file"
+             : !got ? !*base ? "is not in the cloud yet" : st.named ? "is no longer in the cloud" : "is not in the cloud"
+             : !both ? "changed since the last sync" : *base ? "is the newer of two that both changed" : "is the newer of the two");
         g_want = 1;
         break;
     case SS_KEEP:
-        if (got > 0 && mine.files) { write_base(save, mine.hash); SLOG("in step with the cloud"); }
+        if (got > 0 && mine.files) { write_base(save, mine.hash, cloud); SLOG("in step with the cloud"); }
         else if (!got) SLOG("no save here or in the cloud yet");
         break;
     }
@@ -534,11 +575,21 @@ int save_sync_flush(int timeout_ms) {
     return ok;
 }
 
+// No file at the cloud path, nor the placeholder iCloud lists for one it has not downloaded (.<name>.icloud), as SaveSync.m looks: a save sent there replaces nothing
+static int no_cloud_file(const char *cloud) {
+    char ph[PATH_MAX]; struct stat st; const char *name = strrchr(cloud, '/');
+    if (!name || snprintf(ph, sizeof ph, "%.*s/.%s.icloud", (int)(name - cloud), cloud, name + 1) >= (int)sizeof ph) return 0;
+    return stat(cloud, &st) && errno == ENOENT && stat(ph, &st) && errno == ENOENT;
+}
+
 int save_sync_after_exit(const char *save, const char *title) {   // save: DM_SAVE, its trailing slashes stripped as h_fs_MountSave strips them (the same <save>.sync and <save>-backups)
     char cloud[PATH_MAX], dd[PATH_MAX];
     if (!save || !*save) return 1;
     snprintf(dd, sizeof dd, "%s", save); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;
-    return !cloud_file(title, cloud, sizeof cloud) || send_save(dd, title, cloud);
+    if (!cloud_file(title, cloud, sizeof cloud)) return 1;
+    // The host may have ended before its sender sent what its mount found to send. When that is the save its base names (another folder picked, the cloud's file
+    // removed), it goes only where it replaces nothing: a cloud with no file. Any other is the next start's to compare
+    return send_save(dd, title, cloud, no_cloud_file(cloud) ? "" : NULL);
 }
 
 // ---------- the platform's parts: these defaults are plain file copies, which the Mac's iCloud Drive takes (it downloads a file a read asks for) ----------
