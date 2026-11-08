@@ -162,6 +162,9 @@ static void *nq_worker(void *unused) {
             } else {
                 nvn_cap_present(&n->texture,n->crop);
                 present=mtl_present(&n->texture,n->period,n->crop); mtl_tex_unpin(n->texture.serial);
+                // The layer's frame history (hle_vi.c) learns this frame's ticket in the present queue only now. j->frame is dm_nvn_frame_count() before the present's dump_frame
+                // counted it, and the history numbers it after: +1. The queue's count, not mtl_present's answer, which is 0 for a snapshot; one worker presents, so it is this one's
+                { uint64_t pq,pd; mtl_present_progress(&pq,&pd); void dm_vi_frame_ticket(uint64_t,uint64_t); dm_vi_frame_ticket(j->frame+1,pq); }
             }
             DM_SP_END(DM_SP_FRAME, "replay", DM_SP_EXCL, "fence=%llu", (unsigned long long)fence);
             nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);

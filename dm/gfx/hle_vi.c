@@ -70,7 +70,10 @@ HLE_FORCE("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE", "the layer's latest
 // was presented again. FrameInfo is 40 bytes, as the SDK's ListFrameHistory (sdk 20.5.15, sdk+0x4510a0) fills it from the compositor's records: status (2 shown with a present
 // time, 1 queued and not shown yet), frame number (the numbering of GetLatestFrameNumber), the queue tick and the present tick twice; sorted by frame number, newest first.
 // A frame is shown once the present queue has handed it on (nvn_mtl.m g_pq_done) and the system did not drop it; its present time is the drawable's presented time when Metal
-// reports one, else (headless, or before the handler runs) the time it was first seen handed on.
+// reports one, else (headless, or before the handler runs) the time it was first seen handed on. Its ticket in that queue is known only once the NVN queue worker has put its
+// present there (nvn_queue.inc, NQ_PRESENT: dm_vi_frame_ticket), after the commands submitted before it; until then the entry is queued, status 1. Before the queue worker
+// (NXNative ea0c98df) the game's present call queued it itself, and the entry took the ticket then; read at the call since, it was the previous frame's ticket, so a frame was
+// reported shown with the previous one's present time before its own present was handed on, and the first frame before anything was presented.
 // Off (profile key frame_history off; DM_VI_FRAME_HISTORY=0 / 1 / queued overrides the profile any way), every call returns 0, the count query too, as the host answered before it
 // kept the history. A workaround, kept for the one game it is set for: Luigi's Mansion 3 is held to 60 fps by two overrides its own code cannot see, the frame limiter's float
 // (hle_fpslock.c) and present_interval display, which ignores the interval 2 the game sets. Given a history, its render thread's present command (main+0xb7a4b8, read in the
@@ -81,9 +84,18 @@ typedef struct { uint64_t frame, ticket, queued_ns, seen_ns; } vfh_ent;
 static vfh_ent g_vfh[VFH]; static pthread_mutex_t g_vfh_mu = PTHREAD_MUTEX_INITIALIZER;
 void mtl_present_progress(uint64_t *queued, uint64_t *done);   // nvn_mtl.m
 double mtl_presented_time(uint64_t n);                         // nvn_mtl.m: CACurrentMediaTime seconds (the now_ns clock), 0 not yet, -1 dropped by the system
+#define VFH_UNSENT UINT64_MAX   // an entry's ticket until its present is in the present queue: above every handed-on count, so it reads as queued
 void dm_vi_frame_queued(uint64_t frame) {   // hle_nvn.c, at each present the game queues: frame = GetLatestFrameNumber's count with it
-    uint64_t q, d; mtl_present_progress(&q, &d);
-    pthread_mutex_lock(&g_vfh_mu); g_vfh[frame % VFH] = (vfh_ent){frame, q, guest_ns(), 0}; pthread_mutex_unlock(&g_vfh_mu);
+    pthread_mutex_lock(&g_vfh_mu);
+    vfh_ent *e = &g_vfh[frame % VFH]; uint64_t tk = e->frame == frame ? e->ticket : VFH_UNSENT;   // the worker may have put the present in the queue already
+    *e = (vfh_ent){frame, tk, guest_ns(), 0};
+    pthread_mutex_unlock(&g_vfh_mu);
+}
+void dm_vi_frame_ticket(uint64_t frame, uint64_t ticket) {   // nvn_queue.inc, once the worker has put that frame's present in the present queue: its ticket there (g_pq_in)
+    pthread_mutex_lock(&g_vfh_mu);
+    vfh_ent *e = &g_vfh[frame % VFH];
+    if (e->frame != frame) *e = (vfh_ent){frame, ticket, 0, 0}; else e->ticket = ticket;   // before dm_vi_frame_queued: it keeps the ticket and sets the queue time
+    pthread_mutex_unlock(&g_vfh_mu);
 }
 static uint64_t vfh_ticks(uint64_t ns) { return dm_sdk_ounce() ? ns / 32 : ns * 12 / 625; }   // as guest_ticks (hle_os.c)
 // Queued (profile frame_history queued; DM_VI_FRAME_HISTORY=queued): every recorded frame is reported shown, status 2, with its queue tick and both present ticks the time it was
