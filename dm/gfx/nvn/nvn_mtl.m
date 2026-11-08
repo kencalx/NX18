@@ -15942,7 +15942,7 @@ static uint64_t snap_take(const tex_t *t) {
     // has no error handler) and every later command buffer of the process was ignored (GitHub issue #626). A commit with nothing new costs nothing
     res_commit();
     if (!g_snap_ev) {
-        g_snap_ev = [g_dev newSharedEvent];
+        g_snap_ev = [g_dev newSharedEvent]; if (!g_snap_ev) MDIE("present snapshots: no shared event");   // as the residency set and allocators below: signalEvent: needs one
         MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new]; rd.initialCapacity = SNAP_MAX; NSError *e = nil;
         g_snap_res = [g_dev newResidencySetWithDescriptor:rd error:&e]; if (!g_snap_res) MDIE("present snapshots: no residency set: %s", e.localizedDescription.UTF8String);
         [g_q4 addResidencySet:g_snap_res];

@@ -463,6 +463,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     ArchEpoch *ep0 = g_ep;
     arch_flush_wait();
     NSString *file = [@(dir) stringByAppendingPathComponent:@"00000.mtl4a"];
+    if (!file) abort();   // as the archiver folder above: the rest of the run needs the path
     EXPECT("archive file written", 1, [NSFileManager.defaultManager fileExistsAtPath:file]);
     EXPECT("the flush began a new period", 1, g_ep != ep0);
     EXPECT("nothing left to write", 0, g_arch_new);
