@@ -8,8 +8,10 @@ docs/development.md, HMMA census):
             only where hmma_msl passed the caller's one shared memory array) or through the scratch; C from an accumulator slot (FlagCSlot), zero (FlagCZero) or through the
             scratch; D left in its slot (FlagDSlot) or back through the scratch; B through the scratch always. An LDSM whose words go only to A of calls that load A themselves
             keeps its per-lane code in the Metal text, which the Metal compiler drops (the helper is inlined, its flags constants): counted apart, not as work left. A call in
-            no chain (neither CSlot nor DSlot) that comes while a chain is open in slot 0 is counted: this checkout's body works it in a pair of its own; a library whose
-            functions declare dm_acc[16] has NXNative's body, which works it in slot 0's matrices over that chain's sum ([RED], and not counted as served). A library's call of
+            no chain (neither CSlot nor DSlot) that comes while a chain is open in slot 0 is counted: the helper's body works it in matrices of its own (c0, c1: NXNative's
+            13b432b4, this checkout's since the merge of 028a2631; dm_acc[18], a pair past the slots: this checkout's before it); a library whose functions declare dm_acc[16]
+            and whose helper has no matrices of its own has the body before 13b432b4, which works it in slot 0's matrices over that chain's sum ([RED], and not counted as
+            served). A library's call of
             the translator's 19 arguments (hmma_msl did not rewrite its helper) runs the translator's own body, which reads no flag: [RED], and left out of these paths
   stage 1   an LDSM still read lane by lane whose row address each lane could compute instead of shuffling it: a function of the lane (SubgroupInvocationID, or
             LocalInvocationID.x with a local size x that is a multiple of 32) and of warp-uniform values (constants, the workgroup ID, LocalInvocationID.y / z, constant-buffer
@@ -83,7 +85,8 @@ CALL_FORMS = {
 }
 FLAG_A_REUSE, FLAG_C_SLOT, FLAG_D_SLOT, FLAG_C_ZERO, FLAG_A_DIRECT, FLAG_A_TRANS = 1, 2, 4, 8, 16, 32   # TensorPass.cs Flag*; the accumulator slot is flags >> 8
 SLOTS = 8   # TensorPass.cs Slots: accumulator slots a function; a chain that starts with all of them taken goes through the scratch
-SHARED_PAIR = 16   # the size of hmma_msl's dm_acc whose body makes a call in no chain in slot 0's matrices (NXNative's); this checkout's has a pair of its own past the slots (18)
+SHARED_PAIR = 16   # the size of hmma_msl's dm_acc whose body may make a call in no chain in slot 0's matrices: so it does unless the helper has its own C and D (OWN_CD)
+OWN_CD = re.compile(r'\bsimdgroup_half8x8\s+b0,\s*b1,\s*c0,\s*c1;')   # HMMA_BODY's own C and D since NXNative's 13b432b4: a slot is read only for a chain's C, written only for its D
 B_NOTE = "upstream left B in the scratch on purpose: in Ocarina of Time's NDVE networks, B kept as matrices slowed one shader by 13 %; not measured for NDSR"
 M32 = 0xffffffff
 SAMPLES = 4   # random sets of uniform values: buffer words of 32 random bits in the first two, of 16 (an offset in shared memory) in the others; never aligned
@@ -365,6 +368,7 @@ class Shader:
     def __init__(self, src: str, local: list[int] | None = None):
         self.local = local if isinstance(local, list) and len(local) == 3 and all(isinstance(n, int) and n > 0 for n in local) else None
         self.acc_size: int | None = None   # hmma_msl's dm_acc declared in the kernel (a library's source): which body the calls run; None in the translator's own text
+        self.own_cd = False   # the helper's body works C and D in matrices of its own (OWN_CD): a call in no chain leaves slot 0 alone, whatever dm_acc's size
         self.x_aligned = self.local is None or self.local[0] % 32 == 0   # each warp holds whole rows of x: tid.x is 32 k + lane, tid.y and tid.z the warp's
         self.defs: dict[str, Node | None] = {}   # None: unreadable, or D1 of an HMMA call
         self.types: dict[str, str] = {}
@@ -447,6 +451,7 @@ class Shader:
         depth, i = 1, m.end()
         while depth and i < len(src): depth += {'(': 1, ')': -1}.get(src[i], 0); i += 1   # the parameter list: its attributes hold brackets, not braces
         self.buffer_params = set(re.findall(r'\b(\w+)\s*\[\[buffer\(', src[m.end():i])) - {'spvDescriptorSet0'}
+        self.own_cd = bool(OWN_CD.search(src, 0, m.start()))   # the helper comes before the kernel
         for sm in STRUCT.finditer(src, 0, m.start()):   # the buffers' layouts: a constant buffer is float4 _m0[4096], a storage buffer uint _m0[]
             self.structs[sm.group(1)] = {f.group(2): QUALIFIERS.sub('', f.group(1)).strip() + '[]' * f.group(3).count('[') for f in FIELD.finditer(sm.group(2))}
         for pm in BUFFER_PARAM.finditer(src, m.end(), i): self.param_types[pm.group(2)] = QUALIFIERS.sub('', pm.group(1)).strip()
@@ -1406,9 +1411,10 @@ class Census:
             g['dropped'] = g['dropped_shuffles'] == g['shuffles']
         # The slots in text order (a chain stays in one block, and blocks are not interleaved): a DSlot call opens or keeps its slot (flags >> 8), a CSlot call without DSlot ends
         # its chain. A call with neither while slot 0 is open is in no chain (TensorPass gives slots to chains only) and comes while the first chain of its block holds its sum
-        # there: this checkout's body works it in a pair of its own; NXNative's (dm_acc[16]) works it in slot 0's matrices, over that sum, and the chain's end reads it as C
+        # there: the body since 13b432b4 works it in matrices of its own (and this checkout's before the merge in a pair past the slots, dm_acc[18]); the one before 13b432b4
+        # (dm_acc[16], no matrices of its own) works it in slot 0's matrices, over that sum, and the chain's end reads it as C
         open_slots: dict[int, int] = {}
-        self.shared_pair = self.sh.acc_size == SHARED_PAIR
+        self.shared_pair = self.sh.acc_size == SHARED_PAIR and not self.sh.own_cd
         for h in self.hmmas:
             if h['paths'] is None: continue
             f = h['flags']
@@ -1513,10 +1519,10 @@ def summary_lines(rep: dict[str, Any]) -> list[str]:
 def slot0_lines(up: dict[str, Any]) -> list[str]:
     """The calls in no chain that come while a chain is open in slot 0: a [RED] line where the body works them in slot 0's matrices"""
     if up.get('slot0_overwritten'):
-        return [f"  [RED] {up['slot0_overwritten']} calls in no chain work in slot 0's matrices while a chain keeps its sum there (NXNative's body, dm_acc[{SHARED_PAIR}]): that "
-                "chain's end reads a wrong C. Build with this checkout, whose body gives such a call a pair of its own"]
+        return [f"  [RED] {up['slot0_overwritten']} calls in no chain work in slot 0's matrices while a chain keeps its sum there (the body before NXNative's 13b432b4, dm_acc[{SHARED_PAIR}] "
+                "and no matrices of its own): that chain's end reads a wrong C. Build with this checkout, whose body gives such a call matrices of its own"]
     if up.get('in_no_chain_slot0_open'):
-        return [f"    {up['in_no_chain_slot0_open']} calls in no chain come while a chain is open in slot 0: each works in a pair of its own"]
+        return [f"    {up['in_no_chain_slot0_open']} calls in no chain come while a chain is open in slot 0: each works in matrices of its own"]
     return []
 
 

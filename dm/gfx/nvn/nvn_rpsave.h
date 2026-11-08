@@ -11,13 +11,18 @@ static inline int nvn_clear_whole(unsigned mask, unsigned fmask, int in_pass, in
     mask &= 0xf; fmask &= 0xf;
     return !in_pass && scissor_full && fmask && (mask & fmask) == fmask;
 }
-// The colour slots a draw writes, as the pipeline's write masks make them (pso_build: a slot is written when its channel mask nibble is not 0 and the fragment writes that output):
-// no fragment stage, none; outputs not known, or anything that changes them (a specialized fragment, a merged pass's map, a logic operation, a geometry, tessellation or mesh stage), every
-// slot whose nibble is not 0
-static inline uint32_t nvn_rp_wmask(uint32_t chmask, int has_fs, int color_known, uint32_t color_mask, int unknown) {
+// The colour slots a draw writes, as the pipeline's write masks make them (pso_desc: a slot is written when the fragment writes that output and its write mask, the channel mask nibble
+// less the components outside the shader's output map, is not 0): no fragment stage, none; outputs not known, or anything that changes them (a specialized fragment, a merged pass's map,
+// a logic operation, a geometry, tessellation or mesh stage), every slot whose nibble is not 0. omap: the output map (SPH word 18), 4 bits per output, used only when omap_known (a
+// library of an older chain has none, and its pipelines no component mask)
+static inline uint32_t nvn_rp_wmask(uint32_t chmask, int has_fs, int color_known, uint32_t color_mask, int omap_known, uint32_t omap, int unknown) {
     if (!has_fs) return 0;
     uint32_t out = unknown || !color_known ? 0xffu : color_mask, m = 0;
-    for (int i = 0; i < 8; i++) if ((chmask >> (4 * i) & 0xf) && (out >> i & 1)) m |= 1u << i;
+    for (int i = 0; i < 8; i++) {
+        uint32_t nib = chmask >> (4 * i) & 0xf;
+        if (!unknown && omap_known) nib &= omap >> (4 * i) & 0xf;
+        if (nib && (out >> i & 1)) m |= 1u << i;
+    }
     return m;
 }
 // The slots of cand left out of a pass whose colour slots present have level sizes w[i] x h[i] (the depth plane dw x dh when has_d): a slot whose leaving out would make the pass larger

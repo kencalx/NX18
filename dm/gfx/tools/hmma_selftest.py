@@ -13,7 +13,7 @@ ios_metal.compile (ios_metal.METAL + DEPTH, with its fallback language) for ipho
 dm/gfx/tests/test_dmsh_hmma.py runs the same kernels on the Mac's GPU with both chains' flags (the iOS ones on the macosx SDK: build_ios_on_mac), and both runs compare with one
 reference, dm/gfx/nvn/hmma_check.h. Not part of the chain version (dmsh_chain.py): it reads the chain's files and changes none of their outputs.
 Usage: hmma_selftest.py --msl [<library>]: print a kernel's Metal source (default hmma_selftest)"""
-import ast, builtins, inspect, os, re, subprocess, symtable, sys
+import ast, bisect, builtins, inspect, os, re, subprocess, symtable, sys
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -26,7 +26,7 @@ BUILD = TOOLS / 'dmsh_build.py'
 # helper hmma_msl or mac_compile starts to use comes along without a change here (split_params, block_end, HMMA_ARGS, HMMA_CALL and TG_ARRAY came with the flagged calls,
 # METAL_DEPTH with the bracket depth)
 ROOTS = ('hmma_msl', 'mac_compile', 'MAC_METAL', 'MAC_RECORD', 'HMMA_BODY')
-SCOPE = {'re': re, 'subprocess': subprocess, 'dmsh_pch': dmsh_pch}   # the modules those definitions use
+SCOPE = {'re': re, 'bisect': bisect, 'subprocess': subprocess, 'dmsh_pch': dmsh_pch}   # the modules those definitions use
 
 
 def _uses(text: str, node: ast.stmt) -> set[str]:
@@ -61,7 +61,13 @@ def _chain() -> tuple[dict[str, Any], str]:
     if unknown: raise RuntimeError(f'{BUILD}: what the HMMA body is made with uses {", ".join(sorted(unknown))}, which hmma_selftest.py does not give it')
     module = ast.Module(body=[n for n in tree.body if any(n in defs[name] for name in taken)], type_ignores=[])   # in the file's order
     scope: dict[str, Any] = dict(SCOPE)
-    exec(compile(module, str(BUILD), 'exec'), scope)
+    # dmsh_build.py finds the Mac's Metal tools once when it loads (MAC_RUN, MAC_LINK: the paths xcrun names, which save a lookup a compile). Here they are the xcrun commands
+    # MAC_RECORD names, which run the same compiler: the self-test's record is the game chain's, and the definitions load where there is no xcrun (the Linux tests)
+    run = {'MAC_RUN', 'MAC_LINK'}
+    exec(compile(ast.Module(body=[n for n in module.body if not (isinstance(n, ast.Assign) and {getattr(t, 'id', None) for t in n.targets} & run)], type_ignores=[]),
+                 str(BUILD), 'exec'), scope)
+    if 'mac_compile' in scope:
+        scope['MAC_RUN'] = list(scope['MAC_METAL']); scope['MAC_LINK'] = scope['MAC_RECORD'].split('; ', 1)[1].split()
     return scope, ast.dump(module)
 
 
@@ -129,15 +135,15 @@ A_REUSE, C_SLOT, D_SLOT, C_ZERO, A_DIRECT, A_TRANS = 1, 2, 4, 8, 16, 32
 # The flagged run: eight calls a SIMD-group in one block, with the flags TensorPass gives such calls. Each: (its A, its B, the result it adds to, its flags, its slot, the A whose
 # registers it is given). A0's tile lies in shared memory row-major, 48 bytes a row, read as an LDSM.x4's matrices (rows 0 and 8, columns 0 and 8: offsets 0, 384, 16, 400 from
 # lane 0's row); A1's lies there transposed, 32 bytes a row, as an LDSM.MT88.x4 reads it (offsets 0, 16, 256, 272). Results 0 and 1 are accumulator chains of three calls, open
-# at the same time in slots 0 and 7 (slot 0 the first chain of a block takes; slot 7 the last, which TensorPass gives the eighth chain open at once, beside the pair a call in no
-# chain works in); result 0 starts from the tile's C, result 1 from C = 0. Result 3 is one call in no chain while both are open, C from the registers (as TensorPass flags an HMMA
-# outside a chain between two calls of one), which NXNative's body made in slot 0's matrices, over result 0's running sum. Result 2 is one call with C = 0 and D to the registers,
+# at the same time in slots 0 and 7 (slot 0 the first chain of a block takes; slot 7 the last, which TensorPass gives the eighth chain open at once; a call in no chain works in
+# matrices of its own); result 0 starts from the tile's C, result 1 from C = 0. Result 3 is one call in no chain while both are open, C from the registers (as TensorPass flags an HMMA
+# outside a chain between two calls of one), which the body before NXNative's 13b432b4 made in slot 0's matrices, over result 0's running sum. Result 2 is one call with C = 0 and D to the registers,
 # after both chains end. hmma_check.h hmma_flags_calls holds (A, B, result) of each, and hmma_flags_from_c the results that start from the tile's C (FROM_C): its reference.
 CALLS = (
     (0, 0, 0, A_DIRECT | D_SLOT, 0, 1),                      # A where the LDSM read it; C from the registers; D left in slot 0
     (0, 1, 1, A_REUSE | A_DIRECT | C_ZERO | D_SLOT, 7, 1),   # A kept (TensorPass sets both when one LDSM's matrices feed both calls; kept wins); C = 0; D left in slot 7
     (0, 2, 0, A_REUSE | C_SLOT | D_SLOT, 0, 1),              # a chain's middle call: A kept, C from slot 0, D left there
-    (0, 7, 3, A_REUSE, 0, 1),                                # no chain, both open: A kept; C from the registers; D to them: result 3, in the pair of its own
+    (0, 7, 3, A_REUSE, 0, 1),                                # no chain, both open: A kept; C from the registers; D to them: result 3, in matrices of its own
     (1, 3, 1, C_SLOT | D_SLOT, 7, 1),                        # A through the scratch, from its registers; slot 7's middle call
     (1, 4, 0, A_REUSE | C_SLOT, 0, 0),                       # A kept from the scratch's; slot 0's chain ends: result 0 to the registers
     (1, 5, 1, A_DIRECT | A_TRANS | C_SLOT, 7, 0),            # A where the LDSM.MT88 read it, transposed; slot 7's chain ends: result 1

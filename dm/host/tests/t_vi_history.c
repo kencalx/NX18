@@ -98,7 +98,27 @@ int main(void) {
         }
         assert(got == 600 && wa == 0 && wb == 0 && worst == w);
     }
+    // The same present command with the history on (DM_VI_FRAME_HISTORY=1) and the host's present queue two frames behind, so the newest entry is always still queued: at the
+    // interval the window presents at in display mode (hle_nvn.c window_interval, NXNative's 028a2631), 1 at Frame rate 60, wait A runs at most interval - 1 = 0 times and wait B
+    // (interval 2 or more) not at all: no present is held. At 2 (DM_FPS_TARGET=30, or the game's own interval answered before 028a2631) wait A sleeps a 60 Hz frame at every present,
+    // on top of the frame's work: the game's own 30 fps pacing, which is why Luigi's Mansion 3's profile keeps frame_history off at Frame rate 30 (its note, Frame rate)
+    {
+        assert(decide("1") == 1);
+        for (int interval = 1; interval <= 2; interval++) {
+            int slept = 0;
+            for (int k = 0; k < 120; k++) {
+                for (int i = 0; i < interval - 1; i++) {   // wait A
+                    if (h_vi_FrameHist(fi, 1, NULL) != 1 || fi[0][0] != 1) break;
+                    slept++; g_gns += 16666667; g_hns += 16666667;
+                }
+                present(); g_done = g_in - 2;   // handed on two frames behind
+                g_gns += 16666667; g_hns += 16666667;
+            }
+            assert(interval == 1 ? slept == 0 : slept == 120);
+        }
+    }
     puts("vi frame history: count query 8, newest first, shown once handed on, presented or first-seen tick, dropped and queued frames not shown; off: 0 for every call, nothing written; "
-         "DM_VI_FRAME_HISTORY overrides the profile both ways; window counts; queued: every frame shown at its queue tick, LM3's waits A and B do not hold a present");
+         "DM_VI_FRAME_HISTORY overrides the profile both ways; window counts; queued: every frame shown at its queue tick, LM3's waits A and B do not hold a present; on: at interval 1 "
+         "wait A never sleeps, at 2 it sleeps a frame at every present");
     return 0;
 }

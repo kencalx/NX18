@@ -21,12 +21,15 @@ int main(void) {
     t("neg: unknown format", 0, nvn_clear_whole(0xf, 0x0, 0, 1));
     t("A8 cleared with mask 0x8 is whole", 1, nvn_clear_whole(0x8, 0x8, 0, 1));
     // the slots a draw writes
-    t("p103: full masks, the fragment writes output 0 only", 0x1, nvn_rp_wmask(0xffffffffu, 1, 1, 0x1, 0));
-    t("outputs 0 and 2, slot 2's channel mask 0", 0x1, nvn_rp_wmask(0xfffff0ffu, 1, 1, 0x5, 0));
-    t("outputs not known: every slot with channels (slot 1 has none)", 0xfd, nvn_rp_wmask(0xffffff0fu, 1, 0, 0x1, 0));
-    t("a logic operation or specialized fragment: every slot with channels", 0xff, nvn_rp_wmask(0xffffffffu, 1, 1, 0x1, 1));
-    t("no fragment stage writes no colour", 0, nvn_rp_wmask(0xffffffffu, 0, 1, 0xff, 1));
-    t("BotW's G-buffer: mask 0x00f0f0ff (c2 and c4 zero), outputs 0-4", 0xb, nvn_rp_wmask(0x00f0f0ffu, 1, 1, 0x1f, 0));
+    t("p103: full masks, the fragment writes output 0 only", 0x1, nvn_rp_wmask(0xffffffffu, 1, 1, 0x1, 0, 0, 0));
+    t("outputs 0 and 2, slot 2's channel mask 0", 0x1, nvn_rp_wmask(0xfffff0ffu, 1, 1, 0x5, 0, 0, 0));
+    t("outputs not known: every slot with channels (slot 1 has none)", 0xfd, nvn_rp_wmask(0xffffff0fu, 1, 0, 0x1, 0, 0, 0));
+    t("a logic operation or specialized fragment: every slot with channels", 0xff, nvn_rp_wmask(0xffffffffu, 1, 1, 0x1, 0, 0, 1));
+    t("no fragment stage writes no colour", 0, nvn_rp_wmask(0xffffffffu, 0, 1, 0xff, 0, 0, 1));
+    t("BotW's G-buffer: mask 0x00f0f0ff (c2 and c4 zero), outputs 0-4", 0xb, nvn_rp_wmask(0x00f0f0ffu, 1, 1, 0x1f, 0, 0, 0));
+    t("the output map: output 1 maps no component, output 2 only R with its channel mask on G B A", 0x1, nvn_rp_wmask(0xfffffeffu, 1, 1, 0x7, 1, 0x0000010fu, 0));
+    t("the output map not known (an older chain's library): as without it", 0x7, nvn_rp_wmask(0xfffffeffu, 1, 1, 0x7, 0, 0x0000010fu, 0));
+    t("the output map with a logic operation or specialized fragment: every slot with channels", 0xff, nvn_rp_wmask(0xffffffffu, 1, 1, 0x7, 1, 0, 1));
     // DM_NVN_OMIT_UNWRITTEN
     { unsigned long w[8] = {1920, 1920, 1920}, h[8] = {1080, 1080, 1080};
       t("p103: slots 1 and 2 left out, slot 0 stays", 0x6, nvn_rp_omit(0x6, 0x7, w, h, 0, 0, 0));

@@ -45,6 +45,8 @@ Every 3D target is 768x432 from the first frame of the title to the tutorial: Me
 - [NVN2 compute's separate handles in c\[0\]](../../../docs/reference/shaders.md#nvn2-computes-separate-handles-in-c0): `1002069a331ceded`, dispatched in the prologue.
 - [Ampere BMSK and the read of a covered pixel](../../../docs/reference/shaders.md#ampere-bmsk-and-the-read-of-a-covered-pixel): the last 3 shaders, `58046f286de779e1`, `46040940ce0fd49b` and `826168691af2e211`, none asked for in play so far.
 - [The largest block of address space a device reserves](../../../docs/reference/memory.md#the-largest-block-of-address-space-a-device-reserves): its 21.25 GB guest block (the layout of [Splatoon Raiders](../0400380020056000/README.md), whose 16 GB alias region is over iOS's limit) is one of those the iOS app's boot line checks. **Open:** whether an iPhone 18 Pro Max or an iPad Pro (M4) reserves it, and then whether the game fits in the rest.
+- [Compute pipelines compiled at first use](../../../docs/reference/shaders.md#compute-pipelines-compiled-at-first-use): 233 compute pipelines in the app's archive, none built at the title.
+- [Compute pipelines outside the bundled archive built at every start](../../../docs/reference/shaders.md#compute-pipelines-outside-the-bundled-archive-built-at-every-start): the second headless start took its 8 from the device's archive.
 
 ## Open
 

@@ -80,7 +80,7 @@ RX = {k: re.compile(v) for k, v in {
     'archive': r'^\[nvn-mtl\] pipeline archive .*: (\d+) files \((\d+) of bases without a vertex layout\), ([\d.]+) MB, opened in ([\d.]+) ms',
     'bundled': r'^\[nvn-mtl\] pipeline archive bundled with the app: .*, ([\d.]+) MB, opened in ([\d.]+) ms',
     'bundle_out': r'^\[nvn-mtl\] (?:\[RED\] )?pipeline archive bundled with the app: (?:.* is left out|none for this GPU|this system cannot open)',
-    'written': r'^\[nvn-mtl\] pipeline archive: (\d+) new pipeline bases written to \S+ \(([\d.]+) MB, (\d+) ms\)',
+    'written': r'^\[nvn-mtl\] pipeline archive: (\d+) new pipeline bases(?: and \d+ compute pipelines)? written to \S+ \(([\d.]+) MB, (\d+) ms\)',   # the compute part since NXNative's 30fb2136
     'prepare': r'^\[nvn-mtl\] pipeline prepare: (\d+) lines .*?progress screen (shown|not shown); bases (\d+) compiled, (\d+) from the archive, (\d+) reused',
     'link': r'^\[nvn-mtl\] display link up to tick (\d+): ticks \d+, presents (\d+), empty ticks (\d+) .*?merging (\d+); submission ahead of target display p50 ([\d.]+) ms / min ([\d.]+) ms; '
             r'game enqueue to target display p50 ([\d.]+) ms / min ([\d.]+) / max ([\d.]+) ms',

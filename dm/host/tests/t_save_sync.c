@@ -3,11 +3,13 @@
 // in its save, its backups and the cloud. All expected values are written by hand from the semantics in save_sync.h:
 //   (1) packing: a save with folders, a guest name and a device save comes back the same (contents, guest name, dates); the hash ignores dates and .DS_Store and sees contents;
 //       a file cut short, a flipped byte, a byte too many and a path out of the save are refused
-//   (2) ss_decide's table
+//   (2) ss_decide's table: both changed, the newer one wins; with a front end that asks, it asks, whatever the times say
 //   (3) Mac A has a save and the cloud none: A's session sends it; iPhone B has none: B's session brings it in; B saves: the cloud has B's
 //   (4) A starts again: only the cloud's changed: it comes in, and A's old save is kept in A's backups ("local")
-//   (5) both changed, the cloud's newer: B played without sync, A sent a newer save; B starts with sync: A's comes in, B's is kept
-//   (6) both changed, this one newer: A played without sync later than B sent; A starts with sync: A's goes out, B's is kept in A's backups ("cloud")
+//   (5) both changed, the cloud's newer, with a front end that asks (DM_SAVE_SYNC_CHOICE): B played without sync, A sent a newer save; B starts with sync and no
+//       choice yet ("ask"): neither replaces the other; with the player's choice of the cloud's: A's comes in, B's is kept
+//   (6) both changed, this one newer, with a front end that asks: A played without sync later than B sent; A starts with no choice yet, then with a choice made on
+//       another cloud save: nothing is replaced; with the player's choice of this one: A's goes out, B's is kept in A's backups ("cloud")
 //   (7) the Mac launcher's send after the host exited: a save the host committed and did not send goes out
 //   (8) the game's own folder (<folder>/<title ID>) chosen as the folder
 //   (9) a new backup removes the oldest of its side beyond 10, and leaves the other side's and the player's own folders
@@ -22,6 +24,15 @@
 //   (18) a cloud file it cannot read (a newer build's format) and the save last in step: neither the start nor the Mac launcher replaces it
 //   (19) the save last in step with another folder, its push not gone out at the start: a flush later sends it to the cloud as the mount found it, and only so; another
 //        device's save sent there meanwhile stays (that flush; the Mac launcher, or the flush, after a start that cannot read the cloud), and the next start compares the two
+//   (20) the cloud cannot be read at the start (a download that does not come in time), and can when the game saves: the cloud's changed save is not replaced,
+//        neither by the sender nor by the Mac launcher after the host; the player's "offline" choice with the cloud unreadable all along sends nothing
+//   (21) the first play on a new Mac, the cloud's save not read at the start: the new save does not replace the cloud's progress; the next start, with a front end
+//        that asks, asks; the player's choice of the cloud's brings it in and keeps the new one
+//   (22) a damaged file in the cloud: no save to lose, this device's replaces it and the file is kept in the backups ("cloud")
+//   (23) no front end asks: both changed, the newer one wins at the start (the cloud's: it comes in, this one is kept); the cloud not read at the start and this
+//        device's save newer: not sent that session, the next start sends it and keeps the cloud's in the backups ("cloud")
+//   (24) a front end that asks (DM_SAVE_SYNC_CHOICE=ask) after another folder was picked: it reads only the base line, so its "ask" was for the other folder's base;
+//        the first sync with the new folder compares the two as without it (the newer wins, the other is kept), not "both changed, ask" at every start
 #include "../hle_fs.c"
 #include <ctype.h>
 #include <sys/wait.h>
@@ -87,21 +98,43 @@ static const char *g_log;   // set: a session's stderr (the save sync's lines) g
 static void pass_on(const char *p) {   // and then on to this one's stderr, where a sanitizer build's reports are read
     static char b[1 << 16]; FILE *f = fopen(p, "r"); if (!f) return; size_t k = fread(b, 1, sizeof b, f); fclose(f); fwrite(b, 1, k, stderr);
 }
+enum { NOT_SENT = 64 };   // run(): the flush did not leave the save in step with the cloud
+enum { READABLE, LATE, UNREADABLE };   // run(): the cloud's file all along, only after the save mount (a download that did not come in time), never
 // One start of the game on a device: the save mount (the cloud's save comes in), then, with a file, the game writing it and committing, then a flush (the iPhone app
-// going to the background). cloud NULL: sync off. Returns the child's failed steps
-static int session(const char *save, const char *cloud, const char *file, const char *value) {
+// going to the background). cloud NULL: sync off; choice: DM_SAVE_SYNC_CHOICE; cf: the cloud's file, made unreadable as `reach` says.
+// Returns the child's failed steps, plus NOT_SENT when the flush did not leave the save in step with the cloud
+static int run(const char *save, const char *cloud, const char *file, const char *value, const char *choice, const char *cf, int reach) {
     fflush(stdout); fflush(stderr);
+    if (reach != READABLE) chmod(cf, 0);
     pid_t p = fork();
     if (!p) {
         if (g_log) { int fd = open(g_log, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd >= 0 && fd != STDERR_FILENO) { dup2(fd, STDERR_FILENO); close(fd); } }
         setenv("DM_SAVE", save, 1);
         if (cloud) setenv("DM_SAVE_SYNC", cloud, 1); else unsetenv("DM_SAVE_SYNC");
+        if (choice) setenv("DM_SAVE_SYNC_CHOICE", choice, 1); else unsetenv("DM_SAVE_SYNC_CHOICE");
         int bad = h_fs_MountSave("save", NULL) != RES_OK;
+        if (reach == LATE) chmod(cf, 0644);
         if (file) { char gp[256]; snprintf(gp, sizeof gp, "save:/%s", file); bad += write_save(gp, value) != RES_OK; bad += h_fs_Commit("save") != RES_OK; }
-        if (cloud) bad += save_sync_flush(10000) != 1;
+        if (cloud && save_sync_flush(10000) != 1) bad += NOT_SENT;
         fflush(stdout); fflush(stderr); _exit(bad);
     }
-    int st; waitpid(p, &st, 0); return WIFEXITED(st) ? WEXITSTATUS(st) : 99;
+    int st; waitpid(p, &st, 0);
+    if (reach != READABLE) chmod(cf, 0644);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 99;
+}
+static int session(const char *save, const char *cloud, const char *file, const char *value) { return run(save, cloud, file, value, NULL, NULL, READABLE); }
+// DM_SAVE_SYNC_CHOICE for the cloud's save as it is now: "<side>:<its hash>"
+static const char *choice_of(const char *side, const char *cf) {
+    static char c[64]; ss_meta m;
+    if (ss_read(cf, NULL, &m)) snprintf(c, sizeof c, "%s:none", side); else snprintf(c, sizeof c, "%s:%s", side, m.hash);
+    return c;
+}
+static int backups(const char *save, const char *side) {   // how many backups of that side
+    char dir[1200]; snprintf(dir, sizeof dir, "%s-backups", save);
+    int k = 0; DIR *d = opendir(dir); struct dirent *e; size_t sl = strlen(side);
+    while (d && (e = readdir(d))) { size_t l = strlen(e->d_name); k += l > sl && e->d_name[l - sl - 1] == ' ' && !strcmp(e->d_name + l - sl, side); }
+    if (d) closedir(d);
+    return k;
 }
 // A start that ends right after the save mount (a crash, a quit before the game saves): the sender may not have sent yet
 static int mount_only(const char *save, const char *cloud) {
@@ -192,16 +225,20 @@ int main(void) {
 
     printf("(2) which way\n");
     int both;
-    CHECK(ss_decide("", "", "", 0, 0, &both) == SS_KEEP && !both, "no save anywhere: keep");
-    CHECK(ss_decide("L", "", "", 0, 0, &both) == SS_PUSH && !both, "nothing in the cloud: send");
-    CHECK(ss_decide("", "", "R", 0, 0, &both) == SS_PULL && !both, "nothing here: bring in");
-    CHECK(ss_decide("X", "B", "X", 0, 0, &both) == SS_KEEP && !both, "the same here and in the cloud: keep");
-    CHECK(ss_decide("B", "B", "R", 9, 1, &both) == SS_PULL && !both, "only the cloud's changed: bring in, even with an older date");
-    CHECK(ss_decide("L", "B", "B", 1, 9, &both) == SS_PUSH && !both, "only this one changed: send, even with an older date");
-    CHECK(ss_decide("L", "B", "R", 10, 20, &both) == SS_PULL && both, "both changed, the cloud's newer: bring in");
-    CHECK(ss_decide("L", "B", "R", 20, 10, &both) == SS_PUSH && both, "both changed, this one newer: send");
-    CHECK(ss_decide("L", "", "R", 20, 10, &both) == SS_PUSH && both, "a first sync with a save of its own counts as both changed");
-    CHECK(ss_decide("L", "B", "R", 10, 10, &both) == SS_PUSH && both, "the same date: this device's is kept");
+    CHECK(ss_decide("", "", "", 0, 0, 0, &both) == SS_KEEP && !both, "no save anywhere: keep");
+    CHECK(ss_decide("L", "", "", 0, 0, 0, &both) == SS_PUSH && !both, "nothing in the cloud: send");
+    CHECK(ss_decide("", "", "R", 0, 0, 0, &both) == SS_PULL && !both, "nothing here: bring in");
+    CHECK(ss_decide("X", "B", "X", 0, 0, 0, &both) == SS_KEEP && !both, "the same here and in the cloud: keep");
+    CHECK(ss_decide("B", "B", "R", 9, 1, 0, &both) == SS_PULL && !both, "only the cloud's changed: bring in, even with an older date");
+    CHECK(ss_decide("L", "B", "B", 1, 9, 0, &both) == SS_PUSH && !both, "only this one changed: send, even with an older date");
+    CHECK(ss_decide("L", "B", "R", 10, 20, 0, &both) == SS_PULL && both, "both changed, the cloud's newer: bring in");
+    CHECK(ss_decide("L", "B", "R", 20, 10, 0, &both) == SS_PUSH && both, "both changed, this one newer: send");
+    CHECK(ss_decide("L", "", "R", 20, 10, 0, &both) == SS_PUSH && both, "a first sync with a save of its own counts as both changed");
+    CHECK(ss_decide("L", "B", "R", 10, 10, 0, &both) == SS_PUSH && both, "the same date: this device's is kept");
+    CHECK(ss_decide("L", "B", "R", 10, 20, 1, &both) == SS_ASK && both, "a front end asks: both changed, the cloud's newer: ask");
+    CHECK(ss_decide("L", "B", "R", 20, 10, 1, &both) == SS_ASK && both, "a front end asks: both changed, this one newer: ask");
+    CHECK(ss_decide("L", "", "R", 20, 10, 1, &both) == SS_ASK && both, "a front end asks: a first sync with a save of its own: ask");
+    CHECK(ss_decide("B", "B", "R", 9, 1, 1, &both) == SS_PULL && !both, "a front end asks: only the cloud's changed still comes in");
 
     char A[1200], B[1200], cloud[1200], cf[1400], id[24], back[1400];
     snprintf(A, sizeof A, "%s/mac/save", root); snprintf(B, sizeof B, "%s/iphone/save", root); snprintf(cloud, sizeof cloud, "%s/iCloud Drive/nxnative Saves", root);
@@ -230,7 +267,9 @@ int main(void) {
     CHECK(session(B, NULL, "game.dat", "v4") == 0 && same(p, "v4"), "the iPhone plays with sync off");
     set_mtime(p, time(NULL) - 100);
     CHECK(session(A, cloud, "game.dat", "v5") == 0 && cloud_has(cf, root, "game.dat", "v5"), "then the Mac saves and sends");
-    CHECK(session(B, cloud, NULL, NULL) == 0 && same(p, "v5"), "the iPhone starts with sync: the newer Mac save comes in");
+    CHECK(run(B, cloud, NULL, NULL, "ask", NULL, READABLE) == NOT_SENT && same(p, "v4") && cloud_has(cf, root, "game.dat", "v5") && !backups(B, "local") && !backups(B, "cloud"),
+          "the iPhone starts with sync and no choice yet: it plays with its own, nothing is sent, the newer Mac save stays in the cloud");
+    CHECK(run(B, cloud, NULL, NULL, choice_of("cloud", cf), NULL, READABLE) == 0 && same(p, "v5"), "the player chooses the cloud's: the Mac save comes in");
     backup_of(B, "local", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
     CHECK(*back && same(q, "v4"), "the iPhone's own is kept (%s)", back);
 
@@ -239,9 +278,16 @@ int main(void) {
     CHECK(session(A, NULL, "game.dat", "v6") == 0, "the Mac plays with sync off");
     set_mtime(p, time(NULL) + 100);
     CHECK(session(B, cloud, "game.dat", "v7") == 0 && cloud_has(cf, root, "game.dat", "v7"), "the iPhone saves and sends");
-    CHECK(session(A, cloud, NULL, NULL) == 0 && same(p, "v6") && cloud_has(cf, root, "game.dat", "v6"), "the Mac starts with sync: its newer save stays and goes out");
+    char old_choice[64]; snprintf(old_choice, sizeof old_choice, "%s", choice_of("local", cf));
+    CHECK(run(A, cloud, NULL, NULL, "ask", NULL, READABLE) == NOT_SENT && same(p, "v6") && cloud_has(cf, root, "game.dat", "v7") && !backups(A, "cloud"),
+          "the Mac starts with sync and no choice yet: its newer save stays here and is not sent, the iPhone's stays in the cloud");
+    CHECK(session(B, cloud, "game.dat", "v7b") == 0 && cloud_has(cf, root, "game.dat", "v7b"), "the iPhone saves again");
+    CHECK(run(A, cloud, NULL, NULL, old_choice, NULL, READABLE) == NOT_SENT && same(p, "v6") && cloud_has(cf, root, "game.dat", "v7b"),
+          "a choice made on the cloud's save before that one replaces nothing");
+    CHECK(run(A, cloud, NULL, NULL, choice_of("local", cf), NULL, READABLE) == 0 && same(p, "v6") && cloud_has(cf, root, "game.dat", "v6"),
+          "the player chooses this one: it goes out");
     backup_of(A, "cloud", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
-    CHECK(*back && same(q, "v7"), "the iPhone's save it replaced in the cloud is kept on the Mac (%s)", back);
+    CHECK(*back && same(q, "v7b"), "the iPhone's save it replaced in the cloud is kept on the Mac (%s)", back);
 
     printf("(7) the Mac launcher after the host\n");
     snprintf(p, sizeof p, "%s/game.dat", A); put(p, "v8");
@@ -404,6 +450,76 @@ int main(void) {
     snprintf(p, sizeof p, "%s/game.dat", C); set_mtime(p, time(NULL) - 100000);
     CHECK(session(C, F8, NULL, NULL) == 0 && same(p, "v20"), "a start that reads the cloud compares the two: the iPad's newer save comes in");
     CHECK(kept(C, "local", "game.dat", "v17"), "and the Mac's is kept in its backups");
+
+    printf("(20) the cloud cannot be read at the start\n");
+    char M[1200], N[1200], P2[1200], cloudG2[1200], cg2[1400];
+    snprintf(M, sizeof M, "%s/mac3/save", root); snprintf(N, sizeof N, "%s/mac4/save", root); snprintf(P2, sizeof P2, "%s/iphone2/save", root);
+    snprintf(cloudG2, sizeof cloudG2, "%s/iCloud Drive/Other Saves", root); mkd(M); mkd(N); mkd(P2); mkd(cloudG2);
+    snprintf(cg2, sizeof cg2, "%s/%s/save.dmsync", cloudG2, id);
+    snprintf(p, sizeof p, "%s/game.dat", M); put(p, "m1");
+    CHECK(session(M, cloudG2, NULL, NULL) == 0 && session(P2, cloudG2, "game.dat", "p1") == 0 && cloud_has(cg2, root, "game.dat", "p1"), "the Mac sends m1, the iPhone brings it in and sends p1");
+    CHECK(run(M, cloudG2, "game.dat", "m2", NULL, cg2, LATE) == NOT_SENT && same(p, "m2") && cloud_has(cg2, root, "game.dat", "p1") && !backups(M, "cloud"),
+          "the Mac starts before the cloud's save can be read and saves m2: the iPhone's p1 stays in the cloud, nothing is moved into the Mac's backups");
+    setenv("DM_SAVE_SYNC", cloudG2, 1);
+    CHECK(save_sync_after_exit(M, DM_GAME_ID) == 0 && cloud_has(cg2, root, "game.dat", "p1"), "nor does the Mac launcher's send after the host replace it");
+    unsetenv("DM_SAVE_SYNC");
+    CHECK(run(M, cloudG2, "game.dat", "m3", "offline", cg2, UNREADABLE) == NOT_SENT && same(p, "m3") && cloud_has(cg2, root, "game.dat", "p1"),
+          "the player plays offline with the cloud unreadable all along: m3 is played, nothing is sent");
+    CHECK(run(M, cloudG2, NULL, NULL, choice_of("cloud", cg2), NULL, READABLE) == 0 && same(p, "p1"), "with the cloud back, the player chooses the iPhone's: it comes in");
+    backup_of(M, "local", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
+    CHECK(*back && same(q, "m3"), "and the Mac's m3 is kept (%s)", back);
+
+    printf("(21) the first play on a new Mac\n");
+    snprintf(p, sizeof p, "%s/game.dat", N);
+    CHECK(run(N, cloudG2, "game.dat", "n1", NULL, cg2, LATE) == NOT_SENT && same(p, "n1") && cloud_has(cg2, root, "game.dat", "p1"),
+          "the new Mac starts before the cloud's save can be read and the game makes a new save: the cloud's progress stays");
+    CHECK(run(N, cloudG2, NULL, NULL, "ask", NULL, READABLE) == NOT_SENT && same(p, "n1") && cloud_has(cg2, root, "game.dat", "p1"), "its next start, with no choice yet, replaces nothing");
+    CHECK(run(N, cloudG2, NULL, NULL, choice_of("cloud", cg2), NULL, READABLE) == 0 && same(p, "p1"), "the player chooses the cloud's: it comes in");
+    backup_of(N, "local", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
+    CHECK(*back && same(q, "n1"), "and the new save is kept (%s)", back);
+    CHECK(session(N, cloudG2, "game.dat", "n2") == 0 && cloud_has(cg2, root, "game.dat", "n2"), "from then on its saves go out");
+
+    printf("(22) a damaged file in the cloud\n");
+    put(cg2, "DMSYNC1\nnot a save");
+    CHECK(session(N, cloudG2, "game.dat", "n3") == 0 && cloud_has(cg2, root, "game.dat", "n3"), "this device's save replaces it");
+    backup_of(N, "cloud", back, sizeof back); snprintf(q, sizeof q, "%s/save.dmsync", back);
+    CHECK(*back && same(q, "DMSYNC1\nnot a save"), "the damaged file is kept (%s)", back);
+
+    printf("(23) no front end asks: the newer one wins\n");
+    char X[1200], Y[1200], cloudG3[1200], cg3[1400];
+    snprintf(X, sizeof X, "%s/mac5/save", root); snprintf(Y, sizeof Y, "%s/iphone3/save", root); snprintf(cloudG3, sizeof cloudG3, "%s/iCloud Drive/Third Saves", root);
+    mkd(X); mkd(Y); mkd(cloudG3); snprintf(cg3, sizeof cg3, "%s/%s/save.dmsync", cloudG3, id);
+    snprintf(p, sizeof p, "%s/game.dat", X);
+    CHECK(session(Y, cloudG3, "game.dat", "y1") == 0 && session(X, cloudG3, NULL, NULL) == 0 && same(p, "y1"), "the iPhone sends y1, the Mac brings it in");
+    CHECK(session(X, NULL, "game.dat", "x1") == 0, "the Mac plays with sync off");
+    set_mtime(p, time(NULL) - 100);
+    CHECK(session(Y, cloudG3, "game.dat", "y2") == 0 && cloud_has(cg3, root, "game.dat", "y2"), "the iPhone saves and sends a newer save");
+    CHECK(session(X, cloudG3, NULL, NULL) == 0 && same(p, "y2"), "the Mac starts with sync: the iPhone's newer save comes in");
+    backup_of(X, "local", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
+    CHECK(*back && same(q, "x1"), "and the Mac's own is kept (%s)", back);
+    CHECK(session(Y, cloudG3, "game.dat", "y3") == 0 && cloud_has(cg3, root, "game.dat", "y3"), "the iPhone saves again");
+    CHECK(run(X, cloudG3, "game.dat", "x2", NULL, cg3, LATE) == NOT_SENT && same(p, "x2") && cloud_has(cg3, root, "game.dat", "y3") && !backups(X, "cloud"),
+          "the Mac starts before the cloud's save can be read and saves x2: not sent that session");
+    CHECK(session(X, cloudG3, NULL, NULL) == 0 && same(p, "x2") && cloud_has(cg3, root, "game.dat", "x2"), "its next start finds its save the newer one: it goes out");
+    backup_of(X, "cloud", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
+    CHECK(*back && same(q, "y3"), "and the iPhone's save it replaced is kept on the Mac (%s)", back);
+
+    printf("(24) a front end's \"ask\" after another folder was picked\n");
+    char K[1200], L[1200], H1[1200], H2[1200], ch1[1400], ch2[1400], logk[1400];
+    snprintf(K, sizeof K, "%s/mac6/save", root); snprintf(L, sizeof L, "%s/iphone4/save", root); mkd(K); mkd(L);
+    snprintf(H1, sizeof H1, "%s/iCloud Drive/Fourth Saves", root); snprintf(H2, sizeof H2, "%s/iCloud Drive/Fifth Saves", root); mkd(H1); mkd(H2);
+    snprintf(ch1, sizeof ch1, "%s/%s/save.dmsync", H1, id); snprintf(ch2, sizeof ch2, "%s/%s/save.dmsync", H2, id); snprintf(logk, sizeof logk, "%s/ask.log", root);
+    snprintf(p, sizeof p, "%s/game.dat", L); put(p, "l1"); set_mtime(p, time(NULL) - 1000);
+    CHECK(session(L, H2, NULL, NULL) == 0 && cloud_has(ch2, root, "game.dat", "l1"), "an iPhone sends an older save to a folder");
+    snprintf(p, sizeof p, "%s/game.dat", K); put(p, "k1");
+    CHECK(session(K, H1, NULL, NULL) == 0 && cloud_has(ch1, root, "game.dat", "k1"), "the Mac is in step with another folder");
+    g_log = logk;
+    CHECK(run(K, H2, NULL, NULL, "ask", NULL, READABLE) == 0 && same(p, "k1") && cloud_has(ch2, root, "game.dat", "k1"),
+          "the Mac picks the iPhone's folder, its front end saying \"ask\": the Mac's newer save goes out at that start, not held back");
+    g_log = NULL;
+    CHECK(kept(K, "cloud", "game.dat", "l1"), "and the iPhone's save it replaced is kept on the Mac");
+    CHECK(count_in(logk, "was for the base of another cloud file") == 1 && count_in(logk, "neither replaces the other") == 0, "the log says why it did not ask");
+    pass_on(logk);
 
     printf("== save sync: %d checks, %d failed ==\n", checks, fails);
     if (!fails) { char c[1200]; snprintf(c, sizeof c, "rm -rf '%s'", root); system(c); }

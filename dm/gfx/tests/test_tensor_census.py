@@ -10,6 +10,7 @@ bits in an OR, a pitch that differs between warps or matrices, a buffer index th
 words with other uses); the flags, slots and call forms against TensorPass.cs and dmsh_build.py; the C arithmetic the pitch is evaluated with; and the library finder on a
 library folder packed into its one-file image (dm/tools/shader_lib.py). With DMSH_TEST_XLATE (the translator), that the fixtures are its output."""
 import ast
+import bisect
 import contextlib
 import io
 import json
@@ -30,11 +31,11 @@ import shader_lib  # noqa: E402
 import tensor_census as tc  # noqa: E402
 
 # the shader build's HMMA rewrite, as test_dmsh_hmma.py takes it: a library's <key>_b.metal has the helper replaced and each call given the caller's matrices
-NAMES = {'hmma_msl', 'split_params', 'block_end', 'HMMA_BODY', 'HMMA_ARGS', 'HMMA_CALL', 'TG_ARRAY'}
+NAMES = {'hmma_msl', 'split_params', 'block_end', 'BRACE', 'FUNC_OPEN', 'HMMA_BODY', 'HMMA_ARGS', 'HMMA_CALL', 'TG_ARRAY'}
 tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
 selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in NAMES)
             or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) in NAMES for t in n.targets))]
-scope = {'re': re}
+scope = {'re': re, 'bisect': bisect}
 exec(compile(ast.Module(body=selected, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), scope)
 hmma_msl = scope['hmma_msl']
 
@@ -179,7 +180,7 @@ class Programs(unittest.TestCase):
         self.assertEqual((up['flagged'], up['served'], up['in_no_chain_slot0_open'], up['slot0_overwritten'], up['c_slot'], up['d_slot']), (18, 17, 1, 0, 8, 8))
         self.assertEqual((r['verdict']['stage3']['acc'], r['verdict']['stage3']['acc_why']), (1, {'all 8 slots taken': 1}))
         text = '\n'.join(r['text'])
-        self.assertIn('1 calls in no chain come while a chain is open in slot 0: each works in a pair of its own', text); self.assertNotIn('[RED]', text)
+        self.assertIn('1 calls in no chain come while a chain is open in slot 0: each works in matrices of its own', text); self.assertNotIn('[RED]', text)
         self.assertEqual(census(raw('slots'))['verdict'], r['verdict'])   # the translator's text: as this checkout's build rewrites it
 
     def test_the_build_rewrite_changes_nothing_read(self):   # the translator's form (19 arguments) and the build's (22): the same census, direct A decided alike
@@ -253,10 +254,13 @@ class CallForms(unittest.TestCase):
             self.assertIn('direct A off', '\n'.join(r['text']))
         self.assertEqual(hmma_msl(src).count(', _23, dm_acc, dm_am)'), 2)
 
-    def test_nxnative_body_works_a_call_in_no_chain_in_slot_0(self):   # its dm_acc of 16: the ninth chain's first call overwrites slot 0's sum
+    def test_the_body_before_13b432b4_works_a_call_in_no_chain_in_slot_0(self):   # dm_acc of 16 and no C and D of its own: the ninth chain's first call overwrites slot 0's sum
         src = source('slots')
-        self.assertEqual(src.count('dm_acc[18], dm_am[4];'), 1)   # this checkout's
-        r = census(edit(src, 'dm_acc[18], dm_am[4];', f'dm_acc[{tc.SHARED_PAIR}], dm_am[4];'))
+        self.assertEqual((src.count(f'dm_acc[{tc.SHARED_PAIR}], dm_am[4];'), len(tc.OWN_CD.findall(src))), (1, 1))   # this checkout's: NXNative's 13b432b4 body
+        mine = census(src)['verdict']['upstream']
+        self.assertEqual((mine['in_no_chain_slot0_open'], mine['slot0_overwritten'], mine['served']), (1, 0, 17))   # its own C and D: slot 0's sum is left alone
+        old = tc.OWN_CD.sub('simdgroup_half8x8 b0, b1;', src)   # the helper's declaration before 13b432b4 (it worked in acc[k] itself)
+        r = census(old)
         up = r['verdict']['upstream']
         self.assertEqual((up['in_no_chain_slot0_open'], up['slot0_overwritten'], up['served']), (1, 1, 16))
         self.assertIn("[RED] 1 calls in no chain work in slot 0's matrices while a chain keeps its sum there", '\n'.join(r['text']))
@@ -274,8 +278,8 @@ class CallForms(unittest.TestCase):
         for n in (19, 21, 22): self.assertEqual((tc.CALL_FORMS[n]['flags'], tc.CALL_FORMS[n]['d1'], tc.CALL_FORMS[n]['scratch']), (args.index('fl'), args.index('d1'), len(args)))
         rewritten = hmma_msl(raw('chain'))
         self.assertEqual({len(re.split(r',\s*', c)) for c in re.findall(r'dmsh_hmma16816_f16\(([^()]*)\)', rewritten[rewritten.index('kernel void'):])}, {22})
-        self.assertRegex(rewritten, r'const int k = cslot \|\| dslot \? \(f >> 8\) \* 2 : %d;' % (2 * tc.SLOTS))   # the pair past the slots, which the census takes from dm_acc's size
-        self.assertNotIn(f'dm_acc[{tc.SHARED_PAIR}]', rewritten)
+        self.assertIn('if (cslot) { c0 = acc[k]; c1 = acc[k + 1]; }', rewritten)   # NXNative's 13b432b4 body: C and D in matrices of their own, a slot only for a chain
+        self.assertEqual((rewritten.count(f'dm_acc[{tc.SHARED_PAIR}], dm_am[4];'), len(tc.OWN_CD.findall(rewritten))), (1, 1))   # which the census reads as its own C and D
 
     def test_a_form_it_does_not_read(self):   # counted and said, never guessed at
         src = edit(raw('chain'), '_337, _23);', '_337, _23, _18, _18, _18, _18);')

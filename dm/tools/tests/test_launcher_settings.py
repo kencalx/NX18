@@ -103,12 +103,13 @@ class LauncherSettingsTests(unittest.TestCase):
         mac = rows(['fps', 'ultrawide'], 'mac')
         self.assertIn('DM_MOD_FPS', mac); self.assertNotIn('DM_MOD_ULTRAWIDE', mac, 'Ultrawide stretches the picture, which only the iPhone and iPad front end does')
 
-    def test_picture_shape_default_follows_the_screen_on_ios_only(self):   # screen=nearest: the iOS launcher picks the option nearest the device's screen (LauncherSettings.swift nearestShape)
+    def test_picture_shape_matches_the_screen_on_ios_only(self):   # Match screen (auto, NXNative's 08c27ed7): front_ios.m takes the app window's shape at the game's start
         for gid in (BOTW, '01006F8002326000'):   # Breath of the Wild and Animal Crossing: screen_aspect on
             with self.subTest(game=gid):
                 ios, mac = build(gid, 'nvn')['DM_SCREEN_ASPECT'], build(gid, 'nvn', 'mac')['DM_SCREEN_ASPECT']
-                self.assertEqual((ios['default'], ios['screen'], [o[0] for o in ios['options']]), ('1.43', 'nearest', ['1.43', '0']))   # 1.43 for a reader that does not know the field, as before
-                self.assertEqual(mac['default'], '0')
+                self.assertEqual((ios['default'], [o[0] for o in ios['options']]), ('auto', ['auto', '1.43', '0']))
+                self.assertNotIn('screen', ios, 'no screen=nearest: the launcher does not replace Match screen by the shape nearest the screen (LauncherSettings.swift nearestShape)')
+                self.assertEqual((mac['default'], [o[0] for o in mac['options']]), ('0', ['1.43', '0']))
                 self.assertNotIn('screen', mac, 'a Mac window has no fixed shape: its list is as before')
         self.assertNotIn('DM_SCREEN_ASPECT', build(WONDER, 'nvn'), 'only a profile with screen_aspect on has the row')
 

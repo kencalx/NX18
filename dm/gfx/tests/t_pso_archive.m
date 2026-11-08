@@ -1,10 +1,10 @@
 // Metal 4 pipelines (pso_build): one base per pipeline with its colour state unspecialized, made into pipelines by specialization, kept in the pipeline archive.
 // Checks: pipelines that differ only in colour state share one base; a specialized pipeline draws the same pixels as one built through the MTLDevice; a flushed archive
 // file serves the base again without compiling; a flush of bases without a vertex layout is a p<seq> file, where a base with a layout is not looked up; a function with no
-// Metal 4 descriptor keeps the MTLDevice path; pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one despite a
-// mid-prewarm flush, and a compaction that did not finish is not tried again on the same system build; depth-only draws write depth; concurrent colour variants compile
+// Metal 4 descriptor keeps the MTLDevice path; pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one per full period despite a
+// mid-prewarm timer flush, removing them only after its last period, and a compaction that did not finish is not tried again on the same system build; depth-only draws write depth; concurrent colour variants compile
 // one base; archive flushes preserve unrelated compiler state; a function with function constants is specialized by its pipeline's descriptor, not through its library,
-// and an MTLDevice pipeline gets it specialized; the descriptor for a specialization is the caller's whether the driver returns it retained or autoreleased
+// and an MTLDevice pipeline gets it specialized; the descriptor for a specialization is the caller's whether the driver returns it retained or autoreleased; a compute pipeline is captured into a plain file and taken from it later, one without a Metal 4 descriptor never looked up; a capture that fails builds the pipeline all the same and hands a full period over, or stops capturing after a failure in a period that captured nothing
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -93,6 +93,76 @@ static void concurrent_functions(id<MTLLibrary> library) {
     return [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opts error:error];
 }
 @end
+// Counts the compute pipeline lookups in an archive file
+@interface LookupCountArchive : NSObject { @public id<MTL4Archive> archive; _Atomic int lookups; } @end
+@implementation LookupCountArchive
+- (id)forwardingTargetForSelector:(SEL)selector { return archive; }
+- (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)d error:(NSError **)error {
+    atomic_fetch_add(&lookups, 1); return [archive newComputePipelineStateWithDescriptor:d error:error];
+}
+@end
+// Runs kernel k of compute_pipelines over 64 threads: 1 when every o[i] is i * 3 + 1
+static int run_kernel(id<MTLComputePipelineState> ps) {
+    if (!ps) return 0;
+    id<MTLBuffer> b = [g_dev newBufferWithLength:64 * 4 options:MTLResourceStorageModeShared]; memset(b.contents, 0, 64 * 4);
+    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce setComputePipelineState:ps]; [ce setBuffer:b offset:0 atIndex:0]; [ce dispatchThreads:MTLSizeMake(64, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; [ce endEncoding];
+    [cb commit]; [cb waitUntilCompleted];
+    const uint32_t *o = b.contents; for (uint32_t i = 0; i < 64; i++) if (o[i] != i * 3 + 1) return 0;
+    return 1;
+}
+// Compute pipelines (cps_new) beside the bases: one the bundle does not hold is built through the MTLDevice and compiled into the flush period in the background, written to a
+// plain file (never a p<seq> one), and a later start takes it from that file without building it; compaction captures it again; a function without a Metal 4 descriptor
+// (constants, the embedded kernels) is built through the MTLDevice, not captured and never looked up
+static void compute_pipelines(void) {
+    char kdir[] = "/tmp/t_pso_compute.XXXXXX"; if (!mkdtemp(kdir)) abort();
+    NSString *saved = g_arch_dir; g_arch_dir = @(kdir); g_arch4 = @[]; g_arch4p = @[]; NSError *err = nil;
+    arch_flush_wait();   // from an empty period
+    NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\nkernel void k(device uint *o [[buffer(0)]], uint i [[thread_position_in_grid]]) { o[i] = i * 3 + 1; }\n";
+    id<MTLLibrary> kl = [g_dev newLibraryWithSource:src options:nil error:&err], ul = [g_dev newLibraryWithSource:[src stringByAppendingString:@"// unregistered\n"] options:nil error:&err];
+    id<MTLFunction> kf = fn4_note([kl newFunctionWithName:@"k"], kl, @"k", nil), uf = [ul newFunctionWithName:@"k"];
+    uint64_t built = g_cps_built, run = g_cps_run, arch = g_cps_arch; int pending = g_arch_new;
+    id<MTLComputePipelineState> kp = cps_new(kf, &err);
+    EXPECT("compute: a pipeline", 1, kp != nil);
+    EXPECT("compute: built", built + 1, g_cps_built);
+    dispatch_sync(cps_harvest_q(), ^{});   // its capture, in the background
+    EXPECT("compute: captured for the archive", pending + 1, g_arch_new);
+    EXPECT("compute: its dispatch writes", 1, run_kernel(kp));
+    arch_flush_wait();
+    NSArray<NSString *> *names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(kdir) error:nil];
+    EXPECT("compute: one file written", 1, names.count);
+    EXPECT("compute: a plain file, not a p file", 1, names.count == 1 && ![names[0] hasPrefix:@"p"]);
+    EXPECT("compute: nothing left to write", 0, g_arch_new);
+    LookupCountArchive *la = [LookupCountArchive new];
+    la->archive = names.count ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[@(kdir) stringByAppendingPathComponent:names[0]]] error:&err] : nil;
+    g_arch4 = @[(id<MTL4Archive>)la];   // as a new start with that file
+    built = g_cps_built; pending = g_arch_new;
+    id<MTLComputePipelineState> kp2 = cps_new(kf, &err);
+    EXPECT("compute again: from this device's archive", run + 1, g_cps_run);
+    EXPECT("compute again: not built", built, g_cps_built);
+    EXPECT("compute again: not from a bundle", arch, g_cps_arch);
+    EXPECT("compute again: nothing captured", pending, g_arch_new);
+    EXPECT("compute again: its dispatch writes", 1, run_kernel(kp2));
+    // compaction during the prewarm: captured again from its function, for the file that replaces the old ones
+    g_compact_enabled = 1; g_compacted = 0; atomic_store(&g_warm_running, 1);
+    EXPECT("compute, compaction: a pipeline", 1, cps_new(kf, &err) != nil);
+    EXPECT("compute, compaction: from the archive", run + 2, g_cps_run);
+    dispatch_sync(cps_harvest_q(), ^{});
+    EXPECT("compute, compaction: captured again", 1, g_compacted);
+    EXPECT("compute, compaction: waits for the flush", pending + 1, g_arch_new);
+    atomic_store(&g_warm_running, 0); g_compact_enabled = 0; g_compacted = 0;
+    arch_flush_wait();
+    // no Metal 4 descriptor: built through the MTLDevice, no lookup, nothing captured
+    int looked = la->lookups; built = g_cps_built; pending = g_arch_new;
+    id<MTLComputePipelineState> up = cps_new(uf, &err);
+    EXPECT("compute without a descriptor: a pipeline", 1, up != nil);
+    EXPECT("compute without a descriptor: never looked up", looked, la->lookups);
+    EXPECT("compute without a descriptor: built", built + 1, g_cps_built);
+    dispatch_sync(cps_harvest_q(), ^{});
+    EXPECT("compute without a descriptor: not captured", pending, g_arch_new);
+    EXPECT("compute without a descriptor: its dispatch writes", 1, run_kernel(up));
+    [NSFileManager.defaultManager removeItemAtPath:@(kdir) error:nil]; g_arch_dir = saved; g_arch4 = @[];
+}
 // Notes whether the compaction marker exists while the serializer writes (issue #342: a flush that does not return leaves it)
 @interface MarkerSerializer : NSObject { @public id<MTL4PipelineDataSetSerializer> ser; int calls, marked; } @end
 @implementation MarkerSerializer
@@ -199,6 +269,10 @@ static void depth_only(void) {
 }
 static void concurrent_bases(int fail) {
     nvn_hm_clear(&g_pbase, hm_rel);
+    if (fail) {   // the period has captured a pipeline: a capture that fails then means its store is full
+        MTLRenderPipelineDescriptor *pd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); pd.vertexDescriptor.layouts[16].stride = 2048;
+        NSError *err = nil; EXPECT("failed capture: a capture before", 1, pso_build(pd, &err) != nil && atomic_load(&g_ep->n) > 0);
+    }
     ArchEpoch *ep = g_ep; ArchiveGateCompiler *gate = [ArchiveGateCompiler new]; gate->compiler = ep->comp; gate->fail = fail;
     gate->entered = dispatch_semaphore_create(0); gate->release = dispatch_semaphore_create(0); ep->comp = (id<MTL4Compiler>)gate;
     NSMutableArray<MTLRenderPipelineDescriptor *> *ds = [NSMutableArray array];
@@ -209,7 +283,7 @@ static void concurrent_bases(int fail) {
     dispatch_group_t group = dispatch_group_create(); __block int good = 0; NSObject *lock = [NSObject new];
     for (MTLRenderPipelineDescriptor *d in ds) dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         @autoreleasepool { NSError *err = nil; id ps = pso_build(d, &err);
-            @synchronized(lock) { good += fail ? !ps && [err.domain isEqualToString:@"test"] : ps != nil; }
+            @synchronized(lock) { good += ps != nil && !err; }   // a capture that fails builds the pipeline by the plain compiler all the same
         }
     });
     EXPECT("concurrent: first compiler entered", 0, dispatch_semaphore_wait(gate->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
@@ -224,7 +298,31 @@ static void concurrent_bases(int fail) {
     if (!fail) EXPECT("concurrent: one compile per base", 2, gate->calls);
     EXPECT("concurrent: no unfinished builds", 0, g_pbase_pending.n);
     ep->comp = gate->compiler;
-    if (fail) { NSError *err = nil; EXPECT("concurrent: failed base can retry", 1, pso_build(ds[0], &err) != nil); }
+    if (!fail) return;
+    // the full period was handed over once, and the run still captures, into a fresh period
+    EXPECT("failed capture: a new period", 1, g_ep != ep);
+    EXPECT("failed capture: handed over once", 1, ep->failed);
+    EXPECT("failed capture: still capturing", 1, arch_capturing());
+    NSError *err = nil; int n0 = atomic_load(&g_ep->n); nvn_hm_clear(&g_pbase, hm_rel);
+    EXPECT("failed capture: the base captured in the new period", 1, pso_build(ds[0], &err) != nil && atomic_load(&g_ep->n) == n0 + 1);
+    // a capture that fails in a period that has captured nothing: not the store's size, so the run captures no more, and builds the pipeline all the same
+    arch_flush_wait();
+    ArchEpoch *fresh = g_ep; ArchiveGateCompiler *fg = [ArchiveGateCompiler new]; fg->compiler = fresh->comp; fg->fail = 1; fg->calls = 1; fresh->comp = (id<MTL4Compiler>)fg;
+    nvn_hm_clear(&g_pbase, hm_rel); err = nil;
+    EXPECT("failed capture in a new period: built", 1, pso_build(ds[1], &err) != nil && !err);
+    EXPECT("failed capture in a new period: no more captures", 0, arch_capturing());
+    int calls = fg->calls; nvn_hm_clear(&g_pbase, hm_rel);
+    EXPECT("no more captures: built by the plain compiler", 1, pso_build(ds[2], &err) != nil && fg->calls == calls && g_ep == fresh);
+    // a pipeline both compilers refuse fails, with the plain compiler's error
+    atomic_store(&g_arch_cap_off, 0); id<MTL4Compiler> plain = g_comp4;
+    ArchiveGateCompiler *pg = [ArchiveGateCompiler new]; pg->compiler = plain; pg->fail = 1; pg->calls = 1; g_comp4 = (id<MTL4Compiler>)pg;
+    atomic_store(&fresh->n, 1);   // as a period that holds a capture, so the failure is not taken for a broken capture
+    nvn_hm_clear(&g_pbase, hm_rel); err = nil;
+    EXPECT("both refuse: no pipeline, the error", 1, pso_build(ds[3], &err) == nil && [err.domain isEqualToString:@"test"]);
+    EXPECT("both refuse: not a failed capture", 0, fresh->failed);
+    atomic_store(&fresh->n, 0); g_comp4 = plain; fresh->comp = fg->compiler;
+    nvn_hm_clear(&g_pbase, hm_rel); err = nil;
+    EXPECT("concurrent: failed base can retry", 1, pso_build(ds[0], &err) != nil);
 }
 static void capture_preserves_foreign_folder(void) {
     arch_flush_wait();   // Finish earlier captures: the captures below go into a new flush period
@@ -406,6 +504,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         for (NSString *n in names.reverseObjectEnumerator) { NSString *f = [@(cdir) stringByAppendingPathComponent:n]; [paths addObject:f]; [open addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:f] error:&err]]; }
         nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = open;   // as a new start with that many files
         g_compact_enabled = 1; g_compact_files = paths; g_compacted = 0;
+        g_arch_period_max = 4;   // the recaptured bases fill two periods and part of a third: each full one is handed over, the timer's flushes wait
         uint64_t arch0 = g_pb_archived, built0 = g_pb_built;
         ArchEpoch *ep = g_ep; ArchiveGateCompiler *gate = [ArchiveGateCompiler new]; gate->compiler = ep->comp; gate->calls = 1; ep->comp = (id<MTL4Compiler>)gate;
         atomic_store(&g_warm_running, 1);
@@ -413,8 +512,11 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("compaction: captures original shader functions, not archive imports", 0, gate->lookup_calls);
         ep->comp = gate->compiler;
         dispatch_sync(g_arch_q, ^{ arch_flush(); });   // the timer fires while prewarm still has other work
-        EXPECT("compaction: timed flush keeps recaptured bases pending", descs.count, g_arch_new);
-        EXPECT("compaction: timed flush adds no partial file", PSO_ARCH_COMPACT + 1, [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil].count);
+        arch_flush_wait();   // the timer's flush waits for the prewarm; the full periods are written
+        EXPECT("compaction: timed flush keeps the last recaptured bases pending", descs.count % 4, g_arch_new);
+        EXPECT("compaction: a file per full period", PSO_ARCH_COMPACT + 1 + descs.count / 4, [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil].count);
+        int kept = 0; for (NSString *f in paths) kept += [NSFileManager.defaultManager fileExistsAtPath:f];
+        EXPECT("compaction: the old files stay until its last period is written", paths.count, kept);
         atomic_store(&g_warm_running, 0);
         EXPECT("compaction: every base from the archive", arch0 + descs.count, g_pb_archived);
         EXPECT("compaction: none compiled", built0, g_pb_built);
@@ -424,7 +526,9 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("compaction: the marker exists while the flush writes", 1, ms->calls == 1 && ms->marked == 1);
         EXPECT("compaction: the flush that returned removed the marker", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_marker()]);
         names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil];
-        EXPECT("compaction: one file left", 1, names.count);
+        EXPECT("compaction: a file per period left", (descs.count + 3) / 4, names.count);
+        EXPECT("compaction: done", 0, g_compact_periods + !g_compact_closed + g_compact_bad);
+        g_arch_period_max = ARCH_PERIOD_MAX;
         // a marker left by a compaction that did not finish: the next start on this system build does not compact, one from another build is removed and compaction tried
         EXPECT("compaction: allowed without a marker", 1, arch_compact_allowed());
         [arch_compact_stamp() writeToFile:arch_compact_marker() atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -437,13 +541,16 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("compaction: old archive-import marker permits the new capture method", 1, arch_compact_allowed());
         EXPECT("compaction: old capture marker removed", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_marker()]);
         nvn_hm_clear(&g_pbase, hm_rel); g_compact_enabled = 0; g_compacted = 0;
-        g_arch4 = @[[g_dev newArchiveWithURL:[NSURL fileURLWithPath:[@(cdir) stringByAppendingPathComponent:names.firstObject]] error:&err]];
+        NSMutableArray<id<MTL4Archive>> *left = [NSMutableArray array];
+        for (NSString *n in names) [left addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:[@(cdir) stringByAppendingPathComponent:n]] error:&err]];
+        g_arch4 = left;
         arch0 = g_pb_archived; built0 = g_pb_built;
         for (MTLRenderPipelineDescriptor *cd in descs) pso_build(cd, &err);
-        EXPECT("compaction: the new file holds every base", arch0 + descs.count, g_pb_archived);
-        EXPECT("compaction: none compiled from the new file", built0, g_pb_built);
+        EXPECT("compaction: the new files hold every base", arch0 + descs.count, g_pb_archived);
+        EXPECT("compaction: none compiled from the new files", built0, g_pb_built);
         [NSFileManager.defaultManager removeItemAtPath:@(cdir) error:nil]; g_arch_dir = saved; g_arch4 = @[];
     }
+    compute_pipelines();
     // a function with no Metal 4 descriptor: the MTLDevice path
     uint64_t legacy = g_pb_legacy;
     id<MTLRenderPipelineState> l = pso_build(desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 0), &err);

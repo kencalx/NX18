@@ -243,7 +243,8 @@ class Formats(unittest.TestCase):
         ('longframe', 'dm/gfx/nvn/hle_nvn.c', 'frame %llu (%.2f s) whole frame', '[dm] [longframe] ', ()),
         ('archive', 'dm/gfx/nvn/nvn_mtl.m', 'pipeline archive %s: %lu files', '[dm] [nvn-mtl] ', ('/x/pso_archive',)),
         ('bundled', 'dm/gfx/nvn/nvn_mtl.m', 'pipeline archive bundled with the app: %s, %.1f MB', '[dm] [nvn-mtl] ', ('/x/g16g.mtl4a',)),
-        ('written', 'dm/gfx/nvn/nvn_mtl.m', 'pipeline archive: %d new pipeline bases', '[dm] [nvn-mtl] ', ('00004.mtl4a',)),
+        ('written', 'dm/gfx/nvn/nvn_mtl.m', 'pipeline archive: %d new pipeline bases', '[dm] [nvn-mtl] ', ('', '00004.mtl4a')),   # the first %s: the compute pipelines' part, empty without them
+        ('written', 'dm/gfx/nvn/nvn_mtl.m', 'pipeline archive: %d new pipeline bases', '[dm] [nvn-mtl] ', (' and 3 compute pipelines', '00004.mtl4a')),
         ('prepare', 'dm/gfx/nvn/nvn_mtl.m', 'pipeline prepare: %ld lines', '[dm] [nvn-mtl] ', ('shown',)),
         ('audio', 'dm/host/hle_audio.c', 'audio #%d device callbacks', '[dm] ', ()),
         ('save_commit', 'dm/host/hle_fs.c', 'save commit #%d', '[dm] ', ('/a/save.work', '/a/save')),

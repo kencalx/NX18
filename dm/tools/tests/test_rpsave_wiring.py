@@ -79,7 +79,7 @@ class Switches(unittest.TestCase):
         self.assertEqual(dr.count('if (orph & ~g_fd_done) fd_lost(orph & ~g_fd_done);'), 2)   # a draw encoded again (texture upgrade, range retry) that covers again loses nothing
         tri = func(self.mtl, 'static void clear_color_tri(const p_clear_color *c) {')
         self.assertIn('(g_pass.omit >> slot & 1)', tri)
-        end = func(self.mtl, 'static void rp_end(void) {')
+        end = func(self.mtl, 'static void rp_end_at(const char *fn, int line) {')
         self.assertIn('g_fd_orphan |= g_fd_pend; g_fd_pend = 0;', end)
         self.assertIn('fd_lost(g_fd_orphan)', self.mtl)
         self.assertIn('RED_ONCE(158, "a pass whose colour load was skipped', self.mtl)
@@ -99,7 +99,7 @@ class Switches(unittest.TestCase):
         self.assertIn('DM_SP_EVENT(DM_SP_GPU, "rp-save"', self.mtl)
         # a left-out slot's store is counted saved only where DM_NVN_UNWRITTEN_DC would have kept it (its rule, per encoded draw), not twice its bytes up front
         self.assertNotIn('g_omit_bytes += 2 *', self.mtl)
-        self.assertIn('(!udc_on() || (g_omit_udcw >> i & 1))) g_omit_bytes += g_omit_ab[i];', func(self.mtl, 'static void rp_end(void) {'))
+        self.assertIn('(!udc_on() || (g_omit_udcw >> i & 1))) g_omit_bytes += g_omit_ab[i];', func(self.mtl, 'static void rp_end_at(const char *fn, int line) {'))
         self.assertIn('if (g_pass.omit) g_omit_udcw |= udc_rule_writes(pr) & g_pass.omit;', func(self.mtl, 'static void draw_(const p_draw *dw, const p_draw_idx *di) {'))
 
     def test_the_pure_test_is_built_and_run_by_ci(self):

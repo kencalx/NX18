@@ -23,7 +23,7 @@ import pso_offline
 def builder():
     # Use production functions without the CLI's translator/profile initialization. vs_pad reads a paired pixel shader's MSL through output(): from the output folder while
     # that shader is in flight, else from the stage in the shader cache (dmsh_build.py commit), here a dict (STAGED); a full build (want empty) reads no older image
-    names = {'load_pairs', 'vs_pad', 'vs_depth', 'shader_key', 'pair_keyed', 'output', 'label_dir'}
+    names = {'load_pairs', 'partner_inputs', 'vs_pad', 'vs_depth', 'shader_key', 'pair_keyed', 'output', 'label_dir'}
     tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
     staged = {}
     ns = dict(collections=collections, os=os, re=re, sys=sys, hashlib=hashlib, IOSOUT='', STAGE='stage/test', want=set(), OLD_IMAGE={},
@@ -77,7 +77,7 @@ class Pairing(unittest.TestCase):
         self.extra = self.package.parent / 'pso_pairs.tsv'
         self.extra.write_text('# BAHS\nv\tf1\nv\tf6\nv\tf1\n\n')
         self.ns = builder()
-        self.ns.update(out=str(self.root), PAIRS=self.ns['load_pairs'](self.g, self.package))
+        self.ns.update(out=str(self.root), PAIRS=self.ns['load_pairs'](self.g, self.package))   # builder()'s output(): the folder, then the stage (STAGED)
         for key, loc in [('f0', 0), ('f1', 1), ('f6', 6)]:
             src = pixel(loc)
             if not loc: src = src.replace('    float4 missing [[user(locn0)]];\n', '').replace('in.v0 + in.missing', 'in.v0')
@@ -151,6 +151,17 @@ class Pairing(unittest.TestCase):
                            env=dict(os.environ, TMPDIR=str(self.root)), capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue(archive.is_file())
+
+
+class VariationPairs(unittest.TestCase):
+    def test_mesh_pairs_with_its_pixel_shader(self):   # NVN2: Ocarina of Time's foliage variations hold a mesh and a pixel shader, no vertex shader
+        import shader_split as split
+        sh = lambda tag: (bytes([tag]) * 0x40, bytes([tag]) * 0x40)
+        found = [('a.bfsha#BNSH@0x10#var0', 'vs', *sh(1)), ('a.bfsha#BNSH@0x10#var0', 'ps', *sh(2)),
+                 ('a.bfsha#BNSH@0x10#var1', 'ms', *sh(3)), ('a.bfsha#BNSH@0x10#var1', 'ps', *sh(4)),
+                 ('a.bfsha#BNSH@0x10#var2', 'ms', *sh(5))]   # no pixel shader: no pair
+        k = lambda tag: split.skey(*sh(tag))
+        self.assertEqual(split.var_pairs(found), {(k(1), k(2)), (k(3), k(4))})
 
 
 if __name__ == '__main__': unittest.main()

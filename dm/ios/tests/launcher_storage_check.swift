@@ -60,22 +60,23 @@ import Foundation
         plain.reset()
         expect(d.string(forKey: "launcher.DM_FPS_TARGET") == "30", "DM_SAVED_CHOICES=0: Reset leaves the saved choices too")
         unsetenv("DM_SAVED_CHOICES")
-        // Picture shape (screen=nearest): the default follows the device's screen (16:9 on a 2.17:1 iPhone, 1.43:1 on a 4:3 or 1.45:1 iPad and on a Duo); a choice the player made stays theirs
+        // Picture shape: Match screen (auto, NXNative's 08c27ed7) is the iOS list's default, which front_ios.m resolves from the app window at the game's start. The row has no
+        // screen=nearest, so the device's screen does not change the default (nearestShape, for a row that has it, skips auto); a choice the player made stays theirs
         let shape = file.settings.first { $0.env == "DM_SCREEN_ASPECT" }!
-        expect(shape.screen == "nearest" && shape.def == "1.43", "the iOS list marks Picture shape screen=nearest, 1.43 by default")
-        expect(shape.nearestShape(2868.0 / 1320) == "0" && shape.nearestShape(2752.0 / 2064) == "1.43" && shape.nearestShape(2420.0 / 1668) == "1.43" && shape.nearestShape(1.43) == "1.43", "the shape nearest each screen")
+        expect(shape.screen == nil && shape.def == "auto", "the iOS list's Picture shape starts at Match screen (auto), with no screen=nearest")
+        expect(shape.nearestShape(2868.0 / 1320) == "0" && shape.nearestShape(2752.0 / 2064) == "1.43" && shape.nearestShape(2420.0 / 1668) == "1.43" && shape.nearestShape(1.43) == "1.43", "nearestShape takes only the numeric shapes")
         d.removeObject(forKey: "launcher.DM_SCREEN_ASPECT"); unsetenv("DM_SCREEN_ASPECT")
         let phone = LauncherModel(file.settings, screen: 2868.0 / 1320, defaults: d)
-        expect(phone.values["DM_SCREEN_ASPECT"] == "0", "an iPhone wider than 16:9 starts at 16:9")
+        expect(phone.values["DM_SCREEN_ASPECT"] == "auto", "an iPhone wider than 16:9 starts at Match screen")
         phone.apply()
-        expect(d.string(forKey: "launcher.DM_SCREEN_ASPECT") == nil && String(cString: getenv("DM_SCREEN_ASPECT")) == "0", "16:9 there is the default: set, not stored")
+        expect(d.string(forKey: "launcher.DM_SCREEN_ASPECT") == nil && String(cString: getenv("DM_SCREEN_ASPECT")) == "auto", "Match screen there is the default: set, not stored")
         phone.values["DM_SCREEN_ASPECT"] = "1.43"; phone.apply()
         expect(d.string(forKey: "launcher.DM_SCREEN_ASPECT") == "1.43" && LauncherModel(file.settings, screen: 2868.0 / 1320, defaults: d).values["DM_SCREEN_ASPECT"] == "1.43", "the taller picture picked on that iPhone is stored and comes back")
         d.removeObject(forKey: "launcher.DM_SCREEN_ASPECT")
         let pad = LauncherModel(file.settings, screen: 2752.0 / 2064, defaults: d)
         pad.apply()
-        expect(pad.values["DM_SCREEN_ASPECT"] == "1.43" && d.string(forKey: "launcher.DM_SCREEN_ASPECT") == nil && String(cString: getenv("DM_SCREEN_ASPECT")) == "1.43", "a 4:3 iPad keeps the taller picture, not stored")
-        expect(LauncherModel(file.settings, defaults: d).values["DM_SCREEN_ASPECT"] == "1.43", "no screen: the list's default")
+        expect(pad.values["DM_SCREEN_ASPECT"] == "auto" && d.string(forKey: "launcher.DM_SCREEN_ASPECT") == nil && String(cString: getenv("DM_SCREEN_ASPECT")) == "auto", "a 4:3 iPad starts at Match screen too, not stored")
+        expect(LauncherModel(file.settings, defaults: d).values["DM_SCREEN_ASPECT"] == "auto", "no screen: the list's default")
         unsetenv("DM_SCREEN_ASPECT")
         // The Mac window's list (second argument): Basic first, then Advanced in the list's sections; Display mode; the render scale in pixels; values set at launch are fixed
         let mac = try! JSONDecoder().decode(SettingsFile.self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2])))

@@ -3,8 +3,8 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [High frame rate and Ultrawide](#high-frame-rate-and-ultrawide), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
-- [Controls](#controls): [Touch control size](#touch-control-size), [Touch control opacity](#touch-control-opacity), [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
+- [Game](#game): [Frame rate](#frame-rate), [High frame rate and Ultrawide](#high-frame-rate-and-ultrawide), [Dynamic resolution](#dynamic-resolution), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Controls](#controls): [Touch control size](#touch-control-size), [Touch control opacity](#touch-control-opacity), [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
@@ -36,6 +36,9 @@ Shown only for a game packed with such a mod in its [mods folder](playing.md#mod
 **Ultrawide** is for the iPhone, whose screen is wider than 16:9. It renders a wider view, sets the mod's shape to the iPhone's screen where the mod keeps it as a number, and shows the picture as [Stretch](#picture) does, filling the screen. While it does, the [in-game menu](#in-game-menu) has no **Picture** row: the picture stays at Stretch until Ultrawide is turned off at the next start. On an iPad, whose screen is taller than 16:9, it stays off, and an iPad-only build (`--device ipad`) does not pack the Ultrawide mod at all (the build says `mods: Ultrawide left out`). A wider view draws more of the world, so it can run slower and warmer; a frame-rate mod doubles the work per second, so it uses more power and heat.
 
 A mod that changes code the app's own fixes for the game also change can't be switched. The packing script then leaves it out and says why. A mod with a patch only an emulator runs ([Mods and patches](playing.md#mods-and-patches)) is offered without that patch, with a red line in the report; with nothing else left to write, it is not offered.
+### Dynamic resolution
+
+Off, the default, keeps the 3D picture at full size. On lets the game lower its resolution when frames run heavy, as on the Switch: steadier frame rate, softer picture. Only games whose resolution control the app can hold offer it (NieR:Automata, Ocarina of Time).
 
 ### Render scale
 
@@ -108,7 +111,7 @@ Touches on the game's touch screen follow the picture in all three. With Stretch
 
 Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizons). **iPhone Duo screen (1.43:1)** renders a taller picture of the Duo's own shape: the sides of 16:9 with more above and below, and the HUD at the screen's edges. **16:9** is the Switch's picture. The taller picture has about a quarter more pixels, so it runs a little slower and warmer.
 
-The default follows your screen: the shape nearest it. An iPhone wider than 16:9 (the iPhone 18 Pro Max is about 2.17:1) starts at **16:9**, which there is about a quarter larger than the taller picture in Fit; a 4:3 iPad and an iPhone Duo start at **1.43:1**, which fills more of their screens. It follows the whole screen, not the app's window, so an iPad window in Stage Manager or Split View starts at the full screen's shape. A shape you pick is kept. Only a shape other than the default is saved, so on an iPhone a 1.43:1 you chose before this default came in was not saved (it was the default then): choose it again. A Mac starts at 16:9.
+**Match screen**, the default on an iPhone or iPad, takes the app window's own shape when the game starts: its ratio where it is between 1.3:1 and 1.77:1 (a 13-inch iPad Pro's 4:3, an iPhone Duo's 1.43:1, an 11-inch iPad Pro's about 1.45:1), else 16:9 (the iPhone 18 Pro Max, about 2.17:1). It follows the window, not the whole screen, so an iPad window in Stage Manager or Split View gets its own shape. On a 13-inch iPad Pro the 4:3 picture fills the screen and has about 7 % more pixels than 1.43:1, so a little more GPU work and heat. A shape you pick is kept. A Mac starts at 16:9.
 
 ### Frame-rate counter
 
@@ -139,6 +142,10 @@ How strong the game's vibration is, from 0 to 300 %.
 ### Rumble cutoff
 
 A controller's vibration weaker than this stays off, and the rest is spread over the full range. Off (0 %) by default. A controller with rotating motors can rumble all the time in a game that sends a quiet texture: Mario Kart 8 Deluxe needs about 45 % to rumble only on crashes and drifts. The phone's own vibration is not affected.
+
+### Press a button to join
+
+Off by default: each controller is a player as soon as it connects, in the order the system lists them. On: a controller becomes a player only when you press one of its buttons, as the lowest player free, so the players choose their order and how many play. That press also reaches the game. When a game asks for more players than have joined, a prompt over the game waits for the others to press a button; B closes it.
 
 ## Performance
 
@@ -264,13 +271,13 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 The Mac app and the iPhone app of one game can share a save through iCloud Drive. Choose the same iCloud Drive folder on both: **Cloud saves** › **Choose a folder…** in the Mac settings window, and **Cloud saves** in the iPhone launcher (any folder, for instance one named **nxnative Saves**). Each game keeps one file there, `<title ID>/save.dmsync`, which holds the whole save.
 
-When the game starts, it brings the save from iCloud Drive in if that one is the one to keep; a few seconds after the game saves, it sends its save. The iPhone app also sends when it goes to the background, and the Mac app once the game has quit. If you played on both without the save getting across in between, the newer save wins.
+When the game starts, it brings the save from iCloud Drive in if only that one changed since the last sync; a few seconds after the game saves, it sends its save if only this one changed. The iPhone app also sends when it goes to the background, and the Mac app once the game has quit. If you played on both without the save getting across in between, the newer save wins.
 
 After you choose another folder, the next start treats it as a first sync: if the folder has no save of the game yet, this device's goes there at once; if it has one that differs, the newer one wins and the other is kept (below). The same start sends the save again if its file was removed from iCloud Drive. A game that has not synced since you updated the app is the exception: the first time, a save it finds in the new folder still comes in over its own unchanged one, which is kept (below).
 
 A save that is replaced, on the device or in iCloud Drive, is kept first, beside the save in a folder named after it with `-backups` (on the iPhone `save-backups` in the Files app, under the app's name; on the Mac `~/Library/Application Support/nxnative/<title ID>/save-backups`): `<date> local` holds this device's save, `<date> cloud` the one that was in iCloud Drive. The newest 10 of each kind stay, and older ones are removed; other folders you put there are left alone.
 
-iCloud Drive takes a moment to carry a file from one device to the other. Quit the game on one device and give it a few seconds before you start it on the other. Without a connection the game plays on with the save it has and sends it later. The game log says what came in and what went out (lines starting with `save sync:`).
+iCloud Drive takes a moment to carry a file from one device to the other. Quit the game on one device and give it a few seconds before you start it on the other. Without a connection, or when the save in iCloud Drive has not arrived in time, the game plays on with the save it has and sends it later. If the save in iCloud Drive changed meanwhile, the game sends nothing that session, and the next start decides between the two as above. The game log says what came in and what went out (lines starting with `save sync:`).
 
 ## In-game menu
 
@@ -298,7 +305,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped, `stretch` covers the screen, stretched |
-| Picture shape | `DM_SCREEN_ASPECT` | `1.43` the iPhone Duo's shape, `0` 16:9 (default: the shape nearest the screen) |
+| Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `0` 16:9 |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
 | Touch control size | `DM_TOUCH_SIZE` | `1` Large, `0.85` Medium, `0.7` Small (`0.5` to `1`) |
 | Touch control opacity | `DM_TOUCH_OPACITY` | `1` Normal, `0.4` Faint, `0.7` Light, `1.5` Strong (`0.1` to `2`) |
@@ -306,6 +313,8 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
+| Press a button to join | `DM_PAD_PRESS_TO_JOIN` | `1`, `0` |
+| Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `auto` (MetalFX for a picture smaller than 1920x1080), `metalfx` |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |

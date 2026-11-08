@@ -43,9 +43,10 @@ mem_used	0x4600000
 fps_target	60
 present_interval	display
 # A workaround: no layer frame history (nn::vi::ListFrameHistory returns 0 entries, as before the host kept one; hle_vi.c). The render thread's present command (main+0xb7a4b8)
-# reads the newest entry and, at the interval 2 the game set (the two overrides above do not reach it), sleeps a frame while it is queued and then until a frame past its present
-# tick: given "on", 30 fps on the iPhone, 24-26 on the Mac. frame_history queued answers it as a Switch compositor would (each frame shown at its queue tick); it stays off here
-# until an iPhone and Mac A/B of DM_VI_FRAME_HISTORY=0 against =queued shows no difference (README.md, Frame rate)
+# reads the newest entry and, at the interval it reads back, sleeps a frame while it is queued and then until a frame past its present tick: given "on" with the game's own
+# interval 2 answered, 30 fps on the iPhone, 24-26 on the Mac. In display mode the host now answers the window's interval (hle_nvn.c window_interval, NXNative's 028a2631): 1 at
+# Frame rate 60, where neither wait runs, 2 at 30, where they do. frame_history queued answers it as a Switch compositor would (each frame shown at its queue tick); it stays off
+# here until an iPhone and Mac A/B of DM_VI_FRAME_HISTORY=0 against =queued and =1, at Frame rate 60 and 30, shows no difference (README.md, Frame rate)
 frame_history	off
 
 # ---- Input ----
