@@ -34,7 +34,8 @@ static const lock_t k_locks[] = {
     // Luigi's Mansion 3 1.4.0: Next Level Games' frame limiter. At the end of each frame the main thread calls the frame callbacks (main+0xb7c308) with the milliseconds since the frame
     // started; the limiter (main+0x7a3e70) runs jobs or sleeps until 33.333 ms have passed, the float at main+0x13c94dc (read only there, at main+0x7a3ea8 and main+0x7a3f18), and the game
     // steps by the time that really passed. The game asks for present interval 2 too, which the profile's present_interval display ignores; both are needed, and the profile's
-    // frame_history off: given the layer's frame history, the game's own pacing holds it to that interval 2 (30 fps; hle_vi.c)
+    // frame_history off: given the layer's frame history, the render thread's present command (main+0xb7a4b8) holds it to that interval 2 (30 fps; hle_vi.c). frame_history queued
+    // would feed the phase lock here (the ring at main+0x17ce020) with a latency of 0, which it never saw with the history off: its nudge is read as per frame, not checked (hle_vi.c)
     { "79e5950ffa85acf63e28c9aec051eac2", "NLG frame limiter target", 0, 0x13c94dc, MS_F32, 1 },
     // Need for Speed: Hot Pursuit Remastered 1.0.3: Criterion's frame timing. A uint32 in main's bss (main+0xf0043c) selects the engine's 60 fps mode, in which it takes its frame time from
     // the timer object at [main+0xed96a8]: +0x30 the frame in system ticks (19.2 MHz, 640,000 at 30 fps) and +0x28 a tenth of it; the game's own step, at [main+0xeffc60] +0x30 (2D) and +0x50

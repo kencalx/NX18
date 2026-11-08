@@ -71,11 +71,11 @@ HLE_FORCE("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE", "the layer's latest
 // time, 1 queued and not shown yet), frame number (the numbering of GetLatestFrameNumber), the queue tick and the present tick twice; sorted by frame number, newest first.
 // A frame is shown once the present queue has handed it on (nvn_mtl.m g_pq_done) and the system did not drop it; its present time is the drawable's presented time when Metal
 // reports one, else (headless, or before the handler runs) the time it was first seen handed on.
-// Off (profile key frame_history off; DM_VI_FRAME_HISTORY=0 / 1 overrides the profile either way), every call returns 0, the count query too, as the host answered before it kept
-// the history. A workaround, kept for the one game it is set for: Luigi's Mansion 3 is held to 60 fps by two overrides its own code cannot see, the frame limiter's float
-// (hle_fpslock.c) and present_interval display, which ignores the interval 2 the game sets. Given a history, its frame pacing (the readers at main+0xb7a4f0..0xb7d9dc; the
-// community 60 fps mod also sets the interval to 1 at main+0xb7add0) settles at 30 fps on the iPhone, 24-26 on the Mac, with the GPU time unchanged; with none it ran at 53-60.
-// Which reader does it is open until those functions are disassembled (dm/games/0100DCA0064A6000/README.md)
+// Off (profile key frame_history off; DM_VI_FRAME_HISTORY=0 / 1 / queued overrides the profile any way), every call returns 0, the count query too, as the host answered before it
+// kept the history. A workaround, kept for the one game it is set for: Luigi's Mansion 3 is held to 60 fps by two overrides its own code cannot see, the frame limiter's float
+// (hle_fpslock.c) and present_interval display, which ignores the interval 2 the game sets. Given a history, its render thread's present command (main+0xb7a4b8, read in the
+// assembly on the Mac: dm/games/0100DCA0064A6000/README.md) waits for the newest entry to be shown and then a 60 Hz frame past its present tick, and settles at 30 fps on the iPhone,
+// 24-26 on the Mac, with the GPU time unchanged; with none it ran at 53-60. Queued (below) answers it the way a Switch compositor would, for the measurement that decides its default
 #define VFH 8
 typedef struct { uint64_t frame, ticket, queued_ns, seen_ns; } vfh_ent;
 static vfh_ent g_vfh[VFH]; static pthread_mutex_t g_vfh_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -86,18 +86,29 @@ void dm_vi_frame_queued(uint64_t frame) {   // hle_nvn.c, at each present the ga
     pthread_mutex_lock(&g_vfh_mu); g_vfh[frame % VFH] = (vfh_ent){frame, q, guest_ns(), 0}; pthread_mutex_unlock(&g_vfh_mu);
 }
 static uint64_t vfh_ticks(uint64_t ns) { return dm_sdk_ounce() ? ns / 32 : ns * 12 / 625; }   // as guest_ticks (hle_os.c)
-static _Atomic int g_vfh_on = -1;   // -1 until the first call decides
+// Queued (profile frame_history queued; DM_VI_FRAME_HISTORY=queued): every recorded frame is reported shown, status 2, with its queue tick and both present ticks the time it was
+// queued, VFH_LEAD_NS earlier, so the present comes out at the queue tick (latency 0). That is what a Switch compositor reports to a game that keeps up with the vsync, without the
+// depth of the host's present queue (33-50 ms), which is the host's own latency. Luigi's Mansion 3's render thread (main+0xb7a4b8, before each present) asks for the newest entry
+// and, at the present interval 2 it set (nvnWindowGetPresentInterval), sleeps a 60 Hz frame while it is queued (wait A) and then until 16.67 ms after its present tick (wait B):
+// given "on", the entry is almost always still queued and the game halves its rate. Queued, wait A never sleeps and wait B ends at most 16.67 ms after the last queue tick. The lead
+// keeps wait B from pacing on its own: counted from the last queue it adds the game's sleep overshoot and the host's present to every period, a timer just over the vsync (the
+// limiter's MS_MARGIN in hle_fpslock.c is the same thing), so the host's acquire, which waits for the display link, sets the pace as with the history off
+#define VFH_LEAD_NS 500000ull
+static _Atomic int g_vfh_on = -1;   // -1 until the first call decides; 0 off, 1 on, 2 queued (DM_GAME_FRAME_HISTORY's numbering)
+static const char *const k_vfh_mode[3] = {"off", "on", "queued"};
 static int vfh_on(void) {
     int v = g_vfh_on;
     if (v >= 0) return v;
     const char *e = getenv("DM_VI_FRAME_HISTORY");
-    int set = e && (!strcmp(e, "0") || !strcmp(e, "off") || !strcmp(e, "1") || !strcmp(e, "on"));
-    v = set ? e[0] == '1' || !strcmp(e, "on") : DM_GAME_FRAME_HISTORY;
+    int set = -1;
+    if (e) { if (!strcmp(e, "0") || !strcmp(e, "off")) set = 0; else if (!strcmp(e, "1") || !strcmp(e, "on")) set = 1; else if (!strcmp(e, "queued")) set = 2; }
+    v = set >= 0 ? set : DM_GAME_FRAME_HISTORY;
     int was = -1;
     if (atomic_compare_exchange_strong(&g_vfh_on, &was, v)) {
-        if (e && !set) LOG("[RED] DM_VI_FRAME_HISTORY=%s: not 0, 1, off or on; the profile's frame_history %s is kept", e, v ? "on" : "off");
-        LOG("vi::ListFrameHistory: the layer's frame history is %s (%s)%s", v ? "on" : "off", set ? "DM_VI_FRAME_HISTORY" : "game profile frame_history",
-            v ? "" : ": every call returns 0 entries, the count query too, as before the host kept the history");
+        if (e && set < 0) LOG("[RED] DM_VI_FRAME_HISTORY=%s: not 0, 1, off, on or queued; the profile's frame_history %s is kept", e, k_vfh_mode[v]);
+        LOG("vi::ListFrameHistory: the layer's frame history is %s (%s)%s", k_vfh_mode[v], set >= 0 ? "DM_VI_FRAME_HISTORY" : "game profile frame_history",
+            v == 0 ? ": every call returns 0 entries, the count query too, as before the host kept the history"
+            : v == 2 ? ": every frame shown as soon as the game queues it, its present tick its queue tick" : "");
     }
     return g_vfh_on;
 }
@@ -116,8 +127,8 @@ static void vfh_window(uint64_t latest, int n, int k, int shown, int on) {
                  (unsigned long long)w.ents, (unsigned long long)w.shown, on ? "" : " (the history is off)");
 }
 HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the layer's frame history: the last 8 presents, newest first, shown once the present queue handed them on", int, h_vi_FrameHist, void *out, int n, const void *layer) {
-    (void)layer;
-    if (!vfh_on()) { vfh_window(dm_nvn_frame_count(), out ? n : 0, 0, 0, 0); return 0; }
+    (void)layer; int mode = vfh_on();
+    if (!mode) { vfh_window(dm_nvn_frame_count(), out ? n : 0, 0, 0, 0); return 0; }
     if (!out || n <= 0) { vfh_window(dm_nvn_frame_count(), 0, 0, 0, 1); return VFH; }
     uint64_t q, d; mtl_present_progress(&q, &d); (void)q;
     uint64_t gnow = guest_ns(), hnow = now_ns(), latest = dm_nvn_frame_count();   // read in this order as before the switch: the frame count after the queue's progress
@@ -126,6 +137,9 @@ HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the lay
     for (uint64_t f = latest; f > 0 && latest - f < VFH && k < n; f--) {
         vfh_ent *e = &g_vfh[f % VFH]; if (e->frame != f) continue;
         uint64_t *o = (uint64_t *)out + 5 * k++, shown = 0;
+        if (mode == 2) {   // queued: shown at its queue tick, VFH_LEAD_NS early (not at boot)
+            o[0] = 2; o[1] = f; o[2] = o[3] = o[4] = vfh_ticks(e->queued_ns > VFH_LEAD_NS ? e->queued_ns - VFH_LEAD_NS : e->queued_ns); nshown++; continue;
+        }
         double pt = e->ticket <= d ? mtl_presented_time(e->ticket) : -1;
         if (pt > 0) { uint64_t ago = hnow > (uint64_t)(pt * 1e9) ? hnow - (uint64_t)(pt * 1e9) : 0; shown = gnow > ago ? gnow - ago : 1; }
         else if (pt == 0) { if (!e->seen_ns) e->seen_ns = gnow; shown = e->seen_ns; }

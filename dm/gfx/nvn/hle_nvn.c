@@ -1664,6 +1664,13 @@ static void power_line(uint64_t frame) {
         if (fs_ != pfs || fr != pfr || ft != pft) LOG("[nvn] same-pass feedback up to frame %llu, per frame: %.1f snapshots taken, %.1f draws reused one, %.1f read the tile (%.1f waited for their pipeline)",
             frame, (fs_ - pfs) / nf, (fr - pfr) / nf, (ft - pft) / nf, (fw - pfw) / nf);
         pfs = fs_; pfr = fr; pft = ft; pfw = fw;
+        // DM_NVN_CLEAR_FMTMASK, DM_NVN_LOAD_COVER, DM_NVN_OMIT_UNWRITTEN (nvn_mtl.m, off by default): what they changed, with the attachment traffic it saves by the bandwidth ledger's count
+        void mtl_rpsave_stats(uint64_t s[9]); static uint64_t prs[9]; uint64_t rs9[9]; mtl_rpsave_stats(rs9);
+        if (memcmp(rs9, prs, sizeof rs9)) LOG("[nvn] render-pass savings up to frame %llu, per frame: format-complete clears taken whole %.1f (loads %.1f MB); loads skipped for a covering first draw %.1f (%.1f MB), lost %llu; "
+            "unwritten attachments left out %.1f in %.1f passes (loads and stores %.1f MB), passes split for a draw that writes one %.1f",
+            (unsigned long long)frame, (rs9[0] - prs[0]) / nf, (rs9[1] - prs[1]) / 1048576.0 / nf, (rs9[2] - prs[2]) / nf, (rs9[3] - prs[3]) / 1048576.0 / nf, (unsigned long long)(rs9[4] - prs[4]),
+            (rs9[5] - prs[5]) / nf, (rs9[6] - prs[6]) / nf, (rs9[7] - prs[7]) / 1048576.0 / nf, (rs9[8] - prs[8]) / nf);
+        memcpy(prs, rs9, sizeof prs);
         void mtl_pool_stats(uint64_t s[6]); static uint64_t pps[6]; uint64_t ps[6]; mtl_pool_stats(ps);   // the tables of handles traced to no slot (nvn_mtl.m pool_gpu)
         if (ps[0] != pps[0] || ps[2] != pps[2] || ps[3] != pps[3]) LOG("[nvn] pool tables up to frame %llu, per frame: %.2f built whole (%.2f ms), %.2f patched, %.2f kept; of these two %.2f over memory pool changes, %.2f over a new submission",
             frame, (ps[0] - pps[0]) / nf, (ps[1] - pps[1]) / 1e3 / nf, (ps[2] - pps[2]) / nf, (ps[3] - pps[3]) / nf, (ps[4] - pps[4]) / nf, (ps[5] - pps[5]) / nf);
@@ -2151,6 +2158,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         trow(f, "@rt_load_mb", (l - pl) / 1048576.0); trow(f, "@rt_store_mb", (st - pst) / 1048576.0); trow(f, "@pass_full_rw", (double)(fu - pf));
         uint64_t udc = mtl_udc_saved_bytes(); trow(f, "@unwritten_dc_mb", (udc - pudc) / 1048576.0);
         pl = l; pst = st; pf = fu; pudc = udc;
+        { void mtl_rpsave_stats(uint64_t s[9]); static uint64_t pr9[9]; uint64_t r9[9]; mtl_rpsave_stats(r9);   // DM_NVN_CLEAR_FMTMASK / LOAD_COVER / OMIT_UNWRITTEN: traffic saved this frame
+          trow(f, "@clear_fmt_mb", (r9[1] - pr9[1]) / 1048576.0); trow(f, "@cover_skip_mb", (r9[3] - pr9[3]) / 1048576.0); trow(f, "@omit_mb", (r9[7] - pr9[7]) / 1048576.0); memcpy(pr9, r9, sizeof pr9); }
         static uint64_t pae, par; uint64_t ae_, ar_; mtl_args_stats(&ae_, &ar_);
         trow(f, "@args_enc", (double)(ae_ - pae)); trow(f, "@args_reuse", (double)(ar_ - par)); pae = ae_; par = ar_;
         static uint64_t puc, pus; uint64_t uc_, us_; mtl_use_stats(&uc_, &us_);

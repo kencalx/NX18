@@ -80,7 +80,7 @@ class Wiring(unittest.TestCase):
         self.uses = uses(); self.table = table(); self.hdr = read('dm/host/dm_signpost.h')
 
     def test_there_are_lanes_to_check(self):
-        self.assertGreater(len(self.uses), 40); self.assertEqual(len(self.table), 22)
+        self.assertGreater(len(self.uses), 40); self.assertEqual(len(self.table), 23)
 
     def test_names_and_formats_are_literals_of_a_known_category(self):
         for f, kind, cat, name, a in self.uses:

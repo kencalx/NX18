@@ -184,6 +184,10 @@ Comparison and testing:
 |---|---|
 | `DM_NVN_TBDR=1` | Turns on the pass optimizations of the replay layer (store / load elision, pass merging). They are off by default: they infer which textures a draw reads from its bound slots, which bindless textures defeat ([docs/agents/04-graphics.md](../../docs/agents/04-graphics.md) section 4) |
 | `DM_NVN_UNWRITTEN_DC=0` | With `DM_NVN_TBDR=1`, turns off the single item "attachments not written in this pass are not stored" |
+| `DM_NVN_CLEAR_FMTMASK=1` | Off by default: a colour clear whose mask covers every channel of the attached format is a whole clear (load action), not a triangle ([reference](../../docs/reference/rendering.md#a-clear-mask-that-covers-the-attached-formats-channels-is-whole)) |
+| `DM_NVN_LOAD_COVER=1` | Off by default: outside the TBDR mode, a colour load the opening draw provably covers is DontCare ([reference](../../docs/reference/rendering.md#colour-loads-skipped-for-a-covering-first-draw-outside-the-tbdr-mode)) |
+| `DM_NVN_OMIT_UNWRITTEN=1` | Off by default: outside the TBDR mode, a colour attachment no draw of the pass writes is not attached ([reference](../../docs/reference/rendering.md#colour-attachments-no-draw-of-the-pass-writes-are-left-out)) |
+| `DM_NVN_UDC_DS_STORE=1` | Off by default: depth and stencil planes that `DM_NVN_UNWRITTEN_DC` would store DontCare are stored ([reference](../../docs/reference/rendering.md#depth-stored-dontcare-by-a-pass-that-only-tested-it-then-loaded)) |
 | `DM_NVN_FUSE_CHECK=1` | Same-frame check of pass merging; logs the comparison result every time |
 | `DM_NVN_CS_HOIST=0` | A compute dispatch between the draws of a pass ends it (by default it runs ahead of the pass when that changes nothing the draws before it read: [reference](../../docs/reference/rendering.md#compute-dispatches-between-the-draws-of-a-pass-run-ahead-of-it)) |
 | `DM_NVN_SLICE_MERGE=0` | Passes into other layers of one array or cube texture level stay apart (by default they run as one layered pass: [reference](../../docs/reference/rendering.md#passes-into-other-layers-of-one-texture-level-run-as-one-layered-pass)) |

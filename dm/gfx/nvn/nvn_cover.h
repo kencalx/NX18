@@ -39,3 +39,9 @@ static inline int nvn_cover(const float (*v)[4], int n, int prim, int cull, int 
     }
     return 0;
 }
+// The draw itself, before its vertices are read (first_draw_covers): an indirect or indirect-count draw is not what was recorded (the GPU reads its count and first from memory, and a
+// multi-draw's entry past its count draws nothing), and a tessellation, geometry or mesh stage, or a vertex shader that picks the layer or viewport, moves the vertices after the ones
+// read here. Any of them: the proof does not hold
+static inline int nvn_cover_draw_ok(int indirect, int multi_count, int extra_stages, int layer_out) {
+    return !indirect && !multi_count && !extra_stages && !layer_out;
+}

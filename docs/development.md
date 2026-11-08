@@ -630,6 +630,7 @@ The names are kept for saved Instruments templates; `dm/tools/tests/test_signpos
 | `gpu-present` | GPU | interval | the present pass from its commit to its feedback | `nvn_mtl.m` `present_now` |
 | `frame-gpu` | GPU | event | a frame's GPU time and its first-start-to-last-end span, 8 frames late | `hle_nvn.c` |
 | `takeover` | GPU | event | aliased textures taken over (`n`) | `nvn_mtl.m` `alias_take_over` |
+| `rp-save` | GPU | event | a pass that skipped colour loads for a covering first draw (`DM_NVN_LOAD_COVER`) or left unwritten colour attachments out (`DM_NVN_OMIT_UNWRITTEN`): `pass`, `load_skipped` and `left_out` slot masks | `nvn_mtl.m` `rp_begin_ex_` |
 | `link` | Display | interval | one frame's present on the display link's callback or the present thread (`lead_ms` before its target) | `nvn_mtl.m` |
 | `shown` | Display | event | the frame reached the screen (`late_ms` after its target), emitted when the system reports it | `nvn_mtl.m` `present_now` |
 | `tick` | Display | event | a display-link tick that took no frame (`empty`, `held`, `not taking`) | `nvn_mtl.m` display-link callback |

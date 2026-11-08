@@ -82,6 +82,9 @@ t_hmap: t_hmap.c ../nvn/nvn_hmap.h
 	clang -O1 -Wall -o $@ t_hmap.c
 t_cover: t_cover.c ../nvn/nvn_cover.h
 	clang -O1 -Wall -o $@ t_cover.c
+# The render-pass savings' pure decisions (../nvn/nvn_rpsave.h; DM_NVN_CLEAR_FMTMASK, DM_NVN_LOAD_COVER, DM_NVN_OMIT_UNWRITTEN): plain C, no GPU
+t_rpsave: t_rpsave.c ../nvn/nvn_rpsave.h ../nvn/nvn_cover.h
+	clang -O1 -Wall -Wextra -Werror -o $@ t_rpsave.c
 t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
 t_timestamp: t_timestamp.c ../nvn/nvn_timestamp.h
@@ -496,6 +499,10 @@ t_image_primitive_id: t_image_primitive_id.m $(MTL_T_DEP)
 t_unwritten_store: t_unwritten_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_unwritten_store.m $(MTL_T_SRC) $(FW)
 check_t_unwritten_store: RUN_ENV = MTL_DEBUG_LAYER=1
+# The render-pass savings on the GPU through production replay, each switch off and on in one process (DM_NVN_OMIT_UNWRITTEN, DM_NVN_CLEAR_FMTMASK as ab, the DM_AB phase set by hand)
+t_rpsave_gpu: t_rpsave_gpu.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rpsave_gpu.m $(MTL_T_SRC) $(FW)
+check_t_rpsave_gpu: RUN_ENV = MTL_DEBUG_LAYER=1
 t_upgrade_alias: t_upgrade_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upgrade_alias.m $(MTL_T_SRC) $(FW)
 check_t_upgrade_alias: RUN_ENV = MTL_DEBUG_LAYER=1

@@ -50,6 +50,18 @@ int main(void) {
     n = h_vi_FrameHist(fi, 10, NULL);
     assert(fi[5][3] == ticks(g_gns - 1000000000ull));   // the first-seen time stays
     assert(h_vi_FrameHist(fi, 2, NULL) == 2 && fi[0][1] == 10 && fi[1][1] == 9);   // a smaller buffer gets the newest
+    // queued (profile frame_history queued, DM_VI_FRAME_HISTORY=queued): the same 8 frames, every one shown, the queued (8-10) and the dropped (6) too, queue tick and both present
+    // ticks its queue time less VFH_LEAD_NS (present - queue 0); the present queue's progress is not read. Only the word "queued" takes it
+    assert(decide("queued") == 2 && decide("2") == DM_GAME_FRAME_HISTORY && decide("Queued") == DM_GAME_FRAME_HISTORY && decide("queued") == 2);
+    assert(h_vi_FrameHist(NULL, 0, NULL) == 8);
+    uint64_t seen5 = g_vfh[5].seen_ns;
+    memset(fi, 0xa5, sizeof fi);
+    assert(h_vi_FrameHist(fi, 10, NULL) == 8);
+    for (int k = 0; k < 8; k++) { uint64_t q = ticks(5000000000ull + (uint64_t)(9 - k) * 16666667ull - VFH_LEAD_NS);
+        assert(fi[k][0] == 2 && fi[k][1] == (uint64_t)(10 - k) && fi[k][2] == q && fi[k][3] == q && fi[k][4] == q); }
+    assert(fi[8][0] == 0xa5a5a5a5a5a5a5a5ull && g_vfh[5].seen_ns == seen5);   // nothing past the entries; "on"'s first-seen time untouched
+    assert(h_vi_FrameHist(fi, 1, NULL) == 1 && fi[0][1] == 10 && fi[0][0] == 2);   // the render thread's 1-entry call: the newest frame, shown
+    assert(decide("1") == 1);
     // off: the frames above are still recorded, but every call answers 0, the count query too, and writes nothing
     assert(decide("0") == 0);
     memset(fi, 0xa5, sizeof fi);
@@ -66,7 +78,27 @@ int main(void) {
     assert(g_vfs.calls == 0 && g_vfs.from == g_count);   // logged and begun again
     assert(decide("0") == 0); h_vi_FrameHist(fi, 8, NULL);
     assert(g_vfs.calls == 1 && g_vfs.more == 1 && g_vfs.ents == 0);   // counted with it off too
+    // Luigi's Mansion 3's present command (main+0xb7a4b8) given the queued answer at the interval 2 it set: wait A (newest entry queued: sleep a 60 Hz frame and ask again) never
+    // sleeps, and wait B (sleep until 16.67 ms after the newest entry's present tick) holds no present past where the frame was ready. Each frame starts at a 16.67 ms vsync (the
+    // host's acquire), its present is ready 6 ms later, the game's sleep overshoots by 0.1 ms and the host's present takes 0.05 ms before it records the frame. Without the lead wait B
+    // would bind from the second frame and push each present 0.15 ms later, and the 72nd would miss its vsync
+    {
+        assert(decide("queued") == 2);
+        const uint64_t D = 16666667, T = 16666667, w = 6000000, over = 100000, h = 50000;
+        uint64_t v0 = g_gns + D, worst = 0; int wa = 0, wb = 0, got = 0;
+        for (uint64_t k = 0; k < 600; k++) {
+            uint64_t v = v0 + k * D, now = v + w;
+            if (h_vi_FrameHist(fi, 1, NULL) == 1) { got++;
+                if (fi[0][0] == 1) wa++;
+                uint64_t until = fi[0][3] * 625 / 12 + T;
+                if (now < until) { now = until + over; wb++; }
+            }
+            if (now - v > worst) worst = now - v;
+            g_gns = now + h; present();
+        }
+        assert(got == 600 && wa == 0 && wb == 0 && worst == w);
+    }
     puts("vi frame history: count query 8, newest first, shown once handed on, presented or first-seen tick, dropped and queued frames not shown; off: 0 for every call, nothing written; "
-         "DM_VI_FRAME_HISTORY overrides the profile both ways; window counts");
+         "DM_VI_FRAME_HISTORY overrides the profile both ways; window counts; queued: every frame shown at its queue tick, LM3's waits A and B do not hold a present");
     return 0;
 }
