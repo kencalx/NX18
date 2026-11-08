@@ -81,6 +81,11 @@ class LauncherSettingsTests(unittest.TestCase):
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
 
+    def test_frame_rate_as_the_present_interval(self):   # present_interval_choice: Persona 5 Royal's 30 / 60 (DM_PRESENT_INTERVAL game / display)
+        p5r = build('01005CA01580E000', 'nvn')['DM_PRESENT_INTERVAL']
+        self.assertEqual((p5r['label'], p5r['default'], p5r['options']), ('Frame rate', 'game', [['game', '30 fps'], ['display', '60 fps']]))
+        self.assertNotIn('DM_PRESENT_INTERVAL', build(BOTW, 'nvn'), 'a game without the profile key keeps its own interval')
+
     def test_defaults_follow_each_platform_host(self):
         # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile. nvn_rec.h rec_on: iOS on, Mac off.
         for gid, ios_pso in ((BOTW, '1'), (WONDER, '0')):
