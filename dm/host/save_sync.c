@@ -352,14 +352,14 @@ static void prune_backups(const char *save, const char *side, const char *made) 
     free_names(v, k);
 }
 
-// A folder for a save about to be replaced: <save>-backups/<date> <side> (local: this device's, cloud: the cloud's); the oldest of that side beyond KEEP_BACKUPS go
+// A folder for a save about to be replaced: <save>-backups/<date> <side> (local: this device's, cloud: the cloud's). The oldest of that side beyond KEEP_BACKUPS go only once
+// it holds the save (the caller's prune_backups): a backup that fails must not cost a real one, and a start that fails every time (a full disk, the backups on another volume)
+// would otherwise leave an empty folder each time and remove one real backup each time. A caller whose backup fails removes the folder it made
 static int backup_dir(const char *save, const char *side, char *out, size_t n) {
     char stamp[32]; time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm); strftime(stamp, sizeof stamp, "%Y-%m-%d %H.%M.%S", &tm);
     snprintf(out, n, "%s-backups/%s %s", save, stamp, side);
     for (int k = 2; !access(out, F_OK); k++) snprintf(out, n, "%s-backups/%s %s %d", save, stamp, side, k);
-    if (mkdirs(out)) return -1;
-    prune_backups(save, side, out);
-    return 0;
+    return mkdirs(out) ? -1 : 0;
 }
 
 // DM_SAVE_SYNC → <folder>/<title ID>/save.dmsync; 0 when sync is off
@@ -425,6 +425,8 @@ static int fetch_timed(const char *cloud, const char *local, int ms) {   // fron
 // ---------- the two directions ----------
 // The cloud's save replaces this one. It is unpacked beside it first, so a pull that fails leaves this save as it was; then each folder is swapped in at once
 // (renamex_np, as a Commit swaps), and the one it replaced goes to the backups. kept: that backup, "" when this device had no save
+// A pull that fails leaves this device's folders where they were or in the backup, never in <save>.sync-tmp (mount_once removes it, and so does the next mount); its backup
+// folder goes when it is still empty (rmdir: never one that holds a folder of this device's already moved in)
 static int pull(const char *save, const char *bundle, ss_meta *r, char *kept, size_t kn) {
     char tmp[PATH_MAX]; snprintf(tmp, sizeof tmp, "%s.sync-tmp/in", save);
     kept[0] = 0;
@@ -433,15 +435,22 @@ static int pull(const char *save, const char *bundle, ss_meta *r, char *kept, si
         char here[PATH_MAX], incoming[PATH_MAX], old[PATH_MAX];
         folder_path(save, i, here, sizeof here); snprintf(incoming, sizeof incoming, "%s/%s", tmp, FOLDERS[i]);
         int fresh = !access(incoming, F_OK), had = has_entries(here);
-        if (had && !*kept && backup_dir(save, "local", kept, kn)) return -1;
+        if (had && !*kept && backup_dir(save, "local", kept, kn)) goto fail;
         snprintf(old, sizeof old, "%s/%s", kept, FOLDERS[i]);
         if (fresh && !access(here, F_OK)) {   // swapped: here holds the cloud's, incoming this device's
-            if (renamex_np(incoming, here, RENAME_SWAP) || (had ? rename(incoming, old) : rm_tree(incoming))) return -1;
-        } else if (fresh) { if (rename(incoming, here)) return -1; }
-        else if (had && rename(here, old)) return -1;   // a folder the cloud's save does not have: this device's goes, so both hold the same
+            if (renamex_np(incoming, here, RENAME_SWAP)) goto fail;
+            if (had ? rename(incoming, old) : rm_tree(incoming)) {   // this device's folder is in incoming now: swapped back, so it is not removed with <save>.sync-tmp
+                int e = errno; if (had) renamex_np(incoming, here, RENAME_SWAP); errno = e; goto fail;
+            }
+        } else if (fresh) { if (rename(incoming, here)) goto fail; }
+        else if (had && rename(here, old)) goto fail;   // a folder the cloud's save does not have: this device's goes, so both hold the same
     }
     rm_tree(tmp);
+    if (*kept) prune_backups(save, "local", kept);
     return 0;
+fail:
+    if (*kept) { int e = errno; if (!rmdir(kept)) kept[0] = 0; errno = e; }
+    return -1;
 }
 
 // What this device committed goes to the cloud, unless the cloud already has it. It replaces only what it was compared against: no save, the save last synced
@@ -474,7 +483,9 @@ static int send_save(const char *save, const char *title, const char *cloud, con
     }
     if (bad) {   // no save can be read from it, so no progress is lost: the file itself is kept, then replaced
         char raw[PATH_MAX + 16];
-        if (backup_dir(save, "cloud", kept, sizeof kept) || snprintf(raw, sizeof raw, "%s/save.dmsync", kept) >= (int)sizeof raw || rename(theirs, raw)) { SRED("cannot keep the cloud's damaged save before replacing it (errno=%d); not sent", errno); goto done; }
+        if (backup_dir(save, "cloud", kept, sizeof kept)) { SRED("cannot keep the cloud's damaged save before replacing it (errno=%d); not sent", errno); goto done; }
+        if (snprintf(raw, sizeof raw, "%s/save.dmsync", kept) >= (int)sizeof raw || rename(theirs, raw)) { SRED("cannot keep the cloud's damaged save before replacing it (errno=%d); not sent", errno); rmdir(kept); goto done; }
+        prune_backups(save, "cloud", kept);
         SRED("the cloud's save %s is damaged; this device's replaces it, and the damaged file is kept in %s", cloud, kept);
     }
     else if (got && other.files && strcmp(other.hash, st.base)) {
@@ -543,10 +554,12 @@ static void mount_once(const char *save, const char *title) {
     const char *base = !st.named || !strcmp(st.cloud, cloud) || (got > 0 && !strcmp(other.hash, st.base)) ? st.base : "";
     if (*st.base && !*base) SLOG("this device last synced with %s, not this folder's file: a first sync with it", *st.cloud ? st.cloud : "another cloud file");
     if (got < 0) { SLOG("playing on with this device's save; it is not sent until it has been compared with the cloud's"); failed = 1; }
-    // A front end that asks the player reads only the base line (DM_SAVE_SYNC_CHOICE): after another folder was picked it cannot see that the base is another folder's, so its
-    // "ask" (it found no conflict) says nothing about this folder's file. That first sync compares the two as without a front end: the newer wins, the other is kept. Asked
-    // there, the host would play on with this device's save and send nothing at every start
-    int ask = choice != CH_NONE && !(choice == CH_ASK && *st.base && !*base);
+    // A front end that asks the player reads only the base line (DM_SAVE_SYNC_CHOICE): after another folder was picked it cannot see that the base is another folder's. When
+    // this device's save is still the one last in step with the other folder, it sees only the cloud's changed, so its "ask" (it found no conflict) says nothing about this
+    // folder's file: that first sync compares the two as without a front end (the newer wins, the other is kept). Asked there, the host would play on with this device's save
+    // and send nothing at every start. When this device's save changed too, the front end sees both changed and asks the player itself: an "ask" then means it saw no
+    // conflict (it could not see the cloud's file yet, say), and neither is replaced (SS_ASK) until the player has chosen
+    int ask = choice != CH_NONE && !(choice == CH_ASK && *st.base && !*base && !strcmp(mine.hash, st.base));
     if (choice == CH_ASK && !ask) SLOG("the front end's \"ask\" (DM_SAVE_SYNC_CHOICE) was for the base of another cloud file: the newer save wins");
     ss_way way = got < 0 ? SS_KEEP : ss_decide(mine.hash, base, got ? other.hash : "", mine.saved, other.saved, ask, &both);
     // The player's choice, for the save it was made on (the cloud's may have changed between the check and this mount)
@@ -569,7 +582,9 @@ static void mount_once(const char *save, const char *title) {
         // start chose against it, so it is kept first and counts as the one last synced; the sender replaces only that one (send_save), not a save another device sends
         // meanwhile. This comes before the push below: a cloud save not kept stops here, before anything is forced
         if (got > 0 && other.files && strcmp(other.hash, base)) {
-            if (backup_dir(save, "cloud", kept, sizeof kept) || ss_read(theirs, kept, &other)) { SRED("cannot keep the cloud's save before replacing it (errno=%d): not sent", errno); failed = 1; break; }
+            if (backup_dir(save, "cloud", kept, sizeof kept)) { SRED("cannot keep the cloud's save before replacing it (errno=%d): not sent", errno); kept[0] = 0; failed = 1; break; }
+            if (ss_read(theirs, kept, &other)) { SRED("cannot keep the cloud's save before replacing it (errno=%d): not sent", errno); rm_tree(kept); kept[0] = 0; failed = 1; break; }   // only a copy: the cloud's file is still there
+            prune_backups(save, "cloud", kept);
             write_base(save, other.hash, cloud);
         }
         when(mine.saved, t, sizeof t); when(other.saved, t2, sizeof t2);
