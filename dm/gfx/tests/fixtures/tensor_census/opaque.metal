@@ -1,5 +1,5 @@
 // LDSM.x4 from an address read from shared memory, its first word stored.
-// The translator's output (spirv-cross, XLATE_DEBUG=1) since upstream's bd9f422d (each LDSM matrix lowered on its own, HMMA calls with TensorPass's flags) for a synthetic Ampere program, local size 32x1x1: no game's code.
+// The translator's output (spirv-cross, XLATE_DEBUG=1) since upstream's bd9f422d (each LDSM matrix lowered on its own, HMMA calls with TensorPass's flags) and 16776913 (each LDSM between subgroup barriers) for a synthetic Ampere program, local size 32x1x1: no game's code.
 // Cut down for dm/gfx/tests/test_tensor_census.py: the headers, and the helper's per-lane body (dmsh_build.py hmma_msl replaces it anyway).
 #include <metal_stdlib>
 #include <simd/simd.h>
@@ -14,6 +14,7 @@ kernel void main0(uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]],
     int _37 = _35 + 16;
     uint _40 = uint(int(uint(_37) >> uint(2)));
     float _42 = as_type<float>(_18[int(_40)]);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
     float _44 = as_type<float>(gl_SubgroupInvocationID);
     uint _46 = uint(int(uint(as_type<int>(_44)) >> uint(2)));
     int _48 = as_type<int>(_44) & 3;
@@ -24,5 +25,6 @@ kernel void main0(uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]],
     uint _58 = uint(int(uint(_56) >> uint(2)));
     float _60 = as_type<float>(_18[int(_58)]);
     int _62 = as_type<int>(_60);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
     _18[8] = uint(_62);
 }

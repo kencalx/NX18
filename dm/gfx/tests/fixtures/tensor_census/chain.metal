@@ -1,5 +1,5 @@
 // A from LDSM.x4 at lane * 16, B from LDSM.MT88.x2 (+0x400) and MOVM of its second word, two HMMAs accumulating, D stored.
-// The translator's output (spirv-cross, XLATE_DEBUG=1) since upstream's bd9f422d (each LDSM matrix lowered on its own, HMMA calls with TensorPass's flags) for a synthetic Ampere program, local size 32x1x1: no game's code.
+// The translator's output (spirv-cross, XLATE_DEBUG=1) since upstream's bd9f422d (each LDSM matrix lowered on its own, HMMA calls with TensorPass's flags) and 16776913 (each LDSM between subgroup barriers) for a synthetic Ampere program, local size 32x1x1: no game's code.
 // Cut down for dm/gfx/tests/test_tensor_census.py: the headers, and the helper's per-lane body (dmsh_build.py hmma_msl replaces it anyway).
 #include <metal_stdlib>
 #include <simd/simd.h>
@@ -7,13 +7,13 @@
 using namespace metal;
 
 static inline __attribute__((always_inline))
-int dmsh_hmma16816_f16(thread const int& _892, thread const int& _893, thread const int& _894, thread const int& _895, thread const int& _896, thread const int& _897, thread const int& _898, thread const int& _899, thread const int& _900, thread const int& _901, thread const int& _902, thread const int& _903, thread const int& _904, thread const int& _905, thread const int& _906, thread const int& _907, thread const int& _908, thread int& _909, threadgroup spvUnsafeArray<uint, 256>& _23)
+int dmsh_hmma16816_f16(thread const int& _893, thread const int& _894, thread const int& _895, thread const int& _896, thread const int& _897, thread const int& _898, thread const int& _899, thread const int& _900, thread const int& _901, thread const int& _902, thread const int& _903, thread const int& _904, thread const int& _905, thread const int& _906, thread const int& _907, thread const int& _908, thread const int& _909, thread int& _910, threadgroup spvUnsafeArray<uint, 256>& _23)
 {
-    uint _912 = uint(int(uint(_892) >> uint(2)));
-    _23[_893 + int(_912)] = uint(_894);
+    uint _913 = uint(int(uint(_893) >> uint(2)));
+    _23[_894 + int(_913)] = uint(_895);
     simdgroup_barrier(mem_flags::mem_threadgroup);
-    _909 = int(_23[_893]);
-    return int(_23[_893 + 1]);
+    _910 = int(_23[_894]);
+    return int(_23[_894 + 1]);
 }
 
 kernel void main0(uint gl_SubgroupInvocationID [[thread_index_in_simdgroup]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])
@@ -22,6 +22,7 @@ kernel void main0(uint gl_SubgroupInvocationID [[thread_index_in_simdgroup]], ui
     threadgroup spvUnsafeArray<uint, 256> _23;
     float _40 = as_type<float>(gl_SubgroupInvocationID);
     int _42 = as_type<int>(_40) * 16;
+    simdgroup_barrier(mem_flags::mem_threadgroup);
     float _44 = as_type<float>(gl_SubgroupInvocationID);
     uint _47 = uint(int(uint(as_type<int>(_44)) >> uint(2)));
     int _49 = as_type<int>(_44) & 3;
@@ -62,7 +63,9 @@ kernel void main0(uint gl_SubgroupInvocationID [[thread_index_in_simdgroup]], ui
     uint _119 = uint(int(uint(_117) >> uint(2)));
     float _121 = as_type<float>(_18[int(_119)]);
     int _123 = as_type<int>(_121);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
     int _125 = _42 + 1024;
+    simdgroup_barrier(mem_flags::mem_threadgroup);
     float _127 = as_type<float>(gl_SubgroupInvocationID);
     uint _129 = uint(int(uint(as_type<int>(_127)) >> uint(2)));
     int _131 = as_type<int>(_127) & 3;
@@ -119,6 +122,7 @@ kernel void main0(uint gl_SubgroupInvocationID [[thread_index_in_simdgroup]], ui
     int _233 = int(_231) << 16;
     int _235 = int(_209) | _233;
     float _237 = as_type<float>(_235);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
     float _239 = as_type<float>(gl_SubgroupInvocationID);
     uint _241 = uint(int(uint(as_type<int>(_239)) >> uint(2)));
     int _243 = as_type<int>(_239) & 3;
@@ -169,8 +173,8 @@ kernel void main0(uint gl_SubgroupInvocationID [[thread_index_in_simdgroup]], ui
     int _333 = 384;
     int _335 = 16;
     int _337;
-    int _840 = dmsh_hmma16816_f16(_303, _305, _307, _309, _311, _313, _315, _317, _319, _321, _323, _325, _327, _329, _331, _333, _335, _337, _23);
-    int _339 = _840;
+    int _841 = dmsh_hmma16816_f16(_303, _305, _307, _309, _311, _313, _315, _317, _319, _321, _323, _325, _327, _329, _331, _333, _335, _337, _23);
+    int _339 = _841;
     float _341 = as_type<float>(gl_LocalInvocationID.x);
     float _343 = as_type<float>(gl_LocalInvocationID.y);
     float _345 = as_type<float>(gl_LocalInvocationID.z);
@@ -199,8 +203,8 @@ kernel void main0(uint gl_SubgroupInvocationID [[thread_index_in_simdgroup]], ui
     int _391 = 384;
     int _393 = 16;
     int _395;
-    int _884 = dmsh_hmma16816_f16(_361, _363, _365, _367, _369, _371, _373, _375, _377, _379, _381, _383, _385, _387, _389, _391, _393, _395, _23);
-    int _397 = _884;
+    int _885 = dmsh_hmma16816_f16(_361, _363, _365, _367, _369, _371, _373, _375, _377, _379, _381, _383, _385, _387, _389, _391, _393, _395, _23);
+    int _397 = _885;
     _18[8] = uint(_397);
     _18[9] = uint(_395);
 }

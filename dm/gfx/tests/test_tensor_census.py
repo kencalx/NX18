@@ -43,7 +43,7 @@ BUFFERS = ('struct _16\n{\n    float4 _m0[4096];\n};\n\nstruct _23\n{\n    uint 
            '    const device _23* cp_s2 [[id(1)]];\n};\n\n')   # as spirv-cross declares the translator's constant buffers (float4 words) and storage buffers (uint words)
 SHUFFLE_HELPER = 'template<typename T>\ninline T spvSubgroupShuffle(T value, ushort lane)\n{\n    return simd_shuffle(value, lane);\n}\n\n'   # as spirv-cross defines it
 LOCAL = {'cutlass': [64, 2, 1], 'swizzle': [32, 1, 1], 'opaque': [32, 1, 1], 'const': [32, 1, 1], 'chain': [32, 1, 1], 'net': [32, 1, 1], 'slots': [32, 1, 1]}
-CALL0, FLAGS0, FLAGS1 = '    int _840 = dmsh_hmma16816_f16(', '    int _323 = 28;', '    int _381 = 19;'   # chain: the first call, the flags of both
+CALL0, FLAGS0, FLAGS1 = '    int _841 = dmsh_hmma16816_f16(', '    int _323 = 28;', '    int _381 = 19;'   # chain: the first call, the flags of both
 OLD_FORM = ('cutlass', 'swizzle', 'opaque', 'const', 'chain', 'net')   # the programs whose form before the flags is kept (fixtures/tensor_census/unflagged)
 
 
@@ -150,6 +150,9 @@ class Programs(unittest.TestCase):
         self.assertEqual(r['verdict']['stage3'], dict(known=True, hmma=2, a=0, a_why={}, a_not_ldsm=0, acc=0, of_acc=1, acc_why={}, b=0, b_from_ldsm=0))
         self.assertEqual(r['verdict']['tiles'], dict(ldsm=2, of=2, why_not={}, if_phi_uniform=0))
         self.assertEqual(set(a['windows'].values()), {'clean'})
+        # each LDSM between two subgroup barriers (upstream's 16776913), so both windows hold some: counted, and none ends a window (TensorPass counts none as a shared store,
+        # and a tile load moved past one reads the same rows while the window holds no store)
+        self.assertEqual((r['counts']['simdgroup_barriers'], r['counts']['barriers']), (4, 0))
         self.assertEqual([g['words_used_elsewhere'] for g in r['ldsm']], [0, 0])   # A, B, and B through MOVM only
         self.assertEqual(r['arrays']['_23']['role'], 'hmma scratch')
 
@@ -321,7 +324,7 @@ class Variants(unittest.TestCase):
 
     def test_hmma_in_a_loop(self):   # the second call in another block: no chain, no A kept, no direct A (what dmsh_xlate gives an HMMA after a branch: 24, 0)
         src = edit(source('chain'), '    float _341 = as_type<float>(gl_LocalInvocationID.x);', '    for (;;)\n    {\n    float _341 = as_type<float>(gl_LocalInvocationID.x);')
-        src = edit(edit(edit(src, '    int _397 = _884;\n', '    int _397 = _884;\n        break;\n    }\n'), FLAGS0, '    int _323 = 24;'), FLAGS1, '    int _381 = 0;')
+        src = edit(edit(edit(src, '    int _397 = _885;\n', '    int _397 = _885;\n        break;\n    }\n'), FLAGS0, '    int _323 = 24;'), FLAGS1, '    int _381 = 0;')
         r = census(src)
         self.assertEqual([h['in_loop'] for h in r['hmma']], [False, True])
         self.assertEqual(set(r['hmma'][1]['windows'].values()), {'block'})   # the loads are before the loop
