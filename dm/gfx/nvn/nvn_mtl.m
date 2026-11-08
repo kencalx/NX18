@@ -4141,7 +4141,7 @@ static int tex_cpu_content(const tex_t *t) {
         cpu_unc_take(t);
     }
     static uint64_t n[2]; if (n[unc]++ < 4) MLOG("texture written by the CPU before its first use ser=%llu %ux%ux%u format %#x%s pool flags %#x: uploaded from its storage, re-uploaded when it changes (%llu so far)",
-                                         (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, unc ? " (uncompressed, in storage the GPU has not written)" : "", t->pool->flags, (unsigned long long)n[unc]);
+                                         (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, unc ? " (uncompressed, in storage the GPU has not written)" : "", t->pool ? t->pool->flags : 0u, (unsigned long long)n[unc]);
     return 1;
 }
 // nvn_ft_poll (hle_nvn.c, tex_dirty_upload): the CPU wrote the pages of a registered texture after its first use. It is taken from its storage by the rule tex_cpu_content uses at first
@@ -6037,14 +6037,14 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
     prog_t *p = (prog_t *)cp;
     static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // Last result: same object, same serial and unchanged serial table means it is used directly
     uint64_t gen = g_ser_gen;
-    if (p == lp && p->serial == lser && gen == lgen && lpr) return lpr;
+    if (p == lp && p->serial == lser && gen == lgen && lpr) return lpr;   // NOLINT(clang-analyzer-core.NullDereference): no caller passes NULL (each checks its program first); the analyzer reads the static lp as 0 and tries p == lp == NULL
     __unsafe_unretained NvProg *have = p->serial ? serial_get(p->serial) : nil;
     if (have) { lp = p; lser = p->serial; lgen = gen; lpr = have; return have; }
     shmap_load();
     NvProg *o = [NvProg new];
     for (unsigned i = 0; i < p->nstage; i++) {
         // Key = sha256(first 0x880 bytes of the control section + code area): many of Mario's shaders share a control section but differ in code (dm/gfx/tools/shader_split.py). It was computed at SetShaders (hle_nvn.c): by now the game may have freed the control section
-        uint8_t md[8]; prog_key(p, i, md);
+        uint8_t md[8] = {0}; prog_key(p, i, md);   // zeroed: prog_key (hle_nvn.c) leaves md unwritten for a stage with no control section in a program the game wrote itself (no serial), which left stack bytes in the key
         NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
         NSString *stage = g_shmap[k];
         if (!stage) {   // Not in the package: look up the compute kernels embedded in the main body (nvn_builtin.h)
@@ -13012,12 +13012,12 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
         PD("j %llu draw-entry vs=%s fs=%s gs=%s prim=%d count=%d instances=%d indexed=%d indirect=%#llx discard=%d feedback=%d", g_stat_pass + !g_enc,
            p && p->sh[0] ? p->sh[0]->key : "-", p && p->sh[1] ? p->sh[1]->key : "-", p && p->sh[2] ? p->sh[2]->key : "-",
-           dw ? dw->prim : di->prim, dw ? dw->count : di->count, dw ? dw->instances : di->instances, di != NULL,
+           dw ? dw->prim : di->prim, dw ? dw->count : di->count, dw ? dw->instances : di->instances, di != NULL,   // NOLINT(clang-analyzer-core.NullDereference): every draw() / draw_() call passes one of dw, di
            (unsigned long long)(dw ? dw->ind : di->ind), S.rast_discard, S.tf_on); }
     // An indirect draw's arguments (and an indexed one's first indices) at encode and as the GPU left them (read once the submission completed, after any GPU culling earlier in it
     // wrote them): in pass-dumped frames, and for the first n indirect draws with DM_NVN_INDLOG=n
     static long indlog = -1; if (indlog < 0) { const char *v = getenv("DM_NVN_INDLOG"); indlog = v ? atol(v) : 0; }
-    uint64_t ia = dw ? dw->ind : di->ind;
+    uint64_t ia = dw ? dw->ind : di->ind;   // NOLINT(clang-analyzer-core.NullDereference): every draw() / draw_() call passes one of dw, di (a per-draw path: no check)
     if (ia && (passdump() || indlog > 0)) { if (indlog > 0) indlog--;
         unsigned long long pass = g_stat_pass + !g_enc, fr = (unsigned long long)atomic_load(&g_cur_frame); uint64_t ib = di ? di->ibuf : 0; int isz = di ? (di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4) : 0;
         uint32_t e_[2] = {0}; vm_size_t eg = 0; int eok = vm_read_overwrite(mach_task_self(), (vm_address_t)ia, sizeof e_, (vm_address_t)e_, &eg) == KERN_SUCCESS; uint32_t e0 = e_[0], e1 = e_[1];
@@ -14008,8 +14008,8 @@ static void copy_t2t(const p_copy_t2t *c) {
         if (zskip_has(c->src->serial, sl, ss)) zskip_add(c->dst->serial, dl, ds);
     }
     id<MTLTexture> s = tex_mtl(c->src);
-    PD("T src=%llu dst=%llu %dx%dx%d→%dx%dx%d flags=%#x", c->src->serial, c->dst->serial, c->sr.width, c->sr.height, c->sr.depth, c->dr.width, c->dr.height, c->dr.depth, c->flags);
-    if (!s || !c->dst) return;
+    PD("T src=%llu dst=%llu %dx%dx%d→%dx%dx%d flags=%#x", c->src ? c->src->serial : 0ull, c->dst ? c->dst->serial : 0ull, c->sr.width, c->sr.height, c->sr.depth, c->dr.width, c->dr.height, c->dr.depth, c->flags);
+    if (!s || !c->src || !c->dst) return;   // !c->src changes nothing (tex_mtl(NULL) is nil): it says that the lines below have both
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
     if (!tex_level_ok(s, sl, "texture copy source")) return;
@@ -14239,7 +14239,7 @@ static void clear_tex(const p_clear_tex *c) {
         || !(t.usage & MTLTextureUsageRenderTarget)) {
         if (!depth && !stencil && (t.usage & MTLTextureUsageRenderTarget)) { clear_tex_tri(t, lv, l0, c); return; }
         RED_ONCE(44, "texture clear case not implemented: region %d,%d %dx%d (level size %lux%lu) mask %#x render-target capable %d (format %#x flags %#x)", c->r.xoffset, c->r.yoffset, c->r.width, c->r.height,
-                 (unsigned long)w, (unsigned long)h, c->mask, !!(t.usage & MTLTextureUsageRenderTarget), c->tex->d.format, c->tex->d.flags);
+                 (unsigned long)w, (unsigned long)h, c->mask, !!(t.usage & MTLTextureUsageRenderTarget), c->tex ? c->tex->d.format : 0, c->tex ? c->tex->d.flags : 0);
         return;
     }
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
@@ -16016,6 +16016,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
         slot = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
         if ((ss = snap_take(t))) { memset(&snap, 0, sizeof snap); snap.magic = MAGIC('T', 'E', 'X', 0); snap.serial = ss; t = &snap; }
     }
+    if (!t) return 0;   // every caller passes one (mtl_present: the queue worker's &n->texture; mtl_present_ext: its local copy), and *t below needs it; ticket 0 = nothing queued
     mtl_tex_pin(t->serial);
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
