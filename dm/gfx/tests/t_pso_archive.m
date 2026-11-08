@@ -35,6 +35,7 @@ static int checks, failed;
 
 static id<MTLLibrary> g_lib, g_lib2;   // g_lib2: the same source again, for functions with no Metal 4 descriptor (a library hands out one function object per name)
 static id<MTLCommandQueue> g_q;
+static id _Nonnull must(id _Nullable x) { if (!x) abort(); return x; }   // a Metal or Foundation object the rest of the run needs: no object is a broken setup, not a finding
 static id<MTLFunction> test_fn(id<MTLLibrary> lib, NSString *name, int registered) {
     id<MTLFunction> f = [lib newFunctionWithName:name];
     MTLFunctionConstantValues *cv = f.functionConstantsDictionary.count ? [MTLFunctionConstantValues new] : nil;
@@ -462,13 +463,12 @@ int main(int argc, char **argv) { @autoreleasepool {
     EXPECT("one base waits for the archive", 1, g_arch_new);
     ArchEpoch *ep0 = g_ep;
     arch_flush_wait();
-    NSString *file = [@(dir) stringByAppendingPathComponent:@"00000.mtl4a"];
-    if (!file) abort();   // as the archiver folder above: the rest of the run needs the path
+    NSString *file = must([@(dir) stringByAppendingPathComponent:@"00000.mtl4a"]);
     EXPECT("archive file written", 1, [NSFileManager.defaultManager fileExistsAtPath:file]);
     EXPECT("the flush began a new period", 1, g_ep != ep0);
     EXPECT("nothing left to write", 0, g_arch_new);
     nvn_hm_clear(&g_pbase, hm_rel);   // as a new start: no base in memory, the archive opened
-    g_arch4 = @[[g_dev newArchiveWithURL:[NSURL fileURLWithPath:file] error:&err]];
+    g_arch4 = @[must([g_dev newArchiveWithURL:[NSURL fileURLWithPath:file] error:&err])];
     uint64_t built = g_pb_built;
     same_pixels("from the archive: RGBA8 blended, RGBA16F", MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA16Float, MTLColorWriteMaskAll);
     EXPECT("base from the archive", 1, g_pb_archived);
@@ -479,10 +479,10 @@ int main(int argc, char **argv) { @autoreleasepool {
     EXPECT("no layout: a pipeline", 1, pso_build(nd, &err) != nil);
     EXPECT("no layout: its base compiled", built + 1, g_pb_built);
     arch_flush_wait();
-    NSString *pfile = [@(dir) stringByAppendingPathComponent:@"p00001.mtl4a"];
+    NSString *pfile = must([@(dir) stringByAppendingPathComponent:@"p00001.mtl4a"]);
     EXPECT("no layout: written to a p file", 1, [NSFileManager.defaultManager fileExistsAtPath:pfile]);
     nvn_hm_clear(&g_pbase, hm_rel);
-    id<MTL4Archive> pa = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:pfile] error:&err], va = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:file] error:&err];
+    id<MTL4Archive> pa = must([g_dev newArchiveWithURL:[NSURL fileURLWithPath:pfile] error:&err]), va = must([g_dev newArchiveWithURL:[NSURL fileURLWithPath:file] error:&err]);
     g_arch4 = @[]; g_arch4p = @[pa, va];   // the layout base's file among the p files: not looked in
     uint64_t arch0 = g_pb_archived; built = g_pb_built;
     EXPECT("no layout again: a pipeline", 1, pso_build(nd, &err) != nil);
@@ -504,7 +504,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         NSArray<NSString *> *names = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil] sortedArrayUsingSelector:@selector(compare:)];
         EXPECT("compaction: one file per flush", PSO_ARCH_COMPACT + 1, names.count);
         NSMutableArray<id<MTL4Archive>> *open = [NSMutableArray array]; NSMutableArray<NSString *> *paths = [NSMutableArray array];
-        for (NSString *n in names.reverseObjectEnumerator) { NSString *f = [@(cdir) stringByAppendingPathComponent:n]; [paths addObject:f]; [open addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:f] error:&err]]; }
+        for (NSString *n in names.reverseObjectEnumerator) { NSString *f = must([@(cdir) stringByAppendingPathComponent:n]); [paths addObject:f]; [open addObject:must([g_dev newArchiveWithURL:[NSURL fileURLWithPath:f] error:&err])]; }
         nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = open;   // as a new start with that many files
         g_compact_enabled = 1; g_compact_files = paths; g_compacted = 0;
         g_arch_period_max = 4;   // the recaptured bases fill two periods and part of a third: each full one is handed over, the timer's flushes wait
@@ -545,7 +545,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("compaction: old capture marker removed", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_marker()]);
         nvn_hm_clear(&g_pbase, hm_rel); g_compact_enabled = 0; g_compacted = 0;
         NSMutableArray<id<MTL4Archive>> *left = [NSMutableArray array];
-        for (NSString *n in names) [left addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:[@(cdir) stringByAppendingPathComponent:n]] error:&err]];
+        for (NSString *n in names) [left addObject:must([g_dev newArchiveWithURL:[NSURL fileURLWithPath:must([@(cdir) stringByAppendingPathComponent:n])] error:&err])];
         g_arch4 = left;
         arch0 = g_pb_archived; built0 = g_pb_built;
         for (MTLRenderPipelineDescriptor *cd in descs) pso_build(cd, &err);
@@ -575,9 +575,9 @@ int main(int argc, char **argv) { @autoreleasepool {
     // a function that declares function constants (fn_spec, as shader_load loads one): on the Metal 4 path it stays unspecialized, with a specialized descriptor, and a
     // pipeline is made from it; nothing is specialized through MTLLibrary, which compiles through the MTLDevice (the HUD's "Consider adopting MTL4Compiler")
     {
-        id<MTLLibrary> cl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nconstant bool k [[function_constant(0)]];\n"
+        id<MTLLibrary> cl = must([g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nconstant bool k [[function_constant(0)]];\n"
             "struct V { float4 p [[position]]; };\nvertex V cvs(uint i [[vertex_id]]) { V o; o.p = float4(is_function_constant_defined(k) && k ? 1 : 0, 0, 0, 1); return o; }\n"
-            "fragment float4 cfs() { return is_function_constant_defined(k) && k ? float4(1) : float4(0); }\nfragment float4 plain() { return float4(1); }\n" options:nil error:&err];
+            "fragment float4 cfs() { return is_function_constant_defined(k) && k ? float4(1) : float4(0); }\nfragment float4 plain() { return float4(1); }\n" options:nil error:&err]);
         concurrent_functions(cl);
         NSError *se = nil; id<MTLFunction> cf = fn_spec(cl, @"cfs", [MTLFunctionConstantValues new], &se), cv = fn_spec(cl, @"cvs", [MTLFunctionConstantValues new], &se);
         EXPECT("constants: the function stays unspecialized on the Metal 4 path", 1, cf.functionConstantsDictionary.count);
