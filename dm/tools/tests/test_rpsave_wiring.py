@@ -69,8 +69,14 @@ class Switches(unittest.TestCase):
         guard = dr.index('if (g_enc && g_pass.omit && (prog_color_wmask(pr) & g_pass.omit)) {')
         self.assertLess(guard, dr.index('rp_begin_ex(mode)'), 'a draw that writes a slot left out must end the pass before it opens or uses one')
         self.assertIn('if (g_enc && g_pass.omit && g_fb_tseq == g_draw_seq && g_fb_tfn) {', dr)   # a tile read needs every attachment
-        self.assertIn('if (g_fd_pend) { g_fd_done = g_fd_pend; g_fd_pend = 0; }', dr)          # the covering draw was encoded
-        self.assertLess(dr.index('if (g_fd_pend) { g_fd_done'), dr.index('udc_note_draw(pr, raster_mask);'))
+        self.assertIn('if (g_fd_pend && !g_defer_replaying) { g_fd_done = g_fd_pend; g_fd_pend = 0; }', dr)   # the covering draw was encoded (not a deferred draw replayed first)
+        self.assertLess(dr.index('if (g_fd_pend && !g_defer_replaying) { g_fd_done'), dr.index('udc_note_draw(pr, raster_mask);'))
+        # a covering draw that returned unencoded (no pipeline): the next draw ends the pass before it could land on the skipped loads, and so does a clear drawn as a triangle
+        nenc = dr.index('if (g_enc && g_fd_pend && !g_defer_replaying) {')
+        self.assertLess(nenc, dr.index('rp_begin_ex(mode)')); self.assertLess(nenc, dr.index('if (g_fd_pend && !g_defer_replaying) { g_fd_done'))
+        self.assertIn('rp_end(); }', dr[nenc:nenc + 200])
+        self.assertIn('if (g_enc && (g_rp_aw || g_fd_pend)) rp_end();', func(self.mtl, 'static id<MTL4RenderCommandEncoder> rp_begin(void) {'))
+        self.assertEqual(dr.count('if (orph & ~g_fd_done) fd_lost(orph & ~g_fd_done);'), 2)   # a draw encoded again (texture upgrade, range retry) that covers again loses nothing
         tri = func(self.mtl, 'static void clear_color_tri(const p_clear_color *c) {')
         self.assertIn('(g_pass.omit >> slot & 1)', tri)
         end = func(self.mtl, 'static void rp_end(void) {')
@@ -88,6 +94,10 @@ class Switches(unittest.TestCase):
         for col in ('@clear_fmt_mb', '@cover_skip_mb', '@omit_mb'): self.assertIn('"' + col + '"', nvn)
         self.assertIn('void mtl_rpsave_stats(uint64_t s[9])', self.mtl)
         self.assertIn('DM_SP_EVENT(DM_SP_GPU, "rp-save"', self.mtl)
+        # a left-out slot's store is counted saved only where DM_NVN_UNWRITTEN_DC would have kept it (its rule, per encoded draw), not twice its bytes up front
+        self.assertNotIn('g_omit_bytes += 2 *', self.mtl)
+        self.assertIn('(!udc_on() || (g_omit_udcw >> i & 1))) g_omit_bytes += g_omit_ab[i];', func(self.mtl, 'static void rp_end(void) {'))
+        self.assertIn('if (g_pass.omit) g_omit_udcw |= udc_rule_writes(pr) & g_pass.omit;', func(self.mtl, 'static void draw_(const p_draw *dw, const p_draw_idx *di) {'))
 
     def test_the_pure_test_is_built_and_run_by_ci(self):
         self.assertRegex(read('dm/gfx/tests/Makefile'), r'(?m)^t_rpsave: t_rpsave\.c \.\./nvn/nvn_rpsave\.h')

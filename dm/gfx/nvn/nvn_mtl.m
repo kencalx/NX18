@@ -4299,7 +4299,8 @@ static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level);
 // They rest only on what the pass itself writes, never on who reads a texture later, so bindless readers do not touch them (the reason DM_NVN_TBDR stays off).
 // DM_NVN_LOAD_COVER=1: a colour attachment's load becomes DontCare when the draw that opens the pass provably writes every pixel of it (first_draw_covers, the TBDR mode's proof) and
 //   the attachment's level is the pass's size; the pass then holds what that draw writes, as Metal defines a DontCare load whose every pixel is written. Until that draw is encoded the
-//   slots stay in g_fd_pend: a pass that ends first (no pipeline, say) has lost their old contents, logged red and counted (fd_lost), never silent.
+//   slots stay in g_fd_pend and no other draw or clear lands on them (draw_ and rp_begin end the pass first); a pass that ends so (no pipeline, say) has lost their old contents,
+//   logged red and counted (fd_lost), never silent.
 // DM_NVN_OMIT_UNWRITTEN=1: a colour attachment that no draw of the pass writes (the pipeline's write masks: channel mask and the fragment's outputs, prog_color_wmask) is not attached:
 //   no load, no store, its memory untouched, where it was loaded and stored (or stored DontCare by DM_NVN_UNWRITTEN_DC, which Metal leaves undefined). The opening draw and a scan of the
 //   ops after it (cw_scan) pick the slots; a later draw that writes one (or reads it from the tile), or a clear of it, ends the pass first, so a missed write costs a pass split, never the write.
@@ -4310,6 +4311,9 @@ static uint32_t g_fd_pend, g_fd_orphan, g_fd_done;   // slots whose load the ope
 static uint64_t g_lcov_n, g_lcov_bytes, g_fd_lost;
 static uint32_t g_rp_omit;   // the slots draw() asks the pass it opens to leave out (DM_NVN_OMIT_UNWRITTEN), only while it opens it
 static uint64_t g_omit_n, g_omit_pass, g_omit_bytes, g_omit_split, g_cfm_n, g_cfm_bytes;
+// g_omit_bytes counts a left-out slot's load when the pass opens, and its store when the pass ends only if the store would have happened: DM_NVN_UNWRITTEN_DC (on by default) already
+// stores DontCare a loaded slot no draw of the pass writes by its rule (udc_note_draw: a channel mask nibble or a fragment output, any writable image), so for those only the load is new
+static uint64_t g_omit_ab[8]; static uint32_t g_omit_udcw;   // the open pass's left-out slots' level bytes; those of them a draw it encoded writes by DM_NVN_UNWRITTEN_DC's rule
 static int lcov_mode(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_LOAD_COVER", 0); if (m == 1) MLOG("DM_NVN_LOAD_COVER=1: a colour load is skipped when the draw that opens the pass covers the attachment"); } return m; }
 static int omit_mode(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_OMIT_UNWRITTEN", 0); if (m == 1) MLOG("DM_NVN_OMIT_UNWRITTEN=1: colour attachments no draw of the pass writes are left out of it"); } return m; }
 static int cfm_mode(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_CLEAR_FMTMASK", 0); if (m == 1) MLOG("DM_NVN_CLEAR_FMTMASK=1: a colour clear whose mask covers every channel of the attached format is a whole clear"); } return m; }
@@ -4392,6 +4396,7 @@ static void rt_mirror_flush(void) {
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
 }
 static void rp_end(void) { if (g_enc) { AP_B; geo_mesh_flush_pass();
+    if (g_pass.omit) for (int i = 0; i < 8; i++) if ((g_pass.omit >> i & 1) && (!udc_on() || (g_omit_udcw >> i & 1))) g_omit_bytes += g_omit_ab[i];   // DM_NVN_OMIT_UNWRITTEN: the stores saved
     if (g_fd_pend) {   // DM_NVN_LOAD_COVER: the draw that covers these slots was not encoded. Their tiles hold nothing: not stored, so memory keeps what it held (a draw redrawn in the next pass covers it again)
         for (int i = 0; i < g_nsd; i++) if (g_sd[i].depth == 0 && g_sd[i].idx >= 0 && (g_fd_pend >> g_sd[i].idx & 1)) g_sd[i].state = 2;
         g_fd_orphan |= g_fd_pend; g_fd_pend = 0; }
@@ -4543,7 +4548,8 @@ static void attach(MTLRenderPassAttachmentDescriptor *a, const tex_t *t, const v
 // (Mac character select screen: the color-clear pass drags along a 400x225 depth load and store)
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only);
 static NSUInteger g_rp_aw; static int g_rp_whole;
-static id<MTL4RenderCommandEncoder> rp_begin(void) { if (g_enc && g_rp_aw) rp_end(); g_rp_whole = 1; id<MTL4RenderCommandEncoder> e = rp_begin_ex(0); g_rp_whole = 0; return e; }   // the callers draw anywhere in the target (see g_rp_aw)
+// rp_begin ends a pass whose skipped loads wait for a covering draw not encoded (g_fd_pend, DM_NVN_LOAD_COVER): a clear drawn as a triangle does not land on them
+static id<MTL4RenderCommandEncoder> rp_begin(void) { if (g_enc && (g_rp_aw || g_fd_pend)) rp_end(); g_rp_whole = 1; id<MTL4RenderCommandEncoder> e = rp_begin_ex(0); g_rp_whole = 0; return e; }   // the callers draw anywhere in the target (see g_rp_aw)
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only);
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) { AP_B; id<MTL4RenderCommandEncoder> e = rp_begin_ex_(clear_only); AP_E(1); return e; }
 static void bare_dims(NSUInteger *w, NSUInteger *h);
@@ -4569,7 +4575,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         if (rt_dup_slot(&R.rt, i)) continue;   // a slot attached twice is not attached (see rt_dup_slot)
         if (omit >> i & 1) {   // no draw of the pass writes it: not attached, its memory untouched (see rp_omit_plan)
             id<MTLTexture> ot = tex_mtl(R.rt.color[i]); NSUInteger ol = R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0;
-            g_omit_n++; g_omit_bytes += 2 * att_bytes(ot, ol);
+            g_omit_n++; g_omit_ab[i] = att_bytes(ot, ol); g_omit_bytes += g_omit_ab[i];   // the load; the store at rp_end (g_omit_udcw)
             PD("O %llu c%d ser=%llu left out: no draw in the pass writes it", g_stat_pass + 1, i, (unsigned long long)R.rt.color[i]->serial);
             continue;
         }
@@ -4734,7 +4740,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     }
     memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0;
     {   // Pass info (same convention as the former per-draw fetch: colors take each attachment's base texture format; sample count takes the last color attachment, or depth if there is depth)
-        uint64_t ser = g_pass.serial + 1; memset(&g_pass, 0, sizeof g_pass); g_pass.serial = ser; g_pass.omit = omit; g_omit_pass += omit != 0;
+        uint64_t ser = g_pass.serial + 1; memset(&g_pass, 0, sizeof g_pass); g_pass.serial = ser; g_pass.omit = omit; g_omit_pass += omit != 0; g_omit_udcw = 0;
         for (int i = 0; i < R.rt.n && i < 8; i++) { id<MTLTexture> t = R.rt.color[i] ? pd.colorAttachments[i].texture : nil;
             if (t) { g_pass.cfmt[i] = (uint32_t)t.pixelFormat; g_pass.samples = (uint32_t)t.sampleCount; } }
         id<MTLTexture> dt = R.rt.depth ? pd.depthAttachment.texture : nil, stt = R.rt.depth ? pd.stencilAttachment.texture : nil;   // Depth / stencil attachments are fetched separately (possibly only one of them is attached)
@@ -12088,6 +12094,14 @@ static uint32_t draw_color_writes(NvProg *pr) {
     }
     return mask;
 }
+// The colour slots DM_NVN_UNWRITTEN_DC counts as written by a draw with program pr (udc_note_draw, after it has set pr->c_iw): every slot when a stage may write an image or storage,
+// else a slot whose channel mask nibble is not 0 or whose output the fragment writes (all outputs when not known). DM_NVN_OMIT_UNWRITTEN's saved-store count only (g_omit_udcw)
+static uint32_t udc_rule_writes(NvProg *pr) {
+    if (pr && pr->c_iw > 1) return 0xffu;
+    NvShader *fs = pr ? pr->sh[1] : nil; uint32_t scm = fs ? (fs->rf.color_known ? fs->rf.color_mask : UINT32_MAX) : 0, m = 0;
+    for (int i = 0; i < 8; i++) if (((S.chmask.mask >> (4 * i)) & 0xf) || (scm >> i & 1)) m |= 1u << i;
+    return m;
+}
 // DM_NVN_OMIT_UNWRITTEN: the colour slots a draw with program pr writes, as its pipeline's write masks make them (pso_build: the channel mask nibble and the fragment's outputs). Anything
 // that may change the outputs counts every slot with channels: a logic operation, DM_NVN_MAGSCAN's override, a geometry, tessellation or mesh stage; a geometry or mesh draw counts all
 static uint32_t prog_color_wmask(NvProg *pr) {
@@ -12237,6 +12251,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         static int once2; if (!once2++) MLOG("same-target continuation: a draw in the continued pass needs a depth / stencil plane that is not attached; split here (first case pass %llu)", g_stat_pass);
         PD("M %llu a draw in the continued pass needs a depth / stencil plane that is not attached; split here", g_stat_pass); rp_end(); }
     if (g_rt_range_active && (!rt_range_pr_ro(pr) || !S.ds.dt || S.ds.dw || S.ds.st)) rp_end();   // The external write visibility at the original encoder boundary is not removed
+    // DM_NVN_LOAD_COVER: the pass is open and its covering draw (the one that opened it) returned without being encoded (no pipeline, say). No later draw may land on the loads it
+    // skipped: the pass ends here, its pending slots stored DontCare and counted lost (rp_end, fd_lost), and this draw opens a pass that loads them. Not for the deferred draws a
+    // queued draw replays into its own pass (defer_replay) before it is encoded: the covering draw comes after them
+    if (g_enc && g_fd_pend && !g_defer_replaying) { PD("M %llu the draw that covers the skipped loads %#x was not encoded; split here", g_stat_pass, g_fd_pend); rp_end(); }
     if (g_enc && g_pass.omit && (prog_color_wmask(pr) & g_pass.omit)) {   // DM_NVN_OMIT_UNWRITTEN: this draw writes a slot the pass left out; the next pass attaches it
         g_omit_split++; PD("M %llu a draw writes colour slots %#x the pass left out; split here", g_stat_pass, prog_color_wmask(pr) & g_pass.omit); rp_end(); }
     g_samples_fb_left = !tbdr_on();
@@ -12392,7 +12410,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         return;
     }
     // Parameter binding captures the actual resources under the registry lock; if the version changed between the eligibility check and the binding, split and retry before any GPU draw.
-    if (g_rt_range_active && (g_pass.reg_gen != g_reg_gen || g_pass.ser_gen != g_ser_gen || g_pass.range_dirty != nvn_dirty_now())) { rp_end(); draw(dw, di); return; }
+    if (g_rt_range_active && (g_pass.reg_gen != g_reg_gen || g_pass.ser_gen != g_ser_gen || g_pass.range_dirty != nvn_dirty_now())) {
+        rp_end(); uint32_t orph = g_fd_orphan; g_fd_orphan = 0; g_fd_done = 0;   // DM_NVN_LOAD_COVER: as for the texture upgrade above
+        draw(dw, di); if (orph & ~g_fd_done) fd_lost(orph & ~g_fd_done); return; }
     int prim = dw ? dw->prim : di->prim;
     MTLPrimitiveType mp;
     switch (prim) {
@@ -12469,8 +12489,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
 #ifdef NVN_RT_RANGE_TEST
     rr_snap(dw,di);
 #endif
-    if (g_fd_pend) { g_fd_done = g_fd_pend; g_fd_pend = 0; }   // the draw that covers the skipped loads is encoded (DM_NVN_LOAD_COVER)
+    if (g_fd_pend && !g_defer_replaying) { g_fd_done = g_fd_pend; g_fd_pend = 0; }   // the draw that covers the skipped loads is encoded (DM_NVN_LOAD_COVER; a deferred draw replayed first is not it)
     udc_note_draw(pr, raster_mask);
+    if (g_pass.omit) g_omit_udcw |= udc_rule_writes(pr) & g_pass.omit;   // DM_NVN_OMIT_UNWRITTEN's count of the stores it saves (rp_end)
     swrite_note(pr); order_note(pr);
     if (g_mtk.on) { mtk_encode(en); return; }
     if (g_geo_mesh.on) { geo_mesh_encode(en); return; }
