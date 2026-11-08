@@ -16,6 +16,10 @@ A connected game controller hides the touch controls, all but the gear, and keep
 
 In portrait (an iPad, an iPhone Duo's inner screen) the picture sits above the controls; so it does on a Duo half folded, the picture on the upper half. An iPad game also runs in a window of any size (Stage Manager).
 
+## Cheats
+
+Put an Atmosphère cheat file for the game in the Files app, under the app's name, in the `cheats` folder: named after the game's build ID (`0123456789ABCDEF.txt`), or a Switch SD card's `atmosphere/contents/<title ID>/cheats/` folder. Then open the in-game menu (the gear) › **Cheats** › **Reload cheats**. The same submenu shows the build ID the game looks for, turns each cheat on or off (remembered for the next start) and turns all of them off at once (**Cheats on**). Cheats that rewrite the game's code cannot run on an iPhone or iPad, whose app code is signed; the submenu shows them greyed out with the reason. Pack such patches into the app instead (below). A cheat file packed from the game's mods folder comes back at the next start if you delete it: to stop its cheats, turn off **Cheats on** in the submenu, or set `DM_CHEATS=` (nothing after the `=`, every cheat off) in `Documents/env.txt`.
+
 ## Rumble
 
 Game vibration uses the iPhone's haptic engine or a compatible connected controller. Controllers with separate left/right haptic outputs keep those effects separate. The settings screen's **Game rumble** and **Rumble strength** control it independently of **Touch feedback**. Phone rumble approximates the Switch's effects; physical feel and controller compatibility still need device testing.

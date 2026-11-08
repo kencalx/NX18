@@ -114,6 +114,23 @@ uint64_t mtl_present_count(void) { return 0; }
 static int g_present_stretch;   // what the front end last told the present (Picture Stretch)
 void mtl_present_stretch(int on) { g_present_stretch = on; }
 int duo_harness_present_stretch(void) { return g_present_stretch; }
+// The cheats GameMenu.swift lists (hle_cheats.c): no cheats folder in the harness, so the in-game menu has no Cheats submenu
+int dm_cheats_found(void) { return 0; }
+int dm_cheats_ncheats(void) { return 0; }
+const char *dm_cheats_build(void) { return ""; }
+const char *dm_cheats_version(void) { return ""; }
+const char *dm_cheats_dir_path(void) { return ""; }
+int dm_cheats_nothers(void) { return 0; }
+const char *dm_cheat_name_at(int i) { (void)i; return ""; }
+const char *dm_cheat_why_at(int i) { (void)i; return ""; }
+const char *dm_cheat_section_at(int i) { (void)i; return ""; }
+int dm_cheat_kind_at(int i) { (void)i; return 2; }
+int dm_cheat_flags_at(int i) { (void)i; return 0; }
+int dm_cheat_on_at(int i) { (void)i; return 0; }
+void dm_cheat_toggle(int i) { (void)i; }
+void dm_cheats_reload(void) {}
+int dm_cheats_master(void) { return 1; }
+void dm_cheats_master_set(int on) { (void)on; }
 __thread _Atomic int dm_host_work;
 void dm_gfx_suspend(int on) { (void)on; }
 void dm_audio_suspend(int on) { (void)on; }

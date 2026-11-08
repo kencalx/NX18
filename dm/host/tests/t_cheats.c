@@ -143,6 +143,18 @@ int main(void) {
     fresh("none", NULL); load_all();
     CHECK(!g_tick_started && !g_alias && !atomic_load(&g_active), "without a cheats file no alias is mapped and no idle thread runs");
 
+    // ---- the menus before dm_cheats_init has finished (the iPhone's in-game menu, opened while the preload thread loads): nothing to see, nothing to do ----
+    fresh("early", "[Early]\n04000000 00004000 00000001\n"); load_all();   // the state init's load leaves, before init's end publishes it
+    CHECK(g_ncheat == 1 && !dm_cheats_dir_path()[0] && !dm_cheats_build()[0] && !dm_cheats_found() && dm_cheats_ncheats() == 0 && !dm_cheat_name_at(0)[0]
+          && dm_cheat_kind_at(0) == 2 && !dm_cheat_on_at(0) && !dm_cheats_report()[0], "before init has finished the menus see no folder and no cheats");
+    dm_cheat_toggle(0); dm_cheats_reload(); dm_cheats_master_set(0);
+    CHECK(!g_cheat[0].on && g_ncheat == 1 && atomic_load(&g_master) && !exists(".cheats-off-0100000000000000"), "and their actions do nothing");
+    atomic_store_explicit(&g_ready, 1, memory_order_release);   // what the end of dm_cheats_init does (this test loads with load_all itself)
+    CHECK(!strcmp(dm_cheats_dir_path(), g_dir) && !strcmp(dm_cheats_build(), "1111111111111111") && dm_cheats_found() && dm_cheats_ncheats() == 1
+          && !strcmp(dm_cheat_name_at(0), "Early") && dm_cheat_kind_at(0) == 0 && dm_cheats_report()[0], "once it has, they see the loaded file");
+    dm_cheat_toggle(0);
+    CHECK(g_cheat[0].on && dm_cheat_on_at(0), "and a toggle takes");
+
     // ---- A: store register, its six offset types and the increment ----
     char t[2048];
     uint64_t abs20 = (uint64_t)(uintptr_t)img + 0x4020;

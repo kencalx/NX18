@@ -31,7 +31,7 @@ Switches:
 - `DM_CHEATS=<folder>`: cheats folder. Default `<DM_ROOT>/cheats` (the game's work folder). A flat folder and the Atmosphère tree both work.
 - `DM_CHEATS_ANY_BUILD=1`: with no file of this build, load the folder's single `.txt` of another build with a `[RED]` warning that addresses may be wrong.
 - `DM_CHEATS_ON=<name>,…`: cheats turned on by name at launch (case-insensitive; the `<build ID>.enabled` states still apply).
-- `DM_CHEATS_DEBUG=1`: log every write the cheats make (cheat name, bytes, value, guest address), and with no file of this build the other-build `.txt` list.
+- `DM_CHEATS_DEBUG=1`: log every write the cheats make (cheat name, bytes, value, guest address), every read (a pointer chain's addresses and values, so the link that leaves the game's memory shows), and with no file of this build the other-build `.txt` list. The first 600 access lines are logged, then one in 300. A refused address is named in the log (always, on a cheat's first failure): a host image, the host's malloc heap, another host mapping, or nothing mapped, since the game's memory is its modules, its heap and its reserved address block only.
 - `DM_CHEATS_WINDOW=1`: open the Cheats panel at launch.
 
 Implemented opcodes, all with the reference's word order and block-skipping (`dmnt_cheat_vm.cpp`):

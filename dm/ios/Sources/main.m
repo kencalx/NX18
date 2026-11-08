@@ -125,6 +125,34 @@ static void romfs_identity_report(NSString *doc) {
 }
 
 static NSString *program_env(void);
+// Cheats (dm/host/hle_cheats.c): Atmosphère cheat files, <build ID>.txt or the SD card's atmosphere/contents/<title ID>/cheats/ tree, in Documents/cheats unless an env file or the
+// launch environment names another folder with DM_CHEATS (DM_CHEATS= with no folder turns cheats off). The folder is made, with a README, so the Files app shows where they go; the in-game
+// menu's Cheats submenu (GameMenu.swift) turns them on and off and reloads the folder. Cheat files packed into the app (the NSP script's mods folder: <App>/dm/cheats) are copied
+// in at each start when missing, and a file already there is kept, so the player's own edits and toggles (<build ID>.enabled) stay. Nothing records a copy, so a packed file the
+// player deletes is back at the next start: to stop its cheats, turn off the Cheats submenu's master switch (Cheats on, which stops every cheat of the game), or set DM_CHEATS= (empty)
+static void cheats_locate(NSString *doc, NSString *res) {
+    if (getenv("DM_CHEATS") && !*getenv("DM_CHEATS")) { fprintf(stderr, "boot: cheats off (DM_CHEATS is empty)\n"); return; }
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *dir = [doc stringByAppendingPathComponent:@"cheats"];
+    setenv("DM_CHEATS", dir.fileSystemRepresentation, 0);
+    dir = @(getenv("DM_CHEATS"));
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *readme = [dir stringByAppendingPathComponent:@"README.txt"];
+    if (![fm fileExistsAtPath:readme])
+        [@"Cheats for this game go in this folder: an Atmosphere cheat file named after the game's build ID (the first 16 hex digits, such as 0123456789ABCDEF.txt),\n"
+          "or a Switch SD card's atmosphere/contents/<title ID>/cheats/ folder. The in-game menu (the gear) > Cheats shows the build ID it looks for,\n"
+          "turns each cheat on or off, and reloads this folder after you copy a file in. Cheats that rewrite the game's code cannot run on an iPhone:\n"
+          "pack such patches into the app instead (the NSP script's mods folder).\n" writeToFile:readme atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSString *packed = [[res stringByAppendingPathComponent:@"dm"] stringByAppendingPathComponent:@"cheats"];
+    int copied = 0;
+    for (NSString *name in [fm contentsOfDirectoryAtPath:packed error:nil] ?: @[]) {
+        NSString *to = [dir stringByAppendingPathComponent:name];
+        if ([name hasPrefix:@"."] || [fm fileExistsAtPath:to]) continue;
+        if ([fm copyItemAtPath:[packed stringByAppendingPathComponent:name] toPath:to error:nil]) copied++;
+    }
+    fprintf(stderr, "boot: cheats folder %s%s\n", dir.fileSystemRepresentation, copied ? [NSString stringWithFormat:@" (%d packed file(s) copied in)", copied].UTF8String : "");
+}
+
 static int boot_env(void) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
@@ -181,6 +209,7 @@ static int boot_env(void) {
     setenv("DM_GUEST_FILE_DIR", NSTemporaryDirectory().fileSystemRepresentation, 0);   // DM_GUEST_FILE (hle_svc.c) keeps the guest's memory in files there
     setenv("DM_FONT_DIR", [[res stringByAppendingPathComponent:@"dm"] stringByAppendingPathComponent:@"font"].fileSystemRepresentation, 0);   // Shared-font stand-ins (standard.ttf / nintendo_ext.ttf): iOS lacks the macOS font path
     aoc_locate();   // add-on content: Documents/aoc, else <App>/aoc; an empty Documents/aoc explicitly selects no DLC
+    cheats_locate(doc, res);   // cheats: Documents/cheats, seeded from <App>/dm/cheats
     NSString *pso = [res stringByAppendingPathComponent:@"pso"];   // the pipeline archive made offline (build_ipa.sh, dm/gfx/tools/pso_offline.py): the shader pairs' bases, which the device then does not build
     if ([fm fileExistsAtPath:pso]) setenv("DM_PSO_BUNDLE", pso.fileSystemRepresentation, 0);
     chdir(doc.fileSystemRepresentation);
