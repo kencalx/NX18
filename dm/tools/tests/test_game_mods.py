@@ -1,4 +1,4 @@
-"""dm/tools/game_mods.py: a game's mods folder (code patches, RomFS file replacements, cheats) on synthetic modules and images; no game files or keys needed"""
+"""dm/tools/game_mods.py: a game's mods folder (switchable code patches, cheats) on synthetic modules and images; no game files or keys needed"""
 import hashlib
 import importlib.util
 import os
@@ -16,7 +16,6 @@ sys.path.insert(0, str(REPO / 'dm/tools'))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import game_mods as gm
 import nso
-import romfs
 import romfs_image
 from test_nso import make_nso, TEXT, RO, DATA
 
@@ -193,43 +192,6 @@ class Folder(unittest.TestCase):
         self.assertTrue(any('not for this version' in r for r in report))
         self.assertTrue(any('@disabled' in r for r in report))
 
-    def test_romfs_files_replace_and_add_in_the_image(self):
-        src = self.root / 'RomFS'
-        for rel, content in (('Data/a.bin', b'game a'), ('Data/b.bin', b'game b'), ('Movie/m.mp4', b'movie'), ('top.txt', b'top')):
-            (src / rel).parent.mkdir(parents=True, exist_ok=True); (src / rel).write_bytes(content)
-        img = self.root / 'RomFS.img'
-        romfs_image.pack(src, img)
-        self.put('m1/romfs/Data/a.bin', b'MOD A')
-        self.put('m1/romfs/data/B.BIN', b'MOD B (other case)')   # a Windows-made mod: the game's own names are kept
-        self.put('m2/romfs/New/deep/n.bin', b'new file')
-        self.put('m2/romfs/Data/a.bin', b'MOD A from m2')   # a later folder wins
-        dst = self.root / 'modded.img'
-        report = gm.overlay_image(img, dst, gm.scan(self.mods, TITLE).romfs, self.mods)
-        self.assertIn('3 files replaced, 1 added', report[0])
-        im = romfs.Image(dst)   # its own checks: sorted names, breadth-first tree, ranges inside the data
-        idx = romfs_image.read_index(dst)
-        def data(rel):
-            _, off, size = idx[rel]
-            with open(dst, 'rb') as f: f.seek(off); return f.read(size)
-        self.assertEqual(data('Data/a.bin'), b'MOD A from m2')
-        self.assertEqual(data('Data/b.bin'), b'MOD B (other case)')
-        self.assertEqual(data('New/deep/n.bin'), b'new file')
-        self.assertEqual(data('Movie/m.mp4'), b'movie')
-        self.assertEqual(data('top.txt'), b'top')
-        self.assertNotIn('data/B.BIN', idx)
-        self.assertEqual(im.count, len(idx) + 1)
-        self.assertEqual(romfs_image.read_index(img)['Data/a.bin'][2], 6, 'the game\'s image is unchanged')
-        with romfs.open(str(dst / 'Data/b.bin'), 'rb') as f: self.assertEqual(f.read(), b'MOD B (other case)')
-
-    def test_romfs_folder_of_an_older_extraction(self):
-        src = self.root / 'RomFS'; (src / 'Data').mkdir(parents=True); (src / 'Data/a.bin').write_bytes(b'game a')
-        self.put('m/romfs/Data/a.bin', b'MOD A'); self.put('m/romfs/Data/new.bin', b'new')
-        dst = self.root / 'out'
-        gm.overlay_folder(src, dst, gm.scan(self.mods, TITLE).romfs, self.mods)
-        self.assertEqual((dst / 'Data/a.bin').read_bytes(), b'MOD A')
-        self.assertEqual((dst / 'Data/new.bin').read_bytes(), b'new')
-        self.assertEqual((src / 'Data/a.bin').read_bytes(), b'game a', 'a hard link is replaced, never written into')
-
     def test_cheats_are_packed_by_build(self):
         self.put(f'cheats/{BID[:16]}.txt', '[Max HP]\n04000000 00000010 000003E7\n')
         self.put('cheats/downloaded.txt', '[Moon Jump]\n80000040\n04000000 00000020 00000001\n20000000\n')
@@ -271,7 +233,7 @@ class Guard(unittest.TestCase):
         self.assertEqual(img[0x10:0x14], NOP, 'none of the patch is written')
         self.assertEqual(img[0x20:0x24], MOV_W0_1, 'the other patch is')
         why = ("[RED] main: Mod/exefs/p.pchtxt: Cave: left out: 1 of its 2 records lie outside main's text, ro and data, the first at main+0x5000, in its bss, past its data "
-               "(memory the module's file does not hold): Nintanium cannot carry a code cave or a bss write, which only an emulator runs")
+               "(memory the module's file does not hold): NXNative cannot carry a code cave or a bss write, which only an emulator runs")
         self.assertEqual(self.red(report), [why])
         self.assertEqual(left, [gm.LeftOut('main', 'Mod/exefs/p.pchtxt: Cave', 'Mod', why)])
         self.assertIn('main: Mod/exefs/p.pchtxt: Keep: 4 bytes in 1 records', report)
@@ -281,11 +243,11 @@ class Guard(unittest.TestCase):
         self.assertEqual(changed, [], 'every patch left out: the module is the game\'s own')
         self.assertEqual((self.root / 'out/main').read_bytes(), (self.exefs / 'main').read_bytes())
         self.assertEqual([lo.what for lo in left], [f'{n}/{BID[:40]}.ips' for n in 'abcd'])
-        text = ("in the padding between its text and ro, which the module's file does not hold: a Switch runs code there, in the rest of its text's last page, but Nintanium "
+        text = ("in the padding between its text and ro, which the module's file does not hold: a Switch runs code there, in the rest of its text's last page, but NXNative "
                 "carries only what the module's file holds")
         self.assertEqual([line.split(', the first at ')[1].split(', ', 1)[1] for line in self.red(report)],
-                         [text, "in the padding between its ro and data, which the module's file does not hold: Nintanium carries only what the module's file holds",
-                          "past the module's end (after its bss): Nintanium cannot carry a code cave or a bss write, which only an emulator runs", text])
+                         [text, "in the padding between its ro and data, which the module's file does not hold: NXNative carries only what the module's file holds",
+                          "past the module's end (after its bss): NXNative cannot carry a code cave or a bss write, which only an emulator runs", text])
         self.assertIn('the first at main+0x1400,', self.red(report)[3], 'a record that runs past the text: its first byte outside')
         self.assertEqual(img, nso.read(self.exefs / 'main').image)
 
@@ -300,7 +262,7 @@ class Guard(unittest.TestCase):
         uw = [(0x40, MOV_W0_1), (0x100, enc_b(0x100, cave))] + [(cave + 4 * k, NOP) for k in range(16)] + [(cave + 0x40, enc_b(cave + 0x40, 0x104))]
         report, changed, left, img = self.patch({'UW/exefs/p.pchtxt': pchtxt(('Ultrawide and HUD', uw), ('Layout', [(0x80, MOV_W0_2)]))})
         why = ("[RED] main: UW/exefs/p.pchtxt: Ultrawide and HUD: left out of it: its code cave, 17 records outside main's text, ro and data from main+0x5000, in its bss, past "
-               "its data (memory the module's file does not hold), and the record of its code in the text that leads there, at main+0x100: Nintanium cannot carry a code cave or "
+               "its data (memory the module's file does not hold), and the record of its code in the text that leads there, at main+0x100: NXNative cannot carry a code cave or "
                "a bss write, which only an emulator runs. The rest of it, 1 of its 19 records, is kept as a patch of its own")
         self.assertEqual(left, [gm.LeftOut('main', 'UW/exefs/p.pchtxt: Ultrawide and HUD: its code cave at main+0x5000 and the code that enters it', 'UW', why)])
         self.assertEqual(report, [why, 'main: UW/exefs/p.pchtxt: Ultrawide and HUD: 4 bytes in 1 of its 19 records', 'main: UW/exefs/p.pchtxt: Layout: 4 bytes in 1 records'])
@@ -514,7 +476,7 @@ class Switchable(unittest.TestCase):
 
 
 class NspScript(unittest.TestCase):
-    """build_ipa_from_nsp.py's mods stage: the modded extraction it packs from, reused while nothing changed"""
+    """build_ipa_from_nsp.py's mods stage: the cheats it packs and the switchable mods it offers, reused while nothing changed"""
     def setUp(self):
         spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
         assert spec and spec.loader
@@ -535,80 +497,78 @@ class NspScript(unittest.TestCase):
                           (f'contents/{TITLE:016X}/cheats/{BID[:16]}.txt', b'[Max HP]\n04000000 00000010 000003E7\n')):
             (self.mods / rel).parent.mkdir(parents=True, exist_ok=True); (self.mods / rel).write_bytes(data)
 
-    def test_modded_extraction_and_reuse(self):
-        (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/speed')   # a mod that is not switchable: written in for good
+    def test_only_cheats_and_switchable_mods_are_taken(self):
+        (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/speed')   # a mod that is not switchable: left out, never written in for good
         work = self.root / 'work'
-        modded, cheats, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
-        self.assertEqual(modded, work / 'mods/v0')
-        self.assertEqual(nso.read(modded / 'ExeFS/main').image[0x10:0x14], b'\x1f\x20\x03\xd5')
-        idx = romfs_image.read_index(modded / 'RomFS.img')
-        with open(modded / 'RomFS.img', 'rb') as f: f.seek(idx['Data/a.bin'][1]); self.assertEqual(f.read(5), b'MOD A')
-        self.assertEqual(os.stat(modded / 'control.nacp').st_ino, os.stat(self.ext / 'control.nacp').st_ino, 'the other files are hard links')
-        self.assertEqual(sorted(p.name for p in cheats.iterdir()), [f'{BID[:16]}.txt'])
+        cheats, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertEqual(variants, {})
+        self.assertEqual(sorted(p.name for p in cheats.iterdir()), [f'{BID[:16]}.txt']); self.assertEqual(cheats, work / 'mods_stage/v0_cheats')
+        self.assertFalse((work / 'mods').exists(), 'the stage is never in a folder named mods, which may be the player\'s')
+        self.assertEqual(sorted(p.name for p in (work / 'mods_stage').iterdir()), ['v0.key', 'v0.txt', 'v0_cheats', 'v0_switchable.txt', 'v0_variants.json'], 'no modded extraction')
+        report = (work / 'mods_stage/v0.txt').read_text()
+        self.assertIn(f'left out: exefs_patches/speed/{BID[:40]}.ips: not a switchable mod', report)
+        self.assertIn(f'left out: contents/{TITLE:016X}/romfs: a RomFS mod', report)
         self.assertEqual(nso.read(self.ext / 'ExeFS/main').image[0x10:0x14], TEXT[0x10:0x14], 'the extraction is never written')
-        stamp = os.stat(modded / 'ExeFS/main').st_mtime_ns
-        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (modded, cheats, variants))
-        self.assertEqual(os.stat(modded / 'ExeFS/main').st_mtime_ns, stamp, 'reused while nothing changed')
+        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (cheats, variants))
         self.nsp.PROG.end.assert_called_with('reused (the mods and the game files unchanged)')
+        self.assertEqual((work / 'mods_stage/v0.txt').read_text(), report, 'a reuse writes the same report')
 
     def test_a_renamed_mod_folder_is_built_again(self):   # the folder's name decides whether a mod is switchable
         (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/speed')
         work = self.root / 'work'
-        _, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
         self.assertEqual(variants, {})
         (self.mods / 'exefs_patches/speed').rename(self.mods / 'exefs_patches/60 FPS')
-        modded, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
         self.assertEqual(set(variants), {'fps'})
-        self.assertEqual(nso.read(modded / 'ExeFS/main').image[0x10:0x14], TEXT[0x10:0x14], 'no longer written in for good')
+        self.assertEqual(nso.read(Path(variants['fps']['exefs']) / 'main').image[0x10:0x14], b'\x1f\x20\x03\xd5')
 
     def test_a_cheat_change_makes_nothing_else_again(self):
         (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/60 FPS')
         work = self.root / 'work'; cheat = self.mods / f'contents/{TITLE:016X}/cheats/{BID[:16]}.txt'
-        modded, cheats, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
-        rw = work / 'mods/v0_fps/rewrite'; rw.mkdir(); (rw / 'main.key').write_text('the variant rewrite\'s cache\n')   # as build_variants leaves it
-        img = os.stat(modded / 'RomFS.img'); main = os.stat(modded / 'ExeFS/main'); packed = os.stat(cheats / f'{BID[:16]}.txt')
-        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (modded, cheats, variants))
+        cheats, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        rw = work / 'mods_stage/v0_fps/rewrite'; rw.mkdir(); (rw / 'main.key').write_text('the variant rewrite\'s cache\n')   # as build_variants leaves it
+        main = os.stat(Path(variants['fps']['exefs']) / 'main'); packed = os.stat(cheats / f'{BID[:16]}.txt')
+        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (cheats, variants))
         self.nsp.PROG.end.assert_called_with('reused (the mods and the game files unchanged)')
         self.assertEqual(os.stat(cheats / f'{BID[:16]}.txt').st_mtime_ns, packed.st_mtime_ns, 'the same cheats: the packed file is kept')
         cheat.write_text('[Max HP]\n04000000 00000010 000003E7\n[Max MP]\n04000000 00000020 000003E7\n')
-        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (modded, cheats, variants))
-        self.nsp.PROG.end.assert_called_with('reused (the code and RomFS mods and the game files unchanged); the cheats packed again')
+        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (cheats, variants))
+        self.nsp.PROG.end.assert_called_with('reused (the switchable mods and the game files unchanged); the cheats packed again')
         self.assertIn('[Max MP]', (cheats / f'{BID[:16]}.txt').read_text())
-        report = (work / 'mods/v0.txt').read_text()
+        report = (work / 'mods_stage/v0.txt').read_text()
         self.assertIn('2 entries', report); self.assertNotIn('1 entries', report); self.assertIn('switchable', report, 'the report keeps the code mods\' lines')
-        now = os.stat(modded / 'RomFS.img')
-        self.assertEqual((now.st_ino, now.st_mtime_ns, now.st_ctime_ns), (img.st_ino, img.st_mtime_ns, img.st_ctime_ns), 'the RomFS image is not linked again (the IPA packer keys on its ctime)')
-        self.assertEqual(os.stat(modded / 'ExeFS/main').st_mtime_ns, main.st_mtime_ns)
-        cheat.rename(cheat.with_name('-' + cheat.name))   # the Builder turns a cheat file off this way
-        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (modded, None, variants))
-        self.assertFalse(cheats.exists()); self.assertNotIn('cheats: ', (work / 'mods/v0.txt').read_text())
-        (self.mods / f'contents/{TITLE:016X}/romfs/Data/a.bin').write_bytes(b'MOD A, longer')   # a change that makes the modded extraction again
+        self.assertIn('main: exefs_patches/60 FPS/', report, 'and the switchable mod\'s own')
+        self.assertEqual(os.stat(Path(variants['fps']['exefs']) / 'main').st_mtime_ns, main.st_mtime_ns)
+        cheat.rename(cheat.with_name('-' + cheat.name))   # turned off this way
+        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (None, variants))
+        self.assertFalse(cheats.exists()); self.assertNotIn('cheats: ', (work / 'mods_stage/v0.txt').read_text())
+        (self.mods / f'exefs_patches/60 FPS/{BID[:40]}.ips').write_bytes(ips([(0x110, MOV_W0_1)]))   # a change that makes the switchable mod again
         self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
-        self.assertNotEqual(os.stat(modded / 'RomFS.img').st_ino, img.st_ino)
+        self.assertNotEqual(self.nsp.PROG.end.call_args.args[0], 'reused (the mods and the game files unchanged)')
+        self.assertEqual(nso.read(Path(variants['fps']['exefs']) / 'main').image[0x10:0x14], MOV_W0_1)
         self.assertTrue((rw / 'main.key').is_file(), 'the variant rewrite\'s cache is kept: its own key says when it is stale')
 
     def test_a_stopped_rebuild_leaves_no_key(self):
-        work = self.root / 'work'
+        work = self.root / 'work'; mod = self.mods / f'exefs_patches/fps/{BID[:40]}.ips'
         self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
-        extra = self.mods / f'contents/{TITLE:016X}/B/romfs/Data/b.bin'; extra.parent.mkdir(parents=True); extra.write_bytes(b'B')
+        first = mod.read_bytes(); mod.write_bytes(ips([(0x110, MOV_W0_1)]))
         with mock.patch.object(gm, 'patch_exefs', side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
             self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
-        self.assertFalse((work / 'mods/v0.key').exists())
-        extra.unlink()   # back to the first run's mods: made again, not taken for that run's
-        modded, _, _ = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertFalse((work / 'mods_stage/v0.key').exists())
+        mod.write_bytes(first)   # back to the first run's mods: made again, not taken for that run's
+        _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
         self.assertNotEqual(self.nsp.PROG.end.call_args.args[0], 'reused (the mods and the game files unchanged)')
-        self.assertNotIn('Data/b.bin', romfs_image.read_index(modded / 'RomFS.img'))
+        self.assertEqual(nso.read(Path(variants['fps']['exefs']) / 'main').image[0x10:0x14], b'\x1f\x20\x03\xd5')
 
-    def test_the_romfs_mods_key_the_shader_stages(self):   # a file of the same size leaves the image's names and sizes as they were
-        work = self.root / 'work'; rk = work / 'mods/v0.romfs.key'; mod = self.mods / f'contents/{TITLE:016X}/romfs/Data/a.bin'
-        self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
-        first = rk.read_text()
-        mod.write_bytes(b'MOD B'); st = mod.stat(); os.utime(mod, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
-        self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
-        self.assertNotEqual(rk.read_text(), first)
-        mod.unlink()
-        self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
-        self.assertFalse(rk.exists(), 'no RomFS mods: the shader stages keep their keys')
+    def test_romfs_mods_are_left_out(self):   # nothing is laid over the game's RomFS: the image the shader stages and the app take is the extraction's own
+        for p in sorted(self.mods.rglob('*'), reverse=True):
+            if p.is_file() and 'romfs' not in p.parts: p.unlink()
+        work = self.root / 'work'; img = (self.ext / 'RomFS.img').read_bytes()
+        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (None, {}))
+        self.assertIn(f'left out: contents/{TITLE:016X}/romfs: a RomFS mod', (work / 'mods_stage/v0.txt').read_text())
+        self.assertEqual((self.ext / 'RomFS.img').read_bytes(), img)
+        self.assertFalse(list((work / 'mods_stage').glob('*romfs*')), 'no RomFS key or image of its own')
 
     def test_a_profile_with_its_own_frame_rate_takes_no_frame_rate_mod(self):
         sys.path.insert(0, str(REPO / 'dm/games')); import game
@@ -617,9 +577,10 @@ class NspScript(unittest.TestCase):
         self.assertTrue(self.nsp.frame_rate_mods_ok({'fps_target': '0'}))
         (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/60FPS')
         work = self.root / 'work'
-        _, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE, fps_ok=self.nsp.frame_rate_mods_ok({'present_interval_choice': 'on'}))
+        _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE, fps_ok=self.nsp.frame_rate_mods_ok({'present_interval_choice': 'on'}))
         self.assertEqual(variants, {})
-        self.assertIn('left out: exefs_patches/60FPS', (work / 'mods/v0.txt').read_text())
+        self.assertIn('left out: exefs_patches/60FPS', (work / 'mods_stage/v0.txt').read_text())
+        self.assertEqual(nso.read(self.ext / 'ExeFS/main').image[0x10:0x14], TEXT[0x10:0x14], 'nor written in for good')
 
     def test_programs_cheats_in_one_folder(self):   # a game of several programs: each program's packed cheats, under its builds' IDs
         a, b = self.root / 'a', self.root / 'b'; a.mkdir(); b.mkdir()
@@ -639,101 +600,98 @@ class NspScript(unittest.TestCase):
         self.assertEqual((dst / '0000000000000002.txt').read_text(), '[own]\n\n[loose]\n', "program 2's own build: its copy")
         self.assertEqual((dst / 'FFFFFFFFFFFFFFFF.txt').read_text(), '[first]\n', "no program's build: the first program's copy")
 
-    def test_the_cleanup_keeps_the_players_mods_folder(self):   # --work-dir the NSP folder, the mods beside the game: the extraction's mods/ is the player's
+    def test_the_cleanup_keeps_the_players_mods_folder(self):   # --work-dir the NSP folder, the mods beside the game: <work>/mods is the player's, the stage is mods_stage/
         nsp_dir = self.root / 'nsp'; work, other = nsp_dir, nsp_dir / 'p1_build'
-        for d in (work / 'extract', work / 'mods/cheats', other / 'extract', other / 'mods/v0_cheats'): d.mkdir(parents=True)
+        for d in (work / 'extract', work / 'mods/cheats', work / 'mods_stage', other / 'extract', other / 'mods_stage/v0_cheats'): d.mkdir(parents=True)
         programs = {1: {'ex': other / 'extract'}}
-        left = lambda mods_root: self.nsp.extracted_leftovers(work / 'extract', work, programs, mods_root)
-        self.assertEqual(left(work / 'mods'), [work / 'extract', other / 'extract', other / 'mods'], 'the mods folder itself stays')
-        self.assertEqual(left(work / 'mods/cheats'), [work / 'extract', other / 'extract', other / 'mods'], 'and a folder holding it')
-        self.assertEqual(left(self.root / 'elsewhere'), [work / 'extract', work / 'mods', other / 'extract', other / 'mods'])
-        self.assertEqual(left(None), [work / 'extract', work / 'mods', other / 'extract', other / 'mods'])
+        left = lambda mods_root, nsp=None: self.nsp.extracted_leftovers(work / 'extract', work, programs, nsp, mods_root)
+        every = [work / 'extract', work / 'mods_stage', other / 'extract', other / 'mods_stage']
+        for mods_root in (None, work / 'mods', self.root / 'elsewhere'):
+            with self.subTest(mods_root=mods_root): self.assertEqual(left(mods_root, nsp_dir), every, '--no-mods too: the player\'s mods folder is never in the list')
+        self.assertEqual(left(work / 'mods_stage/x'), [work / 'extract', other / 'extract', other / 'mods_stage'], 'nor a folder holding the one --mods names')
+        self.assertEqual(left(None), every)
 
     def test_a_later_program_leaves_loose_cheats_to_the_first(self):   # a cheat file not named after a build ID was made for one program's build: the first's, as before
         for rel in ('cheats/inf.txt', f'contents/{TITLE:016X}/cheats/own.txt', 'cheats/0000000000000001.txt'): (self.mods / rel).parent.mkdir(parents=True, exist_ok=True); (self.mods / rel).write_text('[Inf]\n')
-        packed = lambda first: sorted(p.name for p in self.nsp.apply_mods(self.mods, self.ext, self.root / f'work{first}', 'v0', TITLE, first=first)[1].iterdir())
+        packed = lambda first: sorted(p.name for p in self.nsp.apply_mods(self.mods, self.ext, self.root / f'work{first}', 'v0', TITLE, first=first)[0].iterdir())
         self.assertEqual(packed(True), ['0000000000000001.txt', f'{BID[:16]}.txt'])
         self.assertEqual(packed(False), ['0000000000000001.txt', f'{BID[:16]}.txt'])
-        first, later = ((self.root / f'work{b}/mods/v0_cheats/{BID[:16]}.txt').read_text() for b in (True, False))
+        first, later = ((self.root / f'work{b}/mods_stage/v0_cheats/{BID[:16]}.txt').read_text() for b in (True, False))
         self.assertEqual(first.count('[Inf]'), 2, 'the first program: the loose file and its own title folder\'s')
         self.assertEqual(later.count('[Inf]'), 1, 'a later program: only its own title folder\'s')
-        self.assertIn('cheats/inf.txt is not named after a build ID: left to the first program', (self.root / 'workFalse/mods/v0.txt').read_text())
+        self.assertIn('cheats/inf.txt is not named after a build ID: left to the first program', (self.root / 'workFalse/mods_stage/v0.txt').read_text())
 
     def test_settings_are_checked_before_the_build(self):
         game = self.root / 'game'; game.mkdir()
         with self.assertRaisesRegex(self.nsp.BuildError, 'not a folder'):
             self.nsp.main(self.nsp.parse_args([str(game), '--mods', str(self.root / 'missing')]))
 
-    def test_cheats_alone_need_no_modded_extraction(self):
+    def test_cheats_alone(self):
         for p in sorted(self.mods.rglob('*'), reverse=True):
             if p.is_file() and p.suffix != '.txt': p.unlink()
-        modded, cheats, variants = self.nsp.apply_mods(self.mods, self.ext, self.root / 'work', 'v0', TITLE)
-        self.assertIsNone(modded); self.assertEqual(variants, {})
+        cheats, variants = self.nsp.apply_mods(self.mods, self.ext, self.root / 'work', 'v0', TITLE)
+        self.assertEqual(variants, {})
         self.assertTrue((cheats / f'{BID[:16]}.txt').is_file())
 
-    def test_switchable_mods_stay_out_of_the_modded_modules(self):
+    def test_switchable_mods_stay_out_of_the_games_modules(self):
         (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/60 FPS')
         work = self.root / 'work'
-        modded, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
-        self.assertEqual(nso.read(modded / 'ExeFS/main').image[0x10:0x14], TEXT[0x10:0x14], 'the base build is the game without the mod')
+        _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertEqual(nso.read(self.ext / 'ExeFS/main').image[0x10:0x14], TEXT[0x10:0x14], 'the base build is the game without the mod')
         self.assertEqual(set(variants), {'fps'}); self.assertEqual(variants['fps']['modules'], ['main'])
         self.assertEqual(nso.read(Path(variants['fps']['exefs']) / 'main').image[0x10:0x14], b'\x1f\x20\x03\xd5')
-        _, _, none = self.nsp.apply_mods(self.mods, self.ext, self.root / 'work2', 'v0', TITLE, fps_ok=False)
+        _, none = self.nsp.apply_mods(self.mods, self.ext, self.root / 'work2', 'v0', TITLE, fps_ok=False)
         self.assertEqual(none, {}, 'a profile with its own Frame rate takes no frame-rate mod')
 
     def test_a_switchable_mod_is_offered_without_the_patches_left_out(self):
         uw = self.mods / '21.9 Ultrawide/exefs/uw.pchtxt'; uw.parent.mkdir(parents=True)
         uw.write_text(pchtxt(('Aspect', [(0x20, MOV_W0_1)]), ('Joy-Con fix', [(0x24, enc_b(0x24, 0x4300)), (0x4300, NOP)])))   # the hook and its cave in the bss
         work = self.root / 'work'
-        _, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
         self.assertEqual(set(variants), {'fps', 'ultrawide'}); self.assertEqual(variants['ultrawide']['left_out'], ['21.9 Ultrawide/exefs/uw.pchtxt: Joy-Con fix'])
         self.assertNotIn('left_out', variants['fps'])
         img = nso.read(Path(variants['ultrawide']['exefs']) / 'main').image
         self.assertEqual(img[0x20:0x24], MOV_W0_1); self.assertEqual(img[0x24:0x28], TEXT[0x24:0x28], 'the hook is not written')
-        report = (work / 'mods/v0.txt').read_text()
+        report = (work / 'mods_stage/v0.txt').read_text()
         self.assertIn("[RED] main: 21.9 Ultrawide/exefs/uw.pchtxt: Joy-Con fix: left out: 1 of its 2 records lie outside main's text, ro and data, the first at main+0x4300, in its bss", report)
         self.assertIn('21.9 Ultrawide/exefs/uw.pchtxt: Aspect: no aspect value found', report)
         self.assertNotIn('Joy-Con fix: no aspect value found', report, 'adapt_aspect\'s line goes with a patch left out whole')
         self.assertIn('[RED] ultrawide: 21.9 Ultrawide: left out of it (above): 21.9 Ultrawide/exefs/uw.pchtxt: Joy-Con fix. The rest of the mod is offered (Ultrawide in the launcher)\n', report)
-        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)[2], variants)
-        self.assertIn('[RED] ultrawide: 21.9 Ultrawide: left out of it', (work / 'mods/v0.txt').read_text(), 'a reuse keeps the lines')
+        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)[1], variants)
+        self.assertIn('[RED] ultrawide: 21.9 Ultrawide: left out of it', (work / 'mods_stage/v0.txt').read_text(), 'a reuse keeps the lines')
         uw.write_text(pchtxt(('Joy-Con fix', [(0x24, enc_b(0x24, 0x4300)), (0x4300, NOP)]), ('Header note', [])))   # nothing of it left to write: a block of no record is nothing
-        _, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
-        self.assertEqual(set(variants), {'fps'}); self.assertFalse((work / 'mods/v0_ultrawide').exists())
+        _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        self.assertEqual(set(variants), {'fps'}); self.assertFalse((work / 'mods_stage/v0_ultrawide').exists())
         self.assertIn('[RED] ultrawide: 21.9 Ultrawide: nothing of it is left to write for this version once the patches above are left out: Ultrawide is not offered\n',
-                      (work / 'mods/v0.txt').read_text())
+                      (work / 'mods_stage/v0.txt').read_text())
 
     def test_a_mod_whose_code_cave_shares_its_block_is_offered_without_the_cave(self):   # Super Mario Odyssey's Ultrawide pack: the mod, the hook and the cave in one block
         uw = self.mods / '21.9 Ultrawide/exefs/uw.pchtxt'; uw.parent.mkdir(parents=True)
         uw.write_text(pchtxt(('Ultrawide, uses a codecave at 4300', [(0x20, MOV_W0_1), (0x80, enc_b(0x80, 0x4300))] + [(0x4300 + 4 * k, NOP) for k in range(4)])))
         work = self.root / 'work'
-        _, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
         self.assertEqual(variants['ultrawide']['left_out'], ['21.9 Ultrawide/exefs/uw.pchtxt: Ultrawide, uses a codecave at 4300: its code cave at main+0x4300 and the code that enters it'])
         img = nso.read(Path(variants['ultrawide']['exefs']) / 'main').image
         self.assertEqual((img[0x20:0x24], img[0x80:0x84]), (MOV_W0_1, TEXT[0x80:0x84]), 'the mod is offered, its hook not written')
-        report = (work / 'mods/v0.txt').read_text()
+        report = (work / 'mods_stage/v0.txt').read_text()
         self.assertIn('main: 21.9 Ultrawide/exefs/uw.pchtxt: Ultrawide, uses a codecave at 4300: 4 bytes in 1 of its 6 records\n', report)
         self.assertIn('[RED] ultrawide: 21.9 Ultrawide: left out of it (above): 21.9 Ultrawide/exefs/uw.pchtxt: Ultrawide, uses a codecave at 4300: its code cave at main+0x4300 '
                       'and the code that enters it. The rest of the mod is offered (Ultrawide in the launcher)\n', report)
 
-    def test_a_kept_mods_patch_left_out_is_not_written(self):
-        (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/speed')   # written in for good: NOP at 0x10
+    def test_a_mod_that_is_not_switchable_is_left_out_whole(self):   # never judged or written: only the launcher's High frame rate and Ultrawide reach the code
+        (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/speed')
         p = self.mods / 'HUD/exefs/hud.pchtxt'; p.parent.mkdir(parents=True)
         p.write_text(pchtxt(('Into ro', [(0x30, enc_b(0x30, 0x2000))]), ('Kept', [(0x40, MOV_W0_2)])))
         work = self.root / 'work'
-        modded, _, _ = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
-        img = nso.read(modded / 'ExeFS/main').image
-        self.assertEqual((img[0x10:0x14], img[0x30:0x34], img[0x40:0x44]), (b'\x1f\x20\x03\xd5', TEXT[0x30:0x34], MOV_W0_2))
-        self.assertIn("[RED] main: HUD/exefs/hud.pchtxt: Into ro: left out: the patch's code at main+0x30 branches to main+0x2000", (work / 'mods/v0.txt').read_text())
-        p.write_text(pchtxt(('Into ro', [(0x30, enc_b(0x30, 0x2000))])))
-        (self.mods / 'exefs_patches/speed').rename(self.mods / 'exefs_patches/-speed')
-        modded, _, _ = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
-        self.assertEqual((modded / 'ExeFS/main').read_bytes(), (self.ext / 'ExeFS/main').read_bytes(), 'nothing left: the game\'s own module')
-        self.assertIn("code: nothing is left to write for this version once the patches above are left out: the code is the game's own", (work / 'mods/v0.txt').read_text())
+        self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)[1], {})
+        report = (work / 'mods_stage/v0.txt').read_text()
+        self.assertIn('left out: HUD/exefs/hud.pchtxt: not a switchable mod', report); self.assertIn(f'left out: exefs_patches/speed/{BID[:40]}.ips: not a switchable mod', report)
+        self.assertNotIn('[RED] main:', report, 'not judged: nothing of it is written')
+        self.assertFalse(list((work / 'mods_stage').glob('v0_*/ExeFS')))
 
-    def test_the_mods_key_covers_the_code_that_judges_patches(self):   # a changed a64_words.py (the branch decoders) makes the modded modules again
+    def test_the_mods_key_covers_the_code_that_judges_patches(self):   # a changed a64_words.py (the branch decoders) makes the switchable mods again
         tools = self.root / 'tools'; tools.mkdir()
-        for f in ('game_mods.py', 'a64_words.py', 'romfs_image.py', 'romfs.py', 'nso.py'): shutil.copy(Path(gm.__file__).parent / f, tools / f)
+        for f in ('game_mods.py', 'a64_words.py', 'nso.py'): shutil.copy(Path(gm.__file__).parent / f, tools / f)
         work = self.root / 'work'
         with mock.patch.object(gm, '__file__', str(tools / 'game_mods.py')):
             self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE); self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
@@ -748,9 +706,9 @@ class NspScript(unittest.TestCase):
         (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/speed')
         p = self.mods / f'60FPS/exefs/{sid[:40]}.ips'; p.parent.mkdir(parents=True); p.write_bytes(ips([(0x110, b'\x28\x00\x80\x52')]))
         work = self.root / 'work'
-        _, _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
+        _, variants = self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)
         self.assertEqual(variants['fps']['modules'], ['sdk'])
-        self.assertIn('patches only the sdk module', (work / 'mods/v0.txt').read_text())
+        self.assertIn('display service NXNative replaces', (work / 'mods_stage/v0.txt').read_text())
 
     def test_build_variants(self):
         patched = self.root / 'patched'; patched.mkdir()
@@ -823,174 +781,6 @@ class NspScript(unittest.TestCase):
         with self.assertRaises(self.nsp.BuildError): self.nsp.mods_folder(self.nsp.parse_args(['x', '--mods', str(self.root / 'missing')]), self.root)
 
 
-FAKE_REWRITER = r"""# patch_nso.py as build_variants starts it (<module> <out folder> <name>): writes <ver>_<role>/want.bin as the rewrite, after a pause; no want.bin, or a refuse_<name>: refused (exit 3)
-import os, shutil, sys, time
-src, rw, m = sys.argv[1:4]
-var = os.path.dirname(os.path.dirname(src)); role = os.path.basename(var).split('_', 1)[1]; rec = os.path.join(os.path.dirname(var), 'record.txt')
-with open(rec, 'a') as f: f.write(f'{role} start {time.time()} {os.environ.get("DM_REWRITE_J")} {m}\n')
-print(f'rewriting {m} with the {role} mod', flush=True)
-time.sleep(0.6)
-if not os.path.exists(os.path.join(var, 'want.bin')) or os.path.exists(os.path.join(var, 'refuse_' + m)): print('refused: a word the profile patches too'); sys.exit(3)
-shutil.copyfile(os.path.join(var, 'want.bin'), os.path.join(rw, m + '.patched.bin'))
-with open(os.path.join(rw, m + '.fixups.tsv'), 'w') as f: f.write('# TEXT_END 0x4000\n# PATCH_OFF 0x8000\n')
-with open(rec, 'a') as f: f.write(f'{role} end {time.time()}\n')
-"""
-
-
-class VariantPool(unittest.TestCase):
-    """build_variants' rewrites run together (DM_VARIANT_J), the byte runs kept beside each variant rewrite (DM_VARIANT_RUNS_CACHE), and the files they make, byte for byte those
-    of rewriting one after another and computing the runs at every build, as before; a real process per rewrite (a fake patch_nso.py in a fake repository)"""
-    HDR = '# TEXT_END 0x4000\n# PATCH_OFF 0x8000\n'
-
-    def setUp(self):
-        spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
-        assert spec and spec.loader
-        self.nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.nsp)
-        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
-        self.root = Path(t.name); self.said = []
-        for cm in (mock.patch.object(self.nsp, 'PROG', mock.Mock()), mock.patch.object(self.nsp, 'say', self.said.append)):
-            cm.start(); self.addCleanup(cm.stop)
-        self.repo = self.root / 'repo'; (self.repo / 'dm/tools').mkdir(parents=True); (self.repo / 'dm/tools/patch_nso.py').write_text(FAKE_REWRITER)
-        self.patched = self.root / 'patched'; self.patched.mkdir()
-        self.base = bytes(0xc000)
-        (self.patched / 'main.patched.bin').write_bytes(self.base); (self.patched / 'main.fixups.tsv').write_text(self.HDR)
-        self.mods = self.root / 'mods'; self.variants = {}
-        for role, name, edits in (('fps', '60 FPS', ((0x10, b'\x1f\x20\x03\xd5'), (0x5000, b'\x01\x02'))), ('ultrawide', '21x9', ((0x5100, struct.pack('<f', 21 / 9)),))):
-            exefs = self.mods / f'v0_{role}/ExeFS'; exefs.mkdir(parents=True); (exefs / 'main').write_bytes(bytes(make_nso()))
-            v = bytearray(self.base)
-            for at, b in edits: v[at:at + len(b)] = b
-            (exefs.parent / 'want.bin').write_bytes(bytes(v))
-            self.variants[role] = {'mod': name, 'exefs': str(exefs), 'modules': ['main']}
-        self.env = {k: v for k, v in os.environ.items() if not k.startswith('DM_')}
-
-    def build(self, **env):
-        (self.mods / 'record.txt').unlink(missing_ok=True)
-        self.nsp.build_variants(sys.executable, self.repo, json_copy(self.variants), self.patched, dict(self.env, **env), self.root / 'logs')
-        rec = (self.mods / 'record.txt').read_text().splitlines() if (self.mods / 'record.txt').exists() else []
-        return [l.split() for l in rec]
-
-    def outputs(self):
-        return {p.name: p.read_bytes() for p in sorted(self.patched.iterdir()) if p.suffix in ('.variants', '.tsv') and p.name != 'main.fixups.tsv'}
-
-    def expected(self):   # what the serial build_variants of before wrote: each role's runs (game_mods.variant_runs) in role order, then mods.tsv
-        rows, counts = [], []
-        for role, v in self.variants.items():
-            runs = gm.variant_runs(self.patched, Path(v['exefs']).parent / 'rewrite', 'main', nso.read(Path(v['exefs']) / 'main').image)
-            rows += [(role, r) for r in runs]; counts.append((role, v['mod'], len(runs)))
-        gm.write_variants(self.root / 'expected.variants', rows)
-        return {'main.variants': (self.root / 'expected.variants').read_bytes(),
-                'mods.tsv': ('# switchable mods the launcher offers (dm/games/settings.py mods:<role>): role\tmod\truns\n' + ''.join(f'{r}\t{n}\t{c}\n' for r, n, c in counts)).encode()}
-
-    def test_rewrites_run_together_and_write_what_one_after_another_writes(self):
-        cores = os.cpu_count() or 1
-        cm = mock.patch.object(os, 'cpu_count', lambda: max(2, cores)); cm.start(); self.addCleanup(cm.stop)   # the default pool is at most one rewrite per core: a one-core runner would run them one after another
-        rec = self.build()
-        starts = [float(l[2]) for l in rec if l[1] == 'start']; ends = [float(l[2]) for l in rec if l[1] == 'end']
-        self.assertEqual(len(starts), 2); self.assertLess(max(starts), min(ends), 'both rewrites ran at once')
-        split = str(max(1, (os.cpu_count() or 1) // 2))
-        self.assertEqual({l[3] for l in rec if l[1] == 'start'}, {split}, 'the cores split between them (DM_REWRITE_J)')
-        together = self.outputs()
-        self.assertEqual(together, self.expected())
-        self.assertIn(b'ultrawide\tw\t0x5100\t0x5100\t', together['main.variants'])
-        for role in ('fps', 'ultrawide'): self.assertIn(f'rewriting main with the {role} mod', (self.root / f'logs/rewrite_main_{role}.log').read_text())
-        for f in (self.mods / 'v0_fps/rewrite', self.mods / 'v0_ultrawide/rewrite'): shutil.rmtree(f)
-        rec = self.build(DM_VARIANT_J='1')
-        starts = [float(l[2]) for l in rec if l[1] == 'start']; ends = [float(l[2]) for l in rec if l[1] == 'end']
-        self.assertGreaterEqual(starts[1], ends[0], 'DM_VARIANT_J=1: one after another')
-        self.assertEqual({l[3] for l in rec if l[1] == 'start'}, {'None'}, 'with the environment as it was')
-        self.assertEqual(self.outputs(), together)
-        rec = self.build(DM_REWRITE_J='3')
-        self.assertEqual(rec, [], 'reused: nothing rewritten again')
-        self.assertEqual(self.outputs(), together)
-
-    def test_an_explicit_split_is_kept(self):
-        rec = self.build(DM_REWRITE_J='3')
-        self.assertEqual({l[3] for l in rec if l[1] == 'start'}, {'3'})
-
-    def test_a_refused_role_alone_is_left_out(self):
-        (self.mods / 'v0_ultrawide/want.bin').unlink()
-        self.build()
-        self.assertEqual((self.patched / 'mods.tsv').read_text().splitlines()[1:], ['fps\t60 FPS\t2'])
-        self.assertTrue(any('ultrawide: 21x9: left out: the rewriter refused main' in m and 'rewrite_main_ultrawide.log' in m for m in self.said))
-        self.assertIn('refused: a word the profile patches too', ''.join(str(c) for c in self.nsp.PROG.say.call_args_list), 'the log\'s last lines, as run() prints them')
-        self.assertTrue((self.mods / 'v0_fps/rewrite/main.key').is_file()); self.assertFalse((self.mods / 'v0_ultrawide/rewrite/main.key').exists())
-        self.assertEqual([l[0] for l in self.build() if l[1] == 'start'], ['ultrawide'], 'only the refused rewrite runs again')
-
-    def test_one_after_another_a_roles_modules_stop_at_its_first_failure(self):   # DM_VARIANT_J=1, as before the pool: a module after the refused one is not rewritten
-        (self.mods / 'v0_fps/ExeFS/sub').write_bytes(bytes(make_nso())); (self.mods / 'v0_fps/refuse_main').write_text('')
-        self.variants['fps']['modules'] = ['main', 'sub']
-        rec = self.build(DM_VARIANT_J='1')
-        self.assertEqual([(l[0], l[4]) for l in rec if l[1] == 'start'], [('fps', 'main'), ('ultrawide', 'main')])
-        self.assertTrue(any('fps: 60 FPS: left out: the rewriter refused main' in m for m in self.said))
-        self.assertFalse((self.mods / 'v0_fps/rewrite/sub.key').exists()); self.assertEqual((self.patched / 'mods.tsv').read_text().splitlines()[1:], ['ultrawide\t21x9\t1'])
-        pooled = self.build(DM_VARIANT_J='3')   # together, every planned rewrite has started before the first one is refused: the files written are the same
-        self.assertEqual(sorted((l[0], l[4]) for l in pooled if l[1] == 'start'), [('fps', 'main'), ('fps', 'sub')])
-        self.assertEqual((self.patched / 'mods.tsv').read_text().splitlines()[1:], ['ultrawide\t21x9\t1'])
-        (self.mods / 'v0_fps/refuse_main').unlink(); self.build(DM_VARIANT_J='1')
-        kept = (self.mods / 'v0_fps/rewrite/sub.key').read_text()
-        (self.mods / 'v0_fps/refuse_main').write_text('')
-        rec = self.build(DM_VARIANT_J='1', DM_PATCH_FRONT='1')   # every key misses; main is refused, so sub is not reached and keeps its key and rewrite, as before the pool
-        self.assertEqual([(l[0], l[4]) for l in rec if l[1] == 'start'], [('fps', 'main'), ('ultrawide', 'main')])
-        self.assertEqual((self.mods / 'v0_fps/rewrite/sub.key').read_text(), kept)
-        (self.mods / 'v0_fps/refuse_main').unlink()
-        rec = self.build(DM_VARIANT_J='1')   # the inputs of before: sub's kept rewrite is reused
-        self.assertEqual([(l[0], l[4]) for l in rec if l[1] == 'start'], [('fps', 'main'), ('ultrawide', 'main')])
-
-    def test_the_runs_are_kept_and_follow_their_inputs(self):
-        self.build(); first = self.outputs()
-        calls = []
-        real = gm.variant_runs
-        def counting(*a): calls.append(a[1].parent.name); return real(*a)
-        with mock.patch.object(gm, 'variant_runs', counting), mock.patch.object(self.nsp.nso, 'read', wraps=self.nsp.nso.read) as read:
-            self.build(); self.assertEqual(calls, []); read.assert_not_called()
-            self.assertEqual(self.outputs(), first, 'the kept runs write the same bytes')
-            self.build(DM_VARIANT_RUNS_CACHE='0'); self.assertEqual(calls, ['v0_fps', 'v0_ultrawide'], 'DM_VARIANT_RUNS_CACHE=0: computed at every build')
-            self.assertEqual(self.outputs(), first); calls.clear()
-            self.build(); self.assertEqual(calls, ['v0_fps', 'v0_ultrawide'], 'that build removed them'); calls.clear()
-            self.build(); self.assertEqual(calls, []); self.assertEqual(self.outputs(), first)
-            rw = self.mods / 'v0_ultrawide/rewrite'
-            d = bytearray((rw / 'main.patched.bin').read_bytes()); d[0x5104] = 7; (rw / 'main.patched.bin').write_bytes(bytes(d))   # the variant's output written behind the step's back
-            self.build(); self.assertEqual(calls, ['v0_ultrawide']); calls.clear()
-            self.assertIn(b'ultrawide\tw\t0x5100\t0x5100\t' + struct.pack('<f', 21 / 9).hex().encode() + b'07', self.outputs()['main.variants'])
-            (rw / 'main.runs.json').write_text('{not json'); self.build(); self.assertEqual(calls, ['v0_ultrawide'], 'a damaged file'); calls.clear()
-            (self.mods / 'v0_fps/want.bin').write_bytes(bytes(self.base[:0x10]) + b'\x1f\x20\x03\xd5' + bytes(self.base[0x14:]))   # another mod: the variant key changes, so its rewrite and runs are made again
-            (self.mods / 'v0_fps/ExeFS/main').write_bytes(bytes(make_nso()) + b'\0')
-            rec = self.build(); self.assertEqual([l[0] for l in rec if l[1] == 'start'], ['fps']); self.assertEqual(calls, ['v0_fps']); calls.clear()
-            self.assertEqual((self.patched / 'mods.tsv').read_text().splitlines()[1], 'fps\t60 FPS\t1')
-            gmf = self.root / 'game_mods.py'; gmf.write_bytes(Path(gm.__file__).read_bytes())
-            with mock.patch.object(gm, '__file__', str(gmf)):
-                self.build(); self.assertEqual(calls, [], 'the same game_mods.py by content')
-                gmf.write_text(gmf.read_text() + '\n# changed\n'); self.build(); self.assertEqual(calls, ['v0_fps', 'v0_ultrawide'], 'game_mods.py, which computes them'); calls.clear()
-                self.build(); self.assertEqual(calls, [])
-            before = self.outputs()
-            (self.patched / 'main.gates.tsv').write_text('gate\n')   # the base rewrite's table changes alone (a base rewrite run again): its patched.bin is the same, so is the variant key
-            rec = self.build(); self.assertEqual(rec, []); self.assertEqual(calls, ['v0_fps', 'v0_ultrawide'], 'the base rewrite\'s tables'); calls.clear()
-            self.assertFalse((self.patched / 'mods.tsv').exists(), 'both refused: their rewrites differ in gates.tsv')
-            refusals = [m for m in self.said if 'differs in gates.tsv' in m]; self.said.clear()
-            self.build(); self.assertEqual(calls, [], 'a refusal is kept too'); self.assertEqual([m for m in self.said if 'differs in gates.tsv' in m], refusals, 'with its message')
-            (self.patched / 'main.gates.tsv').unlink(); self.build(); self.assertEqual(self.outputs(), before)
-
-    def test_the_cache_writes_what_computing_again_writes(self):   # every reuse state, the same bytes as rewriting and computing with the old behaviour (one after another, no kept runs)
-        self.build(DM_VARIANT_J='1', DM_VARIANT_RUNS_CACHE='0'); old = self.outputs(); self.assertEqual(old, self.expected())
-        for env in ({}, {}, {'DM_VARIANT_J': '1'}, {'DM_VARIANT_RUNS_CACHE': '0'}, {}):
-            with self.subTest(env=env): self.build(**env); self.assertEqual(self.outputs(), old)
-
-    def test_switch_values(self):
-        for bad in ('0', '-1', 'two'):
-            with self.subTest(bad=bad), self.assertRaisesRegex(self.nsp.BuildError, 'DM_VARIANT_J must be a positive integer'): self.nsp.variant_workers({'DM_VARIANT_J': bad}, 2)
-        self.assertEqual(self.nsp.variant_workers({'DM_VARIANT_J': '8'}, 2), 2)
-        self.assertEqual(self.nsp.variant_workers({}, 1), 1)
-        self.assertEqual(self.nsp.variant_workers({}, 2), min(2, os.cpu_count() or 1))
-
-    def test_fingerprint_memo_is_the_same_key(self):   # build_variants hashes the base rewrite once for all roles: the keys are those of before
-        files = [self.patched / 'main.patched.bin', self.patched / 'main.fixups.tsv', self.root / 'missing']
-        memo, plain = {}, self.nsp.fingerprint(('files', files), 'x')
-        self.assertEqual(self.nsp.fingerprint(('files', files), 'x', memo=memo), plain)
-        self.assertEqual(memo[str(files[2])], b'missing')
-        with mock.patch.object(self.nsp.rfs.Path, 'read_bytes', side_effect=AssertionError('read again')):
-            self.assertEqual(self.nsp.fingerprint(('files', files), 'x', memo=memo), plain, 'each file read once')
-
-
 MAC_READER = r'''#include "mod_rows.h"
 int main(int argc, char **argv) {   // the rows the Mac host puts in place from a .variants file with both roles on (loader.c), one per line: role, kind, image offset, bytes in hex
     FILE *f = argc > 1 ? fopen(argv[1], "r") : NULL;
@@ -1046,11 +836,6 @@ class MacReader(unittest.TestCase):
                 self.assertEqual(r.returncode, 0, r.stderr)
                 r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=120, env=dict(os.environ, ASAN_OPTIONS='detect_leaks=1' if sys.platform.startswith('linux') else '', UBSAN_OPTIONS='halt_on_error=1'))
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertIn(', 0 failed', r.stdout)
-
-
-def json_copy(v):   # the variants as apply_mods hands them over (a JSON file's): build_variants never changes the caller's
-    import json
-    return json.loads(json.dumps(v))
 
 
 if __name__ == '__main__':

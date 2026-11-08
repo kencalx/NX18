@@ -53,7 +53,7 @@ python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; 
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys
 ```
 
-Mods: put the game's code patches (`.ips`, `.pchtxt`), replacement files (`romfs` folders) and cheats (`cheats` folders) in a folder named `mods` inside the game's folder, as Atmosphère, yuzu or Ryujinx lay them out, and they are packed into the app ([Mods and patches](docs/playing.md#mods-and-patches)).
+Mods: put the game's cheats (`cheats` folders) and a High frame rate or Ultrawide mod (`.ips`, `.pchtxt`, in a folder named for it, such as `60FPS` or `Ultrawide`) in a folder named `mods` inside the game's folder, as Atmosphère, yuzu or Ryujinx lay them out: the cheats are packed into the app and the mod becomes a switch in the launcher ([Mods and patches](docs/playing.md#mods-and-patches)). Other code patches and replacement files (`romfs` folders) are left out.
 
 The IPA appears in the game's folder. The first build takes 30–60 minutes and needs free disk space of about twice the game's size plus 10 GB; building again is much faster.
 

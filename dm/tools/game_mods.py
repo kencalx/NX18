@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""A game's mods, packed into its app by the NSP script (scripts/build_ipa_from_nsp.py, MODS / --mods; by default the folder named mods beside the game's files):
-  · code patches: Atmosphère IPS / IPS32 files named after a module's build ID (atmosphere/exefs_patches/<mod>/<build ID>.ips) and IPSwitch text patches (*.pchtxt, which name
-    their build in an @nsobid line), as yuzu, Ryujinx and Atmosphère apply them, written into the decompressed code module (main, subsdk*, sdk, rtld) before the rewriter
-    (patch_nso.py) reads it. An iPhone app's code pages are signed, so this is the only way a code patch (a 60 fps patch, a resolution patch) reaches the game there. A patch
-    (one @enabled block of a .pchtxt, or one IPS file) that writes outside the module's text, ro and data (a code cave in its bss, which only an emulator runs), or whose code
-    branches out of the module's text, is left out whole, with a [RED] line; of a patch that holds a code cave and the hook into it, only those (judge_patches);
-  · RomFS file replacements (LayeredFS): every file under a folder named romfs (atmosphere/contents/<title ID>/romfs/..., <mods>/<title ID>/<mod>/romfs/...) replaces the
-    game file of the same path, or is added; the game's RomFS image (DMROMFS1, romfs_image.py) gets a new index that names them, its own data kept as it was;
+"""A game's mods, packed into its app by the NSP script (scripts/build_ipa_from_nsp.py, MODS / --mods; by default the folder named mods beside the game's files). Two kinds are packed:
+  · switchable code patches: a mod whose folder name says it is a frame-rate or an ultrawide mod (split_roles), as Atmosphère IPS / IPS32 files named after a module's build ID
+    (atmosphere/exefs_patches/<mod>/<build ID>.ips) and IPSwitch text patches (*.pchtxt, which name their build in an @nsobid line), as yuzu, Ryujinx and Atmosphère apply them.
+    It is never written into the game's modules for good: the NSP script rewrites a copy of them with it (patch_nso.py), and the launcher's High frame rate / Ultrawide put its
+    bytes in place when the game starts (variant_runs). A patch (one @enabled block of a .pchtxt, or one IPS file) that writes outside the module's text, ro and data (a code cave
+    in its bss, which only an emulator runs), or whose code branches out of the module's text, is left out whole, with a [RED] line; of a patch that holds a code cave and the
+    hook into it, only those (judge_patches). Other code patches and RomFS mods (folders named romfs, which scan still lists) are left out by the NSP script, each with a line;
   · cheats: Atmosphère cheat files under a folder named cheats, <build ID>.txt; a .txt with another name is taken as the packed build's. They are packed into the app, which copies
     them into its cheats folder (the iPhone's Documents/cheats), where the in-game menu turns them on.
 What belongs to the game: a folder named with a title ID belongs to that title and its update (the title ID + 0x800), so a whole SD card (atmosphere/contents/<title ID>/...),
 Ryujinx's mods folder or yuzu's load folder can be given as it is; anything else under the mods folder counts. A game of several programs (Super Mario 3D All-Stars) packs each
-program with the folders of its own title ID, the application's + the program's index. A DLC's folder (the application's title ID + 0x1000 + its index) is not the game's: a DLC's
-RomFS is not modded, and the report says so. A file or folder whose name starts with '.' or '-' is skipped, so renaming a mod's folder to -name turns it off without deleting it.
+program with the folders of its own title ID, the application's + the program's index. A DLC's folder (the application's title ID + 0x1000 + its index) is not the game's, and
+the report says so. A file or folder whose name starts with '.' or '-' is skipped, so renaming a mod's folder to -name turns it off without deleting it.
 Usage on its own (a check, nothing written): game_mods.py <mods folder> <title ID> [ExeFS folder]"""
 import bisect, hashlib, os, re, shutil, struct, sys
 from array import array
@@ -256,7 +255,7 @@ def code_patches(found, modules, files=None, adapt=None):
 
 # A patch is judged before anything is written (judge_patches), since what it does is one change, and its records only together:
 #  · (a) its records, past the NSO header, must write only the module's text, ro and data. A byte in its bss (a code cave there: on a Switch Atmosphère maps the bss writable
-#    and not executable, so only an emulator runs it), in the padding between two segments (the module's file does not hold it) or past the module is a change Nintanium cannot
+#    and not executable, so only an emulator runs it), in the padding between two segments (the module's file does not hold it) or past the module is a change NXNative cannot
 #    carry, and the patch is left out whole. A zero byte there changes nothing (that memory is zero at start, or is not the module's) and is not counted: apply_records cuts
 #    those past the data with its note, as before. One exception, the shape of a hook and its cave in one block: when each run of those records (records within NEAR bytes of
 #    each other) is entered by a direct branch of the patch's own code in the text, the cave and the records of the patch's text that branch or refer into it (to a fixpoint)
@@ -335,10 +334,10 @@ def _where(m, a):
 
 
 def _cannot(m, a):
-    """Why Nintanium cannot carry a byte at image offset a, outside module m's segments (_where says where that is)"""
-    if m.text_end <= a < (m.text_end + 0xfff) & ~0xfff: return 'a Switch runs code there, in the rest of its text\'s last page, but Nintanium carries only what the module\'s file holds'
-    if a < m.segments[2][0]: return 'Nintanium carries only what the module\'s file holds'
-    return 'Nintanium cannot carry a code cave or a bss write, which only an emulator runs'
+    """Why NXNative cannot carry a byte at image offset a, outside module m's segments (_where says where that is)"""
+    if m.text_end <= a < (m.text_end + 0xfff) & ~0xfff: return 'a Switch runs code there, in the rest of its text\'s last page, but NXNative carries only what the module\'s file holds'
+    if a < m.segments[2][0]: return 'NXNative carries only what the module\'s file holds'
+    return 'NXNative cannot carry a code cave or a bss write, which only an emulator runs'
 
 
 def _text_with(m, recs):
@@ -588,7 +587,7 @@ def _uw_of(name):
 
 
 def split_roles(found, fps_ok=True):
-    """(the patch files written for good, {role: (mod name, [its patch files])}, report lines). fps_ok False: the game's profile has the host's own Frame rate setting,
+    """(the patch files of the other mods, which are not switchable (the NSP script leaves them out), {role: (mod name, [its patch files])}, report lines). fps_ok False: the game's profile has the host's own Frame rate setting,
     which a frame-rate mod would fight, so such mods are left out. Of several mods of one kind: FPS the one of 60 (these screens show 60, the host paces at most 60 on
     an iPhone), else the lowest above it; Ultrawide the shape nearest the iPhone's; a mod made for Ryujinx alone ("Ryujinx" in its name) after the others"""
     by_mod: dict[str, list] = {}
@@ -739,7 +738,7 @@ def read_variants(path):
     return out
 
 
-# ---------- RomFS ----------
+# ---------- files ----------
 
 def link_or_copy(src, dst):
     """dst as a hard link of src (the same volume), else a copy; a file already at dst is replaced, never written into"""
@@ -747,123 +746,6 @@ def link_or_copy(src, dst):
     if dst.exists() or dst.is_symlink(): dst.unlink()
     try: os.link(src, dst)
     except OSError: shutil.copy2(src, dst)
-
-
-def clone_or_copy(src, dst):
-    """dst as an APFS clone of src (instant, its blocks shared until written), else a full copy"""
-    dst = Path(dst)
-    if dst.exists(): dst.unlink()
-    if sys.platform == 'darwin':
-        import ctypes
-        try:
-            if ctypes.CDLL(None, use_errno=True).clonefile(os.fsencode(src), os.fsencode(dst), 0) == 0: return 'clone'
-        except (OSError, AttributeError): pass
-    shutil.copyfile(src, dst)
-    return 'copy'
-
-
-def _image_tree(img):
-    """The tree of a RomFS image: {'kids': {name bytes: node}} for a directory, {'at': (offset, size, flags)} for a file"""
-    import romfs
-    im = romfs.Image(img)
-    def node(k):
-        a, b, _, _, t, flags = im.entry(k)
-        if t: return {'at': (a, b, flags)}
-        return {'kids': {im.name(j): node(j) for j in range(a, a + b)}}
-    return node(0), im
-
-
-def overlay_files(romfs_dirs):
-    """[(guest path parts as bytes, host file)] of the files under the mods' romfs folders, in order (a later folder's file wins)"""
-    out = []
-    for top in romfs_dirs:
-        for d, subdirs, files in os.walk(top):
-            subdirs[:] = sorted(s for s in subdirs if not skipped(s))
-            rel = Path(d).relative_to(top).parts
-            for fn in sorted(files):
-                if not skipped(fn): out.append((tuple(os.fsencode(x) for x in rel + (fn,)), Path(d) / fn))
-    return out
-
-
-def _place(tree, parts, src, report, label):
-    """Puts the host file src at parts in the tree; a name that differs only in letter case from one the game has takes the game's (Windows and macOS folders keep any case)"""
-    node, where = tree, []
-    for i, part in enumerate(parts):
-        kids = node['kids']
-        if part not in kids:
-            same = [k for k in kids if k.lower() == part.lower()]
-            if same: part = same[0]
-        where.append(part.decode(errors='replace'))
-        last = i == len(parts) - 1
-        if last:
-            old = kids.get(part)
-            if old is not None and 'kids' in old: report.append(f'[RED] {label}: {"/".join(where)} is a folder in the game; the file replaces it')
-            kids[part] = {'src': src, 'new': old is None}
-            return old is None
-        if part not in kids or 'kids' not in kids[part]:
-            if part in kids: report.append(f'[RED] {label}: {"/".join(where)} is a file in the game; the folder replaces it')
-            kids[part] = {'kids': {}}
-        node = kids[part]
-
-
-def overlay_image(img, dst, romfs_dirs, root=None):
-    """dst: the RomFS image img with the mods' files replacing or added to its own. img's data is kept where it is (an APFS clone of it on a Mac, a copy elsewhere),
-    the mods' files are appended, and a new index names them; the old index and the replaced files' bytes stay behind as unused bytes. Returns the report lines"""
-    import romfs_image as ri
-    tree, im = _image_tree(img)
-    report, added, replaced = [], 0, 0
-    files = overlay_files(romfs_dirs)
-    for parts, src in files:
-        label = str(src.relative_to(root)) if root else str(src)
-        if _place(tree, parts, src, report, label): added += 1
-        else: replaced += 1
-    part = Path(str(dst) + '.part')
-    how = clone_or_copy(img, part)
-    with open(part, 'r+b') as out:
-        _, ioff, _, _ = ri.HEAD.unpack(out.read(ri.HEAD.size))
-        out.truncate(ioff); out.seek(ioff)
-        ents = [[b'', tree]]   # breadth-first, each directory's children one consecutive run sorted by name, as romfs_image.py writes them
-        rows, i, off = [], 0, ioff
-        while i < len(ents):
-            name, node = ents[i]
-            if 'kids' in node:
-                kids = sorted(node['kids'].items())
-                rows.append((len(ents), len(kids), name, 0, 0)); ents.extend([k, v] for k, v in kids)
-            elif 'src' in node:
-                with open(node['src'], 'rb') as fh:
-                    n = 0
-                    while b := fh.read(8 << 20): out.write(b); n += len(b)
-                rows.append((off, n, name, 1, 0)); off += n
-            else:
-                a, b, flags = node['at']; rows.append((a, b, name, 1, flags))
-            i += 1
-        pool, idx = bytearray(), bytearray()
-        for a, b, name, t, flags in rows:
-            idx += ri.ENT.pack(a, b, len(pool), len(name), t, flags); pool += name
-        out.write(idx); out.write(pool)
-        out.seek(0); out.write(ri.HEAD.pack(ri.MAGIC, off, len(idx) + len(pool), len(rows)))
-    os.replace(part, dst)
-    del im
-    report.insert(0, f'RomFS: {replaced} files replaced, {added} added from {len(romfs_dirs)} romfs folder(s) (the image {"cloned" if how == "clone" else "copied"}, then its new index)')
-    return report
-
-
-def overlay_folder(src, dst, romfs_dirs, root=None):
-    """dst: an extracted RomFS folder (an older extraction's layout) as hard links, with the mods' files in place of the game's"""
-    report, n = [], 0
-    for d, subdirs, files in os.walk(src):
-        subdirs.sort()
-        rel = Path(d).relative_to(src)
-        (Path(dst) / rel).mkdir(parents=True, exist_ok=True)
-        for fn in files: link_or_copy(Path(d) / fn, Path(dst) / rel / fn)
-    for parts, f in overlay_files(romfs_dirs):
-        to = Path(dst).joinpath(*(os.fsdecode(p) for p in parts))
-        if to.is_dir(): report.append(f'[RED] {f.relative_to(root) if root else f}: a folder in the game; skipped'); continue
-        to.parent.mkdir(parents=True, exist_ok=True)
-        if to.exists(): to.unlink()
-        shutil.copy2(f, to); n += 1
-    report.insert(0, f'RomFS: {n} files from {len(romfs_dirs)} romfs folder(s)')
-    return report
 
 
 # ---------- cheats ----------
@@ -892,7 +774,7 @@ def pack_cheats(found, build16, dst):
 if __name__ == '__main__':
     if len(sys.argv) < 3: sys.exit(__doc__)
     found = scan(Path(sys.argv[1]).expanduser(), int(sys.argv[2], 16))
-    print(f'{len(found.ips)} code patch files, {len(found.romfs)} romfs folders, {len(found.cheats)} cheat files')
+    print(f'{len(found.ips)} code patch files, {len(found.romfs)} romfs folders (not packed), {len(found.cheats)} cheat files')
     for p, why in found.ignored: print(f'ignored {p}: {why}')
     if len(sys.argv) > 3:
         modules = nso_modules(sys.argv[3])
