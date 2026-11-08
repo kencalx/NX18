@@ -27,7 +27,9 @@ static void begin(int on) {   // a new frame and submission with the switches of
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
 }
 static void readback(tex_t *t, id<MTLBuffer> b, unsigned bpp) {
-    [blit() copyFromTexture:tex_mtl(t) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(8, 8, 1) toBuffer:b destinationOffset:0
+    id<MTLTexture> src = tex_mtl(t);
+    if (!b || !src) { failed++; fprintf(stderr, "FAIL: readback without a buffer or a texture\n"); return; }   // checked before use, as the repo's tests do (lint-c nullability)
+    [blit() copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(8, 8, 1) toBuffer:b destinationOffset:0
             destinationBytesPerRow:8 * bpp destinationBytesPerImage:64 * bpp];
 }
 typedef struct { uint8_t a[256], b[256]; uint64_t omit, split, cfm; } result;
