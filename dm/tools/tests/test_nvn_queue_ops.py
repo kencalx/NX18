@@ -21,7 +21,7 @@ def past_count_ops():
     for body in re.findall(r'enum\s*\{([^}]*)\}', src):
         items = [i.strip() for i in body.split(',') if i.strip()]
         if not items or not re.search(r'=\s*OP_COUNT_\b', items[0]): continue
-        names += [re.match(r'(\w+)', i).group(1) for i in items]
+        names += [m.group(1) for m in (re.match(r'(\w+)', i) for i in items) if m]
     return names
 
 
