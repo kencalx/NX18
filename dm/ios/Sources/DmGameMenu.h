@@ -11,7 +11,10 @@ int dm_pad_layout(void);   // DmGamepad.m: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_
 bool dm_pad_layout_offered(int layout);   // Tap only in handheld mode
 void dm_pad_layout_set(int layout);   // releases every touch first, and is saved for the next start
 void dm_gamepad_touch_feedback(bool on);   // DM_TOUCH_HAPTICS
+void dm_gamepad_touch_look(const char *env, const char *value);   // DM_TOUCH_SIZE or DM_TOUCH_OPACITY, at once (DmGamepad.m)
+double dm_gamepad_size(void);   // the touch controls' size factor (DM_TOUCH_SIZE; 1 = Large)
 bool dm_setting_live(const char *env, const char *value);   // front_ios.m: value NULL asks whether the running game takes env at once; otherwise applies it
+void dm_setting_env(const char *env, const char *value);   // front_ios.m: a pick into the environment, under the lock a host thread copies such a variable under (front.h front_env_copy)
 // The cheats (dm/host/hle_cheats.c, as dm.h declares them) that GameMenu.swift's Cheats submenu lists and toggles: the file of this build in the cheats folder, Documents/cheats on the iPhone (main.m).
 // They show nothing until the host has loaded them (dm_cheats_init, on the preload thread); a string returned points into hle_cheats.c's static arrays, and the menu copies it at once
 int dm_cheats_found(void);

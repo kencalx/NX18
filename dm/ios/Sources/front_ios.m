@@ -16,6 +16,7 @@
 #import "CloudSaves.h"
 
 void dm_gamepad_active(void);
+void dm_gamepad_hint(void);   // DmGamepad.m: the menu button shows for 5 s (main thread)
 #import "DmLayout.h"
 #import "DmGameMenu.h"
 
@@ -97,8 +98,10 @@ static void tv_attach(void);
 @end
 static DmRootVC *g_root;
 static CGFloat g_picture_aspect = DM_PICTURE_16_9;   // the presented picture's width / height (front_picture_shape); main thread
+static BOOL g_pictured;   // the game's first picture was reported (front_picture_shape); main thread
 static void launcher_done(void) { [g_root startGame]; }
 void mtl_present_stretch(int on);   // nvn_mtl.m: the present draws the picture over the whole drawable instead of keeping its shape (Picture Stretch)
+void mtl_present_upscale_set(const char *mode);   // nvn_mtl.m: the in-game menu's Upscaling, which the present thread takes at its next present
 static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "Fill" : m == DmPictureStretch ? "Stretch" : "Fit"; }
 @implementation DmRootVC
 - (void)loadView { self.view = [DmRootView new]; }
@@ -221,7 +224,7 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
     dm_gamepad_arrange(self.pad, layout);
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = CGRectIntersection(layout.controls, UIEdgeInsetsInsetRect(b, gameInsets));
-        CGFloat u = layout.separated ? MIN(MIN(s.size.height / 430.0, s.size.width / 700.0), 1.3) : MIN(b.size.height / 430.0, 1.3);
+        CGFloat u = (layout.separated ? MIN(MIN(s.size.height / 430.0, s.size.width / 700.0), 1.3) : MIN(b.size.height / 430.0, 1.3)) * dm_gamepad_size();   // times Touch control size, as the pad's
         self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
     }
 }
@@ -278,14 +281,31 @@ void front_picture_shape(int w, int h) {   // front.h: the views take the presen
     if (w <= 0 || h <= 0) return;
     CGFloat a = (CGFloat)w / h;
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (!g_pictured) { g_pictured = YES; dm_gamepad_hint(); }   // the first present reports the first shape: the menu button's 5 s at the start count from the game's first picture
         if (a == g_picture_aspect) return;
         g_picture_aspect = a; LOG("front end: picture shape %dx%d, the game's view follows it", w, h);
         [g_root.view setNeedsLayout]; if (g_tv) [g_tv.rootViewController.view setNeedsLayout];
     });
 }
 
+// The in-game menu's picks go into the environment under one lock (dm_setting_env, from GameMenu.swift), and a host thread that reads one of those variables while the game runs
+// copies it under the same lock (front_env_copy, front.h): Darwin's setenv rewrites a value string it allocated in place, or reallocates it, under a pointer getenv handed another
+// thread before. Of the variables the menu sets, only DM_PRESENT_UPSCALE is read so (nvn_mtl.m fx_mode, on the present thread, at its first present). The others are read on the
+// main thread, which picks run on: DM_PICTURE_FIT, DM_SHOW_FPS and DM_RUMBLE in startGame, DM_TOUCH_* in the gamepad's init, both before the menu exists; DM_OPMODE once, by
+// hle_oe.c dm_opmode, which caches it, and the menu's own opening calls it (dm_pad_layout_offered) before a pick can be made. A host thread that comes to read one of them while
+// the game runs takes it through front_env_copy, or is handed the pick by dm_setting_live below, as the present thread is (mtl_present_upscale_set)
+static pthread_mutex_t g_env_lock = PTHREAD_MUTEX_INITIALIZER;
+void dm_setting_env(const char *env, const char *value) { pthread_mutex_lock(&g_env_lock); setenv(env, value, 1); pthread_mutex_unlock(&g_env_lock); }
+int front_env_copy(const char *name, char *out, size_t cap) {
+    pthread_mutex_lock(&g_env_lock);
+    const char *e = getenv(name);
+    if (cap) strlcpy(out, e ? e : "", cap);
+    pthread_mutex_unlock(&g_env_lock);
+    return e != NULL;
+}
+
 // The settings the in-game menu offers (GameMenu.swift, from the gamepad's menu button), each taking effect while the game runs; the launcher's other settings need the next start.
-// value NULL: only whether env is one of them; otherwise apply it (GameMenu.swift has saved it and put it in the environment). Console mode changes as on a Switch put in or taken out of its
+// value NULL: only whether env is one of them; otherwise apply it (GameMenu.swift has saved it and put it in the environment, dm_setting_env). Console mode changes as on a Switch put in or taken out of its
 // dock (the operation mode change notification); while a TV shows the picture the game stays docked, and the choice applies when the TV is unplugged
 bool dm_setting_live(const char *env, const char *value) {
     if (!env || !g_root.game) return false;
@@ -303,6 +323,8 @@ bool dm_setting_live(const char *env, const char *value) {
     }
     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root showFPS:atoi(value) != 0]; return true; }
     if (!strcmp(env, "DM_TOUCH_HAPTICS")) { if (value) dm_gamepad_touch_feedback(atoi(value) != 0); return true; }
+    if (!strcmp(env, "DM_TOUCH_SIZE") || !strcmp(env, "DM_TOUCH_OPACITY")) { if (value) { dm_gamepad_touch_look(env, value); [g_root.view setNeedsLayout]; } return true; }   // the counter follows the size
+    if (!strcmp(env, "DM_PRESENT_UPSCALE")) { if (value) { mtl_present_upscale_set(value); LOG("front end: upscaling %s (in-game menu)", value); } return true; }   // taken by the present thread (nvn_mtl.m)
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }
     return false;
 }
@@ -361,9 +383,9 @@ void front_progress(const char *title, long done, long total) {
     if (!g_layer) return;
     NSString *tt = title ? @(title) : nil;
     void (*hook)(const char *, long, long) = front_progress_hook;
-    if (hook) { dispatch_async(dispatch_get_main_queue(), ^{ hook(tt.UTF8String, done, total); }); return; }   // the host app draws it (front.h)
+    if (hook) { dispatch_async(dispatch_get_main_queue(), ^{ hook(tt.UTF8String, done, total); if (!tt) dm_gamepad_hint(); }); return; }   // the host app draws it (front.h)
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!tt) { [g_prog removeFromSuperview]; g_prog = nil; return; }
+        if (!tt) { [g_prog removeFromSuperview]; g_prog = nil; dm_gamepad_hint(); return; }   // the screen goes: the menu button it covered shows for 5 s (DmGamepad.m)
         if (!g_prog) {
             UIView *root = g_root.view; if (!root) return;
             g_prog = [[UIView alloc] initWithFrame:root.bounds]; g_prog.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;

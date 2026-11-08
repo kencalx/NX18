@@ -33,6 +33,7 @@
 #include "nvn_border.h"
 #include "nvn_primitive.h"
 #include "nvn_timestamp.h"
+#include "nvn_upscale_pick.h"   // the in-game menu's Upscaling (fx_mode)
 #include "msl_image.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
@@ -14586,16 +14587,35 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t made_at; int made; NSUInteger refused[6]; } fx_state;
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
 static id<MTL4Compiler> g_fx_comp;
-static int g_fx_mode = -1;   // 1 = metalfx, 0 = off
-static int fx_mode(void) {
-    if (g_fx_mode >= 0) return g_fx_mode;
-    const char *e = getenv("DM_PRESENT_UPSCALE"); int v = 0;
-    if (e && (!strcmp(e, "metalfx") || !strcmp(e, "1"))) v = 1;
-    else if (e && (!strcmp(e, "off") || !strcmp(e, "0"))) v = 0;
-    else if (e && *e) MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx or off; keeping %s", e, v ? "metalfx" : "off");
-    if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("present upscaling: this GPU has no Metal 4 MetalFX spatial scaler; the present scales bilinearly"); v = 0; }
-    MLOG("present upscaling (DM_PRESENT_UPSCALE): %s", v ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it" : "off, bilinear");
-    return g_fx_mode = v;
+static _Atomic int g_fx_mode = -1;   // 1 = metalfx, 0 = off (nvn_upscale_pick.h UP_*); the live present sets it (fx_mode), a capture reads it
+static _Atomic int g_fx_req = -1;    // the in-game menu's Upscaling (mtl_present_upscale_set, main thread) until the live present takes it at its next present; -1 none
+// The front ends' (front.h): the iPhone's copies under its in-game menu's lock; the Mac's menus change no variable while the game runs, and the unit tests have no front end
+__attribute__((weak)) int front_env_copy(const char *name, char *out, size_t cap) {
+    const char *e = getenv(name);
+    if (cap) strlcpy(out, e ? e : "", cap);
+    return e != NULL;
+}
+// The in-game menu's Upscaling while the game runs (front_ios.m dm_setting_live): the live present takes the new mode at its next present (fx_mode, nvn_upscale_pick.h). A scaler
+// made before is kept, so switching back to MetalFX makes none for the same sizes (FX_REMAKE_PRESENTS still spaces new ones), and a GPU without the scaler stays bilinear. Nothing
+// the game sees changes
+void mtl_present_upscale_set(const char *mode) {
+    int v = up_parse(mode);
+    if (v < 0) { MLOG("[RED] present upscaling: %s from the in-game menu is not metalfx or off; ignored", mode ? mode : "(none)"); return; }
+    up_post(&g_fx_req, v);
+}
+// live: the live present's (0 for a capture, which never takes the menu's pick). The first present decides from DM_PRESENT_UPSCALE, as before; then the mode in force, until a pick
+static int fx_mode(int live) {
+    int want = -1, v = up_now(&g_fx_mode, &g_fx_req, live, &want);
+    if (v >= 0) return v;   // every present but the first and the one after a pick
+    int was = atomic_load_explicit(&g_fx_mode, memory_order_relaxed);
+    if ((v = want) < 0) {   // a copy taken under the in-game menu's lock (front.h front_env_copy): the menu may set the variable on the main thread right now
+        char e[256]; v = up_parse(front_env_copy("DM_PRESENT_UPSCALE", e, sizeof e) ? e : NULL);
+        if (v < 0) { MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx or off; keeping off", e); v = UP_OFF; }
+    }
+    if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("present upscaling: this GPU has no Metal 4 MetalFX spatial scaler; the present scales bilinearly"); v = UP_OFF; }
+    if (v != was) MLOG("present upscaling (%s): %s", want >= 0 ? "in-game menu" : "DM_PRESENT_UPSCALE", v == UP_METALFX ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it" : "off, bilinear");
+    up_set(&g_fx_mode, v);
+    return v;
 }
 // MetalFX scales the content (cw x ch) to its rectangle on the canvas (vp) when the rectangle is at least as large in both directions and larger in one, and of the content's shape
 // (within present_viewport's 1 %): a picture stretched to another shape (Picture Stretch) is scaled by the bilinear pass, MetalFX's spatial scaler being made for a uniform scale
@@ -14610,7 +14630,7 @@ static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
 // remake_wait: fx is the present thread's, whose textures presents still on the GPU may read: a new scaler waits for them and for FX_REMAKE_PRESENTS presents since the last
 static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTexture> raw, const NSUInteger r[4], MTLViewport vp, MTLPixelFormat out_pf, int remake_wait) {
     NSUInteger cw = r[2], ch = r[3], ow = (NSUInteger)vp.width, oh = (NSUInteger)vp.height;
-    if (fx_mode() != 1 || !fx_wanted(vp, cw, ch)) return nil;
+    if (fx_mode(fx == &g_fx_present) != UP_METALFX || !fx_wanted(vp, cw, ch)) return nil;   // a capture (present_offscreen_m4, its own fx_state) takes no pick
     if (!fx->sc || fx->in.width != cw || fx->in.height != ch || fx->in.pixelFormat != raw.pixelFormat || fx->out.width != ow || fx->out.height != oh || fx->out.pixelFormat != out_pf) {
         NSUInteger key[6] = {cw, ch, raw.pixelFormat, ow, oh, out_pf};
         if (!memcmp(key, fx->refused, sizeof key)) return nil;

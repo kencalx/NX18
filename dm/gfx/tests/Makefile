@@ -114,6 +114,17 @@ perf-order-cpu: t_perf_order
 .PHONY: perf-order-tsan
 perf-order-tsan: t_perf_order_tsan
 	./t_perf_order_tsan --cpu
+# The live in-game menu's plain-C rule: Upscaling's pick taken by the present thread (../nvn/nvn_upscale_pick.h), plain and under ThreadSanitizer (a main thread posting picks while a
+# present thread takes them) and AddressSanitizer (make live-menu)
+t_upscale_pick: t_upscale_pick.c ../nvn/nvn_upscale_pick.h
+	clang -std=c11 -O1 -g -Wall -Wextra -pthread -o $@ t_upscale_pick.c
+t_upscale_pick_tsan: t_upscale_pick.c ../nvn/nvn_upscale_pick.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=thread -o $@ t_upscale_pick.c
+t_upscale_pick_asan: t_upscale_pick.c ../nvn/nvn_upscale_pick.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=address,undefined -o $@ t_upscale_pick.c
+.PHONY: live-menu
+live-menu: t_upscale_pick t_upscale_pick_tsan t_upscale_pick_asan
+	./t_upscale_pick && ./t_upscale_pick_tsan && ./t_upscale_pick_asan
 .PHONY: check_t_perf_order
 check_t_perf_order: t_perf_order
 	MTL_DEBUG_LAYER=1 ./t_perf_order

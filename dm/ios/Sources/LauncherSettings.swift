@@ -107,12 +107,14 @@ final class LauncherModel: ObservableObject {
         if !ignoreSaved { if s.isDefault(v) { defaults.removeObject(forKey: "launcher." + s.env) } else { defaults.set(v, forKey: "launcher." + s.env) } }
     }
 
-    // A choice made while the game runs (the iOS in-game menu, GameMenu.swift): saved as Play saves it, so the settings screen shows it at the next start, and put in the environment.
-    // A value an env file or the launch fixed stays
-    func choose(_ s: Setting, _ v: String) {
-        guard !fixed.contains(s.env), s.accepts(v) else { return }
-        values[s.env] = v; store(s, v); setenv(s.env, v, 1)
+    // A choice made while the game runs (the iOS in-game menu, GameMenu.swift): saved as Play saves it, so the settings screen shows it at the next start. A value an env file or the
+    // launch fixed stays. Returns whether it took the value; the menu then puts it into the environment through front_ios.m's dm_setting_env, not setenv here: the host's threads run
+    // by then, and setenv rewrites or reallocates the value a pointer from another thread's getenv points at (dm_setting_env holds the lock such a reader copies it under)
+    func choose(_ s: Setting, _ v: String) -> Bool {
+        guard !fixed.contains(s.env), s.accepts(v) else { return false }
+        values[s.env] = v; store(s, v)
         fputs("launcher: \(s.env)=\(v) (in-game menu)\n", stderr)
+        return true
     }
 
     // DM_LAUNCHER=0: no screen, but the saved choices still apply (only DM_SAVED_CHOICES=0 ignores them); nothing is written

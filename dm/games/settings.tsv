@@ -26,6 +26,8 @@ DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=bas
 DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
 DM_PICTURE_FIT	choice	fit=Fit,fill=Fill,stretch=Stretch	fit	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen: health bars, subtitles or maps near the edges can be cut off. Stretch fills the screen without cropping, so the picture looks wider.
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
+DM_TOUCH_SIZE	choice	0.7=Small,0.85=Medium,1=Large	1	platform:ios	Controls	Touch control size
+DM_TOUCH_OPACITY	choice	0.4=Faint,0.7=Light,1=Normal,1.5=Strong	1	platform:ios	Controls	Touch control opacity
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
 DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
 DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBLE=1
