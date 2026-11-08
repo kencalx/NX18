@@ -12,6 +12,7 @@ static int checks, fails;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
 enum { TID = 500, W = 8, LAYERS = 4, LEVELS = 3, LAYER = 2, LEVEL = 1 };
 static uint8_t texel_at(id<MTLTexture> base, NSUInteger level, NSUInteger slice) {
+    if (!base) return 0xee;   // no texture: not uniform either
     uint8_t px[W * W]; NSUInteger w = W >> level;
     [base getBytes:px bytesPerRow:w bytesPerImage:w * w fromRegion:MTLRegionMake2D(0, 0, w, w) mipmapLevel:level slice:slice];
     uint8_t v = px[0]; for (NSUInteger i = 1; i < w * w; i++) if (px[i] != v) return 0xee;   // 0xee: not uniform
@@ -45,7 +46,8 @@ int main(void) { @autoreleasepool {
     CHECK(real_3d && vol.textureType == MTLTextureType2DArray && g_red_once[159] == red_before + 1, "a 3D slot: no view bridges it, bound as is and logged red");
     NSError *error = nil;
     id<MTLLibrary> library = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nkernel void store(texture2d<float, access::write> t [[texture(0)]], uint2 p [[thread_position_in_grid]]) { t.write(float4(0.5), p); }\n" options:nil error:&error];
-    id<MTLComputePipelineState> pipe = library ? [g_dev newComputePipelineStateWithFunction:[library newFunctionWithName:@"store"] error:&error] : nil;
+    id<MTLFunction> store_fn = [library newFunctionWithName:@"store"];
+    id<MTLComputePipelineState> pipe = store_fn ? [g_dev newComputePipelineStateWithFunction:store_fn error:&error] : nil;
     if (!pipe) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
     id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
     [e setComputePipelineState:pipe]; [e setTexture:img atIndex:0];

@@ -440,7 +440,7 @@ void dm_device_share(const void *p, uint64_t size, int share) {
     int i = 0; while (i < g_ndshare && (g_dshare[i].lo != lo || g_dshare[i].hi != hi)) i++;
     if (share) {
         if (i == g_ndshare) {
-            if (g_ndshare == g_cdshare) { g_cdshare = g_cdshare ? 2 * g_cdshare : 64; if (!(g_dshare = realloc(g_dshare, (size_t)g_cdshare * sizeof *g_dshare))) die("device-shared range table"); }
+            if (g_ndshare == g_cdshare) { g_cdshare = g_cdshare ? 2 * g_cdshare : 64; dshare_t *grown = realloc(g_dshare, (size_t)g_cdshare * sizeof *g_dshare); if (!grown) die("device-shared range table"); g_dshare = grown; }
             g_dshare[g_ndshare++] = (dshare_t){lo, hi, 0};
         }
         g_dshare[i].n++;

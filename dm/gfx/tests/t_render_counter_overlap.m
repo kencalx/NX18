@@ -64,7 +64,7 @@ static NVNcommandHandle record(NVNtexture *texture, NVNprogram *program, int wai
     return P(nvnCommandBufferEndRecording)(&command);
 }
 int main(void) { @autoreleasepool {
-    setbuf(stdout, NULL); mtl_init(); NSError *error = nil;
+    setvbuf(stdout, NULL, _IONBF, 0); mtl_init(); NSError *error = nil;
     id<MTLLibrary> library = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i [[vertex_id]]) { const float2 p[] = {float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i],0.5,1); }\n"
         "fragment float4 red() { return float4(1,0,0,1); } fragment float4 green() { return float4(0,1,0,1); }\n"
@@ -94,7 +94,7 @@ int main(void) { @autoreleasepool {
     const NVNtexture *colors[]={&target};const float blue[]={0,0,1,1},red_clear[]={1,0,0,1};
     const char *names[]={"UpdateUB1", "UpdateUB1 then fence", "ClearBuffer1", "CopyBuffer1", "CopyBuffer0", "UpdateUB high32"};
     for(int k=0;k<6;k++) {
-        id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+        id<MTLSharedEvent> gate=[g_dev newSharedEvent]; if(!gate) { CHECK(0, "GPU gate event created"); exit(2); }
         dispatch_semaphore_t cancel=dispatch_semaphore_create(0), retired=dispatch_semaphore_create(0);
         [g_q4 waitForEvent:gate value:1];
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
