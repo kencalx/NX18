@@ -13,8 +13,9 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
-static tex_t c0 = {.magic=MAGIC('T','E','X',0), .serial=99601}, c1 = {.magic=MAGIC('T','E','X',0), .serial=99602};
-static tex_t r16 = {.magic=MAGIC('T','E','X',0), .serial=99603}, rg16 = {.magic=MAGIC('T','E','X',0), .serial=99604};
+// Each target at its own offset in the pool, as t_attachment_capacity.m does: at the same offset two attachments overlap, which the validation layer refuses
+static tex_t c0 = {.magic=MAGIC('T','E','X',0), .serial=99601, .off=1*65536}, c1 = {.magic=MAGIC('T','E','X',0), .serial=99602, .off=2*65536};
+static tex_t r16 = {.magic=MAGIC('T','E','X',0), .serial=99603, .off=3*65536}, rg16 = {.magic=MAGIC('T','E','X',0), .serial=99604, .off=4*65536};
 static prog_t p1 = {.serial=99611}, p2 = {.serial=99612};
 static void seed(tex_t *t, MTLClearColor c) {
     MTL4RenderPassDescriptor *p = [MTL4RenderPassDescriptor new];
