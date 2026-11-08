@@ -27,6 +27,7 @@ from pathlib import Path
 TOOLS = Path(__file__).resolve().parent.parent / 'dm' / 'tools'   # the repository's tools, found from this script's place
 sys.path.insert(0, str(TOOLS))
 import nso_match                     # function boundaries and fingerprints: the rewriter's cross-build matcher
+from a64_words import adrp_user_lo, branch_target, ends_pairing, pc_relative_target   # the PC-relative forms' targets and the adrp pairing (game_mods.py's too)
 from nso_syms import load as load_nso
 import nacp                          # the display version of a build, from the control.nacp beside its ExeFS
 
@@ -54,31 +55,7 @@ def hexu(n):
     return f'0x{n:X}'
 
 
-# ---------- AArch64 words: the PC-relative forms and their relocation masks ----------
-
-def _signed(n, bits):
-    """The two's-complement value of the low bits of n (an instruction's signed immediate field)."""
-    return n - (1 << bits) if n & (1 << (bits - 1)) else n
-
-
-def branch_target(w, pc):
-    """Target of a B / BL at pc, or None for any other word (the only PC-relative forms the tool re-encodes)."""
-    if w & 0x7c000000 == 0x14000000: return pc + _signed(w & 0x3ffffff, 26) * 4
-    return None
-
-
-def pc_relative_target(w, pc):
-    """Target of any PC-relative word (B / BL, B.cond, CBZ / CBNZ, TBZ / TBNZ, ADR, ADRP's page, literal load), else None."""
-    t = branch_target(w, pc)
-    if t is not None: return t
-    if w & 0xff000010 == 0x54000000 or w & 0x7e000000 == 0x34000000: return pc + _signed((w >> 5) & 0x7ffff, 19) * 4
-    if w & 0x7e000000 == 0x36000000: return pc + _signed((w >> 5) & 0x3fff, 14) * 4
-    if w & 0x1f000000 == 0x10000000:
-        imm = _signed(((w >> 29) & 3) | ((w >> 5) & 0x7ffff) << 2, 21)
-        return (pc & ~0xfff) + (imm << 12) if w & 0x80000000 else pc + imm
-    if w & 0x3b000000 == 0x18000000: return pc + _signed((w >> 5) & 0x7ffff, 19) * 4
-    return None
-
+# ---------- AArch64 words: the PC-relative forms (dm/tools/a64_words.py) and their relocation masks ----------
 
 def encode_branch(link, pc, target):
     """A B (link False) or BL (link True) from pc to target; refused when out of the +-128 MB range or unaligned."""
@@ -146,26 +123,6 @@ def carry_write(authored, here, new, a, width):
     made_here = here & ~(mask << sh) | new << sh
     made_there = authored & ~(mask << sh) | new << sh
     return new if made_here == made_there and not carries_address_bits(made_here) else None
-
-
-def adrp_user_lo(u, rd):
-    """The low page offset an add (64-bit immediate) or a ldr / str (unsigned offset) with base register rd adds to an
-    adrp's page, or None when u is not such an instruction (the pairing rule of nso_match and nso_fnmap)."""
-    if (u >> 5) & 31 != rd: return None
-    if u & 0xff800000 == 0x91000000: return (u >> 10) & 0xfff
-    if u & 0x3b000000 == 0x39000000:
-        sh = 4 if u & 0x04800000 == 0x04800000 else u >> 30   # 128-bit SIMD / FP registers scale by 16
-        return ((u >> 10) & 0xfff) << sh
-    return None
-
-
-def ends_pairing(u, rd):
-    """True when u ends the search for an adrp's user: any branch, or an instruction that writes rd other than a store.
-    Conservative on purpose: a missed pair only costs one reference, a wrong pair would anchor a wrong address."""
-    if u & 0x7c000000 == 0x14000000 or u & 0xff000010 == 0x54000000 or u & 0x7e000000 in (0x34000000, 0x36000000): return True
-    if u & 0xfffffc1f in (0xd61f0000, 0xd63f0000, 0xd65f0000): return True    # br / blr / ret
-    is_store = u & 0x3b000000 == 0x39000000 and not (u >> 22) & 1             # str (unsigned offset): Rt is read, not written
-    return u & 31 == rd and not is_store
 
 
 # ---------- one build of the game ----------

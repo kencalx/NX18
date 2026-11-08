@@ -744,6 +744,43 @@ static int nro_pieces(const char *name, const uint8_t **x0, unsigned long *z0, c
     }
     return 0;
 }
+// Switchable mods (dm_mod_variants_apply, below) on the iPhone: the code pages a mod touches come signed, once per combination of the roles touching them (gen_embed.py
+// __dm<tag><name>v, its table __dm<tag><name>vt). iOS keeps a mapping of the app's own signed text permanent, and a page vm_remapped from it inherits that: mapping another page
+// over it later fails (KERN_PROTECTION_FAILURE; Luigi's Mansion 3's Ultrawide on an iPhone 18 Pro Max stopped the app at main+0x64000). So map_image holds those pages back
+// (mod_hole): each gets a readable copy of its own bytes in the reservation's anonymous page, not executable, and the code mapping goes around it; dm_mod_variants_apply then
+// remaps one page into each hole, which is an anonymous page and so may be replaced: the mod's page when its toggle is on, the module's own when it is off. No guest code runs in
+// between (the holes are filled before front_run); a host read of the text in between sees the module's own bytes
+typedef struct { uint32_t kind, roles, touch, pad; int64_t off; uint64_t len, src; } mod_var_ent;
+static const mod_var_ent *mod_var_table(const module_t *m, unsigned long *n, const uint8_t **v, unsigned long *zv) {
+    char sv[17], st[17]; const char *g = embed_tag(); unsigned long zt = 0;
+    snprintf(sv, sizeof sv, "__dm%s%sv", g, m->name); snprintf(st, sizeof st, "__dm%s%svt", g, m->name);
+    const mod_var_ent *t = (const mod_var_ent *)getsectiondata(IMAGE_MH, "__DATA", st, &zt);
+    *v = getsectiondata(IMAGE_MH, "__TEXT", sv, zv);
+    *n = t && *v ? zt / sizeof *t : 0;
+    return *n ? t : NULL;
+}
+#define MOD_HOLES_MAX 512
+static struct { module_t *m; int64_t off; const uint8_t *own; } g_hole[MOD_HOLES_MAX]; static int g_nhole;
+static int mod_page_switchable(const module_t *m, const mod_var_ent *t, unsigned long n, int64_t off) {
+    for (unsigned long i = 0; i < n; i++) if (t[i].kind == 0 && t[i].off == off) return 1;
+    return 0;
+}
+// [img_off, img_off + size) of the module's code from src, around the pages a switchable mod touches (holes: anonymous, read + write, holding their own bytes until
+// dm_mod_variants_apply maps the page to run)
+static void remap_code(module_t *m, vm_address_t base, int64_t img_off, const uint8_t *src, unsigned long size, const mod_var_ent *t, unsigned long n) {
+    unsigned long at = 0;
+    for (unsigned long p = 0; p <= size; p += 0x4000) {
+        int hole = p < size && n && mod_page_switchable(m, t, n, img_off + (int64_t)p);
+        if (p < size && !hole) continue;
+        if (p > at) remap_at(m, base + (vm_address_t)(img_off + (int64_t)at), src + at, p - at, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+        if (hole) {
+            if (g_nhole == MOD_HOLES_MAX) die("%s: more than %d pages of switchable mods", m->name, MOD_HOLES_MAX);
+            memcpy((void *)(base + (vm_address_t)(img_off + (int64_t)p)), src + p, 0x4000);
+            g_hole[g_nhole].m = m; g_hole[g_nhole].off = img_off + (int64_t)p; g_hole[g_nhole].own = src + p; g_nhole++;
+        }
+        at = p + 0x4000;
+    }
+}
 static void map_image(module_t *m, const char *dir) {
     (void)dir;
     char sx0[17], sx1[17], dm[17]; const char *g = embed_tag();
@@ -770,12 +807,15 @@ static void map_image(module_t *m, const char *dir) {
     if (slot) base = (vm_address_t)slot - pre;   // inside the jit layout's reservation
     else if (vm_allocate(mach_task_self(), &base, pre + m->size, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) die("%s failed to reserve %#llx bytes of address space", m->name, (unsigned long long)(pre + m->size));
     base += pre;
-    remap_at(m, base, x0, z0, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    unsigned long nv = 0, zv = 0; const uint8_t *v = NULL;
+    const mod_var_ent *t = m->nro ? NULL : mod_var_table(m, &nv, &v, &zv);
+    if (t && slot) { LOG("[RED] %s: switchable mods left off: the module lies in the jit layout's reservation", m->name); t = NULL; nv = 0; }
+    remap_code(m, base, 0, x0, z0, t, nv);
     remap_at(m, base + z0, w, zw, TRUE, VM_PROT_READ | VM_PROT_WRITE);
     // A module with nothing to rewrite has an empty patch area (87 of Super Smash Bros. Ultimate's 98 NROs: no x18, SVC or TLS register use); vm_remap refuses 0 bytes
     // (KERN_INVALID_ARGUMENT), which stopped the app at launch on an iPhone at the first such NRO (found in PR #94)
-    if (z1) remap_at(m, base + m->patch_off, x1, z1, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-    if (z2) remap_at(m, base + m->back_off, x2, z2, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    if (z1) remap_code(m, base, m->patch_off, x1, z1, t, nv);
+    if (z2) remap_code(m, base, m->back_off, x2, z2, t, nv);
     m->base = (uint8_t *)base; install_key_page(m);
 }
 #else
@@ -859,6 +899,100 @@ void load_modules(const char *dir, const char **names, int n) {
     if (getenv("DM_SYMCHECK")) LOG("DM_SYMCHECK: %lu symbol lookups at load time, hash and linear disagree %lu", g_symchk_n, g_symchk_bad);
     if (g_flag.bootprof) LOG("① breakdown: mapping (read + copy + seal pages) %.1f ms, dynamic section parsing %.1f ms, gate registration %.1f ms, relocation + forced takeover %.1f ms, total %.1f ms",
                              tm / 1e6, tp / 1e6, tg / 1e6, tr / 1e6, (now_ns() - t0) / 1e6);
+}
+
+// Switchable mods (the launcher's High frame rate and Ultrawide: the NSP script's mods folder, dm/tools/game_mods.py): a mod's bytes are put in place when the game starts, after
+// the launcher (main.c, beside dm_fps_state_apply), while no guest code has run. DM_MOD_FPS=1 / DM_MOD_ULTRAWIDE=1 turn them on. On the iPhone the code is signed: every code
+// page a mod touches is in the executable once per combination of the roles touching it (gen_embed.py __dm<name>v, its table __dm<name>vt). map_image holds those pages back
+// (anonymous holes, remap_code above), and here each hole gets one page vm_remapped into it: the page holding exactly the roles turned on among them, or the module's own when
+// none is (iOS refuses a remap over a mapping of the signed text); a data run is copied into the module's writable part. A module in the jit layout's reservation gets neither
+// (map_image leaves its mods off). On the Mac the bytes come from <module>.variants beside the modules and are written in place, a code page made writable for the moment:
+// every row of every module's file is read first (mod_rows.h, mod_variants_read), so a role with a row that cannot be read goes in nowhere, as the iPhone has a role whole or
+// not at all.
+// A data run never touches a word the loader relocated (variant_runs refuses such a mod). mod_variants_one returns the pieces it put in place, and in *did their roles
+#include <libkern/OSCacheControl.h>
+static int mod_on(const char *e) { const char *v = getenv(e); return v && !strcmp(v, "1"); }
+#if TARGET_OS_IPHONE
+static int mod_variants_one(module_t *m, int on, int *did) {
+    if (g_jit_base && m->base >= g_jit_base && m->base < g_jit_base + g_jit_span) return 0;   // map_image left its mods off (no holes): no data run goes in either, or a mod would be half applied
+    unsigned long nt = 0, zv = 0; const uint8_t *v = NULL;
+    const mod_var_ent *t = mod_var_table(m, &nt, &v, &zv);
+    int n = 0;
+    for (int h = 0; h < g_nhole; h++) {   // each held-back code page: the page holding exactly the roles turned on among those touching it, else the module's own
+        if (g_hole[h].m != m) continue;
+        const uint8_t *page = g_hole[h].own; int mod = 0;
+        for (unsigned long i = 0; i < nt; i++) {
+            const mod_var_ent *e = &t[i];
+            if (e->kind != 0 || e->off != g_hole[h].off || !(on & e->touch) || (on & e->touch) != e->roles) continue;
+            if (e->src + 0x4000 > zv || ((uintptr_t)(v + e->src) & 0x3FFF)) die("%s: switchable mod page at %#llx past its section or not on a page", m->name, (unsigned long long)e->off);
+            page = v + e->src; mod = 1; *did |= e->roles; break;
+        }
+        remap_at(m, (vm_address_t)(m->base + g_hole[h].off), page, 0x4000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+        sys_icache_invalidate(m->base + g_hole[h].off, 0x4000);
+        n += mod;
+    }
+    for (unsigned long i = 0; i < nt; i++) {   // data runs, into the module's writable part
+        const mod_var_ent *e = &t[i];
+        if (e->kind != 1 || !(on & e->roles)) continue;
+        if (e->src + e->len > zv) die("%s: switchable mod entry %lu past its section", m->name, i);
+        memcpy(m->base + e->off, v + e->src, e->len); n++; *did |= on & e->roles;
+    }
+    return n;
+}
+#else
+#include "mod_rows.h"
+static dm_mod_rows *g_mod_rows; static unsigned g_mod_skip;   // every module's rows, and the roles with a row that cannot be read in any module's file (mod_variants_read)
+// Before any is put in place: every module's <module>.variants, so a role with a row that cannot be read goes in nowhere, never in one module and not another
+static void mod_variants_read(int on) {
+    g_mod_skip = 0;
+    if (!on) return;
+    if (!(g_mod_rows = calloc((size_t)(g_nmod > 0 ? g_nmod : 1), sizeof *g_mod_rows))) { LOG("[RED] switchable mods: out of memory; none put in place"); return; }
+    for (int i = 0; i < g_nmod; i++) {
+        if (g_mod[i].nro) continue;
+        char path[1100]; snprintf(path, sizeof path, "%s/%s.variants", g_module_dir, g_mod[i].name);
+        FILE *f = fopen(path, "r"); if (!f) continue;
+        dm_mod_rows *rows = &g_mod_rows[i];
+        dm_mod_rows_read(f, (unsigned)on, rows); fclose(f);
+        unsigned bad = rows->bad & (unsigned)on;
+        if (bad) LOG("[RED] %s: line %ld cannot be read: %s%s%s not put in place, in any module", path, rows->bad_line[bad & 1 ? 0 : 1], bad & 1 ? "High frame rate" : "", bad == 3 ? " and " : "", bad & 2 ? "Ultrawide" : "");
+        g_mod_skip |= bad;
+    }
+}
+static int mod_variants_one(module_t *m, int on, int *did) {
+    if (!on || !g_mod_rows) return 0;
+    dm_mod_rows *rows = &g_mod_rows[m - g_mod];
+    int n = 0;
+    for (size_t i = 0; i < rows->n; i++) {
+        const dm_mod_row *r = &rows->row[i];
+        if (!(on & (int)r->role) || (g_mod_skip & r->role)) continue;
+        uint8_t *p = m->base + r->io;
+        if (r->code) {   // code: writable for the copy, then read-only executable again
+            uint8_t *lo = (uint8_t *)((uintptr_t)p & ~(uintptr_t)0x3FFF), *hi = (uint8_t *)(((uintptr_t)p + r->len + 0x3FFF) & ~(uintptr_t)0x3FFF);
+            if (mprotect(lo, hi - lo, PROT_READ | PROT_WRITE)) die("%s: switchable mod: mprotect %p", m->name, lo);
+            memcpy(p, r->bytes, r->len);
+            if (mprotect(lo, hi - lo, PROT_READ | PROT_EXEC)) die("%s: switchable mod: mprotect %p", m->name, lo);
+            sys_icache_invalidate(p, r->len);
+        } else memcpy(p, r->bytes, r->len);
+        n++; *did |= (int)r->role;
+    }
+    dm_mod_rows_free(rows);
+    return n;
+}
+#endif
+void dm_mod_variants_apply(void) {
+    int on = mod_on("DM_MOD_FPS") | mod_on("DM_MOD_ULTRAWIDE") << 1;   // with none on, still called: the iPhone fills its held-back code pages with the modules' own
+#if !TARGET_OS_IPHONE
+    mod_variants_read(on);
+#endif
+    for (int i = 0; i < g_nmod; i++) {
+        module_t *m = &g_mod[i];
+        if (m->nro) continue;
+        int did = 0, n = mod_variants_one(m, on, &did);   // did: the roles of the pieces put in place in this module, which may be fewer than those turned on
+        if (n) LOG("%s: switchable mods put in place:%s%s (%d pieces)", m->name, did & 1 ? " High frame rate" : "", did & 2 ? " Ultrawide" : "", n);
+    }
+#if !TARGET_OS_IPHONE
+    free(g_mod_rows); g_mod_rows = NULL;   // each module's rows freed as it was put in place (an NRO's never read)
+#endif
 }
 
 // Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT in forward order of the load list.

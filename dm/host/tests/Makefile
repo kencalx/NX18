@@ -73,6 +73,7 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
 	$(B)/t_nro
 	$(B)/t_symbols
+	$(B)/t_mod_rows
 run: $(B)/t_nro
 run: $(B)/t_sync_wait
 $(B)/t_sync_wait: t_sync_wait.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
@@ -81,6 +82,13 @@ sync-wait: $(B)/t_sync_wait
 	$(B)/t_sync_wait
 .PHONY: sync-wait
 run: $(B)/t_symbols
+run: $(B)/t_mod_rows
+# the Mac's reader of the switchable mods' rows (../mod_rows.h: plain C, no game profile): rows of any length, a role read whole or not at all
+$(B)/t_mod_rows: t_mod_rows.c ../mod_rows.h | $(B)
+	$(CLANG) -std=gnu11 -O1 -g -Wall -Wextra -Werror -o $@ t_mod_rows.c
+.PHONY: mod-rows
+mod-rows: $(B)/t_mod_rows
+	$(B)/t_mod_rows
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c
 .PHONY: symbols

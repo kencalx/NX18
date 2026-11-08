@@ -48,6 +48,48 @@ for n in names:
         assert all(len(x) <= 16 for x in sect.split(','))
         asm.append(f'    .section {sect}'); place(asm, bin_, sz, lo, hi)
     flags.append(f'-Wl,-segprot,__DM{tag}{n}W,rw,rw')
+# Switchable mods (<module>.variants, the NSP script's build_variants; dm/tools/game_mods.py): the host puts them in place when the game starts with the launcher's toggle on
+# (loader.c dm_mod_variants_apply). A code page is signed code here like the module's own, so each code page a mod touches is in __TEXT,__dm<tag><name>v once for every
+# combination of the roles that touch it, the base page with those roles' bytes. The host holds that page of the module back at load (loader.c remap_code) and at start vm_remaps
+# into it the page of the roles turned on, or the module's own when none is; a data run's bytes follow the pages. The table
+# __DATA,__dm<tag><name>vt lists them: u32 kind (0 code page, 1 data run), u32 roles (a code page: the combination it holds; a data run: its role), u32 touch (a code page: every role
+# touching it), u32 0, i64 image offset, u64 length, u64 offset in the v section. Role bits: fps 1, ultrawide 2
+ROLE = {'fps': 1, 'ultrawide': 2}
+def variants(n):
+    f = os.path.join(out, f'{n}.variants')
+    if not os.path.exists(f): return
+    rows = []
+    for l in open(f):
+        if not l.strip() or l.startswith('#'): continue
+        r, k, fo, io, h = l.rstrip('\n').split('\t'); rows.append((ROLE[r], k, int(fo, 16), int(io, 0), bytes.fromhex(h)))
+    bin_ = pieces(n)[0]
+    base = open(bin_, 'rb').read()
+    pages, blob, tab = {}, bytearray(), []
+    for bit, k, fo, io, data in rows:
+        if k != 'c': continue
+        for q in range(fo & ~(PG - 1), fo + len(data), PG): pages.setdefault(q, set()).add(bit)
+    for q in sorted(pages):
+        touch = 0
+        for b in pages[q]: touch |= b
+        for combo in range(1, 4):
+            if combo & ~touch: continue
+            page = bytearray(base[q:q + PG].ljust(PG, b'\0'))
+            for bit, k, fo, io, data in rows:
+                if k == 'c' and bit & combo and fo < q + PG and fo + len(data) > q:
+                    lo, hi = max(fo, q), min(fo + len(data), q + PG); page[lo - q:hi - q] = data[lo - fo:hi - fo]
+            # the page's image offset: the run's own image offset less its distance from the page's start (a run never spans two pieces)
+            io0 = next(io - (fo - q) for bit, k, fo, io, data in rows if k == 'c' and fo < q + PG and fo + len(data) > q)
+            tab.append((0, combo, touch, io0, PG, len(blob))); blob += page
+    for bit, k, fo, io, data in rows:
+        if k == 'w': tab.append((1, bit, 0, io, len(data), len(blob))); blob += data
+    if not tab: return
+    vbin = os.path.join(os.path.dirname(os.path.abspath(dst)), f'{tag}{n}.variants.bin'); open(vbin, 'wb').write(blob)
+    asm.append(f'    .section __TEXT,__dm{tag}{n}v'); place(asm, vbin, len(blob), 0, r16(len(blob)))
+    asm.extend([f'    .section __DATA,__dm{tag}{n}vt', '    .p2align 3'])
+    for kind, roles, touch, io, ln, at in tab: asm.append(f'    .long {kind}, {roles}, {touch}, 0'); asm.append(f'    .quad {io & 0xffffffffffffffff:#x}, {ln:#x}, {at:#x}')
+for n in names:
+    assert len(f'__dm{tag}{n}vt') <= 16
+    variants(n)
 tab = os.path.join(out, 'nro.tsv')
 nros = [ln.split('\t')[0] for ln in open(tab) if ln.strip() and not ln.startswith('#') and not ln.startswith('refused\t')] if os.path.exists(tab) else []
 if nros:

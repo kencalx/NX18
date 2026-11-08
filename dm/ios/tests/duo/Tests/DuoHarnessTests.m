@@ -710,6 +710,19 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     [self endTouches:@[a] onPad:pad cancelled:YES];
 }
 
+- (void)testUltrawideStretchLeavesThePictureRowOutOfTheInGameMenu {
+    UIViewController *root = [self harnessRootViewController];
+    XCTAssertNotNil(root);
+    XCTAssertTrue(dm_setting_live("DM_PICTURE_FIT", NULL));
+    NSInteger before = [[root valueForKey:@"picture"] integerValue];
+    [root setValue:@YES forKey:@"ultrawideStretch"];   // startGame with Ultrawide on a screen wider than 16:9
+    XCTAssertFalse(dm_setting_live("DM_PICTURE_FIT", NULL), @"While Ultrawide holds Stretch the in-game menu has no Picture row");
+    XCTAssertFalse(dm_setting_live("DM_PICTURE_FIT", before == DmPictureFill ? "fit" : "fill"));
+    XCTAssertEqual([[root valueForKey:@"picture"] integerValue], before, @"and a pick cannot replace the picture mode");
+    [root setValue:@NO forKey:@"ultrawideStretch"];
+    XCTAssertTrue(dm_setting_live("DM_PICTURE_FIT", NULL));
+}
+
 - (void)testDockingDropsTheTapLayout {
     dm_set_opmode(0);
     CGRect bounds = CGRectMake(0, 0, 844, 390);

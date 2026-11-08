@@ -81,6 +81,16 @@ class LauncherSettingsTests(unittest.TestCase):
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
 
+    def test_switchable_mods_only_with_the_mods_packed(self):   # mods.tsv beside the rewritten modules (build_ipa_from_nsp.py build_variants)
+        def rows(roles, platform):
+            with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': platform}):
+                if roles: (Path(tmp) / 'mods.tsv').write_text('# header\n' + ''.join(f'{r}\tsome mod\t3\n' for r in roles))
+                return {s['env'] for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}
+        self.assertFalse({'DM_MOD_FPS', 'DM_MOD_ULTRAWIDE'} & rows([], 'ios'))
+        self.assertTrue({'DM_MOD_FPS', 'DM_MOD_ULTRAWIDE'} <= rows(['fps', 'ultrawide'], 'ios'))
+        mac = rows(['fps', 'ultrawide'], 'mac')
+        self.assertIn('DM_MOD_FPS', mac); self.assertNotIn('DM_MOD_ULTRAWIDE', mac, 'Ultrawide stretches the picture, which only the iPhone and iPad front end does')
+
     def test_frame_rate_as_the_present_interval(self):   # present_interval_choice: Persona 5 Royal's 30 / 60 (DM_PRESENT_INTERVAL game / display)
         p5r = build('01005CA01580E000', 'nvn')['DM_PRESENT_INTERVAL']
         self.assertEqual((p5r['label'], p5r['default'], p5r['options']), ('Frame rate', 'game', [['game', '30 fps'], ['display', '60 fps']]))

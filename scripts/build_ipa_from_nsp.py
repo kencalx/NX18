@@ -16,6 +16,11 @@
 # Two ways to run it: open this file in Spyder and press F5 (it uses the values under "Settings" below; an empty NSP folder or prod.keys is asked for at run time);
 #   or in a terminal: python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [options] (values given on the command line override "Settings", -h lists every option;
 #   without keyboard input a missing value is not asked for but reported as an error; exit code 0 on success, 1 on error, 130 when interrupted). Command-line options entered in Spyder's run configuration work the same way.
+# MODS / --mods: a folder of the game's mods, by default the folder named mods beside the game's files when there is one (dm/tools/game_mods.py says what it reads): Atmosphère / yuzu / Ryujinx
+#   code patches (.ips, .ips32, .pchtxt) are written into the code modules before the rewrite (on the iPhone the only way a code patch reaches the game), RomFS file replacements go into
+#   the packed RomFS image, and cheat files are packed into the app (it copies each into its cheats folder at a start when the folder does not have it). The modded files are in <build folder>/mods/<version>/; the
+#   extraction is never changed. MODS = 'none' / --no-mods packs the game without them. A frame-rate or ultrawide mod (by its folder's name) is not written in for good: the launcher's
+#   High frame rate / Ultrawide turn it on and off (build_variants).
 # Uses only three things: this repository, a folder holding one game's NSPs (the base game, with or without an update; DLC NSPs, when present, are packed too and unlock the add-on content already in the game), and prod.keys.
 #   Instead of NSPs, the folder may hold the game's files as a dump (base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): that needs no prod.keys. A game with no profile is surveyed from those files. A dump has no control data: the name comes from the profile (a provisional one takes the folder's name), and the app has no icon.
 #   Or the folder may hold the game as one NUP container (a .nup file: base game, updates and DLC; scripts/pack_nup.py), or the .nup file may be given in its place: it needs no prod.keys, like a dump; a game with no profile is surveyed from the container's files (its newest version's code modules and RomFS file headers),
@@ -66,8 +71,10 @@ TEAM_ID = ''                            # optional Apple team ID; empty = DM_TEA
 XCODE_WORKSPACE = ''                    # shared .xcworkspace (empty = NxNative.xcworkspace beside the game's NSP folder)
 LANGUAGE = ''                           # game language, a code or a name: 'ja', 'fr', 'de', 'es', 'zh-Hans', 'zh-Hant', 'ko', 'Japanese', ... (empty = English); it must be one the game supports (the console line lists them);
                                         #   DM_LANG=<code> in the app's Documents/env.txt changes it without a rebuild
-KEEP_EXTRACTED = True                   # keep the extracted game files after the IPA is built (saves extraction next time; as big as the game files); False deletes them
+KEEP_EXTRACTED = True                   # keep the extracted game files after the IPA is built (saves extraction next time; as big as the game files); False deletes them, and their modded copy in mods/
 DM_ENV_FILE = ''                        # optional: environment switches for a diagnostic build (one KEY=VALUE per line)
+MODS = ''                               # the game's mods: code patches (.ips / .pchtxt), RomFS replacements (romfs/ folders) and cheats (cheats/ folders), in Atmosphère's, yuzu's or Ryujinx's layout
+                                        #   (empty = the folder named mods beside the game's files, when there is one; 'none' = no mods); dm/tools/game_mods.py says what is read
 SEEN_SHADERS = False                    # PLATFORM 'mac' / 'mac-app': build only the shaders the profile's playtests used (shader_seen.tsv) and those the last runs' logs reported missing, not the whole map; areas the list does not cover draw without the rest until this runs again
 PSO_GPUS = ''                           # NVN games: GPU architectures the app gets the shader pairs' pipeline bases for, made on this Mac (metal-tt, comma-separated: 'g18p' = A19 / A19 Pro of the iPhone 17 family;
                                         #   another device's name is in its log when the app has none for it), so the device does not build them on its first start; each adds about 650 MB to the app (Breath of the Wild) and minutes to a first build; 'none' = no archive;
@@ -421,6 +428,18 @@ def build_nx_extract(repo, work, logs, env):
 
 def swap_in(tmp, dst):   # swap the new output in as a whole (the old one is untouched on failure)
     rmtree(dst); tmp.rename(dst)
+
+
+def swap_in_changed(tmp, dst):
+    """swap_in for a folder of files (no subfolders) made again at every run: when dst already holds the same files, tmp is dropped and dst kept, so its files keep their times;
+    no tmp: dst is removed. Returns whether dst changed"""
+    files = lambda d: {p.name: p.read_bytes() for p in d.iterdir() if p.is_file()} if d.is_dir() else None
+    new = files(tmp)
+    if new is not None and new == files(dst): rmtree(tmp); return False
+    changed = new is not None or dst.exists()
+    if new is None: rmtree(dst)
+    else: swap_in(tmp, dst)
+    return changed
 
 
 def free_gb(p):
@@ -1081,10 +1100,11 @@ def files_under(d):   # (relative path, stat) of every file under d, sorted; [] 
     return sorted(out, key=lambda x: x[0])
 
 
-def fingerprint(*items, env=None):
+def fingerprint(*items, env=None, memo=None):
     """sha256 over a stage's inputs. Items: ('files', paths) = names and content (a missing file counts too); ('tree', folder) = relative path and size of every file under it
     (a RomFS: check_build pins its version, so names and sizes stand for its content); ('stat', folder) = relative path, size and mtime of every file under it (the translator's binaries);
-    ('cmd', argv) = a tool's version output (run with env); anything else = its repr"""
+    ('cmd', argv) = a tool's version output (run with env); anything else = its repr. memo: a dict the caller keeps for keys it makes together while none of their files can change
+    (build_variants: the base rewrite's patched.bin, the tools); a file's digest is read from it after its first read, and the result is the same as without it"""
     h = hashlib.sha256()
     for it in items:
         kind, v = it if isinstance(it, tuple) and len(it) == 2 and it[0] in ('files', 'tree', 'stat', 'cmd') else ('repr', it)
@@ -1092,8 +1112,12 @@ def fingerprint(*items, env=None):
         if kind == 'files':
             for p in map(rfs.Path, v):
                 h.update(p.name.encode() + b'\0')
-                try: h.update(hashlib.sha256(p.read_bytes()).digest())
-                except OSError: h.update(b'missing')
+                d = memo.get(str(p)) if memo is not None else None
+                if d is None:
+                    try: d = hashlib.sha256(p.read_bytes()).digest()
+                    except OSError: d = b'missing'
+                    if memo is not None: memo[str(p)] = d
+                h.update(d)
         elif kind in ('tree', 'stat'):
             for rel, st in files_under(v): h.update(f'{rel}\0{st.st_size}\0{st.st_mtime_ns if kind == "stat" else ""}\n'.encode())
         elif kind == 'cmd':
@@ -1127,6 +1151,11 @@ def python_tool_files(repo, entry, roots):   # transitive repository imports, in
 
 def chain_files(repo):   # what the iOS shaders run: not the split's readers (shader_split.py, unityfs.py, uepak.py)
     return python_tool_files(repo, 'dm/gfx/tools/dmsh_build.py', ('dm/gfx/tools', 'dm/ios/tools', 'dm/games')) + [repo / 'dm/gfx/tools/dmsh_chain.lock']
+
+
+def rewrite_tools(repo):   # what patch_nso.py runs: its transitive dm/tools imports (fps_target.py, nso_syms.py, ...); the patch files count separately (patch_files)
+    return python_tool_files(repo, 'dm/tools/patch_nso.py', ('dm/tools',))
+
 
 
 def split_profile_inputs(g):   # shader_split.py's GAME reads, plus the tables the packer checks or writes; renderer settings, notes and translation tables are not extraction inputs
@@ -1407,6 +1436,295 @@ def nro_modules(g, exe_dir, nros):
     why = ', '.join(f'{m} ({k})' for m, k in add.items())
     say(f'modules {" ".join(mods)}: the NROs the game loads import from {why}')
     return set_keys(g, {'modules': (' '.join(mods), f'the NROs the game loads at run time import from {why}, which main does not')}, 'After the NRO collection')
+
+
+def mods_folder(args, nsp_dir):
+    """The game's mods folder (dm/tools/game_mods.py): --mods / MODS, else the folder named mods beside the game's files when there is one; None = no mods (--no-mods, MODS = 'none')"""
+    want = getattr(args, 'mods', None)
+    if want is None: want = MODS
+    if want in ('none', 'off'): return None
+    if want:
+        p = Path(os.path.expanduser(want)).resolve()
+        if not p.is_dir(): raise BuildError(f'--mods / MODS: not a folder: {p}')
+        return p
+    p = nsp_dir / 'mods'
+    return p if p.is_dir() else None
+
+
+def link_tree(src, dst):   # dst: the folder src as hard links (a copy across volumes), so a later write replaces a file of dst, never one of src
+    import game_mods as gm
+    for d, _, files in os.walk(src):
+        to = dst / os.path.relpath(d, src); to.mkdir(parents=True, exist_ok=True)
+        for f in files: gm.link_or_copy(Path(d) / f, to / f)
+
+
+def pack_mod_cheats(found, main, cheats, first=True):
+    """The mods' cheat files packed into the folder cheats (game_mods.py pack_cheats; a file not named after a build ID is main's build's), at every run: they are made in
+    cheats.partial, which takes the folder's place only when its files differ, so an unchanged folder keeps its files and their times. first False: a program of a game of
+    several but its first, which packs a file not named after a build ID only from a folder named with its own title ID; one outside them stays the first program's,
+    as it was before the later programs' cheats were packed (its codes, master codes too, were made for one program's build, which its name does not say). Returns the report lines and whether the folder changed"""
+    import dataclasses
+    import game_mods as gm
+    part = cheats.with_name(cheats.name + '.partial'); rmtree(part)
+    loose = [] if first else [p for p in found.cheats if not gm.TITLE.fullmatch(p.stem) and not any(gm.TITLE.fullmatch(c) for c in p.relative_to(found.root).parent.parts)]
+    report = [f'cheats: {p.relative_to(found.root)} is not named after a build ID: left to the first program' for p in loose]
+    if loose: found = dataclasses.replace(found, cheats=[p for p in found.cheats if p not in loose])
+    crep, _ = gm.pack_cheats(found, build_id(main)[:16].upper(), part) if main.is_file() else ([], [])
+    return report + crep, swap_in_changed(part, cheats)
+
+
+def apply_mods(root, ext, work, ver, app, fps_ok=True, first=True):
+    """The mods of root for the game (dm/tools/game_mods.py) applied to version ver's extraction ext: (the modded extraction, the folder of the cheats to pack, the switchable
+    mods), the first two None when there is nothing of that kind. The modded extraction, <build folder>/mods/<version>/, has ext's layout and hard links of its files, but the code
+    modules the patches change and a RomFS image with the mods' files in it (a clone of ext's on APFS, then a new index): ext is never written. The switchable mods (a frame-rate
+    or ultrawide mod, by its folder's name; fps_ok False: the profile has the launcher's own Frame rate, so no frame-rate mod) are not written in: {role: {'mod', 'exefs',
+    'modules', and 'left_out': the names of its patches gm.patch_exefs left out, when there are any}}, each an ExeFS folder with that mod over the modded one, which build_variants
+    rewrites. A patch gm.patch_exefs leaves out (it writes past the module's data, or its code branches out of the module's code: an iPhone would end the app; of a patch with a
+    code cave, the cave and its hook) is not written, of a kept mod or a switchable one, with its [RED] line; a switchable mod with something left to write is still offered, with a
+    [RED] line naming what it lacks, and one with nothing left is not. Reused while the code patches (with their paths: a folder's name makes a mod switchable), the RomFS mods, ext's code modules and RomFS and the tools are as at the last run. The cheats are not in that key: they are packed again at every run
+    (pack_mod_cheats; first False: a program of a game of several but its first), so a cheat's change makes nothing else again. <version>.romfs.key, written at every run, keys the RomFS mods alone (the shader stages take it)"""
+    import game_mods as gm
+    found = gm.scan(root, app)
+    for p in found.ignored: say(f'mods: ignored {p[0].relative_to(root)}: {p[1]}')
+    if not found.any(): say(f'mods: nothing for {app:016X} in {root}'); return None, None, {}
+    PROG.add(1); PROG.stage('mods', step=f'{len(found.ips)} code patch files, {len(found.romfs)} romfs folders, {len(found.cheats)} cheat files')
+    out = work / 'mods'; out.mkdir(parents=True, exist_ok=True)
+    dst, kf, cheats, vjson = out / ver, out / f'{ver}.key', out / f'{ver}_cheats', out / f'{ver}_variants.json'
+    cheat_report, cheats_changed = pack_mod_cheats(found, ext / 'ExeFS/main', cheats, first)
+    keep, chosen, role_report = gm.split_roles(found, fps_ok)
+    plan, _ = gm.code_patches(found, gm.nso_modules(ext / 'ExeFS'), keep)
+    img, folder = ext / 'RomFS.img', ext / 'RomFS'
+    romfs_stamp = (img.stat().st_size, img.stat().st_mtime_ns) if img.is_file() else None
+    tools = [Path(gm.__file__).resolve().parent / f for f in ('game_mods.py', 'a64_words.py', 'romfs_image.py', 'romfs.py', 'nso.py')]
+    romfs_mods = [*[('stat', d) for d in found.romfs], [str(d) for d in found.romfs]]
+    key = fingerprint(('files', tools + found.ips), ('stat', ext / 'ExeFS'), romfs_stamp or ('stat', folder), *romfs_mods, [str(p.relative_to(root)) for p in found.ips], app, fps_ok)
+    rk = out / f'{ver}.romfs.key'   # a mod's file of the same size leaves the image's names and sizes as they were, which is what the shader stages key a RomFS on
+    if found.romfs: rk.write_text(fingerprint(('files', tools), *romfs_mods) + '\n')
+    else: rmtree(rk)
+    want_ext = bool(plan or found.romfs)
+    if reused(kf, key) is not None and (dst.is_dir() or not want_ext) and (out / f'{ver}.txt').is_file() and vjson.is_file():
+        report = [l for l in (out / f'{ver}.txt').read_text().splitlines() if not l.startswith('cheats: ')] + cheat_report   # the last run's, with this run's cheats
+        (out / f'{ver}.txt').write_text(''.join(line + '\n' for line in report))
+        for line in report: say(f'mods: {line}')
+        PROG.end('reused (the code and RomFS mods and the game files unchanged); the cheats packed again' if cheats_changed else 'reused (the mods and the game files unchanged)')
+        return (dst if want_ext else None), (cheats if cheats.is_dir() else None), json.loads(vjson.read_text())
+    rmtree(kf)   # the outputs change from here: a stop before the end must not leave the last run's key over them
+    report = list(role_report)
+    if want_ext:
+        tmp = dst.with_name(dst.name + '.partial'); rmtree(tmp); tmp.mkdir(parents=True)
+        for e in sorted(ext.iterdir()):
+            if e.name in ('ExeFS', 'RomFS', 'RomFS.img', 'jit'): continue   # jit/: a capture of the rewritten code, made again from the patched modules (capture_jit)
+            if e.is_dir(): link_tree(e, tmp / e.name)
+            elif e.is_file(): gm.link_or_copy(e, tmp / e.name)
+        PROG.set(step='code patches')
+        crep, changed, left = gm.patch_exefs(ext / 'ExeFS', tmp / 'ExeFS', found, keep)
+        report += crep   # a patch left out has its [RED] line there: it is not written
+        if not changed and keep: report.append('code: nothing is left to write for this version once the patches above are left out: the code is the game\'s own' if left else
+                                               'code: no patch file names a build of this version')
+        PROG.set(step='RomFS')
+        if img.is_file():
+            if found.romfs: report += gm.overlay_image(img, tmp / 'RomFS.img', found.romfs, root)
+            else: gm.link_or_copy(img, tmp / 'RomFS.img')
+        elif folder.is_dir():
+            if found.romfs: report += gm.overlay_folder(folder, tmp / 'RomFS', found.romfs, root)
+            else: link_tree(folder, tmp / 'RomFS')
+        rmtree(dst); swap_in(tmp, dst)
+    else: rmtree(dst)
+    variants, base_exefs = {}, (dst if want_ext else ext) / 'ExeFS'
+    for role, (name, files) in chosen.items():   # each switchable mod over the modded modules, an ExeFS folder of its own
+        vdir = out / f'{ver}_{role}' / 'ExeFS'; rmtree(vdir)   # <ver>_<role>/rewrite/ stays: build_variants reuses it by its own key, which hashes these modules
+        vrep, vmods, vleft = gm.patch_exefs(base_exefs, vdir, found, files, gm.adapt_aspect if role == 'ultrawide' else None)
+        report += vrep
+        label = 'High frame rate' if role == 'fps' else 'Ultrawide'
+        if vmods:
+            variants[role] = {'mod': name, 'exefs': str(vdir), 'modules': vmods}
+            if vleft:
+                variants[role]['left_out'] = [lo.what for lo in vleft]   # build_variants names them where it offers the role
+                report.append(f'[RED] {role}: {name}: left out of it (above): {"; ".join(lo.what for lo in vleft)}. The rest of the mod is offered ({label} in the launcher)')
+        else:
+            report.append(f'[RED] {role}: {name}: nothing of it is left to write for this version once the patches above are left out: {label} is not offered' if vleft else
+                          f'{role}: {name} names no build of this version: no switchable {role} mod')
+            rmtree(vdir.parent)
+        if vmods and role == 'fps' and set(vmods) <= {'sdk'}:   # Nintendo's SDK: its graphics driver (NVN) and display service are the host's own, so a frame rate set there never takes
+            report.append(f'[RED] {role}: {name} patches only the sdk module (Nintendo\'s system code, whose graphics driver and display service Nintanium replaces): it likely changes '
+                          'nothing here. A mod that turns the present interval 2 into 1 there is what DM_PRESENT_INTERVAL=display does (the profile key present_interval_choice offers it)')
+    report += cheat_report   # pack_cheats' lines start with 'cheats: ', which a reuse replaces with its own
+    (out / f'{ver}.txt').write_text(''.join(line + '\n' for line in report))
+    vjson.write_text(json.dumps(variants))
+    for line in report: say(f'mods: {line}')
+    kf.write_text(f'{key}\n')
+    PROG.end(f'{"code and RomFS from " + str(dst) if want_ext else "cheats only" if cheats.is_dir() else "switchable mods only"}' + (f'; cheats packed from {cheats}' if cheats.is_dir() else '')
+             + (f'; switchable: {", ".join(variants)}' if variants else ''))
+    return (dst if want_ext else None), (cheats if cheats.is_dir() else None), variants
+
+
+def frame_rate_mods_ok(g):   # a profile with the launcher's own Frame rate (fps_target, or present_interval_choice on: Persona 5 Royal) takes no frame-rate mod, which would fight it
+    return g.get('fps_target', '0') in ('', '0') and g.get('present_interval_choice', 'off') != 'on'
+
+
+def variant_workers(env, n):
+    """How many of build_variants' n variant rewrites run at once: DM_VARIANT_J=<positive integer> (1: one after another, as before this pool; less memory on a Mac short of it, each
+    rewrite of a large main holds its module several times), else all of them, at most one per core"""
+    try: j = int(env['DM_VARIANT_J']) if env.get('DM_VARIANT_J') else None
+    except ValueError: raise BuildError('DM_VARIANT_J must be a positive integer') from None
+    if j is not None and j < 1: raise BuildError('DM_VARIANT_J must be a positive integer')
+    return max(1, min(n, j if j is not None else os.cpu_count() or 1))
+
+
+def run_rewrites(jobs, env, workers, done):
+    """build_variants' variant rewrites: jobs [(name, step, cmd, log)], at most workers at once, each with all its output in its own log; done(name, exit code) after each, as it ends
+    (a rewrite that finished keeps its key even when a later one is interrupted). workers 1: one after another through run(), exactly as before. More: Popen, as rewrite() runs the modules,
+    with the cores split between them (DM_REWRITE_J, unless the environment sets it: it changes how patch_nso.py splits its scans, not what it writes); a failed one prints its log's last lines
+    as run() does and the others go on; an error or an interrupt stops them all"""
+    if workers <= 1:
+        for name, step, cmd, log in jobs:
+            PROG.set(step=step)
+            done(name, run(cmd, log, env=env, fatal=False))
+        return
+    renv = env if env.get('DM_REWRITE_J') else dict(env, DM_REWRITE_J=str(max(1, (os.cpu_count() or 1) // workers)))
+    PROG.set(step=f'rewriting {len(jobs)} variants, {workers} at once: ' + ', '.join(step for _, step, _, _ in jobs), done=0, total=len(jobs), unit='rewrites')
+    procs, todo, finished = {}, list(jobs), 0
+    try:
+        while todo or procs:
+            while todo and len(procs) < workers:
+                name, _, cmd, log = todo.pop(0); log.parent.mkdir(parents=True, exist_ok=True); f = open(log, 'w')
+                try: procs[name] = (subprocess.Popen([str(c) for c in cmd], env=renv, stdout=f, stderr=subprocess.STDOUT), f, log)
+                except BaseException: f.close(); raise
+            for name in [n for n, (p, _, _) in procs.items() if p.poll() is not None]:
+                p, f, log = procs.pop(name); f.close(); finished += 1; PROG.set(done=finished)
+                if p.returncode:
+                    with open(log, errors='replace') as t: PROG.say(f'---- last lines of {log} ----\n' + ''.join(collections.deque(t, maxlen=40)).rstrip('\n'))
+                done(name, p.returncode)
+            if procs: time.sleep(0.2)
+    finally:   # an error or an interrupt stops the other rewrites
+        for p, f, _ in procs.values():
+            if p.poll() is None: p.terminate(); p.wait()
+            f.close()
+
+
+def variant_runs_cached(gm, patched, rw, m, module, key, env):
+    """gm.variant_runs of module m's variant rewrite (rw) against the base rewrite (patched), kept in rw/<m>.runs.json for the next build: it compares two rewrites of a module of up to
+    150 MB and parses the variant module's relocations after decompressing it (about 2.6 s for each role at every build before). Its key: the variant rewrite's (key: the variant module and the
+    base rewrite's patched.bin and fixups.tsv by content, the rewriter's inputs), the base rewrite's other tables by content (a base rewrite run again can change one of them alone), the variant
+    rewrite's outputs by size, times and inode (only its rewrite writes them, and build_variants removes this file before one starts), and game_mods.py, a64_words.py and nso.py, which compute the runs.
+    A refusal (ModError) is kept too and raised again with its message, so the rows and the messages are those computing them again gives. A file that cannot be read or written is computed
+    again, never an error. DM_VARIANT_RUNS_CACHE=0 computes them at every build, as before"""
+    f = rw / f'{m}.runs.json'
+    if env.get('DM_VARIANT_RUNS_CACHE') == '0':
+        rmtree(f); return gm.variant_runs(patched, rw, m, nso.read(module).image)
+    def stat(p):
+        try: s = os.stat(p); return (p.name, s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_ino)
+        except OSError: return (p.name, 'missing')
+    ck = fingerprint('variant runs', key, ('files', [patched / f'{m}.{x}' for x in gm.META] + [Path(gm.__file__), Path(gm.a64.__file__), Path(nso.__file__)]),
+                     [stat(rw / f'{m}.{x}') for x in ('patched.bin', *gm.META)])
+    hit = None
+    try:
+        got = json.loads(f.read_text())
+        if got['key'] == ck:
+            hit = ('error', str(got['error'])) if 'error' in got else ('runs', [(str(k), int(fo), int(io), bytes.fromhex(h)) for k, fo, io, h in got['runs']])
+    except (OSError, ValueError, KeyError, TypeError): hit = None   # none, of another key, or damaged: computed again
+    if hit and hit[0] == 'error': raise gm.ModError(hit[1])
+    if hit and all(r[0] in ('c', 'w') for r in hit[1]): return hit[1]
+    try: runs, err = gm.variant_runs(patched, rw, m, nso.read(module).image), None
+    except gm.ModError as e: runs, err = None, e
+    tmp = f.with_name(f.name + '.tmp')
+    entry = {'key': ck, 'error': str(err)} if err or runs is None else {'key': ck, 'runs': [[k, fo, io, data.hex()] for k, fo, io, data in runs]}   # runs is None only with err
+    try: tmp.write_text(json.dumps(entry)); os.replace(tmp, f)
+    except OSError: pass   # the next build computes them again
+    if err: raise err
+    return runs
+
+
+def build_variants(py, repo, variants, patched, env, logs):
+    """The switchable mods' bytes beside the rewritten modules: each mod's ExeFS (apply_mods) is rewritten as the modules were (patch_nso.py), and where the two rewrites differ
+    only in bytes, <module>.variants lists them (dm/tools/game_mods.py variant_runs; the host puts them in place when the game starts with the launcher's toggle on, loader.c;
+    on the iPhone the code pages come signed, gen_embed.py) and mods.tsv names the roles the launcher offers (dm/games/settings.py mods:<role>). A mod whose rewrite differs in
+    more (it changes code the rewriter rewrites, or a word the loader relocates) is left out with the reason. Earlier variants are always removed first. Each variant rewrite is
+    reused while its module, the base rewrite and the rewriter's inputs (its tools, the patch files of the module's build, capstone, its switches) are as at its last run, and so are the
+    byte runs found in it (variant_runs_cached). The rewrites to run start together (run_rewrites, DM_VARIANT_J: High frame rate and Ultrawide take one rewrite's time, not two); the runs
+    are then taken role by role in the order of before, so <module>.variants, mods.tsv and the messages are those of rewriting one after another, and a role whose rewrite fails is the
+    only one left out. With DM_VARIANT_J=1 each rewrite runs just before its runs are taken, so a role's modules after its first failure are not rewritten, as before. The base rewrite's files are hashed once for all roles (fingerprint's memo): the same keys"""
+    import capstone
+    import game_mods as gm
+    for p in list(patched.glob('*.variants')) + [patched / 'mods.tsv']: rmtree(p)
+    if not variants: return
+    PROG.add(1); PROG.stage('switchable mods', step=', '.join(variants))
+    rw_tools, memo, plan, jobs, stale = rewrite_tools(repo), {}, [], [], {}
+    for role, v in variants.items():
+        exefs, mods = Path(v['exefs']), []
+        for m in v['modules']:
+            rw = exefs.parent / 'rewrite'; rw.mkdir(parents=True, exist_ok=True); kf = rw / f'{m}.key'
+            key = fingerprint(('files', rw_tools + patch_files(repo, exefs, [m], env.get('DM_GAME')) + [exefs / m, patched / f'{m}.patched.bin', patched / f'{m}.fixups.tsv']),
+                              capstone.__version__, {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, memo=memo)
+            if not ((rw / f'{m}.patched.bin').is_file() and reused(kf, key) is not None):
+                stale[(role, m)] = (kf, rw / f'{m}.runs.json')   # removed when its rewrite starts (begin): a module the serial path never reaches keeps them, as before the pool
+                jobs.append(((role, m), f'{role}: rewriting {m}', [py, repo / 'dm/tools/patch_nso.py', exefs / m, rw, m], logs / f'rewrite_{m}_{role}.log'))
+            mods.append((m, rw, kf, key))
+        plan.append((role, v, exefs, mods))
+    keys, failed = {(role, m): (kf, key) for role, _, _, mods in plan for m, _, kf, key in mods}, set()
+    def done(name, rc):
+        if rc: failed.add(name); return
+        kf, key = keys[name]; rmtree(kf); kf.write_text(f'{key}\n')
+    def begin(names):   # the cache outlives apply_mods' rebuilds: a rewrite that stops part way must not leave the last run's key over its outputs, nor the runs found in them
+        for name in names:
+            for f in stale[name]: rmtree(f)
+    workers = variant_workers(env, len(jobs)) if jobs else 1
+    if workers > 1: begin(stale); run_rewrites(jobs, env, workers, done)
+    pending = {job[0]: job for job in jobs} if workers == 1 else {}   # one after another: each rewrite just before its runs, and none after its role's first failure, as before the pool
+    rows: dict[str, list] = {}; offered = []
+    for role, v, exefs, mods in plan:
+        ok, got = True, {}
+        for m, rw, _, key in mods:
+            if (role, m) in pending: begin([(role, m)]); run_rewrites([pending[(role, m)]], env, 1, done)
+            if (role, m) in failed: say(f'mods: [RED] {role}: {v["mod"]}: left out: the rewriter refused {m} with it (likely a word the game\'s profile patches too; {logs / f"rewrite_{m}_{role}.log"})'); ok = False; break
+            try: got[m] = variant_runs_cached(gm, patched, rw, m, exefs / m, key, env)
+            except gm.ModError as e: say(f'mods: [RED] {role}: {v["mod"]}: left out: {e}'); ok = False; break
+        if not ok: continue
+        for m, runs in got.items(): rows.setdefault(m, []).extend((role, r) for r in runs)
+        offered.append((role, v['mod'], sum(len(r) for r in got.values()), v.get('left_out', [])))
+    for m, rs in rows.items(): gm.write_variants(patched / f'{m}.variants', rs)
+    if offered: (patched / 'mods.tsv').write_text('# switchable mods the launcher offers (dm/games/settings.py mods:<role>): role\tmod\truns\n' + ''.join(f'{r}\t{n}\t{c}\n' for r, n, c, _ in offered))
+    for r, n, c, lo in offered:   # a role the mods stage offers without some of its patches says so here too, where the build says what the launcher offers
+        label = "High frame rate" if r == "fps" else "Ultrawide"
+        say(f'mods: [RED] {label} offered in the launcher without part of it: {n} ({c} changed byte runs); left out in the mods stage: {"; ".join(lo)}' if lo else
+            f'mods: {label} offered in the launcher: {n} ({c} changed byte runs)')
+    PROG.end(', '.join(r for r, _, _, _ in offered) or 'none could be offered')
+
+
+def extracted_leftovers(ex, work, programs, mods_root):
+    """What the build deletes when it keeps no extraction: the extraction and the mods stage's folder (apply_mods: the modded copy, its cheats and variants), the same for each
+    other program of the game. Never the player's mods folder or one that holds it (--work-dir the NSP folder, with the mods beside the game: <work>/mods is theirs)"""
+    mine = mods_root.resolve() if mods_root else None
+    ds = [ex, work / 'mods'] + [x for r in programs.values() for x in (r['ex'], r['ex'].parent / 'mods')]
+    return [d for d in ds if d.exists() and not (mine and (d.resolve() == mine or d.resolve() in mine.parents))]
+
+
+def merge_cheats(dirs, dst):
+    """A game of several programs: their packed cheat folders as one, dst, for the app (each file is named after its program's build); made again at every run, and swapped in
+    only when its files differ (swap_in_changed). dirs: (folder, its program's build, the 16 hex digits pack_mod_cheats names it by, or None). A program's own build's file is
+    taken from that program (a later program's own title folder adds codes the first program does not pack); of two other files of one name with other content the first program's
+    is taken. Returns dst"""
+    tmp = dst.with_name(dst.name + '.partial'); rmtree(tmp); tmp.mkdir(parents=True)
+    own = {}
+    for d, b in dirs:
+        if b and f'{b}.txt' not in own and (d / f'{b}.txt').is_file(): own[f'{b}.txt'] = d
+    for d, _ in dirs:
+        for p in sorted(d.iterdir()):
+            if own.get(p.name, d) != d: continue   # the copy of the program whose build it is goes in
+            if not (tmp / p.name).exists(): shutil.copy2(p, tmp / p.name)
+            elif (tmp / p.name).read_bytes() != p.read_bytes(): say(f'mods: cheats: {p.name} of two programs differs: {p} left out')
+    swap_in_changed(tmp, dst)
+    return dst
+
+
+def install_cheats(src, dst):   # the packed cheat files into a cheats folder the host reads (a Mac app's, a Mac run's); a file already there is kept: the player's own, or their edits
+    dst.mkdir(parents=True, exist_ok=True); n = 0
+    for p in sorted(src.iterdir()):
+        if (dst / p.name).exists(): say(f'mods: cheats: {dst / p.name} is already there, kept (delete it to pack the mods folder\'s)'); continue
+        shutil.copy2(p, dst / p.name); n += 1
+    if n: say(f'mods: cheats: {n} file(s) copied into {dst}')
+
+
 
 
 def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
@@ -2146,12 +2464,12 @@ def compute_reader_additions(g, tables, split_log):
     except (OSError, UnicodeError, ValueError): return False
 
 
-def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None):
+def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None, extra=()):
     """The shader split into pkg, checked against the profile's tables. The package is reused when the extractor and the modules it imports, the profile settings and tables it reads or is checked against,
     the DLC RomFS roots, each version's modules, RomFS (paths and sizes) and run-time capture, and the package's own contents are as at the last successful split. Returns the package's content key, the shader build's input (None for damaged files, which never reuse them): a split that runs
     again because a reader of another engine changed writes the same package, and the iOS shaders stay reused.
     oodle: for decoder-backed packs, builds or reuses the Mac host and returns DM_OODLE_HOST / DM_OODLE_MODULES. Verified host provenance ignores only its chain label;
-    unknown hosts use their bytes, and rewritten modules are always content inputs. Both macOS and iOS builds share this extraction cache."""
+    unknown hosts use their bytes, and rewritten modules are always content inputs. Both macOS and iOS builds share this extraction cache. extra: more inputs (the RomFS mods packed in, apply_mods)"""
     names = ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv')
     PROG.stage('shader split', step='checking the inputs')   # then the count of files and archive ranges scanned (shader_split.py's progress lines); the package and tables come at the end
     kf, outputkf = pkg.with_name(pkg.name + '.key'), pkg.with_name(pkg.name + '.outputs.key')
@@ -2167,6 +2485,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         PROG.set(step='building the Mac host for the game\'s Oodle decoder'); env = dict(env, **oodle())
         host = Path(env['DM_OODLE_HOST'])
         inputs += [('decoder', decoder_host_key(host) or fingerprint(('files', [host]))), ('modules', package_key(Path(env['DM_OODLE_MODULES'])))]
+    inputs += list(extra)
     key = None if ALLOW_DAMAGED else fingerprint(*inputs, *split_profile_inputs(g))
     dlckf, dlckey = pkg.with_name(pkg.name + '.dlc.key'), None
     cskf, cskey, promoted = pkg.with_name(pkg.name + '.compute.key'), None, None
@@ -2521,21 +2840,22 @@ def layer_shaders(py, repo, api, name, roots, sh, key, logs, env, mac):
     return out
 
 
-def build_vk_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, provisional=False):
+def build_vk_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, provisional=False, extra=()):
     """A Vulkan game's SPIR-V shaders (roots: the RomFS, and a run-time capture folder) → one Metal library each for the Mac (sh/vk/) and the iPhone (sh/ios/vk/, what build_ipa.sh takes from MSL_IOS;
-    not with mac), replacing the NVN split and chain build (layer_shaders). Reused when the roots (paths and sizes), the tools, the profile and the compilers are as at the last successful run (reuse False: never)"""
+    not with mac), replacing the NVN split and chain build (layer_shaders). Reused when the roots (paths and sizes), the tools, the profile, the compilers and extra (the RomFS mods packed in, apply_mods)
+    are as at the last successful run (reuse False: never)"""
     PROG.stage('Vulkan shaders', step='checking the inputs')
-    key = fingerprint(*[('stat' if provisional else 'tree', r) for r in roots], ('files', tool_files(repo)), ('files', profile_files(g)), *toolchain(repo, env), env=env) if reuse else None
+    key = fingerprint(*[('stat' if provisional else 'tree', r) for r in roots], ('files', tool_files(repo)), ('files', profile_files(g)), *toolchain(repo, env), *extra, env=env) if reuse else None
     return layer_shaders(py, repo, 'vk', 'Vulkan', roots, sh, key, logs, env, mac)
 
 
-def build_gl_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, provisional=False):
+def build_gl_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, provisional=False, extra=()):
     """An OpenGL game's GLSL sources (roots: the RomFS, main, a run-time capture folder) → one Metal library each for the Mac (sh/gl/) and the iPhone (sh/ios/gl/, what build_ipa.sh takes from MSL_IOS;
-    not with mac), replacing the NVN split and chain build, as build_vk_shaders does for a Vulkan game; glslang (glslangValidator) compiles the GLSL to SPIR-V for spirv-cross"""
+    not with mac), replacing the NVN split and chain build, as build_vk_shaders does for a Vulkan game (extra too); glslang (glslangValidator) compiles the GLSL to SPIR-V for spirv-cross"""
     PROG.stage('GL shaders', step='checking the inputs')
     if not shutil.which('glslangValidator', path=env['PATH']): raise BuildError('glslangValidator not found (brew install glslang): it compiles an OpenGL game\'s GLSL shaders')
     key = fingerprint(*[('stat' if provisional else 'tree', r) if Path(r).is_dir() else ('files', [r]) for r in roots], ('files', tool_files(repo)), ('files', profile_files(g)), *toolchain(repo, env),
-                      ('cmd', ['glslangValidator', '--version']), env=env) if reuse else None
+                      ('cmd', ['glslangValidator', '--version']), *extra, env=env) if reuse else None
     return layer_shaders(py, repo, 'gl', 'GL', roots, sh, key, logs, env, mac)
 
 
@@ -2808,9 +3128,14 @@ def parse_args(argv):
     ap.add_argument('--xcode-workspace', help='workspace collecting prepared games (default: NxNative.xcworkspace beside the NSP folder; use with --prepare-xcode)')
     ap.add_argument('-l', '--language', help='game language, a code or a name: ja, fr, de, es, it, nl, pt, ru, ko, zh-Hans, zh-Hant, en-GB, fr-CA, es-419, pt-BR, Japanese, ... (default: the LANGUAGE setting, else English); '
                     'it must be one the game supports, which the console lists')
-    ap.add_argument('--keep-extracted', action=argparse.BooleanOptionalAction, help='keep the extracted game files after the IPA is built, for the next build (default: the KEEP_EXTRACTED setting, on)')
+    ap.add_argument('--keep-extracted', action=argparse.BooleanOptionalAction, help='keep the extracted game files after the IPA is built, for the next build; --no-keep-extracted deletes them and their modded copy in mods/ (default: the KEEP_EXTRACTED setting, on)')
     ap.add_argument('--work-dir', help='the game\'s build folder, used as it is (default: the WORK_DIR setting, else <title ID>_build in the NSP folder); the extracted files, shader cache and temporary files live there, and the IPA or Mac app defaults to the folder holding it')
     ap.add_argument('--env-file', help='environment switches for a diagnostic build (one KEY=VALUE per line)')
+    ap.add_argument('--mods', help='a folder of the game\'s mods: code patches (.ips, .ips32, .pchtxt named for the game\'s build), RomFS file replacements (folders named romfs) and cheats '
+                    '(folders named cheats), as Atmosphère, yuzu or Ryujinx lay them out; a whole SD card or emulator mods folder works, other games\' mods are left out, and a folder '
+                    'whose name starts with - is turned off; a frame-rate or ultrawide mod (by its folder\'s name) is offered in the launcher as High frame rate / Ultrawide '
+                    '(default: the MODS setting, else the folder named mods beside the game\'s files when there is one)')
+    ap.add_argument('--no-mods', dest='mods', action='store_const', const='none', help='pack the game without its mods folder')
     ap.add_argument('--gpu', help='NVN games: GPU architectures the app gets its pipeline archive for, made on this Mac with metal-tt, comma-separated: g18p (A19 / A19 Pro), or the name a device\'s log gives when the app has no archive for its GPU; '
                     'none = no archive, the device builds the bases on its first start (default: the PSO_GPUS setting; when that is empty, a profile with pso_mtl4 on uses its pso_gpu key or g18p, and other profiles use none). '
                     'With --platform mac-app: the Mac app\'s archive, by default for this Mac\'s GPU (none: the app builds the bases on its first start)')
@@ -2943,6 +3268,7 @@ def main(args=None):
     nup = nup_file(nsp_dir)   # a NUP file given in place of the folder: its folder is the NSP folder (the build folder and the IPA go there)
     if nsp_dir.is_file(): nsp_dir = nsp_dir.parent
     global NSP_FOLDER; NSP_FOLDER = nsp_dir
+    mods_root = mods_folder(args, nsp_dir)   # before the extraction: a --mods / MODS that is not a folder stops the build here
     dump = 'nup' if nup else 'folder' if dump_folder(nsp_dir) else None   # their files are not encrypted, so they need no keys
     keys = None if dump else Path(os.path.expanduser(args.keys or PROD_KEYS or ask('path of prod.keys: ', 'prod.keys (-k)'))).resolve()
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
@@ -3074,6 +3400,14 @@ def main(args=None):
         os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
         g = gamemod.load(g.id)
         say(f'derived game profile for {pkg_ver} ({disp}): {g.dir}')
+    packed_cheats, mod_variants, mods_rom, cheat_build = None, {}, (), None
+    if mods_root:   # the game's mods: the packed version's files with them, from here on (dm/tools/game_mods.py); a program of a game of several takes its own (game_mods.py same_title)
+        say(f'mods folder: {mods_root}')
+        m0 = dirs[pkg_ver] / 'ExeFS/main'; cheat_build = build_id(m0)[:16].upper() if m0.is_file() else None   # the build pack_mod_cheats names this program's own cheat file after (merge_cheats)
+        modded, packed_cheats, mod_variants = apply_mods(mods_root, dirs[pkg_ver], work, pkg_ver, app, fps_ok=frame_rate_mods_ok(g), first=getattr(args, 'in_programs', None) is None)
+        if modded:
+            dirs[pkg_ver] = modded; rk = work / 'mods' / f'{pkg_ver}.romfs.key'
+            mods_rom = (('files', [rk]),) if rk.is_file() else ()   # the shader stages' key: a mod's file of the same size leaves the RomFS's names and sizes as they were
     sv = versions if derived else need   # the versions whose files the shaders come from
     game = dirs[pkg_ver]
     # how the shaders are got follows from the packed version's files (profile_guess.py shader_sources): the graphics API, and the shaders made only at run time
@@ -3116,6 +3450,7 @@ def main(args=None):
 
     patched = work / f'patched_{pkg_ver}'
     g = rewrite(py, repo, game / 'ExeFS', patched, env, logs, g, provisional)
+    build_variants(py, repo, mod_variants, patched, env, logs)   # the switchable mods' bytes beside the modules (none: earlier ones removed)
     if nd := captured_nros(patched): env = dict(env, DM_NRO_DIR=str(nd))
     chain_header(py, repo, env, logs)   # before any host is built
     if provisional or derived:   # the keys that need the rewritten modules, then (provisional) the heap check (both only change keys the host is built with, not the rewrite or the shader steps)
@@ -3131,10 +3466,10 @@ def main(args=None):
     sh = work / 'shader'
     if gfx == 'vulkan':   # the packed version's merged RomFS holds the SPIR-V files the game loads; a capture holds those it generates
         cap = capture_shaders(repo, game, patched, work, env, logs, g, 'vk') if vkcap else None
-        ios = build_vk_shaders(py, repo, [rfs.source(game)] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, reuse=not ALLOW_DAMAGED, mac=mac, provisional=bool(provisional or derived))
+        ios = build_vk_shaders(py, repo, [rfs.source(game)] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, reuse=not ALLOW_DAMAGED, mac=mac, provisional=bool(provisional or derived), extra=mods_rom)
     elif gfx == 'gl':   # the GLSL sources in the packed version's archives and in its main (the game compiles them at run time; the host finds each by the hash of its text), and a capture of those it puts together
         cap = capture_shaders(repo, game, patched, work, env, logs, g, 'gl') if glcap else None
-        ios = build_gl_shaders(py, repo, [rfs.source(game), game / 'ExeFS/main'] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, reuse=not ALLOW_DAMAGED, mac=mac, provisional=bool(provisional or derived))
+        ios = build_gl_shaders(py, repo, [rfs.source(game), game / 'ExeFS/main'] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, reuse=not ALLOW_DAMAGED, mac=mac, provisional=bool(provisional or derived), extra=mods_rom)
     else:
         # Trinity packs and legacy Unreal paks: the split decodes them with the packed version's own decoder (Oodle, LZ5), in the Mac host built for the profile
         oodle = (lambda: {'DM_OODLE_HOST': str(build_mac_host(repo, work / 'tools/dmhost', env, logs, g)), 'DM_OODLE_MODULES': str(patched)}) if src['oodle_packs'][0] or src['ue_legacy'][0] else None
@@ -3152,7 +3487,7 @@ def main(args=None):
             return g
         derive_dlc = (lambda: derive_shader_tables('the installed DLC shader content differs from the registered tables')) if not own else None
         derive_compute = (lambda: derive_shader_tables('the reader decoded additional compute kernels from this registered build')) if not own else None
-        pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
+        pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute, mods_rom)
         if observed_glslc is not None: check_glslc_coverage(observed_glslc, g)
         seen = seen_keys(g, sh, seen_logs(work, app)) if seen_shaders else None
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac, seen, None if mac else ios_wants_pulling(g, ios_gpus((args.gpu or PSO_GPUS).strip(), g), prepare_xcode, env))
@@ -3163,12 +3498,15 @@ def main(args=None):
     if not motion: say('motion (gyro): off, DM_MOTION=0 is built in (on the iPhone, DM_MOTION=1 in the app\'s Documents/env.txt turns it back on)')
     if mac_pack:   # a Mac app: the Mac host, then the app packed from it and the build's files
         if getattr(args, 'in_programs', None) is not None:   # a program of the game: the app its first program's build packs takes these
-            rmtree(work / 'tmp'); return {'patched': patched, 'romfs': rfs.source(game), 'msl': ios / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl'), 'tables': g.table('shader_map.tsv').parent, 'html': game / 'html', 'gfx': gfx}
+            rmtree(work / 'tmp'); return {'patched': patched, 'romfs': rfs.source(game), 'msl': ios / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl'), 'tables': g.table('shader_map.tsv').parent, 'html': game / 'html', 'gfx': gfx, 'cheats': packed_cheats, 'build': cheat_build}
         host, font = mac_host(py, repo, work, env, logs, g)
         programs = other_programs(args, g)
         if not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
                 (args.gpu or PSO_GPUS).strip(), programs, control)
+        cdirs = [(d, b) for d, b in [(packed_cheats, cheat_build)] + [(programs[n].get('cheats'), programs[n].get('build')) for n in sorted(programs)] if d]   # each program's own cheats too, under its builds' IDs
+        c = merge_cheats(cdirs, work / 'mods' / 'programs_cheats') if len(cdirs) > 1 else cdirs[0][0] if cdirs else None
+        if c: install_cheats(c, Path.home() / 'Library/Application Support/nxnative' / f'{app:016X}' / 'cheats')   # the app's DM_ROOT (dm/mac/launcher.c)
         rmtree(work / 'tmp')
         say(f'done: {out_ipa} ({tree_size(out_ipa)[1] / 2**30:.1f} GB); '
             f'open it from Finder. Its save is in ~/Library/Application Support/nxnative/{app:016X}/, its log in ~/Library/Logs/nxnative/{app:016X}.log')
@@ -3180,6 +3518,7 @@ def main(args=None):
         host, font = (first['host'], first['font']) if first else mac_host(py, repo, work, env, logs, g)
         parts = {'font': font}
         cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang, env, logs, g, env_file, partial=seen_shaders, parts=parts, jit=jit)
+        if packed_cheats: install_cheats(packed_cheats, work / 'cheats')   # the run's DM_ROOT is the build folder
         rmtree(work / 'tmp')
         if getattr(args, 'in_programs', False): return parts
         programs = None if PROGRAM_INDEX else mac_programs(args, g, parts)
@@ -3191,8 +3530,10 @@ def main(args=None):
         return
 
     if getattr(args, 'in_programs', None) is not None:   # a program of the game: the app its first program's build packs takes these
-        rmtree(work / 'tmp'); return {'row': (PROGRAM_INDEX, g.id, patched, rfs.source(game), ios, gfx), 'ex': ex, 'keep': keep}
+        rmtree(work / 'tmp'); return {'row': (PROGRAM_INDEX, g.id, patched, rfs.source(game), ios, gfx), 'ex': ex, 'keep': keep, 'cheats': packed_cheats, 'build': cheat_build}
     programs = other_programs(args, g)
+    cheat_dirs = [(d, b) for d, b in [(packed_cheats, cheat_build)] + [(programs[n].get('cheats'), programs[n].get('build')) for n in sorted(programs)] if d]   # each program's own cheats too, under its builds' IDs: one folder for the app
+    packed_cheats = merge_cheats(cheat_dirs, work / 'mods' / 'programs_cheats') if len(cheat_dirs) > 1 else cheat_dirs[0][0] if cheat_dirs else None
     if programs and romfs_mode == 'separate': raise BuildError('a game of several programs keeps its files in the app (ROMFS / --romfs bundle): Documents holds one RomFS image, one program\'s')
     if not prepare_xcode and free_gb(out_ipa.parent) < 5: raise BuildError(f'less than 5 GB free on the volume of {out_ipa.parent}')
     say('preparing the Xcode project' if prepare_xcode else f'building the IPA → {out_ipa}')
@@ -3205,6 +3546,7 @@ def main(args=None):
     if icon: ipa_env['DM_ICON'] = str(icon); say(f'app icon: {icon}')   # app icon (found above)
     else: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the home-screen icon will be blank' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the home-screen icon will be blank')
     if env_file: ipa_env['DM_ENV_FILE'] = str(Path(os.path.expanduser(env_file)).resolve())
+    if packed_cheats: ipa_env['DM_PACKED_CHEATS'] = str(packed_cheats); say(f'cheats packed into the app from the mods folder: {", ".join(p.name for p in sorted(packed_cheats.iterdir()))} (the app copies them into its cheats folder; the in-game menu turns them on)')
     show_fps = SHOW_FPS if args.show_fps is None else args.show_fps
     ipa_env['DM_SHOW_FPS'] = '1' if show_fps else '0'
     gpus = (args.gpu or PSO_GPUS).strip()
@@ -3241,8 +3583,8 @@ def main(args=None):
     tree_tar.pack(xcode_data, say)
     PROG.end(f'{out_ipa.name}, {amount(out_ipa.stat().st_size, "B")}')
     rmtree(work / 'tmp')
-    if not keep:
-        for d in [ex] + [r['ex'] for r in programs.values()]: say(f'deleting the extracted game files: {d}'); rmtree(d)
+    if not keep:   # and the modded copy of them (apply_mods), a whole RomFS image of its own once the extraction it was cloned or linked from is gone
+        for d in extracted_leftovers(ex, work, programs, mods_root): say(f'deleting the extracted game files: {d}'); rmtree(d)
     say(f'done: {out_ipa} ({out_ipa.stat().st_size / 2**30:.1f} GB)')
     if separate: say_push_romfs(rfs.source(game), bundle_id)
     report_profile_status(g, reg, pkg_ver, derived, provisional, patched=patched)
