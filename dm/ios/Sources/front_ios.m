@@ -177,7 +177,12 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
         UIScreen *scr = self.view.window.windowScene.screen; CGSize sz = (scr ?: UIScreen.mainScreen).bounds.size;   // the window's screen; the main one before the view is in a window
         CGFloat r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
         if (r < 1.85) { unsetenv("DM_MOD_ULTRAWIDE"); LOG("front end: Ultrawide left off: this screen (%.2f:1) is not wider than 16:9", r); }
-        else { self.picture = DmPictureStretch; self.ultrawideStretch = YES; LOG("front end: Ultrawide: the picture is stretched over the %.2f:1 screen in landscape", r); }
+        else {
+            self.picture = DmPictureStretch; self.ultrawideStretch = YES; LOG("front end: Ultrawide: the picture is stretched over the %.2f:1 screen in landscape", r);
+            // The mod widens the view itself, inside the game's 16:9 picture: a taller Picture shape (DM_SCREEN_ASPECT, e.g. the iPhone Duo pick) would change that picture under it
+            const char *as = getenv("DM_SCREEN_ASPECT");
+            if (as && *as && strcmp(as, "0")) { setenv("DM_SCREEN_ASPECT", "0", 1); LOG("front end: Ultrawide keeps the game's 16:9 picture: DM_SCREEN_ASPECT=%s → 0", as); }
+        }
     }
     self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen
     self.view.window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategorySmall;   // UIKit draws the in-game menu (GameMenu.swift) in this window: it keeps one compact text size over the game, whatever the system's text size

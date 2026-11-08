@@ -184,6 +184,21 @@ int main(void) { @autoreleasepool {
         g_present_n=32;
         EXPECT("same size reuses its scaler",PRESENT_METALFX,check_present_resize(big,192,96));
         EXPECT("reuse makes no new scaler",2,g_fx_present.made);
+        // The in-game menu's Upscaling (mtl_present_upscale_set, the main thread's): the live present takes it at its next present and keeps the scaler it made; a capture
+        // (present_offscreen_wait) reads the mode in force and leaves the pick for the live present
+        int madeBefore=g_fx_present.made;
+        mtl_present_upscale_set("off");
+        present_offscreen_wait(big,whole,out);
+        EXPECT("menu: a capture leaves the pick for the live present",0,atomic_load(&g_fx_req));
+        EXPECT("menu: Standard from the next present",PRESENT_STANDARD,check_present_resize(big,192,96));
+        EXPECT("menu: Standard in force",0,(int)g_fx_mode);
+        EXPECT("menu: the pick was taken",-1,atomic_load(&g_fx_req));
+        mtl_present_upscale_set("metalfx");
+        EXPECT("menu: MetalFX from the next present",PRESENT_METALFX,check_present_resize(big,192,96));
+        EXPECT("menu: the kept scaler, none made for the picks",madeBefore,g_fx_present.made);
+        mtl_present_upscale_set("sharp");check_present_resize(big,192,96);
+        EXPECT("menu: a value that is no mode is ignored",1,(int)g_fx_mode);
+        atomic_store(&g_fx_req,-1);
         g_present_n=savedPresent;
 
         // Whole-window capture uses the same upscale and remains asynchronous; its completion includes the final BGRA readback.

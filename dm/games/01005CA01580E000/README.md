@@ -11,7 +11,7 @@ Update 1.0.2 (`v65536`) over the base game, SDK 13.3.2. Atlus GFD / Needle on NV
 | `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | the NPDM declares no system resource; the game sets a heap in the existing 4 GB layout |
 | `mem_used 0x4c00000` | `game.tsv` | the rewritten modules require 76 MB, exceeding the default 64 MB deducted from the pool |
 | `pad_layout full` | `game.tsv` | movement and camera use both sticks |
-| `present_interval_choice on` | `game.tsv` | the launcher's **Frame rate** 30 / 60. The game asks for present interval 2 (`the game sets present interval 1 → 2`) and steps its logic by its own clock; at 60 (`DM_PRESENT_INTERVAL=display`) it showed 60 fps on an iPhone 18 Pro Max (2026-11-05), at normal speed as reported. The community 60 fps patch for 1.0.2 (StevensND, `sdk` build `357efc19…` at `+0x486DA0`: `mov w8, #1`) changes the same interval in the `sdk`'s NVN, which the host replaces, so as a mod it changes nothing here |
+| `present_interval_choice on` | `game.tsv` | the launcher's **Frame rate** 30 / 60. The game asks for present interval 2 (`the game sets present interval 1 → 2`) and steps its logic by its own clock; at 60 (`DM_PRESENT_INTERVAL=display`) it showed 60 fps on an iPhone 18 Pro Max (2026-11-05), at normal speed as reported. The community 60 fps patch for 1.0.2 (StevensND, `sdk` build `357efc19…` at IPS offset `0x486DA0`, which counts the module's 0x100-byte header, so module offset `sdk+0x486ca0`: `mov w8, #1`) changes the same interval in the `sdk`'s NVN, which the host replaces, so as a mod it changes nothing here |
 
 ## Rendering
 

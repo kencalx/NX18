@@ -1,6 +1,7 @@
 // Virtual gamepad (Nintendo button positions) + physical controllers (GameController), handed to the host through dm_input_set and dm_pad_set_player (hle_hid.c, bit layout in dm_input.h).
 //   Two layouts, three in handheld mode, picked in the in-game menu (GameMenu.swift) that the menu button at the top centre (a gear) opens; the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
-//   The menu button stays while a physical controller is connected, so the menu is there in every layout and with every controller.
+//   The menu button is not hidden with the touch controls when a physical controller is connected, so the menu is there in every layout and with every controller (it still fades
+//   after 5 s and comes back on a double tap, as below).
 //   The menu button is hidden while playing: a double tap anywhere but on a drawn control (keys, diamond, D-pad, left stick) shows it, and it fades out again after 5 s
 //   without a touch on it (the menu open keeps it; closing the menu starts the 5 s again). It shows from the start until 5 s after the game's first picture and after the
 //   progress screen of a first start, "Preparing shaders" (dm_gamepad_hint), so a new player sees where it is; it stays while VoiceOver or Switch Control is on (turning either on shows it), and while an

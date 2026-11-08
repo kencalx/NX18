@@ -105,6 +105,11 @@ class LauncherSettingsTests(unittest.TestCase):
         p5r = build('01005CA01580E000', 'nvn')['DM_PRESENT_INTERVAL']
         self.assertEqual((p5r['label'], p5r['default'], p5r['options']), ('Frame rate', 'game', [['game', '30 fps'], ['display', '60 fps']]))
         self.assertNotIn('DM_PRESENT_INTERVAL', build(BOTW, 'nvn'), 'a game without the profile key keeps its own interval')
+        # The row starts at 30 fps (game): a profile that also sets present_interval display would have the launcher's default override its tested 60, so it is refused
+        with tempfile.TemporaryDirectory() as tmp:
+            src = ROOT / 'dm/games/01005CA01580E000'; d = Path(tmp) / src.name; d.mkdir()
+            (d / 'game.tsv').write_text((src / 'game.tsv').read_text(encoding='utf-8') + 'present_interval\tdisplay\n', encoding='utf-8')
+            with self.assertRaisesRegex(SystemExit, 'leave present_interval at game'): settings.game.header_one(settings.game.Game(d))
 
     def test_defaults_follow_each_platform_host(self):
         # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile. nvn_rec.h rec_on: iOS on, Mac off.
