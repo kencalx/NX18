@@ -188,7 +188,8 @@ static void nq_flatten(nq_job *j,const uint8_t *p,unsigned depth) {
         } else {
             nq_node *n=j->last; if(!n || n->kind!=NQ_COMMANDS || n->closed) n=nq_append(j,NQ_COMMANDS);
             size_t offset=n->length; nq_bytes(n,p,h.size);
-            if(!cap_rec_fields(h.op,n->bytes+offset+8,h.size,&nq_snapshot_ops,j)) die("queue snapshot: unknown command %u",h.op);
+            // OP_DEPTH_BOUNDS (DM_DEPTH_BOUNDS; nvn_obj.h: past OP_COUNT_, outside the capture format, so cap_rec_fields does not know it) holds no address or object: copied as is
+            if(h.op!=OP_DEPTH_BOUNDS && !cap_rec_fields(h.op,n->bytes+offset+8,h.size,&nq_snapshot_ops,j)) die("queue snapshot: unknown command %u",h.op);
             if(h.op==OP_SIGNAL_EVENT) { memcpy(&n->event,a,8); memcpy(&n->mode,a+8,4); memcpy(&n->value,a+12,4); nq_end(j); nq_append(j,NQ_FENCE)->receipt=nq_new(); }
         }
         p+=h.size;
