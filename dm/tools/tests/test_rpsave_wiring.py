@@ -87,6 +87,9 @@ class Switches(unittest.TestCase):
         if m: self.assertGreater(int(m.group(1)), 158)
         cov = func(self.mtl, 'static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level) {')
         self.assertIn('return g_fd_why = 12, 0;', cov); self.assertIn('return g_fd_why = 13, 0;', cov)
+        # the depth plane counts toward the pass's size (nvn_rp_omit) only when it is surely attached: a native depth / stencil format, not drawn through a colour view
+        plan = func(self.mtl, 'static uint32_t rp_omit_plan(uint32_t want) {')
+        self.assertIn('if (t && mtl_fmt_depth(t.pixelFormat) && !bcrt_view(t, &R.rt.dview, R.rt.has_dview, &sf_)) { has_d = 1;', plan)
 
     def test_counters_reach_the_log_and_the_tsv(self):
         nvn = read('dm/gfx/nvn/hle_nvn.c')

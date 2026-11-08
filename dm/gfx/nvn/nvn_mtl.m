@@ -4814,7 +4814,10 @@ static uint32_t rp_omit_plan(uint32_t want) {
         if ((want >> i & 1) && !R.clear_c[i] && !tex_storage_dst(R.rt.color[i])) cand |= 1u << i;
     }
     if (R.rt.depth) { id<MTLTexture> t = tex_mtl(R.rt.depth); NSUInteger lv = R.rt.has_dview && R.rt.dview.set_levels ? R.rt.dview.base_level : 0;
-        if (t) { has_d = 1; dw = mip_extent(t.width, lv); dh = mip_extent(t.height, lv); } }
+        // The plane counts toward the pass's size only when rp_begin_ex_ surely attaches it: a native depth / stencil format not drawn through a colour view (bcrt_view). One it
+        // leaves out would let the colours alone set the size, and leaving out the smallest of them would make the pass larger; not counting it only leaves out fewer slots
+        MTLPixelFormat sf_;
+        if (t && mtl_fmt_depth(t.pixelFormat) && !bcrt_view(t, &R.rt.dview, R.rt.has_dview, &sf_)) { has_d = 1; dw = mip_extent(t.width, lv); dh = mip_extent(t.height, lv); } }
     return cand ? nvn_rp_omit(cand, present, w, h, has_d, dw, dh) : 0;
 }
 // There are pending clears but no draw in the pass: open a pass once to land the clears
