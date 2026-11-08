@@ -255,6 +255,9 @@ void nvn_queue_wait_sync(queue_t *q,const sync_t *s) {
     pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue wait allocation failed"); j->receipt=nq_new();
     pthread_mutex_lock(&nq_mu); nq_snapshot_sync(nq_append(j,NQ_SYNC),s); nq_enqueue(nq_get(q),j); pthread_mutex_unlock(&nq_mu);
 }
+// nvnQueueFinish: the queue's work through the GPU, then its last present handed on by the present queue (mtl_present_wait: one present, not mtl_present_flush's every queued one).
+// The second wait is NXNative's (ea0c98df); on the Switch QueueFinish does not wait for the display (docs/reference/nvn-objects.md: what it costs a game that calls it before each
+// present, Luigi's Mansion 3, is not measured on a device)
 void nvn_queue_finish(queue_t *q) { sync_t s={0}; nvn_queue_fence(q,&s); nvn_sync_wait(&s,UINT64_MAX); nvn_sync_release(&s);
     pthread_mutex_lock(&nq_mu); uint64_t present=nq_get(q)->present; pthread_mutex_unlock(&nq_mu);
     if(present) mtl_present_wait(present);

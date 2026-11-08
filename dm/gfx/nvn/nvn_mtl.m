@@ -2377,9 +2377,11 @@ static void mtl_finish_gpu_at(int site) {
 }
 #define mtl_finish_gpu() mtl_finish_gpu_at(WS_DIAG)
 void mtl_present_flush(void);
-// nvnQueueFinish waits for the GPU work submitted so far, not for queued presents to reach the screen: with a window, the display link takes one present per tick, so waiting for them
+// mtl_finish waits for the GPU work submitted so far, not for queued presents to reach the screen: with a window, the display link takes one present per tick, so waiting for them
 // made every QueueFinish cost one or two display frames. Fire Emblem: Three Houses' loader submits a copy and calls QueueFinish for each resource it uploads, and its first loading screen
-// took 78 s on the iPhone (5 s windowless on the Mac). A swapchain texture is not handed back before its previous present is processed (AcquireTexture waits for that ticket)
+// took 78 s on the iPhone (5 s windowless on the Mac). A swapchain texture is not handed back before its previous present is processed (AcquireTexture waits for that ticket).
+// nvnQueueFinish called this until NXNative's queue worker (ea0c98df); it now calls nvn_queue_finish (nvn_queue.inc), which after the GPU also waits for that queue's last present
+// to be handed on: one present, not every queued one, so a loader's repeated QueueFinish waits once per present at most (docs/reference/nvn-objects.md)
 void mtl_finish(void) { mtl_finish_gpu_at(WS_FINISH); }
 static void present_drop_for_suspend(void);
 static void snap_drain(void);
