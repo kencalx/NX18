@@ -2,12 +2,41 @@
 // from dm/games/settings.tsv (dm/games/settings.py): each sets an environment variable the host reads when the game starts. A variable an env file set (Documents/env.txt, the bundle's
 // dm/env.txt; main.m lists them in DM_ENV_FILE_KEYS) is shown but kept. All settings share one screen, grouped by section (rows: LauncherRow.swift). Choices that differ from the game's default are kept
 // in UserDefaults; Reset to tested defaults shows the defaults, and Play then forgets them. DM_LAUNCHER=0 in Documents/env.txt starts the game at once with the saved choices; DM_SAVED_CHOICES=0 ignores them (and keeps them)
+import CoreHaptics
+import GameController
+import Metal
+import MetalFX
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 import os
 
 private func info(_ key: String) -> Any? { Bundle.main.object(forInfoDictionaryKey: key) }
+
+// Whether front_ios.m startGame has made the process's first Metal device. Until it has, the facts leave MetalFX unknown (no greying): a device made here would come before
+// front_hud_env, and the Metal device reads MTL_HUD_ENABLED, the launcher's Performance HUD switch, only when the process makes its first (GitHub issue #840)
+@MainActor private var metalDeviceMade = false
+
+// The device facts the rules are decided on (LauncherSettings.swift DeviceFacts), as front_ios.m tests the same things when the game starts: the app scene's screen and window
+// (the TV's scene is not the app's), the haptic engine, the controllers, and a TV scene connected
+@MainActor private func iosDeviceFacts() -> DeviceFacts {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let app = scenes.first { $0.session.role == .windowApplication }
+    func ratio(_ s: CGSize?) -> Double? {
+        guard let s, min(s.width, s.height) > 0 else { return nil }
+        return Double(max(s.width, s.height) / min(s.width, s.height))
+    }
+    var f = DeviceFacts()
+    f.kind = UIDevice.current.userInterfaceIdiom == .pad ? .ipad : .iphone
+    f.screen = ratio(app?.screen.bounds.size)
+    f.window = ratio(app?.effectiveGeometry.coordinateSpace.bounds.size)
+    f.hz = app.map { $0.screen.maximumFramesPerSecond }
+    f.haptics = CHHapticEngine.capabilitiesForHardware().supportsHaptics
+    f.controller = !GCController.controllers().isEmpty
+    f.tv = scenes.contains { $0.session.role == .windowExternalDisplayNonInteractive }
+    if metalDeviceMade, let dev = MTLCreateSystemDefaultDevice() { f.metalFX = dev.supportsFamily(.metal4) && MTLFXSpatialScalerDescriptor.supportsMetal4FX(dev) }
+    return f
+}
 
 
 /// Cloud saves: an iCloud Drive folder shared with the Mac app (chosen in its settings window's
@@ -142,6 +171,7 @@ private struct LauncherView: View {
                 .contentMargins(.horizontal, 12, for: .scrollContent)
                 .frame(width: geometry.size.width * 2 / 3)
             }
+            .onChange(of: geometry.size) { m.refreshFacts() }   // the window's shape: rotated, or resized under Stage Manager or Split View
         }
         .preferredColorScheme(.dark)
         .task {
@@ -174,15 +204,21 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
         guard let url = dir?.appendingPathComponent("launcher.json"), let data = try? Data(contentsOf: url) else { return false }
         guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return false }
         let model = LauncherModel(file.settings)
+        model.follow(iosDeviceFacts, on: [.GCControllerDidConnect, .GCControllerDidDisconnect, UIScene.willConnectNotification, UIScene.didDisconnectNotification])
         gameMenuModel = model   // the in-game menu shows and saves the same choices (GameMenu.swift)
-        if ProcessInfo.processInfo.environment["DM_LAUNCHER"] == "0" { fputs("launcher: off (DM_LAUNCHER=0)\n", stderr); model.applySaved(); return false }
+        if ProcessInfo.processInfo.environment["DM_LAUNCHER"] == "0" {
+            fputs("launcher: off (DM_LAUNCHER=0)\n", stderr); model.applySaved()
+            metalDeviceMade = true   // front_ios.m starts the game as soon as this returns, before any refresh, which waits for a later main-actor turn (LauncherModel.follow)
+            Task { @MainActor in model.refreshFacts() }   // that turn: the game's device is made by then, so the facts learn MetalFX (mfx:none) for the in-game menu
+            return false
+        }
         let parent = Unmanaged<UIViewController>.fromOpaque(viewController).takeUnretainedValue()
         var host: UIViewController?
         let view = LauncherView(m: model) {
             guard let h = host else { return }
             host = nil
             model.apply()
-            h.dismiss(animated: false) { done() }
+            h.dismiss(animated: false) { done(); metalDeviceMade = true; model.refreshFacts() }   // done() started the game, whose device is made: the facts learn MetalFX now
         }
         let h = DmHostingController(rootView: view)
         h.modalPresentationStyle = .fullScreen

@@ -179,7 +179,10 @@ int main(void) { @autoreleasepool {
         atomic_store(&g_origin_ll,0);
         // Not over a float source: RCAS's limiter assumes 0..1
         id<MTLTexture> ft=step_tex(N,N,N/2,64,192,200,NULL,1);
+        atomic_store(&g_sharp_why,0);
         EXPECT("sharpening skips a float swapchain",PRESENT_STANDARD,present_rgba(ft,whole,N,N,pa));
+        EXPECT("  a capture leaves the in-game menu's note (front.h mtl_present_sharp_why)",0,mtl_present_sharp_why());
+        EXPECT("  the live present's note: the format",PRESENT_STANDARD,check_present_live(ft,NULL,N,N,NULL));EXPECT("  says why",DM_SHARP_FORMAT,mtl_present_sharp_why());
         // Not over a frame the game's upscaler drew through MetalFX (DM_UPSCALER=metalfx): the present sees a plain 1:1 picture
         atomic_store(&g_up_mfx_drawn,1);
         EXPECT("sharpening skips the game's upscaler drawn by MetalFX",PRESENT_STANDARD,present_rgba(st,whole,N,N,pa));
@@ -189,6 +192,7 @@ int main(void) { @autoreleasepool {
         mtl_present_sharpen_set("2");
         EXPECT("menu sharpening: a capture leaves the pick",PRESENT_STANDARD,present_rgba(st,whole,N,N,pa));EXPECT("  still waiting",2,atomic_load(&g_sharp_req));
         EXPECT("menu sharpening: from the live present's next present",PRESENT_SHARPENED,check_present_live(st,NULL,N,N,NULL));
+        EXPECT("  drawn: no note",0,mtl_present_sharp_why());
         EXPECT("menu sharpening: taken",-1,atomic_load(&g_sharp_req));EXPECT("  medium in force",2,atomic_load(&g_sharp_mode));
         mtl_present_sharpen_set("Medium");EXPECT("menu sharpening: a label is no level",-1,atomic_load(&g_sharp_req));
         mtl_present_sharpen_set("0");EXPECT("menu sharpening: off again",PRESENT_STANDARD,check_present_live(st,NULL,N,N,NULL));
@@ -211,12 +215,20 @@ int main(void) { @autoreleasepool {
             EXPECT("picture width",sizes[i].w,(int)vp.width);EXPECT("picture height",sizes[i].h,(int)vp.height);
         }
         EXPECT("empty content is not upscaled",0,fx_wanted((MTLViewport){0,0,2868,1320,0,1},0,720));
+        EXPECT("native size: not shown larger",DM_FX_NOT_LARGER,fx_why(present_viewport(1280,720,1280,720),1280,720));
         mtl_present_stretch(1);   // Picture Stretch: the whole canvas, and the bilinear pass for a picture stretched to another shape
         MTLViewport st=present_viewport(1280,720,2868,1320);
         EXPECT("stretch: whole canvas, x",0,(int)st.originX);EXPECT("stretch: whole canvas, y",0,(int)st.originY);
         EXPECT("stretch: whole canvas, width",2868,(int)st.width);EXPECT("stretch: whole canvas, height",1320,(int)st.height);
         EXPECT("stretch: no MetalFX for another shape",0,fx_wanted(st,1280,720));
+        EXPECT("  the reason the in-game menu gives",DM_FX_STRETCHED,fx_why(st,1280,720));
         EXPECT("stretch: MetalFX for the same shape",1,fx_wanted(present_viewport(1280,720,2560,1440),1280,720));
+        // The iPhone's stretched drawable is the texture's size (front_ios.m dm_drawable_size), and Core Animation stretches it: a crop that fills the texture is not
+        // upscaled, and the in-game menu says it is because of the stretch; a smaller crop of the same shape (Breath of the Wild's handheld 1280x720 in 1920x1080) still is
+        MTLViewport tex=present_viewport(1920,1080,1920,1080);
+        EXPECT("stretch at the texture's size: whole crop not upscaled",0,fx_wanted(tex,1920,1080));
+        EXPECT("  the reason the in-game menu gives: stretched",DM_FX_STRETCHED,fx_why(tex,1920,1080));
+        EXPECT("  a smaller crop of the same shape: upscaled",DM_FX_UPSCALED,fx_why(tex,1280,720));
         mtl_present_stretch(0);
         EXPECT("stretch off: letterboxed again",2347,(int)present_viewport(1280,720,2868,1320).width);
         EXPECT("stretch off: an anamorphic crop drawn at 16:9 keeps MetalFX",1,fx_wanted(present_viewport(1920,1080,2868,1320),1200,960));
@@ -275,10 +287,14 @@ int main(void) { @autoreleasepool {
         present_offscreen_wait(big,whole,out);
         EXPECT("menu: a capture leaves the pick for the live present",0,atomic_load(&g_fx_req));
         EXPECT("menu: Standard from the next present",PRESENT_STANDARD,check_present_resize(big,192,96));
+        EXPECT("  the in-game menu's note: off (front.h mtl_present_fx_why)",DM_FX_OFF,mtl_present_fx_why());
         EXPECT("menu: Standard in force",0,(int)g_fx_mode);
         EXPECT("menu: the pick was taken",-1,atomic_load(&g_fx_req));
         mtl_present_upscale_set("metalfx");
         EXPECT("menu: MetalFX from the next present",PRESENT_METALFX,check_present_resize(big,192,96));
+        EXPECT("  the note: upscaled",DM_FX_UPSCALED,mtl_present_fx_why());
+        present_offscreen_wait(big,whole,small);EXPECT("  a capture that does not upscale leaves the note",DM_FX_UPSCALED,mtl_present_fx_why());
+        EXPECT("  the live present at the picture's size: not shown larger",PRESENT_STANDARD,check_present_resize(big,64,64));EXPECT("  says so",DM_FX_NOT_LARGER,mtl_present_fx_why());
         EXPECT("menu: the kept scaler, none made for the picks",madeBefore,g_fx_present.made);
         mtl_present_upscale_set("sharp");check_present_resize(big,192,96);
         EXPECT("menu: a value that is no mode is ignored",1,(int)g_fx_mode);
@@ -286,6 +302,7 @@ int main(void) { @autoreleasepool {
         {   // Sharpening is not drawn over MetalFX's picture (its perceptual mode sharpens already): the same bytes as with Sharpening off
             uint8_t *x=malloc(192*96*4),*y=malloc(192*96*4);
             atomic_store(&g_sharp_mode,2);EXPECT("sharpening skipped under MetalFX",PRESENT_METALFX,check_present_live(big,NULL,192,96,x));
+            EXPECT("  the in-game menu's note",DM_SHARP_METALFX,mtl_present_sharp_why());
             atomic_store(&g_sharp_mode,0);check_present_live(big,NULL,192,96,y);
             EXPECT("  byte-identical to Sharpening off",0,memcmp(x,y,192*96*4));free(x);free(y);
         }

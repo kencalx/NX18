@@ -14,15 +14,31 @@ spec = importlib.util.spec_from_file_location('launcher_settings', ROOT / 'dm/ga
 settings = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(settings)
 
-BOTW, WONDER = '01007EF00011E000', '010015100B514000'
+BOTW, WONDER, DQ11S = '01007EF00011E000', '010015100B514000', '01006C300E9F0000'
 PERFORMANCE_NVN = ['DM_PRESENT_SNAP', 'DM_PSO_MTL4', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD', 'DM_FPS_HOLD', 'DM_METAL_HUD']
+FRAME_STEP = ('FPS_STATE_OFF',)   # main's rewriter table of a build with a frame step state page (patch_nso.py): Hold frames when late reads it
 
 
-def build(gid, api, platform=None):
+def build(gid, api, platform=None, fixups=(), mods=()):
+    """The settings rows, by variable, of the game's list; fixups are the keys of main's rewriter table (main.fixups.tsv), mods the switchable mods' roles (mods.tsv)"""
     env = {'GFXAPI': api, **({'SETTINGS_PLATFORM': platform} if platform else {})}
     with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, env):
         if not platform: os.environ.pop('SETTINGS_PLATFORM', None)
+        if fixups: (Path(tmp) / 'main.fixups.tsv').write_text(''.join(f'# {k}\t1\n' for k in fixups))
+        if mods: (Path(tmp) / 'mods.tsv').write_text('# header\n' + ''.join(f'{r}\tsome mod\t3\n' for r in mods))
         return {s['env']: s for s in settings.build(gid, tmp, Path(tmp) / 'control.nacp')['settings']}
+
+
+def build_table(text, gid=BOTW, fixups=()):   # a list from a settings table of the test's own, for the format's checks
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / 'settings.tsv').write_text('# header\n' + text, encoding='utf-8')
+        if fixups: (Path(tmp) / 'main.fixups.tsv').write_text(''.join(f'# {k}\t1\n' for k in fixups))
+        with patch.object(settings, 'HERE', Path(tmp)), patch.object(settings.nacp, 'languages', return_value=['en-US']):
+            return {s['env']: s for s in settings.build(gid, tmp, Path(tmp) / 'control.nacp')['settings']}
+
+
+def row(var, kind='toggle', values='-', default='0', meta='', shown='always'):
+    return '\t'.join((var, kind, values, default, shown, 'Game', var, '', meta)) + '\n'
 
 
 def rows_with_languages(listed):   # the settings rows, by variable, of a game whose control data lists these languages
@@ -85,7 +101,7 @@ class LauncherSettingsTests(unittest.TestCase):
                     self.assertIn('latency', s['note'])
 
     def test_sections_keep_the_profile_defaults(self):
-        botw, wonder = build(BOTW, 'nvn'), build(WONDER, 'nvn')
+        botw, wonder = build(BOTW, 'nvn', fixups=FRAME_STEP), build(WONDER, 'nvn')
         self.assertEqual([e for e, s in botw.items() if s['section'] == 'Performance'], PERFORMANCE_NVN)
         self.assertEqual(botw['DM_PSO_MTL4']['default'], '1')   # pso_mtl4: on unless the profile sets off
         self.assertEqual((wonder['DM_PRESENT_SNAP']['default'], wonder['DM_PSO_MTL4']['default']), ('0', '1'))
@@ -95,7 +111,7 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertIn('first start', botw['DM_PSO_PREBUILD']['note'])   # it runs once in the prepare step, before the first frame
 
     def test_hold_frames_takes_on_and_off(self):   # the host reads DM_FPS_HOLD as on / off (hle_nvn.c), not 1 / 0
-        s = build(BOTW, 'nvn')['DM_FPS_HOLD']
+        s = build(BOTW, 'nvn', fixups=FRAME_STEP)['DM_FPS_HOLD']
         self.assertEqual((s['on'], s['off'], s['default']), ('on', 'off', 'on'))
         s = build(BOTW, 'nvn')['DM_SHOW_FPS']
         self.assertEqual((s['on'], s['off']), ('1', '0'))
@@ -118,6 +134,115 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertTrue(all(0.5 <= float(o[0]) <= 1 for o in size['options']) and all(0.1 <= float(o[0]) <= 2 for o in opacity['options']), 'within the ranges DmGamepad.m takes')
         envs = list(rows)
         self.assertEqual(envs[envs.index('DM_TOUCH_SIZE'):envs.index('DM_TOUCH_SIZE') + 3], ['DM_TOUCH_SIZE', 'DM_TOUCH_OPACITY', 'DM_TOUCH_HAPTICS'])
+
+    def test_hold_frames_only_where_the_frame_step_state_page_is(self):
+        """hle_nvn.c fstep_hold is its only reader, and only a build with the frame step's state page (patch_nso.py FPS_STATE_OFF) has the step: Dragon Quest XI S
+        has a frame rate cap (fps_target 60) but no frame step, so the row would do nothing there"""
+        dq = build(DQ11S, 'nvn')
+        self.assertIn('DM_FPS_TARGET', dq); self.assertNotIn('DM_FPS_HOLD', dq)
+        s = build(BOTW, 'nvn', fixups=FRAME_STEP)['DM_FPS_HOLD']
+        self.assertEqual(s['inactive'], [{'when': ['DM_FPS_TARGET=30/120'], 'why': 'Only matters at 60 fps'}])   # at 30 and 120 fps the hold is fixed (hle_nvn.c fstep_tick kmax)
+        self.assertNotIn('DM_FPS_HOLD', build(BOTW, 'nvn'))
+
+    def test_rumble_sub_rows_need_rumble_and_cutoff_greys_at_no_strength(self):
+        rows = build(BOTW, 'nvn')
+        self.assertEqual((rows['DM_RUMBLE_GAIN']['needs'], rows['DM_RUMBLE_MIN']['needs']), ('DM_RUMBLE=1', 'DM_RUMBLE=1'))
+        self.assertEqual(rows['DM_RUMBLE_MIN']['inactive'], [{'when': ['DM_RUMBLE_GAIN=0'], 'why': 'Rumble strength is 0 %'}])   # the strength multiplies every output (haptics_apple.m)
+        for env in ('DM_RUMBLE', 'DM_RUMBLE_GAIN'):
+            self.assertEqual(rows[env]['hint'], [{'when': ['haptics:none', 'controller:none'], 'why': 'Rumble needs a controller on this device'}])
+
+    def test_metalfx_with_stretch_is_a_hint_where_stretch_changes_the_shape(self):
+        """Stretch (and Ultrawide, which stretches) keeps MetalFX out (nvn_mtl.m fx_why) unless the game presents a crop smaller than its window texture, which no profile key
+        tells apart (Breath of the Wild's handheld picture, Super Mario Odyssey's dynamic resolution; not the render scale, which shrinks only the 3D views inside a full crop):
+        so MetalFX stays selectable everywhere with a hint, and the in-game menu says what the present did. The Stretch hint holds only where Stretch changes the picture's
+        shape: a game with Picture shape on Match screen renders the window's own shape where the window is taller than 16:9 (an iPad, front_ios.m startGame)"""
+        stretch = ['DM_PICTURE_FIT=stretch', 'tv:none']   # with a TV connected the picture is shown there whole, and MetalFX runs (front_ios.m)
+        ultrawide = {'option': 'metalfx', 'when': ['DM_MOD_ULTRAWIDE=1', 'screen>=1.85', 'tv:none'], 'why': 'With Ultrawide, only when the game draws a smaller picture'}
+        why = 'With Stretch, only when the game draws a smaller picture'
+        nofx = {'option': 'metalfx', 'when': ['mfx:none'], 'why': 'This device has no MetalFX scaler'}
+        for gid, fixups in ((WONDER, ()), (WONDER, ('DYNAMIC_RESOLUTION',)), ('0100F2C0115B6000', ('RENDER_SCALE',))):   # no Picture shape row: the 16:9 picture
+            with self.subTest(gid=gid, fixups=fixups):
+                s = build(gid, 'nvn', fixups=fixups, mods=['ultrawide'])['DM_PRESENT_UPSCALE']
+                self.assertEqual(s['inactive'], [nofx], 'nothing greys MetalFX but a device without the scaler')
+                self.assertEqual(s['hint'], [ultrawide, {'option': 'metalfx', 'when': stretch, 'why': why}])
+        s = build(BOTW, 'nvn', fixups=('RENDER_SCALE',), mods=['ultrawide'])['DM_PRESENT_UPSCALE']   # Picture shape: Stretch stretches a shape other than the window's
+        self.assertEqual(s['hint'], [ultrawide, {'option': 'metalfx', 'when': stretch + ['DM_SCREEN_ASPECT!=auto'], 'why': why},
+                                     {'option': 'metalfx', 'when': stretch + ['DM_SCREEN_ASPECT=auto', 'window>=1.77'], 'why': why}])
+        self.assertEqual(build(WONDER, 'nvn')['DM_PRESENT_UPSCALE']['hint'], [{'option': 'metalfx', 'when': stretch, 'why': why}], 'no Ultrawide row without the mod: no rule on it')
+        mac = build(WONDER, 'nvn', 'mac')['DM_PRESENT_UPSCALE']   # no Picture row on the Mac: nothing stretches there
+        self.assertEqual((mac['inactive'], mac.get('hint')), ([nofx], None))
+
+    def test_ultrawide_greys_picture_and_picture_shape(self):   # front_ios.m: on a screen of 1.85:1 or more, Ultrawide stretches the picture and keeps it 16:9
+        rows = build(BOTW, 'nvn', mods=['ultrawide'])
+        self.assertEqual(rows['DM_PICTURE_FIT']['inactive'], [{'when': ['DM_MOD_ULTRAWIDE=1', 'screen>=1.85'], 'why': 'Ultrawide always stretches the picture'}])
+        self.assertEqual(rows['DM_SCREEN_ASPECT']['inactive'], [{'when': ['DM_MOD_ULTRAWIDE=1', 'screen>=1.85'], 'why': 'Ultrawide keeps the 16:9 picture'}])
+        self.assertEqual(rows['DM_SCREEN_ASPECT']['hint'], [{'option': 'auto', 'when': ['window>=1.77'], 'why': '16:9 on this screen'}])
+        self.assertNotIn('inactive', build(BOTW, 'nvn')['DM_PICTURE_FIT'], 'without the mod nothing greys Picture')
+        mac = build(BOTW, 'nvn', 'mac', mods=['ultrawide'])['DM_SCREEN_ASPECT']
+        self.assertFalse({'inactive', 'hint'} & set(mac), 'the Mac has neither Ultrawide nor Match screen')
+
+    def test_rows_that_never_work_on_a_device_are_hidden_there(self):
+        rows = build(BOTW, 'nvn', mods=['ultrawide'])
+        self.assertEqual(rows['DM_MOD_ULTRAWIDE']['hide'], [{'when': ['device:ipad']}])   # front_ios.m leaves the mod off below 1.85:1, every iPad
+        self.assertEqual(rows['DM_MOD_ULTRAWIDE']['inactive'], [{'when': ['screen<1.85'], 'why': "This screen isn't wider than 16:9"}])
+        self.assertEqual(rows['DM_TOUCH_HAPTICS']['hide'], [{'when': ['haptics:none']}])   # DmGamepad.m plays touch feedback on the device's haptic engine only
+
+    def test_device_and_environment_rules(self):
+        rows, mac = build(BOTW, 'nvn'), build('0100F2C0115B6000', 'nvn', 'mac')
+        self.assertEqual(rows['DM_PAD_PRESS_TO_JOIN']['inactive'], [{'when': ['DM_PAD_MERGE=1'], 'why': 'All controllers are player 1 (env.txt)'}])
+        capture = [{'when': ['DM_GPU_CAPTURE=*'], 'why': 'Off while GPU capture is on'}, {'when': ['MTL_CAPTURE_ENABLED=*'], 'why': 'Off while GPU capture is on'}]
+        self.assertEqual((rows['DM_PSO_MTL4']['inactive'], rows['DM_PSO_PREBUILD']['inactive']), (capture, capture))
+        self.assertNotIn('inactive', mac['DM_SW2'], 'the packer writes the Bluetooth key with every list (pack_app.py info_plist): nothing to grey')
+        self.assertEqual(rows['DM_SHOW_FPS']['hint'], [{'when': ['DM_METAL_HUD=1'], 'why': 'The Performance HUD shows the frame rate too'}])
+        self.assertNotIn('inactive', rows['DM_FPS_TARGET'], 'the 120 fps rule goes only where the option is offered')
+        with patch.object(settings.game, 'header_one', lambda g, real=settings.game.header_one: real(g).replace('#define DM_GAME_FPS_MAX 60', '#define DM_GAME_FPS_MAX 120')):
+            s = build(BOTW, 'nvn', 'mac')['DM_FPS_TARGET']
+        self.assertEqual(s['inactive'], [{'option': '120', 'when': ['hz<120'], 'why': "This display can't show 120 Hz"}])
+
+    def test_rules_resolve_pack_terms_and_write_aliases(self):
+        text = (row('DM_PRESENT_UPSCALE', 'choice', 'off=Standard,metalfx=MetalFX', 'off') + row('DM_X', meta='hint=DM_PRESENT_UPSCALE=metalfx~a|DM_PRESENT_UPSCALE!=off~b')
+                + row('DM_Y', meta='inactive=DM_X=1&fixups:K/L~c|DM_X=1&!fixups:K~d|DM_X=1&gfxapi:nvn~e|DM_X=1&DM_GAME_FPS_TARGET==60~f') + row('DM_Z', meta='hint=DM_NOT_HERE=1~g', shown='always')
+                + row('DM_NOT_HERE', shown='fixups:NEVER'))
+        with patch.dict(os.environ, {'GFXAPI': 'gl'}):
+            rows = build_table(text, fixups=('L',))
+        self.assertEqual(rows['DM_X']['hint'], [{'when': ['DM_PRESENT_UPSCALE=metalfx/1'], 'why': 'a'}, {'when': ['DM_PRESENT_UPSCALE!=off/0'], 'why': 'b'}])   # nvn_upscale_pick.h up_parse's spellings
+        self.assertEqual(rows['DM_Y']['inactive'], [{'when': ['DM_X=1'], 'why': 'c'}, {'when': ['DM_X=1'], 'why': 'd'}, {'when': ['DM_X=1'], 'why': 'f'}])   # e: not packed for NVN
+        self.assertNotIn('hint', rows['DM_Z'], 'a rule on a setting this game does not list can never hold')
+
+    def test_rules_are_strict(self):
+        base = row('DM_A', 'choice', 'a=A,b=B', 'a') + row('DM_R', 'range', '0:1:0.1', '0')
+        for meta, why in [('inactive=DM_NOPE=1~x', 'no row sets'), ('inactive=DM_A=c~x', 'never takes'), ('inactive=DM_R=2~x', 'never takes'), ('inactive=DM_R=lots~x', 'not a number'),
+                          ('inactive=c:DM_A=a~x', 'option'), ('inactive=DM_A=a', 'does not match'), ('inactive=DM_A=a~', 'does not match'), ('inactive=DM_A=a~' + 'x' * 61, 'longer than'),
+                          ('inactive=DM_A=a;inactive=DM_A=b~x', 'does not match'), ('hint=size>3~x', 'unknown hint term'), ('hide=DM_A=a', 'device terms'), ('hide=fixups:K', 'device term'),
+                          ('inactive=fixups:K~x', 'only pack-time'), ('inactive=DM_GAME_FPS_TARGET=60~x', 'with =='), ('inactive=DM_A=*~x', 'never takes'),
+                          ('inactive=DM_GPU_CAPTURE=1~x', 'only as set'), ('inactive=DM_PAD_MERGE=2~x', 'never takes'), ('hide=a:device:ipad', 'whole row')]:
+            with self.subTest(meta=meta), self.assertRaises(SystemExit) as e:
+                build_table(base + row('DM_X', 'choice', 'a=A,b=B', 'a', meta=meta))
+            self.assertIn(why, str(e.exception))
+        with self.assertRaises(SystemExit) as e:   # a range has no options to grey
+            build_table(base + row('DM_X', 'range', '0:1:0.1', '0', meta='inactive=0:DM_A=a~x'))
+        self.assertIn('option', str(e.exception))
+        ok = build_table(base + row('DM_X', 'choice', 'a=A,b=B', 'a', meta='inactive=b:DM_A=b&device:iphone/ipad~x|DM_R=0.5~y;hint=DM_PAD_MERGE=1~z;hide=device:mac&hz>=120'))['DM_X']
+        self.assertEqual((ok['inactive'], ok['hint'], ok['hide']), ([{'option': 'b', 'when': ['DM_A=b', 'device:iphone/ipad'], 'why': 'x'}, {'when': ['DM_R=0.5'], 'why': 'y'}],
+                                                                   [{'when': ['DM_PAD_MERGE=1'], 'why': 'z'}], [{'when': ['device:mac', 'hz>=120']}]))
+
+    def test_greying_cycles_are_refused(self):   # two rows that grey each other could both stay greyed with no way out for the player
+        for text in (row('DM_A', meta='inactive=DM_B=1~x') + row('DM_B', meta='inactive=DM_A=0~y'),
+                     row('DM_A', meta='inactive=DM_B=1~x') + row('DM_B', meta='inactive=DM_C=1~y') + row('DM_C', meta='inactive=DM_A=1~z', shown='fixups:NEVER'),
+                     row('DM_A', 'choice', 'a=A,b=B', 'a', meta='inactive=b:DM_A=a~x')):
+            with self.subTest(text=text), self.assertRaisesRegex(SystemExit, 'cycle'):
+                build_table(text)
+        build_table(row('DM_A', meta='inactive=DM_B=1~x') + row('DM_B', meta='hint=DM_A=0~y'))   # a hint greys nothing
+        self.assertIsNone(settings.greying_cycle({v: settings.rules('inactive', m, n, v, table) for n, (v, m, table) in enumerate(real_inactive(), 1)}), 'the real table')
+
+    def test_dynamic_resolution_and_render_scale_together_need_a_rule(self):   # loader.c dm_fps_state_apply: below 100 % the render scale fixes the size
+        with self.assertRaisesRegex(SystemExit, 'both Dynamic resolution and Render scale'):
+            build(BOTW, 'nvn', fixups=('DYNAMIC_RESOLUTION', 'RENDER_SCALE'))
+        text = row('DM_DYNAMIC_RESOLUTION', shown='fixups:DYNAMIC_RESOLUTION') + row('DM_RENDER_SCALE', 'range', '0.5:1.0:0.05', '1.0', shown='fixups:RENDER_SCALE')
+        with self.assertRaisesRegex(SystemExit, 'both Dynamic resolution and Render scale'):
+            build_table(text, fixups=('DYNAMIC_RESOLUTION', 'RENDER_SCALE'))
+        ruled = row('DM_DYNAMIC_RESOLUTION', meta='inactive=DM_RENDER_SCALE!=1~Off below 100 % render scale', shown='fixups:DYNAMIC_RESOLUTION') + text.split('\n', 1)[1]
+        self.assertIn('inactive', build_table(ruled, fixups=('DYNAMIC_RESOLUTION', 'RENDER_SCALE'))['DM_DYNAMIC_RESOLUTION'])
 
     def test_switchable_mods_only_with_the_mods_packed(self):   # mods.tsv beside the rewritten modules (build_ipa_from_nsp.py build_variants)
         def rows(roles, platform):
@@ -198,9 +323,18 @@ class LauncherSettingsTests(unittest.TestCase):
     def test_written_lists_follow_the_schema(self):
         schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
         for gid, api, platform in [(BOTW, 'nvn', None), (BOTW, 'nvn', 'mac'), (WONDER, 'nvn', None), ('0100535012974000', 'vulkan', 'mac')]:
-            with self.subTest(gid=gid, platform=platform), tempfile.TemporaryDirectory() as tmp, \
-                    patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': api, **({'SETTINGS_PLATFORM': platform} if platform else {})}):
-                self.assertEqual(conforms(settings.build(gid, tmp, Path(tmp) / 'control.nacp'), schema, schema), [])
+            for fixups, mods in (((), ()), (('FPS_STATE_OFF', 'RENDER_SCALE'), ('fps', 'ultrawide'))):   # with the rows the rewriter table and the mods bring, and their rules
+                with self.subTest(gid=gid, platform=platform, fixups=fixups), tempfile.TemporaryDirectory() as tmp, \
+                        patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': api, **({'SETTINGS_PLATFORM': platform} if platform else {})}):
+                    (Path(tmp) / 'main.fixups.tsv').write_text(''.join(f'# {k}\t1\n' for k in fixups))
+                    (Path(tmp) / 'mods.tsv').write_text('# header\n' + ''.join(f'{r}\tsome mod\t3\n' for r in mods))
+                    self.assertEqual(conforms(settings.build(gid, tmp, Path(tmp) / 'control.nacp'), schema, schema), [])
+        rule = {'option': 'metalfx', 'when': ['DM_PICTURE_FIT=stretch'], 'why': 'x'}
+        row = {'env': 'DM_X', 'kind': 'toggle', 'section': 'Game', 'label': 'X', 'note': '', 'default': '1', 'on': '1', 'off': '0'}
+        self.assertEqual(conforms({'game': BOTW, 'settings': [{**row, 'inactive': [rule], 'hint': [rule], 'hide': [{'when': ['device:ipad']}]}]}, schema, schema), [])
+        for bad in ({'inactive': [{'when': ['device:ipad']}]}, {'hint': [{'why': 'x'}]}, {'hide': [{}]}, {'inactive': rule}):
+            with self.subTest(bad=bad):
+                self.assertNotEqual(conforms({'game': BOTW, 'settings': [{**row, **bad}]}, schema, schema), [])
 
     def test_schema_1_takes_new_sections_but_not_new_kinds(self):
         """A section is a heading a reader draws by its name, so a new one stays schema 1; a new kind would not"""
@@ -236,6 +370,13 @@ class LauncherSettingsTests(unittest.TestCase):
                         patch.object(settings.nacp, 'languages', return_value=['en-US']), self.assertRaises(SystemExit) as e:
                     settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
                 self.assertIn(why, str(e.exception))
+
+
+def real_inactive():   # (variable, inactive value, table) for every row of the real settings.tsv with inactive rules
+    table = {r[1][0]: (r[1][1], r[1][2]) for r in settings.rows()}
+    for n, c in settings.rows():
+        m = settings.meta(c[8], n)
+        if 'inactive' in m: yield c[0], m['inactive'], table
 
 
 def conforms(value, node, root, at='$'):

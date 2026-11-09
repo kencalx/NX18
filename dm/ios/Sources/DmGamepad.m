@@ -294,6 +294,7 @@ static BOOL assistive_running(void) { return UIAccessibilityIsVoiceOverRunning()
 - (void)menuOpened { _menuOpen = YES; _menuGen++; _menu.hidden = NO; _menu.alpha = 1; }
 - (void)menuClosed { _menuOpen = NO; [self menuScheduleHide]; }
 - (int)padLayout { return _tap ? 2 : _full ? 1 : 0; }
+- (int)touchHidden { return _padOff ? 1 : _tap ? 2 : 0; }   // dm_gamepad_touch_hidden
 - (void)setPadLayout:(int)l {   // the in-game menu's pick: release every touch first (no key stays held), save, lay out again
     if (l == 2 && dm_opmode() != 0) l = 0;
     [self reset];
@@ -836,6 +837,7 @@ void dm_gamepad_touch_look(const char *env, const char *value) {   // front_ios.
 double dm_gamepad_size(void) { return g_touch_size; }   // front_ios.m: the frame-rate counter sits in the top row by the same units
 void dm_gamepad_hint(void) { [g_view menuShow]; }   // main thread: the menu button shows for 5 s (front_ios.m: the game's first picture, the end of the progress screen)
 int dm_pad_layout(void) { return g_view ? [g_view padLayout] : 0; }
+int dm_gamepad_touch_hidden(void) { return g_view ? [g_view touchHidden] : 0; }   // front_ios.m dm_setting_why: the touch rows' note in the in-game menu
 bool dm_pad_layout_offered(int layout) { return layout == 0 || layout == 1 || (layout == 2 && dm_opmode() == 0); }
 void dm_pad_layout_set(int layout) { [g_view setPadLayout:layout]; }
 void dm_gamepad_active(void) { dispatch_async(dispatch_get_main_queue(), ^{ for (GCController *c in GCController.controllers) dm_motion_rearm(c); }); }   // On become active: motion_apple.h

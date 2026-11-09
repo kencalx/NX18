@@ -159,9 +159,11 @@ int main(int argc, char **argv) { @autoreleasepool {
         atomic_store(&g_aa_mode, AA_EDGE);
         EXPECT("first live present: the kernels are not made yet, the picture as it is", PRESENT_STANDARD, live(s8, whole, W, H, a));
         EXPECT("  byte-identical to the source", 0, memcmp(a, px, W * H * 4));
+        EXPECT("  the in-game menu has nothing to say yet (front.h mtl_present_aa_why)", DM_AA_OFF, mtl_present_aa_why());
         CHECK("  the kernels being made in the background", atomic_load(&g_aa_ps_state) != 0);
         CHECK("a capture waits for them", aa_pipelines(1));
         EXPECT("the next live present smooths", PRESENT_STANDARD | PRESENT_AA, live(s8, whole, W, H, a));
+        EXPECT("  and says it ran", DM_AA_RAN, mtl_present_aa_why());
     }
 
     // Edge, an sRGB swapchain: only pixels beside an edge change, the stair steps are smoothed, alpha and flat areas stay
@@ -303,8 +305,12 @@ int main(int argc, char **argv) { @autoreleasepool {
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:W height:H mipmapped:NO]; d.storageMode = MTLStorageModeShared; d.usage = MTLTextureUsageShaderRead;
         id<MTLTexture> ft = [g_dev newTextureWithDescriptor:d]; __fp16 *h = malloc(W * H * 8); for (int i = 0; i < W * H * 4; i++) h[i] = px[i] / 255.0f;
         [ft replaceRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0 withBytes:h bytesPerRow:W * 8]; res_add(ft); res_commit();
+        int was = mtl_present_aa_why();
         EXPECT("RGBA16Float: no edge smoothing", PRESENT_STANDARD, capture(ft, whole, W, H, a));
         EXPECT("  the warning said", 1, g_red_once[165] > 0);
+        EXPECT("  a capture leaves the in-game menu's note", was, mtl_present_aa_why());
+        live(ft, whole, W, H, a);
+        EXPECT("  the live present's note: a format it does not handle", DM_AA_FORMAT, mtl_present_aa_why());
         free(h); res_remove(ft);
     }
 
@@ -347,6 +353,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         mtl_present_aa_set("Edge smoothing"); EXPECT("menu: a label is no choice", -1, atomic_load(&g_aa_req));
         mtl_present_aa_set("ab"); EXPECT("menu: ab is the environment's only", -1, atomic_load(&g_aa_req));
         mtl_present_aa_set("off"); EXPECT("menu: off again", PRESENT_STANDARD, live(s8, whole, W, H, a));
+        EXPECT("  the note follows", DM_AA_OFF, mtl_present_aa_why());
         EXPECT("  byte-identical to the source", 0, memcmp(a, px, W * H * 4));
     }
 

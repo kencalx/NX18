@@ -35,6 +35,7 @@ DuoHarnessInput duo_harness_input(void);
 int duo_harness_rumble(void);   // the in-game menu's rumble switch (dm_haptics_set_enabled)
 int duo_harness_present_stretch(void);   // whether the present was last told to stretch the picture (mtl_present_stretch, Picture Stretch)
 void duo_harness_set_web_touch(int on);   // front_web_touch: 1 as if an offline HTML page were shown over the picture
+void duo_harness_set_present_why(int fx, int sharp, int aa);   // as if the live present had last done this with Upscaling, Sharpening and Anti-aliasing (front.h DM_FX_* and the others)
 void dm_set_opmode(int mode);
 int dm_opmode(void);
 DuoHarnessState duo_harness_state(void);

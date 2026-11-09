@@ -15527,14 +15527,26 @@ static int fx_mode(int live) {
     return v;
 }
 // MetalFX scales the content (cw x ch) to its rectangle on the canvas (vp) when the rectangle is at least as large in both directions and larger in one, and of the content's shape
-// (within present_viewport's 1 %): a picture stretched to another shape (Picture Stretch) is scaled by the bilinear pass, MetalFX's spatial scaler being made for a uniform scale
-static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
+// (within present_viewport's 1 %): a picture stretched to another shape (Picture Stretch) is scaled by the bilinear pass, MetalFX's spatial scaler being made for a uniform scale.
+// fx_why says which (front.h DM_FX_UPSCALED, DM_FX_STRETCHED or DM_FX_NOT_LARGER), for the in-game menu's note (g_fx_why); fx_wanted only whether
+static int fx_why(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
     NSUInteger w = (NSUInteger)vp.width, h = (NSUInteger)vp.height;
+    int stretch = atomic_load_explicit(&g_present_stretch, memory_order_relaxed);
     // Picture Stretch: a picture stretched to another shape (1 % or more) goes through the bilinear pass. Off, upstream's rule alone, so an anamorphic crop drawn in its layer's
     // shape (Super Mario Galaxy 2's 1200x960 shown at 16:9, present_fit) keeps MetalFX
-    if (atomic_load_explicit(&g_present_stretch, memory_order_relaxed) && w && h && cw && ch && fabs(((double)w / h) / ((double)cw / ch) - 1) >= 0.01) return 0;
-    return cw && ch && w >= cw && h >= ch && (w > cw || h > ch);
+    if (stretch && w && h && cw && ch && fabs(((double)w / h) / ((double)cw / ch) - 1) >= 0.01) return DM_FX_STRETCHED;
+    if (cw && ch && w >= cw && h >= ch && (w > cw || h > ch)) return DM_FX_UPSCALED;
+    // Not shown larger here, but stretched: the iPhone front end sizes a stretched drawable at the texture (front_ios.m dm_drawable_size, the picture's render size), so a crop
+    // that fills its texture meets a rectangle of its own size and shape, and Core Animation stretches the layer over the screen. The reason the player sees is the stretch
+    return stretch ? DM_FX_STRETCHED : DM_FX_NOT_LARGER;
 }
+static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) { return fx_why(vp, cw, ch) == DM_FX_UPSCALED; }
+// What the live present last did with each picture setting (front.h mtl_present_fx_why and the others): written by the present thread at each live present, never by a capture,
+// and read by the iOS in-game menu on the main thread when it opens (front_ios.m dm_setting_why). Relaxed: a note one present late says the same
+static _Atomic int g_fx_why, g_sharp_why, g_aa_why;
+int mtl_present_fx_why(void) { return atomic_load_explicit(&g_fx_why, memory_order_relaxed); }
+int mtl_present_sharp_why(void) { return atomic_load_explicit(&g_sharp_why, memory_order_relaxed); }
+int mtl_present_aa_why(void) { return atomic_load_explicit(&g_aa_why, memory_order_relaxed); }
 // DM_NVN_PRESENT_FX_EXACT=1: the scaler's input is the crop's size always, as before the texture-sized input (fx_input_size), for an A/B on a GPU whose MetalFX may treat a
 // content well below the input size differently from the M4 Max's. Read once (-1 until then); the tests set it
 static _Atomic int g_fx_exact = -1;
@@ -15554,11 +15566,15 @@ static void fx_input_size(NSUInteger tw, NSUInteger th, NSUInteger cw, NSUIntege
 // as it is, so the present makes one copy of the picture with both on, not two
 static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTexture> raw, const NSUInteger r[4], MTLViewport vp, MTLPixelFormat out_pf, int remake_wait, int ready) {
     NSUInteger cw = r[2], ch = r[3], ow = (NSUInteger)vp.width, oh = (NSUInteger)vp.height, iw, ih;
-    if (fx_mode(fx == &g_fx_present) != UP_METALFX || !fx_wanted(vp, cw, ch)) return nil;   // a capture (present_offscreen_m4, its own fx_state) takes no pick
+    int live = fx == &g_fx_present, why = fx_mode(live) != UP_METALFX ? DM_FX_OFF : fx_why(vp, cw, ch);   // a capture (present_offscreen_m4, its own fx_state) takes no pick
+    // The live present's outcome for the in-game menu: upscaled from here on, unless MetalFX makes no scaler for this size (below). The FX_REMAKE_PRESENTS wait for a new
+    // scaler stays "upscaled": it lasts half a second, and the scaler comes after it
+    if (live) atomic_store_explicit(&g_fx_why, why, memory_order_relaxed);
+    if (why != DM_FX_UPSCALED) return nil;
     fx_input_size(raw.width, raw.height, cw, ch, ow, oh, &iw, &ih);
     if (!fx->sc || fx->iw != iw || fx->ih != ih || fx->ipf != raw.pixelFormat || fx->out.width != ow || fx->out.height != oh || fx->out.pixelFormat != out_pf) {
         NSUInteger key[6] = {iw, ih, raw.pixelFormat, ow, oh, out_pf};
-        if (!memcmp(key, fx->refused, sizeof key)) return nil;
+        if (!memcmp(key, fx->refused, sizeof key)) { if (live) atomic_store_explicit(&g_fx_why, DM_FX_REFUSED, memory_order_relaxed); return nil; }
         if (remake_wait && fx->made && g_present_n < fx->made_at + FX_REMAKE_PRESENTS) return nil;
         if (remake_wait) { pthread_mutex_lock(&g_pq_mu); while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu); pthread_mutex_unlock(&g_pq_mu); }
         res_remove(fx->in); res_remove(fx->out); fx->sc = nil; fx->in = fx->out = nil;
@@ -15569,13 +15585,13 @@ static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTe
         d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
         id<MTL4FXSpatialScaler> sc = g_fx_comp ? [d newSpatialScalerWithDevice:g_dev compiler:g_fx_comp] : nil;
         fx->made_at = g_present_n; fx->made++;
-        if (!sc) { memcpy(fx->refused, key, sizeof key);
+        if (!sc) { memcpy(fx->refused, key, sizeof key); if (live) atomic_store_explicit(&g_fx_why, DM_FX_REFUSED, memory_order_relaxed);
             MLOG("present upscaling: MetalFX makes no spatial scaler for %lux%lu format %lu → %lux%lu format %lu%s; this size is scaled bilinearly", (unsigned long)iw, (unsigned long)ih, (unsigned long)raw.pixelFormat,
                  (unsigned long)ow, (unsigned long)oh, (unsigned long)out_pf, g_fx_comp ? "" : " (no Metal 4 compiler)"); return nil; }
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:out_pf width:ow height:oh mipmapped:NO];
         td.storageMode = MTLStorageModePrivate; td.usage = sc.outputTextureUsage | MTLTextureUsageShaderRead;
         id<MTLTexture> out = [g_dev newTextureWithDescriptor:td];
-        if (!out) { memcpy(fx->refused, key, sizeof key); MLOG("[RED] present upscaling: cannot create the scaler's output texture (%lux%lu)", (unsigned long)ow, (unsigned long)oh); return nil; }
+        if (!out) { memcpy(fx->refused, key, sizeof key); if (live) atomic_store_explicit(&g_fx_why, DM_FX_REFUSED, memory_order_relaxed); MLOG("[RED] present upscaling: cannot create the scaler's output texture (%lux%lu)", (unsigned long)ow, (unsigned long)oh); return nil; }
         out.label = @"present upscale output";
         res_add(out); res_commit();
         fx->sc = sc; fx->out = out; fx->iw = iw; fx->ih = ih; fx->ipf = raw.pixelFormat;
@@ -15591,7 +15607,7 @@ static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTe
     if (!fx->in) {
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:raw.pixelFormat width:iw height:ih mipmapped:NO];
         td.storageMode = MTLStorageModePrivate; td.usage = fx->sc.colorTextureUsage | MTLTextureUsageShaderRead;
-        if (!(fx->in = [g_dev newTextureWithDescriptor:td])) { RED_ONCE(164, "present upscaling: cannot create the scaler's input texture (%lux%lu); scaled bilinearly", (unsigned long)iw, (unsigned long)ih); return nil; }
+        if (!(fx->in = [g_dev newTextureWithDescriptor:td])) { if (live) atomic_store_explicit(&g_fx_why, DM_FX_REFUSED, memory_order_relaxed); RED_ONCE(164, "present upscaling: cannot create the scaler's input texture (%lux%lu); scaled bilinearly", (unsigned long)iw, (unsigned long)ih); return nil; }
         fx->in.label = @"present upscale input";
         res_add(fx->in); res_commit();
     }
@@ -15771,9 +15787,10 @@ static int up_mfx_encode(NvShader *cs) {
 // ---------- Sharpening in the present (DM_PRESENT_SHARPEN) ----------
 // The settings row Sharpening (Off, Low, Medium, High; the profile's present_sharpen is a game's default, Off without it) sharpens the picture inside the present's own draw:
 // present.metal fs_rcas is fs with FSR1's RCAS fused in, its taps one source texel apart. The drawable stays the picture's render size on the iPhone (front_ios.m), so the
-// sharpening happens before Core Animation scales the layer, in every API and picture mode (Stretch and Ultrawide included, where MetalFX never runs), for no memory and one
-// more pipeline. Off draws fs as before, byte for byte. A crop smaller than the drawable (Breath of the Wild's 1280x720 handheld picture in its 1920x1080 window textures,
-// a dynamic resolution's moving crop) is RCAS of the bilinear scale, a variant measured separately (docs/reference/rendering.md, Sharpening in the present).
+// sharpening happens before Core Animation scales the layer, in every API and picture mode (Stretch and Ultrawide included, where MetalFX runs only for a crop smaller than
+// its texture, fx_wanted), for no memory and one more pipeline. Off draws fs as before, byte for byte. A crop smaller than the drawable (Breath of the Wild's 1280x720
+// handheld picture in its 1920x1080 window textures, a dynamic resolution's moving crop) is RCAS of the bilinear scale, a variant measured separately
+// (docs/reference/rendering.md, Sharpening in the present).
 // Not drawn over MetalFX's picture, which its perceptual mode sharpens already: RCAS on top overshot HUD text by 15-26/255 in the synthetic test. That is the present's
 // MetalFX (fx_encode) and the game's upscaler drawn by MetalFX inside the frame (DM_UPSCALER=metalfx, up_mfx_encode), where the present sees a plain 1:1 picture. Nor over a
 // source that is not a UNORM format: RCAS's limiter assumes values in 0..1, and a float swapchain can hold more. The drawable is BGRA8Unorm always (front_ios.m).
@@ -15813,16 +15830,18 @@ static int present_unorm(MTLPixelFormat pf) {
     }
 }
 // RCAS's linear strength for this present (exp2(-stops)), or 0 to draw fs: off, or one of the cases above, each said once in the log
+// (front.h DM_SHARP_*: the live present keeps the reason for the in-game menu, g_sharp_why)
 static float present_sharpen(int live, int metalfx, MTLPixelFormat pf) {
     int level = sharp_mode(live);
-    if (!level) return 0;
     static _Atomic int said;
-    int why = metalfx ? 1 : atomic_load_explicit(&g_up_mfx_drawn, memory_order_relaxed) ? 2 : !present_unorm(pf) ? 4 : !g_rcas_pso ? 8 : 0;
+    int why = !level ? 0 : metalfx ? DM_SHARP_METALFX : atomic_load_explicit(&g_up_mfx_drawn, memory_order_relaxed) ? DM_SHARP_GAME_UPSCALER : !present_unorm(pf) ? DM_SHARP_FORMAT : !g_rcas_pso ? DM_SHARP_PIPELINE : 0;
+    if (live) atomic_store_explicit(&g_sharp_why, why, memory_order_relaxed);
+    if (!level) return 0;
     if (!why) return exp2f(-sharp_stops(level));
     if (!(atomic_fetch_or_explicit(&said, why, memory_order_relaxed) & why))
-        MLOG("present sharpening: not drawn on %s", why == 1 ? "a picture MetalFX scaled (Upscaling MetalFX), which its perceptual mode sharpens already" :
-             why == 2 ? "the game's upscaler drawn by MetalFX (DM_UPSCALER=metalfx), which its perceptual mode sharpens already" :
-             why == 4 ? "a swapchain that is not a UNORM format: RCAS's limiter assumes values in 0..1" : "this drawable: its pipeline was not made");
+        MLOG("present sharpening: not drawn on %s", why == DM_SHARP_METALFX ? "a picture MetalFX scaled (Upscaling MetalFX), which its perceptual mode sharpens already" :
+             why == DM_SHARP_GAME_UPSCALER ? "the game's upscaler drawn by MetalFX (DM_UPSCALER=metalfx), which its perceptual mode sharpens already" :
+             why == DM_SHARP_FORMAT ? "a swapchain that is not a UNORM format: RCAS's limiter assumes values in 0..1" : "this drawable: its pipeline was not made");
     return 0;
 }
 // ---------- Edge smoothing in the present (DM_POST_AA) ----------
@@ -15962,27 +15981,33 @@ static int aa_make(aa_state *aa, NSUInteger tw, NSUInteger th, MTLPixelFormat tp
     return 1;
 }
 static int aa_srgb(MTLPixelFormat pf) { return pf == MTLPixelFormatRGBA8Unorm_sRGB || pf == MTLPixelFormatBGRA8Unorm_sRGB; }
+// The live present's edge smoothing outcome for the in-game menu (front.h DM_AA_*, g_aa_why); a capture's says nothing
+static void aa_outcome(int live, int why) { if (live) atomic_store_explicit(&g_aa_why, why, memory_order_relaxed); }
 // Encodes edge smoothing of the rectangle r of raw (present_raw_src's view of src) into cb; returns aa->raw, which holds the smoothed crop at its origin, or nil (none this
 // present: off, an unsupported format, no pipelines or memory). uvb: the present's constants buffer, whose AA_UV floats take the kernels' constants
 static id<MTLTexture> aa_encode(aa_state *aa, id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> raw, const NSUInteger r[4], id<MTLBuffer> uvb, int live) {
     int mode = aa_mode(live);
-    if (!mode) return nil;
+    if (!mode) { aa_outcome(live, DM_AA_OFF); return nil; }
     MTLPixelFormat upf = raw.pixelFormat;
     if (upf != MTLPixelFormatRGBA8Unorm && upf != MTLPixelFormatBGRA8Unorm) {
+        aa_outcome(live, DM_AA_FORMAT);
         RED_ONCE(165, "present edge smoothing: the swapchain's format %lu is not 8-bit RGBA or BGRA (CMAA2 here handles those only); the picture is shown without it", (unsigned long)src.pixelFormat);
         return nil;
     }
-    if (!aa_pipelines(!live)) return nil;
+    if (!aa_pipelines(!live)) {   // still being made (the live present does not wait for them) says nothing yet; kernels that failed, that it never runs here
+        int st = atomic_load_explicit(&g_aa_ps_state, memory_order_relaxed);
+        aa_outcome(live, st == 1 || st == 2 ? DM_AA_OFF : DM_AA_FAILED); return nil;
+    }
     // An sRGB swapchain: the live present passes the swapchain texture, a capture its UNORM view (present_offscreen_m4), whose parent is the swapchain texture
     int srgb = aa_srgb(src.pixelFormat) || (src.parentTexture && aa_srgb(src.parentTexture.pixelFormat));
     MTLPixelFormat tpf = !srgb ? upf : upf == MTLPixelFormatRGBA8Unorm ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm_sRGB;
-    if ((!aa->tex || aa->w != raw.width || aa->h != raw.height || aa->pf != tpf) && !aa_make(aa, raw.width, raw.height, tpf, upf, live)) return nil;
+    if ((!aa->tex || aa->w != raw.width || aa->h != raw.height || aa->pf != tpf) && !aa_make(aa, raw.width, raw.height, tpf, upf, live)) { aa_outcome(live, DM_AA_FAILED); return nil; }
     NSUInteger cx = r[0], cy = r[1], cw = r[2], ch = r[3], px = MIN((NSUInteger)FX_PAD, aa->w - cw), py = MIN((NSUInteger)FX_PAD, aa->h - ch);
     uint32_t *k = (uint32_t *)((float *)uvb.contents + AA_UV);   // cmaa2.metal Aa
     k[0] = (uint32_t)cw; k[1] = (uint32_t)ch; k[2] = (uint32_t)(cw + 1) / 2; k[3] = aa->cap[0]; k[4] = aa->cap[1]; k[5] = aa->cap[2]; k[6] = (uint32_t)px; k[7] = (uint32_t)py;
     k[8] = g_aa_test_slm ? g_aa_test_slm : 768; k[9] = g_aa_test_stray;   // cmaa2.metal takes at most its CMAA2_BLEND_ITEM_SLM_SIZE
     id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
-    if (!ce) { RED_ONCE(166, "present edge smoothing: no compute encoder; the picture is shown without it"); return nil; }
+    if (!ce) { aa_outcome(live, DM_AA_FAILED); RED_ONCE(166, "present edge smoothing: no compute encoder; the picture is shown without it"); return nil; }
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];   // after the frame's work, and the presents before (aa's texture and lists)
     [ce copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(cx, cy, 0) sourceSize:MTLSizeMake(cw, ch, 1) toTexture:aa->raw destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
     // The crop's edge FX_PAD texels past it, for MetalFX (fx_encode's padding, here because the scaler reads this texture); cmaa2_apply writes a smoothed edge pixel there too
@@ -16014,6 +16039,7 @@ static id<MTLTexture> aa_encode(aa_state *aa, id<MTL4CommandBuffer> cb, id<MTLTe
     [ce dispatchThreadgroupsWithIndirectBuffer:c + AA_CTL_ARGS2 * 4 threadsPerThreadgroup:MTLSizeMake(4, 32, 1)];
     [ce barrierAfterStages:MTLStageDispatch beforeQueueStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];   // the present's draw or MetalFX reads aa->raw
     [ce endEncoding];
+    aa_outcome(live, DM_AA_RAN);
     return aa->raw;
 }
 // A completed run's counts (ctl: the run's control buffer, from its present's completion): kept for the tests, and an overflow said once

@@ -783,17 +783,59 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     duo_harness_set_web_touch(0);
 }
 
-- (void)testUltrawideStretchLeavesThePictureRowOutOfTheInGameMenu {
+- (void)testUltrawideStretchShowsThePictureRowDisabledWithTheReason {
     UIViewController *root = [self harnessRootViewController];
     XCTAssertNotNil(root);
     XCTAssertTrue(dm_setting_live("DM_PICTURE_FIT", NULL));
+    XCTAssertFalse(dm_setting_held("DM_PICTURE_FIT"));
     NSInteger before = [[root valueForKey:@"picture"] integerValue];
     [root setValue:@YES forKey:@"ultrawideStretch"];   // startGame with Ultrawide on a screen wider than 16:9
-    XCTAssertFalse(dm_setting_live("DM_PICTURE_FIT", NULL), @"While Ultrawide holds Stretch the in-game menu has no Picture row");
+    XCTAssertTrue(dm_setting_live("DM_PICTURE_FIT", NULL), @"While Ultrawide holds Stretch the in-game menu still shows the Picture row");
+    XCTAssertTrue(dm_setting_held("DM_PICTURE_FIT"), @"disabled");
+    XCTAssertEqualObjects(@(dm_setting_why("DM_PICTURE_FIT") ?: ""), @"Ultrawide always stretches the picture", @"with the reason as its subtitle");
     XCTAssertFalse(dm_setting_live("DM_PICTURE_FIT", before == DmPictureFill ? "fit" : "fill"));
     XCTAssertEqual([[root valueForKey:@"picture"] integerValue], before, @"and a pick cannot replace the picture mode");
+    XCTAssertFalse(dm_setting_held("DM_OPMODE"), @"Only Picture is held");
     [root setValue:@NO forKey:@"ultrawideStretch"];
     XCTAssertTrue(dm_setting_live("DM_PICTURE_FIT", NULL));
+    XCTAssertFalse(dm_setting_held("DM_PICTURE_FIT"));
+}
+
+- (void)testInGameMenuNotesFollowTheRunningGame {
+    UIViewController *root = [self harnessRootViewController];
+    XCTAssertNotNil(root);
+    [root.view layoutIfNeeded];
+    // The present's last outcome (nvn_mtl.m, here the harness's stub): a reason only while the choice does nothing
+    duo_harness_set_present_why(DM_FX_STRETCHED, DM_SHARP_METALFX, DM_AA_FORMAT);
+    XCTAssertEqualObjects(@(dm_setting_why("DM_PRESENT_UPSCALE") ?: ""), @"Not upscaling: picture is stretched");
+    XCTAssertFalse(dm_setting_working("DM_PRESENT_UPSCALE"));
+    XCTAssertEqualObjects(@(dm_setting_why("DM_PRESENT_SHARPEN") ?: ""), @"Off while MetalFX upscales");
+    XCTAssertEqualObjects(@(dm_setting_why("DM_POST_AA") ?: ""), @"Not supported for this game's picture");
+    duo_harness_set_present_why(DM_FX_NOT_LARGER, DM_SHARP_FORMAT, DM_AA_FAILED);
+    XCTAssertEqualObjects(@(dm_setting_why("DM_PRESENT_UPSCALE") ?: ""), @"Not upscaling: picture isn't shown larger");
+    XCTAssertEqualObjects(@(dm_setting_why("DM_PRESENT_SHARPEN") ?: ""), @"Not supported for this game's picture");
+    XCTAssertTrue(dm_setting_why("DM_POST_AA") != NULL);
+    duo_harness_set_present_why(DM_FX_UPSCALED, 0, DM_AA_RAN);
+    XCTAssertTrue(dm_setting_why("DM_PRESENT_UPSCALE") == NULL && dm_setting_why("DM_PRESENT_SHARPEN") == NULL && dm_setting_why("DM_POST_AA") == NULL, @"Each doing its work: no note");
+    XCTAssertTrue(dm_setting_working("DM_PRESENT_UPSCALE") && !dm_setting_working("DM_PRESENT_SHARPEN"), @"MetalFX upscaled: the menu leaves out the launcher's hint");
+    duo_harness_set_present_why(DM_FX_OFF, 0, DM_AA_OFF);
+    XCTAssertTrue(dm_setting_why("DM_PRESENT_UPSCALE") == NULL && !dm_setting_working("DM_PRESENT_UPSCALE"), @"Standard: nothing to say, and nothing working");
+    // The front end's own state: the touch controls hidden by the Tap layout (the gamepad the menu asks is the last made: one of this test's own), the console mode without a TV
+    dm_set_opmode(0);
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    UIView *pad = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    XCTAssertNotNil(pad);
+    XCTAssertTrue(dm_setting_why("DM_TOUCH_OPACITY") == NULL && dm_setting_why("DM_TOUCH_SIZE") == NULL, @"Controls drawn: no note");
+    dm_pad_layout_set(2);
+    XCTAssertEqual(dm_gamepad_touch_hidden(), 2);
+    XCTAssertEqualObjects(@(dm_setting_why("DM_TOUCH_OPACITY") ?: ""), @"Touch controls are hidden");
+    XCTAssertEqualObjects(@(dm_setting_why("DM_TOUCH_HAPTICS") ?: ""), @"Touch controls are hidden");
+    XCTAssertEqualObjects(@(dm_setting_why("DM_TOUCH_SIZE") ?: ""), @"Only sizes the menu button now", @"the menu button still follows the size");
+    dm_pad_layout_set(1);
+    XCTAssertEqual(dm_gamepad_touch_hidden(), 0);
+    XCTAssertTrue(dm_setting_why("DM_OPMODE") == NULL, @"No TV: the console mode is the player's");
+    XCTAssertTrue(dm_setting_why("DM_PICTURE_FIT") == NULL, @"Fit: nothing to say");
+    XCTAssertTrue(dm_setting_why("DM_LANG") == NULL);
 }
 
 - (void)testDockingDropsTheTapLayout {

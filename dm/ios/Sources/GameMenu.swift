@@ -1,7 +1,8 @@
 // The in-game menu, opened by the gamepad's menu button at the top centre (DmGamepad.m): the controller layout, then the settings-screen settings the running game takes at once
 // (front_ios.m dm_setting_live), grouped as on the settings screen but without its headings, one row each, so the menu stays short over the game (its text size is fixed: front_ios.m
 // startGame), then the Cheats submenu (cheatsMenu) and Share log (dmShareLog). A pick is saved as Play saves it (LauncherModel.choose), so the settings screen shows it at the next start; a setting an env file fixes is shown, not changed. Settings
-// that need the next start (language, pipelines, the frame rate and so on), and the sliders, stay on the settings screen, which the menu's title points to.
+// that need the next start (language, pipelines, the frame rate and so on), and the sliders, stay on the settings screen, which the menu's title points to. A row that does nothing
+// at the moment says why under its name (gameMenuRow): greyed when nothing the player picks there can take effect, still selectable when only the current choice does nothing.
 import UIKit
 
 @MainActor var gameMenuModel: LauncherModel?   // main-actor state: written by dm_show_launcher, read by the menu, both on the main thread; the settings screen's model (Launcher.swift); nil in an app without one: the menu has the layout only
@@ -15,7 +16,7 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
     return Unmanaged.passRetained(menu).toOpaque()
 }
 
-@MainActor private func gameMenuItems() -> [UIMenuElement] {
+@MainActor func gameMenuItems() -> [UIMenuElement] {   // not private: the Duo harness's menu test reads the rows (dm/ios/tests/duo)
     let names = ["2D", "3D", "Tap"]
     let layouts = (0..<3).filter { dm_pad_layout_offered(Int32($0)) }.map { l in
         UIAction(title: names[l], state: dm_pad_layout() == l ? .on : .off) { _ in dm_pad_layout_set(Int32(l)) }
@@ -138,17 +139,36 @@ private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 
     return UIMenu(title: version.isEmpty ? "Cheats" : "Cheats (\(version))", subtitle: subtitle, image: UIImage(systemName: "wand.and.stars"), children: groups)
 }
 
+// One live setting's row. Its subtitle is the reason it does nothing at the moment, the first that holds of:
+// - the front end holds its value (dm_setting_held: Picture while Ultrawide stretches the picture), or a launcher rule greys the whole row (LauncherModel.inactiveWhy): the row is
+//   greyed, so it cannot be changed, as on the settings screen;
+// - the running game's own state (front_ios.m dm_setting_why: MetalFX not upscaling a stretched picture, the touch controls hidden by a controller), read each time the menu
+//   opens, as it is built then;
+// - a launcher rule about the choice made or the device (LauncherModel.reason: Rumble needs a controller on this device), unless the running game says the choice works right
+//   now (front_ios.m dm_setting_working: MetalFX upscaled at the last present, where the launcher's hint can only say it may not under Stretch).
+// An option a rule greys (MetalFX on a device without the scaler) cannot be picked, with its reason under it; the others stay selectable. Nothing here changes a saved choice.
+// An env file's value is shown, not changed, as before
 @MainActor private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> UIMenuElement {
     let now = m.values[s.env] ?? s.def, fixed = m.fixed.contains(s.env)
-    let attributes: UIMenuElement.Attributes = fixed ? .disabled : []
+    let live: String? = dm_setting_why(s.env).map { String(cString: $0) }
+    let greyed: String? = dm_setting_held(s.env) ? (live ?? "") : m.inactiveWhy(s)
+    let why = greyed ?? live ?? (dm_setting_working(s.env) ? nil : m.reason(s)?.why)
+    let note = why.flatMap { $0.isEmpty ? nil : $0 }
+    let locked = fixed || greyed != nil
     func pick(_ v: String) { if m.choose(s, v) { dm_setting_env(s.env, v) }; _ = dm_setting_live(s.env, v) }   // saved, into the environment (under front_ios.m's lock), then applied
     if s.kind == "toggle" {
-        let a = UIAction(title: s.label, attributes: attributes, state: now == s.onValue ? .on : .off) { _ in pick(now == s.onValue ? s.offValue : s.onValue) }
-        if fixed { a.subtitle = "Set in env.txt" }
+        let next = now == s.onValue ? s.offValue : s.onValue
+        let a = UIAction(title: s.label, attributes: locked || m.optionInactive(s, next) != nil ? .disabled : [], state: now == s.onValue ? .on : .off) { _ in pick(next) }   // the value it would switch to may be greyed
+        a.subtitle = fixed ? "Set in env.txt" : note
         return a
     }
     let options = s.options ?? []
     let current = options.first { $0[0] == now }?[1] ?? now
-    let actions = options.map { o in UIAction(title: o[1], attributes: attributes, state: o[0] == now ? .on : .off) { _ in pick(o[0]) } }
-    return UIMenu(title: s.label, subtitle: fixed ? "\(current), set in env.txt" : nil, options: .singleSelection, children: actions)
+    let actions = options.map { o in
+        let off = o[0] == now ? nil : m.optionInactive(s, o[0])
+        let a = UIAction(title: o[1], attributes: locked || off != nil ? .disabled : [], state: o[0] == now ? .on : .off) { _ in pick(o[0]) }
+        if !locked, let off, !off.isEmpty { a.subtitle = off }
+        return a
+    }
+    return UIMenu(title: s.label, subtitle: fixed ? "\(current), set in env.txt" : note, options: .singleSelection, children: actions)
 }

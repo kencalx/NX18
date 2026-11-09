@@ -17,7 +17,33 @@ SCHEMA = 1   # launcher.json's version (docs/launcher.schema.json); it grows onl
 META = {
     'level': r'basic',                       # a setting a front end shows first; without it, the front end decides
     'needs': r'DM_[A-Z0-9_]+=[^;=]+',        # <VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value
+    'inactive': r'[^;|~]+~[^;|~]+(\|[^;|~]+~[^;|~]+)*',   # <rule>|<rule>: the row (or one option) is drawn greyed, with the rule's reason as its note, while a rule holds
+    'hint': r'[^;|~]+~[^;|~]+(\|[^;|~]+~[^;|~]+)*',       # <rule>|<rule>: the row stays selectable and shows the rule's reason as its note while a rule holds
+    'hide': r'[^;|~]+(\|[^;|~]+)*',                       # <when>|<when>: the row is not drawn on a device where one holds (device terms only)
 }
+RULE_KEYS = ('inactive', 'hint', 'hide')
+# A rule is [<option>:]<when>~<why>, and <when> is terms joined by &, all of which must hold. A front end evaluates two kinds of term on the device:
+# - <VAR>=<v>/<v> or <VAR>!=<v>/<v>: another row's current value (a range compares as a number), or the environment for a switch no row sets (ENV_ONLY); false when neither has it
+# - DEVICE_TERMS: what the device, its screen or the app has
+# A third kind, the shown column's terms (PACK_TERM, ! to negate, / for any of several), settings.py decides when the app is packed: a rule whose pack terms fail is left out of
+# the list, and the others go out without them. So a rule that depends on what the game has (MetalFX's hint with Stretch: a game without Picture shape keeps the 16:9 picture,
+# one with it stretches it only where the shape chosen differs from the window's) is a few rules in the table rather than a column per game
+DEVICE_TERMS = (r'device:(iphone|ipad|mac)(/(iphone|ipad|mac))*',   # the kind of device the app runs on
+                r'(screen|window)(<|>=)\d+(\.\d+)?',               # the long side over the short side of the window's screen (front_ios.m's Ultrawide test) or of the app's window (Match screen's)
+                r'hz(<|>=)\d+',                                    # the highest refresh rate of the connected screens (hle_nvn.c's 120 fps test)
+                r'haptics:none',                                   # no haptic engine in the device (CHHapticEngine supportsHaptics, as haptics_apple.m and DmGamepad.m test it)
+                r'controller:none',                                # no game controller connected now
+                r'tv:none',                                        # no external display (a TV) connected now: front_ios.m shows the picture there, whole, when one is
+                r'mfx:none')                                       # no Metal 4 MetalFX spatial scaler (nvn_mtl.m's test before it upscales)
+PACK_TERM = r'!?(fixups|mods|gfxapi|platform):[\w-]+(/[\w-]+)*|DM_GAME_\w+(==|!=)[^&]*'
+VAR_TERM = r'([A-Z][A-Z0-9_]*)(!=|=)([^&=/!]+(/[^&=/!]+)*)'
+# Switches a rule may test that no row sets, as the host reads them from the environment (an env file or the launch environment), each with the values a rule may name; None takes
+# only *, which holds while the switch is set to anything (nvn_mtl.m keeps Metal 4 pipelines off while either capture switch is set)
+ENV_ONLY = {'DM_PAD_MERGE': {'0', '1'}, 'DM_GPU_CAPTURE': None, 'MTL_CAPTURE_ENABLED': None}
+# Values the host takes as another value of the row (nvn_upscale_pick.h up_parse: 1 is metalfx, 0 off). A term naming one goes out with its aliases, so a front end whose value
+# came from an env file in the other spelling still matches
+ALIASES = {'DM_PRESENT_UPSCALE': {'metalfx': ('1',), 'off': ('0',)}}
+WHY_MAX = 60   # a reason is a note under the row and a subtitle in the in-game menu: one short line
 
 
 def meta(text, n):
@@ -30,6 +56,86 @@ def meta(text, n):
         if not re.fullmatch(META[key], value): sys.exit(f'settings.tsv:{n}: meta {key}={value!r} does not match {META[key]}')
         out[key] = value
     return out
+
+
+def rules(key, text, n, var, table):
+    """inactive, hint or hide's value as [(option or None, [term, ...], why or None)], checked against the whole table (as needs is: a rule on a row this game
+    does not list is still checked). table is {variable: (kind, values)} for every row"""
+    out = []
+    for part in text.split('|'):
+        head, _, why = part.partition('~') if key != 'hide' else (part, '', None)
+        why = why.strip() if why is not None else None
+        if why is not None and not why: sys.exit(f'settings.tsv:{n}: {key} rule without a reason after ~: {part}')
+        if why and len(why) > WHY_MAX: sys.exit(f'settings.tsv:{n}: {key} reason longer than {WHY_MAX} characters: {why}')
+        option, terms = None, head.strip().split('&')
+        first, colon, rest = terms[0].partition(':')
+        if colon and not re.fullmatch(PACK_TERM, terms[0]) and not any(re.fullmatch(t, terms[0]) for t in DEVICE_TERMS):   # <option>:<term>
+            if key == 'hide': sys.exit(f'settings.tsv:{n}: hide is for the whole row, not one option: {part}')
+            kind, values = table[var]
+            can = takes(kind, values)
+            if can is None: sys.exit(f'settings.tsv:{n}: {key} names an option, which a {kind} row does not have: {part}')
+            if first not in can: sys.exit(f'settings.tsv:{n}: {key} names an option {var} does not have: {first} (it has {", ".join(sorted(can))})')
+            option, terms[0] = first, rest
+        device = False
+        for t in terms:
+            if re.fullmatch(PACK_TERM, t): continue
+            if any(re.fullmatch(d, t) for d in DEVICE_TERMS): device = True; continue
+            m = re.fullmatch(VAR_TERM, t)
+            if not m: sys.exit(f'settings.tsv:{n}: unknown {key} term {t!r} (<VAR>=<value>, <VAR>!=<value>, a device term or a shown-column term)')
+            if key == 'hide': sys.exit(f'settings.tsv:{n}: hide takes device terms, not settings ({t}): a row drawn only with another\'s value is needs')
+            check_value(m[1], m[3].split('/'), n, key, table)
+        if key == 'hide' and not device: sys.exit(f'settings.tsv:{n}: hide needs a device term: {part}')
+        if not any(not re.fullmatch(PACK_TERM, t) for t in terms): sys.exit(f'settings.tsv:{n}: {key} rule with only pack-time terms: that is the shown column\'s job: {part}')
+        out.append((option, terms, why))
+    return out
+
+
+def check_value(name, wanted, n, key, table):   # a term's variable is a row or an environment-only switch, and each value one it takes
+    if name.startswith('DM_GAME_'): sys.exit(f'settings.tsv:{n}: {key} tests the profile macro {name} with ==, not =')
+    if name in table:
+        kind, values = table[name]
+        if kind == 'range':
+            lo, hi, _ = (float(x) for x in values.split(':'))
+            for v in wanted:
+                try: f = float(v)
+                except ValueError: sys.exit(f'settings.tsv:{n}: {key} compares the range {name} with {v}, not a number')
+                if not lo <= f <= hi: sys.exit(f'settings.tsv:{n}: {key} names a value {name} never takes: {v} (it takes {lo:g} to {hi:g})')
+            return
+        can = takes(kind, values)
+    elif name in ENV_ONLY:
+        can = ENV_ONLY[name]
+        if can is None:
+            if wanted != ['*']: sys.exit(f'settings.tsv:{n}: {key} tests {name} only as set: {name}=*')
+            return
+    else: sys.exit(f'settings.tsv:{n}: {key} names a variable no row sets and no known environment switch: {name} (those: {", ".join(ENV_ONLY)})')
+    for v in wanted:
+        if can is not None and v not in can: sys.exit(f'settings.tsv:{n}: {key} names a value {name} never takes: {v} (it takes {", ".join(sorted(can))})')
+
+
+def takes(kind, values):   # the values a row's variable can take, for needs and rules; None when any (a range, the game's languages)
+    if kind == 'toggle': return {'1', '0'} if values == '-' else set(values.split('/'))
+    if kind == 'choice' and values != 'languages': return {v.split('?', 1)[0].split('=', 1)[0] for v in values.split(',')}
+    return None
+
+
+def greying_cycle(table_rules):
+    """A row greyed by another row's value that is itself greyed by the first (directly or through others) could leave the player unable to change either: the rows
+    each inactive rule reads, followed until one comes back. table_rules is {variable: [(option, terms, why), ...]}; returns the cycle as a list, or None"""
+    reads = {v: {m[1] for _, terms, _ in rs for t in terms if (m := re.fullmatch(VAR_TERM, t)) and m[1] in table_rules} for v, rs in table_rules.items()}
+    state = {}
+    def walk(v, path):
+        if state.get(v) == 1: return path[path.index(v):] + [v]
+        if state.get(v) == 2: return None
+        state[v] = 1
+        for w in sorted(reads.get(v, ())):
+            c = walk(w, path + [v])
+            if c: return c
+        state[v] = 2
+        return None
+    for v in sorted(reads):
+        c = walk(v, [])
+        if c: return c
+    return None
 
 
 def render_base(g):
@@ -97,23 +203,45 @@ def build(gid, patched, control):
             return {'YES': '1', 'NO': '0', '': '0'}.get(v, v)   # build_ipa.sh's yes / no switches
         return d
 
-    def takes(kind, values):   # the values a row's variable can take, for needs; None when any (a range, the game's languages)
-        if kind == 'toggle': return {'1', '0'} if values == '-' else set(values.split('/'))
-        if kind == 'choice' and values != 'languages': return {v.split('?', 1)[0].split('=', 1)[0] for v in values.split(',')}
-        return None
-
     def offered(v, n):   # value=label?cond&cond: an option only some games or platforms have
         parts = v.split('?', 1)
         return len(parts) == 1 or all(shown(c, n) for c in parts[1].split('&'))
 
-    out, table, base = [], {r[1][0]: takes(r[1][1], r[1][2]) for r in rows()}, render_base(g)
+    def pack(term, n):   # a rule's pack-time term: the shown column's condition, ! negating it, / for any of several values
+        if term.startswith('DM_GAME_'): return shown(term, n)
+        neg, term = term.startswith('!'), term.lstrip('!')
+        kind, _, values = term.partition(':')
+        return any(shown(f'{kind}:{v}', n) for v in values.split('/')) != neg
+
+    def resolve(rs, listed, opts, n):   # a row's rules for this game: pack terms decided, rules on settings it does not list or options it does not offer left out
+        out = []
+        for option, terms, why in rs:
+            if option is not None and opts is not None and option not in opts: continue
+            when, holds = [], True
+            for t in terms:
+                if re.fullmatch(PACK_TERM, t): holds = holds and pack(t, n); continue
+                m = re.fullmatch(VAR_TERM, t)
+                if m and m[1] not in listed and m[1] not in ENV_ONLY: holds = False   # a setting this game's list does not have: the rule can never hold
+                if m and m[1] in ALIASES:
+                    vals = m[3].split('/'); vals += [a for v in vals for a in ALIASES[m[1]].get(v, ()) if a not in vals]
+                    t = f'{m[1]}{m[2]}{"/".join(vals)}'
+                when.append(t)
+            if holds: out.append({**({'option': option} if option is not None else {}), 'when': when, **({'why': why} if why is not None else {})})
+        return out
+
+    out, base = [], render_base(g)
+    table = {r[1][0]: (r[1][1], r[1][2]) for r in rows()}
+    listed = {var for n, (var, kind, values, default, cond, *_) in rows() if shown(cond, n)}
+    inactive = {}   # every row's inactive rules, this game's or not, for the greying cycle check
     for n, (var, kind, values, default, cond, section, label, note, extra) in rows():
         m = meta(extra, n)
         if 'needs' in m:
             need, want = m['needs'].split('=', 1)
             if need not in table: sys.exit(f'settings.tsv:{n}: needs names a variable no row sets: {m["needs"]}')
-            can = table[need]
+            can = takes(*table[need])
             if can is not None and want not in can: sys.exit(f'settings.tsv:{n}: needs a value {need} never takes: {want} (it takes {", ".join(sorted(can))})')
+        parsed = {k: rules(k, m.pop(k), n, var, table) for k in RULE_KEYS if k in m}
+        inactive[var] = parsed.get('inactive', [])
         if not shown(cond, n): continue
         s = {'env': var, 'kind': kind, 'section': section, 'label': label, 'note': note, 'default': value(default, n), **m}
         if var == 'DM_RENDER_SCALE' and base: s['base'] = base   # the render scale in pixels, for the console mode chosen
@@ -132,7 +260,21 @@ def build(gid, patched, control):
             if len(on_off) != 2 or not all(on_off) or on_off[0] == on_off[1]: sys.exit(f'settings.tsv:{n}: toggle values are - or <on>/<off>: {values}')
             s.update(on=on_off[0], off=on_off[1], default=on_off[0] if s['default'] == '1' else on_off[1])   # the default as the value the variable takes
         else: sys.exit(f'settings.tsv:{n}: unknown kind {kind}')
+        opts = [o[0] for o in s['options']] if kind == 'choice' else None
+        for k, rs in parsed.items():
+            r = resolve(rs, listed, opts, n)
+            if r: s[k] = r
         out.append(s)
+    cycle = greying_cycle(inactive)
+    if cycle: sys.exit(f'settings.tsv: inactive rules grey each other in a cycle, which could leave the player unable to change any of them: {" → ".join(cycle)}')
+    # Below 100 % the render scale fixes the 3D views' size, which a game's own dynamic resolution would otherwise change (loader.c dm_fps_state_apply): no game has both rows
+    # today, and one that does needs a rule saying which of them wins before the player sees two settings that fight
+    envs = {s['env']: s for s in out}
+    if {'DM_DYNAMIC_RESOLUTION', 'DM_RENDER_SCALE'} <= set(envs):
+        def reads(a): return {m[1] for k in ('inactive', 'hint') for r in envs[a].get(k, ()) for t in r['when'] if (m := re.fullmatch(VAR_TERM, t))}
+        linked = 'DM_RENDER_SCALE' in reads('DM_DYNAMIC_RESOLUTION') or 'DM_DYNAMIC_RESOLUTION' in reads('DM_RENDER_SCALE')
+        if not linked: sys.exit(f'{g.id}: the game has both Dynamic resolution and Render scale, and below 100 % the render scale overrides the dynamic resolution: '
+                                'give one of the two rows an inactive or hint rule on the other in settings.tsv')
     return {'schema': SCHEMA, 'game': g.id, 'settings': out}
 
 

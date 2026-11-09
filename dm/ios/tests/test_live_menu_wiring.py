@@ -1,9 +1,10 @@
 """The in-game menu's live settings and its Share log (front_ios.m dm_setting_live, DmGamepad.m, GameMenu.swift, LauncherSettings.swift, nvn_mtl.m), checked in the sources off the
-device: Touch control size and opacity, Upscaling, Sharpening and Anti-aliasing while the game runs, and Share log.
+device: Touch control size and opacity, Upscaling, Sharpening and Anti-aliasing while the game runs, why a row does nothing at the moment (front_ios.m dm_setting_why, fed by the
+present's outcomes in nvn_mtl.m), and Share log.
 
 Their plain-C rule runs in dm/gfx/tests (make live-menu: t_upscale_pick), and the gear's Duo tests in the Simulator. What none of them runs: which rows the menu offers, the Duo
 harness's stubs of the host calls front_ios.m makes, the gamepad's colours made again on a change, a pick reaching the environment under the lock the present thread reads it
-under, and the share sheet's snapshot copies and its iPad popover."""
+under, the present's outcomes written by the live present alone and read by the menu's notes, and the share sheet's snapshot copies and its iPad popover."""
 from pathlib import Path
 import re
 import unittest
@@ -56,6 +57,12 @@ class LiveMenu(unittest.TestCase):
                 self.assertIn(decl + ';', self.front)
                 self.assertIn(decl + ' {', home)
                 self.assertIn(decl + ' {', stubs)
+        front_h = read('dm/host/front.h')
+        for decl in ('int mtl_present_fx_why(void)', 'int mtl_present_sharp_why(void)', 'int mtl_present_aa_why(void)'):   # the menu's notes (dm_setting_why)
+            with self.subTest(decl=decl):
+                self.assertIn(decl + ';', front_h)
+                self.assertIn(decl + ' {', self.nvn)
+                self.assertIn(decl + ' {', stubs)
         self.assertIn('int front_web_touch(void) {', stubs)   # DmGamepad.m calls it; web_apple.m is not in the harness
         h = read('dm/ios/Sources/DmGameMenu.h')
         for decl in ('void dm_gamepad_touch_look(const char *env, const char *value);', 'double dm_gamepad_size(void);'):
@@ -77,7 +84,7 @@ class LiveMenu(unittest.TestCase):
     def test_a_pick_is_taken_by_the_live_present_alone(self):   # the main thread posts a pick; the live present takes it, a capture reads the mode in force
         setter = body(self.nvn, 'void mtl_present_upscale_set(const char *mode) {')
         self.assertIn('up_post(&g_fx_req', setter); self.assertNotIn('g_fx_mode', setter)
-        self.assertIn('fx_mode(fx == &g_fx_present)', self.nvn)
+        self.assertIn('int live = fx == &g_fx_present, why = fx_mode(live)', self.nvn)
         self.assertIn('[MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]', body(self.nvn, 'static int fx_mode(int live) {'))   # a pick on a GPU without the scaler stays bilinear
         setter = body(self.nvn, 'void mtl_present_sharpen_set(const char *level) {')   # Sharpening: the same rule, its own mode and pick
         self.assertIn('up_post(&g_sharp_req', setter); self.assertNotIn('g_sharp_mode', setter)
@@ -126,6 +133,48 @@ class LiveMenu(unittest.TestCase):
                                    'DM_TOUCH_OPACITY': {'DmGamepad.m'}, 'DM_RUMBLE': {'haptics_apple.m'}, 'DM_OPMODE': {'hle_oe.c'}})
         self.assertIn('if (m < 0) { const char *e = getenv("DM_OPMODE");', read('dm/host/hle_oe.c'))   # once, then kept; the menu's opening asks it first (dm_pad_layout_offered)
         self.assertIn('dm_opmode() == 0', body(self.pad, 'bool dm_pad_layout_offered(int layout) {'))
+
+    def test_a_row_that_does_nothing_says_why(self):   # GameMenu.swift greys a held or inactive row and gives every row its reason; front_ios.m knows the running game's
+        menu = read('dm/ios/Sources/GameMenu.swift'); row = body(menu, 'private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> UIMenuElement {')
+        for part in ('dm_setting_why(s.env)', 'dm_setting_held(s.env)', 'm.inactiveWhy(s)', 'm.reason(s)', 'm.optionInactive(s, o[0])'):
+            self.assertIn(part, row)
+        self.assertIn('(dm_setting_working(s.env) ? nil : m.reason(s)?.why)', row, 'MetalFX that upscaled drops the launcher\'s Stretch hint')
+        self.assertIn('mtl_present_fx_why() == DM_FX_UPSCALED', body(self.front, 'bool dm_setting_working(const char *env) {'))
+        self.assertNotIn('m.values[s.env] =', row, 'greying changes no choice')
+        h = read('dm/ios/Sources/DmGameMenu.h')
+        for decl in ('bool dm_setting_held(const char *env);', 'const char *dm_setting_why(const char *env);', 'bool dm_setting_working(const char *env);', 'int dm_gamepad_touch_hidden(void);'):
+            self.assertIn(decl, h)
+        self.assertIn('int dm_gamepad_touch_hidden(void) {', self.pad)
+        why = body(self.front, 'const char *dm_setting_why(const char *env) {')
+        live = set(re.findall(r'!strcmp\(env, "(DM_[A-Z0-9_]+)"\)', self.live))
+        self.assertLessEqual(set(re.findall(r'!strcmp\(env, "(DM_[A-Z0-9_]+)"\)', why)), live, 'a note only for a row the menu shows')
+        for call in ('mtl_present_fx_why()', 'mtl_present_sharp_why()', 'mtl_present_aa_why()', 'dm_gamepad_touch_hidden()', 'g_tv_mode_was', 'g_root.ultrawideStretch', 'g_root.split'):
+            self.assertIn(call, why)
+        whys = re.findall(r'return (?:[^;]*\? )?"([^"]+)"', why) + re.findall(r': "([^"]+)"', why)
+        self.assertTrue(whys)
+        for w in whys:
+            self.assertLessEqual(len(w), 60, w)   # settings.py WHY_MAX: one short line
+        # Picture under Ultrawide: shown (the row's question), held, and a pick refused
+        self.assertIn('if (g_root.ultrawideStretch) return !value;', self.live)
+        self.assertIn('g_root.ultrawideStretch', body(self.front, 'bool dm_setting_held(const char *env) {'))
+
+    def test_the_present_outcomes_come_from_the_live_present_alone(self):   # a capture (a screenshot) has its own state and must not change the menu's notes
+        enc = body(self.nvn, 'static id<MTLTexture> fx_encode(')
+        self.assertIn('int live = fx == &g_fx_present', enc)
+        stores = re.findall(r'(.{0,12})atomic_store_explicit\(&g_fx_why', enc)
+        self.assertTrue(stores)
+        for before in stores: self.assertIn('if (live) ', before)
+        self.assertIn('if (why != DM_FX_UPSCALED) return nil;', enc)
+        self.assertIn('fx_why(vp, cw, ch) == DM_FX_UPSCALED', body(self.nvn, 'static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {'))
+        sharp = body(self.nvn, 'static float present_sharpen(int live, int metalfx, MTLPixelFormat pf) {')
+        self.assertIn('if (live) atomic_store_explicit(&g_sharp_why, why', sharp)
+        self.assertLess(sharp.index('g_sharp_why'), sharp.index('if (!level) return 0;'), 'Off says so too')
+        self.assertIn('if (live) atomic_store_explicit(&g_aa_why', body(self.nvn, 'static void aa_outcome(int live, int why) {'))
+        aa = body(self.nvn, 'static id<MTLTexture> aa_encode(')
+        self.assertEqual(aa.count('return nil;') + 1, aa.count('aa_outcome(live, '), 'every way out says why, the smoothed one too')
+        self.assertIn('aa_outcome(live, DM_AA_RAN);', aa)
+        for name in ('DM_FX_OFF', 'DM_SHARP_METALFX', 'DM_AA_RAN'):
+            self.assertIn(name, read('dm/host/front.h'))
 
     def test_share_log_snapshots_and_anchors(self):
         menu = read('dm/ios/Sources/GameMenu.swift'); share = body(menu, 'func dmShareLog(from anchor: UIView?) {')

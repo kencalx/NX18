@@ -5,10 +5,28 @@
 // app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the saved choices. The window never takes focus by itself: an app
 // opened in the background (open -g) keeps its window behind until the player switches to it
 import AppKit
+import CoreHaptics
+import GameController
+import Metal
+import MetalFX
 import QuartzCore
 import SwiftUI
 
 private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictionaryKey: key) as? String }
+
+// The device facts the rules are decided on (LauncherSettings.swift DeviceFacts): the connected screens' fastest rate (120 fps needs a 120 Hz screen, hle_nvn.c), the
+// controllers and MetalFX. The Metal device made here is this launcher
+// process's own: the host, started after it, makes its own. No window or screen shape: nothing on the Mac stretches the picture
+@MainActor func macDeviceFacts() -> DeviceFacts {
+    var f = DeviceFacts()
+    f.kind = .mac
+    f.hz = NSScreen.screens.map(\.maximumFramesPerSecond).max()
+    f.haptics = CHHapticEngine.capabilitiesForHardware().supportsHaptics
+    f.controller = !GCController.controllers().isEmpty
+    f.tv = false
+    if let dev = MTLCreateSystemDefaultDevice() { f.metalFX = dev.supportsFamily(.metal4) && MTLFXSpatialScalerDescriptor.supportsMetal4FX(dev) }
+    return f
+}
 
 struct LauncherView: View {
     @ObservedObject var m: LauncherModel
@@ -189,6 +207,7 @@ public func dmMacLauncher() -> Int32 {
             return 2
         }
         let model = LauncherModel(file.settings)
+        model.follow(macDeviceFacts, on: [.GCControllerDidConnect, .GCControllerDidDisconnect, NSApplication.didChangeScreenParametersNotification])
         let app = NSApplication.shared, launcher = Launcher(model)
         app.setActivationPolicy(.regular)
         app.delegate = launcher

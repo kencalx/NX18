@@ -123,7 +123,8 @@ static void tv_attach(void);
 @property (nonatomic, strong) UILabel *fps;
 @property (nonatomic) BOOL launched;
 @property (nonatomic, strong) id tv;   // the TV scene accessory's registration (iOS 27)
-@property (nonatomic) BOOL ultrawideStretch;   // Ultrawide holds the picture at Stretch (startGame): the in-game menu has no Picture row then (dm_setting_live)
+@property (nonatomic) BOOL ultrawideStretch;   // Ultrawide holds the picture at Stretch (startGame): the in-game menu shows its Picture row disabled then (dm_setting_held)
+@property (nonatomic) BOOL split;   // the last layout put the picture above the controls (portrait, or an iPhone Duo half open), where Fill and Stretch do not apply (dm_setting_why)
 @property (nonatomic) DmPictureMode picture;   // DM_PICTURE_FIT: fit, fill (in landscape the picture covers the screen, its edges cropped) or stretch (it covers the screen, stretched to its shape) (DmLayout.h dm_layout_picture)
 @property (nonatomic) BOOL partiallyOpen;   // an iPhone Duo's hinge half open (UIHingeInteraction, iOS 27.1)
 @property (nonatomic) NSInteger hingeStatus;
@@ -258,6 +259,7 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
     BOOL onTV = self.game.superview != self.view;   // the TV's view lays the picture out; the phone is all pad
     DmLayout layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect), b, self.picture, g_picture_aspect);
     if (!onTV) self.game.frame = layout.game;
+    self.split = !onTV && layout.separated;
     BOOL stretched = !onTV && dm_layout_stretched(layout, self.picture, g_picture_aspect);
     mtl_present_stretch(stretched);   // a TV and a split keep the picture's shape
     self.game.stretched = stretched;   // the drawable: the picture's render size where MetalFX does not run (g_picture_px), on a TV as well
@@ -364,7 +366,7 @@ int front_env_copy(const char *name, char *out, size_t cap) {
 bool dm_setting_live(const char *env, const char *value) {
     if (!env || !g_root.game) return false;
     if (!strcmp(env, "DM_PICTURE_FIT")) {
-        if (g_root.ultrawideStretch) return false;   // Ultrawide holds Stretch: the row would tick the saved choice, and a pick would squeeze or crop the mod's wider view until the next start
+        if (g_root.ultrawideStretch) return !value;   // Ultrawide holds Stretch (dm_setting_held): the row is shown, and a pick would squeeze or crop the mod's wider view until the next start
         if (value) { g_root.picture = dm_picture_mode(value); [g_root.view setNeedsLayout]; LOG("front end: picture %s (in-game menu)", picture_name(g_root.picture)); }
         return true;
     }
@@ -393,6 +395,49 @@ bool dm_setting_live(const char *env, const char *value) {
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }
     return false;
 }
+// A live setting whose value the front end holds while the game runs, so the in-game menu shows its row disabled, with dm_setting_why's reason as its subtitle (GameMenu.swift),
+// and dm_setting_live refuses a pick: Picture while Ultrawide holds Stretch (startGame). The saved choice stays as it is, and applies again at a start without Ultrawide
+bool dm_setting_held(const char *env) { return env && g_root.game && !strcmp(env, "DM_PICTURE_FIT") && g_root.ultrawideStretch; }
+// Why a live setting the in-game menu shows does nothing at the moment, as only the running game knows it (docs/settings.md, In-game menu): a short line for the row's
+// subtitle, or NULL. The present's last outcome for Upscaling, Sharpening and Anti-aliasing (nvn_mtl.m, front.h DM_FX_* and the others), and the front end's own state for
+// Picture (Ultrawide, a TV, a split layout), Console mode (a TV) and the touch controls (a controller, the Tap layout). GameMenu.swift reads it each time the menu opens, as it
+// builds the menu then; the launcher's rules (LauncherSettings.swift) give the reasons that follow from the other settings and the device. Main thread
+const char *dm_setting_why(const char *env) {
+    if (!env || !g_root.game) return NULL;
+    BOOL onTV = g_root.game.superview != g_root.view;
+    if (!strcmp(env, "DM_PICTURE_FIT")) {
+        if (g_root.ultrawideStretch) return "Ultrawide always stretches the picture";   // the launcher's rule says the same (settings.tsv)
+        if (g_root.picture == DmPictureFit) return NULL;   // Fill and Stretch cover the screen in the landscape overlay only (DmLayout.h dm_layout_picture)
+        return onTV ? "The TV shows the whole picture" : g_root.split ? "Applies in landscape only" : NULL;
+    }
+    if (!strcmp(env, "DM_OPMODE")) return g_tv_mode_was >= 0 ? "Held at Docked while a TV is connected" : NULL;   // the pick applies once it is unplugged (dm_setting_live)
+    if (!strcmp(env, "DM_TOUCH_SIZE") || !strcmp(env, "DM_TOUCH_OPACITY") || !strcmp(env, "DM_TOUCH_HAPTICS")) {
+        if (!dm_gamepad_touch_hidden()) return NULL;
+        return !strcmp(env, "DM_TOUCH_SIZE") ? "Only sizes the menu button now" : "Touch controls are hidden";   // the menu button and the counter still follow the size
+    }
+    if (!strcmp(env, "DM_PRESENT_UPSCALE")) switch (mtl_present_fx_why()) {
+        case DM_FX_STRETCHED: return "Not upscaling: picture is stretched";
+        case DM_FX_NOT_LARGER: return "Not upscaling: picture isn't shown larger";
+        case DM_FX_REFUSED: return "Not upscaling: MetalFX can't take this size";
+        default: return NULL;   // upscaling, or Standard
+    }
+    if (!strcmp(env, "DM_PRESENT_SHARPEN")) switch (mtl_present_sharp_why()) {
+        case DM_SHARP_METALFX: return "Off while MetalFX upscales";
+        case DM_SHARP_GAME_UPSCALER: return "Off while MetalFX runs the game's upscaler";
+        case DM_SHARP_FORMAT: return "Not supported for this game's picture";
+        case DM_SHARP_PIPELINE: return "Couldn't start: see Share log";   // its pipeline failed to build (a [RED] line in the log), as edge smoothing's below
+        default: return NULL;
+    }
+    if (!strcmp(env, "DM_POST_AA")) switch (mtl_present_aa_why()) {
+        case DM_AA_FORMAT: return "Not supported for this game's picture";
+        case DM_AA_FAILED: return "Couldn't start: see Share log";
+        default: return NULL;
+    }
+    return NULL;
+}
+// Whether the running game says a live setting's choice took effect at the last present, which dm_setting_why's NULL does not tell apart from "nothing known yet" (0 before the
+// first present): MetalFX upscaled. GameMenu.swift then leaves out the launcher's hint for the row, which can only say MetalFX may not run under Stretch or Ultrawide. Main thread
+bool dm_setting_working(const char *env) { return env && g_root.game && !strcmp(env, "DM_PRESENT_UPSCALE") && mtl_present_fx_why() == DM_FX_UPSCALED; }
 @interface DmTVSceneDelegate : UIResponder <UIWindowSceneDelegate>
 @property (strong, nonatomic) UIWindow *window;
 @end

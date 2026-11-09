@@ -35,6 +35,17 @@ void front_picture_shape(int w, int h);
 // at the first present and when a new size has held for 30 presents: the iOS front end sizes its drawable to it where the present scales bilinearly anyway (front_ios.m DmGameView),
 // and Core Animation scales the layer to the view. Called from the present thread; the front end switches to its main thread and does not block. The Mac has none (a weak default)
 void front_picture_size(int w, int h);
+// What the live present last did with the picture settings the player can change while the game runs (nvn_mtl.m: written by the present thread at each live present, read on any
+// thread), so the iOS in-game menu can say why a choice does nothing at the moment (front_ios.m dm_setting_why). Each is 0 before the first present, and a pick shows from the
+// present after it. Upscaling: DM_FX_UPSCALED when MetalFX drew the picture, else why it did not (off, the picture not shown larger than it is rendered, stretched by
+// Picture Stretch, or a size MetalFX makes no scaler for). Sharpening: 0 drawn or off, else why it was not drawn (the same bits as present_sharpen's log line). Anti-aliasing: DM_AA_RAN
+// when edge smoothing ran, else off (or its kernels still being made), a swapchain format it does not handle, or no kernels or memory for it
+enum { DM_FX_OFF, DM_FX_UPSCALED, DM_FX_NOT_LARGER, DM_FX_STRETCHED, DM_FX_REFUSED };
+enum { DM_SHARP_METALFX = 1, DM_SHARP_GAME_UPSCALER = 2, DM_SHARP_FORMAT = 4, DM_SHARP_PIPELINE = 8 };
+enum { DM_AA_OFF, DM_AA_RAN, DM_AA_FORMAT, DM_AA_FAILED };
+int mtl_present_fx_why(void);
+int mtl_present_sharp_why(void);
+int mtl_present_aa_why(void);
 // Progress screen of the first-start prepare step (nvn_mtl.m warm_prepare: "Preparing shaders" while the pipelines of the prewarm lists are built before the game's first frame):
 // title and done of total shown over the game's view (a dark screen, the title, a bar and a count), updated on each call; title NULL hides it. Any thread; the front end switches to its main
 // thread and does not block. Nothing is shown without a window
