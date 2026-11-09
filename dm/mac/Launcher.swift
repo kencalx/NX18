@@ -181,21 +181,23 @@ enum LauncherWindowLayout {
 // 1: Play (the window's settings are in the environment), 0: the player quit, 2: no window (no launcher.json, or "Show this window at launch" off): launcher.c applies the saved choices
 @_cdecl("dm_mac_launcher")
 public func dmMacLauncher() -> Int32 {
-    guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/launcher.json"), let data = try? Data(contentsOf: url) else { return 2 }
-    guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return 2 }
-    if (UserDefaults.standard.object(forKey: "window.show") as? Bool) == false && !NSEvent.modifierFlags.contains(.option) {
-        fputs("launcher: settings window off (hold Option at launch to show it)\n", stderr)
-        return 2
+    MainActor.assumeIsolated {   // launcher.c calls it on the main thread, before the host starts; LauncherModel is main-actor state (dm/ios/Sources/LauncherSettings.swift)
+        guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/launcher.json"), let data = try? Data(contentsOf: url) else { return 2 }
+        guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return 2 }
+        if (UserDefaults.standard.object(forKey: "window.show") as? Bool) == false && !NSEvent.modifierFlags.contains(.option) {
+            fputs("launcher: settings window off (hold Option at launch to show it)\n", stderr)
+            return 2
+        }
+        let model = LauncherModel(file.settings)
+        let app = NSApplication.shared, launcher = Launcher(model)
+        app.setActivationPolicy(.regular)
+        app.delegate = launcher
+        fputs("launcher: \(file.settings.count) settings shown\n", stderr)
+        app.run()
+        CATransaction.flush()   // finish's order-out
+        app.setActivationPolicy(.prohibited)   // the host is the game's app from here on
+        guard launcher.play else { fputs("launcher: quit without starting the game\n", stderr); return 0 }
+        model.apply()
+        return 1
     }
-    let model = LauncherModel(file.settings)
-    let app = NSApplication.shared, launcher = Launcher(model)
-    app.setActivationPolicy(.regular)
-    app.delegate = launcher
-    fputs("launcher: \(file.settings.count) settings shown\n", stderr)
-    app.run()
-    CATransaction.flush()   // finish's order-out
-    app.setActivationPolicy(.prohibited)   // the host is the game's app from here on
-    guard launcher.play else { fputs("launcher: quit without starting the game\n", stderr); return 0 }
-    model.apply()
-    return 1
 }
