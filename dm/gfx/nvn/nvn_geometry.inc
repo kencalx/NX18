@@ -561,10 +561,11 @@ static uint64_t g_mtk_n, g_mtk_wait;
 static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)};   // only the submit thread uses it: prewarm workers build pipelines (mtk_build) and the submit thread claims them (warm_claim)
 // A mesh pipeline must have a fragment function, where a vertex one need not (validateWithDevice). A task / mesh program with no pixel shader draws depth only (Ocarina of Time's foliage shadows).
 // Noted for Metal 4 (fn4_note) so that such a pipeline goes through the compiler and the archive like the others. The function is the host's own library dm/gfx/msl/mesh_nop.metal,
-// compiled when the host is built (host_lib), so a mesh draw compiles no MSL at run time; host_msl_lib compiles its source only when the build had no Metal compiler
+// compiled when the host is built (host_lib), so a mesh draw compiles no MSL at run time; host_msl_lib compiles its source only when the build had no Metal compiler. Named
+// (lib_tag) so that a depth-only mesh pipeline has an index key and its period's index stays complete (arch_key); a host build that changed it misses in the named file and compiles
 static id<MTLFunction> mtk_nop_fragment(void) {
     static id<MTLFunction> fn; static dispatch_once_t once;
-    dispatch_once(&once, ^{ NSError *e = nil; id<MTLLibrary> l = host_lib("mesh_nop", &e);
+    dispatch_once(&once, ^{ NSError *e = nil; id<MTLLibrary> l = lib_tag(host_lib("mesh_nop", &e), @"host/mesh_nop");
         fn = fn4_note([l newFunctionWithName:@"dm_mesh_nop"], l, @"dm_mesh_nop", nil); if (!fn) MLOG("[RED] the empty fragment function did not load: %s", e.localizedDescription.UTF8String); });
     return fn;
 }
@@ -596,8 +597,7 @@ static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvSh
     MTL4MeshRenderPipelineDescriptor *m4 = g_comp4 ? mtk_desc4(d, ts, ms, ff) : nil;
     if (m4) {
         id<MTLRenderPipelineState> ps = nil; int from_run = 0;
-        for (id<MTL4Archive> a in g_arch4p) if ((ps = [a newRenderPipelineStateWithDescriptor:m4 error:nil])) break;   // a period of mesh pipelines alone is a p file (no vertex layout)
-        if (!ps) for (id<MTL4Archive> a in g_arch4) if ((ps = [a newRenderPipelineStateWithDescriptor:m4 error:nil])) { from_run = 1; break; }
+        ps = arch_lookup(m4, 0, &from_run);   // a period of mesh pipelines alone is a p file (no vertex layout)
         if (ps) {
             g_mtk_arch++; if (archived) *archived = 1;
             if (from_run && g_compact_enabled && atomic_load(&g_warm_running)) arch_harvest(m4, 1);

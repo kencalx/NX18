@@ -137,6 +137,7 @@ int dm_cheats_master(void) { return 1; }
 void dm_cheats_master_set(int on) { (void)on; }
 __thread _Atomic int dm_host_work;
 void dm_gfx_suspend(int on) { (void)on; }
+int dm_gfx_save_wait(int wait_ms) { (void)wait_ms; return 1; }
 void dm_audio_suspend(int on) { (void)on; }
 void dm_audio_reset(void) {}
 void dm_focus_set(int state) { (void)state; }

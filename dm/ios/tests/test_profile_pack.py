@@ -25,12 +25,13 @@ class ProfilePackTests(unittest.TestCase):
             with zipfile.ZipFile(root / 'x.ipa') as archive: self.assertIn('Payload/DmIOS.app/msl/b-fixture.img', archive.namelist())
             self.assertEqual([n for n in os.listdir(root) if '.msl-' in n], [])
 
-    def test_pulling_libraries_follow_compiled_profile_and_explicit_override(self):
+    def test_pulling_libraries_survive_runtime_prebuild_without_an_archive(self):
         # (game, IOS_PULL, with a pipeline archive, _bp libraries packed): an archive's bases are made of the pulling libraries, so an IPA with one carries them whatever IOS_PULL says.
-        # The Metal 4 path is on by default (both registered games); '<id>+off' is that profile with pso_mtl4 off
-        cases = [('01007EF00011E000', None, False, True), ('010015100B514000', None, False, True), ('010015100B514000+off', None, False, False),
-                 ('01007EF00011E000', '0', False, False), ('010015100B514000+off', '1', False, True),
-                 ('010015100B514000+off', None, True, True), ('01007EF00011E000', '0', True, True)]
+        # The Metal 4 path is on by default; '<id>+off' is that profile with pso_mtl4 off, which still carries them (the launcher's Metal 4 toggle and its prebuild read them)
+        cases = [('01007EF00011E000', None, False, True), ('010015100B514000', None, False, True), ('01008CF01BAAC000', None, False, True), ('010015100B514000+off', None, False, True),
+                 ('01007EF00011E000', '0', False, False), ('01008CF01BAAC000', '0', False, False), ('010015100B514000+off', '0', False, False),
+                 ('010015100B514000', '1', False, True), ('010015100B514000+off', '1', False, True),
+                 ('010015100B514000', None, True, True), ('010015100B514000+off', None, True, True), ('01007EF00011E000', '0', True, True)]
         for gid, override, with_pso, included, packed in [c + (p,) for c in cases for p in (False, True)]:
             with self.subTest(game=gid, IOS_PULL=override, archive=with_pso, one_file=packed), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -80,27 +81,22 @@ class ProfilePackTests(unittest.TestCase):
                     self.assertEqual(archive.read('Payload/DmIOS.app/romfs/marker'), b'romfs')
                     self.assertEqual('Payload/DmIOS.app/pso/prebuilt.tsv' in names, with_pso)
 
-    def test_programs_pull_when_an_nvn_program_keeps_metal_4(self):
-        # build_ipa.sh's PULL choice for a multi-program app (PROGRAMS_TSV), where the host's macro is a table's: the pulling libraries go in when an NVN program's profile keeps
-        # pso_mtl4 on (the default), and not for Vulkan / GL programs, which have none to read
+    def test_programs_pull_whatever_a_program_profile_says(self):
+        # build_ipa.sh's _bp choice for a multi-program app (PROGRAMS_TSV) is the same as for one game: the pulling libraries go in unless IOS_PULL=0, and always with a pipeline archive (pso/).
+        # No program's pso_mtl4 is read (a profile with it off can have Metal 4 turned on in the launcher); a Vulkan / GL program has no _bp files, so the rule changes nothing for it
         script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
-        start = script.index('if [ -n "${PROGRAMS_TSV:-}" ]; then PULL=0')
-        block = script[start:script.index('\n', script.index('case "$PULL" in', start))]
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            off = root / 'games/010049900F546000'; off.mkdir(parents=True)
-            (off / 'game.tsv').write_text((REPO / 'dm/games/010049900F546000/game.tsv').read_text(encoding='utf-8') + 'pso_mtl4\toff\n', encoding='utf-8')
-            for rows, games_dir, want in [(('0\t010049900F546000\t-\t-\t-\tnvn', '1\t010049900F546001\t-\t-\t-\tvulkan'), None, '1'),
-                                          (('1\t010049900F546001\t-\t-\t-\tvulkan', '2\t010049900F546002\t-\t-\t-\tvulkan'), None, '0'),
-                                          (('0\t010049900F546000\t-\t-\t-\tnvn', '1\t010049900F546001\t-\t-\t-\tvulkan'), root / 'games', '0')]:   # the launcher with pso_mtl4 off
-                with self.subTest(rows=rows, off=bool(games_dir)):
-                    tsv = root / 'programs.tsv'; tsv.write_text('\n'.join(rows) + '\n')
-                    env = {k: v for k, v in os.environ.items() if k not in ('IOS_PULL', 'DM_GAMES_DIR', 'DM_GAMES_FIRST')}
-                    env.update(DM=str(REPO / 'dm'), PROGRAMS_TSV=str(tsv), GAME='010049900F546000')
-                    if games_dir: env.update(DM_GAMES_DIR=str(games_dir), DM_GAMES_FIRST='1')
-                    r = subprocess.run(['/bin/bash', '-c', 'set -u\ndie() { echo "$*" >&2; exit 1; }\nprog_rows() { grep -v "^#" "$PROGRAMS_TSV" | grep -v "^$"; }\n' + block + '\necho "$PULL"'],
-                                       env=env, capture_output=True, text=True)
-                    self.assertEqual((r.returncode, r.stdout.strip()), (0, want), r.stderr)
+        start = script.index('PACK_OPTS=(--store "$ZS");')
+        line = script[start:script.index('\n', start)]
+        code = [l for l in script[script.index('t "pack IPA'):start].splitlines() if not l.lstrip().startswith('#')]
+        self.assertFalse([l for l in code if 'pso_mtl4' in l or 'PSO_MTL4' in l], 'the packing step reads no profile pso_mtl4')
+        for override, pso, skip in [(None, '', False), ('1', '', False), ('0', '', True), ('0', '/x/pso', False), (None, '/x/pso', False)]:
+            with self.subTest(IOS_PULL=override, archive=bool(pso)):
+                env = {k: v for k, v in os.environ.items() if k not in ('IOS_PULL', 'PSO')}
+                env.update(ZS='', PROGRAMS_TSV='/x/programs.tsv', PSO=pso)
+                if override is not None: env['IOS_PULL'] = override
+                r = subprocess.run(['/bin/bash', '-c', 'set -u\n' + line + '\necho "${PACK_OPTS[*]}"'], env=env, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual('--skip-suffix _bp.metallib' in r.stdout, skip, r.stdout)
 
     def test_programs_pack_the_pipeline_archive(self):
         # A multi-program IPA (PROGRAMS_TSV) carries the archive built for program 0 as pso/ (the Xcode build of an IPA copies no game resources), with that program's pulling libraries

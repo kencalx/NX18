@@ -6,6 +6,9 @@
 // The prebuild's own files (pb<seq>_<program>, pre_trim): one no pair's base was found in is removed by the next prebuild, one that gave a base stays, a draw's p file stays,
 // DM_PSO_PREBUILD_TRIM=0 keeps them all, and an archive bundled with the app that holds every pair's base removes them and prebuilt.tsv. Two programs of one application, each with
 // its own pair list, alternating in one folder (arch_pre_mine): neither removes the other's files, and one the bundle covers removes only its own, and the stamp only when it is its own
+// The same trim when the prebuild's files have a complete index (<file>.keys, read as pso4_init reads it: reopen_ix), which puts them in g_arch_ixf, not g_arch4p.
+// A library file the app does not carry (a pulling library; a shader): the stamp names it, a later start of that app does nothing, one with the file builds the pair; a stamp from
+// before this check runs once. The same with the library as one image (shader_lib.py pack), and a file added beside it
 #include "../nvn/nvn_mtl.m"
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
@@ -53,6 +56,23 @@ static void reopen(NSString *dir) {   // the folder's files, as a new start open
         [a addObject:archive]; if (arch_name_kind(n) == 2) arch_pre_note(archive, [dir stringByAppendingPathComponent:n]);
     }
     g_arch4p = a;
+}
+static void reopen_ix(NSString *dir) {   // the same with the files' indexes, as pso4_init reads them: a file with a complete index in g_arch_ixf alone, newest first in g_arch_ix
+    nvn_hm_clear(&g_arch_ix, NULL);
+    NSMutableArray<id<MTL4Archive>> *a = [NSMutableArray array], *ixf = [NSMutableArray array];
+    NSArray<NSString *> *names = [[[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]]
+        sortedArrayUsingComparator:^NSComparisonResult(NSString *x, NSString *y) { int p = [x substringFromIndex:arch_name_kind(x)].intValue, q = [y substringFromIndex:arch_name_kind(y)].intValue; return p > q ? NSOrderedAscending : p < q ? NSOrderedDescending : NSOrderedSame; }];
+    for (NSString *n in names) {
+        NSString *p = [dir stringByAppendingPathComponent:n];
+        id<MTL4Archive> archive = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:p] error:nil];
+        if (!archive) abort();
+        if (arch_name_kind(n) == 2) arch_pre_note(archive, p);
+        int complete = 0; NSData *keys = arch_keys_read(arch_keys_path(p), &complete);
+        const uint64_t *kv = keys.bytes; NSUInteger nk = keys.length / sizeof(uint64_t);
+        for (NSUInteger j = 0; j < nk; j++) if (!nvn_hm_get(&g_arch_ix, &kv[j])) nvn_hm_put(&g_arch_ix, &kv[j], (__bridge void *)archive);
+        [keys && complete ? ixf : a addObject:archive];
+    }
+    g_arch4p = a; g_arch_ixf = ixf;
 }
 static NSArray<NSString *> *named(NSString *dir, NSString *prefix) {   // the folder's .mtl4a files whose names start with prefix
     return [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self BEGINSWITH %@ AND self ENDSWITH '.mtl4a'", prefix]];
@@ -208,7 +228,7 @@ int main(void) { @autoreleasepool {
     EXPECT("trim: the first file removed", 0, first.count && [NSFileManager.defaultManager fileExistsAtPath:[arch3 stringByAppendingPathComponent:first[0]]]);
     EXPECT("trim: the second file stays", 1, named(arch3, @"pb").count);
     EXPECT("trim: the draw's p file stays", 1, drawn3.count && [NSFileManager.defaultManager fileExistsAtPath:[arch3 stringByAppendingPathComponent:drawn3[0]]]);
-    EXPECT("trim: stamped", 1, [slurp(stamp3) isEqualToString:pre_stamp(slurp(pairs), 0)]);
+    EXPECT("trim: stamped", 1, [slurp(stamp3) hasPrefix:pre_stamp(slurp(pairs), 0)]);
     // DM_PSO_PREBUILD_TRIM=0: a file no base was found in stays
     put(pairs, @"v1\tf2\n"); reopen(arch3); reset_counts(); setenv("DM_PSO_PREBUILD_TRIM", "0", 1);
     EXPECT("no trim: one pair", 1, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
@@ -262,8 +282,105 @@ int main(void) { @autoreleasepool {
     EXPECT("programs, covered: nothing to build", (uint64_t)-1, (uint64_t)(int64_t)pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
     EXPECT("programs, covered: its own file removed", 0, there(fa));
     EXPECT("programs, covered: the other program's file stays", 1, there(fb));
-    EXPECT("programs, covered: the other program's stamp stays", 1, [slurp(stamp4) isEqualToString:pre_stamp(@"v1\tf3\n", 0)]);
+    EXPECT("programs, covered: the other program's stamp stays", 1, [slurp(stamp4) hasPrefix:pre_stamp(@"v1\tf3\n", 0)]);
     g_arch_bundle = nil; g_bundle_dir = nil; g_pre_program = 0;
+    // the same with an index: each pb file the prebuild writes has a complete <file>.keys, and a start puts such a file in g_arch_ixf alone (pso4_init). A pair's base the index
+    // names a file for is credited to that file, so a file that gave one stays and one that gave none goes, with its .keys
+    NSString *arch7 = [root stringByAppendingPathComponent:@"archive7"];
+    [NSFileManager.defaultManager createDirectoryAtPath:arch7 withIntermediateDirectories:YES attributes:nil error:nil];
+    g_arch_dir = arch7; g_arch4 = @[]; g_arch4p = @[]; g_arch_ixf = @[];
+    put(pairs, @"v1\tf2\nv1\tf3\n"); reset_counts();
+    EXPECT("indexed: two pairs", 2, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    NSArray<NSString *> *ifirst = named(arch7, @"pb"); NSString *ia = ifirst.firstObject;
+    EXPECT("indexed: the prebuild's file", 1, ifirst.count == 1);
+    int icomplete = 0; NSData *ikeys = ia ? arch_keys_read(arch_keys_path([arch7 stringByAppendingPathComponent:ia]), &icomplete) : nil;
+    EXPECT("indexed: its index names both bases", 2, ikeys.length / sizeof(uint64_t));
+    EXPECT("indexed: its index is complete", 1, icomplete);
+    put(pairs, @"v1\tf3\nv1\tf4\n"); reopen_ix(arch7); reset_counts();
+    EXPECT("indexed: the file only through the index", 1, g_arch_ixf.count == 1 && g_arch4p.count == 0 && g_arch_ix.n == 2);
+    EXPECT("indexed, a pair kept: two pairs", 2, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("indexed, a pair kept: one from the file", 1, g_pre_archived);
+    EXPECT("indexed, a pair kept: one built", 1, g_pre_built);
+    EXPECT("indexed, a pair kept: the file stays", 1, ia && [NSFileManager.defaultManager fileExistsAtPath:[arch7 stringByAppendingPathComponent:ia]]);
+    EXPECT("indexed, a pair kept: a second file", 2, named(arch7, @"pb").count);
+    put(pairs, @"v1\tf4\n"); reopen_ix(arch7); reset_counts();
+    EXPECT("indexed trim: one pair", 1, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("indexed trim: from the second file", 1, g_pre_archived);
+    EXPECT("indexed trim: nothing built", 0, g_pre_built);
+    EXPECT("indexed trim: the first file removed", 0, ia && [NSFileManager.defaultManager fileExistsAtPath:[arch7 stringByAppendingPathComponent:ia]]);
+    EXPECT("indexed trim: its index removed", 0, ia && [NSFileManager.defaultManager fileExistsAtPath:arch_keys_path([arch7 stringByAppendingPathComponent:ia])]);
+    EXPECT("indexed trim: the second file stays", 1, named(arch7, @"pb").count);
+    // a bundle that covers the pair: the indexed file goes too, with its .keys and the stamp (which ends with the libs line)
+    NSString *ib = named(arch7, @"pb").firstObject, *ibundle = [root stringByAppendingPathComponent:@"bundle7"];
+    [NSFileManager.defaultManager createDirectoryAtPath:ibundle withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *icopy = [ibundle stringByAppendingFormat:@"/%@.mtl4a", gpu];
+    [NSFileManager.defaultManager copyItemAtPath:[arch7 stringByAppendingPathComponent:ib] toPath:icopy error:nil];
+    put([ibundle stringByAppendingPathComponent:@"prebuilt.tsv"], pre_stamp(slurp(pairs), 0));
+    EXPECT("indexed covered: the device's stamp has the libs line", 1, [slurp([arch7 stringByAppendingPathComponent:@"prebuilt.tsv"]) hasSuffix:@"libs\tall\n"]);
+    reopen_ix(arch7); g_arch_bundle = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:icopy] error:nil]; g_bundle_dir = ibundle; reset_counts();
+    EXPECT("indexed covered: nothing to build", (uint64_t)-1, (uint64_t)(int64_t)pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("indexed covered: the prebuild's file removed", 0, named(arch7, @"pb").count);
+    EXPECT("indexed covered: its index removed", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_keys_path([arch7 stringByAppendingPathComponent:ib])]);
+    EXPECT("indexed covered: prebuilt.tsv removed", 0, [NSFileManager.defaultManager fileExistsAtPath:[arch7 stringByAppendingPathComponent:@"prebuilt.tsv"]]);
+    g_arch_bundle = nil; g_bundle_dir = nil; nvn_hm_clear(&g_arch_ix, NULL); g_arch_ixf = nil;
+
+    // the other blocks' state: no files open, the first pair list
+    g_arch4 = @[]; g_arch4p = @[]; reset_counts(); g_pre_nolib = 0; g_pre_nolib_file = nil;
+    // a pulling library the app does not carry (last: its image block packs the library folder away) (an IPA packed without _bp.metallib, then DM_PSO_MTL4=1): into a fresh archive folder
+    NSString *arch5 = [root stringByAppendingPathComponent:@"archive5"], *stamp5 = [arch5 stringByAppendingPathComponent:@"prebuilt.tsv"];
+    [NSFileManager.defaultManager createDirectoryAtPath:arch5 withIntermediateDirectories:YES attributes:nil error:nil];
+    g_arch_dir = arch5; g_arch4 = @[]; g_arch4p = @[];
+    put([msl stringByAppendingPathComponent:@"v2_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"pull\": {}, \"vertex_inputs\": []}", DMSH_CHAIN]);
+    NSString *pairs3 = @"# pairs\nv2\tf6\nv1\tf4\n"; put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], pairs3);
+    reset_counts();
+    EXPECT("no library: two pairs", 2, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("no library: left to the draws", 1, g_pre_skipped);
+    EXPECT("no library: counted", 1, g_pre_nolib);
+    EXPECT("no library: the other built", 1, g_pre_built);
+    EXPECT("no library: the stamp names it", 1, [slurp(stamp5) hasSuffix:@"libs\tmissing\tv2_bp.metallib\n"]);
+    reset_counts();
+    EXPECT("no library, same app: nothing to do", (uint64_t)-1, (uint64_t)(int64_t)pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    // the app comes back with the library: the pair is built, the other taken from the archive, and the stamp says all
+    EXPECT("library installed", 0, lib(msl, @"v2_bp", v));
+    reopen(arch5); reset_counts();
+    EXPECT("library back: two pairs", 2, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("library back: built", 1, g_pre_built);
+    EXPECT("library back: the other from the archive", 1, g_pre_archived);
+    EXPECT("library back: none counted", 0, g_pre_nolib);
+    EXPECT("library back: the stamp says all", 1, [slurp(stamp5) hasSuffix:@"libs\tall\n"]);
+    reset_counts();
+    EXPECT("library back: nothing to do", (uint64_t)-1, (uint64_t)(int64_t)pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    // a stamp from before this check (no libs line) may hide such pairs: one more run, everything from the archive
+    put(stamp5, pre_stamp(pairs3, 0)); reopen(arch5); reset_counts();
+    EXPECT("old stamp: two pairs", 2, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("old stamp: nothing compiled", 0, g_pre_built);
+    EXPECT("old stamp: both from the archive", 2, g_pre_archived);
+    EXPECT("old stamp: the stamp says all", 1, [slurp(stamp5) hasSuffix:@"libs\tall\n"]);
+    // the library as one image beside its folder, as the Mac app and the IPA carry it (dm/tools/shader_lib.py pack, msl_image.h): its files are found there, and a pixel shader
+    // the library lacks is named by its file
+    NSString *packer = [[@(__FILE__) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"../../tools/shader_lib.py"];
+    EXPECT("image: packed", 0, sh([NSString stringWithFormat:@"python3 %@ pack %@ > /dev/null", packer, msl]));
+    EXPECT("image: no folder", 0, [NSFileManager.defaultManager fileExistsAtPath:msl]);
+    NSString *arch6d = [root stringByAppendingPathComponent:@"archive6"], *stamp6 = [arch6d stringByAppendingPathComponent:@"prebuilt.tsv"];
+    [NSFileManager.defaultManager createDirectoryAtPath:arch6d withIntermediateDirectories:YES attributes:nil error:nil];
+    g_arch_dir = arch6d; g_arch4 = @[]; g_arch4p = @[];
+    put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], @"# pairs\nv2\tf6\nv1\tf4\nv1\tf9\n");
+    reset_counts();
+    EXPECT("image: three pairs", 3, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("image: both built from it", 2, g_pre_built);
+    EXPECT("image: the absent shader counted", 1, g_pre_nolib);
+    EXPECT("image: the stamp names its file", 1, [slurp(stamp6) hasSuffix:@"libs\tmissing\tf9_b.json\n"]);
+    reset_counts();
+    EXPECT("image, same app: nothing to do", (uint64_t)-1, (uint64_t)(int64_t)pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    // a partial build makes that shader in a folder beside the image: its pair is built, the others taken from the archive
+    put([msl stringByAppendingPathComponent:@"f9_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\"}", DMSH_CHAIN]);
+    EXPECT("image: shader added", 0, lib(msl, @"f9_b", [NSString stringWithFormat:f, @"main0", 2, 2, pid]));
+    reopen(arch6d); reset_counts();
+    EXPECT("image + folder: three pairs", 3, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("image + folder: built", 1, g_pre_built);
+    EXPECT("image + folder: the others from the archive", 2, g_pre_archived);
+    EXPECT("image + folder: none counted", 0, g_pre_nolib);
+    EXPECT("image + folder: the stamp says all", 1, [slurp(stamp6) hasSuffix:@"libs\tall\n"]);
     [NSFileManager.defaultManager removeItemAtPath:root error:nil];
     printf("t_pso_stall: %d checks, %d failed\n", checks, failed);
     return failed != 0;

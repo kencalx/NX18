@@ -338,7 +338,7 @@ class Build(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
 
     def test_ios_takes_the_apps_deployment_target(self):   # the app's minimum from dm/ios/project.yml; the SDK's major version only without the project
-        project = (Path(po.__file__).resolve().parents[2] / 'ios/project.yml').read_text()
+        project = (Path(str(po.__file__)).resolve().parents[2] / 'ios/project.yml').read_text()
         self.assertIn(f'iOS: "{po.ios_deployment_target()}"', project)
         self.assertEqual(po.ios_deployment_target(self.t / 'none.yml'), None)
         (self.t / 'p.yml').write_text('options:\n  deploymentTarget:\n    iOS: "28.1"   # note\n')

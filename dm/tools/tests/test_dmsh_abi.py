@@ -16,13 +16,14 @@ sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
 import dmsh_abi as abi   # noqa: E402
 
 # Literals of the ABI still written in each file (outside comments), counted as the ratchet below does: the value, or the kind string (repr). These stay for other reasons:
-# a json key spelled like a kind ('c1', 'geometry', 'tex', 'img' in the facts and reflection json), an NVN stage name ("geometry"), a "?" placeholder in a log line, and 0x100
+# a json key spelled like a kind ('c1', 'geometry', 'tex', 'img' in the facts and reflection json), an NVN stage name ("geometry"), a "?" placeholder in a log line or in the pipeline archive's index key (nvn_mtl.m akb_fn: function constants
+# whose description has no values, from NXNative's 70b9a68a), and 0x100
 # where it is not the push constant block's size (DMSH_PUSH_SIZE): a viewport swizzle value in nvn_mtl.m, the start of compute code in a package record in dmsh_build.py,
 # a single texture bind record's flag bit in nvn_obj.h (BIND_TEX1_NOBASE).
 # 0x1000 where it is not the pool table's entry count (DMSH_GMEM_MAP_ENTRIES): the 4 KB page step of nvn_mtl.m's sparse residency map.
 # A count may only go down; when it does, lower it here.
 BASELINE = {
-    'dm/gfx/nvn/nvn_mtl.m': {"'?'": 2, "'geometry'": 3, '0x100': 2, '0x1000': 2},
+    'dm/gfx/nvn/nvn_mtl.m': {"'?'": 3, "'geometry'": 3, '0x100': 2, '0x1000': 2},
     'dm/gfx/nvn/nvn_refl.m': {"'c1'": 1},
     'dm/gfx/nvn/nvn_refl.h': {},
     'dm/gfx/nvn/nvn_obj.h': {'0x100': 1},
@@ -135,6 +136,13 @@ class Host(unittest.TestCase):
         assert m, 'Program.cs C2HandleWords line not found'
         self.assertEqual(int(m.group(1)), abi.C2_SEP_SLOTS)
         self.assertEqual(abi.C2_ROW, 8)
+
+    def test_uniform_bounds_agree(self):   # the translator's size table (Ryujinx Constants.cs) is the bank and the slots the host fills (nvn_mtl.m NVN_RB_CBSIZE)
+        src = (REPO / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Constants.cs').read_text()
+        got = {n: int(v) for n, v in re.findall(r'public const int (Nx\w+) = (\d+);', src)}
+        self.assertEqual(got, {'NxFirstUniformSlot': 3, 'NxUniformSlots': abi.CBSIZE_SLOTS, 'NxUniformSizesBank': abi.CBSIZE_BANK})
+        self.assertEqual(abi.CBSIZE_SLOTS, 16 - 3 + 1, 'uniform slots c[3] to c[16], as dmsh_build.py reflects them')
+        self.assertIn('TranslationFlags.MetalUniformBounds', (REPO / 'dm/gfx/tools/dmsh_xlate/Program.cs').read_text())
 
 
 class Ratchet(unittest.TestCase):

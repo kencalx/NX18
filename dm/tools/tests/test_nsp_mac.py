@@ -211,17 +211,17 @@ class Nvn(Base):
             self.build_ios(False); self.assertEqual(self.ran, []); self.assertTrue(nsp.shader_lib.left_out_pulling(ios))   # no longer read: taken out with no build
 
     def test_who_reads_the_iphones_pulling_libraries(self):
-        def g(mtl4='off', pairs=False, gpu=''):   # mtl4 None: the profile has no pso_mtl4 row (on by default)
+        def g(mtl4: str | None = 'off', pairs=False, gpu=''):   # mtl4 None: the profile has no pso_mtl4 row (on by default)
             rows = {k: v for k, v in {'pso_mtl4': mtl4, 'pso_gpu': gpu}.items() if v is not None}
             return types.SimpleNamespace(get=lambda k, d='': rows.get(k, d), table=lambda n: self.tmp / ('c1_full.tsv' if pairs else 'absent'))
         want = nsp.ios_wants_pulling
         self.build(True)   # the stand-in writes the file that stands for a game's shader pairs here
-        self.assertFalse(want(g(), 'none', False, {}))
+        self.assertTrue(want(g(), 'none', False, {}))   # the player can turn on Metal 4/prebuild on the device
         self.assertTrue(want(g(), 'none', True, {}))   # the Xcode copy phase takes them always
         self.assertTrue(want(g('on'), 'none', False, {})); self.assertFalse(want(g('on'), 'none', False, {'IOS_PULL': '0'})); self.assertTrue(want(g(), 'none', False, {'IOS_PULL': '1'}))
         self.assertTrue(want(g(None), 'none', False, {}))   # the Metal 4 path is on by default: its hybrid pipelines draw with them
         self.assertTrue(want(g(pairs=True), 'g18p', False, {}))   # the archive is made of them
-        self.assertFalse(want(g(), 'g18p', False, {}))   # no pairs: build_ipa.sh makes no archive
+        self.assertTrue(want(g(), 'g19p', False, {}))   # no offline archive: the device's prebuild and runtime lists can still need pulling entries
         self.assertEqual(nsp.ios_gpus('', g()), 'none'); self.assertEqual(nsp.ios_gpus('', g('on')), 'g19p'); self.assertEqual(nsp.ios_gpus('', g(None)), 'g19p'); self.assertEqual(nsp.ios_gpus('', g('on', gpu='g18p g17p')), 'g18p,g17p'); self.assertEqual(nsp.ios_gpus('g16p', g()), 'g16p')
 
     def test_old_chain_images_go_too(self):

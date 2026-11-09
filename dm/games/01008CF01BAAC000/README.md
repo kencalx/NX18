@@ -53,6 +53,7 @@ The development build is `01008CF01BAAC000_build/` beside the NSPs, with runs an
 
 ## Found on this game
 
+- **An iPhone build's launcher toggles built no pipeline bases** (issue #1684): an upstream build, where `pso_mtl4` defaulted off, left out the pulling libraries; here the profile keeps the default `pso_mtl4 on` and its builds carried them, and every iOS build now keeps them whatever the key says. [Pulling vertex inputs](../../../docs/reference/rendering.md#pulling-vertex-inputs). Not yet run on a device with the fix.
 - **Mac app pair tables:** [Shader-pair tables in a Mac app](../../../docs/reference/shaders.md#shader-pair-tables-in-a-mac-app).
 - **An archive built for the profile's default GL depth was rejected at runtime:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree).
 - **Unused conditional cube inputs are not rendering errors:** [A 2D texture in a cube slot binds the zero cube](../../../docs/reference/rendering.md#a-2d-texture-in-a-cube-slot-binds-the-zero-cube).

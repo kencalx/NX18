@@ -175,7 +175,7 @@ def header_one(g):
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.]{0,30}', ufc): sys.exit(f'{g.id}: ue_fps_cvar must be a console variable name: {ufc}')
     ps = g.get('present_snap', 'off')   # present snapshots by default (nvn_mtl.m mtl_snap_on; DM_PRESENT_SNAP and the iOS launcher's Frame buffering override it): on / off
     if ps not in ('on', 'off'): sys.exit(f'{g.id}: present_snap must be on or off: {ps}')
-    p4 = g.get('pso_mtl4', 'on')   # render pipelines through MTL4Compiler on iOS, with the pipeline archive and hybrid pipelines: on (the default, as on the Mac) / off (the MTLDevice on iOS, and no archive or pulling libraries in the app; DM_PSO_MTL4 overrides)
+    p4 = g.get('pso_mtl4', 'on')   # render pipelines through MTL4Compiler on iOS, with the pipeline archive and hybrid pipelines: on (the default, as on the Mac) / off (the MTLDevice on iOS, and no archive in the app; an iOS build carries the pulling libraries either way, for the launcher's Metal 4 toggle; DM_PSO_MTL4 overrides)
     if p4 not in ('on', 'off'): sys.exit(f'{g.id}: pso_mtl4 must be on or off: {p4}')
     pg = g.words('pso_gpu', '')   # GPU architectures the app gets the pipeline archive made offline for (the NSP script's --gpu, build_ipa.sh): when pso_mtl4 is on the app gets these instead of the default g19p, the A20 / A20 Pro of the iPhone 18 family (e.g. 'g18p' for the A19 / A19 Pro of the iPhone 17 family); unset → the default. Whitespace-separated tokens, with or without the applegpu_ prefix
     if pg and (len(pg) > 4 or any(w == 'none' or not re.fullmatch(r'(applegpu_)?[A-Za-z0-9]+', w) for w in pg)):
