@@ -611,9 +611,9 @@ class IpaFallback(unittest.TestCase):
 
 
 class Default(unittest.TestCase):
-    """Which games get an archive without DM_PSO_GPUS: build_ipa.sh's own lines, run with game.py's default form, so only a profile with pso_mtl4 on (the Metal 4 path, which alone
-    reads the archive on iOS) gets one — g18p by default, the profile key pso_gpu's architectures when it names them (joined with commas) and g18p on a key the shell guard does not take —
-    and an explicit DM_PSO_GPUS wins, also when empty"""
+    """Which games get an archive without DM_PSO_GPUS: build_ipa.sh's own lines, run with game.py's default form, so every profile that does not set pso_mtl4 off (the Metal 4 path,
+    which alone reads the archive on iOS, is on for it) gets one — g19p by default, the profile key pso_gpu's architectures when it names them (joined with commas) and g19p on a key
+    the shell guard does not take — and an explicit DM_PSO_GPUS wins, also when empty"""
 
     def lines(self):
         lines = (REPO / 'dm/ios/tools/build_ipa.sh').read_text().splitlines()
@@ -640,10 +640,10 @@ class Default(unittest.TestCase):
                  '0100000000F0F007': 'title_id\t0100000000F0F007\npso_mtl4\toff\npso_gpu\tg19p\n'}
         r = self.gpus(games)
         self.assertEqual({k: p[0].strip() for k, p in r.items()},
-                         {'0100000000F0F000': 'on g18p', '0100000000F0F001': 'off none', '0100000000F0F002': 'off none',
-                          '0100000000F0F003': 'on applegpu_g19p', '0100000000F0F004': 'on g18p,g19p', '0100000000F0F005': 'on g18p',
-                          '0100000000F0F006': 'on g18p', '0100000000F0F007': 'off none'})
-        self.assertEqual({k for k, p in r.items() if 'taking g18p' in p[1]}, {'0100000000F0F005', '0100000000F0F006'})   # a key the guard rejects keeps the default, and says so
+                         {'0100000000F0F000': 'on g19p', '0100000000F0F001': 'on g19p', '0100000000F0F002': 'off none',
+                          '0100000000F0F003': 'on applegpu_g19p', '0100000000F0F004': 'on g18p,g19p', '0100000000F0F005': 'on g19p',
+                          '0100000000F0F006': 'on g19p', '0100000000F0F007': 'off none'})
+        self.assertEqual({k for k, p in r.items() if 'taking g19p' in p[1]}, {'0100000000F0F005', '0100000000F0F006'})   # a key the guard rejects keeps the default, and says so
         self.assertEqual({k: p[0].strip() for k, p in self.gpus(games, DM_PSO_GPUS='g17p').items()},
                          {k: v.split()[0] + ' g17p' for k, v in {k: p[0].strip() for k, p in r.items()}.items()})
         self.assertEqual(self.gpus(games, DM_PSO_GPUS='none')['0100000000F0F000'][0].strip(), 'on none')
@@ -656,19 +656,20 @@ class Default(unittest.TestCase):
         end = script.index("    ipa_env['DM_PSO_GPUS'] = gpus", start)
         block = '\n'.join(line[4:] for line in script[start:end].splitlines())
         block = script[script.index('def ios_gpus('):script.index('def ios_wants_pulling(')] + block   # the choice itself, which the shader step shares
-        for p4, pg, expected in [('on', '', 'g18p'), ('on', 'g18p   applegpu_g19p', 'g18p,applegpu_g19p'),
-                                 ('off', '', 'none'), ('off', 'g19p', 'none')]:
+        for p4, pg, expected in [('on', '', 'g19p'), (None, '', 'g19p'), ('on', 'g18p   applegpu_g19p', 'g18p,applegpu_g19p'),
+                                 ('off', '', 'none'), ('off', 'g19p', 'none')]:   # None: the profile has no pso_mtl4 row
             for explicit, setting in [('', ''), ('g17p', ''), ('none', ''), ('', 'g16p')]:
                 with self.subTest(pso_mtl4=p4, pso_gpu=pg, gpu=explicit, setting=setting):
                     scope = {'args': types.SimpleNamespace(gpu=explicit), 'PSO_GPUS': setting,
-                             'g': types.SimpleNamespace(get={'pso_mtl4': p4, 'pso_gpu': pg}.get),
+                             'g': types.SimpleNamespace(get={k: v for k, v in {'pso_mtl4': p4, 'pso_gpu': pg}.items() if v is not None}.get),
                              're': re, 'BuildError': RuntimeError}
                     exec(block, scope)
                     self.assertEqual(scope['gpus'], explicit or setting or expected)
 
-    def test_breath_of_the_wild(self):   # the profile that turns the Metal 4 path on: its app gets the archive
-        r = subprocess.run([sys.executable, str(REPO / 'dm/games/game.py'), '01007EF00011E000', 'pso_mtl4', 'off'], capture_output=True, text=True)
-        self.assertEqual(r.stdout.strip(), 'on')
+    def test_registered_profiles(self):   # no registered NVN profile turns the Metal 4 path off so far: Breath of the Wild and Wonder both read on, with the default build_ipa.sh passes
+        for gid in ('01007EF00011E000', '010015100B514000'):
+            r = subprocess.run([sys.executable, str(REPO / 'dm/games/game.py'), gid, 'pso_mtl4', 'on'], capture_output=True, text=True)
+            self.assertEqual(r.stdout.strip(), 'on', gid)
 
 
 if __name__ == '__main__':

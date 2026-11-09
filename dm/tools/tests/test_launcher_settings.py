@@ -59,8 +59,8 @@ class LauncherSettingsTests(unittest.TestCase):
     def test_sections_keep_the_profile_defaults(self):
         botw, wonder = build(BOTW, 'nvn'), build(WONDER, 'nvn')
         self.assertEqual([e for e, s in botw.items() if s['section'] == 'Performance'], PERFORMANCE_NVN)
-        self.assertEqual(botw['DM_PSO_MTL4']['default'], '1')   # pso_mtl4 on
-        self.assertEqual((wonder['DM_PRESENT_SNAP']['default'], wonder['DM_PSO_MTL4']['default']), ('0', '0'))
+        self.assertEqual(botw['DM_PSO_MTL4']['default'], '1')   # pso_mtl4: on unless the profile sets off
+        self.assertEqual((wonder['DM_PRESENT_SNAP']['default'], wonder['DM_PSO_MTL4']['default']), ('0', '1'))
         self.assertEqual((botw['DM_PSO_PREBUILD']['default'], botw['DM_NVN_ENC_THREAD']['default'], botw['DM_METAL_HUD']['default']), ('1', '1', '0'))   # the host's iOS defaults
         self.assertEqual(list(dict.fromkeys(s['section'] for s in botw.values())), ['Game', 'Controls', 'Performance'])
         self.assertNotIn('DM_FPS_HOLD', wonder)   # no frame step, as the Frame rate row
@@ -112,12 +112,16 @@ class LauncherSettingsTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, 'leave present_interval at game'): settings.game.header_one(settings.game.Game(d))
 
     def test_defaults_follow_each_platform_host(self):
-        # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile. nvn_rec.h rec_on: iOS on, Mac off.
-        for gid, ios_pso in ((BOTW, '1'), (WONDER, '0')):
-            with self.subTest(game=gid):
-                ios, mac = build(gid, 'nvn', 'ios'), build(gid, 'nvn', 'mac')
-                self.assertEqual((ios['DM_PSO_MTL4']['default'], ios['DM_NVN_ENC_THREAD']['default']), (ios_pso, '1'))
-                self.assertEqual((mac['DM_PSO_MTL4']['default'], mac['DM_NVN_ENC_THREAD']['default']), ('1', '0'))
+        # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile (on unless it sets pso_mtl4 off). nvn_rec.h rec_on: iOS on, Mac off.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / WONDER; d.mkdir()   # Wonder's profile with pso_mtl4 off
+            (d / 'game.tsv').write_text((ROOT / 'dm/games' / WONDER / 'game.tsv').read_text(encoding='utf-8') + 'pso_mtl4\toff\n', encoding='utf-8')
+            off = settings.game.Game(d)
+            for gid, ios_pso, prof in ((BOTW, '1', None), (WONDER, '1', None), (WONDER, '0', off)):
+                with self.subTest(game=gid, pso_mtl4='off' if prof else 'default'), patch.object(settings.game, 'load', side_effect=lambda i, prof=prof, real=settings.game.load: prof or real(i)):
+                    ios, mac = build(gid, 'nvn', 'ios'), build(gid, 'nvn', 'mac')
+                    self.assertEqual((ios['DM_PSO_MTL4']['default'], ios['DM_NVN_ENC_THREAD']['default']), (ios_pso, '1'))
+                    self.assertEqual((mac['DM_PSO_MTL4']['default'], mac['DM_NVN_ENC_THREAD']['default']), ('1', '0'))
 
     def test_unknown_platform_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, 'SETTINGS_PLATFORM must be ios or mac'):

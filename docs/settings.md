@@ -13,7 +13,7 @@ The screen before the game starts shows the settings the game supports. A settin
 
 ## Tested defaults
 
-Each game comes with the settings it was tested with: its profile in this repository says, for example, that Breath of the Wild runs with Frame buffering and Metal 4 pipelines on, because that combination held a steady 60 fps on an iPhone 17 Pro Max. Those are the defaults the settings screen shows the first time.
+Each game comes with the settings it was tested with: its profile in this repository says, for example, that Breath of the Wild runs with Frame buffering on, because that, with Metal 4 pipelines (on for every game), held a steady 60 fps on an iPhone 17 Pro Max. Those are the defaults the settings screen shows the first time.
 
 When you change a setting and tap **Play**, the app keeps your choice, also when a later build of the app ships other defaults. A setting you leave at its default is not stored: it follows the defaults of the build you have, so a newer build's tested settings reach you without doing anything. **Reset to tested defaults** at the bottom sets every setting back to its default, and **Play** then forgets your choices, so the game's defaults apply again. For testing, a line in `Documents/env.txt` overrides any setting ([Settings in a file](#settings-in-a-file)).
 
@@ -198,6 +198,7 @@ flowchart TD
 
 At start, before the game's first frame, the app prepares what it already knows: the pipelines in the archive and those the prewarm lists name (one comes with the game, one grows on the phone as you play); with a warm archive that takes well under a second. A pipeline never seen before is drawn meanwhile with a stand-in for its pair of shaders, a *hybrid* pipeline that reads the draw's vertices in a general way and draws the same picture, while the real pipeline is built in the background and archived for the next start.
 
+- **Default:** on for every game, unless its profile was found to need it off. On an iPhone 18 Pro Max, Persona 5 Royal used about 1.9 GB of memory with it and Super Mario Odyssey at most 2.87 GB, both at 60 fps.
 - **When to change it:** turn it off only if a game crashes or runs out of memory with it.
 - **Cost:** memory for the archive while the game runs, and storage on the phone.
 

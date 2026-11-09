@@ -78,8 +78,8 @@ MODS = ''                               # the game's mods: cheats (cheats/ folde
 SEEN_SHADERS = False                    # PLATFORM 'mac' / 'mac-app': build only the shaders the profile's playtests used (shader_seen.tsv) and those the last runs' logs reported missing, not the whole map; areas the list does not cover draw without the rest until this runs again
 PSO_GPUS = 'g19p'                       # NVN games: GPU architectures the app gets the shader pairs' pipeline bases for, made on this Mac (metal-tt, comma-separated: 'g18p' = A19 / A19 Pro of the iPhone 17 family;
                                         #   another device's name is in its log when the app has none for it), so the device does not build them on its first start; each adds about 650 MB to the app (Breath of the Wild) and minutes to a first build; 'none' = no archive;
-                                        #   empty = by the game's profile: its pso_gpu key (whitespace-separated architectures, joined with commas) when it sets pso_mtl4 on (the Metal 4 path, the only one that reads the archive on iOS, is on for it),
-                                        #   else 'g19p' for a game without the key, and 'none' without pso_mtl4 on
+                                        #   empty = by the game's profile: its pso_gpu key (whitespace-separated architectures, joined with commas) unless it sets pso_mtl4 off (the Metal 4 path, the only one that reads the archive on iOS, is
+                                        #   on for every other game), else 'g19p' for a game without the key, and 'none' with pso_mtl4 off
                                         #   PLATFORM 'mac-app': the Mac app's archive (Resources/pso), empty = this Mac's GPU (e.g. 'g14s' for an M2 Max), 'none' = the app builds its bases on its first start
 SHOW_FPS = True                         # True shows the game's frame rate on the iPhone (frames on screen per second, top left); DM_SHOW_FPS=0 / 1 in the app's Documents/env.txt changes it without a rebuild
 MOTION = True                           # True passes a gyro controller's motion (on iOS also the phone's own) to games that read it; False builds with DM_MOTION=0, for when motion misbehaves (DM_MOTION=1 in the app's Documents/env.txt turns it back on without a rebuild)
@@ -2560,16 +2560,16 @@ def pack_libraries(sh, chain, pull=None):
 
 
 def ios_gpus(gpu_option, g):
-    """The GPU architectures of the iPhone's pipeline archive, as build_ipa.sh gets them (DM_PSO_GPUS): --gpu / PSO_GPUS, else by the profile's pso_gpu (for --gpu: the tokens joined with commas), else g19p for
-    pso_mtl4 on, as build_ipa.sh decides without DM_PSO_GPUS: only the Metal 4 path reads the archive on iOS"""
-    return gpu_option or ((','.join(g.get('pso_gpu', '').split()) or 'g19p') if g.get('pso_mtl4', 'off') == 'on' else 'none')
+    """The GPU architectures of the iPhone's pipeline archive, as build_ipa.sh gets them (DM_PSO_GPUS): --gpu / PSO_GPUS, else by the profile's pso_gpu (for --gpu: the tokens joined with commas), else g19p
+    unless the profile sets pso_mtl4 off, as build_ipa.sh decides without DM_PSO_GPUS: only the Metal 4 path reads the archive on iOS, and it is on for every game whose profile does not turn it off"""
+    return gpu_option or ((','.join(g.get('pso_gpu', '').split()) or 'g19p') if g.get('pso_mtl4', 'on') == 'on' else 'none')
 
 
 def ios_wants_pulling(g, gpus, prepare_xcode, env):
     """Whether the iPhone app reads the pulling vertex libraries, as build_ipa.sh decides what goes in: a pipeline archive is made of them (a game with shader pairs), the Xcode copy phase takes them always,
-    and otherwise the profile's pso_mtl4 says, which IOS_PULL overrides"""
+    and otherwise the profile's pso_mtl4 says (on unless it sets off), which IOS_PULL overrides"""
     if prepare_xcode or (gpus != 'none' and g.table('shader_pairs.tsv').is_file()): return True
-    return (env.get('IOS_PULL') or ('1' if g.get('pso_mtl4', 'off') == 'on' else '0')) == '1'
+    return (env.get('IOS_PULL') or ('1' if g.get('pso_mtl4', 'on') == 'on' else '0')) == '1'
 
 
 def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, seen=None, pull=None):
@@ -3011,7 +3011,7 @@ def parse_args(argv):
                     '(default: the MODS setting, else the folder named mods beside the game\'s files when there is one)')
     ap.add_argument('--no-mods', dest='mods', action='store_const', const='none', help='pack the game without its mods folder')
     ap.add_argument('--gpu', help='NVN games: GPU architectures the app gets its pipeline archive for, made on this Mac with metal-tt, comma-separated: g18p (A19 / A19 Pro), or the name a device\'s log gives when the app has no archive for its GPU; '
-                    'none = no archive, the device builds the bases on its first start (default: the PSO_GPUS setting; when that is empty, a profile with pso_mtl4 on uses its pso_gpu key or g19p, and other profiles use none). '
+                    'none = no archive, the device builds the bases on its first start (default: the PSO_GPUS setting; when that is empty, a profile uses its pso_gpu key or g19p, and one that sets pso_mtl4 off none). '
                     'With --platform mac-app: the Mac app\'s archive, by default for this Mac\'s GPU (none: the app builds the bases on its first start)')
     ap.add_argument('--seen-shaders', action=argparse.BooleanOptionalAction, help='--platform mac or mac-app: build only the shaders the profile\'s playtests used (its shader_seen.tsv) and those the last runs\' logs reported missing, not the whole map: '
                     'minutes instead of hours, but areas the list does not cover draw without the rest until this runs again (default: the SEEN_SHADERS setting, off)')

@@ -135,11 +135,11 @@ else TD=Gen/dm; program_tables; LJ=Gen/dm/launcher.json; fi
 # The pipeline archive made offline (dm/gfx/tools/pso_offline.py): the base of every shader pair and a pipeline per compute shader of the shader map, compiled here by metal-tt for each GPU architecture in DM_PSO_GPUS (comma-separated:
 # g18p = A19 / A19 Pro; another family's device has its own architecture, applegpu_g19p = the family after the A19 (its archive compiles with the current toolchain); none = no archive), so the device
 # does not build them on its first start (Breath of the Wild: 15,767 bases, 7-8 minutes on an iPhone 17 Pro Max).
-# Only the Metal 4 path reads it, which iOS turns on for a game whose profile sets pso_mtl4 on: the default is what the profile's pso_gpu key names (whitespace-separated architectures, joined for
-# pso_offline.py's --gpu), else g19p, and none for the games that do not set pso_mtl4 on (their app would carry it unread). It goes into the app as pso/ (main.m hands it to the host as
+# Only the Metal 4 path reads it, which iOS takes for every game whose profile does not set pso_mtl4 off: the default is what the profile's pso_gpu key names (whitespace-separated
+# architectures, joined for pso_offline.py's --gpu), else g19p, and none for the games that set pso_mtl4 off (their app would carry it unread). It goes into the app as pso/ (main.m hands it to the host as
 # DM_PSO_BUNDLE), with the pulling vertex libraries the bases are made of. Each architecture adds about 650 MB to the app (Breath of the Wild; 220 MB in the IPA) and 4 minutes to the first build;
 # made again only when its inputs change (the libraries, the pairs, the profile's depth_mode, metal-tt)
-PSO=; P4=$(python3 "$DM/games/game.py" "$GAME" pso_mtl4 off) || die "game profile $GD: pso_mtl4"; PG=$(python3 "$DM/games/game.py" "$GAME" pso_gpu '') || die "game profile $GD: pso_gpu"
+PSO=; P4=$(python3 "$DM/games/game.py" "$GAME" pso_mtl4 on) || die "game profile $GD: pso_mtl4"; PG=$(python3 "$DM/games/game.py" "$GAME" pso_gpu '') || die "game profile $GD: pso_gpu"
 PGK=g19p; N=0; for w in $PG; do case $w in none) N=9; break ;; esac; case ${w#applegpu_} in '' | *[!A-Za-z0-9]*) N=9; break ;; esac; N=$((N+1)); done
 if [ "$P4" = on ] && [ "$PG" ]; then case $N in 1 | 2 | 3 | 4) PGK=$(echo "$PG" | tr -s ' \t' ',') ;; *) t "profile $GD: pso_gpu '$PG' is not 1-4 whitespace-separated GPU architectures (each one such as g18p or applegpu_g19p, with or without the applegpu_ prefix; there is no none: without the key the archive defaults follow pso_mtl4) - taking g19p" ;; esac; fi
 if [ -n "${DM_PSO_GPUS+set}" ]; then GPUS=$DM_PSO_GPUS; elif [ "$P4" = on ]; then GPUS=$PGK; else GPUS=none; fi
@@ -152,7 +152,7 @@ if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/sha
     t "[RED] pipeline archive: pso_offline.py failed (its output is above); the app is built without one and the device builds its pipeline bases on its first start (DM_PSO_GPUS=none skips this step)"
     rm -rf "$PSO"; PSO=
   fi
-else [ "$GFXAPI" != nvn ] || t "no pipeline archive ($([ -n "${DM_PSO_GPUS+set}" ] && echo "DM_PSO_GPUS=${GPUS:-empty}" || echo "the profile does not set pso_mtl4 on; DM_PSO_GPUS=g19p builds one")$([ -f "$GD/shader_pairs.tsv" ] || echo ', no shader_pairs.tsv'))"; fi
+else [ "$GFXAPI" != nvn ] || t "no pipeline archive ($([ -n "${DM_PSO_GPUS+set}" ] && echo "DM_PSO_GPUS=${GPUS:-empty}" || echo "the profile sets pso_mtl4 off; DM_PSO_GPUS=g19p builds one")$([ -f "$GD/shader_pairs.tsv" ] || echo ', no shader_pairs.tsv'))"; fi
 # The packed language (DMLanguage) is the Game language row's default, which settings.py makes the game's first language when it lacks DM_LANG: the screen and DM_LAUNCHER=0 then agree
 LD=$(python3 -c 'import json, sys; print(next((s["default"] for s in json.load(open(sys.argv[1]))["settings"] if s["env"] == "DM_LANG"), ""))' $LJ) || die "launcher settings ($LJ)"
 if [ -n "$LD" ] && [ "$LD" != "$DM_LANG" ]; then t "game language: the game has no $DM_LANG; packing $LD, its first"; export DM_LANG=$LD; fi
@@ -242,6 +242,8 @@ if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's shader libraries, RomFS, 
   [ "${DM_COPY_ROMFS:-YES}" != NO ] || die "DM_COPY_ROMFS=NO: a game of several programs keeps its programs' files in the app"
   MAPS=("$P=$APP")
   if [ -n "$AOC" ] && [ -d "$AOC" ]; then MAPS+=("$P/aoc=$AOC"); fi
+  # The pipeline archive made above for program 0 (its shader pairs and depth mode): main.m hands <App>/pso to every program, and one whose stamp differs (prebuilt.tsv, pso_bundle_covers) builds its own bases
+  if [ -n "${PSO:-}" ]; then MAPS+=("$P/pso=$PSO"); fi
   while IFS= read -r row; do prog_set "$row"; SKIP+=(--skip "$P/p$PN")
     if [ -f "$ROMFS" ]; then MAPS+=("$P/p$PN/romfs.img=$ROMFS"); else MAPS+=("$P/p$PN/romfs=$ROMFS"); fi
     MAPS+=("$P/msl/p$PN/$MSLDIR=$MSL_IOS/$MSLDIR")
@@ -268,7 +270,10 @@ fi
 t "pack IPA (already-compressed game files stored, everything else deflated)"
 # The pulling vertex libraries (<key>_bp, dm/gfx/tools/dmsh_pull.py) serve the hybrid pipelines. Default to the same pso_mtl4 setting compiled by gen_build.py; IOS_PULL=0 / 1 overrides it.
 # The pipeline archive's bases are made of them, so an IPA with an archive (pso/) always carries them, whatever IOS_PULL says (an Xcode build copies them always).
-if [ -n "${PROGRAMS_TSV:-}" ]; then PULL=0   # no program of such a game sets pso_mtl4 so far (the macro is a table's there, not a number)
+# With programs the macro is a table's, not a number: the libraries go in when an NVN program's profile keeps pso_mtl4 on (the default)
+if [ -n "${PROGRAMS_TSV:-}" ]; then PULL=0
+  while IFS=$'\t' read -r _ PP _ _ _ PF; do case $PF in vulkan | gl) continue ;; esac   # as prog_set: any other graphics API is NVN
+    P4P=$(python3 "$DM/games/game.py" "$PP" pso_mtl4 on) || die "game profile $PP: pso_mtl4"; [ "$P4P" != on ] || PULL=1; done < <(prog_rows)
 else PULL=$(sed -n 's/^#define DM_GAME_PSO_MTL4 //p' "$DM/host/gen/$GAME/game_profile.h") || die "read game profile header"
 case "$PULL" in 0|1) ;; *) die "no DM_GAME_PSO_MTL4 in generated game profile";; esac; fi
 # Keep this array nonempty: macOS Bash 3.2 treats an empty array as unset under set -u.

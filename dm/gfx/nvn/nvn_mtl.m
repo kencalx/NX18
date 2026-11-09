@@ -7576,8 +7576,11 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
 // at start, and a base found in one is taken from it directly (MTL4Archive), not through the compiler's lookupArchives, which would capture it again into the next file. A base
 // taken from an archive costs about 0.06 ms, against 10-80 ms to build one.
 // DM_PSO_MTL4=0: the MTLDevice path as before (no bases, no archive). DM_PSO_ARCHIVE=off: no archive; DM_PSO_ARCHIVE=<folder>: the archive in that folder.
-// On by default on the Mac; on iOS DM_PSO_MTL4=1, or the profile key pso_mtl4 on, turns it on, and with it the hybrid pipelines and the pipeline prebuild. The archive's footprint
-// (with the prebuild, about 850 MB more for Breath of the Wild) is not measured against an iPhone's limit yet. The prebuild's bases can also come made offline, bundled with the
+// On by default on the Mac and on iOS, and with it the hybrid pipelines and the pipeline prebuild; on iOS a profile's pso_mtl4 off turns it off for that game (DM_PSO_MTL4=1 /
+// 0 overrides either way). iOS took it only for a profile with pso_mtl4 on (Breath of the Wild) while the archive's footprint (with the device's own prebuild, about 850 MB more for
+// Breath of the Wild on the Mac) was not measured on an iPhone. It was then, with DM_PSO_MTL4=1 on an iPhone 18 Pro Max (iOS 27.3) and the g19p archive bundled with the app:
+// Persona 5 Royal peaked at a footprint of about 1.9 GB, prepared its 32,258 prewarm lines in 1.6 s and compiled no base while playing; Super Mario Odyssey held 60 fps with a
+// peak footprint of 2.87 GB. The prebuild's bases can also come made offline, bundled with the
 // app (DM_PSO_BUNDLE, pso_bundle_open). newArchiveWithURL maps a file on the Mac's internal disk (clean pages, not in the footprint) and reads one on an external drive into memory, whole and for the
 // whole run (Kirby Star Allies: 1.13 GB), and it offers no choice: docs/reference/memory.md
 static int pso4_on(void) {
@@ -7585,8 +7588,9 @@ static int pso4_on(void) {
     if (v < 0) {
         const char *e = getenv("DM_PSO_MTL4");
 #if TARGET_OS_IPHONE
-        v = e ? !strcmp(e, "1") : DM_GAME_PSO_MTL4;   // the profile's pso_mtl4
-        if (!v) MLOG("render pipelines through the MTLDevice (iOS: DM_PSO_MTL4=1 or the profile key pso_mtl4 on turns on the Metal 4 bases, the pipeline archive and the hybrid pipelines)");
+        v = e ? !strcmp(e, "1") : DM_GAME_PSO_MTL4;   // the profile's pso_mtl4 (on unless it sets off)
+        if (!v && e) MLOG("DM_PSO_MTL4=%s: render pipelines through the MTLDevice (no Metal 4 bases, pipeline archive or hybrid pipelines)", e);
+        else if (!v) MLOG("render pipelines through the MTLDevice: the profile sets pso_mtl4 off (DM_PSO_MTL4=1 turns on the Metal 4 bases, the pipeline archive and the hybrid pipelines)");
 #else
         v = !(e && !strcmp(e, "0"));
         if (!v) MLOG("DM_PSO_MTL4=0: render pipelines are built through the MTLDevice (no bases, no pipeline archive)");
@@ -8243,13 +8247,33 @@ static uint64_t g_pp_submit_mark, g_pp_kicked, g_pp_taken, g_pp_stolen;   // Whe
 static void pso_predict_rest(void);
 static int pso_pend_find(const pso_key *k) { for (int i = 0; i < PSO_PEND_MAX; i++) if (g_pp[i].used && !memcmp(&g_pp[i].k, k, sizeof *k)) return i; return -1; }
 static int hybrid_on(void);
-// The queue of the builds hybrid draws asked for (the draw has a pulling stand-in, so nothing waits for them): serial queues at utility QoS, one per two performance cores, round
-// robin. At user-initiated QoS on the global queue, a cold start's burst (777 builds on entering Zora's Domain, Breath of the Wild) ran on every core, beside the game's own threads,
-// for the seconds it took. Speculative builds (pso_pend_kick: at most PSO_PEND_ACTIVE at a time) keep the global queue, so a demanded build never waits behind speculation
+// The queue of the builds hybrid draws asked for (the draw has a pulling stand-in, so nothing waits for them): serial queues at utility QoS, round robin. At user-initiated QoS on
+// the global queue, a cold start's burst (777 builds on entering Zora's Domain, Breath of the Wild) ran on every core, beside the game's own threads, for the seconds it took.
+// Speculative builds (pso_pend_kick: at most PSO_PEND_ACTIVE at a time) keep the global queue, so a demanded build never waits behind speculation.
+// How many: one per two performance cores (hw.perflevel0), but at least half of what Metal's compiler runs at once (maximumConcurrentCompilationTaskCount), up to 3. Level 0 alone
+// was 1 queue on an iPhone 18 Pro Max (the A20 Pro has 2 performance cores) and on an M6 (2 Super cores beside 4 Performance and 6 Efficiency): on the iPhone a backlog of 323
+// builds in Super Mario Odyssey ran one at a time, about 20 s with stand-ins drawn meanwhile, and the M6's prebuild of 2,125 pairs took 45.1 s on 1 worker against 28.0 s on 3
+// (docs/reference/shaders.md, A prebuild pool sized from the Super cores). The cap of 3 keeps these utility queues a share of the compiler, beside the game's threads; a Mac whose
+// level 0 already gives more (an M2 Max: 4) keeps its count. DM_PSO_BG_QUEUES=<n> sets the count (1-8)
+static int pp_bg_count(void) {
+    static int n; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc < 2) pc = 2;
+        NSUInteger mc = [(id)g_dev respondsToSelector:@selector(maximumConcurrentCompilationTaskCount)] ? g_dev.maximumConcurrentCompilationTaskCount : 0;
+        int share = (int)(mc / 2 > 3 ? 3 : mc / 2);
+        n = pc / 2 > share ? pc / 2 : share;
+        const char *e = getenv("DM_PSO_BG_QUEUES"); int v = e ? atoi(e) : 0;
+        if (e && (v < 1 || v > 8)) MLOG("[RED] DM_PSO_BG_QUEUES=%s is not a count of 1-8: %s", e, v < 1 ? "ignored" : "taking 8");
+        if (v >= 1) n = v;
+        if (n > 8) n = 8;
+        MLOG("pipeline builds in the background: %d serial queues (%d performance-level-0 cores, Metal runs %lu compiles at once; %s)",
+             n, pc, (unsigned long)mc, v >= 1 ? "set by DM_PSO_BG_QUEUES" : "DM_PSO_BG_QUEUES=<n> sets them");
+    });
+    return n;
+}
 static dispatch_queue_t pp_bg_queue(void) {
     static dispatch_queue_t q[8]; static int n; static _Atomic unsigned rr; static dispatch_once_t once;
-    dispatch_once(&once, ^{ int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc < 2) pc = 2;
-        n = pc / 2 > 8 ? 8 : pc / 2;
+    dispatch_once(&once, ^{ n = pp_bg_count();
         for (int i = 0; i < n; i++) q[i] = dispatch_queue_create("dm.nvn.pso-bg", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)); });
     return q[atomic_fetch_add(&rr, 1) % (unsigned)n];
 }
@@ -8539,7 +8563,8 @@ static int pso_bundle_covers(NSArray<NSArray<NSString *> *> *pairs, NSString *wa
 }
 // The prebuild tool's workers: each waits on one synchronous compile, so as many as Metal's compiler runs at once (maximumConcurrentCompilationTaskCount); the device's active cores where Metal
 // does not say. Not hw.perflevel0: on the chips with three core levels that is only the Super cores (2 on an M6, 5 on an M5 Pro), which gave the tool 1 and 4 workers
-// (docs/reference/shaders.md, A prebuild pool sized from the Super cores). The prepare step keeps the active cores (no measurement on an iPhone, where this count is unread), the background pools a share of level 0
+// (docs/reference/shaders.md, A prebuild pool sized from the Super cores). The prepare step keeps the active cores (prepare_workers) until a device run reports Metal's count there: pp_bg_count reads it on the iPhone too and logs it in its
+// 'pipeline builds in the background' line. The background pools take a share of level 0, raised by that count (pp_bg_count)
 static int compile_tasks(void) {
     NSUInteger n = g_dev.maximumConcurrentCompilationTaskCount;   // every device of macOS 26.6 / iOS 27.3 has it
     if (n >= 2) return (int)n;
@@ -13014,9 +13039,19 @@ static void warm_claim(void) {
 }
 // A program's libraries are loaded in the background when the game makes the program (nvnProgramSetShaders, most of them while it loads a scene), and the next submission
 // takes them (warm_claim) instead of its first draw loading each on the submit thread: in Donkey Kong Bananza a level's first frames loaded 3 to 7 libraries there, 20-90 ms
-// with the drive idle and up to 4 s with it busy. A draw that comes before its library has loaded loads it itself, as before. DM_NVN_PREFETCH=0 turns it off
+// with the drive idle and up to 4 s with it busy. A draw that comes before its library has loaded loads it itself, as before. DM_NVN_PREFETCH=0 turns it off.
+// The loads have serial queues of their own, one per two performance cores (hw.perflevel0) as the pipeline builds had before pp_bg_count: on the build queues (pp_bg_queue) a load
+// waited behind every build queued before it, on an iPhone behind all of them (one queue there then; Super Mario Odyssey once had 323 in flight), and a draw that came first
+// loaded its library itself on the submit thread
 static _Atomic uint64_t g_progpf_loaded;
 static int prefetch_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PREFETCH"); v = !(e && !strcmp(e, "0")); } return v; }
+static dispatch_queue_t progpf_queue(void) {
+    static dispatch_queue_t q[8]; static int n; static _Atomic unsigned rr; static dispatch_once_t once;
+    dispatch_once(&once, ^{ int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc < 2) pc = 2;
+        n = pc / 2 > 8 ? 8 : pc / 2;
+        for (int i = 0; i < n; i++) q[i] = dispatch_queue_create("dm.nvn.lib-prefetch", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)); });
+    return q[atomic_fetch_add(&rr, 1) % (unsigned)n];
+}
 void mtl_prog_prefetch(const prog_t *cp) {
     prog_t *p = (prog_t *)cp;
     if (!g_dev || !prefetch_on()) return;
@@ -13028,7 +13063,7 @@ void mtl_prog_prefetch(const prog_t *cp) {
         if (st < 0) continue;   // not in the package: a built-in kernel (prog_get)
         NSString *pc = [k stringByAppendingString:@"_b"];
         if (!progpf_first(pc)) continue;
-        dispatch_async(pp_bg_queue(), ^{ @autoreleasepool {
+        dispatch_async(progpf_queue(), ^{ @autoreleasepool {
             NvShader *sh = shader_load(pc, st, 0);
             if (sh && st == 0 && sh->has_pull && !sh->layer_out && hybrid_on()) pull_load(sh);   // its pulling entry too, as the prewarm does (warm_shader)
             if (!sh) return;

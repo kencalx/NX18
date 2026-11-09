@@ -55,4 +55,4 @@ With `DM_CTL`: A at the title; A starts the tile shown; Right moves between tile
 - A switch on iOS quits the app and asks for a tap. PR #193's in-process switch would avoid that, at the cost of every host static living in a section that is saved and restored; it is not in.
 - `--platform mac-app`: the app holds all three programs; its settings window is the launcher's.
 - `--romfs separate` is refused: `Documents` holds one RomFS image.
-- No pipeline archive is packed (no program sets `pso_mtl4`).
+- The pipeline archive made offline and the pulling libraries are packed for the launcher (program 0, NVN), whose profile keeps the Metal 4 path on by default (`pso_mtl4`); no iPhone run has used them yet. Programs 1 and 2 draw with Vulkan, which has neither.
