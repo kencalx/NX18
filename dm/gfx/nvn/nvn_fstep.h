@@ -154,3 +154,17 @@ static inline int nvn_fstep_gpu_slowed(nvn_fgpu *g, double gpu, int k, int kmin,
     g->cur = g->n ? g->cur + (gpu - g->cur) / 8 : gpu; g->n++;
     return nvn_fgpu_slow(g);
 }
+
+// The long-frame log (hle_nvn.c, the [longframe] lines): a frame is long when the whole frame takes over 20 ms and 1.4 times the running mean of recent frames (ef), or its GPU work
+// over 16.7 ms and 1.3 times theirs (eg), and either is longer than the hold the frame was made under asked for. held is that hold in ms (its vsyncs times 1/60 s, or ticks of
+// 1/120 s at 120 fps), 0 at a hold of one: the mean alone judges those. The mean takes a sixteenth of each frame, so after a step up from hold 1 to 2 it needs 8–9 frames before
+// 33.3 ms is under 1.4 times it, and each of those frames, as long as the step asked, read as a long frame of the game's own: 412 of the 486 that scripts/devlog.py put on the
+// game's side in a 9.6-minute run of Ocarina of Time at 60 fps on an iPhone 18 Pro Max, whose hold went from 1 to 2 or 3 and back 86 times. A frame now has to run past its
+// hold by more than its pacing jitter (FSTEP_LF_SLACK: frames at hold 2 took 31–36 ms there) and its GPU work past the hold itself. Every frame still feeds the means
+#define FSTEP_LF_SLACK 1.25
+typedef struct { double ef, eg; } nvn_lfmean;   // running means of the whole frame and its GPU time (ms); hle_nvn.c starts them at 16.7 and 8
+static inline int nvn_lf_long(nvn_lfmean *m, double fr, double gpu, double held) {
+    int lf = fr > 20.0 && fr > 1.4 * m->ef && fr > FSTEP_LF_SLACK * held, lg = gpu > 16.7 && gpu > 1.3 * m->eg && gpu > held;
+    m->ef += ((fr < 3 * m->ef ? fr : 3 * m->ef) - m->ef) / 16; m->eg += ((gpu < 3 * m->eg ? gpu : 3 * m->eg) - m->eg) / 16;
+    return lf || lg;
+}

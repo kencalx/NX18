@@ -116,6 +116,9 @@ SWITCH_BINDING = [
      'why': 'the replay could find such draws itself, at the cost of a pass split each'}),
     ('enc_thread', '', {'what': 'Metal encoding on its own thread on the Mac', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
      'why': f'what iOS does for every game: {DEFAULT_SOON}'}),
+    ('present_trim', '', {'what': "a frame standing in the display link's queue dropped after K ticks", 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
+     'why': 'what the display link should do for any game whose frames land two to a refresh; one game measured with it on a device so far: an iOS default after Persona 5 Royal '
+            'and Super Mario Odyssey run with DM_PRESENT_TRIM=60'}),
     ('present_snap', '', {'what': 'present snapshots', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'a setting the game was tested with: {DEFAULT_SOON}'}),
     ('pso_mtl4', '', {'what': 'render pipelines through the MTLDevice on iOS (pso_mtl4 off; MTL4Compiler is the default)', 'now': 'game', 'goal': 'host', 'purpose': 'rendering',
      'why': 'a game the Metal 4 path fails on, on an iPhone: what fails there is the thing to fix'}),

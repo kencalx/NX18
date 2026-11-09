@@ -178,6 +178,9 @@ def header_one(g):
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.]{0,30}', ufc): sys.exit(f'{g.id}: ue_fps_cvar must be a console variable name: {ufc}')
     ps = g.get('present_snap', 'off')   # present snapshots by default (nvn_mtl.m mtl_snap_on; DM_PRESENT_SNAP and the iOS launcher's Frame buffering override it): on / off
     if ps not in ('on', 'off'): sys.exit(f'{g.id}: present_snap must be on or off: {ps}')
+    ptr = g.get('present_trim', '0')   # DM_PRESENT_TRIM's K by default (nvn_mtl.m present_trim_k; DM_PRESENT_TRIM in the environment or Documents/env.txt overrides it): 0 = off, else 30 to 600 display-link ticks
+    if not (ptr == '0' or (ptr.isdigit() and 30 <= int(ptr) <= 600)):   # fewer than 30 ticks risks dropping frames frame-time jitter alone leaves waiting (PR #31's case); more than 600, ten seconds at 60 Hz, trims nothing a player would notice
+        sys.exit(f'{g.id}: present_trim must be 0 (off) or 30 to 600 display-link ticks: {ptr}')
     psh = g.get('present_sharpen', 'off')   # the present's Sharpening by default (nvn_mtl.m present_sharpen; DM_PRESENT_SHARPEN and the launcher's Sharpening override it): off / low / medium / high
     if psh not in SHARPEN: sys.exit(f'{g.id}: present_sharpen must be off, low, medium or high: {psh}')
     paa = g.get('post_aa', 'off')   # the present's edge smoothing by default (nvn_mtl.m aa_mode, CMAA2; DM_POST_AA and the launcher's Anti-aliasing override it): off / edge / edge-sharp
@@ -262,6 +265,7 @@ def header_one(g):
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',
          f'#define DM_GAME_UE_FPS_CVAR {q(ufc)}',
          f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',
+         f'#define DM_GAME_PRESENT_TRIM {int(ptr)}',   # display-link ticks in a row with two or more frames waiting before one is dropped (0 off)
          f'#define DM_GAME_PRESENT_SHARPEN {SHARPEN.index(psh)}',   # 0 off to 3 high: settings.tsv DM_PRESENT_SHARPEN's levels
          f'#define DM_GAME_POST_AA {q(paa)}',   # settings.tsv DM_POST_AA's values (nvn_upscale_pick.h aa_parse)
          f'#define DM_GAME_PSO_MTL4 {int(p4 == "on")}',

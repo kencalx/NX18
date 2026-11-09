@@ -489,6 +489,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Check:** `make -C dm/gfx/tests GAME=0100F2C0115B6000 check_t_sparse_tiles` passes under both kinds of profile. No game was seen drawing wrong from this.
 - **Found on:** the unit test, on Tears of the Kingdom's and Ocarina of Time's profiles. Monster Hunter Rise is the other game with the key and a sparse pool.
 
+### Memory that steps at area loads read as a leak
+
+- **Symptom:** `scripts/devlog.py`'s memory section gives a run's footprint, GPU allocated memory and shared textures as a steep slope: `footprint 731 → 4486 MB (… +5290.2 MB per 10 min)` for Ocarina of Time at 60 fps on an iPhone 18 Pro Max, 9.6 minutes, which reads as a leak of half a gigabyte a minute.
+- **Cause:** the slope was one least-squares line over the whole run, and the memory of that run rose in steps where the game loaded an area and stayed about flat in between: footprint 765 MB to 199 s, 2829 MB to 292 s, 3402 then 3833 MB to 411 s, about 4500 MB to the end. The line through the steps is the steps.
+- **Fix:** devlog reads each memory series as plateaus: a run of samples within 8% of their median (at least 64 MB; 20% and 16 for counts of textures, which churn more), where a sample outside the band starts the next plateau only when the sample after it is outside on the same side too. With more than one plateau it prints them under the series (`24–199 s 765 MB, 205–292 s 2829 MB, …`) and, instead of the run's slope, the drift within them: one slope fitted to all plateaus at once with a level of each plateau's own, over two minutes of plateaus or more (`+454.6 MB per 10 min within them`). A single plateau prints as before. In a comparison of two logs the rows are the drift (`footprint drift / 10 min`) and the number of plateaus. A sample that two lines give for the same moment (a memory line and an on-screen line) counts once.
+- **Check:** `python3 -m unittest dm/tools/tests/test_devlog.py`: three flat steps give three plateaus and no drift where the run's slope is over 3,000 MB per 10 minutes; a rise of 10 MB a minute within two plateaus is a drift of 100; one spike is no plateau; a flat series prints as before.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#memory) on an iPhone 18 Pro Max. What drift is left there is mostly the plateau after the first load (2591 → 2863 MB in 90 s) and the churn of the last one (4109–4854 MB).
+
 ### iOS ends the app once the guest's touched pages reach its memory limit
 
 - **Symptom:** on an iPhone the app is ended by the system (a jetsam event: no crash report, no `[dm] CRASH` line) once its footprint reaches the limit: about 6 GB on a 12 GB iPhone with the increased memory limit (6,143 MiB measured in LiveContainer), 3.3 GB without it. The log stops mid-frame.

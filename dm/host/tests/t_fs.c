@@ -52,6 +52,10 @@ static Result write_save(const char *path, const char *s) {           // open ->
     r = h_fs_WriteFile(h, 0, s, strlen(s), NULL); h_fs_CloseFile(h); return r;
 }
 static int read_fs(const char *path, char *out, size_t n) { uint64_t h; size_t got = 0; if (h_fs_OpenFile(&h, path, MODE_READ)) return 0; Result r = h_fs_ReadFile(&got, h, 0, out, n - 1); h_fs_CloseFile(h); out[got] = 0; return !r; }
+// The host's log goes to stderr: err_to sends it to a file and returns the old stderr, err_back restores it and reads what was logged, so a test can check the count lines' wording
+// A file that cannot be opened leaves stderr where it was (the checks on the log then fail), never fd 2 closed
+static int err_to(const char *path) { fflush(stderr); int s = dup(2), fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd >= 0) { dup2(fd, 2); close(fd); } return s; }
+static void err_back(int s, const char *path, char *buf, size_t n) { fflush(stderr); if (s >= 0) { dup2(s, 2); close(s); } FILE *f = fopen(path, "rb"); size_t k = f ? fread(buf, 1, n - 1, f) : 0; buf[k] = 0; if (f) fclose(f); }
 
 // A stand-in for the SDK's own mount table: one RAM disk, and what the host asks of it (Unmount of an SDK-owned mount, GitHub issue #1012)
 extern void *(*t_guest_sym)(const char *);
@@ -163,6 +167,12 @@ int main(void) {
             CHECK(read_fs("rom:/data/c", got, sizeof got) && !strcmp(got, "xy") && g_mnt[0].img->e[4].flags == 0, "opening a clean file names nothing");
             CHECK(read_fs("rom:/data/a", got, sizeof got) && !strcmp(got, "hello") && g_mnt[0].img->e[2].flags == (IMG_ENT_DAMAGED | IMG_ENT_REPORTED), "the damaged file reads as written, and is named");
             CHECK(read_fs("rom:/data/a", got, sizeof got) && !strcmp(got, "hello"), "and reads again");
+            {   // its 10th open is counted without naming a retry: a file that failed only the hash check may be one the game streams and reopens by design
+                char lp[1100], log[4096]; snprintf(lp, sizeof lp, "%s/hash.log", root); int s = err_to(lp);
+                for (int i = 0; i < 8; i++) read_fs("rom:/data/a", got, sizeof got);
+                err_back(s, lp, log, sizeof log);
+                CHECK(strstr(log, "rom:/data/a, a file that failed the NCA's hash check, opened 10 times") && !strstr(log, "asks again") && !strstr(log, "[RED]"), "its 10th open is counted, plainly: %s", log);
+            }
             g_nmnt = 0;
             e[2].flags = 2; memcpy(img + 39, e, sizeof e); f = fopen(ip, "wb"); fwrite(img, 1, sizeof img, f); fclose(f);
             CHECK(!img_open(ip), "an unknown flag on a file is refused");
@@ -172,6 +182,38 @@ int main(void) {
         }
         f = fopen(ip, "wb"); fwrite(img, 1, 39 + 50, f); fclose(f);   // cut off inside the index, as a copy stopped partway
         CHECK(!img_open(ip), "a cut-off image is refused");
+    }
+    printf("RomFS image: .zs files whose bytes are no zstd stream\n");   // an image with no flags, as --allow-damaged packs a NUP's damaged files: the host reads each .zs file's head at its first open
+    {   // root files, sorted by name: bad.zs (zeros, as Ocarina of Time's three textures), empty.zs, ok.zs (a zstd frame), short.zs (2 bytes), skip.ZS (a skippable frame), z.bin (zeros)
+        static const char *names[] = {"bad.zs", "empty.zs", "ok.zs", "short.zs", "skip.ZS", "z.bin"};
+        static const uint8_t data[] = {0, 0, 0, 0, 1, 2,   0x28, 0xb5, 0x2f, 0xfd, 9,   0x28, 0xb5,   0x5a, 0x2a, 0x4d, 0x18, 0,   0, 0, 0, 0};
+        const uint64_t off[] = {0, 6, 6, 11, 13, 18}, size[] = {6, 0, 5, 2, 5, 4}; enum { N = 6 };
+        char pool[64]; uint32_t pn = 0; img_ent e[N + 1] = {{1, N, 0, 0, 0, 0}};
+        for (int i = 0; i < N; i++) { size_t l = strlen(names[i]); memcpy(pool + pn, names[i], l); e[i + 1] = (img_ent){32 + off[i], size[i], pn, (uint16_t)l, 1, 0}; pn += (uint32_t)l; }
+        uint8_t img[32 + sizeof data + sizeof e + sizeof pool]; uint64_t hd[3] = {32 + sizeof data, sizeof e + pn, N + 1};
+        memcpy(img, "DMROMFS1", 8); memcpy(img + 8, hd, sizeof hd); memcpy(img + 32, data, sizeof data); memcpy(img + 32 + sizeof data, e, sizeof e); memcpy(img + 32 + sizeof data + sizeof e, pool, pn);
+        char ip[1100]; snprintf(ip, sizeof ip, "%s/zs.img", root); FILE *f = fopen(ip, "wb"); fwrite(img, 1, 32 + sizeof data + sizeof e + pn, f); fclose(f);
+        g_nmnt = 0; setenv("DM_ROMFS", ip, 1); unsetenv("DM_ROMFS_OVERLAY");
+        CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && g_mnt[0].img && !g_mnt[0].img->damaged, "the image mounts, with no file flagged in it");
+        const img_ent *x = g_mnt[0].img->e;
+        CHECK(x[1].flags == 0 && x[3].flags == 0, "no head is read before a file's first open");
+        CHECK(read_fs("rom:/ok.zs", got, sizeof got) && x[3].flags == IMG_ENT_HEAD_READ, "a .zs file that starts with a zstd frame is read once and kept as good");
+        CHECK(read_fs("rom:/skip.ZS", got, sizeof got) && x[5].flags == IMG_ENT_HEAD_READ, "a skippable frame is a zstd stream too, the suffix in any case");
+        CHECK(read_fs("rom:/z.bin", got, sizeof got) && x[6].flags == 0, "a name that promises no format is not read");
+        CHECK(read_fs("rom:/empty.zs", got, sizeof got) && x[2].flags == 0, "an empty .zs file is left out, as the NSP script leaves it out");
+        CHECK(read_fs("rom:/short.zs", got, sizeof got) && x[4].flags == (IMG_ENT_HEAD_READ | IMG_ENT_BAD_HEAD | IMG_ENT_REPORTED), "a .zs file shorter than a frame's magic is named");
+        CHECK(read_fs("rom:/bad.zs", got, sizeof got) && x[1].flags == (IMG_ENT_HEAD_READ | IMG_ENT_BAD_HEAD | IMG_ENT_REPORTED), "a .zs file beginning with zeros is named at its first open");
+        uint64_t h; size_t n = 0; char b[8] = {1};
+        CHECK(h_fs_OpenFile(&h, "rom:/bad.zs", MODE_READ) == RES_OK && h_fs_ReadFile(&n, h, 0, b, 8) == RES_OK && n == 6 && !b[0] && b[4] == 1, "and is still served as it is");
+        h_fs_CloseFile(h);
+        char lp[1100], log[4096]; snprintf(lp, sizeof lp, "%s/zs.log", root); int s = err_to(lp);
+        for (int i = 0; i < 98; i++) read_fs("rom:/bad.zs", got, sizeof got);
+        err_back(s, lp, log, sizeof log);
+        CHECK(strstr(log, "[RED] fs rom:/bad.zs, a damaged file, opened 10 times: the game asks again for a file it cannot read") && strstr(log, "opened 100 times: the game asks again"),
+              "a bad head's count names the retry: %s", log);
+        uint64_t opens = 0; for (int i = 0; i < g_nbad_opens; i++) if (g_bad_opens[i].m == g_mnt[0].img && g_bad_opens[i].k == 1) opens = g_bad_opens[i].opens;
+        CHECK(opens == 100, "its opens are counted (100, got %llu), the logged ones at 10 and 100", (unsigned long long)opens);
+        g_nmnt = 0;
     }
     snprintf(save, sizeof save, "%s/save", root); snprintf(work, sizeof work, "%s.work", save);
     mkdir(save, 0755); snprintf(p, sizeof p, "%s/a", save); put(p, "old");

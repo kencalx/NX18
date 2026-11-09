@@ -360,6 +360,28 @@ int main(void) {
             check(first_len == want[c] && m.s.k == 2 && m.s.failed == 1, b);
         }
     }
+    {   // The long-frame log (nvn_lf_long): 60 fps at 16.7 ms frames with 10 ms of GPU work, then a step up to hold 2. Judged by the running mean alone (held 0, as before the
+        // hold was passed) the first frames of 33.3 ms read as long until the mean caught up; judged against their hold none does, and a frame past the hold still counts
+        const double v = 1000.0 / 60;
+        int alone = 0, held = 0;
+        nvn_lfmean a = {16.7, 8}, h = {16.7, 8};
+        for (int i = 0; i < 120; i++) { alone += nvn_lf_long(&a, v, 10, 0); held += nvn_lf_long(&h, v, 10, 0); }
+        check(!alone && !held, "long frames: none at a steady 16.7 ms");
+        int first = alone;
+        for (int i = 0; i < 30; i++) { alone += nvn_lf_long(&a, 2 * v + (i % 3 - 1) * 1.5, 10, 0); held += nvn_lf_long(&h, 2 * v + (i % 3 - 1) * 1.5, 10, 2 * v); }
+        snprintf(b, sizeof b, "  a step to hold 2: %d frames of 31.8-34.8 ms long by the mean alone, %d against their hold", alone - first, held);
+        check(alone - first >= 7 && alone - first <= 10 && held == 0, b);
+        nvn_lfmean s = {16.7, 8};
+        for (int i = 0; i < 120; i++) nvn_lf_long(&s, v, 10, 0);
+        for (int i = 0; i < 3; i++) nvn_lf_long(&s, 2 * v, 10, 2 * v);
+        check(nvn_lf_long(&s, 45, 10, 2 * v), "  a 45 ms frame at hold 2 (33.3 ms) is long: past its hold by more than the slack");
+        check(!nvn_lf_long(&s, 40, 10, 2 * v), "  a 40 ms frame at hold 2 is not: within the slack of 1.25 holds");
+        check(!nvn_lf_long(&s, 2 * v, 25, 2 * v), "  25 ms of GPU work at hold 2 is not long: it fits the hold");
+        check(nvn_lf_long(&s, 2 * v, 40, 2 * v), "  40 ms of GPU work at hold 2 is");
+        nvn_lfmean o = {16.7, 8};
+        for (int i = 0; i < 120; i++) nvn_lf_long(&o, v, 10, 0);
+        check(nvn_lf_long(&o, 25, 10, 0) && nvn_lf_long(&o, v, 18, 0), "  at hold 1 a 25 ms frame and 18 ms of GPU work are long, as before");
+    }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }

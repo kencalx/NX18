@@ -181,6 +181,137 @@ class Compute(unittest.TestCase):
         self.assertEqual([(n, len(x), len(y)) for n, x, y in po.groups_of([], c, 5, 0)], [('c00001', 0, 3)])
 
 
+def skey(vs='m_b', fs='p_b', cfmt=(70,), chmask=0xf, blend_en=0, blend=(), samples=1, a2c=0, atest=0, logic=0, dfmt=0, sfmt=0, vs_stage=4, fs_stage=1, merged=0, fz=0, ptr=0, size=504):
+    """An M row's pso_skey hex, laid out as dm/gfx/nvn/nvn_pso_skey.h on arm64 (built here field by field, not with the tool's own offsets); blend: {target: blend_st fields}"""
+    k = bytearray(416)
+    struct.pack_into('<Q', k, 0, ptr)
+    struct.pack_into('<8I', k, 16, *(list(cfmt) + [0] * (8 - len(cfmt))))
+    struct.pack_into('<6I', k, 48, dfmt, sfmt, samples, blend_en, chmask, a2c)
+    for i, f in dict(blend).items():   # target:3, src_rgb:7, dst_rgb:7, src_a:7, dst_a:7, eq_rgb:3, eq_a:3, adv:6, adv_npm:1, adv_ovl:2, adv_dst_free:1
+        v = (f.get('src_rgb', 0) << 3 | f.get('dst_rgb', 0) << 10 | f.get('src_a', 0) << 17 | f.get('dst_a', 0) << 24 | f.get('eq_rgb', 0) << 31 | f.get('eq_a', 0) << 34
+             | f.get('adv', 0) << 37 | f.get('adv_npm', 0) << 43 | f.get('adv_ovl', 0) << 44)
+        struct.pack_into('<Q', k, 72 + 8 * i, v)
+    struct.pack_into('<2I', k, 344, atest, logic)
+    head = vs.encode().ljust(24, b'\0') + fs.encode().ljust(24, b'\0') + bytes((vs_stage, fs_stage if fs else 0, merged, fz)) + bytes(36)
+    return (head + bytes(k)).hex()[:2 * size]
+
+
+SA, ISA, ONE, ZERO, ADD = 5, 6, 2, 1, 1
+OVER = {'src_rgb': SA, 'dst_rgb': ISA, 'src_a': SA, 'dst_a': ISA, 'eq_rgb': ADD, 'eq_a': ADD}
+
+
+class Mesh(unittest.TestCase):
+    """The task / mesh pipelines of the M rows: the key as the host writes it, the descriptor mtk_desc4 and pso_desc make from it, the rows left to the device, the script"""
+    d: Path   # Plan.setUp's folder
+    setUp, shader = Plan.setUp, Plan.shader
+
+    def shaders(self):
+        self.shader('t', {'mesh_stage': {'kind': 'ts', 'threads': 32, 'payload': 20, 'task': True}}, {'_b': [('main0', False)]})
+        self.shader('m', {'entry_z': 'main0_z', 'mesh_stage': {'kind': 'ms', 'threads': 64, 'payload': 20, 'task': True}}, {'_b': [('main0', False), ('main0_z', False)]})
+        self.shader('n', {'entry_z': 'main0_z', 'entry_object': 'main0_o', 'mesh_stage': {'kind': 'ms', 'threads': 96, 'task': False}},
+                    {'_b': [('main0', False), ('main0_z', False), ('main0_o', False)]})
+        self.shader('mc', {'mesh_stage': {'kind': 'ms', 'threads': 64, 'task': True}}, {'_b': [('main0', True)]})
+        self.shader('p', {'raster': {'colors': [0], 'omap': 7}}, {'_b': [('main0', False)]})
+        self.shader('pc', {}, {'_b': [('main0', True)]})
+        self.shader('old', {'chain': 'fedcba987654', 'mesh_stage': {'kind': 'ms', 'task': True}}, {'_b': [('main0', False)]})
+
+    def test_rows_of_the_lists(self):
+        l = self.d / 'pso_manifest.tsv'
+        l.write_text('# list\nS\tm_b\t4\nM\tt_b\tAA\nM\t-\tBB\nM\tt_b\tAA\nM\tt_b\tCC\textra\nC\tc_b\nM\tt_b\tDD\r\n')
+        self.assertEqual(po.read_meshes([l, self.d / 'none.tsv']), [('t_b', 'AA'), (None, 'BB'), ('t_b', 'DD')])   # recorded order, each once; three columns only
+        self.assertEqual(po.read_meshes(None), [])
+
+    def test_key_as_the_host_writes_it(self):
+        k = po.parse_mesh_key(skey(cfmt=(70, 0, 115), chmask=0xfff, blend_en=0b101, blend={0: OVER, 2: dict(OVER, adv=8, adv_npm=1)}, samples=4, a2c=1))
+        self.assertEqual((k['vs'], k['fs'], k['cfmt'][:3], k['samples'], k['a2c']), ('m_b', 'p_b', [70, 0, 115], 4, 1))
+        self.assertEqual(k['chmask'], 0xf0f)   # the absent target's channels dropped, as pso_key_norm does
+        self.assertEqual({x: k['blend'][0][x] for x in OVER}, OVER)
+        self.assertEqual((k['blend'][2]['adv'], k['blend'][2]['adv_npm'], k['blend'][2]['adv_ovl']), (8, 1, 0))
+        self.assertEqual(k['blend'][1]['src_rgb'], 0)
+        self.assertEqual(po.parse_mesh_key(skey(atest=1, size=504 - 64))['atest'], 1)   # a row written before attr_hi
+        self.assertEqual(po.parse_mesh_key(skey(atest=1, size=504 - 64 - 8))['atest'], 0)   # and one before atest / logic: those fields read as zero
+        self.assertEqual(po.parse_mesh_key(skey(atest=1))['atest'], 1)
+        self.assertEqual(po.parse_mesh_key(skey(fs='', cfmt=()))['fs'], '')
+        self.assertEqual(po.parse_mesh_key(skey(sfmt=260))['cfmt'][0], 70)   # combined depth / stencil paired (pso_ds_pair)
+        for bad in (skey(vs_stage=0), skey(fs_stage=0), skey(merged=1), skey(fz=1), skey(ptr=1), skey(vs=''), skey(dfmt=260, sfmt=253), skey(dfmt=55), skey()[:-2], 'zz' + skey()[2:]):
+            self.assertIsNone(po.parse_mesh_key(bad))
+
+    def test_pipelines_and_left_out(self):
+        self.shaders()
+        rows = [('t_b', skey()), (None, skey(vs='n_b', blend_en=1, blend={0: OVER})), ('t_b', skey(dfmt=252)),   # the third: the same pipeline (no depth format in Metal 4)
+                ('t_b', skey(vs='n_b')), (None, skey()), ('p_b', skey()),   # stages that do not fit: a task with a mesh shader of its own object, the reverse, a pixel shader as the task
+                ('t_b', skey(fs='', cfmt=())), ('t_b', skey(atest=1)), ('t_b', skey(logic=1)), ('t_b', skey(fs='pc_b')), ('t_b', skey(vs='mc_b')), ('t_b', skey(cfmt=(999,))),
+                ('t_b', skey(vs='old_b')), ('gone_b', skey()), ('t_b', 'ff'), ('t_b', skey(fs='nolib_b'))]
+        (self.d / 'nolib_b.json').write_text(json.dumps({'chain': CHAIN, 'entry': 'main0'}))
+        pipes, left = po.plan_mesh(self.d, CHAIN, rows, True)
+        self.assertEqual(left, {'key': 1, 'reflection': 2, 'stages': 3, 'library': 1, 'entry': 0, 'constants': 2, 'no pixel shader': 1, 'side library': 2, 'format': 1})
+        self.assertEqual(len(pipes), 2)
+        a, b = pipes
+        self.assertEqual((a.obj, a.mesh, a.frag, a.obj_threads, a.mesh_threads, a.payload, a.samples, a.a2c), (('t_b', 'main0'), ('m_b', 'main0_z'), ('p_b', 'main0'), 32, 64, 32, 1, False))
+        self.assertEqual(a.colours[0], ('RGBA8Unorm', 'Red Green Blue', 'Disabled', 'Add', 'Add', 'Zero', 'Zero', 'One', 'One'))   # the output map leaves alpha alone
+        self.assertEqual(a.colours[1:], (po.DEFAULT_COLOUR,) * 7)
+        self.assertEqual((b.obj, b.mesh, b.obj_threads, b.mesh_threads, b.payload), (('n_b', 'main0_o'), ('n_b', 'main0_z'), 1, 96, 16))   # no task: one thread a block, 16 bytes
+        self.assertEqual(b.colours[0], ('RGBA8Unorm', 'Red Green Blue', 'Enabled', 'Add', 'Add', 'OneMinusSourceAlpha', 'OneMinusSourceAlpha', 'SourceAlpha', 'SourceAlpha'))
+        self.assertEqual(po.plan_mesh(self.d, CHAIN, rows[:1], False)[0][0].mesh, ('m_b', 'main0'))   # near = -w: the mesh shader's main0
+
+    def colours(self, fj, funcs, **key):
+        return po.mesh_fragment(po.parse_mesh_key(skey(**key)), dict({'entry': 'main0'}, **fj), dict({'main0': False}, **funcs))
+
+    def test_fragment_entry_and_colour_state_as_pso_desc(self):
+        u = {'entry_u': 'main0_u', 'entry_m': 'main0_m', 'uint_mask_m': 2, 'entry_d': 'main0_d'}; uf = dict.fromkeys(('main0_u', 'main0_m', 'main0_d'), False)
+        e, c = self.colours(u, uf, cfmt=(73,), blend_en=1, blend={0: OVER})   # every written target unsigned: the integer entry; an integer target is never blended
+        self.assertEqual((e, c[0][:3]), ('main0_u', ('RGBA8Uint', 'All', 'Disabled')))
+        self.assertEqual(self.colours(u, uf, cfmt=(70, 73), chmask=0xff)[0], 'main0_m')   # mixed, as the mixed entry's mask says
+        self.assertEqual(self.colours(dict(u, uint_mask_m=1), uf, cfmt=(70, 73), chmask=0xff)[0], 'main0')   # mixed, but not the outputs the mixed entry returns as integers
+        self.assertEqual(self.colours({}, {}, cfmt=(73,))[0], 'main0')   # no integer entry: main0
+        src1 = dict(OVER, dst_rgb=0x13, dst_a=0x12)
+        e, c = self.colours(dict(u, raster={'colors': [0, 1]}), uf, cfmt=(70, 70), chmask=0xff, blend_en=1, blend={0: src1})   # dual-source: its entry, output 1 no colour output
+        self.assertEqual((e, c[0][2:], c[1][1:3]), ('main0_d', ('Enabled', 'Add', 'Add', 'Source1Alpha', 'OneMinusSource1Alpha', 'SourceAlpha', 'SourceAlpha'), ('None', 'Disabled')))
+        e, c = self.colours({'raster': {'colors': [0, 1]}}, {}, cfmt=(70,), blend_en=1, blend={0: src1})   # no dual-source entry: the second source counts as zero
+        self.assertEqual((e, c[0][5:7]), ('main0', ('Zero', 'One')))
+        e, c = self.colours({'raster': {'colors': [0]}}, {}, cfmt=(70,), blend_en=1, blend={0: src1})   # output 1 not written: likewise
+        self.assertEqual(c[0][5:7], ('Zero', 'One'))
+        e, c = self.colours({}, {}, cfmt=(70,), blend_en=1, blend={0: src1})   # outputs unknown: the state as it is
+        self.assertEqual(c[0][5:7], ('Source1Alpha', 'OneMinusSource1Alpha'))
+        c = self.colours({'raster': {'colors': [1], 'omap': 0xf3}}, {}, cfmt=(70, 70), chmask=0xff, blend_en=3, blend={0: OVER, 1: OVER})[1]
+        self.assertEqual((c[0][1:3], c[1][1:3]), (('None', 'Disabled'), ('All', 'Enabled')))   # output 0 not written: no mask, no blending; output 1 its map's channels
+        adv = self.colours({}, {}, cfmt=(70,), blend_en=1, blend={0: {'adv': 8, 'eq_rgb': 3, 'eq_a': 3}})[1][0]   # SRC_OVER: One, OneMinusSourceAlpha, Add
+        self.assertEqual(adv[3:], ('Add', 'Add', 'OneMinusSourceAlpha', 'OneMinusSourceAlpha', 'One', 'One'))
+        npm = self.colours({}, {}, cfmt=(70,), blend_en=1, blend={0: {'adv': 8, 'adv_npm': 1}})[1][0]   # a source not premultiplied: SourceAlpha for colour
+        self.assertEqual(npm[8], 'SourceAlpha')
+        keep = self.colours({}, {}, cfmt=(70,), blend_en=1, blend={0: dict(OVER, adv=0x15)})[1][0]   # MULTIPLY has no fixed-function form: the state's functions
+        self.assertEqual(keep[5:], ('OneMinusSourceAlpha', 'OneMinusSourceAlpha', 'SourceAlpha', 'SourceAlpha'))
+        sub = self.colours({}, {}, cfmt=(70,), blend_en=1, blend={0: dict(OVER, eq_rgb=2, eq_a=5, dst_a=0)})[1][0]   # equations; an unset function reads One, as bfac's default
+        self.assertEqual(sub[3:6], ('Max', 'Subtract', 'One'))
+        self.assertEqual(self.colours({'entry': 'none'}, {}), 'entry')
+        self.assertEqual(self.colours(u, {**uf, 'main0_u': True}, cfmt=(73,)), 'constants')
+        self.assertEqual(self.colours({}, {}, cfmt=(7,)), 'format')
+
+    def test_script(self):
+        self.shaders()
+        pipes, _ = po.plan_mesh(self.d, CHAIN, [('t_b', skey(samples=4, a2c=1))], False)
+        j = po.script(self.d, [('v_bp', 'main0', 'p_b', 'main0')], [('c_b', 'main0'), *pipes])
+        self.assertEqual([l['label'] for l in j['libraries']], ['v_bp', 'p_b', 'c_b', 't_b', 'm_b'])
+        self.assertEqual(len(j['pipeline_descriptors']['compute_pipeline_descriptors']), 1)
+        m, = j['pipeline_descriptors']['mesh_render_pipeline_descriptors']
+        self.assertEqual({k: v for k, v in m.items() if k != 'color_attachments'},
+                         {'object_function_descriptor': 'fnd:t_b.main0', 'mesh_function_descriptor': 'fnd:m_b.main0', 'fragment_function_descriptor': 'fnd:p_b.main0',
+                          'max_total_threads_per_object_threadgroup': 32, 'max_total_threads_per_mesh_threadgroup': 64, 'payload_memory_length': 32,
+                          'raster_sample_count': 4, 'alpha_to_coverage_state': 'Enabled'})
+        self.assertEqual(m['color_attachments'][0], dict(zip(po.COLOUR, ('RGBA8Unorm', 'Red Green Blue', 'Disabled', 'Add', 'Add', 'Zero', 'Zero', 'One', 'One'))))
+        self.assertEqual(len(m['color_attachments']), 8)
+        self.assertNotIn('mesh_render_pipeline_descriptors', po.script(self.d, [('v_bp', 'main0', 'p_b', 'main0')], [('c_b', 'main0')])['pipeline_descriptors'])   # none: as before
+        self.assertEqual(po.library_digest(self.d, [], pipes), po.library_digest(self.d, [], pipes * 2))
+        self.assertNotEqual(po.library_digest(self.d, [], pipes), po.library_digest(self.d, [], []))
+
+    def test_groups(self):
+        self.shaders()
+        pipes, _ = po.plan_mesh(self.d, CHAIN, [('t_b', skey(samples=n)) for n in (1, 2, 4)], False)
+        c = [('c_b', 'main0')]
+        self.assertEqual([(n, len(x), len(y)) for n, x, y in po.groups_of([], c + pipes, 5, 5, 2)], [('c00001', 0, 1), ('m00001', 0, 2), ('m00002', 0, 1)])
+        self.assertEqual([n for n, _, _ in po.groups_of([], pipes + c, 5)], ['c00001', 'm00001'])   # the kinds apart, whatever their order
+
+
 class Build(unittest.TestCase):
     """main: one archive per architecture, made again only when its key changes; the stamp, rest_pairs.tsv and archive.tsv beside them"""
     def setUp(self):
@@ -584,6 +715,93 @@ class Build(unittest.TestCase):
         text, left = self.failed_run(10 << 30)
         self.assertNotIn('out of disk space', text); self.assertIn('metal-tt failed', text)
         self.assertFalse({'translate-0001', 'a.airp'} & left)
+
+
+    def mesh_profile(self):
+        for k, j, funcs in (('t', {'mesh_stage': {'kind': 'ts', 'threads': 1, 'payload': 4, 'task': True}}, [('main0', False)]),
+                            ('m', {'mesh_stage': {'kind': 'ms', 'threads': 1, 'task': True}}, [('main0', False)])):
+            (self.lib / f'{k}_b.json').write_text(json.dumps(dict({'chain': CHAIN, 'entry': 'main0'}, **j))); (self.lib / f'{k}_b.metallib').write_bytes(metallib(funcs))
+        (self.prof / 'pso_manifest.tsv').write_text(f'# list\nM\tt_b\t{skey(fs="f_b")}\nM\tt_b\t{skey(fs="c_b")}\n')   # c has function constants: left to the device
+
+    def test_task_mesh_pipelines_are_groups_of_their_own(self):
+        self.mesh_profile()
+        observed = []
+        def runner(cmd, **kw):
+            cmd = [str(c) for c in cmd]
+            if 'metal-tt' in cmd and '-o' in cmd:
+                kinds = json.loads(next(Path(p) for p in cmd if p.endswith('.mtl4-json')).read_text())['pipeline_descriptors']
+                observed.append(sorted(k for k, v in kinds.items() if v))
+            if 'metal-pack' in cmd:
+                observed.append(('merge', sum(p.endswith('.mtl4a') for p in cmd)))
+                Path(cmd[cmd.index('-o') + 1]).write_bytes(b'merged'); return subprocess.CompletedProcess(cmd, 0)
+            return self.fake_run(cmd, **kw)
+        with mock.patch.object(po.subprocess, 'run', runner), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(io.StringIO()) as out:
+            po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0'])
+        self.assertIn('2 task / mesh rows: 1 task / mesh pipelines, left out: key 0, reflection 0, stages 0, library 0, entry 0, constants 1', out.getvalue())
+        self.assertEqual(observed, [['render_pipeline_descriptors'], ['mesh_render_pipeline_descriptors'], ('merge', 2)])   # the bases, the task / mesh pipelines, one archive
+        self.assertEqual(sorted(d.name for d in (self.work / 'batches.applegpu_g19p').iterdir()), ['00001', 'm00001'])
+        self.assertIn('mesh\t1\n', (self.out / 'archive.tsv').read_text())
+        self.assertTrue((self.work / 'key.applegpu_g19p').is_file())
+        observed.clear(); self.main('--os-min', '27.0'); self.assertEqual(observed, [])   # unchanged: reused
+        self.main('--os-min', '27.0', '--no-mesh'); self.assertIn('mesh\t0\n', (self.out / 'archive.tsv').read_text())
+
+    def test_a_refused_task_mesh_group_leaves_the_rest_of_the_archive(self):   # GitHub issue #283: one refused pipeline must not cost the bases
+        self.mesh_profile()
+        refuse = [True]
+        def runner(cmd, **kw):
+            cmd = [str(c) for c in cmd]
+            if 'metal-tt' in cmd and '-o' in cmd and refuse[0] and 'mesh_render_pipeline_descriptors' in next(Path(p) for p in cmd if p.endswith('.mtl4-json')).read_text():
+                Path(cmd[cmd.index('-o') + 1]).write_bytes(b'partial'); return subprocess.CompletedProcess(cmd, 1)
+            if 'metal-pack' in cmd:
+                self.calls.append(cmd); Path(cmd[cmd.index('-o') + 1]).write_bytes(b'merged'); return subprocess.CompletedProcess(cmd, 0)
+            return self.fake_run(cmd, **kw)
+        with mock.patch.object(po.subprocess, 'run', runner), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0']), 0)
+            self.assertIn('[RED] pso_offline: applegpu_g19p: batch 2/2 (1 task / mesh pipelines) left out of the archive', out.getvalue())
+            self.assertTrue((self.out / 'applegpu_g19p.mtl4a').is_file())   # the bases shipped
+            self.assertEqual(sum('00001' in c for c in self.calls[-1]), 1)
+            # the refusal is kept by the group's own inputs and the archive's key written: the next build with the same inputs reuses the archive, with neither metal-tt nor a merge
+            self.assertTrue((self.work / 'key.applegpu_g19p').is_file()); self.assertTrue((self.work / 'batches.applegpu_g19p/m00001/refused.applegpu_g19p').is_file())
+            n, tt = len(self.calls), [0]
+            def counting(cmd, **kw):
+                tt[0] += 'metal-tt' in [str(c) for c in cmd] and '-o' in [str(c) for c in cmd]; return runner(cmd, **kw)
+            with mock.patch.object(po.subprocess, 'run', counting):
+                out.truncate(0); out.seek(0)
+                po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0'])
+                self.assertEqual((len(self.calls), tt[0]), (n, 0))
+                self.assertIn('applegpu_g19p: reused', out.getvalue()); self.assertIn('[RED] pso_offline: applegpu_g19p: task / mesh group(s) m00001 left out of the archive', out.getvalue())
+                # removing the refusal by hand, as the red line says, tries that group again with the same inputs (refused again here) instead of reusing the archive without it
+                (self.work / 'batches.applegpu_g19p/m00001/refused.applegpu_g19p').unlink()
+                out.truncate(0); out.seek(0)
+                po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0'])
+                self.assertEqual(tt[0], 1); self.assertNotIn('applegpu_g19p: reused', out.getvalue())
+                self.assertIn('refused.applegpu_g19p of task / mesh group(s) m00001 removed: trying again', out.getvalue())
+                self.assertTrue((self.work / 'batches.applegpu_g19p/m00001/refused.applegpu_g19p').is_file())
+                self.assertEqual((self.work / 'key.applegpu_g19p').read_text().splitlines()[1:], ['refused\tm00001'])
+                # the group's inputs change (its library): compiled again, now accepted, and merged with the bases
+                refuse[0] = False
+                (self.lib / 't_b.metallib').write_bytes((self.lib / 't_b.metallib').read_bytes() + b'changed GPU program')
+                po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0'])
+            self.assertTrue((self.work / 'key.applegpu_g19p').is_file()); self.assertFalse((self.work / 'batches.applegpu_g19p/m00001/refused.applegpu_g19p').exists())
+            self.assertEqual(sum(p.endswith('.mtl4a') for p in self.calls[-1]), 2)
+            self.assertGreater(len(self.calls), n)
+
+    def test_a_task_mesh_group_that_fails_otherwise_is_tried_again(self):   # a compiler killed (no exit of its own) is no refusal: no key, and the next build compiles the group again
+        self.mesh_profile()
+        kill = [True]
+        def runner(cmd, **kw):
+            cmd = [str(c) for c in cmd]
+            if 'metal-tt' in cmd and '-o' in cmd and kill[0] and 'mesh_render_pipeline_descriptors' in next(Path(p) for p in cmd if p.endswith('.mtl4-json')).read_text():
+                return subprocess.CompletedProcess(cmd, -9)
+            if 'metal-pack' in cmd:
+                self.calls.append(cmd); Path(cmd[cmd.index('-o') + 1]).write_bytes(b'merged'); return subprocess.CompletedProcess(cmd, 0)
+            return self.fake_run(cmd, **kw)
+        args = ['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0']
+        with mock.patch.object(po.subprocess, 'run', runner), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(io.StringIO()):
+            po.main(args)
+            self.assertFalse((self.work / 'key.applegpu_g19p').exists()); self.assertFalse((self.work / 'batches.applegpu_g19p/m00001/refused.applegpu_g19p').exists())
+            kill[0] = False; po.main(args)
+        self.assertTrue((self.work / 'key.applegpu_g19p').is_file()); self.assertEqual(sum(p.endswith('.mtl4a') for p in self.calls[-1]), 2)
 
 
 class IpaFallback(unittest.TestCase):

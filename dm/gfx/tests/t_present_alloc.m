@@ -113,7 +113,11 @@ int main(void) { @autoreleasepool {
 
     // A standing frame trimmed (DM_PRESENT_TRIM=3): two frames waiting at every tick, as when two landed in one refresh and none came without one. FIFO takes the older at the
     // first two ticks, and the third takes the newest, dropping one; then a single frame resets the run. The GPU gate is open from here on
-    CHECK("trim off by default", g_link_trim == 0);
+    // K comes from DM_PRESENT_TRIM when it is set, whatever the profile says (env.txt's 0 turns a profile's trim off), else from the profile's present_trim (0 for most games, 60 for
+    // Ocarina of Time): run with GAME=0400486024DEC000 as well as the generic suites' game to see both defaults
+    CHECK("trim: the profile's present_trim without DM_PRESENT_TRIM", g_link_trim == present_trim_k(getenv("DM_PRESENT_TRIM")) && present_trim_k(NULL) == DM_GAME_PRESENT_TRIM);
+    CHECK("trim: DM_PRESENT_TRIM wins over the profile", present_trim_k("0") == 0 && present_trim_k("45") == 45 && present_trim_k("-3") == 0 && present_trim_k("off") == 0);
+    printf("trim: K %d (game profile present_trim %d)\n", g_link_trim, DM_GAME_PRESENT_TRIM);
     g_link_trim = 3; uint64_t drop0 = g_link_dropped, in0 = g_pq_in;
     present_enqueue(&a, 1. / 60, NULL, 0); present_enqueue(&b, 1. / 60, NULL, 0); tick();
     CHECK("two waiting, first tick: the older (FIFO)", g_pq_read == in0 + 1 && g_link_it_depth == 2 && g_link_trims == 0);

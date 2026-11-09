@@ -134,6 +134,9 @@ static uint64_t g_link_dropped;
 static uint64_t g_link_trims;   // Under g_pq_mu: standing frames dropped by DM_PRESENT_TRIM (the display-link callback; its log line in present_now reads it on the same thread)
 static uint64_t g_link_empty;   // Under g_pq_mu: ticks that found no new frame queued (counted here, not as ticks minus presents: presents before the link starts and while it is rescued are not on ticks)
 static int g_link_trim = -1, g_link_standing;   // Under g_pq_mu (the display-link callback): DM_PRESENT_TRIM's K (-1 not read yet, 0 off) and the ticks in a row that left a frame waiting
+// DM_PRESENT_TRIM's K from its environment value (NULL: not set): set, it wins whatever the profile says, so DM_PRESENT_TRIM=0 in Documents/env.txt turns off a profile's trim;
+// unset, the profile's present_trim (0 for every game that has not been run with it on a device: whether a game's frames form standing frames, and how often, is the game's own)
+static int present_trim_k(const char *e) { int k = e ? atoi(e) : DM_GAME_PRESENT_TRIM; return k > 0 ? k : 0; }
 static double g_link_hold_until; static uint64_t g_link_held;   // Changed only on the display-link callback thread: the time the previous frame must stay on screen until by its present interval (0 = no hold), and the ticks that took no new frame because of it
 static int g_pq_inflight;   // Under g_pq_mu: number of presents committed to the GPU whose completion callback has not arrived yet
 int g_dm_present_link;   // Present pacing mode (runtime value of DM_PRESENT_LINK, modified directly during same-process alternating measurement): 0 = acquire the drawable itself; 1 = display link at 60 Hz; 2 = display link at 120 Hz, the game presents a frame every other display-link tick
@@ -6561,6 +6564,16 @@ static id<MTLTexture> tex_fit(int tid, id<MTLTexture> t, MTLTextureType want, ui
     if (!ns && want == MTLTextureType3D && (have == MTLTextureType2D || have == MTLTextureType2DArray)) {
         static int noted; if (!noted++) MLOG("3D binding fallback: texture ID %d is %s %lux%lu (Metal format %lu); zero 3D texture bound", tid, have == MTLTextureType2D ? "2D" : "a 2D array",
                                              (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat);
+        id<MTLTexture> z = dummy_tex((int)want, NVN_DPF_FLOAT); *rid = g_dummy_tex_rid[want % DMY_NT][NVN_DPF_FLOAT]; return z; }
+    // The reverse: a 3D texture in a 2D array, cube or cube array slot. Metal makes no view of a 3D texture but a 3D one, so no view bridges it, and a copy of its depth planes into
+    // a 2D array would be a guess: a 3D texture's block-linear tiles span depth where an array's layers lie apart, and what the Switch's texture unit reads from a 3D header through an
+    // array instruction is not known. Ocarina of Time on the Switch 2 leaves an RGB10A2 colour-grading lookup table in slot 7 of its Layout2 MergeShader, which samples that slot as a
+    // 2D array only when its uniform c3[0].x is set (Kirby and the Forgotten Land's layout shaders do the same with 2D slots that c3[0].y switches off). The zero texture of the declared
+    // type, a defined read, as for the cases above. A 2D slot keeps the 3D texture and its report: a size query carries no type and is translated as 2D when nothing else uses its slot
+    // (docs/reference/shaders.md, "A size query on a 3D texture gets a 2D slot"), and the 3D texture bound there returns its real width, where the zero texture would return 1
+    if (!ns && have == MTLTextureType3D && (want == MTLTextureType2DArray || want == MTLTextureTypeCube || want == MTLTextureTypeCubeArray)) {
+        static int noted; if (!noted++) MLOG("layered binding fallback: texture ID %d is a 3D texture %lux%lux%lu (Metal format %lu) in a slot declared as Metal type %lu; zero texture bound (the shader may leave this input unused)",
+                                             tid, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth, (unsigned long)t.pixelFormat, (unsigned long)want);
         id<MTLTexture> z = dummy_tex((int)want, NVN_DPF_FLOAT); *rid = g_dummy_tex_rid[want % DMY_NT][NVN_DPF_FLOAT]; return z; }
     if (!ns || tid <= 0 || tid >= g_ntreg) return nil;   // no view bridges it: the caller reports it (tex_mis_note)
     treg_t *r = &g_treg[tid];
@@ -16318,14 +16331,14 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     // dropped the one before whenever two frames landed in the same refresh, as frames of a 60 fps game that take 16-17.5 ms do, and the next frame then stayed up 33 ms
     // (Dark Souls Remastered, from PR #31: presents within 14.7-18.7 ms 98.2 -> 99.98 %, about 2 ms more from enqueue to display). DM_PRESENT_FIFO=0 takes the newest, as before
     static int fifo = -1; if (fifo < 0) { const char *e = getenv("DM_PRESENT_FIFO"); fifo = !(e && !strcmp(e, "0")); MLOG("display link: %s", fifo ? "frames in order, at most one behind" : "the newest frame each tick (DM_PRESENT_FIFO=0)"); }
-    // DM_PRESENT_TRIM=<K> (off by default): the rule above keeps one frame waiting for good once two frames land in one refresh and no refresh comes without a frame, as a game at
+    // DM_PRESENT_TRIM=<K> (the profile's present_trim by default, off without it): the rule above keeps one frame waiting for good once two frames land in one refresh and no refresh comes without a frame, as a game at
     // a steady 60 does: every frame then waits one tick more (16.7 ms at 60 Hz) between the game's enqueue and the screen (an iPhone 18 Pro Max: enqueue to display p50 65.5 ms against
     // a callback lead of 33 ms). After K ticks in a row that found two or more frames waiting (the frame left behind stood through all of them), one tick takes the newest, dropping
     // the one before it (a standing frame trimmed, counted in the display link's log line), and the rule holds again. K must be larger than the runs of such ticks that frame-time
     // jitter alone makes, each ended by a refresh without a frame (PR #31's frames of 16-17.5 ms), or the trim drops the frames FIFO is there to keep: 60, a second at 60 Hz, lets
     // a standing frame last a second at most. Empty ticks end a run; ticks held for a long present interval neither end nor count in one. With DM_PRESENT_FIFO=0 there is nothing to trim
-    if (g_link_trim < 0) { const char *e = getenv("DM_PRESENT_TRIM"); g_link_trim = e ? atoi(e) : 0; if (g_link_trim < 0) g_link_trim = 0;
-        if (g_link_trim) MLOG("display link: a frame left waiting through %d ticks in a row is dropped once (DM_PRESENT_TRIM=%d)%s", g_link_trim, g_link_trim, fifo ? "" : "; nothing to trim with DM_PRESENT_FIFO=0"); }
+    if (g_link_trim < 0) { const char *e = getenv("DM_PRESENT_TRIM"); g_link_trim = present_trim_k(e);
+        if (g_link_trim) MLOG("display link: a frame left waiting through %d ticks in a row is dropped once (%s%d)%s", g_link_trim, e ? "DM_PRESENT_TRIM=" : "game profile present_trim ", g_link_trim, fifo ? "" : "; nothing to trim with DM_PRESENT_FIFO=0"); }
     g_link_it_depth = (int)MIN(g_pq_in - g_pq_read, (uint64_t)PQ);
     if (fifo && ticket > first) {
         if (g_link_trim && ++g_link_standing >= g_link_trim) { g_link_standing = 0; g_link_trims++; }   // the newest (ticket stays g_pq_in)

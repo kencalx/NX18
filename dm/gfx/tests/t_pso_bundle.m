@@ -4,7 +4,9 @@
 // and a draw of a covered pair takes its base from the bundle and captures nothing for the device's own archive;
 // a stamp of another depth mode or other pairs runs the device's prebuild, which still takes the bundled bases it finds; an archive whose bases the probe does not find is not trusted;
 // a folder without this GPU's file and a file that is no archive leave no archive; the compute shaders of the shader map have their pipelines in the archive (cps_new: nothing
-// built), and a shader with function constants or not in the map is built as before.
+// built), and a shader with function constants or not in the map is built as before; the task / mesh pipelines of the prewarm list's M rows (the host's own keys) are in the archive,
+// with a task shader and with the mesh shader's own object function, blended and with a write mask cut to the pixel shader's output map, and with no colour target (mtk_build: from the bundle, nothing built
+// or captured), and one with a pixel shader that declares function constants or with no pixel shader is built as before.
 // Without metal-tt (no Metal toolchain) it says so and passes
 #include "../nvn/nvn_mtl.m"
 uint64_t g_t0_ns;
@@ -57,15 +59,45 @@ int main(void) { @autoreleasepool {
                                                 DMSH_CHAIN, @""]);
     put([tables stringByAppendingPathComponent:@"shader_map.tsv"], @"package\tindex\tstage\tdm_ctl_sha16\tsource\ncs.bin\t0\tcompute\tc1\tx\ncs.bin\t1\tcompute\tc2\tx\ncs.bin\t2\tcompute\tcc\tx\n");
     put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], @"# pairs\nv1\tf1\nv1\tf2\nv1\tfc\n");
+    // Task and mesh shaders as dmsh_meshstage.py makes them: a task shader's object function, a mesh shader with a task (main0, main0_z) and one without, whose own object function
+    // launches its blocks (main0_o); a pixel shader whose output map leaves alpha alone (raster.omap), so its pipelines' write mask is cut to RGB
+    NSString *meshes = @"#include <metal_stdlib>\nusing namespace metal;\nstruct MV { float4 p [[position]]; };\nusing Tri = mesh<MV, void, 3, 1, topology::triangle>;\nstruct PL { uint n; };\n"
+        "[[mesh]] void main0(Tri out, const object_data PL &pl [[payload]]) { out.set_primitive_count(pl.n); out.set_vertex(0, MV{float4(-1, -1, 0.5, 1)}); out.set_vertex(1, MV{float4(3, -1, 0.5, 1)});\n"
+        "  out.set_vertex(2, MV{float4(-1, 3, 0.5, 1)}); out.set_index(0, 0); out.set_index(1, 1); out.set_index(2, 2); }\n"
+        "[[mesh]] void main0_z(Tri out, const object_data PL &pl [[payload]]) { out.set_primitive_count(pl.n); out.set_vertex(0, MV{float4(-1, -1, 0, 1)}); out.set_vertex(1, MV{float4(3, -1, 0, 1)});\n"
+        "  out.set_vertex(2, MV{float4(-1, 3, 0, 1)}); out.set_index(0, 0); out.set_index(1, 1); out.set_index(2, 2); }\n%@";
+    NSString *task = @"#include <metal_stdlib>\nusing namespace metal;\nstruct PL { uint n; };\n"
+        "[[object]] void main0(object_data PL &pl [[payload]], mesh_grid_properties g) { pl.n = 1; g.set_threadgroups_per_grid(uint3(1, 1, 1)); }\n";
+    NSString *own = @"[[object]] void main0_o(object_data PL &pl [[payload]], mesh_grid_properties g) { pl.n = 1; g.set_threadgroups_per_grid(uint3(1, 1, 1)); }\n";
+    if (lib(msl, @"t1_b", task) || lib(msl, @"m1_b", [NSString stringWithFormat:meshes, @""]) || lib(msl, @"m2_b", [NSString stringWithFormat:meshes, own]) ||
+        lib(msl, @"p1_b", [NSString stringWithFormat:f, 0, 1])) { fprintf(stderr, "t_pso_bundle: the task / mesh fixture libraries did not compile\n"); return 1; }
+    NSString *refl = @"{\"chain\": \"%s\", \"route\": \"B\", \"bindings\": [], \"stage\": \"%@\", \"entry\": \"main0\"%@}";
+    put([msl stringByAppendingPathComponent:@"t1_b.json"], [NSString stringWithFormat:refl, DMSH_CHAIN, @"ts", @", \"mesh_stage\": {\"kind\": \"ts\", \"threads\": 1, \"payload\": 4, \"task\": true}"]);
+    put([msl stringByAppendingPathComponent:@"m1_b.json"], [NSString stringWithFormat:refl, DMSH_CHAIN, @"ms", @", \"entry_z\": \"main0_z\", \"mesh_stage\": {\"kind\": \"ms\", \"threads\": 1, \"payload\": 4, \"task\": true}"]);
+    put([msl stringByAppendingPathComponent:@"m2_b.json"], [NSString stringWithFormat:refl, DMSH_CHAIN, @"ms",
+                                                            @", \"entry_z\": \"main0_z\", \"entry_object\": \"main0_o\", \"mesh_stage\": {\"kind\": \"ms\", \"threads\": 1, \"payload\": 4, \"task\": false}"]);
+    put([msl stringByAppendingPathComponent:@"p1_b.json"], [NSString stringWithFormat:refl, DMSH_CHAIN, @"ps", @", \"raster\": {\"colors\": [0], \"omap\": 7}"]);
+    put([msl stringByAppendingPathComponent:@"fc_b.json"], [NSString stringWithFormat:refl, DMSH_CHAIN, @"ps", @""]);   // also the pixel shader of a task / mesh row, which shader_load loads
     setenv("DM_NVN_SHMAP", [tables stringByAppendingPathComponent:@"shader_map.tsv"].UTF8String, 1);
     setenv("DM_MSL_DIR", [root stringByAppendingPathComponent:@"msl"].UTF8String, 1);
     setenv("DM_PSO_ARCHIVE", arch.UTF8String, 1); setenv("DM_PSO_MANIFEST", "off", 1);
     mtl_init();
     NSString *gpu = g_dev.architecture.name;
+    // The M rows, as mtk_pso records them (pso_skey_from, pso_skey_hex): keys that only name the shaders, as a prewarm row does
+    NvShader *(^named)(const char *, int) = ^NvShader *(const char *key, int stage) { NvShader *o = [NvShader new]; strlcpy(o->key, key, sizeof o->key); o->stage = stage; return o; };
+    pso_key mk; memset(&mk, 0, sizeof mk); mk.cfmt[0] = MTLPixelFormatRGBA8Unorm; mk.chmask = 0xf; mk.samples = 1;
+    pso_key md; memset(&md, 0, sizeof md); md.samples = 1; md.dfmt = MTLPixelFormatDepth32Float;   // a pixel shader but no colour target (a depth pre-pass): every attachment the default
+    pso_key mb = mk; mb.cfmt[1] = MTLPixelFormatBGRA8Unorm; mb.chmask = 0xff; mb.blend_en = 1;   // target 0 blended (source alpha over), target 1 written by no output
+    mb.blend[0].src_rgb = mb.blend[0].src_a = NVN_BLEND_FUNC_SRC_ALPHA; mb.blend[0].dst_rgb = mb.blend[0].dst_a = NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA; mb.blend[0].eq_rgb = mb.blend[0].eq_a = NVN_BLEND_EQUATION_ADD;
+    NSString *(^mrow)(const char *, const char *, const char *, const pso_key *) = ^NSString *(const char *t, const char *m, const char *p, const pso_key *k) {
+        pso_skey sk; char hex[sizeof sk * 2 + 1]; pso_skey_from(k, named(m, 4), p ? named(p, 1) : nil, 0, NULL, &sk); pso_skey_hex(&sk, hex);
+        return [NSString stringWithFormat:@"M\t%s\t%s\n", t ?: "-", hex]; };
+    put([tables stringByAppendingPathComponent:@"pso_manifest.tsv"], [@[@"# list\n", mrow("t1_b", "m1_b", "p1_b", &mk), mrow(NULL, "m2_b", "p1_b", &mb), mrow("t1_b", "m1_b", "p1_b", &mk),
+                                                                      mrow("t1_b", "m1_b", "fc_b", &mk), mrow(NULL, "m2_b", NULL, &mk), mrow("t1_b", "m1_b", "p1_b", &md)] componentsJoinedByString:@""]);
     // the archive as build_ipa.sh makes it (the tool's own folder: this file is dm/gfx/tests/t_pso_bundle.m)
     NSString *tool = [[@(__FILE__) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"../tools/pso_offline.py"];
-    if (sh([NSString stringWithFormat:@"python3 %@ --platform macos --gpu %@ --msl %@ --pairs %@/shader_pairs.tsv --shader-map %@/shader_map.tsv --out %@ --work %@/work > %@/pso_offline.log 2>&1",
-            tool, gpu, msl, tables, tables, bundle, root, root])) {
+    if (sh([NSString stringWithFormat:@"python3 %@ --platform macos --gpu %@ --msl %@ --pairs %@/shader_pairs.tsv --shader-map %@/shader_map.tsv --manifest %@/pso_manifest.tsv --out %@ --work %@/work > %@/pso_offline.log 2>&1",
+            tool, gpu, msl, tables, tables, tables, bundle, root, root])) {
         NSString *log = [NSString stringWithContentsOfFile:[root stringByAppendingPathComponent:@"pso_offline.log"] encoding:NSUTF8StringEncoding error:nil];
         if ([log containsString:@"metal-tt is not available"]) { printf("t_pso_bundle: no metal-tt (xcodebuild -downloadComponent MetalToolchain), GPU checks not run; %d file checks failed\n", failed); return failed != 0; }
         fprintf(stderr, "pso_offline.py failed:\n%s\n", log.UTF8String); return 1;
@@ -122,6 +154,34 @@ int main(void) { @autoreleasepool {
         EXPECT("compute with constants, not in the map: not from the bundle", a0 + 2, g_cps_arch);
         dispatch_sync(arch_harvest_q(), ^{});
         EXPECT("compute not in the map: captured into this device's archive, the one with constants not", n0 + 1, g_arch_new);
+    }
+    // task / mesh pipelines: the three the rows describe come from the bundle, nothing built or captured; a pixel shader with function constants and no pixel shader are built as before
+    @autoreleasepool {
+        NvShader *t1 = shader_load(@"t1_b", 3, 0), *m1 = shader_load(@"m1_b", 4, 0), *m2 = shader_load(@"m2_b", 4, 0), *p1 = shader_load(@"p1_b", 1, 0), *pc = shader_load(@"fc_b", 1, 0);
+        EXPECT("mesh: shaders loaded", 1, t1 && m1 && m2 && p1 && pc && m2->mesh_obj && t1->mesh_kind == 1 && m1->mesh_kind == 2 && m2->mesh_notask);
+        NSString *log = [NSString stringWithContentsOfFile:[root stringByAppendingPathComponent:@"pso_offline.log"] encoding:NSUTF8StringEncoding error:nil];
+        EXPECT("mesh: three pipelines in the archive, the constant and no-pixel-shader rows left out", 1, [log containsString:@"5 task / mesh rows: 3 task / mesh pipelines"]);
+        uint64_t a0 = g_mtk_arch, b0 = g_mtk_built, d0 = g_mtk_dev; int n0 = g_arch_new, got = 0; NSError *err = nil;
+        if (t1 && m1 && m2 && p1 && pc) {
+            EXPECT("mesh with a task: a pipeline", 1, mtk_build(&mk, t1, m1, p1, &err, &got) != nil);
+            EXPECT("mesh with a task: from the bundle", 1, got);
+            EXPECT("mesh, its own object function, blended: a pipeline", 1, mtk_build(&mb, nil, m2, p1, &err, &got) != nil);
+            EXPECT("mesh, its own object function, blended: from the bundle", 1, got);
+            EXPECT("mesh, no colour target: a pipeline", 1, mtk_build(&md, t1, m1, p1, &err, &got) != nil);
+            EXPECT("mesh, no colour target: from the bundle", 1, got);
+            EXPECT("mesh: all three from the archive", a0 + 3, g_mtk_arch);
+            EXPECT("mesh: nothing built", b0, g_mtk_built);
+            EXPECT("mesh, pixel shader with constants: a pipeline", 1, mtk_build(&mk, t1, m1, pc, &err, &got) != nil);
+            EXPECT("mesh, pixel shader with constants: built", 0, got);
+            EXPECT("mesh, no pixel shader: a pipeline", 1, mtk_build(&mk, nil, m2, nil, &err, &got) != nil);
+            EXPECT("mesh, no pixel shader: built", 0, got);
+            EXPECT("mesh: the two left out built", b0 + d0 + 2, g_mtk_built + g_mtk_dev);
+            pso_key other = mb; other.blend[0].dst_rgb = NVN_BLEND_FUNC_ONE;   // other blend state than the row's: another pipeline
+            EXPECT("mesh, other blend state: a pipeline", 1, mtk_build(&other, nil, m2, p1, &err, &got) != nil);
+            EXPECT("mesh, other blend state: not in the bundle", 0, got);
+            dispatch_sync(arch_harvest_q(), ^{});
+            EXPECT("mesh: only those built captured for the device's archive", n0 + 3, g_arch_new);
+        }
     }
     // A separate output forces one base per compiler invocation, then metal-pack merges both for this GPU.
     NSString *batched = [root stringByAppendingPathComponent:@"batched"];

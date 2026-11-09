@@ -14,10 +14,15 @@ What it reads (docs/development.md, Reading a device log):
                      playing ([nvn] pipelines up to frame); a Vulkan game's [vk] pipelines lines, an OpenGL game's [gl] pipeline builds
   frames, power      [nvn] timing, on-screen and power up to frame N (one each per 300 frames): frame-time percentiles, dropped frames, frame rate, CPU watts, mJ per frame,
                      wakeups, GPU ms/s, thermal state
-  memory             [nvn-mtl] memory up to frame N and the on-screen lines' footprint; [gl] memory at frame N; [vk] frame N … buffer memory: first, last, least, most, slope per 10 min
+  memory             [nvn-mtl] memory up to frame N and the on-screen lines' footprint; [gl] memory at frame N; [vk] frame N … buffer memory: first, last, least, most, and the
+                     plateaus it stays on between the steps an area load makes (a run of samples within a tolerance of their median), with the slope inside them per 10 min
+                     (the run's own slope, which the steps make, only when there is a single plateau)
   display link       [nvn-mtl] display link up to tick N: submission ahead of / game enqueue to target display; the stretches of windows whose enqueue p50 is more than half a frame
                      period above the run's median (the display link counts whole frames: a frame more latency), and what the log shows just before them
-  long frames        [longframe] frame N (T s): the longest, and what each spent its time on (new pipelines, texture uploads, GPU, submit, the game's side, a return from the background)
+  long frames        [longframe] frame N (T s): the longest, and what each spent its time on (new pipelines, texture uploads, GPU, submit, the game's side, a return from the background).
+                     A frame as long as the frame step's hold asked for (2 or 3 vsyncs, within 1.25 of it) is not counted: the host's own line says the hold (; hold K × V ms,
+                     hold 1 too while the frame step runs) and no longer prints such frames; in an older log the hold comes from the [nvn] frame step: hold A → B lines, and past
+                     their last one from runs of three or more such frames at most two frames apart. A log with no frame step line and no hold guesses none
   events             background and resume, focus changes, thermal state and Low Power Mode changes and the caps they set, memory warnings, in-game menu changes
   audio, saves, RED  audio #N device callbacks … underruns; save commit, save sync; [RED] kinds, normalized as regress.py does (numbers, paths and keys taken out)
   audio output       the iOS audio session's I/O buffer and output latency (audio session:, audio route changed, settled at), its route changes (a [RED] one when asking
@@ -85,7 +90,8 @@ RX = {k: re.compile(v) for k, v in {
     'link': r'^\[nvn-mtl\] display link up to tick (\d+): ticks \d+, presents (\d+), empty ticks (\d+) .*?merging (\d+); submission ahead of target display p50 ([\d.]+) ms / min ([\d.]+) ms; '
             r'game enqueue to target display p50 ([\d.]+) ms / min ([\d.]+) / max ([\d.]+) ms',
     'longframe': r'^\[longframe\] frame (\d+) \(([\d.]+) s\) whole frame ([\d.]+) ms, submit\+present ([\d.]+) ms, GPU (-?[\d.]+) ms; new pipelines (\d+) \+ shader libraries (\d+), '
-                 r'([\d.]+) ms in all; texture uploads (\d+) first \+ (\d+) re-uploads, ([\d.]+) MB / ([\d.]+) ms',
+                 r'([\d.]+) ms in all; texture uploads (\d+) first \+ (\d+) re-uploads, ([\d.]+) MB / ([\d.]+) ms(?:.*?; hold (\d+) × ([\d.]+) ms)?',   # the hold part since the hold-aware long-frame log
+    'fstep': r'^\[nvn\] frame step: hold (\d+) → (\d+) (vsyncs|ticks of 1/120 s) at present (\d+)',
     'audio': r'^audio #(\d+) device callbacks (\d+): .*; in these (\d+), (\d+) underruns, ([\d.]+) ms zero-padded',
     'au_session': r'^audio session: sample rate (\d+) Hz, I/O buffer ([\d.]+) ms \(asked for 5 ms\)(?:, output latency ([\d.]+) ms)?',
     'au_route': r'^(?:\[RED\] )?audio route changed \(([^)]*)\): output ([^;]+); sample rate (\d+) Hz, I/O buffer ([\d.]+) ms, output latency ([\d.]+) ms; '
@@ -113,7 +119,26 @@ EVENTS = (('[nvn-mtl] entering the background', 'background', 'app'), ('[nvn] gr
           ('audio session: resumption recommended', 'audio resumption recommended (lifecycle notice)', 'audio'),
           ('the frame step holds 30 fps', 'the frame step held at 30 fps', 'cap'), ('back to the frame rate cap', 'the chosen frame rate again', 'cap'),
           ('present upscaling: bilinear while the device is', 'MetalFX off (heat or Low Power Mode)', 'cap'), ('present upscaling: MetalFX again', 'MetalFX again', 'cap'))
-CAUSE_KEY = (('return', 'background'), ('focus', 'focus'), ('new pipelines', 'pipelines'), ('texture', 'uploads'), ('GPU', 'gpu'), ('submit', 'submit'), ("the game's", 'game'))
+CAUSE_KEY = (('return', 'background'), ('focus', 'focus'), ('new pipelines', 'pipelines'), ('texture', 'uploads'), ('GPU', 'gpu'), ('submit', 'submit'), ("the game's", 'game'),
+             ('the hold', 'hold'))
+# A frame the frame step held for k vsyncs is as long as asked within HOLD_SLACK times k vsyncs (nvn_fstep.h FSTEP_LF_SLACK: frames at hold 2 take 31–36 ms on an iPhone). The host's
+# long-frame log judged a frame against a running mean that needs 8–9 frames to catch up with a step up, so before it took the hold into account it printed those frames: 412 of
+# the 486 an Ocarina of Time run on an iPhone had on the game's side. An older log names the hold only in its frame step lines, which stop after 40 lines; past them, a run of
+# HOLD_RUN or more frames of k vsyncs (k from 2 to FSTEP_MAX, HOLD_LOW of it at least), with nothing else in them and at most HOLD_GAP frames apart, is a hold too: a hitch of the
+# game's own is one or two frames, and not a whole number of vsyncs each. Only past those lines: a log without them shows no frame step, and there such runs are the game's own
+# 30 or 20 fps dips
+HOLD_SLACK, HOLD_LOW, HOLD_RUN, HOLD_GAP, HOLD_KMAX, VSYNC_MS = 1.25, 0.9, 3, 2, 3, 1000 / 60
+# The host stops logging the frame step's changes after its 40th line and says so on that line, whichever of its kinds it is: a change of hold, the end of a probe (held or failed),
+# or a short run after a probe counted as failed. Only the first names its new hold (RX 'fstep'), so the marker is read from every kind (fstep_cut): a cut taken from the hold
+# lines alone was missed when the 40th line was a probe's, and the last logged hold was then applied to every later frame, hiding a game's own 33-41 ms frames at a stale hold 2
+FSTEP_CUT, FSTEP_AT = '; further changes only counted below', re.compile(r' at present (\d+)')
+
+
+def fstep_cut(cuts: list[tuple[int, Any, int]]) -> int | None:
+    """The present after which the log names no more frame step changes: the one its marked line names, else (the short run after a probe names none) the frame the log was at"""
+    if not cuts: return None
+    _, m, f = cuts[-1]
+    return int(m.group(1)) if m else f
 API = {'nvn': 'NVN', 'vk': 'Vulkan', 'gl': 'OpenGL'}
 
 
@@ -158,11 +183,46 @@ class Clock:
         return round(max(0.0, t + (lerp(self.fix, f, slope=False) if self.fix else 0.0)), 1)
 
 
-def spread(points: list[tuple[float, float]]) -> Rec | None:   # (seconds, value) → first, last, least, most, and the least-squares slope per 10 minutes over two minutes or more
+# Memory rises in steps where the game loads an area and stays about flat until the next: Ocarina of Time on an iPhone went 765 → 2830 → 3830 → 4490 MB of footprint in a
+# 9.6-minute run, which a single slope over the run gave as +5290 MB per 10 minutes, a leak it did not have. A plateau is a run of samples within PLATEAU_REL of their median (and
+# at least PLATEAU_FLOOR, in the series' unit); a sample outside it starts the next plateau when the sample after it is outside on the same side too, so one spike does not.
+# What drifts within the plateaus is the slope fitted to all of them at once with a level of their own each (the steps left out), over two minutes of plateaus or more.
+# Counts of textures churn more than megabytes do (Ocarina of Time's shared textures went 1050 → 1648 → 880 within one area): their plateaus take a wider band
+PLATEAU_REL, PLATEAU_FLOOR, PLATEAU_REL_COUNT, PLATEAU_FLOOR_COUNT = 0.08, 64.0, 0.2, 16.0
+
+
+def plateaus(points: list[tuple[float, float]], floor: float = PLATEAU_FLOOR, rel: float = PLATEAU_REL) -> list[list[tuple[float, float]]]:
+    out: list[list[tuple[float, float]]] = []; cur: list[tuple[float, float]] = []
+    for k, (t, v) in enumerate(points):
+        if cur:
+            ref = statistics.median(x for _, x in cur); tol = max(floor, rel * abs(ref))
+            nxt = points[k + 1][1] if k + 1 < len(points) else None
+            if abs(v - ref) > tol and nxt is not None and abs(nxt - ref) > tol and (nxt - ref) * (v - ref) > 0: out.append(cur); cur = []
+        cur.append((t, v))
+    return out + [cur] if cur else out
+
+
+def drift(phases: list[list[tuple[float, float]]]) -> float | None:   # the slope within the plateaus per 10 minutes: a common slope, a level of each plateau's own
+    sxy = sxx = span = 0.0
+    for ph in phases:
+        if len(ph) < 2: continue
+        tm = sum(t for t, _ in ph) / len(ph); vm = sum(v for _, v in ph) / len(ph)
+        sxy += sum((t - tm) * (v - vm) for t, v in ph); sxx += sum((t - tm) ** 2 for t, _ in ph); span += ph[-1][0] - ph[0][0]
+    return round(600 * sxy / sxx, 1) if sxx > 0 and span >= 120 else None
+
+
+def spread(points: list[tuple[float, float]], floor: float = PLATEAU_FLOOR, rel: float = PLATEAU_REL) -> Rec | None:
+    """(seconds, value) → first, last, least, most, the least-squares slope per 10 minutes over two minutes or more, the plateaus and the drift within them"""
     if not points: return None
     vs = [v for _, v in points]; ts = [t for t, _ in points]
     out: Rec = {'first': vs[0], 'last': vs[-1], 'min': min(vs), 'max': max(vs), 'per_10min': None, 'samples': len(vs)}
     if len(points) >= 3 and ts[-1] - ts[0] >= 120 and len(set(ts)) > 1: out['per_10min'] = round(600 * statistics.linear_regression(ts, vs).slope, 1)
+    # one sample per time for the plateaus: two lines that read the same moment (the footprint of a memory line and of an on-screen line) would confirm each other's spike
+    ph = plateaus(list(dict(reversed(points)).items())[::-1] if len(set(ts)) < len(ts) else points, floor, rel)
+    whole = all(v == int(v) for v in vs)   # megabytes and counts the log gives whole: their medians too
+    out['plateaus'] = [{'from_s': p[0][0], 'to_s': p[-1][0], 'median': (round if whole else lambda x: round(x, 1))(statistics.median(v for _, v in p)),
+                        'min': min(v for _, v in p), 'max': max(v for _, v in p), 'samples': len(p)} for p in ph]
+    out['drift_per_10min'] = drift(ph) if len(ph) > 1 else out['per_10min']
     return out
 
 
@@ -175,6 +235,38 @@ def lf_causes(r: Rec, after: list[str], frame_ms: float) -> list[str]:   # what 
     if r['gpu_ms'] > 1.5 * frame_ms: c.append(f"GPU {r['gpu_ms']:.0f} ms")
     if not c: c.append(f"submit+present {r['submit_ms']:.0f} ms" if r['submit_ms'] >= 0.5 * r['ms'] else "the game's side (its code or its waits)")
     return c
+
+
+def hold_frames(lfs: list[Rec], steps: list[tuple[int, int, float, int]], cut: int | None = None) -> None:
+    """Marks each long frame whose only cause was the game's side and that took what its hold asked for (r['held_ms']): from the line's own hold, else from the frame step lines
+    (present, new hold, its vsync in ms, the hold before): the hold a frame was made under is the one the present before it set, and presents are counted like frames; past cut, the
+    present after which the log names no more changes (fstep_cut), from runs of frames of a whole number of vsyncs. A log whose lines say a hold needs no guess: the host says it on every line while the
+    frame step runs, hold 1 too, so a line without one there was made at no hold. A log with neither a hold nor a frame step line shows no frame step, and its frames of two or three
+    vsyncs (a game's own 30 or 20 fps dips) are long frames"""
+    last = cut if steps else None   # the log stops naming changes after this present
+    said = any(r['hold'] is not None for r in lfs)   # the host writes the hold on its lines
+    infer = bool(steps) and not said and steps[-1][2] == VSYNC_MS   # at 120 fps the step holds 1 or 2 ticks of 1/120 s: a run of 33 ms frames there is no hold
+    cand: list[Rec] = []
+    for r in lfs:
+        if not r['causes'][0].startswith("the game's"): continue
+        if r['hold'] is not None: k, v = r['hold'], r['vsync_ms']
+        elif said: continue
+        elif steps and (last is None or r['frame'] <= last + 1):
+            i = bisect.bisect_left(steps, (r['frame'],)) - 1   # the last change at a present before this frame
+            k, v = (steps[i][1], steps[i][2]) if i >= 0 else (steps[0][3], steps[0][2])   # before the first change: the hold it changed from
+        else:
+            k = round(r['ms'] / VSYNC_MS); v = VSYNC_MS
+            if infer and 2 <= k <= HOLD_KMAX and HOLD_LOW * k * v <= r['ms'] <= HOLD_SLACK * k * v: cand.append(r)
+            continue
+        if k > 1 and r['ms'] <= HOLD_SLACK * k * v: r['held_ms'] = round(k * v, 1); r['held_k'] = k
+    run: list[Rec] = []
+    for r in sorted(cand, key=lambda x: x['frame']) + [None]:   # None ends the last run
+        if r is not None and run and r['frame'] - run[-1]['frame'] <= HOLD_GAP: run.append(r); continue
+        if len(run) >= HOLD_RUN:
+            for x in run: k = round(x['ms'] / VSYNC_MS); x['held_ms'] = round(k * VSYNC_MS, 1); x['held_k'] = k
+        run = [r] if r is not None else []
+    for r in lfs:
+        if 'held_ms' in r: r['causes'] = [f"the hold of {r['held_k']} vsyncs ({r['held_ms']:g} ms) it was made under"]
 
 
 def scan(lines: list[str]) -> tuple[dict[str, list[tuple[int, Any, int]]], list[Rec], list[list[str]]]:
@@ -204,6 +296,7 @@ def scan(lines: list[str]) -> tuple[dict[str, list[tuple[int, Any, int]]], list[
             hit = next(((what, k) for needle, what, k in EVENTS if needle in s), None)
             if hit: ev = (hit[0], hit[1], None)
             elif s.startswith('[game]') and 'underrun' in s: g['game_underrun'].append((i, None, cur))
+        if s.startswith('[nvn] frame step: ') and s.rstrip().endswith(FSTEP_CUT): g['fstep_cut'].append((i, FSTEP_AT.search(s), cur))   # any of its kinds, besides its own match
         if ev: events.append({'i': i, 'frame': cur, 'what': ev[0], 'kind': ev[1], 't': ev[2]}); pending.append(ev[0])
     return g, events, lf_after
 
@@ -287,11 +380,24 @@ def read(text: str, top: int = 5) -> Rec:
     # memory
     fp = sorted([(int(m.group(1)), float(m.group(2))) for _, m, _ in g['memory']] + [(int(m.group(1)), float(m.group(6))) for m in on if int(m.group(6)) >= 0])
 
-    def by_t(k: str, n: int) -> Rec | None: return spread([(clock.at(int(m.group(1))), float(m.group(n))) for _, m, _ in g[k] if m.group(n) is not None])
-    mem: Rec = {'footprint_mb': spread([(clock.at(f), v) for f, v in fp]), 'gpu_mb': by_t('memory', 3), 'headroom_mb': by_t('memory', 5), 'shared_textures': by_t('memory', 4)}
-    if g['glmem']: mem.update(footprint_mb=by_t('glmem', 2), gpu_mb=by_t('glmem', 3), gl_textures=by_t('glmem', 4))
+    def by_t(k: str, n: int, count: bool = False) -> Rec | None:
+        return spread([(clock.at(int(m.group(1))), float(m.group(n))) for _, m, _ in g[k] if m.group(n) is not None],
+                      *((PLATEAU_FLOOR_COUNT, PLATEAU_REL_COUNT) if count else (PLATEAU_FLOOR, PLATEAU_REL)))
+    mem: Rec = {'footprint_mb': spread([(clock.at(f), v) for f, v in fp]), 'gpu_mb': by_t('memory', 3), 'headroom_mb': by_t('memory', 5), 'shared_textures': by_t('memory', 4, True)}
+    if g['glmem']: mem.update(footprint_mb=by_t('glmem', 2), gpu_mb=by_t('glmem', 3), gl_textures=by_t('glmem', 4, True))
     if g['vkframe']: mem['vk_buffer_mb'] = by_t('vkframe', 2)
     out['memory'] = {k: v for k, v in mem.items() if v} or None
+    # long frames, read here: the display link's stretches count those before them
+    lfs: list[Rec] = []
+    for (i, m, _), after in zip(g['longframe'], lf_after):
+        r: Rec = {'frame': int(m.group(1)), 't_s': float(m.group(2)), 'ms': float(m.group(3)), 'submit_ms': float(m.group(4)), 'gpu_ms': float(m.group(5)), 'pipelines': int(m.group(6)),
+                  'libraries': int(m.group(7)), 'make_ms': float(m.group(8)), 'uploads': int(m.group(9)), 'reuploads': int(m.group(10)), 'upload_mb': float(m.group(11)),
+                  'upload_ms': float(m.group(12)), 'hold': int(m.group(13)) if m.group(13) else None, 'vsync_ms': float(m.group(14)) if m.group(14) else None, 'i': i}
+        r['causes'] = lf_causes(r, after, frame_ms); lfs.append(r)
+    hold_frames(lfs, [(int(m.group(4)), int(m.group(2)), 1000 / 120 if m.group(3).startswith('ticks') else VSYNC_MS, int(m.group(1))) for _, m, _ in g['fstep']],
+                fstep_cut(g['fstep_cut']))
+    held_at = {r['i'] for r in lfs if 'held_ms' in r}
+    for r in lfs: del r['i']
     # display-link latency
     win = [{'i': i, 't_s': clock.at(f or int(m.group(2))), 'p50': float(m.group(7)), 'max': float(m.group(9)), 'ahead': float(m.group(5)), 'ahead_min': float(m.group(6))}
            for i, m, f in g['link']]   # at the frame of the window's own lines before it (its presents only when none came before)
@@ -303,25 +409,21 @@ def read(text: str, top: int = 5) -> Rec:
             j = k
             while j + 1 < len(win) and win[j + 1]['p50'] > lim: j += 1
             lo, hi = (win[k - 2]['i'] if k >= 2 else -1), win[k]['i']   # just before: since the window two before the first raised one
-            nlf = sum(1 for i, _, _ in g['longframe'] if lo < i < hi)
+            nlf = sum(1 for i, _, _ in g['longframe'] if lo < i < hi and i not in held_at); nh = sum(1 for i in held_at if lo < i < hi)
             raised.append({'from_s': win[k - 1]['t_s'] if k else 0.0, 'to_s': win[j]['t_s'], 'windows': j - k + 1, 'p50_max_ms': max(x['p50'] for x in win[k:j + 1]),
-                           'before': list(dict.fromkeys(e['what'] for e in events if lo < e['i'] < hi)) + ([nof(nlf, 'long frame')] if nlf else []), 'to_the_end': j == len(win) - 1})
+                           'before': list(dict.fromkeys(e['what'] for e in events if lo < e['i'] < hi)) + ([nof(nlf, 'long frame')] if nlf else [])
+                           + ([nof(nh, 'frame') + ' at the hold the frame step asked'] if nh else []), 'to_the_end': j == len(win) - 1})
             k = j + 1
         lm = g['link'][-1][1]
         out['display_link'] = {'windows': len(win), 'frame_ms': round(frame_ms, 2), 'enqueue_p50_ms': base, 'enqueue_max_ms': max(x['max'] for x in win),
                                'ahead_p50_ms': med([x['ahead'] for x in win]), 'ahead_min_ms': min(x['ahead_min'] for x in win),
                                'empty_ticks': int(lm.group(3)), 'merged': int(lm.group(4)), 'raised': raised, 'p50_by_window': [[x['t_s'], x['p50']] for x in win]}
-    # long frames
-    lfs: list[Rec] = []
-    for (_, m, _), after in zip(g['longframe'], lf_after):
-        r: Rec = {'frame': int(m.group(1)), 't_s': float(m.group(2)), 'ms': float(m.group(3)), 'submit_ms': float(m.group(4)), 'gpu_ms': float(m.group(5)), 'pipelines': int(m.group(6)),
-                  'libraries': int(m.group(7)), 'make_ms': float(m.group(8)), 'uploads': int(m.group(9)), 'reuploads': int(m.group(10)), 'upload_mb': float(m.group(11)),
-                  'upload_ms': float(m.group(12))}
-        r['causes'] = lf_causes(r, after, frame_ms); lfs.append(r)
-    by = collections.Counter(next(key for word, key in CAUSE_KEY if r['causes'][0].startswith(word)) for r in lfs)
+    # long frames: the frames the frame step held as long as it asked are not counted (hold_frames)
+    by = collections.Counter(next(key for word, key in CAUSE_KEY if r['causes'][0].startswith(word)) for r in lfs if 'held_ms' not in r)
     mins_run = (out['duration_s'] or 0) / 60
-    out['long_frames'] = {'count': len(lfs), 'per_min': round(len(lfs) / mins_run, 2) if mins_run else None, 'by_cause': dict(by.most_common()),
-                          'top': sorted(lfs, key=lambda r: -r['ms'])[:top]} if lfs else None
+    nl = sum(by.values())
+    out['long_frames'] = {'count': nl, 'per_min': round(nl / mins_run, 2) if mins_run else None, 'by_cause': dict(by.most_common()), 'held': len(lfs) - nl,
+                          'top': sorted((r for r in lfs if 'held_ms' not in r), key=lambda r: -r['ms'])[:top]} if lfs else None
     # events
     sus = [e for e in events if e['what'] == 'graphics suspended'] or [e for e in events if e['what'] == 'background']
     res = [e for e in events if e['what'] == 'resumed']
@@ -389,8 +491,19 @@ def at_times(evs: list[Rec], limit: int) -> list[str]:   # events grouped by the
 
 def spread_text(x: Rec | None, unit: str = ' MB') -> str:
     if not x: return '–'
+    if len(x.get('plateaus') or ()) > 1:   # in steps: the run's slope would be the steps'; the drift within the plateaus instead
+        d = f", {x['drift_per_10min']:+g}{unit} per 10 min within them" if x['drift_per_10min'] is not None else ''
+        return f"{x['first']:g} → {x['last']:g}{unit} (least {x['min']:g}, most {x['max']:g}), {len(x['plateaus'])} plateaus{d}:"
     slope = f", {x['per_10min']:+g}{unit} per 10 min" if x['per_10min'] is not None else ''
     return f"{x['first']:g} → {x['last']:g}{unit} (least {x['min']:g}, most {x['max']:g}{slope})"
+
+
+def plateau_text(x: Rec | None, limit: int, unit: str = ' MB') -> list[str]:   # the plateaus of a series in steps, a line or more under it: "21–200 s 765 MB, 204–262 s 2830 MB, …"
+    ps = (x or {}).get('plateaus') or []
+    if len(ps) < 2: return []
+    items = [(f"{p['from_s']:.0f}–{p['to_s']:.0f} s" if p['to_s'] > p['from_s'] else f"{p['from_s']:.0f} s") + f" {p['median']:g}{unit}"
+             + (f" ({p['min']:g}–{p['max']:g})" if p['samples'] > 2 and p['max'] - p['min'] > 0.1 * p['median'] else '') for p in ps[:limit]]
+    return ['  ' + t for t in wrap(items + ([f'… {len(ps) - limit} more'] if len(ps) > limit else []), 118)]
 
 
 def title(s: Rec) -> str:
@@ -439,9 +552,9 @@ def render(s: Rec, top: int) -> list[str]:
                         f"({g3(pw['pcore_pct_p50'])}% on performance cores), wakeups {g3(pw['wakeups_p50'])}/s, GPU {g3(pw['gpu_ms_s_p50'])} ms/s; thermal state at most {pw['thermal_max']}")
     row('heat', *(at_times([{'t_s': x['t_s'], 'what': x['what']} for x in s['timeline']], 3 * top) or ['no thermal or Low Power Mode lines']))
     mm = s['memory'] or {}
-    row('memory', *(f'{label} {spread_text(mm[k], unit)}' for k, label, unit in (('footprint_mb', 'footprint', ' MB'), ('gpu_mb', 'GPU allocated', ' MB'),
-                                                                                ('headroom_mb', 'headroom to the limit', ' MB'), ('shared_textures', 'shared textures', ''),
-                                                                                ('gl_textures', 'OpenGL textures', ''), ('vk_buffer_mb', 'Vulkan buffers', ' MB')) if k in mm))
+    row('memory', *(t for k, label, unit in (('footprint_mb', 'footprint', ' MB'), ('gpu_mb', 'GPU allocated', ' MB'), ('headroom_mb', 'headroom to the limit', ' MB'),
+                                             ('shared_textures', 'shared textures', ''), ('gl_textures', 'OpenGL textures', ''), ('vk_buffer_mb', 'Vulkan buffers', ' MB')) if k in mm
+                    for t in [f'{label} {spread_text(mm[k], unit)}', *plateau_text(mm[k], 2 * top, unit)]))
     if not mm: row('memory', 'no memory lines')
     dl = s['display_link']
     if dl:
@@ -452,7 +565,9 @@ def render(s: Rec, top: int) -> list[str]:
         if not dl['raised']: row('', f"no window more than half a frame ({g3(dl['frame_ms'] / 2)} ms) above the median")
     lf = s['long_frames']
     if lf:
-        row('long frames', f"{lf['count']} ({g3(lf['per_min'])} a minute): " + ', '.join(f'{k} {n}' for k, n in lf['by_cause'].items()) + ' (by what each spent its time on first)',
+        row('long frames', f"{lf['count']} ({g3(lf['per_min'])} a minute)" + (': ' + ', '.join(f'{k} {n}' for k, n in lf['by_cause'].items()) + ' (by what each spent its time on first)'
+                                                                               if lf['by_cause'] else ''),
+            f"not counted: {nof(lf['held'], 'frame')} as long as the frame step's hold of 2 or 3 vsyncs asked, just after a step up" if lf.get('held') else '',
             *(f"{r['t_s']:.0f} s frame {r['frame']}: {r['ms']:g} ms, {'; '.join(r['causes'])}" for r in lf['top']))
     ev = s['events']
     row('events', f"in the background {nof(ev['background'], 'time')}, back {ev['resumed']}, {nof(ev['focus_changes'], 'focus change')}" + ('; the log ends in the background' if ev['ended_in_background'] else ''),
@@ -494,12 +609,13 @@ METRICS = (('commit', 'build.commit', 0), ('shader chain', 'build.chain', 0), ('
            ('dropped (%)', 'frames.dropped_pct', -1), ('frames per second', 'frames.fps', 1), ('GPU p50 (ms)', 'frames.gpu_p50_ms', -1),
            ('CPU W (median)', 'power.watts_p50', -1), ('CPU W (over the run)', 'power.watts_mean', -1), ('mJ per frame', 'power.mj_per_frame_p50', -1), ('CPU % of a core', 'power.cpu_pct_p50', -1),
            ('on performance cores (%)', 'power.pcore_pct_p50', 0), ('wakeups per second', 'power.wakeups_p50', -1), ('GPU ms/s', 'power.gpu_ms_s_p50', -1), ('thermal state at most', 'power.thermal_max', -1),
-           ('footprint, last (MB)', 'memory.footprint_mb.last', 0), ('footprint, most (MB)', 'memory.footprint_mb.max', 0), ('footprint per 10 min (MB)', 'memory.footprint_mb.per_10min', -1),
-           ('GPU allocated, last (MB)', 'memory.gpu_mb.last', 0), ('GPU allocated per 10 min', 'memory.gpu_mb.per_10min', -1), ('headroom, least (MB)', 'memory.headroom_mb.min', 1),
-           ('shared textures, last', 'memory.shared_textures.last', 0), ('shared textures per 10 min', 'memory.shared_textures.per_10min', -1),
+           ('footprint, last (MB)', 'memory.footprint_mb.last', 0), ('footprint, most (MB)', 'memory.footprint_mb.max', 0), ('footprint plateaus', 'memory.footprint_mb.plateaus', 0),
+           ('footprint drift / 10 min (MB)', 'memory.footprint_mb.drift_per_10min', -1),   # within the plateaus: the steps of area loads are not a leak
+           ('GPU allocated, last (MB)', 'memory.gpu_mb.last', 0), ('GPU allocated drift / 10 min', 'memory.gpu_mb.drift_per_10min', -1), ('headroom, least (MB)', 'memory.headroom_mb.min', 1),
+           ('shared textures, last', 'memory.shared_textures.last', 0), ('shared textures drift / 10 min', 'memory.shared_textures.drift_per_10min', -1),
            ('enqueue to display p50 (ms)', 'display_link.enqueue_p50_ms', -1), ('enqueue to display, most (ms)', 'display_link.enqueue_max_ms', -1),
            ('submission ahead p50 (ms)', 'display_link.ahead_p50_ms', 0), ('stretches a frame above', 'display_link.raised', -1),
-           ('long frames', 'long_frames.count', 0), ('long frames per minute', 'long_frames.per_min', -1), ('background / back', 'events.background', 0), ('focus changes', 'events.focus_changes', 0),
+           ('long frames', 'long_frames.count', 0), ('long frames per minute', 'long_frames.per_min', -1), ('frames at the step\'s hold', 'long_frames.held', 0), ('background / back', 'events.background', 0), ('focus changes', 'events.focus_changes', 0),
            ('audio underruns', 'audio.underruns', -1), ('audio I/O buffer, most (ms)', 'audio_output.io_buffer_ms_max', -1),
            ('audio output latency, most (ms)', 'audio_output.output_latency_ms_max', -1), ('save commits', 'saves.commits', 0),
            ('VideoToolbox sessions made again', 'movies.vt_rebuilds', 0), ('[RED] lines', 'red.lines', -1), ('[RED] kinds', 'red.kinds', -1))

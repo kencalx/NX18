@@ -166,6 +166,33 @@ static int64_t img_find(const romfs_img *m, const char *rest) {
     }
     return (int64_t)k;
 }
+// A file whose name promises a format is read at its first open (romfs_image.py FORMAT_HEADS: a .zs file starts with a zstd frame, 28 b5 2f fd, or a skippable frame, 5? 2a 4d 18).
+// A NUP or a dump folder carries no NCA hashes; the NSP script's check (check_formats) stops a build that holds such a damaged file, but --allow-damaged packs it as it is, and the image
+// then has no flag for it. The game cannot decompress it: Ocarina of Time's background loader asked for a damaged texture again on every pass, its 'OptimizeChangeBanc' and
+// 'ParallelDecompThread' busy all session on an iPhone (about 1.7 cores, CPU 2-7 W against 1 W) with no red line in the log to say why. The file is still served as it is.
+// Returns 2 for such a file whose bytes do not start as its name promises (a file shorter than the head included), 1 for one whose bytes do; 0 for a file whose name promises
+// no format, an empty one (the NSP script's check leaves those out too), or one whose bytes cannot be read (an I/O error is not damage: the game's own read reports it)
+static int img_head_check(const romfs_img *m, const img_ent *x, uint32_t *head) {
+    const char *nm = m->names + x->name; uint8_t h[4] = {0};
+    if (!x->type || !x->b || x->nlen < 3 || strncasecmp(nm + x->nlen - 3, ".zs", 3)) return 0;
+    size_t n = x->b < sizeof h ? (size_t)x->b : sizeof h;
+    if (!romfs_image_read(m->fd, h, n, (off_t)x->a)) return 0;
+    *head = (uint32_t)h[0] << 24 | (uint32_t)h[1] << 16 | (uint32_t)h[2] << 8 | h[3];   // in file order, as the log prints it
+    return n == sizeof h && (*head == 0x28b52ffdu || (*head & 0xf0ffffffu) == 0x502a4d18u) ? 1 : 2;
+}
+// The opens of damaged files (an NCA hash failure, or a head that is not its format's), counted to log 10, 100, 1,000... opens: a game that asks for such a file again on every
+// pass of its loader shows in the log as the same file opened thousands of times. Only damaged files come here, so a short table and a lock are enough
+static struct { const romfs_img *m; uint64_t k, opens; } g_bad_opens[32];
+static int g_nbad_opens;
+static pthread_mutex_t g_bad_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t img_damaged_open(const romfs_img *m, uint64_t k) {
+    pthread_mutex_lock(&g_bad_lock);
+    int i = 0; while (i < g_nbad_opens && !(g_bad_opens[i].m == m && g_bad_opens[i].k == k)) i++;
+    if (i == g_nbad_opens && i < (int)(sizeof g_bad_opens / sizeof *g_bad_opens)) { g_bad_opens[i].m = m; g_bad_opens[i].k = k; g_bad_opens[i].opens = 0; g_nbad_opens++; }
+    uint64_t n = i < g_nbad_opens ? ++g_bad_opens[i].opens : 0;   // 0: the table is full, this file is not counted
+    pthread_mutex_unlock(&g_bad_lock);
+    return n;
+}
 // Horizon's file system accessor turns each backslash in a path into a slash before it normalizes the path (FileSystemAccessor::SetUpPath, InitializeWithReplaceBackslash),
 // on every mount but the PC host's: Metroid Prime 4 (SDK 19) names its RomFS files rom:\StartupUI.pak. Each guest path resolver takes p through here first: p itself, or
 // its copy in buf with slashes (a path too long for buf is left as it is, and is not found)
@@ -839,9 +866,22 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
         if (k < 0) return err_res("open", path);
         if (!g_mnt[mi].img->e[k].type) return RES_PATH_NOT_FOUND;
         if (mode & (MODE_WRITE | MODE_APPEND)) { LOG("fs write to a read-only mount: %s", path); return RES_FAIL; }
-        img_ent *ent = &g_mnt[mi].img->e[k];   // a damaged file is named once, at its first open
-        if ((ent->flags & IMG_ENT_DAMAGED) && !(__atomic_fetch_or(&ent->flags, IMG_ENT_REPORTED, __ATOMIC_RELAXED) & IMG_ENT_REPORTED))
-            LOG("[RED] fs %s failed the NCA's hash check when it was extracted (a damaged NSP, --allow-damaged); its bytes may be wrong", path);
+        const romfs_img *im = g_mnt[mi].img; img_ent *ent = &im->e[k];   // a damaged file is named once, at its first open, and its opens are counted (img_damaged_open)
+        uint8_t fl = __atomic_load_n(&ent->flags, __ATOMIC_RELAXED); uint32_t head = 0;
+        if (!(fl & IMG_ENT_HEAD_READ)) { int c = img_head_check(im, ent, &head); if (c) fl = __atomic_or_fetch(&ent->flags, IMG_ENT_HEAD_READ | (c == 2 ? IMG_ENT_BAD_HEAD : 0), __ATOMIC_RELAXED); }
+        if (fl & (IMG_ENT_DAMAGED | IMG_ENT_BAD_HEAD)) {
+            if (!(__atomic_fetch_or(&ent->flags, IMG_ENT_REPORTED, __ATOMIC_RELAXED) & IMG_ENT_REPORTED)) {
+                if (fl & IMG_ENT_DAMAGED) LOG("[RED] fs %s failed the NCA's hash check when it was extracted (a damaged NSP, --allow-damaged); its bytes may be wrong", path);
+                else LOG("[RED] fs %s does not start as a zstd stream (first bytes %08x, %llu bytes): the game files are damaged (a NUP or a dump packed with --allow-damaged) and the game "
+                         "cannot decompress it; a loader that asks for it again keeps a thread busy. Pack again from a good copy of the game", path, head, (unsigned long long)ent->b);
+            }
+            uint64_t n = img_damaged_open(im, (uint64_t)k);
+            // Only a bad head shows a file the game cannot read, so only its count names a retry. A file that failed only the NCA's hash check may be one the game
+            // streams and reopens by design (audio, a movie, a pack) and reads with no trouble: its first open was named in red, and its count states the number alone.
+            if (n >= 10) { uint64_t p = 10; while (p < n && p <= UINT64_MAX / 10) p *= 10;
+                if (p == n && (fl & IMG_ENT_BAD_HEAD)) LOG("[RED] fs %s, a damaged file, opened %llu times: the game asks again for a file it cannot read", path, (unsigned long long)n);
+                else if (p == n) LOG("fs %s, a file that failed the NCA's hash check, opened %llu times", path, (unsigned long long)n); }
+        }
         *out = FH_OUT(IMG_HANDLE(mi, k));
         if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → image entry %lld", (now_ns() - g_t0_ns) / 1e9, path, mode, (long long)k);
         return RES_OK;

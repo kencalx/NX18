@@ -40,6 +40,11 @@ shader_note	Ocarina of Time shaders
 # The game steps its time by a frame ratio, its base rate / its frame rate, whatever the frame took: frames longer than a vsync played in slow motion. The ratio takes the host's
 # frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on any build that keeps it): 1 vsync at 60 fps, 2 when 60 does not hold, so game time = real time
 fps_target	60
+# A frame stood in the display link's queue nearly all the time on an iPhone 18 Pro Max at 30 fps, a tick (33 ms) more from enqueue to display; the 60 fps run had two or more
+# frames waiting on part of the ticks in most windows after its first 3 minutes. 60 ticks in a row with two or more frames waiting drop one (DM_PRESENT_TRIM, which env.txt can
+# set, 0 for off): at 30 fps game enqueue to display about 85 -> 53 ms, 9 frames dropped in 2.5 minutes, no smoothness cost seen. Checked only at 30 fps on iOS: the game's
+# default 60 fps and the Mac use it untested
+present_trim	60
 
 # ---- Graphics ----
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here

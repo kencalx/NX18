@@ -12,6 +12,8 @@ typedef struct { uint64_t a, b; uint32_t name; uint16_t nlen; uint8_t type, flag
 _Static_assert(sizeof(img_ent) == 24, "RomFS image entry layout");
 #define IMG_ENT_DAMAGED 1    // in the image: this file failed the NCA's hash check and was written as read (nx_extract --allow-damaged)
 #define IMG_ENT_REPORTED 2   // in memory only: the host has named this damaged file in its log
+#define IMG_ENT_HEAD_READ 4  // in memory only: the host has read the first bytes of this file, whose name promises a format (hle_fs.c img_head_check)
+#define IMG_ENT_BAD_HEAD 8   // in memory only: those bytes do not start as the name promises (a .zs file that is not a zstd stream)
 typedef struct { int fd; uint64_t n, damaged; img_ent *e; const char *names; } romfs_img;
 
 static void romfs_image_close(romfs_img *m) {

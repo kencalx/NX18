@@ -2,7 +2,10 @@
 // a 2D descriptor from an earlier pass: production tex_fit must bind a valid
 // zero cube without diagnosing the binding itself as a rendering error.
 // The same for a 3D input holding a 2D texture or 2D array (Batman: Arkham Knight's
-// volume slots): the zero 3D texture.
+// volume slots): the zero 3D texture. And the reverse, a 3D texture in a 2D array, cube or cube array input
+// (a colour-grading lookup table left in a layout shader's slot that a uniform switches off): the zero
+// texture of the declared type, since Metal makes no other view of a 3D texture. A 3D texture in a 2D input
+// is left as it is: that slot may be a size query's, which reads the real width through it.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -49,6 +52,7 @@ int main(void) { @autoreleasepool {
     NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
         "kernel void cube(texturecube<float> a [[texture(0)]], texturecube<float> b [[texture(1)]], constant uint& select [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(coord::normalized, filter::nearest); if (select) out[0] = b.sample(s,float3(0,0,1),level(0)); else out[0] = a.sample(s,float3(0,0,1),level(0)); }\n"
         "kernel void cubes(texturecube<float> a [[texture(0)]], texturecube_array<float> b [[texture(1)]], constant uint& select [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(coord::normalized, filter::nearest); if (select) out[0] = b.sample(s,float3(0,0,1),0,level(0)); else out[0] = a.sample(s,float3(0,0,1),level(0)); }\n"
+        "kernel void layers(texture2d_array<float> a [[texture(0)]], texture2d_array<float> b [[texture(1)]], constant uint& select [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(coord::normalized, filter::nearest); if (select) out[0] = b.sample(s,float2(0.5),0,level(0)); else out[0] = a.sample(s,float2(0.5),0,level(0)); }\n"
         "kernel void volume(texture3d<float> a [[texture(0)]], texture3d<float> b [[texture(1)]], constant uint& select [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(coord::normalized, filter::nearest); if (select) out[0] = b.sample(s,float3(0.5),level(0)); else out[0] = a.sample(s,float3(0.5),level(0)); }\n";
     id<MTLLibrary> library = [g_dev newLibraryWithSource:source options:nil error:&error];
     if (!library) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
@@ -70,5 +74,22 @@ int main(void) { @autoreleasepool {
     if (!pipeline) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
     const NSUInteger layer_counts[] = {0, 1, 5};
     for (int i = 0; i < 3; i++) run_case(texture(layer_counts[i] ? MTLTextureType2DArray : MTLTextureType2D, layer_counts[i] ?: 1), MTLTextureType3D, volume, pipeline);
-    printf("cube and 3D placeholders: %d checks, %d failed\n", checks, failed); return failed != 0;
+    // A 3D texture (the shape Ocarina of Time leaves in its layout merge shader's 2D array slot 7) in each array and cube slot type, each against a real texture of that type
+    MTLTextureDescriptor *ld = [MTLTextureDescriptor new];
+    ld.textureType = MTLTextureType3D; ld.width = ld.height = ld.depth = 4; ld.pixelFormat = MTLPixelFormatRGB10A2Unorm; ld.storageMode = MTLStorageModeShared; ld.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> lut = [g_dev newTextureWithDescriptor:ld];
+    CHECK(lut != nil, "a 3D lookup table");
+    id<MTLTexture> layered = texture(MTLTextureType2DArray, 2);
+    for (NSUInteger l = 0; l < 2; l++) [layered replaceRegion:MTLRegionMake3D(0,0,0,1,1,1) mipmapLevel:0 slice:l withBytes:blue bytesPerRow:4 bytesPerImage:4];
+    const struct { NSString *fn; MTLTextureType want; id<MTLTexture> primary; } lc[] = {
+        {@"layers", MTLTextureType2DArray, layered}, {@"cube", MTLTextureTypeCube, primary}, {@"cubes", MTLTextureTypeCubeArray, primary} };
+    for (int i = 0; lut && i < 3; i++) {
+        id<MTLComputePipelineState> lp = [g_dev newComputePipelineStateWithFunction:[library newFunctionWithName:lc[i].fn] error:&error];
+        if (!lp) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
+        run_case(lut, lc[i].want, lc[i].primary, lp);
+    }
+    // In a 2D slot no fallback: the caller binds the 3D texture as is and reports it
+    if (lut) { uint64_t rid = 0; os_unfair_lock_lock(&g_rmu); id<MTLTexture> fitted = tex_fit(272, lut, MTLTextureType2D, &rid); os_unfair_lock_unlock(&g_rmu);
+        CHECK(fitted == nil, "a 3D texture in a 2D slot keeps its size for a size query (no zero texture)"); }
+    printf("cube, 3D and layered placeholders: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

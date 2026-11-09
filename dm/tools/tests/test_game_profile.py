@@ -1,5 +1,5 @@
 # dm/games/game.py's profile-key validation, on a synthetic profile: pso_gpu (the GPU architectures the app's offline pipeline archive is made for, beside pso_mtl4) takes, none and no others,
-# and a profile without the key generates its header unchanged; present_sharpen's levels, off without the key; post_aa's values, off without the key; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck
+# and a profile without the key generates its header unchanged; present_sharpen's levels, off without the key; present_trim's ticks, 0 (off) without the key; post_aa's values, off without the key; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck
 from pathlib import Path
 import os
 import subprocess
@@ -60,6 +60,38 @@ class PresentSharpen(unittest.TestCase):   # the present's Sharpening by default
         for v in ('2', 'Medium', 'max', ''):   # the settings row's numbers are not the key's words; an empty value is no level either
             rc, out = header(f'present_sharpen\t{v}\n')
             self.assertNotEqual(rc, 0, v); self.assertIn('present_sharpen must be off, low, medium or high', out, v)
+
+
+class PresentTrim(unittest.TestCase):   # DM_PRESENT_TRIM's K by default (nvn_mtl.m present_trim_k): display-link ticks in a row with two or more frames waiting before one is dropped
+    def macro(self, rows, gid=None):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'game.h')
+            if gid is None:
+                Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+                env = {**os.environ, 'DM_GAMES_DIR': d}
+            else: env = {k: v for k, v in os.environ.items() if k != 'DM_GAMES_DIR'}   # a profile of the repository
+            subprocess.run([sys.executable, str(GAME), 'header', gid or ID, str(out)], env=env, check=True, capture_output=True)
+            return [l for l in out.read_text().splitlines() if 'PRESENT_TRIM' in l]
+
+    def test_values_and_the_default(self):
+        self.assertEqual(self.macro(''), ['#define DM_GAME_PRESENT_TRIM 0'])   # without the key: off, as before the key
+        for v in ('0', '30', '60', '600'):
+            self.assertEqual(self.macro(f'present_trim\t{v}\n'), [f'#define DM_GAME_PRESENT_TRIM {v}'], v)
+
+    def test_rejected_values(self):
+        for v in ('1', '29', '601', '-60', '60.0', 'on', ''):   # under 30 ticks a run of frame-time jitter alone could trigger it and drop the frames DM_PRESENT_FIFO keeps
+            rc, out = header(f'present_trim\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('present_trim must be 0 (off) or 30 to 600 display-link ticks', out, v)
+
+    def test_profiles_that_set_it(self):   # a game that sets it was run with it on a device, and its note says what it measured: Ocarina of Time (iPhone 18 Pro Max, 30 fps, enqueue to display about 85 -> 53 ms)
+        self.assertEqual(self.macro('', '0400486024DEC000'), ['#define DM_GAME_PRESENT_TRIM 60'])
+        on = []
+        for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv')):
+            keys = dict(l.split('\t', 1) for l in tsv.read_text(encoding='utf-8').splitlines() if '\t' in l and not l.startswith('#'))
+            if keys.get('present_trim', '0').strip() == '0': continue
+            on.append(tsv.parent.name); note = tsv.parent / 'README.md'
+            self.assertIn('present_trim', note.read_text(encoding='utf-8') if note.is_file() else '', f'{tsv.parent.name}: its README.md should give the device run behind present_trim')
+        self.assertIn('0400486024DEC000', on)
 
 
 class PostAA(unittest.TestCase):   # the present's edge smoothing by default (settings.tsv DM_POST_AA's values, nvn_upscale_pick.h aa_parse)
