@@ -236,9 +236,9 @@ class Build(unittest.TestCase):
         for lib in config['libraries']:
             lib['path'] = lib['label'] + '.metallib'
         inputs = dict(format=1, configuration=config, libraries=po.library_digest(self.lib, bases),
-                      arch='applegpu_g18p', platform='ios', os_min='27.0', toolchain=self.compiler)
+                      arch='applegpu_g19p', platform='ios', os_min='27.0', toolchain=self.compiler)
         expected = hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-        self.assertEqual((self.work / 'key.applegpu_g18p').read_text().strip(), expected)
+        self.assertEqual((self.work / 'key.applegpu_g19p').read_text().strip(), expected)
 
     def test_build_reuse_and_stamp(self):
         self.assertEqual(self.main('--gpu', 'g18p'), 0)
@@ -270,7 +270,7 @@ class Build(unittest.TestCase):
                 self.out, self.work = self.t / f'out-{platform}', self.t / f'work-{platform}'
                 args = ('--platform', platform, '--os-min', '27.0')
                 self.main(*args)
-                archive = self.out / 'applegpu_g18p.mtl4a'
+                archive = self.out / 'applegpu_g19p.mtl4a'
                 identity = archive.stat().st_ino, archive.stat().st_mtime_ns, archive.read_bytes()
                 before = len(self.calls)
                 chain = 'fedcba987654' if platform == 'macos' else 'abcdef012345'
@@ -323,10 +323,10 @@ class Build(unittest.TestCase):
 
     def test_missing_archive_and_legacy_key_rebuild(self):
         self.main()
-        (self.out / 'applegpu_g18p.mtl4a').unlink()
+        (self.out / 'applegpu_g19p.mtl4a').unlink()
         self.main()
         self.assertEqual(len(self.calls), 2)
-        (self.work / 'key.applegpu_g18p').write_text('legacy-cache-key\n')
+        (self.work / 'key.applegpu_g19p').write_text('legacy-cache-key\n')
         self.main()
         self.assertEqual(len(self.calls), 3)
 
@@ -450,7 +450,7 @@ class Build(unittest.TestCase):
         with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
             # An isolated pilot is the exact cache entry the complete build will consume.
             with mock.patch.object(po.subprocess, 'run', runner), contextlib.redirect_stdout(io.StringIO()):
-                po.compile_batch(self.lib, bases[:2], self.work/'batches.applegpu_g18p/00001', 'applegpu_g18p', 'ios', '27.0', self.compiler)
+                po.compile_batch(self.lib, bases[:2], self.work/'batches.applegpu_g19p/00001', 'applegpu_g19p', 'ios', '27.0', self.compiler)
             self.main('--batch-size', '2', '--os-min', '27.0')
             self.assertEqual(observed, [('compile',['vertex0','vertex1']),('compile',['vertex2','vertex3']),('compile',['vertex4']),('merge',3)])
             before = list(observed)
@@ -465,10 +465,10 @@ class Build(unittest.TestCase):
             self.main('--batch-size','2','--os-min','27.0')
         self.assertEqual(observed, [('compile',['vertex0','vertex1']),('compile',['vertex2','vertex3'])])
         self.assertFalse((self.out/'prebuilt.tsv').exists())
-        self.assertFalse((self.work/'key.applegpu_g18p').exists())
+        self.assertFalse((self.work/'key.applegpu_g19p').exists())
         self.assertFalse(list(self.out.glob('*.mtl4a')))
         self.assertFalse(list(self.work.rglob('*.partial')))
-        first = self.work/'batches.applegpu_g18p/00001/applegpu_g18p.mtl4a'
+        first = self.work/'batches.applegpu_g19p/00001/applegpu_g19p.mtl4a'
         self.assertTrue(first.is_file()); identity = first.stat().st_mtime_ns
         runner, observed = self.batched_runner()
         with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
@@ -483,7 +483,7 @@ class Build(unittest.TestCase):
             self.main('--batch-size','2','--os-min','27.0')
         self.assertFalse(list(self.out.glob('*.mtl4a')))
         self.assertFalse((self.out/'prebuilt.tsv').exists())
-        self.assertFalse((self.work/'key.applegpu_g18p').exists())
+        self.assertFalse((self.work/'key.applegpu_g19p').exists())
         self.assertFalse(list(self.work.rglob('*.partial')))
         runner, observed = self.batched_runner()
         with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
@@ -498,7 +498,7 @@ class Build(unittest.TestCase):
             with mock.patch.object(po, 'BATCH', size), mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', runner):
                 self.main('--os-min', '27.0')
             self.assertEqual([x for x in observed if x[0] == 'merge'], want)
-            self.assertTrue((self.out / 'applegpu_g18p.mtl4a').is_file())
+            self.assertTrue((self.out / 'applegpu_g19p.mtl4a').is_file())
         shutil.rmtree(self.work); shutil.rmtree(self.out)
         runner, observed = self.batched_runner()
         with mock.patch.object(po, 'BATCH', 2), mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', runner):
@@ -510,7 +510,7 @@ class Build(unittest.TestCase):
         runner, _ = self.batched_runner()
         with mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', runner):
             self.main('--batch-size', '1', '--os-min', '27.0')
-        groups = self.work / 'batches.applegpu_g18p'
+        groups = self.work / 'batches.applegpu_g19p'
         self.assertEqual(sorted(d.name for d in groups.iterdir()), ['00001', '00002', '00003', '00004'])
         with mock.patch.object(po, 'plan', return_value=(bases[:2], [], {})), mock.patch.object(self, 'fake_run', runner):
             self.main('--batch-size', '1', '--os-min', '27.0')
@@ -529,7 +529,7 @@ class Build(unittest.TestCase):
             self.assertEqual(observed, [('compile', ['main0_z']), ('compile', []), ('merge', 2)])   # the bases, the compute pipelines, one archive
             self.assertEqual(computes(), ['lib:k_b'])   # kc has function constants: left to the host
             self.assertIn('compute\t1\n', (self.out / 'archive.tsv').read_text())
-            self.assertEqual(sorted(d.name for d in (self.work / 'batches.applegpu_g18p').iterdir()), ['00001', 'c00001'])
+            self.assertEqual(sorted(d.name for d in (self.work / 'batches.applegpu_g19p').iterdir()), ['00001', 'c00001'])
             observed.clear(); self.main('--os-min', '27.0'); self.assertEqual(observed, [])   # unchanged: the archive reused
             (self.prof / 'shader_pairs.tsv').write_text('v\tc\nv\tf\n')   # other pair lists, the same bases and compute pipelines: the archive reused
             observed.clear(); self.main('--os-min', '27.0'); self.assertEqual(observed, [])

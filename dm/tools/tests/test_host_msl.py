@@ -78,7 +78,7 @@ class HostMSL(unittest.TestCase):
         minimum = (self.root / 'dm/mac/min_os.mk').read_text().split('MACOS_MIN := ')[1].split()[0]
         self.assertIn(f'-mmacosx-version-min={minimum}', self.compiles()[-1])
         self.make('MSL_SDK=iphoneos')
-        self.assertIn('-mios-version-min=26.0', self.compiles()[-1])
+        self.assertIn('-mios-version-min=27.3', self.compiles()[-1])
         self.assertIn('iphoneos', self.compiles()[-1])
 
     def test_compiler_installation_recovers_without_cleaning(self):
