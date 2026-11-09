@@ -1,5 +1,6 @@
 """NSP script: a title ID no profile has, whose main is a build a profile registers (a regional release of the same build, GitHub issue #114), packs from a profile derived
-from that one (same_build, game.py by_build, derive_profile with the folder's title ID and main.npdm's program ID). No game files, keys or Xcode needed (temporary files only)."""
+from that one (same_build, game.py by_build, derive_profile with the folder's title ID and main.npdm's program ID); and the closing note on a derived profile, red only for a version or
+module the profile does not register (report_profile_status). No game files, keys or Xcode needed (temporary files only)."""
 import importlib.util
 import os
 from pathlib import Path
@@ -86,6 +87,52 @@ class Alias(unittest.TestCase):
         (d / 'control.nacp').unlink(); nso(d / 'ExeFS/main', UPD_BID)   # a build the profile does not register, with no control data: unknown, as before
         shutil.rmtree(out); self.assertEqual(nsp.derive_profile(g, out, 'v0', d, ['main']), '?')
         self.assertEqual(game.Game(out).builds()['v0']['display'], '?')
+
+
+class ProfileStatus(unittest.TestCase):
+    """The closing note on a derived profile (report_profile_status): red only when the packed version or one of its modules is not a build the profile registers"""
+    SHADERS = f'the folder has no v65536, whose files game profile {PROFILE:016X}\'s shader tables were made from'
+
+    def setUp(self):   # Mario Kart 8 Deluxe's shape: two registered builds sharing subsdk0, shader tables made from both
+        self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
+        self.reg = self.profile('reg', [f'build\tv65536\t4.0.0\tmain={BID}\tsubsdk0={"ee" * 16}', f'build\tv131072\t4.0.1\tmain={UPD_BID}\tsubsdk0={"ee" * 16}',
+                                        'package\tv131072', 'shader_versions\tv65536 v131072'])
+
+    def profile(self, name, rows, title=PROFILE):
+        d = self.tmp / name / f'{PROFILE:016X}'; d.mkdir(parents=True)
+        (d / 'game.tsv').write_text('\n'.join([f'title_id\t{title:016X}', 'modules\tmain subsdk0'] + rows) + '\n')
+        return game.Game(d)
+
+    def status(self, g, ver, derived):
+        said = []
+        with mock.patch.object(nsp, 'say', said.append): nsp.report_profile_status(g, self.reg, ver, derived, False)
+        return said
+
+    def test_a_registered_update_without_the_other_shader_version_is_no_red(self):   # the folder has only 4.0.1: derived for its shader tables alone
+        g = self.profile('derived', [f'build\tv131072\t4.0.1\tmain={UPD_BID}\tsubsdk0={"ee" * 16}', 'package\tv131072', 'shader_versions\tv131072'])
+        said = self.status(g, 'v131072', self.SHADERS)
+        self.assertEqual(said, [f'this IPA uses the registered v131072 (4.0.1) builds and every fix for them, with derived shader tables ({self.SHADERS})'])
+
+    def test_every_registered_row_kept_is_no_red(self):   # shader tables made again (DLC): the derived profile keeps every registered row
+        g = self.profile('derived', ['build\t' + '\t'.join(r) for r in self.reg.values('build')] + ['package\tv131072', 'shader_versions\tv65536 v131072'])
+        self.assertFalse(any(m.startswith('[RED]') for m in self.status(g, 'v131072', 'DLC shaders')))
+
+    def test_an_unregistered_module_is_red(self):   # the version is registered, but its main is another build: the fixes for the registered main do not reach it
+        g = self.profile('derived', [f'build\tv131072\t4.0.1\tmain={"aa" * 16}\tsubsdk0={"ee" * 16}', 'package\tv131072', 'shader_versions\tv131072'])
+        said = self.status(g, 'v131072', self.SHADERS)
+        self.assertTrue(said[0].startswith('[RED] this IPA uses v131072 (4.0.1), which game profile'))
+        self.assertIn('main is a build the profile does not register', said[0])
+
+    def test_an_unregistered_version_is_red(self):   # every module a registered build, but a version the profile does not register
+        g = self.profile('derived', [f'build\tv196608\t4.0.2\tmain={UPD_BID}\tsubsdk0={"ee" * 16}', 'package\tv196608', 'shader_versions\tv196608'])
+        said = self.status(g, 'v196608', 'v196608 is not a version game profile registers')
+        self.assertTrue(said[0].startswith('[RED] this IPA uses v196608 (4.0.2)'))
+        self.assertTrue(said[0].endswith('every module is a registered build'))
+
+    def test_another_title_with_registered_builds_is_no_red(self):   # a regional release of a registered build (same_build)
+        g = self.profile('derived', [f'build\tv131072\t4.0.1\tmain={UPD_BID}\tsubsdk0={"ee" * 16}', 'package\tv131072', 'shader_versions\tv131072'], OTHER)
+        said = self.status(g, 'v131072', 'another title')
+        self.assertEqual(len(said), 1); self.assertIn('under title ID', said[0]); self.assertFalse(said[0].startswith('[RED]'))
 
 
 if __name__ == '__main__':

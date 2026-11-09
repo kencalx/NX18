@@ -3088,7 +3088,10 @@ def report_profile_status(g, reg, pkg_ver, derived, provisional, artifact='IPA',
         known = {(m, b) for row in reg.builds().values() for m, b in row.items() if m != 'display'}
         other = [m for m, b in g.builds()[pkg_ver].items() if m != 'display' and (m, b) not in known]
         registered_builds = ", ".join(f'{v} {b["display"]}' for v, b in reg.builds().items())
-        if g.title_id == reg.title_id and g.builds() == reg.builds():
+        # A registered version whose every module is a registered build is derived only for its shader tables: the folder lacks a version they were made from (Mario Kart 8 Deluxe
+        # with only its 4.0.1 update, whose tables were made from 4.0.0 too), or the tables are made again for DLC. Its build row is the registered one, so every fix applies;
+        # the derived profile keeps that row alone, so comparing every row with the profile's would call it a version the profile was not brought up on
+        if g.title_id == reg.title_id and not other and pkg_ver in reg.builds():
             say(f'this {artifact} uses the registered {pkg_ver} ({disp}) builds and every fix for them, with derived shader tables ({derived})')
         elif g.title_id != reg.title_id and not other and pkg_ver in reg.builds():   # a registered build under another title ID (same_build): every fix applies
             say(f'this {artifact} is game profile {reg.id}\'s {pkg_ver} ({disp}) under title ID {g.title_id:016X}: its settings and every fix for its builds, with shaders split from this title\'s own files')
