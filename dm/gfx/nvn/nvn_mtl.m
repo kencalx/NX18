@@ -2414,6 +2414,7 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (sub_cut)
 static void rt_preserve_bound(void);
 static void queue_program_preserve(void);
+static void up_seq_drained(void);
 uint64_t mtl_sub_commit(void) {
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
@@ -2465,7 +2466,7 @@ uint64_t mtl_sub_commit(void) {
     [g_cb endCommandBuffer];
     rec_commit(g_cb, o);
     if (!lost_test) rec_signal(g_ev, fence);
-    rec_drain();
+    rec_drain(); up_seq_drained();   // every upload batch begun so far is on the queue now (present_enqueue's note)
     g_alloc_fence[g_alloc_cur] = fence;
     g_cb = nil;
     atomic_store(&g_sub_on, 0);   // after ++g_fence and the last encoding: a buffer retired from now on waits for this fence at most
@@ -3088,6 +3089,8 @@ static void up_wait_zero(_Atomic int *v, int site) {
     if (ws_on()) ws_put(site, w0, 1);
 }
 static unsigned g_up_seq;
+static unsigned g_up_seq_drained;   // g_up_seq at the last submission's rec_drain: batches begun before it are on the queue (submit thread only)
+static void up_seq_drained(void) { g_up_seq_drained = g_up_seq; }
 #define UP_BLOCK_SIZE (32u * 1024u * 1024u)
 // Each upload slot keeps its staging resident until its next batch (up_begin waits for the previous batch). Grow the first block to the slot's previous batch demand, not just its first texture:
 // a small first texture followed by a large one otherwise allocates and retires a fresh 32 MB overflow every frame. Keep one overflow as well, at most 64 MB per slot / 192 MB across all three.
@@ -16248,11 +16251,15 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 // Swapchain texture return: before AcquireTexture gets a texture it waits for the ticket of that texture's previous present to be processed (mtl_present_wait), after which the commands the game draws into it
 // are necessarily ordered after that blit on the GPU queue.
 #define PQ 8
-typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
+typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v, up_v; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait); up_v: the upload batch present_enqueue flushed for it (pup_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
 // External producer (the Vulkan layer, dm/gfx/vk) renders on its own queue and signals this event when a frame's rendering is done: the present of that frame waits for the value on g_q4
 static id<MTLSharedEvent> g_ext_ev;
 static void ext_wait(uint64_t v) { if (v && g_ext_ev) [g_q4 waitForEvent:g_ext_ev value:v]; }
 static void snap_commit_wait(uint64_t v);
+// With Metal encoding on its own thread an upload batch present_enqueue flushes is only recorded (rec_commit_upload): a RO_NOTE behind it sets g_pup_cmt to its g_pup_v, and the present
+// thread waits for that before present_now commits the display command buffer straight to the queue, so the upload reaches the queue first
+static _Atomic uint64_t g_pup_cmt; static uint64_t g_pup_v;   // g_pup_v: submit thread only
+static void pup_commit_wait(uint64_t v) { if (v) rec_note_wait(&g_pup_cmt, v); }
 static pq_item g_pq[PQ];
 static uint64_t g_pq_in;
 static int present_now(const tex_t *, double, uint64_t, uint64_t, const int[4], id<CAMetalDrawable>, double);
@@ -16332,7 +16339,7 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
     int submitted;
-    ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
+    ext_wait(it.ev_val); snap_commit_wait(it.snap_v); pup_commit_wait(it.up_v);
     @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); mtl_tex_unpin(it.t.serial); }
     g_link_hold_until = submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
     if (!submitted) {
@@ -16473,7 +16480,7 @@ static void *present_main(void *arg) {
         uint64_t ticket = ++g_pq_read; g_classic_busy = 1;
         pthread_mutex_unlock(&g_pq_mu);
         int submitted;
-        ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
+        ext_wait(it.ev_val); snap_commit_wait(it.snap_v); pup_commit_wait(it.up_v);
         @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, nil, 0); mtl_tex_unpin(it.t.serial); }
         pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
         if (!submitted) {
@@ -16625,7 +16632,20 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     // A texture first used by the present is resolved here too: its first use decides whether it is taken from its storage (tex_cpu_content), so tex_from_storage cannot tell before,
     // and resolved on the present thread a window texture holding the CPU's data in a pool the CPU can write was uploaded there and aborted the host (t_nvn, whose window textures
     // nothing draws into, since c06d1e79 stopped a sliver of another span from making them the GPU's)
-    if (!ev_val && on_sub_thread()) { tex_mtl(t); if (tex_from_storage(t)) up_flush(); }
+    // The flush is unconditional: outside a submission every upload path (the fills of a window texture this first use makes, tex_init_fill / tex_zero_fill, too) flushes at once,
+    // and inside one an open batch must still reach the queue before the snapshot copy and the display command buffer. up_flush returns at once with no batch open.
+    // With encoding on its own thread a flush between submissions is only recorded and published (rec_commit_upload, rec_publish), and nothing drains the encode thread until the next
+    // submission: when a batch began since the last submission's drain and the last note (g_up_seq), a RO_NOTE behind it is what the present thread waits for (pup_commit_wait) before its own commit
+    uint64_t up_v = 0;
+    if (!ev_val && on_sub_thread()) {
+        static unsigned seq_noted; tex_mtl(t); up_flush();
+        if (rec_on() && g_rb_started) {
+            // only a batch begun since the last submission's drain can still be a record ahead of the encode thread; one already noted is covered by its note
+            if (g_up_seq != g_up_seq_drained && g_up_seq != seq_noted) { rec_t *r = rec_put(RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_pup_cmt; r->a[1] = ++g_pup_v; rec_publish(); }
+            up_v = g_pup_v;   // the newest note, not only this present's: the display link may drop the present that carried it and show this one (notes run in order)
+        }
+        seq_noted = g_up_seq;
+    }
     static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, present_start);
     link_sync();
     {   // Test switch DM_TEST_LINK_STALL=start seconds,duration seconds: counting from the first present, pause the display link at that point (imitating the display link not calling back while in the foreground) and release it when the duration is up. For verifying the fallback; not set in the product
@@ -16643,7 +16663,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     mtl_tex_pin(t->serial);
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
-    pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0};
+    pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0, up_v};
     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
     uint64_t tk = ++g_pq_in;
     if (ss) { g_snap[slot].ticket = tk; atomic_fetch_add(&g_snap_next, 1); }
