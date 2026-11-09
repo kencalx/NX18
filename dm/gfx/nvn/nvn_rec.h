@@ -91,6 +91,8 @@ static pthread_mutex_t g_rb_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_rb_work = PTHREAD_COND_INITIALIZER, g_rb_idle = PTHREAD_COND_INITIALIZER;
 static rec_blk *g_rb_cur, *g_rb_head, *g_rb_tail, *g_rb_free;   // the submit thread's open block; blocks waiting for the encode thread; empty blocks
 static int g_rb_busy, g_rb_started, g_rb_sleeping;              // the encode thread is working through a block; the thread exists; it waits for work
+static _Atomic uint64_t g_rb_wakes;                              // the encode thread's returns from its wait for work (rec_publish / rec_own_push signals, and spurious ones): the threads line (mtl_rec_wakes)
+uint64_t mtl_rec_wakes(void) { return atomic_load_explicit(&g_rb_wakes, memory_order_relaxed); }
 
 static inline uint64_t rec_obj(id o) { return o ? (uint64_t)(uintptr_t)CFBridgingRetain(o) : 0; }
 static inline id rec_id(uint64_t v) { return (__bridge id)(void *)(uintptr_t)v; }
@@ -185,7 +187,7 @@ static void *rec_thread(void *arg) {
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     for (;;) {
         pthread_mutex_lock(&g_rb_mu);
-        while (!g_rb_head) { g_rb_sleeping = 1; pthread_cond_wait(&g_rb_work, &g_rb_mu); g_rb_sleeping = 0; }
+        while (!g_rb_head) { g_rb_sleeping = 1; pthread_cond_wait(&g_rb_work, &g_rb_mu); g_rb_sleeping = 0; atomic_fetch_add_explicit(&g_rb_wakes, 1, memory_order_relaxed); }
         rec_blk *b = g_rb_head; g_rb_head = b->next; if (!g_rb_head) g_rb_tail = NULL; g_rb_busy = 1;
         pthread_mutex_unlock(&g_rb_mu);
         @autoreleasepool { for (int i = 0; i < b->n; i++) rec_exec(&b->r[i]); }

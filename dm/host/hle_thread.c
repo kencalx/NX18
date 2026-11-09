@@ -78,6 +78,7 @@ typedef struct thr {
     uint64_t nspin, nspin_seen, spin_site; const char *spin_mod;   // Spin wait passes (dm_spin_wait; those that yield count in nyield too) and where the last one was
     uint64_t srun_svc, srun_t0, spin_ret;     // Current spin wait: nsvc at its passes, when it began, when the last pass returned
     uint64_t cpu_seen_us;                     // CPU time (µs) at the last power report (dm_thread_cpu)
+    uint64_t nsleep, nsleep_seen;             // Timed SleepThread calls (20 µs or more; shorter ones are yields), and their count at the last power report (dm_wake_stats)
     uint64_t yrun_svc, yrun_t0, yrun_sig, yrun_sig2, poll_ret;   // Current run of yields: nsvc of the last yield, when the run began, and the caller's x19–x28 at the last two yields (a run lasts while no other SVC comes between two yields and those registers match one of the last two, thr_yield); when the last yield or short timed-out wait returned (poll_wait_begin)
     uint64_t yrun_clk;                        // dm_clock_reads at the last yield: a pass that read the clock since makes the yield a clock wait (thr_yield)
     uint64_t cw_sig, cw_run, cw_last, cw_end, cw_per, cw_per2, cw_wake, ncwpred, ncwpred_seen;   // The clock wait followed (clock_wait): its x19–x28, the run it was last seen in, when its last yield returned,
@@ -99,6 +100,11 @@ typedef struct thr {
 static thr_t *g_all;
 extern __thread _Atomic int dm_host_work;   // declared in hle.h too; defined in hle_nvn.c
 static _Atomic uint64_t g_preempt_n, g_preempt_ns;   // same-core handoffs: count and total wait (svc_thread)
+// Wake sources for the threads line (dm_wake_stats, every 300 frames); none of them takes a lock. The polls and nanosleep steps are one host wakeup each, the sleep calls only calls
+// (sleep_precise returns without a nanosleep within 20 µs of its deadline; under the deterministic clock SleepThread's 1 ms guest-clock steps are not counted). The 50 µs polls of a same-core
+// handoff (dm_yield_to_core_peers) and of a service request's wait for its starter (dm_thread_service_request); sleep_precise calls and the nanosleep steps they take; timed
+// SleepThread calls by length (< 1 ms, 1-5 ms, > 5 ms). Persona 5 Royal stays at about 4,000 wakeups a second on the iPhone where Super Mario Odyssey has 250-480: these say which
+static _Atomic uint64_t g_hpoll, g_srpoll, g_sp_calls, g_sp_steps, g_sleep_len[3];
 static int g_core_preempt;   // also check already-runnable peers after every thread SVC (profile / DM_PREEMPT)
 
 static pthread_mutex_t G = PTHREAD_MUTEX_INITIALIZER;
@@ -183,7 +189,7 @@ void dm_thread_service_request(void) {
     while (me->start_by && now_ns() - t0 < SERVICE_START_WAIT_NS) {
         if (atomic_load(&me->start_by->hand_epoch) != epoch) { back = 1; break; }
         pthread_mutex_unlock(&G);
-        { struct timespec ts = {0, 50000}; nanosleep(&ts, 0); }
+        { struct timespec ts = {0, 50000}; nanosleep(&ts, 0); atomic_fetch_add_explicit(&g_srpoll, 1, memory_order_relaxed); }
         pthread_mutex_lock(&G);
     }
     me->start_by = NULL; me->native_wait--;
@@ -223,7 +229,7 @@ int dm_yield_to_core_peers(int all) {
             if (t != self && t->started && !t->exited && !t->host_owned && t->mask == bit && t->prio < self->prio && thr_runnable(t) && (all || thr_in_handoff(t, self))) busy = 1;
         pthread_mutex_unlock(&G);
         if (!busy) return waited;
-        { struct timespec ts = {0, 50000}; nanosleep(&ts, 0); } waited = 1;
+        { struct timespec ts = {0, 50000}; nanosleep(&ts, 0); atomic_fetch_add_explicit(&g_hpoll, 1, memory_order_relaxed); } waited = 1;
     }
 }
 // Take a host lock that an HLE call holds while it runs guest code. A guest thread waiting for it is in a native HLE wait (dm_thread_native_wait), blocked as it would be
@@ -970,14 +976,39 @@ void dm_thread_cpu(char *out, size_t n, double secs) {
     if (!top[0] && o < n) snprintf(out + o, n - o, "none");
     pthread_mutex_unlock(&G);
 }
+// The host's wake sources since the last call, per second (the threads line every 300 frames, hle_nvn.c power_line): timed SleepThread calls by length with the three threads that
+// slept most, sleep_precise calls and their nanosleep steps (SleepThread's, the host hooks' and the clock waits' predicted sleeps), same-core handoffs with their wait and 50 µs polls,
+// and the polls of service requests waiting for their starter. Only counts: what drives a process's wakeups (the power line) when no thread yields much. secs = the window length
+void dm_wake_stats(char *out, size_t n, double secs) {
+    static uint64_t pl[3], psc, pss, pho, phn, phs, psr;
+    uint64_t l[3], sc = atomic_load_explicit(&g_sp_calls, memory_order_relaxed), ss = atomic_load_explicit(&g_sp_steps, memory_order_relaxed), ho = atomic_load_explicit(&g_hpoll, memory_order_relaxed),
+             hn = atomic_load_explicit(&g_preempt_n, memory_order_relaxed), hs = atomic_load_explicit(&g_preempt_ns, memory_order_relaxed), sr = atomic_load_explicit(&g_srpoll, memory_order_relaxed);
+    for (int i = 0; i < 3; i++) l[i] = atomic_load_explicit(&g_sleep_len[i], memory_order_relaxed);
+    if (!(secs > 0)) secs = 1;
+    size_t o = (size_t)snprintf(out, n, "SleepThread < 1 ms %.0f / 1–5 ms %.0f / > 5 ms %.0f (top: ", (l[0] - pl[0]) / secs, (l[1] - pl[1]) / secs, (l[2] - pl[2]) / secs);
+    thr_t *top[3] = {0}; uint64_t d[3] = {0}; char nb[32];
+    pthread_mutex_lock(&G);
+    for (thr_t *t = g_all; t; t = t->all) {
+        uint64_t k = t->nsleep - t->nsleep_seen; t->nsleep_seen = t->nsleep;
+        for (int i = 0; i < 3; i++) if (k > d[i]) { for (int j = 2; j > i; j--) { top[j] = top[j - 1]; d[j] = d[j - 1]; } top[i] = t; d[i] = k; break; }
+    }
+    for (int i = 0; i < 3 && top[i] && o < n; i++) o += (size_t)snprintf(out + o, n - o, "%s%#x '%s' %.0f", i ? ", " : "", top[i]->handle, thr_name(top[i], nb, sizeof nb), d[i] / secs);
+    pthread_mutex_unlock(&G);
+    if (!top[0] && o < n) o += (size_t)snprintf(out + o, n - o, "none");
+    if (o < n) snprintf(out + o, n - o, "); precise sleeps %.0f in %.0f nanosleep steps; same-core handoffs %.0f (%.1f ms/s) in %.0f polls of 50 µs; service-request polls %.0f",
+                        (sc - psc) / secs, (ss - pss) / secs, (hn - phn) / secs, (hs - phs) / 1e6 / secs, (ho - pho) / secs, (sr - psr) / secs);
+    memcpy(pl, l, sizeof pl); psc = sc; pss = ss; pho = ho; phn = hn; phs = hs; psr = sr;
+}
 // Sleep until dl (host monotonic ns) on time: macOS nanosleep / mach_wait_until carry timer slack; measured, 33 ms sleeps take about 36.4 ms, 5 ms take 6.1 ms, 1 ms take 1.26 ms (the same at any QoS).
 // Metroid Dread's sound thread sleeps "33 ms minus this round's work" (main+0xf95b0), and on the host its period became 36.9 ms; cutscenes render a frame whenever the audio play position that thread updates moves, so they ran at about 27 fps (30 on the Switch).
 // Each step sleeps only 3/4 of the remaining time (the slack is at most about 25%, so it never oversleeps), looping until within 20 µs: a 33 ms sleep takes about 4 system calls with an error of tens of microseconds, and nothing spins
 static void sleep_precise(uint64_t dl) {
+    atomic_fetch_add_explicit(&g_sp_calls, 1, memory_order_relaxed);
     for (int i = 0; i < 16; i++) {
         uint64_t now = now_ns(); if (now + 20000 >= dl) return;
         uint64_t rem = dl - now, s = rem < 100000 ? rem : rem - rem / 4;
         struct timespec ts = {(time_t)(s / 1000000000u), (long)(s % 1000000000u)}; nanosleep(&ts, 0);
+        atomic_fetch_add_explicit(&g_sp_steps, 1, memory_order_relaxed);
     }
 }
 // A guest thread sleeps ns nanoseconds the way SleepThread does: on the guest clock under the deterministic clock, else on time (sleep_precise). Also for host hooks that stand for a
@@ -1052,7 +1083,11 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         // A sleep, and YieldToAnyThread (-2), which takes the thread off its core so that lower-priority threads run there, end its part in a handoff;
         // the other yields (0, -1) pass the core only to threads of its own priority or higher
         if (ns > 0 || ns == -2) { thr_t *me = pthread_getspecific(g_keythr); if (me && me->nhand) { pthread_mutex_lock(&G); hand_leave(me); pthread_mutex_unlock(&G); } }
-        if ((ns > 0 && dm_detclock_enabled()) || ns >= 20000) dm_guest_sleep_ns(ns);
+        if ((ns > 0 && dm_detclock_enabled()) || ns >= 20000) {
+            thr_t *me = pthread_getspecific(g_keythr); if (me) me->nsleep++;   // by length for the threads line (dm_wake_stats)
+            atomic_fetch_add_explicit(&g_sleep_len[ns < 1000000 ? 0 : ns <= 5000000 ? 1 : 2], 1, memory_order_relaxed);
+            dm_guest_sleep_ns(ns);
+        }
         // Yield (0 / -1 / -2), and sleeps shorter than 20 µs, which sleep_precise would return from at once: Super Mario Galaxy's Hagi polls with SleepThread(100 ns) (main+0x517c),
         // which kept a core at 100% (1.4 billion calls in 200 s); as yields they get the back-off below.
         // Count and time of the main thread's yields are recorded: a render task graph's "wait for everything to finish" is often pure polling + yield; measure how much of a frame it takes

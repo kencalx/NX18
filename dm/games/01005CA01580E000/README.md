@@ -53,3 +53,4 @@ Choose offline mode at the network prompt, then New Game and English voices. Adv
 - Test battles, later story scenes and save/load over a longer playthrough.
 - `SetRenderEnableConditional` still reports that the host draws unconditionally. No visual failure was identified in the tested opening; conditional rendering remains unvalidated.
 - Device validation remains for the user after sideloading.
+- Power: the iPhone's `power up to frame` lines stay at about 4,000 wakeups a second (Super Mario Odyssey: 250–480). The encode thread is not the cause (the wakeups do not follow the draw count, and Super Mario Odyssey has the same thread); the `threads up to frame` line's wake sources ([Power](../../../docs/development.md#power), "Wake sources") are to say which source it is, from a new device log. Not yet measured.

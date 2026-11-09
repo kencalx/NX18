@@ -1520,6 +1520,7 @@ __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *
 int mtl_probe_ramp_on(void);   // nvn_mtl.m: DM_FSTEP_PROBE_RAMP (default on; ab with DM_AB)
 __attribute__((weak)) void dm_yield_top(char *out, size_t n) { if (n) snprintf(out, n, "-"); }   // hle_thread.c: the threads that yielded most since the last call; none in graphics unit tests
 __attribute__((weak)) void dm_thread_cpu(char *out, size_t n, double secs) { (void)secs; if (n) snprintf(out, n, "-"); }   // hle_thread.c: guest-thread CPU by Switch priority band since the last call
+__attribute__((weak)) void dm_wake_stats(char *out, size_t n, double secs) { (void)secs; if (n) snprintf(out, n, "-"); }   // hle_thread.c: the host's wake sources per second since the last call (sleeps, handoff polls)
 void mtl_res_stats(char *out, size_t n);
 void mtl_barrier_stats(uint64_t *skip, uint64_t *full);
 extern uint32_t mtl_present_qos(void);
@@ -1649,7 +1650,7 @@ static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y
 // wakeups per second (interrupt / out of platform idle), GPU time per second (task_gpu_utilisation), thermal state, and the guest threads that yielded most (hle_thread.c);
 // then render-target traffic per frame (attachment load / store bytes, passes that load and store everything, stores saved by DM_NVN_UNWRITTEN_DC) and guest-thread CPU by Switch priority
 static void power_line(uint64_t frame) {
-    static uint64_t pt, pe, pcpu, pp, piw, ppw, pg, pf, pld, pst, pfu, pudc; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
+    static uint64_t pt, pe, pcpu, pp, piw, ppw, pg, pf, pld, pst, pfu, pudc, pnqp, prw; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     task_power_info_v2_data_t pw; mach_msg_type_number_t n = TASK_POWER_INFO_V2_COUNT;
     if (task_info(mach_task_self(), TASK_POWER_INFO_V2, (task_info_t)&pw, &n) != KERN_SUCCESS) return;
     uint64_t t = now_ns(), cpu = (pw.cpu_energy.total_user + pw.cpu_energy.total_system) * tb.numer / tb.denom, p = pw.task_ptime * tb.numer / tb.denom;
@@ -1695,9 +1696,12 @@ static void power_line(uint64_t frame) {
             frame, (ps[0] - pps[0]) / nf, (ps[1] - pps[1]) / 1e3 / nf, (ps[2] - pps[2]) / nf, (ps[3] - pps[3]) / nf, (ps[4] - pps[4]) / nf, (ps[5] - pps[5]) / nf);
         memcpy(pps, ps, sizeof pps);
         char tc[400]; dm_thread_cpu(tc, sizeof tc, s);
-        LOG("[nvn] threads up to frame %llu: CPU %s", frame, tc); }
-    else { char yt[192], rs[400], tc[400]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); }   // the first call only takes the baselines
-    pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes();
+        // Then the wake sources per second, to tell what drives the power line's wakeups: the host's sleeps and handoff polls (dm_wake_stats), the queue replay's 1 ms event polls
+        // (nvn_queue.inc nq_worker) and the encode thread's wakes (nvn_rec.h rec_thread)
+        char wk[512]; dm_wake_stats(wk, sizeof wk, s); uint64_t nqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed), rw = mtl_rec_wakes();
+        LOG("[nvn] threads up to frame %llu: CPU %s; wake sources per second: %s; NVN queue event polls of 1 ms %.0f; encode thread wakes %.0f", frame, tc, wk, (nqp - pnqp) / s, (rw - prw) / s); }
+    else { char yt[192], rs[400], tc[400], wk[512]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); dm_wake_stats(wk, sizeof wk, 1); }   // the first call only takes the baselines
+    pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes(); pnqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed); prw = mtl_rec_wakes();
 }
 static void tsummary(uint64_t frame) {
     char line[1024]; size_t o = 0;

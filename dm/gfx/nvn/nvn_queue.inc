@@ -43,6 +43,7 @@ static pthread_cond_t nq_cv = PTHREAD_COND_INITIALIZER;
 static pthread_once_t nq_once = PTHREAD_ONCE_INIT;
 static nq_queue *nq_queues;
 static int nq_test_held;   // nvn_queue_test_hold: replay takes no queued work while set (unit tests only)
+static _Atomic uint64_t nq_event_polls;   // the replay's 1 ms polls for a mapped event word that ended by their timeout (the threads line, power_line): one host wakeup each
 // The last GPU write of each event word not yet landed: its submission's fence, and for a WRITE signal the value it leaves (exact). A wait the queued value satisfies needs no
 // completion: its continuation is encoded after the writer's on the one ordered Metal queue, as the next submission of one NVN queue is, and memory the writer's completion lands
 // on the CPU (reports, render-target readbacks) is that same in-flight case. An ADD's result depends on the writes landing before it, so such a wait still waits for them
@@ -141,7 +142,7 @@ static void *nq_worker(void *unused) {
             if(q) break;
             // NVN events can also be changed by plain stores through mapped pool memory.
             // A bounded notification poll only while such a word is awaited complements API/callback wakes.
-            if(mapped_event_wait) { struct timespec tick={0,1000000}; pthread_cond_timedwait_relative_np(&nq_cv,&nq_mu,&tick); }
+            if(mapped_event_wait) { struct timespec tick={0,1000000}; if(pthread_cond_timedwait_relative_np(&nq_cv,&nq_mu,&tick)==ETIMEDOUT) atomic_fetch_add_explicit(&nq_event_polls,1,memory_order_relaxed); }
             else pthread_cond_wait(&nq_cv,&nq_mu);
         }
         j->first=n->next; if(!j->first) j->last=NULL;
