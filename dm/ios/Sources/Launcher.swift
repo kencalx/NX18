@@ -168,25 +168,28 @@ private struct LauncherView: View {
 // Shows the launcher over the root view controller and calls done once the settings are in the environment; false (done is not called) when there is no launcher
 @_cdecl("dm_show_launcher")
 public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @convention(c) () -> Void) -> Bool {
-    // a game of several programs (main.m): the running program's settings, in its dm/p<N>
-    let dir = getenv("DM_APP_DM").map { URL(fileURLWithPath: String(cString: $0)) } ?? Bundle.main.resourceURL?.appendingPathComponent("dm")
-    guard let url = dir?.appendingPathComponent("launcher.json"), let data = try? Data(contentsOf: url) else { return false }
-    guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return false }
-    let model = LauncherModel(file.settings)
-    gameMenuModel = model   // the in-game menu shows and saves the same choices (GameMenu.swift)
-    if ProcessInfo.processInfo.environment["DM_LAUNCHER"] == "0" { fputs("launcher: off (DM_LAUNCHER=0)\n", stderr); model.applySaved(); return false }
-    let parent = Unmanaged<UIViewController>.fromOpaque(viewController).takeUnretainedValue()
-    var host: UIViewController?
-    let view = LauncherView(m: model) {
-        guard let h = host else { return }
-        host = nil
-        model.apply()
-        h.dismiss(animated: false) { done() }
+    nonisolated(unsafe) let viewController = viewController, done = done   // a raw pointer and a C callback: not Sendable, but front_ios.m hands them over on the main thread, where they stay
+    return MainActor.assumeIsolated {   // front_ios.m calls it from its view controller on the main thread (UIKit); gameMenuModel is main-actor state (GameMenu.swift)
+        // a game of several programs (main.m): the running program's settings, in its dm/p<N>
+        let dir = getenv("DM_APP_DM").map { URL(fileURLWithPath: String(cString: $0)) } ?? Bundle.main.resourceURL?.appendingPathComponent("dm")
+        guard let url = dir?.appendingPathComponent("launcher.json"), let data = try? Data(contentsOf: url) else { return false }
+        guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return false }
+        let model = LauncherModel(file.settings)
+        gameMenuModel = model   // the in-game menu shows and saves the same choices (GameMenu.swift)
+        if ProcessInfo.processInfo.environment["DM_LAUNCHER"] == "0" { fputs("launcher: off (DM_LAUNCHER=0)\n", stderr); model.applySaved(); return false }
+        let parent = Unmanaged<UIViewController>.fromOpaque(viewController).takeUnretainedValue()
+        var host: UIViewController?
+        let view = LauncherView(m: model) {
+            guard let h = host else { return }
+            host = nil
+            model.apply()
+            h.dismiss(animated: false) { done() }
+        }
+        let h = DmHostingController(rootView: view)
+        h.modalPresentationStyle = .fullScreen
+        host = h
+        parent.present(h, animated: false)
+        fputs("launcher: \(file.settings.count) settings shown\n", stderr)
+        return true
     }
-    let h = DmHostingController(rootView: view)
-    h.modalPresentationStyle = .fullScreen
-    host = h
-    parent.present(h, animated: false)
-    fputs("launcher: \(file.settings.count) settings shown\n", stderr)
-    return true
 }

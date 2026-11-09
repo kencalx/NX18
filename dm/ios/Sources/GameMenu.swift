@@ -4,16 +4,18 @@
 // that need the next start (language, pipelines, the frame rate and so on), and the sliders, stay on the settings screen, which the menu's title points to.
 import UIKit
 
-var gameMenuModel: LauncherModel?   // the settings screen's model (Launcher.swift); nil in an app without one: the menu has the layout only
+@MainActor var gameMenuModel: LauncherModel?   // main-actor state: written by dm_show_launcher, read by the menu, both on the main thread; the settings screen's model (Launcher.swift); nil in an app without one: the menu has the layout only
 
 @_cdecl("dm_game_menu")
 public func dmGameMenu() -> UnsafeMutableRawPointer {
-    let title = gameMenuModel != nil ? "More settings on the start screen" : ""
-    let menu = UIMenu(title: title, children: [UIDeferredMenuElement.uncached { done in done(gameMenuItems()) }])   // built each time it opens, so it shows the current choices
+    let menu = MainActor.assumeIsolated {   // DmGamepad.m asks for the menu on the main thread (UIKit); a call from any other thread stops here instead of racing gameMenuModel
+        let title = gameMenuModel != nil ? "More settings on the start screen" : ""
+        return UIMenu(title: title, children: [UIDeferredMenuElement.uncached { done in done(gameMenuItems()) }])   // built each time it opens, so it shows the current choices
+    }
     return Unmanaged.passRetained(menu).toOpaque()
 }
 
-private func gameMenuItems() -> [UIMenuElement] {
+@MainActor private func gameMenuItems() -> [UIMenuElement] {
     let names = ["2D", "3D", "Tap"]
     let layouts = (0..<3).filter { dm_pad_layout_offered(Int32($0)) }.map { l in
         UIAction(title: names[l], state: dm_pad_layout() == l ? .on : .off) { _ in dm_pad_layout_set(Int32(l)) }
@@ -40,7 +42,7 @@ private func gameMenuItems() -> [UIMenuElement] {
 // that crashed or that iOS ended), the files docs/playing.md asks for in a bug report. Each is copied into tmp/share-log first, so the sheet reads a snapshot: log.txt is still being
 // written while the app runs (APFS clones the copy, which takes no room until the log grows). A missing file is left out; the copies of the share before are deleted at the next (and
 // iOS empties tmp by itself). On an iPad the sheet is a popover: it points at the view the share came from (the gear), or sits in the middle of the screen
-func dmShareLog(from anchor: UIView?) {
+@MainActor func dmShareLog(from anchor: UIView?) {
     let fm = FileManager.default
     guard let doc = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
     let dir = fm.temporaryDirectory.appendingPathComponent("share-log", isDirectory: true)
@@ -80,7 +82,7 @@ func dmShareLog(from anchor: UIView?) {
 // folder). An on / off pair is one row; a "set" cheat runs once when tapped. Then the master switch and Reload, which reads the folder again after a file was copied in.
 private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 32   // dm.h DM_CHEAT_*
 
-private func cheatsMenu() -> UIMenuElement? {
+@MainActor private func cheatsMenu() -> UIMenuElement? {
     if String(cString: dm_cheats_dir_path()).isEmpty { return nil }   // no cheats folder (DM_CHEATS=""), or the host is still loading them (hle_cheats.c): no submenu, until an open after that
     let reload = UIAction(title: "Reload cheats", image: UIImage(systemName: "arrow.clockwise")) { _ in dm_cheats_reload() }
     let build = String(cString: dm_cheats_build())
@@ -136,7 +138,7 @@ private func cheatsMenu() -> UIMenuElement? {
     return UIMenu(title: version.isEmpty ? "Cheats" : "Cheats (\(version))", subtitle: subtitle, image: UIImage(systemName: "wand.and.stars"), children: groups)
 }
 
-private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> UIMenuElement {
+@MainActor private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> UIMenuElement {
     let now = m.values[s.env] ?? s.def, fixed = m.fixed.contains(s.env)
     let attributes: UIMenuElement.Attributes = fixed ? .disabled : []
     func pick(_ v: String) { if m.choose(s, v) { dm_setting_env(s.env, v) }; _ = dm_setting_live(s.env, v) }   // saved, into the environment (under front_ios.m's lock), then applied
