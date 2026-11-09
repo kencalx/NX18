@@ -64,6 +64,7 @@ int main(void) { @autoreleasepool {
 
     // Once it completes, memory holds the truth: what the CPU wrote after it is not overwritten by what was remembered
     g_done = running; running += 1000;
+    if (atomic_load(&g_fence) < g_done) atomic_store(&g_fence, g_done);   // as on the GPU, nothing completes past the committed fence: a release queued at g_fence + 1 is drained at once when g_done has passed it (defer_obj_at), and that freed the upload ring block this submission still used
     memset(mem, 0x22, LEN);
     update(0x48, 0xf2, 4);
     { const uint32_t want[] = {0x22222222, 0x22222222, 0xf2}; words(made_shadow(0x40, 12), want, 3, "a finished update is no longer laid over memory"); }

@@ -2,7 +2,8 @@
 # without hand-copying lists: when the Makefile changes, the next iOS build follows automatically.
 #   Gen/src/<flat name>   symlinks to source files (excluding main.c and front_mac.m; main.c is linked separately to Gen/main/main.c and compiled with -Dmain=dm_main)
 #   stdout            xcconfig lines: HEADER_SEARCH_PATHS (-I directories + the directory of every source file, so relative includes resolve as usual),
-#                     OTHER_CFLAGS (-D), frameworks (those the iOS SDK lacks, Cocoa and IOBluetooth, are left out: the UIKit side has what Cocoa gives)
+#                     OTHER_CFLAGS (-D), frameworks (only those the iOS SDK has: a Mac-only one, such as Cocoa, which the UIKit side replaces, or IOBluetooth,
+#                     which only Mac code under TARGET_OS_OSX uses, would fail the link; each one left out is named on stderr)
 # Usage: gen_build.py <dm/host dir> <Gen dir>
 import os, shlex, subprocess, sys
 host, gen = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
@@ -41,10 +42,8 @@ for s in srcs:
     os.symlink(s, f'{gen}/src/{flat}')
 print('HEADER_SEARCH_PATHS = $(inherited) ' + ' '.join(f'"{d}"' for d in incs + dirs))
 print('OTHER_CFLAGS = $(inherited) ' + ' '.join(defs))
-# Frameworks the iOS SDK does not have are the Mac's alone and are left out: Cocoa (the UIKit side has what it gives) and IOBluetooth (pad_switch2_apple.m
-# uses it only under TARGET_OS_OSX). The Makefile's list is the Mac host's, so any framework added there for the Mac alone would otherwise stop the iOS link
 sdk = subprocess.run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], capture_output=True, text=True, check=True).stdout.strip()
-ios_fws = [f for f in dict.fromkeys(fws) if os.path.isdir(os.path.join(sdk, 'System/Library/Frameworks', f + '.framework'))]
-mac_only = [f for f in dict.fromkeys(fws) if f not in ios_fws]
-if mac_only: print(f'gen_build.py: left out of the iOS link (not in the iOS SDK): {" ".join(mac_only)}', file=sys.stderr)
-print('DM_FRAMEWORKS = ' + ' '.join(f'-framework {f}' for f in ios_fws))
+fws = list(dict.fromkeys(fws))
+mac_only = [f for f in fws if not os.path.isdir(f'{sdk}/System/Library/Frameworks/{f}.framework')]
+if mac_only: print('gen_build: not in the iOS SDK, left out of the link: ' + ' '.join(mac_only), file=sys.stderr)
+print('DM_FRAMEWORKS = ' + ' '.join(f'-framework {f}' for f in fws if f not in mac_only))
