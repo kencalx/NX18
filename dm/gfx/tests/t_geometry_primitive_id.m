@@ -14,7 +14,7 @@ static int run_case(NSString *directory, unsigned topology, unsigned invocations
     if(!meta||!lib){fprintf(stderr,"fixture missing: %s\n",error.description.UTF8String);return 1;}
     NvShader *gs=shader(lib,@"main0",2,NULL,0);char message[160]={0};
     if(nvn_refl_from_json(meta,&gs->rf,message,sizeof message)){fprintf(stderr,"%s\n",message);return 1;}
-    gs->ae=[gs->fn newArgumentEncoderWithBufferIndex:0];gs->arg_len=gs->ae.encodedLength;
+    gs->arg_len=[gs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     NSDictionary *layout=meta[@"geometry"];gs->geo_vertices=[layout[@"vertices"] unsignedIntValue];gs->geo_invocations=invocations;
     gs->geo_output=[layout[@"output"] unsignedIntValue];gs->geo_stride=[layout[@"stride"] unsignedIntValue];gs->geo_index_stride=[layout[@"index_stride"] unsignedIntValue];
     strcpy(gs->key,"000000000000c001_b");

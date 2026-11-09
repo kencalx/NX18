@@ -22,7 +22,7 @@ static void run(NSString *dir, int mode) {   // mode 0: no bindings; 1: an argum
     NvShader *ps = [NvShader new]; pr->sh[1] = ps;
     ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->stage = 1; ps->rf.may_discard = 1; ps->has_alpha = 1;
     memset(ps->key, '0' + mode, 16); memcpy(ps->key + 16, "_b", 3);   // the host loads <dir>/<16 digits>_bx.metallib
-    if (mode == 1) { ps->ae = [ps->fn newArgumentEncoderWithBufferIndex:0]; ps->arg_len = ps->ae.encodedLength; ps->rf.nb = 1; ps->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0}; }
+    if (mode == 1) { ps->arg_len = [ps->fn newArgumentEncoderWithBufferIndex:0].encodedLength; ps->rf.nb = 1; ps->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0}; }
     static prog_t program[2]; int pi = mode; program[pi].serial = 98000 + pi; serial_put(program[pi].serial, pr);
     static NSMutableArray *keep; if (!keep) keep = [NSMutableArray array]; [keep addObject:pr];
     tex_t target = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 98100 + pi};

@@ -44,7 +44,7 @@ int main(void) { @autoreleasepool {
         "fragment float4 fw(constant A&a[[buffer(0)]]){a.p[8192]=1;return float4(1,0,0,1);}\n" options:nil error:&error];
     if(!lib){fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);return 1;}
     static prog_t pg={.serial=910501}; NvProg *program=[NvProg new];
-    NvShader *vs=[NvShader new];vs->fn=[lib newFunctionWithName:@"v"];vs->ae=[vs->fn newArgumentEncoderWithBufferIndex:0];
+    NvShader *vs=[NvShader new];vs->fn=[lib newFunctionWithName:@"v"];vs->arg_len=[vs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     vs->discard_fn=[lib newFunctionWithName:@"vd"];
     vs->rf.nb=1;vs->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0};
     program->sh[0]=vs;program->sh[1]=[NvShader new];program->sh[1]->fn=[lib newFunctionWithName:@"f"];program->sh[1]->stage=1;serial_put(pg.serial,program);
@@ -69,7 +69,7 @@ int main(void) { @autoreleasepool {
     // to the next vertex shader, even with rasterization disabled throughout.
     static prog_t pp={.serial=910503},cp={.serial=910504};NvProg *producers[2]={[NvProg new],[NvProg new]};
     for(int i=0;i<2;i++){NvShader *s=[NvShader new];s->fn=[lib newFunctionWithName:i?@"c":@"p"];s->discard_fn=[lib newFunctionWithName:i?@"cd":@"pd"];
-        s->ae=[s->discard_fn newArgumentEncoderWithBufferIndex:0];s->rf.nb=1;s->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0};producers[i]->sh[0]=s;}
+        s->arg_len=[s->discard_fn newArgumentEncoderWithBufferIndex:0].encodedLength;s->rf.nb=1;s->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0};producers[i]->sh[0]=s;}
     serial_put(pp.serial,producers[0]);serial_put(cp.serial,producers[1]);
     buf.size=32768;emit(OP_BIND_SSBO,&buf,sizeof buf);bp.prog=&pp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);
     arrays=(p_draw){.prim=0,.count=4096,.instances=1};emit(OP_DRAW,&arrays,sizeof arrays);
@@ -84,7 +84,7 @@ int main(void) { @autoreleasepool {
     reader->sh[0]=[NvShader new];reader->sh[0]->fn=[lib newFunctionWithName:@"c"];reader->sh[1]=program->sh[1];serial_put(rd.serial,reader);
     freader->sh[0]=reader->sh[0];freader->sh[1]=[NvShader new];freader->sh[1]->fn=program->sh[1]->fn;freader->sh[1]->stage=1;
     freader->sh[1]->rf.nb=1;freader->sh[1]->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=0,.reg=5,.aid=0};serial_put(rf.serial,freader);   // only its binding table matters here
-    fwriter->sh[0]=reader->sh[0];NvShader *fws=[NvShader new];fws->fn=[lib newFunctionWithName:@"fw"];fws->stage=1;fws->ae=[fws->fn newArgumentEncoderWithBufferIndex:0];
+    fwriter->sh[0]=reader->sh[0];NvShader *fws=[NvShader new];fws->fn=[lib newFunctionWithName:@"fw"];fws->stage=1;fws->arg_len=[fws->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     fws->rf.nb=1;fws->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0};fwriter->sh[1]=fws;serial_put(fwp.serial,fwriter);
     p_bind_buf fbuf=buf;fbuf.stage=1;emit(OP_BIND_SSBO,&fbuf,sizeof fbuf);
     arrays=(p_draw){.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1};p_draw writes=(p_draw){.prim=0,.count=4096,.instances=1};

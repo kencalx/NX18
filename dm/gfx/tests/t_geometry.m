@@ -314,7 +314,7 @@ static NvShader *shader(id<MTLLibrary> l, NSString *name, int stage, const int *
     // Synthetic functions must have distinct content identities too: pipeline caches
     // key on shader content, not the transient MTLLibrary object address.
     static uint64_t identity=0x7000000000000000ull;snprintf(s->key,sizeof s->key,"%016llx_b",(unsigned long long)++identity);
-    if(n) {s->ae=[s->fn newArgumentEncoderWithBufferIndex:0];s->arg_len=s->ae.encodedLength;}
+    if(n) {s->arg_len=[s->fn newArgumentEncoderWithBufferIndex:0].encodedLength;}
     for(int i=0;i<n;i++)s->rf.b[i]=(nvn_rbind){.kind=NVN_RB_GEOMETRY,.reg=helpers[i],.aid=i};
     return s;
 }
@@ -366,7 +366,7 @@ static void passthrough_kernels(const char *directory) {
         EXPECT("compiled passthrough fixture loaded",1,json&&lib);if(!json||!lib)continue;
         NvShader *s=shader(lib,@"main0",2,NULL,0);char message[160]={0};
         EXPECT("passthrough reflection",0,nvn_refl_from_json(json,&s->rf,message,sizeof message));
-        s->ae=[s->fn newArgumentEncoderWithBufferIndex:0];s->arg_len=s->ae.encodedLength;
+        s->arg_len=[s->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
         NSDictionary *layout=json[@"geometry"];
         uint32_t bound=[layout[@"vertices"] unsignedIntValue],stride=[layout[@"stride"] unsignedIntValue],index_stride=[layout[@"index_stride"] unsignedIntValue];
         EXPECT("passthrough topology bound",vertices[t],bound);EXPECT("passthrough complete generic map",133,stride);
@@ -518,7 +518,7 @@ static void replay_local(int mode) {
     int helpers[]={0,1,2,3,4}, rh[]={1};
     NvProg *pr=[NvProg new];pr->sh[0]=shader(l,@"unused",0,NULL,0);pr->sh[0]->geo_fn=[l newFunctionWithName:@"capture"];
     pr->sh[1]=shader(l,@"red",1,NULL,0);pr->sh[2]=shader(l,@"geometry",2,helpers,5);
-    NvShader *gs=pr->sh[2];gs->rf.b[gs->rf.nb++]=(nvn_rbind){.kind=NVN_RB_SBUFP,.reg=0,.aid=5,.rw=1};gs->ae=[gs->fn newArgumentEncoderWithBufferIndex:0];gs->arg_len=gs->ae.encodedLength;
+    NvShader *gs=pr->sh[2];gs->rf.b[gs->rf.nb++]=(nvn_rbind){.kind=NVN_RB_SBUFP,.reg=0,.aid=5,.rw=1};gs->arg_len=[gs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     strcpy(gs->key,"123456789abcdef0_b");gs->geo_vertices=4;gs->geo_invocations=2;gs->geo_output=7;gs->geo_stride=4;gs->geo_index_stride=5;
     g_shcache=[NSMutableDictionary dictionary];g_shcache[@"123456789abcdef0_bg0"]=gs;g_shcache[@"123456789abcdef0_bgv"]=shader(l,@"reader",0,rh,1);
     static NSMutableArray *keep;if(!keep)keep=[NSMutableArray array];[keep addObject:pr];[keep addObject:g_shcache[@"123456789abcdef0_bgv"]];

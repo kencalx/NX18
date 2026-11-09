@@ -19,7 +19,7 @@ int main(void) { @autoreleasepool {
     CHECK(lib != nil, "synthetic compute shader compiles"); if (!lib) return 1;
     prog_t pg = {.serial=960001}; NvProg *program = [NvProg new]; NvShader *cs = [NvShader new];
     program->sh[5] = cs; cs->stage = 5; cs->fn = [lib newFunctionWithName:@"copy_pixel"];
-    cs->ae = [cs->fn newArgumentEncoderWithBufferIndex:0];
+    cs->arg_len = [cs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     cs->rf.tg[0] = cs->rf.tg[1] = cs->rf.tg[2] = 1;
     cs->rf.nb = 3; cs->rf.drv_read[0] = 1;
     cs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .dtt=MTLTextureType2D, .dpf=NVN_DPF_UINT, .reg=0, .aid=0};

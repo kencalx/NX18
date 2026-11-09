@@ -574,7 +574,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
     NvProg *pr = [NvProg new]; NvShader *fs = [NvShader new]; pr->sh[1] = fs;
     fs->stage = 1; strcpy(fs->key, "0123456789abcdef"); fs->fn = [lib newFunctionWithName:@"f"];
-    fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
+    fs->arg_len = [fs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     fs->rf.nb = 1; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .aid=0, .dtt=MTLTextureType2D};
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = [lib newFunctionWithName:@"v"]; d.fragmentFunction = fs->fn;
@@ -588,7 +588,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     shape_case();
     mip_chain_case(pr);
     fs->fn = [lib newFunctionWithName:@"mask"];
-    fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
+    fs->arg_len = [fs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .aid=0, .dtt=MTLTextureType2D, .dpf=NVN_DPF_UINT};
     d.fragmentFunction = fs->fn;
     pipeline = [g_dev newRenderPipelineStateWithDescriptor:d error:&error];

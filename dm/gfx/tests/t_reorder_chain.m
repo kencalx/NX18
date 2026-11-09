@@ -263,7 +263,7 @@ int main(int argc,char **argv) { @autoreleasepool {
     NSString *fn[8]={@"red",@"blue",@"readtex",@"halftex",@"ub",@"readlevel1",@"readslice1",@"green"};
     for(int i=0;i<8;i++) { NvProg *p=[NvProg new]; p->sh[0]=[NvShader new]; p->sh[0]->fn=[lib newFunctionWithName:@"v"];
         p->sh[1]=[NvShader new]; NvShader *f=p->sh[1]; f->fn=[lib newFunctionWithName:fn[i]]; f->stage=1;
-        if(i>=2&&i!=7) { f->rf.nb=1; f->rf.b[0]=(nvn_rbind){.kind=i==4?NVN_RB_CBUF:NVN_RB_TEX,.dtt=i==6?3:2}; f->ae=[f->fn newArgumentEncoderWithBufferIndex:0]; }
+        if(i>=2&&i!=7) { f->rf.nb=1; f->rf.b[0]=(nvn_rbind){.kind=i==4?NVN_RB_CBUF:NVN_RB_TEX,.dtt=i==6?3:2}; f->arg_len=[f->fn newArgumentEncoderWithBufferIndex:0].encodedLength; }
         pg[i].serial=4000+i; serial_put(pg[i].serial,p); }
     printf("CASE inherited_target\n"); inherited_target_case();
     if(argc>1&&!strcmp(argv[1],"--inherited-target-only")) { printf("== %d checks, %d failed ==\n",count,fail); return fail!=0; }

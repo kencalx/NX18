@@ -36,7 +36,7 @@ int main(void) { @autoreleasepool {
     NvShader *fs = [NvShader new]; pr->sh[1] = fs; fs->stage = 1; fs->fn = fn_spec(lib, @"f", nil, &error);
     fs->rf.reads_prim_id = 1;   // as the reflection records it (raster.primitive_id): pso_build_ex builds the pipeline whole
     fs->rf.color_known = 1; fs->rf.color_mask = 0; fs->rf.nb = 1; fs->rf.b[0] = (nvn_rbind){.kind = NVN_RB_IMG, .aid = 0, .reg = 0, .rw = 1, .dtt = MTLTextureType2DArray};
-    fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
+    fs->arg_len = [fs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     serial_put(program.serial, pr);
     state_reset(); memset(&R, 0, sizeof R); mtl_set_frame(1); mtl_sub_begin();
     S.img[1][0] = 701; S.has_vp = 1; S.vp[0][0] = 0; S.vp[0][1] = 0; S.vp[0][2] = 8; S.vp[0][3] = 8;

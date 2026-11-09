@@ -43,6 +43,7 @@ Choose offline mode at the network prompt, then New Game and English voices. Adv
 
 - [Linear render-target storage without the LINEAR flag](../../../docs/reference/nvn-objects.md#linear-render-target-storage-without-the-linear-flag): sizing, row pitch and deswizzle eligibility must all recognize `LINEAR_RENDER_TARGET` independently.
 - [Needle shader containers in main and GFD archives](../../../docs/reference/shaders.md#needle-shader-containers-in-main-and-gfd-archives): descriptor-based extraction of NVN control/code sections.
+- [Stale prebuild files kept in the pipeline archive](../../../docs/reference/shaders.md#stale-prebuild-files-kept-in-the-pipeline-archive): an iPhone 18 Pro Max run of a fork of this tree with `DM_PSO_MTL4=1` kept 20 files of bases without a vertex layout (259.6 MB in all with the plain files) beside a bundled archive that holds every pair's base.
 
 - [Texture clears with partial channel masks or regions](../../../docs/reference/rendering.md#texture-clears-with-partial-channel-masks-or-regions): a load/store draw applies the requested write mask and rectangle.
 

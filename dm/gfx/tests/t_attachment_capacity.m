@@ -46,7 +46,7 @@ int main(void) { @autoreleasepool {
         s->fn=fn4_note([lib newFunctionWithName:@"v"],lib,@"v",nil);
         NSString *entry=i?@"consumer":@"producer";
         s->discard_fn=fn4_note([lib newFunctionWithName:entry],lib,entry,nil);
-        s->ae=[s->discard_fn newArgumentEncoderWithBufferIndex:0];
+        s->arg_len=[s->discard_fn newArgumentEncoderWithBufferIndex:0].encodedLength;
         s->rf.nb=1;s->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0};
         p->sh[0]=s;serial_put(pg[i].serial,p);
     }

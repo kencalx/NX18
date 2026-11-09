@@ -21,7 +21,7 @@ static int run_case(NSString *directory, int pass, int counting) {
         g_msl_dir = directory; g_shcache = [NSMutableDictionary dictionary];
         pr = [NvProg new];
         NvShader *vs = shader(vl, @"main0", 0, NULL, 0); strcpy(vs->key, "7e57000000000a00_b");
-        vs->rf.nb = 1; vs->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0}; vs->ae = [vs->fn newArgumentEncoderWithBufferIndex:0]; vs->arg_len = vs->ae.encodedLength;
+        vs->rf.nb = 1; vs->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0}; vs->arg_len = [vs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
         vs->has_pull = 1; vs->rf.nv = 1; vs->rf.v[0].ct = NVN_CT_FLOAT; vs->rf.v[0].nvn = vs->rf.v[0].loc = 0;
         NvShader *fs = shader(vl, @"depth_only", 1, NULL, 0);
         NvShader *gs = shader(ll, @"main0", 2, NULL, 0); strcpy(gs->key, "7e57000000000b00_b"); gs->geo_vertices = 3; gs->geo_invocations = 1; gs->geo_output = 3; gs->geo_stride = 134; gs->geo_index_stride = 6;
@@ -29,7 +29,7 @@ static int run_case(NSString *directory, int pass, int counting) {
         // slots by member order (the block is a plain struct: the translator numbers its ids 0, 1, 2 ...; the test kernel's 1, 2, 4 are only names)
         lean->rf.nb = 3; lean->rf.b[0] = (nvn_rbind){.kind = NVN_RB_GEOMETRY, .reg = 0, .aid = 0}; lean->rf.b[1] = (nvn_rbind){.kind = NVN_RB_GEOMETRY, .reg = 1, .aid = 1};
         lean->rf.b[2] = (nvn_rbind){.kind = NVN_RB_SBUFP, .reg = 0, .aid = 2, .rw = 1};
-        lean->ae = [lean->fn newArgumentEncoderWithBufferIndex:0]; lean->arg_len = lean->ae.encodedLength;
+        lean->arg_len = [lean->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
         lean->geo_slot = malloc(GEO_CAPTURE_WORDS * sizeof *lean->geo_slot); for (int k = 0; k < GEO_CAPTURE_WORDS; k++) lean->geo_slot[k] = -1;
         lean->geo_slot[36] = 0; lean->geo_words = 1;   // reads.json: [36]
         g_shcache[@"7e57000000000b00_bl3"] = lean;

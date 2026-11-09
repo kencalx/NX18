@@ -114,7 +114,7 @@ int main(void) { @autoreleasepool {
         NvShader *fs=[NvShader new]; pr->sh[1]=fs; fs->stage=1; fs->fn=[lib newFunctionWithName:mode==2?@"image_tail":mode?@"both":@"image_only"];
         fs->rf.color_known=1; fs->rf.color_mask=mode==1; fs->rf.nb=1;
         fs->rf.b[0]=(nvn_rbind){.kind=NVN_RB_IMG,.aid=0,.reg=0,.rw=1,.dtt=MTLTextureType2DArray};
-        fs->ae=[fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len=fs->ae.encodedLength;
+        fs->arg_len=[fs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
         serial_put(programs[mode].serial,pr);
     }
     mapping_checks(prog_get(&programs[0]));

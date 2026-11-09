@@ -628,7 +628,29 @@ int main(int argc, char **argv) { @autoreleasepool {
         names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil];
         EXPECT("compaction: a file per period left", (descs.count + 3) / 4, names.count);
         EXPECT("compaction: done", 0, g_compact_periods + !g_compact_closed + g_compact_bad);
+        EXPECT("compaction: no failure file after one that finished", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_fail_path()]);
         g_arch_period_max = ARCH_PERIOD_MAX;
+        // a compaction that did not finish: the same files, or up to PSO_ARCH_COMPACT more, are not compacted again on this system build; more, a missing one or another build try again
+        {
+            NSMutableArray<NSString *> *runf = [NSMutableArray array]; for (NSString *n in names) [runf addObject:[@(cdir) stringByAppendingPathComponent:n]];
+            NSMutableArray<NSString *> *more = [runf mutableCopy]; for (int i = 0; i < PSO_ARCH_COMPACT; i++) [more addObject:[NSString stringWithFormat:@"%s/9%04d.mtl4a", cdir, i]];
+            EXPECT("failed compaction: tried without the file", 1, arch_compact_retry(runf));
+            arch_compact_fail_note();
+            NSString *note = [NSString stringWithContentsOfFile:arch_compact_fail_path() encoding:NSUTF8StringEncoding error:nil];
+            EXPECT("failed compaction: the file names the system build and the files", 1, [note containsString:arch_os_build()] && names.count && [note containsString:[names[0] stringByAppendingString:@"\n"]]);
+            EXPECT("failed compaction: not again on the same files", 0, arch_compact_retry(runf));
+            EXPECT("failed compaction: not again with up to PSO_ARCH_COMPACT more", 0, arch_compact_retry(more));
+            EXPECT("failed compaction: the file stays", 1, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_fail_path()]);
+            [more addObject:[NSString stringWithFormat:@"%s/99999.mtl4a", cdir]];
+            EXPECT("failed compaction: again with more", 1, arch_compact_retry(more));
+            EXPECT("failed compaction: the file removed", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_fail_path()]);
+            arch_compact_fail_note();
+            EXPECT("failed compaction: again when one is gone", 1, arch_compact_retry([runf subarrayWithRange:NSMakeRange(1, runf.count - 1)]));
+            arch_compact_fail_note();
+            NSString *other = [[NSString stringWithContentsOfFile:arch_compact_fail_path() encoding:NSUTF8StringEncoding error:nil] stringByReplacingOccurrencesOfString:arch_os_build() withString:@"os\t1A1\n"];
+            [other writeToFile:arch_compact_fail_path() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            EXPECT("failed compaction: again on another system build", 1, arch_compact_retry(runf));
+        }
         // a marker left by a compaction that did not finish: the next start on this system build does not compact, one from another build is removed and compaction tried
         EXPECT("compaction: allowed without a marker", 1, arch_compact_allowed());
         [arch_compact_stamp() writeToFile:arch_compact_marker() atomically:YES encoding:NSUTF8StringEncoding error:nil];

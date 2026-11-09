@@ -137,7 +137,7 @@ static void hoists(id<MTLLibrary> lib) {
     NvProg *cs=[NvProg new]; cs->sh[5]=[NvShader new]; cs->sh[5]->stage=5;
     cs->sh[5]->rf.tg[0]=cs->sh[5]->rf.tg[1]=cs->sh[5]->rf.tg[2]=1;
     cs->sh[5]->fn=[lib newFunctionWithName:@"compute_one"];
-    cs->sh[5]->ae=[cs->sh[5]->fn newArgumentEncoderWithBufferIndex:0];
+    cs->sh[5]->arg_len=[cs->sh[5]->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     cs->sh[5]->rf.nb=1; cs->sh[5]->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0};
     serial_put(cp.serial,cs);
     void *mem=NULL; if(posix_memalign(&mem,getpagesize(),getpagesize())) abort(); memset(mem,0,getpagesize()); mtl_pool_add(mem,getpagesize());
