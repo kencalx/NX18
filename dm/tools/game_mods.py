@@ -506,16 +506,29 @@ def patch_exefs(exefs, dst, found, files=None, adapt=None):
     the names of the modules changed (none: dst is a plain copy) and the patches left out ([LeftOut], judge_patches; each has its [RED] line in the report, in its
     place). A module whose patches kept write nothing once some are left out is not changed. files / adapt: as code_patches"""
     modules = nso_modules(exefs)
-    notes: dict[str, list[str]] = {}
+    notes: dict[int, tuple] = {}   # by the records adapt returned (a patch's, as its Item holds them): (the records adapt was given, its report lines)
     def noting(recs, what, rep, adapt=adapt):   # adapt's lines by patch: a patch left out whole loses its line, which would read as if its change were in
         assert adapt is not None
-        n = len(rep); out = adapt(recs, what, rep); notes.setdefault(what, []).extend(rep[n:]); return out
+        n = len(rep); out = adapt(recs, what, rep); notes[id(out)] = (list(recs), rep[n:]); return out
     plan, report = code_patches(found, modules, files, noting if adapt else None)
     verdict = {mod: judge_patches(mod, modules[mod][1], items) for mod, items in plan.items()}
     for mod, items in plan.items():
         for it, v in zip(items, verdict[mod]):
-            if v.left and not v.write:
-                for line in notes.pop(it.what, []): report.remove(line)
+            if not v.left or id(it.records) not in notes: continue
+            orig, lines = notes.pop(id(it.records))
+            at = [report.index(line) for line in lines]
+            if not v.write:
+                for i in sorted(at, reverse=True): del report[i]
+                continue
+            # a patch whose code cave is left out: its aspect is found again in the records kept, so its line names only what is written (adapt_aspect's changes are
+            # immediates and float values, which change no verdict)
+            had = any(bytes(a[1]) != bytes(b[1]) for a, b in zip(orig, it.records))
+            rep2: list[str] = []
+            kept = adapt([orig[k] for k in v.write], it.what, rep2) if adapt else []
+            for k, rec in zip(v.write, kept): it.records[k] = rec
+            if rep2 and 'no aspect value found' in rep2[0] and had:
+                rep2 = [f'{it.what}: no aspect value found outside what is left out of it (its code cave): the view keeps the mod\'s shape']
+            for i, line in zip(at, rep2): report[i] = line
     def writes(mod):   # the bytes the patches kept write into the module's image
         size = len(modules[mod][1].image)
         return sum(max(0, min(len(d), size - at)) for it, v in zip(plan[mod], verdict[mod]) for _, at, d in _image_records([it.records[k] for k in v.write]))
@@ -611,18 +624,146 @@ def split_roles(found, fps_ok=True):
     return keep, chosen, report
 
 
-def adapt_aspect(records, what, report, target=DEVICE_ASPECT):
-    """An ultrawide mod's records with its aspect value (a 4-byte float within 1 % of a ratio ultrawide mods are made for) set to the device's, so the wider view is not
-    squeezed or stretched on a screen of another shape. A value held in instructions (fmov, movz / movk) is not found and stays: the report says so"""
-    out, n = [], 0
-    for off, data in records:
-        if len(data) == 4:
-            v = struct.unpack('<f', data)[0]
-            if any(abs(v - r) <= r * 0.01 for r in UW_RATIOS):
-                out.append((off, struct.pack('<f', target))); n += 1; continue
-        out.append((off, data))
-    report.append(f'{what}: aspect value set to {target:.4f} (the iPhone 18 Pro Max\'s screen)' if n else f'{what}: no aspect value found as a float to set to the device\'s shape: the view keeps the mod\'s shape')
+UW_HEIGHTS = (360, 4320)   # the heights a width / height pair in pixels may have: a pair of smaller numbers of that ratio is something else
+UW_SPAN = 0x20   # how far apart (bytes) the instructions of one constant (a MOVZ and its MOVKs), or a width and its height, may lie
+WIDE16 = 16 / 9
+_COMMON = (0.5, 0.75, 4 / 3, 2.0)   # scales too common in code to take for an ultrawide one (2560×1080's 0.75 and 4/3, 32:9's 0.5 and 2)
+UW_SCALES = tuple(sorted({x for r in UW_RATIOS for x in (r / WIDE16, WIDE16 / r) if not any(abs(x - c) <= c * 0.001 for c in _COMMON)}))   # an ultrawide shape against 16:9
+
+
+def _near_ratio(v):
+    return any(abs(v - r) <= r * 0.01 for r in UW_RATIOS)
+
+
+def _near_scale(v):
+    return any(abs(v - r) <= r * 0.001 for r in UW_SCALES)
+
+
+def _f32(bits):
+    return struct.unpack('<f', struct.pack('<I', bits & 0xFFFFFFFF))[0]
+
+
+def _bits(v):
+    return struct.unpack('<I', struct.pack('<f', v))[0]
+
+
+def _mov_words(records):
+    """[(image offset, record index, byte position, word)] of the aligned 4-byte words of the records that are a MOVZ or MOVK (32 or 64 bit), in offset order"""
+    out = []
+    for i, (off, data) in enumerate(records):
+        for p in range((-off) % 4, len(data) - 3, 4):
+            w = struct.unpack_from('<I', data, p)[0]
+            if (w & 0x7F800000) in (0x52800000, 0x72800000): out.append((off + p, i, p, w))
+    return sorted(out)
+
+
+def _mov_set(w, imm):
+    return (w & ~(0xFFFF << 5)) | (imm & 0xFFFF) << 5
+
+
+def _mov_constants(words):
+    """The constants the words build: [(sf, {hw: index into words}, the MOVZ's index)], each a MOVZ and the MOVKs into the same register that follow it within UW_SPAN bytes
+    of the one before, up to the next MOVZ into that register (a later MOVK of a half overrides an earlier one, as it runs). A MOVK no MOVZ of the records starts is not one"""
+    out = []
+    for a, (off, _, _, w) in enumerate(words):
+        if (w & 0x7F800000) != 0x52800000: continue
+        rd, sf, halves, last = w & 31, w >> 31, {(w >> 21) & 3: a}, off
+        for b in range(a + 1, len(words)):
+            ob, wb = words[b][0], words[b][3]
+            if ob - last > UW_SPAN: break
+            if (wb & 31) != rd or wb >> 31 != sf: continue
+            if (wb & 0x7F800000) == 0x52800000: break   # the register is set again
+            halves[(wb >> 21) & 3] = b; last = ob
+        out.append((sf, halves, a))
     return out
+
+
+UW_PIXEL_HEIGHTS = (720, 1080, 1440, 2160)   # the heights a width in pixels held as a float is taken against (a float of h × an ultrawide ratio)
+
+
+def _uw_class(r):
+    return 'wide' if r < 3 else 'super'   # 21:9's shapes, or 32:9's: one mod is made for one of them
+
+
+def adapt_aspect(records, what, report, target=DEVICE_ASPECT):
+    """An ultrawide mod's records with its aspect set to the device's, so the wider view is not squeezed or stretched on a screen of another shape. Found as:
+    · a float within 1 % of a ratio ultrawide mods are made for (UW_RATIOS), or within 0.1 % of such a ratio against 16:9 (UW_SCALES, either way up: a scale of the 16:9
+      view), set to the device's ratio (or its scale); or a float within 0.2 % of a width in pixels, one of UW_PIXEL_HEIGHTS times such a ratio, set to that height times the
+      device's. The float is a 4-byte record, or one a MOVZ and its MOVKs build in a register (_mov_constants: its halves in any order; of a high half alone, the nearest value
+      a high half holds, or the exact value when a MOVK replaces that MOVZ's half: the MOVZ then sets the low half);
+    · a width and a height in pixels: two MOVZ of 16-bit values, neither followed by a MOVK into its register, within UW_SPAN bytes, whose ratio is such a ratio and whose
+      height is within UW_HEIGHTS, or the two 32-bit halves of one 64-bit register (width low, height high). The pairs are taken in the class of shapes (21:9's or 32:9's) more
+      of them have, best ratio first, then nearest; a height may serve several widths. The width is set to the height times the device's ratio.
+    Each instruction keeps its register and size. A value an FMOV holds, one loaded from data the mod does not write, and an immediate patched without its instruction's other
+    bytes (an .ips of the changed bytes alone) are not found and stay: the report says so"""
+    out = [(off, bytearray(data)) for off, data in records]
+    counts = {'float value': 0, 'float built by movz / movk': 0, 'scale against 16:9': 0, 'width in pixels as a float': 0}
+    pairs = []
+
+    def scaled(v):   # (the device's value, its kind) for an ultrawide ratio, scale or pixel width, else None
+        if _near_ratio(v): return target, 'ratio'
+        if _near_scale(v): return (target / WIDE16 if v > 1 else WIDE16 / target), 'scale'
+        for h in UW_PIXEL_HEIGHTS:
+            if any(abs(v - h * r) <= h * r * 0.002 for r in UW_RATIOS): return h * target, 'pixels'
+        return None
+
+    kinds = {'ratio': 'float value', 'scale': 'scale against 16:9', 'pixels': 'width in pixels as a float'}
+    for k, (off, data) in enumerate(out):
+        if len(data) == 4 and (hit := scaled(struct.unpack('<f', data)[0])):
+            out[k] = (off, bytearray(struct.pack('<f', hit[0]))); counts[kinds[hit[1]]] += 1
+    words = [m for m in _mov_words(records) if len(records[m[1]][1]) != 4 or bytes(out[m[1]][1]) == bytes(records[m[1]][1])]   # not a record set as a float above
+
+    def put(j, w):
+        _, i, p, _ = words[j]; struct.pack_into('<I', out[i][1], p, w)
+
+    def imm(j): return (words[j][3] >> 5) & 0xFFFF
+    pixel = []   # the indices of stand-alone 16-bit MOVZ
+    for sf, halves, z in _mov_constants(words):
+        hws = set(halves)
+        if hws == {0} and halves[0] == z:
+            pixel.append(z); continue
+        if sf and hws == {0, 2}:   # a width and a height in the two halves of one register
+            w, h = imm(halves[0]), imm(halves[2])
+            if UW_HEIGHTS[0] <= h <= UW_HEIGHTS[1] and _near_ratio(w / h):
+                nw = round(h * target); put(halves[0], _mov_set(words[halves[0]][3], nw)); pairs.append(f'{w}×{h} to {nw}×{h}')
+            continue
+        if not hws <= {0, 1} or 1 not in hws: continue   # a float is 32 bits, and its high half holds its sign, exponent and leading mantissa
+        bits = sum(imm(j) << 16 * hw for hw, j in halves.items())
+        hit = scaled(_f32(bits))
+        if not hit: continue
+        nb = _bits(hit[0])
+        if 0 in hws: put(halves[0], _mov_set(words[halves[0]][3], nb)); put(halves[1], _mov_set(words[halves[1]][3], nb >> 16))
+        elif halves[1] != z:   # its MOVZ's half is replaced by the MOVK: the MOVZ sets the low half instead, and the value is exact
+            put(z, _mov_set(words[z][3] & ~(3 << 21), nb)); put(halves[1], _mov_set(words[halves[1]][3], nb >> 16))
+        else: put(z, _mov_set(words[z][3], (nb + 0x8000) >> 16))
+        counts['float built by movz / movk' if hit[1] == 'ratio' else kinds[hit[1]]] += 1
+    cands = []   # (error, distance, the width's index, the height's index, the ratio)
+    for x, a in enumerate(pixel):
+        for b in pixel[x + 1:]:
+            if words[b][0] - words[a][0] > UW_SPAN: break
+            for wj, hj in ((a, b), (b, a)):
+                vw, vh = imm(wj), imm(hj)
+                if not (UW_HEIGHTS[0] <= vh <= UW_HEIGHTS[1]): continue
+                err, r = min((abs(vw / vh - r) / r, r) for r in UW_RATIOS)
+                if err <= 0.01: cands.append((err, words[b][0] - words[a][0], wj, hj, r))
+    if cands:
+        by = {c: sum(_uw_class(x[4]) == c for x in cands) for c in ('wide', 'super')}
+        cls = 'wide' if by['wide'] >= by['super'] else 'super'
+        widths, heights = set(), set()
+        for err, _, wj, hj, r in sorted(c for c in cands if _uw_class(c[4]) == cls):
+            if wj in widths or wj in heights or hj in widths: continue
+            vw, vh = imm(wj), imm(hj); nw = round(vh * target)
+            put(wj, _mov_set(words[wj][3], nw)); widths.add(wj); heights.add(hj); pairs.append((words[wj][0], f'{vw}×{vh} to {nw}×{vh}'))
+        pairs = [p if isinstance(p, str) else p[1] for p in sorted(pairs, key=lambda p: (0, 0) if isinstance(p, str) else (1, p[0]))]
+    plural = {'float value': 'float values', 'float built by movz / movk': 'floats built by movz / movk', 'scale against 16:9': 'scales against 16:9',
+              'width in pixels as a float': 'widths in pixels as floats'}
+    parts = [f'{n} {kind if n == 1 else plural[kind]}' for kind, n in counts.items() if n]
+    if pairs: parts.append(f'{len(pairs)} width{"s" if len(pairs) != 1 else ""} and height{"s" if len(pairs) != 1 else ""} in pixels ({", ".join(pairs)})')
+    if parts:
+        report.append(f'{what}: aspect value set to {target:.4f} (the iPhone 18 Pro Max\'s screen): {", ".join(parts)}')
+    else:
+        report.append(f'{what}: no aspect value found (a float, a float built by movz / movk, or a width and height in pixels) to set to the device\'s shape: the view keeps the mod\'s shape')
+    return [(off, bytes(data)) for off, data in out]
 
 
 def reloc_slots(image):

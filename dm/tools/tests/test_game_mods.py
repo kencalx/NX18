@@ -419,6 +419,53 @@ class Switchable(unittest.TestCase):
         self.assertEqual(out[1:], recs[1:]); self.assertIn('aspect value set', report[0])
         gm.adapt_aspect(recs[1:], 'uw', report); self.assertIn('no aspect value', report[1])
 
+    def test_aspect_in_instructions(self):
+        movz = lambda rd, imm, hw=0, sf=0: struct.pack('<I', (0xD2800000 if sf else 0x52800000) | hw << 21 | imm << 5 | rd)
+        movk = lambda rd, imm, hw=1: struct.pack('<I', 0x72800000 | hw << 21 | imm << 5 | rd)
+        imm = lambda b: (struct.unpack('<I', b)[0] >> 5) & 0xFFFF
+        recs = [(0x100, movz(8, 3440)), (0x104, movz(9, 1440)),   # the scene's aspect: 3440 / 1440, as SMO's 21:9 mod writes it
+                (0x200, movz(0, 1720)), (0x214, movz(0, 720)), (0x228, movz(0, 1720)), (0x238, movz(0, 720)),   # the layout's width and height, twice
+                (0x300, movz(0, 7)), (0x304, movz(1, 3)),   # 7 / 3 is 21:9 in small numbers: not a size in pixels
+                (0x400, movz(2, 1720)), (0x480, movz(3, 720))]   # too far apart to be one pair
+        report = []
+        out = gm.adapt_aspect(recs, 'uw', report)
+        self.assertEqual([imm(d) for _, d in out], [3129, 1440, 1564, 720, 1564, 720, 7, 3, 1720, 720])
+        self.assertEqual([struct.unpack('<I', d)[0] & 31 for _, d in out], [8, 9, 0, 0, 0, 0, 0, 1, 2, 3], 'each keeps its register')
+        self.assertIn('aspect value set to 2.1727', report[0]); self.assertIn('3 widths and heights in pixels (3440×1440 to 3129×1440, 1720×720 to 1564×720', report[0])
+        out = gm.adapt_aspect([(0x10, movz(1, 1440)), (0x14, movz(1, 3440, sf=1))], 'uw', report)   # height first, a 64-bit width
+        self.assertEqual(imm(out[1][1]), 3129); self.assertEqual(struct.unpack('<I', out[1][1])[0] >> 31, 1)
+        bits = struct.unpack('<I', struct.pack('<f', 21 / 9))[0]
+        out = gm.adapt_aspect([(0x10, movz(3, bits & 0xFFFF)), (0x18, movk(3, bits >> 16)), (0x20, struct.pack('<f', 16 / 9))], 'uw', report)
+        got = struct.unpack('<f', struct.pack('<I', imm(out[1][1]) << 16 | imm(out[0][1])))[0]
+        self.assertAlmostEqual(got, gm.DEVICE_ASPECT, places=5); self.assertIn('1 float built by movz / movk', report[-1]); self.assertEqual(out[2], (0x20, struct.pack('<f', 16 / 9)))
+        out = gm.adapt_aspect([(0x10, movz(3, 0x4018, hw=1))], 'uw', report)   # 2.375, its high half alone
+        self.assertAlmostEqual(struct.unpack('<f', struct.pack('<I', imm(out[0][1]) << 16))[0], gm.DEVICE_ASPECT, places=2)
+        bits = struct.unpack('<I', struct.pack('<f', 2.4))[0]
+        out = gm.adapt_aspect([(0x10, movz(3, bits >> 16, hw=1)), (0x14, movk(3, bits & 0xFFFF, hw=0))], 'uw', report)   # the high half first
+        self.assertAlmostEqual(struct.unpack('<f', struct.pack('<I', imm(out[0][1]) << 16 | imm(out[1][1])))[0], gm.DEVICE_ASPECT, places=5)
+        fov = struct.unpack('<I', struct.pack('<f', 1.0472))[0]   # a MOVZ / MOVK constant's low half is no pixel count, even beside a height
+        recs = [(0x10, movz(8, fov & 0xFFFF)), (0x14, movk(8, fov >> 16)), (0x18, movz(9, 1152))]
+        self.assertEqual(gm.adapt_aspect(recs, 'uw', report), recs); self.assertIn('no aspect value found', report[-1])
+        recs = [(0x10, movz(1, 2560)), (0x14, movz(2, 1720)), (0x18, movz(3, 1080)), (0x1c, movz(4, 720))]   # a docked and a handheld size: each width its own height
+        self.assertEqual([imm(d) for _, d in gm.adapt_aspect(recs, 'uw', report)], [2347, 1564, 1080, 720])
+        packed = [(0x10, movz(26, 3440, sf=1)), (0x14, struct.pack('<I', 0xF2800000 | 2 << 21 | 1440 << 5 | 26))]   # width and height in one 64-bit register
+        self.assertEqual(imm(gm.adapt_aspect(packed, 'uw', report)[0][1]), 3129); self.assertIn('3440×1440 to 3129×1440', report[-1])
+        out = gm.adapt_aspect([(0x10, struct.pack('<f', (16 / 9) / (3440 / 1440))), (0x14, struct.pack('<f', 0.75))], 'uw', report)   # a scale of the 16:9 view
+        self.assertAlmostEqual(struct.unpack('<f', out[0][1])[0], (16 / 9) / gm.DEVICE_ASPECT, places=5); self.assertEqual(out[1][1], struct.pack('<f', 0.75), '0.75 is too common')
+        self.assertIn('1 scale against 16:9', report[-1])
+        recs = [(0x10, movz(1, 2560)), (0x14, movz(2, 1720)), (0x18, movz(3, 720)), (0x1c, movz(4, 1080))]   # 2560 / 720 is 32:9 exactly, but this is a 21:9 table
+        self.assertEqual([imm(d) for _, d in gm.adapt_aspect(recs, 'uw', report)], [2347, 1564, 720, 1080])
+        recs = [(0x10, movz(0, 1720)), (0x14, movz(1, 720)), (0x18, movz(0, 1720))]   # a second width with the same height
+        self.assertEqual([imm(d) for _, d in gm.adapt_aspect(recs, 'uw', report)], [1564, 720, 1564])
+        out = gm.adapt_aspect([(0x10, movz(8, 0x4522, hw=1))], 'uw', report)   # 2592.0 = 1080 × 2.4, a width in pixels as a float's high half
+        self.assertEqual(imm(out[0][1]), 0x4513); self.assertIn('1 width in pixels as a float', report[-1])
+        out = gm.adapt_aspect([(0x10, movz(12, 0, hw=1)), (0x14, movk(12, 0x3FAC))], 'uw', report)   # 1.34375 whose MOVZ's half the MOVK replaces: exact
+        self.assertAlmostEqual(struct.unpack('<f', struct.pack('<I', imm(out[1][1]) << 16 | imm(out[0][1])))[0], gm.DEVICE_ASPECT / (16 / 9), places=6)
+        self.assertEqual((struct.unpack('<I', out[0][1])[0] >> 21) & 3, 0, 'the MOVZ now sets the low half')
+        run = movz(8, 3440) + movz(9, 1440)   # one .ips record of both
+        out = gm.adapt_aspect([(0x100, run)], 'uw', report)
+        self.assertEqual(imm(out[0][1][:4]), 3129); self.assertEqual(out[0][1][4:], run[4:])
+
     def test_reloc_slots(self):
         img = bytearray(0x400)
         struct.pack_into('<I', img, 4, 0x100); img[0x100:0x104] = b'MOD0'; struct.pack_into('<i', img, 0x104, 0x100)   # dynamic at 0x200
@@ -656,6 +703,21 @@ class NspScript(unittest.TestCase):
         self.assertIn("[RED] main: 21.9 Ultrawide/exefs/uw.pchtxt: Joy-Con fix: left out: 1 of its 2 records lie outside main's text, ro and data, the first at main+0x4300, in its bss", report)
         self.assertIn('21.9 Ultrawide/exefs/uw.pchtxt: Aspect: no aspect value found', report)
         self.assertNotIn('Joy-Con fix: no aspect value found', report, 'adapt_aspect\'s line goes with a patch left out whole')
+        cave = self.mods / '21.9 Wide/exefs/uw.pchtxt'; cave.parent.mkdir(parents=True)   # its aspect only in the cave that is left out
+        cave.write_text(pchtxt(('Aspect in a cave', [(0x60, MOV_W0_1), (0x24, enc_b(0x24, 0x4300)), (0x4300, struct.pack('<II', 0x52800008 | 3440 << 5, 0x52800009 | 1440 << 5))])))
+        rep, _, _ = gm.patch_exefs(self.ext / 'ExeFS', self.root / 'cave_exefs', gm.scan(self.mods, TITLE), [cave], gm.adapt_aspect)
+        self.assertIn('21.9 Wide/exefs/uw.pchtxt: Aspect in a cave: no aspect value found outside what is left out of it (its code cave)', '\n'.join(rep))
+        self.assertNotIn('aspect value set', '\n'.join(rep)); shutil.rmtree(cave.parent.parent)
+        cave.parent.mkdir(parents=True)   # a pair in the text kept, a pair in the cave left out: the line names the kept one alone
+        cave.write_text(pchtxt(('Aspect', [(0x60, struct.pack('<II', 0x52800008 | 3440 << 5, 0x52800009 | 1440 << 5)), (0x24, enc_b(0x24, 0x4300)),
+                                           (0x4300, struct.pack('<II', 0x52800008 | 1720 << 5, 0x52800009 | 720 << 5))])))
+        rep, _, _ = gm.patch_exefs(self.ext / 'ExeFS', self.root / 'cave_exefs2', gm.scan(self.mods, TITLE), [cave], gm.adapt_aspect)
+        line = next(x for x in rep if 'aspect value set' in x)
+        self.assertIn('1 width and height in pixels (3440×1440 to 3129×1440)', line); self.assertNotIn('1720', line)
+        self.assertEqual(nso.read(self.root / 'cave_exefs2/main').image[0x60:0x64], struct.pack('<I', 0x52800008 | 3129 << 5))
+        cave.write_text(pchtxt(('Aspect', [(0x60, MOV_W0_1)]), ('Aspect', [(0x24, enc_b(0x24, 0x4300)), (0x4300, NOP)])))   # two patches of one name
+        rep, _, _ = gm.patch_exefs(self.ext / 'ExeFS', self.root / 'cave_exefs3', gm.scan(self.mods, TITLE), [cave], gm.adapt_aspect)
+        self.assertEqual(sum('Aspect: no aspect value found (a float' in x for x in rep), 1, 'the kept one keeps its line'); shutil.rmtree(cave.parent.parent)
         self.assertIn('[RED] ultrawide: 21.9 Ultrawide: left out of it (above): 21.9 Ultrawide/exefs/uw.pchtxt: Joy-Con fix. The rest of the mod is offered (Ultrawide in the launcher)\n', report)
         self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE)[1], variants)
         self.assertIn('[RED] ultrawide: 21.9 Ultrawide: left out of it', (work / 'mods_stage/v0.txt').read_text(), 'a reuse keeps the lines')
