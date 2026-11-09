@@ -27,15 +27,16 @@
 # With compute pipelines, they and the bases are separate groups (batches.<arch>/c<index>/ and <index>/) merged the same way, so new pairs leave the compute pipelines compiled, and the
 # reverse. The compute groups are small (COMPUTE_BATCH) and run --jobs at a time: one metal-tt keeps about three cores busy.
 # Usage: pso_offline.py --msl <b-<chain> folder> --out <folder> --work <folder> [--game <id>] [--pairs <shader_pairs.tsv> [--pairs <pso_pairs.tsv>]] [--gpu g18p[,g17p]]
-#          [--depth gl|zero] [--platform ios|macos] [--os-min 27.0] [--script-only] [--batch-size N] [--shader-map <shader_map.tsv>] [--manifest <pso_manifest.tsv>] [--no-compute] [--jobs N]
+#          [--depth gl|zero] [--platform ios|macos] [--os-min 27.3] [--script-only] [--batch-size N] [--shader-map <shader_map.tsv>] [--manifest <pso_manifest.tsv>] [--no-compute] [--jobs N]
 #   --game: the profile (DM_GAMES_DIR as for game.py) whose shader_pairs.tsv and pso_pairs.tsv are the pairs, whose shader_map.tsv and pso_manifest.tsv name the compute shaders, and
 #   whose depth_mode key the depth mode, unless --pairs / --shader-map / --manifest / --depth say; --no-compute: bases only; --jobs: metal-tt runs at a time for compute groups;
 #   --gpu: architectures, with or without the applegpu_ prefix (default g19p); --depth: the game's NVN depth mode (gl = near -w, NVN's default; zero = near 0, which the game sets
 #   with nvnDeviceSetDepthMode: the host knows it only at run time, so the profile says it; a wrong one costs the device its own prebuild, as without the archive);
-#   --os-min: the archives' system (default: for iOS the SDK's major version, e.g. 27.0; for macOS the major version this Mac runs, since the Mac app is built for the Mac that builds it).
+#   --os-min: the archives' system (default: for iOS the app's deployment target, deploymentTarget in dm/ios/project.yml (27.3), or the SDK's major version without it; for macOS
+#   the major version this Mac runs, since the Mac app is built for the Mac that builds it).
 #   A device opens only an archive of its own major version (macOS 27.2 refused archives made for 26.0 and 26.6 and opened those for 27.0 and 27.2), and builds the bases itself
 #   otherwise: the SDK's version on a Mac whose system is older than its Xcode's SDK (macOS 26.6 with Xcode 27.1) left that Mac without them (GitHub issue #673)
-import argparse, concurrent.futures, filecmp, hashlib, json, os, shutil, struct, subprocess, sys, time
+import argparse, concurrent.futures, filecmp, hashlib, json, os, re, shutil, struct, subprocess, sys, time
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
@@ -241,7 +242,22 @@ def tool_version(platform):
     return r.stdout.strip().splitlines()[0]
 
 
+IOS_PROJECT = Path(__file__).resolve().parents[2] / 'ios' / 'project.yml'
+
+
+def ios_deployment_target(project=IOS_PROJECT):
+    """The app's deployment target, options.deploymentTarget.iOS of dm/ios/project.yml; None when this checkout has none"""
+    try: text = project.read_text(encoding='utf-8')
+    except OSError: return None
+    m = re.search(r'^\s*deploymentTarget:[^\n]*\n\s*iOS:\s*["\']?(\d+(?:\.\d+)*)', text, re.M)
+    return m.group(1) if m else None
+
+
 def os_min_default(platform):
+    # iOS: the app's deployment target (27.3), the system every device that runs the app has at least and the one its libraries are built for (ios_metal.py, host_msl.py),
+    # so the archives open on all of them; the SDK's major version only without the project. It was the SDK's major version (27.0), which a device on 27.3 opens as well
+    # (same major version), but which no longer matched what the app is built for. A changed minimum is in each archive's key: the archives are made again once
+    if platform != 'macos' and (v := ios_deployment_target()): return v
     cmd = ['sw_vers', '-productVersion'] if platform == 'macos' else ['xcrun', '-sdk', sdk(platform), '--show-sdk-version']
     v = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.strip()
     return v.split('.')[0] + '.0'
@@ -350,7 +366,7 @@ def main(argv=None):
     ap.add_argument('--gpu', default='g19p', help='GPU architectures, comma-separated (default g19p, the A20 Pro)')
     ap.add_argument('--depth', choices=('gl', 'zero'), help='the game\'s NVN depth mode (default: the profile\'s depth_mode, else gl: near = -w)')
     ap.add_argument('--platform', choices=('ios', 'macos'), default='ios')
-    ap.add_argument('--os-min', help='minimum OS of the archives (default: iOS, the SDK\'s major version; macOS, this Mac\'s)')
+    ap.add_argument('--os-min', help='minimum OS of the archives (default: iOS, the app\'s deployment target from dm/ios/project.yml, else the SDK\'s major version; macOS, this Mac\'s major version)')
     ap.add_argument('--script-only', action='store_true', help='write the script and the stamp, run no metal-tt')
     ap.add_argument('--batch-size', type=int, default=BATCH, help=f'compile sequential groups of at most N bases and merge with metal-pack, when there are more (default {BATCH}; 0: one compiler invocation)')
     ap.add_argument('--shader-map', action='append', help='shader_map.tsv: its compute shaders get pipelines (default: the profile\'s)')

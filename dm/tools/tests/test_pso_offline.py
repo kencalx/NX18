@@ -244,7 +244,7 @@ class Build(unittest.TestCase):
         self.assertEqual(self.main('--gpu', 'g18p'), 0)
         self.assertEqual(len(self.calls), 1)
         c = self.calls[0]
-        self.assertEqual(c[:8], ['xcrun', '-sdk', 'iphoneos', 'metal-tt', '-arch', 'applegpu_g18p', '-ios-version-min', '27.0'])
+        self.assertEqual(c[:8], ['xcrun', '-sdk', 'iphoneos', 'metal-tt', '-arch', 'applegpu_g18p', '-ios-version-min', po.ios_deployment_target()])   # the app's deployment target, not the SDK's 27.1 → 27.0
         self.assertTrue(c[8].endswith('.mtl4-json'))   # the extension metal-tt takes the Metal 4 format from
         script = json.loads(Path(c[8]).read_text())
         self.assertEqual(script['pipeline_descriptors']['render_pipeline_descriptors'][0]['vertex_function_descriptor'], 'fnd:v_bp.main0_z')   # the profile's depth_mode zero
@@ -336,6 +336,17 @@ class Build(unittest.TestCase):
         j = json.loads(p.read_text()); j['chain'] = 'stale'; p.write_text(json.dumps(j))
         with self.assertRaises(SystemExit): self.main()
         self.assertEqual(len(self.calls), 1)
+
+    def test_ios_takes_the_apps_deployment_target(self):   # the app's minimum from dm/ios/project.yml; the SDK's major version only without the project
+        project = (Path(po.__file__).resolve().parents[2] / 'ios/project.yml').read_text()
+        self.assertIn(f'iOS: "{po.ios_deployment_target()}"', project)
+        self.assertEqual(po.ios_deployment_target(self.t / 'none.yml'), None)
+        (self.t / 'p.yml').write_text('options:\n  deploymentTarget:\n    iOS: "28.1"   # note\n')
+        self.assertEqual(po.ios_deployment_target(self.t / 'p.yml'), '28.1')
+        with mock.patch.object(po.ios_deployment_target, '__defaults__', (self.t / 'p.yml',)):
+            self.assertEqual(po.os_min_default('ios'), '28.1')
+        with mock.patch.object(po.ios_deployment_target, '__defaults__', (self.t / 'none.yml',)), mock.patch.object(po.subprocess, 'run', self.fake_run):
+            self.assertEqual(po.os_min_default('ios'), '27.0')   # the fake SDK's 27.1
 
     def test_macos_takes_this_macs_major_version(self):   # not the SDK's: Xcode 27.1's SDK is 27.0 on macOS 26.6, which cannot open a 27.0 archive (GitHub issue #673)
         def run(cmd, **kw):

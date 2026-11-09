@@ -1,6 +1,7 @@
 # iOS project (xcodegen); build_ipa.sh generates Gen/ and the game resource paths first. Xcode stages resources before signing; the unsigned IPA command skips that copy and packs directly from the external drive.
 name: DmIOS
 options:
+  projectFormat: xcode16_3   # the newest project file format xcodegen 2.46 writes (objectVersion 90); xcodegen takes an unknown name silently and writes its default (77), so check the objectVersion of the generated project.pbxproj when raising it
   bundleIdPrefix: ${DM_BUNDLE_ID}
   deploymentTarget:
     iOS: "27.3"   # Graphics replay uses Metal 4 (MTL4CommandQueue etc., from iOS 26)
@@ -44,7 +45,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
           - UIInterfaceOrientationLandscapeLeft
         UIStatusBarHidden: true
-        UIViewControllerBasedStatusBarAppearance: false
+        UIViewControllerBasedStatusBarAppearance: false   # the bar stays hidden app-wide: DmRootVC hides it (prefersStatusBarHidden), but the launcher, presented full screen (DmHostingController), does not, so view-controller-based appearance would show the bar over it
         LSApplicationCategoryType: ${DM_APP_CATEGORY}   # game profile app_category
         DMShowFPS: ${DM_SHOW_FPS}           # YES = the frame-rate counter is on (front_ios.m; set by build_ipa.sh)
         DMLanguage: ${DM_LANG}              # the game language code (main.m sets DM_LANG from it; set by build_ipa.sh)
@@ -78,7 +79,6 @@ targets:
       CONFIGURATION_TEMP_DIR: $(DM_XCODE_OUTPUT_ROOT)/Build/Intermediates.noindex/$(PROJECT_NAME).build/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)
       ASSETCATALOG_COMPILER_APPICON_NAME: $(DM_APPICON)   # Gen/dm.xcconfig sets DM_APPICON = AppIcon when there is a game icon; empty = no icon (xcodegen's default is AppIcon, which fails the build when the catalog lacks it)
       TARGETED_DEVICE_FAMILY: "1,2"
-      ENABLE_BITCODE: NO
       GCC_C_LANGUAGE_STANDARD: gnu11
       GCC_OPTIMIZATION_LEVEL: 2                    # -O2 for the host's C / ObjC / assembly: without it Xcode's Release default is -Os (gen_build.py passes only -I / -D / -framework from dm/host/Makefile, whose -O1 the Mac uses)
       OTHER_CFLAGS: $(inherited) -mcpu=apple-a20   # the one chip the app is built for (the iPhone 18 Pro Max's A20 Pro; no older device or iOS is kept): it has the LSE atomics the host assembly uses, which the default baseline does not accept. Not newer: dav1d turns on every feature the target promises, so a target newer than the device stops it with SIGILL in the AV1 decoder (as the A18 target's I8MM did on an M1 iPad; dm/ios/tests/test_cpu_target.py)
@@ -86,7 +86,8 @@ targets:
       SWIFT_VERSION: "6.0"                         # Launcher.swift (SwiftUI)
       SWIFT_OBJC_BRIDGING_HEADER: Sources/DmIOS-Bridging-Header.h   # CloudSaves.h (the cloud-save folder pick)
       DEBUG_INFORMATION_FORMAT: dwarf
-      GCC_WARN_INHIBIT_ALL_WARNINGS: YES
+      GCC_WARN_INHIBIT_ALL_WARNINGS: NO            # -w would hide every deprecation too
+      WARNING_CFLAGS: -Wno-everything -Wdeprecated-declarations -Wunguarded-availability-new -Werror=implicit-function-declaration -Werror=implicit-int -Werror=int-conversion -Werror=incompatible-function-pointer-types   # only deprecations and APIs newer than the deployment target show, for every C / ObjC file (the vendored libraries' too; warnings, never errors): Xcode puts WARNING_CFLAGS after the -W flags of its GCC_WARN_* / CLANG_WARN_* settings and clang takes the -W flags in order, so -Wno-everything turns those off and the two after it stay on. -Wno-everything also turns off clang's default errors, which -w left on, so the four -Werror= flags put them back: an iOS-only C / ObjC path the Mac build never compiles must not ship an undeclared call (on arm64 its pointer result is cut to an int) or a pointer / int or function-pointer mix-up. compile_check.py uses the same flags
 schemes:
   ${DM_SCHEME_NAME}:
     build:

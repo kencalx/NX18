@@ -560,11 +560,12 @@ static void draw_(const p_draw *dw, const p_draw_idx *di);
 static uint64_t g_mtk_n, g_mtk_wait;
 static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)};   // only the submit thread uses it: prewarm workers build pipelines (mtk_build) and the submit thread claims them (warm_claim)
 // A mesh pipeline must have a fragment function, where a vertex one need not (validateWithDevice). A task / mesh program with no pixel shader draws depth only (Ocarina of Time's foliage shadows).
-// Noted for Metal 4 (fn4_note) so that such a pipeline goes through the compiler and the archive like the others
+// Noted for Metal 4 (fn4_note) so that such a pipeline goes through the compiler and the archive like the others. The function is the host's own library dm/gfx/msl/mesh_nop.metal,
+// compiled when the host is built (host_lib), so a mesh draw compiles no MSL at run time; host_msl_lib compiles its source only when the build had no Metal compiler
 static id<MTLFunction> mtk_nop_fragment(void) {
     static id<MTLFunction> fn; static dispatch_once_t once;
-    dispatch_once(&once, ^{ NSError *e = nil; id<MTLLibrary> l = [g_dev newLibraryWithSource:@"fragment void dm_mesh_nop() {}" options:nil error:&e];
-        fn = fn4_note([l newFunctionWithName:@"dm_mesh_nop"], l, @"dm_mesh_nop", nil); if (!fn) MLOG("[RED] the empty fragment function did not compile: %s", e.localizedDescription.UTF8String); });
+    dispatch_once(&once, ^{ NSError *e = nil; id<MTLLibrary> l = host_lib("mesh_nop", &e);
+        fn = fn4_note([l newFunctionWithName:@"dm_mesh_nop"], l, @"dm_mesh_nop", nil); if (!fn) MLOG("[RED] the empty fragment function did not load: %s", e.localizedDescription.UTF8String); });
     return fn;
 }
 // The Metal 4 descriptor of a native mesh pipeline, whole: no base with open colour state, as a game has some hundred of them, each with functions of its own. Its depth / stencil
