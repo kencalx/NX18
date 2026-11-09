@@ -1899,8 +1899,10 @@ static void high_cap_tick(void) {
     static int win = -1, link_env = -1;
     if (win < 0) { win = mtl_display_hz() != 0; link_env = getenv("DM_PRESENT_LINK") != NULL; }
     // The movie state is read once, so the cap and the reason it logs agree (a movie that ends between two reads gave 120 with the heat or Low Power Mode cause unread)
-    int ok = !win || front_screen_max_fps() >= 120, mv = ok && dm_movie_playing(), th = ok && !mv ? thermal_capped() : 0, cap = ok && !mv && !th ? 120 : 60;
-    static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : mv ? "movie playing" : thermal_why(th)); was = cap; }
+    // iOS: 120 fps is offered on the Mac only (settings.tsv's DM_FPS_TARGET row, platform:mac) and was never checked on an iPhone or iPad. Their front end reports the screen's rate now
+    // (front_ios.m front_screen_max_fps, 120 on a ProMotion screen), so an env.txt DM_FPS_TARGET=120 is held here at 60 with the 60 Hz link, as it was while the iOS front end reported none
+    int ok = !win || (front_screen_max_fps() >= 120 && !TARGET_OS_IPHONE), mv = ok && dm_movie_playing(), th = ok && !mv ? thermal_capped() : 0, cap = ok && !mv && !th ? 120 : 60;
+    static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? (TARGET_OS_IPHONE ? "120 fps is offered on the Mac only" : "the screen is below 120 Hz") : mv ? "movie playing" : thermal_why(th)); was = cap; }
     atomic_store(&g_high_cap, cap);
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
 }

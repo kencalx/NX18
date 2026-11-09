@@ -21,6 +21,7 @@ extern char **environ;
 
 int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=dm_main
 UIViewController *front_ios_root(void);
+void front_ios_scene(UIWindowScene *scene);
 void front_ios_focus_event(int ev);
 
 static char *g_argv[4]; static int g_argc;
@@ -153,12 +154,28 @@ static void cheats_locate(NSString *doc, NSString *res) {
     fprintf(stderr, "boot: cheats folder %s%s\n", dir.fileSystemRepresentation, copied ? [NSString stringWithFormat:@" (%d packed file(s) copied in)", copied].UTF8String : "");
 }
 
+// The device's pipeline archive (nvn_mtl.m pso4_init): DM_PSO_ARCHIVE's folder (off: none), else pso_archive/ beside pso_user.tsv (DM_PSO_USER, else in DM_SAVE's parent:
+// Documents/pso_archive). It holds the pipeline bases this device built, about 170-260 MB a game, which the host makes again from pso_user.tsv (kept in the backup) at the next start,
+// so it stays out of device and iCloud backups. The folder is made here when it is missing, so a first install's archive, which the host writes into it later, is left out too (it stays
+// empty while the Metal 4 pipeline path is off, DM_PSO_MTL4)
+static void pso_archive_exclude(void) {
+    const char *a = getenv("DM_PSO_ARCHIVE"), *u = getenv("DM_PSO_USER"), *s = getenv("DM_SAVE");
+    if (a && !strcmp(a, "off")) return;
+    NSString *dir = a && *a ? @(a) : u && *u ? [@(u).stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_archive"]
+                  : s && *s ? [@(s).stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_archive"] : nil;
+    if (!dir) return;
+    NSError *e = nil;
+    if (![NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&e]) { fprintf(stderr, "boot: the pipeline archive folder %s could not be made: %s\n", dir.fileSystemRepresentation, e.localizedDescription.UTF8String); return; }
+    if (![[NSURL fileURLWithPath:dir isDirectory:YES] setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:&e]) fprintf(stderr, "boot: %s could not be excluded from backup: %s\n", dir.fileSystemRepresentation, e.localizedDescription.UTF8String);
+}
+
 static int boot_env(void) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
     NSString *res = NSBundle.mainBundle.resourcePath;
     for (NSString *d in @[@"save", @"temp"]) [fm createDirectoryAtPath:[doc stringByAppendingPathComponent:d] withIntermediateDirectories:YES attributes:nil error:nil];
-    // Keep game files and scratch data out of device backups (Documents is backed up by default; a RomFS placed there is many GB). Saves, logs and the pipeline list stay in the backup
+    // Keep game files and scratch data out of device backups (Documents is backed up by default; a RomFS placed there is many GB). Saves, logs and the pipeline list stay in the backup;
+    // the pipeline archive, which the device makes again from that list, is left out below (pso_archive_exclude), once DM_SAVE, whose folder it is in, is known
     for (NSString *d in [@[@"romfs", @"aoc", @"temp"] arrayByAddingObjectsFromArray:[romfs_document_images(doc) valueForKey:@"lastPathComponent"]]) {
         NSURL *u = [NSURL fileURLWithPath:[doc stringByAppendingPathComponent:d]]; NSError *e = nil;
         if ([fm fileExistsAtPath:u.path] && ![u setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:&e]) fprintf(stderr, "boot: %s could not be excluded from backup: %s\n", d.UTF8String, e.localizedDescription.UTF8String);
@@ -206,6 +223,7 @@ static int boot_env(void) {
     if (!dm) { romfs_identity_report(doc); fprintf(stderr, "boot: game files not found (Documents/romfs.img, Documents/romfs or <App>/romfs)\n"); return 0; }
     setenv("DM_SAVE", [doc stringByAppendingPathComponent:@"save"].fileSystemRepresentation, 0);
     setenv("DM_TEMP", [doc stringByAppendingPathComponent:@"temp"].fileSystemRepresentation, 0);
+    pso_archive_exclude();
     setenv("DM_GUEST_FILE_DIR", NSTemporaryDirectory().fileSystemRepresentation, 0);   // DM_GUEST_FILE (hle_svc.c) keeps the guest's memory in files there
     setenv("DM_FONT_DIR", [[res stringByAppendingPathComponent:@"dm"] stringByAppendingPathComponent:@"font"].fileSystemRepresentation, 0);   // Shared-font stand-ins (standard.ttf / nintendo_ext.ttf): iOS lacks the macOS font path
     aoc_locate();   // add-on content: Documents/aoc, else <App>/aoc; an empty Documents/aoc explicitly selects no DLC
@@ -283,6 +301,7 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 @end
 @implementation SceneDelegate
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)o {
+    front_ios_scene((UIWindowScene *)scene);   // its screen's size, rate and brightness, before the views that read them (front_ios.m screen_cache)
     self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
     self.window.rootViewController = front_ios_root();
     [self.window makeKeyAndVisible];

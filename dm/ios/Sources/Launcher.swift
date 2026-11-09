@@ -152,9 +152,8 @@ private struct LauncherView: View {
         }
     }
 
-    @ViewBuilder var playButton: some View {
-        let button = Button(action: play) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large)
-        if #available(iOS 26.0, *) { button.buttonStyle(.glassProminent) } else { button.buttonStyle(.borderedProminent) }
+    var playButton: some View {
+        Button(action: play) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large).buttonStyle(.glassProminent)
     }
 
     private func appIcon() -> UIImage? {

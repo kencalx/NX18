@@ -247,10 +247,10 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Symptom:** sound stays silent after Siri, an alarm, a call or another app's audio; a game whose audio thread waits for its buffers back (Wwise's poll-only output, FMOD) then waits forever.
 - **Cause:** iOS stops calling the RemoteIO unit back without stopping it, so the host still thinks the output plays.
 - **Fix:** three layers handle it:
-  - `front_ios.m` observes `AVAudioSessionInterruptionNotification` (began → the silent sink stands in, ended → session up again and resume; becoming active also ends an interruption whose "ended" never came);
+  - `front_ios.m` observes iOS 27's session notifications (`AVAudioSessionInterruptionNotification` is deprecated there): `AVAudioSessionDidBecomeInactiveNotification` with a deactivation the system made (`AVAudioSessionDeactivationContext`, source System; its interruption context gives the reason) → the silent sink stands in; `AVAudioSessionResumptionRecommendationNotification`, whatever it recommends → session up again and resume; `AVAudioSessionDidBecomeActiveNotification`, and the app becoming active, also end an interruption whose recommendation never came. `haptics_apple.m` stops and restarts the phone's rumble on the same three;
   - `front_ios.m` also observes `AVAudioSessionMediaServicesWereResetNotification` (`dm_audio_reset` recreates every AudioUnit);
   - a watchdog in `hle_audio.c` switches any started output whose device has not called back for 200 ms in focus to the silent sink, retrying the AudioUnit after 1, 2, 4, 8 s. A start that fails (session still held by a call) falls back the same way instead of aborting.
-- **Check:** the log shows `audio session: interrupted`, `the device has not called back for N ms` and `AudioUnit restarted`. `tests/t_audio.c` (in `dm/host`) scenario 3 stops a playing AudioUnit behind the host's back.
+- **Check:** the log shows `audio session: interrupted`, `audio session: interruption ended (…)`, `the device has not called back for N ms` and `AudioUnit restarted`. Not run on a device since the move to iOS 27's notifications: Siri, a call and an alarm, each ended in the app and with the app in the background. `tests/t_audio.c` (in `dm/host`) scenario 3 stops a playing AudioUnit behind the host's back.
 
 ### A blocked audio device start freezes the game
 

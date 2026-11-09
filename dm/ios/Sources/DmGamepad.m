@@ -87,13 +87,14 @@ static void motion_start(void) {
 // The host keeps phone and controller orientations separately, choosing fresh controller data in auto mode and the phone alone in forced mode.
 // DM_PHONE_MOTION: auto (default) while no controller supplies fresh gyro data (a DualSense held apart from the phone uses its own, motion_apple.h), 1 always, 0 never.
 // DM_MOTION=0 (all live motion off; the NSP script's --no-motion builds it in) never starts device motion.
-// Which frame the samples come in: on iOS 27 and later the pad view (full screen, over the picture) is the motion body (CMMotionManager.deviceMotionBody), so Core Motion delivers
-// them in that view's frame for whichever display shows it and however it is turned: x to the right of the picture, y to its top, z toward the player, the Switch frame as it is.
-// Before that they come in the hardware frame, turned here by the interface orientation, which holds only where the hardware frame is the screen's portrait frame: not on iPhone
-// Duo's inner display, whose picture is a quarter turn from it (up / down and left / right swapped, GitHub issue #569). Open: while the scene is not full screen (Split View on the
-// inner display) Core Motion falls back to the hardware frame without saying so, and the samples are then taken as the view's frame
+// Which frame the samples come in: the pad view (full screen, over the picture) is the motion body (CMMotionManager.deviceMotionBody, iOS 27), so Core Motion delivers them in
+// that view's frame for whichever display shows it and however it is turned: x to the right of the picture, y to its top, z toward the player, the Switch frame as it is.
+// Without a body they come in the hardware frame, turned here by the interface orientation (g_iface_orient), which holds only where the hardware frame is the screen's portrait
+// frame: not on iPhone Duo's inner display, whose picture is a quarter turn from it (up / down and left / right swapped, GitHub issue #569). Open: while the scene is not full screen
+// (Split View on the inner display) Core Motion falls back to the hardware frame without saying so, and the samples are then taken as the view's frame (g_iface_orient, kept up
+// to date on layout, would turn them, but nothing tells when the fallback is in force)
 static _Atomic int g_iface_orient = 3;      // UIInterfaceOrientation, updated on layout
-static BOOL g_motion_body;                  // samples in the body's frame (iOS 27+)
+static BOOL g_motion_body;                  // samples in the body's frame (deviceMotionBody set)
 static void phone_motion_start(UIView *body) {
     const char *e = getenv("DM_MOTION");
     if (e && !atoi(e)) { LOG("front end: motion is off (DM_MOTION=0), the phone's gyro is not used"); return; }
@@ -102,7 +103,7 @@ static void phone_motion_start(UIView *body) {
     if (!g_motion.deviceMotionAvailable) { LOG("front end: no device motion, the phone's gyro is not used"); return; }
     LOG("front end: the phone's gyro drives the controller's six-axis sensor %s", mode < 0 ? "while no controller supplies fresh motion" : "always (DM_PHONE_MOTION=1)");
     g_motion.deviceMotionUpdateInterval = 1.0 / 100;
-    if (@available(iOS 27.0, *)) { g_motion.deviceMotionBody = body; g_motion_body = YES; LOG("front end: the phone's motion comes in the pad view's frame (deviceMotionBody)"); }
+    g_motion.deviceMotionBody = body; g_motion_body = YES; LOG("front end: the phone's motion comes in the pad view's frame (deviceMotionBody)");
     NSOperationQueue *q = [NSOperationQueue new]; q.maxConcurrentOperationCount = 1;
     [g_motion startDeviceMotionUpdatesToQueue:q withHandler:^(CMDeviceMotion *d, NSError *err) {
         (void)err; if (!d) return;
@@ -220,7 +221,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         self.multipleTouchEnabled = YES; self.opaque = NO; self.backgroundColor = UIColor.clearColor;
         const char *feedback = getenv("DM_TOUCH_HAPTICS");
         if (!feedback || atoi(feedback)) {
-            _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+            _touchFeedback = [UIImpactFeedbackGenerator feedbackGeneratorWithStyle:UIImpactFeedbackStyleLight forView:self];   // an interaction of this view (setTouchFeedback: removes it)
             [_touchFeedback prepare];
         }
         _owner = [NSMapTable strongToStrongObjectsMapTable]; _faceOf = [NSMapTable strongToStrongObjectsMapTable];
@@ -305,8 +306,8 @@ static BOOL assistive_running(void) { return UIAccessibilityIsVoiceOverRunning()
     [self reset]; _tap = NO; _full = NO; [self applyLayout]; [self setNeedsLayout];
 }
 - (void)setTouchFeedback:(BOOL)on {
-    if (!on) { _touchFeedback = nil; return; }
-    if (!_touchFeedback) { _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [_touchFeedback prepare]; }
+    if (!on) { if (_touchFeedback) [self removeInteraction:_touchFeedback]; _touchFeedback = nil; return; }   // the generator is one of this view's interactions: it goes with it
+    if (!_touchFeedback) { _touchFeedback = [UIImpactFeedbackGenerator feedbackGeneratorWithStyle:UIImpactFeedbackStyleLight forView:self]; [_touchFeedback prepare]; }
 }
 - (void)setTouchSize:(CGFloat)s {   // the in-game menu's Touch control size: every touch released first (a held stick's centre moves), then laid out again, hit areas included
     if (s == g_touch_size) return;

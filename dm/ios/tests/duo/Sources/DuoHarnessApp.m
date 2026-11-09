@@ -8,6 +8,7 @@
 #endif
 
 UIViewController *front_ios_root(void);
+void front_ios_scene(UIWindowScene *scene);   // front_ios.m: caches the scene's screen (size, rate, brightness), as main.m does
 
 static NSArray<NSNumber *> *DuoHarnessRectArray(CGRect rect) {
     return @[@(CGRectGetMinX(rect)), @(CGRectGetMinY(rect)), @(CGRectGetWidth(rect)), @(CGRectGetHeight(rect))];
@@ -67,6 +68,7 @@ static NSArray<NSArray<NSNumber *> *> *DuoHarnessTouchArray(DuoHarnessInput inpu
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
     (void)session; (void)options;
     if (![scene isKindOfClass:UIWindowScene.class]) return;
+    front_ios_scene((UIWindowScene *)scene);   // before the window and views that read the screen, as main.m's SceneDelegate
     self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
     UIViewController *root = front_ios_root();
     self.window.rootViewController = root;

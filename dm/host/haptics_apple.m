@@ -433,9 +433,14 @@ void dm_haptics_apple_init(void) {
         [nc addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; suspend(DM_HAPTICS_INACTIVE, YES); }];
         [nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; suspend(DM_HAPTICS_INACTIVE, NO); }];
         [nc addObserverForName:UIApplicationWillTerminateNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_haptics_apple_shutdown(); }];
-        [nc addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
-            suspend(DM_HAPTICS_INTERRUPTED, [n.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue] == AVAudioSessionInterruptionTypeBegan);
+        // The phone's engine runs on the app's audio session: an interruption of it (iOS 27's model, as front_ios.m's audio observers: the system deactivating the session begins
+        // one, its resumption recommendation or the session active again ends it) stops the rumble, and the engine starts again after it
+        [nc addObserverForName:AVAudioSessionDidBecomeInactiveNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
+            AVAudioSessionDeactivationContext *c = n.userInfo[AVAudioSessionDeactivationContextKey];
+            if (!c || c.source == AVAudioSessionDeactivationSourceSystem) suspend(DM_HAPTICS_INTERRUPTED, YES);
         }];
+        [nc addObserverForName:AVAudioSessionResumptionRecommendationNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; suspend(DM_HAPTICS_INTERRUPTED, NO); }];
+        [nc addObserverForName:AVAudioSessionDidBecomeActiveNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; suspend(DM_HAPTICS_INTERRUPTED, NO); }];
         [nc addObserverForName:AVAudioSessionRouteChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
             (void)n; dm_haptics_clear(0);
         }];

@@ -17,9 +17,9 @@ int front_env_copy(const char *name, char *out, size_t cap);
 void front_run(void (*guest)(void));
 // The CAMetalLayer the graphics backend presents frames to (NULL when there is no window)
 void *front_metal_layer(void);
-// The highest refresh rate of the window's screen in Hz, 0 = not known (Mac front_mac.m; none on iOS, whose screens run at multiples of 60 Hz). Any thread
+// The highest refresh rate of the window's screen in Hz, 0 = not known (Mac front_mac.m; iOS front_ios.m: the app window scene's screen, the phone's or iPad's own, whose rates are multiples of 60 Hz). Any thread
 int front_screen_max_fps(void);
-// The pixel size of the display the game is shown on: on the Mac the window's screen in its current mode (the main display before the window is up) (a scaled Retina mode's pixels), an iPhone's or iPad's screen (nativeBounds).
+// The pixel size of the display the game is shown on: on the Mac the window's screen in its current mode (the main display before the window is up) (a scaled Retina mode's pixels), an iPhone's or iPad's screen (the app window scene's nativeBounds, cached on the main thread; a TV's scene does not change it).
 // Returns 0 and leaves w, h alone when not known (no front end: graphics unit tests). Any thread
 int front_display_pixels(int *w, int *h);
 // Whether the window's current screen mode supports variable refresh (Mac front_mac.m; none on iOS). Any thread

@@ -27,6 +27,27 @@ const char *front_ios_device_check(void);   // main.m: why this device cannot ru
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
 
 static CAMetalLayer *g_layer;
+// The app window scene's screen (the phone's or iPad's own; a TV's scene never takes its place), cached on the main thread when the scene connects (main.m front_ios_scene) and at
+// each layout of the root view, for the readers on other threads and those that come before the view is in a window: front_display_pixels (vi::QueryDisplayBufferMaxResolution),
+// front_screen_max_fps (nvn_mtl.m mtl_display_hz and the display link) and the brightness (dm_brightness_now). UIScreen.mainScreen, which these read before, is deprecated (iOS 26).
+// Only the device's own screen has a backlight, so the brightness is read from g_own_screen alone: the screen the app's scene first connects on (the built-in one; an iPad under
+// Stage Manager can later move the window to an external display, which g_screen then follows for the size and rate, but whose brightness means nothing)
+static UIScreen *g_screen;       // main thread
+static UIScreen *g_own_screen;   // main thread
+static _Atomic int g_screen_px_w, g_screen_px_h, g_screen_fps;
+static _Atomic double g_brightness = -1;
+static void screen_cache(UIScreen *s) {
+    if (!s) return;
+    g_screen = s;
+    CGRect b = s.nativeBounds; g_screen_px_w = (int)b.size.width; g_screen_px_h = (int)b.size.height;
+    g_screen_fps = (int)s.maximumFramesPerSecond;
+    if (s == g_own_screen) g_brightness = s.brightness;
+}
+void front_ios_scene(UIWindowScene *scene) {   // main.m SceneDelegate: the app's scene connects, before its window and views exist
+    if (!g_own_screen) g_own_screen = scene.screen;
+    screen_cache(scene.screen);
+}
+int front_screen_max_fps(void) { return g_screen_fps; }   // front.h; hle_nvn.c keeps 120 fps off on iOS whatever it says (high_cap_tick)
 static void front_ios_notify_setup(void);
 static void front_ios_notify_ask(void);
 static void front_ios_power_watch(void);
@@ -47,7 +68,14 @@ static UILabel *front_ios_fps_label(void);
         }];
         CAMetalLayer *l = (CAMetalLayer *)self.layer;
         l.device = MTLCreateSystemDefaultDevice(); l.pixelFormat = MTLPixelFormatBGRA8Unorm;
-        l.contentsScale = MAX(self.traitCollection.displayScale, 1); l.framebufferOnly = NO; l.opaque = YES;
+        l.contentsScale = MAX(self.traitCollection.displayScale, 1); l.opaque = YES;
+        // A drawable is only ever the present pass's colour attachment (nvn_mtl.m present_encode_m4; MetalFX writes a texture of its own): screenshots, the window grab and
+        // DM_NVN_REGLUM read the game's picture or an offscreen texture. So the drawables are render targets only (framebufferOnly, the default, as on the Mac), which lets Core
+        // Animation and Metal keep them in the form best for display (lossless compression). DM_DRAWABLE_SHADER_ACCESS=1 makes them readable and writable by shaders again, as
+        // before (framebufferOnly NO)
+        const char *sa = getenv("DM_DRAWABLE_SHADER_ACCESS"); BOOL shaderAccess = sa && atoi(sa);
+        l.framebufferOnly = !shaderAccess;
+        if (shaderAccess) LOG("front end: the drawables allow shader access (DM_DRAWABLE_SHADER_ACCESS=1)");
         self.backgroundColor = UIColor.blackColor;
     }
     return self;
@@ -82,13 +110,9 @@ static void tv_attach(void);
 @implementation DmRootView
 + (BOOL)requiresConstraintBasedLayout { return YES; }
 - (void)updateConstraints {
-#if __has_include(<UIKit/UIHingeInteraction.h>)
-    if (@available(iOS 27.1, *)) {
-        // Reading here registers UIKit's automatic reserved-region invalidation.
-        [self reservedRegionsOfKind:UIViewReservedRegionKind.divisionRegionKind options:UIViewReservedRegionQueryOptionsIncludeInactive];
-        [self setNeedsLayout];
-    }
-#endif
+    // Reading here registers UIKit's automatic reserved-region invalidation.
+    [self reservedRegionsOfKind:UIViewReservedRegionKind.divisionRegionKind options:UIViewReservedRegionQueryOptionsIncludeInactive];
+    [self setNeedsLayout];
     [super updateConstraints];
 }
 @end
@@ -104,9 +128,7 @@ static void tv_attach(void);
 @property (nonatomic) BOOL partiallyOpen;   // an iPhone Duo's hinge half open (UIHingeInteraction, iOS 27.1)
 @property (nonatomic) NSInteger hingeStatus;
 @property (nonatomic, copy) NSString *layoutLog;   // the last layout line logged
-#if __has_include(<UIKit/UIHingeInteraction.h>)
-- (void)hingeChanged:(UIHinge *)hinge API_AVAILABLE(ios(27.1));
-#endif
+- (void)hingeChanged:(UIHinge *)hinge;
 - (void)startGame;
 - (void)showFPS:(BOOL)on;
 @end
@@ -136,14 +158,10 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.blackColor;
-#if __has_include(<UIKit/UIHingeInteraction.h>)
-    if (@available(iOS 27.1, *)) {
-        __weak DmRootVC *weakSelf = self;
-        [self.view addInteraction:[[UIHingeInteraction alloc] initWithUpdateHandler:^(UIHingeInteraction *interaction, UIHingeInteractionUpdate *update) {
-            [weakSelf hingeChanged:update.hinge];
-        }]];
-    }
-#endif
+    __weak DmRootVC *weakSelf = self;
+    [self.view addInteraction:[[UIHingeInteraction alloc] initWithUpdateHandler:^(UIHingeInteraction *interaction, UIHingeInteractionUpdate *update) {
+        [weakSelf hingeChanged:update.hinge];
+    }]];
     front_ios_power_watch();
     front_ios_notify_setup();
     if (!front_ios_boot_ok()) {   // No game files: show a hint and do not start the host
@@ -151,16 +169,13 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
         [self showHint:why ? [NSString stringWithFormat:@"Game files unusable.\n%s", why] : @"Game files not found.\nPut the RomFS folder into this App's Documents as \"romfs\" (Files app), then restart."]; return;
     }
     front_ios_audio_watch();
-#if defined(__IPHONE_27_0)   // compiled only with an SDK that has the scene accessory API
-    if (@available(iOS 27.0, *)) {   // iOS 27 offers a TV scene only to a registered scene accessory, no longer from the Info.plist entry alone (that path stays for iOS 26)
+    {   // iOS 27 offers a TV scene only to a registered scene accessory, no longer from the Info.plist entry alone (the entry stays: main.m's App names its "TV" configuration)
         UISceneConfiguration *c = [[UISceneConfiguration alloc] initWithName:@"TV" sessionRole:UIWindowSceneSessionRoleExternalDisplayNonInteractive];
         c.delegateClass = NSClassFromString(@"DmTVSceneDelegate");
         self.tv = [self registerSceneAccessory:[UISceneAccessory externalNonInteractiveSceneAccessoryWithConfiguration:c]];
     }
-#endif
 }
-#if __has_include(<UIKit/UIHingeInteraction.h>)
-- (void)hingeChanged:(UIHinge *)hinge API_AVAILABLE(ios(27.1)) {
+- (void)hingeChanged:(UIHinge *)hinge {
     NSInteger status = hinge ? hinge.status : UIHingeStatusUnknown;
     if (self.hingeStatus != status) {
         self.hingeStatus = status;
@@ -170,7 +185,6 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
     [self.view setNeedsUpdateConstraints];
     [self.view setNeedsLayout];
 }
-#endif
 // The game view, the pad and the frame-rate counter are made once the launcher has set the switches they read (DM_SHOW_FPS, DM_METAL_HUD); the host's loading began at app launch (main.m)
 - (void)startGame {
     if (self.game) return;
@@ -183,7 +197,7 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
         // host writes the state page (main.c dm_fps_state_apply)
         const char *a = getenv("DM_SCREEN_ASPECT");
         if (a && !strcmp(a, "auto")) {
-            CGSize sz = self.view.window ? self.view.window.bounds.size : UIScreen.mainScreen.bounds.size; double r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
+            CGSize sz = self.view.window ? self.view.window.bounds.size : g_screen.bounds.size; double r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
             char v[16]; if (r >= 1.3 && r < 1.77) snprintf(v, sizeof v, "%.3f", r); else strcpy(v, "0");
             setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: window %.0fx%.0f points (%.3f:1) → DM_SCREEN_ASPECT=%s", sz.width, sz.height, r, v);
         }
@@ -196,7 +210,7 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
     // there the mod stays out, before the host reads the switch when the game starts
     const char *uw = getenv("DM_MOD_ULTRAWIDE");
     if (uw && !strcmp(uw, "1")) {
-        UIScreen *scr = self.view.window.windowScene.screen; CGSize sz = (scr ?: UIScreen.mainScreen).bounds.size;   // the window's screen; the main one before the view is in a window
+        UIScreen *scr = self.view.window.windowScene.screen; CGSize sz = (scr ?: g_screen).bounds.size;   // the window's screen; the app scene's (screen_cache) before the view is in a window
         CGFloat r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
         if (r < 1.85) { unsetenv("DM_MOD_ULTRAWIDE"); LOG("front end: Ultrawide left off: this screen (%.2f:1) is not wider than 16:9", r); }
         else {
@@ -228,18 +242,15 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
+    screen_cache(self.view.window.windowScene.screen);   // an iPad's window can move to another screen; nil before the view is in a window, which keeps the scene's
     CGRect b = self.view.bounds; if (!self.game) return;
     CGRect division = CGRectNull;   // an iPhone Duo's fold, as UIKit reports it (iOS 27.1)
     NSMutableArray<NSString *> *regionLog = [NSMutableArray array];
-#if __has_include(<UIKit/UIHingeInteraction.h>)
-    if (@available(iOS 27.1, *)) {
-        for (UIViewReservedRegion *region in [self.view reservedRegionsOfKind:UIViewReservedRegionKind.divisionRegionKind options:UIViewReservedRegionQueryOptionsIncludeInactive]) {
-            [regionLog addObject:[NSString stringWithFormat:@"%@ active=%d", NSStringFromCGRect(region.frame), region.isActive]];
-            CGRect candidate = dm_horizontal_division(b, region.frame);
-            if (CGRectIsNull(division) && !CGRectIsNull(candidate)) division = candidate;
-        }
+    for (UIViewReservedRegion *region in [self.view reservedRegionsOfKind:UIViewReservedRegionKind.divisionRegionKind options:UIViewReservedRegionQueryOptionsIncludeInactive]) {
+        [regionLog addObject:[NSString stringWithFormat:@"%@ active=%d", NSStringFromCGRect(region.frame), region.isActive]];
+        CGRect candidate = dm_horizontal_division(b, region.frame);
+        if (CGRectIsNull(division) && !CGRectIsNull(candidate)) division = candidate;
     }
-#endif
     BOOL duoPortrait = b.size.height > b.size.width && (self.hingeStatus != 0 || !CGRectIsNull(division));
     UIEdgeInsets gameInsets = dm_game_safe_insets(b, self.view.safeAreaInsets, duoPortrait);
     BOOL onTV = self.game.superview != self.view;   // the TV's view lays the picture out; the phone is all pad
@@ -386,18 +397,18 @@ bool dm_setting_live(const char *env, const char *value) {
 @end
 
 // Thermal state and screen brightness for the power and present rows every 300 frames (hle_nvn.c; its weak defaults return -1 on the Mac). thermalState: 0 nominal, 1 fair, 2 serious, 3 critical.
-// Brightness is read on the main thread at start and on each change; every change of the thermal state and of Low Power Mode (which lowers the CPU clock) is logged with the time since launch
-static _Atomic double g_brightness = -1;
+// Brightness (the device's own screen, g_own_screen) is read on the main thread at start (screen_cache) and on each change; every change of the thermal state and of Low Power Mode (which lowers the CPU clock) is logged with the time since launch.
+// Low Power Mode can also lower the screen's maximumFramesPerSecond (ProMotion held at 60 Hz), so the screen's values are cached again on each change
 int dm_thermal_now(void) { return (int)NSProcessInfo.processInfo.thermalState; }
 int dm_low_power_now(void) { return NSProcessInfo.processInfo.lowPowerModeEnabled; }   // the frame step does not probe in it (hle_nvn.c fstep_cpu_slowed)
 double dm_brightness_now(void) { return g_brightness; }
 static void front_ios_power_watch(void) {
-    g_brightness = UIScreen.mainScreen.brightness;
-    [NSNotificationCenter.defaultCenter addObserverForName:UIScreenBrightnessDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; g_brightness = UIScreen.mainScreen.brightness; }];
+    [NSNotificationCenter.defaultCenter addObserverForName:UIScreenBrightnessDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; if (g_own_screen) g_brightness = g_own_screen.brightness; }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
         (void)n; LOG("front end: thermal state → %d (%.0f s after launch)", dm_thermal_now(), (now_ns() - g_t0_ns) / 1e9); }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoPowerStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
-        (void)n; LOG("front end: Low Power Mode → %s (%.0f s after launch)", dm_low_power_now() ? "on" : "off", (now_ns() - g_t0_ns) / 1e9); }];
+        (void)n; LOG("front end: Low Power Mode → %s (%.0f s after launch)", dm_low_power_now() ? "on" : "off", (now_ns() - g_t0_ns) / 1e9);
+        dispatch_async(dispatch_get_main_queue(), ^{ screen_cache(g_screen); }); }];
     LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off");
 }
 
@@ -450,8 +461,8 @@ void front_progress(const char *title, long done, long total) {
     });
 }
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
-int front_display_pixels(int *w, int *h) {   // the screen in pixels, landscape (nativeBounds is portrait); UIScreen's sizes may be read from any thread
-    CGRect b = UIScreen.mainScreen.nativeBounds; int a = (int)b.size.width, c = (int)b.size.height;
+int front_display_pixels(int *w, int *h) {   // the app scene's screen in pixels (screen_cache), landscape (nativeBounds is portrait); any thread
+    int a = g_screen_px_w, c = g_screen_px_h;
     if (a <= 0 || c <= 0) return 0;
     *w = a > c ? a : c; *h = a > c ? c : a; return 1;
 }
@@ -576,18 +587,33 @@ void front_ios_audio_session(void) {
 
 // Real audio output is suspended (the silent sink paces the game) while the app is in the background or another audio session has interrupted ours (Siri, an alarm, a call).
 // Without the interruption observer the AudioUnits stayed "started" while iOS no longer called them, and a game waiting for its buffers back lost its sound until restart.
-// All of this runs on the main queue, like the scene callbacks
+// iOS 27's model (AVAudioSessionInterruptionNotification and its keys are deprecated there): the system deactivating the session (DidBecomeInactive, source System; its
+// interruption context, when another app's session took it, gives the reason) begins an interruption, and the system's resumption recommendation ends it, as the old "ended" did,
+// whatever the recommendation (the game's sound is the app's own, not a playback the player started). A deactivation the app asked for (source App) is no interruption: the host never
+// deactivates the session. The session becoming active again (DidBecomeActive) ends an interruption whose recommendation never came; and
+// becoming active as an app ends one too (front_ios_focus_event 3), as before. All of this runs on the main queue, like the scene callbacks
 static int g_audio_bg, g_audio_intr;
 static void front_ios_audio_apply(void) { dm_audio_suspend(g_audio_bg || g_audio_intr); }
 static void front_ios_audio_watch(void) {
     NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
-    [nc addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
-        NSUInteger type = [n.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue], reason = [n.userInfo[AVAudioSessionInterruptionReasonKey] unsignedIntegerValue];
-        if (type == AVAudioSessionInterruptionTypeBegan) { LOG("audio session: interrupted (reason %lu)", (unsigned long)reason); g_audio_intr = 1; }
-        else {
-            LOG("audio session: interruption ended"); g_audio_intr = 0;
-            if (!g_audio_bg) front_ios_audio_session();
-        }
+    [nc addObserverForName:AVAudioSessionDidBecomeInactiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        AVAudioSessionDeactivationContext *c = n.userInfo[AVAudioSessionDeactivationContextKey];
+        if (c && c.source != AVAudioSessionDeactivationSourceSystem) return;
+        AVAudioSessionInterruptionContext *ic = c.interruptionContext;
+        if (ic) LOG("audio session: interrupted (reason %lu)", (unsigned long)ic.reason);
+        else LOG("audio session: interrupted (deactivated by the system, no other app's session named)");
+        g_audio_intr = 1; front_ios_audio_apply();
+    }];
+    [nc addObserverForName:AVAudioSessionResumptionRecommendationNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        AVAudioSessionResumptionContext *c = n.userInfo[AVAudioSessionResumptionContextKey];
+        LOG("audio session: interruption ended (%s)", !c ? "no recommendation" : c.recommendation == AVAudioSessionResumptionRecommendationShouldResume ? "the system recommends resuming" : "the system recommends not resuming; resuming anyway");
+        g_audio_intr = 0;
+        if (!g_audio_bg) front_ios_audio_session();
+        front_ios_audio_apply();
+    }];
+    [nc addObserverForName:AVAudioSessionDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        (void)n; if (!g_audio_intr) return;
+        LOG("audio session: active again with no resumption recommendation; resuming"); g_audio_intr = 0;
         front_ios_audio_apply();
     }];
     [nc addObserverForName:AVAudioSessionMediaServicesWereResetNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
@@ -616,7 +642,7 @@ void front_ios_focus_event(int ev) {
         case 0: dm_gamepad_reset(); dm_focus_set(2); break;
         case 1: UIApplication.sharedApplication.idleTimerDisabled = NO; dm_focus_set(3); g_audio_bg = 1; front_ios_audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); save_sync_background(); break;
         case 2: dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); front_ios_audio_session(); g_audio_bg = 0; front_ios_audio_apply(); dm_focus_set(2); break;
-        case 3:   // Becoming active again also ends an interruption whose "ended" never came (not every one sends it), and retries a session that would not activate on the way back
+        case 3:   // Becoming active again also ends an interruption whose resumption recommendation never came (not every one sends it), and retries a session that would not activate on the way back
             UIApplication.sharedApplication.idleTimerDisabled = YES;
             if (g_audio_intr) { LOG("audio session: active again with no interruption-ended notice; resuming"); g_audio_intr = 0; g_session_off = 1; }
             if (g_session_off) front_ios_audio_session();

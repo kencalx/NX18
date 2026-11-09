@@ -17,6 +17,9 @@
 #include <stdio.h>
 void front_picture_shape(int w, int h);   // front_ios.m (dm/host/front.h)
 void front_picture_size(int w, int h);   // front_ios.m (dm/host/front.h)
+int front_display_pixels(int *w, int *h);   // front_ios.m (dm/host/front.h)
+int front_screen_max_fps(void);
+double dm_brightness_now(void);   // front_ios.m: the device's own screen, -1 = not known
 void dm_gamepad_hint(void);   // DmGamepad.m: the menu button shows for 5 s
 
 static NSArray<GCController *> *gDuoHarnessControllers;
@@ -895,6 +898,20 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertEqualWithAccuracy(metal.drawableSize.width, 320, 1, @"and back at once");
     front_picture_size(100000, 56250); settle();   // back to the view's pixels for the other tests
     XCTAssertTrue(CGSizeEqualToSize(metal.drawableSize, native));
+}
+
+- (void)testSceneConnectCachesTheScreenForOtherThreads {
+    UIViewController *root = [self harnessRootViewController];
+    UIScreen *screen = root.view.window.windowScene.screen;
+    XCTAssertNotNil(screen);
+    int w = 0, h = 0;
+    XCTAssertEqual(front_display_pixels(&w, &h), 1, @"The scene connect (front_ios_scene) fills the cache before the first layout");
+    CGSize native = screen.nativeBounds.size;
+    XCTAssertEqual(w, (int)MAX(native.width, native.height));
+    XCTAssertEqual(h, (int)MIN(native.width, native.height));
+    XCTAssertEqual(front_screen_max_fps(), (int)screen.maximumFramesPerSecond);
+    XCTAssertGreaterThan(front_screen_max_fps(), 0);
+    XCTAssertGreaterThanOrEqual(dm_brightness_now(), 0.0, @"The brightness comes from the screen the scene connected on");
 }
 
 - (void)testGamepadTextLayersRefreshScaleFromTheCurrentTraitCollection {
