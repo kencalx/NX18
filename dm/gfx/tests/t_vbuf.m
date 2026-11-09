@@ -1,4 +1,4 @@
-// Real Metal readback: cached stream bindings survive helper overwrites, encoder/submit changes and pool replacement.
+// Real Metal readback: cached stream bindings survive helper overwrites, encoder/submit changes and pool replacement. The fragment table skips unchanged addresses the same way (g_ft_addr).
 // Byte-aligned streams preserve their bytes and GPU write ordering (Arkham Knight's Scaleform streams sit at addresses 2 mod 4).
 // A draw that reads past a stream's bound size reads zeros there, not the pool's next bytes (Super Mario Odyssey's 9-vertex draw from a 3-vertex stream).
 #include "../nvn/nvn_mtl.m"
@@ -22,6 +22,19 @@ static id<MTLRenderPipelineState> pipeline(NSString *fn) {   // v: the first wor
     if (!lib) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); abort(); }
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = [lib newFunctionWithName:fn]; d.rasterizationEnabled = NO;
+    id<MTLRenderPipelineState> ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&err];
+    if (!ps) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); abort(); }
+    return ps;
+}
+static id<MTLRenderPipelineState> frag_pipeline(void) {   // one point at the 1x1 pass's pixel: its fragment copies the word at fragment slot 3 to fragment slot 8
+    NSError *err = nil;
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct P { float4 p [[position]]; float s [[point_size]]; };\n"
+        "vertex P pv() { P o; o.p = float4(0, 0, 0, 1); o.s = 1; return o; }\n"
+        "fragment void pf(const device uint *a[[buffer(3)]], device uint4 *o[[buffer(8)]]) { *o = uint4(*a, 0, 0, 0); }" options:nil error:&err];
+    if (!lib) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); abort(); }
+    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+    d.vertexFunction = [lib newFunctionWithName:@"pv"]; d.fragmentFunction = [lib newFunctionWithName:@"pf"]; d.rasterSampleCount = 1;
     id<MTLRenderPipelineState> ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&err];
     if (!ps) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); abort(); }
     return ps;
@@ -209,6 +222,30 @@ int main(void) { @autoreleasepool {
         EXPECT("without the shader's inputs nothing is reported", (uint64_t)-1, (uint64_t)bind_vbufs(en, NULL));
         enc_r_end(en); finish();
         S.vbuf[5] = (NVNbufferRange){0, 0}; S.attr[0] = (va_st){0}; S.nattr = 0;
+    }
+    // The fragment table's address cache (g_ft_addr): an unchanged address is not written again, a changed one and one written back after a change are, the table keeps a
+    // skipped address across encoders, and a helper pass's reset (g_ft_valid = 0, clr_tri) writes it again
+    {
+        id<MTLRenderPipelineState> fp = frag_pipeline();
+        id<MTLBuffer> src = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared], fo = [g_dev newBufferWithLength:16 * 8 options:MTLResourceStorageModeShared];
+        res_add(src); res_add(fo); ((uint32_t *)src.contents)[0] = 0x111; ((uint32_t *)src.contents)[1] = 0x222; memset(fo.contents, 0, 16 * 8);
+        #define FRAG(e, word, row) do { enc_r_args(e, MTLRenderStageFragment, src.gpuAddress + 4 * (word), 3); enc_r_args(e, MTLRenderStageFragment, fo.gpuAddress + 16 * (row), 8); \
+                                       enc_r_draw(e, MTLPrimitiveTypePoint, 0, 1); } while (0)
+        mtl_sub_begin(); en = encoder(fp); FRAG(en, 0, 0);
+        uint64_t fs = g_ft_set, fk = g_ft_skip;
+        for (int i = 0; i < 1000; i++) enc_r_args(en, MTLRenderStageFragment, src.gpuAddress, 3);
+        EXPECT("unchanged fragment table avoids writes", g_ft_cache ? 0 : 1000, g_ft_set - fs);
+        EXPECT("the skipped writes are counted", g_ft_cache ? 1000 : 0, g_ft_skip - fk);
+        FRAG(en, 1, 1); FRAG(en, 0, 2); enc_r_end(en);
+        en = encoder(fp); fs = g_ft_set; FRAG(en, 0, 3);
+        EXPECT("a skipped address holds across encoders", g_ft_cache ? 1 : 2, g_ft_set - fs);   // the output slot changed, the source did not
+        g_ft_valid = 0; fs = g_ft_set; FRAG(en, 0, 4);
+        EXPECT("a reset writes the slots again", 2, g_ft_set - fs);
+        enc_r_end(en); finish();
+        #undef FRAG
+        const uint32_t *r = fo.contents;
+        EXPECT("fragment readback, first address", 0x111, r[0]); EXPECT("fragment readback, changed address", 0x222, r[4]);
+        EXPECT("fragment readback, changed back", 0x111, r[8]); EXPECT("fragment readback, next encoder", 0x111, r[12]); EXPECT("fragment readback, after a reset", 0x111, r[16]);
     }
     // CPU-only binding microbenchmark, after GPU validation; reports overhead, not game frame time.
     for (int mode = 0; mode < 2; mode++) {

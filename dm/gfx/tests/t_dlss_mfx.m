@@ -40,7 +40,7 @@ int main(void) { @autoreleasepool {
     const float a[3] = {0.5f, 0.25f, 0.75f}, b[3] = {0.125f, 0.625f, 0.25f};
     fill(tex_mtl(&col), MTLClearColorMake(a[0], a[1], a[2], 1), 0); fill(tex_mtl(&col2), MTLClearColorMake(b[0], b[1], b[2], 1), 0);
     fill(tex_mtl(&dep), MTLClearColorMake(0, 0, 0, 0), 1); fill(tex_mtl(&mot), MTLClearColorMake(0, 0, 0, 0), 0);
-    p_dlss c = {.tex = {&col, &dep, &mot, &out}, .net = 1, .iw = 960, .ih = 540, .ow = 1920, .oh = 1080, .mv = {1, 1}, .pre_exposure = 1, .flags = DLSS_F_DEPTH_INVERTED, .reset = 1};
+    p_dlss c = {.tex = {&col, &dep, &mot, &out}, .net = 1, .iw = 960, .ih = 540, .ow = 1920, .oh = 1080, .mv = {1, 1}, .pre_exposure = 1, .flags = DLSS_F_MV_LOW_RES | DLSS_F_DEPTH_INVERTED, .reset = 1};   // motion at the input's size, as the game passes
     p_dlss c2 = c; c2.tex[DLSS_COLOR] = &col2; c2.tex[DLSS_OUTPUT] = &out2;
     for (int frame = 0; frame < 4; frame++) {   // the temporal scaler settles over a few frames of the same input
         mtl_sub_begin(); dlss_eval(&c); dlss_eval(&c2);

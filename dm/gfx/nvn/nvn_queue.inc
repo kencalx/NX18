@@ -108,6 +108,13 @@ static void nq_cost_end(nq_cost c) {
     atomic_fetch_add(&g_sub_instr,ins-c.instr); atomic_fetch_add(&g_cum_sub_instr,ins-c.instr);
     atomic_fetch_add(&g_cum_sub_cyc,cyc-c.cycles); atomic_fetch_add(&g_cum_sub_sys_ns,thr_sys_ns()-c.sys);
 }
+// The command copies (nq_bytes) of replayed nodes go to the next submissions' nodes instead of free (nq_spare_take / nq_spare_give), so a steady frame allocates none. Both run under g_sub_mu: the
+// submitting thread copies the commands (nq_flatten) and the worker replays them (nq_worker) holding it. At most NQ_SPARES are kept, none over NQ_SPARE_MAX (a load's long stream is freed)
+enum { NQ_SPARES=4 };
+#define NQ_SPARE_MAX ((size_t)4<<20)
+static struct { uint8_t *bytes; size_t capacity; } nq_spare[NQ_SPARES]; static int nq_nspare;
+static void nq_spare_take(nq_node *n) { if(nq_nspare) { nq_nspare--; n->bytes=nq_spare[nq_nspare].bytes; n->capacity=nq_spare[nq_nspare].capacity; } }
+static void nq_spare_give(nq_node *n) { if(n->bytes && n->capacity<=NQ_SPARE_MAX && nq_nspare<NQ_SPARES) { nq_spare[nq_nspare].bytes=n->bytes; nq_spare[nq_nspare].capacity=n->capacity; nq_nspare++; n->bytes=NULL; n->capacity=0; } }
 static void *nq_worker(void *unused) {
     (void)unused; pthread_setname_np("NVN queue replay");
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
@@ -167,7 +174,7 @@ static void *nq_worker(void *unused) {
                 nvn_cap_present(&n->texture,n->crop);
                 present=mtl_present(&n->texture,n->period,n->crop); mtl_tex_unpin(n->texture.serial);
             }
-            nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
+            nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); if(n->kind==NQ_COMMANDS) nq_spare_give(n); pthread_mutex_unlock(&g_sub_mu);
         }
         pthread_mutex_lock(&nq_mu); if(n->kind==NQ_PRESENT) { q->present=present; j->receipt->present=present; } if(fence) { q->physical=fence; if(n->event) nq_event_issued(n->event,fence,n->mode,n->value); } if(n->receipt) nq_put(n->receipt); free(n->bytes); free(n); pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
     }
@@ -175,7 +182,8 @@ static void *nq_worker(void *unused) {
 }
 static void nq_start(void) { pthread_t t; if(pthread_create(&t,NULL,nq_worker,NULL)) die("NVN queue worker failed"); pthread_detach(t); }
 static nq_node *nq_append(nq_job *j,unsigned kind) { nq_node *n=calloc(1,sizeof *n); if(!n) die("queue continuation allocation failed"); n->kind=kind; if(j->last) j->last->next=n; else j->first=n; j->last=n; return n; }
-static void nq_bytes(nq_node *n,const void *bytes,size_t length) { if(n->length+length>n->capacity) { n->capacity=(n->length+length+4095)&~(size_t)4095; n->bytes=realloc(n->bytes,n->capacity); if(!n->bytes) die("queue commands allocation failed"); } memcpy(n->bytes+n->length,bytes,length); n->length+=length; } // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts, so the old buffer cannot leak into a continuing process
+// A node's command copy grows by doubling (from 4 KB): growing 4 KB at a time took a reallocation for every 4 KB, each possibly a copy of all before it, under g_sub_mu
+static void nq_bytes(nq_node *n,const void *bytes,size_t length) { if(n->length+length>n->capacity) { size_t want=(n->length+length+4095)&~(size_t)4095, grown=n->capacity*2; n->capacity=grown>want?grown:want; n->bytes=realloc(n->bytes,n->capacity); if(!n->bytes) die("queue commands allocation failed"); } memcpy(n->bytes+n->length,bytes,length); n->length+=length; } // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts, so the old buffer cannot leak into a continuing process
 static void nq_end(nq_job *j) { if(j->last && j->last->kind==NQ_COMMANDS && !j->last->closed) { op_hdr end={OP_END,8}; nq_bytes(j->last,&end,8); j->last->closed=1; } }
 static void nq_flatten(nq_job *j,const uint8_t *p,unsigned depth) {
     if(depth>64) die("NVN command call nesting exceeds64");
@@ -189,7 +197,7 @@ static void nq_flatten(nq_job *j,const uint8_t *p,unsigned depth) {
             if(h.op==OP_WAIT_EVENT) { memcpy(&n->event,a,8); memcpy(&n->mode,a+8,4); memcpy(&n->value,a+12,4); }
             else { memcpy(&n->sync_source,a,8); if(h.op==OP_FENCE_SYNC) n->receipt=nq_new(); }
         } else {
-            nq_node *n=j->last; if(!n || n->kind!=NQ_COMMANDS || n->closed) n=nq_append(j,NQ_COMMANDS);
+            nq_node *n=j->last; if(!n || n->kind!=NQ_COMMANDS || n->closed) { n=nq_append(j,NQ_COMMANDS); nq_spare_take(n); }
             size_t offset=n->length; nq_bytes(n,p,h.size);
             if(!cap_rec_fields(h.op,n->bytes+offset+8,h.size,&nq_snapshot_ops,j)) die("queue snapshot: unknown command %u",h.op);
             if(h.op==OP_SIGNAL_EVENT) { memcpy(&n->event,a,8); memcpy(&n->mode,a+8,4); memcpy(&n->value,a+12,4); nq_end(j); nq_append(j,NQ_FENCE)->receipt=nq_new(); }

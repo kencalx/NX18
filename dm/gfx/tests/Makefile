@@ -257,6 +257,7 @@ t_vbuf: t_vbuf.m $(MTL_T_DEP)
 check_t_vbuf: t_vbuf
 	MTL_DEBUG_LAYER=1 ./t_vbuf
 	DM_NVN_VBUF_CACHE=0 MTL_DEBUG_LAYER=1 ./t_vbuf
+	DM_NVN_FT_CACHE=0 MTL_DEBUG_LAYER=1 ./t_vbuf
 t_geometry: t_geometry.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_geometry.m $(MTL_T_SRC) $(FW)
 check_t_geometry: RUN_ENV = MTL_DEBUG_LAYER=1
