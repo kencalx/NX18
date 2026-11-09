@@ -1829,8 +1829,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 ### Offline pipeline archive missing for the device GPU
 
 - **Symptom:** `pipeline archive bundled with the app: none for this GPU (...)`: the device builds the bases itself although the app carries an offline archive.
-- **Cause:** each archive targets one GPU architecture. The iOS packers defaulted to `g18p` for profiles with `pso_mtl4 on`; another GPU family needed an explicit build override.
-- **Fix:** both packers also read the optional profile key `pso_gpu` behind the existing `pso_mtl4 on` gate. It names the families to build for; explicit build overrides still win. Without the new key, opted-in profiles retain `g18p`; profiles with Metal 4 off retain no archive. See [archive target selection](../development.md#the-pipeline-archive-made-offline).
+- **Cause:** each archive targets one GPU architecture. The iOS packers defaulted to `g18p` for profiles with `pso_mtl4 on` (then an opt-in); another GPU family needed an explicit build override.
+- **Fix:** both packers also read the optional profile key `pso_gpu`, which names the families to build for; explicit build overrides still win. Without the key a profile gets `g19p` (the A20 / A20 Pro; it was `g18p` before the Metal 4 path became the iOS default for every profile), and a profile that sets `pso_mtl4 off` gets no archive. See [archive target selection](../development.md#the-pipeline-archive-made-offline).
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md#offline-pipeline-archive-probe). Its note records the contributor's Mac build probe and the outstanding device checks.
 - **Check:** `dm/tools/tests/test_game_profile.py` validates the key; `dm/tools/tests/test_pso_offline.py` exercises both packers' selection and override precedence with synthetic profiles.
 
@@ -2176,7 +2176,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 ### GPU frame captures need pipelines built through the device
 
 - **Symptom:** a GPU frame capture (`DM_GPU_CAPTURE`, or Xcode with `MTL_CAPTURE_ENABLED=1`) fails with `Capturing Render pipeline specialization is not supported`, or the capture layer crashes on the pipeline archive; a capture of the `MTLDevice` is refused.
-- **Cause:** Metal cannot capture pipelines made from Metal 4 bases (`DM_PSO_MTL4`, the default on the Mac), and its Metal 4 to 3 conversion for the capture layer crashed on the pipeline archive. A device the replay drives through Metal 4 cannot be the capture object.
+- **Cause:** Metal cannot capture pipelines made from Metal 4 bases (`DM_PSO_MTL4`, the default on the Mac and, unless the profile sets `pso_mtl4 off`, on iOS), and its Metal 4 to 3 conversion for the capture layer crashed on the pipeline archive. A device the replay drives through Metal 4 cannot be the capture object.
 - **Fix:** a run that may capture (`DM_GPU_CAPTURE` or `MTL_CAPTURE_ENABLED` set) builds its render pipelines through the `MTLDevice`, without bases or archive (`pso4_on`), and `gpu_capture_frame` captures the Metal 4 queue (`g_q4`), which runs the frames, the uploads, the present and the host's [one-off command buffers](frame-rate.md#one-off-command-buffers-on-the-metal-4-queue) (readbacks, screenshots); only a test fixture's work on the classic queue is not in the trace. Such a run builds pipelines more slowly than a normal one, so its frame times are not the game's. Every game.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (Mac and iPhone).
 

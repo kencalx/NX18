@@ -40,7 +40,7 @@ static void screen_cache(UIScreen *s) {
     if (!s) return;
     g_screen = s;
     CGRect b = s.nativeBounds; g_screen_px_w = (int)b.size.width; g_screen_px_h = (int)b.size.height;
-    g_screen_fps = (int)s.maximumFramesPerSecond;
+    g_screen_fps = (int)(g_own_screen ?: s).maximumFramesPerSecond;   // the device's own screen, as UIScreen.mainScreen gave: a rate that is a multiple of 60 (front.h), not an external display's under Stage Manager
     if (s == g_own_screen) g_brightness = s.brightness;
 }
 void front_ios_scene(UIWindowScene *scene) {   // main.m SceneDelegate: the app's scene connects, before its window and views exist

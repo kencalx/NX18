@@ -1508,7 +1508,7 @@ static void rp_end_at(const char *fn, int line);
 #define rp_end() rp_end_at(__func__, __LINE__)
 static void geo_mesh_flush_pass(void);   // a waiting run of mesh draws is drawn before its pass ends (nvn_geometry.inc)
 // Metal 4 conservative barriers (first version): a consumer barrier at the start of an encoder (all prior work → this encoder) and a producer barrier at the end (this encoder and earlier → later encoders).
-// Only the one at the start is not enough: t_rt_range 'pass 1 → pass 2 → copy' read back black, and after adding the end barrier it is 19/19. Old-queue encoders (upload / diagnostics / present) do not go through these barriers.
+// Only the one at the start is not enough: t_rt_range 'pass 1 → pass 2 → copy' read back black, and after adding the end barrier it is 19/19. Encoders outside the main command buffer (one-off command buffers, once_*; the present pass, m4_end_present) put the same queue barriers on themselves; only the classic queue's (q_cb: a device without Metal 4, the test fixtures) have none.
 static int g_pass_swrite;   // the open draw pass has shader writes (swrite_note)
 static int g_pass_order;    // ordering barriers came in the open draw pass after its draws, none of which wrote (1 primitives, 2 fragments): the next draw that writes is ordered after them first (order_draw)
 static int g_pass_late_res; // a draw of the open pass reads memory in a stage after the vertex stage (order_note)
@@ -2222,8 +2222,8 @@ static long ab_len(void); static void ab_frame(uint64_t f);
 // DM_GPU_CAPTURE=<frame>[:<frames>] (diagnostic): a Metal GPU trace of those frames (default 1) for Xcode's Metal debugger (per-draw cost, shader profiler), or DM_GPU_CAPTURE=gpu:<ms>[:<after frame>]
 // of one frame in the first scene, after that frame, whose GPU time passes <ms> in 60 frames in a row (a single long frame in a light scene fired the first iPhone capture). Read again
 // when it changes, so the Mac's DM_CTL "env DM_GPU_CAPTURE=..." can set it while the game runs. iOS needs a build with MetalCaptureEnabled (DM_METAL_CAPTURE=1 when the project is
-// made), the Mac MTL_CAPTURE_ENABLED=1 in the environment. It captures the Metal 4 queue (Metal refuses to capture a Metal 4 device), so the old-queue helpers (present, some uploads)
-// are not in it. The trace is dm_<date>-<time>_f<frame>.gputrace in DM_GPU_CAPTURE_DIR, by default gpu_captures/ in the working directory (the app's Documents on iOS, the run folder
+// made), the Mac MTL_CAPTURE_ENABLED=1 in the environment. It captures the Metal 4 queue (Metal refuses to capture a Metal 4 device), which runs the frames, uploads, present and the one-off command
+// buffers (once_new); only a test fixture's classic-queue work (q_cb) is not in it. The trace is dm_<date>-<time>_f<frame>.gputrace in DM_GPU_CAPTURE_DIR, by default gpu_captures/ in the working directory (the app's Documents on iOS, the run folder
 // on the Mac). A trace takes 1.5-2 GB, so before each capture that folder alone is pruned: of its dm_*.gputrace entries the newest DM_GPU_CAPTURE_KEEP - 1 stay (default 2 with the new
 // one); nothing outside it is removed
 static long g_cap_f0 = -2, g_cap_n; static int g_cap_on;
@@ -8407,7 +8407,7 @@ static int pp_bg_count(void) {
     static int n; static dispatch_once_t once;
     dispatch_once(&once, ^{
         int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc < 2) pc = 2;
-        NSUInteger mc = [(id)g_dev respondsToSelector:@selector(maximumConcurrentCompilationTaskCount)] ? g_dev.maximumConcurrentCompilationTaskCount : 0;
+        NSUInteger mc = g_dev.maximumConcurrentCompilationTaskCount;   // every device of macOS 26.6 / iOS 27.3 has it (as compile_tasks)
         int share = (int)(mc / 2 > 3 ? 3 : mc / 2);
         n = pc / 2 > share ? pc / 2 : share;
         const char *e = getenv("DM_PSO_BG_QUEUES"); int v = e ? atoi(e) : 0;

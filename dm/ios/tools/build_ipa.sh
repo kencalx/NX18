@@ -152,7 +152,7 @@ if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/sha
     t "[RED] pipeline archive: pso_offline.py failed (its output is above); the app is built without one and the device builds its pipeline bases on its first start (DM_PSO_GPUS=none skips this step)"
     rm -rf "$PSO"; PSO=
   fi
-else [ "$GFXAPI" != nvn ] || t "no pipeline archive ($([ -n "${DM_PSO_GPUS+set}" ] && echo "DM_PSO_GPUS=${GPUS:-empty}" || echo "the profile sets pso_mtl4 off; DM_PSO_GPUS=g19p builds one")$([ -f "$GD/shader_pairs.tsv" ] || echo ', no shader_pairs.tsv'))"; fi
+else [ "$GFXAPI" != nvn ] || t "no pipeline archive ($([ -n "${DM_PSO_GPUS+set}" ] && echo "DM_PSO_GPUS=${GPUS:-empty}$([ -f "$GD/shader_pairs.tsv" ] || echo ', no shader_pairs.tsv')" || { [ "$P4" != on ] && echo "the profile sets pso_mtl4 off; DM_PSO_GPUS=g19p builds one" || echo "no shader_pairs.tsv: no shader pairs to make bases for"; })"; fi
 # The packed language (DMLanguage) is the Game language row's default, which settings.py makes the game's first language when it lacks DM_LANG: the screen and DM_LAUNCHER=0 then agree
 LD=$(python3 -c 'import json, sys; print(next((s["default"] for s in json.load(open(sys.argv[1]))["settings"] if s["env"] == "DM_LANG"), ""))' $LJ) || die "launcher settings ($LJ)"
 if [ -n "$LD" ] && [ "$LD" != "$DM_LANG" ]; then t "game language: the game has no $DM_LANG; packing $LD, its first"; export DM_LANG=$LD; fi
