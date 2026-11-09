@@ -46,6 +46,34 @@ class LauncherSettingsTests(unittest.TestCase):
                 self.assertEqual((s['kind'], s['section'], s['default']), ('choice', 'Game', 'off'))
                 self.assertEqual(s['options'], [['off', 'Standard'], ['metalfx', 'MetalFX']])
 
+    def test_sharpening_for_every_graphics_api_and_platform_with_the_profile_default(self):   # a Game row the in-game menu also offers (front_ios.m dm_setting_live)
+        for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000')]:
+            for platform in ('ios', 'mac'):
+                with self.subTest(api=api, platform=platform):
+                    s = build(gid, api, platform)['DM_PRESENT_SHARPEN']
+                    self.assertEqual((s['kind'], s['section'], s['default'], s['label']), ('choice', 'Game', '0', 'Sharpening'))   # no profile sets present_sharpen yet: Off
+                    self.assertEqual(s['options'], [['0', 'Off'], ['1', 'Low'], ['2', 'Medium'], ['3', 'High']])
+                    self.assertIn('MetalFX', s['note'])
+        rows = list(build(BOTW, 'nvn'))
+        self.assertEqual(rows.index('DM_PRESENT_SHARPEN'), rows.index('DM_PRESENT_UPSCALE') + 1)   # beside Upscaling
+        real = settings.game.header_one   # a profile's present_sharpen is the row's default
+        with patch.object(settings.game, 'header_one', lambda g: real(g).replace('#define DM_GAME_PRESENT_SHARPEN 0', '#define DM_GAME_PRESENT_SHARPEN 2')):
+            self.assertEqual(build(BOTW, 'nvn')['DM_PRESENT_SHARPEN']['default'], '2')
+
+    def test_anti_aliasing_for_every_graphics_api_and_platform_with_the_profile_default(self):   # a Game row the in-game menu also offers (front_ios.m dm_setting_live)
+        for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000')]:
+            for platform in ('ios', 'mac'):
+                with self.subTest(api=api, platform=platform):
+                    s = build(gid, api, platform)['DM_POST_AA']
+                    self.assertEqual((s['kind'], s['section'], s['default'], s['label']), ('choice', 'Game', 'off', 'Anti-aliasing'))   # no profile sets post_aa: Off
+                    self.assertEqual(s['options'], [['off', 'Off'], ['edge', 'Edge smoothing'], ['edge-sharp', 'Edge smoothing (sharp)']])
+                    self.assertIn('HUD', s['note'])
+        rows = list(build(BOTW, 'nvn'))
+        self.assertEqual(rows.index('DM_POST_AA'), rows.index('DM_PRESENT_SHARPEN') + 1)   # beside Upscaling and Sharpening
+        real = settings.game.header_one   # a profile's post_aa is the row's default
+        with patch.object(settings.game, 'header_one', lambda g: real(g).replace('#define DM_GAME_POST_AA "off"', '#define DM_GAME_POST_AA "edge"')):
+            self.assertEqual(build(BOTW, 'nvn')['DM_POST_AA']['default'], 'edge')
+
     def test_frame_buffering_by_graphics_api(self):
         for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000'), ('', BOTW)]:
             with self.subTest(api=api):

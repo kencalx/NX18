@@ -146,6 +146,8 @@ static BOOL upscale_is_metalfx(const char *v) { return v && (!strcmp(v, "metalfx
 static void launcher_done(void) { [g_root startGame]; }
 void mtl_present_stretch(int on);   // nvn_mtl.m: the present draws the picture over the whole drawable instead of keeping its shape (Picture Stretch)
 void mtl_present_upscale_set(const char *mode);   // nvn_mtl.m: the in-game menu's Upscaling, which the present thread takes at its next present
+void mtl_present_sharpen_set(const char *level);   // nvn_mtl.m: the in-game menu's Sharpening, which the present thread takes at its next present
+void mtl_present_aa_set(const char *mode);   // nvn_mtl.m: the in-game menu's Anti-aliasing (edge smoothing), which the present thread takes at its next present
 static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "Fill" : m == DmPictureStretch ? "Stretch" : "Fit"; }
 @implementation DmRootVC
 - (void)loadView { self.view = [DmRootView new]; }
@@ -341,11 +343,11 @@ void front_picture_shape(int w, int h) {   // front.h: the views take the presen
 
 // The in-game menu's picks go into the environment under one lock (dm_setting_env, from GameMenu.swift), and a host thread that reads one of those variables while the game runs
 // copies it under the same lock (front_env_copy, front.h): Darwin's setenv rewrites a value string it allocated in place, or reallocates it, under a pointer getenv handed another
-// thread before. Of the variables the menu sets, only DM_PRESENT_UPSCALE is read so (nvn_mtl.m fx_mode, on the present thread, at its first present; startGame also reads it on
-// the main thread, for the drawable). The others are read on the main thread, which picks run on: DM_PICTURE_FIT, DM_SHOW_FPS and DM_RUMBLE in startGame, DM_TOUCH_* in the
-// gamepad's init, both before the menu exists; DM_OPMODE once, by
-// hle_oe.c dm_opmode, which caches it, and the menu's own opening calls it (dm_pad_layout_offered) before a pick can be made. A host thread that comes to read one of them while
-// the game runs takes it through front_env_copy, or is handed the pick by dm_setting_live below, as the present thread is (mtl_present_upscale_set)
+// thread before. Of the variables the menu sets, only DM_PRESENT_UPSCALE, DM_PRESENT_SHARPEN and DM_POST_AA are read so (nvn_mtl.m fx_mode, sharp_mode and aa_mode, on the
+// present thread, at its first present; startGame also reads DM_PRESENT_UPSCALE on the main thread, for the drawable). The others are read on the main thread, which picks run on: DM_PICTURE_FIT,
+// DM_SHOW_FPS and DM_RUMBLE in startGame, DM_TOUCH_* in the gamepad's init, both before the menu exists; DM_OPMODE once, by hle_oe.c dm_opmode, which caches it, and the menu's own opening calls it (dm_pad_layout_offered) before a pick can be made. A host thread that comes to read one of them while
+// the game runs takes it through front_env_copy, or is handed the pick by dm_setting_live below, as the present thread is (mtl_present_upscale_set, mtl_present_sharpen_set,
+// mtl_present_aa_set)
 static pthread_mutex_t g_env_lock = PTHREAD_MUTEX_INITIALIZER;
 void dm_setting_env(const char *env, const char *value) { pthread_mutex_lock(&g_env_lock); setenv(env, value, 1); pthread_mutex_unlock(&g_env_lock); }
 int front_env_copy(const char *name, char *out, size_t cap) {
@@ -378,6 +380,14 @@ bool dm_setting_live(const char *env, const char *value) {
     if (!strcmp(env, "DM_TOUCH_SIZE") || !strcmp(env, "DM_TOUCH_OPACITY")) { if (value) { dm_gamepad_touch_look(env, value); [g_root.view setNeedsLayout]; } return true; }   // the counter follows the size
     if (!strcmp(env, "DM_PRESENT_UPSCALE")) {   // taken by the present thread (nvn_mtl.m); the drawable follows (g_upscale_metalfx)
         if (value) { mtl_present_upscale_set(value); g_upscale_metalfx = upscale_is_metalfx(value); [g_root.view setNeedsLayout]; LOG("front end: upscaling %s (in-game menu)", value); }
+        return true;
+    }
+    if (!strcmp(env, "DM_PRESENT_SHARPEN")) {   // taken by the present thread (nvn_mtl.m); the drawable stays as it is: the sharpening is inside the present's own draw
+        if (value) { mtl_present_sharpen_set(value); LOG("front end: sharpening %s (in-game menu)", value); }
+        return true;
+    }
+    if (!strcmp(env, "DM_POST_AA")) {   // taken by the present thread (nvn_mtl.m); the drawable stays as it is: edge smoothing works on the game's picture before the present's draw
+        if (value) { mtl_present_aa_set(value); LOG("front end: anti-aliasing %s (in-game menu)", value); }
         return true;
     }
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }

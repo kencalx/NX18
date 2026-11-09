@@ -1,9 +1,9 @@
 # Settings
 
-The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
+The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling**, **Sharpening** and **Anti-aliasing** are in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [High frame rate and Ultrawide](#high-frame-rate-and-ultrawide), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [High frame rate and Ultrawide](#high-frame-rate-and-ultrawide), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Sharpening](#sharpening), [Anti-aliasing](#anti-aliasing), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch control size](#touch-control-size), [Touch control opacity](#touch-control-opacity), [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -68,6 +68,44 @@ Breath of the Wild renders 1280x720 in handheld mode. Docked it renders its worl
 - **Cost:** more GPU time each frame, which can increase heat on an iPhone. [Breath of the Wild's measurements](../dm/games/01007EF00011E000/README.md#upscaling-current) cover Mac and iPhone; the matching iPhone Standard run and MetalFX's share of the thermal cost remain unmeasured. Nothing changes while the game's picture is as large as the screen. Unsupported devices and sizes use Standard scaling.
 - **On the Mac:** choose **MetalFX** under **Upscaling** in the [settings window](#the-mac-settings-window)'s Advanced settings, or set `DM_PRESENT_UPSCALE=metalfx` in its `env.txt` (off by default). It helps in a large window or on a 4K screen.
 - **While you play** (iPhone and iPad): the [in-game menu](#in-game-menu) has **Upscaling** too, and a pick takes effect at the next frame. Switching back to MetalFX keeps its setup, so it does not pause again for the same picture size.
+
+### Sharpening
+
+Sharpens the edges and text of the game's picture as the app draws it, for almost no GPU time. **Off**, the default, draws the picture as before; **Low**, **Medium** and **High** sharpen more each step. It uses AMD's FidelityFX sharpening (RCAS), and works for every game and with every **Picture** mode, Stretch and Ultrawide included, where MetalFX does not run. A game whose settings were tested with it sharpened starts with that level instead of Off.
+
+```mermaid
+flowchart LR
+    G["Game's picture"] --> U{Upscaling}
+    U -->|Standard| S{Sharpening}
+    S -->|Off| D["Screen"]
+    S -->|Low / Medium / High| R["Sharper edges and text"] --> D
+    U -->|MetalFX| M["MetalFX sharpens already;<br/>Sharpening is not applied"] --> D
+```
+
+- **When to change it:** a soft picture: Breath of the Wild in handheld mode (1280x720), or a game shown much larger than it renders. Try **Low** first. Leave it **Off** for games that already sharpen their own picture, and for pixel-art games, whose hard edges get thin light rims.
+- **Cost:** a little more work in the frame's last draw: about 0.01 ms on a Mac; estimated at under 0.1 ms on an iPhone 18 Pro Max, not yet measured there. No memory.
+- **Text and HUD:** in a synthetic test the brightest 1 % of halo around white text was about 0.2-0.7/255 at Low and 2/255 at Medium, both when the game's picture is drawn at its own size and when it is scaled up first (Breath of the Wild handheld, a game lowering its resolution). High reaches 4-5/255, with single pixels up to 14-28/255: light rims on text can show ([measurements](reference/rendering.md#sharpening-in-the-present)).
+- **With MetalFX:** not applied while MetalFX upscales the picture (**Upscaling** MetalFX) or replaces the game's own upscaler (**Game's upscaler** MetalFX): MetalFX sharpens already, and sharpening on top of it makes text look crunchy.
+- **On the Mac:** under **Sharpening** in the [settings window](#the-mac-settings-window)'s Advanced settings, or `DM_PRESENT_SHARPEN=1` (Low), `2` (Medium) or `3` (High) in its `env.txt`.
+- **While you play** (iPhone and iPad): the [in-game menu](#in-game-menu) has **Sharpening** too, and a pick takes effect at the next frame.
+
+### Anti-aliasing
+
+Smooths the jagged, stair-stepped edges of games that draw without anti-aliasing of their own. **Off**, the default for every game, draws the picture as before. **Edge smoothing** finds the hard edges in the game's picture and blends the pixels along them (Intel's CMAA2, a conservative edge filter), before the picture is scaled to the screen, so MetalFX and Sharpening work on the smoothed picture. **Edge smoothing (sharp)** holds back on small shapes, keeping text crisper at the cost of less smoothing.
+
+```mermaid
+flowchart LR
+    G["Game's picture,<br/>HUD and text included"] --> A{Anti-aliasing}
+    A -->|Off| U["Upscaling<br/>and Sharpening"]
+    A -->|Edge smoothing| E["Jagged edges blended"] --> U
+    U --> D["Screen"]
+```
+
+- **When to change it:** a game whose edges crawl and stair-step, such as a game rendering at native resolution with no anti-aliasing. Leave it **Off** for games that smooth their edges already (Breath of the Wild is believed to), where a second pass only blurs.
+- **Text and HUD:** the game's HUD and text are part of the picture the app gets, so they are smoothed too. On thin white strokes in a synthetic test, Edge smoothing changed about 45 % of the strokes' pixels by 10/255 on average, the sharp setting by 5/255. If text looks soft, use the sharp setting or turn it off. Shimmering foliage and fences flicker from frame to frame; this setting works on one frame at a time and does not calm that.
+- **Cost:** the GPU work runs after the game's frame, in the same queue, so in a game the GPU struggles with it adds to the frame time: about 0.07-0.17 ms at 1920x1080 on an M4 Max Mac, and estimated at several times that on an iPhone 18 Pro Max, not yet measured there. About 33 MB of memory for a game with 1920x1080 window textures.
+- **On the Mac:** under **Anti-aliasing** in the [settings window](#the-mac-settings-window)'s Advanced settings, or `DM_POST_AA=edge` or `edge-sharp` in its `env.txt`.
+- **While you play** (iPhone and iPad): the [in-game menu](#in-game-menu) has **Anti-aliasing** too, and a pick takes effect at the next frame. The first time it is turned on in a run, its shaders are prepared in the background first, so smoothing starts a moment later, without a pause.
 
 ### Game's upscaler
 
@@ -279,7 +317,7 @@ iCloud Drive takes a moment to carry a file from one device to the other. Quit t
 
 ## In-game menu
 
-On the iPhone and iPad the gear at the top centre of the touch controls opens a menu while the game runs; it stays when a controller hides the other controls. The gear is hidden while you play: **double-tap** anywhere except on a button, the D-pad or the left stick to show it. It fades out again after 5 seconds if you don't touch it, and stays while its menu is open. It also shows when the game starts, until 5 seconds after its first picture (and after the **Preparing shaders** or **Preparing pipelines** screen of a first start); it stays while VoiceOver or Switch Control is on (turning either on shows it), and while the game shows an offline web page. It holds **Console mode**, **Upscaling**, **Picture** (not while [Ultrawide](#high-frame-rate-and-ultrawide) stretches the picture) and the **Frame-rate counter**, then **Controller layout** (**2D**, **3D**, and **Tap**, no controls and every touch to the game, in handheld mode), **Touch control size**, **Touch control opacity**, **Touch feedback** and **Game rumble**: the settings that take effect at once. Then **Cheats** ([Playing](playing.md#cheats)), and at the bottom **Share log**, which sends `log.txt` and the previous run's `log.prev.txt` in one share sheet. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
+On the iPhone and iPad the gear at the top centre of the touch controls opens a menu while the game runs; it stays when a controller hides the other controls. The gear is hidden while you play: **double-tap** anywhere except on a button, the D-pad or the left stick to show it. It fades out again after 5 seconds if you don't touch it, and stays while its menu is open. It also shows when the game starts, until 5 seconds after its first picture (and after the **Preparing shaders** or **Preparing pipelines** screen of a first start); it stays while VoiceOver or Switch Control is on (turning either on shows it), and while the game shows an offline web page. It holds **Console mode**, **Upscaling**, **Sharpening**, **Anti-aliasing**, **Picture** (not while [Ultrawide](#high-frame-rate-and-ultrawide) stretches the picture) and the **Frame-rate counter**, then **Controller layout** (**2D**, **3D**, and **Tap**, no controls and every touch to the game, in handheld mode), **Touch control size**, **Touch control opacity**, **Touch feedback** and **Game rumble**: the settings that take effect at once. Then **Cheats** ([Playing](playing.md#cheats)), and at the bottom **Share log**, which sends `log.txt` and the previous run's `log.prev.txt` in one share sheet. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
 
 Console mode changes as on a Switch put in or taken out of its dock. While a TV shows the game it stays **Docked**, and the mode you pick applies when the TV is disconnected. **Docked** removes the Tap layout, as a docked Switch reads no touch screen.
 
@@ -313,6 +351,8 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
 | Press a button to join | `DM_PAD_PRESS_TO_JOIN` | `1`, `0` |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
+| Sharpening | `DM_PRESENT_SHARPEN` | `0` Off, `1` Low, `2` Medium, `3` High (default: the game's `present_sharpen`, Off without it) |
+| Anti-aliasing | `DM_POST_AA` | `off`, `edge`, `edge-sharp` (default: the game's `post_aa`, Off without it); `ab` with `DM_AB` alternates `off` and `edge` for a measurement |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |
 | Metal 4 pipelines | `DM_PSO_MTL4` | `1`, `0` |

@@ -115,6 +115,8 @@ static int g_present_stretch;   // what the front end last told the present (Pic
 void mtl_present_stretch(int on) { g_present_stretch = on; }
 int duo_harness_present_stretch(void) { return g_present_stretch; }
 void mtl_present_upscale_set(const char *mode) { (void)mode; }   // the in-game menu's Upscaling (nvn_mtl.m): no present in the harness
+void mtl_present_sharpen_set(const char *level) { (void)level; }   // the in-game menu's Sharpening (nvn_mtl.m): no present in the harness
+void mtl_present_aa_set(const char *mode) { (void)mode; }   // the in-game menu's Anti-aliasing (nvn_mtl.m): no present in the harness
 static int g_web_touch;   // whether an offline HTML page is shown over the picture (web_apple.m is not in the harness)
 int front_web_touch(void) { return g_web_touch; }
 void duo_harness_set_web_touch(int on) { g_web_touch = on; }

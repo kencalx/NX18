@@ -1,5 +1,5 @@
 """The in-game menu's live settings and its Share log (front_ios.m dm_setting_live, DmGamepad.m, GameMenu.swift, LauncherSettings.swift, nvn_mtl.m), checked in the sources off the
-device: Touch control size and opacity, Upscaling while the game runs, and Share log.
+device: Touch control size and opacity, Upscaling, Sharpening and Anti-aliasing while the game runs, and Share log.
 
 Their plain-C rule runs in dm/gfx/tests (make live-menu: t_upscale_pick), and the gear's Duo tests in the Simulator. What none of them runs: which rows the menu offers, the Duo
 harness's stubs of the host calls front_ios.m makes, the gamepad's colours made again on a change, a pick reaching the environment under the lock the present thread reads it
@@ -39,7 +39,7 @@ class LiveMenu(unittest.TestCase):
 
     def test_every_live_setting_is_a_menu_row(self):   # GameMenu.swift lists the choice and toggle rows dm_setting_live answers for
         live = set(re.findall(r'!strcmp\(env, "(DM_[A-Z0-9_]+)"\)', self.live))
-        self.assertTrue({'DM_TOUCH_SIZE', 'DM_TOUCH_OPACITY', 'DM_PRESENT_UPSCALE'} <= live, live)
+        self.assertTrue({'DM_TOUCH_SIZE', 'DM_TOUCH_OPACITY', 'DM_PRESENT_UPSCALE', 'DM_PRESENT_SHARPEN', 'DM_POST_AA'} <= live, live)
         rows = settings_rows()
         for env in live:
             with self.subTest(env=env):
@@ -50,7 +50,8 @@ class LiveMenu(unittest.TestCase):
 
     def test_the_harness_has_the_host_calls_front_ios_makes(self):   # the Duo harness links front_ios.m and DmGamepad.m alone (dm/ios/tests/duo/project.yml)
         stubs = read('dm/ios/tests/duo/Sources/DuoRuntimeStubs.m')
-        for decl, home in (('void mtl_present_upscale_set(const char *mode)', self.nvn), ('void mtl_present_stretch(int on)', self.nvn)):
+        for decl, home in (('void mtl_present_upscale_set(const char *mode)', self.nvn), ('void mtl_present_sharpen_set(const char *level)', self.nvn),
+                           ('void mtl_present_aa_set(const char *mode)', self.nvn), ('void mtl_present_stretch(int on)', self.nvn)):
             with self.subTest(decl=decl):
                 self.assertIn(decl + ';', self.front)
                 self.assertIn(decl + ' {', home)
@@ -78,6 +79,22 @@ class LiveMenu(unittest.TestCase):
         self.assertIn('up_post(&g_fx_req', setter); self.assertNotIn('g_fx_mode', setter)
         self.assertIn('fx_mode(fx == &g_fx_present)', self.nvn)
         self.assertIn('[MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]', body(self.nvn, 'static int fx_mode(int live) {'))   # a pick on a GPU without the scaler stays bilinear
+        setter = body(self.nvn, 'void mtl_present_sharpen_set(const char *level) {')   # Sharpening: the same rule, its own mode and pick
+        self.assertIn('up_post(&g_sharp_req', setter); self.assertNotIn('g_sharp_mode', setter)
+        self.assertIn('sharp_mode(live)', body(self.nvn, 'static float present_sharpen(int live, int metalfx, MTLPixelFormat pf) {'))
+        self.assertIn('live = fx == &g_fx_present', body(self.nvn, 'static int present_encode_m4('))
+        self.assertIn('present_pipeline(dst.pixelFormat)', body(self.nvn, 'static int present_encode_m4('))   # both pipelines are made at the first present: a pick compiles none
+        self.assertIn('fs_rcas', body(self.nvn, 'static void present_pipeline(MTLPixelFormat format) {'))
+        setter = body(self.nvn, 'void mtl_present_aa_set(const char *mode) {')   # Anti-aliasing: the same rule; ab is the environment's only, never a pick
+        self.assertIn('up_post(&g_aa_req', setter); self.assertNotIn('g_aa_mode', setter); self.assertIn('AA_AB', setter)
+        self.assertIn('aa_pipelines_start()', setter)   # a pick starts making the kernels in the background
+        enc = body(self.nvn, 'static id<MTLTexture> aa_encode(')
+        self.assertIn('aa_mode(live)', enc)
+        self.assertIn('aa_pipelines(!live)', enc)   # the live present never waits for the compiler while it holds a drawable; a capture does
+        self.assertIn('dispatch_async', body(self.nvn, 'static int aa_pipelines_start(void) {'))
+        self.assertIn('aa_encode(aa, cb, src, tex, r, uvb, live)', body(self.nvn, 'static int present_encode_m4('))
+        self.assertIn('&g_aa_present', body(self.nvn, 'static int present_now('))   # the live present's own state; a capture makes its own (present_offscreen_m4)
+        self.assertIn('aa_state aa = {0}', body(self.nvn, 'static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int)) {'))
 
     def test_a_pick_reaches_the_environment_under_the_lock_the_present_thread_reads_it_under(self):   # setenv rewrites or reallocates a value another thread's getenv points at
         swift = read('dm/ios/Sources/LauncherSettings.swift'); menu = read('dm/ios/Sources/GameMenu.swift')
@@ -91,6 +108,11 @@ class LiveMenu(unittest.TestCase):
         self.assertIn('__attribute__((weak)) int front_env_copy(const char *name, char *out, size_t cap) {', self.nvn)   # the Mac and the graphics unit tests link without the iPhone's
         mode = body(self.nvn, 'static int fx_mode(int live) {')
         self.assertIn('front_env_copy("DM_PRESENT_UPSCALE", e, sizeof e)', mode); self.assertNotIn('getenv(', mode)
+        sharp = body(self.nvn, 'static int sharp_mode(int live) {')
+        self.assertIn('front_env_copy("DM_PRESENT_SHARPEN", e, sizeof e)', sharp); self.assertNotIn('getenv(', sharp)
+        aa = body(self.nvn, 'static int aa_mode(int live) {')   # ab goes through sw_mode_of with the copy, not sw_mode, whose getenv would race the menu's setenv
+        self.assertIn('front_env_copy("DM_POST_AA", e, sizeof e)', aa); self.assertNotIn('getenv(', aa); self.assertIn('sw_mode_of("DM_POST_AA", e, 0)', aa)
+        self.assertNotIn('sw_mode("DM_POST_AA"', self.nvn)
         # the other live settings: read on the main thread before the menu exists, or once and kept (dm_opmode), never by a host thread while the game runs
         live = set(re.findall(r'!strcmp\(env, "(DM_[A-Z0-9_]+)"\)', self.live)) - {'DM_PRESENT_UPSCALE'}
         readers = {}
@@ -98,6 +120,8 @@ class LiveMenu(unittest.TestCase):
             for p in sorted((REPO / d).glob('*.[cm]')):
                 for env in re.findall(r'getenv\("(DM_[A-Z0-9_]+)"\)', p.read_text(encoding='utf-8', errors='replace')):
                     if env in live: readers.setdefault(env, set()).add(p.name)
+        self.assertNotIn('DM_PRESENT_SHARPEN', readers)   # the present thread's copy above alone; the drawable does not follow it, so startGame has no reason to read it
+        self.assertNotIn('DM_POST_AA', readers)   # the same for Anti-aliasing
         self.assertEqual(readers, {'DM_PICTURE_FIT': {'front_ios.m'}, 'DM_SHOW_FPS': {'front_ios.m'}, 'DM_TOUCH_HAPTICS': {'DmGamepad.m'}, 'DM_TOUCH_SIZE': {'DmGamepad.m'},
                                    'DM_TOUCH_OPACITY': {'DmGamepad.m'}, 'DM_RUMBLE': {'haptics_apple.m'}, 'DM_OPMODE': {'hle_oe.c'}})
         self.assertIn('if (m < 0) { const char *e = getenv("DM_OPMODE");', read('dm/host/hle_oe.c'))   # once, then kept; the menu's opening asks it first (dm_pad_layout_offered)

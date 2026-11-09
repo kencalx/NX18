@@ -190,6 +190,8 @@ Comparison and testing:
 | `DM_NVN_BARRIER=game`, `DM_NVN_CUT` | Pass ordering and segment commits: see [docs/agents/04-graphics.md](../../docs/agents/04-graphics.md) section 7 |
 | `DM_PRESENT_HZ=N` | The frequency of presentation pacing (default 60); 0 means no frame limit and is for performance profiling only |
 | `DM_PRESENT_UPSCALE=metalfx` or `off` | How the present scales a picture smaller than its rectangle on the screen: `metalfx` through MetalFX's spatial scaler, `off` (the default) bilinearly. An option on both platforms (the iOS launcher's Upscaling; `env.txt` on the Mac); rendering at the screen's resolution stays the reference for sharpness ([reference](../../docs/reference/rendering.md#the-present-upscales-through-metalfx)) |
+| `DM_POST_AA=off`, `edge` or `edge-sharp` | Anti-aliasing in the present: Intel's CMAA2 on the game's crop before MetalFX, the bilinear scale and Sharpening (default: the profile's `post_aa`, off without it); `ab` with `DM_AB` alternates off and edge. The HUD is smoothed too. The launcher's and in-game menu's Anti-aliasing ([reference](../../docs/reference/rendering.md#edge-smoothing-in-the-present)) |
+| `DM_PRESENT_SHARPEN=0` to `3` | Sharpening in the present: FSR1's RCAS fused into the present's draw at `1` low, `2` medium or `3` high; `0` draws the bilinear pass as before (default: the profile's `present_sharpen`, off without it). Not drawn over a picture MetalFX scaled. The launcher's and in-game menu's Sharpening ([reference](../../docs/reference/rendering.md#sharpening-in-the-present)) |
 
 ## Known limitations
 
@@ -199,4 +201,4 @@ The following paths are not implemented and report red in the log when reached (
 - indexed quad primitives (8-bit indices are widened to 16-bit at replay);
 - some forms of texture-to-texture copy and texture clear.
 
-Functions listed in `g_nops`, such as `MultiDraw*IndirectCount` and `SetDepthBounds`, are empty implementations: calling them neither reports red nor has any effect. `Downsample` / `DownsampleTextureView` are recorded as texture copies with a host flag (`DM_COPY_RESOLVE`) and replayed as a Metal multisample resolve.
+Functions listed in `g_nops`, such as `SetPatchSize` and the debug groups and markers, are empty implementations: calling them neither reports red nor has any effect. `SetDepthBounds` is recorded and replayed as Metal's depth bounds test on GPUs that have it ([rendering](../../docs/reference/rendering.md#depth-bounds)). `Downsample` / `DownsampleTextureView` are recorded as texture copies with a host flag (`DM_COPY_RESOLVE`) and replayed as a Metal multisample resolve.

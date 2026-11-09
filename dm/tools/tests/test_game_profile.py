@@ -1,5 +1,5 @@
 # dm/games/game.py's profile-key validation, on a synthetic profile: pso_gpu (the GPU architectures the app's offline pipeline archive is made for, beside pso_mtl4) takes, none and no others,
-# and a profile without the key generates its header unchanged; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck
+# and a profile without the key generates its header unchanged; present_sharpen's levels, off without the key; post_aa's values, off without the key; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck
 from pathlib import Path
 import os
 import subprocess
@@ -39,6 +39,51 @@ class PsoGPU(unittest.TestCase):
             self.assertNotEqual(rc, 0, rows)
             self.assertIn(': pso_gpu takes 1-4 whitespace-separated GPU architectures', out, rows)
 
+
+
+def sharpen_macro(rows):
+    """DM_GAME_PRESENT_SHARPEN of a synthetic profile's header with these extra rows"""
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, ID).mkdir()
+        (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+        subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, check=True, capture_output=True)
+        return [l for l in (Path(d, ID) / 'game.h').read_text().splitlines() if 'PRESENT_SHARPEN' in l]
+
+
+class PresentSharpen(unittest.TestCase):   # the present's Sharpening by default (settings.tsv DM_PRESENT_SHARPEN's levels 0 to 3)
+    def test_levels_and_the_default(self):
+        self.assertEqual(sharpen_macro(''), ['#define DM_GAME_PRESENT_SHARPEN 0'])   # without the key: off
+        for i, v in enumerate(('off', 'low', 'medium', 'high')):
+            self.assertEqual(sharpen_macro(f'present_sharpen\t{v}\n'), [f'#define DM_GAME_PRESENT_SHARPEN {i}'], v)
+
+    def test_rejected_values(self):
+        for v in ('2', 'Medium', 'max', ''):   # the settings row's numbers are not the key's words; an empty value is no level either
+            rc, out = header(f'present_sharpen\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('present_sharpen must be off, low, medium or high', out, v)
+
+
+class PostAA(unittest.TestCase):   # the present's edge smoothing by default (settings.tsv DM_POST_AA's values, nvn_upscale_pick.h aa_parse)
+    def macro(self, rows):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir()
+            (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+            subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, check=True, capture_output=True)
+            return [l for l in (Path(d, ID) / 'game.h').read_text().splitlines() if 'POST_AA' in l]
+
+    def test_values_and_the_default(self):
+        self.assertEqual(self.macro(''), ['#define DM_GAME_POST_AA "off"'])   # without the key: off
+        for v in ('off', 'edge', 'edge-sharp'):
+            self.assertEqual(self.macro(f'post_aa\t{v}\n'), [f'#define DM_GAME_POST_AA "{v}"'], v)
+
+    def test_rejected_values(self):
+        for v in ('ab', 'on', 'Edge', '1', ''):   # ab is a measurement switch, never a profile's default; an empty value is no choice either
+            rc, out = header(f'post_aa\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('post_aa must be off, edge or edge-sharp', out, v)
+
+    def test_no_profile_turns_it_on(self):   # HUD and text are smoothed with the scene until a game has a hook before its HUD: a default waits for a device A/B and captures
+        for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv')):
+            keys = dict(l.split('\t', 1) for l in tsv.read_text(encoding='utf-8').splitlines() if '\t' in l and not l.startswith('#'))
+            self.assertEqual(keys.get('post_aa', 'off').strip(), 'off', tsv.parent.name)
 
 
 MAP = ('# kind: evidence  Test shaders\n# column 5 records where each key first appears\npackage\tindex\tstage\tdm_ctl_sha16\tsource\n'

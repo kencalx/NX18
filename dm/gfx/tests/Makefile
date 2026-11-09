@@ -207,6 +207,14 @@ check_t_present_crop: t_present_crop
 	DM_PRESENT_SNAP=0 DM_NVN_ENC_THREAD=1 ./t_present_crop
 	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=0 ./t_present_crop
 	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=1 ./t_present_crop
+# Edge smoothing in the present (DM_POST_AA, CMAA2): under the API validation layer, and again with shader validation (the kernels' bounds and the lists' clamps). `./t_post_aa bench`
+# times it at 1600x900, 1920x1080 and 2868x1320 instead (docs/reference/rendering.md)
+t_post_aa: t_post_aa.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_post_aa.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_post_aa
+check_t_post_aa: t_post_aa
+	MTL_DEBUG_LAYER=1 ./t_post_aa
+	MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ./t_post_aa
 t_present_rescue: t_present_rescue.m t_present_rescue_focus.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_rescue.m t_present_rescue_focus.c $(MTL_T_SRC) $(FW)
 .PHONY: check_t_present_rescue
@@ -575,6 +583,16 @@ check_t_wait_event: t_wait_event
 check_t_queue_lifetime: t_queue_lifetime
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+
+# Depth bounds (t_depth_bounds.m): the replay's state and encoder calls with the Metal encoder call taken by the test (this Mac's GPU has no depth bounds test), on and off the encode thread,
+# and with the TBDR lookahead (DM_NVN_TBDR=1), which leaves out depth attachments no draw needs
+t_depth_bounds: t_depth_bounds.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_depth_bounds.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_depth_bounds
+check_t_depth_bounds: t_depth_bounds
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_TBDR=1 ./$<
 
 t_render_enable_queue: t_render_enable_queue.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_render_enable_queue.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)

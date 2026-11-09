@@ -28,15 +28,37 @@ extern int g_shape_w,g_shape_h,g_size_w,g_size_h;   // t_host_stubs.c: the last 
 #endif
 
 #ifndef CROP_LEGACY_HEADER
-// Exercise the persistent scaler used by real presents, completing each command buffer before its allocator and output leave scope.
-static int check_present_resize(id<MTLTexture> src, int w, int h) {
+// Exercise the persistent scaler used by real presents (the live present's: g_fx_present, which also takes the in-game menu's picks), completing each command buffer before its
+// allocator and output leave scope. crop: as a window's (NULL = the whole texture); bgra: the output's w x h BGRA bytes when not NULL
+static int check_present_live(id<MTLTexture> src, const int crop[4], int w, int h, uint8_t *bgra) {
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:w height:h mipmapped:NO];
-    d.storageMode=MTLStorageModePrivate;d.usage=MTLTextureUsageRenderTarget;
+    d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageRenderTarget;
     id<MTLTexture> out=[g_dev newTextureWithDescriptor:d];res_add(out);res_commit();
     id<MTL4CommandAllocator> al=[g_dev newCommandAllocator];id<MTL4CommandBuffer> cb=[g_dev newCommandBuffer];id<MTLSharedEvent> ev=[g_dev newSharedEvent];
-    [cb beginCommandBufferWithAllocator:al];int kind=present_encode_m4(cb,src,out,NULL,g_present_uv[0],&g_fx_present);[cb endCommandBuffer];
+    [cb beginCommandBufferWithAllocator:al];int kind=present_encode_m4(cb,src,out,crop,g_present_uv[0],&g_fx_present,&g_aa_present);[cb endCommandBuffer];
     [g_q4 commit:&cb count:1];[g_q4 signalEvent:ev value:1];
-    EXPECT("resize present completes",1,[ev waitUntilSignaledValue:1 timeoutMS:10000]);res_remove(out);return kind;
+    EXPECT("live present completes",1,[ev waitUntilSignaledValue:1 timeoutMS:10000]);
+    if (bgra) [out getBytes:bgra bytesPerRow:w*4 fromRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0];
+    res_remove(out);return kind;
+}
+static int check_present_resize(id<MTLTexture> src, int w, int h) { return check_present_live(src,NULL,w,h,NULL); }
+// The present (present_offscreen_wait, as screenshots use it) into a w x h RGBA8 texture; returns its kind, the bytes in o
+static int present_rgba(id<MTLTexture> src, const int crop[4], int w, int h, uint8_t *o) {
+    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
+    d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageRenderTarget;id<MTLTexture> out=[g_dev newTextureWithDescriptor:d];
+    int kind=present_offscreen_wait(src,crop,out);[out getBytes:o bytesPerRow:w*4 fromRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0];return kind;
+}
+// A w x h RGBA8 (or RGBA16Float, f16) texture with value lo left of column edge and hi from it, alpha a; magenta outside the rectangle in (x, y, w, h; NULL = none)
+static id<MTLTexture> step_tex(int w, int h, int edge, uint8_t lo, uint8_t hi, uint8_t a, const int in[4], int f16) {
+    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:f16?MTLPixelFormatRGBA16Float:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
+    d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead;id<MTLTexture> t=[g_dev newTextureWithDescriptor:d];
+    uint8_t *p=malloc(w*h*4);__fp16 *q=malloc(w*h*8);
+    for(int y=0;y<h;y++)for(int x=0;x<w;x++){
+        int out=in&&(x<in[0]||y<in[1]||x>=in[0]+in[2]||y>=in[1]+in[3]);uint8_t v=x<edge?lo:hi,*px=p+4*(y*w+x);
+        px[0]=out?255:v;px[1]=out?0:v;px[2]=out?255:v;px[3]=a;for(int c=0;c<4;c++)q[4*(y*w+x)+c]=px[c]/255.0f;
+    }
+    if(f16)[t replaceRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0 withBytes:q bytesPerRow:w*8];else [t replaceRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0 withBytes:p bytesPerRow:w*4];
+    free(p);free(q);res_add(t);res_commit();return t;
 }
 #endif
 
@@ -109,6 +131,68 @@ int main(void) { @autoreleasepool {
         uint8_t o[8*8*4];[dst getBytes:o bytesPerRow:32 fromRegion:MTLRegionMake2D(0,0,8,8) mipmapLevel:0];
         int bad=0;for(int i=0;i<64;i++)bad+=abs(o[4*i]-128)>1||abs(o[4*i+1]-64)>1||abs(o[4*i+2]-200)>1;
         EXPECT("sRGB swapchain present sends raw bytes, 64 pixels",0,bad);
+    }
+#endif
+#ifndef CROP_LEGACY_HEADER
+    {   // Sharpening (DM_PRESENT_SHARPEN, present_sharpen): Off is fs as before; a level sharpens edges, leaves flat areas and alpha alone, and reads nothing outside the crop
+        g_fx_mode=0;atomic_store(&g_sharp_mode,0);
+        const int N=32;uint8_t *pa=malloc(4*N*N*4),*pb=malloc(4*N*N*4);
+        id<MTLTexture> st=step_tex(N,N,N/2,64,192,200,NULL,0);
+        int whole[4]={0},half[4]={0,0,N/2,N};
+        // Off: byte-identical to the classic queue's fs (present_encode), 1:1 and scaled
+        const struct { const int *crop; int w,h; } offc[]={{whole,N,N},{whole,2*N,2*N},{half,N,N}};
+        for(int i=0;i<3;i++){
+            EXPECT("sharpening off: the bilinear pass",PRESENT_STANDARD,present_rgba(st,offc[i].crop,offc[i].w,offc[i].h,pa));
+            MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:offc[i].w height:offc[i].h mipmapped:NO];d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageRenderTarget;
+            id<MTLTexture> dst=[g_dev newTextureWithDescriptor:d];id<MTLCommandBuffer> cb=[g_q commandBuffer];present_encode(cb,st,dst,offc[i].crop);[cb commit];[cb waitUntilCompleted];
+            [dst getBytes:pb bytesPerRow:offc[i].w*4 fromRegion:MTLRegionMake2D(0,0,offc[i].w,offc[i].h) mipmapLevel:0];
+            EXPECT("sharpening off: byte-identical to the classic fs present",0,memcmp(pa,pb,offc[i].w*offc[i].h*4));
+        }
+        // Levels on a 64 | 192 grey step, 1:1: the pixels beside the edge move apart, more at each level; columns two or more from it, and alpha, stay as they are
+        present_rgba(st,whole,N,N,pb);
+        int prev_lo=64,prev_hi=192;
+        for(int lv=1;lv<=3;lv++){
+            atomic_store(&g_sharp_mode,lv);
+            EXPECT("sharpening: the bilinear pass with sharpening",PRESENT_SHARPENED,present_rgba(st,whole,N,N,pa));
+            int flat=0,alpha=0,grey=0;
+            for(int y=0;y<N;y++)for(int x=0;x<N;x++){const uint8_t *p=pa+4*(y*N+x);
+                if(x<N/2-1||x>N/2)flat+=memcmp(p,pb+4*(y*N+x),4)!=0;alpha+=p[3]!=200;grey+=p[0]!=p[1]||p[1]!=p[2];}
+            int lo=pa[4*(N/2-1)],hi=pa[4*(N/2)];
+            printf("  sharpening level %d on a 64 | 192 step, 1:1: %d | %d\n",lv,lo,hi);
+            EXPECT("sharpening: flat areas unchanged",0,flat);EXPECT("sharpening: alpha passes through",0,alpha);EXPECT("sharpening: grey stays grey",0,grey);
+            EXPECT("sharpening: the dark side of the edge darker than the level below",1,lo<prev_lo);EXPECT("sharpening: the bright side brighter",1,hi>prev_hi);
+            EXPECT("sharpening: within RCAS's limit of a quarter of the step (32)",1,64-lo<=32&&hi-192<=32);
+            prev_lo=lo;prev_hi=hi;
+        }
+        // Scaled 2x (the crop smaller than the drawable: RCAS of the bilinear field): flat areas unchanged, the edge's ramp steeper
+        atomic_store(&g_sharp_mode,0);present_rgba(st,whole,2*N,2*N,pb);atomic_store(&g_sharp_mode,2);
+        EXPECT("sharpening scaled: the bilinear pass with sharpening",PRESENT_SHARPENED,present_rgba(st,whole,2*N,2*N,pa));
+        int flat=0,edge=0;for(int y=0;y<2*N;y++)for(int x=0;x<2*N;x++){int i=4*(y*2*N+x);if(x<N-4||x>=N+4)flat+=memcmp(pa+i,pb+i,4)!=0;else edge+=pa[i]!=pb[i];}
+        EXPECT("sharpening scaled: flat areas unchanged",0,flat);EXPECT("sharpening scaled: the edge changed",1,edge>0);
+        // Nothing from outside the crop: magenta around a 16x16 crop (1:1 and scaled 2x, both origins) never reaches the picture
+        int in[4]={5,7,16,16};id<MTLTexture> mt=step_tex(N,N,13,64,192,255,in,0);atomic_store(&g_sharp_mode,3);
+        for(int ll=0;ll<2;ll++)for(int sz=16;sz<=32;sz+=16){
+            atomic_store(&g_origin_ll,ll);EXPECT("sharpening inside a crop",PRESENT_SHARPENED,present_rgba(mt,in,sz,sz,pa));
+            int bad=0;for(int i=0;i<sz*sz;i++)bad+=abs(pa[4*i]-pa[4*i+1])>1||abs(pa[4*i+1]-pa[4*i+2])>1;
+            EXPECT("sharpening reads nothing outside the crop (no magenta)",0,bad);
+        }
+        atomic_store(&g_origin_ll,0);
+        // Not over a float source: RCAS's limiter assumes 0..1
+        id<MTLTexture> ft=step_tex(N,N,N/2,64,192,200,NULL,1);
+        EXPECT("sharpening skips a float swapchain",PRESENT_STANDARD,present_rgba(ft,whole,N,N,pa));
+        // Not over a frame the game's upscaler drew through MetalFX (DM_UPSCALER=metalfx): the present sees a plain 1:1 picture
+        atomic_store(&g_up_mfx_drawn,1);
+        EXPECT("sharpening skips the game's upscaler drawn by MetalFX",PRESENT_STANDARD,present_rgba(st,whole,N,N,pa));
+        atomic_store(&g_sharp_mode,0);present_rgba(st,whole,N,N,pb);EXPECT("  byte-identical to Off",0,memcmp(pa,pb,N*N*4));
+        atomic_store(&g_up_mfx_drawn,0);
+        // The in-game menu's pick (mtl_present_sharpen_set): the live present takes it at its next present, a capture leaves it, a value that is no level is ignored
+        mtl_present_sharpen_set("2");
+        EXPECT("menu sharpening: a capture leaves the pick",PRESENT_STANDARD,present_rgba(st,whole,N,N,pa));EXPECT("  still waiting",2,atomic_load(&g_sharp_req));
+        EXPECT("menu sharpening: from the live present's next present",PRESENT_SHARPENED,check_present_live(st,NULL,N,N,NULL));
+        EXPECT("menu sharpening: taken",-1,atomic_load(&g_sharp_req));EXPECT("  medium in force",2,atomic_load(&g_sharp_mode));
+        mtl_present_sharpen_set("Medium");EXPECT("menu sharpening: a label is no level",-1,atomic_load(&g_sharp_req));
+        mtl_present_sharpen_set("0");EXPECT("menu sharpening: off again",PRESENT_STANDARD,check_present_live(st,NULL,N,N,NULL));
+        res_remove(st);res_remove(mt);res_remove(ft);free(pa);free(pb);
     }
 #endif
 #ifndef CROP_LEGACY_HEADER
@@ -199,6 +283,45 @@ int main(void) { @autoreleasepool {
         mtl_present_upscale_set("sharp");check_present_resize(big,192,96);
         EXPECT("menu: a value that is no mode is ignored",1,(int)g_fx_mode);
         atomic_store(&g_fx_req,-1);
+        {   // Sharpening is not drawn over MetalFX's picture (its perceptual mode sharpens already): the same bytes as with Sharpening off
+            uint8_t *x=malloc(192*96*4),*y=malloc(192*96*4);
+            atomic_store(&g_sharp_mode,2);EXPECT("sharpening skipped under MetalFX",PRESENT_METALFX,check_present_live(big,NULL,192,96,x));
+            atomic_store(&g_sharp_mode,0);check_present_live(big,NULL,192,96,y);
+            EXPECT("  byte-identical to Sharpening off",0,memcmp(x,y,192*96*4));free(x);free(y);
+        }
+        {   // The scaler takes the window texture's size (fx_input_size): a crop moving inside the texture keeps it, with no bilinear frame, and the log counts the moves
+            int madeNow=g_fx_present.made;uint64_t moves=atomic_load(&g_present_crop_moves);
+            const int seq[4][4]={{0,0,64,64},{8,8,48,48},{4,4,56,56},{0,0,64,64}};
+            for(int i=0;i<4;i++){g_present_n++;EXPECT("moving crop: every present through MetalFX",PRESENT_METALFX,check_present_live(big,seq[i],192,96,NULL));}
+            EXPECT("moving crop: no new scaler",madeNow,g_fx_present.made);
+            EXPECT("moving crop: the scaler's input is the texture's size",64,(int)g_fx_present.in.width);
+            EXPECT("moving crop: three moves counted",3,(int)(atomic_load(&g_present_crop_moves)-moves));
+            // Texels left in the scaler's input by a larger crop before stay out of the picture (fx_encode's FX_PAD): magenta around a 48x48 crop, presented whole first
+            const int in48[4]={0,0,48,48};id<MTLTexture> mt=step_tex(64,64,24,64,192,255,in48,0);
+            uint8_t *x=malloc(192*96*4),*y=malloc(192*96*4);
+            g_present_n++;check_present_live(mt,NULL,192,96,NULL);
+            g_present_n++;EXPECT("moving crop: the smaller crop through MetalFX",PRESENT_METALFX,check_present_live(mt,in48,192,96,x));
+            EXPECT("  still no new scaler",madeNow,g_fx_present.made);
+            int bad=0;for(int yy=0;yy<96;yy++)for(int xx=48;xx<144;xx++){const uint8_t *p=x+4*(yy*192+xx);bad+=abs(p[0]-p[1])>3||abs(p[1]-p[2])>3;}
+            EXPECT("moving crop: nothing from outside the content (no magenta)",0,bad);
+            // Against a scaler made for the crop's size (DM_NVN_PRESENT_FX_EXACT=1, a capture's own scaler): the same picture
+            atomic_store(&g_fx_exact,1);
+            MTLTextureDescriptor *od2=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:192 height:96 mipmapped:NO];od2.storageMode=MTLStorageModeShared;od2.usage=MTLTextureUsageRenderTarget;
+            id<MTLTexture> ex=[g_dev newTextureWithDescriptor:od2];
+            EXPECT("exact-size scaler",PRESENT_METALFX,present_offscreen_wait(mt,in48,ex));[ex getBytes:y bytesPerRow:192*4 fromRegion:MTLRegionMake2D(0,0,192,96) mipmapLevel:0];
+            atomic_store(&g_fx_exact,0);
+            double se=0;for(int yy=0;yy<96;yy++)for(int xx=48;xx<144;xx++)for(int c=0;c<3;c++){double dd=x[4*(yy*192+xx)+c]-y[4*(yy*192+xx)+c];se+=dd*dd;}
+            double psnr=se>0?10*log10(255.0*255.0/(se/(96*96*3))):99;printf("  texture-sized scaler against an exact-size one, 48x48 content of 64x64 → 96x96: PSNR %.1f dB\n",psnr);
+            EXPECT("moving crop: the texture-sized scaler's picture is byte-identical to an exact-size scaler's (FX_PAD)",0,memcmp(x,y,192*96*4));
+            free(x);free(y);res_remove(mt);
+            // A texture larger than the picture's rectangle (a narrow layout): the crop's size, as before, and a new crop size waits FX_REMAKE_PRESENTS presents
+            const int c32[4]={8,8,32,32},c40[4]={8,8,40,40};
+            g_present_n+=FX_REMAKE_PRESENTS;EXPECT("narrow: through MetalFX",PRESENT_METALFX,check_present_live(big,c32,96,48,NULL));
+            EXPECT("narrow: the scaler's input is the crop's size",32,(int)g_fx_present.in.width);
+            g_present_n++;EXPECT("narrow: a new crop size within 30 presents is bilinear",PRESENT_STANDARD,check_present_live(big,c40,96,48,NULL));
+            g_present_n+=FX_REMAKE_PRESENTS;EXPECT("narrow: then its own scaler",PRESENT_METALFX,check_present_live(big,c40,96,48,NULL));
+            EXPECT("narrow: the new crop's size",40,(int)g_fx_present.in.width);
+        }
         g_present_n=savedPresent;
 
         // Whole-window capture uses the same upscale and remains asynchronous; its completion includes the final BGRA readback.

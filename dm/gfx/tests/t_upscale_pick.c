@@ -1,4 +1,4 @@
-// The in-game menu's Upscaling pick (../nvn/nvn_upscale_pick.h, as nvn_mtl.m fx_mode uses it), on any machine: DM_PRESENT_UPSCALE's values, the first present deciding the mode
+// The in-game menu's Upscaling pick (../nvn/nvn_upscale_pick.h, as nvn_mtl.m fx_mode uses it), on any machine: DM_PRESENT_UPSCALE's values (and Sharpening's), the first present deciding the mode
 // from the environment, a pick taken by the live present alone and only once, whether a pick changed the mode in force, a capture never taking a pick, and a main thread posting
 // picks while a present thread takes them (make t_upscale_pick_tsan): the present thread ends on the last pick, and the changes it reports are exactly those of the mode it runs
 #include "../nvn/nvn_upscale_pick.h"
@@ -37,6 +37,18 @@ int main(void) {
     EXPECT("unset is off", UP_OFF, up_parse(NULL)); EXPECT("empty is off", UP_OFF, up_parse(""));
     EXPECT("anything else is not a mode", -1, up_parse("sharp")); EXPECT("letter case counts, as before", -1, up_parse("MetalFX"));
     EXPECT("auto is not a mode here (no Automatic upscaling)", -1, up_parse("auto"));
+    // Sharpening's levels (DM_PRESENT_SHARPEN, the settings row's values), picked through the same helpers on a mode and a pick of its own
+    for (int i = 0; i <= SHARP_HIGH; i++) { char v[2] = {(char)('0' + i), 0}; EXPECT("a level", i, sharp_parse(v)); }
+    EXPECT("4 is no level", -1, sharp_parse("4")); EXPECT("a label is no level", -1, sharp_parse("Low")); EXPECT("10 is no level", -1, sharp_parse("10"));
+    EXPECT("unset is the caller's (the profile's)", -1, sharp_parse(NULL)); EXPECT("empty is the caller's", -1, sharp_parse(""));
+    EXPECT("off draws no RCAS", 1, sharp_stops(SHARP_OFF) == 0.0f);
+    EXPECT("low, medium, high: 2, 1, 0.5 stops, each stronger", 1, sharp_stops(1) == 2.0f && sharp_stops(2) == 1.0f && sharp_stops(3) == 0.5f);
+    // DM_POST_AA (Anti-aliasing): the row's values, 0 for off, ab with or without its phase list, nothing else
+    EXPECT("aa off", AA_OFF, aa_parse("off")); EXPECT("aa 0 is off", AA_OFF, aa_parse("0")); EXPECT("aa unset is off for the caller", AA_OFF, aa_parse(NULL)); EXPECT("aa empty", AA_OFF, aa_parse(""));
+    EXPECT("aa edge", AA_EDGE, aa_parse("edge")); EXPECT("aa edge-sharp", AA_EDGE_SHARP, aa_parse("edge-sharp"));
+    EXPECT("aa ab", AA_AB, aa_parse("ab")); EXPECT("aa ab with phases", AA_AB, aa_parse("ab:1/2"));
+    EXPECT("aa abc is no value", -1, aa_parse("abc")); EXPECT("aa a label is no value", -1, aa_parse("Edge smoothing")); EXPECT("aa 1 is no value", -1, aa_parse("1"));
+    EXPECT("aa edge1 is no value", -1, aa_parse("edge1")); EXPECT("aa edge-sharper is no value", -1, aa_parse("edge-sharper"));
 
     env_mode = UP_METALFX;
     EXPECT("the first present decides from the environment", UP_METALFX, present(1));

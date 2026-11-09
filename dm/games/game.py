@@ -116,6 +116,9 @@ def upscaler_keys(g):
     return sorted(keys)
 
 
+SHARPEN = ('off', 'low', 'medium', 'high')   # present_sharpen's values, in the order of DM_PRESENT_SHARPEN's levels 0 to 3 (nvn_upscale_pick.h sharp_parse)
+
+
 def header(g):
     """game_profile.h of a profile: one profile's constants, or with the key programs (a multi-program application packed as one game: Super Mario 3D All-Stars) a table of its programs' profiles"""
     return header_multi([(0, g)] + [(int(n), load(i)) for n, i in g.pairs('programs')]) if g.get('programs', '') else header_one(g)
@@ -175,6 +178,10 @@ def header_one(g):
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.]{0,30}', ufc): sys.exit(f'{g.id}: ue_fps_cvar must be a console variable name: {ufc}')
     ps = g.get('present_snap', 'off')   # present snapshots by default (nvn_mtl.m mtl_snap_on; DM_PRESENT_SNAP and the iOS launcher's Frame buffering override it): on / off
     if ps not in ('on', 'off'): sys.exit(f'{g.id}: present_snap must be on or off: {ps}')
+    psh = g.get('present_sharpen', 'off')   # the present's Sharpening by default (nvn_mtl.m present_sharpen; DM_PRESENT_SHARPEN and the launcher's Sharpening override it): off / low / medium / high
+    if psh not in SHARPEN: sys.exit(f'{g.id}: present_sharpen must be off, low, medium or high: {psh}')
+    paa = g.get('post_aa', 'off')   # the present's edge smoothing by default (nvn_mtl.m aa_mode, CMAA2; DM_POST_AA and the launcher's Anti-aliasing override it): off / edge / edge-sharp
+    if paa not in ('off', 'edge', 'edge-sharp'): sys.exit(f'{g.id}: post_aa must be off, edge or edge-sharp: {paa}')
     p4 = g.get('pso_mtl4', 'on')   # render pipelines through MTL4Compiler on iOS, with the pipeline archive and hybrid pipelines: on (the default, as on the Mac) / off (the MTLDevice on iOS, and no archive in the app; an iOS build carries the pulling libraries either way, for the launcher's Metal 4 toggle; DM_PSO_MTL4 overrides)
     if p4 not in ('on', 'off'): sys.exit(f'{g.id}: pso_mtl4 must be on or off: {p4}')
     pg = g.words('pso_gpu', '')   # GPU architectures the app gets the pipeline archive made offline for (the NSP script's --gpu, build_ipa.sh): when pso_mtl4 is on the app gets these instead of the default g19p, the A20 / A20 Pro of the iPhone 18 family (e.g. 'g18p' for the A19 / A19 Pro of the iPhone 17 family); unset → the default. Whitespace-separated tokens, with or without the applegpu_ prefix
@@ -255,6 +262,8 @@ def header_one(g):
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',
          f'#define DM_GAME_UE_FPS_CVAR {q(ufc)}',
          f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',
+         f'#define DM_GAME_PRESENT_SHARPEN {SHARPEN.index(psh)}',   # 0 off to 3 high: settings.tsv DM_PRESENT_SHARPEN's levels
+         f'#define DM_GAME_POST_AA {q(paa)}',   # settings.tsv DM_POST_AA's values (nvn_upscale_pick.h aa_parse)
          f'#define DM_GAME_PSO_MTL4 {int(p4 == "on")}',
          f'#define DM_GAME_ENC_THREAD {int(et == "on")}',
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)

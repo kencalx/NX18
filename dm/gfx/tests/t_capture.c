@@ -131,6 +131,9 @@ int main(void) {
     CHECK(multi_layout && cap_layout_matches(lay, (size_t)(multi_layout - lay)), "the complete legacy record layout remains readable");
     const char *strides_layout = strstr(lay, "p_copy_strides");
     CHECK(strides_layout && cap_layout_matches(lay, (size_t)(strides_layout - lay)), "the layout before the copy strides' tail remains readable");
+    const char *dbnd_layout = strstr(lay, "op 58 p_depth_bounds");
+    CHECK(dbnd_layout && cap_layout_matches(lay, (size_t)(dbnd_layout - lay)), "the layout before the depth bounds opcode remains readable");
+    uint8_t bounds[16] = {0}; CHECK(cap_rec_fields(OP_DEPTH_BOUNDS, bounds, 8 + sizeof(p_depth_bounds), &enc, NULL), "a depth bounds record has no pointer to walk");
     CHECK(cap_layout_matches(lay, strlen(lay)) && !cap_layout_matches(lay, strlen(lay) - 1), "accept the current layout, reject a truncated extension");
     cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
     for (int r = 0; r < nregs; r++) { uint8_t b[sizeof(cap_regn) + 65536]; cap_regn h = {(uint32_t)r, r == 2, regs[r].lo, regs[r].size};

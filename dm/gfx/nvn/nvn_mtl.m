@@ -28,6 +28,7 @@
 #include "host_msl.h"
 #include "nvn_dirty.h"
 #include "nvn_depth_clear.h"
+#include "nvn_dbnd.h"   // depth bounds (OP_DEPTH_BOUNDS)
 #include "nvn_refl.h"
 #include "nvn_cover.h"
 #include "nvn_border.h"
@@ -117,6 +118,7 @@ static uint64_t g_ft_set, g_ft_skip;
 static uint64_t g_vbuf_resolve, g_vbuf_reuse, g_vbuf_set, g_vbuf_skip, g_vbuf_copies, g_vbuf_copy_bytes;   // copies: vertex streams at addresses not 4-byte aligned (vbuf_unaligned)
 static id<MTL4ArgumentTable> g_present_args;
 static id<MTLBuffer> g_present_uv[3];
+#define PRESENT_UV_FLOATS 24   // the present pass's constants (present_encode_m4): the crop's rectangle and edges, then Sharpening's strength and tap step (present.metal Sharp), then edge smoothing's (AA_UV, cmaa2.metal Aa)
 static uint64_t g_present_alloc_fence[3];
 // Under g_pq_mu: per present allocator, the newest ticket its commit feedback reported done on the GPU. present_now resets an allocator only once this reaches the ticket that
 // last used it. g_pq_done is not that: every display-link callback sets it to ticket - 1 (the previous present was committed, not run) and a present that was not submitted sets
@@ -713,7 +715,7 @@ void mtl_init(void) {
     g_present_args = [g_dev newArgumentTableWithDescriptor:pad error:&ate];
     if (!g_present_args) MDIE("failed to create the present argument table: %s", ate.localizedDescription.UTF8String);
     for (int i = 0; i < 3; i++) {
-        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * PRESENT_UV_FLOATS options:MTLResourceStorageModeShared];
         if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
         res_add(g_present_uv[i]);
     }
@@ -1694,6 +1696,7 @@ static inline void enc_r_winding(id<MTL4RenderCommandEncoder> e, MTLWinding w) {
 static inline void enc_r_fill(id<MTL4RenderCommandEncoder> e, MTLTriangleFillMode m) { [e setTriangleFillMode:m]; }
 static inline void enc_r_depth_bias(id<MTL4RenderCommandEncoder> e, float u, float s, float c) { [e setDepthBias:u slopeScale:s clamp:c]; }
 static inline void enc_r_depth_clip(id<MTL4RenderCommandEncoder> e, BOOL v) { [e setDepthClipMode:v ? MTLDepthClipModeClip : MTLDepthClipModeClamp]; }
+static inline void enc_r_depth_bounds(id<MTL4RenderCommandEncoder> e, float lo, float hi) { [e setDepthTestMinBound:lo maxBound:hi]; }   // Apple10 GPUs only (dbnd_hw)
 static inline void enc_r_stencil_ref(id<MTL4RenderCommandEncoder> e, uint32_t f, uint32_t b) { (void)b; [e setStencilReferenceValue:f]; }
 static inline void enc_r_blend_color(id<MTL4RenderCommandEncoder> e, float r, float g, float b, float a) { [e setBlendColorRed:r green:g blue:b alpha:a]; }
 static inline void enc_r_visibility(id<MTL4RenderCommandEncoder> e, MTLVisibilityResultMode m, NSUInteger o) { [e setVisibilityResultMode:m offset:o]; }
@@ -2532,7 +2535,7 @@ void mtl_drain(void) {
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[163];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[169];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -4719,9 +4722,43 @@ static int g_pso_amp;   // pso_get: the pipeline of a slice-merged pass (sm_amp_
 void mtl_sm_stats(uint64_t *np, uint64_t *nc, uint64_t *nw) { *np = g_sm_npass; *nc = g_sm_ncont; *nw = g_sm_nwait; }
 static id<MTLRenderPipelineState> g_enc_pso; static id<MTLDepthStencilState> g_enc_dss;   // Already set on this encoder (not set again if identical)
 // Dynamic state already sent on the open render encoder: each draw used to send all nine (stencil reference, viewport, scissor, cull, winding, fill, depth bias, depth clip, blend colour);
-// now a value is sent only when it differs. g_ed.ok holds one bit per item and is cleared for every new encoder and after a clear triangle (which sets its own)
-static struct { unsigned ok; uint32_t sref; MTLViewport vp; MTLScissorRect sc; int cull, wind, fill, clip; float bias[3], blend[4]; } g_ed;
-enum { ED_SREF = 1, ED_VP = 2, ED_SC = 4, ED_CULL = 8, ED_WIND = 16, ED_FILL = 32, ED_BIAS = 64, ED_CLIP = 128, ED_BLEND = 256 };
+// now a value is sent only when it differs. g_ed.ok holds one bit per item and is cleared for every new encoder and after a clear triangle (which sets its own). The depth bounds are
+// the exception: a new encoder is known to start with the test off (rp_begin_ex sets ED_DBND with (0, 1)), and the clear triangle turns it off itself, so neither costs a call
+static struct { unsigned ok; uint32_t sref; MTLViewport vp; MTLScissorRect sc; int cull, wind, fill, clip; float bias[3], blend[4], dbnd[2]; } g_ed;
+enum { ED_SREF = 1, ED_VP = 2, ED_SC = 4, ED_CULL = 8, ED_WIND = 16, ED_FILL = 32, ED_BIAS = 64, ED_CLIP = 128, ED_BLEND = 256, ED_DBND = 512 };
+// Depth bounds (OP_DEPTH_BOUNDS, what the bounds mean in nvn_dbnd.h). Metal's depth bounds test needs an Apple10 GPU: the M4 Max the Mac tests run on (Apple9) lacks it, and Metal's
+// validation stops the process at the encoder call there. Nothing goes to an encoder until a draw first has bounds that can reject something (g_dbnd_hw stays -1 until then), so a
+// game that never turns the test on makes no call at all. The bounds are replay state like the depth bias: they survive pass splits and new encoders, and each draw sends them when
+// the encoder has others. A GPU without the test draws every draw as before, those whose bounds pass nothing too. DM_DEPTH_BOUNDS=0 ignores the bounds on every GPU, for telling a
+// picture problem from the test: its name is outside DM_NVN_ so that a player build's env.txt can still turn off a test no Apple10 GPU has run in this project
+static int g_dbnd_env = -1, g_dbnd_hw = -1;   // DM_DEPTH_BOUNDS (-1 = not read); the GPU takes the bounds (-1 = not asked yet; t_depth_bounds.m sets it)
+static void (*g_dbnd_test_enc)(float lo, float hi);   // t_depth_bounds.m: takes the encoder call, which the Mac's GPU cannot make
+static uint64_t g_dbnd_empty;   // draws skipped because their bounds pass no stored depth
+static inline int dbnd_on(void) { if (__builtin_expect(g_dbnd_env < 0, 0)) { const char *e = getenv("DM_DEPTH_BOUNDS"); g_dbnd_env = !(e && !strcmp(e, "0")); } return g_dbnd_env; }
+// Asked at the first draw with bounds to test, with one line saying whether they are applied
+static int dbnd_hw(void) {
+    if (__builtin_expect(g_dbnd_hw >= 0, 1)) return g_dbnd_hw;
+    g_dbnd_hw = [g_dev supportsFamily:MTLGPUFamilyApple10];
+    if (g_dbnd_hw) MLOG("depth bounds test: applied through Metal's depth bounds test (an Apple10 GPU; DM_DEPTH_BOUNDS=0 ignores it)");
+    else RED_ONCE(168, "depth bounds test: turned on, but this GPU lacks Metal's depth bounds test (Apple10 GPUs and later); ignored, every draw as if it were off, those whose bounds pass nothing too");
+    return g_dbnd_hw;
+}
+// The bounds b on the open encoder, sent only when it has others
+static void enc_dbnd(id en, const float b[2]) {   // id: draw_ holds its encoder under the classic protocol's type
+    if ((g_ed.ok & ED_DBND) && g_ed.dbnd[0] == b[0] && g_ed.dbnd[1] == b[1]) return;
+    if (g_dbnd_test_enc) g_dbnd_test_enc(b[0], b[1]); else enc_r_depth_bounds(en, b[0], b[1]);
+    g_ed.dbnd[0] = b[0]; g_ed.dbnd[1] = b[1]; g_ed.ok |= ED_DBND;
+}
+// The pass planning (ds_scan, pass_ds_need, first_draw_covers, the readable-tile merges, the same-target split) counts bounds only where they reach the GPU: on a GPU without the
+// test they change nothing a pass draws, so they must not keep depth attached, split or refuse a merge there. Asked quietly, without dbnd_hw's line, which a draw that tests says
+static int dbnd_live(void) {
+    if (!dbnd_on()) return 0;
+    if (g_dbnd_hw >= 0) return g_dbnd_hw;
+    static int can = -1; if (can < 0) can = [g_dev supportsFamily:MTLGPUFamilyApple10];
+    return can;
+}
+// The Vulkan layer's pipelines with a depth bounds test (hle_vk.m) go through the same switch and the same question to the GPU
+int mtl_depth_bounds_hw(void) { return dbnd_on() && dbnd_hw(); }
 static int g_enc_vis, g_enc_has_vis;   // This encoder's current visibility count mode (0 off / slot number + 1), and whether a visibility buffer is attached
 static int g_pso_dirty = 1, g_dss_dirty = 1;   // Pipeline / depth-stencil related state was changed during replay
 static uint64_t g_stat_args_enc, g_stat_args_reuse;   // Argument buffer: new-encode / reuse counts
@@ -4812,9 +4849,11 @@ static _Atomic long g_ab_phase; static long g_ab_len = -1;
 static long ab_len(void) { if (g_ab_len < 0) { const char *e = getenv("DM_AB"); g_ab_len = e ? atol(e) : 0; if (g_ab_len < 0) g_ab_len = 0; if (g_ab_len) MLOG("DM_AB: switches set to ab alternate every %ld frames (phase 0 with all of them off)", g_ab_len); } return g_ab_len; }
 enum { SW_MAX = 8 }; static const char *g_sw_name[SW_MAX]; static int g_sw_mode[SW_MAX], g_sw_n;
 static inline int sw_on_at(int m, long ph) { if (m < 2) return m; int n = (m - 2) & 15, mask = (m - 2) >> 4; return mask >> (ph % n) & 1; }
-// The mode of switch <name>: 0 off, 1 on, 2 + n + 16 * mask = on in the phases whose number modulo n is in mask; ab without DM_AB is off
-static int sw_mode(const char *name, int dflt) {
-    const char *e = getenv(name); int m = dflt, mask = 2, n = 2;
+// The mode of switch <name>: 0 off, 1 on, 2 + n + 16 * mask = on in the phases whose number modulo n is in mask; ab without DM_AB is off. sw_mode_of takes the value read
+// already: a switch the in-game menu also sets is read under the menu's lock (front_env_copy; DM_POST_AA, aa_mode), on a thread other than the one most switches are read on,
+// so the list of names the [ab] lines print is appended under a lock of its own
+static int sw_mode_of(const char *name, const char *e, int dflt) {
+    int m = dflt, mask = 2, n = 2;
     if (e && !strncmp(e, "ab", 2)) {
         if (e[2] == ':') { const char *sl = strchr(e, '/'); int nn = sl ? atoi(sl + 1) : 0, mk = 0;
             for (const char *q = e + 3; sl && q < sl; ) { int k = atoi(q); if (k >= 0 && k < 15) mk |= 1 << k; while (q < sl && *q != ',') q++; if (q < sl) q++; }
@@ -4823,9 +4862,11 @@ static int sw_mode(const char *name, int dflt) {
         if (!ab_len()) MLOG("[RED] %s=%s needs DM_AB=<frames>: the switch is off", name, e); }
     else if (e) m = atoi(e) ? 1 : 0;
     if (m >= 2) MLOG("%s: on in the DM_AB phases whose number modulo %d is in the set %#x", name, n, mask);
-    if (g_sw_n < SW_MAX) { g_sw_name[g_sw_n] = name; g_sw_mode[g_sw_n++] = m; }
+    static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
+    os_unfair_lock_lock(&lk); if (g_sw_n < SW_MAX) { g_sw_name[g_sw_n] = name; g_sw_mode[g_sw_n] = m; atomic_thread_fence(memory_order_release); g_sw_n++; } os_unfair_lock_unlock(&lk);
     return m;
 }
+static int sw_mode(const char *name, int dflt) { return sw_mode_of(name, getenv(name), dflt); }
 static inline int sw_on(int m) { return sw_on_at(m, atomic_load_explicit(&g_ab_phase, memory_order_relaxed)); }
 // Each phase is reported once its frames' GPU times have arrived (8 frames late) as an [ab] line: the switches on in it, GPU time and whole frame time (p50 / p90 / mean over the phase
 // without its first quarter, while the GPU clock and the frame step settle), and attachment traffic and render passes per frame (the bandwidth ledger)
@@ -4934,7 +4975,7 @@ static void sd_finish(void);
 // the first draw does not blend and writes all channels, every covered pixel is rewritten by it, and the original content is not visible (Switch immediate-mode rendering has no such cost; on TBDR load = reading the whole thing from memory into the tile)
 static const p_draw *g_fd_dw; static const p_draw_idx *g_fd_di;   // The draw that opens the pass (one of non-indexed / indexed); non-null only while draw() is opening a pass
 static uint64_t g_fd_n;         // Cumulative number of attachments judged elidable
-static int g_fd_why;            // Reason for the most recent failure (Q line of PASSDUMP: 1 no program 2 shader 3 attachment 4 blend/mask/raster 5 depth-stencil test 6 vertex count 7 position attribute 8 format/stream 9 out of bounds 10 address 11 geometry)
+static int g_fd_why;            // Reason for the most recent failure (Q line of PASSDUMP: 1 no program 2 shader 3 attachment 4 blend/mask/raster 5 depth-stencil or depth bounds test 6 vertex count 7 position attribute 8 format/stream 9 out of bounds 10 address 11 geometry)
 static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level);
 static int pf_is_float(MTLPixelFormat f) {   // Float color formats that can store NaN (sentinel choice for the load-elision probe; RGB9E5 cannot store NaN and does not count)
     switch (f) { case MTLPixelFormatR16Float: case MTLPixelFormatRG16Float: case MTLPixelFormatRGBA16Float: case MTLPixelFormatR32Float:
@@ -5337,7 +5378,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         pass_dims(pd, (NSUInteger)R.rt.n, &g_pass.tw, &g_pass.th);
         if (rt_range_on()) { g_pass.reg_gen = reg0; g_pass.ser_gen = ser0; }
         if (rt_range_on()) { g_pass.range_dirty=dirty0; g_pass.range_color=pd.colorAttachments[0].texture; g_pass.range_depth=pd.depthAttachment.texture; }
-        g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0;
+        g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = ED_DBND; g_ed.dbnd[0] = 0; g_ed.dbnd[1] = 1;   // the new encoder has the depth bounds test off
     }
     if (g_vis_on) {
         // Slots used up (one submission exceeds VIS_SLOTS counting passes): continue in a new overflow buffer. A ring buffer must not be retired (it is still used in rotation, and retiring removes it from the residency set); only a previous overflow buffer is
@@ -6721,6 +6762,7 @@ static struct {
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; uint8_t vp_sw[16][4];   // vp_sw: viewport swizzles XOR the identity (p_vp_swizzle)
     float blend_color[4], alpha_ref; int64_t copy_stride, copy_img_stride;   // alpha_ref: SetAlphaRef (at_bind)
+    p_depth_bounds dbnd;   // SetDepthBounds as the game set it (draw resolves it, nvn_dbnd.h); off after state_reset, as on a new NVN queue
     uint8_t push[2][DMSH_PUSH_SIZE];   // NVN2 push constants of the graphics stages and of compute (p_push_const), bound as c[24]
     p_tf_bind tf[4]; int tf_on, rast_discard;   // capture buffers and enables; byte offsets and captured count stay on the GPU (nvn_feedback.inc)
     int tex_base, samp_base;   // host-table bases of the texture / sampler pool bound (OP_SET_TEX_POOL / OP_SET_SAMP_POOL), for handles read at replay from uniform buffers (encode_args)
@@ -10815,6 +10857,7 @@ static void defer_release_one(defer_t *d) { if (d->active) { g_defer_nact--; if 
 static void defer_clear_all(void) { for (int i = 0; i < 4; i++) defer_release_one(&g_defer_slots[i]); g_defer_nact = g_defer_natq = 0; g_defer_pend = NULL; }
 static int hoist_take(const uint8_t *p) { for (int i = 0; i < g_hoist_n; i++) if (g_hoist_skip[i] == p) { g_hoist_skip[i] = g_hoist_skip[--g_hoist_n]; return 1; } return 0; }
 enum { DS_FREE = 0, DS_USED = 1, DS_RET = 2 };
+static int g_ds_dbnd;   // ds_scan: the depth bounds test is on at this point of the scan (OP_DEPTH_BOUNDS, as the replay will have it), which tests the stored depth
 static int g_ds_why; static int g_ds_scanned; static int g_ds_need;   // g_ds_need: need accumulated during the scan, 1 depth 2 stencil   // Diagnostics: the opcode that triggered the 'used' verdict (for a draw, records 1000 + dt*100 + dw*10 + st), and the number of ops scanned
 static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
     for (int guard = 0; guard < 1000000; guard++) {
@@ -10829,8 +10872,9 @@ static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
             case OP_SET_RT: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_UPDATE_UB: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_DRAW_TEX: case OP_CLEAR_TEX: case OP_DISPATCH: return DS_FREE;
             case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_DLSS: g_ds_why = h.op; return DS_USED;
             case OP_BIND_STATE: { const p_bind_state *b = a; if (b->kind == 5) memcpy(ds, b->bytes, sizeof *ds); break; }
-            case OP_DRAW: case OP_DRAW_IDX: case OP_MULTI_DRAW:   // Depth test / write → depth needed; stencil test → stencil needed; can stop once both are needed
-                g_ds_need |= (ds->dt || ds->dw ? 1 : 0) | (ds->st ? 2 : 0);
+            case OP_DEPTH_BOUNDS: g_ds_dbnd = ((const p_depth_bounds *)a)->on && dbnd_live(); break;
+            case OP_DRAW: case OP_DRAW_IDX: case OP_MULTI_DRAW:   // Depth test / write / bounds → depth needed; stencil test → stencil needed; can stop once both are needed
+                g_ds_need |= (ds->dt || ds->dw || g_ds_dbnd ? 1 : 0) | (ds->st ? 2 : 0);
                 if (g_ds_need == 3) { g_ds_why = 1000 + ds->dt * 100 + ds->dw * 10 + ds->st; return DS_USED; } break;
             default: break;
         }
@@ -10920,6 +10964,9 @@ static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level) {
     if (fs->rf.omap_known && pf_chan_bits(t.pixelFormat) & ~(fs->rf.omap >> (4 * i))) return g_fd_why = 4, 0;   // a stored channel outside the shader's output map keeps its old value (pso_build's write mask)
     if ((S.color.blend_en >> i & 1) || ((S.chmask.mask >> (4 * i)) & 0xf) != 0xf || S.ms.a2c || S.poly.mode != NVN_POLYGON_MODE_FILL) return g_fd_why = 4, 0;
     if (R.rt.depth && ((S.ds.dt && S.ds.df != NVN_DEPTH_FUNC_ALWAYS) || S.ds.st)) return g_fd_why = 5, 0;
+    // The depth bounds test drops fragments like a depth test, with the depth test off too: a fullscreen draw that skips the sky with bounds such as (0, 0.9999) leaves those pixels
+    // as they were loaded, and with the load elided they would keep whatever the tile held. Bounds that reject nothing ((0, 1) or wider) keep the elision
+    if (R.rt.depth && S.dbnd.on && dbnd_live()) { float b_[2]; if (dbnd_resolve(1, S.dbnd.lo, S.dbnd.hi, b_) != DBND_OFF) return g_fd_why = 5, 0; }
     if (n < 3 || n > 64) return g_fd_why = 6, 0;
     float P[64][4]; int why = attr_read(vs->rf.pos_attr, dw, di, P);
     if (why) return g_fd_why = why, 0;
@@ -10988,6 +11035,7 @@ static int state_op(uint32_t op, const void *a) {
         case OP_VIEWPORTS: { const p_viewports *b = a; for (int i = 0; i < b->n; i++) memcpy(S.vp[b->first + i], b->v[i], 16); S.has_vp = 1; break; }
         case OP_DEPTH_RANGE: { const p_depth_range *b = a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
         case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_depth_clamp *)a)->on; break;
+        case OP_DEPTH_BOUNDS: S.dbnd = *(const p_depth_bounds *)a; break;   // encoder state set by draw, not part of the pipeline
         case OP_VP_SWIZZLE: { const p_vp_swizzle *b = a; memcpy(S.vp_sw[b->first], b->sw, 4 * (size_t)b->n); break; }
         case OP_BLEND_COLOR: memcpy(S.blend_color, ((const p_blend_color *)a)->rgba, 16); break;
         case OP_ALPHA_REF: S.alpha_ref = ((const p_alpha_ref *)a)->ref; break;   // data for at_bind, not part of the pipeline
@@ -11227,7 +11275,7 @@ static int sm_scan(const uint8_t *p, const p_set_rt *rt, int cur, int *lo, int *
             case OP_UPDATE_UB: if (!ubd_on()) return n; break;
             case OP_DRAW: case OP_DRAW_IDX: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM:
             case OP_BIND_VBUF: case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL: case OP_POLY_OFFSET:
-            case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: break;
+            case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: break;
             default: return n;
         }
         p += h.size;
@@ -11319,19 +11367,22 @@ static int draw_samples_rt(NvProg *pr) {   // Sampled attachments keep the origi
     return 0;
 }
 // The whole render pass's need for depth / stencil (bits: 1 depth 2 stencil; 3 = both needed or cannot be proven). Starting from the draw that opens the render pass, scan in real replay order to the end of the render pass:
-// the attached clears and this draw's state are counted first; later draws accumulate by their depth-stencil state; anything unprovable such as a mid-pass clear or nesting too deep is treated as both needed
+// the attached clears and this draw's state are counted first; later draws accumulate by their depth-stencil state; anything unprovable such as a mid-pass clear or nesting too deep is treated as both needed.
+// The depth bounds test reads the stored depth like the depth test, so a draw with it on needs the depth attached even with the depth test and write off (a light volume's
+// stencil pass): without it the draw would see a pass without depth, where the bounds do nothing
 static int pass_ds_need(void) {
-    int need = (R.clear_d || S.ds.dt || S.ds.dw ? 1 : 0) | (R.clear_s || S.ds.st ? 2 : 0);
+    int dbnd = S.dbnd.on && dbnd_live();
+    int need = (R.clear_d || S.ds.dt || S.ds.dw || dbnd ? 1 : 0) | (R.clear_s || S.ds.st ? 2 : 0);
     if (!R.rt.depth || need == 3 || !g_exec_next || g_ret_n > 16) {
         PD("S %llu no lookahead depth=%d clear_d=%d clear_s=%d dt=%d dw=%d st=%d next=%d ret=%d", g_stat_pass + 1, R.rt.depth != NULL, R.clear_d, R.clear_s, (int)S.ds.dt, (int)S.ds.dw, (int)S.ds.st, g_exec_next != NULL, g_ret_n);
         return 3;
     }
-    ds_st ds = S.ds; g_ds_why = -1; g_ds_scanned = 0; g_ds_need = need;
+    ds_st ds = S.ds; g_ds_why = -1; g_ds_scanned = 0; g_ds_need = need; g_ds_dbnd = dbnd;
     int r = ds_scan(g_exec_next, &ds, 0);
     for (int k = g_ret_n - 1; r == DS_RET && k >= 0; k--) r = ds_scan(g_ret[k], &ds, 0);
     for (int k = 0; r == DS_RET && k < g_nrest; k++) r = ds_scan((const uint8_t *)g_rest[k], &ds, 0);
     int out = r == DS_USED ? 3 : g_ds_need;
-    PD("S %llu lookahead result=%d need=%d (1 depth 2 stencil) reason=%d scanned %d return_stack %d handles_left %d", g_stat_pass + 1, r, out, g_ds_why, g_ds_scanned, g_ret_n, g_nrest);
+    PD("S %llu lookahead result=%d need=%d (1 depth 2 stencil) reason=%d scanned %d return_stack %d handles_left %d depth_bounds %d", g_stat_pass + 1, r, out, g_ds_why, g_ds_scanned, g_ret_n, g_nrest, dbnd);
     return out;
 }
 // Pure-clear render pass hoisting: when a render pass is opened, scan forward, and if the shape is "several draws of this render pass -> several groups (SetRenderTargets + only clears) -> back to the same targets as this render pass",
@@ -11940,10 +11991,12 @@ static void fuse_try(void) {
     if ((cd_f || cs_f) && !depth_from_r2) return;   // The depth is already in use in the earlier pass: the depth clear at the start of the later pass has nowhere to go
     // Four: draws of the earlier pass must not sample attachments brought in by the later pass; when the depth comes from the later pass, depth-stencil testing must not be enabled
     static uint64_t tex[6][NTEX], img[6][32]; memcpy(tex, S.tex, sizeof tex); memcpy(img, S.img, sizeof img);
-    const prog_t *pg = S.prog; ds_st ds = S.ds;
+    // The depth bounds count as a test here: the Switch ignores bounds left on while drawing to a target without depth, and games do not turn them off, but in the merged pass the
+    // later pass's depth is attached and the bounds would test it
+    const prog_t *pg = S.prog; ds_st ds = S.ds; int dbnd = S.dbnd.on && dbnd_live();
     cur = (fz_cursor){.p = g_exec_next};
     for (;;) {   // The first loop iteration checks the draw that opens the render pass (current state), then checks the draws in the range one by one
-        if (depth_from_r2 && (ds.dt || ds.dw || ds.st)) return;
+        if (depth_from_r2 && (ds.dt || ds.dw || ds.st || dbnd)) return;
         for (int j = R.rt.n; j < n; j++) if (prog_samples_ser(pg, tex, img, U.color[j]->serial)) return;
         if (depth_from_r2 && prog_samples_ser(pg, tex, img, U.depth->serial)) return;
         for (;;) {
@@ -11952,6 +12005,7 @@ static void fuse_try(void) {
             if (q == r2op) goto planned;
             if (hq.op == OP_BIND_PROGRAM) pg = ((const p_bind_program *)aq)->prog;
             else if (hq.op == OP_BIND_STATE) { const p_bind_state *b = aq; if (b->kind == 5) memcpy(&ds, b->bytes, sizeof ds); }
+            else if (hq.op == OP_DEPTH_BOUNDS) dbnd = ((const p_depth_bounds *)aq)->on && dbnd_live();
             else if (hq.op == OP_BIND_TEX || hq.op == OP_BIND_TEX1 || hq.op == OP_BIND_IMG) { p_bind_handles t1; const p_bind_handles *b = bind_rec(hq.op, aq, &t1); bh_fresh(b); int lim = hq.op == OP_BIND_IMG ? 32 : NTEX;
                 if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (hq.op == OP_BIND_IMG) img[b->stage][b->first + k] = b->h[k]; else tex[b->stage][b->first + k] = b->h[k]; } }
             else if (hq.op == OP_DRAW || hq.op == OP_DRAW_IDX) break;
@@ -12136,7 +12190,8 @@ static int scr_proof(NvProg *pr, int locn, NSUInteger W, NSUInteger H) {
 static int fz_p2_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di, uint8_t lmap[8], __strong id<MTLFunction> *fn) {
     NvShader *vs = pr->sh[0], *fs = pr->sh[1]; *fn = nil;
     if (!vs || !fs) { PD("F %llu not provable: no vertex / fragment shader", g_stat_pass); return 0; }
-    if (!g_fz.rt2.depth && R.rt.depth && (S.ds.dt || S.ds.dw || S.ds.st)) { PD("F %llu not provable: depth comes from the previous pass and this draw has depth / stencil testing on", g_stat_pass); return 0; }
+    // The bounds too: left on in a pass without depth they did nothing on the Switch, but here the earlier pass's depth is attached and they would test it
+    if (!g_fz.rt2.depth && R.rt.depth && (S.ds.dt || S.ds.dw || S.ds.st || (S.dbnd.on && dbnd_live()))) { PD("F %llu not provable: depth comes from the previous pass and this draw has depth / stencil testing or depth bounds on", g_stat_pass); return 0; }
     int fx[32]; for (int i = 0; i < 32; i++) fx[i] = -1; uint8_t fbmask = 0;
     for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage >= 6) continue;
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; uint64_t h;
@@ -12984,7 +13039,7 @@ static int lc_keeps(uint32_t op) {
         case OP_SET_RT: case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_DRAW: case OP_DRAW_IDX: case OP_BEGIN: case OP_JUMP: case OP_CALL:
         case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
         case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
-        case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
+        case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
         case OP_TF_BIND: case OP_TF_STATE: case OP_RAST_DISCARD: case OP_PRIM_RESTART: case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_RENDER_COND:
         case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: return 1;
         default: return 0;
@@ -13080,7 +13135,7 @@ static int csh_dispatch_ahead(void) {
             case OP_DRAW: case OP_DRAW_IDX:
             case OP_ALPHA_REF: case OP_BIND_IMG: case OP_BIND_PROGRAM: case OP_BIND_SAMP: case OP_BIND_SSBO: case OP_BIND_STATE: case OP_BIND_TEX: case OP_BIND_TEX1:
             case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_VATTR: case OP_BIND_VBUF: case OP_BIND_VBUF1: case OP_BIND_VSTREAM: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
-            case OP_DEPTH_CLAMP: case OP_DEPTH_RANGE: case OP_POLY_OFFSET: case OP_PRIM_RESTART: case OP_PUSH_CONST: case OP_RAST_DISCARD: case OP_SCISSOR: case OP_SET_SAMP_POOL:
+            case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_DEPTH_RANGE: case OP_POLY_OFFSET: case OP_PRIM_RESTART: case OP_PUSH_CONST: case OP_RAST_DISCARD: case OP_SCISSOR: case OP_SET_SAMP_POOL:
             case OP_SET_TEX_POOL: case OP_STENCIL: case OP_TF_BIND: case OP_VIEWPORTS: case OP_VP_SWIZZLE:
                 continue;
             default: return 0;   // OP_TF_STATE and everything state_op does not take stop the full scan too
@@ -13253,7 +13308,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         if (k >= 0) { uint64_t s_; int lv, sl; rt_sub(&R.rt, k, &s_, &lv, &sl); const tex_t *t = k == 8 ? R.rt.depth : R.rt.color[0]; if ((int)MAX(t->d.width >> lv, 1u) <= small) return; } } }
     if (S.poly.cull == NVN_FACE_FRONT_AND_BACK && !S.rast_discard) { PD("Z %llu draw skipped (before the pass begins): both faces culled", g_stat_pass + !g_enc); return; }
     // The continued render pass may have been opened with fewer depth / stencil attachments (open modes 2 / 3 / 4): if the plane this draw needs is not attached, split before it (on reopen, attach per the new lookahead)
-    if (g_rt_merged && g_enc_mode != 0 && (((S.ds.dt || S.ds.dw) && !g_pass.hd) || (S.ds.st && !g_pass.hs))) {
+    // The depth bounds test reads the stored depth too (as pass_ds_need counts it): the lookahead that opened the pass stopped at the SetRenderTargets of this continuation and never
+    // saw this draw, and in a pass without depth its bounds would do nothing (a light volume with the depth test off and the bounds on would light every pixel)
+    if (g_rt_merged && g_enc_mode != 0 && (((S.ds.dt || S.ds.dw || (S.dbnd.on && dbnd_live())) && !g_pass.hd) || (S.ds.st && !g_pass.hs))) {
         static int once2; if (!once2++) MLOG("same-target continuation: a draw in the continued pass needs a depth / stencil plane that is not attached; split here (first case pass %llu)", g_stat_pass);
         PD("M %llu a draw in the continued pass needs a depth / stencil plane that is not attached; split here", g_stat_pass); rp_end(); }
     if (g_rt_range_active && (!rt_range_pr_ro(pr) || !S.ds.dt || S.ds.dw || S.ds.st)) rp_end();   // The external write visibility at the original encoder boundary is not removed
@@ -13353,6 +13410,18 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     if (!(g_ed.ok & ED_SC) || memcmp(&g_ed.sc, &sc, sizeof sc)) { enc_r_scissor(en, sc); g_ed.sc = sc; g_ed.ok |= ED_SC; }
     if (S.poly.cull == NVN_FACE_FRONT_AND_BACK && !S.rast_discard) { PD("Z %llu draw skipped: both faces culled", g_stat_pass); return; }
+    // Depth bounds: a pass without a depth attachment has no stored depth to test, and the test does nothing there, as on the Switch. Bounds that no stored depth meets pass no fragment
+    // (nvn_dbnd.h), and Metal refuses such bounds: the draw is skipped as for both faces culled. A GPU without the test draws as if it were off (dbnd_hw), those draws too, as
+    // before the test was applied: its red line comes from the first draw with bounds, whichever kind they are
+    int dbk = DBND_OFF; float dbb[2] = {0, 1};
+    if (__builtin_expect(S.dbnd.on, 0) && g_pass.hd) {
+        if (dbnd_on()) dbk = dbnd_resolve(1, S.dbnd.lo, S.dbnd.hi, dbb);
+        else { static int once; if (!once++) MLOG("depth bounds test: ignored (DM_DEPTH_BOUNDS=0)"); }
+    }
+    if (dbk == DBND_EMPTY && !S.rast_discard && dbnd_hw()) {
+        g_dbnd_empty++; static int once; if (!once++) MLOG("depth bounds %g..%g: no stored depth passes, so draws with such bounds are skipped", S.dbnd.lo, S.dbnd.hi);
+        PD("Z %llu draw skipped: depth bounds %g..%g pass nothing", g_stat_pass, S.dbnd.lo, S.dbnd.hi); return;
+    }
     { int cu = S.poly.cull == NVN_FACE_FRONT ? MTLCullModeFront : S.poly.cull == NVN_FACE_BACK ? MTLCullModeBack : MTLCullModeNone;
       int wi = (S.poly.front == NVN_FRONT_FACE_CCW) != g_queue_origin_ll ? MTLWindingCounterClockwise : MTLWindingClockwise;   // NVN's raster flip is captured when the queue is initialized, rather than when the device origin changes.
       int fi = S.poly.mode == NVN_POLYGON_MODE_LINE ? MTLTriangleFillModeLines : MTLTriangleFillModeFill, cl = !S.depth_clamp;   // depth clip off = SetDepthClamp
@@ -13362,7 +13431,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       if (!(g_ed.ok & ED_FILL) || g_ed.fill != fi) { enc_r_fill(en, (MTLTriangleFillMode)fi); g_ed.fill = fi; g_ed.ok |= ED_FILL; }
       if (!(g_ed.ok & ED_BIAS) || memcmp(g_ed.bias, bi, sizeof bi)) { enc_r_depth_bias(en, bi[0], bi[1], bi[2]); memcpy(g_ed.bias, bi, sizeof bi); g_ed.ok |= ED_BIAS; }
       if (!(g_ed.ok & ED_CLIP) || g_ed.clip != cl) { enc_r_depth_clip(en, cl); g_ed.clip = cl; g_ed.ok |= ED_CLIP; }
-      if (!(g_ed.ok & ED_BLEND) || memcmp(g_ed.blend, S.blend_color, sizeof g_ed.blend)) { enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]); memcpy(g_ed.blend, S.blend_color, sizeof g_ed.blend); g_ed.ok |= ED_BLEND; } }
+      if (!(g_ed.ok & ED_BLEND) || memcmp(g_ed.blend, S.blend_color, sizeof g_ed.blend)) { enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]); memcpy(g_ed.blend, S.blend_color, sizeof g_ed.blend); g_ed.ok |= ED_BLEND; }
+      if (dbk == DBND_TEST ? dbnd_hw() : g_dbnd_hw > 0) enc_dbnd(en, dbb); }   // (0, 1) puts the test off again on an encoder an earlier draw gave bounds
     if (cur_pull) { pull_bind(en); g_hy_draws += !g_geo_mesh.on; }   // a pulling pipeline reads the streams itself (no conversion either: dm_fetch decodes every format)
     else {
         int bad = bind_vbufs(en, pr->sh[0] ? &pr->sh[0]->rf : NULL);
@@ -14572,7 +14642,9 @@ static void clr_tri(id<MTL4RenderCommandEncoder> en, id<MTLRenderPipelineState> 
     enc_r_pso(en, ps); g_enc_pso = nil; enc_r_dss(en, ds); g_enc_dss = nil;   // the next draw sets its own again
     if (g_enc_vis) { enc_r_visibility(en, MTLVisibilityResultModeDisabled, 0); g_enc_vis = 0; }   // not counted by an occlusion query; the next counted draw turns counting back on
     enc_r_viewport(en, (MTLViewport){0, 0, (double)tw, (double)th, 0, 1}); enc_r_scissor(en, sc);
-    enc_r_cull(en, MTLCullModeNone); enc_r_fill(en, MTLTriangleFillModeFill); enc_r_depth_bias(en, 0, 0, 0); enc_r_depth_clip(en, YES); enc_r_stencil_ref(en, sref, sref); g_ed.ok = 0;
+    enc_r_cull(en, MTLCullModeNone); enc_r_fill(en, MTLTriangleFillModeFill); enc_r_depth_bias(en, 0, 0, 0); enc_r_depth_clip(en, YES); enc_r_stencil_ref(en, sref, sref);
+    if (g_dbnd_hw > 0) { static const float off[2] = {0, 1}; enc_dbnd(en, off); }   // a clear is not depth-bounds tested; ED_DBND then holds what the encoder has
+    g_ed.ok &= ED_DBND;
     enc_r_draw(en, MTLPrimitiveTypeTriangle, 0, 3);
     [en setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [en setArgumentTable:g_ft atStages:MTLRenderStageFragment];
     g_ft_valid = 0;   // the fragment table's address cache starts again after a draw through tables of its own: g_ft is left as it was, but the cache then does not depend on it (a clear like this is rare)
@@ -14798,7 +14870,7 @@ void mtl_exec(const uint8_t *p) {
                 break; }
             case OP_SCISSOR: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
             case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
-            case OP_POLY_OFFSET: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
+            case OP_POLY_OFFSET: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
                 state_op(h.op, a); break;
             // PASSDUMP O lines: the viewports the game sets, with the pass they fall in (one set before its pass opens takes that pass's number, as the P lines do). The D line
             // prints the one a draw used, so a viewport the pass set is told from one carried over. Printed here, not in state_op: look-ahead scans replay state_op too
@@ -14834,6 +14906,7 @@ void mtl_exec(const uint8_t *p) {
 
 // ---------- Present: draw the swapchain texture to the CAMetalLayer; optional screenshot ----------
 static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
+static id<MTLRenderPipelineState> g_rcas_pso;   // the present with Sharpening (present.metal fs_rcas), made with g_blit_pso (present_pipeline)
 static id<MTLSamplerState> g_blit_samp;
 static uint64_t g_present_n;
 uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present count (heat attribution DM_HEAT computes the present frame rate)
@@ -14876,7 +14949,7 @@ static pthread_mutex_t g_shotq_mu = PTHREAD_MUTEX_INITIALIZER;
 #if TARGET_OS_OSX
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]);   // the classic-queue screenshot path, for a Mac with no Metal 4 queue (g_q4 nil)
 #endif
-enum { PRESENT_FAILED, PRESENT_STANDARD, PRESENT_METALFX };
+enum { PRESENT_FAILED, PRESENT_STANDARD, PRESENT_METALFX, PRESENT_SHARPENED, PRESENT_AA = 8 };   // PRESENT_SHARPENED: the bilinear pass with Sharpening (present_sharpen); PRESENT_AA: or'ed in after edge smoothing (aa_encode)
 static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int));
 static int present_offscreen_wait(id<MTLTexture> src, const int crop[4], id<MTLTexture> out);
 // Game picture needed by the whole-window screenshot (front end window_shot; no longer does drawViewHierarchy on a Metal layer with the display link attached): at the next present, the present thread draws the same frame
@@ -15186,6 +15259,8 @@ int mtl_display_hz(void) {
 static _Atomic uint64_t g_present_stall_ns;   // For unit tests: an extra pause before each present on the present thread (simulating a drawable that stays unavailable)
 static CAMetalLayer *g_present_layer_resident;
 void mtl_present_test_stall(uint64_t ns) { g_present_stall_ns = ns; }
+// The present's two pipelines, made together at the first present (and again for a new drawable format): fs, and fs_rcas for Sharpening. Both are made through the MTLDevice on
+// the present thread, outside the pipeline archive, so a Sharpening picked in the in-game menu later finds its pipeline made and never compiles one inside a present
 static void present_pipeline(MTLPixelFormat format) {
     if (!g_blit_pso || g_blit_fmt != format) {
         NSError *e = nil;
@@ -15196,6 +15271,9 @@ static void present_pipeline(MTLPixelFormat format) {
         pd.colorAttachments[0].pixelFormat = format;
         g_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
+        pd.fragmentFunction = [lib newFunctionWithName:@"fs_rcas"];
+        g_rcas_pso = pd.fragmentFunction ? [g_dev newRenderPipelineStateWithDescriptor:pd error:&e] : nil;
+        if (!g_rcas_pso) MLOG("[RED] present: no Sharpening pipeline (%s); the present draws without sharpening", pd.fragmentFunction ? e.localizedDescription.UTF8String : "present.metal has no fs_rcas");
         g_blit_fmt = format;
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
         g_blit_samp = [g_dev newSamplerStateWithDescriptor:sd];
@@ -15297,8 +15375,16 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 // Opt-in spatial scaling of the valid content to its letterboxed viewport. Copy the crop to an origin-aligned texture, scale in perceptual mode (present_raw_src supplies gamma
 // bytes), then draw 1:1 with the usual origin and output format. Queue barriers serialize both the frame's rendering and reuse of the scaler's textures across presents.
 // Replacing those textures waits for earlier presents; throttle replacement during resizing, and keep standard scaling for refused sizes. Offscreen captures own separate state.
+// The scaler's input is the window texture's size, not the crop's, wherever the texture fits in the picture's rectangle (fx_input_size): a game whose dynamic resolution moves
+// its crop inside the texture every few frames (Pokémon Scarlet calls nvnWindowSetCrop about once a frame; Super Mario Odyssey's crop moves) then keeps one scaler, which takes
+// the crop's size as its content (inputContentWidth / Height) each frame. Keyed on the crop, each new size cost FX_REMAKE_PRESENTS bilinear frames and a drain of the presents
+// in flight on the present thread. Measured on an M4 Max with MTL4FXSpatialScaler: content from 0.5 to 1.0 of 1920x1080 scaled to 2346x1320 matches a scaler made for the
+// content's size within 45-58 dB PSNR, with no texel from outside the content in the output, in the same GPU time
 #define FX_REMAKE_PRESENTS 30
-typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t made_at; int made; NSUInteger refused[6]; } fx_state;
+#define FX_PAD 2   // texels of the crop's edge repeated past it in a texture-sized input (fx_encode)
+// in: the scaler's input, made at the first present that copies the crop into it; with edge smoothing on (aa_encode) the scaler reads the smoothed texture instead and none is
+// made. iw, ih, ipf: the input the scaler was made for
+typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t made_at; int made; NSUInteger refused[6], iw, ih; MTLPixelFormat ipf; } fx_state;
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
 static id<MTL4Compiler> g_fx_comp;
 static _Atomic int g_fx_mode = -1;   // 1 = metalfx, 0 = off (nvn_upscale_pick.h UP_*); the live present sets it (fx_mode), a capture reads it
@@ -15340,13 +15426,29 @@ static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
     if (atomic_load_explicit(&g_present_stretch, memory_order_relaxed) && w && h && cw && ch && fabs(((double)w / h) / ((double)cw / ch) - 1) >= 0.01) return 0;
     return cw && ch && w >= cw && h >= ch && (w > cw || h > ch);
 }
+// DM_NVN_PRESENT_FX_EXACT=1: the scaler's input is the crop's size always, as before the texture-sized input (fx_input_size), for an A/B on a GPU whose MetalFX may treat a
+// content well below the input size differently from the M4 Max's. Read once (-1 until then); the tests set it
+static _Atomic int g_fx_exact = -1;
+// The scaler's input size for content cw x ch of a tw x th texture scaled to ow x oh: the texture's when the texture is no larger than the output in either direction and smaller
+// in one (fx_wanted's rule, for the texture), so the crop can move inside it without a new scaler. Otherwise the crop's: in a narrow layout (an iPad or a portrait split, about
+// 1320 pixels across for a 1920x1080 texture whose crop is 960x540) a texture-sized input would be larger than the output, which MetalFX's spatial scaler does not scale down to
+static void fx_input_size(NSUInteger tw, NSUInteger th, NSUInteger cw, NSUInteger ch, NSUInteger ow, NSUInteger oh, NSUInteger *iw, NSUInteger *ih) {
+    int exact = atomic_load_explicit(&g_fx_exact, memory_order_relaxed);
+    if (exact < 0) { const char *e = getenv("DM_NVN_PRESENT_FX_EXACT"); exact = e && atoi(e) != 0; atomic_store_explicit(&g_fx_exact, exact, memory_order_relaxed);
+        if (exact) MLOG("present upscaling (DM_NVN_PRESENT_FX_EXACT=1): the MetalFX scaler's input is the crop's size, a new scaler for each new crop size"); }
+    int fits = tw <= ow && th <= oh && (tw < ow || th < oh);
+    *iw = fits && !exact ? tw : cw; *ih = fits && !exact ? th : ch;
+}
 // Encodes the upscale of the rectangle r of raw into cb (see above); returns the scaled picture, which the present pass draws 1:1 into vp, or nil (the bilinear pass).
-// remake_wait: fx is the present thread's, whose textures presents still on the GPU may read: a new scaler waits for them and for FX_REMAKE_PRESENTS presents since the last
-static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTexture> raw, const NSUInteger r[4], MTLViewport vp, MTLPixelFormat out_pf, int remake_wait) {
-    NSUInteger cw = r[2], ch = r[3], ow = (NSUInteger)vp.width, oh = (NSUInteger)vp.height;
+// remake_wait: fx is the present thread's, whose textures presents still on the GPU may read: a new scaler waits for them and for FX_REMAKE_PRESENTS presents since the last.
+// ready: raw is edge smoothing's output (aa_encode), the crop at its origin with its edge repeated FX_PAD texels past it: a scaler whose input is that texture's size reads it
+// as it is, so the present makes one copy of the picture with both on, not two
+static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTexture> raw, const NSUInteger r[4], MTLViewport vp, MTLPixelFormat out_pf, int remake_wait, int ready) {
+    NSUInteger cw = r[2], ch = r[3], ow = (NSUInteger)vp.width, oh = (NSUInteger)vp.height, iw, ih;
     if (fx_mode(fx == &g_fx_present) != UP_METALFX || !fx_wanted(vp, cw, ch)) return nil;   // a capture (present_offscreen_m4, its own fx_state) takes no pick
-    if (!fx->sc || fx->in.width != cw || fx->in.height != ch || fx->in.pixelFormat != raw.pixelFormat || fx->out.width != ow || fx->out.height != oh || fx->out.pixelFormat != out_pf) {
-        NSUInteger key[6] = {cw, ch, raw.pixelFormat, ow, oh, out_pf};
+    fx_input_size(raw.width, raw.height, cw, ch, ow, oh, &iw, &ih);
+    if (!fx->sc || fx->iw != iw || fx->ih != ih || fx->ipf != raw.pixelFormat || fx->out.width != ow || fx->out.height != oh || fx->out.pixelFormat != out_pf) {
+        NSUInteger key[6] = {iw, ih, raw.pixelFormat, ow, oh, out_pf};
         if (!memcmp(key, fx->refused, sizeof key)) return nil;
         if (remake_wait && fx->made && g_present_n < fx->made_at + FX_REMAKE_PRESENTS) return nil;
         if (remake_wait) { pthread_mutex_lock(&g_pq_mu); while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu); pthread_mutex_unlock(&g_pq_mu); }
@@ -15354,29 +15456,49 @@ static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTe
         uint64_t t0 = now_ns(); NSError *e = nil;
         if (!g_fx_comp) g_fx_comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&e];
         MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
-        d.colorTextureFormat = raw.pixelFormat; d.outputTextureFormat = out_pf; d.inputWidth = cw; d.inputHeight = ch; d.outputWidth = ow; d.outputHeight = oh;
+        d.colorTextureFormat = raw.pixelFormat; d.outputTextureFormat = out_pf; d.inputWidth = iw; d.inputHeight = ih; d.outputWidth = ow; d.outputHeight = oh;
         d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
         id<MTL4FXSpatialScaler> sc = g_fx_comp ? [d newSpatialScalerWithDevice:g_dev compiler:g_fx_comp] : nil;
         fx->made_at = g_present_n; fx->made++;
         if (!sc) { memcpy(fx->refused, key, sizeof key);
-            MLOG("present upscaling: MetalFX makes no spatial scaler for %lux%lu format %lu → %lux%lu format %lu%s; this size is scaled bilinearly", (unsigned long)cw, (unsigned long)ch, (unsigned long)raw.pixelFormat,
+            MLOG("present upscaling: MetalFX makes no spatial scaler for %lux%lu format %lu → %lux%lu format %lu%s; this size is scaled bilinearly", (unsigned long)iw, (unsigned long)ih, (unsigned long)raw.pixelFormat,
                  (unsigned long)ow, (unsigned long)oh, (unsigned long)out_pf, g_fx_comp ? "" : " (no Metal 4 compiler)"); return nil; }
-        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:raw.pixelFormat width:cw height:ch mipmapped:NO];
-        td.storageMode = MTLStorageModePrivate; td.usage = sc.colorTextureUsage | MTLTextureUsageShaderRead;
-        id<MTLTexture> in = [g_dev newTextureWithDescriptor:td];
-        td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:out_pf width:ow height:oh mipmapped:NO];
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:out_pf width:ow height:oh mipmapped:NO];
         td.storageMode = MTLStorageModePrivate; td.usage = sc.outputTextureUsage | MTLTextureUsageShaderRead;
         id<MTLTexture> out = [g_dev newTextureWithDescriptor:td];
-        if (!in || !out) { memcpy(fx->refused, key, sizeof key); MLOG("[RED] present upscaling: cannot create the scaler's textures (%lux%lu, %lux%lu)", (unsigned long)cw, (unsigned long)ch, (unsigned long)ow, (unsigned long)oh); return nil; }
-        in.label = @"present upscale input"; out.label = @"present upscale output";
-        res_add(in); res_add(out); res_commit();
-        fx->sc = sc; fx->in = in; fx->out = out;
-        MLOG("present upscaling: MetalFX spatial scaler %lux%lu → %lux%lu (format %lu → %lu, scaler #%d, made in %.1f ms)", (unsigned long)cw, (unsigned long)ch, (unsigned long)ow, (unsigned long)oh,
-             (unsigned long)raw.pixelFormat, (unsigned long)out_pf, fx->made, (now_ns() - t0) / 1e6);
+        if (!out) { memcpy(fx->refused, key, sizeof key); MLOG("[RED] present upscaling: cannot create the scaler's output texture (%lux%lu)", (unsigned long)ow, (unsigned long)oh); return nil; }
+        out.label = @"present upscale output";
+        res_add(out); res_commit();
+        fx->sc = sc; fx->out = out; fx->iw = iw; fx->ih = ih; fx->ipf = raw.pixelFormat;
+        MLOG("present upscaling: MetalFX spatial scaler %lux%lu → %lux%lu (format %lu → %lu, scaler #%d, made in %.1f ms), %s", (unsigned long)iw, (unsigned long)ih, (unsigned long)ow, (unsigned long)oh,
+             (unsigned long)raw.pixelFormat, (unsigned long)out_pf, fx->made, (now_ns() - t0) / 1e6,
+             iw == raw.width && ih == raw.height ? "the window texture's size: a crop moving inside it keeps this scaler" : "the crop's size: a new crop size makes a new scaler");
+    }
+    if (ready && raw.width == iw && raw.height == ih && (raw.usage & fx->sc.colorTextureUsage) == fx->sc.colorTextureUsage) {   // edge smoothing's encoder ends with a barrier before the queue's later stages
+        fx->sc.colorTexture = raw; fx->sc.inputContentWidth = cw; fx->sc.inputContentHeight = ch; fx->sc.outputTexture = fx->out;
+        [fx->sc encodeToCommandBuffer:cb];
+        return fx->out;
+    }
+    if (!fx->in) {
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:raw.pixelFormat width:iw height:ih mipmapped:NO];
+        td.storageMode = MTLStorageModePrivate; td.usage = fx->sc.colorTextureUsage | MTLTextureUsageShaderRead;
+        if (!(fx->in = [g_dev newTextureWithDescriptor:td])) { RED_ONCE(164, "present upscaling: cannot create the scaler's input texture (%lux%lu); scaled bilinearly", (unsigned long)iw, (unsigned long)ih); return nil; }
+        fx->in.label = @"present upscale input";
+        res_add(fx->in); res_commit();
     }
     id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];   // after the frame's work
     [ce copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(r[0], r[1], 0) sourceSize:MTLSizeMake(cw, ch, 1) toTexture:fx->in destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    // MetalFX's filter reads past the content's last column and row (inputContentWidth / Height do not stop it), and in a texture-sized input those texels are an earlier, larger
+    // crop's: on the M4 Max the last two output columns of a 48x48 content scaled to 96x96 took a third of the magenta left beyond it. The crop's edge texels are copied into
+    // FX_PAD columns and rows past it (eight small copies), as an input of the content's own size clamps to them; with them the picture is byte-identical to that of a scaler
+    // made for the crop's size (t_present_crop), one texel of padding still left two pixels off
+    for (NSUInteger k = 0; k < FX_PAD; k++) {
+        if (cw + k < iw) [ce copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(r[0] + cw - 1, r[1], 0) sourceSize:MTLSizeMake(1, ch, 1) toTexture:fx->in destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(cw + k, 0, 0)];
+        if (ch + k < ih) [ce copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(r[0], r[1] + ch - 1, 0) sourceSize:MTLSizeMake(cw, 1, 1) toTexture:fx->in destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, ch + k, 0)];
+        for (NSUInteger j = 0; j < FX_PAD; j++) if (cw + j < iw && ch + k < ih)
+            [ce copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(r[0] + cw - 1, r[1] + ch - 1, 0) sourceSize:MTLSizeMake(1, 1, 1) toTexture:fx->in destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(cw + j, ch + k, 0)];
+    }
     [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];   // the scaler's encoders come after the copy
     [ce endEncoding];
     fx->sc.colorTexture = fx->in; fx->sc.inputContentWidth = cw; fx->sc.inputContentHeight = ch; fx->sc.outputTexture = fx->out;
@@ -15398,6 +15520,7 @@ typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out, read; NSUIn
 enum { UP_MFX_SCALERS = 4 };
 static up_mfx_scaler g_up_mfx[UP_MFX_SCALERS]; static int g_up_mfx_next;
 static uint64_t g_up_mfx_n, g_up_mfx_kept;   // dispatches drawn by MetalFX, dispatches of a named shader left to it
+static _Atomic int g_up_mfx_drawn;   // MetalFX has drawn the game's upscaler: the present thread's view of g_up_mfx_n (present_sharpen draws no sharpening over MetalFX's picture)
 void mtl_up_mfx_stats(uint64_t *n, uint64_t *kept) { *n = g_up_mfx_n; *kept = g_up_mfx_kept; }
 static int up_mfx_on(void) {
     static int v = -1;
@@ -15530,21 +15653,291 @@ static int up_mfx_encode(NvShader *cs) {
         args_dirty_all(); g_up_mfx_kept++; return 0;   // only the scratch image was scaled; the game's shader can still produce the output
     }
     args_dirty_all();
-    if (!g_up_mfx_n++) MLOG("upscaler: first dispatch of %s drawn by MetalFX, %dx%d at %d,%d of %lux%lu (format %lu) → %dx%d at %d,%d of %lux%lu (format %lu)%s", cs->key, ir.width, ir.height, ir.xoffset, ir.yoffset,
+    if (!g_up_mfx_n++) atomic_store_explicit(&g_up_mfx_drawn, 1, memory_order_relaxed);
+    if (g_up_mfx_n == 1) MLOG("upscaler: first dispatch of %s drawn by MetalFX, %dx%d at %d,%d of %lux%lu (format %lu) → %dx%d at %d,%d of %lux%lu (format %lu)%s", cs->key, ir.width, ir.height, ir.xoffset, ir.yoffset,
                             (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, orr.width, orr.height, orr.xoffset, orr.yoffset, (unsigned long)out.width, (unsigned long)out.height,
                             (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : ", through RGBA16F");
     return 1;
 }
-// The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it
-// (fx: the scaler state to use, nil = bilinear). uvb: the pass's crop constants (one buffer per present allocator, written by the CPU)
-static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], id<MTLBuffer> uvb, fx_state *fx) {
+// ---------- Sharpening in the present (DM_PRESENT_SHARPEN) ----------
+// The settings row Sharpening (Off, Low, Medium, High; the profile's present_sharpen is a game's default, Off without it) sharpens the picture inside the present's own draw:
+// present.metal fs_rcas is fs with FSR1's RCAS fused in, its taps one source texel apart. The drawable stays the picture's render size on the iPhone (front_ios.m), so the
+// sharpening happens before Core Animation scales the layer, in every API and picture mode (Stretch and Ultrawide included, where MetalFX never runs), for no memory and one
+// more pipeline. Off draws fs as before, byte for byte. A crop smaller than the drawable (Breath of the Wild's 1280x720 handheld picture in its 1920x1080 window textures,
+// a dynamic resolution's moving crop) is RCAS of the bilinear scale, a variant measured separately (docs/reference/rendering.md, Sharpening in the present).
+// Not drawn over MetalFX's picture, which its perceptual mode sharpens already: RCAS on top overshot HUD text by 15-26/255 in the synthetic test. That is the present's
+// MetalFX (fx_encode) and the game's upscaler drawn by MetalFX inside the frame (DM_UPSCALER=metalfx, up_mfx_encode), where the present sees a plain 1:1 picture. Nor over a
+// source that is not a UNORM format: RCAS's limiter assumes values in 0..1, and a float swapchain can hold more. The drawable is BGRA8Unorm always (front_ios.m).
+// The in-game menu's pick reaches the live present as Upscaling's does (nvn_upscale_pick.h): the main thread posts it, the present thread takes it at its next present
+static _Atomic int g_sharp_mode = -1;   // the level in force (nvn_upscale_pick.h sharp_parse); -1 before the first present
+static _Atomic int g_sharp_req = -1;    // the in-game menu's Sharpening (mtl_present_sharpen_set, main thread) until the live present takes it at its next present; -1 none
+static _Atomic uint64_t g_present_crop_moves;   // presents whose crop differs from the live present's before in the same texture size (present_crop_note), for present_gpu_note
+// The in-game menu's Sharpening while the game runs (front_ios.m dm_setting_live): the live present takes the new level at its next present. Both pipelines are made at the
+// first present (present_pipeline), so a pick compiles nothing. Nothing the game sees changes, nor does the drawable
+void mtl_present_sharpen_set(const char *level) {
+    int v = sharp_parse(level);
+    if (v < 0) { MLOG("[RED] present sharpening: %s from the in-game menu is not 0 to 3; ignored", level ? level : "(none)"); return; }
+    up_post(&g_sharp_req, v);
+}
+// live: the live present's (0 for a capture, which never takes the menu's pick). The first present decides from DM_PRESENT_SHARPEN, else the profile's present_sharpen; then
+// the level in force, until a pick
+static int sharp_mode(int live) {
+    int want = -1, v = up_now(&g_sharp_mode, &g_sharp_req, live, &want);
+    if (v >= 0) return v;
+    int was = atomic_load_explicit(&g_sharp_mode, memory_order_relaxed);
+    if ((v = want) < 0) {   // a copy taken under the in-game menu's lock (front.h front_env_copy), as fx_mode's
+        char e[64]; int set = front_env_copy("DM_PRESENT_SHARPEN", e, sizeof e) && *e;
+        v = set ? sharp_parse(e) : DM_GAME_PRESENT_SHARPEN;
+        if (v < 0) { MLOG("[RED] DM_PRESENT_SHARPEN=%s: 0 (off) to 3 (high); keeping the profile's %d", e, (int)DM_GAME_PRESENT_SHARPEN); v = DM_GAME_PRESENT_SHARPEN; }
+    }
+    static const char *const names[] = {"off", "low (RCAS 2 stops)", "medium (RCAS 1 stop)", "high (RCAS 0.5 stops)"};
+    if (v != was) MLOG("present sharpening (%s): %s", want >= 0 ? "in-game menu" : "DM_PRESENT_SHARPEN, else the profile's present_sharpen", names[v & 3]);
+    up_set(&g_sharp_mode, v);
+    return v;
+}
+// The formats RCAS's limiter holds for: unsigned normalized colour, 0..1. An sRGB swapchain arrives here as its UNORM view (present_raw_src)
+static int present_unorm(MTLPixelFormat pf) {
+    switch (pf) {
+    case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatBGRA8Unorm: case MTLPixelFormatRGBA8Unorm_sRGB: case MTLPixelFormatBGRA8Unorm_sRGB:
+    case MTLPixelFormatRGB10A2Unorm: case MTLPixelFormatBGR10A2Unorm: case MTLPixelFormatRGBA16Unorm: return 1;
+    default: return 0;
+    }
+}
+// RCAS's linear strength for this present (exp2(-stops)), or 0 to draw fs: off, or one of the cases above, each said once in the log
+static float present_sharpen(int live, int metalfx, MTLPixelFormat pf) {
+    int level = sharp_mode(live);
+    if (!level) return 0;
+    static _Atomic int said;
+    int why = metalfx ? 1 : atomic_load_explicit(&g_up_mfx_drawn, memory_order_relaxed) ? 2 : !present_unorm(pf) ? 4 : !g_rcas_pso ? 8 : 0;
+    if (!why) return exp2f(-sharp_stops(level));
+    if (!(atomic_fetch_or_explicit(&said, why, memory_order_relaxed) & why))
+        MLOG("present sharpening: not drawn on %s", why == 1 ? "a picture MetalFX scaled (Upscaling MetalFX), which its perceptual mode sharpens already" :
+             why == 2 ? "the game's upscaler drawn by MetalFX (DM_UPSCALER=metalfx), which its perceptual mode sharpens already" :
+             why == 4 ? "a swapchain that is not a UNORM format: RCAS's limiter assumes values in 0..1" : "this drawable: its pipeline was not made");
+    return 0;
+}
+// ---------- Edge smoothing in the present (DM_POST_AA) ----------
+// Intel's CMAA2 (dm/gfx/msl/cmaa2.metal) on the game's picture, for every game: no game has a hook before its HUD yet, so the HUD and text are smoothed with the scene (a 1-2 pixel
+// stroke changed by 3.0/255 on average in the study's synthetic test, Extra Sharp about half that), which is why no profile turns it on. It runs at the game's resolution,
+// before MetalFX or the bilinear scale and before Sharpening, on the present's own command buffer: the crop is copied to the origin of aa->tex, the five dispatches run in
+// one encoder, and the present's draw (or MetalFX, which takes aa->tex as its input instead of making its own copy) reads the result. The drawable stays framebufferOnly.
+// The present's command buffer runs on the game's queue after the frame's work, so its GPU time adds to a GPU-bound frame's (present_gpu_note gives it apart).
+// - aa->tex is the window texture's size, so a dynamic resolution's crop moves inside it with no new allocation; the kernels take the crop's size from the constants (AA_UV).
+// - An sRGB swapchain is smoothed in linear light: aa->tex is the _sRGB format, read decoded, and written through its UNORM view (aa->raw) with the encode in the shader.
+//   An RGBA8 swapchain (Super Mario Odyssey's) is smoothed as stored. Other formats (10-bit, float) are shown without it, said once.
+// - The working buffers are sized so no list can overflow on a real picture: shape candidates w*h/2 (a candidate needs two edges at a corner: a one-pixel checkerboard is the
+//   worst case and reaches w*h), deferred blend items w*h (CMAA2's own reference sizes w*h/2; the study measured 37-47 % of the 2x2 quads deferred on dense synthetic foliage),
+//   blend locations one per 2x2 quad (the most there can be). Every append is clamped all the same (cmaa2.metal), and a run that ran past one is said once (aa_note).
+// The setting follows Sharpening's rule (nvn_upscale_pick.h): the first present reads DM_POST_AA, else the profile's post_aa; the in-game menu's pick is taken by the live present
+// at its next present; a capture (present_offscreen_m4) has state of its own and reads the mode in force. DM_POST_AA=ab alternates off and edge with the DM_AB phases
+#define AA_UV 12   // the present's constants buffer (uvb) from this float on: cmaa2.metal's Aa, 10 words
+enum { AA_CTL_RAW_CAND = 13, AA_CTL_RAW_ITEM = 14, AA_CTL_RAW_LOC = 15, AA_CTL_OVERFLOW = 16, AA_CTL_RAW_INPLACE = 18, AA_CTL_ARGS1 = 20, AA_CTL_ARGS2 = 24, AA_CTL_WORDS = 32 };   // cmaa2.metal's CTL_*
+// tex: the picture's copy, smoothed in place (the swapchain's format, _sRGB for an sRGB one); raw: its UNORM view (tex itself for a UNORM swapchain), what the present and MetalFX
+// read; ctl: the control buffer (shared, so the host reads its counts); work: candidates, locations, items, list heads and edges at off[0..4]; cap: candidates, items, locations
+typedef struct { id<MTLTexture> tex, raw; id<MTLBuffer> ctl, work; id<MTL4ArgumentTable> at; NSUInteger w, h, off[5], refused[3]; MTLPixelFormat pf; uint32_t cap[3]; } aa_state;
+static aa_state g_aa_present;   // the live present's: only the present thread encodes with it or replaces it
+static _Atomic int g_aa_mode = -1;   // the mode in force (nvn_upscale_pick.h AA_*; AA_AB alternates); -1 before the first present
+static _Atomic int g_aa_req = -1;    // the in-game menu's pick (mtl_present_aa_set, main thread) until the live present takes it at its next present; -1 none
+static _Atomic int g_aa_ab;          // DM_POST_AA=ab's switch mode (sw_mode_of)
+static uint32_t g_aa_test_cap[3];    // the tests: the candidates', blend items' and locations' capacities at most these (0 = as sized above), to run the overflow clamps
+static uint32_t g_aa_test_slm;       // the tests: the threadgroup store of Z shapes' blend items at most this many (0 = cmaa2.metal's 768), to run its fallback
+static uint32_t g_aa_test_stray;     // the tests: 1 fills that store with a stray item first, which shows if a slot nothing wrote is read (cmaa2.metal Aa.stray)
+static _Atomic uint32_t g_aa_seen[5];   // the last completed run's candidates, blend items and locations before the clamps, the overflow bits, the Z shapes blended in place (aa_note; the tests)
+static id<MTLComputePipelineState> g_aa_ps[7];   // edges (Extra Sharp off, on), args, process (Extra Sharp off, on), apply (CONVERT off, on); written once, before g_aa_ps_state is 2
+static _Atomic int g_aa_ps_state;   // the pipelines: 0 not asked for, 1 being made (aa_pipelines_start), 2 made, -1 cannot be made
+static pthread_mutex_t g_aa_ps_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_aa_ps_cv = PTHREAD_COND_INITIALIZER;   // a capture waiting for them (aa_pipelines)
+// The seven pipelines, outside the pipeline archive like the present's own; said once either way. Runs on a background queue (aa_pipelines_start)
+static void aa_pipelines_make(void) {
+    static const struct { const char *fn; bool sharp, convert; NSUInteger threads; } P[7] = {
+        {"cmaa2_edges", 0, 0, 256}, {"cmaa2_edges", 1, 0, 256}, {"cmaa2_args", 0, 0, 1}, {"cmaa2_process", 0, 0, 128}, {"cmaa2_process", 1, 0, 128},
+        {"cmaa2_apply", 0, 0, 128}, {"cmaa2_apply", 0, 1, 128}};
+    uint64_t t0 = now_ns(); NSError *e = nil; const char *why = NULL;
+    id<MTLLibrary> lib = host_lib("cmaa2", &e);
+    if (!lib) why = "no library";
+    for (int i = 0; i < 7 && !why; i++) {
+        MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new]; bool c = P[i].convert, sh = P[i].sharp;
+        [cv setConstantValue:&c type:MTLDataTypeBool atIndex:0]; [cv setConstantValue:&sh type:MTLDataTypeBool atIndex:1];
+        id<MTLFunction> f = [lib newFunctionWithName:@(P[i].fn) constantValues:cv error:&e];
+        g_aa_ps[i] = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
+        if (!g_aa_ps[i]) why = P[i].fn;
+        else if (g_aa_ps[i].maxTotalThreadsPerThreadgroup < P[i].threads) { why = P[i].fn; e = nil; }   // the threadgroup size the kernel's threadgroup memory is laid out for
+    }
+    if (why) MLOG("[RED] present edge smoothing: CMAA2's %s cannot be made (%s); the picture is shown without edge smoothing", why, e ? e.localizedDescription.UTF8String : "too few threads per threadgroup");
+    else MLOG("present edge smoothing: CMAA2's 7 compute pipelines made in %.1f ms, in the background", (now_ns() - t0) / 1e6);
+    pthread_mutex_lock(&g_aa_ps_mu);
+    atomic_store_explicit(&g_aa_ps_state, why ? -1 : 2, memory_order_release);   // after g_aa_ps: whoever reads 2 sees the pipelines
+    pthread_cond_broadcast(&g_aa_ps_cv); pthread_mutex_unlock(&g_aa_ps_mu);
+}
+// Starts making the pipelines on a background queue the first time anything asks for them: the in-game menu's pick, or a present that smooths. Compiling seven specialised
+// kernels takes long enough to show as a hitch if the present thread did it while holding a drawable, which is what the live pick would do otherwise. Returns 1 if this call
+// started it
+static int aa_pipelines_start(void) {
+    int none = 0;
+    if (!atomic_compare_exchange_strong(&g_aa_ps_state, &none, 1)) return 0;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { aa_pipelines_make(); } });
+    return 1;
+}
+// Whether the pipelines are made. wait: a capture (screenshots and DM_NVN_SHOT_OUT, which wait for the GPU anyway) and the bench wait for them; the live present does not, and
+// shows the picture without edge smoothing until they are made, a few presents after the first that asked
+static int aa_pipelines(int wait) {
+    if (aa_pipelines_start() && !wait) return 0;
+    int st = atomic_load_explicit(&g_aa_ps_state, memory_order_acquire);
+    if (st == 1 && wait) {
+        pthread_mutex_lock(&g_aa_ps_mu);
+        while ((st = atomic_load_explicit(&g_aa_ps_state, memory_order_acquire)) == 1) pthread_cond_wait(&g_aa_ps_cv, &g_aa_ps_mu);
+        pthread_mutex_unlock(&g_aa_ps_mu);
+    }
+    return st == 2;
+}
+// The in-game menu's anti-aliasing while the game runs (front_ios.m dm_setting_live): taken by the live present at its next present. A pick that turns it on starts making the
+// kernels in the background (aa_pipelines_start), and the present smooths once they are made; its buffers are made at the first present that smooths. Both are kept when it is
+// turned off, so turning it on again makes nothing. Nothing the game sees changes, nor does the drawable
+void mtl_present_aa_set(const char *mode) {
+    int v = aa_parse(mode);
+    if (v < 0 || v == AA_AB) { MLOG("[RED] present edge smoothing: %s from the in-game menu is not off, edge or edge-sharp; ignored", mode ? mode : "(none)"); return; }
+    if (v != AA_OFF) aa_pipelines_start();
+    up_post(&g_aa_req, v);
+}
+// The mode for this present: AA_OFF, AA_EDGE or AA_EDGE_SHARP (ab resolved for the phase this present runs in). live: as sharp_mode's
+static int aa_mode(int live) {
+    int want = -1, v = up_now(&g_aa_mode, &g_aa_req, live, &want);
+    if (v < 0) {
+        int was = atomic_load_explicit(&g_aa_mode, memory_order_relaxed);
+        if ((v = want) < 0) {   // a copy taken under the in-game menu's lock (front.h front_env_copy), as fx_mode's
+            char e[64]; int set = front_env_copy("DM_POST_AA", e, sizeof e) && *e;
+            v = aa_parse(set ? e : DM_GAME_POST_AA);
+            if (v < 0) { MLOG("[RED] DM_POST_AA=%s: off, edge, edge-sharp or ab; keeping the profile's %s", e, DM_GAME_POST_AA); v = aa_parse(DM_GAME_POST_AA); }
+            if (v == AA_AB) { int m = sw_mode_of("DM_POST_AA", e, 0); atomic_store_explicit(&g_aa_ab, m, memory_order_relaxed); if (!m) v = AA_OFF; }
+        }
+        static const char *const names[] = {"off", "edge (CMAA2)", "edge-sharp (CMAA2, Extra Sharp)", "ab (off and edge in turn with the DM_AB phases)"};
+        if (v != was) MLOG("present edge smoothing (%s): %s", want >= 0 ? "in-game menu" : "DM_POST_AA, else the profile's post_aa", names[v & 3]);
+        up_set(&g_aa_mode, v);
+    }
+    return v == AA_AB ? (sw_on(atomic_load_explicit(&g_aa_ab, memory_order_relaxed)) ? AA_EDGE : AA_OFF) : v;
+}
+static void aa_free(aa_state *aa) {
+    res_remove(aa->tex); res_remove(aa->work); res_remove(aa->ctl);
+    aa->tex = aa->raw = nil; aa->ctl = aa->work = nil; aa->at = nil; aa->w = aa->h = 0;
+}
+// Makes aa's texture (tw x th, format tpf, its view upf) and working buffers. live: the present thread's, whose presents on the GPU may still use the old ones: it waits for them
+// when there are old ones to replace (a new window texture size or format), and not the first time, when no present has used any
+static int aa_make(aa_state *aa, NSUInteger tw, NSUInteger th, MTLPixelFormat tpf, MTLPixelFormat upf, int live) {
+    NSUInteger key[3] = {tw, th, tpf};
+    if (!memcmp(key, aa->refused, sizeof key)) return 0;
+    if (live && aa->tex) { pthread_mutex_lock(&g_pq_mu); while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu); pthread_mutex_unlock(&g_pq_mu); }
+    aa_free(aa);
+    NSUInteger stride = (tw + 1) / 2, qh = (th + 1) / 2;
+    uint64_t cap[3] = {(uint64_t)tw * th / 2, (uint64_t)tw * th, (uint64_t)stride * qh};
+    for (int i = 0; i < 3; i++) if (g_aa_test_cap[i] && cap[i] > g_aa_test_cap[i]) cap[i] = g_aa_test_cap[i];
+    uint64_t size[5] = {cap[0] * 4, cap[2] * 4, cap[1] * 8, (uint64_t)stride * qh * 4, (uint64_t)stride * th}, total = 0;   // candidates, locations, items, list heads, edges
+    for (int i = 0; i < 5; i++) { aa->off[i] = total; total += (size[i] + 255) & ~255ull; }
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:tpf width:tw height:th mipmapped:NO];
+    td.storageMode = MTLStorageModePrivate; td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
+    aa->tex = [g_dev newTextureWithDescriptor:td];
+    aa->raw = tpf == upf ? aa->tex : [aa->tex newTextureViewWithPixelFormat:upf];
+    aa->work = [g_dev newBufferWithLength:total options:MTLResourceStorageModePrivate];
+    aa->ctl = [g_dev newBufferWithLength:AA_CTL_WORDS * 4 options:MTLResourceStorageModeShared];
+    MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 7; ad.maxTextureBindCount = 2; NSError *e = nil;
+    aa->at = [g_dev newArgumentTableWithDescriptor:ad error:&e];
+    if (!aa->tex || !aa->raw || !aa->work || !aa->ctl || !aa->at) {
+        memcpy(aa->refused, key, sizeof key); aa_free(aa);
+        MLOG("[RED] present edge smoothing: cannot make CMAA2's texture and buffers for %lux%lu (%.1f MB); this size is shown without it", (unsigned long)tw, (unsigned long)th, (total + tw * th * 4) / 1048576.0);
+        return 0;
+    }
+    memset(aa->ctl.contents, 0, AA_CTL_WORDS * 4);   // the counters start at 0; cmaa2_args clears them after each run
+    aa->tex.label = @"present edge smoothing"; aa->work.label = @"present edge smoothing: CMAA2 lists"; aa->ctl.label = @"present edge smoothing: CMAA2 control";
+    res_add(aa->tex); res_add(aa->work); res_add(aa->ctl); res_commit();
+    aa->w = tw; aa->h = th; aa->pf = tpf; for (int i = 0; i < 3; i++) aa->cap[i] = (uint32_t)cap[i];
+    if (live) MLOG("present edge smoothing: CMAA2 for window textures of %lux%lu, %.1f MB (%s)", (unsigned long)tw, (unsigned long)th, (total + aa->tex.allocatedSize) / 1048576.0,
+                   tpf != upf ? "an sRGB swapchain: smoothed in linear light" : "smoothed as the swapchain stores it");
+    return 1;
+}
+static int aa_srgb(MTLPixelFormat pf) { return pf == MTLPixelFormatRGBA8Unorm_sRGB || pf == MTLPixelFormatBGRA8Unorm_sRGB; }
+// Encodes edge smoothing of the rectangle r of raw (present_raw_src's view of src) into cb; returns aa->raw, which holds the smoothed crop at its origin, or nil (none this
+// present: off, an unsupported format, no pipelines or memory). uvb: the present's constants buffer, whose AA_UV floats take the kernels' constants
+static id<MTLTexture> aa_encode(aa_state *aa, id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> raw, const NSUInteger r[4], id<MTLBuffer> uvb, int live) {
+    int mode = aa_mode(live);
+    if (!mode) return nil;
+    MTLPixelFormat upf = raw.pixelFormat;
+    if (upf != MTLPixelFormatRGBA8Unorm && upf != MTLPixelFormatBGRA8Unorm) {
+        RED_ONCE(165, "present edge smoothing: the swapchain's format %lu is not 8-bit RGBA or BGRA (CMAA2 here handles those only); the picture is shown without it", (unsigned long)src.pixelFormat);
+        return nil;
+    }
+    if (!aa_pipelines(!live)) return nil;
+    // An sRGB swapchain: the live present passes the swapchain texture, a capture its UNORM view (present_offscreen_m4), whose parent is the swapchain texture
+    int srgb = aa_srgb(src.pixelFormat) || (src.parentTexture && aa_srgb(src.parentTexture.pixelFormat));
+    MTLPixelFormat tpf = !srgb ? upf : upf == MTLPixelFormatRGBA8Unorm ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm_sRGB;
+    if ((!aa->tex || aa->w != raw.width || aa->h != raw.height || aa->pf != tpf) && !aa_make(aa, raw.width, raw.height, tpf, upf, live)) return nil;
+    NSUInteger cx = r[0], cy = r[1], cw = r[2], ch = r[3], px = MIN((NSUInteger)FX_PAD, aa->w - cw), py = MIN((NSUInteger)FX_PAD, aa->h - ch);
+    uint32_t *k = (uint32_t *)((float *)uvb.contents + AA_UV);   // cmaa2.metal Aa
+    k[0] = (uint32_t)cw; k[1] = (uint32_t)ch; k[2] = (uint32_t)(cw + 1) / 2; k[3] = aa->cap[0]; k[4] = aa->cap[1]; k[5] = aa->cap[2]; k[6] = (uint32_t)px; k[7] = (uint32_t)py;
+    k[8] = g_aa_test_slm ? g_aa_test_slm : 768; k[9] = g_aa_test_stray;   // cmaa2.metal takes at most its CMAA2_BLEND_ITEM_SLM_SIZE
+    id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    if (!ce) { RED_ONCE(166, "present edge smoothing: no compute encoder; the picture is shown without it"); return nil; }
+    [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];   // after the frame's work, and the presents before (aa's texture and lists)
+    [ce copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(cx, cy, 0) sourceSize:MTLSizeMake(cw, ch, 1) toTexture:aa->raw destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    // The crop's edge FX_PAD texels past it, for MetalFX (fx_encode's padding, here because the scaler reads this texture); cmaa2_apply writes a smoothed edge pixel there too
+    for (NSUInteger j = 0; j < px; j++) [ce copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(cx + cw - 1, cy, 0) sourceSize:MTLSizeMake(1, ch, 1) toTexture:aa->raw destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(cw + j, 0, 0)];
+    for (NSUInteger i = 0; i < py; i++) [ce copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(cx, cy + ch - 1, 0) sourceSize:MTLSizeMake(cw, 1, 1) toTexture:aa->raw destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, ch + i, 0)];
+    if (px && py) [ce copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(cx + cw - 1, cy + ch - 1, 0) sourceSize:MTLSizeMake(1, 1, 1) toTexture:aa->raw destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(cw, ch, 0)];
+    for (NSUInteger j = 0; j < px; j++) for (NSUInteger i = 0; i < py; i++) if (i || j)
+        [ce copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(cx + cw - 1, cy + ch - 1, 0) sourceSize:MTLSizeMake(1, 1, 1) toTexture:aa->raw destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(cw + j, ch + i, 0)];
+    [ce barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    id<MTL4ArgumentTable> at = aa->at; uint64_t w = aa->work.gpuAddress, c = aa->ctl.gpuAddress;
+    [ce setArgumentTable:at];
+    [at setTexture:aa->tex.gpuResourceID atIndex:0]; [at setTexture:aa->raw.gpuResourceID atIndex:1];
+    [at setAddress:uvb.gpuAddress + AA_UV * sizeof(float) atIndex:0]; [at setAddress:c atIndex:1];
+    [at setAddress:w + aa->off[0] atIndex:2]; [at setAddress:w + aa->off[1] atIndex:3]; [at setAddress:w + aa->off[2] atIndex:4]; [at setAddress:w + aa->off[3] atIndex:5]; [at setAddress:w + aa->off[4] atIndex:6];
+    int sharp = mode == AA_EDGE_SHARP;
+    [ce setComputePipelineState:g_aa_ps[sharp]];   // each thread a 2x2 quad, 14x14 of each 16x16 threadgroup's quads its own
+    [ce dispatchThreadgroups:MTLSizeMake((cw + 27) / 28, (ch + 27) / 28, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    [ce setComputePipelineState:g_aa_ps[2]];
+    [ce dispatchThreadgroups:MTLSizeMake(2, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    [ce setComputePipelineState:g_aa_ps[3 + sharp]];
+    [ce dispatchThreadgroupsWithIndirectBuffer:c + AA_CTL_ARGS1 * 4 threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    [ce setComputePipelineState:g_aa_ps[2]];
+    [ce dispatchThreadgroups:MTLSizeMake(1, 2, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    [ce setComputePipelineState:g_aa_ps[5 + srgb]];
+    [ce dispatchThreadgroupsWithIndirectBuffer:c + AA_CTL_ARGS2 * 4 threadsPerThreadgroup:MTLSizeMake(4, 32, 1)];
+    [ce barrierAfterStages:MTLStageDispatch beforeQueueStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];   // the present's draw or MetalFX reads aa->raw
+    [ce endEncoding];
+    return aa->raw;
+}
+// A completed run's counts (ctl: the run's control buffer, from its present's completion): kept for the tests, and an overflow said once
+static void aa_note(id<MTLBuffer> ctl) {
+    const uint32_t *c = ctl.contents;
+    for (int i = 0; i < 3; i++) atomic_store_explicit(&g_aa_seen[i], c[AA_CTL_RAW_CAND + i], memory_order_relaxed);
+    atomic_store_explicit(&g_aa_seen[3], c[AA_CTL_OVERFLOW], memory_order_relaxed);
+    atomic_store_explicit(&g_aa_seen[4], c[AA_CTL_RAW_INPLACE], memory_order_relaxed);
+    if (c[AA_CTL_OVERFLOW])
+        RED_ONCE(167, "present edge smoothing: CMAA2's lists ran full (bits %#x: 1 shape candidates, 2 blend items, 4 locations; this run %u candidates, %u items, %u locations): what did not fit was left unsmoothed",
+                 c[AA_CTL_OVERFLOW], c[AA_CTL_RAW_CAND], c[AA_CTL_RAW_ITEM], c[AA_CTL_RAW_LOC]);
+}
+// A crop that moved since the live present before, in a texture of the same size: a game's dynamic resolution. Counted for present_gpu_note's line (present thread)
+static void present_crop_note(id<MTLTexture> src, const NSUInteger r[4]) {
+    static NSUInteger last[6]; NSUInteger now[6] = {src.width, src.height, r[0], r[1], r[2], r[3]};
+    if (last[0] && last[0] == now[0] && last[1] == now[1] && memcmp(last + 2, now + 2, sizeof now - 2 * sizeof *now)) atomic_fetch_add_explicit(&g_present_crop_moves, 1, memory_order_relaxed);
+    memcpy(last, now, sizeof now);
+}
+// The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, edge-smoothed first where aa_encode takes it (aa:
+// its state, nil = none), then through MetalFX where fx_encode takes it (fx: the scaler state to use, nil = bilinear), with Sharpening where present_sharpen gives it. uvb: the
+// pass's constants (one buffer per present allocator, written by the CPU)
+static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], id<MTLBuffer> uvb, fx_state *fx, aa_state *aa) {
     NSUInteger r[4]; if (!present_crop_rect(src, crop, r)) return 0;
     present_pipeline(dst.pixelFormat);
     double dw = dst.width, dh = dst.height;
     MTLViewport vp = present_fit(src, dw, dh);
-    int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
-    id<MTLTexture> tex = present_raw_src(src), up = fx ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present) : nil;
+    int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh, live = fx == &g_fx_present;
+    if (live) present_crop_note(src, r);
+    id<MTLTexture> tex = present_raw_src(src), smooth = aa ? aa_encode(aa, cb, src, tex, r, uvb, live) : nil;
+    if (smooth) { tex = smooth; r[0] = r[1] = 0; }   // the smoothed crop, at the origin of a texture of the window texture's size
+    id<MTLTexture> up = fx ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, live, smooth != nil) : nil;
     if (up) { tex = up; r[0] = r[1] = 0; r[2] = up.width; r[3] = up.height; }   // the scaled picture, the viewport's size: drawn 1:1
+    float sharp = present_sharpen(live, up != nil, tex.pixelFormat);
     MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
     rp.colorAttachments[0].texture = dst;
     rp.colorAttachments[0].loadAction = full ? MTLLoadActionDontCare : MTLLoadActionClear;
@@ -15559,30 +15952,33 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     float *uv = uvb.contents; NSUInteger tw = tex.width, th = tex.height, cx = r[0], cy = r[1], cw = r[2], ch = r[3];
     uv[0] = (float)cx / tw; uv[1] = (float)cy / th; uv[2] = (float)cw / tw; uv[3] = (float)ch / th;
     uv[4] = (cx + 0.5f) / tw; uv[5] = (cy + 0.5f) / th; uv[6] = (cx + cw - 0.5f) / tw; uv[7] = (cy + ch - 0.5f) / th;
+    uv[8] = sharp; uv[9] = 1.0f / tw; uv[10] = 1.0f / th; uv[11] = 0;   // fs_rcas: its strength and the step to its neighbours, one source texel (fs reads the first 8)
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [g_present_args setAddress:uvb.gpuAddress atIndex:0];
-    [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
+    [en setViewport:vp]; [en setRenderPipelineState:sharp > 0 ? g_rcas_pso : g_blit_pso];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     m4_end_present(en);
-    return up ? PRESENT_METALFX : PRESENT_STANDARD;
+    return (up ? PRESENT_METALFX : sharp > 0 ? PRESENT_SHARPENED : PRESENT_STANDARD) | (smooth ? PRESENT_AA : 0);
 }
 // The present's picture drawn into an offscreen texture (out: private, render target) the way present_now draws it into the drawable, MetalFX included, on the Metal 4 queue;
 // returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error. Resources remain resident and retained until GPU completion.
 static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int)) {
     id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
-    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * PRESENT_UV_FLOATS options:MTLResourceStorageModeShared];
     if (!al || !cb || !uvb) { MLOG("[RED] offscreen present: no command allocator or buffer"); return 0; }
     id<MTLTexture> raw = present_raw_src(src);
-    fx_state fx = {0};
+    fx_state fx = {0}; aa_state aa = {0};   // edge smoothing of its own, made for this capture, so screenshots and DM_NVN_SHOT_OUT captures show it as the screen does
     res_add(out); res_add(uvb); res_commit();
     [cb beginCommandBufferWithAllocator:al];
-    int kind = present_encode_m4(cb, raw, out, crop, uvb, &fx);
+    int kind = present_encode_m4(cb, raw, out, crop, uvb, &fx, &aa);
     [cb endCommandBuffer];
-    if (!kind) { res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out); return 0; }
+    if (!kind) { res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out); aa_free(&aa); return 0; }
     MTL4CommitOptions *options = [MTL4CommitOptions new];
+    id<MTLTexture> aa_tex = aa.tex, aa_raw = aa.raw; id<MTLBuffer> aa_work = aa.work, aa_ctl = aa.ctl; id<MTL4ArgumentTable> aa_at = aa.at;
     [options addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
-        (void)al; (void)cb; (void)raw; (void)fx.sc;   // keep the Metal 4 commands, source view and scaler alive too
-        res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out);
+        (void)al; (void)cb; (void)raw; (void)fx.sc; (void)aa_raw; (void)aa_at;   // keep the Metal 4 commands, source view, scaler and edge smoothing's state alive too
+        res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out); res_remove(aa_tex); res_remove(aa_work); res_remove(aa_ctl);
+        if (aa_ctl && !f.error) aa_note(aa_ctl);
         if (f.error) { MLOG("[RED] offscreen present: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "offscreen present"); }
         done(f.error ? PRESENT_FAILED : kind);
     }];
@@ -15596,16 +15992,22 @@ static int present_offscreen_wait(id<MTLTexture> src, const int crop[4], id<MTLT
     if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC))) { MLOG("[RED] offscreen present: the GPU did not finish within 10 s"); return 0; }
     return kind;
 }
-// The present command buffer's GPU time (its commit feedback: from its first to its last command, the MetalFX scaler and the present pass), every 600 presents as p50 / p95, apart
-// for presents through MetalFX and through the bilinear pass. Under g_pq_mu (the feedback handler)
-static void present_gpu_note(double s, int fx) {
-    static double v[2][600]; static int n[2];
+// The present command buffer's GPU time (its commit feedback: from its first to its last command, edge smoothing, the MetalFX scaler and the present pass), every 600 presents as
+// p50 / p95, apart for presents through the bilinear pass, through MetalFX and through the bilinear pass with Sharpening, each with and without edge smoothing (kind:
+// present_encode_m4's; the [ab] lines leave the present's command buffer out, so DM_POST_AA=ab reads its cost here), with the times the game's crop moved so far
+// (present_crop_note: a game whose dynamic resolution moves its crop, which a game's nvnWindowSetCrop call count alone does not show). Under g_pq_mu (the feedback handler)
+static void present_gpu_note(double s, int kind) {
+    static double v[6][600]; static int n[6];
+    int b = (kind & ~PRESENT_AA) == PRESENT_METALFX ? 1 : (kind & ~PRESENT_AA) == PRESENT_SHARPENED ? 2 : 0;
+    if (kind & PRESENT_AA) b += 3;
     if (!(s > 0 && s < 1)) return;
-    v[fx][n[fx]++] = s * 1e3;
-    if (n[fx] < 600) return;
-    double *a = v[fx]; for (int i = 1; i < 600; i++) { double x = a[i]; int j = i - 1; while (j >= 0 && a[j] > x) { a[j + 1] = a[j]; j--; } a[j + 1] = x; }
-    MLOG("present command buffer GPU time over 600 presents %s: p50 %.3f ms, p95 %.3f ms, max %.3f ms", fx ? "through MetalFX" : "through the bilinear pass", a[299], a[569], a[599]);
-    n[fx] = 0;
+    v[b][n[b]++] = s * 1e3;
+    if (n[b] < 600) return;
+    double *a = v[b]; for (int i = 1; i < 600; i++) { double x = a[i]; int j = i - 1; while (j >= 0 && a[j] > x) { a[j + 1] = a[j]; j--; } a[j + 1] = x; }
+    static const char *const how[] = {"through the bilinear pass", "through MetalFX", "through the bilinear pass with sharpening"};
+    MLOG("present command buffer GPU time over 600 presents %s%s: p50 %.3f ms, p95 %.3f ms, max %.3f ms; crop moved %llu times so far", how[b % 3], b >= 3 ? " after edge smoothing" : "", a[299], a[569], a[599],
+         (unsigned long long)atomic_load_explicit(&g_present_crop_moves, memory_order_relaxed));
+    n[b] = 0;
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
 static int g_link_it_depth;    // Frames that were waiting in the present queue at that callback, the one it takes included (same thread): 2 on every tick is a standing frame
@@ -15697,15 +16099,16 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     [g_q4 waitForDrawable:dr];
     id<MTL4CommandBuffer> cb = g_present_cb[alloc_i];
     [cb beginCommandBufferWithAllocator:g_present_alloc4[alloc_i]];
-    int kind = present_encode_m4(cb, src, dr.texture, crop, g_present_uv[alloc_i], &g_fx_present);
+    int kind = present_encode_m4(cb, src, dr.texture, crop, g_present_uv[alloc_i], &g_fx_present, &g_aa_present);
     if (!kind) { [cb endCommandBuffer]; [g_q4 signalDrawable:dr]; return 0; }
-    int fx_kind = kind == PRESENT_METALFX;
     [cb endCommandBuffer];
     MTL4CommitOptions *o = [MTL4CommitOptions new];
+    id<MTLBuffer> aa_ctl = kind & PRESENT_AA ? g_aa_present.ctl : nil;   // its counts, read when this present completes (a later present may have run by then: a log line's figures only)
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
+        else if (aa_ctl) aa_note(aa_ctl);
         pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
-        present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind); pthread_mutex_unlock(&g_pq_mu);
+        present_gpu_note(f.GPUEndTime - f.GPUStartTime, kind); pthread_mutex_unlock(&g_pq_mu);
     }];
     id<MTL4CommandBuffer> buffers[] = {cb};
     pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);

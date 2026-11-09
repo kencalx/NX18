@@ -33,9 +33,12 @@ CAP_SIZE(p_render_cond, 16); CAP_OFF(p_render_cond, mode, 0); CAP_OFF(p_render_c
 CAP_SIZE(p_multi_draw, 48); CAP_OFF(p_multi_draw, ind, 0); CAP_OFF(p_multi_draw, cnt, 8); CAP_OFF(p_multi_draw, ibuf, 16);
 CAP_OFF(p_multi_draw, stride, 24); CAP_OFF(p_multi_draw, max, 32); CAP_OFF(p_multi_draw, prim, 36); CAP_OFF(p_multi_draw, itype, 40);
 _Static_assert(OP_MULTI_DRAW == 55, "keep existing capture op numbers stable");
-_Static_assert(OP_COUNT_ == 58, "nvn_capture.c: a record op was added or removed: give it a case in cap_rec_fields");
+_Static_assert(OP_DEPTH_BOUNDS == 58 && sizeof(p_depth_bounds) == 12, "keep existing capture op numbers stable");
+_Static_assert(OP_COUNT_ == 59, "nvn_capture.c: a record op was added or removed: give it a case in cap_rec_fields");
 
 #define MULTI_DRAW_LAYOUT "op 55 p_multi_draw 48 ind 0 cnt 8 ibuf 16 stride 24 max 32 prim 36 itype 40\n"
+// SetDepthBounds became a record (OP_DEPTH_BOUNDS, no pointers): a capture holding one needs a replay that knows it, and older captures have none
+#define DEPTH_BOUNDS_LAYOUT "op 58 p_depth_bounds 12\n"
 // Copy strides travel after a copy's texture snapshot (p_copy_strides) instead of as OP_COPY_STRIDE records; the replay still takes OP_COPY_STRIDE from older captures
 #define COPY_STRIDES_LAYOUT "p_copy_strides 16 at 192\n"
 _Static_assert(sizeof(p_copy_strides) == 16 && COPY_STRIDES_OFF == 192, "nvn_capture.c: p_copy_strides moved: update COPY_STRIDES_LAYOUT");
@@ -47,14 +50,14 @@ const char *cap_layout(void) {
            "p_bind_handles 280 src 16\np_bind_tex1 24 nobase 0x100 short 16\np_bind_state short\np_draw 48 ind 24 mdi_cnt 32\np_draw_idx 56 ibuf 24 ind 32 mdi_cnt 40\np_dispatch 32 ind 24\np_set_pool 8\n"
            "p_copy_b2t 64 src 0 tex 8\np_copy_t2t 104 src 0 dst 8\np_clear_tex 72 tex 0\np_clear_buf 24 addr 0\np_tf_bind 24 addr 8\np_tf_state 16 ctl 8\np_render_cond 16 addr 8\n"
            "signal_event 16 val 0\nreport_counter 16 addr 8\ncopy_b2b 24 src 0 dst 8\nupdate_ub dst 0\nfence_sync 8 sync 0\njump 8\ncall 8\n"
-           MULTI_DRAW_LAYOUT COPY_STRIDES_LAYOUT;
+           MULTI_DRAW_LAYOUT COPY_STRIDES_LAYOUT DEPTH_BOUNDS_LAYOUT;
 }
 
 int cap_layout_matches(const char *layout, size_t n) {
-    // Each addition is appended. Captures with an earlier complete layout (before the copy strides' tail, before the multi-draw opcode) still use the same op numbers and payloads.
+    // Each addition is appended. Captures with an earlier complete layout (before the depth bounds opcode, before the copy strides' tail, before the multi-draw opcode) still use the same op numbers and payloads.
     const char *current = cap_layout();
-    size_t full = strlen(current), no_strides = full - (sizeof COPY_STRIDES_LAYOUT - 1), no_multi = no_strides - (sizeof MULTI_DRAW_LAYOUT - 1);
-    return (n == full || n == no_strides || n == no_multi) && !memcmp(layout, current, n);
+    size_t full = strlen(current), no_dbnd = full - (sizeof DEPTH_BOUNDS_LAYOUT - 1), no_strides = no_dbnd - (sizeof COPY_STRIDES_LAYOUT - 1), no_multi = no_strides - (sizeof MULTI_DRAW_LAYOUT - 1);
+    return (n == full || n == no_dbnd || n == no_strides || n == no_multi) && !memcmp(layout, current, n);
 }
 
 const char *cap_record_unsupported(uint32_t op) {
@@ -94,7 +97,7 @@ int cap_rec_fields(uint32_t op, uint8_t *payload, uint32_t size, const cap_ops *
     switch (op) {
         case OP_END: case OP_BEGIN: case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_BIND_STATE: case OP_BIND_VATTR:
         case OP_BIND_VSTREAM: case OP_BIND_TEX1: case OP_STENCIL: case OP_POLY_OFFSET: case OP_BARRIER: case OP_COPY_STRIDE: case OP_BLEND_COLOR: case OP_RESET_COUNTER:
-        case OP_DEPTH_CLAMP: case OP_RAST_DISCARD: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_DRAW_TEX:   // OP_DRAW_TEX: a texture handle, read through the pools at replay
+        case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_RAST_DISCARD: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_DRAW_TEX:   // OP_DRAW_TEX: a texture handle, read through the pools at replay
             return 1;
         case OP_JUMP: case OP_CALL: return HAS(0) && ops->obj(ctx, CAP_K_SEG, F(0), payload, (uint32_t)plen);
         case OP_SIGNAL_EVENT: return HAS(0) && ops->addr(ctx, F(0), 4, 1);   // volatile uint32_t *val, mode, value
