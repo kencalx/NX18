@@ -238,9 +238,9 @@ static NSError *gpu_lost_test_error(void) {
 static pthread_mutex_t g_res_mu = PTHREAD_MUTEX_INITIALIZER;   // Dedicated lock for the residency set: res_add is called on paths that hold g_mu (arena_new), so it cannot share g_mu
 // Wait ledger (DM_NVN_WAITS=1): every place a thread of the host or the game waits on the CPU for the GPU or for the encode thread, counted per frame (calls, calls that blocked,
 // the time they blocked) and logged every 300 frames with the frame's GPU idle. The game's own SyncWait is split by how far its fence is behind the newest one (0: the last submission)
-enum { WS_SYNC, WS_SYNC_NEWEST, WS_SYNC_POLL, WS_ACQ, WS_FINISH, WS_ALLOC, WS_VIS, WS_MDI, WS_READTEX, WS_T2T, WS_DIAG, WS_SNAP, WS_UPZERO, WS_UPALLOC, WS_DRAIN, WS_UBC, WS_OLDQ, WS_N };
+enum { WS_SYNC, WS_SYNC_NEWEST, WS_SYNC_POLL, WS_ACQ, WS_FINISH, WS_ALLOC, WS_VIS, WS_MDI, WS_READTEX, WS_T2T, WS_DIAG, WS_SNAP, WS_UPZERO, WS_UPALLOC, WS_DRAIN, WS_UBC, WS_OLDQ, WS_ONCE, WS_N };
 static const char *const ws_name[WS_N] = {"SyncWait (game, older fence)", "SyncWait (game, newest fence)", "SyncWait polls", "SyncWait on an acquire sync", "QueueFinish", "allocator", "occlusion ring",
-    "indirect-count multi-draw", "texture readback", "texture copy t2t", "diagnostics", "snapshot ring", "upload batches", "upload slot", "encode thread drain", "uniform copy worker", "old-queue command buffer"};
+    "indirect-count multi-draw", "texture readback", "texture copy t2t", "diagnostics", "snapshot ring", "upload batches", "upload slot", "encode thread drain", "uniform copy worker", "old-queue command buffer", "one-off command buffer"};
 static _Atomic uint64_t g_ws_n[WS_N], g_ws_blk[WS_N], g_ws_ns[WS_N];
 static int ws_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_WAITS"); v = e && atoi(e) > 0; } return v; }
 static inline uint64_t ws_t0(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
@@ -576,30 +576,31 @@ static int g_c1_full_valid;
 static NSDictionary<NSString *, NSString *> *g_cb_ext;   // cb_extent.tsv: shader key → "reg:bytes ..." (how far into each uniform slot the shader can read); nil when stale or missing
 static os_unfair_lock g_c1_lock = OS_UNFAIR_LOCK_INIT;
 
+@class NvOnce; static NvOnce *once_new(int order); static void once_use(NvOnce *o, id r); static id once_copy(NvOnce *o); static id once_pass(NvOnce *o, MTLRenderPassDescriptor *rp);
+static void once_end(NvOnce *o, id e); static int once_wait(NvOnce *o);   // one-off command buffers on the Metal 4 queue (below, at q_cb)
 // DM_UDC_SELFTEST=1 (diagnostic, checks DontCare behavior on a real A19 device): private-storage Depth32Float_Stencil8 / RGBA8 (1952x900) are first cleared to write known values,
 // then Load + DontCare without drawing, read back and compared pixel by pixel, printing one result line
 static void udc_selftest(void) {
     if (!getenv("DM_UDC_SELFTEST")) return;
-    id<MTLCommandQueue> q = [g_dev newCommandQueue];
     for (int depth = 1; depth >= 0; depth--) {
         NSUInteger w = 1952, h = 900;
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:depth ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; td.storageMode = MTLStorageModePrivate;
         id<MTLTexture> t = [g_dev newTextureWithDescriptor:td];
-        id<MTLCommandBuffer> cb = [q commandBuffer];
+        NvOnce *cb = once_new(1); once_use(cb, t);
         for (int pass = 0; pass < 2; pass++) {
             MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
             MTLLoadAction la = pass ? MTLLoadActionLoad : MTLLoadActionClear; MTLStoreAction sa = pass ? MTLStoreActionDontCare : MTLStoreActionStore;
             if (depth) { rp.depthAttachment.texture = t; rp.depthAttachment.loadAction = la; rp.depthAttachment.storeAction = sa; rp.depthAttachment.clearDepth = 0.3125;
                          rp.stencilAttachment.texture = t; rp.stencilAttachment.loadAction = la; rp.stencilAttachment.storeAction = sa; rp.stencilAttachment.clearStencil = 0x5a; }
             else { rp.colorAttachments[0].texture = t; rp.colorAttachments[0].loadAction = la; rp.colorAttachments[0].storeAction = sa; rp.colorAttachments[0].clearColor = MTLClearColorMake(0.2, 0.4, 0.6, 0.8); }
-            [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+            once_end(cb, once_pass(cb, rp));
         }
-        id<MTLBuffer> out = [g_dev newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared];
-        id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        id<MTLBuffer> out = [g_dev newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared]; once_use(cb, out);
+        id b = once_copy(cb);
         [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:out destinationOffset:0
             destinationBytesPerRow:w * 4 destinationBytesPerImage:w * h * 4 options:depth ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone];
-        [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        once_end(cb, b); once_wait(cb);
         const uint32_t *px = out.contents; NSUInteger bad = 0; for (NSUInteger i = 0; i < w * h; i++) if (px[i] != px[0]) bad++;
         MLOG("UDC self-check %s %s %lux%lu first value %08x, values differing from it %lu / %lu", g_dev.name.UTF8String, depth ? "Depth32F_S8" : "RGBA8", (unsigned long)w, (unsigned long)h, px[0], (unsigned long)bad, (unsigned long)(w * h));
     }
@@ -616,7 +617,7 @@ void mtl_init(void) {
     g_dev = MTLCreateSystemDefaultDevice();
     if (!g_dev) MDIE("no Metal device");
     if (!g_dev.hasUnifiedMemory) MDIE("needs a unified-memory device (zero-copy memory pools)");
-    g_q = [g_dev newCommandQueue];
+    g_q = [g_dev newCommandQueue];   // the classic queue: the host's one-off command buffers on a device without Metal 4, and the test fixtures' (q_cb)
     // A device without Metal 4 (the paravirtualized GPU of a virtual Mac, such as GitHub's macos-26 runner: no residency set, no MTL4CommandQueue) cannot run the NVN layer. The GL and
     // Vulkan layers draw on classic queues of their own and need only the device (mtl_device_classic): there the classic part starts and presents are dropped, which is all a
     // run-time shader capture needs (the NSP script's capture_shaders boots headless; GitHub issue #112: Balatro's capture aborted here)
@@ -648,7 +649,7 @@ void mtl_init(void) {
     // BC textures are created and uploaded as BC, with no decompression path (dm/gfx/tex/README.md); without BC the first one aborts in Metal's descriptor validation mid-game
     // (GitHub issue #704: an iPhone 15, A16). The iOS front end refuses such a device before the launcher (main.m); this stops every other route at the device, with the reason
     if (!g_dev.supportsBCTextureCompression) MDIE("the Metal device %s has no BC texture formats, which the games' textures use and the host does not decompress: an iPhone needs an A17 Pro or later, an iPad an M1 or later", g_dev.name.UTF8String);
-    [g_q addResidencySet:g_res];
+    [g_q addResidencySet:g_res];   // what the test fixtures reach on the classic queue through GPU addresses
     [g_q4 addResidencySet:g_res];
     { void crash_set_wait_dump(void (*fn)(void)); void mtl_wait_state_dump(void); crash_set_wait_dump(mtl_wait_state_dump); }
     g_alloc_n = 3;
@@ -1303,12 +1304,140 @@ static void up_owner_check(const char *where) {
     void *bt[32]; int n = backtrace(bt, 32); backtrace_symbols_fd(bt, n, 2);
     abort();
 }
-// Every command buffer created outside the replay / upload batch goes through this. On the submit thread: flush this batch's uploads first, so that commands that then read or write these textures are ordered after the uploads;
+// A command buffer of the classic queue (g_q). On the submit thread: flush this batch's uploads first, so that commands that then read or write these textures are ordered after the uploads;
 // other threads (the present thread etc.) creating a command buffer do not touch the batch: they do not read or write textures uploaded in this batch; commands that need these textures all come after this replay submission (the batch is flushed before it)
-// Old-queue command buffers (readback / diagnostics / present; to be deleted once M4-4 and M4-5 are migrated away): uploads are already on the Metal 4 queue, and there is no ordering guarantee between the two queues -
-// wait for the upload to complete after flushing it, and only then can the old queue read the upload result (mtl_read_texels waited first and flushed afterwards, the readback beat the upload, 4 failures on t_nvn upload content)
+// Uploads are on the Metal 4 queue, and there is no ordering guarantee between the two queues - wait for the upload to complete after flushing it, and only then can the classic queue read the upload result
+// (mtl_read_texels waited first and flushed afterwards, the readback beat the upload, 4 failures on t_nvn upload content). The host's own one-off command buffers use it only on a device without
+// Metal 4 (g_classic; once_new below puts them on the Metal 4 queue otherwise); the test fixtures that write or read textures on their own use it everywhere
 static void up_wait_zero(_Atomic int *v, int site);
 static id<MTLCommandBuffer> q_cb(void) { if (on_sub_thread()) { up_flush(); rec_drain(); up_wait_zero(&g_up_pending, WS_OLDQ); } return [g_q commandBuffer]; }
+// One-off command buffers: readbacks (mtl_read_texels, the capture's), screenshots (shot, grab_present), the diagnostics (DM_CTL texraw, DM_NVN_TEXDUMP / TEXRAW / SNAPRAW, the load-skip
+// probe, DM_NVN_REGLUM, DM_UDC_SELFTEST) and the clear of a zero multisample texture (dummy_tex). They went to the classic queue (q_cb), so on the submit thread each one flushed the upload batch,
+// drained the encode thread and waited for every upload batch to complete (WS_OLDQ) before it could read what they wrote. They now go to the Metal 4 queue, whose commit order does that:
+// on the submit thread the command buffer is committed behind the upload batch it flushes and behind every record the encode thread was given (rec_commit_upload, in its place among them),
+// but not behind the replay's open command buffer (g_cb), which is committed only at the end of the submission: one that reads what the open one wrote commits it first (lp_finish);
+// from another thread it is a block of its own behind every block published so far, as the present snapshot's copy (rec_own_push: the frame the game submitted before it presents is in them),
+// or a direct commit without the encode thread. Each encoder starts with a queue barrier (after all earlier work) and ends with one (before all later work). Metal 4 makes nothing resident by
+// itself: what is made for one of them joins the residency set until it completes (once_use). A dummy_tex clear (order 0) reads nothing: no upload flush, no barrier before it, a direct commit.
+// The caller waits (once_wait, on the wait ledger as WS_ONCE) or takes the completion on the feedback queue (once_commit), where it must not wait for another one-off command buffer.
+// Allocators and command buffers are kept for reuse (up to ONCE_KEEP) once the GPU is done with them. Without Metal 4 (g_classic) they are classic command buffers from q_cb, as before
+@interface NvOnce : NSObject { @public id cb; id<MTL4CommandAllocator> al; NSMutableArray *temp; id<MTL4ArgumentTable> args; int order; } @end   // temp: nil for a classic command buffer
+@implementation NvOnce @end
+enum { ONCE_KEEP = 4 };
+static os_unfair_lock g_once_lk = OS_UNFAIR_LOCK_INIT; static __strong id<MTL4CommandAllocator> g_once_al[ONCE_KEEP]; static __strong id<MTL4CommandBuffer> g_once_cb[ONCE_KEEP]; static int g_once_n;
+static NvOnce *once_new(int order) {
+    NvOnce *o = [NvOnce new]; o->order = order;
+    if (!g_q4) { o->cb = order ? q_cb() : [g_q commandBuffer]; return o; }
+    os_unfair_lock_lock(&g_once_lk);
+    if (g_once_n) { g_once_n--; o->al = g_once_al[g_once_n]; o->cb = g_once_cb[g_once_n]; g_once_al[g_once_n] = nil; g_once_cb[g_once_n] = nil; }
+    os_unfair_lock_unlock(&g_once_lk);
+    if (o->al) [o->al reset];
+    else { o->al = [g_dev newCommandAllocator]; o->cb = [g_dev newCommandBuffer]; if (!o->al || !o->cb) MDIE("one-off command buffer: no Metal 4 command allocator / buffer"); }
+    [(id<MTL4CommandBuffer>)o->cb beginCommandBufferWithAllocator:o->al];
+    o->temp = [NSMutableArray array];
+    return o;
+}
+// Make a resource resident for this command buffer when it is not already: a view or a texture over a buffer by the allocation it is made from, a heap's resource by its heap, as res_check
+// finds them. Taken out again once the command buffer completes; what was resident before is left as it is
+static void once_use(NvOnce *o, id res) { @autoreleasepool {
+    if (!o->temp || !res) return;
+    id r = res;
+    if ([r conformsToProtocol:@protocol(MTLTexture)]) { id<MTLTexture> t = r; while (t.parentTexture) t = t.parentTexture; r = t.buffer ? (id)t.buffer : (id)t; }
+    id<MTLHeap> heap = [r conformsToProtocol:@protocol(MTLResource)] ? ((id<MTLResource>)r).heap : nil;
+    if (heap) r = heap;
+    if (!r) return;
+    pthread_mutex_lock(&g_res_mu); int in = [g_res_objects containsObject:r]; pthread_mutex_unlock(&g_res_mu);
+    if (in || [o->temp containsObject:r]) return;
+    res_add(r); [o->temp addObject:r];
+} }
+static id once_copy(NvOnce *o) {   // a blit encoder, or on the Metal 4 queue a compute encoder (the same copy calls)
+    if (!o->temp) return [(id<MTLCommandBuffer>)o->cb blitCommandEncoder];
+    id<MTL4ComputeCommandEncoder> e = [(id<MTL4CommandBuffer>)o->cb computeCommandEncoder];
+    if (o->order) [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()];
+    return e;
+}
+static id once_pass(NvOnce *o, MTLRenderPassDescriptor *rp) {   // the pass as a classic descriptor describes it; on the Metal 4 queue with the same attachment descriptors
+    if (!o->temp) return [(id<MTLCommandBuffer>)o->cb renderCommandEncoderWithDescriptor:rp];
+    MTL4RenderPassDescriptor *d = [MTL4RenderPassDescriptor new];
+    for (NSUInteger i = 0; i < 8; i++) if (rp.colorAttachments[i].texture) d.colorAttachments[i] = rp.colorAttachments[i];
+    if (rp.depthAttachment.texture) d.depthAttachment = rp.depthAttachment;
+    if (rp.stencilAttachment.texture) d.stencilAttachment = rp.stencilAttachment;
+    id<MTL4RenderCommandEncoder> e = [(id<MTL4CommandBuffer>)o->cb renderCommandEncoderWithDescriptor:d];
+    if (!e) MDIE("one-off command buffer: no Metal 4 render encoder");
+    if (o->order) [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()];
+    return e;
+}
+static void once_frag(NvOnce *o, id e, id<MTLTexture> t, id<MTLSamplerState> s) {   // fragment texture 0 and sampler 0 (on the Metal 4 queue through an argument table of its own; the sampler needs supportArgumentBuffers)
+    if (!o->temp) { [e setFragmentTexture:t atIndex:0]; [e setFragmentSamplerState:s atIndex:0]; return; }
+    if (!o->args) {
+        MTL4ArgumentTableDescriptor *d = [MTL4ArgumentTableDescriptor new]; d.maxTextureBindCount = 1; d.maxSamplerStateBindCount = 1; d.maxBufferBindCount = 1;
+        NSError *err = nil; o->args = [g_dev newArgumentTableWithDescriptor:d error:&err];
+        if (!o->args) MDIE("one-off command buffer: no argument table: %s", err.localizedDescription.UTF8String);
+    }
+    [o->args setTexture:t.gpuResourceID atIndex:0]; [o->args setSamplerState:s.gpuResourceID atIndex:0];
+    [(id<MTL4RenderCommandEncoder>)e setArgumentTable:o->args atStages:MTLRenderStageFragment];
+}
+static void once_end(NvOnce *o, id e) {
+    if (o->temp) [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageAll beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
+    [e endEncoding];
+}
+// done (may be nil) runs once the GPU is done: ok 0 on a GPU error. On the Metal 4 queue it runs on the feedback queue after the resources once_use added have left the residency set
+static void once_commit(NvOnce *o, void (^done)(int ok)) {
+    if (!o->temp) {
+        id<MTLCommandBuffer> cb = o->cb;
+        if (done) [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { done(c.status == MTLCommandBufferStatusCompleted); }];
+        [cb commit]; return;
+    }
+    id<MTL4CommandBuffer> cb = o->cb; id<MTL4CommandAllocator> al = o->al; NSMutableArray *temp = o->temp; id<MTL4ArgumentTable> args = o->args;
+    [cb endCommandBuffer];
+    MTL4CommitOptions *opt = [MTL4CommitOptions new];
+    [opt addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        (void)args;   // kept until the GPU is done with it
+        if (f.error) { MLOG("[RED] one-off command buffer (readback / screenshot / diagnostics) execution error: %s", f.error.description.UTF8String); res_top_once(f.error); gpu_lost_check(f.error, "one-off command buffer"); }
+        // The residency set holds what it removed until its next commit, and a readback buffer must be gone once the readback returns (a guest thread's pool may never drain: t_readback)
+        @autoreleasepool { if (temp.count) { for (id r in temp) res_remove(r); [temp removeAllObjects]; res_commit(); } }
+        os_unfair_lock_lock(&g_once_lk);
+        if (g_once_n < ONCE_KEEP) { g_once_al[g_once_n] = al; g_once_cb[g_once_n] = cb; g_once_n++; }
+        os_unfair_lock_unlock(&g_once_lk);
+        if (done) done(!f.error);
+    }];
+    if (o->order && on_sub_thread()) {
+        up_flush();   // the uploads this batch made go first
+        res_commit();
+        rec_commit_upload(cb, opt);   // like an upload batch: after what is recorded so far, and it reads no uniform shadow
+        rec_publish();
+        return;
+    }
+    res_commit();
+    if (o->order && rec_on() && g_rb_started) {
+        rec_blk *b = rec_own_begin();
+        rec_t *r = rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = rec_obj(opt); r->a[1] = rec_obj(cb);
+        rec_own_push(b);
+        return;
+    }
+    id<MTL4CommandBuffer> buffers[] = {cb};
+    pthread_mutex_lock(&g_res_mu); [g_q4 commit:buffers count:1 options:opt]; pthread_mutex_unlock(&g_res_mu);
+}
+// Commit and wait until the GPU is done; returns 0 on a GPU error. Not on the feedback queue (the completion runs there)
+static int once_wait(NvOnce *o) {
+    if (!o->temp) { id<MTLCommandBuffer> cb = o->cb; [cb commit]; [cb waitUntilCompleted]; return cb.status == MTLCommandBufferStatusCompleted; }
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0); __block int ok = 0;
+    uint64_t w0 = ws_t0();
+    once_commit(o, ^(int k) { ok = k; dispatch_semaphore_signal(sem); });
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    if (ws_on()) ws_put(WS_ONCE, w0, 1);
+    return ok;
+}
+// Wait until everything committed to the Metal 4 queue so far has completed on the GPU: an empty one-off command buffer, whose leading queue barrier puts it after all earlier work, placed
+// as once_commit places it (on the submit thread behind the upload batch it flushes and what the encode thread was given, from another thread behind every block published so far).
+// It ends on its commit feedback, not on a queue signal: when the queue runs none of this process's work (revoked GPU access, gpu_lost_check; a submission iOS refuses in the
+// background) no signal ever comes, but the feedback does, with the error, as it does for the frames (mtl_finish_gpu waits on g_done). A queue signalEvent here hung dm_gfx_suspend
+// on the iOS main thread (sceneDidEnterBackground: the watchdog, and save_sync_background after it never starts); the classic queue's empty command buffer came back with an error too
+static void once_drain(void) {
+    NvOnce *o = once_new(1);
+    once_end(o, once_copy(o));
+    once_wait(o);
+}
 static post_op *g_post; static int g_npost, g_postcap;
 // One autorelease pool per submission: submissions run on a guest thread (long-lived, no run loop, never drains the implicit pool), so objects autoreleased in the Metal replay
 // (command buffers, encoders, pass descriptors, etc.) are never released unless put in a pool. Measured on the character select screen of a real iOS device: the host heap grows by about 47 objects per frame, 0.22 MiB/s.
@@ -2335,7 +2464,12 @@ void mtl_present_flush(void);
 void mtl_finish(void) { mtl_finish_gpu_at(WS_FINISH); }
 static void present_drop_for_suspend(void);
 static void snap_drain(void);
-void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_drain(); mtl_init(); id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; mtl_finish_gpu(); }
+// Everything submitted so far has run (suspend, the tests): on the Metal 4 queue its one-off command buffers too (once_drain); without Metal 4 an empty command buffer of the classic queue
+void mtl_drain(void) {
+    present_drop_for_suspend(); mtl_present_flush(); snap_drain(); mtl_init();
+    if (g_q4) once_drain(); else { id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; }
+    mtl_finish_gpu();
+}
 
 // ================= Render replay =================
 #include "../../host/front.h"
@@ -4733,6 +4867,7 @@ static int pf_is_float(MTLPixelFormat f) {   // Float color formats that can sto
         case MTLPixelFormatRG32Float: case MTLPixelFormatRGBA32Float: case MTLPixelFormatRG11B10Float: return 1; default: return 0; }
 }
 static int fz_load_covers(int i, id<MTLTexture> t, NSUInteger level);
+static _Atomic uint64_t g_lp_checked, g_lp_bad;   // attachments the probe has read back, and those of them with sentinel pixels left (t_load_probe)
 static NSMutableArray *g_lp;    // DM_NVN_LOADPROBE=1 / 2 / 3 (two constant sentinel values / NaN - under float formats normal shader output cannot reach NaN, ruling out numeric coincidence): attachments judged elidable are cleared to the sentinel color instead, and at pass end the remaining sentinel pixels are read back and counted (diagnostic: should be 0)
 static void lp_finish(void);
 // Same-target continuation: when the game calls SetRenderTargets again on the same set of targets (with no copy / dispatch / clear in between) the pass is not ended - on TBDR this saves one full write-back + load.
@@ -9089,8 +9224,10 @@ static id<MTLTexture> dummy_tex(int dtt, int dpf) {
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         if (dpf == NVN_DPF_DEPTH) { rp.depthAttachment.texture = t; rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.clearDepth = 0; rp.depthAttachment.storeAction = MTLStoreActionStore; }
         else { rp.colorAttachments[0].texture = t; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0); rp.colorAttachments[0].storeAction = MTLStoreActionStore; }
-        id<MTLCommandBuffer> cb = [g_q commandBuffer]; [[cb renderCommandEncoderWithDescriptor:rp] endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        cache[dtt % DMY_NT][dpf & 3] = t; g_dummy_tex_rid[dtt % DMY_NT][dpf & 3] = t.gpuResourceID._impl; res_add(t);
+        // Resident before its clear (on the Metal 4 queue nothing is made resident for it); a pass of its own that waits for nothing before it (once_new(0)), on any thread
+        res_add(t);
+        NvOnce *cb = once_new(0); once_end(cb, once_pass(cb, rp)); once_wait(cb);
+        cache[dtt % DMY_NT][dpf & 3] = t; g_dummy_tex_rid[dtt % DMY_NT][dpf & 3] = t.gpuResourceID._impl;
         return t;
     }
     t = [g_dev newTextureWithDescriptor:d];   // Shared storage is all zeros when newly created
@@ -10619,33 +10756,45 @@ static int fz_load_covers(int i, id<MTLTexture> t, NSUInteger level) {
 }
 
 // Probe wrap-up: for every attachment changed to clear to the sentinel color, read back that level / layer, compare pixel by pixel with a same-format 1x1 sentinel pixel, and count what remains (> 0 means the coverage proof is wrong, report a failure)
+// The probed pass has just ended in the open command buffer (g_cb), which reaches the queue only with the submission's commit; the probe's own command buffer would be committed before it
+// and read what the attachment held before the pass (on the classic queue too). So the open segment is committed first, as mdi_wait does, and the readback goes behind it on the one queue
 static void lp_finish(void) {
-    id<MTLCommandBuffer> dcb = q_cb();
+    if (g_cb) {
+        if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+        up_flush(); gmem_commit_patch(); res_commit();   // as sub_cut: the pool table words the pass encoded follow the pools before the GPU starts it
+        [g_cb endCommandBuffer];
+        rec_commit(g_cb, nil);   // once_commit publishes it with the probe's command buffer behind it
+        g_cb = rec_cb_new();
+        [g_cb beginCommandBufferWithAllocator:g_alloc4[g_alloc_cur]];
+    }
+    NvOnce *dcb = once_new(1); NSMutableArray<dispatch_block_t> *checks = [NSMutableArray array];
     NSArray *ps = g_lp; g_lp = nil;
     for (NSArray *e in ps) {
         id<MTLTexture> t = e[0]; NSUInteger lv = [e[1] unsignedIntegerValue], sl = [e[2] unsignedIntegerValue];
         NSUInteger W = MAX(t.width >> lv, 1), H = MAX(t.height >> lv, 1), bpp = (NSUInteger)(att_bytes(t, lv) / (W * H));
         MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:1 height:1 mipmapped:NO];
         rd.usage = MTLTextureUsageRenderTarget; rd.storageMode = MTLStorageModePrivate;
-        id<MTLTexture> ref = [g_dev newTextureWithDescriptor:rd];
+        id<MTLTexture> ref = [g_dev newTextureWithDescriptor:rd]; once_use(dcb, ref);
         MTLRenderPassDescriptor *pd = [MTLRenderPassDescriptor renderPassDescriptor];
         pd.colorAttachments[0].texture = ref; pd.colorAttachments[0].loadAction = MTLLoadActionClear; pd.colorAttachments[0].storeAction = MTLStoreActionStore;
         pd.colorAttachments[0].clearColor = [e[6] intValue] == 3 ? MTLClearColorMake(NAN, NAN, NAN, NAN) : [e[6] intValue] == 2 ? MTLClearColorMake(0.777, 0.222, 0.555, 0.888) : MTLClearColorMake(0.123, 0.456, 0.789, 0.321);
-        [[dcb renderCommandEncoderWithDescriptor:pd] endEncoding];
+        once_end(dcb, once_pass(dcb, pd));
         id<MTLBuffer> bt = [g_dev newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared], br = [g_dev newBufferWithLength:bpp options:MTLResourceStorageModeShared];
-        id<MTLBlitCommandEncoder> b = [dcb blitCommandEncoder];
+        once_use(dcb, t); once_use(dcb, bt); once_use(dcb, br);
+        id b = once_copy(dcb);
         [b copyFromTexture:t sourceSlice:sl sourceLevel:lv sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, H, 1) toBuffer:bt destinationOffset:0 destinationBytesPerRow:W * bpp destinationBytesPerImage:W * H * bpp];
         [b copyFromTexture:ref sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(1, 1, 1) toBuffer:br destinationOffset:0 destinationBytesPerRow:bpp destinationBytesPerImage:bpp];
-    enc_b_end(b);
+        once_end(dcb, b);
         unsigned long long pass = [e[3] unsignedLongLongValue], ser = [e[5] unsignedLongLongValue]; int idx = [e[4] intValue];
-        [dcb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c;
+        [checks addObject:[^{
             const uint8_t *p = bt.contents, *r = br.contents; uint64_t left = 0; char at[96] = ""; size_t ao = 0;
             for (NSUInteger k = 0; k < W * H; k++) if (!memcmp(p + k * bpp, r, bpp)) { if (left++ < 4) ao += snprintf(at + ao, sizeof at - ao, " (%lu,%lu)", (unsigned long)(k % W), (unsigned long)(k / W)); }
+            atomic_fetch_add(&g_lp_checked, 1); if (left) atomic_fetch_add(&g_lp_bad, 1);
             if (left) MLOG("[RED] load-skip probe: pass %llu c%d ser=%llu lv%lu sl%lu %lux%lu sentinel pixels left %llu, first positions%s", pass, idx, ser, (unsigned long)lv, (unsigned long)sl, (unsigned long)W, (unsigned long)H, (unsigned long long)left, at);
             else MLOG("load-skip probe: pass %llu c%d ser=%llu lv%lu sl%lu %lux%lu fully covered (0 sentinel pixels left)", pass, idx, ser, (unsigned long)lv, (unsigned long)sl, (unsigned long)W, (unsigned long)H);
-        }];
+        } copy]];
     }
-    [dcb commit];
+    once_commit(dcb, ^(int ok) { (void)ok; for (dispatch_block_t check in checks) check(); });
 }
 // SetRenderTargets naming the targets of the open pass goes on in that pass. On a tile-based GPU a new pass loads and stores its whole attachments however little it draws; on the Switch the call costs nothing.
 // Splatoon Raiders sets its 6400x6400 ink map again before each of about 150 occlusion queries a frame (one draw each, sampling the map, writing nothing): 150 passes of about 1 ms, 42 GB of attachment loads a frame,
@@ -13270,11 +13419,12 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     if (!mt || !tex_level_ok(mt, level, "CPU readback")) { memset(dst, 0, img * nz); return; }
     mtl_finish_gpu_at(WS_READTEX);
     id<MTLBuffer> buf = [g_dev newBufferWithLength:wb * hb * nz options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = enc_b_begin(cb);
+    // On the Metal 4 queue, behind this thread's uploads and submissions (once_new): no wait for the upload batches first, as the classic queue needed
+    NvOnce *cb = once_new(1); once_use(cb, mt); once_use(cb, buf); id b = once_copy(cb);
     for (int z = 0; z < nz; z++)
         [b copyFromTexture:mt sourceSlice:is3d ? 0 : layer0 + r->zoffset + z sourceLevel:level sourceOrigin:MTLOriginMake(r->xoffset, r->yoffset, is3d ? r->zoffset + z : 0)
                 sourceSize:MTLSizeMake(r->width, r->height, 1) toBuffer:buf destinationOffset:z * wb * hb destinationBytesPerRow:wb destinationBytesPerImage:wb * hb];
-    enc_b_end(b); [cb commit]; [cb waitUntilCompleted];
+    once_end(cb, b); once_wait(cb);
     for (int z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) memcpy(dst + z * img + y * row, (uint8_t *)buf.contents + z * wb * hb + y * wb, wb);
     int shift = rb_copy_shift(t, mt); if (shift) rb_swap_rows(dst, wb, hb, (size_t)nz, row, img, shift);   // into the guest's order
     }
@@ -14328,18 +14478,19 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
     d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
     id<MTLTexture> out = w && h ? [g_dev newTextureWithDescriptor:d] : nil; id<MTLBuffer> buf = out ? [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared] : nil;
     if (!buf) { MLOG("[RED] full-window screenshot: cannot create output (%zux%zu)", w, h); cb(NULL); return; }
-    // GPU completion starts the readback, keeping the present thread free. Each capture owns its scaler and textures until completion.
+    // GPU completion starts the readback, keeping the present thread free. Each capture owns its scaler and textures until completion. On the Metal 4 queue the readback is committed from
+    // the feedback queue and completes there too, without waiting (once_commit)
     void (^readback)(int) = ^(int ok) {
         if (!ok) { cb(NULL); return; }
-        id<MTLCommandBuffer> cb2 = q_cb(); id<MTLBlitCommandEncoder> b = [cb2 blitCommandEncoder];
+        NvOnce *cb2 = once_new(1); once_use(cb2, out); once_use(cb2, buf); id b = once_copy(cb2);
         [b copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h];
-        [b endEncoding];
-        [cb2 addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c;
+        once_end(cb2, b);
+        once_commit(cb2, ^(int done) {
+            if (!done) { cb(NULL); return; }
             CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
             CGContextRef ctx = CGBitmapContextCreate(buf.contents, w, h, 8, row, cs, kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
             CGImageRef img = ctx ? CGBitmapContextCreateImage(ctx) : NULL; cb(img);
-            CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs); }];
-        [cb2 commit];
+            CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs); });
     };
     if (g_q4) { if (!present_offscreen_m4(src, crop, out, readback)) cb(NULL); }
 #if TARGET_OS_OSX
@@ -14385,11 +14536,11 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
         read.pixelFormat != MTLPixelFormatBGRA8Unorm && read.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB) { MLOG("[RED] screenshot does not support format %lu", (unsigned long)read.pixelFormat); return; }
     size_t w = read.width, h = read.height, row = w * 4;
     id<MTLBuffer> buf = [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> cb = q_cb();
-    id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+    NvOnce *cb = once_new(1); once_use(cb, read); once_use(cb, buf);   // the offscreen output, or a texture dump's, is resident no longer (or never was)
+    id b = once_copy(cb);
     [b copyFromTexture:read sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
               toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h];
-    [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    once_end(cb, b); once_wait(cb);
     if (screen && read == src && atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) {   // lower-left origin: the window image is stored bottom-up (see g_origin_ll)
         uint8_t *p = buf.contents, *tmp = malloc(row);
         if (tmp) { for (size_t y = 0; y < h / 2; y++) { memcpy(tmp, p + y * row, row); memcpy(p + y * row, p + (h - 1 - y) * row, row); memcpy(p + (h - 1 - y) * row, tmp, row); } free(tmp); } }
@@ -14464,11 +14615,11 @@ void dm_gfx_texraw(uint64_t serial, const char *path) {
     int d3 = t.textureType == MTLTextureType3D;   // a 3D texture: every depth slice, as slices
     NSUInteger ns = d3 ? MAX(t.depth, 1u) : (t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? 6 : 1) * MAX(t.arrayLength, 1u);   // every slice (a cube's six faces), one after another
     id<MTLBuffer> buf = [g_dev newBufferWithLength:sz * ns options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+    NvOnce *cb = once_new(1); once_use(cb, t); once_use(cb, buf); id b = once_copy(cb);
     MTLBlitOption bo = t.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone;
     for (NSUInteger s = 0; s < ns; s++)
         [b copyFromTexture:t sourceSlice:d3 ? 0 : s sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, d3 ? s : 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:sz * s destinationBytesPerRow:row destinationBytesPerImage:sz options:bo];
-    [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    once_end(cb, b); once_wait(cb);
     FILE *f = fopen(path, "wb"); if (f) { fprintf(f, "%lu %lu %lu %lu", (unsigned long)w, (unsigned long)h, (unsigned long)t.pixelFormat, (unsigned long)row); if (ns > 1) fprintf(f, " %lu", (unsigned long)ns); fputc('\n', f); fwrite(buf.contents, 1, sz * ns, f); fclose(f); }
     const uint8_t *p = buf.contents;
     MLOG("[texraw] ser=%llu %lux%lu format %lu type %lu → %s; first bytes %02x %02x %02x %02x %02x %02x %02x %02x", (unsigned long long)serial, (unsigned long)w, (unsigned long)h, (unsigned long)t.pixelFormat, (unsigned long)t.textureType, path, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
@@ -14501,7 +14652,7 @@ static void td_dump(void) {
         d.vertexFunction = [lib newFunctionWithName:@"vs"]; d.fragmentFunction = [lib newFunctionWithName:@"fs"];
         d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
         ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
-        MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sp = [g_dev newSamplerStateWithDescriptor:sd];
+        MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.supportArgumentBuffers = YES; sp = [g_dev newSamplerStateWithDescriptor:sd];   // bound through an argument table on the Metal 4 queue (once_frag)
         if (!ps) { MLOG("[RED] TEXDUMP pipeline failed %s", e.localizedDescription.UTF8String); return; }
     }
     MLOG("[texdump] frame %ld: %lu color targets", g_td_frame, (unsigned long)g_td_list.count);
@@ -14518,10 +14669,10 @@ static void td_dump(void) {
         size_t bpp = t.pixelFormat == MTLPixelFormatRGBA16Float ? 8 : t.pixelFormat == MTLPixelFormatRGBA32Float ? 16 : 4; (void)bw; (void)bh;
         size_t row = w * bpp, img = row * h;
         id<MTLBuffer> buf = [g_dev newBufferWithLength:img * dz options:MTLResourceStorageModeShared];
-        id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        NvOnce *cb = once_new(1); once_use(cb, t); once_use(cb, buf); id b = once_copy(cb);
         MTLBlitOption bo = t.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone;   // depth-stencil: the 32-bit float depth plane only
         [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, dz) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:img options:bo];
-        [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        once_end(cb, b); once_wait(cb);
         char path[1024]; snprintf(path, sizeof path, g_td_path, (int)ser); strlcat(path, ".raw", sizeof path);
         FILE *f = fopen(path, "wb"); if (f) { fprintf(f, "%lu %lu %lu %lu %zu\n", (unsigned long)w, (unsigned long)h, (unsigned long)dz, (unsigned long)t.pixelFormat, row); fwrite(buf.contents, 1, img * dz, f); fclose(f); }
         MLOG("[texraw] ser=%llu %lux%lux%lu format %lu → %s", ser, (unsigned long)w, (unsigned long)h, (unsigned long)dz, (unsigned long)t.pixelFormat, path);
@@ -14534,9 +14685,9 @@ static void td_dump(void) {
             NSUInteger rw = MAX(t.width >> lv, 1u), rh = MAX(t.height >> lv, 1u);
             size_t bpp = t.pixelFormat == MTLPixelFormatRGBA16Float ? 8 : t.pixelFormat == MTLPixelFormatRGBA32Float ? 16 : t.pixelFormat == MTLPixelFormatR16Float || t.pixelFormat == MTLPixelFormatR16Unorm ? 2 : 4;
             id<MTLBuffer> rb = [g_dev newBufferWithLength:rw * rh * bpp options:MTLResourceStorageModeShared];
-            id<MTLCommandBuffer> rc = q_cb(); id<MTLBlitCommandEncoder> bb = [rc blitCommandEncoder];
+            NvOnce *rc = once_new(1); once_use(rc, t); once_use(rc, rb); id bb = once_copy(rc);
             [bb copyFromTexture:t sourceSlice:0 sourceLevel:lv sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(rw, rh, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:rw * bpp destinationBytesPerImage:rw * rh * bpp];
-            [bb endEncoding]; [rc commit]; [rc waitUntilCompleted];
+            once_end(rc, bb); once_wait(rc);
             char rp_[1024]; snprintf(rp_, sizeof rp_, g_td_path, (int)(ser * 100 + lv));
             if (e.count > 4) { char tail[64]; snprintf(tail, sizeof tail, "_s%03d", [e[4] intValue]); strlcat(rp_, tail, sizeof rp_); }   // TEXSNAP copies of one target: one file per pass
             strlcat(rp_, ".raw", sizeof rp_);
@@ -14547,12 +14698,12 @@ static void td_dump(void) {
         MTLTextureDescriptor *od = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
         od.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; od.storageMode = MTLStorageModePrivate;
         id<MTLTexture> o = [g_dev newTextureWithDescriptor:od];
-        id<MTLCommandBuffer> cb = q_cb();
+        NvOnce *cb = once_new(1); once_use(cb, o); once_use(cb, t);
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = o; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-        id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
-        [en setRenderPipelineState:ps]; [en setFragmentTexture:v atIndex:0]; [en setFragmentSamplerState:sp atIndex:0];
-        [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        id en = once_pass(cb, rp);
+        [en setViewport:(MTLViewport){0, 0, (double)w, (double)h, 0, 1}]; [en setRenderPipelineState:ps]; once_frag(cb, en, v, sp);
+        [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; once_end(cb, en); once_wait(cb);
         char path[1024]; snprintf(path, sizeof path, g_td_path, (int)(ser * 100 + sl * 10 + lv));
         if (e.count > 4) { snprintf(path, sizeof path, g_td_path, 0); char *dot = strrchr(path, '.'); char ext[16] = ""; if (dot) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
             char tail[64]; snprintf(tail, sizeof tail, "_s%03d_%llu_%lu%s", [e[4] intValue], (unsigned long long)ser, (unsigned long)lv, ext); strlcat(path, tail, sizeof path); }   // TEXSNAP copy
@@ -15072,18 +15223,17 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (rl && (src.pixelFormat == MTLPixelFormatRGBA8Unorm || src.pixelFormat == MTLPixelFormatBGRA8Unorm || src.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB || src.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB)) {
         NSUInteger x0 = (NSUInteger)(rr[0] * src.width), y0 = (NSUInteger)(rr[1] * src.height), w = (NSUInteger)(rr[2] * src.width) - x0, h = (NSUInteger)(rr[3] * src.height) - y0;
         id<MTLBuffer> rb = [g_dev newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared];
-        id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        NvOnce *cb = once_new(1); once_use(cb, src); once_use(cb, rb); id b = once_copy(cb);
         [b copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:w * h * 4];
-        [b endEncoding];
+        once_end(cb, b);
         unsigned long long n = g_present_n, tns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-        [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; const uint8_t *q = rb.contents; uint64_t sum = 0;
+        once_commit(cb, ^(int ok) { (void)ok; const uint8_t *q = rb.contents; uint64_t sum = 0;
             uint8_t g[4096]; NSUInteger ng = 0;   // Subsampled grayscale thumbnail (every 4th row / column, at most 4096 points), recorded along with the mean, for per-frame image correlation analysis
             for (NSUInteger y = 0; y < h; y += 4) for (NSUInteger x = 0; x < w && ng < sizeof g; x += 4) { const uint8_t *px = q + 4 * (y * w + x); g[ng++] = (uint8_t)((px[0] + px[1] + px[2]) / 3); }
             for (NSUInteger k = 0; k < w * h; k++) sum += q[4 * k] + q[4 * k + 1] + q[4 * k + 2];
             pthread_mutex_lock(&rlmu); fprintf(rlf, "%llu\t%llu\t%.4f\t", n, tns, sum / (3.0 * w * h));
             for (NSUInteger k = 0; k < ng; k++) fprintf(rlf, "%02x", g[k]);
-            fputc('\n', rlf); fflush(rlf); pthread_mutex_unlock(&rlmu); }];
-        [cb commit];
+            fputc('\n', rlf); fflush(rlf); pthread_mutex_unlock(&rlmu); });
     }
     // DM_NVN_SHOT=frame number[,frame number...]:path (%d in the path is replaced with the frame number)
     static long shots[4096]; static int nshot = -1; static const char *shot_path;   // up to 4096 frames (a burst over a frame range, for scoring frame by frame)
