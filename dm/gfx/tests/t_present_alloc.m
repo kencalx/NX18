@@ -110,5 +110,23 @@ int main(void) { @autoreleasepool {
     CHECK("no frame dropped after ticket 2", g_link_dropped == 1);
     bad = bad_pixels(fifth.texture, 50, 150); printf("ticket 5 drawable: %d of 64 pixels wrong\n", bad);
     CHECK("ticket 5 shows its own picture", bad == 0);
+
+    // A standing frame trimmed (DM_PRESENT_TRIM=3): two frames waiting at every tick, as when two landed in one refresh and none came without one. FIFO takes the older at the
+    // first two ticks, and the third takes the newest, dropping one; then a single frame resets the run. The GPU gate is open from here on
+    CHECK("trim off by default", g_link_trim == 0);
+    g_link_trim = 3; uint64_t drop0 = g_link_dropped, in0 = g_pq_in;
+    present_enqueue(&a, 1. / 60, NULL, 0); present_enqueue(&b, 1. / 60, NULL, 0); tick();
+    CHECK("two waiting, first tick: the older (FIFO)", g_pq_read == in0 + 1 && g_link_it_depth == 2 && g_link_trims == 0);
+    present_enqueue(&b, 1. / 60, NULL, 0); tick();
+    CHECK("two waiting, second tick: the older (FIFO)", g_pq_read == in0 + 2 && g_link_trims == 0);
+    present_enqueue(&c, 1. / 60, left_half, 0); tick();
+    CHECK("two waiting, third tick: the newest, one dropped", g_pq_read == in0 + 4 && g_pq_read == g_pq_in && g_link_trims == 1 && g_link_dropped == drop0 + 1);
+    present_enqueue(&a, 1. / 60, NULL, 0); tick();
+    CHECK("one waiting: taken, the run starts again", g_pq_read == g_pq_in && g_link_standing == 0 && g_link_trims == 1 && g_link_dropped == drop0 + 1);
+    pthread_mutex_lock(&g_pq_mu); struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 5;
+    while (g_pq_inflight && pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) != ETIMEDOUT) {}
+    int left = g_pq_inflight; pthread_mutex_unlock(&g_pq_mu);
+    CHECK("the trim's presents completed", left == 0);
+    g_link_trim = 0;
     printf("present allocators: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

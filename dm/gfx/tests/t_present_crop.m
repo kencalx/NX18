@@ -24,7 +24,7 @@ static int failed, cases;
 #define EXPECT(n, w, v) do { int a=(w),b=(v); cases++; printf("%s expected %d → got %d %s\n",n,a,b,a==b?"✓":"✗");failed+=a!=b; } while(0)
 static const uint8_t colors[4][4]={{255,0,0,255},{0,255,0,255},{0,0,255,255},{255,255,0,255}};
 #ifndef CROP_LEGACY_HEADER
-extern int g_shape_w,g_shape_h;   // t_host_stubs.c: the last shape the present reported to the front end
+extern int g_shape_w,g_shape_h,g_size_w,g_size_h;   // t_host_stubs.c: the last shape and render size the present reported to the front end
 #endif
 
 #ifndef CROP_LEGACY_HEADER
@@ -297,6 +297,11 @@ int main(void) { @autoreleasepool {
         present_shape(tall,&sa,&sb);EXPECT("a taller texture without DM_SCREEN_ASPECT: 16:9",1080,(int)sb);
         mtl_present_screen(1920,1344);present_shape(tall,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a texture that follows it keeps the taller shape",1344,(int)sb);
         present_shape(sw,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a 16:9 texture of a build without stubs stays 16:9",1080,(int)sb);mtl_present_screen(0,0);
+        {   // The render size for the iPhone's drawable (front_picture_size): the texture's pixels in the picture's shape, whichever direction needs more; never the crop's
+            int rw,rh;present_render_size(sw,1920,1080,&rw,&rh);EXPECT("render size of a 64x36 texture shown at 16:9, width",64,rw);EXPECT("render size of a 64x36 texture shown at 16:9, height",36,rh);
+            present_render_size(tall,1920,1080,&rw,&rh);EXPECT("render size of a 1920x1344 texture shown at 16:9 keeps its 1344 rows, width",2389,rw);EXPECT("height",1344,rh);
+            present_render_size(sw,4,3,&rw,&rh);EXPECT("render size of a 64x36 texture shown at 4:3: its 64 columns, width",64,rw);EXPECT("height",48,rh);
+        }
         // The front end's layout and the mouse follow the same shape, not the crop's (front_picture_shape): a real present of the 5:4 crop
         tex_t st={.magic=MAGIC('T', 'E', 'X', 0), .serial =10002};st.d.width=TW;st.d.height=TH;st.d.depth=st.d.levels=1;st.d.format=NVN_FORMAT_RGBA8;st.d.target=NVN_TEXTURE_TARGET_2D;serial_put(st.serial,sw);
         win_t w3={.ntex=1};w3.tex[0]=(NVNtexture *)&st;set((NVNwindow *)&w3,crop54[0],crop54[1],crop54[2],crop54[3]);
@@ -304,6 +309,7 @@ int main(void) { @autoreleasepool {
         present(&queue,(NVNwindow *)&w3,0);display_ticket(w3.ticket[0],before);
         h_nvnWindowFinalize((NVNwindow *)&w3);
         EXPECT("the shape reported to the front end is the layer's, width",1920,g_shape_w);EXPECT("the shape reported to the front end is the layer's, height",1080,g_shape_h);
+        EXPECT("a render size was reported to the front end",1,g_size_w>0&&g_size_h>0);
         res_remove(sw);
     }
 #endif

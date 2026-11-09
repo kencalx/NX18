@@ -35,6 +35,8 @@ static UILabel *front_ios_fps_label(void);
 
 @interface DmGameView : UIView
 @property (nonatomic) CGFloat maxPixelWidth;   // 0: the screen's own pixels; a TV caps the drawable at 1920 across (tv_attach)
+@property (nonatomic) CGSize picturePixels;   // zero: the drawable has the view's pixels; else at most the picture's render size (DmRootVC viewDidLayoutSubviews, DmLayout.h dm_drawable_size)
+@property (nonatomic) BOOL stretched;   // the present draws the picture over the whole drawable (Picture Stretch, mtl_present_stretch): picturePixels applies to each direction on its own
 @end
 @implementation DmGameView
 + (Class)layerClass { return CAMetalLayer.class; }
@@ -51,14 +53,26 @@ static UILabel *front_ios_fps_label(void);
     return self;
 }
 - (void)didMoveToWindow { [super didMoveToWindow]; [self setNeedsLayout]; }   // the phone's screen or a TV's (DmTVSceneDelegate)
-- (void)layoutSubviews {   // render at the pixels of the screen the view is on (an iPad window can move to another), at most maxPixelWidth across
+- (void)setPicturePixels:(CGSize)px { if (!CGSizeEqualToSize(px, _picturePixels)) { _picturePixels = px; [self setNeedsLayout]; } }
+- (void)setStretched:(BOOL)on { if (on != _stretched) { _stretched = on; [self setNeedsLayout]; } }
+// Render at the pixels of the screen the view is on (an iPad window can move to another), at most maxPixelWidth across; with picturePixels set, at most the picture's render
+// size, and Core Animation scales the layer to the view (its contentsGravity, resize): 1920x1080 instead of 2868x1320 in landscape Stretch on an iPhone 18 Pro Max, three
+// drawables of 8 MB instead of 15 MB, and a present pass that draws the picture 1:1. The layer keeps the screen's contentsScale: the view's size in points, and with it the
+// layout and the touches (layout.game), stay as they are
+- (void)layoutSubviews {
     [super layoutSubviews];
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
     UIScreen *screen = self.window.windowScene.screen;
     CGFloat scale = screen ? screen.nativeScale : MAX(self.traitCollection.displayScale, 1);
     if (self.maxPixelWidth > 0) scale = MIN(scale, self.maxPixelWidth / MAX(self.bounds.size.width, 1));
     l.contentsScale = scale;
-    l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
+    CGSize d = dm_drawable_size(self.bounds.size, scale, self.picturePixels, self.stretched);
+    if (!CGSizeEqualToSize(d, l.drawableSize) && d.width > 0 && d.height > 0) {
+        CGSize view = CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);
+        if (CGSizeEqualToSize(d, view)) LOG("front end: drawable %.0fx%.0f, the view's pixels", d.width, d.height);
+        else LOG("front end: drawable %.0fx%.0f, the picture's %.0fx%.0f, scaled by Core Animation to the view's %.0fx%.0f pixels", d.width, d.height, self.picturePixels.width, self.picturePixels.height, view.width, view.height);
+    }
+    l.drawableSize = d;
 }
 @end
 static void tv_attach(void);
@@ -99,6 +113,14 @@ static void tv_attach(void);
 static DmRootVC *g_root;
 static CGFloat g_picture_aspect = DM_PICTURE_16_9;   // the presented picture's width / height (front_picture_shape); main thread
 static BOOL g_pictured;   // the game's first picture was reported (front_picture_shape); main thread
+// The drawable at the picture's render size (front_picture_size, DmGameView picturePixels) wherever the present scales the picture bilinearly: Upscaling Standard, or Picture
+// Stretch (and so Ultrawide) to a shape 1 % or more off the picture's, where MetalFX does not run (nvn_mtl.m fx_wanted: its spatial scaler is made for a uniform scale; DmLayout.h
+// dm_layout_fx_shape). The present would draw the picture into the view's pixels bilinearly; Core Animation does the same scale on the layer, and the drawables are smaller. Where
+// MetalFX can run the drawable keeps the view's pixels, which its scaler fills. DM_DRAWABLE_NATIVE=1 keeps the view's pixels always, as before. Main thread
+static CGSize g_picture_px;   // the picture's render size (front_picture_size), zero before the first present
+static BOOL g_upscale_metalfx;   // Upscaling is MetalFX: DM_PRESENT_UPSCALE at the start (startGame), then the in-game menu's pick (dm_setting_live)
+static BOOL g_drawable_native;   // DM_DRAWABLE_NATIVE=1
+static BOOL upscale_is_metalfx(const char *v) { return v && (!strcmp(v, "metalfx") || !strcmp(v, "1")); }   // nvn_upscale_pick.h up_parse's values
 static void launcher_done(void) { [g_root startGame]; }
 void mtl_present_stretch(int on);   // nvn_mtl.m: the present draws the picture over the whole drawable instead of keeping its shape (Picture Stretch)
 void mtl_present_upscale_set(const char *mode);   // nvn_mtl.m: the in-game menu's Upscaling, which the present thread takes at its next present
@@ -184,6 +206,9 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
             if (as && *as && strcmp(as, "0")) { setenv("DM_SCREEN_ASPECT", "0", 1); LOG("front end: Ultrawide keeps the game's 16:9 picture: DM_SCREEN_ASPECT=%s → 0", as); }
         }
     }
+    g_upscale_metalfx = upscale_is_metalfx(getenv("DM_PRESENT_UPSCALE"));   // the main thread, as the menu's setenv (dm_setting_env): no copy under the lock is needed here
+    const char *dn = getenv("DM_DRAWABLE_NATIVE"); g_drawable_native = dn && atoi(dn) != 0;
+    if (g_drawable_native) LOG("front end: the drawable keeps the view's pixels (DM_DRAWABLE_NATIVE=1), also where the present scales the picture bilinearly");
     self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen
     self.view.window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategorySmall;   // UIKit draws the in-game menu (GameMenu.swift) in this window: it keeps one compact text size over the game, whatever the system's text size
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
@@ -220,7 +245,10 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
     BOOL onTV = self.game.superview != self.view;   // the TV's view lays the picture out; the phone is all pad
     DmLayout layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect), b, self.picture, g_picture_aspect);
     if (!onTV) self.game.frame = layout.game;
-    mtl_present_stretch(!onTV && dm_layout_stretched(layout, self.picture, g_picture_aspect));   // a TV and a split keep the picture's shape
+    BOOL stretched = !onTV && dm_layout_stretched(layout, self.picture, g_picture_aspect);
+    mtl_present_stretch(stretched);   // a TV and a split keep the picture's shape
+    self.game.stretched = stretched;   // the drawable: the picture's render size where MetalFX does not run (g_picture_px), on a TV as well
+    self.game.picturePixels = g_drawable_native || (g_upscale_metalfx && dm_layout_fx_shape(layout, stretched, g_picture_aspect)) ? CGSizeZero : g_picture_px;
     layout.topSafeOnly = duoPortrait;
     NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? @"split" : self.picture == DmPictureFill ? @"overlay, Fill" : self.picture == DmPictureStretch ? @"overlay, Stretch" : @"overlay",
                       (long)self.hingeStatus, self.partiallyOpen ? " (half open)" : "", regionLog, NSStringFromCGRect(layout.game), NSStringFromCGRect(layout.controls)];
@@ -282,6 +310,13 @@ static void tv_detach(void) {
     if (g_tv_mode_was >= 0) { dm_set_opmode(g_tv_mode_was); g_tv_mode_was = -1; dm_gamepad_opmode_changed(); }
     LOG("front end: TV disconnected, the picture is back on the phone");
 }
+void front_picture_size(int w, int h) {   // front.h: the drawable's size where MetalFX does not run (g_picture_px); not the crop's, so a game's dynamic resolution resizes nothing
+    if (w <= 0 || h <= 0) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_picture_px.width == w && g_picture_px.height == h) return;
+        g_picture_px = CGSizeMake(w, h); [g_root.view setNeedsLayout];   // viewDidLayoutSubviews hands it to the game view, also while it is on a TV
+    });
+}
 void front_picture_shape(int w, int h) {   // front.h: the views take the presented picture's shape (a taller one under DM_SCREEN_ASPECT) instead of 16:9
     if (w <= 0 || h <= 0) return;
     CGFloat a = (CGFloat)w / h;
@@ -295,8 +330,9 @@ void front_picture_shape(int w, int h) {   // front.h: the views take the presen
 
 // The in-game menu's picks go into the environment under one lock (dm_setting_env, from GameMenu.swift), and a host thread that reads one of those variables while the game runs
 // copies it under the same lock (front_env_copy, front.h): Darwin's setenv rewrites a value string it allocated in place, or reallocates it, under a pointer getenv handed another
-// thread before. Of the variables the menu sets, only DM_PRESENT_UPSCALE is read so (nvn_mtl.m fx_mode, on the present thread, at its first present). The others are read on the
-// main thread, which picks run on: DM_PICTURE_FIT, DM_SHOW_FPS and DM_RUMBLE in startGame, DM_TOUCH_* in the gamepad's init, both before the menu exists; DM_OPMODE once, by
+// thread before. Of the variables the menu sets, only DM_PRESENT_UPSCALE is read so (nvn_mtl.m fx_mode, on the present thread, at its first present; startGame also reads it on
+// the main thread, for the drawable). The others are read on the main thread, which picks run on: DM_PICTURE_FIT, DM_SHOW_FPS and DM_RUMBLE in startGame, DM_TOUCH_* in the
+// gamepad's init, both before the menu exists; DM_OPMODE once, by
 // hle_oe.c dm_opmode, which caches it, and the menu's own opening calls it (dm_pad_layout_offered) before a pick can be made. A host thread that comes to read one of them while
 // the game runs takes it through front_env_copy, or is handed the pick by dm_setting_live below, as the present thread is (mtl_present_upscale_set)
 static pthread_mutex_t g_env_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -329,7 +365,10 @@ bool dm_setting_live(const char *env, const char *value) {
     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root showFPS:atoi(value) != 0]; return true; }
     if (!strcmp(env, "DM_TOUCH_HAPTICS")) { if (value) dm_gamepad_touch_feedback(atoi(value) != 0); return true; }
     if (!strcmp(env, "DM_TOUCH_SIZE") || !strcmp(env, "DM_TOUCH_OPACITY")) { if (value) { dm_gamepad_touch_look(env, value); [g_root.view setNeedsLayout]; } return true; }   // the counter follows the size
-    if (!strcmp(env, "DM_PRESENT_UPSCALE")) { if (value) { mtl_present_upscale_set(value); LOG("front end: upscaling %s (in-game menu)", value); } return true; }   // taken by the present thread (nvn_mtl.m)
+    if (!strcmp(env, "DM_PRESENT_UPSCALE")) {   // taken by the present thread (nvn_mtl.m); the drawable follows (g_upscale_metalfx)
+        if (value) { mtl_present_upscale_set(value); g_upscale_metalfx = upscale_is_metalfx(value); [g_root.view setNeedsLayout]; LOG("front end: upscaling %s (in-game menu)", value); }
+        return true;
+    }
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }
     return false;
 }

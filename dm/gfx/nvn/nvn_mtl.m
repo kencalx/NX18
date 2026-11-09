@@ -129,7 +129,9 @@ static pthread_cond_t g_link_cv = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t g_link_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_link_tick_ns, g_link_tick_n;
 static uint64_t g_link_dropped;
+static uint64_t g_link_trims;   // Under g_pq_mu: standing frames dropped by DM_PRESENT_TRIM (the display-link callback; its log line in present_now reads it on the same thread)
 static uint64_t g_link_empty;   // Under g_pq_mu: ticks that found no new frame queued (counted here, not as ticks minus presents: presents before the link starts and while it is rescued are not on ticks)
+static int g_link_trim = -1, g_link_standing;   // Under g_pq_mu (the display-link callback): DM_PRESENT_TRIM's K (-1 not read yet, 0 off) and the ticks in a row that left a frame waiting
 static double g_link_hold_until; static uint64_t g_link_held;   // Changed only on the display-link callback thread: the time the previous frame must stay on screen until by its present interval (0 = no hold), and the ticks that took no new frame because of it
 static int g_pq_inflight;   // Under g_pq_mu: number of presents committed to the GPU whose completion callback has not arrived yet
 int g_dm_present_link;   // Present pacing mode (runtime value of DM_PRESENT_LINK, modified directly during same-process alternating measurement): 0 = acquire the drawable itself; 1 = display link at 60 Hz; 2 = display link at 120 Hz, the game presents a frame every other display-link tick
@@ -1512,7 +1514,11 @@ static int g_pass_order;    // ordering barriers came in the open draw pass afte
 static int g_pass_late_res; // a draw of the open pass reads memory in a stage after the vertex stage (order_note)
 static uint64_t g_order_vbar;   // ordering barriers kept inside the pass as a vertex-to-vertex barrier (prog_swrites)
 static void img_fit_upgrade(void); static int g_imfit_npend;   // textures an image slot needs a format view of (img_fit), upgraded before the next draw pass opens
-static int g_last_end_relaxed, g_game_barrier;   // the last encoder ended was a draw pass with the relaxed end barrier (nothing else since); the game issued nvnCommandBufferBarrier since the last draw pass began
+static int g_game_barrier;   // the game issued nvnCommandBufferBarrier since the last draw pass began
+// The last encoder ended was a draw pass with the relaxed end barrier (nothing else since). Written and read on the submit thread: the present pass, on the display-link thread (or
+// the present thread), ends through m4_end_present, which touches none of the submit thread's state. Atomic (relaxed) as well, so an end on another thread could not make it a C data
+// race; only the value matters, no other memory is ordered by it
+static _Atomic int g_last_end_relaxed;
 static uint64_t g_bar_skip, g_bar_full;            // draw passes begun without / with the consumer barrier (DM_NVN_BARRIER=game)
 static void gp_end(id e);
 // An encoder's end barrier flushes to the device coherence point only. MTL4VisibilityOptionResourceAlias (aliased virtual addresses: overlapping large-pool chunks, image family heaps,
@@ -1528,7 +1534,14 @@ static inline void m4_end(id e) {
     static int end_alias = -1; if (end_alias < 0) end_alias = sw_mode("DM_NVN_END_ALIAS", 0);
     MTL4VisibilityOptions vis = e == g_blit && g_blit_alias ? blit_vis() : end_alias && sw_on(end_alias) ? resource_vis() : MTL4VisibilityOptionDevice; if (e == g_blit) g_blit_alias = 0;
     if ([e conformsToProtocol:@protocol(MTL4CommandEncoder)]) [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageAll beforeQueueStages:MTLStageAll visibilityOptions:vis];
-    [e endEncoding]; g_last_end_relaxed = 0; cm_enc_mark(-1);
+    [e endEncoding]; atomic_store_explicit(&g_last_end_relaxed, 0, memory_order_relaxed); cm_enc_mark(-1);
+}
+// The end of the present pass (present_encode_m4), on the display-link or present thread: m4_end's end barrier with none of the submit thread's state. m4_end reads g_blit and the
+// pass statistics (gp_end), keeps the command-memory ledger (cm_enc_mark) and sets g_last_end_relaxed, all the main command buffer's, which the present's own command buffer is not part
+// of; DM_NVN_END_ALIAS does not apply (the present writes only its drawable or capture texture, through no aliased address)
+static inline void m4_end_present(id<MTL4RenderCommandEncoder> e) {
+    [e barrierAfterStages:MTLStageAll beforeQueueStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
+    [e endEncoding];
 }
 // DM_NVN_BARRIER=game (default the profile's draw_barriers, full unless it says game): draw passes are ordered by the game's own barriers. A draw pass ends with a barrier from its vertex and fragment stages to the fragment, compute and copy stages of
 // later work, so the next pass's vertex work can overlap this pass's fragments (with the full barriers every pass waited for the previous one to finish completely: about 350 passes a frame in Breath of
@@ -1618,7 +1631,7 @@ static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's las
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2);   // the draw passes (rp_begin_ex); see barrier_game
     id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0);
-    if (g_last_end_relaxed && !g_game_barrier && barrier_game() && !g_image_heap_n) g_bar_skip++;
+    if (atomic_load_explicit(&g_last_end_relaxed, memory_order_relaxed) && !g_game_barrier && barrier_game() && !g_image_heap_n) g_bar_skip++;
     else { [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; g_bar_full++; }
     g_game_barrier = 0;
     [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e;
@@ -1626,7 +1639,7 @@ static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescri
 static inline void enc_r_end_pass(id e) {
     if (!barrier_game() || g_image_heap_n) { m4_end(e); return; }
     gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
-    [e endEncoding]; g_last_end_relaxed = 1;
+    [e endEncoding]; atomic_store_explicit(&g_last_end_relaxed, 1, memory_order_relaxed);
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2); id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0); [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
 static inline void enc_r_end(id e) { m4_end(e); }
@@ -14835,6 +14848,10 @@ static void present_shape(id<MTLTexture> src, double *w, double *h) {
     *w = v ? (double)(uint32_t)v : 1920; *h = v ? (double)(v >> 32) : 1080;
 }
 static MTLViewport present_fit(id<MTLTexture> src, double dw, double dh) { double w, h; present_shape(src, &w, &h); return present_viewport(w, h, dw, dh); }
+// The pixel size of the picture in its shape (w x h, present_shape) with as many pixels as src has across or down, whichever needs more: what a drawable needs to show every texel
+static void present_render_size(id<MTLTexture> src, double w, double h, int *pw, int *ph) {
+    double s = fmax(src.width / w, src.height / h); *pw = (int)lround(w * s); *ph = (int)lround(h * s);
+}
 // The valid source rectangle of a present (x, y, width, height; the crop of nvnWindowSetCrop, zero = the whole texture); 0 when it lies outside the texture
 static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r[4]) {
     r[0] = 0; r[1] = 0; r[2] = src.width; r[3] = src.height;
@@ -15108,7 +15125,7 @@ static int up_mfx_encode(NvShader *cs) {
         sc.colorTexture = color; sc.outputTexture = result; sc.inputContentWidth = cw; sc.inputContentHeight = ch;
         [sc encodeToCommandBuffer:cb];
     });
-    g_last_end_relaxed = 0;   // the next pass waits for the scaler whole (enc_r_begin_pass)
+    atomic_store_explicit(&g_last_end_relaxed, 0, memory_order_relaxed);   // the next pass waits for the scaler whole (enc_r_begin_pass)
     if (!direct && !copy_t2t_draw(e->read, out, 0, 0, 0, 0, &at0o, &orr, 0, 0)) {
         args_dirty_all(); g_up_mfx_kept++; return 0;   // only the scratch image was scaled; the game's shader can still produce the output
     }
@@ -15146,7 +15163,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     [g_present_args setAddress:uvb.gpuAddress atIndex:0];
     [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-    m4_end(en);
+    m4_end_present(en);
     return up ? PRESENT_METALFX : PRESENT_STANDARD;
 }
 // The present's picture drawn into an offscreen texture (out: private, render target) the way present_now draws it into the drawable, MetalFX included, on the Metal 4 queue;
@@ -15191,6 +15208,7 @@ static void present_gpu_note(double s, int fx) {
     n[fx] = 0;
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
+static int g_link_it_depth;    // Frames that were waiting in the present queue at that callback, the one it takes included (same thread): 2 on every tick is a standing frame
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
@@ -15207,8 +15225,15 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (!src) { RED_ONCE(8, "present texture could not get an MTLTexture"); return 0; }
     // The picture's shape for the front end's layout (front.h front_picture_shape): reported when its width / height changes by more than 0.1 %, not on a size change of the same
     // shape (1280x720 handheld, 1920x1080 docked)
+    // The picture's render size for the front end's drawable (front.h front_picture_size): the presented texture's pixels in that shape, as many as the texture has across or down
+    // (1920x1080 docked, 1280x720 for a handheld texture of that size), not the crop's, which a game's dynamic resolution moves every few frames. A new size counts once the
+    // texture has kept it for 30 presents (the first at once), so a game presenting textures of two sizes in turn does not make the front end resize its drawable each frame
     { static double last; double w, h; present_shape(src, &w, &h); double a = w / h;
-      if (fabs(a - last) > last * 0.001) { last = a; MLOG("present: picture shape %.0fx%.0f (%.3f:1) for the front end's layout", w, h, a); front_picture_shape((int)w, (int)h); } }
+      if (fabs(a - last) > last * 0.001) { last = a; MLOG("present: picture shape %.0fx%.0f (%.3f:1) for the front end's layout", w, h, a); front_picture_shape((int)w, (int)h); }
+      static int rw, rh, cw, ch, held; int pw, ph; present_render_size(src, w, h, &pw, &ph);
+      if (pw != cw || ph != ch) { cw = pw; ch = ph; held = 0; }
+      if ((pw != rw || ph != rh) && (!rw || ++held >= 30)) { rw = pw; rh = ph;
+          MLOG("present: picture render size %dx%d (texture %lux%lu) for the front end's drawable", pw, ph, (unsigned long)src.width, (unsigned long)src.height); front_picture_size(pw, ph); } }
     // A texture made on first resolution joins the residency set (res_add), which a submission commits; a window texture presented before any submission has used it was still
     // outside the committed set when the display command buffer sampled it. Super Smash Bros. Ultimate presents its window texture in its first frames before drawing into it:
     // the display queue page-faulted (kIOGPUCommandBufferCallbackErrorPageFault) and macOS then ignored every later command buffer of the process, so the window stayed pink
@@ -15284,17 +15309,20 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     [g_q4 commit:buffers count:1 options:o];
     if (target_ts > 0) {
         static double leads[300], e2e[300];   // e2e: game enqueue -> system-scheduled present (including the time waiting in the queue for the display-link callback), the full span of input latency that our side can read
+        static int depths[300];   // g_link_it_depth: a frame left waiting on every tick (a standing frame, the FIFO rule's) adds a tick to e2e without changing the lead
         static uint64_t lead_n;
-        leads[lead_n % 300] = (target_ts - CACurrentMediaTime()) * 1000.0; e2e[lead_n % 300] = g_link_it_tin > 0 ? (target_ts - g_link_it_tin) * 1000.0 : 0;
+        leads[lead_n % 300] = (target_ts - CACurrentMediaTime()) * 1000.0; e2e[lead_n % 300] = g_link_it_tin > 0 ? (target_ts - g_link_it_tin) * 1000.0 : 0; depths[lead_n % 300] = g_link_it_depth;
         lead_n++;
         if (lead_n % 300 == 0) {
+            int dsum = 0, dmax = 0, dstand = 0; for (int i = 0; i < 300; i++) { dsum += depths[i]; if (depths[i] > dmax) dmax = depths[i]; dstand += depths[i] >= 2; }
             double a[300]; memcpy(a, leads, sizeof a);
             for (int i = 1; i < 300; i++) { double v = a[i]; int j = i - 1; while (j >= 0 && a[j] > v) { a[j + 1] = a[j]; j--; } a[j + 1] = v; }
             double b[300]; memcpy(b, e2e, sizeof b);
             for (int i = 1; i < 300; i++) { double v = b[i]; int j = i - 1; while (j >= 0 && b[j] > v) { b[j + 1] = b[j]; j--; } b[j + 1] = v; }
-            MLOG("display link up to tick %llu: ticks 300, presents %llu, empty ticks %llu (held for the present interval %llu), old frames dropped by merging %llu; submission ahead of target display p50 %.3f ms / min %.3f ms; game enqueue to target display p50 %.3f ms / min %.3f / max %.3f ms",
+            MLOG("display link up to tick %llu: ticks 300, presents %llu, empty ticks %llu (held for the present interval %llu), old frames dropped by merging %llu; submission ahead of target display p50 %.3f ms / min %.3f ms; game enqueue to target display p50 %.3f ms / min %.3f / max %.3f ms; "
+                 "frames queued at the callback mean %.2f / max %d, two or more on %d of 300, standing frames trimmed %llu",
                  (unsigned long long)g_link_tick_n, (unsigned long long)g_present_n, (unsigned long long)g_link_empty, (unsigned long long)g_link_held,
-                 (unsigned long long)g_link_dropped, a[149], a[0], b[149], b[0], b[299]);
+                 (unsigned long long)g_link_dropped, a[149], a[0], b[149], b[0], b[299], dsum / 300.0, dmax, dstand, (unsigned long long)g_link_trims);
         }
     }
     [g_q4 signalDrawable:dr];
@@ -15375,7 +15403,7 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_cond_broadcast(&g_link_cv);
     pthread_mutex_unlock(&g_link_mu);
     pthread_mutex_lock(&g_pq_mu);
-    if (!g_dm_present_link || g_rescue_mode || g_pq_read == g_pq_in) { if (g_dm_present_link && !g_rescue_mode) g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
+    if (!g_dm_present_link || g_rescue_mode || g_pq_read == g_pq_in) { if (g_dm_present_link && !g_rescue_mode) g_link_empty++; g_link_standing = 0; pthread_mutex_unlock(&g_pq_mu); return; }
     // The previous frame's present interval was >= 2 (period > 25 ms): keep it on screen for its whole period before taking the next one, as the Switch flips only every N vertical syncs. This also holds while the link runs at 60 Hz (Mario 1.2.1 sets 2 for single frames, see nvn_game_fps in hle_nvn.c);
     //   before, every tick took the newest frame, so that frame, carrying the extra time step the game advanced for it, was shown for only 16.7 ms and the game looked like it jumped ahead
     if (g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol) { g_link_held++; pthread_mutex_unlock(&g_pq_mu); return; }
@@ -15384,7 +15412,19 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     // dropped the one before whenever two frames landed in the same refresh, as frames of a 60 fps game that take 16-17.5 ms do, and the next frame then stayed up 33 ms
     // (Dark Souls Remastered, from PR #31: presents within 14.7-18.7 ms 98.2 -> 99.98 %, about 2 ms more from enqueue to display). DM_PRESENT_FIFO=0 takes the newest, as before
     static int fifo = -1; if (fifo < 0) { const char *e = getenv("DM_PRESENT_FIFO"); fifo = !(e && !strcmp(e, "0")); MLOG("display link: %s", fifo ? "frames in order, at most one behind" : "the newest frame each tick (DM_PRESENT_FIFO=0)"); }
-    if (fifo && ticket > first) ticket = ticket - first >= 2 ? g_pq_in - 1 : first;
+    // DM_PRESENT_TRIM=<K> (off by default): the rule above keeps one frame waiting for good once two frames land in one refresh and no refresh comes without a frame, as a game at
+    // a steady 60 does: every frame then waits one tick more (16.7 ms at 60 Hz) between the game's enqueue and the screen (an iPhone 18 Pro Max: enqueue to display p50 65.5 ms against
+    // a callback lead of 33 ms). After K ticks in a row that found two or more frames waiting (the frame left behind stood through all of them), one tick takes the newest, dropping
+    // the one before it (a standing frame trimmed, counted in the display link's log line), and the rule holds again. K must be larger than the runs of such ticks that frame-time
+    // jitter alone makes, each ended by a refresh without a frame (PR #31's frames of 16-17.5 ms), or the trim drops the frames FIFO is there to keep: 60, a second at 60 Hz, lets
+    // a standing frame last a second at most. Empty ticks end a run; ticks held for a long present interval neither end nor count in one. With DM_PRESENT_FIFO=0 there is nothing to trim
+    if (g_link_trim < 0) { const char *e = getenv("DM_PRESENT_TRIM"); g_link_trim = e ? atoi(e) : 0; if (g_link_trim < 0) g_link_trim = 0;
+        if (g_link_trim) MLOG("display link: a frame left waiting through %d ticks in a row is dropped once (DM_PRESENT_TRIM=%d)%s", g_link_trim, g_link_trim, fifo ? "" : "; nothing to trim with DM_PRESENT_FIFO=0"); }
+    g_link_it_depth = (int)MIN(g_pq_in - g_pq_read, (uint64_t)PQ);
+    if (fifo && ticket > first) {
+        if (g_link_trim && ++g_link_standing >= g_link_trim) { g_link_standing = 0; g_link_trims++; }   // the newest (ticket stays g_pq_in)
+        else ticket = ticket - first >= 2 ? g_pq_in - 1 : first;
+    } else g_link_standing = 0;
     pq_item it = g_pq[(ticket - 1) % PQ]; g_link_it_tin = it.t_in;
     g_pq_read = ticket;
     if (ticket > first) { g_link_dropped += ticket - first; for (uint64_t k = first; k < ticket; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); } }   // Old frames merged and dropped are recorded as "not presented", so the present statistics honestly count them as dropped frames
@@ -15415,6 +15455,7 @@ static int link_on(void) { return g_dm_present_link && !atomic_load(&g_rescue_mo
 __attribute__((weak)) int front_screen_max_fps(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) void front_screen_match(int fps) { (void)fps; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) void front_picture_shape(int w, int h) { (void)w; (void)h; }   // front_mac.m, front_ios.m; graphics unit tests have none
+__attribute__((weak)) void front_picture_size(int w, int h) { (void)w; (void)h; }   // front_ios.m; the Mac's drawable keeps the window's pixels, and graphics unit tests have none
 static CAFrameRateRange link_range(int mode) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_LINK_VTICK"); on = !(e && !strcmp(e, "0")); }
     int rate = mode == 3 ? 30 : mode == 2 ? 120 : 60, hz = on ? front_screen_max_fps() : 0;

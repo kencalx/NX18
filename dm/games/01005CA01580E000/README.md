@@ -46,6 +46,7 @@ Choose offline mode at the network prompt, then New Game and English voices. Adv
 - [Stale prebuild files kept in the pipeline archive](../../../docs/reference/shaders.md#stale-prebuild-files-kept-in-the-pipeline-archive): an iPhone 18 Pro Max run of a fork of this tree with `DM_PSO_MTL4=1` kept 20 files of bases without a vertex layout (259.6 MB in all with the plain files) beside a bundled archive that holds every pair's base.
 
 - [Texture clears with partial channel masks or regions](../../../docs/reference/rendering.md#texture-clears-with-partial-channel-masks-or-regions): a load/store draw applies the requested write mask and rectangle.
+- [A frame that stands in the display link's queue](../../../docs/reference/frame-rate.md#a-frame-that-stands-in-the-display-links-queue) and [the iPhone's drawable at the picture's render size](../../../docs/reference/rendering.md#the-iphones-drawable-at-the-pictures-render-size): seen in its iPhone 18 Pro Max logs (enqueue to display p50 65.5 ms against a 33.2 ms lead; Stretch drawables of the screen's pixels).
 
 ## Open
 

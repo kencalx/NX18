@@ -88,6 +88,27 @@ static inline BOOL dm_layout_stretched(DmLayout l, DmPictureMode mode, CGFloat a
     CGFloat w = l.game.size.width, h = l.game.size.height;
     return mode == DmPictureStretch && !l.separated && w > 0 && h > 0 && aspect > 0 && fabs((w / h) / aspect - 1) >= 0.001;
 }
+// How far off the picture's shape a stretched picture may be and still go through MetalFX: nvn_mtl.m fx_wanted's 1 % (present_viewport's). Below it the present still scales the
+// picture by MetalFX when Upscaling is MetalFX, though the layout counts it as stretched (dm_layout_stretched's 0.1 %)
+#define DM_FX_SHAPE_TOLERANCE 0.01
+// Whether MetalFX's spatial scaler can draw the picture into the game rectangle: not stretched, or stretched to a shape within DM_FX_SHAPE_TOLERANCE of its own (fx_wanted). Where
+// it can, the drawable keeps the view's pixels for the scaler to fill (front_ios.m viewDidLayoutSubviews)
+static inline BOOL dm_layout_fx_shape(DmLayout l, BOOL stretched, CGFloat aspect) {
+    CGFloat w = l.game.size.width, h = l.game.size.height;
+    return !stretched || (w > 0 && h > 0 && aspect > 0 && fabs((w / h) / aspect - 1) < DM_FX_SHAPE_TOLERANCE);
+}
+
+// The drawable's pixel size for a game view of bounds (points) at scale pixels per point: the view's pixels, or, given the picture's render size px (front.h front_picture_size;
+// zero: none, the view's pixels), no more pixels than the picture has, which Core Animation then scales to the view as the present's bilinear pass would have. Stretched (the
+// present draws the picture over the whole drawable, dm_layout_stretched): each direction on its own, the picture's pixels at most. Otherwise the view's shape, at the scale
+// that gives the picture all its pixels in both directions (the view has the picture's shape in Fit and Fill), never above the view's own
+static inline CGSize dm_drawable_size(CGSize bounds, CGFloat scale, CGSize px, BOOL stretched) {
+    CGSize d = CGSizeMake(bounds.width * scale, bounds.height * scale);
+    if (px.width <= 0 || px.height <= 0 || bounds.width <= 0 || bounds.height <= 0) return d;
+    if (stretched) return CGSizeMake(MIN(d.width, px.width), MIN(d.height, px.height));
+    CGFloat s = MAX(px.width / bounds.width, px.height / bounds.height);
+    return s < scale ? CGSizeMake(round(bounds.width * s), round(bounds.height * s)) : d;
+}
 
 // A point in the view as the game's touch screen sees it: normalized on the game rectangle, which with Fill is larger than the view,
 // so a touch on the visible part lands where that part of the picture is; with Stretch it is the view, stretched as the picture is. Clamped to [0, 0.999].

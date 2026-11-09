@@ -16,6 +16,7 @@
 #include <math.h>
 #include <stdio.h>
 void front_picture_shape(int w, int h);   // front_ios.m (dm/host/front.h)
+void front_picture_size(int w, int h);   // front_ios.m (dm/host/front.h)
 void dm_gamepad_hint(void);   // DmGamepad.m: the menu button shows for 5 s
 
 static NSArray<GCController *> *gDuoHarnessControllers;
@@ -854,6 +855,46 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertEqualWithAccuracy(metal.drawableSize.width, 300, 1);
     [game setValue:@0 forKey:@"maxPixelWidth"]; [game setNeedsLayout]; [game layoutIfNeeded];
     XCTAssertEqualWithAccuracy(metal.drawableSize.width, full, 1);
+}
+
+- (void)testGameViewDrawableTakesThePictureSizeWhereMetalFXDoesNotRun {
+    CGSize px = CGSizeMake(1920, 1080), d = dm_drawable_size(CGSizeMake(956, 440), 3, px, YES);
+    XCTAssertTrue(CGSizeEqualToSize(d, px), @"Stretch: the picture's pixels in each direction, %@", NSStringFromCGSize(d));
+    d = dm_drawable_size(CGSizeMake(782, 440), 3, px, NO);
+    XCTAssertEqualWithAccuracy(d.width, 1920, 1, @"Fit: the view's shape with all of the picture's pixels"); XCTAssertEqualWithAccuracy(d.height, 1080, 1);
+    d = dm_drawable_size(CGSizeMake(782, 440), 2, CGSizeMake(3840, 2160), NO);
+    XCTAssertTrue(CGSizeEqualToSize(d, CGSizeMake(1564, 880)), @"A picture larger than the view's pixels keeps the view's pixels");
+    XCTAssertTrue(CGSizeEqualToSize(dm_drawable_size(CGSizeMake(782, 440), 3, CGSizeZero, NO), CGSizeMake(2346, 1320)), @"No render size yet: the view's pixels");
+    // Stretch within fx_wanted's 1 % of the picture's shape: stretched for the layout (0.1 %), but MetalFX still runs, so the drawable keeps the view's pixels
+    CGFloat aspect = 16.0 / 9.0;
+    DmLayout near = {CGRectMake(0, 0, 1000, round(1000 / (aspect * 1.005))), CGRectZero, NO, NO}, far = {CGRectMake(0, 0, 1000, round(1000 / (aspect * 1.02))), CGRectZero, NO, NO};
+    XCTAssertTrue(dm_layout_stretched(near, DmPictureStretch, aspect), @"0.5 %% off: stretched");
+    XCTAssertTrue(dm_layout_fx_shape(near, YES, aspect), @"0.5 %% off: MetalFX's shape");
+    XCTAssertFalse(dm_layout_fx_shape(far, YES, aspect), @"2 %% off: the bilinear pass");
+    XCTAssertTrue(dm_layout_fx_shape(far, NO, aspect), @"Not stretched: MetalFX's shape");
+
+    UIViewController *root = [self harnessRootViewController];
+    [root.view layoutIfNeeded];
+    UIView *game = [root valueForKey:@"game"];
+    CAMetalLayer *metal = (CAMetalLayer *)game.layer;
+    CGSize native = metal.drawableSize; CGRect frame = game.frame;
+    XCTAssertGreaterThan(native.width, 320);
+    void (^settle)(void) = ^{
+        XCTestExpectation *applied = [self expectationWithDescription:@"render size applied"];
+        dispatch_async(dispatch_get_main_queue(), ^{ [applied fulfill]; });
+        [self waitForExpectations:@[applied] timeout:2];
+        [root.view layoutIfNeeded];
+    };
+    front_picture_size(320, 180); settle();
+    XCTAssertEqualWithAccuracy(metal.drawableSize.width, 320, 1, @"Upscaling Standard: the picture's render size, %@", NSStringFromCGSize(metal.drawableSize));
+    XCTAssertEqualWithAccuracy(metal.drawableSize.height, 180, 1);
+    XCTAssertTrue(CGRectEqualToRect(game.frame, frame), @"The view's points, and so the touches, stay");
+    dm_setting_live("DM_PRESENT_UPSCALE", "metalfx"); [root.view layoutIfNeeded];
+    XCTAssertTrue(CGSizeEqualToSize(metal.drawableSize, native), @"Upscaling MetalFX: the view's pixels for the scaler, %@", NSStringFromCGSize(metal.drawableSize));
+    dm_setting_live("DM_PRESENT_UPSCALE", "off"); [root.view layoutIfNeeded];
+    XCTAssertEqualWithAccuracy(metal.drawableSize.width, 320, 1, @"and back at once");
+    front_picture_size(100000, 56250); settle();   // back to the view's pixels for the other tests
+    XCTAssertTrue(CGSizeEqualToSize(metal.drawableSize, native));
 }
 
 - (void)testGamepadTextLayersRefreshScaleFromTheCurrentTraitCollection {
