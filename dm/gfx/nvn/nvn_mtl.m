@@ -93,9 +93,32 @@ static int g_warm_started;
 static void warm_claim(void);
 
 static id<MTLDevice> g_dev;
+// g_comp4: the host's one MTL4Compiler, made in mtl_init before any pipeline (mtl_comp4), whatever pso4_on says: the host's own pipelines (host_cps, host_rps), MetalFX's
+// scalers, and the game's pipelines while g_pso4 is set. Made only when it is nil, so a test can put a compiler of its own in first. The archive's captures go through the
+// current flush period's own compiler (ArchEpoch). g_pso4: the game's pipelines go through g_comp4 (pso4_init, while pso4_on); else they take the MTLDevice path
+static id<MTL4Compiler> g_comp4;
+static int g_pso4;
+id<MTL4Compiler> mtl_comp4(void) {
+    static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
+    id<MTL4Compiler> c = g_comp4;
+    if (c || !g_dev) return c;
+    os_unfair_lock_lock(&lk);   // a test that sets g_dev itself and skips mtl_init makes it at its first use, on whichever thread that is
+    if (!g_comp4 && [(id)g_dev respondsToSelector:@selector(newCompilerWithDescriptor:error:)]) {   // a test's fake device may have none (t_pso_pending)
+        NSError *ce = nil; g_comp4 = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&ce];
+        if (!g_comp4) MLOG("[RED] the Metal device %s made no Metal 4 compiler: %s", g_dev.name.UTF8String, ce ? ce.localizedDescription.UTF8String : "no error given");
+    }
+    c = g_comp4;
+    os_unfair_lock_unlock(&lk);
+    return c;
+}
 // The shaders the host writes itself (built-in kernels, clears, copies, index conversions, geometry packing, the present: dm/gfx/msl), compiled when the host is built and loaded by
 // name (host_msl_lib), so none is compiled at run time. The diagnostic overrides (DM_NVN_HILITE, DM_NVN_MAGSCAN, DM_NVN_TEXDUMP) still compile theirs from source
-static id<MTLLibrary> host_lib(const char *name, NSError **e) { return host_msl_lib(g_dev, nil, name, e); }
+static id<MTLLibrary> host_lib(const char *name, NSError **e) { return host_msl_lib(g_dev, name, e); }
+// The host's own pipelines, whole through g_comp4 (host_msl_cps / host_msl_rps: no archive, no base; fs nil: the empty fragment function)
+static id<MTLComputePipelineState> host_cps(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **e) { return host_msl_cps(mtl_comp4(), lib, name, cv, e); }
+static id<MTLRenderPipelineState> host_rps(id<MTLLibrary> lib, NSString *vs, NSString *fs, int ncol, const MTLPixelFormat *cf, const MTLColorWriteMask *wm, NSUInteger samples, NSError **e) {
+    return host_msl_rps(mtl_comp4(), lib, vs, fs, ncol, cf, wm, samples, e);
+}
 static NSMutableArray *g_l3_gpu_leaks;
 static int g_nvn_deswz_gpu;
 static id<MTLCommandQueue> g_q;
@@ -728,6 +751,7 @@ void mtl_init(void) {
     // BC textures are created and uploaded as BC, with no decompression path (dm/gfx/tex/README.md); without BC the first one aborts in Metal's descriptor validation mid-game
     // (GitHub issue #704: an iPhone 15, A16). The iOS front end refuses such a device before the launcher (main.m); this stops every other route at the device, with the reason
     if (!g_dev.supportsBCTextureCompression) MDIE("the Metal device %s has no BC texture formats, which the games' textures use and the host does not decompress: an iPhone needs an A17 Pro or later, an iPad an M1 or later", g_dev.name.UTF8String);
+    if (!mtl_comp4()) MDIE("the Metal device %s made no Metal 4 compiler, which the host's pipelines are built through", g_dev.name.UTF8String);   // before any host library or pipeline
     [g_q addResidencySet:g_res];   // what the test fixtures reach on the classic queue through GPU addresses
     [g_q4 addResidencySet:g_res];
     { void crash_set_wait_dump(void (*fn)(void)); void mtl_wait_state_dump(void); crash_set_wait_dump(mtl_wait_state_dump); }
@@ -768,7 +792,7 @@ void mtl_init(void) {
     }
     g_ev = [g_dev newSharedEvent];
     g_keep = [NSMutableArray array];
-    g_nvn_deswz_gpu = nvn_deswz_gpu_init(g_dev) == 0;
+    g_nvn_deswz_gpu = nvn_deswz_gpu_init(g_dev, g_comp4) == 0;
     dm_res_report_register(mtl_res_counts);
     if (!g_nvn_deswz_gpu) MLOG("[RED] GPU deswizzle init failed; swizzled textures fall back to the CPU");
     MLOG("Metal device %s", g_dev.name.UTF8String);
@@ -8444,9 +8468,7 @@ static int pso4_on(void) {
     }
     return v;
 }
-// g_comp4: the compiler of what the archive does not capture (specializations, and every compile without an archive folder); compiles the archive captures go through the current
-// flush period's own compiler (ArchEpoch)
-static id<MTL4Compiler> g_comp4;
+// g_comp4 (made in mtl_init, declared at the top) compiles what the archive does not capture: specializations, and every compile without an archive folder
 // g_arch4: the files that may hold bases with a vertex layout, g_arch4p: the files that hold none (pb<seq>_<program>.mtl4a: the prebuild's own, p<seq>.mtl4a: any other flush whose bases all
 // read their vertices themselves, and the prebuild's before it had files of its own). A base with a layout is looked up in g_arch4 alone: each file a lookup misses in costs about
 // 0.06 ms, and a cold start's misses were for such bases, in the 13 prebuilt files
@@ -8993,7 +9015,7 @@ static void arch_open_end(void) { Method m = arch_read_method(); if (m && g_ns_r
 static void pso4_init(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        if (!pso4_on() || ![(id)g_dev respondsToSelector:@selector(newCompilerWithDescriptor:error:)]) return;   // no Metal 4 compiler (t_pso_pending's fake device): the MTLDevice path
+        if (!pso4_on() || !mtl_comp4()) return;   // no Metal 4 compiler (t_pso_pending's fake device): the MTLDevice path
         const char *e = getenv("DM_PSO_ARCHIVE"); NSString *user = pso_user_path();
         g_arch_dir = e && !strcmp(e, "off") ? nil : e && *e ? @(e) : user ? [user.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_archive"] : nil;
         NSMutableArray<id<MTL4Archive>> *arch = [NSMutableArray array], *archp = [NSMutableArray array];
@@ -9078,16 +9100,15 @@ static void pso4_init(void) {
         }
         arch_open_end();
         g_arch4 = arch; g_arch4p = archp;
-        NSError *ce = nil; g_comp4 = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&ce];
-        if (!g_comp4) MLOG("[RED] no Metal 4 compiler (%s): render pipelines are built through the MTLDevice", ce.localizedDescription.UTF8String);
-        else if (g_arch_dir) {
+        g_pso4 = 1;   // the game's pipelines through g_comp4 from here
+        if (g_arch_dir) {
             g_ep = ep_new(0); g_arch_cap = g_ep != nil;
             if (g_arch_cap) atexit(arch_at_exit);   // what is not written yet, written at quit (mtl_arch_save)
             if (!g_ep) MLOG("[RED] pipeline archive: Metal made no pipeline serializer: nothing is captured into %s", g_arch_dir.UTF8String);
         }
     });
 }
-static int pso4_compiler(void) { pso4_init(); return g_comp4 != nil; }   // render pipelines go through the Metal 4 compiler (fn_spec)
+static int pso4_compiler(void) { pso4_init(); return g_pso4; }   // render pipelines go through the Metal 4 compiler (fn_spec)
 // Compute pipelines from the archive bundled with the app: it holds one per compute shader of the shader map and of the prewarm list's C rows (pso_offline.py), made from <key>_b's
 // function alone. A compute pipeline depends on nothing else here: the MTLDevice builds it from the function (newComputePipelineStateWithFunction, no threadgroup size or other
 // option; the dispatch gives the threadgroup size), so the lookup names the function alone too, by the descriptor shader_load noted (fn4_note). One the bundle does not hold
@@ -9335,11 +9356,11 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
     // A pipeline specialized from a base with open colour state gives its fragment function 0 for [[primitive_id]], where one built whole gives the real IDs (macOS 27.2, Apple M6: 4 triangles of a draw
     // counted per ID, 16384 0 0 0 against 4096 each, whatever the vertex function). So a fragment shader that reads the ID gets a whole pipeline, with no base to share. Fire Emblem Fortune's Weave's
     // ambient occlusion draws 4 triangles and writes the array layer of each one's primitive ID: every one wrote layer 0, so 3 pixels in 4 had no sun light. A platform limit: the ID has no other source
-    if (rast && g_comp4 && [d.label isEqualToString:PSO_WHOLE]) {
+    if (rast && g_pso4 && [d.label isEqualToString:PSO_WHOLE]) {
         MTL4RenderPipelineDescriptor *whole = pso_desc4(d, 0);
         if (whole) { if (!compile) return nil; return [g_comp4 newRenderPipelineStateWithDescriptor:whole compilerTaskOptions:nil error:e]; }
     }
-    MTL4RenderPipelineDescriptor *b = g_comp4 ? pso_desc4(d, rast) : nil;   // with rasterization off there is no colour state to leave open: the base is the pipeline
+    MTL4RenderPipelineDescriptor *b = g_pso4 ? pso_desc4(d, rast) : nil;   // with rasterization off there is no colour state to leave open: the base is the pipeline
     if (!b) { if (!compile) return nil; g_pb_legacy++; return pso_build_dev(d, e); }
     pbase_key bk; pbase_key_of(d, &bk);
     id<MTLRenderPipelineState> base = nil; PbaseBuild *job = nil; int owner = 0, known = 0;   // known: the archives have been searched for it and lack it
@@ -9539,7 +9560,7 @@ static int pso_pend_try(const pso_key *k, id<MTLRenderPipelineState> *out) {
 // transform feedback vertex shaders. DM_PSO_HYBRID=0 turns it off
 static int hybrid_on(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DM_PSO_HYBRID"); pso4_init(); v = g_comp4 && !(e && !strcmp(e, "0")); if (!v) MLOG("hybrid pipelines off: a draw whose pipeline is not built yet waits for it"); }
+    if (v < 0) { const char *e = getenv("DM_PSO_HYBRID"); pso4_init(); v = g_pso4 && !(e && !strcmp(e, "0")); if (!v) MLOG("hybrid pipelines off: a draw whose pipeline is not built yet waits for it"); }
     return v;
 }
 static nvn_hmap g_pso_hy = {.klen = sizeof(pso_key)};   // pulling pipelines by the key they stand in for (submit thread)
@@ -9787,7 +9808,7 @@ static int compile_tasks(void) {
 // threads: workers; wait: run on the calling thread until done (the tool), else in the background. Returns the number of pairs, -1 when there is nothing to do
 static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     shmap_load(); pso4_init();
-    if (!g_comp4 || (!g_arch_bundle && !g_arch_cap) || atomic_exchange(&g_pre_running, 1)) return -1;
+    if (!g_pso4 || (!g_arch_bundle && !g_arch_cap) || atomic_exchange(&g_pre_running, 1)) return -1;
     // The pairs: shader_pairs.tsv (BNSH variations and the other readers' pairs) and pso_pairs.tsv (agl BAHS program variations, also read by vs_pad; DM_PSO_PAIRS: another path),
     // both beside the shader map
     NSString *pp = [g_shmap_path.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"shader_pairs.tsv"];
@@ -10138,7 +10159,7 @@ static void warm_finish(void) {
                          (unsigned long long)g_warm_mps, (unsigned long long)g_mtk_arch, (unsigned long long)g_mtk_built, (unsigned long long)g_mtk_dev);
     char again[96] = "";   // only a compacting start captures bases again
     if (g_compact_enabled) snprintf(again, sizeof again, " (%d of them captured again for the compaction, %.1f ms)", (int)g_compact_bases, g_compact_ns / 1e6);
-    if (g_comp4) MLOG("pipeline bases so far: %llu compiled, %llu from the archive%s, %llu reused (%.1f ms for the bases); %llu specializations (their descriptors %s), %llu pipelines without a base (MTLDevice)",
+    if (g_pso4) MLOG("pipeline bases so far: %llu compiled, %llu from the archive%s, %llu reused (%.1f ms for the bases); %llu specializations (their descriptors %s), %llu pipelines without a base (MTLDevice)",
                       (unsigned long long)g_pb_built, (unsigned long long)g_pb_archived, again, (unsigned long long)g_pb_reused, g_pb_base_ns / 1e6, (unsigned long long)g_pb_spec,
                       (const char *[]){"not asked for yet", "returned retained", "returned autoreleased"}[atomic_load(&g_spec_own) % 3], (unsigned long long)g_pb_legacy);
     if (g_arch_bundle || g_arch_cap) MLOG("compute pipelines so far: %llu from the archive bundled with the app, %llu from this device's archive, %llu built (%.1f ms looking up, %.1f ms building)",
@@ -15262,7 +15283,6 @@ enum { DLSS_F_MV_LOW_RES = 1 << 1, DLSS_F_MV_JITTERED = 1 << 2, DLSS_F_DEPTH_INV
 typedef struct { uint64_t net, used; id<MTL4FXTemporalScaler> sc; NSUInteger key[9]; int fresh; } dlss_scaler;
 static dlss_scaler g_dlss[4];
 static uint64_t g_dlss_use;
-static id<MTL4Compiler> g_dlss_comp;
 static void dlss_scaler_drop(dlss_scaler *e) { if (e->sc) defer_obj_release(e->sc); e->sc = nil; }
 static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLTexture> dep, id<MTLTexture> mot, id<MTLTexture> out, NSUInteger iw, NSUInteger ih) {
     NSUInteger key[9] = {col.pixelFormat, dep.pixelFormat, mot.pixelFormat, out.pixelFormat, iw, ih, out.width, out.height, c->flags};
@@ -15272,8 +15292,7 @@ static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLT
     e->used = ++g_dlss_use;
     if (!memcmp(e->key, key, sizeof key)) return e->sc ? e : NULL;
     memcpy(e->key, key, sizeof key); dlss_scaler_drop(e); e->fresh = 1;
-    NSError *err = nil;
-    if (!g_dlss_comp) g_dlss_comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&err];
+    id<MTL4Compiler> comp = mtl_comp4();   // the host's one compiler (g_comp4)
     float scale = (float)out.width / (float)iw;
     MTLFXTemporalScalerDescriptor *d = [MTLFXTemporalScalerDescriptor new];
     d.colorTextureFormat = col.pixelFormat; d.depthTextureFormat = dep.pixelFormat; d.motionTextureFormat = mot.pixelFormat; d.outputTextureFormat = out.pixelFormat;
@@ -15285,7 +15304,7 @@ static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLT
                                            (c->flags & DLSS_F_MV_LOW_RES) ? "" : " at the output's size", (c->flags & DLSS_F_MV_JITTERED) ? " with the jitter" : "");
     }
     d.inputContentPropertiesEnabled = YES; d.inputContentMinScale = scale; d.inputContentMaxScale = scale;
-    e->sc = g_dlss_comp && [MTLFXTemporalScalerDescriptor supportsMetal4FX:g_dev] ? [d newTemporalScalerWithDevice:g_dev compiler:g_dlss_comp] : nil;
+    e->sc = comp && [MTLFXTemporalScalerDescriptor supportsMetal4FX:g_dev] ? [d newTemporalScalerWithDevice:g_dev compiler:comp] : nil;
     if (!e->sc) MLOG("[RED] DLSS: MetalFX makes no temporal scaler for colour format %lu, depth %lu, motion %lu, output %lu, %lux%lu → %lux%lu; scaling bilinearly", (unsigned long)col.pixelFormat, (unsigned long)dep.pixelFormat,
                      (unsigned long)mot.pixelFormat, (unsigned long)out.pixelFormat, (unsigned long)iw, (unsigned long)ih, (unsigned long)out.width, (unsigned long)out.height);
     else MLOG("DLSS: MetalFX temporal scaler %lux%lu → %lux%lu, colour format %lu, depth %lu, motion %lu, output %lu", (unsigned long)iw, (unsigned long)ih, (unsigned long)out.width, (unsigned long)out.height,
@@ -16289,7 +16308,6 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 // made. iw, ih, ipf: the input the scaler was made for
 typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t made_at; int made; NSUInteger refused[6], iw, ih; MTLPixelFormat ipf; } fx_state;
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
-static id<MTL4Compiler> g_fx_comp;
 static _Atomic int g_fx_mode = -1;   // 1 = metalfx, 0 = off (nvn_upscale_pick.h UP_*); the live present sets it (fx_mode), a capture reads it
 static _Atomic int g_fx_req = -1;    // the in-game menu's Upscaling (mtl_present_upscale_set, main thread) until the live present takes it at its next present; -1 none
 // The front ends' (front.h): the iPhone's copies under its in-game menu's lock; the Mac's menus change no variable while the game runs, and the unit tests have no front end
@@ -16372,16 +16390,15 @@ static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTe
         if (remake_wait && fx->made && g_present_n < fx->made_at + FX_REMAKE_PRESENTS) return nil;
         if (remake_wait) { pthread_mutex_lock(&g_pq_mu); while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu); pthread_mutex_unlock(&g_pq_mu); }
         res_remove(fx->in); res_remove(fx->out); fx->sc = nil; fx->in = fx->out = nil;
-        uint64_t t0 = now_ns(); NSError *e = nil;
-        if (!g_fx_comp) g_fx_comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&e];
+        uint64_t t0 = now_ns(); id<MTL4Compiler> comp = mtl_comp4();   // the host's one compiler (g_comp4)
         MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
         d.colorTextureFormat = raw.pixelFormat; d.outputTextureFormat = out_pf; d.inputWidth = iw; d.inputHeight = ih; d.outputWidth = ow; d.outputHeight = oh;
         d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
-        id<MTL4FXSpatialScaler> sc = g_fx_comp ? [d newSpatialScalerWithDevice:g_dev compiler:g_fx_comp] : nil;
+        id<MTL4FXSpatialScaler> sc = comp ? [d newSpatialScalerWithDevice:g_dev compiler:comp] : nil;
         fx->made_at = g_present_n; fx->made++;
         if (!sc) { memcpy(fx->refused, key, sizeof key); if (live) atomic_store_explicit(&g_fx_why, DM_FX_REFUSED, memory_order_relaxed);
             MLOG("present upscaling: MetalFX makes no spatial scaler for %lux%lu format %lu → %lux%lu format %lu%s; this size is scaled bilinearly", (unsigned long)iw, (unsigned long)ih, (unsigned long)raw.pixelFormat,
-                 (unsigned long)ow, (unsigned long)oh, (unsigned long)out_pf, g_fx_comp ? "" : " (no Metal 4 compiler)"); return nil; }
+                 (unsigned long)ow, (unsigned long)oh, (unsigned long)out_pf, comp ? "" : " (no Metal 4 compiler)"); return nil; }
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:out_pf width:ow height:oh mipmapped:NO];
         td.storageMode = MTLStorageModePrivate; td.usage = sc.outputTextureUsage | MTLTextureUsageShaderRead;
         id<MTLTexture> out = [g_dev newTextureWithDescriptor:td];
@@ -16495,13 +16512,12 @@ static up_mfx_scaler *up_mfx_scaler_for(NSUInteger iw, NSUInteger ih, NSUInteger
     if (e->read && e->read != e->out) defer_obj_unref(e->read);
     if (e->in) { res_remove(e->in); defer_obj_release(e->in); } if (e->out) { res_remove(e->out); defer_obj_release(e->out); }   // a recorded scale still holds them
     *e = (up_mfx_scaler){.key = {iw, ih, ow, oh, (NSUInteger)srgb}, .refused = 1};
-    NSError *err = nil; uint64_t t0 = now_ns();
-    if (!g_fx_comp) g_fx_comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&err];
+    uint64_t t0 = now_ns(); id<MTL4Compiler> comp = mtl_comp4();   // the host's one compiler (g_comp4)
     MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
     MTLPixelFormat of = srgb ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatRGBA16Float;   // sRGB input's result stays encoded, in 0-1 as the network clamps it, and an sRGB view of it decodes it for the draw into the game's image
     d.colorTextureFormat = MTLPixelFormatRGBA16Float; d.outputTextureFormat = of; d.inputWidth = iw; d.inputHeight = ih; d.outputWidth = ow; d.outputHeight = oh;
     d.colorProcessingMode = srgb ? MTLFXSpatialScalerColorProcessingModePerceptual : MTLFXSpatialScalerColorProcessingModeHDR;
-    id<MTL4FXSpatialScaler> sc = g_fx_comp ? [d newSpatialScalerWithDevice:g_dev compiler:g_fx_comp] : nil;
+    id<MTL4FXSpatialScaler> sc = comp ? [d newSpatialScalerWithDevice:g_dev compiler:comp] : nil;
     id<MTLTexture> in = nil, out = nil, read = nil;
     if (sc) {
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:iw height:ih mipmapped:NO];

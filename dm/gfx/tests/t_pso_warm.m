@@ -329,8 +329,8 @@ int main(void) { @autoreleasepool {
     scenario(@(dir), 0); scenario(@(dir), 1);
     native_mesh(@(dir));
     const char *mode = getenv("DM_PSO_MTL4");
-    if (mode) EXPECT("requested compiler path selected", strcmp(mode, "0") != 0, g_comp4 != nil);
+    if (mode) EXPECT("requested compiler path selected", strcmp(mode, "0") != 0, g_pso4 != 0);
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
-    printf("t_pso_warm: %d checks, %d failed; %s\n", checks, failed, g_comp4 ? "Metal 4" : "MTLDevice");
+    printf("t_pso_warm: %d checks, %d failed; %s\n", checks, failed, g_pso4 ? "Metal 4" : "MTLDevice");
     return failed != 0;
 } }
