@@ -6,6 +6,7 @@
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
 #undef g_ft
+#include "t_mtl4.h"
 uint64_t g_t0_ns;
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -31,11 +32,11 @@ static void run_case(int format) {
     if (!image) { img_fit_upgrade(); t = tex_mtl((const tex_t *)&tex); image = img_fit(1, t, NVN_DPF_UINT, t.textureType, &rid); }
     mtl_wait(mtl_sub_commit(), 5000000000ull); EXPECT("production uint image view", 1, image != nil);
     NSError *err = nil; const char *src = "#include <metal_stdlib>\nusing namespace metal;\nkernel void fill(texture2d<uint,access::write> out [[texture(0)]], uint2 p [[thread_position_in_grid]]) { if(p.x<160&&p.y<90) out.write(uint4(0xff996633u,0,0,0),p); }\n";
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src) options:nil error:&err]; if (!lib) { fprintf(stderr,"%s\n",err.description.UTF8String); abort(); }
-    id<MTLComputePipelineState> ps = [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fill"] error:&err]; if (!ps) abort();
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> en = [cb computeCommandEncoder]; [en setComputePipelineState:ps]; [en setTexture:image atIndex:0];
-    [en dispatchThreads:MTLSizeMake(160,90,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)]; [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    EXPECT("image compute complete", MTLCommandBufferStatusCompleted, cb.status);
+    id<MTLLibrary> lib = t4_lib(@(src), nil, &err); if (!lib) { fprintf(stderr,"%s\n",err.description.UTF8String); abort(); }
+    id<MTLComputePipelineState> ps = t4_cps(t4_fn(lib, @"fill"), &err); if (!ps) { fprintf(stderr,"%s\n",err.description.UTF8String); abort(); }
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> en = t4_compute(cb); [en setComputePipelineState:ps]; t4_tex(cb, en, T4_CS, image, 0);
+    [en dispatchThreads:MTLSizeMake(160,90,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)]; t4_end(cb, en);
+    EXPECT("image compute complete", MTLCommandBufferStatusCompleted, t4_wait(cb));
     h_nvnMemoryPoolInvalidateMappedRange((const NVNmemoryPool *)&pool, 65536, 640*90);
     uint8_t *map = (uint8_t *)h_nvnMemoryPoolMap((const NVNmemoryPool *)&pool) + 65536; int bad = 0;
     static const uint8_t want[] = {51,102,153,255}; for(int i=0;i<160*90;i++) bad += memcmp(map+i*4,want,4) != 0;
@@ -55,11 +56,11 @@ static void render_target_stride_case(void) {
     id<MTLTexture> t = tex_mtl((const tex_t *)&tex);
     EXPECT("linear target has buffer backing", 1, t.buffer != nil);
     EXPECT("linear target inferred row pitch", 128, t.bufferBytesPerRow);
-    id<MTLCommandBuffer> cb = q_cb(); MTLRenderPassDescriptor *pd = [MTLRenderPassDescriptor renderPassDescriptor];
+    T4 *cb = t4_begin(); MTLRenderPassDescriptor *pd = [MTLRenderPassDescriptor renderPassDescriptor];
     pd.colorAttachments[0].texture=t; pd.colorAttachments[0].loadAction=MTLLoadActionClear;
     pd.colorAttachments[0].storeAction=MTLStoreActionStore; pd.colorAttachments[0].clearColor=MTLClearColorMake(1,0,0,1);
-    [[cb renderCommandEncoderWithDescriptor:pd] endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    EXPECT("linear target clear completed", MTLCommandBufferStatusCompleted, cb.status);
+    t4_end(cb, t4_pass(cb, pd));
+    EXPECT("linear target clear completed", MTLCommandBufferStatusCompleted, t4_wait(cb));
     static const uint8_t red[]={255,0,0,255}; int bad=0, padding=0;
     for (int y=0;y<16;y++) {
         for (int x=0;x<16;x++) bad += memcmp((uint8_t *)mem+y*128+x*4,red,4)!=0;
@@ -77,11 +78,11 @@ static void scaled_copy_case(void) {
     h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 65536); EXPECT("scaled copy destination init", 1, h_nvnTextureInitialize(&dst, &tb));
     tex_t src = {.magic=MAGIC('T','E','X',0), .serial=900001}; src.d.width=320; src.d.height=180; src.d.depth=src.d.levels=src.d.samples=1;
     src.d.target=NVN_TEXTURE_TARGET_2D; src.d.format=NVN_FORMAT_RGBA8_SRGB;
-    id<MTLTexture> source = tex_mtl(&src); id<MTLCommandBuffer> seed = q_cb();
+    id<MTLTexture> source = tex_mtl(&src); T4 *seed = t4_begin();
     MTLRenderPassDescriptor *pd = [MTLRenderPassDescriptor renderPassDescriptor]; pd.colorAttachments[0].texture=source;
     pd.colorAttachments[0].loadAction=MTLLoadActionClear; pd.colorAttachments[0].storeAction=MTLStoreActionStore; pd.colorAttachments[0].clearColor=MTLClearColorMake(1,0,0,1);
-    [[seed renderCommandEncoderWithDescriptor:pd] endEncoding]; [seed commit]; [seed waitUntilCompleted];
-    EXPECT("scaled copy source seeded", MTLCommandBufferStatusCompleted, seed.status);
+    t4_end(seed, t4_pass(seed, pd));
+    EXPECT("scaled copy source seeded", MTLCommandBufferStatusCompleted, t4_wait(seed));
     NVNcommandBuffer cmd; EXPECT("scaled copy command init", 1, h_nvnCommandBufferInitialize(&cmd, NULL));
     h_nvnCommandBufferAddCommandMemory(&cmd, (const NVNmemoryPool *)&pool, 0, 65536); h_nvnCommandBufferBeginRecording(&cmd);
     NVNcopyRegion sr={0,0,0,320,180,1}, dr={0,0,0,160,90,1};
@@ -105,9 +106,9 @@ static void scaled_copy_case(void) {
 //   5: LINEAR_RENDER_TARGET, 32-byte rows, only sampled: CPU-written, as 3
 static int blit_bad(id<MTLTexture> t, const uint8_t *stored, int stride) {   // rows of the texture unlike the storage's
     id<MTLBuffer> out = [g_dev newBufferWithLength:24 * 6 options:MTLResourceStorageModeShared]; if (!out) return 6;
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> bl = t4_copy(cb); t4_use(cb, t); t4_use(cb, out);
     [bl copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(6, 6, 1) toBuffer:out destinationOffset:0 destinationBytesPerRow:24 destinationBytesPerImage:24 * 6];
-    [bl endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    t4_end(cb, bl); if (t4_wait(cb) != MTLCommandBufferStatusCompleted) return 6;
     int bad = 0; for (int y = 0; y < 6; y++) bad += memcmp((uint8_t *)out.contents + y * 24, stored + y * stride, 24) != 0;
     return bad;
 }

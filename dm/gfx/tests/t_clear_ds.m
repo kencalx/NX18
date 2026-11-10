@@ -1,5 +1,6 @@
 // Partial depth/stencil clears preserve every pixel and stencil bit outside their mask.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -11,12 +12,11 @@ static int checks, failed;
 int main(void) { @autoreleasepool {
     mtl_init();
     NSError *error = nil;
-    id<MTLLibrary> library = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
-        "kernel void read_planes(texture2d<uint,access::read> s [[texture(0)]], depth2d<float,access::read> d [[texture(1)]], device uint2 *o [[buffer(0)]], uint2 p [[thread_position_in_grid]]) { o[p.y*8+p.x]=uint2(s.read(p).r, as_type<uint>(d.read(p))); }\n" options:nil error:&error];
-    id<MTLComputePipelineState> reader = [g_dev newComputePipelineStateWithFunction:[library newFunctionWithName:@"read_planes"] error:&error];
+    id<MTLLibrary> library = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void read_planes(texture2d<uint,access::read> s [[texture(0)]], depth2d<float,access::read> d [[texture(1)]], device uint2 *o [[buffer(0)]], uint2 p [[thread_position_in_grid]]) { o[p.y*8+p.x]=uint2(s.read(p).r, as_type<uint>(d.read(p))); }\n", nil, &error);
+    id<MTLComputePipelineState> reader = t4_cps(t4_fn(library, @"read_planes"), &error);
     CHECK(reader != nil, "synthetic plane reader compiles");
     if (!reader) return 1;
-    id<MTLCommandQueue> queue = [g_dev newCommandQueue];
     struct { int mid; p_scissor sc; int depth, mask; const char *label; } cases[] = {
         {0, {2,1,3,2}, 1, 0, "outside-pass scissored depth clear"},
         {0, {2,1,3,2}, 0, 255, "outside-pass scissored stencil clear"},
@@ -42,8 +42,8 @@ int main(void) { @autoreleasepool {
         init.depthAttachment.loadAction = init.stencilAttachment.loadAction = MTLLoadActionClear;
         init.depthAttachment.storeAction = init.stencilAttachment.storeAction = MTLStoreActionStore;
         init.depthAttachment.clearDepth = .75; init.stencilAttachment.clearStencil = 0xa5;
-        id<MTLCommandBuffer> cb = [queue commandBuffer]; [[cb renderCommandEncoderWithDescriptor:init] endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        CHECK(cb.status == MTLCommandBufferStatusCompleted, "literal initial planes reach the GPU");
+        T4 *cb = t4_begin(); t4_end(cb, t4_pass(cb, init));
+        CHECK(t4_wait(cb) == MTLCommandBufferStatusCompleted, "literal initial planes reach the GPU");
         res_add(base); mtl_tex_init(&t); serial_put(t.serial, base);
         state_reset(); memset(&R,0,sizeof R); mtl_sub_begin();
         R.has_rt=1; R.rt.depth=&t; R.has_sc=1; R.sc=cases[i].sc;
@@ -58,10 +58,10 @@ int main(void) { @autoreleasepool {
         CHECK(!mtl_last_commit_error(), "production clear completes without GPU error");
         id<MTLTexture> stencil = [base newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
         id<MTLBuffer> result = [g_dev newBufferWithLength:64*8 options:MTLResourceStorageModeShared];
-        cb=[queue commandBuffer]; id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
-        [e setComputePipelineState:reader]; [e setTexture:stencil atIndex:0]; [e setTexture:base atIndex:1]; [e setBuffer:result offset:0 atIndex:0];
-        [e dispatchThreads:MTLSizeMake(8,8,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        CHECK(cb.status == MTLCommandBufferStatusCompleted, "both resulting planes are read on the GPU");
+        cb=t4_begin(); id<MTL4ComputeCommandEncoder> e=t4_compute(cb);
+        [e setComputePipelineState:reader]; t4_tex(cb, e, T4_CS, stencil, 0); t4_tex(cb, e, T4_CS, base, 1); t4_buf(cb, e, T4_CS, result, 0, 0);
+        [e dispatchThreads:MTLSizeMake(8,8,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)]; t4_end(cb, e);
+        CHECK(t4_wait(cb) == MTLCommandBufferStatusCompleted, "both resulting planes are read on the GPU");
         uint32_t *pixels=result.contents; int valid=1;
         for (int y=0;y<8;y++) for (int x=0;x<8;x++) {
             p_scissor sc=cases[i].sc; int inside=x>=sc.x && x<sc.x+sc.w && y>=sc.y && y<sc.y+sc.h;
