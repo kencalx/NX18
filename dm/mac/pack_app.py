@@ -100,7 +100,7 @@ def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and th
              '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI'])
 
 
-def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .icns holds
+def make_icns(jpg, out):   # the game's icon (256x256 JPEG; or the NX 18 icon, a 1024x1024 PNG, when the game has none) at every size an .icns holds
     with tempfile.TemporaryDirectory(dir=out.parent) as t:
         s = Path(t) / 'AppIcon.iconset'; s.mkdir()
         for n in ICON_SIZES:
