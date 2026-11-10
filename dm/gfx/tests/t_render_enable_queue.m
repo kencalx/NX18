@@ -7,6 +7,7 @@
 #define DM_GAME_RENDER_COND 1
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 #undef nvn_game_fps
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
@@ -68,16 +69,15 @@ static NVNcommandHandle record(NVNtexture *texture, NVNprogram *program, int wai
 }
 int main(void) { @autoreleasepool {
     if (setvbuf(stdout, NULL, _IONBF, 0)) abort(); mtl_init(); NSError *error = nil;
-    id<MTLLibrary> library = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> library = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i [[vertex_id]]) { const float2 p[] = {float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i],0.5,1); }\n"
-        "fragment float4 red() { return float4(1,0,0,1); } fragment float4 green() { return float4(0,1,0,1); }\n"
-        options:nil error:&error];
+        "fragment float4 red() { return float4(1,0,0,1); } fragment float4 green() { return float4(0,1,0,1); }\n", nil, &error);
     if (!library) fprintf(stderr, "%s\n", error.localizedDescription.UTF8String);
     require(library != nil, "synthetic shaders compile");
-    NvShader *vs = [NvShader new]; vs->fn = [library newFunctionWithName:@"v"];
+    NvShader *vs = [NvShader new]; vs->fn = t4_fn(library, @"v");
     NvProg *red = [NvProg new], *green = [NvProg new]; red->sh[0] = green->sh[0] = vs;
     for (int i = 0; i < 2; i++) {
-        NvShader *fs = [NvShader new]; fs->stage = 1; fs->rf.color_mask = 1; fs->fn = [library newFunctionWithName:i ? @"green" : @"red"];
+        NvShader *fs = [NvShader new]; fs->stage = 1; fs->rf.color_mask = 1; fs->fn = t4_fn(library, i ? @"green" : @"red");
         (i ? green : red)->sh[1] = fs;
     }
     NVNdeviceBuilder db = {0}; P(nvnDeviceBuilderSetDefaults)(&db); require(P(nvnDeviceInitialize)(&device, &db), "device initialized");

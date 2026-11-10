@@ -1,5 +1,6 @@
 // Texture clears preserve channels and pixels outside their explicit mask and region.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -10,7 +11,7 @@ static int checks, failed;
 
 int main(void) { @autoreleasepool {
     CHECK(setenv("DM_NVN_PASSDUMP", "0", 1) == 0, "enable pass dump for frame zero");
-    mtl_init(); id<MTLCommandQueue> queue=[g_dev newCommandQueue];
+    mtl_init();
     CHECK(passdump(), "null clear runs with pass-dump diagnostics enabled");
     clear_tex(&(p_clear_tex){0});   // A missing texture must also be safe in pass-dump diagnostics.
     struct { int mask, x, y, w, h, layer, level, ui; const char *label; } cases[]={
@@ -32,7 +33,7 @@ int main(void) { @autoreleasepool {
             rp.colorAttachments[0].texture=base;rp.colorAttachments[0].slice=layer;rp.colorAttachments[0].level=lv;
             rp.colorAttachments[0].loadAction=MTLLoadActionClear;rp.colorAttachments[0].storeAction=MTLStoreActionStore;
             rp.colorAttachments[0].clearColor=cases[i].ui?MTLClearColorMake(17,34,51,68):MTLClearColorMake(17./255,34./255,51./255,68./255);
-            id<MTLCommandBuffer> cb=[queue commandBuffer];[[cb renderCommandEncoderWithDescriptor:rp] endEncoding];[cb commit];[cb waitUntilCompleted];
+            T4 *cb = t4_begin();t4_end(cb, t4_pass(cb, rp));t4_wait(cb);
         }
         res_add(base);mtl_tex_init(&t);serial_put(t.serial,base);
         state_reset();memset(&R,0,sizeof R);mtl_sub_begin();
@@ -50,9 +51,9 @@ int main(void) { @autoreleasepool {
         int valid=1;
         for(int layer=0;layer<2;layer++)for(int lv=0;lv<2;lv++) {
             int size=8>>lv;id<MTLBuffer> out=[g_dev newBufferWithLength:256*size options:MTLResourceStorageModeShared];
-            id<MTLCommandBuffer> cb=[queue commandBuffer];id<MTLBlitCommandEncoder> en=[cb blitCommandEncoder];
-            [en copyFromTexture:base sourceSlice:layer sourceLevel:lv sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(size,size,1) toBuffer:out destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:256*size];
-            [en endEncoding];[cb commit];[cb waitUntilCompleted];CHECK(cb.status==MTLCommandBufferStatusCompleted,"readback completes");
+            T4 *cb = t4_begin();id<MTL4ComputeCommandEncoder> en=t4_copy(cb);
+            t4_use(cb, base), t4_use(cb, out), [en copyFromTexture:base sourceSlice:layer sourceLevel:lv sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(size,size,1) toBuffer:out destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:256*size];
+            t4_end(cb, en);t4_wait(cb);CHECK(cb->status==MTLCommandBufferStatusCompleted,"readback completes");
             uint8_t *p=out.contents;
             for(int y=0;y<size;y++)for(int x=0;x<size;x++)for(int ch=0;ch<4;ch++) {
                 int hit=layer==cases[i].layer&&lv==cases[i].level&&x>=cases[i].x&&x<cases[i].x+cases[i].w&&y>=cases[i].y&&y<cases[i].y+cases[i].h&&(cases[i].mask&(1<<ch));

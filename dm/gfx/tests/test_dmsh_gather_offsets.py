@@ -58,19 +58,21 @@ kernel void k(texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], devic
     atomic_fetch_add_explicit(bad + 1, 1u, memory_order_relaxed);
 }
 '''
+T4_DIR = str(Path(__file__).resolve().parent)   # t_mtl4.h, the Metal 4 queue and pipelines the runners below use
 RUNNER = '''#import <Metal/Metal.h>
+#include "t_mtl4.h"
 #include <stdio.h>
 int main(int ac, char **av) { @autoreleasepool {
     id<MTLDevice> d = MTLCreateSystemDefaultDevice(); NSError *e = nil;
     id<MTLLibrary> l = [d newLibraryWithURL:[NSURL fileURLWithPath:@(av[1])] error:&e]; if (!l) { puts(e.description.UTF8String); return 2; }
-    id<MTLComputePipelineState> p = [d newComputePipelineStateWithFunction:[l newFunctionWithName:@"k"] error:&e]; if (!p) { puts(e.description.UTF8String); return 2; }
+    id<MTLComputePipelineState> p = t4_cps(t4_fn(l, @"k"), &e); if (!p) { puts(e.description.UTF8String); return 2; }
     enum { W = 256, H = 128 }; MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:W height:H mipmapped:NO]; td.storageMode = MTLStorageModeShared;
     id<MTLTexture> t = [d newTextureWithDescriptor:td]; static float px[H][W][4]; for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) { px[y][x][0] = x; px[y][x][1] = y * W + x + 1; px[y][x][2] = y; px[y][x][3] = 1; }
     [t replaceRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0 withBytes:px bytesPerRow:W * 16];
-    MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge; id<MTLSamplerState> s = [d newSamplerStateWithDescriptor:sd];
-    id<MTLCommandQueue> q = [d newCommandQueue]; id<MTLBuffer> o = [d newBufferWithLength:8 options:MTLResourceStorageModeShared];
-    for (int r = 0; r < 2; r++) { id<MTLCommandBuffer> c = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [c computeCommandEncoder]; [ce setComputePipelineState:p]; [ce setTexture:t atIndex:0]; [ce setSamplerState:s atIndex:0]; [ce setBuffer:o offset:0 atIndex:0];
-        [ce dispatchThreads:MTLSizeMake(W - 2, H - 2, 1) threadsPerThreadgroup:MTLSizeMake(32, 4, 1)]; [ce endEncoding]; [c commit]; [c waitUntilCompleted]; }
+    MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge; sd.supportArgumentBuffers = YES; id<MTLSamplerState> s = [d newSamplerStateWithDescriptor:sd];
+    id<MTLBuffer> o = [d newBufferWithLength:8 options:MTLResourceStorageModeShared];
+    for (int r = 0; r < 2; r++) { T4 *c = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(c); [ce setComputePipelineState:t4_keep(c, p)]; t4_tex(c, ce, T4_CS, t, 0); t4_samp(c, ce, T4_CS, s, 0); t4_buf(c, ce, T4_CS, o, 0, 0);
+        [ce dispatchThreads:MTLSizeMake(W - 2, H - 2, 1) threadsPerThreadgroup:MTLSizeMake(32, 4, 1)]; t4_end(c, ce); t4_wait(c); }
     const uint32_t *v = o.contents; printf("%u %u\\n", v[0], v[1]); return 0;
 } }
 '''
@@ -139,7 +141,7 @@ class OnGpu(unittest.TestCase):
             subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], check=True, capture_output=True)
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
             (w / 'r.m').write_text(QUAD_RUNNER)
-            subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
+            subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
             for repeat in ('0', '1'):
                 out = subprocess.run([str(w / 'r'), str(w / 'k.metallib'), repeat], capture_output=True, text=True).stdout.split()
                 self.assertEqual(out[0], '0', (repeat, out))
@@ -152,7 +154,7 @@ class OnGpu(unittest.TestCase):
             subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], check=True, capture_output=True)
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
             (w / 'r.m').write_text(RUNNER)
-            subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
+            subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
             out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True).stdout.split()
             self.assertEqual(out[0], '0', out)
             self.assertEqual(int(out[1]), 2 * 254 * 126)

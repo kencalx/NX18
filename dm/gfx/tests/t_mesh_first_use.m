@@ -4,6 +4,7 @@
 // function's blocks (dmsh_meshstage.py main0_o), directly and indirectly: every workgroup draws its own pixel once.
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 #undef nvn_game_fps
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
@@ -19,13 +20,13 @@ static int checks, failures;
 static void require(int ok, const char *name) { CHECK(ok, name); if (!ok) exit(2); }
 
 static NvShader *shader(id<MTLLibrary> library, NSString *name, int stage) {
-    NvShader *s = [NvShader new]; s->fn = fn4_note([library newFunctionWithName:name], library, name, nil); s->stage = stage;
+    NvShader *s = [NvShader new]; s->fn = t4_fn(library, name); s->stage = stage;
     snprintf(s->key, sizeof s->key, "first_use_%s", name.UTF8String);
     require(s->fn != nil, "test shader function exists"); return s;
 }
 int main(void) { @autoreleasepool {
     mtl_init(); NSError *error = nil;
-    id<MTLLibrary> library = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> library = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "struct V { float4 position [[position]]; }; struct Payload { uint first; }; struct Block { uint first; };\n"
         "using Mesh = metal::mesh<V, void, 3, 1, metal::topology::triangle>;\n"
         "void triangle(Mesh m, uint first) { float z = float(first) * 0.125f;\n"
@@ -46,14 +47,13 @@ int main(void) { @autoreleasepool {
         "  m.set_vertex(2, V{float4(c.x - 0.25f * dx, c.y - 0.75f * dy, z, 1)}); m.set_index(0,0); m.set_index(1,1); m.set_index(2,2); m.set_primitive_count(1); }\n"
         "[[mesh]] void tasked(Mesh m, const object_data Payload& p [[payload]], uint tid [[thread_index_in_threadgroup]]) { if (!tid) triangle(m, p.first); }\n"
         "vertex float4 vertex_only(uint vid [[vertex_id]]) { const float2 p[] = {float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[vid % 3], float(vid / 3 + 1) * 0.125f, 1); }\n"
-        "fragment float4 color() { return float4(0,1,0,1); }\n"
-        options:nil error:&error];
+        "fragment float4 color() { return float4(0,1,0,1); }\n", nil, &error);
     if (!library) fprintf(stderr, "%s\n", error.localizedDescription.UTF8String);
     require(library != nil, "synthetic task and mesh shaders compile");
     NvShader *ms = shader(library, @"direct", 4), *tasked = shader(library, @"tasked", 4), *ts = shader(library, @"task", 3), *fs = shader(library, @"color", 1);
     NvShader *vs = shader(library, @"vertex_only", 0), *px = shader(library, @"pixel", 4);
     ms->mesh_kind = tasked->mesh_kind = px->mesh_kind = 2; ms->mesh_notask = px->mesh_notask = 1; px->mesh_threads = 32;
-    ms->mesh_obj = px->mesh_obj = fn4_note([library newFunctionWithName:@"block"], library, @"block", nil); require(ms->mesh_obj != nil, "the block object function exists");
+    ms->mesh_obj = px->mesh_obj = t4_fn(library, @"block"); require(ms->mesh_obj != nil, "the block object function exists");
     ms->mesh_threads = tasked->mesh_threads = ts->mesh_threads = 32; ts->mesh_kind = 1; ts->mesh_payload = 4; fs->rf.color_mask = 1;
     prog_t programs[4] = {0};
     for (int kind = 0; kind < 4; kind++) {

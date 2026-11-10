@@ -1,6 +1,7 @@
 // An image slot takes a view of the type its shader declares (img_fit): a one-layer view of a 2D array in a slot declared 2D gets a writable 2D view of that layer and level, and the
 // shader's stores land there. Bound as is, Metal dropped them: Mario Kart World's blob-shadow mips stayed zero (GitHub issue #1648). A type no view bridges is bound as is, logged red
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
 void *front_metal_layer(void) { return NULL; }
@@ -44,14 +45,14 @@ int main(void) { @autoreleasepool {
     CHECK(real_arr && arr.textureType == MTLTextureType2DArray && arr.arrayLength == 1 && arr != img, "a slot declared 2D array gets the registered view as it is");
     CHECK(real_3d && vol.textureType == MTLTextureType2DArray && g_red_once[157] == red_before + 1, "a 3D slot: no view bridges it, bound as is and logged red");
     NSError *error = nil;
-    id<MTLLibrary> library = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nkernel void store(texture2d<float, access::write> t [[texture(0)]], uint2 p [[thread_position_in_grid]]) { t.write(float4(0.5), p); }\n" options:nil error:&error];
-    id<MTLFunction> function = [library newFunctionWithName:@"store"];
-    id<MTLComputePipelineState> pipe = function ? [g_dev newComputePipelineStateWithFunction:function error:&error] : nil;
+    id<MTLLibrary> library = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\nkernel void store(texture2d<float, access::write> t [[texture(0)]], uint2 p [[thread_position_in_grid]]) { t.write(float4(0.5), p); }\n", nil, &error);
+    id<MTLFunction> function = t4_fn(library, @"store");
+    id<MTLComputePipelineState> pipe = function ? t4_cps(function, &error) : nil;
     if (!pipe) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
-    [e setComputePipelineState:pipe]; [e setTexture:img atIndex:0];
-    [e dispatchThreads:MTLSizeMake(W >> LEVEL, W >> LEVEL, 1) threadsPerThreadgroup:MTLSizeMake(W >> LEVEL, W >> LEVEL, 1)]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    CHECK(cb.status == MTLCommandBufferStatusCompleted && !cb.error, "the store kernel ran");
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_compute(cb);
+    [e setComputePipelineState:t4_keep(cb, pipe)]; t4_tex(cb, e, T4_CS, img, 0);
+    [e dispatchThreads:MTLSizeMake(W >> LEVEL, W >> LEVEL, 1) threadsPerThreadgroup:MTLSizeMake(W >> LEVEL, W >> LEVEL, 1)]; t4_end(cb, e); t4_wait(cb);
+    CHECK(cb->status == MTLCommandBufferStatusCompleted, "the store kernel ran");
     CHECK(texel_at(base, LEVEL, LAYER) == 128, "the stores land in the registered layer and level");
     CHECK(texel_at(base, LEVEL, LAYER - 1) == 0 && texel_at(base, LEVEL, LAYER + 1) == 0 && texel_at(base, 0, LAYER) == 0 && texel_at(base, LEVEL + 1, LAYER) == 0, "and nowhere else");
     printf("image slots of another type: %d checks, %d failed\n", checks, fails); return fails != 0;

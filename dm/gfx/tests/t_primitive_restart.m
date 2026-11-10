@@ -1,5 +1,6 @@
 // Indexed fans and quads keep restart-separated polygons apart on the real GPU.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -9,12 +10,12 @@ static int checks, failed;
 #define CHECK(c,label) do { checks++; if (!(c)) { failed++; fprintf(stderr,"FAIL: %s\n",label); } } while(0)
 int main(void){@autoreleasepool{
     mtl_init();NSError *error=nil;
-    id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> lib=t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i [[vertex_id]]){const float2 p[8]={float2(-.9,-.8),float2(-.3,-.8),float2(-.3,.8),float2(-.9,.8),float2(.3,-.8),float2(.9,-.8),float2(.9,.8),float2(.3,.8)};return float4(p[i%8],.5,1);}\n"
-        "fragment float4 f(){return float4(1,0,0,1);}\n" options:nil error:&error];
+        "fragment float4 f(){return float4(1,0,0,1);}\n", nil, &error);
     CHECK(lib!=nil,"synthetic shaders compile");if(!lib)return 1;
     NvProg *pr=[NvProg new];pr->sh[0]=[NvShader new];pr->sh[1]=[NvShader new];
-    pr->sh[0]->fn=[lib newFunctionWithName:@"v"];pr->sh[1]->fn=[lib newFunctionWithName:@"f"];pr->sh[1]->stage=1;
+    pr->sh[0]->fn=t4_fn(lib, @"v");pr->sh[1]->fn=t4_fn(lib, @"f");pr->sh[1]->stage=1;
     pr->sh[1]->rf.color_known=1;pr->sh[1]->rf.color_mask=1;
     prog_t pg={.serial=99501};serial_put(pg.serial,pr);
     size_t page=(size_t)getpagesize();void *mem=NULL;if(posix_memalign(&mem,page,page))return 2;mtl_pool_add(mem,page);

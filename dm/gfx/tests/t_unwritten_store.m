@@ -1,6 +1,7 @@
 // Read back all three attachment planes after production replay, with lookahead disabled.
 // Compare store elision against an interleaved store-all control and literal pixel values.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -74,10 +75,10 @@ int main(int argc,char **argv) { @autoreleasepool {
     color.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=width,.height=height,.depth=1,.levels=1,.samples=1};
     depth.d=color.d; depth.d.format=NVN_FORMAT_DEPTH32F_STENCIL8;
     NSError *error=nil;
-    id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;vertex float4 v(uint n[[vertex_id]]){float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(p[n],.5,1);}\nfragment float4 f(){return float4(1,0,0,1);}" options:nil error:&error];
+    id<MTLLibrary> lib=t4_lib(@"#include <metal_stdlib>\nusing namespace metal;vertex float4 v(uint n[[vertex_id]]){float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(p[n],.5,1);}\nfragment float4 f(){return float4(1,0,0,1);}", nil, &error);
     CHECK(lib!=nil,"literal test shaders compile"); if (!lib) return 1;
     NvProg *pr=[NvProg new]; pr->sh[0]=[NvShader new]; pr->sh[1]=[NvShader new];
-    pr->sh[0]->fn=[lib newFunctionWithName:@"v"]; pr->sh[1]->fn=[lib newFunctionWithName:@"f"];
+    pr->sh[0]->fn=t4_fn(lib, @"v"); pr->sh[1]->fn=t4_fn(lib, @"f");
     pr->sh[1]->stage=1; pr->sh[1]->rf.color_mask=1; serial_put(program.serial,pr);
     for (int case_id=0;case_id<(bench?12:8);case_id++) {
         int mode=bench?0:case_id;

@@ -1,5 +1,6 @@
 // Live dynamic-resolution descriptors must not multiply their NVN storage.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -35,11 +36,11 @@ static void is_zero(id<MTLTexture> t) {
 }
 static void indirect_pixels(id<MTLTexture> t, uint32_t seed) {
     NSError *error=nil;
-    id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> lib=t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "struct Args { texture2d<float,access::read> tex [[id(0)]]; };\n"
-        "kernel void read_image(constant Args &a [[buffer(0)]], device uint *o [[buffer(1)]], uint2 p [[thread_position_in_grid]]) { if(p.x>=a.tex.get_width()||p.y>=a.tex.get_height())return; uint4 v=uint4(round(a.tex.read(p)*255.0f)); o[p.y*a.tex.get_width()+p.x]=v.x|(v.y<<8)|(v.z<<16)|(v.w<<24); }\n" options:nil error:&error];
-    id<MTLFunction> fn=[lib newFunctionWithName:@"read_image"];
-    id<MTLComputePipelineState> ps=fn?[g_dev newComputePipelineStateWithFunction:fn error:&error]:nil;
+        "kernel void read_image(constant Args &a [[buffer(0)]], device uint *o [[buffer(1)]], uint2 p [[thread_position_in_grid]]) { if(p.x>=a.tex.get_width()||p.y>=a.tex.get_height())return; uint4 v=uint4(round(a.tex.read(p)*255.0f)); o[p.y*a.tex.get_width()+p.x]=v.x|(v.y<<8)|(v.z<<16)|(v.w<<24); }\n", nil, &error);
+    id<MTLFunction> fn=t4_fn(lib, @"read_image");
+    id<MTLComputePipelineState> ps=fn?t4_cps(fn, &error):nil;
     CHECK(ps!=nil,"indirect texture reader compiles"); if (!ps) return;
     id<MTLArgumentEncoder> ae=[fn newArgumentEncoderWithBufferIndex:0];
     id<MTLBuffer> args=[g_dev newBufferWithLength:ae.encodedLength options:MTLResourceStorageModeShared];
@@ -59,9 +60,9 @@ static void indirect_pixels(id<MTLTexture> t, uint32_t seed) {
 }
 static void atomic_pixel(id<MTLTexture> t, uint32_t seed) {
     NSError *error=nil;
-    id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
-        "kernel void bump(texture2d<uint,access::read_write> image [[texture(0)]]) { image.atomic_fetch_add(uint2(0,0),5u); }\n" options:nil error:&error];
-    id<MTLComputePipelineState> ps=lib?[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"bump"] error:&error]:nil;
+    id<MTLLibrary> lib=t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void bump(texture2d<uint,access::read_write> image [[texture(0)]]) { image.atomic_fetch_add(uint2(0,0),5u); }\n", nil, &error);
+    id<MTLComputePipelineState> ps=lib?t4_cps(t4_fn(lib, @"bump"), &error):nil;
     CHECK(ps!=nil,"native texture-atomic reader compiles"); if (!ps) return;
     MTL4ArgumentTableDescriptor *ad=[MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount=1;
     id<MTL4ArgumentTable> at=rec_table([g_dev newArgumentTableWithDescriptor:ad error:&error]);
@@ -91,9 +92,9 @@ static void depth_planes(pool_t *pool) {
     for (int i=0;i<2;i++) { d[i]=image(pool,992000+i,32u<<i,32u<<i); d[i].off=12<<20; d[i].mem=pool->mem+d[i].off;
         d[i].d.format=NVN_FORMAT_DEPTH32F_STENCIL8; nvn_tex_layout(&d[i].d,&d[i].L); mtl_tex_init(&d[i]); }
     NSError *error=nil;
-    id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
-        "kernel void planes(texture2d<uint,access::read> s [[texture(0)]], depth2d<float,access::read> d [[texture(1)]], device uint2 *o [[buffer(0)]], uint2 p [[thread_position_in_grid]]) { o[p.y*d.get_width()+p.x]=uint2(s.read(p).r,as_type<uint>(d.read(p))); }\n" options:nil error:&error];
-    id<MTLComputePipelineState> ps=[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"planes"] error:&error];
+    id<MTLLibrary> lib=t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void planes(texture2d<uint,access::read> s [[texture(0)]], depth2d<float,access::read> d [[texture(1)]], device uint2 *o [[buffer(0)]], uint2 p [[thread_position_in_grid]]) { o[p.y*d.get_width()+p.x]=uint2(s.read(p).r,as_type<uint>(d.read(p))); }\n", nil, &error);
+    id<MTLComputePipelineState> ps=t4_cps(t4_fn(lib, @"planes"), &error);
     CHECK(ps!=nil,"depth/stencil reader compiles"); if (!ps) return;
     for (int i=0;i<3;i++) {
         tex_t *t=&d[i%2]; id<MTLTexture> base=tex_mtl(t);
@@ -106,10 +107,10 @@ static void depth_planes(pool_t *pool) {
         CHECK(!mtl_last_commit_error(),"production depth/stencil clear completes");
         id<MTLTexture> stencil=[base newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
         id<MTLBuffer> out=[g_dev newBufferWithLength:base.width*base.height*8 options:MTLResourceStorageModeShared];
-        id<MTLCommandBuffer> cb=q_cb(); id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
-        [e setComputePipelineState:ps]; [e setTexture:stencil atIndex:0]; [e setTexture:base atIndex:1]; [e setBuffer:out offset:0 atIndex:0];
-        [e dispatchThreads:MTLSizeMake(base.width,base.height,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        uint32_t *p=out.contents; int valid=cb.status==MTLCommandBufferStatusCompleted;
+        T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e=t4_compute(cb);
+        [e setComputePipelineState:t4_keep(cb, ps)]; t4_tex(cb, e, T4_CS, stencil, 0); t4_tex(cb, e, T4_CS, base, 1); t4_buf(cb, e, T4_CS, out, 0, 0);
+        [e dispatchThreads:MTLSizeMake(base.width,base.height,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)]; t4_end(cb, e); t4_wait(cb);
+        uint32_t *p=out.contents; int valid=cb->status==MTLCommandBufferStatusCompleted;
         for (NSUInteger j=0;j<out.length/8;j++) valid &= p[j*2]==0x30u+i && p[j*2+1]==0x3e800000;
         CHECK(valid,"both planes survive resolution changes and stencil views"); mtl_sub_begin();
     }

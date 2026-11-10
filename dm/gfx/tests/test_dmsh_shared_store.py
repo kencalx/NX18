@@ -78,8 +78,10 @@ kernel void check(device uint *out [[buffer(0)]], uint t [[thread_index_in_threa
     out[t] = mem[t];
 }
 '''
+T4_DIR = str(Path(__file__).resolve().parent)   # t_mtl4.h, the Metal 4 queue and pipelines the runners below use
 RUNNER = r'''
 #import <Metal/Metal.h>
+#include "t_mtl4.h"
 #include <stdio.h>
 int main(int argc, char **argv) {
     @autoreleasepool {
@@ -87,17 +89,16 @@ int main(int argc, char **argv) {
         if (!dev) { printf("no Metal device\n"); return 2; }
         NSError *err = nil;
         id<MTLLibrary> lib = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&err];
-        id<MTLComputePipelineState> ps = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"check"] error:&err];
+        id<MTLComputePipelineState> ps = t4_cps(t4_fn(lib, @"check"), &err);
         if (!ps) { printf("%s\n", err.localizedDescription.UTF8String); return 1; }
         id<MTLBuffer> out = [dev newBufferWithLength:64 * 4 options:MTLResourceStorageModeShared];
-        id<MTLCommandQueue> q = [dev newCommandQueue];
         int bad = 0;
         for (int run = 0; run < 64 && !bad; run++) {
-            id<MTLCommandBuffer> cb = [q commandBuffer];
-            id<MTLComputeCommandEncoder> en = [cb computeCommandEncoder];
-            [en setComputePipelineState:ps]; [en setBuffer:out offset:0 atIndex:0];
+            T4 *cb = t4_begin();
+            id<MTL4ComputeCommandEncoder> en = t4_compute(cb);
+            [en setComputePipelineState:t4_keep(cb, ps)]; t4_buf(cb, en, T4_CS, out, 0, 0);
             [en dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-            [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
+            t4_end(cb, en); t4_wait(cb);
             const uint32_t *w = out.contents; const uint8_t *b = out.contents;
             for (int t = 0; t < 64; t++) if (b[t] != (uint8_t)(t * 7 + 3)) { printf("byte %d: %#x\n", t, b[t]); bad = 1; }
             for (int t = 0; t < 64; t++) { uint16_t h = b[64 + 2 * t] | b[65 + 2 * t] << 8; if (h != (uint16_t)(t * 0x101 + 0x55)) { printf("half-word %d: %#x\n", t, h); bad = 1; } }
@@ -169,7 +170,7 @@ class OnGpu(unittest.TestCase):
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', str(d / 's.metal'), '-o', str(d / 's.air')], check=True)
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(d / 's.air'), '-o', str(d / 's.metallib')], check=True)
             (d / 'run.m').write_text(RUNNER)
-            subprocess.run(['clang', '-fobjc-arc', '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
+            subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
             r = subprocess.run([str(d / 'run'), str(d / 's.metallib')], capture_output=True, text=True)
             if r.returncode == 2: self.skipTest(r.stdout.strip())
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

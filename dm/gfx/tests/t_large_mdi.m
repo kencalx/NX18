@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 #undef nvn_game_fps
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
@@ -125,12 +126,10 @@ int main(void) {
         mtl_init();
         NSError *err = nil;
         id<MTLLibrary> lib =
-            [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+            t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
                                          "vertex float4 v(uint i [[vertex_id]]){const float2 "
                                          "p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(p[i%3],0,1);}\n"
-                                         "fragment float4 f(){return float4(1,0,0,1);}"
-                                options:nil
-                                  error:&err];
+                                         "fragment float4 f(){return float4(1,0,0,1);}", nil, &err);
         if (!lib) {
             fprintf(stderr, "%s\n", err.localizedDescription.UTF8String);
             return 2;
@@ -154,8 +153,8 @@ int main(void) {
         NvProg *pr = [NvProg new];
         pr->sh[0] = [NvShader new];
         pr->sh[1] = [NvShader new];
-        pr->sh[0]->fn = [lib newFunctionWithName:@"v"];
-        pr->sh[1]->fn = [lib newFunctionWithName:@"f"];
+        pr->sh[0]->fn = t4_fn(lib, @"v");
+        pr->sh[1]->fn = t4_fn(lib, @"f");
         pr->sh[1]->stage = 1;
         pr->sh[1]->rf.color_known = 1;
         pr->sh[1]->rf.color_mask = 1;

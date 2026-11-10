@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "t_mtl4.h"
 
 typedef struct { uint64_t base; uint32_t stride, divisor; } stream;
 typedef struct { stream s[16]; uint32_t attr[16]; } layout;
@@ -21,7 +22,6 @@ int main(int argc, char **argv) { @autoreleasepool {
     NSError *error = nil;
     id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&error];
     if (!library) { fprintf(stderr, "%s\n", error.description.UTF8String); return 1; }
-    id<MTLCommandQueue> queue = [device newCommandQueue];
     id<MTLBuffer> vertices = [device newBufferWithLength:1024 * 16 options:MTLResourceStorageModeShared];
     float *v = vertices.contents;
     const float corners[3][2] = {{-0.8f, -0.8f}, {0.8f, -0.8f}, {0, 0.8f}};
@@ -42,11 +42,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     id<MTLTexture> target = [device newTextureWithDescriptor:td];
     const unsigned counts[] = {1, 31, 32, 33, 63, 64, 65, 97};
     for (int depth = 0; depth < 2; depth++) {
-        id<MTLFunction> fn = [library newFunctionWithName:depth ? @"dm_mesh_z" : @"dm_mesh"];
+        id<MTLFunction> fn = t4_fn(library, depth ? @"dm_mesh_z" : @"dm_mesh");
         MTLMeshRenderPipelineDescriptor *pd = [MTLMeshRenderPipelineDescriptor new];
-        pd.meshFunction = fn; pd.fragmentFunction = [library newFunctionWithName:@"mesh_pixel"];
+        pd.meshFunction = fn; pd.fragmentFunction = t4_fn(library, @"mesh_pixel");
         pd.colorAttachments[0].pixelFormat = td.pixelFormat;
-        id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithMeshDescriptor:pd options:0 reflection:nil error:&error];
+        id<MTLRenderPipelineState> pipeline = t4_mps(pd, &error);
         if (!pipeline) { fprintf(stderr, "%s\n", error.description.UTF8String); return 1; }
         id<MTLArgumentEncoder> va = [fn newArgumentEncoderWithBufferIndex:0], ga = [fn newArgumentEncoderWithBufferIndex:13];
         id<MTLBuffer> vb = [device newBufferWithLength:va.encodedLength options:MTLResourceStorageModeShared];
@@ -64,15 +64,15 @@ int main(int argc, char **argv) { @autoreleasepool {
             MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
             pass.colorAttachments[0].texture = target; pass.colorAttachments[0].loadAction = MTLLoadActionClear;
             pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-            id<MTLCommandBuffer> command = [queue commandBuffer];
-            id<MTLRenderCommandEncoder> en = [command renderCommandEncoderWithDescriptor:pass];
-            [en setRenderPipelineState:pipeline];
-            [en setMeshBuffer:vb offset:0 atIndex:0]; [en setMeshBuffer:gb offset:0 atIndex:13];
-            [en setMeshBytes:&args length:sizeof args atIndex:12]; [en setMeshBytes:&pulling length:sizeof pulling atIndex:16];
-            for (id<MTLBuffer> resource in @[vertices, indices, info, constants]) [en useResource:resource usage:MTLResourceUsageRead stages:MTLRenderStageMesh];
+            T4 *command = t4_begin();
+            id<MTL4RenderCommandEncoder> en = t4_pass(command, pass);
+            [en setRenderPipelineState:t4_keep(command, pipeline)];
+            t4_buf(command, en, T4_MS, vb, 0, 0); t4_buf(command, en, T4_MS, gb, 0, 13);
+            t4_bytes(command, en, T4_MS, &args, sizeof args, 12); t4_bytes(command, en, T4_MS, &pulling, sizeof pulling, 16);
+            for (id<MTLBuffer> resource in @[vertices, indices, info, constants]) t4_use(command, resource);
             [en drawMeshThreadgroups:MTLSizeMake((n + 31) / 32, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(96, 1, 1)];
-            [en endEncoding]; [command commit]; [command waitUntilCompleted];
-            if (command.error) { fprintf(stderr, "%s\n", command.error.description.UTF8String); return 1; }
+            t4_end(command, en); t4_wait(command);
+            if (command->status != MTLCommandBufferStatusCompleted) { fprintf(stderr, "GPU error\n"); return 1; }
             uint8_t pixels[8][16][4]; [target getBytes:pixels bytesPerRow:16 * 4 fromRegion:MTLRegionMake2D(0, 0, 16, 8) mipmapLevel:0];
             for (unsigned primitive = 0; primitive < 128; primitive++) {
                 unsigned red = pixels[7 - primitive / 16][primitive % 16][0];
@@ -85,7 +85,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     const unsigned split[] = {31, 1, 33, 32}, nsplit = 4;
     id<MTLBuffer> pull = [device newBufferWithBytes:&pulling length:sizeof pulling options:MTLResourceStorageModeShared];
     id<MTLBuffer> recs = [device newBufferWithLength:sizeof(run_rec) * nsplit options:MTLResourceStorageModeShared];
-    id<MTLFunction> plain = [library newFunctionWithName:@"dm_mesh"];
+    id<MTLFunction> plain = t4_fn(library, @"dm_mesh");
     id<MTLArgumentEncoder> va = [plain newArgumentEncoderWithBufferIndex:0], ga = [plain newArgumentEncoderWithBufferIndex:13];
     id<MTLBuffer> vb = [device newBufferWithLength:va.encodedLength options:MTLResourceStorageModeShared];
     [va setArgumentBuffer:vb offset:0]; [va setBuffer:constants offset:0 atIndex:0];
@@ -96,10 +96,10 @@ int main(int argc, char **argv) { @autoreleasepool {
     }
     for (int depth = 0; depth < 2; depth++) {
         MTLMeshRenderPipelineDescriptor *pd = [MTLMeshRenderPipelineDescriptor new];
-        pd.meshFunction = [library newFunctionWithName:depth ? @"dm_mesh_run_z" : @"dm_mesh_run"]; pd.fragmentFunction = [library newFunctionWithName:@"mesh_pixel"];
+        pd.meshFunction = t4_fn(library, depth ? @"dm_mesh_run_z" : @"dm_mesh_run"); pd.fragmentFunction = t4_fn(library, @"mesh_pixel");
         if (!pd.meshFunction) { fprintf(stderr, "no run entry\n"); return 1; }
         pd.colorAttachments[0].pixelFormat = td.pixelFormat;
-        id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithMeshDescriptor:pd options:0 reflection:nil error:&error];
+        id<MTLRenderPipelineState> pipeline = t4_mps(pd, &error);
         if (!pipeline) { fprintf(stderr, "%s\n", error.description.UTF8String); return 1; }
         for (int indexed = 0; indexed < 3; indexed++) {
             for (unsigned i = 0; i < 1024; i++) {
@@ -116,13 +116,13 @@ int main(int argc, char **argv) { @autoreleasepool {
             MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
             pass.colorAttachments[0].texture = target; pass.colorAttachments[0].loadAction = MTLLoadActionClear;
             pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-            id<MTLCommandBuffer> command = [queue commandBuffer];
-            id<MTLRenderCommandEncoder> en = [command renderCommandEncoderWithDescriptor:pass];
-            [en setRenderPipelineState:pipeline]; [en setMeshBuffer:recs offset:0 atIndex:12];
-            for (id<MTLBuffer> resource in @[vertices, indices, constants, pull, vb, infos[0], infos[1], infos[2], infos[3], gbs[0], gbs[1], gbs[2], gbs[3]]) [en useResource:resource usage:MTLResourceUsageRead stages:MTLRenderStageMesh];
+            T4 *command = t4_begin();
+            id<MTL4RenderCommandEncoder> en = t4_pass(command, pass);
+            [en setRenderPipelineState:t4_keep(command, pipeline)]; t4_buf(command, en, T4_MS, recs, 0, 12);
+            for (id<MTLBuffer> resource in @[vertices, indices, constants, pull, vb, infos[0], infos[1], infos[2], infos[3], gbs[0], gbs[1], gbs[2], gbs[3]]) t4_use(command, resource);
             [en drawMeshThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(96, 1, 1)];
-            [en endEncoding]; [command commit]; [command waitUntilCompleted];
-            if (command.error) { fprintf(stderr, "%s\n", command.error.description.UTF8String); return 1; }
+            t4_end(command, en); t4_wait(command);
+            if (command->status != MTLCommandBufferStatusCompleted) { fprintf(stderr, "GPU error\n"); return 1; }
             uint8_t pixels[8][16][4]; [target getBytes:pixels bytesPerRow:16 * 4 fromRegion:MTLRegionMake2D(0, 0, 16, 8) mipmapLevel:0];
             for (unsigned primitive = 0; primitive < 128; primitive++) {
                 unsigned red = pixels[7 - primitive / 16][primitive % 16][0], k = 0;

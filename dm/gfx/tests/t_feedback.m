@@ -5,6 +5,7 @@
 // 1 / the target's size, set by an inline update (Splatoon Raiders' ink stamps), on an RG8 attachment sampled through (red, green, zero, one): the tile read fills the missing
 // channels as a sample does.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -223,7 +224,7 @@ static void reuse_case(NvProg *pr) {
 }
 static id<MTLLibrary> lib_file(NSString *path) {
     NSError *e = nil; NSString *src = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&e];
-    id<MTLLibrary> l = src ? [g_dev newLibraryWithSource:src options:nil error:&e] : nil;
+    id<MTLLibrary> l = src ? t4_lib(src, nil, &e) : nil;
     if (!l) fprintf(stderr, "%s: %s\n", path.UTF8String, e.localizedDescription.UTF8String);
     return l;
 }
@@ -241,9 +242,9 @@ static void tile_case(const char *dir) {
     id<MTLLibrary> bfl = lib_from_file([d stringByAppendingPathComponent:@"fedcba9876543210_bf.metallib"], &bfe);
     CHECK(bfl && [bfl.functionNames containsObject:@"main0_f"], "the folded tile-read library exposes main0_f");
     NvProg *pr = [NvProg new]; NvShader *vs = [NvShader new], *fs = [NvShader new]; pr->sh[0] = vs; pr->sh[1] = fs;
-    vs->stage = 0; strcpy(vs->key, "0123456789abcdef_b"); vs->fn = [vl newFunctionWithName:@"main0"]; vs->rf.pos_attr = -1;
+    vs->stage = 0; strcpy(vs->key, "0123456789abcdef_b"); vs->fn = t4_fn(vl, @"main0"); vs->rf.pos_attr = -1;
     for (NSNumber *k in facts[@"screen"]) vs->rf.scr_locn |= 1u << k.intValue;
-    fs->stage = 1; strcpy(fs->key, "fedcba9876543210_b"); fs->fn = [fl newFunctionWithName:@"main0"];
+    fs->stage = 1; strcpy(fs->key, "fedcba9876543210_b"); fs->fn = t4_fn(fl, @"main0");
     fs->rf.nb = 1; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=0, .aid=0, .dtt=MTLTextureType2D};
     nvn_refl_fc *fmt = nvn_refl_fcw(&fs->rf);   // the readable-tile tables are written in place (a shader made by hand has its own)
     for (NSDictionary *c in facts[@"calls"]) { int i = fs->rf.nfc++; fmt->fc_reg[i] = (uint8_t)[c[@"tex_reg"] intValue]; fmt->fc_locn[i] = (uint8_t)[c[@"varying_locn"] intValue]; if ([c[@"proj"] intValue]) fs->rf.fc_proj |= 1u << i; }
@@ -251,12 +252,12 @@ static void tile_case(const char *dir) {
     fs->rf.color_known = 1; fs->rf.color_mask = 1;
     CHECK((vs->rf.scr_locn >> 4 & 1) && fs->rf.nfc == 1 && fs->rf.fc_proj == 1 && fs->rf.fc->fc_locn[0] == 4, "the fixture's facts: screen varying 4 (and 5), one projective sample of 4");
     NSError *e = nil;
-    id<MTLLibrary> gl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> gl = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i[[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
-        "fragment float4 f() { return float4(0, 1, 0, 1); }\n" options:nil error:&e];
+        "fragment float4 f() { return float4(0, 1, 0, 1); }\n", nil, &e);
     MTLRenderPipelineDescriptor *gd = [MTLRenderPipelineDescriptor new];
-    gd.vertexFunction = [gl newFunctionWithName:@"v"]; gd.fragmentFunction = [gl newFunctionWithName:@"f"]; gd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-    id<MTLRenderPipelineState> green = gl ? [g_dev newRenderPipelineStateWithDescriptor:gd error:&e] : nil;
+    gd.vertexFunction = t4_fn(gl, @"v"); gd.fragmentFunction = t4_fn(gl, @"f"); gd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    id<MTLRenderPipelineState> green = gl ? t4_rps(gd, &e) : nil;
     CHECK(green != nil, "the green pipeline compiles");
     tex_t source; id<MTLTexture> attachment = target(&source, 99795);
     mtl_reg_tex(tid, &source, NULL);
@@ -337,8 +338,8 @@ static void fpos_case(const char *dir) {
     id<MTLLibrary> bfl = lib_from_file([d stringByAppendingPathComponent:@"fedcba9876543211_bf.metallib"], &bfe);
     CHECK(bfl && [bfl.functionNames containsObject:@"main0_f"], "the folded pixel-position library exposes main0_f");
     NvProg *pr = [NvProg new]; NvShader *vs = [NvShader new], *fs = [NvShader new]; pr->sh[0] = vs; pr->sh[1] = fs;
-    vs->stage = 0; strcpy(vs->key, "0123456789abcdee_b"); vs->fn = [vl newFunctionWithName:@"main0"]; vs->rf.pos_attr = -1;
-    fs->stage = 1; strcpy(fs->key, "fedcba9876543211_b"); fs->fn = [fl newFunctionWithName:@"main0"];
+    vs->stage = 0; strcpy(vs->key, "0123456789abcdee_b"); vs->fn = t4_fn(vl, @"main0"); vs->rf.pos_attr = -1;
+    fs->stage = 1; strcpy(fs->key, "fedcba9876543211_b"); fs->fn = t4_fn(fl, @"main0");
     fs->rf.nb = 1; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=0, .aid=0, .dtt=MTLTextureType2D};
     nvn_refl_fc *fmt = nvn_refl_fcw(&fs->rf);
     for (NSDictionary *c in facts[@"calls"]) { int i = fs->rf.nfc++; NSArray *f = c[@"frag_pos"]; fmt->fc_reg[i] = (uint8_t)[c[@"tex_reg"] intValue]; fmt->fc_locn[i] = 0xff;
@@ -347,12 +348,12 @@ static void fpos_case(const char *dir) {
     fs->rf.color_known = 1; fs->rf.color_mask = 1;
     CHECK(fs->rf.nfc == 1 && fs->rf.fc_fpos == 1 && fs->rf.fc->fc_scale[0][0] == (6 << 2) && fs->rf.fc->fc_scale[0][1] == (6 << 2 | 1), "the fixture's facts: one sample at the pixel position times c[6].xy");
     NSError *e = nil;
-    id<MTLLibrary> gl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> gl = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i[[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
-        "fragment float4 f() { return float4(0, 1, 0, 1); }\n" options:nil error:&e];
+        "fragment float4 f() { return float4(0, 1, 0, 1); }\n", nil, &e);
     MTLRenderPipelineDescriptor *gd = [MTLRenderPipelineDescriptor new];
-    gd.vertexFunction = [gl newFunctionWithName:@"v"]; gd.fragmentFunction = [gl newFunctionWithName:@"f"]; gd.colorAttachments[0].pixelFormat = MTLPixelFormatRG8Unorm;
-    id<MTLRenderPipelineState> green = gl ? [g_dev newRenderPipelineStateWithDescriptor:gd error:&e] : nil;
+    gd.vertexFunction = t4_fn(gl, @"v"); gd.fragmentFunction = t4_fn(gl, @"f"); gd.colorAttachments[0].pixelFormat = MTLPixelFormatRG8Unorm;
+    id<MTLRenderPipelineState> green = gl ? t4_rps(gd, &e) : nil;
     CHECK(green != nil, "the green pipeline compiles");
     tex_t source; id<MTLTexture> attachment = target_format(&source, 99796, NVN_FORMAT_RG8, 1);
     mtl_reg_tex(tid, &source, NULL);
@@ -512,37 +513,35 @@ static void om_case(const char *dir) {
         bool om = (k == 1);
         [cv setConstantValue:&om type:MTLDataTypeBool atIndex:64 + k];
     }
-    id<MTLFunction> ff = [bfl newFunctionWithName:@"main0_f" constantValues:cv error:&e];
+    id<MTLFunction> ff = t4_fn_cv(bfl, @"main0_f", cv, &e);
     CHECK(ff != nil, "main0_f specializes with OM_0_1");
     if (!ff) { fprintf(stderr, "om specialize: %s\n", e.localizedDescription.UTF8String); printf("feedback output-mapping-only: FAIL\n"); return; }
-    id<MTLLibrary> vl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
-        "vertex float4 v(uint i[[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
-        options:nil error:&e];
+    id<MTLLibrary> vl = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "vertex float4 v(uint i[[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n", nil, &e);
     CHECK(vl != nil, "the om-only vertex shader compiles");
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
-    pd.vertexFunction = [vl newFunctionWithName:@"v"]; pd.fragmentFunction = ff;
+    pd.vertexFunction = t4_fn(vl, @"v"); pd.fragmentFunction = ff;
     pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     pd.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA8Unorm;
-    id<MTLRenderPipelineState> ps = vl ? [g_dev newRenderPipelineStateWithDescriptor:pd error:&e] : nil;
+    id<MTLRenderPipelineState> ps = vl ? t4_rps(pd, &e) : nil;
     CHECK(ps != nil, "the om-only remap pipeline compiles");
     if (!ps) { fprintf(stderr, "om pipeline: %s\n", e.localizedDescription.UTF8String); printf("feedback output-mapping-only: FAIL\n"); return; }
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     td.storageMode = MTLStorageModeShared;
     id<MTLTexture> t0 = [g_dev newTextureWithDescriptor:td], t1 = [g_dev newTextureWithDescriptor:td];
-    id<MTLCommandQueue> q = [g_dev newCommandQueue];
-    id<MTLCommandBuffer> cb = [q commandBuffer];
+    T4 *cb = t4_begin();
     MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
     rpd.colorAttachments[0].texture = t0; rpd.colorAttachments[0].loadAction = MTLLoadActionClear; rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
     rpd.colorAttachments[0].clearColor = MTLClearColorMake(0, 1, 0, 1);
     rpd.colorAttachments[1].texture = t1; rpd.colorAttachments[1].loadAction = MTLLoadActionClear; rpd.colorAttachments[1].storeAction = MTLStoreActionStore;
     rpd.colorAttachments[1].clearColor = MTLClearColorMake(0, 1, 0, 1);
-    id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rpd];
-    [enc setRenderPipelineState:ps];
+    id<MTL4RenderCommandEncoder> enc = t4_pass(cb, rpd);
+    [enc setRenderPipelineState:t4_keep(cb, ps)];
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-    [enc endEncoding];
-    [cb commit]; [cb waitUntilCompleted];
-    CHECK(cb.error == nil, "om-only GPU submission has no error");
+    t4_end(cb, enc);
+    t4_wait(cb);
+    CHECK(cb->status == MTLCommandBufferStatusCompleted, "om-only GPU submission has no error");
     uint8_t px0[64], px1[64];
     [t0 getBytes:px0 bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0];
     [t1 getBytes:px1 bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0];
@@ -685,23 +684,22 @@ static void pending_clear_case(NvProg *pr) {
 int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_NVN_TBDR", "0", 1); setenv("DM_NVN_GPU_TS", "segment", 1);
     mtl_init(); NSError *error = nil;
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> lib = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i[[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
         "struct A {texture2d<float, access::read> source[[id(0)]];};\n"
         "fragment float4 f(float4 p[[position]], constant A&a[[buffer(0)]]) {return a.source.read(uint2(p.xy));}\n"
         "struct I {texture2d<uint, access::read> source[[id(0)]];};\n"
-        "fragment float4 mask(float4 p[[position]], constant I&a[[buffer(0)]]) {uint v = a.source.read(uint2(p.xy)).x; return float4(v==17u, v==29u, 0, 1);}\n"
-        options:nil error:&error];
+        "fragment float4 mask(float4 p[[position]], constant I&a[[buffer(0)]]) {uint v = a.source.read(uint2(p.xy)).x; return float4(v==17u, v==29u, 0, 1);}\n", nil, &error);
     CHECK(lib != nil, "synthetic shader compiles");
     if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
     NvProg *pr = [NvProg new]; NvShader *fs = [NvShader new]; pr->sh[1] = fs;
-    fs->stage = 1; strcpy(fs->key, "0123456789abcdef"); fs->fn = [lib newFunctionWithName:@"f"];
+    fs->stage = 1; strcpy(fs->key, "0123456789abcdef"); fs->fn = t4_fn(lib, @"f");
     fs->arg_len = [fs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     fs->rf.nb = 1; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .aid=0, .dtt=MTLTextureType2D};
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-    d.vertexFunction = [lib newFunctionWithName:@"v"]; d.fragmentFunction = fs->fn;
+    d.vertexFunction = t4_fn(lib, @"v"); d.fragmentFunction = fs->fn;
     d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-    id<MTLRenderPipelineState> pipeline = [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
+    id<MTLRenderPipelineState> pipeline = t4_rps(d, &error);
     CHECK(pipeline != nil, "synthetic render pipeline compiles");
     if (!pipeline) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
     const int slots[] = {0, 128, 255};
@@ -713,11 +711,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     pending_clear_case(pr);
     shape_case();
     mip_chain_case(pr);
-    fs->fn = [lib newFunctionWithName:@"mask"];
+    fs->fn = t4_fn(lib, @"mask");
     fs->arg_len = [fs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .aid=0, .dtt=MTLTextureType2D, .dpf=NVN_DPF_UINT};
     d.fragmentFunction = fs->fn;
-    pipeline = [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
+    pipeline = t4_rps(d, &error);
     CHECK(pipeline != nil, "integer image pipeline compiles");
     if (pipeline) slot_case(pr, pipeline, 3, 3);
     image_view_case(pr);

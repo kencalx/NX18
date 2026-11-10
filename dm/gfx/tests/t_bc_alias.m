@@ -2,6 +2,7 @@
 // blocks) lands in the compressed texture's blocks, as the shared storage does on the console; a copy into a texture over other storage leaves the compressed one alone.
 // Unreal's runtime virtual texture compresses its tiles to RGBA32UI blocks and copies them into such an alias of its BC3 tile cache (Monster Jam Steel Titans 2's black arena floor)
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -22,20 +23,20 @@ static tex_t tex2d(NVNformat format, int w, void *mem) {
     nvn_tex_layout(&t.d, &t.L);
     return t;
 }
-static void run(void (^encode)(id<MTLBlitCommandEncoder> b)) {
-    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
-    encode(b); [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    CHECK(cb.status == MTLCommandBufferStatusCompleted && !cb.error, "blit completes");
+static void run(void (^encode)(T4 *cb, id<MTL4ComputeCommandEncoder> b)) {
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> b = t4_copy(cb);
+    encode(cb, b); t4_end(cb, b); t4_wait(cb);
+    CHECK(cb->status == MTLCommandBufferStatusCompleted, "blit completes");
 }
 static void fill(id<MTLTexture> t, uint8_t seed) {   // every byte of the 8x8 RGBA32UI texture its own value
     id<MTLBuffer> src = buffer(BLOCKS * BLOCKS * BLOCK);
     for (NSUInteger i = 0; i < src.length; i++) ((uint8_t *)src.contents)[i] = (uint8_t)(seed + i * 7);
-    run(^(id<MTLBlitCommandEncoder> b) { [b copyFromBuffer:src sourceOffset:0 sourceBytesPerRow:BLOCKS * BLOCK sourceBytesPerImage:BLOCKS * BLOCKS * BLOCK
+    run(^(T4 *cb, id<MTL4ComputeCommandEncoder> b) { t4_use(cb, src), t4_use(cb, t), [b copyFromBuffer:src sourceOffset:0 sourceBytesPerRow:BLOCKS * BLOCK sourceBytesPerImage:BLOCKS * BLOCKS * BLOCK
                                                sourceSize:MTLSizeMake(BLOCKS, BLOCKS, 1) toTexture:t destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)]; });
 }
 static id<MTLBuffer> blocks_of(id<MTLTexture> bc) {   // the compressed texture's blocks, row by row
     id<MTLBuffer> out = buffer(BLOCKS * BLOCKS * BLOCK);
-    run(^(id<MTLBlitCommandEncoder> b) { [b copyFromTexture:bc sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, W, 1)
+    run(^(T4 *cb, id<MTL4ComputeCommandEncoder> b) { t4_use(cb, bc), t4_use(cb, out), [b copyFromTexture:bc sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, W, 1)
                                                   toBuffer:out destinationOffset:0 destinationBytesPerRow:BLOCKS * BLOCK destinationBytesPerImage:BLOCKS * BLOCKS * BLOCK]; });
     return out;
 }
@@ -60,7 +61,7 @@ int main(void) { @autoreleasepool {
     fill(msrc, 3);
     copy(&src, &alias);
     id<MTLBuffer> got = blocks_of(mbc), want = buffer(BLOCKS * BLOCKS * BLOCK);
-    run(^(id<MTLBlitCommandEncoder> b) { [b copyFromTexture:msrc sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(BLOCKS, BLOCKS, 1)
+    run(^(T4 *cb, id<MTL4ComputeCommandEncoder> b) { t4_use(cb, msrc), t4_use(cb, want), [b copyFromTexture:msrc sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(BLOCKS, BLOCKS, 1)
                                                   toBuffer:want destinationOffset:0 destinationBytesPerRow:BLOCKS * BLOCK destinationBytesPerImage:BLOCKS * BLOCKS * BLOCK]; });
     CHECK(!memcmp(got.contents, want.contents, got.length), "the copy into the alias lands in the compressed texture's blocks");
     CHECK(g_bc_alias_n == 1, "and is counted as an alias copy");
@@ -74,7 +75,7 @@ int main(void) { @autoreleasepool {
 
     copy(&src, &alias);   // a second alias copy reuses the staging buffer
     id<MTLBuffer> third = blocks_of(mbc), want2 = buffer(BLOCKS * BLOCKS * BLOCK);
-    run(^(id<MTLBlitCommandEncoder> b) { [b copyFromTexture:msrc sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(BLOCKS, BLOCKS, 1)
+    run(^(T4 *cb, id<MTL4ComputeCommandEncoder> b) { t4_use(cb, msrc), t4_use(cb, want2), [b copyFromTexture:msrc sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(BLOCKS, BLOCKS, 1)
                                                   toBuffer:want2 destinationOffset:0 destinationBytesPerRow:BLOCKS * BLOCK destinationBytesPerImage:BLOCKS * BLOCKS * BLOCK]; });
     CHECK(!memcmp(third.contents, want2.contents, third.length), "a second copy into the alias lands too");
     CHECK(g_bc_alias_n == 2, "and is counted");

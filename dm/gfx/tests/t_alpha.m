@@ -3,6 +3,7 @@
 // for a shader without bindings and one with an argument buffer; a function or reference that changes keeps the pipeline; an integer colour 0 has no test (atest_key).
 // make GAME=<id> check_t_alpha (the fixture comes from test_dmsh_alpha.py --fixture <dir>; ./t_alpha <dir>)
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -15,12 +16,12 @@ static int accepts(int f, float a, float r) {
 }
 static void run(NSString *dir, int mode) {   // mode 0: no bindings; 1: an argument buffer (a uniform holding the ramp's width)
     NSError *error = nil; NSString *source = [NSString stringWithContentsOfFile:[dir stringByAppendingFormat:@"/base%d.metal", mode] encoding:NSUTF8StringEncoding error:&error];
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:source options:nil error:&error];
+    id<MTLLibrary> lib = t4_lib(source, nil, &error);
     if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); abort(); }
     NvProg *pr = [NvProg new];
-    pr->sh[0] = [NvShader new]; pr->sh[0]->fn = [lib newFunctionWithName:@"vertex_main"]; pr->sh[0]->stage = 0; snprintf(pr->sh[0]->key, sizeof pr->sh[0]->key, "v%d_b", mode);
+    pr->sh[0] = [NvShader new]; pr->sh[0]->fn = t4_fn(lib, @"vertex_main"); pr->sh[0]->stage = 0; snprintf(pr->sh[0]->key, sizeof pr->sh[0]->key, "v%d_b", mode);
     NvShader *ps = [NvShader new]; pr->sh[1] = ps;
-    ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->stage = 1; ps->rf.may_discard = 1; ps->has_alpha = 1;
+    ps->fn = fn4_note(t4_fn(lib, @"main0"), lib, @"main0", nil); ps->stage = 1; ps->rf.may_discard = 1; ps->has_alpha = 1;
     memset(ps->key, '0' + mode, 16); memcpy(ps->key + 16, "_b", 3);   // the host loads <dir>/<16 digits>_bx.metallib
     if (mode == 1) { ps->arg_len = [ps->fn newArgumentEncoderWithBufferIndex:0].encodedLength; ps->rf.nb = 1; ps->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0}; }
     static prog_t program[2]; int pi = mode; program[pi].serial = 98000 + pi; serial_put(program[pi].serial, pr);

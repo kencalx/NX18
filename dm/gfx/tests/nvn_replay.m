@@ -12,6 +12,7 @@
 #include <sys/wait.h>
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 #undef nvn_game_fps
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
@@ -159,12 +160,12 @@ static void fill_tex(const uint8_t *d, size_t n) {
               (unsigned long long)h.t.serial, h.width, h.height, h.pixfmt, h.levels, h.slices, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, slices);
     uint64_t total = 0; for (uint32_t i = 0; i < h.nsub; i++) total += subs[i].bytes;
     id<MTLBuffer> b = [g_dev newBufferWithBytes:px length:MAX(total, 16u) options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder]; uint64_t off = 0;
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_copy(cb); uint64_t off = 0;
     for (uint32_t i = 0; i < h.nsub; i++) { const cap_tsub *s = &subs[i];
-        [e copyFromBuffer:b sourceOffset:off sourceBytesPerRow:s->row sourceBytesPerImage:s->img sourceSize:MTLSizeMake(s->w, s->h, s->d) toTexture:t destinationSlice:s->slice
+        t4_use(cb, b), t4_use(cb, t), [e copyFromBuffer:b sourceOffset:off sourceBytesPerRow:s->row sourceBytesPerImage:s->img sourceSize:MTLSizeMake(s->w, s->h, s->d) toTexture:t destinationSlice:s->slice
            destinationLevel:s->level destinationOrigin:MTLOriginMake(0, 0, 0) options:cap_plane_opt(t.pixelFormat, (int)s->plane)];
         off += s->bytes; }
-    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    t4_end(cb, e); t4_wait(cb);
 }
 
 static void check_programs(const char *cap_chain) {   // every program resolves to shaders with the interface the records were made for

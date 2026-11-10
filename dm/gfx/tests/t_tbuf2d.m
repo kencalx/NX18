@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../nvn/nvn_tex.h"
+#include "t_mtl4.h"
 
 static const char *k_msl =
     "#include <metal_stdlib>\nusing namespace metal;\n"
@@ -21,11 +22,10 @@ static void check(const char *what, int ok, const char *detail) { g_n++; if (!ok
 
 int main(void) {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); NSError *err = nil;
-    id<MTLLibrary> lib = [dev newLibraryWithSource:@(k_msl) options:nil error:&err];
+    id<MTLLibrary> lib = t4_lib(@(k_msl), nil, &err);
     if (!lib) { printf("MSL compile failed: %s\n", err.localizedDescription.UTF8String); return 1; }
-    id<MTLComputePipelineState> pu = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"ku"] error:&err], pf = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"kf"] error:&err],
-                                p1 = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"k1"] error:&err];
-    id<MTLCommandQueue> q = [dev newCommandQueue];
+    id<MTLComputePipelineState> pu = t4_cps(t4_fn(lib, @"ku"), &err), pf = t4_cps(t4_fn(lib, @"kf"), &err),
+                                p1 = t4_cps(t4_fn(lib, @"k1"), &err);
     const uint32_t counts[] = { 1, 1000, 16384, 16385, 40000, 1048576 };
     const struct { MTLPixelFormat pf; uint32_t bpb; const char *name; } fm[] = { { MTLPixelFormatR32Uint, 4, "R32Uint" }, { MTLPixelFormatRGBA32Float, 16, "RGBA32Float" } };
     for (unsigned fi = 0; fi < 2; fi++) for (unsigned ci = 0; ci < sizeof counts / sizeof *counts; ci++) for (int oi = 0; oi < 3; oi++) {
@@ -41,9 +41,9 @@ int main(void) {
         char what[128]; snprintf(what, sizeof what, "%s %u elements at offset %lu: %ux%u rows of %u bytes", fm[fi].name, n, (unsigned long)off, w, h, row);
         if (!tb || !t2) { check(what, 0, "texture not created"); continue; }
         id<MTLBuffer> o = [dev newBufferWithLength:(size_t)n * 32 options:MTLResourceStorageModeShared];
-        id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-        [ce setComputePipelineState:fi ? pf : pu]; [ce setTexture:tb atIndex:0]; [ce setTexture:t2 atIndex:1]; [ce setBuffer:o offset:0 atIndex:0]; [ce setBytes:&n length:4 atIndex:1];
-        [ce dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(cb);
+        [ce setComputePipelineState:t4_keep(cb, fi ? pf : pu)]; t4_tex(cb, ce, T4_CS, tb, 0); t4_tex(cb, ce, T4_CS, t2, 1); t4_buf(cb, ce, T4_CS, o, 0, 0); t4_bytes(cb, ce, T4_CS, &n, 4, 1);
+        [ce dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)]; t4_end(cb, ce); t4_wait(cb);
         const uint32_t *r = o.contents; int bad = -1;
         for (uint32_t i = 0; i < n && bad < 0; i++) for (int c = 0; c < 4; c++) {
             uint32_t mem = c < (int)(bpb / 4) ? words[i * (bpb / 4) + c] : (c == 3 ? (fi ? 0x3f800000u : 1u) : 0u);   // missing components of a one-channel read: 0, 0, 1
@@ -56,9 +56,9 @@ int main(void) {
         id<MTLTexture> t = [dev newTextureWithDescriptor:d]; uint32_t *v = malloc(n * 4); for (uint32_t i = 0; i < n; i++) v[i] = i * 7919u + 3;
         [t replaceRegion:MTLRegionMake2D(0, 0, n, 1) mipmapLevel:0 withBytes:v bytesPerRow:n * 4];
         id<MTLBuffer> o = [dev newBufferWithLength:(size_t)n * 32 options:MTLResourceStorageModeShared];
-        id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-        [ce setComputePipelineState:p1]; [ce setTexture:t atIndex:1]; [ce setBuffer:o offset:0 atIndex:0]; [ce setBytes:&n length:4 atIndex:1];
-        [ce dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(cb);
+        [ce setComputePipelineState:t4_keep(cb, p1)]; t4_tex(cb, ce, T4_CS, t, 1); t4_buf(cb, ce, T4_CS, o, 0, 0); t4_bytes(cb, ce, T4_CS, &n, 4, 1);
+        [ce dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)]; t4_end(cb, ce); t4_wait(cb);
         const uint32_t *r = o.contents; int bad = -1; for (uint32_t i = 0; i < n && bad < 0; i++) if (r[8 * i] != r[8 * i + 4] || r[8 * i] != v[i]) bad = (int)i;
         check("a 16384-wide one-row 2D texture (a 1D texture) reads the same at the wrapped address", bad < 0, "differs");
         free(v);

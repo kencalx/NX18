@@ -1,5 +1,6 @@
 // A clear covers every layer of the bound render target view, as NVN's does, not only the layer a pass that is not layered attaches.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -12,7 +13,6 @@ enum { W = 4, OLD_D = 0x3f400000, NEW_D = 0x3e800000, OLD_C = 0x11223344, NEW_C 
 
 int main(void) { @autoreleasepool {
     mtl_init();
-    id<MTLCommandQueue> queue = [g_dev newCommandQueue];
     // depth: a cube (6 faces) or a 2D array of colour; view: none, or min_layer / nlayers (0: the rest)
     struct { int depth, target, layers, view, min_layer, nlayers; const char *label; } cases[] = {
         {1, NVN_TEXTURE_TARGET_CUBEMAP, 6, 0, 0, 0, "depth clear of a cube without a view clears all six faces"},
@@ -30,17 +30,17 @@ int main(void) { @autoreleasepool {
         id<MTLTexture> base = [g_dev newTextureWithDescriptor:descriptor];
         CHECK(base != nil && base.arrayLength == (NSUInteger)cases[i].layers, "synthetic layered target allocates");
         if (!base) continue;
-        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        T4 *cb = t4_begin();
         for (int s = 0; s < cases[i].layers; s++) {   // every layer starts at the old value
             MTLRenderPassDescriptor *init = [MTLRenderPassDescriptor renderPassDescriptor];
             if (cases[i].depth) { init.depthAttachment.texture = base; init.depthAttachment.slice = s; init.depthAttachment.loadAction = MTLLoadActionClear;
                 init.depthAttachment.storeAction = MTLStoreActionStore; init.depthAttachment.clearDepth = .75; }
             else { init.colorAttachments[0].texture = base; init.colorAttachments[0].slice = s; init.colorAttachments[0].loadAction = MTLLoadActionClear;
                 init.colorAttachments[0].storeAction = MTLStoreActionStore; init.colorAttachments[0].clearColor = MTLClearColorMake(0x44 / 255., 0x33 / 255., 0x22 / 255., 0x11 / 255.); }
-            [[cb renderCommandEncoderWithDescriptor:init] endEncoding];
+            t4_end(cb, t4_pass(cb, init));
         }
-        [cb commit]; [cb waitUntilCompleted];
-        CHECK(cb.status == MTLCommandBufferStatusCompleted, "initial layers reach the GPU");
+        t4_wait(cb);
+        CHECK(cb->status == MTLCommandBufferStatusCompleted, "initial layers reach the GPU");
         res_add(base); mtl_tex_init(&t); serial_put(t.serial, base);
         state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
         view_t v = {0}; if (cases[i].view) { v.set_layers = 1; v.min_layer = (uint16_t)cases[i].min_layer; v.nlayers = (uint16_t)cases[i].nlayers; }
@@ -55,12 +55,12 @@ int main(void) { @autoreleasepool {
         mtl_sub_commit(); mtl_drain();
         CHECK(!mtl_last_commit_error(), "production clear completes without GPU error");
         id<MTLBuffer> result = [g_dev newBufferWithLength:W * W * 4 * cases[i].layers options:MTLResourceStorageModeShared];
-        cb = [queue commandBuffer]; id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        cb = t4_begin(); id<MTL4ComputeCommandEncoder> b = t4_copy(cb);
         for (int s = 0; s < cases[i].layers; s++)
-            [b copyFromTexture:base sourceSlice:s sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, W, 1) toBuffer:result destinationOffset:(NSUInteger)(W * W * 4 * s)
+            t4_use(cb, base), t4_use(cb, result), [b copyFromTexture:base sourceSlice:s sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, W, 1) toBuffer:result destinationOffset:(NSUInteger)(W * W * 4 * s)
                 destinationBytesPerRow:W * 4 destinationBytesPerImage:W * W * 4 options:cases[i].depth ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone];
-        [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        CHECK(cb.status == MTLCommandBufferStatusCompleted, "every layer is read back");
+        t4_end(cb, b); t4_wait(cb);
+        CHECK(cb->status == MTLCommandBufferStatusCompleted, "every layer is read back");
         const uint32_t *px = result.contents; int valid = 1;
         int lo = cases[i].view ? cases[i].min_layer : 0, hi = cases[i].view && cases[i].nlayers ? lo + cases[i].nlayers : cases[i].layers;
         for (int s = 0; s < cases[i].layers; s++) {

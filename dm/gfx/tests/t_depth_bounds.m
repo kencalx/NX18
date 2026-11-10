@@ -10,6 +10,7 @@
 // would stop at a depth bounds call reaching this GPU's encoder
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 #undef nvn_game_fps
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
@@ -86,13 +87,13 @@ int main(void) { @autoreleasepool {
     CHECK([DmRecEnc instancesRespondToSelector:@selector(setDepthTestMinBound:maxBound:)], "the deferred encoder's stand-in records the call (DM_NVN_ENC_THREAD)");
 
     mtl_init(); NSError *error = nil;
-    id<MTLLibrary> library = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> library = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i [[vertex_id]]) { const float2 p[] = {float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i],0.5,1); }\n"
-        "fragment float4 g() { return float4(0,1,0,1); }\n" options:nil error:&error];
+        "fragment float4 g() { return float4(0,1,0,1); }\n", nil, &error);
     if (!library) fprintf(stderr, "%s\n", error.localizedDescription.UTF8String);
     require(library != nil, "test shaders compile");
-    NvProg *compiled = [NvProg new]; compiled->sh[0] = [NvShader new]; compiled->sh[0]->fn = [library newFunctionWithName:@"v"];
-    NvShader *fs = [NvShader new]; fs->stage = 1; fs->rf.color_mask = 1; fs->fn = [library newFunctionWithName:@"g"]; compiled->sh[1] = fs;
+    NvProg *compiled = [NvProg new]; compiled->sh[0] = [NvShader new]; compiled->sh[0]->fn = t4_fn(library, @"v");
+    NvShader *fs = [NvShader new]; fs->stage = 1; fs->rf.color_mask = 1; fs->fn = t4_fn(library, @"g"); compiled->sh[1] = fs;
     NVNdeviceBuilder db = {0}; P(nvnDeviceBuilderSetDefaults)(&db); require(P(nvnDeviceInitialize)(&device, &db), "device initialized");
     NVNqueueBuilder qb = {0}; P(nvnQueueBuilderSetDefaults)(&qb); P(nvnQueueBuilderSetDevice)(&qb, &device); require(P(nvnQueueInitialize)(&queue, &qb), "queue initialized");
     require(!posix_memalign((void **)&memory, getpagesize(), POOL_BYTES), "pool storage allocated"); memset(memory, 0, POOL_BYTES);

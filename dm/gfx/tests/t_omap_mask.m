@@ -2,6 +2,7 @@
 // components and Metal writes the whole attachment under its write mask, so pso_desc masks each target with its output's nibble. The shader below returns 0.25 for alpha,
 // standing in for the undefined value an unstored component has; with output 0 mapped RGB only, the target's cleared alpha must stay
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -18,10 +19,10 @@ static void pixels(id<MTLRenderPipelineState> ps, __fp16 out[4]) {
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = t; rp.colorAttachments[0].loadAction = MTLLoadActionClear;
     rp.colorAttachments[0].clearColor = MTLClearColorMake(.75, .5, .25, .875); rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-    id<MTLCommandQueue> q = [g_dev newCommandQueue]; id<MTLCommandBuffer> cb = [q commandBuffer];
-    id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
-    [e setRenderPipelineState:ps]; [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [e endEncoding];
-    [cb commit]; [cb waitUntilCompleted]; CHECK(cb.status == MTLCommandBufferStatusCompleted, "draw completes");
+    T4 *cb = t4_begin();
+    id<MTL4RenderCommandEncoder> e = t4_pass(cb, rp);
+    [e setRenderPipelineState:t4_keep(cb, ps)]; [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; t4_end(cb, e);
+    t4_wait(cb); CHECK(cb->status == MTLCommandBufferStatusCompleted, "draw completes");
     [t getBytes:out bytesPerRow:32 fromRegion:MTLRegionMake2D(1,1,1,1) mipmapLevel:0];
 }
 
@@ -30,17 +31,17 @@ int main(void) { @autoreleasepool {
     NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i [[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
         "fragment float4 f() { return float4(.125,.25,.5,.25); }\n";
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:nil error:&error];
+    id<MTLLibrary> lib = t4_lib(src, nil, &error);
     CHECK(lib != nil, "shaders compile"); if (!lib) return 1;
     NvShader *vs = [NvShader new], *fs = [NvShader new];
-    vs->fn = fn4_note([lib newFunctionWithName:@"v"], lib, @"v", nil);
-    fs->fn = fn4_note([lib newFunctionWithName:@"f"], lib, @"f", nil);
+    vs->fn = fn4_note(t4_fn(lib, @"v"), lib, @"v", nil);
+    fs->fn = fn4_note(t4_fn(lib, @"f"), lib, @"f", nil);
     fs->rf.color_known = 1; fs->rf.color_mask = 1; fs->rf.omap_known = 1; fs->rf.omap = 0x7;
     pso_key k = {0}; k.samples = 1; k.chmask = 15; k.cfmt[0] = MTLPixelFormatRGBA16Float;
     MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, nil, 0);
     CHECK(d.colorAttachments[0].writeMask == (MTLColorWriteMaskRed | MTLColorWriteMaskGreen | MTLColorWriteMaskBlue), "alpha outside the output map is masked");
     for (int metal4 = 0; metal4 < 2; metal4++) {
-        id<MTLRenderPipelineState> ps = metal4 ? pso_build(d, &error) : [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
+        id<MTLRenderPipelineState> ps = metal4 ? pso_build(d, &error) : t4_rps(d, &error);
         CHECK(ps != nil, "pipeline compiles on both paths");
         if (ps) { __fp16 got[4]; pixels(ps, got); CHECK(got[0] == (__fp16).125 && got[1] == (__fp16).25 && got[2] == (__fp16).5 && got[3] == (__fp16).875, "mapped components written, alpha left as cleared"); }
     }

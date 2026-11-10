@@ -23,6 +23,8 @@ env:
   # The toolchain the project supports (README: Xcode 27.2; dm/gfx/tools/dmsh_chain.lock: its Metal compiler), on GitHub's xcode-27 image (macOS 27, a preview image),
   # named by path so the image's default moving to another Xcode does not move CI. The build check checks the Metal compiler against the lock first.
   # dm/tools/tests/test_ci_toolchain.py keeps this version, the image and README's in step
+  # Release 1 is built and its GPU tests run locally with Xcode 27.3 (the gfx tests' Metal 4 fixtures need no newer SDK than this one); this pin moves to 27.3 in the
+  # same change as dmsh_chain.lock's Metal compiler (32023.925), README, own_compilers.py and the NSP script, after the shader regression pass
   DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
   GAME: 010015100B514000   # Super Mario Bros. Wonder: the profile the host and gfx tests are built for (any profile does; the tests are about code, not the game)
 

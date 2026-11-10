@@ -1,5 +1,6 @@
 // Integer color attachments ignore blending; the same descriptor must remain valid on Metal.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -39,11 +40,11 @@ int main(void) { @autoreleasepool {
             "struct O { uint4 a [[color(0)]]; uint4 b [[color(1)]]; };\n"
             "fragment O f() { return {uint4(0x12345678u), uint4(17,34,51,68)}; }\n";
         NSError *error = nil;
-        id<MTLLibrary> library = [g_dev newLibraryWithSource:source options:nil error:&error];
+        id<MTLLibrary> library = t4_lib(source, nil, &error);
         CHECK(library != nil, "synthetic shader compiles");
-        vs->fn = [library newFunctionWithName:@"v"]; fs->fn = [library newFunctionWithName:@"f"];
+        vs->fn = t4_fn(library, @"v"); fs->fn = t4_fn(library, @"f");
         d = pso_desc(&k, vs, fs, nil, 0);
-        id<MTLRenderPipelineState> pipeline = [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
+        id<MTLRenderPipelineState> pipeline = t4_rps(d, &error);
         CHECK(pipeline != nil, "real Metal accepts the corrected descriptor");
         if (pipeline) {
             MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:k.cfmt[0] width:4 height:4 mipmapped:NO];
@@ -53,11 +54,11 @@ int main(void) { @autoreleasepool {
             MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
             for (int i = 0; i < 2; i++) { rp.colorAttachments[i].texture = i ? b : a;
                 rp.colorAttachments[i].loadAction = MTLLoadActionClear; rp.colorAttachments[i].storeAction = MTLStoreActionStore; }
-            id<MTLCommandQueue> queue = [g_dev newCommandQueue]; id<MTLCommandBuffer> cb = [queue commandBuffer];
-            id<MTLRenderCommandEncoder> encoder = [cb renderCommandEncoderWithDescriptor:rp];
-            [encoder setRenderPipelineState:pipeline]; [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-            [encoder endEncoding]; [cb commit]; [cb waitUntilCompleted];
-            CHECK(cb.status == MTLCommandBufferStatusCompleted, "integer render completes");
+            T4 *cb = t4_begin();
+            id<MTL4RenderCommandEncoder> encoder = t4_pass(cb, rp);
+            [encoder setRenderPipelineState:t4_keep(cb, pipeline)]; [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            t4_end(cb, encoder); t4_wait(cb);
+            CHECK(cb->status == MTLCommandBufferStatusCompleted, "integer render completes");
             uint32_t pixels[16]; [a getBytes:pixels bytesPerRow:16 fromRegion:MTLRegionMake2D(0,0,4,4) mipmapLevel:0];
             int ok = 1; for (int i = 0; i < 16; i++) ok &= pixels[i] == 0x12345678u;
             CHECK(ok, "R32Uint output preserves all literal bits");

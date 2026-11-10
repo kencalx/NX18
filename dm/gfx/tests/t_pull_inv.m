@@ -4,6 +4,7 @@
 // triangles (half positions, snorm normals) are drawn into depth by one pipeline and then with depth test EQUAL by the other, both ways round: every covered pixel must pass
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include "t_mtl4.h"
 static int checks, failed;
 #define EXPECT(name, want, got) do { uint64_t w = (want), g = (got); checks++; if (w != g) { fprintf(stderr, "%s: expected %llu, got %llu\n", name, (unsigned long long)w, (unsigned long long)g); failed++; } } while (0)
 static NSString *k_vs =
@@ -17,7 +18,7 @@ static NSString *k_fs = @"#include <metal_stdlib>\nusing namespace metal;\nstruc
 typedef struct { uint64_t base; uint32_t stride, divisor; } dm_vstream_c;
 typedef struct { dm_vstream_c s[16]; uint32_t attr[16]; } dm_vlayout_c;
 int main(void) { @autoreleasepool {
-    id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); id<MTLCommandQueue> q = [dev newCommandQueue]; NSError *e = nil;
+    id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); NSError *e = nil;
     char dir[] = "/tmp/t_pull_inv.XXXXXX"; if (!mkdtemp(dir)) return 1;
     NSString *in = [@(dir) stringByAppendingPathComponent:@"v.metal"], *out = [@(dir) stringByAppendingPathComponent:@"vp.metal"];
     [k_vs writeToFile:in atomically:NO encoding:NSUTF8StringEncoding error:nil];
@@ -26,7 +27,7 @@ int main(void) { @autoreleasepool {
     NSString *pull = [NSString stringWithContentsOfFile:out encoding:NSUTF8StringEncoding error:nil];
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
     MTLCompileOptions *o = [MTLCompileOptions new]; o.preserveInvariance = YES;   // the chain's -fpreserve-invariance
-    id<MTLLibrary> lv = [dev newLibraryWithSource:k_vs options:o error:&e], lp = [dev newLibraryWithSource:pull options:o error:&e], lf = [dev newLibraryWithSource:k_fs options:o error:&e];
+    id<MTLLibrary> lv = t4_lib(k_vs, o, &e), lp = t4_lib(pull, o, &e), lf = t4_lib(k_fs, o, &e);
     if (!lv || !lp || !lf) { fprintf(stderr, "compile: %s\n", e.localizedDescription.UTF8String); return 1; }
     enum { NT = 2000, NV = NT * 3, W = 256 };
     // vertex data: attribute 0 RGBA16F positions at offset 0, attribute 1 RGBA8 snorm at offset 8, stride 12
@@ -41,10 +42,10 @@ int main(void) { @autoreleasepool {
     id<MTLBuffer> lay = [dev newBufferWithBytes:&L length:sizeof L options:MTLResourceStorageModeShared];
     id<MTLRenderPipelineState> ps[2];
     for (int k = 0; k < 2; k++) {
-        MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new]; d.vertexFunction = [(k ? lp : lv) newFunctionWithName:@"main0"]; d.fragmentFunction = [lf newFunctionWithName:@"fs"];
+        MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new]; d.vertexFunction = t4_fn(k ? lp : lv, @"main0"); d.fragmentFunction = t4_fn(lf, @"fs");
         if (!k) d.vertexDescriptor = vd;
         d.colorAttachments[0].pixelFormat = MTLPixelFormatR32Float; d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
-        ps[k] = [dev newRenderPipelineStateWithDescriptor:d error:&e]; if (!ps[k]) { fprintf(stderr, "pipeline: %s\n", e.localizedDescription.UTF8String); return 1; }
+        ps[k] = t4_rps(d, &e); if (!ps[k]) { fprintf(stderr, "pipeline: %s\n", e.localizedDescription.UTF8String); return 1; }
     }
     MTLDepthStencilDescriptor *dl = [MTLDepthStencilDescriptor new]; dl.depthCompareFunction = MTLCompareFunctionLess; dl.depthWriteEnabled = YES;
     MTLDepthStencilDescriptor *de = [MTLDepthStencilDescriptor new]; de.depthCompareFunction = MTLCompareFunctionEqual; de.depthWriteEnabled = NO;
@@ -54,19 +55,19 @@ int main(void) { @autoreleasepool {
         id<MTLTexture> c0 = [dev newTextureWithDescriptor:td], c1 = [dev newTextureWithDescriptor:td];
         MTLTextureDescriptor *dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:W height:W mipmapped:NO]; dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
         id<MTLTexture> depth = [dev newTextureWithDescriptor:dd];
-        id<MTLCommandBuffer> cb = [q commandBuffer];
+        T4 *cb = t4_begin();
         for (int pass = 0; pass < 2; pass++) {
             int k = pass == 0 ? first : !first;
             MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor new];
             rp.colorAttachments[0].texture = pass ? c1 : c0; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0); rp.colorAttachments[0].storeAction = MTLStoreActionStore;
             rp.depthAttachment.texture = depth; rp.depthAttachment.loadAction = pass ? MTLLoadActionLoad : MTLLoadActionClear; rp.depthAttachment.clearDepth = 1; rp.depthAttachment.storeAction = MTLStoreActionStore;
-            id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
-            [en setRenderPipelineState:ps[k]]; [en setDepthStencilState:pass ? se : sl]; [en setVertexBytes:M length:64 atIndex:0];
-            if (k) { [en setVertexBuffer:lay offset:0 atIndex:16]; [en useResource:vb usage:MTLResourceUsageRead stages:MTLRenderStageVertex]; } else [en setVertexBuffer:vb offset:0 atIndex:16];
-            [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:NV]; [en endEncoding];
+            id<MTL4RenderCommandEncoder> en = t4_pass(cb, rp);
+            [en setRenderPipelineState:t4_keep(cb, ps[k])]; [en setDepthStencilState:t4_keep(cb, pass ? se : sl)]; t4_bytes(cb, en, T4_VS, M, 64, 0);
+            if (k) { t4_buf(cb, en, T4_VS, lay, 0, 16); t4_use(cb, vb); } else t4_buf(cb, en, T4_VS, vb, 0, 16);
+            [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:NV]; t4_end(cb, en);
         }
-        [cb commit]; [cb waitUntilCompleted];
-        EXPECT("no GPU error", 0, cb.error != nil);
+        t4_wait(cb);
+        EXPECT("no GPU error", 0, cb->status != MTLCommandBufferStatusCompleted);
         float *a = malloc(W * W * 4), *b = malloc(W * W * 4);
         [c0 getBytes:a bytesPerRow:W * 4 fromRegion:MTLRegionMake2D(0, 0, W, W) mipmapLevel:0]; [c1 getBytes:b bytesPerRow:W * 4 fromRegion:MTLRegionMake2D(0, 0, W, W) mipmapLevel:0];
         int covered = 0, passed = 0; for (int i = 0; i < W * W; i++) { covered += a[i] != 0; passed += a[i] != 0 && b[i] != 0; }

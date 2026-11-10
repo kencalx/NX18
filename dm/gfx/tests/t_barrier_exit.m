@@ -8,6 +8,7 @@
 #import <Metal/Metal.h>
 #include <stdio.h>
 #include <string.h>
+#include "t_mtl4.h"
 
 static const char *src =
     "#include <metal_stdlib>\n"
@@ -102,31 +103,29 @@ int main(void) { @autoreleasepool {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
     if (!dev) { printf("FAIL: no Metal device\n"); return 1; }
     NSError *err = nil;
-    id<MTLLibrary> lib = [dev newLibraryWithSource:@(src) options:nil error:&err];
+    id<MTLLibrary> lib = t4_lib(@(src), nil, &err);
     if (!lib) { printf("FAIL: %s\n", err.localizedDescription.UTF8String); return 1; }
-    id<MTLCommandQueue> q = [dev newCommandQueue];
     id<MTLBuffer> out = [dev newBufferWithLength:GROUPS * THREADS * 4 options:MTLResourceStorageModeShared];
     uint32_t count = COUNT;
     int fails = 0;
     const char *names[] = {"whole", "last", "lanes", "staged", "loop", "loopexit", "simdbar"};
     for (size_t k = 0; k < sizeof names / sizeof *names; k++) {
-        id<MTLFunction> fn = [lib newFunctionWithName:@(names[k])];
-        id<MTLComputePipelineState> ps = fn ? [dev newComputePipelineStateWithFunction:fn error:&err] : nil;
+        id<MTLFunction> fn = t4_fn(lib, @(names[k]));
+        id<MTLComputePipelineState> ps = fn ? t4_cps(fn, &err) : nil;
         if (!ps || ps.maxTotalThreadsPerThreadgroup < THREADS) { printf("FAIL: %s: no 1024-thread pipeline\n", names[k]); fails++; continue; }
         int bad = 0;
         for (int r = 0; r < REPEAT && !bad; r++) {
             memset(out.contents, 0xff, GROUPS * THREADS * 4);
-            id<MTLCommandBuffer> cb = [q commandBuffer];
-            id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
-            [e setComputePipelineState:ps];
-            [e setBuffer:out offset:0 atIndex:0];
-            [e setBytes:&count length:4 atIndex:1];
+            T4 *cb = t4_begin();
+            id<MTL4ComputeCommandEncoder> e = t4_compute(cb);
+            [e setComputePipelineState:t4_keep(cb, ps)];
+            t4_buf(cb, e, T4_CS, out, 0, 0);
+            t4_bytes(cb, e, T4_CS, &count, 4, 1);
             [e dispatchThreadgroups:MTLSizeMake(GROUPS, 1, 1) threadsPerThreadgroup:MTLSizeMake(THREADS, 1, 1)];
-            [e endEncoding];
-            [cb commit];
-            [cb waitUntilCompleted];   // a GPU that waited at the barrier for the returned threads ends here with Metal's hang error
-            if (cb.status != MTLCommandBufferStatusCompleted) {
-                printf("FAIL: %s: command buffer status %d: %s\n", names[k], (int)cb.status, cb.error.localizedDescription.UTF8String);
+            t4_end(cb, e);
+            t4_wait(cb);   // a GPU that waited at the barrier for the returned threads ends here with Metal's hang error
+            if (cb->status != MTLCommandBufferStatusCompleted) {
+                printf("FAIL: %s: command buffer status %d: %s\n", names[k], (int)cb->status, "GPU error");
                 bad = 1; break;
             }
             const uint32_t *o = out.contents;

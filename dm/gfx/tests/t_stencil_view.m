@@ -2,6 +2,7 @@
 // process at the first view of one made without it. Run under MTL_DEBUG_LAYER=1: for both NVN depth-stencil formats (Depth32Float_Stencil8 in Metal), a texture is filled with a
 // per-pixel depth and stencil, read through a stencil-mode view, a texture built in stencil mode and the depth-stencil copy draw, and the copy's destination is read back
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -17,11 +18,11 @@ static void plane_io(id<MTLTexture> t, int stencil, int to_tex, void *bytes) {
     NSUInteger bpp = stencil ? 1 : 4;
     id<MTLBuffer> b = [g_dev newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared];
     if (to_tex) memcpy(b.contents, bytes, W * H * bpp);
-    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_copy(cb);
     MTLBlitOption o = stencil ? MTLBlitOptionStencilFromDepthStencil : MTLBlitOptionDepthFromDepthStencil;
-    if (to_tex) [e copyFromBuffer:b sourceOffset:0 sourceBytesPerRow:W * bpp sourceBytesPerImage:W * H * bpp sourceSize:MTLSizeMake(W, H, 1) toTexture:t destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0) options:o];
-    else [e copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, H, 1) toBuffer:b destinationOffset:0 destinationBytesPerRow:W * bpp destinationBytesPerImage:W * H * bpp options:o];
-    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    if (to_tex) t4_use(cb, b), t4_use(cb, t), [e copyFromBuffer:b sourceOffset:0 sourceBytesPerRow:W * bpp sourceBytesPerImage:W * H * bpp sourceSize:MTLSizeMake(W, H, 1) toTexture:t destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0) options:o];
+    else t4_use(cb, t), t4_use(cb, b), [e copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, H, 1) toBuffer:b destinationOffset:0 destinationBytesPerRow:W * bpp destinationBytesPerImage:W * H * bpp options:o];
+    t4_end(cb, e); t4_wait(cb);
     if (!to_tex) memcpy(bytes, b.contents, W * H * bpp);
 }
 int main(void) { @autoreleasepool {

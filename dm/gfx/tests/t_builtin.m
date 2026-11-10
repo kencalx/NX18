@@ -5,6 +5,7 @@
 #include <string.h>
 #include "../nvn/nvn_builtin.h"
 #include "../nvn/host_msl.h"
+#include "t_mtl4.h"
 
 enum { NREC = 40, N = 37, CAP = 64 };   // n = 37: spans two thread groups (32 + 5); elements 37..63 must keep the sentinel value
 
@@ -20,11 +21,10 @@ static void expect(int k, const uint64_t *s, uint64_t *e) {
 }
 
 int main(void) {
-    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+    id<MTLDevice> dev = t4_dev();
     NSError *err = nil;
     id<MTLLibrary> lib = host_msl_lib(dev, "builtin", &err);   // the library compiled when the host was built (dm/gfx/msl/builtin.metal)
     if (!lib) { printf("no builtin library: %s\n", err.localizedDescription.UTF8String); return 1; }
-    id<MTLCommandQueue> q = [dev newCommandQueue];
     // Source data: NREC 32-byte records (= 2×NREC 16-byte records), with values that have high bits set and wraparound cases where "the later is smaller than the earlier"
     uint64_t src[4 * NREC];
     for (int i = 0; i < 4 * NREC; i++) src[i] = 0x0123456789ABCDEFull * (uint64_t)(i + 1) ^ ((uint64_t)i << 40);
@@ -35,14 +35,15 @@ int main(void) {
     id<MTLBuffer> bd = [dev newBufferWithLength:CAP * 8 options:MTLResourceStorageModeShared];
     int fail = 0;
     for (int k = 0; k < 4; k++) {
-        id<MTLComputePipelineState> ps = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@(k_nvn_builtin_map[k].fn)] error:&err];
+        id<MTLComputePipelineState> ps = t4_cps(t4_fn(lib, @(k_nvn_builtin_map[k].fn)), &err);
+        if (!ps) { printf("%s: %s\n", k_nvn_builtin_map[k].fn, err.localizedDescription.UTF8String); return 1; }
         int row[4];
         for (int j = 0; j < 4; j++) {
             memset(bd.contents, 0xAA, CAP * 8);
-            id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-            [ce setComputePipelineState:ps]; [ce setBuffer:bn offset:0 atIndex:0]; [ce setBuffer:bs offset:0 atIndex:1]; [ce setBuffer:bd offset:0 atIndex:2];
+            T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(cb);
+            [ce setComputePipelineState:t4_keep(cb, ps)]; t4_buf(cb, ce, T4_CS, bn, 0, 0); t4_buf(cb, ce, T4_CS, bs, 0, 1); t4_buf(cb, ce, T4_CS, bd, 0, 2);
             [ce dispatchThreadgroups:MTLSizeMake((N + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-            [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+            t4_end(cb, ce); if (t4_wait(cb) != MTLCommandBufferStatusCompleted) { printf("%s: GPU error\n", k_nvn_builtin_map[k].fn); return 1; }
             uint64_t e[CAP]; expect(j, src, e);
             row[j] = !memcmp(bd.contents, e, sizeof e);
         }

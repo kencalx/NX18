@@ -1,6 +1,7 @@
 // Snapshot lifecycle: real NVN acquire/present/suspend, real Metal copies, and controlled encoder/GPU delays.
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 #undef nvn_game_fps
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
@@ -34,10 +35,10 @@ static tex_t source_n(unsigned i, int n) {   // n x n texels of 73 + i (n at mos
 static tex_t source(unsigned i) { return source_n(i, 8); }
 static void pixels(id<MTLTexture> t, int value) {
     id<MTLBuffer> out = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
-    [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1)
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> b = t4_copy(cb);
+    t4_use(cb, t), t4_use(cb, out), [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1)
         toBuffer:out destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:256];
-    [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    t4_end(cb, b); t4_wait(cb);
     int bad = 0; for (int i = 0; i < 256; i++) bad += ((uint8_t *)out.contents)[i] != value;
     CHECK("snapshot has the expected pixels", bad == 0);
 }

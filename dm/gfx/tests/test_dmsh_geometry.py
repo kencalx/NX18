@@ -14,8 +14,10 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import dmsh_geometry, dmsh_mesh
 
+T4_DIR = str(Path(__file__).resolve().parent)   # t_mtl4.h, the Metal 4 queue and pipelines the runners below use
 RASTER_CHECK = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include "t_mtl4.h"
 int main(int argc, const char **argv) { @autoreleasepool {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     if (!device) { fprintf(stderr, "no Metal device\n"); return 77; }
@@ -23,15 +25,14 @@ int main(int argc, const char **argv) { @autoreleasepool {
     id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&error];
     if (!library) { fprintf(stderr, "%s\n", error.description.UTF8String); return 1; }
     MTLRenderPipelineDescriptor *pipeline = [MTLRenderPipelineDescriptor new];
-    pipeline.vertexFunction = [library newFunctionWithName:@(argv[2])];
-    pipeline.fragmentFunction = [library newFunctionWithName:@"pixel"];
+    pipeline.vertexFunction = t4_fn(library, @(argv[2]));
+    pipeline.fragmentFunction = t4_fn(library, @"pixel");
     pipeline.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-    id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithDescriptor:pipeline error:&error];
+    id<MTLRenderPipelineState> state = t4_rps(pipeline, &error);
     if (!state) { fprintf(stderr, "%s\n", error.description.UTF8String); return 1; }
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:16 height:16 mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;
     id<MTLTexture> texture = [device newTextureWithDescriptor:td];
-    id<MTLCommandQueue> queue = [device newCommandQueue];
     uint32_t masks[] = {0, 1, 2, 3, 0x80000000u, 0xffffffffu};
     for (unsigned clamp = 0; clamp < 2; clamp++)
     for (uint32_t points = 0; points < 2; points++)
@@ -41,15 +42,15 @@ int main(int argc, const char **argv) { @autoreleasepool {
         pass.colorAttachments[0].loadAction = MTLLoadActionClear;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
-        id<MTLCommandBuffer> command = [queue commandBuffer];
-        id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
-        [encoder setRenderPipelineState:state];
+        T4 *command = t4_begin();
+        id<MTL4RenderCommandEncoder> encoder = t4_pass(command, pass);
+        [encoder setRenderPipelineState:t4_keep(command, state)];
         [encoder setDepthClipMode:clamp ? MTLDepthClipModeClamp : MTLDepthClipModeClip];
-        [encoder setVertexBytes:&masks[i] length:sizeof(masks[i]) atIndex:0];
-        [encoder setVertexBytes:&points length:sizeof(points) atIndex:1];
+        t4_bytes(command, encoder, T4_VS, &masks[i], sizeof(masks[i]), 0);
+        t4_bytes(command, encoder, T4_VS, &points, sizeof(points), 1);
         [encoder drawPrimitives:points ? MTLPrimitiveTypePoint : MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:points ? 1 : 3];
-        [encoder endEncoding]; [command commit]; [command waitUntilCompleted];
-        if (command.error) { fprintf(stderr, "%s\n", command.error.description.UTF8String); return 1; }
+        t4_end(command, encoder); t4_wait(command);
+        if (command->status != MTLCommandBufferStatusCompleted) { fprintf(stderr, "GPU error\n"); return 1; }
         uint8_t pixel[4];
         [texture getBytes:pixel bytesPerRow:4 fromRegion:MTLRegionMake2D(8, 8, 1, 1) mipmapLevel:0];
         if ((pixel[0] != 0) != ((masks[i] & 1u) != 0)) {
@@ -127,7 +128,7 @@ class GeometryReader(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(root / 'reader.air'), '-o', str(library)], check=True, capture_output=True)
             executable = root / 'raster'
-            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-x', 'objective-c', '-', '-o', str(executable),
+            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-I', T4_DIR, '-x', 'objective-c', '-', '-o', str(executable),
                             '-framework', 'Foundation', '-framework', 'Metal'], input=RASTER_CHECK,
                            text=True, check=True, capture_output=True)
             for entry in ('main0', 'main0_z'):
@@ -486,7 +487,7 @@ class MeshPassthrough(unittest.TestCase):
                 library = work / 'pid.metallib'
                 subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(work / 'macosx.air'), '-o', str(library)], check=True, capture_output=True)
                 binary = work / 'mesh_check'
-                subprocess.run(['xcrun', 'clang', '-fobjc-arc', str(root / 'dm/gfx/tests/mesh_primitive_id.m'),
+                subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-I', T4_DIR, str(root / 'dm/gfx/tests/mesh_primitive_id.m'),
                                 '-framework', 'Foundation', '-framework', 'Metal', '-o', str(binary)], check=True, capture_output=True)
                 r = subprocess.run([str(binary), str(library)], capture_output=True, text=True)
                 if r.returncode == 77: self.skipTest('no Metal device')

@@ -44,7 +44,9 @@ KERNEL = '''kernel void check(device const uint2* input [[buffer(0)]], device ui
     o[9] = as_type<uint>(f.lo); o[10] = as_type<uint>(f.hi); o[11] = as_type<uint>(g.lo); o[12] = as_type<uint>(g.hi); o[13] = h.lo.x; o[14] = h.hi.x; o[15] = h.hi.y;
 }
 '''
+T4_DIR = str(Path(__file__).resolve().parent)   # t_mtl4.h, the Metal 4 queue and pipelines the runners below use
 RUNNER = r'''#import <Metal/Metal.h>
+#include "t_mtl4.h"
 #include <stdint.h>
 #include <stdio.h>
 int main(int argc, char **argv) {
@@ -53,7 +55,7 @@ int main(int argc, char **argv) {
     if (!d) return 2;
     NSError *err = nil;
     id<MTLLibrary> lib = [d newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&err];
-    id<MTLComputePipelineState> ps = lib ? [d newComputePipelineStateWithFunction:[lib newFunctionWithName:@"check"] error:&err] : nil;
+    id<MTLComputePipelineState> ps = lib ? t4_cps(t4_fn(lib, @"check"), &err) : nil;
     if (!ps) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); return 1; }
     const unsigned n = 65536;
     id<MTLBuffer> in = [d newBufferWithLength:n * 8 options:MTLResourceStorageModeShared];
@@ -65,13 +67,12 @@ int main(int argc, char **argv) {
         for (unsigned j = 0; j < 2; j++) { state ^= state << 13; state ^= state >> 17; state ^= state << 5; a[2*i+j] = state; }
         if (i < ne*ne) { a[2*i] = edge[i/ne]; a[2*i+1] = edge[i%ne]; }
     }
-    id<MTLCommandQueue> q = [d newCommandQueue];
-    id<MTLCommandBuffer> cb = [q commandBuffer];
-    id<MTLComputeCommandEncoder> en = [cb computeCommandEncoder];
-    [en setComputePipelineState:ps]; [en setBuffer:in offset:0 atIndex:0]; [en setBuffer:out offset:0 atIndex:1];
+    T4 *cb = t4_begin();
+    id<MTL4ComputeCommandEncoder> en = t4_compute(cb);
+    [en setComputePipelineState:t4_keep(cb, ps)]; t4_buf(cb, en, T4_CS, in, 0, 0); t4_buf(cb, en, T4_CS, out, 0, 1);
     [en dispatchThreadgroups:MTLSizeMake(n/64,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
-    [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    if (cb.status == MTLCommandBufferStatusError) { fprintf(stderr, "%s\n", cb.error.localizedDescription.UTF8String); return 1; }
+    t4_end(cb, en); t4_wait(cb);
+    if (cb->status != MTLCommandBufferStatusCompleted) { fprintf(stderr, "GPU error\n"); return 1; }
     const uint32_t *b = out.contents;
     for (unsigned i = 0; i < n; i++) {
         uint32_t x = a[2*i], y = a[2*i+1];
@@ -113,7 +114,7 @@ class ExtendedMultiply(unittest.TestCase):
             for sdk in ('macosx', 'iphoneos'):
                 subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-c', '-O2', '-fpreserve-invariance', str(root / 'test.metal'), '-o', str(root / f'{sdk}.air')], check=True, capture_output=True)
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(root / 'macosx.air'), '-o', str(root / 'test.metallib')], check=True, capture_output=True)
-            subprocess.run(['clang', '-fobjc-arc', '-O1', str(root / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(root / 'run')], check=True, capture_output=True)
+            subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, '-O1', str(root / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(root / 'run')], check=True, capture_output=True)
             r = subprocess.run([str(root / 'run'), str(root / 'test.metallib')], capture_output=True, text=True)
             if r.returncode == 2: self.skipTest('no Metal device')
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

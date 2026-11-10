@@ -2,6 +2,7 @@
 // Zero ordinary walk room exercises first-table materialization and GPU pixels.
 // Finalize-before-replace, a read ID whose texture is not made yet, unread IDs and unwritten render targets stay distinct.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -31,11 +32,11 @@ static int pixel_is(int i, uint8_t v) {
     if (!t) return 0; // Do not resolve here: that would hide a failed pool walk.
     id<MTLBuffer> b = [g_dev newBufferWithLength:64 * 64 * 4 options:MTLResourceStorageModeShared];
     if (!b) return 0;
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
-    [bl copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(64,64,1)
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> bl = t4_copy(cb);
+    t4_use(cb, t), t4_use(cb, b), [bl copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(64,64,1)
               toBuffer:b destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:16384];
-    [bl endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    if (cb.status != MTLCommandBufferStatusCompleted) return 0;
+    t4_end(cb, bl); t4_wait(cb);
+    if (cb->status != MTLCommandBufferStatusCompleted) return 0;
     for (size_t n = 0; n < 16384; n++) if (((uint8_t *)b.contents)[n] != v) return 0;
     return 1;
 }

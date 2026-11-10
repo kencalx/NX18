@@ -1,6 +1,7 @@
 // Fixed command chain experiment: production mtl_exec, hand-written constant shaders and closed-form expectations; does not include the production reorderer.
 // G full stencil block, M small view + copy, U blend, R stencil resolve; only G/M are swapped.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -171,10 +172,10 @@ static result range_case(int array,int reordered) {
     if(!reordered) sample_block(&c,&b,array?6:5,tid);
     result r=execute(&c,&a,&b,&out,&e,NULL);
     NSUInteger w=array?8:4; id<MTLBuffer> buf=[g_dev newBufferWithLength:w*w*4 options:MTLResourceStorageModeShared]; if(!buf) exit(1);
-    id<MTLCommandBuffer> cb=[g_q commandBuffer]; id<MTLBlitCommandEncoder> bl=[cb blitCommandEncoder];
-    [bl copyFromTexture:tex_mtl(&a) sourceSlice:array?1:0 sourceLevel:array?0:1 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(w,w,1)
-      toBuffer:buf destinationOffset:0 destinationBytesPerRow:w*4 destinationBytesPerImage:w*w*4]; [bl endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    EXPECT("second subresource readback GPU done",4,cb.status); uint8_t blue[4]={0,0,255,255}; unsigned bad=0;
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> bl=t4_copy(cb);
+    t4_use(cb, tex_mtl(&a)), t4_use(cb, buf), [bl copyFromTexture:tex_mtl(&a) sourceSlice:array?1:0 sourceLevel:array?0:1 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(w,w,1)
+      toBuffer:buf destinationOffset:0 destinationBytesPerRow:w*4 destinationBytesPerImage:w*w*4]; t4_end(cb, bl); t4_wait(cb);
+    EXPECT("second subresource readback GPU done",4,cb->status); uint8_t blue[4]={0,0,255,255}; unsigned bad=0;
     for(NSUInteger i=0;i<w*w;i++) bad+=memcmp((const uint8_t *)buf.contents+4*i,blue,4)!=0;
     EXPECT("G second subresource blue per pixel",0,bad); save_raw(array?"whole_slice_write_target":"whole_mip_write_target",reordered,buf.contents,w*w*4);
     return r;
@@ -251,18 +252,18 @@ static void inherited_target_case(void) {
 int main(int argc,char **argv) { @autoreleasepool {
     setvbuf(stdout,NULL,_IONBF,0);
     all_independent=argc>1&&!strcmp(argv[1],"--all-independent"); setenv("DM_NVN_TBDR","0",1); mtl_init();
-    NSError *err=nil; id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    NSError *err=nil; id<MTLLibrary> lib=t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
       "vertex float4 v(uint n [[vertex_id]]){float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(p[n],0,1);}\n"
       "fragment float4 red(){return float4(1,0,0,1);} fragment float4 blue(){return float4(0,0,1,1);} fragment float4 green(){return float4(0,1,0,1);}\n"
       "struct A{texture2d<float> t [[id(0)]];}; fragment float4 readtex(constant A&a [[buffer(0)]]){return a.t.read(uint2(0));}\n"
       "fragment float4 halftex(constant A&a [[buffer(0)]]){return float4(a.t.read(uint2(0)).rgb,0.5);}\n"
       "fragment float4 readlevel1(constant A&a [[buffer(0)]]){return a.t.read(uint2(0),1);}\n"
       "struct T{texture2d_array<float> t [[id(0)]];}; fragment float4 readslice1(constant T&a [[buffer(0)]]){return a.t.read(uint2(0),1);}\n"
-      "struct U{constant float4 *c [[id(0)]];}; fragment float4 ub(constant U&a [[buffer(0)]]){return *a.c;}\n" options:nil error:&err];
+      "struct U{constant float4 *c [[id(0)]];}; fragment float4 ub(constant U&a [[buffer(0)]]){return *a.c;}\n", nil, &err);
     if(!lib) { fprintf(stderr,"%s\n",err.localizedDescription.UTF8String); return 2; }
     NSString *fn[8]={@"red",@"blue",@"readtex",@"halftex",@"ub",@"readlevel1",@"readslice1",@"green"};
-    for(int i=0;i<8;i++) { NvProg *p=[NvProg new]; p->sh[0]=[NvShader new]; p->sh[0]->fn=[lib newFunctionWithName:@"v"];
-        p->sh[1]=[NvShader new]; NvShader *f=p->sh[1]; f->fn=[lib newFunctionWithName:fn[i]]; f->stage=1;
+    for(int i=0;i<8;i++) { NvProg *p=[NvProg new]; p->sh[0]=[NvShader new]; p->sh[0]->fn=t4_fn(lib, @"v");
+        p->sh[1]=[NvShader new]; NvShader *f=p->sh[1]; f->fn=t4_fn(lib, fn[i]); f->stage=1;
         if(i>=2&&i!=7) { f->rf.nb=1; f->rf.b[0]=(nvn_rbind){.kind=i==4?NVN_RB_CBUF:NVN_RB_TEX,.dtt=i==6?3:2}; f->arg_len=[f->fn newArgumentEncoderWithBufferIndex:0].encodedLength; }
         pg[i].serial=4000+i; serial_put(pg[i].serial,p); }
     printf("CASE inherited_target\n"); inherited_target_case();

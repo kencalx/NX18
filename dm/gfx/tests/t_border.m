@@ -2,6 +2,7 @@
 // (mtl_reg_samp, samp_by_id), and, given the path of a shader border_emu rewrote (test_dmsh_border.py writes it), the GPU: samples through the sampler, its twin and the block come
 // out as Maxwell's do, bilinear between the texels and the border colour, and with the block's mask clear as Metal's nearest colour
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
 void *front_metal_layer(void) { return NULL; }
@@ -53,11 +54,11 @@ static void gpu_case(id<MTLComputePipelineState> p, int sid, const float B[4], i
     uint64_t a[4] = { g_tex.gpuResourceID._impl, rid, rid_w, block.gpuAddress }; memcpy(args.contents, a, 32);
     id<MTLBuffer> uv = [g_dev newBufferWithBytes:UV length:sizeof UV options:MTLResourceStorageModeShared];
     id<MTLBuffer> out = [g_dev newBufferWithLength:16 * NUV options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
-    [e setComputePipelineState:p]; [e setBuffer:args offset:0 atIndex:0]; [e setBuffer:out offset:0 atIndex:1]; [e setBuffer:uv offset:0 atIndex:2];
-    [e useResource:g_tex usage:MTLResourceUsageRead]; [e useResource:block usage:MTLResourceUsageRead];
-    [e dispatchThreads:MTLSizeMake(NUV, 1, 1) threadsPerThreadgroup:MTLSizeMake(NUV, 1, 1)]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    CHECK(cb.status == MTLCommandBufferStatusCompleted, "sampler %d: GPU work completed", sid);
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_compute(cb);
+    [e setComputePipelineState:t4_keep(cb, p)]; t4_buf(cb, e, T4_CS, args, 0, 0); t4_buf(cb, e, T4_CS, out, 0, 1); t4_buf(cb, e, T4_CS, uv, 0, 2);
+    t4_use(cb, g_tex); t4_use(cb, block);
+    [e dispatchThreads:MTLSizeMake(NUV, 1, 1) threadsPerThreadgroup:MTLSizeMake(NUV, 1, 1)]; t4_end(cb, e); t4_wait(cb);
+    CHECK(cb->status == MTLCommandBufferStatusCompleted, "sampler %d: GPU work completed", sid);
     const float *got = out.contents; const float *Bref = mask ? B : nvn_mtl_border[bn];   // the mask clear: Metal's nearest colour
     for (int i = 0; i < NUV; i++) { float ref[4]; reference(Bref, UV[i][0], UV[i][1], ref);
         for (int c = 0; c < 4; c++) CHECK(fabsf(got[4 * i + c] - ref[c]) < 6e-3f, "border %g,%g,%g,%g mask %u at (%g, %g) channel %d: %g, expected %g", B[0], B[1], B[2], B[3], mask, UV[i][0], UV[i][1], c, got[4 * i + c], ref[c]); }
@@ -75,8 +76,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     mtl_init();
     if (argc > 1) {   // the rewritten shader
         NSError *error = nil; NSString *src = [NSString stringWithContentsOfFile:@(argv[1]) encoding:NSUTF8StringEncoding error:&error];
-        id<MTLLibrary> lib = src ? [g_dev newLibraryWithSource:src options:nil error:&error] : nil;
-        id<MTLComputePipelineState> p = lib ? [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"main0"] error:&error] : nil;
+        id<MTLLibrary> lib = src ? t4_lib(src, nil, &error) : nil;
+        id<MTLComputePipelineState> p = lib ? t4_cps(t4_fn(lib, @"main0"), &error) : nil;
         CHECK(p != nil, "the rewritten shader compiles: %s", error.localizedDescription.UTF8String);
         if (p) {
             MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:W height:H mipmapped:NO];

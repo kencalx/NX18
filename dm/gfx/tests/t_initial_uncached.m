@@ -4,6 +4,7 @@
 // An uncompressed 3D texture with no IMAGE / COMPRESSIBLE flag is taken from its storage the same way (Xenoblade Chronicles 3's 10x10x10
 // particle steering fields, GitHub issue #1011); with IMAGE it stays a GPU texture. IMAGE does not keep a block-compressed texture out (Pokemon Pokopia's icons).
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -22,14 +23,14 @@ static void fill(tex_t *t,void *mem,int first){   // level lv gets colors[(first
 }
 static void expect(id<MTLTexture> image,int first,const char *label){
     NSError *error=nil;
-    static id<MTLComputePipelineState> ps;static id<MTLCommandQueue> queue;
-    if(!ps){id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;kernel void read_mips(texture2d<float> t[[texture(0)]],device float4 *o[[buffer(0)]],uint lv[[thread_position_in_grid]]){constexpr sampler s(coord::normalized,filter::nearest,mip_filter::nearest);o[lv]=t.sample(s,float2(.5),level(lv));}" options:nil error:&error];
-        ps=[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"read_mips"] error:&error];queue=[g_dev newCommandQueue];}
+    static id<MTLComputePipelineState> ps;
+    if(!ps){id<MTLLibrary> lib=t4_lib(@"#include <metal_stdlib>\nusing namespace metal;kernel void read_mips(texture2d<float> t[[texture(0)]],device float4 *o[[buffer(0)]],uint lv[[thread_position_in_grid]]){constexpr sampler s(coord::normalized,filter::nearest,mip_filter::nearest);o[lv]=t.sample(s,float2(.5),level(lv));}", nil, &error);
+        ps=t4_cps(t4_fn(lib, @"read_mips"), &error);}
     CHECK("mip probe compiles",ps!=nil);if(!ps||!image)return;
     id<MTLBuffer> result=[g_dev newBufferWithLength:48 options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> cb=[queue commandBuffer];id<MTLComputeCommandEncoder> ce=[cb computeCommandEncoder];
-    [ce setComputePipelineState:ps];[ce setTexture:image atIndex:0];[ce setBuffer:result offset:0 atIndex:0];[ce dispatchThreadgroups:MTLSizeMake(3,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];[ce endEncoding];[cb commit];[cb waitUntilCompleted];
-    CHECK("mip readback completes",cb.status==MTLCommandBufferStatusCompleted);
+    T4 *cb = t4_begin();id<MTL4ComputeCommandEncoder> ce=t4_compute(cb);
+    [ce setComputePipelineState:t4_keep(cb, ps)];t4_tex(cb, ce, T4_CS, image, 0);t4_buf(cb, ce, T4_CS, result, 0, 0);[ce dispatchThreadgroups:MTLSizeMake(3,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];t4_end(cb, ce);t4_wait(cb);
+    CHECK("mip readback completes",cb->status==MTLCommandBufferStatusCompleted);
     float *out=result.contents;for(int lv=0;lv<3;lv++)for(int c=0;c<4;c++)CHECK(label,fabsf(out[lv*4+c]-(colors[(first+lv)%4][c]?1.f:0.f))<.001f);
 }
 static void run(int format, uint64_t serial, uint32_t pool_flags, int c0, uint32_t tex_flags) {   // c0: the first fill's colour (distinct per run: a run's pool and storage may reuse an earlier run's addresses)
@@ -67,14 +68,14 @@ static void run3d(uint64_t serial, uint32_t tex_flags, int want) {
     mtl_tex_init(&t);mtl_sub_begin();id<MTLTexture> image=tex_mtl(&t);
     CHECK("3D texture resolves",image!=nil);finish();
     if(want&&image){
-        NSError *error=nil;static id<MTLComputePipelineState> ps;static id<MTLCommandQueue> queue;
-        if(!ps){id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;kernel void read_slices(texture3d<float,access::read> t[[texture(0)]],device float4 *o[[buffer(0)]],uint z[[thread_position_in_grid]]){o[z]=t.read(uint3(1,2,z));}" options:nil error:&error];
-            ps=[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"read_slices"] error:&error];queue=[g_dev newCommandQueue];}
+        NSError *error=nil;static id<MTLComputePipelineState> ps;
+        if(!ps){id<MTLLibrary> lib=t4_lib(@"#include <metal_stdlib>\nusing namespace metal;kernel void read_slices(texture3d<float,access::read> t[[texture(0)]],device float4 *o[[buffer(0)]],uint z[[thread_position_in_grid]]){o[z]=t.read(uint3(1,2,z));}", nil, &error);
+            ps=t4_cps(t4_fn(lib, @"read_slices"), &error);}
         CHECK("3D probe compiles",ps!=nil);
         if(ps){id<MTLBuffer> result=[g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared];
-            id<MTLCommandBuffer> cb=[queue commandBuffer];id<MTLComputeCommandEncoder> ce=[cb computeCommandEncoder];
-            [ce setComputePipelineState:ps];[ce setTexture:image atIndex:0];[ce setBuffer:result offset:0 atIndex:0];[ce dispatchThreadgroups:MTLSizeMake(4,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];[ce endEncoding];[cb commit];[cb waitUntilCompleted];
-            float *out=result.contents;int ok=cb.status==MTLCommandBufferStatusCompleted;
+            T4 *cb = t4_begin();id<MTL4ComputeCommandEncoder> ce=t4_compute(cb);
+            [ce setComputePipelineState:t4_keep(cb, ps)];t4_tex(cb, ce, T4_CS, image, 0);t4_buf(cb, ce, T4_CS, result, 0, 0);[ce dispatchThreadgroups:MTLSizeMake(4,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];t4_end(cb, ce);t4_wait(cb);
+            float *out=result.contents;int ok=cb->status==MTLCommandBufferStatusCompleted;
             for(int z=0;z<4;z++)for(int c=0;c<3;c++)ok&=fabsf(out[z*4+c]*255.f-(float)(z*40+1+c))<.5f;
             CHECK("every slice of the 3D texture holds the CPU's texels at first use",ok);}
     }

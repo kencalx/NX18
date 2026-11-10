@@ -2,6 +2,7 @@
 // Expected 8x4 RGBA values are literal bytes, independent of the Metal replay's state.
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 #undef nvn_game_fps
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
@@ -117,13 +118,13 @@ static void sparse_reads(const NVNcopyRegion *region, const uint8_t expected[4])
 // what Metal itself cleared into it. A packaged texture holds Metal's order too: uploads convert, so what Metal clears or copies into one samples right (GitHub issue #183)
 static void sample2(int tid, float out[8]) {
     static id<MTLComputePipelineState> p;
-    if (!p) { NSError *e = nil; id<MTLLibrary> l = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nkernel void k(texture2d<float, access::read> t [[texture(0)]], device float4 *o [[buffer(0)]], uint i [[thread_position_in_grid]]) { o[i] = t.read(uint2(i, 0)); }\n" options:nil error:&e];
-        p = [g_dev newComputePipelineStateWithFunction:[l newFunctionWithName:@"k"] error:&e]; }
+    if (!p) { NSError *e = nil; id<MTLLibrary> l = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\nkernel void k(texture2d<float, access::read> t [[texture(0)]], device float4 *o [[buffer(0)]], uint i [[thread_position_in_grid]]) { o[i] = t.read(uint2(i, 0)); }\n", nil, &e);
+        p = t4_cps(t4_fn(l, @"k"), &e); }
     os_unfair_lock_lock(&g_rmu); id<MTLTexture> v = tex_by_id(tid); os_unfair_lock_unlock(&g_rmu);
     id<MTLBuffer> b = [g_dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> c = q_cb(); id<MTLComputeCommandEncoder> e = [c computeCommandEncoder];
-    [e setComputePipelineState:p]; [e setTexture:v atIndex:0]; [e setBuffer:b offset:0 atIndex:0]; [e dispatchThreads:MTLSizeMake(2, 1, 1) threadsPerThreadgroup:MTLSizeMake(2, 1, 1)];
-    [e endEncoding]; [c commit]; [c waitUntilCompleted]; memcpy(out, b.contents, 32);
+    T4 *c = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_compute(c);
+    [e setComputePipelineState:t4_keep(c, p)]; t4_tex(c, e, T4_CS, v, 0); t4_buf(c, e, T4_CS, b, 0, 0); [e dispatchThreads:MTLSizeMake(2, 1, 1) threadsPerThreadgroup:MTLSizeMake(2, 1, 1)];
+    t4_end(c, e); t4_wait(c); memcpy(out, b.contents, 32);
 }
 static void packed_copies(int format, int tid) {
     int b565 = format == NVN_FORMAT_RGB565, a1 = format == NVN_FORMAT_RGB5A1, rgba4 = format == NVN_FORMAT_RGBA4;
@@ -390,9 +391,9 @@ static void copy_stream(void) { @autoreleasepool {
     mtl_finish_gpu();   // the re-upload's batch, before another queue reads its texture
     {   // the new host texture, read on the GPU: the stored level
         id<MTLBuffer> rb = [g_dev newBufferWithLength:(size_t)W * W * 4 options:MTLResourceStorageModeShared];
-        id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
-        [be copyFromTexture:again sourceSlice:0 sourceLevel:1 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W / 2, W / 2, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:(W / 2) * 4 destinationBytesPerImage:(W / 2) * (W / 2) * 4];
-        [be endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> be = t4_copy(cb);
+        t4_use(cb, again), t4_use(cb, rb), [be copyFromTexture:again sourceSlice:0 sourceLevel:1 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W / 2, W / 2, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:(W / 2) * 4 destinationBytesPerImage:(W / 2) * (W / 2) * 4];
+        t4_end(cb, be); t4_wait(cb);
         bad = 0; for (int i = 0; i < (W / 2) * (W / 2) * 4; i++) bad += ((uint8_t *)rb.contents)[i] != 0x55;
         EXPECT("the re-uploaded host texture holds the stored level", 0, bad);
     }

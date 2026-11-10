@@ -7,6 +7,7 @@
 // texture of the declared type, since Metal makes no other view of a 3D texture. A 3D texture in a 2D input
 // is left as it is: that slot may be a size query's, which reads the real width through it.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -35,12 +36,12 @@ static void run_case(id<MTLTexture> descriptor, MTLTextureType want, id<MTLTextu
     id<MTLBuffer> output = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
     for (uint32_t select = 0; select < 2; select++) {
         memset(output.contents, 0xcd, 16);
-        id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
-        [encoder setComputePipelineState:pipeline]; [encoder setTexture:primary atIndex:0]; [encoder setTexture:fitted atIndex:1];
-        [encoder setBytes:&select length:sizeof select atIndex:0]; [encoder setBuffer:output offset:0 atIndex:1];
+        T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> encoder = t4_compute(cb);
+        [encoder setComputePipelineState:t4_keep(cb, pipeline)]; t4_tex(cb, encoder, T4_CS, primary, 0); t4_tex(cb, encoder, T4_CS, fitted, 1);
+        t4_bytes(cb, encoder, T4_CS, &select, sizeof select, 0); t4_buf(cb, encoder, T4_CS, output, 0, 1);
         [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
-        [encoder endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        CHECK(cb.status == MTLCommandBufferStatusCompleted && !cb.error, "GPU accepts both statically declared resources");
+        t4_end(cb, encoder); t4_wait(cb);
+        CHECK(cb->status == MTLCommandBufferStatusCompleted, "GPU accepts both statically declared resources");
         const float *value = output.contents;
         CHECK(select ? value[0] == 0 && value[1] == 0 && value[2] == 0 && value[3] == 0 :
                        value[0] == 0 && value[1] == 0 && value[2] == 1 && value[3] == 1,
@@ -54,13 +55,13 @@ int main(void) { @autoreleasepool {
         "kernel void cubes(texturecube<float> a [[texture(0)]], texturecube_array<float> b [[texture(1)]], constant uint& select [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(coord::normalized, filter::nearest); if (select) out[0] = b.sample(s,float3(0,0,1),0,level(0)); else out[0] = a.sample(s,float3(0,0,1),level(0)); }\n"
         "kernel void layers(texture2d_array<float> a [[texture(0)]], texture2d_array<float> b [[texture(1)]], constant uint& select [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(coord::normalized, filter::nearest); if (select) out[0] = b.sample(s,float2(0.5),0,level(0)); else out[0] = a.sample(s,float2(0.5),0,level(0)); }\n"
         "kernel void volume(texture3d<float> a [[texture(0)]], texture3d<float> b [[texture(1)]], constant uint& select [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(coord::normalized, filter::nearest); if (select) out[0] = b.sample(s,float3(0.5),level(0)); else out[0] = a.sample(s,float3(0.5),level(0)); }\n";
-    id<MTLLibrary> library = [g_dev newLibraryWithSource:source options:nil error:&error];
+    id<MTLLibrary> library = t4_lib(source, nil, &error);
     if (!library) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
     id<MTLTexture> primary = texture(MTLTextureTypeCube, 1);
     const uint8_t blue[] = {0,0,255,255};
     for (NSUInteger face = 0; face < 6; face++) [primary replaceRegion:MTLRegionMake3D(0,0,0,1,1,1) mipmapLevel:0 slice:face withBytes:blue bytesPerRow:4 bytesPerImage:4];
     for (int array = 0; array < 2; array++) {
-        id<MTLComputePipelineState> pipeline = [g_dev newComputePipelineStateWithFunction:[library newFunctionWithName:array ? @"cubes" : @"cube"] error:&error];
+        id<MTLComputePipelineState> pipeline = t4_cps(t4_fn(library, array ? @"cubes" : @"cube"), &error);
         if (!pipeline) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
         const NSUInteger layer_counts[] = {0, 1, 5};
         for (int i = 0; i < 3; i++) {
@@ -70,7 +71,7 @@ int main(void) { @autoreleasepool {
     }
     id<MTLTexture> volume = texture(MTLTextureType3D, 1);
     [volume replaceRegion:MTLRegionMake3D(0,0,0,1,1,1) mipmapLevel:0 slice:0 withBytes:blue bytesPerRow:4 bytesPerImage:4];
-    id<MTLComputePipelineState> pipeline = [g_dev newComputePipelineStateWithFunction:[library newFunctionWithName:@"volume"] error:&error];
+    id<MTLComputePipelineState> pipeline = t4_cps(t4_fn(library, @"volume"), &error);
     if (!pipeline) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
     const NSUInteger layer_counts[] = {0, 1, 5};
     for (int i = 0; i < 3; i++) run_case(texture(layer_counts[i] ? MTLTextureType2DArray : MTLTextureType2D, layer_counts[i] ?: 1), MTLTextureType3D, volume, pipeline);
@@ -84,7 +85,7 @@ int main(void) { @autoreleasepool {
     const struct { NSString *fn; MTLTextureType want; id<MTLTexture> primary; } lc[] = {
         {@"layers", MTLTextureType2DArray, layered}, {@"cube", MTLTextureTypeCube, primary}, {@"cubes", MTLTextureTypeCubeArray, primary} };
     for (int i = 0; lut && i < 3; i++) {
-        id<MTLComputePipelineState> lp = [g_dev newComputePipelineStateWithFunction:[library newFunctionWithName:lc[i].fn] error:&error];
+        id<MTLComputePipelineState> lp = t4_cps(t4_fn(library, lc[i].fn), &error);
         if (!lp) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
         run_case(lut, lc[i].want, lc[i].primary, lp);
     }

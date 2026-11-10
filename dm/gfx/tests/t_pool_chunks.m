@@ -3,6 +3,7 @@
 // raw global memory's pool table covers the whole pool (big_full), the pool's removal takes every entry, a smaller pool stays one buffer, and each kind of pool buffer made over a
 // write-protected page still takes the GPU's writes without counting the page as written (pool_buf).
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -26,8 +27,8 @@ static id<MTLBuffer> look(uint64_t a, uint64_t n) {
 static int gpu_fill_ok(uint64_t a, uint64_t n, uint8_t v) {
     id<MTLBuffer> b = look(a, n); if (!b) return 0;
     uint64_t off = a - (uint64_t)(uintptr_t)b.contents;
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> ce = [cb blitCommandEncoder];
-    [ce fillBuffer:b range:NSMakeRange(off, n) value:v]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_copy(cb);
+    t4_use(cb, b), [ce fillBuffer:b range:NSMakeRange(off, n) value:v]; t4_end(cb, ce); t4_wait(cb);
     const uint8_t *p = (const uint8_t *)(uintptr_t)a; for (uint64_t i = 0; i < n; i++) if (p[i] != v) return 0;
     return 1;
 }
@@ -82,9 +83,9 @@ int main(void) { @autoreleasepool {
     int n2 = g_npool; mtl_sub_begin(); id<MTLTexture> image = tex_mtl(&t); CHECK("texture resolves", image != nil); finish();
     CHECK("the upload made no chunk", g_npool == n2);
     id<MTLBuffer> rb = [g_dev newBufferWithLength:256 * 256 * 4 options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> ce = [cb blitCommandEncoder];
-    [ce copyFromTexture:image sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(256, 256, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:256 * 4 destinationBytesPerImage:256 * 256 * 4];
-    [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_copy(cb);
+    t4_use(cb, image), t4_use(cb, rb), [ce copyFromTexture:image sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(256, 256, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:256 * 4 destinationBytesPerImage:256 * 256 * 4];
+    t4_end(cb, ce); t4_wait(cb);
     CHECK("the texture holds what the pool holds", !memcmp(rb.contents, lin, 256 * 256 * 4));
     free(lin);
     mtl_tex_release(&t);

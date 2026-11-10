@@ -5,6 +5,7 @@
 #import <Metal/Metal.h>
 #include <assert.h>
 #include <string.h>
+#include "t_mtl4.h"
 
 int main(int argc, const char **argv) { @autoreleasepool {
     assert(argc == 4);
@@ -12,8 +13,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
     NSError *error = nil;
     id<MTLLibrary> lib = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&error];
     assert(lib && !error);
-    id<MTLFunction> fn = [lib newFunctionWithName:@"main0"]; assert(fn);
-    id<MTLComputePipelineState> pso = [dev newComputePipelineStateWithFunction:fn error:&error];
+    id<MTLFunction> fn = t4_fn(lib, @"main0"); assert(fn);
+    id<MTLComputePipelineState> pso = t4_cps(fn, &error);
     assert(pso && !error);
     const char *shape = argv[3];
     MTLTextureUsage usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageShaderAtomic;
@@ -42,15 +43,14 @@ int main(int argc, const char **argv) { @autoreleasepool {
     id<MTLBuffer> ab = [dev newBufferWithLength:args.encodedLength options:MTLResourceStorageModeShared];
     [args setArgumentBuffer:ab offset:0];
     [args setTexture:tex atIndex:0];
-    id<MTLCommandQueue> queue = [dev newCommandQueue];
-    id<MTLCommandBuffer> command = [queue commandBuffer];
-    id<MTLComputeCommandEncoder> enc = [command computeCommandEncoder];
-    [enc setComputePipelineState:pso];
-    [enc setBuffer:ab offset:0 atIndex:0];
-    [enc useResource:tex usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+    T4 *command = t4_begin();
+    id<MTL4ComputeCommandEncoder> enc = t4_compute(command);
+    [enc setComputePipelineState:t4_keep(command, pso)];
+    t4_buf(command, enc, T4_CS, ab, 0, 0);
+    t4_use(command, tex);
     [enc dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
-    [enc endEncoding]; [command commit]; [command waitUntilCompleted];
-    assert(command.status == MTLCommandBufferStatusCompleted);
+    t4_end(command, enc); t4_wait(command);
+    assert(command->status == MTLCommandBufferStatusCompleted);
     uint32_t out[1024];
     if (data) memcpy(out, data.contents, sizeof out);
     else if (tex.textureType == MTLTextureType2DArray)

@@ -1,6 +1,8 @@
 // A 32-bit integer texture in a slot a shader declares float gets the float view of the same size (tex_float_fit, tbuf_view_format), and the shader takes the bits back with as_type<int>.
 // That holds only if the read hands the stored bits over unchanged, in compute and in a fragment shader: small integers are denormal floats, and a light list holds NaN patterns and negative values too.
 #include "../nvn/nvn_mtl.m"
+#define T4_STANDALONE   // no mtl_init: the fixture's own device, queue and residency set
+#include "t_mtl4.h"
 
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -18,7 +20,7 @@ int main(void) { @autoreleasepool {
     failed += tbuf_view_format(MTLPixelFormatR32Uint, NVN_DPF_UINT) != MTLPixelFormatR32Uint;
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
     if (!dev) { printf("no Metal device\n"); return 1; }
-    id<MTLCommandQueue> q = [dev newCommandQueue]; NSError *e = nil;
+    NSError *e = nil;
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint width:8 height:1 mipmapped:NO];
     d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView; d.storageMode = MTLStorageModeShared;
     id<MTLTexture> t = [dev newTextureWithDescriptor:d];
@@ -26,32 +28,32 @@ int main(void) { @autoreleasepool {
     [t replaceRegion:MTLRegionMake2D(0, 0, 8, 1) mipmapLevel:0 withBytes:words bytesPerRow:32];
     id<MTLTexture> v = [t newTextureViewWithPixelFormat:MTLPixelFormatR32Float];
     if (!v) { printf("no float view\n"); return 1; }
-    id<MTLLibrary> lib = [dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> lib = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "kernel void cs(texture2d<float> t [[texture(0)]], device uint *o [[buffer(0)]], uint id [[thread_position_in_grid]]) { o[id] = as_type<uint>(t.read(uint2(id, 0), 0).x); }\n"
         "vertex float4 vs(uint id [[vertex_id]]) { return float4(id == 1 ? 3.0 : -1.0, id == 2 ? 3.0 : -1.0, 0.0, 1.0); }\n"
-        "fragment uint fs(float4 p [[position]], texture2d<float> t [[texture(0)]]) { return as_type<uint>(t.read(uint2(p.xy), 0).x); }\n" options:nil error:&e];
+        "fragment uint fs(float4 p [[position]], texture2d<float> t [[texture(0)]]) { return as_type<uint>(t.read(uint2(p.xy), 0).x); }\n", nil, &e);
     if (!lib) { printf("shader source: %s\n", e.localizedDescription.UTF8String); return 1; }
-    id<MTLFunction> fcs = [lib newFunctionWithName:@"cs"];
+    id<MTLFunction> fcs = t4_fn(lib, @"cs");
     if (!fcs) { printf("no cs function\n"); return 1; }
-    id<MTLComputePipelineState> cp = [dev newComputePipelineStateWithFunction:fcs error:&e];
-    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"]; pd.colorAttachments[0].pixelFormat = MTLPixelFormatR32Uint;
-    id<MTLRenderPipelineState> rp = [dev newRenderPipelineStateWithDescriptor:pd error:&e];
+    id<MTLComputePipelineState> cp = t4_cps(fcs, &e);
+    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = t4_fn(lib, @"vs"); pd.fragmentFunction = t4_fn(lib, @"fs"); pd.colorAttachments[0].pixelFormat = MTLPixelFormatR32Uint;
+    id<MTLRenderPipelineState> rp = t4_rps(pd, &e);
     if (!cp || !rp) { printf("pipelines: %s\n", e.localizedDescription.UTF8String); return 1; }
     id<MTLBuffer> co = [dev newBufferWithLength:32 options:MTLResourceStorageModeShared], fo = [dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
     MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint width:8 height:1 mipmapped:NO]; rd.usage = MTLTextureUsageRenderTarget; rd.storageMode = MTLStorageModePrivate;
     id<MTLTexture> rt = [dev newTextureWithDescriptor:rd];
     if (!co || !fo || !rt) { printf("no buffer or render target\n"); return 1; }
-    id<MTLCommandBuffer> cb = [q commandBuffer];
-    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder]; [ce setComputePipelineState:cp]; [ce setTexture:v atIndex:0]; [ce setBuffer:co offset:0 atIndex:0];
-    [ce dispatchThreads:MTLSizeMake(8, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [ce endEncoding];
+    T4 *cb = t4_begin();
+    id<MTL4ComputeCommandEncoder> ce = t4_compute(cb); [ce setComputePipelineState:t4_keep(cb, cp)]; t4_tex(cb, ce, T4_CS, v, 0); t4_buf(cb, ce, T4_CS, co, 0, 0);
+    [ce dispatchThreads:MTLSizeMake(8, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; t4_end(cb, ce);
     MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor]; rpd.colorAttachments[0].texture = rt; rpd.colorAttachments[0].loadAction = MTLLoadActionClear; rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
-    id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:rpd];
+    id<MTL4RenderCommandEncoder> re = t4_pass(cb, rpd);
     if (!re) { printf("no render encoder\n"); return 1; }
-    [re setRenderPipelineState:rp]; [re setFragmentTexture:v atIndex:0]; [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [re endEncoding];
-    id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+    [re setRenderPipelineState:t4_keep(cb, rp)]; t4_tex(cb, re, T4_FS, v, 0); [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; t4_end(cb, re);
+    id<MTL4ComputeCommandEncoder> be = t4_copy(cb);
     if (!be) { printf("no blit encoder\n"); return 1; }
-    [be copyFromTexture:rt sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(8, 1, 1) toBuffer:fo destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:32]; [be endEncoding];
-    [cb commit]; [cb waitUntilCompleted];
+    t4_use(cb, rt), t4_use(cb, fo), [be copyFromTexture:rt sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(8, 1, 1) toBuffer:fo destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:32]; t4_end(cb, be);
+    t4_wait(cb);
     const uint32_t *c = co.contents, *f = fo.contents;
     for (int i = 0; i < 8; i++) { int ok = c[i] == words[i] && f[i] == words[i]; failed += !ok; printf("%08x: compute %08x fragment %08x %s\n", words[i], c[i], f[i], ok ? "ok" : "CHANGED"); }
     printf("t_int_float_view: %s (%s)\n", failed ? "FAILED" : "ok", dev.name.UTF8String);

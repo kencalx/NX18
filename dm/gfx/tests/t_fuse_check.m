@@ -1,6 +1,7 @@
 // In-run double-render regression: goes directly through production fz_end / fz_check_run, with real 16×16 Metal attachments.
 // The later pass's logical c0 is at physical c3 of the union; the expected red and blue values are defined by constants, not computed via the implementation under test.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -41,13 +42,13 @@ static void check_color(int blue, const prog_t *pg, tex_t t[4]) {
 int main(void) { @autoreleasepool {
     setenv("DM_NVN_FUSE_CHECK", "1", 1); mtl_init();
     NSError *error = nil;
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> lib = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint n [[vertex_id]]) { float2 p[3] = {float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[n],0,1); }\n"
-        "fragment float4 f() { return float4(1,0,0,1); }\n" options:nil error:&error];
+        "fragment float4 f() { return float4(1,0,0,1); }\n", nil, &error);
     if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
     NvProg *pr = [NvProg new];
-    pr->sh[0] = [NvShader new]; pr->sh[0]->fn = [lib newFunctionWithName:@"v"];
-    pr->sh[1] = [NvShader new]; pr->sh[1]->fn = [lib newFunctionWithName:@"f"]; pr->sh[1]->stage = 1;
+    pr->sh[0] = [NvShader new]; pr->sh[0]->fn = t4_fn(lib, @"v");
+    pr->sh[1] = [NvShader new]; pr->sh[1]->fn = t4_fn(lib, @"f"); pr->sh[1]->stage = 1;
     prog_t pg = {.serial = 100}; serial_put(pg.serial, pr);
     tex_t t[4] = {0};
     for (int i = 0; i < 4; i++) { t[i].magic = MAGIC('T', 'E', 'X', 0); t[i].serial = 101 + i; t[i].d.width = t[i].d.height = 16;
