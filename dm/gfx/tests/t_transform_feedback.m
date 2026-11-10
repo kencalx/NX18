@@ -1,5 +1,6 @@
 // Production feedback replay, append/resume, overflow and GPU-count gathering.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -10,9 +11,9 @@ static int checks, fails;
 static void finish(void) { CHECK(mtl_wait(mtl_sub_commit(),5000000000ull),"submission completes");CHECK(!mtl_last_commit_error(),"no GPU error"); }
 static NvShader *shader(NSString *path) {
     NSError *e=nil;NSString *src=[NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&e];
-    id<MTLLibrary> lib=[g_dev newLibraryWithSource:src options:nil error:&e];
+    id<MTLLibrary> lib=t4_lib(src, nil, &e);
     if(!lib){fprintf(stderr,"%s\n",e.localizedDescription.UTF8String);abort();}
-    NvShader *vs=[NvShader new];vs->fn=[lib newFunctionWithName:@"main0"];vs->tf_fn=[lib newFunctionWithName:@"main0_tf"];vs->tf_stride[0]=20;
+    NvShader *vs=[NvShader new];vs->fn=t4_fn(lib, @"main0");vs->tf_fn=t4_fn(lib, @"main0_tf");vs->tf_stride[0]=20;
     return vs;
 }
 static void state(int what,void *control) {p_tf_state s={.what=what,.ctl=(uint64_t)control};state_op(OP_TF_STATE,&s);tf_state_gpu(&s);}
@@ -38,9 +39,9 @@ int main(int argc,char **argv) { @autoreleasepool {
     uint32_t *indices=(uint32_t *)((uint8_t *)memory+8192),*args=indices+32,*source=args+16;
     const uint32_t order[5]={6,2,4,1,5};memcpy(indices,order,sizeof order);source[0]=5;
     NvShader *reader=shader([@(argv[1]) stringByAppendingString:@".geo"]);
-    NSError *error=nil;id<MTLLibrary> drawlib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nstruct A{device uint* p[[id(0)]];};\nvertex float4 v(uint n[[vertex_id]],constant A&a[[buffer(0)]]){return float4(0,0,0,1);}\nvertex void vd(uint n[[vertex_id]],constant A&a[[buffer(0)]]){a.p[n]=0x800+n;}\n" options:nil error:&error];
+    NSError *error=nil;id<MTLLibrary> drawlib=t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\nstruct A{device uint* p[[id(0)]];};\nvertex float4 v(uint n[[vertex_id]],constant A&a[[buffer(0)]]){return float4(0,0,0,1);}\nvertex void vd(uint n[[vertex_id]],constant A&a[[buffer(0)]]){a.p[n]=0x800+n;}\n", nil, &error);
     CHECK(drawlib!=nil,"indirect-count consumer compiles");
-    NvShader *consumer=[NvShader new];consumer->fn=[drawlib newFunctionWithName:@"v"];consumer->discard_fn=[drawlib newFunctionWithName:@"vd"];
+    NvShader *consumer=[NvShader new];consumer->fn=t4_fn(drawlib, @"v");consumer->discard_fn=t4_fn(drawlib, @"vd");
     consumer->arg_len=[consumer->discard_fn newArgumentEncoderWithBufferIndex:0].encodedLength;consumer->rf.nb=1;consumer->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0};
     NvProg *drawpr=[NvProg new];drawpr->sh[0]=consumer;static prog_t pg={.serial=910601};serial_put(pg.serial,drawpr);
     tex_t target={.magic=MAGIC('T','E','X',0),.serial=910602};target.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=8,.height=8,.depth=1,.levels=1,.samples=1};

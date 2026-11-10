@@ -1,6 +1,7 @@
 // Real translated Maxwell PrimitiveID through production splitting and feedback.
 #define main geometry_fixture_main
 #include "t_geometry.m"
+#include "t_mtl4.h"
 #undef main
 static uint32_t source_index(unsigned primitive, unsigned corner, unsigned width) {
     return 5 + (primitive / GEO_RUN_PRIMS) * 400000 + (primitive % GEO_RUN_PRIMS) * width + corner;
@@ -19,9 +20,9 @@ static int run_case(NSString *directory, unsigned topology, unsigned invocations
     gs->geo_output=[layout[@"output"] unsignedIntValue];gs->geo_stride=[layout[@"stride"] unsignedIntValue];gs->geo_index_stride=[layout[@"index_stride"] unsignedIntValue];
     strcpy(gs->key,"000000000000c001_b");
     id<MTLLibrary> vertex=[g_dev newLibraryWithURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:@"vertex.metallib"]] error:&error];
-    NvProg *pr=[NvProg new];pr->sh[2]=gs;pr->sh[0]=shader(vertex,@"main0",0,NULL,0);pr->sh[0]->geo_fn=[vertex newFunctionWithName:@"main0_gs"];
+    NvProg *pr=[NvProg new];pr->sh[2]=gs;pr->sh[0]=shader(vertex,@"main0",0,NULL,0);pr->sh[0]->geo_fn=t4_fn(vertex, @"main0_gs");
     NSString *readerSource=[NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\nstruct V{device const uint*p[[id(0)]];};\nvertex float4 reader(uint v[[vertex_id]],constant V&a[[buffer(0)]]){return as_type<float4>(uint4(a.p[v*%uu],0,0,0x3f800000u));}\nstruct T{uint4 offset,args;device const uint*order;uint first,count,base_instance,pad;ulong reserved;};\nvertex void feedback(uint v[[vertex_id]],constant V&a[[buffer(0)]],device uint4*out[[buffer(8)]],constant T&t[[buffer(14)]]){if(v<t.args.x){uint n=t.order[v]*%uu;out[t.offset.x/16+v]=uint4(a.p[n+5],a.p[n+6],a.p[n+7],a.p[n+8]);}}\n",gs->geo_stride,gs->geo_stride];
-    id<MTLLibrary> rl=library(readerSource);int rh[]={1};NvShader *reader=shader(rl,@"reader",0,rh,1);reader->tf_fn=[rl newFunctionWithName:@"feedback"];reader->tf_stride[0]=16;
+    id<MTLLibrary> rl=library(readerSource);int rh[]={1};NvShader *reader=shader(rl,@"reader",0,rh,1);reader->tf_fn=t4_fn(rl, @"feedback");reader->tf_stride[0]=16;
     g_shcache=[NSMutableDictionary dictionary];g_shcache[@"000000000000c001_bg0"]=gs;g_shcache[@"000000000000c001_bg1"]=gs;g_shcache[@"000000000000c001_bg2"]=gs;g_shcache[@"000000000000c001_bg3"]=gs;g_shcache[@"000000000000c001_bg4"]=gs;g_shcache[@"000000000000c001_bgv"]=reader;
     size_t indexBytes=(size_t)primitives*width[topology]*4,records=(size_t)primitives*vertices[topology]*instances*invocations;
     size_t outputOffset=(indexBytes+4095)&~(size_t)4095,total=outputOffset+records*16+8192;

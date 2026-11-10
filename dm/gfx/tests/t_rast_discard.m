@@ -1,5 +1,6 @@
 // Discard suppresses fragments while array, indexed and instanced vertex writes still execute.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -32,7 +33,7 @@ int main(void) { @autoreleasepool {
     void *memory=NULL; if(posix_memalign(&memory,getpagesize(),65536))abort(); memset(memory,0,65536); mtl_pool_add(memory,65536);
     cmd=memory; uint32_t *output=(uint32_t *)((uint8_t *)memory+32768);
     uint32_t *indices=(uint32_t *)((uint8_t *)memory+36864); indices[0]=7;indices[1]=8;indices[2]=9;
-    NSError *error=nil; id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    NSError *error=nil; id<MTLLibrary> lib=t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "struct A{device uint* p[[id(0)]];};\n"
         "vertex float4 v(uint n[[vertex_id]],uint i[[instance_id]],constant A&a[[buffer(0)]]){a.p[n+16*i]=0x500+n+16*i;float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(p[n%3],0,1);}\n"
         "vertex void vd(uint n[[vertex_id]],uint i[[instance_id]],constant A&a[[buffer(0)]]){a.p[n+16*i]=0x500+n+16*i;}\n"
@@ -41,13 +42,13 @@ int main(void) { @autoreleasepool {
         "vertex void pd(uint n[[vertex_id]],constant A&a[[buffer(0)]]){a.p[n]=n+0x1200;}\n"
         "vertex void cd(uint n[[vertex_id]],constant A&a[[buffer(0)]]){a.p[n+4096]=a.p[n];}\n"
         "fragment float4 f(){return float4(1,0,0,1);}\n"
-        "fragment float4 fw(constant A&a[[buffer(0)]]){a.p[8192]=1;return float4(1,0,0,1);}\n" options:nil error:&error];
+        "fragment float4 fw(constant A&a[[buffer(0)]]){a.p[8192]=1;return float4(1,0,0,1);}\n", nil, &error);
     if(!lib){fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);return 1;}
     static prog_t pg={.serial=910501}; NvProg *program=[NvProg new];
-    NvShader *vs=[NvShader new];vs->fn=[lib newFunctionWithName:@"v"];vs->arg_len=[vs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
-    vs->discard_fn=[lib newFunctionWithName:@"vd"];
+    NvShader *vs=[NvShader new];vs->fn=t4_fn(lib, @"v");vs->arg_len=[vs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
+    vs->discard_fn=t4_fn(lib, @"vd");
     vs->rf.nb=1;vs->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0};
-    program->sh[0]=vs;program->sh[1]=[NvShader new];program->sh[1]->fn=[lib newFunctionWithName:@"f"];program->sh[1]->stage=1;serial_put(pg.serial,program);
+    program->sh[0]=vs;program->sh[1]=[NvShader new];program->sh[1]->fn=t4_fn(lib, @"f");program->sh[1]->stage=1;serial_put(pg.serial,program);
     tex_t t={.magic=MAGIC('T','E','X',0),.serial=910502};t.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=8,.height=8,.depth=1,.levels=1,.samples=1};
     state_reset();memset(&R,0,sizeof R);
     p_set_rt rt={.n=1};rt.color[0]=&t;emit(OP_SET_RT,&rt,sizeof rt);
@@ -68,7 +69,7 @@ int main(void) { @autoreleasepool {
     // ORDER_PRIMITIVES must make one vertex shader's storage writes visible
     // to the next vertex shader, even with rasterization disabled throughout.
     static prog_t pp={.serial=910503},cp={.serial=910504};NvProg *producers[2]={[NvProg new],[NvProg new]};
-    for(int i=0;i<2;i++){NvShader *s=[NvShader new];s->fn=[lib newFunctionWithName:i?@"c":@"p"];s->discard_fn=[lib newFunctionWithName:i?@"cd":@"pd"];
+    for(int i=0;i<2;i++){NvShader *s=[NvShader new];s->fn=t4_fn(lib, i?@"c":@"p");s->discard_fn=t4_fn(lib, i?@"cd":@"pd");
         s->arg_len=[s->discard_fn newArgumentEncoderWithBufferIndex:0].encodedLength;s->rf.nb=1;s->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0};producers[i]->sh[0]=s;}
     serial_put(pp.serial,producers[0]);serial_put(cp.serial,producers[1]);
     buf.size=32768;emit(OP_BIND_SSBO,&buf,sizeof buf);bp.prog=&pp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);
@@ -81,10 +82,10 @@ int main(void) { @autoreleasepool {
     // with a vertex-only draw after ORDER_PRIMITIVES). A barrier from the vertex stage inside the pass is enough when the earlier draws read memory only in their vertex stage or
     // the barrier orders only primitives; ORDER_FRAGMENTS after a draw that reads in its fragment stage ends the pass; a draw without writes, or a write with no barrier, changes nothing
     static prog_t rd={.serial=910506},rf={.serial=910507},fwp={.serial=910508};NvProg *reader=[NvProg new],*freader=[NvProg new],*fwriter=[NvProg new];
-    reader->sh[0]=[NvShader new];reader->sh[0]->fn=[lib newFunctionWithName:@"c"];reader->sh[1]=program->sh[1];serial_put(rd.serial,reader);
+    reader->sh[0]=[NvShader new];reader->sh[0]->fn=t4_fn(lib, @"c");reader->sh[1]=program->sh[1];serial_put(rd.serial,reader);
     freader->sh[0]=reader->sh[0];freader->sh[1]=[NvShader new];freader->sh[1]->fn=program->sh[1]->fn;freader->sh[1]->stage=1;
     freader->sh[1]->rf.nb=1;freader->sh[1]->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=0,.reg=5,.aid=0};serial_put(rf.serial,freader);   // only its binding table matters here
-    fwriter->sh[0]=reader->sh[0];NvShader *fws=[NvShader new];fws->fn=[lib newFunctionWithName:@"fw"];fws->stage=1;fws->arg_len=[fws->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
+    fwriter->sh[0]=reader->sh[0];NvShader *fws=[NvShader new];fws->fn=t4_fn(lib, @"fw");fws->stage=1;fws->arg_len=[fws->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     fws->rf.nb=1;fws->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0};fwriter->sh[1]=fws;serial_put(fwp.serial,fwriter);
     p_bind_buf fbuf=buf;fbuf.stage=1;emit(OP_BIND_SSBO,&fbuf,sizeof fbuf);
     arrays=(p_draw){.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1};p_draw writes=(p_draw){.prim=0,.count=4096,.instances=1};

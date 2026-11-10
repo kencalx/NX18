@@ -1,6 +1,7 @@
 // A loaded color attachment and a fragment image refer to the same array texture.
 // The image-only draw must survive pass end; raster outputs and clears executed in that pass still need their tile store.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -48,7 +49,7 @@ static void run(int mode, int store_all) {
         if(!fs||!tail->sh[0]) { CHECK(0,"DontCare-load image program resolves its two stages"); rp_end(); return; } // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the NvProg prog_get returned (serial_put's CFBridgingRetain)
         MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new]; d.vertexFunction=tail->sh[0]->fn; d.fragmentFunction=fs->fn;
         d.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA8Unorm; d.colorAttachments[0].writeMask=MTLColorWriteMaskNone;
-        NSError *error=nil; id<MTLRenderPipelineState> ps=[g_dev newRenderPipelineStateWithDescriptor:d error:&error];
+        NSError *error=nil; id<MTLRenderPipelineState> ps=t4_rps(d, &error);
         boundary_pipeline=ps; CHECK(ps!=nil,"DontCare-load image pipeline compiles");
         enc_r_pso(g_enc,ps); enc_r_viewport(g_enc,(MTLViewport){0,0,8,8,0,1});
         CHECK(encode_args((id<MTLCommandEncoder>)g_enc,fs,1,0),"DontCare-load image arguments encoded");
@@ -100,18 +101,17 @@ int main(void) { @autoreleasepool {
     MTLTextureDescriptor *td=tex_desc(&color,0); td.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite|MTLTextureUsagePixelFormatView;
     id<MTLTexture> texture=[g_dev newTextureWithDescriptor:td]; CHECK(texture!=nil,"array texture created"); res_add(texture); mtl_tex_init(&color); serial_put(color.serial,texture); mtl_reg_image(701,&color,NULL); // NOLINT(clang-analyzer-osx.cocoa.RetainCount): serial_put transfers a retained reference to g_by_serial; the analyzer does not model its C hash table.
     NSError *error=nil;
-    id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> lib=t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint n[[vertex_id]]){return float4(n==1?3.0:-1.0,n==2?3.0:-1.0,0,1);}\n"
         "struct A{texture2d_array<float,access::write> image[[id(0)]];};\n"
         "void stores(float4 p,constant A&a,uint first){for(uint l=first;l<4;l++)a.image.write(float4(float(32+l*32)/255.0,64.0/255.0,128.0/255.0,1),uint2(p.xy),l);}\n"
         "fragment void image_only(float4 p[[position]],constant A&a[[buffer(0)]]){stores(p,a,0);}\n"
         "fragment void image_tail(float4 p[[position]],constant A&a[[buffer(0)]]){stores(p,a,1);}\n"
-        "fragment float4 both(float4 p[[position]],constant A&a[[buffer(0)]]){stores(p,a,1);return float4(1,0,0,1);}\n"
-        options:nil error:&error];
+        "fragment float4 both(float4 p[[position]],constant A&a[[buffer(0)]]){stores(p,a,1);return float4(1,0,0,1);}\n", nil, &error);
     CHECK(lib!=nil,"literal image-store shaders compile"); if(!lib){fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);return 1;}
     for(unsigned mode=0;mode<3;mode++) { // NOLINT(clang-analyzer-osx.cocoa.RetainCount): the preceding iteration's NvProg is retained by g_by_serial through serial_put.
-        NvProg *pr=[NvProg new]; pr->sh[0]=[NvShader new]; pr->sh[0]->fn=[lib newFunctionWithName:@"v"];
-        NvShader *fs=[NvShader new]; pr->sh[1]=fs; fs->stage=1; fs->fn=[lib newFunctionWithName:mode==2?@"image_tail":mode?@"both":@"image_only"];
+        NvProg *pr=[NvProg new]; pr->sh[0]=[NvShader new]; pr->sh[0]->fn=t4_fn(lib, @"v");
+        NvShader *fs=[NvShader new]; pr->sh[1]=fs; fs->stage=1; fs->fn=t4_fn(lib, mode==2?@"image_tail":mode?@"both":@"image_only");
         fs->rf.color_known=1; fs->rf.color_mask=mode==1; fs->rf.nb=1;
         fs->rf.b[0]=(nvn_rbind){.kind=NVN_RB_IMG,.aid=0,.reg=0,.rw=1,.dtt=MTLTextureType2DArray};
         fs->arg_len=[fs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;

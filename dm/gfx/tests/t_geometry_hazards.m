@@ -2,6 +2,7 @@
 // Rebinding that memory as a uniform must retain the same ordering.
 #define main geometry_fixture_main
 #include "t_geometry.m"
+#include "t_mtl4.h"
 #undef main
 // Independent scalar oracle: a job may join a run only when no pair of its
 // ranges and an earlier job's ranges overlaps with at least one of them a write.
@@ -130,7 +131,7 @@ static void dependency(int mode) {
       "kernel void geometry(constant G&g[[buffer(0)]],uint3 t[[thread_position_in_grid]]){if(t.x||t.y||t.z)return;float x=g.in[0]*.8-.8;g.p[0]=uint(g.in[0])+1;g.out[0]=float4(x,-.5,0,1);g.out[1]=float4(x+.6,-.5,0,1);g.out[2]=float4(x,.5,0,1);g.ix[0]=0;g.ix[1]=1;g.ix[2]=2;g.ix[3]=0xffffffffu;}\n"
       "struct V{device float4*p[[id(0)]];};vertex float4 reader(uint v[[vertex_id]],constant V&a[[buffer(0)]]){return a.p[v];}\nfragment float4 red(){return float4(1,0,0,1);}\n");
     int helpers[]={0,1,2,3,4},rh[]={1};NvProg *pr=[NvProg new];
-    pr->sh[0]=shader(l,@"unused",0,NULL,0);NvShader *vs=pr->sh[0];vs->geo_fn=[l newFunctionWithName:@"capture"];
+    pr->sh[0]=shader(l,@"unused",0,NULL,0);NvShader *vs=pr->sh[0];vs->geo_fn=t4_fn(l, @"capture");
     vs->rf.nb=1;vs->rf.b[0]=(nvn_rbind){.kind=uniform?NVN_RB_CBUF:NVN_RB_SBUFP,.reg=0,.aid=0};
     vs->arg_len=[vs->geo_fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     pr->sh[1]=shader(l,@"red",1,NULL,0);pr->sh[2]=shader(l,@"geometry",2,helpers,5);NvShader *gs=pr->sh[2];

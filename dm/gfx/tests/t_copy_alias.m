@@ -1,6 +1,7 @@
 // Copies through distinct Metal buffers and sparse guest aliases must see earlier GPU writes.
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 #undef nvn_game_fps
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
@@ -91,13 +92,13 @@ static void shader_alias(void) {
     id<MTLBuffer> a = [g_dev newBufferWithBytesNoCopy:mem length:pg options:MTLResourceStorageModeShared deallocator:nil];
     id<MTLBuffer> b = [g_dev newBufferWithBytesNoCopy:mem length:pg options:MTLResourceStorageModeShared deallocator:nil];
     id<MTLBuffer> io = [g_dev newBufferWithLength:pg options:MTLResourceStorageModeShared];
-    id<MTLLibrary> l = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> l = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "kernel void w(device uint *a [[buffer(0)]], constant uint &s [[buffer(2)]], uint i [[thread_position_in_grid]]) { a[i] = s + i; }\n"
-        "kernel void r(device const uint *b [[buffer(0)]], device uint *o [[buffer(1)]], uint i [[thread_position_in_grid]]) { o[i] = b[i]; }\n" options:nil error:&e];
+        "kernel void r(device const uint *b [[buffer(0)]], device uint *o [[buffer(1)]], uint i [[thread_position_in_grid]]) { o[i] = b[i]; }\n", nil, &e);
     if (!l || !a || !b || !io) { fprintf(stderr, "%s\n", e.localizedDescription.UTF8String); abort(); }
-    id<MTLFunction> write_fn = [l newFunctionWithName:@"w"], read_fn = [l newFunctionWithName:@"r"];
+    id<MTLFunction> write_fn = t4_fn(l, @"w"), read_fn = t4_fn(l, @"r");
     if (!write_fn || !read_fn) abort();
-    id<MTLComputePipelineState> pw = [g_dev newComputePipelineStateWithFunction:write_fn error:&e], pr = [g_dev newComputePipelineStateWithFunction:read_fn error:&e];
+    id<MTLComputePipelineState> pw = t4_cps(write_fn, &e), pr = t4_cps(read_fn, &e);
     if (!pw || !pr) abort();
     id<MTLBuffer> seed = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
     res_add(a); res_add(b); res_add(io); res_add(seed); atomic_fetch_add(&g_big_n, 1);

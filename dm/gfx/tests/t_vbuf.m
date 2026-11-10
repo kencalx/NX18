@@ -2,6 +2,7 @@
 // Byte-aligned streams preserve their bytes and GPU write ordering (Arkham Knight's Scaleform streams sit at addresses 2 mod 4).
 // A draw that reads past a stream's bound size reads zeros there, not the pool's next bytes (Super Mario Odyssey's 9-vertex draw from a 3-vertex stream).
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }   // Tests use host-thread stacks.
 void *front_metal_layer(void) { return NULL; }
@@ -14,28 +15,28 @@ static int checks, failed;
 
 static id<MTLRenderPipelineState> pipeline(NSString *fn) {   // v: the first word of streams 0, 14, 15 and the zero buffer; w: words 0, 3, 6 and 8 of stream 0 (vertices 0-2 of 12 bytes)
     NSError *err = nil;
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> lib = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex void v(const device uint *a[[buffer(16)]], const device uint *b[[buffer(14)]],"
         "const device uint *c[[buffer(15)]], const device uint *z[[buffer(30)]], device uint4 *o[[buffer(8)]])"
         "{ *o=uint4(*a,*b,*c,*z); }\n"
-        "vertex void w(const device uint *a[[buffer(16)]], device uint4 *o[[buffer(8)]]) { *o=uint4(a[0],a[3],a[6],a[8]); }" options:nil error:&err];
+        "vertex void w(const device uint *a[[buffer(16)]], device uint4 *o[[buffer(8)]]) { *o=uint4(a[0],a[3],a[6],a[8]); }", nil, &err);
     if (!lib) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); abort(); }
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-    d.vertexFunction = [lib newFunctionWithName:fn]; d.rasterizationEnabled = NO;
-    id<MTLRenderPipelineState> ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&err];
+    d.vertexFunction = t4_fn(lib, fn); d.rasterizationEnabled = NO;
+    id<MTLRenderPipelineState> ps = t4_rps(d, &err);
     if (!ps) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); abort(); }
     return ps;
 }
 static id<MTLRenderPipelineState> frag_pipeline(void) {   // one point at the 1x1 pass's pixel: its fragment copies the word at fragment slot 3 to fragment slot 8
     NSError *err = nil;
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> lib = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "struct P { float4 p [[position]]; float s [[point_size]]; };\n"
         "vertex P pv() { P o; o.p = float4(0, 0, 0, 1); o.s = 1; return o; }\n"
-        "fragment void pf(const device uint *a[[buffer(3)]], device uint4 *o[[buffer(8)]]) { *o = uint4(*a, 0, 0, 0); }" options:nil error:&err];
+        "fragment void pf(const device uint *a[[buffer(3)]], device uint4 *o[[buffer(8)]]) { *o = uint4(*a, 0, 0, 0); }", nil, &err);
     if (!lib) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); abort(); }
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-    d.vertexFunction = [lib newFunctionWithName:@"pv"]; d.fragmentFunction = [lib newFunctionWithName:@"pf"]; d.rasterSampleCount = 1;
-    id<MTLRenderPipelineState> ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&err];
+    d.vertexFunction = t4_fn(lib, @"pv"); d.fragmentFunction = t4_fn(lib, @"pf"); d.rasterSampleCount = 1;
+    id<MTLRenderPipelineState> ps = t4_rps(d, &err);
     if (!ps) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); abort(); }
     return ps;
 }

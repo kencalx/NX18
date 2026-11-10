@@ -9,6 +9,7 @@
 // or captured), and one with a pixel shader that declares function constants or with no pixel shader is built as before.
 // Without metal-tt (no Metal toolchain) it says so and passes
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
 void *front_metal_layer(void) { return NULL; }
@@ -221,7 +222,7 @@ int main(void) { @autoreleasepool {
     @autoreleasepool {
         id<MTLLibrary> vl = lib_from_file([msl stringByAppendingPathComponent:@"v1_bp.metallib"], NULL), fl = lib_from_file([msl stringByAppendingPathComponent:@"f1_b.metallib"], NULL);
         MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-        d.vertexFunction = fn4_note([vl newFunctionWithName:@"main0"], vl, @"main0", nil); d.fragmentFunction = fn4_note([fl newFunctionWithName:@"main0"], fl, @"main0", nil);
+        d.vertexFunction = t4_fn(vl, @"main0"); d.fragmentFunction = t4_fn(fl, @"main0");
         d.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor]; d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
         uint64_t built0 = g_pb_built, arch0 = g_pb_archived; int new0 = g_arch_new; NSError *err = nil;
         EXPECT("covered draw: a pipeline", 1, pso_build(d, &err) != nil);

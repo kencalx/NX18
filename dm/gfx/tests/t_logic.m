@@ -3,6 +3,7 @@
 // with a source, into RG32Uint, RGBA8Uint, RGBA8Unorm and RGBA16Unorm targets (the result cut to the target's bits); every operation shares one pipeline; a target with no bits to combine keeps COPY (lop_key).
 // make GAME=<id> check_t_logic (the fixture comes from test_dmsh_logic.py --fixture <dir>; ./t_logic <dir>)
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -16,12 +17,12 @@ static uint32_t op(int f, uint32_t s, uint32_t d) {
 }
 static NvProg *prog(NSString *dir, prog_t *program, NvShader **out) {
     NSError *error = nil; NSString *source = [NSString stringWithContentsOfFile:[dir stringByAppendingString:@"/base.metal"] encoding:NSUTF8StringEncoding error:&error];
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:source options:nil error:&error];
+    id<MTLLibrary> lib = t4_lib(source, nil, &error);
     if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); abort(); }
     NvProg *pr = [NvProg new];
-    pr->sh[0] = [NvShader new]; pr->sh[0]->fn = [lib newFunctionWithName:@"vertex_main"]; pr->sh[0]->stage = 0; snprintf(pr->sh[0]->key, sizeof pr->sh[0]->key, "vl_b");
+    pr->sh[0] = [NvShader new]; pr->sh[0]->fn = t4_fn(lib, @"vertex_main"); pr->sh[0]->stage = 0; snprintf(pr->sh[0]->key, sizeof pr->sh[0]->key, "vl_b");
     NvShader *ps = [NvShader new]; pr->sh[1] = ps; *out = ps;
-    ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->fn_u = fn4_note([lib newFunctionWithName:@"main0_u"], lib, @"main0_u", nil);
+    ps->fn = fn4_note(t4_fn(lib, @"main0"), lib, @"main0", nil); ps->fn_u = fn4_note(t4_fn(lib, @"main0_u"), lib, @"main0_u", nil);
     ps->stage = 1; ps->has_logic = 1; ps->rf.color_known = 1; ps->rf.color_mask = 1;
     memset(ps->key, '1', 16); memcpy(ps->key + 16, "_b", 3);   // the host loads <dir>/<16 digits>_bx.metallib
     ps->arg_len = [ps->fn newArgumentEncoderWithBufferIndex:0].encodedLength; ps->rf.nb = 1; ps->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0};

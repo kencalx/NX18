@@ -3,6 +3,7 @@
 // saw another workgroup's values. The indirect case takes its counts from a GPU fill earlier in the submission while the CPU's copy still names one workgroup: the slices must follow the
 // GPU's counts (the shape of pull request #1242's test)
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -27,10 +28,10 @@ int main(void) { @autoreleasepool {
         " uint nb = (t + 1u) %% %du, bad = 0;\n"
         " for (uint i = 0; i < %du; i++) bad += mem[nb * %du + i] != g * 1000u + i;\n"
         " a.out[g * %du + t] = bad; }\n", DMSH_TG_SLOT, SLICE, WORDS / THREADS, WORDS / THREADS, THREADS, WORDS / THREADS, WORDS / THREADS, THREADS];
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:nil error:&error];
+    id<MTLLibrary> lib = t4_lib(src, nil, &error);
     CHECK(lib != nil, "spilled kernel compiles"); if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
     prog_t pg = {.serial = 961001}; NvProg *program = [NvProg new]; NvShader *cs = [NvShader new];
-    program->sh[5] = cs; cs->stage = 5; cs->fn = [lib newFunctionWithName:@"spilled"];
+    program->sh[5] = cs; cs->stage = 5; cs->fn = t4_fn(lib, @"spilled");
     cs->arg_len = [cs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     cs->rf.tg[0] = THREADS; cs->rf.tg[1] = cs->rf.tg[2] = 1;
     cs->rf.nb = 1; cs->rf.b[0] = (nvn_rbind){.kind = NVN_RB_SBUFP, .rw = 1, .reg = 0, .aid = 0};

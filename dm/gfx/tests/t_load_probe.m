@@ -3,6 +3,7 @@
 // target holds the sentinel colour before the pass and one full-screen triangle covers it: a readback that ran before the pass saw 64 sentinel pixels left (both encode modes)
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 #undef nvn_game_fps
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
@@ -23,18 +24,17 @@ static void emit(unsigned op, const void *p, size_t n) {
 int main(void) { @autoreleasepool {
     setenv("DM_NVN_TBDR", "1", 1); setenv("DM_NVN_LOADPROBE", "2", 1);   // 2: the fixed sentinel colour on every format, the one the first submission clears to
     mtl_init(); NSError *error = nil;
-    id<MTLLibrary> library = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> library = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "struct I { float4 p [[attribute(0)]]; };\n"
         "vertex float4 v(I i [[stage_in]]) { return i.p; }\n"
-        "fragment float4 f() { return float4(0,1,0,1); }\n"
-        options:nil error:&error];
+        "fragment float4 f() { return float4(0,1,0,1); }\n", nil, &error);
     CHECK(library != nil,"test shaders compile"); if (!library) return 1;
     static prog_t pg = {.serial=930001}; NvProg *program = [NvProg new];
-    NvShader *vs = [NvShader new]; vs->fn = [library newFunctionWithName:@"v"];
+    NvShader *vs = [NvShader new]; vs->fn = t4_fn(library, @"v");
     vs->rf.nv = 1; vs->rf.v[0].ct = NVN_CT_FLOAT;
     memset(vs->rf.v[0].sh,0xff,sizeof vs->rf.v[0].sh);
     vs->rf.pos_attr = 0; vs->rf.pos_w1 = 1; program->sh[0] = vs;
-    NvShader *fs = [NvShader new]; fs->fn = [library newFunctionWithName:@"f"];
+    NvShader *fs = [NvShader new]; fs->fn = t4_fn(library, @"f");
     fs->stage = 1; fs->rf.color_mask = 1; program->sh[1] = fs; serial_put(pg.serial,program);
     tex_t target = {.magic=MAGIC('T','E','X',0),.serial=930002};
     target.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=8,.height=8,.depth=1,.levels=1,.samples=1};
