@@ -103,16 +103,18 @@ static void aoc_locate(void) {
 // Why a slim build found no usable game files: the verdict on Documents/romfs.img (the first of romfs_document_images), in the log and for the screen (front_ios_boot_message). NULL when the build has no romfs.id
 static char g_boot_message[640];
 const char *front_ios_boot_message(void) { return g_boot_message[0] ? g_boot_message : NULL; }
-// Why this device cannot run the games: its GPU has no BC texture formats, which the games' textures use and the host does not decompress (dm/gfx/tex/README.md; the A16 and older,
-// GitHub issue #704), so the screen says so instead of Metal aborting at the game's first BC texture. NULL on a supported device. Called by startGame (front_ios.m) once the launcher has set
-// its switches: this makes the process's first Metal device, and Metal reads MTL_HUD_ENABLED then; checked at launch, it kept the launcher's Performance HUD off (GitHub issue #840)
+// Why this device cannot run the games: its GPU has no Metal 4, the only way the host draws (Metal 4 command queues and MTL4Compiler pipelines; mtl_init stops without it), or no BC
+// texture formats, which the games' textures use and the host does not decompress (dm/gfx/tex/README.md; the A16 and older, GitHub issue #704), so the screen says so instead of Metal
+// aborting at start or at the game's first BC texture. NULL on a supported device. Called by startGame (front_ios.m) once the launcher has set its switches: this makes the process's
+// first Metal device, and Metal reads MTL_HUD_ENABLED then; checked at launch, it kept the launcher's Performance HUD off (GitHub issue #840)
 const char *front_ios_device_check(void) {
     static char msg[320]; static int done;
     if (done++) return msg[0] ? msg : NULL;
-    id<MTLDevice> gpu = MTLCreateSystemDefaultDevice();   // the system default device, the one the graphics layers take (mtl_init repeats this check for the other routes)
-    if (gpu.supportsBCTextureCompression) return NULL;
-    snprintf(msg, sizeof msg, "This device's GPU (%s) cannot read BC-compressed textures, which the games use. It needs an iPhone 15 Pro or newer (A17 Pro chip or later) or an iPad with an M1 chip or later.",
-             gpu ? gpu.name.UTF8String : "no Metal device");
+    id<MTLDevice> gpu = MTLCreateSystemDefaultDevice();   // the system default device, the one the host takes (mtl_init repeats the Metal 4 check)
+    int metal4 = gpu && [gpu supportsFamily:MTLGPUFamilyMetal4];
+    if (metal4 && gpu.supportsBCTextureCompression) return NULL;
+    snprintf(msg, sizeof msg, "This device's GPU (%s) %s. It needs an iPhone 15 Pro or newer (A17 Pro chip or later) or an iPad with an M1 chip or later.",
+             gpu ? gpu.name.UTF8String : "no Metal device", metal4 ? "cannot read BC-compressed textures, which the games use" : "does not support Metal 4, which the games are drawn with");
     fprintf(stderr, "[RED] boot: %s\n", msg);
     return msg;
 }
@@ -156,8 +158,8 @@ static void cheats_locate(NSString *doc, NSString *res) {
 
 // The device's pipeline archive (nvn_mtl.m pso4_init): DM_PSO_ARCHIVE's folder (off: none), else pso_archive/ beside pso_user.tsv (DM_PSO_USER, else in DM_SAVE's parent:
 // Documents/pso_archive). It holds the pipeline bases this device built, about 170-260 MB a game, which the host makes again from pso_user.tsv (kept in the backup) at the next start,
-// so it stays out of device and iCloud backups. The folder is made here when it is missing, so a first install's archive, which the host writes into it later, is left out too (it stays
-// empty while the Metal 4 pipeline path is off, DM_PSO_MTL4)
+// so it stays out of device and iCloud backups. The folder is made here when it is missing, so a first install's archive, which the host writes into it later, is left out too (a GPU
+// capture run adds nothing to it: the capture's pipelines use no archive, nvn_mtl.m)
 static void pso_archive_exclude(void) {
     const char *a = getenv("DM_PSO_ARCHIVE"), *u = getenv("DM_PSO_USER"), *s = getenv("DM_SAVE");
     if (a && !strcmp(a, "off")) return;

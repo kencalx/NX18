@@ -29,6 +29,8 @@
 
 extern char **environ;
 int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
+char *dm_mac_metal4_missing(int assume_missing);   // Launcher.swift: why this Mac cannot draw the game (no Metal 4), or NULL
+void dm_mac_forget_retired(void);    // Launcher.swift: drops the saved choices of switches the host no longer has (launcher.DM_PSO_MTL4)
 static pid_t g_child;
 static char *g_file_keys, *g_launch_keys;   // the variables the env files set, and the settings the launch environment set (DM_ENV_FILE_KEYS, DM_ENV_LAUNCH_KEYS)
 
@@ -198,6 +200,12 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/env.txt", dm); env_file(p);
     setenv("DM_ENV_FILE_KEYS", g_file_keys ? g_file_keys : "", 1); setenv("DM_ENV_LAUNCH_KEYS", g_launch_keys ? g_launch_keys : "", 1);
     free(g_file_keys); free(g_launch_keys);
+    // The host draws through Metal 4 only: say so here, not in a host that stops in mtl_init. DM_TEST_METAL4 (test_nsp_mac_app.py, whose host is a stand-in): 1 takes the GPU as
+    // one with Metal 4 (GitHub's virtual Macs have none), 0 as one without
+    const char *t4 = getenv("DM_TEST_METAL4");
+    char *no_metal4 = t4 && !strcmp(t4, "1") ? NULL : dm_mac_metal4_missing(t4 && !strcmp(t4, "0"));
+    if (no_metal4) { alert(name, no_metal4); free(no_metal4); return 1; }
+    dm_mac_forget_retired();
     int window = !(getenv("DM_LAUNCHER") && !strcmp(getenv("DM_LAUNCHER"), "0"));
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--no-launcher")) window = 0;
     if (!window) fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");

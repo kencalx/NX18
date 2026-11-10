@@ -460,7 +460,7 @@ class App(unittest.TestCase):
 
     def launch(self, wait=False, app=None, args=(), **env):
         home = self.tmp / 'home'
-        e = dict(HOME=str(home), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin', **{'DM_LAUNCHER': '0', **env})   # never the settings window in a test
+        e = dict(HOME=str(home), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin', **{'DM_LAUNCHER': '0', 'DM_TEST_METAL4': '1', **env})   # never the settings window in a test; Metal 4 taken as there (the host is a stand-in)
         if wait: e['STANDIN_WAIT'] = '1'
         return subprocess.Popen([(app or self.app) / 'Contents/MacOS/nxnative', *args], env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
@@ -551,7 +551,11 @@ class App(unittest.TestCase):
                              [{'env': 'DM_FPS_TARGET', 'values': ['30', '60']}, {'env': 'DM_RENDER_SCALE', 'min': 0.5, 'max': 1.0}, {'env': 'DM_FPS_HOLD', 'values': ['on', 'off']}])
             for key, value in [('DM_FPS_TARGET', '30'), ('DM_RENDER_SCALE', '0.75'), ('DM_FPS_HOLD', 'maybe'), ('DM_LANG', 'ja'), ('DM_BOTH', 'saved'), ('DM_BAKED', '0')]: save(key, '-string', value)
             save('DM_OPMODE', '-string', '0')   # not one of this build's settings
+            save('DM_PSO_MTL4', '-string', '0')   # a retired switch (Metal 4 pipelines are the only path): forgotten at the start, window or not
             r = run(app)   # from Finder or the Dock: no environment of its own
+            self.assertNotIn('DM_PSO_MTL4', r)
+            self.assertNotEqual(subprocess.run(['defaults', 'read', domain, 'launcher.DM_PSO_MTL4'], capture_output=True).returncode, 0)
+            self.assertIn('saved choice DM_PSO_MTL4 forgotten', (self.tmp / f'home/Library/Logs/nxnative/{TID}.log').read_text())
             self.assertEqual((r['DM_FPS_TARGET'], r['DM_RENDER_SCALE'], r.get('DM_FPS_HOLD')), ('30', '0.75', None))   # a value the toggle never takes is ignored
             self.assertEqual(r['DM_LANG'], 'ja')   # a saved choice before the packed language
             self.assertEqual((r['DM_BOTH'], r['DM_BAKED']), ('player', '1'))   # the player's env.txt and the bundle's win over a saved choice
@@ -622,6 +626,15 @@ class App(unittest.TestCase):
         self.assertEqual(p.returncode, 1)
         self.assertIn('game data inside this app is missing', (self.tmp / 'home/alert.txt').read_text())
 
+    def test_no_metal4(self):   # a Mac without Metal 4 (a virtual Mac's GPU): an alert, and neither the settings window nor the host
+        home = self.tmp / 'home'
+        for name in ('alert.txt', 'host_run.txt'): (home / name).unlink(missing_ok=True)
+        p = self.launch(DM_TEST_METAL4='0', DM_LAUNCHER='1'); out = p.communicate(timeout=30)[0].decode()
+        self.assertEqual(p.returncode, 1, out)
+        self.assertFalse((home / 'host_run.txt').exists())
+        self.assertIn('does not support Metal 4', (home / 'alert.txt').read_text())
+        self.assertIn('does not support Metal 4', (home / f'Library/Logs/nxnative/{TID}.log').read_text())
+
     def test_missing_modules(self):
         for missing in (('main.patched.bin',), ('main.fixups.tsv',), ('main.patched.bin', 'main.fixups.tsv')):
             with self.subTest(missing=missing):
@@ -659,7 +672,7 @@ class App(unittest.TestCase):
             hidden = self.tmp.with_name(self.tmp.name + '.unavailable')
             try:
                 self.tmp.rename(hidden)
-                p = subprocess.run([moved / 'Contents/MacOS/nxnative'], env=dict(HOME=str(home), PATH='/usr/bin:/bin'), capture_output=True, timeout=30)
+                p = subprocess.run([moved / 'Contents/MacOS/nxnative'], env=dict(HOME=str(home), PATH='/usr/bin:/bin', DM_TEST_METAL4='1'), capture_output=True, timeout=30)
                 self.assertEqual(p.returncode, 7)
                 ran = (home / 'host_run.txt').read_text()
                 self.assertIn(f'argv1={moved}/Contents/Resources/dm\n', ran)

@@ -445,21 +445,17 @@ static void hq_start(void) {
     for (int i = 0; i < HQ_TEXTS; i++) hq_text_line(text, i, def[i], g_hq_text[i], sizeof g_hq_text[i]);
     LOG("front end: hold the Home button to quit %s", g_hq_on ? "is on" : "is off (DM_HOME_QUIT=0)");
 }
-// The Home button setting for apps (macOS 27), once, when the first controller is there (GameController reads it only while one is connected): "system" in the log
+// The Home button setting for apps, once, when the first controller is there (GameController reads it only while one is connected): "system" in the log
 // explains a hold that does nothing, since the system keeps Home whatever the host asks. A front end reads the setting itself (GCControllerHomeButtonSettingsManager)
 static void hq_log_setting(void) {
-#if defined(__MAC_27_0)
-    if (@available(macOS 27.0, *)) {
-        static int done; if (done) return;
-        int any = 0; for (GCController *c in GCController.controllers) if (c.extendedGamepad) any = 1;
-        if (!any) return;
-        done = 1;
-        GCControllerHomeButtonSettingCustomizationStatus by = GCControllerHomeButtonSettingCustomizationDefault; NSError *err = nil;
-        GCControllerHomeButtonSettingInAppAction v = [[GCControllerHomeButtonSettingsManager new] readControllerHomeButtonInAppAction:&by withError:&err];
-        LOG("front end: Home button in apps: %s (%s)%s%s", hq_in_app_name((long)v), by == GCControllerHomeButtonSettingCustomizationUser ? "set by the player" : "the system's default",
-            err ? ", " : "", err ? err.localizedDescription.UTF8String : "");
-    }
-#endif
+    static int done; if (done) return;
+    int any = 0; for (GCController *c in GCController.controllers) if (c.extendedGamepad) any = 1;
+    if (!any) return;
+    done = 1;
+    GCControllerHomeButtonSettingCustomizationStatus by = GCControllerHomeButtonSettingCustomizationDefault; NSError *err = nil;
+    GCControllerHomeButtonSettingInAppAction v = [[GCControllerHomeButtonSettingsManager new] readControllerHomeButtonInAppAction:&by withError:&err];
+    LOG("front end: Home button in apps: %s (%s)%s%s", hq_in_app_name((long)v), by == GCControllerHomeButtonSettingCustomizationUser ? "set by the player" : "the system's default",
+        err ? ", " : "", err ? err.localizedDescription.UTF8String : "");
 }
 static void hq_buttons(int *home, int *a, int *b, GCController **holder) {
     *home = *a = *b = 0;

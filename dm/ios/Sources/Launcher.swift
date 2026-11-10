@@ -34,7 +34,7 @@ private func info(_ key: String) -> Any? { Bundle.main.object(forInfoDictionaryK
     f.haptics = CHHapticEngine.capabilitiesForHardware().supportsHaptics
     f.controller = !GCController.controllers().isEmpty
     f.tv = scenes.contains { $0.session.role == .windowExternalDisplayNonInteractive }
-    if metalDeviceMade, let dev = MTLCreateSystemDefaultDevice() { f.metalFX = dev.supportsFamily(.metal4) && MTLFXSpatialScalerDescriptor.supportsMetal4FX(dev) }
+    if metalDeviceMade, let dev = MTLCreateSystemDefaultDevice() { f.metalFX = MTLFXSpatialScalerDescriptor.supportsMetal4FX(dev) }   // Metal 4 itself: the device check (main.m) refused a GPU without it
     return f
 }
 

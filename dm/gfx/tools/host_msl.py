@@ -5,17 +5,21 @@
 # Writes one C header (the host Makefile includes its directory; dm/gfx/nvn/host_msl.m reads it) with, per library, its name and the metallib compiled for the SDK. The Metal
 # toolchain is required: without it the build stops here (the host has no run-time source compile to fall back on). The sources are in the header too, for the tests that
 # extend one (t_geometry: geo_pack); nothing in the host reads them.
+# The libraries are MSL 4.1 (-std=metal4.1, as the iOS game shaders, dm/ios/tools/ios_metal.py), for the OS minimum given, which must be 27 or later: without -std the language
+# followed the minimum, and the Mac's 26.6 gave MSL 4.0.
 # Each run rechecks the compiler, SDK, deployment target and source contents. Matching inputs reuse the header without compiling.
 # The header is written only when it changes, so an unchanged run does not rebuild the host.
-# Usage: host_msl.py --sdk macosx|iphoneos [--min <OS version>] <header> <name.metal>...
+# Usage: host_msl.py --sdk macosx|iphoneos --min <OS version> <header> <name.metal>...
 import argparse, hashlib, os, subprocess, sys, tempfile
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--sdk', required=True, choices=['macosx', 'iphoneos'])
-ap.add_argument('--min', help='the lowest OS version the libraries must load on (iphoneos: the app\'s deployment target)')
+ap.add_argument('--min', required=True, help='the lowest OS version the libraries must load on (the deployment target: dm/mac/min_os.mk, the iOS app\'s); 27 or later')
 ap.add_argument('out')
 ap.add_argument('sources', nargs='+')
 a = ap.parse_args()
+STD = '-std=metal4.1'   # the newest MSL: macOS 27 / iOS 27 and later
+if not a.min.split('.')[0].isdigit() or int(a.min.split('.')[0]) < 27: sys.exit(f'host_msl.py: --min {a.min}: {STD} needs an OS minimum of 27 or later')
 
 def c_str(s):
     lines = s.split('\n')
@@ -40,7 +44,7 @@ with tempfile.TemporaryDirectory() as td:
     for src, text in sources:
         name = os.path.splitext(os.path.basename(src))[0]
         ml = os.path.join(td, name + '.metallib')
-        cmd = ['xcrun', '-sdk', a.sdk, 'metal'] + ([f'-m{"ios" if a.sdk == "iphoneos" else "macosx"}-version-min={a.min}'] if a.min else []) + ['-o', ml, src]
+        cmd = ['xcrun', '-sdk', a.sdk, 'metal', f'-m{"ios" if a.sdk == "iphoneos" else "macosx"}-version-min={a.min}', STD, '-o', ml, src]
         r = subprocess.run(cmd)
         if r.returncode: sys.exit(f'host_msl.py: {src} does not compile ({" ".join(cmd)})')
         lib = open(ml, 'rb').read()
