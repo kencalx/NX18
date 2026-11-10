@@ -24,7 +24,7 @@ private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictiona
     f.haptics = CHHapticEngine.capabilitiesForHardware().supportsHaptics
     f.controller = !GCController.controllers().isEmpty
     f.tv = false
-    if let dev = MTLCreateSystemDefaultDevice() { f.metalFX = dev.supportsFamily(.metal4) && MTLFXSpatialScalerDescriptor.supportsMetal4FX(dev) }
+    if let dev = MTLCreateSystemDefaultDevice() { f.metalFX = MTLFXSpatialScalerDescriptor.supportsMetal4FX(dev) }   // Metal 4 itself: launcher.c refused a Mac without it (dm_mac_metal4_missing)
     return f
 }
 
@@ -195,6 +195,20 @@ enum LauncherWindowLayout {
         return NSRect(x: frame.minX, y: top - height, width: frame.width, height: height)
     }
 }
+
+// Why this Mac cannot run the game: its GPU has no Metal 4, the only way the host draws (Metal 4 command queues and MTL4Compiler pipelines; mtl_init stops without it). A virtual Mac's
+// paravirtualized GPU is one. launcher.c shows it in an alert and ends before the settings window or the host, window or not. NULL on a supported Mac; the string is the caller's to free.
+// assumeMissing (launcher.c's DM_TEST_METAL4=0): the message whatever the GPU, for the test of the refusal
+@_cdecl("dm_mac_metal4_missing")
+public func dmMacMetal4Missing(_ assumeMissing: Int32) -> UnsafeMutablePointer<CChar>? {
+    let dev = MTLCreateSystemDefaultDevice()
+    if assumeMissing == 0, let dev, dev.supportsFamily(.metal4) { return nil }
+    return strdup("This Mac's GPU (\(dev?.name ?? "no Metal device")) does not support Metal 4, which the game is drawn with. It needs a Mac with Apple silicon on macOS 27.3 or later; a virtual Mac's GPU does not have it.")
+}
+
+// Saved choices this build retired (LauncherModel.forgetRetired), forgotten before the saved choices are read: launcher.c calls it, with the window or without
+@_cdecl("dm_mac_forget_retired")
+public func dmMacForgetRetired() { LauncherModel.forgetRetired(.standard) }
 
 // 1: Play (the window's settings are in the environment), 0: the player quit, 2: no window (no launcher.json, or "Show this window at launch" off): launcher.c applies the saved choices
 @_cdecl("dm_mac_launcher")

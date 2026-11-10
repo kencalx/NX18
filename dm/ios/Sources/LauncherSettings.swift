@@ -98,10 +98,22 @@ struct SettingsFile: Decodable { let settings: [Setting] }
         fixed = fromLaunch.union((env["DM_ENV_FILE_KEYS"] ?? "").split(separator: " ").map(String.init))
         ignoreSaved = env["DM_SAVED_CHOICES"] == "0"
         if ignoreSaved { fputs("launcher: saved choices ignored (DM_SAVED_CHOICES=0)\n", stderr) }
+        Self.forgetRetired(defaults)
         for s in settings {
             if fixed.contains(s.env), let v = env[s.env] { values[s.env] = v; continue }
             let saved = ignoreSaved ? nil : defaults.object(forKey: "launcher." + s.env) as? String   // a string, as launcher.c reads it: not string(forKey:), which turns a number into one
             values[s.env] = saved.flatMap { s.accepts($0) ? $0 : nil } ?? s.def   // a saved choice the game no longer offers: its default
+        }
+    }
+
+    // Saved choices of switches the host no longer has, removed from the preferences so that an old install's choice neither comes back nor lingers there; once, since nothing
+    // stores them again. DM_PSO_MTL4: render pipelines are always Metal 4's (MTL4Compiler), and the MTLDevice path an install could have saved (0) is gone. Removed with
+    // DM_SAVED_CHOICES=0 too: no build offers them. The Mac's launcher.c calls it through dm_mac_forget_retired (dm/mac/Launcher.swift), with the window or without
+    nonisolated static let retired = ["DM_PSO_MTL4"]
+    nonisolated static func forgetRetired(_ defaults: UserDefaults) {
+        for env in retired where defaults.object(forKey: "launcher." + env) != nil {
+            defaults.removeObject(forKey: "launcher." + env)
+            fputs("launcher: saved choice \(env) forgotten: this build no longer has it\n", stderr)
         }
     }
 

@@ -77,8 +77,10 @@ class HostMSL(unittest.TestCase):
         self.make()
         minimum = (self.root / 'dm/mac/min_os.mk').read_text().split('MACOS_MIN := ')[1].split()[0]
         self.assertIn(f'-mmacosx-version-min={minimum}', self.compiles()[-1])
+        self.assertIn('-std=metal4.1', self.compiles()[-1])   # the newest MSL on both, whatever the minimum would pick
         self.make('MSL_SDK=iphoneos')
         self.assertIn('-mios-version-min=27.3', self.compiles()[-1])
+        self.assertIn('-std=metal4.1', self.compiles()[-1])
         self.assertIn('iphoneos', self.compiles()[-1])
 
     def test_compiler_installation_recovers_without_cleaning(self):
@@ -114,14 +116,20 @@ class HostMSL(unittest.TestCase):
         self.env['TEST_METAL_SDK'] = '/sdk/2'
         self.make()
         self.assertEqual(len(self.compiles()), 3)
-        self.make('MACOS_MIN=26.7')
+        self.make('MACOS_MIN=27.4')
         self.assertEqual(len(self.compiles()), 4)
-        self.assertIn('-mmacosx-version-min=26.7', self.compiles()[-1])
+        self.assertIn('-mmacosx-version-min=27.4', self.compiles()[-1])
         before = self.source.stat()
         self.source.write_text('kernel void clear_changed() {}\n')
         os.utime(self.source, ns=(before.st_atime_ns, before.st_mtime_ns))
-        self.make('MACOS_MIN=26.7')
+        self.make('MACOS_MIN=27.4')
         self.assertEqual(len(self.compiles()), 5)
+
+    def test_a_minimum_below_metal4_1_is_refused(self):   # -std=metal4.1 needs OS 27
+        p = subprocess.run(['make', '-s', '-C', 'dm/host', f'GAME={GAME}', 'host_msl', 'MACOS_MIN=26.6'], cwd=self.root, env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('needs an OS minimum of 27', p.stderr)
+        self.assertEqual(self.compiles(), [])
 
     def test_regress_cache_refreshes_shaders_before_reusing_a_host(self):
         regress = script('regress')
