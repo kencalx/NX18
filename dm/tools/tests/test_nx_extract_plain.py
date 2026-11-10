@@ -78,8 +78,11 @@ class Plain(unittest.TestCase):
         if d.exists(): shutil.rmtree(d)
         return w.folder(d, files)
 
-    def extract(self, base, upd='-', *more, out='out', env=None):
-        return self.run_x('--plain', base, upd, self.dir / out, '--app', TID, *more, env=env)
+    def extract(self, base, upd='-', *more, out='out', env=None, timeout=30):
+        return self.run_x('--plain', base, upd, self.dir / out, '--app', TID, *more, env=env, timeout=timeout)
+
+    def snap(self, prog, ctrl=None):   # a base game's folder files: one Program NCA (Built or bytes) and a Control NCA
+        return w.snapshot(w.APPLICATION, APP, 0, [prog, ctrl or w.control_nca(APP)])[0]
 
     # ---- what it reads ----
     def test_base(self):
@@ -188,7 +191,12 @@ class Plain(unittest.TestCase):
         b = self.put('b', self.swap(self.g.base, self.g.base_prog.data, bytes(prog)))
         code, out = self.extract(b, '-', '--romfs-image')
         self.assertEqual(code, 3, out); self.assertIn('[RED] hash check failed: /', out)
+        self.assertIn('[RED] the NCA files are damaged: 1 files fail the NCA\'s hash check', out); self.assertIn('pack them again from a good dump', out); self.assertNotIn('NSP', out)
         self.assertFalse((self.dir / 'out/RomFS.img').exists())
+        code, out = self.extract(b, '-', '--allow-damaged', out='folder')   # folder output: the file the checked read began is written again as read (every file is created new)
+        self.assertEqual(code, 0, out); self.assertIn('[RED] the NCA files are damaged: 1 files written as read', out)
+        self.assertEqual(len((self.dir / 'folder/RomFS/base_only.bin').read_bytes()), len(self.g.romfs0['base_only.bin']))
+        self.assertEqual((self.dir / 'folder/RomFS/data/same.bin').read_bytes(), self.g.romfs0['data/same.bin'])
         code, out = self.extract(b, '-', '--romfs-image', '--allow-damaged', out='out2')   # a new folder: plain mode creates every file new
         self.assertEqual(code, 0, out)
         self.assertEqual(damaged_flags(self.dir / 'out2/RomFS.img'), {'base_only.bin'})
@@ -315,6 +323,49 @@ class Plain(unittest.TestCase):
                 for mode in ('--romfs-image', '--manifest'):   # a folder that is its own sibling is listed twice; one that is its own child is not found under itself (LibHac)
                     code, out = self.extract(d, '-', mode, out=f'o{loop}{mode}')
                     self.assertEqual(code, 7 if loop == 'sibling' else 8, out); self.assertRegex(out, r'\[RED\] .*(twice|cannot be read)')
+
+    def test_hash_table_loops_and_long_chains(self):   # LibHac walks a bucket's chain with no bound on every lookup: a loop never ends, one long chain makes reading quadratic
+        files, many = {'d/a.bin': b'a', 'b.bin': b'b'}, {f'{i:05}': b'' for i in range(3000)}
+        for name, prog, ctrl, why in (('file cycle', w.program_nca(APP, self.g.exefs0, files, buckets='file-cycle'), None, 'file hash table reaches one entry twice'),
+                                      ('folder cycle', w.program_nca(APP, self.g.exefs0, files, buckets='dir-cycle'), None, 'folder hash table reaches one entry twice'),
+                                      ('one chain', w.program_nca(APP, self.g.exefs0, many, buckets='one-chain'), None, 'puts its 3,000 entries in too few chains'),
+                                      ('control data', w.program_nca(APP, self.g.exefs0, files), w.control_nca(APP, buckets='file-cycle'), 'file hash table reaches one entry twice')):
+            d = self.put('h', self.snap(prog, ctrl))
+            for mode in ('--romfs-image', '--manifest', None):
+                with self.subTest(name, mode=mode):
+                    code, out = self.extract(d, '-', *([mode] if mode else []), out=f'o{name}{mode}', timeout=20)
+                    self.assertEqual(code, 7, out); self.assertIn(why, out)
+        code, out = self.extract(self.put('ok', self.snap(w.program_nca(APP, self.g.exefs0, many))), '-', '--romfs-image', out='ok')
+        self.assertEqual(code, 0, out)
+
+    @unittest.skipIf(w.lz4block is None, 'lz4 is needed for a compressed section')
+    def test_compression_table_entries(self):   # LibHac's CompressedStorage loops forever on virtual offsets that do not increase
+        for name, edit, why in (('backwards', lambda e, end: ([e[0], (e[1][0], 0, 0, 0, e[1][0]), (e[1][0], 0, 0, 0, e[1][0])], end), 'virtual offsets that do not increase'),
+                                ('type 9', lambda e, end: ([e[0], e[1][:2] + (9,) + e[1][3:]], end), 'compression type 9'),
+                                ('not from 0', lambda e, end: ([(0x10,) + e[0][1:], e[1]], end), 'does not start at offset 0'),
+                                ('LZ4 past the level', lambda e, end: ([e[0], e[1][:4] + (0xFFFFFFF0,)], end), 'LZ4 entry larger than any'),
+                                ('end before the last entry', lambda e, end: (e, e[1][0]), 'ends before its last entry')):
+            with self.subTest(name):
+                d = self.put('c', self.snap(w.program_nca(APP, self.g.exefs0, self.g.romfs0, compress=edit)))
+                code, out = self.extract(d, '-', '--romfs-image', out=f'o{name}', timeout=20)
+                self.assertEqual(code, 7, out); self.assertIn(why, out)
+
+    def test_manifest_rows_are_spent(self):   # --max-bytes counts the manifest's own rows: deep paths of empty files would amplify a small input
+        files = {('d' * 200, 'e' * 200, f'{i:04}'): b'' for i in range(400)}   # 400 rows of about 430 bytes
+        d = self.put('m', self.snap(w.program_nca(APP, self.g.exefs0, files)))
+        code, out = self.extract(d, '-', '--manifest', '--max-bytes', '100000')
+        self.assertEqual(code, 7, out); self.assertRegex(out, r'declare [\d,]+ bytes, more than the [\d,]+ this extraction may write')
+        self.assertFalse((self.dir / 'out/romfs_manifest.tsv').exists())
+        code, out = self.extract(d, '-', '--manifest', '--max-bytes', str(1 << 20), out='o2')
+        self.assertEqual(code, 0, out); self.assertLess((self.dir / 'o2/romfs_manifest.tsv').stat().st_size, 1 << 20)
+
+    def test_text_from_the_ncas_cannot_forge_lines(self):   # pack_nx.py reads the title and build ID lines: a name with a newline is printed escaped
+        ctrl = w.control_nca(APP, 'Test Game\nmain build id ' + '00' * 16 + '\n[RED] forged\x1b[31m', '1.0\n[RED] v')
+        code, out = self.extract(self.put('n', self.snap(self.g.base_prog, ctrl)), '-', '--romfs-image')
+        self.assertEqual(code, 0, out)
+        self.assertIn('name Test Game\\x0amain build id', out); self.assertIn('display version 1.0\\x0a[RED] v', out)
+        self.assertEqual([l for l in out.splitlines() if l.startswith(('main build id', '[RED]'))], [f'main build id {self.g.bid0[:16].hex()}'])
+        self.assertNotIn('\x1b', out)
 
     def test_memory_limit(self):   # NativeAOT takes DOTNET_GCHeapHardLimit in hexadecimal without 0x: 8 MiB cannot hold the copy buffers, a clean exit code 8
         code, out = self.extract(self.put('b', self.g.base), '-', '--romfs-image', env={'DOTNET_GCHeapHardLimit': '800000'})

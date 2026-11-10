@@ -27,9 +27,11 @@
 //   An update's folder holds its base game's NCAs too (nxconvert's rule): it is given as both the base game and the update, and each content meta's filter picks its own, the patch
 //   Program NCA laid over the base one (BKTR) as for a merged NSP. Each NCA is read through an in-memory header, checked before LibHac sees it: the DNCA marker (read as NCA3), the
 //   distribution and content type, the size field against the file, the section table, each FS header's SHA-256 (before any edit), FS header version 2, SHA-256 or IVFC hash trees,
-//   encryption type none on every section, the hash, relocation and compression tables inside their section, the PFS0 header bounded; a section the decrypter flattened from sparse
+//   encryption type none on every section, the hash, relocation and compression tables inside their section, a compression table's entries (in order, of a type LibHac reads, their
+//   data inside the data level), the PFS0 header bounded; a section the decrypter flattened from sparse
 //   storage (DSPF at FS header 0x1D0) has its sparse info cleared (and is still sparse for exit code 4), one with sparse info and no DSPF is refused. The file is never changed.
-//   Bounds: 2,000,000 entries per filesystem and paths of 768 characters (a loop in the tables ends there), --max-bytes (what the files declare, before anything is written), host file
+//   Before LibHac opens a path in a RomFS, its hash tables: every chain ends inside the table, reaches each entry once and is short (a lookup walks its chain with no bound).
+//   Bounds: 2,000,000 entries per filesystem and paths of 768 characters (a loop in the tables ends there), --max-bytes (what the files and a manifest's rows declare, before anything is written), host file
 //   names (one component, no control characters, 255 bytes, unique ignoring case; files are created new, so none overwrites another: give a new output folder), code modules and NROs of 1 GiB, a NACP of
 //   exactly 0x4000 bytes and an icon of 4 MiB at most. Exit code 7: refused by these checks ("[RED] <file>: <why>"); 8: LibHac could not read them ("[RED] the NCA files cannot be read:
 //   <exception>", no stack trace). Run it with DOTNET_GCHeapHardLimit (hexadecimal, no 0x: scripts/pack_nx.py gives 100000000, 4 GiB) to bound its memory too.
@@ -84,6 +86,7 @@ static class P {
     static readonly HashSet<Nca> g_flattened = new HashSet<Nca>();   // NCAs with a section the decrypter flattened from sparse storage (DSPF)
     const int EntryCap = 2_000_000, PathCap = 0x300, NcaFilesMax = 4096, TreeEntriesMax = 16_777_216; const long ModuleMax = 1L << 30, IconMax = 4 << 20;
     static Exception Fail(string m) => g_plain ? new Refused(m) : new Exception(m);
+    static string Shown(string s) => g_plain ? Esc(s) : s;   // text from the NCAs on a line of its own: in plain mode escaped, so it cannot start a line pack_nx.py reads (a forged build ID or [RED] line)
     static string First(string m) { m = (m ?? "").Split('\n')[0]; return m.Length > 300 ? m[..300] : m; }
     static string Esc(string s) {   // control characters (C0, DEL, C1) and bidirectional overrides escaped: text from an archive must not drive a terminal
         var b = new System.Text.StringBuilder();
@@ -192,8 +195,10 @@ static class P {
                     if (log2 < 9 || log2 > 24 || !Inside(dataOff, dataSize, bound)) throw Bad($"section {i}: its hash tree lies outside it");
                 }
             }
-            if (I64(0x178) != 0 && I64(0x180) != 0)   // compressed: the table lies in the data level, where LibHac's CompressedStorage reads it
+            if (I64(0x178) != 0 && I64(0x180) != 0) {   // compressed: the table lies in the data level, where LibHac's CompressedStorage reads it
                 Tree(0x188, I64(0x178), I64(0x180), dataSize, "compression", c => CompressedStorage.QueryNodeStorageSize(c) + CompressedStorage.QueryEntryStorageSize(c));
+                if (I64(0x108) == 0) Compression(file, start[i] + dataOff, I64(0x178), I32(0x188 + 8), dataSize, $"section {i}", Bad);   // a patch section's lies in the patched storage, which only LibHac reads
+            }
             bool dspf = Is(0x1D0, "DSPF"u8);
             if (dspf) {   // flattened: the holes hold zeros; LibHac would read the sparse table through AES-CTR (a key), so the layer is taken away and the header hash made again
                 Array.Clear(fs, 0x148, 0x30);
@@ -211,6 +216,97 @@ static class P {
         }
         "NCA3"u8.CopyTo(h.AsSpan(0x200));
         return (new LibHac.Tools.FsSystem.ConcatenationStorage(new IStorage[] { new MemoryStorage(h), new SubStorage(file, 0xC00, size - 0xC00) }, true), flattened);
+    }
+
+    // A compression table's entries, read from the file before LibHac's CompressedStorage reads them (it loops forever on entries whose virtual offsets do not increase): every entry
+    // set in order with its index, count and end; virtual offsets from 0, strictly increasing, up to the tree's end; a type LibHac decompresses (0 none, 1 zeros, 3 LZ4); a none entry's
+    // data and an LZ4 entry's compressed data inside the data level, an LZ4 entry at most 16 MiB and its compressed size at most LZ4's worst case for that
+    static void Compression(IStorage file, long level, long table, int count, long levelSize, string what, Func<string, Refused> bad) {
+        const int Node = 0x4000, Ent = 0x18, PerSet = (Node - 16) / Ent, OffsetsPerNode = (Node - 16) / 8; const long Lz4Max = 16 << 20;
+        Refused Bad(string why) => bad($"{what}: its compression table {why}");
+        if (count <= 0) throw Bad("has no entry");
+        long nodes = CompressedStorage.QueryNodeStorageSize(count);
+        int sets = (count + PerSet - 1) / PerSet;
+        byte[] nb = new byte[Node], sb = new byte[Node];
+        file.Read(level + table, nb).ThrowIfFailure();
+        long treeEnd = BinaryPrimitives.ReadInt64LittleEndian(nb.AsSpan(8));
+        if (BinaryPrimitives.ReadInt32LittleEndian(nb) != 0 || treeEnd <= 0 || (sets <= OffsetsPerNode && BinaryPrimitives.ReadInt32LittleEndian(nb.AsSpan(4)) != sets))
+            throw Bad("has a node that does not match its entries");
+        long v0 = -1, p0 = 0; int t0 = 0; uint s0 = 0; long setEnd = 0;
+        void Close(long end) {   // the pending entry, now that its virtual end is known
+            long size = end - v0;
+            if (size <= 0) throw Bad("has virtual offsets that do not increase");
+            switch (t0) {
+                case 0: if (!Inside(p0, size, levelSize)) throw Bad("has an entry outside the data level"); break;
+                case 1: break;
+                case 3: if (size > Lz4Max || s0 == 0 || s0 > size + size / 255 + 16 || !Inside(p0, s0, levelSize)) throw Bad("has an LZ4 entry larger than any or outside the data level"); break;
+                default: throw Bad($"has compression type {t0}, which nx_extract cannot read");
+            }
+        }
+        for (int s = 0; s < sets; s++) {
+            file.Read(level + table + nodes + (long)s * Node, sb).ThrowIfFailure();
+            int n = Math.Min(PerSet, count - s * PerSet);
+            if (BinaryPrimitives.ReadInt32LittleEndian(sb) != s || BinaryPrimitives.ReadInt32LittleEndian(sb.AsSpan(4)) != n) throw Bad("has an entry set that does not match its place");
+            for (int e = 0; e < n; e++) {
+                ReadOnlySpan<byte> x = sb.AsSpan(16 + Ent * e, Ent);
+                long v = BinaryPrimitives.ReadInt64LittleEndian(x);
+                if (e == 0 && v != (s == 0 ? 0 : setEnd)) throw Bad(s == 0 ? "does not start at offset 0" : "has entry sets that do not follow each other");
+                if (e == 0 && sets <= OffsetsPerNode && BinaryPrimitives.ReadInt64LittleEndian(nb.AsSpan(16 + 8 * s)) != v) throw Bad("has a node that does not match its entries");
+                if (v0 >= 0) Close(v);
+                v0 = v; p0 = BinaryPrimitives.ReadInt64LittleEndian(x[8..]); t0 = x[16]; s0 = BinaryPrimitives.ReadUInt32LittleEndian(x[20..]);
+            }
+            setEnd = BinaryPrimitives.ReadInt64LittleEndian(sb.AsSpan(8));
+            if (setEnd <= v0 || setEnd > treeEnd) throw Bad("has an entry set that ends before its last entry or after the table");
+        }
+        if (setEnd != treeEnd) throw Bad("does not end where its node says");
+        Close(treeEnd);
+    }
+
+    // A RomFS's hash tables, read before LibHac opens any path through them (each lookup walks the chain of its bucket, with no bound): every chain ends, inside the table, and reaches
+    // each entry at most once; and the chains are short enough that lookups stay cheap (sum of the squared chain lengths at most 64 per entry plus 1,000,000: a table that puts every
+    // entry in one bucket makes reading the files quadratic in their number). Tables of at most 512 MiB each, 2,000,000 entries in all
+    const long RomFsTableMax = 512L << 20;
+    static readonly HashSet<(Nca, Nca, int)> g_romfsChecked = new HashSet<(Nca, Nca, int)>();
+    static IStorage RomFsChecked(IStorage st, Nca n, Nca patch, NcaSectionType t) {
+        if (g_plain && !g_romfsChecked.Contains((n, patch, (int)t))) {
+            st.GetSize(out long size).ThrowIfFailure();
+            if (size < 0x50) throw new Refused("the RomFS is shorter than its header");
+            byte[] hd = new byte[0x50]; st.Read(0, hd).ThrowIfFailure();
+            long Q(int k) => BinaryPrimitives.ReadInt64LittleEndian(hd.AsSpan(8 * k));
+            long dirs = Chains(st, size, Q(1), Q(2), Q(3), Q(4), 0x10, 0x14, 0x18, "folder", 0);
+            Chains(st, size, Q(5), Q(6), Q(7), Q(8), 0x18, 0x1C, 0x20, "file", dirs);
+            g_romfsChecked.Add((n, patch, (int)t));
+        }
+        return st;
+    }
+    static long Chains(IStorage st, long size, long ho, long hs, long mo, long ms, int next, int len, int name, string what, long before) {
+        Refused Bad(string why) => new Refused($"the RomFS's {what} hash table {why}");
+        if (!Inside(ho, hs, size) || !Inside(mo, ms, size) || hs % 4 != 0 || hs > RomFsTableMax || ms > RomFsTableMax) throw new Refused($"the RomFS's {what} tables lie outside it, or are larger than {RomFsTableMax:N0} bytes");
+        byte[] hash = new byte[hs], meta = new byte[ms];
+        st.Read(ho, hash).ThrowIfFailure(); st.Read(mo, meta).ThrowIfFailure();
+        var seen = new System.Collections.BitArray((int)(ms / 4) + 1);
+        long entries = 0, cost = 0;
+        for (int b = 0; b < hs; b += 4) {
+            int off = BinaryPrimitives.ReadInt32LittleEndian(hash.AsSpan(b)); long chain = 0;
+            while (off != -1) {
+                if (off < 0 || (off & 3) != 0 || off > ms - name) throw Bad("points outside its entries");
+                if (seen[off / 4]) throw Bad("reaches one entry twice (a loop in its tables)");
+                seen[off / 4] = true; chain++;
+                int nl = BinaryPrimitives.ReadInt32LittleEndian(meta.AsSpan(off + len));
+                if (nl < 0 || nl > ms - off - name) throw Bad("has an entry whose name runs past its entries");
+                off = BinaryPrimitives.ReadInt32LittleEndian(meta.AsSpan(off + next));
+            }
+            entries += chain; cost += chain * chain;
+            if (before + entries > EntryCap) throw Bad($"lists more than {EntryCap:N0} entries");
+        }
+        if (cost > 64 * entries + 1_000_000) throw Bad($"puts its {entries:N0} entries in too few chains: every lookup would walk most of them");
+        return entries;
+    }
+    // A data section's filesystem; in plain mode a RomFS's hash tables are checked first (RomFsChecked)
+    static IFileSystem DataFs(Nca n, Nca patch, IntegrityCheckLevel level) {
+        if (!g_plain || (patch ?? n).Header.GetFsHeader(Nca.GetSectionIndexFromType(NcaSectionType.Data, n.Header.ContentType)).FormatType != NcaFormatType.Romfs)
+            return patch == null ? n.OpenFileSystem(NcaSectionType.Data, level) : n.OpenFileSystemWithPatch(patch, NcaSectionType.Data, level);
+        return new RomFsFileSystem(RomFsChecked(patch == null ? n.OpenStorage(NcaSectionType.Data, level) : n.OpenStorageWithPatch(patch, NcaSectionType.Data, level), n, patch, NcaSectionType.Data));
     }
 
     // Every entry of a filesystem, counted as it is listed: in plain mode at most EntryCap, each path once and at most PathCap characters (a RomFS whose tables loop ends here)
@@ -285,9 +381,13 @@ static class P {
         if (html) {   // an update's NCA is read alone, or over a base game's NCA when its header marks the data section a patch (a relocation table); which base NCA it patches the
                       // header does not say: the one it reads with passes the hash check
             int k = 0; ulong tid = baseProg.Header.TitleId; var bases = basePkg.FindAll(n => n.Header.ContentType == NcaContentType.Manual && n.Header.TitleId == tid);
-            bool Try(Func<IFileSystem> open, string dst) {   // a read over the wrong base does not throw: each file fails the hash check, which Copy lists and goes on; such a read is undone
+            void Html(Func<IntegrityCheckLevel, IFileSystem> open, string dst) {   // one NCA's pages; --allow-damaged reads a damaged file again from it without hash checks
+                g_lenient = () => open(IntegrityCheckLevel.IgnoreOnInvalid); g_lenientFs = null;
+                Copy(() => open(IntegrityCheckLevel.ErrorOnInvalid), dst, null);
+            }
+            bool Try(Func<IntegrityCheckLevel, IFileSystem> open, string dst) {   // a read over the wrong base does not throw: each file fails the hash check, which Copy lists and goes on; such a read is undone
                 int damaged = g_damaged.Count;
-                try { Copy(open, dst, null); if (g_damaged.Count == damaged) return true; }
+                try { Html(open, dst); if (g_damaged.Count == damaged) return true; }
                 catch (Exception e) when (e is not KeysMissing and not Refused) { }
                 g_damaged.RemoveRange(damaged, g_damaged.Count - damaged);
                 if (Directory.Exists(dst)) Directory.Delete(dst, true);
@@ -297,15 +397,15 @@ static class P {
                 if (u.Header.ContentType != NcaContentType.Manual || u.Header.TitleId != tid) continue;
                 string dst = Path.Combine(a[3], $"html{k}");
                 bool patch = u.Header.GetFsHeader(Nca.GetSectionIndexFromType(NcaSectionType.Data, u.Header.ContentType)).IsPatchSection();
-                if (!patch) { Copy(() => u.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst, null); k++; }   // a full NCA: its damage is the NSP's
-                else if (bases.Exists(b => Try(() => b.OpenFileSystemWithPatch(u, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst))) { Console.WriteLine($"{dst}: a patch of the base game's NCA"); k++; }
+                if (!patch) { Html(level => DataFs(u, null, level), dst); k++; }   // a full NCA: its damage is the NSP's
+                else if (bases.Exists(b => Try(level => DataFs(b, u, level), dst))) { Console.WriteLine($"{dst}: a patch of the base game's NCA"); k++; }
                 else Console.WriteLine($"[RED] an HtmlDocument NCA of the update patches none of the base game's: read over each, it fails the hash check");
             }
             foreach (Nca b in bases) {
                 // Horizon mounts a sparse NCA only through its patch; read alone, the left-out ranges fail the hash check while its tables open (exit code 3, "the NSP is damaged").
                 // Minecraft Dungeons II's base has one (16 KB, the HtmlDocument its update patches), beside its sparse Program NCA
                 if (Sparse(b)) { Console.WriteLine($"a sparse HtmlDocument NCA of the base game ({b.Header.NcaSize} bytes): read only through the update's patch, not alone"); continue; }
-                Copy(() => b.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), Path.Combine(a[3], $"html{k++}"), null);
+                Html(level => DataFs(b, null, level), Path.Combine(a[3], $"html{k++}"));
             }
             Console.WriteLine($"{k} HtmlDocument NCAs");
             return Damaged();
@@ -318,8 +418,8 @@ static class P {
             byte[] nacp = Nacp(ctrl);
             Directory.CreateDirectory(outDir);
             if (nacp != null) {
-                Console.WriteLine($"display version {System.Text.Encoding.ASCII.GetString(nacp, 0x3060, 0x10).TrimEnd('\0')}");
-                Console.WriteLine($"name {TitleName(nacp)}");
+                Console.WriteLine($"display version {Shown(System.Text.Encoding.ASCII.GetString(nacp, 0x3060, 0x10).TrimEnd('\0'))}");
+                Console.WriteLine($"name {Shown(TitleName(nacp))}");
                 Spend(nacp.Length); File.WriteAllBytes(Path.Combine(outDir, "control.nacp"), nacp);
             }
             var (icon, lang) = Icon(ctrl);   // the game icon for the app icon, saved as <output dir>/icon.jpg (build_ipa.sh picks it up)
@@ -347,7 +447,7 @@ static class P {
             Console.WriteLine("program has no data section: empty RomFS");
             return Damaged();
         }
-        IFileSystem Romfs(IntegrityCheckLevel level) => new RomFsFileSystem(updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, level) : baseProg.OpenStorage(NcaSectionType.Data, level));
+        IFileSystem Romfs(IntegrityCheckLevel level) => new RomFsFileSystem(RomFsChecked(updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, level) : baseProg.OpenStorage(NcaSectionType.Data, level), baseProg, updProg, NcaSectionType.Data));
         Func<IFileSystem> romfs = () => Romfs(IntegrityCheckLevel.ErrorOnInvalid);
         // the same RomFS without hash checks, for reading damaged files as they are (--allow-damaged)
         g_lenient = () => Romfs(IntegrityCheckLevel.IgnoreOnInvalid);
@@ -442,10 +542,12 @@ static class P {
     static IFileSystem Failed(string path, Func<IFileSystem> open) { g_damaged.Add(path); return open(); }
     static int Damaged() {
         if (g_damaged.Count == 0) return 0;
-        foreach (string p in g_damaged) Console.WriteLine($"[RED] hash check failed: {p}");
-        if (g_allow) { Console.WriteLine($"[RED] the NSP is damaged: {g_damaged.Count} files written as read (--allow-damaged)"); return 0; }
-        Console.WriteLine($"[RED] the NSP is damaged: " +
-                          $"{g_damaged.Count} files fail the NCA's hash check (an incomplete copy or a broken download); copy or download it again, or pass --allow-damaged to write them as read");
+        foreach (string p in g_damaged) Console.WriteLine($"[RED] hash check failed: {Shown(p)}");
+        string what = g_plain ? "the NCA files are damaged" : "the NSP is damaged";
+        if (g_allow) { Console.WriteLine($"[RED] {what}: {g_damaged.Count} files written as read (--allow-damaged)"); return 0; }
+        Console.WriteLine($"[RED] {what}: {g_damaged.Count} files fail the NCA's hash check " +
+                          (g_plain ? "(damaged before the archive was made: its own hashes describe these bytes); pack them again from a good dump" : "(an incomplete copy or a broken download); copy or download it again") +
+                          ", or pass --allow-damaged to write them as read");
         return 3;
     }
 
@@ -457,8 +559,8 @@ static class P {
         Nca data = Pick(pkg, NcaContentType.PublicData, id) ?? Pick(pkg, NcaContentType.Data, id) ?? throw Fail(id == null ? "no data NCA in the DLC NSP" : $"no data NCA of add-on content {id:x16} in {(g_plain ? "the folder" : Path.GetFileName(nsp))}");
         Console.WriteLine($"add-on content {data.Header.TitleId:x16}");
         Directory.CreateDirectory(image ? Path.GetDirectoryName(outDir) : outDir);
-        Func<IFileSystem> fs = () => new RomFsFileSystem(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid));
-        g_lenient = () => new RomFsFileSystem(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid));
+        Func<IFileSystem> fs = () => new RomFsFileSystem(RomFsChecked(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), data, null, NcaSectionType.Data));
+        g_lenient = () => new RomFsFileSystem(RomFsChecked(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid), data, null, NcaSectionType.Data));
         if (image) WriteImage(fs, outDir); else Copy(fs, outDir, null);
         return Damaged();
     }
@@ -577,7 +679,7 @@ static class P {
     static readonly string[] IconLangs = { "AmericanEnglish", "BritishEnglish", "Japanese", "French", "German", "LatinAmericanSpanish", "Spanish", "Italian",
                                            "Dutch", "CanadianFrench", "Portuguese", "Russian", "Korean", "TraditionalChinese", "SimplifiedChinese", "BrazilianPortuguese" };
     static (byte[], string) Icon(Nca ctrl) {
-        IFileSystem fs = ctrl.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+        IFileSystem fs = DataFs(ctrl, null, IntegrityCheckLevel.ErrorOnInvalid);
         foreach (string lang in IconLangs) {
             using var f = new UniqueRef<IFile>();
             if (fs.OpenFile(ref f.Ref, $"/icon_{lang}.dat".ToU8Span(), OpenMode.Read).IsFailure()) continue;
@@ -589,7 +691,7 @@ static class P {
         return (null, null);
     }
     static byte[] Nacp(Nca ctrl) {   // the whole control.nacp (0x4000 bytes); null for one of another size (not read, not written)
-        IFileSystem fs = ctrl.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+        IFileSystem fs = DataFs(ctrl, null, IntegrityCheckLevel.ErrorOnInvalid);
         using var f = new UniqueRef<IFile>();
         fs.OpenFile(ref f.Ref, "/control.nacp".ToU8Span(), OpenMode.Read).ThrowIfFailure();
         f.Get.GetSize(out long n).ThrowIfFailure();
@@ -730,6 +832,7 @@ static class P {
                 g_lenientFs ??= g_lenient();
                 using var lf = new UniqueRef<IFile>();
                 g_lenientFs.OpenFile(ref lf.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                File.Delete(op);   // what the checked read wrote before it failed (plain mode creates every file new)
                 Write(lf.Get, op, e.Size, buf);
             }
             written += e.Size;
@@ -749,9 +852,13 @@ static class P {
         IFileSystem fs = open();
         long n = 0, bytes = 0, total = 0; byte[] h = new byte[32];
         var all = new List<DirectoryEntryEx>(Entries(fs)); var names = new HostNames();
-        foreach (DirectoryEntryEx e in all) {   // plain mode: a control character would forge rows of the manifest; the NROs written whole are named, sized and spent first
+        const string Head = "# path\tbytes\tfirst 32 bytes (hex)";
+        total = Head.Length + 1;
+        foreach (DirectoryEntryEx e in all) {   // plain mode: a control character would forge rows of the manifest; the manifest's own rows and the NROs written whole are named, sized and spent first
             if (g_plain) foreach (char c in e.FullPath) if (c < 0x20 || (c >= 0x7F && c <= 0x9F)) throw new Refused($"the RomFS name {Esc(e.FullPath)} holds a control character, which the manifest cannot list");
-            if (e.Type == DirectoryEntryType.Directory || !e.FullPath.EndsWith(".nro", StringComparison.OrdinalIgnoreCase)) continue;
+            if (e.Type == DirectoryEntryType.Directory) continue;
+            total = Sum(total, System.Text.Encoding.UTF8.GetByteCount(e.FullPath) + 24L + 2 * Math.Min(32, Math.Max(0, e.Size)), e.FullPath);   // path, tab, size (at most 19 digits), tab, hex, newline
+            if (!e.FullPath.EndsWith(".nro", StringComparison.OrdinalIgnoreCase)) continue;
             names.Add(e);
             if (g_plain && e.Size > ModuleMax) throw new Refused($"the NRO module {Esc(e.FullPath)} is {e.Size:N0} bytes, larger than any ({ModuleMax:N0} at most)");
             total = Sum(total, e.Size, e.FullPath);
@@ -759,7 +866,7 @@ static class P {
         Spend(total);
         Directory.CreateDirectory(Path.GetDirectoryName(path));
         using var o = new StreamWriter(path);
-        o.WriteLine("# path\tbytes\tfirst 32 bytes (hex)");
+        o.WriteLine(Head);
         foreach (DirectoryEntryEx e in all) {
             if (e.Type == DirectoryEntryType.Directory) continue;
             using var f = new UniqueRef<IFile>();

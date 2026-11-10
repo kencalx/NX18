@@ -741,10 +741,10 @@ class FakeTool:
     build); control: whether it writes control.nacp and icon.jpg; fail: an exception it raises once it has listed the staged files"""
     def __init__(self, build=b'', code=0, text='', title=None, control=True, fail=None):
         self.build, self.code, self.text, self.title, self.control, self.fail = build, code, text, title, control, fail
-        self.calls, self.staged, self.envs = [], [], []
+        self.calls, self.staged, self.envs, self.timeouts = [], [], [], []
 
     def __call__(self, n, args, log=None, timeout=None):
-        args = [str(a) for a in args]; self.calls.append(args)
+        args = [str(a) for a in args]; self.calls.append(args); self.timeouts.append(timeout)
         if args[1] == '--contents':
             out = []
             for j, d in enumerate(args[2:]):
@@ -765,7 +765,8 @@ class FakeTool:
         if self.code: return self.code, self.text
         (out / 'ExeFS').mkdir(parents=True)
         (out / 'ExeFS/main').write_bytes(b'NSO0 main'); (out / 'ExeFS/main.npdm').write_bytes(npdm(TID))
-        (out / 'RomFS.img').write_bytes(b'image')
+        if '--manifest' in args: (out / 'romfs_manifest.tsv').write_text('# path\tbytes\tfirst 32 bytes (hex)\n/a\t1\t00\n')
+        else: (out / 'RomFS.img').write_bytes(b'image')
         if self.control: (out / 'control.nacp').write_bytes(control_nacp('From Control', '1.2.0')); (out / 'icon.jpg').write_bytes(b'control icon')
         pid = args[args.index('--app') + 2].split('=')[1]
         title = self.title or f'title {pid}' + (f', update {pid}' if args[2] != '-' else '')
@@ -905,6 +906,44 @@ class Native(NativeBase):
                 with self.assertRaises(pack_nx.Error) as e: self.pack(n, vers[VER])
                 self.assertEqual(e.exception.code, 'nca'); self.assertIn(why, str(e.exception))
 
+    def test_every_run_has_a_time_limit_a_write_cap_and_allow_damaged(self):
+        g = dnca_writer.Game(TID, manual=True); self.write_game(g)
+        for allow in (False, True):
+            with self.subTest(allow_damaged=allow):
+                fake = FakeTool(build=g.bid1)
+                n, (_, base, vers, _) = self.opened(fake, allow_damaged=allow)
+                k = vers[VER]
+                self.pack(n, k, base)
+                runs = fake.calls[1:]   # after the scan's --contents
+                self.assertEqual([('--html' in c) for c in runs], [False, True])
+                staged = pack_nx.staging_bytes(n, k)
+                self.assertEqual(fake.timeouts, [pack_nx.CONTENTS_TIMEOUT] + [pack_nx.run_timeout(staged)] * 2)
+                for c in runs:
+                    self.assertEqual(int(c[c.index('--max-bytes') + 1]), pack_nx.version_bytes(n, k, base) + pack_nx.WRITE_SLACK)   # the bound the disk checks counted, not all free space
+                    self.assertEqual('--allow-damaged' in c, allow)
+                out = self.dir / f'survey{allow}'
+                pack_nx.survey_native(n, k, base, out, say=lambda s: None)
+                self.assertEqual('--allow-damaged' in fake.calls[-1], allow); self.assertIn('--manifest', fake.calls[-1])
+                self.assertEqual(fake.timeouts[-1], pack_nx.run_timeout(pack_nx.staging_bytes(n, k) - sum(len(b) for b in g.update.values() if b[0x205] == dnca_writer.MANUAL)))
+        with mock.patch.object(pack_nx, 'free_bytes', return_value=(1 << 30) + 5):
+            self.assertEqual(pack_nx.write_cap(1 << 40, self.dir), 5)
+
+    def test_a_run_that_does_not_end_is_stopped(self):
+        exe = self.dir / 'slow'; exe.write_text('#!/bin/sh\nexec sleep 30\n'); exe.chmod(0o755)
+        n = self.open(); n.nca_tool = pack_nx.Native(tool=lambda: exe)
+        t = time.monotonic()
+        with self.assertRaises(pack_nx.Error) as e: pack_nx._run(n, ['--plain'], timeout=1)
+        self.assertLess(time.monotonic() - t, 10)
+        self.assertEqual(e.exception.code, 'nca'); self.assertIn('did not finish reading the NCA files in 1 s', str(e.exception))
+
+    def test_a_second_title_or_build_id_line_is_refused(self):   # nx_extract prints the NCAs' own text escaped: two such lines mean it was not
+        pid = f'{TID:016x}'
+        for title, what in ((f'title {pid}, update {pid}\nmain build id {self.g.bid1[:16].hex()}', 'main build id'), (f'title {pid}, update {pid}\ntitle {pid}, update {pid}', 'title')):
+            with self.subTest(what):
+                n, (_, base, vers, _) = self.opened(FakeTool(build=self.g.bid0, title=title))
+                with self.assertRaises(pack_nx.Error) as e: self.pack(n, vers[VER])
+                self.assertEqual(e.exception.code, 'nca'); self.assertIn(f'printed 2 {what} lines', str(e.exception))
+
     def test_control_data_from_the_archive_when_the_tool_gives_none(self):
         fake = FakeTool(build=self.g.bid1, control=False)
         n, (_, base, vers, _) = self.opened(fake)
@@ -928,6 +967,11 @@ class Native(NativeBase):
         self.assertEqual(self.pack(n, vers[VER])[0], 'packed')
         self.assertEqual(self.pack(n, vers[VER])[0], 'kept')
         with mock.patch.object(pack_nx, 'nx_extract_source_sha', return_value='0' * 16): self.assertEqual(self.pack(n, vers[VER])[0], 'packed')
+        self.assertEqual(self.pack(n, vers[VER])[0], 'packed')
+        edited = self.dir / 'pack_nx_edited.py'; edited.write_text(Path(pack_nx.__file__).read_text() + '# a comment\n')
+        with mock.patch.object(pack_nx, '__file__', str(edited)): self.assertEqual(self.pack(n, vers[VER])[0], 'kept')   # an edit elsewhere in the script: nothing staged again
+        with mock.patch.object(pack_nx, 'NATIVE_PACKER', pack_nx.NATIVE_PACKER + 1): self.assertEqual(self.pack(n, vers[VER])[0], 'packed')
+        self.assertEqual(self.pack(n, vers[VER])[0], 'packed')
         n.nca_tool.allow_damaged = True
         self.assertEqual(self.pack(n, vers[VER])[0], 'packed')
         n.nca_tool.allow_damaged = False
@@ -1045,6 +1089,53 @@ class NativeTool(NativeBase):
         said = []
         self.assertEqual(pack_nx.pack_version(n, base, base, app, self.work() / 'extract/v0', say=said.append), 'packed')
         self.assertTrue(any('hash check failed: /base_only.bin' in s for s in said), said)
+
+    def test_damaged_manual_with_allow_damaged(self):   # the HTML run takes --allow-damaged as the main run does, and writes the file as read
+        g = dnca_writer.Game(TID, dlc=False)
+        ctrl = next(b for b in g.base.values() if b[0x205] == dnca_writer.CONTROL)
+        big = dnca_writer.rand(0x20000, 7)
+        man = bytearray(dnca_writer.manual_nca(TID, {'index.html': b'<p>x</p>', 'big.bin': big}).data)
+        start, _ = dnca_writer.section_span(man, 0)
+        off, _ = dnca_writer.ivfc_data_level(man[0x400 + 8:0x400 + 0x100])
+        man[start + off + 0x8000] ^= 0xFF   # big.bin (0x210 to 0x20210 of the RomFS), in an IVFC block that holds only its data
+        files, mid = dnca_writer.snapshot(dnca_writer.APPLICATION, TID, 0, [g.base_prog, ctrl, bytes(man)], other=TID | 0x800, seed=12)
+        self.write([{'id': TID, 'platform': 1, 'snapshots': [{'type': 0, 'version': 0, 'tree': files, 'content_id': mid, 'build_id': g.bid0, 'meta': META}]}])
+        n, (app, base, vers, dlc) = self.scanned()
+        with self.assertRaises(pack_nx.Error) as e: pack_nx.pack_version(n, base, base, app, self.work() / 'extract/v0', say=lambda s: None)
+        self.assertEqual(e.exception.code, 'nca_hash'); self.assertIn('(/big.bin)', str(e.exception))
+        n, (app, base, vers, dlc) = self.scanned(allow_damaged=True)
+        said = []
+        self.assertEqual(pack_nx.pack_version(n, base, base, app, self.work() / 'extract/v0', say=said.append), 'packed')
+        self.assertTrue(any('hash check failed: /big.bin' in s for s in said), said)
+        got = (self.work() / 'extract/v0/html/html0/big.bin').read_bytes()
+        self.assertEqual(len(got), len(big)); self.assertNotEqual(got, big)   # as read
+        self.assertEqual((self.work() / 'extract/v0/html/html0/index.html').read_bytes(), b'<p>x</p>')
+
+    def test_survey_with_allow_damaged(self):
+        prog = bytearray(self.g.upd_prog.data)
+        start, _ = dnca_writer.section_span(prog, 0)
+        prog[start + 0x200 + 0x1040] ^= 0xFF   # subsdk0's data in the update's ExeFS
+        self.g.update = {k: (bytes(prog) if v == self.g.upd_prog.data else v) for k, v in self.g.update.items()}
+        self.write_game()
+        for allow in (False, True):
+            with self.subTest(allow_damaged=allow):
+                n, (app, base, vers, dlc) = self.scanned(allow_damaged=allow)
+                out = self.dir / f'survey{allow}'
+                if not allow:
+                    with self.assertRaises(pack_nx.Error) as e: pack_nx.survey_native(n, vers[VER], base, out, say=lambda s: None)
+                    self.assertEqual(e.exception.code, 'nca_hash')
+                else: self.assertEqual(pack_nx.survey_native(n, vers[VER], base, out, say=lambda s: None), len(self.g.romfs1))
+
+    def test_hostile_tables_end_as_red_lines(self):   # a RomFS hash table that loops: refused at once (it ran until killed before)
+        g = dnca_writer.Game(TID, dlc=False)
+        g.base_prog = dnca_writer.program_nca(TID, g.exefs0, g.romfs0, buckets='file-cycle')
+        ctrl = next(b for b in g.base.values() if b[0x205] == dnca_writer.CONTROL)
+        files, mid = dnca_writer.snapshot(dnca_writer.APPLICATION, TID, 0, [g.base_prog, ctrl], other=TID | 0x800, seed=12)
+        self.write([{'id': TID, 'platform': 1, 'snapshots': [{'type': 0, 'version': 0, 'tree': files, 'content_id': mid, 'build_id': g.bid0, 'meta': META}]}])
+        n, (app, base, vers, dlc) = self.scanned()
+        with mock.patch.object(pack_nx, 'RUN_BASE', 20), self.assertRaises(pack_nx.Error) as e:
+            pack_nx.pack_version(n, base, base, app, self.work() / 'extract/v0', say=lambda s: None)
+        self.assertEqual(e.exception.code, 'nca'); self.assertIn('file hash table reaches one entry twice', str(e.exception))
 
     def test_cli(self):
         g = dnca_writer.Game(TID, sparse_base=True)
@@ -1279,6 +1370,15 @@ class NativeMain(NativeBase):
         self.assertEqual(nacp.version(out / 'control.nacp'), '1.2.0')
         rows = (out / 'romfs_manifest.tsv').read_text().splitlines()
         self.assertEqual(sorted(r.split('\t')[0] for r in rows[1:]), sorted('/' + p for p in self.g.romfs1))
+
+    def test_scan_takes_allow_damaged_and_closes_the_archive_on_any_error(self):
+        with mock.patch.object(nsp, 'ALLOW_DAMAGED', True):
+            app, fam = nsp.scan_nx(self.path, repo=REPO, env=None); self.addCleanup(fam['nx'].close)
+        self.assertTrue(fam['nx'].nca_tool.allow_damaged)   # before the survey reads with it
+        with mock.patch.object(nsp, 'find_nx_extract', side_effect=nsp.BuildError('nx_extract was not built from the in-repo source')), \
+             mock.patch.object(pack_nx.Nx, 'close', autospec=True, side_effect=pack_nx.Nx.close) as close:
+            with self.assertRaises(nsp.BuildError): nsp.scan_nx(self.path, repo=REPO, env=None)
+        self.assertEqual(close.call_count, 1)
 
     def test_same_build_reads_the_catalog(self):
         app, fam = nsp.scan_nx(self.path, repo=REPO, env=None); self.addCleanup(fam['nx'].close)

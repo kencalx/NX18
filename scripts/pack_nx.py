@@ -1125,6 +1125,9 @@ CT_PROGRAM, CT_META, CT_CONTROL, CT_MANUAL, CT_DATA, CT_PUBLIC = range(6)   # NC
 GAME_TYPES, DLC_TYPES = frozenset({CT_PROGRAM, CT_META, CT_CONTROL, CT_MANUAL}), frozenset({CT_META, CT_DATA, CT_PUBLIC})   # what a version or a DLC stages
 GC_LIMIT = '100000000'   # nx_extract's GC heap, 4 GiB: hexadecimal without 0x, as NativeAOT reads DOTNET_GCHeapHardLimit (it ignores a value with 0x)
 CONTENTS_TIMEOUT = 120   # seconds for the scan's --contents run (meta NCAs only)
+RUN_BASE, RUN_RATE = 300, 10 * MiB   # every other run's time limit: 300 s plus 1 s per 10 MiB staged (tables that never end would hold the build forever)
+WRITE_SLACK = 256 * MiB   # what a run may write beyond the bound the disk checks count (version_bytes): a RomFS image's index, a manifest
+NATIVE_PACKER = 1   # in the stamp of every NCA snapshot's output: raise it when what pack_native, pack_native_dlc or survey_native write changes (nx_extract's own source is stamped too)
 STAMP = 'native.inputs.json'
 TOOL_FIX = 'rebuild it with dm/tools/native_tools.sh nx_extract'
 
@@ -1222,6 +1225,14 @@ def stage(n, files, dst, fresh=True):
     return total
 
 
+def run_timeout(nbytes):   # the time limit of a run that reads nbytes of staged NCA files
+    return RUN_BASE + nbytes // RUN_RATE
+
+
+def write_cap(bound, where):   # nx_extract's --max-bytes: the bound the disk checks counted (plus WRITE_SLACK), and never past the volume's free space less 1 GiB
+    return max(0, min(free_bytes(where) - GiB, bound + WRITE_SLACK))
+
+
 def _run(n, args, log=None, timeout=None):   # nx_extract with args (an argument list, never a shell) → (exit code, its output); the output also goes to log
     nat = _native(n)
     exe = nat.tool()
@@ -1234,7 +1245,8 @@ def _run(n, args, log=None, timeout=None):   # nx_extract with args (an argument
         log.parent.mkdir(parents=True, exist_ok=True)
         with open(log, 'w') as f: r = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=env, timeout=timeout)
         return r.returncode, log.read_text(errors='replace')
-    except subprocess.TimeoutExpired as e: raise Error(f'nx_extract did not finish in {timeout} s ({shown(" ".join(cmd[1:3]))} …)', 'tool') from e
+    except subprocess.TimeoutExpired as e:
+        raise Error(f'nx_extract did not finish reading the NCA files in {timeout:,} s ({shown(" ".join(cmd[1:3]))} …): their tables may never end (a crafted or broken archive)', 'nca') from e
     except OSError as e: raise tool_error(f'{exe} does not start ({e.strerror or e})') from e
 
 
@@ -1299,8 +1311,10 @@ def probe(n, a, snaps):
         if s.type == DLC: s.title_id = tid
 
 
-def _digest(n, k, kind, ids):   # what an NCA snapshot's output is made from: the tool's source, this script, romfs_image.py, the IDs and every root file's name, size and SHA-256
-    h = hashlib.sha256(kind.encode() + b'\0' + nx_extract_source_sha().encode() + Path(__file__).read_bytes() + Path(romfs_image.__file__).read_bytes() + repr(ids).encode())
+def _digest(n, k, kind, ids):
+    """What an NCA snapshot's output is made from: the tool's source, NATIVE_PACKER, romfs_image.py, the IDs and every root file's name, size and SHA-256. Not this script's bytes:
+    an edit elsewhere in it would stage and extract every NCA snapshot again (tens of GB for a game)"""
+    h = hashlib.sha256(kind.encode() + b'\0' + nx_extract_source_sha().encode() + str(NATIVE_PACKER).encode() + b'\0' + Path(romfs_image.__file__).read_bytes() + repr(ids).encode())
     for name, i in sorted(native_files(n, k)): h.update(struct.pack('<IQ', len(name), n.size(i)) + name.encode() + n.sha(i))
     return h.hexdigest()
 
@@ -1340,6 +1354,12 @@ def _control_fallback(k, out, say):   # what the Control NCA did not give (no Co
         say(f'{k.name}: the archive has no NACP for this version' + ('' if k.type == BASE else ' or its base game') + ': the game\'s name and languages come from elsewhere (its profile)')
 
 
+def _one(k, pattern, text, what):   # the one line of nx_extract's output that matches pattern; a second is refused (text from the NCAs is printed escaped, so none can forge one)
+    found = list(re.finditer(f'^{pattern}$', text, re.M))
+    if len(found) > 1: raise Error(f'{k.name}: nx_extract printed {len(found)} {what} lines', 'nca')
+    return found[0] if found else None
+
+
 def _extract_args(k, src, out, a, p, *more):
     return ['--plain', src, src if k.type == UPDATE else '-', out, '--app', f'{a.id:016x}', f'--program={p.id:016x}', *more]
 
@@ -1348,6 +1368,7 @@ def pack_native(n, k, base, app, out, say=print, step=lambda s: None):
     """NCA snapshot k (a base game or an update) → out/ExeFS, out/RomFS.img, its control data and out/html/, through nx_extract --plain on its staged NCA files; the ExeFS and RomFS are
     an update's laid over its base game's (BKTR). Returns 'kept' (the stamp matches: nothing staged or run) or 'packed'"""
     nat, a, p = _native(n), k.app, n.programs[k.program]
+    damaged = ['--allow-damaged'] if nat.allow_damaged else []
     digest = _digest(n, k, 'NX-native-version', (a.id, p.id, app, k.type, k.version, nat.allow_damaged))
     if _kept(out, digest): return 'kept'
     files = chosen(n, k, GAME_TYPES)
@@ -1362,14 +1383,15 @@ def pack_native(n, k, base, app, out, say=print, step=lambda s: None):
         stage(n, files, tmp)
         step('reading the NCA files')
         log = logs / f'extract_{out.name}.log'
-        code, text = _run(n, _extract_args(k, tmp, part, a, p, '--romfs-image', '--max-bytes', max(0, free_bytes(out.parent) - GiB), *(['--allow-damaged'] if nat.allow_damaged else [])), log)
+        bound, limit = version_bytes(n, k, base), run_timeout(staged)
+        code, text = _run(n, _extract_args(k, tmp, part, a, p, '--romfs-image', '--max-bytes', write_cap(bound, out.parent), *damaged), log, limit)
         if code: _failed(k, code, text, log)
         for line in _reds(text): say(f'{k.name}: {line}')   # files written as read (--allow-damaged)
-        m = re.search(r'^title ([0-9a-f]{16})(?:, update ([0-9a-f]{16}))?$', text, re.M)
+        m = _one(k, r'title ([0-9a-f]{16})(?:, update ([0-9a-f]{16}))?', text, 'title')
         if not m or int(m.group(1), 16) != p.id or (k.type == UPDATE) != bool(m.group(2)) or (m.group(2) and int(m.group(2), 16) != p.id):
             raise Error(f'{k.name}: the archive says program {p.id:016X}, nx_extract read ' + (shown(m.group(0)) if m else 'no program'), 'nca')
         if k.flags & 1:   # BUILD_ID_PRESENT: the catalog describes these NCAs only when their main is that build
-            got = re.search(r'^main build id ([0-9a-f]+)$', text, re.M)
+            got = _one(k, r'main build id ([0-9a-f]+)', text, 'main build id')
             if not got or got.group(1) != k.build_id[:16].hex():
                 raise Error(f'{k.name}: the archive says main is build {k.build_id[:16].hex()}, its Program NCA holds {got.group(1) if got else "no main"}', 'nca')
         if not (part / 'ExeFS/main').is_file() or not (part / 'ExeFS/main.npdm').is_file(): raise Error(f'{k.name}: its Program NCA has no ExeFS main and main.npdm', 'nca')
@@ -1378,7 +1400,7 @@ def pack_native(n, k, base, app, out, say=print, step=lambda s: None):
             step('reading the HTML pages')
             hp = part / 'html.partial'; hp.mkdir()
             hlog = logs / f'extract_html_{out.name}.log'
-            code, text = _run(n, _extract_args(k, tmp, hp, a, p, '--html', '--max-bytes', max(0, free_bytes(out.parent) - GiB)), hlog)
+            code, text = _run(n, _extract_args(k, tmp, hp, a, p, '--html', '--max-bytes', write_cap(bound, out.parent), *damaged), hlog, limit)
             if code: _failed(k, code, text, hlog)
             for line in _reds(text): say(f'{k.name}: {line}')
             hp.rename(html)
@@ -1406,7 +1428,7 @@ def pack_native_dlc(n, app, tid, k, img, say=print):
         Path(dst + '.inputs.json').unlink(missing_ok=True); img.unlink(missing_ok=True)
         stage(n, files, tmp)
         log = logs / f'aoc_{img.stem}.log'
-        code, text = _run(n, ['--plain', '--aoc', tmp, img, f'{tid:016x}', '--romfs-image', '--max-bytes', max(0, free_bytes(img.parent) - GiB)], log)
+        code, text = _run(n, ['--plain', '--aoc', tmp, img, f'{tid:016x}', '--romfs-image', '--max-bytes', write_cap(version_bytes(n, k), img.parent)], log, run_timeout(staged))
         if code: _failed(k, code, text, log)
         if not re.search(f'^add-on content {tid:016x}$', text, re.M) or not img.is_file(): raise Error(f'{k.name}: nx_extract read no add-on content {tid:016X}', 'nca')
         romfs_image.stamp(dst, digest, romfs_image.file_identity(img))
@@ -1420,14 +1442,15 @@ def survey_native(n, k, base, out, say=print):
     nx_extract --plain --manifest (no RomFS written). out must not exist. Returns the files listed"""
     nat, a, p = _native(n), k.app, n.programs[k.program]
     files = chosen(n, k, GAME_TYPES - {CT_MANUAL})
-    staged = sum(n.size(i) for _, i, _ in files)
-    _space(k, staged + sum(n.size(i) for _, i, t in files if t == CT_PROGRAM), out.parent)
+    staged, bound = sum(n.size(i) for _, i, _ in files), sum(n.size(i) for _, i, t in files if t in (CT_PROGRAM, CT_CONTROL))   # ExeFS, NROs, control data, the manifest's rows
+    _space(k, staged + bound, out.parent)
     tmp = Path(nat.tmp or out.parent / 'tmp') / 'nca' / 'survey'
     logs = Path(nat.logs or out.parent / 'logs')
     try:
         stage(n, files, tmp)
         log = logs / 'survey_extract.log'
-        code, text = _run(n, _extract_args(k, tmp, out, a, p, '--manifest', '--max-bytes', max(0, free_bytes(out.parent) - GiB)), log)
+        code, text = _run(n, _extract_args(k, tmp, out, a, p, '--manifest', '--max-bytes', write_cap(bound, out.parent), *(['--allow-damaged'] if nat.allow_damaged else [])), log,
+                          run_timeout(staged))
         if code: _failed(k, code, text, log)
         _control_fallback(k, out, say)
     finally: shutil.rmtree(tmp, ignore_errors=True)

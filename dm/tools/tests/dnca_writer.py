@@ -64,11 +64,12 @@ def _hash(parent, name):
     return h
 
 
-def romfs(files, *, shared=None, loop=None):
+def romfs(files, *, shared=None, loop=None, buckets=None):
     """files: {path: bytes}, a path being 'a/b/c' or a tuple of name parts (str or bytes: a name may then hold '/', a tab, '..'). A Nintendo RomFS: 0x50-byte header, the data at 0x200,
     then the directory hash table, directory entries (parent, sibling, first child folder, first file, next in bucket, name length, name), the file hash table and file entries
     (parent, sibling, data offset, size, next in bucket, name length, name). Hostile variants: shared=(count, size) adds count files that all point at one range of size bytes;
-    loop='sibling' makes the first folder its own sibling, loop='child' its own first child folder"""
+    loop='sibling' makes the first folder its own sibling, loop='child' its own first child folder. buckets: 'file-cycle' (every file bucket at file entry 0, which is next in its own
+    bucket), 'dir-cycle' (the same with the folders), 'one-chain' (every file in the first file bucket, chained in table order, the other buckets empty)"""
     root = {'name': b'', 'dirs': {}, 'files': {}}
     for path, data in files.items():
         parts = [p.encode() if isinstance(p, str) else p for p in (path.split('/') if isinstance(path, str) else path)]
@@ -126,6 +127,13 @@ def romfs(files, *, shared=None, loop=None):
     out[data_off:data_off + len(data)] = data
     struct.pack_into(f'<{nb_d}I', out, dh_off, *dh); out[dm_off:dm_off + len(dmeta)] = dmeta
     struct.pack_into(f'<{nb_f}I', out, fh_off, *fh); out[fm_off:fm_off + len(fmeta)] = fmeta
+    if buckets == 'file-cycle':
+        struct.pack_into(f'<{nb_f}I', out, fh_off, *[0] * nb_f); struct.pack_into('<I', out, fm_off + 0x18, 0)
+    elif buckets == 'dir-cycle':
+        struct.pack_into(f'<{nb_d}I', out, dh_off, *[0] * nb_d); struct.pack_into('<I', out, dm_off + 0x10, 0)
+    elif buckets == 'one-chain':
+        struct.pack_into(f'<{nb_f}I', out, fh_off, *[files_l[0]['off']] + [0xFFFFFFFF] * (nb_f - 1))
+        for a, b in zip(files_l, files_l[1:] + [None]): struct.pack_into('<I', out, fm_off + a['off'] + 0x18, b['off'] if b else 0xFFFFFFFF)
     return bytes(out)
 
 
@@ -254,10 +262,10 @@ def nacp(name, display):
     return bytes(b)
 
 
-def control_nca(pid, name='Test Game', display='1.0.0', icon=b'\xff\xd8\xff icon', nacp_bytes=None, seed=21):
+def control_nca(pid, name='Test Game', display='1.0.0', icon=b'\xff\xd8\xff icon', nacp_bytes=None, seed=21, **kw):   # kw: romfs's hostile options
     files = {'control.nacp': nacp_bytes if nacp_bytes is not None else nacp(name, display)}
     if icon is not None: files['icon_AmericanEnglish.dat'] = icon
-    return nca(CONTROL, pid, [romfs_section(files)], seed=seed)
+    return nca(CONTROL, pid, [romfs_section(files, **kw)], seed=seed)
 
 
 def nso(build_id, seed=3, size=0x800):
@@ -283,14 +291,14 @@ class Built:   # an NCA's bytes and its data section (for a patch over it, or a 
         self.data, self.section, self.index = data, section, index
 
 
-def program_nca(pid, exefs_files, romfs_files, *, compress=False, seed=31, sparse_patch=None):
+def program_nca(pid, exefs_files, romfs_files, *, compress: object = False, seed=31, sparse_patch=None, **kw):
     """A Program NCA: section 0 the ExeFS (PFS0 + SHA-256), section 1 the RomFS (IVFC; None: no RomFS section). compress: the RomFS data level kept compressed (CompressionInfo:
-    a None and an LZ4 entry). sparse_patch: a base flattened from sparse storage, with only the ranges that patch section reads from it (see sparse())"""
+    a None and an LZ4 entry; a function: compressed()'s edit). kw: romfs's hostile options. sparse_patch: a base flattened from sparse storage, with only the ranges that patch section reads from it (see sparse())"""
     secs = [_pfs(exefs_files)]
     rom = None
     if romfs_files is not None:
-        if compress: rom = compressed(romfs(romfs_files))
-        else: rom = romfs_section(romfs_files)
+        if compress: rom = compressed(romfs(romfs_files, **kw), edit=compress if callable(compress) else None)
+        else: rom = romfs_section(romfs_files, **kw)
         if sparse_patch is not None: rom = sparse(rom, sparse_patch)
         secs.append(rom)
     return Built(nca(PROGRAM, pid, secs, seed=seed), rom, 1)
@@ -376,19 +384,21 @@ def sparse(section, patch):
     return Section(data, section.fs_type, section.hash_type, section.hash_data, extra=extra)
 
 
-def compressed(plain):
+def compressed(plain, edit=None):
     """An IVFC section whose data level holds plain compressed: the first half raw (a None entry), the rest one LZ4 block, then the compression table at the next BLOCK;
-    CompressionInfo at FS header 0x178"""
+    CompressionInfo at FS header 0x178. edit(entries, end) → (entries, end): hostile tables (an entry: virtual offset, physical offset, type, level, physical size)"""
     half = align(len(plain) // 2, 0x10)
     if lz4block is None: raise RuntimeError('lz4 is needed for a compressed section')
     lz = lz4block.compress(plain[half:], store_size=False)
     at = align(half + len(lz), BLOCK)
-    table = bucket_tree([struct.pack('<qqBbxxI', 0, 0, 0, 0, half), struct.pack('<qqBbxxI', half, half, 3, 0, len(lz))], len(plain))
+    ents, end = [(0, 0, 0, 0, half), (half, half, 3, 0, len(lz))], len(plain)
+    if edit: ents, end = edit(ents, end)
+    table = bucket_tree([struct.pack('<qqBbxxI', *e) for e in ents], end)
     level = bytearray(at + len(table))
     level[:half] = plain[:half]; level[half:half + len(lz)] = lz; level[at:] = table
     sec, h = ivfc_section(bytes(level))
     def extra(fs):
-        struct.pack_into('<qq', fs, 0x178, at, len(table)); fs[0x188:0x198] = bktr(2)
+        struct.pack_into('<qq', fs, 0x178, at, len(table)); fs[0x188:0x198] = bktr(len(ents))
     return Section(sec, 0, 3, h, extra=extra)
 
 

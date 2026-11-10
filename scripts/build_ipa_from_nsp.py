@@ -1331,11 +1331,12 @@ def scan_nx(path, want=None, platform=None, repo=None, env=None):
     n = None
     try:
         n = pack_nx.Nx(path)
-        n.nca_tool = pack_nx.Native(tool=(lambda: find_nx_extract(repo, env)) if repo is not None else None, env=env)
+        n.nca_tool = pack_nx.Native(tool=(lambda: find_nx_extract(repo, env)) if repo is not None else None, allow_damaged=ALLOW_DAMAGED, env=env)   # the survey reads with it too
         app, base, vers, dlc = pack_nx.scan(n, want, platform)
-    except (pack_nx.Error, OSError) as e:
+    except BaseException as e:   # the archive is closed whatever the scan raises (find_nx_extract's BuildError too): Spyder runs main again in this process
         if n is not None: n.close()
-        raise BuildError(str(e)) from e
+        if isinstance(e, (pack_nx.Error, OSError)): raise BuildError(str(e)) from e
+        raise
     return app, {'base': base, 'base_version': base.version if base is not None else 0, 'updates': sorted(vers.items()), 'dlc': [(tid, None, k) for tid, k in sorted(dlc.items())], 'nx': n}
 
 
