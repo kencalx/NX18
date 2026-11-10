@@ -201,7 +201,6 @@ DM_NVN_REUPLOAD_PART	switch	`0` re-uploads a texture's storage whole; by default
 DM_NVN_RP_AREA	switch	`0` makes passes on targets of 16 M pixels or more cover the whole target, as before; by default a draw pass that loads what it keeps stops at the far corner of its scissor when that is at most half the target
 DM_NVN_RT_CONTINUE	switch	`0` ends the pass whenever the game sets render targets, as before; by default SetRenderTargets naming the open pass's targets continues the pass
 DM_NVN_RT_RANGE	switch	`=1` (experimental, off by default; with `DM_NVN_TBDR=1`) keeps the pass open when the game sets the same colour and depth target again with a view that differs only in its level count
-DM_NVN_RT_RANGE_CHECK	diagnostic	With `DM_NVN_RT_RANGE=1` and `DM_NVN_PASSDUMP`, renders a candidate pass both ways in the same frame and logs and writes the comparison (`CHECK_RESULTS.tsv`, `[RED]` on a difference)
 DM_NVN_RT_RECYCLE	switch	`0` makes each render target in a GPU-only pool its own Metal allocation, as before; by default it is placed in a heap of its own, and a freed one's heap is reused by the next target it fits (`ab` alternates it with the `DM_AB` phases)
 DM_NVN_RT_RECYCLE_CAP	switch	`=<MB>` sets a fixed cap on the freed render-target heaps kept for reuse (`=256` is the flat cap before); by default the Mac keeps 256 MB and iOS 256 MB down to 32 MB as the headroom to the memory limit falls from 3 GB to 1 GB
 DM_NVN_SHDUMP	diagnostic	`=<dir>` saves programs missing from the shader map as `<key>.ctl` (control section) and `<key>.code`, to find the files that hold them
@@ -394,7 +393,6 @@ DM_TEST_KILL_AT	diagnostic	`=write:<n>` exits the process (`_exit(9)`) at the nt
 DM_TEST_LEAK_GPU	diagnostic	`=1` allocates and keeps a 1 MB shared Metal buffer every 100 ticks: a GPU memory leak on demand
 DM_TEST_LINK_STALL	diagnostic	`=<start s>,<duration s>`: counting from the first present, pauses the display link at that point for that long, to check the present fallback
 DM_TEST_METAL4	test	`=1` / `=0`: the Mac app's launcher (`dm/mac/launcher.c`) takes the GPU as one with / without Metal 4, so `test_nsp_mac_app.py` runs its stand-in host on a Mac without it (GitHub's virtual Macs) and checks the refusal on one with it
-DM_TEST_NO_METAL4	diagnostic	`=1` treats the GPU as one without Metal 4, as on a virtual Mac: the NVN layer starts only its classic part and drops every present
 DM_TEST_PRESENT_LAG	diagnostic	`=<every n>,<ms>[,<in a row>][;…]` sleeps that long before every nth present (and the ones after it in the run): a slow frame on demand
 DM_TEST_SWKBD_HOLD_MS	diagnostic	`=<ms>` (with `DM_KBD`) keeps the system keyboard up that long before `DM_KBD`'s text is returned, as a player typing would
 DM_TEST_SWKBD_LAG_MS	diagnostic	`=<ms>` sleeps that long between the keyboard handing back its text and the game's thread getting the result, to check that auto-accept does not act early

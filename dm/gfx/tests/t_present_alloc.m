@@ -81,7 +81,7 @@ static id<CAMetalDrawable> big_drawable(void) {
 }
 // One present of t through the display link's callback, completed before it returns
 static void present_done(const tex_t *t) { @autoreleasepool {
-    present_enqueue(t, 1. / 60, NULL, 0); tick_with(big_drawable());
+    present_enqueue(t, 1. / 60, NULL); tick_with(big_drawable());
     pthread_mutex_lock(&g_pq_mu); struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 5;
     while (g_pq_inflight && pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) != ETIMEDOUT) {}
     pthread_mutex_unlock(&g_pq_mu);
@@ -149,9 +149,9 @@ int main(void) { @autoreleasepool {
 
     // A dropped frame: ticket 1 on allocator 1, then 3 (2 dropped) on allocator 0, then 4 on allocator 1 again with two presents in flight
     [g_q4 waitForEvent:gate value:1];   // nothing committed to the Metal 4 queue from here runs until the gate opens
-    present_enqueue(&a, 1. / 60, NULL, 0);
+    present_enqueue(&a, 1. / 60, NULL);
     id<CAMetalDrawable> first = tick();
-    present_enqueue(&b, 1. / 60, NULL, 0); present_enqueue(&b, 1. / 60, NULL, 0); present_enqueue(&c, 1. / 60, left_half, 0);
+    present_enqueue(&b, 1. / 60, NULL); present_enqueue(&b, 1. / 60, NULL); present_enqueue(&c, 1. / 60, left_half);
     tick();
     printf("after the drop: read %llu, done %llu, in flight %d\n", (unsigned long long)g_pq_read, (unsigned long long)g_pq_done, g_pq_inflight);
     CHECK("ticket 1 has not completed", g_pq_inflight == 2);
@@ -161,10 +161,10 @@ int main(void) { @autoreleasepool {
 
     // One frame per tick, nothing dropped: tickets 5, 6 and 7 on allocators 2, 0 and 1, then 8 on allocator 2 again with three presents in flight
     [g_q4 waitForEvent:gate value:2];
-    present_enqueue(&a, 1. / 60, NULL, 0); id<CAMetalDrawable> fifth = tick();
-    present_enqueue(&b, 1. / 60, NULL, 0); tick();
-    present_enqueue(&b, 1. / 60, NULL, 0); tick();
-    present_enqueue(&c, 1. / 60, left_half, 0);
+    present_enqueue(&a, 1. / 60, NULL); id<CAMetalDrawable> fifth = tick();
+    present_enqueue(&b, 1. / 60, NULL); tick();
+    present_enqueue(&b, 1. / 60, NULL); tick();
+    present_enqueue(&c, 1. / 60, left_half);
     printf("one per tick: read %llu, done %llu, in flight %d, dropped %llu\n", (unsigned long long)g_pq_read, (unsigned long long)g_pq_done, g_pq_inflight, (unsigned long long)g_link_dropped);
     CHECK("tickets 5-7 have not completed", g_pq_inflight == 3 && g_link_dropped == 1);
     reuse_case(drawable(), gate, 2, 8, 3, 5);
@@ -180,13 +180,13 @@ int main(void) { @autoreleasepool {
     CHECK("trim: DM_PRESENT_TRIM wins over the profile", present_trim_k("0") == 0 && present_trim_k("45") == 45 && present_trim_k("-3") == 0 && present_trim_k("off") == 0);
     printf("trim: K %d (game profile present_trim %d)\n", g_link_trim, DM_GAME_PRESENT_TRIM);
     g_link_trim = 3; uint64_t drop0 = g_link_dropped, in0 = g_pq_in;
-    present_enqueue(&a, 1. / 60, NULL, 0); present_enqueue(&b, 1. / 60, NULL, 0); tick();
+    present_enqueue(&a, 1. / 60, NULL); present_enqueue(&b, 1. / 60, NULL); tick();
     CHECK("two waiting, first tick: the older (FIFO)", g_pq_read == in0 + 1 && g_link_it_depth == 2 && g_link_trims == 0);
-    present_enqueue(&b, 1. / 60, NULL, 0); tick();
+    present_enqueue(&b, 1. / 60, NULL); tick();
     CHECK("two waiting, second tick: the older (FIFO)", g_pq_read == in0 + 2 && g_link_trims == 0);
-    present_enqueue(&c, 1. / 60, left_half, 0); tick();
+    present_enqueue(&c, 1. / 60, left_half); tick();
     CHECK("two waiting, third tick: the newest, one dropped", g_pq_read == in0 + 4 && g_pq_read == g_pq_in && g_link_trims == 1 && g_link_dropped == drop0 + 1);
-    present_enqueue(&a, 1. / 60, NULL, 0); tick();
+    present_enqueue(&a, 1. / 60, NULL); tick();
     CHECK("one waiting: taken, the run starts again", g_pq_read == g_pq_in && g_link_standing == 0 && g_link_trims == 1 && g_link_dropped == drop0 + 1);
     pthread_mutex_lock(&g_pq_mu); struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 5;
     while (g_pq_inflight && pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) != ETIMEDOUT) {}

@@ -286,7 +286,7 @@ static void tile_case(const char *dir) {
         CHECK(a && a == g_fb_tfn && b == a && c != a, "the readable-tile function is remembered by its numbers, and a different attachment mask is not taken for it");
     }
     g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc;
-    id<MTLRenderPipelineState> ps = pso_get(pr, nil);
+    id<MTLRenderPipelineState> ps = pso_get(pr);
     g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz);
     CHECK(ps == g_fb_tp[0].ps, "the draw's pipeline is the one built in the background");
     if (ps) { enc_r_pso(g_enc, ps); enc_r_scissor(g_enc, (MTLScissorRect){0, 0, 4, 4}); enc_r_args(g_enc, MTLRenderStageFragment, zero.gpuAddress, 0); enc_r_draw(g_enc, MTLPrimitiveTypeTriangle, 0, 3); }
@@ -387,7 +387,7 @@ static void fpos_case(const char *dir) {
     CHECK(g_enc == first && g_fb_n == 0 && g_fb_tseq == g_draw_seq && g_fb_tfn && g_fb_tile_draws == tiles + 1 && g_fb_tdesc.fbmask == 1 && g_fb_tdesc.fx[0] == 0,
           "after a barrier the draw reads the tile: no snapshot, the pass stays open");
     g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc;
-    id<MTLRenderPipelineState> ps = pso_get(pr, nil);
+    id<MTLRenderPipelineState> ps = pso_get(pr);
     g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz);
     CHECK(ps != nil, "the tile-reading pipeline is there");
     if (ps) { enc_r_pso(g_enc, ps); enc_r_viewport(g_enc, (MTLViewport){0, 0, 4, 4, 0, 1}); enc_r_scissor(g_enc, (MTLScissorRect){0, 0, 4, 4}); enc_r_args(g_enc, MTLRenderStageFragment, args.gpuAddress, 0); enc_r_draw(g_enc, MTLPrimitiveTypeTriangle, 0, 3); }

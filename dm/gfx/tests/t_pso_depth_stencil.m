@@ -111,7 +111,7 @@ static void draws(NvProg *p) {
         if (cases[i].mode == 3) CHECK(!g_pass.hd && g_pass.hs, "stencil-only usage keeps depth disabled");
         if (cases[i].mode == 4) CHECK(g_pass.hd && !g_pass.hs, "depth-only usage keeps stencil disabled");
         uint64_t before = g_pb_built + g_pb_spec;
-        id<MTLRenderPipelineState> ps = pso_get_(p, nil); seen[i] = ps;
+        id<MTLRenderPipelineState> ps = pso_get_(p); seen[i] = ps;
         CHECK(ps != nil, "production pipeline lookup succeeds");
         for (unsigned j = 0; j < i; j++) if (cases[i].color == cases[j].color && cases[i].df == cases[j].df && cases[i].sf == cases[j].sf) {
             CHECK(ps == seen[j], "returning to an effective format pair reuses its pipeline");

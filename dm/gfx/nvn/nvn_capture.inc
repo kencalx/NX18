@@ -252,7 +252,7 @@ static id<MTLBuffer> cap_tex_readback(id<MTLTexture> t, cap_tsub **subs, uint32_
     }
     id<MTLBuffer> b = [g_dev newBufferWithLength:MAX(total, 16u) options:MTLResourceStorageModeShared];
     if (!b) return nil;
-    NvOnce *cb = once_new(1); once_use(cb, t); once_use(cb, b); id e = once_copy(cb); uint64_t off = 0;   // a one-off command buffer of the Metal 4 queue (nvn_mtl.m once_new)
+    NvOnce *cb = once_new(1); once_use(cb, t); once_use(cb, b); id<MTL4ComputeCommandEncoder> e = once_copy(cb); uint64_t off = 0;   // a one-off command buffer of the Metal 4 queue (nvn_mtl.m once_new)
     for (uint32_t i = 0; i < *nsub; i++) { cap_tsub *s = &(*subs)[i];
         [e copyFromTexture:t sourceSlice:s->slice sourceLevel:s->level sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(s->w, s->h, s->d) toBuffer:b destinationOffset:off
             destinationBytesPerRow:s->row destinationBytesPerImage:s->img options:cap_plane_opt(t.pixelFormat, (int)s->plane)];
@@ -469,7 +469,7 @@ static int cap_digest(const tex_t *t, uint8_t md[32], uint64_t *bytes, uint32_t 
     int bpp = cap_pf_bpp(mt.pixelFormat, 0); if (!bpp) return 0;
     size_t row = mt.width * (size_t)bpp, n = row * mt.height;
     id<MTLBuffer> b = [g_dev newBufferWithLength:n options:MTLResourceStorageModeShared];
-    NvOnce *cb = once_new(1); once_use(cb, mt); once_use(cb, b); id e = once_copy(cb);
+    NvOnce *cb = once_new(1); once_use(cb, mt); once_use(cb, b); id<MTL4ComputeCommandEncoder> e = once_copy(cb);
     [e copyFromTexture:mt sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(mt.width, mt.height, 1) toBuffer:b destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:n];
     once_end(cb, e); once_wait(cb);
     CC_SHA256(b.contents, (CC_LONG)n, md);

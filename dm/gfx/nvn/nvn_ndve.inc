@@ -75,8 +75,8 @@ static void ndve_build(void) {
             g_nd.ps[k] = host_cps(lib, @(k_ndve_kern[k]), nil, &e);
             if (!g_nd.ps[k]) { MLOG("[RED] NDVE engine: no pipeline for %s (%s); the game's network runs", k_ndve_kern[k], e ? e.localizedDescription.UTF8String : "no error given"); g_nd.state = -1; return; }
         }
-        // a one-off command buffer of the Metal 4 queue (nvn_mtl.m once_new; the classic queue without Metal 4); order 0: new buffers, it reads nothing and waits for nothing before it
-        NvOnce *cb = once_new(0); id be = once_copy(cb);
+        // a one-off command buffer of the Metal 4 queue (nvn_mtl.m once_new); order 0: new buffers, it reads nothing and waits for nothing before it
+        NvOnce *cb = once_new(0); id<MTL4ComputeCommandEncoder> be = once_copy(cb);
         for (int i = 0; i < NT_N; i++) {   // private, zeroed once: the borders stay zero (the kernels write interiors only)
             size_t n = (size_t)(k_ndve_t[i][0] + 2) * (k_ndve_t[i][1] + 2 + 16) * k_ndve_t[i][2] * 2;
             g_nd.t[i] = [g_dev newBufferWithLength:n options:MTLResourceStorageModePrivate];
@@ -127,7 +127,7 @@ static id<MTLTexture> ndve_tex(NvShader *cs, int kind, int reg) { return ndve_te
 // The network: 13 kernels in one compute encoder, ordered by barriers; input = the picture 5a7d69b0 reads, output = the image it writes
 static void ndve_encode(id<MTLTexture> rgba, id<MTLTexture> out, uint64_t wgpu) {
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
-    id<MTL4ComputeCommandEncoder> ce = (id<MTL4ComputeCommandEncoder>)enc_c_begin(NULL);   // waits for the work before it (queue barrier)
+    id<MTL4ComputeCommandEncoder> ce = enc_c_begin();   // waits for the work before it (queue barrier)
     [ce setArgumentTable:g_nd.at];
     id<MTL4ArgumentTable> at = g_nd.at;
     for (int i = 0; i < NDVE_NL; i++) {
@@ -166,7 +166,7 @@ static int ndve_resample(NvShader *cs, id<MTLTexture> into) {
     }
     __strong id<MTLBuffer> cb = nil; size_t co = arena_alloc(256, &cb); memcpy((uint8_t *)cb.contents + co, S.push[1], 96);
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
-    id<MTL4ComputeCommandEncoder> ce = (id<MTL4ComputeCommandEncoder>)enc_c_begin(NULL);
+    id<MTL4ComputeCommandEncoder> ce = enc_c_begin();
     id<MTL4ArgumentTable> at = g_nd.at; [ce setArgumentTable:at];
     [ce setComputePipelineState:g_nd.ps[NK_LUMA]]; [at setTexture:pic.gpuResourceID atIndex:0]; [at setAddress:g_nd.luma.gpuAddress atIndex:1];
     [ce dispatchThreadgroups:MTLSizeMake(60, 135, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
@@ -191,7 +191,7 @@ static id<MTLTexture> ndve_shadow(id<MTLTexture> like) {
 static void ndve_compare(id<MTLTexture> a, id<MTLTexture> b, int slot) {
     if (!g_nd.cnt) { g_nd.cnt = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared]; memset(g_nd.cnt.contents, 0, 16); res_add(g_nd.cnt); }
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
-    id<MTL4ComputeCommandEncoder> ce = (id<MTL4ComputeCommandEncoder>)enc_c_begin(NULL);
+    id<MTL4ComputeCommandEncoder> ce = enc_c_begin();
     id<MTL4ArgumentTable> at = g_nd.at; [ce setArgumentTable:at];
     [ce setComputePipelineState:g_nd.ps[NK_CMP]]; [at setTexture:a.gpuResourceID atIndex:0]; [at setTexture:b.gpuResourceID atIndex:1]; [at setAddress:g_nd.cnt.gpuAddress + 8 * slot atIndex:1];
     [ce dispatchThreadgroups:MTLSizeMake((a.width + 15) / 16, (a.height + 15) / 16, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];

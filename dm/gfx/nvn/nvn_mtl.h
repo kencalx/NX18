@@ -1,4 +1,4 @@
-// Metal execution layer of the NVN null device (C interface): memory pool = zero-copy MTLBuffer, submit = MTLCommandBuffer, sync = MTLSharedEvent.
+// Metal execution layer of the NVN null device (C interface): memory pool = zero-copy MTLBuffer, submit = MTL4CommandBuffer, sync = MTLSharedEvent.
 // Ordering convention (to avoid repeating the GO_MAP_SHARE corrupted-picture mistake of the x86 route): every visible effect of "GPU completion" (sync object ready, event values, counters)
 // happens only after the Metal command buffer has actually completed; CPU-side waits look only at the completed value of the MTLSharedEvent.
 #pragma once
@@ -57,16 +57,11 @@ void mtl_arch_save(int wait_ms, int ending);         // The pipeline archive's u
 void mtl_arch_resume(void);                          // Back in the foreground: compacting writes arm the pipeline archive's crash marker again (none while in the background)
 int mtl_arch_wait(int wait_ms);                      // Waits up to wait_ms for the archive's writes handed over (mtl_arch_save); 1: none left
 void mtl_xv_window_tex(uint64_t serial);   // Register a window (swapchain) texture: the cross-submit validity ledger never collects it
-// The shared Metal device. External producers (a serial for one of their textures; present it once their event reaches ev_val, ticket for mtl_present_wait) and mtl_device_classic
-// were for the OpenGL and Vulkan layers, removed in release 1 (git 93c34371): nothing calls them now, and the classic queue goes with them in a later stage
-void *mtl_device(void);
-void *mtl_device_classic(void);   // the same for a layer that draws only on classic queues: a device without Metal 4 (a virtual Mac) starts too, and its presents are dropped
+void *mtl_device(void);   // the shared Metal device (mtl_init: one with Metal 4, or the process stops with the reason)
 #ifdef __OBJC__
 #import <Metal/Metal.h>
 id<MTL4Compiler> mtl_comp4(void);   // the host's one MTL4Compiler (made in mtl_init; a test that sets the device itself gets it at the first call): every pipeline the host builds
 #endif
-uint64_t mtl_ext_tex(void *tex);
-uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_val, const int crop[4]);   // crop: x, y, w, h of the texture to show (NULL = all of it)
 void mtl_present_layer(uint32_t w, uint32_t h);   // a sized vi layer (hle_vi.c): the picture's shape instead of the display's 16:9
 void mtl_present_screen(uint32_t w, uint32_t h);   // a screen taller than 16:9 (loader.c, DM_SCREEN_ASPECT): the picture's shape for a texture of that shape
 void mtl_present_wait(uint64_t ticket);   // as in nvn_obj.h: wait until that present has been handed to the GPU

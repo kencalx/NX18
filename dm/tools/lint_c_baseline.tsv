@@ -16,10 +16,10 @@ dm/gfx/nvn/nvn_geometry.inc	clang-analyzer-unix.Malloc	1
 dm/gfx/nvn/nvn_hmap.h	clang-analyzer-core.NullPointerArithm	1
 dm/gfx/nvn/nvn_mtl.m	bugprone-misplaced-widening-cast	1
 dm/gfx/nvn/nvn_mtl.m	bugprone-signed-char-misuse	1
-dm/gfx/nvn/nvn_mtl.m	bugprone-suspicious-memory-comparison	8
+dm/gfx/nvn/nvn_mtl.m	bugprone-suspicious-memory-comparison	7
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.NullDereference	8
-dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullableDereferenced	5
-dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullablePassedToNonnull	15
+dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullableDereferenced	4
+dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullablePassedToNonnull	14
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-security.ArrayBound	1
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-unix.cstring.NullArg	4
