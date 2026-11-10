@@ -25,6 +25,9 @@
 #   Instead of NSPs, the folder may hold the game's files as a dump (base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): that needs no prod.keys. A game with no profile is surveyed from those files. A dump has no control data: the name comes from the profile (a provisional one takes the folder's name), and the app gets the NX 18 icon (docs/images/nx18) unless --icon / ICON gives it one.
 #   Or the folder may hold the game as one NUP container (a .nup file: base game, updates and DLC; scripts/pack_nup.py), or the .nup file may be given in its place: it needs no prod.keys, like a dump; a game with no profile is surveyed from the container's files (its newest version's code modules and RomFS file headers),
 #   and its RomFS images are written straight from it; the name, display version and icon come from the NACP and icon it carries, else as for a dump (its name record is a packer's label, not the game's), and --icon / ICON gives the app an icon when it carries none.
+#   Or the folder may hold the game as one NX archive (a .nx file, https://github.com/fab918/nxformat: NXConvert by fab918 makes them from decrypted dumps or NUPs; scripts/pack_nx.py), or the .nx file may be given in its place: read
+#   like a NUP (no prod.keys; the versions and DLC it holds, its NACP and icon tied to each version, Switch 1 and Switch 2), every file checked against its SHA-256. An NX holding decrypted NCA files
+#   (nxconvert pack from a decrypted NSP or XCI) is listed but not packed: its updates are unresolved patches, which only an NCA reader applies.
 #   The newest version in the folder is packed. A version the profile registers (with every version in its shader_versions in the folder) is built from the profile as it is; any other
 #   version (the base game alone, another update) from a profile derived from it in <build folder>/profile: the same settings, and the version's own shaders (derive_profile).
 # Every intermediate file is under the build folder, <id>_build/ in the NSP folder unless --work-dir / WORK_DIR names another: nsp/ (NSZ / XCZ files converted to NSP / XCI with nsz -D, kept for the next build; pip install nsz, or an nsz 5.0 or later executable on PATH), extract/ (the extracted game files, kept for the next build unless KEEP_EXTRACTED / --no-keep-extracted), aoc/ (one RomFS image per DLC index), tools/ (the Mac host for a run-time shader capture), patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/. The finished IPA also goes beside the build folder by default (the NSP folder, without --work-dir).
@@ -38,7 +41,7 @@
 # unless ALLOW_OTHER_METAL / --allow-other-metal. Issue #242 reported corruption with another compiler; the cause is still unconfirmed.
 # Python 3.12+ is required for bounded archive mappings inside images. The Python running this file needs lz4, capstone 5.x, fonttools and zbic (and backports.zstd before Python 3.14); also needed: Xcode, xcodegen, zstd. SPIRV-Cross is the in-repo build. A first run takes 2 (Metroid Dread) to 10 minutes (Breath of the Wild: 5 of them the shader split), longer when shader libraries must be compiled; a repeat run with unchanged inputs takes about 20 s (Metroid Dread), mostly packing the IPA. Key values are never printed.
 # The console shows one line per stage ([k/n] stage, with a bar, done/total, percent, elapsed time and ETA where the work can be counted); the tools' own output goes only to logs/ (PROGRESS / --progress). --progress json writes newline-delimited JSON events to stdout.
-import ast, collections, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, struct, subprocess, sys, tempfile, threading, time, types
+import ast, collections, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, struct, subprocess, sys, tempfile, threading, time, types, typing
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dm/tools"))
 import romfs as rfs
@@ -49,9 +52,10 @@ import shader_cache   # the compile cache as one file, read in place
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pack_dump   # a folder of a game's files instead of NSPs
 import pack_nup   # a game in a NUP container instead of NSPs
+import pack_nx   # a game in an NX archive instead of NSPs
 
 # ---- Settings ----
-NSP_DIR = ''                            # folder holding the NSPs, or the game's .nup file (empty = ask at run time)
+NSP_DIR = ''                            # folder holding the NSPs, or the game's .nup or .nx file (empty = ask at run time)
 PROD_KEYS = ''                          # path of prod.keys (empty = ask at run time)
 PACKAGE = ''                            # version packed into the IPA (empty = the newest in the folder; Mario 'v327680' i.e. 1.2.1, or 'v0')
 TITLE_ID = ''                           # the game to pack when the folder holds several, e.g. a cartridge dump with two games: '0100FD8022DAA000' (empty = the folder's one game)
@@ -59,7 +63,7 @@ WORK_DIR = ''                           # the game's build folder (empty = <titl
 OUT_IPA = ''                            # output IPA (empty = <the profile's ipa> in the NSP folder); with PLATFORM 'mac-app' the output app (empty = <game name>.app in the NSP folder)
 APP_NAME = ''                           # app name on the home screen (empty = the game name in the base NSP)
 BUNDLE_ID = ''                          # the app's bundle ID (empty = saved per-game Xcode ID, else org.nxnative.<base game title ID in lowercase>)
-ICON = ''                               # the app icon, a JPEG or PNG of any size (empty = the game's icon from its control data; a dump has none, a NUP may have none: then the NX 18 icon)
+ICON = ''                               # the app icon, a JPEG or PNG of any size (empty = the game's icon from its control data; a dump has none, a NUP or an NX may have none: then the NX 18 icon)
 ROMFS = 'bundle'                        # 'bundle' = the game files go into the IPA (or the Xcode app), as always; 'separate' = they stay out (DM_COPY_ROMFS=NO): the IPA is small, and its rebuilds do not pack or send the RomFS again.
                                         #   Copy it to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app checks that the image is the one it was built for)
 SHADER_FILES = False                    # True = an NVN game's shader library goes into the IPA as its separate files, for install tools that cannot copy a large file (AltServer: 2 GiB; the game files
@@ -88,7 +92,7 @@ SURVEY_ONLY = False                     # a game with no profile in dm/games: on
 PROFILE_OUT = ''                        # where a provisional profile goes (empty = <build folder>/profile, i.e. <NSP folder>/<title ID>_build/profile unless WORK_DIR is set; the profile is <this>/<title ID>/)
 PROGRAM_INDEX = 0                       # a multi-program application (Super Mario 3D All-Stars: a launcher and one program per game): which program to pack, 0 = the application's own; its title ID is the application's + the index.
                                         #   A game of several programs (its profile's key programs) is packed as one from program 0: this setting packs one of them alone, for bring-up
-ALLOW_DAMAGED = False                   # a damaged NSP (files failing the NCA's hash check: an incomplete copy or a broken download), or files whose bytes do not start as their names promise (a .zs that is no zstd stream: a NUP or a dump has no hashes), stop the build; True writes those files as read and goes on
+ALLOW_DAMAGED = False                   # a damaged NSP (files failing the NCA's hash check: an incomplete copy or a broken download), or files whose bytes do not start as their names promise (a .zs that is no zstd stream: a NUP or a dump has no hashes, and an NX's hashes describe the bytes it was made from), stop the build; True writes those files as read and goes on
 ALLOW_SHADER_REGRESSIONS = False        # shaders that translated in this game's previous build and fail with the current translation chain stop the build (logs/shader_regressions.log lists them);
                                         #   True packs the app without them
 ALLOW_OTHER_METAL = False               # an NVN game's shaders are built only with the Metal compiler they were tested with (dm/gfx/tools/dmsh_chain.lock: Xcode 27.2); another one stops the build,
@@ -352,8 +356,8 @@ def game_language(want, asked, have):
 
 
 def languages_control(*dirs):
-    """The control.nacp that lists the game's languages: the first of the folders' (the packed version's, then the base game's) that lists any, else the first one's path. An update, a NUP's
-    especially, may carry no control data: the language check and the launcher settings (of the Mac app and the IPA) then read the base game's, the same file"""
+    """The control.nacp that lists the game's languages: the first of the folders' (the packed version's, then the base game's) that lists any, else the first one's path. An update, a NUP's or
+    an NX's especially, may carry no control data: the language check and the launcher settings (of the Mac app and the IPA) then read the base game's, the same file"""
     paths = [d / 'control.nacp' for d in dirs]
     return next((p for p in paths if nacp.languages(p)), paths[0])
 
@@ -704,7 +708,7 @@ def same_build(nsp_dir, app, fam, keys, repo, env):
     Only the code modules are extracted (a RomFS manifest, no game files written). Returns (profile, version, main build ID) or None"""
     import game as gamemod   # dm/games (main put it on the path)
     work = nsp_dir / f'{app:016X}_survey'; logs = work / 'logs'
-    files = fam.get('nup') or fam.get('dump')   # a NUP's code modules are read from its packages and a dump's are files already, not by nx_extract
+    files = fam.get('nup') or fam.get('nx') or fam.get('dump')   # a NUP's or an NX's code modules are read from its packages and a dump's are files already, not by nx_extract
     PROG.plan(1); PROG.stage('build ID lookup', step='reading the code modules')
     nx = None if files else find_nx_extract(repo, env)
     ups = sorted(fam['updates'], key=lambda u: u[0] or 0)
@@ -725,16 +729,23 @@ def same_build(nsp_dir, app, fam, keys, repo, env):
     PROG.end('no profile registers its main build'); return None
 
 
-def code_modules(fam, k, dst):   # the ExeFS of a NUP package or a dump's version folder into dst; nothing for a version folder with no code of its own
+def container(fam) -> 'tuple[typing.Any, typing.Any]':   # (packer module, open container) of a game in an NX or a NUP; (pack_nup, None) for NSPs or a dump folder
+    if fam.get('nx'): return pack_nx, fam['nx']
+    return pack_nup, fam.get('nup')
+
+
+def code_modules(fam, k, dst):   # the ExeFS of a NUP package, an NX snapshot or a dump's version folder into dst; nothing for a version folder with no code of its own
     if fam.get('dump'):
         if pack_dump.has_code(k): pack_dump.exefs(k / 'exefs', dst)
         return
-    try: pack_nup.exefs(fam['nup'], k, dst)
-    except pack_nup.Error as e: raise BuildError(str(e)) from e
+    pk, n = container(fam)
+    if pk is pack_nx and k.exefs == pack_nx.NO: return
+    try: pk.exefs(n, k, dst)
+    except pack_nup.Error as e: raise BuildError(str(e)) from e   # pack_nx.Error is one too
 
 
-def package_size(fam, k):   # (name, bytes) of a package for the survey report: an NSP file, a NUP package (its files' size), or a dump's folder (its code and RomFS: the folder of a flat dump also holds the build)
-    if fam.get('nup'): return k.name, fam['nup'].tree_bytes(k.root)
+def package_size(fam, k):   # (name, bytes) of a package for the survey report: an NSP file, a NUP package or an NX snapshot (its files' size), or a dump's folder (its code and RomFS: the folder of a flat dump also holds the build)
+    if fam.get('nup') or fam.get('nx'): return k.name, container(fam)[1].tree_bytes(k.root)
     if fam.get('dump'): return k.name, sum(tree_size(d)[1] for d in (k / 'exefs', k / 'romfs')) or tree_size(k)[1]
     return k.name, k.stat().st_size
 
@@ -757,24 +768,25 @@ def survey_dump(src, out):
     return len(rows)
 
 
-def survey_nup(n, k, base, out):
-    """A NUP package's files as nx_extract --manifest leaves an NSP's for the survey, without writing the RomFS: out/ExeFS, out/romfs_manifest.tsv (path, size and first 32 bytes of every
-    RomFS file), out/romfs_nro (the NRO modules, whole: their imports decide the graphics API and the modules) and the package's control data, else its base game's. Returns the files listed"""
+def survey_nup(n, k, base, out, pk=pack_nup):
+    """A NUP package's (pk = pack_nx: an NX snapshot's) files as nx_extract --manifest leaves an NSP's for the survey, without writing the RomFS: out/ExeFS, out/romfs_manifest.tsv (path, size
+    and first 32 bytes of every RomFS file), out/romfs_nro (the NRO modules, whole: their imports decide the graphics API and the modules) and the package's control data, else its base game's.
+    Returns the files listed"""
     out.mkdir(parents=True)
-    try: pack_nup.exefs(n, k, out / 'ExeFS')
+    try: pk.exefs(n, k, out / 'ExeFS')
     except pack_nup.Error as e: raise BuildError(str(e)) from e
     rows = []
     def walk(d, pre):
         for name, isdir, i in n.children(d):
             p = pre + '/' + os.fsdecode(name)
             if isdir: walk(i, p); continue
-            rows.append(f'{p}\t{n.files[i][1]}\t{n.head(i).hex()}\n')
+            rows.append(f'{p}\t{n.size(i)}\t{n.head(i).hex()}\n')
             if p.lower().endswith('.nro'):
                 o = out / 'romfs_nro' / p.lstrip('/'); o.parent.mkdir(parents=True, exist_ok=True)
                 with open(o, 'wb') as f: n.copy(i, f)
     try:
-        walk(pack_nup.romfs_of(k, base), '')
-        pack_nup.control(k, out, pack_nup.app_package(n) if base is None else base)   # what an update lacks, from its base game (or the metadata record, as pack_version takes it)
+        walk(pk.romfs_of(k, base), '')
+        pk.control(k, out, pk.app_package(n, k) if base is None else base)   # what an update lacks, from its base game (or the metadata record, as pack_version takes it)
     except pack_nup.Error as e: raise BuildError(str(e)) from e
     (out / 'romfs_manifest.tsv').write_text(MANIFEST_HEAD + ''.join(rows))
     return len(rows)
@@ -798,8 +810,8 @@ def check_versions_aarch64(dirs, logs, g, name):   # every extracted version of 
 def survey(nsp_dir, app, fam, keys, repo, py, env):
     work = nsp_dir / f'{app:016X}_survey'; logs, ex = work / 'logs', work / 'extract'
     say(f'no game profile for {app:016X}: surveying first')
-    nup, dump = fam.get('nup'), fam.get('dump')
-    files = nup or dump   # a NUP's or a dump's newest version: its files are read as they are, with no nx_extract
+    (pk, nup), dump = container(fam), fam.get('dump')
+    files = nup or dump   # a NUP's, an NX's or a dump's newest version: its files are read as they are, with no nx_extract
     PROG.plan(3)   # the manifest, the code modules (reading them, then the rewrite-site census), the imports
     if not files: nx = find_nx_extract(repo, env)
     ups = sorted(fam['updates'], key=lambda u: u[0] or 0)
@@ -810,7 +822,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
         except OSError: return None
     PROG.stage('survey: RomFS manifest', poll=None if files else listed)
     say(f'extracting the code modules and a RomFS manifest (no game files written) → {ex}')
-    if files: say(f'  {survey_nup(nup, upd or fam["base"], fam["base"], tmp) if nup else survey_dump(upd or fam["base"], tmp):,} RomFS files listed')
+    if files: say(f'  {survey_nup(nup, upd or fam["base"], fam["base"], tmp, pk) if nup else survey_dump(upd or fam["base"], tmp):,} RomFS files listed')
     else: run([nx, keys, fam['base'], upd or '-', tmp, '--manifest'] + extract_flags(app), logs / 'extract.log')
     swap_in(tmp, ex)
     PROG.stage('survey: code modules', step='reading')
@@ -1257,9 +1269,20 @@ def dump_folder(folder):   # a folder of the game's files (pack_dump.py), with n
     return pack_dump.is_dump(folder) and not files_with_suffix(folder, *PACKAGE_SUFFIXES)
 
 
+def nx_file(path):
+    """The NX archive to pack: path when it is a .nx file (any letter case) or starts as one, else the one .nx in the folder when no game package is beside it; None when there is none.
+    A folder with two containers (two .nx, or a .nx and a .nup) is refused: which one is the game is not for the script to guess"""
+    if path.is_file(): return path if path.suffix.lower() == '.nx' or pack_nx.is_nx(path) else None
+    if files_with_suffix(path, *PACKAGE_SUFFIXES): return None
+    nxs = files_with_suffix(path, '.nx')
+    both = nxs + [p for p in files_with_suffix(path, '.nup') if pack_nup.is_nup(p)] if nxs else []
+    if len(both) > 1: raise BuildError(f'more than one game container in {path}: {", ".join(p.name for p in both)}; keep one game per folder, or give the .nx or .nup file to pack in place of the folder')
+    return nxs[0] if nxs else None
+
+
 def nup_file(path):   # the NUP to pack: path when it is a .nup file, else the one .nup in the folder when no game package is beside it; None when there is none
     if path.is_file():
-        if not pack_nup.is_nup(path): raise BuildError(f'not a folder or a NUP file: {path}')
+        if not pack_nup.is_nup(path): raise BuildError(f'not a folder, a NUP file or an NX file: {path}')
         return path
     if files_with_suffix(path, *PACKAGE_SUFFIXES): return None
     nups = [p for p in files_with_suffix(path, '.nup') if pack_nup.is_nup(p)]
@@ -1276,14 +1299,25 @@ def scan_nup(path, want=None):   # a NUP as scan_nsps gives a folder of NSPs, wi
     return app, {'base': base, 'updates': sorted(vers.items()), 'dlc': [(tid, None, k) for tid, k in sorted(dlc.items())], 'nup': n}
 
 
-def extract_nup(ex, name, k, base, app, n):   # one version of a NUP (k: its base or an update package) into the layout extract makes; the code modules and the image are kept while unchanged
+def scan_nx(path, want=None):   # an NX archive as scan_nsps gives a folder of NSPs, with its snapshots for the NSPs: (title ID, {'base', 'base_version', 'updates', 'dlc', 'nx': the open archive})
+    n = None
+    try:
+        n = pack_nx.Nx(path)
+        app, base, vers, dlc = pack_nx.scan(n, want)
+    except (pack_nx.Error, OSError) as e:
+        if n is not None: n.close()
+        raise BuildError(str(e)) from e
+    return app, {'base': base, 'base_version': base.version if base is not None else 0, 'updates': sorted(vers.items()), 'dlc': [(tid, None, k) for tid, k in sorted(dlc.items())], 'nx': n}
+
+
+def extract_nup(ex, name, k, base, app, n, pk=pack_nup):   # one version of a NUP (k: its base or an update package; pk = pack_nx: an NX snapshot) into the layout extract makes; the code modules and the image are kept while unchanged
     dst = ex / name; part = dst / 'RomFS.img.part'
     def poll():
         try: return {'done': part.stat().st_size}
         except OSError: return None
     try:
-        PROG.stage(f'unpack {name}', poll=poll, unit='B', total=n.tree_bytes(pack_nup.romfs_of(k, base)), est=True)
-        how = pack_nup.pack_version(n, k, base, app, dst, say=lambda s: None, step=lambda s: PROG.set(step=s))
+        PROG.stage(f'unpack {name}', poll=poll, unit='B', total=n.tree_bytes(pk.romfs_of(k, base)), est=True)
+        how = pk.pack_version(n, k, base, app, dst, say=lambda s: None, step=lambda s: PROG.set(step=s))
     except pack_nup.Error as e: raise BuildError(str(e)) from e
     PROG.end(amount((dst / 'RomFS.img').stat().st_size, 'B') + {'kept': ', reused (inputs unchanged)', 'verified': ', reused (image checked)'}.get(how, ''))
     return dst
@@ -1291,7 +1325,7 @@ def extract_nup(ex, name, k, base, app, n):   # one version of a NUP (k: its bas
 
 def check_formats(dirs):
     """Each extracted image's files whose bytes do not start as their names promise (romfs_image.format_mismatches: a .zs file that is not a zstd stream) stop the build, as a damaged
-    NSP does: a NUP or a dump folder carries no NCA hashes, so this is where its damage shows. ALLOW_DAMAGED lists them and goes on. A NUP of Ocarina of Time held three .zs
+    NSP does: a NUP or a dump folder carries no NCA hashes, and an NX's hashes describe the bytes it was packed from, so this is where their damage shows. ALLOW_DAMAGED lists them and goes on. A NUP of Ocarina of Time held three .zs
     textures beginning with 12,288 zero bytes; the game asked for one again on every pass of its background loader (412% CPU on the Mac; PR #1530). The result is kept beside
     the image (RomFS.img.formats) with its size and time, so an unchanged image is not read again (Ocarina of Time: 102,185 .zs files, 16 s from a USB SSD)"""
     import romfs_image
@@ -1336,11 +1370,12 @@ def extract_aoc(nx, keys, repo, work, app, fam, logs):
     """DLC NSPs in the folder → <id>_build/aoc/<index>.img (the RomFS of each one's data NCA; index = title ID − base − 0x1000, base the application's title ID even for one of its programs,
     app + N, whose DLC are the application's). The host reports these indices as owned and mounts them (DM_AOC_DIR).
     Returns None without DLC. Reused when the DLC NSPs (names, sizes and times) and nx_extract's sources are as at the last extraction (Monster Hunter Rise: 250 DLC, 30 s),
-    and aoc/ holds the files that extraction wrote (names, sizes and times): a NUP or a dump folder packs its DLC into the same aoc/"""
+    and aoc/ holds the files that extraction wrote (names, sizes and times): a NUP, an NX or a dump folder packs its DLC into the same aoc/"""
     if not fam['dlc']: return None
-    if fam.get('nup'):
+    if fam.get('nup') or fam.get('nx'):
+        pk, n = container(fam)
         PROG.stage('unpack DLC', step='unpacking')
-        try: pack_nup.pack_dlc(fam['nup'], app, {tid: k for tid, _, k in fam['dlc']}, work / 'aoc', say=lambda s: None)
+        try: pk.pack_dlc(n, app, {tid: k for tid, _, k in fam['dlc']}, work / 'aoc', say=lambda s: None)
         except pack_nup.Error as e: raise BuildError(str(e)) from e
         PROG.end(f'{len(fam["dlc"])} DLC')
         return work / 'aoc'
@@ -2985,8 +3020,8 @@ def parse_args(argv):
     ap = argparse.ArgumentParser(prog='build_ipa_from_nsp.py',
         description='Build an unsigned IPA or prepare an Xcode project from a game\'s NSPs; a game with no profile is surveyed and gets a provisional profile.',
         epilog='example: python3 scripts/build_ipa_from_nsp.py ~/nsp/"Super Mario Bros Wonder" -k ~/keys/prod.keys')
-    ap.add_argument('nsp_dir', nargs='?', help='folder holding one game\'s NSPs, or its files as a dump (scripts/pack_dump.py lists the layout), or one NUP container (a .nup file; the file itself may be given) (default: the NSP_DIR setting, else asked)')
-    ap.add_argument('-k', '--keys', help='path of prod.keys, not needed for a dump folder or a NUP (default: the PROD_KEYS setting, else asked)')
+    ap.add_argument('nsp_dir', nargs='?', help='folder holding one game\'s NSPs, or its files as a dump (scripts/pack_dump.py lists the layout), or one NUP container (a .nup file) or NX archive (a .nx file; the file itself may be given) (default: the NSP_DIR setting, else asked)')
+    ap.add_argument('-k', '--keys', help='path of prod.keys, not needed for a dump folder, a NUP or an NX (default: the PROD_KEYS setting, else asked)')
     ap.add_argument('--title-id', help='the game to pack when the folder holds several (a cartridge dump with two games): its title ID, 16 hex digits (default: the TITLE_ID setting)')
     ap.add_argument('-p', '--package', help='version packed into the IPA, e.g. v327680 / v0 (default: the newest in the folder)')
     ap.add_argument('-o', '--out', help='output IPA, or app with --platform mac-app (default: <the profile\'s ipa>, or <game name>.app, in the NSP folder)')
@@ -3000,7 +3035,7 @@ def parse_args(argv):
     ap.add_argument('--platform', choices=('ios', 'mac', 'mac-app'), help='ios = the IPA (or the Xcode project); mac = for development: build only what running the game on this Mac needs (the Mac shaders and the Mac host, '
                     'no iOS shaders, Xcode project or IPA), keep the extracted files and print the command that runs the game; mac-app = what mac builds, then a self-contained, double-clickable '
                     'Mac app of the game (default: <game name>.app in the NSP folder, -o names another) (default: the PLATFORM setting, ios)')
-    ap.add_argument('--icon', help='the app icon, a JPEG or PNG of any size (default: the ICON setting, else the game\'s icon from its control data; a dump has none, a NUP may have none: then the NX 18 icon)')
+    ap.add_argument('--icon', help='the app icon, a JPEG or PNG of any size (default: the ICON setting, else the game\'s icon from its control data; a dump has none, a NUP or an NX may have none: then the NX 18 icon)')
     ap.add_argument('--mac-sign', help='--platform mac-app: the codesign identity for the app, e.g. "Developer ID Application: <name> (<team>)" (default: the MAC_SIGN setting, else ad-hoc)')
     ap.add_argument('--team-id', help='Apple developer team ID (default: TEAM_ID setting, DM_TEAM_ID environment, or saved Xcode selection)')
     ap.add_argument('--xcode-workspace', help='workspace collecting prepared games (default: NxNative.xcworkspace beside the NSP folder; use with --prepare-xcode)')
@@ -3041,7 +3076,7 @@ NX18_ICON = Path(__file__).resolve().parent.parent / 'docs/images/nx18/nx18-icon
 
 def no_game_icon_line(nup, dump, icon, blank):
     """The line for an app without the game's own icon: why it has none, then what it gets instead (icon: the NX 18 icon, None when that file is missing too; blank: what stays blank then)"""
-    why = (('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') if dump
+    why = (('no game icon: the NX carries none for this version' if dump == 'nx' else 'no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') if dump
            else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again)')
     then = f'the app gets the NX 18 icon ({icon.name})' if icon else f'the {blank} will be blank'
     hint = "the game's" if icon else 'one'
@@ -3158,11 +3193,13 @@ def main(args=None):
     if shader_files and (mac or prepare_xcode): raise BuildError('SHADER_FILES / --shader-files shapes the IPA for install tools that cannot copy a large file: it cannot be combined with ' + (f'--platform {platform}' if mac else '--prepare-xcode, which Xcode installs'))
     nsp_dir = Path(os.path.expanduser(args.nsp_dir or NSP_DIR or ask('NSP folder: ', 'the NSP folder'))).resolve()
     if not nsp_dir.exists(): raise BuildError(f'not a folder: {nsp_dir}')
-    nup = nup_file(nsp_dir)   # a NUP file given in place of the folder: its folder is the NSP folder (the build folder and the IPA go there)
+    nxa = nx_file(nsp_dir)   # an NX or a NUP file given in place of the folder: its folder is the NSP folder (the build folder and the IPA go there)
+    nup = nxa or nup_file(nsp_dir)   # the container file, an NX's or a NUP's
+    pk = pack_nx if nxa else pack_nup   # its packer
     if nsp_dir.is_file(): nsp_dir = nsp_dir.parent
     global NSP_FOLDER; NSP_FOLDER = nsp_dir
     mods_root = mods_folder(args, nsp_dir)   # before the extraction: a --mods / MODS that is not a folder stops the build here
-    dump = 'nup' if nup else 'folder' if dump_folder(nsp_dir) else None   # their files are not encrypted, so they need no keys
+    dump = 'nx' if nxa else 'nup' if nup else 'folder' if dump_folder(nsp_dir) else None   # their files are not encrypted, so they need no keys
     keys = None if dump else Path(os.path.expanduser(args.keys or PROD_KEYS or ask('path of prod.keys: ', 'prod.keys (-k)'))).resolve()
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
     user_icon = Path(os.path.expanduser(args.icon or ICON)).resolve() if args.icon or ICON else None   # checked now, not after the extraction: build_ipa.sh would only log a missing one
@@ -3180,8 +3217,14 @@ def main(args=None):
     want = args.title_id or TITLE_ID
     if want and not re.fullmatch(r'[0-9A-Fa-f]{16}', want): raise BuildError(f'--title-id / TITLE_ID takes a title ID, 16 hex digits: {want}')
     if PROGRAM_INDEX and dump: raise BuildError('--program / PROGRAM_INDEX picks a program from a multi-program application\'s NSPs; '
-                                                     + ('a NUP' if nup else 'a dump folder') + ' is read as one program\'s files')
-    if nup:
+                                                     + ('an NX' if nxa else 'a NUP' if nup else 'a dump folder') + ' is read as one program\'s files')
+    if nxa:
+        app, fam = scan_nx(nxa, int(want, 16) if want else None)
+        n = fam['nx']
+        say(f'an NX: {nxa.name}, {app:016X}, {pack_nx.PLATFORMS[n.selected.platform]}, NX {n.version[0]}.{n.version[1]}, generation {n.generation}, '
+            f'{len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
+        for line in n.notes: say(line)
+    elif nup:
         app, fam = scan_nup(nup, int(want, 16) if want else None)
         say(f'a NUP: {nup.name}, {app:016X}, {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
         if fam['base'] is None: say(pack_nup.NO_BASE)
@@ -3263,7 +3306,7 @@ def main(args=None):
     picks = pick_nsps(fam, have, versions)
 
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
-    gb = (sum(fam['nup'].tree_bytes(pack_nup.romfs_of(u or b, b)) for b, u in picks.values()) if nup else sum(tree_size((u or b) / 'romfs')[1] for b, u in picks.values()) if dump else extract_bytes(picks, False)) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
+    gb = (sum(container(fam)[1].tree_bytes(pk.romfs_of(u or b, b)) for b, u in picks.values()) if nup else sum(tree_size((u or b) / 'romfs')[1] for b, u in picks.values()) if dump else extract_bytes(picks, False)) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'less than {gb:.0f} GB free on the volume of {work}')
     heapck = provisional and HEAP_CHECK and not args.no_heap_check and not heap_checked(g)   # the heap check, when the game needs one (once per provisional profile: it stamps the profile)
     PROG.plan(len(versions) + bool(fam['dlc']) + 4 - (prepare_xcode or (mac and not mac_pack)))   # prepare Xcode (a Mac-only build: the Mac host) replaces app build + IPA pack with one stage (a Mac app: Mac host + Mac app)
@@ -3271,7 +3314,7 @@ def main(args=None):
     dirs = {}
     for ver in versions:   # each merged version streams directly into its own image
         b, u = picks[ver]
-        dirs[ver] = extract_nup(ex, ver, u or b, b, app, fam['nup']) if nup else extract_dump(ex, ver, u or b, app) if dump else extract(nx, keys, ex, ver, b, u, None, logs, g, app)
+        dirs[ver] = extract_nup(ex, ver, u or b, b, app, container(fam)[1], pk) if nup else extract_dump(ex, ver, u or b, app) if dump else extract(nx, keys, ex, ver, b, u, None, logs, g, app)
         if not nup and not dump: extract_html(nx, keys, dirs[ver], b, u, logs, app)
     check_formats(dirs)
     check_versions_aarch64(dirs, logs, g, nacp.name(dirs[versions[0]] / 'control.nacp') or f'{app:016X}')   # before build_mismatch, derive_profile and build_sources read the modules
@@ -3314,7 +3357,7 @@ def main(args=None):
     dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc else []
     base = next((dirs[v] for v in versions if picks[v][1] is None), dirs[versions[0]])   # the folder the base game was extracted to alone
     # the app name and bundle ID both come from the base NSP: the game name in its control data, and a bundle ID from its title ID; a setting / the command line overrides them
-    app_name = args.app_name or APP_NAME or nacp.name(base / 'control.nacp') or (g.get('name') if dump else '')   # a dump has no control data, a NUP may have no NACP
+    app_name = args.app_name or APP_NAME or nacp.name(base / 'control.nacp') or (g.get('name') if dump else '')   # a dump has no control data, a NUP or an NX may have no NACP
     if not app_name and not (mac and not mac_pack): raise BuildError(f'no game name in the base extraction ({base / "control.nacp"}; an older extraction did not save it: delete extract/ and run again, or give --app-name)')
     bundle_id = args.bundle_id or BUNDLE_ID or saved_signing.get('PRODUCT_BUNDLE_IDENTIFIER') or f'org.nxnative.{app:016x}'
     team_id = args.team_id or TEAM_ID or env.get('DM_TEAM_ID') or saved_signing.get('DEVELOPMENT_TEAM') or '0000000000'
@@ -3324,7 +3367,7 @@ def main(args=None):
     # the app version is the packed game's display version: the update's control data when an update is packed (nx_extract saves it next to the RomFS), else the base game's
     app_version = nacp.version(game / 'control.nacp') or nacp.version(base / 'control.nacp')
     if mac_pack and not (args.out or OUT_IPA): out_ipa = work.parent / f'{mac_app_name(app_name)}{"-provisional" if shadowed else ""}.app'
-    # the app icon: --icon / ICON, else the game icon nx_extract saved from the control data (English, icon.jpg; the packed version's first, then the base game's), which a dump never has and a NUP may lack;
+    # the app icon: --icon / ICON, else the game icon nx_extract saved from the control data (English, icon.jpg; the packed version's first, then the base game's), which a dump never has and a NUP or an NX may lack;
     # without one, the NX 18 icon, so the home screen does not show a blank tile
     game_icon = user_icon or next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)
     icon = game_icon or (NX18_ICON if NX18_ICON.is_file() else None)
@@ -3491,7 +3534,7 @@ def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted
         if NSP_FOLDER:   # a developer's work folder, which a player's NSP folder does not have (tree_tar.py)
             for w in NSP_FOLDER.glob('*-work'):
                 if re.fullmatch(r'[0-9A-Fa-f]{16}-work', w.name): tree_tar.pack_quiet(w, say)
-    except (BuildError, nso.Error, pack_nup.Error) as e:   # a damaged module, read in this process (the survey, the heap and region checks), or a NUP's version it cannot pack (no RomFS, read for the disk check before extraction) stops the build the same way
+    except (BuildError, nso.Error, pack_nup.Error) as e:   # a damaged module, read in this process (the survey, the heap and region checks), or a NUP's or an NX's version it cannot pack (no RomFS, read for the disk check before extraction; pack_nx.Error is a pack_nup.Error) stops the build the same way
         PROG.close(ok=False); PROG.say(f'[RED] {e}'); return 1
     except KeyboardInterrupt:
         PROG.close(ok=False); PROG.say('[RED] interrupted'); return 130

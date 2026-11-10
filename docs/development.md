@@ -374,6 +374,13 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-a
 # A NUP with no base game (an empty base record, or none and standalone_update on every update) packs the selected update, which needs its own ExeFS and RomFS, as the whole game; only its update versions are selectable (no v0)
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform mac-app
 
+# the same game in one NX archive (https://github.com/fab918/nxformat, NXFormat 1.0.x, wire versions 0.2 and 0.3; scripts/pack_nx.py, which reads the format with its own code): the .nx file, or a folder that holds one; no prod.keys.
+# Each snapshot (base, update, standalone update, DLC) is a complete tree, so the selected version is packed from its own exefs/ and romfs/ alone; its NACP and icon are the ones the archive ties to that exact version
+# (a version without them reads the base game's, as for a NUP update). Every file is streamed block by block and checked against its SHA-256 (a failure names the file and the block whose CRC-32C fails).
+# An NX holding decrypted NCA files (nxconvert pack from a DNSP/DXCI) is refused with a line: its updates are unresolved patches. One .nx or .nup per folder; --title-id picks a game from an NX that holds several.
+# pack_nx.py <game.nx> --list lists its applications and snapshots, --verify checks every Media record, block and file (with --crc every CRC-32C as well, at about 17 MiB/s)
+python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nx --platform mac-app
+
 # play the game in Japanese (a code or a name: ja, fr, de, es, zh-Hans, zh-Hant, ko, en-GB, ..., Japanese; English by default)
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys -l ja
 

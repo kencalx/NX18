@@ -95,6 +95,36 @@ def write(ents, dst, copy):
     return part
 
 
+def verify_image(ents, dst, size_of, sha_of):
+    """The identity of the image at dst when it is, byte for byte, what write() makes of ents now (layout()'s header and index, and each file's bytes matching sha_of(source),
+    size_of(source) bytes long), and it stayed the same while being read; else None. Reads the image only, not the source (a NUP or an NX: their hashes describe each file).
+    pack_nup.py and pack_nx.py check an image of an earlier packer with this before packing it again: 21.6 s for Ocarina of Time's 26.25 GB image"""
+    ents = [e.copy() for e in ents]
+    off = HEAD.size
+    for e in ents:
+        if not e[2]: e[3], e[4] = off, size_of(e[1]); off += e[4]
+    head, idx = layout(ents, off)
+    try:
+        before = file_identity(dst)
+        if before[1] != off + len(idx): return None   # [inode, size, mtime, ctime]
+        with open(dst, 'rb') as f:
+            if f.read(len(head)) != head: return None
+            f.seek(off)
+            if f.read(len(idx)) != idx: return None
+            f.seek(len(head))
+            for _, src, isdir, _, size in ents:   # the data in entry order, one pass forward
+                if isdir: continue
+                h, left = hashlib.sha256(), size
+                while left:
+                    chunk = f.read(min(left, 8 << 20))
+                    if not chunk: return None
+                    h.update(chunk); left -= len(chunk)
+                if h.digest() != sha_of(src): return None
+        return before if file_identity(dst) == before else None
+    except OSError:
+        return None
+
+
 def stamp(dst, digest, image):   # the stamp reusable() checks: dst, with identity image, is the image of inputs with this digest
     Path(dst + '.inputs.json.part').write_text(json.dumps({'source': digest, 'image': image}))
     os.replace(dst + '.inputs.json.part', dst + '.inputs.json')
