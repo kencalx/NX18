@@ -66,6 +66,18 @@ static void poll_run(int64_t wait_ns, int sleep_too, uint32_t event) {
     poll_step(wait_ns, sleep_too, event);   // exactly 2 ms: the wait (and any yield) backs off
     assert(backoffs() == b0 + 1 + sleep_too);
 }
+// A run of SleepThread(ns) with 10 us of guest work between the sleeps, as Unity 6's idle job workers poll their queue: the guest's own sleeps for steps * 10 us, then one more
+static void sleep_run(int64_t ns, int steps, int expect_backoff) {
+    atomic_fetch_add(&poll_clock, 30000);   // guest work ends the previous run
+    uint64_t b0 = backoffs();
+    for (int i = 0; i < steps; i++) {
+        uint64_t r[32] = {(uint64_t)ns}; svc_thread(0x0B, r);
+        assert(backoffs() == b0);
+        atomic_fetch_add(&poll_clock, 10000);
+    }
+    uint64_t r[32] = {(uint64_t)ns}; svc_thread(0x0B, r);   // a short sleep becomes the back-off's
+    assert(backoffs() == b0 + (expect_backoff ? 1 : 0));
+}
 static void *signaller(void *unused) {
     (void)unused;
     pthread_mutex_lock(&G);
@@ -99,6 +111,22 @@ int main(void) {
     poll_step(500, 0, 0); assert(backoffs() == b0);
     puts("PASS: an intervening non-poll SVC resets the run");
 
+    sleep_run(25000, 200, 1);
+    puts("PASS: 25 us sleeps back off at 2 ms, not before");
+    sleep_run(300000, 200, 0);
+    puts("PASS: sleeps of 250 us and more keep their own length");
+    g_bo_cap = 500000;   // DM_YIELD_BACKOFF=500: the back-off reaches 300 us at 2.4 ms
+    sleep_run(300000, 241, 1);
+    puts("PASS: with a 500 us cap, 300 us sleeps back off once the back-off is longer");
+    g_bo_cap = 0;   // DM_YIELD_BACKOFF=0
+    sleep_run(25000, 300, 0);
+    puts("PASS: with the back-off off, short sleeps keep their length");
+    g_bo_cap = 250000;
+    b0 = backoffs();
+    for (int i = 0; i < 300; i++) { atomic_fetch_add(&poll_clock, 30000); uint64_t q[32] = {25000}; svc_thread(0x0B, q); }
+    assert(backoffs() == b0);
+    puts("PASS: 25 us sleeps with 30 us of work between them never back off");
+
     poll_run(500, 0, 0);
     b0 = backoffs();
     signal_wait = 1;
@@ -125,17 +153,19 @@ int main(void) {
     assert(backoffs() == b0);
     puts("PASS: 50 us sleeps stay sleeps, with no back-off");
     // The yield boundary is sleep_precise's 20 µs plus 100 ns for the time between dm_guest_sleep_ns's clock read and its own: a 20.5 µs sleep, which sleep_precise does sleep, stays a sleep (counted on
-    // the SleepThread row), and the yields around it do not back off. With a microsecond of margin it was a yield, and the run of yields backed off at 2 ms
+    // the SleepThread row) and, being shorter than the back-off's longest sleep, is a poll: it continues the run of yields around it, which backs off at 2 ms and not before.
+    // A 20.1 µs sleep is a yield (not counted as a sleep)
     r[0] = 0; r[1] = me_handle; svc_thread(0x0C, r);
     b0 = backoffs(); uint64_t sl0 = ((thr_t *)pthread_getspecific(g_keythr))->nsleep;
     for (int i = 0; i < 150; i++) {
         uint64_t y[32] = {0}; svc_thread(0x0B, y);
         uint64_t s[32] = {20500}; svc_thread(0x0B, s);
+        if (i < 100) assert(backoffs() == b0);   // under 2 ms of the run
         atomic_fetch_add(&poll_clock, 20000);   // 3 ms on the test clock
     }
-    assert(backoffs() == b0 && ((thr_t *)pthread_getspecific(g_keythr))->nsleep == sl0 + 150);
+    assert(backoffs() > b0 && ((thr_t *)pthread_getspecific(g_keythr))->nsleep == sl0 + 150);
     { uint64_t s[32] = {SP_NEAR_NS + 100}; svc_thread(0x0B, s); assert(((thr_t *)pthread_getspecific(g_keythr))->nsleep == sl0 + 150); }   // up to 20.1 µs: a yield
-    puts("PASS: a 20.5 us sleep stays a sleep, 20.1 us is a yield");
+    puts("PASS: a 20.5 us sleep stays a sleep and polls (backs off at 2 ms), 20.1 us is a yield");
     r[0] = ev_w; svc_thread(0x16, r); r[0] = ev_r; svc_thread(0x16, r);
     return 0;
 }

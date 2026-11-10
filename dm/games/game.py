@@ -220,7 +220,7 @@ def header_one(g):
     ups = upscaler_keys(g)   # the game's own upscaler shaders, which DM_UPSCALER=metalfx (the launcher's Game's upscaler) replaces with MetalFX's spatial scaler (nvn_mtl.m up_mfx_encode)
     dbr = g.get('draw_barriers', 'full')   # how draw passes are ordered (nvn_mtl.m barrier_game): full = each waits for all earlier GPU work, game = by the game's own barriers, so vertex work overlaps the previous pass's fragments
     if dbr not in ('full', 'game'): sys.exit(f'{g.id}: draw_barriers must be full or game: {dbr}')
-    sev = g.get('signal_events', 'split')   # where a GPU event signal leaves its submission's commands (nvn_queue.inc nq_signals_in_node; DM_NVN_SIGNAL_EVENTS overrides): split = it ends its command node (one Metal submission each), node = the node goes on and its signals publish in order at its completion
+    sev = g.get('signal_events', 'node')   # where a GPU event signal leaves its submission's commands (nvn_queue.inc nq_signals_in_node; DM_NVN_SIGNAL_EVENTS overrides): node (the default) = the node goes on and its signals publish in order at its completion, split = it ends its command node (one Metal submission each; a fallback)
     if sev not in ('split', 'node'): sys.exit(f'{g.id}: signal_events must be split or node: {sev}')
     gts = g.get('gpu_timestamps', 'submission')   # counter timestamps (nvn_mtl.m rep_ticks): submission = one time per submission, segment = the GPU start / end of the segment holding the report
     if gts not in ('submission', 'segment'): sys.exit(f'{g.id}: gpu_timestamps must be submission or segment: {gts}')

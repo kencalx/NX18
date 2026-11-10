@@ -21,6 +21,7 @@ void thr_svc_leave(void) {}
 void dm_spin_wait(uint64_t r, uint64_t a) { (void)r; (void)a; }
 uint64_t svc_dispatch(int n, uint64_t *r, uint64_t a) { (void)n; (void)r; (void)a; return 0; }
 uint64_t unimpl_stubs[4096];
+pthread_key_t g_key18;   // hle.c gate_dispatch writes K18 for an x18 system register access (upstream f3ec8fc8); loader.c defines it in the host
 static const char *wrap_kind;
 void *hlecount_wrap(const char *kind, const char *name, void *fn) { (void)name; wrap_kind = kind; return fn; }
 

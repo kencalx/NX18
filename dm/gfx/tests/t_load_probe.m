@@ -15,7 +15,7 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, fails;
 #define CHECK(c, label) do { checks++; if (!(c)) { fails++; fprintf(stderr,"FAIL: %s\n",label); } } while (0)
-static uint8_t commands[8192]; static size_t used;
+static uint8_t commands[8192] __attribute__((aligned(8))); static size_t used;
 static void emit(unsigned op, const void *p, size_t n) {
     size_t size = (8 + n + 7) & ~7ull; op_hdr h = {op, (uint32_t)size};
     memcpy(commands + used, &h, 8); if (n) memcpy(commands + used + 8, p, n); used += size;
@@ -59,8 +59,8 @@ int main(void) { @autoreleasepool {
             p_bind_vbuf1 vb = {.index=0,.size=sizeof positions,.addr=(uint64_t)vertices}; emit(OP_BIND_VBUF1,&vb,sizeof vb);
             p_draw draw = {.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1}; emit(OP_DRAW,&draw,sizeof draw);
         }
-        emit(OP_END,NULL,0);
-        NVNcommandHandle handle = (NVNcommandHandle)commands;
+        static uint64_t list; list = ctl_e(CTL_CHUNK,commands,used) | CTL_LAST;   // the records' control list: one piece (nvn_obj.h ctl_e)
+        NVNcommandHandle handle = (NVNcommandHandle)&list;
         P(nvnQueueSubmitCommands)(&queue,1,&handle); P(nvnQueueFinish)(&queue);
     }
     mtl_drain();

@@ -19,7 +19,7 @@ static int checks, failed;
 
 enum { W = 128, H = 128, L = 8, LW = W / 2, LH = H / 2 };
 static uint8_t want0[L][H][W][4], want1[L][LH][LW][4];   // what levels 0 and 1 of each layer must read back
-static NVNtexture tex; static NVNmemoryPool tpool, cpool; static uint8_t *tmem, *cmem; static NVNtextureView level1;
+static NVNtexture tex, alias; static NVNmemoryPool tpool, cpool; static uint8_t *tmem, *cmem; static NVNtextureView level1;
 static NVNcommandBuffer cmd;
 // The upload batches' feedback has come back too (pkg_upload_ builds on a texture only once its batch has: up_seq_back)
 static void settle(void) { for (int i = 0; i < 5000 && atomic_load(&g_up_pending); i++) usleep(1000); pthread_mutex_lock(&g_mu); g_done = g_fence; pthread_mutex_unlock(&g_mu); defer_drain(); }
@@ -32,13 +32,33 @@ static int readback_ok(const char *label) {
     h_nvnCommandBufferCopyTextureToBuffer(&cmd, &tex, &level1, &r1, dst1, 0);
     NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd);
     memset((void *)(uintptr_t)dst0, 0xcd, sizeof want0 + sizeof want1);
-    mtl_sub_begin(); mtl_exec((const uint8_t *)h);
+    mtl_sub_begin(); mtl_exec(nvn_rec_linear(h, NULL));   // the records as the queue submits them (upstream f02d0474: the handle is a control list)
     int ok = mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error();
     settle();
     int same0 = !memcmp((void *)(uintptr_t)dst0, want0, sizeof want0), same1 = !memcmp((void *)(uintptr_t)dst1, want1, sizeof want1);
     if (!same0 || !same1) { const uint8_t *g = (const uint8_t *)(uintptr_t)dst0, *w = &want0[0][0][0][0]; size_t i = 0; while (i < sizeof want0 && g[i] == w[i]) i++;
-        fprintf(stderr, "%s: level 0 %s (first difference at layer %zu), level 1 %s\n", label, same0 ? "same" : "differs", i / (W * H * 4), same1 ? "same" : "differs"); }
+        unsigned bad = 0; for (unsigned y = 0; y < L; y++) if (memcmp(g + (size_t)y * W * H * 4, w + (size_t)y * W * H * 4, (size_t)W * H * 4)) bad |= 1u << y;
+        fprintf(stderr, "%s: level 0 %s (first difference at layer %zu, layers differing %#x), level 1 %s\n", label, same0 ? "same" : "differs", i / (W * H * 4), bad, same1 ? "same" : "differs"); }
     return ok && same0 && same1;
+}
+// A GPU buffer-to-texture copy into a level 0 region of one layer of dst (the texture, or another texture object over its storage), run in a submission of its own. The copy reaches the
+// storage on the GPU (gsb_store_buf), which the CPU's page tracking does not see
+static int gpu_copy(NVNtexture *dst, int layer, int x, int y, int w, int h, uint8_t seed) {
+    uint8_t *src = cmem + (3 << 20);
+    for (int i = 0; i < w * h * 4; i++) src[i] = (uint8_t)(seed + i * 13);
+    for (int yy = 0; yy < h; yy++) memcpy(&want0[layer][y + yy][x][0], src + (size_t)yy * w * 4, (size_t)w * 4);
+    NVNcopyRegion r = {x, y, layer, w, h, 1};
+    h_nvnCommandBufferBeginRecording(&cmd);
+    h_nvnCommandBufferCopyBufferToTexture(&cmd, (uint64_t)(uintptr_t)src, dst, NULL, &r, 0);
+    NVNcommandHandle hd = h_nvnCommandBufferEndRecording(&cmd);
+    mtl_sub_begin(); mtl_exec(nvn_rec_linear(hd, NULL));
+    int ok = mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error();
+    settle(); return ok;
+}
+// The storage's level 0 of one layer, deswizzled on the CPU, against what it must hold
+static int storage_layer_ok(int layer) {
+    tex_t *t = (tex_t *)&tex; static uint8_t lin[H][W][4];
+    return !nvn_deswizzle(&t->d, 0, (unsigned)layer, t->mem, &lin[0][0][0], W * 4) && !memcmp(lin, want0[layer], sizeof lin);
 }
 // A region of one level of one layer written from the CPU, into the texture and the expected copy
 static void write_region(int level, int layer, int x, int y, int w, int h, uint8_t seed) {
@@ -186,6 +206,41 @@ int main(void) { @autoreleasepool {
     if (part_on) CHECK(g_part_reuploads == pr0 + 1, "and it is partial, copying the rest from the texture it replaces");
     write_region(0, 6, 1, 1, 8, 8, 0x3d);
     CHECK(readback_ok("into the new spare"), "the next re-upload, into the new spare, reads back as written");
+    // A GPU copy into layer 5 of the texture itself reaches its storage on the GPU (gsb_store_buf), unseen by the page tracking, and its record counts it (stored). The spare was read before it,
+    // so a re-upload into the spare is whole (nvn_mtl.m tex_mtl_: pk->stored); one into a new texture may copy layer 5 from the texture it replaces, which the copy wrote
+    CHECK(gpu_copy(&tex, 5, 16, 16, 32, 32, 0x55), "a GPU copy into layer 5 of the texture runs");
+    CHECK(pk->stored > 0, "its record counts the store into its storage");
+    CHECK(storage_layer_ok(5), "the copy reached the storage");
+    CHECK(readback_ok("after a GPU copy"), "after the GPU copy, with no CPU write, the texture reads back with it");
+    write_region(0, 2, 3, 3, 20, 20, 0x22); pr0 = g_part_reuploads; rr0 = g_pkg_reuploads; id<MTLTexture> spare_before = pk->spare;
+    CHECK(readback_ok("re-upload after a GPU store"), "a CPU write after the store: the re-upload reads back with both");
+    CHECK(g_pkg_reuploads == rr0 + 1, "one re-upload");
+    printf("re-upload after the texture's own store: %s, %s\n", spare_before && pk->tex == spare_before ? "into the spare" : "into a new texture", g_part_reuploads == pr0 ? "whole" : "partial");
+    if (part_on && spare_before && pk->tex == spare_before) CHECK(g_part_reuploads == pr0, "into the spare, which lacks the store: whole");
+    CHECK(pk->stored == 0, "the re-upload read the store: the count starts again");
+    for (int y = 3; y <= 4; y++) { char lb[48]; snprintf(lb, sizeof lb, "CPU write into layer %d after the store", y); write_region(0, y, 3, 3, 20, 20, (uint8_t)(0x30 + y)); CHECK(readback_ok(lb), lb); }
+    // Another texture object over the same storage (RGBA8UI: another description, another record) takes a GPU copy into layer 7, which reaches the shared storage on the GPU. This
+    // texture's record sees no store and its pages stay clean; a CPU write into another layer then re-uploads it, and the re-upload must carry layer 7 as the storage holds it: a partial
+    // re-upload kept the layer's content from the spare (or the texture it replaces) for good, as no CPU write ever marked its pages. Into the spare first, then into a new texture
+    NVNtextureBuilder ab; h_nvnTextureBuilderSetDefaults(&ab);
+    h_nvnTextureBuilderSetTarget(&ab, NVN_TEXTURE_TARGET_2D_ARRAY); h_nvnTextureBuilderSetWidth(&ab, W); h_nvnTextureBuilderSetHeight(&ab, H); h_nvnTextureBuilderSetDepth(&ab, L);
+    h_nvnTextureBuilderSetLevels(&ab, 2); h_nvnTextureBuilderSetFormat(&ab, NVN_FORMAT_RGBA8UI); h_nvnTextureBuilderSetStorage(&ab, &tpool, 0);
+    CHECK(h_nvnTextureInitialize(&alias, &ab), "an RGBA8UI texture over the same storage initialized");
+    for (int pass = 0; pass < 2; pass++) {
+        const char *how = pass ? "into a new texture" : "into the spare";
+        if (pass && pk->spare) { defer_obj_release(pk->spare); pk->spare = nil; pk->spare_stamp = 0; pk->spare_seq = 0; }   // no spare: the re-upload copies the rest from the texture it replaces
+        int layer = pass ? 6 : 7, other = pass ? 0 : 2;
+        CHECK(gpu_copy(&alias, layer, 16 + 8 * pass, 16, 32, 32, (uint8_t)(0x77 + pass)), "a GPU copy into the other texture object runs");
+        CHECK(pk->stored == 0, "this texture's record does not see the other object's store");
+        CHECK(storage_layer_ok(layer), "the other object's copy reached the shared storage");
+        write_region(0, other, 40, 40, 12, 12, (uint8_t)(0x5a + pass)); pr0 = g_part_reuploads; rr0 = g_pkg_reuploads; id<MTLTexture> sp = pk->spare;
+        char lb[96]; snprintf(lb, sizeof lb, "other object's store, re-upload %s", how);
+        CHECK(readback_ok(lb), "after the other object's GPU copy and a CPU write into another layer, the re-upload carries the storage's copy");
+        CHECK(g_pkg_reuploads == rr0 + 1 && (pass ? sp == nil : pk->tex == sp), pass ? "one re-upload, into a new texture" : "one re-upload, into the spare");
+        printf("re-upload %s after the other object's store: %s\n", how, g_part_reuploads == pr0 ? "whole" : "partial");
+        if (part_on) CHECK(g_part_reuploads == pr0 + 1, "still partial: only the layers written on the CPU or stored into on the GPU are deswizzled");
+    }
+    h_nvnTextureFinalize(&alias);
     printf("partial re-uploads %llu, levels of layers kept %llu / deswizzled %llu, %.2f MB kept; no-copy source buffers %llu\n", (unsigned long long)g_part_reuploads,
            (unsigned long long)g_part_kept, (unsigned long long)g_part_up, g_part_kept_bytes / 1048576.0, (unsigned long long)g_up_big_srcs);
     h_nvnTextureFinalize(&tex); h_nvnCommandBufferFinalize(&cmd); h_nvnMemoryPoolFinalize(&tpool); h_nvnMemoryPoolFinalize(&cpool); settle();

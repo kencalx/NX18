@@ -35,10 +35,9 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, fails;
 #define CHECK(c,label) do { int ok=!!(c); checks++; fails+=!ok; printf("%s: %s\n",ok?"PASS":"FAIL",label); fflush(stdout); } while(0)
 // Observe the exact release boundary, then call the real event publisher. This
-// avoids a timing race between a CPU polling thread and a very small readback.
+// avoids a timing race between a CPU polling thread and a very small store into storage.
 static _Atomic uintptr_t event_test_storage;
 static _Atomic uint32_t event_test_pixel;
-static _Atomic int event_test_deferred_mirror;
 // Every GPU publication in order (signals_in_node): word, mode, value
 enum { PUB_MAX=4096 };
 static struct { volatile uint32_t *word; unsigned mode; uint32_t value; } pub_log[PUB_MAX]; static _Atomic int pub_n;
@@ -47,9 +46,6 @@ void event_test_publish(volatile uint32_t *word,unsigned mode,uint32_t value,uin
     uintptr_t storage=atomic_load(&event_test_storage);
     if(storage && value==11) {
         atomic_store(&event_test_pixel,*(volatile uint32_t *)storage);
-        post_rec *r=&g_postr[fence%POST_RING]; int signal=-1,mirror=-1;
-        for(int i=0;i<r->n;i++) { if(r->ops[i].kind==1) signal=i; if(r->ops[i].kind==4) mirror=i; }
-        atomic_store(&event_test_deferred_mirror,signal>=0 && mirror>signal);
     }
     nvn_event_publish_gpu(word,mode,value,fence);
 }
@@ -285,6 +281,103 @@ static void event_queued_write(int mode) {
     CHECK(done && *result==after,"the consumer's copy reads the producer's payload"); if(!done) { P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,1); _Exit(2); }
     P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed);
 }
+// A signal does not cut its recording (issue #2112): two signals with commands between them are one Metal submission, and a wait on the first of them, which is not the
+// recording's last, is still encoded behind the in-flight write. This is signal_events node, the default; split (signals_in_node(0)) cuts at each signal
+static void event_signal_no_cut(void) {
+    printf("CASE signals stay in their recording's submission\n");
+    int saved=nq_signals_in_node(); nq_signal_node=1;
+    *source=before; *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    NVNevent second; NVNeventBuilder eb={0}; P(nvnEventBuilderSetDefaults)(&eb); P(nvnEventBuilderSetStorage)(&eb,&pool,65548); CHECK(P(nvnEventInitialize)(&second,&eb),"second event initialized");
+    P(nvnEventSignal)(&second,NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    if (!gate) abort();
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; uint64_t first_fence=mtl_last_fence(); pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
+    begin_cmd(1); uint32_t payload=after, other=before;
+    P(nvnCommandBufferSignalEvent)(&commands[1],&event,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,1);
+    P(nvnCommandBufferUpdateUniformBuffer)(&commands[1],source_addr,4,0,4,&other);
+    P(nvnCommandBufferUpdateUniformBuffer)(&commands[1],source_addr,4,0,4,&payload);
+    P(nvnCommandBufferSignalEvent)(&commands[1],&second,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,7);
+    P(nvnCommandBufferFenceSync)(&commands[1],&produced,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    job pj,cj; enqueue(&pj,&queues[1],P(nvnCommandBufferEndRecording)(&commands[1])); int pr=returned(&pj,250000000ull);
+    CHECK(pr && receipt_encoded(&produced,1000000000ull),"producer encodes while its GPU work is held by a shared-event gate");
+    pthread_mutex_lock(&g_sub_mu); uint64_t submissions=mtl_last_fence()-first_fence; pthread_mutex_unlock(&g_sub_mu);
+    CHECK(submissions==1,"both signals and the commands between them are one Metal submission");
+    enqueue(&cj,&queues[0],consumer(NVN_EVENT_WAIT_MODE_EQUAL,1,&consumed,1)); int cr=returned(&cj,250000000ull);
+    CHECK(receipt_encoded(&consumed,1000000000ull),"a wait on the first signal is encoded behind the in-flight submission");
+    CHECK(!landed(&produced,0) && !landed(&consumed,0) && *result==sentinel && P(nvnEventGetValue)(&event)==0,"nothing has run while the gate holds the GPU");
+    gate.signaledValue=1;   // always release the GPU before cleanup, including assertion failures
+    require_returned(&pj,pr); require_returned(&cj,cr);
+    int done=landed(&produced,5000000000ull) && landed(&consumed,5000000000ull);
+    CHECK(done && *result==after,"the consumer's copy reads what the producer wrote after the first signal"); if(!done) { P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,1); _Exit(2); }
+    CHECK(P(nvnEventGetValue)(&event)==1 && P(nvnEventGetValue)(&second)==7,"both events hold their signalled values");
+    P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed); P(nvnEventFinalize)(&second);
+    nq_signal_node=saved;
+}
+// The submissions of one frame share a command allocator, and one that counts no samples takes no visibility buffer (PR #2090): 24 of them with the GPU held, three times
+// the pool, all encode without a wait for the GPU, which would never return here
+static void frame_shares_allocator(void) {
+    enum { N=24 };
+    printf("CASE a frame's submissions share a command allocator\n");
+    *source=before; *result=sentinel;
+    id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    if (!gate) abort();
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1];
+    uint64_t waits=g_alloc_waits, shares=g_alloc_shares; int pool=g_alloc_n, ring=g_vis_ring_n; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    static NVNsync fences[N]; static job jobs[N]; int submitted=0, encoded=0;
+    for(int i=0;i<N;i++) {
+        P(nvnSyncInitialize)(&fences[i],&device); enqueue(&jobs[i],&queues[0],consumer(0,0,&fences[i],0));
+        if(!returned(&jobs[i],2000000000ull) || !receipt_encoded(&fences[i],2000000000ull)) break;
+        submitted++; encoded++;
+    }
+    CHECK(submitted==N && encoded==N,"24 submissions encode while the GPU is held");
+    pthread_mutex_lock(&g_sub_mu);
+    CHECK(g_alloc_waits==waits,"none waited for the GPU to free an allocator");
+    CHECK(g_alloc_n<=pool+1 && g_alloc_shares-shares>=N-2,"they share the frame's allocator");
+    CHECK(g_vis_ring_n==ring,"none took a visibility buffer");
+    pthread_mutex_unlock(&g_sub_mu);
+    CHECK(*result==sentinel,"nothing has run while the gate holds the GPU");
+    gate.signaledValue=1;   // always release the GPU before cleanup, including assertion failures
+    if(submitted<N) { fprintf(stderr,"a submission waited for the held GPU\n"); _Exit(2); }
+    int done=1; for(int i=0;i<N;i++) done&=landed(&fences[i],5000000000ull);
+    CHECK(done && *result==before,"all of them complete once the GPU runs"); if(!done) _Exit(2);
+    for(int i=0;i<N;i++) P(nvnSyncFinalize)(&fences[i]);
+}
+// More than POST_RING submissions in flight (the GPU held; the frame's submissions share one allocator and take no visibility buffer, so nothing else holds them back): the one whose post-ring
+// slot still holds a fence the GPU has not completed waits for it in mtl_sub_commit. The wait ledger (DM_NVN_WAITS=1) counts that wait as the post ring's: counted as the allocator's, it disagreed
+// with g_alloc_waits (the allocator pool's own figure, which it does not touch) and pointed at ALLOC_MAX / ALLOC_SHARE instead of POST_RING
+static void post_ring_wait(void) {
+    enum { N=POST_RING+16 };
+    printf("CASE more than POST_RING submissions in flight\n");
+    if(!ws_on()) { printf("SKIP: the wait ledger is off (run with DM_NVN_WAITS=1)\n"); return; }
+    int post=-1; for(int i=0;i<WS_N;i++) if(!strcmp(ws_name[i],"post ring")) post=i;
+    *source=before; *result=sentinel;
+    id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    if (!gate) abort();
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1];
+    uint64_t waits=g_alloc_waits; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    uint64_t blk0[WS_N]; for(int i=0;i<WS_N;i++) blk0[i]=atomic_load(&g_ws_blk[i]);
+    static NVNsync fences[N]; static job jobs[N]; int n=0, held=-1, held_returned=0;
+    while(n<N) {   // up to the post ring each one encodes at once; past it, the one that does not within 300 ms is the one waiting for the held GPU
+        uint64_t wait=n<POST_RING-4?2000000000ull:300000000ull;
+        P(nvnSyncInitialize)(&fences[n],&device); enqueue(&jobs[n],&queues[0],consumer(0,0,&fences[n],0));
+        int back=returned(&jobs[n],wait), ok=back && receipt_encoded(&fences[n],wait); n++;
+        if(!ok) { held=n-1; held_returned=back; break; }
+    }
+    printf("submission %d of those made with the GPU held waits (POST_RING %d)\n",held,(int)POST_RING);
+    CHECK(held>=POST_RING/2,"a submission past the post ring waits for the held GPU");
+    CHECK(*result==sentinel,"nothing has run while the gate holds the GPU");
+    gate.signaledValue=1;   // always release the GPU before cleanup, including assertion failures
+    if(held>=0 && !held_returned && !returned(&jobs[held],5000000000ull)) { fprintf(stderr,"the waiting submission did not return once the GPU ran\n"); _Exit(2); }
+    int done=1; for(int i=0;i<n;i++) done&=landed(&fences[i],5000000000ull);
+    CHECK(done && *result==before,"all of them complete once the GPU runs"); if(!done) _Exit(2);
+    pthread_mutex_lock(&g_sub_mu); uint64_t alloc_waits=g_alloc_waits-waits; pthread_mutex_unlock(&g_sub_mu);
+    uint64_t alloc_blk=atomic_load(&g_ws_blk[WS_ALLOC])-blk0[WS_ALLOC], post_blk=post>=0?atomic_load(&g_ws_blk[post])-blk0[post]:0;
+    printf("blocked waits: allocator row %llu, allocator pool %llu, post-ring row %llu\n",(unsigned long long)alloc_blk,(unsigned long long)alloc_waits,(unsigned long long)post_blk);
+    CHECK(alloc_blk==alloc_waits,"the ledger's allocator row counts only the allocator pool's waits (g_alloc_waits)");
+    CHECK(post>=0 && post_blk>=1,"the post-ring wait is on the ledger as the post ring");
+    for(int i=0;i<n;i++) P(nvnSyncFinalize)(&fences[i]);
+}
 // A wait on a sync no fence has reached when it is submitted is already satisfied: the queue's own later work, its fence included, runs (issue #1808)
 static void receipt_unfenced(int command_wait) {
     printf("CASE %s wait on a never-fenced sync does not park its queue\n",command_wait?"command-buffer":"queue");
@@ -303,14 +396,14 @@ static void receipt_tests(void) {
     receipt_unrelated_completion(); receipt_snapshot(0); receipt_snapshot(1); receipt_wait_only(0); receipt_wait_only(1); receipt_unfenced(0); receipt_unfenced(1);
 }
 static void event_mirror_publication(void) {
-    printf("CASE terminal event waits for render-pass mirror publication\n");
+    printf("CASE terminal event publishes after the render pass's store into storage\n");
     NVNtextureBuilder tb; NVNtexture texture; P(nvnTextureBuilderSetDefaults)(&tb);
     P(nvnTextureBuilderSetDevice)(&tb,&device); P(nvnTextureBuilderSetWidth)(&tb,8); P(nvnTextureBuilderSetHeight)(&tb,4);
     P(nvnTextureBuilderSetFormat)(&tb,NVN_FORMAT_RGBA8); P(nvnTextureBuilderSetStorage)(&tb,&pool,98304);
     NVNpackagedTextureLayout layout={{1,0,0,0,7,0,1,0}}; P(nvnTextureBuilderSetPackagedTextureLayout)(&tb,&layout);
     CHECK(P(nvnTextureInitialize)(&texture,&tb),"storage-backed render target initializes");
     memset(memory+98304,0xee,(size_t)P(nvnTextureGetStorageSize)(&texture));
-    atomic_store(&event_test_pixel,0); atomic_store(&event_test_deferred_mirror,0); atomic_store(&event_test_storage,(uintptr_t)(memory+98304));
+    atomic_store(&event_test_pixel,0); atomic_store(&event_test_storage,(uintptr_t)(memory+98304));
     P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
     NVNsync fence; P(nvnSyncInitialize)(&fence,&device);
     begin_cmd(0); const NVNtexture *colors[]={&texture}; float rgba[]={0.2f,0.4f,0.6f,1.f};
@@ -321,13 +414,12 @@ static void event_mirror_publication(void) {
     job submitted; enqueue(&submitted,&queues[0],P(nvnCommandBufferEndRecording)(&commands[0])); int sr=returned(&submitted,250000000ull);
     require_returned(&submitted,sr); int done=landed(&fence,5000000000ull);
     CHECK(done,"render clear and terminal signal complete"); if(!done) _Exit(2);
-    CHECK(atomic_load(&event_test_deferred_mirror),"pass teardown appended the mirror after the recorded event post-op");
     CHECK(atomic_load(&event_test_pixel)==0xff996633u,"rendered bytes are already in guest storage when the event is published");
     CHECK(P(nvnEventGetValue)(&event)==11,"the terminal event publishes once the storage is visible");
     atomic_store(&event_test_storage,0); P(nvnSyncFinalize)(&fence); P(nvnTextureFinalize)(&texture);
 }
 // Profile key signal_events (nvn_queue.inc nq_signals_in_node). node: the signals of a command node stay in it, the node is one Metal submission, and they publish in recorded
-// order once it completes, ADD signals adding up in that order; split (the default): each signal ends its node, one submission each. Either way nothing publishes before the GPU has
+// order once it completes, ADD signals adding up in that order (the default); split: each signal ends its node, one submission each. Either way nothing publishes before the GPU has
 // run the work, and a wait still ends its node, so a wait on a signal of the same command buffer is released
 static volatile uint32_t *event_storage(NVNevent *e) { return ((ev_t *)e)->val; }
 static void signals_in_node(int node) {
@@ -617,6 +709,21 @@ static void split_allocations(void) {
     P(nvnSyncFinalize)(&produced); P(nvnCommandBufferFinalize)(&bigcmd);
     nq_signal_node=saved;
 }
+// DM_NVN_SIGNAL_EVENTS takes exactly node or split; unset or empty, the profile's signal_events. Any other value is logged and the profile's taken: Split, 0 or off chose node before (any
+// value but split), the opposite of what an A/B meant to restore, with only the startup line to tell
+static void signal_events_switch(void) {
+    printf("CASE DM_NVN_SIGNAL_EVENTS values\n");
+    CHECK(nq_signal_events_mode("node",0)==1 && nq_signal_events_mode("split",1)==0,"node and split choose their mode whatever the profile's");
+    CHECK(nq_signal_events_mode(NULL,0)==0 && nq_signal_events_mode(NULL,1)==1 && nq_signal_events_mode("",0)==0 && nq_signal_events_mode("",1)==1,"unset or empty: the profile's");
+    int other=1; const char *bad[]={"Split","SPLIT","0","off","Node","1"};
+    for(unsigned i=0;i<sizeof bad/sizeof bad[0];i++) other&=nq_signal_events_mode(bad[i],0)==0 && nq_signal_events_mode(bad[i],1)==1;
+    CHECK(other,"any other value (Split, SPLIT, 0, off, Node, 1): the profile's, not node");
+    const char *was=getenv("DM_NVN_SIGNAL_EVENTS"); char keep[32]={0}; if(was) snprintf(keep,sizeof keep,"%s",was);
+    int saved=nq_signal_node; setenv("DM_NVN_SIGNAL_EVENTS","Split",1); nq_signal_node=-1;
+    CHECK(nq_signals_in_node()==DM_GAME_SIGNAL_EVENTS_NODE,"nq_signals_in_node takes the profile's for an unknown value");
+    if(was) setenv("DM_NVN_SIGNAL_EVENTS",keep,1); else unsetenv("DM_NVN_SIGNAL_EVENTS");
+    nq_signal_node=saved;
+}
 int main(void) { @autoreleasepool {
     if (setvbuf(stdout, NULL, _IONBF, 0)) abort(); setenv("DM_PSO_PREPARE","0",1);
     mtl_init();
@@ -644,6 +751,10 @@ int main(void) { @autoreleasepool {
     event_stale_gpu_reset();
     event_queued_write(NVN_EVENT_SIGNAL_MODE_WRITE);
     event_queued_write(NVN_EVENT_SIGNAL_MODE_ADD);
+    event_signal_no_cut();
+    frame_shares_allocator();
+    post_ring_wait();
+    signal_events_switch();
     receipt_tests();
     event_mirror_publication();
     signals_in_node(1); signals_in_node(0);
