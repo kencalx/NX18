@@ -6179,7 +6179,7 @@ static uint64_t g_warm_t0;
 static _Atomic int g_warm_running;   // Background warm-up has not finished yet (the loading screen on entering a run waits a little longer based on this, see mtl_warm_wait)
 static _Atomic uint64_t g_warm_shaders, g_warm_rps, g_warm_mps, g_warm_cps, g_warm_skip_fz, g_warm_skip_stale;   // the prewarm's workers count into them
 static id<MTLRenderPipelineState> mtk_build(const pso_key *, NvShader *, NvShader *, NvShader *, NSError **, int *);
-static _Atomic uint64_t g_mtk_arch, g_mtk_built, g_mtk_dev;   // native mesh pipelines (mtk_build, all threads): taken from the pipeline archive, built and captured for it (arch_harvest), built with no Metal 4 descriptor (not kept)
+static _Atomic uint64_t g_mtk_arch, g_mtk_built;   // native mesh pipelines (mtk_build, all threads): taken from the pipeline archive, compiled and captured for it (arch_harvest; not captured in a run without the archive)
 static uint64_t g_warm_claim_shaders, g_warm_claim_rps, g_warm_claim_cps;
 static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const uint8_t *lmap);
 static int rt_range_bindings_ro(NSDictionary *j);
@@ -6421,7 +6421,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (stage == 1 && j[@"entry_m"]) { o->fn_m = fn4_note([lib newFunctionWithName:j[@"entry_m"]], lib, j[@"entry_m"], nil); o->mask_m = (uint8_t)[j[@"uint_mask_m"] unsignedIntValue];
         if (!o->fn_m) MLOG("[RED] shader %s: no mixed integer-output entry point %s in its library", pc.UTF8String, [j[@"entry_m"] UTF8String]); }
     if (stage == 1 && j[@"entry_d"]) { o->fn_d = fn4_note([lib newFunctionWithName:j[@"entry_d"]], lib, j[@"entry_d"], nil); if (!o->fn_d) MLOG("[RED] shader %s: no dual-source entry point %s in its library", pc.UTF8String, [j[@"entry_d"] UTF8String]); }
-    if (o->fn.functionConstantsDictionary.count) {   // every stage, compute too: a compute pipeline the MTLDevice still builds (cps_new) takes the function fn_dev specializes
+    if (o->fn.functionConstantsDictionary.count) {   // every stage, compute too: its pipeline specializes it (cps_new, mtk_build, pso_build)
         NSError *fe = nil; MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
         id<MTLFunction> f = fn_spec(lib, entry, cv, &fe);
         if (f) o->fn = f; else MLOG("[RED] shader %s: specializing its function constants failed: %s", pc.UTF8String, fe.localizedDescription.UTF8String);
@@ -9127,16 +9127,16 @@ static void pso4_init(void) {
 }
 static int pso4_compiler(void) { pso4_init(); return g_pso4; }   // render pipelines go through the Metal 4 compiler (fn_spec)
 // Compute pipelines from the archive bundled with the app: it holds one per compute shader of the shader map and of the prewarm list's C rows (pso_offline.py), made from <key>_b's
-// function alone. A compute pipeline depends on nothing else here: the MTLDevice builds it from the function (newComputePipelineStateWithFunction, no threadgroup size or other
-// option; the dispatch gives the threadgroup size), so the lookup names the function alone too, by the descriptor shader_load noted (fn4_note). One the bundle does not hold
-// (no bundle, a shader outside the map, an OS update that dropped the bundle's binaries) is looked up in this device's own archive files; on a miss it is built through the
-// MTLDevice as before, and compiled again through the Metal 4 compiler into the current flush period on a background queue (arch_harvest), so the next start takes it from the
-// file that period writes: the MTLDevice's build is the one the system's shader cache serves, the capture compiles it whole (Star Fox's first 5 at its title: 1.2 ms in all
-// through the MTLDevice, 95 ms through the capture), so the dispatch never waits for the capture. Before, such a pipeline was built again at every start, and in full at each
-// one after the system's shader cache dropped it. The embedded kernels (builtin_get) are noted too, from the library named host/builtin. Not looked up and not captured: a
-// function with constants (fn_spec notes it with its constants; the MTLDevice builds it from fn_dev's specialization). A miss costs a lookup of a fraction of a millisecond per
-// file. g_cps_arch, g_cps_run, g_cps_built: compute pipelines taken from the bundle, from this device's files, built (the prewarm's last lines); g_cps_look_ns, g_cps_build_ns:
-// the time looking up, building
+// function alone. A compute pipeline depends on nothing else here: it is built from the function alone (no threadgroup size or other option; the dispatch gives the threadgroup
+// size), so the lookup names the function alone too, by the descriptor its function was noted with (fn4_note): a library function, or one specialized with its constants (fn_spec;
+// the bundle never holds those, metal-tt cannot make them, so they are found only in this device's own files). One no file holds (no bundle, a shader outside the map, an OS
+// update that dropped the bundle's binaries, a function with constants) is compiled by the one Metal 4 compiler (g_comp4) for its dispatch, which the system's shader cache serves
+// as it served the MTLDevice's build (the same cold and warm cost, measured for the Metal 4 release), and compiled again into the current flush period on a background queue
+// (arch_harvest), so the next start takes it from the file that period writes: the capture compiles it whole (Star Fox's first 5 at its title: 1.2 ms in all for the plain
+// build, 95 ms through the capture), so the dispatch never waits for the capture. Before, such a pipeline was built again at every start, and in full at each one after the
+// system's shader cache dropped it. The embedded kernels (builtin_get, the library named host/builtin) and the geometry kernels are noted and go the same way. A function with no
+// Metal 4 descriptor gets no pipeline: every function a pipeline is built from is noted. A miss costs a lookup of a fraction of a millisecond per file. g_cps_arch, g_cps_run,
+// g_cps_built: compute pipelines taken from the bundle, from this device's files, compiled (the prewarm's last lines); g_cps_look_ns, g_cps_build_ns: the time looking up, compiling
 static _Atomic uint64_t g_cps_arch, g_cps_run, g_cps_built, g_cps_look_ns, g_cps_build_ns;
 static void arch_note_new(void);
 static dispatch_queue_t arch_harvest_q(void) {   // one capture at a time, at utility QoS: a network shader's compile can take seconds, beside the game's frames
@@ -9144,7 +9144,7 @@ static dispatch_queue_t arch_harvest_q(void) {   // one capture at a time, at ut
     dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.arch-harvest", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)); });
     return q;
 }
-// d into the flush period, in the background: a compute pipeline (cps_new) or a native mesh pipeline (mtk_build), which the MTLDevice built for its first use; compact: a
+// d into the flush period, in the background: a compute pipeline (cps_new) or a native mesh pipeline (mtk_build), which the plain compiler built for its first use; compact: a
 // compaction's capture of a pipeline the prewarm took from an old file (as pso_build's bases)
 static void arch_harvest(MTL4PipelineDescriptor *d, int compact) {
     if (!d) return;
@@ -9162,21 +9162,26 @@ static void arch_harvest(MTL4PipelineDescriptor *d, int compact) {
         }
     } });
 }
+// The error of a pipeline whose function has no Metal 4 descriptor (fn4_of), or of a device that made no Metal 4 compiler (a test's fake device)
+static NSError *pso_err_nodesc(id<MTLFunction> f) {
+    NSString *why = !mtl_comp4() ? @"the Metal device made no Metal 4 compiler" : [NSString stringWithFormat:@"function %@ has no Metal 4 descriptor (fn4_note)", f ? f.name : @"(none)"];
+    return [NSError errorWithDomain:@"nxnative.NVN.Pipeline" code:2 userInfo:@{NSLocalizedDescriptionKey: why}];
+}
 static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e) {
     pso4_init();
-    MTL4FunctionDescriptor *fd = fn4_of(f); MTL4ComputePipelineDescriptor *d = nil; id<MTLComputePipelineState> ps = nil; uint64_t t0 = bp_now();
-    if ([fd isKindOfClass:MTL4LibraryFunctionDescriptor.class]) {
-        d = [MTL4ComputePipelineDescriptor new]; d.computeFunctionDescriptor = fd;
-        if (g_arch_bundle && (ps = [g_arch_bundle newComputePipelineStateWithDescriptor:d error:nil])) atomic_fetch_add(&g_cps_arch, 1);
-        else { int from_run = 0; if ((ps = arch_lookup(d, 1, &from_run))) {   // arch_capture_cs writes them to plain files only
-            atomic_fetch_add(&g_cps_run, 1);
-            if (from_run && g_compact_enabled && atomic_load(&g_warm_running)) arch_harvest(d, 1);
-        } }
-        atomic_fetch_add(&g_cps_look_ns, bp_now() - t0);
-        if (ps) return ps;
-    }
+    MTL4FunctionDescriptor *fd = fn4_of(f); id<MTL4Compiler> comp = mtl_comp4();
+    if (!fd || !comp) { if (e) *e = pso_err_nodesc(f); return nil; }
+    MTL4ComputePipelineDescriptor *d = [MTL4ComputePipelineDescriptor new]; d.computeFunctionDescriptor = fd;
+    id<MTLComputePipelineState> ps = nil; uint64_t t0 = bp_now();
+    if (g_arch_bundle && (ps = [g_arch_bundle newComputePipelineStateWithDescriptor:d error:nil])) atomic_fetch_add(&g_cps_arch, 1);
+    else { int from_run = 0; if ((ps = arch_lookup(d, 1, &from_run))) {   // arch_capture_cs writes them to plain files only
+        atomic_fetch_add(&g_cps_run, 1);
+        if (from_run && g_compact_enabled && atomic_load(&g_warm_running)) arch_harvest(d, 1);
+    } }
+    atomic_fetch_add(&g_cps_look_ns, bp_now() - t0);
+    if (ps) return ps;
     uint64_t t1 = bp_now();
-    ps = [g_dev newComputePipelineStateWithFunction:fn_dev(f) error:e];   // a function with constants, specialized for the MTLDevice (fn_spec left it unspecialized)
+    ps = [comp newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
     if (ps) { atomic_fetch_add(&g_cps_built, 1); atomic_fetch_add(&g_cps_build_ns, bp_now() - t1); arch_harvest(d, 0); }
     return ps;
 }
@@ -10194,8 +10199,8 @@ static void warm_task(WarmTask *t) {
 static void warm_finish(void) {
     MLOG("pipeline prewarm done: shaders %llu / render pipelines %llu (specialized fragment skipped %llu) / compute pipelines %llu, background time %.1f ms; shader keys not in the shader map (another game version) %llu",
          (unsigned long long)g_warm_shaders, (unsigned long long)g_warm_rps, (unsigned long long)g_warm_skip_fz, (unsigned long long)g_warm_cps, (bp_now() - g_warm_t0) / 1e6, (unsigned long long)g_warm_skip_stale);
-    if (g_warm_mps) MLOG("pipeline prewarm: %llu native task / mesh pipelines; so far %llu taken from the pipeline archive, %llu built and captured for it, %llu built without it",
-                         (unsigned long long)g_warm_mps, (unsigned long long)g_mtk_arch, (unsigned long long)g_mtk_built, (unsigned long long)g_mtk_dev);
+    if (g_warm_mps) MLOG("pipeline prewarm: %llu native task / mesh pipelines; so far %llu taken from the pipeline archive, %llu compiled and captured for it",
+                         (unsigned long long)g_warm_mps, (unsigned long long)g_mtk_arch, (unsigned long long)g_mtk_built);
     char again[96] = "";   // only a compacting start captures bases again
     if (g_compact_enabled) snprintf(again, sizeof again, " (%d of them captured again for the compaction, %.1f ms)", (int)g_compact_bases, g_compact_ns / 1e6);
     if (g_pso4) MLOG("pipeline bases so far: %llu compiled, %llu from the archive%s, %llu reused (%.1f ms for the bases); %llu specializations (their descriptors %s), %llu pipelines without a base (MTLDevice)",

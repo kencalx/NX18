@@ -19,7 +19,7 @@ static int checks, failures;
 static void require(int ok, const char *name) { CHECK(ok, name); if (!ok) exit(2); }
 
 static NvShader *shader(id<MTLLibrary> library, NSString *name, int stage) {
-    NvShader *s = [NvShader new]; s->fn = [library newFunctionWithName:name]; s->stage = stage;
+    NvShader *s = [NvShader new]; s->fn = fn4_note([library newFunctionWithName:name], library, name, nil); s->stage = stage;
     snprintf(s->key, sizeof s->key, "first_use_%s", name.UTF8String);
     require(s->fn != nil, "test shader function exists"); return s;
 }
@@ -53,7 +53,7 @@ int main(void) { @autoreleasepool {
     NvShader *ms = shader(library, @"direct", 4), *tasked = shader(library, @"tasked", 4), *ts = shader(library, @"task", 3), *fs = shader(library, @"color", 1);
     NvShader *vs = shader(library, @"vertex_only", 0), *px = shader(library, @"pixel", 4);
     ms->mesh_kind = tasked->mesh_kind = px->mesh_kind = 2; ms->mesh_notask = px->mesh_notask = 1; px->mesh_threads = 32;
-    ms->mesh_obj = px->mesh_obj = [library newFunctionWithName:@"block"]; require(ms->mesh_obj != nil, "the block object function exists");
+    ms->mesh_obj = px->mesh_obj = fn4_note([library newFunctionWithName:@"block"], library, @"block", nil); require(ms->mesh_obj != nil, "the block object function exists");
     ms->mesh_threads = tasked->mesh_threads = ts->mesh_threads = 32; ts->mesh_kind = 1; ts->mesh_payload = 4; fs->rf.color_mask = 1;
     prog_t programs[4] = {0};
     for (int kind = 0; kind < 4; kind++) {

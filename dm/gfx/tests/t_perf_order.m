@@ -136,7 +136,7 @@ static void hoists(id<MTLLibrary> lib) {
     prog_t pg={0}, cp={.serial=910000}; make_program(lib,&pg,"red");
     NvProg *cs=[NvProg new]; cs->sh[5]=[NvShader new]; cs->sh[5]->stage=5;
     cs->sh[5]->rf.tg[0]=cs->sh[5]->rf.tg[1]=cs->sh[5]->rf.tg[2]=1;
-    cs->sh[5]->fn=[lib newFunctionWithName:@"compute_one"];
+    cs->sh[5]->fn=fn4_note([lib newFunctionWithName:@"compute_one"],lib,@"compute_one",nil);
     cs->sh[5]->arg_len=[cs->sh[5]->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     cs->sh[5]->rf.nb=1; cs->sh[5]->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0};
     serial_put(cp.serial,cs);

@@ -310,7 +310,7 @@ static void passthrough_bounds(NSArray *layouts) {
     }
 }
 static NvShader *shader(id<MTLLibrary> l, NSString *name, int stage, const int *helpers, int n) {
-    NvShader *s=[NvShader new];s->stage=stage;s->fn=[l newFunctionWithName:name];s->rf.nb=n;
+    NvShader *s=[NvShader new];s->stage=stage;s->fn=fn4_note([l newFunctionWithName:name],l,name,nil);s->rf.nb=n;   // noted: its pipeline goes through the Metal 4 compiler (cps_new)
     // Synthetic functions must have distinct content identities too: pipeline caches
     // key on shader content, not the transient MTLLibrary object address.
     static uint64_t identity=0x7000000000000000ull;snprintf(s->key,sizeof s->key,"%016llx_b",(unsigned long long)++identity);
@@ -419,7 +419,7 @@ static void replay(int mode) {
         "fragment float4 red(){return float4(1,0,0,1);}\n"
         "kernel void index_write(device uint*p[[buffer(0)]]){p[0]=12;p[1]=10;p[2]=0xffffffffu;p[3]=11;}\n");
     int helpers[]={0,1,2,3,4}, rh[]={1};
-    NvProg *pr=[NvProg new];pr->sh[0]=shader(l,@"unused",0,NULL,0);pr->sh[0]->geo_fn=[l newFunctionWithName:@"capture"];
+    NvProg *pr=[NvProg new];pr->sh[0]=shader(l,@"unused",0,NULL,0);pr->sh[0]->geo_fn=fn4_note([l newFunctionWithName:@"capture"],l,@"capture",nil);
     pr->sh[1]=shader(l,@"red",1,NULL,0);pr->sh[2]=shader(l,@"geometry",2,helpers,5);
     if(conversion||native_stream){pr->sh[0]->rf.nv=1;pr->sh[0]->rf.v[0].ct=NVN_CT_FLOAT;pr->sh[0]->rf.v[0].nvn=pr->sh[0]->rf.v[0].loc=0;}
     NvShader *gs=pr->sh[2];strcpy(gs->key,"0123456789abcdef_b");gs->geo_vertices=4;gs->geo_invocations=2;gs->geo_output=7;gs->geo_stride=4;gs->geo_index_stride=5;
@@ -516,7 +516,7 @@ static void replay_local(int mode) {
         "vertex float4 cover(uint v[[vertex_id]]){float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(p[v],.5,1);}\n"
         "fragment float4 red(){return float4(1,0,0,1);}\n");
     int helpers[]={0,1,2,3,4}, rh[]={1};
-    NvProg *pr=[NvProg new];pr->sh[0]=shader(l,@"unused",0,NULL,0);pr->sh[0]->geo_fn=[l newFunctionWithName:@"capture"];
+    NvProg *pr=[NvProg new];pr->sh[0]=shader(l,@"unused",0,NULL,0);pr->sh[0]->geo_fn=fn4_note([l newFunctionWithName:@"capture"],l,@"capture",nil);
     pr->sh[1]=shader(l,@"red",1,NULL,0);pr->sh[2]=shader(l,@"geometry",2,helpers,5);
     NvShader *gs=pr->sh[2];gs->rf.b[gs->rf.nb++]=(nvn_rbind){.kind=NVN_RB_SBUFP,.reg=0,.aid=5,.rw=1};gs->arg_len=[gs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     strcpy(gs->key,"123456789abcdef0_b");gs->geo_vertices=4;gs->geo_invocations=2;gs->geo_output=7;gs->geo_stride=4;gs->geo_index_stride=5;
