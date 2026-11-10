@@ -1,5 +1,7 @@
 # Super Mario Galaxy 2 (`0100FD8022DAA000`)
 
+> **Unsupported in NX 18 release 1.** This game renders with Vulkan, and release 1 is Metal 4 only and renders NVN games only: the Vulkan layer (`dm/gfx/vk/hle_vk.m`), its shader translator and its run-time shader capture were removed, so the NSP script stops for it (`[RED] <name> renders with Vulkan; NX 18 release 1 supports NVN games only`). The notes below describe the layer as it was at git `93c34371`, where its code is; the profile stays for the port to Metal 4 ([Graphics APIs: NVN only](../../../docs/reference/rendering.md#graphics-apis-nvn-only)).
+
 Update 1.4.0 (v393216) over the base game, SDK 18.3.5. NERD's Hagi Wii layer, as in Super Mario Galaxy ([010099C022B96000](../010099C022B96000/README.md)): the Wii game's PowerPC code is statically recompiled into `main`, and Hagi stands in for the Wii hardware (GX on **Vulkan** with SPIR-V generated at run time, the DSP, disc reads from the RomFS). Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`, the last two Galaxy's builds; `subsdk1`–`subsdk4` (GLSLC, `nn::pcm`, NVIDIA's OpenGL and Vulkan drivers) are not loaded. Everything Galaxy needed from the Vulkan layer and the host carries over; the profile is Galaxy's with its own memory layout and shader list. Brought up on the Mac (the title, file select by touch, the opening and the first storybook stage at 59 fps) and plays on the iPhone.
 
 ## What it needs
@@ -61,7 +63,7 @@ General host changes first needed here; each applies to every game:
 
 - **A crop only picks texels; the picture has the layer's shape** (`present_shape`; issue 949): [A crop only picks texels; the picture has the layer's shape](../../../docs/reference/rendering.md#a-crop-only-picks-texels-the-picture-has-the-layers-shape).
 - **`precise::` min / max / clamp** in every translator (`dmsh_rewrite.py` `precise`, `vk_shaders.py`, `gl_shaders.py`; issue 72): [min, max and clamp with a NaN operand](../../../docs/reference/shaders.md#min-max-and-clamp-with-a-nan-operand).
-- **Vulkan descriptors hold the Metal objects** (issue 68): [Descriptors hold the Metal objects they were written with](../../../docs/reference/rendering.md#descriptors-hold-the-metal-objects-they-were-written-with).
+- **Vulkan descriptors hold the Metal objects** (issue 68): Descriptors hold the Metal objects they were written with.
 - **Vulkan acquire and the vsync event thread follow the display link** (`mtl_link_wait_tick`, `mtl_link_wait_vsync`): [Vulkan acquire and vsync event follow the display link](../../../docs/reference/frame-rate.md#vulkan-acquire-and-vsync-event-follow-the-display-link).
 - **Focus message 15 only under focus handling modes 1 and 2** (`hle_oe.c`) and **the guest clock waits in the background** (`guest_clock_read_wait`): [Focus handling mode decides whether focus changes are notified](../../../docs/reference/services.md#focus-handling-mode-decides-whether-focus-changes-are-notified), [Guest clock reads wait while the app is in the background](../../../docs/reference/services.md#guest-clock-reads-wait-while-the-app-is-in-the-background).
 - **A yield whose callee-saved registers moved counts as progress** (`thr_yield`; this game's poll keeps them): [Yields that make progress return at once](../../../docs/reference/threads.md#yields-that-make-progress-return-at-once-thr_yield).

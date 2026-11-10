@@ -28,15 +28,10 @@ class Base(unittest.TestCase):
         for cm in (mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'say', lambda m: None), mock.patch.object(nsp, 'run', self.fake_run)):
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
-    def fake_run(self, cmd, log, env=None, cwd=None, on_line=None):   # stands in for the translators: writes the libraries a real run writes
+    def fake_run(self, cmd, log, env=None, cwd=None, on_line=None):   # stands in for the translator: writes the libraries a real run writes
         self.ran.append(([str(c) for c in cmd], dict(env or {})))
         tool = Path(cmd[1]).name
-        if tool in ('vk_shaders.py', 'gl_shaders.py'):
-            api, a = tool[:2], [str(c) for c in cmd]
-            outs = [Path(a[a.index('--ios') - 1]), Path(a[a.index('--ios') + 1])] if '--ios' in a else [Path(a[-1])]
-            for o in outs: (o / api).mkdir(parents=True, exist_ok=True); (o / api / f'{api}_shaders.metallib').write_bytes(b'lib')
-            log.write_text('macosx: 3 shaders\n' + ('iphoneos: 3 shaders\n' if '--ios' in a else ''))
-        elif tool == 'own_compilers.py':   # a full dmsh_build.py run: the libraries, their stamp, and the profile's tables naming it
+        if tool == 'own_compilers.py':   # a full dmsh_build.py run: the libraries, their stamp, and the profile's tables naming it
             outs = [self.sh / 'cache'] + ([Path(env['IOSOUT'])] if 'IOSOUT' in env else [])
             targets = (env or {}).get('DMSH_TARGETS', 'mac').split(',')
             for o in outs:
@@ -47,35 +42,6 @@ class Base(unittest.TestCase):
                 (o / f'b-{CHAIN}' / 'inputs.tsv').write_text(f'# stamp\ngame\t0100535012974000\ninputs\t{INPUTS}\n')
             for n in ('c1_full.tsv', 'cb_extent.tsv'): (self.tmp / n).write_text(f'# chain b-{CHAIN} inputs {INPUTS} 2026-10-23T00:00:00+00:00\n')
             log.write_text('shaders 1: ok 1\n')
-
-
-class Layer(Base):
-    def vk(self, mac, key='K'):
-        self.ran.clear()
-        return nsp.layer_shaders(sys.executable, REPO, 'vk', 'Vulkan', [self.tmp / 'romfs'], self.sh, key, self.logs, {'WORK': str(self.tmp)}, mac)
-
-    def test_mac_only(self):   # no --ios, only the Mac key, the Mac folder for DM_MSL_DIR
-        self.assertEqual(self.vk(True), self.sh)
-        self.assertNotIn('--ios', self.ran[0][0])
-        self.assertTrue((self.sh / 'vk.key').is_file()); self.assertFalse((self.sh / 'ios/vk.key').exists())
-        self.assertEqual(self.vk(True), self.sh); self.assertEqual(self.ran, [])   # reused
-
-    def test_mac_after_ios(self):   # an iOS build makes the Mac library too: a Mac-only build is reused
-        self.assertEqual(self.vk(False), self.sh / 'ios')
-        self.assertIn('--ios', self.ran[0][0])
-        (self.sh / 'vk.key').unlink()   # an iOS build from before Mac-only builds wrote only its own key
-        self.assertEqual(self.vk(True), self.sh); self.assertEqual(self.ran, [])
-
-    def test_ios_after_mac(self):   # a Mac-only build made no iPhone library: an iOS build runs
-        self.vk(True)
-        self.assertEqual(self.vk(False), self.sh / 'ios'); self.assertEqual(len(self.ran), 1)
-        self.assertTrue((self.sh / 'ios/vk/vk_shaders.metallib').is_file())
-
-    def test_changed_inputs(self):
-        self.vk(False)
-        self.vk(True, 'K2'); self.assertEqual(len(self.ran), 1)
-        self.assertTrue((self.sh / 'ios/vk/vk_shaders.metallib').is_file())   # the iPhone library stays, under its own (older) key
-        self.assertEqual(nsp.reused(self.sh / 'ios/vk.key', 'K'), '3 shaders for the Mac and iOS')
 
 
 class Nvn(Base):

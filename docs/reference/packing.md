@@ -70,6 +70,7 @@
 
 ### The Vulkan shader step fails with `Argument list too long: 'xcrun'`
 
+- **Note:** the Vulkan layer and `vk_shaders.py` were removed in release 1 (in git at `93c34371`); this entry is their history.
 - **Symptom:** `vk_shaders.py` stops with `OSError: [Errno 7] Argument list too long: 'xcrun'` after the Metal compiles, in the `metallib` link.
 - **Cause:** `metallib()` passed every `.air` file as an absolute path in one command. The NSP script runs it with `TMPDIR` set to the work folder, so each path holds that folder's name; a game with thousands of generated modules (Super Mario Galaxy: 3,083 captured shaders, more with the dual-source variants) under a long NSP folder name exceeds macOS's 1 MB `ARG_MAX`.
 - **Fix:** `metallib()` runs from the files' common folder with relative paths and an absolute output path, so the command length no longer depends on the work folder's name.

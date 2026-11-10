@@ -475,7 +475,7 @@ static void front_ios_power_watch(void) {
     dispatch_resume(mp);
 }
 
-// Frame-rate counter: the frames put on screen in the last second (nvn_mtl.m counts them for NVN and for the Vulkan layer alike; frames the display link merged away are not counted).
+// Frame-rate counter: the frames put on screen in the last second (nvn_mtl.m counts them; frames the display link merged away are not counted).
 // On when the IPA was built with it (the NSP script's SHOW_FPS / --show-fps → DMShowFPS in Info.plist); DM_SHOW_FPS=0 / 1 (the launcher, Documents/env.txt) overrides that without a rebuild,
 // and the in-game menu turns it on and off ([DmRootVC showFPS:])
 uint64_t mtl_present_count(void);

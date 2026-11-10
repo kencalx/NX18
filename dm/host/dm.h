@@ -210,7 +210,6 @@ void dm_gfx_pressure(int level);   // hle_nvn.c: the system's memory pressure (t
 uint64_t dm_gfx_trim(int level);   // hle_nvn.c: give back the idle graphics caches and sweep the guest's files now; only with no submission open and the GPU drained (dm_gfx_suspend does it going to the background); the bytes
 int dm_gfx_save_wait(int wait_ms);   // hle_nvn.c: waits up to wait_ms for the pipeline archive's writes dm_gfx_suspend started (iOS: within the app's background time); 1: all written
 void dm_gfx_quit(int wait_ms);   // hle_nvn.c: the process is ending (the graceful exit): what the pipeline archive has not written yet, written, waiting up to wait_ms
-void dm_gfx_enter(void); void dm_gfx_leave(void);   // hle_nvn.c: the gate dm_gfx_suspend closes, for graphics layers other than NVN (dm/gfx/vk)
 void dm_gfx_shot_at(long k, const char *path);
 void dm_shot_written(const char *path, int ok);   // The graphics side finished writing a screenshot to disk (diag.c: DM_TICK_HOLD=E:SHOT unfreezes on this)
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg);   // The same, then(arg) in place of the last _exit(0) (oe::ExecuteProgram: execve of the next program)

@@ -848,32 +848,6 @@ class RewriteWorkers(Base):
                 collect.assert_not_called()
 
 
-class LayerShaders(Base):
-    def test_redumped_romfs_and_captures_invalidate_only_own_libraries(self):
-        cap = self.ex / 'capture'; cap.mkdir(); (cap / 'shader.bin').write_bytes(b'shader')
-        self.derive(); g = game.Game(self.pdir)
-        logs = self.tmp / 'logs'; logs.mkdir(); runs = []
-        def translate(cmd, log, **kw):
-            api = Path(cmd[1]).stem.split('_')[0]
-            lib = Path(cmd[-1]) / api / f'{api}_shaders.metallib'
-            lib.parent.mkdir(parents=True); lib.write_bytes(b'library')
-            Path(log).write_text('macosx: 1\n'); runs.append(api)
-        with mock.patch.object(nsp, 'run', side_effect=translate), mock.patch.object(nsp, 'toolchain', return_value=()), \
-             mock.patch.object(nsp.shutil, 'which', return_value='/glslangValidator'), \
-             mock.patch.object(nsp.subprocess, 'run', return_value=mock.Mock(stdout='compiler', stderr='')):
-            for api, build in (('vk', nsp.build_vk_shaders), ('gl', nsp.build_gl_shaders)):
-                roots = [self.ex / 'RomFS', cap] + ([self.ex / 'ExeFS/main'] if api == 'gl' else [])
-                for own in (False, True):
-                    sh = self.tmp / f'{api}-{own}'
-                    def go(): build(sys.executable, REPO, roots, sh, {'WORK': str(self.tmp), 'PATH': ''}, logs, g, mac=True, provisional=own)
-                    go(); go()
-                    for p in (self.ex / 'RomFS/a.bin', cap / 'shader.bin'):
-                        with self.subTest(api=api, own=own, path=p):
-                            before = len(runs); self.redump(p); go()
-                            self.assertEqual(len(runs), before + int(own))
-                            go(); self.assertEqual(len(runs), before + int(own))
-
-
 class MacApp(Base):
     def test_packer_reports_reuse_and_first_pack_steps(self):
         t = self.tmp; out = t / 'Game.app'; packs = []
@@ -886,7 +860,7 @@ class MacApp(Base):
             on_line(f'app: {out}' + (', reused (inputs unchanged)' if len(packs) > 1 else ''))
         with mock.patch.object(nsp, 'run', side_effect=pack):
             for i in range(2):
-                result = nsp.mac_app(sys.executable, REPO, out, TID, t, self.ex, t / 'patched', t / 'host', t / 'font', t / 'shader', None, 'vulkan', 'en-US',
+                result = nsp.mac_app(sys.executable, REPO, out, TID, t, self.ex, t / 'patched', t / 'host', t / 'font', t / 'shader', None, 'nvn', 'en-US',
                                      game.Game(self.src), 'Game', '1.0.0', 'org.nxnative.test', None, '', {}, t)
                 self.assertIsNone(result)
                 if i: nsp.PROG.end.assert_called_with('Game.app, reused (inputs unchanged)')

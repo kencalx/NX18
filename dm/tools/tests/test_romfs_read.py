@@ -62,13 +62,8 @@ class ReadImage(unittest.TestCase):
             self.assertEqual(z.read('member'), b'archive member')
 
     def test_build_scanners_discover_the_same_inputs_from_image_and_folder(self):
-        import gl_shaders
-        import vk_shaders
         with patch.dict(os.environ, DM_GAME='010020D01AD24000'):
             import shader_split
-        self.assertEqual(list(gl_shaders.sources([str(self.virtual)])), list(gl_shaders.sources([str(self.src)])))
-        self.assertEqual([Path(p).relative_to(self.virtual) for p in vk_shaders.spirv_files(str(self.virtual))],
-                         [Path(p).relative_to(self.src) for p in vk_shaders.spirv_files(str(self.src))])
         jobs, paths = shader_split.zip_jobs([(str(self.virtual / 'data/game.zip'), 'data/game.zip')])
         self.assertEqual(paths, {str(self.virtual / 'data/game.zip')})
         self.assertEqual(jobs[0][2][1], ('member',))

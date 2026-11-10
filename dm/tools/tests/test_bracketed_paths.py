@@ -37,8 +37,8 @@ class BracketedParent(unittest.TestCase):
 
     def test_host_hooks_are_read_from_every_source_folder(self):
         self.write('dm/host/hle_a.c', 'HLE("nnA")\n'); self.write('dm/gfx/b.c', 'HLE("nnB")\n')
-        self.write('dm/gfx/nvn/c.c', 'HLE_FORCE("nnC")\n'); self.write('dm/gfx/vk/d.m', 'VK(vkCreateD, x)\n')
-        self.assertEqual(nso_syms.host_hooks(str(self.root / 'dm/host')), {'nnA', 'nnB', 'nnC', 'vkCreateD'})
+        self.write('dm/gfx/nvn/c.c', 'HLE_FORCE("nnC")\n')
+        self.assertEqual(nso_syms.host_hooks(str(self.root / 'dm/host')), {'nnA', 'nnB', 'nnC'})
 
     def test_boot_nros_are_found(self):
         b, a = self.write('build/nro/b.nro'), self.write('build/nro/a.nro'); self.write('build/nro/c.txt')

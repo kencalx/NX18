@@ -17,11 +17,11 @@ REPO = lint.REPO
 BASELINE = '''# clang-tidy findings of dm/host and dm/gfx per file and check
 # python3 dm/tools/lint_c.py tidy --update. Made with LLVM 23.1.4.
 # file\tcheck\tfindings
-dm/gfx/vk/hle_vk.m\tclang-analyzer-unix.Malloc\t1
+dm/gfx/hle_nv.c\tclang-analyzer-unix.Malloc\t1
 dm/host/hle_hid.c\tclang-analyzer-core.BitwiseShift\t2
 '''
 HID = ('dm/host/hle_hid.c', 'clang-analyzer-core.BitwiseShift')
-VK = ('dm/gfx/vk/hle_vk.m', 'clang-analyzer-unix.Malloc')
+VK = ('dm/gfx/hle_nv.c', 'clang-analyzer-unix.Malloc')
 
 
 class Baseline(unittest.TestCase):
@@ -68,7 +68,7 @@ class Tidy(unittest.TestCase):
     def run_tidy(self, findings, files=()):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
-            (d / 'compile_commands.json').write_text(json.dumps([{'file': str(REPO / 'dm/host/hle_hid.c')}, {'file': str(REPO / 'dm/gfx/vk/hle_vk.m')}]))
+            (d / 'compile_commands.json').write_text(json.dumps([{'file': str(REPO / 'dm/host/hle_hid.c')}, {'file': str(REPO / 'dm/gfx/hle_nv.c')}]))
             (d / 'b.tsv').write_text(BASELINE)
             version = mock.Mock(stdout='LLVM version 23.1.4\n')
             args = mock.Mock(files=list(files), update=False, rebaseline=False, against=None, report=None, jobs=2)
@@ -81,12 +81,12 @@ class Tidy(unittest.TestCase):
         return [('dm/host/hle_hid.c', 230 + i, 5, HID[1], 'Right operand is negative in left shift') for i in range(n)]
 
     def test_baseline_counts_pass(self):
-        rc, out = self.run_tidy({'dm/host/hle_hid.c': self.hid(2), 'dm/gfx/vk/hle_vk.m': [('dm/gfx/vk/hle_vk.m', 991, 137, VK[1], 'Use of memory after it is released')]})
+        rc, out = self.run_tidy({'dm/host/hle_hid.c': self.hid(2), 'dm/gfx/hle_nv.c': [('dm/gfx/hle_nv.c', 991, 137, VK[1], 'Use of memory after it is released')]})
         self.assertEqual(rc, 0, out)
         self.assertIn('0 file/check pairs above it, 0 below it', out)
 
     def test_new_finding_fails_and_is_listed_with_its_line(self):
-        rc, out = self.run_tidy({'dm/host/hle_hid.c': self.hid(3), 'dm/gfx/vk/hle_vk.m': [('dm/gfx/vk/hle_vk.m', 991, 137, VK[1], 'Use of memory after it is released')]})
+        rc, out = self.run_tidy({'dm/host/hle_hid.c': self.hid(3), 'dm/gfx/hle_nv.c': [('dm/gfx/hle_nv.c', 991, 137, VK[1], 'Use of memory after it is released')]})
         self.assertEqual(rc, 1)
         self.assertIn(f'dm/host/hle_hid.c: {HID[1]}: 3 findings, the baseline has 2', out)
         self.assertIn(f'::error file=dm/host/hle_hid.c,line=232,col=5::Right operand is negative in left shift [{HID[1]}] (3 in this file, the baseline has 2)', out)
@@ -94,7 +94,7 @@ class Tidy(unittest.TestCase):
     def test_fixed_finding_still_listed_fails(self):
         rc, out = self.run_tidy({'dm/host/hle_hid.c': self.hid(2)})
         self.assertEqual(rc, 1)
-        self.assertIn(f'::error file=dm/gfx/vk/hle_vk.m::{VK[1]}: 0 findings, the baseline still has 1: shrink it', out)
+        self.assertIn(f'::error file=dm/gfx/hle_nv.c::{VK[1]}: 0 findings, the baseline still has 1: shrink it', out)
 
     def test_named_sources_report_nothing_fixed(self):
         rc, out = self.run_tidy({'dm/host/hle_hid.c': self.hid(1)}, files=['dm/host/hle_hid.c'])
@@ -123,22 +123,22 @@ class ClangTidyOutput(unittest.TestCase):
 
 class CompileDatabase(unittest.TestCase):
     def test_compile_line(self):
-        line = ('clang -O1 -g -Wall -Werror -fsanitize=thread -I../gfx/nvn/include -D DM_X=1 -isysroot /sdk -framework Metal -arch arm64 -c hle_hid.c ../gfx/vk/hle_vk.m '
+        line = ('clang -O1 -g -Wall -Werror -fsanitize=thread -I../gfx/nvn/include -D DM_X=1 -isysroot /sdk -framework Metal -arch arm64 -c hle_hid.c ../gfx/hle_nv.c '
                 '-o dmhost -lz -L/opt/lib -Wl,-dead_strip')
         (e1, e2) = lint.entries(REPO / 'dm/host', line, '/other-sdk')
         self.assertEqual(e1['file'], str(REPO / 'dm/host/hle_hid.c'))
         self.assertEqual(e1['directory'], str(REPO / 'dm/host'))
         self.assertEqual(e1['arguments'], ['clang', '-O1', '-g', '-Wall', '-I../gfx/nvn/include', '-D', 'DM_X=1', '-isysroot', '/sdk', '-c', str(REPO / 'dm/host/hle_hid.c')])
-        self.assertEqual(e2['file'], str(REPO / 'dm/gfx/vk/hle_vk.m'))
+        self.assertEqual(e2['file'], str(REPO / 'dm/gfx/hle_nv.c'))
         self.assertEqual(lint.entries(REPO / 'dm/host', 'ar rcs libx.a a.o', ''), [])
         self.assertEqual(lint.entries(REPO / 'dm/host', 'clang -c x.c', '/sdk')[0]['arguments'][:3], ['clang', '-isysroot', '/sdk'])   # the SDK added when make gives none
 
     def test_first_command_of_a_source_wins_and_third_party_is_left_out(self):
         def e(f, flag): return {'directory': str(REPO), 'file': str(REPO / f), 'arguments': ['clang', flag, '-c', str(REPO / f)]}
-        db = lint.merge_entries([e('dm/host/loader.c', '-DHOST'), e('dm/gfx/vk/hle_vk.m', '-DHOST'), e('dm/host/loader.c', '-DTEST'),
+        db = lint.merge_entries([e('dm/host/loader.c', '-DHOST'), e('dm/gfx/hle_nv.c', '-DHOST'), e('dm/host/loader.c', '-DTEST'),
                                  e('dm/third_party/libvpx/vpx_dsp/x.c', '-DHOST'), e('dm/host/gen/profile.c', '-DHOST'), e('dm/host/tests/t_fs.c', '-DTEST')])
         self.assertEqual([(lint.rel(x['file']), x['arguments'][1]) for x in db],
-                         [('dm/gfx/vk/hle_vk.m', '-DHOST'), ('dm/host/loader.c', '-DHOST'), ('dm/host/tests/t_fs.c', '-DTEST')])
+                         [('dm/gfx/hle_nv.c', '-DHOST'), ('dm/host/loader.c', '-DHOST'), ('dm/host/tests/t_fs.c', '-DTEST')])
 
 
 class Against(unittest.TestCase):

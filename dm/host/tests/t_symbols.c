@@ -61,7 +61,34 @@ static void expect_abort(int duplicate) {
     assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
 }
 
+// The OpenGL / Vulkan names of the layers removed in release 1: an NVN game that only imports them (Absolum, Balatro's vkGetInstanceProcAddr) gets named stubs as before,
+// a call to any other stub still returns 0, and a call to one of them stops the game with the one message. In a child: it aborts, and stub indexes are its own
+static void expect_gfx_api_stop(void) {
+    int fd[2]; assert(!pipe(fd));
+    pid_t pid = fork(); assert(pid >= 0);
+    if (!pid) {
+        struct rlimit lim = {0, 0}; setrlimit(RLIMIT_CORE, &lim);
+        close(fd[0]); dup2(fd[1], 2);
+        const char *other[] = {"glslcCompile", "nvnBootstrapLoader", "vkontakte", "egl", "gl"}, *api[] = {"eglGetDisplay", "vkGetInstanceProcAddr", "glClear"};
+        uint64_t regs[3] = {0};
+        for (unsigned i = 0; i < 5; i++) { uint64_t a = resolve_import(NULL, other[i]); unsigned k = (unsigned)((uint64_t *)a - unimpl_stubs);
+            if (g_stub_gfx[k] || unimpl_c(k, regs)) _exit(1); }
+        for (unsigned i = 0; i < 3; i++) { uint64_t a = resolve_import(NULL, api[i]); if (!g_stub_gfx[(uint64_t *)a - unimpl_stubs]) _exit(2); }
+        unimpl_c((unsigned)((uint64_t *)resolve_import(NULL, "eglGetDisplay") - unimpl_stubs), regs);
+        _exit(3);
+    }
+    close(fd[1]);
+    char out[1024] = {0}; size_t n = 0; ssize_t r;
+    while (n < sizeof out - 1 && (r = read(fd[0], out + n, sizeof out - 1 - n)) > 0) n += (size_t)r;
+    close(fd[0]);
+    int status; assert(waitpid(pid, &status, 0) == pid);
+    assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+    assert(strstr(out, "[RED] this game renders with OpenGL/Vulkan, which NX 18 does not support (Metal 4 only; the layer was removed in release 1): it called eglGetDisplay"));
+    assert(!strstr(out, "UNIMPL eglGetDisplay"));
+}
+
 int main(void) {
+    expect_gfx_api_stop();
     // Empty/missing sections must still give misses after lazy initialization.
     assert(!hle_implements("absent")); assert(!hle_implements("absent"));
     force_init(); assert(!force_lookup("absent")); reset_sections();
@@ -106,6 +133,6 @@ int main(void) {
     }
     assert(g_nstub == MAX_STUB); expect_abort(0);
     reset_sections();
-    puts("Symbol indexes: collisions, duplicate precedence/rejection, misses, wrappers and 4096 reusable stubs: OK");
+    puts("Symbol indexes: collisions, duplicate precedence/rejection, misses, wrappers, 4096 reusable stubs and the OpenGL / Vulkan stop: OK");
     return 0;
 }

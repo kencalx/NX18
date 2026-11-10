@@ -1,12 +1,14 @@
 # Super Mario 64 in Super Mario 3D All-Stars (`010049900F546001`)
 
+> **Unsupported in NX 18 release 1.** This game renders with Vulkan, and release 1 is Metal 4 only and renders NVN games only: the Vulkan layer (`dm/gfx/vk/hle_vk.m`), its shader translator and its run-time shader capture were removed, so the NSP script stops for Super Mario 3D All-Stars, which packs this program with the launcher (`[RED] <name> renders with Vulkan; NX 18 release 1 supports NVN games only`). The notes below describe the layer as it was at git `93c34371`, where its code is; the profile stays for the port to Metal 4 ([Graphics APIs: NVN only](../../../docs/reference/rendering.md#graphics-apis-nvn-only)).
+
 Program 1 of [Super Mario 3D All-Stars](../010049900F546000/README.md), packed with it, update 1.1.4 (v393216), SDK 10.8.1. Modules `main` and `sdk`.
 
 Nintendo's N64 layer ("EmuAppNX64") on the Japanese Shindou ROM with English text patched in by Lua scripts:
 
 - the MIPS code is recompiled to arm64 in an NRO (`rom/Stardust_JP/05_UNSMJ3.002.nro`), which the game loads with `nn::ro`;
 - a precompiled block list goes through a JIT plugin (`nro/EmuSystemJITPlugin.nro`) under `nn::jit`, 14 MB of code at boot, and a few blocks are compiled in play;
-- it renders with Vulkan ([`hle_vk.m`](../../gfx/vk/hle_vk.m)).
+- it renders with Vulkan (`hle_vk.m`).
 
 Tested on the Mac: the Mario head, the file select, a new file through Peach's letter and Lakitu to the castle grounds, walking to the castle, at 30 fps; 0.64 GB resident there. The pause page and Return to title selection work.
 
@@ -26,7 +28,7 @@ A closes text, B jumps, Y attacks; Plus starts at the head, Minus opens the laun
 ## Found on this game
 
 - [`nn::jit` taken over by the host](../../../docs/reference/services.md#nnjit-taken-over-by-the-host), [`nn::jit` served from an image on iOS](../../../docs/reference/services.md#nnjit-served-from-an-image-on-ios).
-- Vulkan layer: [`VK_EXT_debug_report`](../../../docs/reference/rendering.md#vk_ext_debug_report), [Specialization constants](../../../docs/reference/rendering.md#specialization-constants), [Packed 16-bit and 8-bit formats](../../../docs/reference/rendering.md#packed-16-bit-and-8-bit-formats), [Image clears, dynamic stencil and line width](../../../docs/reference/rendering.md#image-clears-dynamic-stencil-and-line-width), [What a game tears down that it should not](../../../docs/reference/rendering.md#what-a-game-tears-down-that-it-should-not).
+- Vulkan layer: `VK_EXT_debug_report`, Specialization constants, Packed 16-bit and 8-bit formats, Image clears, dynamic stencil and line width, What a game tears down that it should not.
 
 ## Open
 

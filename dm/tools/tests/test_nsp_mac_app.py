@@ -767,8 +767,8 @@ class Script(unittest.TestCase):
         self.assertEqual(o['--settings'], str(tmp / 'app/launcher.json'))   # the launcher settings the Mac front end reads, without the iPhone's own switches
         self.assertEqual(self.settings_cmd[2:], ['01008CF01BAAC000', str(tmp / 'patched'), str(tmp / 'ex/control.nacp'), str(tmp / 'app/launcher.json')])
         self.assertEqual((self.settings_env['SETTINGS_PLATFORM'], self.settings_env['GFXAPI'], self.settings_env['DM_LANG']), ('mac', 'nvn', 'en-US'))
-        o, tmp = self.pack_cmd('vulkan', aoc=Path('/x/aoc'), sign='Developer ID Application: X (T)')
-        self.assertEqual((o['--msl'], o['--aoc'], o['--sign']), (str(tmp / 'shader/vk'), '/x/aoc', 'Developer ID Application: X (T)'))
+        o, tmp = self.pack_cmd('nvn', aoc=Path('/x/aoc'), sign='Developer ID Application: X (T)')
+        self.assertEqual((o['--msl'], o['--aoc'], o['--sign']), (str(tmp / 'shader/cache/b-0123456789ab'), '/x/aoc', 'Developer ID Application: X (T)'))
 
     def test_pso_archive(self):   # an NVN game with shader pairs: its pipeline archive for this Mac's GPU, made by pso_offline.py, goes into the app
         tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp)

@@ -1,5 +1,7 @@
 # Super Mario Sunshine in Super Mario 3D All-Stars (`010049900F546002`)
 
+> **Unsupported in NX 18 release 1.** This game renders with Vulkan, and release 1 is Metal 4 only and renders NVN games only: the Vulkan layer (`dm/gfx/vk/hle_vk.m`), its shader translator and its run-time shader capture were removed, so the NSP script stops for Super Mario 3D All-Stars, which packs this program with the launcher (`[RED] <name> renders with Vulkan; NX 18 release 1 supports NVN games only`). The notes below describe the layer as it was at git `93c34371`, where its code is; the profile stays for the port to Metal 4 ([Graphics APIs: NVN only](../../../docs/reference/rendering.md#graphics-apis-nvn-only)).
+
 Program 2 of [Super Mario 3D All-Stars](../010049900F546000/README.md), packed with it, update 1.1.4 (v393216), SDK 9.5.1. Modules `main`, `subsdk0` (the movie library) and `sdk`.
 
 NERD's Hagi layer, as in Super Mario Galaxy ([010099C022B96000](../010099C022B96000/README.md)):
@@ -31,7 +33,7 @@ A talks and picks a block at the file select (stand under one: Mario starts betw
 ## Found on this game
 
 - [Loading NROs with `ro::LoadModule`](../../../docs/reference/services.md#loading-nros-with-roloadmodule) (`.nrolz`).
-- [Occlusion queries that span render encoders](../../../docs/reference/rendering.md#occlusion-queries-that-span-render-encoders).
+- Occlusion queries that span render encoders.
 
 ## Open
 

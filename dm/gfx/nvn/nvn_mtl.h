@@ -57,10 +57,10 @@ void mtl_arch_save(int wait_ms, int ending);         // The pipeline archive's u
 void mtl_arch_resume(void);                          // Back in the foreground: compacting writes arm the pipeline archive's crash marker again (none while in the background)
 int mtl_arch_wait(int wait_ms);                      // Waits up to wait_ms for the archive's writes handed over (mtl_arch_save); 1: none left
 void mtl_xv_window_tex(uint64_t serial);   // Register a window (swapchain) texture: the cross-submit validity ledger never collects it
-// External producers (the Vulkan layer, dm/gfx/vk): the shared Metal device; a serial for one of their textures; present it once their event reaches ev_val (ticket for mtl_present_wait)
+// The shared Metal device. External producers (a serial for one of their textures; present it once their event reaches ev_val, ticket for mtl_present_wait) and mtl_device_classic
+// were for the OpenGL and Vulkan layers, removed in release 1 (git 93c34371): nothing calls them now, and the classic queue goes with them in a later stage
 void *mtl_device(void);
 void *mtl_device_classic(void);   // the same for a layer that draws only on classic queues: a device without Metal 4 (a virtual Mac) starts too, and its presents are dropped
-int mtl_depth_bounds_hw(void);   // the depth bounds test is not turned off (DM_DEPTH_BOUNDS=0) and the GPU takes the bounds (Apple10 and later), so bounds that pass nothing skip draws (nvn_dbnd.h): asked at the first pipeline with bounds, with one log line
 uint64_t mtl_ext_tex(void *tex);
 uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_val, const int crop[4]);   // crop: x, y, w, h of the texture to show (NULL = all of it)
 void mtl_present_layer(uint32_t w, uint32_t h);   // a sized vi layer (hle_vi.c): the picture's shape instead of the display's 16:9

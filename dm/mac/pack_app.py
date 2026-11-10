@@ -21,7 +21,7 @@ import romfs as rfs
 import shader_lib
 MODULE_FILES = ('*.patched.bin', '*.fixups.tsv', '*.gates.tsv', '*.cuts.tsv', '*.obs.tsv', '*.changed.tsv', 'nro.tsv', '*.variants', 'mods.tsv')   # what the host reads from the module folder (build_ipa.sh copies the same tables but changed.tsv: the iPhone's cheats never write code)
 MSL_FILES = ('*.metallib', '*.json', '*.tsv')   # what the host reads from msl/ (not the Mac build's .metal sources or _b_build.json); an NVN game's b-<chain> goes in as one file of them (shader_lib.py)
-# read beside DM_NVN_SHMAP; any of them may be absent (a Vulkan or GL game has no c1_full.tsv). The shader pairs are the pipeline prebuild's (nvn_mtl.m pso_prebuild): without them the
+# read beside DM_NVN_SHMAP; any of them may be absent. The shader pairs are the pipeline prebuild's (nvn_mtl.m pso_prebuild): without them the
 # app makes no pulling bases, a hybrid draw has no stand-in and a new pipeline compiles on the submit thread (build_ipa.sh copies them into the IPA the same way)
 TABLES = ('shader_map.tsv', 'pso_manifest.tsv', 'c1_full.tsv', 'cb_extent.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')
 PSO_FILES = ('*.mtl4a', 'prebuilt.tsv', 'rest_pairs.tsv', 'archive.tsv')   # what the app takes of pso_offline.py's output folder
@@ -185,7 +185,7 @@ def inventory(root):
     return rows
 
 
-def is_chain_library(msl): return shader_lib.name_of(msl).startswith('b-')   # not a Vulkan or GL game's vk / gl, one Metal library with its table
+def is_chain_library(msl): return shader_lib.name_of(msl).startswith('b-')
 
 
 def msl_inputs(msl):
@@ -346,7 +346,7 @@ def pack(a):
     info['DMModuleFiles'] = [p.name for p in mods]
     commit = source_commit()
     if commit: info['DMCommit'] = commit
-    if msl_dst.name.startswith('b-'): info['DMChain'] = msl_dst.name[2:]   # the library chain the app carries (a Vulkan or GL game's vk / gl has none)
+    if msl_dst.name.startswith('b-'): info['DMChain'] = msl_dst.name[2:]   # the library chain the app carries
     (c / 'Info.plist').write_bytes(plistlib.dumps(info))
     (c / 'PkgInfo').write_text('APPL????')
     step(f'signing ({"ad-hoc" if a.sign == "-" else a.sign})'); sign(tmp, a.sign, codesign)
@@ -372,7 +372,7 @@ def parse(argv):
     ap.add_argument('--host', required=True, help='the Mac host built for the profile')
     ap.add_argument('--patched', required=True, help='the rewritten modules (patch_nso.py output)')
     ap.add_argument('--romfs', required=True, help='the RomFS of the packed version')
-    ap.add_argument('--msl', required=True, help='the Mac shader libraries: <shader>/cache/b-<chain>, or a Vulkan or GL game\'s <shader>/vk or gl')
+    ap.add_argument('--msl', required=True, help='the Mac shader libraries: <shader>/cache/b-<chain>')
     ap.add_argument('--msl-name', help='its folder name in the app (default: its own)')
     ap.add_argument('--tables', required=True, help='the game profile folder (shader_map.tsv and the tables beside it)')
     ap.add_argument('--font', required=True, help='the folder of the shared-font stand-ins (nintendo_ext.ttf)')

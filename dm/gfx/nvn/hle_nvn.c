@@ -1683,18 +1683,14 @@ static int g_susp, g_inflight_api;
 __thread _Atomic int dm_host_work;   // see dm.h (defined here: the graphics unit tests compile this file but not hle_thread.c)
 static void gfx_enter(void) { pthread_mutex_lock(&g_susp_mu); while (g_susp) pthread_cond_wait(&g_susp_cv, &g_susp_mu); g_inflight_api++; pthread_mutex_unlock(&g_susp_mu); dm_host_work++; }
 static void gfx_leave(void) { dm_host_work--; pthread_mutex_lock(&g_susp_mu); g_inflight_api--; pthread_cond_broadcast(&g_susp_cv); pthread_mutex_unlock(&g_susp_mu); }
-void dm_gfx_enter(void) { gfx_enter(); }   // the same gate for the Vulkan layer's submits and presents (dm/gfx/vk)
-void dm_gfx_leave(void) { gfx_leave(); }
-__attribute__((weak)) void dm_vk_drain(void) {}   // dm/gfx/vk/hle_vk.m: wait for the Vulkan layer's queue (the graphics unit tests do not link it)
-__attribute__((weak)) void dm_gl_drain(void) {}   // dm/gfx/gl/hle_gl.m: the same for the GL layer
 void dm_gfx_suspend(int on) {
     pthread_mutex_lock(&g_susp_mu);
     g_susp = on != 0;
     if (on) while (g_inflight_api) pthread_cond_wait(&g_susp_cv, &g_susp_mu);
     else pthread_cond_broadcast(&g_susp_cv);
     pthread_mutex_unlock(&g_susp_mu);
-    if (on) { dm_vk_drain(); dm_gl_drain(); mtl_drain(); mtl_arch_save(0, 0); LOG("[nvn] graphics suspended: in-flight GPU work drained"); if (mtl_bg_trim_on()) dm_gfx_trim(3); } else { mtl_arch_resume(); LOG("[nvn] graphics resumed"); }   // the Vulkan and GL queues first: presents on the NVN queue wait for their frames;
-    // the pipeline archive starts writing what it holds: a process in the background may be ended without a word (iOS), and a prewarm's captures wait for a full period. Then, with the gate closed and nothing in flight, the idle caches go
+    if (on) { mtl_drain(); mtl_arch_save(0, 0); LOG("[nvn] graphics suspended: in-flight GPU work drained"); if (mtl_bg_trim_on()) dm_gfx_trim(3); } else { mtl_arch_resume(); LOG("[nvn] graphics resumed"); }
+    // The pipeline archive starts writing what it holds: a process in the background may be ended without a word (iOS), and a prewarm's captures wait for a full period. Then, with the gate closed and nothing in flight, the idle caches go
     // (dm_gfx_trim: a suspended app holding less is less likely to be ended for memory; DM_BG_TRIM=0 keeps them)
 }
 void dm_gfx_quit(int wait_ms) { mtl_arch_save(wait_ms, 1); }

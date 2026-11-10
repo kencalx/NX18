@@ -1,9 +1,8 @@
-"""Signed integer overflow wraps in translated shaders (-fwrapv in dmsh_build.py MAC_METAL, ios_metal.py METAL, vk_shaders.py and gl_shaders.py): SPIR-V, GLSL and the Switch's GPUs wrap,
+"""Signed integer overflow wraps in translated shaders (-fwrapv in dmsh_build.py MAC_METAL and ios_metal.py METAL): SPIR-V, GLSL and the Switch's GPUs wrap,
 while MSL leaves it undefined, and without the flag the compiler folds Ocarina of Time's low-half extraction (an IMAD by 65536, then a shift right by 16) to the whole word. On this Mac's GPU,
 with the chain's own compile command, the idioms below give the wrapped results; the iPhone command keeps the shift."""
 import ast
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
@@ -79,10 +78,6 @@ class WrappingOverflow(unittest.TestCase):
     def test_every_compile_wraps(self):
         self.assertIn('-fwrapv', mac_metal())
         self.assertIn('-fwrapv', ios_metal.METAL)
-        for tool in ('vk_shaders.py', 'gl_shaders.py'):
-            calls = re.findall(r"\['xcrun', '-sdk', sdk, 'metal', '-c'[^\]]*\]", (TOOLS / tool).read_text())
-            self.assertTrue(calls, tool)
-            for c in calls: self.assertIn("'-fwrapv'", c, tool)
 
     @unittest.skipUnless(shutil.which('xcrun') and shutil.which('clang'), 'needs Xcode and Metal')
     def test_gpu_wraps(self):

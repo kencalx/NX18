@@ -1,10 +1,9 @@
-// Depth bounds test: the bounds a draw runs with, from what the game set (nvnCommandBufferSetDepthBounds, recorded as OP_DEPTH_BOUNDS; Vulkan's depthBoundsTestEnable with
-// minDepthBounds / maxDepthBounds in hle_vk.m). The Switch's GPU passes a fragment when the depth already stored at its sample lies in [min, max], as GL's EXT_depth_bounds_test and
+// Depth bounds test: the bounds a draw runs with, from what the game set (nvnCommandBufferSetDepthBounds, recorded as OP_DEPTH_BOUNDS). The Switch's GPU passes a fragment when the depth already stored at its sample lies in [min, max], as GL's EXT_depth_bounds_test and
 // Vulkan define it, and Metal's -setDepthTestMinBound:maxBound: tests the stored depth the same way. Metal takes only 0 <= min <= max <= 1 and reads (0, 1) as the test turned off.
 // The stored depth is always in [0, 1], so a bound outside it is the same as the bound clamped; bounds that no stored depth can meet (min above max, min above 1, max below 0, or a NaN,
 // which fails every comparison on the GPU) pass nothing, and on a GPU with the test the replay skips those draws instead of handing Metal bounds it refuses; a GPU without the
 // test draws them, as every draw, as before the test was applied.
-// Pure C so the Vulkan layer and the tests share it (t_depth_bounds.m)
+// Pure C so the tests share it (t_depth_bounds.m)
 #pragma once
 
 enum { DBND_OFF, DBND_TEST, DBND_EMPTY };   // the test is off or cannot reject anything / bounds for the encoder / no fragment passes

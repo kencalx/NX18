@@ -19,28 +19,27 @@ SDL_MAIN = {'eglCreateWindowSurface', 'eglGetProcAddress'}   # SDL's EGL backend
 
 class NroGraphics(unittest.TestCase):
     def test_nvn_in_nros_beats_an_sdl_main(self):
-        s = pg.shader_sources(SDL_MAIN, 0, ['subsdk0'], 0, 0, gl_names=2, nro_imports={'nvnBootstrapLoader', 'glslcCompile'})
+        s = pg.shader_sources(SDL_MAIN, 0, ['subsdk0'], 0, gl_names=2, nro_imports={'nvnBootstrapLoader', 'glslcCompile'})
         self.assertEqual(s['graphics'][0], 'nvn')
         self.assertTrue(s['glslc_capture'][0])
-        self.assertFalse(s['gl_capture'][0])
 
-    def test_gl_without_nros_unchanged(self):   # Digimon Story Cyber Sleuth: no NRO, GL through EGL
-        s = pg.shader_sources(SDL_MAIN | {'nvnBootstrapLoader'}, 0, [], 0, 0, gl_names=1, gl_files=1)
+    def test_gl_without_nros_unchanged(self):   # Digimon Story Cyber Sleuth: no NRO, GL through EGL (the NSP script stops for it: NX 18 release 1 renders NVN games only)
+        s = pg.shader_sources(SDL_MAIN | {'nvnBootstrapLoader'}, 0, [], 0, gl_names=1)
         self.assertEqual(s['graphics'][0], 'gl')
+        self.assertIn('does not support', s['graphics'][1])
         self.assertFalse(s['glslc_capture'][0])
 
     def test_own_glslc_beats_egl_in_main(self):   # Rayman 30th Anniversary Edition: EGL and glShaderSource linked, NVN and its own GLSL compiled with GLSLC
-        s = pg.shader_sources(SDL_MAIN | {'nvnBootstrapLoader', 'glslcCompile'}, 4, ['subsdk2'], 0, 0, gl_names=2)
+        s = pg.shader_sources(SDL_MAIN | {'nvnBootstrapLoader', 'glslcCompile'}, 4, ['subsdk2'], 0, gl_names=2)
         self.assertEqual(s['graphics'][0], 'nvn')
         self.assertTrue(s['glslc_capture'][0])
-        self.assertFalse(s['gl_capture'][0])
 
     def test_glslc_without_nvn_stays_gl(self):   # no nvnBootstrapLoader in main: GLSLC alone does not make it an NVN game
-        s = pg.shader_sources(SDL_MAIN | {'glslcCompile'}, 4, ['subsdk2'], 0, 0, gl_names=2)
+        s = pg.shader_sources(SDL_MAIN | {'glslcCompile'}, 4, ['subsdk2'], 0, gl_names=2)
         self.assertEqual(s['graphics'][0], 'gl')
 
     def test_nro_glslc_needs_a_module_that_defines_it(self):
-        s = pg.shader_sources(set(), 0, [], 0, 0, nro_imports={'nvnBootstrapLoader', 'glslcCompile'})
+        s = pg.shader_sources(set(), 0, [], 0, nro_imports={'nvnBootstrapLoader', 'glslcCompile'})
         self.assertEqual(s['graphics'][0], 'nvn')
         self.assertFalse(s['glslc_capture'][0])
 

@@ -538,19 +538,6 @@ class Regress(unittest.TestCase):
             self.assertNotEqual(original, changed)
             self.assertNotEqual(changed, paired)
 
-    def test_vk_chain_key_tracks_selected_converter_content(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td); tools = root / 'dm/gfx/tools'; tools.mkdir(parents=True)
-            bundled = tools / 'spirv_cross_bin/spirv-cross'; bundled.parent.mkdir()
-            bundled.write_bytes(b'bundled converter')
-            selected = root / 'override'; selected.write_bytes(b'converter A'); selected.chmod(0o755)
-            env = dict(regress.os.environ, SPIRV_CROSS=str(selected))
-            g = NS(kind='vk', ver='v0', env=lambda tree: env, shader_roots=list, build=root)
-            tree = NS(path=root)
-            before = regress.chain_key(tree, g, 'tools')[2]
-            selected.write_bytes(b'converter B')
-            self.assertNotEqual(before, regress.chain_key(tree, g, 'tools')[2])
-
     def test_baseline_context_tracks_route_save_artifacts_and_settings(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); save = root / 'save'; save.mkdir()
@@ -612,15 +599,6 @@ class Regress(unittest.TestCase):
             self.assertEqual(env['DM_GAMES_DIR'], str(g.profile_dir(tree).parent))
             self.assertEqual(env['DM_GAMES_FIRST'], '1')
 
-    def test_vk_roots_include_runtime_capture(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td); build = root / ('0' * 16 + '_build')
-            romfs = build / 'extract/v0/RomFS'; romfs.mkdir(parents=True)
-            (build / 'patched_v0').mkdir()
-            capture = romfs.parent / 'vk_capture'; capture.mkdir()
-            g = regress.Game(root, build)
-            self.assertEqual(g.shader_roots(), [romfs, capture])
-
     def test_rewriter_uses_original_registered_profile_and_keeps_provisional(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -640,32 +618,6 @@ class Regress(unittest.TestCase):
                     self.assertEqual(selected['DM_GAME'], 'game')
                     self.assertTrue((dst / '.done').is_file())
 
-    def test_vk_build_records_failure_even_without_generated_shaders(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td); tool = root / 'dm/gfx/tools/vk_shaders.py'; tool.parent.mkdir(parents=True)
-            tool.write_text('raise SystemExit(1)\n')
-            g = NS(id='game', folder=root, build=root, kind='vk', env=lambda tree: dict(regress.os.environ), shader_roots=list)
-            with patch.object(regress, 'chain_key', return_value=('version', 'inputs', 'key')):
-                manifest, _ = regress.chain_build(NS(id='tree', path=root), g, NS(tools_fp='', jobs=1, pause_lock=None))
-            self.assertTrue(manifest['build_failed'])
-            self.assertEqual(manifest['shaders'], {})
-
-    def test_vk_failure_without_msl_fails_the_check(self):
-        with tempfile.TemporaryDirectory() as td, ExitStack() as stack:
-            root = Path(td)
-            tree = NS(id='tree'); g = NS(id='game', name='game')
-            a = NS(baseline='base', candidate='cand', no_smoke=True, rewrite=False, quick=False)
-            stack.enter_context(patch.object(regress, 'Tree', return_value=tree))
-            stack.enter_context(patch.object(regress, 'select', return_value=[g]))
-            stack.enter_context(patch.object(regress, 'rewriter_key', return_value='same'))
-            baseline = {'kind': 'vk', 'shaders': {'key': {'st': 'ok'}}, 'failed': 0}
-            candidate = {'kind': 'vk', 'shaders': {}, 'failed': 0, 'build_failed': True}
-            stack.enter_context(patch.object(regress, 'chain_build', side_effect=[(baseline, root), (candidate, root)]))
-            stack.enter_context(patch.object(regress, 'new_report', return_value={'games': {}}))
-            finish = stack.enter_context(patch.object(regress, 'finish', return_value=1))
-            stack.enter_context(patch.object(regress, 'say'))
-            regress.cmd_check(a)
-            self.assertEqual(finish.call_args.args[0]['games']['game']['status'], 'NEW-FAIL')
 
 
 class Validated(unittest.TestCase):

@@ -83,7 +83,7 @@ class ProfilePackTests(unittest.TestCase):
 
     def test_programs_pull_whatever_a_program_profile_says(self):
         # build_ipa.sh's _bp choice for a multi-program app (PROGRAMS_TSV) is the same as for one game: the pulling libraries go in unless IOS_PULL=0, and always with a pipeline archive (pso/).
-        # No program's pso_mtl4 is read (a profile with it off can have Metal 4 turned on in the launcher); a Vulkan / GL program has no _bp files, so the rule changes nothing for it
+        # No program's pso_mtl4 is read (a profile with it off can have Metal 4 turned on in the launcher)
         script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
         start = script.index('PACK_OPTS=(--store "$ZS");')
         line = script[start:script.index('\n', start)]
@@ -103,14 +103,14 @@ class ProfilePackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             app, pso = root / 'DmIOS.app', root / 'pso'
-            for folder in (app, pso, root / 'p0/romfs', root / 'p1/romfs', root / 'p0/shaders/b-fixture', root / 'p1/shaders/vk'): folder.mkdir(parents=True)
+            for folder in (app, pso, root / 'p0/romfs', root / 'p1/romfs', root / 'p0/shaders/b-fixture', root / 'p1/shaders/b-fixture'): folder.mkdir(parents=True)
             (app / 'executable').write_text('app'); (pso / 'prebuilt.tsv').write_text('fixture')
             for n in (0, 1): (root / f'p{n}/romfs/marker').write_text(f'romfs {n}')
             for name in ('fixture_b.metallib', 'fixture_bp.metallib', 'fixture_bv.metallib', 'fixture_b.json'): (root / 'p0/shaders/b-fixture' / name).write_text(name)
-            (root / 'p1/shaders/vk/fixture.spv').write_text('spv')
+            (root / 'p1/shaders/b-fixture/p1_b.metallib').write_text('p1')
             (root / 'tools').symlink_to(REPO / 'dm/ios/tools', target_is_directory=True)
             tsv = root / 'programs.tsv'
-            tsv.write_text(f'0\t010049900F546000\t-\t{root}/p0/romfs\t{root}/p0/shaders\tnvn\n1\t010049900F546001\t-\t{root}/p1/romfs\t{root}/p1/shaders\tvulkan\n')
+            tsv.write_text(f'0\t010049900F546000\t-\t{root}/p0/romfs\t{root}/p0/shaders\tnvn\n1\t010049900F546001\t-\t{root}/p1/romfs\t{root}/p1/shaders\tnvn\n')
             env = {k: v for k, v in os.environ.items() if k not in ('IOS_PULL', 'DM_GAMES_DIR', 'DM_GAMES_FIRST', 'DM_COPY_ROMFS')}
             env.update(GAME='010049900F546000', DM=str(REPO / 'dm'), APP=str(app), AOC='', OUT_IPA=str(root / 'fixture.ipa'), PSO=str(pso), PROGRAMS_TSV=str(tsv))
             script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
@@ -118,7 +118,7 @@ class ProfilePackTests(unittest.TestCase):
             # prog_set as build_ipa.sh's, without the profile's modules and marker, which the packing does not read
             helpers = ('set -u\nt() { :; }; die() { echo "$*" >&2; exit 1; }\ngp() { python3 "$DM/games/game.py" "$GAME" "$1"; }\n'
                        'prog_rows() { grep -v "^#" "$PROGRAMS_TSV" | grep -v "^$"; }\n'
-                       'prog_set() { IFS=$\'\\t\' read -r PN GAME PATCHED ROMFS MSL_IOS GFXAPI <<< "$1"; if [ "$GFXAPI" = vulkan ]; then MSLDIR=vk; else MSLDIR=b-fixture; fi; }\n'
+                       'prog_set() { IFS=$\'\\t\' read -r PN GAME PATCHED ROMFS MSL_IOS GFXAPI <<< "$1"; MSLDIR=b-fixture; }\n'
                        'prog_back() { GAME=010049900F546000; }\n')
             r = subprocess.run(['/bin/bash', '-c', helpers + packing], cwd=root, env=env, capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -126,7 +126,7 @@ class ProfilePackTests(unittest.TestCase):
                 names = set(archive.namelist())
                 self.assertIn('Payload/DmIOS.app/pso/prebuilt.tsv', names)
                 self.assertIn('Payload/DmIOS.app/msl/p0/b-fixture/fixture_bp.metallib', names)
-                self.assertIn('Payload/DmIOS.app/msl/p1/vk/fixture.spv', names)
+                self.assertIn('Payload/DmIOS.app/msl/p1/b-fixture/p1_b.metallib', names)
                 self.assertEqual(archive.read('Payload/DmIOS.app/p1/romfs/marker'), b'romfs 1')
 
 

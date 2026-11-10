@@ -27,7 +27,7 @@
 #   --lock FILE (DM_MEASURE_LOCK): the measuring lock bench.py --lock shares, held only while a game runs.
 #
 # What it checks, per game:
-# 1. Chain (static): the game's shaders translated by each revision's chain (dmsh_build.py through own_compilers.py; a Vulkan game: vk_shaders.py), compared shader by shader: built or failed
+# 1. Chain (static): the game's shaders translated by each revision's chain (dmsh_build.py through own_compilers.py; NVN games only: the Vulkan and OpenGL layers were removed in release 1), compared shader by shader: built or failed
 #    (newly failing by the rule of dm/gfx/tools/shader_regressions.py, which the NSP script applies to one game's previous build; a new shader that fails is listed apart),
 #    the SHA-256 of the MSL (<key>_b.metal), of the reflection (<key>_b.json without its chain fields) and of the variant libraries (_bf, _bv, _bp, _bg*). A build is kept per chain version,
 #    shader package, profile inputs and compilers (<NSP folder>/<id>-work/regress/chain/<key>/; only the few used last stay, prune_chains), so a revision whose chain did not change costs nothing, and dmsh_build.py uses the build's own shader cache (DMSH_CAS), so MSL
@@ -36,7 +36,7 @@
 # 2. Smoke (runtime): the game in the Mac host (window, no audio), from a copy of the route's save, with the route's buttons, under a watchdog: the frame it must reach, crash (exit status,
 #    the host's CRASH line, a DiagnosticReports file), hang (no frame for `hang` seconds once frames came; before stopping the host the harness asks for its state dump, DM_CTL
 #    "dump", into the log and samples every host thread into the run folder's hang_sample.txt), the prepare step's time, [RED] lines (numbers, addresses and paths normalized; a shader
-#    the chain build does not hold counts as one kind, MISSING_LIB, whatever its name) that the baseline did not print, frame times (bench.py's DM_NVN_TSV rows; a Vulkan / GL game: presents counted from the log), peak memory footprint, and perceptual hashes of
+#    the chain build does not hold counts as one kind, MISSING_LIB, whatever its name) that the baseline did not print, frame times (bench.py's DM_NVN_TSV rows), peak memory footprint, and perceptual hashes of
 #    screenshots at fixed times. The full mode first runs the pipeline prebuild (the host's DM_PSO_PREBUILD=tool, the step the Mac app's "Preparing pipelines" runs) under a watchdog
 #    and starts the game on its archive; --quick runs the chain checks and a 60 s boot without the prebuild (DM_PSO_PREBUILD=0).
 #    A route, dm/games/<id>/smoke.tsv, key <TAB> value lines: save (a folder relative to the NSP folder, `run` = <id>_build/run/save, `new` = empty), keys (DM_KEYS), secs (full run),
@@ -55,7 +55,7 @@
 #   {"schema": "nxnative-regress/1", "command", "mode": "quick"|"full", "status", "exit", "started", "secs", "machine": {model, gpu, macos, xcode},
 #    "baseline": {"rev", "sha"}, "candidate": {"rev", "sha", "dirty"},
 #    "games": {<title ID>: {"name", "status", "reasons": [text], "known": [text], "secs": {"chain", "smoke"},
-#       "chain": {"kind": "nvn"|"vk", "baseline": BUILD, "candidate": BUILD, "newly_failing": [{"key", "status", "error"}], "added_failing": [same],
+#       "chain": {"kind": "nvn", "baseline": BUILD, "candidate": BUILD, "newly_failing": [{"key", "status", "error"}], "added_failing": [same],
 #                 "newly_passing": [key],
 #                 "changed": {"msl", "reflection", "variants", "shaders", "keys": [key, at most 200]}, "added": n, "removed": n,
 #                 "interface": {"baseline": n, "candidate": n, "new": [PAIR], "known": [PAIR, at most 50]}},
@@ -94,10 +94,10 @@ rfs = shader_lib.romfs
 # Where they are depends on the machine (a drive with room for the trees and the games' NSP folders): set with --root / --games-dir or REGRESS_ROOT / REGRESS_GAMES, checked in main
 ROOT = Path(os.environ.get('REGRESS_ROOT', ''))
 GAMES = Path(os.environ.get('REGRESS_GAMES', ''))
-HOST_DIRS = ('dm/host', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/nvn/include', 'dm/gfx/tex', 'dm/gfx/vk', 'dm/gfx/gl')   # as build_ipa_from_nsp.py: the host's sources and headers
+HOST_DIRS = ('dm/host', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/nvn/include', 'dm/gfx/tex')   # as build_ipa_from_nsp.py: the host's sources and headers
 REWRITER = ('dm/tools/patch_nso.py', 'dm/tools/nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/tools/engine_patches.py', 'dm/tools/ue_cvar.py', 'dm/tools/ue_malloc.py', 'dm/tools/ue_region.py', 'dm/tools/ue_ring.py', 'dm/tools/fps_target.py', 'dm/tools/loader_census.py', 'dm/tools/ue_fixed_rate.py', 'dm/tools/unity_fps.py', 'dm/tools/unity_bucket.py', 'dm/tools/snowdrop_pools.py')
 HEAVY_EXE = {'clang', 'make', 'xcodebuild', 'ld', 'ld64', 'swift-frontend', 'dotnet', 'metal', 'metal-tt', 'air-tt', 'applegpu-nt', 'dmsh_xlate', 'spirv-cross'}   # jobs that skew a measurement
-HEAVY_PY = r'(dmsh_build|shader_split|own_compilers|patch_nso|vk_shaders)\.py'   # (the shared measuring rule)
+HEAVY_PY = r'(dmsh_build|shader_split|own_compilers|patch_nso)\.py'   # (the shared measuring rule)
 # Tolerances, from runs of one revision against itself (docs/development.md, The regression harness)
 TOL = {'fps_pct': 10.0, 'p99_pct': 30.0, 'p99_ms': 4.0, 'footprint_pct': 15.0, 'footprint_mb': 300.0, 'prepare_s': 10.0, 'prepare_x': 1.5, 'prebuild_x': 1.5, 'prebuild_s': 30.0,
        'dhash_bits': 12, 'rgb_diff': 12.0,
@@ -285,12 +285,6 @@ class Game:
         if not (dst / 'game.tsv').is_file(): shutil.copytree(src, dst, ignore=shutil.ignore_patterns(VALIDATED))
         return dst
 
-    def shader_roots(self):
-        roots = [self.romfs()]
-        capture = self.build / 'extract' / self.ver / 'vk_capture'
-        if capture.is_dir(): roots.append(capture)
-        return roots
-
 
 def read_route(f):
     r = {'save': 'run', 'keys': '', 'secs': 90.0, 'quick': 60.0, 'reach': None, 'window': None, 'shots': [], 'hang': 20.0, 'prebuild': 'on', 'capture': None}
@@ -351,12 +345,7 @@ def chain_key(tree, g, tools):
         pairs = g.profile_dir(tree) / 'pso_pairs.tsv'
         if not pairs.is_file(): pairs = g.build / 'shader/pso_pairs.tsv'
         side += digest([pairs])
-    elif g.kind == 'vk':
-        v, inp = digest([tree.path / 'dm/gfx/tools/vk_shaders.py'])[:12], g.ver
-        side = ''
-        vk = load_module('regress_vk_sources', REPO / 'dm/gfx/tools/vk_shaders.py')
-        sources = digest(sorted(Path(p) for root in g.shader_roots() for p in vk.spirv_files(root)), root=g.build)
-    else: raise HarnessError(f'{g.id}: the chain check does not cover {g.kind} games yet')
+    else: raise HarnessError(f'{g.id}: a {g.kind} game: NX 18 release 1 supports NVN games only (the Vulkan and OpenGL layers were removed)')
     sc = tree.path / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'
     if sc.is_file():   # earlier revisions use PATH, already covered by tools; pinned revisions also honor SPIRV_CROSS
         env = dotnet_env(g.env(tree))
@@ -453,39 +442,27 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
     env = dotnet_env(g.env(tree)); env.update(WORK=str(tmp), TMPDIR=str(tmp) + '/', J=str(jobs))
     t0 = time.time(); log = out / 'build.log'
     done = (out / 'built.ok').is_file()   # a build whose outputs are complete (a run stopped while hashing, or a build made by hand); its manifest is made again
-    if g.kind == 'nvn':
-        tools_dir = tree.path / 'dm/gfx/tools'
-        cas = chain_cache(tree, g)
-        env.update(XLATE=str(tools_dir / 'dmsh_xlate_bin/dmsh_xlate'), DMSH_CAS=str(cas))
-        entry = tools_dir / ('own_compilers.py' if (tools_dir / 'own_compilers.py').is_file() else 'dmsh_build.py')
-        lib = out / f'b-{v}'
-        if not done:
-            say(f'  {g.id}: chain {v} (inputs {inp}) of {tree.id}: translating the shaders ({jobs} workers) → {out}')
-            if cas.suffix != '.db': tree_tar.unpack(cas, say)
-            rc, paused = run_heavy([sys.executable, entry, g.build / 'shader/pkg', out], log, tree.path, env, a, f'{g.id} shader build'); t0 += paused
-            if rc or not (shader_lib.view(lib) / '_b_build.json').is_file():   # a folder (an older revision's dmsh_build.py) or the image a newer one writes
-                raise HarnessError(f'{g.id}: dmsh_build.py of {tree.id} failed (exit {rc}); last lines of {log}:\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=8)))
-            prof = out / 'profile'; prof.mkdir(exist_ok=True)   # the tables the host reads beside the shader map, as this build made them
-            for src in g.profile_dir(tree).glob('*.tsv'): shutil.copyfile(src, prof / src.name)
-            (out / 'built.ok').write_text(f'{tree.id}\n')
-            if cas.suffix != '.db': tree_tar.pack(cas, say)
-        say(f'  {g.id}: hashing the outputs of chain {v}')
-        shaders = nvn_manifest(shader_lib.view(lib), jobs)
-    else:
-        say(f'  {g.id}: vk_shaders.py {v} of {tree.id} → {out}')
-        msl = out / 'msl'; shutil.rmtree(msl, ignore_errors=True); msl.mkdir()
-        # vk_shaders.py writes its MSL into a temporary folder; this keeps it (the script itself is unchanged)
-        wrap = ('import sys, runpy, tempfile, contextlib\n'
-                f'@contextlib.contextmanager\ndef keep(*a, **k): yield {str(msl)!r}\n'
-                'tempfile.TemporaryDirectory = keep\n'
-                f'sys.argv = {[str(tree.path / "dm/gfx/tools/vk_shaders.py"), *map(str, g.shader_roots()), str(out)]!r}\n'
-                'runpy.run_path(sys.argv[0], run_name="__main__")\n')
-        rc, paused = run_heavy([sys.executable, '-c', wrap], log, tree.path, env, a, f'{g.id} shader build'); t0 += paused
-        shaders = vk_manifest(msl, out / 'vk/vk_shaders.tsv', rc == 0, log)
+    if g.kind != 'nvn': raise HarnessError(f'{g.id}: a {g.kind} game: NX 18 release 1 supports NVN games only (the Vulkan and OpenGL layers were removed)')
+    tools_dir = tree.path / 'dm/gfx/tools'
+    cas = chain_cache(tree, g)
+    env.update(XLATE=str(tools_dir / 'dmsh_xlate_bin/dmsh_xlate'), DMSH_CAS=str(cas))
+    entry = tools_dir / ('own_compilers.py' if (tools_dir / 'own_compilers.py').is_file() else 'dmsh_build.py')
+    lib = out / f'b-{v}'
+    if not done:
+        say(f'  {g.id}: chain {v} (inputs {inp}) of {tree.id}: translating the shaders ({jobs} workers) → {out}')
+        if cas.suffix != '.db': tree_tar.unpack(cas, say)
+        rc, paused = run_heavy([sys.executable, entry, g.build / 'shader/pkg', out], log, tree.path, env, a, f'{g.id} shader build'); t0 += paused
+        if rc or not (shader_lib.view(lib) / '_b_build.json').is_file():   # a folder (an older revision's dmsh_build.py) or the image a newer one writes
+            raise HarnessError(f'{g.id}: dmsh_build.py of {tree.id} failed (exit {rc}); last lines of {log}:\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=8)))
+        prof = out / 'profile'; prof.mkdir(exist_ok=True)   # the tables the host reads beside the shader map, as this build made them
+        for src in g.profile_dir(tree).glob('*.tsv'): shutil.copyfile(src, prof / src.name)
+        (out / 'built.ok').write_text(f'{tree.id}\n')
+        if cas.suffix != '.db': tree_tar.pack(cas, say)
+    say(f'  {g.id}: hashing the outputs of chain {v}')
+    shaders = nvn_manifest(shader_lib.view(lib), jobs)
     st = collections.Counter(s['st'] for s in shaders.values())
     m = {'key': key, 'kind': g.kind, 'chain': v, 'inputs': inp, 'tree': tree.id, 'game': g.id, 'total': len(shaders), 'ok': st['ok'], 'failed': len(shaders) - st['ok'],
          'failed_by_status': {k: n for k, n in st.items() if k != 'ok'}, 'build_secs': round(time.time() - t0, 1), 'shaders': shaders}
-    if g.kind == 'vk': m['build_failed'] = rc != 0
     if g.kind == 'nvn': m['interface'] = interface_check(tree, g, out); m['hashes'] = NVN_HASHES
     mf.write_text(json.dumps(m, indent=0))
     if g.kind == 'nvn': pack_chain(tree, out / f'b-{v}')
@@ -539,18 +516,6 @@ def nvn_manifest(lib, jobs):
             e['var'] = h.hexdigest()[:16]
         return k, e
     with cf.ThreadPoolExecutor(max(2, jobs)) as ex: return dict(ex.map(one, rows))
-
-
-def vk_manifest(msl, table, ok, log):
-    keys = {}
-    for p in sorted(msl.glob('*.metal')):
-        keys[p.stem] = {'st': 'ok' if ok else 'library failed', 'msl': sha256_file(p).hexdigest()[:16]}
-        if not ok: keys[p.stem]['err'] = (list(collections.deque(open(log, errors='replace'), maxlen=1)) or [''])[0].strip()[:160]
-    if table.is_file():
-        for ln in table.read_text().splitlines():
-            c = ln.split('\t')
-            if len(c) >= 3 and c[0] in keys: keys[c[0]]['refl'] = hashlib.sha256(ln.encode()).hexdigest()[:16]
-    return keys
 
 
 # ---------------------------------------------------------------- the vertex / pixel interface of the archive's pipeline bases (GitHub issue #283)
@@ -664,7 +629,7 @@ def loss_levels(loss, levels, known):
 
 
 def build_summary(m):
-    return {k: m.get(k) for k in ('key', 'chain', 'inputs', 'total', 'ok', 'failed', 'failed_by_status', 'build_failed')} | {'secs': m.get('secs', 0)}
+    return {k: m.get(k) for k in ('key', 'chain', 'inputs', 'total', 'ok', 'failed', 'failed_by_status')} | {'secs': m.get('secs', 0)}
 
 
 # ---------------------------------------------------------------- host and rewritten modules of a revision
@@ -764,7 +729,7 @@ def heavy_jobs():   # other builds now running: not this process's, not stopped,
             seen.add(pid)
             parent, _, _, command = rows[pid]
             if pid == os.getpid(): return True
-            if re.search(r'(?:dmsh_build|own_compilers|vk_shaders)\.py', command): cooperative = True
+            if re.search(r'(?:dmsh_build|own_compilers)\.py', command): cooperative = True
             if re.search(r'(?:^|[/\s])regress\.py(?:\s|$)', command): return cooperative
             pid = parent
         return False
@@ -1265,7 +1230,6 @@ def cmd_baseline(a):
             (bd / 'chain.json').write_text(json.dumps({'key': m['key']}))
             gr['chain'] = {'kind': m['kind'], 'baseline': build_summary(m)}
             if m['failed']: gr['known'].append(f"{m['failed']} of {m['total']} shaders do not build")
-            if m.get('build_failed'): gr['known'].append('Vulkan shader build failed')
             if m.get('interface', {}).get('bad'):
                 bad = m['interface']['bad']; gr['chain']['interface'] = {'baseline': len(bad), 'checked': m['interface']['checked'], 'known': bad[:50]}
                 gr['status'] = 'NEW-FAIL'; gr['reasons'].append(f'{len(bad)} pipeline bases whose pixel shader reads an output the vertex shader does not write (metal-tt refuses the archive)')
@@ -1307,8 +1271,6 @@ def cmd_check(a, smoke=True):
             gr['secs']['chain'] = round(time.time() - t0, 1)
             cd = chain_diff(bm, cm)
             gr['chain'] = {'kind': cm['kind'], 'baseline': build_summary(bm), 'candidate': build_summary(cm), **cd}
-            if cm.get('build_failed'):
-                (gr['known'] if bm.get('build_failed') else levels['NEW-FAIL']).append('Vulkan shader build failed')
             if cd['newly_failing']: levels['NEW-FAIL'].append(f"{len(cd['newly_failing'])} shaders newly fail to build (shader_regressions.py's rule)")
             if cd['added_failing']: levels['NEW-FAIL'].append(f"{len(cd['added_failing'])} shaders new in the candidate fail to build")
             both = cm['failed'] - len(cd['newly_failing']) - len(cd['added_failing'])
@@ -1540,8 +1502,8 @@ def cmd_usage(a):
             res = smoke_run(g, tree, art, r2, True, d, a)
             a.env = a.env[:-2]
             if run_failures(res, route): say(f'    [RED] the run failed ({"; ".join(run_failures(res, route))}): its usage rows are incomplete')
-            rows.update(usage.runtime_usage(d, g.kind if g.kind != 'vk' else 'vulkan'))
-        else: rows['api', g.kind if g.kind != 'vk' else 'vulkan'] = 1
+            rows.update(usage.runtime_usage(d, g.kind))
+        else: rows['api', g.kind] = 1
         out = ROOT / g.id / 'usage' / f'{tree.id}.tsv'; out.parent.mkdir(parents=True, exist_ok=True)
         head = f'{g.name} ({g.id}), revision {tree.commit[:12]}, chain {art["manifest"]["chain"]}, ' + (f'route smoke.tsv quick ({route["quick"]:g} s)' if route and not a.no_smoke else 'no run')
         usage.write_manifest(out, rows, head)

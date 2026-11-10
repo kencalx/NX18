@@ -698,8 +698,8 @@ void mtl_init(void) {
     if (!g_dev.hasUnifiedMemory) MDIE("needs a unified-memory device (zero-copy memory pools)");
     g_q = [g_dev newCommandQueue];   // the classic queue: the host's one-off command buffers on a device without Metal 4, and the test fixtures' (q_cb)
     // A device without Metal 4 (the paravirtualized GPU of a virtual Mac, such as GitHub's macos-26 runner: no residency set, no MTL4CommandQueue) cannot run the NVN layer. The GL and
-    // Vulkan layers draw on classic queues of their own and need only the device (mtl_device_classic): there the classic part starts and presents are dropped, which is all a
-    // run-time shader capture needs (the NSP script's capture_shaders boots headless; GitHub issue #112: Balatro's capture aborted here)
+    // Vulkan layers (removed in release 1, git 93c34371) drew on classic queues of their own and needed only the device (mtl_device_classic): there the classic part started and
+    // presents were dropped, which was all their run-time shader capture needed (GitHub issue #112). Nothing asks for it now; a later stage removes it with the classic queue
     NSError *re = nil; const char *no4 = NULL;
     if (getenv("DM_TEST_NO_METAL4")) no4 = "DM_TEST_NO_METAL4";   // test switch: as on a virtual Mac; not set in the product
     else if (![g_dev supportsFamily:MTLGPUFamilyMetal4]) no4 = "no Metal 4 GPU family";
@@ -5133,8 +5133,6 @@ static int dbnd_live(void) {
     static int can = -1; if (can < 0) can = [g_dev supportsFamily:MTLGPUFamilyApple10];
     return can;
 }
-// The Vulkan layer's pipelines with a depth bounds test (hle_vk.m) go through the same switch and the same question to the GPU
-int mtl_depth_bounds_hw(void) { return dbnd_on() && dbnd_hw(); }
 static int g_enc_vis, g_enc_has_vis;   // This encoder's current visibility count mode (0 off / slot number + 1), and whether a visibility buffer is attached
 static int g_pso_dirty = 1, g_dss_dirty = 1;   // Pipeline / depth-stencil related state was changed during replay
 static uint64_t g_stat_args_enc, g_stat_args_reuse, g_stat_args_patch;   // Argument buffer: new-encode / reuse / patched (only CBUF slots written again) counts
@@ -17199,7 +17197,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 // are necessarily ordered after that blit on the GPU queue.
 #define PQ 8
 typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v, up_v; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait); up_v: the upload batch present_enqueue flushed for it (pup_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
-// External producer (the Vulkan layer, dm/gfx/vk) renders on its own queue and signals this event when a frame's rendering is done: the present of that frame waits for the value on g_q4
+// External producer (the Vulkan layer, removed in release 1: no producer now) renders on its own queue and signals this event when a frame's rendering is done: the present of that frame waits for the value on g_q4
 static id<MTLSharedEvent> g_ext_ev;
 static void ext_wait(uint64_t v) { if (v && g_ext_ev) [g_q4 waitForEvent:g_ext_ev value:v]; }
 static void snap_commit_wait(uint64_t v);
@@ -17450,8 +17448,8 @@ void mtl_present_discard(int on) { atomic_store(&g_present_discard, on != 0); if
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val);
 uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) { return present_enqueue(t, period, crop, 0); }
 void *mtl_device(void) { mtl_init(); return (__bridge void *)g_dev; }
-void *mtl_device_classic(void) { g_classic_ok = 1; return mtl_device(); }   // the GL and Vulkan layers: a device without Metal 4 is taken too, with presents dropped (mtl_init)
-// An external producer's texture (the Vulkan layer's swapchain images): a serial the present path resolves (serial_put), resident for the Metal 4 queue, never collected by the cross-submit ledger
+void *mtl_device_classic(void) { g_classic_ok = 1; return mtl_device(); }   // was for the GL and Vulkan layers (removed in release 1): a device without Metal 4 is taken too, with presents dropped (mtl_init)
+// An external producer's texture (was the Vulkan layer's swapchain images; no producer since release 1): a serial the present path resolves (serial_put), resident for the Metal 4 queue, never collected by the cross-submit ledger
 uint64_t mtl_ext_tex(void *tex) {
     static _Atomic uint64_t n; id<MTLTexture> t = (__bridge id<MTLTexture>)tex; uint64_t ser = (1ull << 62) + atomic_fetch_add(&n, 1) + 1;
     res_add(t); serial_put(ser, t); mtl_xv_window_tex(ser); return ser;
@@ -17462,7 +17460,7 @@ uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_v
     if (ev && !g_ext_ev) g_ext_ev = (__bridge id<MTLSharedEvent>)ev;
     return present_enqueue(&t, period, crop, ev ? ev_val : 0);
 }
-extern _Atomic uint64_t dm_present_ns;   // hle_thread.c (DM_HITCH_DUMP); the NVN, Vulkan and GL presents all come through present_enqueue
+extern _Atomic uint64_t dm_present_ns;   // hle_thread.c (DM_HITCH_DUMP); every present comes through present_enqueue
 // Present snapshots (DM_PRESENT_SNAP). A game with two swapchain textures (Breath of the Wild) gets one back only when the display link has taken its previous present on a
 // tick, so the next frame's CPU work starts on the tick and the GPU idles from the end of one frame to the first work of the next. macOS reads that idle time as room and holds the GPU
 // at its lowest clock (444 MHz on an M2 Max) even while frames miss the screen, and there 12 ms of GPU work a frame plus the time to the frame's first submission often missed 16.7 ms.

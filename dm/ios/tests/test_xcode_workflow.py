@@ -23,7 +23,7 @@ import xcode_projects
 
 
 class XcodePipelineTests(unittest.TestCase):
-    def test_prepare_preserves_upstream_options_and_graphics_paths(self):
+    def test_prepare_preserves_upstream_options_and_stops_for_vulkan_and_gl(self):
         for graphics in ('nvn', 'vulkan', 'gl'):
             for derived in (False, True):
                 with self.subTest(graphics=graphics, derived=derived):
@@ -41,7 +41,7 @@ class XcodePipelineTests(unittest.TestCase):
             profile = SimpleNamespace(id=registered.id, title_id=registered.title_id, dir=root / 'profile' / registered.id,
                                       get=registered.get, words=registered.words, modules_in=registered.modules_in,
                                       builds=lambda: {'v0': {'display': '1.0.0', 'main': 'other-build'}})
-            sources = {key: (False, '') for key in ('glslc_capture', 'vk_capture', 'gl_capture', 'ue_decode', 'oodle_packs', 'ue_legacy')}
+            sources = {key: (False, '') for key in ('glslc_capture', 'ue_decode', 'oodle_packs', 'ue_legacy')}
             sources['graphics'] = (graphics, 'fixture')
             fam = {'base': base, 'updates': [] if derived else [(327680, update)], 'dlc': []}
             version = 'v0' if derived else 'v327680'
@@ -58,8 +58,7 @@ class XcodePipelineTests(unittest.TestCase):
                 'free_gb': 10000, 'find_nx_extract': root / 'nx_extract',
                 'extract': extraction, 'check_formats': None, 'can_clone': False, 'build_mismatch': [],
                 'extract_aoc': None, 'rewrite': profile, 'split_shaders': 'fixture-key',
-                'build_shaders': root / 'shaders', 'build_vk_shaders': root / 'shaders',
-                'build_gl_shaders': root / 'shaders', 'provisional_prep': None, 'chain_header': None,
+                'build_shaders': root / 'shaders', 'provisional_prep': None, 'chain_header': None,
                 'refine_after_rewrite': profile, 'derive_profile': '1.0.0',
             }.items():
                 mocks[name] = stack.enter_context(patch.object(build, name, return_value=value))
@@ -83,8 +82,14 @@ class XcodePipelineTests(unittest.TestCase):
                                       '--language', 'ja', '--no-show-fps', '--no-motion', '--progress', 'json'])
             finally:
                 progress.close()
-            self.assertEqual(code, 0)
             events = [json.loads(line) for line in output.getvalue().splitlines()]
+            if graphics != 'nvn':   # NX 18 release 1 renders NVN games only: the build stops after the extraction, before the rewrite and the shader steps, with one message
+                api = 'Vulkan' if graphics == 'vulkan' else 'OpenGL'
+                self.assertEqual(code, 1)
+                self.assertIn(f'[RED] Fixture Game renders with {api}; NX 18 release 1 supports NVN games only', output.getvalue())
+                for step in ('rewrite', 'check_metal', 'split_shaders', 'build_shaders', 'extract_aoc'): mocks[step].assert_not_called()
+                return
+            self.assertEqual(code, 0)
             self.assertTrue(any(event.get('name') == 'prepare Xcode' for event in events))
             self.assertFalse(any(event.get('name') == 'app build' for event in events))
             command = mocks['run'].call_args.args[0]
@@ -100,11 +105,7 @@ class XcodePipelineTests(unittest.TestCase):
             self.assertEqual(Path(environment['DM_XCODE_PROJECT_DIR']), root / f'{registered.id}_build/xcode')
             register.assert_called_once()
             self.assertEqual(mocks['derive_profile'].call_count, int(derived))
-            if graphics == 'nvn':
-                self.assertEqual(mocks['split_shaders'].call_args.args[8], derived)
-            else:
-                builder = mocks['build_vk_shaders' if graphics == 'vulkan' else 'build_gl_shaders']
-                self.assertTrue(builder.call_args.kwargs['reuse'])
+            self.assertEqual(mocks['split_shaders'].call_args.args[8], derived)
             warnings = [event.get('msg', '') for event in events]
             self.assertEqual(any('this Xcode project uses' in message for message in warnings), derived)
             if derived:

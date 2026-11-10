@@ -123,7 +123,7 @@ class LiveMenu(unittest.TestCase):
         # the other live settings: read on the main thread before the menu exists, or once and kept (dm_opmode), never by a host thread while the game runs
         live = set(re.findall(r'!strcmp\(env, "(DM_[A-Z0-9_]+)"\)', self.live)) - {'DM_PRESENT_UPSCALE'}
         readers = {}
-        for d in ('dm/host', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/vk', 'dm/gfx/gl', 'dm/gfx/tex', 'dm/ios/Sources'):
+        for d in ('dm/host', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/tex', 'dm/ios/Sources'):
             for p in sorted((REPO / d).glob('*.[cm]')):
                 for env in re.findall(r'getenv\("(DM_[A-Z0-9_]+)"\)', p.read_text(encoding='utf-8', errors='replace')):
                     if env in live: readers.setdefault(env, set()).add(p.name)

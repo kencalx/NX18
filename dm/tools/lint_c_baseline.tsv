@@ -2,12 +2,6 @@
 # shrinks: after fixing findings, python3 dm/tools/lint_c.py compdb && python3 dm/tools/lint_c.py tidy --update; a new finding is fixed, or silenced on its line with
 # // NOLINT(<check>) and a reason. Never edit by hand to add. Made with LLVM 23.1.4.
 # file	check	findings
-dm/gfx/gl/hle_gl.m	bugprone-signed-char-misuse	2
-dm/gfx/gl/hle_gl.m	bugprone-suspicious-memory-comparison	2
-dm/gfx/gl/hle_gl.m	bugprone-suspicious-realloc-usage	2
-dm/gfx/gl/hle_gl.m	clang-analyzer-nullability.NullablePassedToNonnull	1
-dm/gfx/gl/hle_gl.m	clang-analyzer-security.ArrayBound	1
-dm/gfx/gl/hle_gl.m	misc-redundant-expression	1
 dm/gfx/nvn/hle_nvn.c	bugprone-suspicious-memory-comparison	1
 dm/gfx/nvn/hle_nvn.c	bugprone-suspicious-realloc-usage	6
 dm/gfx/nvn/hle_nvn.c	clang-analyzer-core.uninitialized.Assign	1
@@ -83,12 +77,6 @@ dm/gfx/tests/t_view_swizzle.m	clang-analyzer-core.UndefinedBinaryOperatorResult	
 dm/gfx/tests/t_view_swizzle.m	clang-analyzer-nullability.NullablePassedToNonnull	2
 dm/gfx/tests/t_xv.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_zskip.m	clang-analyzer-nullability.NullablePassedToNonnull	1
-dm/gfx/vk/hle_vk.m	bugprone-suspicious-memory-comparison	1
-dm/gfx/vk/hle_vk.m	bugprone-suspicious-realloc-usage	2
-dm/gfx/vk/hle_vk.m	clang-analyzer-core.uninitialized.Assign	1
-dm/gfx/vk/hle_vk.m	clang-analyzer-security.ArrayBound	1
-dm/gfx/vk/hle_vk.m	clang-analyzer-unix.Malloc	1
-dm/gfx/vk/hle_vk.m	misc-misplaced-const	5
 dm/host/haptics_apple.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/host/hle_fs.c	bugprone-suspicious-realloc-usage	4
 dm/host/hle_fs.c	clang-analyzer-unix.Errno	2

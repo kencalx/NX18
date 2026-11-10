@@ -17,7 +17,7 @@ import tool_lock  # noqa: E402
 class Pin(unittest.TestCase):
     def test_tools_run_the_in_repo_build(self):
         self.assertEqual(Path(dmsh_chain.SPIRV_CROSS), BIN / 'spirv-cross')
-        for tool in ('dmsh_build.py', 'dmsh_dryrun.py', 'vk_shaders.py', 'gl_shaders.py'):
+        for tool in ('dmsh_build.py', 'dmsh_dryrun.py'):
             self.assertNotRegex((REPO / 'dm/gfx/tools' / tool).read_text(), r"\[\s*'spirv-cross'", tool)
 
     def test_lock_records_it(self):
