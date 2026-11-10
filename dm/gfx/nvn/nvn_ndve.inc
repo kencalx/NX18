@@ -72,9 +72,8 @@ static void ndve_build(void) {
         NSError *e = nil; id<MTLLibrary> lib = host_lib("ndve_engine", &e);
         if (!lib) { MLOG("[RED] NDVE engine: no library (%s); the game's network runs", e.localizedDescription.UTF8String); g_nd.state = -1; return; }
         for (int k = 0; k < NK_N; k++) {
-            id<MTLFunction> f = [lib newFunctionWithName:@(k_ndve_kern[k])];
-            g_nd.ps[k] = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
-            if (!g_nd.ps[k]) { MLOG("[RED] NDVE engine: no pipeline for %s; the game's network runs", k_ndve_kern[k]); g_nd.state = -1; return; }
+            g_nd.ps[k] = host_cps(lib, @(k_ndve_kern[k]), nil, &e);
+            if (!g_nd.ps[k]) { MLOG("[RED] NDVE engine: no pipeline for %s (%s); the game's network runs", k_ndve_kern[k], e ? e.localizedDescription.UTF8String : "no error given"); g_nd.state = -1; return; }
         }
         // a one-off command buffer of the Metal 4 queue (nvn_mtl.m once_new; the classic queue without Metal 4); order 0: new buffers, it reads nothing and waits for nothing before it
         NvOnce *cb = once_new(0); id be = once_copy(cb);

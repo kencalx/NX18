@@ -40,7 +40,7 @@ static uint64_t tf_prepare(NvShader *vs, uint64_t source_count, uint64_t order, 
     }
     if (!g_tf_prepare) {
         NSError *e=nil; id<MTLLibrary> lib=host_lib("tf",&e);
-        if (lib) g_tf_prepare=[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"tf_prepare"] error:&e];
+        if (lib) g_tf_prepare=host_cps(lib,@"tf_prepare",nil,&e);
         if (!g_tf_prepare) { MLOG("[RED] transform feedback prepare: %s",e.localizedDescription.UTF8String); return 0; }
     }
     rp_end(); ubd_land();

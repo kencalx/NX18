@@ -356,7 +356,7 @@ static NvShader *geo_lean_pick(NvProg *pr, NvShader *gs, int topology, int insta
         NSError *error = nil;
         id<MTLLibrary> lib = host_lib("geo_pack", &error);
         const char *names[] = {"geo_lean_cull", "geo_lean_index", "geo_lean_tri"};
-        for (int i = 0; i < 3 && lib; i++) g_geo_lean_k[i] = [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@(names[i])] error:&error];
+        for (int i = 0; i < 3 && lib; i++) g_geo_lean_k[i] = host_cps(lib, @(names[i]), nil, &error);
         if (!g_geo_lean_k[0] || !g_geo_lean_k[1] || !g_geo_lean_k[2]) {
             failed = 1; g_geo_lean_k[0] = g_geo_lean_k[1] = g_geo_lean_k[2] = nil;
             MLOG("[RED] lean geometry index kernels: %s", error.localizedDescription.UTF8String); return NULL;
@@ -1088,7 +1088,7 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
     static id<MTLComputePipelineState> pack[5];   // count, parallel scan, write, fused small draw, legacy scan
     if (!pack[4]) { NSError *e = nil; id<MTLLibrary> lib = host_lib("geo_pack", &e);
         const char *fn[5] = {"geo_pack_count", "geo_pack_scan", "geo_pack_write", "geo_pack_small", "geo_pack_scan_legacy"};
-        for (int i = 0; i < 5 && lib; i++) if (!(pack[i] = [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@(fn[i])] error:&e])) break;
+        for (int i = 0; i < 5 && lib; i++) if (!(pack[i] = host_cps(lib, @(fn[i]), nil, &e))) break;
         if (!pack[4]) { for (int i = 0; i < 5; i++) pack[i] = nil; MLOG("[RED] geometry index compaction: %s", e.localizedDescription.UTF8String); return; } }
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     if (g_geo_split_compute < 0) { const char *e = getenv("DM_NVN_GEOMETRY_COMPUTE"); g_geo_split_compute = e && !strcmp(e, "split"); }
