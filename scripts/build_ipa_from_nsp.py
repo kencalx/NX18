@@ -58,7 +58,7 @@ import pack_nx   # a game in an NX archive instead of NSPs
 NSP_DIR = ''                            # folder holding the NSPs, or the game's .nup or .nx file (empty = ask at run time)
 PROD_KEYS = ''                          # path of prod.keys (empty = ask at run time)
 PACKAGE = ''                            # version packed into the IPA (empty = the newest in the folder; Mario 'v327680' i.e. 1.2.1, or 'v0')
-TITLE_ID = ''                           # the game to pack when the folder holds several, e.g. a cartridge dump with two games: '0100FD8022DAA000' (empty = the folder's one game)
+TITLE_ID = ''                           # the game to pack when the folder holds several, e.g. a cartridge dump with two games: '0100FD8022DAA000' (empty = the folder's one game); an NX that holds the ID on two platforms: '0100FD8022DAA000:switch2' (or :switch1, :unknown)
 WORK_DIR = ''                           # the game's build folder (empty = <title ID>_build in the NSP folder); the extracted files, shader cache and temporary files live there, and the IPA (or app) goes beside it unless OUT_IPA names it
 OUT_IPA = ''                            # output IPA (empty = <the profile's ipa> in the NSP folder); with PLATFORM 'mac-app' the output app (empty = <game name>.app in the NSP folder)
 APP_NAME = ''                           # app name on the home screen (empty = the game name in the base NSP)
@@ -742,6 +742,11 @@ def code_modules(fam, k, dst):   # the ExeFS of a NUP package, an NX snapshot or
     if pk is pack_nx and k.exefs == pack_nx.NO: return
     try: pk.exefs(n, k, dst)
     except pack_nup.Error as e: raise BuildError(str(e)) from e   # pack_nx.Error is one too
+    except OSError as e: raise BuildError(f'{k.name}: writing its code modules to {dst}: {e.strerror or e}') from e
+
+
+def exefs_size(n, k):   # the bytes a NUP package's or an NX snapshot's exefs/ holds (what code_modules writes)
+    return sum(n.size(i) for _, isdir, i in n.children(k.exefs) if not isdir) if k.exefs != pack_nx.NO else 0
 
 
 def package_size(fam, k):   # (name, bytes) of a package for the survey report: an NSP file, a NUP package or an NX snapshot (its files' size), or a dump's folder (its code and RomFS: the folder of a flat dump also holds the build)
@@ -771,23 +776,30 @@ def survey_dump(src, out):
 def survey_nup(n, k, base, out, pk=pack_nup):
     """A NUP package's (pk = pack_nx: an NX snapshot's) files as nx_extract --manifest leaves an NSP's for the survey, without writing the RomFS: out/ExeFS, out/romfs_manifest.tsv (path, size
     and first 32 bytes of every RomFS file), out/romfs_nro (the NRO modules, whole: their imports decide the graphics API and the modules) and the package's control data, else its base game's.
-    Returns the files listed"""
+    A RomFS name with a control character (a tab or a line break would forge manifest rows), NROs that one host folder cannot hold apart (case, Unicode normalization, 255 bytes: pack_nx.HostNames),
+    an NRO above pack_nx.MODULE_MAX and more bytes than the volume has free are refused before anything is written. Returns the files listed"""
     out.mkdir(parents=True)
-    try: pk.exefs(n, k, out / 'ExeFS')
-    except pack_nup.Error as e: raise BuildError(str(e)) from e
-    rows = []
-    def walk(d, pre):
+    rows, nros, names = [], [], pack_nx.HostNames(f'{k.name} romfs/')
+    def walk(d, parts):
         for name, isdir, i in n.children(d):
-            p = pre + '/' + os.fsdecode(name)
-            if isdir: walk(i, p); continue
+            if isdir: walk(i, parts + [name]); continue
+            p = '/' + '/'.join(os.fsdecode(x) for x in parts + [name])
+            if any(ord(c) < 0x20 or ord(c) == 0x7F for c in p): raise BuildError(f'{k.name}: RomFS name {p!r} holds control characters, which the survey\'s manifest cannot list')
             rows.append(f'{p}\t{n.size(i)}\t{n.head(i).hex()}\n')
             if p.lower().endswith('.nro'):
-                o = out / 'romfs_nro' / p.lstrip('/'); o.parent.mkdir(parents=True, exist_ok=True)
-                with open(o, 'wb') as f: n.copy(i, f)
+                if n.size(i) > pack_nx.MODULE_MAX: raise BuildError(f'{k.name}: RomFS {p!r} is {n.size(i):,} bytes, larger than any NRO module ({pack_nx.MODULE_MAX:,} at most)')
+                nros.append((names.add(parts + [name]), i))
     try:
-        walk(pk.romfs_of(k, base), '')
-        pk.control(k, out, pk.app_package(n, k) if base is None else base)   # what an update lacks, from its base game (or the metadata record, as pack_version takes it)
+        walk(pk.romfs_of(k, base), [])
+        need = exefs_size(n, k) + sum(n.size(i) for _, i in nros)   # dedup lets a small archive declare terabytes
+        if (free := free_gb(out) * 2**30) < need + 2**30: raise BuildError(f'{k.name}: {need / 2**30:,.1f} GB of code modules and NROs to write and {free / 2**30:,.1f} GB free on the volume of {out}')
+        pk.exefs(n, k, out / 'ExeFS')
+        for parts, i in nros:
+            o = out / 'romfs_nro' / Path(*parts); o.parent.mkdir(parents=True, exist_ok=True)
+            with open(o, 'xb') as f: n.copy(i, f)
+        pk.control(k, out, pk.app_package(n, k) if base is None else base)   # what an update lacks, from its base game (pack_nx: its exact base snapshot, as pack_version takes it)
     except pack_nup.Error as e: raise BuildError(str(e)) from e
+    except OSError as e: raise BuildError(f'{k.name}: writing the survey\'s files to {out}: {e.strerror or e}') from e
     (out / 'romfs_manifest.tsv').write_text(MANIFEST_HEAD + ''.join(rows))
     return len(rows)
 
@@ -1299,11 +1311,11 @@ def scan_nup(path, want=None):   # a NUP as scan_nsps gives a folder of NSPs, wi
     return app, {'base': base, 'updates': sorted(vers.items()), 'dlc': [(tid, None, k) for tid, k in sorted(dlc.items())], 'nup': n}
 
 
-def scan_nx(path, want=None):   # an NX archive as scan_nsps gives a folder of NSPs, with its snapshots for the NSPs: (title ID, {'base', 'base_version', 'updates', 'dlc', 'nx': the open archive})
+def scan_nx(path, want=None, platform=None):   # an NX archive as scan_nsps gives a folder of NSPs, with its snapshots for the NSPs: (title ID, {'base', 'base_version', 'updates', 'dlc', 'nx': the open archive})
     n = None
     try:
         n = pack_nx.Nx(path)
-        app, base, vers, dlc = pack_nx.scan(n, want)
+        app, base, vers, dlc = pack_nx.scan(n, want, platform)
     except (pack_nx.Error, OSError) as e:
         if n is not None: n.close()
         raise BuildError(str(e)) from e
@@ -3022,7 +3034,8 @@ def parse_args(argv):
         epilog='example: python3 scripts/build_ipa_from_nsp.py ~/nsp/"Super Mario Bros Wonder" -k ~/keys/prod.keys')
     ap.add_argument('nsp_dir', nargs='?', help='folder holding one game\'s NSPs, or its files as a dump (scripts/pack_dump.py lists the layout), or one NUP container (a .nup file) or NX archive (a .nx file; the file itself may be given) (default: the NSP_DIR setting, else asked)')
     ap.add_argument('-k', '--keys', help='path of prod.keys, not needed for a dump folder, a NUP or an NX (default: the PROD_KEYS setting, else asked)')
-    ap.add_argument('--title-id', help='the game to pack when the folder holds several (a cartridge dump with two games): its title ID, 16 hex digits (default: the TITLE_ID setting)')
+    ap.add_argument('--title-id', help='the game to pack when the folder holds several (a cartridge dump with two games): its title ID, 16 hex digits, with :switch1, :switch2 or :unknown after it '
+                    'for an NX that holds the ID on two platforms (default: the TITLE_ID setting)')
     ap.add_argument('-p', '--package', help='version packed into the IPA, e.g. v327680 / v0 (default: the newest in the folder)')
     ap.add_argument('-o', '--out', help='output IPA, or app with --platform mac-app (default: <the profile\'s ipa>, or <game name>.app, in the NSP folder)')
     ap.add_argument('--app-name', help='app name on the home screen (default: the game name in the base NSP)')
@@ -3215,25 +3228,32 @@ def main(args=None):
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
     py = sys.executable
     want = args.title_id or TITLE_ID
-    if want and not re.fullmatch(r'[0-9A-Fa-f]{16}', want): raise BuildError(f'--title-id / TITLE_ID takes a title ID, 16 hex digits: {want}')
+    sel = pack_nx.parse_title_id(want) if want else (None, None)
+    if sel is None: raise BuildError(f'--title-id / TITLE_ID takes a title ID, 16 hex digits (an NX that holds it on two platforms: with :switch1, :switch2 or :unknown after it): {want}')
+    want_id, want_platform = sel
+    if want_platform is not None and not nxa: raise BuildError(f'--title-id / TITLE_ID: a platform after the title ID ({want}) picks a game from an NX archive, which this is not')
+    plat_tag = ''   # an NX that holds the title ID on two platforms: the platform keeps the build folder and the app of each apart
     if PROGRAM_INDEX and dump: raise BuildError('--program / PROGRAM_INDEX picks a program from a multi-program application\'s NSPs; '
                                                      + ('an NX' if nxa else 'a NUP' if nup else 'a dump folder') + ' is read as one program\'s files')
     if nxa:
-        app, fam = scan_nx(nxa, int(want, 16) if want else None)
+        app, fam = scan_nx(nxa, want_id, want_platform)
         n = fam['nx']
+        if (plat_tag := pack_nx.platform_tag(n, n.selected)) and not work_dir(args):
+            args.work_dir = str(nsp_dir / f'{app:016X}-{plat_tag}_build')
+            say(f'{nxa.name} holds {app:016X} on two platforms: this build ({pack_nx.PLATFORMS[n.selected.platform]}) goes to {args.work_dir}')
         say(f'an NX: {nxa.name}, {app:016X}, {pack_nx.PLATFORMS[n.selected.platform]}, NX {n.version[0]}.{n.version[1]}, generation {n.generation}, '
             f'{len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
-        for line in n.notes: say(line)
+        for line in n.notes: say(pack_nx.shown(line))
     elif nup:
-        app, fam = scan_nup(nup, int(want, 16) if want else None)
+        app, fam = scan_nup(nup, want_id)
         say(f'a NUP: {nup.name}, {app:016X}, {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
         if fam['base'] is None: say(pack_nup.NO_BASE)
     elif dump:
-        app, fam = scan_dump(nsp_dir, int(want, 16) if want else None)
+        app, fam = scan_dump(nsp_dir, want_id)
         say(f'a dump folder: {app:016X}, {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
     else:
         with package_reader(repo, keys, env) as packages:
-            app, fam = scan_nsps(nsp_dir, packages.contents, int(want, 16) if want else None)
+            app, fam = scan_nsps(nsp_dir, packages.contents, want_id)
             packages.check_keys(fam)
         if PROGRAM_INDEX:   # one program of a multi-program application, packed as a game of its own: its title ID names the profile and the build folder
             app += PROGRAM_INDEX; say(f'program {PROGRAM_INDEX} of the application: title ID {app:016X}')
@@ -3282,6 +3302,7 @@ def main(args=None):
     work = build_folder(args, nsp_dir, g.id)
     out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else work.parent / g.get('ipa')   # by default next to the build folder (the NSP folder, beside the NSPs and <id>_build/, unless --work-dir moved it)
     if shadowed and not (args.out or OUT_IPA): out_ipa = out_ipa.with_name(out_ipa.stem + '-provisional.ipa')   # never over the IPA of the game's real profile
+    if plat_tag and not (args.out or OUT_IPA): out_ipa = out_ipa.with_name(f'{out_ipa.stem}-{plat_tag}{out_ipa.suffix}')   # never over the other platform's
     if mac_pack and (args.out or OUT_IPA) and out_ipa.suffix != '.app': raise BuildError(f'the Mac app (-o / OUT_IPA) must end in .app: {out_ipa}')
     project = work / 'xcode/DmIOS.xcodeproj'
     workspace = Path(os.path.expanduser(args.xcode_workspace or XCODE_WORKSPACE)).resolve() if (args.xcode_workspace or XCODE_WORKSPACE) else nsp_dir.parent / 'NxNative.xcworkspace'
@@ -3306,7 +3327,7 @@ def main(args=None):
     picks = pick_nsps(fam, have, versions)
 
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
-    gb = (sum(container(fam)[1].tree_bytes(pk.romfs_of(u or b, b)) for b, u in picks.values()) if nup else sum(tree_size((u or b) / 'romfs')[1] for b, u in picks.values()) if dump else extract_bytes(picks, False)) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
+    gb = (sum(container(fam)[1].tree_bytes(pk.romfs_of(u or b, b)) + exefs_size(container(fam)[1], u or b) for b, u in picks.values()) if nup else sum(tree_size((u or b) / 'romfs')[1] for b, u in picks.values()) if dump else extract_bytes(picks, False)) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'less than {gb:.0f} GB free on the volume of {work}')
     heapck = provisional and HEAP_CHECK and not args.no_heap_check and not heap_checked(g)   # the heap check, when the game needs one (once per provisional profile: it stamps the profile)
     PROG.plan(len(versions) + bool(fam['dlc']) + 4 - (prepare_xcode or (mac and not mac_pack)))   # prepare Xcode (a Mac-only build: the Mac host) replaces app build + IPA pack with one stage (a Mac app: Mac host + Mac app)
@@ -3366,7 +3387,7 @@ def main(args=None):
         except ValueError as e: raise BuildError(str(e)) from e
     # the app version is the packed game's display version: the update's control data when an update is packed (nx_extract saves it next to the RomFS), else the base game's
     app_version = nacp.version(game / 'control.nacp') or nacp.version(base / 'control.nacp')
-    if mac_pack and not (args.out or OUT_IPA): out_ipa = work.parent / f'{mac_app_name(app_name)}{"-provisional" if shadowed else ""}.app'
+    if mac_pack and not (args.out or OUT_IPA): out_ipa = work.parent / f'{mac_app_name(app_name)}{"-provisional" if shadowed else ""}{"-" + plat_tag if plat_tag else ""}.app'
     # the app icon: --icon / ICON, else the game icon nx_extract saved from the control data (English, icon.jpg; the packed version's first, then the base game's), which a dump never has and a NUP or an NX may lack;
     # without one, the NX 18 icon, so the home screen does not show a blank tile
     game_icon = user_icon or next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)

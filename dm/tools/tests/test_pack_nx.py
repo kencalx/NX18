@@ -440,7 +440,8 @@ class Pack(Base):
         self.assertFalse((u / 'ExeFS/.listing').exists())
         names = romfs_image.read_index(u / 'RomFS.img')
         self.assertIn('dir/new', names); self.assertNotIn('dir/old', names); self.assertEqual(names['empty'][2], 0)
-        self.assertFalse((u / 'control.nacp').exists())   # the update has none, and the base's is not borrowed: the script reads the base's
+        self.assertEqual(nacp.name(u / 'control.nacp'), 'Test Game')   # the update has none: its exact base game's, as the console inherits an unchanged Control
+        self.assertEqual((u / 'icon.jpg').read_bytes(), b'\xff\xd8 icon')
         pack_nx.pack_version(n, base, base, app, self.out() / 'b', say=lambda s: None)
         b = self.out() / 'b'
         self.assertEqual((nacp.name(b / 'control.nacp'), nacp.version(b / 'control.nacp')), ('Test Game', '1.2.3'))
@@ -457,16 +458,27 @@ class Pack(Base):
             self.assertEqual(nacp.version(self.out() / out / 'control.nacp'), disp)
             self.assertEqual((self.out() / out / 'icon.jpg').read_bytes(), icon)
 
-    def test_standalone_update_without_base_takes_the_application_metadata(self):
-        self.write(game({'type': 3, 'version': VER, 'tree': version(), 'meta': META}, {'type': 3, 'version': VER + 1, 'tree': version(main=b'newest', marker='newest')}))
-        n = self.open(); app, base, vers, _ = pack_nx.scan(n)
-        self.assertIsNone(base)
-        app2, fam = nsp.scan_nx(self.path); self.addCleanup(fam['nx'].close)
-        self.assertEqual(set(nsp.nsp_versions(fam)), {f'v{VER}', f'v{VER + 1}'})
-        pack_nx.pack_version(n, vers[VER + 1], base, app, self.out(), say=lambda s: None)
-        self.assertEqual((self.out() / 'ExeFS/main').read_bytes(), b'newest')
-        self.assertIn('dir/newest', romfs_image.read_index(self.out() / 'RomFS.img'))
-        self.assertEqual(nacp.name(self.out() / 'control.nacp'), 'Test Game')   # no base: the application's metadata snapshot's
+    def test_standalone_update_without_base_never_takes_another_updates_metadata(self):   # SPEC §4: native metadata is never attributed to another snapshot
+        for older, newer in ((3, 3), (1, 1)):
+            with self.subTest(types=(older, newer)):
+                self.write(game({'type': older, 'version': VER, 'tree': version(), 'meta': META}, {'type': newer, 'version': VER + 1, 'tree': version(main=b'newest', marker='newest')}))
+                n = self.open(); app, base, vers, _ = pack_nx.scan(n)
+                self.assertIsNone(base)
+                app2, fam = nsp.scan_nx(self.path); self.addCleanup(fam['nx'].close)
+                self.assertEqual(set(nsp.nsp_versions(fam)), {f'v{VER}', f'v{VER + 1}'})
+                said = []
+                pack_nx.pack_version(n, vers[VER + 1], base, app, self.out() / 'new', say=said.append)
+                self.assertEqual((self.out() / 'new/ExeFS/main').read_bytes(), b'newest')
+                self.assertIn('dir/newest', romfs_image.read_index(self.out() / 'new/RomFS.img'))
+                self.assertFalse((self.out() / 'new/control.nacp').exists())   # no NACP of its own and no base: none, not the older update's
+                self.assertFalse((self.out() / 'new/icon.jpg').exists())
+                self.assertTrue(any('no NACP for this version or its base game' in s for s in said), said)
+                pack_nx.pack_version(n, vers[VER], base, app, self.out() / 'old', say=lambda s: None)
+                self.assertEqual(nacp.name(self.out() / 'old/control.nacp'), 'Test Game')   # its own
+                self.write(game({'type': older, 'version': VER, 'tree': version()}, {'type': newer, 'version': VER + 1, 'tree': version(main=b'newest'), 'meta': META}))
+                n = self.open(); app, base, vers, _ = pack_nx.scan(n)
+                pack_nx.pack_version(n, vers[VER], base, app, self.out() / 'old2', say=lambda s: None)
+                self.assertFalse((self.out() / 'old2/control.nacp').exists())   # the older one never shows the newer update's NACP (display version) either
 
     def test_icon_choice_and_png(self):
         png = b'\x89PNG\r\n\x1a\n' + bytes(20)
@@ -536,6 +548,185 @@ class Pack(Base):
         self.assertEqual(nacp.name(out / 'control.nacp'), 'Test Game')
 
 
+class Review(Base):
+    """The review of the NX reader (scratchpad nxfmt/review-*): each case an archive the reader once took or mishandled"""
+    def cat(self, data):   # (Catalog offset, its header fields by name)
+        off, _ = nx_writer.catalog_span(data)
+        nexts, = struct.unpack_from('<I', data, off + 40)
+        app_off, ext_off, pool_off, pool_size = (struct.unpack_from('<Q', data, off + at)[0] for at in (48, 88, 96, 104))
+        return off, {'nexts': nexts, 'app_off': app_off, 'ext_off': ext_off, 'pool_off': pool_off, 'pool_size': pool_size}
+
+    def test_verify_checks_every_blocks_crc(self):   # SPEC §12 level 4: an integrity table that disagrees with the data fails verification, with or without --crc
+        data = bytearray(self.one_file(b'bytes whose file SHA-256 stays right ' * 30, compress=False))
+        integ = struct.unpack_from('<Q', data, 104)[0]
+        data[integ] ^= 1
+        self.path.write_bytes(nx_writer.reseal(bytes(data)))
+        n = self.open()
+        self.assertEqual(n.read(0)[:5], b'bytes')   # packing reads files by their SHA-256 (CRC-32C only with --crc)
+        for kw in ({}, {'crc': False}, {'crc': True}):
+            with self.subTest(kw=kw), self.assertRaises(pack_nx.Error) as e: n.verify(**kw)
+            self.assertEqual(e.exception.code, 'block_hash')
+        r = subprocess.run([sys.executable, str(REPO / 'scripts/pack_nx.py'), str(self.path), '--verify'], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1, r.stdout); self.assertIn('CRC-32C', r.stderr); self.assertNotIn('verified', r.stdout)
+
+    def test_extensions_sorted_and_their_padding_zero(self):
+        snaps = ({'type': 0, 'version': 0, 'tree': version(), 'display': '1.0'},)   # a 3-byte string pool: 5 bytes of padding before the first payload
+        exts = [(0x7F000001, 0, 1, 0, b'first'), (0x7F000002, 0, 1, 0, b'secnd')]
+        good = self.write(game(*snaps), extensions=exts)
+        self.open()
+        off, c = self.cat(good)
+        self.assertEqual((c['nexts'], c['pool_size']), (2, 3))
+        rec = off + c['ext_off']
+        for what, a, b, code in (('unsorted', 0x7F000002, 0x7F000001, 'catalog'), ('twice', 0x7F000001, 0x7F000001, 'catalog')):
+            with self.subTest(what=what):
+                d = bytearray(good); struct.pack_into('<I', d, rec, a); struct.pack_into('<I', d, rec + 32, b)
+                self.refused(nx_writer.reseal(bytes(d)), code, 'not sorted')
+        pad = off + c['pool_off'] + c['pool_size']
+        d = bytearray(good); self.assertEqual(d[pad:pad + 5], bytes(5)); d[pad:pad + 5] = b'\xaa' * 5
+        self.refused(nx_writer.reseal(bytes(d)), 'padding', 'extension')
+
+    def test_opaque_media_range_bounded_before_it_is_walked(self):
+        good = self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': META}))
+        off, c = self.cat(good)
+        for first, count in ((0, 0xFFFFFFFF), (0, 0xBCBCE95A), (0xFFFF, 1)):
+            with self.subTest(count=count):
+                d = bytearray(good); struct.pack_into('<II', d, off + c['app_off'] + 60, first, count)
+                t = time.monotonic()
+                self.refused(nx_writer.reseal(bytes(d)), 'catalog', 'opaque media range')
+                self.assertLess(time.monotonic() - t, 2)
+        d = bytearray(good); struct.pack_into('<II', d, off + c['app_off'] + 60, 0, 5)   # within the limit: refused by the Media check, as before
+        self.refused(nx_writer.reseal(bytes(d)), 'catalog', 'media reference')
+
+    def test_main_npdm_read_only_at_the_size_of_one(self):
+        tree = version(); tree['exefs']['main.npdm'] = npdm(TID) + bytes(2 << 20)   # 2 MiB of deduplicated zeros after a valid NPDM
+        self.write(game({'type': 0, 'version': 0, 'tree': tree}))
+        n = self.open()
+        with mock.patch.object(n, 'copy', side_effect=AssertionError('read whole')), self.assertRaises(pack_nx.Error) as e: pack_nx.scan(n)
+        self.assertEqual(e.exception.code, 'resource'); self.assertIn('exefs/main.npdm', str(e.exception))
+
+    def test_short_or_cut_npdm_is_an_error(self):
+        cut = bytearray(npdm(TID)); struct.pack_into('<I', cut, 0x70, 0xF8); cut[0xF8:0xFC] = b'ACI0'
+        for what, data, msg in (('8 bytes', b'META1234', 'not an NPDM'), ('ACI0 at its end', bytes(cut), 'no ACI0')):
+            with self.subTest(what=what):
+                tree = version(); tree['exefs']['main.npdm'] = data
+                self.write(game({'type': 0, 'version': 0, 'tree': tree}))
+                with self.assertRaisesRegex(pack_nx.Error, msg): pack_nx.scan(self.open())
+                with self.assertRaisesRegex(nsp.BuildError, msg): nsp.scan_nx(self.path)
+                r = subprocess.run([sys.executable, str(REPO / 'scripts/pack_nx.py'), str(self.path), '--work-dir', str(self.dir / 'w')], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 1); self.assertIn('[RED]', r.stderr); self.assertNotIn('Traceback', r.stderr)
+
+    def test_a_file_cut_while_open_is_an_io_error(self):   # read with pread: no SIGBUS
+        n = self.open()
+        i = n.child(n.snapshots[0].exefs, b'main')
+        os.truncate(self.path, 8192)
+        with self.assertRaises(pack_nx.Error) as e: n.read(i)
+        self.assertEqual(e.exception.code, 'io'); self.assertIn('before the', str(e.exception))
+
+    def test_control_characters_escaped_when_printed(self):
+        title = 'Game\x1b]0;TERMINAL TITLE SET BY ARCHIVE\x07\x1b[2K\rfake line\u202e'
+        self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': dict(META, title=title)}))
+        r = subprocess.run([sys.executable, str(REPO / 'scripts/pack_nx.py'), str(self.path), '--list'], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('Game\\x1b]0;TERMINAL', r.stdout)
+        self.assertFalse(any(c in r.stdout for c in '\x1b\x07\r\u202e'))
+        self.assertEqual(pack_nx.shown('a\tb\x9b\u2066'), 'a\\x09b\\x9b\\u2066')
+
+    def test_host_names_of_exefs_modules(self):
+        nfc, nfd = 'sdké', 'sdké'
+        for what, files, msg in (('NFC and NFD', {nfc: b'NFC-CONTENT', nfd: b'NFD-CONTENT'}, 'normalization'), ('case', {'main2': b'1', 'MAIN2': b'2'}, 'differ only in case'),
+                                 ('300 bytes', {'L' * 300: b'x'}, 'longer than a host file name'), ('control character', {'sdk\n': b'x'}, 'control characters')):
+            with self.subTest(what=what):
+                tree = version(); tree['exefs'].update(files)
+                self.write(game({'type': 0, 'version': 0, 'tree': tree}))
+                n = self.open()
+                with self.assertRaises(pack_nx.Error) as e: pack_nx.exefs(n, n.snapshots[0], self.dir / 'out/ExeFS')
+                self.assertEqual(e.exception.code, 'path'); self.assertRegex(str(e.exception), msg)
+                with self.assertRaisesRegex(nsp.BuildError, msg): nsp.code_modules({'nx': n}, n.snapshots[0], self.dir / 'out/ExeFS')
+                self.assertFalse((self.dir / 'out').exists())
+
+    def test_code_module_and_nro_size_capped_and_space_checked(self):
+        tree = version(); tree['exefs']['subsdk9'] = bytes(5000)
+        tree['romfs']['m.nro'] = b'\0' * 16 + b'NRO0' + bytes(5000)
+        self.write(game({'type': 0, 'version': 0, 'tree': tree}))
+        n = self.open(); k = n.snapshots[0]
+        with mock.patch.object(pack_nx, 'MODULE_MAX', 4096):
+            with self.assertRaises(pack_nx.Error) as e: pack_nx.exefs(n, k, self.dir / 'out/ExeFS')
+            self.assertEqual(e.exception.code, 'resource'); self.assertIn('subsdk9', str(e.exception))
+            with self.assertRaisesRegex(nsp.BuildError, 'larger than any NRO'): nsp.survey_nup(n, k, k, self.dir / 's1', pack_nx)
+        with mock.patch.object(nsp, 'free_gb', return_value=0.5):
+            with self.assertRaisesRegex(nsp.BuildError, 'GB free'): nsp.survey_nup(n, k, k, self.dir / 's2', pack_nx)
+        self.assertFalse((self.dir / 's2/ExeFS').exists())
+        self.assertEqual(nsp.exefs_size(n, k), sum(len(v) for v in tree['exefs'].values()))
+        with mock.patch.object(sys, 'argv', ['pack_nx.py', str(self.path), '--work-dir', str(self.dir / 'w')]), mock.patch.object(pack_nx, 'free_bytes', return_value=1 << 29), \
+             self.assertRaises(SystemExit) as e: pack_nx.main()
+        self.assertRegex(str(e.exception.code), r'^\[RED\] .* GB to write and 0.5 GB free')
+        self.assertFalse((self.dir / 'w/extract').exists())
+
+    def survey(self, romfs):
+        self.write(game({'type': 0, 'version': 0, 'tree': {'exefs': version()['exefs'], 'romfs': romfs}}))
+        n = self.open(); out = self.dir / 'survey'
+        import shutil; shutil.rmtree(out, ignore_errors=True)
+        return nsp.survey_nup(n, n.snapshots[0], n.snapshots[0], out, pack_nx)
+
+    def test_survey_refuses_names_it_cannot_list_or_write_apart(self):
+        nro = b'\0' * 16 + b'NRO0' + b'x' * 64
+        for what, romfs, msg in (('forged row', {'x\t1\t00\nfake/Engine/UE4Game.pak': b'1'}, 'control characters'), ('tab', {'a\tb': b'1'}, 'control characters'),
+                                 ('case', {'mod.nro': nro, 'MOD.nro': nro + b'2'}, 'differ only in case'), ('NFC and NFD', {'é.nro': nro, 'é.nro': nro + b'2'}, 'normalization'),
+                                 ('file and folder', {'d.nro': nro, 'D.NRO/e.nro': nro}, 'differ only in case'), ('long name', {'n' * 300 + '.nro': nro}, 'longer than a host file name')):
+            with self.subTest(what=what), self.assertRaisesRegex(nsp.BuildError, msg): self.survey(romfs)
+        self.assertEqual(self.survey({'Mod.nro': nro, 'sub/mod.nro': nro, 'a b.txt': b'1'}), 3)   # one name per folder is fine
+        self.assertEqual((self.dir / 'survey/romfs_nro/sub/mod.nro').read_bytes(), nro)
+
+    def test_empty_base_is_no_base(self):   # as a NUP's empty base record (test_nsp_nup.py); its metadata still serves the update
+        for tree in ({'exefs': {}}, {}, {'exefs': {}, 'romfs': {}}, {'exefs': {'.listing': b'not a file of the game'}}):
+            with self.subTest(tree=tree):
+                self.write(game({'type': 0, 'version': 0, 'tree': tree, 'meta': META}, {'type': 1, 'version': VER, 'tree': version()}))
+                n = self.open()
+                app, base, vers, _ = pack_nx.scan(n)
+                self.assertIsNone(base); self.assertEqual(app, TID)
+                self.assertTrue(any('no base game' in s for s in n.notes), n.notes)
+                self.assertEqual(set(nsp.nsp_versions({'base': base, 'updates': sorted(vers.items())})), {f'v{VER}'})
+                pack_nx.pack_version(n, vers[VER], base, app, self.dir / 'out', say=lambda s: None)
+                self.assertIn('dir/marker', romfs_image.read_index(self.dir / 'out/RomFS.img'))
+                self.assertEqual(nacp.name(self.dir / 'out/control.nacp'), 'Test Game')   # the exact base's metadata
+        for tree in ({'romfs': {'shared': b'data'}}, {'exefs': version()['exefs']}):   # a base with game files stays a base
+            with self.subTest(tree=tree):
+                self.write(game({'type': 0, 'version': 0, 'tree': tree}, {'type': 1, 'version': VER, 'tree': version()}))
+                self.assertIsNotNone(pack_nx.scan(self.open())[1])
+        self.write(game({'type': 0, 'version': 0, 'tree': {'exefs': {}}, 'meta': META}))
+        with self.assertRaisesRegex(pack_nx.Error, 'holds the game\'s files'): pack_nx.scan(self.open())
+
+    def test_one_title_id_on_two_platforms(self):
+        self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': META}, platform=1) + game({'type': 0, 'version': 0, 'tree': version(main=b'two'), 'meta': META}, platform=2))
+        n = self.open()
+        for want in (None, TID):
+            with self.subTest(want=want), self.assertRaises(pack_nx.Error) as e: pack_nx.scan(n, want)
+            self.assertIn(f'{TID:016X}:switch1 (Switch 1, Test Game), {TID:016X}:switch2 (Switch 2', str(e.exception))
+            self.assertIn('platform after the ID', str(e.exception))
+        for plat in (1, 2):
+            self.assertEqual((pack_nx.scan(n, TID, plat)[0], n.selected.platform, pack_nx.platform_tag(n, n.selected)), (TID, plat, pack_nx.SELECTORS[plat]))
+        with self.assertRaisesRegex(pack_nx.Error, f'no game {TID:016X}:unknown'): pack_nx.scan(n, TID, 0)
+        self.assertEqual(pack_nx.parse_title_id(f'{TID:016x}:Switch2'), (TID, 2))
+        self.assertEqual(pack_nx.parse_title_id(f'{TID:016X}'), (TID, None))
+        self.assertEqual(pack_nx.parse_title_id(f'{TID:016X}:1'), (TID, 1))
+        self.assertIsNone(pack_nx.parse_title_id(f'{TID:016X}:switch3'))
+        with fixture('same_application_id_cross_platform.nx') as f:
+            with self.assertRaisesRegex(pack_nx.Error, ':switch2') as e: pack_nx.scan(f, 0x0100000000000001)
+            try: pack_nx.scan(f, 0x0100000000000001, 2)
+            except pack_nx.Error as e2: self.assertNotIn('holds 2 games', str(e2))   # picked; what it holds may still not be a game's
+        r = subprocess.run([sys.executable, str(REPO / 'scripts/pack_nx.py'), str(self.path), '--title-id', f'{TID:016X}:switch2'], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.dir / f'{TID:016X}-switch2_build/extract/v0/ExeFS/main').read_bytes(), b'two')
+
+    def test_notes_printed_once(self):
+        good = bytearray(self.path.read_bytes())
+        h = bytearray(good[:256]); struct.pack_into('<Q', h, 216, 1); h[120] ^= 1   # generation 1, its Catalog digest wrong
+        struct.pack_into('<I', h, 252, nx_writer.crc32c(h[:252])); good[4096:4352] = h; self.path.write_bytes(good)
+        r = subprocess.run([sys.executable, str(REPO / 'scripts/pack_nx.py'), str(self.path), '--work-dir', str(self.dir / 'w')], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.count('generation 1 is damaged'), 1, r.stdout)
+
+
 class Stop(Exception): pass
 
 
@@ -566,7 +757,7 @@ class StandaloneCLI(Base):
 
 
 class Main(Base):
-    def run_main(self, target, *, extract=False, package=None):
+    def run_main(self, target, *, extract=False, package=None, argv=()):
         seen, said = {}, []
         def stop(env, *a):
             seen.update(env)
@@ -575,7 +766,7 @@ class Main(Base):
              mock.patch.object(nsp, 'check_prereqs', side_effect=stop), mock.patch.object(nsp, 'say', side_effect=said.append), \
              mock.patch.object(nsp, 'check_versions_aarch64', side_effect=Stop), mock.patch.object(nsp, 'find_nx_extract', side_effect=AssertionError('built nx_extract')), \
              mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_reader', side_effect=AssertionError('read a package')):
-            with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(target)] + (['--package', package] if package else [])))
+            with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(target)] + (['--package', package] if package else []) + list(argv)))
         return Path(seen['DM_ROOT']), said
 
     def test_needs_no_keys_and_builds_beside_the_nx(self):
@@ -612,6 +803,42 @@ class Main(Base):
             with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(self.path), '--survey-only']))
         self.assertEqual(seen['app'], NEW)
         self.assertEqual(seen['base'].type, pack_nx.BASE)
+
+    def test_empty_base_and_no_base_pack_alike(self):   # Mario's profile needs v0 and registers the update: without a base game it is packed from a derived profile (test_nsp_nup.py's twin)
+        tid, ver = 0x010015100B514000, 327680
+        for snaps in (({'type': 3, 'version': ver, 'tree': version(tid=tid), 'meta': META},),
+                      ({'type': 0, 'version': 0, 'tree': {}, 'meta': META}, {'type': 1, 'version': ver, 'tree': version(tid=tid)}),
+                      ({'type': 0, 'version': 0, 'tree': {'exefs': {'.listing': b'x'}}, 'meta': META}, {'type': 1, 'version': ver, 'tree': version(tid=tid)})):
+            with self.subTest(types=[x['type'] for x in snaps]):
+                self.write(game(*snaps, tid=tid))
+                work, said = self.run_main(self.path, extract=True)
+                self.assertFalse((work / 'extract/v0').exists())
+                self.assertEqual((work / f'extract/v{ver}/ExeFS/main').read_bytes(), b'code')
+                self.assertEqual(nacp.name(work / f'extract/v{ver}/control.nacp'), 'Test Game')
+                self.assertTrue(any('the folder has no v0' in s for s in said), said)
+
+    def test_update_alone_takes_its_base_games_control_data(self):   # the profile packs only the update: the base snapshot's NACP and icon still reach its folder (docs/development.md)
+        work, _ = self.run_main(self.path, extract=True)
+        self.assertFalse((work / 'extract/v0').exists())
+        self.assertEqual(nacp.name(work / f'extract/v{VER}/control.nacp'), 'Test Game')
+        self.assertEqual((work / f'extract/v{VER}/icon.jpg').read_bytes(), b'\xff\xd8 icon')
+
+    def test_platform_picks_the_game_and_keeps_its_build_apart(self):
+        self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': META}, platform=1) + game({'type': 0, 'version': 0, 'tree': version(), 'meta': META}, platform=2))
+        self.assertRegex(self.red([str(self.path), '--title-id', f'{TID:016X}']), f'{TID:016X}:switch2 .*platform after the ID')
+        self.assertRegex(self.red([str(self.path), '--title-id', f'{TID:016X}:switch3']), 'takes a title ID')
+        for plat in ('switch1', 'switch2'):
+            work, said = self.run_main(self.path, argv=['--title-id', f'{TID:016X}:{plat}'])
+            self.assertEqual(work, self.dir / f'{TID:016X}-{plat}_build')
+            self.assertTrue(any(s.startswith(f'an NX: game.nx, {TID:016X}, Switch {plat[-1]}') for s in said), said)
+
+    def test_disk_check_counts_the_code_modules(self):
+        n = self.open(); k = n.snapshots[1]
+        romfs, code = n.tree_bytes(k.romfs), nsp.exefs_size(n, k)
+        self.assertGreater(code, 0)
+        n.close()
+        with mock.patch.object(nsp, 'free_gb', return_value=6 + (romfs + code / 2) / 2**30):   # room for the RomFS and the 6 GB of slack, not for the code too
+            self.assertRegex(self.red([str(self.path)]), r'^\[RED\] less than 6 GB free')
 
     def red(self, argv):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \

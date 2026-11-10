@@ -179,10 +179,10 @@ class Nup:
         return out[:n]
 
 
-def program_id(npdm, where):   # the ACI0 program ID of an NPDM
-    if npdm[:4] != b'META': raise Error(f'{where}: not an NPDM')
+def program_id(npdm, where):   # the ACI0 program ID of an NPDM; a short or cut NPDM is an Error, not a struct.error
+    if npdm[:4] != b'META' or len(npdm) < 0x78: raise Error(f'{where}: not an NPDM ({len(npdm):,} bytes)')
     off, size = struct.unpack_from('<II', npdm, 0x70)
-    if npdm[off:off + 4] != b'ACI0' or size < 0x18: raise Error(f'{where}: no ACI0 section')
+    if npdm[off:off + 4] != b'ACI0' or size < 0x18 or off + 0x18 > len(npdm): raise Error(f'{where}: no ACI0 section')
     return struct.unpack_from('<Q', npdm, off + 0x10)[0]
 
 

@@ -872,7 +872,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
         if (fl & (IMG_ENT_DAMAGED | IMG_ENT_BAD_HEAD)) {
             if (!(__atomic_fetch_or(&ent->flags, IMG_ENT_REPORTED, __ATOMIC_RELAXED) & IMG_ENT_REPORTED)) {
                 if (fl & IMG_ENT_DAMAGED) LOG("[RED] fs %s failed the NCA's hash check when it was extracted (a damaged NSP, --allow-damaged); its bytes may be wrong", path);
-                else LOG("[RED] fs %s does not start as a zstd stream (first bytes %08x, %llu bytes): the game files are damaged (a NUP or a dump packed with --allow-damaged) and the game "
+                else LOG("[RED] fs %s does not start as a zstd stream (first bytes %08x, %llu bytes): the game files are damaged (a NUP, an NX or a dump packed with --allow-damaged) and the game "
                          "cannot decompress it; a loader that asks for it again keeps a thread busy. Pack again from a good copy of the game", path, head, (unsigned long long)ent->b);
             }
             uint64_t n = img_damaged_open(im, (uint64_t)k);

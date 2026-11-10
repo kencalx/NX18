@@ -13,7 +13,8 @@
 # Writes, under the build folder (<folder of the .nx>/<title ID>_build unless --work-dir names another):
 #   extract/v<version>/ExeFS/   the version's code modules
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py), written straight from the archive: the RomFS is never unpacked into loose files
-#   extract/v<version>/control.nacp, icon.jpg   the snapshot's NACP and icon, when the archive has them for it (sips reads a PNG icon by its content)
+#   extract/v<version>/control.nacp, icon.jpg   the snapshot's NACP and icon, when the archive has them for it, else its exact base snapshot's (also a base that holds only metadata; never
+#     another update's); none when neither has them (sips reads a PNG icon by its content)
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − base title ID − 0x1000; DLC converted from a NUP or folders carry their add-on title ID), the host's DM_AOC_DIR
 # Checks, in the order of the format's own validator so a damaged or hostile archive gets the error the format names (Error.code):
 #   open: both header slots (magic, CRC-32C, zero page padding; the valid one of the highest generation; an older generation when the newer one's tail is damaged), the version (0.2 and 0.3
@@ -22,12 +23,18 @@
 #     snapshot's identity, recomputed. The format's limits (SECURITY.md) and lower budgets of this reader (Budgets: the Manifest and block index are held in memory) bound all of it.
 #   read: a zstd block must be one frame with its content size, no dictionary, a window of 1 MiB at most and no trailing bytes, and decodes to at most its logical size; every file streamed
 #     is checked against its SHA-256 before the image is published. A file that fails has its blocks' CRC-32C checked to name the damaged block. CRC-32C is computed here in Python
-#     (17 MiB/s, the SHA-256 runs at about 2 GB/s), so it is checked on every block read only with --crc; --verify checks the whole archive (every block, also unreferenced ones, and every file).
+#     (17 MiB/s, the SHA-256 runs at about 2 GB/s), so it is checked on every block read only with --crc; --verify checks the whole archive (every block with its CRC-32C, also unreferenced
+#     ones, and every file). The archive is read with pread, never mapped: a file that shrinks while it is read is an error (io), not a SIGBUS.
+#   host: what is written out is bounded before it is read: main.npdm up to 1 MiB, a code module up to 1 GiB, each name one host file name (255 bytes, no control characters, none that a
+#     case- and normalization-insensitive volume takes for another), and the bytes to write against the volume's free space (dedup lets a small archive declare terabytes). Strings from the
+#     archive are printed with their control characters escaped (shown).
 # A repeat run keeps code modules whose content is the same and an image made from the same RomFS tree (paths, sizes and SHA-256) by the same packer, or, after a packer update, an image whose
 # bytes check against the archive's hashes. An edit that appends a generation (nxconvert add) or recompresses the archive keeps those trees, so the images are kept.
 # Needs the zstd module for zstd blocks: compression.zstd (Python 3.14+) or backports.zstd, as the NSP script.
-# Usage: pack_nx.py <game.nx> [--version N] [--title-id ID] [--work-dir DIR] [--list] [--verify] [--crc]   (exit 1 on error)
-import argparse, hashlib, mmap, os, shutil, struct, sys
+# A base snapshot with no game files (no exefs/main, nothing in romfs/: one that holds only the application's metadata) is no base game, as a NUP's empty base record.
+# An archive may hold one title ID on two platforms: --title-id <ID>:switch1 / :switch2 / :unknown picks one, and its build folder is <ID>-<platform>_build.
+# Usage: pack_nx.py <game.nx> [--version N] [--title-id ID[:PLATFORM]] [--work-dir DIR] [--list] [--verify] [--crc]   (exit 1 on error)
+import argparse, hashlib, os, re, shutil, struct, sys, unicodedata
 import typing
 from typing import NoReturn
 from pathlib import Path
@@ -78,6 +85,28 @@ KNOWN_REQUIRED = {EXT_FIRMWARE, EXT_LANGUAGES, EXT_REGIONS, EXT_HISTORY, EXT_NAT
 DAMAGE = {'length', 'bounds', 'structure', 'padding', 'catalog_hash', 'manifest_hash', 'index_hash'}   # failures of a newer generation that fall back to the older one (SPEC §1)
 NATIVE = ('holds decrypted NCA files (an NX that nxconvert pack made from a decrypted NSP or XCI): building from those is not supported yet. Make the NX from a NUP or from extracted '
           'folders instead (nxconvert pack-nup / pack-tree), or build from the NSPs with prod.keys')
+
+
+class _File:
+    """The archive's bytes, read with pread: f[a:b] is bytes. A file that shrinks while it is open (a drive or share dropped, a tool rewriting it) gives an Error (code io), where a
+    memory map of it would kill the process with SIGBUS, before any clean-up ran"""
+    def __init__(self, path, f):
+        self.path, self.fd, self.size, self.closed = path, os.dup(f.fileno()), os.fstat(f.fileno()).st_size, False
+
+    def __len__(self): return self.size
+
+    def __getitem__(self, s):
+        start, stop, _ = s.indices(self.size)
+        out, at = [], start
+        while at < stop:
+            try: b = os.pread(self.fd, min(stop - at, 64 * MiB), at)
+            except OSError as e: raise Error(f'{self.path.name}: {e.strerror or e} (reading at {at:#x})', 'io') from e
+            if not b: raise Error(f'{self.path.name}: the file ends at {at:#x}, before the {self.size:,} bytes it had when it was opened (removed, rewritten or its drive gone?)', 'io')
+            out.append(b); at += len(b)
+        return b''.join(out)
+
+    def close(self):
+        if not self.closed: self.closed = True; os.close(self.fd)
 
 
 class Budgets:
@@ -176,10 +205,10 @@ class Nx:
         self.path, self.budgets, self.crc = Path(path), budgets or Budgets(), crc
         self.notes, self.fell_back = [], None
         try:
-            with open(self.path, 'rb') as f:   # the map keeps its own descriptor
+            with open(self.path, 'rb') as f:   # the reader keeps its own descriptor
                 size = os.fstat(f.fileno()).st_size
                 if size < DATA_START: raise Error(f'{self.path.name}: {size:,} bytes, shorter than the two header pages (8,192 bytes): not a whole NX archive', 'length')
-                self.mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+                self.mm = _File(self.path, f)
         except OSError as e: raise Error(f'{self.path}: {e.strerror or e}', 'io') from e
         try: self._open()
         except BaseException:
@@ -199,7 +228,7 @@ class Nx:
     def _slots(self):
         valid = []
         for at in (0, PAGE):
-            raw = bytes(self.mm[at:at + HEADER.size])
+            raw = self.mm[at:at + HEADER.size]
             v = HEADER.unpack(raw)
             if v[0] != b'NXAR' or crc32c(raw[:252]) != v[25] or self.mm[at + HEADER.size:at + PAGE] != bytes(PAGE - HEADER.size): continue
             valid.append((v[22], raw, v))
@@ -235,7 +264,7 @@ class Nx:
             if idx_off or integ_off or data_off or data_size or integ_size: self.fail('structure', 'no blocks, but block regions are set')
         elif data_off != DATA_START or not idx_off or not integ_off or not data_size or not integ_size: self.fail('structure', 'blocks without a Data region or block index')
         self._range(cat_off, cat_size, self.archive_size, 'the Catalog')
-        catalog = bytes(self.mm[cat_off:cat_off + cat_size])
+        catalog = self.mm[cat_off:cat_off + cat_size]
         if hashlib.sha256(catalog).digest() != cat_sha: self.fail('catalog_hash', 'the Catalog does not match its SHA-256 (damaged archive)')
         if man_size < MANIFEST.size or man_size > 4 << 30: self.fail('resource', 'Manifest size outside the format limit')
         if media_size == 0 and media_off: self.fail('structure', 'no Media region, but its offset is set')
@@ -252,15 +281,15 @@ class Nx:
             end = at + size
         if end != self.archive_size: self.fail('length', 'the tail does not end at the archive size')
         if nblocks * BLOCK.size + integ_size > self.budgets.index: self.fail('resource', f'block index of {nblocks:,} blocks: above this reader\'s budget (Budgets.index)')
-        self.index = bytes(self.mm[idx_off:idx_off + nblocks * BLOCK.size])
-        self.integrity = bytes(self.mm[integ_off:integ_off + integ_size])
+        self.index = self.mm[idx_off:idx_off + nblocks * BLOCK.size]
+        self.integrity = self.mm[integ_off:integ_off + integ_size]
         if hashlib.sha256(self.index + self.integrity).digest() != idx_sha: self.fail('index_hash', 'the block index or integrity table does not match its SHA-256 (damaged archive)')
         self.nblocks, self.data_end = nblocks, data_off + data_size
         self.media_off, self.media_size = media_off, media_size
         self._catalog(catalog, minor)
         self._media()
         if man_size > self.budgets.manifest: self.fail('resource', f'Manifest of {man_size:,} bytes: above this reader\'s budget (Budgets.manifest)')
-        manifest = bytes(self.mm[man_off:man_off + man_size])
+        manifest = self.mm[man_off:man_off + man_size]
         if hashlib.sha256(manifest).digest() != man_sha: self.fail('manifest_hash', 'the Manifest does not match its SHA-256 (damaged archive)')
         self._manifest(manifest)
         self._blocks(data_off)
@@ -346,6 +375,7 @@ class Nx:
             elif not a.first_snapshot <= a.meta_snapshot < a.first_snapshot + a.nsnapshots: self.fail('catalog', f'application {a.id:016X}: its metadata snapshot is not one of its snapshots')
             elif not has: self.fail('catalog', f'application {a.id:016X}: a metadata snapshot with no metadata')
             if a.opaque_count:
+                if a.opaque_count > 65535 or a.opaque_first > 65535 - a.opaque_count: self.fail('catalog', f'application {a.id:016X}: its opaque media range lies past the Media records\' limit (65,535)')
                 refs.extend((m, (OPAQUE,)) for m in range(a.opaque_first, a.opaque_first + a.opaque_count)); opaque.append((a.opaque_first, a.opaque_first + a.opaque_count))
             elif a.opaque_first not in (0, NO): self.fail('catalog', f'application {a.id:016X}: an empty opaque media range with a start')
         if pcur != nprogs or scur != nsnaps or lcur != nlocal: self.fail('catalog', 'application ranges do not cover the Catalog tables')
@@ -402,15 +432,16 @@ class Nx:
             if kind not in (1, 2, 3) or flags & ~1 or r0 or r1 or target == bytes(32): self.fail('catalog', 'invalid dependency record')
             if bool(flags & 1) == (cid == bytes(16)): self.fail('catalog', 'dependency content ID flag and value disagree')
         self.history, self.native, self.resource_dirs = {}, {}, []   # {app index: {snapshot index: row}}, {snapshot index: (NPDM media, firmware or None)}, [(kind, root directory)]
-        keys = set()
+        prior = None
         for e in range(nexts):
             type_id, flags, okind, r0, oidx, p_off, p_size = EXT.unpack_from(cat, ext_off + e * EXT.size)
             if flags & ~1 or okind not in (0, 1, 2, 3) or r0: self.fail('catalog', f'invalid extension record {e}')
             if (okind == 0 and oidx != NO) or (okind == 1 and oidx >= napps) or (okind == 2 and oidx >= nprogs) or (okind == 3 and oidx >= nsnaps): self.fail('catalog', f'extension {type_id:#010x}: invalid owner')
-            if (type_id, okind, oidx) in keys: self.fail('catalog', f'extension {type_id:#010x} twice for one owner')
-            keys.add((type_id, okind, oidx))
+            if prior is not None and (type_id, okind, oidx) <= prior: self.fail('catalog', f'extension {type_id:#010x}: extensions are not sorted by (type, owner kind, owner index), or one is listed twice for one owner')
+            prior = (type_id, okind, oidx)
             lo, hi = self._range(p_off, p_size, len(cat), f'extension {type_id:#010x}')
             if lo < pool_off + pool_size: self.fail('catalog', f'extension {type_id:#010x}: its payload overlaps the tables or strings')
+            if cat[cursor:align(cursor, 8)] != bytes(align(cursor, 8) - cursor): self.fail('padding', f'nonzero Catalog padding before extension {type_id:#010x}\'s payload')
             cursor = align(cursor, 8)
             if lo != cursor: self.fail('catalog', f'extension {type_id:#010x}: its payload is not at its packed offset')
             cursor = hi
@@ -536,14 +567,14 @@ class Nx:
         if size:
             self._range(off, size, len(self.mm), 'the Media region')
             if off % 16 or size < MEDIA_HEAD.size or size > 4 << 30: self.fail('structure', 'invalid Media region alignment or size')
-            magic, v, hs, total, n, rsize, r0, rec_off, pay_off = MEDIA_HEAD.unpack_from(self.mm, off)
+            magic, v, hs, total, n, rsize, r0, rec_off, pay_off = MEDIA_HEAD.unpack(self.mm[off:off + MEDIA_HEAD.size])
             if (magic, v, hs, total, rsize, r0, rec_off) != (b'NXMD', 1, 32, size, 64, 0, 32): self.fail('structure', 'invalid Media header')
             if not 1 <= n <= 65535 or pay_off != align(32 + n * 64, 16): self.fail('structure', 'invalid Media record count or payload start')
             self._range(off + 32, n * MEDIA.size, off + size, 'the Media records')
             if self.mm[off + 32 + n * 64:off + pay_off] != bytes(pay_off - 32 - n * 64): self.fail('padding', 'nonzero Media table padding')
-            cursor = pay_off
+            cursor, recs = pay_off, self.mm[off + 32:off + 32 + n * MEDIA.size]
             for i in range(n):
-                mtype, codec, flags, stored, logical, d_off, sha, rr = MEDIA.unpack_from(self.mm, off + 32 + i * 64)
+                mtype, codec, flags, stored, logical, d_off, sha, rr = MEDIA.unpack_from(recs, i * 64)
                 if mtype not in (PNG, JPEG, NPDM, NACP, OPAQUE) or codec or flags or rr: self.fail('structure', f'invalid Media record {i}')
                 if not stored or stored > 64 * MiB or logical != stored or d_off % 16: self.fail('resource', f'Media record {i}: size or alignment outside the limit')
                 if d_off != align(cursor, 16): self.fail('structure', f'Media record {i}: payload not at its packed offset')
@@ -565,7 +596,7 @@ class Nx:
 
     def media(self, m):   # Media record m's payload, checked against its SHA-256
         mtype, at, size, sha = self.media_records[m]
-        data = bytes(self.mm[at:at + size])
+        data = self.mm[at:at + size]
         if hashlib.sha256(data).digest() != sha: self.fail('media_hash', f'Media record {m} does not match its SHA-256 (damaged archive)')
         return data
 
@@ -778,12 +809,13 @@ class Nx:
                 parent.setdefault((isdir, t), (d, name))
         parts, key, roots = [], (False, i), {s.root: s for s in self.snapshots}
         while key in parent and len(parts) <= 257:
-            d, name = parent[key]; parts.append(name.decode(errors='replace'))
+            d, name = parent[key]; parts.append(shown(name.decode(errors='replace')))
             if d in roots: return f'{roots[d].name}: {"/".join(reversed(parts))}'
             key = (True, d)
         return '/'.join(reversed(parts)) if parts else f'file record {i}'
 
-    def read(self, i):
+    def read(self, i, limit=None):   # file i whole, checked; limit: the most bytes the caller takes, refused (code resource) before anything is read
+        if limit is not None and self.size(i) > limit: raise Error(f'{self.file_path(i)}: {self.size(i):,} bytes, above the {limit:,} this reader takes for it', 'resource')
         class Buf(bytearray):
             write = bytearray.extend
         b = Buf(); self.copy(i, b); return bytes(b)
@@ -797,18 +829,21 @@ class Nx:
         return out[:min(n, size)]
 
     def verify(self, crc=True, progress=None):
-        """Full verification (SPEC §12 level 4): every Media payload's SHA-256, every block decoded by the zstd rules (crc: every slice's CRC-32C; else only blocks no file uses, the
-        others being covered by their files' SHA-256) and every file record's SHA-256. progress(done, total) per file. Raises Error"""
+        """Full verification (SPEC §12 level 4): every Media payload's SHA-256, every block decoded by the zstd rules and checked against its slices' CRC-32C (once per block, also when
+        its files' SHA-256 would pass: an archive whose integrity table disagrees with its data fails every read of the format's own reader), and every file record's SHA-256.
+        crc is kept for callers: the blocks' CRC-32C are always checked here. progress(done, total) per block, then per file. Raises Error"""
         for m in range(len(self.media_records)): self.media(m)
-        used = set(self.refs)
         for bid in range(self.nblocks):
-            if crc or bid not in used: self.block(bid, crc=True)
+            if progress and not bid % 64: progress(bid, self.nblocks, 'blocks')
+            self.block(bid, crc=True)
         class Sink:
             def write(self, b): pass
-        sink = Sink()
-        for i in range(len(self.files)):
-            if progress and not i % 256: progress(i, len(self.files))
-            self.copy(i, sink)
+        sink, self.crc, crc = Sink(), False, self.crc   # every block's CRC-32C is checked already
+        try:
+            for i in range(len(self.files)):
+                if progress and not i % 256: progress(i, len(self.files), 'files')
+                self.copy(i, sink)
+        finally: self.crc = crc
 
     # ---- metadata ----
     def meta(self, s):
@@ -822,22 +857,80 @@ class Nx:
         return {'nacp': self.media(nacp) if nacp != NO else None, 'icon': self.media(icon) if icon != NO else None}
 
 
+NPDM_MAX, MODULE_MAX = MiB, 1 << 30   # the largest main.npdm read whole (real ones are a few KB), and the largest code module or NRO written out (real ones are tens of MB)
+SELECTORS = {0: 'unknown', 1: 'switch1', 2: 'switch2'}   # the platform after a title ID (--title-id 0100…:switch2), for an archive that holds one ID on two platforms
+_UNSHOWN = re.compile('[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]')   # C0, DEL, C1 and the bidirectional overrides
+
+
+def shown(text):   # an archive's string as it is printed: control characters escaped, so a title cannot drive the terminal (set its title, erase or rewrite lines)
+    return _UNSHOWN.sub(lambda m: f'\\x{ord(m.group()):02x}' if ord(m.group()) < 0x100 else f'\\u{ord(m.group()):04x}', text) if text else text
+
+
+def parse_title_id(text):   # '0100…' or '0100…:switch1' / ':switch2' / ':unknown' (or :1, :2, :0) → (application ID, platform or None); None when it is neither
+    m = re.fullmatch(r'([0-9A-Fa-f]{16})(?::(switch1|switch2|unknown|[012]))?', text.strip(), re.IGNORECASE)
+    if not m: return None
+    plat = m.group(2)
+    return int(m.group(1), 16), None if plat is None else int(plat) if plat.isdigit() else {v: k for k, v in SELECTORS.items()}[plat.lower()]
+
+
+def platform_tag(n, a):   # 'switch1', 'switch2' or 'unknown' when the archive holds a's ID on another platform too (its build folder and app are kept apart by it), else ''
+    return SELECTORS[a.platform] if any(b is not a and b.id == a.id for b in n.apps) else ''
+
+
+class HostNames:
+    """Archive names written as host files (ExeFS modules, a survey's NROs): each one component of at most 255 bytes with no control characters (a survey's RomFS manifest is tab- and
+    line-separated), and no two in one folder that a case- and normalization-insensitive volume (APFS by default) takes for the same name, so no file overwrites another. add(parts) → the
+    names as str; raises Error (code path)"""
+    def __init__(self, where):
+        self.where, self.seen = where, {}
+
+    def add(self, parts):
+        out, key = [], ()
+        for raw in parts:
+            name = os.fsdecode(raw)
+            if name in ('', '.', '..') or '\0' in name or Path(name).name != name: raise Error(f'{self.where}: invalid name {name!r} for a host file', 'path')
+            if any(ord(c) < 0x20 or ord(c) == 0x7F for c in name): raise Error(f'{self.where}: name {name!r} holds control characters, which no host file name here takes', 'path')
+            if len(os.fsencode(name)) > 255: raise Error(f'{self.where}: name {shown(name[:40])!r}… is {len(os.fsencode(name)):,} bytes, longer than a host file name (255)', 'path')
+            fold = unicodedata.normalize('NFD', unicodedata.normalize('NFD', name).casefold())
+            other = self.seen.setdefault(key + (fold,), name)
+            if other != name: raise Error(f'{self.where}: names {other!a} and {name!a} differ only in case or Unicode normalization: one file on a case-insensitive volume', 'path')
+            out.append(name); key += (fold,)
+        return out
+
+
 def primary(a):   # the application's own program: its ID is the application's, else its one primary program, else its one program
     progs = a.programs
     return next((p for p in progs if p.id == a.id), None) or (ps[0] if len(ps := [p for p in progs if p.kind == 0]) == 1 else progs[0] if len(progs) == 1 else None)
 
 
-def scan(n, want=None):
+def npdm_id(n, k):   # the program ID of snapshot k's exefs/main.npdm, read whole only when it is the size of an NPDM
+    try: return pack_nup.program_id(n.read(n.child(k.exefs, b'main.npdm'), NPDM_MAX), f'{k.name} exefs/main.npdm')
+    except Error: raise
+    except pack_nup.Error as e: raise Error(str(e), 'format') from e
+
+
+def has_game(n, k):   # whether snapshot k holds game files: exefs/main, or files in romfs/. A base snapshot without them holds only the application's metadata, as a NUP's empty base record
+    return (k.exefs != NO and n.child(k.exefs, b'main') is not None) or (k.romfs != NO and bool(n.children(k.romfs)))
+
+
+def scan(n, want=None, platform=None):
     """What an NX holds for the game to pack: (title ID, base snapshot or None, {update version: snapshot}, {DLC title ID: snapshot}), with the checks pack_nup.scan makes.
-    want: the application ID (--title-id) when the archive holds more than one game. Lines about what is left out go to n.notes"""
+    want: the application ID (--title-id) when the archive holds more than one game; platform: its platform (1 Switch 1, 2 Switch 2, 0 unknown) when it holds that ID on two.
+    A base snapshot with no game files is no base game, as a NUP's empty base record (pack_nup.scan); its metadata still serves its updates (base_of). Lines about what is left out go to n.notes"""
     games = [a for a in n.apps if any(s.type != DLC for s in a.snapshots)]
-    def listing(apps): return ', '.join(f'{a.id:016X} ({PLATFORMS[a.platform]}{f", {a.title}" if a.title else ""})' for a in apps)
+    def listing(apps):
+        return ', '.join(f'{a.id:016X}{f":{SELECTORS[a.platform]}" if any(b is not a and b.id == a.id for b in apps) else ""} ({PLATFORMS[a.platform]}{f", {shown(a.title)}" if a.title else ""})'
+                         for a in apps)
     if want is not None:
-        mine = [a for a in games if a.id == want]
-        if not mine: raise Error(f'no game {want:016X} (--title-id / TITLE_ID) in {n.path.name}, which holds {listing(games) or "no game, only DLC"}', 'select')
+        mine = [a for a in games if a.id == want and (platform is None or a.platform == platform)]
+        what = f'{want:016X}' + (f':{SELECTORS[platform]}' if platform is not None else '')
+        if not mine: raise Error(f'no game {what} (--title-id / TITLE_ID) in {n.path.name}, which holds {listing(games) or "no game, only DLC"}', 'select')
         games = mine
     if not games: raise Error(f'{n.path.name}: no game, only DLC ({listing(n.apps)})', 'select')
-    if len(games) > 1: raise Error(f'{n.path.name} holds {len(games)} games: {listing(games)}; name the one to pack with --title-id / TITLE_ID', 'select')
+    if len(games) > 1:
+        twice = len({a.id for a in games}) < len(games)
+        raise Error(f'{n.path.name} holds {len(games)} games: {listing(games)}; name the one to pack with --title-id / TITLE_ID'
+                    + (' as listed, with its platform after the ID (:switch1, :switch2 or :unknown): the archive holds one title ID on two platforms' if twice else ''), 'select')
     a = n.selected = games[0]
     p = primary(a)
     if p is None: raise Error(f'{n.path.name}: application {a.id:016X} has {len(a.programs)} programs and none is its own: ' + ', '.join(f'{q.id:016X}' for q in a.programs), 'select')
@@ -850,12 +943,16 @@ def scan(n, want=None):
     if not any(s.kind == 'tree' for s in snaps): raise Error(f'{n.path.name}: no snapshot of {a.id:016X} holds exefs/ or romfs/', 'select')
     bases = [s for s in snaps if s.type == BASE]
     if len(bases) > 1: raise Error(f'{n.path.name}: {len(bases)} base game snapshots of {a.id:016X} (versions ' + ', '.join(str(s.version) for s in bases) + ')', 'select')
-    base, vers = (bases[0] if bases else None), {}
+    base, vers = (bases[0] if bases and has_game(n, bases[0]) else None), {}
+    if bases and base is None:
+        held = "the application's metadata" if a.meta_snapshot == bases[0].index else 'a tree'
+        n.notes.append(f'{bases[0].name}: no game files (no exefs/main, nothing in romfs/), only {held}: no base game, so each update is taken as the whole game')
     for s in snaps:
         if s.type in (UPDATE, STANDALONE):
             if s.version in vers or base is not None and s.version == base.version: raise Error(f'{n.path.name}: two snapshots of version {s.version}', 'select')
             vers[s.version] = s
-    ids = {pack_nup.program_id(n.read(i), f'{s.name} exefs/main.npdm') for s in snaps if s.exefs != NO and (i := n.child(s.exefs, b'main.npdm')) is not None}
+    if base is None and not vers: raise Error(f'{n.path.name}: no snapshot of {a.id:016X} holds the game\'s files (exefs/main or romfs/)', 'select')
+    ids = {npdm_id(n, s) for s in snaps if s.exefs != NO and n.child(s.exefs, b'main.npdm') is not None}
     if ids - {p.id}: raise Error(f'{n.path.name}: program {p.id:016X} has code of other program IDs: ' + ', '.join(f'{x:016X}' for x in sorted(ids - {p.id})), 'select')
     app = p.id
     if app & 0xFFF: raise Error(f'{n.path.name}: program ID {app:016X} is not a base title ID', 'select')
@@ -872,14 +969,11 @@ def scan(n, want=None):
 
 def exefs(n, k, dst):   # the snapshot's exefs/ into dst, kept as it is when every file there has the same content
     if k.exefs == NO: raise Error(f'{k.name}: no exefs/', 'select')
-    files, folded = [], {}
+    files, names = [], HostNames(f'{k.name} exefs/')
     for name, isdir, i in n.children(k.exefs):
         if isdir or name.startswith(b'.'): continue
-        # Names were checked as archive path components; a host file name must also be one component and unique on a case-insensitive volume (APFS default)
-        filename = os.fsdecode(name)
-        if filename in ('', '.', '..') or '\0' in filename or Path(filename).name != filename: raise Error(f'{k.name}: invalid ExeFS name {name!r}', 'path')
-        if (low := filename.casefold()) in folded: raise Error(f'{k.name}: ExeFS names {folded[low]!r} and {filename!r} differ only in case', 'path')
-        folded[low] = filename
+        names.add([name])   # names were checked as archive path components; a host file name must also be one component the volume can hold, and unique on a case-insensitive one
+        if n.size(i) > MODULE_MAX: raise Error(f'{k.name}: exefs/{os.fsdecode(name)!r} is {n.size(i):,} bytes, larger than any code module ({MODULE_MAX:,} at most)', 'resource')
         files.append((name, i))
     def same():
         if not dst.is_dir() or {os.fsencode(p.name) for p in dst.iterdir()} != {name for name, _ in files}: return False
@@ -895,6 +989,10 @@ def exefs(n, k, dst):   # the snapshot's exefs/ into dst, kept as it is when eve
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True); raise
     shutil.rmtree(dst, ignore_errors=True); tmp.rename(dst)
+
+
+def exefs_bytes(n, k):   # what exefs() writes for snapshot k
+    return sum(n.size(i) for name, isdir, i in n.children(k.exefs) if not isdir and not name.startswith(b'.')) if k.exefs != NO else 0
 
 
 entries = pack_nup.entries   # romfs_image entries for a folder of the archive
@@ -930,12 +1028,17 @@ def pack(n, d, img, say=print, step=lambda s: None):
     return 'packed'
 
 
-def app_package(n, k=None):   # the snapshot whose metadata the application shows (its metadata snapshot), or None
-    a = k.app if k is not None else getattr(n, 'selected', None)
-    return n.snapshots[a.meta_snapshot] if a is not None and a.meta_snapshot != NO else None
+def base_of(k):
+    """The exact base snapshot of snapshot k (its program's base, also one that holds only metadata), or None. An update with no control data of its own runs with its base game's, as
+    the console inherits an unchanged Control through the update's base (READER.md); never with another update's, whose NACP and display version are that update's (SPEC §4)"""
+    return next((s for s in k.app.snapshots if s.type == BASE and s.program == k.program), None) if k.type != DLC else None
 
 
-def control(k, out, fallback=None):   # the snapshot's control data beside its ExeFS (control.nacp, icon.jpg); what it lacks comes from fallback's
+def app_package(n, k):   # (as pack_nup.app_package, for the NSP script's survey) the snapshot whose control data stands in for k's when the archive has no base game: k's exact base, or none
+    return base_of(k)
+
+
+def control(k, out, fallback=None):   # the snapshot's control data beside its ExeFS (control.nacp, icon.jpg); what it lacks comes from fallback's (its base game). Returns {'nacp', 'icon'}
     meta = k.nx.meta(k)
     if fallback is not None and fallback is not k:
         more = fallback.nx.meta(fallback)
@@ -943,6 +1046,7 @@ def control(k, out, fallback=None):   # the snapshot's control data beside its E
     for name, data in (('control.nacp', meta['nacp']), ('icon.jpg', meta['icon'])):
         if data: (out / name).write_bytes(data)
         else: (out / name).unlink(missing_ok=True)
+    return meta
 
 
 def romfs_of(k, base=None):   # the RomFS folder a version runs with: its own, as every NX snapshot is a complete tree (never the base game's)
@@ -954,12 +1058,13 @@ def romfs_of(k, base=None):   # the RomFS folder a version runs with: its own, a
 def pack_version(n, k, base, app, out, say=print, step=lambda s: None):   # one snapshot → out/ExeFS, out/RomFS.img and its control data; returns how pack() got the image
     if k.kind == 'native': raise Error(f'{k.name} {NATIVE}', 'native')
     if k.exefs == NO or n.child(k.exefs, b'main') is None or n.child(k.exefs, b'main.npdm') is None: raise Error(f'{k.name}: no exefs/main and exefs/main.npdm', 'select')
-    if (pid := pack_nup.program_id(n.read(n.child(k.exefs, b'main.npdm')), f'{k.name} exefs/main.npdm')) != app: raise Error(f'{k.name}: program ID {pid:016X}, the game is {app:016X}', 'select')
+    if (pid := npdm_id(n, k)) != app: raise Error(f'{k.name}: program ID {pid:016X}, the game is {app:016X}', 'select')
     d = romfs_of(k, base)
     out.mkdir(parents=True, exist_ok=True)
     exefs(n, k, out / 'ExeFS')
     how = pack(n, d, out / 'RomFS.img', say, step)
-    control(k, out, app_package(n, k) if base is None else None)
+    if not control(k, out, base_of(k))['nacp']:
+        say(f'{k.name}: the archive has no NACP for this version' + ('' if k.type == BASE else ' or its base game') + ': the game\'s name and languages come from elsewhere (its profile)')
     return how
 
 
@@ -974,52 +1079,65 @@ def pack_dlc(n, app, dlc, aoc, say=print):   # {DLC title ID: snapshot} → aoc/
 def listing(n):   # the --list lines
     out = [f'{n.path.name}: NX {n.version[0]}.{n.version[1]}, generation {n.generation}, {n.archive_size:,} bytes, {n.nblocks:,} blocks, {len(n.files):,} file records']
     for a in n.apps:
-        out.append(f'{a.id:016X} {PLATFORMS[a.platform]}' + (f': {a.title}' + (f' ({a.publisher})' if a.publisher else '') if a.title else ''))
+        out.append(f'{a.id:016X} {PLATFORMS[a.platform]}' + (f': {shown(a.title)}' + (f' ({shown(a.publisher)})' if a.publisher else '') if a.title else ''))
         for s in a.snapshots:
             pid = '-' if s.program == NO else f'{n.programs[s.program].id:016X}'
             out.append(f'  {s.index:3} {TYPES[s.type]:17} v{s.version:<10} program {pid}  {s.kind:6} {s.logical_size / 2**30:7.2f} GB'
-                       + (f'  add-on {s.title_id:016X}' if s.title_id is not None else '') + (f'  display {s.display_version}' if s.display_version else '')
+                       + (f'  add-on {s.title_id:016X}' if s.title_id is not None else '') + (f'  display {shown(s.display_version)}' if s.display_version else '')
                        + (f'  build {s.build_id.hex()[:16]}' if s.flags & 1 else '') + ('  (metadata)' if a.meta_snapshot == s.index else ''))
     return out
+
+
+def free_bytes(p):   # free bytes on the volume of p, or of the nearest folder above it that exists
+    p = Path(p)
+    while not p.exists(): p = p.parent
+    return shutil.disk_usage(p).free
 
 
 def main():
     ap = argparse.ArgumentParser(description='Pack a game in an NX archive into the extraction layout of build_ipa_from_nsp.py')
     ap.add_argument('nx', type=Path, help='the .nx file')
     ap.add_argument('--version', type=int, help='the version to pack (default: the newest in the archive; the base game\'s own, 0 for most, packs the base game)')
-    ap.add_argument('--title-id', help='the game to pack when the archive holds several: its application ID, 16 hex digits')
-    ap.add_argument('--work-dir', type=Path, help='the build folder (default: <folder of the .nx>/<title ID>_build)')
+    ap.add_argument('--title-id', help='the game to pack when the archive holds several: its application ID, 16 hex digits, with :switch1, :switch2 or :unknown after it when the archive '
+                    'holds that ID on two platforms')
+    ap.add_argument('--work-dir', type=Path, help='the build folder (default: <folder of the .nx>/<title ID>_build; <title ID>-<platform>_build for an ID the archive holds on two platforms)')
     ap.add_argument('--list', action='store_true', help='list the applications and snapshots, and pack nothing')
-    ap.add_argument('--verify', action='store_true', help='check the whole archive (every Media record, block and file; slow on a big game), and pack nothing')
-    ap.add_argument('--crc', action='store_true', help='also check every block\'s CRC-32C as it is read (about 17 MiB/s in Python)')
+    ap.add_argument('--verify', action='store_true', help='check the whole archive (every Media record, every block with its CRC-32C at about 17 MiB/s, and every file), and pack nothing')
+    ap.add_argument('--crc', action='store_true', help='also check every block\'s CRC-32C as it is read when packing (about 17 MiB/s in Python)')
     a = ap.parse_args()
     path = a.nx.resolve()
     try:
-        want = int(a.title_id, 16) if a.title_id else None
+        sel = parse_title_id(a.title_id) if a.title_id else (None, None)
+        if sel is None: raise Error(f'--title-id takes a title ID, 16 hex digits, optionally with :switch1, :switch2 or :unknown after it: {a.title_id}', 'select')
         with Nx(path, crc=a.crc) as n:
-            for line in n.notes: print(line, flush=True)
+            for line in n.notes: print(shown(line), flush=True)
+            told = len(n.notes)
             if a.list:
                 print('\n'.join(listing(n))); return
             if a.verify:
                 tty = sys.stdout.isatty()
-                try: n.verify(crc=a.crc, progress=(lambda i, t: print(f'\r  {i:,} / {t:,} files', end='', flush=True)) if tty else None)
+                try: n.verify(progress=(lambda i, t, what: print(f'\r  {i:,} / {t:,} {what}   ', end='', flush=True)) if tty else None)
                 finally:
                     if tty: print('\r' + ' ' * 40 + '\r', end='', flush=True)
-                print(f'{path.name}: verified ({len(n.files):,} files, {n.nblocks:,} blocks{", every CRC-32C" if a.crc else ""})'); return
-            app, base, vers, dlc = scan(n, want)
-            for line in n.notes: print(line, flush=True)
+                print(f'{path.name}: verified ({len(n.files):,} files, {n.nblocks:,} blocks, every CRC-32C)'); return
+            app, base, vers, dlc = scan(n, *sel)
+            for line in n.notes[told:]: print(shown(line), flush=True)
             have = dict(vers)
             if base is not None: have[base.version] = base
             ver = a.version if a.version is not None else max(vers, default=base.version if base is not None else 0)
             if ver not in have: raise Error(f'no version {ver} in {path.name} (have: {", ".join(map(str, sorted(have))) or "none"})', 'select')
             k = have[ver]
-            work = (a.work_dir or path.parent / f'{app:016X}_build').resolve()
+            tag = platform_tag(n, k.app)
+            work = (a.work_dir or path.parent / f'{app:016X}{"-" + tag if tag else ""}_build').resolve()
             out = work / 'extract' / f'v{ver}'
+            need = n.tree_bytes(romfs_of(k, base)) + exefs_bytes(n, k) + sum(n.tree_bytes(romfs_of(d)) for d in dlc.values())   # dedup lets a small archive declare far more
+            if not (out / 'RomFS.img').exists() and (free := free_bytes(work)) < need + (1 << 30):
+                raise Error(f'{need / 2**30:,.1f} GB to write and {free / 2**30:,.1f} GB free on the volume of {work} (1 GB is kept free)', 'io')
             print(f'{app:016X} version {ver} ({PLATFORMS[k.app.platform]}): {k.name}', flush=True)
             say = lambda s: print(s, flush=True)
             pack_version(n, k, base, app, out, say)
             pack_dlc(n, app, dlc, work / 'aoc', say)
-    except (Error, OSError, ValueError) as e: sys.exit(f'[RED] {e}')
+    except (pack_nup.Error, OSError, ValueError) as e: sys.exit(f'[RED] {shown(str(e))}')
     print(f'done: {out}' + (f', {len(dlc)} DLC in {work / "aoc"}' if dlc else ''))
 
 
