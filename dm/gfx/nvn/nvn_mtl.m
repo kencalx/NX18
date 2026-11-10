@@ -6267,8 +6267,9 @@ void mtl_set_depth_zero(int on) {
     if (n) MLOG("[RED] depth mode changed after %d vertex shaders were loaded: they keep the old convention", n);
 }
 // The Metal 4 function descriptor of each function pipelines are built from (pso_build): MTL4Compiler takes a library, an entry name and the constant values a function was
-// specialized with, not an MTLFunction, so every function made from a library is noted here as it is made. A function with no note (the diagnostic fragment overrides
-// DM_NVN_HILITE and DM_NVN_MAGSCAN) keeps the MTLDevice path
+// specialized with, not an MTLFunction, so every function a pipeline is built from is noted here as it is made: the game's (shader_load, the side libraries), the embedded
+// kernels (builtin_get), the geometry mesh functions and the diagnostic fragment overrides (DM_NVN_HILITE, DM_NVN_MAGSCAN). Constants go in the note, never through
+// newFunctionWithName:constantValues: (fn_spec). The host's own pipelines take descriptors directly (host_rps, host_cps)
 static os_unfair_lock g_fn4_lock = OS_UNFAIR_LOCK_INIT;
 static NSMapTable *g_fn4;   // id<MTLFunction> → MTL4FunctionDescriptor
 static id<MTLFunction> fn4_note(id<MTLFunction> f, id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv) {
@@ -6277,7 +6278,7 @@ static id<MTLFunction> fn4_note(id<MTLFunction> f, id<MTLLibrary> lib, NSString 
     MTL4FunctionDescriptor *d = ld;
     if (cv) { MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = cv; d = sd; }
     os_unfair_lock_lock(&g_fn4_lock);
-    if (!g_fn4) g_fn4 = [[NSMapTable alloc] initWithKeyOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality valueOptions:NSPointerFunctionsStrongMemory capacity:0];   // by identity: a function made again from the same library and name (other constants: bf_fn) is another function
+    if (!g_fn4) g_fn4 = [[NSMapTable alloc] initWithKeyOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality valueOptions:NSPointerFunctionsStrongMemory capacity:0];   // by identity: each specialization fn_spec makes with other constants (bf_fn, lo_fn) is another object (FnSpec)
     [g_fn4 setObject:d forKey:f];
     os_unfair_lock_unlock(&g_fn4_lock);
     return f;
@@ -6292,6 +6293,16 @@ static MTL4FunctionDescriptor *fn4_of(id<MTLFunction> f) {
 // newFunctionWithName:constantValues: compiles through the MTLDevice, synchronously, on the thread that loads the shader: when Animal Crossing loaded such a shader during play,
 // the Metal performance HUD on the iPhone counted it ("Compiled 2 shaders. Total compilation time is 102.70ms. Consider adopting MTL4Compiler"). A pipeline the MTLDevice
 // builds after all (pso_build's fallback) takes the function fn_dev specializes from the descriptor
+// A library gives the same MTLFunction object for the same name each time it is asked (macOS 27.3), so a function specialized with constants of its own (the readable-tile
+// versions, the logic operation entry points: one name, several sets) is a FnSpec, a stand-in that forwards every message to that object: each set is then its own object, with its
+// own note, its own pipeline-cache keys (pso_key.fsfn, bf_fn's memo) and its own fn_dev record. Only the note, fn_dev and reflection (the argument encoder check) take one: the
+// MTLDevice is never handed a FnSpec (pso_build_dev and every other MTLDevice build take fn_dev's function). An empty set (shader_load) keeps the library's object
+@interface FnSpec : NSProxy { @public id<MTLFunction> base; } @end
+@implementation FnSpec
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { return [(NSObject *)base methodSignatureForSelector:sel]; }
+- (void)forwardInvocation:(NSInvocation *)inv { [inv invokeWithTarget:base]; }
+- (id)forwardingTargetForSelector:(SEL)sel { return base; }
+@end
 static int pso4_compiler(void);
 static os_unfair_lock g_fn_dev_lock = OS_UNFAIR_LOCK_INIT;
 @interface FnDev : NSObject { @public id<MTLFunction> fn; } @end
@@ -6307,6 +6318,8 @@ static id<MTLFunction> fn_spec(id<MTLLibrary> lib, NSString *name, MTLFunctionCo
     id<MTLFunction> f = [lib newFunctionWithName:name];
     if (!f) { if (e) *e = [NSError errorWithDomain:@"dm" code:1 userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"no function %@ in the library", name]}]; return nil; }
     if (!f.functionConstantsDictionary.count) return fn4_note(f, lib, name, nil);
+    static MTLFunctionConstantValues *none; static dispatch_once_t once; dispatch_once(&once, ^{ none = [MTLFunctionConstantValues new]; });
+    if (cv && ![cv isEqual:none]) { FnSpec *p = [FnSpec alloc]; p->base = f; f = (id<MTLFunction>)p; }   // compared by value (akb_fn)
     os_unfair_lock_lock(&g_fn_dev_lock);
     if (!g_fn_dev) g_fn_dev = [[NSMapTable alloc] initWithKeyOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality valueOptions:NSPointerFunctionsStrongMemory capacity:0];
     if (![g_fn_dev objectForKey:f]) [g_fn_dev setObject:[FnDev new] forKey:f];
@@ -6323,9 +6336,10 @@ static id<MTLFunction> fn_dev(id<MTLFunction> f) {
         if (dev->fn) return dev->fn;
         MTL4SpecializedFunctionDescriptor *sd = (MTL4SpecializedFunctionDescriptor *)fn4_of(f); MTL4LibraryFunctionDescriptor *ld = (MTL4LibraryFunctionDescriptor *)sd.functionDescriptor;
         id<MTLLibrary> lib = ld.library; NSString *name = ld.name; MTLFunctionConstantValues *cv = sd.constantValues;
-        if (!lib || !name || !cv) return f;   // fn_spec notes all three
+        id<MTLFunction> own = object_getClass(f) == FnSpec.class ? ((FnSpec *)f)->base : f;   // never a FnSpec to the MTLDevice: the unspecialized function, which it refuses with an error
+        if (!lib || !name || !cv) return own;   // fn_spec notes all three
         NSError *e = nil; dev->fn = fn_lib_spec(lib, name, cv, &e);
-        if (!dev->fn) { MLOG("[RED] function %s: specializing its function constants for an MTLDevice pipeline failed: %s", f.name.UTF8String, e.localizedDescription.UTF8String); return f; }
+        if (!dev->fn) { MLOG("[RED] function %s: specializing its function constants for an MTLDevice pipeline failed: %s", f.name.UTF8String, e.localizedDescription.UTF8String); return own; }
         return dev->fn;
     }
 }
@@ -6407,22 +6421,25 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (stage == 1 && j[@"entry_m"]) { o->fn_m = fn4_note([lib newFunctionWithName:j[@"entry_m"]], lib, j[@"entry_m"], nil); o->mask_m = (uint8_t)[j[@"uint_mask_m"] unsignedIntValue];
         if (!o->fn_m) MLOG("[RED] shader %s: no mixed integer-output entry point %s in its library", pc.UTF8String, [j[@"entry_m"] UTF8String]); }
     if (stage == 1 && j[@"entry_d"]) { o->fn_d = fn4_note([lib newFunctionWithName:j[@"entry_d"]], lib, j[@"entry_d"], nil); if (!o->fn_d) MLOG("[RED] shader %s: no dual-source entry point %s in its library", pc.UTF8String, [j[@"entry_d"] UTF8String]); }
-    if (o->fn.functionConstantsDictionary.count) {   // a compute shader with constants has MTLDevice pipelines (cps_new): it is specialized through its library (fn_spec otherwise)
-        NSError *fe = nil; MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new]; id<MTLFunction> (*spec)(id<MTLLibrary>, NSString *, MTLFunctionConstantValues *, NSError **) = stage == 5 ? fn_lib_spec : fn_spec;
-        id<MTLFunction> f = spec(lib, entry, cv, &fe);
+    if (o->fn.functionConstantsDictionary.count) {   // every stage, compute too: a compute pipeline the MTLDevice still builds (cps_new) takes the function fn_dev specializes
+        NSError *fe = nil; MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+        id<MTLFunction> f = fn_spec(lib, entry, cv, &fe);
         if (f) o->fn = f; else MLOG("[RED] shader %s: specializing its function constants failed: %s", pc.UTF8String, fe.localizedDescription.UTF8String);
-        if (o->fn_u) o->fn_u = spec(lib, j[@"entry_u"], cv, &fe);
-        if (o->fn_m) o->fn_m = spec(lib, j[@"entry_m"], cv, &fe);
-        if (o->fn_d) o->fn_d = spec(lib, j[@"entry_d"], cv, &fe);
+        if (o->fn_u) o->fn_u = fn_spec(lib, j[@"entry_u"], cv, &fe);
+        if (o->fn_m) o->fn_m = fn_spec(lib, j[@"entry_m"], cv, &fe);
+        if (o->fn_d) o->fn_d = fn_spec(lib, j[@"entry_d"], cv, &fe);
     }
-    // The argument buffer's length, from an encoder that is not kept: encode_args writes the slots itself (8 bytes each, checked here) and needs only arg_len, which also says the
-    // shader has bindings. Kept per shader, the encoders (an estimated 1-5 KB each) were held for the whole run by every shader loaded, tens of thousands in a large game
+    // The argument buffer's length, from the reflection: encode_args writes the slots itself, 8 bytes each (a GPU address or a resource ID), and needs only arg_len, which also says
+    // the shader has bindings. The function's own layout is still measured against it, by an argument encoder that is not kept, as the side libraries' entry points are (vin_fn,
+    // pull_load, at_fn, lo_fn): a reflection that misses entries the MSL has stops here instead of binding the wrong slots (Paper Mario: The Thousand-Year Door's handle arrays,
+    // docs/reference/shaders.md). Kept per shader, the encoders (an estimated 1-5 KB each) were held for the whole run by every shader loaded, tens of thousands in a large game
     if (o->rf.nb) {
         int max_aid = -1;
         for (int i = 0; i < o->rf.nb; i++) max_aid = MAX(max_aid, o->rf.b[i].aid + (o->rf.b[i].n ? o->rf.b[i].n - 1 : 0));   // an array takes n entries
-        o->arg_len = [o->fn newArgumentEncoderWithBufferIndex:o->rf.abi].encodedLength;
-        if (o->arg_len != (NSUInteger)(8 * (max_aid + 1)) || (o->arg_len & 7) || max_aid >= NVN_REFL_MAXARG)
-            MDIE("shader %s has an unexpected argument buffer layout: encodedLength=%lu maxAid=%d", o->key, (unsigned long)o->arg_len, max_aid);
+        o->arg_len = (NSUInteger)(8 * (max_aid + 1));
+        NSUInteger measured = [o->fn newArgumentEncoderWithBufferIndex:o->rf.abi].encodedLength;
+        if (measured != o->arg_len || max_aid >= NVN_REFL_MAXARG)
+            MDIE("shader %s has an unexpected argument buffer layout: encodedLength=%lu maxAid=%d", o->key, (unsigned long)measured, max_aid);
     }
     if (o->rf.has_c1) c1_store(o);
     NSString *ext = g_cb_ext[[pc hasSuffix:@"_b"] ? [pc substringToIndex:pc.length - 2] : pc];   // bytes each uniform slot can read (cb_len), storage slots never written (sb_ro)
@@ -6519,10 +6536,11 @@ static NvShader *builtin_get(const char *ctl) {
         NvShader *o = g_builtin[@(ctl)];
         if (o) return o;
         if (!g_builtin_lib) {
-            NSError *e = nil; g_builtin_lib = host_lib("builtin", &e);
+            NSError *e = nil; g_builtin_lib = lib_tag(host_lib("builtin", &e), @"host/builtin");   // named: its pipelines have index keys (arch_key)
             if (!g_builtin_lib) MDIE("embedded compute kernel MSL compile failed: %s", e.localizedDescription.UTF8String);
         }
-        o = shader_new(); o->fn = [g_builtin_lib newFunctionWithName:@(k_nvn_builtin_map[i].fn)]; o->stage = 5; o->builtin = k_nvn_builtin_map[i].fn;
+        NSString *name = @(k_nvn_builtin_map[i].fn);
+        o = shader_new(); o->fn = fn4_note([g_builtin_lib newFunctionWithName:name], g_builtin_lib, name, nil); o->stage = 5; o->builtin = k_nvn_builtin_map[i].fn;
         g_builtin[@(ctl)] = o;
         return o;
     }
@@ -8289,7 +8307,7 @@ static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t target
         MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
         for (int n = 0; n < 8; n++) { bool on = targets >> n & 1; [cv setConstantValue:&on type:MTLDataTypeBool atIndex:DMSH_LOGIC_FC + n]; }
         NSString *name = [base.name stringByAppendingString:@"_l"];
-        f = fn4_note([fs->llib newFunctionWithName:name constantValues:cv error:&e], fs->llib, name, cv);
+        f = fn_spec(fs->llib, name, cv, &e);
         if (!f) why = "no entry point";
         else if (fs->rf.nb && [f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) fs->lfn[k] = f; else fs->lfn_state = 2;
@@ -8323,14 +8341,16 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
     d.vertexFunction = vs && vs->mesh_kind != 2 ? vs->fn : nil; d.fragmentFunction = fsfn ? fsfn : fs ? fs->fn : nil;   // mtk_pso copies the raster state only: a mesh function is not a vertex function
     // Diagnostic DM_NVN_HILITE=fragment shader key,...: these draws use a solid-color fragment instead (keys 1–6 in order magenta / green / cyan / yellow / blue / white), to see where the geometry lands
     // Pipelines are built on several threads at once: the keys and the library are set up once (a lazy setup raced, and a thread used a library another had just replaced: Hades II, 6 keys)
-    if (fs) { static char keys[6][24]; static int nk; static id<MTLLibrary> hl; static dispatch_once_t once;
+    // The six functions are made and noted once (fn4_note), so that these pipelines are built through the Metal 4 compiler like the game's
+    if (fs) { static char keys[6][24]; static int nk; static id<MTLFunction> hl[6]; static dispatch_once_t once;
         dispatch_once(&once, ^{ const char *e = getenv("DM_NVN_HILITE");
             for (const char *q = e; q && *q && nk < 6; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t n = strcspn(q, ","); if (n > 23) n = 23; memcpy(keys[nk], q, n); keys[nk++][n] = 0; }
             if (!nk) return;
-            NSError *err = nil; hl = host_lib("hilite", &err);   // dm/gfx/msl/hilite.metal
-            if (!hl) MLOG("[RED] HILITE shaders did not load %s", err.localizedDescription.UTF8String); });
+            NSError *err = nil; id<MTLLibrary> l = lib_tag(host_lib("hilite", &err), @"host/hilite");   // dm/gfx/msl/hilite.metal
+            if (!l) MLOG("[RED] HILITE shaders did not load %s", err.localizedDescription.UTF8String);
+            for (int i = 0; l && i < nk; i++) { NSString *name = [NSString stringWithFormat:@"hl%d", i]; hl[i] = fn4_note([l newFunctionWithName:name], l, name, nil); } });
         for (int i = 0; i < nk; i++) if (!strncmp(fs->key, keys[i], strlen(keys[i]))) {
-            if (hl) d.fragmentFunction = [hl newFunctionWithName:[NSString stringWithFormat:@"hl%d", i]];
+            if (hl[i]) d.fragmentFunction = hl[i];
             break; } }
     if (fs && fs->fn_u && !fsfn && d.fragmentFunction == fs->fn && pso_all_uint(k, fs, merged)) d.fragmentFunction = fs->fn_u;   // integer colour targets (dmsh_entry.py fs_uint)
     else if (fs && fs->fn_m && !fsfn && d.fragmentFunction == fs->fn && pso_mixed_uint(k, fs, merged)) d.fragmentFunction = fs->fn_m;   // integer and float colour targets
@@ -8595,7 +8615,7 @@ static dispatch_queue_t g_arch_q; static _Atomic int g_arch_new, g_arch_new_vd, 
 // pipeline has the same key at every start, and two that Metal tells apart have two. A field the host starts setting must go in the key too, or two pipelines that differ only there
 // share a key: the index names one's file for both, and the other misses there, is compiled and written again at every start. A key the index names a file for is looked up in that
 // file alone: a miss there (the file's binaries no longer fit this system, a library changed under the same name) compiles it, and its new file, newer, holds it from the next start
-// on. 0: no key (a function from a library with no name: the diagnostic overrides, embedded kernels), looked up in the files without a complete index
+// on. 0: no key (a function from a library with no name), looked up in the files without a complete index
 typedef struct { CC_SHA256_CTX c; int ok; } arch_kb;
 static void akb_u(arch_kb *k, uint64_t v) { CC_SHA256_Update(&k->c, &v, sizeof v); }
 static void akb_s(arch_kb *k, NSString *s) { const char *u = s.UTF8String ?: ""; size_t n = strlen(u); akb_u(k, n); CC_SHA256_Update(&k->c, u, (CC_LONG)n); }
@@ -9113,9 +9133,10 @@ static int pso4_compiler(void) { pso4_init(); return g_pso4; }   // render pipel
 // MTLDevice as before, and compiled again through the Metal 4 compiler into the current flush period on a background queue (arch_harvest), so the next start takes it from the
 // file that period writes: the MTLDevice's build is the one the system's shader cache serves, the capture compiles it whole (Star Fox's first 5 at its title: 1.2 ms in all
 // through the MTLDevice, 95 ms through the capture), so the dispatch never waits for the capture. Before, such a pipeline was built again at every start, and in full at each
-// one after the system's shader cache dropped it. Not looked up and not captured: a function with constants (fn_lib_spec specializes it through its library) and the embedded
-// kernels, which have no note. A miss costs a lookup of a fraction of a millisecond per file. g_cps_arch, g_cps_run, g_cps_built: compute pipelines taken from the
-// bundle, from this device's files, built (the prewarm's last lines); g_cps_look_ns, g_cps_build_ns: the time looking up, building
+// one after the system's shader cache dropped it. The embedded kernels (builtin_get) are noted too, from the library named host/builtin. Not looked up and not captured: a
+// function with constants (fn_spec notes it with its constants; the MTLDevice builds it from fn_dev's specialization). A miss costs a lookup of a fraction of a millisecond per
+// file. g_cps_arch, g_cps_run, g_cps_built: compute pipelines taken from the bundle, from this device's files, built (the prewarm's last lines); g_cps_look_ns, g_cps_build_ns:
+// the time looking up, building
 static _Atomic uint64_t g_cps_arch, g_cps_run, g_cps_built, g_cps_look_ns, g_cps_build_ns;
 static void arch_note_new(void);
 static dispatch_queue_t arch_harvest_q(void) {   // one capture at a time, at utility QoS: a network shader's compile can take seconds, beside the game's frames
@@ -9155,7 +9176,7 @@ static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e) {
         if (ps) return ps;
     }
     uint64_t t1 = bp_now();
-    ps = [g_dev newComputePipelineStateWithFunction:f error:e];
+    ps = [g_dev newComputePipelineStateWithFunction:fn_dev(f) error:e];   // a function with constants, specialized for the MTLDevice (fn_spec left it unspecialized)
     if (ps) { atomic_fetch_add(&g_cps_built, 1); atomic_fetch_add(&g_cps_build_ns, bp_now() - t1); arch_harvest(d, 0); }
     return ps;
 }
@@ -12957,7 +12978,7 @@ static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const 
     for (int i = 0; i < nfc; i++) { int v = fx[i]; [cv setConstantValue:&v type:MTLDataTypeInt atIndex:(NSUInteger)i]; }
     for (int q = 0; q < 8; q++) { bool b = fbmask >> q & 1; [cv setConstantValue:&b type:MTLDataTypeBool atIndex:(NSUInteger)(32 + q)]; }
     for (int j = 0; j < fs->rf.nfo; j++) for (int q = 0; q < 8; q++) { bool b = lmap[q] == fs->rf.fo_color[j]; [cv setConstantValue:&b type:MTLDataTypeBool atIndex:(NSUInteger)(64 + 8 * j + q)]; }
-    NSError *e = nil; id<MTLFunction> f = fn4_note([lib newFunctionWithName:@"main0_f" constantValues:cv error:&e], lib, @"main0_f", cv);
+    NSError *e = nil; id<MTLFunction> f = fn_spec(lib, @"main0_f", cv, &e);
     if (!f) MLOG("[RED] readable-tile version specialization failed %s (mask %02x): %s", fs->key, fbmask, e.localizedDescription.UTF8String);
     NvBfFn *s = [NvBfFn new]; s->k = k; s->fn = f;
     if (!fs->bffn) fs->bffn = [NSMutableArray array];
@@ -13169,8 +13190,8 @@ static id<MTLFunction> ms_fs_override(NvShader *fs) {
     if (!fs || !ms_on() || strncmp(fs->key, g_ms_key, strlen(g_ms_key))) return nil;
     int ph = ms_phase_now(); if (ph < 2) return nil;
     static id<MTLFunction> fn[2]; static int failed;
-    if (!fn[0] && !failed) { NSError *e = nil; id<MTLLibrary> lib = host_lib("magscan", &e);   // dm/gfx/msl/magscan.metal
-        fn[0] = [lib newFunctionWithName:@"msg"]; fn[1] = [lib newFunctionWithName:@"msm"];
+    if (!fn[0] && !failed) { NSError *e = nil; id<MTLLibrary> lib = lib_tag(host_lib("magscan", &e), @"host/magscan");   // dm/gfx/msl/magscan.metal; noted as the game's functions are
+        fn[0] = fn4_note([lib newFunctionWithName:@"msg"], lib, @"msg", nil); fn[1] = fn4_note([lib newFunctionWithName:@"msm"], lib, @"msm", nil);
         if (!fn[0] || !fn[1]) { failed = 1; MLOG("[RED] DM_NVN_MAGSCAN: the constant fragment shaders did not load %s", e.localizedDescription.UTF8String); } }
     return failed ? nil : fn[ph - 2];
 }
