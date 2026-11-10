@@ -362,7 +362,7 @@ static void depth_only(void) {
     d.fragmentFunction = nil; NSError *err = nil; uint64_t legacy = g_pb_legacy;
     id<MTLRenderPipelineState> ps = pso_build(d, &err);
     EXPECT("depth only: pipeline", 1, ps != nil);
-    EXPECT("depth only: legacy path", legacy + 1, g_pb_legacy);
+    EXPECT("depth only: through the Metal 4 compiler (the empty fragment)", legacy, g_pb_legacy);
     if (!ps) return;
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:4 height:4 mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;

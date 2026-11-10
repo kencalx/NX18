@@ -8,6 +8,10 @@
 #   · left out as the host leaves them out (to the draws): a reflection of another chain version or none, a vertex shader with stage inputs and no pulling library, a vertex library that
 #     writes the layer (its reflection's layer_out, dmsh_entry.py layer_out: its pipelines take an input primitive class), a pixel shader that reads the primitive ID (its reflection's
 #     raster.primitive_id: the host builds its pipelines whole, since through a base every primitive reads 0), a missing library or entry point
+#   · a pair with no pixel key (a line "<vertex key><TAB>") is a depth-only program's: its base has the host's empty fragment, dm_nop of dm/gfx/msl/nop_frag.metal, as pso_desc4 gives
+#     such a draw (Metal 4 needs a fragment function whenever rasterization is on). That library is not among the game's: it is compiled here as the host compiles its own shaders
+#     (host_msl.py: the SDK of the platform, the host's minimum OS, MSL_MIN_<sdk> in dm/host/Makefile), since the archive finds a function by its hash, which the minimum OS changes
+#     and the file's path does not. The split writes no such pairs yet
 #   · a pair whose functions declare function constants is left to the device (rest_pairs.tsv): the host specializes such functions with an empty set of values, and metal-tt makes
 #     no specialized function from a library (applegpu-nt: "cannot find private metadata"), nor the function unspecialized ("cannot lower module with unresolved function constants")
 # And a compute pipeline per compute shader, which depends on its function alone (the host makes it from the function, cps_new in nvn_mtl.m; the threadgroup size is the dispatch's):
@@ -95,6 +99,44 @@ KEY = 88
 D16, D32, S8, D32S8, X32S8 = 250, 252, 253, 260, 261   # nvn_pso_ds.h
 
 
+# The host's empty fragment (nvn_mtl.m nop_fragment): its library's name here (no game library has it: theirs are <key>_b / <key>_bp) and its function. HOST_LIBS: the host libraries
+# a build compiled (host_libraries), by name; every other library is <name>.metallib in the game's library folder
+NOP_LIB, NOP_ENTRY = 'host_nop_frag', 'dm_nop'
+HOST_MSL = {NOP_LIB: 'nop_frag.metal'}
+HOST_LIBS = {}
+DM = Path(__file__).resolve().parents[2]
+
+
+def lib_path(lib_dir, lib):
+    """Where a base's library is: a host library compiled for this build (HOST_LIBS), else <lib>.metallib in lib_dir"""
+    return HOST_LIBS[lib] if lib in HOST_LIBS else os.path.join(lib_dir, f'{lib}.metallib')
+
+
+def host_msl_min(platform):
+    """The minimum OS the host compiles its own shaders for (host_msl.py --min): iOS dm/host/Makefile's MSL_MIN_iphoneos, macOS MACOS_MIN of dm/mac/min_os.mk (the Makefile's MSL_MIN_macosx)"""
+    path, var = (DM / 'host' / 'Makefile', 'MSL_MIN_iphoneos') if platform == 'ios' else (DM / 'mac' / 'min_os.mk', 'MACOS_MIN')
+    try: m = re.search(rf'^{var}\s*:?=\s*(\S+)', path.read_text(encoding='utf-8'), re.M)
+    except OSError: m = None
+    if not m: sys.exit(f'[RED] pso_offline: no {var} in {path}: the host\'s minimum OS for its shaders')
+    return m.group(1)
+
+
+def host_libraries(bases, platform, work):
+    """Compiles the host libraries the bases name (the empty fragment of depth-only pairs) into work/host, as host_msl.py compiles them for the host, and notes them in HOST_LIBS.
+    Each compile gives the file another identifier, so the archive's key takes their function hashes (library_digest), which the same source, compiler and minimum OS keep"""
+    HOST_LIBS.clear()
+    names = sorted({fl for _, _, fl, _ in bases if fl in HOST_MSL})
+    if not names: return
+    folder = Path(work) / 'host'; folder.mkdir(parents=True, exist_ok=True)
+    flag = f'-m{"ios" if platform == "ios" else "macosx"}-version-min={host_msl_min(platform)}'
+    for name in names:
+        src, out = DM / 'gfx' / 'msl' / HOST_MSL[name], folder / f'{name}.metallib'
+        cmd = ['xcrun', '-sdk', sdk(platform), 'metal', flag, '-o', str(out), str(src)]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode or not out.is_file(): sys.exit(f'[RED] pso_offline: the host library {src} does not compile ({" ".join(cmd)}): {(r.stderr or r.stdout).strip()}')
+        HOST_LIBS[name] = str(out)
+
+
 class MeshPipe(NamedTuple):
     """A native task / mesh pipeline as mtk_desc4 describes it: (library, entry) of the object, mesh and fragment functions, the threads and payload, the raster state and the
     eight colour attachments, each its values of COLOUR in that order"""
@@ -147,9 +189,9 @@ def stamp(chain, zero, text):
     return f'chain\t{chain}\ndepth\t{"near=0" if zero else "near=-w"}\npairs\t{len(text)}\t{hashlib.sha256(text).hexdigest()[:16]}\n'
 
 
-def functions(path):
+def functions(path, hashes=False):
     """{entry name: declares function constants} of a .metallib, from its header: the function list (NAME tags) and each function's public metadata (a CNST tag lists its constants).
-    Raises ValueError on a file it cannot read"""
+    hashes: {entry name: its HASH tag} instead, what an archive finds the function by. Raises ValueError on a file it cannot read"""
     with romfs.open(path, 'rb') as f: b = f.read(1 << 20)
     if b[:4] != b'MTLB' or len(b) < 0x58: raise ValueError(f'{path}: not a Metal library')
     fo, _, po, ps = struct.unpack_from('<QQQQ', b, 0x18)
@@ -161,9 +203,10 @@ def functions(path):
             n = struct.unpack_from('<H', b, p)[0]; p += 2; t[tag] = b[p:p + n]; p += n
         raise ValueError(f'{path}: unterminated tag list')
     try:
-        count = struct.unpack_from('<I', b, fo)[0]; p = fo + 4; names = []
+        count = struct.unpack_from('<I', b, fo)[0]; p = fo + 4; names, hs = [], []
         for _ in range(count):   # each entry: its size (counting the size field), then tags
-            size = struct.unpack_from('<I', b, p)[0]; names.append(tags(p + 4, p + size)[b'NAME'].rstrip(b'\0').decode()); p += size
+            size = struct.unpack_from('<I', b, p)[0]; t = tags(p + 4, p + size); names.append(t[b'NAME'].rstrip(b'\0').decode()); hs.append(t.get(b'HASH', b'').hex()); p += size
+        if hashes: return dict(zip(names, hs))
         consts, p = [], po
         for _ in range(count):   # each entry: its size (not counting the size field), then tags
             size = struct.unpack_from('<I', b, p)[0]; consts.append(b'CNST' in tags(p + 4, p + 4 + size)); p += 4 + size
@@ -181,13 +224,15 @@ def plan(lib_dir, chain, pairs, zero):
             except (OSError, ValueError): js[key] = None
         return js[key]
     def fn(lib):
+        if lib == NOP_LIB: return {NOP_ENTRY: False}   # the host's, compiled with the build (host_libraries)
         if lib not in fns:
             try: fns[lib] = functions(lib_dir / f'{lib}.metallib')
             except (OSError, ValueError): fns[lib] = None
         return fns[lib]
     bases, rest, seen, left = [], [], set(), dict.fromkeys(('reflection', 'mesh', 'stage inputs', 'library', 'layer', 'primitive ID', 'entry'), 0)
     for vk, fk in pairs:
-        vj, fj = refl(vk), refl(fk)
+        depth = not fk   # a depth-only pair: the host's empty fragment
+        vj, fj = refl(vk), {'chain': chain, 'entry': NOP_ENTRY} if depth else refl(fk)
         if not vj or not fj or vj.get('chain') != chain or fj.get('chain') != chain: left['reflection'] += 1; continue
         if vj.get('mesh_stage'): left['mesh'] += 1; continue   # a mesh shader's pair (shader_split.py var_pairs, for its padding): its pipelines are mesh pipelines, built at the draw (nvn_geometry.inc mtk_pso)
         ventry = vj['entry_z'] if zero and vj.get('entry_z') else vj.get('entry'); fentry = fj.get('entry') or 'main0'
@@ -195,7 +240,7 @@ def plan(lib_dir, chain, pairs, zero):
         if not pull and vj.get('vertex_inputs'): left['stage inputs'] += 1; continue
         if vj.get('layer_out'): left['layer'] += 1; continue
         if (fj.get('raster') or {}).get('primitive_id'): left['primitive ID'] += 1; continue
-        vl, fl = vk + ('_bp' if pull else '_b'), fk + '_b'
+        vl, fl = vk + ('_bp' if pull else '_b'), NOP_LIB if depth else fk + '_b'
         vf, ff = fn(vl), fn(fl)
         if vf is None or ff is None: left['library'] += 1; continue
         if ventry not in vf or fentry not in ff: left['entry'] += 1; continue
@@ -382,7 +427,7 @@ def script(lib_dir, bases, computes=()):
     meshes = [p for p in computes if isinstance(p, MeshPipe)]; computes = [p for p in computes if not isinstance(p, MeshPipe)]
     libs, fns, pipes = {}, {}, []
     def fd(lib, entry):
-        if lib not in libs: libs[lib] = {'label': lib, 'path': str(Path(lib_dir).resolve() / f'{lib}.metallib')}
+        if lib not in libs: libs[lib] = {'label': lib, 'path': str(Path(lib_path(lib_dir, lib)).resolve())}
         label = f'{lib}.{entry}'
         if label not in fns: fns[label] = {'label': label, 'library': f'lib:{lib}', 'name': entry}
         return f'fnd:{label}'
@@ -411,6 +456,8 @@ def library_digest(lib_dir, bases, computes=()):
     for name in sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)} | {lib for p in computes for lib in pipe_libs(p)}):
         h.update(name.encode() + b'\0')
         lib = hashlib.sha256()
+        if name in HOST_LIBS:   # compiled with this build, each time with another identifier: its functions by their hashes
+            lib.update(json.dumps(sorted(functions(HOST_LIBS[name], hashes=True).items())).encode()); h.update(lib.digest()); continue
         with romfs.open(os.path.join(lib_dir, f'{name}.metallib'), 'rb') as f:
             while chunk := f.read(1 << 20): lib.update(chunk)
         h.update(lib.digest())
@@ -503,6 +550,7 @@ def real_libraries(lib_dir, bases, work, computes=()):
     if os.path.isdir(lib_dir): return lib_dir
     real = Path(work) / 'libraries'; shutil.rmtree(real, ignore_errors=True); real.mkdir(parents=True)
     for name in sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)} | {lib for p in computes for lib in pipe_libs(p)}):
+        if name in HOST_LIBS: continue   # in its own folder (lib_path)
         with romfs.open(os.path.join(lib_dir, f'{name}.metallib'), 'rb') as f, open(real / f'{name}.metallib', 'wb') as o: shutil.copyfileobj(f, o)
     return real
 
@@ -648,6 +696,7 @@ def main(argv=None):
     meshes, mleft = plan_mesh(lib_dir, chain, mesh_rows, zero)
     pipes = computes + meshes   # the pipelines beside the bases: script, groups and keys tell the two kinds apart (MeshPipe)
     work.mkdir(parents=True, exist_ok=True); out.mkdir(parents=True, exist_ok=True)
+    host_libraries(bases, a.platform, work)   # the empty fragment of depth-only pairs; none without them, so no other archive's key changes
     js = work / 'bases.mtl4-json'   # metal-tt takes the format from the extension: .mtl4-json is Metal 4's (.mtlp-json is the Metal 3 format)
     configuration = script(lib_dir, bases, pipes)
     write_script(js, configuration)

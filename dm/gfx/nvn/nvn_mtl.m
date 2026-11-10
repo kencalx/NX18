@@ -9299,12 +9299,30 @@ static void pso_col4(MTL4RenderPipelineColorAttachmentDescriptor *a, MTLRenderPi
     a.sourceRGBBlendFactor = c.sourceRGBBlendFactor; a.destinationRGBBlendFactor = c.destinationRGBBlendFactor; a.rgbBlendOperation = c.rgbBlendOperation;
     a.sourceAlphaBlendFactor = c.sourceAlphaBlendFactor; a.destinationAlphaBlendFactor = c.destinationAlphaBlendFactor; a.alphaBlendOperation = c.alphaBlendOperation;
 }
+// The fragment function of a render pipeline whose program has no pixel shader but rasterizes: a shadow or depth pre-pass, which writes depth only. Metal 4 requires a fragment
+// function whenever rasterization is on (MTL4RenderPipeline.h), so such a pipeline takes the host's empty one, dm/gfx/msl/nop_frag.metal (the one the host's own depth-only clears
+// and copies take: host_msl_rps). Before, these pipelines went through the MTLDevice with no fragment function. An empty fragment costs the same GPU time as none (measured for
+// the Metal 4 release). Named (lib_tag) and noted (fn4_note) as the game's functions are, so its bases have index keys (arch_key), and the prebuild's depth-only pairs (pre_desc)
+// and the archive made offline (dm/gfx/tools/pso_offline.py, which compiles the same file for the host's SDK and minimum: the archive finds a function by its hash) describe the
+// same base as the draw
+static id<MTLFunction> nop_fragment(void) {
+    static id<MTLFunction> fn; static dispatch_once_t once;
+    dispatch_once(&once, ^{ NSError *e = nil; id<MTLLibrary> l = lib_tag(host_lib("nop_frag", &e), @"host/nop_frag");
+        fn = fn4_note([l newFunctionWithName:@"dm_nop"], l, @"dm_nop", nil); if (!fn) MLOG("[RED] the empty fragment function did not load: %s", e.localizedDescription.UTF8String); });
+    return fn;
+}
+// A colour attachment of pso_desc's pipeline as a Metal 4 one. A pipeline with no pixel shader (the empty fragment, nop_fragment) writes no colour, as it wrote none with no
+// fragment function: its write mask is none, so the attachments of its pass keep their pixels
+static void pso_col4_of(MTL4RenderPipelineColorAttachmentDescriptor *a, MTLRenderPipelineDescriptor *d, int i) {
+    pso_col4(a, d.colorAttachments[i]);
+    if (!d.fragmentFunction) a.writeMask = MTLColorWriteMaskNone;
+}
 // pso_desc's descriptor as a Metal 4 one: unspec leaves every colour attachment unspecialized (the base), else copies them. nil when a function has no Metal 4 descriptor (fn4_of)
 static MTL4RenderPipelineDescriptor *pso_desc4(MTLRenderPipelineDescriptor *d, int unspec) {
-    // Metal 4 requires a fragment function when rasterization is enabled. Depth-only draws still need rasterization.
-    if (d.rasterizationEnabled && !d.fragmentFunction) return nil;
-    MTL4FunctionDescriptor *vf = fn4_of(d.vertexFunction), *ff = d.fragmentFunction ? fn4_of(d.fragmentFunction) : nil;
-    if (!vf || (d.fragmentFunction && !ff)) return nil;
+    // Metal 4 requires a fragment function when rasterization is enabled: a depth-only draw (no pixel shader) takes the empty one
+    id<MTLFunction> f = d.fragmentFunction ?: d.rasterizationEnabled ? nop_fragment() : nil;
+    MTL4FunctionDescriptor *vf = fn4_of(d.vertexFunction), *ff = f ? fn4_of(f) : nil;
+    if (!vf || (f && !ff)) return nil;
     MTL4RenderPipelineDescriptor *m = [MTL4RenderPipelineDescriptor new];
     m.vertexFunctionDescriptor = vf; m.fragmentFunctionDescriptor = ff; m.vertexDescriptor = d.vertexDescriptor;
     m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageState = d.alphaToCoverageEnabled ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
@@ -9312,7 +9330,7 @@ static MTL4RenderPipelineDescriptor *pso_desc4(MTLRenderPipelineDescriptor *d, i
     if (d.maxVertexAmplificationCount > 1) m.maxVertexAmplificationCount = d.maxVertexAmplificationCount;
     for (int i = 0; i < 8; i++) {
         MTL4RenderPipelineColorAttachmentDescriptor *a = m.colorAttachments[i];
-        if (!unspec) { pso_col4(a, d.colorAttachments[i]); continue; }
+        if (!unspec) { pso_col4_of(a, d, i); continue; }
         a.pixelFormat = MTLPixelFormatUnspecialized; a.writeMask = MTLColorWriteMaskUnspecialized; a.blendingState = MTL4BlendStateUnspecialized;
         a.sourceRGBBlendFactor = a.destinationRGBBlendFactor = a.sourceAlphaBlendFactor = a.destinationAlphaBlendFactor = MTLBlendFactorUnspecialized;
         a.rgbBlendOperation = a.alphaBlendOperation = MTLBlendOperationUnspecialized;
@@ -9434,7 +9452,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
     if (!rast) return base;   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): job stays in g_pbase_pending (hm_put_id's CFBridgingRetain) until hm_rel releases it, not a leak
     uint64_t ts = bp_now();
     MTL4RenderPipelineDescriptor *s = spec_desc(base, &g_spec_own);
-    for (int i = 0; i < 8; i++) pso_col4(s.colorAttachments[i], d.colorAttachments[i]);
+    for (int i = 0; i < 8; i++) pso_col4_of(s.colorAttachments[i], d, i);
     id<MTLRenderPipelineState> ps = [g_comp4 newRenderPipelineStateBySpecializationWithDescriptor:s pipeline:base error:e];
     if (ps) g_pb_spec++;
     g_pt_spec_ns += bp_now() - ts;
@@ -9635,7 +9653,8 @@ void mtl_pso_line(char *o, size_t n) {
 // what it captured until then). Runs once per chain version, depth mode and pair list, and again when a library file it lacked arrives (pso_archive/prebuilt.tsv, pre_stamp_done): in the app after the prewarm, on a background queue at utility QoS
 // (DM_PSO_PREBUILD=0: not at all), or as a tool on the Mac (DM_PSO_PREBUILD=tool: build, write, exit). Vertex shaders that write the layer, pairs whose vertex shader has stage
 // inputs but no pulling library, and integer-output or multisampled bases are left to the draws. An app that bundles these bases made offline (DM_PSO_BUNDLE, pso_bundle_covers)
-// builds none of them, only the pairs that archive left to the device (rest_pairs.tsv beside it: functions with constants)
+// builds none of them, only the pairs that archive left to the device (rest_pairs.tsv beside it: functions with constants). A pair with no pixel key is a depth-only program's: its
+// base has the host's empty fragment (pre_desc, nop_fragment). The split writes no such pairs yet; a depth-only draw builds its base itself, and the archive keeps it as any other
 static _Atomic int g_pre_running; static _Atomic int g_pre_next, g_pre_done, g_pre_built, g_pre_archived, g_pre_skipped, g_pre_failed;   // g_pre_next: pairs handed to a worker
 // Pairs whose base failed to build, kept with the system build and the stamp they failed under (prebuild_failed.tsv beside prebuilt.tsv): prebuilt.tsv is written with them, and a
 // later start with both the same leaves them to the draws instead of building them again, which would fail the same way (Metal reports a compile that its compiler service
@@ -9715,11 +9734,13 @@ static MTL4FunctionDescriptor *pre_fn(id<MTLLibrary> lib, NSString *name) {   //
     MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = [MTLFunctionConstantValues new]; return sd;
 }
 static NSDictionary *pre_json(NSString *key) { NSData *d = msl_data([NSString stringWithFormat:@"%@/%@_b.json", g_msl_dir, key]); return d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil; }
-// The base of one pair as the draws make it (pso_desc_pull / pso_desc), or nil when the pair is left to the draws. Call inside an autorelease pool
+// The base of one pair as the draws make it (pso_desc_pull / pso_desc), or nil when the pair is left to the draws. Call inside an autorelease pool. A pair with no pixel key
+// (a line "<vertex key><TAB>" in a pair list) is a depth-only program's: its base takes the host's empty fragment (nop_fragment), as pso_desc4 gives such a draw
 static MTL4RenderPipelineDescriptor *pre_desc(NSString *vk, NSString *fk, int zero) {
-    NSDictionary *vj = pre_json(vk), *fj = pre_json(fk);
+    int depth = !fk.length;
+    NSDictionary *vj = pre_json(vk), *fj = depth ? @{} : pre_json(fk);
     if ((!vj && pre_lib_absent(vk, @"_b.json")) || (!fj && pre_lib_absent(fk, @"_b.json"))) return nil;
-    if (!vj || !fj || ![vj[@"chain"] isEqual:@DMSH_CHAIN] || ![fj[@"chain"] isEqual:@DMSH_CHAIN]) return nil;
+    if (!vj || !fj || ![vj[@"chain"] isEqual:@DMSH_CHAIN] || (!depth && ![fj[@"chain"] isEqual:@DMSH_CHAIN])) return nil;
     if (vj[@"mesh_stage"]) return nil;   // a mesh shader's pair (shader_pairs.tsv holds them for its padding): mesh pipelines are built at the draw (nvn_geometry.inc mtk_pso), no base
     NSString *ventry = zero && vj[@"entry_z"] ? vj[@"entry_z"] : vj[@"entry"], *fentry = fj[@"entry"] ?: @"main0";
     int pull = [vj[@"pull"] isKindOfClass:[NSDictionary class]];
@@ -9727,11 +9748,11 @@ static MTL4RenderPipelineDescriptor *pre_desc(NSString *vk, NSString *fk, int ze
     if ([vj[@"layer_out"] boolValue]) return nil;   // writes the layer (as shader_load takes it): its pipelines take an input primitive class (pso_desc), no pulling pipeline
     NSDictionary *fr = fj[@"raster"]; if ([fr isKindOfClass:[NSDictionary class]] && [fr[@"primitive_id"] intValue]) return nil;   // reads the primitive ID: its pipelines are built whole (pso_build_ex), no base
     NSError *e = nil;
-    if (pre_lib_absent(vk, pull ? @"_bp.metallib" : @"_b.metallib") || pre_lib_absent(fk, @"_b.metallib")) return nil;
+    if (pre_lib_absent(vk, pull ? @"_bp.metallib" : @"_b.metallib") || (!depth && pre_lib_absent(fk, @"_b.metallib"))) return nil;
     id<MTLLibrary> vl = lib_from_file([NSString stringWithFormat:@"%@/%@%@.metallib", g_msl_dir, vk, pull ? @"_bp" : @"_b"], &e);
     if (!vl) return nil;
-    id<MTLLibrary> fl = lib_from_file([NSString stringWithFormat:@"%@/%@_b.metallib", g_msl_dir, fk], &e);
-    MTL4FunctionDescriptor *vf = pre_fn(vl, ventry), *ff = fl ? pre_fn(fl, fentry) : nil;
+    id<MTLLibrary> fl = depth ? nil : lib_from_file([NSString stringWithFormat:@"%@/%@_b.metallib", g_msl_dir, fk], &e);
+    MTL4FunctionDescriptor *vf = pre_fn(vl, ventry), *ff = depth ? fn4_of(nop_fragment()) : fl ? pre_fn(fl, fentry) : nil;
     if (!vf || !ff) return nil;
     MTL4RenderPipelineDescriptor *m = [MTL4RenderPipelineDescriptor new];
     m.vertexFunctionDescriptor = vf; m.fragmentFunctionDescriptor = ff; m.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor]; m.rasterSampleCount = 1;
