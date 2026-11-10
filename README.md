@@ -40,7 +40,7 @@ Community projects build on nxnative with tools to turn your games into apps for
 - **iPhone:** A17 Pro chip or later, with iOS 26 or later.
 - **iPad:** M1 chip or later, with iPadOS 26 or later.
 
-**This fork (Nintanium)** builds its iOS app for one chip, the iPhone 18 Pro Max's A20 Pro, on iOS 27.3 (`dm/ios/project.yml`: deployment target 27.3, `-mcpu=apple-a20`; the app still declares the iPad family), with the newest Xcode beta: `build_ipa_from_nsp.py` takes `--allow-other-metal` (`DM_ALLOW_OTHER_METAL=1` for `own_compilers.py`). An IPA from this tree does not run on the older devices listed above, which are upstream's.
+**This fork (NX 18)** builds its iOS app for one chip, the iPhone 18 Pro Max's A20 Pro, on iOS 27.3 (`dm/ios/project.yml`: deployment target 27.3, `-mcpu=apple-a20`; the app still declares the iPad family), with the newest Xcode beta: `build_ipa_from_nsp.py` takes `--allow-other-metal` (`DM_ALLOW_OTHER_METAL=1` for `own_compilers.py`). An IPA from this tree does not run on the older devices listed above, which are upstream's.
 
 The games' textures are BC-compressed, which older iPhones cannot read. Switch 2 builds are tested on the Mac; check each game's note for device-specific validation.
 
