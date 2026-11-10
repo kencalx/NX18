@@ -1,8 +1,10 @@
-// Shader reflection json (B: produced by translating the original Switch shaders, output of tools/dmsh_build.py) → fixed-length C arrays (nvn_refl.h)
+// Shader reflection json (B: produced by translating the original Switch shaders, output of tools/dmsh_build.py) → C arrays (nvn_refl.h), the bindings and readable-tile tables in a tail block of their real size
 #import "nvn_refl.h"
 #include "dmsh_abi.h"   // the binding kinds the build writes (DMSH_KIND_*)
 #import <Metal/Metal.h>
+#include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // Dummy texture type: same prefix rules as the original dummy_tex (an unbound texture slot reads 0 per D3D semantics)
@@ -35,9 +37,58 @@ static int arr_len(NSString *ty, NSString **el) {
 
 // Whether a storage buffer binding may be written: current B reflection carries the translator's write flag ("rw"); old samples without it fall back to SPIRV-Cross's const device qualifier.
 static int sbuf_rw(NSDictionary *b) { id rw = b[@"rw"]; if (rw) return [rw boolValue]; id ty = b[@"msl_type"]; return !([ty isKindOfClass:[NSString class]] && [ty hasPrefix:@"const "]); }
+
+const nvn_refl_fc nvn_refl_fc_none;
+const nvn_refl_uv nvn_refl_uv_none = { .uv_attr = { [0 ... 31] = -1 }, .uv_aff_attr = { [0 ... 31] = -1 } };
+static _Atomic int g_fixed = -1;
+static _Atomic uint64_t g_tails, g_tail_bytes;
+int nvn_refl_fixed(void) { int f = atomic_load(&g_fixed); if (f < 0) { const char *e = getenv("DM_NVN_REFL_FIXED"); f = e && atoi(e) == 1; atomic_store(&g_fixed, f); } return f; }
+void nvn_refl_set_fixed(int fixed) { atomic_store(&g_fixed, fixed < 0 ? -1 : !!fixed); }
+void nvn_refl_stats(uint64_t *tails, uint64_t *bytes) { *tails = atomic_load(&g_tails); *bytes = atomic_load(&g_tail_bytes); }
+// The tail block: the shader's own fragment tables, then its own vertex tables (each 8-byte aligned, as malloc gives and their sizes keep), then its bindings, last, so that a read past
+// the end of b runs off the block (Guard Malloc catches it)
+_Static_assert(sizeof(nvn_refl_fc) % 8 == 0 && sizeof(nvn_refl_uv) % 8 == 0, "tail block parts stay 8-byte aligned");
+static size_t tail_size(int cap, int own_fc, int own_uv) { return (own_fc ? sizeof(nvn_refl_fc) : 0) + (own_uv ? sizeof(nvn_refl_uv) : 0) + (size_t)cap * sizeof(nvn_rbind); }
+static void tables_none(nvn_refl *r) { r->fc = &nvn_refl_fc_none; r->uv = &nvn_refl_uv_none; }
+static void tail_drop(nvn_refl *r) {
+    if (r->tail) { atomic_fetch_sub(&g_tails, 1); atomic_fetch_sub(&g_tail_bytes, tail_size(r->cap, r->fc != &nvn_refl_fc_none, r->uv != &nvn_refl_uv_none)); free(r->tail); }
+    r->tail = NULL; r->b = NULL; r->cap = 0; tables_none(r);
+}
+// Makes a tail block with room for cap bindings holding b[0..nb), and the tables *fc / *uv when own_fc / own_uv; replaces r's. 0 on allocation failure (r unchanged)
+static int tail_make(nvn_refl *r, int cap, const nvn_rbind *b, int nb, int own_fc, const nvn_refl_fc *fc, int own_uv, const nvn_refl_uv *uv) {
+    size_t sz = tail_size(cap, own_fc, own_uv);
+    if (!sz) { tail_drop(r); return 1; }
+    uint8_t *t = calloc(1, sz), *at = t; if (!t) return 0;
+    nvn_refl_fc *tfc = own_fc ? (nvn_refl_fc *)at : NULL; if (own_fc) { memcpy(tfc, fc, sizeof *fc); at += sizeof *fc; }
+    nvn_refl_uv *tuv = own_uv ? (nvn_refl_uv *)at : NULL; if (own_uv) { memcpy(tuv, uv, sizeof *uv); at += sizeof *uv; }
+    if (nb) memcpy(at, b, (size_t)nb * sizeof *b);
+    tail_drop(r);
+    r->tail = t; r->cap = (uint16_t)cap; r->b = cap ? (nvn_rbind *)at : NULL;
+    r->fc = own_fc ? tfc : &nvn_refl_fc_none; r->uv = own_uv ? tuv : &nvn_refl_uv_none;
+    atomic_fetch_add(&g_tails, 1); atomic_fetch_add(&g_tail_bytes, sz);
+    return 1;
+}
+void nvn_refl_init(nvn_refl *r) { memset(r, 0, sizeof *r); tables_none(r); }
+void nvn_refl_free(nvn_refl *r) { tail_drop(r); free(r->c1); nvn_refl_init(r); }
+static int reserve(nvn_refl *r, int cap, int own_fc, int own_uv) {
+    if (!r->fc) r->fc = &nvn_refl_fc_none;   // a zeroed struct
+    if (!r->uv) r->uv = &nvn_refl_uv_none;
+    int nb = r->nb < 0 ? 0 : r->nb > r->cap ? r->cap : r->nb, have_fc = r->fc != &nvn_refl_fc_none, have_uv = r->uv != &nvn_refl_uv_none;
+    own_fc |= have_fc; own_uv |= have_uv;
+    if (cap < r->cap) cap = r->cap;
+    if (cap > NVN_REFL_MAXB) cap = NVN_REFL_MAXB;
+    if (cap == r->cap && own_fc == have_fc && own_uv == have_uv) return 1;
+    return tail_make(r, cap, r->b, nb, own_fc, r->fc, own_uv, r->uv);
+}
+int nvn_refl_reserve(nvn_refl *r, int cap, int own) { return reserve(r, cap, own, own); }
+nvn_refl_fc *nvn_refl_fcw(nvn_refl *r) { return reserve(r, r->cap, 1, 0) ? (nvn_refl_fc *)r->fc : NULL; }
+nvn_refl_uv *nvn_refl_uvw(nvn_refl *r) { return reserve(r, r->cap, 0, 1) ? (nvn_refl_uv *)r->uv : NULL; }
 int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
-    memset(o, 0, sizeof *o);
-    #define FAIL(...) do { free(o->c1); o->c1 = NULL; snprintf(err, errlen, __VA_ARGS__); return 1; } while (0)
+    nvn_refl_free(o);
+    // Converted into whole-size arrays on the stack, then moved into a tail block of the real size (refl_done)
+    nvn_rbind bt[NVN_REFL_MAXB]; nvn_refl_fc fct = nvn_refl_fc_none, *F = &fct; nvn_refl_uv uvt = nvn_refl_uv_none, *U = &uvt;
+    memset(bt, 0, sizeof bt); o->b = bt;
+    #define FAIL(...) do { free(o->c1); nvn_refl_init(o); snprintf(err, errlen, __VA_ARGS__); return 1; } while (0)
     if (![j[@"route"] isEqual:@"B"]) FAIL("not a B reflection (route ≠ B; route A / PC-chain reflection is retired)");
     {   // Translated original Switch shaders: kind and NVN slot number are already parsed from the MSL member names by dmsh_build.py
         NSArray *bs = j[@"bindings"];
@@ -157,17 +208,16 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             o->color_known = [ra[@"colors"] isKindOfClass:[NSArray class]];
             if ([ra[@"omap"] isKindOfClass:[NSNumber class]]) { o->omap = (uint32_t)[ra[@"omap"] unsignedLongLongValue]; o->omap_known = 1; }
         }
-        memset(o->uv_attr, -1, sizeof o->uv_attr); memset(o->uv_aff_attr, -1, sizeof o->uv_aff_attr);
         NSDictionary *ua = [ra isKindOfClass:[NSDictionary class]] ? ra[@"uv_affine"] : nil;
         if ([ua isKindOfClass:[NSDictionary class]]) for (NSString *k in ua) { int l = k.intValue; NSDictionary *e = ua[k]; int a = [e[@"attr"] intValue];
             if (l < 0 || l >= 32 || a < 0 || a >= 16) continue;
             NSArray *refs[4] = {e[@"sx"], e[@"ox"], e[@"sy"], e[@"oy"]}; int ok = 1;
             for (int q = 0; q < 4; q++) { NSArray *r = refs[q]; if (![r isKindOfClass:[NSArray class]] || r.count != 3) { ok = 0; break; }
                 int sl = [r[0] intValue], vec = [r[1] intValue], cmp = [r[2] intValue]; if (sl < 0 || sl > 15 || vec < 0 || vec > 4095 || cmp < 0 || cmp > 3) { ok = 0; break; }
-                o->uv_aff[l][q] = (uint32_t)(sl << 16 | vec << 2 | cmp); }
-            if (ok) o->uv_aff_attr[l] = (int8_t)a; }
+                U->uv_aff[l][q] = (uint32_t)(sl << 16 | vec << 2 | cmp); }
+            if (ok) U->uv_aff_attr[l] = (int8_t)a; }
         NSDictionary *uv = [ra isKindOfClass:[NSDictionary class]] ? ra[@"uv_from_attr"] : nil;
-        if ([uv isKindOfClass:[NSDictionary class]]) for (NSString *k in uv) { int l = k.intValue, a = [uv[k] intValue]; if (l >= 0 && l < 32 && a >= 0 && a < 16) o->uv_attr[l] = (int8_t)a; }
+        if ([uv isKindOfClass:[NSDictionary class]]) for (NSString *k in uv) { int l = k.intValue, a = [uv[k] intValue]; if (l >= 0 && l < 32 && a >= 0 && a < 16) U->uv_attr[l] = (int8_t)a; }
         NSArray *scr = [ra isKindOfClass:[NSDictionary class]] ? ra[@"screen"] : nil;
         if ([scr isKindOfClass:[NSArray class]]) for (NSNumber *k in scr) if (k.intValue >= 0 && k.intValue < 32) o->scr_locn |= 1u << k.intValue;
         NSDictionary *fe = j[@"fetch"];
@@ -177,13 +227,13 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                     if (fp.count != 2 || i >= 32) FAIL("fetch call %d: frag_pos is not two uniform references", i);
                     for (int q = 0; q < 2; q++) { NSArray *x = fp[q]; int sl = [x isKindOfClass:[NSArray class]] && x.count == 3 ? [x[0] intValue] : -1, vec = sl >= 0 ? [x[1] intValue] : -1, cmp = sl >= 0 ? [x[2] intValue] : -1;
                         if (sl < 0 || sl > 15 || vec < 0 || vec > 4095 || cmp < 0 || cmp > 3) FAIL("fetch call %d: frag_pos uniform reference out of range", i);
-                        o->fc_scale[i][q] = (uint32_t)(sl << 16 | vec << 2 | cmp); }
+                        F->fc_scale[i][q] = (uint32_t)(sl << 16 | vec << 2 | cmp); }
                     o->fc_fpos |= 1u << i; l = 0xff; }
                 else if (l < 0 || l >= 32) l = -1;
                 if (i != o->nfc || i >= 32 || r < 0 || r >= 256 || l < 0) FAIL("fetch call table not contiguous or out of range (entry %d)", i);
                 if ([c[@"proj"] intValue]) o->fc_proj |= 1u << i;
-                o->fc_reg[o->nfc] = (uint8_t)r; o->fc_locn[o->nfc] = (uint8_t)l; o->nfc++; }
-            for (NSNumber *r in fe[@"mixed_regs"]) if (r.intValue >= 0 && r.intValue < 256) o->fc_mixed[r.intValue >> 6] |= 1ull << (r.intValue & 63);
+                F->fc_reg[o->nfc] = (uint8_t)r; F->fc_locn[o->nfc] = (uint8_t)l; o->nfc++; }
+            for (NSNumber *r in fe[@"mixed_regs"]) if (r.intValue >= 0 && r.intValue < 256) F->fc_mixed[r.intValue >> 6] |= 1ull << (r.intValue & 63);
             for (NSDictionary *u in fe[@"outputs"]) { if (o->nfo >= 4) FAIL("more than 4 fetch outputs"); o->fo_color[o->nfo++] = (uint8_t)[u[@"color"] intValue]; }
         }
         NSArray *tg = j[@"threadgroup_size"];
@@ -192,6 +242,11 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         for (NSDictionary *u in j[@"first_store"]) { if (o->nfirst >= 4) FAIL("more than 4 first-invocation stores");
             int reg = [u[@"reg"] intValue]; if (reg < 0 || reg >= 16) FAIL("first-invocation store to storage slot %d", reg);
             o->first[o->nfirst].reg = (uint8_t)reg; o->first[o->nfirst].word = (uint16_t)[u[@"word"] intValue]; o->first[o->nfirst++].value = (uint32_t)[u[@"value"] unsignedIntValue]; }
+        // The tail block: the bindings at their real number and the tables only when the shader has an entry in them (DM_NVN_REFL_FIXED=1: all NVN_REFL_MAXB bindings, zeros past nb, and
+        // tables of its own, as every shader had embedded before)
+        int fixed = nvn_refl_fixed(), own_fc = fixed || memcmp(F, &nvn_refl_fc_none, sizeof *F), own_uv = fixed || memcmp(U, &nvn_refl_uv_none, sizeof *U);
+        o->b = NULL; tables_none(o);
+        if (!tail_make(o, fixed ? NVN_REFL_MAXB : o->nb, bt, o->nb, own_fc, F, own_uv, U)) FAIL("reflection block of %d bindings: allocation failed", o->nb);
         return 0;
     }
     #undef FAIL

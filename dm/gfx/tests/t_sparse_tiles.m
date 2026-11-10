@@ -3,7 +3,8 @@
 // log holds still end right; a GPU-written texture gets tiles and no uploads; a small sparse texture stays whole. Shared tiles: one physical page mapped at two places is one heap tile, a GPU
 // write through one place shows at the other, a drawn tile keeps its content for the next place until the CPU writes its memory or its pool's Finalize gives it back, an undrawn one goes back with
 // its last place and each new place reads the memory (the CPU's fill behind a GPU-written place, the GPU's write to the memory as a buffer), a tile cut by the level's edge shares nothing, and a
-// new pool over the same memory never finds the old pool's tile.
+// new pool over the same memory never finds the old pool's tile. Heaps: the first tile makes one heap of DM_NVN_SPARSE_HEAP_MB (64 MB by default, not 256), a tile takes the lowest free
+// slot (the last freed with =256), and tiles past the first heap land in the second at slots that still read back right.
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
@@ -79,13 +80,18 @@ int main(void) { @autoreleasepool {
     CHECK("placement sparse", m.isSparse);
     CHECK("no upgrade will be needed for a view or a clear", (m.usage & MTLTextureUsagePixelFormatView) && (m.usage & MTLTextureUsageRenderTarget));
     CHECK("an upgrade keeps it", tex_upgrade(T, m, MTLTextureUsageShaderWrite, m.pixelFormat) == m);
-    uint64_t live0 = g_sp_live;
+    uint64_t live0 = g_sp_live, heap_mb = sp_ht() >> 4, ca0 = g_dev.currentAllocatedSize;
+    CHECK("no placement heap before the first tile", !g_sp_heaps.count);
     // Tiles (0, 0) and (2, 1) of level 0, and the tail, each from pages of its own
     uint64_t t1 = 32 + 2;
     memcpy(phys, store, TILE); memcpy(phys + 2 * TILE, store + t1 * TILE, TILE); memcpy(phys + 4 * TILE, store + tail, tail_n);
     map_at(0, TILE, 0, 1); map_at(t1 * TILE, TILE, 2 * TILE, 1); map_at(tail, tail_n, 4 * TILE, 1);
     CHECK("the same texture", resolve(&tx) == m);
     CHECK("three tiles mapped", g_sp_live == live0 + 3);
+    {   const char *e = getenv("DM_NVN_SPARSE_HEAP_MB"); uint64_t want = e ? (uint64_t)atol(e) : 64, grew = (g_dev.currentAllocatedSize - ca0) >> 20;
+        CHECK("the heap has the size asked for", heap_mb == want && g_sp_heaps.count == 1 && [(id<MTLHeap>)g_sp_heaps[0] size] == (want << 20));
+        CHECK("the first tile costs one heap of that size, not more", grew >= want && grew < want + 48);
+        printf("first sparse tile: %lu heap(s) of %llu MB, GPU allocated +%llu MB\n", (unsigned long)g_sp_heaps.count, (unsigned long long)heap_mb, (unsigned long long)grew); }
     CHECK("tile (0, 0) holds its pages", same(m, 0, 0, 0, TW, TW, lin[0], W));
     CHECK("tile (2, 1) holds its pages", same(m, 0, 2 * TW, TW, TW, TW, lin[0], W));
     for (unsigned l = nt; l < LEVELS; l++) { unsigned w = MAX((unsigned)W >> l, 1u); CHECK("a tail level holds its pages", same(m, l, 0, 0, w, w, lin[l], w)); }
@@ -193,5 +199,43 @@ int main(void) { @autoreleasepool {
     CHECK("the pool again", h_nvnMemoryPoolInitialize((NVNmemoryPool *)&g_phys, (const NVNmemoryPoolBuilder *)&again));
     map_at(11 * TILE, TILE, 32 * TILE, 1); (void)resolve(&tx);
     CHECK("the new pool's content, not the old one's", same_at(m, 11 * TW, 0, TW, TW, lin[0], W, TW, 0));
+    {   // Heaps and slots: a texture of its own mapped over a pool of its own. Default: past the first heap, so tiles land in the second; then a freed low slot and a freed high one, and a new
+        // tile takes the low one (lowest first; the later heaps empty). DM_NVN_SPARSE_HEAP_MB=256: a few tiles, and the new tile takes the one freed last, as before
+        uint32_t ht = sp_ht(); const char *hmb = getenv("DM_NVN_SPARSE_HEAP_MB"); int lifo = hmb && atoi(hmb) == 256;   // what the switch asks for
+        uint32_t n = lifo ? 64 : (uint32_t)(ht + 32 > g_sp_live ? ht + 32 - g_sp_live : 32), most = (uint32_t)(T->L.size / TILE) - 1; if (n > most) n = most;   // the texture's storage has that many tiles
+        size_t p2len = (size_t)(n + 2) * TILE; pool_t ph2; uint8_t *phys2 = mmap(NULL, p2len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (phys2 == MAP_FAILED) abort();
+        memcpy(phys2, store, (size_t)(n + 1) * TILE);   // tile i of the texture's storage at page i (its level 0 then level 1 tiles)
+        pool_builder_t p2 = {.mem = phys2, .size = p2len, .flags = 0x24};
+        CHECK("a second physical pool", h_nvnMemoryPoolInitialize((NVNmemoryPool *)&ph2, (const NVNmemoryPoolBuilder *)&p2));
+        NVNtexture hx; h_nvnTextureBuilderSetWidth(&tb, W); h_nvnTextureBuilderSetHeight(&tb, W); h_nvnTextureBuilderSetLevels(&tb, LEVELS); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE);
+        uint64_t H = (3ull << 30) + (512ull << 20); h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&g_sparse, H);
+        CHECK("a texture for the heaps", h_nvnTextureInitialize(&hx, &tb));
+        id<MTLTexture> hm = resolve(&hx); CHECK("placement sparse too", hm.isSparse);
+        map_req r = {.phys = (NVNmemoryPool *)&ph2, .poff = 0, .voff = (int64_t)H, .size = (uint64_t)n * TILE};
+        CHECK("one request maps them all", h_nvnMemoryPoolMapVirtual((NVNmemoryPool *)&g_sparse, 1, (const NVNmappingRequest *)&r));
+        (void)resolve(&hx);
+        NvSparse *hs = ((NvPkg *)tex_get(((const tex_t *)&hx)->serial))->ps; uint32_t lo = ~0u, hi = 0, hi_i = 0;
+        for (uint32_t i = 0; i < n; i++) { uint32_t sl = hs->slot[i]; if (!sl) continue; if (sl - 1 < lo) lo = sl - 1; if (sl - 1 >= hi) { hi = sl - 1; hi_i = i; } }
+        int all = 1; for (uint32_t i = 0; i < n; i++) if (!hs->slot[i]) all = 0;
+        CHECK("every tile mapped", all);
+        if (!lifo) {
+            CHECK("past the first heap: a second one", g_sp_heaps.count == 2 && hi >= ht && hi < 2 * ht);
+            uint32_t lv = hi_i < 1024 ? 0 : 1, j = hi_i < 1024 ? hi_i : hi_i - 1024, per = lv ? 16 : 32, lw = W >> lv;
+            CHECK("a tile in the second heap reads back right (slot = heap × tiles + tile)", same(hm, lv, (j % per) * TW, (j / per) * TW, TW, TW, lin[lv], lw));
+            CHECK("a tile in the first heap too", same(hm, 0, 0, 0, TW, TW, lin[0], W));
+        }
+        // free a low slot (tile 0), then a high one (the last tile), the GPU past both; then one new tile
+        uint32_t s_lo = hs->slot[0] - 1, s_hi = hs->slot[hi_i] - 1;
+        map_req u0 = {.phys = NULL, .voff = (int64_t)H, .size = TILE}, u1 = {.phys = NULL, .voff = (int64_t)(H + (uint64_t)hi_i * TILE), .size = TILE};
+        CHECK("unmap the low tile", h_nvnMemoryPoolMapVirtual((NVNmemoryPool *)&g_sparse, 1, (const NVNmappingRequest *)&u0)); (void)resolve(&hx);
+        CHECK("unmap the high tile", h_nvnMemoryPoolMapVirtual((NVNmemoryPool *)&g_sparse, 1, (const NVNmappingRequest *)&u1)); (void)resolve(&hx);
+        CHECK("both gave their slots back", !hs->slot[0] && !hs->slot[hi_i]);
+        map_req m1 = {.phys = (NVNmemoryPool *)&ph2, .poff = (int64_t)n * TILE, .voff = (int64_t)(H + (uint64_t)n * TILE), .size = TILE};
+        CHECK("map one new tile", h_nvnMemoryPoolMapVirtual((NVNmemoryPool *)&g_sparse, 1, (const NVNmappingRequest *)&m1)); (void)resolve(&hx);
+        uint32_t got = hs->slot[n] - 1;
+        if (lifo) CHECK("=256: the new tile takes the slot freed last, as before", hs->slot[n] && got == s_hi);
+        else CHECK("the new tile takes the lowest free slot, in the first heap", hs->slot[n] && got == s_lo && got < ht);
+        printf("heaps: %lu of %u MB, %u tiles mapped over slots %u-%u; freed %u then %u, the new tile took %u\n", (unsigned long)g_sp_heaps.count, ht >> 4, n, lo, hi, s_lo, s_hi, got);
+    }
     printf("t_sparse_tiles: %d checks, %d failed\n", checks, failed); return failed != 0;
 }}

@@ -11,6 +11,7 @@
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
+#include "front_drawable.h"   // DM_DRAWABLE_COUNT
 #include "haptics_apple.h"
 #include "save_sync.h"
 #import "CloudSaves.h"
@@ -76,6 +77,8 @@ static UILabel *front_ios_fps_label(void);
         const char *sa = getenv("DM_DRAWABLE_SHADER_ACCESS"); BOOL shaderAccess = sa && atoi(sa);
         l.framebufferOnly = !shaderAccess;
         if (shaderAccess) LOG("front end: the drawables allow shader access (DM_DRAWABLE_SHADER_ACCESS=1)");
+        { const char *dc = getenv("DM_DRAWABLE_COUNT"); int n = front_drawable_count(l, dc);   // front_drawable.h: unset keeps Metal's 3
+          if (n > 0) LOG("front end: %d drawables (DM_DRAWABLE_COUNT)", n); else if (n < 0) LOG("[RED] front end: DM_DRAWABLE_COUNT=%s is not 2 or 3: Metal's 3 drawables", dc); }
         self.backgroundColor = UIColor.blackColor;
     }
     return self;
@@ -465,6 +468,11 @@ static void front_ios_power_watch(void) {
         (void)n; LOG("front end: Low Power Mode → %s (%.0f s after launch)", dm_low_power_now() ? "on" : "off", (now_ns() - g_t0_ns) / 1e9);
         dispatch_async(dispatch_get_main_queue(), ^{ screen_cache(g_screen); }); }];
     LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off");
+    // The system's memory pressure: dm_gfx_pressure (hle_nvn.c) logs the footprint and the room to the memory limit, so a jetsam can be traced to memory, and gives back idle memory (DM_MEMORY_TRIM=0: logged only)
+    static dispatch_source_t mp;
+    mp = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0, DISPATCH_MEMORYPRESSURE_NORMAL | DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_event_handler(mp, ^{ unsigned long d = dispatch_source_get_data(mp); dm_gfx_pressure(d & DISPATCH_MEMORYPRESSURE_CRITICAL ? 2 : d & DISPATCH_MEMORYPRESSURE_WARN ? 1 : 0); });
+    dispatch_resume(mp);
 }
 
 // Frame-rate counter: the frames put on screen in the last second (nvn_mtl.m counts them for NVN and for the Vulkan layer alike; frames the display link merged away are not counted).

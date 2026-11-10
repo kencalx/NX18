@@ -108,6 +108,34 @@ int main(void) {
     assert(backoffs() == b0 + 1);
     poll_step(500, 0, 0); assert(backoffs() == b0 + 1);
     puts("PASS: a lengthened wait returns at the signal and the next poll starts a new run");
+    // A loop that yields and sleeps 20 µs in turn (Ocarina of Time's main thread): sleep_precise returns from such a sleep at once, so it is a yield and the run goes on
+    // through it. Taken as a sleep, it was an SVC between the yields and each yield began a new run, which never backed off
+    r[0] = 0; r[1] = me_handle; svc_thread(0x0C, r);   // another SVC first: a new run
+    b0 = backoffs();
+    for (int i = 0; i < 100; i++) {
+        uint64_t y[32] = {0}; svc_thread(0x0B, y); assert(backoffs() == b0);
+        uint64_t s20[32] = {20000}; svc_thread(0x0B, s20); assert(backoffs() == b0);
+        atomic_fetch_add(&poll_clock, 20000);
+    }
+    { uint64_t y[32] = {0}; svc_thread(0x0B, y); assert(backoffs() == b0 + 1); }   // exactly 2 ms
+    puts("PASS: yields between 20 us sleeps back off at 2 ms, not before");
+    r[0] = 0; r[1] = me_handle; svc_thread(0x0C, r);
+    b0 = backoffs();
+    for (int i = 0; i < 30; i++) { uint64_t s[32] = {50000}; svc_thread(0x0B, s); atomic_fetch_add(&poll_clock, 100000); }   // 3 ms on the test clock
+    assert(backoffs() == b0);
+    puts("PASS: 50 us sleeps stay sleeps, with no back-off");
+    // The yield boundary is sleep_precise's 20 µs plus 100 ns for the time between dm_guest_sleep_ns's clock read and its own: a 20.5 µs sleep, which sleep_precise does sleep, stays a sleep (counted on
+    // the SleepThread row), and the yields around it do not back off. With a microsecond of margin it was a yield, and the run of yields backed off at 2 ms
+    r[0] = 0; r[1] = me_handle; svc_thread(0x0C, r);
+    b0 = backoffs(); uint64_t sl0 = ((thr_t *)pthread_getspecific(g_keythr))->nsleep;
+    for (int i = 0; i < 150; i++) {
+        uint64_t y[32] = {0}; svc_thread(0x0B, y);
+        uint64_t s[32] = {20500}; svc_thread(0x0B, s);
+        atomic_fetch_add(&poll_clock, 20000);   // 3 ms on the test clock
+    }
+    assert(backoffs() == b0 && ((thr_t *)pthread_getspecific(g_keythr))->nsleep == sl0 + 150);
+    { uint64_t s[32] = {SP_NEAR_NS + 100}; svc_thread(0x0B, s); assert(((thr_t *)pthread_getspecific(g_keythr))->nsleep == sl0 + 150); }   // up to 20.1 µs: a yield
+    puts("PASS: a 20.5 us sleep stays a sleep, 20.1 us is a yield");
     r[0] = ev_w; svc_thread(0x16, r); r[0] = ev_r; svc_thread(0x16, r);
     return 0;
 }

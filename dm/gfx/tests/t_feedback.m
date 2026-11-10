@@ -245,10 +245,11 @@ static void tile_case(const char *dir) {
     for (NSNumber *k in facts[@"screen"]) vs->rf.scr_locn |= 1u << k.intValue;
     fs->stage = 1; strcpy(fs->key, "fedcba9876543210_b"); fs->fn = [fl newFunctionWithName:@"main0"];
     fs->rf.nb = 1; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=0, .aid=0, .dtt=MTLTextureType2D};
-    for (NSDictionary *c in facts[@"calls"]) { int i = fs->rf.nfc++; fs->rf.fc_reg[i] = (uint8_t)[c[@"tex_reg"] intValue]; fs->rf.fc_locn[i] = (uint8_t)[c[@"varying_locn"] intValue]; if ([c[@"proj"] intValue]) fs->rf.fc_proj |= 1u << i; }
+    nvn_refl_fc *fmt = nvn_refl_fcw(&fs->rf);   // the readable-tile tables are written in place (a shader made by hand has its own)
+    for (NSDictionary *c in facts[@"calls"]) { int i = fs->rf.nfc++; fmt->fc_reg[i] = (uint8_t)[c[@"tex_reg"] intValue]; fmt->fc_locn[i] = (uint8_t)[c[@"varying_locn"] intValue]; if ([c[@"proj"] intValue]) fs->rf.fc_proj |= 1u << i; }
     for (NSDictionary *o in facts[@"outputs"]) fs->rf.fo_color[fs->rf.nfo++] = (uint8_t)[o[@"color"] intValue];
     fs->rf.color_known = 1; fs->rf.color_mask = 1;
-    CHECK((vs->rf.scr_locn >> 4 & 1) && fs->rf.nfc == 1 && fs->rf.fc_proj == 1 && fs->rf.fc_locn[0] == 4, "the fixture's facts: screen varying 4 (and 5), one projective sample of 4");
+    CHECK((vs->rf.scr_locn >> 4 & 1) && fs->rf.nfc == 1 && fs->rf.fc_proj == 1 && fs->rf.fc->fc_locn[0] == 4, "the fixture's facts: screen varying 4 (and 5), one projective sample of 4");
     NSError *e = nil;
     id<MTLLibrary> gl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i[[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
@@ -339,11 +340,12 @@ static void fpos_case(const char *dir) {
     vs->stage = 0; strcpy(vs->key, "0123456789abcdee_b"); vs->fn = [vl newFunctionWithName:@"main0"]; vs->rf.pos_attr = -1;
     fs->stage = 1; strcpy(fs->key, "fedcba9876543211_b"); fs->fn = [fl newFunctionWithName:@"main0"];
     fs->rf.nb = 1; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=0, .aid=0, .dtt=MTLTextureType2D};
-    for (NSDictionary *c in facts[@"calls"]) { int i = fs->rf.nfc++; NSArray *f = c[@"frag_pos"]; fs->rf.fc_reg[i] = (uint8_t)[c[@"tex_reg"] intValue]; fs->rf.fc_locn[i] = 0xff;
-        if (f.count == 2) { fs->rf.fc_fpos |= 1u << i; for (int q = 0; q < 2; q++) fs->rf.fc_scale[i][q] = (uint32_t)([f[q][0] intValue] << 16 | [f[q][1] intValue] << 2 | [f[q][2] intValue]); } }
+    nvn_refl_fc *fmt = nvn_refl_fcw(&fs->rf);
+    for (NSDictionary *c in facts[@"calls"]) { int i = fs->rf.nfc++; NSArray *f = c[@"frag_pos"]; fmt->fc_reg[i] = (uint8_t)[c[@"tex_reg"] intValue]; fmt->fc_locn[i] = 0xff;
+        if (f.count == 2) { fs->rf.fc_fpos |= 1u << i; for (int q = 0; q < 2; q++) fmt->fc_scale[i][q] = (uint32_t)([f[q][0] intValue] << 16 | [f[q][1] intValue] << 2 | [f[q][2] intValue]); } }
     for (NSDictionary *o in facts[@"outputs"]) fs->rf.fo_color[fs->rf.nfo++] = (uint8_t)[o[@"color"] intValue];
     fs->rf.color_known = 1; fs->rf.color_mask = 1;
-    CHECK(fs->rf.nfc == 1 && fs->rf.fc_fpos == 1 && fs->rf.fc_scale[0][0] == (6 << 2) && fs->rf.fc_scale[0][1] == (6 << 2 | 1), "the fixture's facts: one sample at the pixel position times c[6].xy");
+    CHECK(fs->rf.nfc == 1 && fs->rf.fc_fpos == 1 && fs->rf.fc->fc_scale[0][0] == (6 << 2) && fs->rf.fc->fc_scale[0][1] == (6 << 2 | 1), "the fixture's facts: one sample at the pixel position times c[6].xy");
     NSError *e = nil;
     id<MTLLibrary> gl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i[[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"

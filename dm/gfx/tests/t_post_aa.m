@@ -138,9 +138,22 @@ static void bench(void) {
     }
 }
 
+// The blend items' share read by two threads at once (nvn_mtl.m aa_items_frac: aa_make on the present thread, aa_note in a completion handler): the first reader is held inside the read
+// until a second one reaches it too or 300 ms pass. Read once, the second waits for the first and the switch is read one time; read lazily without a lock, both read it
+static _Atomic int g_items_in;
+static void items_hold(void) { if (atomic_fetch_add(&g_items_in, 1) == 0) for (int i = 0; i < 300 && atomic_load(&g_items_in) < 2; i++) usleep(1000); }
+static void items_race(void) {
+    g_aa_items_hook = items_hold; __block double first = 0; dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ first = aa_items_frac(); dispatch_semaphore_signal(done); });
+    while (!atomic_load(&g_items_in)) usleep(100);
+    double second = aa_items_frac(); dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER); g_aa_items_hook = NULL;
+    EXPECT("items: two first readers at once read DM_PRESENT_AA_ITEMS one time", 1, (long)atomic_load(&g_aa_items_reads));
+    CHECK("items: and both get the same share", first == second && second > 0 && second <= 1);
+}
 int main(int argc, char **argv) { @autoreleasepool {
     mtl_init();
     if (argc > 1 && !strcmp(argv[1], "bench")) { bench(); return 0; }
+    items_race();   // before anything else asks for the share
     mtl_present_layer(W, H);   // the picture's shape is the crop's: a W x H capture is the crop 1:1
     g_fx_mode = UP_OFF; atomic_store(&g_sharp_mode, 0);
     uint8_t *px = malloc(W * H * 4), *hud = malloc(W * H), *off = malloc(W * H * 4), *a = malloc(W * H * 4), *b = malloc(W * H * 4);
@@ -254,6 +267,47 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("flat: no shape candidates", 0, atomic_load(&g_aa_seen[0])); EXPECT("flat: no blend items", 0, atomic_load(&g_aa_seen[1]));
         EXPECT("flat: byte-identical", 0, memcmp(a, fl, W * H * 4));
         free(fl); res_remove(ft);
+    }
+
+    // The blend items' list (nvn_mtl.m aa_items_frac): a quarter of the pixels unless DM_PRESENT_AA_ITEMS says otherwise (=1: one per pixel, as before). 1080p's lists are 11.9 MB
+    // smaller; the bench's dense foliage at 1080p still fits; this size's foliage (40,000 triangles in 256x192, about 43 % of the pixels) runs the list full, which is said, and the next
+    // present makes it one per pixel and smooths the picture as a list of one per pixel from the start does
+    {
+        double frac = aa_items_frac(); const long MBy = 1 << 20;
+        atomic_store(&g_aa_mode, AA_EDGE); atomic_store(&g_aa_items_full, 0); aa_free(&g_aa_present);
+        uint8_t *l0 = malloc(W * H * 4), *l1 = malloc(W * H * 4), *fp = malloc(W * H * 4);
+        EXPECT("items: the live present smooths", PRESENT_STANDARD | PRESENT_AA, live(s8, whole, W, H, l0));
+        EXPECT("items: the live list holds the share of the pixels", frac >= 1 ? (long)W * H : (long)((double)W * H * frac), (long)g_aa_present.cap[1]);
+        EXPECT("items: no overflow on the scene", 0, atomic_load(&g_aa_seen[3]));
+        aa_state big = {0}; CHECK("items: 1080p lists made", aa_make(&big, 1920, 1080, MTLPixelFormatRGBA8Unorm_sRGB, MTLPixelFormatRGBA8Unorm, 0)); long q = (long)big.work.length; aa_free(&big);
+        atomic_store(&g_aa_items_full, 1); CHECK("items: 1080p lists made one per pixel", aa_make(&big, 1920, 1080, MTLPixelFormatRGBA8Unorm_sRGB, MTLPixelFormatRGBA8Unorm, 0)); long f = (long)big.work.length; aa_free(&big); atomic_store(&g_aa_items_full, 0);
+        printf("  1080p lists: %.1f MB with blend items for %.0f %% of the pixels, %.1f MB with one per pixel\n", q / (double)MBy, 100 * frac, f / (double)MBy);
+        if (frac < 1) CHECK("items: 1080p's lists 11.9 MB smaller than one per pixel", f - q >= (long)(1920 * 1080 * 0.75 * 8) - MBy); else EXPECT("items: DM_PRESENT_AA_ITEMS=1 is one per pixel", f, q);
+        {   // the bench's dense foliage at 1080p, through a capture's own lists
+            const int FW_ = 1920, FH_ = 1080; uint8_t *big_px = malloc((size_t)FW_ * FH_ * 4), *big_out = malloc((size_t)FW_ * FH_ * 4); scene(big_px, FW_, FH_, NULL, 1, 7);
+            id<MTLTexture> bt = src_tex(MTLPixelFormatRGBA8Unorm_sRGB, FW_, FH_, 0, 0, FW_, FH_, big_px, 1);
+            mtl_present_layer(FW_, FH_);
+            EXPECT("1080p foliage: smoothed", PRESENT_STANDARD | PRESENT_AA, capture(bt, whole, FW_, FH_, big_out));
+            printf("  1080p dense foliage: %u blend items wanted (%.1f %% of the pixels)\n", atomic_load(&g_aa_seen[1]), 100.0 * atomic_load(&g_aa_seen[1]) / (FW_ * FH_));
+            EXPECT("1080p foliage: the blend items fit a quarter of the pixels", 0, atomic_load(&g_aa_seen[3]) & 2);
+            CHECK("1080p foliage: and leave it room", atomic_load(&g_aa_seen[1]) < FW_ * FH_ / 8);
+            mtl_present_layer(W, H); res_remove(bt); free(big_px); free(big_out);
+        }
+        scene(fp, W, H, NULL, 1, 5); id<MTLTexture> ft = src_tex(MTLPixelFormatRGBA8Unorm_sRGB, W, H, 0, 0, W, H, fp, 1);
+        g_aa_items_frac = 1; aa_free(&g_aa_present);
+        EXPECT("dense foliage, one per pixel: smoothed", PRESENT_STANDARD | PRESENT_AA, live(ft, whole, W, H, l0));
+        uint32_t want = atomic_load(&g_aa_seen[1]); g_aa_items_frac = frac; aa_free(&g_aa_present);
+        printf("  dense foliage at %dx%d: %u blend items wanted (%.1f %% of the pixels)\n", W, H, want, 100.0 * want / (W * H));
+        EXPECT("dense foliage: smoothed with the share", PRESENT_STANDARD | PRESENT_AA, live(ft, whole, W, H, l1));
+        int ran_full = want > g_aa_present.cap[1];
+        EXPECT("dense foliage: the list ran full exactly when it wants more than the share holds", ran_full ? 2 : 0, atomic_load(&g_aa_seen[3]) & 2);
+        EXPECT("dense foliage: one per pixel from then on, only after it ran full", ran_full, atomic_load(&g_aa_items_full));
+        EXPECT("dense foliage: the next present smooths", PRESENT_STANDARD | PRESENT_AA, live(ft, whole, W, H, l1));
+        EXPECT("dense foliage: with one blend item per pixel after a run that ran full", ran_full || frac >= 1 ? (long)W * H : (long)((double)W * H * frac), (long)g_aa_present.cap[1]);
+        EXPECT("dense foliage: and no overflow", 0, atomic_load(&g_aa_seen[3]));
+        EXPECT("dense foliage: the picture a list of one per pixel gives", 0, memcmp(l0, l1, W * H * 4));
+        if (frac < 1) CHECK("dense foliage at this size wants more than a quarter (the grow is run)", ran_full);
+        res_remove(ft); atomic_store(&g_aa_items_full, 0); aa_free(&g_aa_present); free(l0); free(l1); free(fp);
     }
 
     // The lists' clamps: capacities of 64 overflow on the scene; the run completes (MTL_DEBUG_LAYER and shader validation in the check target), says so, and touches only edges

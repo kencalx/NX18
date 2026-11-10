@@ -1,8 +1,8 @@
-// Shader reflection json → fixed-length C arrays (A: PC chain reflection; B: reflection produced by translating the original Switch shaders, route = "B", output of tools/dmsh_build.py).
+// Shader reflection json → C arrays (A: PC chain reflection; B: reflection produced by translating the original Switch shaders, route = "B", output of tools/dmsh_build.py).
 // Kinds added by B: SBUFP = storage buffer device pointer (NVN storage buffer slot); SUPPORT = Ryujinx auxiliary constants; C1 = the shader's own constant segment (c[1]);
 //            DRV0 / DRV2 = NVN driver constant segments c[0] (storage buffer address table) / c[2] (texture and sampler handle table)
 // The json names a binding's kind with a string, DMSH_KIND_* in dmsh_abi.h (one definition for the build and the host); nvn_refl.m maps each to one of the NVN_RB_* codes below, which only the host uses
-// PC shader reflection json → fixed-length C arrays (converted once when the shader is fetched; each draw only walks the arrays and does not touch NSDictionary / NSString).
+// PC shader reflection json → C arrays (converted once when the shader is fetched; each draw only walks the arrays and does not touch NSDictionary / NSString).
 // Unit test tests/t_refl.m computes the expectations by hand from real reflection.
 #pragma once
 #include <stdint.h>
@@ -42,9 +42,27 @@ typedef struct {
     uint8_t atom;            // IMG: the shader runs image atomics on it (dmsh_build.py "atomic"): the texture must allow Metal's texture atomics (nvn_mtl.m dummy_img_atomic)
     uint8_t bw;              // SAMP / SAMPT / SAMPU / SAMPI: a twin sampler for border colours (dmsh_build.py border_emu), its bit in the BORDER block + 1; 0 = an ordinary sampler binding
 } nvn_rbind;
+// The readable-tile tables of Merge B step 2 (readable-tile version <key>_bf, dmsh_fetch.py), in two parts that a shader has only when it has an entry in them.
+// Fragment (nvn_refl_fc): the i-th of nvn_refl.nfc redirectable samples reads texture slot fc_reg[i] at interpolated output fc_locn[i]; fc_mixed is a bit per texture slot 0-255 with
+// mixed use (such a slot must not be redirected to read the tile; slots 128+ are separate texture binds, NVN_SEPTEX_SLOT0); a pixel-position sample i (nvn_refl.fc_fpos) reads at
+// (gl_FragCoord.x * U, gl_FragCoord.y * V), fc_scale[i] = {U, V} as uniform references (slot << 16) | (vector 0..4095 << 2) | component, and its fc_locn is 0xff.
+// Vertex (nvn_refl_uv): .xy of interpolated output locn is taken as-is from attribute uv_attr[locn] (-1 = no), or .x / .y = fma(.x / .y of attribute uv_aff_attr[locn], scale, offset)
+// with uv_aff[locn] = [sx, ox, sy, oy] as uniform references (-1 = no)
+typedef struct { uint64_t fc_mixed[4]; uint32_t fc_scale[32][2]; uint8_t fc_reg[32], fc_locn[32]; } nvn_refl_fc;
+typedef struct { uint32_t uv_aff[32][4]; int8_t uv_attr[32], uv_aff_attr[32]; } nvn_refl_uv;
+// The tables of a shader that has none: all 0, and uv_attr and uv_aff_attr all -1. Shared by every such shader and never written (nvn_refl_fcw / nvn_refl_uvw give a shader its own to write)
+extern const nvn_refl_fc nvn_refl_fc_none;
+extern const nvn_refl_uv nvn_refl_uv_none;
 typedef struct {
     int nb, abi, nv;         // Binding count, argument buffer slot, vertex input count
-    nvn_rbind b[NVN_REFL_MAXB];
+    // The bindings: nb of them in the shader's tail block (nvn_refl_from_json), not a fixed array of NVN_REFL_MAXB. That array and the readable-tile tables were embedded in every shader loaded,
+    // 3,232 of the struct's 3,544 bytes and mostly empty (t_refl's round trip: NieR:Automata's library holds 454 bytes a shader in tails, Persona 5 Royal's 687), which Persona 5 Royal's
+    // 30,357 prewarmed shaders made about 100 MB. Every reader stops at nb. DM_NVN_REFL_FIXED=1 gives every shader NVN_REFL_MAXB entries and both tables of its own, as before (zeros past nb)
+    nvn_rbind *b;
+    const nvn_refl_fc *fc;   // the readable-tile tables: the shader's own in its tail block when it has an entry in that part, else &nvn_refl_fc_none / &nvn_refl_uv_none. Never NULL once
+    const nvn_refl_uv *uv;   // nvn_refl_init or nvn_refl_from_json ran
+    void *tail;              // the one malloc'd block that holds the shader's own tables (fc, then uv) and then its bindings (NULL: none); nvn_refl_free releases it with c1
+    uint16_t cap;            // bindings b has room for (nb at most, but NVN_REFL_MAXB with DM_NVN_REFL_FIXED=1 or after nvn_refl_reserve)
     struct { uint8_t loc, ct, nvn, sh[3]; } v[NVN_REFL_MAXV];   // loc: Metal vertex attribute slot (DXBC input register); nvn: NVN vertex attribute number (the n of HLSL semantic ATTRn);
                                                                 // sh[ct]: Metal attribute index of the input's shadow of that component type in the <key>_bv library (0xff = none; dmsh_vin.py)
     uint8_t has_vin;         // has a shadow-input library <key>_bv (nvn_mtl.m vin_fn)
@@ -66,22 +84,34 @@ typedef struct {
     // fragment: the SPH's output map (word 18, dmsh_build.py ps_omap): 4 bits per colour output, R G B A from the low bit; the GPU writes only these components of the target.
     // omap_known: recorded at packaging (libraries of an older chain have none and get no component mask)
     uint32_t omap; uint8_t omap_known;
-    // Merge B step 2 (readable-tile version <key>_bf, dmsh_fetch.py): fragment - nfc redirectable samples (the i-th: texture slot fc_reg, interpolated output fc_locn),
-    // bitmap fc_mixed of texture slots with mixed use (these slots must not be redirected to read the tile), nfo outputs (each with color number fo_color); vertex - .xy of interpolated output locn is taken as-is from attribute uv_attr[locn] (-1 = no)
-    uint8_t nfc, fc_reg[32], fc_locn[32], nfo, fo_color[4]; uint64_t fc_mixed[4]; int8_t uv_attr[32];   // fc_mixed: a bit per texture slot 0-255 (slots 128+ are separate texture binds, NVN_SEPTEX_SLOT0)
-    // Vertex - .x / .y of interpolated output locn = fma(.x / .y of attribute uv_aff_attr[locn], scale, offset), where scale / offset reference a uniform: (slot << 16) | (vector 0..4095 << 2) | component
-    int8_t uv_aff_attr[32]; uint32_t uv_aff[32][4];   // [sx, ox, sy, oy]
-    // Projective samples (dmsh_fetch.py 'proj'): fragment - bit i: the i-th redirectable sample reads at in.m_X.xy / in.m_X.w (X = fc_locn[i]); vertex - bit K: interpolated output K is the
+    // Merge B step 2 (readable-tile version <key>_bf, dmsh_fetch.py; the tables are in fc and uv): fragment - nfc redirectable samples, nfo outputs (each with color number fo_color)
+    uint8_t nfc, nfo, fo_color[4];
+    // Projective samples (dmsh_fetch.py 'proj'): fragment - bit i: the i-th redirectable sample reads at in.m_X.xy / in.m_X.w (X = fc->fc_locn[i]); vertex - bit K: interpolated output K is the
     // clip → screen varying ((x + w) / 2, (w − y) / 2, ·, w) of gl_Position in every entry point (dmsh_fetch.py screen_varyings)
     uint32_t fc_proj, scr_locn;
-    // Pixel-position samples (dmsh_fetch.py 'frag_pos'): bit i: the i-th redirectable sample reads at (gl_FragCoord.x * U, gl_FragCoord.y * V), fc_scale[i] = {U, V} as uniform references
-    // (slot << 16) | (vector 0..4095 << 2) | component; its fc_locn is 0xff
-    uint32_t fc_fpos; uint32_t fc_scale[32][2];
+    // Pixel-position samples (dmsh_fetch.py 'frag_pos'): bit i: the i-th redirectable sample reads at the pixel position times fc->fc_scale[i]
+    uint32_t fc_fpos;
     uint8_t *c1;             // c1 constant segment as-is (B): c1_len bytes, malloc'd by nvn_refl_from_json (NULL without one). It was a 4 KB array; Hyrule Warriors: Age of Calamity has 6 KB segments (its soldiers' vertex shaders)
 } nvn_refl;
 
+// An empty reflection (no bindings, the shared empty tables); what a shader that is not loaded from a json starts with
+void nvn_refl_init(nvn_refl *r);
+// Releases the tail block and c1 and leaves r as nvn_refl_init does. r must be zeroed, initialized or filled by nvn_refl_from_json
+void nvn_refl_free(nvn_refl *r);
+// Gives r room for cap bindings (b[0..nb) kept) and, with own, both tables of its own (their entries kept): for a shader made by hand (NvShader's init, the unit tests). 0 on allocation failure
+int nvn_refl_reserve(nvn_refl *r, int cap, int own);
+// r's own tables for writing, made first when r has none (a shader made by hand, the unit tests); NULL on allocation failure
+nvn_refl_fc *nvn_refl_fcw(nvn_refl *r);
+nvn_refl_uv *nvn_refl_uvw(nvn_refl *r);
+// The layout nvn_refl_from_json gives: 1 the fixed one (DM_NVN_REFL_FIXED=1: NVN_REFL_MAXB bindings and both tables of its own for every shader), 0 the tail at its real length. Read from the
+// environment once; t_refl sets it to convert one library both ways (-1 reads the environment again)
+int nvn_refl_fixed(void);
+void nvn_refl_set_fixed(int fixed);
+// Shaders holding a tail block now, and the block bytes (the memory line)
+void nvn_refl_stats(uint64_t *tails, uint64_t *bytes);
 #ifdef __OBJC__
 #import <Foundation/Foundation.h>
-// 0 on success; on failure returns non-0 and writes the reason into err (unknown binding type, fixed-length limit exceeded, missing field)
+// 0 on success; on failure returns non-0 and writes the reason into err (unknown binding type, fixed-length limit exceeded, missing field). out must be zeroed, initialized or filled by an
+// earlier call (what it holds is released first); on failure it is left as nvn_refl_init does
 int nvn_refl_from_json(NSDictionary *j, nvn_refl *out, char *err, int errlen);
 #endif

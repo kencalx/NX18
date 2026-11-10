@@ -78,7 +78,7 @@ typedef struct thr {
     uint64_t nspin, nspin_seen, spin_site; const char *spin_mod;   // Spin wait passes (dm_spin_wait; those that yield count in nyield too) and where the last one was
     uint64_t srun_svc, srun_t0, spin_ret;     // Current spin wait: nsvc at its passes, when it began, when the last pass returned
     uint64_t cpu_seen_us;                     // CPU time (µs) at the last power report (dm_thread_cpu)
-    uint64_t nsleep, nsleep_seen;             // Timed SleepThread calls (20 µs or more; shorter ones are yields), and their count at the last power report (dm_wake_stats)
+    uint64_t nsleep, nsleep_seen;             // Timed SleepThread calls (over 20.1 µs; shorter ones are yields, case 0x0B), and their count at the last power report (dm_wake_stats)
     uint64_t yrun_svc, yrun_t0, yrun_sig, yrun_sig2, poll_ret;   // Current run of yields: nsvc of the last yield, when the run began, and the caller's x19–x28 at the last two yields (a run lasts while no other SVC comes between two yields and those registers match one of the last two, thr_yield); when the last yield or short timed-out wait returned (poll_wait_begin)
     uint64_t yrun_clk;                        // dm_clock_reads at the last yield: a pass that read the clock since makes the yield a clock wait (thr_yield)
     uint64_t cw_sig, cw_run, cw_last, cw_end, cw_per, cw_per2, cw_wake, ncwpred, ncwpred_seen;   // The clock wait followed (clock_wait): its x19–x28, the run it was last seen in, when its last yield returned,
@@ -1002,10 +1002,11 @@ void dm_wake_stats(char *out, size_t n, double secs) {
 // Sleep until dl (host monotonic ns) on time: macOS nanosleep / mach_wait_until carry timer slack; measured, 33 ms sleeps take about 36.4 ms, 5 ms take 6.1 ms, 1 ms take 1.26 ms (the same at any QoS).
 // Metroid Dread's sound thread sleeps "33 ms minus this round's work" (main+0xf95b0), and on the host its period became 36.9 ms; cutscenes render a frame whenever the audio play position that thread updates moves, so they ran at about 27 fps (30 on the Switch).
 // Each step sleeps only 3/4 of the remaining time (the slack is at most about 25%, so it never oversleeps), looping until within 20 µs: a 33 ms sleep takes about 4 system calls with an error of tens of microseconds, and nothing spins
+#define SP_NEAR_NS 20000   // sleep_precise returns without a nanosleep this near its deadline (SleepThread's yield boundary follows it, case 0x0B)
 static void sleep_precise(uint64_t dl) {
     atomic_fetch_add_explicit(&g_sp_calls, 1, memory_order_relaxed);
     for (int i = 0; i < 16; i++) {
-        uint64_t now = now_ns(); if (now + 20000 >= dl) return;
+        uint64_t now = now_ns(); if (now + SP_NEAR_NS >= dl) return;
         uint64_t rem = dl - now, s = rem < 100000 ? rem : rem - rem / 4;
         struct timespec ts = {(time_t)(s / 1000000000u), (long)(s % 1000000000u)}; nanosleep(&ts, 0);
         atomic_fetch_add_explicit(&g_sp_steps, 1, memory_order_relaxed);
@@ -1083,12 +1084,16 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         // A sleep, and YieldToAnyThread (-2), which takes the thread off its core so that lower-priority threads run there, end its part in a handoff;
         // the other yields (0, -1) pass the core only to threads of its own priority or higher
         if (ns > 0 || ns == -2) { thr_t *me = pthread_getspecific(g_keythr); if (me && me->nhand) { pthread_mutex_lock(&G); hand_leave(me); pthread_mutex_unlock(&G); } }
-        if ((ns > 0 && dm_detclock_enabled()) || ns >= 20000) {
+        // The boundary is sleep_precise's own: a sleep it would return from at once is a yield. It used to be ns >= 20000, so a sleep of exactly 20 µs (or a few ns more: the
+        // 100 ns allow for the tens of nanoseconds from dm_guest_sleep_ns's clock read to sleep_precise's; with a whole microsecond, sleeps of 20.1-21 µs, which sleep_precise does
+        // sleep, were taken as yields too) took the sleep path, slept nothing, and as an SVC between two yields began a new run of yields each time, so the yields around it never backed off. Ocarina of Time's main thread on an iPhone at 30 fps: about 99,000 such sleeps a second (131,568 precise sleeps in
+        // 447 nanosleep steps across the process); in a 60 fps run its yields reached 2,300,000 per 300 frames, none of them backed off
+        if ((ns > 0 && dm_detclock_enabled()) || ns > SP_NEAR_NS + 100) {
             thr_t *me = pthread_getspecific(g_keythr); if (me) me->nsleep++;   // by length for the threads line (dm_wake_stats)
             atomic_fetch_add_explicit(&g_sleep_len[ns < 1000000 ? 0 : ns <= 5000000 ? 1 : 2], 1, memory_order_relaxed);
             dm_guest_sleep_ns(ns);
         }
-        // Yield (0 / -1 / -2), and sleeps shorter than 20 µs, which sleep_precise would return from at once: Super Mario Galaxy's Hagi polls with SleepThread(100 ns) (main+0x517c),
+        // Yield (0 / -1 / -2), and sleeps of up to 20.1 µs, which sleep_precise would return from at once: Super Mario Galaxy's Hagi polls with SleepThread(100 ns) (main+0x517c),
         // which kept a core at 100% (1.4 billion calls in 200 s); as yields they get the back-off below.
         // Count and time of the main thread's yields are recorded: a render task graph's "wait for everything to finish" is often pure polling + yield; measure how much of a frame it takes
         else thr_yield(pthread_getspecific(g_keythr), regs);

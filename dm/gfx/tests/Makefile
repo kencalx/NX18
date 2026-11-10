@@ -73,8 +73,14 @@ t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../
 	clang $(CFLAGS) -fobjc-arc -o $@ t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../nvn/nvn_tex.c ../nvn/host_msl.m -framework Metal -framework Foundation
 t_tex_layout: t_tex_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang -O1 -Wall -o $@ t_tex_layout.c ../nvn/nvn_tex.c
-t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/dmsh_chain.h
-	clang -O1 -g -Wall -I../nvn -fobjc-arc -o $@ t_refl.m ../nvn/nvn_refl.m -framework Metal -framework Foundation
+t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/dmsh_chain.h ../nvn/msl_image.h ../../host/romfs_image.h
+	clang -O1 -g -Wall -Wno-unused-function -I../nvn -fobjc-arc -o $@ t_refl.m ../nvn/nvn_refl.m -framework Metal -framework Foundation
+# REFL_IMG=<a game's build>/shader/<platform>/b-<chain>.img also converts every reflection of that library in both layouts (DM_NVN_REFL_FIXED) and compares them, under Guard Malloc, which
+# puts each tail block against an unmapped page so that a read past its bindings faults
+.PHONY: check_t_refl
+check_t_refl: t_refl
+	./t_refl
+	$(if $(REFL_IMG),DM_REFL_IMG='$(REFL_IMG)' DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib MALLOC_PROTECT_BEFORE=0 ./t_refl)
 t_hmap: t_hmap.c ../nvn/nvn_hmap.h
 	clang -O1 -Wall -o $@ t_hmap.c
 t_cover: t_cover.c ../nvn/nvn_cover.h
@@ -193,6 +199,11 @@ t_pool_notes: t_pool_notes.m $(MTL_T_DEP)
 check_t_pool_notes: RUN_ENV = MTL_DEBUG_LAYER=1
 t_sparse_tiles: t_sparse_tiles.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_tiles.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+# 64 MB placement heaps taking the lowest free tile (the default), and DM_NVN_SPARSE_HEAP_MB=256, today's heaps taking the tile freed last
+.PHONY: check_t_sparse_tiles
+check_t_sparse_tiles: t_sparse_tiles
+	./t_sparse_tiles
+	DM_NVN_SPARSE_HEAP_MB=256 ./t_sparse_tiles
 t_readback: t_readback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_readback.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_readback
@@ -215,6 +226,7 @@ t_post_aa: t_post_aa.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigsta
 check_t_post_aa: t_post_aa
 	MTL_DEBUG_LAYER=1 ./t_post_aa
 	MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ./t_post_aa
+	DM_PRESENT_AA_ITEMS=1 MTL_DEBUG_LAYER=1 ./t_post_aa
 t_present_rescue: t_present_rescue.m t_present_rescue_focus.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_rescue.m t_present_rescue_focus.c $(MTL_T_SRC) $(FW)
 .PHONY: check_t_present_rescue
@@ -226,6 +238,7 @@ t_present_alloc: t_present_alloc.m $(MTL_T_DEP)
 check_t_present_alloc: t_present_alloc
 	MTL_DEBUG_LAYER=1 ./t_present_alloc
 	MTL_DEBUG_LAYER=1 DM_PRESENT_TRIM=0 ./t_present_alloc
+	MTL_DEBUG_LAYER=1 DM_PRESENT_FX_KEEP=1 ./t_present_alloc
 # A GPU whose access macOS revoked (DM_TEST_GPU_LOST, set by the test): the front end told once, the game's waits released, presents stopped
 t_gpu_lost: t_gpu_lost.m t_gpu_lost_front.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gpu_lost.m t_gpu_lost_front.c $(MTL_T_SRC) $(FW)
@@ -312,6 +325,19 @@ t_upload_slots: t_upload_slots.m $(MTL_T_DEP)
 check_t_upload_slots: t_upload_slots
 	MTL_DEBUG_LAYER=1 ./t_upload_slots
 	DM_NVN_UPLOAD_REUSE=0 MTL_DEBUG_LAYER=1 ./t_upload_slots
+	DM_NVN_UPLOAD_TRIM=0 MTL_DEBUG_LAYER=1 ./t_upload_slots
+# The memory line's graphics ledger and guest charged (mtl_mem_stat), with a guest block of its own (mem_line_guest.c gives the host's svc_guest_range)
+t_mem_line: t_mem_line.m mem_line_guest.c $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_mem_line.m mem_line_guest.c $(MTL_T_SRC) $(FW)
+t_mem_trim: t_mem_trim.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_mem_trim.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_mem_trim
+check_t_mem_trim: t_mem_trim
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_mem_trim
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_mem_trim
+	DM_MEMORY_TRIM=0 MTL_DEBUG_LAYER=1 ./t_mem_trim
+	DM_BG_TRIM=0 MTL_DEBUG_LAYER=1 ./t_mem_trim
+	DM_NVN_FB_SNAP_IDLE=0 MTL_DEBUG_LAYER=1 ./t_mem_trim
 t_sbw: t_sbw.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sbw.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_sbw
@@ -509,6 +535,7 @@ check_t_rt_recycle: t_rt_recycle
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_rt_recycle
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_rt_recycle
 	DM_NVN_RT_RECYCLE=0 MTL_DEBUG_LAYER=1 ./t_rt_recycle
+	DM_NVN_RT_RECYCLE_CAP=16 MTL_DEBUG_LAYER=1 ./t_rt_recycle
 # A game's upscaler drawn by MetalFX (any profile; the profile's upscaler shaders, from its shader map, when it has some); with and without the switch, and on the encoding thread
 t_upscaler_mfx: t_upscaler_mfx.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upscaler_mfx.m $(MTL_T_SRC) $(FW)
@@ -583,6 +610,7 @@ check_t_texels_layers: t_texels_layers
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_REUPLOAD_PART=0 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_PKG_SPARE_IDLE=0 ./$<
 
 t_wait_event: t_wait_event.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_wait_event.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
@@ -596,6 +624,8 @@ check_t_wait_event: t_wait_event
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_SIGNAL_EVENTS=node ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_SIGNAL_EVENTS=split ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_SIGNAL_EVENTS=split ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_EVENT_MAP=0 DM_NVN_NODE_POOL=0 DM_NVN_SUBMIT_PROBES=full ./$<   # the event list, no free lists and the full probes, as before
 check_t_queue_lifetime: t_queue_lifetime
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<

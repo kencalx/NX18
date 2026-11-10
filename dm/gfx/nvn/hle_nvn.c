@@ -1390,6 +1390,15 @@ static uint64_t thr_sys_ns(void) {
     if (thread_info(me, THREAD_BASIC_INFO, (thread_info_t)&bi, &n) == KERN_SUCCESS) r = (uint64_t)bi.system_time.seconds * 1000000000ull + (uint64_t)bi.system_time.microseconds * 1000ull;
     mach_port_deallocate(mach_task_self(), me); return r;
 }
+// The submit-cost probes' default reading (nvn_queue.inc nq_cost_begin / nq_cost_end; DM_NVN_SUBMIT_PROBES=full keeps clock_gettime plus thr_sys_ns above): one THREAD_BASIC_INFO call gives this thread's CPU time (user plus kernel) and its kernel time, on a port kept per thread. pthread_mach_thread_np returns the port pthread already holds, so no send right is made and released per reading as mach_thread_self does. The times come in whole microseconds, but each scope takes the difference of two running totals, so the sums the stats lines print lose nothing on average (on an M4 Max, 20,000 scopes of 5 to 10 us summed to within 0.1% of clock_gettime's). A reading was clock_gettime, mach_thread_self, thread_info and mach_port_deallocate, about 0.73 us; it is now about 0.37 us
+static __thread mach_port_t thr_port;
+static void thr_times(uint64_t *cpu, uint64_t *sys) {
+    if (!thr_port) thr_port = pthread_mach_thread_np(pthread_self());
+    thread_basic_info_data_t bi; mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT; *cpu = *sys = 0;
+    if (thread_info(thr_port, THREAD_BASIC_INFO, (thread_info_t)&bi, &n) != KERN_SUCCESS) return;
+    *sys = (uint64_t)bi.system_time.seconds * 1000000000ull + (uint64_t)bi.system_time.microseconds * 1000ull;
+    *cpu = *sys + (uint64_t)bi.user_time.seconds * 1000000000ull + (uint64_t)bi.user_time.microseconds * 1000ull;
+}
 static _Atomic uint64_t g_cum_sub_cyc, g_cum_sub_sys_ns, g_cum_sub_wall_ns;
 static int frame_rec(void);
 static _Atomic uint64_t g_nvn_ns;   // Host time spent in submit / present this frame (replay encoding + present), used by the timing instrumentation
@@ -1412,10 +1421,24 @@ void dm_gfx_suspend(int on) {
     if (on) while (g_inflight_api) pthread_cond_wait(&g_susp_cv, &g_susp_mu);
     else pthread_cond_broadcast(&g_susp_cv);
     pthread_mutex_unlock(&g_susp_mu);
-    if (on) { dm_vk_drain(); dm_gl_drain(); mtl_drain(); mtl_arch_save(0, 0); LOG("[nvn] graphics suspended: in-flight GPU work drained"); } else { mtl_arch_resume(); LOG("[nvn] graphics resumed"); }   // the Vulkan and GL queues first: presents on the NVN queue wait for their frames;
-    // the pipeline archive starts writing what it holds: a process in the background may be ended without a word (iOS), and a prewarm's captures wait for a full period
+    if (on) { dm_vk_drain(); dm_gl_drain(); mtl_drain(); mtl_arch_save(0, 0); LOG("[nvn] graphics suspended: in-flight GPU work drained"); if (mtl_bg_trim_on()) dm_gfx_trim(3); } else { mtl_arch_resume(); LOG("[nvn] graphics resumed"); }   // the Vulkan and GL queues first: presents on the NVN queue wait for their frames;
+    // the pipeline archive starts writing what it holds: a process in the background may be ended without a word (iOS), and a prewarm's captures wait for a full period. Then, with the gate closed and nothing in flight, the idle caches go
+    // (dm_gfx_trim: a suspended app holding less is less likely to be ended for memory; DM_BG_TRIM=0 keeps them)
 }
 void dm_gfx_quit(int wait_ms) { mtl_arch_save(wait_ms, 1); }
+// The guest's files (hle_svc.c, DM_GUEST_FILE): the pages the game gave back punched out now instead of at the next 10 s sweep; the bytes. A binary without the SVC layer (the graphics unit tests) has this weak one
+__attribute__((weak)) uint64_t dm_guest_file_trim(void) { return 0; }
+// Memory pressure (front_ios.m, front_mac.m: a dispatch source on the system's memory pressure): mtl_pressure logs it and asks the next submission to trim the graphics caches (nvn_mtl.m mtl_trim_at); the guest's files are swept here, on the caller's queue
+void dm_gfx_pressure(int level) {
+    if (!mtl_pressure(level)) return;
+    uint64_t b = dm_guest_file_trim(); if (b) LOG("[mem] guest file: %.1f MB given back as holes for the memory pressure", b / 1048576.0);
+}
+// The trim at once: the graphics caches (mtl_trim) and the guest's files. Only with no submission open and the GPU drained, as after dm_gfx_suspend(1)'s drain
+uint64_t dm_gfx_trim(int level) {
+    uint64_t b = mtl_trim(level), g = dm_guest_file_trim();
+    if (g) LOG("[mem] guest file: %.1f MB given back as holes for the memory trim", g / 1048576.0);
+    return b + g;
+}
 int dm_gfx_save_wait(int wait_ms) { return mtl_arch_wait(wait_ms); }
 // One submission at a time: the Metal replay keeps one command buffer and one upload batch for the submission in progress (nvn_mtl.m g_cb). Fire Emblem: Three Houses initializes two queues and
 // submits on both from two threads; the second submission arrived while the first was replaying and the host stopped with "submit re-entered" at the ninth frame. NVN orders work on different queues only

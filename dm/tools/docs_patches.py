@@ -134,9 +134,13 @@ SWITCH_BINDING = [
     ('ue_texture_pool', '', {'what': "Unreal's texture streaming pool", 'now': 'game', 'goal': 'game', 'purpose': 'memory', 'why': "the game's own budget, raised to its Windows value"}),
     ('snowdrop_pools', '', {'what': "Snowdrop's three page pools' address ranges", 'now': 'game', 'goal': 'game', 'purpose': 'address space',
      'why': "the rewriter finds the allocator in any build (snowdrop_pools.py); the sizes are measured against each game's regions, and the cause, an iPhone's address space, is a platform limit"}),
+    ('present_interval_choice', '', {'what': 'the launcher offers Frame rate 30 / 60 (DM_PRESENT_INTERVAL game / display)', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "offered only for a game whose logic runs on its own clock, checked at both rates"}),   # before present_interval: classify matches a key by its start
     ('present_interval', '', {'what': 'one frame per display tick', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'right only for games whose logic does not count frames'}),
     ('fps_hold', '', {'what': 'no frame held past the cap', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's pacing"}),
     ('fps_target', '', {'what': 'frame rate target', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'a choice per game'}),
+    ('fps_max', '', {'what': 'a frame rate of 120 allowed (fps_target and the launcher\'s Frame rate)', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "only for a game checked at that speed: its logic must keep time at 120 frames a second (hle_nvn.c fps_high)"}),
     ('ue_fps_cvar', '', {'what': "the game's own Unreal frame-limit variable", 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's own variable, which its settings apply to t.MaxFPS; the rewriter finds it by name (ue_cvar.py)"}),
     ('perf_mode', '', {'what': 'Boost whatever the operation mode', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': 'a combination a Switch 1 never reports: a choice per game'}),
     ('launch_param', '', {'what': 'the launch parameter its launcher program passes', 'now': 'game', 'goal': 'game', 'purpose': 'runtime',
@@ -240,8 +244,14 @@ def shader_rules():   # (file, line, comment) of translator rules keyed by a sha
     return out
 
 
+def header_src():   # the source of the functions that write the host's header, from def header( to the end of header_one: header() has only dispatched to header_multi or header_one since the multi-program profiles (commit 0b8e0dc1), and every key with a default is read in header_one, so a slice that stopped at header()'s own body found one key (programs) and the switch table lost every other row
+    src = (REPO / 'dm/games/game.py').read_text(); a, b = src.find('def header('), src.find('def header_one(')
+    if a < 0 or b < a: raise SystemExit('dm/games/game.py: no def header( followed by def header_one(: docs_patches.py switches() reads the profile keys from them')
+    return src[a:b] + re.split(r'\n(?=\S)', src[b:])[0]   # header_one runs to the next top-level line
+
+
 def switches(gs):   # [(key, value, [games])] of every profile key set away from its default in game.py
-    src = (REPO / 'dm/games/game.py').read_text(); src = src[src.find('def header('):]; src = re.split(r'\n(?=\S)', src)[0]   # the keys the host's header takes (to the next top-level line)
+    src = header_src()
     defaults = {}
     for k, d in re.findall(r'g\.(?:get|words)\(\s*[\'"](\w+)[\'"]\s*,\s*[\'"]([^\'"]*)[\'"]\s*\)', src): defaults.setdefault(k, d)
     out = {}

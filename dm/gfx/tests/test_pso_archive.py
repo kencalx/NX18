@@ -98,6 +98,25 @@ class ArchiveRestartTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, phase + '\n' + result.stdout + result.stderr)
                 self.assertEqual(len(list(Path(folder).glob('*.mtl4a'))), files, phase)
 
+    def test_stale_chain_files(self):
+        for keep in (False, True):
+            with self.subTest(keep=keep), tempfile.TemporaryDirectory(prefix='pso-stale-') as folder:
+                env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')
+                for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED', 'DM_PSO_KEEP_OLD'):
+                    env.pop(name, None)
+                # six one-base files; then one of another chain, two without a stamp with an index and two without an index: the open and the probe keep 3, DM_PSO_KEEP_OLD=1 all 6
+                for phase, files in (('seed', 6), ('open', 6 if keep else 3)):
+                    if phase == 'open' and keep:
+                        env['DM_PSO_KEEP_OLD'] = '1'
+                    result = subprocess.run([executable, '--stale-' + phase, folder],
+                                            env=env, capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, phase + '\n' + result.stdout + result.stderr)
+                    self.assertEqual(len(list(Path(folder).glob('*.mtl4a'))), files, phase)
+                    self.assertEqual(sorted(p.stem for p in Path(folder).glob('*.keys')),
+                                     sorted(p.stem for p in Path(folder).glob('*.mtl4a') if (phase == 'open' and not keep) or p.stem not in ('00004-1', '00005-1')), phase)
+                if not keep:
+                    self.assertIn('1 files of another shader chain removed without opening them', result.stdout + result.stderr)
+                    self.assertIn('4 files without a chain stamp probed: 2 served', result.stdout + result.stderr)
 
 
 if __name__ == '__main__':

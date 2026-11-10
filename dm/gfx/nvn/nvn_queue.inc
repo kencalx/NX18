@@ -1,17 +1,19 @@
 #include "nvn_capture.h"
 #include "nvn_hmap.h"
+#include <os/lock.h>
 
 void *objc_autoreleasePoolPush(void);
 void objc_autoreleasePoolPop(void *);
 
 // Ready continuations of NVN queues share the renderer's one ordered Metal queue.
 // An unresolved wait parks its queue, never the submitting CPU or another queue.
-typedef struct nq_receipt { unsigned refs, published; uint64_t fence, present; } nq_receipt;
+typedef struct nq_receipt { unsigned refs, published; uint64_t fence, present; struct nq_receipt *spare_next; } nq_receipt;   // spare_next: the free list (nq_pooled)
 typedef struct nq_node {
     struct nq_node *next;
     uint8_t *bytes; size_t length, capacity;
     unsigned kind, mode, closed, waiting; volatile uint32_t *event; uint32_t value;   // event, mode, value: an NQ_EVENT node's wait
     struct nq_signal { volatile uint32_t *word; unsigned mode; uint32_t value; } *signals; unsigned nsignals, signals_cap;   // an NQ_COMMANDS node's GPU event signals in recorded order, issued at its completion (nq_event_issued)
+    struct nq_signal signal0; uint64_t signal_set;   // signal0: the first signal, so a node of one signal (split mode) allocates no array (nq_pooled); signal_set: this node's mark in nq_signal_words (nq_signal_on)
     uint64_t wait_fence, event_predecessor; unsigned wait_kind; const sync_t *sync_source; nq_receipt *receipt;
     tex_t texture; double period; int crop[4];
 } nq_node;
@@ -48,19 +50,115 @@ static _Atomic uint64_t nq_event_polls;   // the replay's 1 ms polls for a mappe
 // The last GPU write of each event word not yet landed: its submission's fence, and for a WRITE signal the value it leaves (exact). A wait the queued value satisfies needs no
 // completion: its continuation is encoded after the writer's on the one ordered Metal queue, as the next submission of one NVN queue is, and memory the writer's completion lands
 // on the CPU (reports, render-target readbacks) is that same in-flight case. An ADD's result depends on the writes landing before it, so such a wait still waits for them
-typedef struct nq_event_write { struct nq_event_write *next; volatile uint32_t *word; uint64_t fence; uint32_t value; int exact; } nq_event_write;
-static nq_event_write *nq_event_writes;
-static uint64_t nq_event_pending(volatile uint32_t *word) { for(nq_event_write *w=nq_event_writes;w;w=w->next) if(w->word==word) return w->fence; return 0; }
-static nq_event_write *nq_event_write_of(volatile uint32_t *word) { nq_event_write *w=nq_event_writes; while(w && w->word!=word) w=w->next; return w; }
+// The entries are found by word in a hash map (nq_event_words) and kept in a list in fence order, oldest first, so nvn_queue_gpu_progress takes the landed ones off its head. Each signal used to
+// walk a list of every word written and not yet landed, under nq_mu on the replay thread: on an M4 Max 0.26 ms a frame for NieR:Automata's 850 signals on the same words each frame (0.003 ms
+// now), 1.8 ms with 850 fresh words and three frames in flight, and 21 ms with 2,000 (0.03 ms now). Entries taken off go to a free list (NQ_EVENT_SPARES) instead of free. DM_NVN_EVENT_MAP=0
+// keeps the walked list, newest first, one calloc and one free per entry.
+// Both give the same answers: one entry per word, holding its last write, removed once that write's fence has completed (all of them with a fence at or below the completed one)
+typedef struct nq_event_write { struct nq_event_write *next, *prev; volatile uint32_t *word; uint64_t fence; uint32_t value; int exact; } nq_event_write;
+static nq_event_write *nq_event_writes, *nq_event_newest;   // map: in fence order from the oldest, nq_event_newest the last; list (DM_NVN_EVENT_MAP=0): newest first, singly linked
+static nvn_hmap nq_event_words;   // word pointer (8-byte key) -> its nq_event_write (map only)
+static nq_event_write *nq_event_spare; static unsigned nq_event_nspare;
+enum { NQ_EVENT_SPARES=4096 };
+static int nq_event_map=-1;   // 1 map, 0 list (a unit test may set it directly while nothing is recorded)
+static _Atomic uint64_t nq_stat_event_writes, nq_stat_event_ns; static unsigned nq_stat_event_peak;   // the queue line: writes recorded, time in this bookkeeping on the replay thread and in GPU progress, most words in flight
+static unsigned nq_event_nlist;   // entries in the list when the map is off (DM_NVN_EVENT_MAP=0), so the queue line counts the words in flight with either; the map keeps its own count (nq_event_words.n)
+static int nq_event_map_on(void) {
+    if(nq_event_map<0) { const char *e=getenv("DM_NVN_EVENT_MAP"); int on=!(e && !strcmp(e,"0")); if(!on) LOG("[nvn] GPU event writes kept in a list and a node's signals scanned (DM_NVN_EVENT_MAP=0)"); nq_event_map=on; }
+    return nq_event_map;
+}
+static int nq_event_mapped(void) {   // under nq_mu
+    int on=nq_event_map_on(); if(on && !nq_event_words.klen) nvn_hm_init(&nq_event_words,8);
+    return on;
+}
+static unsigned nq_event_inflight(void) { return nq_event_mapped()?nq_event_words.n:nq_event_nlist; }   // under nq_mu: the event words with a write not yet landed
+static nq_event_write *nq_event_write_of(volatile uint32_t *word) {
+    if(nq_event_mapped()) return nvn_hm_get(&nq_event_words,&word);
+    nq_event_write *w=nq_event_writes; while(w && w->word!=word) w=w->next; return w;
+}
+static uint64_t nq_event_pending(volatile uint32_t *word) { nq_event_write *w=nq_event_write_of(word); return w?w->fence:0; }
+static void nq_event_unlink(nq_event_write *w) {   // map only
+    if(w->prev) w->prev->next=w->next; else nq_event_writes=w->next;
+    if(w->next) w->next->prev=w->prev; else nq_event_newest=w->prev;
+    w->next=w->prev=NULL;
+}
+// Fences come from one ordered Metal queue in issue order, so an entry nearly always goes last; an older fence (a unit test) goes to its place, so the list stays in fence order
+static void nq_event_place(nq_event_write *w) {   // map only
+    nq_event_write *after=nq_event_newest;
+    if(after && after->fence>w->fence) { if(nq_event_writes->fence>=w->fence) after=NULL; else while(after->fence>w->fence) after=after->prev; }
+    w->prev=after; w->next=after?after->next:nq_event_writes;
+    if(w->next) w->next->prev=w; else nq_event_newest=w;
+    if(after) after->next=w; else nq_event_writes=w;
+}
 static void nq_event_issued(volatile uint32_t *word,uint64_t fence,unsigned mode,uint32_t value) {
-    nq_event_write *w=nq_event_write_of(word);
-    if(!w) { w=calloc(1,sizeof *w); if(!w) die("event ordering allocation failed"); w->word=word; w->next=nq_event_writes; nq_event_writes=w; }
-    w->fence=fence; w->value=value; w->exact=mode==0;
+    atomic_fetch_add_explicit(&nq_stat_event_writes,1,memory_order_relaxed);
+    if(!nq_event_mapped()) {
+        nq_event_write *w=nq_event_write_of(word);
+        if(!w) { w=calloc(1,sizeof *w); if(!w) die("event ordering allocation failed"); w->word=word; w->next=nq_event_writes; nq_event_writes=w; if(++nq_event_nlist>nq_stat_event_peak) nq_stat_event_peak=nq_event_nlist; }
+        w->fence=fence; w->value=value; w->exact=mode==0; return;
+    }
+    nq_event_write *w=nvn_hm_get(&nq_event_words,&word);
+    if(w) nq_event_unlink(w);
+    else {
+        if(nq_event_spare) { w=nq_event_spare; nq_event_spare=w->next; nq_event_nspare--; memset(w,0,sizeof *w); }
+        else if(!(w=calloc(1,sizeof *w))) die("event ordering allocation failed");
+        w->word=word; nvn_hm_put(&nq_event_words,&word,w);
+        if(nq_event_words.n>nq_stat_event_peak) nq_stat_event_peak=nq_event_words.n;
+    }
+    w->fence=fence; w->value=value; w->exact=mode==0; nq_event_place(w);
+}
+static void nq_event_landed(uint64_t done) {   // under nq_mu: forget the writes whose fence has completed
+    if(!nq_event_mapped()) {
+        nq_event_write **p=&nq_event_writes;
+        while(*p) { nq_event_write *w=*p; if(w->fence<=done) { *p=w->next; free(w); nq_event_nlist--; } else p=&w->next; }
+        return;
+    }
+    while(nq_event_writes && nq_event_writes->fence<=done) {
+        nq_event_write *w=nq_event_writes; nq_event_unlink(w); nvn_hm_del(&nq_event_words,&w->word);
+        if(nq_event_nspare<NQ_EVENT_SPARES) { w->next=nq_event_spare; nq_event_spare=w; nq_event_nspare++; } else free(w);
+    }
 }
 
 enum { NQ_COMMANDS, NQ_EVENT, NQ_SYNC, NQ_FENCE, NQ_PRESENT };
-static nq_receipt *nq_new(void) { nq_receipt *r=calloc(1,sizeof *r); if(!r) die("queue receipt allocation failed"); r->refs=1; return r; }
-static void nq_put(nq_receipt *r) { if(r && !--r->refs) free(r); }
+// Free lists of nodes and receipts. In split mode, the default for every game but NieR:Automata, each GPU event signal made a command node, an NQ_FENCE node, that node's receipt and a signals
+// array: four allocations on the submitting thread and four frees on the replay thread per signal. A node now keeps its first signal inline (signal0), and nodes and receipts come from these
+// lists, at most NQ_POOL_MAX of each kept (a node is 296 bytes, a receipt 32: at most about 330 KB in all). The lists have a lock of their own, taken with no other held after it: nodes and receipts are made under
+// g_sub_mu, nq_mu or neither, and given back under nq_mu. A recycled receipt is no more of a hazard to a stale pointer than freed memory malloc hands out again. DM_NVN_NODE_POOL=0 allocates and
+// frees each one, with no inline signal, as before. The queue line counts them, with the command nodes that started without a spare command copy (nq_spare_take)
+static os_unfair_lock nq_pool_mu=OS_UNFAIR_LOCK_INIT;
+enum { NQ_POOL_MAX=1024 };
+static nq_node *nq_node_pool; static nq_receipt *nq_receipt_pool; static unsigned nq_node_npool, nq_receipt_npool;
+static int nq_pool=-1;   // 1 free lists and inline signal, 0 off (a unit test may set it directly)
+static _Atomic uint64_t nq_stat_nodes, nq_stat_nodes_pooled, nq_stat_receipts, nq_stat_receipts_pooled, nq_stat_no_spare;
+static int nq_pooled(void) {
+    if(nq_pool<0) { const char *e=getenv("DM_NVN_NODE_POOL"); int on=!(e && !strcmp(e,"0")); if(!on) LOG("[nvn] queue nodes and receipts allocated one by one (DM_NVN_NODE_POOL=0)"); nq_pool=on; }
+    return nq_pool;
+}
+static nq_node *nq_node_new(void) {
+    nq_node *n=NULL; atomic_fetch_add_explicit(&nq_stat_nodes,1,memory_order_relaxed);
+    if(nq_pooled()) { os_unfair_lock_lock(&nq_pool_mu); if((n=nq_node_pool)) { nq_node_pool=n->next; nq_node_npool--; } os_unfair_lock_unlock(&nq_pool_mu); }
+    if(n) { memset(n,0,sizeof *n); atomic_fetch_add_explicit(&nq_stat_nodes_pooled,1,memory_order_relaxed); }
+    else if(!(n=calloc(1,sizeof *n))) die("queue continuation allocation failed");
+    return n;
+}
+static void nq_node_free(nq_node *n) {
+    if(n->signals!=&n->signal0) free(n->signals);
+    free(n->bytes);
+    if(nq_pooled()) { os_unfair_lock_lock(&nq_pool_mu); if(nq_node_npool<NQ_POOL_MAX) { n->next=nq_node_pool; nq_node_pool=n; nq_node_npool++; n=NULL; } os_unfair_lock_unlock(&nq_pool_mu); }
+    free(n);
+}
+static nq_receipt *nq_new(void) {
+    nq_receipt *r=NULL; atomic_fetch_add_explicit(&nq_stat_receipts,1,memory_order_relaxed);
+    if(nq_pooled()) { os_unfair_lock_lock(&nq_pool_mu); if((r=nq_receipt_pool)) { nq_receipt_pool=r->spare_next; nq_receipt_npool--; } os_unfair_lock_unlock(&nq_pool_mu); }
+    if(r) { memset(r,0,sizeof *r); atomic_fetch_add_explicit(&nq_stat_receipts_pooled,1,memory_order_relaxed); }
+    else if(!(r=calloc(1,sizeof *r))) die("queue receipt allocation failed");
+    r->refs=1; return r;
+}
+static void nq_put(nq_receipt *r) {
+    if(!r || --r->refs) return;
+    if(nq_pooled()) { os_unfair_lock_lock(&nq_pool_mu); if(nq_receipt_npool<NQ_POOL_MAX) { r->spare_next=nq_receipt_pool; nq_receipt_pool=r; nq_receipt_npool++; r=NULL; } os_unfair_lock_unlock(&nq_pool_mu); }
+    free(r);
+}
 static void nq_set_sync(sync_t *s,nq_receipt *r) { if(s->fenced==3) nq_put((nq_receipt *)(uintptr_t)s->fence); r->refs++; s->fence=(uintptr_t)r; s->fenced=3; }
 void nvn_sync_release(sync_t *s) { pthread_mutex_lock(&nq_mu); if(s->fenced==3) nq_put((nq_receipt *)(uintptr_t)s->fence); s->fenced=0; s->fence=0; pthread_mutex_unlock(&nq_mu); }
 static nq_queue *nq_get(queue_t *q) {
@@ -75,8 +173,8 @@ static int nq_sync_encoded(const sync_t *s,uint64_t *fence) {
     if(!s->fenced) return 0; *fence=s->fence; return 1;
 }
 void nvn_queue_gpu_progress(void) {
-    pthread_mutex_lock(&nq_mu); uint64_t done=mtl_completed_fence(); nq_event_write **p=&nq_event_writes;
-    while(*p) { nq_event_write *w=*p; if(w->fence<=done) { *p=w->next; free(w); } else p=&w->next; }
+    pthread_mutex_lock(&nq_mu); uint64_t t0=nq_event_writes?now_ns():0;
+    if(t0) { nq_event_landed(mtl_completed_fence()); atomic_fetch_add_explicit(&nq_stat_event_ns,now_ns()-t0,memory_order_relaxed); }
     pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
 }
 static void nq_event_publish(volatile uint32_t *word,unsigned mode,uint32_t value,uint64_t gpu_fence) {
@@ -97,29 +195,63 @@ static void nq_snapshot_sync(nq_node *n,const sync_t *s) {
     n->wait_kind=s->fenced; n->wait_fence=s->fence;
     if(s->fenced==3) { n->receipt=(nq_receipt *)(uintptr_t)s->fence; n->receipt->refs++; }
 }
+// The submit-cost probes run once per nvn_queue_submit and once per replayed COMMANDS or PRESENT node, so in split mode once per GPU event signal. By default a reading is one THREAD_BASIC_INFO
+// call on a port kept per thread (hle_nvn.c thr_times) plus thread_selfcounts: about 0.9 us a scope on an M4 Max. DM_NVN_SUBMIT_PROBES=full keeps the earlier reading, clock_gettime for the CPU
+// time and mach_thread_self, thread_info and mach_port_deallocate for the kernel time (thr_sys_ns), about 1.6 us a scope; both feed the same translation lines. The kernel figure there is lower
+// by default, since the earlier reading's own port calls ran inside the scope (in t_wait_event 1.8 against 3.3 ms for 4,000 scopes of about 10 us)
+static int nq_probes_full=-1;
+static int nq_probe_full(void) {
+    if(nq_probes_full<0) { const char *e=getenv("DM_NVN_SUBMIT_PROBES"); nq_probes_full=e && !strcmp(e,"full"); if(nq_probes_full) LOG("[nvn] submit-cost probes: full (DM_NVN_SUBMIT_PROBES=full): clock_gettime plus a thread port made and released per reading"); }
+    return nq_probes_full;
+}
 typedef struct { uint64_t wall, cpu, instr, cycles, sys; } nq_cost;
 static nq_cost nq_cost_begin(void) {
-    nq_cost c={.wall=now_ns(),.cpu=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID),.sys=thr_sys_ns()};
+    nq_cost c={.wall=now_ns()};
+    if(nq_probe_full()) { c.cpu=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); c.sys=thr_sys_ns(); } else thr_times(&c.cpu,&c.sys);
     thr_counts(&c.instr,&c.cycles); return c;
 }
 static void nq_cost_end(nq_cost c) {
-    uint64_t dw=now_ns()-c.wall, dc=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)-c.cpu, ins, cyc; thr_counts(&ins,&cyc);
+    int full=nq_probe_full(); uint64_t dw=now_ns()-c.wall, cpu=0, sys=0, ins, cyc;
+    if(full) cpu=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); else thr_times(&cpu,&sys);
+    thr_counts(&ins,&cyc); if(full) sys=thr_sys_ns();
+    uint64_t dc=cpu-c.cpu;
     atomic_fetch_add(&g_nvn_ns,dw); atomic_fetch_add(&g_sub_wall_ns,dw); atomic_fetch_add(&g_cum_sub_wall_ns,dw);
     atomic_fetch_add(&g_sub_cpu_ns,dc); atomic_fetch_add(&g_cum_sub_cpu_ns,dc);
     atomic_fetch_add(&g_sub_instr,ins-c.instr); atomic_fetch_add(&g_cum_sub_instr,ins-c.instr);
-    atomic_fetch_add(&g_cum_sub_cyc,cyc-c.cycles); atomic_fetch_add(&g_cum_sub_sys_ns,thr_sys_ns()-c.sys);
+    atomic_fetch_add(&g_cum_sub_cyc,cyc-c.cycles); atomic_fetch_add(&g_cum_sub_sys_ns,sys-c.sys);
 }
 // The command copies (nq_bytes) of replayed nodes go to the next submissions' nodes instead of free (nq_spare_take / nq_spare_give), so a steady frame allocates none. Both run under g_sub_mu: the
 // submitting thread copies the commands (nq_flatten) and the worker replays them (nq_worker) holding it. At most NQ_SPARES are kept, none over NQ_SPARE_MAX (a load's long stream is freed)
 enum { NQ_SPARES=4 };
 #define NQ_SPARE_MAX ((size_t)4<<20)
 static struct { uint8_t *bytes; size_t capacity; } nq_spare[NQ_SPARES]; static int nq_nspare;
-static void nq_spare_take(nq_node *n) { if(nq_nspare) { nq_nspare--; n->bytes=nq_spare[nq_nspare].bytes; n->capacity=nq_spare[nq_nspare].capacity; } }
+static void nq_spare_take(nq_node *n) { if(nq_nspare) { nq_nspare--; n->bytes=nq_spare[nq_nspare].bytes; n->capacity=nq_spare[nq_nspare].capacity; } else atomic_fetch_add_explicit(&nq_stat_no_spare,1,memory_order_relaxed); }
 static void nq_spare_give(nq_node *n) { if(n->bytes && n->capacity<=NQ_SPARE_MAX && nq_nspare<NQ_SPARES) { nq_spare[nq_nspare].bytes=n->bytes; nq_spare[nq_nspare].capacity=n->capacity; nq_nspare++; n->bytes=NULL; n->capacity=0; } }
+// When the queue line is due: the first time the replay's frame passes a multiple of 300 after the last line, given the frames since it (0 when not due); the first frame seen only sets the
+// baseline. frame is the frame of the last replayed job, and it goes back whenever jobs of two queues interleave (a job of frame 599 on one queue waiting on a frame-600 job of another), so a
+// frame at or below the last line's is ignored: compared by its multiple of 300 alone, such a frame wrote a line of zeros over a wrapped frame count and moved the baseline back, and the next
+// job's line then counted the jobs between as one frame
+static uint64_t nq_report_due(uint64_t frame,uint64_t *reported) {
+    if(frame==UINT64_MAX) return 0;
+    if(*reported==UINT64_MAX) { *reported=frame; return 0; }
+    if(frame<=*reported || frame/300==*reported/300) return 0;
+    uint64_t frames=frame-*reported; *reported=frame; return frames;
+}
+// The queue line, from the replay thread every 300 frames with no lock held: per frame, the nodes and receipts made and how many came from the free lists (nq_pooled), the command nodes that
+// started without a spare copy (they allocate it as they grow), the GPU event writes recorded (nq_event_issued) and the time this bookkeeping took on the replay thread and in GPU progress,
+// with the event words in flight now and the most at once since the start, counted with the map and with the list (DM_NVN_EVENT_MAP=0) alike
+static void nq_report(uint64_t frame,uint64_t frames) {
+    static uint64_t p[8]; uint64_t v[8]={atomic_load(&nq_stat_nodes),atomic_load(&nq_stat_nodes_pooled),atomic_load(&nq_stat_receipts),atomic_load(&nq_stat_receipts_pooled),atomic_load(&nq_stat_no_spare),atomic_load(&nq_stat_event_writes),atomic_load(&nq_stat_event_ns),0};
+    pthread_mutex_lock(&nq_mu); unsigned peak=nq_stat_event_peak, inflight=nq_event_inflight(); pthread_mutex_unlock(&nq_mu);
+    double nf=frames?(double)frames:1;
+    LOG("[nvn] queue up to frame %llu, per frame: nodes %.1f (%.1f from the free list), receipts %.1f (%.1f from the free list), command nodes without a spare copy %.1f; GPU event writes %.1f, their bookkeeping %.3f ms; event words in flight %u, at most %u",
+        frame,(v[0]-p[0])/nf,(v[1]-p[1])/nf,(v[2]-p[2])/nf,(v[3]-p[3])/nf,(v[4]-p[4])/nf,(v[5]-p[5])/nf,(v[6]-p[6])/1e6/nf,inflight,peak);
+    memcpy(p,v,sizeof p);
+}
 static void *nq_worker(void *unused) {
     (void)unused; pthread_setname_np("NVN queue replay");
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
-    uint64_t frame=UINT64_MAX;
+    uint64_t frame=UINT64_MAX, reported=UINT64_MAX;
     for(;;) {
         pthread_mutex_lock(&nq_mu); nq_queue *q=NULL; nq_node *n=NULL; nq_job *j=NULL;
         for(;;) {
@@ -177,12 +309,15 @@ static void *nq_worker(void *unused) {
             }
             nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); if(n->kind==NQ_COMMANDS) nq_spare_give(n); pthread_mutex_unlock(&g_sub_mu);
         }
-        pthread_mutex_lock(&nq_mu); if(n->kind==NQ_PRESENT) { q->present=present; j->receipt->present=present; } if(fence) { q->physical=fence; for(unsigned i=0;i<n->nsignals;i++) nq_event_issued(n->signals[i].word,fence,n->signals[i].mode,n->signals[i].value); } if(n->receipt) nq_put(n->receipt); free(n->signals); free(n->bytes); free(n); pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
+        pthread_mutex_lock(&nq_mu); if(n->kind==NQ_PRESENT) { q->present=present; j->receipt->present=present; }
+        if(fence) { q->physical=fence; if(n->nsignals) { uint64_t t0=now_ns(); for(unsigned i=0;i<n->nsignals;i++) nq_event_issued(n->signals[i].word,fence,n->signals[i].mode,n->signals[i].value); atomic_fetch_add_explicit(&nq_stat_event_ns,now_ns()-t0,memory_order_relaxed); } }
+        if(n->receipt) nq_put(n->receipt); nq_node_free(n); pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
+        uint64_t frames=nq_report_due(frame,&reported); if(frames) nq_report(frame,frames);
     }
     return NULL;
 }
 static void nq_start(void) { pthread_t t; if(pthread_create(&t,NULL,nq_worker,NULL)) die("NVN queue worker failed"); pthread_detach(t); }
-static nq_node *nq_append(nq_job *j,unsigned kind) { nq_node *n=calloc(1,sizeof *n); if(!n) die("queue continuation allocation failed"); n->kind=kind; if(j->last) j->last->next=n; else j->first=n; j->last=n; return n; }
+static nq_node *nq_append(nq_job *j,unsigned kind) { nq_node *n=nq_node_new(); n->kind=kind; if(j->last) j->last->next=n; else j->first=n; j->last=n; return n; }
 // A node's command copy grows by doubling (from 4 KB): growing 4 KB at a time took a reallocation for every 4 KB, each possibly a copy of all before it, under g_sub_mu
 static void nq_bytes(nq_node *n,const void *bytes,size_t length) { if(n->length+length>n->capacity) { size_t want=(n->length+length+4095)&~(size_t)4095, grown=n->capacity*2; n->capacity=grown>want?grown:want; n->bytes=realloc(n->bytes,n->capacity); if(!n->bytes) die("queue commands allocation failed"); } memcpy(n->bytes+n->length,bytes,length); n->length+=length; } // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts, so the old buffer cannot leak into a continuing process
 // Where a GPU event signal leaves the commands around it (profile key signal_events; DM_NVN_SIGNAL_EVENTS=node / split overrides it). split (the default): the signal ends its command node, so the node's
@@ -201,10 +336,36 @@ static int nq_signals_in_node(void) {
         LOG("[nvn] GPU event signals %s (profile key signal_events; DM_NVN_SIGNAL_EVENTS=node / split)",nq_signal_node?"publish when their command node completes: a signal does not end the node":"end their command node"); }
     return nq_signal_node;
 }
-static int nq_signal_on(const nq_node *n,const uint8_t *a) { volatile uint32_t *word; memcpy(&word,a,8); for(unsigned i=0;i<n->nsignals;i++) if(n->signals[i].word==word) return 1; return 0; }
+// Whether a node already holds a signal of a word. A node of up to NQ_SIGNAL_SCAN signals is scanned; past that its words are marked in nq_signal_words (word -> the node's mark, signal_set),
+// under g_sub_mu as nq_flatten is: a scan for every signal was n squared, 0.05 ms a frame on an M4 Max for 622 signals in one node and 0.5 ms for 2,000 (0.006 and 0.02 ms now). A mark is a number never given
+// to another node, so the map is not cleared between nodes; it is emptied when it passes NQ_SIGNAL_WORDS words, and the current node's words are marked again. DM_NVN_EVENT_MAP=0 scans every node
+enum { NQ_SIGNAL_SCAN=16, NQ_SIGNAL_WORDS=16384 };
+static nvn_hmap nq_signal_words; static uint64_t nq_signal_mark;
+static void nq_signal_mark_word(nq_node *n,volatile uint32_t *word) {
+    if(!nq_signal_words.klen) nvn_hm_init(&nq_signal_words,8);
+    nvn_hm_put(&nq_signal_words,&word,(void *)(uintptr_t)n->signal_set);
+}
+static int nq_signal_on(const nq_node *n,const uint8_t *a) {
+    volatile uint32_t *word; memcpy(&word,a,8);
+    if(n->signal_set) return (uintptr_t)nvn_hm_get(&nq_signal_words,&word)==n->signal_set;
+    for(unsigned i=0;i<n->nsignals;i++) if(n->signals[i].word==word) return 1;
+    return 0;
+}
 static void nq_signal_add(nq_node *n,const uint8_t *a) {
-    if(n->nsignals==n->signals_cap) { n->signals_cap=n->signals_cap?n->signals_cap*2:4; n->signals=realloc(n->signals,n->signals_cap*sizeof *n->signals); if(!n->signals) die("queue signal allocation failed"); }   // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts
+    if(!n->signals_cap && nq_pooled()) { n->signals=&n->signal0; n->signals_cap=1; }
+    if(n->nsignals==n->signals_cap) {
+        unsigned cap=n->signals_cap>1?n->signals_cap*2:4; struct nq_signal *grown=n->signals==&n->signal0?malloc(cap*sizeof *grown):realloc(n->signals,cap*sizeof *grown);   // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts
+        if(!grown) die("queue signal allocation failed");
+        if(n->signals==&n->signal0) grown[0]=n->signal0;
+        n->signals=grown; n->signals_cap=cap;
+    }
     struct nq_signal *g=&n->signals[n->nsignals++]; memcpy(&g->word,a,8); memcpy(&g->mode,a+8,4); memcpy(&g->value,a+12,4);
+    if(n->signal_set) nq_signal_mark_word(n,g->word);
+    else if(n->nsignals>NQ_SIGNAL_SCAN && nq_event_map_on()) {
+        if(nq_signal_words.n>NQ_SIGNAL_WORDS) nvn_hm_clear(&nq_signal_words,NULL);
+        n->signal_set=++nq_signal_mark;
+        for(unsigned i=0;i<n->nsignals;i++) nq_signal_mark_word(n,n->signals[i].word);
+    }
 }
 static void nq_end(nq_job *j) { if(j->last && j->last->kind==NQ_COMMANDS && !j->last->closed) { op_hdr end={OP_END,8}; nq_bytes(j->last,&end,8); j->last->closed=1; } }
 static void nq_flatten(nq_job *j,const uint8_t *p,unsigned depth) {

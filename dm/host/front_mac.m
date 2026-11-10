@@ -14,6 +14,7 @@
 #import <Metal/Metal.h>
 #import <GameController/GameController.h>
 #include "dm.h"
+#include "front_drawable.h"   // DM_DRAWABLE_COUNT
 #include "dm_input.h"
 #include "front.h"
 #include "hle.h"
@@ -1504,6 +1505,11 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
 void front_run(void (*guest)(void)) {
     // A game: tell macOS its work is latency-critical, so the system does not trade its frame time for power while the frame rate is capped
     static id activity; activity = [[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical reason:@"game"];
+    // The system's memory pressure (memory_pressure -S -l warn simulates it), with a window or without: dm_gfx_pressure (hle_nvn.c) logs the footprint and the system's free memory and gives back idle memory (DM_MEMORY_TRIM=0: logged only)
+    static dispatch_source_t mp;
+    mp = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0, DISPATCH_MEMORYPRESSURE_NORMAL | DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_event_handler(mp, ^{ unsigned long d = dispatch_source_get_data(mp); dm_gfx_pressure(d & DISPATCH_MEMORYPRESSURE_CRITICAL ? 2 : d & DISPATCH_MEMORYPRESSURE_WARN ? 1 : 0); });
+    dispatch_resume(mp);
     if (!getenv("DM_WINDOW")) { guest(); return; }
     @autoreleasepool {
         [NSApplication sharedApplication];
@@ -1522,6 +1528,8 @@ void front_run(void (*guest)(void)) {
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_layer.contentsScale = win.backingScaleFactor;
+        { const char *dc = getenv("DM_DRAWABLE_COUNT"); int n = front_drawable_count(g_layer, dc);   // front_drawable.h: unset keeps Metal's 3
+          if (n > 0) LOG("front end: %d drawables (DM_DRAWABLE_COUNT)", n); else if (n < 0) LOG("[RED] front end: DM_DRAWABLE_COUNT=%s is not 2 or 3: Metal's 3 drawables", dc); }
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");

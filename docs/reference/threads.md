@@ -206,6 +206,15 @@ The yield back-off (`DM_YIELD_BACKOFF`) and the rewriter's spin waits (`patch_ns
 - **Fix:** sleeps under 20 µs take the yield path and its back-off (plain yields for the first 2 ms of a run, then short sleeps).
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md): Hagi polls with `SleepThread(100 ns)` (`main+0x517c`), 1.4 billion calls in 200 s, and the render thread nearly as busy. The two threads went from 199 s and 171 s of CPU per 200 s to 5 s and 19 s per 120 s, at the same frame rate.
 
+### A 20 µs sleep between yields kept them from backing off
+
+- **Symptom:** the threads line's `SleepThread < 1 ms` runs to tens of thousands a second and its `precise sleeps` as many, in only hundreds of nanosleep steps; the power line's top yielder (the main thread) makes hundreds of thousands of yields per 300 frames with `back-off sleeps 0`.
+- **Cause:** the yield path took sleeps under 20 µs (`ns < 20000`), while `sleep_precise` returns at once within 20 µs of its deadline, so a sleep of exactly 20 µs (or a few nanoseconds more) took the sleep path and slept nothing. In a loop that yields and sleeps in turn it was also an SVC between two yields, so each yield began a new run and the back-off never started ([Sleeps under 20 µs take the yield path](#sleeps-under-20-µs-take-the-yield-path)).
+- **Fix:** the boundary is `sleep_precise`'s own (`SP_NEAR_NS` in `hle_thread.c`, plus 100 ns for the tens of nanoseconds from `dm_guest_sleep_ns`'s clock read to its own): sleeps up to 20.1 µs are yields, while a 20.5 µs sleep, which `sleep_precise` does sleep, stays a sleep (a whole microsecond of margin took 20.1-21 µs sleeps for yields too), and a loop of yields and such sleeps backs off after 2 ms as a loop of yields does. Those sleeps now count as yields, not on the `SleepThread` row.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on an iPhone 18 Pro Max: `SleepThread < 1 ms` 26,000-133,000 a second in a 60 fps run (the main thread about 99,000 in a 30 fps one) beside `precise sleeps` of the same count in 400-2,200 nanosleep steps, and up to 2,300,000 main-thread yields per 300 frames with no back-off sleep.
+- **Check:** `make -C dm/host/tests GAME=<id> build/t_pollwait && dm/host/tests/build/t_pollwait`: a loop of yields between 20 µs sleeps backs off at 2 ms and not before (it never did before the change), 50 µs and 20.5 µs sleeps stay sleeps (the 20.5 µs case fails with a microsecond of margin), and 20.1 µs is a yield.
+- **Not checked:** a device run: how much of the main thread's CPU and the process's wakeups it takes off.
+
 ### Short timed waits are polls
 
 - **Symptom:** a thread polls at full speed although the power line's yields (if any) show no back-off sleeps; a `sample` of the host shows it in `svc_thread` → `block` → `pthread_cond_wait` with timeouts of nanoseconds, between plain `cthread_yield`s.

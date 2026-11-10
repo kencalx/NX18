@@ -332,7 +332,7 @@ static void storage_buffers(void) {
     EXPECT("geometry storage write flag",1,s->rf.b[1].rw);
     NSDictionary *readonly=@{@"route":@"B",@"bindings":@[
         @{@"kind":@"sbuf",@"reg":@2,@"arg_id":@0,@"msl_name":@"gp_s1",@"msl_type":@"device uint*",@"rw":@NO}]};
-    nvn_refl rr;EXPECT("explicit read-only reflection",0,nvn_refl_from_json(readonly,&rr,error,sizeof error));
+    nvn_refl rr={0};EXPECT("explicit read-only reflection",0,nvn_refl_from_json(readonly,&rr,error,sizeof error));
     EXPECT("explicit read-only flag overrides device qualifier",0,rr.b[0].rw);
     uint8_t *data;if(posix_memalign((void**)&data,getpagesize(),12288))abort();memset(data,0xcc,12288);mtl_pool_add(data,12288);
     state_reset();S.ssbo[2][0]=(p_bind_buf){.stage=2,.index=0,.addr=(uint64_t)data,.size=123};

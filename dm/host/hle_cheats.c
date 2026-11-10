@@ -1108,12 +1108,29 @@ void dm_cheats_present(void) {
 }
 
 // The fixed ~60 Hz passes when the game is not presenting (window minimized, graphics suspended or before the first
-// present): a stopped game still changes under its cheats, as on hardware where the cheat process keeps running
+// present): a stopped game still changes under its cheats, as on hardware where the cheat process keeps running.
+// It used to wake every 16.7 ms all the time, 60 wakeups a second for a whole run with cheats, almost all of them while the game presented and the present hook applied
+// the cheats; now, while the game presents, it sleeps until 250 ms after the last present (about 4 wakeups a second), and with no file loaded or the master switch off it waits on g_tick_cv,
+// which load_all, folder_flags and the master switch signal (tick_wake); a pause still gets its first pass once 250 ms have passed without a present, as before (no later than the old 16.7 ms tick)
+#define TICK_IDLE_NS 250000000ull   // no present for this long: the thread applies the cheats
+#define TICK_US 16667               // ~60 Hz
+static pthread_mutex_t g_tick_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_tick_cv = PTHREAD_COND_INITIALIZER;
+static void tick_wake(void) { pthread_mutex_lock(&g_tick_mu); pthread_cond_broadcast(&g_tick_cv); pthread_mutex_unlock(&g_tick_mu); }
+// How long the thread sleeps before it looks again: until TICK_IDLE_NS after the last present while the game presents (a present stamped after now was read counts as just now), else one ~60 Hz tick
+static uint64_t tick_sleep_us(uint64_t now, uint64_t present) {
+    if (present > now) return TICK_IDLE_NS / 1000;
+    uint64_t since = now - present;
+    return since < TICK_IDLE_NS ? (TICK_IDLE_NS - since) / 1000 + 1 : TICK_US;
+}
 static void *cheat_tick_thread(void *arg) {
     (void)arg;
     for (;;) {
-        usleep(16667);   // ~60 Hz
-        if (now_ns() - atomic_load(&g_present_ns) < 250000000ull) continue;   // presenting again: the hook applies
+        pthread_mutex_lock(&g_tick_mu);
+        while (!atomic_load(&g_active) || !atomic_load(&g_master)) pthread_cond_wait(&g_tick_cv, &g_tick_mu);   // nothing to apply: wait for a file or the master switch
+        pthread_mutex_unlock(&g_tick_mu);
+        usleep((useconds_t)tick_sleep_us(now_ns(), atomic_load(&g_present_ns)));
+        if (now_ns() - atomic_load(&g_present_ns) < TICK_IDLE_NS) continue;   // presenting: the hook applies
         cheats_pass();
     }
     return NULL;
@@ -1121,7 +1138,7 @@ static void *cheat_tick_thread(void *arg) {
 
 // Started with the first file that has a cheat in it (load_all, at launch or on "Reload cheats"), never for a game without
 // one: a run without cheats keeps no thread waking 60 times a second. It runs from then on, standing down while the game
-// presents; a reload that loses the file leaves g_active off and the passes return at once
+// presents (asleep until 250 ms after the last present); a reload that loses the file leaves g_active off and the thread waits on g_tick_cv
 static int g_tick_started;
 static void tick_start(void) {
     if (g_tick_started) return;
@@ -1883,7 +1900,7 @@ static void load_all(void) {
         g_have_meta ? ", with its meta file" : "");
     report_build();
     atomic_store(&g_active, g_ncheat > labels);
-    if (atomic_load(&g_active)) tick_start();
+    if (atomic_load(&g_active)) { tick_start(); tick_wake(); }
     running_update();
 }
 
@@ -1893,7 +1910,7 @@ static void folder_flags(void) {
     if (!g_dir[0]) return;
     char p[1100];
     flag_file(p, sizeof p, "off");
-    atomic_store(&g_master, access(p, F_OK) != 0);
+    atomic_store(&g_master, access(p, F_OK) != 0); tick_wake();
 #if !TARGET_OS_IPHONE   // iOS keeps no safe mode (running_update)
     flag_file(p, sizeof p, "running");
     g_safe = access(p, F_OK) == 0;
@@ -2130,7 +2147,7 @@ int dm_cheats_master(void) { return atomic_load(&g_master); }
 void dm_cheats_master_set(int on) {
     if (!menus_ready()) return;
     pthread_mutex_lock(&g_lock);
-    atomic_store(&g_master, !!on);
+    atomic_store(&g_master, !!on); tick_wake();
     if (g_dir[0]) {
         char p[1100]; flag_file(p, sizeof p, "off");
         if (on) unlink(p);

@@ -1,6 +1,7 @@
 // Recycled render-target memory (nvn_mtl.m rh_texture, GitHub issue #1831): a shared render target in a GPU-only pool is made in a placement heap of its own; once its texture is
 // freed the heap stays resident and the next target it fits (up to an eighth larger) is placed in it, cleared as a new allocation is. Heaps that wait too long leave the residency
-// set when a submission begins. CPU-visible pools, textures without COMPRESSIBLE and DM_NVN_RT_RECYCLE=0 keep allocations of their own.
+// set when a submission begins. CPU-visible pools, textures without COMPRESSIBLE and DM_NVN_RT_RECYCLE=0 keep allocations of their own. The waiting heaps stay under the cap after a
+// submission begins: 256 MB on the Mac, on iOS 256 MB down to 32 MB as the headroom to the memory limit falls from 3 GB to 1 GB (a stand-in headroom here), DM_NVN_RT_RECYCLE_CAP=<MB> fixed.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -34,6 +35,42 @@ static int all_zero(id<MTLTexture> t) {
     mtl_sub_commit(); mtl_drain(); CHECK(!mtl_last_commit_error(), "the read completes without GPU error"); res_remove(b); mtl_sub_begin();
     const uint8_t *p = b.contents; for (NSUInteger i = 0; i < bytes; i++) if (p[i]) return 0;
     return 1;
+}
+
+static uint64_t g_fake_avail;
+static uint64_t fake_avail(void) { return g_fake_avail; }
+// The cap the waiting heaps keep to after a submission begins. Eight 1080p RGBA16F targets (about 16 MB each) are freed together: with a stand-in headroom of 512 MB (iOS near its limit)
+// at most 32 MB of them wait; with 8 GB (an iPhone in the usual case) and on the Mac, all of them, under 256 MB; DM_NVN_RT_RECYCLE_CAP fixes the cap whatever the headroom
+static void cap_cases(pool_t *pool) {
+    const char *e = getenv("DM_NVN_RT_RECYCLE_CAP"); int64_t fixed = e && *e ? (int64_t)atoll(e) << 20 : -1;
+    CHECK(rh_cap_for(8ull << 30) == 256u << 20 && rh_cap_for(3ull << 30) == 256u << 20, "3 GB of headroom or more: 256 MB");
+    CHECK(rh_cap_for(1ull << 30) == 32u << 20 && rh_cap_for(200ull << 20) == 32u << 20, "1 GB or less: 32 MB");
+    CHECK(rh_cap_for(2ull << 30) == 144u << 20, "2 GB: half way, 144 MB");
+    for (int round = 0; round < 3; round++) {
+        uint64_t avail = round == 0 ? 0 : round == 1 ? 512ull << 20 : 8ull << 30;   // 0: no headroom source (the Mac)
+        g_rh_avail = round ? fake_avail : NULL; g_fake_avail = avail; g_rh_cap_at = 0;
+        uint64_t want = fixed >= 0 ? (uint64_t)fixed : round == 1 ? 32u << 20 : 256u << 20;
+        tex_t t[8]; uint64_t total = 0; __strong id<MTLTexture> keep[8];
+        for (int i = 0; i < 8; i++) { t[i] = target(pool, 96000 + 16 * (uint64_t)round + (uint64_t)i, (uint64_t)i << 21, 1920, 1080); mtl_tex_init(&t[i]); keep[i] = tex_mtl(&t[i]); total += keep[i].heap.size; }
+        CHECK(keep[7] && keep[7].heap, "eight targets in heaps of their own");
+        for (int i = 0; i < 8; i++) { keep[i] = nil; mtl_tex_release(&t[i]); }
+        mtl_alias_drop_pool(pool); settle();   // settle ends with a submission beginning: rh_trim
+        os_unfair_lock_lock(&g_rh_lk); uint64_t wb = g_rh_bytes; unsigned wn = g_rh_n; os_unfair_lock_unlock(&g_rh_lk);
+        char m[160]; snprintf(m, sizeof m, "headroom %llu MB: waiting %llu MB within the cap of %llu MB after a submission begins", (unsigned long long)(avail >> 20), (unsigned long long)(wb >> 20), (unsigned long long)(want >> 20));
+        CHECK(wb <= want && atomic_load(&g_rh_cap_now) == want, m);
+        if (want >= total) CHECK(wn == 8 && wb == total, "all eight wait when they fit under the cap");
+        else CHECK(wb + total / 8 > want, "the cap is filled, not emptied: only the oldest past it go");
+        printf("cap round %d (headroom %llu MB): %u heaps wait, %llu MB of %llu MB freed together, cap %llu MB\n", round, (unsigned long long)(avail >> 20), wn, (unsigned long long)(wb >> 20), (unsigned long long)(total >> 20), (unsigned long long)(atomic_load(&g_rh_cap_now) >> 20));
+        os_unfair_lock_lock(&g_rh_lk); for (unsigned i = 0; i < g_rh_n; i++) g_rh[i].t -= RH_IDLE_NS; os_unfair_lock_unlock(&g_rh_lk);
+        mtl_sub_commit(); mtl_drain(); mtl_sub_begin();   // the next round starts with none waiting
+        CHECK(waiting() == 0, "the idle heaps go before the next round");
+    }
+    // With no heap waiting the cap still follows the headroom: the memory line's cap reads the headroom of now, not of the last time a heap waited. Round 2 left 256 MB (8 GB of headroom)
+    g_rh_avail = fake_avail; g_fake_avail = 512ull << 20; g_rh_cap_at = 0;
+    mtl_sub_commit(); mtl_drain(); mtl_sub_begin();   // rh_trim with none waiting
+    CHECK(waiting() == 0 && atomic_load(&g_rh_cap_now) == (fixed >= 0 ? (uint64_t)fixed : 32u << 20), "none waiting: the headroom falling to 512 MB lowers the memory line's cap to 32 MB at the next submission's start");
+    printf("cap with none waiting (headroom 512 MB): %llu MB\n", (unsigned long long)(atomic_load(&g_rh_cap_now) >> 20));
+    g_rh_avail = NULL;
 }
 
 int main(void) { @autoreleasepool {
@@ -93,6 +130,7 @@ int main(void) { @autoreleasepool {
     mtl_sub_commit(); mtl_drain(); mtl_sub_begin();   // rh_trim
     CHECK(waiting() == 0 && g_rh_trimmed == before && g_rh_bytes == 0, "heaps that waited too long are freed when a submission begins");
     CHECK(!first_heap || !resident(first_heap), "and leave the residency set");
+    cap_cases(&pool);
     mtl_sub_commit(); mtl_drain(); free(mem);
     printf("t_rt_recycle: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

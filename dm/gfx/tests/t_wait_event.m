@@ -1,5 +1,23 @@
 // Contract fixture: real public NVN lookup -> recording -> QueueSubmit -> Metal replay.
 // An event wait gates GPU work, but never blocks CPU submission or another NVN queue.
+// The queue's own costs are counted on the calling thread: allocations (malloc, calloc, realloc) while t_count_allocs is set, and the thread port and thread_info calls the submit-cost probes
+// make. The system headers come first, so only the calls in the NVN layer below go through these counters
+#include <Foundation/Foundation.h>
+#include <Metal/Metal.h>
+#include <stdlib.h>
+#include <malloc/malloc.h>
+#include <mach/mach.h>
+static __thread int t_count_allocs; static __thread unsigned t_allocs, t_thread_self, t_thread_info;
+static void *t_malloc(size_t n) { t_allocs+=t_count_allocs; return malloc(n); }
+static void *t_calloc(size_t c,size_t n) { t_allocs+=t_count_allocs; return calloc(c,n); }
+static void *t_realloc(void *p,size_t n) { t_allocs+=t_count_allocs; return realloc(p,n); }
+static mach_port_t t_mach_thread_self(void) { t_thread_self++; return mach_thread_self(); }
+static kern_return_t t_thread_info_fn(thread_inspect_t t,thread_flavor_t f,thread_info_t i,mach_msg_type_number_t *n) { t_thread_info++; return thread_info(t,f,i,n); }
+#define malloc(n) t_malloc(n)
+#define calloc(c,n) t_calloc(c,n)
+#define realloc(p,n) t_realloc(p,n)
+#define mach_thread_self() t_mach_thread_self()
+#define thread_info(t,f,i,n) t_thread_info_fn(t,f,i,n)
 #define nvn_game_fps nvn_game_fps_mtl_default
 #define nvn_event_publish_gpu event_test_publish
 #include "../nvn/nvn_mtl.m"
@@ -22,7 +40,7 @@ static _Atomic uintptr_t event_test_storage;
 static _Atomic uint32_t event_test_pixel;
 static _Atomic int event_test_deferred_mirror;
 // Every GPU publication in order (signals_in_node): word, mode, value
-enum { PUB_MAX=64 };
+enum { PUB_MAX=4096 };
 static struct { volatile uint32_t *word; unsigned mode; uint32_t value; } pub_log[PUB_MAX]; static _Atomic int pub_n;
 void event_test_publish(volatile uint32_t *word,unsigned mode,uint32_t value,uint64_t fence) {
     { int i=atomic_fetch_add(&pub_n,1); if(i<PUB_MAX) { pub_log[i].word=word; pub_log[i].mode=mode; pub_log[i].value=value; } }
@@ -405,6 +423,200 @@ static void signal_overwritten(int node) {
     P(nvnSyncFinalize)(&consumed); P(nvnSyncFinalize)(&produced);
     nq_signal_node=saved;
 }
+static int env_is(const char *k,const char *v) { const char *e=getenv(k); return e && !strcmp(e,v); }
+// Waits until the replay has taken every queued job (each job's nodes are back in the free list or freed when its queue's first job moves on)
+static int queue_idle(uint64_t timeout) {
+    uint64_t start=now_ns(); int idle=0; pthread_mutex_lock(&nq_mu);
+    for(;;) {
+        idle=1; for(nq_queue *q=nq_queues;q;q=q->next) if(q->first) idle=0;
+        uint64_t elapsed=now_ns()-start; if(idle || elapsed>=timeout) break;
+        struct timespec ts={0,1000000}; pthread_cond_timedwait_relative_np(&nq_cv,&nq_mu,&ts);
+    }
+    pthread_mutex_unlock(&nq_mu); return idle;
+}
+// The submit-cost probes (nq_cost_begin / nq_cost_end) read the thread's times with one thread_info call each and make no thread port (DM_NVN_SUBMIT_PROBES=full: clock_gettime plus
+// mach_thread_self, thread_info and the port's release, as before), and the CPU time they add up matches the thread's own clock
+static void probe_cost(void) {
+    int full=env_is("DM_NVN_SUBMIT_PROBES","full");
+    printf("CASE submit-cost probes (%s)\n",full?"full":"default");
+    enum { N=4000 };
+    uint64_t c0=atomic_load(&g_cum_sub_cpu_ns), s0=atomic_load(&g_cum_sub_sys_ns), k0=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
+    unsigned self0=t_thread_self, info0=t_thread_info; volatile double x=1;
+    for(int i=0;i<N;i++) { nq_cost c=nq_cost_begin(); for(int k=0;k<3000;k++) x*=1.0000001; nq_cost_end(c); }
+    uint64_t k1=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), c1=atomic_load(&g_cum_sub_cpu_ns), s1=atomic_load(&g_cum_sub_sys_ns);
+    unsigned self=t_thread_self-self0, info=t_thread_info-info0;
+    uint64_t t0=now_ns(); for(int i=0;i<N;i++) nq_cost_end(nq_cost_begin()); double per=(double)(now_ns()-t0)/N;
+    printf("probes: %u thread port calls and %u thread_info calls for %d scopes; %.0f ns a scope with nothing in it; CPU %.3f ms counted of %.3f ms on the thread's clock, kernel %.3f ms\n",
+           self,info,N,per,(c1-c0)/1e6,(k1-k0)/1e6,(s1-s0)/1e6);
+    if(full) CHECK(self==2u*N && info==2u*N,"DM_NVN_SUBMIT_PROBES=full: a thread port and a thread_info call per reading, as before");
+    else CHECK(self==0 && info==2u*N,"one thread_info call per reading and no thread port made");
+    double ratio=k1>k0?(double)(c1-c0)/(double)(k1-k0):0;
+    CHECK(ratio>0.85 && ratio<1.02,"the probes' CPU time matches the thread's clock");
+    CHECK(s1-s0<=c1-c0,"the kernel time is part of the CPU time");
+}
+// GPU event bookkeeping (nq_event_issued, nq_event_pending, nvn_queue_gpu_progress): three rounds of 2,000 fresh words and a rewrite of the first round, as three frames of a game's 2,000 signals
+// in flight. Each word holds its last write; writes whose fence has completed are forgotten, the others kept. With the hash map this takes well under a millisecond; the list walked every
+// word written for each signal (about 30 ms on an M4 Max). DM_NVN_EVENT_MAP=0 keeps the list, and the time is not checked then
+static uint32_t ev_words[8000];
+static void event_bookkeeping(void) {
+    int list=env_is("DM_NVN_EVENT_MAP","0");
+    printf("CASE GPU event bookkeeping with 6,000 words in flight (%s)\n",list?"list":"map");
+    pthread_mutex_lock(&nq_mu);
+    uint64_t done=mtl_completed_fence(), F=mtl_last_fence()+1000000; unsigned base=nq_event_inflight();   // earlier cases' writes not yet dropped
+    uint64_t t0=now_ns();
+    for(int r=0;r<3;r++) for(int i=0;i<2000;i++) nq_event_issued(&ev_words[r*2000+i],F+r,0,(uint32_t)i);
+    for(int i=0;i<2000;i++) nq_event_issued(&ev_words[i],F+3,1,7);
+    for(int i=0;i<6000;i++) (void)nq_event_pending(&ev_words[i]);
+    uint64_t dt=now_ns()-t0;
+    int good=1;
+    for(int i=0;i<6000;i++) { nq_event_write *w=nq_event_write_of(&ev_words[i]); int r=i/2000;
+        good&=w && w->word==&ev_words[i] && w->fence==(r?F+r:F+3) && w->value==(r?(uint32_t)(i%2000):7u) && w->exact==(r!=0) && nq_event_pending(&ev_words[i])==w->fence; }
+    CHECK(good,"each word holds its last write: fence, value and whether it is exact");
+    // The queue line's words in flight (nq_event_inflight) count the entries with the list too: with DM_NVN_EVENT_MAP=0 they read 0 now and 0 at most before
+    unsigned inflight=nq_event_inflight(), peak=nq_stat_event_peak;
+    CHECK(inflight==base+6000 && peak>=inflight,"the queue line counts 6,000 event words in flight and at most at least as many");
+    // The first round lands (fence 1); a write with a fence between the oldest and the newest goes to its place
+    for(int i=0;i<2000;i++) nq_event_issued(&ev_words[i],1,0,1);
+    nq_event_issued(&ev_words[6000],F+1,0,5);
+    pthread_mutex_unlock(&nq_mu);
+    nvn_queue_gpu_progress();
+    pthread_mutex_lock(&nq_mu);
+    good=1; for(int i=0;i<2000;i++) good&=!nq_event_pending(&ev_words[i]);
+    for(int i=2000;i<6000;i++) good&=nq_event_pending(&ev_words[i])==F+i/2000;
+    good&=nq_event_pending(&ev_words[6000])==F+1;
+    CHECK(good && done>=1,"the writes whose fence has completed are forgotten, the others kept");
+    for(int i=2000;i<=6000;i++) nq_event_issued(&ev_words[i],1,0,1);
+    pthread_mutex_unlock(&nq_mu);
+    nvn_queue_gpu_progress();
+    pthread_mutex_lock(&nq_mu); int empty=!nq_event_writes; good=1; for(int i=0;i<=6000;i++) good&=!nq_event_pending(&ev_words[i]); inflight=nq_event_inflight(); peak=nq_stat_event_peak; pthread_mutex_unlock(&nq_mu);
+    CHECK(empty && good,"once every write has landed nothing is kept");
+    printf("event words in flight once landed %u, at most %u\n",inflight,peak);
+    CHECK(inflight==0 && peak>=6001,"the queue line counts none in flight once they land, and at most the 6,001 words");
+    printf("event bookkeeping: %.3f ms for 8,000 writes and 6,000 lookups\n",dt/1e6);
+    if(!list) CHECK(dt<4000000,"8,000 writes with 6,000 words in flight take under 4 ms");
+}
+// When the queue line is due (nq_report_due): once per multiple of 300 frames, never on a frame that went back. The replay's frame goes back when jobs of two queues interleave: a job of frame
+// 599 on one queue replayed after the frame-600 job it waits on. Compared by its multiple of 300 alone, frame 599 after 600 wrote a line over 2^64 - 1 frames and moved the baseline back,
+// and the next job of frame 600 wrote another over 1 frame
+static void report_due(void) {
+    printf("CASE the queue line's frames with jobs of two queues interleaved\n");
+    static const uint64_t seq[]={UINT64_MAX,5,6,299,300,301,599,600,599,600,598,601,899,900,1200,1199,1500};
+    static const uint64_t want[]={0,0,0,0,295,0,0,300,0,0,0,0,0,300,300,0,300};
+    uint64_t reported=UINT64_MAX; int good=1;
+    for(unsigned i=0;i<sizeof seq/sizeof *seq;i++) { uint64_t f=nq_report_due(seq[i],&reported); if(f!=want[i]) { good=0; printf("frame %llu: line over %llu frames, expected %llu\n",(unsigned long long)seq[i],(unsigned long long)f,(unsigned long long)want[i]); } }
+    CHECK(good,"one line per multiple of 300 over the frames since the last, and none for a frame that went back");
+}
+// A node holds one signal of each word (nq_signal_on): 8,000 signals on 8,000 words in one node, each looked up before it is added. Past 16 signals the node's words are marked in a map
+// instead of scanned; the scan was n squared (about 10 ms here). DM_NVN_EVENT_MAP=0 scans, and the time is not checked then
+static void signal_set(void) {
+    int list=env_is("DM_NVN_EVENT_MAP","0");
+    printf("CASE one signal of each word in a node of 8,000 signals (%s)\n",list?"scan":"map");
+    nq_node n; memset(&n,0,sizeof n); n.kind=NQ_COMMANDS; uint8_t a[16];
+    pthread_mutex_lock(&g_sub_mu);
+    uint64_t t0=now_ns(); int found=0;
+    for(int i=0;i<8000;i++) { volatile uint32_t *w=&ev_words[i]; uint32_t mode=i%3==0, value=(uint32_t)i; memcpy(a,&w,8); memcpy(a+8,&mode,4); memcpy(a+12,&value,4); found+=nq_signal_on(&n,a); nq_signal_add(&n,a); }
+    uint64_t dt=now_ns()-t0;
+    int good=!found && n.nsignals==8000;
+    for(int i=0;i<8000 && good;i++) { volatile uint32_t *w=&ev_words[i]; memcpy(a,&w,8); good&=nq_signal_on(&n,a) && n.signals[i].word==w && n.signals[i].mode==(unsigned)(i%3==0) && n.signals[i].value==(uint32_t)i; }
+    uint32_t other; volatile uint32_t *ow=&other; memcpy(a,&ow,8); good&=!nq_signal_on(&n,a);
+    pthread_mutex_unlock(&g_sub_mu);
+    CHECK(good,"every word is found once added, in recorded order with its mode and value, and no other");
+    printf("signal lookups: %.3f ms for 8,000 signals in one node\n",dt/1e6);
+    if(!list) CHECK(dt<2000000,"8,000 signals in one node take under 2 ms");
+    free(n.signals);   // past the first signal the signals are in an allocated array
+    // Marks left by earlier nodes (each node's mark is a number no other node gets) and the map's reset once it passes NQ_SIGNAL_WORDS words, which happens only as a node takes its mark,
+    // never in the middle of one. A node of 20 signals on words 0-19, then a second one on the same words, finds none of them before adding each and all of them after. A node of 17,000 fresh
+    // words then passes 16,384 in its middle and keeps every word, and the next node of 20 empties the map and marks its words again, the 16 it scanned first among them
+    pthread_mutex_lock(&g_sub_mu);
+    good=1; nq_node m[4]; memset(m,0,sizeof m);
+    for(int k=0;k<2;k++) {
+        for(int i=0;i<20;i++) { volatile uint32_t *w=&ev_words[i]; uint32_t mode=0, value=(uint32_t)i; memcpy(a,&w,8); memcpy(a+8,&mode,4); memcpy(a+12,&value,4); good&=!nq_signal_on(&m[k],a); nq_signal_add(&m[k],a); }
+        for(int i=0;i<20;i++) { volatile uint32_t *w=&ev_words[i]; memcpy(a,&w,8); good&=nq_signal_on(&m[k],a); }
+        good&=m[k].nsignals==20 && (list || m[k].signal_set);
+    }
+    if(!list) good&=m[0].signal_set!=m[1].signal_set;
+    static uint32_t many[17000]; int kept=1, seen=0, big=list?0:17000;   // the scan keeps no map
+    for(int i=0;i<big;i++) { volatile uint32_t *w=&many[i]; uint32_t mode=0, value=0; memcpy(a,&w,8); memcpy(a+8,&mode,4); memcpy(a+12,&value,4); seen+=nq_signal_on(&m[2],a); nq_signal_add(&m[2],a); }
+    for(int i=0;i<big;i++) { volatile uint32_t *w=&many[i]; memcpy(a,&w,8); kept&=nq_signal_on(&m[2],a); }
+    unsigned before=nq_signal_words.n;
+    for(int i=0;i<20;i++) { volatile uint32_t *w=&ev_words[i]; uint32_t mode=1, value=(uint32_t)i; memcpy(a,&w,8); memcpy(a+8,&mode,4); memcpy(a+12,&value,4); good&=!nq_signal_on(&m[3],a); nq_signal_add(&m[3],a); }
+    for(int i=0;i<20;i++) { volatile uint32_t *w=&ev_words[i]; memcpy(a,&w,8); good&=nq_signal_on(&m[3],a); }
+    { volatile uint32_t *w=&many[0]; memcpy(a,&w,8); good&=!nq_signal_on(&m[3],a); }
+    unsigned after=nq_signal_words.n;
+    pthread_mutex_unlock(&g_sub_mu);
+    printf("signal map: %u words after the node of 17,000, %u after the next node of 20\n",before,after);
+    CHECK(good,"a node of 20 signals on words an earlier node marked finds none of them before adding each and all of them after");
+    CHECK(!seen && kept,"a node whose words pass the map's limit in its middle keeps every one of them");
+    if(!list) CHECK(before>16384 && after==20,"the map is emptied when the next node takes its mark, and that node's words are marked again");
+    for(int k=0;k<4;k++) if(m[k].signals!=&m[k].signal0) free(m[k].signals);
+}
+// 2,000 GPU event signals on 2,000 events in one command buffer: one node with signal_events node, 2,000 with split. They publish in recorded order with their modes and values, and a wait on
+// another queue, submitted first, for the last word's value is released and sees the payload written before the signals
+static NVNmemoryPool pool2; static uint8_t *memory2; static NVNevent evs[2000]; static NVNcommandBuffer bigcmd;
+static NVNcommandHandle record_signals(int count,NVNsync *fence) {
+    P(nvnCommandBufferInitialize)(&bigcmd,&device);
+    P(nvnCommandBufferAddCommandMemory)(&bigcmd,&pool2,65536,262144);
+    P(nvnCommandBufferBeginRecording)(&bigcmd);
+    uint32_t payload=after; P(nvnCommandBufferUpdateUniformBuffer)(&bigcmd,source_addr,4,0,4,&payload);
+    for(int i=0;i<count;i++) P(nvnCommandBufferSignalEvent)(&bigcmd,&evs[i],i%5==0?NVN_EVENT_SIGNAL_MODE_ADD:NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,(uint32_t)(3*i+1));
+    P(nvnCommandBufferFenceSync)(&bigcmd,fence,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    return P(nvnCommandBufferEndRecording)(&bigcmd);
+}
+static void signals_2000(int node) {
+    printf("CASE signal_events %s: 2,000 signals on 2,000 events in one command buffer\n",node?"node":"split");
+    int saved=nq_signals_in_node(); nq_signal_node=node;
+    *source=before; *result=sentinel; for(int i=0;i<2000;i++) P(nvnEventSignal)(&evs[i],NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
+    begin_cmd(0); P(nvnCommandBufferWaitEvent)(&commands[0],&evs[1999],NVN_EVENT_WAIT_MODE_EQUAL,3*1999+1);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[0],source_addr,result_addr,4,0);
+    P(nvnCommandBufferFenceSync)(&commands[0],&consumed,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    NVNcommandHandle ch=P(nvnCommandBufferEndRecording)(&commands[0]), ph=record_signals(2000,&produced);
+    atomic_store(&pub_n,0);
+    nvn_queue_test_hold(1);   // the consumer is queued before the producer
+    job cj,pj; enqueue(&cj,&queues[0],ch); int cr=returned(&cj,250000000ull); enqueue(&pj,&queues[1],ph); int pr=returned(&pj,1000000000ull);
+    uint64_t f0=mtl_last_fence();
+    nvn_queue_test_hold(0);
+    int done=landed(&produced,10000000000ull) && landed(&consumed,5000000000ull);
+    if(!done) { P(nvnEventSignal)(&evs[1999],NVN_EVENT_SIGNAL_MODE_WRITE,3*1999+1); done=landed(&consumed,5000000000ull); }   // rescue before failing
+    require_returned(&cj,cr); require_returned(&pj,pr);
+    CHECK(cr && pr && done && *result==after,"the wait on another queue for the last signal is released and its copy sees the payload before the signals");
+    uint64_t subs=mtl_last_fence()-f0;
+    CHECK(subs==(node?2u:2001u),node?"node: the producer is one Metal submission, the consumer one":"split: each signal ends a submission (2,000), the consumer one");
+    for(int k=0;k<2000 && atomic_load(&pub_n)<2000;k++) usleep(1000);
+    int n=atomic_load(&pub_n), order=n==2000;
+    for(int i=0;i<2000 && order;i++) order=pub_log[i].word==event_storage(&evs[i]) && pub_log[i].mode==(unsigned)(i%5==0) && pub_log[i].value==(uint32_t)(3*i+1);
+    CHECK(order,"2,000 publications in recorded order with their modes and values");
+    int values=1; for(int i=0;i<2000;i++) values&=P(nvnEventGetValue)(&evs[i])==(uint32_t)(3*i+1);
+    CHECK(values,"every event holds its signal's value (an ADD to 0 or a WRITE)");
+    if(!done) _Exit(2);
+    P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed); P(nvnCommandBufferFinalize)(&bigcmd);
+    nq_signal_node=saved;
+}
+// Allocations per signal in split mode (nq_pooled): 400 signals in one command buffer, submitted twice. The second submission takes its nodes and receipts from the free lists and keeps each
+// node's one signal inline, so it allocates about one command copy per signal (the 4 spares cover the first nodes); each signal took two nodes, a receipt and a signals array as well before
+// (DM_NVN_NODE_POOL=0, checked to be at least 4 a signal)
+static void split_allocations(void) {
+    int off=env_is("DM_NVN_NODE_POOL","0");
+    printf("CASE allocations per signal in split mode (%s)\n",off?"no free lists":"free lists");
+    int saved=nq_signals_in_node(); nq_signal_node=0;
+    for(int i=0;i<400;i++) P(nvnEventSignal)(&evs[i],NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    NVNsync produced; P(nvnSyncInitialize)(&produced,&device);
+    NVNcommandHandle h=record_signals(400,&produced);
+    unsigned allocs[2]={0,0}; int done=1;
+    for(int round=0;round<2;round++) {
+        CHECK(queue_idle(5000000000ull),"the replay has taken every queued job");
+        t_allocs=0; t_count_allocs=1; P(nvnQueueSubmitCommands)(&queues[0],1,&h); t_count_allocs=0; allocs[round]=t_allocs;
+        done&=landed(&produced,10000000000ull);
+    }
+    CHECK(done && queue_idle(5000000000ull),"both submissions complete");
+    double per=allocs[1]/400.0;
+    printf("allocations on the submitting thread: %u for the first submission, %u for the second (%.2f a signal); a node is %zu bytes, a receipt %zu\n",allocs[0],allocs[1],per,sizeof(nq_node),sizeof(nq_receipt));
+    if(off) CHECK(per>=4,"DM_NVN_NODE_POOL=0: two nodes, a receipt and a signals array per signal, as before");
+    else CHECK(per<1.5,"the second submission allocates at most about a command copy per signal");
+    if(!done) _Exit(2);
+    P(nvnSyncFinalize)(&produced); P(nvnCommandBufferFinalize)(&bigcmd);
+    nq_signal_node=saved;
+}
 int main(void) { @autoreleasepool {
     if (setvbuf(stdout, NULL, _IONBF, 0)) abort(); setenv("DM_PSO_PREPARE","0",1);
     mtl_init();
@@ -436,6 +648,12 @@ int main(void) { @autoreleasepool {
     event_mirror_publication();
     signals_in_node(1); signals_in_node(0);
     signal_overwritten(1); signal_overwritten(0);
+    CHECK(!posix_memalign((void **)&memory2,getpagesize(),524288),"second pool storage allocated"); if(!memory2) return 2; memset(memory2,0,524288);
+    P(nvnMemoryPoolBuilderSetStorage)(&pb,memory2,524288); CHECK(P(nvnMemoryPoolInitialize)(&pool2,&pb),"second memory pool initialized");
+    { int good=1; for(int i=0;i<2000;i++) { P(nvnEventBuilderSetStorage)(&eb,&pool2,16*i); good&=P(nvnEventInitialize)(&evs[i],&eb); } CHECK(good,"2,000 events initialized"); }
+    report_due(); probe_cost(); event_bookkeeping(); signal_set();
+    signals_2000(1); signals_2000(0);
+    split_allocations();
     pthread_mutex_lock(&jobs_mu); jobs_stop=1; pthread_cond_signal(&jobs_cv); pthread_mutex_unlock(&jobs_mu); pthread_join(worker,NULL);
     printf("wait-event fixture: %d checks, %d failed\n",checks,fails);
     // The process owns the fixture pool until all callbacks have retired.

@@ -225,7 +225,8 @@ void hid_keys_init(void) {
 //   registered textures of that target (2 = 3D) with storage address and block-linear layout (nvn_mtl.m dm_gfx_texlist), "texraw <serial> <path>"
 //   saves a host texture's level 0 raw, every slice (a cube's six faces, a 3D texture's depth slices) (nvn_mtl.m dm_gfx_texraw), "drag <x0> <y0> <x1> <y1> [seconds=0.3]" moves one finger in a straight line between the two normalized picture
 //   points over that time and lifts it (the touch screen's pans and swipes, hle_touch.c gesture_sample), "dump" logs what each guest thread waits on and the graphics wait points
-//   (crash_dump_now, as the iOS app's DM_LOG_PORT dump; scripts/regress.py asks for it before stopping a hung game), "program <n>" makes oe::ExecuteProgram(n) with no parameters (a multi-program application's way between its programs, headless), "webshot <path>" saves the offline page shown as a PNG, "#…" is ignored.
+//   (crash_dump_now, as the iOS app's DM_LOG_PORT dump; scripts/regress.py asks for it before stopping a hung game), "program <n>" makes oe::ExecuteProgram(n) with no parameters (a multi-program application's way between its programs, headless), "webshot <path>" saves the offline page shown as a PNG, "pressure <0|1|2>" acts as the system's memory pressure going normal, warning or critical (dm_gfx_pressure: the
+//   memory line and the trim at the next submission; macOS lets only root simulate one, memory_pressure -S), "#…" is ignored.
 //   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script
 static void *ctl_main(void *arg) {
     const char *path = arg; long off = 0; char line[1100];
@@ -245,6 +246,7 @@ static void *ctl_main(void *arg) {
                 if (!strncmp(line, "shot ", 5)) { dm_gfx_shot_at(1, line + 5); LOG("DM_CTL: screenshot of the next frame → %s", line + 5); continue; }
                 if (!strncmp(line, "texlist ", 8)) { void dm_gfx_texlist(int target); dm_gfx_texlist(atoi(line + 8)); continue; }
                 if (!strcmp(line, "restop")) { void dm_gfx_restop(void); dm_gfx_restop(); continue; }   // what the residency set holds (nvn_mtl.m res_top)
+                if (!strncmp(line, "pressure ", 9)) { LOG("DM_CTL: memory pressure %d, as the system's dispatch source gives it", atoi(line + 9)); dm_gfx_pressure(atoi(line + 9)); continue; }   // 0 normal, 1 warning, 2 critical (hle_nvn.c dm_gfx_pressure: the log line and the trim)
                 if (!strncmp(line, "texraw ", 7)) { void dm_gfx_texraw(uint64_t serial, const char *path); char *e2; uint64_t s = strtoull(line + 7, &e2, 10); while (*e2 == ' ') e2++; dm_gfx_texraw(s, e2); continue; }
                 if (!strncmp(line, "peek ", 5)) { void dm_ctl_peek(uint64_t a, int n); char *e2; uint64_t a = strtoull(line + 5, &e2, 16); dm_ctl_peek(a, (int)strtol(e2, NULL, 0)); continue; }
                 if (!strncmp(line, "memdump ", 8)) { void dm_ctl_memdump(uint64_t a, uint64_t n, const char *path); char *e2, *e3; uint64_t a = strtoull(line + 8, &e2, 16), n = strtoull(e2, &e3, 0);

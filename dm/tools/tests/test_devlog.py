@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# scripts/devlog.py: the long frames the frame step's own holds make (not counted), and memory read as plateaus between the steps an area load makes, from logs written here
+# scripts/devlog.py: the long frames the frame step's own holds make (not counted), and memory read as plateaus between the steps an area load makes, the graphics ledger and guest charged among them, from logs written here
 import importlib.util, re, unittest
 from pathlib import Path
 
@@ -21,8 +21,9 @@ def step(a: int, b: int, present: int, last: bool = False) -> str:
             + ('; further changes only counted below' if last else ''))
 
 
-def mem(f: int, res: float, gpu: float, tex: int, head: float) -> str:
-    return (f'[dm] [nvn-mtl] memory up to frame {f}: resident {res:.0f} MB, GPU allocated {gpu:.0f} MB, deferred-release queue 0, residency set 1, serial objects 1, '
+def mem(f: int, res: float, gpu: float, tex: int, head: float, ledger: float | None = None, guest: float | None = None) -> str:   # ledger and guest: the memory audit's two fields (None: an older log)
+    extra = (f'graphics ledger {ledger:.0f} MB, ' if ledger is not None else '') + (f'guest charged {guest:.0f} MB, ' if ledger is not None and guest is not None else '')   # guest charged only with DM_MEM_GUEST=1
+    return (f'[dm] [nvn-mtl] memory up to frame {f}: resident {res:.0f} MB, GPU allocated {gpu:.0f} MB, {extra}deferred-release queue 0, residency set 1, serial objects 1, '
             f'memory pools 1 (resident 1; peak 1 / tracking table capacity 262144; freed but alive 0, 0 MB), shared textures {tex} (0 of them unreferenced; evicted with pools 0, '
             f'on storage takeover 0 in total), texture re-uploads 0 in total; headroom to the system memory limit {head:.0f} MB')
 
@@ -155,6 +156,89 @@ class Plateaus(unittest.TestCase):
         self.assertEqual([len(m[k]['plateaus']) for k in ('footprint_mb', 'gpu_mb', 'headroom_mb', 'shared_textures')], [2, 2, 2, 2])
         text = '\n'.join(devlog.render(s, 5))
         self.assertIn('footprint 700 → 2600 MB (least 700, most 2600), 2 plateaus', text)
+        self.assertNotIn('ledger_mb', m); self.assertNotIn('guest_charged_mb', m)   # an older log: neither series
+
+    def test_ledger_and_guest(self):   # the graphics ledger and guest charged after GPU allocated (nvn_mtl.m, the memory audit): read as series of their own, shown and compared; the fields around them as before
+        lines = [mem(f, 3800, 4020, 120, 7400, 1477 if f < 3000 else 1900, 1800) for f in range(300, 6001, 300)]
+        s = read(lines); m = s['memory']
+        self.assertEqual((m['ledger_mb']['min'], m['ledger_mb']['max'], m['guest_charged_mb']['max'], m['gpu_mb']['max'], m['headroom_mb']['min'], m['shared_textures']['max']), (1477, 1900, 1800, 4020, 7400, 120))
+        text = '\n'.join(devlog.render(s, 5))
+        self.assertIn('graphics ledger 1477 → 1900 MB', text); self.assertIn('guest charged 1800 → 1800 MB', text)
+        rows = {r[0] for r in devlog.METRICS}
+        self.assertTrue({'graphics ledger, most (MB)', 'guest charged, most (MB)'} <= rows)
+        self.assertEqual((devlog.dig(s, 'memory.ledger_mb.max'), devlog.dig(s, 'memory.guest_charged_mb.max')), (1900, 1800))
+
+    def test_memory_line_format_matches_the_producer(self):   # the memory line as nvn_mtl.m prints it (its MLOG format and the tail's asprintf format, filled in) is what the pattern reads, both new fields included
+        src = (REPO / 'dm/gfx/nvn/nvn_mtl.m').read_text(errors='replace')
+        main = re.search(r'MLOG\("(memory up to frame %llu: [^"]*)"', src); tail = re.search(r'asprintf\(&tail, "(deferred-release queue [^"]*)"', src)
+        self.assertTrue(main and tail, 'the memory line\'s format strings in nvn_mtl.m')
+        assert main and tail
+        n = iter(range(1, 1000))
+        fill = lambda f: re.sub(r'%(?:llu|lu|u|d)', lambda _: str(100 + next(n)), f)
+        gst = re.search(r'snprintf\(gst, sizeof gst, "(guest charged %llu MB, )"', src)
+        self.assertTrue(gst, 'the guest charged field\'s format in nvn_mtl.m (DM_MEM_GUEST=1)')
+        assert gst
+        for with_guest in (True, False):   # DM_MEM_GUEST=1, and the default line without the field
+            n = iter(range(1, 1000))
+            head = fill(main.group(1)).split('%s')
+            g = fill(gst.group(1)) if with_guest else ''
+            line = '[dm] [nvn-mtl] ' + head[0] + g + fill(tail.group(1)).replace('%s', '7400 MB')
+            x = devlog.RX['memory'].search(line[len('[dm] '):])
+            self.assertIsNotNone(x, line)
+            assert x
+            self.assertEqual([x.group(i) for i in (1, 2, 3, 4)], [str(v) for v in (101, 102, 103, 104)])
+            self.assertEqual(x.group(5), str(105) if with_guest else None)
+            self.assertEqual(x.group(7), '7400')
+            self.assertRegex(line, rf'shared textures {x.group(6)} \(')
+
+
+class LedgerFields(unittest.TestCase):   # the memory line's graphics ledger and guest charged (after GPU allocated, which counts the guest's pools twice): read, shown first, compared lower-better
+    def run_of(self, ledger: float | None, guest: float | None) -> dict:
+        return read([mem(f, 2600, 4000, 300, 5500, None if ledger is None else ledger + (f > 3000) * 100, guest) for f in range(300, 6001, 300)])
+
+    def test_read_and_shown_first(self):
+        s = self.run_of(1400, 1500); m = s['memory']
+        self.assertEqual((m['ledger_mb']['first'], m['ledger_mb']['last'], m['guest_charged_mb']['last'], m['gpu_mb']['last']), (1400, 1500, 1500, 4000))
+        self.assertEqual(s['memory']['footprint_mb']['last'], 2600)   # the line's other fields read as before
+        text = '\n'.join(devlog.render(s, 5))
+        self.assertIn('graphics ledger 1400 → 1500 MB', text); self.assertIn('guest charged 1500 → 1500 MB', text)
+        self.assertLess(text.index('graphics ledger'), text.index('guest charged')); self.assertLess(text.index('guest charged'), text.index('GPU allocated (counts the guest\'s pools again)'))
+
+    def test_ledger_without_guest(self):   # the default line (no DM_MEM_GUEST): the ledger read, shown and compared; no guest charged series or row
+        s = self.run_of(1400, None); m = s['memory']
+        self.assertEqual((m['ledger_mb']['first'], m['ledger_mb']['last']), (1400, 1500)); self.assertNotIn('guest_charged_mb', m)
+        text = '\n'.join(devlog.render(s, 5))
+        self.assertIn('graphics ledger 1400 → 1500 MB', text); self.assertNotIn('guest charged', text)
+        rows = {r['label'] for r in devlog.compare(s, s)['rows']}
+        self.assertIn('graphics ledger, last (MB)', rows); self.assertNotIn('guest charged, last (MB)', rows)
+
+    def test_old_logs_have_no_rows(self):   # a log from before the fields: no entry, no row, and GPU allocated as before
+        s = self.run_of(None, None); m = s['memory']
+        self.assertNotIn('ledger_mb', m); self.assertNotIn('guest_charged_mb', m); self.assertEqual(m['gpu_mb']['last'], 4000)
+        text = '\n'.join(devlog.render(s, 5))
+        self.assertNotIn('graphics ledger', text); self.assertNotIn('counts the guest', text); self.assertIn('GPU allocated 4000 → 4000 MB', text)
+        rows = {r['label'] for r in devlog.compare(s, s)['rows']}
+        self.assertNotIn('graphics ledger, last (MB)', rows); self.assertNotIn('guest charged, last (MB)', rows); self.assertIn('GPU allocated, last (MB)', rows)
+
+    def test_compared_lower_is_better(self):
+        a, b = self.run_of(1400, 1500), self.run_of(1000, 1200)
+        rows = {r['label']: r for r in devlog.compare(a, b)['rows']}
+        self.assertEqual((rows['graphics ledger, last (MB)']['a'], rows['graphics ledger, last (MB)']['b']), (1500, 1100))
+        self.assertTrue(rows['graphics ledger, last (MB)']['change'].endswith('better')); self.assertTrue(rows['guest charged, last (MB)']['change'].endswith('better'))
+        self.assertTrue(devlog.compare(b, a)['rows'][[r['label'] for r in devlog.compare(b, a)['rows']].index('graphics ledger, most (MB)')]['change'].endswith('worse'))
+        labels = [r['label'] for r in devlog.compare(a, b)['rows']]
+        self.assertLess(labels.index('graphics ledger, last (MB)'), labels.index('GPU allocated, last (MB)'))   # preferred: listed before GPU allocated
+        rows = {r['label']: r for r in devlog.compare(self.run_of(None, None), b)['rows']}   # an old log against a new one: the row, empty on the old side
+        self.assertEqual((rows['graphics ledger, last (MB)']['a'], rows['graphics ledger, last (MB)']['b']), (None, 1100))
+
+
+class AudioLine(unittest.TestCase):   # hle_audio.c's statistics line, before and after it carried the watchdog's passes: the same underruns and callbacks
+    def test_watchdog_suffix(self):
+        base = '[dm] audio #3 device callbacks 4000: 240–240 frames each, 1.0 blocks queued on average at callback; in these 2000, 2 underruns, 10.0 ms zero-padded'
+        for line in (base, base + '; watchdog passes so far (all outputs) 120 on the 50 ms tick, 64 on the healthy one',
+                     base + '; watchdog passes so far (all outputs) 120 on the 50 ms tick, 64 on the healthy one (3 of them found the last callback over 50 ms old)'):
+            au = read([line])['audio']
+            self.assertEqual((au['callbacks'], au['underruns'], au['zero_padded_ms']), (2000, 2, 10.0))
 
 
 if __name__ == '__main__':

@@ -16,7 +16,8 @@ What it reads (docs/development.md, Reading a device log):
                      wakeups, GPU ms/s, thermal state
   memory             [nvn-mtl] memory up to frame N and the on-screen lines' footprint; [gl] memory at frame N; [vk] frame N … buffer memory: first, last, least, most, and the
                      plateaus it stays on between the steps an area load makes (a run of samples within a tolerance of their median), with the slope inside them per 10 min
-                     (the run's own slope, which the steps make, only when there is a single plateau)
+                     (the run's own slope, which the steps make, only when there is a single plateau). A newer memory line's graphics ledger and guest charged come first: GPU
+                     allocated counts the guest's memory pools a second time (NieR: about 4.0 GB where the real figure is about 2.6), so a log that has them is compared on them
   display link       [nvn-mtl] display link up to tick N: submission ahead of / game enqueue to target display; the stretches of windows whose enqueue p50 is more than half a frame
                      period above the run's median (the display link counts whole frames: a frame more latency), and what the log shows just before them
   long frames        [longframe] frame N (T s): the longest, and what each spent its time on (new pipelines, texture uploads, GPU, submit, the game's side, a return from the background).
@@ -76,7 +77,7 @@ RX = {k: re.compile(v) for k, v in {
     'power': r'^\[nvn\] power up to frame (\d+): CPU energy ([\d.]+) W, ([\d.]+) mJ per frame \(([\d.]+) fps\); CPU (\d+)% \(100 = one core\), (\d+)% of it on performance cores; '
              r'wakeups (\d+)/s \(out of platform idle (\d+)\); GPU ([\d.]+) ms/s[^;]*; thermal (-?\d+)',
     'psoline': r'^\[nvn\] pipelines up to frame (\d+): .*?bases compiled (\d+) / ([\d.]+) ms',
-    'memory': r'^\[nvn-mtl\] memory up to frame (\d+): resident (\d+) MB, GPU allocated (\d+) MB, .*?shared textures (\d+) \(.*headroom to the system memory limit (?:(\d+) MB|none)',   # none: the Mac
+    'memory': r'^\[nvn-mtl\] memory up to frame (\d+): resident (\d+) MB, GPU allocated (\d+) MB, (?:graphics ledger (\d+) MB, (?:guest charged (\d+) MB, )?)?.*?shared textures (\d+) \(.*headroom to the system memory limit (?:(\d+) MB|none)',   # none: the Mac; the graphics ledger since the memory audit, guest charged only with DM_MEM_GUEST=1
     'glmem': r'^\[gl\] memory at frame (\d+): footprint ([\d.]+) MB, Metal allocated ([\d.]+) MB; (\d+) textures',
     'vkframe': r'^\[vk\] frame (\d+): draws .*? buffer memory ([\d.]+) MB',
     'glpso': r'^\[gl\] frame (\d+): pipeline builds since the last record (\d+), ([\d.]+) ms; in all (\d+), ([\d.]+) ms, the longest ([\d.]+) ms; (\d+) of them after the first frame, ([\d.]+) ms',
@@ -383,7 +384,8 @@ def read(text: str, top: int = 5) -> Rec:
     def by_t(k: str, n: int, count: bool = False) -> Rec | None:
         return spread([(clock.at(int(m.group(1))), float(m.group(n))) for _, m, _ in g[k] if m.group(n) is not None],
                       *((PLATEAU_FLOOR_COUNT, PLATEAU_REL_COUNT) if count else (PLATEAU_FLOOR, PLATEAU_REL)))
-    mem: Rec = {'footprint_mb': spread([(clock.at(f), v) for f, v in fp]), 'gpu_mb': by_t('memory', 3), 'headroom_mb': by_t('memory', 5), 'shared_textures': by_t('memory', 4, True)}
+    mem: Rec = {'footprint_mb': spread([(clock.at(f), v) for f, v in fp]), 'ledger_mb': by_t('memory', 4), 'guest_charged_mb': by_t('memory', 5),   # a newer line's fields (an older one: no samples, no entry)
+                'gpu_mb': by_t('memory', 3), 'headroom_mb': by_t('memory', 7), 'shared_textures': by_t('memory', 6, True)}
     if g['glmem']: mem.update(footprint_mb=by_t('glmem', 2), gpu_mb=by_t('glmem', 3), gl_textures=by_t('glmem', 4, True))
     if g['vkframe']: mem['vk_buffer_mb'] = by_t('vkframe', 2)
     out['memory'] = {k: v for k, v in mem.items() if v} or None
@@ -552,7 +554,9 @@ def render(s: Rec, top: int) -> list[str]:
                         f"({g3(pw['pcore_pct_p50'])}% on performance cores), wakeups {g3(pw['wakeups_p50'])}/s, GPU {g3(pw['gpu_ms_s_p50'])} ms/s; thermal state at most {pw['thermal_max']}")
     row('heat', *(at_times([{'t_s': x['t_s'], 'what': x['what']} for x in s['timeline']], 3 * top) or ['no thermal or Low Power Mode lines']))
     mm = s['memory'] or {}
-    row('memory', *(t for k, label, unit in (('footprint_mb', 'footprint', ' MB'), ('gpu_mb', 'GPU allocated', ' MB'), ('headroom_mb', 'headroom to the limit', ' MB'),
+    gpu_label = 'GPU allocated (counts the guest\'s pools again)' if 'ledger_mb' in mm or 'guest_charged_mb' in mm else 'GPU allocated'   # the ledger and guest charged first, where the log has them
+    row('memory', *(t for k, label, unit in (('footprint_mb', 'footprint', ' MB'), ('ledger_mb', 'graphics ledger', ' MB'), ('guest_charged_mb', 'guest charged', ' MB'),
+                                             ('gpu_mb', gpu_label, ' MB'), ('headroom_mb', 'headroom to the limit', ' MB'),
                                              ('shared_textures', 'shared textures', ''), ('gl_textures', 'OpenGL textures', ''), ('vk_buffer_mb', 'Vulkan buffers', ' MB')) if k in mm
                     for t in [f'{label} {spread_text(mm[k], unit)}', *plateau_text(mm[k], 2 * top, unit)]))
     if not mm: row('memory', 'no memory lines')
@@ -611,6 +615,10 @@ METRICS = (('commit', 'build.commit', 0), ('shader chain', 'build.chain', 0), ('
            ('on performance cores (%)', 'power.pcore_pct_p50', 0), ('wakeups per second', 'power.wakeups_p50', -1), ('GPU ms/s', 'power.gpu_ms_s_p50', -1), ('thermal state at most', 'power.thermal_max', -1),
            ('footprint, last (MB)', 'memory.footprint_mb.last', 0), ('footprint, most (MB)', 'memory.footprint_mb.max', 0), ('footprint plateaus', 'memory.footprint_mb.plateaus', 0),
            ('footprint drift / 10 min (MB)', 'memory.footprint_mb.drift_per_10min', -1),   # within the plateaus: the steps of area loads are not a leak
+           ('graphics ledger, last (MB)', 'memory.ledger_mb.last', -1), ('graphics ledger, most (MB)', 'memory.ledger_mb.max', -1),   # newer logs: the memory to compare (GPU allocated counts the guest twice)
+           ('graphics ledger drift / 10 min', 'memory.ledger_mb.drift_per_10min', -1),
+           ('guest charged, last (MB)', 'memory.guest_charged_mb.last', -1), ('guest charged, most (MB)', 'memory.guest_charged_mb.max', -1),
+           ('guest charged drift / 10 min', 'memory.guest_charged_mb.drift_per_10min', -1),
            ('GPU allocated, last (MB)', 'memory.gpu_mb.last', 0), ('GPU allocated drift / 10 min', 'memory.gpu_mb.drift_per_10min', -1), ('headroom, least (MB)', 'memory.headroom_mb.min', 1),
            ('shared textures, last', 'memory.shared_textures.last', 0), ('shared textures drift / 10 min', 'memory.shared_textures.drift_per_10min', -1),
            ('enqueue to display p50 (ms)', 'display_link.enqueue_p50_ms', -1), ('enqueue to display, most (ms)', 'display_link.enqueue_max_ms', -1),

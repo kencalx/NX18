@@ -90,6 +90,15 @@ class PatchIndex(unittest.TestCase):
     def test_index_is_current(self):
         self.assertEqual(docs_patches.OUT.read_text(), docs_patches.page(), 'docs/agents/game-patches.md is out of date: run dm/tools/docs_patches.py')
 
+    def test_switches_read_every_header_key(self):   # the switch table reads the keys header_one takes: a parse that stopped at header()'s three-line dispatcher found 1 row (programs) where there are about 30, and the page and the test above agreed on it
+        rows = docs_patches.switches(docs_patches.games()); keys = {k for k, _, _ in rows}
+        self.assertGreater(len(rows), 20, f'only {len(rows)} profile switches found: does docs_patches.header_src() still reach header_one in dm/games/game.py?')
+        for k in ('signal_events', 'fps_max', 'fps_target', 'render_cond'): self.assertIn(k, keys)
+        for k, v, _ in rows:   # each switch has its own SWITCH_BINDING row: classify matches a key by its start, so present_interval_choice would otherwise take present_interval's
+            r = next((r for r in docs_patches.SWITCH_BINDING if k.startswith(r[0]) and (v or '').startswith(r[1])), None)
+            self.assertIsNotNone(r, f'profile key {k} {v}: no SWITCH_BINDING row')
+            self.assertEqual(r[0], k, f'profile key {k} {v} is classified by the SWITCH_BINDING row of {r[0]}')
+
 
 class Length(unittest.TestCase):
     def test_entry_points_stay_short(self):

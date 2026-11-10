@@ -41,7 +41,8 @@ typedef struct {
     uint64_t st_calls, st_count, st_qsum, st_u0, st_ub0; uint32_t st_fmin, st_fmax;   // callback-owned accumulators
     audio_stats st_report; _Atomic int st_pending; // one snapshot, consumed by the watchdog or Close under g_aos_lock
     _Atomic uint64_t cb_n;             // device callbacks of this output (the watchdog's evidence that the device still plays it)
-    uint64_t wd_n, wd_t;               // watchdog: callback count last seen and when it last moved (under g_aos_lock)
+    _Atomic uint64_t cb_t;             // now_ns() at the last device callback, stored before cb_n moves (release), so a watchdog that sees the count move sees this time too
+    uint64_t wd_n, wd_t;               // watchdog: callback count last seen and when it last moved (under g_aos_lock); after a healthy tick, the time of the last callback itself (wd_pass)
     int stalled, retry_ms; uint64_t retry_at;   // the device stopped calling back (or would not start): the silent sink stands in and the watchdog retries the AudioUnit at retry_at, backing off
 } aout;
 
@@ -51,6 +52,10 @@ typedef struct {
 #define AOMAX 8
 static aout *g_aos[AOMAX];
 static pthread_mutex_t g_aos_lock = PTHREAD_MUTEX_INITIALIZER;
+// The watchdog waits on g_wd_cv with its tick as the timeout; a start that begins waiting for its first callback signals it (au_start_device, under g_aos_lock), so the handoff from the silent sink to
+// the device never waits out a 250 ms tick (the device plays silence until the watchdog sees that callback). Its passes by the tick they waited, 50 ms or the healthy one, go on the callback statistics line
+static pthread_cond_t g_wd_cv = PTHREAD_COND_INITIALIZER;
+static _Atomic uint64_t g_wd_fast, g_wd_slow, g_wd_stale;   // passes by tick, and passes after a healthy tick whose last callback was over 50 ms old (a suspicion, wd_pass)
 static int g_suspended;
 static aout *ao(const void *g) { aout *a = objmap_get(g); if (!a) die("AudioOut %p was not created by the host", g); return a; }
 // the call site as "module+offset"; "host" when the host itself calls (in-process audio renderer)
@@ -155,7 +160,8 @@ uint64_t dm_audio_render_calls(void) { return atomic_load_explicit(&g_render_cal
 static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
     (void)f; (void)ts; (void)bus; (void)frames;
     aout *a = ctx;
-    atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed); atomic_fetch_add_explicit(&a->cb_n, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed);
+    atomic_store_explicit(&a->cb_t, now_ns(), memory_order_relaxed); atomic_fetch_add_explicit(&a->cb_n, 1, memory_order_release);
     {
         // At each 2000-callback checkpoint publish a snapshot for the watchdog: LOG takes a stdio lock and must never run here or in the release-event notifier.
         // A busy logger leaves its mailbox full; keep accumulating then, rather than waiting, overwriting its snapshot or losing counts.
@@ -317,6 +323,7 @@ static void au_start_device(void *p) {
     } else {
         a->wd_n = atomic_load_explicit(&a->cb_n, memory_order_relaxed);
         a->start_phase = AU_WAIT_CALLBACK; a->wd_t = now_ns();
+        pthread_cond_signal(&g_wd_cv);   // out of a 250 ms wait: 50 ms ticks from now on (wd_pass)
     }
     pthread_mutex_unlock(&g_aos_lock);
 }
@@ -330,7 +337,17 @@ static void au_request_start(aout *a) {
 // After 200 ms without a callback the silent sink takes over (the game's audio keeps its real-time pace) and the AudioUnit is retried after 1, 2, 4, 8 s. A late wake-up of the watchdog itself (the whole process was stopped) only restarts the count.
 // The time is read under g_aos_lock: the startup helper stamps wd_t under it too, and a watchdog time read before the lock was older than the stamp of an AudioUnit the return from the background had just
 // started (DRAGON QUEST VII Reimagined on an iPhone: "has not called back for 18446744073662 ms", a restart of a running AudioUnit)
-enum { WD_TICK_MS = 50, WD_STALL_MS = 200 };
+// The watchdog wakes every 50 ms while an output is starting, waiting for its first callback, standing on the silent sink or under suspicion, and every 250 ms (WD_HEALTHY_MS; DM_AUDIO_WD_MS sets it, 50 is the old
+// fixed tick) while every playing output's device calls back and the others are stopped: about 16 fewer wakeups a second for the whole run of a game whose audio plays. A pass after a 250 ms tick measures from
+// the time of the last callback itself (cb_t, which au_render stamps), not from its own time, which can come up to 250 ms after it: a last callback more than 50 ms old, or none since the last pass, only
+// suspects a stall and falls back to 50 ms ticks, and the 50 ms passes decide as before, on more than 200 ms without a callback. So a real stall is caught 200-350 ms after its last callback (at most the healthy
+// tick plus two 50 ms ticks; with a pass's own time it was up to 550 ms, and the log understated it), and a stop of the whole process (its I/O thread stopped too) is not taken for one: the device calls back
+// again within the 50 ms that follow, and a pass more than 150 ms later than its tick only restarts the count
+enum { WD_TICK_MS = 50, WD_HEALTHY_MS = 250, WD_STALL_MS = 200 };
+static int wd_healthy_ms(void) {   // DM_AUDIO_WD_MS: 50-1000 ms
+    const char *e = getenv("DM_AUDIO_WD_MS"); int v = e && *e ? atoi(e) : WD_HEALTHY_MS;
+    return v < WD_TICK_MS ? WD_TICK_MS : v > 1000 ? 1000 : v;
+}
 typedef struct { audio_stats stats; int id, ch; } audio_report;
 // Both consumers hold g_aos_lock. A local copy owns every log argument, so a slow log cannot hold up registry changes or retain a closed output.
 static int stats_take(aout *a, audio_report *r) {
@@ -341,9 +358,12 @@ static int stats_take(aout *a, audio_report *r) {
 }
 static void stats_log(const audio_report *r) {
     const audio_stats *s = &r->stats;
-    LOG("audio #%d device callbacks %llu: %u–%u frames each, %.1f blocks queued on average at callback; in these %llu, %llu underruns, %.1f ms zero-padded", r->id,
+    LOG("audio #%d device callbacks %llu: %u–%u frames each, %.1f blocks queued on average at callback; in these %llu, %llu underruns, %.1f ms zero-padded; "
+        "watchdog passes so far (all outputs) %llu on the 50 ms tick, %llu on the healthy one (%llu of them found the last callback over 50 ms old)", r->id,
         (unsigned long long)s->calls, s->fmin, s->fmax, (double)s->qsum / s->count, (unsigned long long)s->count,
-        (unsigned long long)s->underruns, s->zero_bytes / (2.0 * r->ch) / (RATE / 1000.0));
+        (unsigned long long)s->underruns, s->zero_bytes / (2.0 * r->ch) / (RATE / 1000.0),
+        (unsigned long long)atomic_load_explicit(&g_wd_fast, memory_order_relaxed), (unsigned long long)atomic_load_explicit(&g_wd_slow, memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_wd_stale, memory_order_relaxed));
 }
 static void stats_drain(void) {
     audio_report reports[AOMAX]; int n = 0;
@@ -352,42 +372,65 @@ static void stats_drain(void) {
     pthread_mutex_unlock(&g_aos_lock);
     for (int i = 0; i < n; i++) stats_log(&reports[i]);
 }
-static void *au_watchdog(void *p) {
-    (void)p; uint64_t last = now_ns();
-    for (;;) {
-        usleep(WD_TICK_MS * 1000);
-        pthread_mutex_lock(&g_aos_lock);
-        uint64_t t = now_ns(), gap = t - last; last = t;
-        for (int i = 0; i < AOMAX; i++) {
-            aout *a = g_aos[i]; if (!a || !a->au) continue;
-            uint64_t n = atomic_load_explicit(&a->cb_n, memory_order_relaxed);
-            if (a->start_phase == AU_WAIT_CALLBACK) {
-                if (n != a->wd_n) {
-                    null_stop(a);
-                    atomic_store_explicit(&a->hold_device, 0, memory_order_release);
-                    if (a->stalled) LOG("audio #%d: AudioUnit restarted", a->id);
-                    a->backend = BK_AU; a->start_phase = AU_IDLE; a->stalled = a->retry_ms = 0;
-                    a->wd_n = n; a->wd_t = t;
-                } else if (gap > 4ull * WD_TICK_MS * 1000000) a->wd_t = t;
-                else if (t - a->wd_t >= 1000000000ull) {
-                    if (!a->stalled) LOG("[RED] audio #%d: no device callback after start; continuing on the silent sink", a->id);
-                    AudioOutputUnitStop(a->au); a->start_phase = AU_IDLE; au_retry(a, t);
-                }
-                continue;
-            }
-            if (a->backend == BK_NULL) {
-                if (t >= a->retry_at) au_request_start(a);
-                continue;
-            }
-            if (a->backend != BK_AU) continue;
-            if (gap > 4ull * WD_TICK_MS * 1000000 || n != a->wd_n) {
+// One pass over the outputs, under g_aos_lock: t is now, gap the time since the last pass, slept_ms the tick that pass slept. Returns whether the next tick may be the healthy one: at least one output's device
+// called back since the last pass, and every other output with an AudioUnit is stopped (BK_NONE with no start in flight)
+static int wd_pass(uint64_t t, uint64_t gap, int slept_ms) {
+    int calling = 0, quiet = 1;
+    // A late wake-up of the watchdog itself (the whole process was stopped) only restarts the count: one 150 ms past the tick it slept, the old 200 ms on a 50 ms tick and 400 ms on a 250 ms one. It was four
+    // of the tick slept (1000 ms on a 250 ms tick), so a 600 ms stop of the process during one was only a suspicion, the next 50 ms pass compared against a time from before the stop, and the device, whose I/O
+    // thread had not yet resumed, was stopped and the silent sink stood in for about a second
+    uint64_t late = ((uint64_t)slept_ms + 150) * 1000000;
+    for (int i = 0; i < AOMAX; i++) {
+        aout *a = g_aos[i]; if (!a || !a->au) continue;
+        uint64_t n = atomic_load_explicit(&a->cb_n, memory_order_acquire);
+        if (a->start_phase != AU_IDLE || a->stalled) quiet = 0;
+        if (a->start_phase == AU_WAIT_CALLBACK) {
+            if (n != a->wd_n) {
+                null_stop(a);
+                atomic_store_explicit(&a->hold_device, 0, memory_order_release);
+                if (a->stalled) LOG("audio #%d: AudioUnit restarted", a->id);
+                a->backend = BK_AU; a->start_phase = AU_IDLE; a->stalled = a->retry_ms = 0;
                 a->wd_n = n; a->wd_t = t;
-            } else if (t - a->wd_t > WD_STALL_MS * 1000000ull) {
-                LOG("[RED] audio #%d: the device has not called back for %.0f ms while playing: the silent sink stands in, retrying the AudioUnit", a->id, (t - a->wd_t) / 1e6);
-                AudioOutputUnitStop(a->au); a->backend = BK_NONE; null_start(a);
-                au_retry(a, t);
+            } else if (gap > late) a->wd_t = t;
+            else if (t - a->wd_t >= 1000000000ull) {
+                if (!a->stalled) LOG("[RED] audio #%d: no device callback after start; continuing on the silent sink", a->id);
+                AudioOutputUnitStop(a->au); a->start_phase = AU_IDLE; au_retry(a, t);
             }
+            continue;
         }
+        if (a->backend == BK_NULL) {
+            quiet = 0;
+            if (t >= a->retry_at) au_request_start(a);
+            continue;
+        }
+        if (a->backend != BK_AU) continue;
+        if (gap <= late && n != a->wd_n && slept_ms > WD_TICK_MS) {   // called back during a healthy tick: from the last callback's own time, which a pass can come up to the tick after
+            uint64_t c = atomic_load_explicit(&a->cb_t, memory_order_relaxed);   // cb_n's acquire load above orders it after the stamp of the callback it counted
+            a->wd_n = n; a->wd_t = c && c < t ? c : t;
+            if (t - a->wd_t > WD_TICK_MS * 1000000ull) { quiet = 0; atomic_fetch_add_explicit(&g_wd_stale, 1, memory_order_relaxed); }   // not in the last 50 ms: a suspicion
+            else calling = 1;
+        } else if (gap > late || n != a->wd_n) {
+            if (n != a->wd_n) calling = 1; else quiet = 0;
+            a->wd_n = n; a->wd_t = t;
+        } else if (slept_ms > WD_TICK_MS) quiet = 0;   // no callback in a healthy tick: a suspicion, which the next 50 ms tick decides
+        else if (t - a->wd_t > WD_STALL_MS * 1000000ull) {
+            LOG("[RED] audio #%d: the device has not called back for %.0f ms while playing: the silent sink stands in, retrying the AudioUnit", a->id, (t - a->wd_t) / 1e6);
+            AudioOutputUnitStop(a->au); a->backend = BK_NONE; null_start(a);
+            au_retry(a, t); quiet = 0;
+        } else quiet = 0;
+    }
+    return calling && quiet;
+}
+static void *au_watchdog(void *p) {
+    (void)p; uint64_t last = now_ns(); int healthy_ms = wd_healthy_ms(), tick = WD_TICK_MS;
+    LOG("audio watchdog: a %d ms tick, %d ms while every playing output's device calls back (DM_AUDIO_WD_MS)", WD_TICK_MS, healthy_ms);
+    for (;;) {
+        pthread_mutex_lock(&g_aos_lock);
+        struct timespec rel = {tick / 1000, (long)(tick % 1000) * 1000000};
+        pthread_cond_timedwait_relative_np(&g_wd_cv, &g_aos_lock, &rel);   // relative: a change of the wall clock cannot stretch it
+        atomic_fetch_add_explicit(tick > WD_TICK_MS ? &g_wd_slow : &g_wd_fast, 1, memory_order_relaxed);
+        uint64_t t = now_ns(), gap = t - last; last = t;
+        tick = wd_pass(t, gap, tick) ? healthy_ms : WD_TICK_MS;
         pthread_mutex_unlock(&g_aos_lock);
         stats_drain();
     }

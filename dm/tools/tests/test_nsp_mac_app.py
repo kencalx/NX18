@@ -747,7 +747,8 @@ class Script(unittest.TestCase):
         with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', self.prog), mock.patch.object(nsp, 'chain_of', lambda repo: '0123456789ab'), \
              mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append):
             nsp.mac_app(sys.executable, REPO, out, 0x01008CF01BAAC000, tmp, tmp / 'ex', tmp / 'patched', tmp / 'dmhost', tmp / 'font', tmp / 'shader/cache' if gfx == 'nvn' else tmp / 'shader',
-                        kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''))
+                        kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''),
+                        gpu_option=kw.get('gpu_option', True))
         self.pso_cmd = next((c for c in ran if c[1].endswith('pso_offline.py')), None)   # before the packer
         self.settings_cmd = next(c for c in ran if c[1].endswith('dm/games/settings.py'))
         c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
@@ -779,7 +780,7 @@ class Script(unittest.TestCase):
                          {'--game': '01008CF01BAAC000', '--msl': str(tmp / 'shader/cache/b-0123456789ab'), '--out': str(tmp / 'pso/mac'), '--work': str(tmp / 'pso/mac-work'),
                           '--gpu': 'applegpu_g14s', '--platform': 'macos'})
         self.assertFalse(any('does not name this Mac' in m for m in self.said))
-        o, _ = self.pack_cmd('nvn', work=tmp, gpus='g18p')   # PSO_GPUS set for the IPA: built as asked, with a note that this Mac's app builds its own bases
+        o, _ = self.pack_cmd('nvn', work=tmp, gpus='g18p')   # --gpu g18p (pack_cmd passes gpu_option=True): built as asked, with a note that this Mac's app builds its own bases
         self.assertEqual(o['--pso'], str(tmp / 'pso/mac'))
         self.assertTrue(any('does not name this Mac\'s GPU (applegpu_g14s)' in m for m in self.said))
         o, _ = self.pack_cmd('nvn', work=tmp, gpus='applegpu_g14s,g18p'); self.assertFalse(any('does not name this Mac' in m for m in self.said))
@@ -788,6 +789,25 @@ class Script(unittest.TestCase):
         shutil.rmtree(tmp / 'pso')
         o, _ = self.pack_cmd('nvn', work=tmp, no_bases=True)   # every eligible pair has function constants: pso_offline.py makes no archive, the app is packed without one
         self.assertNotIn('--pso', o); self.assertIsNotNone(self.pso_cmd)
+
+    def test_pso_archive_arch_from_the_setting(self):   # PSO_GPUS is the IPA's (g19p, an iPhone's GPU, which metal-tt refuses for macOS): without --gpu the Mac app's archive is for this Mac's GPU
+        self.assertEqual(nsp.PSO_GPUS, 'g19p')   # the shipped setting this guards
+        self.assertEqual(nsp.mac_archive_gpus(nsp.PSO_GPUS, False, 'applegpu_g16s'), 'applegpu_g16s')
+        self.assertEqual(nsp.mac_archive_gpus('g19p,applegpu_g16s', False, 'applegpu_g16s'), 'applegpu_g16s')   # the iPhone's architecture is left out even beside this Mac's
+        self.assertEqual(nsp.mac_archive_gpus('none', False, 'applegpu_g16s'), 'none')   # none in the setting: no archive for either
+        self.assertEqual(nsp.mac_archive_gpus('', False, 'applegpu_g16s'), 'applegpu_g16s')
+        self.assertEqual(nsp.mac_archive_gpus('g19p', False, None), 'g19p')   # this Mac's GPU unknown: as before
+        self.assertEqual(nsp.mac_archive_gpus('g19p', True, 'applegpu_g16s'), 'g19p')   # --gpu g19p: as given (the old behaviour)
+        self.assertEqual(nsp.mac_archive_gpus('g15s', True, 'applegpu_g16s'), 'g15s')   # --gpu: another Mac's GPU
+        tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp)
+        (tmp / 'profile').mkdir(); (tmp / 'profile/shader_pairs.tsv').write_text('v\tf\n')
+        o, _ = self.pack_cmd('nvn', work=tmp, gpus=nsp.PSO_GPUS, gpu_option=False)   # the build's own call: (args.gpu or PSO_GPUS) with no --gpu
+        self.assertEqual(o['--pso'], str(tmp / 'pso/mac'))
+        p = self.pso_cmd; self.assertEqual(p[p.index('--gpu') + 1], 'applegpu_g14s')
+        self.assertTrue(any('PSO_GPUS (g19p) is the IPA\'s' in m for m in self.said))
+        o, _ = self.pack_cmd('nvn', work=tmp, gpus='none', gpu_option=False); self.assertIsNone(self.pso_cmd)
+        script = (REPO / 'scripts/build_ipa_from_nsp.py').read_text()   # the call site says where the value came from
+        self.assertIn("(args.gpu or PSO_GPUS).strip(), programs, control, gpu_option=bool((args.gpu or '').strip()))", script)
 
     def test_pso_archive_failure_is_a_warning(self):   # the archive is an optimization: without it the app builds the bases on its first start
         tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp)

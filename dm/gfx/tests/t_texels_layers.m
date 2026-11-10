@@ -163,6 +163,29 @@ int main(void) { @autoreleasepool {
     write_region(0, 4, 3, 3, 16, 16, 0xf8); pr0 = g_part_reuploads;
     CHECK(readback_ok("after the batch came back"), "a re-upload once that batch has come back reads back as written");
     if (part_on) CHECK(g_part_reuploads == pr0 + 1, "and is partial again");
+    // A spare no re-upload uses for PKG_SPARE_IDLE submissions is let go (pkg_spare_trim): out of the residency set, counted for the memory line; the next re-upload makes a new texture
+    // and, partial re-upload on, copies what was not written from the one it replaces. DM_NVN_PKG_SPARE_IDLE=0 keeps it
+    CHECK(pk->spare != nil, "the texture has a spare after its re-uploads");
+    uint64_t freed0 = atomic_load(&g_pkg_spare_freed), spare_bytes = pk->spare.allocatedSize; __weak id<MTLTexture> idle_spare = pk->spare;
+    for (int i = 0; i < PKG_SPARE_IDLE + PKG_SPARE_SCAN + 2; i++) { @autoreleasepool { mtl_sub_begin(); if (!mtl_wait(mtl_sub_commit(), 5000000000ull)) { CHECK(0, "idle submission completes"); break; } } }
+    settle(); @autoreleasepool { mtl_sub_begin(); mtl_wait(mtl_sub_commit(), 5000000000ull); } settle(); res_commit();
+    int spare_resident; @autoreleasepool { id<MTLTexture> sp = idle_spare; pthread_mutex_lock(&g_res_mu); spare_resident = sp && [g_res_objects containsObject:sp]; pthread_mutex_unlock(&g_res_mu); }
+    printf("after %d idle submissions: spare %s, spares alive %llu (%llu KB), let go %llu (%llu KB of %llu KB)\n", PKG_SPARE_IDLE + PKG_SPARE_SCAN + 2, pk->spare ? "kept" : "let go",
+           (unsigned long long)atomic_load(&g_pkg_spare_n), (unsigned long long)(atomic_load(&g_pkg_spare_bytes) >> 10), (unsigned long long)(atomic_load(&g_pkg_spare_freed) - freed0), (unsigned long long)(atomic_load(&g_pkg_spare_freed_bytes) >> 10), (unsigned long long)(spare_bytes >> 10));
+    if (pkg_spare_idle_on()) {
+        CHECK(pk->spare == nil && pk->spare_stamp == 0 && pk->spare_seq == 0, "an idle spare is let go");
+        CHECK(!spare_resident, "and leaves the residency set");
+        CHECK(atomic_load(&g_pkg_spare_freed) == freed0 + 1 && atomic_load(&g_pkg_spare_n) == 0 && atomic_load(&g_pkg_spare_bytes) == 0, "the memory line's counts: one let go, none alive");
+    } else {
+        CHECK(pk->spare != nil && spare_resident && atomic_load(&g_pkg_spare_freed) == freed0, "DM_NVN_PKG_SPARE_IDLE=0: the spare is kept");
+        CHECK(atomic_load(&g_pkg_spare_n) == 1 && atomic_load(&g_pkg_spare_bytes) == spare_bytes, "the memory line counts the spare kept");
+    }
+    write_region(0, 2, 11, 13, 20, 20, 0x2c); pr0 = g_part_reuploads; rr0 = g_pkg_reuploads; id<MTLTexture> before_idle = pk->tex;
+    CHECK(readback_ok("after the spare went idle"), "a re-upload after the spare went idle reads back as written");
+    CHECK(g_pkg_reuploads == rr0 + 1 && pk->tex != before_idle && pk->spare == before_idle, "one re-upload into another texture, the one it replaced the spare again");
+    if (part_on) CHECK(g_part_reuploads == pr0 + 1, "and it is partial, copying the rest from the texture it replaces");
+    write_region(0, 6, 1, 1, 8, 8, 0x3d);
+    CHECK(readback_ok("into the new spare"), "the next re-upload, into the new spare, reads back as written");
     printf("partial re-uploads %llu, levels of layers kept %llu / deswizzled %llu, %.2f MB kept; no-copy source buffers %llu\n", (unsigned long long)g_part_reuploads,
            (unsigned long long)g_part_kept, (unsigned long long)g_part_up, g_part_kept_bytes / 1048576.0, (unsigned long long)g_up_big_srcs);
     h_nvnTextureFinalize(&tex); h_nvnCommandBufferFinalize(&cmd); h_nvnMemoryPoolFinalize(&tpool); h_nvnMemoryPoolFinalize(&cpool); settle();

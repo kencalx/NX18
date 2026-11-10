@@ -398,6 +398,14 @@ static void guest_file_sweep(void) {
     }
     pthread_mutex_unlock(&g_map_lock);
 }
+// One sweep now, for memory pressure or going to the background (hle_nvn.c dm_gfx_pressure, dm_gfx_trim): the same step as guest_file_thread's every 10 s, so the pages given back since the
+// last sweep only age and are punched at the next. The bytes punched; 0 while the guest is anonymous
+uint64_t dm_guest_file_trim(void) {
+    if (!g_gf_n) return 0;
+    uint64_t b0 = atomic_load(&g_gf_punched);
+    guest_file_sweep();
+    return atomic_load(&g_gf_punched) - b0;
+}
 // A hole-free read / write of guest heap bytes for the cheat VM (hle_cheats.c): under g_map_lock no concurrent SetHeapSize
 // can mprotect the span away between the bounds check and the copy (both hold this same lock), so a live heap address cannot
 // turn into a fault while the cheat VM touches it. Both return 0 when every byte was inside the currently opened (readable

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "dmsh_chain.h"   // dm/gfx/nvn (-I from the Makefile)
+#include "msl_image.h"    // a game's shader library image (DM_REFL_IMG), read in place
 
 enum { C = NVN_RB_CBUF, S = NVN_RB_SAMP, T = NVN_RB_TEX, I = NVN_RB_IMG, TB = NVN_RB_TBUF };
 enum { F = NVN_DPF_FLOAT, U = NVN_DPF_UINT, D = NVN_DPF_DEPTH };
@@ -21,8 +22,105 @@ static NSDictionary *load(const char *key) {
     return [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
 }
 
+// Two conversions of one json are the same reflection: every field, the bindings b[0..nb), the readable-tile tables and c1. The pointers and the room differ by design (cap, tail)
+static int same_refl(const nvn_refl *a, const nvn_refl *b, char *why, size_t wl) {
+    nvn_refl x = *a, y = *b; x.b = y.b = NULL; x.fc = y.fc = NULL; x.uv = y.uv = NULL; x.tail = y.tail = NULL; x.cap = y.cap = 0; x.c1 = y.c1 = NULL;
+    if (memcmp(&x, &y, sizeof x)) { snprintf(why, wl, "scalar fields differ"); return 0; }
+    if (a->nb && memcmp(a->b, b->b, (size_t)a->nb * sizeof *a->b)) { snprintf(why, wl, "bindings differ"); return 0; }
+    if (memcmp(a->fc, b->fc, sizeof *a->fc)) { snprintf(why, wl, "fragment readable-tile tables differ"); return 0; }
+    if (memcmp(a->uv, b->uv, sizeof *a->uv)) { snprintf(why, wl, "vertex readable-tile tables differ"); return 0; }
+    if (a->c1_len && memcmp(a->c1, b->c1, a->c1_len)) { snprintf(why, wl, "c1 differs"); return 0; }
+    return 1;
+}
+static const long FIXED_BLOCK = (long)(sizeof(nvn_refl_fc) + sizeof(nvn_refl_uv) + NVN_REFL_MAXB * sizeof(nvn_rbind));   // what DM_NVN_REFL_FIXED=1 gives every shader
+// The tail block's layout: bindings at their real number, each table part only for a shader with entries in it, nothing at all for a shader with neither; DM_NVN_REFL_FIXED=1 the
+// old fixed block
+static void layout_cases(nvn_refl *r) {
+    char err[160] = ""; int f1 = fail; uint64_t t0, b0, t1, b1;
+    NSDictionary *two = @{@"route": @"B", @"bindings": @[@{@"kind": @"cbuf", @"reg": @0, @"arg_id": @0, @"msl_name": @"vp_c3", @"msl_type": @"constant vp_c3_t*"},
+        @{@"kind": @"tex", @"reg": @1, @"arg_id": @1, @"msl_name": @"vp_t_1", @"msl_type": @"texture2d<float>"}]};
+    NSDictionary *none = @{@"route": @"B", @"bindings": @[]};
+    NSDictionary *fetch = @{@"route": @"B", @"stage": @"ps", @"bindings": @[@{@"kind": @"tex", @"reg": @1, @"arg_id": @0, @"msl_name": @"fp_t_1", @"msl_type": @"texture2d<float>"}],
+        @"fetch": @{@"calls": @[@{@"fc": @0, @"tex_reg": @1, @"varying_locn": @3}], @"mixed_regs": @[@200]}};
+    NSDictionary *uv = @{@"route": @"B", @"stage": @"vs", @"bindings": @[], @"raster": @{@"pos_attr": @0, @"uv_from_attr": @{@"5": @2}}};
+    nvn_refl_set_fixed(0);
+    nvn_refl_stats(&t0, &b0);
+    check("tail: two bindings convert", 0, nvn_refl_from_json(two, r, err, sizeof err));
+    nvn_refl_stats(&t1, &b1);
+    check("tail: room for exactly the two bindings", 2, r->cap);
+    check("tail: no tables of its own", 1, r->fc == &nvn_refl_fc_none && r->uv == &nvn_refl_uv_none);
+    check("tail: one block of two bindings counted", (long)(2 * sizeof(nvn_rbind)), (long)(b1 - b0));
+    check("tail: the bindings come back", NVN_RB_TEX, r->b[1].kind); check("tail: binding 1 slot", 1, r->b[1].reg);
+    check("tail: an empty table reads -1 for uv_attr", -1, r->uv->uv_attr[31]); check("tail: an empty table reads -1 for uv_aff_attr", -1, r->uv->uv_aff_attr[0]);
+    check("tail: an empty table reads 0 for fc_mixed", 0, (long)r->fc->fc_mixed[3]);
+    check("tail: no bindings converts", 0, nvn_refl_from_json(none, r, err, sizeof err));
+    check("tail: no bindings, no block", 1, r->tail == NULL && r->b == NULL && r->cap == 0);
+    nvn_refl_stats(&t1, &b1); check("tail: the earlier block was released", (long)t0, (long)t1);
+    check("tail: fetch calls convert", 0, nvn_refl_from_json(fetch, r, err, sizeof err));
+    check("tail: fetch calls give fragment tables of its own, first in the block", 1, r->fc != &nvn_refl_fc_none && (const void *)r->fc == r->tail && r->uv == &nvn_refl_uv_none);
+    check("tail: and one binding after them", 1, r->cap == 1 && (const char *)r->b == (const char *)r->tail + sizeof(nvn_refl_fc));
+    nvn_refl_stats(&t1, &b1); check("tail: fragment tables and one binding counted", (long)(sizeof(nvn_refl_fc) + sizeof(nvn_rbind)), (long)(b1 - b0));
+    check("tail: fc_reg kept", 1, r->fc->fc_reg[0]); check("tail: fc_locn kept", 3, r->fc->fc_locn[0]); check("tail: mixed slot 200", 1, (long)(r->fc->fc_mixed[3] >> 8 & 1));
+    check("tail: uv_attr still reads -1", -1, r->uv->uv_attr[0]);
+    check("tail: a vertex uv fact converts", 0, nvn_refl_from_json(uv, r, err, sizeof err));
+    check("tail: a vertex uv fact gives vertex tables of its own only", 1, r->uv != &nvn_refl_uv_none && r->fc == &nvn_refl_fc_none && r->cap == 0 && (const void *)r->uv == r->tail);
+    check("tail: uv_attr[5] = attribute 2", 2, r->uv->uv_attr[5]); check("tail: uv_attr[4] none", -1, r->uv->uv_attr[4]);
+    check("tail: a refused json leaves no block", 1, nvn_refl_from_json(@{@"route": @"B", @"bindings": @[@{@"kind": @"foo", @"arg_id": @0, @"msl_name": @"x", @"msl_type": @"x"}]}, r, err, sizeof err) && !r->tail && r->fc == &nvn_refl_fc_none && r->uv == &nvn_refl_uv_none);
+    nvn_refl_stats(&t1, &b1); check("tail: every block released", (long)t0, (long)t1); check("tail: every byte released", (long)b0, (long)b1);
+    nvn_refl_set_fixed(1);
+    check("fixed: two bindings convert", 0, nvn_refl_from_json(two, r, err, sizeof err));
+    check("fixed: room for NVN_REFL_MAXB bindings", NVN_REFL_MAXB, r->cap);
+    check("fixed: both tables of its own", 1, r->fc != &nvn_refl_fc_none && r->uv != &nvn_refl_uv_none);
+    int zero = 1; for (int i = r->nb; i < r->cap; i++) { nvn_rbind z = {0}; if (memcmp(&r->b[i], &z, sizeof z)) zero = 0; }
+    check("fixed: zeros past nb, as the embedded array had", 1, zero);
+    nvn_refl_stats(&t1, &b1); check("fixed: the old block's size counted", FIXED_BLOCK, (long)(b1 - b0));
+    nvn_refl_free(r); nvn_refl_set_fixed(-1);
+    nvn_refl h = {0}; check("reserve: a shader made by hand gets room", 1, nvn_refl_reserve(&h, NVN_REFL_MAXB, 1) && h.cap == NVN_REFL_MAXB);
+    h.nb = 1; h.b[0] = (nvn_rbind){.kind = NVN_RB_IMG, .reg = 7}; nvn_refl_fcw(&h)->fc_reg[0] = 9; nvn_refl_uvw(&h)->uv_attr[2] = 4;
+    check("reserve: the tables written in place", 1, h.fc->fc_reg[0] == 9 && h.uv->uv_attr[2] == 4 && h.uv->uv_attr[3] == -1);
+    nvn_refl g = {0}; g.nb = 0; check("reserve: a table alone keeps the bindings it has", 1, nvn_refl_fcw(&g) && g.cap == 0 && g.uv == &nvn_refl_uv_none);
+    nvn_refl_free(&g); nvn_refl_free(&h);
+    printf("%-60s %s\n", "reflection tail block: real length, tables only when used, fixed layout behind DM_NVN_REFL_FIXED=1", fail == f1 ? "✓" : "✗");
+}
+// Every reflection json of a game's shader library image (DM_REFL_IMG=<build>/shader/<platform>/b-<chain>.img), converted in the fixed layout and in the tail layout: the same reflection
+// each time, and the tail's bytes against the fixed block's
+static void roundtrip_image(const char *path) {
+    if (!path || !*path) { printf("SKIP: DM_REFL_IMG unset (a game's shader library image, b-<chain>.img): the round trip over a real library does not run\n"); skipped++; return; }
+    romfs_img *m = romfs_image_open(path);
+    if (!m) { printf("SKIP: %s does not open as a shader library image: the round trip does not run\n", path); skipped++; return; }
+    int f1 = fail; unsigned long shaders = 0, refused = 0, own_fc = 0, own_uv = 0, diff = 0, nb_sum = 0, le8 = 0; uint64_t fixed_bytes = 0, tail_bytes = 0;
+    const img_ent *root = &m->e[0];
+    for (uint64_t k = root->a; k < root->a + root->b; k++) @autoreleasepool {
+        const img_ent *x = &m->e[k]; const char *nm = m->names + x->name;
+        if (!x->type || x->nlen < 5 || memcmp(nm + x->nlen - 5, ".json", 5)) continue;
+        NSMutableData *d = [NSMutableData dataWithLength:(NSUInteger)x->b];
+        if (!romfs_image_read(m->fd, d.mutableBytes, (size_t)x->b, (off_t)x->a)) continue;
+        NSDictionary *j = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+        if (![j isKindOfClass:[NSDictionary class]] || ![j[@"route"] isEqual:@"B"]) continue;
+        nvn_refl a = {0}, b = {0}; char ea[160] = "", eb[160] = "", why[64] = ""; uint64_t t0, b0, t1, b1;
+        nvn_refl_set_fixed(1); int ra = nvn_refl_from_json(j, &a, ea, sizeof ea);
+        nvn_refl_set_fixed(0); nvn_refl_stats(&t0, &b0); int rb = nvn_refl_from_json(j, &b, eb, sizeof eb); nvn_refl_stats(&t1, &b1);
+        shaders++;
+        int fc_ok = (b.fc != &nvn_refl_fc_none) == !!memcmp(b.fc, &nvn_refl_fc_none, sizeof *b.fc), uv_ok = (b.uv != &nvn_refl_uv_none) == !!memcmp(b.uv, &nvn_refl_uv_none, sizeof *b.uv);
+        if (ra != rb || (ra && strcmp(ea, eb))) { if (diff++ < 5) printf("  %.*s: fixed %d (%s), tail %d (%s)\n", (int)x->nlen, nm, ra, ea, rb, eb); }
+        else if (ra) refused++;
+        else if (!same_refl(&a, &b, why, sizeof why) || b.cap != b.nb || !fc_ok || !uv_ok) {
+            if (diff++ < 5) printf("  %.*s: %s (cap %d, nb %d)\n", (int)x->nlen, nm, why[0] ? why : "tail not at the real length", b.cap, b.nb); }
+        else { own_fc += b.fc != &nvn_refl_fc_none; own_uv += b.uv != &nvn_refl_uv_none; nb_sum += (unsigned long)b.nb; le8 += b.nb <= 8; tail_bytes += b1 - b0; fixed_bytes += (uint64_t)FIXED_BLOCK; }
+        nvn_refl_free(&a); nvn_refl_free(&b);
+    }
+    nvn_refl_set_fixed(-1); romfs_image_close(m);
+    check("round trip: shaders in the library", 1, shaders > 0);
+    check("round trip: shaders whose two conversions differ", 0, (long)diff);
+    unsigned long ok = shaders - refused - diff;
+    printf("round trip of %lu reflections in %s: %lu the same both ways, %lu refused both ways, %lu differ; %lu with fragment and %lu with vertex readable-tile tables, %lu with 8 bindings or fewer, "
+           "%.1f bindings on average; blocks %.1f KB fixed against %.1f KB in tails (%.0f bytes a shader against %.0f)\n", shaders, path, ok, refused, diff, own_fc, own_uv, le8, ok ? (double)nb_sum / ok : 0.0,
+           fixed_bytes / 1024.0, tail_bytes / 1024.0, ok ? (double)fixed_bytes / ok : 0.0, ok ? (double)tail_bytes / ok : 0.0);
+    printf("%-60s %s\n", "round trip over a real library: fixed and tail layouts agree", fail == f1 ? "✓" : "✗");
+}
+
 int main(void) { @autoreleasepool {
-    nvn_refl r; char err[160] = "";
+    nvn_refl r = {0}; char err[160] = "";
     {   // native image atomics (dmsh_atomic.py): one read_write image, marked atomic by the build; an image the shader only stores to is not
         NSDictionary *j = @{@"route": @"B", @"bindings": @[
             @{@"kind": @"img", @"reg": @2, @"arg_id": @0, @"msl_name": @"cp_i_cb2_4C_r32ui", @"msl_type": @"texture_buffer<uint, access::read_write>", @"atomic": @YES},
@@ -43,12 +141,12 @@ int main(void) { @autoreleasepool {
         check("fetch calls: three", 3, r.nfc);
         check("fetch calls: projective bit", 2, r.fc_proj);
         check("fetch calls: pixel-position bit", 4, r.fc_fpos);
-        check("fetch calls: pixel-position has no interpolated output", 0xff, r.fc_locn[2]);
-        check("fetch calls: x scale c[6].x", 6 << 2, r.fc_scale[2][0]);
-        check("fetch calls: y scale c[6].y", 6 << 2 | 1, r.fc_scale[2][1]);
+        check("fetch calls: pixel-position has no interpolated output", 0xff, r.fc->fc_locn[2]);
+        check("fetch calls: x scale c[6].x", 6 << 2, r.fc->fc_scale[2][0]);
+        check("fetch calls: y scale c[6].y", 6 << 2 | 1, r.fc->fc_scale[2][1]);
         NSDictionary *far = @{@"route": @"B", @"stage": @"ps", @"bindings": @[], @"fetch": @{@"calls": @[@{@"fc": @0, @"tex_reg": @6, @"frag_pos": @[@[@6, @989, @0], @[@6, @989, @1]]}]}};
         check("fetch calls: a vector past c[x][63] converts (Mario Kart World's c6[989])", 0, nvn_refl_from_json(far, &r, err, sizeof err));
-        check("fetch calls: slot 6, vector 989, x", 6 << 16 | 989 << 2, r.fc_scale[0][0]);
+        check("fetch calls: slot 6, vector 989, x", 6 << 16 | 989 << 2, r.fc->fc_scale[0][0]);
         NSDictionary *bad = @{@"route": @"B", @"stage": @"ps", @"bindings": @[], @"fetch": @{@"calls": @[@{@"fc": @0, @"tex_reg": @3, @"frag_pos": @[@[@16, @6, @0], @[@0, @6, @1]]}]}};
         check("fetch calls: a uniform slot out of range is refused", 1, nvn_refl_from_json(bad, &r, err, sizeof err) != 0);
     }
@@ -119,6 +217,9 @@ int main(void) { @autoreleasepool {
         check("B texture without a resolved slot fails", 1, nvn_refl_from_json(b2, &r, err, sizeof err) != 0);
         printf("%-60s %s\n", "B negative control: unknown kind / missing slot", fail == f1 ? "✓" : "✗");
     }
+    layout_cases(&r);
+    roundtrip_image(getenv("DM_REFL_IMG"));
+    nvn_refl_free(&r);
     printf("== %d checks, %d failed, %d sample files missing (those checks skipped) ==\n", n, fail, skipped);
     return fail != 0;
 } }

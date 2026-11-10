@@ -73,6 +73,7 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_switch2
 	$(B)/t_haptics
 	$(B)/t_haptics_apple
+	$(B)/t_drawable_count
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
 	$(B)/t_nro
 	$(B)/t_symbols
@@ -258,6 +259,10 @@ $(B)/t_hid_tsan: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle
 	$(CLANG) -O1 -g -fsanitize=thread -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c
 $(B)/t_haptics: t_haptics.c ../hle_haptics.c ../hle_haptics.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_haptics.c ../hle_haptics.c
+# DM_DRAWABLE_COUNT=2|3 on a CAMetalLayer (../front_drawable.h, the iOS and Mac front ends): unset leaves Metal's 3
+run: $(B)/t_drawable_count
+$(B)/t_drawable_count: t_drawable_count.m ../front_drawable.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_drawable_count.m -framework QuartzCore -framework Foundation
 $(B)/t_haptics_apple: t_haptics_apple.m ../haptics_apple.m ../haptics_apple.h ../hle_haptics.c ../hle_haptics.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_haptics_apple.m ../hle_haptics.c -framework Cocoa -framework GameController -framework CoreHaptics -framework IOKit
 $(B)/t_time: t_time.c ../hle_time.c ../hle.h ../dm.h $(GAME_H) | $(B)

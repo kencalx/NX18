@@ -11,9 +11,9 @@ static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
 static int refl_type(NSString *msl_type, uint8_t *dpf) {
     NSDictionary *j = @{@"route": @"B", @"stage": @"pixel", @"bindings": @[@{@"msl_name": @"t", @"msl_type": msl_type, @"arg_id": @0, @"kind": @"tex", @"reg": @128}]};
-    nvn_refl r; char err[256] = "";
-    if (nvn_refl_from_json(j, &r, err, sizeof err) || r.nb != 1) { fprintf(stderr, "reflection of %s: %s\n", msl_type.UTF8String, err); return -1; }
-    *dpf = r.b[0].dpf; return r.b[0].dtt;
+    nvn_refl r = {0}; char err[256] = "";
+    if (nvn_refl_from_json(j, &r, err, sizeof err) || r.nb != 1) { fprintf(stderr, "reflection of %s: %s\n", msl_type.UTF8String, err); nvn_refl_free(&r); return -1; }
+    *dpf = r.b[0].dpf; int dtt = r.b[0].dtt; nvn_refl_free(&r); return dtt;
 }
 int main(void) { @autoreleasepool {
     mtl_init(); NSError *error = nil; uint8_t dpf = 0;

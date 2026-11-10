@@ -138,7 +138,7 @@ int main(void) {
     if (!ok2) return 1;
 
     // Scenario 3: the device stops calling back while the output plays (iOS does this when another audio session takes over, without telling the AudioUnit). 20 blocks of 100 ms; at 150 ms the AudioUnit is stopped behind the host's back.
-    // Expected: the watchdog sees no callback for 200 ms, the silent sink takes over (all 20 blocks still released in order, about 2 s plus the 200-250 ms gap), and the AudioUnit is restarted 1 s later and calls back again
+    // Expected: the watchdog sees no callback for 200 ms, the silent sink takes over (all 20 blocks still released in order, about 2 s plus a gap of 200-350 ms: a pass after the watchdog's 250 ms tick that finds no callback, or a last one over 50 ms old, only suspects the stall, and the 50 ms passes after it decide on more than 200 ms since that callback, hle_audio.c wd_pass), and the AudioUnit is restarted 1 s later and calls back again
     // Allow 5 s for scheduling and AudioUnit stop/start delays on virtual CI Macs; buffer order, the playback lower bound and resumed callbacks still have to hold.
     // The virtual output of a CI Mac can also pause by itself for more than 200 ms after the restart: the watchdog then rightly stands the silent sink in again and retries 1 s later, which can fall after the
     // last release (CI: "AudioUnit restarted", a second "has not called back for 204 ms", then Close 1 s later, "calling back again=0"). So the backend is followed on every poll until a restarted AudioUnit

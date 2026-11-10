@@ -72,6 +72,66 @@ static int bad_pixels(id<MTLTexture> t, uint8_t left, uint8_t right) {
     if (bad) { printf("first row:"); for (int i = 0; i < 8; i++) printf(" %u", p[4 * i]); printf(" (want %u x4, %u x4)\n", left, right); }
     return bad;
 }
+// A 128x128 drawable for the effects case, from three layers in turn (a queue takes at most 32 residency sets, so not a layer per present; each present here completes before the next)
+static id<CAMetalDrawable> big_drawable(void) {
+    static CAMetalLayer *ls[3]; static int k;
+    CAMetalLayer *l = ls[k % 3]; if (!l) { l = ls[k % 3] = offscreen_layer(); l.drawableSize = CGSizeMake(128, 128); [g_q4 addResidencySet:l.residencySet]; }
+    k++; return [l nextDrawable];
+}
+// One present of t through the display link's callback, completed before it returns
+static void present_done(const tex_t *t) { @autoreleasepool {
+    present_enqueue(t, 1. / 60, NULL, 0); tick_with(big_drawable());
+    pthread_mutex_lock(&g_pq_mu); struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 5;
+    while (g_pq_inflight && pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) != ETIMEDOUT) {}
+    pthread_mutex_unlock(&g_pq_mu);
+} }
+static NSUInteger res_count(void) { NSUInteger n; @autoreleasepool { pthread_mutex_lock(&g_res_mu); n = g_res_objects.allObjects.count; pthread_mutex_unlock(&g_res_mu); } return n; }
+static void fx_case(void) {
+    char name[200]; int keep = present_fx_keep();
+    tex_t big = {.magic = MAGIC('T','E','X',0), .serial = 91010};
+    @autoreleasepool {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:64 height:64 mipmapped:NO];
+        d.storageMode = MTLStorageModeShared; d.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> mt = [g_dev newTextureWithDescriptor:d]; static uint8_t bytes[64 * 64 * 4];
+        for (int i = 0; i < 64 * 64; i++) { uint8_t v = (i % 64) < 32 ? 40 : 220; bytes[4 * i] = bytes[4 * i + 1] = bytes[4 * i + 2] = v; bytes[4 * i + 3] = 255; }   // a hard edge for CMAA2
+        [mt replaceRegion:MTLRegionMake2D(0, 0, 64, 64) mipmapLevel:0 withBytes:bytes bytesPerRow:256];
+        big.d.width = big.d.height = 64; big.d.depth = big.d.levels = big.d.samples = 1; big.d.target = NVN_TEXTURE_TARGET_2D; big.d.format = NVN_FORMAT_RGBA8;
+        serial_put(big.serial, mt); res_add(mt); res_commit();
+    }
+    CHECK("effects: CMAA2's kernels are made", aa_pipelines(1));
+    int mfx = [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev];
+    g_fx_idle_presents = 4;
+    mtl_present_aa_set("edge"); mtl_present_upscale_set("metalfx");
+    for (int i = 0; i < 3; i++) present_done(&big);
+    CHECK("effects on: edge smoothing ran and holds its texture and lists", g_aa_ran && g_aa_present.tex && g_aa_present.work && g_aa_present.ctl);
+    if (mfx) CHECK("effects on: MetalFX ran and holds its scaler and output", g_fx_ran && g_fx_present.sc && g_fx_present.out);
+    else printf("effects: this GPU has no Metal 4 MetalFX scaler; edge smoothing alone\n");
+    uint64_t z = g_aa_present.tex.allocatedSize + g_aa_present.work.allocatedSize + g_aa_present.ctl.allocatedSize + g_fx_present.in.allocatedSize + g_fx_present.out.allocatedSize;
+    int nobj = !!g_aa_present.tex + !!g_aa_present.work + !!g_aa_present.ctl + !!g_fx_present.in + !!g_fx_present.out;
+    __weak id w[5] = {g_aa_present.tex, g_aa_present.work, g_aa_present.ctl, g_fx_present.in, g_fx_present.out};   // GPU allocated cannot show them go: drawables come and go between these presents
+    uint64_t freed0 = atomic_load(&g_present_fx_freed), gpu0 = g_dev.currentAllocatedSize; NSUInteger res0 = res_count();
+    mtl_present_aa_set("off"); mtl_present_upscale_set("off");
+    for (int i = 0; i < g_fx_idle_presents + 2; i++) present_done(&big);
+    uint64_t gpu1 = g_dev.currentAllocatedSize; NSUInteger res1 = res_count();
+    printf("effects off for %d presents (DM_PRESENT_FX_KEEP %s): %d objects, %llu KB before; residency set %lu -> %lu, GPU allocated %llu -> %llu KB, released %llu\n", g_fx_idle_presents + 2, keep ? "1" : "unset",
+           nobj, (unsigned long long)(z >> 10), (unsigned long)res0, (unsigned long)res1, (unsigned long long)(gpu0 >> 10), (unsigned long long)(gpu1 >> 10), (unsigned long long)(atomic_load(&g_present_fx_freed) - freed0));
+    if (!keep) {
+        CHECK("effects off: CMAA2's texture and lists released", !g_aa_present.tex && !g_aa_present.raw && !g_aa_present.work && !g_aa_present.ctl);
+        if (mfx) CHECK("effects off: the scaler and its textures released", !g_fx_present.sc && !g_fx_present.in && !g_fx_present.out);
+        snprintf(name, sizeof name, "effects off: the residency set lost their %d objects", nobj); CHECK(name, res1 + nobj <= res0);
+        int alive = 0; @autoreleasepool { for (int k = 0; k < 5; k++) { id o = w[k]; alive += o != nil; } }
+        CHECK("effects off: their textures and buffers are freed", alive == 0);
+        CHECK("effects off: counted for the memory line", atomic_load(&g_present_fx_freed) == freed0 + 1 + mfx);
+    } else {
+        CHECK("DM_PRESENT_FX_KEEP=1: the effects' state is kept", g_aa_present.tex && (!mfx || g_fx_present.out) && res1 == res0 && atomic_load(&g_present_fx_freed) == freed0);
+    }
+    // On again: made again (the scaler after FX_REMAKE_PRESENTS presents since the last one made)
+    mtl_present_aa_set("edge"); mtl_present_upscale_set("metalfx");
+    for (int i = 0; i < FX_REMAKE_PRESENTS + 4; i++) present_done(&big);
+    CHECK("effects on again: edge smoothing runs with its state made again", g_aa_ran && g_aa_present.tex && g_aa_present.work);
+    if (mfx) CHECK("effects on again: MetalFX runs with a scaler made again", g_fx_ran && g_fx_present.sc && g_fx_present.out && g_fx_idle == 0);
+    mtl_present_aa_set("off"); mtl_present_upscale_set("off"); g_fx_idle_presents = FX_IDLE_PRESENTS;
+}
 int main(void) { @autoreleasepool {
     alarm(30); setbuf(stdout, NULL);
     setenv("DM_PRESENT_HZ", "0", 1);
@@ -132,5 +192,10 @@ int main(void) { @autoreleasepool {
     int left = g_pq_inflight; pthread_mutex_unlock(&g_pq_mu);
     CHECK("the trim's presents completed", left == 0);
     g_link_trim = 0;
+
+    // Present effects released when off (present_fx_idle): edge smoothing (CMAA2) and MetalFX run on a 64x64 picture shown at 128x128, then both are turned off. Once the effects have
+    // not run for g_fx_idle_presents presents and the last present that ran them has completed, their textures and buffers leave the residency set and GPU allocated falls by them;
+    // turned on again they are made again. DM_PRESENT_FX_KEEP=1 keeps them, as before
+    fx_case();
     printf("present allocators: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

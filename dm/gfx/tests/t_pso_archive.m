@@ -626,6 +626,67 @@ int main(int argc, char **argv) { @autoreleasepool {
         printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
         return failed != 0;
     }
+    if (argc == 3 && !strncmp(argv[1], "--stale-", 8)) {   // across fresh processes: files of another shader chain and files written before the chain stamp (fix 10)
+        int seed = !strcmp(argv[1], "--stale-seed"), keep = getenv("DM_PSO_KEEP_OLD") && !strcmp(getenv("DM_PSO_KEEP_OLD"), "1");
+        NSMutableArray<MTLRenderPipelineDescriptor *> *descs = [NSMutableArray array];
+        for (int i = 0; i < 6; i++) {
+            MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+            cd.vertexDescriptor.layouts[16].stride = 16 * (i + 100); [descs addObject:cd];
+        }
+        NSString *(^fpath)(int) = ^NSString *(int i) { return [NSString stringWithFormat:@"%s/%05d-1.mtl4a", argv[2], i]; };
+        // an index as a host before the stamp wrote it (DMPSOIX1), or one stamped with another chain
+        void (^write_ix)(int, NSData *, int, const char *) = ^(int i, NSData *keys, int complete, const char *chain) {
+            uint32_t head[2] = {(uint32_t)complete, (uint32_t)(keys.length / 8)}; char st[ARCH_STAMP_LEN] = {0};
+            NSMutableData *d = [NSMutableData dataWithBytes:chain ? "DMPSOIX2" : "DMPSOIX1" length:8]; [d appendBytes:head length:sizeof head];
+            if (chain) { strncpy(st, chain, sizeof st); [d appendBytes:st length:sizeof st]; }
+            [d appendData:keys]; [d writeToFile:arch_keys_path(fpath(i)) atomically:YES];
+        };
+        if (seed) {
+            pso4_init();
+            for (int i = 0; i < 6; i++) { EXPECT("stale chain: pipeline", 1, pso_build(descs[i], &err) != nil); arch_flush_wait(); }
+            NSData *key[6]; int complete = 0, stamp = 0;
+            for (int i = 0; i < 6; i++) {
+                key[i] = arch_keys_read_st(arch_keys_path(fpath(i)), &complete, &stamp);
+                EXPECT("stale chain: a new file's index carries this chain", 1, stamp == 1 && complete == 1 && key[i].length == 8);
+            }
+            write_ix(0, key[0], 1, "000000000000");   // 0: another chain's (removed at the open, never opened)
+            write_ix(1, key[1], 1, NULL);             // 1: no stamp, its own key (serves base 1: stamped)
+            write_ix(3, key[0], 1, NULL);             // 3: no stamp, names base 0, which it does not hold (a named miss: removed)
+            unlink(arch_keys_path(fpath(4)).fileSystemRepresentation);   // 4, 5: no index (scanned: 4 serves base 4, 5 serves nothing and is asked twice)
+            unlink(arch_keys_path(fpath(5)).fileSystemRepresentation);
+            int st = 0; EXPECT("stale chain: the old stamp reads as another chain", 1, arch_keys_read_st(arch_keys_path(fpath(0)), &complete, &st) && st == -1);
+            EXPECT("stale chain: a DMPSOIX1 index reads as no stamp", 1, arch_keys_read_st(arch_keys_path(fpath(1)), &complete, &st) && st == 0 && complete == 1);
+            EXPECT("stale chain: a DMPSOIX1 index keeps its keys", 1, [arch_keys_read(arch_keys_path(fpath(1)), &complete) isEqualToData:key[1]]);
+        } else {
+            g_arch_probe_miss = 1; g_arch_probe_asks = 2;
+            pso4_init();
+            NSFileManager *fm = NSFileManager.defaultManager;
+            EXPECT("stale chain: files opened", keep ? 6 : 5, g_arch4.count + g_arch_ixf.count);
+            EXPECT("stale chain: another chain's file removed at the open", keep ? 1 : 0, [fm fileExistsAtPath:fpath(0)]);
+            EXPECT("stale chain: and its index", keep ? 1 : 0, [fm fileExistsAtPath:arch_keys_path(fpath(0))]);
+            EXPECT("stale chain: counted", keep ? 0 : 1, g_arch_old_n);
+            EXPECT("stale chain: files without a stamp probed", keep ? 0 : 4, g_arch_probe_n);
+            uint64_t arch0 = g_pb_archived, built0 = g_pb_built;
+            for (int i = 0; i < 5; i++) EXPECT("stale chain: pipeline", 1, pso_build(descs[i], &err) != nil);
+            // with the old file kept, base 0 is still compiled: file 3 is newer and its index names base 0, so a lookup asks it alone (a named lookup asks one file) and misses
+            EXPECT("stale chain: bases 1, 2 and 4 from the archive", 3, (int)(g_pb_archived - arch0));
+            EXPECT("stale chain: bases 0 and 3 compiled", 2, (int)(g_pb_built - built0));
+            int gone = arch_probe_settle(), complete = -1, st = 0;
+            EXPECT("stale chain: probe removed the files that served nothing", keep ? 0 : 2, gone);
+            EXPECT("stale chain: a named miss and no hit: removed", keep ? 1 : 0, [fm fileExistsAtPath:fpath(3)]);
+            EXPECT("stale chain: asked twice, no hit, no index: removed", keep ? 1 : 0, [fm fileExistsAtPath:fpath(5)]);
+            EXPECT("stale chain: the current file stays", 1, [fm fileExistsAtPath:fpath(2)]);
+            EXPECT("stale chain: an unstamped file that served a base stays", 1, [fm fileExistsAtPath:fpath(1)] && [fm fileExistsAtPath:fpath(4)]);
+            NSData *k1 = arch_keys_read_st(arch_keys_path(fpath(1)), &complete, &st);
+            EXPECT("stale chain: and gets this chain's stamp, its keys and completeness kept", keep ? 0 : 1, k1.length == 8 && st == 1 && complete == 1);
+            NSData *k4 = arch_keys_read_st(arch_keys_path(fpath(4)), &complete, &st);
+            EXPECT("stale chain: a file with no index gets an empty stamped one, not complete", keep ? 0 : 1, k4 && k4.length == 0 && st == 1 && complete == 0);
+            EXPECT("stale chain: settles once", 0, arch_probe_settle());
+            g_arch_cap = 0;   // the new bases are not written at exit: the folder is checked as the probe left it
+        }
+        printf("t_pso_archive %s%s: %d checks, %d failed\n", argv[1], keep ? " (DM_PSO_KEEP_OLD=1)" : "", checks, failed);
+        return failed != 0;
+    }
     if (argc == 3) {
         int seed = !strcmp(argv[1], "--compact-seed");
         pso4_init();

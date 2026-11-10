@@ -81,7 +81,7 @@ PSO_GPUS = 'g19p'                       # NVN games: GPU architectures the app g
                                         #   another device's name is in its log when the app has none for it), so the device does not build them on its first start; each adds about 650 MB to the app (Breath of the Wild) and minutes to a first build; 'none' = no archive;
                                         #   empty = by the game's profile: its pso_gpu key (whitespace-separated architectures, joined with commas) unless it sets pso_mtl4 off (the Metal 4 path, the only one that reads the archive on iOS, is
                                         #   on for every other game), else 'g19p' for a game without the key, and 'none' with pso_mtl4 off
-                                        #   PLATFORM 'mac-app': the Mac app's archive (Resources/pso), empty = this Mac's GPU (e.g. 'g14s' for an M2 Max), 'none' = the app builds its bases on its first start
+                                        #   PLATFORM 'mac-app': the Mac app's archive (Resources/pso) is for this Mac's GPU (e.g. 'g14s' for an M2 Max) whatever this names, except 'none' = the app builds its bases on its first start; --gpu names another Mac's
 SHOW_FPS = True                         # True shows the game's frame rate on the iPhone (frames on screen per second, top left); DM_SHOW_FPS=0 / 1 in the app's Documents/env.txt changes it without a rebuild
 MOTION = True                           # True passes a gyro controller's motion (on iOS also the phone's own) to games that read it; False builds with DM_MOTION=0, for when motion misbehaves (DM_MOTION=1 in the app's Documents/env.txt turns it back on without a rebuild)
 SURVEY_ONLY = False                     # a game with no profile in dm/games: only write the survey, no provisional profile and no IPA
@@ -2912,20 +2912,32 @@ def mac_gpu_arch(work, env, logs):
     return arch
 
 
-def mac_pso(py, repo, work, lib, g, gpus, env, logs):
+def mac_archive_gpus(gpus, gpu_option, here):
+    """The GPU architectures of the Mac app's pipeline archive. gpus: --gpu / PSO_GPUS; gpu_option: they came from --gpu; here: this Mac's (mac_gpu_arch), None when it cannot be told.
+    --gpu is taken as given (another Mac's GPU, or none). The PSO_GPUS setting is the IPA's too, and its default is an iPhone's GPU (g19p), which metal-tt refuses for --platform macos: taken for the
+    Mac app it left every NVN Mac app built without --gpu with no archive, so the app built its pipeline bases on its first start (Super Mario Odyssey: 32,864). From the setting only none is
+    kept; any architectures it names give way to this Mac's GPU. --gpu g19p builds as before"""
+    if not gpus: return here
+    if gpu_option or gpus == 'none' or here is None: return gpus
+    return here
+
+
+def mac_pso(py, repo, work, lib, g, gpus, env, logs, gpu_option=True):
     """PLATFORM 'mac-app', an NVN game with shader pairs: its pipeline archive made offline for this Mac's GPU (dm/gfx/tools/pso_offline.py --platform macos, metal-tt), which the app carries as
     Resources/pso and the launcher hands to the host as DM_PSO_BUNDLE, as the iOS app does (docs/development.md, The pipeline archive made offline): the app's first start builds no base,
     and the bases (about 615 MB for Breath of the Wild) do not go into the player's ~/Library/Application Support. gpus: --gpu / PSO_GPUS (empty: this Mac's GPU; none: no archive, the app
-    builds the bases on its first start). Made again only when its inputs change (pso_offline.py's key). Returns the folder, or None"""
+    builds the bases on its first start); gpu_option: they came from --gpu, else from the PSO_GPUS setting, whose architectures are the IPA's (mac_archive_gpus). Made again only when its inputs
+    change (pso_offline.py's key). Returns the folder, or None"""
     if gpus == 'none': say('pipeline archive: none (--gpu none): the app builds the pipeline bases on its first start'); return None
     if gpus and not re.fullmatch(r'(applegpu_)?g\w+(,(applegpu_)?g\w+)*', gpus): raise BuildError(f'--gpu / PSO_GPUS takes GPU architectures such as g14s, or none: {gpus}')
     try: here = mac_gpu_arch(work, env, logs)
     except BuildError:
         if not gpus: raise
         here = None
-    if gpus and here and here not in {x if x.startswith('applegpu_') else 'applegpu_' + x for x in gpus.split(',')}:   # PSO_GPUS is shared with the IPA (g18p is an iPhone's)
-        say(f'pipeline archive: --gpu / PSO_GPUS ({gpus}) does not name this Mac\'s GPU ({here}): on this Mac the app builds its pipeline bases on its first start (empty = this Mac\'s GPU)')
-    arch = gpus or here
+    arch = mac_archive_gpus(gpus, gpu_option, here)
+    if gpus and here and here not in {x if x.startswith('applegpu_') else 'applegpu_' + x for x in gpus.split(',')}:
+        if gpu_option: say(f'pipeline archive: --gpu ({gpus}) does not name this Mac\'s GPU ({here}): on this Mac the app builds its pipeline bases on its first start (empty = this Mac\'s GPU)')
+        else: say(f'pipeline archive: PSO_GPUS ({gpus}) is the IPA\'s and does not name this Mac\'s GPU: the Mac app\'s archive is for this Mac\'s ({here}); --gpu names another')
     PROG.add(1); PROG.stage('Pipeline archive', step=f'{arch} (metal-tt, minutes when its inputs changed)')
     out = work / 'pso/mac'
     cmd = [py, repo / 'dm/gfx/tools/pso_offline.py', '--game', g.id, '--msl', lib, '--out', out, '--work', work / 'pso/mac-work', '--gpu', arch, '--platform', 'macos']
@@ -2946,14 +2958,14 @@ def mac_app_name(name):   # the app's file name: the game name with the characte
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
 
-def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None):
+def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None, gpu_option=True):
     """The last stage of PLATFORM 'mac-app': pack the Mac app (dm/mac/pack_app.py) from what a Mac-only build made: the Mac host and font (mac_host), the packed version's RomFS and rewritten
     modules, the Mac shader libraries (msl: <shader>/cache, whose b-<chain> goes in, or a Vulkan or GL game's <shader>, whose vk / gl goes in), the DLC, the profile's tables (with the shader pairs
-    the pipeline prebuild reads), the pipeline archive made offline for this Mac (mac_pso; gpus: --gpu / PSO_GPUS), the launcher settings and an environment file.
+    the pipeline prebuild reads), the pipeline archive made offline for this Mac (mac_pso; gpus: --gpu / PSO_GPUS, gpu_option: from --gpu), the launcher settings and an environment file.
     The save and the log go to the player's Library, keyed by the folder's title ID (app); a new app replaces the old one only when it is complete. programs: a game of several programs, the others' files
     (other_programs), which go in beside the first's as one app. control: the control.nacp that lists the game's languages (languages_control), by default the packed version's"""
     lib = msl / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl')
-    pso = mac_pso(py, repo, work, lib, g, gpus, env, logs) if gfx == 'nvn' and g.table('shader_pairs.tsv').is_file() else None   # a stage of its own, before the app's
+    pso = mac_pso(py, repo, work, lib, g, gpus, env, logs, gpu_option) if gfx == 'nvn' and g.table('shader_pairs.tsv').is_file() else None   # a stage of its own, before the app's
     PROG.stage('Mac app', step='starting')
     # The launcher settings the IPA carries (dm/games/settings.py), without the iPhone's own switches: the app's settings window and Mac front ends show them (docs/frontends.md)
     settings = work / 'app/launcher.json'; settings.parent.mkdir(parents=True, exist_ok=True)
@@ -3402,7 +3414,7 @@ def main(args=None):
         programs = other_programs(args, g)
         if not game_icon: say(no_game_icon_line(nup, dump, icon, "app's icon"))
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
-                (args.gpu or PSO_GPUS).strip(), programs, control)
+                (args.gpu or PSO_GPUS).strip(), programs, control, gpu_option=bool((args.gpu or '').strip()))
         cdirs = [(d, b) for d, b in [(packed_cheats, cheat_build)] + [(programs[n].get('cheats'), programs[n].get('build')) for n in sorted(programs)] if d]   # each program's own cheats too, under its builds' IDs
         c = merge_cheats(cdirs, work / MODS_STAGE / 'programs_cheats') if len(cdirs) > 1 else cdirs[0][0] if cdirs else None
         if c: install_cheats(c, Path.home() / 'Library/Application Support/nxnative' / f'{app:016X}' / 'cheats')   # the app's DM_ROOT (dm/mac/launcher.c)
