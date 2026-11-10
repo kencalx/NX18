@@ -23,8 +23,9 @@ $(MSL_H): $(wildcard ../msl/*.metal) ../tools/host_msl.py host_msl_force
 host_msl_force:
 FW=-framework Metal -framework MetalFX -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework UniformTypeIdentifiers
 # Host crash.c is linked in as well: the write-protect unit tests go through the same page-fault hook as production
+# t_mtl4.h: the fixtures' Metal 4 command buffers and pipelines (the host's one-off command buffers when nvn_mtl.m is included, a queue of their own otherwise)
 # Tests that #include nvn_mtl.m link the rest of the NVN layer beside it (hle_nvn.c: memory pools, sparse pools, serials) and the host's large stack, with weak stubs of what they need of the host (t_host_stubs.c)
-MTL_T_DEP=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
+MTL_T_DEP=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H) t_mtl4.h
 MTL_T_SRC=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX))
 # The run list: every t_*.c and t_*.m but those in NOT_RUN. `make run` builds them all (in parallel with -j), then runs them one after another, each through its check_
 # target: ./t_x by default, with the environment its RUN_ENV gives it (check_t_x: RUN_ENV = MTL_DEBUG_LAYER=1, beside its build rule), or a check_t_x recipe of its own when it
@@ -59,17 +60,17 @@ t_dirty_retire_race: t_dirty_retire_race.c ../nvn/nvn_dirty.c ../../host/crash.c
 	clang $(CFLAGS) -o $@ t_dirty_retire_race.c ../../host/crash.c
 t_host_msl: t_host_msl.m ../nvn/host_msl.m ../nvn/host_msl.h $(MSL_H)
 	clang -O1 -g -Wall -I$(dir $(MSL_H)) -fobjc-arc -o $@ t_host_msl.m ../nvn/host_msl.m -framework Metal -framework Foundation
-t_builtin: t_builtin.m ../nvn/nvn_builtin.h ../nvn/host_msl.m $(MSL_H)
+t_builtin: t_builtin.m ../nvn/nvn_builtin.h ../nvn/host_msl.m $(MSL_H) t_mtl4.h
 	clang -O1 -g -Wall -I$(dir $(MSL_H)) -fobjc-arc -o $@ t_builtin.m ../nvn/host_msl.m -framework Metal -framework Foundation
-t_vin: t_vin.m
+t_vin: t_vin.m t_mtl4.h
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_vin.m -framework Metal -framework Foundation
-t_tbuf2d: t_tbuf2d.m ../nvn/nvn_tex.c ../nvn/nvn_tex.h
+t_tbuf2d: t_tbuf2d.m ../nvn/nvn_tex.c ../nvn/nvn_tex.h t_mtl4.h
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_tbuf2d.m ../nvn/nvn_tex.c -framework Metal -framework Foundation
-t_tbuf_align: t_tbuf_align.m
+t_tbuf_align: t_tbuf_align.m t_mtl4.h
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_tbuf_align.m -framework Metal -framework Foundation
 t_sparse_layout: t_sparse_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle.h
 	clang $(CFLAGS) -o $@ t_sparse_layout.c ../nvn/nvn_tex.c ../tex/nvn_deswizzle.c
-t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../tex/nvn_deswizzle.h ../tex/nvn_deswizzle_gpu.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../nvn/host_msl.m $(MSL_H)
+t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../tex/nvn_deswizzle.h ../tex/nvn_deswizzle_gpu.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../nvn/host_msl.m $(MSL_H) t_mtl4.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../nvn/nvn_tex.c ../nvn/host_msl.m -framework Metal -framework Foundation
 t_tex_layout: t_tex_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang -O1 -Wall -o $@ t_tex_layout.c ../nvn/nvn_tex.c
@@ -210,7 +211,7 @@ t_readback: t_readback.m $(MTL_T_DEP)
 check_t_readback: t_readback
 	DM_NVN_FAST_WAKE=1 MTL_DEBUG_LAYER=1 ./t_readback
 	DM_NVN_FAST_WAKE=0 MTL_DEBUG_LAYER=1 ./t_readback
-t_present_crop: t_present_crop.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
+t_present_crop: t_present_crop.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H) t_mtl4.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_crop.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_present_crop
 check_t_present_crop: t_present_crop
@@ -220,7 +221,7 @@ check_t_present_crop: t_present_crop
 	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=1 ./t_present_crop
 # Edge smoothing in the present (DM_POST_AA, CMAA2): under the API validation layer, and again with shader validation (the kernels' bounds and the lists' clamps). `./t_post_aa bench`
 # times it at 1600x900, 1920x1080 and 2868x1320 instead (docs/reference/rendering.md)
-t_post_aa: t_post_aa.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
+t_post_aa: t_post_aa.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H) t_mtl4.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_post_aa.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_post_aa
 check_t_post_aa: t_post_aa
@@ -385,7 +386,7 @@ check_t_geometry_mesh: t_geometry_mesh
 .PHONY: check_t_feedback
 check_t_feedback: t_feedback
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_fetch.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_feedback "$$work"
-t_mip_extent: t_mip_extent.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
+t_mip_extent: t_mip_extent.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H) t_mtl4.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_mip_extent.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_mip_extent
 check_t_mip_extent: t_mip_extent
@@ -419,14 +420,12 @@ t_pso_depth_stencil: t_pso_depth_stencil.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_depth_stencil.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_pso_depth_stencil
 check_t_pso_depth_stencil: t_pso_depth_stencil
-	DM_PSO_MTL4=0 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
-	DM_PSO_MTL4=1 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
-	DM_NVN_ENC_THREAD=1 DM_PSO_MTL4=0 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
-	DM_NVN_ENC_THREAD=1 DM_PSO_MTL4=1 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
+	MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
 t_pull: t_pull.m ../tools/dmsh_pull.metal $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pull.m $(MTL_T_SRC) $(FW)
 check_t_pull: RUN_ENV = MTL_DEBUG_LAYER=1
-t_pull_inv: t_pull_inv.m ../tools/dmsh_pull.py ../tools/dmsh_pull.metal
+t_pull_inv: t_pull_inv.m ../tools/dmsh_pull.py ../tools/dmsh_pull.metal t_mtl4.h
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_pull_inv.m -framework Metal -framework Foundation
 check_t_pull_inv: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pso_archive: t_pso_archive.m $(MTL_T_DEP)
@@ -445,8 +444,7 @@ t_pso_warm: t_pso_warm.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_warm.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_pso_warm
 check_t_pso_warm: t_pso_warm
-	DM_PSO_MTL4=0 MTL_DEBUG_LAYER=1 ./t_pso_warm
-	DM_PSO_MTL4=1 MTL_DEBUG_LAYER=1 ./t_pso_warm
+	MTL_DEBUG_LAYER=1 ./t_pso_warm
 t_pso_skey: t_pso_skey.m ../nvn/nvn_pso_skey.h ../nvn/nvn_obj.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_skey.m -framework Foundation
 t_view_swizzle: t_view_swizzle.m $(MTL_T_DEP)
@@ -517,9 +515,9 @@ t_attachment_capacity: t_attachment_capacity.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_attachment_capacity.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_attachment_capacity
 check_t_attachment_capacity: t_attachment_capacity
-	@for compiler in 0 1; do for td in 0 1; do for enc in 0 1; do \
-	    DM_PSO_MTL4=$$compiler DM_NVN_TBDR=$$td DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_attachment_capacity || exit $$?; \
-	done; done; done
+	@for td in 0 1; do for enc in 0 1; do \
+	    DM_NVN_TBDR=$$td DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_attachment_capacity || exit $$?; \
+	done; done
 t_image_attachment_store: t_image_attachment_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_attachment_store.m $(MTL_T_SRC) $(FW)
 check_t_image_attachment_store: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -595,15 +593,15 @@ t_logic: t_logic.m $(MTL_T_DEP)
 check_t_logic: t_logic
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
 # gl_FragCoord.z against the depth the rasterizer stored for the same triangle, through dmsh_rewrite.py frag_z_snap's dm_zsnap (from test_dmsh_zsnap.py)
-t_zsnap: t_zsnap.m
+t_zsnap: t_zsnap.m t_mtl4.h
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_zsnap.m -framework Metal -framework Foundation
 check_t_zsnap: t_zsnap
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_zsnap.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_zsnap "$$work"
 # MUFU.SIN / COS lowered from turns through the fraction (InstEmitAmpereAlu.cs ATurnsToRadians), on the GPU against a double-precision reference
-t_mufu_turns: t_mufu_turns.m
+t_mufu_turns: t_mufu_turns.m t_mtl4.h
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_mufu_turns.m -framework Metal -framework Foundation
 # Compute threads that return before a barrier count as arrived on the Mac's GPU, as on NVIDIA's (no translator change needed)
-t_barrier_exit: t_barrier_exit.m
+t_barrier_exit: t_barrier_exit.m t_mtl4.h
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_barrier_exit.m -framework Metal -framework Foundation
 # Native task/mesh draws must render on the first pipeline use, with direct and threaded Metal encoding.
 t_mesh_first_use: t_mesh_first_use.m $(MTL_T_DEP)
