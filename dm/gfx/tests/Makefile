@@ -575,6 +575,15 @@ check_t_mesh_first_use: t_mesh_first_use
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_mesh_first_use
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_mesh_first_use
 
+# WriteTexels into one layer leaves the other layers protected, and the re-upload it causes deswizzles only what was written (partial re-upload on and off)
+t_texels_layers: t_texels_layers.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_texels_layers.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_texels_layers
+check_t_texels_layers: t_texels_layers
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_REUPLOAD_PART=0 ./$<
+
 t_wait_event: t_wait_event.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_wait_event.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 
@@ -585,6 +594,8 @@ t_queue_lifetime: t_queue_lifetime.m $(MTL_T_DEP)
 check_t_wait_event: t_wait_event
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_SIGNAL_EVENTS=node ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_SIGNAL_EVENTS=split ./$<
 check_t_queue_lifetime: t_queue_lifetime
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<

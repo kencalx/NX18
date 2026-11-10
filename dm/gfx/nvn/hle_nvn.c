@@ -1747,7 +1747,8 @@ static void tsummary(uint64_t frame) {
         py = cy; pk = ck; pw = cw; }
       pi = ci; pc = cc; pd = dr_; pf = frame; }
     uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc; mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc);
-    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu; write-protection faults %llu, pages unprotected before host writes %llu, opened for pool buffers %llu (changed while open %llu); missed %llu (cumulative); CPU-written textures alive %u", up, re, es, fa, pr, op, oc, mtl_pkg_miss(), mtl_cpu_tex_count());
+    uint64_t ptn, ptk, ptu, ptb, ptw; void mtl_part_reupload_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); mtl_part_reupload_stats(&ptn, &ptk, &ptu, &ptb, &ptw);
+    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu; write-protection faults %llu, pages unprotected before host writes %llu, opened for pool buffers %llu (changed while open %llu); missed %llu (cumulative); CPU-written textures alive %u; partial re-uploads %llu (levels of layers kept %llu, deswizzled %llu; %.1f MB kept), made whole as what they would keep was not known good (its upload still running or dropped) %llu", up, re, es, fa, pr, op, oc, mtl_pkg_miss(), mtl_cpu_tex_count(), ptn, ptk, ptu, ptb / 1048576.0, ptw);
     memset(g_tn, 0, sizeof g_tn);
 }
 // DM_SLOWFRAME=1 (test switch, read over the log port on a real device): per-frame timings are first stored in a ring of the last 16 frames; dropped frames are judged 8 frames late (GPU / on-screen present times are back by then),
@@ -3084,6 +3085,17 @@ static void region_image(const tex_t *t, unsigned layer0, const NVNcopyRegion *r
     if (t->d.target == NVN_TEXTURE_TARGET_3D) { *layer = 0; *slice = (unsigned)(r->zoffset + z); }
     else { *layer = layer0 + (unsigned)(r->zoffset + z); *slice = 0; }
 }
+static int mirror_prepare(const tex_t *t, unsigned level, unsigned layer);
+// Unprotects what a WriteTexels region writes: its level in each layer it touches (a 3D texture's level holds all its slices), or the whole storage where that span cannot be computed.
+// The whole storage went for every call: NieR:Automata writes regions of 28x28 to 244x244 into layers 0 and 1 of two 16-layer 512x512 arrays every frame, and all 48 MB counted as written
+// (14 calls a frame, 133 MB unprotected), so the next use re-uploaded them whole; now the other layers stay protected and a partial re-upload keeps them (pkg_upload_ in nvn_mtl.m)
+static void write_texels_prepare(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, int nz) {
+    for (int z = 0; z < nz; z++) {
+        unsigned layer, slice; region_image(t, layer0, r, z, &layer, &slice);
+        if (level >= t->d.levels || mirror_prepare(t, level, layer)) { dm_guest_write_prepare(t->mem, t->L.size); return; }
+        if (t->d.target == NVN_TEXTURE_TARGET_3D) return;
+    }
+}
 static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
     if (!t->mem) { LOG("[RED] WriteTexels: texture has no storage"); return; }
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
@@ -3092,7 +3104,7 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
     int is3d = t->d.target == NVN_TEXTURE_TARGET_3D, nz = r->depth ? r->depth : 1;
     {
         size_t wb0 = (size_t)((r->width + bw - 1) / bw) * bpb, row0 = row ? row : wb0, img0 = img ? img : row0 * (size_t)((r->height + bh - 1) / bh);
-        dm_guest_write_prepare(t->mem, t->L.size);
+        write_texels_prepare(t, level, layer0, r, nz);
         int ok = 1;
         for (int z = 0; z < nz && ok; z++) { unsigned layer, slice; region_image(t, layer0, r, z, &layer, &slice); ok = !write_region_bl(t, level, layer, slice, r, src + (size_t)z * img0, row0, bw, bh, bpb); }
         if (ok) { mtl_tex_cpu_written(t); return; }
@@ -3103,7 +3115,7 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
     if (!row) row = wb;
     if (!img) img = row * hb;
     uint8_t *lin = malloc(lp * lr * lz); if (!lin) die("WriteTexels allocation failed");
-    dm_guest_write_prepare(t->mem, t->L.size);
+    write_texels_prepare(t, level, layer0, r, nz);
     // when the region is exactly the whole level (2D) every texel is overwritten, so the old content need not be decoded first (movies write whole frames; saves one deswizzle per 1080p frame)
     int whole = !is3d && !r->xoffset && !r->yoffset && (uint32_t)r->width == lw && (uint32_t)r->height == lh;
     for (int z = 0; z < nz; z++) {

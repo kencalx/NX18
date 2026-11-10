@@ -21,7 +21,11 @@ static int checks, fails;
 static _Atomic uintptr_t event_test_storage;
 static _Atomic uint32_t event_test_pixel;
 static _Atomic int event_test_deferred_mirror;
+// Every GPU publication in order (signals_in_node): word, mode, value
+enum { PUB_MAX=64 };
+static struct { volatile uint32_t *word; unsigned mode; uint32_t value; } pub_log[PUB_MAX]; static _Atomic int pub_n;
 void event_test_publish(volatile uint32_t *word,unsigned mode,uint32_t value,uint64_t fence) {
+    { int i=atomic_fetch_add(&pub_n,1); if(i<PUB_MAX) { pub_log[i].word=word; pub_log[i].mode=mode; pub_log[i].value=value; } }
     uintptr_t storage=atomic_load(&event_test_storage);
     if(storage && value==11) {
         atomic_store(&event_test_pixel,*(volatile uint32_t *)storage);
@@ -61,7 +65,7 @@ static void require_returned(job *j,int seen) {
     if (!seen && !returned(j,5000000000ull)) { fprintf(stderr,"submission did not return after rescue release\n"); _Exit(2); }
 }
 static NVNdevice device; static NVNqueue queues[2]; static NVNmemoryPool pool;
-static NVNevent event; static uint8_t *memory; static volatile uint32_t *source,*result;
+static NVNevent event, event2; static uint8_t *memory; static volatile uint32_t *source,*result;
 static NVNbufferAddress source_addr,result_addr; static NVNcommandBuffer commands[2];
 static NVNcommandHandle begin_cmd(int k) {
     P(nvnCommandBufferInitialize)(&commands[k],&device);
@@ -304,6 +308,103 @@ static void event_mirror_publication(void) {
     CHECK(P(nvnEventGetValue)(&event)==11,"the terminal event publishes once the storage is visible");
     atomic_store(&event_test_storage,0); P(nvnSyncFinalize)(&fence); P(nvnTextureFinalize)(&texture);
 }
+// Profile key signal_events (nvn_queue.inc nq_signals_in_node). node: the signals of a command node stay in it, the node is one Metal submission, and they publish in recorded
+// order once it completes, ADD signals adding up in that order; split (the default): each signal ends its node, one submission each. Either way nothing publishes before the GPU has
+// run the work, and a wait still ends its node, so a wait on a signal of the same command buffer is released
+static volatile uint32_t *event_storage(NVNevent *e) { return ((ev_t *)e)->val; }
+static void signals_in_node(int node) {
+    printf("CASE signal_events %s: four signals in one command buffer\n",node?"node":"split");
+    int saved=nq_signals_in_node(); nq_signal_node=node;
+    *source=before; *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0); P(nvnEventSignal)(&event2,NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    if (!gate) abort();
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    NVNsync fence; P(nvnSyncInitialize)(&fence,&device);
+    begin_cmd(0); uint32_t payload=after;
+    P(nvnCommandBufferUpdateUniformBuffer)(&commands[0],source_addr,4,0,4,&payload);
+    P(nvnCommandBufferSignalEvent)(&commands[0],&event,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,1);
+    P(nvnCommandBufferSignalEvent)(&commands[0],&event2,NVN_EVENT_SIGNAL_MODE_ADD,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,2);
+    P(nvnCommandBufferSignalEvent)(&commands[0],&event,NVN_EVENT_SIGNAL_MODE_ADD,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,3);
+    P(nvnCommandBufferSignalEvent)(&commands[0],&event2,NVN_EVENT_SIGNAL_MODE_ADD,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,5);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[0],source_addr,result_addr,4,0);
+    P(nvnCommandBufferFenceSync)(&commands[0],&fence,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    atomic_store(&pub_n,0); uint64_t f0=mtl_last_fence();
+    job j; enqueue(&j,&queues[0],P(nvnCommandBufferEndRecording)(&commands[0])); int r=returned(&j,250000000ull);
+    int encoded=receipt_encoded(&fence,1000000000ull); uint64_t f1=mtl_last_fence();
+    CHECK(r && encoded,"the command buffer encodes while the gate holds the GPU");
+    CHECK(f1-f0==(node?2u:5u),node?"node: four signals on two events leave the command buffer two Metal submissions (the first event's second signal starts a node)":"split: each signal ends a submission (four, then the copy)");
+    CHECK(!atomic_load(&pub_n) && P(nvnEventGetValue)(&event)==0 && P(nvnEventGetValue)(&event2)==0,"no signal publishes before the GPU has run its work");
+    gate.signaledValue=1;
+    require_returned(&j,r); int done=landed(&fence,5000000000ull);
+    if(!done) { fprintf(stderr,"signal fixture did not complete\n"); _Exit(2); }
+    for(int k=0;k<200 && atomic_load(&pub_n)<4;k++) usleep(1000);   // the last submission's events publish in its completion, which the fence's waiter may have run (post_early)
+    int n=atomic_load(&pub_n);
+    CHECK(n==4,"four publications");
+    int order=n==4 && pub_log[0].word==event_storage(&event) && pub_log[0].mode==0 && pub_log[0].value==1 && pub_log[1].word==event_storage(&event2) && pub_log[1].mode==1 && pub_log[1].value==2
+              && pub_log[2].word==event_storage(&event) && pub_log[2].mode==1 && pub_log[2].value==3 && pub_log[3].word==event_storage(&event2) && pub_log[3].mode==1 && pub_log[3].value==5;
+    CHECK(order,"the signals publish in recorded order with their modes");
+    CHECK(P(nvnEventGetValue)(&event)==4 && P(nvnEventGetValue)(&event2)==7,"WRITE then ADD, and two ADDs, leave the values the order gives (4 and 7)");
+    CHECK(*result==after,"the work after the signals ran with the payload before them");
+    P(nvnSyncFinalize)(&fence);
+    // A wait on a signal of the same command buffer still ends the node: the producer's submission is committed before the wait, and the work after it runs
+    printf("CASE signal_events %s: a wait on the same command buffer's signal\n",node?"node":"split");
+    *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    NVNsync waited; P(nvnSyncInitialize)(&waited,&device);
+    begin_cmd(0);
+    P(nvnCommandBufferSignalEvent)(&commands[0],&event,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,9);
+    P(nvnCommandBufferWaitEvent)(&commands[0],&event,NVN_EVENT_WAIT_MODE_EQUAL,9);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[0],source_addr,result_addr,4,0);
+    P(nvnCommandBufferFenceSync)(&commands[0],&waited,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    f0=mtl_last_fence(); job w; enqueue(&w,&queues[0],P(nvnCommandBufferEndRecording)(&commands[0])); int wr=returned(&w,250000000ull);
+    int wdone=landed(&waited,5000000000ull);
+    if(!wdone) P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,9);   // rescue before failing
+    require_returned(&w,wr);
+    CHECK(wr && wdone && *result==after,"the wait on its own command buffer's signal is released and the copy after it runs");
+    CHECK(mtl_last_fence()-f0==2,"the wait ends the node: two submissions");
+    if(!wdone) { landed(&waited,5000000000ull); }
+    P(nvnSyncFinalize)(&waited);
+    nq_signal_node=saved;
+}
+// A node keeps one signal of each event word (nq_flatten): a command buffer on one queue writes 1 and then 2 to an event, and another queue waits EQUAL 1 behind work of its own. The wait is
+// released when the producer's WRITE 1 is encoded, while a shared-event gate still holds the GPU, as split always did. With both WRITEs in one node only 2 was recorded at encode, and the wait was
+// left to the release at publish, which a wait the replay first looks at after the producer has landed never gets (it then parks for good)
+static void signal_overwritten(int node) {
+    printf("CASE signal_events %s: a wait on another queue for a value the same command buffer overwrites\n",node?"node":"split");
+    int saved=nq_signals_in_node(); nq_signal_node=node;
+    *source=before; *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    if (!gate) abort();
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    NVNsync consumed,produced; P(nvnSyncInitialize)(&consumed,&device); P(nvnSyncInitialize)(&produced,&device);
+    begin_cmd(0); uint32_t own=sentinel;
+    P(nvnCommandBufferUpdateUniformBuffer)(&commands[0],result_addr,4,0,4,&own);   // work of its own before the wait: the wait is not the queue's head when the replay starts
+    P(nvnCommandBufferWaitEvent)(&commands[0],&event,NVN_EVENT_WAIT_MODE_EQUAL,1);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[0],source_addr,result_addr,4,0);
+    P(nvnCommandBufferFenceSync)(&commands[0],&consumed,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    NVNcommandHandle ch=P(nvnCommandBufferEndRecording)(&commands[0]);
+    begin_cmd(1); uint32_t payload=after;
+    P(nvnCommandBufferUpdateUniformBuffer)(&commands[1],source_addr,4,0,4,&payload);
+    P(nvnCommandBufferSignalEvent)(&commands[1],&event,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,1);
+    P(nvnCommandBufferSignalEvent)(&commands[1],&event,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,2);
+    P(nvnCommandBufferFenceSync)(&commands[1],&produced,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    NVNcommandHandle ph=P(nvnCommandBufferEndRecording)(&commands[1]);
+    nvn_queue_test_hold(1);   // both jobs are queued before the replay takes either
+    job cj,pj; enqueue(&cj,&queues[0],ch); int cr=returned(&cj,250000000ull); enqueue(&pj,&queues[1],ph); int pr=returned(&pj,250000000ull);
+    uint64_t f0=mtl_last_fence();
+    nvn_queue_test_hold(0);
+    int released=receipt_encoded(&consumed,1000000000ull) && receipt_encoded(&produced,1000000000ull);
+    CHECK(cr && pr && released,"the wait for the overwritten value is released at the producer's encode, while the GPU is held");
+    CHECK(mtl_last_fence()-f0==4,"four submissions: the producer's two writes of one event in two, and the consumer's work before and after its wait");
+    gate.signaledValue=1;   // always release the GPU before cleanup
+    int done=landed(&produced,5000000000ull) && landed(&consumed,2000000000ull);
+    if(!done) { P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,1); done=landed(&consumed,5000000000ull); }   // rescue before failing
+    require_returned(&cj,cr); require_returned(&pj,pr);
+    CHECK(done && *result==after,"the consumer runs after the producer's payload and WRITE 1");
+    CHECK(P(nvnEventGetValue)(&event)==2,"the event ends at the producer's last value");
+    if(!done) _Exit(2);
+    P(nvnSyncFinalize)(&consumed); P(nvnSyncFinalize)(&produced);
+    nq_signal_node=saved;
+}
 int main(void) { @autoreleasepool {
     if (setvbuf(stdout, NULL, _IONBF, 0)) abort(); setenv("DM_PSO_PREPARE","0",1);
     mtl_init();
@@ -316,6 +417,7 @@ int main(void) { @autoreleasepool {
     NVNbufferBuilder bb={0}; NVNbuffer buffer; P(nvnBufferBuilderSetDefaults)(&bb); P(nvnBufferBuilderSetDevice)(&bb,&device); P(nvnBufferBuilderSetStorage)(&bb,&pool,65536,16); CHECK(P(nvnBufferInitialize)(&buffer,&bb),"buffer initialized");
     source_addr=P(nvnBufferGetAddress)(&buffer); result_addr=source_addr+4;
     NVNeventBuilder eb={0}; P(nvnEventBuilderSetDefaults)(&eb); P(nvnEventBuilderSetStorage)(&eb,&pool,65544); CHECK(P(nvnEventInitialize)(&event,&eb),"event initialized");
+    P(nvnEventBuilderSetStorage)(&eb,&pool,65600); CHECK(P(nvnEventInitialize)(&event2,&eb),"second event initialized");
     pthread_t worker; if(pthread_create(&worker,NULL,submit_worker,NULL)) return 2;
     // Warm the actual copy/fence path before making bounded negative assertions.
     *source=before; *result=sentinel; NVNsync warm; P(nvnSyncInitialize)(&warm,&device); job w; enqueue(&w,&queues[0],consumer(0,0,&warm,0));
@@ -332,6 +434,8 @@ int main(void) { @autoreleasepool {
     event_queued_write(NVN_EVENT_SIGNAL_MODE_ADD);
     receipt_tests();
     event_mirror_publication();
+    signals_in_node(1); signals_in_node(0);
+    signal_overwritten(1); signal_overwritten(0);
     pthread_mutex_lock(&jobs_mu); jobs_stop=1; pthread_cond_signal(&jobs_cv); pthread_mutex_unlock(&jobs_mu); pthread_join(worker,NULL);
     printf("wait-event fixture: %d checks, %d failed\n",checks,fails);
     // The process owns the fixture pool until all callbacks have retired.

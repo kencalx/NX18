@@ -40,6 +40,8 @@ present_interval	display
 fps_target	60
 # The renderer subtracts two raw timestamp reports to measure its GPU cost.
 gpu_timestamps	segment
+# Each occlusion query is followed by a SignalEvent: split, every one ended a Metal submission and the open depth pass (about 850 a frame in the heavy scenes, README.md).
+signal_events	node
 # The game fills texture storage on the CPU and publishes it with mapped-range flushes.
 tex_flush_upload	on
 # Some title backgrounds are filled after initialization without an NVN flush.

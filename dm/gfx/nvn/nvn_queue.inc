@@ -10,7 +10,8 @@ typedef struct nq_receipt { unsigned refs, published; uint64_t fence, present; }
 typedef struct nq_node {
     struct nq_node *next;
     uint8_t *bytes; size_t length, capacity;
-    unsigned kind, mode, closed, waiting; volatile uint32_t *event; uint32_t value;
+    unsigned kind, mode, closed, waiting; volatile uint32_t *event; uint32_t value;   // event, mode, value: an NQ_EVENT node's wait
+    struct nq_signal { volatile uint32_t *word; unsigned mode; uint32_t value; } *signals; unsigned nsignals, signals_cap;   // an NQ_COMMANDS node's GPU event signals in recorded order, issued at its completion (nq_event_issued)
     uint64_t wait_fence, event_predecessor; unsigned wait_kind; const sync_t *sync_source; nq_receipt *receipt;
     tex_t texture; double period; int crop[4];
 } nq_node;
@@ -176,7 +177,7 @@ static void *nq_worker(void *unused) {
             }
             nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); if(n->kind==NQ_COMMANDS) nq_spare_give(n); pthread_mutex_unlock(&g_sub_mu);
         }
-        pthread_mutex_lock(&nq_mu); if(n->kind==NQ_PRESENT) { q->present=present; j->receipt->present=present; } if(fence) { q->physical=fence; if(n->event) nq_event_issued(n->event,fence,n->mode,n->value); } if(n->receipt) nq_put(n->receipt); free(n->bytes); free(n); pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
+        pthread_mutex_lock(&nq_mu); if(n->kind==NQ_PRESENT) { q->present=present; j->receipt->present=present; } if(fence) { q->physical=fence; for(unsigned i=0;i<n->nsignals;i++) nq_event_issued(n->signals[i].word,fence,n->signals[i].mode,n->signals[i].value); } if(n->receipt) nq_put(n->receipt); free(n->signals); free(n->bytes); free(n); pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
     }
     return NULL;
 }
@@ -184,6 +185,27 @@ static void nq_start(void) { pthread_t t; if(pthread_create(&t,NULL,nq_worker,NU
 static nq_node *nq_append(nq_job *j,unsigned kind) { nq_node *n=calloc(1,sizeof *n); if(!n) die("queue continuation allocation failed"); n->kind=kind; if(j->last) j->last->next=n; else j->first=n; j->last=n; return n; }
 // A node's command copy grows by doubling (from 4 KB): growing 4 KB at a time took a reallocation for every 4 KB, each possibly a copy of all before it, under g_sub_mu
 static void nq_bytes(nq_node *n,const void *bytes,size_t length) { if(n->length+length>n->capacity) { size_t want=(n->length+length+4095)&~(size_t)4095, grown=n->capacity*2; n->capacity=grown>want?grown:want; n->bytes=realloc(n->bytes,n->capacity); if(!n->bytes) die("queue commands allocation failed"); } memcpy(n->bytes+n->length,bytes,length); n->length+=length; } // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts, so the old buffer cannot leak into a continuing process
+// Where a GPU event signal leaves the commands around it (profile key signal_events; DM_NVN_SIGNAL_EVENTS=node / split overrides it). split (the default): the signal ends its command node, so the node's
+// Metal submission ends there and the event publishes once the work before it completes. node: the signal stays inside its node, which goes on to the next wait (WAIT_EVENT, WAIT_SYNC), FENCE_SYNC or
+// the end of the submitted commands, and the node's signals publish in recorded order when the whole node completes: each still after every GPU write before it (post_run in nvn_mtl.m publishes the
+// events last), only later. NieR:Automata follows each of its occlusion queries with a SignalEvent; split made its one command buffer about 850 Metal submissions a frame in its heavy scenes, each
+// ending the open render pass, so the next query's draw reopened the 1080p depth target with a full load, store and entry barrier (dm/games/010056B015FE8000/README.md). Waits still end a node, so a
+// wait in the same job always finds the producer's node committed before it; a wait on another queue is released when this node is encoded (a WRITE signal) or lands (an ADD), not at the signal.
+// A node holds at most one signal of each event word: a second signal of a word ends the node before it, as split does (with the same turn for the other queues, the NQ_FENCE node), so the earlier
+// value is released when its own node is encoded. Kept in one node, only the word's last value was recorded at encode (nq_event_issued), and a wait on another queue for an earlier one (EQUAL 1
+// before a WRITE of 2, or a reset to 0 before a count) was left to the release at publish (nq_event_publish), which only latches a wait already looked at: one looked at after the node landed
+// found the last value and parked for good. NieR:Automata signals each word once per command buffer (622 signals on 622 words a frame), so its nodes are not split by this
+static int nq_signal_node=-1;   // 1 node, 0 split (a unit test may set it directly)
+static int nq_signals_in_node(void) {
+    if(nq_signal_node<0) { const char *e=getenv("DM_NVN_SIGNAL_EVENTS"); nq_signal_node=e && *e ? !strcmp(e,"node") : DM_GAME_SIGNAL_EVENTS_NODE;
+        LOG("[nvn] GPU event signals %s (profile key signal_events; DM_NVN_SIGNAL_EVENTS=node / split)",nq_signal_node?"publish when their command node completes: a signal does not end the node":"end their command node"); }
+    return nq_signal_node;
+}
+static int nq_signal_on(const nq_node *n,const uint8_t *a) { volatile uint32_t *word; memcpy(&word,a,8); for(unsigned i=0;i<n->nsignals;i++) if(n->signals[i].word==word) return 1; return 0; }
+static void nq_signal_add(nq_node *n,const uint8_t *a) {
+    if(n->nsignals==n->signals_cap) { n->signals_cap=n->signals_cap?n->signals_cap*2:4; n->signals=realloc(n->signals,n->signals_cap*sizeof *n->signals); if(!n->signals) die("queue signal allocation failed"); }   // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts
+    struct nq_signal *g=&n->signals[n->nsignals++]; memcpy(&g->word,a,8); memcpy(&g->mode,a+8,4); memcpy(&g->value,a+12,4);
+}
 static void nq_end(nq_job *j) { if(j->last && j->last->kind==NQ_COMMANDS && !j->last->closed) { op_hdr end={OP_END,8}; nq_bytes(j->last,&end,8); j->last->closed=1; } }
 static void nq_flatten(nq_job *j,const uint8_t *p,unsigned depth) {
     if(depth>64) die("NVN command call nesting exceeds64");
@@ -197,10 +219,12 @@ static void nq_flatten(nq_job *j,const uint8_t *p,unsigned depth) {
             if(h.op==OP_WAIT_EVENT) { memcpy(&n->event,a,8); memcpy(&n->mode,a+8,4); memcpy(&n->value,a+12,4); }
             else { memcpy(&n->sync_source,a,8); if(h.op==OP_FENCE_SYNC) n->receipt=nq_new(); }
         } else {
-            nq_node *n=j->last; if(!n || n->kind!=NQ_COMMANDS || n->closed) { n=nq_append(j,NQ_COMMANDS); nq_spare_take(n); }
+            nq_node *n=j->last;
+            if(h.op==OP_SIGNAL_EVENT && n && n->kind==NQ_COMMANDS && !n->closed && nq_signal_on(n,a)) { nq_end(j); nq_append(j,NQ_FENCE)->receipt=nq_new(); n=j->last; }   // one signal of a word per node (nq_signals_in_node)
+            if(!n || n->kind!=NQ_COMMANDS || n->closed) { n=nq_append(j,NQ_COMMANDS); nq_spare_take(n); }
             size_t offset=n->length; nq_bytes(n,p,h.size);
             if(!cap_rec_fields(h.op,n->bytes+offset+8,h.size,&nq_snapshot_ops,j)) die("queue snapshot: unknown command %u",h.op);
-            if(h.op==OP_SIGNAL_EVENT) { memcpy(&n->event,a,8); memcpy(&n->mode,a+8,4); memcpy(&n->value,a+12,4); nq_end(j); nq_append(j,NQ_FENCE)->receipt=nq_new(); }
+            if(h.op==OP_SIGNAL_EVENT) { nq_signal_add(n,a); if(!nq_signals_in_node()) { nq_end(j); nq_append(j,NQ_FENCE)->receipt=nq_new(); } }   // see nq_signals_in_node
         }
         p+=h.size;
     }

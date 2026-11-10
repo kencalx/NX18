@@ -14,6 +14,7 @@ Update 1.0.3 (v131072) over the base cartridge dump. PlatinumGames' engine, SDK 
 | `tex_dirty_upload on` | `game.tsv` | tracks later CPU texture writes that the game does not publish with an NVN flush |
 | `present_interval display` | `game.tsv` | replaces the game's interval-two presentation target with 60 Hz; the native clock already measures elapsed time |
 | `fps_target 60` | `game.tsv`, `hle_fpslock.c` | initializes the verified build's engine interval at 60 fps; the launcher can select 30 fps independently of resolution policy |
+| `signal_events node` | `game.tsv`, `nvn_queue.inc` | the game signals an event after each occlusion query; split, each signal ended a Metal submission and the open depth pass, about 850 a frame in heavy scenes ([below](#heavy-scenes-one-submission-per-occlusion-query-2026-11-09)) |
 | `gpu_timestamps segment` | `game.tsv` | the renderer subtracts two raw timestamp reports; one timestamp for the whole submission makes its measured GPU cost zero |
 | Four dynamic-resolution threshold cuts | [`patches.py`](patches.py) | the verified 1.0.3 main build uses 22.5 / 16.005 / 15 ms thresholds for a 60 fps budget |
 
@@ -110,6 +111,28 @@ The objects in `data000.cpk/shader.dat` decode as follows:
 ## Rendering and performance follow-up
 
 The following checkpoints and screenshots were reported with PR #336 before the current reconciliation. They document the original Mac and iPhone tests; validation of the reconciled host is recorded in the geometry optimization review above.
+
+### Heavy scenes: one submission per occlusion query (2026-11-09)
+
+From the scene load after the opening flight (about 7 minutes into a new game, the factory cutscene and ground combat), the iPhone 18 Pro Max ran at 18-40 fps with 300-947 load-all store-all passes a frame. A Mac run of the same route (`DM_KEYS=40:A,45:A,50:A,52:Left,53:A,60:A` from a save made before Start Game, the device's settings) showed the same counters. In the stall where auto-chips stop moving (about 2,075 draws a frame), the frame took 44.8 ms against 16.67 ms in the flight.
+
+- **One submission per query.** The game signals an event after each occlusion query, about 850 a frame there. Each `SignalEvent` ended its command node, so the game's one command buffer became about 850 Metal submissions. Each one ended the render pass, and the next query reopened the 1920x1080 depth target with a full load, store and entry barrier. `signal_events node` keeps the signals in their node and publishes them in order when it completes ([signals inside a command node](../../../docs/reference/nvn-objects.md#gpu-event-waits-order-work-across-queues)).
+- **Whole-texture re-uploads.** Each frame the game writes small regions into layers 0 and 1 of a 32 MB and a 16 MB 16-layer array. Each write unprotected the whole texture, so both were re-uploaded whole, through two no-copy source buffers each. Now only the written level of each layer is unprotected, the re-upload deswizzles only what was written, and it makes one source buffer ([re-uploading only the written layers](../../../docs/reference/frame-rate.md#re-uploading-only-the-written-layers-of-a-texture)).
+- **Mac, M4 Max, same route and save, 840 s each, HEAD d830f7d6 against the fix.** The table gives means of the per-300-frame stats lines. In the stall the fixed build's GPU p50 went from 6.7 to about 11.6 ms after frame 39,900 with the same draws and passes, as in an earlier run of the fix after frame 47,100: probably the GPU's clock, not looked into.
+
+| Window | Frame p50 / p95 ms | Submit+present p50 ms | GPU p50 ms | Submit CPU / kernel ms | Load-all passes a frame | Entry barriers a frame | Re-uploads / 300 frames | Pages unprotected / 300 frames | Residency added / 300 frames |
+|---|---|---|---|---|---|---|---|---|---|
+| Stall, before (frames 33,600-36,900) | 45.1 / 45.9 | 40.2 | 18.9 | 23.4 / 7.43 | 860 | 867 | 648 | 861K | 26.4 GB |
+| Stall, after (35,700-50,100) | 16.7 / 17.0 | 4.3 | 10.0 (6.7 to frame 39,300) | 4.2 / 0.44 | 37 | 43 | 594 (493 partial) | 48K | 6.4 GB |
+| Heavy windows of 800+ draws, before (25,500-32,700) | 34.5 / 40.9 | 30.8 | 14.7 | 17.5 / 5.36 | 644 | 650 | 434 | 493K | 14.7 GB |
+| Heavy windows of 800+ draws, after (25,800-33,600) | 16.7 / 17.0 | 3.3 | 9.2 | 3.2 / 0.30 | 36 | 42 | 430 (321 partial) | 37K | 4.4 GB |
+| Flight (5,100-23,700), before | 16.6 / 17.1 | 5.5 | 8.0 | 2.7 / 0.58 | 89 | 95 | 0.5 | 122 | 14 MB |
+| Flight, after | 16.6 / 17.4 | 2.9 | 6.9 | 1.6 / 0.11 | 42 | 47 | 0.5 | 46 | 14 MB |
+
+- **The upload changes alone.** The same fixed build with `DM_NVN_SIGNAL_EVENTS=split` (600 s) leaves the flight's load-all passes and entry barriers as before: 88.5 and 94.5 a frame, against 88.7 and 94.6. In the heavy windows of 800+ draws it cut pages unprotected from 419K to 22K and residency added from 12.4 GB to 2.3 GB per 300 frames, against a HEAD run of the same length. The frame still takes 21.1 ms there at 416 load-all passes a frame, so the submissions are the main cost.
+- After the fix the frame holds the 60 fps cap through the whole route, and the run gets further in its 840 s (frame 50,100 against 36,900). Draws a frame match in each window, so the work is the same. The allocator waits ("GPU waits so far") went from about 115-150 a frame in the heavy windows and the stall to 0.
+- **Not set: `draw_barriers game`.** Measured on the fixed build with `DM_NVN_BARRIER=ab DM_AB=300` on the same route, it skips about 29% of the entry barriers (4,090 of about 14,000 per 300 frames). The other 71% still follow a game barrier or a non-draw encoder. GPU p50 was 0.34 ms higher at the median of 22 paired heavy phases (9.96 against 9.49 ms on average) and 0.8 ms higher in flight (7.11 against 6.31 ms).
+- **Open:** an iPhone A/B (frame and GPU p50, and occlusion pop-in, since query results now publish at the end of the command node instead of after each query). The 768-face cube array still takes the direct path and is uploaded whole, about 3 MB a frame.
 
 ### Factory combat capture and 9S texture follow-up
 
