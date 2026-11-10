@@ -195,7 +195,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     CHECK(lib != nil, "synthetic shaders compile"); if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
     NvProg *p = program(lib); draws(p); invalid_descriptors(p); prediction(lib);
     const char *mode = getenv("DM_PSO_MTL4");
-    CHECK((g_comp4 != nil) == (!mode || strcmp(mode, "0") != 0), "requested pipeline compiler path is exercised");
-    printf("depth/stencil pipelines: %d checks, %d failed (%s)\n", checks, failed, g_comp4 ? "Metal 4" : "MTLDevice");
+    CHECK((g_pso4 != 0) == (!mode || strcmp(mode, "0") != 0), "requested pipeline compiler path is exercised");
+    printf("depth/stencil pipelines: %d checks, %d failed (%s)\n", checks, failed, g_pso4 ? "Metal 4" : "MTLDevice");
     return failed != 0;
 } }

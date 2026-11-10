@@ -72,7 +72,7 @@ int main(void) {
     @autoreleasepool {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
         if (!dev) { printf("BAD: no Metal device\n"); return 1; }
-        if (nvn_deswz_gpu_init(dev)) { printf("BAD: GPU deswizzle pipeline init failed\n"); return 1; }
+        if (nvn_deswz_gpu_init(dev, [dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:nil])) { printf("BAD: GPU deswizzle pipeline init failed\n"); return 1; }
         id<MTLCommandQueue> queue = [dev newCommandQueue];
         test_case cases[] = {
             {"RGBA8 1x1", {1, NVN_FORMAT_RGBA8, 0, 0, 1, 1, 1, 1, 0}},

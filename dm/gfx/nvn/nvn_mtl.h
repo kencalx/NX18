@@ -61,6 +61,10 @@ void mtl_xv_window_tex(uint64_t serial);   // Register a window (swapchain) text
 // were for the OpenGL and Vulkan layers, removed in release 1 (git 93c34371): nothing calls them now, and the classic queue goes with them in a later stage
 void *mtl_device(void);
 void *mtl_device_classic(void);   // the same for a layer that draws only on classic queues: a device without Metal 4 (a virtual Mac) starts too, and its presents are dropped
+#ifdef __OBJC__
+#import <Metal/Metal.h>
+id<MTL4Compiler> mtl_comp4(void);   // the host's one MTL4Compiler (made in mtl_init; a test that sets the device itself gets it at the first call): every pipeline the host builds
+#endif
 uint64_t mtl_ext_tex(void *tex);
 uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_val, const int crop[4]);   // crop: x, y, w, h of the texture to show (NULL = all of it)
 void mtl_present_layer(uint32_t w, uint32_t h);   // a sized vi layer (hle_vi.c): the picture's shape instead of the display's 16:9

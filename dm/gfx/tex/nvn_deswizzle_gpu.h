@@ -4,7 +4,7 @@
 #import <Metal/Metal.h>
 #include "nvn_deswizzle.h"
 
-int nvn_deswz_gpu_init(id<MTLDevice> dev);
+int nvn_deswz_gpu_init(id<MTLDevice> dev, id<MTL4Compiler> comp);   // the kernels' pipelines, built through comp (the host's MTL4Compiler)
 // Small RGBA16F arrays: write raw component bits through an integer texture
 // view, across all layers in one dispatch per mip (no per-face staging/copies).
 int nvn_deswz_gpu_direct_supported(const nvn_texdesc *d);

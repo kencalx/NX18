@@ -22,7 +22,7 @@ static void expect(int k, const uint64_t *s, uint64_t *e) {
 int main(void) {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
     NSError *err = nil;
-    id<MTLLibrary> lib = host_msl_lib(dev, nil, "builtin", &err);   // the library compiled when the host was built (dm/gfx/msl/builtin.metal)
+    id<MTLLibrary> lib = host_msl_lib(dev, "builtin", &err);   // the library compiled when the host was built (dm/gfx/msl/builtin.metal)
     if (!lib) { printf("no builtin library: %s\n", err.localizedDescription.UTF8String); return 1; }
     id<MTLCommandQueue> q = [dev newCommandQueue];
     // Source data: NREC 32-byte records (= 2×NREC 16-byte records), with values that have high bits set and wraparound cases where "the later is smaller than the earlier"

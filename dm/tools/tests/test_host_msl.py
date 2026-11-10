@@ -1,4 +1,4 @@
-"""Exercise the host/test Makefiles with a fake Metal compiler: deployment targets, toolchain recovery and incremental builds, without a GPU or game files."""
+"""Exercise the host/test Makefiles with a fake Metal compiler: deployment targets, a missing toolchain stopping the build, and incremental builds, without a GPU or game files."""
 import importlib.util
 import json
 import os
@@ -60,11 +60,13 @@ class HostMSL(unittest.TestCase):
                         TEST_METAL_VERSION='Metal test compiler 1', TEST_METAL_SDK='/sdk/1', TEST_METAL_LOG=str(self.log))
         self.header = self.root / 'dm/host/gen/msl-macosx/host_msl_gen.h'
 
-    def make(self, *args, gfx=False):
+    def make(self, *args, gfx=False, ok=True):
         target = '../../host/gen/msl-macosx/host_msl_gen.h' if gfx else 'host_msl'
         p = subprocess.run(['make', '-s', '-C', 'dm/gfx/tests' if gfx else 'dm/host', f'GAME={GAME}', target, *args],
                            cwd=self.root, env=self.env, capture_output=True, text=True)
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        if ok: self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        else: self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        return p
 
     def compiles(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
@@ -81,19 +83,25 @@ class HostMSL(unittest.TestCase):
         self.assertIn('-mios-version-min=27.3', self.compiles()[-1])
         self.assertIn('iphoneos', self.compiles()[-1])
 
-    def test_compiler_installation_recovers_without_cleaning(self):
+    def test_missing_compiler_stops_the_build_and_installing_it_recovers(self):
+        # the host has no run-time source compile: no toolchain is a build error, and no header is written for the host to build against
         self.env['TEST_METAL_VERSION'] = ''
-        self.make()
-        self.assertIn('#define HOST_MSL_COMPILER "none"', self.header.read_text())
+        p = self.make(ok=False)
+        self.assertIn('downloadComponent MetalToolchain', p.stderr)
+        self.assertFalse(self.header.exists())
         self.assertEqual(self.compiles(), [])
         self.env['TEST_METAL_VERSION'] = 'Metal test compiler 1'
         self.make()
         self.assertEqual(len(self.compiles()), 1)
-        self.assertNotIn('#define HOST_MSL_COMPILER "none"', self.header.read_text())
+        text = self.header.read_text()
+        self.assertIn('#define HOST_MSL_COMPILER "Metal test compiler 1"', text)
+        self.assertNotIn('"none"', text)
 
-    def test_gfx_tests_also_recheck_a_source_only_header(self):
+    def test_missing_compiler_after_a_build_does_not_reuse_the_header(self):
+        self.make()
         self.env['TEST_METAL_VERSION'] = ''
-        self.make(gfx=True)
+        self.make(ok=False)
+        self.make(gfx=True, ok=False)
         self.env['TEST_METAL_VERSION'] = 'Metal test compiler 1'
         self.make(gfx=True)
         self.assertEqual(len(self.compiles()), 1)
@@ -140,11 +148,10 @@ class HostMSL(unittest.TestCase):
             return real_run(cmd, **kw)
 
         with patch.object(regress, 'game_root', return_value=self.root / 'regress'), patch.object(regress, 'say'), patch.object(regress.subprocess, 'run', side_effect=run):
-            self.env['TEST_METAL_VERSION'] = ''
-            _, source_key, _ = regress.host_for(tree, game, 1)
-            self.env['TEST_METAL_VERSION'] = 'Metal test compiler 1'
+            _, first_key, _ = regress.host_for(tree, game, 1)
+            self.env['TEST_METAL_VERSION'] = 'Metal test compiler 2'
             _, compiled_key, _ = regress.host_for(tree, game, 1)
-            self.assertNotEqual(compiled_key, source_key)
+            self.assertNotEqual(compiled_key, first_key)
             self.assertEqual(regress.host_for(tree, game, 1)[1], compiled_key)
             self.assertEqual(len(builds), 2)
             self.source.write_text('kernel void changed() {}\n')
@@ -178,11 +185,10 @@ class HostMSL(unittest.TestCase):
             return NS(returncode=0, stdout='clang -o dmhost main.c\n' if cmd[0] == 'make' else 'test toolchain', stderr='')
 
         with patch.object(nsp, 'apple_silicon', return_value=True), patch.object(nsp, 'run', side_effect=run), patch.object(nsp.subprocess, 'run', side_effect=command):
-            self.env['TEST_METAL_VERSION'] = ''
             nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME))
             nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME))
             self.assertEqual(len(builds), 1)
-            self.env['TEST_METAL_VERSION'] = 'Metal test compiler 1'
+            self.env['TEST_METAL_VERSION'] = 'Metal test compiler 2'
             nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME))
             self.assertEqual(len(builds), 2)
             self.source.write_text('kernel void changed() {}\n')

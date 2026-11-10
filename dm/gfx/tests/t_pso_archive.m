@@ -114,9 +114,9 @@ static int run_kernel(id<MTLComputePipelineState> ps) {
     const uint32_t *o = b.contents; for (uint32_t i = 0; i < 64; i++) if (o[i] != i * 3 + 1) return 0;
     return 1;
 }
-// Compute pipelines (cps_new) beside the bases: one the bundle does not hold is built through the MTLDevice and compiled into the flush period in the background, written to a
+// Compute pipelines (cps_new) beside the bases: one the bundle does not hold is built through the Metal 4 compiler and compiled into the flush period in the background, written to a
 // plain file (never a p<seq> one), and a later start takes it from that file without building it; compaction captures it again; a function without a Metal 4 descriptor
-// (constants, the embedded kernels) is built through the MTLDevice, not captured and never looked up
+// gets no pipeline, is not captured and never looked up
 static void compute_pipelines(void) {
     char kdir[] = "/tmp/t_pso_compute.XXXXXX"; if (!mkdtemp(kdir)) abort();
     NSString *saved = g_arch_dir; g_arch_dir = @(kdir); g_arch4 = @[]; g_arch4p = @[]; NSError *err = nil;
@@ -162,15 +162,14 @@ static void compute_pipelines(void) {
     EXPECT("compute, compaction: waits for the flush", pending + 1, g_arch_new);
     atomic_store(&g_warm_running, 0); g_compact_enabled = 0; g_compacted = 0;
     arch_flush_wait();
-    // no Metal 4 descriptor: built through the MTLDevice, no lookup, nothing captured
+    // no Metal 4 descriptor: no pipeline (every function a pipeline is built from is noted), no lookup, nothing captured
     int looked = la->lookups; built = g_cps_built; pending = g_arch_new;
     id<MTLComputePipelineState> up = cps_new(uf, &err);
-    EXPECT("compute without a descriptor: a pipeline", 1, up != nil);
+    EXPECT("compute without a descriptor: no pipeline", 1, up == nil);
     EXPECT("compute without a descriptor: never looked up", looked, la->lookups);
-    EXPECT("compute without a descriptor: built", built + 1, g_cps_built);
+    EXPECT("compute without a descriptor: not built", built, g_cps_built);
     dispatch_sync(arch_harvest_q(), ^{});
     EXPECT("compute without a descriptor: not captured", pending, g_arch_new);
-    EXPECT("compute without a descriptor: its dispatch writes", 1, run_kernel(up));
     [NSFileManager.defaultManager removeItemAtPath:@(kdir) error:nil]; g_arch_dir = saved; g_arch4 = @[];
 }
 // Draws mesh pipeline ps (one triangle over the target) into a 4x4 RGBA8 target cleared to red: 1 when the centre pixel is the fragment's colour, or red with no fragment
@@ -188,9 +187,9 @@ static int mesh_draw_ok(id<MTLRenderPipelineState> ps, int fragment) {
     uint8_t px[4]; [t getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0];
     return fragment ? px[0] == 0 && px[1] == 255 && px[2] == 0 && px[3] == 255 : px[0] == 255 && px[1] == 0 && px[2] == 0 && px[3] == 255;
 }
-// Native mesh pipelines (mtk_build) beside the bases: one built through the MTLDevice is compiled into the flush period in the background, written to a p file (no vertex layout), and a later start takes it from
+// Native mesh pipelines (mtk_build) beside the bases: one built through the Metal 4 compiler is compiled into the flush period in the background, written to a p file (no vertex layout), and a later start takes it from
 // that file without compiling, with or without a task shader; a compacting prewarm captures one taken from a plain file again; a depth-only one (no pixel shader) takes the noted
-// empty fragment and goes the same way; one whose function has no Metal 4 descriptor is built through the MTLDevice and not captured
+// empty fragment and goes the same way; one whose function has no Metal 4 descriptor gets no pipeline and is not captured
 static void mesh_pipelines(void) {
     char mdir[] = "/tmp/t_pso_mesh.XXXXXX"; if (!mkdtemp(mdir)) abort();
     NSString *saved = g_arch_dir; g_arch_dir = @(mdir); g_arch4 = @[]; g_arch4p = @[]; NSError *err = nil;
@@ -216,7 +215,7 @@ static void mesh_pipelines(void) {
     um->fn = test_fn(ul, @"ms", 0); um->stage = 4; um->mesh_kind = 2; um->mesh_threads = 1; um->mesh_notask = 1; um->mesh_obj = test_fn(ul, @"ob", 0); strlcpy(um->key, "mesh-u", sizeof um->key);
     pso_key k; memset(&k, 0, sizeof k); k.cfmt[0] = MTLPixelFormatRGBA8Unorm; k.chmask = 0xf; k.samples = 1;
     pso_key kz; memset(&kz, 0, sizeof kz); kz.cfmt[0] = MTLPixelFormatRGBA8Unorm; kz.samples = 1;   // depth only: no pixel shader, no colour written
-    uint64_t built = g_mtk_built, arch = g_mtk_arch, dev = g_mtk_dev; int pending = g_arch_new, got = 0;
+    uint64_t built = g_mtk_built, arch = g_mtk_arch; int pending = g_arch_new, got = 0;
     id<MTLRenderPipelineState> p1 = mtk_build(&k, nil, ms, fs, &err, &got), p2 = mtk_build(&k, os, mt, fs, &err, NULL), p3 = mtk_build(&kz, nil, ms, nil, &err, NULL);
     EXPECT("mesh: pipelines", 1, p1 && p2 && p3);
     EXPECT("mesh: built", built + 3, g_mtk_built);
@@ -267,15 +266,13 @@ static void mesh_pipelines(void) {
     EXPECT("mesh, compaction: waits for the flush", pending + 1, g_arch_new);
     atomic_store(&g_warm_running, 0); g_compact_enabled = 0; g_compacted = 0;
     arch_flush_wait();
-    // no Metal 4 descriptor: built through the MTLDevice, nothing captured
+    // no Metal 4 descriptor: no pipeline (every function a pipeline is built from is noted), nothing captured
     pending = g_arch_new; built = g_mtk_built;
     id<MTLRenderPipelineState> up = mtk_build(&k, nil, um, fs, &err, NULL);
-    EXPECT("mesh without a descriptor: a pipeline", 1, up != nil);
-    EXPECT("mesh without a descriptor: MTLDevice build", dev + 1, g_mtk_dev);
-    EXPECT("mesh without a descriptor: not counted as kept", built, g_mtk_built);
+    EXPECT("mesh without a descriptor: no pipeline", 1, up == nil);
+    EXPECT("mesh without a descriptor: not built", built, g_mtk_built);
     dispatch_sync(arch_harvest_q(), ^{});
     EXPECT("mesh without a descriptor: not captured", pending, g_arch_new);
-    EXPECT("mesh without a descriptor: its draw writes", 1, mesh_draw_ok(up, 1));
     [NSFileManager.defaultManager removeItemAtPath:@(mdir) error:nil]; g_arch_dir = saved; g_arch4 = @[]; g_arch4p = @[];
 }
 // Notes whether the compaction marker exists while the serializer writes (issue #342: a flush that does not return leaves it)
@@ -362,7 +359,7 @@ static void depth_only(void) {
     d.fragmentFunction = nil; NSError *err = nil; uint64_t legacy = g_pb_legacy;
     id<MTLRenderPipelineState> ps = pso_build(d, &err);
     EXPECT("depth only: pipeline", 1, ps != nil);
-    EXPECT("depth only: legacy path", legacy + 1, g_pb_legacy);
+    EXPECT("depth only: through the Metal 4 compiler (the empty fragment)", legacy, g_pb_legacy);
     if (!ps) return;
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:4 height:4 mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
@@ -658,7 +655,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         return failed != 0;
     }
     if (argc == 3 && !strncmp(argv[1], "--stale-", 8)) {   // across fresh processes: files of another shader chain and files written before the chain stamp (fix 10)
-        int seed = !strcmp(argv[1], "--stale-seed"), keep = getenv("DM_PSO_KEEP_OLD") && !strcmp(getenv("DM_PSO_KEEP_OLD"), "1");
+        const char *keep_env = getenv("DM_PSO_KEEP_OLD"); int seed = !strcmp(argv[1], "--stale-seed"), keep = keep_env && !strcmp(keep_env, "1");
         NSMutableArray<MTLRenderPipelineDescriptor *> *descs = [NSMutableArray array];
         for (int i = 0; i < 6; i++) {
             MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);

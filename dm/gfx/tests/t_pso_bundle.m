@@ -153,7 +153,7 @@ int main(void) { @autoreleasepool {
         EXPECT("compute with constants, not in the map: built", b0 + 2, g_cps_built);
         EXPECT("compute with constants, not in the map: not from the bundle", a0 + 2, g_cps_arch);
         dispatch_sync(arch_harvest_q(), ^{});
-        EXPECT("compute not in the map: captured into this device's archive, the one with constants not", n0 + 1, g_arch_new);
+        EXPECT("compute not in the map and with constants: both captured into this device's archive", n0 + 2, g_arch_new);
     }
     // task / mesh pipelines: the three the rows describe come from the bundle, nothing built or captured; a pixel shader with function constants and no pixel shader are built as before
     @autoreleasepool {
@@ -161,7 +161,7 @@ int main(void) { @autoreleasepool {
         EXPECT("mesh: shaders loaded", 1, t1 && m1 && m2 && p1 && pc && m2->mesh_obj && t1->mesh_kind == 1 && m1->mesh_kind == 2 && m2->mesh_notask);
         NSString *log = [NSString stringWithContentsOfFile:[root stringByAppendingPathComponent:@"pso_offline.log"] encoding:NSUTF8StringEncoding error:nil];
         EXPECT("mesh: three pipelines in the archive, the constant and no-pixel-shader rows left out", 1, [log containsString:@"5 task / mesh rows: 3 task / mesh pipelines"]);
-        uint64_t a0 = g_mtk_arch, b0 = g_mtk_built, d0 = g_mtk_dev; int n0 = g_arch_new, got = 0; NSError *err = nil;
+        uint64_t a0 = g_mtk_arch, b0 = g_mtk_built; int n0 = g_arch_new, got = 0; NSError *err = nil;
         if (t1 && m1 && m2 && p1 && pc) {
             EXPECT("mesh with a task: a pipeline", 1, mtk_build(&mk, t1, m1, p1, &err, &got) != nil);
             EXPECT("mesh with a task: from the bundle", 1, got);
@@ -175,7 +175,7 @@ int main(void) { @autoreleasepool {
             EXPECT("mesh, pixel shader with constants: built", 0, got);
             EXPECT("mesh, no pixel shader: a pipeline", 1, mtk_build(&mk, nil, m2, nil, &err, &got) != nil);
             EXPECT("mesh, no pixel shader: built", 0, got);
-            EXPECT("mesh: the two left out built", b0 + d0 + 2, g_mtk_built + g_mtk_dev);
+            EXPECT("mesh: the two left out built", b0 + 2, g_mtk_built);
             pso_key other = mb; other.blend[0].dst_rgb = NVN_BLEND_FUNC_ONE;   // other blend state than the row's: another pipeline
             EXPECT("mesh, other blend state: a pipeline", 1, mtk_build(&other, nil, m2, p1, &err, &got) != nil);
             EXPECT("mesh, other blend state: not in the bundle", 0, got);
