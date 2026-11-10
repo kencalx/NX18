@@ -41,7 +41,7 @@ int main(void) {
         for (int j = 0; j < 4; j++) {
             memset(bd.contents, 0xAA, CAP * 8);
             T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(cb);
-            [ce setComputePipelineState:ps]; t4_buf(cb, ce, T4_CS, bn, 0, 0); t4_buf(cb, ce, T4_CS, bs, 0, 1); t4_buf(cb, ce, T4_CS, bd, 0, 2);
+            [ce setComputePipelineState:t4_keep(cb, ps)]; t4_buf(cb, ce, T4_CS, bn, 0, 0); t4_buf(cb, ce, T4_CS, bs, 0, 1); t4_buf(cb, ce, T4_CS, bd, 0, 2);
             [ce dispatchThreadgroups:MTLSizeMake((N + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
             t4_end(cb, ce); if (t4_wait(cb) != MTLCommandBufferStatusCompleted) { printf("%s: GPU error\n", k_nvn_builtin_map[k].fn); return 1; }
             uint64_t e[CAP]; expect(j, src, e);

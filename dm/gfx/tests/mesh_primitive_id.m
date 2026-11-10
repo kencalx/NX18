@@ -66,7 +66,7 @@ int main(int argc, char **argv) { @autoreleasepool {
             pass.colorAttachments[0].storeAction = MTLStoreActionStore;
             T4 *command = t4_begin();
             id<MTL4RenderCommandEncoder> en = t4_pass(command, pass);
-            [en setRenderPipelineState:pipeline];
+            [en setRenderPipelineState:t4_keep(command, pipeline)];
             t4_buf(command, en, T4_MS, vb, 0, 0); t4_buf(command, en, T4_MS, gb, 0, 13);
             t4_bytes(command, en, T4_MS, &args, sizeof args, 12); t4_bytes(command, en, T4_MS, &pulling, sizeof pulling, 16);
             for (id<MTLBuffer> resource in @[vertices, indices, info, constants]) t4_use(command, resource);
@@ -118,7 +118,7 @@ int main(int argc, char **argv) { @autoreleasepool {
             pass.colorAttachments[0].storeAction = MTLStoreActionStore;
             T4 *command = t4_begin();
             id<MTL4RenderCommandEncoder> en = t4_pass(command, pass);
-            [en setRenderPipelineState:pipeline]; t4_buf(command, en, T4_MS, recs, 0, 12);
+            [en setRenderPipelineState:t4_keep(command, pipeline)]; t4_buf(command, en, T4_MS, recs, 0, 12);
             for (id<MTLBuffer> resource in @[vertices, indices, constants, pull, vb, infos[0], infos[1], infos[2], infos[3], gbs[0], gbs[1], gbs[2], gbs[3]]) t4_use(command, resource);
             [en drawMeshThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(96, 1, 1)];
             t4_end(command, en); t4_wait(command);

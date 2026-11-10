@@ -19,7 +19,7 @@ static id<MTLComputePipelineState> pipe_of(NSString *src, NSString *name) {
 }
 static void run2(id<MTLComputePipelineState> p, id<MTLTexture> t, id<MTLBuffer> out) {
     T4 *command = t4_begin(); id<MTL4ComputeCommandEncoder> encoder = t4_compute(command);
-    [encoder setComputePipelineState:p]; t4_tex(command, encoder, T4_CS, t, 0); if (out) t4_buf(command, encoder, T4_CS, out, 0, 0);
+    [encoder setComputePipelineState:t4_keep(command, p)]; t4_tex(command, encoder, T4_CS, t, 0); if (out) t4_buf(command, encoder, T4_CS, out, 0, 0);
     [encoder dispatchThreads:MTLSizeMake(2, 1, 1) threadsPerThreadgroup:MTLSizeMake(2, 1, 1)];
     t4_end(command, encoder); t4_wait(command);
     CHECK(command->status == MTLCommandBufferStatusCompleted, "GPU work completed");
@@ -136,7 +136,7 @@ static void init_fill_case(int tid, int format, int pool_flags) {
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = base; rp.colorAttachments[0].loadAction = MTLLoadActionLoad; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     T4 *command = t4_begin(); id<MTL4RenderCommandEncoder> e = t4_pass(command, rp);
-    [e setRenderPipelineState:p]; [e setScissorRect:(MTLScissorRect){0, 0, 1, 1}]; [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; t4_end(command, e);
+    [e setRenderPipelineState:t4_keep(command, p)]; [e setScissorRect:(MTLScissorRect){0, 0, 1, 1}]; [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; t4_end(command, e);
     t4_wait(command);
     CHECK(p && command->status == MTLCommandBufferStatusCompleted, "partial render completed");
     want[0] = want[2] = 0; want[1] = want[3] = 1;   // texel 0 drawn green, texel 1 as uploaded

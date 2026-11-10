@@ -30,7 +30,9 @@ HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int&
 # The pool table as the host writes it (nvn_mtl.m gmem_map, dmsh_abi.h DMSH_GMEM_MAP_*): 8,192 entries of 8 words {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, 0}, sorted by start,
 # entry 0 empty, unused entries starting at ~0. Pools A and B are adjacent, C lies past a gap and above 4 GiB, and its 2 MiB chunk has a hint naming it (the only pool there; the gap after it is in
 # the chunk too, so the hint's entry does not hold that address)
+T4_DIR = str(Path(__file__).resolve().parent)   # t_mtl4.h, the Metal 4 queue and pipelines the runners below use
 RUNNER = '''#import <Metal/Metal.h>
+#include "t_mtl4.h"
 #include <stdio.h>
 #include <string.h>
 enum { POOLS = 3, WORDS = 1024, LANES = 64, STEPS = 16 };
@@ -40,7 +42,7 @@ static int expect(uint64_t a, int64_t *pool) { for (int p = 0; p < POOLS; p++) i
 int main(int ac, char **av) { @autoreleasepool {
     id<MTLDevice> d = MTLCreateSystemDefaultDevice(); NSError *e = nil;
     id<MTLLibrary> l = [d newLibraryWithURL:[NSURL fileURLWithPath:@(av[1])] error:&e]; if (!l) { puts(e.description.UTF8String); return 2; }
-    id<MTLComputePipelineState> ps = [d newComputePipelineStateWithFunction:[l newFunctionWithName:@"k"] error:&e]; if (!ps) { puts(e.description.UTF8String); return 2; }
+    id<MTLComputePipelineState> ps = t4_cps(t4_fn(l, @"k"), &e); if (!ps) { puts(e.description.UTF8String); return 2; }
     id<MTLBuffer> pool[POOLS], map = [d newBufferWithLength:8192 * 32 options:MTLResourceStorageModeShared];
     uint32_t *t = map.contents; memset(t, 0, 8192 * 32); for (int k = 1; k < 8192; k++) memset(t + k * 8, 0xff, 8);
     for (int p = 0; p < POOLS; p++) {
@@ -56,10 +58,10 @@ int main(int ac, char **av) { @autoreleasepool {
         uint64_t x = SEQ[s][0] < 0 ? (uint64_t)SEQ[s][1] : GUEST[SEQ[s][0]] + SEQ[s][1] + (uint64_t)(lane * 8) % (WORDS * 4 - 64); int64_t p;
         a[lane * STEPS + s] = x; want[lane * STEPS + s] = expect(x, &p);
     }
-    id<MTLCommandQueue> q = [d newCommandQueue]; id<MTLCommandBuffer> c = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [c computeCommandEncoder];
-    [ce setComputePipelineState:ps]; [ce setBuffer:map offset:0 atIndex:0]; [ce setBuffer:addr offset:0 atIndex:1]; [ce setBuffer:out offset:0 atIndex:2];
-    for (int p = 0; p < POOLS; p++) [ce useResource:pool[p] usage:MTLResourceUsageRead];
-    [ce dispatchThreads:MTLSizeMake(LANES, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; [ce endEncoding]; [c commit]; [c waitUntilCompleted];
+    T4 *c = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(c);
+    [ce setComputePipelineState:t4_keep(c, ps)]; t4_buf(c, ce, T4_CS, map, 0, 0); t4_buf(c, ce, T4_CS, addr, 0, 1); t4_buf(c, ce, T4_CS, out, 0, 2);
+    for (int p = 0; p < POOLS; p++) t4_use(c, pool[p]);
+    [ce dispatchThreads:MTLSizeMake(LANES, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; t4_end(c, ce); t4_wait(c);
     const int *got = out.contents; int bad = 0;
     for (int i = 0; i < LANES * STEPS; i++) if (got[i] != want[i]) { if (bad++ < 8) printf("lane %d step %d: address 0x%llx read 0x%x, want 0x%x\\n", i / STEPS, i % STEPS, a[i], got[i], want[i]); }
     printf("bad %d of %d\\n", bad, LANES * STEPS); return 0;
@@ -102,7 +104,7 @@ class RawLast(Translated):
             self.assertEqual(r.returncode, 0, r.stderr[-3000:])
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
             (w / 'r.m').write_text(RUNNER)
-            subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
+            subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
             out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
             self.assertIn('bad 0 of 1024', out.stdout, out.stdout + out.stderr)
 
@@ -174,7 +176,7 @@ class RawVector(Translated):
             self.assertEqual(r.returncode, 0, r.stderr[-3000:])
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
             (w / 'r.m').write_text(RUNNER)
-            subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
+            subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
             out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
             self.assertIn('bad 0 of 1024', out.stdout, out.stdout + out.stderr)
 

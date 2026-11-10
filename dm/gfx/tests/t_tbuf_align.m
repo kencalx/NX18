@@ -21,8 +21,8 @@ static id<MTLDevice> dev; static id<MTLComputePipelineState> pd, pa; static id<M
 static void readback(id<MTLTexture> t, int argbuf, uint32_t *o) {
     id<MTLBuffer> ob = [dev newBufferWithLength:N * 16 options:MTLResourceStorageModeShared], ab = [dev newBufferWithLength:ae.encodedLength options:MTLResourceStorageModeShared];
     T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(cb);
-    if (argbuf) { [ae setArgumentBuffer:ab offset:0]; [ae setTexture:t atIndex:0]; [ce setComputePipelineState:pa]; t4_buf(cb, ce, T4_CS, ab, 0, 1); t4_use(cb, t); }
-    else { [ce setComputePipelineState:pd]; t4_tex(cb, ce, T4_CS, t, 0); }
+    if (argbuf) { [ae setArgumentBuffer:ab offset:0]; [ae setTexture:t atIndex:0]; [ce setComputePipelineState:t4_keep(cb, pa)]; t4_buf(cb, ce, T4_CS, ab, 0, 1); t4_use(cb, t); }
+    else { [ce setComputePipelineState:t4_keep(cb, pd)]; t4_tex(cb, ce, T4_CS, t, 0); }
     t4_buf(cb, ce, T4_CS, ob, 0, 0);
     [ce dispatchThreads:MTLSizeMake(N, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; t4_end(cb, ce); t4_wait(cb);
     memcpy(o, ob.contents, N * 16);

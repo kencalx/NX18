@@ -21,7 +21,7 @@ static void pixels(id<MTLRenderPipelineState> ps, __fp16 out[4]) {
     rp.colorAttachments[0].clearColor = MTLClearColorMake(.75, .5, .25, .875); rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     T4 *cb = t4_begin();
     id<MTL4RenderCommandEncoder> e = t4_pass(cb, rp);
-    [e setRenderPipelineState:ps]; [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; t4_end(cb, e);
+    [e setRenderPipelineState:t4_keep(cb, ps)]; [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; t4_end(cb, e);
     t4_wait(cb); CHECK(cb->status == MTLCommandBufferStatusCompleted, "draw completes");
     [t getBytes:out bytesPerRow:32 fromRegion:MTLRegionMake2D(1,1,1,1) mipmapLevel:0];
 }

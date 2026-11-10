@@ -42,7 +42,7 @@ int main(void) {
         if (!tb || !t2) { check(what, 0, "texture not created"); continue; }
         id<MTLBuffer> o = [dev newBufferWithLength:(size_t)n * 32 options:MTLResourceStorageModeShared];
         T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(cb);
-        [ce setComputePipelineState:fi ? pf : pu]; t4_tex(cb, ce, T4_CS, tb, 0); t4_tex(cb, ce, T4_CS, t2, 1); t4_buf(cb, ce, T4_CS, o, 0, 0); t4_bytes(cb, ce, T4_CS, &n, 4, 1);
+        [ce setComputePipelineState:t4_keep(cb, fi ? pf : pu)]; t4_tex(cb, ce, T4_CS, tb, 0); t4_tex(cb, ce, T4_CS, t2, 1); t4_buf(cb, ce, T4_CS, o, 0, 0); t4_bytes(cb, ce, T4_CS, &n, 4, 1);
         [ce dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)]; t4_end(cb, ce); t4_wait(cb);
         const uint32_t *r = o.contents; int bad = -1;
         for (uint32_t i = 0; i < n && bad < 0; i++) for (int c = 0; c < 4; c++) {
@@ -57,7 +57,7 @@ int main(void) {
         [t replaceRegion:MTLRegionMake2D(0, 0, n, 1) mipmapLevel:0 withBytes:v bytesPerRow:n * 4];
         id<MTLBuffer> o = [dev newBufferWithLength:(size_t)n * 32 options:MTLResourceStorageModeShared];
         T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(cb);
-        [ce setComputePipelineState:p1]; t4_tex(cb, ce, T4_CS, t, 1); t4_buf(cb, ce, T4_CS, o, 0, 0); t4_bytes(cb, ce, T4_CS, &n, 4, 1);
+        [ce setComputePipelineState:t4_keep(cb, p1)]; t4_tex(cb, ce, T4_CS, t, 1); t4_buf(cb, ce, T4_CS, o, 0, 0); t4_bytes(cb, ce, T4_CS, &n, 4, 1);
         [ce dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)]; t4_end(cb, ce); t4_wait(cb);
         const uint32_t *r = o.contents; int bad = -1; for (uint32_t i = 0; i < n && bad < 0; i++) if (r[8 * i] != r[8 * i + 4] || r[8 * i] != v[i]) bad = (int)i;
         check("a 16384-wide one-row 2D texture (a 1D texture) reads the same at the wrapped address", bad < 0, "differs");

@@ -95,24 +95,25 @@ kernel void main0(device uint* out [[buffer(1)]], uint3 gl_WorkGroupID [[threadg
     out[g * 64u + t] = s;
 }
 """
+T4_DIR = str(Path(__file__).resolve().parent)   # t_mtl4.h, the Metal 4 queue and pipelines the runners below use
 RUNNER = r"""#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include "t_mtl4.h"
 int main(int argc, char **argv) { @autoreleasepool {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); NSError *e = nil;
     if (!dev) { printf("no Metal device\n"); return 2; }
     id<MTLLibrary> lib = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&e];
-    id<MTLComputePipelineState> ps = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"main0"] error:&e] : nil;
+    id<MTLComputePipelineState> ps = lib ? t4_cps(t4_fn(lib, @"main0"), &e) : nil;
     if (!ps) { printf("pipeline: %s\n", e.localizedDescription.UTF8String); return 1; }
     const uint32_t slice = (uint32_t)atoi(argv[2]), slot = (uint32_t)atoi(argv[3]), gw = 16, gh = 64, groups = gw * gh;
     id<MTLBuffer> tg = [dev newBufferWithLength:(size_t)slice * groups options:MTLResourceStorageModeShared];   // one slice per workgroup, as nvn_mtl.m dispatch binds
     id<MTLBuffer> out = [dev newBufferWithLength:groups * 64 * 4 options:MTLResourceStorageModeShared];
-    id<MTLCommandQueue> q = [dev newCommandQueue];
     long wrong = 0;
     for (int run = 0; run < 4; run++) {
-        id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-        [ce setComputePipelineState:ps]; [ce setBuffer:out offset:0 atIndex:1]; [ce setBuffer:tg offset:0 atIndex:slot];
-        [ce dispatchThreadgroups:MTLSizeMake(gw, gh, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        if (cb.error) { printf("command buffer: %s\n", cb.error.localizedDescription.UTF8String); return 1; }
+        T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(cb);
+        [ce setComputePipelineState:t4_keep(cb, ps)]; t4_buf(cb, ce, T4_CS, out, 0, 1); t4_buf(cb, ce, T4_CS, tg, 0, slot);
+        [ce dispatchThreadgroups:MTLSizeMake(gw, gh, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)]; t4_end(cb, ce); t4_wait(cb);
+        if (cb->status != MTLCommandBufferStatusCompleted) { printf("command buffer: GPU error\n"); return 1; }
         const uint32_t *v = out.contents;
         for (uint32_t g = 0; g < groups; g++) for (uint32_t t = 0; t < 64; t++) {
             uint32_t nb = (t + 1) & 63, want = 0;
@@ -137,7 +138,7 @@ class OnGpu(unittest.TestCase):
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', str(d / 'k.metal'), '-o', str(d / 'k.air')], check=True)
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(d / 'k.air'), '-o', str(d / 'k.metallib')], check=True)
             (d / 'run.m').write_text(RUNNER)
-            subprocess.run(['clang', '-fobjc-arc', '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
+            subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
             r = subprocess.run([str(d / 'run'), str(d / 'k.metallib'), str(n), str(abi.TG_SLOT)], capture_output=True, text=True)
             if r.returncode == 2: self.skipTest(r.stdout.strip())
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

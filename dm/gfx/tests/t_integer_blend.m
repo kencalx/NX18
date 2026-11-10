@@ -56,7 +56,7 @@ int main(void) { @autoreleasepool {
                 rp.colorAttachments[i].loadAction = MTLLoadActionClear; rp.colorAttachments[i].storeAction = MTLStoreActionStore; }
             T4 *cb = t4_begin();
             id<MTL4RenderCommandEncoder> encoder = t4_pass(cb, rp);
-            [encoder setRenderPipelineState:pipeline]; [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [encoder setRenderPipelineState:t4_keep(cb, pipeline)]; [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
             t4_end(cb, encoder); t4_wait(cb);
             CHECK(cb->status == MTLCommandBufferStatusCompleted, "integer render completes");
             uint32_t pixels[16]; [a getBytes:pixels bytesPerRow:16 fromRegion:MTLRegionMake2D(0,0,4,4) mipmapLevel:0];

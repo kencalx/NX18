@@ -43,7 +43,7 @@ int main(void) { @autoreleasepool {
     if (!pipeline) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
     id<MTLBuffer> output = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared]; memset(output.contents, 0xcd, 16);
     T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_compute(cb);
-    [e setComputePipelineState:pipeline];
+    [e setComputePipelineState:t4_keep(cb, pipeline)];
     t4_tex(cb, e, T4_CS, dummy_tex(MTLTextureType2DMultisample, NVN_DPF_FLOAT), 0); t4_tex(cb, e, T4_CS, dummy_tex(MTLTextureType2DMultisample, NVN_DPF_UINT), 1);
     t4_tex(cb, e, T4_CS, dummy_tex(MTLTextureType2DMultisample, NVN_DPF_DEPTH), 2); t4_buf(cb, e, T4_CS, output, 0, 0);
     [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; t4_end(cb, e); t4_wait(cb);

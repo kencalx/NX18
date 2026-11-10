@@ -149,8 +149,10 @@ kernel void check_seq(device const ushort *in [[buffer(0)]], device uint *out [[
     out[gid * 4] = uint(d4); out[gid * 4 + 1] = uint(e4); out[gid * 4 + 2] = uint(d3); out[gid * 4 + 3] = uint(e3);
 }
 '''
+T4_DIR = str(Path(__file__).resolve().parent)   # t_mtl4.h, the Metal 4 queue and pipelines the runners below use
 HALF = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include "t_mtl4.h"
 static float h2f(uint16_t h) { __fp16 v; memcpy(&v, &h, 2); return (float)v; }
 static uint16_t f2h(float f) { __fp16 v = (__fp16)f; uint16_t h; memcpy(&h, &v, 2); return h; }
 static float r16(float f) { return h2f(f2h(f)); }   // one rounding to f16 (RNE)
@@ -158,14 +160,14 @@ static id<MTLComputePipelineState> pipeline(id<MTLDevice> dev, const char *path,
     NSError *e = nil; NSData *lib_data = [NSData dataWithContentsOfFile:@(path)];
     id<MTLLibrary> lib = [dev newLibraryWithData:dispatch_data_create(lib_data.bytes, lib_data.length, nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT) error:&e];
     if (!lib) { printf("library: %s\n", e.localizedDescription.UTF8String); exit(1); }
-    id<MTLComputePipelineState> ps = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:name] error:&e];
+    id<MTLComputePipelineState> ps = t4_cps(t4_fn(lib, name), &e);
     if (!ps) { printf("pipeline: %s\n", e.localizedDescription.UTF8String); exit(1); }
     return ps;
 }
 static void run(id<MTLDevice> dev, id<MTLComputePipelineState> ps, id<MTLBuffer> in, id<MTLBuffer> out, int groups) {
-    id<MTLCommandQueue> q = [dev newCommandQueue]; id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-    [ce setComputePipelineState:ps]; [ce setBuffer:in offset:0 atIndex:0]; [ce setBuffer:out offset:0 atIndex:1];
-    [ce dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(cb);
+    [ce setComputePipelineState:t4_keep(cb, ps)]; t4_buf(cb, ce, T4_CS, in, 0, 0); t4_buf(cb, ce, T4_CS, out, 0, 1);
+    [ce dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)]; t4_end(cb, ce); t4_wait(cb);
 }
 '''
 # The GPU check: 64 threadgroups of 128 lanes, random halves in [-1, 1]; the reference is Ampere's: C, then k 0-7 summed in float in order and rounded once to f16,
@@ -349,7 +351,7 @@ def run_libs(test, msls, runner):   # each source compiled to its own library, a
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(d / f'{i}.air'), '-o', str(d / f'{i}.metallib')], check=True)
             libs.append(str(d / f'{i}.metallib'))
         (d / 'run.m').write_text(runner)
-        subprocess.run(['clang', '-fobjc-arc', '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
+        subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
         r = subprocess.run([str(d / 'run')] + libs, capture_output=True, text=True)
         if r.returncode == 2: test.skipTest(r.stdout.strip())
         test.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -363,7 +365,7 @@ def compile_and_run(test, msl, runner):
         subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', str(d / 'h.metal'), '-o', str(d / 'h.air')], check=True)
         subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(d / 'h.air'), '-o', str(d / 'h.metallib')], check=True)
         (d / 'run.m').write_text(runner)
-        subprocess.run(['clang', '-fobjc-arc', '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
+        subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
         r = subprocess.run([str(d / 'run'), str(d / 'h.metallib')], capture_output=True, text=True)
         if r.returncode == 2: test.skipTest(r.stdout.strip())
         test.assertEqual(r.returncode, 0, r.stdout + r.stderr)

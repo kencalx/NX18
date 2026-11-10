@@ -110,7 +110,7 @@ static int run_kernel(id<MTLComputePipelineState> ps) {
     if (!ps) return 0;
     id<MTLBuffer> b = [g_dev newBufferWithLength:64 * 4 options:MTLResourceStorageModeShared]; memset(b.contents, 0, 64 * 4);
     T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(cb);
-    [ce setComputePipelineState:ps]; t4_buf(cb, ce, T4_CS, b, 0, 0); [ce dispatchThreads:MTLSizeMake(64, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; t4_end(cb, ce);
+    [ce setComputePipelineState:t4_keep(cb, ps)]; t4_buf(cb, ce, T4_CS, b, 0, 0); [ce dispatchThreads:MTLSizeMake(64, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; t4_end(cb, ce);
     if (t4_wait(cb) != MTLCommandBufferStatusCompleted) return 0;
     const uint32_t *o = b.contents; for (uint32_t i = 0; i < 64; i++) if (o[i] != i * 3 + 1) return 0;
     return 1;
@@ -184,7 +184,7 @@ static int mesh_draw_ok(id<MTLRenderPipelineState> ps, int fragment) {
     rp.colorAttachments[0].texture = t; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 0, 1); rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     T4 *cb = t4_begin(); id<MTL4RenderCommandEncoder> en = t4_pass(cb, rp);
     MTLSize one = MTLSizeMake(1, 1, 1);
-    [en setRenderPipelineState:ps]; [en drawMeshThreadgroups:one threadsPerObjectThreadgroup:one threadsPerMeshThreadgroup:one]; t4_end(cb, en);
+    [en setRenderPipelineState:t4_keep(cb, ps)]; [en drawMeshThreadgroups:one threadsPerObjectThreadgroup:one threadsPerMeshThreadgroup:one]; t4_end(cb, en);
     if (t4_wait(cb) != MTLCommandBufferStatusCompleted) return 0;
     uint8_t px[4]; [t getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0];
     return fragment ? px[0] == 0 && px[1] == 255 && px[2] == 0 && px[3] == 255 : px[0] == 255 && px[1] == 0 && px[2] == 0 && px[3] == 255;
@@ -343,7 +343,7 @@ static void draw_with(id<MTLRenderPipelineState> ps, MTLPixelFormat f0, MTLPixel
     rp.depthAttachment.texture = [g_dev newTextureWithDescriptor:dd]; rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.storeAction = MTLStoreActionDontCare;
     static id<MTLBuffer> one; if (!one) { float v[4] = { 1, 1, 1, 1 }; one = [g_dev newBufferWithBytes:v length:16 options:MTLResourceStorageModeShared]; }
     T4 *cb = t4_begin(); id<MTL4RenderCommandEncoder> e = t4_pass(cb, rp);
-    [e setRenderPipelineState:ps]; t4_buf(cb, e, T4_VS, one, 0, 16); [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; t4_end(cb, e);
+    [e setRenderPipelineState:t4_keep(cb, ps)]; t4_buf(cb, e, T4_VS, one, 0, 16); [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; t4_end(cb, e);
     EXPECT("draw: command completed", MTLCommandBufferStatusCompleted, t4_wait(cb));
     for (int i = 0; i < 2; i++) {
         if (fm[i] == MTLPixelFormatRGBA8Unorm) { uint8_t p[4]; [t[i] getBytes:p bytesPerRow:16 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0]; for (int c = 0; c < 4; c++) out[i][c] = p[c] / 255.0f; }
@@ -376,7 +376,7 @@ static void depth_only(void) {
     float v[4] = {1, 1, 1, 1}; id<MTLBuffer> vb = [g_dev newBufferWithBytes:v length:sizeof v options:MTLResourceStorageModeShared];
     id<MTLBuffer> out = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared];
     T4 *cb = t4_begin(); id<MTL4RenderCommandEncoder> enc = t4_pass(cb, rp);
-    [enc setRenderPipelineState:ps]; [enc setDepthStencilState:[g_dev newDepthStencilStateWithDescriptor:ds]];
+    [enc setRenderPipelineState:t4_keep(cb, ps)]; [enc setDepthStencilState:t4_keep(cb, [g_dev newDepthStencilStateWithDescriptor:ds])];
     t4_buf(cb, enc, T4_VS, vb, 0, 16); [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; t4_end(cb, enc);
     id<MTL4ComputeCommandEncoder> blit = t4_copy(cb); t4_use(cb, t); t4_use(cb, out);
     [blit copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(4, 4, 1)

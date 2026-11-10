@@ -44,12 +44,12 @@ int main(void) { @autoreleasepool {
     id<MTLTexture> rt = [dev newTextureWithDescriptor:rd];
     if (!co || !fo || !rt) { printf("no buffer or render target\n"); return 1; }
     T4 *cb = t4_begin();
-    id<MTL4ComputeCommandEncoder> ce = t4_compute(cb); [ce setComputePipelineState:cp]; t4_tex(cb, ce, T4_CS, v, 0); t4_buf(cb, ce, T4_CS, co, 0, 0);
+    id<MTL4ComputeCommandEncoder> ce = t4_compute(cb); [ce setComputePipelineState:t4_keep(cb, cp)]; t4_tex(cb, ce, T4_CS, v, 0); t4_buf(cb, ce, T4_CS, co, 0, 0);
     [ce dispatchThreads:MTLSizeMake(8, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; t4_end(cb, ce);
     MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor]; rpd.colorAttachments[0].texture = rt; rpd.colorAttachments[0].loadAction = MTLLoadActionClear; rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTL4RenderCommandEncoder> re = t4_pass(cb, rpd);
     if (!re) { printf("no render encoder\n"); return 1; }
-    [re setRenderPipelineState:rp]; t4_tex(cb, re, T4_FS, v, 0); [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; t4_end(cb, re);
+    [re setRenderPipelineState:t4_keep(cb, rp)]; t4_tex(cb, re, T4_FS, v, 0); [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; t4_end(cb, re);
     id<MTL4ComputeCommandEncoder> be = t4_copy(cb);
     if (!be) { printf("no blit encoder\n"); return 1; }
     t4_use(cb, rt), t4_use(cb, fo), [be copyFromTexture:rt sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(8, 1, 1) toBuffer:fo destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:32]; t4_end(cb, be);

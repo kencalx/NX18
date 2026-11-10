@@ -71,7 +71,7 @@ static void image_case(int explicit_image) { @autoreleasepool {
     id<MTLComputePipelineState> pipeline = t4_cps(t4_fn(lib, @"put"), &error);
     CHECK(pipeline != nil, "image writer compiled");
     T4 *write = t4_begin(); id<MTL4ComputeCommandEncoder> encoder = t4_compute(write);
-    [encoder setComputePipelineState:pipeline]; t4_tex(write, encoder, T4_CS, image, 0);
+    [encoder setComputePipelineState:t4_keep(write, pipeline)]; t4_tex(write, encoder, T4_CS, image, 0);
     [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)]; t4_end(write, encoder); t4_wait(write);
     CHECK(write->status == MTLCommandBufferStatusCompleted, "image write completed");
     read_level(tex_mtl(&alias), 1, pixels); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == (i == 5 ? 0x3400 : 0x3a00);

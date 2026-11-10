@@ -50,7 +50,7 @@ int main(void) { @autoreleasepool {
     id<MTLComputePipelineState> pipe = function ? t4_cps(function, &error) : nil;
     if (!pipe) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
     T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_compute(cb);
-    [e setComputePipelineState:pipe]; t4_tex(cb, e, T4_CS, img, 0);
+    [e setComputePipelineState:t4_keep(cb, pipe)]; t4_tex(cb, e, T4_CS, img, 0);
     [e dispatchThreads:MTLSizeMake(W >> LEVEL, W >> LEVEL, 1) threadsPerThreadgroup:MTLSizeMake(W >> LEVEL, W >> LEVEL, 1)]; t4_end(cb, e); t4_wait(cb);
     CHECK(cb->status == MTLCommandBufferStatusCompleted, "the store kernel ran");
     CHECK(texel_at(base, LEVEL, LAYER) == 128, "the stores land in the registered layer and level");

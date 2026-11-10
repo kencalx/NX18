@@ -77,14 +77,14 @@ int main(int argc, char **argv) { @autoreleasepool {
             MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor new];
             rp.depthAttachment.texture = depth; rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.clearDepth = 1; rp.depthAttachment.storeAction = MTLStoreActionStore;
             id<MTL4RenderCommandEncoder> en = t4_pass(cb, rp);
-            float zero = 0; [en setRenderPipelineState:pd]; [en setDepthStencilState:dsw]; t4_buf(cb, en, T4_VS, vb, 0, 0); t4_bytes(cb, en, T4_VS, &zero, 4, 1);
+            float zero = 0; [en setRenderPipelineState:t4_keep(cb, pd)]; [en setDepthStencilState:t4_keep(cb, dsw)]; t4_buf(cb, en, T4_VS, vb, 0, 0); t4_bytes(cb, en, T4_VS, &zero, 4, 1);
             [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3 * N]; t4_end(cb, en);
             rp = [MTLRenderPassDescriptor new];
             rp.colorAttachments[0].texture = res; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
             rp.colorAttachments[0].storeAction = MTLStoreActionStore;
             rp.depthAttachment.texture = spare; rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.storeAction = MTLStoreActionDontCare;
             en = t4_pass(cb, rp);
-            [en setRenderPipelineState:pr]; [en setDepthStencilState:dsn]; t4_buf(cb, en, T4_VS, vb, 0, 0); t4_bytes(cb, en, T4_VS, &dz, 4, 1);
+            [en setRenderPipelineState:t4_keep(cb, pr)]; [en setDepthStencilState:t4_keep(cb, dsn)]; t4_buf(cb, en, T4_VS, vb, 0, 0); t4_bytes(cb, en, T4_VS, &dz, 4, 1);
             t4_tex(cb, en, T4_FS, depth, 0); [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3 * N]; t4_end(cb, en);
             t4_wait(cb);
             [res getBytes:px bytesPerRow:W * 16 fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];

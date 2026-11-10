@@ -35,7 +35,7 @@ static id<MTLRenderPipelineState> rp(NSString *fn, MTLVertexDescriptor *vd) {
 static void run(id<MTLRenderPipelineState> ps, id<MTLBuffer> vb, int vd_slot, id<MTLBuffer> lay, id<MTLBuffer> out, uint32_t mode, int nvert, int ninst, int binst) {
     MTLRenderPassDescriptor *p = [MTLRenderPassDescriptor new]; p.colorAttachments[0].texture = rt; p.colorAttachments[0].loadAction = MTLLoadActionDontCare; p.colorAttachments[0].storeAction = MTLStoreActionDontCare;
     T4 *cb = t4_begin(); id<MTL4RenderCommandEncoder> e = t4_pass(cb, p);
-    [e setRenderPipelineState:ps];
+    [e setRenderPipelineState:t4_keep(cb, ps)];
     if (vd_slot >= 0) t4_buf(cb, e, T4_VS, vb, 0, (NSUInteger)vd_slot);
     if (lay) { t4_buf(cb, e, T4_VS, lay, 0, 16); t4_use(cb, vb); }
     t4_buf(cb, e, T4_VS, out, 0, 1); t4_bytes(cb, e, T4_VS, &mode, 4, 2);

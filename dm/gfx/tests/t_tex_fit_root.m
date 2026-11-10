@@ -15,7 +15,7 @@ static uint8_t texel(NSUInteger level, NSUInteger layer, int c) { return (uint8_
 static void read_args(id<MTLComputePipelineState> pipeline, id<MTLTexture> t, const void *args, size_t n, float out[4]) {
     id<MTLBuffer> b = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared]; memset(b.contents, 0xcd, 16);
     T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_compute(cb);
-    [e setComputePipelineState:pipeline]; t4_tex(cb, e, T4_CS, t, 0); t4_bytes(cb, e, T4_CS, args, n, 0); t4_buf(cb, e, T4_CS, b, 0, 1);
+    [e setComputePipelineState:t4_keep(cb, pipeline)]; t4_tex(cb, e, T4_CS, t, 0); t4_bytes(cb, e, T4_CS, args, n, 0); t4_buf(cb, e, T4_CS, b, 0, 1);
     [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; t4_end(cb, e); t4_wait(cb);
     CHECK(cb->status == MTLCommandBufferStatusCompleted, "the GPU reads the fitted view");
     memcpy(out, b.contents, 16);

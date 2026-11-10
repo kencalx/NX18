@@ -118,7 +118,7 @@ int main(void) { @autoreleasepool {
             memset(out.contents, 0xff, GROUPS * THREADS * 4);
             T4 *cb = t4_begin();
             id<MTL4ComputeCommandEncoder> e = t4_compute(cb);
-            [e setComputePipelineState:ps];
+            [e setComputePipelineState:t4_keep(cb, ps)];
             t4_buf(cb, e, T4_CS, out, 0, 0);
             t4_bytes(cb, e, T4_CS, &count, 4, 1);
             [e dispatchThreadgroups:MTLSizeMake(GROUPS, 1, 1) threadsPerThreadgroup:MTLSizeMake(THREADS, 1, 1)];

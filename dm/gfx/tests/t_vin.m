@@ -88,7 +88,7 @@ int main(void) {
         memset(out.contents, 0xEE, NV * 32);
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor]; rp.renderTargetWidth = 1; rp.renderTargetHeight = 1; rp.defaultRasterSampleCount = 1;
         T4 *cb = t4_begin(); id<MTL4RenderCommandEncoder> en = t4_pass(cb, rp);
-        [en setRenderPipelineState:ps]; t4_buf(cb, en, T4_VS, out, 0, 1); t4_buf(cb, en, T4_VS, ba, 0, 2); t4_buf(cb, en, T4_VS, bb, 0, 3); t4_buf(cb, en, T4_VS, zero, 0, 30);
+        [en setRenderPipelineState:t4_keep(cb, ps)]; t4_buf(cb, en, T4_VS, out, 0, 1); t4_buf(cb, en, T4_VS, ba, 0, 2); t4_buf(cb, en, T4_VS, bb, 0, 3); t4_buf(cb, en, T4_VS, zero, 0, 30);
         [en drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:NV]; t4_end(cb, en); t4_wait(cb);
         const uint32_t *o = out.contents; uint32_t worst = 0; char detail[160] = "";
         for (int v = 0; v < NV; v++) for (int s = 0; s < 2; s++) {

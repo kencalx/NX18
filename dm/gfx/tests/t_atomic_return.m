@@ -45,7 +45,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     [args setTexture:tex atIndex:0];
     T4 *command = t4_begin();
     id<MTL4ComputeCommandEncoder> enc = t4_compute(command);
-    [enc setComputePipelineState:pso];
+    [enc setComputePipelineState:t4_keep(command, pso)];
     t4_buf(command, enc, T4_CS, ab, 0, 0);
     t4_use(command, tex);
     [enc dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];

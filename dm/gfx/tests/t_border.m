@@ -55,7 +55,7 @@ static void gpu_case(id<MTLComputePipelineState> p, int sid, const float B[4], i
     id<MTLBuffer> uv = [g_dev newBufferWithBytes:UV length:sizeof UV options:MTLResourceStorageModeShared];
     id<MTLBuffer> out = [g_dev newBufferWithLength:16 * NUV options:MTLResourceStorageModeShared];
     T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_compute(cb);
-    [e setComputePipelineState:p]; t4_buf(cb, e, T4_CS, args, 0, 0); t4_buf(cb, e, T4_CS, out, 0, 1); t4_buf(cb, e, T4_CS, uv, 0, 2);
+    [e setComputePipelineState:t4_keep(cb, p)]; t4_buf(cb, e, T4_CS, args, 0, 0); t4_buf(cb, e, T4_CS, out, 0, 1); t4_buf(cb, e, T4_CS, uv, 0, 2);
     t4_use(cb, g_tex); t4_use(cb, block);
     [e dispatchThreads:MTLSizeMake(NUV, 1, 1) threadsPerThreadgroup:MTLSizeMake(NUV, 1, 1)]; t4_end(cb, e); t4_wait(cb);
     CHECK(cb->status == MTLCommandBufferStatusCompleted, "sampler %d: GPU work completed", sid);

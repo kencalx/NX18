@@ -29,7 +29,7 @@ static void expect(id<MTLTexture> image,int first,const char *label){
     CHECK("mip probe compiles",ps!=nil);if(!ps||!image)return;
     id<MTLBuffer> result=[g_dev newBufferWithLength:48 options:MTLResourceStorageModeShared];
     T4 *cb = t4_begin();id<MTL4ComputeCommandEncoder> ce=t4_compute(cb);
-    [ce setComputePipelineState:ps];t4_tex(cb, ce, T4_CS, image, 0);t4_buf(cb, ce, T4_CS, result, 0, 0);[ce dispatchThreadgroups:MTLSizeMake(3,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];t4_end(cb, ce);t4_wait(cb);
+    [ce setComputePipelineState:t4_keep(cb, ps)];t4_tex(cb, ce, T4_CS, image, 0);t4_buf(cb, ce, T4_CS, result, 0, 0);[ce dispatchThreadgroups:MTLSizeMake(3,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];t4_end(cb, ce);t4_wait(cb);
     CHECK("mip readback completes",cb->status==MTLCommandBufferStatusCompleted);
     float *out=result.contents;for(int lv=0;lv<3;lv++)for(int c=0;c<4;c++)CHECK(label,fabsf(out[lv*4+c]-(colors[(first+lv)%4][c]?1.f:0.f))<.001f);
 }
@@ -74,7 +74,7 @@ static void run3d(uint64_t serial, uint32_t tex_flags, int want) {
         CHECK("3D probe compiles",ps!=nil);
         if(ps){id<MTLBuffer> result=[g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared];
             T4 *cb = t4_begin();id<MTL4ComputeCommandEncoder> ce=t4_compute(cb);
-            [ce setComputePipelineState:ps];t4_tex(cb, ce, T4_CS, image, 0);t4_buf(cb, ce, T4_CS, result, 0, 0);[ce dispatchThreadgroups:MTLSizeMake(4,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];t4_end(cb, ce);t4_wait(cb);
+            [ce setComputePipelineState:t4_keep(cb, ps)];t4_tex(cb, ce, T4_CS, image, 0);t4_buf(cb, ce, T4_CS, result, 0, 0);[ce dispatchThreadgroups:MTLSizeMake(4,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];t4_end(cb, ce);t4_wait(cb);
             float *out=result.contents;int ok=cb->status==MTLCommandBufferStatusCompleted;
             for(int z=0;z<4;z++)for(int c=0;c<3;c++)ok&=fabsf(out[z*4+c]*255.f-(float)(z*40+1+c))<.5f;
             CHECK("every slice of the 3D texture holds the CPU's texels at first use",ok);}

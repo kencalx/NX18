@@ -34,7 +34,7 @@ static void run_case(int format) {
     NSError *err = nil; const char *src = "#include <metal_stdlib>\nusing namespace metal;\nkernel void fill(texture2d<uint,access::write> out [[texture(0)]], uint2 p [[thread_position_in_grid]]) { if(p.x<160&&p.y<90) out.write(uint4(0xff996633u,0,0,0),p); }\n";
     id<MTLLibrary> lib = t4_lib(@(src), nil, &err); if (!lib) { fprintf(stderr,"%s\n",err.description.UTF8String); abort(); }
     id<MTLComputePipelineState> ps = t4_cps(t4_fn(lib, @"fill"), &err); if (!ps) { fprintf(stderr,"%s\n",err.description.UTF8String); abort(); }
-    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> en = t4_compute(cb); [en setComputePipelineState:ps]; t4_tex(cb, en, T4_CS, image, 0);
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> en = t4_compute(cb); [en setComputePipelineState:t4_keep(cb, ps)]; t4_tex(cb, en, T4_CS, image, 0);
     [en dispatchThreads:MTLSizeMake(160,90,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)]; t4_end(cb, en);
     EXPECT("image compute complete", MTLCommandBufferStatusCompleted, t4_wait(cb));
     h_nvnMemoryPoolInvalidateMappedRange((const NVNmemoryPool *)&pool, 65536, 640*90);

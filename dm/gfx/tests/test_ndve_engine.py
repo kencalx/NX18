@@ -177,18 +177,20 @@ kernel void ref_resample(device const half *luma [[buffer(0)]], device const hal
 }
 '''
 
+T4_DIR = str(Path(__file__).resolve().parent)   # t_mtl4.h, the Metal 4 queue and pipelines the runners below use
 RUNNER = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include "t_mtl4.h"
 #include <stdlib.h>
-static id<MTLDevice> dev; static id<MTLCommandQueue> q; static id<MTLLibrary> eng, ref;
+static id<MTLDevice> dev; static id<MTLLibrary> eng, ref;
 static uint64_t rng = 0x9e3779b97f4a7c15ull;
 static uint32_t rnd(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (uint32_t)(rng >> 16); }
 static uint16_t f2h(float f) { __fp16 v = (__fp16)f; uint16_t h; memcpy(&h, &v, 2); return h; }
 static float h2f(uint16_t h) { __fp16 v; memcpy(&v, &h, 2); return (float)v; }
 static float uni(void) { return ((int)(rnd() % 20001) - 10000) / 10000.0f; }   // in [-1, 1]
 static id<MTLComputePipelineState> pso(id<MTLLibrary> lib, NSString *name) {
-    NSError *e = nil; id<MTLFunction> f = [lib newFunctionWithName:name]; if (!f) { printf("no function %s\n", name.UTF8String); exit(1); }
-    id<MTLComputePipelineState> p = [dev newComputePipelineStateWithFunction:f error:&e]; if (!p) { printf("%s: %s\n", name.UTF8String, e.localizedDescription.UTF8String); exit(1); }
+    NSError *e = nil; id<MTLFunction> f = t4_fn(lib, name); if (!f) { printf("no function %s\n", name.UTF8String); exit(1); }
+    id<MTLComputePipelineState> p = t4_cps(f, &e); if (!p) { printf("%s: %s\n", name.UTF8String, e.localizedDescription.UTF8String); exit(1); }
     return p;
 }
 // a padded f16 NHWC tensor (zero border, 16 spare rows) of random activations: about a third zero (ReLU'd), the rest in [-1, 1] (negative ones too: signed zeros of products)
@@ -213,10 +215,10 @@ static void fill_tex(id<MTLTexture> t, int mask10) {
     for (size_t i = 0; i < n; i++) p[i] = mask10 ? (rnd() & 0x3fffffff) | (3u << 30) : rnd();
     [t replaceRegion:MTLRegionMake2D(0, 0, t.width, t.height) mipmapLevel:0 withBytes:p bytesPerRow:t.width * 4]; free(p);
 }
-typedef void (^enc_fn)(id<MTLComputeCommandEncoder>);
-static void run(enc_fn f) {
-    id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder]; f(ce); [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    if (cb.error) { printf("GPU error: %s\n", cb.error.localizedDescription.UTF8String); exit(1); }
+typedef void (^enc_fn)(T4 *cb, id<MTL4ComputeCommandEncoder>);
+static void run(enc_fn f) {   // f's dispatches may overlap unless it puts t4_barrier between them
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(cb); f(cb, ce); t4_end(cb, ce);
+    if (t4_wait(cb) != MTLCommandBufferStatusCompleted) { printf("GPU error\n"); exit(1); }
 }
 static int fails;
 static void same(const char *what, const void *a, const void *b, size_t n, int esz) {
@@ -234,12 +236,12 @@ static void layer(const char *ek, const char *rk, int KS, int up, int K, int N, 
     const int taps = up ? 4 : KS * KS; id<MTLBuffer> w = weights(taps * K * N, 3.0f / (taps * K)), b = weights(N, 0.5f);
     LayerArgs a = {(uint32_t)W, (uint32_t)H, (uint32_t)W / 8, (uint32_t)((H + ry - 1) / ry)}; Dims d = {(uint32_t)W, (uint32_t)H};
     id<MTLComputePipelineState> pe = pso(eng, @(ek)), pr = pso(ref, @(rk));
-    run(^(id<MTLComputeCommandEncoder> ce) {
-        [ce setComputePipelineState:pe]; [ce setBuffer:in offset:0 atIndex:0]; [ce setBuffer:oe offset:0 atIndex:1]; [ce setBuffer:w offset:0 atIndex:2]; [ce setBuffer:b offset:0 atIndex:3];
-        [ce setBytes:&a length:sizeof a atIndex:4]; if (skip) [ce setBuffer:skip offset:0 atIndex:5];
+    run(^(T4 *cb, id<MTL4ComputeCommandEncoder> ce) {
+        [ce setComputePipelineState:t4_keep(cb, pe)]; t4_buf(cb, ce, T4_CS, in, 0, 0); t4_buf(cb, ce, T4_CS, oe, 0, 1); t4_buf(cb, ce, T4_CS, w, 0, 2); t4_buf(cb, ce, T4_CS, b, 0, 3);
+        t4_bytes(cb, ce, T4_CS, &a, sizeof a, 4); if (skip) t4_buf(cb, ce, T4_CS, skip, 0, 5);
         uint32_t groups = staged ? (a.W + 31) / 32 * a.tiles_y : (a.tiles_x * a.tiles_y + 3) / 4;
         [ce dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-        [ce setComputePipelineState:pr]; [ce setBuffer:orf offset:0 atIndex:1]; [ce setBytes:&d length:sizeof d atIndex:4]; [ce setBuffer:skip ? skip : in offset:0 atIndex:5]; [ce setBuffer:nil offset:0 atIndex:6];
+        [ce setComputePipelineState:t4_keep(cb, pr)]; t4_buf(cb, ce, T4_CS, orf, 0, 1); t4_bytes(cb, ce, T4_CS, &d, sizeof d, 4); t4_buf(cb, ce, T4_CS, skip ? skip : in, 0, 5); t4_buf(cb, ce, T4_CS, nil, 0, 6);
         uint32_t tiles = (uint32_t)(W / 16) * (N / 8) * H * (up ? 4 : 1);
         [ce dispatchThreadgroups:MTLSizeMake((tiles + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
     });
@@ -248,8 +250,8 @@ static void layer(const char *ek, const char *rk, int KS, int up, int K, int N, 
 }
 int main(int argc, char **argv) {
     @autoreleasepool {
-        dev = MTLCreateSystemDefaultDevice(); if (!dev || ![dev supportsFamily:MTLGPUFamilyApple7]) { printf("no Apple7 Metal device\n"); return 2; }
-        q = [dev newCommandQueue]; NSError *e = nil;
+        dev = t4_dev(); if (![dev supportsFamily:MTLGPUFamilyApple7]) { printf("no Apple7 Metal device\n"); return 2; }
+        NSError *e = nil;
         eng = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&e]; ref = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[2])] error:&e];
         if (!eng || !ref) { printf("library: %s\n", e.localizedDescription.UTF8String); return 1; }
         // the network's layers at their sizes (nvn_ndve.inc k_ndve_l)
@@ -267,14 +269,14 @@ int main(int argc, char **argv) {
             fill_tex(rgba, 0);
             LayerArgs a = {960, 540, 120, 135}; Dims d = {960, 540};
             id<MTLComputePipelineState> pe = pso(eng, @"out_16"), pr = pso(ref, @"ref_conv3_raw"), pu = pso(ref, @"ref_unpack");
-            run(^(id<MTLComputeCommandEncoder> ce) {
-                [ce setComputePipelineState:pe]; [ce setBuffer:in offset:0 atIndex:0]; [ce setBuffer:w offset:0 atIndex:2]; [ce setBuffer:b offset:0 atIndex:3]; [ce setBytes:&a length:sizeof a atIndex:4];
-                [ce setTexture:rgba atIndex:0]; [ce setTexture:oe atIndex:1];
+            run(^(T4 *cb, id<MTL4ComputeCommandEncoder> ce) {
+                [ce setComputePipelineState:t4_keep(cb, pe)]; t4_buf(cb, ce, T4_CS, in, 0, 0); t4_buf(cb, ce, T4_CS, w, 0, 2); t4_buf(cb, ce, T4_CS, b, 0, 3); t4_bytes(cb, ce, T4_CS, &a, sizeof a, 4);
+                t4_tex(cb, ce, T4_CS, rgba, 0); t4_tex(cb, ce, T4_CS, oe, 1);
                 [ce dispatchThreadgroups:MTLSizeMake((a.tiles_x * a.tiles_y + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-                [ce setComputePipelineState:pr]; [ce setBuffer:in offset:0 atIndex:1]; [ce setBytes:&d length:sizeof d atIndex:4]; [ce setBuffer:in offset:0 atIndex:5]; [ce setBuffer:dr offset:0 atIndex:6];
+                [ce setComputePipelineState:t4_keep(cb, pr)]; t4_buf(cb, ce, T4_CS, in, 0, 1); t4_bytes(cb, ce, T4_CS, &d, sizeof d, 4); t4_buf(cb, ce, T4_CS, in, 0, 5); t4_buf(cb, ce, T4_CS, dr, 0, 6);
                 [ce dispatchThreadgroups:MTLSizeMake(960 / 16 * 2 * 540 / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-                [ce memoryBarrierWithScope:MTLBarrierScopeBuffers];
-                [ce setComputePipelineState:pu]; [ce setBuffer:dr offset:0 atIndex:0]; [ce setTexture:orf atIndex:1];
+                t4_barrier(ce);
+                [ce setComputePipelineState:t4_keep(cb, pu)]; t4_buf(cb, ce, T4_CS, dr, 0, 0); t4_tex(cb, ce, T4_CS, orf, 1);
                 [ce dispatchThreads:MTLSizeMake(1920, 1080, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
             });
             uint32_t *pa = malloc(1920 * 1080 * 4), *pb = malloc(1920 * 1080 * 4);
@@ -285,8 +287,8 @@ int main(int argc, char **argv) {
         {
             id<MTLTexture> rgba = tex(MTLPixelFormatRGBA8Unorm, 1920, 1080); fill_tex(rgba, 0);
             id<MTLBuffer> out = tensor(960, 540, 16, 0); LayerArgs a = {960, 540, 0, 0};
-            run(^(id<MTLComputeCommandEncoder> ce) {
-                [ce setComputePipelineState:pso(eng, @"pack_input")]; [ce setTexture:rgba atIndex:0]; [ce setBuffer:out offset:0 atIndex:1]; [ce setBytes:&a length:sizeof a atIndex:4];
+            run(^(T4 *cb, id<MTL4ComputeCommandEncoder> ce) {
+                [ce setComputePipelineState:t4_keep(cb, pso(eng, @"pack_input"))]; t4_tex(cb, ce, T4_CS, rgba, 0); t4_buf(cb, ce, T4_CS, out, 0, 1); t4_bytes(cb, ce, T4_CS, &a, sizeof a, 4);
                 [ce dispatchThreadgroups:MTLSizeMake(30, 135, 1) threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
             });
             uint8_t *px = malloc(1920 * 1080 * 4); [rgba getBytes:px bytesPerRow:1920 * 4 fromRegion:MTLRegionMake2D(0, 0, 1920, 1080) mipmapLevel:0];
@@ -301,14 +303,14 @@ int main(int argc, char **argv) {
             fill_tex(pic, 1); fill_tex(dith, 1);
             id<MTLBuffer> luma = [dev newBufferWithLength:1920 * 1080 * 2 options:MTLResourceStorageModeShared], w = weights(6 * 1024, 0.35f);
             int32_t c[24] = {0, 0, 1919, 1079, 0, 0, 2559, 1439}; float s2[4] = {0, 0, 1.0f / 2560, 1.0f / 1440}; memcpy(c + 8, s2, 16); c[18] = 1439; c[19] = 0; c[20] = 1; const int32_t *cp = c;
-            run(^(id<MTLComputeCommandEncoder> ce) {
-                [ce setComputePipelineState:pso(eng, @"rs_luma")]; [ce setTexture:pic atIndex:0]; [ce setBuffer:luma offset:0 atIndex:1];
+            run(^(T4 *cb, id<MTL4ComputeCommandEncoder> ce) {
+                [ce setComputePipelineState:t4_keep(cb, pso(eng, @"rs_luma"))]; t4_tex(cb, ce, T4_CS, pic, 0); t4_buf(cb, ce, T4_CS, luma, 0, 1);
                 [ce dispatchThreadgroups:MTLSizeMake(60, 135, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
-                [ce memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                t4_barrier(ce);
                 for (int i = 0; i < 2; i++) {
-                    [ce setComputePipelineState:pso(i ? ref : eng, i ? @"ref_resample" : @"resample")];
-                    [ce setBuffer:luma offset:0 atIndex:0]; [ce setBuffer:w offset:0 atIndex:2]; [ce setBytes:cp length:96 atIndex:3];
-                    [ce setTexture:pic atIndex:0]; [ce setTexture:dith atIndex:1]; [ce setTexture:i ? orf : oe atIndex:2];
+                    [ce setComputePipelineState:t4_keep(cb, pso(i ? ref : eng, i ? @"ref_resample" : @"resample"))];
+                    t4_buf(cb, ce, T4_CS, luma, 0, 0); t4_buf(cb, ce, T4_CS, w, 0, 2); t4_bytes(cb, ce, T4_CS, cp, 96, 3);
+                    t4_tex(cb, ce, T4_CS, pic, 0); t4_tex(cb, ce, T4_CS, dith, 1); t4_tex(cb, ce, T4_CS, i ? orf : oe, 2);
                     [ce dispatchThreadgroups:MTLSizeMake(80, 180, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
                 }
             });
@@ -369,7 +371,7 @@ class EngineOnGpu(unittest.TestCase):
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', str(d / 'ref.metal'), '-o', str(d / 'ref.air')], check=True)
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(d / 'ref.air'), '-o', str(d / 'ref.metallib')], check=True)
             (d / 'run.m').write_text(RUNNER)
-            subprocess.run(['clang', '-fobjc-arc', '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
+            subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
             r = subprocess.run([str(d / 'run'), str(d / 'eng.metallib'), str(d / 'ref.metallib')], capture_output=True, text=True)
             if r.returncode == 2: self.skipTest(r.stdout.strip())
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

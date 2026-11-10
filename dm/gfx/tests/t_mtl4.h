@@ -8,7 +8,8 @@
 // Metal 4 makes nothing resident and tracks no hazard by itself:
 //   - every texture, buffer or heap an encoder reads or writes goes through t4_use (t4_buf / t4_tex / t4_pass / t4_bytes do it for what they bind);
 //   - each encoder starts with a queue barrier (after all earlier work) and ends with one (t4_end: before all later work);
-//   - dispatches and copies in one compute encoder may overlap: t4_barrier between two that depend on each other.
+//   - dispatches and copies in one compute encoder may overlap: t4_barrier between two that depend on each other;
+//   - an encoder retains nothing it is given: a pipeline or depth / stencil state made just for one encoder is kept by t4_keep until the command buffer completes.
 // Bindings go through argument tables (one per stage and command buffer); set*Bytes, which Metal 4 does not have, through a scratch buffer (t4_bytes). Samplers bound
 // through t4_samp need supportArgumentBuffers. Pipelines are built by an MTL4Compiler from the Metal 4 function descriptors t4_fn / t4_fn_cv noted (t4_cps, t4_rps, t4_mps),
 // libraries from source through it too (t4_lib).
@@ -41,6 +42,7 @@ enum { T4_SCRATCH = 64 << 10, T4_BUFS = 31, T4_TEXS = 31, T4_SAMPS = 16 };
 #endif
     id<MTL4ArgumentTable> tab[T4_NSTAGE];
     NSMutableArray<id<MTLBuffer>> *scratch; NSUInteger scratch_at;
+    NSMutableArray *keep;   // t4_keep's objects
     long status;   // MTLCommandBufferStatusCompleted / MTLCommandBufferStatusError once t4_wait returned, else MTLCommandBufferStatusNotEnqueued
 }
 @end
@@ -253,6 +255,8 @@ static inline void t4_use(T4 *t, id res) {
     }
 #endif
 }
+// Keep obj (a pipeline, a depth / stencil state...) until the command buffer completes, and return it: a Metal 4 encoder does not retain what it is given
+static inline id t4_keep(T4 *t, id obj) { if (obj) { if (!t->keep) t->keep = [NSMutableArray array]; [t->keep addObject:obj]; } return obj; }
 // A compute encoder, for dispatches and for the copies a blit encoder made (copyFromTexture, copyFromBuffer, fillBuffer, generateMipmapsForTexture...)
 static inline id<MTL4ComputeCommandEncoder> t4_compute(T4 *t) {
 #if T4_NVN

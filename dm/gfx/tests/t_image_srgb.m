@@ -32,7 +32,7 @@ static void run_kernel(id<MTLTexture> image, id<MTLTexture> sampled, float *out)
     if (!p) return;
     id<MTLBuffer> ob = [g_dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
     T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> c = t4_compute(cb);
-    [c setComputePipelineState:p]; t4_tex(cb, c, T4_CS, image, 0); t4_tex(cb, c, T4_CS, sampled, 1); t4_buf(cb, c, T4_CS, ob, 0, 0);
+    [c setComputePipelineState:t4_keep(cb, p)]; t4_tex(cb, c, T4_CS, image, 0); t4_tex(cb, c, T4_CS, sampled, 1); t4_buf(cb, c, T4_CS, ob, 0, 0);
     [c dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; t4_end(cb, c); t4_wait(cb);
     CHECK(cb->status == MTLCommandBufferStatusCompleted, "image kernel completed");
     memcpy(out, ob.contents, 32);

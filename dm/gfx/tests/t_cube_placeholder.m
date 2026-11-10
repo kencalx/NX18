@@ -37,7 +37,7 @@ static void run_case(id<MTLTexture> descriptor, MTLTextureType want, id<MTLTextu
     for (uint32_t select = 0; select < 2; select++) {
         memset(output.contents, 0xcd, 16);
         T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> encoder = t4_compute(cb);
-        [encoder setComputePipelineState:pipeline]; t4_tex(cb, encoder, T4_CS, primary, 0); t4_tex(cb, encoder, T4_CS, fitted, 1);
+        [encoder setComputePipelineState:t4_keep(cb, pipeline)]; t4_tex(cb, encoder, T4_CS, primary, 0); t4_tex(cb, encoder, T4_CS, fitted, 1);
         t4_bytes(cb, encoder, T4_CS, &select, sizeof select, 0); t4_buf(cb, encoder, T4_CS, output, 0, 1);
         [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
         t4_end(cb, encoder); t4_wait(cb);

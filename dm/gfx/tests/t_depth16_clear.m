@@ -83,7 +83,7 @@ int main(void) { @autoreleasepool {
         rp.depthAttachment.texture = tex[k]; rp.depthAttachment.slice = (NSUInteger)i; rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.storeAction = MTLStoreActionStore;
         rp.depthAttachment.clearDepth = k == 0 ? 1.0 : depth[i];
         id<MTL4RenderCommandEncoder> e = t4_pass(cb, rp);
-        if (k == 0) { float d = (float)depth[i]; [e setRenderPipelineState:ps]; [e setDepthStencilState:ds]; t4_bytes(cb, e, T4_FS, &d, 4, 0); [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; }
+        if (k == 0) { float d = (float)depth[i]; [e setRenderPipelineState:t4_keep(cb, ps)]; [e setDepthStencilState:t4_keep(cb, ds)]; t4_bytes(cb, e, T4_FS, &d, 4, 0); [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; }
         t4_end(cb, e);
     }
     t4_wait(cb);

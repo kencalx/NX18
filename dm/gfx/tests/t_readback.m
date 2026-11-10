@@ -123,7 +123,7 @@ static void sample2(int tid, float out[8]) {
     os_unfair_lock_lock(&g_rmu); id<MTLTexture> v = tex_by_id(tid); os_unfair_lock_unlock(&g_rmu);
     id<MTLBuffer> b = [g_dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
     T4 *c = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_compute(c);
-    [e setComputePipelineState:p]; t4_tex(c, e, T4_CS, v, 0); t4_buf(c, e, T4_CS, b, 0, 0); [e dispatchThreads:MTLSizeMake(2, 1, 1) threadsPerThreadgroup:MTLSizeMake(2, 1, 1)];
+    [e setComputePipelineState:t4_keep(c, p)]; t4_tex(c, e, T4_CS, v, 0); t4_buf(c, e, T4_CS, b, 0, 0); [e dispatchThreads:MTLSizeMake(2, 1, 1) threadsPerThreadgroup:MTLSizeMake(2, 1, 1)];
     t4_end(c, e); t4_wait(c); memcpy(out, b.contents, 32);
 }
 static void packed_copies(int format, int tid) {

@@ -108,7 +108,7 @@ static void depth_planes(pool_t *pool) {
         id<MTLTexture> stencil=[base newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
         id<MTLBuffer> out=[g_dev newBufferWithLength:base.width*base.height*8 options:MTLResourceStorageModeShared];
         T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e=t4_compute(cb);
-        [e setComputePipelineState:ps]; t4_tex(cb, e, T4_CS, stencil, 0); t4_tex(cb, e, T4_CS, base, 1); t4_buf(cb, e, T4_CS, out, 0, 0);
+        [e setComputePipelineState:t4_keep(cb, ps)]; t4_tex(cb, e, T4_CS, stencil, 0); t4_tex(cb, e, T4_CS, base, 1); t4_buf(cb, e, T4_CS, out, 0, 0);
         [e dispatchThreads:MTLSizeMake(base.width,base.height,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)]; t4_end(cb, e); t4_wait(cb);
         uint32_t *p=out.contents; int valid=cb->status==MTLCommandBufferStatusCompleted;
         for (NSUInteger j=0;j<out.length/8;j++) valid &= p[j*2]==0x30u+i && p[j*2+1]==0x3e800000;

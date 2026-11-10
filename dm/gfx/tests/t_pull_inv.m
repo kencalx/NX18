@@ -62,7 +62,7 @@ int main(void) { @autoreleasepool {
             rp.colorAttachments[0].texture = pass ? c1 : c0; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0); rp.colorAttachments[0].storeAction = MTLStoreActionStore;
             rp.depthAttachment.texture = depth; rp.depthAttachment.loadAction = pass ? MTLLoadActionLoad : MTLLoadActionClear; rp.depthAttachment.clearDepth = 1; rp.depthAttachment.storeAction = MTLStoreActionStore;
             id<MTL4RenderCommandEncoder> en = t4_pass(cb, rp);
-            [en setRenderPipelineState:ps[k]]; [en setDepthStencilState:pass ? se : sl]; t4_bytes(cb, en, T4_VS, M, 64, 0);
+            [en setRenderPipelineState:t4_keep(cb, ps[k])]; [en setDepthStencilState:t4_keep(cb, pass ? se : sl)]; t4_bytes(cb, en, T4_VS, M, 64, 0);
             if (k) { t4_buf(cb, en, T4_VS, lay, 0, 16); t4_use(cb, vb); } else t4_buf(cb, en, T4_VS, vb, 0, 16);
             [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:NV]; t4_end(cb, en);
         }

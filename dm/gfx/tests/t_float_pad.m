@@ -28,7 +28,7 @@ int main(void) { @autoreleasepool {
         id<MTLRenderPipelineState> ps=t4_rps(pd, &err); if (!ps) { puts(err.localizedDescription.UTF8String); return 2; }
         MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor]; rp.renderTargetWidth=rp.renderTargetHeight=1; rp.defaultRasterSampleCount=1;
         memset(out.contents,0xEE,16);
-        T4 *cb = t4_begin(); id<MTL4RenderCommandEncoder> en=t4_pass(cb, rp); [en setRenderPipelineState:ps]; t4_buf(cb, en, T4_VS, out, 0, 1); t4_buf(cb, en, T4_VS, vb, 0, 2); t4_buf(cb, en, T4_VS, zero, 0, 30); [en drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:1]; t4_end(cb, en); t4_wait(cb);
+        T4 *cb = t4_begin(); id<MTL4RenderCommandEncoder> en=t4_pass(cb, rp); [en setRenderPipelineState:t4_keep(cb, ps)]; t4_buf(cb, en, T4_VS, out, 0, 1); t4_buf(cb, en, T4_VS, vb, 0, 2); t4_buf(cb, en, T4_VS, zero, 0, 30); [en drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:1]; t4_end(cb, en); t4_wait(cb);
         if (cb->status!=MTLCommandBufferStatusCompleted) { printf("GPU command failed\n"); return 2; }
         uint32_t expected[4]={0,0,0,0x3f800000}; memcpy(expected,data,n*4);
         checks++; if (memcmp(out.contents,expected,16)) { failed++; printf("FAIL Float%d -> %s4 w=%#x expected float1=%#x\n",n,sign?"int":"uint",((uint32_t*)out.contents)[3],expected[3]); }

@@ -37,7 +37,7 @@ static void run(id<MTLDevice> dev, id<MTLComputePipelineState> ps, int w, int h)
         }
     T4 *cb = t4_begin();
     id<MTL4ComputeCommandEncoder> ce = t4_compute(cb);
-    [ce setComputePipelineState:ps];
+    [ce setComputePipelineState:t4_keep(cb, ps)];
     t4_buf(cb, ce, T4_CS, bt, 0, 0);
     t4_buf(cb, ce, T4_CS, bo, 0, 1);
     [ce dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];

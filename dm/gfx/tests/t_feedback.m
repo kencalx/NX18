@@ -537,7 +537,7 @@ static void om_case(const char *dir) {
     rpd.colorAttachments[1].texture = t1; rpd.colorAttachments[1].loadAction = MTLLoadActionClear; rpd.colorAttachments[1].storeAction = MTLStoreActionStore;
     rpd.colorAttachments[1].clearColor = MTLClearColorMake(0, 1, 0, 1);
     id<MTL4RenderCommandEncoder> enc = t4_pass(cb, rpd);
-    [enc setRenderPipelineState:ps];
+    [enc setRenderPipelineState:t4_keep(cb, ps)];
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     t4_end(cb, enc);
     t4_wait(cb);

@@ -59,7 +59,7 @@ int main(void) { @autoreleasepool {
         id<MTLTexture> stencil = [base newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
         id<MTLBuffer> result = [g_dev newBufferWithLength:64*8 options:MTLResourceStorageModeShared];
         cb=t4_begin(); id<MTL4ComputeCommandEncoder> e=t4_compute(cb);
-        [e setComputePipelineState:reader]; t4_tex(cb, e, T4_CS, stencil, 0); t4_tex(cb, e, T4_CS, base, 1); t4_buf(cb, e, T4_CS, result, 0, 0);
+        [e setComputePipelineState:t4_keep(cb, reader)]; t4_tex(cb, e, T4_CS, stencil, 0); t4_tex(cb, e, T4_CS, base, 1); t4_buf(cb, e, T4_CS, result, 0, 0);
         [e dispatchThreads:MTLSizeMake(8,8,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)]; t4_end(cb, e);
         CHECK(t4_wait(cb) == MTLCommandBufferStatusCompleted, "both resulting planes are read on the GPU");
         uint32_t *pixels=result.contents; int valid=1;

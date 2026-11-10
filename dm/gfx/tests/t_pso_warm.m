@@ -97,7 +97,7 @@ static void pixels(id<MTLRenderPipelineState> pipeline, int mesh, uint8_t out[4]
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     T4 *cb = t4_begin();
     id<MTL4RenderCommandEncoder> enc = t4_pass(cb, pass);
-    [enc setRenderPipelineState:pipeline];
+    [enc setRenderPipelineState:t4_keep(cb, pipeline)];
     if (mesh) {
         MTLSize one = MTLSizeMake(1, 1, 1);
         [enc drawMeshThreadgroups:one threadsPerObjectThreadgroup:one threadsPerMeshThreadgroup:one];
