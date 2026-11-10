@@ -38,6 +38,13 @@
 - **Fix:** the pattern takes the variant, and an `sdk` built for the Switch 2 (`spec: Ounce`, as `dm_sdk_ounce` reads it) gets the 9 GB pool every Switch 2 profile has. Open: only the pool changes; a game with system resource keeps the 5 GB block (Star Fox's profile has 21 GB with a 16 GB alias region), so a provisional profile may still not fit and needs the bring-up.
 - **Found on:** Star Fox and Kirby Air Riders (`040077201BE50000`; no profile), read from their NUP and extraction; first reported with [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md).
 
+### An NX made by nxconvert pack needs free space for its NCA files
+
+- **Symptom:** a build from a `.nx` made with `nxconvert pack game.dnsp` (or `.dxci`) stops before extraction with `[RED] <file> (update <N>): <x> GB to stage and write and <y> GB free on the volume of <build folder> (1 GB is kept free)`, or the overall `[RED] less than <n> GB free`, where an NX made from folders of the same game passed. Before NX 18 read such archives, it stopped at `holds decrypted NCA files … not supported yet`.
+- **Cause:** that NX holds the decrypted NCA files themselves, not extracted folders, and an update holds its base game's NCAs beside its patch NCAs (nxconvert's rule). LibHac reads NCAs with random access, so `pack_nx.py` writes the ones a version needs (Meta, Program, Control, Manual) to `<build folder>/tmp/nca/v<N>/` before `nx_extract --plain` reads them: an update needs room for its base and patch Program NCAs beside the extracted ExeFS and RomFS image.
+- **Fix:** none needed beyond the space: the check runs before anything is staged, counts the staged files, the output bound (the Program, Control and Manual NCAs) and 1 GB, and the staging folder is deleted after each version, also on an error or Ctrl-C. A repeat build with the same NCAs (`extract/v<N>/native.inputs.json`) stages nothing. Data NCAs and delta fragments are never staged. No `prod.keys` is read: `nx_extract --plain` uses an empty key set.
+- **Found on:** synthetic NCAs only (`dm/tools/tests/dnca_writer.py`: base, BKTR update, DLC, sparse and compressed sections); no real decrypted NSP or XCI was at hand. What a real decrypter leaves in the sparse info, the AesCtrEx table and compressed sections is not known from NXFormat's text; `nx_extract` accepts either form of each.
+
 ## Build tools
 
 ### Building needed .NET, and finding its runtime kept failing
@@ -447,6 +454,13 @@
 - **Cause:** the base game's HtmlDocument NCA can be sparse too (16 KB, beside the sparse Program NCA). `--html` reads the update's HtmlDocument NCAs, each over a base one when it is a patch, and then every base HtmlDocument NCA on its own; a sparse one read alone fails the hash check while its tables open.
 - **Fix:** `dm/tools/nx_extract/Program.cs` reads no sparse base HtmlDocument NCA on its own (`a sparse HtmlDocument NCA of the base game (… bytes): read only through the update's patch, not alone`), as Horizon mounts it only through its patch.
 - **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md), base v0 with update v131072: the update's patch (`accessible-urls`) and its full legal information NCA are read, the base's legal information NCA too.
+
+### A sparse base game in an NX packs only with its update
+
+- **Symptom:** `--package v0` (or `pack_nx.py game.nx --version 0`) on an NX made by `nxconvert pack` stops with `[RED] <file> (base): the base game's program is sparse (the decrypter left out data its update carries): it runs only with its update; pack an update version`.
+- **Cause:** the base game's Program NCA was sparse in the NSP or XCI. The decrypter flattens such a section (its holes are zeros, `DSPF` at FS header 0x1D0), but its hashes still describe the whole section, and the left-out data is the update's. NXConvert packs such a base anyway; Horizon mounts it only through its patch.
+- **Fix:** `nx_extract --plain` clears the flattened section's sparse info (LibHac would otherwise read its table through AES-CTR, a key) and still treats the NCA as sparse: read alone it stops with exit code 4, which `pack_nx.py` reports as code `sparse`; read with its update, the patch is laid over it and every hash check passes. A section with sparse info and no `DSPF` is refused (exit code 7): the decrypter did not finish it. The survey's build ID lookup takes main's build ID from the archive's catalog, so a sparse base (which has none) is skipped there.
+- **Found on:** synthetic NCAs (`dm/tools/tests/dnca_writer.py` `Game(sparse_base=True)`), after the NSP case of [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md).
 
 ## Mods
 
