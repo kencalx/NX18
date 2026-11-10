@@ -4,6 +4,7 @@
 #import <Metal/Metal.h>
 #include <stdio.h>
 #include <string.h>
+#include "t_mtl4.h"
 
 static const char *k_msl =
     "#include <metal_stdlib>\nusing namespace metal;\n"
@@ -15,25 +16,24 @@ static int g_n, g_fail;
 static void check(const char *what, int ok, const char *detail) { g_n++; if (!ok) g_fail++; printf("%-70s %s %s\n", what, ok ? "✓" : "✗", ok ? "" : detail); }
 
 enum { N = 64 };
-static id<MTLDevice> dev; static id<MTLCommandQueue> q; static id<MTLComputePipelineState> pd, pa; static id<MTLArgumentEncoder> ae;
+static id<MTLDevice> dev; static id<MTLComputePipelineState> pd, pa; static id<MTLArgumentEncoder> ae;
 // Reads N elements of t into o (uint4 each), directly (argbuf 0) or through an argument buffer (argbuf 1)
 static void readback(id<MTLTexture> t, int argbuf, uint32_t *o) {
     id<MTLBuffer> ob = [dev newBufferWithLength:N * 16 options:MTLResourceStorageModeShared], ab = [dev newBufferWithLength:ae.encodedLength options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-    if (argbuf) { [ae setArgumentBuffer:ab offset:0]; [ae setTexture:t atIndex:0]; [ce setComputePipelineState:pa]; [ce setBuffer:ab offset:0 atIndex:1]; [ce useResource:t usage:MTLResourceUsageRead]; }
-    else { [ce setComputePipelineState:pd]; [ce setTexture:t atIndex:0]; }
-    [ce setBuffer:ob offset:0 atIndex:0];
-    [ce dispatchThreads:MTLSizeMake(N, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(cb);
+    if (argbuf) { [ae setArgumentBuffer:ab offset:0]; [ae setTexture:t atIndex:0]; [ce setComputePipelineState:pa]; t4_buf(cb, ce, T4_CS, ab, 0, 1); t4_use(cb, t); }
+    else { [ce setComputePipelineState:pd]; t4_tex(cb, ce, T4_CS, t, 0); }
+    t4_buf(cb, ce, T4_CS, ob, 0, 0);
+    [ce dispatchThreads:MTLSizeMake(N, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; t4_end(cb, ce); t4_wait(cb);
     memcpy(o, ob.contents, N * 16);
 }
 
 int main(void) { @autoreleasepool {
     dev = MTLCreateSystemDefaultDevice(); NSError *err = nil;
-    id<MTLLibrary> lib = [dev newLibraryWithSource:@(k_msl) options:nil error:&err];
+    id<MTLLibrary> lib = t4_lib(@(k_msl), nil, &err);
     if (!lib) { printf("MSL compile failed: %s\n", err.localizedDescription.UTF8String); return 1; }
-    pd = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"kd"] error:&err];
-    id<MTLFunction> fa = [lib newFunctionWithName:@"ka"]; pa = [dev newComputePipelineStateWithFunction:fa error:&err]; ae = [fa newArgumentEncoderWithBufferIndex:1];
-    q = [dev newCommandQueue];
+    pd = t4_cps(t4_fn(lib, @"kd"), &err);
+    id<MTLFunction> fa = t4_fn(lib, @"ka"); pa = t4_cps(fa, &err); ae = [fa newArgumentEncoderWithBufferIndex:1];
     const struct { MTLPixelFormat pf; uint32_t bpb, comps; const char *name; } fm[] = {
         { MTLPixelFormatR32Uint, 4, 1, "R32Uint" }, { MTLPixelFormatRG32Uint, 8, 2, "RG32Uint" }, { MTLPixelFormatRG16Uint, 4, 2, "RG16Uint" } };
     size_t len = 64 + N * 16 + 64;

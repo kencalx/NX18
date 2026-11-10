@@ -7,6 +7,7 @@
 #import <Metal/Metal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "t_mtl4.h"
 
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); } } while (0)
@@ -32,14 +33,14 @@ int main(int argc, char **argv) { @autoreleasepool {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); NSError *e = nil;
     MTLCompileOptions *co = [MTLCompileOptions new]; co.preserveInvariance = YES;   // the chain's -fpreserve-invariance
     NSString *src = [NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\n%@\n%s", helper, SRC];
-    id<MTLLibrary> lib = [dev newLibraryWithSource:src options:co error:&e];
+    id<MTLLibrary> lib = t4_lib(src, co, &e);
     if (!lib) { printf("FAIL: compile: %s\n", e.localizedDescription.UTF8String); return 1; }
     const int W = 768, H = 432, N = 2000, cols = 50, rows = (N + cols - 1) / cols;
     id<MTLRenderPipelineState> (^pso)(NSString *, BOOL) = ^(NSString *fs, BOOL colour) {
         MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new]; NSError *err = nil;
-        d.vertexFunction = [lib newFunctionWithName:@"vs"]; d.fragmentFunction = [lib newFunctionWithName:fs];
+        d.vertexFunction = t4_fn(lib, @"vs"); d.fragmentFunction = t4_fn(lib, fs);
         d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float; if (colour) d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA32Float;
-        id<MTLRenderPipelineState> p = [dev newRenderPipelineStateWithDescriptor:d error:&err];
+        id<MTLRenderPipelineState> p = t4_rps(d, &err);
         if (!p) { printf("FAIL: pipeline %s: %s\n", fs.UTF8String, err.localizedDescription.UTF8String); exit(1); }
         return p; };
     id<MTLRenderPipelineState> pd = pso(@"depth_only", NO), pr = pso(@"reader", YES);
@@ -53,7 +54,6 @@ int main(int argc, char **argv) { @autoreleasepool {
     td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:W height:H mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;
     id<MTLTexture> res = [dev newTextureWithDescriptor:td];
-    id<MTLCommandQueue> q = [dev newCommandQueue];
     float *v = malloc(sizeof(float) * 12 * N), *px = malloc((size_t)W * H * 16);
     const char *names[] = {"perspective", "w = 1", "constant depth", "depth < 0.001", "depth > 0.999"};
     long plain_total = 0;
@@ -73,20 +73,20 @@ int main(int argc, char **argv) { @autoreleasepool {
         id<MTLBuffer> vb = [dev newBufferWithBytes:v length:sizeof(float) * 12 * N options:MTLResourceStorageModeShared];
         for (int far = 0; far < 2; far++) {
             float dz = far ? 4e-6f : 0;
-            id<MTLCommandBuffer> cb = [q commandBuffer];
+            T4 *cb = t4_begin();
             MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor new];
             rp.depthAttachment.texture = depth; rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.clearDepth = 1; rp.depthAttachment.storeAction = MTLStoreActionStore;
-            id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
-            float zero = 0; [en setRenderPipelineState:pd]; [en setDepthStencilState:dsw]; [en setVertexBuffer:vb offset:0 atIndex:0]; [en setVertexBytes:&zero length:4 atIndex:1];
-            [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3 * N]; [en endEncoding];
+            id<MTL4RenderCommandEncoder> en = t4_pass(cb, rp);
+            float zero = 0; [en setRenderPipelineState:pd]; [en setDepthStencilState:dsw]; t4_buf(cb, en, T4_VS, vb, 0, 0); t4_bytes(cb, en, T4_VS, &zero, 4, 1);
+            [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3 * N]; t4_end(cb, en);
             rp = [MTLRenderPassDescriptor new];
             rp.colorAttachments[0].texture = res; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
             rp.colorAttachments[0].storeAction = MTLStoreActionStore;
             rp.depthAttachment.texture = spare; rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.storeAction = MTLStoreActionDontCare;
-            en = [cb renderCommandEncoderWithDescriptor:rp];
-            [en setRenderPipelineState:pr]; [en setDepthStencilState:dsn]; [en setVertexBuffer:vb offset:0 atIndex:0]; [en setVertexBytes:&dz length:4 atIndex:1];
-            [en setFragmentTexture:depth atIndex:0]; [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3 * N]; [en endEncoding];
-            [cb commit]; [cb waitUntilCompleted];
+            en = t4_pass(cb, rp);
+            [en setRenderPipelineState:pr]; [en setDepthStencilState:dsn]; t4_buf(cb, en, T4_VS, vb, 0, 0); t4_bytes(cb, en, T4_VS, &dz, 4, 1);
+            t4_tex(cb, en, T4_FS, depth, 0); [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3 * N]; t4_end(cb, en);
+            t4_wait(cb);
             [res getBytes:px bytesPerRow:W * 16 fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
             long cov = 0, above = 0, below = 0, snapped_above = 0;
             for (long i = 0; i < (long)W * H; i++) {

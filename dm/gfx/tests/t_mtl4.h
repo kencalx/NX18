@@ -214,7 +214,7 @@ static inline MTL4VisibilityOptions t4_vis(void) {
     return MTL4VisibilityOptionDevice;
 #endif
 }
-// A command buffer of its own (q_cb / [queue commandBuffer] before): ordered after everything committed before it
+// A command buffer of its own (in place of a classic queue's): ordered after everything committed before it
 static inline T4 *t4_begin(void) {
     T4 *t = [T4 new]; t->status = MTLCommandBufferStatusNotEnqueued;
 #if T4_NVN

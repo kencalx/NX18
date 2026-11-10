@@ -8,6 +8,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "t_mtl4.h"
 
 static const char *src =
     "#include <metal_stdlib>\n"
@@ -23,7 +24,7 @@ static const char *src =
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); } } while (0)
 
-static void run(id<MTLDevice> dev, id<MTLComputePipelineState> ps, id<MTLCommandQueue> q, int w, int h) {
+static void run(id<MTLDevice> dev, id<MTLComputePipelineState> ps, int w, int h) {
     size_t n = (size_t)w * h;
     id<MTLBuffer> bt = [dev newBufferWithLength:n * 4 options:MTLResourceStorageModeShared];
     id<MTLBuffer> bo = [dev newBufferWithLength:n * 16 options:MTLResourceStorageModeShared];
@@ -34,15 +35,14 @@ static void run(id<MTLDevice> dev, id<MTLComputePipelineState> ps, id<MTLCommand
             float a = fmaf((float)k, 10.0f, 5.651999950408935546875f);
             t[(size_t)y * w + x] = a * 0.15915493667125701904296875f;
         }
-    id<MTLCommandBuffer> cb = [q commandBuffer];
-    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    T4 *cb = t4_begin();
+    id<MTL4ComputeCommandEncoder> ce = t4_compute(cb);
     [ce setComputePipelineState:ps];
-    [ce setBuffer:bt offset:0 atIndex:0];
-    [ce setBuffer:bo offset:0 atIndex:1];
+    t4_buf(cb, ce, T4_CS, bt, 0, 0);
+    t4_buf(cb, ce, T4_CS, bo, 0, 1);
     [ce dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-    [ce endEncoding];
-    [cb commit];
-    [cb waitUntilCompleted];
+    t4_end(cb, ce);
+    CHECK(t4_wait(cb) == MTLCommandBufferStatusCompleted, "%dx%d: GPU error", w, h);
     const float *o = bo.contents;
     double emax = 0, emax_old = 0; size_t dead = 0, dead_old = 0, at = 0;
     for (size_t i = 0; i < n; i++) {
@@ -65,17 +65,16 @@ int main(void) {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
         if (!dev) { printf("SKIP: no Metal device\n"); return 0; }
         NSError *err = nil;
-        id<MTLLibrary> lib = [dev newLibraryWithSource:@(src) options:[MTLCompileOptions new] error:&err];   // default options: fast math, as xcrun metal compiles the Mac libraries
+        id<MTLLibrary> lib = t4_lib(@(src), [MTLCompileOptions new], &err);   // default options: fast math, as xcrun metal compiles the Mac libraries
         if (!lib) { printf("FAIL: %s\n", err.description.UTF8String); return 1; }
-        id<MTLFunction> fn = [lib newFunctionWithName:@"lowered"];
+        id<MTLFunction> fn = t4_fn(lib, @"lowered");
         if (!fn) { printf("FAIL: no function lowered in the library\n"); return 1; }
-        id<MTLComputePipelineState> ps = [dev newComputePipelineStateWithFunction:fn error:&err];
+        id<MTLComputePipelineState> ps = t4_cps(fn, &err);
         if (!ps) { printf("FAIL: %s\n", err.description.UTF8String); return 1; }
-        id<MTLCommandQueue> q = [dev newCommandQueue];
-        run(dev, ps, q, 838, 471);
-        run(dev, ps, q, 1152, 648);
-        run(dev, ps, q, 1676, 943);
-        run(dev, ps, q, 2560, 1440);
+        run(dev, ps, 838, 471);
+        run(dev, ps, 1152, 648);
+        run(dev, ps, 1676, 943);
+        run(dev, ps, 2560, 1440);
     }
     if (fails) { printf("%d failed\n", fails); return 1; }
     printf("t_mufu_turns: all passed\n");

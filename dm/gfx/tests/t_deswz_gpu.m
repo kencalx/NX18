@@ -7,6 +7,7 @@
 #include "../nvn/nvn_tex.h"
 #include "../tex/nvn_deswizzle.h"
 #include "../tex/nvn_deswizzle_gpu.h"
+#include "t_mtl4.h"
 
 typedef struct { const char *name; nvn_texdesc d; } test_case;
 typedef struct { size_t off, pitch, bytes; unsigned level, layer, slices, rows; } record;
@@ -14,7 +15,14 @@ typedef struct { size_t off, pitch, bytes; unsigned level, layer, slices, rows; 
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
 static void fill_bytes(unsigned char *p, size_t n, uint32_t seed) { for (size_t i = 0; i < n; i++) p[i] = (unsigned char)(seed + i * 37u + (i >> 7)); }
 
-static int run_case(id<MTLDevice> dev, id<MTLCommandQueue> queue, const test_case *tc, int special) {
+// One level / layer through the Metal 4 encode (nvn_deswz_gpu_encode_m4): its constants at slot k of prm, the command buffer's compute table, what it touches made resident
+static int deswz(T4 *cb, id<MTL4ComputeCommandEncoder> enc, id<MTLBuffer> prm, unsigned k, id<MTLBuffer> src, uint64_t src_off, const nvn_texdesc *d, unsigned level, unsigned layer,
+                 id<MTLBuffer> dst, uint64_t dst_off, size_t pitch) {
+    if ((size_t)(k + 1) * 256 > prm.length) return -1;
+    t4_use(cb, src); t4_use(cb, dst); t4_use(cb, prm);
+    return nvn_deswz_gpu_encode_m4(enc, t4_table(cb, enc, T4_CS), prm, (size_t)k * 256, src, src_off, d, level, layer, dst, dst_off, pitch);
+}
+static int run_case(id<MTLDevice> dev, const test_case *tc, int special) {
     nvn_texlayout layout; nvn_tex_layout(&tc->d, &layout);
     size_t source_off = special ? 4 : 0;
     unsigned levels = tc->d.levels ? tc->d.levels : 1;
@@ -49,11 +57,12 @@ static int run_case(id<MTLDevice> dev, id<MTLCommandQueue> queue, const test_cas
     id<MTLBuffer> src = [dev newBufferWithBytes:source length:source_off + layout.size + 32 options:MTLResourceStorageModeShared];
     id<MTLBuffer> dst = [dev newBufferWithLength:dst_size + 32 options:MTLResourceStorageModeShared];
     memset(dst.contents, 0xCD, dst.length);
-    id<MTLCommandBuffer> cb = [queue commandBuffer]; id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    id<MTLBuffer> prm = [dev newBufferWithLength:(size_t)count * 256 options:MTLResourceStorageModeShared];
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> enc = t4_compute(cb);
     int fail = 0;
     for (unsigned i = 0; i < count; i++)
-        fail |= nvn_deswz_gpu_encode(enc, src, source_off, &tc->d, records[i].level, records[i].layer, dst, records[i].off, records[i].pitch) != 0;
-    [enc endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        fail |= deswz(cb, enc, prm, i, src, source_off, &tc->d, records[i].level, records[i].layer, dst, records[i].off, records[i].pitch) != 0;
+    t4_end(cb, enc); fail |= t4_wait(cb) != MTLCommandBufferStatusCompleted;
     for (unsigned i = 0; i < count; i++) {
         size_t row_bytes = records[i].bytes / (records[i].slices * records[i].rows);
         int ok = 1;
@@ -70,10 +79,8 @@ static int run_case(id<MTLDevice> dev, id<MTLCommandQueue> queue, const test_cas
 
 int main(void) {
     @autoreleasepool {
-        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
-        if (!dev) { printf("BAD: no Metal device\n"); return 1; }
+        id<MTLDevice> dev = t4_dev();
         if (nvn_deswz_gpu_init(dev)) { printf("BAD: GPU deswizzle pipeline init failed\n"); return 1; }
-        id<MTLCommandQueue> queue = [dev newCommandQueue];
         test_case cases[] = {
             {"RGBA8 1x1", {1, NVN_FORMAT_RGBA8, 0, 0, 1, 1, 1, 1, 0}},
             {"RGBA8 3x5", {1, NVN_FORMAT_RGBA8, 0, 0, 3, 5, 1, 1, 0}},
@@ -96,9 +103,9 @@ int main(void) {
             {"minimal 2D array 64x64x3 mip", {4, NVN_FORMAT_RGBA8, NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT, 0, 64, 64, 3, 7, 0}},
         };
         int fail = 0; unsigned n = 0;
-        for (unsigned i = 0; i < sizeof(cases) / sizeof(*cases); i++) { fail |= run_case(dev, queue, &cases[i], i == 1); n++; }
+        for (unsigned i = 0; i < sizeof(cases) / sizeof(*cases); i++) { fail |= run_case(dev, &cases[i], i == 1); n++; }
         nvn_gob_switch2 = 1;   // the Switch 2's order inside a GOB (nvn_deswizzle.h): the GPU paths must match the CPU one there too
-        for (unsigned i = 0; i < sizeof(cases) / sizeof(*cases); i++) { fail |= run_case(dev, queue, &cases[i], 0); n++; }
+        for (unsigned i = 0; i < sizeof(cases) / sizeof(*cases); i++) { fail |= run_case(dev, &cases[i], 0); n++; }
         nvn_gob_switch2 = 0;
 
         test_case neg = {"negative control", {1, NVN_FORMAT_RGBA8, 0, 0, 64, 64, 1, 2, 0}};
@@ -108,8 +115,9 @@ int main(void) {
         fill_bytes(lin, expected_bytes, 91); nvn_swizzle(&neg.d, 0, 0, lin, rb, srcmem);
         id<MTLBuffer> sb = [dev newBufferWithBytes:srcmem length:nl.size + 32 options:MTLResourceStorageModeShared];
         id<MTLBuffer> db = [dev newBufferWithLength:expected_bytes options:MTLResourceStorageModeShared]; memset(db.contents, 0xCD, db.length);
-        id<MTLCommandBuffer> ncb = [queue commandBuffer]; id<MTLComputeCommandEncoder> ne = [ncb computeCommandEncoder];
-        int enc_bad = nvn_deswz_gpu_encode(ne, sb, 0, &neg.d, 1, 0, db, 0, rb); [ne endEncoding]; [ncb commit]; [ncb waitUntilCompleted];
+        id<MTLBuffer> nprm = [dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
+        T4 *ncb = t4_begin(); id<MTL4ComputeCommandEncoder> ne = t4_compute(ncb);
+        int enc_bad = deswz(ncb, ne, nprm, 0, sb, 0, &neg.d, 1, 0, db, 0, rb); t4_end(ncb, ne); t4_wait(ncb);
         int mismatch = enc_bad || memcmp(db.contents, lin, expected_bytes) != 0; printf("negative control (wrong level): %s %zu bytes\n", mismatch ? "OK (flagged)" : "BAD (not flagged)", expected_bytes); fail |= !mismatch;
         free(lin); free(srcmem);
 
@@ -121,8 +129,9 @@ int main(void) {
         uint64_t c0 = now_ns(); perf_cursor = 0; for (unsigned l = 0; l < perf.d.levels; l++) { uint32_t pr, py, pz, pb; uint64_t pbase; unsigned pth, ptd; nvn_deswizzle_geom(&perf.d, l, 0, &pr, &py, &pz, &pbase, &pth, &ptd, &pb); nvn_deswizzle(&perf.d, l, 0, ps, pd + perf_cursor, pr); perf_cursor += (size_t)pr * py; } uint64_t cpu_ns = now_ns() - c0;
         id<MTLBuffer> psrc = [dev newBufferWithBytes:ps length:pl.size options:MTLResourceStorageModeShared];
         id<MTLBuffer> pdst = [dev newBufferWithLength:perf_size options:MTLResourceStorageModeShared];
-        c0 = now_ns(); id<MTLCommandBuffer> pcb = [queue commandBuffer]; id<MTLComputeCommandEncoder> pe = [pcb computeCommandEncoder]; perf_cursor = 0; for (unsigned l = 0; l < perf.d.levels; l++) { uint32_t pr, py, pz, pb; uint64_t pbase; unsigned pth, ptd; nvn_deswizzle_geom(&perf.d, l, 0, &pr, &py, &pz, &pbase, &pth, &ptd, &pb); nvn_deswz_gpu_encode(pe, psrc, 0, &perf.d, l, 0, pdst, perf_cursor, pr); perf_cursor += (size_t)pr * py; } [pe endEncoding]; uint64_t encode_ns = now_ns() - c0; [pcb commit]; [pcb waitUntilCompleted]; uint64_t gpu_ns = now_ns() - c0;
-        printf("performance reference: 2048x2048 RGBA8 with mips (about 22 MB), CPU nvn_deswizzle %.3f ms; GPU encode %.3f ms + waitUntilCompleted, total %.3f ms\n", cpu_ns / 1e6, encode_ns / 1e6, gpu_ns / 1e6); free(ps); free(pd);
+        id<MTLBuffer> pprm = [dev newBufferWithLength:(size_t)perf.d.levels * 256 options:MTLResourceStorageModeShared];
+        c0 = now_ns(); T4 *pcb = t4_begin(); id<MTL4ComputeCommandEncoder> pe = t4_compute(pcb); perf_cursor = 0; for (unsigned l = 0; l < perf.d.levels; l++) { uint32_t pr, py, pz, pb; uint64_t pbase; unsigned pth, ptd; nvn_deswizzle_geom(&perf.d, l, 0, &pr, &py, &pz, &pbase, &pth, &ptd, &pb); deswz(pcb, pe, pprm, l, psrc, 0, &perf.d, l, 0, pdst, perf_cursor, pr); perf_cursor += (size_t)pr * py; } t4_end(pcb, pe); uint64_t encode_ns = now_ns() - c0; t4_wait(pcb); uint64_t gpu_ns = now_ns() - c0;
+        printf("performance reference: 2048x2048 RGBA8 with mips (about 22 MB), CPU nvn_deswizzle %.3f ms; GPU encode %.3f ms + commit and wait, total %.3f ms\n", cpu_ns / 1e6, encode_ns / 1e6, gpu_ns / 1e6); free(ps); free(pd);
         printf("== all %u cases pass / negative control flagged ==\n", n);
         return fail != 0;
     }

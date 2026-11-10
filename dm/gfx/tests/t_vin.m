@@ -7,6 +7,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include "t_mtl4.h"
 
 static const char *k_msl =
     "#include <metal_stdlib>\nusing namespace metal;\n"
@@ -55,9 +56,9 @@ static void check(const char *what, int ok, const char *detail) { g_n++; if (!ok
 
 int main(void) {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); NSError *err = nil;
-    id<MTLLibrary> lib = [dev newLibraryWithSource:@(k_msl) options:nil error:&err];
+    id<MTLLibrary> lib = t4_lib(@(k_msl), nil, &err);
     if (!lib) { printf("MSL compile failed: %s\n", err.localizedDescription.UTF8String); return 1; }
-    id<MTLFunction> fn = [lib newFunctionWithName:@"vs"]; id<MTLCommandQueue> q = [dev newCommandQueue];
+    id<MTLFunction> fn = t4_fn(lib, @"vs");
     id<MTLBuffer> zero = [dev newBufferWithLength:64 options:MTLResourceStorageModeShared], out = [dev newBufferWithLength:NV * 32 options:MTLResourceStorageModeShared];
     memset(zero.contents, 0, 64);
     const int nf = (int)(sizeof F / sizeof *F);
@@ -81,14 +82,14 @@ int main(void) {
         vd.layouts[2].stride = 8; vd.layouts[3].stride = 8;
         vd.layouts[30].stride = 16; vd.layouts[30].stepFunction = MTLVertexStepFunctionConstant; vd.layouts[30].stepRate = 0;
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = fn; pd.rasterizationEnabled = NO; pd.vertexDescriptor = vd;
-        id<MTLRenderPipelineState> ps = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        id<MTLRenderPipelineState> ps = t4_rps(pd, &err);
         char name[96]; snprintf(name, sizeof name, "%s into uint, %s into int", fa->name, fb->name);
         if (!ps) { check(name, 0, err.localizedDescription.UTF8String); continue; }
         memset(out.contents, 0xEE, NV * 32);
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor]; rp.renderTargetWidth = 1; rp.renderTargetHeight = 1; rp.defaultRasterSampleCount = 1;
-        id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
-        [en setRenderPipelineState:ps]; [en setVertexBuffer:out offset:0 atIndex:1]; [en setVertexBuffer:ba offset:0 atIndex:2]; [en setVertexBuffer:bb offset:0 atIndex:3]; [en setVertexBuffer:zero offset:0 atIndex:30];
-        [en drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:NV]; [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        T4 *cb = t4_begin(); id<MTL4RenderCommandEncoder> en = t4_pass(cb, rp);
+        [en setRenderPipelineState:ps]; t4_buf(cb, en, T4_VS, out, 0, 1); t4_buf(cb, en, T4_VS, ba, 0, 2); t4_buf(cb, en, T4_VS, bb, 0, 3); t4_buf(cb, en, T4_VS, zero, 0, 30);
+        [en drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:NV]; t4_end(cb, en); t4_wait(cb);
         const uint32_t *o = out.contents; uint32_t worst = 0; char detail[160] = "";
         for (int v = 0; v < NV; v++) for (int s = 0; s < 2; s++) {
             const fmt_t *f = s ? fb : fa; uint32_t e[4]; ref(f, (s ? db : da) + 8 * v, e);
@@ -107,7 +108,7 @@ int main(void) {
         for (int i = 16; i < 20; i++) { vd.attributes[i].format = i == 18 ? MTLVertexFormatInt4 : i == 19 ? MTLVertexFormatUInt4 : MTLVertexFormatFloat4; vd.attributes[i].bufferIndex = 30; }
         vd.layouts[2].stride = 8; vd.layouts[3].stride = 8; vd.layouts[30].stride = 16; vd.layouts[30].stepFunction = MTLVertexStepFunctionConstant; vd.layouts[30].stepRate = 0;
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = fn; pd.rasterizationEnabled = NO; pd.vertexDescriptor = vd;
-        id<MTLRenderPipelineState> ps = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        id<MTLRenderPipelineState> ps = t4_rps(pd, &err);
         check("negative control: Half2 into a uint input is refused by Metal", ps == nil, "Metal built the pipeline");
     }
     printf("== %d checks, %d failed ==\n", g_n, g_fail);
