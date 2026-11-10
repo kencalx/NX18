@@ -329,6 +329,16 @@ check_t_upload_slots: t_upload_slots
 # The memory line's graphics ledger and guest charged (mtl_mem_stat), with a guest block of its own (mem_line_guest.c gives the host's svc_guest_range)
 t_mem_line: t_mem_line.m mem_line_guest.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_mem_line.m mem_line_guest.c $(MTL_T_SRC) $(FW)
+# Per-frame arena blocks: shared between submissions, released above the keep count once idle and at a memory trim, never while a pending submission holds them (t_arena_trim.m)
+t_arena_trim: t_arena_trim.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_arena_trim.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_arena_trim
+check_t_arena_trim: t_arena_trim
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_arena_trim
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_arena_trim
+	DM_NVN_ARENA_TRIM=0 MTL_DEBUG_LAYER=1 ./t_arena_trim
+	DM_NVN_ARENA_SHARE=0 MTL_DEBUG_LAYER=1 ./t_arena_trim
+	DM_MEMORY_TRIM=0 MTL_DEBUG_LAYER=1 ./t_arena_trim
 t_mem_trim: t_mem_trim.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_mem_trim.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_mem_trim

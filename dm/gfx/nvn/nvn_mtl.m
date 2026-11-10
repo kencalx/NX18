@@ -155,7 +155,7 @@ static int g_cut_copy;                          // a buffer → texture copy was
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic uint64_t g_done;                 // GPU complete and all CPU-visible effects through this fence published
-static uint64_t g_arena_made;
+static uint64_t g_arena_made, g_arena_live, g_arena_live_bytes, g_arena_freed, g_arena_freed_bytes;   // per-frame arena blocks made in total, alive now (and their bytes), released when idle in total (and their bytes): the memory line
 static uint64_t g_cm_mdraws;
 static uint64_t g_cm_enc, g_cm_enc0, g_cm_mdraws0, g_cm_hist[7], g_cm_big_enc, g_cm_big_draws, g_cm_big_z;   // per submission: encoders begun and Metal draws, by size, the largest (DM_NVN_ALLOCPROF=2)
 static int g_allocprof = -1; static uint64_t g_ap_bytes[64], g_ap_fn[8];
@@ -4946,7 +4946,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     // The shaders' reflection tail blocks (nvn_refl.h): the bindings at their real number and the readable-tile tables of the shaders that have entries; with DM_NVN_REFL_FIXED=1, 3.2 KB each
     uint64_t rf_tails, rf_bytes; nvn_refl_stats(&rf_tails, &rf_bytes);
     char *tail = NULL;
-    if (asprintf(&tail, "deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, finalized textures still referenced %u (small table, %llu put in total), retired but held by a serial %u, recycled render-target heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB; cap %llu MB), upload staging blocks released when idle %llu (%llu MB in total), packaged-texture spares %llu (%llu MB; released when idle %llu, %llu MB in total), present effects released when off %llu (%llu MB in total), shader reflection blocks %llu (%llu KB), feedback snapshots %llu (%llu MB; released when idle %llu, %llu MB in total), memory trims %llu (%llu MB in total); headroom to the system memory limit %s", nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, nghost, (unsigned long long)ghost_puts, nwait,
+    if (asprintf(&tail, "deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total (alive %llu, %llu MB; released when idle %llu, %llu MB in total), finalized textures still referenced %u (small table, %llu put in total), retired but held by a serial %u, recycled render-target heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB; cap %llu MB), upload staging blocks released when idle %llu (%llu MB in total), packaged-texture spares %llu (%llu MB; released when idle %llu, %llu MB in total), present effects released when off %llu (%llu MB in total), shader reflection blocks %llu (%llu KB), feedback snapshots %llu (%llu MB; released when idle %llu, %llu MB in total), memory trims %llu (%llu MB in total); headroom to the system memory limit %s", nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, (unsigned long long)g_arena_live, (unsigned long long)(g_arena_live_bytes >> 20), (unsigned long long)g_arena_freed, (unsigned long long)(g_arena_freed_bytes >> 20), nghost, (unsigned long long)ghost_puts, nwait,
          (unsigned long long)g_rh_made, (unsigned long long)g_rh_reused, (unsigned long long)g_rh_trimmed, rh_n, (unsigned long long)(rh_bytes >> 20), (unsigned long long)(atomic_load(&g_rh_cap_now) >> 20), (unsigned long long)g_up_trimmed, (unsigned long long)(g_up_trim_bytes >> 20),
          (unsigned long long)atomic_load(&g_pkg_spare_n), (unsigned long long)(atomic_load(&g_pkg_spare_bytes) >> 20), (unsigned long long)atomic_load(&g_pkg_spare_freed), (unsigned long long)(atomic_load(&g_pkg_spare_freed_bytes) >> 20),
          (unsigned long long)atomic_load(&g_present_fx_freed), (unsigned long long)(atomic_load(&g_present_fx_freed_bytes) >> 20), (unsigned long long)rf_tails, (unsigned long long)(rf_bytes >> 10),
@@ -7246,32 +7246,63 @@ static inline __attribute__((always_inline)) void *samp_fast(int sid) {
     return (__bridge void *)samp_by_id(sid);
 }
 
-// ---------- Argument buffer blocks: one block per submission, reclaimed after the GPU completes ----------
+// ---------- Argument buffer blocks: written by the CPU as a submission is encoded, reclaimed after the GPU completes ----------
 @interface NvArena : NSObject { @public id<MTLBuffer> buf; uint8_t *cpu; uint64_t gpu, fence; size_t used, len; } @end   // len: buf.length and cpu: buf.contents, kept so an allocation and its writes send no message
 @implementation NvArena @end
 static NSMutableArray<NvArena *> *g_arenas; static NvArena *g_cur_arena; static NSMutableArray<NvArena *> *g_sub_arenas;
+// One block per submission held a 4 MB block for each submission in flight, however little it wrote. Since the submissions of a frame share a command allocator (ALLOC_SHARE), the submit
+// thread no longer waits for one of 8 allocators, and up to POST_RING submissions can be in flight: NieR:Automata's made 26-28 blocks by its second scene (8 before) and kept them for good,
+// about 80 MB more of shared memory from about 105 s on. So the next submission goes on in the block the last one ended in while it has room (g_arena_next), its fence then the later
+// submission's, and blocks follow the bytes in flight, not the submissions. DM_NVN_ARENA_SHARE=0 takes a block per submission, as before
+static NvArena *g_arena_next;   // the last submission's current block, in g_arenas with that submission's fence: the next submission's start takes it back (arena_begin)
+static int arena_share_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_ARENA_SHARE"); on = !e || atoi(e); } return on; }
+static int arena_trim_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_ARENA_TRIM"); on = !e || atoi(e); } return on; }
 static NvArena *arena_new(size_t minimum) {
     // The for-in loop variable does not retain the object: take a strong reference first and then remove it from the array, otherwise what is returned after the array releases it is a dangling pointer
-    NvArena *r = nil;   // the smallest one that fits, so the usual small requests do not keep a large scratch arena alive (ARENA_IDLE, arena_begin)
-    for (NvArena *it in g_arenas) if (it->fence && it->fence <= g_done && it->len >= minimum && (!r || it->len < r->len)) r = it;
-    if (r) { [g_arenas removeObject:r]; r->fence = 0; r->used = 0; return r; }
+    // The smallest one that fits, so the usual small requests do not keep a large scratch arena alive (ARENA_IDLE, arena_begin), and of those the one used last, so blocks a peak made
+    // and no longer needed stay unused and go once idle (arena_trim)
+    NvArena *r = nil;
+    for (NvArena *it in g_arenas) if (it->fence && it->fence <= g_done && it->len >= minimum && (!r || it->len < r->len || (it->len == r->len && it->fence > r->fence))) r = it;
+    if (r) { if (r == g_arena_next) g_arena_next = nil; [g_arenas removeObjectIdenticalTo:r]; r->fence = 0; r->used = 0; return r; }
     NvArena *a = [NvArena new]; a->buf = [g_dev newBufferWithLength:MAX(minimum, 4u << 20) options:MTLResourceStorageModeShared];
     if (!a->buf) MDIE("cannot allocate %zu bytes of frame scratch", minimum);
-    a->gpu = a->buf.gpuAddress; a->len = a->buf.length; a->cpu = a->buf.contents; res_add(a->buf); g_arena_made++; return a;
+    a->gpu = a->buf.gpuAddress; a->len = a->buf.length; a->cpu = a->buf.contents; res_add(a->buf); g_arena_made++; g_arena_live++; g_arena_live_bytes += a->len; return a;
 }
 // Arenas above ARENA_KEEP bytes are scratch for large one-off work (a geometry draw's capture, up to 256 MB each). They are kept for reuse while that work goes on and released once
 // none has been used for ARENA_IDLE submissions: OCTOPATH TRAVELER II draws a 129,032-triangle mesh through a geometry shader now and then in its battles (nvn_geometry.inc geo_split,
 // about 32 arenas of up to 64 MB). Kept for good they left about 330 MB of Metal allocations behind after the battle; released at the next submission, every such frame allocated
-// them again and took 300 ms. The usual 4 MB blocks are always kept
-enum { ARENA_KEEP = 32 << 20, ARENA_IDLE = 600 };
+// them again and took 300 ms. The usual blocks above ARENA_KEEP_BLOCKS go the same way once idle (a peak of submissions in flight made them), and at a memory trim (mtl_trim_at) every
+// one the GPU is done with above ARENA_KEEP_BLOCKS goes at once; DM_NVN_ARENA_TRIM=0 keeps them for the rest of the run, as before. A block goes only once the GPU has completed
+// the last submission that used it (its fence, g_done), and never the one a submission is writing (g_sub_arenas holds those, not g_arenas)
+enum { ARENA_KEEP = 32 << 20, ARENA_IDLE = 600, ARENA_KEEP_BLOCKS = 4 };
+// idle: the submissions since a block's last use that let it go (0: every one the GPU is done with, the memory trim). Returns the bytes released; *nout the blocks
+static uint64_t arena_trim(uint64_t idle, int *nout) {
+    uint64_t done = g_done, bytes = 0; int n = 0, trim = arena_trim_on(); unsigned usual = 0;
+    for (NvArena *a in g_arenas) usual += a->len <= ARENA_KEEP;
+    for (NvArena *a in g_sub_arenas) usual += a->len <= ARENA_KEEP;
+    for (NSUInteger i = g_arenas.count; i-- > 0;) { NvArena *a = g_arenas[i];
+        if (!a->fence || a->fence > done || g_fence < a->fence + idle) continue;
+        int big = a->len > ARENA_KEEP;
+        if (!big && (!trim || usual <= ARENA_KEEP_BLOCKS)) continue;
+        if (a == g_arena_next) g_arena_next = nil;
+        res_remove(a->buf); g_arena_live--; g_arena_live_bytes -= a->len; n++; bytes += a->len;
+        if (!big) { usual--; g_arena_freed++; g_arena_freed_bytes += a->len; }
+        [g_arenas removeObjectAtIndex:i];
+    }
+    *nout = n; return bytes;
+}
 void arena_begin(void) {
     if (!g_arenas) { g_arenas = [NSMutableArray array]; g_sub_arenas = [NSMutableArray array]; }
     g_cur_arena = nil;
-    uint64_t done = g_done;   // read as the submission start does (its allocator and visibility ring)
-    for (NSUInteger i = g_arenas.count; i-- > 0;) { NvArena *a = g_arenas[i];
-        if (a->fence && a->fence <= done && a->len > ARENA_KEEP && g_fence > a->fence + ARENA_IDLE) { res_remove(a->buf); [g_arenas removeObjectAtIndex:i]; } }
+    int n; arena_trim(ARENA_IDLE, &n);
+    if (g_arena_next) { NvArena *a = g_arena_next; g_arena_next = nil; [g_arenas removeObjectIdenticalTo:a]; [g_sub_arenas addObject:a]; g_cur_arena = a; }
 }
-void arena_commit(uint64_t fence) { for (NvArena *a in g_sub_arenas) { a->fence = fence; [g_arenas addObject:a]; } [g_sub_arenas removeAllObjects]; g_cur_arena = nil; }
+void arena_commit(uint64_t fence) {
+    for (NvArena *a in g_sub_arenas) { a->fence = fence; [g_arenas addObject:a]; }
+    [g_sub_arenas removeAllObjects];
+    g_arena_next = arena_share_on() && g_cur_arena && g_cur_arena->len <= ARENA_KEEP && g_cur_arena->used + 256 <= g_cur_arena->len ? g_cur_arena : nil;
+    g_cur_arena = nil;
+}
 // An unqualified id * out-parameter is __autoreleasing under ARC; __strong avoids autoreleasing the arena buffer at every allocation.
 // Measurements: docs/reference/frame-rate.md, Arena buffer ownership on allocation.
 static size_t arena_alloc(size_t n, __strong id<MTLBuffer> *buf) {
@@ -11297,14 +11328,17 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     }
     NSUInteger arg_len = sh->arg_len;
     if (reusable && args_cbuf_only(sh)) {   // only what the uniform bindings point at changed since this shader's block: copy it and write its uniform slots and their size table again
-        id<MTLBuffer> ab; size_t off = arena_alloc(arg_len, &ab);
+        // The block's address is read before the slots are written: cbuf_slot and cbsize_table take arena space of their own, and when that moves to a new block g_cur_arena is that
+        // one, so g_cur_arena->gpu + off named the new block at the old one's offset, bytes this block was never written to. The GPU hung on NieR:Automata once the submissions
+        // shared blocks (arena_commit), which fill mid-submission every few frames; with a block each, a submission filled one only past 4 MB
+        id<MTLBuffer> ab; size_t off = arena_alloc(arg_len, &ab); const uint64_t ag = g_cur_arena->gpu + off;
         uint64_t *p = (uint64_t *)(void *)(g_cur_arena->cpu + off);
         memcpy(p, (const uint8_t *)sh->ab_buf.contents + sh->ab_off, arg_len);
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; id<MTLBuffer> use;
             if (b->kind == NVN_RB_CBUF) p[b->aid] = cbuf_slot(sh, nvn_stage, b, &use);
             else if (b->kind == NVN_RB_CBSIZE) p[b->aid] = cbsize_table(nvn_stage, &use); }
-        bind_args(en, nvn_stage, metal_vertex, ab, g_cur_arena->gpu + off, off, sh->rf.abi);
-        sh->ab_buf = ab; sh->ab_gpu = g_cur_arena->gpu + off; sh->ab_off = off; g_args_ubo[nvn_stage] = 0;   // pass, base instance and pool generation are the ones the copied block was encoded for
+        bind_args(en, nvn_stage, metal_vertex, ab, ag, off, sh->rf.abi);
+        sh->ab_buf = ab; sh->ab_gpu = ag; sh->ab_off = off; g_args_ubo[nvn_stage] = 0;   // pass, base instance and pool generation are the ones the copied block was encoded for
         g_stat_args_patch++;
         return 1;
     }
@@ -16965,7 +16999,7 @@ static void present_fx_idle(int kind, uint64_t ticket, int alloc_i) {
 // queue for the fence of the submission that starts there, which no present or submission committed before it outlasts on the queue; or going to the background
 // (dm_gfx_suspend: the graphics gate closed and every submission and present drained, so for the last fence, which has passed). It releases what is idle and large:
 // render-target heaps waiting for reuse (rh_trim_all), the upload slots' blocks above UP_SLOT_BLOCK and their overflow blocks (up_trim_idle), packaged-texture spares
-// (pkg_spare_release), same-pass feedback snapshots (fb_trim), what the deferred-release queue holds whose fence has passed (defer_drain), and it asks the present thread to
+// (pkg_spare_release), same-pass feedback snapshots (fb_trim), per-frame arena blocks the GPU is done with above ARENA_KEEP_BLOCKS (arena_trim), what the deferred-release queue holds whose fence has passed (defer_drain), and it asks the present thread to
 // release edge smoothing and MetalFX if they are off (g_fx_trim_req). Each was made again on its next use before, as after the idle trims. dm_gfx_pressure also sweeps the guest's
 // files (hle_svc.c dm_guest_file_trim, DM_GUEST_FILE). One line gives the MB per class; the memory line counts the trims. DM_MEMORY_TRIM=0 logs the pressure and trims
 // nothing; DM_BG_TRIM=0 keeps the trim going to the background off
@@ -16981,16 +17015,16 @@ static uint64_t mtl_trim_at(int level, uint64_t fence) { @autoreleasepool {
     pthread_mutex_lock(&g_deferred_mu); unsigned long q0 = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
     defer_drain();
     pthread_mutex_lock(&g_deferred_mu); unsigned long q1 = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
-    int nrh = 0, nup = 0, nsp = 0, nfb = 0;
-    uint64_t brh = rh_trim_all(&nrh), bup = up_trim_idle(0, fence, &nup), bsp = pkg_spare_release(0, fence, &nsp), bfb = fb_trim(0, fence, &nfb);
+    int nrh = 0, nup = 0, nsp = 0, nfb = 0, nar = 0;
+    uint64_t brh = rh_trim_all(&nrh), bup = up_trim_idle(0, fence, &nup), bsp = pkg_spare_release(0, fence, &nsp), bfb = fb_trim(0, fence, &nfb), bar = g_arenas ? arena_trim(0, &nar) : 0;
     atomic_store(&g_fx_trim_req, 1);
     res_commit();   // the heaps leave the residency set now; the rest once their fence has passed (defer_obj_at drains at once a fence the GPU has passed)
-    uint64_t total = brh + bup + bsp + bfb;
+    uint64_t total = brh + bup + bsp + bfb + bar;
     atomic_fetch_add(&g_trim_n, 1); atomic_fetch_add(&g_trim_bytes, total);
     const double M = 1048576.0;
-    MLOG("memory trim (%s): %.1f MB in all: render-target heaps waiting %d (%.1f MB), upload staging blocks %d (%.1f MB), packaged-texture spares %d (%.1f MB), feedback snapshots %d (%.1f MB), "
+    MLOG("memory trim (%s): %.1f MB in all: render-target heaps waiting %d (%.1f MB), upload staging blocks %d (%.1f MB), packaged-texture spares %d (%.1f MB), feedback snapshots %d (%.1f MB), per-frame arena blocks %d (%.1f MB), "
          "deferred-release queue %lu of %lu entries released; present effects that are off go at the next present; footprint %.0f MB before, %.1f ms",
-         g_trim_why[level >= 0 && level <= 4 ? level : 4], total / M, nrh, brh / M, nup, bup / M, nsp, bsp / M, nfb, bfb / M, q0 > q1 ? q0 - q1 : 0, q0, fp0 / M, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6);
+         g_trim_why[level >= 0 && level <= 4 ? level : 4], total / M, nrh, brh / M, nup, bup / M, nsp, bsp / M, nfb, bfb / M, nar, bar / M, q0 > q1 ? q0 - q1 : 0, q0, fp0 / M, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6);
     return total;
 } }
 // The trim at once (dm_gfx_trim): only with no submission open and every submission and present completed (dm_gfx_suspend after mtl_drain; the tests), so for the last fence
