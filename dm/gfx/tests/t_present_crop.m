@@ -6,6 +6,7 @@
 #define g_ft g_ft_hle   // both files have a static g_ft (nvn_mtl.m's fragment argument table, hle_nvn.c's textures a flush can mark CPU-written), so hle_nvn.c's is renamed too
 #include "../nvn/hle_nvn.c"
 #undef g_ft
+#include "t_mtl4.h"
 uint64_t g_t0_ns;   // process start time from host main.c (used by hle_nvn's per-frame @t_s); unit test stub
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -14,20 +15,11 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int g_layer_crop[4];   // what the vi layer crop (hle_vi.c) answers: x, y, w, h, all 0 = none
 void dm_vi_layer_crop(int c[4]) { memcpy(c, g_layer_crop, sizeof g_layer_crop); }
-#ifdef CROP_LEGACY_HEADER
-#include CROP_LEGACY_HEADER
-#define ENCODE legacy_present_encode
-#else
-#define ENCODE present_encode
-#endif
 static int failed, cases;
 #define EXPECT(n, w, v) do { int a=(w),b=(v); cases++; printf("%s expected %d → got %d %s\n",n,a,b,a==b?"✓":"✗");failed+=a!=b; } while(0)
 static const uint8_t colors[4][4]={{255,0,0,255},{0,255,0,255},{0,0,255,255},{255,255,0,255}};
-#ifndef CROP_LEGACY_HEADER
 extern int g_shape_w,g_shape_h,g_size_w,g_size_h;   // t_host_stubs.c: the last shape and render size the present reported to the front end
-#endif
 
-#ifndef CROP_LEGACY_HEADER
 // Exercise the persistent scaler used by real presents (the live present's: g_fx_present, which also takes the in-game menu's picks), completing each command buffer before its
 // allocator and output leave scope. crop: as a window's (NULL = the whole texture); bgra: the output's w x h BGRA bytes when not NULL
 static int check_present_live(id<MTLTexture> src, const int crop[4], int w, int h, uint8_t *bgra) {
@@ -60,14 +52,28 @@ static id<MTLTexture> step_tex(int w, int h, int edge, uint8_t lo, uint8_t hi, u
     if(f16)[t replaceRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0 withBytes:q bytesPerRow:w*8];else [t replaceRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0 withBytes:p bytesPerRow:w*4];
     free(p);free(q);res_add(t);res_commit();return t;
 }
-#endif
+// The bilinear present pass (present.metal fs) on the CPU: src's w x h RGBA8 bytes s, its crop (NULL or zero: whole), drawn into a full ow x oh viewport (top-left origin); RGBA8 out
+static void fs_ref(const uint8_t *s, int w, int h, const int crop[4], int ow, int oh, uint8_t *out) {
+    double cx=0,cy=0,cw=w,ch=h; if(crop&&(crop[2]||crop[3])){cx=crop[0];cy=crop[1];cw=crop[2];ch=crop[3];}
+    for(int y=0;y<oh;y++)for(int x=0;x<ow;x++){
+        double u=(x+0.5)/ow*cw/w+cx/w, v=(y+0.5)/oh*ch/h+cy/h;   // uv * rect.zw + rect.xy
+        u=fmin(fmax(u,(cx+0.5)/w),(cx+cw-0.5)/w); v=fmin(fmax(v,(cy+0.5)/h),(cy+ch-0.5)/h);   // clamped to the edge texels' centres
+        double tx=u*w-0.5, ty=v*h-0.5; int x0=(int)floor(tx), y0=(int)floor(ty); double fx=tx-x0, fy=ty-y0;
+        int x1=x0+1<w?x0+1:w-1, y1=y0+1<h?y0+1:h-1; if(x0<0)x0=0; if(y0<0)y0=0;
+        for(int c=0;c<4;c++){
+            double a=s[4*(y0*w+x0)+c]*(1-fx)+s[4*(y0*w+x1)+c]*fx, b=s[4*(y1*w+x0)+c]*(1-fx)+s[4*(y1*w+x1)+c]*fx;
+            out[4*(y*ow+x)+c]=(uint8_t)lround(a*(1-fy)+b*fy);
+        }
+    }
+}
+// Bytes of a and b (n bytes) that differ by more than 1 (the GPU's filter weights are not exact)
+static int bytes_off(const uint8_t *a, const uint8_t *b, int n) { int bad=0; for(int i=0;i<n;i++) bad+=abs(a[i]-b[i])>1; return bad; }
 
 static void check(id<MTLTexture> src, const char *name, const int crop[4], int w, int h, int color) {
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
     d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageRenderTarget;
-    id<MTLTexture> dst=[g_dev newTextureWithDescriptor:d];id<MTLCommandBuffer> cb=[g_q commandBuffer];
-    EXPECT("encode succeeds",1,ENCODE(cb,src,dst,crop));[cb commit];[cb waitUntilCompleted];
-    EXPECT("GPU done",MTLCommandBufferStatusCompleted,cb.status);
+    id<MTLTexture> dst=[g_dev newTextureWithDescriptor:d];
+    EXPECT("the bilinear present pass completes",PRESENT_STANDARD,present_offscreen_wait(src,crop,dst));
     uint8_t *out=malloc(w*h*4);[dst getBytes:out bytesPerRow:w*4 fromRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0];
     int bad=0;
     for(int y=0;y<h;y++)for(int x=0;x<w;x++) {
@@ -101,9 +107,8 @@ static uint64_t display_ticket(uint64_t receipt, uint64_t before) {
 
 int main(void) { @autoreleasepool {
     mtl_init();
-#ifndef CROP_LEGACY_HEADER
     mtl_present_layer(1,1);   // square fixtures: a sized square layer, so the checks below see the crop's texels and the bars of that shape; the display's own shape is checked at the end
-#endif
+    g_fx_mode=0;atomic_store(&g_sharp_mode,0);   // the plain bilinear pass (present.metal fs) for the closed-form checks; the live present's choice is made again below
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:8 height:8 mipmapped:NO];d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead;
     id<MTLTexture> src=[g_dev newTextureWithDescriptor:d];uint8_t px[8*8*4];
     for(int y=0;y<8;y++)for(int x=0;x<8;x++)memcpy(px+4*(y*8+x),colors[(x>=4)+2*(y>=4)],4);
@@ -118,7 +123,7 @@ int main(void) { @autoreleasepool {
     check(src,"single texel scaled up without crossing edges, 256 pixels all red",one,16,16,0);
     check(src,"non-zero x and y offset, 16 pixels byte-identical to a hand-written sub-rectangle",inset,4,4,-2);
     check(src,"aspect of the valid area kept, 128 pixels red in the middle / black on both sides",tl,16,8,4);
-#ifndef CROP_LEGACY_HEADER
+    g_fx_mode=-1;atomic_store(&g_sharp_mode,-1);
     {
         // sRGB swapchain: present sends the raw bytes (as the Switch's scan-out does) without decoding first; unfixed, 128/64/200 decode to about 55/13/148
         MTLTextureDescriptor *sd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB width:8 height:8 mipmapped:NO];sd.storageMode=MTLStorageModeShared;sd.usage=MTLTextureUsageShaderRead;
@@ -126,28 +131,26 @@ int main(void) { @autoreleasepool {
         for(int i=0;i<64;i++){g[4*i]=128;g[4*i+1]=64;g[4*i+2]=200;g[4*i+3]=255;}
         [s8 replaceRegion:MTLRegionMake2D(0,0,8,8) mipmapLevel:0 withBytes:g bytesPerRow:32];
         MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:8 height:8 mipmapped:NO];od.storageMode=MTLStorageModeShared;od.usage=MTLTextureUsageRenderTarget;
-        id<MTLTexture> dst=[g_dev newTextureWithDescriptor:od];id<MTLCommandBuffer> cb=[g_q commandBuffer];
-        EXPECT("sRGB source encode succeeds",1,ENCODE(cb,s8,dst,zero));[cb commit];[cb waitUntilCompleted];
+        id<MTLTexture> dst=[g_dev newTextureWithDescriptor:od];
+        EXPECT("sRGB source present completes",1,present_offscreen_wait(s8,zero,dst)!=PRESENT_FAILED);
         uint8_t o[8*8*4];[dst getBytes:o bytesPerRow:32 fromRegion:MTLRegionMake2D(0,0,8,8) mipmapLevel:0];
         int bad=0;for(int i=0;i<64;i++)bad+=abs(o[4*i]-128)>1||abs(o[4*i+1]-64)>1||abs(o[4*i+2]-200)>1;
         EXPECT("sRGB swapchain present sends raw bytes, 64 pixels",0,bad);
     }
-#endif
-#ifndef CROP_LEGACY_HEADER
     {   // Sharpening (DM_PRESENT_SHARPEN, present_sharpen): Off is fs as before; a level sharpens edges, leaves flat areas and alpha alone, and reads nothing outside the crop
         g_fx_mode=0;atomic_store(&g_sharp_mode,0);
         const int N=32;uint8_t *pa=malloc(4*N*N*4),*pb=malloc(4*N*N*4);
         id<MTLTexture> st=step_tex(N,N,N/2,64,192,200,NULL,0);
         int whole[4]={0},half[4]={0,0,N/2,N};
-        // Off: byte-identical to the classic queue's fs (present_encode), 1:1 and scaled
+        // Off: the bilinear pass (present.metal fs) as a CPU computes it, 1:1 and scaled
         const struct { const int *crop; int w,h; } offc[]={{whole,N,N},{whole,2*N,2*N},{half,N,N}};
+        uint8_t *sb=malloc(N*N*4);[st getBytes:sb bytesPerRow:N*4 fromRegion:MTLRegionMake2D(0,0,N,N) mipmapLevel:0];
         for(int i=0;i<3;i++){
             EXPECT("sharpening off: the bilinear pass",PRESENT_STANDARD,present_rgba(st,offc[i].crop,offc[i].w,offc[i].h,pa));
-            MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:offc[i].w height:offc[i].h mipmapped:NO];d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageRenderTarget;
-            id<MTLTexture> dst=[g_dev newTextureWithDescriptor:d];id<MTLCommandBuffer> cb=[g_q commandBuffer];present_encode(cb,st,dst,offc[i].crop);[cb commit];[cb waitUntilCompleted];
-            [dst getBytes:pb bytesPerRow:offc[i].w*4 fromRegion:MTLRegionMake2D(0,0,offc[i].w,offc[i].h) mipmapLevel:0];
-            EXPECT("sharpening off: byte-identical to the classic fs present",0,memcmp(pa,pb,offc[i].w*offc[i].h*4));
+            fs_ref(sb,N,N,offc[i].crop,offc[i].w,offc[i].h,pb);
+            EXPECT("sharpening off: the bilinear pass computed on the CPU, within 1 in every byte",0,bytes_off(pa,pb,offc[i].w*offc[i].h*4));
         }
+        free(sb);
         // Levels on a 64 | 192 grey step, 1:1: the pixels beside the edge move apart, more at each level; columns two or more from it, and alpha, stay as they are
         present_rgba(st,whole,N,N,pb);
         int prev_lo=64,prev_hi=192;
@@ -198,8 +201,6 @@ int main(void) { @autoreleasepool {
         mtl_present_sharpen_set("0");EXPECT("menu sharpening: off again",PRESENT_STANDARD,check_present_live(st,NULL,N,N,NULL));
         res_remove(st);res_remove(mt);res_remove(ft);free(pa);free(pb);
     }
-#endif
-#ifndef CROP_LEGACY_HEADER
     {   // DM_PRESENT_UPSCALE: which content MetalFX scales, and to which size (the picture's rectangle on the canvas)
         const struct { unsigned cw,ch,dw,dh,w,h; int upscale; } sizes[] = {
             {1280,720,2868,1320,2347,1320,1},   // handheld, letterboxed on an iPhone
@@ -247,9 +248,9 @@ int main(void) { @autoreleasepool {
         for (int mode=0;mode<4;mode++) {
             g_fx_mode=mode==3?0:1;atomic_store(&g_origin_ll,mode==2);
             EXPECT("offscreen present reports the scaler actually used",mode==3?PRESENT_STANDARD:PRESENT_METALFX,present_offscreen_wait(big,crops[mode],out));
-            id<MTLBuffer> rb=[g_dev newBufferWithLength:W*H*4 options:MTLResourceStorageModeShared];id<MTLCommandBuffer> cb=[g_q commandBuffer];id<MTLBlitCommandEncoder> bl=[cb blitCommandEncoder];
+            id<MTLBuffer> rb=[g_dev newBufferWithLength:W*H*4 options:MTLResourceStorageModeShared];T4 *cb=t4_begin();id<MTL4ComputeCommandEncoder> bl=t4_copy(cb);t4_use(cb,out);t4_use(cb,rb);
             [bl copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(W,H,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:W*4 destinationBytesPerImage:W*H*4];
-            [bl endEncoding];[cb commit];[cb waitUntilCompleted];
+            t4_end(cb,bl);EXPECT("  readback completes",MTLCommandBufferStatusCompleted,t4_wait(cb));
             const uint8_t *o=rb.contents;   // BGRA
         #define PX(x,y,c) o[4*((y)*W+(x))+(c)]
             int bars=0;for(int y=0;y<H;y++)for(int x=0;x<W;x++)if(x<64||x>=192)bars+=PX(x,y,0)||PX(x,y,1)||PX(x,y,2);
@@ -358,12 +359,11 @@ int main(void) { @autoreleasepool {
         EXPECT("whole-window capture callback completes",0,(int)dispatch_semaphore_wait(grabbed,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC)));
         res_remove(big);g_fx_mode=0;
     } else printf("no Metal 4 MetalFX spatial scaler on this GPU: the MetalFX present is not checked\n");
-#endif
     int invalid[4][4]={{-1,0,4,4},{0,-1,4,4},{0,0,0,4},{7,0,4,4}};
     for(int i=0;i<4;i++) {
         MTLTextureDescriptor *dd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:8 height:8 mipmapped:NO];dd.usage=MTLTextureUsageRenderTarget;dd.storageMode=MTLStorageModeShared;
         id<MTLTexture> dst=[g_dev newTextureWithDescriptor:dd];
-        EXPECT("invalid crop is not encoded and does not fake success by stretching the whole image",0,ENCODE([g_q commandBuffer],src,dst,invalid[i]));
+        EXPECT("invalid crop is not encoded and does not fake success by stretching the whole image",0,present_offscreen_wait(src,invalid[i],dst));
     }
     // Real QueuePresent entry: set crop and enqueue first, then immediately change the window; the present ticket must keep that frame's copy.
     PFNNVNDEVICEGETPROCADDRESSPROC get=(PFNNVNDEVICEGETPROCADDRESSPROC)h_nvnBootstrapLoader("nvnDeviceGetProcAddress");
@@ -385,15 +385,10 @@ int main(void) { @autoreleasepool {
     }
     nvn_queue_test_hold(0);
     uint64_t tk=display_ticket(win.ticket[0],before);
-#ifdef CROP_LEGACY_HEADER
-    EXPECT("old queue struct has no room for a four-value copy (struct check)",1,sizeof(pq_item)>=sizeof(tex_t)+sizeof(double)+sizeof(uint64_t)+sizeof br);
-#else
     pthread_mutex_lock(&g_pq_mu);
     int saved=tk && memcmp(g_pq[(tk-1)%PQ].crop,br,sizeof br)==0;pthread_mutex_unlock(&g_pq_mu);
     EXPECT("real QueuePresent: the frame's crop copy does not change with the window",1,saved);
-#endif
     h_nvnWindowFinalize((NVNwindow *)&win);
-#ifndef CROP_LEGACY_HEADER
     {   // A window without a crop of its own presents by the vi layer crop (Link's Awakening in handheld mode: 1280x720 of its 1920x1080 window textures, cropped through vi::SetLayerCrop)
         int none[4]={0},lay[4]={0,4,4,4},over[4]={0,0,16,16},lc[4];
         memset(g_layer_crop,0,sizeof g_layer_crop);EXPECT("no window or layer crop: the whole texture",1,present_crop(none,8,8,lc)==none);
@@ -418,13 +413,12 @@ int main(void) { @autoreleasepool {
         [sw replaceRegion:MTLRegionMake2D(0,0,TW,TH) mipmapLevel:0 withBytes:sp bytesPerRow:TW*4];free(sp);res_add(sw);res_commit();
         double sa,sb;
         mtl_present_layer(0,0);present_shape(sw,&sa,&sb);EXPECT("no sized layer: the display's width",1920,(int)sa);EXPECT("no sized layer: the display's height",1080,(int)sb);
-        for(int m4=0;m4<2;m4++) {
+        {
             int outH[2]={H,40};   // 16:9 fills; a 16:10 canvas keeps the bars above and below
             for(int k=0;k<2;k++) {
                 MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:W height:outH[k] mipmapped:NO];od.storageMode=MTLStorageModeShared;od.usage=MTLTextureUsageRenderTarget;
                 id<MTLTexture> ot=[g_dev newTextureWithDescriptor:od];res_add(ot);res_commit();
-                if(m4){EXPECT("Metal 4 present of a 5:4 crop",1,present_offscreen_wait(sw,crop54,ot)!=PRESENT_FAILED);}
-                else{id<MTLCommandBuffer> cb=[g_q commandBuffer];EXPECT("classic present of a 5:4 crop",1,present_encode(cb,sw,ot,crop54));[cb commit];[cb waitUntilCompleted];}
+                EXPECT("present of a 5:4 crop",1,present_offscreen_wait(sw,crop54,ot)!=PRESENT_FAILED);
                 uint8_t *o=malloc(W*outH[k]*4);[ot getBytes:o bytesPerRow:W*4 fromRegion:MTLRegionMake2D(0,0,W,outH[k]) mipmapLevel:0];
                 int bad=0,top=(outH[k]-H)/2;static const uint8_t black[4]={0,0,0,255};
                 for(int y=0;y<outH[k];y++)for(int x=0;x<W;x++)bad+=memcmp(o+4*(y*W+x),y<top||y>=top+H?black:colors[0],4)!=0;
@@ -452,7 +446,6 @@ int main(void) { @autoreleasepool {
         EXPECT("a render size was reported to the front end",1,g_size_w>0&&g_size_h>0);
         res_remove(sw);
     }
-#endif
     h_nvnQueueFinalize(&queue);
     printf("== %d checks, %d failed ==\n",cases,failed);return failed!=0;
 } }
