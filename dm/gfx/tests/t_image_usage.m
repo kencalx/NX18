@@ -1,5 +1,6 @@
 // RegisterImage on a COMPRESSIBLE-only render texture: first use adds image usage, keeps the open pass's clear and every mip, and updates sampled aliases.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -11,11 +12,11 @@ static void read_level(id<MTLTexture> texture, unsigned level, uint16_t *out) {
     NSUInteger n = texture.width >> level;
     id<MTLBuffer> readback = [g_dev newBufferWithLength:n * n * 2 options:MTLResourceStorageModeShared];
     if (!readback) { CHECK(0, "readback buffer allocated"); memset(out, 0, n * n * 2); return; }
-    id<MTLCommandBuffer> command = q_cb(); id<MTLBlitCommandEncoder> copy = [command blitCommandEncoder];
-    [copy copyFromTexture:texture sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(n,n,1)
+    T4 *command = t4_begin(); id<MTL4ComputeCommandEncoder> copy = t4_copy(command);
+    t4_use(command, texture), t4_use(command, readback), [copy copyFromTexture:texture sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(n,n,1)
                 toBuffer:readback destinationOffset:0 destinationBytesPerRow:n * 2 destinationBytesPerImage:n * n * 2];
-    [copy endEncoding]; [command commit]; [command waitUntilCompleted];
-    CHECK(command.status == MTLCommandBufferStatusCompleted, "readback completed");
+    t4_end(command, copy); t4_wait(command);
+    CHECK(command->status == MTLCommandBufferStatusCompleted, "readback completed");
     memcpy(out, readback.contents, n * n * 2);
 }
 static void image_case(int explicit_image) { @autoreleasepool {
@@ -28,11 +29,11 @@ static void image_case(int explicit_image) { @autoreleasepool {
     CHECK(old && !(old.usage & MTLTextureUsageShaderWrite), "ordinary render target keeps its original usage");
     CHECK(tex_mtl(&alias) == old, "another serial shares the original backing");
     // Seed the smaller mip before the production render pass clears level 0.
-    id<MTLCommandBuffer> seed = q_cb(); MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    T4 *seed = t4_begin(); MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = old; rp.colorAttachments[0].level = 1; rp.colorAttachments[0].loadAction = MTLLoadActionClear;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore; rp.colorAttachments[0].clearColor = MTLClearColorMake(0.75,0,0,1);
-    [[seed renderCommandEncoderWithDescriptor:rp] endEncoding]; [seed commit]; [seed waitUntilCompleted];
-    CHECK(seed.status == MTLCommandBufferStatusCompleted, "smaller mip seeded");
+    t4_end(seed, t4_pass(seed, rp)); t4_wait(seed);
+    CHECK(seed->status == MTLCommandBufferStatusCompleted, "smaller mip seeded");
     mtl_reg_tex(601, &alias, NULL);
     os_unfair_lock_lock(&g_rmu); CHECK(tex_by_id(601) == old, "sampled descriptor caches the old backing"); os_unfair_lock_unlock(&g_rmu);
     mtl_sub_begin(); memset(&R, 0, sizeof R); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &texture;
@@ -66,13 +67,13 @@ static void image_case(int explicit_image) { @autoreleasepool {
     int same = 1; for (int i = 0; i < 64; i++) same &= pixels[i] == 0x3800; CHECK(same, "upgrade preserves the clear from the pass it ended");
     read_level(upgraded, 1, pixels); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == 0x3a00; CHECK(same, "upgrade preserves the other mip");
     NSError *error = nil;
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nkernel void put(texture2d<float, access::write> t [[texture(0)]]) { t.write(float4(0.25),uint2(1,1)); }\n" options:nil error:&error];
-    id<MTLComputePipelineState> pipeline = [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"put"] error:&error];
+    id<MTLLibrary> lib = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\nkernel void put(texture2d<float, access::write> t [[texture(0)]]) { t.write(float4(0.25),uint2(1,1)); }\n", nil, &error);
+    id<MTLComputePipelineState> pipeline = t4_cps(t4_fn(lib, @"put"), &error);
     CHECK(pipeline != nil, "image writer compiled");
-    id<MTLCommandBuffer> write = q_cb(); id<MTLComputeCommandEncoder> encoder = [write computeCommandEncoder];
-    [encoder setComputePipelineState:pipeline]; [encoder setTexture:image atIndex:0];
-    [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)]; [encoder endEncoding]; [write commit]; [write waitUntilCompleted];
-    CHECK(write.status == MTLCommandBufferStatusCompleted, "image write completed");
+    T4 *write = t4_begin(); id<MTL4ComputeCommandEncoder> encoder = t4_compute(write);
+    [encoder setComputePipelineState:pipeline]; t4_tex(write, encoder, T4_CS, image, 0);
+    [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)]; t4_end(write, encoder); t4_wait(write);
+    CHECK(write->status == MTLCommandBufferStatusCompleted, "image write completed");
     read_level(tex_mtl(&alias), 1, pixels); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == (i == 5 ? 0x3400 : 0x3a00);
     CHECK(same, "sampled alias sees the image write and untouched pixels");
 } }

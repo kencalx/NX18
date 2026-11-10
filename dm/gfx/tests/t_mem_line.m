@@ -3,6 +3,7 @@
 // A guest block of its own (mem_line_guest.c's svc_guest_range): 64 MB written, a second mapping of 32 MB of those pages (counted once), 16 MB of a written file (not counted), and
 // two no-copy Metal buffers over the 64 MB that raise GPU allocated by 128 MB and the graphics ledger by about nothing. NieR:Automata read GPU allocated 4,020 MB with 1,477 MB in the ledger
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -49,15 +50,15 @@ int main(void) { @autoreleasepool {
     for (size_t o = 0; o < WRITTEN; o += 2 * 16384) mprotect(g + o, 16384, PROT_READ | PROT_WRITE);
     // Two no-copy buffers over the written pages, as overlapping pool chunks are: GPU allocated rises by both, the graphics ledger by about nothing
     // The first command buffer on a queue charges the ledger once for Metal's own setup (about 160 MB on an M4 Max, at the first blit): a small one before the figures are taken
-    { id<MTLBuffer> s = [g_dev newBufferWithLength:16384 options:MTLResourceStorageModePrivate]; id<MTLCommandBuffer> w = [g_q commandBuffer]; id<MTLBlitCommandEncoder> e = [w blitCommandEncoder];
-      [e fillBuffer:s range:NSMakeRange(0, 16384) value:1]; [e endEncoding]; [w commit]; [w waitUntilCompleted]; }
+    { id<MTLBuffer> s = [g_dev newBufferWithLength:16384 options:MTLResourceStorageModePrivate]; T4 *w = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_copy(w);
+      t4_use(w, s), [e fillBuffer:s range:NSMakeRange(0, 16384) value:1]; t4_end(w, e); t4_wait(w); }
     uint64_t gpu0 = g_dev.currentAllocatedSize, led0 = mem_graphics_ledger();
     id<MTLBuffer> w1 = [g_dev newBufferWithBytesNoCopy:g length:WRITTEN options:MTLResourceStorageModeShared deallocator:nil];
     id<MTLBuffer> w2 = [g_dev newBufferWithBytesNoCopy:g length:WRITTEN options:MTLResourceStorageModeShared deallocator:nil];
     CHECK(w1 && w2, "two no-copy buffers over the guest's written pages");
     // 64 MB of private memory the GPU writes: the graphics ledger rises by it
     id<MTLBuffer> priv = [g_dev newBufferWithLength:WRITTEN options:MTLResourceStorageModePrivate];
-    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder]; [b fillBuffer:priv range:NSMakeRange(0, WRITTEN) value:7]; [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> b = t4_copy(cb); t4_use(cb, priv), [b fillBuffer:priv range:NSMakeRange(0, WRITTEN) value:7]; t4_end(cb, b); t4_wait(cb);
     uint64_t gpu1 = g_dev.currentAllocatedSize, led1 = mem_graphics_ledger();
     printf("GPU allocated +%lld MB, graphics ledger +%lld MB\n", ((long long)gpu1 - (long long)gpu0) / MB, ((long long)led1 - (long long)led0) / MB);
     CHECK(gpu1 - gpu0 >= 3ull * WRITTEN, "GPU allocated counts the no-copy windows and the private buffer: 192 MB or more");

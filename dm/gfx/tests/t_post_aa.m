@@ -5,6 +5,7 @@
 // texture as its input. `t_post_aa bench` times the run at the study's sizes instead (the docs' M4 Max figures)
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 #undef nvn_game_fps
 #define g_ft g_ft_hle   // both files have a static g_ft (see t_present_crop.m)
 #include "../nvn/hle_nvn.c"

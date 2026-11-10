@@ -1,6 +1,7 @@
 // Exercise real manifest loading, shader loading, pipeline builds, cache claims and GPU draws.
 // Synthetic shaders need no game files; old rows differ in unused state, while live changes and logical target 7 in a merged pass must remain distinct.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -94,16 +95,16 @@ static void pixels(id<MTLRenderPipelineState> pipeline, int mesh, uint8_t out[4]
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor new]; pass.colorAttachments[0].texture = target;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear; pass.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 0, 1);
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    id<MTLCommandQueue> queue = [g_dev newCommandQueue]; id<MTLCommandBuffer> cb = [queue commandBuffer];
-    id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:pass];
+    T4 *cb = t4_begin();
+    id<MTL4RenderCommandEncoder> enc = t4_pass(cb, pass);
     [enc setRenderPipelineState:pipeline];
     if (mesh) {
         MTLSize one = MTLSizeMake(1, 1, 1);
         [enc drawMeshThreadgroups:one threadsPerObjectThreadgroup:one threadsPerMeshThreadgroup:one];
     } else [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-    [enc endEncoding];
-    [cb commit]; [cb waitUntilCompleted];
-    EXPECT("GPU draw completed", MTLCommandBufferStatusCompleted, cb.status);
+    t4_end(cb, enc);
+    t4_wait(cb);
+    EXPECT("GPU draw completed", MTLCommandBufferStatusCompleted, cb->status);
     [target getBytes:out bytesPerRow:16 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0];
 }
 

@@ -3,6 +3,7 @@
 // vconv_i2f), the ones the host's CPU conversion gives (vconv_fill). Every byte value, half and float specials, snorm -128, 10:10:10:2 extremes, 8-bit attributes at aligned and
 // at 2-byte offsets, a stride-1 stream; then stride 0 and a divisor with a base instance, which must pick the elements Metal's step functions pick; then the host's layout block
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
 void *front_metal_layer(void) { return NULL; }
@@ -16,7 +17,7 @@ static int checks, failed;
 typedef struct { uint64_t base; uint32_t stride, divisor; } dm_vstream_c;
 typedef struct { dm_vstream_c s[16]; uint32_t attr[16]; } dm_vlayout_c;   // dmsh_pull.metal dm_vlayout
 _Static_assert(sizeof(dm_vlayout_c) == 320, "dm_vlayout");
-static id<MTLCommandQueue> q; static id<MTLTexture> rt; static id<MTLLibrary> lib;
+static static id<MTLTexture> rt; static id<MTLLibrary> lib;
 static NSString *k_test = @"\n"
 "vertex void pull_test(constant dm_vlayout &L [[buffer(16)]], device uint4 *out [[buffer(1)]], constant uint &mode [[buffer(2)]], uint vid [[vertex_id]], uint iid [[instance_id]], uint bi [[base_instance]]) { out[mode ? iid : vid] = dm_fetch(L, 0, vid, iid, bi); }\n"
 "struct vinf { float4 a [[attribute(0)]]; }; struct vinu { uint4 a [[attribute(0)]]; }; struct vini { int4 a [[attribute(0)]]; };\n"
@@ -25,22 +26,22 @@ static NSString *k_test = @"\n"
 "vertex void vd_i(vini in [[stage_in]], device uint4 *out [[buffer(1)]], constant uint &mode [[buffer(2)]], uint vid [[vertex_id]], uint iid [[instance_id]]) { out[mode ? iid : vid] = as_type<uint4>(in.a); }\n";
 
 static id<MTLRenderPipelineState> rp(NSString *fn, MTLVertexDescriptor *vd) {
-    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new]; d.vertexFunction = [lib newFunctionWithName:fn]; d.rasterizationEnabled = NO; d.vertexDescriptor = vd;
+    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new]; d.vertexFunction = t4_fn(lib, fn); d.rasterizationEnabled = NO; d.vertexDescriptor = vd;
     d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-    NSError *e = nil; id<MTLRenderPipelineState> ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
+    NSError *e = nil; id<MTLRenderPipelineState> ps = t4_rps(d, &e);
     if (!ps) { fprintf(stderr, "pipeline %s: %s\n", fn.UTF8String, e.localizedDescription.UTF8String); abort(); }
     return ps;
 }
 static void run(id<MTLRenderPipelineState> ps, id<MTLBuffer> vb, int vd_slot, id<MTLBuffer> lay, id<MTLBuffer> out, uint32_t mode, int nvert, int ninst, int binst) {
     MTLRenderPassDescriptor *p = [MTLRenderPassDescriptor new]; p.colorAttachments[0].texture = rt; p.colorAttachments[0].loadAction = MTLLoadActionDontCare; p.colorAttachments[0].storeAction = MTLStoreActionDontCare;
-    id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:p];
+    T4 *cb = t4_begin(); id<MTL4RenderCommandEncoder> e = t4_pass(cb, p);
     [e setRenderPipelineState:ps];
-    if (vd_slot >= 0) [e setVertexBuffer:vb offset:0 atIndex:(NSUInteger)vd_slot];
-    if (lay) { [e setVertexBuffer:lay offset:0 atIndex:16]; [e useResource:vb usage:MTLResourceUsageRead stages:MTLRenderStageVertex]; }
-    [e setVertexBuffer:out offset:0 atIndex:1]; [e setVertexBytes:&mode length:4 atIndex:2];
+    if (vd_slot >= 0) t4_buf(cb, e, T4_VS, vb, 0, (NSUInteger)vd_slot);
+    if (lay) { t4_buf(cb, e, T4_VS, lay, 0, 16); t4_use(cb, vb); }
+    t4_buf(cb, e, T4_VS, out, 0, 1); t4_bytes(cb, e, T4_VS, &mode, 4, 2);
     [e drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:(NSUInteger)nvert instanceCount:(NSUInteger)ninst baseInstance:(NSUInteger)binst];
-    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    EXPECT("command buffer without error", 0, cb.error != nil);
+    t4_end(cb, e); t4_wait(cb);
+    EXPECT("command buffer without error", 0, cb->status != MTLCommandBufferStatusCompleted);
 }
 static int int_class(MTLVertexFormat f) {   // 1 unsigned, 2 signed integer input; 0 float
     switch (f) {
@@ -66,11 +67,11 @@ static int elem_size(int f) {   // bytes of one element of NVN format f
     }
 }
 int main(void) { @autoreleasepool {
-    mtl_init(); q = [g_dev newCommandQueue]; NSError *err = nil;
+    mtl_init(); NSError *err = nil;
     NSString *fetch = [NSString stringWithContentsOfFile:@"../tools/dmsh_pull.metal" encoding:NSUTF8StringEncoding error:&err];
     if (!fetch) { fprintf(stderr, "dmsh_pull.metal: %s\n", err.localizedDescription.UTF8String); return 1; }
     MTLCompileOptions *o = [MTLCompileOptions new]; o.preserveInvariance = YES;   // as the chain compiles (fast math on)
-    lib = [g_dev newLibraryWithSource:[NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\n%@\n%@", fetch, k_test] options:o error:&err];
+    lib = t4_lib([NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\n%@\n%@", fetch, k_test], o, &err);
     if (!lib) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); return 1; }
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO]; td.usage = MTLTextureUsageRenderTarget; rt = [g_dev newTextureWithDescriptor:td];
     enum { NV = 512 };

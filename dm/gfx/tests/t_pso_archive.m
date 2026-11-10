@@ -20,6 +20,7 @@ static size_t archive_confstr(int name, char *buffer, size_t length) {
 }
 #define confstr archive_confstr
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 static void archive_cache_cleanup(void) {
     [NSFileManager.defaultManager removeItemAtPath:@(archive_cache_root) error:nil];
 }
@@ -33,8 +34,8 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define EXPECT(name, want, got) do { uint64_t w = (want), g = (got); checks++; if (w != g) { fprintf(stderr, "%s: expected %llu, got %llu\n", name, (unsigned long long)w, (unsigned long long)g); failed++; } } while (0)
 
-static id<MTLLibrary> g_lib, g_lib2;   // g_lib2: the same source again, for functions with no Metal 4 descriptor (a library hands out one function object per name)
-static id<MTLCommandQueue> g_q;
+static id<MTLLibrary> g_lib, g_lib2, g_lib3;   // g_lib2: the same source again, for functions with no Metal 4 descriptor (a library hands out one function object per name);
+                                              // g_lib3: once more, through the fixture's compiler, for whole reference pipelines (t4_rps)
 static NSArray<NSString *> *archive_files(NSString *dir) {   // the archive's files, without their indexes (<file>.keys)
     return [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]];
 }
@@ -108,9 +109,9 @@ static void concurrent_functions(id<MTLLibrary> library) {
 static int run_kernel(id<MTLComputePipelineState> ps) {
     if (!ps) return 0;
     id<MTLBuffer> b = [g_dev newBufferWithLength:64 * 4 options:MTLResourceStorageModeShared]; memset(b.contents, 0, 64 * 4);
-    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-    [ce setComputePipelineState:ps]; [ce setBuffer:b offset:0 atIndex:0]; [ce dispatchThreads:MTLSizeMake(64, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; [ce endEncoding];
-    [cb commit]; [cb waitUntilCompleted];
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_compute(cb);
+    [ce setComputePipelineState:ps]; t4_buf(cb, ce, T4_CS, b, 0, 0); [ce dispatchThreads:MTLSizeMake(64, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; t4_end(cb, ce);
+    if (t4_wait(cb) != MTLCommandBufferStatusCompleted) return 0;
     const uint32_t *o = b.contents; for (uint32_t i = 0; i < 64; i++) if (o[i] != i * 3 + 1) return 0;
     return 1;
 }
@@ -181,10 +182,10 @@ static int mesh_draw_ok(id<MTLRenderPipelineState> ps, int fragment) {
     id<MTLTexture> t = [g_dev newTextureWithDescriptor:td];
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = t; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 0, 1); rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
+    T4 *cb = t4_begin(); id<MTL4RenderCommandEncoder> en = t4_pass(cb, rp);
     MTLSize one = MTLSizeMake(1, 1, 1);
-    [en setRenderPipelineState:ps]; [en drawMeshThreadgroups:one threadsPerObjectThreadgroup:one threadsPerMeshThreadgroup:one]; [en endEncoding];
-    [cb commit]; [cb waitUntilCompleted];
+    [en setRenderPipelineState:ps]; [en drawMeshThreadgroups:one threadsPerObjectThreadgroup:one threadsPerMeshThreadgroup:one]; t4_end(cb, en);
+    if (t4_wait(cb) != MTLCommandBufferStatusCompleted) return 0;
     uint8_t px[4]; [t getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0];
     return fragment ? px[0] == 0 && px[1] == 255 && px[2] == 0 && px[3] == 255 : px[0] == 255 && px[1] == 0 && px[2] == 0 && px[3] == 255;
 }
@@ -341,9 +342,9 @@ static void draw_with(id<MTLRenderPipelineState> ps, MTLPixelFormat f0, MTLPixel
     MTLTextureDescriptor *dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:4 height:4 mipmapped:NO]; dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
     rp.depthAttachment.texture = [g_dev newTextureWithDescriptor:dd]; rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.storeAction = MTLStoreActionDontCare;
     static id<MTLBuffer> one; if (!one) { float v[4] = { 1, 1, 1, 1 }; one = [g_dev newBufferWithBytes:v length:16 options:MTLResourceStorageModeShared]; }
-    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
-    [e setRenderPipelineState:ps]; [e setVertexBuffer:one offset:0 atIndex:16]; [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [e endEncoding];
-    [cb commit]; [cb waitUntilCompleted];
+    T4 *cb = t4_begin(); id<MTL4RenderCommandEncoder> e = t4_pass(cb, rp);
+    [e setRenderPipelineState:ps]; t4_buf(cb, e, T4_VS, one, 0, 16); [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; t4_end(cb, e);
+    EXPECT("draw: command completed", MTLCommandBufferStatusCompleted, t4_wait(cb));
     for (int i = 0; i < 2; i++) {
         if (fm[i] == MTLPixelFormatRGBA8Unorm) { uint8_t p[4]; [t[i] getBytes:p bytesPerRow:16 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0]; for (int c = 0; c < 4; c++) out[i][c] = p[c] / 255.0f; }
         else { __fp16 p[4]; [t[i] getBytes:p bytesPerRow:32 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0]; for (int c = 0; c < 4; c++) out[i][c] = p[c]; }
@@ -351,10 +352,11 @@ static void draw_with(id<MTLRenderPipelineState> ps, MTLPixelFormat f0, MTLPixel
 }
 static void same_pixels(const char *name, MTLPixelFormat f0, int blend, MTLPixelFormat f1, MTLColorWriteMask m1) {
     NSError *e = nil;
-    id<MTLRenderPipelineState> a = pso_build(desc(f0, blend, f1, m1, 1), &e), b = [g_dev newRenderPipelineStateWithDescriptor:desc(f0, blend, f1, m1, 0) error:&e];
+    MTLRenderPipelineDescriptor *whole = desc(f0, blend, f1, m1, 0); whole.vertexFunction = t4_fn(g_lib3, @"vs"); whole.fragmentFunction = t4_fn(g_lib3, @"fs");
+    id<MTLRenderPipelineState> a = pso_build(desc(f0, blend, f1, m1, 1), &e), b = t4_rps(whole, &e);
     checks++; if (!a || !b) { fprintf(stderr, "%s: no pipeline (%s)\n", name, e.localizedDescription.UTF8String); failed++; return; }
     float pa[2][4], pb[2][4]; draw_with(a, f0, f1, pa); draw_with(b, f0, f1, pb);
-    checks++; if (memcmp(pa, pb, sizeof pa)) { fprintf(stderr, "%s: the specialized pipeline drew (%g %g %g %g | %g %g %g %g), the MTLDevice one (%g %g %g %g | %g %g %g %g)\n", name,
+    checks++; if (memcmp(pa, pb, sizeof pa)) { fprintf(stderr, "%s: the specialized pipeline drew (%g %g %g %g | %g %g %g %g), the whole one (%g %g %g %g | %g %g %g %g)\n", name,
         pa[0][0], pa[0][1], pa[0][2], pa[0][3], pa[1][0], pa[1][1], pa[1][2], pa[1][3], pb[0][0], pb[0][1], pb[0][2], pb[0][3], pb[1][0], pb[1][1], pb[1][2], pb[1][3]); failed++; }
 }
 static void depth_only(void) {
@@ -373,14 +375,13 @@ static void depth_only(void) {
     MTLDepthStencilDescriptor *ds = [MTLDepthStencilDescriptor new]; ds.depthWriteEnabled = YES; ds.depthCompareFunction = MTLCompareFunctionAlways;
     float v[4] = {1, 1, 1, 1}; id<MTLBuffer> vb = [g_dev newBufferWithBytes:v length:sizeof v options:MTLResourceStorageModeShared];
     id<MTLBuffer> out = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+    T4 *cb = t4_begin(); id<MTL4RenderCommandEncoder> enc = t4_pass(cb, rp);
     [enc setRenderPipelineState:ps]; [enc setDepthStencilState:[g_dev newDepthStencilStateWithDescriptor:ds]];
-    [enc setVertexBuffer:vb offset:0 atIndex:16]; [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [enc endEncoding];
-    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    t4_buf(cb, enc, T4_VS, vb, 0, 16); [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; t4_end(cb, enc);
+    id<MTL4ComputeCommandEncoder> blit = t4_copy(cb); t4_use(cb, t); t4_use(cb, out);
     [blit copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(4, 4, 1)
-                toBuffer:out destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:1024]; [blit endEncoding];
-    [cb commit]; [cb waitUntilCompleted];
-    EXPECT("depth only: command completed", MTLCommandBufferStatusCompleted, cb.status);
+                toBuffer:out destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:1024]; t4_end(cb, blit);
+    EXPECT("depth only: command completed", MTLCommandBufferStatusCompleted, t4_wait(cb));
     EXPECT("depth only: rasterization wrote zero depth", 1, ((float *)out.contents)[65] == 0.0f);
 }
 static void concurrent_bases(int fail) {
@@ -552,7 +553,7 @@ int main(int argc, char **argv) { @autoreleasepool {
                                withIntermediateDirectories:NO attributes:nil error:nil]) abort();
     char dir[] = "/tmp/t_pso_archive.XXXXXX"; if (!mkdtemp(dir)) abort();
     setenv("DM_PSO_ARCHIVE", argc == 3 ? argv[2] : dir, 1);
-    mtl_init(); g_q = [g_dev newCommandQueue]; NSError *err = nil;
+    mtl_init(); NSError *err = nil;
     NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\nstruct I { float4 a [[attribute(0)]]; };\n"
         "vertex V vs(I in [[stage_in]], uint id [[vertex_id]]) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.p = float4(uv * 2 - 1, 0, in.a.w); return o; }\n"
         "struct O { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; };\nfragment O fs() { return { float4(0.5, 0.25, 1.0, 0.5), float4(0.2, 0.4, 0.6, 0.8) }; }\n"
@@ -572,6 +573,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     } else g_lib = [g_dev newLibraryWithSource:src options:nil error:&err];
     if (!g_lib) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); return 1; }
     g_lib2 = [g_dev newLibraryWithSource:[src stringByAppendingString:@"// another library: the same source would come back as the same library\n"] options:nil error:&err];
+    g_lib3 = t4_lib([src stringByAppendingString:@"// the whole reference pipelines' library\n"], nil, &err);
+    if (!g_lib2 || !g_lib3) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); return 1; }
     lib_tag(g_lib, @"fixture.metallib"); lib_tag(g_lib2, @"fixture2.metallib");   // as lib_from_file names the game's: their pipelines have index keys
     if (argc == 3 && !strncmp(argv[1], "--cold-", 7)) {   // across fresh processes: a cold start's prewarm with a timer flush after each new base, then the next start
         g_arch_period_max = 4; int seed = !strcmp(argv[1], "--cold-seed"), cut = !strcmp(argv[1], "--cold-cut-seed"), after_cut = !strcmp(argv[1], "--cold-after-cut");

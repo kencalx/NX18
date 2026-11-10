@@ -3,6 +3,7 @@
 // writes it stays a GPU texture, unless the CPU has rewritten that storage since. Mario Kart World's terrain patches: R16, RG8, RGBA8, R11G11B10F and RGBA16 in a CPU_CACHED pool, never
 // flushed, were zeros and every patch a flat plane. Ocarina of Time's terrain height and blend maps lie in the pool its normal maps are drawn into: zeros, and holes in the ground.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -26,13 +27,12 @@ static void fill(tex_t *t, void *mem, uint8_t v) {
     free(linear);
 }
 static uint8_t first_red(id<MTLTexture> image) {   // the red of texel (3, 5), read through a blit: the texture is private
-    static id<MTLCommandQueue> queue; if (!queue) queue = [g_dev newCommandQueue];
     id<MTLBuffer> out = [g_dev newBufferWithLength:4 options:MTLResourceStorageModeShared];
     if (!image || !out) { fprintf(stderr, "nothing to read back\n"); return 0; }
-    id<MTLCommandBuffer> cb = [queue commandBuffer]; id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
-    [be copyFromTexture:image.parentTexture ?: image sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(3, 5, 0) sourceSize:MTLSizeMake(1, 1, 1) toBuffer:out destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
-    [be endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    CHECK("readback completes", cb.status == MTLCommandBufferStatusCompleted);
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> be = t4_copy(cb);
+    t4_use(cb, out), [be copyFromTexture:image.parentTexture ?: image sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(3, 5, 0) sourceSize:MTLSizeMake(1, 1, 1) toBuffer:out destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
+    t4_end(cb, be); t4_wait(cb);
+    CHECK("readback completes", cb->status == MTLCommandBufferStatusCompleted);
     return *(uint8_t *)out.contents;
 }
 static uint8_t stored_red(const tex_t *t) {   // the red of texel (3, 5) of level 0, as the storage holds it

@@ -44,6 +44,7 @@ static int test_pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mu
 #define clock_gettime test_clock_gettime
 #define pthread_cond_timedwait test_pthread_cond_timedwait
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 #undef pthread_cond_timedwait
 #undef clock_gettime
 #undef clock_gettime_nsec_np
@@ -89,8 +90,8 @@ static uint64_t execute(chain *c) {
 static NvProg *make_program(id<MTLLibrary> lib, prog_t *pg, const char *fragment) {
     static uint64_t serial=900000; pg->serial=++serial;
     NvProg *p=[NvProg new]; p->sh[0]=[NvShader new]; p->sh[1]=[NvShader new];
-    p->sh[0]->fn=[lib newFunctionWithName:@"v"]; p->sh[0]->stage=0;
-    p->sh[1]->fn=[lib newFunctionWithName:@(fragment)]; p->sh[1]->stage=1;
+    p->sh[0]->fn=t4_fn(lib, @"v"); p->sh[0]->stage=0;
+    p->sh[1]->fn=t4_fn(lib, @(fragment)); p->sh[1]->stage=1;
     p->sh[1]->rf.color_known=1; p->sh[1]->rf.color_mask=1;
     serial_put(pg->serial,p); return p;
 }
@@ -108,9 +109,9 @@ static void slices(id<MTLLibrary> lib) {
     CHECK("six independent slices take five continuations",!sm_on() || g_sm_ncont-before==5);
     id<MTLTexture> mt=tex_mtl(&t);
     id<MTLBuffer> out=[g_dev newBufferWithLength:6*256 options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> cb=[g_q commandBuffer]; id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];
-    for(int sl=0;sl<6;sl++) [e copyFromTexture:mt sourceSlice:sl sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1) toBuffer:out destinationOffset:sl*256 destinationBytesPerRow:32 destinationBytesPerImage:256];
-    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e=t4_copy(cb);
+    for(int sl=0;sl<6;sl++) t4_use(cb, mt), t4_use(cb, out), [e copyFromTexture:mt sourceSlice:sl sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1) toBuffer:out destinationOffset:sl*256 destinationBytesPerRow:32 destinationBytesPerImage:256];
+    t4_end(cb, e); t4_wait(cb);
     int bad=0; const uint8_t *bytes=out.contents;
     for(int i=0;i<6*64;i++) bad+=memcmp(bytes+4*i,(uint8_t[]){255,0,0,255},4)!=0;
     CHECK("every pixel of all six layers is red",!bad);
@@ -136,7 +137,7 @@ static void hoists(id<MTLLibrary> lib) {
     prog_t pg={0}, cp={.serial=910000}; make_program(lib,&pg,"red");
     NvProg *cs=[NvProg new]; cs->sh[5]=[NvShader new]; cs->sh[5]->stage=5;
     cs->sh[5]->rf.tg[0]=cs->sh[5]->rf.tg[1]=cs->sh[5]->rf.tg[2]=1;
-    cs->sh[5]->fn=[lib newFunctionWithName:@"compute_one"];
+    cs->sh[5]->fn=t4_fn(lib, @"compute_one");
     cs->sh[5]->arg_len=[cs->sh[5]->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     cs->sh[5]->rf.nb=1; cs->sh[5]->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0};
     serial_put(cp.serial,cs);
@@ -304,11 +305,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     }
     alarm(30); setbuf(stdout,NULL); mtl_init();
     NSError *error=nil;
-    id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> lib=t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i [[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i],0,1); }\n"
         "fragment float4 red() { return float4(1,0,0,1); }\n"
         "struct Args { device uint *p [[id(0)]]; };\n"
-        "kernel void compute_one(constant Args &a [[buffer(0)]]) { *a.p=73; }\n" options:nil error:&error];
+        "kernel void compute_one(constant Args &a [[buffer(0)]]) { *a.p=73; }\n", nil, &error);
     if(!lib) { fprintf(stderr,"%s\n",error.localizedDescription.UTF8String); return 2; }
     slices(lib); hoists(lib); posts();
     printf("performance ordering: %d checks, %d failed\n",checks,failed); return failed!=0;

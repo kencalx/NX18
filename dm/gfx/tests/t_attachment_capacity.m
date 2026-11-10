@@ -1,6 +1,7 @@
 // Eight color attachments plus independently tracked depth and stencil: ten entries.
 // A vertex-only producer/consumer pair must still run after attachment write tracking.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -18,11 +19,11 @@ static NSData *plane(const tex_t *t, unsigned bpp, MTLBlitOption option) {
     CHECK(source != nil,"attachment exists for readback"); if (!source) exit(1);
     id<MTLBuffer> b=[g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared];
     CHECK(b != nil,"readback buffer allocates"); if (!b) exit(1);
-    id<MTLCommandBuffer> cb=q_cb(); id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];
-    [e copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1)
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e=t4_copy(cb);
+    t4_use(cb, source), t4_use(cb, b), [e copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1)
         toBuffer:b destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:2048 options:option];
-    [e endEncoding];[cb commit];[cb waitUntilCompleted];
-    CHECK(cb.status==MTLCommandBufferStatusCompleted,"attachment readback completes");
+    t4_end(cb, e);t4_wait(cb);
+    CHECK(cb->status==MTLCommandBufferStatusCompleted,"attachment readback completes");
     NSMutableData *out=[NSMutableData dataWithLength:64*bpp];
     for(unsigned y=0;y<8;y++)memcpy((uint8_t *)out.mutableBytes+y*8*bpp,(uint8_t *)b.contents+y*256,8*bpp);
     return out;
@@ -33,19 +34,19 @@ int main(void) { @autoreleasepool {
     mtl_init();
     void *memory=NULL;if(posix_memalign(&memory,getpagesize(),65536))abort();memset(memory,0,65536);mtl_pool_add(memory,65536);
     commands=memory;uint32_t *output=(uint32_t *)((uint8_t *)memory+32768);
-    NSError *error=nil;id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    NSError *error=nil;id<MTLLibrary> lib=t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "struct A{device uint* p[[id(0)]];};\n"
         "vertex float4 v(){return float4(0,0,0,1);}\n"
         "vertex void producer(uint n[[vertex_id]],constant A&a[[buffer(0)]]){a.p[n]=n+0x1200;}\n"
-        "vertex void consumer(uint n[[vertex_id]],constant A&a[[buffer(0)]]){a.p[n+4096]=a.p[n];}\n" options:nil error:&error];
+        "vertex void consumer(uint n[[vertex_id]],constant A&a[[buffer(0)]]){a.p[n+4096]=a.p[n];}\n", nil, &error);
     CHECK(lib!=nil,"synthetic vertex shaders compile");if(!lib)return 1;
     static prog_t pg[2]={{.serial=982001},{.serial=982002}};
     // NOLINTBEGIN(clang-analyzer-osx.cocoa.RetainCount): serial_put retains each program in g_by_serial through hm_put_id's CFBridgingRetain
     for(int i=0;i<2;i++) {
         NvProg *p=[NvProg new];NvShader *s=[NvShader new];
-        s->fn=fn4_note([lib newFunctionWithName:@"v"],lib,@"v",nil);
+        s->fn=fn4_note(t4_fn(lib, @"v"),lib,@"v",nil);
         NSString *entry=i?@"consumer":@"producer";
-        s->discard_fn=fn4_note([lib newFunctionWithName:entry],lib,entry,nil);
+        s->discard_fn=fn4_note(t4_fn(lib, entry),lib,entry,nil);
         s->arg_len=[s->discard_fn newArgumentEncoderWithBufferIndex:0].encodedLength;
         s->rf.nb=1;s->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0};
         p->sh[0]=s;serial_put(pg[i].serial,p);

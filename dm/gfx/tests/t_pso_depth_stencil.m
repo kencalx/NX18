@@ -1,5 +1,6 @@
 // #702: real pass setup, pipeline lookup and literal GPU plane readback, without game files.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 #include "../nvn/nvn_pso_ds.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -43,7 +44,7 @@ static tex_t texture(int format) {
 static void seed(const tex_t *t) {
     id<MTLTexture> base = tex_mtl(t);
     CHECK(base != nil, "NVN target allocates"); if (!base) exit(1);
-    id<MTLCommandBuffer> cb = q_cb();   // finish the production zero-fill before poisoning the planes
+    T4 *cb = t4_begin();   // finish the production zero-fill before poisoning the planes
     MTLRenderPassDescriptor *p = [MTLRenderPassDescriptor new];
     if (t->d.format != NVN_FORMAT_STENCIL8) {
         p.depthAttachment.texture = base; p.depthAttachment.loadAction = MTLLoadActionClear;
@@ -53,19 +54,19 @@ static void seed(const tex_t *t) {
         p.stencilAttachment.texture = base; p.stencilAttachment.loadAction = MTLLoadActionClear;
         p.stencilAttachment.storeAction = MTLStoreActionStore; p.stencilAttachment.clearStencil = 0xa5;
     }
-    [[cb renderCommandEncoderWithDescriptor:p] endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    CHECK(cb.status == MTLCommandBufferStatusCompleted, "initial plane values reach the GPU");
+    t4_end(cb, t4_pass(cb, p)); t4_wait(cb);
+    CHECK(cb->status == MTLCommandBufferStatusCompleted, "initial plane values reach the GPU");
 }
 static NSData *read_plane(const tex_t *t, unsigned bpp, MTLBlitOption option) {
     id<MTLTexture> source = tex_mtl(t);
     CHECK(source != nil, "attachment exists for readback"); if (!source) exit(1);
     id<MTLBuffer> b = [g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared];
     CHECK(b != nil, "readback buffer allocates"); if (!b) exit(1);
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
-    [e copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1)
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_copy(cb);
+    t4_use(cb, source), t4_use(cb, b), [e copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1)
         toBuffer:b destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:2048 options:option];
-    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    CHECK(cb.status == MTLCommandBufferStatusCompleted, "literal plane readback completes");
+    t4_end(cb, e); t4_wait(cb);
+    CHECK(cb->status == MTLCommandBufferStatusCompleted, "literal plane readback completes");
     NSMutableData *result = [NSMutableData dataWithLength:64 * bpp];
     for (unsigned y = 0; y < 8; y++) memcpy((uint8_t *)result.mutableBytes + y * 8 * bpp, (uint8_t *)b.contents + y * 256, 8 * bpp);
     return result;
@@ -74,8 +75,8 @@ static NvProg *program(id<MTLLibrary> lib) {
     NvProg *p = [NvProg new];
     p->sh[0] = [NvShader new]; p->sh[1] = [NvShader new];
     strcpy(p->sh[0]->key, "ds-vs"); strcpy(p->sh[1]->key, "ds-fs"); p->sh[1]->stage = 1;
-    p->sh[0]->fn = fn4_note([lib newFunctionWithName:@"v"], lib, @"v", nil);
-    p->sh[1]->fn = fn4_note([lib newFunctionWithName:@"f"], lib, @"f", nil);
+    p->sh[0]->fn = fn4_note(t4_fn(lib, @"v"), lib, @"v", nil);
+    p->sh[1]->fn = fn4_note(t4_fn(lib, @"f"), lib, @"f", nil);
     p->sh[1]->rf.color_known = 1; p->sh[1]->rf.color_mask = 1;
     return p;
 }
@@ -189,9 +190,9 @@ int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_PSO_MANIFEST", "off", 1); setenv("DM_PSO_USER", "/dev/null", 1);
     setenv("DM_PSO_PREBUILD", "0", 1); setenv("DM_PSO_HYBRID", "0", 1); setenv("DM_NVN_PREDICT", "0", 1);
     mtl_init(); NSError *error = nil;
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> lib = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint n[[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[n],.25,1); }\n"
-        "fragment float4 f() { return float4(1,0,0,1); }\n" options:nil error:&error];
+        "fragment float4 f() { return float4(1,0,0,1); }\n", nil, &error);
     CHECK(lib != nil, "synthetic shaders compile"); if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
     NvProg *p = program(lib); draws(p); invalid_descriptors(p); prediction(lib);
     const char *mode = getenv("DM_PSO_MTL4");

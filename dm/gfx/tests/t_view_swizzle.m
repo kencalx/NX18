@@ -1,6 +1,7 @@
 // Channel mapping of registered textures (tex_by_id): the descriptor's swizzle composed with the format's own mapping, read back from the GPU through the production lookup.
 // The RGB565 family's red / blue swap and RGBA4's reversal are for uploaded textures only; a texture Metal cleared reads as cleared, and an image slot gets a writable view without the mapping (img_fit)
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
 void *front_metal_layer(void) { return NULL; }
@@ -11,17 +12,17 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, fails;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
 static id<MTLComputePipelineState> pipe_of(NSString *src, NSString *name) {
-    NSError *error = nil; id<MTLLibrary> library = [g_dev newLibraryWithSource:src options:nil error:&error];
-    id<MTLComputePipelineState> p = [g_dev newComputePipelineStateWithFunction:[library newFunctionWithName:name] error:&error];
+    NSError *error = nil; id<MTLLibrary> library = t4_lib(src, nil, &error);
+    id<MTLComputePipelineState> p = t4_cps(t4_fn(library, name), &error);
     CHECK(p != nil, "pipeline created");
     return p;
 }
 static void run2(id<MTLComputePipelineState> p, id<MTLTexture> t, id<MTLBuffer> out) {
-    id<MTLCommandBuffer> command = q_cb(); id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-    [encoder setComputePipelineState:p]; [encoder setTexture:t atIndex:0]; if (out) [encoder setBuffer:out offset:0 atIndex:0];
+    T4 *command = t4_begin(); id<MTL4ComputeCommandEncoder> encoder = t4_compute(command);
+    [encoder setComputePipelineState:p]; t4_tex(command, encoder, T4_CS, t, 0); if (out) t4_buf(command, encoder, T4_CS, out, 0, 0);
     [encoder dispatchThreads:MTLSizeMake(2, 1, 1) threadsPerThreadgroup:MTLSizeMake(2, 1, 1)];
-    [encoder endEncoding]; [command commit]; [command waitUntilCompleted];
-    CHECK(command.status == MTLCommandBufferStatusCompleted, "GPU work completed");
+    t4_end(command, encoder); t4_wait(command);
+    CHECK(command->status == MTLCommandBufferStatusCompleted, "GPU work completed");
 }
 static void read_check(int tid, id<MTLTexture> view, const float expected[8], float tol) {   // the two texels as the shader reads them
     static id<MTLComputePipelineState> p;
@@ -64,7 +65,7 @@ static void cleared_case(int tid, int format) {
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = base; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     rp.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 0, 1);
-    id<MTLCommandBuffer> command = q_cb(); [[command renderCommandEncoderWithDescriptor:rp] endEncoding]; [command commit]; [command waitUntilCompleted];
+    T4 *command = t4_begin(); t4_end(command, t4_pass(command, rp)); t4_wait(command);
     mtl_reg_tex(tid, &t, NULL);
     os_unfair_lock_lock(&g_rmu); id<MTLTexture> view = tex_by_id(tid); os_unfair_lock_unlock(&g_rmu);
     CHECK(view == base, "a cleared RGB565-family texture needs no view");
@@ -128,16 +129,16 @@ static void init_fill_case(int tid, int format, int pool_flags) {
     if (format == NVN_FORMAT_BGR565) { want[0] = want[6] = 0; want[2] = want[4] = 1; }
     if (rgba4) { want[0] = 1/15.f; want[1] = 2/15.f; want[2] = 4/15.f; want[3] = 8/15.f; }
     read_check(tid, view, want, 0.001f);
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nvertex float4 v(uint i [[vertex_id]]) { return float4(i == 1 ? 3 : -1, i == 2 ? 3 : -1, 0, 1); }\nfragment float4 f() { return float4(0, 1, 0, 1); }\n" options:nil error:nil];
+    id<MTLLibrary> lib = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\nvertex float4 v(uint i [[vertex_id]]) { return float4(i == 1 ? 3 : -1, i == 2 ? 3 : -1, 0, 1); }\nfragment float4 f() { return float4(0, 1, 0, 1); }\n", nil, nil);
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
-    pd.vertexFunction = [lib newFunctionWithName:@"v"]; pd.fragmentFunction = [lib newFunctionWithName:@"f"]; pd.colorAttachments[0].pixelFormat = base.pixelFormat;
-    id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithDescriptor:pd error:nil];
+    pd.vertexFunction = t4_fn(lib, @"v"); pd.fragmentFunction = t4_fn(lib, @"f"); pd.colorAttachments[0].pixelFormat = base.pixelFormat;
+    id<MTLRenderPipelineState> p = t4_rps(pd, nil);
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = base; rp.colorAttachments[0].loadAction = MTLLoadActionLoad; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-    id<MTLCommandBuffer> command = q_cb(); id<MTLRenderCommandEncoder> e = [command renderCommandEncoderWithDescriptor:rp];
-    [e setRenderPipelineState:p]; [e setScissorRect:(MTLScissorRect){0, 0, 1, 1}]; [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [e endEncoding];
-    [command commit]; [command waitUntilCompleted];
-    CHECK(p && command.status == MTLCommandBufferStatusCompleted, "partial render completed");
+    T4 *command = t4_begin(); id<MTL4RenderCommandEncoder> e = t4_pass(command, rp);
+    [e setRenderPipelineState:p]; [e setScissorRect:(MTLScissorRect){0, 0, 1, 1}]; [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; t4_end(command, e);
+    t4_wait(command);
+    CHECK(p && command->status == MTLCommandBufferStatusCompleted, "partial render completed");
     want[0] = want[2] = 0; want[1] = want[3] = 1;   // texel 0 drawn green, texel 1 as uploaded
     read_check(tid, view, want, 0.001f);
     CHECK(nvn_deswizzle(&t.d, 0, 0, t.mem, kept, 4) == 0 && !memcmp(kept, pixels, 4), "guest storage keeps the guest's bits");
@@ -149,9 +150,9 @@ static void clear_depth_level(id<MTLTexture> depth, NSUInteger level, double val
     pass.depthAttachment.texture = depth; pass.depthAttachment.level = level;
     pass.depthAttachment.loadAction = MTLLoadActionClear; pass.depthAttachment.storeAction = MTLStoreActionStore;
     pass.depthAttachment.clearDepth = value;
-    id<MTLCommandBuffer> command = q_cb();
-    [[command renderCommandEncoderWithDescriptor:pass] endEncoding]; [command commit]; [command waitUntilCompleted];
-    CHECK(command.status == MTLCommandBufferStatusCompleted, "depth attachment cleared");
+    T4 *command = t4_begin();
+    t4_end(command, t4_pass(command, pass)); t4_wait(command);
+    CHECK(command->status == MTLCommandBufferStatusCompleted, "depth attachment cleared");
 }
 static void check_depth_red(id<MTLTexture> view, const float want[4]) {
     static id<MTLComputePipelineState> p;

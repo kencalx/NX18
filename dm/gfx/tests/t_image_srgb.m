@@ -1,6 +1,7 @@
 // An sRGB texture in an image slot is loaded and stored raw, as NVN's image loads and stores do (no sRGB conversion), while its sampled descriptor still decodes.
 // Star Fox writes its upscaler's sRGB-encoded output into an RGBA8_SRGB texture through an image: through the texture's own format Metal encoded it once more.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -13,27 +14,27 @@ static void read_bytes(id<MTLTexture> t, uint8_t *out) {
     id<MTLBuffer> rb = [g_dev newBufferWithLength:4 * 4 * 4 options:MTLResourceStorageModeShared];
     CHECK(rb != nil, "readback buffer made");
     if (!rb) return;
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
-    [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(4, 4, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:16 destinationBytesPerImage:64];
-    [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    CHECK(cb.status == MTLCommandBufferStatusCompleted, "readback completed");
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> b = t4_copy(cb);
+    t4_use(cb, t), t4_use(cb, rb), [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(4, 4, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:16 destinationBytesPerImage:64];
+    t4_end(cb, b); t4_wait(cb);
+    CHECK(cb->status == MTLCommandBufferStatusCompleted, "readback completed");
     memcpy(out, rb.contents, 64);
 }
 // One thread: reads texel (0,0) through the image and through the sampled texture into out[0..7], writes (0.5, 0.25, 0.75, 1) to texel (1,1) through the image
 static void run_kernel(id<MTLTexture> image, id<MTLTexture> sampled, float *out) {
     NSError *e = nil;
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> lib = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "kernel void k(texture2d<float, access::read_write> im [[texture(0)]], texture2d<float> tx [[texture(1)]], device float4 *o [[buffer(0)]]) {\n"
-        "  o[0] = im.read(uint2(0, 0)); o[1] = tx.read(uint2(0, 0)); im.write(float4(0.5, 0.25, 0.75, 1.0), uint2(1, 1)); }\n" options:nil error:&e];
-    id<MTLFunction> fn = [lib newFunctionWithName:@"k"];
-    id<MTLComputePipelineState> p = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
+        "  o[0] = im.read(uint2(0, 0)); o[1] = tx.read(uint2(0, 0)); im.write(float4(0.5, 0.25, 0.75, 1.0), uint2(1, 1)); }\n", nil, &e);
+    id<MTLFunction> fn = t4_fn(lib, @"k");
+    id<MTLComputePipelineState> p = fn ? t4_cps(fn, &e) : nil;
     CHECK(p != nil, "image kernel compiled");
     if (!p) return;
     id<MTLBuffer> ob = [g_dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> c = [cb computeCommandEncoder];
-    [c setComputePipelineState:p]; [c setTexture:image atIndex:0]; [c setTexture:sampled atIndex:1]; [c setBuffer:ob offset:0 atIndex:0];
-    [c dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [c endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    CHECK(cb.status == MTLCommandBufferStatusCompleted, "image kernel completed");
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> c = t4_compute(cb);
+    [c setComputePipelineState:p]; t4_tex(cb, c, T4_CS, image, 0); t4_tex(cb, c, T4_CS, sampled, 1); t4_buf(cb, c, T4_CS, ob, 0, 0);
+    [c dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; t4_end(cb, c); t4_wait(cb);
+    CHECK(cb->status == MTLCommandBufferStatusCompleted, "image kernel completed");
     memcpy(out, ob.contents, 32);
 }
 static void srgb_case(int fmt, int bgra, uint64_t serial, int tid) { @autoreleasepool {
@@ -47,9 +48,9 @@ static void srgb_case(int fmt, int bgra, uint64_t serial, int tid) { @autoreleas
     { id<MTLBuffer> sb = [g_dev newBufferWithBytes:seed length:64 options:MTLResourceStorageModeShared];
       CHECK(sb != nil, "seed buffer made");
       if (!sb) return;
-      id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
-      [b copyFromBuffer:sb sourceOffset:0 sourceBytesPerRow:16 sourceBytesPerImage:64 sourceSize:MTLSizeMake(4, 4, 1) toTexture:base destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
-      [b endEncoding]; [cb commit]; [cb waitUntilCompleted]; }
+      T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> b = t4_copy(cb);
+      t4_use(cb, sb), t4_use(cb, base), [b copyFromBuffer:sb sourceOffset:0 sourceBytesPerRow:16 sourceBytesPerImage:64 sourceSize:MTLSizeMake(4, 4, 1) toTexture:base destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+      t4_end(cb, b); t4_wait(cb); }
     mtl_reg_tex(tid, &texture, NULL); mtl_reg_image(tid + 1, &texture, NULL);
     NvProg *program = [NvProg new]; NvShader *shader = [NvShader new]; program->sh[5] = shader;
     shader->rf.nb = 1; shader->rf.b[0] = (nvn_rbind){.kind = NVN_RB_IMG, .dtt = MTLTextureType2D, .dpf = NVN_DPF_FLOAT, .reg = 0, .rw = 1};

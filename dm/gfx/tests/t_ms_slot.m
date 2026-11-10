@@ -2,6 +2,7 @@
 // through texture2d_ms: Super Monkey Ball Banana Rumble reported the multisample depth bound there as a type mismatch), and the dummy of an unbound multisample slot
 // is a multisample texture that reads 0, which Metal accepts in that argument (a 2D dummy is not).
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -36,17 +37,17 @@ int main(void) { @autoreleasepool {
     NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
         "kernel void rd(texture2d_ms<float> a [[texture(0)]], texture2d_ms<uint> b [[texture(1)]], depth2d_ms<float> c [[texture(2)]], device float4* out [[buffer(0)]]) {"
         " float4 v = a.read(uint2(0), 0) + float4(b.read(uint2(0), 3)) + float4(c.read(uint2(0), 1)); out[0] = v; }\n";
-    id<MTLLibrary> library = [g_dev newLibraryWithSource:source options:nil error:&error];
+    id<MTLLibrary> library = t4_lib(source, nil, &error);
     if (!library) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
-    id<MTLComputePipelineState> pipeline = [g_dev newComputePipelineStateWithFunction:[library newFunctionWithName:@"rd"] error:&error];
+    id<MTLComputePipelineState> pipeline = t4_cps(t4_fn(library, @"rd"), &error);
     if (!pipeline) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
     id<MTLBuffer> output = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared]; memset(output.contents, 0xcd, 16);
-    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_compute(cb);
     [e setComputePipelineState:pipeline];
-    [e setTexture:dummy_tex(MTLTextureType2DMultisample, NVN_DPF_FLOAT) atIndex:0]; [e setTexture:dummy_tex(MTLTextureType2DMultisample, NVN_DPF_UINT) atIndex:1];
-    [e setTexture:dummy_tex(MTLTextureType2DMultisample, NVN_DPF_DEPTH) atIndex:2]; [e setBuffer:output offset:0 atIndex:0];
-    [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    CHECK(cb.status == MTLCommandBufferStatusCompleted && !cb.error, "the GPU accepts the multisample dummies in multisample arguments");
+    t4_tex(cb, e, T4_CS, dummy_tex(MTLTextureType2DMultisample, NVN_DPF_FLOAT), 0); t4_tex(cb, e, T4_CS, dummy_tex(MTLTextureType2DMultisample, NVN_DPF_UINT), 1);
+    t4_tex(cb, e, T4_CS, dummy_tex(MTLTextureType2DMultisample, NVN_DPF_DEPTH), 2); t4_buf(cb, e, T4_CS, output, 0, 0);
+    [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; t4_end(cb, e); t4_wait(cb);
+    CHECK(cb->status == MTLCommandBufferStatusCompleted, "the GPU accepts the multisample dummies in multisample arguments");
     const float *v = output.contents;
     CHECK(v[0] == 0 && v[1] == 0 && v[2] == 0 && v[3] == 0, "every sample of the multisample dummies reads 0");
     printf("multisample slots: %d checks, %d failed\n", checks, failed); return failed != 0;

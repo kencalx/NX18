@@ -1,6 +1,7 @@
 // Both production Depth16Unorm clear paths must store the same depth as a fragment. Use NVN's float inputs, including half-bin boundaries and their neighboring floats.
 // Expectations come from the GPU's fragment writes; count raw load-clear differences for comparison without requiring a particular GPU's unadjusted conversion.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -47,15 +48,15 @@ int main(void) { @autoreleasepool {
     if (!dev) { puts("t_depth16_clear: no Metal device, skipped"); return 0; }
     mtl_init(); dev = g_dev;
     NSError *err = nil;
-    id<MTLLibrary> lib = [dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> lib = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "struct V { float4 p [[position]]; };\n"
         "vertex V vs(uint i [[vertex_id]]) { float2 q = float2((i << 1) & 2, i & 2); return { float4(q * 2 - 1, 0, 1) }; }\n"
         "struct F { float d [[depth(any)]]; };\n"
-        "fragment F fs(constant float &d [[buffer(0)]]) { return { d }; }\n" options:nil error:&err];
+        "fragment F fs(constant float &d [[buffer(0)]]) { return { d }; }\n", nil, &err);
     if (!lib) { printf("t_depth16_clear: shader compile failed: %s\n", err.localizedDescription.UTF8String); return 1; }
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
-    pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"]; pd.depthAttachmentPixelFormat = MTLPixelFormatDepth16Unorm;
-    id<MTLRenderPipelineState> ps = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+    pd.vertexFunction = t4_fn(lib, @"vs"); pd.fragmentFunction = t4_fn(lib, @"fs"); pd.depthAttachmentPixelFormat = MTLPixelFormatDepth16Unorm;
+    id<MTLRenderPipelineState> ps = t4_rps(pd, &err);
     MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = YES;
     id<MTLDepthStencilState> ds = [dev newDepthStencilStateWithDescriptor:dd];
     if (!ps || !ds) { printf("t_depth16_clear: pipeline failed: %s\n", err.localizedDescription.UTF8String); return 1; }
@@ -76,26 +77,25 @@ int main(void) { @autoreleasepool {
     id<MTLTexture> tex[4] = {[dev newTextureWithDescriptor:td], [dev newTextureWithDescriptor:td], [dev newTextureWithDescriptor:td], [dev newTextureWithDescriptor:td]};   // fragment, ClearDepthStencil, raw clear, ClearTexture
     id<MTLBuffer> out = [dev newBufferWithLength:(size_t)4 * N * W * H * 2 options:MTLResourceStorageModeShared];
     if (!tex[0] || !tex[1] || !tex[2] || !tex[3] || !out) { puts("t_depth16_clear: resource allocation failed"); return 1; }
-    id<MTLCommandQueue> q = [dev newCommandQueue];
-    id<MTLCommandBuffer> cb = [q commandBuffer];
+    T4 *cb = t4_begin();
     for (int i = 0; i < N; i++) for (int k = 0; k < 3; k += 2) {
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.depthAttachment.texture = tex[k]; rp.depthAttachment.slice = (NSUInteger)i; rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.storeAction = MTLStoreActionStore;
         rp.depthAttachment.clearDepth = k == 0 ? 1.0 : depth[i];
-        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
-        if (k == 0) { float d = (float)depth[i]; [e setRenderPipelineState:ps]; [e setDepthStencilState:ds]; [e setFragmentBytes:&d length:4 atIndex:0]; [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; }
-        [e endEncoding];
+        id<MTL4RenderCommandEncoder> e = t4_pass(cb, rp);
+        if (k == 0) { float d = (float)depth[i]; [e setRenderPipelineState:ps]; [e setDepthStencilState:ds]; t4_bytes(cb, e, T4_FS, &d, 4, 0); [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; }
+        t4_end(cb, e);
     }
-    [cb commit]; [cb waitUntilCompleted];
-    if (cb.error) { printf("t_depth16_clear: reference command buffer failed: %s\n", cb.error.localizedDescription.UTF8String); return 1; }
+    t4_wait(cb);
+    if (cb->status != MTLCommandBufferStatusCompleted) { printf("t_depth16_clear: reference command buffer failed\n"); return 1; }
     if (production_clears(tex[1], tex[3], depth, N)) { puts("t_depth16_clear: production clear failed"); return 1; }
-    cb = [q commandBuffer];
-    id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+    cb = t4_begin();
+    id<MTL4ComputeCommandEncoder> b = t4_copy(cb);
     for (int k = 0; k < 4; k++) for (int i = 0; i < N; i++)
         [b copyFromTexture:tex[k] sourceSlice:(NSUInteger)i sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, H, 1)
                   toBuffer:out destinationOffset:((size_t)k * N + i) * W * H * 2 destinationBytesPerRow:W * 2 destinationBytesPerImage:W * H * 2];
-    [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    if (cb.error) { printf("t_depth16_clear: command buffer failed: %s\n", cb.error.localizedDescription.UTF8String); return 1; }
+    t4_end(cb, b); t4_wait(cb);
+    if (cb->status != MTLCommandBufferStatusCompleted) { printf("t_depth16_clear: command buffer failed\n"); return 1; }
     const uint16_t *v = out.contents;
     int fail[2] = {0}, raw_off = 0;
     for (int i = 0; i < N; i++) {

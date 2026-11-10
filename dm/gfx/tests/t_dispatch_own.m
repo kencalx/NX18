@@ -1,5 +1,6 @@
 // A compute binding's format-view upgrade must finish before its dispatch.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -11,14 +12,14 @@ static int checks, failed;
 int main(void) { @autoreleasepool {
     mtl_init();
     NSError *error = nil;
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+    id<MTLLibrary> lib = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "struct Args { texture2d<uint, access::read> src [[id(0)]]; device uint *out [[id(1)]]; constant uint *c0 [[id(2)]]; };\n"
         "kernel void copy_pixel(constant Args &a [[buffer(0)]], uint3 p [[thread_position_in_grid]], uint3 n [[threadgroups_per_grid]]) {\n"
         " uint i = 4 * ((p.z * n.y + p.y) * n.x + p.x); a.out[i] = a.src.read(uint2(0)).r;\n"
-        " for (uint j = 0; j < 3; ++j) a.out[i + j + 1] = a.c0[0x200 / 4 + j]; }\n" options:nil error:&error];
+        " for (uint j = 0; j < 3; ++j) a.out[i + j + 1] = a.c0[0x200 / 4 + j]; }\n", nil, &error);
     CHECK(lib != nil, "synthetic compute shader compiles"); if (!lib) return 1;
     prog_t pg = {.serial=960001}; NvProg *program = [NvProg new]; NvShader *cs = [NvShader new];
-    program->sh[5] = cs; cs->stage = 5; cs->fn = [lib newFunctionWithName:@"copy_pixel"];
+    program->sh[5] = cs; cs->stage = 5; cs->fn = t4_fn(lib, @"copy_pixel");
     cs->arg_len = [cs->fn newArgumentEncoderWithBufferIndex:0].encodedLength;
     cs->rf.tg[0] = cs->rf.tg[1] = cs->rf.tg[2] = 1;
     cs->rf.nb = 3; cs->rf.drv_read[0] = 1;
@@ -38,11 +39,11 @@ int main(void) { @autoreleasepool {
         nvn_tex_layout(&texture.d, &texture.L); mtl_tex_init(&texture);
         id<MTLTexture> old = tex_mtl(&texture);
         CHECK(old && !(old.usage & MTLTextureUsagePixelFormatView), "source needs a format-view upgrade");
-        id<MTLCommandBuffer> seed = q_cb(); MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        T4 *seed = t4_begin(); MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = old; rp.colorAttachments[0].loadAction = MTLLoadActionClear;
         rp.colorAttachments[0].storeAction = MTLStoreActionStore; rp.colorAttachments[0].clearColor = MTLClearColorMake(1,0,0,1);
-        [[seed renderCommandEncoderWithDescriptor:rp] endEncoding]; [seed commit]; [seed waitUntilCompleted];
-        CHECK(seed.status == MTLCommandBufferStatusCompleted, "source pixels seeded");
+        t4_end(seed, t4_pass(seed, rp)); t4_wait(seed);
+        CHECK(seed->status == MTLCommandBufferStatusCompleted, "source pixels seeded");
         view_t view = {.set_format=1, .format=NVN_FORMAT_RGBA8UI}; mtl_reg_tex(601 + indirect, &texture, &view);
         for (int warm = 0; warm < 2; warm++) {
             uint32_t counts[3] = {warm ? 2 : 3, warm ? 1 : 2, warm ? 2 : 1};

@@ -2,6 +2,7 @@
 // layers and swizzle. Metal takes a view's residency from the texture it was made from: a view of a view read as not resident (shader validation) although the texture under both was
 // in the residency set (Breath of the Wild's 64x64 cube read from a 2D-array view, found with nvn_replay)
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -13,10 +14,10 @@ enum { W = 8, LEVELS = 3, LAYERS = 4, TID = 5, CUBE_LAYERS = 12, CUBE_CA = 6, CU
 static uint8_t texel(NSUInteger level, NSUInteger layer, int c) { return (uint8_t)(64 * level + 4 * layer + c + 1); }   // every level, layer and channel its own value
 static void read_args(id<MTLComputePipelineState> pipeline, id<MTLTexture> t, const void *args, size_t n, float out[4]) {
     id<MTLBuffer> b = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared]; memset(b.contents, 0xcd, 16);
-    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
-    [e setComputePipelineState:pipeline]; [e setTexture:t atIndex:0]; [e setBytes:args length:n atIndex:0]; [e setBuffer:b offset:0 atIndex:1];
-    [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    CHECK(cb.status == MTLCommandBufferStatusCompleted && !cb.error, "the GPU reads the fitted view");
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_compute(cb);
+    [e setComputePipelineState:pipeline]; t4_tex(cb, e, T4_CS, t, 0); t4_bytes(cb, e, T4_CS, args, n, 0); t4_buf(cb, e, T4_CS, b, 0, 1);
+    [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; t4_end(cb, e); t4_wait(cb);
+    CHECK(cb->status == MTLCommandBufferStatusCompleted, "the GPU reads the fitted view");
     memcpy(out, b.contents, 16);
 }
 static void read2d(id<MTLComputePipelineState> pipeline, id<MTLTexture> t, uint32_t level, float out[4]) { read_args(pipeline, t, &level, sizeof level, out); }
@@ -25,7 +26,7 @@ static int same(const float v[4], NSUInteger level, NSUInteger layer, const int 
     return 1;
 }
 static id<MTLComputePipelineState> pipeline_of(id<MTLLibrary> library, NSString *name) {
-    NSError *error = nil; id<MTLComputePipelineState> p = [g_dev newComputePipelineStateWithFunction:[library newFunctionWithName:name] error:&error];
+    NSError *error = nil; id<MTLComputePipelineState> p = t4_cps(t4_fn(library, name), &error);
     if (!p) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); exit(2); }
     return p;
 }
@@ -72,7 +73,7 @@ int main(void) { @autoreleasepool {
         "kernel void rd_2a(texture2d_array<float> t [[texture(0)]], constant uint2& a [[buffer(0)]], device float4* out [[buffer(1)]]) { out[0] = t.read(uint2(0, 0), a.x, a.y); }\n"
         "kernel void rd_ca(texturecube_array<float> t [[texture(0)]], constant float4& a [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(filter::nearest); out[0] = t.sample(s, a.xyz, 0, level(a.w)); }\n"
         "kernel void rd_c(texturecube<float> t [[texture(0)]], constant float4& a [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(filter::nearest); out[0] = t.sample(s, a.xyz, level(a.w)); }\n";
-    id<MTLLibrary> library = [g_dev newLibraryWithSource:source options:nil error:&error];
+    id<MTLLibrary> library = t4_lib(source, nil, &error);
     if (!library) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
     id<MTLComputePipelineState> pipeline = pipeline_of(library, @"rd");
     id<MTLTexture> root = layered_root(LAYERS);

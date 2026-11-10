@@ -3,6 +3,7 @@
 // texture; so does a texture of a type that has no stand-in and an unwritten render target. A read makes the texture and lets the stand-in go, as does another registration.
 // DM_NVN_POOL_STANDIN=0: the dummy everywhere, as before
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -45,11 +46,11 @@ static id<MTLBuffer> level_of(id<MTLTexture> t, unsigned level, unsigned slice, 
     if (!t || level >= t.mipmapLevelCount || slice >= t.arrayLength) return nil;
     id<MTLBuffer> b = [g_dev newBufferWithLength:n options:MTLResourceStorageModeShared];
     if (!b) return nil;
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
-    [bl copyFromTexture:t sourceSlice:slice sourceLevel:level sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(MAX(t.width >> level, 1u), MAX(t.height >> level, 1u), 1)
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> bl = t4_copy(cb);
+    t4_use(cb, t), t4_use(cb, b), [bl copyFromTexture:t sourceSlice:slice sourceLevel:level sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(MAX(t.width >> level, 1u), MAX(t.height >> level, 1u), 1)
                toBuffer:b destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:n];
-    [bl endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    return cb.status == MTLCommandBufferStatusCompleted ? b : nil;
+    t4_end(cb, bl); t4_wait(cb);
+    return cb->status == MTLCommandBufferStatusCompleted ? b : nil;
 }
 static int layer_is(id<MTLTexture> t, unsigned level, unsigned slice, size_t n, size_t row, uint8_t v) {   // every byte v
     id<MTLBuffer> b = level_of(t, level, slice, n, row); if (!b) return 0;

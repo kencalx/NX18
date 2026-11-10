@@ -7,6 +7,7 @@
 // slot (the last freed with =256), and tiles past the first heap land in the second at slots that still read back right.
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 #undef nvn_game_fps
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
@@ -31,9 +32,9 @@ static void map_at(uint64_t voff, uint64_t size, uint64_t poff, int mapped) {
 static int same(id<MTLTexture> m, unsigned level, unsigned x, unsigned y, unsigned w, unsigned h, const uint32_t *lin, unsigned stride) {
     id<MTLBuffer> rb = [g_dev newBufferWithLength:(size_t)w * h * 4 options:MTLResourceStorageModeShared];
     if (!rb) { fprintf(stderr, "readback buffer did not allocate\n"); return 0; }
-    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> ce = [cb blitCommandEncoder];
-    [ce copyFromTexture:m sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(x, y, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:(NSUInteger)w * h * 4];
-    [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_copy(cb);
+    t4_use(cb, m), t4_use(cb, rb), [ce copyFromTexture:m sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(x, y, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:(NSUInteger)w * h * 4];
+    t4_end(cb, ce); t4_wait(cb);
     const uint32_t *got = rb.contents;
     for (unsigned r = 0; r < h; r++) if (memcmp(got + (size_t)r * w, lin + (size_t)(y + r) * stride + x, (size_t)w * 4)) return 0;
     return 1;
@@ -162,7 +163,7 @@ int main(void) { @autoreleasepool {
     map_at(9 * TILE, TILE, 28 * TILE, 1); (void)resolve(&tx);
     {   void *bu = NULL; uint64_t off = 0; CHECK("the pool's buffer", mtl_addr((uint64_t)(uintptr_t)(phys + 28 * TILE), TILE, &bu, &off));
         id<MTLBuffer> dst = (__bridge id<MTLBuffer>)bu, src = [g_dev newBufferWithBytes:store + TILE length:TILE options:MTLResourceStorageModeShared];
-        id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> ce = [cb blitCommandEncoder]; [ce copyFromBuffer:src sourceOffset:0 toBuffer:dst destinationOffset:off size:TILE]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted]; }
+        T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> ce = t4_copy(cb); t4_use(cb, src), t4_use(cb, dst), [ce copyFromBuffer:src sourceOffset:0 toBuffer:dst destinationOffset:off size:TILE]; t4_end(cb, ce); t4_wait(cb); }
     map_at(10 * TILE, TILE, 28 * TILE, 1); (void)resolve(&tx);
     CHECK("a new place reads what the GPU wrote to the memory", same_at(m, 10 * TW, 0, TW, TW, lin[0], W, TW, 0));
     CHECK("and the place already there", same_at(m, 9 * TW, 0, TW, TW, lin[0], W, TW, 0));

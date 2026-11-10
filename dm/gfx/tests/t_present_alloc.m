@@ -1,6 +1,7 @@
 // Display-link presents with the GPU held back: a present must not reset a command allocator whose own present has not run yet. Real Metal 4 queue and offscreen
 // drawables; the link's callback is called by hand (no window, no game files). Two cases: a dropped frame (two presents in flight) and one frame per tick (three in flight).
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 @interface FakeLinkUpdate : NSObject
 @property id<CAMetalDrawable> drawable;
 @property CFTimeInterval targetPresentationTimestamp;
@@ -63,10 +64,10 @@ static void reuse_case(id<CAMetalDrawable> dr, id<MTLSharedEvent> gate, uint64_t
 }
 static int bad_pixels(id<MTLTexture> t, uint8_t left, uint8_t right) {
     id<MTLBuffer> out = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
-    [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(8, 8, 1)
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> b = t4_copy(cb);
+    t4_use(cb, t), t4_use(cb, out), [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(8, 8, 1)
         toBuffer:out destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:256];
-    [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    t4_end(cb, b); t4_wait(cb);
     const uint8_t *p = out.contents; int bad = 0;
     for (int i = 0; i < 64; i++) { uint8_t v = i % 8 < 4 ? left : right; bad += p[4 * i] != v || p[4 * i + 1] != v || p[4 * i + 2] != v; }
     if (bad) { printf("first row:"); for (int i = 0; i < 8; i++) printf(" %u", p[4 * i]); printf(" (want %u x4, %u x4)\n", left, right); }

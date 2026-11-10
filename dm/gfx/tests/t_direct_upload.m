@@ -1,6 +1,7 @@
 // Production RGBA16F array uploads: compare every component bit, including
 // half-float NaN payloads, across mips, faces, reuploads and spare reuse.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -39,11 +40,11 @@ static void run(int target,unsigned width,unsigned height,unsigned layers,unsign
             id<MTLTexture> control=[g_dev newTextureWithDescriptor:tex_desc(&initial,0)];res_add(control);uint64_t n=g_direct_uploads;
             mtl_sub_begin();CHECK("initial fill retains its original texture",tex_init_fill(&initial,control));finish();CHECK("initial fill does not require new write/view usage",g_direct_uploads==n);defer_obj_release(control);
         }
-        memset(readback.contents,0xcd,readback.length);id<MTLCommandBuffer> cb=q_cb();id<MTLBlitCommandEncoder> ce=[cb blitCommandEncoder];off=0;
+        memset(readback.contents,0xcd,readback.length);T4 *cb = t4_begin();id<MTL4ComputeCommandEncoder> ce=t4_copy(cb);off=0;
         for(unsigned l=0;l<levels;l++)for(unsigned a=0;a<layers;a++) {
-            unsigned w=MAX(width>>l,1u),h=MAX(height>>l,1u);[ce copyFromTexture:image sourceSlice:a sourceLevel:l sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(w,h,1) toBuffer:readback destinationOffset:256+off destinationBytesPerRow:w*8 destinationBytesPerImage:w*h*8];off+=(size_t)w*h*8;
+            unsigned w=MAX(width>>l,1u),h=MAX(height>>l,1u);t4_use(cb, image), t4_use(cb, readback), [ce copyFromTexture:image sourceSlice:a sourceLevel:l sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(w,h,1) toBuffer:readback destinationOffset:256+off destinationBytesPerRow:w*8 destinationBytesPerImage:w*h*8];off+=(size_t)w*h*8;
         }
-        [ce endEncoding];[cb commit];[cb waitUntilCompleted];CHECK("all-mip readback completes",cb.status==MTLCommandBufferStatusCompleted);
+        t4_end(cb, ce);t4_wait(cb);CHECK("all-mip readback completes",cb->status==MTLCommandBufferStatusCompleted);
         CHECK("all face/mip component bits match CPU reference",!memcmp((uint8_t*)readback.contents+256,expected,bytes));
         CHECK("readback prefix guard",((uint8_t*)readback.contents)[255]==0xcd);CHECK("readback suffix guard",((uint8_t*)readback.contents)[256+bytes]==0xcd);
         uint64_t reuploads=g_pkg_reuploads;mtl_sub_begin();CHECK("unchanged storage reuses its image",tex_mtl(&t)==image);finish();CHECK("unchanged storage is not reuploaded",g_pkg_reuploads==reuploads);

@@ -1,6 +1,8 @@
 // Float32 attributes with fewer than four components must pad w with float 1
 // even when translation declares an integer input and bitcasts it back to float.
 #include "../nvn/nvn_mtl.m"
+#define T4_STANDALONE   // no mtl_init: the fixture's own device, queue and residency set
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -9,8 +11,8 @@ uint64_t now_ns(void) { return bp_now(); }
 int main(void) { @autoreleasepool {
     id<MTLDevice> dev=MTLCreateSystemDefaultDevice(); if (!dev) return 2;
     NSString *src=@"#include <metal_stdlib>\nusing namespace metal;\nstruct U { uint4 a [[attribute(0)]]; float4 f [[attribute(16)]]; };\nstruct I { int4 a [[attribute(0)]]; float4 f [[attribute(16)]]; };\nvertex void vu(U in [[stage_in]], device uint4 *o [[buffer(1)]]) { *o=in.a|as_type<uint4>(in.f); }\nvertex void vi(I in [[stage_in]], device uint4 *o [[buffer(1)]]) { *o=as_type<uint4>(in.a)|as_type<uint4>(in.f); }\n";
-    NSError *err=nil; id<MTLLibrary> lib=[dev newLibraryWithSource:src options:nil error:&err]; if (!lib) { puts(err.localizedDescription.UTF8String); return 2; }
-    id<MTLCommandQueue> q=[dev newCommandQueue]; float data[4]={-1,3,0.5,1};
+    NSError *err=nil; id<MTLLibrary> lib=t4_lib(src, nil, &err); if (!lib) { puts(err.localizedDescription.UTF8String); return 2; }
+    float data[4]={-1,3,0.5,1};
     id<MTLBuffer> vb=[dev newBufferWithBytes:data length:sizeof data options:MTLResourceStorageModeShared];
     id<MTLBuffer> zero=[dev newBufferWithLength:16 options:MTLResourceStorageModeShared], out=[dev newBufferWithLength:16 options:MTLResourceStorageModeShared]; memset(zero.contents,0,16);
     int failed=0, checks=0; int formats[]={0x0a,0x16,0x22,0x2e};
@@ -22,12 +24,12 @@ int main(void) { @autoreleasepool {
         vd.attributes[16].format=MTLVertexFormatFloat4; vd.attributes[16].bufferIndex=30;
         vd.attributes[loc].format=routed==NVN_CT_FLOAT?vfmt(formats[n-1]):vfmt_for_ct(vfmt(formats[n-1]),ct,formats[n-1]); vd.attributes[loc].bufferIndex=2;
         vd.layouts[2].stride=n*4; vd.layouts[30].stride=16; vd.layouts[30].stepFunction=MTLVertexStepFunctionConstant; vd.layouts[30].stepRate=0;
-        MTLRenderPipelineDescriptor *pd=[MTLRenderPipelineDescriptor new]; pd.vertexFunction=[lib newFunctionWithName:sign?@"vi":@"vu"]; pd.vertexDescriptor=vd; pd.rasterizationEnabled=NO;
-        id<MTLRenderPipelineState> ps=[dev newRenderPipelineStateWithDescriptor:pd error:&err]; if (!ps) { puts(err.localizedDescription.UTF8String); return 2; }
+        MTLRenderPipelineDescriptor *pd=[MTLRenderPipelineDescriptor new]; pd.vertexFunction=t4_fn(lib, sign?@"vi":@"vu"); pd.vertexDescriptor=vd; pd.rasterizationEnabled=NO;
+        id<MTLRenderPipelineState> ps=t4_rps(pd, &err); if (!ps) { puts(err.localizedDescription.UTF8String); return 2; }
         MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor]; rp.renderTargetWidth=rp.renderTargetHeight=1; rp.defaultRasterSampleCount=1;
         memset(out.contents,0xEE,16);
-        id<MTLCommandBuffer> cb=[q commandBuffer]; id<MTLRenderCommandEncoder> en=[cb renderCommandEncoderWithDescriptor:rp]; [en setRenderPipelineState:ps]; [en setVertexBuffer:out offset:0 atIndex:1]; [en setVertexBuffer:vb offset:0 atIndex:2]; [en setVertexBuffer:zero offset:0 atIndex:30]; [en drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:1]; [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        if (cb.status!=MTLCommandBufferStatusCompleted || cb.error) { printf("GPU command failed: %s\n",cb.error.localizedDescription.UTF8String); return 2; }
+        T4 *cb = t4_begin(); id<MTL4RenderCommandEncoder> en=t4_pass(cb, rp); [en setRenderPipelineState:ps]; t4_buf(cb, en, T4_VS, out, 0, 1); t4_buf(cb, en, T4_VS, vb, 0, 2); t4_buf(cb, en, T4_VS, zero, 0, 30); [en drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:1]; t4_end(cb, en); t4_wait(cb);
+        if (cb->status!=MTLCommandBufferStatusCompleted) { printf("GPU command failed\n"); return 2; }
         uint32_t expected[4]={0,0,0,0x3f800000}; memcpy(expected,data,n*4);
         checks++; if (memcmp(out.contents,expected,16)) { failed++; printf("FAIL Float%d -> %s4 w=%#x expected float1=%#x\n",n,sign?"int":"uint",((uint32_t*)out.contents)[3],expected[3]); }
         pso_key k={0}; k.attr[0].fmt=formats[n-1]; float expanded[4]={0};
