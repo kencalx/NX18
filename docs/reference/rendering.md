@@ -278,9 +278,10 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`); the Vulkan and OpenGL layers were 
 
 ### Sampler LOD bias
 
-- **Symptom:** textures a mip level sharper or blurrier than on the Switch where the game biases its sampler; in the Vulkan layer, a red line `sampler LOD bias … not implemented`.
+- **Note:** the Vulkan layer was removed in release 1 (in git at `93c34371`); its half of this entry (`vkCreateSampler`, the red line) is history, the NVN half still applies.
+- **Symptom:** textures a mip level sharper or blurrier than on the Switch where the game biases its sampler; in the Vulkan layer (removed in release 1; history), a red line `sampler LOD bias … not implemented`.
 - **Cause:** the host kept NVN's `SamplerBuilderSetLodBias` and Vulkan's `mipLodBias` but never gave them to Metal, taking them for something Metal samplers lack. Metal 26 has `MTLSamplerDescriptor.lodBias` (range −16 to 15.99).
-- **Fix:** `samp_by_id` (NVN) and `vkCreateSampler` set it, clamped to that range (Vulkan to the ±15 the device reports as `maxSamplerLodBias`).
+- **Fix:** `samp_by_id` (NVN) sets it, clamped to that range; the Vulkan layer's `vkCreateSampler` did too, until release 1 removed it (clamped to the ±15 the device reported as `maxSamplerLodBias`).
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md) (the Vulkan red line). MacNativeGames uses the property for its own MetalFX bias, which pointed to it.
 
 ### Border colours Metal has no sampler state for
@@ -1506,7 +1507,7 @@ NX 18 release 1 is Metal 4 only and renders NVN games only. The Vulkan layer (`d
 
 ### Telling a GL game from an NVN or Vulkan one
 
-- **Symptom:** the NSP script's provisional profile said Vulkan, and the capture boot crashed in the GL layer.
+- **Symptom:** (GL layer, removed in release 1; history) the NSP script's provisional profile said Vulkan, and the capture boot crashed in the GL layer.
 - **Cause:** `main` imports `vkGetInstanceProcAddr` for SDL's Vulkan loader, which nothing uses; the game draws with EGL and GL.
 - **Fix:** `profile_guess.py` decides `graphics gl` when `main` imports `eglCreateWindowSurface` and names `glShaderSource`, and now leaves `vkGetInstanceProcAddr` out of its Vulkan count.
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md): `main` imports `nvnBootstrapLoader` and 13 EGL functions. Its graphics setup (`main+0x5ed8f0`) makes an NVN device first, which only a helper beside the movie player uses (`main+0x528000`–`+0x52c400`: a memory pool and four textures next to the movie's GL textures). Then `eglGetDisplay`, `eglBindAPI(EGL_OPENGL_API)`, a 4.5 core context, a window surface on `vi::CreateLayer(w, h)` and a glad loader (`main+0x52c460`). Of the 22 games extracted here (at the time), only Digimon matches the rule. [Balatro](../../dm/games/0100CD801CE5E000/README.md) (SDK 18.3.2, LÖVE 11.4 on OpenGL with SDL and LuaJIT; one boot): `main` imports the EGL functions and `vkGetInstanceProcAddr`, SDL's Vulkan loader, which nothing calls (`subsdk1` is NVIDIA's Vulkan driver); Hades and both Galaxies import 99 or 100 Vulkan functions, `vkCreateInstance` among them.

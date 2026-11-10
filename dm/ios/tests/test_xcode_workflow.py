@@ -131,7 +131,7 @@ class BuildEnvFileTests(unittest.TestCase):
 
 
 class ResourceStagingTests(unittest.TestCase):
-    def test_nvn_vulkan_gl_and_incremental_cleanup(self):
+    def test_nvn_incremental_cleanup_and_vulkan_gl_stop(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve() / "Game's $ literal `ticks`"
             ios, romfs, shaders, aoc = [root / name for name in ('xcode', 'romfs', 'shaders', 'aoc')]
@@ -141,12 +141,12 @@ class ResourceStagingTests(unittest.TestCase):
             (romfs / 'marker').write_text('game')
             (aoc / '1/content').write_text('dlc')
             chain_h = root / 'dmsh_chain.h'
-            chain_h.write_text('#define DMSH_CHAIN "fixture"\n')
             app = root / 'products/DmIOS.app'
             environment = dict(os.environ, SRCROOT=str(ios), TARGET_BUILD_DIR=str(app.parent),
                                UNLOCALIZED_RESOURCES_FOLDER_PATH=app.name, PLATFORM_NAME='iphoneos')
-            for chain in ('b-fixture', 'vk', 'gl'):
+            for chain in ('b-older', 'b-fixture'):   # a later chain's libraries replace the earlier one's
                 with self.subTest(chain=chain):
+                    chain_h.write_text(f'#define DMSH_CHAIN "{chain[2:]}"\n')
                     shader = shaders / chain
                     shader.mkdir(parents=True)
                     (shader / 'fixture.metallib').write_text(chain)
@@ -160,11 +160,29 @@ class ResourceStagingTests(unittest.TestCase):
                     self.assertEqual((app / 'msl' / chain / 'fixture.metallib').read_text(), chain)
                     self.assertEqual([p.name for p in (app / 'msl').iterdir()], [chain])
                     self.assertEqual((app / 'aoc/1/content').read_text(), 'dlc')
+            # A project prepared for a Vulkan or OpenGL game (msl/vk, msl/gl) before NX 18 release 1 removed those layers: stop before copying anything
+            for chain in ('vk', 'gl'):
+                with self.subTest(chain=chain):
+                    shader = shaders / chain
+                    shader.mkdir(parents=True)
+                    (shader / 'fixture.metallib').write_text(chain)
+                    arguments = ['gen_resources.py', str(ios), str(romfs), 'marker', str(shader), chain, str(aoc), str(root / 'dd'), str(chain_h)]
+                    with patch.object(sys, 'argv', arguments):
+                        gen_resources.main()
+                    result = subprocess.run(['bash', str(REPO / 'dm/ios/tools/stage_resources.sh')],
+                                            env=environment, capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f'The prepared shaders are {chain}', result.stderr)
+                    self.assertIn('NVN games only', result.stderr); self.assertIn('prepare the game again', result.stderr)
+                    self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-fixture'])
+            arguments = ['gen_resources.py', str(ios), str(romfs), 'marker', str(shaders / 'b-fixture'), 'b-fixture', str(aoc), str(root / 'dd'), str(chain_h)]
+            with patch.object(sys, 'argv', arguments):
+                gen_resources.main()
             # Quick reinstalls omit only RomFS, including removing an old bundled copy; restoring the default stages it again.
             environment['DM_COPY_ROMFS'] = 'NO'
             result = subprocess.run(['bash', str(REPO / 'dm/ios/tools/stage_resources.sh')], env=environment, capture_output=True)
             self.assertEqual(result.returncode, 0); self.assertFalse((app / 'romfs').exists())
-            self.assertTrue((app / 'msl/gl/fixture.metallib').is_file()); self.assertTrue((app / 'aoc/1/content').is_file())
+            self.assertTrue((app / 'msl/b-fixture/fixture.metallib').is_file()); self.assertTrue((app / 'aoc/1/content').is_file())
             environment.pop('DM_COPY_ROMFS')
             result = subprocess.run(['bash', str(REPO / 'dm/ios/tools/stage_resources.sh')], env=environment, capture_output=True)
             self.assertEqual(result.returncode, 0); self.assertEqual((app / 'romfs/marker').read_text(), 'game')
@@ -177,14 +195,14 @@ class ResourceStagingTests(unittest.TestCase):
                                     env=environment, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('prepare the game again', result.stderr)
-            self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['gl'])
+            self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-fixture'])
             # A disconnected drive fails before deleting the last good app's resources.
             (romfs / 'marker').unlink()
             result = subprocess.run(['bash', str(REPO / 'dm/ios/tools/stage_resources.sh')],
                                     env=environment, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue((app / 'romfs/marker').exists())
-            self.assertTrue((app / 'msl/gl/fixture.metallib').exists())
+            self.assertTrue((app / 'msl/b-fixture/fixture.metallib').exists())
             # Unsigned IPA mode bypasses staging even without a device or mounted data.
             environment.update(DM_COPY_GAME_RESOURCES='NO', PLATFORM_NAME='iphonesimulator')
             result = subprocess.run(['bash', str(REPO / 'dm/ios/tools/stage_resources.sh')], env=environment)
@@ -226,8 +244,9 @@ class ImageStaging(unittest.TestCase):
             (ios / 'Gen/dm.xcconfig').touch()
             source = root / 'source'; source.mkdir(); (source / 'marker').write_text('resource')
             image = root / 'RomFS.img'; romfs_image.pack(source, image)
-            shader = root / 'shaders/gl'; shader.mkdir(parents=True); (shader / 'k.metallib').touch()
-            with patch.object(sys, 'argv', ['gen_resources.py', str(ios), str(image), 'marker', str(shader), 'gl', '', str(root / 'dd'), 'unused']):
+            shader = root / 'shaders/b-fixture'; shader.mkdir(parents=True); (shader / 'k.metallib').touch()
+            header = root / 'dmsh_chain.h'; header.write_text('#define DMSH_CHAIN "fixture"\n')
+            with patch.object(sys, 'argv', ['gen_resources.py', str(ios), str(image), 'marker', str(shader), 'b-fixture', '', str(root / 'dd'), str(header)]):
                 gen_resources.main()
             app = root / 'products/Game.app'
             environment = dict(os.environ, SRCROOT=str(ios), TARGET_BUILD_DIR=str(app.parent), UNLOCALIZED_RESOURCES_FOLDER_PATH=app.name, PLATFORM_NAME='iphoneos')

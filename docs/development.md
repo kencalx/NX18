@@ -406,18 +406,19 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --no-mods
 
 # a damaged NSP (files failing the NCA's hash check), or a NUP or dump whose .zs files are not zstd streams, stops the build after listing them; this packs those files as read
-python3 scripts/build_ipa_from_nsp.py ~/Games/MarioGalaxy -k ~/keys/prod.keys --allow-damaged
+python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --allow-damaged
 
 # a game without a profile: survey, provisional profile (a heap check on the Mac when the game needs one), best-effort IPA
 python3 scripts/build_ipa_from_nsp.py ~/Games/NewGame -k ~/keys/prod.keys
 
 # test the guesses on a game that has a profile: build from a provisional one (the IPA is named <ipa>-provisional.ipa)
-python3 scripts/build_ipa_from_nsp.py ~/Games/MarioGalaxy -k ~/keys/prod.keys --provisional --allow-damaged
+python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --provisional
 
 # the pipeline archive for another GPU too, beside the A20 / A20 Pro (applegpu_g19p) that a game gets by default (unless its profile sets pso_mtl4 off); --gpu none leaves it out
 python3 scripts/build_ipa_from_nsp.py ~/Games/BreathOfTheWild -k ~/keys/prod.keys --gpu g18p,g17p
 
-# a game of several programs (Super Mario 3D All-Stars) is packed as one, as any game: --program N packs one of its programs alone, for bring-up
+# a game of several programs is packed as one, as any game: --program N packs one of its programs alone, for bring-up. Super Mario 3D All-Stars, the one profiled, is unsupported in
+# release 1: its programs 1 and 2 render with Vulkan, so this stops with `[RED] ... renders with Vulkan; NX 18 release 1 supports NVN games only` (and the whole game stops before program 0's rewrite)
 python3 scripts/build_ipa_from_nsp.py ~/Games/3DAllStars -k ~/keys/prod.keys --program 2 --platform mac
 
 # development: build only what running the game on this Mac needs (no iOS shaders, Xcode project or IPA) and print the command that runs it

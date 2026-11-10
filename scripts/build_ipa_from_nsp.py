@@ -2770,6 +2770,22 @@ def other_programs(args, g, first=None):
     return runs
 
 
+def check_programs_gfx(args, g):
+    """A game of several programs (the profile's key programs): each of the others is extracted and its graphics detected before the first program's rewrite and shader steps, so one
+    that is not NVN stops the build at the start, not after the first program's whole build (main with gfx_probe: it stops after the detection; its extraction is reused when the
+    program is built). Super Mario 3D All-Stars' launcher is NVN, its Super Mario 64 and Super Mario Sunshine Vulkan"""
+    global PROGRAM_INDEX
+    if not g.get('programs', '') or getattr(args, 'in_programs', None) is not None: return
+    k, n = PROG.k, PROG.n
+    try:
+        for i, _ in g.pairs('programs'):
+            say(f'==== program {i}: its graphics, before program 0 is built')
+            sub = types.SimpleNamespace(**vars(args)); sub.program, sub.in_programs, sub.gfx_probe = int(i), {}, True
+            main(sub)
+    finally:
+        PROGRAM_INDEX = 0; PROG.k, PROG.n = k, n
+
+
 def mac_programs(args, g, first):
     """A Mac build of a game of several programs writes programs.tsv, which DM_PROGRAMS names: one host over all of them (game.py header_multi), and oe::ExecuteProgram ends the running program and
     starts the host again on the named one (hle_oe.c). As on Horizon the programs share one save. Returns the file, or None for a game of one program"""
@@ -3197,7 +3213,8 @@ def main(args=None):
         g = gamemod.load(g.id)
         say(f'derived game profile for {pkg_ver} ({disp}): {g.dir}')
     packed_cheats, mod_variants, cheat_build = None, {}, None
-    if mods_root:   # the game's mods: its cheats and its switchable mods (dm/tools/game_mods.py); a program of a game of several takes its own (game_mods.py same_title)
+    probe = getattr(args, 'gfx_probe', False)   # check_programs_gfx: this program's graphics only
+    if mods_root and not probe:   # the game's mods: its cheats and its switchable mods (dm/tools/game_mods.py); a program of a game of several takes its own (game_mods.py same_title)
         say(f'mods folder: {mods_root}')
         m0 = dirs[pkg_ver] / 'ExeFS/main'; cheat_build = build_id(m0)[:16].upper() if m0.is_file() else None   # the build pack_mod_cheats names this program's own cheat file after (merge_cheats)
         packed_cheats, mod_variants = apply_mods(mods_root, dirs[pkg_ver], work, pkg_ver, app, fps_ok=frame_rate_mods_ok(g), first=getattr(args, 'in_programs', None) is None)
@@ -3207,6 +3224,8 @@ def main(args=None):
     src = pg.build_sources(game / 'ExeFS', rfs.source(game), g.modules_in(game / 'ExeFS'))
     gfx = src['graphics'][0]   # nvn; vulkan (Hades) or gl (Balatro, Digimon Story Cyber Sleuth) stop here: their layers were removed in release 1
     if gfx != 'nvn': raise BuildError(unsupported_gfx(gfx, nacp.name(game / 'control.nacp') or g.get('name') or f'{app:016X}'))
+    if probe: return gfx
+    check_programs_gfx(args, g)   # the other programs of a game of several: one that is not NVN stops here too, before this one's rewrite and shaders
     glslc = src['glslc_capture'][0]   # shaders the game compiles at run time, captured in the Mac host (capture_glslc)
     uedec = src['ue_decode'][0]   # Unreal Engine shaders, Oodle-compressed in the paks' shader code archives, decoded in the Mac host (decode_ue_shaders)
     check_metal(py, repo, env)   # before the captures and the shader split, which take minutes

@@ -360,7 +360,7 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Note:** the Vulkan layer was removed in release 1 (in git at `93c34371`); the vsync event half below still applies to every game.
 - **Symptom:** a steady game whose frame-rate counter wanders between 50 and 60 on the iPhone only; the `display link up to tick` lines show about as many empty ticks as frames dropped by merging: frames arrive two in one tick and none in the next.
 - **Cause:** the Vulkan layer's acquire and the `vi::GetDisplayVsyncEvent` thread each kept a 60 Hz clock of their own, and Galaxy runs the Wii's VI retrace on that event, so its frames drifted against the screen.
-- **Fix:** while the display link presents, both follow its ticks (`hle_vk.m` acquire → `mtl_link_wait_tick`, as NVN's; `hle_sdk16.c` vsync thread → `mtl_link_wait_vsync`), with the old clocks as the fallback.
+- **Fix:** while the display link presents, both follow its ticks (the Vulkan layer's acquire in `hle_vk.m`, until release 1 removed it → `mtl_link_wait_tick`, as NVN's; `hle_sdk16.c` vsync thread → `mtl_link_wait_vsync`), with the old clocks as the fallback.
 - **Found on:** [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md) (Vulkan).
 - **Note:** a Mac window measures nothing here unless it is on screen: macOS fires an occluded window's display link about once a second (`display link recovered: stalled 1017 ms`).
 

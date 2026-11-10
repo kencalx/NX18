@@ -2,7 +2,8 @@
 // past ARENA_KEEP_BLOCKS: a memory trim asked then (mtl_pressure, run at the next submission's start) and the idle trim at the starts after it free none of them while their GPU work is
 // pending, and once the gate opens every submission's GPU copy reads the bytes it wrote. ARENA_IDLE small submissions later the blocks above the keep count have left the residency set and
 // are freed (DM_NVN_ARENA_TRIM=0: all kept); grown again, the memory trim (dm_gfx_trim) frees them at once. Shared blocks: 32 small submissions with the GPU held take one block between
-// them (DM_NVN_ARENA_SHARE=0: one each), and each one's GPU copy still reads its own bytes. A patched argument block whose size table moves to a new block is bound where it was written
+// them (DM_NVN_ARENA_SHARE=0: one each), and each one's GPU copy still reads its own bytes. A patched argument block whose size table moves to a new block is bound where it was written,
+// and so is a padded uniform slot (ub_padded) whose partly covered shadow does
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -128,6 +129,32 @@ int main(void) { @autoreleasepool {
         CHECK(g_stat_args_patch == patched + 1 && g_cur_arena != before, "patched block: the copy took the block's last room and its size table a new block");
         CHECK(sh->ab_buf == before->buf && sh->ab_gpu == before->gpu + before->len - 256, "patched block: bound and kept at the block it was written in");
         CHECK(w[0] == zero_bank_gpu() && w[1] >= g_cur_arena->gpu && w[1] < g_cur_arena->gpu + g_cur_arena->len, "patched block: its uniform slot and size table slot written there");
+        mtl_wait(mtl_sub_commit(), 5000000000ull);
+    }
+    mtl_drain();
+    // 6. A uniform slot bound shorter than its shader reads it (ub_padded) with an inline update deferred over part of it: the padded copy takes the block's last room and the
+    // partly covered shadow (ubp_get) a new block. The slot is still the block the padded copy was written in, not the new block at the old one's offset
+    @autoreleasepool {
+        enum { LEN = 0x20000 };
+        uint8_t *mem = mmap(NULL, LEN, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (mem == MAP_FAILED) abort();
+        mtl_pool_add(mem, LEN); memset(mem, 0x11, LEN);
+        mtl_sub_begin();
+        uint32_t v = 0xa0; mtl_sub_update(&v, (uint64_t)(uintptr_t)mem, 4);   // deferred, over the binding's first word only
+        const p_bind_buf ubo0 = S.ubo[1][0]; S.ubo[1][0].addr = (uint64_t)(uintptr_t)mem; S.ubo[1][0].size = 16;   // bound with 16 bytes
+        static nvn_rbind b; b.kind = NVN_RB_CBUF; b.reg = 0; b.aid = 0; b.fixw = 64;   // read up to byte 256 at fixed offsets
+        NvShader *sh = [NvShader new]; sh->rf.b = &b; sh->rf.nb = 1; sh->rf.cap = 1; memcpy(sh->key, "t_arena_trim", 13);
+        __strong id<MTLBuffer> tmp; arena_alloc(256, &tmp);
+        NvArena *before = g_cur_arena; before->used = before->len - 256;   // room for the padded copy, none for the shadow after it
+        uint64_t made = g_ubp_made, deferred = (uint64_t)g_nubd;
+        __strong id<MTLBuffer> use; uint64_t g = cbuf_slot(sh, 1, &b, &use);
+        const uint32_t *w = (const uint32_t *)(const void *)(before->cpu + before->len - 256);
+        printf("padded slot: %llu deferred, %llu shadow made, shadow in %s block; slot at block %s offset %#llx; written %#x %#x %#x %#x %#x\n", (unsigned long long)deferred,
+               (unsigned long long)(g_ubp_made - made), g_cur_arena != before ? "a new" : "the same", g >= before->gpu && g < before->gpu + before->len ? "written" : "other",
+               (unsigned long long)(g - before->gpu), w[0], w[1], w[2], w[3], w[4]);
+        CHECK(deferred == 1 && g_ubp_made == made + 1 && g_cur_arena != before, "padded slot: the copy took the block's last room and the partly covered shadow a new block");
+        CHECK(g == before->gpu + before->len - 256 && use == before->buf, "padded slot: bound at the block it was written in");
+        CHECK(w[0] == 0xa0 && w[1] == 0x11111111 && w[3] == 0x11111111 && w[4] == 0 && w[63] == 0, "padded slot: the update, memory past it, then zeros up to the reads' end");
+        S.ubo[1][0] = ubo0;
         mtl_wait(mtl_sub_commit(), 5000000000ull);
     }
     mtl_drain();

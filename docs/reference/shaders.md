@@ -1880,7 +1880,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 ### GLSL ES 1.00 sources without a `#version` line
 
 - **Note:** the OpenGL layer and `gl_shaders.py` were removed in release 1 (in git at `93c34371`); this entry and the next are their history.
-- **Symptom:** `gl_shaders.py` failed on the captured sources: `ES shaders for SPIR-V require version 310 or higher`.
+- **Symptom:** (GL layer, removed in release 1; history) `gl_shaders.py` failed on the captured sources: `ES shaders for SPIR-V require version 310 or higher`.
 - **Cause:** GameMaker's runner writes each shader variant as **GLSL ES 1.00 with the version statement left out** (`attribute`, `varying`, `texture2D`, `gl_FragColor`, `precision mediump float;`), and uses `sample` as a variable name, a reserved word since ES 3.00.
 - **Fix:** `gl_shaders.py`'s `es100()` pass, run when the source has no `#version` line or says `#version 100` (that line is dropped): drop `precision <p> <t>;` lines (the pattern has to accept `\r`, the captured files mix CRLF and LF), strip `lowp`/`mediump`/`highp` (GameMaker has `#define LOWPREC lowp`, so a macro would otherwise expand to nothing useful), rename `attribute`→`in`, `varying`→`out` (vertex) / `in` (fragment), declare `out vec4 gm_FragColor;` and rename `gl_FragColor`, rename `sample`→`gm_sample`, then prepend `#version 310 es` with `precision highp float; precision highp int;`. Texture functions stay with the existing `fixups()` so the rename happens after `glslangValidator -E` and a macro cannot hide one.
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md) (93 run-time shaders; see its [`gl_capture.tsv`](../../dm/games/0100217023F6C000/gl_capture.tsv)).
