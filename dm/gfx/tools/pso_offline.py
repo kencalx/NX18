@@ -103,6 +103,7 @@ D16, D32, S8, D32S8, X32S8 = 250, 252, 253, 260, 261   # nvn_pso_ds.h
 # a build compiled (host_libraries), by name; every other library is <name>.metallib in the game's library folder
 NOP_LIB, NOP_ENTRY = 'host_nop_frag', 'dm_nop'
 HOST_MSL = {NOP_LIB: 'nop_frag.metal'}
+HOST_MSL_STD = '-std=metal4.1'   # host_msl.py's STD: the host compiles its own shaders as MSL 4.1
 HOST_LIBS = {}
 DM = Path(__file__).resolve().parents[2]
 
@@ -128,10 +129,10 @@ def host_libraries(bases, platform, work):
     names = sorted({fl for _, _, fl, _ in bases if fl in HOST_MSL})
     if not names: return
     folder = Path(work) / 'host'; folder.mkdir(parents=True, exist_ok=True)
-    flag = f'-m{"ios" if platform == "ios" else "macosx"}-version-min={host_msl_min(platform)}'
+    flag = f'-m{"ios" if platform == "ios" else "macosx"}-version-min={host_msl_min(platform)}'   # and host_msl.py's language, HOST_MSL_STD
     for name in names:
         src, out = DM / 'gfx' / 'msl' / HOST_MSL[name], folder / f'{name}.metallib'
-        cmd = ['xcrun', '-sdk', sdk(platform), 'metal', flag, '-o', str(out), str(src)]
+        cmd = ['xcrun', '-sdk', sdk(platform), 'metal', flag, HOST_MSL_STD, '-o', str(out), str(src)]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode or not out.is_file(): sys.exit(f'[RED] pso_offline: the host library {src} does not compile ({" ".join(cmd)}): {(r.stderr or r.stdout).strip()}')
         HOST_LIBS[name] = str(out)

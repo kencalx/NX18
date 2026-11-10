@@ -102,7 +102,8 @@ class HostLibrary(unittest.TestCase):
         Path(cmd[cmd.index('-o') + 1]).write_bytes(metallib([(po.NOP_ENTRY, False)], os.urandom(16)))
         return subprocess.CompletedProcess(cmd, 0, '', '')
 
-    def test_compiled_as_the_host_compiles_it(self):   # host_msl.py's command: the platform's SDK and the host's minimum, MSL_MIN_<sdk> of dm/host/Makefile
+    def test_compiled_as_the_host_compiles_it(self):   # host_msl.py's command: the platform's SDK, the host's minimum (MSL_MIN_<sdk> of dm/host/Makefile) and its language
+        self.assertIn(f"STD = '{po.HOST_MSL_STD}'", (REPO / 'dm/gfx/tools/host_msl.py').read_text())
         mk = (REPO / 'dm/host/Makefile').read_text()
         self.assertRegex(mk, r'(?m)^MSL_MIN_macosx\s*=\s*\$\(MACOS_MIN\)')   # host_msl_min reads MACOS_MIN for the Mac because the Makefile does
         ios, mac = re.search(r'(?m)^MSL_MIN_iphoneos\s*=\s*(\S+)', mk), re.search(r'(?m)^MACOS_MIN\s*:?=\s*(\S+)', (REPO / 'dm/mac/min_os.mk').read_text())
@@ -112,8 +113,8 @@ class HostLibrary(unittest.TestCase):
             po.host_libraries(base, 'ios', self.t)
             po.host_libraries(base, 'macos', self.t)
         out, src = str(self.t / 'host' / f'{po.NOP_LIB}.metallib'), str(REPO / 'dm/gfx/msl/nop_frag.metal')
-        self.assertEqual(self.calls, [['xcrun', '-sdk', 'iphoneos', 'metal', f'-mios-version-min={ios}', '-o', out, src],
-                                      ['xcrun', '-sdk', 'macosx', 'metal', f'-mmacosx-version-min={mac}', '-o', out, src]])
+        self.assertEqual(self.calls, [['xcrun', '-sdk', 'iphoneos', 'metal', f'-mios-version-min={ios}', '-std=metal4.1', '-o', out, src],
+                                      ['xcrun', '-sdk', 'macosx', 'metal', f'-mmacosx-version-min={mac}', '-std=metal4.1', '-o', out, src]])
         self.assertEqual(po.HOST_LIBS, {po.NOP_LIB: out})
 
     def test_none_without_depth_only_pairs(self):
