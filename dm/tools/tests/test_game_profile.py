@@ -1,4 +1,4 @@
-# dm/games/game.py's profile-key validation, on a synthetic profile: pso_gpu (the GPU architectures the app's offline pipeline archive is made for, beside pso_mtl4) takes, none and no others,
+# dm/games/game.py's profile-key validation, on a synthetic profile: pso_gpu (the GPU architectures the app's offline pipeline archive is made for) takes, none and no others; the retired pso_mtl4 is tolerated (on silently, off with a warning, never an error),
 # and a profile without the key generates its header unchanged; present_sharpen's levels, off without the key; present_trim's ticks, 0 (off) without the key; post_aa's values, off without the key; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck
 from pathlib import Path
 import os
@@ -26,18 +26,29 @@ def header(rows):
 
 class PsoGPU(unittest.TestCase):
     def test_valid_tokens(self):
-        for rows in ('', 'pso_mtl4\ton\npso_gpu\tg18p\n', 'pso_mtl4\ton\npso_gpu\tapplegpu_g19p\n',   # without the key: the header is made as before, no message
-                     'pso_mtl4\ton\npso_gpu\tg18p g19p\n', 'pso_mtl4\ton\npso_gpu\tg14s g15s g16s g17p\n'):
+        for rows in ('', 'pso_gpu\tg18p\n', 'pso_gpu\tapplegpu_g19p\n',   # without the key: the header is made as before, no message
+                     'pso_gpu\tg18p g19p\n', 'pso_gpu\tg14s g15s g16s g17p\n', 'pso_mtl4\ton\npso_gpu\tg18p\n'):
             rc, out = header(rows)
             self.assertEqual((rc, out), (0, ''), rows)
 
     def test_rejected_tokens(self):
         for rows in ('pso_gpu\tnone\n',                     # none is not a value: absence of the key says no archive of its own
-                     'pso_mtl4\ton\npso_gpu\tg18p none\n', 'pso_gpu\tx g18p!\n', 'pso_gpu\tg14s g15s g16s g17p g18p\n',
+                     'pso_gpu\tg18p none\n', 'pso_gpu\tx g18p!\n', 'pso_gpu\tg14s g15s g16s g17p g18p\n',
                      'pso_gpu\tapplegpu_g19p,x\n'):
             rc, out = header(rows)
             self.assertNotEqual(rc, 0, rows)
             self.assertIn(': pso_gpu takes 1-4 whitespace-separated GPU architectures', out, rows)
+
+
+class PsoMtl4(unittest.TestCase):   # retired: upstream profiles still carry it, and no value stops a build
+    def test_tolerated(self):
+        for value, warned in (('on', False), ('off', True), ('maybe', True)):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as d:
+                Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(TSV + f'pso_mtl4\t{value}\n')
+                r = subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual('pso_mtl4' in r.stderr and 'ignored' in r.stderr, warned, r.stderr)
+                self.assertNotIn('PSO_MTL4', (Path(d, ID) / 'game.h').read_text())   # the host reads no such macro
 
 
 

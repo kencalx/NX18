@@ -27,11 +27,12 @@ class ProfilePackTests(unittest.TestCase):
 
     def test_pulling_libraries_survive_runtime_prebuild_without_an_archive(self):
         # (game, IOS_PULL, with a pipeline archive, _bp libraries packed): an archive's bases are made of the pulling libraries, so an IPA with one carries them whatever IOS_PULL says.
-        # The Metal 4 path is on by default; '<id>+off' is that profile with pso_mtl4 off, which still carries them (the launcher's Metal 4 toggle and its prebuild read them)
+        # Every NVN game has the hybrid pipelines and the prebuild (every pipeline is built through MTL4Compiler); '<id>+off' is that profile with the retired pso_mtl4 off, which
+        # changes nothing
         cases = [('01007EF00011E000', None, False, True), ('010015100B514000', None, False, True), ('01008CF01BAAC000', None, False, True), ('010015100B514000+off', None, False, True),
                  ('01007EF00011E000', '0', False, False), ('01008CF01BAAC000', '0', False, False), ('010015100B514000+off', '0', False, False),
-                 ('010015100B514000', '1', False, True), ('010015100B514000+off', '1', False, True),
-                 ('010015100B514000', None, True, True), ('010015100B514000+off', None, True, True), ('01007EF00011E000', '0', True, True)]
+                 ('010015100B514000', '1', False, True),
+                 ('010015100B514000', None, True, True), ('01007EF00011E000', '0', True, True)]
         for gid, override, with_pso, included, packed in [c + (p,) for c in cases for p in (False, True)]:
             with self.subTest(game=gid, IOS_PULL=override, archive=with_pso, one_file=packed), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -83,7 +84,7 @@ class ProfilePackTests(unittest.TestCase):
 
     def test_programs_pull_whatever_a_program_profile_says(self):
         # build_ipa.sh's _bp choice for a multi-program app (PROGRAMS_TSV) is the same as for one game: the pulling libraries go in unless IOS_PULL=0, and always with a pipeline archive (pso/).
-        # No program's pso_mtl4 is read (a profile with it off can have Metal 4 turned on in the launcher)
+        # No program's pso_mtl4 is read (it is retired: game.py ignores it)
         script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
         start = script.index('PACK_OPTS=(--store "$ZS");')
         line = script[start:script.index('\n', start)]

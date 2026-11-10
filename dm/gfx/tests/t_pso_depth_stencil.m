@@ -110,12 +110,12 @@ static void draws(NvProg *p) {
         CHECK(g_pass.dfmt == cases[i].df && g_pass.sfmt == cases[i].sf, "physical formats match literal expected pipeline formats");
         if (cases[i].mode == 3) CHECK(!g_pass.hd && g_pass.hs, "stencil-only usage keeps depth disabled");
         if (cases[i].mode == 4) CHECK(g_pass.hd && !g_pass.hs, "depth-only usage keeps stencil disabled");
-        uint64_t before = g_pb_legacy + g_pb_spec;
+        uint64_t before = g_pb_built + g_pb_spec;
         id<MTLRenderPipelineState> ps = pso_get_(p, nil); seen[i] = ps;
         CHECK(ps != nil, "production pipeline lookup succeeds");
         for (unsigned j = 0; j < i; j++) if (cases[i].color == cases[j].color && cases[i].df == cases[j].df && cases[i].sf == cases[j].sf) {
             CHECK(ps == seen[j], "returning to an effective format pair reuses its pipeline");
-            CHECK(g_pb_legacy + g_pb_spec == before, "format transition cache hit compiles nothing");
+            CHECK(g_pb_built + g_pb_spec == before, "format transition cache hit compiles nothing");
         }
         // NOLINTBEGIN(clang-analyzer-osx.cocoa.RetainCount): dss_get retains the state in g_dss through hm_put_id's CFBridgingRetain
         if (e && ps) {
@@ -195,8 +195,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         "fragment float4 f() { return float4(1,0,0,1); }\n", nil, &error);
     CHECK(lib != nil, "synthetic shaders compile"); if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
     NvProg *p = program(lib); draws(p); invalid_descriptors(p); prediction(lib);
-    const char *mode = getenv("DM_PSO_MTL4");
-    CHECK((g_pso4 != 0) == (!mode || strcmp(mode, "0") != 0), "requested pipeline compiler path is exercised");
-    printf("depth/stencil pipelines: %d checks, %d failed (%s)\n", checks, failed, g_pso4 ? "Metal 4" : "MTLDevice");
+    CHECK(g_comp4 != nil && g_pb_spec > 0, "pipelines are built through the Metal 4 compiler");
+    printf("depth/stencil pipelines: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

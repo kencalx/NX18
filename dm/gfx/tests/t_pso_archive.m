@@ -1,10 +1,10 @@
 // Metal 4 pipelines (pso_build): one base per pipeline with its colour state unspecialized, made into pipelines by specialization, kept in the pipeline archive.
-// Checks: pipelines that differ only in colour state share one base; a specialized pipeline draws the same pixels as one built through the MTLDevice; a flushed archive
+// Checks: pipelines that differ only in colour state share one base; a specialized pipeline draws the same pixels as one built whole; a flushed archive
 // file serves the base again without compiling; a flush of bases without a vertex layout is a p<seq> file, where a base with a layout is not looked up; a function with no
-// Metal 4 descriptor keeps the MTLDevice path; pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one per full period despite a
+// Metal 4 descriptor gets no pipeline (there is no MTLDevice path); pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one per full period despite a
 // mid-prewarm timer flush, removing them only after its last period, counting them for the prepare line, and a compaction that did not finish is not tried again on the same system build; a timer flush waits for any prewarm, so a cold start writes a file per full period; depth-only draws write depth; concurrent colour variants compile
-// one base; archive flushes preserve unrelated compiler state; a function with function constants is specialized by its pipeline's descriptor, not through its library,
-// and an MTLDevice pipeline gets it specialized; the descriptor for a specialization is the caller's whether the driver returns it retained or autoreleased; a compute pipeline is captured into a plain file and taken from it later, one without a Metal 4 descriptor never looked up; a native mesh pipeline is captured into a p file and taken from it later, with or without a task shader or a pixel shader, captured again by a compaction, and one without a Metal 4 descriptor built through the MTLDevice; a capture that fails builds the pipeline all the same and hands a full period over, or stops capturing after a failure in a period that captured nothing; run files are compacted by size tier from the pipeline count in their names (a tier of more than PSO_ARCH_COMPACT files and every smaller one, never a full period's, old and malformed names as the largest tier, the same across fresh processes), and a compute or task / mesh pipeline in a file left out is not captured again
+// one base; archive flushes preserve unrelated compiler state; a function with function constants is specialized by its pipeline's descriptor, not through its library
+// (fn_spec asks the library for no specialization); the descriptor for a specialization is the caller's whether the driver returns it retained or autoreleased; a compute pipeline is captured into a plain file and taken from it later, one without a Metal 4 descriptor never looked up; a native mesh pipeline is captured into a p file and taken from it later, with or without a task shader or a pixel shader, captured again by a compaction, and one without a Metal 4 descriptor refused; a capture that fails builds the pipeline all the same and hands a full period over, or stops capturing after a failure in a period that captured nothing; run files are compacted by size tier from the pipeline count in their names (a tier of more than PSO_ARCH_COMPACT files and every smaller one, never a full period's, old and malformed names as the largest tier, the same across fresh processes), and a compute or task / mesh pipeline in a file left out is not captured again
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -45,42 +45,27 @@ static id<MTLFunction> test_fn(id<MTLLibrary> lib, NSString *name, int registere
     if (cv) f = [lib newFunctionWithName:name constantValues:cv error:nil];
     return registered ? fn4_note(f, lib, name, cv) : f;
 }
-// Hold one function's first library specialization while another caller requests it and an unrelated function specializes.
-@interface FunctionGateLibrary : NSObject {
-@public id<MTLLibrary> library; NSString *name; dispatch_semaphore_t entered, extra, release; _Atomic int calls;
+// Counts the library specializations asked of it (newFunctionWithName:constantValues:, which compiles through the MTLDevice): fn_spec asks for none
+@interface SpecCountLibrary : NSObject {
+@public id<MTLLibrary> library; _Atomic int calls;
 }
 @end
-@implementation FunctionGateLibrary
+@implementation SpecCountLibrary
 - (id)forwardingTargetForSelector:(SEL)selector { return library; }
 - (id<MTLFunction>)newFunctionWithName:(NSString *)entry constantValues:(MTLFunctionConstantValues *)values error:(NSError **)error {
-    if ([entry isEqualToString:name]) {
-        if (!atomic_fetch_add(&calls, 1)) { dispatch_semaphore_signal(entered); dispatch_semaphore_wait(release, DISPATCH_TIME_FOREVER); }
-        else dispatch_semaphore_signal(extra);
-    }
+    atomic_fetch_add(&calls, 1);
     return [library newFunctionWithName:entry constantValues:values error:error];
 }
 @end
-static void concurrent_functions(id<MTLLibrary> library) {
-    FunctionGateLibrary *gate = [FunctionGateLibrary new]; gate->library = library; gate->name = @"cvs";
-    gate->entered = dispatch_semaphore_create(0); gate->extra = dispatch_semaphore_create(0); gate->release = dispatch_semaphore_create(0);
-    id<MTLLibrary> lib = (id<MTLLibrary>)gate;
-    id<MTLFunction> vf = fn_spec(lib, @"cvs", [MTLFunctionConstantValues new], NULL), ff = fn_spec(lib, @"cfs", [MTLFunctionConstantValues new], NULL);
-    dispatch_group_t group = dispatch_group_create(), other = dispatch_group_create(); dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
-    dispatch_semaphore_t started = dispatch_semaphore_create(0); __block id<MTLFunction> first, second, separate;
-    dispatch_group_async(group, q, ^{ @autoreleasepool { first = fn_dev(vf); } });
-    EXPECT("concurrent functions: first specialization entered", 0, dispatch_semaphore_wait(gate->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
-    dispatch_group_async(group, q, ^{ @autoreleasepool { dispatch_semaphore_signal(started); second = fn_dev(vf); } });
-    EXPECT("concurrent functions: overlapping caller started", 0, dispatch_semaphore_wait(started, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
-    dispatch_group_async(other, q, ^{ @autoreleasepool { separate = fn_dev(ff); } });
-    EXPECT("concurrent functions: unrelated function progresses", 0, dispatch_group_wait(other, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
-    EXPECT("concurrent functions: unrelated result specialized", 1, separate && separate != ff && !separate.functionConstantsDictionary.count);
-    EXPECT("concurrent functions: overlapping caller does not specialize again", 1, dispatch_semaphore_wait(gate->extra, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) != 0);
-    dispatch_semaphore_signal(gate->release); dispatch_group_wait(group, DISPATCH_TIME_FOREVER); dispatch_group_wait(other, DISPATCH_TIME_FOREVER);
-    EXPECT("concurrent functions: both callers share the specialized result", 1, first && first != vf && first == second && !first.functionConstantsDictionary.count);
-    // Re-registering the same library entry must preserve the function's cached specialization.
-    id<MTLFunction> again = fn_spec(lib, @"cvs", [MTLFunctionConstantValues new], NULL);
-    EXPECT("concurrent functions: reloading retains the result", 1, fn_dev(again) == first);
-    EXPECT("concurrent functions: one library specialization", 1, gate->calls);
+static void functions_unspecialized(id<MTLLibrary> library) {
+    SpecCountLibrary *count = [SpecCountLibrary new]; count->library = library;
+    id<MTLLibrary> lib = (id<MTLLibrary>)count;
+    MTLFunctionConstantValues *set = [MTLFunctionConstantValues new]; BOOL on = YES; [set setConstantValue:&on type:MTLDataTypeBool atIndex:0];
+    id<MTLFunction> a = fn_spec(lib, @"cvs", [MTLFunctionConstantValues new], NULL), b = fn_spec(lib, @"cfs", set, NULL), c = fn_spec(lib, @"cfs", set, NULL);
+    EXPECT("functions: each made", 1, a && b && c);
+    EXPECT("functions: none specialized through the library", 0, count->calls);
+    EXPECT("functions: a set of constants of its own is its own object and note", 1, b != c && fn4_of(b) && fn4_of(c) && fn4_of(b) != fn4_of(c));
+    EXPECT("functions: its note specializes it", 1, [fn4_of(b) isKindOfClass:MTL4SpecializedFunctionDescriptor.class] && [((MTL4SpecializedFunctionDescriptor *)fn4_of(b)).constantValues isEqual:set]);
 }
 // Hold the first base build while other callers request colour variants and an unrelated base.
 @interface ArchiveGateCompiler : NSObject {
@@ -358,10 +343,9 @@ static void same_pixels(const char *name, MTLPixelFormat f0, int blend, MTLPixel
 }
 static void depth_only(void) {
     MTLRenderPipelineDescriptor *d = desc(MTLPixelFormatInvalid, 0, MTLPixelFormatInvalid, MTLColorWriteMaskNone, 1);
-    d.fragmentFunction = nil; NSError *err = nil; uint64_t legacy = g_pb_legacy;
+    d.fragmentFunction = nil; NSError *err = nil;
     id<MTLRenderPipelineState> ps = pso_build(d, &err);
-    EXPECT("depth only: pipeline", 1, ps != nil);
-    EXPECT("depth only: through the Metal 4 compiler (the empty fragment)", legacy, g_pb_legacy);
+    EXPECT("depth only: pipeline (through the Metal 4 compiler, with the empty fragment)", 1, ps != nil);
     if (!ps) return;
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:4 height:4 mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
@@ -1073,11 +1057,12 @@ int main(int argc, char **argv) { @autoreleasepool {
         [NSFileManager.defaultManager removeItemAtPath:@(cdir) error:nil]; g_arch_dir = saved; g_arch4 = @[];
     }
     mesh_pipelines();
-    // a function with no Metal 4 descriptor: the MTLDevice path
-    uint64_t legacy = g_pb_legacy;
+    // a function with no Metal 4 descriptor: no pipeline, an error that names the note (there is no MTLDevice path)
+    uint64_t built0 = g_pb_built; err = nil;
     id<MTLRenderPipelineState> l = pso_build(desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 0), &err);
-    EXPECT("unregistered function: a pipeline", 1, l != nil);
-    EXPECT("unregistered function: MTLDevice build", legacy + 1, g_pb_legacy);
+    EXPECT("unregistered function: no pipeline", 1, l == nil);
+    EXPECT("unregistered function: an error naming the missing note", 1, err && [err.localizedDescription containsString:@"fn4_note"]);
+    EXPECT("unregistered function: nothing compiled", built0, g_pb_built);
     depth_only();
     concurrent_bases(0);
     concurrent_bases(1);
@@ -1097,20 +1082,15 @@ int main(int argc, char **argv) { @autoreleasepool {
         id<MTLLibrary> cl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nconstant bool k [[function_constant(0)]];\n"
             "struct V { float4 p [[position]]; };\nvertex V cvs(uint i [[vertex_id]]) { V o; o.p = float4(is_function_constant_defined(k) && k ? 1 : 0, 0, 0, 1); return o; }\n"
             "fragment float4 cfs() { return is_function_constant_defined(k) && k ? float4(1) : float4(0); }\nfragment float4 plain() { return float4(1); }\n" options:nil error:&err];
-        concurrent_functions(cl);
+        functions_unspecialized(cl);
         NSError *se = nil; id<MTLFunction> cf = fn_spec(cl, @"cfs", [MTLFunctionConstantValues new], &se), cv = fn_spec(cl, @"cvs", [MTLFunctionConstantValues new], &se);
         EXPECT("constants: the function stays unspecialized on the Metal 4 path", 1, cf.functionConstantsDictionary.count);
         EXPECT("constants: its descriptor specializes it", 1, [fn4_of(cf) isKindOfClass:MTL4SpecializedFunctionDescriptor.class]);
         MTLRenderPipelineDescriptor *cd = [MTLRenderPipelineDescriptor new]; cd.vertexFunction = cv; cd.fragmentFunction = cf; cd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-        uint64_t legacy0 = g_pb_legacy;
-        EXPECT("constants: a pipeline made from it", 1, pso_build(cd, &se) != nil);
-        EXPECT("constants: through the Metal 4 compiler", legacy0, g_pb_legacy);
-        // a fragment function with no Metal 4 descriptor (as the DM_NVN_HILITE override) sends the pipeline to the MTLDevice: its vertex function is specialized for it
+        EXPECT("constants: a pipeline made from it (through the Metal 4 compiler)", 1, pso_build(cd, &se) != nil);
+        // a fragment function with no Metal 4 descriptor: no pipeline (every function a pipeline is built from is noted, the DM_NVN_HILITE overrides too)
         cd.fragmentFunction = [cl newFunctionWithName:@"plain"]; se = nil;
-        EXPECT("constants: an MTLDevice pipeline made from it", 1, pso_build(cd, &se) != nil);
-        EXPECT("constants: that pipeline went through the MTLDevice", legacy0 + 1, g_pb_legacy);
-        EXPECT("constants: the vertex function given to it is specialized once", 1, fn_dev(cv) != cv && fn_dev(cv) == fn_dev(cv));
-        EXPECT("constants: a function without constants is its own", 1, fn_dev(cd.fragmentFunction) == cd.fragmentFunction);
+        EXPECT("constants: an unnoted fragment function gets no pipeline", 1, pso_build(cd, &se) == nil && se != nil);
     }
     repeated_archive_miss();
     spec_desc_ownership();

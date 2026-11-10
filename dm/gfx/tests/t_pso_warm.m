@@ -118,10 +118,10 @@ static void check_draw(const pso_key *raw, int merged, const uint8_t expected[4]
     pso_key live; pso_key_fill(&live, vs, fs, raw->cfmt, raw->dfmt, raw->sfmt, raw->samples, merged);
     if (merged) memcpy(live.lmap, raw->lmap, sizeof live.lmap);
     EXPECT("live key finds warmed pipeline", 1, hm_get_id(&g_pso, &live) != nil);
-    uint64_t before = g_pb_spec + g_pb_legacy;
+    uint64_t before = g_pb_spec + g_pb_built;
     NvProg *program = [NvProg new]; program->sh[0] = vs; program->sh[1] = fs;
     id<MTLRenderPipelineState> warmed = pso_get_(program, nil);
-    EXPECT("draw lookup adds no pipeline build", before, g_pb_spec + g_pb_legacy);
+    EXPECT("draw lookup adds no pipeline build", before, g_pb_spec + g_pb_built);
     EXPECT("draw lookup returns a pipeline", 1, warmed != nil);
     if (!warmed) { g_pso_lmap = NULL; return; }
     // Build the descriptor from the unnormalized historical state as a rendering oracle.
@@ -223,10 +223,10 @@ static void scenario(NSString *dir, int merged) {
     NSString *user = [NSString stringWithFormat:@"%@%@%@%@", r1, r0, row(&keys[2], merged), row(&keys[3], merged)];
     EXPECT("seed manifest written", 1, [seed writeToFile:a atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     EXPECT("user manifest written", 1, [user writeToFile:b atomically:YES encoding:NSUTF8StringEncoding error:nil]);
-    uint64_t before = g_pb_spec + g_pb_legacy; g_warm_t0 = bp_now(); atomic_store(&g_warm_running, 1);
+    uint64_t before = g_pb_spec; g_warm_t0 = bp_now(); atomic_store(&g_warm_running, 1);
     long lines = 0; for (WarmTask *t in warm_parse(@[a, b], &lines)) warm_task(t);
     warm_finish();
-    EXPECT("only three effective pipelines compiled across both manifests", 3, g_pb_spec + g_pb_legacy - before);
+    EXPECT("only three effective pipelines compiled across both manifests", 3, g_pb_spec - before);
     EXPECT("only three render pipelines enqueued", 3, g_warm_rps);
     warm_claim();
     EXPECT("three warmed pipelines claimed into cache", 3, g_warm_claim_rps);
@@ -329,9 +329,8 @@ int main(void) { @autoreleasepool {
     singleflight(@(dir));
     scenario(@(dir), 0); scenario(@(dir), 1);
     native_mesh(@(dir));
-    const char *mode = getenv("DM_PSO_MTL4");
-    if (mode) EXPECT("requested compiler path selected", strcmp(mode, "0") != 0, g_pso4 != 0);
+    EXPECT("pipelines are built through the Metal 4 compiler", 1, g_comp4 != nil && g_pb_spec > 0);
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
-    printf("t_pso_warm: %d checks, %d failed; %s\n", checks, failed, g_pso4 ? "Metal 4" : "MTLDevice");
+    printf("t_pso_warm: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

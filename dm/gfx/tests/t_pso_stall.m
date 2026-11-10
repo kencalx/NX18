@@ -326,7 +326,7 @@ int main(void) { @autoreleasepool {
 
     // the other blocks' state: no files open, the first pair list
     g_arch4 = @[]; g_arch4p = @[]; reset_counts(); g_pre_nolib = 0; g_pre_nolib_file = nil;
-    // a pulling library the app does not carry (last: its image block packs the library folder away) (an IPA packed without _bp.metallib, then DM_PSO_MTL4=1): into a fresh archive folder
+    // a pulling library the app does not carry (last: its image block packs the library folder away) (an IPA packed without _bp.metallib: IOS_PULL=0): into a fresh archive folder
     NSString *arch5 = [root stringByAppendingPathComponent:@"archive5"], *stamp5 = [arch5 stringByAppendingPathComponent:@"prebuilt.tsv"];
     [NSFileManager.defaultManager createDirectoryAtPath:arch5 withIntermediateDirectories:YES attributes:nil error:nil];
     g_arch_dir = arch5; g_arch4 = @[]; g_arch4p = @[];

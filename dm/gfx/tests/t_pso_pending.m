@@ -19,10 +19,32 @@ static int g_checks, g_failed;
 
 @interface TestPipelineState : NSObject { @public int call; } @end
 @implementation TestPipelineState @end
+// A fake base: what pso_build_ex specializes from (spec_desc asks it for the descriptor to fill)
+@interface TestBase : NSObject @end
+@implementation TestBase
+- (MTL4RenderPipelineDescriptor *)newRenderPipelineDescriptorForSpecialization { return [MTL4RenderPipelineDescriptor new]; }
+@end
+// Fake functions and their library: every function a pipeline is built from has a Metal 4 descriptor (fn4_note), and the fake compiler never reads one
+@interface TestFunction : NSObject { @public MTLFunctionType type; } @end
+@implementation TestFunction
+- (NSString *)name { return @"pending-fake"; }
+- (MTLFunctionType)functionType { return type; }
+@end
+@interface TestLibrary : NSObject @end
+@implementation TestLibrary @end
+static id<MTLFunction> test_function(MTLFunctionType type) {
+    static id<MTLLibrary> lib; if (!lib) lib = (id<MTLLibrary>)[TestLibrary new];
+    TestFunction *f = [TestFunction new]; f->type = type;
+    return fn4_note((id<MTLFunction>)f, lib, @"pending-fake", nil);
+}
+static NvShader *test_shader(const char *key, MTLFunctionType type) {
+    NvShader *s = [NvShader new]; snprintf(s->key, sizeof s->key, "%s", key); s->fn = test_function(type); return s;
+}
 
-// The fake compiler blocks selected invocation numbers, so the test can hold
-// real pso_pend_kick workers in the compiler without relying on driver timing.
-@interface GateDevice : NSObject {
+// The fake MTL4Compiler, put in g_comp4 before the first pipeline (nvn_mtl.m makes its own only when g_comp4 is nil). A pipeline is a base, built once per shader pair
+// (newRenderPipelineStateWithDescriptor:compilerTaskOptions:error:, never held), then specialized for its colour state: the specialization is the compile each pipeline makes,
+// and it blocks selected invocation numbers, so the test can hold real pso_pend_kick workers in the compiler without relying on driver timing.
+@interface GateCompiler : NSObject {
     pthread_mutex_t _mu;
     pthread_cond_t _cv;
     int _entered, _released, _block_through, _nil_call;
@@ -35,7 +57,8 @@ static int g_checks, g_failed;
     BOOL _absent_key_observed[1024];
 }
 - (instancetype)initBlockingThrough:(int)call nilCall:(int)nilCall;
-- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)descriptor error:(NSError **)error;
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor compilerTaskOptions:(MTL4CompilerTaskOptions *)options error:(NSError **)error;
+- (id<MTLRenderPipelineState>)newRenderPipelineStateBySpecializationWithDescriptor:(MTL4PipelineDescriptor *)descriptor pipeline:(id<MTLRenderPipelineState>)base error:(NSError **)error;
 - (BOOL)waitForEntered:(int)count timeoutMs:(int)timeoutMs;
 - (void)releaseThrough:(int)count;
 - (void)releaseAll;
@@ -48,7 +71,7 @@ static int g_checks, g_failed;
 - (TestPipelineState *)resultForCall:(int)call;
 @end
 
-@implementation GateDevice
+@implementation GateCompiler
 - (instancetype)initBlockingThrough:(int)call nilCall:(int)nilCall {
     if ((self = [super init])) {
         pthread_mutex_init(&_mu, NULL); pthread_cond_init(&_cv, NULL);
@@ -58,8 +81,13 @@ static int g_checks, g_failed;
     return self;
 }
 - (void)dealloc { pthread_cond_destroy(&_cv); pthread_mutex_destroy(&_mu); }
-- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)descriptor error:(NSError **)error {
-    (void)descriptor;
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4PipelineDescriptor *)descriptor compilerTaskOptions:(MTL4CompilerTaskOptions *)options error:(NSError **)error {
+    (void)descriptor; (void)options;
+    if (error) *error = nil;
+    return (id<MTLRenderPipelineState>)[TestBase new];
+}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateBySpecializationWithDescriptor:(MTL4PipelineDescriptor *)descriptor pipeline:(id<MTLRenderPipelineState>)base error:(NSError **)error {
+    (void)descriptor; (void)base;
     pthread_mutex_lock(&_mu);
     int n = ++_entered;
     TestPipelineState *result = [TestPipelineState new]; result->call = n;
@@ -198,7 +226,7 @@ static int wait_kick_job(kick_job *j, int timeout_ms) {
 
 static void test_two_active_exact_take_and_release(void) {
     reset_queue();
-    GateDevice *dev = [[GateDevice alloc] initBlockingThrough:2 nilCall:0]; g_dev = (id<MTLDevice>)(id)dev;
+    GateCompiler *dev = [[GateCompiler alloc] initBlockingThrough:2 nilCall:0]; g_comp4 = (id<MTL4Compiler>)(id)dev;
     pso_key a = make_key(1), b = make_key(2), c = make_key(3), wrong_attachment = a;
     wrong_attachment.cfmt[0] = MTLPixelFormatBGRA8Unorm;
     EXPECT_EQ("first prediction admitted", 1, pso_pend_kick(&a, test_vs, test_fs));
@@ -241,7 +269,7 @@ static void test_two_active_exact_take_and_release(void) {
 
 static void test_full_table_reclaims_done_not_running(void) {
     reset_queue();
-    GateDevice *dev = [[GateDevice alloc] initBlockingThrough:2 nilCall:0]; g_dev = (id<MTLDevice>)(id)dev;
+    GateCompiler *dev = [[GateCompiler alloc] initBlockingThrough:2 nilCall:0]; g_comp4 = (id<MTL4Compiler>)(id)dev;
     pso_key oldest = make_key(4), running = make_key(5);
     EXPECT_EQ("oldest slot admitted", 1, pso_pend_kick(&oldest, test_vs, test_fs));
     if (![dev waitForEntered:1 timeoutMs:5000]) { EXPECT_TRUE("oldest worker entered fake compiler", 0); [dev releaseAll]; drain_queue(5000); reset_queue(); return; }
@@ -291,10 +319,9 @@ static void append_op(uint8_t *buf, size_t *used, unsigned op, const void *paylo
 static void test_nil_prediction_falls_back_then_predicts(void) {
     reset_queue(); reset_pso_cache(); state_reset();
     unsetenv("DM_NVN_HILITE"); unsetenv("DM_NVN_MAGSCAN"); unsetenv("DM_PSO_RECORD"); unsetenv("DM_PSO_USER"); unsetenv("DM_SAVE");
-    GateDevice *dev = [[GateDevice alloc] initBlockingThrough:1 nilCall:1]; g_dev = (id<MTLDevice>)(id)dev;
-    NvShader *vs1 = [NvShader new], *fs1 = [NvShader new], *vs2 = [NvShader new], *fs2 = [NvShader new];
-    snprintf(vs1->key, sizeof vs1->key, "pending-vs1"); snprintf(fs1->key, sizeof fs1->key, "pending-fs1");
-    snprintf(vs2->key, sizeof vs2->key, "pending-vs2"); snprintf(fs2->key, sizeof fs2->key, "pending-fs2");
+    GateCompiler *dev = [[GateCompiler alloc] initBlockingThrough:1 nilCall:1]; g_comp4 = (id<MTL4Compiler>)(id)dev;
+    NvShader *vs1 = test_shader("pending-vs1", MTLFunctionTypeVertex), *fs1 = test_shader("pending-fs1", MTLFunctionTypeFragment);
+    NvShader *vs2 = test_shader("pending-vs2", MTLFunctionTypeVertex), *fs2 = test_shader("pending-fs2", MTLFunctionTypeFragment);
     NvProg *demand = [NvProg new]; demand->sh[0] = vs1; demand->sh[1] = fs1;
     NvProg *predicted = [NvProg new]; predicted->sh[0] = vs2; predicted->sh[1] = fs2;
     pso_key demand_key; pso_key_fill(&demand_key, vs1, fs1, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
@@ -356,8 +383,9 @@ static void test_prediction_restores_scissor(void) {
 int main(void) {
     @autoreleasepool {
         setvbuf(stdout, NULL, _IONBF, 0);
-        test_vs = [NvShader new]; test_fs = [NvShader new];
-        snprintf(test_vs->key, sizeof test_vs->key, "pending-base-vs"); snprintf(test_fs->key, sizeof test_fs->key, "pending-base-fs");
+        // no archive (none is opened: no device messages), no hybrid stand-ins (no pulling bases): each pipeline is a compile of the fake compiler
+        setenv("DM_PSO_ARCHIVE", "off", 1); unsetenv("DM_PSO_BUNDLE"); setenv("DM_PSO_HYBRID", "0", 1);
+        test_vs = test_shader("pending-base-vs", MTLFunctionTypeVertex); test_fs = test_shader("pending-base-fs", MTLFunctionTypeFragment);
         test_two_active_exact_take_and_release();
         test_full_table_reclaims_done_not_running();
         test_nil_prediction_falls_back_then_predicts();

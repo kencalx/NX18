@@ -176,10 +176,11 @@ import Foundation
     setenv("DM_PAD_MERGE", "1", 1); setenv("DM_GPU_CAPTURE", "1", 1)
     let e = LauncherModel(ios, defaults: d)
     expect(e.inactiveWhy(row(e, "DM_PAD_PRESS_TO_JOIN")) == "All controllers are player 1 (env.txt)", "DM_PAD_MERGE=1 greys Press a button to join")
-    expect(e.inactiveWhy(row(e, "DM_PSO_MTL4")) == "Off while GPU capture is on" && e.inactiveWhy(row(e, "DM_PSO_PREBUILD")) != nil, "GPU capture set to anything greys the Metal 4 pipelines")
+    expect(!e.settings.contains { $0.env == "DM_PSO_MTL4" }, "no Metal 4 pipelines row: every pipeline is built through MTL4Compiler")
+    expect(e.inactiveWhy(row(e, "DM_PSO_PREBUILD")) == "Off while GPU capture is on", "GPU capture set to anything greys the pipeline prebuild (the capture profile opens no archive)")
     unsetenv("DM_PAD_MERGE"); unsetenv("DM_GPU_CAPTURE")
     let plain = LauncherModel(ios, defaults: d)
-    expect(plain.inactiveWhy(row(plain, "DM_PAD_PRESS_TO_JOIN")) == nil && plain.inactiveWhy(row(plain, "DM_PSO_MTL4")) == nil, "without them, neither")
+    expect(plain.inactiveWhy(row(plain, "DM_PAD_PRESS_TO_JOIN")) == nil && plain.inactiveWhy(row(plain, "DM_PSO_PREBUILD")) == nil, "without them, neither")
 
     // Super Mario Bros. Wonder has no Picture shape: Stretch always stretches its 16:9 picture on an iPhone, so MetalFX gets the hint; only a device without the scaler greys it
     let w = LauncherModel(wonder, defaults: d)

@@ -185,11 +185,13 @@ def header_one(g):
     if psh not in SHARPEN: sys.exit(f'{g.id}: present_sharpen must be off, low, medium or high: {psh}')
     paa = g.get('post_aa', 'off')   # the present's edge smoothing by default (nvn_mtl.m aa_mode, CMAA2; DM_POST_AA and the launcher's Anti-aliasing override it): off / edge / edge-sharp
     if paa not in ('off', 'edge', 'edge-sharp'): sys.exit(f'{g.id}: post_aa must be off, edge or edge-sharp: {paa}')
-    p4 = g.get('pso_mtl4', 'on')   # render pipelines through MTL4Compiler on iOS, with the pipeline archive and hybrid pipelines: on (the default, as on the Mac) / off (the MTLDevice on iOS, and no archive in the app; an iOS build carries the pulling libraries either way, for the launcher's Metal 4 toggle; DM_PSO_MTL4 overrides)
-    if p4 not in ('on', 'off'): sys.exit(f'{g.id}: pso_mtl4 must be on or off: {p4}')
-    pg = g.words('pso_gpu', '')   # GPU architectures the app gets the pipeline archive made offline for (the NSP script's --gpu, build_ipa.sh): when pso_mtl4 is on the app gets these instead of the default g19p, the A20 / A20 Pro of the iPhone 18 family (e.g. 'g18p' for the A19 / A19 Pro of the iPhone 17 family); unset → the default. Whitespace-separated tokens, with or without the applegpu_ prefix
+    # pso_mtl4 is retired: every pipeline is built through MTL4Compiler, on iOS and on the Mac. Upstream profiles still carry it, so it is tolerated: on silently, any other
+    # value with a warning, never an error (the profile builds as if it were on)
+    p4 = g.get('pso_mtl4', 'on')
+    if p4 != 'on': print(f'{g.id}: pso_mtl4 {p4} ignored: pipelines are always built through MTL4Compiler', file=sys.stderr)
+    pg = g.words('pso_gpu', '')   # GPU architectures the app gets the pipeline archive made offline for (the NSP script's --gpu, build_ipa.sh): these instead of the default g19p, the A20 / A20 Pro of the iPhone 18 family (e.g. 'g18p' for the A19 / A19 Pro of the iPhone 17 family); unset → the default. Whitespace-separated tokens, with or without the applegpu_ prefix
     if pg and (len(pg) > 4 or any(w == 'none' or not re.fullmatch(r'(applegpu_)?[A-Za-z0-9]+', w) for w in pg)):
-        sys.exit(f"{g.id}: pso_gpu takes 1-4 whitespace-separated GPU architectures such as 'g18p applegpu_g19p' (each an optional applegpu_ prefix then an alphanumeric token; there is no none: omit the key for g19p, or set pso_mtl4 off for no archive): {pg}")
+        sys.exit(f"{g.id}: pso_gpu takes 1-4 whitespace-separated GPU architectures such as 'g18p applegpu_g19p' (each an optional applegpu_ prefix then an alphanumeric token; there is no none: omit the key for g19p, or build with DM_PSO_GPUS=none / --gpu none for no archive): {pg}")
     et = g.get('enc_thread', 'off')   # Metal encoding on its own thread on the Mac by default (nvn_rec.h rec_on; on iOS it is on for every game; DM_NVN_ENC_THREAD overrides): on / off
     if et not in ('on', 'off'): sys.exit(f'{g.id}: enc_thread must be on or off: {et}')
     cp = g.get('core_preempt', 'off')   # same-core preemption approximation (hle_thread.c): on / off
@@ -270,7 +272,6 @@ def header_one(g):
          f'#define DM_GAME_PRESENT_TRIM {int(ptr)}',   # display-link ticks in a row with two or more frames waiting before one is dropped (0 off)
          f'#define DM_GAME_PRESENT_SHARPEN {SHARPEN.index(psh)}',   # 0 off to 3 high: settings.tsv DM_PRESENT_SHARPEN's levels
          f'#define DM_GAME_POST_AA {q(paa)}',   # settings.tsv DM_POST_AA's values (nvn_upscale_pick.h aa_parse)
-         f'#define DM_GAME_PSO_MTL4 {int(p4 == "on")}',
          f'#define DM_GAME_ENC_THREAD {int(et == "on")}',
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)
          f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch").index(pl)}',

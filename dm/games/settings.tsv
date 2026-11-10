@@ -48,8 +48,7 @@ DM_MOD_FPS	toggle	-	0	mods:fps	Game	High frame rate	A mod from the game's mods f
 DM_MOD_ULTRAWIDE	toggle	-	0	mods:ultrawide&platform:ios	Game	Ultrawide	A mod from the game's mods folder that shows a wider view, stretched over a screen wider than 16:9 (an iPhone in landscape). Off on an iPad.	hide=device:ipad;inactive=screen<1.85~This screen isn't wider than 16:9
 DM_SCREEN_ASPECT	choice	auto=Match screen?platform:ios,1.43=iPhone Duo screen (1.43:1),0=16:9 (Switch)	auto|0	DM_GAME_SCREEN_ASPECT!=0	Game	Picture shape	Renders about a quarter more pixels: a little slower and warmer.	inactive=DM_MOD_ULTRAWIDE=1&screen>=1.85~Ultrawide keeps the 16:9 picture;hint=auto:window>=1.77~16:9 on this screen
 DM_PRESENT_SNAP	toggle	-	DM_GAME_PRESENT_SNAP	gfxapi:nvn	Performance	Frame buffering	Up to one frame more display latency.
-DM_PSO_MTL4	toggle	-	DM_GAME_PSO_MTL4|1	gfxapi:nvn	Performance	Metal 4 pipelines	Keeps a pipeline archive; uses more memory.	inactive=DM_GPU_CAPTURE=*~Off while GPU capture is on|MTL_CAPTURE_ENABLED=*~Off while GPU capture is on
-DM_PSO_PREBUILD	toggle	-	1	gfxapi:nvn	Performance	Pipeline prebuild	The first start waits a few minutes for it, once.	needs=DM_PSO_MTL4=1;inactive=DM_GPU_CAPTURE=*~Off while GPU capture is on|MTL_CAPTURE_ENABLED=*~Off while GPU capture is on
+DM_PSO_PREBUILD	toggle	-	1	gfxapi:nvn	Performance	Pipeline prebuild	The first start waits a few minutes for it, once.	inactive=DM_GPU_CAPTURE=*~Off while GPU capture is on|MTL_CAPTURE_ENABLED=*~Off while GPU capture is on
 DM_NVN_ENC_THREAD	toggle	-	1|DM_GAME_ENC_THREAD	gfxapi:nvn	Performance	Encode thread
 DM_FPS_HOLD	toggle	on/off	DM_GAME_FPS_HOLD	DM_GAME_FPS_TARGET!=0&fixups:FPS_STATE_OFF	Performance	Hold frames when late		inactive=DM_FPS_TARGET=30/120~Only matters at 60 fps
 DM_METAL_HUD	toggle	-	0	always	Performance	Performance HUD

@@ -1,4 +1,4 @@
-"""Compaction and the following start use fresh processes and disk-built shaders."""
+"""Compaction and the following start use fresh processes and disk-built shaders. Each run drops the GPU capture variables, which run the capture profile (no archive)."""
 import os
 from pathlib import Path
 import subprocess
@@ -11,7 +11,7 @@ import unittest
 class ArchiveRestartTests(unittest.TestCase):
     def test_cold_start_then_next(self):
         with tempfile.TemporaryDirectory(prefix='pso-cold-') as folder:
-            env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')
+            env = dict(os.environ, MTL_DEBUG_LAYER='1')
             for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED'):
                 env.pop(name, None)
             # nine new bases with a timer flush after each: a file per full period of 4 and one for the rest, which the next start does not compact
@@ -28,7 +28,7 @@ class ArchiveRestartTests(unittest.TestCase):
 
     def test_cold_start_cut_short(self):
         with tempfile.TemporaryDirectory(prefix='pso-cold-cut-') as folder:
-            env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')
+            env = dict(os.environ, MTL_DEBUG_LAYER='1')
             for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED'):
                 env.pop(name, None)
             # ended in its prewarm after 6 new bases: the full period's file alone; the next start takes those 4 and builds the other 5
@@ -40,7 +40,7 @@ class ArchiveRestartTests(unittest.TestCase):
 
     def test_cold_start_quit(self):
         with tempfile.TemporaryDirectory(prefix='pso-cold-quit-') as folder:
-            env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')
+            env = dict(os.environ, MTL_DEBUG_LAYER='1')
             for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED'):
                 env.pop(name, None)
             # quit in its prewarm after 6 new bases: the full period's file and one of the 2 after it; the next start takes all 6 and builds the other 3.
@@ -55,7 +55,7 @@ class ArchiveRestartTests(unittest.TestCase):
     def test_compaction_with_fresh_bases_and_restart(self):
         for constants in (False, True):
             with self.subTest(constants=constants), tempfile.TemporaryDirectory(prefix='pso-restart-') as folder:
-                env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1', DM_TEST_ARCHIVE_MIXED='1')
+                env = dict(os.environ, MTL_DEBUG_LAYER='1', DM_TEST_ARCHIVE_MIXED='1')
                 for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS'):
                     env.pop(name, None)
                 if constants:
@@ -72,7 +72,7 @@ class ArchiveRestartTests(unittest.TestCase):
 
     def test_old_names_compacted_once(self):
         with tempfile.TemporaryDirectory(prefix='pso-oldname-') as folder:
-            env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')
+            env = dict(os.environ, MTL_DEBUG_LAYER='1')
             for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED'):
                 env.pop(name, None)
             # nine files of one base, renamed as an archive from before the count; one compaction, then none
@@ -88,7 +88,7 @@ class ArchiveRestartTests(unittest.TestCase):
 
     def test_tier_compaction_restart(self):
         with tempfile.TemporaryDirectory(prefix='pso-tier-') as folder:
-            env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')
+            env = dict(os.environ, MTL_DEBUG_LAYER='1')
             for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED'):
                 env.pop(name, None)
             # a full period's file and nine of one base; the nine become a file per period of 4; then nothing to compact
@@ -101,7 +101,7 @@ class ArchiveRestartTests(unittest.TestCase):
     def test_stale_chain_files(self):
         for keep in (False, True):
             with self.subTest(keep=keep), tempfile.TemporaryDirectory(prefix='pso-stale-') as folder:
-                env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')
+                env = dict(os.environ, MTL_DEBUG_LAYER='1')
                 for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED', 'DM_PSO_KEEP_OLD'):
                     env.pop(name, None)
                 # six one-base files; then one of another chain, two without a stamp with an index and two without an index: the open and the probe keep 3, DM_PSO_KEEP_OLD=1 all 6

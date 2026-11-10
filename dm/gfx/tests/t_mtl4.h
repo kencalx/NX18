@@ -62,7 +62,7 @@ static inline id<MTLDevice> t4_dev(void) {
     return dev;
 #endif
 }
-static inline id<MTL4Compiler> t4_comp(void) {   // the fixtures' own compiler, beside the host's g_comp4 (mtl_comp4): standalone fixtures have no host, and fake devices make no g_comp4
+static inline id<MTL4Compiler> t4_comp(void) {   // the fixtures' own compiler, beside the host's g_comp4 (mtl_comp4): standalone fixtures have no host, and a test may put a fake compiler in g_comp4 (t_pso_pending)
     static id<MTL4Compiler> comp; static dispatch_once_t once;
     dispatch_once(&once, ^{
         NSError *e = nil; comp = [t4_dev() newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&e];

@@ -15,7 +15,7 @@ settings = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(settings)
 
 BOTW, WONDER, DQ11S = '01007EF00011E000', '010015100B514000', '01006C300E9F0000'
-PERFORMANCE_NVN = ['DM_PRESENT_SNAP', 'DM_PSO_MTL4', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD', 'DM_FPS_HOLD', 'DM_METAL_HUD']
+PERFORMANCE_NVN = ['DM_PRESENT_SNAP', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD', 'DM_FPS_HOLD', 'DM_METAL_HUD']
 FRAME_STEP = ('FPS_STATE_OFF',)   # main's rewriter table of a build with a frame step state page (patch_nso.py): Hold frames when late reads it
 
 
@@ -103,8 +103,9 @@ class LauncherSettingsTests(unittest.TestCase):
     def test_sections_keep_the_profile_defaults(self):
         botw, wonder = build(BOTW, 'nvn', fixups=FRAME_STEP), build(WONDER, 'nvn')
         self.assertEqual([e for e, s in botw.items() if s['section'] == 'Performance'], PERFORMANCE_NVN)
-        self.assertEqual(botw['DM_PSO_MTL4']['default'], '1')   # pso_mtl4: on unless the profile sets off
-        self.assertEqual((wonder['DM_PRESENT_SNAP']['default'], wonder['DM_PSO_MTL4']['default']), ('0', '1'))
+        self.assertNotIn('DM_PSO_MTL4', botw)   # retired: every pipeline is built through MTL4Compiler, nothing to choose
+        self.assertNotIn('needs', botw['DM_PSO_PREBUILD'])   # the prebuild is always there to turn off
+        self.assertEqual(wonder['DM_PRESENT_SNAP']['default'], '0')
         self.assertEqual((botw['DM_PSO_PREBUILD']['default'], botw['DM_NVN_ENC_THREAD']['default'], botw['DM_METAL_HUD']['default']), ('1', '1', '0'))   # the host's iOS defaults
         self.assertEqual(list(dict.fromkeys(s['section'] for s in botw.values())), ['Game', 'Controls', 'Performance'])
         self.assertNotIn('DM_FPS_HOLD', wonder)   # no frame step, as the Frame rate row
@@ -191,7 +192,7 @@ class LauncherSettingsTests(unittest.TestCase):
         rows, mac = build(BOTW, 'nvn'), build('0100F2C0115B6000', 'nvn', 'mac')
         self.assertEqual(rows['DM_PAD_PRESS_TO_JOIN']['inactive'], [{'when': ['DM_PAD_MERGE=1'], 'why': 'All controllers are player 1 (env.txt)'}])
         capture = [{'when': ['DM_GPU_CAPTURE=*'], 'why': 'Off while GPU capture is on'}, {'when': ['MTL_CAPTURE_ENABLED=*'], 'why': 'Off while GPU capture is on'}]
-        self.assertEqual((rows['DM_PSO_MTL4']['inactive'], rows['DM_PSO_PREBUILD']['inactive']), (capture, capture))
+        self.assertEqual(rows['DM_PSO_PREBUILD']['inactive'], capture)   # the capture profile opens no archive: the prebuild has none to build into
         self.assertNotIn('inactive', mac['DM_SW2'], 'the packer writes the Bluetooth key with every list (pack_app.py info_plist): nothing to grey')
         self.assertEqual(rows['DM_SHOW_FPS']['hint'], [{'when': ['DM_METAL_HUD=1'], 'why': 'The Performance HUD shows the frame rate too'}])
         self.assertNotIn('inactive', rows['DM_FPS_TARGET'], 'the 120 fps rule goes only where the option is offered')
@@ -265,16 +266,18 @@ class LauncherSettingsTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, 'leave present_interval at game'): settings.game.header_one(settings.game.Game(d))
 
     def test_defaults_follow_each_platform_host(self):
-        # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile (on unless it sets pso_mtl4 off). nvn_rec.h rec_on: iOS on, Mac off.
+        # The <ios>|<mac> default form: nvn_rec.h rec_on is on on iOS and follows the profile on the Mac (DM_NVN_ENC_THREAD 1|DM_GAME_ENC_THREAD). A retired pso_mtl4 off in the
+        # profile changes nothing: no row reads it
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp) / WONDER; d.mkdir()   # Wonder's profile with pso_mtl4 off
             (d / 'game.tsv').write_text((ROOT / 'dm/games' / WONDER / 'game.tsv').read_text(encoding='utf-8') + 'pso_mtl4\toff\n', encoding='utf-8')
             off = settings.game.Game(d)
-            for gid, ios_pso, prof in ((BOTW, '1', None), (WONDER, '1', None), (WONDER, '0', off)):
+            for gid, prof in ((BOTW, None), (WONDER, None), (WONDER, off)):
                 with self.subTest(game=gid, pso_mtl4='off' if prof else 'default'), patch.object(settings.game, 'load', side_effect=lambda i, prof=prof, real=settings.game.load: prof or real(i)):
                     ios, mac = build(gid, 'nvn', 'ios'), build(gid, 'nvn', 'mac')
-                    self.assertEqual((ios['DM_PSO_MTL4']['default'], ios['DM_NVN_ENC_THREAD']['default']), (ios_pso, '1'))
-                    self.assertEqual((mac['DM_PSO_MTL4']['default'], mac['DM_NVN_ENC_THREAD']['default']), ('1', '0'))
+                    self.assertEqual((ios['DM_NVN_ENC_THREAD']['default'], mac['DM_NVN_ENC_THREAD']['default']), ('1', '0'))
+                    self.assertNotIn('DM_PSO_MTL4', ios); self.assertNotIn('DM_PSO_MTL4', mac)
+                    self.assertEqual((ios['DM_PSO_PREBUILD']['default'], mac['DM_PSO_PREBUILD']['default']), ('1', '1'))
 
     def test_unknown_platform_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, 'SETTINGS_PLATFORM must be ios or mac'):

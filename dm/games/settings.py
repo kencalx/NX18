@@ -38,7 +38,7 @@ DEVICE_TERMS = (r'device:(iphone|ipad|mac)(/(iphone|ipad|mac))*',   # the kind o
 PACK_TERM = r'!?(fixups|mods|gfxapi|platform):[\w-]+(/[\w-]+)*|DM_GAME_\w+(==|!=)[^&]*'
 VAR_TERM = r'([A-Z][A-Z0-9_]*)(!=|=)([^&=/!]+(/[^&=/!]+)*)'
 # Switches a rule may test that no row sets, as the host reads them from the environment (an env file or the launch environment), each with the values a rule may name; None takes
-# only *, which holds while the switch is set to anything (nvn_mtl.m keeps Metal 4 pipelines off while either capture switch is set)
+# only *, which holds while the switch is set to anything (either capture switch runs nvn_mtl.m's capture profile, which opens no pipeline archive: the prebuild has none to build into)
 ENV_ONLY = {'DM_PAD_MERGE': {'0', '1'}, 'DM_GPU_CAPTURE': None, 'MTL_CAPTURE_ENABLED': None}
 # Values the host takes as another value of the row (nvn_upscale_pick.h up_parse: 1 is metalfx, 0 off). A term naming one goes out with its aliases, so a front end whose value
 # came from an env file in the other spelling still matches

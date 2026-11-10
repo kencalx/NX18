@@ -93,17 +93,16 @@ static int g_warm_started;
 static void warm_claim(void);
 
 static id<MTLDevice> g_dev;
-// g_comp4: the host's one MTL4Compiler, made in mtl_init before any pipeline (mtl_comp4), whatever pso4_on says: the host's own pipelines (host_cps, host_rps), MetalFX's
-// scalers, and the game's pipelines while g_pso4 is set. Made only when it is nil, so a test can put a compiler of its own in first. The archive's captures go through the
-// current flush period's own compiler (ArchEpoch). g_pso4: the game's pipelines go through g_comp4 (pso4_init, while pso4_on); else they take the MTLDevice path
+// g_comp4: the host's one MTL4Compiler, made in mtl_init before any pipeline (mtl_comp4): every pipeline is built through it, the host's own (host_cps, host_rps), MetalFX's
+// scalers and the game's (pso_build, cps_new, mtk_build); there is no MTLDevice pipeline path. Made only when it is nil, so a test can put a compiler of its own in first
+// (t_pso_pending's fake one). The archive's captures go through the current flush period's own compiler (ArchEpoch)
 static id<MTL4Compiler> g_comp4;
-static int g_pso4;
 id<MTL4Compiler> mtl_comp4(void) {
     static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
     id<MTL4Compiler> c = g_comp4;
     if (c || !g_dev) return c;
     os_unfair_lock_lock(&lk);   // a test that sets g_dev itself and skips mtl_init makes it at its first use, on whichever thread that is
-    if (!g_comp4 && [(id)g_dev respondsToSelector:@selector(newCompilerWithDescriptor:error:)]) {   // a test's fake device may have none (t_pso_pending)
+    if (!g_comp4) {
         NSError *ce = nil; g_comp4 = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&ce];
         if (!g_comp4) MLOG("[RED] the Metal device %s made no Metal 4 compiler: %s", g_dev.name.UTF8String, ce ? ce.localizedDescription.UTF8String : "no error given");
     }
@@ -2389,7 +2388,7 @@ static long ab_len(void); static void ab_frame(uint64_t f);
 // DM_GPU_CAPTURE=<frame>[:<frames>] (diagnostic): a Metal GPU trace of those frames (default 1) for Xcode's Metal debugger (per-draw cost, shader profiler), or DM_GPU_CAPTURE=gpu:<ms>[:<after frame>]
 // of one frame in the first scene, after that frame, whose GPU time passes <ms> in 60 frames in a row (a single long frame in a light scene fired the first iPhone capture). Read again
 // when it changes, so the Mac's DM_CTL "env DM_GPU_CAPTURE=..." can set it while the game runs. iOS needs a build with MetalCaptureEnabled (DM_METAL_CAPTURE=1 when the project is
-// made), the Mac MTL_CAPTURE_ENABLED=1 in the environment. It captures the Metal 4 queue (Metal refuses to capture a Metal 4 device), which runs the frames, uploads, present and the one-off command
+// made), the Mac MTL_CAPTURE_ENABLED=1 in the environment; either one, or DM_GPU_CAPTURE set at the start, runs the capture profile (pso4_capture: no pipeline archive). It captures the Metal 4 queue (Metal refuses to capture a Metal 4 device), which runs the frames, uploads, present and the one-off command
 // buffers (once_new); only a test fixture's classic-queue work (q_cb) is not in it. The trace is dm_<date>-<time>_f<frame>.gputrace in DM_GPU_CAPTURE_DIR, by default gpu_captures/ in the working directory (the app's Documents on iOS, the run folder
 // on the Mac). A trace takes 1.5-2 GB, so before each capture that folder alone is pruned: of its dm_*.gputrace entries the newest DM_GPU_CAPTURE_KEEP - 1 stay (default 2 with the new
 // one); nothing outside it is removed
@@ -6288,60 +6287,28 @@ static MTL4FunctionDescriptor *fn4_of(id<MTLFunction> f) {
     os_unfair_lock_lock(&g_fn4_lock); MTL4FunctionDescriptor *d = [g_fn4 objectForKey:f]; os_unfair_lock_unlock(&g_fn4_lock);
     return d;
 }
-// A function that declares function constants, specialized with cv (an empty set keeps every default). On the Metal 4 path the pipeline's descriptor specializes it (fn4_note
-// records cv, and MTL4Compiler compiles it with the pipeline), so the MTLFunction stays unspecialized: its reflection and argument encoders are the same. MTLLibrary's
-// newFunctionWithName:constantValues: compiles through the MTLDevice, synchronously, on the thread that loads the shader: when Animal Crossing loaded such a shader during play,
-// the Metal performance HUD on the iPhone counted it ("Compiled 2 shaders. Total compilation time is 102.70ms. Consider adopting MTL4Compiler"). A pipeline the MTLDevice
-// builds after all (pso_build's fallback) takes the function fn_dev specializes from the descriptor
+// A function that declares function constants, specialized with cv (an empty set keeps every default). The pipeline's descriptor specializes it (fn4_note records cv, and
+// MTL4Compiler compiles it with the pipeline), so the MTLFunction stays unspecialized: its reflection and argument encoders are the same. Nothing is specialized through
+// MTLLibrary's newFunctionWithName:constantValues:, which compiles through the MTLDevice, synchronously, on the thread that loads the shader: when Animal Crossing loaded such a
+// shader during play, the Metal performance HUD on the iPhone counted it ("Compiled 2 shaders. Total compilation time is 102.70ms. Consider adopting MTL4Compiler").
 // A library gives the same MTLFunction object for the same name each time it is asked (macOS 27.3), so a function specialized with constants of its own (the readable-tile
 // versions, the logic operation entry points: one name, several sets) is a FnSpec, a stand-in that forwards every message to that object: each set is then its own object, with its
-// own note, its own pipeline-cache keys (pso_key.fsfn, bf_fn's memo) and its own fn_dev record. Only the note, fn_dev and reflection (the argument encoder check) take one: the
-// MTLDevice is never handed a FnSpec (pso_build_dev and every other MTLDevice build take fn_dev's function). An empty set (shader_load) keeps the library's object
+// own note and its own pipeline-cache keys (pso_key.fsfn, bf_fn's memo). Only the note and reflection (the argument encoder check) take one. An empty set (shader_load) keeps the
+// library's object
 @interface FnSpec : NSProxy { @public id<MTLFunction> base; } @end
 @implementation FnSpec
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)sel { return [(NSObject *)base methodSignatureForSelector:sel]; }
 - (void)forwardInvocation:(NSInvocation *)inv { [inv invokeWithTarget:base]; }
 - (id)forwardingTargetForSelector:(SEL)sel { return base; }
 @end
-static int pso4_compiler(void);
-static os_unfair_lock g_fn_dev_lock = OS_UNFAIR_LOCK_INIT;
-@interface FnDev : NSObject { @public id<MTLFunction> fn; } @end
-@implementation FnDev @end
-static NSMapTable *g_fn_dev;   // a function fn_spec left unspecialized → its stable specialization record (fn filled by fn_dev)
-static id<MTLFunction> fn_lib_spec(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **e) {
-    if (!lib || !name || !cv) return nil;
-    return fn4_note([lib newFunctionWithName:name constantValues:cv error:e], lib, name, cv);
-}
 static id<MTLFunction> fn_spec(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **e) {
     if (!lib || !name) return nil;
-    if (!pso4_compiler()) return fn_lib_spec(lib, name, cv, e);
     id<MTLFunction> f = [lib newFunctionWithName:name];
     if (!f) { if (e) *e = [NSError errorWithDomain:@"dm" code:1 userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"no function %@ in the library", name]}]; return nil; }
     if (!f.functionConstantsDictionary.count) return fn4_note(f, lib, name, nil);
     static MTLFunctionConstantValues *none; static dispatch_once_t once; dispatch_once(&once, ^{ none = [MTLFunctionConstantValues new]; });
     if (cv && ![cv isEqual:none]) { FnSpec *p = [FnSpec alloc]; p->base = f; f = (id<MTLFunction>)p; }   // compared by value (akb_fn)
-    os_unfair_lock_lock(&g_fn_dev_lock);
-    if (!g_fn_dev) g_fn_dev = [[NSMapTable alloc] initWithKeyOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality valueOptions:NSPointerFunctionsStrongMemory capacity:0];
-    if (![g_fn_dev objectForKey:f]) [g_fn_dev setObject:[FnDev new] forKey:f];
-    os_unfair_lock_unlock(&g_fn_dev_lock);
     return fn4_note(f, lib, name, cv);
-}
-// The function an MTLDevice pipeline is built from: f specialized through its library (once) when fn_spec left it unspecialized, else f itself
-static id<MTLFunction> fn_dev(id<MTLFunction> f) {
-    if (!f) return f;
-    os_unfair_lock_lock(&g_fn_dev_lock); FnDev *dev = [g_fn_dev objectForKey:f]; os_unfair_lock_unlock(&g_fn_dev_lock);
-    if (!dev) return f;
-    // Only callers of this function wait for its compilation; the map lock never covers a library/compiler call.
-    @synchronized(dev) {
-        if (dev->fn) return dev->fn;
-        MTL4SpecializedFunctionDescriptor *sd = (MTL4SpecializedFunctionDescriptor *)fn4_of(f); MTL4LibraryFunctionDescriptor *ld = (MTL4LibraryFunctionDescriptor *)sd.functionDescriptor;
-        id<MTLLibrary> lib = ld.library; NSString *name = ld.name; MTLFunctionConstantValues *cv = sd.constantValues;
-        id<MTLFunction> own = object_getClass(f) == FnSpec.class ? ((FnSpec *)f)->base : f;   // never a FnSpec to the MTLDevice: the unspecialized function, which it refuses with an error
-        if (!lib || !name || !cv) return own;   // fn_spec notes all three
-        NSError *e = nil; dev->fn = fn_lib_spec(lib, name, cv, &e);
-        if (!dev->fn) { MLOG("[RED] function %s: specializing its function constants for an MTLDevice pipeline failed: %s", f.name.UTF8String, e.localizedDescription.UTF8String); return own; }
-        return dev->fn;
-    }
 }
 static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e);   // a compute shader's pipeline: from the archive bundled with the app, else built
 // layer: a vertex shader's layer entry points (entry_layer / entry_layer_z, which also write the layer) instead of main0 / main0_z, for a program whose geometry shader is a slice writer (prog_fold_gs)
@@ -8459,31 +8426,31 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
 // well it writes no archive and reports no error). Each serialization writes what was captured since the one before, so the folder holds one file per flush; all of them are opened
 // at start, and a base found in one is taken from it directly (MTL4Archive), not through the compiler's lookupArchives, which would capture it again into the next file. A base
 // taken from an archive costs about 0.06 ms, against 10-80 ms to build one.
-// DM_PSO_MTL4=0: the MTLDevice path as before (no bases, no archive). DM_PSO_ARCHIVE=off: no archive; DM_PSO_ARCHIVE=<folder>: the archive in that folder.
-// On by default on the Mac and on iOS, and with it the hybrid pipelines and the pipeline prebuild; on iOS a profile's pso_mtl4 off turns it off for that game (DM_PSO_MTL4=1 /
-// 0 overrides either way). iOS took it only for a profile with pso_mtl4 on (Breath of the Wild) while the archive's footprint (with the device's own prebuild, about 850 MB more for
-// Breath of the Wild on the Mac) was not measured on an iPhone. It was then, with DM_PSO_MTL4=1 on an iPhone 18 Pro Max (iOS 27.3) and the g19p archive bundled with the app:
-// Persona 5 Royal peaked at a footprint of about 1.9 GB, prepared its 32,258 prewarm lines in 1.6 s and compiled no base while playing; Super Mario Odyssey held 60 fps with a
-// peak footprint of 2.87 GB. The prebuild's bases can also come made offline, bundled with the
-// app (DM_PSO_BUNDLE, pso_bundle_open). newArchiveWithURL maps a file on the Mac's internal disk (clean pages, not in the footprint) and reads one on an external drive into memory, whole and for the
-// whole run (Kirby Star Allies: 1.13 GB), and it offers no choice: docs/reference/memory.md
-static int pso4_on(void) {
-    static int v = -1;
-    if (v < 0) {
-        const char *e = getenv("DM_PSO_MTL4");
-#if TARGET_OS_IPHONE
-        v = e ? !strcmp(e, "1") : DM_GAME_PSO_MTL4;   // the profile's pso_mtl4 (on unless it sets off)
-        if (!v && e) MLOG("DM_PSO_MTL4=%s: render pipelines through the MTLDevice (no Metal 4 bases, pipeline archive or hybrid pipelines)", e);
-        else if (!v) MLOG("render pipelines through the MTLDevice: the profile sets pso_mtl4 off (DM_PSO_MTL4=1 turns on the Metal 4 bases, the pipeline archive and the hybrid pipelines)");
-#else
-        v = !(e && !strcmp(e, "0"));
-        if (!v) MLOG("DM_PSO_MTL4=0: render pipelines are built through the MTLDevice (no bases, no pipeline archive)");
-#endif
-        // Metal cannot capture pipelines made from bases ("Capturing Render pipeline specialization is not supported"), and its Metal 4 → 3 conversion for the capture layer
-        // crashes on the archives: a run that may capture GPU frames (DM_GPU_CAPTURE, MTL_CAPTURE_ENABLED) builds its pipelines through the MTLDevice
-        if (v && (getenv("DM_GPU_CAPTURE") || getenv("MTL_CAPTURE_ENABLED"))) { v = 0; MLOG("render pipelines through the MTLDevice in a run that may capture GPU frames (DM_GPU_CAPTURE / MTL_CAPTURE_ENABLED)"); }
-    }
-    return v;
+// Every pipeline is built through g_comp4, with the hybrid pipelines and the pipeline prebuild (DM_PSO_HYBRID=0 / DM_PSO_PREBUILD=0 turn those two off).
+// DM_PSO_ARCHIVE=off: no archive; DM_PSO_ARCHIVE=<folder>: the archive in that folder. The archive's footprint on an iPhone, measured with the g19p archive bundled with the
+// app on an iPhone 18 Pro Max (iOS 27.3): Persona 5 Royal peaked at a footprint of about 1.9 GB, prepared its 32,258 prewarm lines in 1.6 s and compiled no base while playing;
+// Super Mario Odyssey held 60 fps with a peak footprint of 2.87 GB (Breath of the Wild on the Mac: about 850 MB more with the device's own prebuild). The prebuild's bases can
+// also come made offline, bundled with the app (DM_PSO_BUNDLE, pso_bundle_open). newArchiveWithURL maps a file on the Mac's internal disk (clean pages, not in the footprint) and
+// reads one on an external drive into memory, whole and for the whole run (Kirby Star Allies: 1.13 GB), and it offers no choice: docs/reference/memory.md.
+// DM_PSO_MTL4 (it chose the MTLDevice path, which is gone) is ignored with one log line (pso4_init).
+// The GPU capture profile. With Metal's capture layer loaded, pipeline archives do not work (Xcode 27.3 beta, macOS 27.3, Apple M4 Max, measured for the Metal 4 release):
+// every archive lookup misses; once the process has called newArchiveWithURL Metal refuses to capture ("Capturing Metal 4 Device is not supported"); a compile with
+// MTL4CompilerTaskOptions.lookupArchives crashes in Metal4To3ConversionUtility::convertBinaryArchives; and an archive a pipeline serializer writes meanwhile serves nothing later.
+// Pipelines MTL4Compiler builds whole, and pipelines specialized from a base (newRenderPipelineStateBySpecializationWithDescriptor), capture and replay. So a run that loads the
+// layer opens no archive (neither the one bundled with the app nor pso_archive/), makes no serializer and writes no archive file, and builds every pipeline through g_comp4,
+// bases and specializations as in any run; with no archive the prebuild has nothing to build into. No run sets lookupArchives. The layer is loaded by MTL_CAPTURE_ENABLED (the
+// Mac), DM_GPU_CAPTURE asks for a capture (which needs it), and an iOS app built with DM_METAL_CAPTURE=1 has MetalCaptureEnabled in its Info.plist, which loads it with no
+// variable set (Xcode's capture button). The reason, or NULL
+static const char *capture_profile_why(const char *mtl_capture, const char *dm_capture, id plist) {
+    if (mtl_capture) return "MTL_CAPTURE_ENABLED";
+    if (dm_capture) return "DM_GPU_CAPTURE";
+    if ([plist respondsToSelector:@selector(boolValue)] && [plist boolValue]) return "Info.plist MetalCaptureEnabled";
+    return NULL;
+}
+static const char *pso4_capture(void) {
+    static const char *why; static dispatch_once_t once;
+    dispatch_once(&once, ^{ why = capture_profile_why(getenv("MTL_CAPTURE_ENABLED"), getenv("DM_GPU_CAPTURE"), [NSBundle.mainBundle objectForInfoDictionaryKey:@"MetalCaptureEnabled"]); });
+    return why;
 }
 // g_comp4 (made in mtl_init, declared at the top) compiles what the archive does not capture: specializations, and every compile without an archive folder
 // g_arch4: the files that may hold bases with a vertex layout, g_arch4p: the files that hold none (pb<seq>_<program>.mtl4a: the prebuild's own, p<seq>.mtl4a: any other flush whose bases all
@@ -8801,7 +8768,7 @@ static id arch_lookup(MTL4PipelineDescriptor *d, int plain, int *from_run) { ret
 static ArchEpoch *g_ep, *g_ep_pre; static os_unfair_lock g_ep_lock = OS_UNFAIR_LOCK_INIT;
 static int g_arch_cap;   // compiles are captured (an archive folder, a serializer): immutable after pso4_init
 static dispatch_group_t g_arch_pending;   // periods handed over and not written yet
-static _Atomic uint64_t g_pb_built, g_pb_archived, g_pb_reused, g_pb_spec, g_pb_legacy, g_pb_base_ns;
+static _Atomic uint64_t g_pb_built, g_pb_archived, g_pb_reused, g_pb_spec, g_pb_base_ns;
 // Time by kind, all threads (the 'pipelines up to frame' line): archive lookups that found the base / found none, specializations, base compiles; predictions (submit thread)
 static _Atomic uint64_t g_pt_hit_n, g_pt_hit_ns, g_pt_miss_n, g_pt_miss_ns, g_pt_spec_ns, g_pt_comp_ns, g_pt_pred_n, g_pt_pred_ns, g_pp_done_n;   // bases compiled / taken from the archive / reused, specializations, MTLDevice builds
 typedef struct { const void *vf, *ff; uint32_t samples, a2c, rast, topo, amp; uint32_t va[31][3], vl[31][3]; } pbase_key;   // what a base depends on: pso_desc's descriptor less the colour attachments
@@ -8889,7 +8856,7 @@ static int arch_file_ok(NSString *path) {
 static void pso_bundle_open(NSMutableArray<id<MTL4Archive>> *archp) {
     const char *e = getenv("DM_PSO_BUNDLE");
     if (!e || !*e || !strcmp(e, "off")) return;
-    NSString *dir = @(e), *gpu = g_dev.architecture.name;   // every device of macOS 26.6 / iOS 27.3 has it; the tests' fake devices without it never get here (pso4_init returns first)
+    NSString *dir = @(e), *gpu = g_dev.architecture.name;   // every device of macOS 26.6 / iOS 27.3 has it; a test with a fake device leaves DM_PSO_BUNDLE unset
     NSString *p = gpu ? [dir stringByAppendingPathComponent:[gpu stringByAppendingPathExtension:@"mtl4a"]] : nil;
     if (!p || ![NSFileManager.defaultManager fileExistsAtPath:p]) {
         NSArray<NSString *> *have = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]];
@@ -9032,7 +8999,11 @@ static void arch_open_end(void) { Method m = arch_read_method(); if (m && g_ns_r
 static void pso4_init(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        if (!pso4_on() || !mtl_comp4()) return;   // no Metal 4 compiler (t_pso_pending's fake device): the MTLDevice path
+        if (!mtl_comp4()) MDIE("no Metal 4 compiler: every pipeline is built through MTL4Compiler");   // mtl_init makes it; a test without mtl_init puts one in g_comp4 first
+        const char *mode = getenv("DM_PSO_MTL4");
+        if (mode) MLOG("DM_PSO_MTL4=%s ignored: pipelines are always built through MTL4Compiler", mode);
+        const char *cap = pso4_capture();
+        if (cap) { MLOG("GPU capture profile (%s): no pipeline archive is opened or written; every pipeline is compiled through MTL4Compiler, whole or specialized from its base", cap); return; }
         const char *e = getenv("DM_PSO_ARCHIVE"); NSString *user = pso_user_path();
         g_arch_dir = e && !strcmp(e, "off") ? nil : e && *e ? @(e) : user ? [user.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_archive"] : nil;
         NSMutableArray<id<MTL4Archive>> *arch = [NSMutableArray array], *archp = [NSMutableArray array];
@@ -9117,7 +9088,6 @@ static void pso4_init(void) {
         }
         arch_open_end();
         g_arch4 = arch; g_arch4p = archp;
-        g_pso4 = 1;   // the game's pipelines through g_comp4 from here
         if (g_arch_dir) {
             g_ep = ep_new(0); g_arch_cap = g_ep != nil;
             if (g_arch_cap) atexit(arch_at_exit);   // what is not written yet, written at quit (mtl_arch_save)
@@ -9125,7 +9095,6 @@ static void pso4_init(void) {
         }
     });
 }
-static int pso4_compiler(void) { pso4_init(); return g_pso4; }   // render pipelines go through the Metal 4 compiler (fn_spec)
 // Compute pipelines from the archive bundled with the app: it holds one per compute shader of the shader map and of the prewarm list's C rows (pso_offline.py), made from <key>_b's
 // function alone. A compute pipeline depends on nothing else here: it is built from the function alone (no threadgroup size or other option; the dispatch gives the threadgroup
 // size), so the lookup names the function alone too, by the descriptor its function was noted with (fn4_note): a library function, or one specialized with its constants (fn_spec;
@@ -9353,13 +9322,6 @@ static void pbase_key_of(MTLRenderPipelineDescriptor *d, pbase_key *k) {
         k->vl[i][0] = (uint32_t)l.stride; k->vl[i][1] = (uint32_t)l.stepFunction; k->vl[i][2] = (uint32_t)l.stepRate;
     }
 }
-// A pipeline with no Metal 4 descriptor, through the MTLDevice: from specialized functions (fn_dev)
-static id<MTLRenderPipelineState> pso_build_dev(MTLRenderPipelineDescriptor *d, NSError **e) {
-    id<MTLFunction> vf = fn_dev(d.vertexFunction), ff = fn_dev(d.fragmentFunction);
-    if (vf == d.vertexFunction && ff == d.fragmentFunction) return [g_dev newRenderPipelineStateWithDescriptor:d error:e];
-    MTLRenderPipelineDescriptor *dd = [d copy]; dd.vertexFunction = vf; dd.fragmentFunction = ff;
-    return [g_dev newRenderPipelineStateWithDescriptor:dd error:e];
-}
 // newRenderPipelineDescriptorForSpecialization's descriptor, owned by the caller whatever the driver returns. Its new prefix promises a +1 object, and macOS 27.0 returns one. iOS 26.0
 // returns it autoreleased (23A341; on an iPad Pro M4 the method is -[AGXG16GFamilyRenderPipeline newRenderPipelineDescriptorForSpecialization] in AGXMetalG16G_B0, and an iPhone 16 Pro Max
 // crashed the same way). ARC's release at the end of pso_build_ex then freed it, and the release of the warm task's pool crashed in objc_release before the first frame
@@ -9382,10 +9344,10 @@ static MTL4RenderPipelineDescriptor *spec_desc(id base, _Atomic int *own) {   //
 }
 static _Atomic int g_spec_own;
 // The pipeline pso_desc describes: its base (built, from the archive or already made), then specialized with its colour state. Called on several threads.
-// compile 0: nil on an archive miss (*e untouched), with no MTLDevice fallback. Prewarm compaction may still refresh a found base for serialization.
+// compile 0: nil on an archive miss (*e untouched). Prewarm compaction may still refresh a found base for serialization. A function with no Metal 4 descriptor: nil (pso_err_nodesc).
 static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, NSError **e, int compile) {
     // Do not send conflicting or non-renderable aspect formats to Metal, which can
-    // abort instead of returning an NSError (also on the MTLDevice fallback).
+    // abort instead of returning an NSError.
     if (!pso_ds_valid((uint32_t)d.depthAttachmentPixelFormat, (uint32_t)d.stencilAttachmentPixelFormat)) {
         if (e) *e = [NSError errorWithDomain:@"nxnative.NVN.Pipeline" code:1
             userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"invalid depth/stencil pipeline formats %lu/%lu (compile=%d)",
@@ -9397,12 +9359,15 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
     // A pipeline specialized from a base with open colour state gives its fragment function 0 for [[primitive_id]], where one built whole gives the real IDs (macOS 27.2, Apple M6: 4 triangles of a draw
     // counted per ID, 16384 0 0 0 against 4096 each, whatever the vertex function). So a fragment shader that reads the ID gets a whole pipeline, with no base to share. Fire Emblem Fortune's Weave's
     // ambient occlusion draws 4 triangles and writes the array layer of each one's primitive ID: every one wrote layer 0, so 3 pixels in 4 had no sun light. A platform limit: the ID has no other source
-    if (rast && g_pso4 && [d.label isEqualToString:PSO_WHOLE]) {
+    if (rast && [d.label isEqualToString:PSO_WHOLE]) {
         MTL4RenderPipelineDescriptor *whole = pso_desc4(d, 0);
         if (whole) { if (!compile) return nil; return [g_comp4 newRenderPipelineStateWithDescriptor:whole compilerTaskOptions:nil error:e]; }
     }
-    MTL4RenderPipelineDescriptor *b = g_pso4 ? pso_desc4(d, rast) : nil;   // with rasterization off there is no colour state to leave open: the base is the pipeline
-    if (!b) { if (!compile) return nil; g_pb_legacy++; return pso_build_dev(d, e); }
+    MTL4RenderPipelineDescriptor *b = pso_desc4(d, rast);   // with rasterization off there is no colour state to leave open: the base is the pipeline
+    if (!b) {   // a function with no Metal 4 descriptor (every function a pipeline is built from is noted: fn4_note): no pipeline
+        if (compile && e) *e = pso_err_nodesc(!fn4_of(d.vertexFunction) ? d.vertexFunction : d.fragmentFunction);
+        return nil;
+    }
     pbase_key bk; pbase_key_of(d, &bk);
     id<MTLRenderPipelineState> base = nil; PbaseBuild *job = nil; int owner = 0, known = 0;   // known: the archives have been searched for it and lack it
     for (;;) {
@@ -9601,7 +9566,7 @@ static int pso_pend_try(const pso_key *k, id<MTLRenderPipelineState> *out) {
 // transform feedback vertex shaders. DM_PSO_HYBRID=0 turns it off
 static int hybrid_on(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DM_PSO_HYBRID"); pso4_init(); v = g_pso4 && !(e && !strcmp(e, "0")); if (!v) MLOG("hybrid pipelines off: a draw whose pipeline is not built yet waits for it"); }
+    if (v < 0) { const char *e = getenv("DM_PSO_HYBRID"); pso4_init(); v = !(e && !strcmp(e, "0")); if (!v) MLOG("hybrid pipelines off: a draw whose pipeline is not built yet waits for it"); }
     return v;
 }
 static nvn_hmap g_pso_hy = {.klen = sizeof(pso_key)};   // pulling pipelines by the key they stand in for (submit thread)
@@ -9667,7 +9632,7 @@ static _Atomic int g_pre_running; static _Atomic int g_pre_next, g_pre_done, g_p
 // GPU compiler) or another stamp tries them again. g_pre_known: those lines by pair ("vertex<TAB>pixel"); g_pre_fails: this run's new lines
 static NSDictionary<NSString *, NSString *> *g_pre_known; static NSMutableArray<NSString *> *g_pre_fails; static os_unfair_lock g_pre_fail_lock = OS_UNFAIR_LOCK_INIT;
 static _Atomic int g_pre_known_n;   // pairs left to the draws because they failed on an earlier start
-// Pairs with a library file the app does not carry (an IPA packed without the pulling libraries _bp.metallib, then run with DM_PSO_MTL4=1; a shader a partial build has not made yet):
+// Pairs with a library file the app does not carry (an IPA packed without the pulling libraries _bp.metallib, IOS_PULL=0; a shader a partial build has not made yet):
 // their bases cannot be made yet, so the stamp names one such file (pre_device_stamp) and a later start builds them once it is there. g_pre_nolib_file: the first one seen in this
 // run, a name in the library, under g_pre_fail_lock
 static _Atomic int g_pre_nolib; static NSString *g_pre_nolib_file;
@@ -9852,7 +9817,7 @@ static int compile_tasks(void) {
 // threads: workers; wait: run on the calling thread until done (the tool), else in the background. Returns the number of pairs, -1 when there is nothing to do
 static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     shmap_load(); pso4_init();
-    if (!g_pso4 || (!g_arch_bundle && !g_arch_cap) || atomic_exchange(&g_pre_running, 1)) return -1;
+    if ((!g_arch_bundle && !g_arch_cap) || atomic_exchange(&g_pre_running, 1)) return -1;
     // The pairs: shader_pairs.tsv (BNSH variations and the other readers' pairs) and pso_pairs.tsv (agl BAHS program variations, also read by vs_pad; DM_PSO_PAIRS: another path),
     // both beside the shader map
     NSString *pp = [g_shmap_path.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"shader_pairs.tsv"];
@@ -10203,9 +10168,9 @@ static void warm_finish(void) {
                          (unsigned long long)g_warm_mps, (unsigned long long)g_mtk_arch, (unsigned long long)g_mtk_built);
     char again[96] = "";   // only a compacting start captures bases again
     if (g_compact_enabled) snprintf(again, sizeof again, " (%d of them captured again for the compaction, %.1f ms)", (int)g_compact_bases, g_compact_ns / 1e6);
-    if (g_pso4) MLOG("pipeline bases so far: %llu compiled, %llu from the archive%s, %llu reused (%.1f ms for the bases); %llu specializations (their descriptors %s), %llu pipelines without a base (MTLDevice)",
-                      (unsigned long long)g_pb_built, (unsigned long long)g_pb_archived, again, (unsigned long long)g_pb_reused, g_pb_base_ns / 1e6, (unsigned long long)g_pb_spec,
-                      (const char *[]){"not asked for yet", "returned retained", "returned autoreleased"}[atomic_load(&g_spec_own) % 3], (unsigned long long)g_pb_legacy);
+    MLOG("pipeline bases so far: %llu compiled, %llu from the archive%s, %llu reused (%.1f ms for the bases); %llu specializations (their descriptors %s)",
+         (unsigned long long)g_pb_built, (unsigned long long)g_pb_archived, again, (unsigned long long)g_pb_reused, g_pb_base_ns / 1e6, (unsigned long long)g_pb_spec,
+         (const char *[]){"not asked for yet", "returned retained", "returned autoreleased"}[atomic_load(&g_spec_own) % 3]);
     if (g_arch_bundle || g_arch_cap) MLOG("compute pipelines so far: %llu from the archive bundled with the app, %llu from this device's archive, %llu built (%.1f ms looking up, %.1f ms building)",
                                          (unsigned long long)g_cps_arch, (unsigned long long)g_cps_run, (unsigned long long)g_cps_built, g_cps_look_ns / 1e6, g_cps_build_ns / 1e6);
     // All warm tasks have joined. WarmItems retain published shaders until the submit thread claims them.
