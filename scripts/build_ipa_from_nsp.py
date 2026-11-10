@@ -27,7 +27,8 @@
 #   and its RomFS images are written straight from it; the name, display version and icon come from the NACP and icon it carries, else as for a dump (its name record is a packer's label, not the game's), and --icon / ICON gives the app an icon when it carries none.
 #   Or the folder may hold the game as one NX archive (a .nx file, https://github.com/fab918/nxformat: NXConvert by fab918 makes them from decrypted dumps or NUPs; scripts/pack_nx.py), or the .nx file may be given in its place: read
 #   like a NUP (no prod.keys; the versions and DLC it holds, its NACP and icon tied to each version, Switch 1 and Switch 2), every file checked against its SHA-256. An NX holding decrypted NCA files
-#   (nxconvert pack from a decrypted NSP or XCI) is listed but not packed: its updates are unresolved patches, which only an NCA reader applies.
+#   (nxconvert pack from a decrypted NSP or XCI, Switch 1) is read by the in-repo nx_extract (--plain: still no keys), its update's patch laid over its base game as for NSPs; it needs
+#   temporary space for the NCA files of the version being extracted (<build folder>/tmp/nca, deleted after each).
 #   The newest version in the folder is packed. A version the profile registers (with every version in its shader_versions in the folder) is built from the profile as it is; any other
 #   version (the base game alone, another update) from a profile derived from it in <build folder>/profile: the same settings, and the version's own shaders (derive_profile).
 # Every intermediate file is under the build folder, <id>_build/ in the NSP folder unless --work-dir / WORK_DIR names another: nsp/ (NSZ / XCZ files converted to NSP / XCI with nsz -D, kept for the next build; pip install nsz, or an nsz 5.0 or later executable on PATH), extract/ (the extracted game files, kept for the next build unless KEEP_EXTRACTED / --no-keep-extracted), aoc/ (one RomFS image per DLC index), tools/ (the Mac host for a run-time shader capture), patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/. The finished IPA also goes beside the build folder by default (the NSP folder, without --work-dir).
@@ -423,8 +424,8 @@ def rmtree(p):
 NX_EXTRACT = 'dm/tools/nx_extract_bin/nx_extract'   # the committed native executable (dm/tools/native_tools.sh), built from dm/tools/nx_extract
 
 
-def nx_extract_source_sha(repo):   # the same convention as nx_extract --source-sha: the sha256 of Program.cs and nx_extract.csproj, in that order, first 16 digits
-    return hashlib.sha256(b''.join((repo / 'dm/tools/nx_extract' / f).read_bytes() for f in ('Program.cs', 'nx_extract.csproj'))).hexdigest()[:16]
+def nx_extract_source_sha(repo):   # the same convention as nx_extract --source-sha: the sha256 of Program.cs and nx_extract.csproj, in that order, first 16 digits (pack_nx's one definition)
+    return pack_nx.nx_extract_source_sha(repo)
 
 
 def find_nx_extract(repo, env):
@@ -714,6 +715,14 @@ def same_build(nsp_dir, app, fam, keys, repo, env):
     ups = sorted(fam['updates'], key=lambda u: u[0] or 0)
     for v, upd in ([ups[-1]] if ups else []) + ([(0, None)] if fam['base'] is not None else []):
         PROG.set(step=f'main of {"the base game" if upd is None else "update v" + str(v)}')
+        k = upd or fam['base']
+        if fam.get('nx') and k.kind == 'native':   # an NX's NCA snapshot: main's build ID is the catalog's (BUILD_ID_PRESENT), so nothing is staged; a sparse base game has none
+            bid = k.build_id[:16].hex() if k.flags & 1 else None
+            g = gamemod.by_build(bid) if bid else None
+            if g:
+                ver = next(ver for ver, b in g.builds().items() if b.get('main') == bid)
+                PROG.end(f'main {bid} is game profile {g.id}\'s {ver}'); return g, ver, bid
+            continue
         tmp = work / 'exefs.partial'; rmtree(tmp)
         if files: code_modules(fam, upd or fam['base'], tmp / 'ExeFS')
         else:
@@ -777,7 +786,12 @@ def survey_nup(n, k, base, out, pk=pack_nup):
     """A NUP package's (pk = pack_nx: an NX snapshot's) files as nx_extract --manifest leaves an NSP's for the survey, without writing the RomFS: out/ExeFS, out/romfs_manifest.tsv (path, size
     and first 32 bytes of every RomFS file), out/romfs_nro (the NRO modules, whole: their imports decide the graphics API and the modules) and the package's control data, else its base game's.
     A RomFS name with a control character (a tab or a line break would forge manifest rows), NROs that one host folder cannot hold apart (case, Unicode normalization, 255 bytes: pack_nx.HostNames),
-    an NRO above pack_nx.MODULE_MAX and more bytes than the volume has free are refused before anything is written. Returns the files listed"""
+    an NRO above pack_nx.MODULE_MAX and more bytes than the volume has free are refused before anything is written. An NX's NCA snapshot is read by nx_extract --manifest
+    (pack_nx.survey_native), which writes the same files. Returns the files listed"""
+    if pk is pack_nx and k.kind == 'native':
+        try: return pack_nx.survey_native(n, k, base, out, say=say)
+        except pack_nup.Error as e: raise BuildError(str(e)) from e
+        except OSError as e: raise BuildError(f'{k.name}: writing the survey\'s files to {out}: {e.strerror or e}') from e
     out.mkdir(parents=True)
     rows, nros, names = [], [], pack_nx.HostNames(f'{k.name} romfs/')
     def walk(d, parts):
@@ -1311,10 +1325,13 @@ def scan_nup(path, want=None):   # a NUP as scan_nsps gives a folder of NSPs, wi
     return app, {'base': base, 'updates': sorted(vers.items()), 'dlc': [(tid, None, k) for tid, k in sorted(dlc.items())], 'nup': n}
 
 
-def scan_nx(path, want=None, platform=None):   # an NX archive as scan_nsps gives a folder of NSPs, with its snapshots for the NSPs: (title ID, {'base', 'base_version', 'updates', 'dlc', 'nx': the open archive})
+def scan_nx(path, want=None, platform=None, repo=None, env=None):
+    """An NX archive as scan_nsps gives a folder of NSPs, with its snapshots for the NSPs: (title ID, {'base', 'base_version', 'updates', 'dlc', 'nx': the open archive}).
+    Its NCA snapshots (nxconvert pack) are read by nx_extract, found (find_nx_extract) the first time one is touched: never for an archive of trees"""
     n = None
     try:
         n = pack_nx.Nx(path)
+        n.nca_tool = pack_nx.Native(tool=(lambda: find_nx_extract(repo, env)) if repo is not None else None, env=env)
         app, base, vers, dlc = pack_nx.scan(n, want, platform)
     except (pack_nx.Error, OSError) as e:
         if n is not None: n.close()
@@ -1323,12 +1340,14 @@ def scan_nx(path, want=None, platform=None):   # an NX archive as scan_nsps give
 
 
 def extract_nup(ex, name, k, base, app, n, pk=pack_nup):   # one version of a NUP (k: its base or an update package; pk = pack_nx: an NX snapshot) into the layout extract makes; the code modules and the image are kept while unchanged
-    dst = ex / name; part = dst / 'RomFS.img.part'
+    dst = ex / name; parts = (dst / 'RomFS.img.part', ex / f'{name}.partial/RomFS.img.part')   # an NX's NCA snapshot: nx_extract writes into <name>.partial
     def poll():
-        try: return {'done': part.stat().st_size}
-        except OSError: return None
+        for part in parts:
+            try: return {'done': part.stat().st_size}
+            except OSError: pass
+        return None
     try:
-        PROG.stage(f'unpack {name}', poll=poll, unit='B', total=n.tree_bytes(pk.romfs_of(k, base)), est=True)
+        PROG.stage(f'unpack {name}', poll=poll, unit='B', total=pk.version_bytes(n, k, base) if pk is pack_nx else n.tree_bytes(pk.romfs_of(k, base)), est=True)
         how = pk.pack_version(n, k, base, app, dst, say=lambda s: None, step=lambda s: PROG.set(step=s))
     except pack_nup.Error as e: raise BuildError(str(e)) from e
     PROG.end(amount((dst / 'RomFS.img').stat().st_size, 'B') + {'kept': ', reused (inputs unchanged)', 'verified': ', reused (image checked)'}.get(how, ''))
@@ -3236,7 +3255,7 @@ def main(args=None):
     if PROGRAM_INDEX and dump: raise BuildError('--program / PROGRAM_INDEX picks a program from a multi-program application\'s NSPs; '
                                                      + ('an NX' if nxa else 'a NUP' if nup else 'a dump folder') + ' is read as one program\'s files')
     if nxa:
-        app, fam = scan_nx(nxa, want_id, want_platform)
+        app, fam = scan_nx(nxa, want_id, want_platform, repo, env)
         n = fam['nx']
         if (plat_tag := pack_nx.platform_tag(n, n.selected)) and not work_dir(args):
             args.work_dir = str(nsp_dir / f'{app:016X}-{plat_tag}_build')
@@ -3325,9 +3344,13 @@ def main(args=None):
     logs = work / 'logs'
     check_prereqs(env, xlate, mac)
     picks = pick_nsps(fam, have, versions)
+    if nxa:   # an NX's NCA snapshots: staged under tmp/nca, nx_extract's output in logs/ (extract_<version>.log, read for the display version)
+        fam['nx'].nca_tool.tmp, fam['nx'].nca_tool.logs, fam['nx'].nca_tool.allow_damaged = work / 'tmp', logs, ALLOW_DAMAGED
 
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
-    gb = (sum(container(fam)[1].tree_bytes(pk.romfs_of(u or b, b)) + exefs_size(container(fam)[1], u or b) for b, u in picks.values()) if nup else sum(tree_size((u or b) / 'romfs')[1] for b, u in picks.values()) if dump else extract_bytes(picks, False)) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
+    # an NX: what each version writes, and the NCA files the largest staging holds meanwhile (an NCA snapshot's: each staging folder goes before the next)
+    gb = ((sum(pack_nx.version_bytes(fam['nx'], u or b, b) for b, u in picks.values()) + max(pack_nx.staging_bytes(fam['nx'], u or b) for b, u in picks.values())) if nxa else
+          sum(container(fam)[1].tree_bytes(pk.romfs_of(u or b, b)) + exefs_size(container(fam)[1], u or b) for b, u in picks.values()) if nup else sum(tree_size((u or b) / 'romfs')[1] for b, u in picks.values()) if dump else extract_bytes(picks, False)) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'less than {gb:.0f} GB free on the volume of {work}')
     heapck = provisional and HEAP_CHECK and not args.no_heap_check and not heap_checked(g)   # the heap check, when the game needs one (once per provisional profile: it stamps the profile)
     PROG.plan(len(versions) + bool(fam['dlc']) + 4 - (prepare_xcode or (mac and not mac_pack)))   # prepare Xcode (a Mac-only build: the Mac host) replaces app build + IPA pack with one stage (a Mac app: Mac host + Mac app)

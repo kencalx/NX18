@@ -1189,5 +1189,106 @@ class Main(Base):
         self.assertRegex(self.red([str(self.dir)]), r'^\[RED\] more than one game container')
 
 
+@unittest.skipUnless(NX_OK, 'needs the committed nx_extract built from the sources beside it, on a Mac')
+class NativeMain(NativeBase):
+    """The NSP script on an NX of NCA snapshots, up to extraction: the real nx_extract, found once; no keys asked for"""
+    def run_main(self, target, *, extract=True, package=None, argv=(), free=None):
+        seen, said, found = {}, [], []
+        def stop(env, *a):
+            seen.update(env)
+            if not extract: raise Stop()
+        def find(repo, env):
+            found.append(repo); return pack_nx.find_tool(repo, env)
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
+             mock.patch.object(nsp, 'check_prereqs', side_effect=stop), mock.patch.object(nsp, 'say', side_effect=said.append), \
+             mock.patch.object(nsp, 'check_versions_aarch64', side_effect=Stop), mock.patch.object(nsp, 'find_nx_extract', side_effect=find), \
+             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_reader', side_effect=AssertionError('read a package')), \
+             mock.patch.object(nsp, 'free_gb', side_effect=free or nsp.free_gb):
+            with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(target)] + (['--package', package] if package else []) + list(argv)))
+        return Path(seen['DM_ROOT']), said, found
+
+    def red(self, argv, free=None):
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
+             mock.patch.object(nsp, 'check_prereqs'), mock.patch.object(nsp, 'say'), mock.patch.object(nsp.PROG, 'say') as red, \
+             mock.patch.object(nsp, 'free_gb', side_effect=free or nsp.free_gb), mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')):
+            self.assertEqual(nsp.cli(argv), 1)
+        return red.call_args.args[0]
+
+    def test_update_reaches_extraction(self):
+        self.path = self.path.rename(self.dir / 'Game.NX'); self.write_game()
+        for target in (self.dir, self.path):
+            with self.subTest(target=target.name):
+                work, said, found = self.run_main(target)
+                v = work / f'extract/v{VER}'
+                self.assertEqual((v / 'ExeFS/main').read_bytes(), self.g.exefs1['main'])
+                img = (v / 'RomFS.img').read_bytes()
+                self.assertEqual({p: img[a:a + b] for p, (d, a, b) in romfs_image.read_index(v / 'RomFS.img').items() if not d}, self.g.romfs1)
+                self.assertEqual(nacp.version(v / 'control.nacp'), '1.2.0')
+                self.assertIn('display version 1.2.0', (work / f'logs/extract_v{VER}.log').read_text())
+                self.assertEqual(found, [REPO])   # once, for the scan and the extraction
+                self.assertFalse((work / 'extract/v0').exists())
+                self.assertEqual(list((work / 'tmp/nca').iterdir()), [])
+                self.assertTrue(any(s.startswith(f'an NX: Game.NX, {TID:016X}, Switch 1') for s in said), said)
+
+    def test_base_alone_and_a_sparse_base(self):
+        work, _, _ = self.run_main(self.path, package='v0')
+        self.assertEqual((work / 'extract/v0/ExeFS/main').read_bytes(), self.g.exefs0['main'])
+        g = dnca_writer.Game(TID, sparse_base=True)
+        self.write([{'id': TID, 'platform': 1, 'snapshots': g.snapshots(META, base_build=False)}])
+        self.assertRegex(self.red([str(self.path), '--package', 'v0']), r"^\[RED\] game.nx \(base\): the base game's program is sparse")
+        work, _, _ = self.run_main(self.path)
+        self.assertEqual((work / f'extract/v{VER}/ExeFS/main').read_bytes(), g.exefs1['main'])
+
+    def test_disk_check_counts_the_staged_ncas(self):
+        n = self.open(); n.nca_tool = pack_nx.Native(tool=pack_nx.find_tool)
+        _, base, vers, _ = pack_nx.scan(n)
+        out = pack_nx.version_bytes(n, vers[VER], base)
+        staged = pack_nx.staging_bytes(n, vers[VER])
+        self.assertGreater(staged, out)
+        n.close()
+        self.assertRegex(self.red([str(self.path)], free=lambda p: 6 + (out + staged / 2) / 2**30), r'^\[RED\] less than 6 GB free')
+
+    def test_damaged_nca(self):
+        prog = bytearray(self.g.upd_prog.data)
+        start, _ = dnca_writer.section_span(prog, 0)
+        prog[start + 0x200 + 0x1040] ^= 0xFF   # the ExeFS PFS0 (at 0x200 of the section) in its second hash block: subsdk0's data, not the file table
+        bad = bytes(prog)
+        self.g.update = {k: (bad if v == self.g.upd_prog.data else v) for k, v in self.g.update.items()}
+        self.write_game()
+        self.assertRegex(self.red([str(self.path)]), r"^\[RED\] game.nx \(update 458752\): .*fail the NCA's own hash check")
+        work, _, _ = self.run_main(self.path, argv=['--allow-damaged'])
+        self.assertTrue((work / f'extract/v{VER}/ExeFS/main').is_file())
+
+    def test_dlc(self):
+        app, fam = nsp.scan_nx(self.path, repo=REPO, env=None); self.addCleanup(fam['nx'].close)
+        work = self.dir / 'w'; fam['nx'].nca_tool.tmp = work / 'tmp'
+        with mock.patch.object(nsp, 'PROG'):
+            self.assertEqual(nsp.extract_aoc(None, None, REPO, work, app, fam, work / 'logs'), work / 'aoc')
+            first = romfs_image.file_identity(work / 'aoc/1.img')
+            nsp.extract_aoc(None, None, REPO, work, app, fam, work / 'logs')
+        self.assertEqual(romfs_image.file_identity(work / 'aoc/1.img'), first)   # reused
+        self.assertEqual(set(romfs_image.read_index(work / 'aoc/1.img')), {'dlcfile', 'more', 'more/x.bin'})
+
+    def test_survey_files(self):
+        app, fam = nsp.scan_nx(self.path, repo=REPO, env=None); self.addCleanup(fam['nx'].close)
+        out = self.dir / 'survey/extract.partial'
+        k = fam['updates'][-1][1]
+        with mock.patch.object(nsp, 'say'):
+            self.assertEqual(nsp.survey_nup(fam['nx'], k, fam['base'], out, pack_nx), len(self.g.romfs1))
+        self.assertEqual((out / 'ExeFS/main').read_bytes(), self.g.exefs1['main'])
+        self.assertEqual(nacp.version(out / 'control.nacp'), '1.2.0')
+        rows = (out / 'romfs_manifest.tsv').read_text().splitlines()
+        self.assertEqual(sorted(r.split('\t')[0] for r in rows[1:]), sorted('/' + p for p in self.g.romfs1))
+
+    def test_same_build_reads_the_catalog(self):
+        app, fam = nsp.scan_nx(self.path, repo=REPO, env=None); self.addCleanup(fam['nx'].close)
+        sys.path.insert(0, str(REPO / 'dm/games')); import game as gamemod
+        asked = []
+        with mock.patch.object(gamemod, 'by_build', side_effect=asked.append), mock.patch.object(nsp, 'PROG'), \
+             mock.patch.object(pack_nx, '_run', side_effect=AssertionError('ran nx_extract')):
+            self.assertIsNone(nsp.same_build(self.dir, app, fam, None, REPO, None))
+        self.assertEqual(asked, [self.g.bid1[:16].hex(), self.g.bid0[:16].hex()])
+
+
 if __name__ == '__main__':
     unittest.main()
