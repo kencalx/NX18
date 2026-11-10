@@ -459,3 +459,12 @@ def folder(path, files):   # a snapshot's files written into a folder (the stagi
     path.mkdir(parents=True, exist_ok=True)
     for name, b in files.items(): (path / name).write_bytes(b)
     return path
+
+
+def cnmt_of(meta):   # (type, title ID, version) of a Meta NCA made here: the content meta, the one file of its PFS0 (section 0)
+    start, _ = section_span(meta, 0)
+    pfs = start + struct.unpack_from('<Q', meta, 0x408 + 0x38)[0]
+    count, strings = struct.unpack_from('<II', meta, pfs + 4)
+    data = pfs + 0x10 + 0x18 * count + strings + struct.unpack_from('<Q', meta, pfs + 0x10)[0]
+    tid, version, kind = struct.unpack_from('<QIB', meta, data)
+    return kind, tid, version

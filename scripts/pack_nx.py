@@ -7,9 +7,19 @@
 # per file. Its files are not encrypted, so it needs no keys. The NACP and the icons are records of their own (Media), each tied to one exact snapshot.
 # Two kinds of tree, by what NXConvert packed:
 #   from a NUP or extracted folders (nxconvert pack-nup, pack-tree, add-tree): exefs/, romfs/ and an optional data/ per snapshot, an update's tree already merged with its base's
-#     (its ExeFS replaces the base's, its RomFS paths shadow the base's). These are packed here.
-#   from a decrypted NSP or XCI (nxconvert pack, add): decrypted NCA files, an update's holding unresolved patch NCAs. Those need an NCA reader with patching that this script lacks:
-#     it lists them and refuses to pack them, with a line saying so (code 'native').
+#     (its ExeFS replaces the base's, its RomFS paths shadow the base's). These are packed here, by this script alone.
+#   from a decrypted NSP or XCI (nxconvert pack, add): a flat set of decrypted NCA files (<content ID>.nca, <content ID>.cnmt.nca; DNCA at 0x200, no section encrypted), an update's
+#     holding its base game's NCAs and its unresolved patch NCAs. These are read by nx_extract --plain (dm/tools/nx_extract, LibHac: no keys), found the first time such a snapshot
+#     is touched (a tree archive never starts it) and refused unless built from the in-repo source. The scan reads every one's own content meta (one nx_extract --contents run) and
+#     checks it against the Catalog; a DLC's add-on title ID comes from there. To pack a version, the NCA files it needs (Meta, Program, Control, Manual: never Data or delta
+#     fragments; a DLC: Meta, Data, PublicData) are staged into <build folder>/tmp/nca/<label>/, each checked against its SHA-256 as it is streamed out of the archive, and deleted
+#     after the run: an update version needs free space for its base and patch NCAs beside its output (checked first). An update is read in one folder as base and update, its patch
+#     Program NCA laid over the base one (BKTR) by nx_extract. Refused: Switch 2 or platform-unknown games and snapshot types 3 and 4 (nxconvert 1.0.2 writes none: code native),
+#     anything in a snapshot root but those NCA files, an NCA without the DNCA marker, with an encrypted section, an unflattened sparse layer, an FS header other than version 2 or
+#     hash trees other than SHA-256 and IVFC, a data-only update (code nca), a sparse base game packed alone (code sparse: it runs only with its update).
+#     nx_extract writes extract/v<version>/ (its log: logs/extract_v<version>.log, with display version and build IDs) through extract/v<version>.partial/, and a stamp
+#     native.inputs.json (a digest of the tool's source, this script, the IDs and every NCA's name, size and SHA-256 from the Manifest, and the SHA-256 of what it wrote): a repeat run
+#     with that digest stages nothing, also after an appended generation or a recompression. The NACP and icon come from the Control NCA, what it lacks from the Media records.
 # Writes, under the build folder (<folder of the .nx>/<title ID>_build unless --work-dir names another):
 #   extract/v<version>/ExeFS/   the version's code modules
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py), written straight from the archive: the RomFS is never unpacked into loose files
@@ -33,8 +43,8 @@
 # Needs the zstd module for zstd blocks: compression.zstd (Python 3.14+) or backports.zstd, as the NSP script.
 # A base snapshot with no game files (no exefs/main, nothing in romfs/: one that holds only the application's metadata) is no base game, as a NUP's empty base record.
 # An archive may hold one title ID on two platforms: --title-id <ID>:switch1 / :switch2 / :unknown picks one, and its build folder is <ID>-<platform>_build.
-# Usage: pack_nx.py <game.nx> [--version N] [--title-id ID[:PLATFORM]] [--work-dir DIR] [--list] [--verify] [--crc]   (exit 1 on error)
-import argparse, hashlib, os, re, shutil, struct, sys, unicodedata
+# Usage: pack_nx.py <game.nx> [--version N] [--title-id ID[:PLATFORM]] [--work-dir DIR] [--list] [--verify] [--crc] [--allow-damaged]   (exit 1 on error)
+import argparse, hashlib, json, os, re, shutil, struct, subprocess, sys, tempfile, unicodedata
 import typing
 from typing import NoReturn
 from pathlib import Path
@@ -51,7 +61,8 @@ except ImportError:
 class Error(pack_nup.Error):
     """A refused archive or snapshot. code: what failed, in the format's words (SPEC, the conformance fixtures' expected_error): unsupported, version, feature, format, length, bounds,
     resource, structure, padding, header, catalog, catalog_hash, string, manifest, manifest_hash, path, index_hash, block, block_hash, zstd, snapshot_identity, media_hash, file_hash; and this
-    reader's own: native (a decrypted NCA snapshot), select (no such game or version), io"""
+    reader's own: native (an NCA snapshot of a kind not supported), nca (an NCA snapshot's files or content meta refused, by this script or nx_extract), nca_hash (an NCA fails its own
+    hash check), sparse (a sparse base game packed without its update), tool (nx_extract missing, not built from the in-repo source, or failing), select (no such game or version), io"""
     def __init__(self, msg, code='format'):
         super().__init__(msg); self.code = code
 
@@ -83,8 +94,6 @@ PNG, JPEG, NPDM, NACP, OPAQUE = 1, 2, 3, 4, 5
 EXT_FIRMWARE, EXT_LANGUAGES, EXT_REGIONS, EXT_HISTORY, EXT_NATIVE, EXT_RECIPES, EXT_RESOURCES = 0x00010001, 0x00010002, 0x00010003, 0x00010004, 0x00010005, 0x00010006, 0x00010008
 KNOWN_REQUIRED = {EXT_FIRMWARE, EXT_LANGUAGES, EXT_REGIONS, EXT_HISTORY, EXT_NATIVE, EXT_RESOURCES}
 DAMAGE = {'length', 'bounds', 'structure', 'padding', 'catalog_hash', 'manifest_hash', 'index_hash'}   # failures of a newer generation that fall back to the older one (SPEC §1)
-NATIVE = ('holds decrypted NCA files (an NX that nxconvert pack made from a decrypted NSP or XCI): building from those is not supported yet. Make the NX from a NUP or from extracted '
-          'folders instead (nxconvert pack-nup / pack-tree), or build from the NSPs with prod.keys')
 
 
 class _File:
@@ -204,6 +213,8 @@ class Nx:
     def __init__(self, path, budgets=None, crc=False):
         self.path, self.budgets, self.crc = Path(path), budgets or Budgets(), crc
         self.notes, self.fell_back = [], None
+        self.nca_tool: 'Native | None' = None   # a Native: how NCA snapshots are read (the caller sets it; none: they are refused, code tool)
+        self.heads = {}   # file index → content type of an NCA whose header was checked (nca_head)
         try:
             with open(self.path, 'rb') as f:   # the reader keeps its own descriptor
                 size = os.fstat(f.fileno()).st_size
@@ -909,7 +920,9 @@ def npdm_id(n, k):   # the program ID of snapshot k's exefs/main.npdm, read whol
     except pack_nup.Error as e: raise Error(str(e), 'format') from e
 
 
-def has_game(n, k):   # whether snapshot k holds game files: exefs/main, or files in romfs/. A base snapshot without them holds only the application's metadata, as a NUP's empty base record
+def has_game(n, k):   # whether snapshot k holds game files: exefs/main, or files in romfs/ (an NCA snapshot: its Program NCA, which nxconvert requires and nx_extract reads). A base snapshot
+    # without them holds only the application's metadata, as a NUP's empty base record
+    if k.kind == 'native': return True
     return (k.exefs != NO and n.child(k.exefs, b'main') is not None) or (k.romfs != NO and bool(n.children(k.romfs)))
 
 
@@ -936,11 +949,17 @@ def scan(n, want=None, platform=None):
     if p is None: raise Error(f'{n.path.name}: application {a.id:016X} has {len(a.programs)} programs and none is its own: ' + ', '.join(f'{q.id:016X}' for q in a.programs), 'select')
     if len(a.programs) > 1: n.notes.append(f'{n.path.name}: application {a.id:016X} has {len(a.programs)} programs: packing {p.id:016X}, its own')
     snaps = [s for s in a.snapshots if s.program == p.index and s.type != DLC]
+    for s in a.snapshots:
+        if s.kind != 'native' or s not in snaps and s.type != DLC: continue
+        if a.platform != 1: raise Error(f'{s.name}: NCA snapshots of a {PLATFORMS[a.platform]} game are not supported: NXFormat 1.0.2 writes only Switch 1 games that way; make the NX from '
+                                        'extracted folders (nxconvert pack-tree / pack-nup)', 'native')
+        if s.type in (STANDALONE, UNKNOWN): raise Error(f'{s.name}: an NCA snapshot of type {s.type} ({TYPES[s.type]}), which nxconvert never writes; not supported', 'native')
     for s in snaps:
         if s.type == UNKNOWN: n.notes.append(f'{s.name}: a snapshot of unknown type, left out')
     snaps = [s for s in snaps if s.type != UNKNOWN]
-    if snaps and all(s.kind == 'native' for s in snaps): raise Error(f'{n.path.name} {NATIVE}', 'native')
-    if not any(s.kind == 'tree' for s in snaps): raise Error(f'{n.path.name}: no snapshot of {a.id:016X} holds exefs/ or romfs/', 'select')
+    if not any(s.kind in ('tree', 'native') for s in snaps): raise Error(f'{n.path.name}: no snapshot of {a.id:016X} holds exefs/ or romfs/, nor NCA files', 'select')
+    natives = [s for s in snaps if s.kind == 'native'] + [s for s in a.snapshots if s.type == DLC and s.kind == 'native']
+    if natives: probe(n, a, natives)   # their content metas against the Catalog, a DLC's add-on title ID
     bases = [s for s in snaps if s.type == BASE]
     if len(bases) > 1: raise Error(f'{n.path.name}: {len(bases)} base game snapshots of {a.id:016X} (versions ' + ', '.join(str(s.version) for s in bases) + ')', 'select')
     base, vers = (bases[0] if bases and has_game(n, bases[0]) else None), {}
@@ -959,15 +978,16 @@ def scan(n, want=None, platform=None):
     dlc = {}
     for s in a.snapshots:
         if s.type != DLC: continue
-        if s.title_id is None: n.notes.append(f'{s.name}: a DLC with no add-on title ID (one converted from a decrypted NSP keeps it in its NCAs), left out'); continue
+        if s.title_id is None: n.notes.append(f'{s.name}: a DLC with no add-on title ID, left out'); continue
         if not 0 < s.title_id - app - 0x1000 <= 2000: raise Error(f'{n.path.name}: {s.title_id:016X} is not a DLC of {app:016X}', 'select')
-        if s.romfs == NO: raise Error(f'{n.path.name}: DLC {s.title_id:016X} has no romfs/', 'select')
+        if s.romfs == NO and s.kind != 'native': raise Error(f'{n.path.name}: DLC {s.title_id:016X} has no romfs/', 'select')
         if s.title_id in dlc: n.notes.append(f'{n.path.name}: DLC {s.title_id:016X} in versions {dlc[s.title_id].version} and {s.version}: packing the newer')
         if s.title_id not in dlc or s.version > dlc[s.title_id].version: dlc[s.title_id] = s
     return app, base, vers, dlc
 
 
 def exefs(n, k, dst):   # the snapshot's exefs/ into dst, kept as it is when every file there has the same content
+    if k.kind == 'native': raise Error(f'internal: {k.name} is an NCA snapshot, read by nx_extract', 'native')
     if k.exefs == NO: raise Error(f'{k.name}: no exefs/', 'select')
     files, names = [], HostNames(f'{k.name} exefs/')
     for name, isdir, i in n.children(k.exefs):
@@ -1050,13 +1070,13 @@ def control(k, out, fallback=None):   # the snapshot's control data beside its E
 
 
 def romfs_of(k, base=None):   # the RomFS folder a version runs with: its own, as every NX snapshot is a complete tree (never the base game's)
-    if k.kind == 'native': raise Error(f'{k.name} {NATIVE}', 'native')
+    if k.kind == 'native': raise Error(f'internal: {k.name} is an NCA snapshot, read by nx_extract', 'native')
     if k.romfs == NO: raise Error(f'{k.name}: no romfs/ in this snapshot (an NX snapshot is the whole game: it does not take the base game\'s)', 'select')
     return k.romfs
 
 
 def pack_version(n, k, base, app, out, say=print, step=lambda s: None):   # one snapshot → out/ExeFS, out/RomFS.img and its control data; returns how pack() got the image
-    if k.kind == 'native': raise Error(f'{k.name} {NATIVE}', 'native')
+    if k.kind == 'native': return pack_native(n, k, base, app, out, say, step)
     if k.exefs == NO or n.child(k.exefs, b'main') is None or n.child(k.exefs, b'main.npdm') is None: raise Error(f'{k.name}: no exefs/main and exefs/main.npdm', 'select')
     if (pid := npdm_id(n, k)) != app: raise Error(f'{k.name}: program ID {pid:016X}, the game is {app:016X}', 'select')
     d = romfs_of(k, base)
@@ -1073,7 +1093,9 @@ def pack_dlc(n, app, dlc, aoc, say=print):   # {DLC title ID: snapshot} → aoc/
     if aoc.is_dir():
         for f in aoc.iterdir():
             if f.name.removesuffix('.inputs.json') not in want: f.unlink()
-    for name, k in want.items(): pack(n, romfs_of(k), aoc / name, say)
+    for (name, k), tid in zip(want.items(), dlc):
+        if k.kind == 'native': pack_native_dlc(n, app, tid, k, aoc / name, say)
+        else: pack(n, romfs_of(k), aoc / name, say)
 
 
 def listing(n):   # the --list lines
@@ -1094,6 +1116,324 @@ def free_bytes(p):   # free bytes on the volume of p, or of the nearest folder a
     return shutil.disk_usage(p).free
 
 
+# ---- NCA snapshots (nxconvert pack): read by nx_extract --plain ----
+REPO = Path(__file__).resolve().parents[1]
+NX_EXTRACT = 'dm/tools/nx_extract_bin/nx_extract'   # the committed native executable (dm/tools/native_tools.sh), built from dm/tools/nx_extract
+NCA_NAME = re.compile(rb'[0-9a-f]{32}(\.cnmt)?\.nca')
+NCA_FILES_MAX, META_MAX, NCA_HEAD, GiB = 4096, 16 * MiB, 0xC00, 1 << 30
+CT_PROGRAM, CT_META, CT_CONTROL, CT_MANUAL, CT_DATA, CT_PUBLIC = range(6)   # NCA content types (header 0x205)
+GAME_TYPES, DLC_TYPES = frozenset({CT_PROGRAM, CT_META, CT_CONTROL, CT_MANUAL}), frozenset({CT_META, CT_DATA, CT_PUBLIC})   # what a version or a DLC stages
+GC_LIMIT = '100000000'   # nx_extract's GC heap, 4 GiB: hexadecimal without 0x, as NativeAOT reads DOTNET_GCHeapHardLimit (it ignores a value with 0x)
+CONTENTS_TIMEOUT = 120   # seconds for the scan's --contents run (meta NCAs only)
+STAMP = 'native.inputs.json'
+TOOL_FIX = 'rebuild it with dm/tools/native_tools.sh nx_extract'
+
+
+def nx_extract_source_sha(repo=REPO):   # the same convention as nx_extract --source-sha: the sha256 of Program.cs and nx_extract.csproj, in that order, first 16 digits
+    return hashlib.sha256(b''.join((Path(repo) / 'dm/tools/nx_extract' / f).read_bytes() for f in ('Program.cs', 'nx_extract.csproj'))).hexdigest()[:16]
+
+
+def tool_error(why):
+    return Error(f'reading an NX made by nxconvert pack needs nx_extract built from the in-repo source: {why}; {TOOL_FIX}', 'tool')
+
+
+def find_tool(repo=REPO, env=None):
+    """The committed nx_extract, once it has shown that it runs and was built from the in-repo source (after an edit to Program.cs the old executable would read with the old code)"""
+    exe = Path(repo) / NX_EXTRACT
+    try: r = subprocess.run([str(exe), '--source-sha'], capture_output=True, text=True, env=env, timeout=60, errors='replace')
+    except (OSError, subprocess.SubprocessError) as e: raise tool_error(f'{exe} does not start ({e})') from e
+    got, want = r.stdout.strip(), nx_extract_source_sha(repo)
+    if r.returncode or not got: raise tool_error(f'{exe} does not run (exit code {r.returncode})')
+    if got != want: raise tool_error(f'{exe} was built from source {got}, the repository holds {want}')
+    return exe
+
+
+class Native:
+    """How NCA snapshots are read, set on an open archive as n.nca_tool by its caller. tool(): the nx_extract path, asked for (and checked) the first time an NCA snapshot is touched,
+    then kept; tmp: the folder the NCA files are staged under (<tmp>/nca/<label>/; None: <build folder>/tmp); logs: the folder of each run's output (None: <build folder>/logs);
+    allow_damaged: --allow-damaged; env: nx_extract's environment (None: this process's)"""
+    def __init__(self, tool=None, tmp=None, logs=None, allow_damaged=False, env=None):
+        self._tool, self.tmp, self.logs, self.allow_damaged, self.env = tool or find_tool, tmp, logs, allow_damaged, env
+        self._exe = None
+
+    def tool(self):
+        if self._exe is None: self._exe = Path(self._tool())
+        return self._exe
+
+
+def _native(n) -> Native:
+    if n.nca_tool is None: raise Error(f'{n.path.name}: reading its NCA snapshots needs nx_extract, which this caller did not set up', 'tool')
+    return n.nca_tool
+
+
+def native_files(n, k):
+    """[(name, file index)] of NCA snapshot k's root, before anything is read: only files named <32 lowercase hex>.nca or .cnmt.nca (all NXConvert writes there), at most 4,096,
+    each at least an NCA header long"""
+    kids = n.children(k.root)
+    if len(kids) > NCA_FILES_MAX: raise Error(f'{k.name}: {len(kids):,} files, more than the {NCA_FILES_MAX:,} an NCA snapshot may hold', 'nca')
+    out = []
+    for name, isdir, i in kids:
+        if isdir or not NCA_NAME.fullmatch(name):
+            raise Error(f'{k.name}: {shown(os.fsdecode(name))!r} is not a decrypted NCA\'s file name (<32 hex>.nca or <32 hex>.cnmt.nca); NXConvert never writes one into an NCA snapshot', 'nca')
+        if n.size(i) < NCA_HEAD: raise Error(f'{k.name}: {name.decode()} is {n.size(i):,} bytes, shorter than an NCA header (3,072 bytes)', 'nca')
+        out.append((name.decode(), i))
+    return out
+
+
+def nca_head(n, k, name, i):
+    """The content type of NCA file i, from its header in the file's first block (CRC-32C checked): the DNCA marker, a content type an NCA has and the size field are checked here,
+    before gigabytes are staged; nx_extract checks the whole header again"""
+    if i in n.heads: return n.heads[i]
+    size, first, _, _, _ = n.files[i]
+    head = n.block(n.refs[first], crc=True)[:NCA_HEAD]   # blocks are 64 KiB at least and the file is 3,072 bytes at least: the header is in the first block
+    def bad(why) -> NoReturn: raise Error(f'{k.name}: {name}: {why}', 'nca')
+    magic = head[0x200:0x204]
+    if magic != b'DNCA': bad('a plaintext NCA without the DNCA marker of a decrypted NCA' if magic in (b'NCA3', b'NCA2', b'NCA0') else 'not a decrypted NCA (still encrypted, or not an NCA)')
+    if head[0x205] > CT_PUBLIC: bad(f'content type {head[0x205]} is not one an NCA has')
+    if (declared := struct.unpack_from('<Q', head, 0x208)[0]) != size: bad(f'its header says {declared:,} bytes, the file has {size:,}')
+    n.heads[i] = head[0x205]
+    return head[0x205]
+
+
+def chosen(n, k, types):   # [(name, file index, content type)] of k's NCA files whose content type is in types: what a step stages
+    return [(name, i, t) for name, i in native_files(n, k) if (t := nca_head(n, k, name, i)) in types]
+
+
+def staging_bytes(n, k):   # what packing snapshot k stages (an NCA snapshot), for the disk checks
+    if k.kind != 'native': return 0
+    return sum(n.size(i) for _, i, _ in chosen(n, k, DLC_TYPES if k.type == DLC else GAME_TYPES))
+
+
+def version_bytes(n, k, base=None):
+    """An upper bound of what packing snapshot k writes: a tree's RomFS and ExeFS; an NCA snapshot's Program, Control and Manual NCAs (a DLC: its data NCAs), as the ExeFS and the
+    patched RomFS are at most the base section and the patch section"""
+    if k.kind != 'native': return n.tree_bytes(romfs_of(k, base)) + exefs_bytes(n, k)
+    out = {CT_DATA, CT_PUBLIC} if k.type == DLC else {CT_PROGRAM, CT_CONTROL, CT_MANUAL}
+    return sum(n.size(i) for _, i, t in chosen(n, k, out))
+
+
+def stage(n, files, dst, fresh=True):
+    """files ([(name, file index, type)]) streamed out of the archive into the new folder dst (<tmp>/nca/<label>), each checked against its SHA-256; returns the bytes written.
+    fresh: <tmp>/nca is emptied first (what a killed run left there)"""
+    shutil.rmtree(dst.parent if fresh else dst, ignore_errors=True); dst.mkdir(parents=True)
+    total = 0
+    for name, i, _ in files:
+        with open(dst / name, 'xb') as f: total += n.copy(i, f)
+    return total
+
+
+def _run(n, args, log=None, timeout=None):   # nx_extract with args (an argument list, never a shell) → (exit code, its output); the output also goes to log
+    nat = _native(n)
+    exe = nat.tool()
+    env = dict(nat.env if nat.env is not None else os.environ, DOTNET_GCHeapHardLimit=GC_LIMIT)
+    cmd = [str(exe), *map(str, args)]
+    try:
+        if log is None:
+            r = subprocess.run(cmd, capture_output=True, text=True, errors='replace', env=env, timeout=timeout)
+            return r.returncode, r.stdout + r.stderr
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, 'w') as f: r = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=env, timeout=timeout)
+        return r.returncode, log.read_text(errors='replace')
+    except subprocess.TimeoutExpired as e: raise Error(f'nx_extract did not finish in {timeout} s ({shown(" ".join(cmd[1:3]))} …)', 'tool') from e
+    except OSError as e: raise tool_error(f'{exe} does not start ({e.strerror or e})') from e
+
+
+def _reds(text):   # nx_extract's [RED] lines, escaped
+    return [shown(line[6:]) for line in text.splitlines() if line.startswith('[RED] ')]
+
+
+def _failed(k, code, text, log) -> NoReturn:   # nx_extract's exit code → Error
+    reds = _reds(text)
+    first = reds[0] if reds else f'no message (log: {log})'
+    where = k.name if k is not None else 'the content metas'
+    if code == 2: raise Error(f'nx_extract refused its arguments: {first}', 'tool')
+    if code == 3:
+        bad = [r.removeprefix('hash check failed: ') for r in reds if r.startswith('hash check failed: ')]
+        what = (f'{len(bad)} file(s) fail the NCA\'s own hash check ({", ".join(bad[:3])}{", …" if len(bad) > 3 else ""})' if bad else
+                'its filesystem tables fail the NCA\'s own hash check')
+        raise Error(f'{where}: {what}. The archive\'s own hashes pass, so the NCA was already damaged when it was packed (by the decrypter or its source); pack it again from a good '
+                    'dump, or pass --allow-damaged to pack them as read', 'nca_hash')
+    if code == 4: raise Error(f'{where}: the base game\'s program is sparse (the decrypter left out data its update carries): it runs only with its update; pack an update version '
+                              '(--version <N> / -p v<N>)', 'sparse')
+    if code == 5: raise Error(f'{where}: its content meta cannot be read: {first}', 'nca')
+    if code == 6: raise Error(f'{where}: a section still asks for keys ({first}): it is not a decrypted NCA', 'nca')
+    if code in (7, 8): raise Error(f'{where}: {first}', 'nca')
+    raise Error(f'nx_extract stopped with exit code {code}' + (f' (log: {log})' if log else f': {first}'), 'tool')
+
+
+def probe(n, a, snaps):
+    """Each NCA snapshot's own content meta (<content ID>.cnmt.nca, at most META_MAX) read in one nx_extract --contents run, against the Catalog: a base game is Application a.id, an
+    update Patch a.id | 0x800, a DLC AddOnContent, each of the snapshot's version. A DLC's add-on title ID comes from there (s.title_id)"""
+    todo = []
+    for s in snaps:
+        files = dict(native_files(n, s))
+        name = s.content_id.hex() + '.cnmt.nca'
+        if (i := files.get(name)) is None: raise Error(f'{s.name}: no {name}, the content meta its catalog row names', 'nca')
+        if n.size(i) > META_MAX: raise Error(f'{s.name}: {name} is {n.size(i):,} bytes, larger than a content meta NCA ({META_MAX:,} at most)', 'nca')
+        if nca_head(n, s, name, i) != CT_META: raise Error(f'{s.name}: {name} is not a Meta NCA', 'nca')
+        todo.append((s, name, i))
+    nat = _native(n)   # the files are what an NCA snapshot holds: only now is nx_extract needed
+    def run(root):
+        try:
+            for j, (s, name, i) in enumerate(todo):
+                stage(n, [(name, i, CT_META)], root / f's{j}', fresh=False)
+            return _run(n, ['--plain', '--contents', *(root / f's{j}' for j in range(len(todo)))], timeout=CONTENTS_TIMEOUT)
+        finally: shutil.rmtree(root, ignore_errors=True)
+    if nat.tmp is not None: code, text = run(Path(nat.tmp) / 'nca' / 'meta')
+    else:
+        with tempfile.TemporaryDirectory(prefix='nx_meta_') as td: code, text = run(Path(td) / 'meta')
+    if code not in (0, 5): _failed(None, code, text, None)
+    got, why, cur = {}, {}, None
+    for line in text.splitlines():
+        if m := re.fullmatch(r'package (\d+) s\d+', line): cur = int(m.group(1)); got[cur] = []
+        elif cur is not None and (m := re.fullmatch(r'content (\w+) ([0-9a-f]{16}) (\d+)', line)): got[cur].append((m.group(1), int(m.group(2), 16), int(m.group(3))))
+        elif cur is not None and line.startswith('[RED] '): why[cur] = shown(line[6:])
+    for j, (s, name, i) in enumerate(todo):
+        rows = got.get(j, [])
+        if len(rows) != 1: raise Error(f'{s.name}: its content meta cannot be read: ' + (why.get(j) or f'{name} holds {len(rows)} content metas'), 'nca')
+        kind, tid, ver = rows[0]
+        want, wid = {BASE: ('Application', a.id), UPDATE: ('Patch', a.id | 0x800), DLC: ('AddOnContent', None)}[s.type]
+        if kind != want or (wid is not None and tid != wid) or ver != s.version:
+            raise Error(f'{s.name}: its catalog row says {want}{f" {wid:016X}" if wid is not None else ""} version {s.version}, its content meta says {shown(kind)} {tid:016X} version {ver}',
+                        'nca')
+        if s.type == DLC: s.title_id = tid
+
+
+def _digest(n, k, kind, ids):   # what an NCA snapshot's output is made from: the tool's source, this script, romfs_image.py, the IDs and every root file's name, size and SHA-256
+    h = hashlib.sha256(kind.encode() + b'\0' + nx_extract_source_sha().encode() + Path(__file__).read_bytes() + Path(romfs_image.__file__).read_bytes() + repr(ids).encode())
+    for name, i in sorted(native_files(n, k)): h.update(struct.pack('<IQ', len(name), n.size(i)) + name.encode() + n.sha(i))
+    return h.hexdigest()
+
+
+def _sha_file(p):
+    with open(p, 'rb') as f: return hashlib.file_digest(f, 'sha256').hexdigest()
+
+
+def _stamp(out, digest):   # out/native.inputs.json: the digest, RomFS.img's file identity and the SHA-256 of every other file written
+    files = {p.relative_to(out).as_posix(): _sha_file(p) for p in sorted(out.rglob('*')) if p.is_file() and p.name not in (STAMP, 'RomFS.img')}
+    (out / STAMP).write_text(json.dumps({'digest': digest, 'image': romfs_image.file_identity(out / 'RomFS.img'), 'files': files}))
+
+
+def _kept(out, digest):   # whether out is what the stamp says inputs with this digest made, still as written
+    try:
+        st = json.loads((out / STAMP).read_text())
+        if st['digest'] != digest or romfs_image.file_identity(out / 'RomFS.img') != st['image']: return False
+        return all('..' not in Path(rel).parts and _sha_file(out / rel) == sha for rel, sha in st['files'].items())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError): return False
+
+
+def _space(k, need, where):   # stop before staging when the volume cannot hold what is staged and written, with 1 GiB kept free; returns the free bytes
+    free = free_bytes(where)
+    if free < need + GiB: raise Error(f'{k.name}: {need / 2**30:,.1f} GB to stage and write and {free / 2**30:,.1f} GB free on the volume of {where} (1 GB is kept free)', 'io')
+    return free
+
+
+def _control_fallback(k, out, say):   # what the Control NCA did not give (no Control NCA, no icon in it) from the archive's Media: the snapshot's own, else its exact base's
+    nacp, icon = out / 'control.nacp', out / 'icon.jpg'
+    if not (nacp.is_file() and icon.is_file()):
+        meta = k.nx.meta(k)
+        if (fb := base_of(k)) is not None and fb is not k:
+            more = fb.nx.meta(fb); meta = {key: meta[key] or more[key] for key in meta}
+        if not nacp.is_file() and meta['nacp']: nacp.write_bytes(meta['nacp'])
+        if not icon.is_file() and meta['icon']: icon.write_bytes(meta['icon'])
+    if not nacp.is_file():
+        say(f'{k.name}: the archive has no NACP for this version' + ('' if k.type == BASE else ' or its base game') + ': the game\'s name and languages come from elsewhere (its profile)')
+
+
+def _extract_args(k, src, out, a, p, *more):
+    return ['--plain', src, src if k.type == UPDATE else '-', out, '--app', f'{a.id:016x}', f'--program={p.id:016x}', *more]
+
+
+def pack_native(n, k, base, app, out, say=print, step=lambda s: None):
+    """NCA snapshot k (a base game or an update) → out/ExeFS, out/RomFS.img, its control data and out/html/, through nx_extract --plain on its staged NCA files; the ExeFS and RomFS are
+    an update's laid over its base game's (BKTR). Returns 'kept' (the stamp matches: nothing staged or run) or 'packed'"""
+    nat, a, p = _native(n), k.app, n.programs[k.program]
+    digest = _digest(n, k, 'NX-native-version', (a.id, p.id, app, k.type, k.version, nat.allow_damaged))
+    if _kept(out, digest): return 'kept'
+    files = chosen(n, k, GAME_TYPES)
+    staged = sum(n.size(i) for _, i, _ in files)
+    _space(k, staged + version_bytes(n, k, base), out.parent)
+    tmp = Path(nat.tmp or out.parent.parent / 'tmp') / 'nca' / out.name
+    logs = Path(nat.logs or out.parent.parent / 'logs')
+    part = out.with_name(out.name + '.partial')
+    try:
+        shutil.rmtree(part, ignore_errors=True)
+        step('staging the NCA files'); say(f'staging {len(files)} NCA files of {k.name} ({staged / 2**30:,.2f} GB) → {tmp}')
+        stage(n, files, tmp)
+        step('reading the NCA files')
+        log = logs / f'extract_{out.name}.log'
+        code, text = _run(n, _extract_args(k, tmp, part, a, p, '--romfs-image', '--max-bytes', max(0, free_bytes(out.parent) - GiB), *(['--allow-damaged'] if nat.allow_damaged else [])), log)
+        if code: _failed(k, code, text, log)
+        for line in _reds(text): say(f'{k.name}: {line}')   # files written as read (--allow-damaged)
+        m = re.search(r'^title ([0-9a-f]{16})(?:, update ([0-9a-f]{16}))?$', text, re.M)
+        if not m or int(m.group(1), 16) != p.id or (k.type == UPDATE) != bool(m.group(2)) or (m.group(2) and int(m.group(2), 16) != p.id):
+            raise Error(f'{k.name}: the archive says program {p.id:016X}, nx_extract read ' + (shown(m.group(0)) if m else 'no program'), 'nca')
+        if k.flags & 1:   # BUILD_ID_PRESENT: the catalog describes these NCAs only when their main is that build
+            got = re.search(r'^main build id ([0-9a-f]+)$', text, re.M)
+            if not got or got.group(1) != k.build_id[:16].hex():
+                raise Error(f'{k.name}: the archive says main is build {k.build_id[:16].hex()}, its Program NCA holds {got.group(1) if got else "no main"}', 'nca')
+        if not (part / 'ExeFS/main').is_file() or not (part / 'ExeFS/main.npdm').is_file(): raise Error(f'{k.name}: its Program NCA has no ExeFS main and main.npdm', 'nca')
+        html = part / 'html'
+        if any(t == CT_MANUAL for _, _, t in files):   # the offline HTML pages (the update's, then the base game's), as extract_html leaves an NSP's
+            step('reading the HTML pages')
+            hp = part / 'html.partial'; hp.mkdir()
+            hlog = logs / f'extract_html_{out.name}.log'
+            code, text = _run(n, _extract_args(k, tmp, hp, a, p, '--html', '--max-bytes', max(0, free_bytes(out.parent) - GiB)), hlog)
+            if code: _failed(k, code, text, hlog)
+            for line in _reds(text): say(f'{k.name}: {line}')
+            hp.rename(html)
+        else: html.mkdir()
+        _control_fallback(k, part, say)
+        _stamp(part, digest)
+        shutil.rmtree(out, ignore_errors=True); part.rename(out)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True); shutil.rmtree(part, ignore_errors=True)
+    return 'packed'
+
+
+def pack_native_dlc(n, app, tid, k, img, say=print):
+    """NCA snapshot k of DLC tid → the image img (nx_extract --plain --aoc on its staged Meta and data NCAs), stamped as romfs_image stamps one; 'kept' when the stamp matches"""
+    nat, dst = _native(n), str(img)
+    digest = _digest(n, k, 'NX-native-aoc', (app, tid, k.version))
+    if romfs_image.reusable(dst, digest): return 'kept'
+    files = chosen(n, k, DLC_TYPES)
+    staged = sum(n.size(i) for _, i, _ in files)
+    _space(k, staged + version_bytes(n, k), img.parent)
+    tmp = Path(nat.tmp or img.parent.parent / 'tmp') / 'nca' / f'aoc{img.stem}'
+    logs = Path(nat.logs or img.parent.parent / 'logs')
+    try:
+        img.parent.mkdir(parents=True, exist_ok=True)
+        Path(dst + '.inputs.json').unlink(missing_ok=True); img.unlink(missing_ok=True)
+        stage(n, files, tmp)
+        log = logs / f'aoc_{img.stem}.log'
+        code, text = _run(n, ['--plain', '--aoc', tmp, img, f'{tid:016x}', '--romfs-image', '--max-bytes', max(0, free_bytes(img.parent) - GiB)], log)
+        if code: _failed(k, code, text, log)
+        if not re.search(f'^add-on content {tid:016x}$', text, re.M) or not img.is_file(): raise Error(f'{k.name}: nx_extract read no add-on content {tid:016X}', 'nca')
+        romfs_image.stamp(dst, digest, romfs_image.file_identity(img))
+    finally: shutil.rmtree(tmp, ignore_errors=True)
+    say(f'  DLC {tid:016X}: {img}')
+    return 'packed'
+
+
+def survey_native(n, k, base, out, say=print):
+    """NCA snapshot k's files for a survey (build_ipa_from_nsp.py's survey_nup for an NX): out/ExeFS, out/romfs_manifest.tsv, out/romfs_nro/ and the control data, through
+    nx_extract --plain --manifest (no RomFS written). out must not exist. Returns the files listed"""
+    nat, a, p = _native(n), k.app, n.programs[k.program]
+    files = chosen(n, k, GAME_TYPES - {CT_MANUAL})
+    staged = sum(n.size(i) for _, i, _ in files)
+    _space(k, staged + sum(n.size(i) for _, i, t in files if t == CT_PROGRAM), out.parent)
+    tmp = Path(nat.tmp or out.parent / 'tmp') / 'nca' / 'survey'
+    logs = Path(nat.logs or out.parent / 'logs')
+    try:
+        stage(n, files, tmp)
+        log = logs / 'survey_extract.log'
+        code, text = _run(n, _extract_args(k, tmp, out, a, p, '--manifest', '--max-bytes', max(0, free_bytes(out.parent) - GiB)), log)
+        if code: _failed(k, code, text, log)
+        _control_fallback(k, out, say)
+    finally: shutil.rmtree(tmp, ignore_errors=True)
+    return max(0, (out / 'romfs_manifest.tsv').read_bytes().count(b'\n') - 1)
+
+
 def main():
     ap = argparse.ArgumentParser(description='Pack a game in an NX archive into the extraction layout of build_ipa_from_nsp.py')
     ap.add_argument('nx', type=Path, help='the .nx file')
@@ -1104,12 +1444,14 @@ def main():
     ap.add_argument('--list', action='store_true', help='list the applications and snapshots, and pack nothing')
     ap.add_argument('--verify', action='store_true', help='check the whole archive (every Media record, every block with its CRC-32C at about 17 MiB/s, and every file), and pack nothing')
     ap.add_argument('--crc', action='store_true', help='also check every block\'s CRC-32C as it is read when packing (about 17 MiB/s in Python)')
+    ap.add_argument('--allow-damaged', action='store_true', help='an NCA snapshot whose files fail the NCA\'s own hash check: pack them as read (nx_extract --allow-damaged)')
     a = ap.parse_args()
     path = a.nx.resolve()
     try:
         sel = parse_title_id(a.title_id) if a.title_id else (None, None)
         if sel is None: raise Error(f'--title-id takes a title ID, 16 hex digits, optionally with :switch1, :switch2 or :unknown after it: {a.title_id}', 'select')
         with Nx(path, crc=a.crc) as n:
+            nat = n.nca_tool = Native(allow_damaged=a.allow_damaged)   # NCA snapshots (nxconvert pack): nx_extract, found when the first one is touched
             for line in n.notes: print(shown(line), flush=True)
             told = len(n.notes)
             if a.list:
@@ -1130,7 +1472,8 @@ def main():
             tag = platform_tag(n, k.app)
             work = (a.work_dir or path.parent / f'{app:016X}{"-" + tag if tag else ""}_build').resolve()
             out = work / 'extract' / f'v{ver}'
-            need = n.tree_bytes(romfs_of(k, base)) + exefs_bytes(n, k) + sum(n.tree_bytes(romfs_of(d)) for d in dlc.values())   # dedup lets a small archive declare far more
+            nat.tmp, nat.logs = work / 'tmp', work / 'logs'
+            need = sum(version_bytes(n, x, base) for x in [k, *dlc.values()]) + max(staging_bytes(n, x) for x in [k, *dlc.values()])   # dedup lets a small archive declare far more
             if not (out / 'RomFS.img').exists() and (free := free_bytes(work)) < need + (1 << 30):
                 raise Error(f'{need / 2**30:,.1f} GB to write and {free / 2**30:,.1f} GB free on the volume of {work} (1 GB is kept free)', 'io')
             print(f'{app:016X} version {ver} ({PLATFORMS[k.app.platform]}): {k.name}', flush=True)

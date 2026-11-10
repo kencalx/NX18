@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
@@ -23,6 +24,7 @@ sys.path.insert(0, str(HERE))
 import nacp
 import romfs_image
 import nx_writer
+import dnca_writer
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
 if spec is None or spec.loader is None: raise ImportError('scripts/build_ipa_from_nsp.py')
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
@@ -363,15 +365,18 @@ class Hostile(Base):
         good[4096:4352] = h
         self.refused(bytes(good), 'version')
 
-    def test_native_snapshots_refused_with_a_clear_line(self):
-        dnca = bytes(0x200) + b'DNCA' + bytes(60)
+    def test_native_snapshots_checked_before_anything_runs(self):   # an NCA snapshot's root and kind, before nx_extract is needed (none is set up here)
+        dnca = bytes(0x200) + b'DNCA' + bytes(0xA00)
         self.write(game({'type': 0, 'version': 0, 'tree': {'0123456789abcdef0123456789abcdef.nca': dnca, 'aa.cnmt.nca': dnca}}))
         n = self.open()
         self.assertEqual(n.snapshots[0].kind, 'native')
         with self.assertRaises(pack_nx.Error) as e: pack_nx.scan(n)
+        self.assertEqual(e.exception.code, 'nca')
+        self.assertIn("'aa.cnmt.nca' is not a decrypted NCA's file name", str(e.exception))
+        self.write(game({'type': 0, 'version': 0, 'tree': {'0123456789abcdef0123456789abcdef.nca': dnca}}, platform=2))
+        with self.assertRaises(pack_nx.Error) as e: pack_nx.scan(self.open())
         self.assertEqual(e.exception.code, 'native')
-        self.assertIn('decrypted NCA', str(e.exception))
-        self.assertIn('nxconvert pack-nup', str(e.exception))
+        self.assertIn('NCA snapshots of a Switch 2 game are not supported', str(e.exception)); self.assertIn('nxconvert pack-tree', str(e.exception))
 
 
 class Read(Base):
@@ -403,7 +408,7 @@ class Read(Base):
         self.write(game({'type': 0, 'version': 0, 'tree': version()},
                         {'type': 2, 'version': 0, 'addon': TID + 0x1001, 'tree': {'romfs': {'v': b'old'}}},
                         {'type': 2, 'version': 65536, 'addon': TID + 0x1001, 'tree': {'romfs': {'v': b'new'}}},
-                        {'type': 2, 'version': 0, 'content_id': b'\x11' * 16, 'tree': {'x.nca': b'nca'}}))
+                        {'type': 2, 'version': 0, 'content_id': b'\x11' * 16, 'tree': {'romfs': {'v': b'x'}}}))
         n = self.open(); _, _, _, dlc = pack_nx.scan(n)
         self.assertEqual(dlc[TID + 0x1001].version, 65536)
         self.assertTrue(any('no add-on title ID' in s for s in n.notes))
@@ -727,6 +732,330 @@ class Review(Base):
         self.assertEqual(r.stdout.count('generation 1 is damaged'), 1, r.stdout)
 
 
+KINDS = {dnca_writer.APPLICATION: 'Application', dnca_writer.PATCH: 'Patch', dnca_writer.ADDON: 'AddOnContent'}
+
+
+class FakeTool:
+    """nx_extract as pack_nx runs it, without the executable (pack_nx._run replaced): --contents reads the staged meta NCAs' content metas (dnca_writer.cnmt_of); an extraction lists
+    the staged folder and writes the layout. code/text: an extraction's exit code and output; title, build: its title and main build ID lines (default: the program asked for and
+    build); control: whether it writes control.nacp and icon.jpg; fail: an exception it raises once it has listed the staged files"""
+    def __init__(self, build=b'', code=0, text='', title=None, control=True, fail=None):
+        self.build, self.code, self.text, self.title, self.control, self.fail = build, code, text, title, control, fail
+        self.calls, self.staged, self.envs = [], [], []
+
+    def __call__(self, n, args, log=None, timeout=None):
+        args = [str(a) for a in args]; self.calls.append(args)
+        if args[1] == '--contents':
+            out = []
+            for j, d in enumerate(args[2:]):
+                out.append(f'package {j} {Path(d).name}')
+                for f in sorted(Path(d).iterdir()):
+                    kind, tid, ver = dnca_writer.cnmt_of(f.read_bytes()); out.append(f'content {KINDS[kind]} {tid:016x} {ver}')
+            return 0, '\n'.join(out) + '\n'
+        src = Path(args[2] if args[1] == '--aoc' else args[1])
+        self.staged.append(sorted(p.name for p in src.iterdir()))
+        if self.fail: raise self.fail
+        if args[1] == '--aoc':
+            img = Path(args[3]); img.parent.mkdir(parents=True, exist_ok=True); img.write_bytes(b'dlc image')
+            return 0, f'add-on content {args[4]}\n'
+        out = Path(args[3])
+        if '--html' in args:
+            (out / 'html0').mkdir(parents=True); (out / 'html0/index.html').write_bytes(b'page')
+            return 0, '1 HtmlDocument NCAs\n'
+        if self.code: return self.code, self.text
+        (out / 'ExeFS').mkdir(parents=True)
+        (out / 'ExeFS/main').write_bytes(b'NSO0 main'); (out / 'ExeFS/main.npdm').write_bytes(npdm(TID))
+        (out / 'RomFS.img').write_bytes(b'image')
+        if self.control: (out / 'control.nacp').write_bytes(control_nacp('From Control', '1.2.0')); (out / 'icon.jpg').write_bytes(b'control icon')
+        pid = args[args.index('--app') + 2].split('=')[1]
+        title = self.title or f'title {pid}' + (f', update {pid}' if args[2] != '-' else '')
+        return 0, f'{title}\nmain build id {self.build[:16].hex()}\n{self.text}'
+
+
+class NativeBase(Base):
+    def setUp(self):
+        super().setUp()
+        self.g = dnca_writer.Game(TID)
+        self.write_game()
+
+    def write_game(self, g=None, meta=META, **kw):
+        g = g or self.g
+        return self.write([{'id': TID, 'platform': 1, 'snapshots': g.snapshots(meta)}], **kw)
+
+    def opened(self, fake=None, **kw):   # the archive, scanned with nx_extract replaced by fake
+        n = self.open()
+        n.nca_tool = pack_nx.Native(tool=lambda: Path('/nonexistent/nx_extract'), **kw)
+        if fake is not None:
+            p = mock.patch.object(pack_nx, '_run', side_effect=fake); p.start(); self.addCleanup(p.stop)
+        return n, pack_nx.scan(n)
+
+    def work(self):
+        return self.dir / 'work'
+
+
+class Native(NativeBase):
+    """pack_nx's NCA snapshots with nx_extract replaced by a fake: what is checked before anything runs, what is staged, the exit codes, cross-checks, stamps and clean-up"""
+    def pack(self, n, k, base=None):
+        out = self.work() / 'extract' / f'v{k.version}'
+        return pack_nx.pack_version(n, k, base, TID, out, say=lambda s: None), out
+
+    def test_listing_and_scan(self):
+        fake = FakeTool()
+        n, (app, base, vers, dlc) = self.opened(fake)
+        self.assertTrue(all(' native ' in line for line in pack_nx.listing(n)[2:]))
+        self.assertEqual((app, base.version, list(vers), list(dlc)), (TID, 0, [VER], [TID + 0x1001]))
+        self.assertEqual([c[1] for c in fake.calls], ['--contents'])   # one run reads every snapshot's content meta
+        self.assertEqual(len(fake.calls[0]) - 2, 3)
+
+    def test_root_checks_before_staging(self):
+        for extra, why in (({'A' * 32 + '.nca': b'x' * 0xC00}, "is not a decrypted NCA's file name"), ({'ticket.tik': b'x'}, "'ticket.tik' is not"),
+                           ({'sub': {'f': b'x'}}, "'sub' is not"), ({'0' * 32 + '.nca': b'x' * 100}, 'shorter than an NCA header')):
+            with self.subTest(extra=list(extra)):
+                g = dnca_writer.Game(TID, dlc=False); g.base = dict(g.base, **extra)
+                self.write_game(g)
+                fake = FakeTool()
+                with self.assertRaises(pack_nx.Error) as e: self.opened(fake)
+                self.assertEqual(e.exception.code, 'nca'); self.assertIn(why, str(e.exception))
+                self.assertEqual(fake.calls, [])
+
+    def test_header_checked_before_staging(self):
+        prog = bytearray(self.g.base_prog.data); prog[0x200:0x204] = b'NCA3'
+        self.g.base = {k: (bytes(prog) if v == self.g.base_prog.data else v) for k, v in self.g.base.items()}
+        self.g.update = dict(self.g.update, **self.g.base)
+        self.write_game()
+        fake = FakeTool(build=self.g.bid1)
+        n, (_, base, vers, _) = self.opened(fake)
+        with self.assertRaises(pack_nx.Error) as e: self.pack(n, vers[VER])
+        self.assertEqual(e.exception.code, 'nca')
+        self.assertIn(f'{dnca_writer.content_id(self.g.base_prog.data).hex()}.nca: a plaintext NCA without the DNCA marker', str(e.exception))
+        self.assertEqual(len(fake.calls), 1)   # the scan's only
+        self.assertFalse((self.work() / 'tmp/nca').exists() and any((self.work() / 'tmp/nca').iterdir()))
+
+    def test_damaged_block_found_while_staging(self):
+        self.write_game(compress=False)
+        n = self.open()
+        cid = dnca_writer.content_id(self.g.upd_prog.data).hex() + '.nca'
+        i = n.child(n.snapshots[1].root, cid.encode())
+        _, first, count, _, _ = n.files[i]
+        at, stored, _, _, _ = next(b for k in range(1, count) if (b := n._block(n.refs[first + k]))[3] == 0)   # a block after the header's, stored raw
+        n.close()
+        data = bytearray(self.path.read_bytes()); data[at + stored // 2] ^= 0xFF; self.path.write_bytes(data)
+        fake = FakeTool(build=self.g.bid1)
+        n, (_, base, vers, _) = self.opened(fake)
+        with self.assertRaises(pack_nx.Error) as e: self.pack(n, vers[VER])
+        self.assertEqual(e.exception.code, 'block_hash'); self.assertIn(cid, str(e.exception))
+        self.assertEqual(len(fake.calls), 1)
+        self.assertFalse((self.work() / 'tmp/nca/v458752').exists())
+
+    def test_what_is_staged(self):
+        data = dnca_writer.data_nca(TID, {'x': b'data'}, content_type=dnca_writer.DATA, seed=71)
+        g = dnca_writer.Game(TID, manual=True)
+        own = {k: v for k, v in g.update.items() if k not in g.base}
+        g.base, g.base_id = dnca_writer.snapshot(dnca_writer.APPLICATION, TID, 0, [g.base_prog, dnca_writer.control_nca(TID), data,
+                                                                                   dnca_writer.manual_nca(TID, g.html0)], other=TID | 0x800, seed=12)
+        g.update = dict(own, **g.base)
+        self.write_game(g)
+        fake = FakeTool(build=g.bid1)
+        n, (_, base, vers, dlc) = self.opened(fake)
+        self.pack(n, vers[VER])
+        types = {name: b[0x205] for name, b in g.update.items()}
+        self.assertEqual(sorted(types[x] for x in fake.staged[0]), [0, 0, 1, 1, 2, 2, 3, 3])   # no Data NCA; the update's and the base's Meta, Program, Control, Manual
+        self.assertEqual(sorted(types[x] for x in fake.staged[1]), [0, 0, 1, 1, 2, 2, 3, 3])   # the HTML pages, from the same folder
+        self.assertNotIn(dnca_writer.content_id(data.data).hex() + '.nca', fake.staged[0])
+        pack_nx.pack_dlc(n, TID, dlc, self.work() / 'aoc', say=lambda s: None)
+        self.assertEqual(sorted(g.dlc), fake.staged[2])   # the DLC: its Meta and data NCAs
+        self.assertEqual((self.work() / 'aoc/1.img').read_bytes(), b'dlc image')
+        self.assertTrue((self.work() / 'aoc/1.img.inputs.json').is_file())
+
+    def test_disk_checked_before_staging(self):
+        fake = FakeTool(build=self.g.bid1)
+        n, (_, base, vers, _) = self.opened(fake)
+        need = pack_nx.staging_bytes(n, vers[VER]) + pack_nx.version_bytes(n, vers[VER])
+        self.assertEqual(pack_nx.staging_bytes(n, vers[VER]), sum(len(b) for b in self.g.update.values()))
+        with mock.patch.object(pack_nx, 'free_bytes', return_value=need + (1 << 30) - 1), self.assertRaises(pack_nx.Error) as e: self.pack(n, vers[VER])
+        self.assertEqual(e.exception.code, 'io'); self.assertIn('to stage and write', str(e.exception))
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_exit_codes(self):
+        red = '[RED] x\x1b[2Jy: why\n'
+        for code, want, msg in ((2, 'tool', 'nx_extract refused its arguments: x\\\\x1b\\[2Jy'), (3, 'nca_hash', 'fail the NCA\'s own hash check'),
+                                (4, 'sparse', 'runs only with its update'), (5, 'nca', 'its content meta cannot be read'), (6, 'nca', 'still asks for keys'),
+                                (7, 'nca', r'\(update 458752\): x\\x1b\[2Jy: why'), (8, 'nca', r'x\\x1b\[2Jy'), (-9, 'tool', 'exit code -9')):
+            with self.subTest(code=code):
+                fake = FakeTool(code=code, text=red + ('[RED] hash check failed: /a.bin\n' if code == 3 else ''))
+                n, (_, base, vers, _) = self.opened(fake)
+                with self.assertRaises(pack_nx.Error) as e: self.pack(n, vers[VER])
+                self.assertEqual(e.exception.code, want, str(e.exception)); self.assertRegex(str(e.exception), msg)
+                self.assertNotIn('\x1b', str(e.exception))
+                self.assertFalse((self.work() / 'extract/v458752.partial').exists())
+        self.assertIn('1 file(s) fail', str(self.exit3()))
+
+    def exit3(self):
+        fake = FakeTool(code=3, text='[RED] hash check failed: /a.bin\n')
+        n, (_, base, vers, _) = self.opened(fake)
+        try: self.pack(n, vers[VER])
+        except pack_nx.Error as e: return e
+
+    def test_cross_checks(self):
+        for fake, why in ((FakeTool(build=self.g.bid0), 'the archive says main is build 8182838485868788'),
+                          (FakeTool(build=self.g.bid1, title=f'title {TID + 1:016x}, update {TID + 1:016x}'), f'the archive says program {TID:016X}'),
+                          (FakeTool(build=self.g.bid1, title=f'title {TID:016x}'), 'nx_extract read title')):
+            with self.subTest(why):
+                n, (_, base, vers, _) = self.opened(fake)
+                with self.assertRaises(pack_nx.Error) as e: self.pack(n, vers[VER])
+                self.assertEqual(e.exception.code, 'nca'); self.assertIn(why, str(e.exception))
+
+    def test_control_data_from_the_archive_when_the_tool_gives_none(self):
+        fake = FakeTool(build=self.g.bid1, control=False)
+        n, (_, base, vers, _) = self.opened(fake)
+        _, out = self.pack(n, vers[VER])   # the update has no Media record: its exact base's
+        self.assertEqual(((out / 'control.nacp').read_bytes(), (out / 'icon.jpg').read_bytes()), (META['nacp'], META['icon']))
+        fake2 = FakeTool(build=self.g.bid1)
+        n, (_, base, vers, _) = self.opened(fake2)
+        shutil.rmtree(out)
+        _, out = self.pack(n, vers[VER])   # what the Control NCA gives comes first
+        self.assertEqual(nacp.name(out / 'control.nacp'), 'From Control')
+
+    def test_stamp_keeps_the_output(self):
+        fake = FakeTool(build=self.g.bid1)
+        n, (_, base, vers, _) = self.opened(fake)
+        self.assertEqual(self.pack(n, vers[VER])[0], 'packed')
+        out = self.work() / 'extract/v458752'
+        self.assertEqual(sorted(p.name for p in out.iterdir()), ['ExeFS', 'RomFS.img', 'control.nacp', 'html', 'icon.jpg', 'native.inputs.json'])
+        calls = len(fake.calls)
+        self.assertEqual(self.pack(n, vers[VER])[0], 'kept'); self.assertEqual(len(fake.calls), calls)   # nothing staged, the tool not started
+        (out / 'ExeFS/main').write_bytes(b'changed')
+        self.assertEqual(self.pack(n, vers[VER])[0], 'packed')
+        self.assertEqual(self.pack(n, vers[VER])[0], 'kept')
+        with mock.patch.object(pack_nx, 'nx_extract_source_sha', return_value='0' * 16): self.assertEqual(self.pack(n, vers[VER])[0], 'packed')
+        n.nca_tool.allow_damaged = True
+        self.assertEqual(self.pack(n, vers[VER])[0], 'packed')
+        n.nca_tool.allow_damaged = False
+        self.assertEqual(self.pack(n, vers[VER])[0], 'packed')
+        n.close()
+        self.write_game(generation=1)   # an edit that appended a generation with the same files: kept
+        n, (_, base, vers, _) = self.opened(fake)
+        self.assertEqual(self.pack(n, vers[VER])[0], 'kept')
+        g = dnca_writer.Game(TID); g.update = dict(g.update, **{'f' * 32 + '.nca': g.base_prog.data})   # another file in the snapshot
+        self.write_game(g)
+        n, (_, base, vers, _) = self.opened(FakeTool(build=self.g.bid1))
+        self.assertEqual(self.pack(n, vers[VER])[0], 'packed')
+
+    def test_clean_up(self):
+        for fake in (FakeTool(build=self.g.bid1), FakeTool(code=7, text='[RED] no\n'), FakeTool(fail=KeyboardInterrupt())):
+            with self.subTest(code=fake.code, fail=fake.fail):
+                n, (_, base, vers, _) = self.opened(fake)
+                try: self.pack(n, vers[VER])
+                except (pack_nx.Error, KeyboardInterrupt): pass
+                self.assertEqual(list((self.work() / 'tmp/nca').iterdir()), [])
+                self.assertFalse((self.work() / 'extract/v458752.partial').exists())
+
+    def test_tool_missing_or_not_built_from_the_sources(self):
+        with self.assertRaises(pack_nx.Error) as e: pack_nx.find_tool(self.dir)
+        self.assertEqual(e.exception.code, 'tool'); self.assertIn('does not start', str(e.exception)); self.assertIn('native_tools.sh nx_extract', str(e.exception))
+        exe = self.dir / pack_nx.NX_EXTRACT; exe.parent.mkdir(parents=True)
+        exe.write_text('#!/bin/sh\necho 0123456789abcdef\n'); exe.chmod(0o755)
+        for f in ('Program.cs', 'nx_extract.csproj'): (self.dir / 'dm/tools/nx_extract').mkdir(parents=True, exist_ok=True); (self.dir / 'dm/tools/nx_extract' / f).write_text(f)
+        with self.assertRaises(pack_nx.Error) as e: pack_nx.find_tool(self.dir)
+        self.assertEqual(e.exception.code, 'tool'); self.assertIn('was built from source 0123456789abcdef', str(e.exception))
+        n = self.open()   # no tool set up: refused once the snapshots' files pass their checks
+        with self.assertRaises(pack_nx.Error) as e: pack_nx.scan(n)
+        self.assertEqual(e.exception.code, 'tool')
+
+    def test_scan_refusals(self):
+        self.write([{'id': TID, 'platform': 1, 'snapshots': [{'type': 3, 'version': VER, 'tree': self.g.update, 'content_id': self.g.update_id}]}])
+        with self.assertRaises(pack_nx.Error) as e: self.opened(FakeTool())
+        self.assertEqual(e.exception.code, 'native'); self.assertIn('type 3 (standalone update)', str(e.exception))
+        self.write([{'id': TID, 'platform': 1, 'snapshots': [{'type': 0, 'version': 0, 'tree': self.g.base, 'content_id': self.g.base_id},
+                                                            {'type': 1, 'version': VER + 1, 'tree': self.g.update, 'content_id': self.g.update_id}]}])
+        with self.assertRaises(pack_nx.Error) as e: self.opened(FakeTool())
+        self.assertEqual(e.exception.code, 'nca'); self.assertIn('its catalog row says Patch 040074A01BF12800 version 458753, its content meta says Patch 040074A01BF12800 version 458752',
+                                                             str(e.exception))
+        self.write([{'id': TID, 'platform': 1, 'snapshots': [{'type': 0, 'version': 0, 'tree': self.g.base, 'content_id': self.g.update_id}]}])
+        with self.assertRaises(pack_nx.Error) as e: self.opened(FakeTool())
+        self.assertEqual(e.exception.code, 'nca'); self.assertIn('the content meta its catalog row names', str(e.exception))
+
+
+NX_OK = sys.platform == 'darwin' and (REPO / pack_nx.NX_EXTRACT).is_file()
+try: NX_OK = NX_OK and pack_nx.find_tool() is not None
+except pack_nx.Error: NX_OK = False
+
+
+@unittest.skipUnless(NX_OK, 'needs the committed nx_extract built from the sources beside it, on a Mac')
+class NativeTool(NativeBase):
+    """pack_nx with the real nx_extract on synthetic NCA snapshots (dnca_writer.py)"""
+    def scanned(self, **kw):
+        n = self.open(); n.nca_tool = pack_nx.Native(tmp=self.work() / 'tmp', logs=self.work() / 'logs', **kw)
+        return n, pack_nx.scan(n)
+
+    def test_scan_reads_the_content_metas(self):
+        n, (app, base, vers, dlc) = self.scanned()
+        self.assertEqual((app, base.version, list(vers), list(dlc)), (TID, 0, [VER], [TID + 0x1001]))
+        self.assertEqual(n.snapshots[2].title_id, TID + 0x1001)
+
+    def test_base_update_and_dlc(self):
+        g = dnca_writer.Game(TID, manual=True); self.write_game(g)
+        n, (app, base, vers, dlc) = self.scanned()
+        for k, exefs, romfs, display in ((base, g.exefs0, g.romfs0, '1.0.0'), (vers[VER], g.exefs1, g.romfs1, '1.2.0')):
+            with self.subTest(version=k.version):
+                out = self.work() / 'extract' / f'v{k.version}'
+                self.assertEqual(pack_nx.pack_version(n, k, base, app, out, say=lambda s: None), 'packed')
+                self.assertEqual({p.name: p.read_bytes() for p in (out / 'ExeFS').iterdir()}, exefs)
+                img = (out / 'RomFS.img').read_bytes()
+                self.assertEqual({p: img[a:a + b] for p, (d, a, b) in romfs_image.read_index(out / 'RomFS.img').items() if not d}, romfs)
+                self.assertEqual(nacp.version(out / 'control.nacp'), display)
+                self.assertIn(f'display version {display}', (self.work() / f'logs/extract_v{k.version}.log').read_text())
+                self.assertEqual(sorted(p.name for p in (out / 'html').iterdir()), ['html0', 'html1'] if k is not base else ['html0'])
+                self.assertEqual(pack_nx.pack_version(n, k, base, app, out, say=lambda s: None), 'kept')
+        self.assertEqual(list((self.work() / 'tmp/nca').iterdir()), [])
+        pack_nx.pack_dlc(n, app, dlc, self.work() / 'aoc', say=lambda s: None)
+        self.assertEqual(set(romfs_image.read_index(self.work() / 'aoc/1.img')), {'dlcfile', 'more', 'more/x.bin'})
+        self.assertTrue(romfs_image.reusable(str(self.work() / 'aoc/1.img'), json.loads((self.work() / 'aoc/1.img.inputs.json').read_text())['source']))
+
+    def test_sparse_base(self):
+        g = dnca_writer.Game(TID, sparse_base=True)
+        self.write([{'id': TID, 'platform': 1, 'snapshots': g.snapshots(META, base_build=False)}])   # a sparse base has no build ID of its own
+        n, (app, base, vers, dlc) = self.scanned()
+        with self.assertRaises(pack_nx.Error) as e: pack_nx.pack_version(n, base, base, app, self.work() / 'extract/v0', say=lambda s: None)
+        self.assertEqual(e.exception.code, 'sparse'); self.assertIn('pack an update version', str(e.exception))
+        self.assertEqual(pack_nx.pack_version(n, vers[VER], base, app, self.work() / f'extract/v{VER}', say=lambda s: None), 'packed')
+        self.assertEqual(set(romfs_image.read_index(self.work() / f'extract/v{VER}/RomFS.img')), {'data', 'data/same.bin', 'data/changed.txt', 'new', 'new/added.bin', 'empty'})
+
+    def test_two_programs(self):
+        g = dnca_writer.Game(TID, program2=True, dlc=False)
+        self.write([{'id': TID, 'platform': 1, 'programs': [TID, TID + 1], 'snapshots': g.snapshots(META) + [
+            {'type': 0, 'version': 0, 'program': 1, 'tree': g.base, 'content_id': g.base_id}]}])
+        n, (app, base, vers, dlc) = self.scanned()
+        self.assertIn('2 programs: packing 040074A01BF12000', ' '.join(n.notes))
+        out = self.work() / f'extract/v{VER}'
+        pack_nx.pack_version(n, vers[VER], base, app, out, say=lambda s: None)
+        self.assertEqual((out / 'ExeFS/main').read_bytes(), g.exefs1['main'])
+
+    def test_damaged_nca(self):
+        prog = bytearray(self.g.base_prog.data)
+        start, _ = dnca_writer.section_span(prog, 1)
+        off, _ = dnca_writer.ivfc_data_level(prog[0x600 + 8:0x600 + 0x100])
+        prog[start + off + 0x5000] ^= 0xFF   # base_only.bin, in an IVFC block of its own: the archive's SHA-256 is of these bytes, the NCA's own hash is not
+        self.g.base = {k: (bytes(prog) if v == self.g.base_prog.data else v) for k, v in self.g.base.items()}
+        self.write_game()
+        n, (app, base, vers, dlc) = self.scanned()
+        with self.assertRaises(pack_nx.Error) as e: pack_nx.pack_version(n, base, base, app, self.work() / 'extract/v0', say=lambda s: None)
+        self.assertEqual(e.exception.code, 'nca_hash'); self.assertIn("1 file(s) fail the NCA's own hash check (/base_only.bin)", str(e.exception))
+        n, (app, base, vers, dlc) = self.scanned(allow_damaged=True)
+        said = []
+        self.assertEqual(pack_nx.pack_version(n, base, base, app, self.work() / 'extract/v0', say=said.append), 'packed')
+        self.assertTrue(any('hash check failed: /base_only.bin' in s for s in said), said)
+
+    def test_cli(self):
+        g = dnca_writer.Game(TID, sparse_base=True)
+        self.write([{'id': TID, 'platform': 1, 'snapshots': g.snapshots(META, base_build=False)}])
+        r = subprocess.run([sys.executable, str(REPO / 'scripts/pack_nx.py'), str(self.path), '--work-dir', str(self.work())], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertIn('done:', r.stdout)
+        self.assertEqual(set(romfs_image.read_index(self.work() / 'aoc/1.img')), {'dlcfile', 'more', 'more/x.bin'})
+        r = subprocess.run([sys.executable, str(REPO / 'scripts/pack_nx.py'), str(self.path), '--work-dir', str(self.work()), '--version', '0'], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1); self.assertRegex(r.stderr, r'^\[RED\] game.nx \(base\): the base game\'s program is sparse'); self.assertNotIn('Traceback', r.stderr)
+
+
 class Stop(Exception): pass
 
 
@@ -850,7 +1179,7 @@ class Main(Base):
         self.write(game({'type': 0, 'version': 0, 'tree': version()}, {'type': 1, 'version': VER, 'tree': {'exefs': version()['exefs']}}))
         self.assertRegex(self.red([str(self.path)]), r'^\[RED\] .*no romfs/')   # the newest version, read for the disk check before extraction
         self.write(game({'type': 0, 'version': 0, 'tree': {'0123.nca': b'nca'}}))
-        self.assertRegex(self.red([str(self.dir)]), r'^\[RED\] game.nx holds decrypted NCA files')
+        self.assertRegex(self.red([str(self.dir)]), r"^\[RED\] game.nx \(base\): '0123.nca' is not a decrypted NCA's file name")
         good = self.path.read_bytes()
         data = bytearray(good); struct.pack_into('<H', data, 6, 9); self.path.write_bytes(nx_writer.reseal(bytes(data)))
         self.assertRegex(self.red([str(self.path)]), r'^\[RED\] game.nx: NX format version 0.9 .*newer NX 18')
