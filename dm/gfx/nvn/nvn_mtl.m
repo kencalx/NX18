@@ -3062,7 +3062,10 @@ static int pkg_edges_clean(NvPkg *pk, const tex_t *t) {   // the covered pages w
     uintptr_t r[2][2], ia, ie; pkg_edge_ranges(t, r, &ia, &ie);
     uint64_t st = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size);   // take the stamp, protect, then read (as pkg_upload): a later write is seen at the next check
     if (ie > ia && nvn_dirty_since_span(pk->span, (const void *)ia, ie - ia, pk->stamp)) return 0;
-    for (int i = 0; i < 2; i++) if (pk->edge_n[i] && memcmp(pk->edge[i], (const void *)r[i][0], pk->edge_n[i])) return 0;
+    for (int i = 0; i < 2; i++) if (pk->edge_n[i]) {
+        const void *now = (const void *)r[i][0];   // no such edge now (the texture's range has changed since pkg_edges_take): not as uploaded
+        if (!now || r[i][1] - r[i][0] != pk->edge_n[i] || memcmp(pk->edge[i], now, pk->edge_n[i])) return 0;
+    }
     pk->stamp = st; g_pkg_edge_skips++;
     return 1;
 }
