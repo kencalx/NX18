@@ -53,7 +53,7 @@ class Rows(unittest.TestCase):
             f'R\t{skey(tail=b"xy")}': 'after a shader key', f'R\t{skey(size=500)}': 'hex digits', f'R\t{skey()[:-2]}zz': 'not hex',
             f'R\t{skey(vs=M + "_b", vs_stage=4)}': 'mesh shader in an R row', f'R\t{skey(fs=V + "_b")}': 'vertex shader', f'R\t{skey(merged=2)}': 'flags',
             f'M\t{V}_b\t{skey(vs=M + "_b", vs_stage=4)}': 'vertex shader', f'M\t-\t{skey()}': 'not a task / mesh', f'X\t{V}_b': 'unknown row kind',
-            f'S\t/var/mobile/{V}_b\t0': 'a path'}
+            f'S\t/var/mobile/{V}_b\t0': 'a path', f'C\t{C}_b\r': 'carriage return'}
         for line, want in cases.items():
             self.assertIn(want, self.why(line) or '', line[:60])
 
@@ -105,15 +105,18 @@ class Add(unittest.TestCase):
             self.assertEqual(pso_seed.main(['add', '--map', str(self.p / 'shader_map.tsv'), '--manifest', str(self.man), '--note', '{S} S', str(src)]), 0)
             self.assertEqual(pso_seed.main(['check', '--map', str(self.p / 'shader_map.tsv'), str(self.man)]), 0)
             self.assertEqual(pso_seed.main(['check', '--map', str(self.p / 'shader_map.tsv'), str(self.rec(f'S\t{P}_b\t0'))]), 1)
+            crlf = self.p / 'crlf.tsv'; crlf.write_bytes(f'S\t{V}_b\t0\r\nC\t{C}_b\r\n'.encode())   # the host drops the C row; add takes the rows clean
+            self.assertEqual(pso_seed.main(['check', '--map', str(self.p / 'shader_map.tsv'), str(crlf)]), 1)
         self.assertIn('2 rows added (S 1, R 0, C 1, M 0)', out.getvalue())
         self.assertIn('pixel shader in the shader map', err.getvalue())
+        self.assertIn('carriage return', err.getvalue())
 
 
 class Committed(unittest.TestCase):
     def test_persona_5_royal_checks_clean(self):   # recorded on an iPhone 18 Pro Max (its README, Pipelines on a first start)
         g = REPO / 'dm/games/01005CA01580E000'
         shmap = pso_seed.read_map(g / 'shader_map.tsv')
-        rows = pso_seed.rows_of((g / 'pso_manifest.tsv').read_text())
+        rows = pso_seed.rows_of((g / 'pso_manifest.tsv').read_bytes().decode('utf-8'), strip_cr=False)
         keep, bad = pso_seed.collect(rows, shmap)
         self.assertEqual((bad, len(keep), len(rows)), ([], len(rows), len(rows)))
         self.assertEqual(pso_seed.counts(keep), {'S': 30357, 'R': 564, 'C': 2, 'M': 0, 'rows': 30923})
