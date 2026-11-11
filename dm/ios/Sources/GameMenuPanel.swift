@@ -12,15 +12,6 @@ import GameController
 import SwiftUI
 import UIKit
 
-// TEMPORARY (scratch branch claude/ui-menu-short): DM_MENU_VARIANT picks a shorter look of the overview to compare: compact (tighter rows, notes on one line), five (five
-// columns), badges (notes off the overview, a dot marks a row that has one; Cheats' count as its value; a tighter header), oneline (badges' rows, no header row: Close on the
-// headings' line, the hints and the title in the room under the shorter columns). Unset: the panel as it is
-enum GameMenuVariant: String {
-    case current, compact, five, badges, oneline
-    var tight: Bool { self == .compact || self == .badges || self == .oneline }
-    static let now = GameMenuVariant(rawValue: ProcessInfo.processInfo.environment["DM_MENU_VARIANT"] ?? "") ?? .current
-}
-
 // One column of a page: blocks of rows, each under its heading (none where a section goes on from the column before)
 struct GameMenuColumn: Identifiable {
     struct Block: Identifiable {
@@ -208,18 +199,17 @@ struct GameMenuPanelView: View {
     private func panel(width: CGFloat, maxHeight: CGFloat, landscape: Bool) -> some View {
         let page = model.page
         let inner = width - 24
-        var n = max(1, Int((inner + 8) / ((page.options ? optionWidth : columnWidth) + 8)))
-        if GameMenuVariant.now == .five && landscape && page.id == nil && !typeSize.isAccessibilitySize { n = max(n, 5) }
+        let n = max(1, Int((inner + 8) / ((page.options ? optionWidth : columnWidth) + 8)))
         let columns = GameMenuLayout.columns(page.sections, fit: n, split: page.options || page.id != nil ? 1 : 2)
         let colWidth = (inner - CGFloat(max(columns.count - 1, 0)) * 8) / CGFloat(max(columns.count, 1))
         return VStack(alignment: .leading, spacing: 0) {
-            if !folded(page) { header(page, width: width)
+            header(page, width: width)
                 .accessibilityElement(children: .contain)
-                .accessibilitySortPriority(Double(columns.count + 1)) }   // VoiceOver: the header first, then the columns left to right (grid)
+                .accessibilitySortPriority(Double(columns.count + 1))   // VoiceOver: the header first, then the columns left to right (grid)
             ScrollViewReader { proxy in
                 ViewThatFits(in: .vertical) {
-                    grid(columns, page: page, colWidth: colWidth).overlay { if folded(page) { foldedHeader(page) } }
-                    ScrollView(.vertical) { grid(columns, page: page, colWidth: colWidth).overlay { if folded(page) { foldedHeader(page) } } }.scrollIndicators(.automatic)
+                    grid(columns, page: page, colWidth: colWidth)
+                    ScrollView(.vertical) { grid(columns, page: page, colWidth: colWidth) }.scrollIndicators(.automatic)
                 }
                 .onChange(of: model.focus) { _, f in
                     guard let f, pad.connected else { return }
@@ -236,33 +226,6 @@ struct GameMenuPanelView: View {
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
         .accessibilityAction(.escape) { model.back() }
-    }
-
-    private func folded(_ page: GameMenuPanelModel.Page) -> Bool { GameMenuVariant.now == .oneline && page.id == nil && !typeSize.isAccessibilitySize }
-    // oneline: Close at the right end of the headings' line, the hints and the title along the foot, under the shorter columns at the left
-    private func foldedHeader(_ page: GameMenuPanelModel.Page) -> some View {
-        ZStack {
-            closeButton.padding(.trailing, 6).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing).offset(y: -1)
-            HStack(spacing: 14) {
-                if pad.connected { hints(page) }
-                Text(page.title).nxFont(.caption2).foregroundStyle(NX18Palette.muted).lineLimit(1)
-            }
-            .padding(.leading, 22).padding(.bottom, 12)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-        }
-    }
-    private var closeButton: some View {
-        Button { model.close() } label: {
-            Label("Close", systemImage: "xmark")
-                .labelStyle(.iconOnly)
-                .font(.system(size: 11, weight: .bold))   // system: symbol
-                .foregroundStyle(NX18Palette.charcoal)
-                .frame(width: 24, height: 24)
-                .background(Circle().fill(NX18Palette.coral))
-                .frame(width: 36, height: 34).contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Close menu")
     }
 
     @ViewBuilder private func header(_ page: GameMenuPanelModel.Page, width: CGFloat) -> some View {
@@ -300,8 +263,7 @@ struct GameMenuPanelView: View {
         }
         .padding(.leading, page.id != nil ? 6 : 14)
         .padding(.trailing, 6)
-        .padding(.vertical, GameMenuVariant.now.tight ? 0 : 2)
-        .padding(.top, GameMenuVariant.now.tight ? 2 : 0)
+        .padding(.top, 2)
     }
 
     // The controller's A and B as the pack's glyphs (NXButtonGlyph.swift: the first pad's buttons, a Nintendo pad by its labels, any other by position as the game maps them),
@@ -320,15 +282,14 @@ struct GameMenuPanelView: View {
     }
 
     private func grid(_ columns: [GameMenuColumn], page: GameMenuPanelModel.Page, colWidth: CGFloat) -> some View {
-        let tight = GameMenuVariant.now.tight
-        return HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             ForEach(Array(columns.enumerated()), id: \.element.id) { index, col in
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(col.blocks) { block in
                         if let h = block.heading, !h.isEmpty {
-                            NX18SectionHeader(h).padding(.horizontal, 10).padding(.top, tight ? 0 : 2).padding(.bottom, tight ? 2 : 1)
+                            NX18SectionHeader(h).padding(.horizontal, 10).padding(.bottom, 2)
                         } else if block.id == col.blocks.first?.id, let h = block.continues, !h.isEmpty {
-                            NX18SectionHeader(h).padding(.horizontal, 10).padding(.top, tight ? 0 : 2).padding(.bottom, tight ? 2 : 1).hidden().accessibilityHidden(true)   // its room only: the rows line up with the column before
+                            NX18SectionHeader(h).padding(.horizontal, 10).padding(.bottom, 2).hidden().accessibilityHidden(true)   // its room only: the rows line up with the column before
                         }
                         ForEach(block.items) { item in
                             GameMenuRowView(item: item, option: page.options, overview: page.id == nil, focused: pad.connected && model.focus == item.id) { model.activate(item) }
@@ -342,16 +303,15 @@ struct GameMenuPanelView: View {
             }
         }
         .padding(.horizontal, 12)
-        .padding(.top, folded(page) ? 10 : 0)
-        .padding(.bottom, tight ? 8 : 10)
+        .padding(.bottom, 8)
     }
 }
 
-// One row: its name and note, and at the end a switch, a tick, the choice made with ›, or › alone
+// One row: its name and note (on the first page its name alone, a dot marking a note: the note is on its page, and VoiceOver reads it), and at the end a switch, a tick, the choice made with ›, or › alone
 private struct GameMenuRowView: View {
     let item: GameMenuItem
     let option: Bool   // an option of a choice: a tick and a cyan tint when it is the one chosen
-    var overview = false   // a row of the first page (DM_MENU_VARIANT)
+    let overview: Bool   // a row of the first page
     let focused: Bool
     let pick: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -362,20 +322,12 @@ private struct GameMenuRowView: View {
                 if let s = item.symbol {
                     Image(systemName: s).font(.footnote.weight(.medium)).foregroundStyle(NX18Palette.cyan).frame(minWidth: 16)   // system: symbol
                 }
-                switch variant {
-                case .compact:   // the title as before (it wraps where it must), the note on one line, cut short (VoiceOver and the option page have it whole)
-                    VStack(alignment: .leading, spacing: NXFont.name == nil ? 0 : 1) {
-                        Text(item.title).nxFont(.footnote).foregroundStyle(NX18Palette.text).fixedSize(horizontal: false, vertical: true)
-                        if let s = item.subtitle, !s.isEmpty {
-                            Text(s).nxFont(.caption2).foregroundStyle(NX18Palette.muted).lineLimit(1).truncationMode(.tail)
-                        }
-                    }
-                case .badges, .oneline:   // the title alone, a small dot after it where the row has a note (shown on its page, and to VoiceOver); the dot takes no room
+                if overview {   // the dot takes no room
                     Text(item.title).nxFont(.footnote).foregroundStyle(NX18Palette.text).fixedSize(horizontal: false, vertical: true)
                         .overlay(alignment: .topTrailing) {
-                            if badge { Circle().fill(NX18Palette.muted).frame(width: 5, height: 5).offset(x: 8, y: 2).accessibilityHidden(true) }
+                            if dot { Circle().fill(NX18Palette.muted).frame(width: 5, height: 5).offset(x: 8, y: 2).accessibilityHidden(true) }
                         }
-                default:
+                } else {
                     VStack(alignment: .leading, spacing: NXFont.name == nil ? 1 : 3) {   // the UI font's lines carry no gap of their own (NXFont.swift)
                         Text(item.title).nxFont(.footnote).foregroundStyle(NX18Palette.text).fixedSize(horizontal: false, vertical: true)
                         if let s = item.subtitle, !s.isEmpty {
@@ -387,8 +339,8 @@ private struct GameMenuRowView: View {
                 trailing
             }
             .padding(.horizontal, 8)
-            .padding(.vertical, variant == .current ? 4 : 3)
-            .frame(minHeight: variant == .current ? 34 : 30)
+            .padding(.vertical, overview ? 3 : 4)
+            .frame(minHeight: overview ? 30 : 34)
             .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(fill))
             .opacity(item.disabled ? 0.45 : 1)
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -403,8 +355,7 @@ private struct GameMenuRowView: View {
         .accessibilityAddTraits(traits)
     }
 
-    private var variant: GameMenuVariant { overview && GameMenuVariant.now != .five ? GameMenuVariant.now : .current }
-    private var badge: Bool { if case .submenu = item.kind { return false }; return !(item.subtitle ?? "").isEmpty }
+    private var dot: Bool { if case .submenu = item.kind { return false }; return !(item.subtitle ?? "").isEmpty }   // a submenu's note is its value
 
     private var fill: Color {
         if option && item.isOn { return NX18Palette.cyan.opacity(0.18) }
@@ -429,7 +380,7 @@ private struct GameMenuRowView: View {
             }
             .fixedSize()
         case .submenu:
-            if variant == .badges || variant == .oneline, let s = item.subtitle, !s.isEmpty { Text(s).nxFont(.footnote).foregroundStyle(NX18Palette.cyan).lineLimit(1).fixedSize() }   // Cheats: "1 on" as its value
+            if overview, let s = item.subtitle, !s.isEmpty { Text(s).nxFont(.footnote).foregroundStyle(NX18Palette.cyan).lineLimit(1).fixedSize() }   // Cheats: "1 on" as its value
             Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(NX18Palette.muted)   // system: symbol
         case .action:
             EmptyView()
