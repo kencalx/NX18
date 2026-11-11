@@ -58,6 +58,9 @@ void dm_gfx_texlist(int target) { (void)target; }
 int dm_guest_as_contains(uintptr_t a) { (void)a; return 0; }
 void dm_gfx_restop(void) {}
 void dm_gfx_pressure(int level) { (void)level; }
+void dm_gfx_addr_note(uint64_t a, char *note, size_t n) { (void)a; if (n) note[0] = 0; }   // DM_CTL addr, bufsnap and atrace (hle_hid.c ctl_main): nvn_mtl.m's and probe.c's
+void dm_gfx_bufsnap(const char *key, uint64_t a, size_t n, const char *path) { (void)key; (void)a; (void)n; (void)path; }
+void probe_atrace(uint64_t lo, uint64_t n) { (void)lo; (void)n; }
 void dm_gfx_texraw(uint64_t serial, const char *path) { (void)serial; (void)path; }
 void dm_ctl_peek(uint64_t a, int n) { (void)a; (void)n; }
 void crash_dump_now(const char *why) { (void)why; }
