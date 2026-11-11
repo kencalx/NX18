@@ -24,8 +24,10 @@ static NSDictionary *load(const char *key) {
 
 // Two conversions of one json are the same reflection: every field, the bindings b[0..nb), the readable-tile tables and c1. The pointers and the room differ by design (cap, tail)
 static int same_refl(const nvn_refl *a, const nvn_refl *b, char *why, size_t wl) {
-    nvn_refl x = *a, y = *b; x.b = y.b = NULL; x.fc = y.fc = NULL; x.uv = y.uv = NULL; x.tail = y.tail = NULL; x.cap = y.cap = 0; x.c1 = y.c1 = NULL;
-    if (memcmp(&x, &y, sizeof x)) { snprintf(why, wl, "scalar fields differ"); return 0; }
+    // Byte copies, padding included: nvn_refl_from_json zeroes the whole struct (nvn_refl_free → nvn_refl_init's memset) before it sets a field, so the bytes compared are the fields
+    // and zeros, and comparing the whole representation covers a field added later without a line here
+    nvn_refl x, y; memcpy(&x, a, sizeof x); memcpy(&y, b, sizeof y); x.b = y.b = NULL; x.fc = y.fc = NULL; x.uv = y.uv = NULL; x.tail = y.tail = NULL; x.cap = y.cap = 0; x.c1 = y.c1 = NULL;
+    if (memcmp(&x, &y, sizeof x)) { snprintf(why, wl, "scalar fields differ"); return 0; }   // NOLINT(bugprone-suspicious-memory-comparison): padding zeroed by nvn_refl_from_json, copied by memcpy (above)
     if (a->nb && memcmp(a->b, b->b, (size_t)a->nb * sizeof *a->b)) { snprintf(why, wl, "bindings differ"); return 0; }
     if (memcmp(a->fc, b->fc, sizeof *a->fc)) { snprintf(why, wl, "fragment readable-tile tables differ"); return 0; }
     if (memcmp(a->uv, b->uv, sizeof *a->uv)) { snprintf(why, wl, "vertex readable-tile tables differ"); return 0; }
@@ -71,7 +73,8 @@ static void layout_cases(nvn_refl *r) {
     check("fixed: two bindings convert", 0, nvn_refl_from_json(two, r, err, sizeof err));
     check("fixed: room for NVN_REFL_MAXB bindings", NVN_REFL_MAXB, r->cap);
     check("fixed: both tables of its own", 1, r->fc != &nvn_refl_fc_none && r->uv != &nvn_refl_uv_none);
-    int zero = 1; for (int i = r->nb; i < r->cap; i++) { nvn_rbind z = {0}; if (memcmp(&r->b[i], &z, sizeof z)) zero = 0; }
+    int zero = 1; const size_t eb = sizeof *r->b;   // every byte of each entry, padding included
+    for (int i = r->nb; i < r->cap; i++) { const uint8_t *e = (const uint8_t *)&r->b[i]; for (size_t k = 0; k < eb; k++) if (e[k]) zero = 0; }
     check("fixed: zeros past nb, as the embedded array had", 1, zero);
     nvn_refl_stats(&t1, &b1); check("fixed: the old block's size counted", FIXED_BLOCK, (long)(b1 - b0));
     nvn_refl_free(r); nvn_refl_set_fixed(-1);

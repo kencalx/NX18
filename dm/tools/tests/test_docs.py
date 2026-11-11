@@ -96,7 +96,7 @@ class PatchIndex(unittest.TestCase):
         for k in ('fps_max', 'fps_target', 'render_cond'): self.assertIn(k, keys)
         for k, v, _ in rows:   # each switch has its own SWITCH_BINDING row: classify matches a key by its start, so present_interval_choice would otherwise take present_interval's
             r = next((r for r in docs_patches.SWITCH_BINDING if k.startswith(r[0]) and (v or '').startswith(r[1])), None)
-            self.assertIsNotNone(r, f'profile key {k} {v}: no SWITCH_BINDING row')
+            if r is None: self.fail(f'profile key {k} {v}: no SWITCH_BINDING row')
             self.assertEqual(r[0], k, f'profile key {k} {v} is classified by the SWITCH_BINDING row of {r[0]}')
 
 

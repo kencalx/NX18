@@ -4,13 +4,15 @@ import importlib.util
 import inspect
 from pathlib import Path
 import types
+from typing import Any
 import unittest
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 SCRIPT = REPO / 'scripts/build_ipa_from_nsp.py'
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', SCRIPT)
-nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
+assert spec and spec.loader   # a path that exists: narrows the Optional for the type checker
+nsp: Any = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)   # Any: the script's globals, which the tests set as main does, are not known to the checker
 
 
 class Profile:

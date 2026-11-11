@@ -23,9 +23,12 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 SCRIPT = REPO / 'scripts/build_ipa_from_nsp.py'
+PACK_APP = REPO / 'dm/mac/pack_app.py'
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', SCRIPT)
+assert spec and spec.loader   # paths that exist: narrows the Optional for the type checker
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
-spec = importlib.util.spec_from_file_location('pack_app', REPO / 'dm/mac/pack_app.py')
+spec = importlib.util.spec_from_file_location('pack_app', PACK_APP)
+assert spec and spec.loader
 pack_app = importlib.util.module_from_spec(spec); spec.loader.exec_module(pack_app)
 TID = '01008CF01BAAC000'
 TEST_ROOT = Path(os.environ.get('NXNATIVE_TEST_ROOT', tempfile.gettempdir()))
@@ -307,7 +310,7 @@ class PackReuse(unittest.TestCase):
             with self.subTest(option=name): setattr(self.args, name, None); self.assert_repacked()
 
     def test_packer_source_content_invalidates(self):
-        source = self.tmp / 'source/pack_app.py'; shutil.copy2(pack_app.__file__, source)
+        source = self.tmp / 'source/pack_app.py'; shutil.copy2(PACK_APP, source)
         with mock.patch.object(pack_app, '__file__', str(source)):
             self.pack(); source.write_text(source.read_text() + '\n# fixture change\n'); self.assert_repacked()
 
@@ -841,7 +844,9 @@ class Script(unittest.TestCase):
         (tmp / 'profile').mkdir(); (tmp / 'profile/shader_pairs.tsv').write_text('v\tf\n')
         o, _ = self.pack_cmd('nvn', work=tmp)
         self.assertEqual(o['--pso'], str(tmp / 'pso/mac'))
-        p = self.pso_cmd; self.assertTrue(p[1].endswith('dm/gfx/tools/pso_offline.py'))
+        p = self.pso_cmd
+        if p is None: self.fail('pso_offline.py did not run')
+        self.assertTrue(p[1].endswith('dm/gfx/tools/pso_offline.py'))
         self.assertEqual({p[i]: p[i + 1] for i in range(2, len(p) - 1) if p[i].startswith('--')},
                          {'--game': '01008CF01BAAC000', '--msl': str(tmp / 'shader/cache/b-0123456789ab'), '--out': str(tmp / 'pso/mac'), '--work': str(tmp / 'pso/mac-work'),
                           '--gpu': 'applegpu_g14s', '--platform': 'macos'})
@@ -869,7 +874,9 @@ class Script(unittest.TestCase):
         (tmp / 'profile').mkdir(); (tmp / 'profile/shader_pairs.tsv').write_text('v\tf\n')
         o, _ = self.pack_cmd('nvn', work=tmp, gpus=nsp.PSO_GPUS, gpu_option=False)   # the build's own call: (args.gpu or PSO_GPUS) with no --gpu
         self.assertEqual(o['--pso'], str(tmp / 'pso/mac'))
-        p = self.pso_cmd; self.assertEqual(p[p.index('--gpu') + 1], 'applegpu_g14s')
+        p = self.pso_cmd
+        if p is None: self.fail('pso_offline.py did not run')
+        self.assertEqual(p[p.index('--gpu') + 1], 'applegpu_g14s')
         self.assertTrue(any('PSO_GPUS (g19p) is the IPA\'s' in m for m in self.said))
         o, _ = self.pack_cmd('nvn', work=tmp, gpus='none', gpu_option=False); self.assertIsNone(self.pso_cmd)
         script = (REPO / 'scripts/build_ipa_from_nsp.py').read_text()   # the call site says where the value came from

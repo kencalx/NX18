@@ -366,9 +366,12 @@ static int nq_signal_on(const nq_node *n,const uint8_t *a) {
 static void nq_signal_add(nq_node *n,const uint8_t *a) {
     if(!n->signals_cap && nq_pooled()) { n->signals=&n->signal0; n->signals_cap=1; }
     if(n->nsignals==n->signals_cap) {
-        unsigned cap=n->signals_cap>1?n->signals_cap*2:4; struct nq_signal *grown=n->signals==&n->signal0?malloc(cap*sizeof *grown):realloc(n->signals,cap*sizeof *grown);   // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts
+        // inline: the one signal is in signal0 (nq_pooled), which the new array takes as its first; asked once, so the copy goes with the malloc (clang's analyzer cannot carry a pointer
+        // comparison from one test to the next, and took the malloc without the copy)
+        int inline_one=n->signals==&n->signal0;
+        unsigned cap=n->signals_cap>1?n->signals_cap*2:4; struct nq_signal *grown=inline_one?malloc(cap*sizeof *grown):realloc(n->signals,cap*sizeof *grown);   // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts
         if(!grown) die("queue signal allocation failed");
-        if(n->signals==&n->signal0) grown[0]=n->signal0;
+        if(inline_one) grown[0]=n->signal0;
         n->signals=grown; n->signals_cap=cap;
     }
     struct nq_signal *g=&n->signals[n->nsignals++]; memcpy(&g->word,a,8); memcpy(&g->mode,a+8,4); memcpy(&g->value,a+12,4);

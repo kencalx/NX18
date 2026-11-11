@@ -16,7 +16,8 @@ enum { MB = 1 << 20, BLOCK = 256 * MB, WRITTEN = 64 * MB, ALIAS_AT = 128 * MB, A
 // The memory line as mtl_mem_stat prints it, read back from stderr
 static int mem_line(char *out, size_t cap, unsigned long long frame) {
     char path[] = "/tmp/t_mem_line.XXXXXX"; int fd = mkstemp(path); if (fd < 0) return 0;
-    fflush(stderr); int saved = dup(2); dup2(fd, 2);
+    fflush(stderr); int saved = dup(2); if (saved < 0) { unlink(path); close(fd); return 0; }
+    dup2(fd, 2);
     task_vm_info_data_t vi; mach_msg_type_number_t n = TASK_VM_INFO_COUNT; task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &n);
     mtl_mem_stat(frame, vi.phys_footprint >> 20);
     dispatch_sync(g_mem_q, ^{});   // the line is printed on its own queue, after the guest block's walk

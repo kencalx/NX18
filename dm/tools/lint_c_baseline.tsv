@@ -22,7 +22,7 @@ dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullableDereferenced	4
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullablePassedToNonnull	14
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-security.ArrayBound	1
-dm/gfx/nvn/nvn_mtl.m	clang-analyzer-unix.cstring.NullArg	4
+dm/gfx/nvn/nvn_mtl.m	clang-analyzer-unix.cstring.NullArg	3
 dm/gfx/nvn/nvn_mtl.m	misc-redundant-expression	2
 dm/gfx/nvn/nvn_rec.h	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_border.m	clang-analyzer-security.ArrayBound	2
@@ -31,7 +31,6 @@ dm/gfx/tests/t_defer_chain.m	clang-analyzer-nullability.NullablePassedToNonnull	
 dm/gfx/tests/t_float_pad.m	bugprone-suspicious-memory-comparison	1
 dm/gfx/tests/t_geometry.m	clang-analyzer-nullability.NullablePassedToNonnull	2
 dm/gfx/tests/t_geometry.m	clang-analyzer-security.ArrayBound	1
-dm/gfx/tests/t_geometry_feedback.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_geometry_primitive_id.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_missing_src1.m	bugprone-suspicious-memory-comparison	2
 dm/gfx/tests/t_perf_order.m	bugprone-unsafe-functions	2

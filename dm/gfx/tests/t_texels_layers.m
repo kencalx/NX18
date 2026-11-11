@@ -32,11 +32,12 @@ static int readback_ok(const char *label) {
     h_nvnCommandBufferCopyTextureToBuffer(&cmd, &tex, &level1, &r1, dst1, 0);
     NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd);
     memset((void *)(uintptr_t)dst0, 0xcd, sizeof want0 + sizeof want1);
-    mtl_sub_begin(); mtl_exec(nvn_rec_linear(h, NULL));   // the records as the queue submits them (upstream f02d0474: the handle is a control list)
+    uint8_t *rec = nvn_rec_linear(h, NULL);   // the records as the queue submits them (upstream f02d0474: the handle is a control list); malloc'd, freed once the submission has run
+    mtl_sub_begin(); mtl_exec(rec);
     int ok = mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error();
-    settle();
+    settle(); free(rec);
     int same0 = !memcmp((void *)(uintptr_t)dst0, want0, sizeof want0), same1 = !memcmp((void *)(uintptr_t)dst1, want1, sizeof want1);
-    if (!same0 || !same1) { const uint8_t *g = (const uint8_t *)(uintptr_t)dst0, *w = &want0[0][0][0][0]; size_t i = 0; while (i < sizeof want0 && g[i] == w[i]) i++;
+    if (!same0 || !same1) { const uint8_t *g = (const uint8_t *)(uintptr_t)dst0, *w = &want0[0][0][0][0]; size_t i = 0, n0 = sizeof want0; while (i < n0 && g[i] == w[i]) i++;
         unsigned bad = 0; for (unsigned y = 0; y < L; y++) if (memcmp(g + (size_t)y * W * H * 4, w + (size_t)y * W * H * 4, (size_t)W * H * 4)) bad |= 1u << y;
         fprintf(stderr, "%s: level 0 %s (first difference at layer %zu, layers differing %#x), level 1 %s\n", label, same0 ? "same" : "differs", i / (W * H * 4), bad, same1 ? "same" : "differs"); }
     return ok && same0 && same1;
@@ -51,9 +52,10 @@ static int gpu_copy(NVNtexture *dst, int layer, int x, int y, int w, int h, uint
     h_nvnCommandBufferBeginRecording(&cmd);
     h_nvnCommandBufferCopyBufferToTexture(&cmd, (uint64_t)(uintptr_t)src, dst, NULL, &r, 0);
     NVNcommandHandle hd = h_nvnCommandBufferEndRecording(&cmd);
-    mtl_sub_begin(); mtl_exec(nvn_rec_linear(hd, NULL));
+    uint8_t *rec = nvn_rec_linear(hd, NULL);
+    mtl_sub_begin(); mtl_exec(rec);
     int ok = mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error();
-    settle(); return ok;
+    settle(); free(rec); return ok;
 }
 // The storage's level 0 of one layer, deswizzled on the CPU, against what it must hold
 static int storage_layer_ok(int layer) {

@@ -38,9 +38,10 @@ static void target(recording *r,const tex_t *t,int lv,int slot,const tex_t *othe
 }
 static void finish(recording *r) {
     NVNcommandHandle h=h_nvnCommandBufferEndRecording(&r->cb);state_reset();memset(&R,0,sizeof R);
-    mtl_sub_begin();mtl_exec(nvn_rec_linear(h, NULL));
+    uint8_t *rec=nvn_rec_linear(h, NULL);   // malloc'd: freed once its submission has run
+    mtl_sub_begin();mtl_exec(rec);
     int done=mtl_wait(mtl_sub_commit(),5000000000ull);EXPECT("production GPU done",1,done);if(!done)abort();EXPECT("no error in commit feedback",0,mtl_last_commit_error());
-    mtl_pool_del(r->mem);free(r->mem);
+    free(rec);mtl_pool_del(r->mem);free(r->mem);
 }
 static void seed(const tex_t *t) {
     id<MTLTexture> m=tex_mtl(t);T4 *cb = t4_begin();   // t4_begin orders it after the host's pending new-texture zeroing (a command buffer of the classic queue that did not wait for it ran before it, and the zeroing wiped the seed

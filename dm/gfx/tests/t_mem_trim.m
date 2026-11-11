@@ -31,7 +31,9 @@ static uint64_t make_idle(__weak id held[], int *nheld) {
             id<MTLHeap> h = [g_dev newHeapWithDescriptor:hd]; res_add(h); bytes += h.size; held[(*nheld)++] = h;
             NvRecycledHeap *o = [NvRecycledHeap new]; o->heap = h; o = nil;   // waits now (dealloc)
         }
-        id<MTLBuffer> src = [g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared]; res_add(src);
+        id<MTLBuffer> src = [g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];
+        if (!src) { fprintf(stderr, "FAIL: no 4 KB shared buffer for the upload batches\n"); exit(1); }
+        res_add(src);
         mtl_sub_begin();
         for (int b = 0; b < 3; b++) {   // one batch per slot: 2 x 24 MB, past the 32 MB block, so each slot has a block above 4 MB and an overflow block
             up_begin();
