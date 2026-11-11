@@ -41,7 +41,7 @@ static uint64_t make_idle(__weak id held[], int *nheld) {
             up_flush();
         }
         int fresh = 0; const NSUInteger side[3] = {1024, 512, 256};
-        for (int i = 0; i < 3; i++) { fb_cache_t *e = fb_snap(91000 + (uint64_t)i, 0, 0, MTLPixelFormatRGBA16Float, side[i], side[i], 1, &fresh); if (e) { bytes += e->snap.allocatedSize; held[(*nheld)++] = e->snap; } }
+        for (int i = 0; i < 3; i++) { fb_cache_t *e = fb_snap(91000 + (uint64_t)i, 0, 0, MTLPixelFormatRGBA16Float, side[i], side[i], 1, &fresh); if (e) { id<MTLHeap> h = e->snap.heap; bytes += h ? h.size : e->snap.allocatedSize; held[(*nheld)++] = h ?: (id)e->snap; } }   // a snapshot in recycled memory: its heap (rh_place)
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission with the upload batches completes");
         mtl_drain();
         for (unsigned i = 0; i < 3; i++) { if (g_up_slot_blk[i].length > UP_SLOT_BLOCK) held[(*nheld)++] = g_up_slot_blk[i]; if (g_up_slot_over[i]) held[(*nheld)++] = g_up_slot_over[i]; }
@@ -109,7 +109,7 @@ int main(void) { @autoreleasepool {
         printf("idle snapshots %s: %d kept after %d idle submissions, %llu released\n", fb_idle ? "on" : "off (DM_NVN_FB_SNAP_IDLE=0)", snaps(), FB_SNAP_IDLE + 1, (unsigned long long)(atomic_load(&g_fbc_freed) - f0));
         CHECK(snaps() == (fb_idle ? 0 : 3), fb_idle ? "idle snapshots: all three go" : "DM_NVN_FB_SNAP_IDLE=0: all three kept");
         CHECK(atomic_load(&g_fbc_freed) - f0 == (fb_idle ? 3u : 0u), "idle snapshots: counted");
-        id s = s0; CHECK(fb_idle ? !s : s && resident(s), fb_idle ? "idle snapshots: freed" : "DM_NVN_FB_SNAP_IDLE=0: still resident");
+        id s = s0; CHECK(fb_idle ? !s : s && resident(((id<MTLTexture>)s).heap ?: s), fb_idle ? "idle snapshots: freed" : "DM_NVN_FB_SNAP_IDLE=0: still resident");
         s = nil;
     }
     printf("t_mem_trim: %d checks, %d failed\n", checks, failed);
