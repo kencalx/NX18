@@ -241,5 +241,36 @@ class AudioLine(unittest.TestCase):   # hle_audio.c's statistics line, before an
             self.assertEqual((au['callbacks'], au['underruns'], au['zero_padded_ms']), (2000, 2, 10.0))
 
 
+
+class BundledArchive(unittest.TestCase):   # the pipeline archive bundled with the app: opened, or left out, the crash guard's verdicts among them (nvn_mtl.m, pso_guard_begin)
+    G = '[dm] [nvn-mtl] [RED] pipeline archive bundled with the app: '
+    ID = 'applegpu_g19p.metallib (12 MB, 0123abcd, app 89ab)'
+
+    def bundled(self, line: str):
+        return read([line])['pipelines']['bundled']
+
+    def test_opened(self):
+        self.assertEqual(self.bundled(f'[dm] [nvn-mtl] pipeline archive bundled with the app: /a/{self.ID}, 12.0 MB, opened in 3.5 ms'), {'mb': 12.0, 'open_ms': 3.5})
+
+    def test_left_out_by_the_guard(self):   # two early ends in a row, and one with the one-end rule: the start that leaves the archive out, the one an A/B most needs to see
+        for line in (f'{self.G}two starts in a row with {self.ID} on this system build (23A100) did not get past their first frames (they crashed, or iOS ended them in the '
+                     'foreground): this start leaves the archive out and the device builds the bases itself (Preparing pipelines, once). (crash guard: /d/pso_bundle_guard.tsv).',
+                     f'{self.G}a start with {self.ID} on this system build (23A100) did not get past its first frames (it crashed, or iOS ended it in the foreground): this start '
+                     'leaves the archive out and the device builds the bases itself (Preparing pipelines, once). (crash guard: /d/pso_bundle_guard.tsv).',
+                     f'{self.G}{self.ID} is left out on this system build (23A100): starts with it did not get past their first frames and the start without it did (crash guard: '
+                     '/d/pso_bundle_guard.tsv), so the device\'s own archive serves the bases.'):
+            self.assertEqual(self.bundled(line), 'left out', line)
+        self.assertIn("the app's own archive left out", '\n'.join(devlog.render(read([line]), 5)))
+
+    def test_used_again(self):   # one early end: this start uses it again, so not left out (its open line says the rest)
+        line = (f'{self.G}a start with {self.ID} on this system build (23A100) did not get past its first frames (it crashed, or iOS ended it in the foreground): this start uses it '
+                'again, watched, since one such start can have another cause; only a second such start in a row leaves it out (crash guard: /d/pso_bundle_guard.tsv)')
+        self.assertIsNone(self.bundled(line))
+
+    def test_the_producer_says_it(self):   # the words the pattern reads are in the guard's [RED] lines
+        src = (REPO / 'dm/gfx/nvn/nvn_mtl.m').read_text(errors='replace')
+        self.assertGreaterEqual(src.count('foreground): this start leaves the archive out and the device builds the bases itself'), 1)
+        self.assertGreaterEqual(src.count('"in the foreground): this start leaves the archive out and the device builds the bases itself'), 1)   # PSG_WITH2's line
+
 if __name__ == '__main__':
     unittest.main()

@@ -9,7 +9,7 @@
 // or captured), and one with a pixel shader that declares function constants or with no pixel shader is built as before.
 // The crash guard (nvn_pso_guard.h; its rules are t_pso_guard.c's), which the Mac runs only with DM_PSO_BUNDLE_GUARD=1: unset, a planted record is not read; with it, a record
 // planted for this archive and system build after one start that ended early uses the archive again, watched as the second in a row; after two in a row it leaves the archive out,
-// and the start without it past its window keeps it out; DM_PSO_BUNDLE_GUARD=0 opens it all the same; a start with it writes the record before Metal reads it, the background
+// and the start without it past its window keeps it out; DM_PSO_BUNDLE_GUARD=0 (and =Off) opens it all the same; a start with it writes the record before Metal reads it, the background
 // puts it back and the window clears it; a file the container check refuses writes no record; and another system build's record is none.
 // Without metal-tt (no Metal toolchain) it says so and passes
 #include "../nvn/nvn_mtl.m"
@@ -324,6 +324,11 @@ int main(void) { @autoreleasepool {
         setenv("DM_PSO_BUNDLE_GUARD", "0", 1); pso_bundle_open(list); setenv("DM_PSO_BUNDLE_GUARD", "1", 1);
         EXPECT("guard off: opened", 1, list.count == 1 && g_arch_bundle != nil);
         EXPECT("guard off: the record left as it was", PSG_SKIP, psg_load(&g_psg));
+        // DM_PSO_BUNDLE_GUARD=off (DM_PSO_BUNDLE's word; false and no too, in any case) is off as well: the old commit read only 0 as off and kept the guard on
+        [list removeAllObjects]; g_arch_bundle = nil;
+        setenv("DM_PSO_BUNDLE_GUARD", "Off", 1); pso_bundle_open(list); setenv("DM_PSO_BUNDLE_GUARD", "1", 1);
+        EXPECT("guard off (off): opened", 1, list.count == 1 && g_arch_bundle != nil);
+        EXPECT("guard off (off): the record left as it was", PSG_SKIP, psg_load(&g_psg));
         // no record: the archive opens and the record says a start with it is under way; the background puts it back, the foreground writes it again, the window clears it
         [NSFileManager.defaultManager removeItemAtPath:rec error:nil]; [list removeAllObjects]; g_arch_bundle = nil; pso_bundle_open(list);
         EXPECT("guard: no record, opened", 1, list.count == 1 && g_arch_bundle != nil);

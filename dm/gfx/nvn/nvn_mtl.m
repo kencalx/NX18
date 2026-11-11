@@ -69,6 +69,7 @@ static uint64_t c2_handle(int stage, unsigned b);   // the handle c2 holds at by
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   // strcasecmp (DM_PSO_BUNDLE_GUARD's off words)
 #include <time.h>
 #include <unistd.h>
 #include <stdatomic.h>
@@ -8934,8 +8935,8 @@ static int arch_file_ok(NSString *path) {
 // counted. Two starts in a row with the archive that ended early in the foreground (PSO_GUARD_NEED) leave it out: the device builds the bases itself, as with DM_PSO_BUNDLE=off
 // (Preparing pipelines, once), with a [RED] line that says why, and whether that start gets past its first frames decides if it stays out. Nothing a game sees changes: the
 // bases are the same pipelines either way, looked up by content; a wrong verdict costs one long first start. On by default on iOS, where #640 was found and the app runs one
-// process at a time; off on the Mac, whose runs (the launcher, bench.py, regress.py) keep using their archive after a crash in bring-up as before. DM_PSO_BUNDLE_GUARD=0 / 1
-// turns it off / on (off: the archive is always used and no record is read or written)
+// process at a time; off on the Mac, whose runs (the launcher, bench.py, regress.py) keep using their archive after a crash in bring-up as before. DM_PSO_BUNDLE_GUARD=0 (or off,
+// false, no) / 1 (any other value) turns it off / on (off: the archive is always used and no record is read or written)
 static psg_guard g_psg = PSG_GUARD_INIT;
 static _Atomic(const char *) g_psg_why;   // the end of the start the window waited for (the log line)
 // Starts in a row with the archive that end early before one leaves it out: two for every game. The Nintanium line took one for games that had no archive before it became the
@@ -8984,7 +8985,10 @@ static void pso_guard_atexit(void) { psg_exit(&g_psg); }
 // Whether this start opens the bundled archive at p (before Metal reads it): the record's verdict, with a [RED] line when it leaves the archive out
 static int pso_guard_begin(NSString *p) {
     const char *e = getenv("DM_PSO_BUNDLE_GUARD");
-    if (!(e && *e ? strcmp(e, "0") != 0 : TARGET_OS_IPHONE)) {   // off: on the Mac unless asked for, and wherever DM_PSO_BUNDLE_GUARD=0
+    // Off: on the Mac unless asked for, and wherever DM_PSO_BUNDLE_GUARD is 0, off, false or no (any case). The old commit took only 0 as off, so DM_PSO_BUNDLE_GUARD=off, the
+    // word its sibling DM_PSO_BUNDLE takes, kept the guard on without a line saying so (and turned it on on the Mac); any other value still turns it on, the Mac included
+    int off_word = e && (!strcmp(e, "0") || !strcasecmp(e, "off") || !strcasecmp(e, "false") || !strcasecmp(e, "no"));
+    if (e && *e ? off_word : !TARGET_OS_IPHONE) {
         if (e && *e) MLOG("DM_PSO_BUNDLE_GUARD=%s: the pipeline archive bundled with the app is used without its crash guard (no record read or written)", e);
         return 1;
     }

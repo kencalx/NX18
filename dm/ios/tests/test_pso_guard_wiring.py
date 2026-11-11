@@ -95,7 +95,8 @@ class Wiring(unittest.TestCase):
         self.assertIn('#define PSO_GUARD_NEED 2\n', self.nvn)   # two early ends in a row for every game (pso_mtl4 is retired: every game reads its archive)
         self.assertNotIn('DM_GAME_PSO_MTL4', self.nvn)
         begin = body(self.nvn, 'static int pso_guard_begin(NSString *p) {')
-        self.assertIn('if (!(e && *e ? strcmp(e, "0") != 0 : TARGET_OS_IPHONE)) {', begin)   # on by default on iOS only; 0 / 1 override
+        self.assertIn('if (e && *e ? off_word : !TARGET_OS_IPHONE) {', begin)   # on by default on iOS only; an off word / any other value override
+        self.assertIn('int off_word = e && (!strcmp(e, "0") || !strcasecmp(e, "off") || !strcasecmp(e, "false") || !strcasecmp(e, "no"));', begin)   # off, DM_PSO_BUNDLE's word, is off here too
         self.assertIn('psg_begin(&g_psg, rec.fileSystemRepresentation, os, id_.UTF8String, PSO_GUARD_NEED)', begin)
         self.assertNotRegex(begin, r'g_psg\.(found|armed|err)')   # the verdict as psg_begin copied it under its lock, not the guard's fields
         row = next(ln for ln in read('docs/env_switches.tsv').splitlines() if ln.startswith('DM_PSO_BUNDLE_GUARD\t'))

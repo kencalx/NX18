@@ -85,7 +85,7 @@ RX = {k: re.compile(v) for k, v in {
     'vkpso': r'^\[vk\] pipelines: (\d+) compiled .*? in ([\d.]+) s from the first create .*?, (\d+) failed; submissions waited for a compile (\d+) times, ([\d.]+) ms in all .*?; (\d+) since the start',
     'archive': r'^\[nvn-mtl\] pipeline archive .*: (\d+) files \((\d+) of bases without a vertex layout(?:, \d+ with an index of \d+ pipelines)?\), ([\d.]+) MB, opened in ([\d.]+) ms',   # the index part since NXNative's 70b9a68a
     'bundled': r'^\[nvn-mtl\] pipeline archive bundled with the app: .*, ([\d.]+) MB, opened in ([\d.]+) ms',
-    'bundle_out': r'^\[nvn-mtl\] (?:\[RED\] )?pipeline archive bundled with the app: (?:.* is left out|none for this GPU|this system cannot open)',
+    'bundle_out': r'^\[nvn-mtl\] (?:\[RED\] )?pipeline archive bundled with the app: (?:.* is left out|.*: this start leaves the archive out|none for this GPU|this system cannot open)',   # this start leaves it out: the crash guard's verdict (nvn_mtl.m, pso_guard_begin)
     'written': r'^\[nvn-mtl\] pipeline archive: (\d+) new pipeline bases(?: and \d+ compute pipelines)?(?: and \d+ task / mesh pipelines)? written to \S+ \(([\d.]+) MB, (\d+) ms\)',   # the compute part since NXNative's 30fb2136, the task / mesh part since bf420fda
     'prepare': r'^\[nvn-mtl\] pipeline prepare: (\d+) lines .*?progress screen (shown|not shown); bases (\d+) compiled, (\d+) from the archive, (\d+) reused',
     'link': r'^\[nvn-mtl\] display link up to tick (\d+): ticks \d+, presents (\d+), empty ticks (\d+) .*?merging (\d+); submission ahead of target display p50 ([\d.]+) ms / min ([\d.]+) ms; '
