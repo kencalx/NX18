@@ -54,6 +54,21 @@ For a game without a profile, the script writes a survey and tries a provisional
 
 Switch 2 games are built from one `.nup` or `.nx` file or a folder of their files, not from NSPs, and are tested on the Mac only: see [Switch 2 games](#switch-2-games).
 
+### Quick start with the release scripts
+
+Two scripts come with each [release](https://github.com/kencalx/NX18/releases) (and are in [`scripts/release`](scripts/release)). They do the steps of [Build from the command line](#build-from-the-command-line) for you:
+
+- **`nx18-setup.sh`** gets the Mac ready. It checks macOS, Xcode 27.3 (which you download from Apple yourself; it says which and how to select it) and its Metal toolchain, installs xcodegen, zstd and the Python modules (into a virtualenv, `.venv` in the NX 18 folder), and clones or updates NX 18 in `~/NX18`. It asks before each install or download and never runs `sudo`, and it leaves a folder with your own changes in it alone. `--check` only reports what is missing; `--yes` answers every question; `--dir <folder>` and `--ref <tag>` choose another folder or a release.
+- **`nx18-build.sh`** builds a game. Set your game (its folder of NSPs, a dump folder, or a `.nup` or `.nx` file), your `prod.keys` and the target (`iphone`, `ipad` or `mac-app`) in the settings at its top, then run it. It checks the settings, selects Xcode 27.3 by itself, runs the build and says where the IPA or app is. It never prints or copies your keys.
+
+```
+bash ~/Downloads/nx18-setup.sh
+cp -n ~/Downloads/nx18-build.sh ~/nx18-build.sh   # -n keeps a copy you already edited; then edit the settings at its top
+bash ~/nx18-build.sh
+```
+
+Each setting can also be given as an environment variable (`NX18_GAME`, `NX18_KEYS`, `NX18_TARGET`, ...: the comment beside it names it), and other options of the packing script go after the script's name: `bash ~/nx18-build.sh --language ja`. Keep your copy of `nx18-build.sh` outside the NX 18 folder: `nx18-setup.sh` does not update a folder with changed files in it.
+
 ### Build from the command line
 
 You need an Apple silicon Mac with macOS 27.3 or later, [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.3) 27.3, [Homebrew](https://brew.sh) and Python 3.12 or newer (an arm64 one, not an Intel Homebrew's). An iPhone build also needs Xcode's iOS platform (Xcode → Settings → Components).

@@ -11,3 +11,5 @@ dm/games/*/cb_extent.tsv
 .coverage
 .coverage.*
 /coverage.json
+# The Python virtualenv scripts/release/nx18-setup.sh makes for the build's modules
+.venv/
