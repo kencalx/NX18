@@ -89,8 +89,10 @@ enum GameMenuLayout {
     @Published private(set) var root: [GameMenuSection] = []
     @Published private(set) var stack: [String] = []   // the ids of the choice or submenu open, outermost first
     @Published var focus: String?
+    @Published var anchorBottom: CGFloat = 0            // the menu button's lower edge in the panel's view: the landscape panel starts below it (GameMenuPanelHost keeps it, rotation too)
     let title = gameMenuTitle()
     weak var anchor: UIView?                            // the menu button
+    var closed = false                                  // closing: the controller's presses during the fade do nothing
     var columnsShown: [GameMenuColumn] = []            // the page as last laid out: the controller's steps go by it
     var close: () -> Void = {}
 
@@ -144,9 +146,11 @@ enum GameMenuLayout {
         focus = last
     }
     func handle(_ e: LauncherPadEvent) {
+        if closed { return }
         let cols = columnsShown
         let ids = Set(cols.flatMap(\.ids))
-        if focus == nil || !ids.contains(focus!) { focus = GameMenuLayout.step(nil, 0, 0, in: cols); if e != .a && e != .b && e != .plus { return } }
+        // no ring on a row shown (the rows changed under it): the first row gets it, and only B and + act at once; A picks nothing the player has not seen ringed
+        if focus == nil || !ids.contains(focus!) { focus = GameMenuLayout.step(nil, 0, 0, in: cols); if e != .b && e != .plus { return } }
         switch e {
         case .up: focus = GameMenuLayout.step(focus, 0, -1, in: cols)
         case .down: focus = GameMenuLayout.step(focus, 0, 1, in: cols)
@@ -162,7 +166,6 @@ enum GameMenuLayout {
 
 struct GameMenuPanelView: View {
     @ObservedObject var model: GameMenuPanelModel
-    let anchorBottom: CGFloat   // the menu button's lower edge in this view: the landscape panel starts below it
     @StateObject private var pad = LauncherGamepad()
     @Environment(\.dynamicTypeSize) private var typeSize
     @ScaledMetric(relativeTo: .footnote) private var columnWidth: CGFloat = 180
@@ -174,7 +177,7 @@ struct GameMenuPanelView: View {
             let full = CGSize(width: geo.size.width + safe.leading + safe.trailing, height: geo.size.height + safe.top + safe.bottom)
             let landscape = full.width > full.height
             let width = min(geo.size.width - (landscape ? 12 : 20), 1000)
-            let top = landscape ? max(anchorBottom + 6 - safe.top, 6) : 0
+            let top = landscape ? max(model.anchorBottom + 6 - safe.top, 6) : 0
             let maxHeight = landscape ? geo.size.height - top - 8 : min(geo.size.height * 0.72, geo.size.height - 12)
             ZStack(alignment: landscape ? .top : .bottom) {
                 Color.black.opacity(0.22)   // a light dim: the game stays readable around the panel
@@ -200,7 +203,7 @@ struct GameMenuPanelView: View {
         let columns = GameMenuLayout.columns(page.sections, fit: n, split: page.options || page.id != nil ? 1 : 2)
         let colWidth = (inner - CGFloat(max(columns.count - 1, 0)) * 8) / CGFloat(max(columns.count, 1))
         return VStack(alignment: .leading, spacing: 0) {
-            header(page)
+            header(page, width: width)
                 .accessibilityElement(children: .contain)
                 .accessibilitySortPriority(Double(columns.count + 1))   // VoiceOver: the header first, then the columns left to right (grid)
             ScrollViewReader { proxy in
@@ -225,7 +228,7 @@ struct GameMenuPanelView: View {
         .accessibilityAction(.escape) { model.back() }
     }
 
-    @ViewBuilder private func header(_ page: GameMenuPanelModel.Page) -> some View {
+    @ViewBuilder private func header(_ page: GameMenuPanelModel.Page, width: CGFloat) -> some View {
         HStack(spacing: 10) {
             if page.id != nil {
                 Button { model.back() } label: {
@@ -245,7 +248,7 @@ struct GameMenuPanelView: View {
                     .accessibilityAddTraits(.isHeader)
             }
             Spacer(minLength: 8)
-            if pad.connected { hints(page) }
+            if pad.connected && !(typeSize.isAccessibilitySize && width < 600) { hints(page) }   // an accessibility text size in a narrow panel: no room for them beside the title
             Button { model.close() } label: {
                 Label("Close", systemImage: "xmark")
                     .labelStyle(.iconOnly)
@@ -397,9 +400,9 @@ private struct GameMenuPressStyle: ButtonStyle {
 @MainActor final class GameMenuPanelHost: UIHostingController<GameMenuPanelView> {
     let model: GameMenuPanelModel
     private var closing = false
-    init(model: GameMenuPanelModel, anchorBottom: CGFloat) {
+    init(model: GameMenuPanelModel) {
         self.model = model
-        super.init(rootView: GameMenuPanelView(model: model, anchorBottom: anchorBottom))
+        super.init(rootView: GameMenuPanelView(model: model))
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("not from a storyboard") }
 
@@ -408,6 +411,18 @@ private struct GameMenuPressStyle: ButtonStyle {
         [UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(escape))]
     }
     @objc private func escape() { model.back() }
+
+    // Where the menu button ends, read again at each layout and after a rotation (the button moves with the safe area), so the landscape panel starts just below it
+    private func followAnchor() {
+        guard let a = model.anchor, let into = view.superview else { return }
+        let y = a.convert(a.bounds, to: into).maxY
+        if abs(y - model.anchorBottom) > 0.5 { model.anchorBottom = y }
+    }
+    override func viewDidLayoutSubviews() { super.viewDidLayoutSubviews(); followAnchor() }
+    override func viewWillTransition(to size: CGSize, with coordinator: any UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in self?.followAnchor() }
+    }
 
     // The system's text size, not the window's fixed small one (front_ios.m keeps that for the UIMenu)
     func followTextSize() { traitOverrides.preferredContentSizeCategory = UIApplication.shared.preferredContentSizeCategory }
@@ -421,6 +436,7 @@ private struct GameMenuPressStyle: ButtonStyle {
         followTextSize()
         NotificationCenter.default.addObserver(self, selector: #selector(textSizeChanged), name: UIContentSizeCategory.didChangeNotification, object: nil)
         parent.view.addSubview(view)
+        followAnchor()
         didMove(toParent: parent)
         view.alpha = 0
         if !UIAccessibility.isReduceMotionEnabled { view.transform = CGAffineTransform(translationX: 0, y: -6) }
@@ -450,6 +466,7 @@ private struct GameMenuPressStyle: ButtonStyle {
 @MainActor func gameMenuPanelClose() {
     guard let host = gameMenuPanel else { return }
     gameMenuPanel = nil
+    host.model.closed = true
     dm_gamepad_panel_closed()   // at once: the game has its controllers back while the panel fades (it takes no touch meanwhile)
     host.hide()
 }
@@ -465,7 +482,7 @@ public func dmGamePanelOpen(_ anchor: UnsafeMutableRawPointer) -> Bool {
         while let x = r, !(x is UIViewController) { r = x.next }
         guard let parent = r as? UIViewController else { fputs("[RED] in-game menu: the menu button is in no view controller\n", stderr); return false }
         let model = GameMenuPanelModel(anchor: button)
-        let host = GameMenuPanelHost(model: model, anchorBottom: button.convert(button.bounds, to: parent.view).maxY)
+        let host = GameMenuPanelHost(model: model)
         model.close = { gameMenuPanelClose() }
         gameMenuPanel = host
         host.show(in: parent)

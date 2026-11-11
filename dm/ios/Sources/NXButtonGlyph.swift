@@ -13,6 +13,8 @@ import SwiftUI
 // and in the README's Acknowledgements
 enum NX18Credits {
     static let buttonIcons = "Button Icons and Controls by Zacksly (CC BY 3.0 Licensed | zacksly.itch.io), modified: recoloured"
+    // CC BY 3.0 asks for the licence's address with every copy: the app carries no LICENSE.txt, so About this game names it
+    static let buttonIconsLicence = "CC BY 3.0: creativecommons.org/licenses/by/3.0"
 }
 
 // A Switch button with a glyph

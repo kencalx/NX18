@@ -56,6 +56,9 @@ class ButtonIcons(unittest.TestCase):
         self.assertIn('Text(NX18Credits.buttonIcons)', read('dm/ios/Sources/Launcher.swift'))
         self.assertIn('Text(NX18Credits.buttonIcons)', read('dm/ios/Sources/GuideViewer.swift'))
         self.assertIn(f'static let buttonIcons = "{CREDIT}, modified: recoloured"', read('dm/ios/Sources/NXButtonGlyph.swift'))
+        # CC BY 3.0 4(a): the licence's address goes with every copy; the app carries no LICENSE.txt, so About names it
+        self.assertIn('creativecommons.org/licenses/by/3.0', read('dm/ios/Sources/NXButtonGlyph.swift'))
+        self.assertIn('Text(NX18Credits.buttonIconsLicence)', read('dm/ios/Sources/GuideViewer.swift'))
 
     def test_every_list_of_the_harness_compiles_the_glyphs(self):
         yml = read('dm/ios/tests/duo/project.yml')

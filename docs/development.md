@@ -574,7 +574,7 @@ titledb's list (about 90 MB) is downloaded whole, so GitHub is sent no title ID.
 - **Controller hint glyphs**: these come from Zacksly's "Switch Button Icons and Controls" (CC BY 3.0). They are vendored as SVG in `dm/ios/Resources/ButtonIcons` (its README and `LICENSE.txt`) and turned into outlines by `dm/ios/tools/button_glyphs.py`, which writes `NXButtonGlyphData.swift`. They are drawn in NX 18's colours by `NXButtonGlyph.swift`.
   - Where they appear: the settings screen's "Press A / + to play", the guide button's Y, B beside the close buttons of the guide and About, and the in-game menu's A Select and B Back / Close.
   - Which glyph shows: a Nintendo pad gets its printed labels. Any other pad gets the button in that position, as the game maps it (`pad_apple.h`): an Xbox pad's own letter, or a PlayStation pad's own SF Symbol.
-  - The credit "Button Icons and Controls by Zacksly (CC BY 3.0 Licensed | zacksly.itch.io), modified: recoloured" appears under the settings, in About this game and in the README.
+  - The credit "Button Icons and Controls by Zacksly (CC BY 3.0 Licensed | zacksly.itch.io), modified: recoloured" appears under the settings, in About this game (with the licence's address, creativecommons.org/licenses/by/3.0, as the app carries no `LICENSE.txt`) and in the README.
   - `dm/ios/tests/test_button_icons.py` checks that the generated file matches the SVGs, that every vendored SVG is used, and that the credit and the licence are in place.
 
 ### A Mac-only build for development

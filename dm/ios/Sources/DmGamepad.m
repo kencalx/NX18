@@ -914,6 +914,7 @@ int front_ctrl_support(int min, int max) {
     if (!front_metal_layer()) return -1;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (dm_game_panel_shown()) dm_game_panel_close();   // the in-game panel gives way: it holds the controllers (g_menu_block), which the prompt needs
         [g_view reset]; dm_touch_set(NULL, 0);   // nothing the game held stays pressed while the prompt has the input
         if (g_merge) dm_pad_set(0, 0, 0, 0, 0); else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
         int a, b; cp_buttons(&a, &b);

@@ -204,7 +204,11 @@ struct LauncherAboutSheet: View {
                     facts
                     if let s = about.sourceLine { Text(s).nxFont(.footnote).foregroundStyle(NX18Palette.muted) }
                     if let v = version { Text("Version \(v)").nxFont(.footnote).foregroundStyle(NX18Palette.muted) }
-                    Text(NX18Credits.buttonIcons).nxFont(.caption).foregroundStyle(NX18Palette.muted)   // the controller hints' glyphs (NXButtonGlyph.swift)
+                    VStack(alignment: .leading, spacing: 2) {   // the controller hints' glyphs (NXButtonGlyph.swift): the credit and the licence's address
+                        Text(NX18Credits.buttonIcons)
+                        Text(NX18Credits.buttonIconsLicence)
+                    }
+                    .nxFont(.caption).foregroundStyle(NX18Palette.muted)
                 }
                 .padding(.horizontal, 24).padding(.top, 4).padding(.bottom, 32)
                 .frame(maxWidth: 720, alignment: .leading)

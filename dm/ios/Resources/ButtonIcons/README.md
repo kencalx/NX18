@@ -36,7 +36,7 @@ The hint shows the button the player presses, mapped the way the game maps the c
 The credit appears in three places:
 
 - under the settings screen, next to the version
-- in About this game
+- in About this game, with the licence's address (creativecommons.org/licenses/by/3.0), since the app does not carry LICENSE.txt
 - in the README's Acknowledgements
 
 The Mac app shows no controller hints and does not ship these glyphs.
