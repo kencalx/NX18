@@ -374,6 +374,7 @@ check_t_mem_trim: t_mem_trim
 	DM_MEMORY_TRIM=0 MTL_DEBUG_LAYER=1 ./t_mem_trim
 	DM_BG_TRIM=0 MTL_DEBUG_LAYER=1 ./t_mem_trim
 	DM_NVN_FB_SNAP_IDLE=0 MTL_DEBUG_LAYER=1 ./t_mem_trim
+	DM_NVN_FB_SNAP_KEEP=0 MTL_DEBUG_LAYER=1 ./t_mem_trim
 t_sbw: t_sbw.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sbw.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_sbw

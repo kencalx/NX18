@@ -1579,6 +1579,7 @@ static void fb_trim_idle(void);   // same-pass feedback snapshots let go when id
 static _Atomic int g_trim_req;   // a memory pressure level that asks for a trim at the next submission's start (mtl_pressure); 0: none
 static _Atomic uint64_t g_trim_n, g_trim_bytes;   // trims and their bytes, in total (the memory line)
 static _Atomic uint64_t g_fbc_n, g_fbc_bytes, g_fbc_freed, g_fbc_freed_bytes;   // feedback snapshot textures kept and their bytes (at the last look, fb_trim); let go and their bytes, in total (the memory line)
+static _Atomic uint64_t g_fbc_keep_n, g_fbc_keep_bytes, g_fbc_kept;   // of those kept, the ones that came back after the idle release, and their bytes (at the last look, fb_trim); textures made kept so, in total (the memory line; fb_keep_try)
 static uint64_t mtl_trim_at(int level, uint64_t fence);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
 void mtl_sub_begin(void) {
@@ -5016,11 +5017,12 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     // The shaders' reflection tail blocks (nvn_refl.h): the bindings at their real number and the readable-tile tables of the shaders that have entries; with DM_NVN_REFL_FIXED=1, 3.2 KB each
     uint64_t rf_tails, rf_bytes; nvn_refl_stats(&rf_tails, &rf_bytes);
     char *tail = NULL;
-    if (asprintf(&tail, "deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total (alive %llu, %llu MB; released when idle %llu, %llu MB in total), finalized textures still referenced %u (small table, %llu put in total), retired but held by a serial %u, recycled render-target heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB; cap %llu MB), upload staging blocks released when idle %llu (%llu MB in total), packaged-texture spares %llu (%llu MB; released when idle %llu, %llu MB in total), present effects released when off %llu (%llu MB in total), shader reflection blocks %llu (%llu KB), feedback snapshots %llu (%llu MB; released when idle %llu, %llu MB in total), memory trims %llu (%llu MB in total); headroom to the system memory limit %s", nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, (unsigned long long)g_arena_live, (unsigned long long)(g_arena_live_bytes >> 20), (unsigned long long)g_arena_freed, (unsigned long long)(g_arena_freed_bytes >> 20), nghost, (unsigned long long)ghost_puts, nwait,
+    if (asprintf(&tail, "deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total (alive %llu, %llu MB; released when idle %llu, %llu MB in total), finalized textures still referenced %u (small table, %llu put in total), retired but held by a serial %u, recycled render-target heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB; cap %llu MB), upload staging blocks released when idle %llu (%llu MB in total), packaged-texture spares %llu (%llu MB; released when idle %llu, %llu MB in total), present effects released when off %llu (%llu MB in total), shader reflection blocks %llu (%llu KB), feedback snapshots %llu (%llu MB; released when idle %llu, %llu MB in total; kept after coming back %llu, %llu MB, made so %llu in total), memory trims %llu (%llu MB in total); headroom to the system memory limit %s", nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, (unsigned long long)g_arena_live, (unsigned long long)(g_arena_live_bytes >> 20), (unsigned long long)g_arena_freed, (unsigned long long)(g_arena_freed_bytes >> 20), nghost, (unsigned long long)ghost_puts, nwait,
          (unsigned long long)g_rh_made, (unsigned long long)g_rh_reused, (unsigned long long)g_rh_trimmed, rh_n, (unsigned long long)(rh_bytes >> 20), (unsigned long long)(atomic_load(&g_rh_cap_now) >> 20), (unsigned long long)g_up_trimmed, (unsigned long long)(g_up_trim_bytes >> 20),
          (unsigned long long)atomic_load(&g_pkg_spare_n), (unsigned long long)(atomic_load(&g_pkg_spare_bytes) >> 20), (unsigned long long)atomic_load(&g_pkg_spare_freed), (unsigned long long)(atomic_load(&g_pkg_spare_freed_bytes) >> 20),
          (unsigned long long)atomic_load(&g_present_fx_freed), (unsigned long long)(atomic_load(&g_present_fx_freed_bytes) >> 20), (unsigned long long)rf_tails, (unsigned long long)(rf_bytes >> 10),
          (unsigned long long)atomic_load(&g_fbc_n), (unsigned long long)(atomic_load(&g_fbc_bytes) >> 20), (unsigned long long)atomic_load(&g_fbc_freed), (unsigned long long)(atomic_load(&g_fbc_freed_bytes) >> 20),
+         (unsigned long long)atomic_load(&g_fbc_keep_n), (unsigned long long)(atomic_load(&g_fbc_keep_bytes) >> 20), (unsigned long long)atomic_load(&g_fbc_kept),
          (unsigned long long)atomic_load(&g_trim_n), (unsigned long long)(atomic_load(&g_trim_bytes) >> 20), avail) < 0) tail = NULL;
     if (!g_mem_q) g_mem_q = dispatch_queue_create("dm.memory-line", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
     // The guest block's walk only with DM_MEM_GUEST=1: on a large, finely split guest (Ocarina of Time on the Mac) it held the game's frame 24-45 ms each time the line printed, though it runs on this queue (the walk contends with the guest's own page faults), so by default the line has no guest charged figure; DM_MEMSTAT's guest column gives it once a second without the walk's cost to frames that matter
@@ -13633,7 +13635,7 @@ void ms_after(void) {
 static int g_fb_mode = -1;   // 0 none, 1 writers with reuse until a barrier, 2 every sampling draw, fresh
 static uint64_t g_fb_bar, g_fb_reuse, g_fb_split;   // game barriers so far (OP_BARRIER with bits); draws that reused a snapshot; passes ended before a write to an attachment an earlier draw read
 static uint64_t g_fb_pass = UINT64_MAX; static uint32_t g_fb_wmask, g_fb_rmask, g_fb_dread, g_fb_dwrote;   // the current Metal render pass: color attachments written so far, sampled directly; a draw has read its depth attachment (or could have: bindless); a draw has written depth or stencil
-typedef struct { uint64_t ser, bar, sub, use; int lv, sl; __strong id<MTLTexture> snap; } fb_cache_t;   // use: when it was last taken or reused (g_fbc_use)
+typedef struct { uint64_t ser, bar, sub, use; int lv, sl, keep; __strong id<MTLTexture> snap; } fb_cache_t;   // use: when it was last taken or reused (g_fbc_use); keep: its texture came back after the idle release and stays (fb_keep_try)
 static fb_cache_t g_fbc[8]; static uint64_t g_fbc_use;
 static int fb_mode(void) {
     if (g_fb_mode < 0) { const char *e = getenv("DM_NVN_FB_SNAP"); g_fb_mode = e && !strcmp(e, "0") ? 0 : e && !strcmp(e, "all") ? 2 : 1;
@@ -13643,6 +13645,46 @@ static int fb_mode(void) {
 static inline void fb_pass_sync(void) { uint64_t p = g_stat_pass + !g_enc; if (p != g_fb_pass) { g_fb_pass = p; g_fb_wmask = g_fb_rmask = g_fb_dread = g_fb_dwrote = 0; g_fb_dread_pool = 0; } }
 static inline int fb_shape(const fb_cache_t *e, MTLPixelFormat pf, NSUInteger w, NSUInteger h) { return e->snap && e->snap.pixelFormat == pf && e->snap.width == w && e->snap.height == h; }
 static inline int fb_live(const fb_cache_t *e) { return e->ser && e->bar == g_fb_bar && e->sub == g_sub_serial; }   // a later draw may still reuse it
+// Snapshots that come back. The idle release (fb_trim, below) lets a texture go once no submission has used it for FB_SNAP_IDLE submissions, and the next snapshot of that shape makes
+// one again, adding it to the residency set: res_add, then a residency commit before the submission's command buffer goes (res_commit), on the submit thread. For a small texture that
+// costs little, but 13 Sentinels samples its 4096x4096 RGBA8 attachment from inside its own pass only about every 10 s or more: on an iPhone 18 Pro Max each use after a release made
+// 64 MB again with a 7-10 ms commit inside that frame's submission (two of them in a 330 s run, each on a frame of a drop burst). The commit has to stay where it is: a command buffer
+// that reads the snapshot must not be committed before the texture is resident, or the GPU faults on it. So the shape the idle release let go is remembered (g_fb_gone, the last 8
+// shapes), and a texture made again for a remembered shape is kept from then on (keep): the game has shown it comes back to it after a pause longer than the idle limit, so letting it go
+// again would cost the same commit each time it returns, while keeping it costs only its memory. What may be kept so is capped at FB_SNAP_KEEP_MB in all (128 MB: two such 64 MB
+// snapshots, about 1.6% of the 7.96 GB an iPhone 18 Pro Max still had to its limit above 13 Sentinels' 2.1-2.4 GB footprint); a texture that would pass the cap is let go when idle, as before. A memory trim (mtl_trim_at)
+// still releases every snapshot, kept ones included; under memory pressure it also forgets the shapes, so a snapshot is kept again only once it has come back again. Going to the
+// background (or dm_gfx_trim) keeps the shapes: the game returns to the same scene, and the snapshot made again for it is kept at once. The memory line counts the textures kept so.
+// DM_NVN_FB_SNAP_KEEP=<MB> sets the cap, and 0 restores the old rule (every idle snapshot goes, whether or not it came back); DM_NVN_FB_SNAP_IDLE=0 still keeps every snapshot
+typedef struct { MTLPixelFormat pf; NSUInteger w, h; } fb_gone_t;
+static fb_gone_t g_fb_gone[8]; static int g_fb_gone_n, g_fb_gone_at;   // the shapes the idle release let go, the last 8 (a ring: g_fb_gone_at is the next to write); submit thread, or a trim with no submission open
+static int g_fb_keep_logs;   // lines logged about kept snapshots (at most 16: a game that cycles more than 8 shapes a frame can make a remembered one again every frame)
+enum { FB_SNAP_KEEP_MB = 128 };
+static uint64_t fb_keep_cap(void) {
+    static int64_t mb = -1;
+    if (mb < 0) { const char *e = getenv("DM_NVN_FB_SNAP_KEEP"); mb = e ? atoll(e) : FB_SNAP_KEEP_MB; if (mb < 0) mb = 0;
+        if (e && mb) MLOG("feedback snapshots that come back after the idle release: kept, up to %lld MB in all (DM_NVN_FB_SNAP_KEEP)", (long long)mb);
+        else if (e) MLOG("feedback snapshots that come back after the idle release: released again when idle, as before (DM_NVN_FB_SNAP_KEEP=0)"); }
+    return (uint64_t)mb << 20;
+}
+static inline int fb_gone_at(MTLPixelFormat pf, NSUInteger w, NSUInteger h) { for (int i = 0; i < g_fb_gone_n; i++) if (g_fb_gone[i].pf == pf && g_fb_gone[i].w == w && g_fb_gone[i].h == h) return i; return -1; }
+static void fb_gone_note(MTLPixelFormat pf, NSUInteger w, NSUInteger h) {
+    if (!fb_keep_cap() || fb_gone_at(pf, w, h) >= 0) return;
+    g_fb_gone[g_fb_gone_at] = (fb_gone_t){pf, w, h}; g_fb_gone_at = (g_fb_gone_at + 1) % 8; if (g_fb_gone_n < 8) g_fb_gone_n++;
+}
+static void fb_gone_forget(void) { g_fb_gone_n = g_fb_gone_at = 0; }
+// A texture just made for e: kept if its shape came back and the cap has room
+static void fb_keep_try(fb_cache_t *e) {
+    e->keep = 0;
+    uint64_t cap = fb_keep_cap(); if (!cap || fb_gone_at(e->snap.pixelFormat, e->snap.width, e->snap.height) < 0) return;
+    uint64_t z = e->snap.allocatedSize, held = 0;
+    for (int i = 0; i < 8; i++) if (g_fbc[i].keep && g_fbc[i].snap && &g_fbc[i] != e) held += g_fbc[i].snap.allocatedSize;
+    int ok = held + z <= cap;
+    if (ok) { e->keep = 1; atomic_fetch_add(&g_fbc_kept, 1); }
+    if (g_fb_keep_logs < 16) { g_fb_keep_logs++;
+        MLOG("feedback snapshot %lux%lu (pixel format %lu, %.1f MB) made again after the idle release: %s (%.1f MB kept so before it, cap %llu MB; DM_NVN_FB_SNAP_KEEP)", (unsigned long)e->snap.width, (unsigned long)e->snap.height,
+             (unsigned long)e->snap.pixelFormat, z / 1048576.0, ok ? "kept from now on" : "over the cap, released when idle as before", held / 1048576.0, (unsigned long long)(cap >> 20)); }
+}
 // The snapshot of an attachment's level and layer: the cached one (valid: *fresh = 0) or a texture to copy into (*fresh = 1; the entry is then valid from this barrier and submission on).
 // A new key takes an entry whose texture already has its format and size, one no later draw can reuse first, else the least recently used. Taking the entries in turn made a texture for
 // nearly every snapshot when a frame snapshots several sizes: Tears of the Kingdom's 4-5 a frame (1600x896 down to 400x224) each made one, 4-6 GB of textures every 300 frames on the Mac
@@ -13658,36 +13700,41 @@ static fb_cache_t *fb_snap(uint64_t ser, int lv, int sl, MTLPixelFormat pf, NSUI
         int best = 1 << 30;
         for (int i = 0; i < 8; i++) { fb_cache_t *c = &g_fbc[i]; int r = fb_live(c) ? (fb_shape(c, pf, w, h) ? 2 : 3) : fb_shape(c, pf, w, h) ? 0 : 1;
             if (r < best || (r == best && c->use < e->use)) { best = r; e = c; } }
-        if (e->snap && !fb_shape(e, pf, w, h)) { defer_obj_release(e->snap); e->snap = nil; }
+        if (e->snap && !fb_shape(e, pf, w, h)) { defer_obj_release(e->snap); e->snap = nil; e->keep = 0; }
     }
     if (!e->snap) { MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:NO];
         d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView; d.storageMode = MTLStorageModePrivate;
-        e->snap = [g_dev newTextureWithDescriptor:d]; if (!e->snap) { e->ser = 0; return NULL; } res_add(e->snap); }   // full queue barriers separate a copy from the draws that read the earlier content
+        e->keep = 0; e->snap = [g_dev newTextureWithDescriptor:d]; if (!e->snap) { e->ser = 0; return NULL; } res_add(e->snap);   // full queue barriers separate a copy from the draws that read the earlier content
+        fb_keep_try(e); }   // a shape the idle release let go before: kept from now on (above)
     e->ser = ser; e->lv = lv; e->sl = sl; e->bar = g_fb_bar; e->sub = g_sub_serial; e->use = ++g_fbc_use; *fresh = 1; return e;
 }
 // Snapshots no draw has taken for a while. Each entry kept its attachment-sized texture for good once made: a game that snapshots several sizes kept up to eight of them after a scene that
 // needed them (Tears of the Kingdom takes 4-5 sizes a frame, 1600x896 down to 400x224; NieR:Automata one 1920x1080 RG11B10F, 8 MB). An entry is only reused within the submission
 // it was taken in (fb_live), and every take sets sub, so sub is the last submission that used its texture. At a submission's start (mtl_sub_begin, the submit thread, which alone
 // takes snapshots) an entry no submission has used for FB_SNAP_IDLE submissions (about 10 s at 60 fps) gives its texture to the deferred-release queue, which takes it out of the
-// residency set after the given fence; the next snapshot of that size makes a texture again. The memory line counts them. DM_NVN_FB_SNAP_IDLE=0 keeps them, as before
+// residency set after the given fence; the next snapshot of that size makes a texture again. The memory line counts them. DM_NVN_FB_SNAP_IDLE=0 keeps them, as before.
+// An entry whose texture was made again for a shape this release let go before stays (keep, fb_keep_try: the game came back to it, and making it again cost a residency commit on the
+// submit thread each time); the release notes the shape of each texture it lets go (fb_gone_note). The full trim (idle 0) lets every one go, kept ones included
 enum { FB_SNAP_IDLE = 600 };
 static int fb_snap_idle_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_FB_SNAP_IDLE"); on = !e || atoi(e); } return on; }
 // idle: the submissions without a use that let an entry's texture go (0: every one, mtl_trim); fence: the one it waits for. Returns the bytes let go; *nout the textures
 static uint64_t fb_trim(uint64_t idle, uint64_t fence, int *nout) {
-    uint64_t freed = 0, kept = 0, nk = 0; int n = 0;
+    uint64_t freed = 0, kept = 0, nk = 0, kb = 0, nkb = 0; int n = 0;
     *nout = 0; if (atomic_load(&g_sub_on)) return 0;   // only between submissions, where no later draw can reuse an entry (fb_live)
     for (int i = 0; i < 8; i++) {
         fb_cache_t *e = &g_fbc[i];
         if (!e->snap) continue;
-        if (g_sub_serial - e->sub >= idle) {
+        if (g_sub_serial - e->sub >= idle && !(idle && e->keep)) {   // a kept entry goes only at the full trim
             uint64_t z = e->snap.allocatedSize; n++; freed += z;
-            defer_obj_at(e->snap, 0, fence); e->snap = nil; e->ser = 0;
+            if (idle) fb_gone_note(e->snap.pixelFormat, e->snap.width, e->snap.height);
+            defer_obj_at(e->snap, 0, fence); e->snap = nil; e->ser = 0; e->keep = 0;
             continue;
         }
         nk++; kept += e->snap.allocatedSize;
+        if (e->keep) { nkb++; kb += e->snap.allocatedSize; }
     }
     if (n) { atomic_fetch_add(&g_fbc_freed, n); atomic_fetch_add(&g_fbc_freed_bytes, freed); }
-    atomic_store(&g_fbc_n, nk); atomic_store(&g_fbc_bytes, kept);
+    atomic_store(&g_fbc_n, nk); atomic_store(&g_fbc_bytes, kept); atomic_store(&g_fbc_keep_n, nkb); atomic_store(&g_fbc_keep_bytes, kb);
     *nout = n; return freed;
 }
 static void fb_trim_idle(void) { if (fb_snap_idle_on()) { int n; fb_trim(FB_SNAP_IDLE, g_fence + 1, &n); } }
@@ -17297,6 +17344,7 @@ static uint64_t mtl_trim_at(int level, uint64_t fence) { @autoreleasepool {
     pthread_mutex_lock(&g_deferred_mu); unsigned long q1 = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
     int nrh = 0, nup = 0, nsp = 0, nfb = 0, nar = 0;
     uint64_t brh = rh_trim_all(&nrh), bup = up_trim_idle(0, fence, &nup), bsp = pkg_spare_release(0, fence, &nsp), bfb = fb_trim(0, fence, &nfb), bar = g_arenas ? arena_trim(0, &nar) : 0;
+    if (level == 1 || level == 2) fb_gone_forget();   // under memory pressure a feedback snapshot is kept again only once it has come back again (fb_keep_try); going to the background keeps the shapes
     atomic_store(&g_fx_trim_req, 1);
     res_commit();   // the heaps leave the residency set now; the rest once their fence has passed (defer_obj_at drains at once a fence the GPU has passed)
     uint64_t total = brh + bup + bsp + bfb + bar;

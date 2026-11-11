@@ -2,7 +2,9 @@
 // upload slot blocks above 4 MB with their overflow, three same-pass feedback snapshots of three sizes), dm_gfx_trim between submissions with the GPU drained releases every one of
 // them: they leave the residency set, GPU allocated falls by at least their bytes, the line counts them, and the present thread is asked to release effects that are off. Memory
 // pressure (mtl_pressure) only asks: the trim runs at the next submission's start; DM_MEMORY_TRIM=0 logs it and asks nothing. Going to the background (dm_gfx_suspend(1)) trims
-// after its drain; DM_BG_TRIM=0 does not. Idle snapshots (fix 13): FB_SNAP_IDLE submissions after their last use the snapshots go; DM_NVN_FB_SNAP_IDLE=0 keeps them
+// after its drain; DM_BG_TRIM=0 does not. Idle snapshots (fix 13): FB_SNAP_IDLE submissions after their last use the snapshots go; DM_NVN_FB_SNAP_IDLE=0 keeps them. A snapshot that
+// comes back after that release (13 Sentinels' 64 MB one, about every 10 s) is kept from then on, up to FB_SNAP_KEEP_MB in all; the full trim still releases it, going to the background
+// keeps the shapes it remembers and memory pressure forgets them; DM_NVN_FB_SNAP_KEEP=0 lets it go again when idle, as before
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -51,6 +53,7 @@ static uint64_t make_idle(__weak id held[], int *nheld) {
     settle();
     return bytes;
 }
+static void idle_subs(int n) { for (int i = 0; i < n; i++) { @autoreleasepool { mtl_sub_begin(); mtl_wait(mtl_sub_commit(), 5000000000ull); } } }   // empty submissions: no snapshot taken
 static int held_resident(__weak id held[], int n) { int r = 0; @autoreleasepool { for (int i = 0; i < n; i++) { id o = held[i]; r += o && resident(o); } } return r; }
 static int held_alive(__weak id held[], int n) { int r = 0; @autoreleasepool { for (int i = 0; i < n; i++) { id o = held[i]; r += o != nil; } } return r; }
 int main(void) { @autoreleasepool {
@@ -111,6 +114,48 @@ int main(void) { @autoreleasepool {
         CHECK(atomic_load(&g_fbc_freed) - f0 == (fb_idle ? 3u : 0u), "idle snapshots: counted");
         id s = s0; CHECK(fb_idle ? !s : s && resident(s), fb_idle ? "idle snapshots: freed" : "DM_NVN_FB_SNAP_IDLE=0: still resident");
         s = nil;
+    }
+    // 5. A snapshot that comes back after the idle release stays (fb_keep_try): section 4 let 640x360 go, so the snapshot made again for it is kept through FB_SNAP_IDLE + 1 idle
+    // submissions, where one of a shape never let go is released. Going to the background releases it but keeps the shape (the next one is kept at once); memory pressure forgets it.
+    // Three 48 MB snapshots that came back: the 128 MB cap keeps two. DM_NVN_FB_SNAP_KEEP=0: none is kept, as before
+    if (!fb_idle) printf("snapshots that come back: not run (DM_NVN_FB_SNAP_IDLE=0 releases none)\n");
+    else @autoreleasepool {
+        uint64_t cap = fb_keep_cap(), m0 = atomic_load(&g_fbc_kept); int keep_on = cap != 0, fresh = 0; __weak id k0 = nil, o0 = nil;
+        mtl_sub_begin();
+        fb_cache_t *e = fb_snap(92000, 0, 0, MTLPixelFormatRGBA16Float, 640, 360, 1, &fresh); k0 = e ? e->snap : nil;
+        CHECK(e && fresh && e->keep == keep_on, keep_on ? "came back: the 640x360 snapshot made again is kept" : "DM_NVN_FB_SNAP_KEEP=0: made again, not kept");
+        e = fb_snap(92003, 0, 0, MTLPixelFormatRGBA16Float, 200, 100, 1, &fresh); o0 = e ? e->snap : nil;
+        CHECK(e && !e->keep, "came back: a shape never let go is not kept");
+        mtl_wait(mtl_sub_commit(), 5000000000ull);
+        idle_subs(FB_SNAP_IDLE + 1); mtl_drain(); settle();
+        { id k = k0, o = o0;
+          printf("snapshots that come back %s: %d kept after %d idle submissions (%llu MB kept so)\n", keep_on ? "kept" : "released (DM_NVN_FB_SNAP_KEEP=0)", snaps(), FB_SNAP_IDLE + 1, (unsigned long long)(atomic_load(&g_fbc_keep_bytes) / MB));
+          CHECK(keep_on ? k && resident(k) : !k, keep_on ? "came back: still resident after FB_SNAP_IDLE + 1 idle submissions" : "DM_NVN_FB_SNAP_KEEP=0: released when idle, as before");
+          CHECK(!o, "came back: the shape never let go was released when idle"); }
+        CHECK(snaps() == keep_on && atomic_load(&g_fbc_keep_n) == (uint64_t)keep_on && atomic_load(&g_fbc_kept) - m0 == (uint64_t)keep_on, "came back: counted for the memory line");
+        dm_gfx_trim(3); settle();
+        { id k = k0; CHECK(snaps() == 0 && !k, "background trim: the kept snapshot is released too"); }
+        mtl_sub_begin(); e = fb_snap(92000, 0, 0, MTLPixelFormatRGBA16Float, 640, 360, 1, &fresh);
+        CHECK(e && e->keep == keep_on, keep_on ? "after the background trim: made again and kept at once" : "DM_NVN_FB_SNAP_KEEP=0: after the background trim, not kept");
+        mtl_wait(mtl_sub_commit(), 5000000000ull); mtl_drain();
+        mtl_trim(1); settle();
+        CHECK(snaps() == 0, "pressure trim: the kept snapshot is released");
+        mtl_sub_begin(); e = fb_snap(92000, 0, 0, MTLPixelFormatRGBA16Float, 640, 360, 1, &fresh);
+        CHECK(e && !e->keep, "after memory pressure: made again, not kept until it comes back again");
+        mtl_wait(mtl_sub_commit(), 5000000000ull); mtl_drain(); dm_gfx_trim(4); settle();
+        mtl_sub_begin();
+        for (int i = 0; i < 3; i++) fb_snap(93000 + (uint64_t)i, 0, 0, MTLPixelFormatRGBA8Unorm, 4096, 3072, 1, &fresh);
+        mtl_wait(mtl_sub_commit(), 5000000000ull);
+        idle_subs(FB_SNAP_IDLE + 1); mtl_drain(); settle();
+        CHECK(snaps() == 0, "cap: three 4096x3072 snapshots released when idle");
+        mtl_sub_begin(); int nk = 0, want = 0; uint64_t kept_b = 0;
+        for (int i = 0; i < 3; i++) { e = fb_snap(93000 + (uint64_t)i, 0, 0, MTLPixelFormatRGBA8Unorm, 4096, 3072, 1, &fresh); if (!e) continue;
+            uint64_t z = e->snap.allocatedSize; if (cap && kept_b + z <= cap) { want++; kept_b += z; } nk += e->keep; }
+        mtl_wait(mtl_sub_commit(), 5000000000ull); mtl_drain();
+        printf("cap %llu MB: %d of 3 4096x3072 snapshots that came back kept (%d expected)\n", (unsigned long long)(cap / MB), nk, want);
+        CHECK(nk == want && (cap != (uint64_t)FB_SNAP_KEEP_MB * MB || want == 2), keep_on ? "cap: kept up to the cap (two of three at 128 MB)" : "DM_NVN_FB_SNAP_KEEP=0: none kept");
+        dm_gfx_trim(4); settle();
+        CHECK(snaps() == 0, "cap: the full trim releases every kept snapshot");
     }
     printf("t_mem_trim: %d checks, %d failed\n", checks, failed);
     return failed != 0;
