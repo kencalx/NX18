@@ -3,7 +3,8 @@
 // pending, and once the gate opens every submission's GPU copy reads the bytes it wrote. ARENA_IDLE small submissions later the blocks above the keep count have left the residency set and
 // are freed (DM_NVN_ARENA_TRIM=0: all kept); grown again, the memory trim (dm_gfx_trim) frees them at once. Shared blocks: 32 small submissions with the GPU held take one block between
 // them (DM_NVN_ARENA_SHARE=0: one each), and each one's GPU copy still reads its own bytes. A patched argument block whose size table moves to a new block is bound where it was written,
-// and so is a padded uniform slot (ub_padded) whose partly covered shadow does
+// and so is a padded uniform slot (ub_padded) whose partly covered shadow does. A uniform binding's readable size is its bound size rounded up to 256 bytes where its pool
+// reaches (ub_live): the padded copy, the slot and the size table take it
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -132,8 +133,9 @@ int main(void) { @autoreleasepool {
         mtl_wait(mtl_sub_commit(), 5000000000ull);
     }
     mtl_drain();
-    // 6. A uniform slot bound shorter than its shader reads it (ub_padded) with an inline update deferred over part of it: the padded copy takes the block's last room and the
-    // partly covered shadow (ubp_get) a new block. The slot is still the block the padded copy was written in, not the new block at the old one's offset
+    // 6. A uniform slot readable for less than its shader reads it (ub_padded) with an inline update deferred over part of it: the padded copy takes the block's last room and the
+    // partly covered shadow (ubp_get) a new block. The slot is still the block the padded copy was written in, not the new block at the old one's offset. 16 bytes bound are 256
+    // readable (ub_live: the driver's rounding), so the copy holds the update, the memory to byte 256 and zeros to the reads' end at 512
     @autoreleasepool {
         enum { LEN = 0x20000 };
         uint8_t *mem = mmap(NULL, LEN, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (mem == MAP_FAILED) abort();
@@ -141,20 +143,47 @@ int main(void) { @autoreleasepool {
         mtl_sub_begin();
         uint32_t v = 0xa0; mtl_sub_update(&v, (uint64_t)(uintptr_t)mem, 4);   // deferred, over the binding's first word only
         const p_bind_buf ubo0 = S.ubo[1][0]; S.ubo[1][0].addr = (uint64_t)(uintptr_t)mem; S.ubo[1][0].size = 16;   // bound with 16 bytes
-        static nvn_rbind b; b.kind = NVN_RB_CBUF; b.reg = 0; b.aid = 0; b.fixw = 64;   // read up to byte 256 at fixed offsets
+        static nvn_rbind b; b.kind = NVN_RB_CBUF; b.reg = 0; b.aid = 0; b.fixw = 128;   // read up to byte 512 at fixed offsets
         NvShader *sh = [NvShader new]; sh->rf.b = &b; sh->rf.nb = 1; sh->rf.cap = 1; memcpy(sh->key, "t_arena_trim", 13);
         __strong id<MTLBuffer> tmp; arena_alloc(256, &tmp);
-        NvArena *before = g_cur_arena; before->used = before->len - 256;   // room for the padded copy, none for the shadow after it
+        NvArena *before = g_cur_arena; before->used = before->len - 512;   // room for the padded copy, none for the shadow after it
         uint64_t made = g_ubp_made, deferred = (uint64_t)g_nubd;
         __strong id<MTLBuffer> use; uint64_t g = cbuf_slot(sh, 1, &b, &use);
-        const uint32_t *w = (const uint32_t *)(const void *)(before->cpu + before->len - 256);
+        const uint32_t *w = (const uint32_t *)(const void *)(before->cpu + before->len - 512);
         printf("padded slot: %llu deferred, %llu shadow made, shadow in %s block; slot at block %s offset %#llx; written %#x %#x %#x %#x %#x\n", (unsigned long long)deferred,
                (unsigned long long)(g_ubp_made - made), g_cur_arena != before ? "a new" : "the same", g >= before->gpu && g < before->gpu + before->len ? "written" : "other",
                (unsigned long long)(g - before->gpu), w[0], w[1], w[2], w[3], w[4]);
         CHECK(deferred == 1 && g_ubp_made == made + 1 && g_cur_arena != before, "padded slot: the copy took the block's last room and the partly covered shadow a new block");
-        CHECK(g == before->gpu + before->len - 256 && use == before->buf, "padded slot: bound at the block it was written in");
-        CHECK(w[0] == 0xa0 && w[1] == 0x11111111 && w[3] == 0x11111111 && w[4] == 0 && w[63] == 0, "padded slot: the update, memory past it, then zeros up to the reads' end");
+        CHECK(g == before->gpu + before->len - 512 && use == before->buf, "padded slot: bound at the block it was written in");
+        CHECK(w[0] == 0xa0 && w[1] == 0x11111111 && w[3] == 0x11111111 && w[4] == 0x11111111 && w[63] == 0x11111111 && w[64] == 0 && w[127] == 0,
+              "padded slot: the update, memory past it to the rounded size (256), then zeros up to the reads' end");
         S.ubo[1][0] = ubo0;
+        mtl_wait(mtl_sub_commit(), 5000000000ull);
+    }
+    mtl_drain();
+    // 7. The one rule for a binding's readable size (ub_live): 192 bytes bound are 256 readable, so a shader that reads to byte 256 at fixed offsets gets the memory itself; 16 bytes
+    // bound 64 bytes before the pool's end are 16 readable (the rounded size would leave the pool), so one that reads to byte 64 gets a padded copy; the size table holds 256 and 16
+    @autoreleasepool {
+        enum { LEN = 0x10000 };
+        uint8_t *mem = mmap(NULL, LEN, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (mem == MAP_FAILED) abort();
+        mtl_pool_add(mem, LEN); memset(mem, 0x22, LEN);
+        mtl_sub_begin();
+        const p_bind_buf ubo0 = S.ubo[1][0], ubo1 = S.ubo[1][1];
+        S.ubo[1][0].addr = (uint64_t)(uintptr_t)mem; S.ubo[1][0].size = 192; S.ubo[1][1].addr = (uint64_t)(uintptr_t)(mem + LEN - 64); S.ubo[1][1].size = 16;
+        static nvn_rbind b0, b1; b0.kind = b1.kind = NVN_RB_CBUF; b0.reg = 0; b1.reg = 1; b0.fixw = 64; b1.fixw = 16;   // read up to byte 256 and byte 64
+        NvShader *sh = [NvShader new]; sh->rf.b = &b0; sh->rf.nb = 1; sh->rf.cap = 1; memcpy(sh->key, "t_arena_trim", 13);
+        void *pb; uint64_t po, pg; int mapped = mtl_gpu_addr((uint64_t)(uintptr_t)mem, LEN, &pb, &po, &pg);
+        uint64_t shorts = g_ub_short;
+        __strong id<MTLBuffer> use0, use1, tu; uint64_t g0 = cbuf_slot(sh, 1, &b0, &use0), g1 = cbuf_slot(sh, 1, &b1, &use1);
+        const uint32_t *w = (const uint32_t *)(const void *)((const uint8_t *)use1.contents + (g1 - use1.gpuAddress));
+        uint64_t tg = cbsize_table(1, &tu); const uint32_t *t = (const uint32_t *)(const void *)((const uint8_t *)tu.contents + (tg - tu.gpuAddress));
+        printf("readable sizes: 192 bound at %s, 16 at the pool's end %s (%#x %#x %#x %#x), %llu padded; size table %u %u\n", g0 == pg ? "the memory" : "a copy",
+               use1 == (__bridge id<MTLBuffer>)pb ? "at the memory" : "copied", w[0], w[3], w[4], w[15], (unsigned long long)(g_ub_short - shorts), t[0], t[1]);
+        CHECK(mapped && g0 == pg && use0 == (__bridge id<MTLBuffer>)pb, "readable size: 192 bytes bound read to byte 256 point at the memory (rounded to 256), no padded copy");
+        CHECK(use1 != (__bridge id<MTLBuffer>)pb && g_ub_short == shorts + 1 && w[0] == 0x22222222 && w[3] == 0x22222222 && w[4] == 0 && w[15] == 0,
+              "readable size: 16 bytes bound at the pool's end read to byte 64 are padded from the bound size, not read past the pool");
+        CHECK(t[0] == 256 && t[1] == 16, "readable size: the size table holds the rounded size, and the bound size at the pool's end");
+        S.ubo[1][0] = ubo0; S.ubo[1][1] = ubo1;
         mtl_wait(mtl_sub_commit(), 5000000000ull);
     }
     mtl_drain();
