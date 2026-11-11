@@ -79,10 +79,17 @@ class HoldFrames(unittest.TestCase):
         run = '[dm] [nvn] frame step: the run at hold 1 after the probe lasted under 10 s, counted as a failed probe (CPU 80% on performance cores); further changes only counted below'
         s = read([step(1, 2, 111), step(2, 1, 142), step(1, 2, 250), lf(400, 33.4), run, *late])
         self.assertEqual((s['long_frames']['count'], s['long_frames']['held']), (3, 1))
+        # a failed probe's line with what it measured at hold 1, and the line that ends the probes' hold-off: the cut is the present each names
+        failed = ('[dm] [nvn] frame step: the probe failed at present 300 (CPU 56% on performance cores; cost 1.45 at hold 1, 2 in a row over 1.15: '
+                  'no probe while hold 2 costs over 1.11); further changes only counted below')
+        allowed = '[dm] [nvn] frame step: probes back to hold 1 allowed again at present 300 (cost 0.80 at hold 2, about 0.83 at hold 1); further changes only counted below'
+        for cut in (failed, allowed):
+            s = read([step(1, 2, 111), step(2, 1, 142), step(1, 2, 250), lf(280, 33.4), cut, *late])
+            self.assertEqual((s['long_frames']['count'], s['long_frames']['held']), (3, 1))
 
     def test_the_marker_matches_the_producer(self):   # every kind of frame step line the host counts toward its 40 carries the marker devlog reads
         src = (REPO / 'dm/gfx/nvn/hle_nvn.c').read_text(errors='replace')
-        self.assertEqual(src.count('++nlog == 40 ? "' + devlog.FSTEP_CUT + '"'), 3)
+        self.assertEqual(src.count('++nlog == 40 ? "' + devlog.FSTEP_CUT + '"'), 4)
 
     def test_without_step_lines(self):   # no frame step line and no hold (a game without fps_target, or the step off): runs of 33 ms frames are the game's own dips, all counted
         s = read([*(lf(f, 33.6, gpu=9.0, submit=2.0) for f in range(200, 206)), lf(400, 33.3), lf(700, 90.0)])
