@@ -66,6 +66,8 @@ final class DuoButtonGlyphTests: XCTestCase {
         window.addSubview(rails)
         rails.layoutIfNeeded()
         XCTAssertTrue(rails.isFlowing, "In a window: the slide runs")
+        let slide = try XCTUnwrap(rails.layer.sublayers?.first?.animation(forKey: NX18RailsFlowView.key))
+        XCTAssertLessThanOrEqual(slide.preferredFrameRateRange.maximum, 30, "A slow drift: no ProMotion rate for it")
         rails.moving = false
         XCTAssertFalse(rails.isFlowing, "Reduce Motion: still")
         rails.moving = true

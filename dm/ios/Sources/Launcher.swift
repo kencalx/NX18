@@ -341,6 +341,7 @@ struct LauncherView: View {
         let iconSide = Swift.min(Swift.max(height * 0.3, wide ? 96 : 72), 150)
         return VStack(alignment: .leading, spacing: 0) {
             NX18Mark(height: 20)
+                .background { if artwork.art != nil { NX18MarkShade(strong: reduceTransparency) } }   // over art only: the plain backdrop is dark already
             if artwork.art == nil, height >= 300, let icon = artwork.icon {   // the sharp icon only where it leaves the name and buttons room (the blurred one stays behind)
                 Image(uiImage: icon).resizable().aspectRatio(1, contentMode: .fit)
                     .frame(width: iconSide, height: iconSide)

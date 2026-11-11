@@ -14,7 +14,10 @@ import UIKit
 
 // One column of a page: blocks of rows, each under its heading (none where a section goes on from the column before)
 struct GameMenuColumn: Identifiable {
-    struct Block: Identifiable { let id: String; var heading: String?; var items: [GameMenuItem] }
+    struct Block: Identifiable {
+        let id: String; var heading: String?; var items: [GameMenuItem]
+        var continues: String? = nil   // the heading of the section this block goes on with from the column before: the column keeps that heading's room, so its rows line up
+    }
     let id: String
     var blocks: [Block]
     var ids: [String] { blocks.flatMap { $0.items.map(\.id) } }
@@ -44,7 +47,7 @@ enum GameMenuLayout {
                 for c in 0..<count[i] {
                     let part = Array(s.items.dropFirst(c * per).prefix(per))
                     if part.isEmpty { continue }
-                    out.append(GameMenuColumn(id: "\(s.id)#\(c)", blocks: [.init(id: "\(s.id)#\(c)", heading: c == 0 ? s.label : nil, items: part)]))
+                    out.append(GameMenuColumn(id: "\(s.id)#\(c)", blocks: [.init(id: "\(s.id)#\(c)", heading: c == 0 ? s.label : nil, items: part, continues: c == 0 ? nil : s.label)]))
                 }
             }
             return out
@@ -60,7 +63,7 @@ enum GameMenuLayout {
                 if used > 0 && out.count < n - 1 && (used + head >= per || per - used - head < min(2, rest.count)) { cut() }   // no heading left alone at a column's foot
                 let room = out.count == n - 1 ? rest.count : max(1, per - used - head)
                 let part = Array(rest.prefix(room)); rest = rest.dropFirst(part.count)
-                blocks.append(.init(id: "\(s.id)@\(part[0].id)", heading: first ? s.label : nil, items: part))
+                blocks.append(.init(id: "\(s.id)@\(part[0].id)", heading: first ? s.label : nil, items: part, continues: first ? nil : s.label))
                 used += head + part.count; first = false
                 if used >= per && out.count < n - 1 { cut() }
             }
@@ -198,6 +201,8 @@ struct GameMenuPanelView: View {
         let colWidth = (inner - CGFloat(max(columns.count - 1, 0)) * 8) / CGFloat(max(columns.count, 1))
         return VStack(alignment: .leading, spacing: 0) {
             header(page)
+                .accessibilityElement(children: .contain)
+                .accessibilitySortPriority(Double(columns.count + 1))   // VoiceOver: the header first, then the columns left to right (grid)
             ScrollViewReader { proxy in
                 ViewThatFits(in: .vertical) {
                     grid(columns, page: page, colWidth: colWidth)
@@ -229,7 +234,7 @@ struct GameMenuPanelView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Back")
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: NXFont.name == nil ? 1 : 3) {
                     Text(page.title).nxFont(.footnote, weight: .semibold).foregroundStyle(NX18Palette.text).lineLimit(1)
                     if let s = page.subtitle { Text(s).nxFont(.caption2).foregroundStyle(NX18Palette.muted).lineLimit(1) }
                 }
@@ -275,11 +280,13 @@ struct GameMenuPanelView: View {
 
     private func grid(_ columns: [GameMenuColumn], page: GameMenuPanelModel.Page, colWidth: CGFloat) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            ForEach(columns) { col in
+            ForEach(Array(columns.enumerated()), id: \.element.id) { index, col in
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(col.blocks) { block in
                         if let h = block.heading, !h.isEmpty {
                             NX18SectionHeader(h).padding(.horizontal, 10).padding(.top, 2).padding(.bottom, 1)
+                        } else if block.id == col.blocks.first?.id, let h = block.continues, !h.isEmpty {
+                            NX18SectionHeader(h).padding(.horizontal, 10).padding(.top, 2).padding(.bottom, 1).hidden().accessibilityHidden(true)   // its room only: the rows line up with the column before
                         }
                         ForEach(block.items) { item in
                             GameMenuRowView(item: item, option: page.options, focused: pad.connected && model.focus == item.id) { model.activate(item) }
@@ -288,6 +295,8 @@ struct GameMenuPanelView: View {
                     }
                 }
                 .frame(width: max(colWidth, 0), alignment: .topLeading)
+                .accessibilityElement(children: .contain)   // VoiceOver reads a column through before the next, not across the columns row by row,
+                .accessibilitySortPriority(Double(columns.count - index))   // and the columns in their order (a column whose heading is the one before's starts lower)
             }
         }
         .padding(.horizontal, 12)
@@ -310,7 +319,7 @@ private struct GameMenuRowView: View {
                 if let s = item.symbol {
                     Image(systemName: s).font(.footnote.weight(.medium)).foregroundStyle(NX18Palette.cyan).frame(minWidth: 16)   // system: symbol
                 }
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: NXFont.name == nil ? 1 : 3) {   // the UI font's lines carry no gap of their own (NXFont.swift)
                     Text(item.title).nxFont(.footnote).foregroundStyle(NX18Palette.text).fixedSize(horizontal: false, vertical: true)
                     if let s = item.subtitle, !s.isEmpty {
                         Text(s).nxFont(.caption2).foregroundStyle(NX18Palette.muted).fixedSize(horizontal: false, vertical: true)

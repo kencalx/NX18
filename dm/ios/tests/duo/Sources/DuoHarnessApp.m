@@ -5,6 +5,7 @@
 #import "DuoHarnessRuntime.h"
 #include <stdlib.h>
 #include <string.h>
+#include <objc/runtime.h>
 #if __has_include(<UIKit/UIHingeInteraction.h>)
 #import <UIKit/UIHingeInteraction.h>
 #endif
@@ -42,13 +43,15 @@ static NSArray<NSArray<NSNumber *> *> *DuoHarnessTouchArray(DuoHarnessInput inpu
 // controller, after DUO_PAD_DELAY seconds (default 2): up, down, left, right (the D-pad), a, b, y, plus, l, r (Switch buttons: the virtual pad is not a Nintendo one, so A is its
 // right button, as pad_apple.h maps it), wait (one step of nothing). The controller stays connected afterwards, so the focus ring stays on screen for a screenshot
 API_AVAILABLE(ios(17.0)) static GCVirtualController *g_script_pad;
+static BOOL duo_pad_nintendo(void);   // DUO_PAD_KIND, below
 API_AVAILABLE(ios(17.0)) static void duo_pad_step(NSArray<NSString *> *steps, NSUInteger i) {
     if (i >= steps.count) { NSLog(@"duo: pad script done"); return; }
     NSString *s = [steps[i] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet].lowercaseString;
     NSDictionary<NSString *, NSValue *> *dirs = @{@"up": [NSValue valueWithCGPoint:CGPointMake(0, 1)], @"down": [NSValue valueWithCGPoint:CGPointMake(0, -1)],
                                                    @"left": [NSValue valueWithCGPoint:CGPointMake(-1, 0)], @"right": [NSValue valueWithCGPoint:CGPointMake(1, 0)]};
-    NSDictionary<NSString *, NSString *> *buttons = @{@"a": GCInputButtonB, @"b": GCInputButtonA, @"y": GCInputButtonX, @"x": GCInputButtonY,
-                                                      @"plus": GCInputButtonMenu, @"l": GCInputLeftShoulder, @"r": GCInputRightShoulder};
+    NSDictionary<NSString *, NSString *> *buttons = duo_pad_nintendo()
+        ? @{@"a": GCInputButtonA, @"b": GCInputButtonB, @"y": GCInputButtonY, @"x": GCInputButtonX, @"plus": GCInputButtonMenu, @"l": GCInputLeftShoulder, @"r": GCInputRightShoulder}
+        : @{@"a": GCInputButtonB, @"b": GCInputButtonA, @"y": GCInputButtonX, @"x": GCInputButtonY, @"plus": GCInputButtonMenu, @"l": GCInputLeftShoulder, @"r": GCInputRightShoulder};
     void (^release)(void) = ^{};
     if (dirs[s]) {
         [g_script_pad setPosition:dirs[s].CGPointValue forDirectionPadElement:GCInputDirectionPad];
@@ -61,6 +64,35 @@ API_AVAILABLE(ios(17.0)) static void duo_pad_step(NSArray<NSString *> *steps, NS
     NSLog(@"duo: pad script %@", s);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 8)), dispatch_get_main_queue(), release);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * 0.35)), dispatch_get_main_queue(), ^{ duo_pad_step(steps, i + 1); });
+}
+// DUO_PAD_KIND=nintendo: every controller presents itself as a Switch Pro Controller (productCategory), so the hints show a Nintendo pad's labels and the script's a / b / x / y
+// are the pad's buttons of those names (pad_apple.h: a Nintendo pad by its labels). For screenshots of the controller hints; any other value keeps the pads as they are
+static BOOL duo_pad_nintendo(void) { return [NSProcessInfo.processInfo.environment[@"DUO_PAD_KIND"] isEqualToString:@"nintendo"]; }
+static NSString *duo_nintendo_category(id self, SEL _cmd) { (void)self; (void)_cmd; return @"Switch Pro Controller"; }
+static void duo_pad_kind(void) {
+    if (!duo_pad_nintendo()) return;
+    Method m = class_getInstanceMethod(GCController.class, @selector(productCategory));
+    if (m) method_setImplementation(m, (IMP)duo_nintendo_category);
+    NSLog(@"duo: controllers present themselves as Switch Pro Controllers (DUO_PAD_KIND=nintendo)");
+}
+// DUO_BACKDROP: a picture over the (empty) game view, below the touch controls and the menu: a file path (placeholder art) or #RRGGBB, for screenshots of the menu button and
+// the in-game menu over a bright or a dark scene
+static void duo_backdrop(UIViewController *root, int tries) {
+    NSString *b = NSProcessInfo.processInfo.environment[@"DUO_BACKDROP"];
+    if (!b.length) return;
+    UIView *game = [root valueForKey:@"game"];
+    if (!game.superview) {   // the game view comes when the game starts (front_ios.m startGame): look again a little later
+        if (tries < 50) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 10)), dispatch_get_main_queue(), ^{ duo_backdrop(root, tries + 1); });
+        return;
+    }
+    UIImageView *v = [[UIImageView alloc] initWithFrame:root.view.bounds];
+    v.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    v.contentMode = UIViewContentModeScaleAspectFill; v.clipsToBounds = YES; v.userInteractionEnabled = NO;
+    if ([b hasPrefix:@"#"] && b.length == 7) {
+        unsigned rgb = 0; [[NSScanner scannerWithString:[b substringFromIndex:1]] scanHexInt:&rgb];
+        v.backgroundColor = [UIColor colorWithRed:((rgb >> 16) & 255) / 255.0 green:((rgb >> 8) & 255) / 255.0 blue:(rgb & 255) / 255.0 alpha:1];
+    } else v.image = [UIImage imageWithContentsOfFile:b];
+    [game.superview insertSubview:v aboveSubview:game];
 }
 static void duo_pad_script(void) {
     NSString *script = NSProcessInfo.processInfo.environment[@"DUO_PAD_SCRIPT"];
@@ -121,6 +153,8 @@ static void duo_pad_script(void) {
     UIViewController *root = front_ios_root();
     self.window.rootViewController = root;
     [self.window makeKeyAndVisible];
+    duo_backdrop(root, 0);
+    duo_pad_kind();
     duo_pad_script();
     double menuAt = NSProcessInfo.processInfo.environment[@"DUO_MENU_OPEN"].doubleValue;   // README.md, The in-game menu: open it after that many seconds, for a screenshot
     if (menuAt > 0) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * menuAt)), dispatch_get_main_queue(), ^{ NSLog(@"duo: in-game menu open"); dm_gamepad_menu_open(); });

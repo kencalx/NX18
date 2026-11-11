@@ -251,6 +251,22 @@ struct NX18GameLogo: View {
     }
 }
 
+// A soft dark halo right behind the small NX 18 mark over key art (both launchers; the iOS one adds it to its top shade, the Mac one to its banner's): over a white sky the
+// shade alone leaves the cyan N on a light grey. An ellipse much wider than tall fading from the middle to clear at its edge, so it reads as the mark's shadow, not a patch;
+// a gradient fill, no blur. strong: Reduce Transparency, a little darker
+struct NX18MarkShade: View {
+    var strong = false
+    var body: some View {
+        let mid = strong ? 0.45 : 0.36
+        EllipticalGradient(stops: [.init(color: .black.opacity(mid), location: 0), .init(color: .black.opacity(mid * 0.8), location: 0.25),
+                                   .init(color: .black.opacity(mid * 0.45), location: 0.55), .init(color: .black.opacity(mid * 0.12), location: 0.8),
+                                   .init(color: .black.opacity(0), location: 1)])
+            .frame(width: 230, height: 100)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
 // The NX 18 mark (make_logo.py's mark() with the lockup's pill, colour version): a monoline cyan N, an X whose coral stroke passes under the cyan one with a gap, and 18 in a coral
 // pill as an exponent. Drawn as paths, no image or font; height is the whole mark's (the pill rises above the letters), the width follows (NX18MarkShape.aspect)
 struct NX18Mark: View {
@@ -353,6 +369,7 @@ typealias NX18PlatformView = UIView
 final class NX18RailsFlowView: NX18PlatformView {
     static let period: CFTimeInterval = 14   // seconds for a point of the line to go from cyan to coral and back
     static let key = "nx18.flow"
+    static let frameRates = CAFrameRateRange(minimum: 10, maximum: 30, preferred: 30)
     let axis: Axis
     private let strip = CAGradientLayer()
     private var length: CGFloat = 0
@@ -425,6 +442,8 @@ final class NX18RailsFlowView: NX18PlatformView {
         a.repeatCount = .infinity
         a.timingFunction = CAMediaTimingFunction(name: .linear)
         a.isRemovedOnCompletion = false
+        // A slow drift (a few points a frame at 30 Hz) needs no ProMotion rate: without a range the render server may compose the screen at 120 Hz for it while the launcher idles
+        a.preferredFrameRateRange = Self.frameRates
         strip.add(a, forKey: Self.key)
     }
 }

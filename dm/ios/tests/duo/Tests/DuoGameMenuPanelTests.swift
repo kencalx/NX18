@@ -158,6 +158,17 @@ final class DuoGameMenuPanelTests: XCTestCase {
         }
         XCTAssertGreaterThan(cyan, 10, "Cyan in the ring")
         XCTAssertGreaterThan(coral, 10, "and coral")
+        // each ray is one colour or the other, none a grey blend of the two: the middle of each ray (rays run from 0.72 of the radius to the edge)
+        var rays: [String] = []
+        for i in 0..<8 {
+            let a = Double(i) * .pi / 4, d = 0.84 * Double(w) / 2
+            let x = Int((Double(w) / 2 + d * cos(a)).rounded(.down)), y = Int((Double(h) / 2 + d * sin(a)).rounded(.down))   // the bitmap's rows run down, as UIKit's y
+            let o = (y * w + x) * 4, r = Int(px[o]), b = Int(px[o + 2])
+            XCTAssertGreaterThan(px[o + 3], 200, "ray \(i) is drawn at its middle")
+            rays.append(b > r + 120 ? "cyan" : r > b + 80 ? "coral" : "grey (\(r), \(px[o + 1]), \(b))")
+        }
+        XCTAssertFalse(rays.contains { $0.hasPrefix("grey") }, "No ray is a grey blend: \(rays)")
+        XCTAssertEqual(rays.filter { $0 == "cyan" }.count, 4, "Half the rays cyan, half coral: \(rays)")
     }
 
     @MainActor

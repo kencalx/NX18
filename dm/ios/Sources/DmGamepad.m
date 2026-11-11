@@ -594,7 +594,8 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 // ---- Shapes ----
 static CGPathRef circlePath(CGPoint c, CGFloat r) { return CGPathCreateWithEllipseInRect(CGRectMake(c.x - r, c.y - r, 2 * r, 2 * r), NULL); }
 // The menu button's icon: a ring with eight straight rays (the owner's drawing) in NX 18's two colours, a sweep from cyan (top left) to coral (bottom right) and back around the
-// ring, so the rays take the colour of where they stand (LauncherRow.swift NX18Palette: cyan #00C8F5, coral #FF6B5A). side: the icon's width and height in points, drawn at the
+// ring, so the rays take the colour of where they stand (LauncherRow.swift NX18Palette: cyan #00C8F5, coral #FF6B5A). The two blends sit between rays (the sweep turned an
+// eighth of a ray's spacing off the diagonal): one blend centred on a ray would mix it to grey. side: the icon's width and height in points, drawn at the
 // screen's scale for each touch-control size, so it stays sharp. Ring centred at half the radius, rays from 0.72 to the edge, all strokes 0.19 of the radius, flat ends
 static UIImage *menuIcon(CGFloat side, CGFloat scale) {
     UIGraphicsImageRendererFormat *f = [UIGraphicsImageRendererFormat preferredFormat]; f.opaque = NO; f.scale = scale;
@@ -610,9 +611,9 @@ static UIImage *menuIcon(CGFloat side, CGFloat scale) {
         CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
         const CGFloat cyan[4] = {0, 0xC8 / 255.0, 0xF5 / 255.0, 1}, coral[4] = {1, 0x6B / 255.0, 0x5A / 255.0, 1};
         CGColorRef c0 = CGColorCreate(cs, cyan), c1 = CGColorCreate(cs, coral);
-        const CGFloat at[6] = {0, 0.12, 0.38, 0.62, 0.88, 1};   // each colour holds a quarter of the way round, the blends between them short, so no ray turns grey
+        const CGFloat at[6] = {0, 0.17, 0.33, 0.67, 0.83, 1};   // each colour holds most of its half, the blends short and centred a quarter turn from it, between two rays
         CGGradientRef grad = CGGradientCreateWithColors(cs, (__bridge CFArrayRef)@[(__bridge id)c0, (__bridge id)c0, (__bridge id)c1, (__bridge id)c1, (__bridge id)c0, (__bridge id)c0], at);
-        CGContextDrawConicGradient(g, grad, CGPointMake(R, R), -3 * M_PI_4);   // cyan at the top left (UIKit's y runs down), coral opposite
+        CGContextDrawConicGradient(g, grad, CGPointMake(R, R), -5 * M_PI / 8);   // cyan centred between the top-left and top rays (UIKit's y runs down), coral opposite
         CGGradientRelease(grad); CGColorRelease(c0); CGColorRelease(c1); CGColorSpaceRelease(cs);
     }];
     return [img imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];

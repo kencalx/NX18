@@ -186,6 +186,7 @@ struct LauncherView: View {
     @State private var lastPlayed: Date?
     @State private var aboutShown = false
     @State private var bannerWidth: CGFloat = 600   // the banner's width, which bounds the logo's
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     init(m: LauncherModel, done: @escaping (Bool) -> Void, fit: @escaping (CGFloat) -> Void, extras: LauncherExtras = .load()) {
         self.m = m; self.done = done; self.fit = fit; self.extras = extras
@@ -328,7 +329,9 @@ struct LauncherView: View {
         .frame(maxWidth: .infinity)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { bannerWidth = $0 }
         .overlay(alignment: .topTrailing) {
-            NX18Mark(height: 20).padding(.top, 12).padding(.trailing, 16).allowsHitTesting(false)
+            NX18Mark(height: 20)
+                .background { if extras.art != nil { NX18MarkShade(strong: reduceTransparency) } }   // over key art: the banner's top shade alone leaves it on a light grey (LauncherRow.swift)
+                .padding(.top, 12).padding(.trailing, 16).allowsHitTesting(false)
         }
         .clipped()
     }
