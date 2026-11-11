@@ -215,6 +215,27 @@ static void pull_case(const char *root, const char *name, const char *bundle, in
         snprintf(p, sizeof p, "%s/save_device/b", kept); CHECK(is(p, "original 1"), "this device's device save is kept in the backup pull names");
     } else CHECK(*kept && holds(kept, "original"), "the backup pull names holds what is not in place");
 }
+// This device's save folder cannot be listed (EACCES here; EMFILE or ENOMEM on a device): never taken for "no save". ss_scan fails (the mount turns sync off), and a
+// pull fails before anything moves: before 2026-11-11, has_entries said empty, ss_decide pulled, and pull swapped the real folder into the staging folder and cleared it
+static void unreadable_case(const char *root) {
+    const char *name = "this device's save folder cannot be listed";
+    char save[PATH_MAX], dev[PATH_MAX], p[PATH_MAX], kept[PATH_MAX], backups[PATH_MAX], bundle[PATH_MAX]; ss_meta m;
+    snprintf(save, sizeof save, "%s/save", root); snprintf(dev, sizeof dev, "%s/save_device", root); snprintf(backups, sizeof backups, "%s-backups", save);
+    rm_tree(save); rm_tree(dev); rm_tree(backups); mkdirs(save);
+    snprintf(p, sizeof p, "%s/a", save); put(p, "original 0");
+    cloud_bundle(root, 0, bundle, sizeof bundle);
+    if (chmod(save, 0)) abort();
+    DIR *probe = opendir(save);
+    if (probe) { closedir(probe); chmod(save, 0755); fprintf(stderr, "skipped: %s (this user can list a folder with no permissions)\n", name); return; }
+    CHECK(ss_scan(save, &m) != 0, "ss_scan fails: the mount turns sync off, it does not decide on an empty save");
+    int r = pull(save, bundle, &m, kept, sizeof kept);
+    chmod(save, 0755);
+    CHECK(r == -1, "pull fails before anything moves");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(is(p, "original 0"), "this device's save stays in place");
+    CHECK(access(backups, F_OK) == -1, "no backup folder is made");
+    snprintf(p, sizeof p, "%s.sync-tmp/in", save); CHECK(access(p, F_OK) == -1, "the staging folder is cleared");
+    rm_tree(save); rm_tree(backups);
+}
 int main(void) {
     char folder[] = "/tmp/dm-save-sync-metadata-XXXXXX", save[PATH_MAX], path[PATH_MAX];
     if (!mkdtemp(folder)) return 1;
@@ -240,6 +261,7 @@ int main(void) {
         name = "pull, the device save's move to the backups fails"; pull_case(root, name, one, 0, (struct fault){1, "/save_device", "local/save_device", 0}, none, -1);
         name = "pull, the device save's swap and the save's swap back fail";
         pull_case(root, name, both, 1, (struct fault){2, "local/save_device", "/save_device", 0}, (struct fault){2, "local/save", "/save", 1}, -2);
+        unreadable_case(root);
         rm_tree(root);
     }
     rmdir(folder);

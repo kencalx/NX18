@@ -4860,6 +4860,9 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
                     MLOG("[RED] dirty-page miss: texture ser=%llu pool content changed but was not detected", t->serial);
                 return pk->view ? pk->view : pk->tex;
             }
+            // Its pages were written since (an edge page a neighbour writes before every use, say): a dropped upload is taken here too, or pkg_edges_clean below would keep
+            // the never-written texture at every use (upstream d2556cff)
+            if (!clean && !redo && atomic_load_explicit(&g_up_lost_n, memory_order_relaxed) && up_lost_take(pk->tex)) redo = 1;
             // Not after a dropped upload (redo): its texture holds nothing, and edge bytes unchanged since the upload say nothing about it
             if (!redo && !pk->sparse && pkg_edges_clean(pk, t)) return pk->view ? pk->view : pk->tex;   // only the pages it shares with other data were written
             // Pool content changed (streamed assets written into the same storage, a movie frame): switch to another texture, as in-flight draws still read the old one. That is the spare

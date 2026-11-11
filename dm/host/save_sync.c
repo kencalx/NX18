@@ -72,9 +72,12 @@ static int rm_tree(const char *p) {   // rm -rf: 0 when nothing is left
     return rmdir(p) ? -1 : r;
 }
 
-// Anything in it but Finder's .DS_Store: an empty folder is no save (the host makes DM_SAVE at every mount, DM_SAVE_device at the device save's)
+// Anything in it but Finder's .DS_Store: an empty folder is no save (the host makes DM_SAVE at every mount, DM_SAVE_device at the device save's). 1 yes, 0 no (or no
+// such folder), -1 it cannot be listed (opendir: EMFILE, ENOMEM, EACCES): never "no save", or a pull would swap the folder into the staging folder, which is cleared,
+// with no backup made, and ss_scan would call it empty and decide on that; callers take -1 as an error (pack_save fails, so the mount turns sync off; pull fails first)
 static int has_entries(const char *dir) {
-    char **v; size_t n, k = 0; if (names_of(dir, &v, &n)) return 0;
+    char **v; size_t n, k = 0;
+    if (names_of(dir, &v, &n)) { struct stat st; return lstat(dir, &st) && errno == ENOENT ? 0 : -1; }
     for (size_t i = 0; i < n; i++) k += strcmp(v[i], ".DS_Store") != 0;
     free_names(v, n); return k > 0;
 }
@@ -428,7 +431,8 @@ static int fetch_timed(const char *cloud, const char *local, int ms) {   // fron
 // staging folder, which every start clears, never holds the only copy of this device's save, not even when the app is killed between two steps. A folder the
 // cloud's save does not have goes to the backups too, so both hold the same. When a step fails, the folders already done are put back in reverse order (act[]),
 // so the save is this device's again, whole, and the backup folder, empty again, goes. kept: the backup of this device's save, "" when it had none.
-// 0: the cloud's save is in place, and only then the oldest local backups beyond KEEP_BACKUPS go (prune_backups). -1: this device's save is as it was (kept "").
+// 0: the cloud's save is in place, and only then the oldest local backups beyond KEEP_BACKUPS go (prune_backups). -1: this device's save is as it was (kept "", unless
+// the emptied backup folder could not be removed: then it holds only leftovers of the cloud's).
 // -2: it could not be put back whole: kept holds this device's folders that are not in place. errno: the first failure's
 // (From upstream NXNative 06c2ea4c; NX18 keeps its prune after a pull that succeeded and its backup_dir that does not prune.)
 enum { PL_NONE, PL_SWAPPED, PL_MOVED_OUT, PL_PLACED };   // what was done to a folder: swapped from the backups, moved to them, put where none was
@@ -441,6 +445,7 @@ static int pull(const char *save, const char *bundle, ss_meta *r, char *kept, si
     for (int i = 0; i < 2; i++) {
         folder_path(save, i, here[i], sizeof here[i]); snprintf(incoming[i], sizeof incoming[i], "%s/%s", tmp, FOLDERS[i]);
         fresh[i] = !access(incoming[i], F_OK); had[i] = has_entries(here[i]);
+        if (had[i] < 0) { e = errno; rm_tree(tmp); errno = e; return -1; }   // a folder it cannot list is never taken for an empty one: nothing has moved
     }
     if ((had[0] || had[1]) && backup_dir(save, "local", kept, kn)) { e = errno; kept[0] = 0; goto undo; }   // made before any folder moves
     for (int i = 0; i < 2; i++) {
@@ -596,7 +601,8 @@ static void mount_once(const char *save, const char *title) {
         when(other.saved, t, sizeof t);
         if ((pr = pull(save, theirs, &other, kept, sizeof kept))) {
             if (pr == -1) SRED("bringing the cloud's save in failed (errno=%d): playing on with this device's", errno);
-            else SRED("bringing the cloud's save in failed (errno=%d), and this device's could not all be put back: what is not in %s is kept in %s", errno, save, kept);
+            else if (*kept) SRED("bringing the cloud's save in failed (errno=%d), and this device's could not all be put back: what is not in %s is kept in %s", errno, save, kept);
+            else SRED("bringing the cloud's save in failed (errno=%d), and part of the cloud's could not be taken out again: %s holds some of it (this device had no save)", errno, save);
             failed = 1; break;
         }
         write_base(save, other.hash, cloud);
