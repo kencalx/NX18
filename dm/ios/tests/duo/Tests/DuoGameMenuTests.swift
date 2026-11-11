@@ -14,7 +14,8 @@ final class DuoGameMenuTests: XCTestCase {
       "hint": [{"option": "metalfx", "when": ["DM_PICTURE_FIT=stretch"], "why": "With Stretch, only when the game draws a smaller picture"}]},
      {"env": "DM_PICTURE_FIT", "kind": "choice", "section": "Game", "label": "Picture", "note": "", "default": "fit",
       "options": [["fit", "Fit"], ["fill", "Fill"], ["stretch", "Stretch"]],
-      "inactive": [{"when": ["DM_MOD_ULTRAWIDE=1", "screen>=1.85"], "why": "Ultrawide always stretches the picture"}]},
+      "inactive": [{"when": ["DM_MOD_ULTRAWIDE=1", "screen>=1.85"], "why": "Ultrawide always stretches the picture"}],
+      "shows": [{"option": "stretch", "when": ["DM_MOD_ULTRAWIDE=1", "screen>=1.85"]}]},
      {"env": "DM_MOD_ULTRAWIDE", "kind": "toggle", "section": "Game", "label": "Ultrawide", "note": "", "default": "0"}
     ]}
     """
@@ -44,7 +45,7 @@ final class DuoGameMenuTests: XCTestCase {
             defaults.removePersistentDomain(forName: suite)
         }
 
-        // Ultrawide holds Stretch: Picture is shown, greyed, with the reason; the saved choice is not touched
+        // Ultrawide holds Stretch: Picture is shown, greyed, with the reason, and ticks the Stretch the game has; the saved choice is not touched
         m.values["DM_PICTURE_FIT"] = "fill"
         root.setValue(true, forKey: "ultrawideStretch")
         let picture = try XCTUnwrap(row("Picture", in: gameMenuItems()), "The Picture row is shown while Ultrawide holds Stretch")
@@ -52,13 +53,28 @@ final class DuoGameMenuTests: XCTestCase {
         let options = picture.children.compactMap { $0 as? UIAction }
         XCTAssertEqual(options.count, 3)
         XCTAssertTrue(options.allSatisfy { $0.attributes.contains(.disabled) }, "No option can be picked")
-        XCTAssertEqual(options.first { $0.state == .on }?.title, "Fill", "The saved choice is still the one ticked")
-        XCTAssertEqual(m.values["DM_PICTURE_FIT"], "fill")
+        XCTAssertEqual(options.filter { $0.state == .on }.map(\.title), ["Stretch"], "The value the game is held at is the one ticked, not the saved Fill")
+        XCTAssertEqual(m.values["DM_PICTURE_FIT"], "fill", "The saved choice stays")
+        XCTAssertEqual(String(cString: try XCTUnwrap(dm_setting_held_value("DM_PICTURE_FIT"))), "stretch")
+        XCTAssertNil(dm_setting_held_value("DM_OPMODE"), "Only Picture is held")
         XCTAssertNil(row("Ultrawide", in: gameMenuItems()), "Ultrawide needs the next start: not in the menu")
         root.setValue(false, forKey: "ultrawideStretch")
         let free = try XCTUnwrap(row("Picture", in: gameMenuItems()))
         XCTAssertNil(free.subtitle)
         XCTAssertFalse(free.children.compactMap { $0 as? UIAction }.contains { $0.attributes.contains(.disabled) })
+        XCTAssertEqual(free.children.compactMap { $0 as? UIAction }.first { $0.state == .on }?.title, "Fill", "Ultrawide gone: the saved choice is ticked again")
+        XCTAssertNil(dm_setting_held_value("DM_PICTURE_FIT"))
+        // The launcher's own rule (the list's shows) gives the same where the front end holds nothing, as the settings screen draws it: greyed, Stretch ticked, Fill saved
+        m.values["DM_MOD_ULTRAWIDE"] = "1"; m.facts = DeviceFacts(kind: .iphone, screen: 2.17)
+        let ruled = try XCTUnwrap(row("Picture", in: gameMenuItems()))
+        XCTAssertEqual(ruled.subtitle, "Ultrawide always stretches the picture")
+        XCTAssertEqual(ruled.children.compactMap { $0 as? UIAction }.filter { $0.state == .on }.map(\.title), ["Stretch"])
+        XCTAssertTrue(ruled.children.compactMap { $0 as? UIAction }.allSatisfy { $0.attributes.contains(.disabled) })
+        let pictureRow = try XCTUnwrap(m.settings.first { $0.env == "DM_PICTURE_FIT" })
+        XCTAssertEqual(m.shown(pictureRow), "stretch")
+        XCTAssertFalse(m.choose(pictureRow, "fit"), "A greyed row refuses a pick")
+        XCTAssertEqual(m.values["DM_PICTURE_FIT"], "fill")
+        m.values["DM_MOD_ULTRAWIDE"] = "0"; m.facts = DeviceFacts()
 
         // A launcher hint on MetalFX under Stretch: both options stay selectable, and with Standard chosen the row has nothing to say
         m.values["DM_PICTURE_FIT"] = "stretch"

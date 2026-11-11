@@ -23,6 +23,8 @@ int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=
 UIViewController *front_ios_root(void);
 void front_ios_scene(UIWindowScene *scene);
 void front_ios_focus_event(int ev);
+void dm_shortcut_cold(const char *type);   // LauncherShortcuts.swift: the home screen shortcut the app was opened with, for the launcher's start
+bool dm_shortcut_perform(const char *type);   // and one chosen while the app runs; false when it is not one of the app's
 
 static char *g_argv[4]; static int g_argc;
 
@@ -143,7 +145,7 @@ static void cheats_locate(NSString *doc, NSString *res) {
     NSString *readme = [dir stringByAppendingPathComponent:@"README.txt"];
     if (![fm fileExistsAtPath:readme])
         [@"Cheats for this game go in this folder: an Atmosphere cheat file named after the game's build ID (the first 16 hex digits, such as 0123456789ABCDEF.txt),\n"
-          "or a Switch SD card's atmosphere/contents/<title ID>/cheats/ folder. The in-game menu (the gear) > Cheats shows the build ID it looks for,\n"
+          "or a Switch SD card's atmosphere/contents/<title ID>/cheats/ folder. The in-game menu (the button at the top centre) > Cheats shows the build ID it looks for,\n"
           "turns each cheat on or off, and reloads this folder after you copy a file in. Cheats that rewrite the game's code cannot run on an iPhone:\n"
           "pack such patches into the app instead (the NSP script's mods folder).\n" writeToFile:readme atomically:YES encoding:NSUTF8StringEncoding error:nil];
     NSString *packed = [[res stringByAppendingPathComponent:@"dm"] stringByAppendingPathComponent:@"cheats"];
@@ -268,6 +270,17 @@ static NSString *program_env(void) {
     if (!romfs) return nil;
     fprintf(stderr, "boot: game files %s\n", romfs.fileSystemRepresentation);
     setenv("DM_ROMFS", romfs.fileSystemRepresentation, 0);
+    // The offline pages (hle_web.c's web applet, the settings screen's game guide in LauncherArt.swift): build_ipa.sh always packs them into the app as html (p<N>/html for a program), beside the app's own game files.
+    // A slim build's game files are Documents/romfs.img (push_romfs.sh), with no html beside them, so DM_HTML then names the app's copy. An env file's or the launch's DM_HTML still wins
+    if (!getenv("DM_HTML")) {
+        NSString *beside = [[@(getenv("DM_ROMFS")) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"html"];
+        NSString *app = [(prog ? [res stringByAppendingPathComponent:prog] : res) stringByAppendingPathComponent:@"html"];
+        BOOL bd = NO, ad = NO;
+        if (!([fm fileExistsAtPath:beside isDirectory:&bd] && bd) && [fm fileExistsAtPath:app isDirectory:&ad] && ad) {
+            setenv("DM_HTML", app.fileSystemRepresentation, 1);
+            fprintf(stderr, "boot: offline pages %s (none beside the game files)\n", app.fileSystemRepresentation);
+        }
+    }
     setenv("DM_NVN_SHMAP", [dmdir stringByAppendingPathComponent:@"shader_map.tsv"].fileSystemRepresentation, 0);
     setenv("DM_MSL_DIR", msl.fileSystemRepresentation, 0);
     return dmdir;
@@ -303,11 +316,14 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 @end
 @implementation SceneDelegate
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)o {
+    if (o.shortcutItem) dm_shortcut_cold(o.shortcutItem.type.UTF8String);   // opened from a home screen shortcut (Game, Launcher, Guide: build_ipa.sh): kept for the launcher, which decides the start once the root view controller appears
     front_ios_scene((UIWindowScene *)scene);   // its screen's size, rate and brightness, before the views that read them (front_ios.m screen_cache)
     self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
     self.window.rootViewController = front_ios_root();
     [self.window makeKeyAndVisible];
 }
+// A home screen shortcut chosen while the app runs (in the background or on screen): the settings screen takes it, or the running game (LauncherShortcuts.swift)
+- (void)windowScene:(UIWindowScene *)scene performActionForShortcutItem:(UIApplicationShortcutItem *)item completionHandler:(void (^)(BOOL))done { done(dm_shortcut_perform(item.type.UTF8String)); }
 - (void)sceneWillResignActive:(UIScene *)s { front_ios_focus_event(0); }
 - (void)sceneDidEnterBackground:(UIScene *)s { front_ios_focus_event(1); }
 - (void)sceneWillEnterForeground:(UIScene *)s { front_ios_focus_event(2); }

@@ -4,7 +4,8 @@
 # and in Contents/Resources what the IPA carries (dm/ios/tools/build_ipa.sh): romfs.img (the RomFS image), msl/<b-chain.img | vk | gl> (the Mac shader libraries, named as in the IPA),
 # aoc/<index>/ (DLC), pso/ (an NVN game's pipeline archive made offline for this Mac's GPU, dm/gfx/tools/pso_offline.py: the launcher hands it to the host as DM_PSO_BUNDLE),
 # and dm/ (the rewritten modules and their rewriter tables, nro.tsv, the profile's shader_map.tsv / pso_manifest.tsv / c1_full.tsv / cb_extent.tsv / shader_pairs.tsv / pso_pairs.tsv, font/, env.txt,
-# launcher.json: the game's launcher settings, dm/games/settings.py, which the settings window and Mac front ends show),
+# launcher.json: the game's launcher settings, dm/games/settings.py, which the settings window and Mac front ends show; art.jpg, logo.png, about.json and manual.pdf: the launcher's key art, the game's logo
+# (shown in place of its name), its "About this game" text and the game's manual, each optional, which the NSP script settles in <build folder>/art/ and --manual),
 # plus AppIcon.icns from the game's icon (sips, iconutil) and the Info.plist keys the launcher reads (DMTitleID, DMRomfsMarker, DMLanguage).
 # The large folders are APFS clones (cp -c) when the app is on the same APFS volume as the build, so they take no space; plain copies otherwise.
 # Signing: the inner host first, then the bundle (codesign --force --sign <identity>; '-' = ad-hoc), without the hardened runtime: the host maps the game's code executable, which the hardened
@@ -41,6 +42,11 @@ def run(cmd):
     r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True)
     if r.returncode: raise SystemExit(f'{Path(str(cmd[0])).name} failed ({r.returncode}): {(r.stderr or r.stdout).strip()[-1500:]}')
     return r.stdout
+
+
+def fit(src, dst, fmt, size):   # an image → dst in the format fmt with sips, its longest side at most size: -Z only for a larger image (or one sips cannot measure), as sips -Z also enlarges a smaller one
+    n = max((int(v) for v in re.findall(r'pixel(?:Width|Height):\s*(\d+)', run(['sips', '-g', 'pixelWidth', '-g', 'pixelHeight', src]) or '')), default=0)
+    run(['sips', '-s', 'format', fmt, *(['-Z', size] if not n or n > size else []), src, '--out', dst])
 
 
 def first_file(d):
@@ -221,7 +227,7 @@ def selected_inputs(a):
     pairs = Path(a.pso_pairs) if a.pso_pairs and not any(p.name == 'pso_pairs.tsv' for p in tables) else None
     fonts = sorted(p for p in Path(a.font).glob('*.ttf') if not detritus(p.name))
     files = [Path(a.host)] + mods + msls + pso + tables + fonts + ([pairs] if pairs else [])
-    files += [Path(p) for p in (a.env_file, a.settings, a.icon) if p]
+    files += [Path(p) for p in (a.env_file, a.settings, a.icon, a.art, a.logo, a.about, a.manual) if p]
     for p in files:
         if not p.is_file(): raise SystemExit(f'no input file at {p}')
     return mods, msls, pso, tables, pairs, fonts, files
@@ -269,7 +275,7 @@ def pack(a):
     except (OSError, ValueError): previous = None
     try:
         a = argparse.Namespace(**vars(a))
-        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'html'):
+        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'art', 'logo', 'about', 'manual', 'html'):
             if getattr(a, name): setattr(a, name, str(Path(getattr(a, name)).resolve()))
         mods, msls, pso, tables, pairs, fonts, files = selected_inputs(a)
         # --program: the other programs of a game of several programs (index, rewritten modules, RomFS, shader libraries, tables, offline pages; tab-separated), which go in beside the first's as one app
@@ -323,6 +329,18 @@ def pack(a):
     if fonts: copy(fonts, dm / 'font', False)
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
+    if a.art:   # the launcher's key art: the NSP script's art.jpg as it is (a JPEG, longest side at most 1920), any other image converted as build_ipa.sh does; optional, so a sips failure is a line, as there
+        if Path(a.art).suffix.lower() in ('.jpg', '.jpeg'): shutil.copyfile(a.art, dm / 'art.jpg')
+        else:
+            try: fit(a.art, dm / 'art.jpg', 'jpeg', 1920)
+            except SystemExit as e: (dm / 'art.jpg').unlink(missing_ok=True); print(f'[RED] launcher art: cannot pack {a.art} ({e}); the app is built without it (the launcher blurs the icon)', flush=True)
+    if a.logo:   # the game's logo, shown in place of its name: the NSP script's logo.png as it is (a PNG, longest side at most 1200), any other image (a WebP) converted to a PNG keeping its alpha, as build_ipa.sh does; a failure is a line
+        if Path(a.logo).suffix.lower() == '.png': shutil.copyfile(a.logo, dm / 'logo.png')
+        else:
+            try: fit(a.logo, dm / 'logo.png', 'png', 1200)
+            except SystemExit as e: (dm / 'logo.png').unlink(missing_ok=True); print(f'[RED] launcher logo: cannot pack {a.logo} ({e}); the app is built without it (the launcher shows the game\'s name)', flush=True)
+    if a.about: shutil.copyfile(a.about, dm / 'about.json')
+    if a.manual: shutil.copyfile(a.manual, dm / 'manual.pdf')
     step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.parent.mkdir(exist_ok=True); copy_msl(msl, msls, msl_dst, clone['msl'])
     if aoc: step('add-on content'); copy([aoc], res / 'aoc', clone['aoc'])
     if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', clone['pso'])
@@ -386,6 +404,10 @@ def parse(argv):
     ap.add_argument('--title-id', required=True); ap.add_argument('--name', required=True)
     ap.add_argument('--version'); ap.add_argument('--bundle-id'); ap.add_argument('--category'); ap.add_argument('--lang'); ap.add_argument('--marker', help='the profile\'s romfs_marker')
     ap.add_argument('--icon', help='the game icon (icon.jpg from the control data)')
+    ap.add_argument('--art', help='the launcher\'s key art, a JPEG or PNG (Resources/dm/art.jpg; the NSP script\'s <build folder>/art/art.jpg)')
+    ap.add_argument('--logo', help='the game\'s logo, which the launcher shows in place of its name: a PNG or WebP with transparency (Resources/dm/logo.png; the NSP script\'s <build folder>/art/logo.png)')
+    ap.add_argument('--about', help='the launcher\'s "About this game" text (Resources/dm/about.json; the NSP script\'s <build folder>/art/about.json)')
+    ap.add_argument('--manual', help='the game\'s manual, a PDF (Resources/dm/manual.pdf)')
     ap.add_argument('--sign', default='-', help='codesign identity (default: - = ad-hoc)')
     return ap.parse_args(argv)
 

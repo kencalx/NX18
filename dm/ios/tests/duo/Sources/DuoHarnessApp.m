@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import <GameController/GameController.h>
 #import "DmLayout.h"
 #import "DuoHarnessRuntime.h"
 #include <stdlib.h>
@@ -9,6 +10,8 @@
 
 UIViewController *front_ios_root(void);
 void front_ios_scene(UIWindowScene *scene);   // front_ios.m: caches the scene's screen (size, rate, brightness), as main.m does
+void dm_shortcut_cold(const char *type);   // LauncherShortcuts.swift: home screen shortcuts, handed over as main.m's SceneDelegate does
+bool dm_shortcut_perform(const char *type);
 
 static NSArray<NSNumber *> *DuoHarnessRectArray(CGRect rect) {
     return @[@(CGRectGetMinX(rect)), @(CGRectGetMinY(rect)), @(CGRectGetWidth(rect)), @(CGRectGetHeight(rect))];
@@ -32,6 +35,48 @@ static NSArray<NSArray<NSNumber *> *> *DuoHarnessTouchArray(DuoHarnessInput inpu
     if (self.didLayout) self.didLayout();
 }
 @end
+
+// A scripted controller for the settings screen (README.md, The settings screen): DUO_PAD_SCRIPT is a comma-separated list of steps run one every 0.35 s on a hidden virtual
+// controller, after DUO_PAD_DELAY seconds (default 2): up, down, left, right (the D-pad), a, b, y, plus, l, r (Switch buttons: the virtual pad is not a Nintendo one, so A is its
+// right button, as pad_apple.h maps it), wait (one step of nothing). The controller stays connected afterwards, so the focus ring stays on screen for a screenshot
+API_AVAILABLE(ios(17.0)) static GCVirtualController *g_script_pad;
+API_AVAILABLE(ios(17.0)) static void duo_pad_step(NSArray<NSString *> *steps, NSUInteger i) {
+    if (i >= steps.count) { NSLog(@"duo: pad script done"); return; }
+    NSString *s = [steps[i] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet].lowercaseString;
+    NSDictionary<NSString *, NSValue *> *dirs = @{@"up": [NSValue valueWithCGPoint:CGPointMake(0, 1)], @"down": [NSValue valueWithCGPoint:CGPointMake(0, -1)],
+                                                   @"left": [NSValue valueWithCGPoint:CGPointMake(-1, 0)], @"right": [NSValue valueWithCGPoint:CGPointMake(1, 0)]};
+    NSDictionary<NSString *, NSString *> *buttons = @{@"a": GCInputButtonB, @"b": GCInputButtonA, @"y": GCInputButtonX, @"x": GCInputButtonY,
+                                                      @"plus": GCInputButtonMenu, @"l": GCInputLeftShoulder, @"r": GCInputRightShoulder};
+    void (^release)(void) = ^{};
+    if (dirs[s]) {
+        [g_script_pad setPosition:dirs[s].CGPointValue forDirectionPadElement:GCInputDirectionPad];
+        release = ^{ [g_script_pad setPosition:CGPointZero forDirectionPadElement:GCInputDirectionPad]; };
+    } else if (buttons[s]) {
+        NSString *b = buttons[s];
+        [g_script_pad setValue:1 forButtonElement:b];
+        release = ^{ [g_script_pad setValue:0 forButtonElement:b]; };
+    } else if (![s isEqualToString:@"wait"]) NSLog(@"duo: pad script step %@ unknown", s);
+    NSLog(@"duo: pad script %@", s);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 8)), dispatch_get_main_queue(), release);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * 0.35)), dispatch_get_main_queue(), ^{ duo_pad_step(steps, i + 1); });
+}
+static void duo_pad_script(void) {
+    NSString *script = NSProcessInfo.processInfo.environment[@"DUO_PAD_SCRIPT"];
+    if (!script.length) return;
+    if (@available(iOS 17.0, *)) {
+        GCVirtualControllerConfiguration *config = [GCVirtualControllerConfiguration new];
+        config.hidden = YES;
+        config.elements = [NSSet setWithArray:@[GCInputButtonA, GCInputButtonB, GCInputButtonX, GCInputButtonY, GCInputLeftShoulder, GCInputRightShoulder,
+                                                 GCInputButtonMenu, GCInputLeftThumbstick, GCInputDirectionPad]];
+        g_script_pad = [[GCVirtualController alloc] initWithConfiguration:config];
+        double delay = NSProcessInfo.processInfo.environment[@"DUO_PAD_DELAY"].doubleValue ?: 2;
+        NSArray<NSString *> *steps = [script componentsSeparatedByString:@","];
+        [g_script_pad connectWithReplyHandler:^(NSError *error) {
+            if (error) { NSLog(@"duo: pad script: no virtual controller (%@)", error); return; }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * delay)), dispatch_get_main_queue(), ^{ duo_pad_step(steps, 0); });
+        }];
+    }
+}
 
 @interface DuoHarnessAppDelegate : UIResponder <UIApplicationDelegate>
 @end
@@ -66,13 +111,15 @@ static NSArray<NSArray<NSNumber *> *> *DuoHarnessTouchArray(DuoHarnessInput inpu
 
 @implementation DuoHarnessSceneDelegate
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
-    (void)session; (void)options;
+    (void)session;
     if (![scene isKindOfClass:UIWindowScene.class]) return;
+    if (options.shortcutItem) dm_shortcut_cold(options.shortcutItem.type.UTF8String);   // opened from a home screen shortcut, as main.m's SceneDelegate
     front_ios_scene((UIWindowScene *)scene);   // before the window and views that read the screen, as main.m's SceneDelegate
     self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
     UIViewController *root = front_ios_root();
     self.window.rootViewController = root;
     [self.window makeKeyAndVisible];
+    duo_pad_script();
 
     self.diagnosticHingeStatus = -1;
     self.diagnosticHingeAngle = -1;
@@ -117,6 +164,10 @@ static NSArray<NSArray<NSNumber *> *> *DuoHarnessTouchArray(DuoHarnessInput inpu
         [weakSelf.window.rootViewController.view layoutIfNeeded];
         [weakSelf refreshDiagnostics];
     });
+}
+
+- (void)windowScene:(UIWindowScene *)windowScene performActionForShortcutItem:(UIApplicationShortcutItem *)item completionHandler:(void (^)(BOOL))done {
+    (void)windowScene; done(dm_shortcut_perform(item.type.UTF8String));   // a home screen shortcut while the harness runs, as main.m's SceneDelegate
 }
 
 - (void)windowScene:(UIWindowScene *)windowScene

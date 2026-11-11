@@ -117,7 +117,7 @@ class PackReuse(unittest.TestCase):
             'romfs/marker': b'game', 'msl/k.metallib': b'lib', 'msl/k.json': b'{}', 'msl/inputs.tsv': b'stamp',
             'font/nintendo_ext.ttf': b'font', 'aoc/1/data': b'dlc', 'pso/gpu.mtl4a': b'archive',
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
-            'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
+            'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'art.jpg': b'art', 'logo.png': b'\x89PNG logo', 'about.json': b'{}', 'manual.pdf': b'%PDF-1.7', 'source/launcher.c': b'launcher',
             'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows',
         }
@@ -128,7 +128,8 @@ class PackReuse(unittest.TestCase):
         self.args = pack_app.parse([str(t / 'Game.app'), '--host', str(t / 'dmhost'), '--patched', str(t / 'patched'),
                                    '--romfs', str(t / 'romfs'), '--msl', str(t / 'msl'), '--tables', str(t / 'profile'), '--font', str(t / 'font'),
                                    '--aoc', str(t / 'aoc'), '--pso', str(t / 'pso'), '--pso-pairs', str(t / 'split.tsv'), '--env-file', str(t / 'env.txt'),
-                                   '--title-id', TID, '--name', 'Test Game', '--marker', 'marker', '--icon', str(t / 'icon.jpg')])
+                                   '--title-id', TID, '--name', 'Test Game', '--marker', 'marker', '--icon', str(t / 'icon.jpg'),
+                                   '--art', str(t / 'art.jpg'), '--logo', str(t / 'logo.png'), '--about', str(t / 'about.json'), '--manual', str(t / 'manual.pdf')])
         self.commands = []
         self.clang_version, self.swiftc_version, self.sdk_version = 'clang fixture 1', 'swiftc fixture 1', '27.0'
         self.clang, self.swiftc, self.sdk = t / 'bin/clang', t / 'bin/swiftc', t / 'sdk'
@@ -149,7 +150,9 @@ class PackReuse(unittest.TestCase):
                 if '--version' in cmd: return (self.clang_version if name == 'clang' else self.swiftc_version) + '\n'
                 out = Path(cmd[cmd.index('-o') + 1]); out.write_bytes(b'fake ' + name.encode()); out.chmod(0o755); return ''
             if name in ('codesign', 'other-codesign'): return ''
-            if name == 'sips': Path(cmd[cmd.index('--out') + 1]).write_bytes(b'png'); return ''
+            if name == 'sips':   # sips -g (an image's size) says nothing here, so -Z is given; a conversion writes its --out
+                if '--out' in cmd: Path(cmd[cmd.index('--out') + 1]).write_bytes(b'png')
+                return ''
             if name == 'iconutil': Path(cmd[cmd.index('-o') + 1]).write_bytes(b'icns'); return ''
             return real_run(cmd)
         def which(name): return str(self.codesign) if name == 'codesign' else real_which(name)
@@ -203,7 +206,7 @@ class PackReuse(unittest.TestCase):
         self.pack()
         names = ['dmhost', 'patched/main.patched.bin', 'patched/main.fixups.tsv', 'patched/main.gates.tsv', 'patched/main.cuts.tsv',
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
-                 'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
+                 'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'art.jpg', 'logo.png', 'about.json', 'manual.pdf', 'source/launcher.c',
                  'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift',   # the settings window's sources
                  'host/save_sync.c', 'host/save_sync.h']   # the cloud-save code the launcher links (its send after the host exits)
         names += ['profile/' + n for n in pack_app.TABLES]
@@ -238,7 +241,7 @@ class PackReuse(unittest.TestCase):
         for name, value in [('name', 'New Game'), ('version', '2.0'), ('bundle_id', 'org.test.new'), ('category', 'public.app-category.action-games'),
                             ('lang', 'ja'), ('title_id', '0100000000000000'), ('marker', 'empty'), ('msl_name', 'custom'), ('sign', 'Fixture identity')]:
             with self.subTest(option=name): setattr(self.args, name, value); self.assert_repacked()
-        for name in ('host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'env_file', 'icon', 'pso_pairs'):
+        for name in ('host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'env_file', 'icon', 'art', 'logo', 'about', 'manual', 'pso_pairs'):
             with self.subTest(path=name):
                 old = Path(getattr(self.args, name)); new = old.with_name(old.name + '-other')
                 if old.is_dir(): shutil.copytree(old, new)
@@ -300,7 +303,7 @@ class PackReuse(unittest.TestCase):
         old = Path(self.args.out); new = old.with_name('Other.app')
         shutil.copytree(old, new); shutil.copy2(self.key, Path(str(new) + '.key'))
         self.args.out = str(new); self.assert_repacked()
-        for name in ('icon', 'env_file', 'aoc', 'pso', 'pso_pairs'):
+        for name in ('icon', 'env_file', 'aoc', 'pso', 'pso_pairs', 'art', 'logo', 'about', 'manual'):
             with self.subTest(option=name): setattr(self.args, name, None); self.assert_repacked()
 
     def test_packer_source_content_invalidates(self):
@@ -335,9 +338,51 @@ class PackReuse(unittest.TestCase):
         (self.tmp / 'split.tsv').write_bytes(b'new split'); self.assert_repacked()
         self.assertEqual(target.read_bytes(), b'new split')
 
+    def test_launcher_art_about_and_manual_land_in_resources_dm(self):   # the NSP script's <build folder>/art/ files and --manual: once per app, beside launcher.json
+        self.pack()
+        dm = Path(self.args.out) / 'Contents/Resources/dm'
+        self.assertEqual([(dm / n).read_bytes() for n in ('art.jpg', 'about.json', 'manual.pdf')], [b'art', b'{}', b'%PDF-1.7'])
+        self.assertFalse(any(Path(c[0]).name == 'sips' and str(self.tmp / 'art.jpg') in c for c in self.commands))   # a JPEG goes in as it is
+        png = self.tmp / 'art.png'; png.write_bytes(b'png art'); self.args.art = str(png); self.assert_repacked()   # another image: converted to art.jpg, as build_ipa.sh does
+        sips = next(c for c in self.commands if Path(c[0]).name == 'sips' and str(png) in c and '--out' in c)
+        self.assertEqual((sips[1:6], sips[-1]), (['-s', 'format', 'jpeg', '-Z', '1920'], str(Path(self.args.out).resolve().with_name('Game.app.partial') / 'Contents/Resources/dm/art.jpg')))
+        self.assert_reused()
+        for name in ('art', 'logo', 'about', 'manual'): setattr(self.args, name, None)
+        self.assert_repacked()
+        self.assertEqual([n for n in ('art.jpg', 'logo.png', 'about.json', 'manual.pdf') if (dm / n).exists()], [])
+
+    def test_logo_lands_in_resources_dm(self):   # the game's logo (the NSP script's <build folder>/art/logo.png, or --logo): Resources/dm/logo.png, which the launcher shows in place of the name
+        self.pack()
+        dm = Path(self.args.out) / 'Contents/Resources/dm'
+        self.assertEqual((dm / 'logo.png').read_bytes(), b'\x89PNG logo')
+        self.assertFalse(any(Path(c[0]).name == 'sips' and str(self.tmp / 'logo.png') in c for c in self.commands))   # a PNG goes in as it is
+        webp = self.tmp / 'logo.webp'; webp.write_bytes(b'webp logo'); self.args.logo = str(webp); self.assert_repacked()   # another image: a PNG keeping its alpha, as build_ipa.sh makes it
+        sips = next(c for c in self.commands if Path(c[0]).name == 'sips' and str(webp) in c and '--out' in c)
+        self.assertEqual((sips[1:6], sips[-1]), (['-s', 'format', 'png', '-Z', '1200'], str(Path(self.args.out).resolve().with_name('Game.app.partial') / 'Contents/Resources/dm/logo.png')))
+        self.assert_reused()
+        webp.write_bytes(b'webp logo, changed'); self.assert_repacked()   # its bytes are in the reuse key
+
+    def test_small_or_broken_logo(self):   # sips -Z also enlarges: a logo smaller than 1200 is converted without it; one sips cannot convert is a [RED] line and an app without dm/logo.png, as build_ipa.sh
+        dm = Path(self.args.out) / 'Contents/Resources/dm'
+        webp = self.tmp / 'small.webp'; webp.write_bytes(b'small webp'); self.args.logo = str(webp)
+        real = pack_app.run
+        def sized(cmd):
+            if Path(str(cmd[0])).name == 'sips' and '-g' in [str(c) for c in cmd]: return f'{cmd[-1]}\n  pixelWidth: 600\n  pixelHeight: 200\n'
+            return real(cmd)
+        with mock.patch.object(pack_app, 'run', sized): self.pack()
+        sips = next(c for c in self.commands if Path(c[0]).name == 'sips' and str(webp) in c and '--out' in c)
+        self.assertNotIn('-Z', sips); self.assertEqual((dm / 'logo.png').read_bytes(), b'png')
+        bad = self.tmp / 'broken.webp'; bad.write_bytes(b'not an image'); self.args.logo = str(bad)
+        def broken(cmd):
+            if Path(str(cmd[0])).name == 'sips' and str(bad) in [str(c) for c in cmd]: raise SystemExit('sips failed (1): Error: Cannot open file')
+            return real(cmd)
+        with mock.patch.object(pack_app, 'run', broken): out = self.pack()
+        self.assertIn(f'[RED] launcher logo: cannot pack {bad} (sips failed (1): Error: Cannot open file); the app is built without it', out)
+        self.assertTrue((Path(self.args.out) / 'Contents').is_dir()); self.assertFalse((dm / 'logo.png').exists())
+
     def test_missing_selected_inputs_fail_before_reuse_or_partial_creation(self):
         self.pack()
-        for name in ('dmhost', 'patched/main.fixups.tsv', 'msl/k.metallib', 'romfs/marker', 'pso/prebuilt.tsv', 'env.txt', 'icon.jpg',
+        for name in ('dmhost', 'patched/main.fixups.tsv', 'msl/k.metallib', 'romfs/marker', 'pso/prebuilt.tsv', 'env.txt', 'icon.jpg', 'art.jpg', 'logo.png', 'about.json', 'manual.pdf',
                      'font', 'aoc', 'profile', 'bin/clang', 'bin/swiftc', 'sdk', 'bin/codesign', 'source/launcher.c', 'source/Launcher.swift', 'ios/Sources/LauncherRow.swift'):
             with self.subTest(name=name):
                 p = self.tmp / name; hidden = p.with_name(p.name + '.hidden'); p.rename(hidden)
@@ -761,7 +806,7 @@ class Script(unittest.TestCase):
              mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append):
             nsp.mac_app(sys.executable, REPO, out, 0x01008CF01BAAC000, tmp, tmp / 'ex', tmp / 'patched', tmp / 'dmhost', tmp / 'font', tmp / 'shader/cache' if gfx == 'nvn' else tmp / 'shader',
                         kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''),
-                        gpu_option=kw.get('gpu_option', True))
+                        gpu_option=kw.get('gpu_option', True), **{k: kw[k] for k in ('art', 'about', 'manual', 'logo') if k in kw})
         self.pso_cmd = next((c for c in ran if c[1].endswith('pso_offline.py')), None)   # before the packer
         self.settings_cmd = next(c for c in ran if c[1].endswith('dm/games/settings.py'))
         c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
@@ -776,12 +821,20 @@ class Script(unittest.TestCase):
         self.assertEqual((o['--msl'], o['--romfs'], o['--tables'], o['--title-id'], o['--sign'], o['--marker']),
                          (str(tmp / 'shader/cache/b-0123456789ab'), str(tmp / 'ex/RomFS'), str(tmp / 'profile'), TID, '-', 'a/b'))
         self.assertNotIn('--aoc', o); self.assertNotIn('--icon', o)
+        for opt in ('--art', '--logo', '--about', '--manual'): self.assertNotIn(opt, o)   # none settled: the launcher blurs the icon and shows the name
         self.assertNotIn('--pso', o)   # no shader pairs: no pipeline archive
         self.assertEqual(o['--settings'], str(tmp / 'app/launcher.json'))   # the launcher settings the Mac front end reads, without the iPhone's own switches
         self.assertEqual(self.settings_cmd[2:], ['01008CF01BAAC000', str(tmp / 'patched'), str(tmp / 'ex/control.nacp'), str(tmp / 'app/launcher.json')])
         self.assertEqual((self.settings_env['SETTINGS_PLATFORM'], self.settings_env['GFXAPI'], self.settings_env['DM_LANG']), ('mac', 'nvn', 'en-US'))
         o, tmp = self.pack_cmd('nvn', aoc=Path('/x/aoc'), sign='Developer ID Application: X (T)')
         self.assertEqual((o['--msl'], o['--aoc'], o['--sign']), (str(tmp / 'shader/cache/b-0123456789ab'), '/x/aoc', 'Developer ID Application: X (T)'))
+
+    def test_launcher_art_options(self):   # the art, logo, About text and manual launcher_art settled go to the packer as options
+        art, about, manual, logo = Path('/b/art/art.jpg'), Path('/b/art/about.json'), Path('/m/manual.pdf'), Path('/b/art/logo.png')
+        o, _ = self.pack_cmd('nvn', art=art, about=about, manual=manual, logo=logo)
+        self.assertEqual((o['--art'], o['--logo'], o['--about'], o['--manual']), (str(art), str(logo), str(about), str(manual)))
+        o, _ = self.pack_cmd('nvn', art=art)
+        self.assertEqual(o['--art'], str(art)); self.assertNotIn('--logo', o); self.assertNotIn('--about', o); self.assertNotIn('--manual', o)
 
     def test_pso_archive(self):   # an NVN game with shader pairs: its pipeline archive for this Mac's GPU, made by pso_offline.py, goes into the app
         tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp)
@@ -820,7 +873,7 @@ class Script(unittest.TestCase):
         self.assertTrue(any('PSO_GPUS (g19p) is the IPA\'s' in m for m in self.said))
         o, _ = self.pack_cmd('nvn', work=tmp, gpus='none', gpu_option=False); self.assertIsNone(self.pso_cmd)
         script = (REPO / 'scripts/build_ipa_from_nsp.py').read_text()   # the call site says where the value came from
-        self.assertIn("(args.gpu or PSO_GPUS).strip(), programs, control, gpu_option=bool((args.gpu or '').strip()))", script)
+        self.assertIn("(args.gpu or PSO_GPUS).strip(), programs, control, gpu_option=bool((args.gpu or '').strip()),", script)
 
     def test_pso_archive_failure_is_a_warning(self):   # the archive is an optimization: without it the app builds the bases on its first start
         tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp)

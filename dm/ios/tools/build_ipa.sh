@@ -15,6 +15,9 @@
 #   DM_METAL_CAPTURE=1 makes a development build that can write GPU frame captures (MetalCaptureEnabled in Info.plist, for the host's DM_GPU_CAPTURE switch);
 #   DM_SHOW_FPS=1 turns the frame-rate counter on (DMShowFPS in Info.plist; DM_SHOW_FPS in the app's Documents/env.txt overrides it on the phone);
 #   DM_LANG=<language code> is the game language (DMLanguage in Info.plist, default en-US; DM_LANG in the app's Documents/env.txt overrides it on the phone);
+#   DM_ART=<image> is the launcher's key art (dm/art.jpg in the app: a JPEG as it is, the NSP script's being at most 1920 a side; a PNG converted with sips, longest side at most 1920), DM_ABOUT=<about.json> its "About this game" text (dm/about.json), DM_MANUAL=<file.pdf> the game's manual (dm/manual.pdf);
+#   DM_LOGO=<image> is the game's logo, which the launcher shows in place of its name (dm/logo.png: a PNG as it is, the NSP script's being at most 1200 a side; a WebP converted with sips to a PNG keeping its alpha, longest side at most 1200);
+#   the NSP script settles them once per app (scripts/game_art.py, <build folder>/art/), so they go in once, not per program; each is optional (without art the launcher blurs the app icon)
 #   both are also the launcher's defaults (dm/launcher.json from dm/games/settings.py; the player's choice there wins over them, Documents/env.txt over the choice);
 #   the IPA name, code modules, RomFS marker and shader tables come from the game profile
 #   PROGRAMS_TSV=<file> (the NSP script, a multi-program application: Super Mario 3D All-Stars): one app holding several programs, one row each, "<index>\t<profile>\t<patched>\t<RomFS>\t<iOS shaders>\t<graphics API>",
@@ -155,6 +158,18 @@ if [ -n "$LD" ] && [ "$LD" != "$DM_LANG" ]; then t "game language: the game has 
 if [ -n "${DM_ENV_FILE:-}" ]; then cp "$DM_ENV_FILE" Gen/dm/env.txt || die "copy DM_ENV_FILE"; t "env: $(grep -v '^#' "$DM_ENV_FILE" | tr '\n' ' ')"; fi
 # Cheats from the NSP script's mods folder (DM_PACKED_CHEATS, dm/tools/game_mods.py): dm/cheats in the bundle, which main.m copies into Documents/cheats at each start when that folder does not have them (a file the player has there is kept)
 if [ -n "${DM_PACKED_CHEATS:-}" ] && [ -d "$DM_PACKED_CHEATS" ]; then mkdir -p Gen/dm/cheats && cp "$DM_PACKED_CHEATS"/*.txt Gen/dm/cheats/ || die "copy DM_PACKED_CHEATS"; t "cheats: $(cd "$DM_PACKED_CHEATS" && ls *.txt | tr '\n' ' ')"; fi
+# The launcher's key art, logo, "About this game" text and manual (DM_ART, DM_LOGO, DM_ABOUT, DM_MANUAL, from the NSP script's <build folder>/art/ and --manual): once per app in Gen/dm, a folder resource, so they reach DmIOS.app/dm/ in the IPA and the Xcode project alike
+# The NSP script's art.jpg is already a JPEG of at most 1920 a side, so a JPEG is copied as it is (no second lossy pass, as pack_app.py does); another image goes through sips. Art is optional: a failure is a line, never the end of the build
+# fit <format> <longest side> <image> <out>: sips to that format, with -Z only when the image is larger than that (or sips cannot tell its size), as sips -Z also enlarges a smaller image (softer, and a bigger file)
+fit() { local n; n=$(sips -g pixelWidth -g pixelHeight "$3" 2> /dev/null | awk '/pixel(Width|Height):/ { if ($2 + 0 > n + 0) n = $2 } END { print n + 0 }')
+  if [ "$n" -eq 0 ] || [ "$n" -gt "$2" ]; then sips -s format "$1" -Z "$2" "$3" --out "$4" > /dev/null; else sips -s format "$1" "$3" --out "$4" > /dev/null; fi; }
+if [ -n "${DM_ART:-}" ] && [ -f "$DM_ART" ]; then case "$(printf %s "$DM_ART" | tr '[:upper:]' '[:lower:]')" in *.jpg|*.jpeg) cp "$DM_ART" Gen/dm/art.jpg;; *) fit jpeg 1920 "$DM_ART" Gen/dm/art.jpg;; esac \
+  && t "launcher art: $DM_ART" || { rm -f Gen/dm/art.jpg; t "[RED] launcher art: cannot pack $DM_ART; the app is built without it (the launcher blurs the icon)"; }; fi
+# The NSP script's logo.png is already a PNG of at most 1200 a side, copied as it is; another image (a WebP) goes through sips to a PNG, which keeps its alpha. Optional too: without it the launcher shows the name
+if [ -n "${DM_LOGO:-}" ] && [ -f "$DM_LOGO" ]; then case "$(printf %s "$DM_LOGO" | tr '[:upper:]' '[:lower:]')" in *.png) cp "$DM_LOGO" Gen/dm/logo.png;; *) fit png 1200 "$DM_LOGO" Gen/dm/logo.png;; esac \
+  && t "launcher logo: $DM_LOGO" || { rm -f Gen/dm/logo.png; t "[RED] launcher logo: cannot pack $DM_LOGO; the app is built without it (the launcher shows the game's name)"; }; fi
+if [ -n "${DM_ABOUT:-}" ] && [ -f "$DM_ABOUT" ]; then cp "$DM_ABOUT" Gen/dm/about.json || die "copy DM_ABOUT"; t "About this game: $DM_ABOUT"; fi
+if [ -n "${DM_MANUAL:-}" ] && [ -f "$DM_MANUAL" ]; then cp "$DM_MANUAL" Gen/dm/manual.pdf || die "copy DM_MANUAL"; t "manual: $DM_MANUAL"; fi
 # The shader libraries go into the archive as DmIOS.app/msl/<folder>, or as the file DmIOS.app/msl/<folder>.img (main.m sets DM_MSL_DIR to msl)
 MSLDIR=b-$V
 # Shared-font stand-ins: standard = macOS's Arial Unicode (absent on iOS), Nintendo extension = button icons generated by make_ext_font.py (needs fontTools; FONT_PY names a python that has it)
@@ -193,6 +208,29 @@ COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null) && { [ -z "$(git -
 case "$MSLDIR" in b-*) /usr/libexec/PlistBuddy -c "Add :DMChain string ${MSLDIR#b-}" Gen/Info.plist > /dev/null || die "DMChain";; esac
 # DM_METAL_CAPTURE=1: a development build that may write GPU frame captures (MetalCaptureEnabled; the host's DM_GPU_CAPTURE switch writes them to Documents/gpu_captures)
 if [ "${DM_METAL_CAPTURE:-0}" = 1 ]; then /usr/libexec/PlistBuddy -c "Add :MetalCaptureEnabled bool true" Gen/Info.plist > /dev/null || die "MetalCaptureEnabled"; t "Metal frame capture: enabled (DM_METAL_CAPTURE=1)"; fi
+# Home screen shortcuts (UIApplicationShortcutItems; dm/ios/Sources/LauncherShortcuts.swift): holding the app's icon offers Game (the game at once with the saved choices), Launcher (the settings screen) and Guide (the settings screen with the game guide open), each this time only.
+# In the Info.plist, so they are there from the install on, for the IPA and the Xcode project alike. Guide only when the app carries something for it: the game guide in the offline pages beside the RomFS (program 0's for a game of several programs,
+# an HtmlDocument's .htdocs other than the legal ones), else the manual (DM_MANUAL), else About this game (DM_ABOUT) when it has some text; its subtitle names which. Both tests are the app's own, so the item never offers what the app then cannot open:
+# guide_pages is LauncherArt.swift findGuide (<html>/html-document or <html>/html<n>/html-document, a .htdocs other than important, ipnotices and support, holding html/<LANG>/index.html, html/index.html or index.html)
+# and about_text is LauncherAbout.hasText (a JSON object with a non-blank intro, description or publisher, or a releaseDate YYYY-MM-DD)
+guide_pages() { local doc h f; for doc in "$1/html-document" "$1"/html*/html-document; do [ -d "$doc" ] && [ "$doc" != "$1/html-document/html-document" ] || continue
+  for h in "$doc"/*.htdocs; do case ${h##*/} in important.htdocs|ipnotices.htdocs|support.htdocs) continue;; esac
+    for f in "$h"/html/*/index.html "$h/html/index.html" "$h/index.html"; do [ -f "$f" ] && return 0; done; done; done; return 1; }
+about_text() { [ -s "$1" ] && python3 -I -c 'import datetime, json, sys
+try: a = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception: sys.exit(1)
+def text(k): return isinstance(a.get(k), str) and a[k].strip() != ""
+def date():
+    try: return isinstance(a.get("releaseDate"), str) and bool(datetime.datetime.strptime(a["releaseDate"].strip(), "%Y-%m-%d"))
+    except ValueError: return False
+sys.exit(0 if isinstance(a, dict) and (text("intro") or text("description") or text("publisher") or date()) else 1)' "$1"; }
+GUIDE=; if guide_pages "$(dirname "$ROMFS")/html"; then GUIDE="Game guide"; elif [ -s Gen/dm/manual.pdf ]; then GUIDE=Manual; elif about_text Gen/dm/about.json; then GUIDE="About this game"; fi
+SC=("game|Game|Skips the settings screen|play.fill" "launcher|Launcher|Settings before playing|slider.horizontal.3"); [ -z "$GUIDE" ] || SC+=("guide|Guide|$GUIDE|book.closed")
+/usr/libexec/PlistBuddy -c "Delete :UIApplicationShortcutItems" Gen/Info.plist > /dev/null 2>&1; /usr/libexec/PlistBuddy -c "Add :UIApplicationShortcutItems array" Gen/Info.plist > /dev/null || die "UIApplicationShortcutItems"
+i=0; for item in "${SC[@]}"; do IFS='|' read -r ST STITLE SSUB SICON <<< "$item"; K=":UIApplicationShortcutItems:$i"
+  /usr/libexec/PlistBuddy -c "Add $K dict" -c "Add $K:UIApplicationShortcutItemType string dm.shortcut.$ST" -c "Add $K:UIApplicationShortcutItemTitle string $STITLE" \
+    -c "Add $K:UIApplicationShortcutItemSubtitle string $SSUB" -c "Add $K:UIApplicationShortcutItemIconSymbolName string $SICON" Gen/Info.plist > /dev/null || die "shortcut $ST"; i=$((i + 1)); done
+t "home screen shortcuts: Game, Launcher$([ -z "$GUIDE" ] && echo ' (no Guide: no guide, manual or About this game)' || echo ", Guide ($GUIDE)")"
 RP=; if [ -n "${PROGRAMS_TSV:-}" ]; then   # a game of several programs: each program's files, which the Xcode build phase copies under p<index> as the IPA has them (stage_resources.sh)
   RP=Gen/resources_programs.tsv; printf '# program\tRomFS\tmarker\tiOS shaders\tshader folder (build_ipa.sh)\n' > "$RP"
   M0=$MSLDIR; while IFS= read -r row; do prog_set "$row"; printf '%s\t%s\t%s\t%s\t%s\n' "$PN" "$ROMFS" "$MARKER" "$(lib_path "$MSL_IOS/$MSLDIR")" "$MSLDIR" >> "$RP"; done < <(prog_rows); prog_back; MSLDIR=$M0; fi

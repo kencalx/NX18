@@ -16,8 +16,10 @@ double dm_gamepad_size(void);   // the touch controls' size factor (DM_TOUCH_SIZ
 bool dm_setting_live(const char *env, const char *value);   // front_ios.m: value NULL asks whether the running game takes env at once; otherwise applies it
 void dm_setting_env(const char *env, const char *value);   // front_ios.m: a pick into the environment, under the lock a host thread copies such a variable under (front.h front_env_copy)
 bool dm_setting_held(const char *env);   // front_ios.m: the front end holds this live setting's value while the game runs (Picture under Ultrawide): its row is shown disabled
+const char *dm_setting_held_value(const char *env);   // front_ios.m: the value it holds then (a static string: stretch), which the row ticks in place of the saved choice; NULL when not held
 const char *dm_setting_why(const char *env);   // front_ios.m: why this live setting does nothing at the moment, as the running game knows it (a static string), or NULL
 bool dm_setting_working(const char *env);   // front_ios.m: the running game says this live setting's choice took effect at the last present (MetalFX upscaled)
+void dm_gamepad_menu_open(void);   // DmGamepad.m: the menu button shows and opens the in-game menu, as a tap on it does (a Launcher or Guide home screen shortcut while the game runs, LauncherShortcuts.swift)
 int dm_gamepad_touch_hidden(void);   // DmGamepad.m: 0 the touch controls are drawn, 1 hidden while a controller is connected, 2 the Tap layout draws none (main thread)
 // The cheats (dm/host/hle_cheats.c, as dm.h declares them) that GameMenu.swift's Cheats submenu lists and toggles: the file of this build in the cheats folder, Documents/cheats on the iPhone (main.m).
 // They show nothing until the host has loaded them (dm_cheats_init, on the preload thread); a string returned points into hle_cheats.c's static arrays, and the menu copies it at once
