@@ -420,8 +420,10 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-a
 
 # the same game in one NUP container (https://github.com/a55uka/nup; scripts/pack_nup.py): the .nup file, or a folder that holds one; no prod.keys; a game with no profile is surveyed from the container's own files (code modules, RomFS file headers, NROs), as NSPs are by nx_extract's manifest pass.
 # The RomFS images are written straight from the container (each file checked against its SHA-256); the NACP and icon come from the container when it carries them, else the name comes from the profile as for a dump
-# nup since its PR #20 (2026-11-04) writes every meta record's type one too low (NPDM 0 … localized icons 9): such a block is told apart as nup's PR #32 tells it (a record of type 0, or one of type 7
-# that is not 32 bytes) and read one type up, with a line saying so; a block of an older nup is read as it is. A NACP record that is not 0x4000 bytes is left out with a line, never saved as control.nacp
+# nup since its PR #20 (2026-11-04) writes every meta record's type one too low (NPDM 0 … localized icons 9): such a block is read one type up, with a line saying so (also in a build with a
+# profile, which otherwise packs quietly); a block of an older nup is read as it is. Where the NACP (0x4000 bytes) or icon (JPEG or PNG) is tells them apart: type 1 or 2 (shifted), 2 or 3 (SPEC);
+# only when neither tells does nup's PR #32 rule decide (a record of type 0, or one of type 7 that is not 32 bytes), and a block that rule marks but its records do not is read as it is, with a line.
+# A NACP record that is not 0x4000 bytes is left out with a line, never saved as control.nacp. An icon (from any input) that is not a JPEG or PNG is not used as the app's icon, with a line
 # A NUP with no base game (an empty base record, or none and standalone_update on every update) packs the selected update, which needs its own ExeFS and RomFS, as the whole game; only its update versions are selectable (no v0)
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform mac-app
 
@@ -429,7 +431,8 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform m
 # Each snapshot (base, update, standalone update, DLC) is a complete tree, so the selected version is packed from its own exefs/ and romfs/ alone; its NACP and icon are the ones the archive ties to that exact version
 # (a version without them takes its exact base snapshot's, also one that holds only metadata, packed or not; never another update's: with no base the version has none, and the name comes from the profile).
 # A NACP record that is not 0x4000 bytes (NXConvert 1.0.0 and 1.0.1 may have stored one for a NUP whose meta types were one too low) is left out with a line.
-# Without a NACP the app is named after the archive's display title for the version (nxconvert --fallback-title, or a title typed in NXConvert's sidebar; saved as extract/v<N>/title.txt), else the profile's name.
+# Without a NACP the app is named after the archive's display title for the version (nxconvert --fallback-title, or a title typed in NXConvert's sidebar; saved as extract/v<N>/title.txt, control
+# characters dropped, at most 511 bytes; a title of only spaces gives way to a localized one, American English first), else the profile's name.
 # A base snapshot with no game files (no exefs/main, nothing in romfs/) is no base game, as a NUP's empty base record. Every file is streamed block by block and checked against its SHA-256 (a failure names the file and the block whose CRC-32C fails).
 # An NX holding decrypted NCA files (nxconvert pack from a DNSP/DXCI, Switch 1 only) is read by nx_extract --plain, still with no prod.keys: the scan reads each snapshot's content meta (one
 # nx_extract --contents run; a DLC's add-on title ID comes from there) against the catalog; a version's Meta, Program, Control and Manual NCAs are staged into <build folder>/tmp/nca/v<N>/

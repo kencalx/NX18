@@ -784,6 +784,7 @@ class Script(unittest.TestCase):
     def test_app_name(self):
         self.assertEqual(nsp.mac_app_name('The Legend of Zelda: Echoes of Wisdom'), 'The Legend of Zelda - Echoes of Wisdom')
         self.assertEqual(nsp.mac_app_name('AC/DC'), 'AC - DC'); self.assertEqual(nsp.mac_app_name(':'), 'nxnative')
+        self.assertEqual(nsp.mac_app_name('ゲ' * 100), 'ゲ' * 66)   # an NX's display title may be 511 bytes: at most 200 bytes, cut on a character, so the .app's name fits a file name
 
     def pack_cmd(self, gfx, **kw):
         ran, tmp = [], Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp); self.said = []; self.settings_env = {}

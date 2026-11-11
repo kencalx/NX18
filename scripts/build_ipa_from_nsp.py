@@ -373,12 +373,20 @@ def game_language(want, asked, have):
 
 
 def control_name(d):   # the game's name in a version folder's control data: its NACP's, else the NX archive's display title that pack_nx saves for a version with no NACP (title.txt), else ''
-    try: return nacp.name(d / 'control.nacp') or (d / 'title.txt').read_text(encoding='utf-8').strip()
+    try: return nacp.name(d / 'control.nacp') or (d / pack_nup.TITLE_FILE).read_text(encoding='utf-8').strip()
     except (OSError, UnicodeDecodeError): return ''
 
 
-def game_icon_of(d):   # a version folder's game icon: an NX's icon edited in NXConvert (pack_nx.EDITED_ICON, beside an NCA snapshot's), else the control data's icon.jpg, else None
-    return next((p for p in (d / pack_nx.EDITED_ICON, d / 'icon.jpg') if p.is_file()), None)
+def game_icon_of(d, say=lambda s: None):
+    """A version folder's game icon: an NX's icon edited in NXConvert (pack_nx.EDITED_ICON, beside an NCA snapshot's), else the control data's icon.jpg, else None. One that is not a JPEG or
+    a PNG (by its first bytes) is passed over with a line: sips could not make the app icon of it, and build_ipa.sh would stop at the end of the build"""
+    for p in (d / pack_nup.EDITED_ICON, d / 'icon.jpg'):
+        try:
+            with open(p, 'rb') as f: head = f.read(4)
+        except OSError: continue
+        if pack_nup.image(head): return p
+        say(f'{p}: not a JPEG or PNG image ({len(head)}+ bytes beginning {head!r}): not used as the app icon')
+    return None
 
 
 def languages_control(*dirs):
@@ -1383,7 +1391,7 @@ def extract_nup(ex, name, k, base, app, n, pk=pack_nup):   # one version of a NU
         return None
     try:
         PROG.stage(f'unpack {name}', poll=poll, unit='B', total=pk.version_bytes(n, k, base) if pk is pack_nx else n.tree_bytes(pk.romfs_of(k, base)), est=True)
-        how = pk.pack_version(n, k, base, app, dst, say=lambda s: None, step=lambda s: PROG.set(step=s))
+        how = pk.pack_version(n, k, base, app, dst, say=lambda s: None, step=lambda s: PROG.set(step=s), note=say)   # quiet, but for the lines about its control data
     except pack_nup.Error as e: raise BuildError(str(e)) from e
     PROG.end(amount((dst / 'RomFS.img').stat().st_size, 'B') + {'kept': ', reused (inputs unchanged)', 'verified': ', reused (image checked)'}.get(how, ''))
     return dst
@@ -2958,8 +2966,8 @@ def mac_pso(py, repo, work, lib, g, gpus, env, logs, gpu_option=True):
     return out
 
 
-def mac_app_name(name):   # the app's file name: the game name with the characters Finder shows otherwise (':' and '/') as ' - '
-    return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
+def mac_app_name(name):   # the app's file name: the game name with the characters Finder shows otherwise (':' and '/') as ' - ', at most 200 bytes (a file name holds 255, with the suffixes)
+    return re.sub(r'\s*[:/]\s*', ' - ', name).encode()[:200].decode('utf-8', 'ignore').strip(' .-') or 'nxnative'
 
 
 def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None, gpu_option=True, art=None, about=None, manual=None, logo=None):
@@ -3352,7 +3360,7 @@ def main(args=None):
         dirs[ver] = extract_nup(ex, ver, u or b, b, app, container(fam)[1], pk) if nup else extract_dump(ex, ver, u or b, app) if dump else extract(nx, keys, ex, ver, b, u, None, logs, g, app)
         if not nup and not dump: extract_html(nx, keys, dirs[ver], b, u, logs, app)
     check_formats(dirs)
-    check_versions_aarch64(dirs, logs, g, nacp.name(dirs[versions[0]] / 'control.nacp') or f'{app:016X}')   # before build_mismatch, derive_profile and build_sources read the modules
+    check_versions_aarch64(dirs, logs, g, control_name(dirs[versions[0]]) or f'{app:016X}')   # before build_mismatch, derive_profile and build_sources read the modules
     bad = [] if derived else [f'{v}: {x}' for v in versions for x in build_mismatch(dirs[v], v, g)]   # every module's build ID must be the one the profile registers for its version
     if bad and provisional: raise BuildError(f'not the builds provisional game profile {g.id} registers: {"; ".join(bad)}')
     if bad:   # files of other builds under a registered version's tag: packed like any other version
@@ -3403,7 +3411,7 @@ def main(args=None):
     if mac_pack and not (args.out or OUT_IPA): out_ipa = work.parent / f'{mac_app_name(app_name)}{"-provisional" if shadowed else ""}{"-" + plat_tag if plat_tag else ""}.app'
     # the app icon: --icon / ICON, else the game icon nx_extract saved from the control data (English, icon.jpg; the packed version's first, then the base game's), which a dump never has and a NUP or an NX may lack;
     # an icon edited in an NX made from NSPs or XCIs comes before its Control NCA's (game_icon_of). Without one, the NX 18 icon, so the home screen does not show a blank tile
-    game_icon = user_icon or next(filter(None, map(game_icon_of, (game, base))), None)
+    game_icon = user_icon or next(filter(None, (game_icon_of(d, say) for d in dict.fromkeys((game, base)))), None)
     icon = game_icon or (NX18_ICON if NX18_ICON.is_file() else None)
     if (not mac or mac_pack) and getattr(args, 'in_programs', None) is None:   # an app is made, once: a program packed with the application's first (in_programs) is part of its app
         say_game(app, app_name, app_version or '1.0', bundle_id, None if prepare_xcode else out_ipa, game_icon)   # the game's own icon (docs/frontends.md): null without one, not the NX 18 stand-in
