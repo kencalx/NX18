@@ -1970,7 +1970,12 @@ void nvn_gpu_recent(double *avg, double *p95, unsigned *n) {
 }
 static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
 // Power over the window since the last summary, for the whole process: CPU energy (task_energy in nJ, Apple silicon), CPU time (100% = one core) and the share of it on performance cores,
-// wakeups per second (interrupt / out of platform idle), GPU time per second (task_gpu_utilisation), thermal state, and the guest threads that yielded most (hle_thread.c);
+// wakeups per second (interrupt / out of platform idle), GPU time per second, thermal state, and the guest threads that yielded most (hle_thread.c);
+// GPU: the host's own count first, how long per second the Metal 4 queue's command buffers (the game's submissions and segments, uploads, presents, one-off command buffers)
+// kept the GPU busy, their GPU start-to-end intervals with overlaps counted once (nvn_mtl.m mtl_gpu_busy_ns). The line used to give only task_power_info's
+// gpu_energy.task_gpu_utilisation, which iOS leaves at 0 for an app: 'GPU 0.0 ms/s' in every window of the iPhone 18 Pro Max's logs (13 Sentinels, Luigi's Mansion 3), so a
+// GPU-bound window could not be told from an idle one. The system's count follows only where it moved in the window (the Mac fills it). The timing line's GPU is another
+// measure: per frame, the sum of that frame's game command buffers' intervals (mtl_gpu_ms), without presents and uploads;
 // then render-target traffic per frame (attachment load / store bytes, passes that load and store everything, stores saved by DM_NVN_UNWRITTEN_DC) and guest-thread CPU by Switch priority
 static void power_line(uint64_t frame) {
     static uint64_t pt, pe, pcpu, pp, piw, ppw, pg, pf, pld, pst, pfu, pudc, pnqp, prw; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
@@ -1983,10 +1988,12 @@ static void power_line(uint64_t frame) {
     uint64_t e = 0;
 #endif
     uint64_t iw = pw.cpu_energy.task_interrupt_wakeups, idw = pw.cpu_energy.task_platform_idle_wakeups, g = pw.gpu_energy.task_gpu_utilisation;
+    static uint64_t pgbusy; uint64_t gbusy = mtl_gpu_busy_ns();   // the host's own GPU busy time (nvn_mtl.m)
     if (pt && t > pt) { double s = (t - pt) / 1e9; char yt[192]; dm_yield_top(yt, sizeof yt);
         double nf = frame > pf ? (double)(frame - pf) : 1;   // per frame: the fair comparison when one build holds the frame rate better than another
-        LOG("[nvn] power up to frame %llu: CPU energy %.2f W, %.1f mJ per frame (%.1f fps); CPU %.0f%% (100 = one core), %.0f%% of it on performance cores; wakeups %.0f/s (out of platform idle %.0f); GPU %.1f ms/s; thermal %d; top yielders: %s", frame,
-            (e - pe) / 1e9 / s, (e - pe) / 1e6 / nf, nf / s, (cpu - pcpu) / 1e7 / s, cpu > pcpu ? 100.0 * (double)(p - pp) / (double)(cpu - pcpu) : 0, (iw - piw) / s, (idw - ppw) / s, (g - pg) / 1e6 / s, dm_thermal_now(), yt);
+        char gt[96] = ""; if (g > pg) snprintf(gt, sizeof gt, ", %.1f ms/s by the system's count (task_gpu_utilisation)", (g - pg) / 1e6 / s);
+        LOG("[nvn] power up to frame %llu: CPU energy %.2f W, %.1f mJ per frame (%.1f fps); CPU %.0f%% (100 = one core), %.0f%% of it on performance cores; wakeups %.0f/s (out of platform idle %.0f); GPU %.1f ms/s busy (the host's command buffers, overlaps merged)%s; thermal %d; top yielders: %s", frame,
+            (e - pe) / 1e9 / s, (e - pe) / 1e6 / nf, nf / s, (cpu - pcpu) / 1e7 / s, cpu > pcpu ? 100.0 * (double)(p - pp) / (double)(cpu - pcpu) : 0, (iw - piw) / s, (idw - ppw) / s, gbusy > pgbusy ? (gbusy - pgbusy) / 1e6 / s : 0.0, gt, dm_thermal_now(), yt);
         char rs[400]; mtl_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; mtl_barrier_stats(&bs, &bf);
         uint64_t mtl_cut_count(void), mtl_copy_cut_count(void), mtl_blit_splits(void); void mtl_ubd_stats(uint64_t *, uint64_t *); static uint64_t pcut, pccut, pbsp, pud, puc; uint64_t cut = mtl_cut_count(), ccut = mtl_copy_cut_count(), bsp = mtl_blit_splits(), ud, uc; mtl_ubd_stats(&ud, &uc);
         void mtl_ubp_stats(uint64_t *, uint64_t *, uint64_t *); static uint64_t ppm, ppr, ppf; uint64_t pm, pr, pf_; mtl_ubp_stats(&pm, &pr, &pf_);
@@ -2028,7 +2035,7 @@ static void power_line(uint64_t frame) {
         char wk[512]; dm_wake_stats(wk, sizeof wk, s); uint64_t nqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed), rw = mtl_rec_wakes();
         LOG("[nvn] threads up to frame %llu: CPU %s; wake sources per second: %s; NVN queue event polls of 1 ms %.0f; encode thread wakes %.0f", frame, tc, wk, (nqp - pnqp) / s, (rw - prw) / s); }
     else { char yt[192], rs[400], tc[400], wk[512]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); dm_wake_stats(wk, sizeof wk, 1); }   // the first call only takes the baselines
-    pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes(); pnqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed); prw = mtl_rec_wakes();
+    pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pgbusy = gbusy; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes(); pnqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed); prw = mtl_rec_wakes();
 }
 static void tsummary(uint64_t frame) {
     char line[1024]; size_t o = 0;

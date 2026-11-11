@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# scripts/devlog.py: the long frames the frame step's own holds make (not counted), those made under the in-game menu or out of focus (counted apart), and memory read as plateaus between the steps an area load makes, the graphics ledger and guest charged among them, from logs written here; the movie lines (AAC channel order, VideoToolbox sessions made again) from the host's own formats
+# scripts/devlog.py: the long frames the frame step's own holds make (not counted), those made under the in-game menu or out of focus (counted apart), and memory read as plateaus between the steps an area load makes, the graphics ledger and guest charged among them, and the power line's GPU busy time, from logs written here; the movie lines (AAC channel order, VideoToolbox sessions made again) from the host's own formats
 import importlib.util, re, unittest
 from pathlib import Path
 
@@ -282,6 +282,43 @@ class Plateaus(unittest.TestCase):
             self.assertEqual(x.group(5), str(105) if with_guest else None)
             self.assertEqual(x.group(7), '7400')
             self.assertRegex(line, rf'shared textures {x.group(6)} \(')
+
+
+class PowerGpu(unittest.TestCase):   # the power line's GPU: the host's own busy time ('GPU x ms/s busy (…)'), the system's count beside it only where it moved (the Mac), and an older log's lone system count
+    def fmt(self) -> tuple[str, str]:   # the power line and its system's-count part as hle_nvn.c power_line prints them, as Python formats
+        src = (REPO / 'dm/gfx/nvn/hle_nvn.c').read_text(errors='replace')
+        main = re.search(r'LOG\("\[nvn\] (power up to frame %llu: [^"]*)"', src); gt = re.search(r'snprintf\(gt, sizeof gt, "([^"]*)"', src)
+        self.assertTrue(main and gt, 'the power line\'s format strings in hle_nvn.c')
+        assert main and gt
+        return main.group(1).replace('%llu', '%d'), gt.group(1)
+
+    def line(self, frame: int, busy: float, system: float | None = None, thermal: int = 0) -> str:
+        main, gt = self.fmt()
+        return '[dm] [nvn] ' + main % (frame, 1.2, 20.0, 60.0, 120, 80, 7000, 300, busy, gt % system if system is not None else '', thermal, 'none')
+
+    def test_line_format_matches_the_producer(self):
+        for system in (None, 480.5):   # iOS: no system's count; the Mac: the count beside the busy time
+            x = devlog.RX['power'].search(self.line(600, 512.3, system, 2)[len('[dm] '):])
+            self.assertIsNotNone(x)
+            assert x
+            self.assertEqual((x.group(1), x.group(9), x.group(10), x.group(11), x.group(12)), ('600', '512.3', ' busy', None if system is None else '480.5', '2'))
+
+    def test_read_and_shown(self):   # the busy time's median, and the system's count, 0 where the line has none
+        s = read([self.line(f, b) for f, b in ((300, 400.0), (600, 500.0), (900, 600.0))])
+        self.assertEqual((s['power']['gpu_busy_ms_s_p50'], s['power']['gpu_ms_s_p50']), (500.0, 0.0))
+        self.assertIn('GPU 500 ms/s busy (the system\'s count 0; iOS leaves it at 0)', '\n'.join(devlog.render(s, 5)))
+        s = read([self.line(f, b, b - 20) for f, b in ((300, 400.0), (600, 500.0), (900, 600.0))])   # the Mac
+        self.assertEqual((s['power']['gpu_busy_ms_s_p50'], s['power']['gpu_ms_s_p50']), (500.0, 480.0))
+
+    def test_an_older_log(self):   # before the busy time: the line's lone GPU figure is the system's count, and there is no busy time to compare
+        old = '[dm] [nvn] power up to frame %d: CPU energy 1.20 W, 20.0 mJ per frame (60.0 fps); CPU 120%% (100 = one core), 80%% of it on performance cores; wakeups 7000/s (out of platform idle 300); GPU 0.0 ms/s; thermal 1; top yielders: none'
+        a = read([old % f for f in (300, 600, 900)])
+        self.assertEqual((a['power']['gpu_busy_ms_s_p50'], a['power']['gpu_ms_s_p50'], a['power']['thermal_max']), (None, 0.0, 1))
+        self.assertIn('an older log, before the host\'s own busy time', '\n'.join(devlog.render(a, 5)))
+        b = read([self.line(f, 500.0) for f in (300, 600, 900)])
+        rows = {r['label']: r for r in devlog.compare(a, b)['rows']}
+        self.assertEqual((rows['GPU ms/s busy']['a'], rows['GPU ms/s busy']['b']), (None, 500.0))   # no better or worse from nothing
+        self.assertEqual(rows['GPU ms/s, the system\'s count']['change'], '')   # 0 against 0: the system's count of an iPhone, before and after
 
 
 class LedgerFields(unittest.TestCase):   # the memory line's graphics ledger and guest charged (after GPU allocated, which counts the guest's pools twice): read, shown first, compared lower-better

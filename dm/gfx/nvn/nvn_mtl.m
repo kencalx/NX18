@@ -37,6 +37,7 @@
 #include "nvn_timestamp.h"
 #include "nvn_pso_guard.h"   // the crash guard of the pipeline archive bundled with the app (pso_bundle_open)
 #include "nvn_upscale_pick.h"   // the in-game menu's Upscaling (fx_mode)
+#include "nvn_gpu_diag.h"   // the GPU busy time of the Metal 4 queue's command buffers, overlaps merged (g_gpu_busy, gpu_busy_note)
 #include "msl_image.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
@@ -124,6 +125,16 @@ static NSMutableArray *g_l3_gpu_leaks;
 static int g_nvn_deswz_gpu;
 static id<MTL4CommandQueue> g_q4;
 static dispatch_queue_t g_feedback_q;
+// The GPU's busy time, for the power line's GPU ms/s (hle_nvn.c power_line): every command buffer committed to the Metal 4 queue adds its GPU start-to-end interval, overlaps
+// counted once (nvn_gpu_diag.h gd_busy_add). iOS leaves task_power_info's gpu_energy.task_gpu_utilisation at 0 for an app, so before this every iPhone power line read
+// 'GPU 0.0 ms/s'. Added to by the feedback handlers alone, which all run on g_feedback_q, a serial queue: the one writer gd_busy needs. The submit thread does nothing more for
+// it, but for giving the indirect-count wait's command buffer, which had no handler, one (mdi_wait). Counted: the game's submissions and their segments, the indirect-count waits (mdi_wait), upload batches, one-off command buffers (readbacks, screenshots, drains), the
+// display presents and offscreen presents. Not counted: the present snapshot copy (one texture copy a frame while present snapshots are on, DM_PRESENT_SNAP or Frame buffering, committed with no handler),
+// and the iOS render server's own GPU work (UIKit over the layer), which is another process's. A command buffer's interval includes its waits at queue barriers, so this is an
+// upper bound of the GPU's work while it ran; the timing line's GPU (mtl_gpu_ms) is another measure, per frame, of the game's command buffers alone and summed, not merged
+static gd_busy g_gpu_busy;
+static inline void gpu_busy_note(double g0, double g1) { if (g0 > 0 && g1 > g0) gd_busy_add(&g_gpu_busy, (uint64_t)(g0 * 1e9), (uint64_t)(g1 * 1e9)); }   // seconds on the CACurrentMediaTime base; g_feedback_q only
+uint64_t mtl_gpu_busy_ns(void) { return gd_busy_ns(&g_gpu_busy); }   // the Metal 4 queue's GPU busy time so far, in ns (hle_nvn.c power_line, any thread)
 static _Atomic uint32_t g_present_qos;
 #define ALLOC_MAX 8
 static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX]; static int g_alloc_n, g_alloc_cur;   // Command allocator pool of the main submission: at start pick one the GPU has finished with, create a new one if there is none (wait only at the cap)
@@ -1500,6 +1511,7 @@ static void once_commit(NvOnce *o, void (^done)(int ok)) {
     MTL4CommitOptions *opt = [MTL4CommitOptions new];
     [opt addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         (void)args;   // kept until the GPU is done with it
+        gpu_busy_note(f.GPUStartTime, f.GPUEndTime);
         if (f.error) { MLOG("[RED] one-off command buffer (readback / screenshot / diagnostics) execution error: %s", f.error.description.UTF8String); res_top_once(f.error); gpu_lost_check(f.error, "one-off command buffer"); }
         // The residency set holds what it removed until its next commit, and a readback buffer must be gone once the readback returns (a guest thread's pool may never drain: t_readback)
         @autoreleasepool { if (temp.count) { for (id r in temp) res_remove(r); [temp removeAllObjects]; res_commit(); } }
@@ -2591,7 +2603,7 @@ uint64_t mtl_sub_commit(void) {
     pthread_mutex_unlock(&g_post_mu);
     int lost_test = gpu_lost_test();
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
-        gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime);
+        gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime); gpu_busy_note(cb.GPUStartTime, cb.GPUEndTime);
         if (ws_on()) ws_fb(fence, cb.GPUEndTime);
         uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); res_top_once(cb.error); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String); }
@@ -3345,6 +3357,7 @@ static void up_flush(void) {
         }
         double d = f.GPUEndTime - f.GPUStartTime;
         if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
+        gpu_busy_note(f.GPUStartTime, f.GPUEndTime);
         @autoreleasepool {
             for (id<MTLResource> obj in staging) res_remove(obj);
             [staging removeAllObjects];
@@ -14070,7 +14083,11 @@ static void mdi_wait(void) {
     // other commit, whole or segment (mtl_sub_commit, sub_cut, lp_finish; the block comment above gmem_slot_note). It comes before res_commit because gmem_map may res_add a new table
     up_flush(); gmem_commit_patch(); res_commit();
     [g_cb endCommandBuffer];
-    rec_commit(g_cb, nil); g_cbgen++;
+    // Its feedback handler only adds the command buffer's GPU interval to the busy time (the power line's GPU ms/s): this command buffer holds the game's work up to the
+    // draw, which would otherwise be missing from it. The thread waits below until the GPU has run it, so the options object costs nothing that wait does not cover
+    MTL4CommitOptions *o = [MTL4CommitOptions new];
+    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { gpu_busy_note(f.GPUStartTime, f.GPUEndTime); }];
+    rec_commit(g_cb, o); g_cbgen++;
     if (!g_mdi_ev) g_mdi_ev = [g_dev newSharedEvent];
     rec_signal(g_mdi_ev, ++g_mdi_v); rec_drain();
     uint64_t w0 = ws_t0(); int ok = [g_mdi_ev waitUntilSignaledValue:g_mdi_v timeoutMS:10000]; if (ws_on()) ws_put(WS_MDI, w0, 1);
@@ -15714,7 +15731,7 @@ static void sub_cut(void) {
     atomic_fetch_add(&g_seg_inflight, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
         atomic_fetch_sub(&g_seg_inflight, 1);
-        gpu_tag_done(f, cb.GPUStartTime, cb.GPUEndTime);
+        gpu_tag_done(f, cb.GPUStartTime, cb.GPUEndTime); gpu_busy_note(cb.GPUStartTime, cb.GPUEndTime);
         if (sc) { if (k < SEG_CLK_N) { atomic_store(&sc->t[k][0], gpu_s_guest_ns(cb.GPUStartTime)); atomic_store(&sc->t[k][1], gpu_s_guest_ns(cb.GPUEndTime)); } seg_clk_put(sc); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("[RED] segment command buffer execution error: %s", cb.error.description.UTF8String); res_top_once(cb.error); }
         char where[64]; snprintf(where, sizeof where, "fence %llu, segment %u", (unsigned long long)cbs_fence, k); cbs_feedback(cbs, cb.error, where);
@@ -17118,6 +17135,7 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
         (void)al; (void)cb; (void)raw; (void)fx.sc; (void)aa_raw; (void)aa_at;   // keep the Metal 4 commands, source view, scaler and edge smoothing's state alive too
         res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out); res_remove(aa_tex); res_remove(aa_work); res_remove(aa_ctl);
         if (aa_ctl && !f.error) aa_note(aa_ctl);
+        gpu_busy_note(f.GPUStartTime, f.GPUEndTime);
         if (f.error) { MLOG("[RED] offscreen present: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "offscreen present"); }
         done(f.error ? PRESENT_FAILED : kind);
     }];
@@ -17334,6 +17352,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     id<MTLBuffer> aa_ctl = kind & PRESENT_AA ? g_aa_present.ctl : nil;   // its counts, read when this present completes (a later present may have run by then: a log line's figures only)
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        gpu_busy_note(f.GPUStartTime, f.GPUEndTime);
         if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
         else if (aa_ctl) aa_note(aa_ctl);
         pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);

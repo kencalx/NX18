@@ -144,6 +144,17 @@ t_pso_guard_asan: t_pso_guard.c ../nvn/nvn_pso_guard.h
 .PHONY: pso-guard
 pso-guard: t_pso_guard t_pso_guard_tsan t_pso_guard_asan
 	./t_pso_guard && ./t_pso_guard_tsan && ./t_pso_guard_asan
+# The GPU diagnostics' plain-C core (../nvn/nvn_gpu_diag.h): the power line's GPU busy time, the union of the Metal 4 command buffers' GPU intervals. Plain C, also under
+# ThreadSanitizer (the power line's thread reading the total while the feedback queue adds to it) and AddressSanitizer / UBSan (make gpu-diag; `make run` runs the plain one)
+t_gpu_diag: t_gpu_diag.c ../nvn/nvn_gpu_diag.h
+	clang -std=c11 -O1 -g -Wall -Wextra -pthread -o $@ t_gpu_diag.c
+t_gpu_diag_tsan: t_gpu_diag.c ../nvn/nvn_gpu_diag.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=thread -o $@ t_gpu_diag.c
+t_gpu_diag_asan: t_gpu_diag.c ../nvn/nvn_gpu_diag.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=address,undefined -o $@ t_gpu_diag.c
+.PHONY: gpu-diag
+gpu-diag: t_gpu_diag t_gpu_diag_tsan t_gpu_diag_asan
+	./t_gpu_diag && ./t_gpu_diag_tsan && ./t_gpu_diag_asan
 .PHONY: check_t_perf_order
 check_t_perf_order: t_perf_order
 	MTL_DEBUG_LAYER=1 ./t_perf_order

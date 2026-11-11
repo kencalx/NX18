@@ -13,7 +13,7 @@ What it reads (docs/development.md, Reading a device log):
   pipelines          pipeline prepare and prebuild (read by scripts/regress.py's read_log, as in its Mac runs); pipeline archive … files, MB; bases written; bases compiled while
                      playing ([nvn] pipelines up to frame); a Vulkan game's [vk] pipelines lines, an OpenGL game's [gl] pipeline builds
   frames, power      [nvn] timing, on-screen and power up to frame N (one each per 300 frames): frame-time percentiles, dropped frames, frame rate, CPU watts, mJ per frame,
-                     wakeups, GPU ms/s, thermal state; a window that had frames made with the in-game menu open or out of focus says how many (in-game menu open N frames, not in
+                     wakeups, GPU ms/s (busy: the host's command buffers, overlaps merged; and the system's count, which iOS leaves at 0), thermal state; a window that had frames made with the in-game menu open or out of focus says how many (in-game menu open N frames, not in
                      focus M frames): those frames, and the dropped frames of those windows, are given apart, and the dropped rate again without those windows
   memory             [nvn-mtl] memory up to frame N and the on-screen lines' footprint; [gl] memory at frame N; [vk] frame N … buffer memory: first, last, least, most, and the
                      plateaus it stays on between the steps an area load makes (a run of samples within a tolerance of their median), with the slope inside them per 10 min
@@ -79,7 +79,7 @@ RX = {k: re.compile(v) for k, v in {
     'timing': r'^\[nvn\] timing up to frame (\d+): frame time p50 ([\d.]+) / p95 ([\d.]+) / max ([\d.]+) ms \((\d+) frames\);(?:.*? GPU p50 ([\d.]+) / p95 ([\d.]+))?',
     'onscreen': r'^\[nvn\] on-screen up to frame (\d+): (\d+) frames, dropped (\d+) \(discarded (\d+)\), p99 ([\d.]+) ms; footprint (-?\d+) MiB; brightness (-?[\d.]+); thermal (-?\d+)',
     'power': r'^\[nvn\] power up to frame (\d+): CPU energy ([\d.]+) W, ([\d.]+) mJ per frame \(([\d.]+) fps\); CPU (\d+)% \(100 = one core\), (\d+)% of it on performance cores; '
-             r'wakeups (\d+)/s \(out of platform idle (\d+)\); GPU ([\d.]+) ms/s[^;]*; thermal (-?\d+)',
+             r'wakeups (\d+)/s \(out of platform idle (\d+)\); GPU ([\d.]+) ms/s( busy)?(?: \([^)]*\))?(?:, ([\d.]+) ms/s by the system\'s count)?[^;]*; thermal (-?\d+)',   # ' busy (…)' and the system's count since the host's own GPU busy time
     'psoline': r'^\[nvn\] pipelines up to frame (\d+): .*?bases compiled (\d+) / ([\d.]+) ms',
     'memory': r'^\[nvn-mtl\] memory up to frame (\d+): resident (\d+) MB, GPU allocated (\d+) MB, (?:graphics ledger (\d+) MB, (?:guest charged (\d+) MB, )?)?.*?shared textures (\d+) \(.*headroom to the system memory limit (?:(\d+) MB|none)',   # none: the Mac; the graphics ledger since the memory audit, guest charged only with DM_MEM_GUEST=1
     'glmem': r'^\[gl\] memory at frame (\d+): footprint ([\d.]+) MB, Metal allocated ([\d.]+) MB; (\d+) textures',
@@ -401,13 +401,15 @@ def read(text: str, top: int = 5) -> Rec:
         w = col('power', 2)
         out['power'] = {'windows': len(power), 'watts_p50': med(w), 'watts_mean': round(sum(a * d for a, d in zip(w, dur)) / sum(dur), 2) if sum(dur) else None,
                         'mj_per_frame_p50': med(col('power', 3)), 'cpu_pct_p50': med(col('power', 5)), 'pcore_pct_p50': med(col('power', 6)), 'wakeups_p50': med(col('power', 7)),
-                        'gpu_ms_s_p50': med(col('power', 9)), 'thermal_max': max(int(m.group(10)) for _, m, _ in g['power'])}
+                        'gpu_busy_ms_s_p50': med([float(m.group(9)) for _, m, _ in g['power'] if m.group(10)]),
+                        'gpu_ms_s_p50': med([float(m.group(11) or 0) if m.group(10) else float(m.group(9)) for _, m, _ in g['power']]),
+                        'thermal_max': max(int(m.group(12)) for _, m, _ in g['power'])}
     fs = one.get('front_start')
     tl: list[Rec] = [{'t_s': 0.0, 'what': f'thermal state {fs.group(1)}, Low Power Mode {fs.group(2)}'}] if fs else []
     if not g['front_change']:   # a log without the front end's change lines (the Mac, an older app): the thermal state as the windows saw it
         th0 = int(fs.group(1)) if fs else 0
         for _, m, _ in g['onscreen'] or g['power']:
-            th = int(m.group(8) if g['onscreen'] else m.group(10))
+            th = int(m.group(8) if g['onscreen'] else m.group(12))
             if th != th0: tl.append({'t_s': clock.at(int(m.group(1))), 'what': f'thermal state {th} (a window\'s)'}); th0 = th
     tl += [{'t_s': e['t'], 'what': e['what']} for e in events if e['kind'] in ('power', 'cap')]
     out['timeline'] = sorted(tl, key=lambda x: x['t_s'])
@@ -595,7 +597,10 @@ def render(s: Rec, top: int) -> list[str]:
     else: row('frames', 'no on-screen or timing lines (they come from NVN\'s present: a Vulkan or OpenGL game has none)')
     pw = s['power']
     if pw: row('power', f"CPU {g3(pw['watts_p50'])} W (median; {g3(pw['watts_mean'])} W over the run), {g3(pw['mj_per_frame_p50'])} mJ per frame, CPU {g3(pw['cpu_pct_p50'])}% of a core "
-                        f"({g3(pw['pcore_pct_p50'])}% on performance cores), wakeups {g3(pw['wakeups_p50'])}/s, GPU {g3(pw['gpu_ms_s_p50'])} ms/s; thermal state at most {pw['thermal_max']}")
+                        f"({g3(pw['pcore_pct_p50'])}% on performance cores), wakeups {g3(pw['wakeups_p50'])}/s, "
+                        + (f"GPU {g3(pw['gpu_busy_ms_s_p50'])} ms/s busy (the system's count {g3(pw['gpu_ms_s_p50'])}; iOS leaves it at 0)" if pw.get('gpu_busy_ms_s_p50') is not None
+                           else f"GPU {g3(pw['gpu_ms_s_p50'])} ms/s by the system's count (iOS leaves it at 0; an older log, before the host's own busy time)")
+                        + f"; thermal state at most {pw['thermal_max']}")
     row('heat', *(at_times([{'t_s': x['t_s'], 'what': x['what']} for x in s['timeline']], 3 * top) or ['no thermal or Low Power Mode lines']))
     mm = s['memory'] or {}
     gpu_label = 'GPU allocated (counts the guest\'s pools again)' if 'ledger_mb' in mm or 'guest_charged_mb' in mm else 'GPU allocated'   # the ledger and guest charged first, where the log has them
@@ -661,7 +666,8 @@ METRICS = (('commit', 'build.commit', 0), ('shader chain', 'build.chain', 0), ('
            ('dropped (%)', 'frames.dropped_pct', -1), ('dropped, menu / focus windows out (%)', 'frames.dropped_clean_pct', -1), ('frames per second', 'frames.fps', 1),
            ('GPU p50 (ms)', 'frames.gpu_p50_ms', -1), ('frames with the in-game menu open', 'frames.menu_frames', 0),
            ('CPU W (median)', 'power.watts_p50', -1), ('CPU W (over the run)', 'power.watts_mean', -1), ('mJ per frame', 'power.mj_per_frame_p50', -1), ('CPU % of a core', 'power.cpu_pct_p50', -1),
-           ('on performance cores (%)', 'power.pcore_pct_p50', 0), ('wakeups per second', 'power.wakeups_p50', -1), ('GPU ms/s', 'power.gpu_ms_s_p50', -1), ('thermal state at most', 'power.thermal_max', -1),
+           ('on performance cores (%)', 'power.pcore_pct_p50', 0), ('wakeups per second', 'power.wakeups_p50', -1), ('GPU ms/s busy', 'power.gpu_busy_ms_s_p50', -1),
+           ('GPU ms/s, the system\'s count', 'power.gpu_ms_s_p50', -1), ('thermal state at most', 'power.thermal_max', -1),
            ('footprint, last (MB)', 'memory.footprint_mb.last', 0), ('footprint, most (MB)', 'memory.footprint_mb.max', 0), ('footprint plateaus', 'memory.footprint_mb.plateaus', 0),
            ('footprint drift / 10 min (MB)', 'memory.footprint_mb.drift_per_10min', -1),   # within the plateaus: the steps of area loads are not a leak
            ('graphics ledger, last (MB)', 'memory.ledger_mb.last', -1), ('graphics ledger, most (MB)', 'memory.ledger_mb.max', -1),   # newer logs: the memory to compare (GPU allocated counts the guest twice)

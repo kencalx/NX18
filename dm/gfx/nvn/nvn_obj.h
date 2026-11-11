@@ -288,6 +288,7 @@ void mtl_set_tex_pool_n(int n);                            // Texture descriptor
 void mtl_set_frame(uint64_t f);
 void mtl_ub_present(double iv_ms);   // Same-process alternating measurement (DM_NVN_UB): the present thread reports the actual present interval every frame
 double mtl_gpu_ms(uint64_t f);
+uint64_t mtl_gpu_busy_ns(void);   // The Metal 4 queue's GPU busy time since the start, in ns: every command buffer's GPU start-to-end interval, overlaps counted once (the power line's GPU ms/s; nvn_gpu_diag.h)
 void mtl_ab_gpu(uint64_t f, double gpu_ms, double frame_ms);   // DM_AB phases (nvn_mtl.m)
 void mtl_sub_index(const uint64_t *h, int n);   // Start of submission: build the store lookahead index in replay order (nvn_mtl.m)
 void xv_test_counts(int *dc, int *viol);
