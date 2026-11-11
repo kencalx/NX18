@@ -1,6 +1,6 @@
 // The plain-C part of the NVN layer's GPU diagnostics (../nvn/nvn_gpu_diag.h), on any machine: the GPU busy time the power line prints as 'GPU <x> ms/s busy', the union of
 // the Metal 4 command buffers' GPU intervals (overlaps, gaps, one interval inside another, no start time, a late report: the documented undercount, never a double count), the
-// figure never passing the wall clock the intervals span, and a reader on another thread taking the total while the one writer adds to it (make t_gpu_diag_tsan: no race, and the
+// figure never passing the wall clock the intervals span, a bad end time or a minute-long interval left out by the feedback handlers' check, and a reader on another thread taking the total while the one writer adds to it (make t_gpu_diag_tsan: no race, and the
 // total it reads never goes down). nvn_mtl.m's use of it needs a GPU: its feedback handlers on the Metal 4 queue (gpu_busy_note), hle_nvn.c power_line's line
 #include "../nvn/nvn_gpu_diag.h"
 #include <pthread.h>
@@ -45,6 +45,23 @@ static void window(void) {
     EXPECT("window: overlapping pieces over 1.004 s count 1.004 s", 1004 * ms, gd_busy_ns(&c));
 }
 
+// The feedback handlers' check (gd_busy_add_checked, nvn_mtl.m gpu_busy_note): one bad GPU end time far in the future, from a command buffer that failed or was lost, would
+// move the last end forward and leave every later interval counting 0 for the rest of the run ('GPU 0.0 ms/s busy' again). It is left out, as is an interval longer than a
+// minute, and the intervals after it still count; real ones, a report a little after its end and one ending within the slack of the report's clock, count as before
+static void checked(void) {
+    gd_busy b = {0}; const uint64_t ms = 1000000, s = 1000 * ms, now = 5000 * s;   // the report's clock: a device up for 5000 s
+    EXPECT("checked: a real interval counts", 1, gd_busy_add_checked(&b, now - 20 * ms, now - 10 * ms, now));
+    EXPECT("checked: its length", 10 * ms, gd_busy_ns(&b));
+    EXPECT("checked: an end an hour after the report is left out", 0, gd_busy_add_checked(&b, now - 5 * ms, now + 3600 * s, now));
+    EXPECT("checked: and does not move the last end", now - 10 * ms, b.end);
+    EXPECT("checked: the next real interval still counts", 1, gd_busy_add_checked(&b, now + 1 * ms, now + 5 * ms, now + 6 * ms));
+    EXPECT("checked: busy after it", 14 * ms, gd_busy_ns(&b));
+    EXPECT("checked: an interval of two minutes is left out", 0, gd_busy_add_checked(&b, now - 120 * s, now + 7 * ms, now + 8 * ms));
+    EXPECT("checked: an end within the slack of the report's clock counts", 1, gd_busy_add_checked(&b, now + 10 * ms, now + 20 * ms, now + 15 * ms));
+    EXPECT("checked: no start time is left out", 0, gd_busy_add_checked(&b, 0, now, now));
+    EXPECT("checked: busy at the end", 24 * ms, gd_busy_ns(&b));
+}
+
 // The one writer (the feedback queue) adds back-to-back intervals while a reader (the power line's thread) takes the total: under ThreadSanitizer no race is reported, the
 // total read never goes down, and the last one is exactly what was added
 static gd_busy g_race; static _Atomic int g_stop;
@@ -66,7 +83,7 @@ static void race(void) {
 }
 
 int main(void) {
-    busy(); window(); race();
+    busy(); window(); checked(); race();
     printf("t_gpu_diag: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 }

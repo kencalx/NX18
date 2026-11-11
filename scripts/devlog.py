@@ -596,10 +596,11 @@ def render(s: Rec, top: int) -> list[str]:
             'worst windows: ' + '; '.join(f"{w['t_s']:.0f} s {w['dropped']} dropped (p99 {w['p99_ms']:g} ms{', in-game menu or out of focus' if w['front_end'] else ''})" for w in f['worst']) if f['worst'] else '')
     else: row('frames', 'no on-screen or timing lines (they come from NVN\'s present: a Vulkan or OpenGL game has none)')
     pw = s['power']
+    ios0 = '; iOS leaves it at 0' if pw and not pw['gpu_ms_s_p50'] else ''   # named only where the system's count is 0: the Mac fills it
     if pw: row('power', f"CPU {g3(pw['watts_p50'])} W (median; {g3(pw['watts_mean'])} W over the run), {g3(pw['mj_per_frame_p50'])} mJ per frame, CPU {g3(pw['cpu_pct_p50'])}% of a core "
                         f"({g3(pw['pcore_pct_p50'])}% on performance cores), wakeups {g3(pw['wakeups_p50'])}/s, "
-                        + (f"GPU {g3(pw['gpu_busy_ms_s_p50'])} ms/s busy (the system's count {g3(pw['gpu_ms_s_p50'])}; iOS leaves it at 0)" if pw.get('gpu_busy_ms_s_p50') is not None
-                           else f"GPU {g3(pw['gpu_ms_s_p50'])} ms/s by the system's count (iOS leaves it at 0; an older log, before the host's own busy time)")
+                        + (f"GPU {g3(pw['gpu_busy_ms_s_p50'])} ms/s busy (the system's count {g3(pw['gpu_ms_s_p50'])}{ios0})" if pw.get('gpu_busy_ms_s_p50') is not None
+                           else f"GPU {g3(pw['gpu_ms_s_p50'])} ms/s by the system's count ({ios0[2:] + '; ' if ios0 else ''}an older log, before the host's own busy time)")
                         + f"; thermal state at most {pw['thermal_max']}")
     row('heat', *(at_times([{'t_s': x['t_s'], 'what': x['what']} for x in s['timeline']], 3 * top) or ['no thermal or Low Power Mode lines']))
     mm = s['memory'] or {}

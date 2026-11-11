@@ -128,12 +128,15 @@ static dispatch_queue_t g_feedback_q;
 // The GPU's busy time, for the power line's GPU ms/s (hle_nvn.c power_line): every command buffer committed to the Metal 4 queue adds its GPU start-to-end interval, overlaps
 // counted once (nvn_gpu_diag.h gd_busy_add). iOS leaves task_power_info's gpu_energy.task_gpu_utilisation at 0 for an app, so before this every iPhone power line read
 // 'GPU 0.0 ms/s'. Added to by the feedback handlers alone, which all run on g_feedback_q, a serial queue: the one writer gd_busy needs. The submit thread does nothing more for
-// it, but for giving the indirect-count wait's command buffer, which had no handler, one (mdi_wait). Counted: the game's submissions and their segments, the indirect-count waits (mdi_wait), upload batches, one-off command buffers (readbacks, screenshots, drains), the
-// display presents and offscreen presents. Not counted: the present snapshot copy (one texture copy a frame while present snapshots are on, DM_PRESENT_SNAP or Frame buffering, committed with no handler),
+// it, but for giving the two command buffers of the game's work that had no handler one: the indirect-count wait's (mdi_wait) and the load-skip probe's (lp_finish, only
+// with DM_NVN_LOADPROBE). Counted: the game's submissions and their segments, the indirect-count waits (mdi_wait), the load-skip probe's commit of the open command buffer
+// (lp_finish), upload batches, one-off command buffers (readbacks, screenshots, drains), the display presents and offscreen presents. Not counted: the present snapshot copy (one texture copy a frame while present snapshots are on, DM_PRESENT_SNAP or Frame buffering, committed with no handler),
 // and the iOS render server's own GPU work (UIKit over the layer), which is another process's. A command buffer's interval includes its waits at queue barriers, so this is an
 // upper bound of the GPU's work while it ran; the timing line's GPU (mtl_gpu_ms) is another measure, per frame, of the game's command buffers alone and summed, not merged
 static gd_busy g_gpu_busy;
-static inline void gpu_busy_note(double g0, double g1) { if (g0 > 0 && g1 > g0) gd_busy_add(&g_gpu_busy, (uint64_t)(g0 * 1e9), (uint64_t)(g1 * 1e9)); }   // seconds on the CACurrentMediaTime base; g_feedback_q only
+// Seconds on the CACurrentMediaTime base; g_feedback_q only. An interval ending after the handler runs (beyond a second) or longer than a minute is a bad time, not GPU work, and
+// is left out (gd_busy_add_checked): counted, its end would hide every later interval for the rest of the run
+static inline void gpu_busy_note(double g0, double g1) { if (g0 > 0 && g1 > g0) gd_busy_add_checked(&g_gpu_busy, (uint64_t)(g0 * 1e9), (uint64_t)(g1 * 1e9), (uint64_t)(CACurrentMediaTime() * 1e9)); }
 uint64_t mtl_gpu_busy_ns(void) { return gd_busy_ns(&g_gpu_busy); }   // the Metal 4 queue's GPU busy time so far, in ns (hle_nvn.c power_line, any thread)
 static _Atomic uint32_t g_present_qos;
 #define ALLOC_MAX 8
@@ -12351,7 +12354,11 @@ static void lp_finish(void) {
         if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
         up_flush(); gmem_commit_patch(); res_commit();   // as sub_cut: the pool table words the pass encoded follow the pools before the GPU starts it
         [g_cb endCommandBuffer];
-        rec_commit(g_cb, nil);   // once_commit publishes it with the probe's command buffer behind it
+        // Its feedback handler only adds the command buffer's GPU interval to the busy time (the power line's GPU ms/s), as mdi_wait's: it holds the game's work up to the
+        // probed pass, which would otherwise be missing from it. Only with DM_NVN_LOADPROBE; nothing waits on the handler
+        MTL4CommitOptions *o = [MTL4CommitOptions new];
+        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { gpu_busy_note(f.GPUStartTime, f.GPUEndTime); }];
+        rec_commit(g_cb, o);   // once_commit publishes it with the probe's command buffer behind it
         g_cb = rec_cb_new();
         [g_cb beginCommandBufferWithAllocator:g_alloc4[g_alloc_cur]];
     }

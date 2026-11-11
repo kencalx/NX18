@@ -309,6 +309,9 @@ class PowerGpu(unittest.TestCase):   # the power line's GPU: the host's own busy
         self.assertIn('GPU 500 ms/s busy (the system\'s count 0; iOS leaves it at 0)', '\n'.join(devlog.render(s, 5)))
         s = read([self.line(f, b, b - 20) for f, b in ((300, 400.0), (600, 500.0), (900, 600.0))])   # the Mac
         self.assertEqual((s['power']['gpu_busy_ms_s_p50'], s['power']['gpu_ms_s_p50']), (500.0, 480.0))
+        shown = '\n'.join(devlog.render(s, 5))   # the Mac's count is not 0: no 'iOS leaves it at 0' beside it
+        self.assertIn('GPU 500 ms/s busy (the system\'s count 480)', shown)
+        self.assertNotIn('iOS leaves it at 0', shown)
 
     def test_an_older_log(self):   # before the busy time: the line's lone GPU figure is the system's count, and there is no busy time to compare
         old = '[dm] [nvn] power up to frame %d: CPU energy 1.20 W, 20.0 mJ per frame (60.0 fps); CPU 120%% (100 = one core), 80%% of it on performance cores; wakeups 7000/s (out of platform idle 300); GPU 0.0 ms/s; thermal 1; top yielders: none'

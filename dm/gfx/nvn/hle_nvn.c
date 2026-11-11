@@ -1974,7 +1974,8 @@ static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y
 // GPU: the host's own count first, how long per second the Metal 4 queue's command buffers (the game's submissions and segments, uploads, presents, one-off command buffers)
 // kept the GPU busy, their GPU start-to-end intervals with overlaps counted once (nvn_mtl.m mtl_gpu_busy_ns). The line used to give only task_power_info's
 // gpu_energy.task_gpu_utilisation, which iOS leaves at 0 for an app: 'GPU 0.0 ms/s' in every window of the iPhone 18 Pro Max's logs (13 Sentinels, Luigi's Mansion 3), so a
-// GPU-bound window could not be told from an idle one. The system's count follows only where it moved in the window (the Mac fills it). The timing line's GPU is another
+// GPU-bound window could not be told from an idle one. The system's count follows only where it moved in the window (the Mac fills it). The busy time is about 1000 ms/s at
+// most, not exactly: an interval counts in the window its feedback handler ran in, so a long command buffer across the window's edge can put a window a little over. The timing line's GPU is another
 // measure: per frame, the sum of that frame's game command buffers' intervals (mtl_gpu_ms), without presents and uploads;
 // then render-target traffic per frame (attachment load / store bytes, passes that load and store everything, stores saved by DM_NVN_UNWRITTEN_DC) and guest-thread CPU by Switch priority
 static void power_line(uint64_t frame) {
