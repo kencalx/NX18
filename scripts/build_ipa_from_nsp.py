@@ -27,7 +27,10 @@
 #   and its RomFS images are written straight from it; the name, display version and icon come from the NACP and icon it carries, else as for a dump (its name record is a packer's label, not the game's), and --icon / ICON gives the app an icon when it carries none.
 #   The newest version in the folder is packed. A version the profile registers (with every version in its shader_versions in the folder) is built from the profile as it is; any other
 #   version (the base game alone, another update) from a profile derived from it in <build folder>/profile: the same settings, and the version's own shaders (derive_profile).
-# Every intermediate file is under the build folder, <id>_build/ in the NSP folder unless --work-dir / WORK_DIR names another: nsp/ (NSZ / XCZ files converted to NSP / XCI with nsz -D, kept for the next build; pip install nsz, or an nsz 5.0 or later executable on PATH), extract/ (the extracted game files, kept for the next build unless KEEP_EXTRACTED / --no-keep-extracted), aoc/ (one RomFS image per DLC index), tools/ (nx_extract, and the Mac host for a run-time shader capture), patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/. The finished IPA also goes beside the build folder by default (the NSP folder, without --work-dir).
+# The launcher shows the game's key art, its "About this game" text and its manual: ART / --art gives the art, else (ART_ONLINE, on) the build downloads it, the banner and text from titledb (the whole list, into ~/Library/Caches/nxnative/titledb/,
+#   so the list's host is sent no title ID; the banner itself comes from Nintendo's image server, which so learns the game), else a hero image from SteamGridDB when a key is set (STEAMGRIDDB_KEY, or the environment variable of that name); ART_ONLINE = False / --no-art-online keeps the build offline.
+#   With a key, SteamGridDB's textless hero and the game's logo come as a pair, the logo shown in place of the name (LOGO / --logo gives your own logo). Without art the launcher blurs the app icon. MANUAL / --manual packs a PDF manual of your own. They are settled once per app in <build folder>/art/ (scripts/game_art.py) and reused by the next build without the network.
+# Every intermediate file is under the build folder, <id>_build/ in the NSP folder unless --work-dir / WORK_DIR names another: nsp/ (NSZ / XCZ files converted to NSP / XCI with nsz -D, kept for the next build; pip install nsz, or an nsz 5.0 or later executable on PATH), extract/ (the extracted game files, kept for the next build unless KEEP_EXTRACTED / --no-keep-extracted), aoc/ (one RomFS image per DLC index), tools/ (nx_extract, and the Mac host for a run-time shader capture), patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/, art/ (the launcher's art and "About this game" text, kept for the next build). The finished IPA also goes beside the build folder by default (the NSP folder, without --work-dir).
 # The DLC, the rewrite, the shader split and the iOS (or Vulkan) shaders are reused when all their inputs are as at their last successful run (the game files, the tools, the profile, Xcode and the in-repo spirv-cross: fingerprint() keys beside their output);
 #   the iOS shaders' inputs are the shader package's content and the chain's own tools, so a split that runs again and writes the same package leaves them reused.
 #   The chain version header dm/gfx/nvn/dmsh_chain.h (one version for every game) is written again when a chain change was committed without it (chain_header: it follows from the source alone),
@@ -36,7 +39,7 @@
 # The shader translator is the in-repo dm/gfx/tools/dmsh_xlate_bin (the build whose fingerprints match dmsh_chain.lock; a rebuilt dll has different fingerprints and dmsh_build refuses it; its launcher is universal, so an Intel Mac runs it too). SPIRV-Cross is the in-repo dm/gfx/tools/spirv_cross_bin and must match the lock too.
 # The shader libraries are built through dm/gfx/tools/own_compilers.py. The Metal compiler must match the lock (Xcode 27.2): another one stops an NVN game's build before its shader steps,
 # unless ALLOW_OTHER_METAL / --allow-other-metal. Issue #242 reported corruption with another compiler; the cause is still unconfirmed.
-# Python 3.12+ is required for bounded archive mappings inside images. The Python running this file needs lz4, capstone 5.x, fonttools and zbic (and backports.zstd before Python 3.14); also needed: Xcode, xcodegen, .NET SDK 10, zstd. SPIRV-Cross is the in-repo build. A first run takes 2 (Metroid Dread) to 10 minutes (Breath of the Wild: 5 of them the shader split), longer when shader libraries must be compiled; a repeat run with unchanged inputs takes about 20 s (Metroid Dread), mostly packing the IPA. Key values are never printed.
+# Python 3.12+ is required for bounded archive mappings inside images. The Python running this file needs lz4, capstone 5.x, fonttools and zbic (and backports.zstd before Python 3.14); also needed: Xcode, xcodegen, .NET SDK 10, zstd. SPIRV-Cross is the in-repo build. A first run takes 2 (Metroid Dread) to 10 minutes (Breath of the Wild: 5 of them the shader split), longer when shader libraries must be compiled; a repeat run with unchanged inputs takes about 20 s (Metroid Dread), mostly packing the IPA. Key values (prod.keys, the SteamGridDB key) are never printed.
 # The console shows one line per stage ([k/n] stage, with a bar, done/total, percent, elapsed time and ETA where the work can be counted); the tools' own output goes only to logs/ (PROGRESS / --progress). --progress json writes newline-delimited JSON events to stdout.
 import ast, collections, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, struct, subprocess, sys, tempfile, threading, time, types
 from pathlib import Path
@@ -49,6 +52,7 @@ import shader_cache   # the compile cache as one file, read in place
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pack_dump   # a folder of a game's files instead of NSPs
 import pack_nup   # a game in a NUP container instead of NSPs
+import game_art   # the launcher's key art and "About this game" text (titledb, SteamGridDB)
 
 # ---- Settings ----
 NSP_DIR = ''                            # folder holding the NSPs, or the game's .nup file (empty = ask at run time)
@@ -60,6 +64,12 @@ OUT_IPA = ''                            # output IPA (empty = <the profile's ipa
 APP_NAME = ''                           # app name on the home screen (empty = the game name in the base NSP)
 BUNDLE_ID = ''                          # the app's bundle ID (empty = saved per-game Xcode ID, else org.nxnative.<base game title ID in lowercase>)
 ICON = ''                               # the app icon, a JPEG or PNG of any size (empty = the game's icon from its control data; a dump has none, a NUP may have none: then the NX 18 icon)
+ART = ''                                # the launcher's key art, a JPEG or PNG of any size (empty = found online when ART_ONLINE is on, else none: the launcher blurs the app icon)
+LOGO = ''                               # the launcher's logo shown in place of the game's name, the game's title wordmark as a PNG or WebP with transparency (empty = SteamGridDB's with a key, over its textless hero or your art; none over a titledb banner, which has the logo painted in)
+ART_ONLINE = True                       # find the launcher's art and "About this game" text online: titledb, then SteamGridDB (with a key); False = no network at all (art an earlier online build downloaded into <build folder>/art/ is still used)
+STEAMGRIDDB_KEY = ''                    # a SteamGridDB API key, for art titledb lacks (empty = the STEAMGRIDDB_KEY environment variable, else SteamGridDB is skipped); sent only to SteamGridDB, never printed or saved
+                                        #   by the build. This file is tracked: never commit it with a key in it (the environment variable keeps the key out of the repository)
+MANUAL = ''                             # the game's manual, a PDF of your own, which the launcher opens (empty = none)
 ROMFS = 'bundle'                        # 'bundle' = the game files go into the IPA (or the Xcode app), as always; 'separate' = they stay out (DM_COPY_ROMFS=NO): the IPA is small, and its rebuilds do not pack or send the RomFS again.
                                         #   Copy it to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app checks that the image is the one it was built for)
 SHADER_FILES = False                    # True = an NVN game's shader library goes into the IPA as its separate files, for install tools that cannot copy a large file (AltServer: 2 GiB; the game files
@@ -138,7 +148,7 @@ class Progress:
     """The console view of the build: one line per stage, "[k/n] stage · step", with a bar, done/total, percent, elapsed time and ETA when the work can be counted, else a spinner and the elapsed time.
     Modes: bar = the line is redrawn in place (a terminal, Spyder's console) and replaced by a ✓ line when the stage ends; lines = a plain line when a stage or step starts, every BEAT seconds and at the end
     (for output piped to a file); off = only each stage's start and end lines. Counters come from set(), or from a poll function that runs in a thread of its own (it may walk a big folder) and returns set()'s arguments.
-    Messages go through say(), which prints them above the live line. json (for a program that shows the build) = one JSON object per stdout line instead: the events stage, step, progress, stage_end, say, shaders_stale and game;
+    Messages go through say(), which prints them above the live line. json (for a program that shows the build) = one JSON object per stdout line instead: the events stage, step, progress, stage_end, say, shaders_stale, game and art;
     a count change goes out at most every JSON_INTERVAL seconds (the ticker sends one held back), any other change at once"""
     SPIN, BLOCKS, POLL, JSON_INTERVAL = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏', ' ▏▎▍▌▋▊▉', 1.0, 0.5
 
@@ -2946,12 +2956,13 @@ def mac_app_name(name):   # the app's file name: the game name with the characte
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
 
-def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None):
+def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None, art=None, about=None, manual=None, logo=None):
     """The last stage of PLATFORM 'mac-app': pack the Mac app (dm/mac/pack_app.py) from what a Mac-only build made: the Mac host and font (mac_host), the packed version's RomFS and rewritten
     modules, the Mac shader libraries (msl: <shader>/cache, whose b-<chain> goes in, or a Vulkan or GL game's <shader>, whose vk / gl goes in), the DLC, the profile's tables (with the shader pairs
     the pipeline prebuild reads), the pipeline archive made offline for this Mac (mac_pso; gpus: --gpu / PSO_GPUS), the launcher settings and an environment file.
     The save and the log go to the player's Library, keyed by the folder's title ID (app); a new app replaces the old one only when it is complete. programs: a game of several programs, the others' files
-    (other_programs), which go in beside the first's as one app. control: the control.nacp that lists the game's languages (languages_control), by default the packed version's"""
+    (other_programs), which go in beside the first's as one app. control: the control.nacp that lists the game's languages (languages_control), by default the packed version's.
+    art, about, manual, logo: the launcher's key art, "About this game" text, manual and the game's logo (launcher_art), each None without one"""
     lib = msl / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl')
     pso = mac_pso(py, repo, work, lib, g, gpus, env, logs) if gfx == 'nvn' and g.table('shader_pairs.tsv').is_file() else None   # a stage of its own, before the app's
     PROG.stage('Mac app', step='starting')
@@ -2963,7 +2974,7 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     split_pairs = work / 'shader/pso_pairs.tsv'   # the split's copy of pso_pairs.tsv, for a profile without the table (as mac_run's DM_PSO_PAIRS)
     for opt, v in (('--version', version), ('--category', g.get('app_category')), ('--marker', g.get('romfs_marker')), ('--aoc', aoc), ('--icon', icon),
                    ('--pso', pso), ('--pso-pairs', split_pairs if gfx == 'nvn' and not g.table('pso_pairs.tsv').is_file() and split_pairs.is_file() else None),
-                   ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings)):
+                   ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings), ('--art', art), ('--logo', logo), ('--about', about), ('--manual', manual)):
         if v: cmd += [opt, v]
     for n, r in (programs or {}).items(): cmd += ['--program', f'{n}\t{r["patched"]}\t{r["romfs"]}\t{r["msl"]}\t{r["tables"]}\t{r["html"]}']
     if (game / 'html').is_dir(): cmd += ['--html', game / 'html']
@@ -3005,6 +3016,12 @@ def parse_args(argv):
                     'no iOS shaders, Xcode project or IPA), keep the extracted files and print the command that runs the game; mac-app = what mac builds, then a self-contained, double-clickable '
                     'Mac app of the game (default: <game name>.app in the NSP folder, -o names another) (default: the PLATFORM setting, ios)')
     ap.add_argument('--icon', help='the app icon, a JPEG or PNG of any size (default: the ICON setting, else the game\'s icon from its control data; a dump has none, a NUP may have none: then the NX 18 icon)')
+    ap.add_argument('--art', help='the launcher\'s key art, a JPEG or PNG of any size (default: the ART setting, else found online: titledb, then SteamGridDB with a key; without one the launcher blurs the app icon)')
+    ap.add_argument('--logo', help='the launcher\'s logo, shown in place of the game\'s name: the game\'s title wordmark, a PNG or WebP with transparency (default: the LOGO setting, else SteamGridDB\'s with a key, '
+                    'over its textless hero or your art; none over a titledb banner, which has the logo painted in)')
+    ap.add_argument('--art-online', action=argparse.BooleanOptionalAction, help='find the launcher\'s art and "About this game" text online: titledb (the whole list, cached in ~/Library/Caches/nxnative/titledb), then SteamGridDB '
+                    'when the STEAMGRIDDB_KEY setting or environment variable holds a key; --no-art-online keeps the build offline, art an earlier online build downloaded into the build folder\'s art/ is still used (default: the ART_ONLINE setting, on)')
+    ap.add_argument('--manual', help='the game\'s manual, a PDF of your own, which the launcher opens (default: the MANUAL setting, else none)')
     ap.add_argument('--mac-sign', help='--platform mac-app: the codesign identity for the app, e.g. "Developer ID Application: <name> (<team>)" (default: the MAC_SIGN setting, else ad-hoc)')
     ap.add_argument('--team-id', help='Apple developer team ID (default: TEAM_ID setting, DM_TEAM_ID environment, or saved Xcode selection)')
     ap.add_argument('--xcode-workspace', help='workspace collecting prepared games (default: NxNative.xcworkspace beside the NSP folder; use with --prepare-xcode)')
@@ -3057,6 +3074,24 @@ def say_game(app, name, version, bundle_id, out, icon):
     out = the IPA or Mac app, None for an Xcode project; icon = the game's image: --icon / ICON, else the extracted icon.jpg; None without one, when the app gets the NX 18 icon), then the message for people"""
     PROG.event('game', title_id=f'{app:016X}', name=name, version=version, bundle_id=bundle_id, out=str(out) if out else None, icon=str(icon) if icon else None)
     say(f'app name: {name}; version: {version}; bundle ID: {bundle_id}' + (f'; app: {out}' if out and out.suffix == '.app' else ''))
+
+
+def launcher_art(app, name, work, given, online, manual, given_logo=None):
+    """The launcher's key art, logo and "About this game" text, once per app (game_art.settle: <build folder>/art/, reused by the next build), and the manual (--manual / MANUAL, checked in main).
+    app: the application's title ID (a multi-program game's program 0, as titledb lists it); given: --art / ART; given_logo: --logo / LOGO; online: ART_ONLINE. The SteamGridDB key (STEAMGRIDDB_KEY, else
+    the environment) goes only to game_art, never into a message, event or the tools' environment. Nothing here stops the build: a failure is a line, and the app goes without the art.
+    Then the event art for a front end (json mode: path, source, url, logo, about, manual; null where there is none). Returns (art, about, manual, logo), each a Path or None"""
+    key = STEAMGRIDDB_KEY or os.environ.get('STEAMGRIDDB_KEY', '')
+    if STEAMGRIDDB_KEY: say('SteamGridDB key: from the STEAMGRIDDB_KEY setting; this file is tracked, so do not commit it with the key (the STEAMGRIDDB_KEY environment variable keeps it out of the repository)')
+    try: r = game_art.settle(app, name, work / 'art', given=given, given_logo=given_logo, online=online, key=key, say=say) or {}
+    except Exception as e:   # game_art reports its own failures; this is the last guard, so the art never stops the build
+        msg = f'{type(e).__name__}: {e}'
+        say(f'launcher art: none ({game_art.scrub(msg, key.strip())}); the launcher blurs the icon'); r = {}
+    art, about, logo = (Path(r[k]) if r.get(k) else None for k in ('art', 'about', 'logo'))
+    if manual: say(f'manual: {manual}')
+    PROG.event('art', path=str(art) if art else None, source=r.get('source') if art else None, url=r.get('url') if art else None, logo=str(logo) if logo else None,
+               about=str(about) if about else None, manual=str(manual) if manual else None)
+    return art, about, manual, logo
 
 
 def say_push_romfs(image, bundle_id):
@@ -3171,6 +3206,16 @@ def main(args=None):
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
     user_icon = Path(os.path.expanduser(args.icon or ICON)).resolve() if args.icon or ICON else None   # checked now, not after the extraction: build_ipa.sh would only log a missing one
     if user_icon and not user_icon.is_file(): raise BuildError(f'no such icon file (--icon / ICON): {user_icon}')
+    user_art = Path(os.path.expanduser(args.art or ART)).resolve() if args.art or ART else None   # the launcher's art and manual, checked now too
+    if user_art and not user_art.is_file(): raise BuildError(f'no such art file (--art / ART): {user_art}')
+    user_logo = Path(os.path.expanduser(args.logo or LOGO)).resolve() if args.logo or LOGO else None
+    if user_logo and not user_logo.is_file(): raise BuildError(f'no such logo file (--logo / LOGO): {user_logo}')
+    manual = Path(os.path.expanduser(args.manual or MANUAL)).resolve() if args.manual or MANUAL else None
+    if manual and not manual.is_file(): raise BuildError(f'no such manual file (--manual / MANUAL): {manual}')
+    if manual:
+        with open(manual, 'rb') as f:
+            if f.read(4) != b'%PDF': raise BuildError(f'the manual (--manual / MANUAL) is not a PDF: {manual}')
+    art_online = ART_ONLINE if args.art_online is None else args.art_online
     sys.path.insert(0, str(repo / 'dm/games')); import game as gamemod   # game profiles
     global pg; import profile_guess as pg   # dm/games: a provisional profile's keys from the game files and from the heap check
     sys.path.insert(0, str(repo / 'dm/tools')); global nacp; import nacp   # the game name in the NSP's control data
@@ -3340,6 +3385,8 @@ def main(args=None):
     icon = game_icon or (NX18_ICON if NX18_ICON.is_file() else None)
     if (not mac or mac_pack) and getattr(args, 'in_programs', None) is None:   # an app is made, once: a program packed with the application's first (in_programs) is part of its app
         say_game(app, app_name, app_version or '1.0', bundle_id, None if prepare_xcode else out_ipa, game_icon)   # the game's own icon (docs/frontends.md): null without one, not the NX 18 stand-in
+        art, about, manual, logo = launcher_art(app - PROGRAM_INDEX, app_name, work, user_art, art_online, manual, user_logo)   # titledb lists the application, program 0
+    else: art = about = manual = logo = None
     # the game language: Horizon gives the game one of the languages its control data lists (the packed version's, which an update may extend), so the one packed must be among them
     control = languages_control(game, base)
     have = nacp.languages(control)
@@ -3402,7 +3449,7 @@ def main(args=None):
         programs = other_programs(args, g)
         if not game_icon: say(no_game_icon_line(nup, dump, icon, "app's icon"))
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
-                (args.gpu or PSO_GPUS).strip(), programs, control)
+                (args.gpu or PSO_GPUS).strip(), programs, control, art=art, about=about, manual=manual, logo=logo)
         cdirs = [(d, b) for d, b in [(packed_cheats, cheat_build)] + [(programs[n].get('cheats'), programs[n].get('build')) for n in sorted(programs)] if d]   # each program's own cheats too, under its builds' IDs
         c = merge_cheats(cdirs, work / MODS_STAGE / 'programs_cheats') if len(cdirs) > 1 else cdirs[0][0] if cdirs else None
         if c: install_cheats(c, Path.home() / 'Library/Application Support/nxnative' / f'{app:016X}' / 'cheats')   # the app's DM_ROOT (dm/mac/launcher.c)
@@ -3444,6 +3491,8 @@ def main(args=None):
     if app_version: ipa_env['DM_APP_VERSION'] = app_version
     if not game_icon: say(no_game_icon_line(nup, dump, icon, 'home-screen icon'))
     if icon: ipa_env['DM_ICON'] = str(icon); say(f'app icon: {icon}')   # app icon (found above)
+    for k, v in (('DM_ART', art), ('DM_LOGO', logo), ('DM_ABOUT', about), ('DM_MANUAL', manual)):   # the launcher's art, logo, "About this game" text and manual (launcher_art): dm/ in the app, once for every program
+        if v: ipa_env[k] = str(v)
     if env_file: ipa_env['DM_ENV_FILE'] = str(Path(os.path.expanduser(env_file)).resolve())
     if packed_cheats: ipa_env['DM_PACKED_CHEATS'] = str(packed_cheats); say(f'cheats packed into the app from the mods folder: {", ".join(p.name for p in sorted(packed_cheats.iterdir()))} (the app copies them into its cheats folder; the in-game menu turns them on)')
     show_fps = SHOW_FPS if args.show_fps is None else args.show_fps

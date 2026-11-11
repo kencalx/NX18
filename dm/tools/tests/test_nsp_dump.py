@@ -1,6 +1,8 @@
 """NSP script with a dump folder (scripts/pack_dump.py): the folder's layout is read and packed into what the script's later steps read, and the script asks for no keys.
 The run stops at the prerequisite check; no game files, keys or Xcode needed."""
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import shutil
 import struct
@@ -165,6 +167,30 @@ class Main(Base):
         (self.dump.parent / 'icon.png').write_bytes(b'png')
         self.run_main('--icon', str(self.dump.parent / 'icon.png'))
         with mock.patch.object(nsp, 'ICON', str(self.dump / 'missing.jpg')), self.assertRaisesRegex(nsp.BuildError, 'no such icon file'): self.run_main()
+
+    def test_art_and_manual_are_checked_before_the_build(self):   # --art / ART, --logo / LOGO and --manual / MANUAL: a wrong path, or a manual that is no PDF, stops at once, not after the extraction
+        def stops(*opts, pattern):
+            with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', ''), \
+                 mock.patch.object(nsp, 'check_prereqs', side_effect=AssertionError('went on')), self.assertRaisesRegex(nsp.BuildError, pattern):
+                nsp.main(nsp.parse_args([str(self.dump), *opts]))
+        stops('--art', str(self.dump / 'missing.png'), pattern=r'no such art file \(--art / ART\)')
+        stops('--logo', str(self.dump / 'missing.webp'), pattern=r'no such logo file \(--logo / LOGO\)')
+        stops('--manual', str(self.dump / 'missing.pdf'), pattern=r'no such manual file \(--manual / MANUAL\)')
+        (self.dump.parent / 'notes.pdf').write_bytes(b'<html>'); stops('--manual', str(self.dump.parent / 'notes.pdf'), pattern='is not a PDF')
+        (self.dump.parent / 'art.png').write_bytes(b'png'); (self.dump.parent / 'logo.png').write_bytes(b'png'); (self.dump.parent / 'manual.pdf').write_bytes(b'%PDF-1.7\n')
+        with mock.patch.object(nsp.game_art, 'settle', side_effect=AssertionError('settled before the build')):
+            self.run_main('--art', str(self.dump.parent / 'art.png'), '--logo', str(self.dump.parent / 'logo.png'), '--manual', str(self.dump.parent / 'manual.pdf'), '--no-art-online')
+        for name, value, pattern in (('ART', 'missing.jpg', 'no such art file'), ('LOGO', 'missing.png', 'no such logo file'), ('MANUAL', 'missing.pdf', 'no such manual file')):
+            with mock.patch.object(nsp, name, str(self.dump / value)), self.assertRaisesRegex(nsp.BuildError, pattern): self.run_main()
+
+    def test_art_options(self):
+        a = nsp.parse_args([str(self.dump)])
+        self.assertEqual((a.art, a.logo, a.art_online, a.manual), (None, None, None, None))   # the settings decide: ART, LOGO, ART_ONLINE (on), MANUAL
+        a = nsp.parse_args([str(self.dump), '--art', 'x.png', '--logo', 'l.webp', '--no-art-online', '--manual', 'm.pdf'])
+        self.assertEqual((a.art, a.logo, a.art_online, a.manual), ('x.png', 'l.webp', False, 'm.pdf'))
+        self.assertIs(nsp.parse_args([str(self.dump), '--art-online']).art_online, True)
+        self.assertEqual((nsp.ART, nsp.LOGO, nsp.ART_ONLINE, nsp.STEAMGRIDDB_KEY, nsp.MANUAL), ('', '', True, '', ''))
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()): nsp.parse_args([str(self.dump), '--steamgriddb-key', 'k'])   # never a command-line option: argv shows in ps
 
     def test_title_id_must_match(self):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, 'which holds'):

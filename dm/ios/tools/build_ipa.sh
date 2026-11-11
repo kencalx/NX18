@@ -15,6 +15,9 @@
 #   DM_METAL_CAPTURE=1 makes a development build that can write GPU frame captures (MetalCaptureEnabled in Info.plist, for the host's DM_GPU_CAPTURE switch);
 #   DM_SHOW_FPS=1 turns the frame-rate counter on (DMShowFPS in Info.plist; DM_SHOW_FPS in the app's Documents/env.txt overrides it on the phone);
 #   DM_LANG=<language code> is the game language (DMLanguage in Info.plist, default en-US; DM_LANG in the app's Documents/env.txt overrides it on the phone);
+#   DM_ART=<image> is the launcher's key art (dm/art.jpg in the app: a JPEG as it is, the NSP script's being at most 1920 a side; a PNG converted with sips, longest side at most 1920), DM_ABOUT=<about.json> its "About this game" text (dm/about.json), DM_MANUAL=<file.pdf> the game's manual (dm/manual.pdf);
+#   DM_LOGO=<image> is the game's logo, which the launcher shows in place of its name (dm/logo.png: a PNG as it is, the NSP script's being at most 1200 a side; a WebP converted with sips to a PNG keeping its alpha, longest side at most 1200);
+#   the NSP script settles them once per app (scripts/game_art.py, <build folder>/art/), so they go in once, not per program; each is optional (without art the launcher blurs the app icon)
 #   both are also the launcher's defaults (dm/launcher.json from dm/games/settings.py; the player's choice there wins over them, Documents/env.txt over the choice);
 #   the IPA name, code modules, RomFS marker and shader tables come from the game profile
 #   PROGRAMS_TSV=<file> (the NSP script, a multi-program application: Super Mario 3D All-Stars): one app holding several programs, one row each, "<index>\t<profile>\t<patched>\t<RomFS>\t<iOS shaders>\t<graphics API>",
@@ -160,6 +163,18 @@ if [ -n "$LD" ] && [ "$LD" != "$DM_LANG" ]; then t "game language: the game has 
 if [ -n "${DM_ENV_FILE:-}" ]; then cp "$DM_ENV_FILE" Gen/dm/env.txt || die "copy DM_ENV_FILE"; t "env: $(grep -v '^#' "$DM_ENV_FILE" | tr '\n' ' ')"; fi
 # Cheats from the NSP script's mods folder (DM_PACKED_CHEATS, dm/tools/game_mods.py): dm/cheats in the bundle, which main.m copies into Documents/cheats at each start when that folder does not have them (a file the player has there is kept)
 if [ -n "${DM_PACKED_CHEATS:-}" ] && [ -d "$DM_PACKED_CHEATS" ]; then mkdir -p Gen/dm/cheats && cp "$DM_PACKED_CHEATS"/*.txt Gen/dm/cheats/ || die "copy DM_PACKED_CHEATS"; t "cheats: $(cd "$DM_PACKED_CHEATS" && ls *.txt | tr '\n' ' ')"; fi
+# The launcher's key art, logo, "About this game" text and manual (DM_ART, DM_LOGO, DM_ABOUT, DM_MANUAL, from the NSP script's <build folder>/art/ and --manual): once per app in Gen/dm, a folder resource, so they reach DmIOS.app/dm/ in the IPA and the Xcode project alike
+# The NSP script's art.jpg is already a JPEG of at most 1920 a side, so a JPEG is copied as it is (no second lossy pass, as pack_app.py does); another image goes through sips. Art is optional: a failure is a line, never the end of the build
+# fit <format> <longest side> <image> <out>: sips to that format, with -Z only when the image is larger than that (or sips cannot tell its size), as sips -Z also enlarges a smaller image (softer, and a bigger file)
+fit() { local n; n=$(sips -g pixelWidth -g pixelHeight "$3" 2> /dev/null | awk '/pixel(Width|Height):/ { if ($2 + 0 > n + 0) n = $2 } END { print n + 0 }')
+  if [ "$n" -eq 0 ] || [ "$n" -gt "$2" ]; then sips -s format "$1" -Z "$2" "$3" --out "$4" > /dev/null; else sips -s format "$1" "$3" --out "$4" > /dev/null; fi; }
+if [ -n "${DM_ART:-}" ] && [ -f "$DM_ART" ]; then case "$(printf %s "$DM_ART" | tr '[:upper:]' '[:lower:]')" in *.jpg|*.jpeg) cp "$DM_ART" Gen/dm/art.jpg;; *) fit jpeg 1920 "$DM_ART" Gen/dm/art.jpg;; esac \
+  && t "launcher art: $DM_ART" || { rm -f Gen/dm/art.jpg; t "[RED] launcher art: cannot pack $DM_ART; the app is built without it (the launcher blurs the icon)"; }; fi
+# The NSP script's logo.png is already a PNG of at most 1200 a side, copied as it is; another image (a WebP) goes through sips to a PNG, which keeps its alpha. Optional too: without it the launcher shows the name
+if [ -n "${DM_LOGO:-}" ] && [ -f "$DM_LOGO" ]; then case "$(printf %s "$DM_LOGO" | tr '[:upper:]' '[:lower:]')" in *.png) cp "$DM_LOGO" Gen/dm/logo.png;; *) fit png 1200 "$DM_LOGO" Gen/dm/logo.png;; esac \
+  && t "launcher logo: $DM_LOGO" || { rm -f Gen/dm/logo.png; t "[RED] launcher logo: cannot pack $DM_LOGO; the app is built without it (the launcher shows the game's name)"; }; fi
+if [ -n "${DM_ABOUT:-}" ] && [ -f "$DM_ABOUT" ]; then cp "$DM_ABOUT" Gen/dm/about.json || die "copy DM_ABOUT"; t "About this game: $DM_ABOUT"; fi
+if [ -n "${DM_MANUAL:-}" ] && [ -f "$DM_MANUAL" ]; then cp "$DM_MANUAL" Gen/dm/manual.pdf || die "copy DM_MANUAL"; t "manual: $DM_MANUAL"; fi
 # The shader libraries go into the archive as DmIOS.app/msl/<folder>, or an NVN game's as the file DmIOS.app/msl/<folder>.img (main.m sets DM_MSL_DIR to msl)
 if [ "$GFXAPI" = vulkan ]; then MSLDIR=vk; elif [ "$GFXAPI" = gl ]; then MSLDIR=gl; else MSLDIR=b-$V; fi
 # Shared-font stand-ins: standard = macOS's Arial Unicode (absent on iOS), Nintendo extension = button icons generated by make_ext_font.py (needs fontTools; FONT_PY names a python that has it)

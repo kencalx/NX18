@@ -86,6 +86,8 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys
 
 Mods: put the game's cheats (`cheats` folders) and a High frame rate or Ultrawide mod (`.ips`, `.pchtxt`, in a folder named for it, such as `60FPS` or `Ultrawide`) in a folder named `mods` inside the game's folder, as Atmosphère, yuzu or Ryujinx lay them out: the cheats are packed into the app and the mod becomes a switch in the launcher ([Mods and patches](docs/playing.md#mods-and-patches)). Other code patches and replacement files (`romfs` folders) are left out.
 
+Launcher art: the screen before the game shows the game's key art, downloaded from titledb, else from SteamGridDB when you set a `STEAMGRIDDB_KEY` environment variable to your SteamGridDB API key. With a key it also shows the game's logo in place of its name, over SteamGridDB's textless art. `--art <image>` gives your own art, `--logo <image>` your own logo (a PNG or WebP with transparency), `--manual <file.pdf>` adds the game's manual, and `--no-art-online` keeps the build off the network ([Launcher art](docs/development.md#launcher-art-about-this-game-and-the-manual)).
+
 The IPA appears in the game's folder. The first build takes 30–60 minutes and needs free disk space of about twice the game's size plus 10 GB; building again is much faster.
 
 To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the game to open from Finder. All options: [The packing script in detail](docs/development.md#the-packing-script-in-detail).

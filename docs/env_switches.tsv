@@ -1,5 +1,6 @@
 name	class	meaning
 DM_AB	diagnostic	`=<frames>` splits the run into phases of that many frames and alternates every switch set to `ab` (on in the odd phases); logs an `[ab]` line per phase with GPU and frame time and attachment traffic
+DM_ABOUT	path	`=<about.json>` gives `build_ipa.sh` the launcher's "About this game" text (`dm/about.json` in the app: name, intro, description, publisher, release date); the NSP script sets it to `<build folder>/art/about.json` when titledb has the game
 DM_ALIAS_SIZE	diagnostic	`=<bytes>` gives the guest an alias region of that size instead of the platform's, which is at least the Switch's 64 GB on the Mac and the profile's `mem_alias` on an iPhone (at least 256 MB, whole host pages; the heap and stacks stay as they are): the profile's value reproduces an iPhone's address space on the Mac, as the NSP script's heap check does; its address region check sets 64 GB (Mac only: an iPhone has no room)
 DM_ALIAS_WINDOWS	diagnostic	`=<MB>` logs every 30 s how much of each window of that size in the alias region is mapped (windows aligned to their size in absolute addresses)
 DM_ALLOW_OTHER_METAL	switch	`1` lets `own_compilers.py` build the shader libraries with a Metal compiler other than the one in `dmsh_chain.lock` (it stops otherwise, GitHub issue #242); the NSP script sets it for `--allow-other-metal`
@@ -7,6 +8,7 @@ DM_AOC_DIR	path	Folder of add-on content: one numbered subfolder per DLC index h
 DM_AOC_OWNED	switch	`0` reports no add-on content even when `DM_AOC_DIR` has some, for runs without the DLC
 DM_APP_DM	path	Set by the iOS app of a game of several programs: the running program's `dm/p<N>` folder, where the settings screen finds its `launcher.json`
 DM_APP_VERSION	switch	Overrides the IPA's version in `build_ipa.sh`; by default it is the packed game's display version from its control data (the update's when one is packed)
+DM_ART	path	`=<image>` gives `build_ipa.sh` the launcher's key art, `dm/art.jpg` in the app (a JPEG copied as it is, a PNG converted with sips, longest side at most 1920; a failure leaves the app without art); the NSP script sets it to `<build folder>/art/art.jpg` (`--art`, else titledb or SteamGridDB); without it the launcher blurs the app icon
 DM_AUDIO	switch	`1` plays audio through Core Audio, `0` uses the silent sink; real output is the default on iOS, the silent sink on the Mac (the Mac launcher sets `1`)
 DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is (16-bit, 48 kHz, channel count as in the OpenAudioOut log), to judge whether a sound played
 DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
@@ -97,8 +99,10 @@ DM_LAUNCHER	switch	`0` skips the iOS settings screen or the Mac settings window 
 DM_LAUNCH_PARAM	path	File whose bytes `oe::TryPopLaunchParameter` returns once; `oe::ExecuteProgram` sets it for the program it starts
 DM_LINK_VTICK	switch	`0` keeps the system's display-link rate on 144 or 165 Hz Mac screens; by default the link counts only the refreshes nearest a steady 1/60 s clock
 DM_LOADHASH	diagnostic	`=1` logs an address-independent SHA-256 per module after loading
+DM_LOGO	path	`=<image>` gives `build_ipa.sh` the game's logo, which the launcher shows in place of its name: `dm/logo.png` in the app (a PNG copied as it is, a WebP converted with sips to a PNG keeping its alpha, longest side at most 1200; a failure leaves the app without one); the NSP script sets it to `<build folder>/art/logo.png` (`--logo`, else SteamGridDB's with a key); without it the launcher shows the name
 DM_LONGFRAME	diagnostic	`0` turns off the long-frame log (on by default), a line for a frame over 20 ms or with GPU time over 16.7 ms that is clearly above recent frames and longer than the hold of the frame step or the game's present interval asked for (a frame held 2 or 3 vsyncs ends with `; hold K × V ms`)
 DM_LOW_POWER_CAP	switch	`0` keeps the frame rate cap in Low Power Mode. By default, Low Power Mode (iOS) holds the frame step at 30 fps, and a 120 fps engine limiter at 60, for the games the thermal cap covers. The cap is lifted 30 s after Low Power Mode is turned off, and the game's speed is unchanged. `DM_THERMAL_CAP=0` turns off both causes
+DM_MANUAL	path	`=<file.pdf>` gives `build_ipa.sh` the game's manual, `dm/manual.pdf` in the app, which the launcher opens; the NSP script sets it for `--manual` / `MANUAL`
 DM_MEASURE_LOCK	path	`=<file>`: `scripts/regress.py`'s default `--lock`, the measuring lock `scripts/bench.py --lock` shares: held only while a game runs, and the harness's shader builds pause while another process holds it
 DM_MEMSTAT	diagnostic	`=<tsv>` writes one line per second of memory accounting: footprint, Metal allocation and resident and charged memory by region class (guest, code, malloc, gpu, …)
 DM_MEMSTAT_DUMP	diagnostic	`=<seconds>`: with `DM_MEMSTAT`, at that second writes every VM region of 1 MiB or more to `<tsv>.regions`

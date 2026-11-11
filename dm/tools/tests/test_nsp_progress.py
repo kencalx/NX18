@@ -102,6 +102,57 @@ class Json(unittest.TestCase):
         self.prog.mode = 'lines'; nsp.say_game(1, 'Zelda', '1.0', 'b', Path('/b/z.ipa'), None)   # the human modes get only the message
         self.assertNotIn('"ev"', self.out.getvalue().splitlines()[-1])
 
+    def art(self, result=None, error=None, manual=None, key='', env_key=None, online=True, given=None, given_logo=None):
+        """launcher_art with game_art.settle stubbed (no network): what settle was asked, the events and the messages"""
+        calls, env = [], {k: v for k, v in nsp.os.environ.items() if k != 'STEAMGRIDDB_KEY'}
+        if env_key is not None: env['STEAMGRIDDB_KEY'] = env_key
+        def settle(title_id, name, art_dir, *, given, online, key, say, given_logo=None):
+            calls.append(dict(title_id=title_id, name=name, art_dir=art_dir, given=given, given_logo=given_logo, online=online, key=key))
+            say('launcher art: from the stub')
+            if error: raise error
+            return result
+        with mock.patch.object(nsp.game_art, 'settle', settle), mock.patch.object(nsp, 'STEAMGRIDDB_KEY', key), mock.patch.dict(nsp.os.environ, env, clear=True):
+            r = nsp.launcher_art(0x0100F2C0115B6000, "Luigi's Mansion 3", Path('/b/w'), given, online, manual, given_logo)
+        return r, calls, self.events() if self.prog.mode == 'json' else []
+
+    def test_art(self):   # the launcher's art: settle once with the application's title ID and the build folder's art/, then the event art (the event game is left as it is)
+        art, about, manual = Path('/b/w/art/art.jpg'), Path('/b/w/art/about.json'), Path('/m/manual.pdf')
+        url = 'https://img-eshop.cdn.nintendo.net/i/banner.jpg'
+        r, calls, es = self.art({'art': art, 'source': 'titledb', 'url': url, 'logo': None, 'about': about}, manual=manual, given=Path('/g/art.png'), online=False)
+        self.assertEqual(r, (art, about, manual, None))
+        self.assertEqual(calls, [dict(title_id=0x0100F2C0115B6000, name="Luigi's Mansion 3", art_dir=Path('/b/w/art'), given=Path('/g/art.png'), given_logo=None, online=False, key='')])
+        self.assertEqual([e['ev'] for e in es], ['say', 'say', 'art'])
+        self.assertEqual(es[1]['msg'].split('] ', 1)[1], f'manual: {manual}')
+        self.assertEqual({k: v for k, v in es[2].items() if k != 't'}, {'ev': 'art', 'path': str(art), 'source': 'titledb', 'url': url, 'logo': None, 'about': str(about), 'manual': str(manual)})
+        self.out.truncate(0); self.out.seek(0)
+        r, _, es = self.art({'art': None, 'source': None, 'url': None, 'logo': None, 'about': None})   # nothing found: the launcher blurs the icon
+        self.assertEqual(r, (None, None, None, None))
+        self.assertEqual({k: v for k, v in es[-1].items() if k != 't'}, {'ev': 'art', 'path': None, 'source': None, 'url': None, 'logo': None, 'about': None, 'manual': None})
+        self.out.truncate(0); self.out.seek(0)   # SteamGridDB's hero and logo, or --logo: the event names logo.png, which the launcher shows in place of the name
+        logo, hero = Path('/b/w/art/logo.png'), 'https://cdn2.steamgriddb.com/hero/x.png'
+        r, calls, es = self.art({'art': art, 'source': 'steamgriddb', 'url': hero, 'logo': logo, 'about': about}, given_logo=Path('/g/logo.webp'))
+        self.assertEqual(r, (art, about, None, logo)); self.assertEqual(calls[0]['given_logo'], Path('/g/logo.webp'))
+        self.assertEqual({k: v for k, v in es[-1].items() if k != 't'}, {'ev': 'art', 'path': str(art), 'source': 'steamgriddb', 'url': hero, 'logo': str(logo), 'about': str(about), 'manual': None})
+        self.prog.mode = 'lines'; n = len(self.out.getvalue().splitlines()); self.art({'art': art, 'source': 'given', 'url': None, 'about': None})   # the human modes get only the messages
+        self.assertFalse(any('"ev"' in ln for ln in self.out.getvalue().splitlines()[n:]))
+
+    def test_art_key(self):   # the SteamGridDB key: the setting, else the environment; it goes to settle and nowhere else
+        _, calls, _ = self.art({'art': None}, key='setting-key-1234', env_key='env-key-5678')
+        self.assertEqual(calls[0]['key'], 'setting-key-1234')
+        self.assertIn('do not commit it with the key', self.out.getvalue(), 'a key typed into the tracked script: a reminder')
+        _, calls, _ = self.art({'art': None}, env_key='env-key-5678')
+        self.assertEqual(calls[0]['key'], 'env-key-5678')
+        _, calls, _ = self.art({'art': None})
+        self.assertEqual(calls[0]['key'], '')
+        self.assertNotIn('5678', self.out.getvalue()); self.assertNotIn('1234', self.out.getvalue())
+
+    def test_art_failure_does_not_stop_the_build(self):   # a failure settle did not catch is a line without the key, and the app goes without art
+        r, _, es = self.art(error=OSError('HTTP 401 for Bearer secret-key-42'), key='secret-key-42', manual=Path('/m/manual.pdf'))
+        self.assertEqual(r, (None, None, Path('/m/manual.pdf'), None))
+        self.assertTrue(any(e['ev'] == 'say' and 'launcher art: none (OSError: HTTP 401 for Bearer <key>)' in e['msg'] for e in es), es)
+        self.assertEqual((es[-1]['ev'], es[-1]['path'], es[-1]['manual']), ('art', None, '/m/manual.pdf'))
+        self.assertNotIn('secret-key-42', self.out.getvalue())
+
 class ShadersStale(unittest.TestCase):
     """build_shaders tells a front end (event shaders_stale, json mode) that cached libraries cannot be reused, once, before it rebuilds them"""
     class Stop(Exception): pass
