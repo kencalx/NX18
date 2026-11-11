@@ -231,7 +231,7 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
     const char *dn = getenv("DM_DRAWABLE_NATIVE"); g_drawable_native = dn && atoi(dn) != 0;
     if (g_drawable_native) LOG("front end: the drawable keeps the view's pixels (DM_DRAWABLE_NATIVE=1), also where the present scales the picture bilinearly");
     self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen
-    self.view.window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategorySmall;   // UIKit draws the in-game menu (GameMenu.swift) in this window: it keeps one compact text size over the game, whatever the system's text size
+    self.view.window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategorySmall;   // UIKit draws the in-game menu's UIMenu (GameMenu.swift, DM_GAME_MENU=system) in this window: it keeps one compact text size over the game, whatever the system's text size (NX 18's panel sets the system's back on itself, GameMenuPanel.swift)
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
     [self.view addSubview:self.game];
     g_layer = (CAMetalLayer *)self.game.layer;

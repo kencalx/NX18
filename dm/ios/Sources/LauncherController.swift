@@ -77,8 +77,8 @@ enum LauncherPadEvent: Equatable, Sendable { case up, down, left, right, a, b, y
         return anyHeld()
     }
 
-    // A Switch layout's button from a pad: a Nintendo pad by label, any other by position (pad_apple.h dm_pad_face): right A, bottom B, left Y
-    private static func labelled(_ c: GCController) -> Bool { c.productCategory == "Switch Pro Controller" || c.productCategory.contains("Joy-Con") }
+    // A Switch layout's button from a pad: a Nintendo pad by label, any other by position (pad_apple.h dm_pad_face): right A, bottom B, left Y. Also the in-game menu's hints (GameMenuPanel.swift)
+    nonisolated static func labelled(_ c: GCController) -> Bool { c.productCategory == "Switch Pro Controller" || c.productCategory.contains("Joy-Con") }
     private static func keys(_ c: GCController) -> Set<Key> {
         guard let g = c.extendedGamepad else { return [] }
         let byLabel = labelled(c)

@@ -135,7 +135,7 @@ class LiveMenu(unittest.TestCase):
         self.assertIn('dm_opmode() == 0', body(self.pad, 'bool dm_pad_layout_offered(int layout) {'))
 
     def test_a_row_that_does_nothing_says_why(self):   # GameMenu.swift greys a held or inactive row and gives every row its reason; front_ios.m knows the running game's
-        menu = read('dm/ios/Sources/GameMenu.swift'); row = body(menu, 'private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> UIMenuElement {')
+        menu = read('dm/ios/Sources/GameMenu.swift'); row = body(menu, 'private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> GameMenuItem {')
         for part in ('dm_setting_why(s.env)', 'dm_setting_held(s.env)', 'm.inactiveWhy(s)', 'm.reason(s)', 'm.optionInactive(s, o[0])'):
             self.assertIn(part, row)
         self.assertIn('(dm_setting_working(s.env) ? nil : m.reason(s)?.why)', row, 'MetalFX that upscaled drops the launcher\'s Stretch hint')
@@ -182,7 +182,11 @@ class LiveMenu(unittest.TestCase):
                      'popoverPresentationController', 'pop.sourceView', 'fileExists(atPath: src.path)'):
             self.assertIn(part, share)
         self.assertLess(share.index('copyItem'), share.index('UIActivityViewController'))   # the sheet gets the copies, never the log being written
-        self.assertIn('dmShareLog(from: action.sender as? UIView)', menu)
+        self.assertIn('{ anchor in dmShareLog(from: anchor) }', menu)   # the menu button: the UIMenu's sender, the panel's anchor (an iPad's popover points at it)
+        self.assertIn('perform?(action.sender as? UIView)', body(menu, 'func uiMenuElement(_ i: GameMenuItem) -> UIMenuElement {'))
+        panel = read('dm/ios/Sources/GameMenuPanel.swift')
+        self.assertIn('if item.closesMenu { close(); item.perform?(anchor); return }', panel)   # the panel goes first: the share sheet and its alert are the system's
+        self.assertIn('GameMenuPanelModel(anchor: button)', panel)
 
 
 if __name__ == '__main__':

@@ -40,3 +40,7 @@ xcrun simctl io "$DEVICE" screenshot launcher.png
 ```
 
 `SIMCTL_CHILD_DUO_PAD_SCRIPT=down,down,a,right` drives the screen with a hidden virtual controller (steps every 0.35 s after `DUO_PAD_DELAY` seconds, default 2: up, down, left, right, a, b, y, plus, l, r, wait; Switch buttons, so `a` is the pad's right button). The harness's app icon is the NX 18 icon (Resources, a link to docs/images/nx18), the screen's backdrop when there is no art.
+
+## The in-game menu
+
+`SIMCTL_CHILD_DUO_MENU_OPEN=<seconds>` opens the in-game menu that many seconds after the start, as a home screen shortcut does while the game runs: NX 18's panel (GameMenuPanel.swift), or the UIMenu with `SIMCTL_CHILD_DM_GAME_MENU=system`. With a launcher list and `SIMCTL_CHILD_DM_LAUNCHER=0` the game view starts at once and the panel has the live settings; a `DUO_PAD_SCRIPT` then drives the panel (it starts after `DUO_PAD_DELAY`, so give it a delay past the menu's), the virtual controller hiding the touch controls as a real one does.

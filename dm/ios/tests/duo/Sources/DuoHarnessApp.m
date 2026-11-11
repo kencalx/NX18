@@ -13,6 +13,7 @@ UIViewController *front_ios_root(void);
 void front_ios_scene(UIWindowScene *scene);   // front_ios.m: caches the scene's screen (size, rate, brightness), as main.m does
 void dm_shortcut_cold(const char *type);   // LauncherShortcuts.swift: home screen shortcuts, handed over as main.m's SceneDelegate does
 bool dm_shortcut_perform(const char *type);
+void dm_gamepad_menu_open(void);   // DmGamepad.m: opens the in-game menu (DUO_MENU_OPEN)
 
 static NSArray<NSNumber *> *DuoHarnessRectArray(CGRect rect) {
     return @[@(CGRectGetMinX(rect)), @(CGRectGetMinY(rect)), @(CGRectGetWidth(rect)), @(CGRectGetHeight(rect))];
@@ -121,6 +122,8 @@ static void duo_pad_script(void) {
     self.window.rootViewController = root;
     [self.window makeKeyAndVisible];
     duo_pad_script();
+    double menuAt = NSProcessInfo.processInfo.environment[@"DUO_MENU_OPEN"].doubleValue;   // README.md, The in-game menu: open it after that many seconds, for a screenshot
+    if (menuAt > 0) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * menuAt)), dispatch_get_main_queue(), ^{ NSLog(@"duo: in-game menu open"); dm_gamepad_menu_open(); });
 
     self.diagnosticHingeStatus = -1;
     self.diagnosticHingeAngle = -1;

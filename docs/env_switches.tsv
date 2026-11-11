@@ -61,6 +61,7 @@ DM_GAME	switch	Selects the game profile (a title ID under `dm/games` or `DM_GAME
 DM_GAMES_DIR	path	Profile folders outside the repository, separated by `:`, searched after `dm/games`; the NSP script points it at a provisional or derived profile
 DM_GAMES_FIRST	switch	`=1` searches `DM_GAMES_DIR` before `dm/games`, so a provisional or derived profile wins over the game's own (the NSP script's `--provisional`)
 DM_GAME_ENV	switch	`KEY=VALUE` pairs, separated by spaces, that the game's own `getenv` returns, in place of the profile's `game_env` (`hle_os.c`); any other name goes to the SDK's empty environment
+DM_GAME_MENU	switch	`system` makes the iPhone and iPad in-game menu the system's menu (a `UIMenu`, as before NX 18's panel) instead of NX 18's own panel; the rows, notes and actions are the same, but the system's menu takes no controller and keeps the system font
 DM_GFX_FIXTURE_OUT	test	`=<dir>`: graphics tests write their raw result textures and buffers there
 DM_GLSLC_CAPTURE	path	`=<dir>` saves every GLSLC output the game compiles at run time; `shader_split.py` reads it (default `<version dir>/glslc_capture`)
 DM_GPU_CAPTURE	diagnostic	`=<frame>[:<frames>]` or `gpu:<ms>[:<after frame>]` writes a Metal GPU trace of those frames for Xcode's Metal debugger; can be set while running through `DM_CTL`. Set at the start (as `MTL_CAPTURE_ENABLED` is), it gives the GPU capture profile: no pipeline archive is opened or written, so the start is slower (docs/reference/shaders.md)

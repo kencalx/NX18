@@ -1,4 +1,4 @@
-// The in-game menu: GameMenu.swift builds it, the gamepad's menu button at the top centre opens it (DmGamepad.m). It holds the controller layout, the launcher
+// The in-game menu: GameMenu.swift builds it, GameMenuPanel.swift draws it as NX 18's panel (or a UIMenu with DM_GAME_MENU=system), the gamepad's menu button at the top centre opens it (DmGamepad.m). It holds the controller layout, the launcher
 // settings the running game takes at once (front_ios.m dm_setting_live) and the cheats; the other settings stay on the settings screen before the game starts.
 #pragma once
 #include <stdbool.h>
@@ -6,7 +6,11 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-void *dm_game_menu(void);   // GameMenu.swift: a retained UIMenu, rebuilt each time it opens
+void *dm_game_menu(void);   // GameMenu.swift: a retained UIMenu, rebuilt each time it opens (DM_GAME_MENU=system)
+bool dm_game_panel_open(void *anchor);   // GameMenuPanel.swift: NX 18's panel over the view controller the menu button (anchor, a UIView) is in; false when it cannot show
+void dm_game_panel_close(void);   // closes it (a short fade), then calls dm_gamepad_panel_closed
+bool dm_game_panel_shown(void);
+void dm_gamepad_panel_closed(void);   // DmGamepad.m: the panel is gone: the menu button's hide timer starts, the controllers go back to the game once their buttons are released
 int dm_pad_layout(void);   // DmGamepad.m: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
 bool dm_pad_layout_offered(int layout);   // Tap only in handheld mode
 void dm_pad_layout_set(int layout);   // releases every touch first, and is saved for the next start
