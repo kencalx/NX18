@@ -40,14 +40,15 @@
 // What a failed probe measured at kmin: the cost of its frames after the grace (pk), against the cost at the longer hold it started from (pfrom). The cost at the longer hold now,
 // scaled by pk / pfrom, is the estimate of kmin's cost (nvn_fstep_pest). Breath of the Wild on an iPhone 18 Pro Max: an area whose GPU work took 22–24 ms at hold 2, 1.6–1.7 times
 // its hold-1 reference, took as much in each probe back to hold 1 (cost 1.3–1.9), and a probe failed every 2–3 s for as long as the area lasted, each 3 late frames on screen.
-// After FSTEP_OVER_N failed probes in a row whose cost at kmin was over FSTEP_OVER times its budget, no probe starts while the estimate stays over it (two, not one: a clock
-// slower to come back after a cap fails the first probe and holds the second). An estimate of at most FSTEP_FIT of the budget (the scene got light), a stall of
-// FSTEP_DEBT_MAX or more (a load, a trip to the background), a cap change, or a run at kmin that holds forgets the measurement and the hold-offs. Probes that fail within the
-// margin back off exponentially (phold, 1 s doubled up to FSTEP_PHOLD_MAX), beside the trials' FSTEP_HOLD_MAX
+// After FSTEP_OVER_N failed probes in a row whose cost at kmin was over FSTEP_OVER times its budget, no probe starts while the estimate stays over it, for at most
+// FSTEP_PHOLD_MAX since the last step up (two, not one: a clock slower to come back after a cap fails the first probe and holds the second). An estimate of at most
+// FSTEP_FIT of the budget (the scene got light), a stall of FSTEP_DEBT_MAX or more (a load, a trip to the background), a cap change, a step the game fixes itself, or a run
+// at kmin that holds forgets the measurement and the hold-offs. Probes that fail within the margin back off exponentially (phold, 1 s doubled up to FSTEP_PHOLD_MAX),
+// beside the trials' FSTEP_HOLD_MAX
 #define FSTEP_OVER 1.15       // a failed probe's cost at kmin against kmin: above it, clearly over (the probes in the BotW area took 1.3–1.9; 1.12 is within the noise of a clock still rising)
 #define FSTEP_OVER_N 2        // failed probes in a row clearly over before the estimate holds the probes off
 #define FSTEP_PEST_N 8        // frames on time at the longer hold before its cost counts for the estimate
-#define FSTEP_PHOLD_MAX 1920.0   // the probes' hold-off at most: 32 s
+#define FSTEP_PHOLD_MAX 1920.0   // the probes' hold-off at most, and the longest two failed probes over budget hold them off: 32 s
 // The screen's verdicts lag the frames (hle_nvn.c judges the frame FSTEP_UP_LAG presents back, with present snapshots): for that many frames after a step up, a frame the screen
 // calls late whose own cost fits the new hold is one made before the step, and does not count toward another (opening a menu in BotW: six frames of 34 ms at a cost of 0.72–0.76
 // stepped 1 → 2 → 3 within 3 presents)
@@ -82,8 +83,12 @@ typedef struct {
 static inline int nvn_fstep_same(const nvn_fstep *s) { return s->cref > 0 && s->cn >= FSTEP_RUN && s->ccur <= FSTEP_SAME * s->cref; }
 // kmin's cost estimated from the last failed probe and the cost at the longer hold now (0 = no estimate: no failed probe measured, or too few frames at the longer hold)
 static inline double nvn_fstep_pest(const nvn_fstep *s) { return s->pk > 0 && s->pfrom > 0 && s->cn >= FSTEP_PEST_N ? s->pk * s->ccur / s->pfrom : 0; }
-// Whether a probe may start: not while two failed ones in a row measured kmin clearly over and the cost at the longer hold has not fallen since (no estimate holds them off too)
-static inline int nvn_fstep_probe_ok(const nvn_fstep *s, int kmin) { double e = nvn_fstep_pest(s); return s->pover < FSTEP_OVER_N || (e > 0 && e <= FSTEP_OVER * kmin); }
+// Whether two failed probes in a row measured kmin clearly over and the cost at the longer hold has not fallen since (no estimate yet counts as not fallen)
+static inline int nvn_fstep_pheld(const nvn_fstep *s, int kmin) { double e = nvn_fstep_pest(s); return s->pover >= FSTEP_OVER_N && !(e > 0 && e <= FSTEP_OVER * kmin); }
+// Whether a probe may start: not while held off as above, for at most FSTEP_PHOLD_MAX since the last step up. The cost at the longer hold alone does not tell a scene kmin
+// cannot hold from one it can, as the GPU clock follows the hold: BotW's heavy area took 22–24 ms at hold 2, and a scene that held hold 1 at 14.4 ms took about 25 there.
+// Held off for good, a game that left the heavy area for such a scene stayed at 30 fps until a load (t_fstep: the heavy stretch, then the GPU-slowed scene)
+static inline int nvn_fstep_probe_ok(const nvn_fstep *s, int kmin) { return !nvn_fstep_pheld(s, kmin) || s->since >= FSTEP_PHOLD_MAX * (s->per_vsync ? s->per_vsync : 1); }
 // Forget what failed probes measured, and their hold-offs (the scene changed). pfrom stays: each probe sets its own (a cap's rise starts one and forgets in the same frame)
 static inline void nvn_fstep_pforget(nvn_fstep *s, double hold0) { s->pk = 0; s->pover = 0; s->phold = hold0; }
 static inline void nvn_fstep_pstart(nvn_fstep *s, double cost) { s->pfrom = s->cn ? s->ccur : cost; s->psum = 0; s->pn = 0; }   // what the probe starts from
@@ -103,6 +108,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         s->k = s->step = fixed < FSTEP_MAX ? fixed : FSTEP_MAX;
         s->debt = 0; s->late_run = s->fit_run = s->trial = s->probe = s->grace = 0; s->run = 0;
         s->kmin = FSTEP_MAX + 1;   // when it ends, k starts again from kmin
+        nvn_fstep_pforget(s, hold0);   // a cutscene: another scene, as a cap change is
         return s->step;
     }
     if (!s->k) { s->k = s->step = s->kmin = kmin; return s->step; }   // first frame: nothing measured yet

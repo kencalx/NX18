@@ -2397,24 +2397,32 @@ static void fstep_tick(const win_t *o, int c) {
         LOG("[nvn] frame step: hold %d → %d %s at present %llu (%s; cost %.2f, GPU %.2f%s)%s", k0, g_fs.k, fps_high() ? "ticks of 1/120 s" : "vsyncs", (unsigned long long)o->presents,
             fixed ? "the game's own step" : kmin0 > FSTEP_MAX ? "the game's own step ended" : kmin != kmin0 ? "the cap changed" : g_fs.k > k0 ? "3 late frames" : g_fs.probes != probes0 ? why : "trial", cost, gpu, held, ++nlog == 40 ? "; further changes only counted below" : "");
     }
+    static int pann;   // the failed-probe line said the probes are held off (nvn_fstep_pheld), and no line has said they are allowed again
     if (probe0 == 1 && g_fs.probe != 1 && !fixed && nlog < 40) {   // whether the controller raised the clock for the shorter deadline, and what the probe measured at kmin
-        char pm[128] = "";
+        char pm[160] = "";
         if (g_fs.probe != 2 && g_fs.pk > 0) {
             int w = snprintf(pm, sizeof pm, "; cost %.2f at hold %d", g_fs.pk, kmin);
-            if (!nvn_fstep_probe_ok(&g_fs, kmin)) snprintf(pm + w, sizeof pm - w, ", %d in a row over %.2f: no probe while hold %d costs over %.2f", g_fs.pover, FSTEP_OVER * kmin, g_fs.k, FSTEP_OVER * kmin * g_fs.pfrom / g_fs.pk);
+            if (nvn_fstep_pheld(&g_fs, kmin)) {
+                snprintf(pm + w, sizeof pm - w, ", %d in a row over %.2f: no probe for %.0f s while hold %d costs over %.2f", g_fs.pover, FSTEP_OVER * kmin, FSTEP_PHOLD_MAX / 60, g_fs.k, FSTEP_OVER * kmin * g_fs.pfrom / g_fs.pk);
+                pann = 1;
+            }
         }
         LOG("[nvn] frame step: the probe %s at present %llu (CPU %d%% on performance cores%s)%s", g_fs.probe == 2 ? "held" : "failed", (unsigned long long)o->presents, g_fs_pshare, pm, ++nlog == 40 ? "; further changes only counted below" : "");
     }
     else if (probe0 == 2 && !g_fs.probe && g_fs.failed != failed0 && nlog < 40)
         LOG("[nvn] frame step: the run at hold %d after the probe lasted under %.0f s, counted as a failed probe (CPU %d%% on performance cores)%s", kmin, FSTEP_HOLD_MAX / 60, g_fs_pshare, ++nlog == 40 ? "; further changes only counted below" : "");
-    // The end of the hold-off two failed probes over budget put on the probes (nvn_fstep.h FSTEP_OVER): the cost at the longer hold fell, or the scene changed (a load, a cap change)
-    static int pok_was = 1; int pok = nvn_fstep_probe_ok(&g_fs, kmin);
-    if (pok && !pok_was && nlog < 40) {
-        char why[64]; if (g_fs.pk > 0) snprintf(why, sizeof why, "about %.2f at hold %d", nvn_fstep_pest(&g_fs), kmin); else snprintf(why, sizeof why, "the measurement forgotten");
-        LOG("[nvn] frame step: probes back to hold %d allowed again at present %llu (cost %.2f at hold %d, %s)%s", kmin, (unsigned long long)o->presents,
-            g_fs.cn ? g_fs.ccur : cost, g_fs.k, why, ++nlog == 40 ? "; further changes only counted below" : "");
+    // The end of the hold-off two failed probes over budget put on the probes (nvn_fstep.h FSTEP_OVER), once per hold-off the failed-probe line announced: the cost at the
+    // longer hold fell, or the scene changed (a load, a cap change). Not when a probe ended it (its own line says what it measured: the probe held, or failed within the margin)
+    // nor at hold kmin already; and the probe FSTEP_PHOLD_MAX after the step up is logged as a probe
+    if (pann && (g_fs.probe == 2 || !nvn_fstep_pheld(&g_fs, kmin))) {
+        double e = nvn_fstep_pest(&g_fs);
+        if (g_fs.probe != 2 && g_fs.k > kmin && (g_fs.pk <= 0 || e > 0) && nlog < 40) {
+            char why[64]; if (g_fs.pk > 0) snprintf(why, sizeof why, "about %.2f at hold %d", e, kmin); else snprintf(why, sizeof why, "the measurement forgotten");
+            LOG("[nvn] frame step: probes back to hold %d allowed again at present %llu (cost %.2f at hold %d, %s)%s", kmin, (unsigned long long)o->presents,
+                g_fs.cn ? g_fs.ccur : cost, g_fs.k, why, ++nlog == 40 ? "; further changes only counted below" : "");
+        }
+        pann = 0;
     }
-    pok_was = pok;
     if (!dm_fps_state) {   // 120 fps: no game clock to read; the frames at each hold say how much of the time it held 120
         if (o->presents % 1800 == 0) { LOG("[nvn] 120 fps: held 1 / 2 ticks %llu / %llu frames, %llu late, %llu up / %llu down (%llu probes, %llu failed trials)", (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)g_fs.late, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed); memset(held, 0, sizeof held); }
     } else if (o->presents % 1800 == 0) {   // game time against real time (1.000 = normal speed; lower when a device cannot hold 20 fps or after long stalls)

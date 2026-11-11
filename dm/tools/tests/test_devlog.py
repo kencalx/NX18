@@ -81,7 +81,7 @@ class HoldFrames(unittest.TestCase):
         self.assertEqual((s['long_frames']['count'], s['long_frames']['held']), (3, 1))
         # a failed probe's line with what it measured at hold 1, and the line that ends the probes' hold-off: the cut is the present each names
         failed = ('[dm] [nvn] frame step: the probe failed at present 300 (CPU 56% on performance cores; cost 1.45 at hold 1, 2 in a row over 1.15: '
-                  'no probe while hold 2 costs over 1.11); further changes only counted below')
+                  'no probe for 32 s while hold 2 costs over 1.11); further changes only counted below')
         allowed = '[dm] [nvn] frame step: probes back to hold 1 allowed again at present 300 (cost 0.80 at hold 2, about 0.83 at hold 1); further changes only counted below'
         for cut in (failed, allowed):
             s = read([step(1, 2, 111), step(2, 1, 142), step(1, 2, 250), lf(280, 33.4), cut, *late])
