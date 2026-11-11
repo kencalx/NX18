@@ -57,6 +57,12 @@ SHADER_FILES="no"     # iphone/ipad: yes = the shader library as separate files,
 # Optional: the app's name on the home screen or in Finder; empty = the game's name. (env NX18_APP_NAME)
 APP_NAME=""
 
+# Optional: one font for all of NX 18's own text (the launcher, prompts, progress screens, the Mac
+# banner), a .ttf, .otf or .ttc file of your own on this Mac; empty = the system font. It goes only
+# into the app built here, never into the NX 18 folder or the repository; keep it outside the NX 18
+# folder (or in its local/fonts/, which git ignores), e.g. "$HOME/Fonts/MyUIFont.ttf" (env NX18_UI_FONT)
+UI_FONT=""
+
 # Optional: more options of scripts/build_ipa_from_nsp.py, one quoted word each
 # (python3 scripts/build_ipa_from_nsp.py -h lists them), e.g.
 #   EXTRA_ARGS=(--language ja --no-art-online --art "/Users/me/My Art/art.png")
@@ -89,6 +95,7 @@ NO_MODS="${NX18_NO_MODS:-$NO_MODS}"
 ROMFS_SEPARATE="${NX18_ROMFS_SEPARATE:-$ROMFS_SEPARATE}"
 SHADER_FILES="${NX18_SHADER_FILES:-$SHADER_FILES}"
 APP_NAME="${NX18_APP_NAME:-$APP_NAME}"
+UI_FONT="${NX18_UI_FONT:-$UI_FONT}"
 case "${NX18_EXTRA_ARGS:-}" in *[![:space:]]*)
     # split like a command line (quotes allowed) without running it: xargs does the quoting, printf the output
     printf '%s' "$NX18_EXTRA_ARGS" | xargs printf '%s' >/dev/null 2>&1 || die "NX18_EXTRA_ARGS: an unmatched quote in: $NX18_EXTRA_ARGS"
@@ -230,6 +237,14 @@ else
     [ -w "$GAME_DIR" ] || die "the game's folder cannot be written to, and the build folder goes there: $GAME_DIR" "Set WORK_DIR and OUTPUT to a folder you can write to."
 fi
 
+if [ -n "$UI_FONT" ]; then
+    UI_FONT="$(path_setting UI_FONT "$UI_FONT")"
+    on_mounted_drive UI_FONT "$UI_FONT"
+    [ -f "$UI_FONT" ] || die "UI_FONT: no font file at $UI_FONT"
+    [ -r "$UI_FONT" ] || die "UI_FONT cannot be read (permissions): $UI_FONT"
+    case "$(printf '%s' "$UI_FONT" | tr '[:upper:]' '[:lower:]')" in *.ttf|*.otf|*.ttc) ;; *) die "UI_FONT must be a .ttf, .otf or .ttc file: $UI_FONT" ;; esac
+fi
+
 # ---- the Mac, Xcode and Python ---------------------------------------------------------------
 [ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = 1 ] || die "NX 18 builds need an Apple silicon Mac."
 if [ -x /opt/homebrew/bin/brew ]; then
@@ -319,6 +334,7 @@ ARGS=("$BUILD_PY" "$GAME" --platform "$PLATFORM")
 [ "$ROMFS_SEPARATE" = yes ] && ARGS+=(--romfs separate)
 [ "$SHADER_FILES" = yes ] && ARGS+=(--shader-files)
 [ -n "$APP_NAME" ] && ARGS+=(--app-name "$APP_NAME")
+[ -n "$UI_FONT" ] && ARGS+=(--ui-font "$UI_FONT")
 if [ "${#EXTRA_ARGS[@]}" -gt 0 ]; then
     for a in "${EXTRA_ARGS[@]}"; do if [ -n "$a" ]; then ARGS+=("$a"); fi; done   # EXTRA_ARGS="" leaves an empty word
 fi

@@ -123,7 +123,7 @@ class PackReuse(unittest.TestCase):
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'art.jpg': b'art', 'logo.png': b'\x89PNG logo', 'about.json': b'{}', 'manual.pdf': b'%PDF-1.7', 'source/launcher.c': b'launcher',
             'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'host/ui_font.h': b'ui font api', 'tools/romfs.py': b'reader',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/LauncherGuideFiles.swift': b'guide',
-            'ios/Sources/NXFont.swift': b'text styles',
+            'ios/Sources/NXFont.swift': b'text styles', 'uifont.ttf': b'\x00\x01\x00\x00 stand-in font',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
         for n, content in files.items(): (t / n).write_bytes(content)
@@ -212,7 +212,7 @@ class PackReuse(unittest.TestCase):
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'art.jpg', 'logo.png', 'about.json', 'manual.pdf', 'source/launcher.c',
                  'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/LauncherGuideFiles.swift', 'ios/Sources/NXFont.swift',   # the settings window's sources
-                 'host/save_sync.c', 'host/save_sync.h', 'host/ui_font.h']   # the cloud-save code the launcher links (its send after the host exits), the UI font's registration
+                 'host/save_sync.c', 'host/save_sync.h', 'host/ui_font.h']   # the cloud-save code the launcher links (its send after the host exits), the UI font's registration   # the cloud-save code the launcher links (its send after the host exits)
         names += ['profile/' + n for n in pack_app.TABLES]
         for name in names:
             with self.subTest(name=name):
@@ -355,6 +355,24 @@ class PackReuse(unittest.TestCase):
         for name in ('art', 'logo', 'about', 'manual'): setattr(self.args, name, None)
         self.assert_repacked()
         self.assertEqual([n for n in ('art.jpg', 'logo.png', 'about.json', 'manual.pdf') if (dm / n).exists()], [])
+
+    def test_ui_font_lands_in_resources_dm_uifont(self):   # --ui-font: Resources/dm/uifont/ui.<ext> (never dm/font, the game's shared fonts) and its name in Info.plist; without it neither
+        self.pack()
+        res, info = Path(self.args.out) / 'Contents/Resources', lambda: plistlib.loads((Path(self.args.out) / 'Contents/Info.plist').read_bytes())
+        self.assertFalse((res / 'dm/uifont').exists()); self.assertNotIn('DMUIFontFile', info()); self.assertNotIn('DMUIFontName', info())
+        self.args.ui_font, self.args.ui_font_name = str(self.tmp / 'uifont.ttf'), 'NXTestUI-Regular'; self.assert_repacked()
+        self.assertEqual(sorted(p.name for p in (res / 'dm/uifont').iterdir()), ['ui.ttf'])
+        self.assertEqual((res / 'dm/uifont/ui.ttf').read_bytes(), (self.tmp / 'uifont.ttf').read_bytes())
+        self.assertEqual((info()['DMUIFontFile'], info()['DMUIFontName']), ('dm/uifont/ui.ttf', 'NXTestUI-Regular'))
+        self.assertEqual(sorted(p.name for p in (res / 'dm/font').iterdir()), ['nintendo_ext.ttf'])   # the game's shared fonts only
+        self.assert_reused()
+        (self.tmp / 'uifont.ttf').write_bytes(b'\x00\x01\x00\x00 another font'); self.assert_repacked()   # its bytes are in the reuse key
+        otf = self.tmp / 'Other.OTF'; otf.write_bytes(b'OTTO font'); self.args.ui_font = str(otf); self.assert_repacked()
+        self.assertEqual((sorted(p.name for p in (res / 'dm/uifont').iterdir()), info()['DMUIFontFile']), (['ui.otf'], 'dm/uifont/ui.otf'))
+        self.args.ui_font = self.args.ui_font_name = None; self.assert_repacked()
+        self.assertFalse((res / 'dm/uifont').exists()); self.assertNotIn('DMUIFontFile', info())
+        self.args.ui_font = str(self.tmp / 'about.json')
+        with self.assertRaisesRegex(SystemExit, 'must be a .ttf, .otf or .ttc'): self.pack()
 
     def test_logo_lands_in_resources_dm(self):   # the game's logo (the NSP script's <build folder>/art/logo.png, or --logo): Resources/dm/logo.png, which the launcher shows in place of the name
         self.pack()
@@ -658,6 +676,27 @@ class App(unittest.TestCase):
         self.assertIn('standin host output', (logs / f'{TID}.prev.log').read_text())
         self.assertEqual(self.host_run()['DM_LANG'], 'fr')   # Info.plist DMLanguage
 
+    @unittest.skipUnless(importlib.util.find_spec('fontTools'), 'needs fontTools (the test makes its font)')
+    def test_ui_font(self):   # --ui-font: the launcher registers Resources/dm/uifont/ui.ttf for its window (dm/host/ui_font.h) and hands it to the host; DM_UI_FONT=0 turns it off
+        spec = importlib.util.spec_from_file_location('test_private_fonts', Path(__file__).with_name('test_private_fonts.py')); assert spec and spec.loader
+        fonts = importlib.util.module_from_spec(spec); spec.loader.exec_module(fonts)
+        logs = self.tmp / f'home/Library/Logs/nxnative/{TID}.log'
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as d:
+            font = fonts.make_font(Path(d) / 'NX Test UI.ttf')
+            a = types.SimpleNamespace(**vars(self.args)); a.out = str(self.tmp / 'Font.app'); a.icon = None; a.ui_font = str(font); a.ui_font_name = 'NXTestUI-Regular'
+            with contextlib.redirect_stdout(io.StringIO()): pack_app.pack(a)
+        app = self.tmp / 'Font.app'; res = app / 'Contents/Resources'
+        self.assertEqual(sorted(p.name for p in (res / 'dm/uifont').iterdir()), ['ui.ttf'])
+        p = self.launch(app=app); p.communicate(timeout=30)
+        r = self.host_run()
+        self.assertEqual((r['DM_UI_FONT'], r['DM_UI_FONT_NAME']), (str(res / 'dm/uifont/ui.ttf'), 'NXTestUI-Regular'))
+        self.assertIn(f'ui font: NXTestUI-Regular registered ({res / "dm/uifont/ui.ttf"})', logs.read_text())
+        p = self.launch(app=app, DM_UI_FONT='0'); p.communicate(timeout=30)   # an env file's or the launch's 0: the system font, for the host too
+        r = self.host_run(); self.assertEqual(r['DM_UI_FONT'], '0'); self.assertNotIn('DM_UI_FONT_NAME', r)
+        self.assertIn('ui font: off (DM_UI_FONT=0): the system font', logs.read_text())
+        p = self.launch(); p.communicate(timeout=30)   # an app built without one: nothing set, nothing logged
+        r = self.host_run(); self.assertNotIn('DM_UI_FONT', r); self.assertNotIn('DM_UI_FONT_NAME', r); self.assertNotIn('ui font', logs.read_text())
+
     def test_sigterm(self):   # forwarded to the host, whose exit code comes back
         p = self.launch(wait=True)
         for _ in range(100):
@@ -811,7 +850,7 @@ class Script(unittest.TestCase):
              mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append):
             nsp.mac_app(sys.executable, REPO, out, 0x01008CF01BAAC000, tmp, tmp / 'ex', tmp / 'patched', tmp / 'dmhost', tmp / 'font', tmp / 'shader/cache' if gfx == 'nvn' else tmp / 'shader',
                         kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''),
-                        gpu_option=kw.get('gpu_option', True), **{k: kw[k] for k in ('art', 'about', 'manual', 'logo') if k in kw})
+                        gpu_option=kw.get('gpu_option', True), **{k: kw[k] for k in ('art', 'about', 'manual', 'logo', 'ui_font') if k in kw})
         self.pso_cmd = next((c for c in ran if c[1].endswith('pso_offline.py')), None)   # before the packer
         self.settings_cmd = next(c for c in ran if c[1].endswith('dm/games/settings.py'))
         c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
@@ -840,6 +879,12 @@ class Script(unittest.TestCase):
         self.assertEqual((o['--art'], o['--logo'], o['--about'], o['--manual']), (str(art), str(logo), str(about), str(manual)))
         o, _ = self.pack_cmd('nvn', art=art)
         self.assertEqual(o['--art'], str(art)); self.assertNotIn('--logo', o); self.assertNotIn('--about', o); self.assertNotIn('--manual', o)
+
+    def test_ui_font_options(self):   # --ui-font / UI_FONT (ui_font_info's path and PostScript name) go to the packer; without one, no option
+        o, _ = self.pack_cmd('nvn', ui_font=(Path('/f/My UI.ttf'), 'MyUI-Regular', 'My UI'))
+        self.assertEqual((o['--ui-font'], o['--ui-font-name']), ('/f/My UI.ttf', 'MyUI-Regular'))
+        o, _ = self.pack_cmd('nvn')
+        self.assertNotIn('--ui-font', o); self.assertNotIn('--ui-font-name', o)
 
     def test_pso_archive(self):   # an NVN game with shader pairs: its pipeline archive for this Mac's GPU, made by pso_offline.py, goes into the app
         tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp)

@@ -36,6 +36,33 @@ class EnvSwitches(unittest.TestCase):
         self.assertIn('fit jpeg 1920 "$DM_ART" Gen/dm/art.jpg', art)
         self.assertNotIn('die', logo, 'an optional logo never stops the build')
 
+    def test_ui_font(self):   # DM_UI_FONT: Gen/dm/uifont/ui.<ext> (never Gen/dm/font, the game's shared fonts), DMUIFontFile / DMUIFontName, and no stale dm/uifont in a later IPA without it
+        rows = {r.split('\t')[0]: r.split('\t')[1] for r in (REPO / 'docs/env_switches.tsv').read_text().splitlines()[1:] if r}
+        self.assertEqual((rows.get('DM_UI_FONT'), rows.get('DM_UI_FONT_NAME')), ('path', 'switch'))
+        sh = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
+        copy = sh[sh.index('UI_FONT_FILE=\n'):]; copy = copy[:copy.index('\nfi\n') + 4]
+        stale = next(ln for ln in sh.splitlines() if ln.startswith('if [ -z "$UI_FONT_FILE" ]; then rm -rf "$APP/dm/uifont"'))
+        plist = sh[sh.index('if [ -n "$UI_FONT_FILE" ]; then /usr/libexec/PlistBuddy'):]; plist = plist[:plist.index('; fi\n') + 5]
+        self.assertIn('Add :DMUIFontFile string $UI_FONT_FILE', plist); self.assertIn('Add :DMUIFontName string $DM_UI_FONT_NAME', plist)
+        self.assertLess(sh.index(stale), sh.index('python3 tools/pack_ipa.py'))
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t); (t / 'Gen/dm').mkdir(parents=True); (t / 'My Font.TTF').write_bytes(b'font'); (t / 'notes.txt').write_text('x')
+            def run(env, script):
+                return subprocess.run(['bash', '-c', 'set -u; t() { echo "$*"; }; die() { echo "FAIL: $*"; exit 1; }\n' + script + '\necho "file=$UI_FONT_FILE"'],
+                                      cwd=t, env={'PATH': '/usr/bin:/bin', **env}, capture_output=True, text=True)
+            r = run({'DM_UI_FONT': str(t / 'My Font.TTF'), 'DM_UI_FONT_NAME': 'NXTestUI-Regular'}, copy)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertIn('file=dm/uifont/ui.ttf', r.stdout)
+            self.assertEqual(sorted(p.name for p in (t / 'Gen/dm/uifont').iterdir()), ['ui.ttf']); self.assertFalse((t / 'Gen/dm/font').exists())
+            self.assertIn('UI font: NXTestUI-Regular', r.stdout)
+            for bad in (str(t / 'missing.ttf'), str(t / 'notes.txt')):
+                with self.subTest(bad=bad): self.assertIn('FAIL:', run({'DM_UI_FONT': bad}, copy).stdout)
+            r = run({}, copy); self.assertEqual(r.returncode, 0); self.assertIn('file=\n', r.stdout + '\n')
+            app = t / 'DmIOS.app'; (app / 'dm/uifont').mkdir(parents=True); (app / 'dm/uifont/ui.ttf').write_bytes(b'old'); (app / 'dm/uifont/ui.otf').write_bytes(b'new')
+            run({'APP': str(app)}, f'UI_FONT_FILE=dm/uifont/ui.otf; APP={app}\n{stale}')
+            self.assertEqual(sorted(p.name for p in (app / 'dm/uifont').iterdir()), ['ui.otf'])   # the build's own file only
+            run({'APP': str(app)}, f'UI_FONT_FILE=; APP={app}\n{stale}')
+            self.assertFalse((app / 'dm/uifont').exists())   # an IPA without a UI font carries none
+
     @unittest.skipUnless(shutil.which('sips'), 'sips is macOS\'s')
     def test_fit_never_enlarges(self):   # build_ipa.sh's fit(): sips -Z also enlarges, so a smaller image keeps its size and a larger one is brought down to the limit
         sh = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()

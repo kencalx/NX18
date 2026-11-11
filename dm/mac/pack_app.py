@@ -7,6 +7,8 @@
 # launcher.json: the game's launcher settings, dm/games/settings.py, which the settings window and Mac front ends show; art.jpg, logo.png, about.json and manual.pdf: the launcher's key art, the game's logo
 # (shown in place of its name), its "About this game" text and the game's manual, each optional, which the NSP script settles in <build folder>/art/ and --manual),
 # plus AppIcon.icns from the game's icon (sips, iconutil) and the Info.plist keys the launcher reads (DMTitleID, DMRomfsMarker, DMLanguage).
+# --ui-font: the NX 18 UI font, the player's own (the NSP script's --ui-font / UI_FONT), in Resources/dm/uifont/ui.<ext> with DMUIFontFile / DMUIFontName in Info.plist: the launcher
+# registers it (dm/host/ui_font.h) for its window and hands it to the host as DM_UI_FONT. Not in dm/font, the game's shared-font stand-ins. Without it the app draws with the system font.
 # The large folders are APFS clones (cp -c) when the app is on the same APFS volume as the build, so they take no space; plain copies otherwise.
 # Signing: the inner host first, then the bundle (codesign --force --sign <identity>; '-' = ad-hoc), without the hardened runtime: the host maps the game's code executable, which the hardened
 # runtime refuses without entitlements, and so the app cannot be notarized. The bundle is stripped of its "._name" files first: on exFAT (an external drive for the build or the app) every
@@ -133,12 +135,24 @@ def info_plist(a, minos, icon):
          'NSBluetoothAlwaysUsageDescription': 'Connect Switch 2 Joy-Con and Pro Controllers over Bluetooth.',
          'LSApplicationCategoryType': a.category or 'public.app-category.games', 'LSSupportsGameMode': False, 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US', 'DMSaveSyncChoice': 1}
     if icon: p['CFBundleIconFile'] = 'AppIcon'
+    if a.ui_font:   # the UI font in the app and its PostScript name (launcher.c, dm/host/ui_font.h)
+        p['DMUIFontFile'] = ui_font_file(a.ui_font)
+        if a.ui_font_name: p['DMUIFontName'] = a.ui_font_name
     if a.settings:
         listed = json.loads(Path(a.settings).read_text(encoding='utf-8'))['settings']
         p['DMSettings'] = settings_rules(listed)
         lang = next((s['default'] for s in listed if s['env'] == 'DM_LANG'), None)
         if lang: p['DMLanguage'] = lang   # the Game language row's default: --lang, or the game's first language when it lacks that one (settings.py), with or without the window
     return p
+
+
+UI_FONT_SUFFIXES = ('.ttf', '.otf', '.ttc')
+
+
+def ui_font_file(font):   # the UI font's path in Resources: a fixed name that says nothing of the font, with its own extension
+    suffix = Path(font).suffix.lower()
+    if suffix not in UI_FONT_SUFFIXES: raise SystemExit(f'the UI font must be a .ttf, .otf or .ttc file: {font}')
+    return f'dm/uifont/ui{suffix}'
 
 
 def source_commit():   # DMCommit: the checkout that packed the app (scripts/bug_report.py reads it), short hash, +dirty with uncommitted changes to tracked files; None outside a checkout
@@ -228,7 +242,7 @@ def selected_inputs(a):
     pairs = Path(a.pso_pairs) if a.pso_pairs and not any(p.name == 'pso_pairs.tsv' for p in tables) else None
     fonts = sorted(p for p in Path(a.font).glob('*.ttf') if not detritus(p.name))
     files = [Path(a.host)] + mods + msls + pso + tables + fonts + ([pairs] if pairs else [])
-    files += [Path(p) for p in (a.env_file, a.settings, a.icon, a.art, a.logo, a.about, a.manual) if p]
+    files += [Path(p) for p in (a.env_file, a.settings, a.icon, a.art, a.logo, a.about, a.manual, a.ui_font) if p]
     for p in files:
         if not p.is_file(): raise SystemExit(f'no input file at {p}')
     return mods, msls, pso, tables, pairs, fonts, files
@@ -276,7 +290,8 @@ def pack(a):
     except (OSError, ValueError): previous = None
     try:
         a = argparse.Namespace(**vars(a))
-        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'art', 'logo', 'about', 'manual', 'html'):
+        if a.ui_font: ui_font_file(a.ui_font)   # its extension, before anything is built
+        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'art', 'logo', 'about', 'manual', 'html', 'ui_font'):
             if getattr(a, name): setattr(a, name, str(Path(getattr(a, name)).resolve()))
         mods, msls, pso, tables, pairs, fonts, files = selected_inputs(a)
         # --program: the other programs of a game of several programs (index, rewritten modules, RomFS, shader libraries, tables, offline pages; tab-separated), which go in beside the first's as one app
@@ -342,6 +357,7 @@ def pack(a):
             except SystemExit as e: (dm / 'logo.png').unlink(missing_ok=True); print(f'[RED] launcher logo: cannot pack {a.logo} ({e}); the app is built without it (the launcher shows the game\'s name)', flush=True)
     if a.about: shutil.copyfile(a.about, dm / 'about.json')
     if a.manual: shutil.copyfile(a.manual, dm / 'manual.pdf')
+    if a.ui_font: (dm / 'uifont').mkdir(); shutil.copyfile(a.ui_font, res / ui_font_file(a.ui_font))   # data only: no extended attributes of the player's copy
     step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.parent.mkdir(exist_ok=True); copy_msl(msl, msls, msl_dst, clone['msl'])
     if aoc: step('add-on content'); copy([aoc], res / 'aoc', clone['aoc'])
     if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', clone['pso'])
@@ -409,6 +425,8 @@ def parse(argv):
     ap.add_argument('--logo', help='the game\'s logo, which the launcher shows in place of its name: a PNG or WebP with transparency (Resources/dm/logo.png; the NSP script\'s <build folder>/art/logo.png)')
     ap.add_argument('--about', help='the launcher\'s "About this game" text (Resources/dm/about.json; the NSP script\'s <build folder>/art/about.json)')
     ap.add_argument('--manual', help='the game\'s manual, a PDF (Resources/dm/manual.pdf)')
+    ap.add_argument('--ui-font', help='the NX 18 UI font, a TTF, OTF or TTC of the player\'s own (Resources/dm/uifont/ui.<ext>; the NSP script\'s --ui-font / UI_FONT); default: the system font')
+    ap.add_argument('--ui-font-name', help='its PostScript name (Info.plist DMUIFontName; the NSP script reads it with fontTools)')
     ap.add_argument('--sign', default='-', help='codesign identity (default: - = ad-hoc)')
     return ap.parse_args(argv)
 
