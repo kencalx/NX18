@@ -429,6 +429,7 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform m
 # Each snapshot (base, update, standalone update, DLC) is a complete tree, so the selected version is packed from its own exefs/ and romfs/ alone; its NACP and icon are the ones the archive ties to that exact version
 # (a version without them takes its exact base snapshot's, also one that holds only metadata, packed or not; never another update's: with no base the version has none, and the name comes from the profile).
 # A NACP record that is not 0x4000 bytes (NXConvert 1.0.0 and 1.0.1 may have stored one for a NUP whose meta types were one too low) is left out with a line.
+# Without a NACP the app is named after the archive's display title for the version (nxconvert --fallback-title, or a title typed in NXConvert's sidebar; saved as extract/v<N>/title.txt), else the profile's name.
 # A base snapshot with no game files (no exefs/main, nothing in romfs/) is no base game, as a NUP's empty base record. Every file is streamed block by block and checked against its SHA-256 (a failure names the file and the block whose CRC-32C fails).
 # An NX holding decrypted NCA files (nxconvert pack from a DNSP/DXCI, Switch 1 only) is read by nx_extract --plain, still with no prod.keys: the scan reads each snapshot's content meta (one
 # nx_extract --contents run; a DLC's add-on title ID comes from there) against the catalog; a version's Meta, Program, Control and Manual NCAs are staged into <build folder>/tmp/nca/v<N>/

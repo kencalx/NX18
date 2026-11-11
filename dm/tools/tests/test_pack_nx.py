@@ -493,6 +493,23 @@ class Pack(Base):
         self.assertEqual((self.out() / 'icon.jpg').read_bytes(), png)   # American English's, written as icon.jpg (sips reads a PNG by its content)
         self.assertFalse((self.out() / 'control.nacp').exists())
 
+    def test_title_names_a_version_without_a_nacp(self):   # the archive's display title (nxconvert --fallback-title, or typed in NXConvert's sidebar): title.txt, the app's name
+        self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': {'title': ' Archive‮ Title\x1b[2J\n', 'icon': b'\xff\xd8 icon'}},
+                        {'type': 1, 'version': VER, 'tree': version(main=b'new')}))
+        n = self.open(); app, base, vers, _ = pack_nx.scan(n)
+        vars(nsp)['nacp'] = nacp   # main sets it
+        for k, out in ((base, 'b'), (vers[VER], 'u')):   # the update has no metadata of its own: its base's
+            pack_nx.pack_version(n, k, base, app, self.out() / out, say=lambda s: None)
+            self.assertFalse((self.out() / out / 'control.nacp').exists())
+            self.assertEqual((self.out() / out / 'title.txt').read_text(encoding='utf-8'), 'Archive Title[2J')   # control and bidirectional characters dropped
+            self.assertEqual(nsp.control_name(self.out() / out), 'Archive Title[2J')
+        self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': dict(META, title='Archive Title')}))
+        n = self.open(); app, base, _, _ = pack_nx.scan(n)
+        pack_nx.pack_version(n, base, base, app, self.out() / 'b', say=lambda s: None)
+        self.assertFalse((self.out() / 'b/title.txt').exists())   # a NACP names the game: no title.txt, and an older one goes
+        self.assertEqual(nsp.control_name(self.out() / 'b'), 'Test Game')
+        self.assertEqual(nsp.control_name(self.dir), '')   # neither file
+
     def test_wrong_size_nacp_left_out(self):   # an NX that NXConvert 1.0.0 or 1.0.1 made from a shifted NUP may hold something else as its NACP: never saved as control.nacp
         for size in (0x3FFF, 0x4001):
             with self.subTest(size=size):
@@ -972,6 +989,16 @@ class Native(NativeBase):
         shutil.rmtree(out)
         _, out = self.pack(n, vers[VER])   # what the Control NCA gives comes first
         self.assertEqual(nacp.name(out / 'control.nacp'), 'From Control')
+
+    def test_title_without_a_nacp(self):   # neither the Control NCA nor the archive has a NACP: the archive's display title, kept current by a repeat run that stages nothing
+        fake = FakeTool(build=self.g.bid0, control=False)
+        out = self.work() / 'extract/v0'
+        for title, how in (('Archive Title', 'packed'), ('Renamed', 'kept')):
+            self.write_game(meta={'title': title, 'icon': b'control icon'}, generation=int(how == 'kept'))
+            n, (_, base, _, _) = self.opened(fake)
+            self.assertEqual(pack_nx.pack_version(n, base, None, TID, out, say=lambda s: None), how)
+            self.assertEqual((out / 'title.txt').read_text(encoding='utf-8'), title)
+            n.close()
 
     def test_stamp_keeps_the_output(self):
         fake = FakeTool(build=self.g.bid1)

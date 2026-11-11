@@ -372,6 +372,11 @@ def game_language(want, asked, have):
     return have[0]
 
 
+def control_name(d):   # the game's name in a version folder's control data: its NACP's, else the NX archive's display title that pack_nx saves for a version with no NACP (title.txt), else ''
+    try: return nacp.name(d / 'control.nacp') or (d / 'title.txt').read_text(encoding='utf-8').strip()
+    except (OSError, UnicodeDecodeError): return ''
+
+
 def languages_control(*dirs):
     """The control.nacp that lists the game's languages: the first of the folders' (the packed version's, then the base game's) that lists any, else the first one's path. An update, a NUP's or
     an NX's especially, may carry no control data: the language check and the launcher settings (of the Mac app and the IPA) then read the base game's, the same file"""
@@ -3369,7 +3374,7 @@ def main(args=None):
     # how the shaders are got follows from the packed version's files (profile_guess.py shader_sources): the graphics API, and the shaders made only at run time
     src = pg.build_sources(game / 'ExeFS', rfs.source(game), g.modules_in(game / 'ExeFS'))
     gfx = src['graphics'][0]   # nvn; vulkan (Hades) or gl (Balatro, Digimon Story Cyber Sleuth) stop here: their layers were removed in release 1
-    if gfx != 'nvn': raise BuildError(unsupported_gfx(gfx, nacp.name(game / 'control.nacp') or g.get('name') or f'{app:016X}'))
+    if gfx != 'nvn': raise BuildError(unsupported_gfx(gfx, control_name(game) or g.get('name') or f'{app:016X}'))
     if probe: return gfx
     check_programs_gfx(args, g)   # the other programs of a game of several: one that is not NVN stops here too, before this one's rewrite and shaders
     glslc = src['glslc_capture'][0]   # shaders the game compiles at run time, captured in the Mac host (capture_glslc)
@@ -3382,7 +3387,7 @@ def main(args=None):
     dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc else []
     base = next((dirs[v] for v in versions if picks[v][1] is None), dirs[versions[0]])   # the folder the base game was extracted to alone
     # the app name and bundle ID both come from the base NSP: the game name in its control data, and a bundle ID from its title ID; a setting / the command line overrides them
-    app_name = args.app_name or APP_NAME or nacp.name(base / 'control.nacp') or (g.get('name') if dump else '')   # a dump has no control data, a NUP or an NX may have no NACP
+    app_name = args.app_name or APP_NAME or control_name(base) or (g.get('name') if dump else '')   # a dump has no control data, a NUP or an NX may have no NACP (an NX's display title then)
     if not app_name and not (mac and not mac_pack): raise BuildError(f'no game name in the base extraction ({base / "control.nacp"}; an older extraction did not save it: delete extract/ and run again, or give --app-name)')
     bundle_id = args.bundle_id or BUNDLE_ID or saved_signing.get('PRODUCT_BUNDLE_IDENTIFIER') or f'org.nxnative.{app:016x}'
     team_id = args.team_id or TEAM_ID or env.get('DM_TEAM_ID') or saved_signing.get('DEVELOPMENT_TEAM') or '0000000000'
