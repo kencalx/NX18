@@ -77,7 +77,11 @@ static size_t env_size(const char *name, size_t min, size_t align) {
 int proc_pid_rusage(int pid, int flavor, rusage_info_t *buffer);   // libproc.h, which the iOS SDK does not have
 #define GF_MAX 1024
 static int g_gf_tab[GF_MAX];       // the files, open for reading and writing
-static int g_gf_n;                 // how many; 0 while the guest is anonymous. Set by mem_init_once, whose pthread_once orders it before every reader
+static int g_gf_n;                 // how many; 0 while the guest is anonymous. Set by mem_init_once, whose pthread_once orders it before every reader on a guest thread
+// Set last by mem_init_once (release): a sweep that is not ordered after its pthread_once (dm_guest_file_trim on the memory-pressure source's queue or the DM_CTL thread, which the
+// front end starts before the game's first memory SVC) reads it (acquire) first, and does nothing before. It ran between the alias release bitmap's calloc and the aged one's
+// and read the aged bitmap through NULL (t_svc_memory's sweep_in_init)
+static atomic_int g_mem_ready;
 static size_t g_gf_chunk;          // each file's size; the last one holds the rest of the block
 static uint64_t g_gf_min_free;     // DM_GUEST_FILE_MIN_FREE in bytes: the free space on the files' disk, less what the dirty pages may still take, under which the game is stopped; 0 = never
 static int g_gf_punch = 1;         // DM_GUEST_FILE_PUNCH=0: what the game gives back keeps its disk blocks (only PROT_NONE), as before
@@ -333,6 +337,7 @@ static void mem_init_once(void) {
     if (!(g_alias_bits = calloc((g_alias_cap >> 18) + 1, sizeof *g_alias_bits))) die("alias region page bitmap calloc");
     if (!(g_alias_exposed = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_exposed))) die("alias exposure bitmap calloc");
     if (!(g_alias_rel = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_rel)) || !(g_alias_aged = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_aged))) die("alias release bitmap calloc");
+    atomic_store_explicit(&g_mem_ready, 1, memory_order_release);
     LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)g_reserve, g_heap, g_alias, g_stack);
     if ((uint64_t)(uintptr_t)g_alias > UINT64_C(1) << 39) LOG("[mem] the heap and stacks reach past 2^39, which a Switch's addresses never do: a crash on a cut-off pointer points here (DM_ALIAS_SIZE=<profile's mem_alias> keeps them lower)");
     const char *aw = getenv("DM_ALIAS_WINDOWS");
@@ -383,7 +388,7 @@ static pthread_mutex_t g_map_lock = PTHREAD_MUTEX_INITIALIZER;
 // Punch the alias region's host pages that the game gave back before the last sweep and has not mapped again since (g_alias_aged), then age the ones given back since. Under g_map_lock,
 // so no MapPhysicalMemory opens a page while it is punched. Called by guest_file_thread every 10 s
 static void guest_file_sweep(void) {
-    if (!g_gf_punch || !g_alias_rel) return;
+    if (!atomic_load_explicit(&g_mem_ready, memory_order_acquire) || !g_gf_punch || !g_alias_rel) return;
     size_t pg = (size_t)getpagesize(), nw = g_alias_cap / pg / 64 + 1;
     pthread_mutex_lock(&g_map_lock);
     for (size_t w = 0; w < nw; w++) {
@@ -401,7 +406,7 @@ static void guest_file_sweep(void) {
 // One sweep now, for memory pressure or going to the background (hle_nvn.c dm_gfx_pressure, dm_gfx_trim): the same step as guest_file_thread's every 10 s, so the pages given back since the
 // last sweep only age and are punched at the next. The bytes punched; 0 while the guest is anonymous
 uint64_t dm_guest_file_trim(void) {
-    if (!g_gf_n) return 0;
+    if (!atomic_load_explicit(&g_mem_ready, memory_order_acquire) || !g_gf_n) return 0;
     uint64_t b0 = atomic_load(&g_gf_punched);
     guest_file_sweep();
     return atomic_load(&g_gf_punched) - b0;
