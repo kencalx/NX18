@@ -5678,6 +5678,7 @@ enum { BCRT_CACHE = 8 };   // as many as a pass has colour attachments, so an en
 #define BCRT_IDLE_NS (5000000000ull)   // an entry no pass has taken for this long (5 s) is let go at the next submission's start (bcrt_trim), so a scene that needed large shadows does not pin them
 typedef struct { __strong id<MTLTexture> sh; __strong id<MTLBuffer> buf; uint64_t use, ns, bytes; } bcrt_cache_t;
 static bcrt_cache_t g_bcrtc[BCRT_CACHE]; static uint64_t g_bcrtc_use;
+static int g_bcrt_res_line;   // the source line of bcrt_slot's res_add, as the residency line counts it (g_rs_site), so t_bcrt_cache can check that shadows stop adding to the set
 static int bcrt_cache_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_BCRT_CACHE"); on = !e || atoi(e);
     if (!on) MLOG("render-target shadows: one per attachment number, made again whenever its format or size changes, as before (DM_NVN_BCRT_CACHE=0)"); } return on; }
 static int bcrt_is(id<MTLTexture> t) { for (int i = 0; i < g_nbcrt; i++) if (t && g_bcrt[i].shadow == t) return 1; return 0; }
@@ -5689,9 +5690,20 @@ static uint64_t bcrt_drop(bcrt_cache_t *e, uint64_t fence) {
     uint64_t b = e->bytes; defer_obj_at(e->sh, 0, fence); defer_obj_at(e->buf, 0, fence); e->sh = nil; e->buf = nil; e->bytes = e->use = e->ns = 0; return b;
 }
 // Over the byte cap: the least recently used entries go, never keep (just taken) nor one attached in the open pass. An entry larger than the cap by itself stays while it is attached, and is
-// the first to go at the next miss
+// the first to go at the next miss. A game whose shadow shapes add up to more than the cap (two or three 2048-square D32 maps through R32F views, 32 MiB a shadow and its buffer) would
+// make its shadows again at every pass, as before the cache, and only 'retired' in the residency line would show it; so the first eviction is logged once with every entry's shape and
+// the total, and a device log names the cause if it ever happens
 static void bcrt_cap(int keep) {
     uint64_t total = 0; for (int i = 0; i < BCRT_CACHE; i++) total += g_bcrtc[i].bytes;
+    static int logged;
+    if (total > BCRT_CAP && !logged++) {
+        char shapes[640]; size_t o = 0; shapes[0] = 0;
+        for (int i = 0; i < BCRT_CACHE && o < sizeof shapes; i++) { const bcrt_cache_t *e = &g_bcrtc[i]; if (!e->sh) continue;
+            o += snprintf(shapes + o, sizeof shapes - o, "%s%lux%lu Metal format %lu %.1f MiB%s", o ? ", " : "", (unsigned long)e->sh.width, (unsigned long)e->sh.height, (unsigned long)e->sh.pixelFormat,
+                          e->bytes / 1048576.0, i == keep ? " (new)" : ""); }
+        MLOG("render-target shadows: the cache holds %.1f MiB, over its %llu MiB, so the least recently used shadows go and are made again when next drawn (logged once): %s",
+             total / 1048576.0, (unsigned long long)(BCRT_CAP >> 20), shapes);
+    }
     while (total > BCRT_CAP) {
         int v = -1; for (int i = 0; i < BCRT_CACHE; i++) { bcrt_cache_t *e = &g_bcrtc[i]; if (i == keep || !e->sh || bcrt_is(e->sh)) continue; if (v < 0 || e->use < g_bcrtc[v].use) v = i; }
         if (v < 0) break;
@@ -5730,7 +5742,7 @@ static int bcrt_slot(MTLPixelFormat spf, NSUInteger bw, NSUInteger bh, NSUIntege
         id<MTLTexture> sh = [g_dev newTextureWithDescriptor:d]; id<MTLBuffer> buf = [g_dev newBufferWithLength:img options:MTLResourceStorageModePrivate];
         if (!sh || !buf) { RED_ONCE(74, "render target in a compressed or depth texture: cannot create its %lux%lu-block shadow (Metal format %lu)", (unsigned long)bw, (unsigned long)bh, (unsigned long)spf); return -1; }
         if (e->sh) { bcrt_drop(e, g_fence + 1); if (cache) atomic_fetch_add(&g_bcrt_retired, 1); }
-        res_add(sh); res_add(buf); e->sh = sh; e->buf = buf; e->bytes = sh.allocatedSize + buf.allocatedSize;
+        res_add(sh); res_add(buf); g_bcrt_res_line = __LINE__; e->sh = sh; e->buf = buf; e->bytes = sh.allocatedSize + buf.allocatedSize;
         atomic_fetch_add(&g_bcrt_made, 1);
         if (cache) bcrt_cap(k);
     }
