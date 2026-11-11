@@ -121,7 +121,7 @@ SWITCH_BINDING = [
      'why': "what the display link should do for any game whose frames land two to a refresh: on iOS the host's default for every game without the key (60 ticks) since seven games measured "
             'with it on an iPhone (Ocarina of Time, 13 Sentinels, Mario Kart 8 Deluxe, NieR:Automata, Persona 4 Golden, Persona 5 Royal, Super Mario Odyssey) all improved; on the Mac still the game\'s, '
             "so the six profiles that set 60 keep it, with each game's measurement",
-     'blocked': 'the Mac: no game has been run there with it'}),
+     'blocked': 'no game has been run on the Mac with it'}),
     ('present_snap', '', {'what': 'present snapshots', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'a setting the game was tested with: {DEFAULT_SOON}'}),
     ('screen_aspect', '', {'what': 'a picture of a taller screen\'s own shape (DM_SCREEN_ASPECT)', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the output size is the host's, but the stubs that follow it (projections, layout panes, screen copies) are this build's code"}),

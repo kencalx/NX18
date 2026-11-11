@@ -99,7 +99,7 @@ class PresentTrim(unittest.TestCase):   # DM_PRESENT_TRIM's K by default (nvn_mt
         on = []
         for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv')):
             keys = dict(l.split('\t', 1) for l in tsv.read_text(encoding='utf-8').splitlines() if '\t' in l and not l.startswith('#'))
-            if keys.get('present_trim', '0').strip() == '0': continue
+            if 'present_trim' not in keys: continue   # an explicit 0 needs its note too: it turns the iOS default off for the game
             on.append(tsv.parent.name); note = tsv.parent / 'README.md'
             self.assertIn('present_trim', note.read_text(encoding='utf-8') if note.is_file() else '', f'{tsv.parent.name}: its README.md should give the device run behind present_trim')
         self.assertIn('0400486024DEC000', on)
