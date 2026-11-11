@@ -238,6 +238,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** static analysis reported in [issue #313](https://github.com/seedds/nxnative/issues/313#issuecomment-6543080671); reproduced without game files.
 - **Check:** `t_save_sync_metadata` injects open, write, close and rename failures into the production writer, including simultaneous write/close failures and cleanup changing `errno`. It checks descriptor closure, preservation of existing metadata, diagnostics and a successful replacement. No cloud service or gameplay validation is claimed.
 
+### A cloud save pull that cannot keep this device's save
+
+- **Symptom:** `[RED] save sync: bringing the cloud's save in failed (errno=18): playing on with this device's`, and afterwards the save holds the cloud's save, the new `<date> local` backup is empty, and this device's save is nowhere. Also: each start whose backup fails leaves another empty `<date> local` or `<date> cloud` folder and one older backup of that side is gone.
+- **Cause:** `pull` in `dm/host/save_sync.c` swaps the cloud's folder in first (`renamex_np` `RENAME_SWAP`), so this device's folder sits in `<save>.sync-tmp/in`, then moves it into `<save>-backups` with `rename`. When that rename failed (`EXDEV` with the backups on another volume, `EACCES`, `ENOSPC`), it returned with this device's folder still in `<save>.sync-tmp`, which `mount_once` then removed. Separately, `backup_dir` removed the oldest backups beyond 10 before the new folder held anything, and a caller whose backup then failed left that folder behind, so it counted as one of the 10. Both were in NXNative and in this fork before the merge of 028a2631.
+- **Fix:** when the move into the backups fails, `pull` swaps the folders back, so this device's save is where it was and the log line is true; its backup folder is removed when it is still empty (`rmdir`, never one that already holds a folder of this device's). `backup_dir` no longer prunes: each caller calls `prune_backups` once its backup is complete (the pull, the push's copy of the cloud's save, the damaged cloud file), and removes the folder when the backup fails (the push's copy with `rm_tree`, as it is only a copy).
+- **Found on:** review of the merge of NXNative's 028a2631 (no game; a backups folder on another volume); first fixed on that merge branch (2c259c53) and brought to NX 18's main with the save-sync review of release 1.
+- **Check:** `t_save_sync` (15): a pull whose move into the backups fails with `EXDEV` (the test's `rename` fails into `-backups/`): this device's save stays, nothing is left in `<save>.sync-tmp`, the backup folder goes and the 10 older backups stay; the next start pulls, keeps this device's save and only then removes the oldest beyond 10. On Linux through the shim, plain and under ASan and UBSan. Not run on a device.
+
 ## Add-on content
 
 ### Add-on content from `DM_AOC_DIR`

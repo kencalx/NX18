@@ -21,12 +21,21 @@
 //   (13) a damaged file in the cloud: no save to lose, this device's replaces it and the file is kept in the backups ("cloud")
 //   (14) no front end asks: both changed, the newer one wins at the start (the cloud's: it comes in, this one is kept); the cloud not read at the start and this
 //        device's save newer: not sent that session, the next start sends it and keeps the cloud's in the backups ("cloud")
+//   (15) a pull whose backup cannot be made (the backups folder on another volume: rename fails with EXDEV, made so here): this device's save stays as it was, the backup
+//        folder made for it goes, and no older backup is removed; the next start that can keep it pulls, keeps this one and only then removes the oldest beyond 10
 #include "../hle_fs.c"
 #include <ctype.h>
 #include <sys/wait.h>
 #include <sys/time.h>
 
 struct dm_flags g_flag; uint64_t g_t0_ns;
+// (15): rename into a path that holds g_rename_fail fails as across volumes (EXDEV); every other rename is the system's. save_sync.c is linked into this program, so its
+// calls come here
+static const char *g_rename_fail;
+int rename(const char *from, const char *to) {
+    if (g_rename_fail && strstr(to, g_rename_fail)) { errno = EXDEV; return -1; }
+    return renameat(AT_FDCWD, from, AT_FDCWD, to);
+}
 uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
 void dm_guest_write_prepare(void *a, size_t n) { (void)a; (void)n; }
 
@@ -313,6 +322,29 @@ int main(void) {
     CHECK(session(X, cloud3, NULL, NULL) == 0 && same(p, "x2") && cloud_has(cf3, root, "game.dat", "x2"), "its next start finds its save the newer one: it goes out");
     backup_of(X, "cloud", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
     CHECK(*back && same(q, "y3"), "and the iPhone's save it replaced is kept on the Mac (%s)", back);
+
+    printf("(15) a pull whose backup cannot be made\n");
+    char A3[1200], B3[1200], H5[1200], ch5[1400], bk[1400], oldest[1600];
+    snprintf(A3, sizeof A3, "%s/pmac/save", root); snprintf(B3, sizeof B3, "%s/ppad/save", root); mkd(A3); mkd(B3);
+    snprintf(H5, sizeof H5, "%s/iCloud Drive/Eighth Saves", root); mkd(H5); snprintf(ch5, sizeof ch5, "%s/%s/save.dmsync", H5, id);
+    snprintf(p, sizeof p, "%s/game.dat", A3); put(p, "a1");
+    CHECK(session(A3, H5, NULL, NULL) == 0 && session(B3, H5, "game.dat", "b2") == 0 && cloud_has(ch5, root, "game.dat", "b2"), "the Mac sends a1, the iPad brings it in and sends b2");
+    for (int i = 0; i < 10; i++) {   // ten older backups of this device's: the most that stay
+        snprintf(bk, sizeof bk, "%s-backups/2001-01-%02d 00.00.00 local/save", A3, i + 1); mkd(bk);
+        snprintf(bk, sizeof bk, "%s-backups/2001-01-%02d 00.00.00 local/save/game.dat", A3, i + 1); put(bk, "old");
+    }
+    snprintf(oldest, sizeof oldest, "%s-backups/2001-01-01 00.00.00 local", A3);
+    put(p, "a-unsynced"); set_mtime(p, time(NULL) - 5000);   // both changed, the cloud's newer: it comes in, this one is kept first
+    g_rename_fail = "-backups/";
+    run(A3, H5, NULL, NULL, NULL, NULL, READABLE);
+    g_rename_fail = NULL;
+    snprintf(q, sizeof q, "%s.sync-tmp", A3);
+    CHECK(same(p, "a-unsynced") && cloud_has(ch5, root, "game.dat", "b2") && !exists(q), "the pull fails: this device's save stays as it was, nothing is left beside it");
+    CHECK(backups(A3, "local") == 10 && exists(oldest), "the backup folder made for it goes, and no older backup is removed");
+    CHECK(session(A3, H5, NULL, NULL) == 0 && same(p, "b2"), "the next start pulls");
+    backup_of(A3, "local", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
+    CHECK(*back && same(q, "a-unsynced"), "and keeps this device's (%s)", back);
+    CHECK(backups(A3, "local") == 10 && !exists(oldest), "and only then the oldest backup beyond 10 goes");
 
     printf("== save sync: %d checks, %d failed ==\n", checks, fails);
     if (!fails) { char c[1200]; snprintf(c, sizeof c, "rm -rf '%s'", root); system(c); }
