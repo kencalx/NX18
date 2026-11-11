@@ -1,4 +1,4 @@
-"""NX archives (scripts/pack_nx.py, https://github.com/fab918/nxformat, NXFormat 1.0.2): the reader against the format's own conformance fixtures (dm/tools/tests/fixtures/nx, each accepted or
+"""NX archives (scripts/pack_nx.py, https://github.com/fab918/nxformat, NXFormat 1.0.3): the reader against the format's own conformance fixtures (dm/tools/tests/fixtures/nx, each accepted or
 refused with the error code upstream's index names), hostile archives made here (cut short, counts past the limits, unsafe names, zstd frames that break the rules or expand past their block),
 the packing of versions, DLC and control data, and the NSP script's NX path up to extraction. The archives besides the fixtures are written by nx_writer.py, test code with its own record
 layouts. No network, game files, keys or Xcode needed."""

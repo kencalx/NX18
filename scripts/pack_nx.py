@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# A game in an NX archive (one .nx file: https://github.com/fab918/nxformat, NXFormat 1.0.2, SPEC.md; wire versions 0.2 and 0.3) → the layout build_ipa_from_nsp.py extracts NSPs into,
+# A game in an NX archive (one .nx file: https://github.com/fab918/nxformat, NXFormat 1.0.3, SPEC.md; wire versions 0.2 and 0.3) → the layout build_ipa_from_nsp.py extracts NSPs into,
 # the same as scripts/pack_nup.py writes for a NUP. build_ipa_from_nsp.py calls this when it is given a .nx file, or a folder that holds one, and goes on with its other steps; run on its own,
 # this script does only this step. It reads the format with its own code: nothing of NXFormat's (nxconvert, its C++ reader) is used or needed.
 # An NX holds decrypted Switch 1 and Switch 2 games: per application, snapshots (the base game, updates, standalone updates and DLC), each a complete file tree, never laid over another
@@ -14,7 +14,7 @@
 #     checks it against the Catalog; a DLC's add-on title ID comes from there. To pack a version, the NCA files it needs (Meta, Program, Control, Manual: never Data or delta
 #     fragments; a DLC: Meta, Data, PublicData) are staged into <build folder>/tmp/nca/<label>/, each checked against its SHA-256 as it is streamed out of the archive, and deleted
 #     after the run: an update version needs free space for its base and patch NCAs beside its output (checked first). An update is read in one folder as base and update, its patch
-#     Program NCA laid over the base one (BKTR) by nx_extract. Refused: Switch 2 or platform-unknown games and snapshot types 3 and 4 (nxconvert 1.0.2 writes none: code native),
+#     Program NCA laid over the base one (BKTR) by nx_extract. Refused: Switch 2 or platform-unknown games and snapshot types 3 and 4 (nxconvert 1.0.3 writes none: code native),
 #     anything in a snapshot root but those NCA files, an NCA without the DNCA marker, with an encrypted section, an unflattened sparse layer, an FS header other than version 2 or
 #     hash trees other than SHA-256 and IVFC, a data-only update (code nca), a sparse base game packed alone (code sparse: it runs only with its update).
 #     nx_extract writes extract/v<version>/ (its log: logs/extract_v<version>.log, with display version and build IDs) through extract/v<version>.partial/, and a stamp
@@ -957,7 +957,7 @@ def scan(n, want=None, platform=None):
     snaps = [s for s in a.snapshots if s.program == p.index and s.type != DLC]
     for s in a.snapshots:
         if s.kind != 'native' or s not in snaps and s.type != DLC: continue
-        if a.platform != 1: raise Error(f'{s.name}: NCA snapshots of a {PLATFORMS[a.platform]} game are not supported: NXFormat 1.0.2 writes only Switch 1 games that way; make the NX from '
+        if a.platform != 1: raise Error(f'{s.name}: NCA snapshots of a {PLATFORMS[a.platform]} game are not supported: NXFormat 1.0.3 writes only Switch 1 games that way; make the NX from '
                                         'extracted folders (nxconvert pack-tree / pack-nup)', 'native')
         if s.type in (STANDALONE, UNKNOWN): raise Error(f'{s.name}: an NCA snapshot of type {s.type} ({TYPES[s.type]}), which nxconvert never writes; not supported', 'native')
     for s in snaps:

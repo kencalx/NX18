@@ -1,4 +1,4 @@
-"""Writes NX archives (https://github.com/fab918/nxformat, SPEC.md 1.0.2, wire versions 0.2 and 0.3) for the tests of scripts/pack_nx.py. Test code only: it declares its own record layouts
+"""Writes NX archives (https://github.com/fab918/nxformat, SPEC.md 1.0.3, wire versions 0.2 and 0.3) for the tests of scripts/pack_nx.py. Test code only: it declares its own record layouts
 from the spec and shares nothing with the reader, so a reader bug the writer repeats would still fail on the upstream conformance fixtures (dm/tools/tests/fixtures/nx).
 
 write(path, apps, ...) writes a compact archive: both header slots, blocks deduplicated by content (RAW, or one zstd frame each when that is smaller), the CRC-32C table, Media (NACP and icons),
