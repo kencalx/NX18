@@ -81,6 +81,7 @@ def skey_problem(b, shmap, mesh=False):
 def row_problem(line, shmap):
     """Why a list's row is refused, or None"""
     if '/' in line or '\\' in line: return 'a path'
+    if '\r' in line: return 'a carriage return: the host splits lines at \\n only, and drops an R or C row that ends in \\r'
     c = line.split('\t')
     kind = c[0]
     if kind == 'S':
@@ -101,8 +102,9 @@ def row_problem(line, shmap):
     return f'an unknown row kind {kind!r}'
 
 
-def rows_of(text):
-    """The rows of a list (no comments, no blank lines), with '\\r' line ends taken off"""
+def rows_of(text, strip_cr=True):
+    """The rows of a list (no comments, no blank lines), with '\\r' line ends taken off (add's sources); strip_cr off: as the host reads them (check)"""
+    if not strip_cr: return [ln for ln in text.split('\n') if ln and not ln.startswith('#')]
     return [ln.rstrip('\r') for ln in text.split('\n') if ln.rstrip('\r') and not ln.startswith('#')]
 
 
@@ -173,7 +175,7 @@ def main(argv=None):
         if not paths: ap.error('check: a list, or --game')
         status = 0
         for p in paths:
-            rows = rows_of(Path(p).read_text(encoding='utf-8'))
+            rows = rows_of(Path(p).read_bytes().decode('utf-8'), strip_cr=False)   # bytes as they are: read_text would turn \r\n into \n, which the host does not
             keep, bad = collect(rows, shmap)
             n = counts(keep)
             print(f'{p}: {len(rows)} rows, {n["rows"]} kept (S {n["S"]}, R {n["R"]}, C {n["C"]}, M {n["M"]}), {len(rows) - len(keep) - len(bad)} repeated, {len(bad)} refused')
