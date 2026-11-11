@@ -80,6 +80,13 @@ import WebKit
         expect(abs(g.web.pageZoom - 1000.0 / 1280) < 0.001, "at the window's scale")
         _ = spin(1) { js("innerWidth") as? Int == 1280 }
         expect(js("innerWidth") as? Int == 1280 && js("innerHeight") as? Int == 720, "its viewport is the console's 1280x720 (\(js("innerWidth") ?? "-")x\(js("innerHeight") ?? "-"))")
+        _ = js("document.getElementById('item2').focus()")
+        expect(spin(5) { js("document.getElementById('preview').textContent") as? String == "Preview of topic 2" }, "a focused item's onfocus runs in a window that is not focused")
+        _ = js("document.getElementById('item2').click()")
+        expect(spin(10) { log().hasPrefix("topic2 page") && g.footer == ["B"] }, "a link opens another page (\(log()))")
+        g.press("B")
+        expect(spin(10) { log() == "ready,menu" && js("getComputedStyle(document.querySelector('.contents')).opacity") as? String == "1" },
+               "its Back: the menu's page, loaded again and shown, not as it was left (\(log()))")
         _ = js("document.getElementById('item1').click()")
         expect(spin(5) { log().hasSuffix("topic1") && g.footer == ["B", "L", "R"] }, "a click opens topic one, which assigns B, L and R (\(g.footer.sorted()))")
         g.press("R")

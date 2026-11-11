@@ -10,8 +10,11 @@ What it does as the console's guides do:
 - When `window.nx` exists it cancels every touch (`preventDefault` on touchstart, touchmove and touchend), and its menu items are `javascript:void(0)` links that act only through `onclick`.
 - It waits for the `NXFirstPaintEndAfterLoad` event before loading its pictures and setting up.
 - It assigns B (back to the menu, or the end from the menu with `nx.endApplet`) and L / R (the previous and next topic) with `nx.footer.setAssign`; its drawn button hints have no handlers.
-- Topic 2 is another page (`topic2.html`), whose Back goes back in the history; the menu's Finish ends the guide by going to ` http://localhost/ `.
-- The arrow keys move the menu's focus (`document.onkeydown`, keyCode 37-40).
+- Topic 2 is another page (`topic2.html`), whose Back goes back in the history; the menu's page fades out as it leaves for it and shows again only when it loads (as from the
+  back-forward cache it would stay faded). The menu's Finish ends the guide by going to ` http://localhost/ `.
+- The arrow keys move the menu's focus from the focused item (`document.onkeydown`, keyCode 37-40); nothing is focused when the menu comes up. Each item's `onfocus` shows its
+  preview (the console's cursor is the focus).
+- An invisible page (`.later-page`, opacity 0) lies over the whole menu page, as guides stack their pages in one place and show one by its opacity.
 
 `window.guideLog` records what happened (`ready`, `menu`, `topic1`, `end`, ...) for the tests to read.
 
@@ -23,4 +26,4 @@ SIMCTL_CHILD_DM_APP_DM=/path/to/folder/with/launcher.json SIMCTL_CHILD_DM_HTML=$
 ```
 
 The page should fill the height under the header in landscape, whole; a tap on a topic opens it, the header's back button or a swipe from the left edge goes back,
-L and R turn the topics, and Finish closes the guide.
+L and R (or a swipe across the page) turn the topics, the controller's down focuses an item and shows its preview, and Finish closes the guide.

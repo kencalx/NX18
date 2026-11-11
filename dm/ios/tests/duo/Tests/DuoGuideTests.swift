@@ -6,8 +6,9 @@ import XCTest
 
 // The game guide viewer (GuideViewer.swift, LauncherGuideFiles.swift) on the placeholder guide (dm/ios/tests/fixtures/guide: made up, written as the console's guides are). The
 // guide is shown in the real LauncherGuideSheet in a window of the iPhone 18 Pro Max's size, in landscape and then portrait. It checks the page is laid out at 1280x720 and
-// scaled to fit, whole, under the header; that the console's first-paint event came (the guide sets up only then); that a tap on a menu item the page cancels the touches of
-// opens its topic; the page's footer buttons (Back, L / R) as the header and the controller press them; a link to another page and back; and the end URL closing the viewer.
+// scaled to fit, whole, under the header; that the console's first-paint event came (the guide sets up only then); the D-pad's first down focusing the first item and the items'
+// onfocus running; that a tap on a menu item the page cancels the touches of opens its topic, under an invisible page stacked over it; the page's footer buttons (Back, L / R) as
+// the header, a swipe and the controller press them; a link to another page and back, the page loaded again; and the end URL closing the viewer.
 // The taps are touch events dispatched in the page at the item's place: what WebKit gives the page for a finger there, except that the page's script cannot tell them apart
 // (it cancels both); a tap on the Simulator's screen is in the fixture's README.md
 final class DuoGuideTests: XCTestCase {
@@ -87,9 +88,22 @@ final class DuoGuideTests: XCTestCase {
         }
         try checkFit("Landscape")
         XCTAssertTrue(box?.gestureRecognizers?.contains { ($0 as? UIScreenEdgePanGestureRecognizer)?.edges == .left } ?? false, "A swipe from the left edge goes back")
+        for d in [UISwipeGestureRecognizer.Direction.left, .right] {
+            XCTAssertTrue(box?.gestureRecognizers?.contains { ($0 as? UISwipeGestureRecognizer)?.direction == d } ?? false, "A swipe across the page turns it (\(d.rawValue))")
+        }
 
-        // A tap on a menu item whose page cancels its touches: the item's onclick runs
+        // Nothing is focused when the menu comes up, and the page moves its focus only from a focused item: the first down focuses the first item, whose onfocus shows its
+        // preview (WebKit sends no focus events in a view that is not focused; the shim does)
+        XCTAssertEqual(js(web, "document.activeElement === document.body") as? Bool, true, "Nothing focused at first")
+        XCTAssertEqual(scroller.pad?(.down), true)
+        waitUntil("Down: the first item has the focus") { js(web, "document.activeElement.id") as? String == "item1" }
+        waitUntil("and its onfocus ran") { js(web, "document.getElementById('preview').textContent") as? String == "Preview of topic 1" }
+        _ = scroller.pad?(.down)
+        waitUntil("Down again: the second item, its onfocus too") { js(web, "document.getElementById('preview').textContent") as? String == "Preview of topic 2" }
+
+        // A tap on a menu item whose page cancels its touches: the item's onclick runs, though an invisible page (opacity 0) lies over it, as guides stack their pages
         XCTAssertEqual(js(web, "document.querySelector('.menu a').getAttribute('href')") as? String, "javascript:void(0)")
+        XCTAssertEqual(js(web, "(function () { var b = document.getElementById('item1').getBoundingClientRect(); return document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2).closest('.later-page') !== null; })()") as? Bool, true, "The invisible page is on top")
         tap(web, "item1")
         waitUntil("The tap opened topic one") { log(web).last == "topic1" }
         XCTAssertNotNil(scroller.pad, "The controller goes to the page")
@@ -99,6 +113,10 @@ final class DuoGuideTests: XCTestCase {
         waitUntil("R turned to topic three") { log(web).last == "topic3" }
         XCTAssertEqual(scroller.pad?(.l), true)
         waitUntil("L turned back to topic one") { log(web).last == "topic1" }
+        box?.turn?("R")
+        waitUntil("A swipe to the left: the next topic (R)") { log(web).last == "topic3" }
+        box?.turn?("L")
+        waitUntil("A swipe to the right: the previous one (L)") { log(web).last == "topic1" }
         XCTAssertEqual(scroller.pad?(.b), true, "B is the page's")
         waitUntil("B went back to the menu") { log(web).last == "menu" }
         XCTAssertEqual(closed, 0, "and did not close the viewer")
@@ -119,6 +137,9 @@ final class DuoGuideTests: XCTestCase {
         waitUntil("The viewer can go back") { web.canGoBack }
         _ = scroller.pad?(.b)
         waitUntil("B: back on the menu's page") { (js(web, "location.pathname") as? String)?.hasSuffix("/index.html") == true && log(web).contains("menu") }
+        // which faded out as it left: it is loaded again (not shown as it was left, from the back-forward cache) and set up again
+        waitUntil("The menu's page loaded again and set up") { log(web) == ["ready", "menu"] }
+        XCTAssertEqual(js(web, "getComputedStyle(document.querySelector('.contents')).opacity") as? String, "1", "and shows")
         XCTAssertEqual(closed, 0)
 
         // Portrait: still whole, as wide as the screen

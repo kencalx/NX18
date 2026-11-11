@@ -20,12 +20,15 @@ import WebKit
     // need on a touch screen). Every nx call it lacks does nothing and nothing throws; nx.endApplet, nx.exit and window.close post nx18Close.
     // - The footer's buttons (nx.footer.setAssign: the page's Back on B, its page turning on L / R) are kept, and their names posted to nx18State when they change: the viewer
     //   shows a Back, L and R button for them and sends the controller's buttons there (__nx18.footer). B with nothing assigned is the viewer's own back ('back').
-    // - The console's first paint (NXFirstPaintEndAfterLoad on window) once each page has loaded and painted: guides wait for it before loading their pictures and setting up.
+    // - The console's first paint (NXFirstPaintEndAfterLoad on window) once each page has loaded and painted: guides wait for it before loading their pictures and setting up;
+    //   a page shown again from the back-forward cache is loaded again (the guide set it up on its load and faded it out as it left).
     // - A tap the page cancelled: guides written for the console call preventDefault on every touch when window.nx exists, and WebKit then sends no click. A one-finger tap that
-    //   did not move, whose touchstart or touchend the page cancelled and that no click followed, clicks what it landed on (its link, button or focusable ancestor), after focusing it.
+    //   did not move, whose touchstart or touchend the page cancelled and that no click followed, clicks what it landed on (its link, button or focusable ancestor), after focusing it;
+    //   what it landed on is what shows there, under any invisible (opacity 0) page stacked over it.
     // - The controller as keys (__nx18.key: the arrow keys 37-40 with keyCode set, A as 32 that clicks the focused link when the page does not take it), and for a page with no key
     //   handler of its own, the arrows move the focus to the nearest link or button that way (else up / down scroll it).
-    // - :focus rules copied for [data-dm-focus], which follows the focus (WebKit matches :focus only in the key window, and on the iPhone the web view never takes the keyboard)
+    // - :focus rules copied for [data-dm-focus], which follows the focus (WebKit matches :focus only in the key window, and on the iPhone the web view never takes the keyboard),
+    //   and the focus and blur events WebKit then does not send (guides show an item's picture and text in its onfocus); up / down with nothing focused focus the first item
     static let shim = """
     (function () {
       if (window.__nx18) return;
@@ -50,7 +53,9 @@ import WebKit
         })
       });
       window.close = close;
-      window.addEventListener('pageshow', report);   // a page back from the back-forward cache keeps its buttons
+      // A page back from the back-forward cache is loaded again, as the console's browser does: guides fade the page out as they leave it and set it up only on its load (and
+      // its first paint), so the page as it was left stays black and takes no taps
+      window.addEventListener('pageshow', function (e) { if (e.persisted) location.reload(); else report(); });
 
       // The page's look: the Nintendo extension font's button icons (the host's stand-in), no tap highlight or text selection, no focus ring when the page asks for none
       var style = function () {
@@ -80,11 +85,32 @@ import WebKit
         mark(document.activeElement);
       };
       // The focus as it changes: a page focused in a view that is not the key one gets no focus events, so the focused element is also looked at once a frame
-      var focused = null;
-      var follow = function () { if (document.activeElement !== focused) { focused = document.activeElement; mark(focused); } requestAnimationFrame(follow); };
-      requestAnimationFrame(follow);
       document.addEventListener('focus', function (e) { mark(e.target); }, true);
       document.addEventListener('blur', function () { setTimeout(function () { mark(document.activeElement); }, 0); }, true);
+      // Its focus and blur events too: WebKit sends none in a page whose view is not focused (the iPhone's web view never takes the keyboard), and guides do their work in
+      // onfocus (the console's cursor is the focus: an item's picture, video and text show when it is focused). A focus change no event reported gets them here, at once after
+      // focus() or blur() and once a frame for any other change; when WebKit sent them (a focused view), nothing is sent twice
+      var heard = {f: null, b: null}, seen = document.activeElement;
+      document.addEventListener('focus', function (e) { heard.f = e.target; if (heard.b === e.target) heard.b = null; }, true);
+      document.addEventListener('blur', function (e) { heard.b = e.target; if (heard.f === e.target) heard.f = null; }, true);
+      var plain = function (el) { return !el || el === document.body || el === document.documentElement || !el.dispatchEvent; };
+      var fire = function (el, type, rel) {
+        try { el.dispatchEvent(new FocusEvent(type, {bubbles: type === 'focusin' || type === 'focusout', relatedTarget: rel || null})); } catch (e) { console.error(e && e.message); }
+      };
+      var settle = function () {
+        var old = seen, now = document.activeElement;
+        if (now === old) return;
+        seen = now;
+        if (!plain(old) && heard.b !== old) { fire(old, 'blur', now); fire(old, 'focusout', now); }
+        if (!plain(now) && heard.f !== now && document.activeElement === now) { fire(now, 'focus', old); if (document.activeElement === now) fire(now, 'focusin', old); }
+      };
+      ['focus', 'blur'].forEach(function (m) {
+        var f = HTMLElement.prototype[m];
+        if (f) HTMLElement.prototype[m] = function () { var r = f.apply(this, arguments); settle(); return r; };
+      });
+      var focused = null;
+      var follow = function () { settle(); if (document.activeElement !== focused) { focused = document.activeElement; mark(focused); } requestAnimationFrame(follow); };
+      requestAnimationFrame(follow);
 
       // The console's first paint after the load: the page's own load handlers have run, and it has painted once (or 100 ms went by: a view not on the screen paints no frames)
       window.addEventListener('load', function () {
@@ -96,6 +122,17 @@ import WebKit
 
       // A tap the page cancelled becomes a click (decided after the touch's listeners have all run: defaultPrevented stays set on the event)
       var CLICKABLE = 'a[href],button,input,select,textarea,label,summary,[onclick],[tabindex]';
+      // What the player sees at a point: the topmost element there that is not see-through. Guides stack all their pages at one place and show one by its opacity (the console
+      // cancels their touches, so a page made invisible on top of the shown one never mattered there): a tap is for what is shown, not for an invisible page over it
+      var shown = function (n) {
+        for (; n && n.nodeType === 1; n = n.parentElement) { var st = getComputedStyle(n); if (st.opacity === '0' || st.visibility === 'hidden') return false; }
+        return true;
+      };
+      var seenAt = function (x, y) {
+        var all = document.elementsFromPoint ? document.elementsFromPoint(x, y) : [document.elementFromPoint(x, y)];
+        for (var i = 0; i < all.length; i++) if (all[i] && shown(all[i])) return all[i];
+        return all[0] || null;
+      };
       var tap = null;
       window.addEventListener('touchstart', function (e) {
         var t = e.touches[0];
@@ -113,7 +150,7 @@ import WebKit
         setTimeout(function () {
           if (tap === s) tap = null;
           if (s.clicked || !(s.start.defaultPrevented || e.defaultPrevented)) return;   // WebKit clicked, or will: the page did not cancel the touch
-          var el = document.elementFromPoint(s.x, s.y); if (!el) return;
+          var el = seenAt(s.x, s.y); if (!el) return;
           var c = (el.closest && el.closest(CLICKABLE)) || el;
           if (c.focus) { try { c.focus({preventScroll: true}); } catch (x) {} }
           if (c.click) c.click();
@@ -170,7 +207,10 @@ import WebKit
         key: function (code) {
           var el = target(), go = key('keydown', code, el);
           key('keyup', code, el);
-          if (!go || reads()) return;
+          if (!go) return;
+          // Nothing focused yet (a page that moves its focus from the focused item, as the console's cursor starts on one): up / down the page did not take focus the first item
+          if (plain(document.activeElement) && (code === 38 || code === 40)) { var f = nearest(code); if (f) { try { f.focus({preventScroll: false}); } catch (x) {} return; } }
+          if (reads()) return;
           var n = nearest(code);
           if (n) { try { n.focus({preventScroll: false}); } catch (x) {} }
           else if (code === 38 || code === 40) window.scrollBy(0, code === 40 ? 160 : -160);

@@ -4,8 +4,8 @@
 // The guide's pages were written for the Switch's web applet at 1280x720: they are laid out at that size and scaled to fit under the header, whole (LauncherGuideBox), and a script
 // at document start gives them window.nx and what the console's browser does for them (LauncherGuideFiles.swift shim). The header's Back, a swipe from the left edge and the
 // controller's B go back: the page's own Back when it assigned one (nx.footer B), else the previous page, else the viewer closes. The page's L / R page turning shows as two buttons
-// in the header and is the controller's L / R; the D-pad and stick are its arrow keys and A presses; ZL / ZR switch between the guide and the manual. The calls that end the applet
-// (nx.endApplet, window.close) and the console's end URL (http://localhost/) close the viewer.
+// in the header, a swipe across the page and the controller's L / R; the D-pad and stick are its arrow keys and A presses; ZL / ZR switch between the guide and the manual.
+// The calls that end the applet (nx.endApplet, window.close) and the console's end URL (http://localhost/) close the viewer.
 // The pages are served from the guide's .htdocs through a scheme of their own, with the shim, the Content-Security-Policy and the network block list: LauncherGuideFiles.swift,
 // which the Mac app's guide window shares (dm/mac/Launcher.swift MacGuideWindow)
 import PDFKit
@@ -168,11 +168,12 @@ struct LauncherGuideSheet: View {
 
 // The page's area: the web view laid out at the console's 1280x720 and scaled to fit the area inside insets, whole and centred (the rest is the letterbox, in the viewer's
 // background), as the in-game viewer does (dm/host/web_apple.m -place). The page's own scrolling stays for a page taller than the screen, without bounce. A swipe from the
-// left edge goes back
+// left edge goes back; a swipe across the page turns its pages when it assigned L / R (to the left: R, the next)
 final class LauncherGuideBox: UIView, UIGestureRecognizerDelegate {
     let web: WKWebView
     var insets: UIEdgeInsets = .zero { didSet { if insets != oldValue { setNeedsLayout() } } }
     var back: (() -> Void)?
+    var turn: ((String) -> Void)?   // a swipe across the page: "R" (to the left) or "L" (to the right), the page's own page turning
     private let cue = UIImageView(image: UIImage(systemName: "chevron.backward.circle.fill"))
 
     init(web: WKWebView) {
@@ -190,6 +191,13 @@ final class LauncherGuideBox: UIView, UIGestureRecognizerDelegate {
         edge.edges = .left
         edge.delegate = self
         addGestureRecognizer(edge)
+        for d in [UISwipeGestureRecognizer.Direction.left, .right] {
+            let swipe = UISwipeGestureRecognizer(target: self, action: #selector(turned(_:)))
+            swipe.direction = d
+            swipe.delegate = self
+            swipe.require(toFail: edge)   // a swipe from the left edge is the back swipe only
+            addGestureRecognizer(swipe)
+        }
     }
     required init?(coder: NSCoder) { nil }
 
@@ -219,6 +227,7 @@ final class LauncherGuideBox: UIView, UIGestureRecognizerDelegate {
         default: fade()
         }
     }
+    @objc private func turned(_ g: UISwipeGestureRecognizer) { turn?(g.direction == .left ? "R" : "L") }
     private func fade() { UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.2) { self.cue.alpha = 0 } }
     // The swipe and the page's touches together: the page sees its touches, the swipe still goes back
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
@@ -245,6 +254,7 @@ struct LauncherGuideWebView: UIViewRepresentable {
         box.backgroundColor = UIColor(NX18Palette.background)
         box.insets = insets
         box.back = { [weak model] in model?.back() }
+        box.turn = { [weak model] b in if model?.footer.contains(b) == true { model?.press(b) } }
         model.web = web
         context.coordinator.watch(web)
         guard let start = context.coordinator.files.url(for: index) else {

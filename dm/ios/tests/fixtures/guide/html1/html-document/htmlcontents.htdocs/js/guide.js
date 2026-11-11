@@ -16,11 +16,15 @@ function show(n) {
   var s = document.querySelectorAll('.section');
   for (var i = 0; i < s.length; i++) s[i].className = 'section' + (s[i].id === 'topic' + n ? ' is-shown' : '');
   document.getElementById('menu').style.display = n ? 'none' : '';
+  document.getElementById('preview').style.display = n ? 'none' : '';
   log(n ? 'topic' + n : 'menu');
   assignButtons();
 }
+// The focused item's preview, set by its onfocus (the console's cursor is the focus)
+function preview(n) { document.getElementById('preview').textContent = n === 9 ? 'Finish the guide' : 'Preview of topic ' + n; }
 function menuSelect(n) {
-  if (n === 2) { log('go topic2'); location.href = 'topic2.html'; return; }
+  // Leaving for another page: the page fades out first, and only its load (setup) shows it again
+  if (n === 2) { log('go topic2'); document.body.className = 'is-leaving'; location.href = 'topic2.html'; return; }
   if (n === 9) { log('end'); location.href = ' http://localhost/ '; return; }
   show(n);
 }
@@ -38,6 +42,7 @@ function assignButtons() {
 document.onkeydown = function (e) {
   var items = Array.prototype.slice.call(document.querySelectorAll('.menu a'));
   var i = items.indexOf(document.activeElement);
+  if (i < 0) return;   // the arrows move the focus from the focused item: nothing focused, nothing moves
   if (e.keyCode === 40) { e.preventDefault(); items[Math.min(items.length - 1, i + 1)].focus(); }
   else if (e.keyCode === 38) { e.preventDefault(); items[Math.max(0, i - 1)].focus(); }
 };
@@ -45,9 +50,9 @@ function setup() {
   var imgs = document.querySelectorAll('img[data-src]');
   for (var i = 0; i < imgs.length; i++) imgs[i].src = imgs[i].getAttribute('data-src');
   document.body.setAttribute('data-ready', '1');
+  document.body.className = '';
   log('ready');
   show(0);
-  var first = document.querySelector('.menu a'); if (first) first.focus();
 }
 if (window.nx) window.addEventListener('NXFirstPaintEndAfterLoad', setup);
 else window.addEventListener('load', setup);

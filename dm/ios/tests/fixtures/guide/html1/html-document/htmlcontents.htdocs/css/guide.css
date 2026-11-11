@@ -11,3 +11,6 @@ h1 { position: absolute; left: 80px; top: 40px; margin: 0; font-size: 48px; }
 .hints { position: absolute; left: 0; bottom: 0; width: 1280px; height: 60px; line-height: 60px; text-align: right; background: #101828; }
 .hints span { margin-right: 40px; }
 #bottom-edge { position: absolute; left: 0; bottom: 0; width: 8px; height: 8px; background: #d9663f; }
+.preview { position: absolute; left: 720px; top: 280px; width: 480px; margin: 0; }
+.later-page { position: absolute; left: 0; top: 0; width: 1280px; height: 720px; opacity: 0; background: #101828; }
+.is-leaving .contents { opacity: 0; }
