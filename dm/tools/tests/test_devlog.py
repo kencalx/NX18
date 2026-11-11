@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# scripts/devlog.py: the long frames the frame step's own holds make (not counted), and memory read as plateaus between the steps an area load makes, the graphics ledger and guest charged among them, from logs written here
+# scripts/devlog.py: the long frames the frame step's own holds make (not counted), and memory read as plateaus between the steps an area load makes, the graphics ledger and guest charged among them, from logs written here; the movie lines (AAC channel order, VideoToolbox sessions made again) from the host's own formats
 import importlib.util, re, unittest
 from pathlib import Path
 
@@ -271,6 +271,32 @@ class BundledArchive(unittest.TestCase):   # the pipeline archive bundled with t
         src = (REPO / 'dm/gfx/nvn/nvn_mtl.m').read_text(errors='replace')
         self.assertGreaterEqual(src.count('foreground): this start leaves the archive out and the device builds the bases itself'), 1)
         self.assertGreaterEqual(src.count('"in the foreground): this start leaves the archive out and the device builds the bases itself'), 1)   # PSG_WITH2's line
+
+class MovieLines(unittest.TestCase):   # hle_movie.c's AAC channel order lines and hle_movie_vt_rebuild.h's session line, their formats filled in, read into the movies summary
+    def fmt(self, rel: str, start: str) -> str:
+        src = (REPO / rel).read_text(errors='replace')
+        m = re.search(r'"(' + re.escape(start) + r'(?:[^"\\]|\\.)*)"', src)
+        self.assertTrue(m, f'{start} in {rel}')
+        assert m
+        return m.group(1).replace("\\'", "'")
+
+    def fill(self, f: str, strs: tuple) -> str:
+        it = iter(strs)
+        return re.sub(r'%(?:#x|zu|d|s)', lambda k: {'%d': '6', '%#x': '0x7c0006', '%zu': '32'}.get(k.group(0)) or next(it), f)
+
+    def test_aac_order_and_session_lines(self):
+        aac = "[movie] AAC: %d channels in AudioToolbox's order %s (layout tag %#x), "
+        lines = ['[dm] ' + self.fill(self.fmt('dm/host/hle_movie.c', aac + 'handed out'), ('C L R Ls Rs LFE', 'L R C LFE Ls Rs')),
+                 '[dm] ' + self.fill(self.fmt('dm/host/hle_movie.c', aac + 'already'), ('L R C LFE Ls Rs',)),
+                 '[dm] ' + self.fill(self.fmt('dm/host/hle_movie.c', aac + 'kept'), ('C L R Ls Rs LFE', 'L R C LFE Ls Rs'))]
+        vt = self.fmt('dm/host/hle_movie_vt_rebuild.h', '%s: VideoToolbox session made again after')
+        lines.append('[dm] [movie] ' + self.fill(vt, ('H.264', 'kVTInvalidSessionErr', 'IDR')))
+        mv = read(lines)['movies']
+        self.assertEqual([(a['channels'], a['audiotoolbox'], a['console'], a['set']) for a in mv['aac']],
+                         [(6, 'C L R Ls Rs LFE', 'L R C LFE Ls Rs', 'reordered'), (6, 'L R C LFE Ls Rs', 'L R C LFE Ls Rs', 'already'),
+                          (6, 'C L R Ls Rs LFE', 'L R C LFE Ls Rs', 'kept (DM_AAC_LAYOUT=0)')])
+        self.assertEqual((mv['vt_rebuilds'], mv['vt_refed']), (1, 6))
+
 
 if __name__ == '__main__':
     unittest.main()
