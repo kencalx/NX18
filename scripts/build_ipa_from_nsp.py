@@ -1789,7 +1789,7 @@ GLSLC_KEYS = '5:A*7/4'   # A every 4 s from 5 s on during the capture run (DM_KE
 # button press (0 in 200 s without input, both 3 s after the first A); the run keeps its own save and temporary storage, so whatever the presses choose is thrown away with them
 
 
-def glslc_named(g, folder):   # the capture files of one kind the profile's shader map was built from (column 5: /<folder>/<name>#GLSLC@…)
+def glslc_named(g, folder):   # the capture files of one kind the profile's shader map was built from (column 5: /<folder>/<name>#GLSLC@…): the boot capture's, which glslc_wanted names by file
     try: t = g.table('shader_map.tsv').read_text(errors='replace')
     except OSError: return set()
     return set(re.findall(rf'/{folder}/([0-9a-f]{{16}}\.glslc)#', t))
@@ -1830,12 +1830,35 @@ def glslc_play_sources(nsp_dir, work, app, extra=()):
             Path.home() / 'Library/Application Support/nxnative' / f'{app:016X}' / GLSLC_PLAY]
 
 
+def glslc_play_keys(paths, g):
+    """{file name: {(stage, key)}} of GLSLC output files, as shader_split.py reads and keys them (--glslc-keys: glslc_shaders and skey with the profile's shader_key_skip, the key the host's
+    nvn_shkey.h computes); an empty set for a file the split reads no shader out of. None when the split could not say"""
+    if not paths: return {}
+    r = subprocess.run([sys.executable, Path(__file__).resolve().parents[1] / 'dm/gfx/tools/shader_split.py', '--glslc-keys', *map(str, paths)],
+                       env=dict(os.environ, DM_GAME=str(g.dir)), capture_output=True, text=True)
+    if r.returncode:
+        say(f'[RED] shader_split.py --glslc-keys failed (exit {r.returncode}): {" ".join((r.stderr or r.stdout).strip().splitlines()[-1:])}; the shaders captured in play are taken unchecked'); return None
+    out = {Path(p).name: set() for p in paths}
+    for ln in r.stdout.splitlines():
+        c = ln.split('\t')
+        if len(c) == 3 and c[0] in out and c[2] != '-': out[c[0]].add((c[1], c[2]))
+    return out
+
+
+def shader_sources(g):   # {key: source column} of the profile's shader map
+    try: t = g.table('shader_map.tsv').read_text(errors='replace')
+    except OSError: return {}
+    return {c[3]: c[4] for c in (ln.split('\t') for ln in t.splitlines()) if len(c) > 4 and c[0].endswith('.bin')}
+
+
 def gather_glslc_play(d, sources, g):
     """The outputs a game compiled with its own GLSLC while it was played, past the boot the capture runs (Catherine: Full Body compiles one for every material its shader cache has no file for:
-    loading a save at Night 2 compiles 21): the app and the Mac host save each one the build did not have into glslc_play beside the save (hle_glslc.c), and the files of sources go to
-    <version dir>/glslc_play, where shader_split.py reads them as the /glslc_play/ rows. The folder is made again at every build from what the sources hold now (none: it is removed), so the split's
-    reuse follows them. A file that is not a whole GLSLC output named by its FNV-1a 64 is left out. The profile's tables are compared without these rows (dlc_only_shader_change): a profile row
-    whose file no source holds, or a file the profile does not name, gives a shader-only derived profile, as installed DLC does. Returns the names taken"""
+    loading a save at Night 2 compiles 21): the app and the Mac host save each one with a stage whose key the build's shader map lacks into glslc_play beside the save (hle_glslc.c), and the files
+    of sources go to <version dir>/glslc_play, where shader_split.py reads them as the /glslc_play/ rows. The folder is made again at every build from what the sources hold now (none: it is removed),
+    so the split's reuse follows them. A file that is not a whole GLSLC output named by its FNV-1a 64, or one the split reads no shader out of, is left out.
+    Keys decide, as in the split (play_shaders: a row only for a key no other source has) and the host, not file names: a profile /glslc_play/ row is held when some file has its key, and only keys
+    the profile's tables lack are new. The profile's tables are compared without these rows (dlc_only_shader_change): a profile row whose key no source holds, or a new key, gives a shader-only
+    derived profile, as installed DLC does. Returns the names taken"""
     got, bad = {}, []
     for s in dict.fromkeys(sources):
         try: names = sorted(n for n in os.listdir(s) if n.endswith('.glslc') and not n.startswith('._'))
@@ -1845,7 +1868,7 @@ def gather_glslc_play(d, sources, g):
             if n in got: continue
             try: b = (s / n).read_bytes()
             except OSError: bad.append(s / n); continue
-            if glslc_whole(b) and n == f'{fnv1a64(b):016x}.glslc': got[n] = b; took += 1
+            if glslc_whole(b) and n == f'{fnv1a64(b):016x}.glslc': got[n] = (s, b); took += 1
             else: bad.append(s / n)
         if names: say(f'shaders captured in play: {took} of the {len(names)} files in {s}')
     for p in bad: say(f'[RED] {p} is not a whole GLSLC output named by its FNV-1a 64 (as hle_glslc.c saves them): left out')
@@ -1853,13 +1876,21 @@ def gather_glslc_play(d, sources, g):
     rmtree(tmp)
     if got:
         tmp.mkdir(parents=True)
-        for n, b in got.items(): (tmp / n).write_bytes(b)
+        for n, (_, b) in got.items(): (tmp / n).write_bytes(b)
+    keys = glslc_play_keys(sorted(tmp / n for n in got), g)
+    for n in [n for n in got if keys is not None and not keys[n]]:
+        say(f'[RED] {got.pop(n)[0] / n}: the split reads no shader out of it, left out'); (tmp / n).unlink()
+    if not got: rmtree(tmp)
     swap_in_changed(tmp, dst)
-    named = glslc_named(g, GLSLC_PLAY)
-    if named - got.keys():
-        say(f'[RED] the profile names {len(named - got.keys())} shaders the game compiles only while it is played (its shader map\'s /glslc_play/ rows), and no glslc_play folder holds them: '
+    if keys is None: return set(got)
+    prof, have = shader_sources(g), {k for n in got for _, k in keys[n]}
+    lost = {k for k, src in prof.items() if src.startswith(f'/{GLSLC_PLAY}/')} - have
+    if lost:
+        say(f'[RED] the profile names {len(lost)} shaders the game compiles only while it is played (its shader map\'s /glslc_play/ rows), and no glslc_play folder holds them: '
             f'draws with them stay missing in this build. Play the game on the Mac or the iPhone and put the glslc_play folder beside the save into the NSP folder (the game profile\'s README)')
-    if got.keys() - named: say(f'{len(got.keys() - named)} shaders captured in play that the profile does not name go into this build\'s shader tables')
+    if have - prof.keys(): say(f'{len(have - prof.keys())} shaders captured in play that the profile\'s tables lack go into this build\'s shader tables')
+    held = [n for n in got if all(k in prof and not prof[k].startswith(f'/{GLSLC_PLAY}/') for _, k in keys[n])]
+    if held: say(f'{len(held)} of the files captured in play hold only shaders the game files have already: they add nothing to the tables')
     return set(got)
 
 

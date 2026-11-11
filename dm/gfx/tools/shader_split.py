@@ -3011,6 +3011,15 @@ def play_shaders(keys, played, per_src):
     keys.update(new)
     return {p for p in var_pairs(played) if p[0] in new or p[1] in new}
 
+def glslc_keys_main(paths):
+    """shader_split.py --glslc-keys FILE…: every stage of each GLSLC output file as the split reads and keys it (glslc_shaders, skey), one '<file name>\t<stage>\t<key>' line each; '<file name>\t-\t-'
+    for a file with none. The NSP script's gather_glslc_play judges the shaders captured in play by these keys, as play_shaders and the host (hle_glslc.c, nvn_shkey.h) do, not by the file names"""
+    for p in paths:
+        try: found = glslc_shaders(open(p, 'rb').read(), os.path.basename(p), need=False)
+        except (OSError, SystemExit): found = []
+        for _, st, ctl, code in found: print(f'{os.path.basename(p)}\t{st}\t{skey(ctl, code)}')
+        if not found: print(f'{os.path.basename(p)}\t-\t-')
+
 def unreadable_why(e, name):
     why = str(e).removeprefix('[RED] ') if isinstance(e, SystemExit) else f'{type(e).__name__}: {e}'
     return why if why.lstrip('/').startswith(name.lstrip('/')) else f'{name}: {why}'   # most red lines name the file already
@@ -3193,6 +3202,7 @@ def pooled(ex, jobs, total, start=0, chunk=1):
 
 
 def main():
+    if sys.argv[1:2] == ['--glslc-keys']: return glslc_keys_main(sys.argv[2:])
     romfs_l, main_l, pkg, mapout, factsout = sys.argv[1:6]
     pairsout = sys.argv[6] if len(sys.argv) > 6 else None
     psopairsout = sys.argv[7] if len(sys.argv) > 7 else None   # pso_pairs.tsv: supplemental BAHS program variations and legacy Unity pass-input covers
@@ -3232,7 +3242,9 @@ def main():
         # host save them to (hle_glslc.c). They are optional inputs, scanned after everything else (play_shaders): a key another source has keeps that source's row
         play = os.environ.get('DM_GLSLC_PLAY') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'glslc_play')
         for nm in (sorted(f for f in os.listdir(play) if f.endswith('.glslc') and not f.startswith('._')) if os.path.isdir(play) else []):
-            played += glslc_shaders(open(os.path.join(play, nm), 'rb').read(), f'/glslc_play/{nm}')
+            got = glslc_shaders(open(os.path.join(play, nm), 'rb').read(), f'/glslc_play/{nm}', need=False)
+            if not got: print(f'[RED] /glslc_play/{nm}: no GLSLC output this split reads, left out', flush=True)   # an optional input: the others still count
+            played += got
         # Unreal Engine shader code archives decoded on the Mac (uepak.py): <version dir>/ue_shaders, or DM_UE_SHADERS; needed when the RomFS has Unreal paks
         ued = os.environ.get('DM_UE_SHADERS') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'ue_shaders')
         names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode') and not f.startswith('._')) if os.path.isdir(ued) else []   # AppleDouble metadata, not decoded shader archives
