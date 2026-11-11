@@ -1683,7 +1683,14 @@ static int g_susp, g_inflight_api;
 __thread _Atomic int dm_host_work;   // see dm.h (defined here: the graphics unit tests compile this file but not hle_thread.c)
 static void gfx_enter(void) { pthread_mutex_lock(&g_susp_mu); while (g_susp) pthread_cond_wait(&g_susp_cv, &g_susp_mu); g_inflight_api++; pthread_mutex_unlock(&g_susp_mu); dm_host_work++; }
 static void gfx_leave(void) { dm_host_work--; pthread_mutex_lock(&g_susp_mu); g_inflight_api--; pthread_cond_broadcast(&g_susp_cv); pthread_mutex_unlock(&g_susp_mu); }
+// The scene resigns active (on 1: the app switcher, a system sheet; a swipe there kills the app without a trip to the background) or becomes active (0): only the bundled
+// pipeline archive's crash guard takes it (a start that ends meanwhile is no crash of the archive); the game goes on as before
+void dm_gfx_inactive(int on) { mtl_pso_guard_away(2, on); }
+// The host's graceful exit begins (hle_lifecycle.c, its first step, before the waits that come before dm_gfx_suspend and before its 1.5 s fallback can end it): only the crash
+// guard takes it, so a start that ends there is no crash of the archive
+void dm_gfx_exiting(void) { mtl_pso_guard_away(4, 1); }
 void dm_gfx_suspend(int on) {
+    mtl_pso_guard_away(1, on);   // first, before any wait: a start that ends while the app is in the background (swiped away, jetsam) is no crash of the bundled pipeline archive
     pthread_mutex_lock(&g_susp_mu);
     g_susp = on != 0;
     if (on) while (g_inflight_api) pthread_cond_wait(&g_susp_cv, &g_susp_mu);

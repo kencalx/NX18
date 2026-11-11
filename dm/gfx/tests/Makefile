@@ -133,6 +133,17 @@ t_upscale_pick_asan: t_upscale_pick.c ../nvn/nvn_upscale_pick.h
 .PHONY: live-menu
 live-menu: t_upscale_pick t_upscale_pick_tsan t_upscale_pick_asan
 	./t_upscale_pick && ./t_upscale_pick_tsan && ./t_upscale_pick_asan
+# The crash guard of the pipeline archive bundled with the app (../nvn/nvn_pso_guard.h, DM_PSO_BUNDLE_GUARD): plain C, also under ThreadSanitizer and AddressSanitizer
+# (make pso-guard); nvn_mtl.m's use of it with a real archive is t_pso_bundle's (an Apple-silicon Mac)
+t_pso_guard: t_pso_guard.c ../nvn/nvn_pso_guard.h
+	clang -std=c11 -O1 -g -Wall -Wextra -pthread -o $@ t_pso_guard.c
+t_pso_guard_tsan: t_pso_guard.c ../nvn/nvn_pso_guard.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=thread -o $@ t_pso_guard.c
+t_pso_guard_asan: t_pso_guard.c ../nvn/nvn_pso_guard.h
+	clang -std=c11 -O1 -g -Wall -pthread -fsanitize=address,undefined -o $@ t_pso_guard.c
+.PHONY: pso-guard
+pso-guard: t_pso_guard t_pso_guard_tsan t_pso_guard_asan
+	./t_pso_guard && ./t_pso_guard_tsan && ./t_pso_guard_asan
 .PHONY: check_t_perf_order
 check_t_perf_order: t_perf_order
 	MTL_DEBUG_LAYER=1 ./t_perf_order

@@ -206,6 +206,8 @@ const char *dm_cheats_source(int i);
 void dm_cheats_exit(void);            // a clean exit (hle_lifecycle.c, atexit): removes the safe-mode flag
 // Graphics lifecycle (hle_nvn.c): on=1 suspends (afterwards submit / present block, and in-flight GPU work is drained before returning), on=0 resumes; called by the iOS front end when entering and leaving the background
 void dm_gfx_suspend(int on);
+void dm_gfx_inactive(int on);   // hle_nvn.c: the iOS scene resigns active (1) or becomes active (0), for the bundled pipeline archive's crash guard alone (nvn_pso_guard.h)
+void dm_gfx_exiting(void);      // hle_nvn.c: the graceful exit begins (hle_lifecycle.c, first), for the crash guard alone: a start that ends there is no crash of the archive
 void dm_gfx_pressure(int level);   // hle_nvn.c: the system's memory pressure (the front ends' dispatch source): 0 back to normal, 1 warning, 2 critical; logged, and idle memory given back (DM_MEMORY_TRIM=0: logged only)
 uint64_t dm_gfx_trim(int level);   // hle_nvn.c: give back the idle graphics caches and sweep the guest's files now; only with no submission open and the GPU drained (dm_gfx_suspend does it going to the background); the bytes
 int dm_gfx_save_wait(int wait_ms);   // hle_nvn.c: waits up to wait_ms for the pipeline archive's writes dm_gfx_suspend started (iOS: within the app's background time); 1: all written

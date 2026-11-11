@@ -35,6 +35,7 @@
 #include "nvn_border.h"
 #include "nvn_primitive.h"
 #include "nvn_timestamp.h"
+#include "nvn_pso_guard.h"   // the crash guard of the pipeline archive bundled with the app (pso_bundle_open)
 #include "nvn_upscale_pick.h"   // the in-game menu's Upscaling (fx_mode)
 #include "msl_image.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
@@ -8923,6 +8924,141 @@ static int arch_file_ok(NSString *path) {
     struct stat st; int ok = !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size > 0 && arch_container_ok(fd, (uint64_t)st.st_size);
     close(fd); return ok;
 }
+// The crash guard (nvn_pso_guard.h, which says how it decides and why). A bundled archive that is well formed (arch_file_ok above passes it) but makes Metal crash as it loads
+// or first uses it (one built for another GPU family than its name says, LNPANDY/NX2Apple#640 on an iPhone Air, cause unknown) used to crash the game at every start, until the
+// player put DM_PSO_BUNDLE=off in env.txt or the app was rebuilt without it. Every NVN game's app carries the archive of its device's GPU by default, and every game reads it, so
+// one bad archive would leave a game that never starts. So before Metal first reads the bundled archive, a record beside the device's own archive folder (pso_bundle_guard.tsv, in
+// Documents on iOS) says a start with it is under way; the start takes it back once past its first frames (PSG_FRAMES frames after the prepare step and every compile of its
+// prebuild ended, or the background prebuild; PSG_FRAMES_MAX frames without that). While the app is away (mtl_pso_guard_away: dm_gfx_suspend, dm_gfx_inactive, dm_gfx_exiting)
+// and at a clean exit, the record is as the start's end would leave it, so a start that ends there (the player swiping the app away, iOS ending it in the background) is not
+// counted. Two starts in a row with the archive that ended early in the foreground (PSO_GUARD_NEED) leave it out: the device builds the bases itself, as with DM_PSO_BUNDLE=off
+// (Preparing pipelines, once), with a [RED] line that says why, and whether that start gets past its first frames decides if it stays out. Nothing a game sees changes: the
+// bases are the same pipelines either way, looked up by content; a wrong verdict costs one long first start. On by default on iOS, where #640 was found and the app runs one
+// process at a time; off on the Mac, whose runs (the launcher, bench.py, regress.py) keep using their archive after a crash in bring-up as before. DM_PSO_BUNDLE_GUARD=0 / 1
+// turns it off / on (off: the archive is always used and no record is read or written)
+static psg_guard g_psg = PSG_GUARD_INIT;
+static _Atomic(const char *) g_psg_why;   // the end of the start the window waited for (the log line)
+// Starts in a row with the archive that end early before one leaves it out: two for every game. The Nintanium line took one for games that had no archive before it became the
+// default there and two for a profile that set pso_mtl4 on (a game that had its archive at every start and may need it: 13 Sentinels: Aegis Rim was reported to crash on an
+// A20 Pro without it). In NX 18 the Metal 4 path is always on and pso_mtl4 is retired, so every game is such a game: one unrelated early end (a crash in the first seconds that
+// has nothing to do with the archive, iOS ending the app for memory in the foreground) is followed by another start with the archive, never by one without it
+#define PSO_GUARD_NEED 2
+// The app's own build, for the archive's identity: its executable's LC_UUID (out: 32 hex digits, empty when not found)
+static void exe_uuid(char out[33]) {
+    out[0] = 0;
+    const struct mach_header_64 *h = (const struct mach_header_64 *)_dyld_get_image_header(0);   // image 0: the main executable
+    if (!h || h->magic != MH_MAGIC_64) return;
+    const uint8_t *p = (const uint8_t *)(h + 1);
+    for (uint32_t i = 0; i < h->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)p;
+        if (lc->cmd == LC_UUID) { const uint8_t *u = ((const struct uuid_command *)p)->uuid; for (int k = 0; k < 16; k++) snprintf(out + 2 * k, 3, "%02x", u[k]); return; }
+        if (lc->cmdsize < sizeof *lc) return;
+        p += lc->cmdsize;
+    }
+}
+// An archive file's identity for the record: its name, size, a digest of its first and last 64 KiB (reading it whole would cost a boot hundreds of MB of reads) and the app's own
+// build. A rebuilt archive is another one, and so is the same archive in an app with another host: #640's cause is not known, so a host change tries the archive again. An app
+// rebuilt from the same inputs is the same (the archive is reused, and the linker's LC_UUID is a digest of its output), so it keeps its record
+static NSString *pso_bundle_identity(NSString *p) {
+    int fd = open(p.fileSystemRepresentation, O_RDONLY); if (fd < 0) return nil;
+    struct stat st = {0}; enum { PART = 65536 }; uint8_t *b = malloc(PART), h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX c; CC_SHA256_Init(&c);
+    int ok = b && !fstat(fd, &st) && st.st_size > 0;
+    for (int i = 0; ok && i < 2; i++) {
+        ssize_t n = pread(fd, b, PART, i ? MAX(0, (off_t)st.st_size - PART) : 0);
+        if (n <= 0) ok = 0; else CC_SHA256_Update(&c, b, (CC_LONG)n);
+    }
+    free(b); close(fd); CC_SHA256_Final(h, &c);
+    char u[33]; exe_uuid(u);
+    return ok ? [NSString stringWithFormat:@"%@ %lld %02x%02x%02x%02x%02x%02x%02x%02x host %s", p.lastPathComponent, (long long)st.st_size, h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7],
+                 *u ? u : "unknown"] : nil;
+}
+// exit(): a clean end (a front end's quit). The host's graceful exit ends in _exit; dm_gfx_exiting, its first step, puts the record back there. A crash or a kill runs neither
+static void pso_guard_atexit(void) { psg_exit(&g_psg); }
+#if TARGET_OS_IPHONE
+#define PSO_GUARD_RETRY "delete that file (the Files app, in the app's folder) or put DM_PSO_BUNDLE_GUARD=0 in Documents/env.txt"
+#else
+#define PSO_GUARD_RETRY "delete that file or set DM_PSO_BUNDLE_GUARD=0"
+#endif
+// What brings the archive back by itself, and how to retry the same build (an app rebuilt from the same inputs has the same identity)
+#define PSO_GUARD_AGAIN "An app built with another archive or host (new shaders, an NX 18 update) or a system update tries it again by itself; to try this one again, " PSO_GUARD_RETRY
+// Whether this start opens the bundled archive at p (before Metal reads it): the record's verdict, with a [RED] line when it leaves the archive out
+static int pso_guard_begin(NSString *p) {
+    const char *e = getenv("DM_PSO_BUNDLE_GUARD");
+    if (!(e && *e ? strcmp(e, "0") != 0 : TARGET_OS_IPHONE)) {   // off: on the Mac unless asked for, and wherever DM_PSO_BUNDLE_GUARD=0
+        if (e && *e) MLOG("DM_PSO_BUNDLE_GUARD=%s: the pipeline archive bundled with the app is used without its crash guard (no record read or written)", e);
+        return 1;
+    }
+    NSString *home = g_arch_dir.stringByDeletingLastPathComponent, *id_ = pso_bundle_identity(p);
+    if (!home.length) home = pso_user_path().stringByDeletingLastPathComponent;   // DM_PSO_ARCHIVE=off: beside pso_user.tsv, where the archive folder would be
+    char os[64] = ""; size_t n = sizeof os; if (sysctlbyname("kern.osversion", os, &n, NULL, 0)) os[0] = 0;
+    if (!home.length || !id_ || !*os) {
+        MLOG("pipeline archive bundled with the app: %s: used without its crash guard", !id_ ? "its size and digest cannot be read" : !*os ? "the system build (kern.osversion) is not known"
+             : "no folder for the crash guard's record (neither DM_PSO_ARCHIVE nor DM_SAVE)");
+        return 1;
+    }
+    [NSFileManager.defaultManager createDirectoryAtPath:home withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *rec = [home stringByAppendingPathComponent:@"pso_bundle_guard.tsv"];
+    atomic_store(&g_psg_why, NULL);
+    psg_start s = psg_begin(&g_psg, rec.fileSystemRepresentation, os, id_.UTF8String, PSO_GUARD_NEED);   // copied under its lock: the background hook may write the guard meanwhile
+    if (s.armed != PSG_NONE) { static dispatch_once_t once; dispatch_once(&once, ^{ atexit(pso_guard_atexit); }); }
+    const char *r = rec.UTF8String, *ident = id_.UTF8String;
+    // What this start's outcome decides, said only when the record says so (s.err: not watched, nothing recorded; the line after says so)
+    const char *then = s.err ? "" : "If this start gets past its first frames, the archive stays out for this archive, app build and system build; if it does not either, the "
+                                    "archive is not shown to be the cause and the next start uses it again. ";
+    switch (s.found) {
+    case PSG_WITH:
+        if (s.use) MLOG("[RED] pipeline archive bundled with the app: a start with %s on this system build (%s) did not get past its first frames (it crashed, or iOS ended it in the "
+                        "foreground): this start uses it again%s, since one such start can have another cause; only a second such start in a row leaves it out (crash guard: %s)",
+                        ident, os, s.err ? "" : ", watched", r);
+        else MLOG("[RED] pipeline archive bundled with the app: a start with %s on this system build (%s) did not get past its first frames (it crashed, or iOS ended it in the "
+                  "foreground): this start leaves the archive out and the device builds the bases itself (Preparing pipelines, once). %s(crash guard: %s). " PSO_GUARD_AGAIN,
+                  ident, os, then, r);
+        break;
+    case PSG_WITH2:
+        MLOG("[RED] pipeline archive bundled with the app: two starts in a row with %s on this system build (%s) did not get past their first frames (they crashed, or iOS ended them "
+             "in the foreground): this start leaves the archive out and the device builds the bases itself (Preparing pipelines, once). %s(crash guard: %s). " PSO_GUARD_AGAIN,
+             ident, os, then, r);
+        break;
+    case PSG_WITHOUT:
+        MLOG("[RED] pipeline archive bundled with the app: the start without %s did not get past its first frames either, after starts with it did not: the archive is not shown to "
+             "be what ended them, so this start uses it again%s (crash guard: %s)", ident, s.err ? "" : ", watched as a first start", r);
+        break;
+    case PSG_SKIP:
+        MLOG("[RED] pipeline archive bundled with the app: %s is left out on this system build (%s): starts with it did not get past their first frames and the start without it did "
+             "(crash guard: %s), so the device's own archive serves the bases. " PSO_GUARD_AGAIN, ident, os, r);
+        break;
+    default: if (s.armed == PSG_WITH) MLOG("pipeline archive bundled with the app: crash guard on until this start is past its first frames (%s: archive %s, system build %s)",
+                                          r, ident, os); break;
+    }
+    // Nothing recorded: the record stays as this start found it, and so does every later start's verdict until it can be written
+    if (s.err) MLOG("[RED] pipeline archive bundled with the app: the crash guard cannot write %s (%s): this start is not watched and the record stays as it is, so until it can "
+                    "be written (free some space) every start %s", r, strerror(s.err), s.use ? "uses the archive unwatched" : "leaves the archive out (Preparing pipelines)");
+    return s.use;
+}
+static void pso_guard_mark(const char *why) {   // the prepare step and its prebuild, or the background prebuild, ended (the first of them names it in the log)
+    if (!atomic_load(&g_psg.watching)) return;
+    const char *none = NULL; atomic_compare_exchange_strong(&g_psg_why, &none, why); psg_mark(&g_psg);
+}
+static void pso_guard_frame(void) {   // a frame presented while watched (present_now): the frame that ends the window hands the record to a utility queue
+    if (!psg_frame(&g_psg)) return;
+    uint32_t frames = atomic_load(&g_psg.frames), at = atomic_load(&g_psg.mark_at); const char *why = at != PSG_UNMARKED ? atomic_load(&g_psg_why) : NULL;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        int err = 0, was = psg_pass(&g_psg, &err);
+        if (was == PSG_WITH || was == PSG_WITH2) MLOG("pipeline archive bundled with the app: this start got past its first frames with it (%s, %u frames %s): the crash guard's record is "
+                                                    "taken back", why ?: "no end of the prepare step or prebuild", why ? frames - at : frames, why ? "after it" : "presented");
+        else if (was == PSG_WITHOUT) MLOG("[RED] pipeline archive bundled with the app: this start got past its first frames without it, after %s did not: it stays out for this "
+                                         "archive, app build and system build (%s; to try it again, " PSO_GUARD_RETRY ")", g_psg.need > 1 ? "two in a row with it" : "one with it", g_psg.path);
+        if (err) MLOG("[RED] pipeline archive bundled with the app: the crash guard cannot write %s (%s)", g_psg.path, strerror(err));
+    });
+}
+void mtl_pso_guard_away(int why, int on) {
+    int err = 0, was = psg_away(&g_psg, why, on, &err);
+    if (was == PSG_NONE) return;
+    MLOG("pipeline archive bundled with the app: %s before this start got past its first frames: the crash guard's record %s",
+         !on ? "back in the foreground" : why == PSG_AWAY_INACTIVE ? "inactive (the app switcher, a system sheet)" : why == PSG_AWAY_EXIT ? "in the graceful exit" : "in the background",
+         on ? "is as the start's end would leave it (an app ended while away is not counted)" : "is written again");
+    if (err) MLOG("[RED] pipeline archive bundled with the app: the crash guard cannot write %s (%s)", g_psg.path, strerror(err));
+}
 static void pso_bundle_open(NSMutableArray<id<MTL4Archive>> *archp) {
     const char *e = getenv("DM_PSO_BUNDLE");
     if (!e || !*e || !strcmp(e, "off")) return;
@@ -8936,8 +9072,11 @@ static void pso_bundle_open(NSMutableArray<id<MTL4Archive>> *archp) {
     }
     uint64_t t0 = bp_now(); NSError *ae = nil;
     if (!arch_file_ok(p)) { MLOG("[RED] pipeline archive bundled with the app: %s is not a pipeline archive: the bases are built on the device", p.UTF8String); return; }
+    // After the container checks (a file they refuse is never read by Metal, so it needs no record) and before Metal reads it: an earlier start with it did not get past its first
+    // frames (its [RED] line says what happens next). t0 above also counts the guard's record and its 128 KiB digest in the 'opened in' time
+    if (!pso_guard_begin(p)) return;
     id<MTL4Archive> a = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:p] error:&ae];
-    if (!a) { MLOG("pipeline archive bundled with the app: this system cannot open %s (%s; made for another system version, or an OS update changed the GPU compiler): the bases are built on the device",
+    if (!a) { psg_unused(&g_psg); MLOG("pipeline archive bundled with the app: this system cannot open %s (%s; made for another system version, or an OS update changed the GPU compiler): the bases are built on the device",
                    p.UTF8String, ae.localizedDescription.UTF8String); return; }
     g_arch_bundle = a; g_bundle_dir = dir; [archp addObject:a];
     MLOG("pipeline archive bundled with the app: %s, %.1f MB, opened in %.1f ms", p.UTF8String, [[NSFileManager.defaultManager attributesOfItemAtPath:p error:nil] fileSize] / 1048576.0, (bp_now() - t0) / 1e6);
@@ -9946,6 +10085,7 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
         if (g_pre_nolib) MLOG("[RED] pipeline prebuild: %d pairs need a library file this app does not carry (first: %s), left to the draws until a package with them is installed (the pulling libraries <key>_bp.metallib: an IPA packed with IOS_PULL=0 leaves them out)", (int)g_pre_nolib, g_pre_nolib_file.UTF8String);
         if (fails.count) MLOG("pipeline prebuild: %lu pairs whose base failed are left to the draws (%s; %d of them failed on an earlier start of this system build, not built again); another system build tries them again",
                               (unsigned long)fails.count, failp.UTF8String, (int)g_pre_known_n);
+        if (!wait) pso_guard_mark("the pipeline prebuild ended");   // the bundled archive's crash guard: the app's prebuild is behind it, every compile in it returned
         g_pre_running = 0;
     };
     if (wait) { dispatch_group_wait(g, DISPATCH_TIME_FOREVER); done(); }
@@ -9965,10 +10105,11 @@ int mtl_pso_prebuild_tool(void) {
 }
 static int prepare_on(void);
 static void pso_prebuild_bg(void) {   // after the prewarm, in the app without a prepare step (with one, prepare_prebuild builds them before the first frame)
-    const char *e = getenv("DM_PSO_PREBUILD"); if (e && !strcmp(e, "0")) return;
-    if (!hybrid_on() || prepare_on()) return;
+    if (prepare_on()) return;
+    const char *e = getenv("DM_PSO_PREBUILD");
+    if ((e && !strcmp(e, "0")) || !hybrid_on()) { pso_guard_mark("the prewarm ended, no prebuild"); return; }   // the crash guard's window: no prebuild comes
     int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc <= 1) pc = 4;
-    pso_prebuild(pc > 4 ? pc / 2 : 2, 0, QOS_CLASS_UTILITY);
+    if (pso_prebuild(pc > 4 ? pc / 2 : 2, 0, QOS_CLASS_UTILITY) < 0) pso_guard_mark("the prewarm ended, nothing to prebuild");   // else its end marks it (pso_prebuild)
 }
 static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr);
 static id<MTLFunction> ms_fs_override(NvShader *fs);   // DM_NVN_MAGSCAN (defined before draw)
@@ -10322,6 +10463,11 @@ static void prepare_prebuild(void) {
     if (left > 0) MLOG("pipeline prepare: every shader pair handed out after %.1f s; %d compiles still under way finish in the background", (bp_now() - t0) / 1e9, left);
     if (shown) front_progress(NULL, n, n);
 }
+// The prepare step ended (warm_start): the bundled archive's crash guard counts its window from here, or, while compiles of the prebuild are still under way, from when they have
+// all returned (pso_prebuild's done block marks it then, before it clears g_pre_running, so no end falls between the two). A start without the archive builds every base on the
+// device, so its window covers that whole build: the compile of the bases is where a game that needs its archive most likely crashes without it. A compile that never returns
+// (GitHub issue #294) leaves the window to PSG_FRAMES_MAX
+static void pso_guard_prepared(void) { if (!atomic_load(&g_pre_running)) pso_guard_mark("the prepare step ended"); }
 static void warm_start(void) {
     if (g_warm_started++) return;
     const char *e = getenv("DM_PSO_MANIFEST");
@@ -10352,6 +10498,7 @@ static void warm_start(void) {
         else MLOG("pipeline prepare: the prewarm lists hold nothing to build");
         warm_finish();
         @autoreleasepool { prepare_prebuild(); }   // then the bases every shader pair's hybrid draws need, before the first frame too (once)
+        pso_guard_prepared();   // the bundled archive's crash guard: its window ends PSG_FRAMES frames from here, or from the end of the prebuild's compiles still under way
         return;
     }
     dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);   // Not optional background work: it decides whether the pipelines are ready before the player enters a run
@@ -17091,6 +17238,7 @@ static int g_link_it_depth;    // Frames that were waiting in the present queue 
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
+    if (atomic_load_explicit(&g_psg.watching, memory_order_relaxed)) pso_guard_frame();   // the bundled archive's crash guard counts the start's first frames
     if (bootprof() && (g_present_n == 1 || g_present_n % 120 == 0)) {
         if (g_present_n == 1) g_bp_first_present = bp_now() - g_bp_t0;
         MLOG("[bootprof] t=%.3f s present #%llu: metallibs loaded %llu / %.1f ms; pipelines created %llu / %.1f ms (all synchronous on the submit thread); prewarmed and used: shaders %llu / render pipelines %llu / compute pipelines %llu; "

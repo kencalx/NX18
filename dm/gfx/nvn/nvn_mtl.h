@@ -50,6 +50,7 @@ int mtl_wait(uint64_t fence, uint64_t timeout_ns);   // Returns 1 when the GPU h
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns);   // the same for a sync WindowAcquireTexture handed out (its own line in the wait ledger, DM_NVN_WAITS)
 void mtl_finish(void);                               // Wait for all submitted commands to complete
 void mtl_drain(void);                                // Wait for all commands on the queue (including presents) to complete: submit an empty command buffer and wait for it
+void mtl_pso_guard_away(int why, int on);            // the app goes away (on 1) or comes back (0), why: 1 the background (dm_gfx_suspend), 2 inactive (dm_gfx_inactive), 4 the graceful exit (dm_gfx_exiting): the bundled pipeline archive's crash guard (nvn_pso_guard.h) does not count a start that ends meanwhile
 int mtl_pressure(int level);                         // The system's memory pressure changed (0 normal, 1 warning, 2 critical; any thread): logged, and a trim asked for the next submission's start; 1: asked
 uint64_t mtl_trim(int level);                        // Release what is idle and large now (no submission open, the GPU drained: dm_gfx_suspend, the tests); the bytes
 int mtl_bg_trim_on(void);                            // DM_BG_TRIM is not 0: going to the background trims (dm_gfx_suspend)
