@@ -155,10 +155,23 @@ static uint64_t g_link_tick_ns, g_link_tick_n;
 static uint64_t g_link_dropped;
 static uint64_t g_link_trims;   // Under g_pq_mu: standing frames dropped by DM_PRESENT_TRIM (the display-link callback; its log line in present_now reads it on the same thread)
 static uint64_t g_link_empty;   // Under g_pq_mu: ticks that found no new frame queued (counted here, not as ticks minus presents: presents before the link starts and while it is rescued are not on ticks)
-static int g_link_trim = -1, g_link_standing;   // Under g_pq_mu (the display-link callback): DM_PRESENT_TRIM's K (-1 not read yet, 0 off) and the ticks in a row that left a frame waiting
-// DM_PRESENT_TRIM's K from its environment value (NULL: not set): set, it wins whatever the profile says, so DM_PRESENT_TRIM=0 in Documents/env.txt turns off a profile's trim;
-// unset, the profile's present_trim (0 for every game that has not been run with it on a device: whether a game's frames form standing frames, and how often, is the game's own)
-static int present_trim_k(const char *e) { int k = e ? atoi(e) : DM_GAME_PRESENT_TRIM; return k > 0 ? k : 0; }
+static int g_link_trim = -1, g_link_trim_src, g_link_trim_was, g_link_standing;   // Under g_pq_mu (the display-link callback): DM_PRESENT_TRIM's K (-1 not read yet, 0 off), where it came from (TRIM_*), the K last logged, and the ticks in a row that left a frame waiting
+// DM_PRESENT_TRIM's K, in display-link ticks, and where it came from (*src: TRIM_*). e: the environment value (NULL: not set); profile: the profile's present_trim (-1: no key); ios: the platform has
+// the default (PRESENT_TRIM_PLATFORM, a parameter so the Mac's tests check both). Set, the variable wins whatever the profile says, so DM_PRESENT_TRIM=0 in Documents/env.txt turns a trim off;
+// unset, the profile's present_trim, an explicit 0 included; without the key 60 on iOS (TRIM_IOS: every iPhone game measured with it lost a tick of latency at a few dropped frames, docs/reference/frame-rate.md)
+// and off on the Mac (no game there measured with it). The iOS default is a second of ticks on a link faster than 60 Hz (present_trim_ticks)
+enum { TRIM_OFF, TRIM_ENV, TRIM_PROFILE, TRIM_PLATFORM };
+#define TRIM_IOS 60
+#define PRESENT_TRIM_PLATFORM (TARGET_OS_IPHONE && !TARGET_OS_MACCATALYST)
+static int present_trim_k(const char *e, int profile, int ios, int *src) {
+    int k = e ? atoi(e) : profile >= 0 ? profile : ios ? TRIM_IOS : 0; k = k > 0 ? k : 0;
+    if (src) *src = !k ? TRIM_OFF : e ? TRIM_ENV : profile >= 0 ? TRIM_PROFILE : TRIM_PLATFORM;
+    return k;
+}
+// The K a tick counts against on a link at rate Hz (mtl_link_rate, the rate ticks are counted at, virtual ticks included): the platform default's 60 ticks are a second at 60 Hz and stay 60 on the
+// 30 Hz link (Ocarina of Time's 30 fps run used 60, two seconds; 30 is the least game.py takes), and become a second of ticks on a faster link (120 on the 120 Hz link of a 120 fps game or
+// DM_PRESENT_LINK=2), so a run of jitter is not judged at half the time. A value the variable or the profile gives is ticks, as written
+static int present_trim_ticks(int k, int src, int rate) { return src == TRIM_PLATFORM && rate > 60 ? k * rate / 60 : k; }
 static double g_link_hold_until; static uint64_t g_link_held;   // Changed only on the display-link callback thread: the time the previous frame must stay on screen until by its present interval (0 = no hold), and the ticks that took no new frame because of it
 static int g_pq_inflight;   // Under g_pq_mu: number of presents committed to the GPU whose completion callback has not arrived yet
 int g_dm_present_link;   // Present pacing mode (runtime value of DM_PRESENT_LINK, modified directly during same-process alternating measurement): 0 = acquire the drawable itself; 1 = display link at 60 Hz; 2 = display link at 120 Hz, the game presents a frame every other display-link tick
@@ -17292,17 +17305,24 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     // dropped the one before whenever two frames landed in the same refresh, as frames of a 60 fps game that take 16-17.5 ms do, and the next frame then stayed up 33 ms
     // (Dark Souls Remastered, from PR #31: presents within 14.7-18.7 ms 98.2 -> 99.98 %, about 2 ms more from enqueue to display). DM_PRESENT_FIFO=0 takes the newest, as before
     static int fifo = -1; if (fifo < 0) { const char *e = getenv("DM_PRESENT_FIFO"); fifo = !(e && !strcmp(e, "0")); MLOG("display link: %s", fifo ? "frames in order, at most one behind" : "the newest frame each tick (DM_PRESENT_FIFO=0)"); }
-    // DM_PRESENT_TRIM=<K> (the profile's present_trim by default, off without it): the rule above keeps one frame waiting for good once two frames land in one refresh and no refresh comes without a frame, as a game at
+    // DM_PRESENT_TRIM=<K> (the profile's present_trim by default; without the key 60 on iOS, off on the Mac: present_trim_k): the rule above keeps one frame waiting for good once two frames land in one refresh and no refresh comes without a frame, as a game at
     // a steady 60 does: every frame then waits one tick more (16.7 ms at 60 Hz) between the game's enqueue and the screen (an iPhone 18 Pro Max: enqueue to display p50 65.5 ms against
     // a callback lead of 33 ms). After K ticks in a row that found two or more frames waiting (the frame left behind stood through all of them), one tick takes the newest, dropping
     // the one before it (a standing frame trimmed, counted in the display link's log line), and the rule holds again. K must be larger than the runs of such ticks that frame-time
     // jitter alone makes, each ended by a refresh without a frame (PR #31's frames of 16-17.5 ms), or the trim drops the frames FIFO is there to keep: 60, a second at 60 Hz, lets
     // a standing frame last a second at most. Empty ticks end a run; ticks held for a long present interval neither end nor count in one. With DM_PRESENT_FIFO=0 there is nothing to trim
-    if (g_link_trim < 0) { const char *e = getenv("DM_PRESENT_TRIM"); g_link_trim = present_trim_k(e);
-        if (g_link_trim) MLOG("display link: a frame left waiting through %d ticks in a row is dropped once (%s%d)%s", g_link_trim, e ? "DM_PRESENT_TRIM=" : "game profile present_trim ", g_link_trim, fifo ? "" : "; nothing to trim with DM_PRESENT_FIFO=0"); }
+    if (g_link_trim < 0) g_link_trim = present_trim_k(getenv("DM_PRESENT_TRIM"), DM_GAME_PRESENT_TRIM, PRESENT_TRIM_PLATFORM, &g_link_trim_src);
+    int trim = present_trim_ticks(g_link_trim, g_link_trim_src, mtl_link_rate());
+    if (trim != g_link_trim_was) { g_link_trim_was = trim;   // the first tick with a trim, and the iOS default's K again when the link's rate changes it
+        char why[64]; int rate = mtl_link_rate();
+        if (g_link_trim_src == TRIM_ENV) snprintf(why, sizeof why, "DM_PRESENT_TRIM=%d", g_link_trim);
+        else if (g_link_trim_src == TRIM_PROFILE) snprintf(why, sizeof why, "game profile present_trim %d", g_link_trim);
+        else if (g_link_trim_src == TRIM_PLATFORM && trim != g_link_trim) snprintf(why, sizeof why, "iOS default %d, a second of the %d Hz link", trim, rate);
+        else snprintf(why, sizeof why, "%s %d", g_link_trim_src == TRIM_PLATFORM ? "iOS default" : "set", trim);
+        if (trim) MLOG("display link: a frame left waiting through %d ticks in a row is dropped once (%s)%s", trim, why, fifo ? "" : "; nothing to trim with DM_PRESENT_FIFO=0"); }
     g_link_it_depth = (int)MIN(g_pq_in - g_pq_read, (uint64_t)PQ);
     if (fifo && ticket > first) {
-        if (g_link_trim && ++g_link_standing >= g_link_trim) { g_link_standing = 0; g_link_trims++; }   // the newest (ticket stays g_pq_in)
+        if (trim && ++g_link_standing >= trim) { g_link_standing = 0; g_link_trims++; }   // the newest (ticket stays g_pq_in)
         else ticket = ticket - first >= 2 ? g_pq_in - 1 : first;
     } else g_link_standing = 0;
     pq_item it = g_pq[(ticket - 1) % PQ]; g_link_it_tin = it.t_in;

@@ -118,8 +118,10 @@ SWITCH_BINDING = [
     ('enc_thread', '', {'what': 'Metal encoding on its own thread on the Mac', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
      'why': f'what iOS does for every game: {DEFAULT_SOON}'}),
     ('present_trim', '', {'what': "a frame standing in the display link's queue dropped after K ticks", 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
-     'why': 'what the display link should do for any game whose frames land two to a refresh; six games measured with it on an iPhone so far (Ocarina of Time, 13 Sentinels, Mario Kart 8 Deluxe, NieR:Automata, Persona 4 Golden, Persona 5 Royal): '
-            'an iOS default after Super Mario Odyssey runs with DM_PRESENT_TRIM=60'}),
+     'why': "what the display link should do for any game whose frames land two to a refresh: on iOS the host's default for every game without the key (60 ticks) since seven games measured "
+            'with it on an iPhone (Ocarina of Time, 13 Sentinels, Mario Kart 8 Deluxe, NieR:Automata, Persona 4 Golden, Persona 5 Royal, Super Mario Odyssey) all improved; on the Mac still the game\'s, '
+            "so the six profiles that set 60 keep it, with each game's measurement",
+     'blocked': 'the Mac: no game has been run there with it'}),
     ('present_snap', '', {'what': 'present snapshots', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'a setting the game was tested with: {DEFAULT_SOON}'}),
     ('screen_aspect', '', {'what': 'a picture of a taller screen\'s own shape (DM_SCREEN_ASPECT)', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the output size is the host's, but the stubs that follow it (projections, layout panes, screen copies) are this build's code"}),
