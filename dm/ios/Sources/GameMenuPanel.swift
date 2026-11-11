@@ -307,7 +307,8 @@ struct GameMenuPanelView: View {
     }
 }
 
-// One row: its name and note (on the first page its name alone, a dot marking a note: the note is on its page, and VoiceOver reads it), and at the end a switch, a tick, the choice made with ›, or › alone
+// One row: its name and note, and at the end a switch, a tick, the choice made with ›, or › alone. On the first page a choice or a submenu shows its name alone: a choice's note
+// heads its page (a dot marks it, and VoiceOver reads it), a submenu's is its value. A switch or an action has no page, so its note stays under its name
 private struct GameMenuRowView: View {
     let item: GameMenuItem
     let option: Bool   // an option of a choice: a tick and a cyan tint when it is the one chosen
@@ -322,7 +323,7 @@ private struct GameMenuRowView: View {
                 if let s = item.symbol {
                     Image(systemName: s).font(.footnote.weight(.medium)).foregroundStyle(NX18Palette.cyan).frame(minWidth: 16)   // system: symbol
                 }
-                if overview {   // the dot takes no room
+                if overview, opens {   // the dot takes no room
                     Text(item.title).nxFont(.footnote).foregroundStyle(NX18Palette.text).fixedSize(horizontal: false, vertical: true)
                         .overlay(alignment: .topTrailing) {
                             if dot { Circle().fill(NX18Palette.muted).frame(width: 5, height: 5).offset(x: 8, y: 2).accessibilityHidden(true) }
@@ -355,7 +356,8 @@ private struct GameMenuRowView: View {
         .accessibilityAddTraits(traits)
     }
 
-    private var dot: Bool { if case .submenu = item.kind { return false }; return !(item.subtitle ?? "").isEmpty }   // a submenu's note is its value
+    private var opens: Bool { switch item.kind { case .choice, .submenu: return true; default: return false } }   // a page of its own, where its note is shown
+    private var dot: Bool { if case .choice = item.kind { return !(item.subtitle ?? "").isEmpty }; return false }   // a submenu's note is its value
 
     private var fill: Color {
         if option && item.isOn { return NX18Palette.cyan.opacity(0.18) }
