@@ -138,7 +138,10 @@ class LiveMenu(unittest.TestCase):
         menu = read('dm/ios/Sources/GameMenu.swift'); row = body(menu, 'private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> GameMenuItem {')
         for part in ('dm_setting_why(s.env)', 'dm_setting_held(s.env)', 'm.inactiveWhy(s)', 'm.reason(s)', 'm.optionInactive(s, o[0])'):
             self.assertIn(part, row)
-        self.assertIn('(dm_setting_working(s.env) ? nil : m.reason(s)?.why)', row, 'MetalFX that upscaled drops the launcher\'s Stretch hint')
+        self.assertIn('(dm_setting_working(s.env) ? nil : m.reason(s)?.why)', row, 'MetalFX that upscaled drops the launcher\'s Ultrawide hint')
+        self.assertIn('let why = greyed ?? ruled ?? live ??', row, 'a rule greying the choice made (MetalFX under Stretch) gives its reason at once, before the next present can')
+        self.assertIn('let off = m.optionInactive(s, o[0])', row, 'the option chosen is greyed too while a rule greys it')
+        self.assertIn('gameMenuModel?.refreshFacts()', body(menu, '@MainActor func gameMenuSections() -> [GameMenuSection] {'), 'the window the Stretch rules test, as it is now')
         self.assertIn('mtl_present_fx_why() == DM_FX_UPSCALED', body(self.front, 'bool dm_setting_working(const char *env) {'))
         self.assertNotIn('m.values[s.env] =', row, 'greying changes no choice')
         h = read('dm/ios/Sources/DmGameMenu.h')

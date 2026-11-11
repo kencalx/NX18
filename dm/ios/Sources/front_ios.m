@@ -442,7 +442,7 @@ const char *dm_setting_why(const char *env) {
     return NULL;
 }
 // Whether the running game says a live setting's choice took effect at the last present, which dm_setting_why's NULL does not tell apart from "nothing known yet" (0 before the
-// first present): MetalFX upscaled. GameMenu.swift then leaves out the launcher's hint for the row, which can only say MetalFX may not run under Stretch or Ultrawide. Main thread
+// first present): MetalFX upscaled. GameMenu.swift then leaves out the launcher's hint for the row, which can only say MetalFX may not run under Ultrawide. Main thread
 bool dm_setting_working(const char *env) { return env && g_root.game && !strcmp(env, "DM_PRESENT_UPSCALE") && mtl_present_fx_why() == DM_FX_UPSCALED; }
 @interface DmTVSceneDelegate : UIResponder <UIWindowSceneDelegate>
 @property (strong, nonatomic) UIWindow *window;

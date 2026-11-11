@@ -131,19 +131,38 @@ import SwiftUI
     expect(m.inactiveWhy(hold) == "Only matters at 60 fps", "Hold frames when late is greyed at 30 fps")
     m.values["DM_FPS_TARGET"] = "60"
     expect(m.inactiveWhy(hold) == nil, "and works at 60")
-    // MetalFX with Stretch runs only for a crop smaller than its texture (Breath of the Wild's handheld picture), which the present knows: a hint, not greyed. Breath of the
-    // Wild has Picture shape, and on Match screen Stretch changes the picture's shape only where the window is 16:9 or wider (the picture is the window's own shape on an iPad)
+    // MetalFX's spatial scaler keeps the picture's shape (nvn_mtl.m fx_why), so MetalFX is greyed where Stretch changes it, the saved choice kept: Fit or Fill brings it back.
+    // Breath of the Wild has Picture shape, and on Match screen Stretch changes the picture's shape only where the window is 16:9 or wider (the picture is the window's own
+    // shape on an iPad)
     let upscale = row(m, "DM_PRESENT_UPSCALE")
+    let notStretch = "Not with Stretch: pick Fit or Fill"
     m.values["DM_PRESENT_UPSCALE"] = "metalfx"; m.values["DM_PICTURE_FIT"] = "stretch"; m.values["DM_MOD_ULTRAWIDE"] = "0"
-    expect(m.values["DM_SCREEN_ASPECT"] == "auto" && m.optionInactive(upscale, "metalfx") == nil && m.hintWhy(upscale) == "With Stretch, only when the game draws a smaller picture"
-           && m.reason(upscale)?.inactive == false, "MetalFX with Stretch on an iPhone: a hint")
+    expect(m.values["DM_SCREEN_ASPECT"] == "auto" && m.optionInactive(upscale, "metalfx") == notStretch && m.inactiveWhy(upscale) == nil
+           && m.reason(upscale)?.why == notStretch && m.reason(upscale)?.inactive == true, "MetalFX with Stretch on an iPhone: greyed, the row itself not")
+    expect(m.values["DM_PRESENT_UPSCALE"] == "metalfx" && m.shown(upscale) == "metalfx", "greying MetalFX keeps the saved choice, and the row shows it")
+    expect(m.pick(upscale, "off") && m.values["DM_PRESENT_UPSCALE"] == "off", "Standard can be picked")
+    expect(!m.pick(upscale, "metalfx") && m.values["DM_PRESENT_UPSCALE"] == "off", "and MetalFX then cannot be picked again under Stretch")
+    m.values["DM_PRESENT_UPSCALE"] = "metalfx"
+    m.facts.tv = true
+    expect(m.reason(upscale) == nil, "with a TV connected the picture is shown there whole, and MetalFX runs")
     m.facts = ipad
-    expect(m.reason(upscale) == nil, "an iPad on Match screen: Stretch stretches nothing, no hint")
+    expect(m.reason(upscale) == nil, "an iPad on Match screen: Stretch stretches nothing, MetalFX works")
     m.values["DM_SCREEN_ASPECT"] = "0"
-    expect(m.hintWhy(upscale) == "With Stretch, only when the game draws a smaller picture", "an iPad with the 16:9 picture: the hint")
+    expect(m.optionInactive(upscale, "metalfx") == notStretch, "an iPad with the 16:9 picture: greyed")
+    m.values["DM_SCREEN_ASPECT"] = "1.43"
+    expect(m.optionInactive(upscale, "metalfx") == notStretch, "and with the Duo's 1.43:1 in a 1.45:1 window, 1.4 % off its shape")
+    m.facts.window = 1.43
+    expect(m.optionInactive(upscale, "metalfx") == nil, "an iPhone Duo's window: the picture's own shape, MetalFX works")
+    m.facts.window = 1.78; m.values["DM_SCREEN_ASPECT"] = "0"
+    expect(m.optionInactive(upscale, "metalfx") == nil, "a 16:9 window with the 16:9 picture: MetalFX works")
     m.values["DM_SCREEN_ASPECT"] = "auto"; m.facts = iphone
+    expect(m.optionInactive(upscale, "metalfx") == notStretch, "the iPhone again: greyed")
     m.values["DM_PICTURE_FIT"] = "fit"
-    expect(m.reason(upscale) == nil, "no hint with Fit and Ultrawide off")
+    expect(m.reason(upscale) == nil && m.optionInactive(upscale, "metalfx") == nil && m.values["DM_PRESENT_UPSCALE"] == "metalfx",
+           "Fit brings MetalFX back, the saved choice as it was")
+    m.values["DM_PICTURE_FIT"] = "fill"
+    expect(m.reason(upscale) == nil, "and so does Fill")
+    m.values["DM_PICTURE_FIT"] = "fit"
     m.values["DM_MOD_ULTRAWIDE"] = "1"
     // Ultrawide on a screen wider than 16:9 stretches the picture: Picture greyed, and on a 16:9 screen Ultrawide itself
     let picture = row(m, "DM_PICTURE_FIT"), ultrawide = row(m, "DM_MOD_ULTRAWIDE")
@@ -201,15 +220,19 @@ import SwiftUI
     let plain = LauncherModel(ios, defaults: d)
     expect(plain.inactiveWhy(row(plain, "DM_PAD_PRESS_TO_JOIN")) == nil && plain.inactiveWhy(row(plain, "DM_PSO_PREBUILD")) == nil, "without them, neither")
 
-    // Super Mario Bros. Wonder has no Picture shape: Stretch always stretches its 16:9 picture on an iPhone, so MetalFX gets the hint; only a device without the scaler greys it
+    // Super Mario Bros. Wonder has no Picture shape: Stretch stretches its 16:9 picture on an iPhone and on a 4:3 iPad, so MetalFX is greyed there; in a 16:9 window it works
     let w = LauncherModel(wonder, defaults: d)
     w.facts = iphone
     let wu = row(w, "DM_PRESENT_UPSCALE")
     w.values["DM_PICTURE_FIT"] = "stretch"
-    expect(w.optionInactive(wu, "metalfx") == nil && w.optionHint(wu, "metalfx") == "With Stretch, only when the game draws a smaller picture" && w.inactiveWhy(wu) == nil,
-           "MetalFX with Stretch: selectable, with the hint")
-    w.facts.tv = true
-    expect(w.optionHint(wu, "metalfx") == nil, "with a TV connected the picture is shown there whole, and MetalFX runs")
+    expect(w.optionInactive(wu, "metalfx") == "Not with Stretch: pick Fit or Fill" && w.optionHint(wu, "metalfx") == nil && w.inactiveWhy(wu) == nil,
+           "MetalFX with Stretch: greyed, Standard still selectable")
+    w.facts.window = 1.33
+    expect(w.optionInactive(wu, "metalfx") == "Not with Stretch: pick Fit or Fill", "a 4:3 window: greyed")
+    w.facts.window = 1.77
+    expect(w.optionInactive(wu, "metalfx") == nil, "a window within 1 % of 16:9: the picture keeps its shape, MetalFX works")
+    w.facts = iphone; w.facts.tv = true
+    expect(w.optionInactive(wu, "metalfx") == nil && w.optionHint(wu, "metalfx") == nil, "with a TV connected the picture is shown there whole, and MetalFX runs")
     w.facts = iphone; w.values["DM_PICTURE_FIT"] = "fit"; w.values["DM_MOD_ULTRAWIDE"] = "1"
     expect(w.optionHint(wu, "metalfx") == "With Ultrawide, only when the game draws a smaller picture", "Ultrawide gives MetalFX its hint too")
     w.values["DM_MOD_ULTRAWIDE"] = "0"; w.facts.metalFX = false

@@ -13,7 +13,7 @@
   },
   "$defs": {
     "size": {"description": "[width, height] in pixels.", "type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
-    "term": {"description": "<VAR>=<v>/<v> or <VAR>!=<v>/<v> (another row's current value, a range compared as a number, or the environment for a switch no row sets; false when neither has the variable), or a device term: device:<iphone/ipad/mac>, screen<r, screen>=r, window>=r, hz<n, hz>=n, haptics:none, controller:none, tv:none, mfx:none, capture:on. A term a reader does not know is false.", "type": "string"},
+    "term": {"description": "<VAR>=<v>/<v> or <VAR>!=<v>/<v> (another row's current value, a range compared as a number, or the environment for a switch no row sets; false when neither has the variable), or a device term: device:<iphone/ipad/mac>, screen<r, screen>=r, window<r, window>=r, hz<n, hz>=n, haptics:none, controller:none, tv:none, mfx:none, capture:on. A term a reader does not know is false.", "type": "string"},
     "when": {"type": "object", "required": ["when"], "properties": {"when": {"description": "Terms that must all hold.", "type": "array", "items": {"$ref": "#/$defs/term"}, "minItems": 1}}},
     "shown": {"type": "object", "required": ["option", "when"],
               "properties": {"option": {"description": "The value the row shows while the terms hold, one it takes.", "type": "string"},

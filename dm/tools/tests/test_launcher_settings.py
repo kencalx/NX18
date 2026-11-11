@@ -152,26 +152,36 @@ class LauncherSettingsTests(unittest.TestCase):
         for env in ('DM_RUMBLE', 'DM_RUMBLE_GAIN'):
             self.assertEqual(rows[env]['hint'], [{'when': ['haptics:none', 'controller:none'], 'why': 'Rumble needs a controller on this device'}])
 
-    def test_metalfx_with_stretch_is_a_hint_where_stretch_changes_the_shape(self):
-        """Stretch (and Ultrawide, which stretches) keeps MetalFX out (nvn_mtl.m fx_why) unless the game presents a crop smaller than its window texture, which no profile key
-        tells apart (Breath of the Wild's handheld picture, Super Mario Odyssey's dynamic resolution; not the render scale, which shrinks only the 3D views inside a full crop):
-        so MetalFX stays selectable everywhere with a hint, and the in-game menu says what the present did. The Stretch hint holds only where Stretch changes the picture's
-        shape: a game with Picture shape on Match screen renders the window's own shape where the window is taller than 16:9 (an iPad, front_ios.m startGame)"""
+    def test_metalfx_is_greyed_where_stretch_changes_the_shape(self):
+        """Stretch keeps MetalFX out where it stretches the picture to another shape (nvn_mtl.m fx_why: 1 % or more off, as the spatial scaler is made for a uniform scale), so
+        MetalFX is greyed there (inactive, the saved choice kept) and comes back with Fit or Fill. Only where the window has the picture's shape (within the 1 %) does Stretch
+        leave MetalFX working: the 16:9 picture of a game without Picture shape in a 16:9 window, and with Picture shape the shape chosen (Match screen: the window's own where it
+        is taller than 16:9, front_ios.m startGame). Ultrawide, which stretches too, keeps its hint: there MetalFX still scales a crop smaller than its texture"""
         stretch = ['DM_PICTURE_FIT=stretch', 'tv:none']   # with a TV connected the picture is shown there whole, and MetalFX runs (front_ios.m)
         ultrawide = {'option': 'metalfx', 'when': ['DM_MOD_ULTRAWIDE=1', 'screen>=1.85', 'tv:none'], 'why': 'With Ultrawide, only when the game draws a smaller picture'}
-        why = 'With Stretch, only when the game draws a smaller picture'
         nofx = {'option': 'metalfx', 'when': ['mfx:none'], 'why': 'This device has no MetalFX scaler'}
+        def greyed(*when): return {'option': 'metalfx', 'when': stretch + list(when), 'why': 'Not with Stretch: pick Fit or Fill'}
+        wide = [greyed('window<1.76'), greyed('window>=1.7956')]   # 16:9 within fx_why's 1 %: from 1.76 to 1.7956
         for gid, fixups in ((WONDER, ()), (WONDER, ('DYNAMIC_RESOLUTION',)), ('0100F2C0115B6000', ('RENDER_SCALE',))):   # no Picture shape row: the 16:9 picture
             with self.subTest(gid=gid, fixups=fixups):
                 s = build(gid, 'nvn', fixups=fixups, mods=['ultrawide'])['DM_PRESENT_UPSCALE']
-                self.assertEqual(s['inactive'], [nofx], 'nothing greys MetalFX but a device without the scaler')
-                self.assertEqual(s['hint'], [ultrawide, {'option': 'metalfx', 'when': stretch, 'why': why}])
-        s = build(BOTW, 'nvn', fixups=('RENDER_SCALE',), mods=['ultrawide'])['DM_PRESENT_UPSCALE']   # Picture shape: Stretch stretches a shape other than the window's
-        self.assertEqual(s['hint'], [ultrawide, {'option': 'metalfx', 'when': stretch + ['DM_SCREEN_ASPECT!=auto'], 'why': why},
-                                     {'option': 'metalfx', 'when': stretch + ['DM_SCREEN_ASPECT=auto', 'window>=1.77'], 'why': why}])
-        self.assertEqual(build(WONDER, 'nvn')['DM_PRESENT_UPSCALE']['hint'], [{'option': 'metalfx', 'when': stretch, 'why': why}], 'no Ultrawide row without the mod: no rule on it')
+                self.assertEqual(s['inactive'], [nofx] + wide, 'the device without the scaler first, then Stretch to a shape other than 16:9')
+                self.assertEqual(s['hint'], [ultrawide])
+        s = build(BOTW, 'nvn', fixups=('RENDER_SCALE',), mods=['ultrawide'])['DM_PRESENT_UPSCALE']   # Picture shape: Stretch stretches the shape chosen to the window's
+        self.assertEqual(s['inactive'], [nofx, greyed('DM_SCREEN_ASPECT=0', 'window<1.76'), greyed('DM_SCREEN_ASPECT=0', 'window>=1.7956'),
+                                         greyed('DM_SCREEN_ASPECT=1.43', 'window<1.4157'), greyed('DM_SCREEN_ASPECT=1.43', 'window>=1.4443'),
+                                         greyed('DM_SCREEN_ASPECT=auto', 'window<1.3'), greyed('DM_SCREEN_ASPECT=auto', 'window>=1.7956')])
+        self.assertEqual(s['hint'], [ultrawide])
+        self.assertEqual(build(WONDER, 'nvn')['DM_PRESENT_UPSCALE']['inactive'], [nofx] + wide)
+        self.assertNotIn('hint', build(WONDER, 'nvn')['DM_PRESENT_UPSCALE'], 'no Ultrawide row without the mod: no rule on it')
         mac = build(WONDER, 'nvn', 'mac')['DM_PRESENT_UPSCALE']   # no Picture row on the Mac: nothing stretches there
         self.assertEqual((mac['inactive'], mac.get('hint')), ([nofx], None))
+        for r in s['inactive'][1:]:   # each rule's window bounds against fx_why's 1 % around the picture's shape: greyed outside, MetalFX inside
+            shape = {'DM_SCREEN_ASPECT=1.43': 1.43}.get(r['when'][2], 16 / 9)
+            op, bound = re.fullmatch(r'window(<|>=)([\d.]+)', r['when'][-1]).groups()
+            if r['when'][2] == 'DM_SCREEN_ASPECT=auto' and op == '<': self.assertEqual(bound, '1.3'); continue   # below Match screen's 1.3 the picture is 16:9 (front_ios.m)
+            off = abs(float(bound) / shape - 1)
+            self.assertTrue(0.0099 <= off <= 0.0101, f'{r["when"]}: {off:.4f} off {shape:.3f}')
 
     def test_ultrawide_greys_picture_and_picture_shape(self):   # front_ios.m: on a screen of 1.85:1 or more, Ultrawide stretches the picture and keeps it 16:9
         rows = build(BOTW, 'nvn', mods=['ultrawide'])

@@ -25,7 +25,7 @@ class LauncherStorageTests(unittest.TestCase):
             for d in ('patched', 'wonder'): (tmp / d / 'mods.tsv').write_text('# header\nultrawide\tsome mod\t3\n')   # the Ultrawide row (iPhone and iPad), which the rules grey and hide
             with patch.dict(os.environ, {'GFXAPI': 'nvn'}), patch.object(settings.nacp, 'languages', return_value=['en-US', 'ja']):
                 (tmp / 'launcher.json').write_text(json.dumps(settings.build('01007EF00011E000', tmp / 'patched', tmp / 'control.nacp')))
-                (tmp / 'launcher_wonder.json').write_text(json.dumps(settings.build('010015100B514000', tmp / 'wonder', tmp / 'control.nacp')))   # no render scale: MetalFX greyed with Stretch
+                (tmp / 'launcher_wonder.json').write_text(json.dumps(settings.build('010015100B514000', tmp / 'wonder', tmp / 'control.nacp')))   # no Picture shape: MetalFX greyed with Stretch on a window not 16:9
                 with patch.dict(os.environ, {'SETTINGS_PLATFORM': 'mac'}):   # the Mac window's list: Display mode, the render scale's base size
                     (tmp / 'launcher_mac.json').write_text(json.dumps(settings.build('01007EF00011E000', tmp / 'patched', tmp / 'control.nacp')))
             exe = tmp / 'launcher_storage_check'

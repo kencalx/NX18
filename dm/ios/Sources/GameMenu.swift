@@ -84,6 +84,7 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
 
 // The rows, built each time the menu opens (and after each pick in the panel), so they show the current choices
 @MainActor func gameMenuSections() -> [GameMenuSection] {
+    gameMenuModel?.refreshFacts()   // the rules' device terms as they are now: the app's window (an iPad's, resized while the game runs; MetalFX's Stretch rules), a TV
     let names = ["2D", "3D", "Tap"]
     let layouts = (0..<3).filter { dm_pad_layout_offered(Int32($0)) }.map { l in
         GameMenuItem(id: "layout=\(l)", title: names[l], kind: .toggle(dm_pad_layout() == l)) { _ in dm_pad_layout_set(Int32(l)) }
@@ -219,18 +220,22 @@ private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 
 // - the front end holds its value (dm_setting_held: Picture while Ultrawide stretches the picture), or a launcher rule greys the whole row (LauncherModel.inactiveWhy): the row is
 //   greyed, so it cannot be changed, as on the settings screen, and ticks the value the game has then (dm_setting_held_value's Stretch, else the launcher's shows rule,
 //   LauncherModel.shown), not the saved choice, which stays as it is;
+// - a launcher rule that greys the choice made (LauncherModel.optionInactive: MetalFX under a Stretch that changes the picture's shape, or on a device without the scaler), as
+//   the settings screen's note says it, at once after the pick that brought it (Picture set to Stretch here), before the next present can tell;
 // - the running game's own state (front_ios.m dm_setting_why: MetalFX not upscaling a stretched picture, the touch controls hidden by a controller), read each time the menu
 //   opens, as it is built then;
 // - a launcher rule about the choice made or the device (LauncherModel.reason: Rumble needs a controller on this device), unless the running game says the choice works right
-//   now (front_ios.m dm_setting_working: MetalFX upscaled at the last present, where the launcher's hint can only say it may not under Stretch).
-// An option a rule greys (MetalFX on a device without the scaler) cannot be picked, with its reason under it; the others stay selectable. Nothing here changes a saved choice.
+//   now (front_ios.m dm_setting_working: MetalFX upscaled at the last present, where the launcher's hint can only say it may not under Ultrawide).
+// An option a rule greys (MetalFX on a device without the scaler, or under Stretch) cannot be picked, with its reason under it; the others stay selectable. The option chosen
+// is drawn greyed as well while a rule greys it, ticked, as the settings screen's menu draws it: picking it again would change nothing. Nothing here changes a saved choice.
 // An env file's value is shown, not changed, as before
 @MainActor private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> GameMenuItem {
     let held = dm_setting_held(s.env), fixed = m.fixed.contains(s.env)
     let now = (held ? dm_setting_held_value(s.env).map { String(cString: $0) } : nil) ?? m.shown(s)   // the value the game has: Stretch while Ultrawide holds Picture
     let live: String? = dm_setting_why(s.env).map { String(cString: $0) }
     let greyed: String? = held ? (live ?? "") : m.inactiveWhy(s)
-    let why = greyed ?? live ?? (dm_setting_working(s.env) ? nil : m.reason(s)?.why)
+    let ruled = m.optionInactive(s, now)   // the choice made does nothing while the rule holds (MetalFX with Stretch)
+    let why = greyed ?? ruled ?? live ?? (dm_setting_working(s.env) ? nil : m.reason(s)?.why)
     let note = why.flatMap { $0.isEmpty ? nil : $0 }
     let locked = fixed || greyed != nil
     func pick(_ v: String) { if m.choose(s, v) { dm_setting_env(s.env, v) }; _ = dm_setting_live(s.env, v) }   // saved, into the environment (under front_ios.m's lock), then applied
@@ -242,7 +247,7 @@ private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 
     let options = s.options ?? []
     let current = options.first { $0[0] == now }?[1] ?? now
     let picks = options.map { o in
-        let off = o[0] == now ? nil : m.optionInactive(s, o[0])
+        let off = m.optionInactive(s, o[0])
         return GameMenuItem(id: "row:\(s.env)=\(o[0])", title: o[1], subtitle: !locked ? off.flatMap { $0.isEmpty ? nil : $0 } : nil,
                             disabled: locked || off != nil, kind: .toggle(o[0] == now)) { _ in pick(o[0]) }
     }

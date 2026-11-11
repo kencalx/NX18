@@ -72,7 +72,7 @@ struct DeviceFacts: Equatable, Sendable {
     enum Kind: String, Sendable { case iphone, ipad, mac }
     var kind: Kind?
     var screen: Double?        // the long side over the short side of the screen the app's window is on (front_ios.m's Ultrawide test)
-    var window: Double?        // the same for the app's window, which an iPad under Stage Manager or Split View makes smaller than the screen (front_ios.m's Match screen)
+    var window: Double?        // the same for the app's window, which an iPad under Stage Manager or Split View makes smaller than the screen (front_ios.m's Match screen; the shape Stretch stretches the picture to)
     var hz: Int?               // the fastest connected screen's maximumFramesPerSecond (hle_nvn.c's 120 fps test)
     var haptics: Bool?         // the device has a haptic engine (CHHapticEngine supportsHaptics, as haptics_apple.m and DmGamepad.m test it)
     var controller: Bool?      // a game controller is connected now
