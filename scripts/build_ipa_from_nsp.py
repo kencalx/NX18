@@ -479,8 +479,19 @@ def free_gb(p):
 
 def tool_env(environ=os.environ):
     """The environment the build's tools run in: the caller's PATH first, so the tools it selects (a venv's python3, mise's zstd) are the ones that run,
-    then TOOL_PATHS for the tools it lacks (a GUI app such as Spyder gets only the system PATH, or none)."""
-    return dict(environ, PATH=os.pathsep.join([environ.get('PATH') or '/usr/bin:/bin:/usr/sbin:/sbin'] + TOOL_PATHS))
+    then TOOL_PATHS for the tools it lacks (a GUI app such as Spyder gets only the system PATH, or none). Never the SteamGridDB key (env_key)."""
+    return dict({k: v for k, v in environ.items() if k != 'STEAMGRIDDB_KEY'}, PATH=os.pathsep.join([environ.get('PATH') or '/usr/bin:/bin:/usr/sbin:/sbin'] + TOOL_PATHS))
+
+
+_ENV_KEY = ''   # this run's STEAMGRIDDB_KEY environment variable, once env_key has taken it out of os.environ
+
+
+def env_key():
+    """The STEAMGRIDDB_KEY environment variable, taken out of os.environ (main does it before the first tool runs), so no tool the build starts inherits it, whether through tool_env or
+    a subprocess call without env=; cli puts os.environ back after the run. Only launcher_art reads the value, for game_art"""
+    global _ENV_KEY
+    if 'STEAMGRIDDB_KEY' in os.environ: _ENV_KEY = os.environ.pop('STEAMGRIDDB_KEY')
+    return _ENV_KEY
 
 
 # ---- NSP identification ----
@@ -3066,9 +3077,10 @@ def say_game(app, name, version, bundle_id, out, icon):
 def launcher_art(app, name, work, given, online, manual, given_logo=None):
     """The launcher's key art, logo and "About this game" text, once per app (game_art.settle: <build folder>/art/, reused by the next build), and the manual (--manual / MANUAL, checked in main).
     app: the application's title ID (a multi-program game's program 0, as titledb lists it); given: --art / ART; given_logo: --logo / LOGO; online: ART_ONLINE. The SteamGridDB key (STEAMGRIDDB_KEY, else
-    the environment) goes only to game_art, never into a message, event or the tools' environment. Nothing here stops the build: a failure is a line, and the app goes without the art.
+    the environment variable, which env_key has taken out of os.environ) goes only to game_art, never into a message, event or the tools' environment. Nothing here stops the build: a failure is a line, and the app goes without the art.
     Then the event art for a front end (json mode: path, source, url, logo, about, manual; null where there is none). Returns (art, about, manual, logo), each a Path or None"""
-    key = STEAMGRIDDB_KEY or os.environ.get('STEAMGRIDDB_KEY', '')
+    from_env = env_key()   # out of the environment even when the setting holds the key
+    key = STEAMGRIDDB_KEY or from_env
     if STEAMGRIDDB_KEY: say('SteamGridDB key: from the STEAMGRIDDB_KEY setting; this file is tracked, so do not commit it with the key (the STEAMGRIDDB_KEY environment variable keeps it out of the repository)')
     try: r = game_art.settle(app, name, work / 'art', given=given, given_logo=given_logo, online=online, key=key, say=say) or {}
     except Exception as e:   # game_art reports its own failures; this is the last guard, so the art never stops the build
@@ -3153,6 +3165,7 @@ def provisional_version(have, builds, requested, profile_root):
 
 def main(args=None):
     args = args or parse_args([])
+    global _ENV_KEY; _ENV_KEY = ''; env_key()   # the SteamGridDB key out of the environment before any tool runs (launcher_art)
     PROG.mode = progress_mode(args.progress or PROGRESS)
     global ALLOW_DAMAGED; ALLOW_DAMAGED = args.allow_damaged or ALLOW_DAMAGED
     global PROGRAM_INDEX; PROGRAM_INDEX = args.program if args.program is not None else PROGRAM_INDEX

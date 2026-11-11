@@ -71,7 +71,12 @@ def _open(req, timeout):
     return _OPENER.open(req, timeout=timeout)
 
 
-def run(argv, **kw):   # sips and curl (tests replace it)
+def child_env(environ=None):   # the environment sips and curl run in: the caller's, without STEAMGRIDDB_KEY (curl reads the key's header on stdin and needs no variable)
+    return {k: v for k, v in (os.environ if environ is None else environ).items() if k != 'STEAMGRIDDB_KEY'}
+
+
+def run(argv, **kw):   # sips and curl (tests replace it), never with the key in their environment
+    kw.setdefault('env', child_env())
     return subprocess.run(argv, **kw)
 
 
@@ -603,7 +608,7 @@ def main():
     ap.add_argument('--logo', type=Path, help='a logo of yours (the game\'s title wordmark, a PNG or WebP with transparency) instead of SteamGridDB\'s')
     ap.add_argument('--offline', action='store_true', help='no network: only what the folder already has')
     a = ap.parse_args()
-    r = settle(int(a.title_id, 16), a.name, a.art_dir, given=a.art, given_logo=a.logo, online=not a.offline, key=os.environ.get('STEAMGRIDDB_KEY', ''), say=print)
+    r = settle(int(a.title_id, 16), a.name, a.art_dir, given=a.art, given_logo=a.logo, online=not a.offline, key=os.environ.pop('STEAMGRIDDB_KEY', ''), say=print)   # out of the environment, as run() keeps it from sips and curl
     print(json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in r.items()}))
 
 

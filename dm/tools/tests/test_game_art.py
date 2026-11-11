@@ -115,7 +115,7 @@ class Base(unittest.TestCase):
             if f.is_file(): self.assertNotIn(KEY.encode(), f.read_bytes(), f)
         for f in (self.tmp / 'cache').rglob('*'):
             if f.is_file(): self.assertNotIn(KEY.encode(), f.read_bytes(), f)
-        self.assertNotIn(KEY, json.dumps({k: v for k, v in os.environ.items() if k != 'STEAMGRIDDB_KEY'}))
+        self.assertFalse(KEY in json.dumps(dict(os.environ)), 'nor the environment, under any name')
 
 
 class Index(Base):
@@ -757,6 +757,16 @@ def webp(w, h, rgba):   # a lossless (VP8L) WebP of one color with alpha, withou
     data = b'\x2f' + bytes(sum(bits[i + j] << j for j in range(8)) for i in range(0, len(bits), 8))
     chunk = b'VP8L' + struct.pack('<I', len(data)) + data + b'\0' * (len(data) % 2)
     return b'RIFF' + struct.pack('<I', 4 + len(chunk)) + b'WEBP' + chunk
+
+
+class ChildEnv(unittest.TestCase):   # sips and curl run without the key in their environment, though the caller's has it (STEAMGRIDDB_KEY, how the build is given one)
+    def test_run_leaves_the_key_out(self):
+        with mock.patch.dict(os.environ, {'STEAMGRIDDB_KEY': KEY, 'GAME_ART_TEST_MARK': '1'}):
+            r = ga.run([sys.executable, '-c', 'import json, os; print(json.dumps(dict(os.environ)))'], capture_output=True, text=True, check=True)
+            self.assertIn('STEAMGRIDDB_KEY', os.environ, 'the caller\'s environment is left as it is')
+        env = json.loads(r.stdout)
+        self.assertFalse(KEY in r.stdout); self.assertFalse('STEAMGRIDDB_KEY' in env); self.assertEqual(env.get('GAME_ART_TEST_MARK'), '1')
+        self.assertEqual(ga.child_env({'STEAMGRIDDB_KEY': KEY, 'PATH': '/usr/bin'}), {'PATH': '/usr/bin'})
 
 
 @unittest.skipUnless(shutil.which('sips'), 'sips is macOS\'s')

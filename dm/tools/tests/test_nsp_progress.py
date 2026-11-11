@@ -111,8 +111,10 @@ class Json(unittest.TestCase):
             say('launcher art: from the stub')
             if error: raise error
             return result
-        with mock.patch.object(nsp.game_art, 'settle', settle), mock.patch.object(nsp, 'STEAMGRIDDB_KEY', key), mock.patch.dict(nsp.os.environ, env, clear=True):
+        with mock.patch.object(nsp.game_art, 'settle', settle), mock.patch.object(nsp, 'STEAMGRIDDB_KEY', key), mock.patch.object(nsp, '_ENV_KEY', ''), \
+             mock.patch.dict(nsp.os.environ, env, clear=True):
             r = nsp.launcher_art(0x0100F2C0115B6000, "Luigi's Mansion 3", Path('/b/w'), given, online, manual, given_logo)
+            self.assertFalse('STEAMGRIDDB_KEY' in nsp.os.environ, 'read once, then out of the environment the tools inherit')
         return r, calls, self.events() if self.prog.mode == 'json' else []
 
     def test_art(self):   # the launcher's art: settle once with the application's title ID and the build folder's art/, then the event art (the event game is left as it is)
@@ -145,6 +147,25 @@ class Json(unittest.TestCase):
         _, calls, _ = self.art({'art': None})
         self.assertEqual(calls[0]['key'], '')
         self.assertNotIn('5678', self.out.getvalue()); self.assertNotIn('1234', self.out.getvalue())
+
+    def test_key_never_in_a_tools_environment(self):   # the key in the environment: main takes it out before any tool runs, and tool_env leaves it out of an environment given to it
+        class Stop(Exception): pass
+        dummy = 'dummy-not-a-key-9137'
+        with mock.patch.object(nsp, '_ENV_KEY', 'a previous run'), mock.patch.dict(nsp.os.environ, {'STEAMGRIDDB_KEY': dummy, 'NX18_TEST_MARK': '1'}), \
+             mock.patch.object(nsp, 'progress_mode', side_effect=Stop):
+            with self.assertRaises(Stop): nsp.main(nsp.parse_args([]))
+            self.assertFalse('STEAMGRIDDB_KEY' in nsp.os.environ)
+            self.assertEqual(nsp._ENV_KEY, dummy, 'kept for launcher_art alone')
+            env = nsp.tool_env()
+            self.assertFalse(dummy in json.dumps(env)); self.assertEqual(env['NX18_TEST_MARK'], '1')
+            child = subprocess.run([sys.executable, '-c', 'import json, os; print(json.dumps(dict(os.environ)))'], capture_output=True, text=True, check=True).stdout
+            self.assertFalse(dummy in child, 'nor a tool started without env=')
+            self.assertEqual(nsp.env_key(), dummy)
+        with mock.patch.object(nsp, '_ENV_KEY', 'a previous run'), mock.patch.dict(nsp.os.environ, {}), mock.patch.object(nsp, 'progress_mode', side_effect=Stop):
+            nsp.os.environ.pop('STEAMGRIDDB_KEY', None)
+            with self.assertRaises(Stop): nsp.main(nsp.parse_args([]))
+            self.assertEqual(nsp.env_key(), '', 'a run without the variable has no key from the run before (Spyder runs again in the same process)')
+        self.assertNotIn('STEAMGRIDDB_KEY', nsp.tool_env({'STEAMGRIDDB_KEY': dummy, 'PATH': '/usr/bin'}))
 
     def test_art_failure_does_not_stop_the_build(self):   # a failure settle did not catch is a line without the key, and the app goes without art
         r, _, es = self.art(error=OSError('HTTP 401 for Bearer secret-key-42'), key='secret-key-42', manual=Path('/m/manual.pdf'))
