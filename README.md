@@ -14,7 +14,7 @@ It is not an emulator: the game's own code runs directly on the Apple chip, with
 
 The full [tested games table](dm/games/README.md#games) includes original Switch games, tested builds, engines and graphics APIs. Each game's note records its tested platforms, progress and known issues.
 
-These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup` file or a dump folder](#switch-2-games):
+These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup` or `.nx` file or a dump folder](#switch-2-games):
 
 - [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md)
 - [Fire Emblem Fortune's Weave](dm/games/04007EF01F8AE000/README.md) — up to 120 fps
@@ -52,7 +52,7 @@ For a game without a profile, the script writes a survey and tries a provisional
 
 ## How to play
 
-Switch 2 games are built from one `.nup` file or a folder of their files, not from NSPs, and are tested on the Mac only: see [Switch 2 games](#switch-2-games).
+Switch 2 games are built from one `.nup` or `.nx` file or a folder of their files, not from NSPs, and are tested on the Mac only: see [Switch 2 games](#switch-2-games).
 
 ### Build from the command line
 
@@ -99,7 +99,7 @@ Controls, saves and settings: [Playing](docs/playing.md).
 
 ### Switch 2 games
 
-A Switch 2 game is built from one [NUP](https://github.com/a55uka/nup) container (a `.nup` file) or a folder of its files, not from NSPs. Neither needs `prod.keys`. A game this project has no profile for is surveyed and gets a provisional profile, as NSPs do ([Port another game](docs/development.md#port-another-game)), which may not boot. You get a Mac app; iPhone and iPad are untested.
+A Switch 2 game is built from one [NUP](https://github.com/a55uka/nup) container (a `.nup` file), one [NX](https://github.com/fab918/nxformat) archive (a `.nx` file) or a folder of its files, not from NSPs. None of them needs `prod.keys`. A game this project has no profile for is surveyed and gets a provisional profile, as NSPs do ([Port another game](docs/development.md#port-another-game)), which may not boot. You get a Mac app; iPhone and iPad are untested.
 
 **From a `.nup` file**, which holds the base game, its updates and DLC in one file. Give the file, or a folder that holds it:
 
@@ -110,6 +110,14 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform m
 [Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) is played this way: its 47 GB NUP unpacks in under five minutes. A NUP that carries the game's control data (its NACP) and icon gives the app the game's name and icon; otherwise the name comes from the game's profile and the app gets the NX 18 icon (`docs/images/nx18/nx18-icon-square-1024.png`) unless you give it one with `--icon <image>` (`ICON` in Spyder; a JPEG or PNG of any size).
 
 A NUP without the base game also works, when its base package is empty or it has none and its updates are marked `standalone_update`: the update is taken as the whole game, and the script says so. If the game then stops on missing files, that update holds only what changed: pack a NUP with the base game. The newest update is selected by default; `--package v<N>` selects another version in the container. Such a container has no `v0` (base game) to select.
+
+**From a `.nx` file**, an NX archive ([NXFormat](https://github.com/fab918/nxformat) 1.0.x, by fab918), which also holds the base game, updates and DLC in one file, for Switch 1 and Switch 2 games alike. Its NXConvert makes one from a NUP (`nxconvert pack-nup game.nup game.nx --platform switch2`) or from extracted folders (`nxconvert pack-tree`). Give the file, or a folder that holds it:
+
+```
+python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nx --platform mac-app
+```
+
+Every version in an NX is the whole game, so a newer update needs no base game beside it; `--package v<N>` selects a version, the newest by default. Each version carries its own NACP and icon when the archive has them, and DLC converted from a NUP or folders comes along. Every file is checked against its SHA-256 as it is unpacked, and a damaged archive stops the build with the file it failed on; `python3 scripts/pack_nx.py game.nx --list` lists what an archive holds and `--verify` checks all of it. An NX that holds several games needs `--title-id`. An NX made from decrypted NSPs or XCIs (`nxconvert pack game.dnsp`, Switch 1 games) holds the decrypted NCA files themselves: it builds too, still with no `prod.keys`. The repository's `nx_extract` reads them and lays an update over its base game, as it does for NSPs. It needs temporary space for the NCA files of the version it extracts (an update's base and patch NCAs together, deleted after each), and a repeat build reuses the extraction without staging them again. Its base game alone cannot be packed when that base is sparse (the decrypter left out data its update carries); pack the update version. An NX of a newer format version than 0.2 or 0.3 is refused with a line saying a newer NX 18 is needed. Keep one `.nup` or `.nx` per folder.
 
 **From a folder of files**. The script expects this layout (`updates` and `dlc` are optional):
 

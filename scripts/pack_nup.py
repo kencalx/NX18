@@ -133,6 +133,9 @@ class Nup:
     def child(self, d, name):   # the index of a file in folder d, or None
         return next((i for n, isdir, i in self.children(d) if n == name and not isdir), None)
 
+    def size(self, i): return self.files[i][1]
+    def sha(self, i): return self.files[i][2]
+
     def tree_bytes(self, d):   # the uncompressed size of everything under folder d
         return sum(self.files[i][1] if not isdir else self.tree_bytes(i) for _, isdir, i in self.children(d))
 
@@ -176,10 +179,10 @@ class Nup:
         return out[:n]
 
 
-def program_id(npdm, where):   # the ACI0 program ID of an NPDM
-    if npdm[:4] != b'META': raise Error(f'{where}: not an NPDM')
+def program_id(npdm, where):   # the ACI0 program ID of an NPDM; a short or cut NPDM is an Error, not a struct.error
+    if npdm[:4] != b'META' or len(npdm) < 0x78: raise Error(f'{where}: not an NPDM ({len(npdm):,} bytes)')
     off, size = struct.unpack_from('<II', npdm, 0x70)
-    if npdm[off:off + 4] != b'ACI0' or size < 0x18: raise Error(f'{where}: no ACI0 section')
+    if npdm[off:off + 4] != b'ACI0' or size < 0x18 or off + 0x18 > len(npdm): raise Error(f'{where}: no ACI0 section')
     return struct.unpack_from('<Q', npdm, off + 0x10)[0]
 
 
@@ -252,32 +255,8 @@ def entries(n, d):   # romfs_image.entries for a folder of the container: [name,
 
 
 def verified(n, ents, dst):
-    """The identity of the image at dst when it is, byte for byte, what write() makes of ents now (romfs_image.layout's header and index, and each file's bytes
-    with the container's SHA-256), and it stayed the same while being read; else None. Reads the image, not the container's file data: 21.6 s for Ocarina's 26.25 GB image."""
-    ents = [e.copy() for e in ents]
-    off = romfs_image.HEAD.size
-    for e in ents:
-        if not e[2]: e[3], e[4] = off, n.files[e[1]][1]; off += e[4]
-    head, idx = romfs_image.layout(ents, off)
-    try:
-        before = romfs_image.file_identity(dst)
-        if before[1] != off + len(idx): return None   # [inode, size, mtime, ctime]
-        with open(dst, 'rb') as f:
-            if f.read(len(head)) != head: return None
-            f.seek(off)
-            if f.read(len(idx)) != idx: return None
-            f.seek(len(head))
-            for _, i, isdir, _, size in ents:   # the data in entry order, one pass forward
-                if isdir: continue
-                h, left = hashlib.sha256(), size
-                while left:
-                    chunk = f.read(min(left, 8 << 20))
-                    if not chunk: return None
-                    h.update(chunk); left -= len(chunk)
-                if h.digest() != n.files[i][2]: return None
-        return before if romfs_image.file_identity(dst) == before else None
-    except OSError:
-        return None
+    """The identity of the image at dst when it is, byte for byte, what write() makes of ents now, each file's bytes with the container's SHA-256 (romfs_image.verify_image); else None"""
+    return romfs_image.verify_image(ents, dst, n.size, n.sha)
 
 
 def pack(n, d, img, say=print, step=lambda s: None):
@@ -317,7 +296,7 @@ def pick(tags, code):   # the record for a language code: the exact tag, then it
     return tags.get(code) or tags.get(code.split('-')[0])
 
 
-def app_package(n):   # the record that holds application metadata when no base game is there (SPEC §5.1): a base record with no files, as packers attach it there, else the first package
+def app_package(n, k=None):   # (k: the package, as pack_nx.app_package takes it) the record that holds application metadata when no base game is there (SPEC §5.1): a base record with no files, as packers attach it there, else the first package
     return next((k for k in n.packages if k.kind == BASE), n.packages[0])
 
 
