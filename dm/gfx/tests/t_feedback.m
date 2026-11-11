@@ -470,11 +470,14 @@ static void reuse_tables_case(void) {
     pool_table_give(b); pool_table_give(c); pool_table_give(d);
     g_done = done0; g_fence = fence0;
 }
-// A cut with earlier work still running stays a boundary for the game's timestamps, and commits only when the GPU has run out; a report after it takes that boundary's time
+// A cut with earlier work still running stays a boundary for the game's timestamps, and commits only when the GPU has run out; a report after it takes that boundary's time.
+// Run with and without the encode thread, so both the direct and the recorded timestamp writes are gated
 static void cut_boundary_case(void) {
     tex_t colour; target(&colour, 99810);
     id<MTLBuffer> rep = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(rep);
     CHECK(ts_on(), "segment mode has a timestamp heap");
+    const char *et = getenv("DM_NVN_ENC_THREAD");   // check_t_feedback runs this both ways: on the encode thread (iOS's default) the boundary timestamps are recorded RO_R_TS / RO_C_TS commands
+    if (et) CHECK(rec_on() == (atoi(et) > 0), "the encode thread is on exactly when DM_NVN_ENC_THREAD asks");
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour;
     clear(MTLClearColorMake(0, 0, 0, 1)); rp_end();
