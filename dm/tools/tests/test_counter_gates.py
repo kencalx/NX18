@@ -36,7 +36,11 @@ class CounterGates(unittest.TestCase):
         value = HLE[HLE.index('static uint64_t cntfrq_value(void)'):]
         value = value[:value.index('\n}\n')]
         self.assertIn('dm_sdk_ounce() ? 31250000 : 19200000', value)
-        self.assertIn('getenv("DM_CNTFRQ")', value, "the switch back to the host's register")
+        self.assertIn('pthread_once(&g_cntfrq_once, cntfrq_read_switch)', value, 'the switch is read once, for every gate thread')
+        switch = HLE[HLE.index('static void cntfrq_read_switch(void)'):]
+        switch = switch[:switch.index('\n}\n')]
+        self.assertIn('getenv("DM_CNTFRQ")', switch, "the switch back to the host's register")
+        self.assertIn('!strcmp(e, "0")', switch, 'exactly "0", as DM_AAC_LAYOUT and DM_VT_REBUILD')
         self.assertIn('guest_ns() / 32 : guest_ns() * 12 / 625', (REPO / 'dm/host/hle_os.c').read_text(), 'the ticks the frequency describes: 31.25 MHz and 19.2 MHz')
 
 

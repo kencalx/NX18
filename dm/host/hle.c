@@ -121,12 +121,26 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr);   // hle_svc
 // mrs xN, cntfrq_el0 (patch_nso.py sends it to the gate): the frequency of the ticks the counter gates return, the guest's 19.2 MHz (31.25 MHz for the Switch 2). The host's own
 // register describes the host's counter instead: 24 MHz on earlier Apple chips, 1 GHz measured on a development Mac (dm/gfx/nvn/nvn_entry.S), so a game converting ticks to time
 // with it got times 20 % short, or 32 to 52 times short on that Mac. Before the rewriter's rule the read stayed in place and gave the host's register; DM_CNTFRQ=0 gives that value
-// again (an A/B against builds without the rule; the rewritten code is the same either way). No game is known to read the register.
-static uint64_t cntfrq_value(void) {
-    static int host = -1;
-    if (host < 0) { const char *e = getenv("DM_CNTFRQ"); host = e && *e == '0'; if (host) LOG("[gate] DM_CNTFRQ=0: mrs cntfrq_el0 gives the host's counter frequency, not the guest's"); }
+// again (an A/B against builds without the rule; the rewritten code is the same either way). No game is known to read the register. The switch is read once, under pthread_once,
+// as the other switches (DM_AAC_LAYOUT, DM_VT_REBUILD) are: exactly "0" turns it on, so a value such as "00" or "0x…" leaves the guest's frequency. Only an arm64 host has
+// the register to give; elsewhere (a test build on another architecture) the switch is logged as having no effect and the guest's value stays.
 #if defined(__aarch64__)
-    if (host) { uint64_t f; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f)); return f; }
+static int g_cntfrq_host;
+#endif
+static pthread_once_t g_cntfrq_once = PTHREAD_ONCE_INIT;
+static void cntfrq_read_switch(void) {
+    const char *e = getenv("DM_CNTFRQ");
+    if (!(e && !strcmp(e, "0"))) return;
+#if defined(__aarch64__)
+    g_cntfrq_host = 1; LOG("[gate] DM_CNTFRQ=0: mrs cntfrq_el0 gives the host's counter frequency, not the guest's");
+#else
+    LOG("[gate] DM_CNTFRQ=0 has no effect on this architecture (no host cntfrq_el0 to read): mrs cntfrq_el0 gives the guest's frequency");
+#endif
+}
+static uint64_t cntfrq_value(void) {
+    pthread_once(&g_cntfrq_once, cntfrq_read_switch);
+#if defined(__aarch64__)
+    if (g_cntfrq_host) { uint64_t f; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f)); return f; }
 #endif
     return dm_sdk_ounce() ? 31250000 : 19200000;
 }
