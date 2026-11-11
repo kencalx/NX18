@@ -1936,7 +1936,8 @@ typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned
 static lf_rec g_lf[LFN];
 // What the front end had over the game when a frame was made (diagnostics only: nothing is decided on it). FRONT_MENU: its own menu was open or still closing (the iPhone's
 // in-game menu, a menu of the Mac's menu bar: front.h dm_front_menu_now); FRONT_AWAY: the app was not in focus (dm_focus_now() != 1: Control Center, a notification pulled
-// down, another window key on the Mac, on the way to the background). In both the system draws over the game on the same GPU: 13 Sentinels on an iPhone 18 Pro Max had
+// down, another window key on the Mac, on the way to the background). On the iPhone the system draws over the game on the same GPU in both (on the Mac out of focus another
+// window is in front, which may draw or not: the tag says only what the state was, scripts/devlog.py words it so): 13 Sentinels on an iPhone 18 Pro Max had
 // game frames at 19-56 ms of GPU time against about 7 ms, and bursts of dropped frames, while the player used the in-game menu, and 17-23 ms after losing focus, and nothing in the
 // log told those frames from the game's own. The long-frame line of such a frame ends with "(in-game menu open)", "(not in focus)" or both, and the 300-frame timing and
 // on-screen lines say how many of their frames were made so (front_ui_note); scripts/devlog.py keeps them apart. A long frame is judged 8 frames after it was made (its GPU

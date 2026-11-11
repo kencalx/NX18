@@ -169,8 +169,9 @@ int main(void) {
     dm_front_menu_set(1, NULL); CHECK(dm_front_menu_now(), "a second open report: still open");
     t_now += 5000000000ull; dm_front_menu_set(0, NULL);
     CHECK(dm_front_menu_now() && empty() && h_oe_GetFocus() == 1, "menu closes: still open while its dismissal is drawn, nothing for the game");
+    CHECK(atomic_load(&g_front_menu) == 0 && atomic_load(&g_front_menu_tail) == t_now + FRONT_MENU_TAIL_NS, "the close leaves the flag down and its tail set (stored before the flag)");
     t_now += FRONT_MENU_TAIL_NS - 1; dm_front_menu_set(0, NULL);
-    CHECK(dm_front_menu_now(), "a second close report (the next touch) starts no new tail: open until the first one's ends");
+    CHECK(dm_front_menu_now(), "a second close report (the Duo harness repeats one) starts no new tail: open until the first one's ends");
     t_now += 1; CHECK(!dm_front_menu_now(), "the tail over: shut");
     CHECK(atomic_load(&g_front_menu_tail) == 0, "and the tail cleared, so later reads take no clock");
     dm_front_menu_set(1, "menu bar"); t_now += 100; dm_front_menu_set(0, "menu bar"); t_now += 100; dm_front_menu_set(1, "menu bar");

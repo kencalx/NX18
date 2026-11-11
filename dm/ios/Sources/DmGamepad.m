@@ -294,7 +294,8 @@ static BOOL assistive_running(void) { return UIAccessibilityIsVoiceOverRunning()
 - (void)menuTouched { [self menuShow]; }
 // The log hears each open and close (hle_oe.c dm_front_menu_set: "front end: in-game menu open" / "... closed after N s"). UIKit draws the menu over the game on the same GPU, and
 // 13 Sentinels on an iPhone showed GPU spikes and dropped frames while it was open that the log could not tell from the game's own; the long-frame lines and the 300-frame
-// windows now say which frames were made under the menu (hle_nvn.c front_ui). A close is heard twice at most (willEnd, then the next touch on the game): the host logs one
+// windows now say which frames were made under the menu (hle_nvn.c front_ui). Each close is reported once: willEnd clears _menuOpen, so the touch on the game that also
+// closes the menu (touchesBegan) reports one only when willEnd never came. The host ignores a repeated report all the same
 - (void)menuOpened { _menuOpen = YES; _menuGen++; _menu.hidden = NO; _menu.alpha = 1; dm_front_menu_set(1, NULL); }
 - (void)menuClosed { _menuOpen = NO; [self menuScheduleHide]; dm_front_menu_set(0, NULL); }
 // A home screen shortcut (dm_gamepad_menu_open): the button shows at once (a faded or hidden one does not open its menu) and its menu opens on the next main-queue turn, as a tap does

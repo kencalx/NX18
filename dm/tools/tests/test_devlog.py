@@ -163,9 +163,14 @@ class FrontEnd(unittest.TestCase):   # frames made while the in-game menu (or a 
         self.assertEqual([r['frame'] for r in lfs['top']], [100]); self.assertEqual(lfs['by_cause'], {'game': 1})
         text = '\n'.join(devlog.render(s, 5))
         self.assertIn('long frames  1 (', text)
-        self.assertIn('not counted: 3 frames made with the system drawing over the game (in-game menu open 2, not in focus 1)', text)
-        rows = {r['label']: r for r in devlog.compare(s, read([lf(100, 80.0)]))['rows']}
+        self.assertIn('not counted: 3 frames made with the in-game menu open or out of focus (in-game menu open 2; not in focus 1)', text)   # "; ": a tag has a comma of its own
+        both = read([lf(200, 60.0) + ' (in-game menu open, not in focus)', lf(201, 45.0) + ' (in-game menu open)'])
+        self.assertIn('(in-game menu open, not in focus 1; in-game menu open 1)', '\n'.join(devlog.render(both, 5)))
+        rows = {r['label']: r for r in devlog.compare(s, read([lf(100, 80.0), lf(200, 60.0), lf(201, 45.0), lf(300, 50.0)]))['rows']}
         self.assertEqual((rows['long frames under the menu / out of focus']['a'], rows['long frames under the menu / out of focus']['b']), (3, 0))
+        # a log from before the tags counts every long frame as the game's: the row with the tagged ones in compares like for like (4 and 4 for the same play)
+        self.assertEqual((rows['long frames']['a'], rows['long frames']['b']), (1, 4))
+        self.assertEqual((rows['long frames, menu / focus ones too']['a'], rows['long frames, menu / focus ones too']['b']), (4, 4))
 
     def test_windows_and_drops(self):   # the windows' counts, and the dropped frames given without the windows that had such frames
         s = read([timing(300), onscreen(300, 1), timing(600, ui_note(120, 0)[2:]), onscreen(600, 30, ui_note(118, 0)), timing(900, ui_note(0, 40)[2:]), onscreen(900, 9, ui_note(0, 42)),
@@ -182,6 +187,17 @@ class FrontEnd(unittest.TestCase):   # frames made while the in-game menu (or a 
         s = read(['[dm] front end: in-game menu open', '[dm] front end: in-game menu closed after 2.4 s', '[dm] front end: in-game menu open (menu bar)',
                   '[dm] front end: in-game menu closed (menu bar) after 0.8 s'])
         self.assertEqual([e['what'] for e in s['events']['list']], ['in-game menu open', 'in-game menu closed', 'in-game menu open (menu bar)', 'in-game menu closed (menu bar)'])
+        self.assertEqual(s['events']['menu_long'], [])
+
+    def test_menu_open_too_long(self):   # a close the log may have missed: open a minute or more, or never closed in a log that ran a minute past the open, is flagged
+        pw = lambda f: lf(f, 20.0)   # a long-frame line gives the log's clock: frame f at f / 60 s
+        s = read([pw(60), '[dm] front end: in-game menu open', '[dm] front end: in-game menu closed after 75.0 s', pw(6000), '[dm] front end: in-game menu open', pw(12000)])
+        self.assertEqual([(x['open_s'], x['closed']) for x in s['events']['menu_long']], [(75.0, True), (100.0, False)])
+        text = '\n'.join(devlog.render(s, 5))
+        self.assertIn('the in-game menu was open 75 s from 1 s: a close may have been missed', text)
+        self.assertIn('was open 100 s from 100 s and never closed in the log', text)
+        short = read([pw(60), '[dm] front end: in-game menu open', '[dm] front end: in-game menu closed after 2.4 s', '[dm] front end: in-game menu open', pw(1200)])
+        self.assertEqual(short['events']['menu_long'], [])   # a log that ends soon after an open (the player shares it from the menu) is not flagged
 
     def test_old_logs_read_as_before(self):   # no tag and no note: nothing apart, the rate without such windows is the rate, no line of text for it
         s = read([timing(300), onscreen(300, 3), lf(100, 80.0)])

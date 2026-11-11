@@ -25,9 +25,10 @@ What it reads (docs/development.md, Reading a device log):
                      A frame as long as the frame step's hold asked for (2 or 3 vsyncs, within 1.25 of it) is not counted: the host's own line says the hold (; hold K × V ms,
                      hold 1 too while the frame step runs) and no longer prints such frames; in an older log the hold comes from the [nvn] frame step: hold A → B lines, and past
                      their last one from runs of three or more such frames at most two frames apart. A log with no frame step line and no hold guesses none. A line that ends with
-                     (in-game menu open), (not in focus) or both was made while the system drew over the game on its GPU: counted apart, not as the game's
+                     (in-game menu open), (not in focus) or both was made with the in-game menu over the game or out of focus: counted apart, not as the game's, and given
+                     again with them in (long frames, menu / focus ones too) so a log from before the tags compares like for like
   events             background and resume, focus changes, thermal state and Low Power Mode changes and the caps they set, memory warnings, in-game menu changes, the in-game
-                     menu opening and closing (front end: in-game menu open / closed; on the Mac a menu of the menu bar)
+                     menu opening and closing (front end: in-game menu open / closed; on the Mac a menu of the menu bar), and a menu open a minute or more or never closed
   audio, saves, RED  audio #N device callbacks … underruns; save commit, save sync; [RED] kinds, normalized as regress.py does (numbers, paths and keys taken out)
   audio output       the iOS audio session's I/O buffer and output latency (audio session:, audio route changed, settled at), its route changes (a [RED] one when asking
                      again failed) and lifecycle notices;
@@ -108,7 +109,7 @@ RX = {k: re.compile(v) for k, v in {
     'front_change': r'^front end: (thermal state|Low Power Mode) → (\S+) \((\d+) s after launch\)',
     'mem_warning': r'front end: iOS memory warning \((\d+) s after launch\): footprint (\d+) MiB, (\d+) MiB left',
     'focus': r'^oe focus state → (\d+)( \(library applet (?:open|closed)\))?',
-    'front_menu': r'^front end: in-game menu (open|closed)(?: \(([^()]*)\))?',   # hle_oe.c dm_front_menu_set: the iPhone's gear menu, or a menu of the Mac's menu bar
+    'front_menu': r'^front end: in-game menu (open|closed)(?: \(([^()]*)\))?(?: after ([\d.]+) s)?',   # hle_oe.c dm_front_menu_set: the iPhone's gear menu, or a menu of the Mac's menu bar
     'vp9_vt': r'^\[movie\] VP9 in VideoToolbox: hardware decoder (yes|no) after VTRegisterSupplementalVideoDecoderIfAvailable \((yes|no) before\); (\w+) (\S*) \(([^()]*)\), ([^.]*)\.',
     'aac_order': r"^\[movie\] AAC: (\d+) channels in AudioToolbox's order (.+?) \(layout tag \S+\), (handed out in|already|kept)(?:.*? order (.+?) \(DM_AAC_LAYOUT\)|.*? is (.+)|.*)$",
     'vt_rebuild': r'^\[movie\] (H\.264|AV1): VideoToolbox session made again after (-?\d+) \((\w+)\): (\d+) packets since the last',
@@ -143,6 +144,9 @@ FSTEP_CUT, FSTEP_AT = '; further changes only counted below', re.compile(r' at p
 # and only when some were. Such long frames are counted apart, not with the game's, and the dropped frames are also given without the windows that had any
 LF_UI = re.compile(r' \((in-game menu open(?:, not in focus)?|not in focus)\)$')
 WIN_UI = re.compile(r'in-game menu open (\d+) frames, not in focus (\d+) frames')
+# A menu open this long (or open at the end of a log that ran this long past it) is flagged: nobody reads the in-game menu for a minute, so its close was probably missed
+# (the pad reports it from willEnd and from the next touch on the game, and a controller player may never touch the game), and every frame tagged since would hide the game's own
+MENU_LONG_S = 60
 
 
 def fstep_cut(cuts: list[tuple[int, Any, int]]) -> int | None:
@@ -313,6 +317,18 @@ def scan(lines: list[str]) -> tuple[dict[str, list[tuple[int, Any, int]]], list[
     return g, events, lf_after
 
 
+def menu_long(lines: list[tuple[int, Any, int]], clock: Clock, end_s: float | None) -> list[Rec]:
+    """The front end's menu opens that lasted MENU_LONG_S or more: closed after that long (the close line says how long), or never closed in a log that ran that long past them"""
+    out: list[Rec] = []; opened: float | None = None
+    for _, m, f in lines:
+        if m.group(1) == 'open': opened = clock.at(f); continue
+        if m.group(3) and float(m.group(3)) >= MENU_LONG_S:
+            out.append({'t_s': opened if opened is not None else max(0.0, round(clock.at(f) - float(m.group(3)), 1)), 'open_s': float(m.group(3)), 'closed': True})
+        opened = None
+    if opened is not None and end_s is not None and end_s - opened >= MENU_LONG_S: out.append({'t_s': opened, 'open_s': round(end_s - opened, 1), 'closed': False})
+    return out
+
+
 def read(text: str, top: int = 5) -> Rec:
     """The summary of one log, in JSON types"""
     lines = text.splitlines()
@@ -449,14 +465,15 @@ def read(text: str, top: int = 5) -> Rec:
     mins_run = (out['duration_s'] or 0) / 60
     nl = sum(by.values()); ui_by = collections.Counter(r['front_end'] for r in lfs if 'held_ms' not in r and 'front_end' in r)
     out['long_frames'] = {'count': nl, 'per_min': round(nl / mins_run, 2) if mins_run else None, 'by_cause': dict(by.most_common()), 'held': sum(1 for r in lfs if 'held_ms' in r),
-                          'front_end': sum(ui_by.values()), 'front_end_by': dict(ui_by.most_common()),
+                          'front_end': sum(ui_by.values()), 'front_end_by': dict(ui_by.most_common()), 'with_front_end': nl + sum(ui_by.values()),
                           'top': sorted(game, key=lambda r: -r['ms'])[:top]} if lfs else None
     # events
     sus = [e for e in events if e['what'] == 'graphics suspended'] or [e for e in events if e['what'] == 'background']
     res = [e for e in events if e['what'] == 'resumed']
     out['events'] = {'background': len(sus), 'resumed': len(res), 'focus_changes': sum(1 for e in events if e['kind'] == 'focus'),
                      'ended_in_background': bool(sus) and (not res or res[-1]['i'] < sus[-1]['i']),
-                     'list': [{'t_s': e['t'], 'what': e['what']} for e in events if e['kind'] in ('app', 'focus', 'audio', 'menu', 'controller', 'memory')]}
+                     'list': [{'t_s': e['t'], 'what': e['what']} for e in events if e['kind'] in ('app', 'focus', 'audio', 'menu', 'controller', 'memory')],
+                     'menu_long': menu_long(g['front_menu'], clock, out['duration_s'])}
     # audio, saves, RED
     au = g['audio']
     out['audio'] = {'callbacks': sum(int(m.group(3)) for _, m, _ in au), 'underruns': sum(int(m.group(4)) for _, m, _ in au),
@@ -599,11 +616,13 @@ def render(s: Rec, top: int) -> list[str]:
         row('long frames', f"{lf['count']} ({g3(lf['per_min'])} a minute)" + (': ' + ', '.join(f'{k} {n}' for k, n in lf['by_cause'].items()) + ' (by what each spent its time on first)'
                                                                                if lf['by_cause'] else ''),
             f"not counted: {nof(lf['held'], 'frame')} as long as the frame step's hold of 2 or 3 vsyncs asked, just after a step up" if lf.get('held') else '',
-            f"not counted: {nof(lf['front_end'], 'frame')} made with the system drawing over the game (" + ', '.join(f'{k} {n}' for k, n in lf['front_end_by'].items()) + ')'
+            f"not counted: {nof(lf['front_end'], 'frame')} made with the in-game menu open or out of focus (" + '; '.join(f'{k} {n}' for k, n in lf['front_end_by'].items()) + ')'
             if lf.get('front_end') else '',
             *(f"{r['t_s']:.0f} s frame {r['frame']}: {r['ms']:g} ms, {'; '.join(r['causes'])}" for r in lf['top']))
     ev = s['events']
     row('events', f"in the background {nof(ev['background'], 'time')}, back {ev['resumed']}, {nof(ev['focus_changes'], 'focus change')}" + ('; the log ends in the background' if ev['ended_in_background'] else ''),
+        *(f"the in-game menu was open {x['open_s']:g} s from {x['t_s']:.0f} s" + ('' if x['closed'] else ' and never closed in the log') + ': a close may have been missed, and the long'
+          ' frames and windows tagged as made under it may be the game\'s' for x in ev.get('menu_long', [])),
         *at_times(ev['list'], 3 * top))
     au = s['audio']
     if au: row('audio', f"{au['underruns']} underruns in {au['callbacks']} device callbacks ({au['zero_padded_ms']:g} ms zero-padded)" + (f"; the game reported {au['game_reports']}" if au['game_reports'] else ''),
@@ -654,7 +673,9 @@ METRICS = (('commit', 'build.commit', 0), ('shader chain', 'build.chain', 0), ('
            ('enqueue to display p50 (ms)', 'display_link.enqueue_p50_ms', -1), ('enqueue to display, most (ms)', 'display_link.enqueue_max_ms', -1),
            ('submission ahead p50 (ms)', 'display_link.ahead_p50_ms', 0), ('stretches a frame above', 'display_link.raised', -1),
            ('long frames', 'long_frames.count', 0), ('long frames per minute', 'long_frames.per_min', -1), ('frames at the step\'s hold', 'long_frames.held', 0),
-           ('long frames under the menu / out of focus', 'long_frames.front_end', 0), ('background / back', 'events.background', 0), ('focus changes', 'events.focus_changes', 0),
+           ('long frames under the menu / out of focus', 'long_frames.front_end', 0),
+           ('long frames, menu / focus ones too', 'long_frames.with_front_end', 0),   # like for like with a log from before the tags, whose long frames count them all
+           ('background / back', 'events.background', 0), ('focus changes', 'events.focus_changes', 0),
            ('audio underruns', 'audio.underruns', -1), ('audio I/O buffer, most (ms)', 'audio_output.io_buffer_ms_max', -1),
            ('audio output latency, most (ms)', 'audio_output.output_latency_ms_max', -1), ('save commits', 'saves.commits', 0),
            ('VideoToolbox sessions made again', 'movies.vt_rebuilds', 0), ('[RED] lines', 'red.lines', -1), ('[RED] kinds', 'red.kinds', -1))
