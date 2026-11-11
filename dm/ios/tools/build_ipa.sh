@@ -172,12 +172,17 @@ if [ -n "${DM_LOGO:-}" ] && [ -f "$DM_LOGO" ]; then case "$(printf %s "$DM_LOGO"
   && t "launcher logo: $DM_LOGO" || { rm -f Gen/dm/logo.png; t "[RED] launcher logo: cannot pack $DM_LOGO; the app is built without it (the launcher shows the game's name)"; }; fi
 if [ -n "${DM_ABOUT:-}" ] && [ -f "$DM_ABOUT" ]; then cp "$DM_ABOUT" Gen/dm/about.json || die "copy DM_ABOUT"; t "About this game: $DM_ABOUT"; fi
 if [ -n "${DM_MANUAL:-}" ] && [ -f "$DM_MANUAL" ]; then cp "$DM_MANUAL" Gen/dm/manual.pdf || die "copy DM_MANUAL"; t "manual: $DM_MANUAL"; fi
-# The UI font (DM_UI_FONT, the NSP script's --ui-font): Gen/dm/uifont/ui.<ext>, a name that says nothing of the font; not dm/font, the game's shared-font stand-ins. Asked for, so a missing file ends the build
+# The UI font (DM_UI_FONT, the NSP script's --ui-font): dm/uifont/ui.<ext> in the app, a name that says nothing of the font; not dm/font, the game's shared-font stand-ins. Asked for, so a missing
+# file ends the build. An IPA build's Gen/ is dm/ios/Gen, inside the checkout (git ignores it, but it is the repository's folder), so the font is not copied there: it goes into the built app in
+# the build folder after xcodebuild (below). --prepare-xcode's Gen/dm is the per-game project's, outside the checkout (DM_XCODE_PROJECT_DIR, <build folder>/xcode), so the project gets it there
 UI_FONT_FILE=
 if [ -n "${DM_UI_FONT:-}" ]; then
-  [ -f "$DM_UI_FONT" ] || die "no UI font at DM_UI_FONT=$DM_UI_FONT"
+  [ -f "$DM_UI_FONT" ] && [ -r "$DM_UI_FONT" ] || die "no readable UI font at DM_UI_FONT=$DM_UI_FONT"
   case "$(printf %s "$DM_UI_FONT" | tr '[:upper:]' '[:lower:]')" in *.ttf) UI_FONT_FILE=dm/uifont/ui.ttf;; *.otf) UI_FONT_FILE=dm/uifont/ui.otf;; *.ttc) UI_FONT_FILE=dm/uifont/ui.ttc;; *) die "DM_UI_FONT must be a .ttf, .otf or .ttc file: $DM_UI_FONT";; esac
-  mkdir -p Gen/dm/uifont && cp "$DM_UI_FONT" "Gen/$UI_FONT_FILE" || die "copy DM_UI_FONT"; t "UI font: ${DM_UI_FONT_NAME:-$DM_UI_FONT}"
+  if [ "$PREPARE_XCODE" = YES ]; then
+    mkdir -p Gen/dm/uifont && cat "$DM_UI_FONT" > "Gen/$UI_FONT_FILE" && chmod 644 "Gen/$UI_FONT_FILE" || die "copy DM_UI_FONT"
+    t "UI font: ${DM_UI_FONT_NAME:-$DM_UI_FONT} (in the Xcode project: $IOS/Gen/$UI_FONT_FILE)"
+  else t "UI font: ${DM_UI_FONT_NAME:-$DM_UI_FONT}"; fi
 fi
 # The shader libraries go into the archive as DmIOS.app/msl/<folder>, or as the file DmIOS.app/msl/<folder>.img (main.m sets DM_MSL_DIR to msl)
 MSLDIR=b-$V
@@ -268,8 +273,10 @@ APP=$DD/Build/Products/Release-iphoneos/DmIOS.app
 # Straight from the sources: the app without its signature, and without the folders an app built before pack_ipa.py still has (DerivedData keeps resources that left the project;
 # msl/ is also deleted there, it took 1.5 GB of the home disk), then the shader libraries, the add-on content (the RomFS extracted from the player's DLC NSPs, one folder per index:
 # the app sets DM_AOC_DIR at launch, the host reports them as owned and mounts them from it) and the RomFS
-# A UI font an earlier build with DM_UI_FONT put there: DerivedData keeps it, so a build without one removes the folder, and a build with one keeps only its own file
-if [ -z "$UI_FONT_FILE" ]; then rm -rf "$APP/dm/uifont"; elif [ -d "$APP/dm/uifont" ]; then find "$APP/dm/uifont" -type f ! -name "${UI_FONT_FILE##*/}" -delete; fi
+# The UI font: into the built app here, not through Gen/ (above). A font an earlier build put there is removed first (DerivedData keeps it), so a build without one has no dm/uifont.
+# cat, not cp: data only, readable by the app whatever the player's copy's permissions and extended attributes
+rm -rf "$APP/dm/uifont"
+if [ -n "$UI_FONT_FILE" ]; then mkdir -p "$APP/dm/uifont" && cat "$DM_UI_FONT" > "$APP/$UI_FONT_FILE" && chmod 644 "$APP/$UI_FONT_FILE" || die "copy DM_UI_FONT into the app"; fi
 rm -rf "$APP/msl" "$O/Payload"   # Payload/: what the copy-and-zip packing left behind, as was out.ipa (and its index) unless it is the IPA packed here, which a repeat pack reuses
 [ "$O/out.ipa" -ef "$OUT_IPA" ] || rm -f "$O/out.ipa"; [ "$O/out.ipa.idx" -ef "$OUT_IPA.idx" ] || rm -f "$O/out.ipa.idx"
 # The entitlements of an unsigned IPA: an unsigned build has no signature for a sideloader to read them from, so the Increased Memory Limit request would be lost (AltStore and others carry over

@@ -788,10 +788,12 @@ static UILabel *cp_label(const char *text, CGFloat size, UIFontWeight w, CGFloat
 static UIButton *cp_button(const char *title, SEL action, int primary) {
     UIButtonConfiguration *cfg = primary ? UIButtonConfiguration.filledButtonConfiguration : UIButtonConfiguration.grayButtonConfiguration;
     cfg.title = @(title); cfg.cornerStyle = UIButtonConfigurationCornerStyleCapsule; cfg.buttonSize = UIButtonConfigurationSizeLarge;
-    if (dm_ui_font_on()) {   // the title in the UI font (a large button's is 17 pt); without it the configuration's own font, as before
+    if (dm_ui_font_on()) {   // the title in the UI font (a large button's is 17 pt at the default text size), scaled with Dynamic Type as the configuration's own font is; without it that font, as before
         UIFont *f = dm_ui_font(17, UIFontWeightSemibold);
         cfg.titleTextAttributesTransformer = ^NSDictionary<NSAttributedStringKey, id> *(NSDictionary<NSAttributedStringKey, id> *a) {
-            NSMutableDictionary<NSAttributedStringKey, id> *m = [a mutableCopy]; m[NSFontAttributeName] = f; return m;
+            NSMutableDictionary<NSAttributedStringKey, id> *m = [a mutableCopy];
+            m[NSFontAttributeName] = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleHeadline] scaledFontForFont:f];   // the button's text size (the transformer runs with its traits)
+            return m;
         };
     }
     UIButton *b = [UIButton buttonWithConfiguration:cfg primaryAction:nil];

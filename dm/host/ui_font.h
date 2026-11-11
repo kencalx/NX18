@@ -81,13 +81,17 @@ DM_UI_FN int dm_ui_font_register(const char *resources) {
     return 1;
 }
 
-// The registered UI font's PostScript name, or NULL for the system font; taken once per translation unit, after dm_ui_font_register (the app's start)
+// The registered UI font's PostScript name, or NULL for the system font; taken once per translation unit, after dm_ui_font_register (the app's start). Text drawn first from
+// another thread may meet the main thread here: one of them writes the name (done 0 -> 2 -> 1), the other waits for it, so neither reads a name half written
 DM_UI_FN const char *dm_ui_font_ps(void) {
     static int done; static char name[256];
-    if (!done) {
-        const char *n = getenv("DM_UI_FONT_NAME");
-        if (n && *n && strlen(n) < sizeof name && dm_ui_font_resolves(n)) snprintf(name, sizeof name, "%s", n);
-        done = 1;
+    if (__atomic_load_n(&done, __ATOMIC_ACQUIRE) != 1) {
+        int zero = 0;
+        if (__atomic_compare_exchange_n(&done, &zero, 2, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            const char *n = getenv("DM_UI_FONT_NAME");
+            if (n && *n && strlen(n) < sizeof name && dm_ui_font_resolves(n)) snprintf(name, sizeof name, "%s", n);
+            __atomic_store_n(&done, 1, __ATOMIC_RELEASE);
+        } else while (__atomic_load_n(&done, __ATOMIC_ACQUIRE) != 1) {}
     }
     return *name ? name : NULL;
 }
