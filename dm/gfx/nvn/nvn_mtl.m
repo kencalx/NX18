@@ -13914,7 +13914,10 @@ static id<MTLSharedEvent> g_mdi_ev; static uint64_t g_mdi_v, g_mdi_waits, g_mdi_
 static void mdi_wait(void) {
     rp_end(); ubd_land();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
-    up_flush(); res_commit();
+    // The GPU runs the part encoded so far now, before the submission's own commit. Its argument blocks still hold the raw pool table that was current when each was encoded, so a pool made
+    // since then would read as 0 there (wrong rendering, or a task shader that hangs as agl's did). So their table words are pointed at a table of the pools as they are now, as at every
+    // other commit, whole or segment (mtl_sub_commit, sub_cut, lp_finish; the block comment above gmem_slot_note). It comes before res_commit because gmem_map may res_add a new table
+    up_flush(); gmem_commit_patch(); res_commit();
     [g_cb endCommandBuffer];
     rec_commit(g_cb, nil); g_cbgen++;
     if (!g_mdi_ev) g_mdi_ev = [g_dev newSharedEvent];

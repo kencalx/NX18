@@ -1,5 +1,6 @@
 // The raw pool table words of the argument blocks encoded so far follow the pools at commit (nvn_mtl.m gmem_slot_note, gmem_commit_patch): a pool made after a block was encoded is in the
-// table its word points at when the GPU reads it, a word behind the pools or holding an older table is rewritten and counted, and a word that is current is left alone.
+// table its word points at when the GPU reads it, a word behind the pools or holding an older table is rewritten and counted, and a word that is current is left alone. The segment an
+// indirect-count multi-draw's CPU wait commits (mdi_wait) is patched the same way.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -63,6 +64,15 @@ int main(void) { @autoreleasepool {
     gmem_commit_patch();
     CHECK("its word follows the newer table", w4 == g_gmem_buf.gpuAddress && w4 != t3);
     CHECK("and its log is read against that table, not the older one", lg->map == g_gmem_buf && lg->map != t3buf);
+    // The CPU wait of an indirect-count multi-draw (mdi_wait) commits the part of the submission encoded so far, and the GPU runs it before the submission's own commit: that commit is a
+    // segment too, so a block encoded before a pool was made must point at a table that holds it when the wait commits it (it did not: the word kept the older table until the end)
+    uint64_t t4 = g_gmem_buf.gpuAddress, w5 = t4;
+    mtl_pool_add(mem + 40 * MB, 4 * MB); mtl_pool_addressed(mem + 40 * MB, 4 * MB);             // a pool made after the block was encoded
+    gmem_slot_note(&w5, NULL);
+    uint64_t v0 = g_mdi_v; mdi_wait();
+    CHECK("the indirect-count wait committed and waited", g_mdi_v == v0 + 1);
+    CHECK("its commit points the word at a newer table", w5 == g_gmem_buf.gpuAddress && w5 != t4);
+    CHECK("that table holds the pool made after the block was encoded", table_has(w5, a + 40 * MB));
     CHECK("submission completes", mtl_wait(mtl_sub_commit(), 5000000000ull));
     CHECK("GPU has no submission error", !mtl_last_commit_error());
     printf("t_gmem_words: %d checks, %d failed\n", checks, failed); return failed != 0;
