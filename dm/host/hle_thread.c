@@ -259,13 +259,15 @@ static void hw_init(void) {
     g_hw_spin_us = us; g_hw_mode = mode;
     if (e && *e) LOG("same-core handoff wait: %s", mode == 0 ? "50 µs polls" : us ? "spin, then condition variable" : "condition variable");
 }
-// Spin without G until busy leaves the handoff or stops running, or until end (holding G on entry and return). Only a hint: the caller's scan decides
+// Spin without G until busy leaves the handoff or stops running, or until end (holding G on entry and return). Only a hint: the caller's scan decides.
+// It reads only busy's thr_t, which the pin keeps: busy's host_work flag is in busy's own thread-local storage, which pthread_exit frees while G is not held here, so host GPU work
+// ends the wait at the next scan instead (at most the spin's length later)
 static void hand_spin(thr_t *busy, uint64_t end) {
-    uint64_t gen = atomic_load_explicit(&busy->hand_gen, memory_order_acquire); _Atomic int *hw = busy->host_work;
+    uint64_t gen = atomic_load_explicit(&busy->hand_gen, memory_order_acquire);
     busy->sync_refs++;   // pinned: thr_free waits for the last reference
     pthread_mutex_unlock(&G);
     while (atomic_load_explicit(&busy->hand_gen, memory_order_acquire) == gen && !atomic_load_explicit(&busy->sleeping, memory_order_relaxed)
-           && !atomic_load_explicit(&busy->pause_req, memory_order_relaxed) && !(hw && atomic_load_explicit(hw, memory_order_relaxed)) && now_ns() < end)
+           && !atomic_load_explicit(&busy->pause_req, memory_order_relaxed) && now_ns() < end)
         for (int i = 0; i < 16; i++) __asm__ volatile("yield");
     pthread_mutex_lock(&G);
 }
