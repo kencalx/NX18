@@ -86,6 +86,7 @@ typedef struct thr {
     mach_port_t mport;         // Host thread port (to get CPU time)
     _Atomic int qos_pending;   // SetThreadPriority from another thread changed prio: the thread applies the new class at its next SVC (only a thread can set its own QoS)
     uint32_t qos;
+    uint64_t nho, nho_seen, nheld, nheld_seen; int ho_svc; uint64_t leave_ns; int hwait, hcv_init; pthread_cond_t hcv;   // DIAG focuspower: same-core handoffs this thread waited in / held others in, and the SVC of its last one
     // Pausing (SetThreadActivity, used by IL2CPP's garbage collector to stop the world): pause_req = requested, paused = stopped for the current request; when stopped inside an SVC the context comes from the gate frame svc_regs (registered on SVC entry),
     // when stopped in guest code the signal handler saves it into ctx_*; pcv lets the requester wait for "stopped" and the paused thread wait for "resume"
     _Atomic int pause_req; int paused;
@@ -150,7 +151,12 @@ static int thr_in_handoff(const thr_t *t, const thr_t *self) {
     return 0;
 }
 // Holding G. t blocked (a guest wait, a timed sleep, YieldToAnyThread): it gave its core back, so it no longer holds the threads whose handoff made it runnable
-static void hand_leave(thr_t *t) { t->nhand = 0; t->start_by = NULL; }
+static pthread_cond_t g_hand_cv = PTHREAD_COND_INITIALIZER; static int g_hand_waiters;   // DIAG focuspower: handoff waiters sleeping on G (DM_HANDOFF_WAIT=cv)
+static void hand_leave(thr_t *t) {
+    if (t->nhand) { t->leave_ns = now_ns(); for (int i = 0; i < t->nhand; i++) if (t->hand[i].by->hwait) pthread_cond_signal(&t->hand[i].by->hcv); }   // the handoffs t held end: their waiters look again
+    if (g_hand_waiters) pthread_cond_broadcast(&g_hand_cv);
+    t->nhand = 0; t->start_by = NULL;
+}
 // A file system call is a request to fsp-srv on Horizon: svcSendSyncRequest blocks the caller until the service replies, and a lower-priority thread of its core runs meanwhile.
 // The host answers in the caller's own thread, so without this the caller never gives up its core and its waker stays held until it blocks or exits. Digimon Story Cyber Sleuth's
 // save manager (main+0x16cdf0 and its neighbours) sets its busy flag after StartThread returns, and its priority-38 worker clears it last thing: on Horizon the worker's first request lets
@@ -218,19 +224,48 @@ void dm_thread_native_wait(int entering) {
 // priority (Mesosphere's KScheduler migrates suggested threads), and the host never counts peers the wake did not make runnable as busy. Batman: Arkham Knight's job workers
 // (priority 43, mask 0x5) finish a job and signal the main thread (priority 29, core 0), which then spin-waits for the next two jobs it hands them; waiting for it to block
 // left both workers in this loop for good, and the game stopped presenting as New Story loaded
+// DIAG focuspower: DM_HANDOFF_WAIT=poll (default, 50 µs nanosleeps) | cv (sleep on g_hand_cv, woken by the held thread's hand_leave, 1 ms backstop) | spin:<µs> (spin that long first, then poll)
+static void thr_free(struct thr *t);
+static int g_hw_mode = -1, g_hw_spin_us;
+static _Atomic uint64_t g_ho_hist[7];   // time from the handoff's start to the held thread's hand_leave: <5, <10, <20, <50, <100, <1000, >=1000 µs
+static void hw_init(void) { const char *e = getenv("DM_HANDOFF_WAIT"); g_hw_mode = 0; if (e && !strcmp(e, "cv")) g_hw_mode = 1; else if (e && !strncmp(e, "spin:", 5)) { g_hw_mode = 2; g_hw_spin_us = atoi(e + 5); }
+    LOG("DIAG DM_HANDOFF_WAIT mode %d spin %d µs", g_hw_mode, g_hw_spin_us); }
 int dm_yield_to_core_peers(int all) {
     thr_t *self = pthread_getspecific(g_keythr); if (!self) return 0;
     uint64_t bit = 1ull << (self->core & 63); int waited = 0;
     if (self->mask & ~bit) return 0;
+    if (g_hw_mode < 0) hw_init();
+    uint64_t t0 = now_ns(); thr_t *held = NULL;
+    pthread_mutex_lock(&G);
     for (;;) {
-        int busy = 0;
-        pthread_mutex_lock(&G);
+        thr_t *busy = NULL;
         for (thr_t *t = g_all; t && !busy; t = t->all)
-            if (t != self && t->started && !t->exited && !t->host_owned && t->mask == bit && t->prio < self->prio && thr_runnable(t) && (all || thr_in_handoff(t, self))) busy = 1;
-        pthread_mutex_unlock(&G);
-        if (!busy) return waited;
-        { struct timespec ts = {0, 50000}; nanosleep(&ts, 0); atomic_fetch_add_explicit(&g_hpoll, 1, memory_order_relaxed); } waited = 1;
+            if (t != self && t->started && !t->exited && !t->host_owned && t->mask == bit && t->prio < self->prio && thr_runnable(t) && (all || thr_in_handoff(t, self))) { busy = t; if (!waited) { t->nheld++; held = t; } }
+        if (!busy) break;
+        if (g_hw_mode == 1) {
+            struct timespec ts = {0, 50000};   // the backstop: the old poll's period, for a held thread that stops being runnable without hand_leave (a host sleep, GPU host work)
+            if (all) { g_hand_waiters++; pthread_cond_timedwait_relative_np(&g_hand_cv, &G, &ts); g_hand_waiters--; }
+            else { if (!self->hcv_init) { pthread_cond_init(&self->hcv, NULL); self->hcv_init = 1; } self->hwait = 1; pthread_cond_timedwait_relative_np(&self->hcv, &G, &ts); self->hwait = 0; }
+            atomic_fetch_add_explicit(&g_hpoll, 1, memory_order_relaxed);
+        } else if (g_hw_mode == 2 && now_ns() - t0 < (uint64_t)g_hw_spin_us * 1000) {
+            // spin without G on the held thread's own fields (a hint; the scan above decides), until it leaves the handoff or the spin time is up
+            volatile thr_t *b = busy; uint64_t end = t0 + (uint64_t)g_hw_spin_us * 1000;
+            busy->sync_refs++;   // pinned: thr_free waits for the last reference, so the reads below never touch a freed thread
+            pthread_mutex_unlock(&G);
+            while (b->nhand && !b->wkind && !b->sleeping && now_ns() < end) for (int i = 0; i < 16; i++) __asm__ volatile("yield");
+            pthread_mutex_lock(&G);
+            if (!--busy->sync_refs && busy->closed && busy->exited) { if (held == busy) held = NULL; thr_free(busy); }
+            atomic_fetch_add_explicit(&g_srpoll, 1, memory_order_relaxed);   // DIAG: spins counted as service-request polls
+        } else {
+            pthread_mutex_unlock(&G);
+            { struct timespec ts = {0, 50000}; nanosleep(&ts, 0); atomic_fetch_add_explicit(&g_hpoll, 1, memory_order_relaxed); }
+            pthread_mutex_lock(&G);
+        }
+        waited = 1;
     }
+    if (held && held->leave_ns >= t0) { uint64_t us = (held->leave_ns - t0) / 1000; int b = us < 5 ? 0 : us < 10 ? 1 : us < 20 ? 2 : us < 50 ? 3 : us < 100 ? 4 : us < 1000 ? 5 : 6; atomic_fetch_add_explicit(&g_ho_hist[b], 1, memory_order_relaxed); }
+    pthread_mutex_unlock(&G);
+    return waited;
 }
 // Take a host lock that an HLE call holds while it runs guest code. A guest thread waiting for it is in a native HLE wait (dm_thread_native_wait), blocked as it would be
 // on the guest-visible lock the SDK's own code uses there, so it does not hold a same-core handoff: Kirby and the Forgotten Land's guide movies froze the game when the movie decoder's decode lock was held across the
@@ -376,7 +411,7 @@ static void thr_free(thr_t *t) {   // Holding G; unlink from the all-threads cha
         for (int i = 0; i < u->nhand; ) if (u->hand[i].by == t) u->hand[i] = u->hand[--u->nhand]; else i++;
         if (u->start_by == t) u->start_by = NULL;
     }
-    pthread_cond_destroy(&t->cv); pthread_cond_destroy(&t->pcv); free(t);
+    pthread_cond_destroy(&t->cv); pthread_cond_destroy(&t->pcv); if (t->hcv_init) pthread_cond_destroy(&t->hcv); free(t);
 }
 static void wake_sync_waiters(const void *obj);
 static void thread_exit(thr_t *t) {
@@ -1022,6 +1057,22 @@ void dm_wake_stats(char *out, size_t n, double secs) {
     if (o < n) snprintf(out + o, n - o, "); precise sleeps %.0f in %.0f nanosleep steps; same-core handoffs %.0f (%.1f ms/s) in %.0f polls of 50 µs; service-request polls %.0f",
                         (sc - psc) / secs, (ss - pss) / secs, (hn - phn) / secs, (hs - phs) / 1e6 / secs, (ho - pho) / secs, (sr - psr) / secs);
     memcpy(pl, l, sizeof pl); psc = sc; pss = ss; pho = ho; phn = hn; phs = hs; psr = sr;
+    { size_t o2 = strlen(out); thr_t *tw[3] = {0}, *th[3] = {0}; uint64_t dw[3] = {0}, dh[3] = {0};   // DIAG focuspower
+      pthread_mutex_lock(&G);
+      for (thr_t *t = g_all; t; t = t->all) {
+          uint64_t k = t->nho - t->nho_seen; t->nho_seen = t->nho;
+          for (int i = 0; i < 3; i++) if (k > dw[i]) { for (int j = 2; j > i; j--) { tw[j] = tw[j - 1]; dw[j] = dw[j - 1]; } tw[i] = t; dw[i] = k; break; }
+          k = t->nheld - t->nheld_seen; t->nheld_seen = t->nheld;
+          for (int i = 0; i < 3; i++) if (k > dh[i]) { for (int j = 2; j > i; j--) { th[j] = th[j - 1]; dh[j] = dh[j - 1]; } th[i] = t; dh[i] = k; break; }
+      }
+      if (o2 < n) o2 += (size_t)snprintf(out + o2, n - o2, "; handoff waiters:");
+      for (int i = 0; i < 3 && tw[i] && o2 < n; i++) o2 += (size_t)snprintf(out + o2, n - o2, " %#x '%s' p%d c%d m%#llx svc %#x %.0f/s", tw[i]->handle, thr_name(tw[i], nb, sizeof nb), tw[i]->prio, tw[i]->core, (unsigned long long)tw[i]->mask, tw[i]->ho_svc, dw[i] / secs);
+      { static uint64_t ph[7]; uint64_t h[7]; for (int i = 0; i < 7; i++) h[i] = atomic_load(&g_ho_hist[i]);
+        if (o2 < n) o2 += (size_t)snprintf(out + o2, n - o2, "; held thread blocked after <5 %.0f / <10 %.0f / <20 %.0f / <50 %.0f / <100 %.0f / <1000 %.0f / more %.0f µs per s",
+            (h[0]-ph[0])/secs, (h[1]-ph[1])/secs, (h[2]-ph[2])/secs, (h[3]-ph[3])/secs, (h[4]-ph[4])/secs, (h[5]-ph[5])/secs, (h[6]-ph[6])/secs); memcpy(ph, h, sizeof ph); }
+      if (o2 < n) o2 += (size_t)snprintf(out + o2, n - o2, "; held for:");
+      for (int i = 0; i < 3 && th[i] && o2 < n; i++) o2 += (size_t)snprintf(out + o2, n - o2, " %#x '%s' p%d c%d %.0f/s", th[i]->handle, thr_name(th[i], nb, sizeof nb), th[i]->prio, th[i]->core, dh[i] / secs);
+      pthread_mutex_unlock(&G); }
 }
 // Sleep until dl (host monotonic ns) on time: macOS nanosleep / mach_wait_until carry timer slack; measured, 33 ms sleeps take about 36.4 ms, 5 ms take 6.1 ms, 1 ms take 1.26 ms (the same at any QoS).
 // Metroid Dread's sound thread sleeps "33 ms minus this round's work" (main+0xf95b0), and on the host its period became 36.9 ms; cutscenes render a frame whenever the audio play position that thread updates moves, so they ran at about 27 fps (30 on the Switch).
@@ -1064,7 +1115,7 @@ int svc_thread(int num, uint64_t *regs) {
     // game's SVCs behind unrelated busy workers by default.
     if (me && (g_core_preempt || me->yield_pending)) {
         uint64_t t0 = now_ns(); int w = dm_yield_to_core_peers(g_core_preempt);
-        if (w) { g_preempt_n++; g_preempt_ns += now_ns() - t0; }
+        if (w) { g_preempt_n++; g_preempt_ns += now_ns() - t0; me->nho++; me->ho_svc = num; }
     }
     if (me) { me->yield_pending = 0; me->hand_epoch++; }   // the handoff is complete: threads this one made runnable no longer hold it
     return r;
