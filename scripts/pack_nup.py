@@ -78,7 +78,7 @@ class Package:
         return out
 
 
-def nacp_like(v): return v is not None and len(v) == NACP_SIZE and v[:4] != b'META'   # a NACP's size (an NPDM of that size starts META)
+def nacp_like(v): return v is not None and len(v) == NACP_SIZE and v[:4] != b'META' and not image(v)   # a NACP's size (an NPDM of that size starts META; an icon may be as big)
 def image(v): return v is not None and (v[:2] == b'\xff\xd8' or v[:4] == b'\x89PNG')   # a JPEG's start of image, or PNG's signature
 
 

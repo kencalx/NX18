@@ -24,10 +24,12 @@
 #   extract/v<version>/ExeFS/   the version's code modules
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py), written straight from the archive: the RomFS is never unpacked into loose files
 #   extract/v<version>/control.nacp, icon.jpg   the snapshot's NACP and icon, when the archive has them for it, else its exact base snapshot's (also a base that holds only metadata; never
-#     another update's); none when neither has them (sips reads a PNG icon by its content). A NACP record that is not 0x4000 bytes is no NACP: left out, with a line
+#     another update's); none when neither has them (sips reads a PNG icon by its content). A NACP record that is not 0x4000 bytes is no NACP: left out, with a line, and that
+#     snapshot's display title with it (NXConvert 1.0.0 and 1.0.1 filled both from the wrong records of a NUP numbered one too low)
 #   extract/v<version>/title.txt   without a NACP, the archive's display title for the version (or its base's; when it holds only spaces or control characters, a localized one, American
 #     English first), cut to a NACP name's 511 bytes: the NSP script's app name then, before the profile's
-#   extract/v<version>/icon.edited.jpg   an NCA snapshot's own icon in the archive (one set in NXConvert's sidebar) when it differs from its Control NCA's icon.jpg: the app's icon then
+#   extract/v<version>/icon.edited.jpg   an NCA snapshot's own icon in the archive (one set in NXConvert's sidebar) when it differs from its Control NCA's icon.jpg and its localized icons
+#     do not hold that one (a new icon clears them; otherwise the default is the game's own in another language): the app's icon then
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − base title ID − 0x1000; DLC converted from a NUP or folders carry their add-on title ID), the host's DM_AOC_DIR
 # Checks, in the order of the format's own validator so a damaged or hostile archive gets the error the format names (Error.code):
 #   open: both header slots (magic, CRC-32C, zero page padding; the valid one of the highest generation; an older generation when the newer one's tail is damaged), the version (0.2 and 0.3
@@ -863,10 +865,8 @@ class Nx:
     def meta(self, s):
         """Snapshot s's own control data: {'nacp': bytes or None, 'icon': bytes or None, 'title': str or None (its display title)}, from its application's record when s is its metadata
         snapshot, else from the metadata history"""
-        a = s.app
-        if a.meta_snapshot == s.index: nacp, icon, local, title = a.nacp, a.icon, a.localized, a.title
-        elif (row := self.history.get(a.index, {}).get(s.index)) is not None: nacp, icon, local, title = row['nacp'], row['icon'], row['localized'], row['title']
-        else: return {'nacp': None, 'icon': None, 'title': None}
+        if (rec := self._display_record(s)) is None: return {'nacp': None, 'icon': None, 'title': None}
+        nacp, icon, local, title = rec
         def pick(rows, default, none):   # the default, else the American English one, else English, else the first (as pack_nup.control picks an icon)
             if default != none: return default
             by = {lang.lower(): v for lang, v in rows if v != none}
@@ -874,6 +874,16 @@ class Nx:
         title = pick([(lang, display_title(t)) for lang, t, _ in local], display_title(title), None)   # a title of only spaces or control characters is none: a localized one then
         icon = pick([(lang, i) for lang, _, i in local], icon, NO)
         return {'nacp': self.media(nacp) if nacp != NO else None, 'icon': self.media(icon) if icon != NO else None, 'title': title}
+
+    def localized_icons(self, s):   # the icons snapshot s's own display record lists per language (a new icon set with set-metadata clears them: NXConvert's CLI.md)
+        rec = self._display_record(s)
+        return [self.media(i) for _, _, i in rec[2] if i != NO] if rec is not None else []
+
+    def _display_record(self, s):   # (nacp, icon, localized, title) of snapshot s's own display record: its application's when s is its metadata snapshot, else the metadata history's; None without one
+        a = s.app
+        if a.meta_snapshot == s.index: return a.nacp, a.icon, a.localized, a.title
+        if (row := self.history.get(a.index, {}).get(s.index)) is not None: return row['nacp'], row['icon'], row['localized'], row['title']
+        return None
 
 
 NPDM_MAX, MODULE_MAX = MiB, 1 << 30   # the largest main.npdm read whole (real ones are a few KB), and the largest code module or NRO written out (real ones are tens of MB)
@@ -1067,15 +1077,16 @@ def app_package(n, k):   # (as pack_nup.app_package, for the NSP script's survey
 
 
 def media_meta(k, fallback, say=print):
-    """Snapshot k's control data in the archive's Media ({'nacp', 'icon'}), what it lacks from fallback's (its base game). A NACP record that is not 0x4000 bytes is left out, with a line:
-    NXConvert 1.0.0 and 1.0.1 may have stored something else as the NACP of a NUP whose meta block was numbered one too low (pack_nup.SHIFTED), and the reader takes a NACP of any size"""
+    """Snapshot k's control data in the archive's Media ({'nacp', 'icon', 'title'}), what it lacks from fallback's (its base game). A NACP record that is not 0x4000 bytes is left out, with a line:
+    NXConvert 1.0.0 and 1.0.1 may have stored something else as the NACP of a NUP whose meta block was numbered one too low (pack_nup.SHIFTED), and the reader takes a NACP of any size.
+    That snapshot's display title goes with it: such an archive's title is the NUP's publisher record (NXConvert 1.0.2's notes: wrong title, publisher and display version)"""
     snaps = [k] if fallback is None or fallback is k else [k, fallback]
     metas = [s.nx.meta(s) for s in snaps]
     for s, m in zip(snaps, metas):
         if m['nacp'] is not None and len(m['nacp']) != pack_nup.NACP_SIZE:
-            pack_nup.tell(s, f"{s.name}: the archive's NACP for it is {len(m['nacp']):,} bytes, not {pack_nup.NACP_SIZE:,} (0x4000): it is not a NACP, left out "
-                             '(repack the NX with NXConvert 1.0.2 or later)', say)
-            m['nacp'] = None
+            pack_nup.tell(s, f"{s.name}: the archive's NACP for it is {len(m['nacp']):,} bytes, not {pack_nup.NACP_SIZE:,} (0x4000): it is not a NACP, left out, and so is its "
+                             'display title, taken from the wrong record too (repack the NX with NXConvert 1.0.2 or later)', say)
+            m['nacp'] = m['title'] = None   # NXConvert 1.0.0 and 1.0.1 took a shifted NUP's publisher record as its title: never the app's name
     return {key: next((m[key] for m in metas if m[key]), None) for key in metas[0]}
 
 
@@ -1396,9 +1407,11 @@ def _display(k, out, say):
     every run, so an edit to the archive's display metadata (it appends a generation) needs no new extraction, and undoing it brings the game's icon back"""
     title_file(out, media_meta(k, base_of(k), say)['title'] if not (out / 'control.nacp').is_file() else None)
     own, icon, edited = k.nx.meta(k)['icon'], out / 'icon.jpg', out / EDITED_ICON
-    if own and icon.is_file() and own != icon.read_bytes():
+    # a new icon clears the record's localized icons (NXConvert's CLI.md, set-metadata): while they still hold the Control NCA's icon, the record's default is the game's own in another
+    # language (as NXConvert picked it, not an edit), and the Control NCA's is kept as before
+    if own and icon.is_file() and own != (got := icon.read_bytes()) and got not in k.nx.localized_icons(k):
         edited.write_bytes(own)
-        pack_nup.tell(k, f"{k.name}: the archive's icon for it differs from its Control NCA's (edited in NXConvert): the app takes the archive's ({EDITED_ICON})", say)
+        pack_nup.tell(k, f"{k.name}: the archive's icon for it is not its Control NCA's (set in NXConvert's sidebar or with set-metadata): the app takes the archive's ({EDITED_ICON})", say)
     else: edited.unlink(missing_ok=True)
 
 

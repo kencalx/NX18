@@ -598,7 +598,9 @@ class ShiftedMeta(Base):
                 ('SPEC, a 64-character build ID at type 7', [(1, npdm(TID)), (2, nacp_), (3, ICON), (7, b'ab' * 32)], False, ICON),
                 ('SPEC, no NACP, a 20-byte build ID: the icon decides', [(1, npdm(TID)), (3, ICON), (7, bytes(20))], False, ICON),
                 ('SPEC, an NPDM of 0x4000 bytes is no NACP', [(1, npdm(TID) + bytes(0x4000 - 0x100)), (2, nacp_), (3, ICON), (7, bytes(20))], False, ICON),
-                ('neither place holds a NACP or an icon: the rule', [(0, npdm(TID)), (3, b'TG')], True, None)):
+                ('neither place holds a NACP or an icon: the rule', [(0, npdm(TID)), (3, b'TG')], True, None),
+                ('shifted, no NACP, an icon of 0x4000 bytes is no NACP', [(0, npdm(TID)), (2, ICON + bytes(0x4000 - len(ICON))), (3, b'1.2.3')], True, ICON + bytes(0x4000 - len(ICON))),
+                ('SPEC, no NACP, an icon of 0x4000 bytes', [(1, npdm(TID)), (3, ICON + bytes(0x4000 - len(ICON))), (4, b'1.2.3')], False, ICON + bytes(0x4000 - len(ICON)))):
             with self.subTest(what):
                 said = self.pack(tlv(recs))
                 self.assertEqual(len([s for s in said if pack_nup.SHIFTED in s]), int(shifted_), said)

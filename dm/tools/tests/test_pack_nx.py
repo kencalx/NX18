@@ -541,8 +541,10 @@ class Pack(Base):
                 said = []
                 pack_nx.pack_version(n, base, base, app, self.out(), say=said.append)
                 self.assertFalse((self.out() / 'control.nacp').exists())
+                self.assertFalse((self.out() / 'title.txt').exists())   # such an archive's title is the NUP's publisher record: the profile names the app, as before
                 self.assertEqual([s for s in said if 'not a NACP' in s],
-                                 [f"game.nx (base): the archive's NACP for it is {size:,} bytes, not 16,384 (0x4000): it is not a NACP, left out (repack the NX with NXConvert 1.0.2 or later)"])
+                                 [f"game.nx (base): the archive's NACP for it is {size:,} bytes, not 16,384 (0x4000): it is not a NACP, left out, and so is its display title, "
+                                  'taken from the wrong record too (repack the NX with NXConvert 1.0.2 or later)'])
         self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': META}, {'type': 1, 'version': VER, 'tree': version(main=b'new'), 'meta': {'nacp': b'short', 'icon': b'new icon'}}))
         n = self.open(); app, base, vers, _ = pack_nx.scan(n)
         said = []
@@ -1024,7 +1026,8 @@ class Native(NativeBase):
             n.close()
 
     def test_icon_edited_in_the_archive(self):   # an icon set in NXConvert's sidebar (set-metadata) for an archive made from an NSP: icon.edited.jpg, which the app takes
-        for meta, edited in ((dict(META, icon=b'\xff\xd8 control icon'), None), (META, META['icon']), (dict(META, icon=None), None)):   # the Control NCA's own icon, another, none
+        for meta, edited in ((dict(META, icon=b'\xff\xd8 control icon'), None), (META, META['icon']), (dict(META, icon=None), None),   # the Control NCA's own icon, another, none
+                             (dict(META, localized=[('en-gb', None, b'\xff\xd8 control icon'), ('ja', None, META['icon'])]), None)):   # another language's, beside the Control NCA's: no edit
             with self.subTest(icon=meta['icon']):
                 self.write_game(meta=meta)
                 n, (_, base, vers, _) = self.opened(FakeTool(build=self.g.bid0))
@@ -1324,7 +1327,8 @@ class Main(Base):
         self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': META}, {'type': 1, 'version': VER, 'tree': version(main=b'new code'), 'meta': {'nacp': b'short'}}))
         _, said = self.run_main(self.path, extract=True)
         self.assertEqual([s for s in said if 'not a NACP' in s],
-                         [f"game.nx (update {VER}): the archive's NACP for it is 5 bytes, not 16,384 (0x4000): it is not a NACP, left out (repack the NX with NXConvert 1.0.2 or later)"])
+                         [f"game.nx (update {VER}): the archive's NACP for it is 5 bytes, not 16,384 (0x4000): it is not a NACP, left out, and so is its display title, "
+                          'taken from the wrong record too (repack the NX with NXConvert 1.0.2 or later)'])
 
     def test_standalone_update_reaches_extraction_without_a_base(self):
         self.write(game({'type': 3, 'version': VER, 'tree': version(), 'meta': META}))
