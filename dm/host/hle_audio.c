@@ -223,7 +223,7 @@ static AudioDeviceID au_buffer(AudioUnit au, const char *why) {
 }
 static void route_post(AudioUnit au, uint32_t dev, int changed, const char *why);
 // The DefaultOutput unit follows the system's default output device by itself and notifies CurrentDevice: that is the Mac's route change (route_post; the worker drops a notification for the device
-// the output already plays on). Runs on a Core Audio notification thread: nothing here stops or starts the unit
+// the output already plays on, and restarts a unit that plays on only if it stops calling back: ROUTE_PROBE_MS). Runs on a Core Audio notification thread: nothing here stops or starts the unit
 static void au_device_changed(void *ctx, AudioUnit au, AudioUnitPropertyID id, AudioUnitScope scope, AudioUnitElement el) {
     (void)ctx;
     int device = id == kAudioOutputUnitProperty_CurrentDevice && scope == kAudioUnitScope_Global;
@@ -889,17 +889,36 @@ static const char *transport(uint32_t dev, char *b, size_t n) {
     }
 }
 #endif
+// Mac: the DefaultOutput unit has already moved to the new device by itself when it notifies CurrentDevice, and keeps playing there. Stopping and starting it again then only added a gap, and a
+// new device whose start blocks (HDMI, Bluetooth: issue #1030) let the 200 ms fallback consume the game's sound unheard. A unit playing on its device is watched this long first and restarted only
+// when it did not call back at least twice in that time (a Bluetooth device's 1024-frame buffer is about 21 ms)
+enum { ROUTE_PROBE_MS = 50 };
 static void route_work(void *p) {
-    route_msg *m = p; int on = route_enabled(), restarted = 0, id = -1, susp; uint32_t old = 0;
+    route_msg *m = p; int on = route_enabled(), restarted = 0, followed = 0, id = -1, susp; uint32_t old = 0; aout *probe = NULL; uint64_t n0 = 0;
     pthread_mutex_lock(&g_aos_lock);
     uint64_t t = now_ns(); susp = g_suspended;
     for (int i = 0; i < AOMAX; i++) {
         aout *a = g_aos[i]; if (!a || !a->au || (m->au && a->au != m->au)) continue;
-        if (m->au) { if (a->dev == m->dev) break; old = a->dev; a->dev = m->dev; id = a->id; }   // the same device: no route change
+        if (m->au) {
+            if (a->dev == m->dev) break;   // the same device: no route change
+            old = a->dev; a->dev = m->dev; id = a->id;
+            if (m->changed && on && a->backend == BK_AU && a->start_phase == AU_IDLE && !a->route_t) { probe = a; n0 = atomic_load_explicit(&a->cb_n, memory_order_acquire); break; }
+        }
         if (m->changed && on) restarted += au_route_restart(a, t);
     }
     pthread_mutex_unlock(&g_aos_lock);
+    if (probe) {   // on this serial queue only, never under g_aos_lock
+        usleep(ROUTE_PROBE_MS * 1000);
+        pthread_mutex_lock(&g_aos_lock);
+        for (int i = 0; i < AOMAX; i++) if (g_aos[i] == probe && probe->au == m->au) {   // still open: Close unregisters an output under the lock before it frees it
+            if (atomic_load_explicit(&probe->cb_n, memory_order_acquire) - n0 >= 2 && probe->backend == BK_AU && !probe->route_t) followed = 1;
+            else restarted += au_route_restart(probe, now_ns());
+        }
+        susp = g_suspended;
+        pthread_mutex_unlock(&g_aos_lock);
+    }
     const char *what = !m->changed ? "the output is unchanged: nothing restarted" : !on ? "DM_AUDIO_ROUTE=0: left to the watchdog" :
+                       followed ? "the unit followed the new device and plays on: nothing restarted" :
                        restarted ? "restarted on the new route" : susp ? "outputs suspended: they start on the new route on resume" : "nothing playing to restart";
     (void)id; (void)old;   // the Mac's line only
 #if !TARGET_OS_IPHONE

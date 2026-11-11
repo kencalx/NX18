@@ -404,6 +404,7 @@ static void rc_fallback(void) {
 }
 static void rc_ios(void) { dm_audio_route_change("new device available: Speaker -> BluetoothA2DPOutput (test)", 1); }
 static void rc_mac(void) { unit.device = 5; changed(kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0); }
+static void route_drained(void *p);
 static void route_change(void) {
     unit.init_error = noErr; unit.device = 1; unit.rate = 48000; unit.range = (AudioValueRange){15, 4096}; unit.frames = 512;
     atomic_store(&free_run, 1);
@@ -421,6 +422,17 @@ static void route_change(void) {
     rc_switch("iOS route change notification", rc_ios);
     rc_switch("Mac default output device", rc_mac);
     rc_fallback(); usleep(100000);
+    // Mac: the DefaultOutput unit follows a new default device by itself and goes on calling back there (no gap): it is watched, not stopped and started again
+    {
+        unsigned s1 = atomic_load(&dev_starts); uint64_t u1 = atomic_load(&rc_out->under_n), c1 = atomic_load(&rc_out->cb_n);
+        unit.device = 6; changed(kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0);
+        dispatch_sync_f(route_queue(), NULL, route_drained);
+        rc_state(&backend, &stalled);
+        pthread_mutex_lock(&g_aos_lock); uint32_t dev_now = rc_out->dev; pthread_mutex_unlock(&g_aos_lock);
+        printf("route change (Mac default output device, the unit plays on): %u restart(s), %llu callbacks meanwhile, %llu underruns\n", atomic_load(&dev_starts) - s1,
+               (unsigned long long)(atomic_load(&rc_out->cb_n) - c1), (unsigned long long)(atomic_load(&rc_out->under_n) - u1));
+        assert(atomic_load(&dev_starts) == s1 && backend == BK_AU && !stalled && dev_now == 6 && atomic_load(&rc_out->under_n) - u1 <= 2);
+    }
     // No route change, no behaviour change: the same device notified again, and a notification whose outputs are the same ones, restart nothing
     unsigned s0 = atomic_load(&dev_starts); uint64_t c0 = atomic_load(&rc_out->cb_n);
     changed(kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0);
