@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#include "ui_font.h"   // NX 18's UI font, registered as main.m does
 #import <GameController/GameController.h>
 #import "DmLayout.h"
 #import "DuoHarnessRuntime.h"
@@ -226,5 +227,6 @@ static void duo_pad_script(void) {
 @end
 
 int main(int argc, char *argv[]) {
+    @autoreleasepool { dm_ui_font_register(NSBundle.mainBundle.resourcePath.fileSystemRepresentation); }   // as main.m: SIMCTL_CHILD_DM_UI_FONT=<file> shows the screens in that font
     @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(DuoHarnessAppDelegate.class)); }
 }

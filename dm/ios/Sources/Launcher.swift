@@ -109,6 +109,7 @@ private struct CloudSavesSection: View {
             Text(note.isEmpty
                  ? "Choose a folder in iCloud Drive, and the same one in the Mac app's Cloud saves. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups."
                  : note)
+            .nxFontIfCustom(.footnote)
             .foregroundStyle(NX18Palette.muted)
         }
         .listRowSeparatorTint(NX18Palette.separator)
@@ -278,6 +279,7 @@ struct LauncherView: View {
         .background(background.ignoresSafeArea())
         .preferredColorScheme(.dark)
         .environment(\.colorScheme, .dark)   // a fullScreenCover from a light-mode app keeps its light traits otherwise, which drew the settings' names black
+        .nxTextRoot()   // NX 18's UI font for every text below that names no style (NXFont.swift); the guide and About set it again on their own roots
         .tint(NX18Palette.cyan)
         .toggleStyle(NX18SwitchStyle())
         .fullScreenCover(isPresented: shown(.guide)) {
@@ -354,7 +356,7 @@ struct LauncherView: View {
                     NX18GameLogo(image: Image(uiImage: logo), natural: logo.size, name: name, dark: artwork.logoDark, maxWidth: width * 0.7, maxHeight: Swift.min(96, height * 0.22))
                 } else {
                     Text(name)
-                        .font(.title.weight(.bold)).foregroundStyle(.white)
+                        .nxFont(.title, weight: .bold).foregroundStyle(.white)
                         .lineLimit(2).minimumScaleFactor(0.7)
                         .shadow(color: .black.opacity(0.35), radius: 6, y: 1)
                         .accessibilityAddTraits(.isHeader)
@@ -417,8 +419,8 @@ struct LauncherView: View {
     private var playButton: some View {
         Button(action: play) {
             HStack(spacing: 10) {
-                Image(systemName: "play.fill").font(.body.weight(.bold))
-                Text("Play").font(.title3.weight(.bold))
+                Image(systemName: "play.fill").font(.body.weight(.bold))   // system: symbol
+                Text("Play").nxFont(.title3, weight: .bold)
             }
             .foregroundStyle(NX18Palette.charcoal)
             .padding(.horizontal, 34).frame(minHeight: 46)
@@ -451,7 +453,7 @@ struct LauncherView: View {
                 case .icon: Image(systemName: icon).frame(width: 40)
                 }
             }
-            .font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1).fixedSize()
+            .nxFont(.subheadline, weight: .semibold).foregroundStyle(.white).lineLimit(1).fixedSize()
             .frame(minHeight: 40)
             .background(Capsule().fill(fill))
             .overlay(Capsule().strokeBorder(NX18Palette.separator, lineWidth: 1))
@@ -471,7 +473,7 @@ struct LauncherView: View {
                 if !onPlay { Image(systemName: "plus.circle") } else if let g = pad.glyphA { Image(systemName: g) } else { Text(verbatim: "A") }
                 Text("to play")
             }
-            .font(.footnote).foregroundStyle(NX18Palette.onArt).fixedSize()
+            .nxFont(.footnote).foregroundStyle(NX18Palette.onArt).fixedSize()
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(onPlay ? "Press \(pad.nameA ?? "A") to play" : "Press plus to play")   // the button the glyph shows: the right one, B on an Xbox pad
         }
@@ -504,7 +506,7 @@ struct LauncherView: View {
                             HStack {
                                 Text("Advanced settings").foregroundStyle(.white)
                                 Spacer()
-                                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(NX18Palette.muted)
+                                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(NX18Palette.muted)   // system: symbol
                                     .rotationEffect(.degrees(advancedOpen ? 90 : 0))
                             }
                             .contentShape(Rectangle())
@@ -523,7 +525,7 @@ struct LauncherView: View {
                         .listRowBackground(rowBackground(ring(.reset), fill: .clear))
                         .id(LauncherFocus.reset)
                 } footer: {
-                    Text("Brings back all settings this game was tested with.").foregroundStyle(NX18Palette.muted)
+                    Text("Brings back all settings this game was tested with.").nxFontIfCustom(.footnote).foregroundStyle(NX18Palette.muted)
                 }
                 CloudSavesSection(picking: $cloudPicking, focused: ring(.cloud), closed: guideAfterClosing) { refreshCloud() }
                 Section {
@@ -533,14 +535,14 @@ struct LauncherView: View {
                             Text(launcherFromEnv
                                  ? "DM_LAUNCHER in an env file decides this"
                                  : "The game starts at once with these settings. To see this screen again, use Settings screen at start in the in-game menu (or hold a controller button while the app opens).")
-                                .font(.footnote).foregroundStyle(NX18Palette.muted)
+                                .nxFont(.footnote).foregroundStyle(NX18Palette.muted)
                         }
                     }
                     .disabled(launcherFromEnv)
                     .listRowBackground(rowBackground(ring(.skip)))
                     .id(LauncherFocus.skip)
                 } footer: {
-                    if let v = version { Text("Version \(v)").foregroundStyle(NX18Palette.muted) }
+                    if let v = version { Text("Version \(v)").nxFontIfCustom(.footnote).foregroundStyle(NX18Palette.muted) }
                 }
             }
             .listStyle(.insetGrouped)

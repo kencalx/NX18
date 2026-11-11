@@ -14,6 +14,7 @@
 #include "front_drawable.h"   // DM_DRAWABLE_COUNT
 #include "haptics_apple.h"
 #include "save_sync.h"
+#include "ui_font.h"   // NX 18's UI font for the hint, the counter, the progress screen and the program handoff
 #import "CloudSaves.h"
 
 void dm_gamepad_active(void);
@@ -159,7 +160,7 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
     UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 40, 40)];
     lb.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     lb.numberOfLines = 0; lb.textAlignment = NSTextAlignmentCenter; lb.textColor = UIColor.whiteColor;
-    lb.text = text; [self.view addSubview:lb];
+    lb.font = dm_ui_font(17, UIFontWeightRegular); dm_ui_label_text(lb, text); [self.view addSubview:lb];
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -483,7 +484,7 @@ static void front_ios_power_watch(void) {
 uint64_t mtl_present_count(void);
 static UILabel *front_ios_fps_label(void) {
     UILabel *l = [UILabel new];
-    l.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightSemibold]; l.textColor = UIColor.whiteColor; l.textAlignment = NSTextAlignmentCenter;
+    l.font = dm_ui_mono_digits(13, UIFontWeightSemibold); l.textColor = UIColor.whiteColor; l.textAlignment = NSTextAlignmentCenter;
     l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45]; l.layer.cornerRadius = 6; l.layer.masksToBounds = YES; l.userInteractionEnabled = NO;
     l.text = @"-- fps";
     __block uint64_t n0 = mtl_present_count(); __block double t0 = CACurrentMediaTime();
@@ -513,10 +514,10 @@ void front_progress(const char *title, long done, long total) {
             UIView *box = [[UIView alloc] initWithFrame:CGRectMake(floor((root.bounds.size.width - 320) / 2), floor((root.bounds.size.height - 96) / 2), 320, 96)];
             box.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
             g_prog_title = [[UILabel alloc] initWithFrame:CGRectMake(0, 4, 320, 30)]; g_prog_title.textAlignment = NSTextAlignmentCenter; g_prog_title.textColor = UIColor.whiteColor;
-            g_prog_title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightSemibold];
+            g_prog_title.font = dm_ui_font(20, UIFontWeightSemibold);
             g_prog_bar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault]; g_prog_bar.frame = CGRectMake(20, 48, 280, 4);
             g_prog_count = [[UILabel alloc] initWithFrame:CGRectMake(0, 64, 320, 22)]; g_prog_count.textAlignment = NSTextAlignmentCenter;
-            g_prog_count.textColor = [UIColor colorWithWhite:0.72 alpha:1]; g_prog_count.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular];
+            g_prog_count.textColor = [UIColor colorWithWhite:0.72 alpha:1]; g_prog_count.font = dm_ui_mono_digits(13, UIFontWeightRegular);
             [box addSubview:g_prog_title]; [box addSubview:g_prog_bar]; [box addSubview:g_prog_count]; [g_prog addSubview:box];
             [root addSubview:g_prog];
         }
@@ -578,7 +579,7 @@ void front_program_handoff(int index, const char *name) {   // front.h; on the g
         o.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
         UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(o.bounds, 40, 0)]; lb.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         lb.numberOfLines = 0; lb.textAlignment = NSTextAlignmentCenter; lb.textColor = UIColor.whiteColor;
-        lb.font = [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold]; lb.text = [NSString stringWithFormat:@"Starting %@\u2026", nm];
+        lb.font = dm_ui_font(22, UIFontWeightSemibold); dm_ui_label_text(lb, [NSString stringWithFormat:@"Starting %@\u2026", nm]);
         [o addSubview:lb]; [w addSubview:o];
     });
     usleep(1500 * 1000);

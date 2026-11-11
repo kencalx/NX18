@@ -17,6 +17,7 @@ targets:
       - path: ../../Sources/LauncherArt.swift
       - path: ../../Sources/GuideViewer.swift
       - path: ../../Sources/LauncherGuideFiles.swift    # the guide's scheme, shim and block list, shared with the Mac app's guide window
+      - path: ../../Sources/NXFont.swift                # the UI font's text styles (dm/host/ui_font.h registers it; SIMCTL_CHILD_DM_UI_FONT=<file>)
       - path: ../../Sources/LauncherShortcuts.swift    # the home screen shortcuts (Game, Launcher, Guide), handed over by the harness's scene delegate as main.m's
       - path: ../../Sources/CloudSaves.m
       - path: Resources/Assets.xcassets                 # the NX 18 app icon (docs/images/nx18), the screen's icon without art

@@ -28,6 +28,7 @@
 #include "dm.h"
 #include "dm_input.h"
 #include "front.h"
+#include "ui_font.h"   // NX 18's UI font: the key letters and the controller prompt
 #include "game_profile.h"
 #include "haptics_apple.h"
 #include "motion_apple.h"
@@ -609,9 +610,9 @@ static CGPathRef armPath(CGPoint c, CGFloat R, CGFloat w, CGFloat in, CGFloat an
 }
 static void setPath(CAShapeLayer *l, CGPathRef p) { l.path = p; l.shadowPath = p; CGPathRelease(p); }
 static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
-    CTFontRef f = CTFontCreateUIFontForLanguage(kCTFontUIFontEmphasizedSystem, fs, NULL);
-    t.font = f; t.fontSize = fs;
-    CGFloat h = CTFontGetAscent(f) + CTFontGetDescent(f) + CTFontGetLeading(f), w = fs * 3;
+    CTFontRef f = dm_ui_ctfont_emphasized(fs);
+    t.font = f; t.fontSize = CTFontGetSize(f);   // the UI font's size is scaled (DM_UI_FONT_SCALE)
+    CGFloat h = CTFontGetAscent(f) + CTFontGetDescent(f) + (dm_ui_font_on() ? 0 : CTFontGetLeading(f)), w = fs * 3;   // the UI font's line gap is below its letters: left out, so they stay centred
     t.frame = CGRectMake(c.x - w / 2, c.y - h / 2, w, h);
     CFRelease(f);
 }
@@ -781,12 +782,18 @@ static int cp_waiting(void) {   // connected controllers that are no player yet
     return n;
 }
 static UILabel *cp_label(const char *text, CGFloat size, UIFontWeight w, CGFloat alpha) {
-    UILabel *l = [UILabel new]; l.text = @(text); l.font = [UIFont systemFontOfSize:size weight:w]; l.textColor = [UIColor colorWithWhite:1 alpha:alpha];
-    l.numberOfLines = 0; l.textAlignment = NSTextAlignmentCenter; return l;
+    UILabel *l = [UILabel new]; l.font = dm_ui_font(size, w); l.textColor = [UIColor colorWithWhite:1 alpha:alpha];
+    l.numberOfLines = 0; l.textAlignment = NSTextAlignmentCenter; dm_ui_label_text(l, @(text)); return l;
 }
 static UIButton *cp_button(const char *title, SEL action, int primary) {
     UIButtonConfiguration *cfg = primary ? UIButtonConfiguration.filledButtonConfiguration : UIButtonConfiguration.grayButtonConfiguration;
     cfg.title = @(title); cfg.cornerStyle = UIButtonConfigurationCornerStyleCapsule; cfg.buttonSize = UIButtonConfigurationSizeLarge;
+    if (dm_ui_font_on()) {   // the title in the UI font (a large button's is 17 pt); without it the configuration's own font, as before
+        UIFont *f = dm_ui_font(17, UIFontWeightSemibold);
+        cfg.titleTextAttributesTransformer = ^NSDictionary<NSAttributedStringKey, id> *(NSDictionary<NSAttributedStringKey, id> *a) {
+            NSMutableDictionary<NSAttributedStringKey, id> *m = [a mutableCopy]; m[NSFontAttributeName] = f; return m;
+        };
+    }
     UIButton *b = [UIButton buttonWithConfiguration:cfg primaryAction:nil];
     [b addTarget:g_cp_target action:action forControlEvents:UIControlEventTouchUpInside]; return b;
 }
@@ -815,7 +822,7 @@ static void cp_show(void) {   // the card once per prompt; its count and its Don
             [card.widthAnchor constraintLessThanOrEqualToAnchor:scrim.widthAnchor constant:-32], wide]];
         [w addSubview:scrim]; g_cp_view = scrim;
     }
-    g_cp_count.text = @(t[CP_TEXT_COUNT]);
+    dm_ui_label_text(g_cp_count, @(t[CP_TEXT_COUNT]));
     g_cp_done_btn.enabled = cp_can_confirm(&g_cp);
 }
 // One step of the prompt (a button, a touch on the card, a controller joining, coming or going); returns whether it keeps the game's input

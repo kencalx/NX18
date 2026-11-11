@@ -45,7 +45,7 @@ struct SettingRow: View {
     private var settingLabel: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(s.label).foregroundStyle(NX18Palette.text)
-            if !note.isEmpty { Text(note).font(.footnote).foregroundStyle(NX18Palette.muted) }
+            if !note.isEmpty { Text(note).nxFont(.footnote).foregroundStyle(NX18Palette.muted) }
         }
     }
 
@@ -299,7 +299,7 @@ struct NX18SectionHeader: View {
     let title: String
     init(_ title: String) { self.title = title }
     var body: some View {
-        Text(title).font(.footnote.weight(.semibold)).foregroundStyle(NX18Palette.cyan).textCase(.uppercase)
+        Text(title).nxFont(.footnote, weight: .semibold).foregroundStyle(NX18Palette.cyan).textCase(.uppercase)
             .accessibilityAddTraits(.isHeader)
     }
 }
@@ -326,7 +326,7 @@ struct PresetChips: View {
             HStack(spacing: 8) {
                 ForEach(LauncherPreset.allCases) { p in
                     Button { m.applyPreset(p) } label: {
-                        Text(p.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                        Text(p.title).nxFont(.subheadline, weight: .semibold).lineLimit(1)
                             .foregroundStyle(active == p ? NX18Palette.charcoal : Color.white)
                             .padding(.horizontal, 14).padding(.vertical, 7)
                             .background(Capsule().fill(active == p ? NX18Palette.cyan : NX18Palette.row))
@@ -401,11 +401,11 @@ struct LauncherStatusLine: View {
         if !parts.isEmpty {
             parts.enumerated().reduce(Text(verbatim: "")) { t, e in
                 let sep = e.offset == 0 ? Text(verbatim: "") : Text(verbatim: "  ·  ")
-                let dot = e.element.dot.map { Text(Image(systemName: "circle.fill")).font(.system(size: 7)).foregroundStyle($0) } ?? Text(verbatim: "")
+                let dot = e.element.dot.map { Text(Image(systemName: "circle.fill")).font(.system(size: 7)).foregroundStyle($0) } ?? Text(verbatim: "")   // system: symbol
                 let gap = e.element.dot == nil ? "" : "\u{2009}"
                 return Text("\(t)\(sep)\(dot)\(gap)\(e.element.text)")
             }
-            .font(.footnote)
+            .nxFont(.footnote)
             .foregroundStyle(color)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(status.spoken())
