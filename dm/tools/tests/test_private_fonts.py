@@ -2,7 +2,9 @@
 (by its path or its name records) is tracked or about to be added, no tracked text names such a font, local/ (where one may be kept in a checkout) is ignored, and the build refuses a
 font inside the checkout that git does not ignore. The text NX 18 draws goes through one place per language: NXFont.swift (SwiftUI) and dm/host/ui_font.h (UIKit, AppKit, CoreText).
 Every font used here is made by the test with fontTools' FontBuilder."""
+import atexit
 import importlib.util
+import os
 from pathlib import Path
 import re
 import shutil
@@ -18,23 +20,41 @@ NAME_IDS = (1, 4, 6, 16, 21)   # family, full name, PostScript name, typographic
 HAS_FONTTOOLS = importlib.util.find_spec('fontTools') is not None
 
 
-def checkout_files():
+def checkout_files(repo=REPO):
     """Tracked files and new files git would add (not ignored), relative to the checkout"""
-    out = subprocess.run(['git', 'ls-files', '-z', '-co', '--exclude-standard'], cwd=REPO, capture_output=True, check=True).stdout
+    out = subprocess.run(['git', 'ls-files', '-z', '-co', '--exclude-standard'], cwd=repo, capture_output=True, check=True).stdout
     return sorted({p for p in out.decode('utf-8', 'surrogateescape').split('\0') if p})
 
 
-def font_files():
-    """The files that are fonts: by their suffix, or by their first bytes (a font under another name)"""
-    found = []
-    for rel in checkout_files():
-        p = REPO / rel
-        if not p.is_file() or p.is_symlink(): continue
-        if p.suffix.lower() in FONT_SUFFIXES: found.append(rel); continue
+def staged_blobs(repo=REPO):
+    """{path: blob} of the index entries whose content the work tree does not show: staged and then deleted or changed in the work tree (git add, then rm or an edit),
+    so the commit would carry what is in the index, not what is on disk. Symbolic links and submodules are left out"""
+    def z(*args): return [p for p in subprocess.run(['git', *args], cwd=repo, capture_output=True, check=True).stdout.decode('utf-8', 'surrogateescape').split('\0') if p]
+    differs = set(z('ls-files', '-z', '-m', '-d'))
+    blobs = {}
+    for entry in z('ls-files', '-z', '-s'):
+        meta, rel = entry.split('\t', 1)
+        mode, sha = meta.split()[:2]
+        if rel in differs and mode in ('100644', '100755'): blobs[rel] = sha
+    return blobs
+
+
+def font_files(repo=REPO):
+    """The files that are fonts, as (path in the checkout, file holding the content git has or would add): by their suffix, or by their first bytes (a font under another
+    name). An index entry the work tree does not match is read from the index (a temporary copy, removed at exit)"""
+    found, blobs = [], staged_blobs(repo)
+    for rel in checkout_files(repo):
+        p = repo / rel
+        if rel in blobs:
+            fd, tmp = tempfile.mkstemp(prefix='staged-'); atexit.register(os.unlink, tmp)
+            with os.fdopen(fd, 'wb') as f: subprocess.run(['git', 'cat-file', 'blob', blobs[rel]], cwd=repo, stdout=f, check=True)
+            p = Path(tmp)
+        elif not p.is_file() or p.is_symlink(): continue
+        if Path(rel).suffix.lower() in FONT_SUFFIXES: found.append((rel, p)); continue
         try:
             with open(p, 'rb') as f: head = f.read(4)
         except OSError: continue
-        if head in FONT_MAGIC: found.append(rel)
+        if head in FONT_MAGIC: found.append((rel, p))
     return found
 
 
@@ -56,27 +76,50 @@ def make_font(path, family='NX Test UI', ps='NXTestUI-Regular'):
     return path
 
 
+def named_fonts(found):
+    """The fonts among found whose name table names Nintendo or Switch, as 'path: name ID n'"""
+    from fontTools.ttLib import TTCollection, TTFont
+    bad = []
+    for rel, p in found:
+        try:
+            with open(p, 'rb') as f: coll = f.read(4) == b'ttcf'
+            fonts = TTCollection(str(p), lazy=True).fonts if coll else [TTFont(str(p), lazy=True)]
+        except Exception: continue   # not a font after all (four bytes that happen to match)
+        for font in fonts:
+            names = font['name'] if 'name' in font else None
+            for nid in NAME_IDS:
+                v = names.getDebugName(nid) if names else None
+                if v and PRIVATE.search(v): bad.append(f'{rel}: name ID {nid}')
+    return bad
+
+
 class NoPrivateFonts(unittest.TestCase):
     def test_no_font_named_for_a_console_is_tracked_or_added(self):
-        bad = [rel for rel in font_files() if PRIVATE.search(rel)]
+        bad = [rel for rel, _ in font_files() if PRIVATE.search(rel)]
         self.assertEqual(bad, [], 'a font file whose path names Nintendo or Switch is tracked or about to be added: keep it outside the repository (or in local/, which git ignores)')
 
     @unittest.skipUnless(HAS_FONTTOOLS, 'needs fontTools')
     def test_no_tracked_font_has_such_a_name(self):
-        from fontTools.ttLib import TTCollection, TTFont
-        bad = []
-        for rel in font_files():
-            p = REPO / rel
-            try:
-                with open(p, 'rb') as f: coll = f.read(4) == b'ttcf'
-                fonts = TTCollection(str(p), lazy=True).fonts if coll else [TTFont(str(p), lazy=True)]
-            except Exception: continue   # not a font after all (four bytes that happen to match)
-            for font in fonts:
-                names = font['name'] if 'name' in font else None
-                for nid in NAME_IDS:
-                    v = names.getDebugName(nid) if names else None
-                    if v and PRIVATE.search(v): bad.append(f'{rel}: name ID {nid}')
-        self.assertEqual(bad, [], 'a tracked font names Nintendo or Switch in its name table')
+        self.assertEqual(named_fonts(font_files()), [], 'a tracked font names Nintendo or Switch in its name table')
+
+    @unittest.skipUnless(HAS_FONTTOOLS and shutil.which('git'), 'needs fontTools and git')
+    def test_the_guard_reads_what_the_index_holds(self):   # in a checkout of its own: a font staged and then deleted or replaced in the work tree is still found
+        tmp = Path(tempfile.mkdtemp(prefix='ui-font-guard-')).resolve(); self.addCleanup(shutil.rmtree, tmp)
+        for k in [k for k in os.environ if k in ('GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE', 'GIT_OBJECT_DIRECTORY')]:   # a run under another index (a hook) would add to it
+            self.addCleanup(os.environ.__setitem__, k, os.environ.pop(k))
+        subprocess.run(['git', 'init', '-q', str(tmp)], check=True)
+        shutil.copyfile(REPO / '.gitignore', tmp / '.gitignore')
+        (tmp / 'dm').mkdir(); (tmp / 'local/fonts').mkdir(parents=True)
+        make_font(tmp / 'dm/ui.ttf', 'Nintendo Test UI', 'NintendoTestUI')   # a generic path, the name table names it
+        make_font(tmp / 'dm/renamed.bin', 'Switch Test UI', 'SwitchTestUI')   # another suffix: found by its first bytes
+        make_font(tmp / 'local/fonts/NintendoTestUI.ttf')                   # ignored, then forced in
+        subprocess.run(['git', 'add', '-f', 'dm/ui.ttf', 'dm/renamed.bin', 'local/fonts/NintendoTestUI.ttf'], cwd=tmp, check=True)
+        (tmp / 'dm/ui.ttf').unlink()                                         # staged, then deleted
+        make_font(tmp / 'dm/renamed.bin')                                    # staged, then replaced by a harmless font
+        found = font_files(tmp)
+        self.assertEqual(sorted(rel for rel, _ in found), ['dm/renamed.bin', 'dm/ui.ttf', 'local/fonts/NintendoTestUI.ttf'])
+        self.assertEqual([rel for rel, _ in found if PRIVATE.search(rel)], ['local/fonts/NintendoTestUI.ttf'])
+        self.assertEqual(sorted({b.split(':')[0] for b in named_fonts(found)}), ['dm/renamed.bin', 'dm/ui.ttf'])
 
     def test_no_tracked_text_names_the_font(self):
         # the font's names, written in two parts so this file does not match itself
@@ -166,6 +209,8 @@ class UiFontInfo(unittest.TestCase):
     def test_what_is_refused(self):
         BuildError = self.nsp.BuildError
         with self.assertRaisesRegex(BuildError, r'no such UI font file \(--ui-font / UI_FONT\)'): self.info(self.tmp / 'missing.ttf')
+        (self.tmp / 'folder.ttf').mkdir()
+        with self.assertRaisesRegex(BuildError, 'is a folder, not a font file'): self.info(self.tmp / 'folder.ttf')
         (self.tmp / 'notes.txt').write_text('a font?')
         with self.assertRaisesRegex(BuildError, 'must be a .ttf, .otf or .ttc file'): self.info(self.tmp / 'notes.txt')
         png = self.tmp / 'picture.ttf'; png.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\0' * 64)

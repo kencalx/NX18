@@ -3093,6 +3093,7 @@ def ui_font_info(given, repo):
     can look it up by (face 0 of a collection; the apps register the whole file). A path inside the checkout must be one git ignores (local/, .gitignore), so the font cannot be committed
     by accident. Only the name table is read; nothing of the file is printed or copied here (build_ipa.sh and pack_app.py copy it into the app)"""
     path = Path(os.path.expanduser(str(given))).resolve()
+    if path.is_dir(): raise BuildError(f'the UI font (--ui-font / UI_FONT) is a folder, not a font file: {path}')
     if not path.is_file(): raise BuildError(f'no such UI font file (--ui-font / UI_FONT): {path}')
     if path.suffix.lower() not in ('.ttf', '.otf', '.ttc'): raise BuildError(f'the UI font (--ui-font / UI_FONT) must be a .ttf, .otf or .ttc file: {path}')
     try:
