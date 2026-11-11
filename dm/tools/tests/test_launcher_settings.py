@@ -112,6 +112,10 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertIn('first start', botw['DM_PSO_PREBUILD']['note'])   # it runs once in the prepare step, before the first frame
         self.assertIn('deferred-encoding error', botw['DM_NVN_ENC_THREAD']['note'])   # off only for a FATAL deferred encoding stop (docs/settings.md, Encode thread)
         self.assertIn('GPU time', botw['DM_METAL_HUD']['note'])   # what Apple's overlay shows, as docs/settings.md's Performance HUD says
+        # On the Mac the row is off by default (the profile's enc_thread off), so the iPhone's "Leave on" note would push a Mac player against the tested default: a
+        # device:mac hint replaces it there, and only for games whose profile leaves it off (Need for Speed: Hot Pursuit Remastered's enc_thread on keeps the plain note on the Mac too)
+        self.assertEqual(botw['DM_NVN_ENC_THREAD']['hint'], [{'when': ['device:mac'], 'why': 'Off on the Mac by default: steadier slowest frames'}])
+        self.assertNotIn('hint', build('010029B0118E8000', 'nvn', 'mac')['DM_NVN_ENC_THREAD'])
 
     def test_hold_frames_takes_on_and_off(self):   # the host reads DM_FPS_HOLD as on / off (hle_nvn.c), not 1 / 0
         s = build(BOTW, 'nvn', fixups=FRAME_STEP)['DM_FPS_HOLD']
