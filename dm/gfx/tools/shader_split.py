@@ -2820,7 +2820,15 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     if d[:4] == b'NARC':   # Camelot's containers (cra.py): each member packed by its first byte, so its size says nothing about the budget above
         import cra
-        for i, m in enumerate(cra.narc_members(d, label)): scan_blob(cra.undo(m), f'{label}/{i}', out, depth + 1)
+        # A NARC whose header or member table is cut or damaged, and a member that does not unpack (a cut LZ4 or zstd stream, an LZ4 size past its largest ratio, MMMM
+        # chunks nested past 32), stop the split with a red line naming the archive and the member, as for SARC, instead of a Python traceback (cra.Error; struct.error and
+        # IndexError from the older packers' readers). A well-formed archive splits as before. The nightly fuzz harness found the first one (corpus/shader_split/narc-*)
+        try: members = cra.narc_members(d, label)
+        except cra.Error as e: red(f'{e} (a damaged or cut NARC)')
+        for i, m in enumerate(members):
+            try: u = cra.undo(m)
+            except (cra.Error, struct.error, IndexError) as e: red(f'{label}/{i}: a packed member that does not unpack ({type(e).__name__}: {e})')
+            scan_blob(u, f'{label}/{i}', out, depth + 1)
         return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
     if d[:4] == RGXD: out.extend(rgxd_shaders(d, label)); return

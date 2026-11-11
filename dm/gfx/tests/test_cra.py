@@ -109,6 +109,27 @@ class Members(unittest.TestCase):
         with self.assertRaises(cra.Error): cra.narc_members(b'SARC' + bytes(32))
         with self.assertRaises(cra.Error): cra.narc_members(narc([b'abc'])[:40])
 
+    def test_damaged_narc(self):   # a cut or damaged archive is a cra.Error naming the place, not a struct.error (shader_split.py turns it into a red line)
+        with self.assertRaisesRegex(cra.Error, 'header cut short'): cra.narc_members(b'NARCBNS\0N')   # the nightly fuzzer's input (corpus/shader_split/narc-cut-header.bin)
+        with self.assertRaisesRegex(cra.Error, 'BTAF past the end'):   # the last section, cut after its 8-byte header: its count of entries past the end
+            cra.narc_members(b'NARC\xfe\xff\0\0' + struct.pack('<IHH', 32, 16, 2) + b'GMIF' + struct.pack('<I', 8) + b'BTAF' + struct.pack('<I', 12))
+        img = b'GMIF' + struct.pack('<I', 24) + b'abc' + bytes(13)   # one member, 'abc'
+        tab = b'BTAF' + struct.pack('<III', 20, 3, 0) + struct.pack('<I', 3)   # says 3 entries, holds 1, and the archive ends there
+        with self.assertRaisesRegex(cra.Error, 'BTAF entry 1 past the end'):
+            cra.narc_members(b'NARC\xfe\xff\0\0' + struct.pack('<IHH', 16 + len(img) + len(tab), 16, 2) + img + tab)
+
+    def test_damaged_members(self):   # a damaged packed member is a cra.Error, checked before anything allocates what it declares
+        text = b'shaders ' * 64
+        packed = lz4.block.compress(text, store_size=False)
+        with self.assertRaisesRegex(cra.Error, "LZ4's largest ratio"): cra.undo(b'\x94\0\0\0' + struct.pack('<I', 0xfffffff0) + packed)
+        with self.assertRaisesRegex(cra.Error, 'damaged LZ4'): cra.undo(b'\x94\0\0\0' + struct.pack('<I', len(text)) + packed[:-1])   # its last literal cut
+        self.assertEqual(cra.undo(b'\x94\0\0\0' + struct.pack('<I', len(text)) + packed), text)   # the cap is far above a real member's ratio
+        nest = b'plain'
+        for _ in range(40):   # MMMM chunks inside chunks: at most 32 levels, not Python's recursion limit
+            head = b'MMMM' + struct.pack('<III', len(nest), 1, len(nest))
+            nest = head + bytes(-len(head) & 15) + nest
+        with self.assertRaisesRegex(cra.Error, 'nested more than 32'): cra.undo(nest)
+
     def test_kinds(self):
         text = b'BNSH\0\0\0\0 shaders shaders shaders shaders ' * 40
         lz4d = b'\x94\0\0\0' + struct.pack('<I', len(text)) + lz4.block.compress(text, store_size=False)
