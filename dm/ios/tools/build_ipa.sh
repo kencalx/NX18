@@ -72,7 +72,7 @@ MODS=$(python3 "$DM/games/game.py" modules "$GAME" "$PATCHED") || die "game prof
 for f in $MODS; do [ -f "$PATCHED/$f.patched.bin" ] && [ -f "$PATCHED/$f.fixups.tsv" ] || die "no rewritten module $PATCHED/$f (run dm/tools/patch_nso.py first)"; done
 python3 "$DM/tools/romfs.py" "$ROMFS" "$MARKER" || die "no RomFS at $ROMFS (missing $MARKER)"
 V=${V:-$(sed -n 's/^#define DMSH_CHAIN "\(.*\)"/\1/p' "$DM/gfx/nvn/dmsh_chain.h")}   # the chain version the host is compiled with, one for every game
-# NX 18 release 1 is Metal 4 only and renders NVN games only: the OpenGL and Vulkan layers were removed (git 93c34371). GFXAPI is what the NSP script detected (nvn when unset)
+# NX 18 release 1 is Metal 4 only and renders NVN games only: the OpenGL and Vulkan layers were removed (git 989e75d4; last present at 93c34371). GFXAPI is what the NSP script detected (nvn when unset)
 GFXAPI=${GFXAPI:-nvn}
 [ "$GFXAPI" = nvn ] || die "$(gp name) renders with $([ "$GFXAPI" = vulkan ] && echo Vulkan || echo OpenGL); NX 18 release 1 supports NVN games only"
 [ -n "$V" ] && lib_has "$MSL_IOS/b-$V" || die "no iOS shader libraries $MSL_IOS/b-$V (IOSOUT=$MSL_IOS dmsh_build.py ...)"

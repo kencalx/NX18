@@ -1286,7 +1286,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`); the Vulkan and OpenGL layers were 
 
 ### A specialization descriptor iOS 26.0 returns autoreleased
 
-- **Symptom:** with Metal 4 pipelines on (`DM_PSO_MTL4=1`), the iOS app crashes before its first frame, right after `pipeline prewarm list … lines`: `CRASH sig=11 pc=objc_release+0x10`, `bt: objc_autoreleasePoolPop warm_task __warm_prepare_block_invoke`, on several prepare workers at once. The Mac runs the same pipelines.
+- **Symptom:** with Metal 4 pipelines (then `DM_PSO_MTL4=1`, now always on), the iOS app crashes before its first frame, right after `pipeline prewarm list … lines`: `CRASH sig=11 pc=objc_release+0x10`, `bt: objc_autoreleasePoolPop warm_task __warm_prepare_block_invoke`, on several prepare workers at once. The Mac runs the same pipelines.
 - **Cause:** `newRenderPipelineDescriptorForSpecialization` promises a +1 object by its name, so ARC releases it once at the end of `pso_build_ex`. On iOS 26.0 (23A341) the driver returns it autoreleased. On an iPad Pro M4 the method is `-[AGXG16GFamilyRenderPipeline newRenderPipelineDescriptorForSpecialization]` in `AGXMetalG16G_B0`. So ARC's release freed it, and the warm task's pool released it again. Under LLDB on the iPad:
   - the descriptor sits in the autorelease pool when the call returns (`_objc_autoreleasePoolPrint`);
   - `NSZombieEnabled=YES` reports `-[MTL4RenderPipelineDescriptor release]: message sent to deallocated instance`.

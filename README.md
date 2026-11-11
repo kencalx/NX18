@@ -41,10 +41,10 @@ Community projects build on nxnative with tools to turn your games into apps for
 ## Requirements
 
 - **Mac:** Apple silicon with Metal 4, macOS 27.3 or later (NX 18 draws through Metal 4 only; a virtual Mac, whose GPU has no Metal 4, is not supported). Building games requires Xcode 27.2.
-- **iPhone:** A17 Pro chip or later, with iOS 26 or later.
-- **iPad:** M1 chip or later, with iPadOS 26 or later.
+- **iPhone:** A17 Pro chip or later, with iOS 26 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iOS 27.3 or later (below).
+- **iPad:** M1 chip or later, with iPadOS 26 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iPadOS 27.3 or later (below).
 
-**This fork (NX 18)** builds its iOS app for one chip, the iPhone 18 Pro Max's A20 Pro, on iOS 27.3 (`dm/ios/project.yml`: deployment target 27.3, `-mcpu=apple-a20`; the app still declares the iPad family), with the newest Xcode beta: `build_ipa_from_nsp.py` takes `--allow-other-metal` (`DM_ALLOW_OTHER_METAL=1` for `own_compilers.py`). An IPA from this tree does not run on the older devices listed above, which are upstream's.
+**This fork (NX 18)** builds its iOS app for one chip, the iPhone 18 Pro Max's A20 Pro, on iOS 27.3 (`dm/ios/project.yml`: deployment target 27.3, `-mcpu=apple-a20`; the app still declares the iPad family), with the newest Xcode beta: `build_ipa_from_nsp.py` takes `--allow-other-metal` (`DM_ALLOW_OTHER_METAL=1` for `own_compilers.py`). An IPA from this tree needs iOS 27.3 or later and does not run on the older devices or systems listed above, which are upstream's.
 
 The games' textures are BC-compressed, which older iPhones cannot read. Switch 2 builds are tested on the Mac; check each game's note for device-specific validation.
 

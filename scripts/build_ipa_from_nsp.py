@@ -127,7 +127,7 @@ class BuildError(Exception):
 
 def unsupported_gfx(gfx, name):
     """The stop for a game whose graphics detection (profile_guess.py shader_sources) says vulkan or gl: NX 18 release 1 is Metal 4 only and renders NVN games only; the OpenGL and
-    Vulkan layers were removed (git 93c34371), to be ported later"""
+    Vulkan layers were removed (git 989e75d4; last present at 93c34371), to be ported later"""
     return f'{name} renders with {"Vulkan" if gfx == "vulkan" else "OpenGL"}; NX 18 release 1 supports NVN games only'
 
 

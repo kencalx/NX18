@@ -27,6 +27,13 @@ class Toolchain(unittest.TestCase):
         self.assertEqual(set(named), {self.xcode}, f'README.md: the Xcode to install is not CI\'s {self.xcode}')
         self.assertEqual(set(re.findall(r'Xcode[ -](\d+\.\d+)', readme)), {self.xcode}, f'README.md: an Xcode it names (the side-by-side one too) is not CI\'s {self.xcode}')
 
+    def test_development_page_and_lint_workflow_name_the_same_xcode(self):   # docs/development.md's CI section and lint-c.yml's DEVELOPER_DIR (its clang-tidy reads the SDK's headers)
+        named = re.findall(r"Xcode (\d+\.\d+) on GitHub's", (REPO / 'docs/development.md').read_text())
+        self.assertTrue(named, 'docs/development.md names no Xcode for CI')
+        self.assertEqual(set(named), {self.xcode}, f'docs/development.md: the Xcode CI runs is not tests.yml\'s {self.xcode}')
+        lint = re.findall(r'DEVELOPER_DIR: /Applications/Xcode_(\d+\.\d+)\.app/Contents/Developer', (REPO / '.github/workflows/lint-c.yml').read_text())
+        self.assertEqual(set(lint), {self.xcode}, f'lint-c.yml: DEVELOPER_DIR is not tests.yml\'s {self.xcode}')
+
     def test_metal_stop_names_the_same_xcode(self):   # own_compilers.py's stop message: the Xcode to install and select (GitHub issue #717)
         named = re.findall(r"XCODE_VERSION = '(\d+\.\d+)'", (REPO / 'dm/gfx/tools/own_compilers.py').read_text())
         self.assertEqual(named, [self.xcode], f'dm/gfx/tools/own_compilers.py: XCODE_VERSION is not CI\'s {self.xcode}')
