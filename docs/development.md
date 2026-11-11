@@ -435,6 +435,8 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform m
 # nx_extract --contents run; a DLC's add-on title ID comes from there) against the catalog; a version's Meta, Program, Control and Manual NCAs are staged into <build folder>/tmp/nca/v<N>/
 # (each checked against its SHA-256, deleted after the run; the disk check counts them), and an update's folder, which holds its base game's NCAs too, is given as both the base game and the
 # update, so its patch Program NCA is laid over the base one (BKTR) as for a merged NSP. Its log is logs/extract_v<N>.log; its NACP and icon come from the Control NCA, else from the archive.
+# An icon set in NXConvert's sidebar (the snapshot's own icon in the archive, when it differs from the Control NCA's) is saved as extract/v<N>/icon.edited.jpg and becomes the app's icon; that file and
+# title.txt are rewritten on every run, also when the extraction is kept, so editing or undoing the archive's display metadata stages nothing again.
 # nx_extract is found the first time an NCA snapshot is touched (an archive of trees never starts it) and must be built from the in-repo source. Refused: a sparse base game alone (pack an
 # update version), a data-only update, NCAs still encrypted or without the DNCA marker, anything but <hex>.nca files in a snapshot. One .nx or .nup per folder; --title-id picks a game from an NX that holds several,
 # and --title-id <ID>:switch1 / :switch2 / :unknown one of an ID the NX holds on two platforms (its build folder is then <ID>-<platform>_build and its app gets -<platform> after its name).

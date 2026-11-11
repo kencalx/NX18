@@ -26,6 +26,7 @@
 #   extract/v<version>/control.nacp, icon.jpg   the snapshot's NACP and icon, when the archive has them for it, else its exact base snapshot's (also a base that holds only metadata; never
 #     another update's); none when neither has them (sips reads a PNG icon by its content). A NACP record that is not 0x4000 bytes is no NACP: left out, with a line
 #   extract/v<version>/title.txt   without a NACP, the archive's display title for the version (or its base's): the NSP script's app name then, before the profile's
+#   extract/v<version>/icon.edited.jpg   an NCA snapshot's own icon in the archive (one set in NXConvert's sidebar) when it differs from its Control NCA's icon.jpg: the app's icon then
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − base title ID − 0x1000; DLC converted from a NUP or folders carry their add-on title ID), the host's DM_AOC_DIR
 # Checks, in the order of the format's own validator so a damaged or hostile archive gets the error the format names (Error.code):
 #   open: both header slots (magic, CRC-32C, zero page padding; the valid one of the highest generation; an older generation when the newer one's tail is damaged), the version (0.2 and 0.3
@@ -1377,10 +1378,19 @@ def _control_fallback(k, out, say):   # what the Control NCA did not give (no Co
         say(f'{k.name}: the archive has no NACP for this version' + ('' if k.type == BASE else ' or its base game') + ': the game\'s name and languages come from elsewhere (its profile)')
 
 
+EDITED_ICON = 'icon.edited.jpg'   # beside an NCA snapshot's icon.jpg: the archive's own icon for it when that differs from the Control NCA's, which the NSP script takes first
+
+
 def _display(k, out, say):
-    """An NCA snapshot's output, as extracted or as its stamp kept it: title.txt (the archive's display title, without a NACP). Written after the stamp and on every run, so an edit to the
-    archive's display metadata (NXConvert's sidebar appends a generation, the NCA files stay) needs no new extraction"""
+    """An NCA snapshot's output, as extracted or as its stamp kept it: title.txt (the archive's display title, without a NACP) and EDITED_ICON (an icon set in NXConvert's sidebar, set-metadata,
+    which keeps the NCA files as they are: the snapshot's own icon in the archive, when it differs from the icon.jpg its Control NCA gave; never its base game's). Written after the stamp and on
+    every run, so an edit to the archive's display metadata (it appends a generation) needs no new extraction, and undoing it brings the game's icon back"""
     title_file(out, media_meta(k, base_of(k), say)['title'] if not (out / 'control.nacp').is_file() else None)
+    own, icon, edited = k.nx.meta(k)['icon'], out / 'icon.jpg', out / EDITED_ICON
+    if own and icon.is_file() and own != icon.read_bytes():
+        edited.write_bytes(own)
+        pack_nup.tell(k, f"{k.name}: the archive's icon for it differs from its Control NCA's (edited in NXConvert): the app takes the archive's ({EDITED_ICON})", say)
+    else: edited.unlink(missing_ok=True)
 
 
 def _one(k, pattern, text, what):   # the one line of nx_extract's output that matches pattern; a second is refused (text from the NCAs is printed escaped, so none can forge one)

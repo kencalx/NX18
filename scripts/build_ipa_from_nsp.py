@@ -377,6 +377,10 @@ def control_name(d):   # the game's name in a version folder's control data: its
     except (OSError, UnicodeDecodeError): return ''
 
 
+def game_icon_of(d):   # a version folder's game icon: an NX's icon edited in NXConvert (pack_nx.EDITED_ICON, beside an NCA snapshot's), else the control data's icon.jpg, else None
+    return next((p for p in (d / pack_nx.EDITED_ICON, d / 'icon.jpg') if p.is_file()), None)
+
+
 def languages_control(*dirs):
     """The control.nacp that lists the game's languages: the first of the folders' (the packed version's, then the base game's) that lists any, else the first one's path. An update, a NUP's or
     an NX's especially, may carry no control data: the language check and the launcher settings (of the Mac app and the IPA) then read the base game's, the same file"""
@@ -3398,8 +3402,8 @@ def main(args=None):
     app_version = nacp.version(game / 'control.nacp') or nacp.version(base / 'control.nacp')
     if mac_pack and not (args.out or OUT_IPA): out_ipa = work.parent / f'{mac_app_name(app_name)}{"-provisional" if shadowed else ""}{"-" + plat_tag if plat_tag else ""}.app'
     # the app icon: --icon / ICON, else the game icon nx_extract saved from the control data (English, icon.jpg; the packed version's first, then the base game's), which a dump never has and a NUP or an NX may lack;
-    # without one, the NX 18 icon, so the home screen does not show a blank tile
-    game_icon = user_icon or next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)
+    # an icon edited in an NX made from NSPs or XCIs comes before its Control NCA's (game_icon_of). Without one, the NX 18 icon, so the home screen does not show a blank tile
+    game_icon = user_icon or next(filter(None, map(game_icon_of, (game, base))), None)
     icon = game_icon or (NX18_ICON if NX18_ICON.is_file() else None)
     if (not mac or mac_pack) and getattr(args, 'in_programs', None) is None:   # an app is made, once: a program packed with the application's first (in_programs) is part of its app
         say_game(app, app_name, app_version or '1.0', bundle_id, None if prepare_xcode else out_ipa, game_icon)   # the game's own icon (docs/frontends.md): null without one, not the NX 18 stand-in

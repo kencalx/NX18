@@ -1000,6 +1000,40 @@ class Native(NativeBase):
             self.assertEqual((out / 'title.txt').read_text(encoding='utf-8'), title)
             n.close()
 
+    def test_icon_edited_in_the_archive(self):   # an icon set in NXConvert's sidebar (set-metadata) for an archive made from an NSP: icon.edited.jpg, which the app takes
+        for meta, edited in ((dict(META, icon=b'control icon'), None), (META, META['icon']), (dict(META, icon=None), None)):   # the Control NCA's own icon, another, none
+            with self.subTest(icon=meta['icon']):
+                self.write_game(meta=meta)
+                n, (_, base, vers, _) = self.opened(FakeTool(build=self.g.bid0))
+                said = []
+                out = self.work() / 'extract/v0'
+                pack_nx.pack_version(n, base, None, TID, out, say=said.append)
+                self.assertEqual((out / 'icon.jpg').read_bytes(), b'control icon')   # the Control NCA's, as stamped
+                self.assertEqual((out / 'icon.edited.jpg').read_bytes() if (out / 'icon.edited.jpg').exists() else None, edited)
+                self.assertEqual(len([s for s in said if 'edited' in s]), int(edited is not None), said)
+                self.assertEqual(nsp.game_icon_of(out), out / ('icon.edited.jpg' if edited else 'icon.jpg'))
+                n.close()
+        self.write_game()
+        n, (_, base, vers, _) = self.opened(FakeTool(build=self.g.bid1))
+        _, out = self.pack(n, vers[VER])   # the update has no Media icon of its own (the edit is the base's): the Control NCA's
+        self.assertFalse((out / 'icon.edited.jpg').exists())
+
+    def test_icon_edited_after_the_extraction(self):   # a repeat run keeps the extraction (nothing staged) and still follows an edit, or its undoing
+        fake = FakeTool(build=self.g.bid0)
+        n, (_, base, _, _) = self.opened(fake)
+        out = self.work() / 'extract/v0'
+        self.assertEqual(pack_nx.pack_version(n, base, None, TID, out, say=lambda s: None), 'packed')
+        self.assertTrue((out / 'icon.edited.jpg').exists())
+        n.close()
+        for meta, edited in ((dict(META, icon=b'new icon'), b'new icon'), (dict(META, icon=b'control icon'), None)):
+            self.write_game(meta=meta, generation=1)   # an edit appends a generation; the NCA files are the same
+            n, (_, base, _, _) = self.opened(fake)
+            calls = len(fake.calls)
+            self.assertEqual(pack_nx.pack_version(n, base, None, TID, out, say=lambda s: None), 'kept')
+            self.assertEqual(len(fake.calls), calls)
+            self.assertEqual((out / 'icon.edited.jpg').read_bytes() if (out / 'icon.edited.jpg').exists() else None, edited)
+            n.close()
+
     def test_stamp_keeps_the_output(self):
         fake = FakeTool(build=self.g.bid1)
         n, (_, base, vers, _) = self.opened(fake)
