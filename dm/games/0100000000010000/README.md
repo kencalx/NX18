@@ -54,6 +54,17 @@ No `patches.py`. `op_mode` stays docked: Odyssey only takes its motion moves in 
 - 27,984 shaders: agl `sharcb` and `bfsha` in `ShaderData`, particles in `EffectData`; groups per RomFS folder in `game.tsv`.
 - The spin-wait rewrite leaves its modules byte for byte as before the lock and store rules.
 
+### Pipelines on a first start
+
+[`pso_manifest.tsv`](pso_manifest.tsv), the prewarm list the app ships, is an iPhone 18 Pro Max's own `Documents/pso_user.tsv` from the owner's play on release 1 (`5b302cd0`, update 1.4.1, Ultrawide on, no edge smoothing): the first start after a fresh install, with no list and an empty device archive, so everything it drew was built on the spot; boot, the owner's save and about 3 minutes of play (9,700 frames). Its 15,895 rows are 15,164 shaders (`S`), 723 render pipelines (`R`, of 498 shader pairs) and 8 compute pipelines (`C`), in the order of first use, every one checked against [`shader_map.tsv`](shader_map.tsv) by `dm/tools/pso_seed.py` (keys, stages, no pointer or other device bytes, no path, no repeats) and read by the host's own `warm_parse` with none dropped. The `S` rows are kept, as in every recorded list: they are the libraries its program creation and draws loaded (about half the shader map's 27,984), which cost frames of their own on the draw (222 of them in one 188 ms frame), and the prepare step loads them on every core before the first frame.
+
+- **Without it** (that first start): the prewarm lists held nothing (`pipeline prepare: the prewarm lists hold nothing to build`), the archive bundled with the app (900.8 MB, opened in 867 ms) served 402 lookups, and 767 pipeline bases were compiled in play (41.4 s of compile time on all threads, 54 ms each); the submit thread waited 2.39 s for pipelines and 0.36 s for shader libraries: 3 frames over 100 ms, 932 ms at 34 s (56 pipelines, 896 ms), 709 ms at 46 s (41 pipelines and 374 first texture uploads) and 188 ms (222 shader libraries), and 10 more of 31-80 ms with pipelines or libraries made on the draw.
+- **Its cost on a first start** (an estimate, not measured: no start with the list has been logged yet): a fresh install builds the same pipelines in the prepare step, behind the progress screen, so about the 767 bases above are compiled there and the rest come from the bundled archive. At Persona 5 Royal's measured prepare (30,923 lines with 305 compiles in 2.19 s on 6 workers, 23.5 ms a base) or this first start's 54 ms a base, that is 18-41 s of compile time on 6 workers, so the prepare step takes about 3-7 s (Persona 5 Royal's 2.19 s scaled to 767 compiles: about 5.5 s), in place of the stalls above. The 15,164 shaders are half Persona 5 Royal's 30,357, which fit in its 2.19 s.
+- **On the owner's iPhone** the list adds nothing: its own `pso_user.tsv` names the same rows and its device archive holds the 767 bases, so its next start prepares them from there.
+- **Ultrawide off:** the rows hold. The mod (`exefs` patches of `main` only) changes the aspect ratio the scene's camera is given, the HUD layout's size and the width of two panes of the boot loading screen. It has no RomFS file, so no shader the map does not have, and changes no render target's size or format (the game's window textures stayed 1600x900); a row's pipeline key (`pso_skey`) holds the shaders, the attachment formats, blending and the vertex layout, not the picture size. With it off the view is narrower, so a few objects at its sides may be first drawn later than here; the prepare step builds their rows anyway.
+- **What it does not cover:** places those 3 minutes did not reach, which still build their pipelines at their first draw, and `pso_user.tsv` records them for the next start.
+- **The build:** the next build of this game runs the shader step again (its key covers the profile's files, `pso_manifest.tsv` among them; the libraries come back from the shader cache), and `pso_offline.py` compiles 2 of its 3 compute groups again (32 of the 41 compute pipelines), since the 8 `C` rows put those compute shaders first, then merges the archive again; the 33 groups of the 32,864 bases are reused. The `S` and `R` rows go into no archive: the app carries the list and the device builds them. No other game's build changes.
+
 ## Mac routes
 
 - A fresh save wakes Mario in the Cap Kingdom with `DM_KEYS="f1000:A,f8200:RLeft~6,f9200:LUp~4"`: the "Look Around" hint waits for the right stick held about 6 s one way (left then right cancels out). Play starts at about frame 9,900, and the game saves there.
@@ -91,6 +102,7 @@ General host and tool changes first needed here; each applies to every game:
 
 ## Open
 
+- A fresh install's prepare step with the shipped prewarm list, estimated at 3-7 s ([Pipelines on a first start](#pipelines-on-a-first-start)): its `pipeline prepare` line on the iPhone, and whether play to the same place has no frame over 100 ms.
 - The three thunder geometry shaders do not translate.
 - The silent first minute of sound.
 - development.md calls SDK 7.3.2 "the oldest so far"; Mario Kart 8 Deluxe (SDK 4.4.0) is older now.
