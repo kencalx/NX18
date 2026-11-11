@@ -9,7 +9,7 @@
 // glslc_play/ beside the save (DM_SAVE's parent: the app's Documents/glslc_play, on the Mac beside save/, as pso_user.tsv; DM_GLSLC_PLAY=<dir> another folder, off none) when the shader map the
 // renderer loads lacks the shader key of one of its stages (nvn_shkey.h, the key shader_split.py skey gives and nvn_mtl.m looks up; mtl_shmap_has). The key decides, not the output's file name:
 // the split gives a play output a row only for a key no other source has, so a game that compiles a combination of stages its files hold already (Portal and Portal 2 combine shaders of
-// game.zip) needs nothing, and saving it would only bring the same red line and the same file at every run. Each missing key is saved and reported once a run. Its draws are missing in this
+// game.zip) needs nothing, and saving it would only bring the same red line and the same file at every run. Each combination of stages with a missing key is saved and reported once a run. Its draws are missing in this
 // build (shaders are translated offline only); the NSP script takes the folder into the next build (gather_glslc_play)
 #include "hle.h"
 #include "../gfx/nvn/nvn_shkey.h"
@@ -98,7 +98,9 @@ static const char *play_dir(void) {   // glslc_play/ beside the save, made at th
     return dir[0] ? dir : NULL;
 }
 
-// The keys this run has saved and reported, sorted: a shader the game compiles again (another material with the same stages, a scene loaded again) is neither saved nor reported again
+// The stage combinations this run has saved and reported (all of an output's stage keys, as one hash), sorted: the same shader compiled again (another material with the same stages, a scene
+// loaded again, an output that differs only outside its stages) is neither saved nor reported again. A program that pairs a missing stage with other stages than an output saved before is saved
+// as well: the split takes its variation pair (var_pairs: shader_pairs.tsv) only from an output it reads, and dmsh_build pads the vertex shader for the pixel shaders paired with it (vs_pad)
 static uint64_t *g_run; static size_t g_nrun, g_caprun;
 static int u64_cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
 static int run_add(uint64_t k) {   // 1: new this run
@@ -122,13 +124,13 @@ static void capture(const void *obj) {
         if (save(dir, h, out, n, path, sizeof path) > 0) LOG("glslc: saved a run-time compile output %s (%u bytes)", path, n);
         return;
     }
-    uint8_t keys[GLSLC_MAX_STAGES][8]; int nk = glslc_keys(out, n, keys), nmiss = 0; char miss[17] = ""; uint64_t mk[GLSLC_MAX_STAGES];
+    uint8_t keys[GLSLC_MAX_STAGES][8]; int nk = glslc_keys(out, n, keys), nmiss = 0; char miss[17] = ""; uint64_t combo = 0xcbf29ce484222325ull;
     for (int i = 0; i < nk; i++) {
+        for (int b = 0; b < 8; b++) combo = (combo ^ keys[i][b]) * 0x100000001b3ull;
         char hex[17]; for (int b = 0; b < 8; b++) snprintf(hex + 2 * b, 3, "%02x", keys[i][b]);
         if (mtl_shmap_has(hex) == 1) continue;   // in this build's shader tables (no map at all: every key is missing)
         if (!nmiss) memcpy(miss, hex, sizeof hex);
-        uint64_t k = 0; for (int b = 0; b < 8; b++) k = k << 8 | keys[i][b];
-        mk[nmiss++] = k;
+        nmiss++;
     }
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static unsigned seen, unread;   // the game may compile on several threads
     if (!nk) {   // the split would read no shader out of it either: saved, it would only stop the next build's split
@@ -138,9 +140,7 @@ static void capture(const void *obj) {
     }
     if (!nmiss) return;   // every stage in the tables: a shader the game files hold, or one an earlier play capture brought in
     pthread_mutex_lock(&mu);
-    int fresh = 0;
-    for (int i = 0; i < nmiss; i++) fresh |= run_add(mk[i]);
-    if (!fresh) { pthread_mutex_unlock(&mu); return; }   // its stages were saved and reported this run already
+    if (!run_add(combo)) { pthread_mutex_unlock(&mu); return; }   // these stages were saved and reported this run already
     const char *pd = play_dir(); int w = 0;
     if (pd) { mkdir(pd, 0755); w = save(pd, h, out, n, path, sizeof path); }
     unsigned k = ++seen;

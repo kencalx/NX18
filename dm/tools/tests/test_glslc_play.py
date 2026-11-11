@@ -317,6 +317,16 @@ class HostSavesPlay(unittest.TestCase):
             self.assertEqual(self.played(root), sorted([fnv_name(prog), fnv_name(glslc_output(4))]))
             self.assertEqual(log.count(RED_LINE), 1); self.assertEqual(log.count('is not in the shader map either'), 1)
 
+    def test_a_missing_stage_in_another_combination_is_saved(self):   # the split takes a program's variation pair only from a file it reads (var_pairs, vs_pad)
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t); x, y = glslc_program(1, 2), glslc_program(1, 3)
+            files = self.outputs(root, x, y, y)
+            (vs, ps2), (_, ps3) = split_keys(files[:1])['o0'], split_keys(files[1:2])['o1']
+            m = self.shader_map(root, [ps2, ps3])   # the vertex shader both share is missing
+            log = self.run_host(root, files, DM_NVN_SHMAP=str(m))
+            self.assertEqual(self.played(root), sorted([fnv_name(x), fnv_name(y)]))
+            self.assertEqual(log.count(RED_LINE), 1); self.assertEqual(log.count(f'shader {vs} is not in the shader map either'), 1)
+
     def test_a_build_with_the_saved_files_knows_them(self):   # (d) the split folds the saved files into the tables: the next run saves and reports nothing
         with tempfile.TemporaryDirectory() as t:
             root = game_root(t)

@@ -6051,11 +6051,12 @@ static NSString *shmap_path(void) {   // DM_NVN_SHMAP, by default the current ga
 }
 // Whether the shader map holds a key (16 lowercase hex digits, as nvn_shkey.h computes and column 4 lists): 1 yes, 0 no, -1 there is no map to read. hle_glslc.c asks it for the stages of an
 // output the game compiled with its own GLSLC (a game may do that before its first program, so the map is read here if need be; without a map the first program stops the run anyway)
-int mtl_shmap_has(const char *key) {
+// A pool of its own: the game's compile threads have none, so the strings made here, and the whole map's parse when this call reads it, would stay until the thread ends
+int mtl_shmap_has(const char *key) { @autoreleasepool {
     if (!g_shmap && access(shmap_path().fileSystemRepresentation, R_OK)) return -1;
     shmap_read_once();
     return g_shmap[@(key)] != nil;
-}
+} }
 static void shmap_read(void) {
     if (g_shmap) return;
     NSString *path = shmap_path();
