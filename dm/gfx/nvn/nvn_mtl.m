@@ -3242,7 +3242,10 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
         } else if (!named) tex_put(t->serial, upgraded);
         defer_obj_release(base);
     }
-    MLOG("texture upgraded to allow %s ser=%llu base format %lu → view format %lu (upgrades=%llu)", add & MTLTextureUsageShaderWrite ? "image writes" : add & MTLTextureUsageRenderTarget ? "render-target use" : "format views", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf, ++g_pfv_upgrades);
+    // The size, and whether the texture left a resolution family's shared heap: the copy is a standalone allocation, so each such upgrade adds the texture's size to what the family holds
+    MLOG("texture upgraded to allow %s ser=%llu %lux%lu base format %lu → view format %lu%s (upgrades=%llu)", add & MTLTextureUsageShaderWrite ? "image writes" : add & MTLTextureUsageRenderTarget ? "render-target use" : "format views",
+         t->serial, (unsigned long)base.width, (unsigned long)base.height, (unsigned long)base.pixelFormat, (unsigned long)view_pf,
+         objc_getAssociatedObject(base, &g_image_heap_owner_key) ? ", out of its resolution family's shared heap" : "", ++g_pfv_upgrades);
     return upgraded_view ? upgraded_view : upgraded;
 }
 static id<MTLTexture> tex_upgrade_pfv(const tex_t *t, id<MTLTexture> base, MTLPixelFormat view_pf) { return tex_upgrade(t, base, MTLTextureUsagePixelFormatView, view_pf); }
@@ -4703,6 +4706,19 @@ static void sparse_view(NvPkg *pk, const tex_t *t) {
     pk->vbase = (int)r;
 }
 static uint64_t g_texinfo_ser[8]; static int g_texinfo_n;
+// A 32-bit integer family member made with the format-view usage from the start (DM_NVN_FAMILY_PFV, on unless =0, and only while DM_NVN_FAMILY_NOCOMPRESS is in force). Luigi's
+// Mansion 3 samples its R32Uint (and two RG32Uint) dynamic-resolution images through float views (tex_float_fit), which Metal makes only of a texture with that usage. Made without it,
+// each size was upgraded the first time it was sampled through one (tex_upgrade): a copy of the whole texture into a new standalone allocation, outside the family's shared heap, 80 to 170 times a
+// run on the iPhone at about 8 MB each, up to about 0.66 GB that physical image sharing exists to avoid, and a full copy and table walk on the frame it happened. A texture gets the usage
+// only when needed because it costs lossless compression (tex_desc, tex_upgrade); family members are made uncompressed anyway (below), so here it costs nothing and that upgrade is never needed.
+// The formats are those tex_float_fit reads through a float view of the same size (tbuf_view_format: R32, RG32 and RGBA32 Uint / Sint), so the same rule covers an integer view of another
+// class (img_fit). The bytes and their layout are the same with the usage or without it. The usage may change what Metal asks of a heap, so image_texture sizes the heap with the
+// descriptors as they are made, the largest one included. =0 makes the family as before, and the upgrade moves each such size out of the heap again
+static MTLPixelFormat tbuf_view_format(MTLPixelFormat pf, int dpf);
+static void family_pfv(MTLTextureDescriptor *d) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_FAMILY_PFV"); on = !(e && !strcmp(e, "0")); }
+    if (on && tbuf_view_format(d.pixelFormat, NVN_DPF_FLOAT) != d.pixelFormat) d.usage |= MTLTextureUsagePixelFormatView;
+}
 // Distinct compressible image descriptions at one NVN address alias physical memory, even while all their descriptor objects are live (LM3's resolution families).
 // Single-description storage keeps the ordinary allocation. Families share an exact-sized placement heap, found through the existing alias table rather than a pool-lifetime owner.
 // Different formats, offsets, CPU-visible, sparse, linear, display, layered and multisample images keep their existing path. Inherited texels are not translated between incompatible
@@ -4713,7 +4729,7 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d0) {
     // decodes the other's compressed blocks as garbage: ASTRAL CHAIN's 1600x900 HDR targets (loaded, never cleared) came back from the 1440x810 pause menu with 1.1M non-finite
     // pixels, which bloom spread into a strobing pink / white glow. Uncompressed, the inherited bytes are only misplaced texels of the same format, as on the console
     static int nocomp = -1; if (nocomp < 0) { const char *e = getenv("DM_NVN_FAMILY_NOCOMPRESS"); nocomp = !(e && !strcmp(e, "0")); }
-    MTLTextureDescriptor *d = d0; if (nocomp) { d = [d0 copy]; d.allowGPUOptimizedContents = NO; }
+    MTLTextureDescriptor *d = d0; if (nocomp) { d = [d0 copy]; d.allowGPUOptimizedContents = NO; family_pfv(d); }
     MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
     if (!need.size) return nil;
     NvImageHeap *owner = nil; MTLTextureDescriptor *largest = d; NSUInteger capacity = need.size; int family = 0;
@@ -4732,7 +4748,7 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d0) {
         if (other->pool != t->pool || other->off != t->off || other->d.format != t->d.format) continue;
         family |= other->d.width != t->d.width || other->d.height != t->d.height;
         MTLTextureDescriptor *od = tex_desc(other, 0); if (!od) continue;
-        if (nocomp) od.allowGPUOptimizedContents = NO;
+        if (nocomp) { od.allowGPUOptimizedContents = NO; family_pfv(od); }   // sized as it will be made: the format-view usage may change what Metal asks of the heap
         MTLSizeAndAlign sz = [g_dev heapTextureSizeAndAlignWithDescriptor:od];
         if (sz.size > capacity) { capacity = sz.size; largest = od; }
     }
@@ -7265,13 +7281,19 @@ static int mtl_pf_dpf(MTLPixelFormat pf) {
 // The Ivalice Chronicles' UI composite blends into the RGBA8 window texture in software, loading it as r32ui and unpacking the four bytes (uirender.tec, fragment 4cf1975ed1e36590); bound as
 // it was, an RGBA8Unorm texture in a texture2d<uint> argument read undefined values and translucent UI came out yellow and white. The slot gets a view of the same texel size in the
 // shader's class; a texture made without the format-view usage is upgraded before the next draw pass (img_fit_upgrade), three textures in that game. Caller holds g_rmu
-static int g_imfit_pend[16];
+// g_imfit_pf: the view format the slot wanted (img_fit's class format, tex_float_fit's float one), which the upgrade's log line gives; the upgrade itself adds the format-view usage
+// whatever the format, so a texture two slots want in different formats is upgraded once
+static int g_imfit_pend[16]; static MTLPixelFormat g_imfit_pf[16];
+static void imfit_queue(int tid, MTLPixelFormat pf) {
+    int seen = 0; for (int i = 0; i < g_imfit_npend; i++) seen |= g_imfit_pend[i] == tid;
+    if (!seen && g_imfit_npend < 16) { g_imfit_pf[g_imfit_npend] = pf; g_imfit_pend[g_imfit_npend++] = tid; }
+}
 static void img_fit_upgrade(void) {
     os_unfair_lock_lock(&g_rmu);
     for (int i = 0; i < g_imfit_npend; i++) { int tid = g_imfit_pend[i];
         if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok || g_treg[tid].gone) continue;
         id<MTLTexture> b = tex_mtl(&g_treg[tid].t); if (b.parentTexture) b = b.parentTexture;
-        if (b && !(b.usage & MTLTextureUsagePixelFormatView)) tex_upgrade_pfv(&g_treg[tid].t, b, MTLPixelFormatR32Uint); }
+        if (b && !(b.usage & MTLTextureUsagePixelFormatView)) tex_upgrade_pfv(&g_treg[tid].t, b, g_imfit_pf[i]); }
     g_imfit_npend = 0;
     os_unfair_lock_unlock(&g_rmu);
 }
@@ -7298,8 +7320,7 @@ static id<MTLTexture> img_fit(int tid, id<MTLTexture> t, int dpf, MTLTextureType
         RED_ONCE(157, "image slot declared as Metal type %lu holds texture ID %d of type %lu (Metal format %lu, %lux%lu): no view bridges them, bound as is (its accesses are undefined, its stores lost)",
                  (unsigned long)want, tid, (unsigned long)t.textureType, (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height); return nil; }
     if (cls && !(base.usage & MTLTextureUsagePixelFormatView)) {   // made without the format-view usage (it costs lossless compression, so textures get it only when needed): upgraded before the next
-        int seen = 0; for (int i = 0; i < g_imfit_npend; i++) seen |= g_imfit_pend[i] == tid;   // draw pass opens, as an upgrade copies the texture and so cannot run inside this draw's pass;
-        if (!seen && g_imfit_npend < 16) g_imfit_pend[g_imfit_npend++] = tid;                  // until then the slot is bound as is
+        imfit_queue(tid, pf);                                       // draw pass opens, as an upgrade copies the texture and so cannot run inside this draw's pass; until then the slot is bound as is
         return nil; }
     treg_t *r = &g_treg[tid];
     if (r->im && r->im_of == (__bridge void *)t && ((__bridge id<MTLTexture>)r->im).pixelFormat == pf && ((__bridge id<MTLTexture>)r->im).textureType == want) { *rid = r->im_rid; return (__bridge id<MTLTexture>)r->im; }
@@ -7321,10 +7342,7 @@ static id<MTLTexture> tex_float_fit(int tid, id<MTLTexture> t, uint64_t *rid) {
     MTLPixelFormat pf = tbuf_view_format(t.pixelFormat, NVN_DPF_FLOAT);
     if (pf == t.pixelFormat || tid <= 0 || tid >= g_ntreg || t.textureType == MTLTextureTypeTextureBuffer) return nil;
     id<MTLTexture> base = t.parentTexture ? t.parentTexture : t;
-    if (!(base.usage & MTLTextureUsagePixelFormatView)) {
-        int seen = 0; for (int i = 0; i < g_imfit_npend; i++) seen |= g_imfit_pend[i] == tid;
-        if (!seen && g_imfit_npend < 16) g_imfit_pend[g_imfit_npend++] = tid;
-        return nil; }
+    if (!(base.usage & MTLTextureUsagePixelFormatView)) { imfit_queue(tid, pf); return nil; }   // a resolution family's 32-bit integer sizes have the usage from the start (family_pfv)
     treg_t *r = &g_treg[tid];
     if (r->im && r->im_of == (__bridge void *)t && ((__bridge id<MTLTexture>)r->im).pixelFormat == pf && ((__bridge id<MTLTexture>)r->im).textureType == t.textureType) { *rid = r->im_rid; return (__bridge id<MTLTexture>)r->im; }
     if (r->im) { defer_obj_unref((__bridge id)r->im); CFRelease(r->im); r->im = r->im_of = NULL; r->im_rid = 0; }

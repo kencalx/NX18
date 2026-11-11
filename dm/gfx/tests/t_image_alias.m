@@ -139,6 +139,80 @@ static void separate_storage(pool_t *pool, id<MTLHeap> original) {
     for (int i=0;i<8;i++) mtl_tex_release(&t[i]);
     mtl_alias_drop_pool(&other_pool); mtl_alias_drop_pool(&cpu_pool);
 }
+// A 32-bit integer resolution family sampled through a float view (tex_float_fit): Luigi's Mansion 3 does so with its R32Uint and RG32Uint dynamic-resolution images. Each size has the
+// format-view usage from the start (family_pfv), so its float view is made at once, nothing waits for an upgrade, and the size stays in the family's heap, which is sized with that usage.
+// With DM_NVN_FAMILY_PFV=0 (the Makefile's third run) the old path is checked instead: the view waits for img_fit_upgrade, which copies the size out of the heap into a standalone texture
+// and names the float format it was wanted for, and the copy keeps every texel. Either way the float view hands over the stored bits unchanged
+static id<MTLBuffer> read_bytes(id<MTLTexture> t, NSUInteger bpp) {
+    NSUInteger row=t.width*bpp, bytes=row*t.height;
+    id<MTLBuffer> b=[g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared]; res_add(b);
+    enc_b_copy_texture_buffer(blit(), t, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(t.width,t.height,1), b, 0, row, bytes);
+    mtl_sub_commit(); mtl_drain(); CHECK(!mtl_last_commit_error(), "integer image read completes without GPU error");
+    res_remove(b); mtl_sub_begin(); return b;
+}
+static int float_view_bits(id<MTLTexture> v, const uint32_t *want, NSUInteger comps) {
+    NSError *error=nil;
+    id<MTLLibrary> lib=t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void bits(texture2d<float,access::read> t [[texture(0)]], device uint *o [[buffer(0)]], constant uint &n [[buffer(1)]], uint2 p [[thread_position_in_grid]]) {\n"
+        "  if(p.x>=t.get_width()||p.y>=t.get_height())return; float4 c=t.read(p); uint i=(p.y*t.get_width()+p.x)*n; o[i]=as_type<uint>(c.x); if(n>1)o[i+1]=as_type<uint>(c.y); }\n", nil, &error);
+    id<MTLComputePipelineState> ps=lib?t4_cps(t4_fn(lib, @"bits"), &error):nil;
+    CHECK(ps!=nil,"float-view bit reader compiles"); if (!ps) return 0;
+    NSUInteger bytes=v.width*v.height*comps*4; uint32_t n=(uint32_t)comps;
+    id<MTLBuffer> out=[g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared], nb=[g_dev newBufferWithBytes:&n length:4 options:MTLResourceStorageModeShared];
+    res_add(out); res_add(nb);
+    MTL4ArgumentTableDescriptor *ad=[MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount=1; ad.maxBufferBindCount=2;
+    id<MTL4ArgumentTable> at=rec_table([g_dev newArgumentTableWithDescriptor:ad error:&error]);
+    [at setTexture:v.gpuResourceID atIndex:0]; [at setAddress:out.gpuAddress atIndex:0]; [at setAddress:nb.gpuAddress atIndex:1];
+    id<MTL4ComputeCommandEncoder> e=enc_c_begin(); [e setArgumentTable:at]; enc_c_pso(e,ps);
+    enc_c_dispatch(e,MTLSizeMake((v.width+7)/8,(v.height+7)/8,1),MTLSizeMake(8,8,1)); enc_c_end(e);
+    mtl_sub_commit(); mtl_drain(); CHECK(!mtl_last_commit_error(),"the float-view read completes without GPU error");
+    int same=!memcmp(out.contents,want,bytes);
+    res_remove(out); res_remove(nb); mtl_sub_begin(); return same;
+}
+static void int_float_family(pool_t *pool) {
+    const char *env=getenv("DM_NVN_FAMILY_PFV"); int on=!(env && !strcmp(env,"0"));
+    static const struct { uint32_t nvn; MTLPixelFormat pf, fv; NSUInteger comps; } fm[2]={
+        {NVN_FORMAT_R32UI, MTLPixelFormatR32Uint, MTLPixelFormatR32Float, 1}, {NVN_FORMAT_RG32UI, MTLPixelFormatRG32Uint, MTLPixelFormatRG32Float, 2}};
+    for (int f=0;f<2;f++) {
+        tex_t t[2]; int tid=401+f*2;   // t[1], the smaller size, is the one sampled; its ID is tid
+        for (int i=0;i<2;i++) { t[i]=image(pool,996000+f*2+i,96u-i*32,64); t[i].off=(4u+f)<<20; t[i].mem=pool->mem+t[i].off; t[i].d.format=fm[f].nvn;
+            nvn_tex_layout(&t[i].d,&t[i].L); mtl_tex_init(&t[i]); mtl_reg_tex(400+f*2+i,&t[i],NULL); }
+        id<MTLTexture> big=tex_mtl(&t[0]), small=tex_mtl(&t[1]);
+        CHECK(small.pixelFormat==fm[f].pf && big.heap && big.heap==small.heap,"a 32-bit integer resolution family shares one heap");
+        CHECK(!small.allowGPUOptimizedContents,"a 32-bit integer family member is uncompressed, so the format-view usage costs it no compression");
+        CHECK(!!(small.usage&MTLTextureUsagePixelFormatView)==on && !!(big.usage&MTLTextureUsagePixelFormatView)==on,
+              on?"a 32-bit integer family member has the format-view usage from the start":"DM_NVN_FAMILY_PFV=0: a 32-bit integer family member is made without the format-view usage, as before");
+        MTLTextureDescriptor *ld=tex_desc(&t[0],0); ld.allowGPUOptimizedContents=NO; if (on) ld.usage|=MTLTextureUsagePixelFormatView;
+        CHECK(big.heap.size==[g_dev heapTextureSizeAndAlignWithDescriptor:ld].size,"the integer family's heap is sized with the descriptor its members are made with");
+        NSUInteger bpp=fm[f].comps*4, bytes=small.width*small.height*bpp;
+        id<MTLBuffer> src=[g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared]; uint32_t *w=src.contents;
+        static const uint32_t odd[]={0u,1u,0x7fffffu,0x80000000u,0x7f800001u,0x7fc00123u,0xffffffffu};   // denormals, NaN patterns and negatives, as a light grid holds
+        for (NSUInteger i=0;i<bytes/4;i++) w[i]=i<7?odd[i]:0x9e3779b9u*(uint32_t)i;
+        res_add(src); enc_b_copy_buffer_texture(blit(), src, 0, small.width*bpp, bytes, MTLSizeMake(small.width,small.height,1), small, 0, 0, MTLOriginMake(0,0,0));
+        mtl_sub_commit(); mtl_drain(); mtl_sub_begin();   // the texels are in before an upgrade's copy reads them
+        uint64_t ups=g_pfv_upgrades, rid=0;
+        os_unfair_lock_lock(&g_rmu); id<MTLTexture> v=tex_float_fit(tid, small, &rid); os_unfair_lock_unlock(&g_rmu);
+        if (on) {
+            CHECK(v && v.pixelFormat==fm[f].fv && v.parentTexture==small && rid,"a 32-bit integer family member gets its float view at once");
+            CHECK(!g_imfit_npend,"no upgrade is queued for it");
+        } else {
+            CHECK(!v && g_imfit_npend==1 && g_imfit_pend[0]==tid && g_imfit_pf[0]==fm[f].fv,"DM_NVN_FAMILY_PFV=0: the float view waits for an upgrade, queued with the float format it is wanted in");
+            img_fit_upgrade();
+            CHECK(g_pfv_upgrades==ups+1 && !g_imfit_npend,"DM_NVN_FAMILY_PFV=0: the queued upgrade runs once");
+            id<MTLTexture> up=tex_mtl(&t[1]); if (up.parentTexture) up=up.parentTexture;
+            os_unfair_lock_lock(&g_rmu); v=tex_float_fit(tid, up, &rid); os_unfair_lock_unlock(&g_rmu);
+            CHECK(v && v.pixelFormat==fm[f].fv,"DM_NVN_FAMILY_PFV=0: the upgraded texture gets its float view");
+        }
+        id<MTLTexture> now=tex_mtl(&t[1]); if (now.parentTexture) now=now.parentTexture;
+        if (on) CHECK(now==small && now.heap==big.heap && g_pfv_upgrades==ups,"sampled through a float view, the member is not upgraded and stays in the family's heap");
+        else CHECK(now!=small && !now.heap && (now.usage&MTLTextureUsagePixelFormatView),"DM_NVN_FAMILY_PFV=0: the upgrade moves the member out of the heap into a standalone texture, as before");
+        id<MTLBuffer> back=read_bytes(now,bpp);
+        CHECK(!memcmp(back.contents,src.contents,bytes),"every texel of the sampled member is kept");
+        CHECK(float_view_bits(v,src.contents,fm[f].comps),"the float view hands over the stored bits unchanged");
+        res_remove(src);
+        for (int i=0;i<2;i++) { mtl_reg_tex(400+f*2+i,NULL,NULL); mtl_tex_release(&t[i]); }
+    }
+}
 // A resolution family member read after another size wrote the shared storage sees that size's texels, misplaced but of the same format, as on the console (ASTRAL CHAIN, issue #1935)
 static void cross_size_read(void) {
     void *mem=NULL; posix_memalign(&mem,16384,16<<20); memset(mem,0,16<<20);
@@ -175,7 +249,7 @@ int main(void) { @autoreleasepool {
     id<MTLTexture> small=tex_mtl(&a[0]);
     CHECK(small.width==512 && small.height==512,"the first descriptor retains its NVN dimensions");
     CHECK(small.heap!=nil,"live resolution family has physical backing");
-    CHECK(!(small.usage&MTLTextureUsagePixelFormatView),"a family texture gets no forced format-view usage");
+    CHECK(!(small.usage&MTLTextureUsagePixelFormatView),"an RGBA8 family texture gets no forced format-view usage (only 32-bit integer formats do, family_pfv)");
     CHECK(!small.allowGPUOptimizedContents,"family textures are uncompressed: a size reading another's compressed blocks decodes garbage");
     MTLTextureDescriptor *largest=tex_desc(&a[N-1],0); largest.allowGPUOptimizedContents=NO;   // family members are sized uncompressed, as they are made (image_texture)
     MTLSizeAndAlign max_size=[g_dev heapTextureSizeAndAlignWithDescriptor:largest];
@@ -199,6 +273,7 @@ int main(void) { @autoreleasepool {
     separate_storage(&pool,small.heap);
     indirect_pixels(small,0x76543210);   // writes to other pools, offsets and formats left it intact
     atomic_colour(&pool);
+    int_float_family(&pool);
     depth_planes(&pool);
     cross_size_read();
     CHECK([g_res_objects containsObject:small.heap],"the parent heap is resident for indirect access");
