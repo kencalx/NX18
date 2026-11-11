@@ -4,6 +4,7 @@
 
 void *objc_autoreleasePoolPush(void);
 void objc_autoreleasePoolPop(void *);
+void dm_vi_frame_ticket(uint64_t frame, uint64_t ticket);   // hle_vi.c: a frame's present is in the present queue with this ticket (the layer's frame history)
 
 // Ready continuations of NVN queues share the renderer's one ordered Metal queue.
 // An unresolved wait parks its queue, never the submitting CPU or another queue.
@@ -307,6 +308,11 @@ static void *nq_worker(void *unused) {
             } else {
                 nvn_cap_present(&n->texture,n->crop);
                 present=mtl_present(&n->texture,n->period,n->crop,&copy); mtl_tex_unpin(n->texture.serial);
+                // The layer's frame history (hle_vi.c) learns this frame's ticket in the present queue only now: until here vi::ListFrameHistory reports the frame queued. j->frame is
+                // dm_nvn_frame_count() before the present's dump_frame counted it (hle_nvn.c), and the history numbers it after: +1. The ticket is the queue's own count, not
+                // mtl_present's answer: in the background (mtl_present_discard) that is 0 and the count stays where it was, so the frame reads as the one before it, as it did when the
+                // ticket was read at the game's call. One worker presents, under g_sub_mu, so the count is this present's
+                { uint64_t pq,pd; mtl_present_progress(&pq,&pd); dm_vi_frame_ticket(j->frame+1,pq); }
             }
             nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); if(n->kind==NQ_COMMANDS) nq_spare_give(n); pthread_mutex_unlock(&g_sub_mu);
         }

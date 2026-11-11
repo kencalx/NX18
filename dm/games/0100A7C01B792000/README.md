@@ -35,6 +35,7 @@ No host or rewriter rule is specific to this game.
 
 - [Unreal's frame limit and present interval, found by name](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name): 60 and 120 by `rhi.SyncInterval` alone
 - [Layer frame history](../../../docs/reference/services.md#layer-frame-history)
+- [A frame read as shown before its own present was handed on](../../../docs/reference/services.md#a-frame-read-as-shown-before-its-own-present-was-handed-on): not yet checked on a device that the game still passes the logo movie (A/B against `DM_VI_FRAME_TICKET=0`)
 - [The offline pages of a sparse base game stop the build as a damaged NSP](../../../docs/reference/packing.md#the-offline-pages-of-a-sparse-base-game-stop-the-build-as-a-damaged-nsp)
 - [The survey's build ID lookup stops on the base game alone with a hash error](../../../docs/reference/packing.md#the-surveys-build-id-lookup-stops-on-the-base-game-alone-with-a-hash-error)
 - [A shader build leaves a file per shader output while it runs or after a stop](../../../docs/reference/packing.md#a-shader-build-leaves-a-file-per-shader-output-while-it-runs-or-after-a-stop): measured here, its 61,655 library files the same under the new chain

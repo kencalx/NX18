@@ -65,15 +65,47 @@ HLE_FORCE("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE", "the layer's latest
 // was presented again. FrameInfo is 40 bytes, as the SDK's ListFrameHistory (sdk 20.5.15, sdk+0x4510a0) fills it from the compositor's records: status (2 shown with a present
 // time, 1 queued and not shown yet), frame number (the numbering of GetLatestFrameNumber), the queue tick and the present tick twice; sorted by frame number, newest first.
 // A frame is shown once the present queue has handed it on (nvn_mtl.m g_pq_done) and the system did not drop it; its present time is the drawable's presented time when Metal
-// reports one, else (headless, or before the handler runs) the time it was first seen handed on
+// reports one, else (headless, or before the handler runs) the time it was first seen handed on.
+// A frame's ticket in that queue is known only once the NVN queue worker has put its present there (nvn_queue.inc, NQ_PRESENT: dm_vi_frame_ticket), after the commands the game
+// submitted before it; until then the entry is queued, status 1. Since NXNative's queue worker (ea0c98df) the game's present call only queues a job for the worker, so the queue
+// count read at the call (as the history did when it was written, before the worker) was the previous frame's ticket, or an older one when the worker lagged: a frame was
+// reported shown, with the previous frame's present time, about a frame before its own present was even handed on, and the very first frame before anything was presented
+// (ticket 0). Unreal Engine 5 completes its frame-end fences from the first shown entry (Minecraft Dungeons II, both Octopath Travelers) and Luigi's Mansion 3 paces its render
+// thread by the newest one, so they were told of flips that had not happened yet. The worker and the game's call may come in either order: whichever is first makes the entry.
+// A present the call did not queue (an invalid window texture index) gets no ticket and stays queued until the ring reuses its slot; a newer frame shown is listed before it.
+// DM_VI_FRAME_TICKET=0 takes the ticket at the game's call again, the history as before this fix, for an A/B of the games above on a device (logged once at the first present)
 #define VFH 8
 typedef struct { uint64_t frame, ticket, queued_ns, seen_ns; } vfh_ent;
 static vfh_ent g_vfh[VFH]; static pthread_mutex_t g_vfh_mu = PTHREAD_MUTEX_INITIALIZER;
 void mtl_present_progress(uint64_t *queued, uint64_t *done);   // nvn_mtl.m
 double mtl_presented_time(uint64_t n);                         // nvn_mtl.m: CACurrentMediaTime seconds (the now_ns clock), 0 not yet, -1 dropped by the system
+#define VFH_UNSENT UINT64_MAX   // an entry's ticket until its present is in the present queue: above every handed-on count, so it reads as queued
+static _Atomic int g_vfh_worker = -1;   // 1: the queue worker gives each frame its ticket (the default); 0: DM_VI_FRAME_TICKET=0, the ticket is read at the game's call; -1 not read yet
+static int vfh_worker_ticket(void) {
+    int v = atomic_load(&g_vfh_worker);
+    if (v < 0) {
+        const char *e = getenv("DM_VI_FRAME_TICKET"); v = !(e && !strcmp(e, "0"));
+        if (atomic_exchange(&g_vfh_worker, v) < 0 && !v) LOG("vi::ListFrameHistory: DM_VI_FRAME_TICKET=0: a frame takes the present queue's count at the game's present call, as before the fix (shown about a frame early)");
+    }
+    return v;
+}
 void dm_vi_frame_queued(uint64_t frame) {   // hle_nvn.c, at each present the game queues: frame = GetLatestFrameNumber's count with it
-    uint64_t q, d; mtl_present_progress(&q, &d);
-    pthread_mutex_lock(&g_vfh_mu); g_vfh[frame % VFH] = (vfh_ent){frame, q, guest_ns(), 0}; pthread_mutex_unlock(&g_vfh_mu);
+    uint64_t tk = VFH_UNSENT;
+    if (!vfh_worker_ticket()) { uint64_t q, d; mtl_present_progress(&q, &d); tk = q; }   // DM_VI_FRAME_TICKET=0: the count at the call
+    pthread_mutex_lock(&g_vfh_mu);
+    vfh_ent *e = &g_vfh[frame % VFH];
+    if (tk == VFH_UNSENT && e->frame == frame) tk = e->ticket;   // the worker has put this frame's present in the queue already: keep its ticket
+    *e = (vfh_ent){frame, tk, guest_ns(), 0};
+    pthread_mutex_unlock(&g_vfh_mu);
+}
+void dm_vi_frame_ticket(uint64_t frame, uint64_t ticket) {   // nvn_queue.inc, once the worker has put that frame's present in the present queue: its ticket there (g_pq_in)
+    if (!vfh_worker_ticket()) return;
+    pthread_mutex_lock(&g_vfh_mu);
+    vfh_ent *e = &g_vfh[frame % VFH];
+    // Before the game's call recorded the frame (the worker can be that quick): the entry is made here, with a queue time of now so that it never reads as 0; the call keeps the
+    // ticket and sets its own queue time
+    if (e->frame != frame) *e = (vfh_ent){frame, ticket, guest_ns(), 0}; else e->ticket = ticket;
+    pthread_mutex_unlock(&g_vfh_mu);
 }
 static uint64_t vfh_ticks(uint64_t ns) { return dm_sdk_ounce() ? ns / 32 : ns * 12 / 625; }   // as guest_ticks (hle_os.c)
 HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the layer's frame history: the last 8 presents, newest first, shown once the present queue handed them on", int, h_vi_FrameHist, void *out, int n, const void *layer) {

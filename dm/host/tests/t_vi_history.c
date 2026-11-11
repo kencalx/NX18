@@ -15,11 +15,21 @@ uint64_t now_ns(void) { return g_hns; }
 int dm_sdk_ounce(void) { return 0; }
 int dm_opmode(void) { return 0; }
 
-static void present(void) { g_in++; g_count++; dm_vi_frame_queued(g_count); }
+// A present, as the host makes it since NXNative's queue worker (ea0c98df): the game's call records the frame (hle_nvn.c), then the worker puts its present in the present queue
+// and tells the history its ticket (nvn_queue.inc); present_call and present_worker are the two halves, present both at once
+static void present_call(void) { g_count++; dm_vi_frame_queued(g_count); }
+static void present_worker(uint64_t frame) { g_in++; dm_vi_frame_ticket(frame, g_in); }
+static void present(void) { present_call(); present_worker(g_count); }
+static void restart(const char *ticket_env) {   // a new start: an empty history and present queue, and DM_VI_FRAME_TICKET read again
+    memset(g_vfh, 0, sizeof g_vfh); g_count = g_in = g_done = 0; memset(g_pt, 0, sizeof g_pt);
+    if (ticket_env) setenv("DM_VI_FRAME_TICKET", ticket_env, 1); else unsetenv("DM_VI_FRAME_TICKET");
+    atomic_store(&g_vfh_worker, -1);
+}
 static uint64_t ticks(uint64_t ns) { return ns * 12 / 625; }
 
 int main(void) {
     uint64_t fi[10][5];
+    unsetenv("DM_VI_FRAME_TICKET");
     assert(h_vi_FrameHist(NULL, 0, NULL) == 8 && h_vi_FrameHist(fi, 0, NULL) == 8);   // the SDK's count query
     assert(h_vi_FrameHist(fi, 10, NULL) == 0);                                        // nothing presented yet
     for (int i = 0; i < 10; i++) { present(); g_gns += 16666667; g_hns += 16666667; }  // frames 1-10, tickets 1-10
@@ -40,6 +50,60 @@ int main(void) {
     n = h_vi_FrameHist(fi, 10, NULL);
     assert(fi[5][3] == ticks(g_gns - 1000000000ull));   // the first-seen time stays
     assert(h_vi_FrameHist(fi, 2, NULL) == 2 && fi[0][1] == 10 && fi[1][1] == 9);   // a smaller buffer gets the newest
-    puts("vi frame history: count query 8, newest first, shown once handed on, presented or first-seen tick, dropped and queued frames not shown");
+    // The present's ticket comes from the queue worker: until it has put the present in the present queue the entry is queued (status 1), even when every earlier present has
+    // been handed on, and it is shown only once its own present has. Read at the game's call (as before this fix, since the queue worker) the ticket was the previous frame's,
+    // so the newest frame was reported shown with the previous one's present time, and the very first one before anything was presented
+    {
+        restart(NULL);
+        present_call();
+        assert(h_vi_FrameHist(fi, 8, NULL) == 1 && fi[0][1] == 1 && fi[0][0] == 1 && fi[0][3] == 0);   // the first frame: queued, nothing presented yet
+        present_worker(1); assert(h_vi_FrameHist(fi, 1, NULL) == 1 && fi[0][0] == 1);                    // in the present queue, not handed on
+        g_done = 1; g_pt[1] = (g_hns - 5000000ull) / 1e9;
+        assert(h_vi_FrameHist(fi, 1, NULL) == 1 && fi[0][0] == 2 && fi[0][3] == ticks(g_gns - 5000000ull));   // handed on: shown at its presented time
+        g_gns += 16666667; g_hns += 16666667; present_call();                                            // frame 2: the game's call; every earlier present handed on
+        assert(h_vi_FrameHist(fi, 2, NULL) == 2 && fi[0][1] == 2 && fi[0][0] == 1 && fi[1][0] == 2);     // 2 queued, 1 shown
+        present_worker(2); assert(h_vi_FrameHist(fi, 1, NULL) == 1 && fi[0][0] == 1);
+        g_done = 2; g_pt[2] = (g_hns - 1000000ull) / 1e9;
+        assert(h_vi_FrameHist(fi, 1, NULL) == 1 && fi[0][0] == 2 && fi[0][3] == ticks(g_gns - 1000000ull));   // its own present time, not frame 1's
+        // the worker first (it may put the present in the queue before the game's call records the frame): the entry it makes has a queue time, the call keeps the ticket and sets its own
+        g_gns += 16666667; g_hns += 16666667; uint64_t worker_at = g_gns; present_worker(3);
+        assert(g_vfh[3].frame == 3 && g_vfh[3].ticket == 3 && g_vfh[3].queued_ns == worker_at);
+        g_gns += 1000000; present_call();
+        assert(g_vfh[3].ticket == 3 && g_vfh[3].queued_ns == g_gns && h_vi_FrameHist(fi, 1, NULL) == 1 && fi[0][1] == 3 && fi[0][0] == 1 && fi[0][2] == ticks(g_gns));
+        g_done = 3; assert(h_vi_FrameHist(fi, 1, NULL) == 1 && fi[0][0] == 2);
+        // a ticket left in the ring by the frame 8 earlier is not this frame's
+        for (int i = 0; i < 4; i++) present();                                                        // frames 4-7, tickets 4-7
+        g_done = g_in; present_call();                                                                // frame 8: queued, though every present so far is handed on
+        assert(h_vi_FrameHist(fi, 1, NULL) == 1 && fi[0][1] == 8 && fi[0][0] == 1);
+        present_worker(8); for (int i = 0; i < 8; i++) present();                                      // frames 9-16 reuse every slot
+        g_done = g_in - 1; present_call();                                                            // frame 17 in frame 9's slot: queued, though ticket 9 is long handed on
+        assert(h_vi_FrameHist(fi, 1, NULL) == 1 && fi[0][1] == 17 && fi[0][0] == 1);
+        // the game two frames ahead of a worker that lags: each frame queued until its own present is handed on, never shown with an earlier frame's time
+        restart(NULL);
+        int early = 0;
+        for (int k = 1; k <= 30; k++) {
+            present_call(); if (k > 2) present_worker((uint64_t)k - 2);                                    // the worker puts frame k - 2's present in the queue
+            g_done = g_in; if (g_in < 64) g_pt[g_in] = (g_hns - 1000ull) / 1e9;                         // and it is handed on and presented at once
+            int n2 = h_vi_FrameHist(fi, 8, NULL);
+            for (int i = 0; i < n2; i++) early += fi[i][0] == 2 && fi[i][1] + 2 > (uint64_t)k;           // frames k and k - 1 have no present yet
+            assert(n2 > 0 && fi[0][1] == (uint64_t)k && fi[0][0] == 1);
+            g_gns += 16666667; g_hns += 16666667;
+        }
+        assert(early == 0);
+    }
+    // DM_VI_FRAME_TICKET=0: the ticket is read at the game's call, as before the fix (the device A/B's other leg): the worker's ticket is ignored, and with the present of the frame
+    // before handed on the newest frame reads as shown already, the first frame too
+    {
+        restart("0");
+        present_call();
+        assert(g_vfh[1].ticket == 0 && h_vi_FrameHist(fi, 1, NULL) == 1 && fi[0][1] == 1 && fi[0][0] == 2);   // shown before anything was presented, as before
+        present_worker(1); assert(g_vfh[1].ticket == 0);                                                       // the worker's ticket is not taken
+        g_done = 1; present_call();
+        assert(g_vfh[2].ticket == 1 && h_vi_FrameHist(fi, 1, NULL) == 1 && fi[0][1] == 2 && fi[0][0] == 2);   // frame 2 shown on frame 1's present
+        restart("1"); present_call(); assert(g_vfh[1].ticket == VFH_UNSENT);                                   // any other value: the worker's ticket
+        restart(NULL);
+    }
+    puts("vi frame history: count query 8, newest first, shown once handed on, presented or first-seen tick, dropped and queued frames not shown; a frame is queued until the "
+         "queue worker gives it its own ticket, in either order, with a worker that lags, slot reuse; DM_VI_FRAME_TICKET=0 takes the ticket at the game's call as before");
     return 0;
 }
