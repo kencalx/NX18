@@ -65,6 +65,7 @@ static const char new_hash[] = "123456789abcdef0123456789abcdef0";
 static const char cloud[] = "/Users/p/Library/Mobile Documents/com~apple~CloudDocs/nxnative Saves/0100ABC/save.dmsync";
 
 // The reader of the build before the cloud line (fa92bb0e save_sync.c), as it is: an older build on another device, or this one's app before an update
+// (NX 18's main before the port of the cloud line, a1057c2d's save_sync.c, has this very reader too)
 static void older_build_read_base(const char *save, char *out) {   // <save>.sync: the hash of the save last known to be the same here and in the cloud ("" for none)
     char p[PATH_MAX], ln[128]; out[0] = 0;
     snprintf(p, sizeof p, "%s.sync", save);
