@@ -212,7 +212,7 @@ struct LauncherView: View {
     var body: some View {
         VStack(spacing: 0) {
             banner
-            NX18Rails(axis: .horizontal)
+            NX18Rails(axis: .horizontal, flowing: true)   // the colours drift slowly along it (still under Reduce Motion; LauncherRow.swift)
             Form {
                 if m.hasPresets {
                     Section {

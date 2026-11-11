@@ -261,7 +261,7 @@ struct LauncherView: View {
                 if wide {
                     HStack(spacing: 0) {
                         hero(wide: true, width: (g.size.width * 0.55).rounded(), height: g.size.height).frame(width: (g.size.width * 0.55).rounded())
-                        NX18Rails().ignoresSafeArea(edges: .vertical)
+                        NX18Rails(flowing: true).ignoresSafeArea(edges: .vertical)
                         settings
                     }
                 } else {
@@ -269,7 +269,7 @@ struct LauncherView: View {
                         // at least tall, and as tall as its text and buttons need (a large text size, a short window) up to 70 % of the window: they never slide under the settings
                         HeroHeight(least: tall, most: Swift.max(tall, g.size.height * 0.7)) { hero(wide: false, width: g.size.width, height: tall) }
                             .clipped()
-                        NX18Rails(axis: .horizontal).ignoresSafeArea(edges: .horizontal)
+                        NX18Rails(axis: .horizontal, flowing: true).ignoresSafeArea(edges: .horizontal)
                         settings
                     }
                 }
@@ -283,10 +283,11 @@ struct LauncherView: View {
         .tint(NX18Palette.cyan)
         .toggleStyle(NX18SwitchStyle())
         .fullScreenCover(isPresented: shown(.guide)) {
-            LauncherGuideSheet(content: content, scroller: scroller) { sheet = nil }
+            LauncherGuideSheet(content: content, scroller: scroller, closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil) { sheet = nil }
         }
         .sheet(isPresented: shown(.about), onDismiss: guideAfterClosing) {
-            LauncherAboutSheet(about: content.about ?? LauncherAbout(), artwork: artwork, name: name, version: version, scroller: scroller) { sheet = nil }
+            LauncherAboutSheet(about: content.about ?? LauncherAbout(), artwork: artwork, name: name, version: version, scroller: scroller,
+                               closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil) { sheet = nil }
                 .presentationBackground(background)
         }
         .task { await pad.run { handle($0) } }
@@ -385,6 +386,7 @@ struct LauncherView: View {
             if wide {
                 LinearGradient(stops: [.init(color: background.opacity(0), location: 0.55), .init(color: background, location: 1)], startPoint: .leading, endPoint: .trailing)
             }
+            topShade
             LinearGradient(stops: [.init(color: background.opacity(0), location: wide ? 0.45 : 0.35), .init(color: background.opacity(wide ? 0.92 : 1), location: 1)],
                            startPoint: .top, endPoint: .bottom)
             // a scrim under the name, status line and buttons, whatever the art (a bright sky or a white logo field): from clear 48 pt above the name to most of the background
@@ -397,6 +399,20 @@ struct LauncherView: View {
             }
         }
         .accessibilityHidden(true)   // decorative
+    }
+
+    // A soft shade down from the top edge, behind the small NX 18 mark, so it reads over bright art (a sky, a white field): black at a third at the very top (a little more
+    // under Reduce Transparency), fading out over about 120 pt on an eased curve, so it shows no edge or band. Across the whole art side, from the top of the screen (it runs
+    // into the safe area with the art)
+    private var topShade: some View {
+        let top = reduceTransparency ? 0.45 : 0.34
+        return VStack(spacing: 0) {
+            LinearGradient(stops: [.init(color: .black.opacity(top), location: 0), .init(color: .black.opacity(top * 0.72), location: 0.25),
+                                   .init(color: .black.opacity(top * 0.38), location: 0.5), .init(color: .black.opacity(top * 0.12), location: 0.75),
+                                   .init(color: .black.opacity(0), location: 1)], startPoint: .top, endPoint: .bottom)
+                .frame(height: 120)
+            Spacer(minLength: 0)
+        }
     }
 
     // Play, then the guide and About when the app has them, and "Press A to play" (+ while the outline is elsewhere) while a controller is connected: in one line, with the buttons' full names when they fit, else
@@ -437,19 +453,26 @@ struct LauncherView: View {
     @ViewBuilder private func guideButton(_ l: ButtonLabel) -> some View {
         if content.hasGuide {
             let title = content.guide != nil ? "Game guide" : "Manual"
-            smallButton(title, short: content.guide != nil ? "Guide" : "Manual", icon: "book.closed", label: l, focus: .guide) { openGuide() }
+            smallButton(title, short: content.guide != nil ? "Guide" : "Manual", icon: "book.closed", label: l, focus: .guide, pad: .y) { openGuide() }
         }
     }
     @ViewBuilder private func aboutButton(_ l: ButtonLabel) -> some View {
         if content.hasAbout { smallButton("About this game", short: "About", icon: "info.circle", label: l, focus: .about) { sheet = .about } }
     }
-    private func smallButton(_ title: String, short: String, icon: String, label: ButtonLabel, focus f: LauncherFocus, action: @escaping () -> Void) -> some View {
+    // pad: the controller button that presses it from anywhere on the screen (Y: the guide), its glyph at the end of a named button while a controller is connected
+    private func smallButton(_ title: String, short: String, icon: String, label: ButtonLabel, focus f: LauncherFocus, pad button: NXButton? = nil,
+                             action: @escaping () -> Void) -> some View {
         let fill = NX18Palette.row.opacity(reduceTransparency || artwork.art == nil ? 1 : 0.82)
+        let glyph = pad.connected ? button.map { pad.glyphs.glyph($0) } : nil
         return Button(action: action) {
             Group {
                 switch label {
-                case .full: Label(title, systemImage: icon).labelStyle(.titleAndIcon).padding(.horizontal, 14)
-                case .short: Label(short, systemImage: icon).labelStyle(.titleAndIcon).padding(.horizontal, 14)
+                case .full, .short:
+                    HStack(spacing: 7) {
+                        Label(label == .full ? title : short, systemImage: icon).labelStyle(.titleAndIcon)
+                        if let glyph { NXPadGlyphView(glyph, size: 17, relativeTo: .subheadline).foregroundStyle(NX18Palette.cyan) }
+                    }
+                    .padding(.leading, 14).padding(.trailing, glyph != nil ? 10 : 14)
                 case .icon: Image(systemName: icon).frame(width: 40)
                 }
             }
@@ -462,20 +485,22 @@ struct LauncherView: View {
         .buttonStyle(NX18PressStyle())
         .nx18Focus(ring(f), cornerRadius: 100)
         .accessibilityLabel(title)
+        .accessibilityHint(glyph != nil && button != nil ? "Or press \(pad.glyphs.name(button ?? .y))" : "")
     }
 
     @ViewBuilder private var padHint: some View {
         if pad.connected {
             // A presses what the outline is on, so it plays only while the outline is on Play; + plays from anywhere
             let onPlay = focus == .play
+            let button: NXButton = onPlay ? .a : .plus
             HStack(spacing: 4) {
                 Text("Press")
-                if !onPlay { Image(systemName: "plus.circle") } else if let g = pad.glyphA { Image(systemName: g) } else { Text(verbatim: "A") }
+                NXPadGlyphView(pad.glyphs.glyph(button), size: 17, relativeTo: .footnote).foregroundStyle(NX18Palette.coral)   // Play's coral
                 Text("to play")
             }
             .nxFont(.footnote).foregroundStyle(NX18Palette.onArt).fixedSize()
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(onPlay ? "Press \(pad.nameA ?? "A") to play" : "Press plus to play")   // the button the glyph shows: the right one, B on an Xbox pad
+            .accessibilityLabel("Press \(pad.glyphs.name(button)) to play")   // the button the glyph shows: the right one, B on an Xbox pad
         }
     }
 
@@ -542,7 +567,11 @@ struct LauncherView: View {
                     .listRowBackground(rowBackground(ring(.skip)))
                     .id(LauncherFocus.skip)
                 } footer: {
-                    if let v = version { Text("Version \(v)").nxFontIfCustom(.footnote).foregroundStyle(NX18Palette.muted) }
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let v = version { Text("Version \(v)") }
+                        Text(NX18Credits.buttonIcons)
+                    }
+                    .nxFontIfCustom(.footnote).foregroundStyle(NX18Palette.muted)
                 }
             }
             .listStyle(.insetGrouped)

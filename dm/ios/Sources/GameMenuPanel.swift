@@ -157,18 +157,6 @@ enum GameMenuLayout {
     }
 }
 
-// The glyphs of the controller hints: the first controller's A and B (a Nintendo pad by its labels, any other by position, as the game maps them: pad_apple.h) and Home
-@MainActor private struct GameMenuPadGlyphs {
-    var a = "a.circle", b = "b.circle", home: String?
-    init() {
-        guard let c = GCController.controllers().first(where: { $0.extendedGamepad != nil }), let g = c.extendedGamepad else { return }
-        let byLabel = LauncherGamepad.labelled(c)
-        a = (byLabel ? g.buttonA : g.buttonB).sfSymbolsName ?? a
-        b = (byLabel ? g.buttonB : g.buttonA).sfSymbolsName ?? b
-        home = g.buttonHome?.sfSymbolsName
-    }
-}
-
 struct GameMenuPanelView: View {
     @ObservedObject var model: GameMenuPanelModel
     let anchorBottom: CGFloat   // the menu button's lower edge in this view: the landscape panel starts below it
@@ -270,17 +258,19 @@ struct GameMenuPanelView: View {
         .padding(.vertical, 2)
     }
 
+    // The controller's A and B as the pack's glyphs (NXButtonGlyph.swift: the first pad's buttons, a Nintendo pad by its labels, any other by position as the game maps them),
+    // each in the colour of what it does: A selects (cyan), B closes (Close's coral) or goes back a page (cyan)
     private func hints(_ page: GameMenuPanelModel.Page) -> some View {
-        let g = GameMenuPadGlyphs()
+        let g = pad.glyphs
         return HStack(spacing: 10) {
-            hint(g.a, "Select")
-            hint(g.b, page.id != nil ? "Back" : "Close")
+            hint(g.glyph(.a), "Select", NX18Palette.cyan)
+            hint(g.glyph(.b), page.id != nil ? "Back" : "Close", page.id != nil ? NX18Palette.cyan : NX18Palette.coral)
         }
         .nxFont(.caption2).foregroundStyle(NX18Palette.muted)
         .accessibilityHidden(true)   // VoiceOver has its own gestures; the controller's are said by the buttons themselves
     }
-    private func hint(_ symbol: String, _ text: String) -> some View {
-        HStack(spacing: 3) { Image(systemName: symbol).foregroundStyle(NX18Palette.text); Text(text) }.fixedSize()
+    private func hint(_ glyph: NXPadGlyph, _ text: String, _ tint: Color) -> some View {
+        HStack(spacing: 4) { NXPadGlyphView(glyph, size: 15, relativeTo: .caption2).foregroundStyle(tint); Text(text) }.fixedSize()
     }
 
     private func grid(_ columns: [GameMenuColumn], page: GameMenuPanelModel.Page, colWidth: CGFloat) -> some View {

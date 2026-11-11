@@ -45,8 +45,7 @@ enum LauncherPadEvent: Equatable, Sendable { case up, down, left, right, a, b, y
 
 @MainActor final class LauncherGamepad: ObservableObject {
     @Published private(set) var connected = false   // a controller with an extended gamepad profile is connected: the focus ring shows
-    @Published private(set) var glyphA: String?      // the SF Symbol of the pad's A button (for "or press A")
-    @Published private(set) var nameA: String?       // that button's name as the pad labels it (VoiceOver's "or press B to play" on an Xbox pad, whose right button plays)
+    @Published private(set) var glyphs = NXPadGlyphs()   // the hints' glyphs and VoiceOver names of the first pad's A, B, X, Y and + (NXButtonGlyph.swift: "Press B to play" on an Xbox pad, whose right button plays)
 
     private enum Key: CaseIterable { case up, down, left, right, a, b, y, plus, l, r }
     private var held: Set<Key> = []
@@ -112,12 +111,8 @@ enum LauncherPadEvent: Equatable, Sendable { case up, down, left, right, a, b, y
     private func poll(_ handle: @MainActor (LauncherPadEvent) -> Void) {
         let pads = GCController.controllers().filter { $0.extendedGamepad != nil }
         if connected != !pads.isEmpty { connected = !pads.isEmpty }
-        let first = pads.first.flatMap { c -> GCControllerButtonInput? in
-            guard let g = c.extendedGamepad else { return nil }
-            return Self.labelled(c) ? g.buttonA : g.buttonB
-        }
-        if glyphA != first?.sfSymbolsName { glyphA = first?.sfSymbolsName }
-        if nameA != first?.localizedName { nameA = first?.localizedName }
+        let g = NXPadGlyphs.of(pads.first)
+        if glyphs != g { glyphs = g }
         let now = pads.reduce(into: Set<Key>()) { $0.formUnion(Self.keys($1)) }
         // A key that vanishes because its pad went (or one that appears with a new pad), or while the app is not active (its input reads as nothing), is no press or release:
         // everything held stays blocked until it is released for real

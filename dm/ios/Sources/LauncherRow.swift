@@ -5,7 +5,13 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import QuartzCore
 import SwiftUI
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 extension LauncherModel {
     func binding(_ s: Setting) -> Binding<String> { Binding(get: { self.shown(s) }, set: { self.pick(s, $0) }) }   // the value the row shows (shown); a greyed row or option is refused (pick)
@@ -123,8 +129,9 @@ public enum NX18Palette {
     public static let text = Color(nx18: 0xEDEDF0)         // a setting's name and other plain text: near white, set outright so a light-mode trait cannot turn it black
     public static let muted = Color(nx18: 0xB4B4BC)        // notes, values, chevrons: light enough to read on the cards (#9A9AA2 was too dim)
     public static let onArt = Color(nx18: 0xC4C4CA)        // the muted grey a little lighter, for small text over the art (the status line), always on a scrim
-    public static let cyan = Color(nx18: 0x00C8F5)         // section headings, switches, the slider, the focus ring, the N
-    public static let coral = Color(nx18: 0xFF6B5A)        // the Play pill, Reset, the 18 pill
+    public static let cyan = Color(nx18: cyanHex)          // section headings, switches, the slider, the focus ring, the N
+    public static let coral = Color(nx18: coralHex)        // the Play pill, Reset, the 18 pill
+    static let cyanHex: UInt32 = 0x00C8F5, coralHex: UInt32 = 0xFF6B5A   // also the rails' Core Animation layer (NX18RailsFlowView)
 
     // The art's average colour, for the tint: the image drawn into an 8 x 8 sRGB bitmap with Core Graphics, on the CPU (no Metal device or Core Image context: Launcher.swift's
     // metalDeviceMade). nil for an image Core Graphics cannot draw or one that is all transparent
@@ -311,17 +318,132 @@ struct NX18MarkShape: Shape {
     }
 }
 
-// The rails: the logo's cyan running into its coral, the thin line between the art and the settings (iOS, vertical) or under the banner (the Mac, horizontal), on every game
+// The rails: the logo's cyan running into its coral, the thin line between the art and the settings (iOS, vertical) or under the banner (the Mac, horizontal), on every game.
+// flowing (the launchers' rails): the two colours drift slowly along the line, a cycle every NX18RailsFlowView.period seconds, drawn by Core Animation (no redraw of the view);
+// still, as it was, under Reduce Motion. The guide's and About's rails stay still
 struct NX18Rails: View {
     var axis: Axis = .vertical
     var thickness: CGFloat = 2.5
+    var flowing = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        LinearGradient(colors: [NX18Palette.cyan, NX18Palette.coral],
-                       startPoint: axis == .vertical ? .top : .leading, endPoint: axis == .vertical ? .bottom : .trailing)
-            .frame(width: axis == .vertical ? thickness : nil, height: axis == .horizontal ? thickness : nil)
-            .accessibilityHidden(true)
+        Group {
+            if flowing {
+                NX18RailsFlow(axis: axis, moving: !reduceMotion)
+            } else {
+                LinearGradient(colors: [NX18Palette.cyan, NX18Palette.coral],
+                               startPoint: axis == .vertical ? .top : .leading, endPoint: axis == .vertical ? .bottom : .trailing)
+            }
+        }
+        .frame(width: axis == .vertical ? thickness : nil, height: axis == .horizontal ? thickness : nil)
+        .accessibilityHidden(true)
     }
 }
+
+#if os(macOS)
+typealias NX18PlatformView = NSView
+#else
+typealias NX18PlatformView = UIView
+#endif
+
+// The flowing rails: a gradient layer three lines long (cyan, coral, cyan, coral) slid along the line by two lengths and round again, so the line shows cyan to coral (as the
+// still rails do) at the start and end of each cycle and coral to cyan halfway. The slide is a CABasicAnimation, run by the render server: no timer, display link or SwiftUI
+// update in the app while it moves. It is only on while the view is in a window (and, on the Mac, while the window is visible: not minimised, hidden or covered), and not under
+// Reduce Motion (moving false: the still cyan-to-coral line). A change of length starts it again from the still position
+final class NX18RailsFlowView: NX18PlatformView {
+    static let period: CFTimeInterval = 14   // seconds for a point of the line to go from cyan to coral and back
+    static let key = "nx18.flow"
+    let axis: Axis
+    private let strip = CAGradientLayer()
+    private var length: CGFloat = 0
+    private var observers: [NSObjectProtocol] = []
+    var moving = true { didSet { if moving != oldValue { restart() } } }
+    var isFlowing: Bool { strip.animation(forKey: Self.key) != nil }   // the Duo harness's check
+
+    init(axis: Axis) {
+        self.axis = axis
+        super.init(frame: .zero)
+        let c = [NX18Palette.cyanHex, NX18Palette.coralHex].map { h -> CGColor in let v = NX18RGB(hex: h); return CGColor(srgbRed: v.r, green: v.g, blue: v.b, alpha: 1) }
+        strip.colors = [c[0], c[1], c[0], c[1]]
+        strip.startPoint = axis == .vertical ? CGPoint(x: 0.5, y: 0) : CGPoint(x: 0, y: 0.5)
+        strip.endPoint = axis == .vertical ? CGPoint(x: 0.5, y: 1) : CGPoint(x: 1, y: 0.5)
+#if os(macOS)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        layer?.addSublayer(strip)
+#else
+        isUserInteractionEnabled = false
+        clipsToBounds = true
+        layer.addSublayer(strip)
+        observers.append(NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.restart() }   // the system may drop a running animation while the app is in the background
+        })
+#endif
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+    isolated deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+#if os(macOS)
+    override var isFlipped: Bool { true }   // the strip's layer laid out from the top left, as on iOS
+    override func layout() { super.layout(); place() }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        if let w = window {
+            observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: w, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.restart() }
+            })
+        }
+        restart()
+    }
+    private var visible: Bool { window.map { $0.occlusionState.contains(.visible) } ?? false }
+#else
+    override func layoutSubviews() { super.layoutSubviews(); place() }
+    override func didMoveToWindow() { super.didMoveToWindow(); restart() }
+    private var visible: Bool { window != nil }
+#endif
+
+    // The strip three lines long from the line's start; a new length starts the slide again
+    private func place() {
+        let l = axis == .vertical ? bounds.height : bounds.width
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        strip.frame = axis == .vertical ? CGRect(x: 0, y: 0, width: bounds.width, height: l * 3) : CGRect(x: 0, y: 0, width: l * 3, height: bounds.height)
+        CATransaction.commit()
+        if l != length { length = l; restart() }
+    }
+
+    private func restart() {
+        strip.removeAnimation(forKey: Self.key)
+        guard moving, visible, length > 0 else { return }
+        let path = axis == .vertical ? "position.y" : "position.x"
+        let from = axis == .vertical ? strip.position.y : strip.position.x
+        let a = CABasicAnimation(keyPath: path)
+        a.fromValue = from
+        a.toValue = from - 2 * length
+        a.duration = Self.period
+        a.repeatCount = .infinity
+        a.timingFunction = CAMediaTimingFunction(name: .linear)
+        a.isRemovedOnCompletion = false
+        strip.add(a, forKey: Self.key)
+    }
+}
+
+#if os(macOS)
+private struct NX18RailsFlow: NSViewRepresentable {
+    let axis: Axis
+    let moving: Bool
+    func makeNSView(context: Context) -> NX18RailsFlowView { NX18RailsFlowView(axis: axis) }
+    func updateNSView(_ v: NX18RailsFlowView, context: Context) { v.moving = moving }
+}
+#else
+private struct NX18RailsFlow: UIViewRepresentable {
+    let axis: Axis
+    let moving: Bool
+    func makeUIView(context: Context) -> NX18RailsFlowView { NX18RailsFlowView(axis: axis) }
+    func updateUIView(_ v: NX18RailsFlowView, context: Context) { v.moving = moving }
+}
+#endif
 
 // A section heading in the logo's cyan
 struct NX18SectionHeader: View {

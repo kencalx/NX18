@@ -18,11 +18,12 @@ enum LauncherGuidePage: String, Identifiable, CaseIterable, Sendable {
 struct LauncherGuideSheet: View {
     let content: LauncherContent
     let scroller: LauncherScroller
+    var closeGlyph: NXPadGlyph? = nil   // the controller's B (NXButtonGlyph.swift), beside the close button while a controller is connected
     let close: () -> Void
     @State private var page: LauncherGuidePage
 
-    init(content: LauncherContent, scroller: LauncherScroller, close: @escaping () -> Void) {
-        self.content = content; self.scroller = scroller; self.close = close
+    init(content: LauncherContent, scroller: LauncherScroller, closeGlyph: NXPadGlyph? = nil, close: @escaping () -> Void) {
+        self.content = content; self.scroller = scroller; self.closeGlyph = closeGlyph; self.close = close
         _page = State(initialValue: content.guide != nil ? .guide : .manual)
     }
     private var pages: [LauncherGuidePage] { LauncherGuidePage.allCases.filter { $0 == .guide ? content.guide != nil : content.manual != nil } }
@@ -44,8 +45,12 @@ struct LauncherGuideSheet: View {
                 }
                 Spacer()
                 Button(action: close) {
-                    Image(systemName: "xmark").font(.body.weight(.semibold)).foregroundStyle(.white)   // system: symbol
-                        .frame(width: 36, height: 36).background(Circle().fill(NX18Palette.row))
+                    HStack(spacing: 8) {
+                        if let g = closeGlyph { NXPadGlyphView(g, size: 20, relativeTo: .body).foregroundStyle(NX18Palette.cyan) }
+                        Image(systemName: "xmark").font(.body.weight(.semibold)).foregroundStyle(.white)   // system: symbol
+                            .frame(width: 36, height: 36).background(Circle().fill(NX18Palette.row))
+                    }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close")
@@ -180,6 +185,7 @@ struct LauncherAboutSheet: View {
     let name: String
     let version: String?
     let scroller: LauncherScroller
+    var closeGlyph: NXPadGlyph? = nil   // the controller's B, beside the close button while a controller is connected
     let close: () -> Void
     @State private var position = ScrollPosition(edge: .top)
     @State private var offset: CGFloat = 0
@@ -198,6 +204,7 @@ struct LauncherAboutSheet: View {
                     facts
                     if let s = about.sourceLine { Text(s).nxFont(.footnote).foregroundStyle(NX18Palette.muted) }
                     if let v = version { Text("Version \(v)").nxFont(.footnote).foregroundStyle(NX18Palette.muted) }
+                    Text(NX18Credits.buttonIcons).nxFont(.caption).foregroundStyle(NX18Palette.muted)   // the controller hints' glyphs (NXButtonGlyph.swift)
                 }
                 .padding(.horizontal, 24).padding(.top, 4).padding(.bottom, 32)
                 .frame(maxWidth: 720, alignment: .leading)
@@ -209,8 +216,15 @@ struct LauncherAboutSheet: View {
         .nxTextRoot()
         .overlay(alignment: .topTrailing) {
             Button(action: close) {
-                Image(systemName: "xmark").font(.body.weight(.semibold)).foregroundStyle(.white)   // system: symbol
-                    .frame(width: 36, height: 36).background(Circle().fill(NX18Palette.charcoal.opacity(0.85)))
+                HStack(spacing: 8) {
+                    if let g = closeGlyph {
+                        NXPadGlyphView(g, size: 20, relativeTo: .body).foregroundStyle(NX18Palette.cyan)
+                            .padding(4).background(Circle().fill(NX18Palette.charcoal.opacity(0.85)))   // over the art: a dark disc behind it
+                    }
+                    Image(systemName: "xmark").font(.body.weight(.semibold)).foregroundStyle(.white)   // system: symbol
+                        .frame(width: 36, height: 36).background(Circle().fill(NX18Palette.charcoal.opacity(0.85)))
+                }
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Close")
