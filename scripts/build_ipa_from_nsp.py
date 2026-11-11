@@ -22,7 +22,7 @@
 #   for good. Other code patches and RomFS mods (romfs/ folders) are left out, each with a line. The build's own files are in <build folder>/mods_stage/; the extraction is never changed.
 #   MODS = 'none' / --no-mods packs the game without them.
 # Uses only three things: this repository, a folder holding one game's NSPs (the base game, with or without an update; DLC NSPs, when present, are packed too and unlock the add-on content already in the game), and prod.keys.
-#   Instead of NSPs, the folder may hold the game's files as a dump (base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): that needs no prod.keys. A game with no profile is surveyed from those files. A dump has no control data: the name comes from the profile (a provisional one takes the folder's name), and the app gets the NX 18 icon (docs/images/nx18) unless --icon / ICON gives it one.
+#   Instead of NSPs, the folder may hold the game's files as a dump (base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): that needs no prod.keys. A game with no profile is surveyed from those files. A dump has no control data: the name comes from the profile (a provisional one takes the folder's name), and the app gets the NX 18 icon (docs/images/nx18) unless --icon / ICON gives it one (--fallback-icon / FALLBACK_ICON: only when the game has none).
 #   Or the folder may hold the game as one NUP container (a .nup file: base game, updates and DLC; scripts/pack_nup.py), or the .nup file may be given in its place: it needs no prod.keys, like a dump; a game with no profile is surveyed from the container's files (its newest version's code modules and RomFS file headers),
 #   and its RomFS images are written straight from it; the name, display version and icon come from the NACP and icon it carries, else as for a dump (its name record is a packer's label, not the game's), and --icon / ICON gives the app an icon when it carries none.
 #   Or the folder may hold the game as one NX archive (a .nx file, https://github.com/fab918/nxformat: NXConvert by fab918 makes them from decrypted dumps or NUPs; scripts/pack_nx.py), or the .nx file may be given in its place: read
@@ -69,6 +69,7 @@ OUT_IPA = ''                            # output IPA (empty = <the profile's ipa
 APP_NAME = ''                           # app name on the home screen (empty = the game name in the base NSP)
 BUNDLE_ID = ''                          # the app's bundle ID (empty = saved per-game Xcode ID, else org.nxnative.<base game title ID in lowercase>)
 ICON = ''                               # the app icon, a JPEG or PNG of any size (empty = the game's icon from its control data; a dump has none, a NUP or an NX may have none: then the NX 18 icon)
+FALLBACK_ICON = ''                      # the app icon only when ICON is empty and the game has none of its own (a dump, a NUP or an NX without one); empty = such an app gets the NX 18 icon
 ART = ''                                # the launcher's key art, a JPEG or PNG of any size (empty = found online when ART_ONLINE is on, else none: the launcher blurs the app icon)
 LOGO = ''                               # the launcher's logo shown in place of the game's name, the game's title wordmark as a PNG or WebP with transparency (empty = SteamGridDB's with a key, over its textless hero or your art; none over a titledb banner, which has the logo painted in)
 ART_ONLINE = True                       # find the launcher's art and "About this game" text online: titledb, then SteamGridDB (with a key); False = no network at all (art an earlier online build downloaded into <build folder>/art/ is still used)
@@ -3014,6 +3015,8 @@ def parse_args(argv):
                     'no iOS shaders, Xcode project or IPA), keep the extracted files and print the command that runs the game; mac-app = what mac builds, then a self-contained, double-clickable '
                     'Mac app of the game (default: <game name>.app in the NSP folder, -o names another) (default: the PLATFORM setting, ios)')
     ap.add_argument('--icon', help='the app icon, a JPEG or PNG of any size (default: the ICON setting, else the game\'s icon from its control data; a dump has none, a NUP or an NX may have none: then the NX 18 icon)')
+    ap.add_argument('--fallback-icon', help='the app icon only when --icon / ICON is not given and the game has none of its own (a dump, a NUP or an NX without one), a JPEG or PNG of any size: a game with its own icon '
+                    'keeps it, so a front end can pass a stand-in without knowing what the game carries (default: the FALLBACK_ICON setting, else such an app gets the NX 18 icon)')
     ap.add_argument('--art', help='the launcher\'s key art, a JPEG or PNG of any size (default: the ART setting, else found online: titledb, then SteamGridDB with a key; without one the launcher blurs the app icon)')
     ap.add_argument('--logo', help='the launcher\'s logo, shown in place of the game\'s name: the game\'s title wordmark, a PNG or WebP with transparency (default: the LOGO setting, else SteamGridDB\'s with a key, '
                     'over its textless hero or your art; none over a titledb banner, which has the logo painted in)')
@@ -3067,9 +3070,24 @@ def no_game_icon_line(nup, dump, icon, blank):
     return f'{why}; {then}' + (f'; --icon / ICON gives it {hint}' if dump else '')
 
 
+def icon_file(value, option):
+    """The image an icon option or setting names, None when it is empty. Checked when the build starts, not after the extraction: build_ipa.sh would only log a missing one"""
+    if not value: return None
+    p = Path(os.path.expanduser(value)).resolve()
+    if not p.is_file(): raise BuildError(f'no such icon file ({option}): {p}')
+    return p
+
+
+def app_icon(given, spare, *dirs):
+    """The image the app is given, and whether it is the fallback: --icon / ICON (given), else the game icon nx_extract saved from the control data (English, icon.jpg; in dirs, the packed version's
+    first, then the base game's), which a dump never has and a NUP or an NX may lack, else --fallback-icon / FALLBACK_ICON (spare), which never replaces a game's own. None without any: the app then gets the NX 18 icon"""
+    own = next((d / 'icon.jpg' for d in dirs if (d / 'icon.jpg').exists()), None)
+    return given or own or spare, bool(spare and not (given or own))
+
+
 def say_game(app, name, version, bundle_id, out, icon):
     """Which game the app is, once its name, version and bundle ID are settled (before the shader stages): the event game for a front end (json mode; the base game's title ID as DMTitleID has it,
-    out = the IPA or Mac app, None for an Xcode project; icon = the game's image: --icon / ICON, else the extracted icon.jpg; None without one, when the app gets the NX 18 icon), then the message for people"""
+    out = the IPA or Mac app, None for an Xcode project; icon = the image the app is given: --icon / ICON, else the extracted icon.jpg, else --fallback-icon / FALLBACK_ICON; None without one, when the app gets the NX 18 icon), then the message for people"""
     PROG.event('game', title_id=f'{app:016X}', name=name, version=version, bundle_id=bundle_id, out=str(out) if out else None, icon=str(icon) if icon else None)
     say(f'app name: {name}; version: {version}; bundle ID: {bundle_id}' + (f'; app: {out}' if out and out.suffix == '.app' else ''))
 
@@ -3206,8 +3224,7 @@ def main(args=None):
     dump = 'nx' if nxa else 'nup' if nup else 'folder' if dump_folder(nsp_dir) else None   # their files are not encrypted, so they need no keys
     keys = None if dump else Path(os.path.expanduser(args.keys or PROD_KEYS or ask('path of prod.keys: ', 'prod.keys (-k)'))).resolve()
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
-    user_icon = Path(os.path.expanduser(args.icon or ICON)).resolve() if args.icon or ICON else None   # checked now, not after the extraction: build_ipa.sh would only log a missing one
-    if user_icon and not user_icon.is_file(): raise BuildError(f'no such icon file (--icon / ICON): {user_icon}')
+    user_icon = icon_file(args.icon or ICON, '--icon / ICON'); spare_icon = icon_file(args.fallback_icon or FALLBACK_ICON, '--fallback-icon / FALLBACK_ICON')
     user_art = Path(os.path.expanduser(args.art or ART)).resolve() if args.art or ART else None   # the launcher's art and manual, checked now too
     if user_art and not user_art.is_file(): raise BuildError(f'no such art file (--art / ART): {user_art}')
     user_logo = Path(os.path.expanduser(args.logo or LOGO)).resolve() if args.logo or LOGO else None
@@ -3392,12 +3409,13 @@ def main(args=None):
     # the app version is the packed game's display version: the update's control data when an update is packed (nx_extract saves it next to the RomFS), else the base game's
     app_version = nacp.version(game / 'control.nacp') or nacp.version(base / 'control.nacp')
     if mac_pack and not (args.out or OUT_IPA): out_ipa = work.parent / f'{mac_app_name(app_name)}{"-provisional" if shadowed else ""}{"-" + plat_tag if plat_tag else ""}.app'
-    # the app icon: --icon / ICON, else the game icon nx_extract saved from the control data (English, icon.jpg; the packed version's first, then the base game's), which a dump never has and a NUP or an NX may lack;
-    # without one, the NX 18 icon, so the home screen does not show a blank tile
-    game_icon = user_icon or next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)
+    # the app icon: --icon / ICON, else the game icon nx_extract saved from the control data (the packed version's first, then the base game's), which a dump never has and a NUP or an NX may lack,
+    # else --fallback-icon / FALLBACK_ICON (app_icon); without one, the NX 18 icon, so the home screen does not show a blank tile
+    game_icon, stand_in = app_icon(user_icon, spare_icon, game, base)
     icon = game_icon or (NX18_ICON if NX18_ICON.is_file() else None)
     if (not mac or mac_pack) and getattr(args, 'in_programs', None) is None:   # an app is made, once: a program packed with the application's first (in_programs) is part of its app
-        say_game(app, app_name, app_version or '1.0', bundle_id, None if prepare_xcode else out_ipa, game_icon)   # the game's own icon (docs/frontends.md): null without one, not the NX 18 stand-in
+        if stand_in: say(f'no game icon: the app takes the fallback icon {spare_icon} (--fallback-icon / FALLBACK_ICON)')
+        say_game(app, app_name, app_version or '1.0', bundle_id, None if prepare_xcode else out_ipa, game_icon)   # the image the app is given (docs/frontends.md): the fallback icon too, null without one, not the NX 18 stand-in
         art, about, manual, logo = launcher_art(app - PROGRAM_INDEX, app_name, work, user_art, art_online, manual, user_logo)   # titledb lists the application, program 0
     else: art = about = manual = logo = None
     # the game language: Horizon gives the game one of the languages its control data lists (the packed version's, which an update may extend), so the one packed must be among them
