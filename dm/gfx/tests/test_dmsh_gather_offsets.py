@@ -64,8 +64,8 @@ RUNNER = '''#import <Metal/Metal.h>
 #include <stdio.h>
 int main(int ac, char **av) { @autoreleasepool {
     id<MTLDevice> d = MTLCreateSystemDefaultDevice(); NSError *e = nil;
-    id<MTLLibrary> l = [d newLibraryWithURL:[NSURL fileURLWithPath:@(av[1])] error:&e]; if (!l) { puts(e.description.UTF8String); return 2; }
-    id<MTLComputePipelineState> p = t4_cps(t4_fn(l, @"k"), &e); if (!p) { puts(e.description.UTF8String); return 2; }
+    id<MTLLibrary> l = [d newLibraryWithURL:[NSURL fileURLWithPath:@(av[1])] error:&e]; if (!l) { puts(e.description.UTF8String); return 1; }
+    id<MTLComputePipelineState> p = t4_cps(t4_fn(l, @"k"), &e); if (!p) { puts(e.description.UTF8String); return 1; }
     enum { W = 256, H = 128 }; MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:W height:H mipmapped:NO]; td.storageMode = MTLStorageModeShared;
     id<MTLTexture> t = [d newTextureWithDescriptor:td]; static float px[H][W][4]; for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) { px[y][x][0] = x; px[y][x][1] = y * W + x + 1; px[y][x][2] = y; px[y][x][3] = 1; }
     [t replaceRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0 withBytes:px bytesPerRow:W * 16];

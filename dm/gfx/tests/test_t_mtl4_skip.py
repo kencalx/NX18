@@ -1,10 +1,14 @@
 """t_mtl4.h's standalone back end on a Mac without a Metal 4 GPU (GitHub's virtual Macs): t4_dev ends the runner with exit status 2, which the Python GPU tests' runners
 take as a skip (test_ndve_engine, test_dmsh_*: `if r.returncode == 2: self.skipTest(...)`), not with an abort that fails them. T4_TEST_NO_METAL4 makes t4_dev act as on such a
 Mac; the first call may come through the compiler (t4_comp), as t4_cps's does. Every other test file here then runs with T4_TEST_NO_METAL4 set (with the committed translator as
-DMSH_TEST_XLATE when none is given, as CI's tool-test job sets it) and must pass: a runner that asserts its output without taking status 2 as a skip fails there, as it would on CI."""
+DMSH_TEST_XLATE when none is given, as CI's tool-test job sets it) and must pass: a runner that asserts its output without taking status 2 as a skip fails there, as it would on CI.
+The other way round, status 2 is only for a missing device: a runner of those files that cannot load its metallib or build its pipeline must fail the test, so it may not exit 2 then
+(given a file that is no metallib, each runner that loads one exits with another status, or with 2 and a 'no ... device' line)."""
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import importlib
 import os
+import re
 import sys
 import shutil
 import subprocess
@@ -75,6 +79,40 @@ class EveryTestFileWithoutMetal4(unittest.TestCase):
             for name, r in pool.map(run, files):
                 with self.subTest(file=name):
                     self.assertEqual(r.returncode, 0, r.stderr[-3000:])
+
+
+def metallib_runners():
+    """(file, name, source) for every runner source of a test file that takes status 2 as a skip and loads the metallib its command line names"""
+    here = Path(__file__).resolve().parent
+    sys.path.insert(0, str(here))
+    for p in sorted(here.glob('test_*.py')):
+        if p.name == Path(__file__).name or 'returncode == 2' not in p.read_text(): continue
+        for name, v in vars(importlib.import_module(p.stem)).items():
+            if isinstance(v, str) and 'int main(' in v and 'newLibraryWithURL' in v: yield p.name, name, v
+
+
+@unittest.skipUnless(shutil.which('clang'), 'needs Xcode')
+class LoadFailureIsNoSkip(unittest.TestCase):
+    def test_bad_metallib_fails(self):
+        runners = list(metallib_runners())
+        self.assertGreaterEqual(len(runners), 8, [r[:2] for r in runners])
+        with tempfile.TemporaryDirectory() as w:
+            w = Path(w)
+            bad = w / 'bad.metallib'
+            bad.write_bytes(b'not a metallib\n' * 8)
+
+            def run(i):
+                f, name, src = runners[i]
+                (w / f'r{i}.m').write_text(src)
+                b = subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, str(w / f'r{i}.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(w / f'r{i}')], capture_output=True, text=True)
+                if b.returncode: return f, name, b
+                return f, name, subprocess.run([str(w / f'r{i}'), str(bad), str(bad), '0'], capture_output=True, text=True, timeout=120)
+
+            with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+                for f, name, r in pool.map(run, range(len(runners))):
+                    with self.subTest(file=f, runner=name):
+                        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+                        if r.returncode == 2: self.assertRegex(r.stdout, re.compile(r'^no .*device', re.M), 'status 2 (a skip) for a metallib that does not load: ' + r.stdout + r.stderr)
 
 
 if __name__ == '__main__':

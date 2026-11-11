@@ -41,8 +41,8 @@ static uint32_t value(int p, uint64_t off) { return (uint32_t)(p + 1) << 24 | (u
 static int expect(uint64_t a, int64_t *pool) { for (int p = 0; p < POOLS; p++) if (a >= GUEST[p] && a < GUEST[p] + WORDS * 4) { *pool = p; return (int)value(p, a - GUEST[p]); } *pool = -1; return 0; }
 int main(int ac, char **av) { @autoreleasepool {
     id<MTLDevice> d = MTLCreateSystemDefaultDevice(); NSError *e = nil;
-    id<MTLLibrary> l = [d newLibraryWithURL:[NSURL fileURLWithPath:@(av[1])] error:&e]; if (!l) { puts(e.description.UTF8String); return 2; }
-    id<MTLComputePipelineState> ps = t4_cps(t4_fn(l, @"k"), &e); if (!ps) { puts(e.description.UTF8String); return 2; }
+    id<MTLLibrary> l = [d newLibraryWithURL:[NSURL fileURLWithPath:@(av[1])] error:&e]; if (!l) { puts(e.description.UTF8String); return 1; }
+    id<MTLComputePipelineState> ps = t4_cps(t4_fn(l, @"k"), &e); if (!ps) { puts(e.description.UTF8String); return 1; }
     id<MTLBuffer> pool[POOLS], map = [d newBufferWithLength:8192 * 32 options:MTLResourceStorageModeShared];
     uint32_t *t = map.contents; memset(t, 0, 8192 * 32); for (int k = 1; k < 8192; k++) memset(t + k * 8, 0xff, 8);
     for (int p = 0; p < POOLS; p++) {
