@@ -10,6 +10,7 @@ Update 1.4.0 (v327680) over the base game, SDK 7.3.2 (NVN 53). Next Level Games'
 | `present_interval display` | `game.tsv` | ignores the present interval 2 the game also asks for |
 | `mem_used 0x4600000` | `game.tsv` | the rewritten modules are larger than the default 64 MB of used memory |
 | 4 GB layout: `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `sys_resource 0x0` | `game.tsv` | no virtual address memory (the NPDM declares no system resource): `main` sets a 2.94 GB heap |
+| `ultrawide_cost fps` | `game.tsv`, `settings.tsv` `DM_MOD_ULTRAWIDE` | an Ultrawide mod drops the game below 60 fps in busy rooms on the iPhone; the launcher's Ultrawide row says so ([Ultrawide](#ultrawide)) |
 | `pad_layout full` | `game.tsv` | Luigi moves with the left stick and aims with the right; the D-pad calls up the Virtual Boo: the iPhone pad starts in the 3D layout, which has both |
 | Node area cut and 2 MB alignment of large regions (SDK 20's) | `dm/tools/sdk_patches.py` SDK-wide rules, `sdk` build `fcf93a41…` | DRAGON QUEST XI S's build, cut by the SDK-wide rules; this game has no virtual address memory |
 
@@ -21,6 +22,11 @@ No `patches.py`.
 - On the Mac the lobby holds 60.0 fps (display interval p99 16.67 ms); the same 2 s walk and 1.5 s turn from the same save end at the same spot at 30 and 60 fps, and the title's animation matches at time scale 1.00 (`DM_NVN_REGLUM`). `DM_FPS_TARGET=30` keeps the game's 33.333 ms.
 - The limiter also has a phase lock, a nudge of at most 0.05 ms a frame from the layer's frame history (`main+0xb7c050` reads 8 entries and finds the frame it recorded after its present). It had no input while the host's `nn::vi::ListFrameHistory` returned no entries; it has entries since 51cc8bce, and its effect is not measured.
 - **Resolved: about 25 fps since 51cc8bce** (issue #1705; an M2 Pro in a window, 54–58 fps on an M6). Before each `nvnQueuePresentTexture` the render thread (`main+0xb7a4b8`, after an `nvnQueueFinish`) reads the newest history entry and `nvnWindowGetPresentInterval`. While that frame is not shown it sleeps 16.67 ms per vsync of the interval; once shown, it waits until (interval − 1) vsyncs after its present time. That is the game's own pacing for 30 fps at interval 2, which `present_interval display` did not reach: the host still answered 2. It now answers the interval the window presents at, 1 ([A game's own present pacing reads the interval the window presents at](../../../docs/reference/frame-rate.md#a-games-own-present-pacing-reads-the-interval-the-window-presents-at)). Title screen in a window on an M6, 75 s each: 54.3–58.2 → 60.0 fps, frame time p95 24–25 → 18 ms, max 107 → 22.7 ms, no frame of 33 ms (no sleep for a frame not yet shown) and no empty display-link ticks after warm-up.
+
+## Ultrawide
+
+- **Current:** with an Ultrawide mod in the game's mods folder the launcher offers **Ultrawide** (`DM_MOD_ULTRAWIDE`, off by default as for every game), and on an iPhone the row says *Can drop below 60 fps in busy scenes on iPhone* (`ultrawide_cost fps`, the row's `hint` in `settings.tsv`). It stays selectable.
+- Measured on an iPhone 18 Pro Max with release 1 (`5b302cd0`), the same route from warm starts each time, Picture on Stretch. Ultrawide off with edge smoothing (**Anti-aliasing**) on held 60 fps, with brief dips to 51–54. Ultrawide on with edge smoothing off fell to 36–52 fps for most of the route's second half, with a GPU time p50 of 17–24 ms against the 16.7 ms a frame has at 60 fps. Ultrawide adds about 1.5–2 ms of GPU time a frame in light areas and 5–9 ms in busy rooms, so the drop comes from the wider view, not from edge smoothing, which the slower run had off.
 
 ## Modules and memory
 

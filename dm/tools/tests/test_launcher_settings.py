@@ -191,6 +191,21 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(rows['DM_MOD_ULTRAWIDE']['inactive'], [{'when': ['screen<1.85'], 'why': "This screen isn't wider than 16:9"}])
         self.assertEqual(rows['DM_TOUCH_HAPTICS']['hide'], [{'when': ['haptics:none']}])   # DmGamepad.m plays touch feedback on the device's haptic engine only
 
+    def test_ultrawide_says_its_cost_where_the_profile_measured_one(self):   # game.py ultrawide_cost: a hint on the row, which stays selectable and off by default
+        LM3 = '0100DCA0064A6000'   # ultrawide_cost fps: below 60 fps in busy rooms on an iPhone 18 Pro Max (its README, Ultrawide)
+        cost = {'when': ['device:iphone'], 'why': 'Can drop below 60 fps in busy scenes on iPhone'}
+        s = build(LM3, 'nvn', mods=['ultrawide'])['DM_MOD_ULTRAWIDE']
+        self.assertEqual(s['hint'], [cost])
+        self.assertEqual(s['inactive'], [{'when': ['screen<1.85'], 'why': "This screen isn't wider than 16:9"}], 'a hint, not a greying')
+        self.assertEqual(s['default'], '0', 'Ultrawide stays off by default')
+        self.assertLessEqual(len(cost['why']), settings.WHY_MAX)
+        for gid in (BOTW, WONDER):   # no ultrawide_cost: no hint
+            with self.subTest(gid=gid):
+                self.assertNotIn('hint', build(gid, 'nvn', mods=['ultrawide'])['DM_MOD_ULTRAWIDE'])
+        with tempfile.TemporaryDirectory() as d:   # the key's values are checked
+            (Path(d) / 'X').mkdir(); (Path(d) / 'X' / 'game.tsv').write_text((settings.game.find_dir(LM3) / 'game.tsv').read_text().replace('ultrawide_cost\tfps', 'ultrawide_cost\tslow'))
+            with self.assertRaises(SystemExit): settings.game.header_one(settings.game.Game(Path(d) / 'X'))
+
     def test_device_and_environment_rules(self):
         rows, mac = build(BOTW, 'nvn'), build('0100F2C0115B6000', 'nvn', 'mac')
         self.assertEqual(rows['DM_PAD_PRESS_TO_JOIN']['inactive'], [{'when': ['DM_PAD_MERGE=1'], 'why': 'All controllers are player 1 (env.txt)'}])
