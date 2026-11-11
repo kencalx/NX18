@@ -64,6 +64,11 @@ class LiveMenu(unittest.TestCase):
                 self.assertIn(decl + ' {', self.nvn)
                 self.assertIn(decl + ' {', stubs)
         self.assertIn('int front_web_touch(void) {', stubs)   # DmGamepad.m calls it; web_apple.m is not in the harness
+        # DmGamepad.m tells the host its menu opened and closed (front.h dm_front_menu_set, hle_oe.c: the log line and the long-frame tag); the harness keeps what it was told
+        decl = 'void dm_front_menu_set(int open, const char *where)'
+        self.assertIn(decl + ';', front_h); self.assertIn(decl + ' {', read('dm/host/hle_oe.c')); self.assertIn(decl + ' {', stubs)
+        for header, call in (('- (void)menuOpened {', 'dm_front_menu_set(1, NULL)'), ('- (void)menuClosed {', 'dm_front_menu_set(0, NULL)')):
+            self.assertIn(call, body(self.pad, header))
         h = read('dm/ios/Sources/DmGameMenu.h')
         for decl in ('void dm_gamepad_touch_look(const char *env, const char *value);', 'double dm_gamepad_size(void);'):
             self.assertIn(decl, h); self.assertIn(decl[:-1] + ' {', self.pad)

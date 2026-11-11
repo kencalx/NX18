@@ -7,7 +7,8 @@
 #include <signal.h>
 #include <sys/wait.h>
 void dm_thread_native_wait(int entering) { (void)entering; } // queue-only test, without the guest scheduler
-uint64_t now_ns(void) { return 0; }
+static uint64_t t_now;   // the test's clock: the front-end menu's tail (FRONT_MENU_TAIL_NS) is timed on it
+uint64_t now_ns(void) { return t_now; }
 void dm_audio_suspend(int on) { (void)on; }   // stubs for the bg item of DM_OE_SCRIPT (hle_audio.c / hle_os.c / hle_nvn.c)
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_gfx_suspend(int on) { (void)on; }
@@ -159,5 +160,22 @@ int main(void) {
     h_oe_SetFocusMode(3); dm_applet_enter("test");
     CHECK(empty() && h_oe_GetFocus() == 2, "focus mode 3: an applet changes the state without a notification");
     dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 1, "focus mode 3: back to 1 without a notification");
+    // The front end's own menu over the game (dm_front_menu_set / dm_front_menu_now, front.h): diagnostics only. The game sees nothing of it (no notification, its focus
+    // unchanged); the present path reads it to tag long frames, open from the open report until FRONT_MENU_TAIL_NS past the close (its dismissal is still drawn), then shut
+    reset(); t_now = 1000;
+    CHECK(!dm_front_menu_now(), "front-end menu: shut at the start");
+    dm_front_menu_set(0, NULL); CHECK(!dm_front_menu_now() && atomic_load(&g_front_menu_tail) == 0, "a close report while shut starts no tail");
+    dm_front_menu_set(1, NULL); CHECK(dm_front_menu_now() && empty() && h_oe_GetFocus() == 1 && dm_focus_now() == 1, "menu opens: open, nothing for the game, focus unchanged");
+    dm_front_menu_set(1, NULL); CHECK(dm_front_menu_now(), "a second open report: still open");
+    t_now += 5000000000ull; dm_front_menu_set(0, NULL);
+    CHECK(dm_front_menu_now() && empty() && h_oe_GetFocus() == 1, "menu closes: still open while its dismissal is drawn, nothing for the game");
+    t_now += FRONT_MENU_TAIL_NS - 1; dm_front_menu_set(0, NULL);
+    CHECK(dm_front_menu_now(), "a second close report (the next touch) starts no new tail: open until the first one's ends");
+    t_now += 1; CHECK(!dm_front_menu_now(), "the tail over: shut");
+    CHECK(atomic_load(&g_front_menu_tail) == 0, "and the tail cleared, so later reads take no clock");
+    dm_front_menu_set(1, "menu bar"); t_now += 100; dm_front_menu_set(0, "menu bar"); t_now += 100; dm_front_menu_set(1, "menu bar");
+    t_now += 10 * FRONT_MENU_TAIL_NS; CHECK(dm_front_menu_now(), "opened again within the tail: open however long it stays open");
+    dm_front_menu_set(0, ""); t_now += FRONT_MENU_TAIL_NS; CHECK(!dm_front_menu_now(), "and shut a tail after that close");
+    dm_focus_set(2); pop_is(15); CHECK(!dm_front_menu_now() && dm_focus_now() == 2, "focus is its own state: losing it opens no menu");
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

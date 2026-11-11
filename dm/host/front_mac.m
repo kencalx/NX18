@@ -1574,6 +1574,12 @@ void front_run(void (*guest)(void)) {
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
         NSApp.mainMenu = bar;
+        // The Mac's nearest to the iPhone's in-game menu is a menu of this menu bar (Cheats, Window) opened over the game: diagnostics only, the log says when one opens and closes
+        // ("front end: in-game menu open (menu bar)", hle_oe.c dm_front_menu_set) and the long-frame lines and 300-frame windows count the frames made while it was open
+        // (hle_nvn.c front_ui), so a hitch while the player read a menu is not taken for the game's. AppKit posts both notifications with the main menu as their object for
+        // any of its menus, on the main thread; a key equivalent (⌘R, ⌘Q) opens no menu and posts neither
+        [NSNotificationCenter.defaultCenter addObserverForName:NSMenuDidBeginTrackingNotification object:bar queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_front_menu_set(1, "menu bar"); }];
+        [NSNotificationCenter.defaultCenter addObserverForName:NSMenuDidEndTrackingNotification object:bar queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_front_menu_set(0, "menu bar"); }];
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
         if (fs && strcmp(fs, "0")) {
             // A game opened from a fullscreen app starts while macOS leaves that Space. Wait for activation and for the window to reach the active Space before asking for fullscreen

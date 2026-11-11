@@ -150,6 +150,9 @@ int dm_gfx_save_wait(int wait_ms) { (void)wait_ms; return 1; }
 void dm_audio_suspend(int on) { (void)on; }
 void dm_audio_reset(void) {}
 void dm_focus_set(int state) { (void)state; }
+static int g_front_menu;   // hle_oe.c's front-end menu state, as DmGamepad.m last reported it (dm_front_menu_set: its log line and the long-frame tag)
+void dm_front_menu_set(int open, const char *where) { (void)where; g_front_menu = open != 0; }
+int duo_harness_front_menu(void) { return g_front_menu; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 const char *front_ios_boot_message(void) { return NULL; }
 const char *front_ios_device_check(void) { return NULL; }   // a supported GPU

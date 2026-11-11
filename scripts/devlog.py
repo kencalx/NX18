@@ -13,7 +13,8 @@ What it reads (docs/development.md, Reading a device log):
   pipelines          pipeline prepare and prebuild (read by scripts/regress.py's read_log, as in its Mac runs); pipeline archive … files, MB; bases written; bases compiled while
                      playing ([nvn] pipelines up to frame); a Vulkan game's [vk] pipelines lines, an OpenGL game's [gl] pipeline builds
   frames, power      [nvn] timing, on-screen and power up to frame N (one each per 300 frames): frame-time percentiles, dropped frames, frame rate, CPU watts, mJ per frame,
-                     wakeups, GPU ms/s, thermal state
+                     wakeups, GPU ms/s, thermal state; a window that had frames made with the in-game menu open or out of focus says how many (in-game menu open N frames, not in
+                     focus M frames): those frames, and the dropped frames of those windows, are given apart, and the dropped rate again without those windows
   memory             [nvn-mtl] memory up to frame N and the on-screen lines' footprint; [gl] memory at frame N; [vk] frame N … buffer memory: first, last, least, most, and the
                      plateaus it stays on between the steps an area load makes (a run of samples within a tolerance of their median), with the slope inside them per 10 min
                      (the run's own slope, which the steps make, only when there is a single plateau). A newer memory line's graphics ledger and guest charged come first: GPU
@@ -23,8 +24,10 @@ What it reads (docs/development.md, Reading a device log):
   long frames        [longframe] frame N (T s): the longest, and what each spent its time on (new pipelines, texture uploads, GPU, submit, the game's side, a return from the background).
                      A frame as long as the frame step's hold asked for (2 or 3 vsyncs, within 1.25 of it) is not counted: the host's own line says the hold (; hold K × V ms,
                      hold 1 too while the frame step runs) and no longer prints such frames; in an older log the hold comes from the [nvn] frame step: hold A → B lines, and past
-                     their last one from runs of three or more such frames at most two frames apart. A log with no frame step line and no hold guesses none
-  events             background and resume, focus changes, thermal state and Low Power Mode changes and the caps they set, memory warnings, in-game menu changes
+                     their last one from runs of three or more such frames at most two frames apart. A log with no frame step line and no hold guesses none. A line that ends with
+                     (in-game menu open), (not in focus) or both was made while the system drew over the game on its GPU: counted apart, not as the game's
+  events             background and resume, focus changes, thermal state and Low Power Mode changes and the caps they set, memory warnings, in-game menu changes, the in-game
+                     menu opening and closing (front end: in-game menu open / closed; on the Mac a menu of the menu bar)
   audio, saves, RED  audio #N device callbacks … underruns; save commit, save sync; [RED] kinds, normalized as regress.py does (numbers, paths and keys taken out)
   audio output       the iOS audio session's I/O buffer and output latency (audio session:, audio route changed, settled at), its route changes (a [RED] one when asking
                      again failed) and lifecycle notices;
@@ -105,6 +108,7 @@ RX = {k: re.compile(v) for k, v in {
     'front_change': r'^front end: (thermal state|Low Power Mode) → (\S+) \((\d+) s after launch\)',
     'mem_warning': r'front end: iOS memory warning \((\d+) s after launch\): footprint (\d+) MiB, (\d+) MiB left',
     'focus': r'^oe focus state → (\d+)( \(library applet (?:open|closed)\))?',
+    'front_menu': r'^front end: in-game menu (open|closed)(?: \(([^()]*)\))?',   # hle_oe.c dm_front_menu_set: the iPhone's gear menu, or a menu of the Mac's menu bar
     'vp9_vt': r'^\[movie\] VP9 in VideoToolbox: hardware decoder (yes|no) after VTRegisterSupplementalVideoDecoderIfAvailable \((yes|no) before\); (\w+) (\S*) \(([^()]*)\), ([^.]*)\.',
     'aac_order': r"^\[movie\] AAC: (\d+) channels in AudioToolbox's order (.+?) \(layout tag \S+\), (handed out in|already|kept)(?:.*? order (.+?) \(DM_AAC_LAYOUT\)|.*? is (.+)|.*)$",
     'vt_rebuild': r'^\[movie\] (H\.264|AV1): VideoToolbox session made again after (-?\d+) \((\w+)\): (\d+) packets since the last',
@@ -133,6 +137,12 @@ HOLD_SLACK, HOLD_LOW, HOLD_RUN, HOLD_GAP, HOLD_KMAX, VSYNC_MS = 1.25, 0.9, 3, 2,
 # or a short run after a probe counted as failed. Only the first names its new hold (RX 'fstep'), so the marker is read from every kind (fstep_cut): a cut taken from the hold
 # lines alone was missed when the 40th line was a probe's, and the last logged hold was then applied to every later frame, hiding a game's own 33-41 ms frames at a stale hold 2
 FSTEP_CUT, FSTEP_AT = '; further changes only counted below', re.compile(r' at present (\d+)')
+# What the front end had over the game (hle_nvn.c front_ui): the system draws the iPhone's in-game menu (or a Mac menu) and whatever takes the focus over the game on the same GPU,
+# so a frame made then is not the game's to answer for. 13 Sentinels on an iPhone had GPU spikes of 19-56 ms (about 7 otherwise) and bursts of dropped frames while the menu was
+# open, which the log could not tell apart. A long-frame line ends with the tag (LF_UI); a timing or on-screen window line says how many of its frames were made so (WIN_UI),
+# and only when some were. Such long frames are counted apart, not with the game's, and the dropped frames are also given without the windows that had any
+LF_UI = re.compile(r' \((in-game menu open(?:, not in focus)?|not in focus)\)$')
+WIN_UI = re.compile(r'in-game menu open (\d+) frames, not in focus (\d+) frames')
 
 
 def fstep_cut(cuts: list[tuple[int, Any, int]]) -> int | None:
@@ -292,6 +302,7 @@ def scan(lines: list[str]) -> tuple[dict[str, list[tuple[int, Any, int]]], list[
         elif kind == 'mem_warning' and m: ev = (f'memory warning, {m.group(3)} MiB left', 'memory', float(m.group(1)))
         elif kind == 'controller' and m: ev = (f"controller '{m.group(1)}' {m.group(2)}", 'controller', None)
         elif kind == 'au_route' and m: ev = (f'audio route: {m.group(2)} ({m.group(1)})', 'audio', None)
+        elif kind == 'front_menu' and m: ev = (f'in-game menu {m.group(1)}' + (f' ({m.group(2)})' if m.group(2) else ''), 'menu', None)
         elif kind == 'launcher' and m and m.group(3) == 'in-game menu': ev = (f'{m.group(1)}={no_path(m.group(2))} (in-game menu)', 'menu', None)
         elif kind is None:
             hit = next(((what, k) for needle, what, k in EVENTS if needle in s), None)
@@ -355,12 +366,18 @@ def read(text: str, top: int = 5) -> Rec:
     out['frames'] = None
     if g['timing'] or on:
         shown, dropped = sum(int(m.group(2)) for m in on), sum(int(m.group(3)) for m in on)
+        ui_on = [WIN_UI.search(m.string) for m in on]; ui_t = [WIN_UI.search(m.string) for _, m, _ in g['timing']]   # the windows with frames made under the menu or out of focus
+        sh_ui = sum(int(m.group(2)) for m, u in zip(on, ui_on) if u); dr_ui = sum(int(m.group(3)) for m, u in zip(on, ui_on) if u)
         out['frames'] = {'windows': len(g['timing']), 'p50_ms': med(col('timing', 2)), 'p95_ms': med(col('timing', 3)), 'p95_worst_ms': max(col('timing', 3), default=None),
                          'max_ms': max(col('timing', 4), default=None), 'p99_onscreen_ms': med(col('onscreen', 5)), 'p99_onscreen_worst_ms': max(col('onscreen', 5), default=None),
                          'gpu_p50_ms': med([float(m.group(6)) for _, m, _ in g['timing'] if m.group(6)]), 'on_screen': shown, 'dropped': dropped,
                          'discarded': sum(int(m.group(4)) for m in on), 'dropped_pct': round(100 * dropped / shown, 2) if shown else None, 'fps': med([fps for _, fps in power]),
-                         'worst': [{'t_s': clock.at(int(m.group(1))), 'frame': int(m.group(1)), 'dropped': int(m.group(3)), 'p99_ms': float(m.group(5))}
-                                   for m in sorted(on, key=lambda m: -int(m.group(3)))[:top] if int(m.group(3))]}
+                         'worst': [{'t_s': clock.at(int(m.group(1))), 'frame': int(m.group(1)), 'dropped': int(m.group(3)), 'p99_ms': float(m.group(5)), 'front_end': bool(WIN_UI.search(m.string))}
+                                   for m in sorted(on, key=lambda m: -int(m.group(3)))[:top] if int(m.group(3))],
+                         # the timing windows' counts (frames made), and the dropped frames of the on-screen windows that had any such frame, then the rate without those windows
+                         'menu_frames': sum(int(u.group(1)) for u in ui_t if u), 'unfocused_frames': sum(int(u.group(2)) for u in ui_t if u),
+                         'front_end_windows': sum(1 for u in ui_on if u), 'dropped_front_end': dr_ui,
+                         'dropped_clean_pct': round(100 * (dropped - dr_ui) / (shown - sh_ui), 2) if shown - sh_ui else None}
     # power and heat
     out['power'] = None
     if power:
@@ -395,10 +412,13 @@ def read(text: str, top: int = 5) -> Rec:
         r: Rec = {'frame': int(m.group(1)), 't_s': float(m.group(2)), 'ms': float(m.group(3)), 'submit_ms': float(m.group(4)), 'gpu_ms': float(m.group(5)), 'pipelines': int(m.group(6)),
                   'libraries': int(m.group(7)), 'make_ms': float(m.group(8)), 'uploads': int(m.group(9)), 'reuploads': int(m.group(10)), 'upload_mb': float(m.group(11)),
                   'upload_ms': float(m.group(12)), 'hold': int(m.group(13)) if m.group(13) else None, 'vsync_ms': float(m.group(14)) if m.group(14) else None, 'i': i}
+        ui = LF_UI.search(m.string.rstrip())
+        if ui: r['front_end'] = ui.group(1)   # made with the in-game menu over the game or out of focus: counted apart
         r['causes'] = lf_causes(r, after, frame_ms); lfs.append(r)
     hold_frames(lfs, [(int(m.group(4)), int(m.group(2)), 1000 / 120 if m.group(3).startswith('ticks') else VSYNC_MS, int(m.group(1))) for _, m, _ in g['fstep']],
                 fstep_cut(g['fstep_cut']))
     held_at = {r['i'] for r in lfs if 'held_ms' in r}
+    ui_at = {r['i'] for r in lfs if 'front_end' in r and 'held_ms' not in r}
     for r in lfs: del r['i']
     # display-link latency
     win = [{'i': i, 't_s': clock.at(f or int(m.group(2))), 'p50': float(m.group(7)), 'max': float(m.group(9)), 'ahead': float(m.group(5)), 'ahead_min': float(m.group(6))}
@@ -411,21 +431,26 @@ def read(text: str, top: int = 5) -> Rec:
             j = k
             while j + 1 < len(win) and win[j + 1]['p50'] > lim: j += 1
             lo, hi = (win[k - 2]['i'] if k >= 2 else -1), win[k]['i']   # just before: since the window two before the first raised one
-            nlf = sum(1 for i, _, _ in g['longframe'] if lo < i < hi and i not in held_at); nh = sum(1 for i in held_at if lo < i < hi)
+            nlf = sum(1 for i, _, _ in g['longframe'] if lo < i < hi and i not in held_at and i not in ui_at); nh = sum(1 for i in held_at if lo < i < hi)
+            nui = sum(1 for i in ui_at if lo < i < hi)
             raised.append({'from_s': win[k - 1]['t_s'] if k else 0.0, 'to_s': win[j]['t_s'], 'windows': j - k + 1, 'p50_max_ms': max(x['p50'] for x in win[k:j + 1]),
                            'before': list(dict.fromkeys(e['what'] for e in events if lo < e['i'] < hi)) + ([nof(nlf, 'long frame')] if nlf else [])
-                           + ([nof(nh, 'frame') + ' at the hold the frame step asked'] if nh else []), 'to_the_end': j == len(win) - 1})
+                           + ([nof(nh, 'frame') + ' at the hold the frame step asked'] if nh else [])
+                           + ([nof(nui, 'long frame') + ' with the in-game menu open or out of focus'] if nui else []), 'to_the_end': j == len(win) - 1})
             k = j + 1
         lm = g['link'][-1][1]
         out['display_link'] = {'windows': len(win), 'frame_ms': round(frame_ms, 2), 'enqueue_p50_ms': base, 'enqueue_max_ms': max(x['max'] for x in win),
                                'ahead_p50_ms': med([x['ahead'] for x in win]), 'ahead_min_ms': min(x['ahead_min'] for x in win),
                                'empty_ticks': int(lm.group(3)), 'merged': int(lm.group(4)), 'raised': raised, 'p50_by_window': [[x['t_s'], x['p50']] for x in win]}
-    # long frames: the frames the frame step held as long as it asked are not counted (hold_frames)
-    by = collections.Counter(next(key for word, key in CAUSE_KEY if r['causes'][0].startswith(word)) for r in lfs if 'held_ms' not in r)
+    # long frames: the frames the frame step held as long as it asked are not counted (hold_frames), nor those made with the in-game menu over the game or out of focus (LF_UI):
+    # those are counted apart, by what the front end had over the game
+    game = [r for r in lfs if 'held_ms' not in r and 'front_end' not in r]
+    by = collections.Counter(next(key for word, key in CAUSE_KEY if r['causes'][0].startswith(word)) for r in game)
     mins_run = (out['duration_s'] or 0) / 60
-    nl = sum(by.values())
-    out['long_frames'] = {'count': nl, 'per_min': round(nl / mins_run, 2) if mins_run else None, 'by_cause': dict(by.most_common()), 'held': len(lfs) - nl,
-                          'top': sorted((r for r in lfs if 'held_ms' not in r), key=lambda r: -r['ms'])[:top]} if lfs else None
+    nl = sum(by.values()); ui_by = collections.Counter(r['front_end'] for r in lfs if 'held_ms' not in r and 'front_end' in r)
+    out['long_frames'] = {'count': nl, 'per_min': round(nl / mins_run, 2) if mins_run else None, 'by_cause': dict(by.most_common()), 'held': sum(1 for r in lfs if 'held_ms' in r),
+                          'front_end': sum(ui_by.values()), 'front_end_by': dict(ui_by.most_common()),
+                          'top': sorted(game, key=lambda r: -r['ms'])[:top]} if lfs else None
     # events
     sus = [e for e in events if e['what'] == 'graphics suspended'] or [e for e in events if e['what'] == 'background']
     res = [e for e in events if e['what'] == 'resumed']
@@ -547,7 +572,9 @@ def render(s: Rec, top: int) -> list[str]:
         row('frames', f"{f['windows']} windows: frame time p50 {g3(f['p50_ms'])} ms, p95 {g3(f['p95_ms'])} (worst window {g3(f['p95_worst_ms'])}), on screen p99 {g3(f['p99_onscreen_ms'])} "
                       f"(worst {g3(f['p99_onscreen_worst_ms'])}), longest {g3(f['max_ms'])} ms; GPU p50 {g3(f['gpu_p50_ms'])} ms",
             f"{f['on_screen']} frames on screen, {f['dropped']} dropped ({g3(f['dropped_pct'])}%), {f['discarded']} of them discarded; {g3(f['fps'])} fps (the power windows' median)",
-            'worst windows: ' + '; '.join(f"{w['t_s']:.0f} s {w['dropped']} dropped (p99 {w['p99_ms']:g} ms)" for w in f['worst']) if f['worst'] else '')
+            f"{f['menu_frames']} frames made with the in-game menu open, {f['unfocused_frames']} out of focus: {f['dropped_front_end']} of the dropped frames are in the "
+            f"{nof(f['front_end_windows'], 'window')} that had any; {g3(f['dropped_clean_pct'])}% dropped without those windows" if f['front_end_windows'] or f['menu_frames'] or f['unfocused_frames'] else '',
+            'worst windows: ' + '; '.join(f"{w['t_s']:.0f} s {w['dropped']} dropped (p99 {w['p99_ms']:g} ms{', in-game menu or out of focus' if w['front_end'] else ''})" for w in f['worst']) if f['worst'] else '')
     else: row('frames', 'no on-screen or timing lines (they come from NVN\'s present: a Vulkan or OpenGL game has none)')
     pw = s['power']
     if pw: row('power', f"CPU {g3(pw['watts_p50'])} W (median; {g3(pw['watts_mean'])} W over the run), {g3(pw['mj_per_frame_p50'])} mJ per frame, CPU {g3(pw['cpu_pct_p50'])}% of a core "
@@ -572,6 +599,8 @@ def render(s: Rec, top: int) -> list[str]:
         row('long frames', f"{lf['count']} ({g3(lf['per_min'])} a minute)" + (': ' + ', '.join(f'{k} {n}' for k, n in lf['by_cause'].items()) + ' (by what each spent its time on first)'
                                                                                if lf['by_cause'] else ''),
             f"not counted: {nof(lf['held'], 'frame')} as long as the frame step's hold of 2 or 3 vsyncs asked, just after a step up" if lf.get('held') else '',
+            f"not counted: {nof(lf['front_end'], 'frame')} made with the system drawing over the game (" + ', '.join(f'{k} {n}' for k, n in lf['front_end_by'].items()) + ')'
+            if lf.get('front_end') else '',
             *(f"{r['t_s']:.0f} s frame {r['frame']}: {r['ms']:g} ms, {'; '.join(r['causes'])}" for r in lf['top']))
     ev = s['events']
     row('events', f"in the background {nof(ev['background'], 'time')}, back {ev['resumed']}, {nof(ev['focus_changes'], 'focus change')}" + ('; the log ends in the background' if ev['ended_in_background'] else ''),
@@ -610,7 +639,8 @@ METRICS = (('commit', 'build.commit', 0), ('shader chain', 'build.chain', 0), ('
            ('bases written', 'pipelines.written.bases', 0), ('bases compiled while playing', 'pipelines.in_play.bases', 0),
            ('frame time p50 (ms)', 'frames.p50_ms', -1), ('frame time p95 (ms)', 'frames.p95_ms', -1), ('worst window p95 (ms)', 'frames.p95_worst_ms', -1),
            ('on-screen p99 (ms)', 'frames.p99_onscreen_ms', -1), ('worst window p99 (ms)', 'frames.p99_onscreen_worst_ms', -1), ('longest frame (ms)', 'frames.max_ms', -1),
-           ('dropped (%)', 'frames.dropped_pct', -1), ('frames per second', 'frames.fps', 1), ('GPU p50 (ms)', 'frames.gpu_p50_ms', -1),
+           ('dropped (%)', 'frames.dropped_pct', -1), ('dropped, menu / focus windows out (%)', 'frames.dropped_clean_pct', -1), ('frames per second', 'frames.fps', 1),
+           ('GPU p50 (ms)', 'frames.gpu_p50_ms', -1), ('frames with the in-game menu open', 'frames.menu_frames', 0),
            ('CPU W (median)', 'power.watts_p50', -1), ('CPU W (over the run)', 'power.watts_mean', -1), ('mJ per frame', 'power.mj_per_frame_p50', -1), ('CPU % of a core', 'power.cpu_pct_p50', -1),
            ('on performance cores (%)', 'power.pcore_pct_p50', 0), ('wakeups per second', 'power.wakeups_p50', -1), ('GPU ms/s', 'power.gpu_ms_s_p50', -1), ('thermal state at most', 'power.thermal_max', -1),
            ('footprint, last (MB)', 'memory.footprint_mb.last', 0), ('footprint, most (MB)', 'memory.footprint_mb.max', 0), ('footprint plateaus', 'memory.footprint_mb.plateaus', 0),
@@ -623,7 +653,8 @@ METRICS = (('commit', 'build.commit', 0), ('shader chain', 'build.chain', 0), ('
            ('shared textures, last', 'memory.shared_textures.last', 0), ('shared textures drift / 10 min', 'memory.shared_textures.drift_per_10min', -1),
            ('enqueue to display p50 (ms)', 'display_link.enqueue_p50_ms', -1), ('enqueue to display, most (ms)', 'display_link.enqueue_max_ms', -1),
            ('submission ahead p50 (ms)', 'display_link.ahead_p50_ms', 0), ('stretches a frame above', 'display_link.raised', -1),
-           ('long frames', 'long_frames.count', 0), ('long frames per minute', 'long_frames.per_min', -1), ('frames at the step\'s hold', 'long_frames.held', 0), ('background / back', 'events.background', 0), ('focus changes', 'events.focus_changes', 0),
+           ('long frames', 'long_frames.count', 0), ('long frames per minute', 'long_frames.per_min', -1), ('frames at the step\'s hold', 'long_frames.held', 0),
+           ('long frames under the menu / out of focus', 'long_frames.front_end', 0), ('background / back', 'events.background', 0), ('focus changes', 'events.focus_changes', 0),
            ('audio underruns', 'audio.underruns', -1), ('audio I/O buffer, most (ms)', 'audio_output.io_buffer_ms_max', -1),
            ('audio output latency, most (ms)', 'audio_output.output_latency_ms_max', -1), ('save commits', 'saves.commits', 0),
            ('VideoToolbox sessions made again', 'movies.vt_rebuilds', 0), ('[RED] lines', 'red.lines', -1), ('[RED] kinds', 'red.kinds', -1))

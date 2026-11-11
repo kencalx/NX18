@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# scripts/devlog.py: the long frames the frame step's own holds make (not counted), and memory read as plateaus between the steps an area load makes, the graphics ledger and guest charged among them, from logs written here; the movie lines (AAC channel order, VideoToolbox sessions made again) from the host's own formats
+# scripts/devlog.py: the long frames the frame step's own holds make (not counted), those made under the in-game menu or out of focus (counted apart), and memory read as plateaus between the steps an area load makes, the graphics ledger and guest charged among them, from logs written here; the movie lines (AAC channel order, VideoToolbox sessions made again) from the host's own formats
 import importlib.util, re, unittest
 from pathlib import Path
 
@@ -114,6 +114,82 @@ class HoldFrames(unittest.TestCase):
         rows = {r['label']: r for r in devlog.compare(a, b)['rows']}
         self.assertEqual((rows["frames at the step's hold"]['a'], rows["frames at the step's hold"]['b']), (8, 0))
         self.assertEqual((rows['long frames']['a'], rows['long frames']['b']), (0, 1))
+
+
+def timing(f: int, note: str = '') -> str:   # a timing window line as tsummary writes it; note: front_ui_note's tail, without its leading ";" (the items end with one)
+    return (f'[dm] [nvn] timing up to frame {f}: frame time p50 16.67 / p95 17.20 / max 40.00 ms (300 frames); GPU p50 7.00 / p95 9.00 / max 50.00 ms (300 frames);'
+            + (f' {note}' if note else ''))
+
+
+def onscreen(f: int, dropped: int, note: str = '') -> str:   # an on-screen window line; note: front_ui_note's tail, as written
+    return f'[dm] [nvn] on-screen up to frame {f}: 300 frames, dropped {dropped} (discarded 0), p99 {16.7 + dropped:.2f} ms; footprint 2000 MiB; brightness 0.50; thermal 0{note}'
+
+
+def ui_note(menu: int, away: int) -> str: return f'; in-game menu open {menu} frames, not in focus {away} frames'
+
+
+class FrontEnd(unittest.TestCase):   # frames made while the in-game menu (or a Mac menu) was over the game, or out of focus (hle_nvn.c front_ui): counted apart from the game's
+    def test_formats_match_the_producer(self):   # the tags and the window note hle_nvn.c writes are what devlog reads; the long-frame line still reads with a hold and a tag
+        src = (REPO / 'dm/gfx/nvn/hle_nvn.c').read_text(errors='replace')
+        tag = re.search(r'static const char \*front_ui_tag\(unsigned ui\) \{ return ([^;]*);', src); note = re.search(r'snprintf\(b, cap, "(; in-game menu open %u frames, not in focus %u frames)"', src)
+        self.assertTrue(tag and note, 'front_ui_tag and front_ui_note in hle_nvn.c')
+        assert tag and note
+        tags = [t for t in re.findall(r'"([^"]*)"', tag.group(1)) if t]
+        self.assertEqual(tags, [' (in-game menu open, not in focus)', ' (in-game menu open)', ' (not in focus)'])
+        base = lf(1234, 45.0, hold=1)
+        for t in tags:
+            m = devlog.RX['longframe'].search(base[len('[dm] '):] + t)
+            self.assertTrue(m); assert m
+            self.assertEqual((m.group(1), m.group(13)), ('1234', '1'))
+            u = devlog.LF_UI.search(m.string)
+            self.assertTrue(u); assert u
+            self.assertEqual(' (' + u.group(1) + ')', t)
+        self.assertIsNone(devlog.LF_UI.search(base))
+        w = devlog.WIN_UI.search(note.group(1) % (42, 7)); self.assertTrue(w); assert w
+        self.assertEqual((w.group(1), w.group(2)), ('42', '7'))
+        self.assertIn('LOG("[nvn] timing up to frame %llu:%s%s", frame, line, uin + (*uin ? 1 : 0));', src)   # the note after the items' last ";"
+        self.assertIn('brightness %.2f; thermal %d%s"', src)   # and at the end of the on-screen line
+        for line, kind in ((timing(600, ui_note(42, 7)[2:]), 'timing'), (onscreen(600, 3, ui_note(42, 7)), 'onscreen')):
+            m = devlog.RX[kind].search(line[len('[dm] '):])
+            self.assertTrue(m, line); assert m
+            self.assertEqual(m.group(1), '600')
+
+    def test_long_frames_apart(self):   # a tagged long frame is not the game's: not in the count, the causes or the longest, but counted apart by its tag
+        s = read([lf(100, 80.0), lf(200, 60.0, gpu=50.0) + ' (in-game menu open)', lf(201, 45.0, gpu=40.0) + ' (in-game menu open)', lf(300, 50.0, hold=1) + ' (not in focus)',
+                  lf(400, 33.0, hold=2) + ' (in-game menu open, not in focus)'])
+        lfs = s['long_frames']
+        self.assertEqual((lfs['count'], lfs['held'], lfs['front_end']), (1, 1, 3))   # the frame at its hold of 2 is the hold's, tagged or not
+        self.assertEqual(lfs['front_end_by'], {'in-game menu open': 2, 'not in focus': 1})
+        self.assertEqual([r['frame'] for r in lfs['top']], [100]); self.assertEqual(lfs['by_cause'], {'game': 1})
+        text = '\n'.join(devlog.render(s, 5))
+        self.assertIn('long frames  1 (', text)
+        self.assertIn('not counted: 3 frames made with the system drawing over the game (in-game menu open 2, not in focus 1)', text)
+        rows = {r['label']: r for r in devlog.compare(s, read([lf(100, 80.0)]))['rows']}
+        self.assertEqual((rows['long frames under the menu / out of focus']['a'], rows['long frames under the menu / out of focus']['b']), (3, 0))
+
+    def test_windows_and_drops(self):   # the windows' counts, and the dropped frames given without the windows that had such frames
+        s = read([timing(300), onscreen(300, 1), timing(600, ui_note(120, 0)[2:]), onscreen(600, 30, ui_note(118, 0)), timing(900, ui_note(0, 40)[2:]), onscreen(900, 9, ui_note(0, 42)),
+                  timing(1200), onscreen(1200, 2)])
+        f = s['frames']
+        self.assertEqual((f['dropped'], f['menu_frames'], f['unfocused_frames'], f['front_end_windows'], f['dropped_front_end']), (42, 120, 40, 2, 39))
+        self.assertEqual((f['dropped_pct'], f['dropped_clean_pct']), (3.5, 0.5))
+        self.assertEqual([(w['frame'], w['front_end']) for w in f['worst']], [(600, True), (900, True), (1200, False), (300, False)])
+        text = '\n'.join(devlog.render(s, 5))
+        self.assertIn('120 frames made with the in-game menu open, 40 out of focus: 39 of the dropped frames are in the 2 windows that had any; 0.5% dropped without those windows', text)
+        self.assertIn('30 dropped (p99 46.7 ms, in-game menu or out of focus)', text)
+
+    def test_menu_events(self):   # the front end's open and close lines are events, on the Mac with the menu bar named
+        s = read(['[dm] front end: in-game menu open', '[dm] front end: in-game menu closed after 2.4 s', '[dm] front end: in-game menu open (menu bar)',
+                  '[dm] front end: in-game menu closed (menu bar) after 0.8 s'])
+        self.assertEqual([e['what'] for e in s['events']['list']], ['in-game menu open', 'in-game menu closed', 'in-game menu open (menu bar)', 'in-game menu closed (menu bar)'])
+
+    def test_old_logs_read_as_before(self):   # no tag and no note: nothing apart, the rate without such windows is the rate, no line of text for it
+        s = read([timing(300), onscreen(300, 3), lf(100, 80.0)])
+        f, lfs = s['frames'], s['long_frames']
+        self.assertEqual((f['menu_frames'], f['front_end_windows'], f['dropped_clean_pct'], f['dropped_pct']), (0, 0, 1.0, 1.0))
+        self.assertEqual((lfs['count'], lfs['front_end']), (1, 0))
+        text = '\n'.join(devlog.render(s, 5))
+        self.assertNotIn('in-game menu', text); self.assertNotIn('drawing over the game', text)
 
 
 class Plateaus(unittest.TestCase):

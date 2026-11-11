@@ -124,11 +124,13 @@ final class DuoShortcutTests: XCTestCase {
         XCTAssertEqual(pad.value(forKey: "menuOpen") as? Bool, false)
         _ = pad.perform(NSSelectorFromString("menuOpenNow"))   // what dm_gamepad_menu_open asks of the app's one pad (here other tests make pads of their own, and the last one made is the one it asks)
         waitUntil("The in-game menu opened") { pad.value(forKey: "menuOpen") as? Bool == true }
+        XCTAssertEqual(duo_harness_front_menu(), 1, "The host heard the menu open (its log line, the long-frame tag)")
         XCTAssertFalse(button.isHidden)
         XCTAssertEqual(button.alpha, 1)
         button.contextMenuInteraction?.dismissMenu()   // closed again for the tests after this one; a dismissal from code need not reach the button's willEnd, so the pad hears it here
         _ = pad.perform(NSSelectorFromString("menuClosed"))
         XCTAssertEqual(pad.value(forKey: "menuOpen") as? Bool, false)
+        XCTAssertEqual(duo_harness_front_menu(), 0, "and close")
     }
 
     // One press on a hidden virtual controller, which the settings screen polls (LauncherGamepad): a Switch button (the pad is not a Nintendo one, so A is its right button) or a D-pad direction

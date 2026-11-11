@@ -1325,6 +1325,21 @@ int main(void) {
         EXPECT("several rows whose alignment would break the wrapped address: refused", 0, nvn_tbuf_rows(20000, 4, 3, &w, &h, &row));
     }
 
+    // 9. What the front end had over the game, for the long-frame tag and the 300-frame windows (front_ui; diagnostics only). The unit test links no host: no menu (the weak
+    // dm_front_menu_now) and in focus (nvn_mtl.m's weak dm_focus_now), so nothing is tagged. The texts are the ones scripts/devlog.py reads (dm/tools/tests/test_devlog.py)
+    {
+        EXPECT("front_ui without a host: nothing over the game", 0, front_ui());
+        EXPECT("tag of a frame made with nothing over it: none", 1, !strcmp(front_ui_tag(0), ""));
+        EXPECT("tag under the in-game menu", 1, !strcmp(front_ui_tag(FRONT_MENU), " (in-game menu open)"));
+        EXPECT("tag out of focus", 1, !strcmp(front_ui_tag(FRONT_AWAY), " (not in focus)"));
+        EXPECT("tag under both", 1, !strcmp(front_ui_tag(FRONT_MENU | FRONT_AWAY), " (in-game menu open, not in focus)"));
+        unsigned n[2] = {0, 0}; char t[96] = "x";
+        front_ui_note(t, sizeof t, n); EXPECT("window note with no such frame: empty (the line reads as before)", 1, !strcmp(t, ""));
+        front_ui_count(n, 0); front_ui_count(n, FRONT_MENU); front_ui_count(n, FRONT_MENU | FRONT_AWAY); front_ui_count(n, FRONT_AWAY); front_ui_count(n, FRONT_MENU);
+        EXPECT("frames counted under the menu", 3, n[0]); EXPECT("frames counted out of focus", 2, n[1]);
+        front_ui_note(t, sizeof t, n); EXPECT("window note", 1, !strcmp(t, "; in-game menu open 3 frames, not in focus 2 frames"));
+    }
+
     printf("== %d checks, %d failed ==\n", g_n, g_fail);
     return g_fail != 0;
 }

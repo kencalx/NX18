@@ -66,6 +66,13 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
 // 0: closed (B, Escape); -1 with no window: nothing shown, the caller answers as the player closing it
 int front_ctrl_support(int min, int max);
 
+// The front end's own menu over the running game (hle_oe.c; diagnostics only, the game sees nothing): the iOS front end reports its in-game menu (the gear button's, DmGamepad.m)
+// opening and closing, the Mac front end a menu of its menu bar (where = "menu bar"; NULL or "" names nothing). Each change is one log line, "front end: in-game menu open" or
+// "... closed after N s"; a repeat of the same state is ignored. Call it on the main thread. dm_front_menu_now: 1 while the menu is open and for half a second after it closes
+// (its dismissal is still drawn), from any thread; the present path tags its long frames and its 300-frame windows with it (hle_nvn.c front_ui)
+void dm_front_menu_set(int open, const char *where);
+int dm_front_menu_now(void);
+
 // Early start of host loading (main.c): reading the NSO / relocation / forced takeover / prefetch start are moved to a background thread, in parallel with the front end (UIKit launch chain, Metal view);
 // the dm_main / main called afterwards waits for it to finish. For call timing and preconditions see the comments in main.c (set DM_ROMFS and the other environment variables and the cwd first; arguments identical item by item to those of the later main).
 void dm_host_preload_start(int argc, char **argv);

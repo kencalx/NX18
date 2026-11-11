@@ -1932,8 +1932,27 @@ __attribute__((weak)) int dm_thermal_now(void) { return -1; }   // Default (Mac)
 __attribute__((weak)) int dm_low_power_now(void) { return 0; }   // Low Power Mode (iOS front_ios.m); off on the Mac
 // Per-frame ring for the long-frame log (GPU time only arrives 8 frames late, so store first and judge later)
 #define LFN 16
-typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup, hy, hold; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline; hold: the vsyncs the frame was made under
+typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup, hy, hold, ui; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline; hold: the vsyncs the frame was made under; ui: front_ui then
 static lf_rec g_lf[LFN];
+// What the front end had over the game when a frame was made (diagnostics only: nothing is decided on it). FRONT_MENU: its own menu was open or still closing (the iPhone's
+// in-game menu, a menu of the Mac's menu bar: front.h dm_front_menu_now); FRONT_AWAY: the app was not in focus (dm_focus_now() != 1: Control Center, a notification pulled
+// down, another window key on the Mac, on the way to the background). In both the system draws over the game on the same GPU: 13 Sentinels on an iPhone 18 Pro Max had
+// game frames at 19-56 ms of GPU time against about 7 ms, and bursts of dropped frames, while the player used the in-game menu, and 17-23 ms after losing focus, and nothing in the
+// log told those frames from the game's own. The long-frame line of such a frame ends with "(in-game menu open)", "(not in focus)" or both, and the 300-frame timing and
+// on-screen lines say how many of their frames were made so (front_ui_note); scripts/devlog.py keeps them apart. A long frame is judged 8 frames after it was made (its GPU
+// time is back by then), and the state of both moments counts: the system's drawing lands on the frames around a change, not on one. Two or three atomic loads a frame while nothing is over
+// the game (hle_oe.c keeps the menu's half-second tail without a clock read once it is over). The weak default is for the graphics unit tests, which link no host; dm_focus_now's
+// is in nvn_mtl.m
+enum { FRONT_MENU = 1, FRONT_AWAY = 2 };
+__attribute__((weak)) int dm_front_menu_now(void) { return 0; }
+int dm_focus_now(void);
+static unsigned front_ui(void) { return (dm_front_menu_now() ? FRONT_MENU : 0u) | (dm_focus_now() != 1 ? FRONT_AWAY : 0u); }
+static unsigned g_ui_tw[2], g_ui_pw[2];   // frames of the current timing window / presents of the current on-screen window made under FRONT_MENU, FRONT_AWAY
+static void front_ui_count(unsigned n[2], unsigned ui) { n[0] += (ui & FRONT_MENU) != 0; n[1] += (ui & FRONT_AWAY) != 0; }
+static const char *front_ui_tag(unsigned ui) { return (ui & 3) == 3 ? " (in-game menu open, not in focus)" : ui & FRONT_MENU ? " (in-game menu open)" : ui & FRONT_AWAY ? " (not in focus)" : ""; }
+static void front_ui_note(char *b, size_t cap, const unsigned n[2]) {   // a window line's tail: nothing when no frame of it was made under either (scripts/devlog.py RX_UI)
+    if (n[0] || n[1]) snprintf(b, cap, "; in-game menu open %u frames, not in focus %u frames", n[0], n[1]); else if (cap) *b = 0;
+}
 __attribute__((weak)) void dm_longframe_note(const char *what) { LOG("[longframe] %s", what); }   // Default (graphics unit tests); the strong definition in the host's diag.c adds scene context and writes perf.txt
 extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
 static const char *const g_tname[6] = {"frame time", "frame work", "NVN submit+present", "GPU", "translation layer recording", "translation layer submit"};
@@ -2017,7 +2036,8 @@ static void tsummary(uint64_t frame) {
         double v[TWIN]; memcpy(v, g_tw[k], n * sizeof *v); qsort(v, n, sizeof *v, dcmp);
         o += snprintf(line + o, sizeof line - o, " %s p50 %.2f / p95 %.2f / max %.2f ms (%u frames);", g_tname[k], v[n / 2], v[(n * 95) / 100 < n ? (n * 95) / 100 : n - 1], v[n - 1], n);
     }
-    LOG("[nvn] timing up to frame %llu:%s", frame, line);
+    char uin[96]; front_ui_note(uin, sizeof uin, g_ui_tw); memset(g_ui_tw, 0, sizeof g_ui_tw);
+    LOG("[nvn] timing up to frame %llu:%s%s", frame, line, uin + (*uin ? 1 : 0));   // the timing items end with ";": the note follows after one space
     { void mtl_pso_line(char *, size_t); char pl[1024]; mtl_pso_line(pl, sizeof pl); LOG("[nvn] pipelines up to frame %llu: %s", frame, pl); }
     double tgt = 1000.0 / mtl_fps_target();   // milliseconds one frame should take: 16.7 at 60 fps, 33.3 when the game itself asks for 30 (the over-time / dropped-frame counts below use it)
     { unsigned n = g_tn[0] < TWIN ? g_tn[0] : TWIN, over = 0; double v[TWIN];   // frame interval gets its own line (M1 baseline): number of frames longer than one frame period in this window and p99
@@ -2027,8 +2047,9 @@ static void tsummary(uint64_t frame) {
       for (unsigned i = 0; i < n; i++) { double x = g_pres_iv[i]; if (x < 0) { drop++; discard++; } else if (x > 0) { v[k++] = x; drop += x > g_pres_exp[i] * 1.5; } }
       task_vm_info_data_t vi; mach_msg_type_number_t vc = TASK_VM_INFO_COUNT; double fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &vc) == KERN_SUCCESS ? vi.phys_footprint / 1048576.0 : -1;
       double br = dm_brightness_now();   // footprint / brightness are carried on the on-screen present row: does not depend on the tick-entry observation gate (camp runs have it too)
-      if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; footprint %.0f MiB; brightness %.2f; thermal %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], fp, br, dm_thermal_now()); }
-      g_presn = 0; }
+      char pun[96]; front_ui_note(pun, sizeof pun, g_ui_pw);   // presents of this window made with the front end's menu over the game or out of focus: their drops may be the system's drawing
+      if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; footprint %.0f MiB; brightness %.2f; thermal %d%s", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], fp, br, dm_thermal_now(), pun); }
+      g_presn = 0; memset(g_ui_pw, 0, sizeof g_ui_pw); }
     power_line(frame);
     { static uint64_t prev[8], pf; uint64_t v[8]; mtl_vbuf_stats(&v[0], &v[1], &v[2], &v[3], &v[4], &v[5]); mtl_ft_stats(&v[6], &v[7]);
       if (pf && frame > pf) { double nf = (double)(frame - pf);
@@ -2470,6 +2491,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
     uint64_t f = g_frame, ps, dr; mtl_stats(&ps, &dr);
+    const unsigned fui = front_ui();   // what the front end has over the game at this present (diagnostics: the long-frame tag and the windows' counts)
     if (nvn_real[0] || nvn_real[1]) {   // DM_NVN_PROF: record phase = time of all implemented functions except submit; submit phase = QueueSubmitCommands
         static unsigned isub = ~0u; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
         if (isub == ~0u) for (isub = 0; isub < NVN_NFUNC && strcmp(nvn_names[isub], "nvnQueueSubmitCommands"); isub++) {}
@@ -2524,6 +2546,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
             lf_rec *r = &g_lf[f % LFN]; r->f = f; r->fr = fr; r->nv = nv; r->t_s = (now_ns() - g_t0_ns) / 1e9; r->pso = (unsigned)(pso_ - ppso); r->lib = (unsigned)(lib_ - plib);
             r->make_ms = ((lns - plns) + (pns - ppns)) / 1e6; r->up = (unsigned)(up - pup); r->rup = (unsigned)(rup - prup); r->up_mb = (ub - pub) / 1048576.0; r->up_ms = up_ms;
             r->hy = (unsigned)(hy - phy); plns = lns; ppns = pns; pup = up; prup = rup; pub = ub; phy = hy;
+            r->ui = fui; front_ui_count(g_ui_tw, fui);   // the frame is counted in the timing window it is pushed to (tpush above)
             // The hold this frame was made under is the previous present's: the acquire before this frame waited out that present's period (g_hold_ring is written at the end of each present)
             r->hold = o->presents > 1 && g_hold_ring[(o->presents - 1) % 16] ? g_hold_ring[(o->presents - 1) % 16] : 1;
         }
@@ -2548,7 +2571,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
               // A frame made under a longer hold says so, with the length it asked for (scripts/devlog.py reads it): such a frame ran past its hold, not past one vsync. While the
               // frame step runs every line says its hold, 1 too, so devlog reads a line of this host as it is and never guesses holds from runs of long frames, which would hide
               // a frame of hold 1 that took two or three vsyncs on the game's side
-              if ((held > 0 || fstep_on()) && n > 0 && (size_t)n < sizeof b) snprintf(b + n, sizeof b - (size_t)n, "; hold %u × %.1f ms", r->hold, 1000.0 / fstep_hz());
+              if ((held > 0 || fstep_on()) && n > 0 && (size_t)n < sizeof b) n += snprintf(b + n, sizeof b - (size_t)n, "; hold %u × %.1f ms", r->hold, 1000.0 / fstep_hz());
+              // Made with the front end's menu over the game or out of focus, when it was made or by the time it is judged (front_ui): the line says so last, and devlog keeps it apart
+              if (n > 0 && (size_t)n < sizeof b) snprintf(b + n, sizeof b - (size_t)n, "%s", front_ui_tag(r->ui | fui));
               // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
               dm_longframe_note(b); } }
         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
@@ -2570,6 +2595,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         if (a_ < 0) trow(f - 8, "@presented_ms", -1); else if (a_ > 0 && b_ > 0) trow(f - 8, "@presented_ms", (a_ - b_) * 1e3);
         g_pres_exp[g_presn % TWIN] = g_pres_exp_last = pres_expect_ms(n);
         g_pres_iv[g_presn++ % TWIN] = a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0);
+        { lf_rec *r = &g_lf[(f - 8) % LFN]; front_ui_count(g_ui_pw, (f >= 8 && r->f == f - 8 ? r->ui : 0) | fui); }   // this interval shows the frame made 8 presents back: its state and now's, as a long frame's
         { double iv_ = a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0); mtl_ub_present(iv_); }   // same-process alternating measurement (DM_NVN_UB) tallies on-screen present intervals per phase; when off it is just one atomic read
         dm_perf_present(a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0));   // on-screen present intervals are also kept in a separate ring; tsummary reports dropped frames every 300 frames (M1 criterion)
         if (a_ > 0) trow(f - 8, "@pres_at_ms", a_ * 1e3 - g_t0_ns / 1e6);   // on-screen present time (ms since process start; presentedTime shares a time base with mach_absolute_time)

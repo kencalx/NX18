@@ -94,6 +94,35 @@ void dm_focus_set(int st) {
     if (atomic_exchange(&g_focus, st) == st) return;
     focus_sync(0);
 }
+// The front end's own menu over the running game (front.h dm_front_menu_set): on the iPhone and iPad the in-game menu of the gear button (DmGamepad.m menuOpened / menuClosed), on
+// the Mac a menu of the menu bar (front_mac.m, the Cheats and Window menus). Diagnostics only: nothing the game sees changes, it keeps running under the menu as before. The
+// reason it is kept at all is the log. 13 Sentinels on an iPhone 18 Pro Max showed five clusters of game frames at 19-56 ms of GPU time (about 7 ms otherwise) and bursts of
+// dropped frames while the player used the in-game menu: UIKit draws the menu, its blur and its open and close animations through the render server on the same GPU as the game's
+// command buffers. Nothing in log.txt said the menu was open, so the reading blamed the game. Now the log says when it opens and closes, and the long-frame lines and the
+// 300-frame windows (hle_nvn.c front_ui) say which of their frames were made under it.
+// "Open" lasts FRONT_MENU_TAIL_NS past the close: UIKit reports the end (contextMenuInteraction:willEndForConfiguration:) as the dismissal animation starts, and that animation
+// is still drawn over the game for about a third of a second. The present thread reads the state once a frame: two atomic loads while the menu is shut and its tail is over
+// (g_front_menu_tail is cleared on the first read past it), a clock read only during the tail. The front end calls the setter on its main thread
+#define FRONT_MENU_TAIL_NS 500000000ull
+static _Atomic int g_front_menu; static _Atomic uint64_t g_front_menu_tail, g_front_menu_since;   // open; the end of the tail after the last close (0: none); when it last opened
+void dm_front_menu_set(int open, const char *where) {
+    open = open != 0;
+    if (atomic_exchange(&g_front_menu, open) == open) return;   // a second report of the same state (DmGamepad.m hears a close from willEnd and from the next touch)
+    uint64_t t = now_ns();
+    const char *w = where && *where ? where : NULL;
+    if (open) { atomic_store(&g_front_menu_since, t); atomic_store(&g_front_menu_tail, 0); LOG("front end: in-game menu open%s%s%s", w ? " (" : "", w ? w : "", w ? ")" : ""); return; }
+    atomic_store(&g_front_menu_tail, t + FRONT_MENU_TAIL_NS);
+    uint64_t since = atomic_load(&g_front_menu_since);
+    LOG("front end: in-game menu closed%s%s%s after %.1f s", w ? " (" : "", w ? w : "", w ? ")" : "", since && t >= since ? (t - since) / 1e9 : 0.0);
+}
+int dm_front_menu_now(void) {   // 1 while the front end's menu is open or its closing is still drawn (FRONT_MENU_TAIL_NS); any thread
+    if (atomic_load_explicit(&g_front_menu, memory_order_relaxed)) return 1;
+    uint64_t tail = atomic_load_explicit(&g_front_menu_tail, memory_order_relaxed);
+    if (!tail) return 0;
+    if (now_ns() < tail) return 1;
+    atomic_compare_exchange_strong(&g_front_menu_tail, &tail, 0);   // over: later reads take the one load above (a newer close's tail, stored meanwhile, is not touched)
+    return 0;
+}
 static int opmode(void) { return dm_opmode(); }
 
 // Screenshot / video recording switches: the host has no system screenshot service, no-op
