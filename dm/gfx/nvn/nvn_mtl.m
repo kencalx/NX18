@@ -269,9 +269,9 @@ static NSError *gpu_lost_test_error(void) {
 static pthread_mutex_t g_res_mu = PTHREAD_MUTEX_INITIALIZER;   // Dedicated lock for the residency set: res_add is called on paths that hold g_mu (arena_new), so it cannot share g_mu
 // Wait ledger (DM_NVN_WAITS=1): every place a thread of the host or the game waits on the CPU for the GPU or for the encode thread, counted per frame (calls, calls that blocked,
 // the time they blocked) and logged every 300 frames with the frame's GPU idle. The game's own SyncWait is split by how far its fence is behind the newest one (0: the last submission)
-enum { WS_SYNC, WS_SYNC_NEWEST, WS_SYNC_POLL, WS_ACQ, WS_FINISH, WS_ALLOC, WS_VIS, WS_MDI, WS_READTEX, WS_T2T, WS_DIAG, WS_SNAP, WS_UPZERO, WS_UPALLOC, WS_DRAIN, WS_UBC, WS_ONCE, WS_POST, WS_N };
+enum { WS_SYNC, WS_SYNC_NEWEST, WS_SYNC_POLL, WS_ACQ, WS_FINISH, WS_ALLOC, WS_VIS, WS_MDI, WS_READTEX, WS_T2T, WS_DIAG, WS_SNAP, WS_UPZERO, WS_UPALLOC, WS_DRAIN, WS_UBC, WS_ONCE, WS_POST, WS_SNAPCOPY, WS_N };
 static const char *const ws_name[WS_N] = {"SyncWait (game, older fence)", "SyncWait (game, newest fence)", "SyncWait polls", "SyncWait on an acquire sync", "QueueFinish", "allocator", "occlusion ring",
-    "indirect-count multi-draw", "texture readback", "texture copy t2t", "diagnostics", "snapshot ring", "upload batches", "upload slot", "encode thread drain", "uniform copy worker", "one-off command buffer", "post ring"};
+    "indirect-count multi-draw", "texture readback", "texture copy t2t", "diagnostics", "snapshot ring", "upload batches", "upload slot", "encode thread drain", "uniform copy worker", "one-off command buffer", "post ring", "snapshot copy"};
 static _Atomic uint64_t g_ws_n[WS_N], g_ws_blk[WS_N], g_ws_ns[WS_N];
 static int ws_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_WAITS"); v = e && atoi(e) > 0; } return v; }
 static inline uint64_t ws_t0(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
@@ -17443,7 +17443,7 @@ extern _Atomic uint64_t dm_present_ns;   // hle_thread.c (DM_HITCH_DUMP); every 
 // tick, so the next frame's CPU work starts on the tick and the GPU idles from the end of one frame to the first work of the next. macOS reads that idle time as room and holds the GPU
 // at its lowest clock (444 MHz on an M2 Max) even while frames miss the screen, and there 12 ms of GPU work a frame plus the time to the frame's first submission often missed 16.7 ms.
 // With snapshots each present is copied on the game's queue, right after the frame's work, into a texture of the host's own (a ring of g_snap_n), the display link shows the copy, and
-// the game's texture is free at once: the game runs up to a frame ahead of the screen, and a frame whose GPU work runs long is absorbed instead of shown late. A ring slot is reused
+// the game's texture is free once its copy has run on the GPU, not when the screen has shown it: the game runs up to a frame ahead of the screen, and a frame whose GPU work runs long is absorbed instead of shown late. A ring slot is reused
 // once its present has been processed and its copy has completed; AcquireTexture waits for that capacity and counts it as pacing, not as the frame's cost.
 // A present that reaches a busy slot (several textures acquired ahead of time) keeps the original texture and its ticket instead of waiting while the game may hold a lock.
 // With Metal encoding on its own thread (DM_NVN_ENC_THREAD) the copy is a block of the encode thread's queue (rec_own_push): it runs behind everything the game submitted before
@@ -17608,10 +17608,12 @@ void mtl_present_progress(uint64_t *queued, uint64_t *done) { pthread_mutex_lock
 // worker has replayed that present, then ran a frame further ahead of the GPU per ring slot, and one that sizes its
 // CPU-written per-frame buffers on the swapchain's depth rewrote data a queued frame's draws still read: Xenoblade Chronicles 3's scene came out one flat colour in a
 // third to a half of the frames (2 slots 32/80, 4 slots 49/80, snapshots off 0/80; LNPANDY/NX2Apple#1117)
+// The wait for the copy is a CPU wait for the GPU: the ledger counts it as "snapshot copy" (WS_SNAPCOPY), apart from the ring slot's (WS_SNAP)
 void mtl_present_wait_texture(uint64_t tk, uint64_t ev) {
     if (!ev) { mtl_present_wait(tk); return; }
-    if (atomic_load(&g_present_discard) || g_snap_ev.signaledValue >= ev) return;
-    if (![g_snap_ev waitUntilSignaledValue:ev timeoutMS:2000]) RED_ONCE(169, "present snapshots: a texture's copy did not finish within 2 s; the game draws into it again");
+    uint64_t w0 = ws_t0(); int blocked = !atomic_load(&g_present_discard) && g_snap_ev.signaledValue < ev;
+    if (blocked && ![g_snap_ev waitUntilSignaledValue:ev timeoutMS:2000]) RED_ONCE(169, "present snapshots: a texture's copy did not finish within 2 s; the game draws into it again");
+    if (ws_on()) ws_put(WS_SNAPCOPY, w0, blocked);
 }
 void mtl_present_wait(uint64_t tk) {
     pthread_mutex_lock(&g_pq_mu);

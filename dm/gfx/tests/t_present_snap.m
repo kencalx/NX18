@@ -186,8 +186,9 @@ static void ticket_case(void) {
     CHECK("the first texture's receipt names its copy", ev0 == copies + 1);
     h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx);   // (it also takes the stalled display link's pacing wait, as any acquire with snapshots does)
     CHECK("acquiring the first texture again waited for its copy", idx == 0 && g_snap_ev.signaledValue >= ev0);
-    // the second texture's copy is still behind the gate: its acquire must hold until the gate opens
+    // the second texture's copy is still behind the gate: its acquire must hold until the gate opens, and the wait ledger counts that wait as the snapshot copy's
     h_nvnQueuePresentTexture(&fixture_queue, (NVNwindow *)&win, idx);
+    uint64_t copy_blocked = atomic_load(&g_ws_blk[WS_SNAPCOPY]);
     acquire_job job = {.window = &win, .started = dispatch_semaphore_create(0), .done = dispatch_semaphore_create(0)};
     pthread_t thread; if (pthread_create(&thread, NULL, acquire_thread, &job)) { gpu_gate.signaledValue = 1; exit(2); }
     dispatch_semaphore_wait(job.started, DISPATCH_TIME_FOREVER);
@@ -197,6 +198,7 @@ static void ticket_case(void) {
     if (!returned) returned = dispatch_semaphore_wait(job.done, dispatch_time(DISPATCH_TIME_NOW, 2000000000ll)) == 0;
     CHECK("that acquire returns once the copy has run", returned && job.index == 1);
     if (!returned) exit(2); pthread_join(thread, NULL);
+    CHECK("the wait for the copy is on the wait ledger (DM_NVN_WAITS=1) as the snapshot copy's", atomic_load(&g_ws_blk[WS_SNAPCOPY]) > copy_blocked);
     h_nvnQueuePresentTexture(&fixture_queue, (NVNwindow *)&win, job.index); queue_encoded();
     mtl_present_flush(); mtl_present_test_stall(0); snap_commit_wait(g_snap_v);
     CHECK("the last snapshot completes", [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);
@@ -248,6 +250,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     alarm(15); setbuf(stdout, NULL);
     if (argc != 2) return 2;
     setenv("DM_PRESENT_SNAP", "1", 1); setenv("DM_PRESENT_HZ", "0", 1);
+    if (!strcmp(argv[1], "ticket")) setenv("DM_NVN_WAITS", "1", 1);   // the wait ledger, which ticket_case reads
     mtl_init();
     NVNdeviceBuilder db = {0}; h_nvnDeviceBuilderSetDefaults(&db); CHECK("fixture device initialized", h_nvnDeviceInitialize(&fixture_device, &db));
     NVNqueueBuilder qb = {0}; h_nvnQueueBuilderSetDefaults(&qb); h_nvnQueueBuilderSetDevice(&qb, &fixture_device);
