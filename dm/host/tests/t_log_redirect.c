@@ -4,7 +4,7 @@
 // through descriptor 2 (crash.c's write(2, ...)), the stream stderr and, for the Mac form, descriptor 1, and starts a program that writes to both (the Mac launcher's host
 // inherits them). The save must hold only its own bytes, every line must be in the log when it opened, or where the launch put that descriptor when it did not (nowhere when
 // that was closed), and no standard descriptor may be free or closed on exec afterwards. The old forms fail it: freopen(log, "w", stderr) with a log that cannot be created,
-// and open, dup2, close with 2 (or 1) closed at launch, put the log lines into the save.
+// and open, dup2, close with 2 (or 1) closed at launch, put lines written to descriptor 2 (or 1) into the save.
 // Build and run: make -C dm/host/tests GAME=<title ID> log-redirect (no game profile is used; plain POSIX, so it runs on the Mac and on Linux)
 #include <errno.h>
 #include <fcntl.h>

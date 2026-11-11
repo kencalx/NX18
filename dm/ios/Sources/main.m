@@ -174,12 +174,12 @@ static void pso_archive_exclude(void) {
     if (![[NSURL fileURLWithPath:dir isDirectory:YES] setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:&e]) fprintf(stderr, "boot: %s could not be excluded from backup: %s\n", dir.fileSystemRepresentation, e.localizedDescription.UTF8String);
 }
 
-// Documents/log.txt onto descriptor 2, which the stream stderr, Swift's launcher log and crash.c's write(2, ...) all use (dm_log_redirect in log_redirect.h says why and how).
-// It was freopen(log, "w", stderr), which closes descriptor 2 before it opens the file and leaves it closed when the open fails (a full disk: log.txt has just been moved to
-// log.prev.txt, so it has to be created). The next file the app opened, possibly a save, then took descriptor 2, and every later log line and a crash report went into it.
-// Now descriptor 2 is never free: a log that cannot be opened leaves stderr where the launch put it (/dev/null from the Home Screen, Xcode's console), or on /dev/null when the
-// launch left it closed, and says so there. An opened log.txt is as before: the same file, created with freopen's mode (0666 less the umask) and truncated, line-buffered. This
-// runs before the preload thread starts (dm_host_preload_start, at the end of boot_env)
+// Documents/log.txt onto descriptor 2, which the stream stderr, Swift's launcher log and crash.c's write(2, ...) all use (dm_log_redirect in log_redirect.h says why and how). It
+// was freopen(log, "w", stderr), which closes descriptor 2 before it opens the file and leaves it closed when the open fails (a full disk: log.txt has just been moved to
+// log.prev.txt, so it has to be created). The next file the app opened, possibly a save, then took descriptor 2, and a crash report or NSLog output went into it (the stream
+// stderr, closed by the failed freopen, wrote nothing). Now descriptor 2 is never free: a log that cannot be opened leaves stderr where the launch put it (/dev/null from the
+// Home Screen, Xcode's console), or on /dev/null when the launch left it closed, and says so there. An opened log.txt is as before: the same file, created with freopen's mode
+// (0666 less the umask) and truncated, line-buffered. This runs before the preload thread starts (dm_host_preload_start, at the end of boot_env)
 static void log_open(NSString *log) {
     int err = dm_log_redirect(log.fileSystemRepresentation, 0666, STDERR_FILENO);
     if (err) { fprintf(stderr, "[RED] boot: %s cannot be written (%s): no log for this run\n", log.fileSystemRepresentation, strerror(err)); return; }

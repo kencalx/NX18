@@ -3,7 +3,7 @@
 The log: main.m's log_open puts Documents/log.txt on descriptor 2 and launcher.c's puts the Mac app's log on 1 and 2, both through dm/host/log_redirect.h, which
 dm/host/tests/t_log_redirect.c runs with every mix of closed descriptors (make -C dm/host/tests log-redirect). Here: that both front ends use it, as their only redirect, before
 the iPhone's preload thread starts, and, on a Mac, main.m's very log_open compiled with Foundation and started with descriptor 2 closed and a log that cannot be created, as a
-full disk leaves it (freopen left 2 free there, and the next file opened, possibly a save, got every later log line).
+full disk leaves it (freopen left 2 free there, and the next file opened, possibly a save, got every later raw write to descriptor 2: a crash report, NSLog).
 
 The scope: CloudSaves.m's scope_hold starts a folder's security scope once and stops it when another folder, or none, is picked."""
 from pathlib import Path
