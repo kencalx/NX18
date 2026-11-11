@@ -184,6 +184,22 @@ build check first compares the image's Metal compiler with `dmsh_chain.lock`
 keeps the workflows, the image, README, this page and the NSP script naming
 the same Xcode: raising the toolchain changes them together.
 
+While the gates run locally, the Python GPU tests run with the shader
+translator's cases on, as CI's tool-test job runs them: without
+`DMSH_TEST_XLATE` about 130 cases of `dm/gfx/tests` skip, and a translator or
+MSL rewrite regression passes. The local run gives them the committed
+translator, the Metal compile, the GPU and the native fixtures they replay on:
+
+```sh
+make -C dm/gfx/tests GAME=<id> t_geometry t_geometry_primitive_id t_border t_transform_feedback
+T=$PWD/dm/gfx/tests
+DMSH_TEST_XLATE=$PWD/dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate DMSH_TEST_METAL=1 DMSH_TEST_GPU=1 \
+  DM_TEST_GEOMETRY=$T/t_geometry DM_TEST_GEOMETRY_PRIMITIVE_ID=$T/t_geometry_primitive_id \
+  DM_TEST_BORDER=$T/t_border DM_TEST_TRANSFORM_FEEDBACK=$T/t_transform_feedback \
+  DM_GAME=<id> MTL_DEBUG_LAYER=1 python3 -m unittest discover -s dm/gfx/tests
+DMSH_TEST_XLATE=$PWD/dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate python3 -m unittest discover -s dm/tools/tests
+```
+
 A separate `sanitizers` job builds the same tests again with sanitizers, each
 build in a folder of its own (`build/asan`, `build/tsan`, `asan/`): every host
 unit test and the CPU texture test under AddressSanitizer and
