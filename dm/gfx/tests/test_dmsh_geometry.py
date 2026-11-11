@@ -136,6 +136,8 @@ class GeometryReader(unittest.TestCase):
                     r = subprocess.run([str(executable), str(library), entry], capture_output=True, text=True)
                     if r.returncode == 77:
                         self.skipTest(r.stderr.strip())
+                    if r.returncode == 2:   # no Metal 4 device (t_mtl4.h t4_dev)
+                        self.skipTest(r.stdout.strip())
                     self.assertEqual(r.returncode, 0, r.stderr)
 
     @unittest.skipUnless(shutil.which('xcrun'), 'requires the Metal compiler')
@@ -491,6 +493,7 @@ class MeshPassthrough(unittest.TestCase):
                                 '-framework', 'Foundation', '-framework', 'Metal', '-o', str(binary)], check=True, capture_output=True)
                 r = subprocess.run([str(binary), str(library)], capture_output=True, text=True)
                 if r.returncode == 77: self.skipTest('no Metal device')
+                if r.returncode == 2 and r.stdout.startswith('no Metal 4 device'): self.skipTest(r.stdout.strip())   # t_mtl4.h t4_dev (2 is also the runner's usage error)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 self.assertIn('6 run cases passed', r.stdout)
 

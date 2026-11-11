@@ -1,8 +1,11 @@
 """t_mtl4.h's standalone back end on a Mac without a Metal 4 GPU (GitHub's virtual Macs): t4_dev ends the runner with exit status 2, which the Python GPU tests' runners
 take as a skip (test_ndve_engine, test_dmsh_*: `if r.returncode == 2: self.skipTest(...)`), not with an abort that fails them. T4_TEST_NO_METAL4 makes t4_dev act as on such a
-Mac; the first call may come through the compiler (t4_comp), as t4_cps's does."""
+Mac; the first call may come through the compiler (t4_comp), as t4_cps's does. Every other test file here then runs with T4_TEST_NO_METAL4 set (with the committed translator as
+DMSH_TEST_XLATE when none is given, as CI's tool-test job sets it) and must pass: a runner that asserts its output without taking status 2 as a skip fails there, as it would on CI."""
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import os
+import sys
 import shutil
 import subprocess
 import tempfile
@@ -53,6 +56,25 @@ class NoMetal4IsASkip(unittest.TestCase):
         r = self.run_it(no_metal4=False)
         if r.returncode == 2: self.skipTest(r.stdout.strip())
         self.assertEqual((r.returncode, r.stdout.strip()), (0, 'ran'), r.stderr)
+
+
+@unittest.skipUnless(shutil.which('clang'), 'needs Xcode')
+@unittest.skipIf(os.environ.get('T4_TEST_NO_METAL4'), 'already a sweep without Metal 4')
+class EveryTestFileWithoutMetal4(unittest.TestCase):
+    def test_each_file_passes_or_skips(self):
+        here = Path(__file__).resolve().parent
+        files = sorted(p for p in here.glob('test_*.py') if p.name != Path(__file__).name)
+        env = dict(os.environ, T4_TEST_NO_METAL4='1')
+        xlate = here.parent / 'tools/dmsh_xlate_bin/dmsh_xlate'
+        if not env.get('DMSH_TEST_XLATE') and xlate.exists(): env['DMSH_TEST_XLATE'] = str(xlate)
+
+        def run(p):
+            return p.name, subprocess.run([sys.executable, '-m', 'unittest', p.name], cwd=here, env=env, capture_output=True, text=True, timeout=900)
+
+        with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+            for name, r in pool.map(run, files):
+                with self.subTest(file=name):
+                    self.assertEqual(r.returncode, 0, r.stderr[-3000:])
 
 
 if __name__ == '__main__':

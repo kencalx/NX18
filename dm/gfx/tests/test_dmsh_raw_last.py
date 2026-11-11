@@ -106,6 +106,7 @@ class RawLast(Translated):
             (w / 'r.m').write_text(RUNNER)
             subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
             out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
+            if out.returncode == 2: self.skipTest(out.stdout.strip())   # no Metal 4 device (t_mtl4.h t4_dev)
             self.assertIn('bad 0 of 1024', out.stdout, out.stdout + out.stderr)
 
 
@@ -178,6 +179,7 @@ class RawVector(Translated):
             (w / 'r.m').write_text(RUNNER)
             subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
             out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
+            if out.returncode == 2: self.skipTest(out.stdout.strip())   # no Metal 4 device (t_mtl4.h t4_dev)
             self.assertIn('bad 0 of 1024', out.stdout, out.stdout + out.stderr)
 
 

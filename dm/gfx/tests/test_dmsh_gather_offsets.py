@@ -143,7 +143,9 @@ class OnGpu(unittest.TestCase):
             (w / 'r.m').write_text(QUAD_RUNNER)
             subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
             for repeat in ('0', '1'):
-                out = subprocess.run([str(w / 'r'), str(w / 'k.metallib'), repeat], capture_output=True, text=True).stdout.split()
+                r = subprocess.run([str(w / 'r'), str(w / 'k.metallib'), repeat], capture_output=True, text=True)
+                if r.returncode == 2: self.skipTest(r.stdout.strip())   # no Metal 4 device (t_mtl4.h t4_dev)
+                out = r.stdout.split()
                 self.assertEqual(out[0], '0', (repeat, out))
                 self.assertEqual(int(out[1]), 2 * 264 * 136 * 49, (repeat, out))
 
@@ -155,7 +157,9 @@ class OnGpu(unittest.TestCase):
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
             (w / 'r.m').write_text(RUNNER)
             subprocess.run(['clang', '-fobjc-arc', '-I', T4_DIR, '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
-            out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True).stdout.split()
+            r = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
+            if r.returncode == 2: self.skipTest(r.stdout.strip())   # no Metal 4 device (t_mtl4.h t4_dev)
+            out = r.stdout.split()
             self.assertEqual(out[0], '0', out)
             self.assertEqual(int(out[1]), 2 * 254 * 126)
 
