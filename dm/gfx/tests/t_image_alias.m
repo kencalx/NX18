@@ -177,13 +177,15 @@ static void int_float_family(pool_t *pool) {
         tex_t t[2]; int tid=401+f*2;   // t[1], the smaller size, is the one sampled; its ID is tid
         for (int i=0;i<2;i++) { t[i]=image(pool,996000+f*2+i,96u-i*32,64); t[i].off=(4u+f)<<20; t[i].mem=pool->mem+t[i].off; t[i].d.format=fm[f].nvn;
             nvn_tex_layout(&t[i].d,&t[i].L); mtl_tex_init(&t[i]); mtl_reg_tex(400+f*2+i,&t[i],NULL); }
-        id<MTLTexture> big=tex_mtl(&t[0]), small=tex_mtl(&t[1]);
+        // Small first, as the main family's small-first case: the fresh heap is then sized and zeroed through the larger, not yet made description (image_texture's loop over
+        // the other live descriptions), so the heap-size check below fails if that description is sized without the format-view usage its member is made with
+        id<MTLTexture> small=tex_mtl(&t[1]), big=tex_mtl(&t[0]);
         CHECK(small.pixelFormat==fm[f].pf && big.heap && big.heap==small.heap,"a 32-bit integer resolution family shares one heap");
         CHECK(!small.allowGPUOptimizedContents,"a 32-bit integer family member is uncompressed, so the format-view usage costs it no compression");
         CHECK(!!(small.usage&MTLTextureUsagePixelFormatView)==on && !!(big.usage&MTLTextureUsagePixelFormatView)==on,
               on?"a 32-bit integer family member has the format-view usage from the start":"DM_NVN_FAMILY_PFV=0: a 32-bit integer family member is made without the format-view usage, as before");
         MTLTextureDescriptor *ld=tex_desc(&t[0],0); ld.allowGPUOptimizedContents=NO; if (on) ld.usage|=MTLTextureUsagePixelFormatView;
-        CHECK(big.heap.size==[g_dev heapTextureSizeAndAlignWithDescriptor:ld].size,"the integer family's heap is sized with the descriptor its members are made with");
+        CHECK(big.heap.size==[g_dev heapTextureSizeAndAlignWithDescriptor:ld].size,"the integer family's heap, made for the smaller size, is sized with the larger description as its member is made");
         NSUInteger bpp=fm[f].comps*4, bytes=small.width*small.height*bpp;
         id<MTLBuffer> src=[g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared]; uint32_t *w=src.contents;
         static const uint32_t odd[]={0u,1u,0x7fffffu,0x80000000u,0x7f800001u,0x7fc00123u,0xffffffffu};   // denormals, NaN patterns and negatives, as a light grid holds

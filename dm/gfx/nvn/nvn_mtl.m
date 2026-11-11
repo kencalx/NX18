@@ -4713,7 +4713,9 @@ static uint64_t g_texinfo_ser[8]; static int g_texinfo_n;
 // only when needed because it costs lossless compression (tex_desc, tex_upgrade); family members are made uncompressed anyway (below), so here it costs nothing and that upgrade is never needed.
 // The formats are those tex_float_fit reads through a float view of the same size (tbuf_view_format: R32, RG32 and RGBA32 Uint / Sint), so the same rule covers an integer view of another
 // class (img_fit). The bytes and their layout are the same with the usage or without it. The usage may change what Metal asks of a heap, so image_texture sizes the heap with the
-// descriptors as they are made, the largest one included. =0 makes the family as before, and the upgrade moves each such size out of the heap again
+// descriptors as they are made, the largest one included. With the usage from creation such a member also skips the other fallbacks for a texture without it: a render-target view of
+// another format is attached in that format (attach, rt_view_fmt) rather than in the base format with RED 68, and a texture view of another format (tex_by_id) runs no upgrade, so a pass's
+// attachment formats, and with them pipeline keys, can differ from the old path. =0 makes the family as before, and the upgrade moves each such size out of the heap again
 static MTLPixelFormat tbuf_view_format(MTLPixelFormat pf, int dpf);
 static void family_pfv(MTLTextureDescriptor *d) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_FAMILY_PFV"); on = !(e && !strcmp(e, "0")); }
