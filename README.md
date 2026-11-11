@@ -124,7 +124,7 @@ A Switch 2 game is built from one [NUP](https://github.com/a55uka/nup) container
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform mac-app
 ```
 
-[Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) is played this way: its 47 GB NUP unpacks in under five minutes. A NUP that carries the game's control data (its NACP) and icon gives the app the game's name and icon; otherwise the name comes from the game's profile and the app gets the NX 18 icon (`docs/images/nx18/nx18-icon-square-1024.png`) unless you give it one with `--icon <image>` (`ICON` in Spyder; a JPEG or PNG of any size).
+[Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) is played this way: its 47 GB NUP unpacks in under five minutes. A NUP that carries the game's control data (its NACP) and icon gives the app the game's name and icon; otherwise the name comes from the game's profile and the app gets the NX 18 icon (`docs/images/nx18/nx18-icon-square-1024.png`) unless you give it one with `--icon <image>` (`ICON` in Spyder; a JPEG or PNG of any size). The `nup` tool numbers a NUP's metadata one too low since 2026-11-04 (its PR #20); the script reads such a NUP correctly and says so.
 
 A NUP without the base game also works, when its base package is empty or it has none and its updates are marked `standalone_update`: the update is taken as the whole game, and the script says so. If the game then stops on missing files, that update holds only what changed: pack a NUP with the base game. The newest update is selected by default; `--package v<N>` selects another version in the container. Such a container has no `v0` (base game) to select.
 

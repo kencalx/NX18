@@ -11,7 +11,9 @@
 # Writes, under the build folder (<folder of the .nup>/<title ID>_build unless --work-dir names another):
 #   extract/v<version>/ExeFS/   the version's code modules
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py), written straight from the container: the RomFS is never unpacked into loose files
-#   extract/v<version>/control.nacp, icon.jpg   the package's NACP and its icon, when it carries them (sips reads a PNG icon by its content)
+#   extract/v<version>/control.nacp, icon.jpg   the package's NACP and its icon, when it carries them (sips reads a PNG icon by its content). A NACP record that is not 0x4000 bytes is
+#     no NACP: it is left out, with a line. Since its PR #20 (2026-11-04) nup writes every meta type one too low (NPDM 0 … localized icons 9); such a block is told apart as nup's PR #32
+#     tells it (a record of type 0, or one of type 7 that is not 32 bytes) and read one type up, with a line. A block of an older nup, in SPEC §5's numbers, is read as it is.
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − base title ID − 0x1000), the host's DM_AOC_DIR
 # An update's RomFS is packed on its own, never laid over the base: the dumps NUPs are packed from hold the patched RomFS of an update (pack_dump.py); an update with no romfs/ uses the base's.
 # Every file read is checked against its SHA-256. A repeat run keeps code modules whose content is the same and an image made from the same container tree by the same packer,
@@ -41,7 +43,9 @@ NO_DIR = 0xFFFFFFFF
 BASE, UPDATE, ADDON = 0, 1, 2
 KINDS = ('base', 'update', 'addon', 'addon_update', 'system')
 STANDALONE = 1   # package flags bit 0: an update in a container without a base
-T_NACP, T_ICON, T_LICONS = 2, 3, 10
+T_NACP, T_ICON, T_BUILD_ID, T_LICONS = 2, 3, 7, 10   # SPEC §5's numbers
+NACP_SIZE = 0x4000   # every NACP's size: a record of another size is something else
+SHIFTED = 'its meta block numbers every record one too low (written by nup after its PR #20 of 2026-11-04): read one type up, so its NACP and icon are the right records'
 ARTIFACTS = {b'.listing'}   # dump-tool files a producer may have kept (SPEC §6.3): not game files
 NO_BASE = 'no base game in this NUP: its update is taken as the whole game (if the game then stops on missing files, the update holds only what changed: pack a NUP with the base game)'
 
@@ -52,15 +56,22 @@ class Package:
         self.title_id, self.root, self.exefs, self.romfs, self.version, self.kind, self.flags, r1, r2, self.meta_off, self.meta_size = rec
         if self.kind >= len(KINDS): raise Error(f'{nup.path}: package {index} of unknown kind {self.kind}')
         if r1 or r2 or self.flags & ~STANDALONE: raise Error(f'{nup.path}: package {index} has reserved fields or flags set')
+        self.shifted = False   # set by meta()
         self.name = f'{nup.path.name} ({KINDS[self.kind]}' + (f' {self.version}' if self.kind == UPDATE else f' {self.title_id:016X}' if self.kind == ADDON else '') + ')'   # what pick_nsps prints
 
-    def meta(self):   # {TLV type: payload}
-        out, b = {}, self.nup.mm[self.meta_off:self.meta_off + self.meta_size] if self.meta_size else b''
+    def meta(self):
+        """{TLV type in SPEC §5's numbers: payload}, the first record of each type. nup since its PR #20 (merged 2026-11-04) writes every type one too low (NPDM 0, NACP 1, icon 2 …
+        localized icons 9). Its PR #32 tells such a block by a record of type 0, which SPEC §5 does not register, or one of type 7 that is not 32 bytes (SPEC's build ID is 32; a shifted block
+        keeps the source name there): every type of such a block is read one up, and self.shifted says so"""
+        recs, b = [], self.nup.mm[self.meta_off:self.meta_off + self.meta_size] if self.meta_size else b''
         p = 0
         while p + TLV.size <= len(b):
             t, _, n = TLV.unpack_from(b, p); p += TLV.size
             if p + n > len(b): raise Error(f'{self.nup.path}: package {self.index}: meta record {t:#x} runs past its block')
-            out.setdefault(t, bytes(b[p:p + n])); p += n
+            recs.append((t, bytes(b[p:p + n]))); p += n
+        self.shifted = any(t == 0 or t == T_BUILD_ID and len(v) != 32 for t, v in recs)
+        out = {}
+        for t, v in recs: out.setdefault(t + 1 if self.shifted else t, v)
         return out
 
 
@@ -300,9 +311,21 @@ def app_package(n, k=None):   # (k: the package, as pack_nx.app_package takes it
     return next((k for k in n.packages if k.kind == BASE), n.packages[0])
 
 
-def control(k, out, fallback=None):   # the package's control data beside its ExeFS; what it lacks comes from fallback
-    meta = fallback.meta() if fallback is not None else {}
-    meta.update(k.meta())
+def tell(k, line, say):   # say line once for package (or NX snapshot) k: a build reads a version's control data for its survey and again for its extraction
+    told = vars(k).setdefault('told', set())
+    if line not in told: told.add(line); say(line)
+
+
+def control(k, out, fallback=None, say=print):   # the package's control data beside its ExeFS; what it lacks comes from fallback
+    meta = {}
+    for p in (fallback, k):
+        if p is None: continue
+        m = p.meta()
+        if p.shifted: tell(p, f'{p.name}: {SHIFTED}', say)
+        if (b := m.get(T_NACP)) is not None and len(b) != NACP_SIZE:
+            tell(p, f'{p.name}: its NACP record is {len(b):,} bytes, not {NACP_SIZE:,} (0x4000): it is not a NACP, left out', say)
+            del m[T_NACP]
+        meta.update(m)
     nacp_bytes = meta.get(T_NACP)
     icons = localized(meta.get(T_LICONS, b''))
     icon = meta.get(T_ICON) or pick(icons, 'en-US') or next(iter(icons.values()), None)
@@ -324,7 +347,7 @@ def pack_version(n, k, base, app, out, say=print, step=lambda s: None):   # one 
     out.mkdir(parents=True, exist_ok=True)
     exefs(n, k, out / 'ExeFS')
     how = pack(n, d, out / 'RomFS.img', say, step)
-    control(k, out, app_package(n) if base is None else None)
+    control(k, out, app_package(n) if base is None else None, say)
     return how
 
 

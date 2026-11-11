@@ -493,6 +493,24 @@ class Pack(Base):
         self.assertEqual((self.out() / 'icon.jpg').read_bytes(), png)   # American English's, written as icon.jpg (sips reads a PNG by its content)
         self.assertFalse((self.out() / 'control.nacp').exists())
 
+    def test_wrong_size_nacp_left_out(self):   # an NX that NXConvert 1.0.0 or 1.0.1 made from a shifted NUP may hold something else as its NACP: never saved as control.nacp
+        for size in (0x3FFF, 0x4001):
+            with self.subTest(size=size):
+                self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': {'nacp': b'\xff\xd8' + bytes(size - 2), 'icon': b'\xff\xd8 icon', 'title': 'T'}}))
+                n = self.open(); app, base, _, _ = pack_nx.scan(n)
+                said = []
+                pack_nx.pack_version(n, base, base, app, self.out(), say=said.append)
+                self.assertFalse((self.out() / 'control.nacp').exists())
+                self.assertEqual([s for s in said if 'not a NACP' in s],
+                                 [f"game.nx (base): the archive's NACP for it is {size:,} bytes, not 16,384 (0x4000): it is not a NACP, left out (repack the NX with NXConvert 1.0.2 or later)"])
+        self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': META}, {'type': 1, 'version': VER, 'tree': version(main=b'new'), 'meta': {'nacp': b'short', 'icon': b'new icon'}}))
+        n = self.open(); app, base, vers, _ = pack_nx.scan(n)
+        said = []
+        for _ in range(2): pack_nx.pack_version(n, vers[VER], base, app, self.out(), say=said.append)
+        self.assertEqual(nacp.name(self.out() / 'control.nacp'), 'Test Game')   # the update's own is left out: its base game's
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'new icon')
+        self.assertEqual(len([s for s in said if 'not a NACP' in s]), 1, said)   # said once per snapshot
+
     def test_version_without_romfs_or_main(self):
         self.write(game({'type': 0, 'version': 0, 'tree': version()}, {'type': 1, 'version': VER, 'tree': {'exefs': version()['exefs']}}))
         n = self.open(); app, base, vers, _ = pack_nx.scan(n)

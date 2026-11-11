@@ -838,7 +838,7 @@ def survey_nup(n, k, base, out, pk=pack_nup):
         for parts, i in nros:
             o = out / 'romfs_nro' / Path(*parts); o.parent.mkdir(parents=True, exist_ok=True)
             with open(o, 'xb') as f: n.copy(i, f)
-        pk.control(k, out, pk.app_package(n, k) if base is None else base)   # what an update lacks, from its base game (pack_nx: its exact base snapshot, as pack_version takes it)
+        pk.control(k, out, pk.app_package(n, k) if base is None else base, say)   # what an update lacks, from its base game (pack_nx: its exact base snapshot, as pack_version takes it)
     except pack_nup.Error as e: raise BuildError(str(e)) from e
     except OSError as e: raise BuildError(f'{k.name}: writing the survey\'s files to {out}: {e.strerror or e}') from e
     (out / 'romfs_manifest.tsv').write_text(MANIFEST_HEAD + ''.join(rows))

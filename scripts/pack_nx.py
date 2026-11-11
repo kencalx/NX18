@@ -24,7 +24,7 @@
 #   extract/v<version>/ExeFS/   the version's code modules
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py), written straight from the archive: the RomFS is never unpacked into loose files
 #   extract/v<version>/control.nacp, icon.jpg   the snapshot's NACP and icon, when the archive has them for it, else its exact base snapshot's (also a base that holds only metadata; never
-#     another update's); none when neither has them (sips reads a PNG icon by its content)
+#     another update's); none when neither has them (sips reads a PNG icon by its content). A NACP record that is not 0x4000 bytes is no NACP: left out, with a line
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − base title ID − 0x1000; DLC converted from a NUP or folders carry their add-on title ID), the host's DM_AOC_DIR
 # Checks, in the order of the format's own validator so a damaged or hostile archive gets the error the format names (Error.code):
 #   open: both header slots (magic, CRC-32C, zero page padding; the valid one of the highest generation; an older generation when the newer one's tail is damaged), the version (0.2 and 0.3
@@ -1058,11 +1058,21 @@ def app_package(n, k):   # (as pack_nup.app_package, for the NSP script's survey
     return base_of(k)
 
 
-def control(k, out, fallback=None):   # the snapshot's control data beside its ExeFS (control.nacp, icon.jpg); what it lacks comes from fallback's (its base game). Returns {'nacp', 'icon'}
-    meta = k.nx.meta(k)
-    if fallback is not None and fallback is not k:
-        more = fallback.nx.meta(fallback)
-        meta = {key: meta[key] or more[key] for key in meta}
+def media_meta(k, fallback, say=print):
+    """Snapshot k's control data in the archive's Media ({'nacp', 'icon'}), what it lacks from fallback's (its base game). A NACP record that is not 0x4000 bytes is left out, with a line:
+    NXConvert 1.0.0 and 1.0.1 may have stored something else as the NACP of a NUP whose meta block was numbered one too low (pack_nup.SHIFTED), and the reader takes a NACP of any size"""
+    snaps = [k] if fallback is None or fallback is k else [k, fallback]
+    metas = [s.nx.meta(s) for s in snaps]
+    for s, m in zip(snaps, metas):
+        if m['nacp'] is not None and len(m['nacp']) != pack_nup.NACP_SIZE:
+            pack_nup.tell(s, f"{s.name}: the archive's NACP for it is {len(m['nacp']):,} bytes, not {pack_nup.NACP_SIZE:,} (0x4000): it is not a NACP, left out "
+                             '(repack the NX with NXConvert 1.0.2 or later)', say)
+            m['nacp'] = None
+    return {key: next((m[key] for m in metas if m[key]), None) for key in metas[0]}
+
+
+def control(k, out, fallback=None, say=print):   # the snapshot's control data beside its ExeFS (control.nacp, icon.jpg); what it lacks comes from fallback's (its base game). Returns {'nacp', 'icon'}
+    meta = media_meta(k, fallback, say)
     for name, data in (('control.nacp', meta['nacp']), ('icon.jpg', meta['icon'])):
         if data: (out / name).write_bytes(data)
         else: (out / name).unlink(missing_ok=True)
@@ -1083,7 +1093,7 @@ def pack_version(n, k, base, app, out, say=print, step=lambda s: None):   # one 
     out.mkdir(parents=True, exist_ok=True)
     exefs(n, k, out / 'ExeFS')
     how = pack(n, d, out / 'RomFS.img', say, step)
-    if not control(k, out, base_of(k))['nacp']:
+    if not control(k, out, base_of(k), say)['nacp']:
         say(f'{k.name}: the archive has no NACP for this version' + ('' if k.type == BASE else ' or its base game') + ': the game\'s name and languages come from elsewhere (its profile)')
     return how
 
@@ -1345,9 +1355,7 @@ def _space(k, need, where):   # stop before staging when the volume cannot hold 
 def _control_fallback(k, out, say):   # what the Control NCA did not give (no Control NCA, no icon in it) from the archive's Media: the snapshot's own, else its exact base's
     nacp, icon = out / 'control.nacp', out / 'icon.jpg'
     if not (nacp.is_file() and icon.is_file()):
-        meta = k.nx.meta(k)
-        if (fb := base_of(k)) is not None and fb is not k:
-            more = fb.nx.meta(fb); meta = {key: meta[key] or more[key] for key in meta}
+        meta = media_meta(k, base_of(k), say)
         if not nacp.is_file() and meta['nacp']: nacp.write_bytes(meta['nacp'])
         if not icon.is_file() and meta['icon']: icon.write_bytes(meta['icon'])
     if not nacp.is_file():

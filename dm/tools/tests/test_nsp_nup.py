@@ -522,6 +522,92 @@ class Pack(Base):
         self.assertEqual((aoc / '1.img').read_bytes(), b'from the NSP')
 
 
+ICON = b'\xff\xd8 icon'
+BUILD_ID = bytes(range(32))
+# a whole meta block in SPEC §5's numbers: NPDM 1, NACP 2, icon 3, display version 4, title 5, publisher 6, build ID 7 (32 bytes), source name 8
+FULL = [(1, npdm(TID)), (2, control_nacp('Test Game', 'テス', '1.2.3')), (3, ICON), (4, b'1.2.3'), (5, b'TG'), (6, b'Pub'), (7, BUILD_ID), (8, b'game.nsp')]
+
+
+def shifted(recs):   # the block as nup writes it since its PR #20 (merged 2026-11-04): every type one too low (NPDM 0 … localized icons 9)
+    return tlv([(t - 1, v) for t, v in recs])
+
+
+class ShiftedMeta(Base):
+    """NUPs whose meta block numbers every record one too low (nup since its PR #20): told apart by the rule of nup PR #32 (a record of type 0, or one of type 7 that is not
+    32 bytes) and read one type up; a block in SPEC §5's numbers is read as it is. A "NACP" that is not 0x4000 bytes is left out, never saved as control.nacp"""
+    def out(self): return self.dir / 'out'
+
+    def pack(self, meta):   # a base game with this meta block, packed; returns the lines said
+        write_nup(self.path, [(0, TID, 0, version(), meta)])
+        n = self.open(); app, base, _, _ = pack_nup.scan(n)
+        said = []
+        pack_nup.pack_version(n, base, base, app, self.out(), say=said.append)
+        return said
+
+    def control(self):
+        return nacp.name(self.out() / 'control.nacp'), nacp.version(self.out() / 'control.nacp'), (self.out() / 'icon.jpg').read_bytes()
+
+    def test_shifted_block_read_one_type_up(self):
+        for what, recs in (('whole block', FULL), ('marked by its NPDM (type 0) alone', [r for r in FULL if r[0] != 8]),
+                           ('marked by its source name (type 7, not 32 bytes) alone', [r for r in FULL if r[0] != 1])):
+            with self.subTest(what):
+                said = self.pack(shifted(recs))
+                self.assertEqual(self.control(), ('Test Game', '1.2.3', ICON))   # it was the icon JPEG as control.nacp and the display version as icon.jpg
+                lines = [s for s in said if 'one too low' in s]
+                self.assertEqual(len(lines), 1, said)
+                self.assertTrue(lines[0].startswith('game.nup (base): '), lines[0])
+
+    def test_shifted_localized_icons(self):   # localized icons (SPEC 10, shifted 9) with no default icon: the American English one
+        local = b''.join(bytes([len(t)]) + t + struct.pack('<I', len(i)) + i for t, i in ((b'ja', b'ja icon'), (b'en-US', b'us icon')))
+        self.pack(shifted([(1, npdm(TID)), (2, control_nacp('Test Game', 'テス', '1.2.3')), (10, local)]))
+        self.assertEqual(self.control(), ('Test Game', '1.2.3', b'us icon'))
+
+    def test_spec_block_read_as_it_is(self):   # older nup: SPEC numbers, a 32-byte build ID at type 7 and no type 0
+        for what, recs in (('whole block', FULL), ('build ID only', [r for r in FULL if r[0] in (2, 3, 7)])):
+            with self.subTest(what):
+                said = self.pack(tlv(recs))
+                self.assertEqual(self.control(), ('Test Game', '1.2.3', ICON))
+                self.assertFalse([s for s in said if 'one too low' in s or 'NACP' in s], said)
+
+    def test_type_7_record_decides(self):   # the same records without an NPDM: a 32-byte type 7 is SPEC's build ID, another size the shifted source name
+        spec = [(2, control_nacp('Test Game', 'テス', '1.2.3')), (3, ICON), (7, BUILD_ID)]
+        self.pack(tlv(spec))
+        self.assertEqual(self.control(), ('Test Game', '1.2.3', ICON))
+        said = self.pack(tlv([(1, control_nacp('Test Game', 'テス', '1.2.3')), (2, ICON), (7, b'game.nsp')]))   # shifted: NACP 1, icon 2, source name 7
+        self.assertEqual(self.control(), ('Test Game', '1.2.3', ICON))
+        self.assertTrue(any('one too low' in s for s in said), said)
+
+    def test_wrong_size_nacp_left_out(self):   # a shifted block the rule cannot tell (no NPDM, no source name): the icon JPEG at type 2 is no NACP
+        for size in (0x3FFF, 0x4001):
+            with self.subTest(size=size):
+                said = self.pack(tlv([(2, ICON + bytes(size - len(ICON))), (5, b'TG')]))
+                self.assertFalse((self.out() / 'control.nacp').exists())
+                self.assertEqual([s for s in said if 'NACP' in s], [f'game.nup (base): its NACP record is {size:,} bytes, not 16,384 (0x4000): it is not a NACP, left out'])
+
+    def test_wrong_size_nacp_falls_back_to_the_base_records(self):   # a standalone update's own bad NACP leaves the empty base record's good one in place
+        write_nup(self.path, [(0, 0, 0, {}, tlv([(2, control_nacp('Test Game', 'テス', '1.2.3'))])), (1, TID, VER, version(), tlv([(2, b'short'), (3, ICON)]))])
+        n = self.open(); app, base, vers, _ = pack_nup.scan(n)
+        said = []
+        pack_nup.pack_version(n, vers[VER], base, app, self.out(), say=said.append)
+        self.assertEqual(self.control(), ('Test Game', '1.2.3', ICON))
+        self.assertEqual(len([s for s in said if 'not a NACP' in s]), 1, said)
+
+    def test_said_once_per_package(self):   # the survey and the extraction both read a version's control data
+        write_nup(self.path, [(0, TID, 0, version(), shifted(FULL))])
+        n = self.open(); _, base, _, _ = pack_nup.scan(n)
+        said = []
+        for _ in range(2): pack_nup.control(base, self.dir, say=said.append)
+        self.assertEqual(len(said), 1, said)
+
+    def test_survey_reads_a_shifted_block(self):   # the NSP script's survey (a NUP with no profile) saves the same control data, and says the line through its own output
+        write_nup(self.path, [(0, NEW, 0, version(tid=NEW), shifted(FULL))])
+        n = self.open(); _, base, _, _ = pack_nup.scan(n)
+        said = []
+        with mock.patch.object(nsp, 'say', side_effect=said.append): nsp.survey_nup(n, base, base, self.dir / 'survey')
+        self.assertEqual(nacp.name(self.dir / 'survey/control.nacp'), 'Test Game')
+        self.assertTrue(any('one too low' in s for s in said), said)
+
+
 class Stop(Exception): pass
 
 
