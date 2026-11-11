@@ -3,24 +3,24 @@
 How to build and install a game: [README](../README.md#how-to-play).
 
 - **Settings:** a screen before the game starts sets frame rate, resolution, docked or handheld mode, language, rumble and more. Tap **Play**; your choices are remembered. What each one does: [Settings](settings.md).
-- **Saves and logs** are in the Files app, under the game's name: `save/` and `log.txt` (the previous run is `log.prev.txt`). When something goes wrong, send `log.txt`: the gear's menu › **Share log** sends it and `log.prev.txt` in one share sheet.
+- **Saves and logs** are in the Files app, under the game's name: `save/` and `log.txt` (the previous run is `log.prev.txt`). When something goes wrong, send `log.txt`: the in-game menu › **Share log** sends it and `log.prev.txt` in one share sheet.
 - **Reinstalling:** some sideloading tools give a reinstalled app a new data folder. Copy `save/` and `pso_user.tsv` over from the old one to keep your progress.
 
 ## Touch controls
 
-The gear at the top centre opens the in-game menu (double-tap off the controls to show it; it hides again after 5 seconds): **Controller layout** switches between **2D** and **3D** (and **Tap**, every touch to the game, in handheld mode), and the settings that take effect at once are there too, such as **Picture**, **Console mode** and **Game rumble** ([In-game menu](settings.md#in-game-menu)). The app remembers your choices. Wonder, Engage, Dread, 13 Sentinels, Link's Awakening, Ace Attorney Investigations Collection, Unicorn Overlord, Rhythm Heaven Groove, Octopath Traveler 0, Pokémon Legends: Z-A, Cuphead, Absolum, Blasphemous 2, Brain Memory Training Academy, The Great Ace Attorney Chronicles, STEINS;GATE RE:BOOT, Big Brain Academy: Brain vs. Brain, Patrick's Parabox, Celeste, Raging Loop and Mario vs. Donkey Kong start in 2D, the other games in 3D (STEINS;GATE RE:BOOT's quick save is R3, in the 3D layout).
+The cyan button with eight rays at the top centre opens the in-game menu (double-tap off the controls to show it; it hides again after 5 seconds): **Controller layout** switches between **2D** and **3D** (and **Tap**, every touch to the game, in handheld mode), and the settings that take effect at once are there too, such as **Picture**, **Console mode** and **Game rumble** ([In-game menu](settings.md#in-game-menu)). The app remembers your choices. Wonder, Engage, Dread, 13 Sentinels, Link's Awakening, Ace Attorney Investigations Collection, Unicorn Overlord, Rhythm Heaven Groove, Octopath Traveler 0, Pokémon Legends: Z-A, Cuphead, Absolum, Blasphemous 2, Brain Memory Training Academy, The Great Ace Attorney Chronicles, STEINS;GATE RE:BOOT, Big Brain Academy: Brain vs. Brain, Patrick's Parabox, Celeste, Raging Loop and Mario vs. Donkey Kong start in 2D, the other games in 3D (STEINS;GATE RE:BOOT's quick save is R3, in the 3D layout).
 
 In 3D, the right stick (the camera in most games) is not drawn: swipe on the right third of the screen, starting anywhere off the buttons. In Super Mario Galaxy and Super Mario Galaxy 2, other touches outside the controls move the pointer; in Captain Toad: Treasure Tracker they touch the game's screen (touch blocks, stun enemies), and in Big Brain Academy: Brain vs. Brain too (its menus and activities).
 
-A connected game controller hides the touch controls, all but the gear, and keeps every button.
+A connected game controller hides the touch controls, all but the menu button, and keeps every button.
 
-**Touch control size** (Large, Medium, Small) and **Touch control opacity** (Faint, Light, Normal, Strong), on the settings screen and in the gear's menu, make the controls smaller or more see-through, at once ([Settings](settings.md#touch-control-size)).
+**Touch control size** (Large, Medium, Small) and **Touch control opacity** (Faint, Light, Normal, Strong), on the settings screen and in the in-game menu, make the controls smaller or more see-through, at once ([Settings](settings.md#touch-control-size)).
 
 In portrait (an iPad, an iPhone Duo's inner screen) the picture sits above the controls; so it does on a Duo half folded, the picture on the upper half. An iPad game also runs in a window of any size (Stage Manager).
 
 ## Cheats
 
-Put an Atmosphère cheat file for the game in the Files app, under the app's name, in the `cheats` folder: named after the game's build ID (`0123456789ABCDEF.txt`), or a Switch SD card's `atmosphere/contents/<title ID>/cheats/` folder. Then open the in-game menu (the gear) › **Cheats** › **Reload cheats**. The same submenu shows the build ID the game looks for, turns each cheat on or off (remembered for the next start) and turns all of them off at once (**Cheats on**). Cheats that rewrite the game's code cannot run on an iPhone or iPad, whose app code is signed; the submenu shows them greyed out with the reason. Pack such patches into the app instead (below). A cheat file packed from the game's mods folder comes back at the next start if you delete it: to stop its cheats, turn off **Cheats on** in the submenu, or set `DM_CHEATS=` (nothing after the `=`, every cheat off) in `Documents/env.txt`.
+Put an Atmosphère cheat file for the game in the Files app, under the app's name, in the `cheats` folder: named after the game's build ID (`0123456789ABCDEF.txt`), or a Switch SD card's `atmosphere/contents/<title ID>/cheats/` folder. Then open the in-game menu (the cyan button with eight rays at the top centre) › **Cheats** › **Reload cheats**. The same submenu shows the build ID the game looks for, turns each cheat on or off (remembered for the next start) and turns all of them off at once (**Cheats on**). Cheats that rewrite the game's code cannot run on an iPhone or iPad, whose app code is signed; the submenu shows them greyed out with the reason. Pack such patches into the app instead (below). A cheat file packed from the game's mods folder comes back at the next start if you delete it: to stop its cheats, turn off **Cheats on** in the submenu, or set `DM_CHEATS=` (nothing after the `=`, every cheat off) in `Documents/env.txt`.
 
 ## Mods and patches
 
@@ -46,7 +46,7 @@ English by default. Pick another when packing with `--language` (`-l`), by code 
 
 ## Settings in a file
 
-Lines like `DM_OPMODE=0` (handheld mode: lower resolution, higher frame rate) in `Documents/env.txt` win over the settings screen, which then shows them greyed out ([the full list](settings.md#settings-in-a-file)). `DM_FPS_TARGET=30` keeps Breath of the Wild, Tears of the Kingdom, Octopath Traveler 0 and Octopath Traveler II at their original 30 fps, which saves battery; `DM_PRESENT_INTERVAL=game` does the same for Monster Train 2. `DM_SHOW_FPS=1` shows the frame rate at the top left (`--show-fps` when packing turns it on from the start). `DM_LAUNCHER=0` skips the settings screen.
+Lines like `DM_OPMODE=0` (handheld mode: lower resolution, higher frame rate) in `Documents/env.txt` win over the settings screen, which then shows them greyed out ([the full list](settings.md#settings-in-a-file)). `DM_FPS_TARGET=30` keeps Breath of the Wild, Tears of the Kingdom, Octopath Traveler 0 and Octopath Traveler II at their original 30 fps, which saves battery; `DM_PRESENT_INTERVAL=game` does the same for Monster Train 2. `DM_SHOW_FPS=1` shows the frame rate at the top left (`--show-fps` when packing turns it on from the start). `DM_LAUNCHER=0` skips the settings screen. Touching and holding the app's icon offers **Game** (start at once), **Launcher** (the settings screen) and **Guide** (the game's guide) for one start ([Home screen shortcuts](settings.md#home-screen-shortcuts)).
 
 ## On the Mac
 

@@ -24,7 +24,7 @@ void front_ios_boot(void);
 int front_ios_boot_ok(void);
 const char *front_ios_boot_message(void);   // main.m: why a build that keeps the game files off the IPA found none usable (NULL = the generic hint)
 const char *front_ios_device_check(void);   // main.m: why this device cannot run the games (its GPU has no BC textures; NULL = supported); makes the first Metal device
-bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
+bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0); true = it calls done later (Play, or the skip's short wait)
 
 static CAMetalLayer *g_layer;
 // The app window scene's screen (the phone's or iPad's own; a TV's scene never takes its place), cached on the main thread when the scene connects (main.m front_ios_scene) and at
@@ -398,6 +398,8 @@ bool dm_setting_live(const char *env, const char *value) {
 // A live setting whose value the front end holds while the game runs, so the in-game menu shows its row disabled, with dm_setting_why's reason as its subtitle (GameMenu.swift),
 // and dm_setting_live refuses a pick: Picture while Ultrawide holds Stretch (startGame). The saved choice stays as it is, and applies again at a start without Ultrawide
 bool dm_setting_held(const char *env) { return env && g_root.game && !strcmp(env, "DM_PICTURE_FIT") && g_root.ultrawideStretch; }
+// The value it holds, for the menu to tick in place of the saved choice (the launcher's shows rule says the same, settings.tsv), or NULL
+const char *dm_setting_held_value(const char *env) { return dm_setting_held(env) ? "stretch" : NULL; }
 // Why a live setting the in-game menu shows does nothing at the moment, as only the running game knows it (docs/settings.md, In-game menu): a short line for the row's
 // subtitle, or NULL. The present's last outcome for Upscaling, Sharpening and Anti-aliasing (nvn_mtl.m, front.h DM_FX_* and the others), and the front end's own state for
 // Picture (Ultrawide, a TV, a split layout), Console mode (a TV) and the touch controls (a controller, the Tap layout). GameMenu.swift reads it each time the menu opens, as it

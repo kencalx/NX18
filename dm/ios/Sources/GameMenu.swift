@@ -1,6 +1,6 @@
 // The in-game menu, opened by the gamepad's menu button at the top centre (DmGamepad.m): the controller layout, then the settings-screen settings the running game takes at once
 // (front_ios.m dm_setting_live), grouped as on the settings screen but without its headings, one row each, so the menu stays short over the game (its text size is fixed: front_ios.m
-// startGame), then the Cheats submenu (cheatsMenu) and Share log (dmShareLog). A pick is saved as Play saves it (LauncherModel.choose), so the settings screen shows it at the next start; a setting an env file fixes is shown, not changed. Settings
+// startGame), then the Cheats submenu (cheatsMenu), Settings screen at start (settingsAtStartRow) and Share log (dmShareLog). A pick is saved as Play saves it (LauncherModel.choose), so the settings screen shows it at the next start; a setting an env file fixes is shown, not changed. Settings
 // that need the next start (language, pipelines, the frame rate and so on), and the sliders, stay on the settings screen, which the menu's title points to. A row that does nothing
 // at the moment says why under its name (gameMenuRow): greyed when nothing the player picks there can take effect, still selectable when only the current choice does nothing.
 import UIKit
@@ -34,15 +34,31 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
     }
     if !placed { items.insert(UIMenu(options: .displayInline, children: [layout]), at: 0) }
     if let cheats = cheatsMenu() { items.append(UIMenu(options: .displayInline, children: [cheats])) }
-    let share = UIAction(title: "Share log", image: UIImage(systemName: "square.and.arrow.up")) { action in dmShareLog(from: action.sender as? UIView) }   // the gear, for an iPad's popover
-    items.append(UIMenu(options: .displayInline, children: [share]))
+    let share = UIAction(title: "Share log", image: UIImage(systemName: "square.and.arrow.up")) { action in dmShareLog(from: action.sender as? UIView) }   // the menu button, for an iPad's popover
+    var last: [UIMenuElement] = []
+    if let m = gameMenuModel { last.append(settingsAtStartRow(m)) }
+    items.append(UIMenu(options: .displayInline, children: last + [share]))
     return items
+}
+
+// Settings screen at start: ticked while the settings screen shows when the app starts, unticked while the player's Skip this screen next time skips it (launcher.skip, stored at once:
+// LauncherModel.skipAtStart). Picking it brings the screen back at the next start, or skips it again. Greyed while DM_LAUNCHER from an env file or the launch decides
+// (LauncherModel.launcherSetByEnv); main.m's own DM_LAUNCHER=0 for a start from a program record skips only that start, so the row stays the player's then
+@MainActor func settingsAtStartRow(_ m: LauncherModel) -> UIMenuElement {
+    let env = ProcessInfo.processInfo.environment
+    let fixed = LauncherModel.launcherSetByEnv(environment: env)
+    let on = fixed ? env["DM_LAUNCHER"] != "0" : !m.skipAtStart
+    let a = UIAction(title: "Settings screen at start", image: UIImage(systemName: "slider.horizontal.3"), state: on ? .on : .off) { _ in
+        m.skipAtStart.toggle()
+    }
+    if fixed { a.attributes = .disabled; a.subtitle = "Set by an env file" }
+    return a
 }
 
 // Share log: the in-game menu's last row. One share sheet with Documents/log.txt and log.prev.txt (the run before this one, which main.m keeps under that name at each start: a run
 // that crashed or that iOS ended), the files docs/playing.md asks for in a bug report. Each is copied into tmp/share-log first, so the sheet reads a snapshot: log.txt is still being
 // written while the app runs (APFS clones the copy, which takes no room until the log grows). A missing file is left out; the copies of the share before are deleted at the next (and
-// iOS empties tmp by itself). On an iPad the sheet is a popover: it points at the view the share came from (the gear), or sits in the middle of the screen
+// iOS empties tmp by itself). On an iPad the sheet is a popover: it points at the view the share came from (the menu button), or sits in the middle of the screen
 @MainActor func dmShareLog(from anchor: UIView?) {
     let fm = FileManager.default
     guard let doc = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
@@ -141,7 +157,8 @@ private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 
 
 // One live setting's row. Its subtitle is the reason it does nothing at the moment, the first that holds of:
 // - the front end holds its value (dm_setting_held: Picture while Ultrawide stretches the picture), or a launcher rule greys the whole row (LauncherModel.inactiveWhy): the row is
-//   greyed, so it cannot be changed, as on the settings screen;
+//   greyed, so it cannot be changed, as on the settings screen, and ticks the value the game has then (dm_setting_held_value's Stretch, else the launcher's shows rule,
+//   LauncherModel.shown), not the saved choice, which stays as it is;
 // - the running game's own state (front_ios.m dm_setting_why: MetalFX not upscaling a stretched picture, the touch controls hidden by a controller), read each time the menu
 //   opens, as it is built then;
 // - a launcher rule about the choice made or the device (LauncherModel.reason: Rumble needs a controller on this device), unless the running game says the choice works right
@@ -149,9 +166,10 @@ private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 
 // An option a rule greys (MetalFX on a device without the scaler) cannot be picked, with its reason under it; the others stay selectable. Nothing here changes a saved choice.
 // An env file's value is shown, not changed, as before
 @MainActor private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> UIMenuElement {
-    let now = m.values[s.env] ?? s.def, fixed = m.fixed.contains(s.env)
+    let held = dm_setting_held(s.env), fixed = m.fixed.contains(s.env)
+    let now = (held ? dm_setting_held_value(s.env).map { String(cString: $0) } : nil) ?? m.shown(s)   // the value the game has: Stretch while Ultrawide holds Picture
     let live: String? = dm_setting_why(s.env).map { String(cString: $0) }
-    let greyed: String? = dm_setting_held(s.env) ? (live ?? "") : m.inactiveWhy(s)
+    let greyed: String? = held ? (live ?? "") : m.inactiveWhy(s)
     let why = greyed ?? live ?? (dm_setting_working(s.env) ? nil : m.reason(s)?.why)
     let note = why.flatMap { $0.isEmpty ? nil : $0 }
     let locked = fixed || greyed != nil

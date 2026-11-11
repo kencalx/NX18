@@ -8,12 +8,16 @@
   "properties": {
     "schema": {"description": "The list's version; a list without it is schema 1 written before the field existed.", "type": "integer", "const": 1},
     "game": {"description": "The base game's title ID.", "type": "string", "pattern": "^[0-9A-F]{16}$"},
+    "console": {"description": "The console the game was built for: 'switch2' when its sdk module was built for the Switch 2, else 'switch1'. A front end may show it (the launcher's line under the game's name); a list without it says nothing about the console.", "type": "string", "enum": ["switch1", "switch2"]},
     "settings": {"type": "array", "items": {"$ref": "#/$defs/setting"}}
   },
   "$defs": {
     "size": {"description": "[width, height] in pixels.", "type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
     "term": {"description": "<VAR>=<v>/<v> or <VAR>!=<v>/<v> (another row's current value, a range compared as a number, or the environment for a switch no row sets; false when neither has the variable), or a device term: device:<iphone/ipad/mac>, screen<r, screen>=r, window>=r, hz<n, hz>=n, haptics:none, controller:none, tv:none, mfx:none. A term a reader does not know is false.", "type": "string"},
     "when": {"type": "object", "required": ["when"], "properties": {"when": {"description": "Terms that must all hold.", "type": "array", "items": {"$ref": "#/$defs/term"}, "minItems": 1}}},
+    "shown": {"type": "object", "required": ["option", "when"],
+              "properties": {"option": {"description": "The value the row shows while the terms hold, one it takes.", "type": "string"},
+                             "when": {"description": "Terms that must all hold: the same as one of the row's whole-row inactive rules.", "type": "array", "items": {"$ref": "#/$defs/term"}, "minItems": 1}}},
     "rule": {"type": "object", "required": ["when", "why"],
              "properties": {"option": {"description": "choice or toggle: the value the rule is about; without it, the whole row.", "type": "string"},
                             "when": {"description": "Terms that must all hold.", "type": "array", "items": {"$ref": "#/$defs/term"}, "minItems": 1},
@@ -40,7 +44,9 @@
         "needs": {"description": "<VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value. A row naming a variable this list does not have stays drawn.", "type": "string", "pattern": "^DM_[A-Z0-9_]+=[^;=]+$"},
         "inactive": {"description": "The row, or with option one of its options, is drawn greyed (not selectable) with why as its note while a rule's terms all hold: another setting or the device makes it do nothing. Its saved value stays as it is.", "type": "array", "items": {"$ref": "#/$defs/rule"}},
         "hint": {"description": "The row, or with option one of its options, stays selectable and shows why as its note while a rule's terms all hold: it does something only in some situations.", "type": "array", "items": {"$ref": "#/$defs/rule"}},
-        "hide": {"description": "The row is not drawn while one entry's terms all hold: device terms only, for a setting that can never do anything on this device. Its saved value stays as it is.", "type": "array", "items": {"$ref": "#/$defs/when"}}
+        "hide": {"description": "The row is not drawn while one entry's terms all hold: device terms only, for a setting that can never do anything on this device. Its saved value stays as it is.", "type": "array", "items": {"$ref": "#/$defs/when"}},
+        "shows": {"description": "While an entry's terms all hold (the row is then greyed by its whole-row inactive rule with the same terms), the row shows option, the value the host uses then, instead of the saved choice; the saved value stays as it is and is shown again when the terms stop holding. A reader that does not know the field shows the saved choice.", "type": "array", "items": {"$ref": "#/$defs/shown"}},
+        "preset": {"description": "The value the row takes in each launcher preset besides Balanced (the defaults): battery and quality, each a value the row takes (its default where the preset leaves the row as tested). A front end applies a preset to the rows that have one, except rows an env file or the launch sets and rows or options a rule greys; a preset whose values all match is the one shown as chosen. A reader ignores presets it does not know.", "type": "object", "required": ["battery", "quality"], "properties": {"battery": {"type": "string"}, "quality": {"type": "string"}}}
       },
       "allOf": [
         {"if": {"properties": {"kind": {"const": "choice"}}}, "then": {"required": ["options"]}},

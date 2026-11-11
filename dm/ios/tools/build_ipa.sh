@@ -213,6 +213,29 @@ COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null) && { [ -z "$(git -
 case "$MSLDIR" in b-*) /usr/libexec/PlistBuddy -c "Add :DMChain string ${MSLDIR#b-}" Gen/Info.plist > /dev/null || die "DMChain";; esac
 # DM_METAL_CAPTURE=1: a development build that may write GPU frame captures (MetalCaptureEnabled; the host's DM_GPU_CAPTURE switch writes them to Documents/gpu_captures)
 if [ "${DM_METAL_CAPTURE:-0}" = 1 ]; then /usr/libexec/PlistBuddy -c "Add :MetalCaptureEnabled bool true" Gen/Info.plist > /dev/null || die "MetalCaptureEnabled"; t "Metal frame capture: enabled (DM_METAL_CAPTURE=1)"; fi
+# Home screen shortcuts (UIApplicationShortcutItems; dm/ios/Sources/LauncherShortcuts.swift): holding the app's icon offers Game (the game at once with the saved choices), Launcher (the settings screen) and Guide (the settings screen with the game guide open), each this time only.
+# In the Info.plist, so they are there from the install on, for the IPA and the Xcode project alike. Guide only when the app carries something for it: the game guide in the offline pages beside the RomFS (program 0's for a game of several programs,
+# an HtmlDocument's .htdocs other than the legal ones), else the manual (DM_MANUAL), else About this game (DM_ABOUT) when it has some text; its subtitle names which. Both tests are the app's own, so the item never offers what the app then cannot open:
+# guide_pages is LauncherArt.swift findGuide (<html>/html-document or <html>/html<n>/html-document, a .htdocs other than important, ipnotices and support, holding html/<LANG>/index.html, html/index.html or index.html)
+# and about_text is LauncherAbout.hasText (a JSON object with a non-blank intro, description or publisher, or a releaseDate YYYY-MM-DD)
+guide_pages() { local doc h f; for doc in "$1/html-document" "$1"/html*/html-document; do [ -d "$doc" ] && [ "$doc" != "$1/html-document/html-document" ] || continue
+  for h in "$doc"/*.htdocs; do case ${h##*/} in important.htdocs|ipnotices.htdocs|support.htdocs) continue;; esac
+    for f in "$h"/html/*/index.html "$h/html/index.html" "$h/index.html"; do [ -f "$f" ] && return 0; done; done; done; return 1; }
+about_text() { [ -s "$1" ] && python3 -I -c 'import datetime, json, sys
+try: a = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception: sys.exit(1)
+def text(k): return isinstance(a.get(k), str) and a[k].strip() != ""
+def date():
+    try: return isinstance(a.get("releaseDate"), str) and bool(datetime.datetime.strptime(a["releaseDate"].strip(), "%Y-%m-%d"))
+    except ValueError: return False
+sys.exit(0 if isinstance(a, dict) and (text("intro") or text("description") or text("publisher") or date()) else 1)' "$1"; }
+GUIDE=; if guide_pages "$(dirname "$ROMFS")/html"; then GUIDE="Game guide"; elif [ -s Gen/dm/manual.pdf ]; then GUIDE=Manual; elif about_text Gen/dm/about.json; then GUIDE="About this game"; fi
+SC=("game|Game|Skips the settings screen|play.fill" "launcher|Launcher|Settings before playing|slider.horizontal.3"); [ -z "$GUIDE" ] || SC+=("guide|Guide|$GUIDE|book.closed")
+/usr/libexec/PlistBuddy -c "Delete :UIApplicationShortcutItems" Gen/Info.plist > /dev/null 2>&1; /usr/libexec/PlistBuddy -c "Add :UIApplicationShortcutItems array" Gen/Info.plist > /dev/null || die "UIApplicationShortcutItems"
+i=0; for item in "${SC[@]}"; do IFS='|' read -r ST STITLE SSUB SICON <<< "$item"; K=":UIApplicationShortcutItems:$i"
+  /usr/libexec/PlistBuddy -c "Add $K dict" -c "Add $K:UIApplicationShortcutItemType string dm.shortcut.$ST" -c "Add $K:UIApplicationShortcutItemTitle string $STITLE" \
+    -c "Add $K:UIApplicationShortcutItemSubtitle string $SSUB" -c "Add $K:UIApplicationShortcutItemIconSymbolName string $SICON" Gen/Info.plist > /dev/null || die "shortcut $ST"; i=$((i + 1)); done
+t "home screen shortcuts: Game, Launcher$([ -z "$GUIDE" ] && echo ' (no Guide: no guide, manual or About this game)' || echo ", Guide ($GUIDE)")"
 RP=; if [ -n "${PROGRAMS_TSV:-}" ]; then   # a game of several programs: each program's files, which the Xcode build phase copies under p<index> as the IPA has them (stage_resources.sh)
   RP=Gen/resources_programs.tsv; printf '# program\tRomFS\tmarker\tiOS shaders\tshader folder (build_ipa.sh)\n' > "$RP"
   M0=$MSLDIR; while IFS= read -r row; do prog_set "$row"; printf '%s\t%s\t%s\t%s\t%s\n' "$PN" "$ROMFS" "$MARKER" "$(lib_path "$MSL_IOS/$MSLDIR")" "$MSLDIR" >> "$RP"; done < <(prog_rows); prog_back; MSLDIR=$M0; fi

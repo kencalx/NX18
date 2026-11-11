@@ -1,10 +1,15 @@
 // Mac app launcher: the settings window shown before the game starts, in the launcher's own process (launcher.c calls dm_mac_launcher before it starts the host). Its settings come from the
 // app's Resources/dm/launcher.json (dm/games/settings.py with SETTINGS_PLATFORM=mac); the model and the rows are the iOS launcher's (dm/ios/Sources/LauncherSettings.swift, LauncherRow.swift),
 // and so is the store: launcher.<VAR> in the app's preferences, which launcher.c reads when the window is not shown (docs/frontends.md, Saved choices). Basic settings (level basic) come
-// first, the others under Advanced settings, each in the list's sections. Play puts the settings into this process's environment, which the host inherits; Quit and closing the window end the
-// app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the saved choices. The window never takes focus by itself: an app
-// opened in the background (open -g) keeps its window behind until the player switches to it
+// first, the others under Advanced settings, each in the list's sections (a game without basic rows shows them all, with no Advanced). Play puts the settings into this process's environment,
+// which the host inherits; Quit and closing the window end the app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the
+// saved choices. The window never takes focus by itself: an app opened in the background (open -g) keeps its window behind until the player switches to it.
+// The look is the NX 18 one the iOS launcher has (LauncherRow.swift's NX18Palette): a dark window, a banner across the top with the game's key art (Resources/dm/art.jpg; without it the app
+// icon blurred, with the icon itself on it), the game's logo (Resources/dm/logo.png) or else its name and the status line over it, the coral Play pill, Game guide (the game's own pages under Resources/html in the default browser, or
+// Resources/dm/manual.pdf) and About this game (Resources/dm/about.json, a sheet), the cyan-to-coral rails under the banner, the preset chips, cyan section headings and controls on
+// charcoal rows. Only the window's background takes a little of the art's colour; the accents, the rails and the mark keep the logo's
 import AppKit
+import Combine
 import CoreHaptics
 import GameController
 import Metal
@@ -28,66 +33,490 @@ private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictiona
     return f
 }
 
+// What the app carries for the window besides launcher.json, each optional and read defensively: the key art, the About text, the manual and the game's own guide pages
+struct LauncherExtras {
+    // about.json: every field may be missing, empty or of another type (a number, a list); such a field is nil and the others still show, as on iOS (LauncherAbout)
+    struct About: Decodable {
+        let name, intro, description, publisher, releaseDate, source: String?
+        var hasText: Bool { [intro, description, publisher, releaseDate].contains { !($0 ?? "").isEmpty } }
+        init(name: String? = nil, intro: String? = nil, description: String? = nil, publisher: String? = nil, releaseDate: String? = nil, source: String? = nil) {
+            self.name = name; self.intro = intro; self.description = description; self.publisher = publisher; self.releaseDate = releaseDate; self.source = source
+        }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            func text(_ k: CodingKeys) -> String? {
+                guard let s = (try? c.decodeIfPresent(String.self, forKey: k)) ?? nil else { return nil }
+                let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                return t.isEmpty ? nil : t
+            }
+            self.init(name: text(.name), intro: text(.intro), description: text(.description), publisher: text(.publisher), releaseDate: text(.releaseDate), source: text(.source))
+        }
+        enum CodingKeys: String, CodingKey { case name, intro, description, publisher, releaseDate, source }
+    }
+    var art: NSImage?
+    var logo: NSImage?       // dm/logo.png, the game's title wordmark with transparency (scripts/game_art.py), shown in place of the name; nil without it or when it cannot be decoded
+    var logoDark = false     // a black wordmark, drawn with a light glow (NX18Logo.isDark)
+    var backdrop: NSImage?   // without art: the app icon blurred on the CPU, the banner's backdrop
+    var tint: NX18RGB?   // the art's (else the icon's) average colour, for the window's background
+    var about: About?
+    var manual: URL?
+    var guides: [URL] = []   // the folders holding a guide's language folders (…/html<n>/html-document/htmlcontents.htdocs/html), first program first
+
+    // From the app's Resources: dm/art.jpg, dm/logo.png, dm/about.json, dm/manual.pdf, and the guides under html/ (an app of several programs: p<N>/html/ too)
+    static func load(resources: URL? = Bundle.main.resourceURL) -> LauncherExtras {
+        var x = LauncherExtras()
+        guard let res = resources else { return x }
+        let fm = FileManager.default
+        let dm = res.appendingPathComponent("dm")
+        if let img = NSImage(contentsOf: dm.appendingPathComponent("art.jpg")), img.isValid, img.size.width > 0 { x.art = img }
+        let logo = dm.appendingPathComponent("logo.png")
+        if fm.fileExists(atPath: logo.path) {   // decoded and trimmed on the CPU as on iOS (NX18Logo.decode); one that cannot be decoded or shows nothing leaves the name
+            if let cg = NX18Logo.decode(logo) { x.logo = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)); x.logoDark = NX18Logo.isDark(cg) }
+            else { fputs("[RED] launcher: dm/logo.png cannot be decoded; showing the name\n", stderr) }
+        }
+        if let data = try? Data(contentsOf: dm.appendingPathComponent("about.json")) {
+            if let a = try? JSONDecoder().decode(About.self, from: data) { if a.hasText { x.about = a } }
+            else { fputs("[RED] launcher: dm/about.json cannot be read; no About this game\n", stderr) }
+        }
+        let pdf = dm.appendingPathComponent("manual.pdf")
+        if fm.isReadableFile(atPath: pdf.path) { x.manual = pdf }
+        var roots = [res.appendingPathComponent("html")]
+        let programs = ((try? fm.contentsOfDirectory(atPath: res.path)) ?? []).compactMap { n -> (Int, URL)? in
+            guard n.hasPrefix("p"), let i = Int(n.dropFirst()) else { return nil }
+            return (i, res.appendingPathComponent(n).appendingPathComponent("html"))
+        }
+        roots += programs.sorted { $0.0 < $1.0 }.map(\.1)
+        for root in roots {
+            for d in numbered(root, prefix: "html") {
+                let langs = d.appendingPathComponent("html-document/htmlcontents.htdocs/html")
+                if guideIndex(in: langs, language: "en-US") != nil { x.guides.append(langs) }   // folders of legal notices only (important, ipnotices, support.htdocs) have none
+            }
+        }
+        let image = x.art ?? (NSApp?.applicationIconImage)
+        if let cg = image?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            x.tint = NX18Palette.average(of: cg)
+            if x.art == nil { x.backdrop = blurred(cg, side: 96, radius: 6) }
+        }
+        return x
+    }
+    // The icon blurred on the CPU for the backdrop: drawn into a side x side bitmap with Core Graphics, then three passes of a box blur each way (about a Gaussian), so it looks
+    // the same whatever draws it later and no Core Image or Metal work is made for it
+    private static func blurred(_ image: CGImage, side n: Int, radius r: Int) -> NSImage? {
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: n, height: n, bitsPerComponent: 8, bytesPerRow: n * 4, space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.setFillColor(CGColor(srgbRed: 0x1E / 255, green: 0x1E / 255, blue: 0x21 / 255, alpha: 1)); ctx.fill(CGRect(x: 0, y: 0, width: n, height: n))
+        ctx.interpolationQuality = .high
+        let inset = CGFloat(n) * 0.1   // the icon's rounded corners fall outside, so its edge does not darken the backdrop's
+        ctx.draw(image, in: CGRect(x: -inset, y: -inset, width: CGFloat(n) + 2 * inset, height: CGFloat(n) + 2 * inset))
+        guard let data = ctx.data else { return nil }
+        let px = data.bindMemory(to: UInt8.self, capacity: n * n * 4)
+        var a = [Double](repeating: 0, count: n * n * 4), b = a
+        for i in 0..<(n * n * 4) { a[i] = Double(px[i]) }
+        func pass(_ src: [Double], _ dst: inout [Double], horizontal: Bool) {
+            for line in 0..<n {
+                for c in 0..<4 {
+                    var sum = 0.0
+                    func at(_ k: Int) -> Double { let k = Swift.min(Swift.max(k, 0), n - 1); return src[(horizontal ? line * n + k : k * n + line) * 4 + c] }
+                    for k in -r...r { sum += at(k) }
+                    for k in 0..<n {
+                        dst[(horizontal ? line * n + k : k * n + line) * 4 + c] = sum / Double(2 * r + 1)
+                        sum += at(k + r + 1) - at(k - r)
+                    }
+                }
+            }
+        }
+        for _ in 0..<3 { pass(a, &b, horizontal: true); pass(b, &a, horizontal: false) }
+        for i in 0..<(n * n * 4) { px[i] = UInt8(Swift.min(255, Swift.max(0, a[i].rounded()))) }
+        return ctx.makeImage().map { NSImage(cgImage: $0, size: NSSize(width: n, height: n)) }
+    }
+    // A folder's subfolders <prefix><n> in number order
+    private static func numbered(_ dir: URL, prefix: String) -> [URL] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        return names.compactMap { n -> (Int, String)? in
+            guard n.hasPrefix(prefix), let i = Int(n.dropFirst(prefix.count)) else { return nil }
+            return (i, n)
+        }.sorted { $0.0 < $1.0 }.map { dir.appendingPathComponent($0.1) }
+    }
+    // The guide's folder names for a game language (DM_LANG's values, dm/tools/nacp.py LANGUAGES), the Switch's region and language codes, then USen and EUen
+    static func guideFolders(_ language: String) -> [String] {
+        let map = ["en-US": "USen", "en-GB": "EUen", "ja": "JPja", "fr": "EUfr", "de": "EUde", "es-419": "USes", "es": "EUes", "it": "EUit", "nl": "EUnl", "fr-CA": "USfr",
+                   "pt": "EUpt", "pt-BR": "USpt", "ru": "EUru", "ko": "KRko", "zh-Hant": "TWzh", "zh-Hans": "CNzh"]
+        let base = String(language.split(separator: "-").first ?? "")
+        let byBase = ["en": "USen", "ja": "JPja", "fr": "EUfr", "de": "EUde", "es": "EUes", "it": "EUit", "nl": "EUnl", "pt": "EUpt", "ru": "EUru", "ko": "KRko", "zh": "CNzh"]
+        var out: [String] = []
+        for f in [map[language], byBase[base], "USen", "EUen"] { if let f, !out.contains(f) { out.append(f) } }
+        return out
+    }
+    // A guide's index.html in the language's folder, else USen, EUen, the first language folder with one, else html/index.html
+    static func guideIndex(in langs: URL, language: String) -> URL? {
+        let fm = FileManager.default
+        for f in guideFolders(language) {
+            let u = langs.appendingPathComponent(f).appendingPathComponent("index.html")
+            if fm.isReadableFile(atPath: u.path) { return u }
+        }
+        let names = ((try? fm.contentsOfDirectory(atPath: langs.path)) ?? []).sorted()
+        for n in names {
+            let u = langs.appendingPathComponent(n).appendingPathComponent("index.html")
+            if fm.isReadableFile(atPath: u.path) { return u }
+        }
+        let flat = langs.appendingPathComponent("index.html")
+        return fm.isReadableFile(atPath: flat.path) ? flat : nil
+    }
+    var hasGuide: Bool { !guides.isEmpty }
+    // The first guide's page in the game's language
+    func guide(language: String) -> URL? { guides.lazy.compactMap { LauncherExtras.guideIndex(in: $0, language: language) }.first }
+}
+
 struct LauncherView: View {
     @ObservedObject var m: LauncherModel
     let done: (Bool) -> Void
     let fit: (CGFloat) -> Void
+    let extras: LauncherExtras
     @AppStorage("window.show") private var show = true
     @AppStorage("window.advanced") private var advanced = false
+    @AppStorage("cloudSaves.folder") private var cloudFolder = ""
+    @State private var lastPlayed: Date?
+    @State private var aboutShown = false
+    @State private var bannerWidth: CGFloat = 600   // the banner's width, which bounds the logo's
+
+    init(m: LauncherModel, done: @escaping (Bool) -> Void, fit: @escaping (CGFloat) -> Void, extras: LauncherExtras = .load()) {
+        self.m = m; self.done = done; self.fit = fit; self.extras = extras
+    }
+
+    private var name: String { info("CFBundleName") ?? "Game" }
+    private var background: Color { NX18Palette.background(tint: extras.tint) }
+    private var presetNote: String {
+        switch m.activePreset {
+        case .battery?: return "Lower frame rate and resolution, for a cooler Mac"
+        case .balanced?: return "The settings this game was tested with"
+        case .quality?: return "Full resolution and MetalFX upscaling"
+        case nil: return "Your own choices"
+        }
+    }
+    private var status: LauncherStatus {
+        var s = LauncherStatus()
+        s.lastPlayed = lastPlayed
+        s.cloud = CloudSavesSection.fixed.map { $0.isEmpty ? .off : .on } ?? (cloudFolder.isEmpty ? .off : .on)
+        s.console = m.console.flatMap(LauncherStatus.Console.init(rawValue:))
+        return s
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 64, height: 64).accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(info("CFBundleName") ?? "Game").font(.title2.weight(.semibold))
-                    Text("Version \(info("CFBundleShortVersionString") ?? "1.0")").foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-            .padding([.horizontal, .top], 20)
+            banner
+            NX18Rails(axis: .horizontal)
             Form {
+                if m.hasPresets {
+                    Section {
+                        LabeledContent {
+                            PresetChips(m: m)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Preset")
+                                Text(presetNote).font(.footnote).foregroundStyle(NX18Palette.muted)
+                            }
+                        }
+                    }
+                    .listRowBackground(NX18Palette.row)
+                }
                 settingSections(basic: true)
                 CloudSavesSection()
-                Section {
-                    DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
-                }
-                if advanced {
-                    settingSections(basic: false)
+                if !m.hasBasicRows {
+                    resetSection
+                } else {
                     Section {
-                        Button("Reset to tested defaults") { m.reset() }
-                            .disabled(!m.changed)
-                    } footer: {
-                        Text("Brings back all settings this game was tested with.")
+                        DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
+                    }
+                    .listRowBackground(NX18Palette.row)
+                    if advanced {
+                        settingSections(basic: false)
+                        resetSection
                     }
                 }
             }
             .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
             .onScrollGeometryChange(for: CGFloat.self) {
                 $0.contentSize.height + $0.contentInsets.top + $0.contentInsets.bottom - $0.containerSize.height
             } action: { _, extraHeight in
                 fit(extraHeight)
             }
+            NX18Palette.separator.frame(height: 1)
             HStack {
                 Toggle("Show this window at launch", isOn: $show).toggleStyle(.checkbox)
                 Spacer()
                 Button("Quit") { done(false) }
-                Button("Play") { done(true) }.keyboardShortcut(.defaultAction)
             }
-            .padding(20)
+            .padding(.horizontal, 20).padding(.vertical, 14)
+            .background(NX18Palette.card(tint: extras.tint))
         }
-        .frame(minWidth: 520, idealWidth: 560)
+        .background(background)
+        .ignoresSafeArea(.container, edges: .top)   // the banner runs under the transparent title bar
+        .tint(NX18Palette.cyan)
+        .environment(\.colorScheme, .dark)
+        .frame(minWidth: 520, idealWidth: 600)
+        .sheet(isPresented: $aboutShown) {
+            if let a = extras.about { AboutGameSheet(about: a, name: name, art: extras.art, tint: extras.tint) }
+        }
+        .task {
+            let folder = Self.saveFolder
+            lastPlayed = await Task.detached(priority: .utility) { folder.flatMap { LauncherStatus.lastModified(under: $0) } }.value
+        }
     }
 
-    @ViewBuilder private func settingSections(basic: Bool) -> some View {
-        ForEach(m.sections(basic: basic), id: \.self) { section in
-            let rows = m.rows(in: section, basic: basic)
-            if !rows.isEmpty {
-                Section(section) {
-                    ForEach(rows) { SettingRow(s: $0, m: m) }
+    // The banner: the key art (or the blurred icon with the icon on it), faded into the window at the bottom, the mark, the logo (else the name), the status line and the buttons
+    private var banner: some View {
+        ZStack(alignment: .bottomLeading) {
+            Color.clear
+                .overlay {
+                    if let art = extras.art {
+                        Image(nsImage: art).resizable().scaledToFill()
+                    } else {
+                        Image(nsImage: extras.backdrop ?? NSApp.applicationIconImage).resizable().interpolation(.high).scaledToFill().opacity(0.8)
+                    }
+                }
+                .clipped()
+                .overlay {
+                    LinearGradient(stops: [.init(color: .black.opacity(0.35), location: 0), .init(color: .black.opacity(0), location: 0.3),
+                                           .init(color: background.opacity(0), location: 0.4), .init(color: background.opacity(0.94), location: 1)],
+                                   startPoint: .top, endPoint: .bottom)
+                }
+                .overlay {
+                    LinearGradient(stops: [.init(color: background.opacity(0.55), location: 0), .init(color: background.opacity(0), location: 0.65)],
+                                   startPoint: .leading, endPoint: .trailing)
+                }
+                .accessibilityHidden(true)
+                .gesture(WindowDragGesture())
+            if extras.art == nil {
+                Image(nsImage: NSApp.applicationIconImage).resizable().interpolation(.high).frame(width: 112, height: 112)
+                    .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                    .padding(.trailing, 28).padding(.top, 26)
+                    .accessibilityHidden(true)
+                    .allowsHitTesting(false)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                // the game's logo in place of its name when the app has one: at most 72 pt tall and 60 % of the banner's width; VoiceOver still reads the name
+                if let logo = extras.logo {
+                    NX18GameLogo(image: Image(nsImage: logo), natural: logo.size, name: name, dark: extras.logoDark, maxWidth: bannerWidth * 0.6, maxHeight: 72)
+                } else {
+                    Text(name).font(.system(size: 28, weight: .bold)).foregroundStyle(.white).lineLimit(2)
+                        .shadow(color: .black.opacity(0.35), radius: 6, y: 1)
+                        .accessibilityAddTraits(.isHeader)
+                }
+                statusLine
+                // Play and the buttons the app has on one line: their full names when they fit, else short ones, else icons only (each still named for VoiceOver and the tooltip)
+                ViewThatFits(in: .horizontal) {
+                    buttons(.full)
+                    buttons(.short)
+                    buttons(.icon)
+                }
+                .padding(.top, 8)
+            }
+            .padding(.horizontal, 24).padding(.bottom, 20)
+        }
+        .frame(height: 248)
+        .frame(maxWidth: .infinity)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { bannerWidth = $0 }
+        .overlay(alignment: .topTrailing) {
+            NX18Mark(height: 20).padding(.top, 12).padding(.trailing, 16).allowsHitTesting(false)
+        }
+        .clipped()
+    }
+
+    private enum PillLabel { case full, short, icon }
+    private func buttons(_ l: PillLabel) -> some View {
+        HStack(spacing: 10) {
+            Button { done(true) } label: {
+                Label("Play", systemImage: "play.fill").labelStyle(PlayLabel())
+            }
+            .buttonStyle(NX18PillStyle(fill: NX18Palette.coral, text: NX18Palette.charcoal, font: .system(size: 16, weight: .bold), height: 38))
+            .keyboardShortcut(.defaultAction)
+            .accessibilityLabel("Play")
+            .accessibilityHint("Starts the game with these settings")
+            if extras.hasGuide {
+                pill("Game guide", short: "Guide", icon: "book", label: l, help: "Opens the game's own guide in your browser") { openGuide() }
+            }
+            if let manual = extras.manual {
+                pill(extras.hasGuide ? "Manual" : "Game guide", short: extras.hasGuide ? "Manual" : "Guide", icon: "doc.richtext", label: l, help: "Opens the game's manual (PDF)") {
+                    NSWorkspace.shared.open(manual)
                 }
             }
+            if extras.about != nil {
+                pill("About this game", short: "About", icon: "info.circle", label: l, help: "The game's description, publisher and release date") { aboutShown = true }
+            }
         }
+        .fixedSize()
+    }
+    private func pill(_ title: String, short: String, icon: String, label l: PillLabel, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            switch l {
+            case .full: Label(title, systemImage: icon)
+            case .short: Label(short, systemImage: icon)
+            case .icon: Image(systemName: icon)
+            }
+        }
+        .buttonStyle(NX18PillStyle())
+        .help(l == .full ? help : "\(title): \(help.prefix(1).lowercased() + help.dropFirst())")
+        .accessibilityLabel(title)
+    }
+
+    private var statusLine: some View {
+        let s = status
+        return HStack(spacing: 0) {
+            Text("Version \(info("CFBundleShortVersionString") ?? "1.0")")
+            if !s.parts().isEmpty {
+                Text(verbatim: "  ·  ").accessibilityHidden(true)
+                LauncherStatusLine(status: s, color: NX18Palette.onArt)
+            }
+        }
+        .font(.footnote)
+        .foregroundStyle(NX18Palette.onArt)   // the muted grey a little lighter, as it sits on the art
+        .lineLimit(1)
+    }
+
+    // The basic rows' sections, or those under Advanced. Each section is keyed by its part as well as its title: both parts can have a section of the same name (Game), and the
+    // grouped Form mixed up the two parts' rows and boxes when two of its sections shared an identity
+    @ViewBuilder private func settingSections(basic: Bool) -> some View {
+        ForEach(m.groups(basic: basic).map { (key: (basic ? "basic/" : "advanced/") + $0.section, group: $0) }, id: \.key) { item in
+            let g = item.group
+            Section {
+                ForEach(g.rows) { SettingRow(s: $0, m: m) }
+            } header: {
+                NX18SectionHeader(g.section)
+            }
+            .listRowBackground(NX18Palette.row)
+            .listRowSeparatorTint(NX18Palette.separator)
+        }
+    }
+
+    private var resetSection: some View {
+        Section {
+            Button { m.reset() } label: {
+                Text("Reset to tested defaults").foregroundStyle(m.changed ? NX18Palette.coral : NX18Palette.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!m.changed)
+        } footer: {
+            Text("Brings back all settings this game was tested with.").foregroundStyle(NX18Palette.muted)
+        }
+        .listRowBackground(NX18Palette.row)
+    }
+
+    // The guide in the game language the window shows (Game language, else the app's DMLanguage), in the default browser rather than the app .html files open with
+    private func openGuide() {
+        let lang = m.values["DM_LANG"] ?? info("DMLanguage") ?? "en-US"
+        guard let url = extras.guide(language: lang) else { return }
+        if let browser = NSWorkspace.shared.urlForApplication(toOpen: URL(string: "https://example.com")!) {
+            NSWorkspace.shared.open([url], withApplicationAt: browser, configuration: NSWorkspace.OpenConfiguration())
+        } else {
+            NSWorkspace.shared.open(url)
+        }
+        fputs("launcher: game guide \(url.path)\n", stderr)
+    }
+
+    // Where the host keeps the save (launcher.c: DM_SAVE, else Application Support/nxnative/<title ID>/save), for Last played
+    static var saveFolder: URL? {
+        if let s = ProcessInfo.processInfo.environment["DM_SAVE"], !s.isEmpty { return URL(fileURLWithPath: s) }
+        guard let id = info("DMTitleID"), !id.isEmpty else { return nil }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/nxnative/\(id)/save")
+    }
+}
+
+// Play's label: the triangle and the word, the triangle a little smaller
+private struct PlayLabel: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 7) { configuration.icon.font(.system(size: 13, weight: .bold)); configuration.title }
+    }
+}
+
+// A capsule button on the banner: the coral Play pill, or a quiet one (white on a translucent dark fill) for the guide and About
+struct NX18PillStyle: ButtonStyle {
+    var fill: Color = Color.white.opacity(0.14)
+    var text: Color = .white
+    var font: Font = .system(size: 13, weight: .semibold)
+    var height: CGFloat = 30
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(font).foregroundStyle(text).lineLimit(1)
+            .padding(.horizontal, height * 0.55)
+            .frame(height: height)
+            .background(Capsule().fill(fill))
+            .overlay(Capsule().fill(Color.black.opacity(configuration.isPressed ? 0.18 : 0)))
+            .contentShape(Capsule())
+            .opacity(enabled ? 1 : 0.5)
+    }
+}
+
+// About this game (dm/about.json, titledb's text): the art, the name, the intro and description, the publisher and release date, and where the text came from
+struct AboutGameSheet: View {
+    let about: LauncherExtras.About
+    let name: String
+    let art: NSImage?
+    let tint: NX18RGB?
+    @Environment(\.dismiss) private var dismiss
+
+    private var released: String? {
+        guard let s = about.releaseDate, !s.isEmpty else { return nil }
+        let p = DateFormatter(); p.calendar = Calendar(identifier: .gregorian); p.locale = Locale(identifier: "en_US_POSIX"); p.timeZone = TimeZone(identifier: "UTC"); p.dateFormat = "yyyy-MM-dd"
+        guard let d = p.date(from: s) else { return s }
+        let f = DateFormatter(); f.dateStyle = .long; f.timeStyle = .none; f.timeZone = TimeZone(identifier: "UTC")
+        return f.string(from: d)
+    }
+    private func fact(_ name: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(name).foregroundStyle(NX18Palette.muted)
+            Text(value).foregroundStyle(.white)
+        }
+        .accessibilityElement(children: .combine)
+    }
+    private func text(_ s: String?) -> String? { s.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 } }
+
+    var body: some View {
+        let bg = NX18Palette.background(tint: tint)
+        VStack(spacing: 0) {
+            if let art {
+                Color.clear.frame(height: 150)
+                    .overlay { Image(nsImage: art).resizable().scaledToFill() }
+                    .clipped()
+                    .overlay { LinearGradient(colors: [bg.opacity(0), bg], startPoint: .center, endPoint: .bottom) }
+                    .accessibilityHidden(true)
+            }
+            NX18Rails(axis: .horizontal)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(text(about.name) ?? name).font(.title2.weight(.bold)).foregroundStyle(.white).accessibilityAddTraits(.isHeader)
+                    if let intro = text(about.intro) { Text(intro).font(.headline).foregroundStyle(.white) }
+                    if let d = text(about.description) { Text(d).foregroundStyle(Color(nx18: 0xDADADF)).fixedSize(horizontal: false, vertical: true) }
+                    if text(about.publisher) != nil || released != nil {
+                        VStack(alignment: .leading, spacing: 4) {
+                            if let p = text(about.publisher) { fact("Publisher", p) }
+                            if let r = released { fact("Released", r) }
+                        }
+                        .font(.callout)
+                        .padding(.top, 4)
+                    }
+                    if let src = text(about.source) {
+                        Text("From \(src)").font(.footnote).foregroundStyle(NX18Palette.muted)
+                    }
+                }
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(24)
+            }
+            NX18Palette.separator.frame(height: 1)
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding(14)
+        }
+        .frame(width: 520, height: 560)
+        .background(bg)
+        .tint(NX18Palette.cyan)
+        .environment(\.colorScheme, .dark)
     }
 }
 
@@ -95,17 +524,19 @@ struct LauncherView: View {
 /// preferences as cloudSaves.folder, which launcher.c puts into DM_SAVE_SYNC before the host starts; a DM_SAVE_SYNC an env file or the launch environment set wins, and is shown here.
 struct CloudSavesSection: View {
     @AppStorage("cloudSaves.folder") private var folder = ""
-    private let fixed: String? = {
+    // DM_SAVE_SYNC as an env file or the launch environment set it; nil when neither did
+    static let fixed: String? = {
         let env = ProcessInfo.processInfo.environment
         let keys = ((env["DM_ENV_FILE_KEYS"] ?? "") + " " + (env["DM_ENV_LAUNCH_KEYS"] ?? "")).split(separator: " ")
         return keys.contains("DM_SAVE_SYNC") || env["DM_SAVE_SYNC"] != nil ? env["DM_SAVE_SYNC"] : nil
     }()
+    private var fixed: String? { Self.fixed }
 
     var body: some View {
         Section {
             LabeledContent("Cloud saves") {
                 Text(fixed.map { "\(Self.shown($0)) (env.txt)" } ?? (folder.isEmpty ? "Off" : Self.shown(folder)))
-                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+                    .foregroundStyle(NX18Palette.muted).lineLimit(1).truncationMode(.head)
             }
             if fixed == nil {
                 HStack {
@@ -113,9 +544,14 @@ struct CloudSavesSection: View {
                     if !folder.isEmpty { Button("Turn off") { folder = "" } }
                 }
             }
+        } header: {
+            NX18SectionHeader("Cloud saves")
         } footer: {
             Text("Choose the iCloud Drive folder the iPhone app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in the save's -backups folder.")
+                .foregroundStyle(NX18Palette.muted)
         }
+        .listRowBackground(NX18Palette.row)
+        .listRowSeparatorTint(NX18Palette.separator)
     }
 
     private func choose() {
@@ -149,17 +585,23 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         app.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         app.addItem(withTitle: "Quit \(name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let extras = LauncherExtras.load()
+        // the banner runs under a transparent title bar (the traffic lights over the art); a dark window whatever the system's appearance, as the iPhone's screen is
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 700), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         w.title = name; w.isReleasedWhenClosed = false; w.delegate = self
+        w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden
+        w.appearance = NSAppearance(named: .darkAqua)
+        w.backgroundColor = NSColor(NX18Palette.background(tint: extras.tint))
         w.contentMinSize = NSSize(width: 520, height: 0)
         window = w
         if let screen = w.screen ?? NSScreen.main {
             w.setFrameTopLeftPoint(NSPoint(x: screen.visibleFrame.midX - w.frame.width / 2, y: screen.visibleFrame.maxY))
         }
-        let host = NSHostingView(rootView: LauncherView(m: model, done: { [weak self] in self?.finish($0) }, fit: { [weak self] in self?.fit($0) }))
+        let host = NSHostingView(rootView: LauncherView(m: model, done: { [weak self] in self?.finish($0) }, fit: { [weak self] in self?.fit($0) }, extras: extras))
         host.sizingOptions = []   // the Form's measured scroll content owns the height, including after collapse
         w.contentView = host
         host.layoutSubtreeIfNeeded()
+        fputs("launcher: art \(extras.art == nil ? "none (the icon)" : "dm/art.jpg"), logo \(extras.logo == nil ? "no" : "yes"), guide \(extras.hasGuide ? "yes" : "no"), manual \(extras.manual == nil ? "no" : "yes"), about \(extras.about == nil ? "no" : "yes")\n", stderr)
         // no activation and no ordering in front of another app's windows: LaunchServices activates an app opened from Finder or the Dock (applicationDidBecomeActive), open -g does not
         if NSApp.isActive { w.makeKeyAndOrderFront(nil) } else { w.orderBack(nil) }
     }
@@ -182,6 +624,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         // The main thread blocks in launcher.c's waitpid once run() returns, so the window must leave the screen now: no fade-out (it runs on later run-loop passes),
         // and dmMacLauncher flushes the order-out (AppKit commits it at the end of a pass). Without both, the window stayed on screen, not responding, until the game ended
         w.animationBehavior = .none
+        if let sheet = w.attachedSheet { w.endSheet(sheet) }   // About this game, if open
         w.delegate = nil; w.orderOut(nil)
         NSApp.stop(nil)
         NSApp.postEvent(NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0)!, atStart: true)   // run returns at the next event
@@ -207,6 +650,7 @@ public func dmMacLauncher() -> Int32 {
             return 2
         }
         let model = LauncherModel(file.settings)
+        model.console = file.console
         model.follow(macDeviceFacts, on: [.GCControllerDidConnect, .GCControllerDidDisconnect, NSApplication.didChangeScreenParametersNotification])
         let app = NSApplication.shared, launcher = Launcher(model)
         app.setActivationPolicy(.regular)

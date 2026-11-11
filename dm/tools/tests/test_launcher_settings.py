@@ -177,7 +177,10 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(rows['DM_PICTURE_FIT']['inactive'], [{'when': ['DM_MOD_ULTRAWIDE=1', 'screen>=1.85'], 'why': 'Ultrawide always stretches the picture'}])
         self.assertEqual(rows['DM_SCREEN_ASPECT']['inactive'], [{'when': ['DM_MOD_ULTRAWIDE=1', 'screen>=1.85'], 'why': 'Ultrawide keeps the 16:9 picture'}])
         self.assertEqual(rows['DM_SCREEN_ASPECT']['hint'], [{'option': 'auto', 'when': ['window>=1.77'], 'why': '16:9 on this screen'}])
+        self.assertEqual(rows['DM_PICTURE_FIT']['shows'], [{'option': 'stretch', 'when': ['DM_MOD_ULTRAWIDE=1', 'screen>=1.85']}], 'greyed, Picture shows the Stretch the game is held at')
+        self.assertEqual(rows['DM_SCREEN_ASPECT']['shows'], [{'option': '0', 'when': ['DM_MOD_ULTRAWIDE=1', 'screen>=1.85']}], 'and Picture shape the 16:9 picture')
         self.assertNotIn('inactive', build(BOTW, 'nvn')['DM_PICTURE_FIT'], 'without the mod nothing greys Picture')
+        self.assertNotIn('shows', build(BOTW, 'nvn')['DM_PICTURE_FIT'], 'or shows another value')
         mac = build(BOTW, 'nvn', 'mac', mods=['ultrawide'])['DM_SCREEN_ASPECT']
         self.assertFalse({'inactive', 'hint'} & set(mac), 'the Mac has neither Ultrawide nor Match screen')
 
@@ -225,6 +228,29 @@ class LauncherSettingsTests(unittest.TestCase):
         ok = build_table(base + row('DM_X', 'choice', 'a=A,b=B', 'a', meta='inactive=b:DM_A=b&device:iphone/ipad~x|DM_R=0.5~y;hint=DM_PAD_MERGE=1~z;hide=device:mac&hz>=120'))['DM_X']
         self.assertEqual((ok['inactive'], ok['hint'], ok['hide']), ([{'option': 'b', 'when': ['DM_A=b', 'device:iphone/ipad'], 'why': 'x'}, {'when': ['DM_R=0.5'], 'why': 'y'}],
                                                                    [{'when': ['DM_PAD_MERGE=1'], 'why': 'z'}], [{'when': ['device:mac', 'hz>=120']}]))
+
+    def test_shows_rules(self):   # the value a greyed row shows while the host holds it there (Picture at Stretch under Ultrawide), the saved choice kept
+        base = row('DM_A', 'choice', 'a=A,b=B', 'a') + row('DM_T')
+        ok = build_table(base + row('DM_X', 'choice', 'a=A,b=B,c=C?fixups:NEVER', 'a', meta='inactive=DM_A=b&device:iphone~x;shows=b:DM_A=b&device:iphone'))['DM_X']
+        self.assertEqual(ok['shows'], [{'option': 'b', 'when': ['DM_A=b', 'device:iphone']}])
+        toggle = build_table(base + row('DM_X', meta='inactive=DM_A=b~x|DM_T=1~y;shows=1:DM_T=1'))['DM_X']
+        self.assertEqual(toggle['shows'], [{'option': '1', 'when': ['DM_T=1']}], 'a toggle shows on or off')
+        unoffered = build_table(base + row('DM_X', 'choice', 'a=A,b=B,c=C?fixups:NEVER', 'a', meta='inactive=DM_A=b~x;shows=c:DM_A=b'))['DM_X']
+        self.assertNotIn('shows', unoffered, 'a value this game does not offer is left out, the greying stays')
+        self.assertIn('inactive', unoffered)
+        for meta, why in [('shows=b:DM_A=b', 'whole-row inactive rule'), ('inactive=a:DM_A=b~x;shows=b:DM_A=b', 'whole-row inactive rule'),
+                          ('inactive=DM_A=b&DM_T=1~x;shows=b:DM_A=b', 'whole-row inactive rule'), ('inactive=DM_A=b~x;shows=DM_A=b', 'does not match'),
+                          ('inactive=DM_A=b~x;shows=b:DM_A=b~x', 'does not match'), ('inactive=DM_A=b~x;shows=z:DM_A=b', 'option DM_X does not have'),
+                          ('inactive=device:iphone~x;shows=b:device:iphone|device:ipad', 'shows names the value')]:
+            with self.subTest(meta=meta), self.assertRaises(SystemExit) as e:
+                build_table(base + row('DM_X', 'choice', 'a=A,b=B', 'a', meta=meta))
+            self.assertIn(why, str(e.exception))
+        with self.assertRaises(SystemExit) as e:   # a range has no option to show
+            build_table(base + row('DM_X', 'range', '0:1:0.1', '0', meta='inactive=DM_A=b~x;shows=1:DM_A=b'))
+        self.assertIn('option', str(e.exception))
+        with self.assertRaises(SystemExit) as e:
+            settings.rules('shows', 'b:DM_A=b~x', 1, 'DM_X', {'DM_X': ('choice', 'a=A,b=B'), 'DM_A': ('choice', 'a=A,b=B')})
+        self.assertIn('no reason', str(e.exception))
 
     def test_greying_cycles_are_refused(self):   # two rows that grey each other could both stay greyed with no way out for the player
         for text in (row('DM_A', meta='inactive=DM_B=1~x') + row('DM_B', meta='inactive=DM_A=0~y'),
@@ -299,11 +325,46 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(rows['DM_RUMBLE_GAIN']['needs'], 'DM_RUMBLE=1')
         self.assertFalse({'level', 'needs'} & set(rows['DM_METAL_HUD']), 'a row without meta has no optional fields')
 
+    def test_console_from_the_sdk_modules_build_spec(self):   # loader.c dm_sdk_ounce: the Switch 2's sdk says "spec: Ounce"; the title ID only when there is no sdk module
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(settings.console('0400486024DEC000', tmp), 'switch2')
+            self.assertEqual(settings.console(BOTW, tmp), 'switch1')
+            (Path(tmp) / 'sdk.patched.bin').write_bytes(b'\0' * 64 + b'nnSdk spec: NX ' + b'\0' * 16)
+            self.assertEqual(settings.console('0400486024DEC000', tmp), 'switch1')   # the module wins over the title ID
+            (Path(tmp) / 'sdk.patched.bin').write_bytes(b'\0' * 64 + b'nnSdk spec: Ounce ' + b'\0' * 16)
+            self.assertEqual(settings.console(BOTW, tmp), 'switch2')
+            with patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn'}):
+                self.assertEqual(settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['console'], 'switch2')
+
+    def test_presets_resolve_to_each_rows_values(self):
+        """preset: Battery and Quality's value per row (Balanced is the defaults), def resolved to the game's default, written for every preset"""
+        rows = build(BOTW, 'nvn', fixups=('RENDER_SCALE',), mods=('fps',))
+        fps, scale, up, aa, sharpen = (rows[v]['preset'] for v in ('DM_FPS_TARGET', 'DM_RENDER_SCALE', 'DM_PRESENT_UPSCALE', 'DM_POST_AA', 'DM_PRESENT_SHARPEN'))
+        self.assertEqual(fps, {'battery': '30', 'quality': rows['DM_FPS_TARGET']['default']})   # Quality keeps the tested frame rate
+        self.assertEqual((scale, up, aa), ({'battery': '0.75', 'quality': '1.0'}, {'battery': 'off', 'quality': 'metalfx'}, {'battery': 'off', 'quality': 'edge'}))
+        self.assertEqual(sharpen, {'battery': '0', 'quality': rows['DM_PRESENT_SHARPEN']['default']})
+        self.assertEqual(rows['DM_MOD_FPS']['preset'], {'battery': '0', 'quality': '0'})
+        for v in ('DM_OPMODE', 'DM_LANG', 'DM_RUMBLE', 'DM_PRESENT_SNAP', 'DM_PSO_MTL4', 'DM_METAL_HUD'):
+            self.assertNotIn('preset', rows.get(v, {}), f'{v}: no preset touches it')
+        dr = build('010056B015FE8000', 'nvn', fixups=('DYNAMIC_RESOLUTION',))['DM_DYNAMIC_RESOLUTION']['preset']   # NieR:Automata's dynamic resolution
+        self.assertEqual(dr, {'battery': '1', 'quality': '0'})
+        t = build_table(row('DM_A', 'choice', '1=One,2=Two?platform:mac', '1', 'preset=quality:2') + row('DM_B', 'toggle', 'on/off', '1', 'preset=battery:off')
+                        + row('DM_C', 'range', '0.5:1:0.05', '1', 'preset=battery:0.5'))
+        self.assertEqual(t['DM_A']['preset'], {'battery': '1', 'quality': '1'}, 'an option this game does not offer, and a preset not named: the default')
+        self.assertEqual((t['DM_B']['preset'], t['DM_C']['preset']), ({'battery': 'off', 'quality': 'on'}, {'battery': '0.5', 'quality': '1'}))
+        for bad, why in [(row('DM_X', meta='preset=eco:1'), 'unknown preset'), (row('DM_X', meta='preset=battery:1,battery:0'), 'twice'),
+                         (row('DM_X', meta='preset=battery:2'), 'never takes'), (row('DM_X', 'range', '0.5:1:0.05', '1', 'preset=battery:0.25'), 'never takes'),
+                         (row('DM_X', 'range', '0.5:1:0.05', '1', 'preset=battery:low'), 'not a number'), (row('DM_X', 'choice', 'languages', 'en-US', 'preset=battery:ja'), 'only def')]:
+            with self.subTest(why=why), self.assertRaises(SystemExit) as e:
+                build_table(bad)
+            self.assertIn(why, str(e.exception))
+
     def test_meta_is_strict(self):
         self.assertEqual(settings.meta('level=basic; needs=DM_RUMBLE=1', 1), {'level': 'basic', 'needs': 'DM_RUMBLE=1'})
         self.assertEqual(settings.meta('', 1), {})
         for bad, why in [('colour=red', 'unknown meta key'), ('level', 'unknown meta key'), ('level=basic;level=basic', 'twice'),
-                         ('level=advanced', 'does not match'), ('needs=DM_RUMBLE', 'does not match'), ('needs=rumble=1', 'does not match')]:
+                         ('level=advanced', 'does not match'), ('needs=DM_RUMBLE', 'does not match'), ('needs=rumble=1', 'does not match'),
+                         ('preset=battery', 'does not match'), ('preset=battery:1;preset=quality:0', 'twice'), ('preset=Battery:1', 'does not match')]:
             with self.subTest(bad=bad), self.assertRaises(SystemExit) as e:
                 settings.meta(bad, 1)
             self.assertIn(why, str(e.exception))
@@ -331,8 +392,8 @@ class LauncherSettingsTests(unittest.TestCase):
                     self.assertEqual(conforms(settings.build(gid, tmp, Path(tmp) / 'control.nacp'), schema, schema), [])
         rule = {'option': 'metalfx', 'when': ['DM_PICTURE_FIT=stretch'], 'why': 'x'}
         row = {'env': 'DM_X', 'kind': 'toggle', 'section': 'Game', 'label': 'X', 'note': '', 'default': '1', 'on': '1', 'off': '0'}
-        self.assertEqual(conforms({'game': BOTW, 'settings': [{**row, 'inactive': [rule], 'hint': [rule], 'hide': [{'when': ['device:ipad']}]}]}, schema, schema), [])
-        for bad in ({'inactive': [{'when': ['device:ipad']}]}, {'hint': [{'why': 'x'}]}, {'hide': [{}]}, {'inactive': rule}):
+        self.assertEqual(conforms({'game': BOTW, 'settings': [{**row, 'inactive': [rule], 'hint': [rule], 'hide': [{'when': ['device:ipad']}], 'shows': [{'option': '1', 'when': ['device:ipad']}]}]}, schema, schema), [])
+        for bad in ({'inactive': [{'when': ['device:ipad']}]}, {'hint': [{'why': 'x'}]}, {'hide': [{}]}, {'inactive': rule}, {'shows': [{'when': ['device:ipad']}]}, {'shows': [{'option': 1, 'when': ['device:ipad']}]}):
             with self.subTest(bad=bad):
                 self.assertNotEqual(conforms({'game': BOTW, 'settings': [{**row, **bad}]}, schema, schema), [])
 

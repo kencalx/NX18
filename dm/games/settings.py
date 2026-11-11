@@ -20,14 +20,22 @@ META = {
     'inactive': r'[^;|~]+~[^;|~]+(\|[^;|~]+~[^;|~]+)*',   # <rule>|<rule>: the row (or one option) is drawn greyed, with the rule's reason as its note, while a rule holds
     'hint': r'[^;|~]+~[^;|~]+(\|[^;|~]+~[^;|~]+)*',       # <rule>|<rule>: the row stays selectable and shows the rule's reason as its note while a rule holds
     'hide': r'[^;|~]+(\|[^;|~]+)*',                       # <when>|<when>: the row is not drawn on a device where one holds (device terms only)
+    'shows': r'[^;|~:]+:[^;|~]+(\|[^;|~:]+:[^;|~]+)*',     # <value>:<when>|...: while the row is greyed by a whole-row inactive rule with that <when>, it shows <value> (what the host uses then) in place of its saved choice
+    'preset': r'[a-z]+:[^,;:=|~]+(,[a-z]+:[^,;:=|~]+)*',   # <preset>:<value>,...: the value the row takes in a preset (PRESETS), def for its default; a preset it does not name keeps the default
 }
-RULE_KEYS = ('inactive', 'hint', 'hide')
+RULE_KEYS = ('inactive', 'hint', 'hide', 'shows')
+# The launcher's presets besides Balanced, which is the tested defaults (Reset): a front end shows them as one choice over the rows that have a preset (frame rate, resolution,
+# upscaling, anti-aliasing). Applying one sets each such row to its preset value, except a row an env file or the launch sets, a row a rule greys and an option a rule greys
+PRESETS = ('battery', 'quality')
 # A rule is [<option>:]<when>~<why>, and <when> is terms joined by &, all of which must hold. A front end evaluates two kinds of term on the device:
 # - <VAR>=<v>/<v> or <VAR>!=<v>/<v>: another row's current value (a range compares as a number), or the environment for a switch no row sets (ENV_ONLY); false when neither has it
 # - DEVICE_TERMS: what the device, its screen or the app has
 # A third kind, the shown column's terms (PACK_TERM, ! to negate, / for any of several), settings.py decides when the app is packed: a rule whose pack terms fail is left out of
 # the list, and the others go out without them. So a rule that depends on what the game has (MetalFX's hint with Stretch: a game without Picture shape keeps the 16:9 picture,
 # one with it stretches it only where the shape chosen differs from the window's) is a few rules in the table rather than a column per game
+# A shows rule is <value>:<when> with no reason: while it holds the row shows <value>, the value the host uses then (Ultrawide holds Picture at Stretch, front_ios.m startGame),
+# instead of the player's saved choice, which stays and comes back when the rule stops holding. It needs a whole-row inactive rule with the same terms, so the row it
+# changes is always greyed and a pick never meets a value it cannot change. Other rows' rules still test the saved value (LauncherModel.holds)
 DEVICE_TERMS = (r'device:(iphone|ipad|mac)(/(iphone|ipad|mac))*',   # the kind of device the app runs on
                 r'(screen|window)(<|>=)\d+(\.\d+)?',               # the long side over the short side of the window's screen (front_ios.m's Ultrawide test) or of the app's window (Match screen's)
                 r'hz(<|>=)\d+',                                    # the highest refresh rate of the connected screens (hle_nvn.c's 120 fps test)
@@ -59,11 +67,12 @@ def meta(text, n):
 
 
 def rules(key, text, n, var, table):
-    """inactive, hint or hide's value as [(option or None, [term, ...], why or None)], checked against the whole table (as needs is: a rule on a row this game
-    does not list is still checked). table is {variable: (kind, values)} for every row"""
+    """inactive, hint, hide or shows's value as [(option or None, [term, ...], why or None)], checked against the whole table (as needs is: a rule on a row this game
+    does not list is still checked). table is {variable: (kind, values)} for every row. A shows rule's option is the value the row shows, and it has no reason"""
     out = []
     for part in text.split('|'):
-        head, _, why = part.partition('~') if key != 'hide' else (part, '', None)
+        if key == 'shows' and '~' in part: sys.exit(f'settings.tsv:{n}: shows takes no reason (the row\'s inactive rule gives it): {part}')
+        head, _, why = part.partition('~') if key not in ('hide', 'shows') else (part, '', None)
         why = why.strip() if why is not None else None
         if why is not None and not why: sys.exit(f'settings.tsv:{n}: {key} rule without a reason after ~: {part}')
         if why and len(why) > WHY_MAX: sys.exit(f'settings.tsv:{n}: {key} reason longer than {WHY_MAX} characters: {why}')
@@ -76,6 +85,7 @@ def rules(key, text, n, var, table):
             if can is None: sys.exit(f'settings.tsv:{n}: {key} names an option, which a {kind} row does not have: {part}')
             if first not in can: sys.exit(f'settings.tsv:{n}: {key} names an option {var} does not have: {first} (it has {", ".join(sorted(can))})')
             option, terms[0] = first, rest
+        if key == 'shows' and option is None: sys.exit(f'settings.tsv:{n}: shows names the value the row shows first, <value>:<when>: {part}')
         device = False
         for t in terms:
             if re.fullmatch(PACK_TERM, t): continue
@@ -87,6 +97,28 @@ def rules(key, text, n, var, table):
         if key == 'hide' and not device: sys.exit(f'settings.tsv:{n}: hide needs a device term: {part}')
         if not any(not re.fullmatch(PACK_TERM, t) for t in terms): sys.exit(f'settings.tsv:{n}: {key} rule with only pack-time terms: that is the shown column\'s job: {part}')
         out.append((option, terms, why))
+    return out
+
+
+def presets(text, n, var, table):
+    """preset's value as {preset: value}, def for the row's default, each value one the row's variable takes (checked against the whole table, as rules are)"""
+    out = {}
+    kind, values = table[var]
+    for part in text.split(','):
+        name, _, v = part.partition(':')
+        if name not in PRESETS: sys.exit(f'settings.tsv:{n}: unknown preset {name!r} (presets: {", ".join(PRESETS)}; balanced is the defaults)')
+        if name in out: sys.exit(f'settings.tsv:{n}: preset {name} given twice')
+        if v != 'def':
+            if kind == 'range':
+                lo, hi, _ = (float(x) for x in values.split(':'))
+                try: f = float(v)
+                except ValueError: sys.exit(f'settings.tsv:{n}: preset {name} sets the range {var} to {v}, not a number')
+                if not lo <= f <= hi: sys.exit(f'settings.tsv:{n}: preset {name} sets {var} to {v}, which it never takes (it takes {lo:g} to {hi:g})')
+            else:
+                can = takes(kind, values)
+                if can is None: sys.exit(f'settings.tsv:{n}: preset {name} on {var}, whose values are the game\'s: only def')
+                if v not in can: sys.exit(f'settings.tsv:{n}: preset {name} sets {var} to {v}, which it never takes (it takes {", ".join(sorted(can))})')
+        out[name] = v
     return out
 
 
@@ -241,6 +273,10 @@ def build(gid, patched, control):
             can = takes(*table[need])
             if can is not None and want not in can: sys.exit(f'settings.tsv:{n}: needs a value {need} never takes: {want} (it takes {", ".join(sorted(can))})')
         parsed = {k: rules(k, m.pop(k), n, var, table) for k in RULE_KEYS if k in m}
+        for _, terms, _ in parsed.get('shows', []):   # the row shows another value only while it is greyed, so the player never sees a value that a pick could not change
+            if not any(o is None and t == terms for o, t, _ in parsed.get('inactive', [])):
+                sys.exit(f'settings.tsv:{n}: a shows rule needs a whole-row inactive rule with the same terms, so the row is greyed while it shows the value: {"&".join(terms)}')
+        preset = presets(m.pop('preset'), n, var, table) if 'preset' in m else None
         inactive[var] = parsed.get('inactive', [])
         if not shown(cond, n): continue
         s = {'env': var, 'kind': kind, 'section': section, 'label': label, 'note': note, 'default': value(default, n), **m}
@@ -261,6 +297,8 @@ def build(gid, patched, control):
             s.update(on=on_off[0], off=on_off[1], default=on_off[0] if s['default'] == '1' else on_off[1])   # the default as the value the variable takes
         else: sys.exit(f'settings.tsv:{n}: unknown kind {kind}')
         opts = [o[0] for o in s['options']] if kind == 'choice' else None
+        if preset is not None:   # every preset, def resolved to this game's default; an option this game does not offer: its default too
+            s['preset'] = {p: s['default'] if (v := preset.get(p, 'def')) == 'def' or (opts is not None and v not in opts) else v for p in PRESETS}
         for k, rs in parsed.items():
             r = resolve(rs, listed, opts, n)
             if r: s[k] = r
@@ -275,7 +313,15 @@ def build(gid, patched, control):
         linked = 'DM_RENDER_SCALE' in reads('DM_DYNAMIC_RESOLUTION') or 'DM_DYNAMIC_RESOLUTION' in reads('DM_RENDER_SCALE')
         if not linked: sys.exit(f'{g.id}: the game has both Dynamic resolution and Render scale, and below 100 % the render scale overrides the dynamic resolution: '
                                 'give one of the two rows an inactive or hint rule on the other in settings.tsv')
-    return {'schema': SCHEMA, 'game': g.id, 'settings': out}
+    return {'schema': SCHEMA, 'game': g.id, 'console': console(g.id, patched), 'settings': out}
+
+
+def console(gid, patched):
+    """'switch2' for a game built for the Switch 2, else 'switch1', for the launcher's line under the game's name: the rewritten sdk module's build spec ("spec: Ounce",
+    loader.c dm_sdk_ounce, profile_guess.py), else the title ID (Switch 2 titles are 04...)"""
+    sdk = next(iter(sorted(Path(patched).glob('sdk*.bin'))), None)
+    if sdk is not None and b'spec: Ounce' in sdk.read_bytes(): return 'switch2'
+    return 'switch2' if sdk is None and gid.upper().startswith('04') else 'switch1'
 
 
 if __name__ == '__main__':

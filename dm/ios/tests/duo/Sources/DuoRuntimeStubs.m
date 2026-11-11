@@ -106,7 +106,7 @@ void dm_haptics_apple_controller(int player, GCController *controller) { (void)p
 
 int front_ios_boot_ok(void) { return 1; }
 void front_ios_boot(void) {}
-bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewController; (void)done; return false; }
+// dm_show_launcher is the real one (Launcher.swift): without a launcher list (DM_APP_DM unset, no dm/launcher.json in the harness) it returns false and the game starts
 
 uint64_t g_t0_ns;
 uint64_t now_ns(void) { return 1; }
@@ -151,6 +151,5 @@ void dm_focus_set(int state) { (void)state; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 const char *front_ios_boot_message(void) { return NULL; }
 const char *front_ios_device_check(void) { return NULL; }   // a supported GPU
-void dm_cloud_saves_env(void) {}
 int save_sync_flush(int timeout_ms) { (void)timeout_ms; return 1; }
 int dm_players_reported(void) { return 1; }   // hle_hid.c: DmGamepad.m asks for the player count; the harness has only player 1

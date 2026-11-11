@@ -1,5 +1,5 @@
 // Virtual gamepad (Nintendo button positions) + physical controllers (GameController), handed to the host through dm_input_set and dm_pad_set_player (hle_hid.c, bit layout in dm_input.h).
-//   Two layouts, three in handheld mode, picked in the in-game menu (GameMenu.swift) that the menu button at the top centre (a gear) opens; the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
+//   Two layouts, three in handheld mode, picked in the in-game menu (GameMenu.swift) that the menu button at the top centre (a ring with eight rays, menuIcon) opens; the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
 //   The menu button is not hidden with the touch controls when a physical controller is connected, so the menu is there in every layout and with every controller (it still fades
 //   after 5 s and comes back on a double tap, as below).
 //   The menu button is hidden while playing: a double tap anywhere but on a drawn control (keys, diamond, D-pad, left stick) shows it, and it fades out again after 5 s
@@ -146,6 +146,7 @@ int front_web_touch(void);   // web_apple.m: an offline HTML page is shown over 
 - (BOOL)menuTakes:(CGPoint)p;
 - (void)menuTouched;
 - (void)menuClosed;
+- (void)menuOpenNow;
 @end
 // The menu button: a UIButton whose menu is the in-game menu (UIKit draws it and takes the touches while it is open). Its hit circle is larger than the drawn one, and a key nearer
 // to the touch wins (− / + sit beside it), so it asks the pad
@@ -227,7 +228,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         _owner = [NSMapTable strongToStrongObjectsMapTable]; _faceOf = [NSMapTable strongToStrongObjectsMapTable];
         g_touch_size = touch_value("DM_TOUCH_SIZE", getenv("DM_TOUCH_SIZE"), 0.5, 1); g_touch_opacity = touch_value("DM_TOUCH_OPACITY", getenv("DM_TOUCH_OPACITY"), 0.1, 2);
         if (g_touch_size != 1 || g_touch_opacity != 1) LOG("front end: touch controls at size %.2f, opacity %.2f (DM_TOUCH_SIZE, DM_TOUCH_OPACITY)", g_touch_size, g_touch_opacity);
-        make_colors(1); UIColor *menuFill = k_idle, *menuLine = k_line, *menuText = k_text;   // the menu button's: the normal look
+        make_colors(1); UIColor *menuFill = k_idle, *menuLine = k_line;   // the menu button's: the normal look
         make_colors(g_touch_opacity);
         _controls = [CALayer layer]; [self.layer addSublayer:_controls];
         _ring = shape(_controls); _ring.fillColor = k_ringFill.CGColor;
@@ -242,7 +243,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         _menu = [DmMenuButton buttonWithType:UIButtonTypeCustom];
         _menu.backgroundColor = menuFill; _menu.layer.borderColor = menuLine.CGColor; _menu.layer.borderWidth = 1.5;
         _menu.layer.shadowColor = UIColor.blackColor.CGColor; _menu.layer.shadowOpacity = 0.2; _menu.layer.shadowRadius = 3; _menu.layer.shadowOffset = CGSizeMake(0, 1);
-        _menu.tintColor = menuText; _menu.accessibilityLabel = @"Menu";
+        _menu.tintColor = [UIColor colorWithRed:0 green:0xC8 / 255.0 blue:0xF5 / 255.0 alpha:1]; _menu.accessibilityLabel = @"Menu";   // NX 18's cyan (LauncherRow.swift NX18Palette): the icon (menuIcon) and the menu's ticks, as on the settings screen
         _menu.menu = CFBridgingRelease(dm_game_menu()); _menu.showsMenuAsPrimaryAction = YES;
         __weak DmGamepad *weakSelf = self;
         [_menu addAction:[UIAction actionWithHandler:^(UIAction *a) { (void)a; [weakSelf menuOpened]; [weakSelf reset]; }] forControlEvents:UIControlEventMenuActionTriggered];   // the menu opens: release every key and touch first
@@ -293,6 +294,13 @@ static BOOL assistive_running(void) { return UIAccessibilityIsVoiceOverRunning()
 - (void)menuTouched { [self menuShow]; }
 - (void)menuOpened { _menuOpen = YES; _menuGen++; _menu.hidden = NO; _menu.alpha = 1; }
 - (void)menuClosed { _menuOpen = NO; [self menuScheduleHide]; }
+// A home screen shortcut (dm_gamepad_menu_open): the button shows at once (a faded or hidden one does not open its menu) and its menu opens on the next main-queue turn, as a tap does
+// (UIControl performPrimaryAction presents a menu-as-primary-action button's menu)
+- (void)menuOpenNow {
+    [_menu.layer removeAllAnimations]; _menu.hidden = NO; _menu.alpha = 1; [self menuScheduleHide];
+    __weak DmGamepad *w = self;
+    dispatch_async(dispatch_get_main_queue(), ^{ DmGamepad *me = w; if (me && me.window) [me->_menu performPrimaryAction]; });
+}
 - (int)padLayout { return _tap ? 2 : _full ? 1 : 0; }
 - (int)touchHidden { return _padOff ? 1 : _tap ? 2 : 0; }   // dm_gamepad_touch_hidden
 - (void)setPadLayout:(int)l {   // the in-game menu's pick: release every touch first (no key stays held), save, lay out again
@@ -563,6 +571,23 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 
 // ---- Shapes ----
 static CGPathRef circlePath(CGPoint c, CGFloat r) { return CGPathCreateWithEllipseInRect(CGRectMake(c.x - r, c.y - r, 2 * r, 2 * r), NULL); }
+// The menu button's icon: a ring with eight straight rays (the owner's drawing), a template image the button's tintColor (NX 18's cyan) colours. side: the icon's width and height
+// in points. Ring centred at half the radius, rays from 0.72 to the edge, all strokes 0.19 of the radius, flat ends
+static UIImage *menuIcon(CGFloat side) {
+    UIGraphicsImageRendererFormat *f = [UIGraphicsImageRendererFormat preferredFormat]; f.opaque = NO;
+    UIImage *img = [[[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side) format:f] imageWithActions:^(UIGraphicsImageRendererContext *rc) {
+        CGContextRef g = rc.CGContext; CGFloat R = side / 2, w = 0.19 * R;
+        CGContextSetFillColorWithColor(g, UIColor.blackColor.CGColor); CGContextSetStrokeColorWithColor(g, UIColor.blackColor.CGColor);
+        CGContextSetLineWidth(g, w); CGContextSetLineCap(g, kCGLineCapButt);
+        CGContextStrokeEllipseInRect(g, CGRectMake(R - 0.505 * R, R - 0.505 * R, 1.01 * R, 1.01 * R));
+        for (int i = 0; i < 8; i++) {
+            CGFloat a = i * M_PI_4, c = cos(a), s = sin(a), in = 0.72 * R, out = R - w * 0.5 * (fabs(c) > 0.1 && fabs(s) > 0.1 ? 1 : 0);   // a diagonal's flat end keeps its corners inside
+            CGContextMoveToPoint(g, R + in * c, R + in * s); CGContextAddLineToPoint(g, R + out * c, R + out * s);
+        }
+        CGContextStrokePath(g);
+    }];
+    return [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
 static CGPathRef dropPath(CGPoint c, CGFloat r, CGFloat tipAngle, CGFloat round) {   // teardrop: circle + two tangents meeting at the tip, tip slightly rounded
     CGFloat d = r * K_DROP_TIP, th = acos(r / d);
     CGPoint tip = CGPointMake(c.x + d * cos(tipAngle), c.y + d * sin(tipAngle));
@@ -618,7 +643,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     CGFloat mr = K_MENU_R * u; CGPoint mc = self.menuCenter;
     _menu.frame = CGRectMake(mc.x - mr, mc.y - mr, 2 * mr, 2 * mr); _menu.layer.cornerRadius = mr;
     _menu.layer.shadowPath = [UIBezierPath bezierPathWithOvalInRect:_menu.bounds].CGPath;
-    [_menu setImage:[UIImage systemImageNamed:@"gearshape.fill" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:13 * u weight:UIImageSymbolWeightSemibold]] forState:UIControlStateNormal];
+    [_menu setImage:menuIcon(16 * u) forState:UIControlStateNormal];   // drawn for this size, so it stays sharp at every touch-control scale
     setPath(_ring, circlePath(self.stickHome, [self stickR:0]));
     CGFloat k = K_KNOB_R * u; _knob.bounds = CGRectMake(0, 0, 2 * k, 2 * k);
     setPath(_knob, circlePath(CGPointMake(k, k), k));
@@ -835,6 +860,7 @@ void dm_gamepad_touch_look(const char *env, const char *value) {   // front_ios.
     LOG("front end: touch control %s %.2f (in-game menu)", size ? "size" : "opacity", v);
 }
 double dm_gamepad_size(void) { return g_touch_size; }   // front_ios.m: the frame-rate counter sits in the top row by the same units
+void dm_gamepad_menu_open(void) { if (g_view) [g_view menuOpenNow]; else LOG("front end: no touch controls yet: the in-game menu cannot open"); }   // main thread (LauncherShortcuts.swift)
 void dm_gamepad_hint(void) { [g_view menuShow]; }   // main thread: the menu button shows for 5 s (front_ios.m: the game's first picture, the end of the progress screen)
 int dm_pad_layout(void) { return g_view ? [g_view padLayout] : 0; }
 int dm_gamepad_touch_hidden(void) { return g_view ? [g_view touchHidden] : 0; }   // front_ios.m dm_setting_why: the touch rows' note in the in-game menu
