@@ -24,7 +24,8 @@
 
 #define DM_UI_FN static __attribute__((unused))   // each part uses some of these
 #define DM_UI_FONT_SCALE_DEFAULT 0.9   // the font's cap height is about 13 % above the system font's at one size
-#define DM_UI_LINE_SPACING 0.2         // extra space between wrapped lines, in ems: the system font's lines are about 1.2 ems, this font's 1.0
+#define DM_UI_LINE_SPACING 0.3         // extra space between wrapped lines, in ems: the system font's lines are about 1.2 ems, this font's 1.0, and its descenders and accented
+                                       // capitals reach past its ascent and descent (at 0.2 a "p" touched the "Ü" on the line below)
 
 DM_UI_FN int dm_ui_font_info_string(const char *key, char *out, size_t n) {   // a string key of the main bundle's Info.plist
     CFBundleRef b = CFBundleGetMainBundle(); if (!b) return 0;

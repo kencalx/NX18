@@ -49,18 +49,47 @@ struct SettingRow: View {
         }
     }
 
+    private var options: some View {
+        ForEach(s.options ?? [], id: \.[0]) { o in
+            Text(optionLabel(o)).tag(o[0]).selectionDisabled(m.optionInactive(s, o[0]) != nil)
+        }
+    }
+    private var currentLabel: String { s.options?.first { $0[0] == current }?[1] ?? current }
+    // A choice with the UI font (NXFont.swift): the menu picker draws its value itself, in the system font on iOS (a UIKit button) and on the Mac in an NSPopUpButton whose
+    // title sits below the row's name (AppKit lays the font out with its line gap). So the value is NX 18's own text in a Menu, and only the option list is the system's menu
+    // (the same Picker, inline in it: checkmark, greyed options). Name and value side by side, the value under the name at the accessibility text sizes, as the menu picker does
+    @ViewBuilder private var fontChoice: some View {
+        let value = Menu {
+            Picker(selection: m.binding(s)) { options } label: { Text(s.label) }
+                .pickerStyle(.inline)
+        } label: {
+            HStack(spacing: 4) {
+                Text(currentLabel).nxFont(.body)
+                Image(systemName: "chevron.up.chevron.down").imageScale(.small)
+            }
+            .foregroundStyle(enabled && !locked && !inactive ? NX18Palette.cyan : NX18Palette.muted)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.button).buttonStyle(.plain).fixedSize()
+        .accessibilityLabel(Text(s.label)).accessibilityValue(Text(currentLabel))
+        if typeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 6) { settingLabel.accessibilityHidden(true); value.accessibilityHint(Text(note)) }
+        } else {
+            HStack(alignment: .firstTextBaseline) { settingLabel.accessibilityHidden(true); Spacer(minLength: 12); value.accessibilityHint(Text(note)) }
+        }
+    }
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.legibilityWeight) private var legibility
+    @Environment(\.isEnabled) private var enabled
+
     var body: some View {
         Group {
             switch s.kind {
             case "choice":
-                Picker(selection: m.binding(s)) {
-                    ForEach(s.options ?? [], id: \.[0]) { o in
-                        Text(optionLabel(o)).tag(o[0]).selectionDisabled(m.optionInactive(s, o[0]) != nil)
-                    }
-                } label: {
-                    settingLabel
+                if NXFont.name != nil && legibility != .bold { fontChoice } else {
+                    Picker(selection: m.binding(s)) { options } label: { settingLabel }
+                        .pickerStyle(.menu)
                 }
-                .pickerStyle(.menu)
             case "range":
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {

@@ -18,8 +18,8 @@ enum NXFont {
         guard let s = ProcessInfo.processInfo.environment["DM_UI_FONT_SCALE"], let v = Double(s), (0.5...1.5).contains(v) else { return 0.9 }
         return CGFloat(v)
     }()
-    /// Space between wrapped lines with the UI font, in ems (ui_font.h DM_UI_LINE_SPACING): the system font's lines are about 1.2 ems, this font's 1.0 in SwiftUI
-    static let lineSpacingEm: CGFloat = 0.2
+    /// Space between wrapped lines with the UI font, in ems (ui_font.h DM_UI_LINE_SPACING, which says why 0.3): the system font's lines are about 1.2 ems, this font's 1.0 in SwiftUI
+    static let lineSpacingEm: CGFloat = 0.3
 
     /// A text style's size at the default text size, which Font.custom scales from (the platform's own table)
     static func base(_ s: Font.TextStyle) -> CGFloat {
