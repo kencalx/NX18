@@ -327,6 +327,9 @@ static _Atomic unsigned g_image_heap_n, g_big_n;   // g_big_n: large pools in ch
 static inline MTL4VisibilityOptions resource_vis(void) { return MTL4VisibilityOptionDevice | (g_image_heap_n || g_big_n ? MTL4VisibilityOptionResourceAlias : 0); }
 // Residency churn by call site (the power line every 300 frames, mtl_res_stats): each commit with changes is a kernel call whose cost grows with what was added or removed
 enum { RS_SITES = 16 }; static struct { int line; uint64_t n, bytes; } g_rs_site[RS_SITES]; static uint64_t g_rs_rm, g_rs_commits, g_rs_commit_ns;
+// The render-target shadows of depth and compressed textures (bcrt_attach), for the same line: passes that drew into one, shadows made and reused, retired (idle, over the cache's byte cap
+// or trimmed), and the bytes the cache holds. Written by the submit thread, read and reset by mtl_res_stats on another, so atomic
+static _Atomic uint64_t g_bcrt_passes, g_bcrt_made, g_bcrt_reused, g_bcrt_retired, g_bcrt_bytes;
 #define res_add(r) res_add_at((r), __LINE__)
 // Both run on guest threads too (pool_res from mtl_addr, uploads), whose implicit autorelease pools never drain; containsObject: / removeObject: on a weak NSHashTable leave the object
 // autoreleased in the calling thread's pool (measured in a standalone test: the object outlived its last strong reference until the thread ended), so each has a pool of its own
@@ -549,7 +552,12 @@ void mtl_res_stats(char *out, size_t n) {
     size_t o = snprintf(out, n, "commits %llu / %.1f ms, added %llu, %.0f MB (", (unsigned long long)g_rs_commits, g_rs_commit_ns / 1e6, (unsigned long long)tn, tb / 1048576.0);
     for (int i = 0; i < 4 && o < n; i++) { int best = -1; for (int k = 0; k < RS_SITES; k++) if (g_rs_site[k].n && (best < 0 || g_rs_site[k].bytes > g_rs_site[best].bytes)) best = k;
         if (best < 0) break; o += snprintf(out + o, n - o, "%sline %d: %llu, %.0f MB", i ? ", " : "", g_rs_site[best].line, (unsigned long long)g_rs_site[best].n, g_rs_site[best].bytes / 1048576.0); g_rs_site[best].n = 0; }
-    if (o < n) snprintf(out + o, n - o, "), removed %llu, %lu allocations in the set (%.0f MB)", (unsigned long long)g_rs_rm, g_res ? (unsigned long)g_res.allocationCount : 0ul, g_res ? g_res.allocatedSize / 1048576.0 : 0.0);
+    if (o < n) o += snprintf(out + o, n - o, "), removed %llu, %lu allocations in the set (%.0f MB)", (unsigned long long)g_rs_rm, g_res ? (unsigned long)g_res.allocationCount : 0ul, g_res ? g_res.allocatedSize / 1048576.0 : 0.0);
+    // How often a pass drew into a depth or compressed texture through a shadow, and whether the shadow cache kept up: in Luigi's Mansion 3 'made' was about 3 a frame before the cache was
+    // keyed by format and size (bcrt_slot), each one a texture, a buffer and residency commits; a few in all, then none, once it was. Passes times 4 copies is what the shadows cost in copies
+    uint64_t bp = atomic_exchange(&g_bcrt_passes, 0), bm = atomic_exchange(&g_bcrt_made, 0), bu = atomic_exchange(&g_bcrt_reused, 0), br = atomic_exchange(&g_bcrt_retired, 0);
+    if (o < n && (bp || bm || br)) snprintf(out + o, n - o, "; render-target shadows: passes %llu, made %llu, reused %llu, retired %llu, %.1f MB kept", (unsigned long long)bp, (unsigned long long)bm,
+                                           (unsigned long long)bu, (unsigned long long)br, atomic_load(&g_bcrt_bytes) / 1048576.0);
     memset(g_rs_site, 0, sizeof g_rs_site); g_rs_rm = g_rs_commits = g_rs_commit_ns = 0;
     pthread_mutex_unlock(&g_res_mu);
 }
@@ -1576,6 +1584,7 @@ static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(voi
 static void up_trim(void);   // the upload staging's idle trim (UP_TRIM_IDLE)
 static void pkg_spare_trim(void);   // packaged-texture spares let go when idle (PKG_SPARE_IDLE)
 static void fb_trim_idle(void);   // same-pass feedback snapshots let go when idle (FB_SNAP_IDLE)
+static void bcrt_trim_idle(void); static uint64_t bcrt_trim(uint64_t idle_ns, uint64_t fence, int *nout);   // render-target shadows let go when idle (BCRT_IDLE_NS) or trimmed
 static _Atomic int g_trim_req;   // a memory pressure level that asks for a trim at the next submission's start (mtl_pressure); 0: none
 static _Atomic uint64_t g_trim_n, g_trim_bytes;   // trims and their bytes, in total (the memory line)
 static _Atomic uint64_t g_fbc_n, g_fbc_bytes, g_fbc_freed, g_fbc_freed_bytes;   // feedback snapshot textures kept and their bytes (at the last look, fb_trim); let go and their bytes, in total (the memory line)
@@ -1590,6 +1599,7 @@ void mtl_sub_begin(void) {
     up_trim();
     pkg_spare_trim();
     fb_trim_idle();
+    bcrt_trim_idle();
     { int lv = atomic_exchange(&g_trim_req, 0); if (lv) mtl_trim_at(lv, g_fence + 1); }   // memory pressure: the next submission's fence, after which no present or submission committed so far reads what goes
     defer_reset();
     mtl_prepare();   // done by then in the submit entry; the replay tool (nvn_replay) reaches it here
@@ -5652,14 +5662,85 @@ static int bcrt_view(id<MTLTexture> base, const view_t *v, int has_v, MTLPixelFo
 }
 // Drawing into a BC texture: the pass draws into an uncompressed shadow of blocks x blocks in the view's format. The level / layer / depth plane's blocks are copied into it through a buffer before the pass
 // and back, byte for byte, after it (bcrt_flush, from rp_end). The shadow is an attachment of its own: always loaded and stored, and kept out of the load-skip / store-elision / zero-source bookkeeping,
-// which keys by the BC texture's serial. Shadows and staging buffers stay resident and are reused per attachment number, format and size, so a pass per depth plane adds no residency churn.
+// which keys by the BC texture's serial. Shadows and staging buffers stay resident and are reused by format and size (bcrt_slot), so a pass per depth plane adds no residency churn.
 // From PR #11 (digitalhivehub), where Tears of the Kingdom first drew this way
 typedef struct { id<MTLTexture> base, shadow; id<MTLBuffer> buf; NSUInteger level, slice, z, w, h, bw, bh, bpb; } bcrt_t;
 static bcrt_t g_bcrt[8];
-static __strong id<MTLTexture> g_bcrt_sh[8]; static __strong id<MTLBuffer> g_bcrt_buf[8];
+// The shadow cache: each entry a shadow texture and its staging buffer, with when it was last taken (use: an order; ns: the time) and its bytes. It used to be indexed by the attachment's
+// number in the pass, which starts at 0 again every pass, so an entry was made again whenever the passes that used that number changed format or size. Luigi's Mansion 3 draws its D16 shadow
+// maps of 1024, 512 and 256 square through R16 views, one attachment per pass, so entry 0 was made again about 3 times a frame: in the iPhone log 1,300-1,900 textures and buffers, about
+// 1.6 GB, and about 600 residency commits every 300 frames, all from the res_add line below. Now an entry is found by its shadow's Metal format and size in blocks (bcrt_slot): every attach
+// copies the base's blocks in first and every pass end copies them back, so what a shadow held before never shows, and which entry a pass takes cannot change a picture; the copies
+// themselves are as before (the blit barriers order one pass's copy back before the next pass's copy in through the same buffer, as they did when two passes shared an entry number).
+// DM_NVN_BCRT_CACHE=0 takes the entry by attachment number again, made again whenever its format or size differs, as before, for A/B tests on a device
+enum { BCRT_CACHE = 8 };   // as many as a pass has colour attachments, so an entry not attached in the open pass is always left
+#define BCRT_CAP ((uint64_t)64 << 20)   // the bytes the cache keeps (textures and buffers) before it lets the least recently used entries go; Luigi's Mansion 3 needs 5.25 MiB
+#define BCRT_IDLE_NS (5000000000ull)   // an entry no pass has taken for this long (5 s) is let go at the next submission's start (bcrt_trim), so a scene that needed large shadows does not pin them
+typedef struct { __strong id<MTLTexture> sh; __strong id<MTLBuffer> buf; uint64_t use, ns, bytes; } bcrt_cache_t;
+static bcrt_cache_t g_bcrtc[BCRT_CACHE]; static uint64_t g_bcrtc_use;
+static int bcrt_cache_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_BCRT_CACHE"); on = !e || atoi(e);
+    if (!on) MLOG("render-target shadows: one per attachment number, made again whenever its format or size changes, as before (DM_NVN_BCRT_CACHE=0)"); } return on; }
 static int bcrt_is(id<MTLTexture> t) { for (int i = 0; i < g_nbcrt; i++) if (t && g_bcrt[i].shadow == t) return 1; return 0; }
+static inline int bcrt_fits(const bcrt_cache_t *e, MTLPixelFormat spf, NSUInteger bw, NSUInteger bh, NSUInteger img) { return e->sh && e->sh.pixelFormat == spf && e->sh.width == bw && e->sh.height == bh && e->buf.length >= img; }
+static void bcrt_bytes_note(void) { uint64_t b = 0; for (int i = 0; i < BCRT_CACHE; i++) b += g_bcrtc[i].bytes; atomic_store(&g_bcrt_bytes, b); }
+// An entry's pair leaves through the deferred-release queue: out of the residency set and released once the submission of fence has completed (the open one's, g_fence + 1, for an entry a
+// pass of it may have used)
+static uint64_t bcrt_drop(bcrt_cache_t *e, uint64_t fence) {
+    uint64_t b = e->bytes; defer_obj_at(e->sh, 0, fence); defer_obj_at(e->buf, 0, fence); e->sh = nil; e->buf = nil; e->bytes = e->use = e->ns = 0; return b;
+}
+// Over the byte cap: the least recently used entries go, never keep (just taken) nor one attached in the open pass. An entry larger than the cap by itself stays while it is attached, and is
+// the first to go at the next miss
+static void bcrt_cap(int keep) {
+    uint64_t total = 0; for (int i = 0; i < BCRT_CACHE; i++) total += g_bcrtc[i].bytes;
+    while (total > BCRT_CAP) {
+        int v = -1; for (int i = 0; i < BCRT_CACHE; i++) { bcrt_cache_t *e = &g_bcrtc[i]; if (i == keep || !e->sh || bcrt_is(e->sh)) continue; if (v < 0 || e->use < g_bcrtc[v].use) v = i; }
+        if (v < 0) break;
+        total -= bcrt_drop(&g_bcrtc[v], g_fence + 1); atomic_fetch_add(&g_bcrt_retired, 1);
+    }
+}
+// Entries no pass has taken for idle_ns (0: all) go behind fence. Only between submissions (no pass is open, so none is attached), from mtl_sub_begin and the memory trim (mtl_trim_at);
+// returns the bytes let go, *nout the entries
+static uint64_t bcrt_trim(uint64_t idle_ns, uint64_t fence, int *nout) {
+    uint64_t freed = 0, now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); int n = 0;
+    *nout = 0; if (!bcrt_cache_on() || atomic_load(&g_sub_on) || g_nbcrt) return 0;
+    for (int i = 0; i < BCRT_CACHE; i++) { bcrt_cache_t *e = &g_bcrtc[i];
+        if (e->sh && now - e->ns >= idle_ns) { freed += bcrt_drop(e, fence); n++; } }
+    if (n) { atomic_fetch_add(&g_bcrt_retired, (uint64_t)n); bcrt_bytes_note(); }
+    *nout = n; return freed;
+}
+static void bcrt_trim_idle(void) { int n; bcrt_trim(BCRT_IDLE_NS, g_fence + 1, &n); }
+// The entry for a shadow of spf, bw x bh blocks, img bytes of blocks: one of that format and size not attached in the open pass (two attachments of one size get two), else an empty entry or
+// the least recently used one not attached, made again for this shape (its old pair through the deferred-release queue). -1 when no shadow can be made (a red line)
+static int bcrt_slot(MTLPixelFormat spf, NSUInteger bw, NSUInteger bh, NSUInteger img) {
+    int k = -1, cache = bcrt_cache_on();
+    if (!cache) k = g_nbcrt;   // DM_NVN_BCRT_CACHE=0: the attachment's number in the pass, as before
+    else { int empty = -1, lru = -1;
+        for (int i = 0; i < BCRT_CACHE && k < 0; i++) { bcrt_cache_t *e = &g_bcrtc[i];
+            if (!e->sh) { if (empty < 0) empty = i; continue; }
+            if (bcrt_is(e->sh)) continue;
+            if (bcrt_fits(e, spf, bw, bh, img)) k = i;
+            else if (lru < 0 || e->use < g_bcrtc[lru].use) lru = i; }
+        if (k < 0) k = empty >= 0 ? empty : lru; }
+    if (k < 0 || k >= BCRT_CACHE) return -1;
+    bcrt_cache_t *e = &g_bcrtc[k];
+    if (bcrt_fits(e, spf, bw, bh, img)) atomic_fetch_add(&g_bcrt_reused, 1);
+    else {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:spf width:bw height:bh mipmapped:NO];
+        d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> sh = [g_dev newTextureWithDescriptor:d]; id<MTLBuffer> buf = [g_dev newBufferWithLength:img options:MTLResourceStorageModePrivate];
+        if (!sh || !buf) { RED_ONCE(74, "render target in a compressed or depth texture: cannot create its %lux%lu-block shadow (Metal format %lu)", (unsigned long)bw, (unsigned long)bh, (unsigned long)spf); return -1; }
+        if (e->sh) { bcrt_drop(e, g_fence + 1); if (cache) atomic_fetch_add(&g_bcrt_retired, 1); }
+        res_add(sh); res_add(buf); e->sh = sh; e->buf = buf; e->bytes = sh.allocatedSize + buf.allocatedSize;
+        atomic_fetch_add(&g_bcrt_made, 1);
+        if (cache) bcrt_cap(k);
+    }
+    e->use = ++g_bcrtc_use; e->ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    bcrt_bytes_note();
+    return k;
+}
 static void bcrt_flush(void) {
     int n = g_nbcrt; g_nbcrt = 0;
+    if (n) atomic_fetch_add(&g_bcrt_passes, 1);
     for (int i = 0; i < n; i++) { bcrt_t e = g_bcrt[i]; g_bcrt[i] = (bcrt_t){0};
         NSUInteger row = e.bw * e.bpb, img = row * e.bh;
         enc_b_copy_texture_buffer(blit(), e.shadow, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(e.bw, e.bh, 1), e.buf, 0, row, img);
@@ -5668,20 +5749,13 @@ static void bcrt_flush(void) {
 }
 // a holds the BC texture with its level and layer / plane already set; returns 1 when a now holds the shadow
 static int bcrt_attach(MTLRenderPassAttachmentDescriptor *a, id<MTLTexture> base, const view_t *v, int has_v) {
-    MTLPixelFormat spf; int k = g_nbcrt; if (k >= 8 || !bcrt_view(base, v, has_v, &spf)) return 0;
+    MTLPixelFormat spf; if (g_nbcrt >= 8 || !bcrt_view(base, v, has_v, &spf)) return 0;
     int is3d = base.textureType == MTLTextureType3D, side = 1;
     NSUInteger bpb = (NSUInteger)shrt_block(base.pixelFormat, &side);
     NSUInteger lv = a.level, sl = is3d ? 0 : a.slice, z = is3d ? a.depthPlane : 0, w = mip_extent(base.width, lv), h = mip_extent(base.height, lv), bw = (w + side - 1) / side, bh = (h + side - 1) / side;
     NSUInteger row = bw * bpb, img = row * bh;
-    if (!g_bcrt_sh[k] || g_bcrt_sh[k].pixelFormat != spf || g_bcrt_sh[k].width != bw || g_bcrt_sh[k].height != bh) {
-        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:spf width:bw height:bh mipmapped:NO];
-        d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
-        id<MTLTexture> sh = [g_dev newTextureWithDescriptor:d]; id<MTLBuffer> buf = [g_dev newBufferWithLength:img options:MTLResourceStorageModePrivate];
-        if (!sh || !buf) { RED_ONCE(74, "render target in a compressed or depth texture: cannot create its %lux%lu-block shadow (Metal format %lu)", (unsigned long)bw, (unsigned long)bh, (unsigned long)spf); return 0; }
-        if (g_bcrt_sh[k]) { defer_obj_release(g_bcrt_sh[k]); defer_obj_release(g_bcrt_buf[k]); }
-        res_add(sh); res_add(buf); g_bcrt_sh[k] = sh; g_bcrt_buf[k] = buf;
-    }
-    id<MTLTexture> sh = g_bcrt_sh[k]; id<MTLBuffer> buf = g_bcrt_buf[k];
+    int k = bcrt_slot(spf, bw, bh, img); if (k < 0) return 0;
+    id<MTLTexture> sh = g_bcrtc[k].sh; id<MTLBuffer> buf = g_bcrtc[k].buf;
     enc_b_copy_texture_buffer(blit(), base, sl, lv, MTLOriginMake(0, 0, z), MTLSizeMake(w, h, 1), buf, 0, row, img);
     enc_b_copy_buffer_texture(blit(), buf, 0, row, img, MTLSizeMake(bw, bh, 1), sh, 0, 0, MTLOriginMake(0, 0, 0));
     g_bcrt[g_nbcrt++] = (bcrt_t){base, sh, buf, lv, sl, z, w, h, bw, bh, bpb};
@@ -17331,7 +17405,7 @@ static void present_fx_idle(int kind, uint64_t ticket, int alloc_i) {
 // queue for the fence of the submission that starts there, which no present or submission committed before it outlasts on the queue; or going to the background
 // (dm_gfx_suspend: the graphics gate closed and every submission and present drained, so for the last fence, which has passed). It releases what is idle and large:
 // render-target heaps waiting for reuse (rh_trim_all), the upload slots' blocks above UP_SLOT_BLOCK and their overflow blocks (up_trim_idle), packaged-texture spares
-// (pkg_spare_release), same-pass feedback snapshots (fb_trim), per-frame arena blocks the GPU is done with above ARENA_KEEP_BLOCKS (arena_trim), what the deferred-release queue holds whose fence has passed (defer_drain), and it asks the present thread to
+// (pkg_spare_release), same-pass feedback snapshots (fb_trim), the render-target shadows of depth and compressed textures (bcrt_trim), per-frame arena blocks the GPU is done with above ARENA_KEEP_BLOCKS (arena_trim), what the deferred-release queue holds whose fence has passed (defer_drain), and it asks the present thread to
 // release edge smoothing and MetalFX if they are off (g_fx_trim_req). Each was made again on its next use before, as after the idle trims. dm_gfx_pressure also sweeps the guest's
 // files (hle_svc.c dm_guest_file_trim, DM_GUEST_FILE). One line gives the MB per class; the memory line counts the trims. DM_MEMORY_TRIM=0 logs the pressure and trims
 // nothing; DM_BG_TRIM=0 keeps the trim going to the background off
@@ -17347,19 +17421,19 @@ static uint64_t mtl_trim_at(int level, uint64_t fence) { @autoreleasepool {
     pthread_mutex_lock(&g_deferred_mu); unsigned long q0 = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
     defer_drain();
     pthread_mutex_lock(&g_deferred_mu); unsigned long q1 = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
-    int nrh = 0, nup = 0, nsp = 0, nfb = 0, nar = 0;
-    uint64_t brh = rh_trim_all(&nrh), bup = up_trim_idle(0, fence, &nup), bsp = pkg_spare_release(0, fence, &nsp), bfb = fb_trim(0, fence, &nfb), bar = g_arenas ? arena_trim(0, &nar) : 0;
+    int nrh = 0, nup = 0, nsp = 0, nfb = 0, nar = 0, nbc = 0;
+    uint64_t brh = rh_trim_all(&nrh), bup = up_trim_idle(0, fence, &nup), bsp = pkg_spare_release(0, fence, &nsp), bfb = fb_trim(0, fence, &nfb), bar = g_arenas ? arena_trim(0, &nar) : 0, bbc = bcrt_trim(0, fence, &nbc);
     // Under memory pressure a feedback snapshot is kept again only once it has come back again (fb_keep_try); going to the background keeps the shapes. Only when fb_trim ran: with a
     // submission open it releases nothing (no call site does that now), and forgetting the shapes of textures still kept would leave the log naming them as kept again later
     if ((level == 1 || level == 2) && !atomic_load(&g_sub_on)) fb_gone_forget();
     atomic_store(&g_fx_trim_req, 1);
     res_commit();   // the heaps leave the residency set now; the rest once their fence has passed (defer_obj_at drains at once a fence the GPU has passed)
-    uint64_t total = brh + bup + bsp + bfb + bar;
+    uint64_t total = brh + bup + bsp + bfb + bar + bbc;
     atomic_fetch_add(&g_trim_n, 1); atomic_fetch_add(&g_trim_bytes, total);
     const double M = 1048576.0;
-    MLOG("memory trim (%s): %.1f MB in all: render-target heaps waiting %d (%.1f MB), upload staging blocks %d (%.1f MB), packaged-texture spares %d (%.1f MB), feedback snapshots %d (%.1f MB), per-frame arena blocks %d (%.1f MB), "
+    MLOG("memory trim (%s): %.1f MB in all: render-target heaps waiting %d (%.1f MB), upload staging blocks %d (%.1f MB), packaged-texture spares %d (%.1f MB), feedback snapshots %d (%.1f MB), render-target shadows %d (%.1f MB), per-frame arena blocks %d (%.1f MB), "
          "deferred-release queue %lu of %lu entries released; present effects that are off go at the next present; footprint %.0f MB before, %.1f ms",
-         g_trim_why[level >= 0 && level <= 4 ? level : 4], total / M, nrh, brh / M, nup, bup / M, nsp, bsp / M, nfb, bfb / M, nar, bar / M, q0 > q1 ? q0 - q1 : 0, q0, fp0 / M, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6);
+         g_trim_why[level >= 0 && level <= 4 ? level : 4], total / M, nrh, brh / M, nup, bup / M, nsp, bsp / M, nfb, bfb / M, nbc, bbc / M, nar, bar / M, q0 > q1 ? q0 - q1 : 0, q0, fp0 / M, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6);
     return total;
 } }
 // The trim at once (dm_gfx_trim): only with no submission open and every submission and present completed (dm_gfx_suspend after mtl_drain; the tests), so for the last fence

@@ -552,6 +552,15 @@ check_t_primitive_restart: RUN_ENV = MTL_DEBUG_LAYER=1
 t_depth16_clear: t_depth16_clear.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_depth16_clear.m $(MTL_T_SRC) $(FW)
 check_t_depth16_clear: RUN_ENV = MTL_DEBUG_LAYER=1
+# The shadow cache of render targets in depth and compressed textures (nvn_mtl.m bcrt_slot): with deferred encoding off and on, under Metal's validation and the residency check, and
+# once with DM_NVN_BCRT_CACHE=0 (the old cache by attachment number, whose counts it checks instead)
+t_bcrt_cache: t_bcrt_cache.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_bcrt_cache.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_bcrt_cache
+check_t_bcrt_cache: t_bcrt_cache
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 DM_RES_CHECK=1 ./t_bcrt_cache
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 DM_RES_CHECK=1 ./t_bcrt_cache
+	DM_NVN_BCRT_CACHE=0 DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 DM_RES_CHECK=1 ./t_bcrt_cache
 t_clear_ds: t_clear_ds.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_ds.m $(MTL_T_SRC) $(FW)
 check_t_clear_ds: RUN_ENV = MTL_DEBUG_LAYER=1

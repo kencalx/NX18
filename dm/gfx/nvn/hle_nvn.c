@@ -1995,7 +1995,7 @@ static void power_line(uint64_t frame) {
         char gt[96] = ""; if (g > pg) snprintf(gt, sizeof gt, ", %.1f ms/s by the system's count (task_gpu_utilisation)", (g - pg) / 1e6 / s);
         LOG("[nvn] power up to frame %llu: CPU energy %.2f W, %.1f mJ per frame (%.1f fps); CPU %.0f%% (100 = one core), %.0f%% of it on performance cores; wakeups %.0f/s (out of platform idle %.0f); GPU %.1f ms/s busy (the host's command buffers, overlaps merged)%s; thermal %d; top yielders: %s", frame,
             (e - pe) / 1e9 / s, (e - pe) / 1e6 / nf, nf / s, (cpu - pcpu) / 1e7 / s, cpu > pcpu ? 100.0 * (double)(p - pp) / (double)(cpu - pcpu) : 0, (iw - piw) / s, (idw - ppw) / s, gbusy > pgbusy ? (gbusy - pgbusy) / 1e6 / s : 0.0, gt, dm_thermal_now(), yt);
-        char rs[400]; mtl_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; mtl_barrier_stats(&bs, &bf);
+        char rs[512]; mtl_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; mtl_barrier_stats(&bs, &bf);
         uint64_t mtl_cut_count(void), mtl_copy_cut_count(void), mtl_blit_splits(void); void mtl_ubd_stats(uint64_t *, uint64_t *); static uint64_t pcut, pccut, pbsp, pud, puc; uint64_t cut = mtl_cut_count(), ccut = mtl_copy_cut_count(), bsp = mtl_blit_splits(), ud, uc; mtl_ubd_stats(&ud, &uc);
         void mtl_ubp_stats(uint64_t *, uint64_t *, uint64_t *); static uint64_t ppm, ppr, ppf; uint64_t pm, pr, pf_; mtl_ubp_stats(&pm, &pr, &pf_);
         void mtl_lc_stats(uint64_t *, uint64_t *); static uint64_t plt, pll; uint64_t lt, ll; mtl_lc_stats(&lt, &ll);
@@ -2035,7 +2035,7 @@ static void power_line(uint64_t frame) {
         // (nvn_queue.inc nq_worker) and the encode thread's wakes (nvn_rec.h rec_thread)
         char wk[512]; dm_wake_stats(wk, sizeof wk, s); uint64_t nqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed), rw = mtl_rec_wakes();
         LOG("[nvn] threads up to frame %llu: CPU %s; wake sources per second: %s; NVN queue event polls of 1 ms %.0f; encode thread wakes %.0f", frame, tc, wk, (nqp - pnqp) / s, (rw - prw) / s); }
-    else { char yt[192], rs[400], tc[400], wk[512]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); dm_wake_stats(wk, sizeof wk, 1); }   // the first call only takes the baselines
+    else { char yt[192], rs[512], tc[400], wk[512]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); dm_wake_stats(wk, sizeof wk, 1); }   // the first call only takes the baselines
     pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pgbusy = gbusy; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes(); pnqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed); prw = mtl_rec_wakes();
 }
 static void tsummary(uint64_t frame) {
