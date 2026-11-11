@@ -429,7 +429,7 @@ class MovieLines(unittest.TestCase):   # hle_movie.c's AAC channel order lines a
                           (6, 'C L R Ls Rs LFE', 'L R C LFE Ls Rs', 'kept (DM_AAC_LAYOUT=0)')])
         self.assertEqual((mv['vt_rebuilds'], mv['vt_refed']), (1, 6))
 
-class PipelineLines(unittest.TestCase):   # nvn_mtl.m's 'pipelines up to frame' line with the hybrid misses' pulling-base kicks, and the bundled archive's probe line with its cover note
+class PipelineLines(unittest.TestCase):   # nvn_mtl.m's 'pipelines up to frame' line with the pulling-base kicks of the hybrid lookups, and the bundled archive's probe line with its cover note
     SRC = (REPO / 'dm/gfx/nvn/nvn_mtl.m').read_text(errors='replace')
 
     @staticmethod
@@ -458,7 +458,7 @@ class PipelineLines(unittest.TestCase):   # nvn_mtl.m's 'pipelines up to frame' 
         s = read([self.pso_line(300, 1, 5), self.pso_line(600, 20, 7), self.pso_line(900, 3, 0, unkicked=4)])
         p = s['pipelines']
         self.assertEqual(p['in_play'], {'bases': 23, 'ms': 1610.0})   # the first window is left out, as before
-        self.assertEqual((p['pulling_kicked'], p['pulling_not_kicked']), (12, 4))   # every window: only draws kick them
+        self.assertEqual((p['pulling_kicked'], p['pulling_not_kicked']), (12, 4))   # every window: distinct pulling bases, kicked by draws' misses and the prediction scan
         text = [x for x in devlog.render(s, 5) if 'pulling base builds kicked' in x]
         self.assertTrue(text and '12' in text[0] and '4 not kicked' in text[0], text)
         rows = {r['label']: r for r in devlog.compare(s, read([self.pso_line(600, 2, 1)]))['rows']}

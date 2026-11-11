@@ -11,7 +11,7 @@ What it reads (docs/development.md, Reading a device log):
   build, device      build: commit … (main.c); GPU …, architecture … (nvn_mtl.m); boot: memory / address space (main.m); the launcher: and boot: env lines (the switches in effect,
                      and those changed in the in-game menu); controller … connected
   pipelines          pipeline prepare and prebuild (read by scripts/regress.py's read_log, as in its Mac runs); pipeline archive … files, MB; the bundled archive's probe (pairs
-                     found, cover pairs only); bases written; bases compiled while playing and the hybrid misses' pulling base builds kicked ([nvn] pipelines up to frame);
+                     found, cover pairs only); bases written; bases compiled while playing and the pulling base builds hybrid lookups kicked ([nvn] pipelines up to frame);
                      a Vulkan game's [vk] pipelines lines, an OpenGL game's [gl] pipeline builds
   frames, power      [nvn] timing, on-screen and power up to frame N (one each per 300 frames): frame-time percentiles, dropped frames, frame rate, CPU watts, mJ per frame,
                      wakeups, GPU ms/s (busy: the host's command buffers, overlaps merged; and the system's count, which iOS leaves at 0), thermal state; a window that had frames made with the in-game menu open or out of focus says how many (in-game menu open N frames, not in
@@ -367,7 +367,7 @@ def read(text: str, top: int = 5) -> Rec:
     pp, ar, bu, bp = one.get('prepare'), one.get('archive'), one.get('bundled'), one.get('bundle_probe')
     wr = [(int(m.group(1)), float(m.group(2))) for _, m, _ in g['written']]
     play = [(int(m.group(2)), float(m.group(3))) for _, m, _ in g['psoline'] if int(m.group(1)) > 300]   # the first window holds the prepare step's
-    kicks = [(int(m.group(4)), int(m.group(5) or 0)) for _, m, _ in g['psoline'] if m.group(4) is not None]   # hybrid misses' pulling bases, the whole run (only draws kick them)
+    kicks = [(int(m.group(4)), int(m.group(5) or 0)) for _, m, _ in g['psoline'] if m.group(4) is not None]   # the distinct pulling bases hybrid lookups (draws' misses and the prediction scan) sent to the background or, with DM_PSO_HYBRID_KICK=0, left unbuilt, the whole run
     vk, gl = (g['vkpso'][-1][1] if g['vkpso'] else None), (g['glpso'][-1][1] if g['glpso'] else None)
     out['pipelines'] = {
         'prepare_s': prepare_s, 'prebuild': prebuild,
@@ -590,7 +590,7 @@ def render(s: Rec, top: int) -> list[str]:
                                + ('' if bq['taken'] else ', not taken')) if bq else '',
                               f"written this run {wr['bases']} bases in {wr['files']} files, {wr['mb']:g} MB" if wr else '',
                               f"compiled while playing {ip['bases']} bases ({ip['ms'] / 1000:.3g} s of compiling, all threads)" if ip else '',
-                              f"pulling base builds kicked by hybrid misses {p['pulling_kicked']}" + (f" ({p['pulling_not_kicked']} not kicked, DM_PSO_HYBRID_KICK=0)" if p['pulling_not_kicked'] else '')
+                              f"pulling base builds kicked by hybrid lookups {p['pulling_kicked']}" + (f" ({p['pulling_not_kicked']} not kicked, DM_PSO_HYBRID_KICK=0)" if p['pulling_not_kicked'] else '')
                               if p['pulling_kicked'] is not None else '') if x),
         f"Vulkan: {p['vk']['compiled']} compiled, {p['vk']['failed']} failed, submissions waited {p['vk']['waits']} times, {p['vk']['wait_ms']:g} ms" if p['vk'] else '',
         f"OpenGL: {p['gl']['built']} built in {p['gl']['ms']:g} ms (longest {p['gl']['longest_ms']:g} ms), {p['gl']['after_first_frame']} after the first frame, {p['gl']['after_ms']:g} ms"
