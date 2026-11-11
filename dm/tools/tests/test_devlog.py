@@ -429,6 +429,64 @@ class MovieLines(unittest.TestCase):   # hle_movie.c's AAC channel order lines a
                           (6, 'C L R Ls Rs LFE', 'L R C LFE Ls Rs', 'kept (DM_AAC_LAYOUT=0)')])
         self.assertEqual((mv['vt_rebuilds'], mv['vt_refed']), (1, 6))
 
+class PipelineLines(unittest.TestCase):   # nvn_mtl.m's 'pipelines up to frame' line with the hybrid misses' pulling-base kicks, and the bundled archive's probe line with its cover note
+    SRC = (REPO / 'dm/gfx/nvn/nvn_mtl.m').read_text(errors='replace')
+
+    @staticmethod
+    def c_fmt(fmt: str, *vals: object) -> str:   # a C format string filled as the host prints it (%llu and %d as integers, %.1f, %s)
+        it = iter(vals)
+        return re.sub(r'%(?:llu|d|\.1f|s)', lambda _m: str(next(it)), fmt)
+
+    def pso_fmt(self) -> str:   # mtl_pso_line's first snprintf, its adjacent literals joined
+        body = self.SRC[self.SRC.index('void mtl_pso_line('):]
+        call = body[body.index('snprintf(o, n, '):]
+        lits = re.findall(r'"((?:[^"\\]|\\.)*)"', call[:call.index(',\n             d[0]')])
+        return ''.join(lits)
+
+    def probe_fmt(self) -> str:
+        m = re.search(r'MLOG\("(pipeline archive bundled with the app: %s \(%d of %d probed pairs from %s found, %\.1f ms\)%s)"', self.SRC)
+        self.assertTrue(m, "pso_bundle_covers' probe line in nvn_mtl.m")
+        assert m
+        return m.group(1)
+
+    def pso_line(self, frame: int, compiled: int, kicked: int, unkicked: int = 0) -> str:
+        unk = f', {unkicked} not kicked (DM_PSO_HYBRID_KICK=0)' if unkicked else ''
+        vals = [1.0, 0.5, 0, 0.0, 3, 1.0, 2, 0.5, 0, 0.0, compiled, 70.0 * compiled, 4, 1, 9, kicked, unk, 0, 0, 0, 0]
+        return f'[dm] [nvn] pipelines up to frame {frame}: ' + self.c_fmt(self.pso_fmt(), *vals)
+
+    def test_kicks_read_from_the_producer_format(self):
+        s = read([self.pso_line(300, 1, 5), self.pso_line(600, 20, 7), self.pso_line(900, 3, 0, unkicked=4)])
+        p = s['pipelines']
+        self.assertEqual(p['in_play'], {'bases': 23, 'ms': 1610.0})   # the first window is left out, as before
+        self.assertEqual((p['pulling_kicked'], p['pulling_not_kicked']), (12, 4))   # every window: only draws kick them
+        text = [x for x in devlog.render(s, 5) if 'pulling base builds kicked' in x]
+        self.assertTrue(text and '12' in text[0] and '4 not kicked' in text[0], text)
+        rows = {r['label']: r for r in devlog.compare(s, read([self.pso_line(600, 2, 1)]))['rows']}
+        self.assertEqual((rows['pulling base builds kicked']['a'], rows['pulling base builds kicked']['b']), (12, 1))
+
+    def test_an_older_line_has_no_kicks(self):   # before the count: the same bases, no kick figure
+        old = ('[dm] [nvn] pipelines up to frame 600: on the submit thread pipelines 1.0 ms, shader libraries 0.5 ms, predictions 0 / 0.0 ms; all threads: archive lookups found 3 / 1.0 ms, '
+               'found none 2 / 0.5 ms, specializations 0 / 0.0 ms, bases compiled 6 / 400.0 ms; draws with a hybrid pipeline 4 (1 pulling pipelines made, 9 misses with no pulling base ready); '
+               'background builds kicked 26, done 20, made by the draw 6, in flight 0')
+        p = read([old])['pipelines']
+        self.assertEqual((p['in_play'], p['pulling_kicked']), ({'bases': 6, 'ms': 400.0}, None))
+
+    def test_probe_line_and_cover_note(self):
+        fmt = self.probe_fmt()
+        cover = re.search(r'"(; cover pairs only: [^"]*)"', self.SRC)
+        self.assertTrue(cover)
+        assert cover
+        for tail, want in (('', False), (cover.group(1), True)):
+            line = '[dm] [nvn-mtl] ' + self.c_fmt(fmt, 'holds the bases of the listed shader pairs', 16, 16, 'shader_pairs.tsv', 26.0, tail)
+            with self.subTest(cover=want):
+                self.assertNotIn('every shader pair', line)
+                bp = read([line])['pipelines']['bundle_probe']
+                self.assertEqual(bp, {'taken': True, 'found': 16, 'probed': 16, 'cover_only': want})
+        refused = '[dm] [nvn-mtl] ' + self.c_fmt(fmt, 'this system does not take its bases', 0, 16, 'shader_pairs.tsv and pso_pairs.tsv', 3.0, ': the device builds them')
+        self.assertEqual(read([refused])['pipelines']['bundle_probe'], {'taken': False, 'found': 0, 'probed': 16, 'cover_only': False})
+        older = '[dm] [nvn-mtl] pipeline archive bundled with the app: holds the bases of every shader pair (16 of 16 probed bases found, 26.0 ms)'
+        self.assertEqual(read([older])['pipelines']['bundle_probe'], {'taken': True, 'found': 16, 'probed': 16, 'cover_only': False})
+
 
 if __name__ == '__main__':
     unittest.main()

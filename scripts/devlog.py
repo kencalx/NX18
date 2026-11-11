@@ -10,8 +10,9 @@ LOG is the app's Documents/log.txt or log.prev.txt (Share log, on the start scre
 What it reads (docs/development.md, Reading a device log):
   build, device      build: commit … (main.c); GPU …, architecture … (nvn_mtl.m); boot: memory / address space (main.m); the launcher: and boot: env lines (the switches in effect,
                      and those changed in the in-game menu); controller … connected
-  pipelines          pipeline prepare and prebuild (read by scripts/regress.py's read_log, as in its Mac runs); pipeline archive … files, MB; bases written; bases compiled while
-                     playing ([nvn] pipelines up to frame); a Vulkan game's [vk] pipelines lines, an OpenGL game's [gl] pipeline builds
+  pipelines          pipeline prepare and prebuild (read by scripts/regress.py's read_log, as in its Mac runs); pipeline archive … files, MB; the bundled archive's probe (pairs
+                     found, cover pairs only); bases written; bases compiled while playing and the hybrid misses' pulling base builds kicked ([nvn] pipelines up to frame);
+                     a Vulkan game's [vk] pipelines lines, an OpenGL game's [gl] pipeline builds
   frames, power      [nvn] timing, on-screen and power up to frame N (one each per 300 frames): frame-time percentiles, dropped frames, frame rate, CPU watts, mJ per frame,
                      wakeups, GPU ms/s (busy: the host's command buffers, overlaps merged; and the system's count, which iOS leaves at 0), thermal state; a window that had frames made with the in-game menu open or out of focus says how many (in-game menu open N frames, not in
                      focus M frames): those frames, and the dropped frames of those windows, are given apart, and the dropped rate again without those windows
@@ -80,7 +81,7 @@ RX = {k: re.compile(v) for k, v in {
     'onscreen': r'^\[nvn\] on-screen up to frame (\d+): (\d+) frames, dropped (\d+) \(discarded (\d+)\), p99 ([\d.]+) ms; footprint (-?\d+) MiB; brightness (-?[\d.]+); thermal (-?\d+)',
     'power': r'^\[nvn\] power up to frame (\d+): CPU energy ([\d.]+) W, ([\d.]+) mJ per frame \(([\d.]+) fps\); CPU (\d+)% \(100 = one core\), (\d+)% of it on performance cores; '
              r'wakeups (\d+)/s \(out of platform idle (\d+)\); GPU ([\d.]+) ms/s( busy)?(?: \([^)]*\))?(?:, ([\d.]+) ms/s by the system\'s count)?[^;]*; thermal (-?\d+)',   # ' busy (…)' and the system's count since the host's own GPU busy time
-    'psoline': r'^\[nvn\] pipelines up to frame (\d+): .*?bases compiled (\d+) / ([\d.]+) ms',
+    'psoline': r'^\[nvn\] pipelines up to frame (\d+): .*?bases compiled (\d+) / ([\d.]+) ms(?:.*?, (\d+) pulling base builds kicked(?:, (\d+) not kicked)?)?',   # the kicks since the cover-pair probe line
     'memory': r'^\[nvn-mtl\] memory up to frame (\d+): resident (\d+) MB, GPU allocated (\d+) MB, (?:graphics ledger (\d+) MB, (?:guest charged (\d+) MB, )?)?.*?shared textures (\d+) \(.*headroom to the system memory limit (?:(\d+) MB|none)',   # none: the Mac; the graphics ledger since the memory audit, guest charged only with DM_MEM_GUEST=1
     'glmem': r'^\[gl\] memory at frame (\d+): footprint ([\d.]+) MB, Metal allocated ([\d.]+) MB; (\d+) textures',
     'vkframe': r'^\[vk\] frame (\d+): draws .*? buffer memory ([\d.]+) MB',
@@ -90,6 +91,7 @@ RX = {k: re.compile(v) for k, v in {
     'archive': r'^\[nvn-mtl\] pipeline archive .*: (\d+) files \((\d+) of bases without a vertex layout(?:, \d+ with an index of \d+ pipelines)?\), ([\d.]+) MB, opened in ([\d.]+) ms',   # the index part since NXNative's 70b9a68a
     'bundled': r'^\[nvn-mtl\] pipeline archive bundled with the app: .*, ([\d.]+) MB, opened in ([\d.]+) ms',
     'bundle_out': r'^\[nvn-mtl\] (?:\[RED\] )?pipeline archive bundled with the app: (?:.* is left out|.*: this start leaves the archive out|none for this GPU|this system cannot open)',   # this start leaves it out: the crash guard's verdict (nvn_mtl.m, pso_guard_begin)
+    'bundle_probe': r'^\[nvn-mtl\] pipeline archive bundled with the app: (holds the bases|this system does not take its bases)[^(]*\((\d+) of (\d+) probed (?:pairs|bases) .*?found, [\d.]+ ms\)(.*)',   # older logs: 'probed bases', no cover note
     'written': r'^\[nvn-mtl\] pipeline archive: (\d+) new pipeline bases(?: and \d+ compute pipelines)?(?: and \d+ task / mesh pipelines)? written to \S+ \(([\d.]+) MB, (\d+) ms\)',   # the compute part since NXNative's 30fb2136, the task / mesh part since bf420fda
     'prepare': r'^\[nvn-mtl\] pipeline prepare: (\d+) lines .*?progress screen (shown|not shown); bases (\d+) compiled, (\d+) from the archive, (\d+) reused',
     'link': r'^\[nvn-mtl\] display link up to tick (\d+): ticks \d+, presents (\d+), empty ticks (\d+) .*?merging (\d+); submission ahead of target display p50 ([\d.]+) ms / min ([\d.]+) ms; '
@@ -362,9 +364,10 @@ def read(text: str, top: int = 5) -> Rec:
     out['env'], out['env_from'], out['env_changes'] = env, env_from, changes
     out['controllers'] = list(dict.fromkeys(f'{m.group(1)} (player {m.group(3)})' if m.group(3) else m.group(1) for _, m, _ in g['controller'] if m.group(2) == 'connected'))
     # pipelines
-    pp, ar, bu = one.get('prepare'), one.get('archive'), one.get('bundled')
+    pp, ar, bu, bp = one.get('prepare'), one.get('archive'), one.get('bundled'), one.get('bundle_probe')
     wr = [(int(m.group(1)), float(m.group(2))) for _, m, _ in g['written']]
     play = [(int(m.group(2)), float(m.group(3))) for _, m, _ in g['psoline'] if int(m.group(1)) > 300]   # the first window holds the prepare step's
+    kicks = [(int(m.group(4)), int(m.group(5) or 0)) for _, m, _ in g['psoline'] if m.group(4) is not None]   # hybrid misses' pulling bases, the whole run (only draws kick them)
     vk, gl = (g['vkpso'][-1][1] if g['vkpso'] else None), (g['glpso'][-1][1] if g['glpso'] else None)
     out['pipelines'] = {
         'prepare_s': prepare_s, 'prebuild': prebuild,
@@ -372,6 +375,8 @@ def read(text: str, top: int = 5) -> Rec:
                     'reused': int(pp.group(5))} if pp else None,
         'archive': {'files': int(ar.group(1)), 'mb': float(ar.group(3)), 'open_ms': float(ar.group(4))} if ar else None,
         'bundled': {'mb': float(bu.group(1)), 'open_ms': float(bu.group(2))} if bu else 'left out' if 'bundle_out' in one else None,
+        'bundle_probe': {'taken': bp.group(1) == 'holds the bases', 'found': int(bp.group(2)), 'probed': int(bp.group(3)), 'cover_only': 'cover pairs only' in bp.group(4)} if bp else None,
+        'pulling_kicked': sum(k for k, _ in kicks) if kicks else None, 'pulling_not_kicked': sum(u for _, u in kicks) if kicks else None,
         'written': {'files': len(wr), 'bases': sum(n for n, _ in wr), 'mb': round(sum(x for _, x in wr), 1)} if wr else None,
         'in_play': {'bases': sum(n for n, _ in play), 'ms': round(sum(x for _, x in play), 1)} if g['psoline'] else None,
         'vk': {'compiled': int(vk.group(6)), 'failed': sum(int(m.group(3)) for _, m, _ in g['vkpso']), 'waits': sum(int(m.group(4)) for _, m, _ in g['vkpso']),
@@ -572,7 +577,7 @@ def render(s: Rec, top: int) -> list[str]:
     row('controller', ', '.join(s['controllers']) or 'none connected (touch controls)')
     sw = [f'{k}={v}' + ('' if s['env_from'].get(k) == 'default' else f" ({s['env_from'][k]})") for k, v in sorted(s['env'].items())]
     row('switches', *(wrap(sw) or ['no launcher or env lines']), *(f"{c['t_s']:.0f} s: {c['key']}={c['value']} (in-game menu)" for c in s['env_changes']))
-    pr, pb, ar, wr, ip = p['prepare'], p['prebuild'], p['archive'], p['written'], p['in_play']
+    pr, pb, ar, wr, ip, bq = p['prepare'], p['prebuild'], p['archive'], p['written'], p['in_play'], p['bundle_probe']
     done = 'done' if not pb or pb.get('done') else f"not done in the log, at {pb.get('at', 0):.0f} of"
     ptexts = (
         f"prepare {p['prepare_s']:g} s" + (f" ({pr['lines']} lines, progress screen {'shown' if pr['progress_screen'] else 'not shown'}; bases {pr['bases_compiled']} compiled, "
@@ -581,8 +586,12 @@ def render(s: Rec, top: int) -> list[str]:
         f"{pb['secs']:g} s" if pb else '',
         ', '.join(x for x in (f"archive {ar['files']} files, {ar['mb']:g} MB (opened in {ar['open_ms']:g} ms)" if ar else '',
                               f"the app's own archive {p['bundled']['mb']:g} MB" if isinstance(p['bundled'], dict) else "the app's own archive left out" if p['bundled'] else '',
+                              (f"its probe {bq['found']} of {bq['probed']} listed pairs found" + (', cover pairs only: not the pairs the game draws with' if bq['cover_only'] else '')
+                               + ('' if bq['taken'] else ', not taken')) if bq else '',
                               f"written this run {wr['bases']} bases in {wr['files']} files, {wr['mb']:g} MB" if wr else '',
-                              f"compiled while playing {ip['bases']} bases ({ip['ms'] / 1000:.3g} s of compiling, all threads)" if ip else '') if x),
+                              f"compiled while playing {ip['bases']} bases ({ip['ms'] / 1000:.3g} s of compiling, all threads)" if ip else '',
+                              f"pulling base builds kicked by hybrid misses {p['pulling_kicked']}" + (f" ({p['pulling_not_kicked']} not kicked, DM_PSO_HYBRID_KICK=0)" if p['pulling_not_kicked'] else '')
+                              if p['pulling_kicked'] is not None else '') if x),
         f"Vulkan: {p['vk']['compiled']} compiled, {p['vk']['failed']} failed, submissions waited {p['vk']['waits']} times, {p['vk']['wait_ms']:g} ms" if p['vk'] else '',
         f"OpenGL: {p['gl']['built']} built in {p['gl']['ms']:g} ms (longest {p['gl']['longest_ms']:g} ms), {p['gl']['after_first_frame']} after the first frame, {p['gl']['after_ms']:g} ms"
         if p['gl'] else '')
@@ -662,6 +671,7 @@ METRICS = (('commit', 'build.commit', 0), ('shader chain', 'build.chain', 0), ('
            ('frames', 'last_frame', 0), ('duration (s)', 'duration_s', 0),
            ('prepare (s)', 'pipelines.prepare_s', -1), ('prebuild (s)', 'pipelines.prebuild.secs', -1), ('archive files', 'pipelines.archive.files', 0), ('archive (MB)', 'pipelines.archive.mb', 0),
            ('bases written', 'pipelines.written.bases', 0), ('bases compiled while playing', 'pipelines.in_play.bases', 0),
+           ('pulling base builds kicked', 'pipelines.pulling_kicked', 0), ('pulling bases not kicked', 'pipelines.pulling_not_kicked', 0),
            ('frame time p50 (ms)', 'frames.p50_ms', -1), ('frame time p95 (ms)', 'frames.p95_ms', -1), ('worst window p95 (ms)', 'frames.p95_worst_ms', -1),
            ('on-screen p99 (ms)', 'frames.p99_onscreen_ms', -1), ('worst window p99 (ms)', 'frames.p99_onscreen_worst_ms', -1), ('longest frame (ms)', 'frames.max_ms', -1),
            ('dropped (%)', 'frames.dropped_pct', -1), ('dropped, menu / focus windows out (%)', 'frames.dropped_clean_pct', -1), ('frames per second', 'frames.fps', 1),

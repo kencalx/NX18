@@ -2047,7 +2047,7 @@ static void tsummary(uint64_t frame) {
     }
     char uin[96]; front_ui_note(uin, sizeof uin, g_ui_tw); memset(g_ui_tw, 0, sizeof g_ui_tw);
     LOG("[nvn] timing up to frame %llu:%s%s", frame, line, uin + (*uin ? 1 : 0));   // the timing items end with ";": the note follows after one space
-    { void mtl_pso_line(char *, size_t); char pl[1024]; mtl_pso_line(pl, sizeof pl); LOG("[nvn] pipelines up to frame %llu: %s", frame, pl); }
+    { void mtl_pso_line(char *, size_t); char pl[1536]; mtl_pso_line(pl, sizeof pl); LOG("[nvn] pipelines up to frame %llu: %s", frame, pl); }   // 1536: with every wait reason and the compute part the line came within a few characters of 1024 once it counted the pulling-base kicks
     double tgt = 1000.0 / mtl_fps_target();   // milliseconds one frame should take: 16.7 at 60 fps, 33.3 when the game itself asks for 30 (the over-time / dropped-frame counts below use it)
     { unsigned n = g_tn[0] < TWIN ? g_tn[0] : TWIN, over = 0; double v[TWIN];   // frame interval gets its own line (M1 baseline): number of frames longer than one frame period in this window and p99
       if (n) { memcpy(v, g_tw[0], n * sizeof *v); qsort(v, n, sizeof *v, dcmp); for (unsigned i = 0; i < n; i++) over += v[i] > tgt;

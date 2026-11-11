@@ -9801,7 +9801,25 @@ static int hybrid_on(void) {
 static nvn_hmap g_pso_hy = {.klen = sizeof(pso_key)};   // pulling pipelines by the key they stand in for (submit thread)
 static int g_pso_pull;   // the pipeline pso_get_ returned reads its vertex streams through the layout block
 static _Atomic uint64_t g_hy_draws, g_hy_made, g_hy_none, g_hy_kicked, g_hy_ns;   // draws with a pulling pipeline, pulling pipelines made, misses with no pulling base ready, pulling bases built for later, time
+static _Atomic uint64_t g_hy_unkicked;   // misses whose pulling base was not sent to the background (DM_PSO_HYBRID_KICK=0 with an archive of cover pairs only)
 static NSMutableSet<NSData *> *g_hy_kick_set; static os_unfair_lock g_hy_lock = OS_UNFAIR_LOCK_INIT;
+// Set by pso_bundle_covers when the archive bundled with the app holds the bases of the pair list and every listed pair shares one pixel shader: a game whose programs have a single
+// stage (a vertex shader alone, or a pixel shader alone), which the shader split pairs through one cover pixel shader because the real pairs exist only when a draw binds the two.
+// 13 Sentinels: Aegis Rim has 376 vertex shaders, each listed with the pixel shader 0ddfcfcdcc3ddf9e, which no draw uses as its fragment. The bundled archive then holds no pulling
+// base a draw asks for, so on such a game every hybrid miss also kicks the compile of a pulling base that only the same pair's next miss can use, beside the layout base the draw
+// compiles at once on the submit thread; both reach Metal's compiler service at the same moment (sentinels/results.txt, topic pipelines). Read by hybrid_kick_ok on the submit thread
+static _Atomic int g_bundle_cover_only;
+// Whether a hybrid miss sends its pulling base to the background (pp_bg_queue) to be built for the pair's next miss. DM_PSO_HYBRID_KICK=0 leaves it unbuilt when the archive bundled
+// with the app has cover pairs only (above): an A/B test of whether those compiles, about half of a first run's in-play compiles on 13 Sentinels by the diagnosis's estimate, cost
+// more than they save. It changes no draw: the miss waits for its layout base either way (pso_get_), and a pair whose pulling base is never built simply has no stand-in on a later
+// miss of another layout or colour state, as before the base was made. The default (1) kicks it as before; with any other archive, or none, the switch does nothing. The env value
+// is read once (env), then decided per miss (pure, so t_pso_bundle checks it without the environment)
+static int hybrid_kick_decide(int env_on, int cover_only) { return env_on || !cover_only; }
+static int hybrid_kick_ok(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_PSO_HYBRID_KICK"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("hybrid pipelines: DM_PSO_HYBRID_KICK=0, a miss does not build its pulling base in the background when the archive bundled with the app has cover pairs only"); }
+    return hybrid_kick_decide(v, atomic_load(&g_bundle_cover_only));
+}
 static MTLRenderPipelineDescriptor *pso_desc_pull(const pso_key *k, NvShader *vs, NvShader *fs) {   // pso_desc's pipeline with the pulling entry point and no vertex descriptor
     id<MTLFunction> pf = pull_fn(vs); if (!pf) return nil;
     MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0);
@@ -9814,6 +9832,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *
     MTLRenderPipelineDescriptor *d = vs->has_pull ? pso_desc_pull(k, vs, fs) : nil;
     if (!d) return nil;
     NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build_ex(d, &e, 0);
+    if (!ps && !hybrid_kick_ok()) { g_hy_unkicked++; g_hy_none++; return nil; }   // DM_PSO_HYBRID_KICK=0 and an archive of cover pairs only: the draw waits for its layout base alone
     if (!ps) {   // the pulling base is neither made nor archived: build it in the background for the pair's next miss
         pbase_key bk; pbase_key_of(d, &bk); NSData *kd = [NSData dataWithBytes:&bk length:sizeof bk];
         os_unfair_lock_lock(&g_hy_lock); if (!g_hy_kick_set) g_hy_kick_set = [NSMutableSet set];
@@ -9825,14 +9844,22 @@ static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *
     return ps;
 }
 void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none) { *draws = g_hy_draws; *made = g_hy_made; *none = g_hy_none; }
-// The pipeline time line of the timing summary (hle_nvn.c), the difference since the last call
+// The pipeline time line of the timing summary (hle_nvn.c), the difference since the last call. 'pulling base builds kicked' counts the hybrid misses that sent their pair's pulling
+// base to the background (hybrid_get), apart from the predictions' builds ('background builds kicked', g_pp_kicked): a run's bases compiled then split into these, the layout bases
+// the draws compiled and the predicted ones. Without it a 13 Sentinels log could only guess that split. 'not kicked' appears only with DM_PSO_HYBRID_KICK=0 (hybrid_kick_ok)
 void mtl_pso_line(char *o, size_t n) {
-    static uint64_t p[18]; uint64_t v[18] = {g_bp_pso_ns, g_bp_lib_ns, g_pt_hit_n, g_pt_hit_ns, g_pt_miss_n, g_pt_miss_ns, g_pb_spec, g_pt_spec_ns, g_pb_built, g_pt_comp_ns, g_pt_pred_n, g_pt_pred_ns, g_hy_draws, g_hy_made, g_pp_kicked, g_pp_done_n, g_pp_stolen, g_hy_none};
-    uint64_t d[18]; for (int i = 0; i < 18; i++) d[i] = v[i] - p[i];
+    enum { NV = 20 };
+    static uint64_t p[NV]; uint64_t v[NV] = {g_bp_pso_ns, g_bp_lib_ns, g_pt_hit_n, g_pt_hit_ns, g_pt_miss_n, g_pt_miss_ns, g_pb_spec, g_pt_spec_ns, g_pb_built, g_pt_comp_ns, g_pt_pred_n, g_pt_pred_ns, g_hy_draws, g_hy_made, g_pp_kicked, g_pp_done_n, g_pp_stolen, g_hy_none,
+                                           g_hy_kicked, g_hy_unkicked};
+    uint64_t d[NV]; for (int i = 0; i < NV; i++) d[i] = v[i] - p[i];
+    char unk[64] = "";
+    if (d[19]) snprintf(unk, sizeof unk, ", %llu not kicked (DM_PSO_HYBRID_KICK=0)", (unsigned long long)d[19]);
     snprintf(o, n, "on the submit thread pipelines %.1f ms, shader libraries %.1f ms, predictions %llu / %.1f ms; all threads: archive lookups found %llu / %.1f ms, found none %llu / %.1f ms, "
-             "specializations %llu / %.1f ms, bases compiled %llu / %.1f ms; draws with a hybrid pipeline %llu (%llu pulling pipelines made, %llu misses with no pulling base ready); background builds kicked %llu, done %llu, made by the draw %llu, in flight %llu",
+             "specializations %llu / %.1f ms, bases compiled %llu / %.1f ms; draws with a hybrid pipeline %llu (%llu pulling pipelines made, %llu misses with no pulling base ready, %llu pulling base builds kicked%s); "
+             "background builds kicked %llu, done %llu, made by the draw %llu, in flight %llu",
              d[0] / 1e6, d[1] / 1e6, (unsigned long long)d[10], d[11] / 1e6, (unsigned long long)d[2], d[3] / 1e6, (unsigned long long)d[4], d[5] / 1e6, (unsigned long long)d[6], d[7] / 1e6,
-             (unsigned long long)d[8], d[9] / 1e6, (unsigned long long)d[12], (unsigned long long)d[13], (unsigned long long)d[17], (unsigned long long)d[14], (unsigned long long)d[15], (unsigned long long)d[16], (unsigned long long)(v[14] - v[15] - v[16]));
+             (unsigned long long)d[8], d[9] / 1e6, (unsigned long long)d[12], (unsigned long long)d[13], (unsigned long long)d[17], (unsigned long long)d[18], unk,
+             (unsigned long long)d[14], (unsigned long long)d[15], (unsigned long long)d[16], (unsigned long long)(v[14] - v[15] - v[16]));
     memcpy(p, v, sizeof p);
     static uint64_t pn[5], pns[5]; size_t o2 = strlen(o);
     o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; draws that waited:");
@@ -10007,7 +10034,23 @@ static NSArray<NSArray<NSString *> *> *pre_parse(NSString *txt) {   // (vertex k
 // Whether the archive bundled with the app (pso_bundle_open) holds this run's prebuild: its prebuilt.tsv is the stamp the device would write for these pairs and this depth mode,
 // and a probe of up to 16 pairs spread over the list (not those it left to the device, rest) finds every base it makes in it (an archive that opens but whose binaries this system
 // does not take finds none)
+// What the probe proves is narrower than 'every base the game needs': the archive holds only bases without a vertex layout (pulling bases), and only for the pairs of the list
+// (shader_pairs.tsv, with pso_pairs.tsv or DM_PSO_PAIRS). The bases with a vertex layout that the draws take are never looked up in it (pso_build_ex), and a game whose programs
+// have one stage is listed through a cover pixel shader no draw uses (pre_cover_only). The line used to read 'holds the bases of every shader pair (16 of 16 probed bases found)',
+// which a 13 Sentinels run printed while it compiled 110 bases in play; it now names what was probed, and says when the list holds cover pairs only
 enum { PRE_PROBE = 16 };
+static char g_pre_pairs_name[192] = "shader_pairs.tsv";   // the pair lists pso_prebuild read, for the probe's line (a copy: pso_prebuild's strings are autoreleased)
+// Whether every listed pair with a pixel shader has the same one, over at least two vertex shaders: the shader split's cover pairs (above), not pairs any draw makes. A depth-only
+// pair (no pixel key) does not count either way
+static int pre_cover_only(NSArray<NSArray<NSString *> *> *pairs) {
+    NSString *px = nil; NSMutableSet<NSString *> *vs = [NSMutableSet set];
+    for (NSArray<NSString *> *p in pairs) {
+        if (p.count < 2 || !p[1].length) continue;
+        if (px && ![px isEqualToString:p[1]]) return 0;
+        px = p[1]; [vs addObject:p[0]];
+    }
+    return px && vs.count >= 2;
+}
 static const char *stamp_line(NSString *st) {   // a stamp on one line, for the log
     return [[[st stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet] stringByReplacingOccurrencesOfString:@"\n" withString:@"; "] stringByReplacingOccurrencesOfString:@"\t" withString:@" "].UTF8String;
 }
@@ -10029,8 +10072,11 @@ static int pso_bundle_covers(NSArray<NSArray<NSString *> *> *pairs, NSString *wa
         probed++; found += [g_arch_bundle newRenderPipelineStateWithDescriptor:m error:nil] != nil;
     }
     int ok = probed > 0 && found == probed;   // skipped samples give no evidence that this system can take a base from the archive
-    MLOG("pipeline archive bundled with the app: %s (%d of %d probed bases found, %.1f ms)%s", ok ? "holds the bases of every shader pair" : "this system does not take its bases",
-         found, probed, (bp_now() - t0) / 1e6, ok ? "" : ": the device builds them");
+    int cover = ok && pre_cover_only(pairs);
+    atomic_store(&g_bundle_cover_only, cover);
+    MLOG("pipeline archive bundled with the app: %s (%d of %d probed pairs from %s found, %.1f ms)%s", ok ? "holds the bases of the listed shader pairs" : "this system does not take its bases",
+         found, probed, g_pre_pairs_name, (bp_now() - t0) / 1e6,
+         !ok ? ": the device builds them" : cover ? "; cover pairs only: the pairs the game draws with are not in this archive, their bases are compiled as the draws meet them" : "");
     return ok;
 }
 // The prebuild tool's workers: each waits on one synchronous compile, so as many as Metal's compiler runs at once (maximumConcurrentCompilationTaskCount); the device's active cores where Metal
@@ -10055,6 +10101,7 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     NSString *txt = [NSString stringWithContentsOfFile:pp encoding:NSUTF8StringEncoding error:nil], *txt2 = [NSString stringWithContentsOfFile:pp2 encoding:NSUTF8StringEncoding error:nil];
     if (!txt) { MLOG("pipeline prebuild: no %s, nothing to build", pp.UTF8String); g_pre_running = 0; return -1; }
     if (txt2) txt = [txt stringByAppendingString:txt2];
+    snprintf(g_pre_pairs_name, sizeof g_pre_pairs_name, "shader_pairs.tsv%s%s", txt2 ? " and " : "", txt2 ? pp2.lastPathComponent.UTF8String : "");
     int zero = atomic_load(&g_depth_zero);
     NSString *want = pre_stamp(txt, zero);
     NSArray<NSArray<NSString *> *> *pairs = pre_parse(txt);

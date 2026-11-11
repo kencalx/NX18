@@ -6,7 +6,8 @@
 // a folder without this GPU's file and a file that is no archive leave no archive; the compute shaders of the shader map have their pipelines in the archive (cps_new: nothing
 // built), and a shader with function constants or not in the map is built as before; the task / mesh pipelines of the prewarm list's M rows (the host's own keys) are in the archive,
 // with a task shader and with the mesh shader's own object function, blended and with a write mask cut to the pixel shader's output map, and with no colour target (mtk_build: from the bundle, nothing built
-// or captured), and one with a pixel shader that declares function constants or with no pixel shader is built as before.
+// or captured), and one with a pixel shader that declares function constants or with no pixel shader is built as before. The probe tells a list of cover pairs (one pixel shader
+// for every pair) from real ones, and only such a list lets DM_PSO_HYBRID_KICK=0 leave a hybrid miss's pulling base unbuilt.
 // The crash guard (nvn_pso_guard.h; its rules are t_pso_guard.c's), which the Mac runs only with DM_PSO_BUNDLE_GUARD=1: unset, a planted record is not read; with it, a record
 // planted for this archive and system build after one start that ended early uses the archive again, watched as the second in a row; after two in a row it leaves the archive out,
 // and the start without it past its window keeps it out; DM_PSO_BUNDLE_GUARD=0 (and =Off) opens it all the same; a start with it writes the record before Metal reads it, the background
@@ -259,6 +260,18 @@ int main(void) { @autoreleasepool {
         EXPECT("probe: its bases are not this run's", 0, pso_bundle_covers(pre_parse(txt), pre_stamp(txt, 0), 0, rest));
         g_arch_bundle = real;
         EXPECT("probe: the bundled archive holds them", 1, pso_bundle_covers(pre_parse(txt), pre_stamp(txt, 0), 0, rest));
+        EXPECT("probe: three pixel shaders are no cover pairs", 0, atomic_load(&g_bundle_cover_only));
+        EXPECT("probe: the probe names the pair list", 0, strcmp(g_pre_pairs_name, "shader_pairs.tsv"));
+        // A game whose programs have one stage is listed through one cover pixel shader (13 Sentinels: 376 vertex shaders, all with 0ddfcfcdcc3ddf9e): the probe line says so, and
+        // only then may DM_PSO_HYBRID_KICK=0 leave a miss's pulling base unbuilt. A depth-only pair (no pixel key) and a single pair prove nothing either way
+        EXPECT("cover: every pair with one pixel shader", 1, pre_cover_only(pre_parse(@"va\tcov\nvb\tcov\nvc\tcov\n")));
+        EXPECT("cover: a depth-only pair does not count", 1, pre_cover_only(pre_parse(@"va\tcov\nvb\tcov\nvd\t\n")));
+        EXPECT("cover: one pair is no cover list", 0, pre_cover_only(pre_parse(@"va\tcov\n")));
+        EXPECT("cover: a second pixel shader", 0, pre_cover_only(pre_parse(@"va\tcov\nvb\tcov\nvb\tf2\n")));
+        EXPECT("cover: the test's own pairs", 0, pre_cover_only(pre_parse(txt)));
+        EXPECT("kick: on by default, cover pairs or not", 1, hybrid_kick_decide(1, 1) && hybrid_kick_decide(1, 0));
+        EXPECT("kick: DM_PSO_HYBRID_KICK=0 with cover pairs only", 0, hybrid_kick_decide(0, 1));
+        EXPECT("kick: DM_PSO_HYBRID_KICK=0 does nothing for real pairs", 1, hybrid_kick_decide(0, 0));
         EXPECT("probe: not for the other depth mode", 0, pso_bundle_covers(pre_parse(txt), pre_stamp(txt, 1), 1, rest));
         // Raw-pair sampling can hit only ineligible pairs: 0 of 0 lookups must not suppress the device prebuild.
         NSMutableString *sparse = [NSMutableString string];

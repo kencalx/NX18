@@ -459,7 +459,9 @@ class Regress(unittest.TestCase):
                  (True, depth + rejected.replace('depth near=-w', 'depth near=0').replace('made for chain b3ca4b7c621f', 'made for chain old'), 'bundled pipeline archive stamp'),
                  (True, depth + '[dm] [nvn-mtl] pipeline archive bundled with the app: made for (no prebuilt.tsv), this run needs chain current; depth near=0: the device builds the bases it does not hold\n', 'bundled pipeline archive stamp'),
                  (False, '', None), (False, '[dm] [nvn] depth mode near=-w (GL)\n', None),
-                 (True, depth + '[dm] [nvn-mtl] pipeline archive bundled with the app: holds the bases of every shader pair (16 of 16 probed bases found, 26.0 ms)\n', None)]
+                 (True, depth + '[dm] [nvn-mtl] pipeline archive bundled with the app: holds the bases of the listed shader pairs (16 of 16 probed pairs from shader_pairs.tsv found, 26.0 ms)\n', None),
+                 (True, depth + '[dm] [nvn-mtl] pipeline archive bundled with the app: holds the bases of the listed shader pairs (16 of 16 probed pairs from shader_pairs.tsv found, 26.0 ms); '
+                  'cover pairs only: the pairs the game draws with are not in this archive, their bases are compiled as the draws meet them\n', None)]
         route = dict(secs=10, quick=10, prebuild='off', keys='', reach=None, shots=[], hang=20)
         for zero, text, failure in cases:
             with self.subTest(zero=zero, text=text), tempfile.TemporaryDirectory() as td:
