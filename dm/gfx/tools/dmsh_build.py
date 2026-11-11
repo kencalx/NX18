@@ -64,7 +64,10 @@ PRE_STATS = collections.Counter()
 # 35785cddc971290c sign-extends a packed 16-bit vertex field as a = w * 65536, then (a >> 31) << 16 | uint(a) >> 16; without the flag the compiler took the sign bits from bits 15-30 of w,
 # so the lightmap / probe UV's x came out far too large and models drawn with mesh shaders took their ambient light from the wrong texels (the bright band on the Deku Tree's walls).
 # The flag also drops inbounds from pointer arithmetic (Metal's clang has no -fwrapv-pointer) and keeps loop bounds that may wrap (test_dmsh_wrapv.py)
-MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', '-fwrapv']
+# -mmacosx-version-min=27.3 -std=metal4.1: MSL 4.1, the newest (Metal Shading Language Specification 4.1, 1.6.10: macOS 27 and later), for the Mac host's minimum (dm/mac/min_os.mk MACOS_MIN),
+# as ios_metal.py names them for the iPhone. Without them the language and the libraries' minimum followed the SDK (MSL 4.1 and 27.3 with the macOS 27.3 SDK), and a newer SDK would have
+# moved both with no change here or to the chain version. On Xcode 27.3's compiler (32023.925) they change no byte of NieR:Automata's or Ocarina of Time's Mac libraries
+MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-mmacosx-version-min=27.3', '-std=metal4.1', '-fpreserve-invariance', '-fwrapv']
 MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
 # The compiles run the tools xcrun names, found once: each xcrun launch looks them up again, about 4 ms of a compile's two launches (8 ms a shader). -isysroot is what xcrun -sdk passes
 # (as SDKROOT), and the outputs are the same bytes (.air and .metallib, checked on Odyssey's shaders); without it the driver targets the running macOS, not the SDK, and they differ.

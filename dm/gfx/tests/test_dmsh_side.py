@@ -1,10 +1,13 @@
 """One compile for a pixel shader's alpha test and logic operation entry points (dmsh_side.py): the compile unit keeps each body once, and cutting its library gives a base with only the
 plain entry points, which pso_offline.py keeps in the pipeline archive, and a side library, byte for byte what the compiler's own tool cuts for one function"""
-import pathlib, shutil, subprocess, sys, tempfile, unittest
+import ast, pathlib, shutil, subprocess, sys, tempfile, unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'tools'))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / 'ios/tools'))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))   # its sibling test modules, also when the file runs alone (python -m unittest <file>, as CI does)
-import dmsh_side, pso_offline
+import dmsh_side, pso_offline, ios_metal
 from test_dmsh_logic import BASE   # noqa: E402
+MAC_METAL = next(ast.literal_eval(n.value) for n in ast.parse((pathlib.Path(dmsh_side.__file__).parent / 'dmsh_build.py').read_text()).body   # read without running the build script
+                 if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', None) == 'MAC_METAL')
 
 ONE = BASE.split('\nstruct main0_out_u')[0] + '\n'
 
@@ -25,7 +28,7 @@ class Unit(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('xcrun'), 'requires Metal compilers')
 class Cut(unittest.TestCase):
-    FLAGS = (('macosx', ()), ('iphoneos', ('-mios-version-min=18.0', '-fmetal-math-mode=relaxed')))
+    FLAGS = (('macosx', MAC_METAL[5:]), ('iphoneos', ios_metal.METAL[5:]))   # the chain's own flags after -c: MSL 4.1 for each platform's minimum (dmsh_build.py MAC_METAL, ios_metal.py METAL)
 
     def compile(self, d, src, sdk, flags):   # → (the .air, the library)
         msl = d / 'u.metal'; air = d / f'{sdk}.air'; lib = d / f'{sdk}.metallib'; msl.write_text(src)

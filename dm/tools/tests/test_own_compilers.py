@@ -46,7 +46,7 @@ class CheckTools(unittest.TestCase):
             for want in (key, OTHER, LOCKED[key], f'Xcode {own_compilers.XCODE_VERSION}', 'macOS 27.3', 'xcodebuild -downloadComponent MetalToolchain', 'DM_ALLOW_OTHER_METAL=1', '#242'): self.assertIn(want, msg)
 
     def test_other_metal_says_to_select_the_tested_xcode(self):   # a newer Xcode selected downloads its own toolchain again (GitHub issue #717)
-        sel = ' (selected: Xcode 27.3 in /Applications/Xcode.app/Contents/Developer)'
+        sel = ' (selected: Xcode 27.4 in /Applications/Xcode.app/Contents/Developer)'
         with mock.patch.object(own_compilers, 'selected_xcode', lambda: sel):
             msg = own_compilers.other_metal_message([('metal_macosx', LOCKED['metal_macosx'], OTHER)])
         app = own_compilers.XCODE_APP

@@ -29,6 +29,15 @@ RYU = ROOT / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader'
 spec = importlib.util.spec_from_file_location('dmsh_atomic', ROOT / 'dm/gfx/tools/dmsh_atomic.py')
 atomic = importlib.util.module_from_spec(spec); spec.loader.exec_module(atomic)
 SPIRV_CROSS = ROOT / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'   # the build dmsh_build.py runs (dmsh_chain.SPIRV_CROSS)
+
+
+def chain_flags(sdk):   # what dmsh_build.py MAC_METAL / ios_metal.py METAL pass after -c, read without running either (dmsh_build.py runs a build when imported)
+    if sdk == 'macosx': path, name = ROOT / 'dm/gfx/tools/dmsh_build.py', 'MAC_METAL'
+    else: path, name = ROOT / 'dm/ios/tools/ios_metal.py', 'METAL'
+    line = next(ast.literal_eval(n.value) for n in ast.parse(path.read_text()).body if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', None) == name)
+    return line[line.index('-c') + 1:]
+
+
 XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']  # dmsh_build.XC without fragment padding
 
 
@@ -325,10 +334,9 @@ class Compiler(unittest.TestCase):
         self.assertTrue(metal_sdks and all(sdk in ('macosx', 'iphoneos') for sdk in metal_sdks),
                         'DMSH_TEST_METAL_SDKS must be macosx, iphoneos or macosx,iphoneos')
         for sdk in metal_sdks:
-            # Match dmsh_build.MAC_METAL and ios_metal.METAL;
-            # the latter needs relaxed NaN-aware arithmetic.
-            flags = ['-fpreserve-invariance'] if sdk == 'macosx' else [
-                '-mios-version-min=18.0', '-fmetal-math-mode=relaxed', '-fpreserve-invariance']
+            # The chain's own flags after -c (dmsh_build.MAC_METAL and ios_metal.METAL): MSL 4.1 for each platform's minimum,
+            # and on iOS relaxed NaN-aware arithmetic.
+            flags = chain_flags(sdk)
             air = work / (key + '.' + sdk + '.air')
             library = work / (key + '.' + sdk + '.metallib')
             subprocess.run(['xcrun','-sdk',sdk,'metal','-c',*flags,str(msl),'-o',str(air)],check=True)

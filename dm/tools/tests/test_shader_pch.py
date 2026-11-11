@@ -18,7 +18,8 @@ sys.path.insert(0, str(REPO / 'dm/ios/tools'))
 import dmsh_pch  # noqa: E402
 import ios_metal  # noqa: E402
 
-MAC = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', '-fwrapv']   # dmsh_build.py MAC_METAL (that file is a script that runs a build when imported)
+MAC = next(ast.literal_eval(n.value) for n in ast.parse((REPO / 'dm/gfx/tools/dmsh_build.py').read_text()).body   # dmsh_build.py MAC_METAL, read without running the script (it runs a build when imported)
+           if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', None) == 'MAC_METAL')
 SHADERS = {
     'vertex': 'vertex float4 main0(uint v [[vertex_id]], constant float4* c [[buffer(0)]]) { return c[v]; }\n',
     'fragment_many': dmsh_pch.PROBE.split('using namespace metal;\n')[1],
