@@ -15,7 +15,6 @@ Update 1.0.3 (v131072) over the base cartridge dump. PlatinumGames' engine, SDK 
 | `present_interval display` | `game.tsv` | replaces the game's interval-two presentation target with 60 Hz; the native clock already measures elapsed time |
 | `fps_target 60` | `game.tsv`, `hle_fpslock.c` | initializes the verified build's engine interval at 60 fps; the launcher can select 30 fps independently of resolution policy |
 | `signal_events node` | `game.tsv`, `nvn_queue.inc` | the game signals an event after each occlusion query; split, each signal ended a Metal submission and the open depth pass, about 850 a frame in heavy scenes ([below](#heavy-scenes-one-submission-per-occlusion-query-2026-11-09)) |
-| `gpu_timestamps segment` | `game.tsv` | the renderer subtracts two raw timestamp reports; one timestamp for the whole submission makes its measured GPU cost zero |
 | Four dynamic-resolution threshold cuts | [`patches.py`](patches.py) | the verified 1.0.3 main build uses 22.5 / 16.005 / 15 ms thresholds for a 60 fps budget |
 
 ## Files and shaders
