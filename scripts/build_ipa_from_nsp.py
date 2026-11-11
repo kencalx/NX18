@@ -1789,21 +1789,78 @@ GLSLC_KEYS = '5:A*7/4'   # A every 4 s from 5 s on during the capture run (DM_KE
 # button press (0 in 200 s without input, both 3 s after the first A); the run keeps its own save and temporary storage, so whatever the presses choose is thrown away with them
 
 
-def glslc_wanted(g):   # the capture files the profile's shader map was built from (column 5: /glslc_capture/<name>#GLSLC@…); None when the map names no captures
+def glslc_named(g, folder):   # the capture files of one kind the profile's shader map was built from (column 5: /<folder>/<name>#GLSLC@…)
     try: t = g.table('shader_map.tsv').read_text(errors='replace')
-    except OSError: return None
-    return set(re.findall(r'/glslc_capture/([0-9a-f]{16}\.glslc)#', t)) or None
+    except OSError: return set()
+    return set(re.findall(rf'/{folder}/([0-9a-f]{{16}}\.glslc)#', t))
 
 
-def glslc_done(d):   # capture files written whole: a GLSLC output (magic 0x19866891) holds its own length at +0x44
+def glslc_wanted(g):   # the boot's capture files the profile's shader map was built from (/glslc_capture/); None when the map names none. Those captured in play (/glslc_play/) are not wanted from the boot
+    return glslc_named(g, 'glslc_capture') or None
+
+
+def glslc_whole(b):   # a capture file written whole: a GLSLC output (magic 0x19866891) holds its own length at +0x44
+    return len(b) >= 0x48 and b[:4] == b'\x91\x68\x86\x19' and struct.unpack_from('<I', b, 0x44)[0] == len(b)
+
+
+def glslc_done(d):   # the capture files of a folder written whole
     out = set()
     try: names = [n for n in os.listdir(d) if n.endswith('.glslc')]
     except OSError: return out
     for n in names:
         try: b = (d / n).read_bytes()
         except OSError: continue
-        if len(b) >= 0x48 and b[:4] == b'\x91\x68\x86\x19' and struct.unpack_from('<I', b, 0x44)[0] == len(b): out.add(n)
+        if glslc_whole(b): out.add(n)
     return out
+
+
+def fnv1a64(b):   # the name hle_glslc.c gives a capture file: the FNV-1a 64 of its bytes
+    h = 0xcbf29ce484222325
+    for x in b: h = (h ^ x) * 0x100000001b3 & 0xffffffffffffffff
+    return h
+
+
+GLSLC_PLAY = 'glslc_play'   # the folder of the outputs a game compiled with its own GLSLC while it was played (hle_glslc.c), beside the save: the app's Documents/glslc_play, the Mac's beside save/
+
+
+def glslc_play_sources(nsp_dir, work, app, extra=()):
+    """The folders the shaders captured in play are taken from: --glslc-play's, then glslc_play in the NSP folder and in the build folder (where the iPhone's Documents/glslc_play is copied),
+    the Mac run command's (<build folder>/run/glslc_play) and the Mac app's (~/Library/Application Support/nxnative/<title ID>/glslc_play)"""
+    return [*(Path(os.path.expanduser(e)).resolve() for e in extra), nsp_dir / GLSLC_PLAY, work / GLSLC_PLAY, work / 'run' / GLSLC_PLAY,
+            Path.home() / 'Library/Application Support/nxnative' / f'{app:016X}' / GLSLC_PLAY]
+
+
+def gather_glslc_play(d, sources, g):
+    """The outputs a game compiled with its own GLSLC while it was played, past the boot the capture runs (Catherine: Full Body compiles one for every material its shader cache has no file for:
+    loading a save at Night 2 compiles 21): the app and the Mac host save each one the build did not have into glslc_play beside the save (hle_glslc.c), and the files of sources go to
+    <version dir>/glslc_play, where shader_split.py reads them as the /glslc_play/ rows. The folder is made again at every build from what the sources hold now (none: it is removed), so the split's
+    reuse follows them. A file that is not a whole GLSLC output named by its FNV-1a 64 is left out. The profile's tables are compared without these rows (dlc_only_shader_change): a profile row
+    whose file no source holds, or a file the profile does not name, gives a shader-only derived profile, as installed DLC does. Returns the names taken"""
+    got, bad = {}, []
+    for s in dict.fromkeys(sources):
+        try: names = sorted(n for n in os.listdir(s) if n.endswith('.glslc') and not n.startswith('._'))
+        except OSError: continue
+        took = 0
+        for n in names:
+            if n in got: continue
+            try: b = (s / n).read_bytes()
+            except OSError: bad.append(s / n); continue
+            if glslc_whole(b) and n == f'{fnv1a64(b):016x}.glslc': got[n] = b; took += 1
+            else: bad.append(s / n)
+        if names: say(f'shaders captured in play: {took} of the {len(names)} files in {s}')
+    for p in bad: say(f'[RED] {p} is not a whole GLSLC output named by its FNV-1a 64 (as hle_glslc.c saves them): left out')
+    tmp, dst = d / (GLSLC_PLAY + '.partial'), d / GLSLC_PLAY
+    rmtree(tmp)
+    if got:
+        tmp.mkdir(parents=True)
+        for n, b in got.items(): (tmp / n).write_bytes(b)
+    swap_in_changed(tmp, dst)
+    named = glslc_named(g, GLSLC_PLAY)
+    if named - got.keys():
+        say(f'[RED] the profile names {len(named - got.keys())} shaders the game compiles only while it is played (its shader map\'s /glslc_play/ rows), and no glslc_play folder holds them: '
+            f'draws with them stay missing in this build. Play the game on the Mac or the iPhone and put the glslc_play folder beside the save into the NSP folder (the game profile\'s README)')
+    if got.keys() - named: say(f'{len(got.keys() - named)} shaders captured in play that the profile does not name go into this build\'s shader tables')
+    return set(got)
 
 
 def apple_silicon():   # hw.optional.arm64 is 1 on Apple silicon (for a Python under Rosetta too); an Intel Mac has no such key
@@ -1888,6 +1945,8 @@ def capture_glslc(repo, dirs, pkg_ver, patched, work, env, logs, g):
     want = glslc_wanted(g)
     todo = [v for v, d in dirs.items() if not (glslc_done(d / 'glslc_capture') >= want if want else glslc_done(d / 'glslc_capture'))]
     PROG.stage('GLSLC capture')
+    say('the game compiles shaders with its own GLSLC: the capture covers its boot only. Those it compiles later, when a scene needs a shader its files do not hold (Catherine: Full Body), '
+        f'are saved while it is played to {GLSLC_PLAY}/ beside the save, which the next build takes from the NSP folder (gather_glslc_play)')
     if not todo:
         say(f'reusing the captured run-time shaders: {", ".join(str(d / "glslc_capture") for d in dirs.values())}')
         PROG.end('reused'); return
@@ -1927,7 +1986,7 @@ def capture_glslc(repo, dirs, pkg_ver, patched, work, env, logs, g):
         PROG.say(f'---- last lines of {log} ----\n' + tail)
         raise BuildError(f'captured only {len(got)} run-time shaders'
                          + (f', the profile needs {len(want)}' if want else '') + f' (host output: {log})')
-    if want and got - want: say(f'[RED] captured files the profile\'s shader map does not name: {", ".join(sorted(got - want))}')
+    if want and got - want - glslc_named(g, GLSLC_PLAY): say(f'[RED] captured files the profile\'s shader map does not name: {", ".join(sorted(got - want - glslc_named(g, GLSLC_PLAY)))}')
     swap_in(cap, d / 'glslc_capture'); rmtree(rd)
     PROG.end(f'{len(got)} shaders in {hms(time.time() - t0)}')
 
@@ -2287,9 +2346,13 @@ def table_difference(name, profile, split):
     return '\n'.join(out)
 
 
+OPTIONAL_SOURCES = ('/aoc/', '/glslc_play/')   # shader map sources a build may have or not: installed DLC, the shaders captured in play (gather_glslc_play)
+
+
 def dlc_only_shader_change(g, tables):
-    """A different DLC shader union, with the registered non-DLC shaders and facts unchanged. Package indices may be re-numbered when an add-on is removed.
-    Source ownership is the split's /aoc/<index>/ prefix; a module or base/update shader difference never qualifies for this shader-only derivation."""
+    """A different union of the optional shaders (installed DLC, the shaders captured in play), with the registered other shaders and facts unchanged. Package indices may be re-numbered when one is removed.
+    Source ownership is the split's /aoc/<index>/ or /glslc_play/ prefix (shader_split.py gives a play capture a row only for a key no other source has); a module or base/update shader difference
+    never qualifies for this shader-only derivation."""
     def rows(path):
         out = {}
         for line in path.read_text().splitlines():
@@ -2301,8 +2364,8 @@ def dlc_only_shader_change(g, tables):
     try:
         old, new = rows(g.table('shader_map.tsv')), rows(tables / 'shader_map.tsv')
         if old is None or new is None: return False
-        old_dlc = {k: v for k, v in old.items() if v[2].startswith('/aoc/')}
-        new_dlc = {k: v for k, v in new.items() if v[2].startswith('/aoc/')}
+        old_dlc = {k: v for k, v in old.items() if v[2].startswith(OPTIONAL_SOURCES)}
+        new_dlc = {k: v for k, v in new.items() if v[2].startswith(OPTIONAL_SOURCES)}
         if old_dlc == new_dlc or {k: v for k, v in old.items() if k not in old_dlc} != {k: v for k, v in new.items() if k not in new_dlc}: return False
         dlc = old_dlc.keys() | new_dlc.keys()
         def facts(path):
@@ -2377,8 +2440,8 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     inputs = [('files', python_tool_files(repo, 'dm/gfx/tools/shader_split.py', ('dm/gfx/tools', 'dm/tools', 'dm/games'))), bool(provisional), 'split-v2']
     for r, m in zip(roms, mains):
         inputs += [('files', [m] + [m.parent / n for n in g.modules_in(m.parent) if n != 'main']), ('stat' if provisional else 'tree', r)]
-        for setting, folder, pattern in (('DM_GLSLC_CAPTURE', 'glslc_capture', '*.glslc'), ('DM_UE_SHADERS', 'ue_shaders', '*.ushaderbytecode')):
-            capture = Path(env.get(setting) or r.parent / folder)
+        for setting, folder, pattern in (('DM_GLSLC_CAPTURE', 'glslc_capture', '*.glslc'), ('DM_UE_SHADERS', 'ue_shaders', '*.ushaderbytecode'), (None, GLSLC_PLAY, '*.glslc')):
+            capture = Path(setting and env.get(setting) or r.parent / folder)
             inputs += [('stat', capture) if provisional else ('files', sorted(capture.glob(pattern)))]   # its files, not where it is: the same build reached through a moved folder or a link keeps its split
     if env.get('DM_NRO_DIR'): inputs += [('files', sorted(Path(env['DM_NRO_DIR']).glob('*.nro')))]   # NROs captured from a boot (capture_nro)
     inputs += [item for r in dlc_roms for item in (('dlc', Path(r).name), ('stat', r))]   # DLC has no registered module build to pin its contents: include its index and re-extraction times, even when file sizes stay the same
@@ -2411,7 +2474,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     def counted(ln):   # shader_split.py's 'progress: <done>/<total>'
         if m := re.fullmatch(r'progress: (\d+)/(\d+)', ln): PROG.set(done=int(m[1]), total=int(m[2]), unit='files')
     run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in names + ('pso_pairs.tsv',)] + ([','.join(map(str, dlc_roms))] if dlc_roms else []),
-        logs / 'shader_split.log', env=env, on_line=counted)
+        logs / 'shader_split.log', env={k: v for k, v in env.items() if k != 'DM_GLSLC_PLAY'}, on_line=counted)   # the shaders captured in play: <version dir>/glslc_play (gather_glslc_play), the folder the inputs name
     text = (logs / 'shader_split.log').read_text(errors='replace')
     m = re.search(r'shaders: (\d+) \(', text)
     bad = re.search(r'^\[RED\] (\d+) file\(s\) could not be read.*$', text, re.M)   # the split leaves out a file no reader reads (its own red line per file in the log) and goes on
@@ -3038,6 +3101,8 @@ def parse_args(argv):
                     'With --platform mac-app: the Mac app\'s archive, by default for this Mac\'s GPU (none: the app builds the bases on its first start)')
     ap.add_argument('--seen-shaders', action=argparse.BooleanOptionalAction, help='--platform mac or mac-app: build only the shaders the profile\'s playtests used (its shader_seen.tsv) and those the last runs\' logs reported missing, not the whole map: '
                     'minutes instead of hours, but areas the list does not cover draw without the rest until this runs again (default: the SEEN_SHADERS setting, off)')
+    ap.add_argument('--glslc-play', action='append', metavar='DIR', help='a folder of shaders the game compiled with its own GLSLC while it was played (the app\'s Documents/glslc_play, hle_glslc.c), '
+                    'taken into the shader tables; may be given more than once. glslc_play in the NSP folder and in the build folder, and the Mac run\'s and Mac app\'s, are always taken')
     ap.add_argument('--show-fps', action=argparse.BooleanOptionalAction, help='show the game\'s frame rate on the iPhone, frames on screen per second at the top left (default: the SHOW_FPS setting, on)')
     ap.add_argument('--motion', action=argparse.BooleanOptionalAction, help='pass a gyro controller\'s motion (on iOS also the phone\'s own) to games that read it; --no-motion builds with DM_MOTION=0, for when motion misbehaves (default: the MOTION setting, on)')
     ap.add_argument('--survey-only', action='store_true', help='a game with no profile: only the survey, no provisional profile and no IPA')
@@ -3422,6 +3487,7 @@ def main(args=None):
             PROG.add(1); g = region_check(repo, game, patched, work, env, logs, g)
     observed_glslc = capture_glslc(repo, {v: dirs[v] for v in sv}, pkg_ver, patched, work, env, logs, g) if glslc else None
     if uedec: decode_ue_shaders(repo, {v: dirs[v] for v in sv}, pkg_ver, patched, work, env, logs, g)
+    gather_glslc_play(dirs[pkg_ver], glslc_play_sources(nsp_dir, work, app, [*(getattr(args, 'glslc_play', None) or ()), *filter(None, [env.get('DM_GLSLC_PLAY')])]), g)
     sh = work / 'shader'
     # Trinity packs and legacy Unreal paks: the split decodes them with the packed version's own decoder (Oodle, LZ5), in the Mac host built for the profile
     oodle = (lambda: {'DM_OODLE_HOST': str(build_mac_host(repo, work / 'tools/dmhost', env, logs, g)), 'DM_OODLE_MODULES': str(patched)}) if src['oodle_packs'][0] or src['ue_legacy'][0] else None
@@ -3437,7 +3503,7 @@ def main(args=None):
         g = gamemod.load(g.id)
         say(f'{derived}: using a shader-only derived profile at {g.dir}; registered module fixes are preserved')
         return g
-    derive_dlc = (lambda: derive_shader_tables('the installed DLC shader content differs from the registered tables')) if not own else None
+    derive_dlc = (lambda: derive_shader_tables('the installed DLC or the shaders captured in play (glslc_play) differ from the registered tables')) if not own else None
     derive_compute = (lambda: derive_shader_tables('the reader decoded additional compute kernels from this registered build')) if not own else None
     pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
     if observed_glslc is not None: check_glslc_coverage(observed_glslc, g)

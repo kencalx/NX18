@@ -3,8 +3,8 @@
 # Atlus's GFD engine (the game's code name xrd758) on SDK 8.2.1, NVN; modules main + subsdk0 (GLSLC, the runtime shader compiler) + subsdk1 (NintendoSDK_movie) + sdk.
 # RomFS: everything in five CRI CPK archives (data/Base.cpk, Model.cpk, Puzzle.cpk, Keyfree.cpk, Patch.cpk), CRI ADX2 sound (data/sound*/*.acb / .awb) and CRI Sofdec2 movies
 # (data/movie*/*.usm, H.264 decoded through the SDK's movie::Decoder, hle_movie.c).
-# Shaders: GLSLC outputs, one stage each: 3,050 in data/shaders_binary (*.vs / *.ps), 76 in main, and 2 the game compiles at boot with its own GLSLC from GLSL sources in main
-# (captured on the Mac, hle_glslc.c). Its GLSLC (GPU code version 1.15) writes shader type 0 into every vertex shader's SPH (shader_split.py sph_stage)
+# Shaders: GLSLC outputs, one stage each: 3,050 in data/shaders_binary (*.vs / *.ps), 76 in main, 2 the game compiles at boot with its own GLSLC from GLSL sources in main
+# (captured on the Mac, hle_glslc.c), and 21 it compiles when its shader cache lacks a material's file (a save at Night 2; /glslc_play/ rows, from glslc_play/ in the NSP folder). Its GLSLC (GPU code version 1.15) writes shader type 0 into every vertex shader's SPH (shader_split.py sph_stage)
 
 # ---- Identity ----
 title_id	0100BF00112C0000

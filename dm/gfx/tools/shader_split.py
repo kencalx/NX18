@@ -2998,6 +2998,19 @@ def var_pairs(found):
         if g: var[g][st] = skey(ctl, code)
     return {(v[st], v['ps']) + (('prog',) if '#BAHS#prog' in g else ()) for g, v in var.items() for st in ('vs', 'ms') if st in v and 'ps' in v}
 
+def play_shaders(keys, played, per_src):
+    """The run-time outputs captured in play (/glslc_play/) into keys, after every other source: only keys no other source has get a row of theirs, so the rows without them are what a split with
+    none of these files writes (the NSP script compares the tables without them, dlc_only_shader_change). Returns the pairs of their outputs of several stages that hold such a key"""
+    new = {}
+    for v in played:
+        key = skey(v[2], v[3])
+        if key in keys or key in new:
+            if not same_shader((keys.get(key) or new[key])[2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {(keys.get(key) or new[key])[0]})')
+            continue
+        new[key] = v; per_src[group(v[0])] += 1
+    keys.update(new)
+    return {p for p in var_pairs(played) if p[0] in new or p[1] in new}
+
 def unreadable_why(e, name):
     why = str(e).removeprefix('[RED] ') if isinstance(e, SystemExit) else f'{type(e).__name__}: {e}'
     return why if why.lstrip('/').startswith(name.lstrip('/')) else f'{name}: {why}'   # most red lines name the file already
@@ -3188,7 +3201,7 @@ def main():
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
     romfs_v, main_v = romfs_l.split(','), main_l.split(',')
     if len(romfs_v) != len(main_v): red(f'{len(romfs_v)} RomFS and {len(main_v)} main: they must pair one to one')
-    files, results, common = [], [], None
+    files, results, common, played = [], [], None, []
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
         files += sorted((os.path.join(dp, f), (tag + '/' if tag else '') + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
@@ -3214,6 +3227,12 @@ def main():
         if not names and glsl_sources(img) and 'glslcCompile' in main_imports(img) and glslc_module(os.path.dirname(os.path.abspath(mainnso))):
             print(f'[RED] main holds GLSL sources and imports glslcCompile, but there are no captured GLSLC outputs in {cap}: the shaders the game compiles at run time will have no translation (the NSP script checks an empty capture against the offline split)', flush=True)
         for nm in names: found += glslc_shaders(open(os.path.join(cap, nm), 'rb').read(), f'/glslc_capture/{nm}')
+        # GLSLC outputs the game compiled while it was played, past the boot the capture runs (Catherine: Full Body compiles a shader whenever its shader cache, data/shaders_binary, has no file
+        # for a material: loading a save at Night 2 compiles 21 that no game file holds): <version dir>/glslc_play, or DM_GLSLC_PLAY, which the NSP script fills from the folders the app and the Mac
+        # host save them to (hle_glslc.c). They are optional inputs, scanned after everything else (play_shaders): a key another source has keeps that source's row
+        play = os.environ.get('DM_GLSLC_PLAY') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'glslc_play')
+        for nm in (sorted(f for f in os.listdir(play) if f.endswith('.glslc') and not f.startswith('._')) if os.path.isdir(play) else []):
+            played += glslc_shaders(open(os.path.join(play, nm), 'rb').read(), f'/glslc_play/{nm}')
         # Unreal Engine shader code archives decoded on the Mac (uepak.py): <version dir>/ue_shaders, or DM_UE_SHADERS; needed when the RomFS has Unreal paks
         ued = os.environ.get('DM_UE_SHADERS') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'ue_shaders')
         names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode') and not f.startswith('._')) if os.path.isdir(ued) else []   # AppleDouble metadata, not decoded shader archives
@@ -3270,6 +3289,7 @@ def main():
                 if not same_shader(keys[key][2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {keys[key][0]})')
                 continue
             keys[key] = v; per_src[group(v[0])] += 1
+    pairs |= play_shaders(keys, played, per_src)
     prog = {(a, b) for a, b, *t in pairs if t} - pairs; pairs = {x for x in pairs if len(x) == 2}
     sp, cover = separable_pairs(keys); pairs |= sp
     if cover: print(f'single-stage programs: {len({v for v, _ in sp}):,} vertex shaders are paired with a cover of {len(cover)} pixel shader(s) ({" ".join(cover)})')
