@@ -5,6 +5,9 @@
 // 0 B, 1 A, 2 Y, 3 X, 4 L, 5 R, 6 ZL, 7 ZR, 8 −, 9 +, 10 / 11 stick presses, 12-15 up down left right), and key events: the D-pad and the left stick are the arrow keys with key
 // repeat, A is keyCode 32 (as the pause menu reads it) and clicks the focused link or button when the page does not take it. B goes back, or ends the page from its first one
 // (exit reason 1), unless the page took B over with nx.footer. The page ends when it loads a URL under its callback URL (exit reason 3); other URLs outside the document are refused.
+// Nothing of a page reaches the internet: navigations outside the document are refused (decidePolicyForNavigationAction), and every load from http(s) or ws(s), an image, a script,
+// a fetch, a socket (a tracking pixel or an analytics script in a game's page), is blocked by a content rule list (offline_rules) attached before the page's first load, as the
+// Switch's offline web applet shows only the game's own files. DM_WEB_OFFLINE_RULES=0 attaches none and loads the page at once, as before the list.
 // Input: hle_hid.c's state while the page is shown (dm_input_peek: the keyboard, every controller, DM_CTL), sent to the page 60 times a second; buttons held when it appears count
 // only once released. A click or touch on the page focuses what it lands on and presses A there. The page is transparent where it draws nothing, over the game's picture; its
 // 1280x720 is fitted to the game's 16:9 picture. Its sounds follow the host's audio (DM_AUDIO; silent on the Mac by default)
@@ -362,6 +365,28 @@ static NSString *mime(NSString *ext) {
 }
 @end
 
+// The content rule list that blocks every load from the internet (url-filter as WebKit's content blockers read it: ^ anchors the URL's start, letter case does not count; one
+// trigger per scheme, as the filter has no alternation; Apple, "Creating a content blocker"), compiled once a run (WKContentRuleListStore also keeps it compiled on disk) and
+// attached to a page's controller before its first load. then() runs on the main thread once the list is attached, or once it cannot be compiled: the page then loads without
+// it, and the log says so (navigations outside the document stay refused). The callback URL a page ends at (http://localhost/ by default) is a navigation: the navigation
+// delegate sees it, ends the page and cancels it before any load, so the list does not change how a page ends. Pages served from their document (dmweb://, data:, blob:) are
+// untouched. DM_WEB_OFFLINE_RULES=0: no list, then() at once (the page loads as soon as it is opened, as before the list)
+static NSString *const OFFLINE_RULES = @"[{\"trigger\":{\"url-filter\":\"^https?://\"},\"action\":{\"type\":\"block\"}},"
+                                         "{\"trigger\":{\"url-filter\":\"^wss?://\"},\"action\":{\"type\":\"block\"}}]";
+static WKContentRuleList *g_offline_rules;   // main thread
+static void offline_rules(WKUserContentController *uc, void (^then)(void)) {
+    const char *off = getenv("DM_WEB_OFFLINE_RULES");
+    if (off && !strcmp(off, "0")) { static int said; if (!said++) LOG("web: loads from the internet are not blocked (DM_WEB_OFFLINE_RULES=0)"); then(); return; }
+    if (g_offline_rules) { [uc addContentRuleList:g_offline_rules]; then(); return; }
+    [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:@"dm-offline-pages" encodedContentRuleList:OFFLINE_RULES completionHandler:^(WKContentRuleList *list, NSError *e) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (list) { g_offline_rules = list; [uc addContentRuleList:list]; LOG("web: loads from the internet blocked (content rule list)"); }
+            else LOG("[RED] web: the content rule list that blocks loads from the internet does not compile (%s): the page loads without it", e.localizedDescription.UTF8String ?: "no reason");
+            then();
+        });
+    }];
+}
+
 int front_web_open(const char *dir, const char *path, const char *callback, int hidden, const dm_web_opts *opts) {
     if (!front_metal_layer()) return -1;   // no window: the stand-in answers
     NSString *d = @(dir), *p = @(path), *cb = @(callback); dm_web_opts o = opts ? *opts : (dm_web_opts){0, 0};
@@ -372,7 +397,8 @@ int front_web_open(const char *dir, const char *path, const char *callback, int 
         front_web_attach(box);
         [box place];
         NSString *q = [p stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLFragmentAllowedCharacterSet];
-        [box.web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[@"dmweb://doc/" stringByAppendingString:q ?: @""]]]];   // NOLINT(clang-analyzer-nullability.NullablePassedToNonnull): percent-encoded, it always parses; a path that does not encode reaches the [RED] line of a page not found
+        NSURLRequest *req = [NSURLRequest requestWithURL:[NSURL URLWithString:[@"dmweb://doc/" stringByAppendingString:q ?: @""]]];   // NOLINT(clang-analyzer-nullability.NullablePassedToNonnull): percent-encoded, it always parses; a path that does not encode reaches the [RED] line of a page not found
+        offline_rules(box.web.configuration.userContentController, ^{ if (g_box == box && !box.closed) [box.web loadRequest:req]; });   // the rules before the first load; a box closed meanwhile loads nothing
         if (!hidden) { box.shown = YES; g_touch = 1; [box setHiddenState:NO]; [box startInput]; }
     });
     return 0;
