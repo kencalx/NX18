@@ -60,7 +60,7 @@ DM_GAMES_FIRST	switch	`=1` searches `DM_GAMES_DIR` before `dm/games`, so a provi
 DM_GAME_ENV	switch	`KEY=VALUE` pairs, separated by spaces, that the game's own `getenv` returns, in place of the profile's `game_env` (`hle_os.c`); any other name goes to the SDK's empty environment
 DM_GFX_FIXTURE_OUT	test	`=<dir>`: graphics tests write their raw result textures and buffers there
 DM_GLSLC_CAPTURE	path	`=<dir>` saves every GLSLC output the game compiles at run time; `shader_split.py` reads it (default `<version dir>/glslc_capture`)
-DM_GPU_CAPTURE	diagnostic	`=<frame>[:<frames>]` or `gpu:<ms>[:<after frame>]` writes a Metal GPU trace of those frames for Xcode's Metal debugger; can be set while running through `DM_CTL`
+DM_GPU_CAPTURE	diagnostic	`=<frame>[:<frames>]` or `gpu:<ms>[:<after frame>]` writes a Metal GPU trace of those frames for Xcode's Metal debugger; can be set while running through `DM_CTL`. Set at the start (as `MTL_CAPTURE_ENABLED` is), it gives the GPU capture profile: no pipeline archive is opened or written, so the start is slower (docs/reference/shaders.md)
 DM_GPU_CAPTURE_DIR	path	Folder for `DM_GPU_CAPTURE`'s traces (default `gpu_captures/` in the working directory)
 DM_GPU_CAPTURE_KEEP	diagnostic	Before each GPU capture, prunes the capture folder's `dm_*.gputrace` entries so that the newest `KEEP - 1` stay (default 2)
 DM_GUEST_FILE	switch	`1` puts the guest's memory in sparse, unlinked files mapped shared over the guest block, `0` keeps it anonymous (`hle_svc.c`): file pages are out of `phys_footprint`, the figure iOS ends an app at, and the kernel can write them out when it needs the room. Unset: on iOS when the game's memory pool is larger than the room to the memory limit at start (the log's `[mem] guest memory` line says which), off on the Mac. The guest stays anonymous, with a `[RED]` line, when the files cannot be made, or the disk has less than `DM_GUEST_FILE_MIN_FREE` free (on the Mac that plus 8 GB)
@@ -102,7 +102,7 @@ DM_MEMSTAT	diagnostic	`=<tsv>` writes one line per second of memory accounting: 
 DM_MEMSTAT_DUMP	diagnostic	`=<seconds>`: with `DM_MEMSTAT`, at that second writes every VM region of 1 MiB or more to `<tsv>.regions`
 DM_MEM_CAP_GB	switch	`=<GB>`: the memory watchdog exits when resident memory exceeds that many GB (default 24 on the Mac, none on iOS; `0` turns it off)
 DM_MEM_GUEST	diagnostic	`=1`: the memory line adds `guest charged N MB` (a walk of the guest block's VM regions, each VM object counted once); off by default because the walk held Ocarina of Time's frames 24-45 ms on the Mac each time the line printed
-DM_METAL_CAPTURE	diagnostic	`=1` makes `build_ipa.sh` produce a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`), for `DM_GPU_CAPTURE`
+DM_METAL_CAPTURE	diagnostic	`=1` makes `build_ipa.sh` produce a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`), for `DM_GPU_CAPTURE`; such a build always runs the GPU capture profile, with no pipeline archive
 DM_METAL_HUD	player	`1` shows Apple's Metal performance HUD over the game (frame rate, frame and GPU time, memory)
 DM_MOD_FPS	player	`1` puts the switchable frame-rate mod in place when the game starts (the launcher's High frame rate; the NSP script's mods folder, `loader.c` `dm_mod_variants_apply`)
 DM_MOD_ULTRAWIDE	player	`1` puts the switchable ultrawide mod in place when the game starts and stretches the picture over a screen wider than 16:9 (the launcher's Ultrawide, iPhone and iPad; left off on a screen no wider than 16:9)
@@ -299,11 +299,11 @@ DM_PROBE_X2	diagnostic	`=<bytes>` (hex): probe hits also dump that many bytes of
 DM_PROGRAM	switch	`=<index>`: the program of a game of several programs that a host over their profiles runs (default 0; `main.c` `dm_game_cur`)
 DM_PROGRAMS	path	Table of a game's programs on the Mac (`programs.tsv`: index, host, modules, run folder, environment): `oe::ExecuteProgram` starts the named one in this process's place; the NSP script's run command and the Mac app set it
 DM_PROGRAM_ID	switch	`=<hex>`: the program ID the host reports from `svcGetInfo(ProgramId)` (default: the profile's `program_id`)
-DM_PSO_ARCHIVE	path	The folder of the per-game Metal 4 pipeline archive of pipeline bases (default `pso_archive/` beside `pso_user.tsv`); `off` keeps no archive
+DM_PSO_ARCHIVE	path	The folder of the per-game Metal 4 pipeline archive of pipeline bases (default `pso_archive/` beside `pso_user.tsv`); `off` keeps no archive; a GPU capture run keeps none either
 DM_PSO_BG_QUEUES	switch	`=<n>` (1-8): the serial queues of the pipeline builds hybrid draws ask for in the background (default: one per two performance-level-0 cores, but at least half of Metal's concurrent compiles, `maximumConcurrentCompilationTaskCount`, up to 3; the log's `pipeline builds in the background` line gives both)
 DM_PSO_BUNDLE	path	The pipeline archive made offline (`<GPU architecture>.mtl4a`, `prebuilt.tsv`), read only; the iOS app and Mac launcher set it to their `pso/` folder; `off` ignores it
 DM_PSO_GPUS	switch	`build_ipa.sh`: the GPU architectures, comma-separated, to build the offline pipeline archive for (`none` builds none); unset, a profile gets its `pso_gpu` list or `g19p` when absent
-DM_PSO_HYBRID	switch	`0`: a draw whose pipeline is not built yet waits for it instead of drawing with its shader pair's pulling pipeline meanwhile (on by default with the Metal 4 path)
+DM_PSO_HYBRID	switch	`0`: a draw whose pipeline is not built yet waits for it instead of drawing with its shader pair's pulling pipeline meanwhile (on by default)
 DM_PSO_IOS_MIN	switch	`build_ipa.sh`: the minimum iOS version of the offline pipeline archives (default the app's deployment target, `deploymentTarget` in `dm/ios/project.yml`); a device of another major version cannot open them and builds the bases itself
 DM_PSO_KEEP_OLD	switch	`1` opens every pipeline archive file as before: files of another shader chain are not removed at the start, and files written before the chain stamp are not probed or removed after the prewarm (default: removed, docs/reference/memory.md)
 DM_PSO_MANIFEST	path	The prewarm manifest to use instead of the profile's `pso_manifest.tsv`; `off` turns the prewarm off

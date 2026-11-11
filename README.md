@@ -40,7 +40,7 @@ Community projects build on nxnative with tools to turn your games into apps for
 
 ## Requirements
 
-- **Mac:** Apple silicon, macOS 26.6 or later. Building games requires Xcode 27.2.
+- **Mac:** Apple silicon with Metal 4, macOS 27.3 or later (NX 18 draws through Metal 4 only; a virtual Mac, whose GPU has no Metal 4, is not supported). Building games requires Xcode 27.2.
 - **iPhone:** A17 Pro chip or later, with iOS 26 or later.
 - **iPad:** M1 chip or later, with iPadOS 26 or later.
 
@@ -56,14 +56,14 @@ Switch 2 games are built from one `.nup` file or a folder of their files, not fr
 
 ### Build from the command line
 
-You need a Mac with macOS 26.6 or later, [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.2) 27.2, [Homebrew](https://brew.sh) and Python 3.12 or newer (an arm64 one, not an Intel Homebrew's). An iPhone build also needs Xcode's iOS platform (Xcode → Settings → Components).
+You need an Apple silicon Mac with macOS 27.3 or later, [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.2) 27.2, [Homebrew](https://brew.sh) and Python 3.12 or newer (an arm64 one, not an Intel Homebrew's). An iPhone build also needs Xcode's iOS platform (Xcode → Settings → Components).
 
 The shaders are built with Xcode 27.2's Metal compiler. Select it before step 1: `sudo xcode-select -s /Applications/Xcode.app`. With several Xcode versions installed, name this one `Xcode-27.2.app` and select it with `sudo xcode-select -s /Applications/Xcode-27.2.app`.
 
 **1. Install the tools** (only once), in Terminal:
 
 ```
-xcodebuild -downloadComponent MetalToolchain
+xcodebuild -downloadComponent MetalToolchain   # required: without it the build stops with an error
 git clone https://github.com/seedds/nxnative.git && cd nxnative
 brew install xcodegen zstd
 python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"

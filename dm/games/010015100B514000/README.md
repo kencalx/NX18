@@ -73,7 +73,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ### Offline pipeline archive probe
 
-**Current: Mac build evidence; device acceptance open.** [PR #653](https://github.com/seedds/nxnative/pull/653) reports a `pso_offline.py --gpu g19p` probe of the contributor's Wonder shader build on an Apple M2 Pro with toolchain `metalfe-32023.922`: 3,698 pairs gave 3,697 bases in a 67 MB archive, built in 113 s including 27.5 s of planning. One layer-writing pair was left to the device; no pair declared function constants. Opening the archive on an iPhone, hybrid rendering, cold preparation time, steady GPU time and peak device memory remain unmeasured. The Metal 4 path (`pso_mtl4`) is now on by default on iOS for every game, Wonder included; its device acceptance is still open.
+**Current: Mac build evidence; device acceptance open.** [PR #653](https://github.com/seedds/nxnative/pull/653) reports a `pso_offline.py --gpu g19p` probe of the contributor's Wonder shader build on an Apple M2 Pro with toolchain `metalfe-32023.922`: 3,698 pairs gave 3,697 bases in a 67 MB archive, built in 113 s including 27.5 s of planning. One layer-writing pair was left to the device; no pair declared function constants. Opening the archive on an iPhone, hybrid rendering, cold preparation time, steady GPU time and peak device memory remain unmeasured. The Metal 4 path (once `pso_mtl4`) is now the only one, on iOS for every game, Wonder included; its device acceptance is still open.
 
 ## Audio
 

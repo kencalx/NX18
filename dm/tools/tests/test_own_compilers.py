@@ -43,7 +43,7 @@ class CheckTools(unittest.TestCase):
             with self.assertRaises(SystemExit) as e: self.check([mismatch(key, OTHER)])
             msg = str(e.exception.code)
             self.assertTrue(msg.startswith('[RED] '), msg)
-            for want in (key, OTHER, LOCKED[key], f'Xcode {own_compilers.XCODE_VERSION}', 'macOS 26.6', 'xcodebuild -downloadComponent MetalToolchain', 'DM_ALLOW_OTHER_METAL=1', '#242'): self.assertIn(want, msg)
+            for want in (key, OTHER, LOCKED[key], f'Xcode {own_compilers.XCODE_VERSION}', 'macOS 27.3', 'xcodebuild -downloadComponent MetalToolchain', 'DM_ALLOW_OTHER_METAL=1', '#242'): self.assertIn(want, msg)
 
     def test_other_metal_says_to_select_the_tested_xcode(self):   # a newer Xcode selected downloads its own toolchain again (GitHub issue #717)
         sel = ' (selected: Xcode 27.3 in /Applications/Xcode.app/Contents/Developer)'

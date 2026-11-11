@@ -27,7 +27,7 @@ No `pad_layout`: the virtual gamepad starts in the 2D layout (the default).
 - **Current: the GL layer.** One context; GL calls are encoded into Metal as they come, one command buffer per frame; GL's bottom-up orientation through the NVN layer's lower-left origin (`mtl_set_origin_lower_left`: flipped viewports, reversed winding, a flipped present); textures made on first use from the levels given (the loader defines them level by level); buffers orphaned on `glBufferData` (a new `MTLBuffer` when the GPU may still read the old one); the window surface (the size of the game's `vi::CreateLayer`, 1920x1080) presented through the NVN layer's present path, paced by the swap interval.
 - Without `glBindAttribLocation` the game's attribute index is the Metal one: `glGetAttribLocation` returns the shader's own attribute numbers.
 - **Resolved:** Metal refuses a swizzle on a texture that can be a render target (`Texture swizzling is not compatable with MTLTextureUsageRenderTarget`, in the first story scene), so only luminance / alpha formats get a swizzle; Metal reads a channel a format lacks as 0 (alpha 1), as GL does.
-- **Present:** three window textures through the NVN layer's present path (`mtl_ext_tex`). The game sets the swap interval to 60 ÷ its frame rate before each swap: 1 at the title and in the DigiLab, 2 from the story's opening on.
+- **Present:** three window textures through the NVN layer's present path (`mtl_ext_tex`, deleted with the GL layer in release 1). The game sets the swap interval to 60 ÷ its frame rate before each swap: 1 at the title and in the DigiLab, 2 from the story's opening on.
 
 ## Shaders
 
@@ -69,7 +69,7 @@ SDK 6.4.0 boots, one each:
 
 General host changes first needed here; each applies to every game:
 
-- **The OpenGL layer** (`dm/gfx/gl/hle_gl.m`: EGL, GL on Metal, `mtl_set_origin_lower_left`, `mtl_ext_tex` presents) and **offline GLSL translation** (`dm/gfx/tools/gl_shaders.py`: glslang `-V -R`, SPIRV-Cross, varyings matched by name, `--fixup-clipspace`; `DM_GL_CAPTURE`): Games that render with desktop OpenGL through EGL, GLSL source translated offline and found by hash.
+- **The OpenGL layer** (`dm/gfx/gl/hle_gl.m`: EGL, GL on Metal, `mtl_set_origin_lower_left`, `mtl_ext_tex` presents; removed in release 1, in git at `93c34371`) and **offline GLSL translation** (`dm/gfx/tools/gl_shaders.py`: glslang `-V -R`, SPIRV-Cross, varyings matched by name, `--fixup-clipspace`; `DM_GL_CAPTURE`): Games that render with desktop OpenGL through EGL, GLSL source translated offline and found by hash.
 - **MVGL archives** (`dm/gfx/tools/mvgl.py`).
 - **Loader census** (`dm/tools/loader_census.py`) and the `graphics gl` guess in `profile_guess.py`: [02, NVN surface](../../../docs/agents/02-survey.md#nvn-surface).
 - **Add-on content queries on the big host stack** (`HLE_FORCE_BIG`): [Add-on content queries on a small guest stack](../../../docs/reference/services.md#add-on-content-queries-on-a-small-guest-stack).

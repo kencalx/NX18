@@ -81,7 +81,7 @@ Each item was found from a red line or a pass dump on the way through the langua
 | Content key: archive reused | 10.10 s |
 | Saved | 452.68 s (7m33s), 97.8% |
 
-- **Current:** the Metal 4 path (`pso_mtl4`) is now on by default on iOS, so this game's default iOS build makes the offline archive too and gains from this stage as the Mac app does (not measured for the iPhone build). No gameplay run used the reused archive; `regress.py check` compared its 28,603 shaders only, since the game has no `smoke.tsv`.
+- **Current:** the Metal 4 path (once `pso_mtl4`) is now always taken on iOS, so this game's default iOS build makes the offline archive too and gains from this stage as the Mac app does (not measured for the iPhone build). No gameplay run used the reused archive; `regress.py check` compared its 28,603 shaders only, since the game has no `smoke.tsv`.
 
 ### Shader extraction reuse
 

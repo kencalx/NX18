@@ -122,16 +122,19 @@ make -C dm/gfx/tests run        # graphics layer unit tests
 make -C dm/gfx/tex/tests run    # texture submodule unit tests; the real-data items need texture samples from both the Switch and PC versions, see tex/README.md
 ```
 
-The tests in `dm/gfx/tests` compile the production code in directly and need a Metal device on the local machine; a few of them run under `MTL_DEBUG_LAYER=1` (the Metal validation layer). Most tests do not read the workspace; the exceptions are `t_refl` and `t_rt_range_ro`, which read the translated shader reflection json under `$DM_ROOT/build/cache/metal_shader_cache`, and `test_tbdr_budget.py`, which creates a temporary directory under `$DM_ROOT/run/gfx`. Main contents:
+The tests in `dm/gfx/tests` compile the production code in directly and need a Metal device on the local machine; a few of them run under `MTL_DEBUG_LAYER=1` (the Metal validation layer). Most tests do not read the workspace; the exceptions are `t_refl` and `t_rt_range_ro`, which read the translated shader reflection json under `$DM_ROOT/build/cache/metal_shader_cache`, and `test_tbdr_budget.py`, which creates a temporary directory under `$DM_ROOT/run/gfx`.
+
+The host and the tests draw through Metal 4 only. A fixture's command buffers and pipelines go through `tests/t_mtl4.h`: with `nvn_mtl.m` included first it takes the host's one-off command buffers on the Metal 4 queue, otherwise (or with `T4_STANDALONE`) a Metal 4 queue of its own; `t4_use` makes what an encoder touches resident, `t4_keep` keeps a pipeline or state until the command buffer completes, `t4_barrier` orders dependent dispatches, and `t4_fn` notes each function a pipeline uses ([docs/development.md](../../docs/development.md#continuous-integration)). `dm/tools/tests/test_mtl4_only.py` (CPU only, in CI) fails on a Metal 3 queue, command buffer, encoder, `set*Bytes` or `MTLDevice` pipeline in the production code, and on a classic queue in these fixtures. Its allowlist holds only the five argument-buffer layout checks (`newArgumentEncoderWithBufferIndex` in `nvn_mtl.m`: the shader's own function at its load, and the side libraries' entry points in `vin_fn`, `pull_load`, `at_fn` and `lo_fn`), which measure a function's layout and keep no encoder. Main contents:
 
 | Test | What it checks |
 |---|---|
 | `t_nvn` | Interface layer: fetches addresses from `nvnBootstrapLoader` the way the game does, all the way through to presentation |
 | `t_builtin` | The 4 embedded compute shaders |
 | `t_refl`, `t_hmap`, `t_cover`, `t_pace`, `t_pso_skey`, `t_dirty_slots` | Reflection parsing, hash table, full-coverage proof, pacer, pipeline manifest key, dirty page tracking |
-| `t_pso_warm` | Historical manifest normalization and deduplication, draw-time cache reuse and GPU pixels for normal and merged passes, and one preparation per shader key across concurrent warm tasks with unrelated keys left free, through MTLDevice and Metal 4 |
+| `t_pso_warm` | Historical manifest normalization and deduplication, draw-time cache reuse and GPU pixels for normal and merged passes, and one preparation per shader key across concurrent warm tasks with unrelated keys left free, through the Metal 4 compiler |
 | `t_deswz_gpu` | GPU deswizzling |
 | `t_present_crop` | Presentation cropping |
+| `t_pso_capture`, `t_pso_depth_only` | The GPU capture profile (no pipeline archive opened or written, pipelines still built and specialized); depth-only draws through the host's empty fragment, with and without that profile (`make check_t_pso_capture`, `check_t_pso_depth_only`, under `MTL_DEBUG_LAYER=1`) |
 | `t_mip_extent` | Effective size when rendering to a mip level other than level 0 |
 | `t_fuse_check`, `t_reorder_chain`, `t_defer_chain`, `t_zskip`, `t_xv`, `t_ub`, `t_pfv`, `t_rt_range`, `t_rt_range_shape`, `t_rt_range_ro`, `t_rt_depth_ro` | Compile the replay layer `nvn_mtl.m` in directly and check the various optimization and diagnostic logic inside the replay layer |
 | `test_tbdr_budget.py` | The parsing in `tools/tbdr_budget.py` |
@@ -151,7 +154,7 @@ Resource locations:
 | `DM_PSO_RECORD=path` | Appends the shaders and pipelines used in this run to a file, for re-recording the warm-up manifest |
 | `DM_PSO_USER=path` | Where to keep the per-device list of shaders and pipelines built on the spot (default: `pso_user.tsv` in the parent of `DM_SAVE`) |
 | `DM_PSO_ARCHIVE=folder` or `off` | Where to keep the per-game pipeline archive of pipeline bases (default: `pso_archive/` beside `pso_user.tsv`), or no archive |
-| `DM_PSO_MTL4=0` / `=1` | `0`: build render pipelines through the `MTLDevice` as before, with no unspecialized bases and no archive (the default is on, on the Mac and on iOS). `1`: turn them on on iOS for a game whose profile sets `pso_mtl4 off` |
+| `DM_PSO_MTL4` | Retired: ignored with one log line (`DM_PSO_MTL4=<v> ignored: pipelines are always built through MTL4Compiler`). Every pipeline is built through the host's one `MTL4Compiler`; the `MTLDevice` path it chose is gone |
 | `DM_PSO_HYBRID=0` | A draw whose pipeline is not built yet waits for it, instead of drawing with the pair's pulling pipeline meanwhile (docs/development.md, "Hybrid pipelines") |
 | `DM_PSO_BG_QUEUES=<n>` | The serial queues (1-8) the pipelines hybrid draws ask for are built on in the background (default: one per two performance-level-0 cores, but at least half of `maximumConcurrentCompilationTaskCount`, up to 3; docs/development.md, "Hybrid pipelines") |
 | `DM_PSO_PREBUILD=0` or `tool` | No prebuild of the pulling bases into the archive (in the prepare step, or in the background without one); `tool`: run the prebuild alone and exit (`DM_PSO_PREBUILD_DEPTH=zero`, `DM_PSO_PREBUILD_THREADS=<n>`) |

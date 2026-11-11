@@ -6,7 +6,7 @@ The screen before the game starts shows the settings the game supports. A settin
 - [Greyed-out settings](#greyed-out-settings)
 - [Game](#game): [Frame rate](#frame-rate), [High frame rate and Ultrawide](#high-frame-rate-and-ultrawide), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Sharpening](#sharpening), [Anti-aliasing](#anti-aliasing), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch control size](#touch-control-size), [Touch control opacity](#touch-control-opacity), [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
-- [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
+- [Performance](#performance): [Frame buffering](#frame-buffering), [How pipelines are built](#how-pipelines-are-built), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
 - [TV](#tv)
@@ -14,7 +14,7 @@ The screen before the game starts shows the settings the game supports. A settin
 
 ## Tested defaults
 
-Each game comes with the settings it was tested with: its profile in this repository says, for example, that Breath of the Wild runs with Frame buffering on, because that, with Metal 4 pipelines (on for every game), held a steady 60 fps on an iPhone 17 Pro Max. Those are the defaults the settings screen shows the first time.
+Each game comes with the settings it was tested with: its profile in this repository says, for example, that Breath of the Wild runs with Frame buffering on, because that held a steady 60 fps on an iPhone 17 Pro Max. Those are the defaults the settings screen shows the first time.
 
 When you change a setting and tap **Play**, the app keeps your choice, also when a later build of the app ships other defaults. A setting you leave at its default is not stored: it follows the defaults of the build you have, so a newer build's tested settings reach you without doing anything. **Reset to tested defaults** at the bottom sets every setting back to its default, and **Play** then forgets your choices, so the game's defaults apply again. For testing, a line in `Documents/env.txt` overrides any setting ([Settings in a file](#settings-in-a-file)).
 
@@ -34,7 +34,7 @@ A setting that another setting or the device makes do nothing is shown greyed, w
 | Hold frames when late | Frame rate is 30 fps | Only matters at 60 fps |
 | Rumble cutoff | Rumble strength is 0 % | Rumble strength is 0 % |
 | Press a button to join | `DM_PAD_MERGE=1` in `env.txt` | All controllers are player 1 (env.txt) |
-| Metal 4 pipelines, Pipeline prebuild | `DM_GPU_CAPTURE` or `MTL_CAPTURE_ENABLED` is set | Off while GPU capture is on |
+| Pipeline prebuild | `DM_GPU_CAPTURE` or `MTL_CAPTURE_ENABLED` is set | Off while GPU capture is on |
 
 Some settings work only in some situations. They stay selectable, and the reason is added under the name:
 
@@ -243,9 +243,9 @@ Without it the GPU idles between frames, and iOS reads that idle time as room to
 - **When to change it:** turn it off if you notice the controls lag behind and the game holds its frame rate without it.
 - **Cost:** up to one frame more latency between your input and the screen (about 28 ms more on an iPhone 17 Pro Max), and two more frame-sized images in memory.
 
-### Metal 4 pipelines
+### How pipelines are built
 
-Before the GPU can draw something, the app has to build a *pipeline* for it: the game's shaders compiled for the iPhone's GPU, with the drawing settings. Building one takes tens of milliseconds, so a scene full of new ones stutters. With Metal 4 pipelines the app keeps what it built in a pipeline archive on the phone, and builds most pipelines in a few microseconds from a shared base.
+This is not a setting: it explains what [Pipeline prebuild](#pipeline-prebuild) and the **Preparing pipelines** screen are for. Before the GPU can draw something, the app has to build a *pipeline* for it: the game's shaders compiled for the iPhone's GPU, with the drawing settings. Building one takes tens of milliseconds, so a scene full of new ones stutters. The app builds every pipeline through Metal 4's compiler, keeps what it built in a pipeline archive on the phone, and builds most pipelines in a few microseconds from a shared base. There is no option to turn this off: the older way of building pipelines, and the devices that only had that way, are gone. An iPhone 15 Pro or newer, an iPad with M1 or later, or an Apple silicon Mac on macOS 27.3 or later is needed.
 
 ```mermaid
 flowchart TD
@@ -267,13 +267,13 @@ flowchart TD
 
 At start, before the game's first frame, the app prepares what it already knows: the pipelines in the archive and those the prewarm lists name (one comes with the game, one grows on the phone as you play); with a warm archive that takes well under a second. A pipeline never seen before is drawn meanwhile with a stand-in for its pair of shaders, a *hybrid* pipeline that reads the draw's vertices in a general way and draws the same picture, while the real pipeline is built in the background and archived for the next start.
 
-- **Default:** on for every game, unless its profile was found to need it off. On an iPhone 18 Pro Max, Persona 5 Royal used about 1.9 GB of memory with it and Super Mario Odyssey at most 2.87 GB, both at 60 fps.
-- **When to change it:** turn it off only if a game crashes or runs out of memory with it.
+- **Memory:** on an iPhone 18 Pro Max, Persona 5 Royal used about 1.9 GB of memory and Super Mario Odyssey at most 2.87 GB, both at 60 fps.
 - **Cost:** memory for the archive while the game runs, and storage on the phone.
+- **GPU capture:** a run that may record a frame for Xcode (`DM_GPU_CAPTURE`, `MTL_CAPTURE_ENABLED`, or an app built for capture) opens and writes no pipeline archive, because Metal's capture does not work with one. It starts slower, since it compiles every pipeline it needs, and it skips the prebuild.
 
 ### Pipeline prebuild
 
-Builds a stand-in for every pair of shaders the game has (15,767 for Breath of the Wild) and puts them into the pipeline archive, so that a scene you have never seen has a stand-in for each of its draws instead of a stutter. It runs before the game's first frame, behind a **Preparing pipelines** screen: the first start waits a few minutes for it, once, and so does the first start after a game update or an app update that brings new shaders. Every other start skips it. It needs Metal 4 pipelines, and its row shows only while that option is on.
+Builds a stand-in for every pair of shaders the game has (15,767 for Breath of the Wild) and puts them into the pipeline archive, so that a scene you have never seen has a stand-in for each of its draws instead of a stutter. It runs before the game's first frame, behind a **Preparing pipelines** screen: the first start waits a few minutes for it, once, and so does the first start after a game update or an app update that brings new shaders. Every other start skips it.
 
 Built in the background while playing instead, the stand-ins took an iPhone 17 Pro Max's GPU from about 13 to 15–18 ms a frame in Breath of the Wild, so the app does the work up front.
 
@@ -386,7 +386,6 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Anti-aliasing | `DM_POST_AA` | `off`, `edge`, `edge-sharp` (default: the game's `post_aa`, Off without it); `ab` with `DM_AB` alternates `off` and `edge` for a measurement |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |
-| Metal 4 pipelines | `DM_PSO_MTL4` | `1`, `0` |
 | Pipeline prebuild | `DM_PSO_PREBUILD` | `1`, `0` |
 | Encode thread | `DM_NVN_ENC_THREAD` | `1`, `0` |
 | Hold frames when late | `DM_FPS_HOLD` | `on`, `off` |
