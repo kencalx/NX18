@@ -40,7 +40,7 @@ class AacOrder(unittest.TestCase):
         self.assertTrue(lay.split('\n')[1].strip().startswith('if (d->ch < 3) return;'))   # mono and stereo: not touched
         self.assertIn('r == 1 && on', lay)   # set only when the order differs and DM_AAC_LAYOUT is on
         self.assertIn('kAudioChannelLayoutTag_UseChannelDescriptions', lay)   # the stream's own labels, reordered: nothing to mix
-        self.assertIn('getenv("DM_AAC_LAYOUT"); g_aac_layout = !(e && !strcmp(e, "0"))', self.movie)
+        self.assertIn('getenv("DM_AAC_LAYOUT"); g_aac_layout = e && !strcmp(e, "1")', self.movie)   # opt-in in release 1
 
     def test_a_layout_with_a_tag_only_is_read(self):   # 12 bytes (CAAudioChannelLayout::CalculateByteSize(0)), less than sizeof(AudioChannelLayout)
         self.assertIn('#define MD_LAYOUT_HEAD offsetof(AudioChannelLayout, mChannelDescriptions)', self.movie)

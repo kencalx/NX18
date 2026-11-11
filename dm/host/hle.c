@@ -122,7 +122,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr);   // hle_svc
 // register describes the host's counter instead: 24 MHz on earlier Apple chips, 1 GHz measured on a development Mac (dm/gfx/nvn/nvn_entry.S), so a game converting ticks to time
 // with it got times 20 % short, or 32 to 52 times short on that Mac. Before the rewriter's rule the read stayed in place and gave the host's register; DM_CNTFRQ=0 gives that value
 // again (an A/B against builds without the rule; the rewritten code is the same either way). No game is known to read the register. The switch is read once, under pthread_once,
-// as the other switches (DM_AAC_LAYOUT, DM_VT_REBUILD) are: exactly "0" turns it on, so a value such as "00" or "0x…" leaves the guest's frequency. Only an arm64 host has
+// as DM_VT_REBUILD is: exactly "0" turns it on, so a value such as "00" or "0x…" leaves the guest's frequency. Only an arm64 host has
 // the register to give; elsewhere (a test build on another architecture) the switch is logged as having no effect and the guest's value stays.
 #if defined(__aarch64__)
 static int g_cntfrq_host;

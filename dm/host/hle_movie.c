@@ -388,9 +388,11 @@ static OSStatus aac_feed(AudioConverterRef c, UInt32 *np, AudioBufferList *bl, A
 // The console hands a game MediaCodec's channel order (hle_movie_aac_order.h: 5.1 is L R C LFE Ls Rs); AudioToolbox's converter hands out the order its output channel layout names.
 // md_aac_layout reads that layout once per stream, before the first packet, and for 3 channels or more logs it and sets the same labels in the console's order
 // (kAudioConverterOutputChannelLayout, as Chromium's AudioToolbox decoder sets it): the converter then moves whole channels between slots, the samples stay what it decodes.
-// DM_AAC_LAYOUT=0 keeps AudioToolbox's order, as before (the order is still read and logged). g_aac_layout: -1 until read (t_movie_vpx sets it)
+// Off by default in release 1 until a device A/B with a 5.1 AAC movie confirms that the layout AudioToolbox reports is the order its samples come out in (t_movie_vpx checks
+// it on the Mac): DM_AAC_LAYOUT=1 sets the console's order, unset or 0 keeps AudioToolbox's order, as before (the order is still read and logged either way).
+// g_aac_layout: -1 until read (t_movie_vpx sets it)
 static int g_aac_layout = -1;
-static int md_aac_layout_on(void) { if (g_aac_layout < 0) { const char *e = getenv("DM_AAC_LAYOUT"); g_aac_layout = !(e && !strcmp(e, "0")); } return g_aac_layout; }
+static int md_aac_layout_on(void) { if (g_aac_layout < 0) { const char *e = getenv("DM_AAC_LAYOUT"); g_aac_layout = e && !strcmp(e, "1"); } return g_aac_layout; }
 _Static_assert(AACL_LEFT == kAudioChannelLabel_Left && AACL_RIGHT == kAudioChannelLabel_Right && AACL_CENTER == kAudioChannelLabel_Center && AACL_LFE == kAudioChannelLabel_LFEScreen &&
                AACL_LS == kAudioChannelLabel_LeftSurround && AACL_RS == kAudioChannelLabel_RightSurround && AACL_LC == kAudioChannelLabel_LeftCenter &&
                AACL_RC == kAudioChannelLabel_RightCenter && AACL_CS == kAudioChannelLabel_CenterSurround && AACL_LSD == kAudioChannelLabel_LeftSurroundDirect &&
