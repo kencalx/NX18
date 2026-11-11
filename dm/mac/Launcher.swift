@@ -5,7 +5,7 @@
 // which the host inherits; Quit and closing the window end the app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the
 // saved choices. The window never takes focus by itself: an app opened in the background (open -g) keeps its window behind until the player switches to it.
 // The look is the NX 18 one the iOS launcher has (LauncherRow.swift's NX18Palette): a dark window, a banner across the top with the game's key art (Resources/dm/art.jpg; without it the app
-// icon blurred, with the icon itself on it), the game's logo (Resources/dm/logo.png) or else its name and the status line over it, the coral Play pill, Game guide (the game's own pages under Resources/html in the default browser, or
+// icon blurred, with the icon itself on it), the game's logo (Resources/dm/logo.png) or else its name and the status line over it, the coral Play pill, Game guide (the game's own pages under Resources/html in a window of the app's own, MacGuideWindow, or
 // Resources/dm/manual.pdf) and About this game (Resources/dm/about.json, a sheet), the cyan-to-coral rails under the banner, the preset chips, cyan section headings and controls on
 // charcoal rows. Only the window's background takes a little of the art's colour; the accents, the rails and the mark keep the logo's
 import AppKit
@@ -16,6 +16,7 @@ import Metal
 import MetalFX
 import QuartzCore
 import SwiftUI
+import WebKit
 
 private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictionaryKey: key) as? String }
 
@@ -167,7 +168,11 @@ struct LauncherExtras {
     }
     var hasGuide: Bool { !guides.isEmpty }
     // The first guide's page in the game's language
-    func guide(language: String) -> URL? { guides.lazy.compactMap { LauncherExtras.guideIndex(in: $0, language: language) }.first }
+    func guide(language: String) -> URL? { guidePage(language: language)?.index }
+    // That page and the folder its scripts may read (the guide's .htdocs, which holds the language folders' html/)
+    func guidePage(language: String) -> (index: URL, root: URL)? {
+        guides.lazy.compactMap { langs in LauncherExtras.guideIndex(in: langs, language: language).map { ($0, langs.deletingLastPathComponent()) } }.first
+    }
 }
 
 struct LauncherView: View {
@@ -338,7 +343,7 @@ struct LauncherView: View {
             .accessibilityLabel("Play")
             .accessibilityHint("Starts the game with these settings")
             if extras.hasGuide {
-                pill("Game guide", short: "Guide", icon: "book", label: l, help: "Opens the game's own guide in your browser") { openGuide() }
+                pill("Game guide", short: "Guide", icon: "book", label: l, help: "Opens the game's own guide in a window") { openGuide() }
             }
             if let manual = extras.manual {
                 pill(extras.hasGuide ? "Manual" : "Game guide", short: extras.hasGuide ? "Manual" : "Guide", icon: "doc.richtext", label: l, help: "Opens the game's manual (PDF)") {
@@ -407,16 +412,13 @@ struct LauncherView: View {
         .listRowBackground(NX18Palette.row)
     }
 
-    // The guide in the game language the window shows (Game language, else the app's DMLanguage), in the default browser rather than the app .html files open with
+    // The guide in the game language the window shows (Game language, else the app's DMLanguage), in the guide window (MacGuideWindow), not a browser: one opening the pages from
+    // file: URLs refuses their scripts' reads of the guide's other files and has no window.nx
     private func openGuide() {
         let lang = m.values["DM_LANG"] ?? info("DMLanguage") ?? "en-US"
-        guard let url = extras.guide(language: lang) else { return }
-        if let browser = NSWorkspace.shared.urlForApplication(toOpen: URL(string: "https://example.com")!) {
-            NSWorkspace.shared.open([url], withApplicationAt: browser, configuration: NSWorkspace.OpenConfiguration())
-        } else {
-            NSWorkspace.shared.open(url)
-        }
-        fputs("launcher: game guide \(url.path)\n", stderr)
+        guard let page = extras.guidePage(language: lang) else { return }
+        MacGuideWindow.show(index: page.index, root: page.root, fontDir: Bundle.main.resourceURL?.appendingPathComponent("dm/font"), title: name)
+        fputs("launcher: game guide \(page.index.path)\n", stderr)
     }
 
     // Where the host keeps the save (launcher.c: DM_SAVE, else Application Support/nxnative/<title ID>/save), for Last played
@@ -431,6 +433,69 @@ struct LauncherView: View {
 private struct PlayLabel: LabelStyle {
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 7) { configuration.icon.font(.system(size: 13, weight: .bold)); configuration.title }
+    }
+}
+
+// Game guide: the game's own pages in a window of the app's own, in a WKWebView configured as the iPhone's guide viewer is (LauncherGuideFiles.swift: the guide's .htdocs served
+// through nx18guide://, the window.nx shim, a Content-Security-Policy and a block list that keep the pages off the network, links outside the guide refused). The default browser,
+// which the window used before, opens the pages from file: URLs: there their scripts' XMLHttpRequest and fetch of the guide's other files are refused, and window.nx, the Switch
+// applet's API they call, does not exist. nx.endApplet and window.close close the window; Game guide again brings it forward. Play and Quit close it with the settings window
+@MainActor final class MacGuideWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNavigationDelegate {
+    private(set) static var current: MacGuideWindow?
+    let files: LauncherGuideFiles
+    private(set) var web: WKWebView!
+    private(set) var window: NSWindow?
+    private(set) var index: URL?
+    var closed: (() -> Void)?   // after the page or the window closed it
+
+    // The guide's web view, not yet in a window (show puts it in one; dm/ios/tests/mac_guide_check.swift loads pages into it directly)
+    init(root: URL, fontDir: URL?) {
+        files = LauncherGuideFiles(root: root, fontDir: fontDir)
+        super.init()
+        web = WKWebView(frame: NSRect(x: 0, y: 0, width: 960, height: 720), configuration: LauncherGuideFiles.configuration(files: files, close: self))
+        web.navigationDelegate = self
+        web.underPageBackgroundColor = NSColor(NX18Palette.background)
+        web.setAccessibilityLabel("Game guide")
+    }
+    // Loads a page of the guide; false for one outside its folder
+    @discardableResult func open(_ page: URL) -> Bool {
+        guard let start = files.url(for: page) else { fputs("[RED] launcher: the guide's index.html is not inside its folder\n", stderr); return false }
+        index = page
+        LauncherGuideFiles.load(web, start: start)
+        return true
+    }
+    // The guide window, made once: the same page again only comes forward; another language's page replaces it
+    static func show(index: URL, root: URL, fontDir: URL?, title: String) {
+        if let c = current, let w = c.window, c.files.root == root.standardizedFileURL.resolvingSymlinksInPath() {
+            if c.index != index { c.open(index) }
+            w.makeKeyAndOrderFront(nil); return
+        }
+        current?.close()
+        let g = MacGuideWindow(root: root, fontDir: fontDir)
+        guard g.open(index) else { g.close(); return }
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        w.title = "\(title): Game guide"; w.isReleasedWhenClosed = false; w.delegate = g
+        w.appearance = NSAppearance(named: .darkAqua)
+        w.backgroundColor = NSColor(NX18Palette.background)
+        w.contentMinSize = NSSize(width: 480, height: 360)
+        w.contentView = g.web
+        w.center()
+        g.window = w; current = g
+        w.makeKeyAndOrderFront(nil)
+    }
+    // Closes the window, if any, and lets the page go (the content controller held this object as its message handler)
+    func close() {
+        web.configuration.userContentController.removeScriptMessageHandler(forName: "nx18Close")
+        web.navigationDelegate = nil
+        web.stopLoading()
+        if let w = window { window = nil; w.delegate = nil; w.orderOut(nil); w.close() }
+        if Self.current === self { Self.current = nil }
+        let done = closed; closed = nil; done?()
+    }
+    func windowWillClose(_ n: Notification) { window?.delegate = nil; window = nil; close() }
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) { close() }   // nx.endApplet, nx.exit, window.close
+    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
+        LauncherGuideFiles.allows(action.request.url) ? .allow : .cancel
     }
 }
 
@@ -628,6 +693,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         // and dmMacLauncher flushes the order-out (AppKit commits it at the end of a pass). Without both, the window stayed on screen, not responding, until the game ended
         w.animationBehavior = .none
         if let sheet = w.attachedSheet { w.endSheet(sheet) }   // About this game, if open
+        MainActor.assumeIsolated { MacGuideWindow.current?.close() }   // the guide window, if open (finish runs on the main thread: the window's buttons and its delegate)
         w.delegate = nil; w.orderOut(nil)
         NSApp.stop(nil)
         NSApp.postEvent(NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0)!, atStart: true)   // run returns at the next event
