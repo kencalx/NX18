@@ -74,6 +74,7 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_haptics
 	$(B)/t_haptics_apple
 	$(B)/t_drawable_count
+	$(B)/t_front_role
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
 	$(B)/t_nro
 	$(B)/t_symbols
@@ -259,6 +260,10 @@ $(B)/t_hid_tsan: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle
 	$(CLANG) -O1 -g -fsanitize=thread -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c
 $(B)/t_haptics: t_haptics.c ../hle_haptics.c ../hle_haptics.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_haptics.c ../hle_haptics.c
+# The foreground-application task role of a Mac host without a window (../front_role.h): the priority a focused app's threads get
+run: $(B)/t_front_role
+$(B)/t_front_role: t_front_role.c ../front_role.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_front_role.c
 # DM_DRAWABLE_COUNT=2|3 on a CAMetalLayer (../front_drawable.h, the iOS and Mac front ends): unset leaves Metal's 3
 run: $(B)/t_drawable_count
 $(B)/t_drawable_count: t_drawable_count.m ../front_drawable.h | $(B)

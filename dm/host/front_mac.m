@@ -1,5 +1,5 @@
 // Mac front end: with DM_WINDOW=1 open a window (CAMetalLayer, for the graphics backend to present frames) + keyboard and controllers → dm_input; the guest runs on a large-stack thread instead and the main thread belongs to AppKit.
-// Without DM_WINDOW: the guest runs directly on the current thread, behaving the same as with no front end (windowless tests use this).
+// Without DM_WINDOW: the guest runs directly on the current thread, behaving the same as with no front end (windowless tests use this), with the task role a focused app has (front_role.h).
 // The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits, and so does a controller's Home button held for 2 s and
 // confirmed with A (home_quit.h); the left mouse button is the touchscreen.
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
@@ -15,6 +15,7 @@
 #import <GameController/GameController.h>
 #include "dm.h"
 #include "front_drawable.h"   // DM_DRAWABLE_COUNT
+#include "front_role.h"   // DM_FOREGROUND_ROLE
 #include "dm_input.h"
 #include "front.h"
 #include "hle.h"
@@ -1512,7 +1513,13 @@ void front_run(void (*guest)(void)) {
     mp = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0, DISPATCH_MEMORYPRESSURE_NORMAL | DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
     dispatch_source_set_event_handler(mp, ^{ unsigned long d = dispatch_source_get_data(mp); dm_gfx_pressure(d & DISPATCH_MEMORYPRESSURE_CRITICAL ? 2 : d & DISPATCH_MEMORYPRESSURE_WARN ? 1 : 0); });
     dispatch_resume(mp);
-    if (!getenv("DM_WINDOW")) { guest(); return; }
+    if (!getenv("DM_WINDOW")) {   // no window: the role a focused app has, which a process started from a shell lacks (front_role.h; audio underruns without it)
+        kern_return_t kr; int fg = front_foreground_role(getenv("DM_FOREGROUND_ROLE"), &kr);
+        if (fg > 0) LOG("front end: no window; the foreground-application task role, as a focused app has (DM_FOREGROUND_ROLE=0 keeps the shell's)");
+        else if (fg < 0) LOG("front end: no window; the foreground-application task role was refused (%d): the game's threads run at the default priority", kr);
+        else LOG("front end: no window; the shell's task role kept (DM_FOREGROUND_ROLE=0)");
+        guest(); return;
+    }
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
