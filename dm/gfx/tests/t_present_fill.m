@@ -52,7 +52,7 @@ int main(void) { @autoreleasepool {
     tex_t t = new_tex(93001);
     hold_encoder();
     uint64_t v0 = g_pup_v;
-    uint64_t tk = mtl_present(&t, 1. / 60, NULL);
+    uint64_t tk = mtl_present(&t, 1. / 60, NULL, NULL);
     CHECK("the present's fill is not left in an open upload batch", g_up_cb == nil);
     CHECK("the flushed batch is noted for the present thread", g_pup_v == v0 + 1);
     mtl_present_wait(tk);
@@ -61,7 +61,7 @@ int main(void) { @autoreleasepool {
 
     // A texture already made: no batch is opened, nothing is noted, and the present does not wait for the encode thread
     v0 = g_pup_v;
-    mtl_present_wait(mtl_present(&t, 1. / 60, NULL));
+    mtl_present_wait(mtl_present(&t, 1. / 60, NULL, NULL));
     CHECK("a present with no upload notes nothing", g_pup_v == v0 && g_up_cb == nil);
 
     // A texture made inside a submission: its fill's batch is flushed ahead of the submission's command buffer and on the queue once the commit drains the encode thread
@@ -72,7 +72,7 @@ int main(void) { @autoreleasepool {
     SETUP("the texture made inside the submission opened an upload batch", g_up_seq != seq0 && g_up_cb != nil);
     SETUP("the submission completes", mtl_wait(mtl_sub_commit(), 2000000000ull));
     v0 = g_pup_v;
-    mtl_present_wait(mtl_present(&t, 1. / 60, NULL));
+    mtl_present_wait(mtl_present(&t, 1. / 60, NULL, NULL));
     CHECK("a present after a submission that drained its only upload notes nothing", g_pup_v == v0);
 
     // The display link drops the present carrying the note: a new texture's present (its fill noted) and then a present of a texture already made (nothing of its own to note),
@@ -84,7 +84,7 @@ int main(void) { @autoreleasepool {
     tex_t w = new_tex(93003);
     hold_encoder();
     v0 = g_pup_v;
-    uint64_t t1 = mtl_present(&w, 1. / 60, NULL), t2 = mtl_present(&t, 1. / 60, NULL);
+    uint64_t t1 = mtl_present(&w, 1. / 60, NULL, NULL), t2 = mtl_present(&t, 1. / 60, NULL, NULL);
     SETUP("the new texture's fill is noted and the second present notes nothing", g_pup_v == v0 + 1 && t2 == t1 + 1);
     CHECK("the present with no upload of its own carries the newest note", g_pq[(t2 - 1) % PQ].up_v == g_pup_v);
     uint64_t drop0 = g_link_dropped;
