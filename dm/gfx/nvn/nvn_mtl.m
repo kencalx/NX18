@@ -14279,6 +14279,10 @@ static uint32_t draw_map_take(NvProg *pr) {
     if (g_pso_lmap) { g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz); g_pso_dirty = 1; }
     return raster_mask;
 }
+// A draw that is encoded again after draw_map_take (draw_ below: binding its arguments ended the pass, or an rt_range pass split) begins its new pass on the same targets, R.rt,
+// which for a deferred-merge replay are the merged pass Q's: it takes back the mapping this draw's pipeline was fetched by, which no branch of draw_ sets again while replaying.
+// Without it the pipeline came with no mapping, and output i went to Q's attachment i instead of the one the mapping names
+static void draw_map_put(const uint8_t *lmap, id<MTLFunction> fsfn, const pso_fz_desc *fz) { if (lmap) { g_pso_lmap = lmap; g_pso_fsfn = fsfn; g_pso_fz = *fz; g_pso_dirty = 1; } }
 // Large calls take one record regardless of the declared maximum. The fast path feeds mdx_run in bounded batches,
 // with a fresh mask table for this range. Coincident records (stride zero) need a different predicate at each index,
 // and the conversion paths need a resolved count. Beyond the mask table's capacity read the count once, so even
@@ -14453,6 +14457,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         g_sm_nwait++; PD("M %llu slice-merged pass: no amplified pipeline yet for vertex %s fragment %s; split here", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-");
         rp_end(); en = rp_begin_ex(mode); if (!en) return;
         cur_ps = pso_get(pr); cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; g_pso_dirty = !cur_ps || cur_pull; }
+    const uint8_t *lmap0 = g_pso_lmap; id<MTLFunction> fsfn0 = g_pso_fsfn; pso_fz_desc fz0 = g_pso_fz;   // for an encode again below (draw_map_put)
     uint32_t raster_mask = draw_map_take(pr);   // the physical mapping's uses below are taken before the merged pipeline state is reset
     __unsafe_unretained id<MTLRenderPipelineState> ps = cur_ps;
     if (!ps) { PD("Z %llu draw skipped: no render pipeline (vertex %s fragment %s)", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-"); return; }
@@ -14527,10 +14532,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_enc != en) {
         static int again; if (again) { RED_ONCE(130, "binding a draw's arguments ended its render pass twice; draw skipped"); return; }
         PD("M %llu binding the draw's arguments ended the render pass (texture upgrade); encoded again", g_stat_pass);
-        again = 1; draw(dw, di); again = 0; return;
+        again = 1; draw_map_put(lmap0, fsfn0, &fz0); draw(dw, di); again = 0; return;
     }
     // Parameter binding captures the actual resources under the registry lock; if the version changed between the eligibility check and the binding, split and retry before any GPU draw.
-    if (g_rt_range_active && (g_pass.reg_gen != g_reg_gen || g_pass.ser_gen != g_ser_gen || g_pass.range_dirty != nvn_dirty_now())) { rp_end(); draw(dw, di); return; }
+    if (g_rt_range_active && (g_pass.reg_gen != g_reg_gen || g_pass.ser_gen != g_ser_gen || g_pass.range_dirty != nvn_dirty_now())) { rp_end(); draw_map_put(lmap0, fsfn0, &fz0); draw(dw, di); return; }
     int prim = dw ? dw->prim : di->prim;
     MTLPrimitiveType mp;
     switch (prim) {
