@@ -8244,10 +8244,12 @@ static uint32_t bz_word(void) {
     }
     return w;
 }
-// The word at fragment buffer DMSH_BLEND_BUFFER, for every draw of a shader that reads it: a copy in the frame arena per value and pass, as at_bind
+// The word at fragment buffer DMSH_BLEND_BUFFER, for every draw of a shader that reads it: a copy in the frame arena per value and pass, as at_bind. The value is g_draw_bz, which
+// draw_map_take works out by the draw's own physical -> logical mapping before draw_ resets g_pso_lmap (a readable-tile merge's second phase writes its outputs to other attachments)
+static uint32_t g_draw_bz;
 static void bz_bind(id<MTL4CommandEncoder> en) {
     static uint64_t gpu, pass; static uint32_t last;
-    uint32_t v = bz_word();
+    uint32_t v = g_draw_bz;
     if (!gpu || pass != g_pass.serial || v != last) {
         __strong id<MTLBuffer> b; size_t off = arena_alloc(16, &b); memset((uint8_t *)b.contents + off, 0, 16); memcpy((uint8_t *)b.contents + off, &v, sizeof v);
         gpu = b.gpuAddress + off; pass = g_pass.serial; last = v;
@@ -14233,6 +14235,14 @@ static uint32_t draw_color_writes(NvProg *pr) {
     }
     return mask;
 }
+// What the draw's encoding needs of a merged pass's mapping, taken before it ends: the physical attachments the pipeline writes (returned) and bz_bind's word (g_draw_bz: bits by
+// logical output, formats by the physical attachment each output goes to). Then g_pso_lmap is reset, and the next draw fetches its pipeline again according to its own situation
+static uint32_t draw_map_take(NvProg *pr) {
+    uint32_t raster_mask = draw_color_writes(pr);
+    g_draw_bz = pr && pr->sh[1] && pr->sh[1]->has_bz && !S.rast_discard ? bz_word() : 0;
+    if (g_pso_lmap) { g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz); g_pso_dirty = 1; }
+    return raster_mask;
+}
 // Large calls take one record regardless of the declared maximum. The fast path feeds mdx_run in bounded batches,
 // with a fresh mask table for this range. Coincident records (stride zero) need a different predicate at each index,
 // and the conversion paths need a resolved count. Beyond the mask table's capacity read the count once, so even
@@ -14407,8 +14417,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         g_sm_nwait++; PD("M %llu slice-merged pass: no amplified pipeline yet for vertex %s fragment %s; split here", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-");
         rp_end(); en = rp_begin_ex(mode); if (!en) return;
         cur_ps = pso_get(pr); cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; g_pso_dirty = !cur_ps || cur_pull; }
-    uint32_t raster_mask = draw_color_writes(pr);   // Capture the physical mapping before resetting the merged pipeline state.
-    if (g_pso_lmap) { g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz); g_pso_dirty = 1; }   // The next draw fetches again according to its own situation
+    uint32_t raster_mask = draw_map_take(pr);   // the physical mapping's uses below are taken before the merged pipeline state is reset
     __unsafe_unretained id<MTLRenderPipelineState> ps = cur_ps;
     if (!ps) { PD("Z %llu draw skipped: no render pipeline (vertex %s fragment %s)", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-"); return; }
     if (ps != g_enc_pso) { enc_r_pso(en, ps); g_enc_pso = ps; }

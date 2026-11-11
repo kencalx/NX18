@@ -1,6 +1,7 @@
 """A non-finite colour under a zero blend weight returned as 0 (dmsh_rewrite.py blend_zero), as NVIDIA's blender takes it with "zero times anything is zero" on: main0 calls the guard
 before every return and takes the host's word as its last parameter, every entry point the build makes afterwards (the shared body's callers, the side library's, main0_f) carries both,
 what dmsh_entry.fs_uint reads of a shader is unchanged, the rule itself, and each text compiled by Metal's compiler when it is there."""
+import ast
 from pathlib import Path
 import re
 import shutil
@@ -12,12 +13,16 @@ import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'ios/tools'))
 import dmsh_abi   # noqa: E402
 import dmsh_entry   # noqa: E402
 import dmsh_fetch   # noqa: E402
 import dmsh_rewrite   # noqa: E402
 import dmsh_side   # noqa: E402
+import ios_metal   # noqa: E402
 blend_zero = dmsh_rewrite.blend_zero
+MAC_METAL = next(ast.literal_eval(n.value) for n in ast.parse((TOOLS / 'dmsh_build.py').read_text()).body   # read without running the build script, as test_dmsh_side.py
+                 if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', None) == 'MAC_METAL')
 
 HEAD = '#include <metal_stdlib>\n#include <simd/simd.h>\n\nusing namespace metal;\n\n'
 # a light shader's shape as spirv-cross writes it: two colour outputs, an early return that writes zeros, a weighted average divided by its weight sum
@@ -164,12 +169,12 @@ class BlendZero(unittest.TestCase):
             u, info = dmsh_side.unit(text)
             f, meta = dmsh_fetch.fold(u, [], om_only_ok=True)
             texts += [(name, text), (name + '_unit', u), (name + '_fold', f)]   # each text a library is compiled from
-        for name, out in texts:
-            with tempfile.TemporaryDirectory() as d:
-                p = Path(d) / f'{name}.metal'; p.write_text(out)
-                r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', '-fwrapv', str(p), '-o', str(Path(d) / f'{name}.air')],
-                                   capture_output=True, text=True)
-                self.assertEqual(r.returncode, 0, name + ': ' + r.stderr[:500])
+        for line in (MAC_METAL, ios_metal.METAL):   # the chain's own compile lines (language, minimum OS, flags), so the test moves with them
+            for name, out in texts:
+                with self.subTest(sdk=line[2], text=name), tempfile.TemporaryDirectory() as d:
+                    p = Path(d) / f'{name}.metal'; p.write_text(out)
+                    r = subprocess.run([*line, str(p), '-o', str(Path(d) / f'{name}.air')], capture_output=True, text=True)
+                    self.assertEqual(r.returncode, 0, name + ': ' + r.stderr[:500])
 
 
 # t_blend_zero.m's shader: NaN, +Inf, -Inf and 2 by column, at alpha 0 (columns 0-3) and alpha 1 (4-7), with the guard

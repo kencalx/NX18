@@ -50,6 +50,8 @@ static void run(NSString *dir, int mode) {   // mode 0: no bindings; 1: an argum
     uint32_t psos = g_pso.n;
     memset(&R, 0, sizeof R); mtl_sub_begin(); uint64_t handle = (uint64_t)commands; mtl_sub_index(&handle, 1); mtl_exec(commands);
     id<MTLBuffer> pixels = [g_dev newBufferWithLength:256 * 48 options:MTLResourceStorageModeShared];
+    if (!pixels) abort();
+    res_add(pixels); res_commit();   // the copy below writes it: resident as everything an encoder touches (t_mtl4.h)
     [blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(8, 48, 1) toBuffer:pixels destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:256 * 48];
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull)); CHECK(!mtl_last_commit_error());
     CHECK(g_pso.n - psos == 2u);   // the function and the reference are data: one pipeline with the test (functions 1-7), one without (ALWAYS)

@@ -56,6 +56,8 @@ static void run(NvProg *pr, prog_t *program, NvShader *ps, int fmt, int bits) { 
     uint32_t psos = g_pso.n;
     memset(&R, 0, sizeof R); mtl_sub_begin(); uint64_t handle = (uint64_t)commands; mtl_sub_index(&handle, 1); mtl_exec(commands);
     id<MTLBuffer> pixels = [g_dev newBufferWithLength:256 * 16 options:MTLResourceStorageModeShared];
+    if (!pixels) abort();
+    res_add(pixels); res_commit();   // the copy below writes it: resident as everything an encoder touches (t_mtl4.h)
     [blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(4, 16, 1) toBuffer:pixels destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:256 * 16];
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull)); CHECK(!mtl_last_commit_error());
     CHECK(g_pso.n - psos == 2u);   // the operation is data: one pipeline with it (every operation but COPY), one without
