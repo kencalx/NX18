@@ -2,10 +2,10 @@
 # Format: see dm/games/README.md
 # LÖVE 11.4 ("Mysterious Mysteries", love-nx) with LuaJIT 2.1.0-beta3 in its interpreter, on SDL, SDK 18.3.2: the game itself is Lua source in the RomFS (main.lua, game.lua, engine/,
 # functions/), its pictures PNG, its sound Ogg Vorbis. It renders with NVIDIA's desktop OpenGL 4.5 through EGL (subsdk0, not loaded): main gets its GL functions from LÖVE's glad
-# loader (eglGetProcAddress) and calls about 150 of them (dm/tools/loader_census.py), which the host's GL layer implements on Metal (dm/gfx/gl/hle_gl.m), on the core profile's paths.
+# loader (eglGetProcAddress) and calls about 150 of them (dm/tools/loader_census.py), which the host's GL layer implements on Metal (dm/gfx/gl/hle_gl.m; removed in release 1, in git at 93c34371), on the core profile's paths.
 # main imports vkGetInstanceProcAddr only for SDL's Vulkan loader, which nothing uses (subsdk1 is NVIDIA's Vulkan driver, not loaded either)
 # The shaders are GLSL that LÖVE puts together at run time, in Lua, from the game's 19 resources/shaders/*.fs files and its own built-in code: no game file holds them, so the NSP
-# script captures them by booting the game on the Mac (gl_capture.tsv lists them) and dm/gfx/tools/gl_shaders.py translates them offline; the host finds each by the hash of its text
+# script captures them by booting the game on the Mac (gl_capture.tsv lists them) and dm/gfx/tools/gl_shaders.py (removed in release 1, in git at 93c34371) translates them offline; the host finds each by the hash of its text
 
 # ---- Identity ----
 title_id	0100CD801CE5E000
@@ -44,5 +44,5 @@ app_pool	0xCD500000
 sys_resource	0x0
 
 # ---- Shader split ----
-# no NVN shaders: the NVN tables stay empty (gl_shaders.py writes the GL library and its table, not the profile)
-shader_note	Balatro has no NVN shaders (its GLSL shaders go through the GL layer)
+# no NVN shaders: the NVN tables stay empty (gl_shaders.py, removed in release 1 and in git at 93c34371, wrote the GL library and its table, not the profile)
+shader_note	Balatro has no NVN shaders (its GLSL shaders went through the GL layer, removed in release 1, in git at 93c34371)

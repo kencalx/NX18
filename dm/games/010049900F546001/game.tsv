@@ -1,6 +1,6 @@
 # Super Mario 64 in Super Mario 3D All-Stars (program 1 of application 010049900F546000; update 1.1.4 = v393216), SDK 10.8.1.
 # Nintendo's N64 layer: the game's MIPS code statically recompiled to arm64 in an NRO (rom/Stardust_JP/05_UNSMJ3.002.nro, loaded with nn::ro), the rest through a JIT plugin
-# (nro/EmuSystemJITPlugin.nro, run by the host's nn::jit, hle_jit.c). Renders with Vulkan (dm/gfx/vk/hle_vk.m). Packed with the launcher, as one game
+# (nro/EmuSystemJITPlugin.nro, run by the host's nn::jit, hle_jit.c). Renders with Vulkan (dm/gfx/vk/hle_vk.m; removed in release 1, in git at 93c34371). Packed with the launcher, as one game
 
 # ---- Identity ----
 title_id	010049900F546001

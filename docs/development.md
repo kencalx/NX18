@@ -168,8 +168,17 @@ project supports: Xcode 27.3 on GitHub's `xcode-27` image, named by path in
 `DEVELOPER_DIR` so a new default Xcode on the image does not change CI. The pin
 moved from 27.2 with `dmsh_chain.lock`'s Metal compiler (32023.925), after the
 NieR:Automata and Ocarina of Time shader regression pass, which ran locally on
-the Xcode 27.3 beta; no CI run has used it yet, and whether the image carries
-Xcode 27.3 at that path has not been checked. The
+the Xcode 27.3 beta (build 27C5020n; its Metal Toolchain, 27C5020k, is the
+lock's 32023.925.6). The image does not carry Xcode 27.3 yet: its newest release
+(`xcode-27-arm64/20261104.0337`, checked 2026-11-11) lists Xcode 27.2 (27B52)
+only, so every macOS job of `tests.yml` and `lint-c.yml` stops at its first
+`xcrun` until the image ships 27.3 at that path. Pinning 27.2 again is no way
+round: the iOS deployment target 27.3 is above its SDK, and its Metal compiler
+(32023.922) fails the build check. Until then green CI is not a release gate;
+the standard gates run locally on the Xcode 27.3 beta. The macOS jobs become
+one when the image carries Xcode 27.3 (or on a self-hosted Apple-silicon runner
+with it), after a check that its Metal toolchain reports the lock's
+32023.925.6: a released 27.3 may ship another build. The
 build check first compares the image's Metal compiler with `dmsh_chain.lock`
 (`own_compilers.py --check-metal`), and `dm/tools/tests/test_ci_toolchain.py`
 keeps the workflows, the image, README, this page and the NSP script naming

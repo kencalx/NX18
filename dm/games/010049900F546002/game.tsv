@@ -1,6 +1,6 @@
 # Super Mario Sunshine in Super Mario 3D All-Stars (program 2 of application 010049900F546000; update 1.1.4 = v393216), SDK 9.5.1.
 # NERD's Hagi layer: the GameCube's PowerPC code statically recompiled to arm64 in an LZ4-packed NRO (data/gekko/MarioSunshine/nx/MarioSunshine.nrolz, collected by nro_collect.py,
-# loaded with nn::ro). Renders with Vulkan (dm/gfx/vk/hle_vk.m), shaders captured at run time on the Mac. Packed with the launcher, as one game
+# loaded with nn::ro). Renders with Vulkan (dm/gfx/vk/hle_vk.m; removed in release 1, in git at 93c34371), shaders captured at run time on the Mac. Packed with the launcher, as one game
 
 # ---- Identity ----
 title_id	010049900F546002

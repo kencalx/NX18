@@ -21,7 +21,7 @@ package	v589824
 shader_versions	v589824
 
 # ---- Graphics ----
-# main imports Vulkan, not NVN: the host's Vulkan layer (dm/gfx/vk/hle_vk.m); dm/gfx/tools/vk_shaders.py translates the SPIR-V shaders into <shader dir>/vk/
+# main imports Vulkan, not NVN: the host's Vulkan layer (dm/gfx/vk/hle_vk.m; removed in release 1, in git at 93c34371); dm/gfx/tools/vk_shaders.py (removed in release 1, in git at 93c34371) translates the SPIR-V shaders into <shader dir>/vk/
 
 # ---- Files ----
 # subsdk0 / subsdk1 (Vulkan loader, NVIDIA driver) are replaced by the host's Vulkan layer and not loaded
@@ -37,4 +37,4 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 
 # ---- Shader split ----
-shader_note	Hades has no NVN shaders (its SPIR-V shaders go through the Vulkan layer)
+shader_note	Hades has no NVN shaders (its SPIR-V shaders went through the Vulkan layer, removed in release 1, in git at 93c34371)

@@ -24,8 +24,11 @@ env:
   # named by path so the image's default moving to another Xcode does not move CI. The build check checks the Metal compiler against the lock first.
   # dm/tools/tests/test_ci_toolchain.py keeps this version, the image and README's in step
   # The pin moved from 27.2 with the lock, README, own_compilers.py and the NSP script, after the NieR:Automata and Ocarina of Time shader regression pass, which ran locally
-  # on the Xcode 27.3 beta (Xcode 27.2's compiler, 32023.922, would now fail the build check). No CI run has used this pin yet, and whether the image carries Xcode 27.3 at this
-  # path was not checked: if it does not, every macOS job stops at its first xcrun, and this line and lint-c.yml's are the ones to change
+  # on the Xcode 27.3 beta (build 27C5020n; Metal Toolchain 27C5020k, 32023.925.6, the lock's compiler). GitHub's xcode-27 image has no Xcode 27.3: its newest release
+  # (xcode-27-arm64/20261104.0337, checked 2026-11-11) lists Xcode 27.2 (27B52) only, so every macOS job here and in lint-c.yml stops at its first xcrun until the image ships
+  # 27.3 at this path. Pinning 27.2 again is no way round: the iOS deployment target 27.3 is above its SDK, and its Metal compiler (32023.922) fails the build check. Until then
+  # green CI is no release gate (docs/development.md): the macOS jobs need the image's 27.3 or a self-hosted Apple-silicon runner with it, and then a check that its Metal
+  # toolchain reports the lock's 32023.925.6 (a released 27.3 may ship another build). This line and lint-c.yml's change together
   DEVELOPER_DIR: /Applications/Xcode_27.3.app/Contents/Developer
   GAME: 010015100B514000   # Super Mario Bros. Wonder: the profile the host and gfx tests are built for (any profile does; the tests are about code, not the game)
 

@@ -44,7 +44,7 @@ Community projects build on nxnative with tools to turn your games into apps for
 - **iPhone:** A17 Pro chip or later, with iOS 26 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iOS 27.3 or later (below).
 - **iPad:** M1 chip or later, with iPadOS 26 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iPadOS 27.3 or later (below).
 
-**This fork (NX 18)** builds its iOS app for one chip, the iPhone 18 Pro Max's A20 Pro, on iOS 27.3 (`dm/ios/project.yml`: deployment target 27.3, `-mcpu=apple-a20`; the app still declares the iPad family), with Xcode 27.3, whose Metal compiler (32023.925) is the one `dm/gfx/tools/dmsh_chain.lock` records, so `--allow-other-metal` is not needed; its game shaders are MSL 4.1 on both platforms (`-std=metal4.1`). An IPA from this tree needs iOS 27.3 or later and does not run on the older devices or systems listed above, which are upstream's.
+**This fork (NX 18)** builds its iOS app for one chip, the iPhone 18 Pro Max's A20 Pro, on iOS 27.3 (`dm/ios/project.yml`: deployment target 27.3, `-mcpu=apple-a20`; the app still declares the iPad family), with Xcode 27.3, whose Metal compiler (32023.925) is the one `dm/gfx/tools/dmsh_chain.lock` records, so `--allow-other-metal` is not needed. The lock's exact compiler, 32023.925.6, is the Xcode 27.3 beta's (build 27C5020n, Metal Toolchain 27C5020k), the one the shaders were tested with; a released Xcode 27.3 whose Metal compiler reports another version is refused by the build check until the lock is raised, or needs `--allow-other-metal`; its game shaders are MSL 4.1 on both platforms (`-std=metal4.1`). An IPA from this tree needs iOS 27.3 or later and does not run on the older devices or systems listed above, which are upstream's.
 
 The games' textures are BC-compressed, which older iPhones cannot read. Switch 2 builds are tested on the Mac; check each game's note for device-specific validation.
 
@@ -64,7 +64,7 @@ The shaders are built with Xcode 27.3's Metal compiler. Select it before step 1:
 
 ```
 xcodebuild -downloadComponent MetalToolchain   # required: without it the build stops with an error
-git clone https://github.com/seedds/nxnative.git && cd nxnative
+git clone https://github.com/kencalx/NX18.git && cd NX18   # this fork; upstream's nxnative tree has other requirements (its own Xcode and Metal compiler lock)
 brew install xcodegen zstd
 python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
 ```

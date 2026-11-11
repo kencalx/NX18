@@ -43,7 +43,7 @@ General host changes first needed here; each applies to every game on the same S
 - **SDK aborts with a message** (`nn::diag::detail::VAbortImpl`) log their format before the abort, which is how the `system_error` above was named: [`clock_gettime` is `nn::time`'s steady clock (SDK 22)](../../../docs/reference/services.md#clock_gettime-is-nntimes-steady-clock-sdk-22).
 - **Resolved: no audio**, `OpenAudioOut` without a release event (SDK 22): [`OpenAudioOut` without a release event (SDK 22)](../../../docs/reference/audio.md#openaudioout-without-a-release-event-sdk-22).
 - **Resolved: a crash at `pc 0` in `nv::GetGraphicsMemoryInfo`** on a title with no NVN device: [`nv::GetGraphicsMemoryInfo` with no graphics device](../../../docs/reference/memory.md#nvgetgraphicsmemoryinfo-with-no-graphics-device).
-- **The GL layer:** client-memory vertex arrays, `glFlush`, and the bring-up switches `DM_GL_DRAWLOG`, `DM_GL_FBLOG` and `DM_GL_MISSES` (see [env_switches.tsv](../../../docs/env_switches.tsv)); the translator's ES 1.00 dialect and struct uniforms (links above).
+- **The GL layer** (removed in release 1, in git at `93c34371`): client-memory vertex arrays, `glFlush`, and the bring-up switches `DM_GL_DRAWLOG`, `DM_GL_FBLOG` and `DM_GL_MISSES` (removed with it: their rows are in `docs/env_switches.tsv` at `93c34371`, `git show 93c34371:docs/env_switches.tsv`); the translator's ES 1.00 dialect and struct uniforms (links above).
 
 ## Open
 
