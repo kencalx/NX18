@@ -6,7 +6,8 @@
 // repeat, A is keyCode 32 (as the pause menu reads it) and clicks the focused link or button when the page does not take it. B goes back, or ends the page from its first one
 // (exit reason 1), unless the page took B over with nx.footer. The page ends when it loads a URL under its callback URL (exit reason 3); other URLs outside the document are refused.
 // Input: hle_hid.c's state while the page is shown (dm_input_peek: the keyboard, every controller, DM_CTL), sent to the page 60 times a second; buttons held when it appears count
-// only once released. A click or touch on the page focuses what it lands on and presses A there. The page is transparent where it draws nothing, over the game's picture; its
+// only once released. A click or touch on the page focuses what it lands on and presses A there; a tap whose touches the page cancelled (as guides do under window.nx) is
+// clicked, and the browser's NXFirstPaintEndAfterLoad follows each load. The page is transparent where it draws nothing, over the game's picture; its
 // 1280x720 is fitted to the game's 16:9 picture. Its sounds follow the host's audio (DM_AUDIO; silent on the Mac by default)
 #include <TargetConditionals.h>
 #if TARGET_OS_IPHONE
@@ -171,6 +172,32 @@ static NSString *const SHIM = @R"JS(
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
+  // The browser's first paint after the load (guides wait for it before loading their pictures and setting up), once the page's own load handlers have run and it painted
+  // (or 100 ms went by: a page loading hidden paints no frames)
+  window.addEventListener('load', function () {
+    var sent = false, paint = function () { if (!sent) { sent = true; window.dispatchEvent(new Event('NXFirstPaintEndAfterLoad')); } };
+    requestAnimationFrame(function () { setTimeout(paint, 0); });
+    setTimeout(paint, 100);
+  });
+  // A tap the page cancelled (guides cancel every touch when window.nx exists, and WebKit then sends no click): a one-finger tap that did not move and no click followed clicks
+  // what it landed on, as the launcher's guide viewer does (dm/ios/Sources/LauncherGuideFiles.swift)
+  var tap = null;
+  window.addEventListener('touchstart', function (e) { var t = e.touches[0]; tap = e.touches.length === 1 && t ? {x: t.clientX, y: t.clientY, start: e, moved: false, clicked: false} : null; }, true);
+  window.addEventListener('touchmove', function (e) { var t = e.touches[0]; if (tap && t && Math.abs(t.clientX - tap.x) + Math.abs(t.clientY - tap.y) > 12) tap.moved = true; }, true);
+  window.addEventListener('touchcancel', function () { tap = null; }, true);
+  window.addEventListener('click', function (e) { if (tap && e.isTrusted) tap.clicked = true; }, true);
+  window.addEventListener('touchend', function (e) {
+    var s = tap;
+    if (!s || s.moved || e.touches.length) { tap = null; return; }
+    setTimeout(function () {
+      if (tap === s) tap = null;
+      if (s.clicked || !(s.start.defaultPrevented || e.defaultPrevented)) return;
+      var el = document.elementFromPoint(s.x, s.y), c = el && ((el.closest && (clickable(el) || el.closest('[tabindex]'))) || el);
+      if (!c) return;
+      if (c.focus) { try { c.focus({preventScroll: true}); } catch (x) {} }
+      if (c.click) c.click();
+    }, 40);
+  }, true);
   // A click or a touch: what it lands on takes the focus and A is pressed there (pages made for the controller act on A alone)
   document.addEventListener('click', function (e) {
     var el = clickable(e.target) || (e.target && e.target.closest && e.target.closest('[tabindex]'));

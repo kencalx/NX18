@@ -439,23 +439,34 @@ private struct PlayLabel: LabelStyle {
 // Game guide: the game's own pages in a window of the app's own, in a WKWebView configured as the iPhone's guide viewer is (LauncherGuideFiles.swift: the guide's .htdocs served
 // through nx18guide://, the window.nx shim, a Content-Security-Policy and a block list that keep the pages off the network, links outside the guide refused). The default browser,
 // which the window used before, opens the pages from file: URLs: there their scripts' XMLHttpRequest and fetch of the guide's other files are refused, and window.nx, the Switch
-// applet's API they call, does not exist. nx.endApplet and window.close close the window; Game guide again brings it forward. Play and Quit close it with the settings window
+// applet's API they call, does not exist. The page is laid out at the console's 1280x720 and zoomed to fit the window, whole (MacGuideBox; the window keeps 16:9 as it is resized).
+// The title bar has Back (the page's own Back when it assigned one, else the previous page) and the page's L / R page turning when it assigned them; a two-finger swipe goes back
+// through the pages too. nx.endApplet, window.close and the console's end URL (http://localhost/) close the window; Game guide again brings it forward. Play and Quit close it with
+// the settings window
 @MainActor final class MacGuideWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNavigationDelegate {
     private(set) static var current: MacGuideWindow?
     let files: LauncherGuideFiles
     private(set) var web: WKWebView!
+    let box = MacGuideBox()
     private(set) var window: NSWindow?
     private(set) var index: URL?
+    private(set) var footer: Set<String> = []   // the page's nx.footer buttons
+    private var buttons: [String: NSButton] = [:]   // the title bar's Back, L and R
+    private var history: NSKeyValueObservation?
     var closed: (() -> Void)?   // after the page or the window closed it
 
     // The guide's web view, not yet in a window (show puts it in one; dm/ios/tests/mac_guide_check.swift loads pages into it directly)
     init(root: URL, fontDir: URL?) {
         files = LauncherGuideFiles(root: root, fontDir: fontDir)
         super.init()
-        web = WKWebView(frame: NSRect(x: 0, y: 0, width: 960, height: 720), configuration: LauncherGuideFiles.configuration(files: files, close: self))
+        web = WKWebView(frame: NSRect(origin: .zero, size: LauncherGuideFiles.pageSize), configuration: LauncherGuideFiles.configuration(files: files, handler: self))
         web.navigationDelegate = self
-        web.underPageBackgroundColor = NSColor(NX18Palette.background)
+        web.allowsBackForwardNavigationGestures = true
+        web.underPageBackgroundColor = .black
         web.setAccessibilityLabel("Game guide")
+        box.frame = NSRect(x: 0, y: 0, width: 1120, height: 630)
+        box.web = web
+        history = web.observe(\.canGoBack, options: [.new]) { [weak self] _, _ in MainActor.assumeIsolated { self?.refresh() } }
     }
     // Loads a page of the guide; false for one outside its folder
     @discardableResult func open(_ page: URL) -> Bool {
@@ -473,30 +484,101 @@ private struct PlayLabel: LabelStyle {
         current?.close()
         let g = MacGuideWindow(root: root, fontDir: fontDir)
         guard g.open(index) else { g.close(); return }
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 630), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "\(title): Game guide"; w.isReleasedWhenClosed = false; w.delegate = g
         w.appearance = NSAppearance(named: .darkAqua)
         w.backgroundColor = NSColor(NX18Palette.background)
-        w.contentMinSize = NSSize(width: 480, height: 360)
-        w.contentView = g.web
+        w.contentMinSize = NSSize(width: 640, height: 360)
+        w.contentAspectRatio = LauncherGuideFiles.pageSize   // the page fills the window; full screen letterboxes it (MacGuideBox)
+        w.contentView = g.box
+        w.addTitlebarAccessoryViewController(g.titleButtons())
         w.center()
         g.window = w; current = g
+        g.refresh()
         w.makeKeyAndOrderFront(nil)
+        w.makeFirstResponder(g.web)   // the arrow keys reach the page's own key handlers
+    }
+    // Back, L and R in the title bar, at its trailing end
+    private func titleButtons() -> NSTitlebarAccessoryViewController {
+        func button(_ symbol: String, _ label: String, _ action: Selector) -> NSButton {
+            let b = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: label) ?? NSImage(), target: self, action: action)
+            b.bezelStyle = .texturedRounded; b.toolTip = label; b.setAccessibilityLabel(label)
+            return b
+        }
+        buttons = ["B": button("chevron.backward", "Back", #selector(pressBack)), "L": button("chevron.left", "Previous page (L)", #selector(pressL)),
+                   "R": button("chevron.right", "Next page (R)", #selector(pressR))]
+        buttons["B"]?.keyEquivalent = "["; buttons["B"]?.keyEquivalentModifierMask = .command
+        let stack = NSStackView(views: [buttons["B"], buttons["L"], buttons["R"]].compactMap { $0 })
+        stack.spacing = 6; stack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 8)
+        let c = NSTitlebarAccessoryViewController()
+        c.view = stack; c.layoutAttribute = .trailing
+        return c
+    }
+    @objc private func pressBack() { press("B") }
+    @objc private func pressL() { press("L") }
+    @objc private func pressR() { press("R") }
+    // A footer button on the page: its own when it assigned it; B left to the window goes to the previous page, else closes the window
+    func press(_ button: String) {
+        web.evaluateJavaScript(LauncherGuideFiles.footerScript(button)) { [weak self] r, _ in
+            MainActor.assumeIsolated {
+                guard let self, button == "B", (r as? String) ?? "back" == "back" else { return }
+                if self.web.canGoBack { self.web.goBack() } else { self.close() }
+            }
+        }
+    }
+    private func refresh() {
+        buttons["B"]?.isHidden = !(web.canGoBack || footer.contains("B"))
+        buttons["L"]?.isHidden = !(footer.contains("L") || footer.contains("R")); buttons["L"]?.isEnabled = footer.contains("L")
+        buttons["R"]?.isHidden = !(footer.contains("L") || footer.contains("R")); buttons["R"]?.isEnabled = footer.contains("R")
     }
     // Closes the window, if any, and lets the page go (the content controller held this object as its message handler)
     func close() {
-        web.configuration.userContentController.removeScriptMessageHandler(forName: "nx18Close")
+        LauncherGuideFiles.detach(web)
         web.navigationDelegate = nil
         web.stopLoading()
+        history = nil
         if let w = window { window = nil; w.delegate = nil; w.orderOut(nil); w.close() }
         if Self.current === self { Self.current = nil }
         let done = closed; closed = nil; done?()
     }
     func windowWillClose(_ n: Notification) { window?.delegate = nil; window = nil; close() }
-    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) { close() }   // nx.endApplet, nx.exit, window.close
-    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
-        LauncherGuideFiles.allows(action.request.url) ? .allow : .cancel
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "nx18State" {
+            if message.frameInfo.isMainFrame { footer = LauncherGuideFiles.footer(of: message.body); refresh() }
+            return
+        }
+        close()   // nx.endApplet, nx.exit, window.close
     }
+    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
+        switch LauncherGuideFiles.navigation(action.request.url) {
+        case .allow: return .allow
+        case .refuse: return .cancel
+        case .end: close(); return .cancel
+        }
+    }
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { footer = []; refresh() }   // a new page: it assigns its own
+}
+
+// The guide window's content: the page at the console's 1280x720 zoomed to fit, whole and centred (the rest in the window's background), as the in-game viewer does on the Mac
+// (dm/host/web_apple.m -place)
+final class MacGuideBox: NSView {
+    var web: WKWebView? {
+        didSet { oldValue?.removeFromSuperview(); if let web { addSubview(web); place() } }
+    }
+    override var isFlipped: Bool { true }
+    // The page's rect in the box
+    var pageFrame: CGRect { LauncherGuideFiles.fit(in: bounds) }
+    func place() {
+        guard let web else { return }
+        let r = pageFrame
+        guard r.width >= 1 else { return }
+        // Whole points (WebKit takes the viewport from the frame's whole points): the width's zoom, and the height rounded up so the viewport is not a line short of 720
+        let w = r.width.rounded(.down), zoom = w / LauncherGuideFiles.pageSize.width, h = (LauncherGuideFiles.pageSize.height * zoom).rounded(.up)
+        web.frame = NSRect(x: ((bounds.width - w) / 2).rounded(.down), y: ((bounds.height - h) / 2).rounded(.down), width: w, height: h)
+        web.pageZoom = zoom   // the page's viewport stays 1280x720
+    }
+    override func resizeSubviews(withOldSize s: NSSize) { super.resizeSubviews(withOldSize: s); place() }
+    override func layout() { super.layout(); place() }
 }
 
 // A capsule button on the banner: the coral Play pill, or a quiet one (white on a translucent dark fill) for the guide and About

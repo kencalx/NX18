@@ -1,7 +1,11 @@
 // The settings screen's viewers (Launcher.swift): the game guide, full screen, which shows the game's own guide (its offline HTML pages in a WKWebView, read from the app's files
 // only) and the player's manual (manual.pdf in a PDFView), the guide first, with a switch between them when the app has both; and the About this game sheet (about.json's text
-// under the art). Both close with their close button or the controller's B (LauncherController.swift). The guide's pages were written for the Switch's web applet: a script at
-// document start gives them a harmless window.nx (every call does nothing, nothing throws), and the calls that end the applet (nx.endApplet, window.close) close the viewer.
+// under the art). Both close with their close button or the controller's B (LauncherController.swift) when nothing is left to go back to.
+// The guide's pages were written for the Switch's web applet at 1280x720: they are laid out at that size and scaled to fit under the header, whole (LauncherGuideBox), and a script
+// at document start gives them window.nx and what the console's browser does for them (LauncherGuideFiles.swift shim). The header's Back, a swipe from the left edge and the
+// controller's B go back: the page's own Back when it assigned one (nx.footer B), else the previous page, else the viewer closes. The page's L / R page turning shows as two buttons
+// in the header and is the controller's L / R; the D-pad and stick are its arrow keys and A presses; ZL / ZR switch between the guide and the manual. The calls that end the applet
+// (nx.endApplet, window.close) and the console's end URL (http://localhost/) close the viewer.
 // The pages are served from the guide's .htdocs through a scheme of their own, with the shim, the Content-Security-Policy and the network block list: LauncherGuideFiles.swift,
 // which the Mac app's guide window shares (dm/mac/Launcher.swift MacGuideWindow)
 import PDFKit
@@ -15,22 +19,72 @@ enum LauncherGuidePage: String, Identifiable, CaseIterable, Sendable {
     var title: String { self == .guide ? "Game guide" : "Manual" }
 }
 
+// The guide page shown: the footer buttons it assigned and whether there is a page to go back to, and what the header, the edge swipe and the controller do to it
+@MainActor final class LauncherGuidePageModel: ObservableObject {
+    @Published var footer: Set<String> = []   // the page's nx.footer buttons ("B", "L", "R", ...)
+    @Published var canGoBack = false           // the web view has a previous page
+    weak var web: WKWebView?
+    var close: () -> Void = {}
+
+    var hasBack: Bool { canGoBack || footer.contains("B") }
+    // A footer button on the page: the page's own when it assigned it; B left to the viewer goes to the previous page, else closes the viewer
+    func press(_ button: String) {
+        guard let web else { if button == "B" { close() }; return }
+        web.evaluateJavaScript(LauncherGuideFiles.footerScript(button)) { [weak self, weak web] r, _ in
+            MainActor.assumeIsolated {
+                guard let self, button == "B", (r as? String) ?? "back" == "back" else { return }
+                if let web, web.canGoBack { web.goBack() } else { self.close() }
+            }
+        }
+    }
+    func back() { press("B") }
+    // An arrow key (37 left, 38 up, 39 right, 40 down) and A, as the console's controller gives them to the page
+    func key(_ code: Int) { web?.evaluateJavaScript("window.__nx18 && __nx18.key && __nx18.key(\(code))", completionHandler: nil) }
+    func pressA() { web?.evaluateJavaScript("window.__nx18 && __nx18.a && __nx18.a()", completionHandler: nil) }
+
+    // A controller event while the guide's page is shown (Launcher.swift handle): every button goes to the page
+    func handle(_ e: LauncherPadEvent) -> Bool {
+        switch e {
+        case .left: key(37)
+        case .up: key(38)
+        case .right: key(39)
+        case .down: key(40)
+        case .a: pressA()
+        case .b: back()
+        case .l: press("L")
+        case .r: press("R")
+        case .x: press("X")
+        case .y: press("Y")
+        case .plus: press("Plus")
+        case .minus: press("Minus")
+        case .zl, .zr: return false
+        }
+        return true
+    }
+}
+
 struct LauncherGuideSheet: View {
     let content: LauncherContent
     let scroller: LauncherScroller
     let close: () -> Void
     @State private var page: LauncherGuidePage
+    @StateObject private var model = LauncherGuidePageModel()
 
     init(content: LauncherContent, scroller: LauncherScroller, close: @escaping () -> Void) {
         self.content = content; self.scroller = scroller; self.close = close
         _page = State(initialValue: content.guide != nil ? .guide : .manual)
     }
     private var pages: [LauncherGuidePage] { LauncherGuidePage.allCases.filter { $0 == .guide ? content.guide != nil : content.manual != nil } }
+    private var onGuide: Bool { page == .guide && content.guide != nil }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                NX18Mark(height: 16).accessibilityHidden(true)
+                if onGuide && model.hasBack {
+                    circleButton("chevron.backward", label: "Back") { model.back() }
+                } else {
+                    NX18Mark(height: 16).accessibilityHidden(true)
+                }
                 if pages.count > 1 {
                     Picker("Document", selection: $page) {
                         ForEach(pages) { Text($0.title).tag($0) }
@@ -38,23 +92,31 @@ struct LauncherGuideSheet: View {
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 280)
                 } else {
-                    Text(page.title).font(.headline).foregroundStyle(.white)
+                    Text(page.title).font(.headline).foregroundStyle(.white).lineLimit(1)
                 }
-                Spacer()
-                Button(action: close) {
-                    Image(systemName: "xmark").font(.body.weight(.semibold)).foregroundStyle(.white)
-                        .frame(width: 36, height: 36).background(Circle().fill(NX18Palette.row))
+                Spacer(minLength: 0)
+                if onGuide && (model.footer.contains("L") || model.footer.contains("R")) {
+                    HStack(spacing: 8) {
+                        turnButton("L", icon: "chevron.left", label: "Previous page", on: model.footer.contains("L"))
+                        turnButton("R", icon: "chevron.right", label: "Next page", on: model.footer.contains("R"))
+                    }
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Close")
-                .keyboardShortcut(.cancelAction)
+                circleButton("xmark", label: "Close", action: close)
+                    .keyboardShortcut(.cancelAction)
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
             NX18Rails(axis: .horizontal, thickness: 2)
             Group {
                 switch page {
                 case .guide:
-                    if let g = content.guide, let root = content.guideRoot { LauncherGuideWebView(index: g, root: root, scroller: scroller, close: close) }
+                    if let g = content.guide, let root = content.guideRoot {
+                        // The page is fitted into the safe area's width; the box reaches the screen's edges, so the swipe back starts at the left edge
+                        GeometryReader { geo in
+                            LauncherGuideWebView(index: g, root: root, model: model, close: close,
+                                                 insets: UIEdgeInsets(top: 0, left: geo.safeAreaInsets.leading, bottom: 0, right: geo.safeAreaInsets.trailing))
+                        }
+                        .ignoresSafeArea(edges: [.horizontal, .bottom])
+                    }
                 case .manual:
                     if let m = content.manual { LauncherManualView(url: m, scroller: scroller) }
                 }
@@ -64,57 +126,172 @@ struct LauncherGuideSheet: View {
         .background(NX18Palette.background.ignoresSafeArea())
         .tint(NX18Palette.cyan)
         .onAppear {
+            model.close = close
             scroller.page = { step in
                 let p = pages
                 guard p.count > 1, let i = p.firstIndex(of: page) else { return }
                 page = p[(i + step + p.count) % p.count]
             }
+            // The controller: ZL / ZR switch documents; on the guide every other button is the page's (the manual keeps Launcher.swift's: B closes, up / down scroll, L / R switch)
+            scroller.pad = { e in
+                if e == .zl || e == .zr { scroller.page?(e == .zr ? 1 : -1); return true }
+                return onGuide ? model.handle(e) : false
+            }
         }
-        .onDisappear { scroller.page = nil; scroller.scroll = nil }
+        .onDisappear { scroller.page = nil; scroller.scroll = nil; scroller.pad = nil }
+    }
+
+    private func circleButton(_ icon: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.body.weight(.semibold)).foregroundStyle(.white)
+                .frame(width: 36, height: 36).background(Circle().fill(NX18Palette.row))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+    // The page's L or R (its page turning), drawn as the console's shoulder buttons
+    private func turnButton(_ button: String, icon: String, label: String, on: Bool) -> some View {
+        Button { model.press(button) } label: {
+            HStack(spacing: 4) {
+                if button == "L" { Image(systemName: icon) }
+                Text(button)
+                if button == "R" { Image(systemName: icon) }
+            }
+            .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+            .padding(.horizontal, 12).frame(height: 36).background(Capsule().fill(NX18Palette.row))
+        }
+        .buttonStyle(.plain)
+        .disabled(!on).opacity(on ? 1 : 0.35)
+        .accessibilityLabel(label)
     }
 }
 
-// The guide's pages: the index.html under its .htdocs folder, served by LauncherGuideFiles, a shim for the Switch's applet API, links outside the guide refused
+// The page's area: the web view laid out at the console's 1280x720 and scaled to fit the area inside insets, whole and centred (the rest is the letterbox, in the viewer's
+// background), as the in-game viewer does (dm/host/web_apple.m -place). The page's own scrolling stays for a page taller than the screen, without bounce. A swipe from the
+// left edge goes back
+final class LauncherGuideBox: UIView, UIGestureRecognizerDelegate {
+    let web: WKWebView
+    var insets: UIEdgeInsets = .zero { didSet { if insets != oldValue { setNeedsLayout() } } }
+    var back: (() -> Void)?
+    private let cue = UIImageView(image: UIImage(systemName: "chevron.backward.circle.fill"))
+
+    init(web: WKWebView) {
+        self.web = web
+        super.init(frame: .zero)
+        clipsToBounds = true
+        let sv = web.scrollView
+        sv.bounces = false; sv.alwaysBounceVertical = false; sv.alwaysBounceHorizontal = false
+        sv.contentInsetAdjustmentBehavior = .never
+        sv.minimumZoomScale = 1; sv.maximumZoomScale = 1
+        addSubview(web)
+        cue.tintColor = .white; cue.alpha = 0; cue.frame = CGRect(x: 0, y: 0, width: 44, height: 44); cue.contentMode = .scaleAspectFit
+        addSubview(cue)
+        let edge = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(swiped(_:)))
+        edge.edges = .left
+        edge.delegate = self
+        addGestureRecognizer(edge)
+    }
+    required init?(coder: NSCoder) { nil }
+
+    // The page's rect in the box
+    var pageFrame: CGRect { LauncherGuideFiles.fit(in: bounds.inset(by: insets)) }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let r = pageFrame
+        guard r.width > 0 else { return }
+        let size = LauncherGuideFiles.pageSize
+        web.transform = .identity
+        web.bounds = CGRect(origin: .zero, size: size)   // laid out at the console's size, so the page's viewport is 1280x720
+        web.center = CGPoint(x: r.midX, y: r.midY)
+        web.transform = CGAffineTransform(scaleX: r.width / size.width, y: r.height / size.height)
+    }
+
+    @objc private func swiped(_ g: UIScreenEdgePanGestureRecognizer) {
+        let x = g.translation(in: self).x, go = x > 72
+        switch g.state {
+        case .began, .changed:
+            cue.center = CGPoint(x: Swift.min(x, 72) - 8 + insets.left, y: bounds.midY)
+            cue.alpha = Swift.min(1, x / 72) * (go ? 1 : 0.6)
+        case .ended:
+            fade()
+            if go { back?() }
+        default: fade()
+        }
+    }
+    private func fade() { UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.2) { self.cue.alpha = 0 } }
+    // The swipe and the page's touches together: the page sees its touches, the swipe still goes back
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+}
+
+// The guide's pages: the index.html under its .htdocs folder, served by LauncherGuideFiles, the shim for the Switch's applet API, links outside the guide refused, the end URL closing
 struct LauncherGuideWebView: UIViewRepresentable {
     let index: URL
     let root: URL
-    let scroller: LauncherScroller
+    let model: LauncherGuidePageModel
     let close: () -> Void
+    var insets: UIEdgeInsets = .zero
 
-    func makeCoordinator() -> Coordinator { Coordinator(root: root, close: close) }
+    func makeCoordinator() -> Coordinator { Coordinator(root: root, model: model, close: close) }
 
-    func makeUIView(context: Context) -> WKWebView {
-        let web = WKWebView(frame: .zero, configuration: LauncherGuideFiles.configuration(files: context.coordinator.files, close: context.coordinator))
+    func makeUIView(context: Context) -> LauncherGuideBox {
+        let web = WKWebView(frame: CGRect(origin: .zero, size: LauncherGuideFiles.pageSize), configuration: LauncherGuideFiles.configuration(files: context.coordinator.files, handler: context.coordinator))
         web.isOpaque = false
-        web.backgroundColor = UIColor(NX18Palette.background)
-        web.scrollView.backgroundColor = UIColor(NX18Palette.background)
+        web.backgroundColor = .black
+        web.scrollView.backgroundColor = .black
         web.navigationDelegate = context.coordinator
         web.accessibilityLabel = "Game guide"
-        let sv = web.scrollView
-        scroller.scroll = { [weak sv] dy in sv?.nudge(by: dy) }
+        let box = LauncherGuideBox(web: web)
+        box.backgroundColor = UIColor(NX18Palette.background)
+        box.insets = insets
+        box.back = { [weak model] in model?.back() }
+        model.web = web
+        context.coordinator.watch(web)
         guard let start = context.coordinator.files.url(for: index) else {
             fputs("[RED] launcher: the guide's index.html is not inside its folder\n", stderr)
-            return web
+            return box
         }
         LauncherGuideFiles.load(web, start: start)
-        return web
+        return box
     }
-    func updateUIView(_ web: WKWebView, context: Context) { context.coordinator.close = close }
-    static func dismantleUIView(_ web: WKWebView, coordinator: Coordinator) {
-        web.configuration.userContentController.removeScriptMessageHandler(forName: "nx18Close")   // the controller keeps its handler: let it go with the view
-        web.navigationDelegate = nil
+    func updateUIView(_ box: LauncherGuideBox, context: Context) {
+        context.coordinator.close = close
+        box.insets = insets
+    }
+    static func dismantleUIView(_ box: LauncherGuideBox, coordinator: Coordinator) {
+        LauncherGuideFiles.detach(box.web)   // the controller keeps its handler: let it go with the view
+        box.web.navigationDelegate = nil
+        coordinator.history = nil
     }
 
     @MainActor final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         let files: LauncherGuideFiles
+        let model: LauncherGuidePageModel
         var close: () -> Void
-        init(root: URL, close: @escaping () -> Void) { files = LauncherGuideFiles(root: root); self.close = close }
+        var history: NSKeyValueObservation?
+        init(root: URL, model: LauncherGuidePageModel, close: @escaping () -> Void) { files = LauncherGuideFiles(root: root); self.model = model; self.close = close }
 
-        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) { close() }   // nx.endApplet, window.close
-
-        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
-            LauncherGuideFiles.allows(action.request.url) ? .allow : .cancel
+        func watch(_ web: WKWebView) {
+            history = web.observe(\.canGoBack, options: [.initial, .new]) { [weak self] w, _ in
+                MainActor.assumeIsolated { if let m = self?.model, m.canGoBack != w.canGoBack { m.canGoBack = w.canGoBack } }
+            }
         }
+        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "nx18State" {
+                let f = LauncherGuideFiles.footer(of: message.body)
+                if message.frameInfo.isMainFrame, model.footer != f { model.footer = f }
+                return
+            }
+            close()   // nx.endApplet, window.close
+        }
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
+            switch LauncherGuideFiles.navigation(action.request.url) {
+            case .allow: return .allow
+            case .refuse: return .cancel
+            case .end: close(); return .cancel
+            }
+        }
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { if !model.footer.isEmpty { model.footer = [] } }   // a new page: it assigns its own
     }
 }
 
