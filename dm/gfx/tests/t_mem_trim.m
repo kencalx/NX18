@@ -4,7 +4,7 @@
 // pressure (mtl_pressure) only asks: the trim runs at the next submission's start; DM_MEMORY_TRIM=0 logs it and asks nothing. Going to the background (dm_gfx_suspend(1)) trims
 // after its drain; DM_BG_TRIM=0 does not. Idle snapshots (fix 13): FB_SNAP_IDLE submissions after their last use the snapshots go; DM_NVN_FB_SNAP_IDLE=0 keeps them. A snapshot that
 // comes back after that release (13 Sentinels' 64 MB one, about every 10 s) is kept from then on, up to FB_SNAP_KEEP_MB in all; the full trim still releases it, going to the background
-// keeps the shapes it remembers and memory pressure forgets them; DM_NVN_FB_SNAP_KEEP=0 lets it go again when idle, as before
+// keeps the shapes it remembers and memory pressure forgets them; a new shape takes any other free entry before a kept one; DM_NVN_FB_SNAP_KEEP=0 lets it go again when idle, as before
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -117,7 +117,7 @@ int main(void) { @autoreleasepool {
     }
     // 5. A snapshot that comes back after the idle release stays (fb_keep_try): section 4 let 640x360 go, so the snapshot made again for it is kept through FB_SNAP_IDLE + 1 idle
     // submissions, where one of a shape never let go is released. Going to the background releases it but keeps the shape (the next one is kept at once); memory pressure forgets it.
-    // Three 48 MB snapshots that came back: the 128 MB cap keeps two. DM_NVN_FB_SNAP_KEEP=0: none is kept, as before
+    // Three 48 MB snapshots that came back: the 128 MB cap keeps two. A new shape takes an emptied entry, not the kept one. DM_NVN_FB_SNAP_KEEP=0: none is kept, as before
     if (!fb_idle) printf("snapshots that come back: not run (DM_NVN_FB_SNAP_IDLE=0 releases none)\n");
     else @autoreleasepool {
         uint64_t cap = fb_keep_cap(), m0 = atomic_load(&g_fbc_kept); int keep_on = cap != 0, fresh = 0; __weak id k0 = nil, o0 = nil;
@@ -156,6 +156,29 @@ int main(void) { @autoreleasepool {
         CHECK(nk == want && (cap != (uint64_t)FB_SNAP_KEEP_MB * MB || want == 2), keep_on ? "cap: kept up to the cap (two of three at 128 MB)" : "DM_NVN_FB_SNAP_KEEP=0: none kept");
         dm_gfx_trim(4); settle();
         CHECK(snaps() == 0, "cap: the full trim releases every kept snapshot");
+        // The kept entry is given to a new shape only when no other entry is free (fb_snap's rank). Every one of the 8 entries is taken in one submission, the 4096x3072 one first,
+        // so its use is the oldest (as a snapshot used every 10 s or more has); the 7 others are released when idle, which leaves 7 empty entries used later than it. A new shape
+        // then takes an empty one: before, an empty entry and another shape's texture ranked alike and the oldest use went first, so the kept 48 MB texture was released and made
+        // again at its next use. DM_NVN_FB_SNAP_KEEP=0: it is released when idle with the others, as before
+        __weak id kk = nil;
+        mtl_sub_begin();
+        e = fb_snap(94000, 0, 0, MTLPixelFormatRGBA8Unorm, 4096, 3072, 1, &fresh); kk = e ? e->snap : nil;
+        CHECK(e && e->keep == keep_on, keep_on ? "free entries first: the 4096x3072 snapshot that came back is kept" : "DM_NVN_FB_SNAP_KEEP=0: the 4096x3072 snapshot is not kept");
+        for (int i = 1; i < 8; i++) fb_snap(94000 + (uint64_t)i, 0, 0, MTLPixelFormatRGBA16Float, 64 + 16 * (NSUInteger)i, 32, 1, &fresh);
+        CHECK(snaps() == 8, "free entries first: all 8 entries hold a texture");
+        mtl_wait(mtl_sub_commit(), 5000000000ull);
+        idle_subs(FB_SNAP_IDLE + 1); mtl_drain(); settle();
+        CHECK(snaps() == keep_on, "free entries first: the 7 other shapes released when idle");
+        mtl_sub_begin();
+        e = fb_snap(94010, 0, 0, MTLPixelFormatRGBA16Float, 300, 200, 1, &fresh);
+        CHECK(e && fresh && e->snap.width == 300, "free entries first: the new shape gets a texture");
+        mtl_wait(mtl_sub_commit(), 5000000000ull); mtl_drain(); settle();
+        { id k = kk; int same = 0; for (int i = 0; i < 8; i++) same += k && g_fbc[i].snap == k && g_fbc[i].keep;
+          printf("free entries first: %d entries hold a texture, the kept 4096x3072 one %s\n", snaps(), k ? "still there" : "released");
+          CHECK(keep_on ? same == 1 && resident(k) && snaps() == 2 : !k && snaps() == 1,
+                keep_on ? "free entries first: the kept texture is the same object, still kept and resident" : "DM_NVN_FB_SNAP_KEEP=0: only the new shape's texture is left"); }
+        dm_gfx_trim(4); settle();
+        CHECK(snaps() == 0, "free entries first: the full trim releases every snapshot");
     }
     printf("t_mem_trim: %d checks, %d failed\n", checks, failed);
     return failed != 0;

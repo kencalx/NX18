@@ -13651,14 +13651,17 @@ static inline int fb_live(const fb_cache_t *e) { return e->ser && e->bar == g_fb
 // 64 MB again with a 7-10 ms commit inside that frame's submission (two of them in a 330 s run, each on a frame of a drop burst). The commit has to stay where it is: a command buffer
 // that reads the snapshot must not be committed before the texture is resident, or the GPU faults on it. So the shape the idle release let go is remembered (g_fb_gone, the last 8
 // shapes), and a texture made again for a remembered shape is kept from then on (keep): the game has shown it comes back to it after a pause longer than the idle limit, so letting it go
-// again would cost the same commit each time it returns, while keeping it costs only its memory. What may be kept so is capped at FB_SNAP_KEEP_MB in all (128 MB: two such 64 MB
-// snapshots, about 1.6% of the 7.96 GB an iPhone 18 Pro Max still had to its limit above 13 Sentinels' 2.1-2.4 GB footprint); a texture that would pass the cap is let go when idle, as before. A memory trim (mtl_trim_at)
+// again would cost the same commit each time it returns, while keeping it costs only its memory. What may be kept so is capped at FB_SNAP_KEEP_MB in all (128 MB: about two such 64 MB
+// snapshots (a private, compressed texture can report a little more than its pixels, so two may not both fit), about 1.6% of the 7.96 GB an iPhone 18 Pro Max still had to its limit above 13 Sentinels' 2.1-2.4 GB footprint); a texture that would pass the cap is let go when idle, as before. A memory trim (mtl_trim_at)
 // still releases every snapshot, kept ones included; under memory pressure it also forgets the shapes, so a snapshot is kept again only once it has come back again. Going to the
 // background (or dm_gfx_trim) keeps the shapes: the game returns to the same scene, and the snapshot made again for it is kept at once. The memory line counts the textures kept so.
+// A kept entry is by design the one used least often, so its use is usually the oldest: fb_snap gives a new shape any other entry no draw can reuse, an empty one included,
+// before it, or the kept texture would go the next time a shape came back to an emptied slot (two or three shapes over a long run are enough), and be made again with the same commit.
 // DM_NVN_FB_SNAP_KEEP=<MB> sets the cap, and 0 restores the old rule (every idle snapshot goes, whether or not it came back); DM_NVN_FB_SNAP_IDLE=0 still keeps every snapshot
 typedef struct { MTLPixelFormat pf; NSUInteger w, h; } fb_gone_t;
 static fb_gone_t g_fb_gone[8]; static int g_fb_gone_n, g_fb_gone_at;   // the shapes the idle release let go, the last 8 (a ring: g_fb_gone_at is the next to write); submit thread, or a trim with no submission open
-static int g_fb_keep_logs;   // lines logged about kept snapshots (at most 16: a game that cycles more than 8 shapes a frame can make a remembered one again every frame)
+static int g_fb_keep_logs;   // lines logged about kept snapshots (at most 16: a game that cycles more than 8 shapes a frame can make a remembered one again every frame). 13 Sentinels
+// should log one a run for its 4096x4096 snapshot (one more after each memory trim); more than that means its kept texture was given to another shape
 enum { FB_SNAP_KEEP_MB = 128 };
 static uint64_t fb_keep_cap(void) {
     static int64_t mb = -1;
@@ -13686,7 +13689,8 @@ static void fb_keep_try(fb_cache_t *e) {
              (unsigned long)e->snap.pixelFormat, z / 1048576.0, ok ? "kept from now on" : "over the cap, released when idle as before", held / 1048576.0, (unsigned long long)(cap >> 20)); }
 }
 // The snapshot of an attachment's level and layer: the cached one (valid: *fresh = 0) or a texture to copy into (*fresh = 1; the entry is then valid from this barrier and submission on).
-// A new key takes an entry whose texture already has its format and size, one no later draw can reuse first, else the least recently used. Taking the entries in turn made a texture for
+// A new key takes an entry whose texture already has its format and size, one no later draw can reuse first, then one no later draw can reuse that is not kept (empty, or another
+// shape's texture), then a kept one (fb_keep_try: it stays through the idle release, so it goes only when no other entry is free), else the least recently used. Taking the entries in turn made a texture for
 // nearly every snapshot when a frame snapshots several sizes: Tears of the Kingdom's 4-5 a frame (1600x896 down to 400x224) each made one, 4-6 GB of textures every 300 frames on the Mac
 // and a residency commit for each texture added and each removed (GitHub #931). The callers copy after rp_flush, not only after the open pass ends: a clear with no draw after it waits
 // to be the load action of the pass this draw opens (R.clear_c / clear_d), so a copy taken before it held what the attachment had before the clear, which a game sees only up to its clear
@@ -13696,9 +13700,10 @@ static fb_cache_t *fb_snap(uint64_t ser, int lv, int sl, MTLPixelFormat pf, NSUI
     for (int i = 0; i < 8 && !e; i++) if (g_fbc[i].snap && g_fbc[i].ser == ser && g_fbc[i].lv == lv && g_fbc[i].sl == sl) e = &g_fbc[i];
     if (e && !fb_shape(e, pf, w, h)) { e->ser = 0; e = NULL; }   // the attachment was made again in another format or size: its snapshot is no longer this key's
     if (e && !force && fb_live(e)) { e->use = ++g_fbc_use; *fresh = 0; return e; }
-    if (!e) {   // by rank: same shape and not live, not live, same shape (every entry live), least recently used within a rank
+    if (!e) {   // by rank: same shape and not live, not live and not kept, not live and kept, same shape (every entry live), least recently used within a rank. keep is 0 with
+        // DM_NVN_FB_SNAP_KEEP=0 (and an empty entry's always), so there the order is the one before kept entries
         int best = 1 << 30;
-        for (int i = 0; i < 8; i++) { fb_cache_t *c = &g_fbc[i]; int r = fb_live(c) ? (fb_shape(c, pf, w, h) ? 2 : 3) : fb_shape(c, pf, w, h) ? 0 : 1;
+        for (int i = 0; i < 8; i++) { fb_cache_t *c = &g_fbc[i]; int r = fb_live(c) ? (fb_shape(c, pf, w, h) ? 3 : 4) : fb_shape(c, pf, w, h) ? 0 : c->keep ? 2 : 1;
             if (r < best || (r == best && c->use < e->use)) { best = r; e = c; } }
         if (e->snap && !fb_shape(e, pf, w, h)) { defer_obj_release(e->snap); e->snap = nil; e->keep = 0; }
     }
@@ -17344,7 +17349,9 @@ static uint64_t mtl_trim_at(int level, uint64_t fence) { @autoreleasepool {
     pthread_mutex_lock(&g_deferred_mu); unsigned long q1 = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
     int nrh = 0, nup = 0, nsp = 0, nfb = 0, nar = 0;
     uint64_t brh = rh_trim_all(&nrh), bup = up_trim_idle(0, fence, &nup), bsp = pkg_spare_release(0, fence, &nsp), bfb = fb_trim(0, fence, &nfb), bar = g_arenas ? arena_trim(0, &nar) : 0;
-    if (level == 1 || level == 2) fb_gone_forget();   // under memory pressure a feedback snapshot is kept again only once it has come back again (fb_keep_try); going to the background keeps the shapes
+    // Under memory pressure a feedback snapshot is kept again only once it has come back again (fb_keep_try); going to the background keeps the shapes. Only when fb_trim ran: with a
+    // submission open it releases nothing (no call site does that now), and forgetting the shapes of textures still kept would leave the log naming them as kept again later
+    if ((level == 1 || level == 2) && !atomic_load(&g_sub_on)) fb_gone_forget();
     atomic_store(&g_fx_trim_req, 1);
     res_commit();   // the heaps leave the residency set now; the rest once their fence has passed (defer_obj_at drains at once a fence the GPU has passed)
     uint64_t total = brh + bup + bsp + bfb + bar;
