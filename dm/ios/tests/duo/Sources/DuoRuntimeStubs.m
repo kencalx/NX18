@@ -148,6 +148,7 @@ void dm_gfx_pressure(int level) { (void)level; }   // front_ios.m's memory press
 int dm_gfx_save_wait(int wait_ms) { (void)wait_ms; return 1; }
 void dm_audio_suspend(int on) { (void)on; }
 void dm_audio_reset(void) {}
+void dm_audio_route_change(const char *why, int changed) { (void)why; (void)changed; }
 void dm_focus_set(int state) { (void)state; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 const char *front_ios_boot_message(void) { return NULL; }

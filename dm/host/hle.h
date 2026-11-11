@@ -71,3 +71,4 @@ int dm_movie_playing(void);   // hle_movie.c: a video decoder of the SDK's movie
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)
+void dm_audio_route_change(const char *why, int changed);   // iOS audio route change: restart the playing outputs on the new route when changed (hle_audio.c; the Mac follows its unit's CurrentDevice itself)
