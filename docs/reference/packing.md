@@ -291,6 +291,22 @@
 - **Fix:** `finish` sets the window's `animationBehavior` to `.none` before the order-out, and `dm_mac_launcher` calls `CATransaction.flush()` after `run()` returns, before it hands back to `launcher.c`. Neither alone was enough. Check: a copy of the window with a timed Play and a `CGWindowListCopyWindowInfo` probe while the thread then blocks; the window was still listed 2 and 4 s after Play before the fix, and gone 3 times in 3 after it. `test_launcher_storage.py` and `test_nsp_mac_app.py` pass.
 - **Found on:** the Mac app of [Breath of the Wild](../../dm/games/01007EF00011E000/README.md); applies to every Mac app.
 
+### The iPhone app's log lines go into another file when log.txt cannot be created
+
+- **Symptom:** after a run on a device whose storage is full (or whose Documents folder cannot be written), `Documents/log.txt` is missing or empty, and the host's log lines, or a `CRASH` report, are written at the start of another file the app opened next, which can be a save: the game may then find that save damaged.
+- **Cause:** `dm/ios/Sources/main.m` redirected stderr with `freopen(log, "w", stderr)`. `freopen` closes descriptor 2 before it opens the file and leaves it closed when the open fails, and the open has to create the file, as `boot_env` has just moved the last run's `log.txt` to `log.prev.txt`. `open` hands out the lowest free descriptor, so the next file the app opened got descriptor 2, and everything written there went into it: crash.c's `write(2, ...)`, NSLog and the diagnostic threads a launch environment can start before `main` (the stream stderr itself, closed by the failed `freopen`, wrote nothing).
+- **Fix:** `log_open` in `main.m` goes through `dm_log_redirect` (`dm/host/log_redirect.h`), which puts `/dev/null` on any of descriptors 0 to 2 the launch left closed, opens the log on a descriptor of its own and moves it onto 2 with `dup2`, which replaces it in one step. A log that cannot be opened leaves stderr where the launch put it (`/dev/null` from the Home Screen, Xcode's console) and says so there with a `[RED] boot: … cannot be written` line. An opened `log.txt` is as before: the same file, created with `freopen`'s mode and truncated, line-buffered.
+- **Found on:** reading the source (no game); applies to every iPhone app. Ported from the older line's fix.
+- **Check:** `make -C dm/host/tests log-redirect` (`t_log_redirect.c`) runs the helper with every mix of 0, 1 and 2 closed and a log that opens or cannot be created, and finds the stand-in save clean; with the `freopen` form, the case with no descriptor closed and no log puts the lines into the save. `dm/ios/tests/test_log_redirect.py` checks the wiring and, on a Mac, runs `main.m`'s `log_open` itself with descriptor 2 closed.
+
+### The Mac app's log lines go into another file when it starts with its error output closed
+
+- **Symptom:** a Mac app started with descriptor 2 closed (a shell's `2>&-`, a parent that closed it) logs neither the launcher's lines nor the host's error output: they are lost, or written into whichever file took descriptor 2 next (the host's first file it keeps open, possibly a save). With descriptor 1 closed, the host's standard output goes there instead.
+- **Cause:** `dm/mac/launcher.c` opened the log and moved it onto 1 and 2 with `dup2`, then closed it. `open` takes the lowest free descriptor, so with 2 closed the log came on 2 itself, and the `close` freed the descriptor just set up; the next file opened took it, in the launcher or in the host, which inherits the launcher's descriptors.
+- **Fix:** `log_open` in `launcher.c` goes through `dm_log_redirect` (`dm/host/log_redirect.h`), as the iPhone app does: descriptors the launch left closed get `/dev/null` first, so the log's own descriptor is above 2 and is the only one closed. A log that cannot be opened leaves 1 and 2 where the launch put them and says so with a `[RED] launcher: … cannot be written` line. A normal start (Finder, the Dock, `open`, a terminal) has all three open and is unchanged.
+- **Found on:** reading the source (no game); applies to every Mac app. Ported from the older line's fix.
+- **Check:** `test_nsp_mac_app.py` `App.test_launch_with_a_standard_descriptor_closed` (macOS) starts the app with 2, then 1, closed and finds every line in the log and none in the stand-in host's first file; `t_log_redirect.c` covers the other mixes.
+
 ## External drives
 
 ### A game folder on an exFAT drive reads one update as two, or fails to remove a folder

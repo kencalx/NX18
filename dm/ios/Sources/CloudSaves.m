@@ -5,8 +5,21 @@
 static NSString *const kCloudSaves = @"cloudSavesBookmark";
 
 // The folder's security scope, held from the first resolve on: the host writes there after every
-// save. Never stopped on purpose, the process exits when the game does.
+// save. Not stopped while that folder stays picked (the process exits when the game does). Picking
+// another folder, turning cloud saves off, or a bookmark that no longer resolves stops it, all in
+// the launcher, before Play sets DM_SAVE_SYNC (dm_cloud_saves_env) and the host reads it. Every
+// start that succeeded is matched by one stop. It used to be dropped without a stop when another
+// folder was picked, and replaced by a URL never started when the same folder resolved again, so a
+// started scope stayed taken for the rest of the run (a sandbox extension per folder change; no
+// save was affected: the folder in use was always started).
+// opened is the URL whose startAccessingSecurityScopedResource returned YES, nil when none did.
 static NSURL *opened = nil;
+
+static void scope_hold(NSURL *url) {   // url: the folder picked now, nil for none
+    if (opened && url && [opened.path isEqualToString:url.path]) return;   // already held: keep the URL that started it
+    if (opened) { [opened stopAccessingSecurityScopedResource]; opened = nil; }
+    if (url && [url startAccessingSecurityScopedResource]) opened = url;   // one that does not start is not held, and the next resolve tries again
+}
 
 static NSData *fresh_bookmark(NSURL *url) {
     // The picker grants a security scope that lasts while it is held: the bookmark is written with
@@ -29,12 +42,11 @@ NSString *dm_cloud_saves_path(BOOL *stale) {
         // A re-signed build gets a bookmark the system will not resolve for it. Keep the data, the
         // player may install the same signature again, and let the launcher ask for a new pick.
         fprintf(stderr, "boot: the picked cloud-save folder bookmark does not resolve (%s)\n", error.localizedDescription.UTF8String ?: "no reason given");
+        scope_hold(nil);   // cloud saves are off now (no DM_SAVE_SYNC): a scope an earlier resolve started is stopped; a later resolve that works starts it again
         if (stale) *stale = YES;
         return nil;
     }
-    if (opened && ![opened.path isEqualToString:url.path]) opened = nil;
-    if (!opened) [url startAccessingSecurityScopedResource];   // held for the session (see opened)
-    opened = url;
+    scope_hold(url);   // held for the session (see opened)
     if (isStale) {
         // The system still resolves it but asks for a rewrite. Same signature, so a fresh bookmark sticks.
         NSData *again = fresh_bookmark(url);
@@ -62,6 +74,7 @@ BOOL dm_store_cloud_saves(NSURL *url) {
 
 void dm_clear_cloud_saves(void) {
     [NSUserDefaults.standardUserDefaults removeObjectForKey:kCloudSaves];
+    scope_hold(nil);
 }
 
 void dm_cloud_saves_env(void) {

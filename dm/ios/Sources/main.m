@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include "game_profile.h"   // game profile constants (the RomFS marker path)
 #include "front.h"
+#include "log_redirect.h"   // dm_log_redirect (log_open)
 #include "romfs_image.h"
 #include "romfs_identity.h"
 #include "player_env.h"
@@ -173,6 +174,18 @@ static void pso_archive_exclude(void) {
     if (![[NSURL fileURLWithPath:dir isDirectory:YES] setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:&e]) fprintf(stderr, "boot: %s could not be excluded from backup: %s\n", dir.fileSystemRepresentation, e.localizedDescription.UTF8String);
 }
 
+// Documents/log.txt onto descriptor 2, which the stream stderr, Swift's launcher log and crash.c's write(2, ...) all use (dm_log_redirect in log_redirect.h says why and how).
+// It was freopen(log, "w", stderr), which closes descriptor 2 before it opens the file and leaves it closed when the open fails (a full disk: log.txt has just been moved to
+// log.prev.txt, so it has to be created). The next file the app opened, possibly a save, then took descriptor 2, and every later log line and a crash report went into it.
+// Now descriptor 2 is never free: a log that cannot be opened leaves stderr where the launch put it (/dev/null from the Home Screen, Xcode's console), or on /dev/null when the
+// launch left it closed, and says so there. An opened log.txt is as before: the same file, created with freopen's mode (0666 less the umask) and truncated, line-buffered. This
+// runs before the preload thread starts (dm_host_preload_start, at the end of boot_env)
+static void log_open(NSString *log) {
+    int err = dm_log_redirect(log.fileSystemRepresentation, 0666, STDERR_FILENO);
+    if (err) { fprintf(stderr, "[RED] boot: %s cannot be written (%s): no log for this run\n", log.fileSystemRepresentation, strerror(err)); return; }
+    clearerr(stderr); setvbuf(stderr, NULL, _IOLBF, 0);
+}
+
 static int boot_env(void) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
@@ -187,7 +200,7 @@ static int boot_env(void) {
     // Log: the host only writes to stderr; redirect it to Documents/log.txt (the previous one is kept as log.prev.txt), retrieve it from the Files app when something goes wrong
     NSString *log = [doc stringByAppendingPathComponent:@"log.txt"], *prev = [doc stringByAppendingPathComponent:@"log.prev.txt"];
     [fm removeItemAtPath:prev error:nil]; [fm moveItemAtPath:log toPath:prev error:nil];
-    if (freopen(log.fileSystemRepresentation, "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
+    log_open(log);
     // Environment switch files (for on-device diagnostics: a sideloaded app cannot be given environment variables from outside): one KEY=VALUE per line, # starts a comment; Documents/env.txt takes precedence over dm/env.txt in the bundle (put there by build_ipa.sh's DM_ENV_FILE)
     NSMutableArray<NSString *> *from_file = [NSMutableArray array], *from_launch = [NSMutableArray array];
     for (char **e = environ; *e; e++) {   // set at launch (Xcode, devicectl): before the env files, and the launcher keeps them

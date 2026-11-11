@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "log_redirect.h"
 #include "romfs_image.h"
 #include "save_sync.h"
 
@@ -162,6 +163,18 @@ static void programs_table(const char *contents, const char *res, const char *su
     fclose(f); fclose(o); setenv("DM_PROGRAMS", out, 0);
 }
 
+// ~/Library/Logs/nxnative/<title ID>.log onto descriptors 1 and 2, which the launcher's lines, the settings window's (Launcher.swift) and the host, which inherits
+// both, all write to (dm_log_redirect in dm/host/log_redirect.h says why and how). It was open, dup2 onto 1 and 2, close: when the launch left 2 (or 1) closed (a shell's 2>&-,
+// a parent that closed it), open returned that very descriptor and the close freed it, so the next file opened took it (an env file, programs.tsv, the host's first file,
+// possibly a save) and got the log lines after that. Now no standard descriptor is free when the host starts: a log that cannot be opened leaves 1 and 2 where the launch put
+// them, or on /dev/null when the launch left one closed, and says so there. An opened log is as before: the same file, mode 0644, truncated, stdout line-buffered. A normal
+// start (Finder, the Dock, open, a terminal) has all three open and is unchanged
+static void log_open(const char *log) {
+    int err = dm_log_redirect(log, 0644, STDOUT_FILENO);
+    if (err) { fprintf(stderr, "[RED] launcher: %s cannot be written (%s): no log for this run\n", log, strerror(err)); return; }
+    setvbuf(stdout, NULL, _IOLBF, 0);
+}
+
 int main(int argc, char **argv) {
     char self[PATH_MAX], exe[PATH_MAX]; uint32_t n = sizeof self;
     if (_NSGetExecutablePath(self, &n) || !realpath(self, exe)) return 1;
@@ -191,8 +204,7 @@ int main(int argc, char **argv) {
     snprintf(log, sizeof log, "%s/%s.log", logs, id); snprintf(prev, sizeof prev, "%s/%s.prev.log", logs, id);
     mkdirs(save); mkdirs(temp); mkdirs(logs);
     rename(log, prev);
-    int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); setvbuf(stdout, NULL, _IOLBF, 0); }
+    log_open(log);
     fprintf(stderr, "launcher: %s (%s), host %s\n", name, id, host);
     CFArrayRef rules = setting_rules();   // the settings the launch environment already set: the window shows them, fixed
     for (CFIndex i = 0; rules && i < CFArrayGetCount(rules); i++) { char env[128]; if (rule_env(CFArrayGetValueAtIndex(rules, i), env, sizeof env) && getenv(env)) add_key(&g_launch_keys, env); }

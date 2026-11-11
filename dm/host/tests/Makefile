@@ -200,6 +200,14 @@ $(B)/t_swkbd: t_swkbd.c ../hle_swkbd.c ../hle.h ../dm.h $(GAME_H) | $(B)
 run: $(B)/t_bigstack
 $(B)/t_bigstack: t_bigstack.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_bigstack.c ../hle_bigstack.c
+# The front ends' log onto the standard descriptors (../log_redirect.h: main.m's log.txt onto 2, launcher.c's log onto 1 and 2), with every mix of 0, 1 and 2 closed at launch
+# and a log that opens or cannot be created; no game profile, so GAME only satisfies the run target
+run: log-redirect
+$(B)/t_log_redirect: t_log_redirect.c ../log_redirect.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -I.. -o $@ t_log_redirect.c
+.PHONY: log-redirect
+log-redirect: $(B)/t_log_redirect
+	TMPDIR="$(abspath $(B))" $(B)/t_log_redirect
 run: watch-sample
 $(B)/t_watch_sample: t_watch_sample.c ../crash.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_watch_sample.c

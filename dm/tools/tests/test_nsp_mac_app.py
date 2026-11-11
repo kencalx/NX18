@@ -41,10 +41,10 @@ extern char **environ;
 static void term(int s) { (void)s; _exit(3); }
 int main(int argc, char **argv) {
     char p[1024]; snprintf(p, sizeof p, "%s/host_run.txt", getenv("HOME")); FILE *f = fopen(p, "w");
+    printf("standin host output\n"); fflush(stdout); fprintf(stderr, "standin host error output\n");   // while host_run.txt is open: a 1 or 2 the launcher left free is that file's
     for (char **e = environ; *e; e++) fprintf(f, "%s\n", *e);
     for (int i = 0; i < argc; i++) fprintf(f, "argv%d=%s\n", i, argv[i]);
     char cwd[1024]; fprintf(f, "cwd=%s\n", getcwd(cwd, sizeof cwd)); fclose(f);
-    printf("standin host output\n"); fflush(stdout);
     if (getenv("STANDIN_WAIT")) { signal(SIGTERM, term); for (;;) pause(); }
     return 7;
 }
@@ -121,7 +121,7 @@ class PackReuse(unittest.TestCase):
             'font/nintendo_ext.ttf': b'font', 'aoc/1/data': b'dlc', 'pso/gpu.mtl4a': b'archive',
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'art.jpg': b'art', 'logo.png': b'\x89PNG logo', 'about.json': b'{}', 'manual.pdf': b'%PDF-1.7', 'source/launcher.c': b'launcher',
-            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
+            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'host/log_redirect.h': b'log', 'tools/romfs.py': b'reader',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/LauncherGuideFiles.swift': b'guide',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
@@ -211,7 +211,8 @@ class PackReuse(unittest.TestCase):
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'art.jpg', 'logo.png', 'about.json', 'manual.pdf', 'source/launcher.c',
                  'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/LauncherGuideFiles.swift',   # the settings window's sources
-                 'host/save_sync.c', 'host/save_sync.h']   # the cloud-save code the launcher links (its send after the host exits)
+                 'host/save_sync.c', 'host/save_sync.h',   # the cloud-save code the launcher links (its send after the host exits)
+                 'host/log_redirect.h']   # the launcher's log onto 1 and 2
         names += ['profile/' + n for n in pack_app.TABLES]
         for name in names:
             with self.subTest(name=name):
@@ -506,11 +507,13 @@ class App(unittest.TestCase):
     @classmethod
     def tearDownClass(cls): shutil.rmtree(cls.tmp)
 
-    def launch(self, wait=False, app=None, args=(), **env):
+    def launch(self, wait=False, app=None, args=(), closed=None, **env):
         home = self.tmp / 'home'
         e = dict(HOME=str(home), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin', **{'DM_LAUNCHER': '0', 'DM_TEST_METAL4': '1', **env})   # never the settings window in a test; Metal 4 taken as there (the host is a stand-in)
         if wait: e['STANDIN_WAIT'] = '1'
-        return subprocess.Popen([(app or self.app) / 'Contents/MacOS/nxnative', *args], env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        cmd = [(app or self.app) / 'Contents/MacOS/nxnative', *args]
+        if closed is not None: cmd = ['/bin/sh', '-c', f'exec "$@" {closed}>&-', 'sh', *cmd]   # started with that descriptor closed
+        return subprocess.Popen(cmd, env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
     def host_run(self):
         out = {}
@@ -655,6 +658,20 @@ class App(unittest.TestCase):
         p = self.launch(); p.communicate(timeout=30)
         self.assertIn('standin host output', (logs / f'{TID}.prev.log').read_text())
         self.assertEqual(self.host_run()['DM_LANG'], 'fr')   # Info.plist DMLanguage
+
+    def test_launch_with_a_standard_descriptor_closed(self):
+        """Started with 2 (or 1) closed, open() gave the log that very descriptor and the launcher closed it after the dup2s, so the next file opened took it. Now every line is
+        in the log, the launcher's and the host's, and the file the host opens first (host_run.txt) gets none (dm/host/log_redirect.h; t_log_redirect covers the other mixes)"""
+        log, run = self.tmp / f'home/Library/Logs/nxnative/{TID}.log', self.tmp / 'home/host_run.txt'
+        for closed in (2, 1):
+            with self.subTest(closed=closed):
+                p = self.launch(closed=closed); out = p.communicate(timeout=30)[0]
+                self.assertEqual(p.returncode, 7)
+                text = log.read_text()
+                for line in (f'launcher: Game: Test ({TID}), host ', 'launcher: no settings window', 'launcher: the host exited with 7', 'standin host output', 'standin host error output'):
+                    self.assertIn(line, text)
+                self.assertNotIn('standin host', run.read_text()); self.assertNotIn('launcher:', run.read_text())
+                self.assertNotIn(b'launcher:', out)
 
     def test_sigterm(self):   # forwarded to the host, whose exit code comes back
         p = self.launch(wait=True)
