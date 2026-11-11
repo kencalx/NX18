@@ -95,7 +95,7 @@ static id<MTLRenderPipelineState> geo_capture_pso(NvShader *vs) {
     id<MTLRenderPipelineState> ps = hm_get_id(&g_pso, &k);
     if (ps || hm_get_id(&g_pso_fail, &k)) return ps;
     NSError *e = nil;
-    ps = pso_build(pso_desc(&k, vs, nil, nil, 0), &e);   // its capture entry (geo_fn), no rasterization: the base is the pipeline, kept in the archive as the game's are
+    ps = pso_build(pso_desc(&k, vs, nil, nil, 0), !k.border, &e);   // its capture entry (geo_fn), no rasterization: the base is the pipeline, kept in the archive as the game's are; a vertex shader that samples declares the border corrections' constant: specialized as the draw's key says
     if (ps) hm_put_id(&g_pso, &k, ps);
     else { hm_put_id(&g_pso_fail, &k, NSNull.null); MLOG("[RED] geometry vertex capture %s: %s", vs->key, e.localizedDescription.UTF8String); }
     return ps;
@@ -385,6 +385,12 @@ static uint32_t geo_mesh_prims(id<MTLFunction> f) {
 }
 static struct { NvShader *vs, *lean; id<MTLFunction> f; } g_geo_mesh_last;
 static NSMutableDictionary *g_geo_mesh_runfn;   // a mesh entry → its run twin (dm_mesh_run..., dmsh_mesh.py), or NSNull: none in the library, or its pipeline failed
+// Generated mesh entries inherit the vertex library's constants: one that declares any is noted specialized with the empty set (fn_spec), as shader_load notes the vertex shader, so
+// MTL4Compiler specializes it with the pipeline and fn_off can make its variant without the border corrections
+static id<MTLFunction> geo_mesh_entry(id<MTLLibrary> lib, NSString *name) {
+    id<MTLFunction> f = [lib newFunctionWithName:name];
+    return f.functionConstantsDictionary.count ? fn_spec(lib, name, [MTLFunctionConstantValues new], NULL) : fn4_note(f, lib, name, nil);
+}
 // The mesh entry for this draw's program, or nil (the compute path draws it)
 static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     if (!geo_mesh_on()) return nil;
@@ -401,11 +407,10 @@ static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_id
         NSString *path = [NSString stringWithFormat:@"%@/%.16s_%.16s_m3.metallib", g_msl_dir, vs->key, lean->key];
         id<MTLLibrary> lib = lib_from_file(path, NULL);
         NSString *want = [vs->fn.name isEqualToString:@"main0_z"] ? @"dm_mesh_z" : @"dm_mesh";
-        f = lib ? fn4_note([lib newFunctionWithName:want], lib, want, nil) : nil;   // noted, as every function a pipeline is built from (fn4_note)
-        if (lib && !f) for (NSString *nm in lib.functionNames) if ([nm hasPrefix:[want stringByAppendingString:@"_p"]]) { f = fn4_note([lib newFunctionWithName:nm], lib, nm, nil); break; }   // fewer triangles a group (dm_mesh_p16)
+        f = lib ? geo_mesh_entry(lib, want) : nil;
+        if (lib && !f) for (NSString *nm in lib.functionNames) if ([nm hasPrefix:[want stringByAppendingString:@"_p"]]) { f = geo_mesh_entry(lib, nm); break; }   // fewer triangles a group (dm_mesh_p16)
         if (f) { if (!g_geo_mesh_runfn) g_geo_mesh_runfn = [NSMutableDictionary dictionary];   // its run twin: dm_mesh_z_p16 → dm_mesh_run_z_p16
-            NSString *run = [@"dm_mesh_run" stringByAppendingString:[((id<MTLFunction>)f).name substringFromIndex:7]];
-            g_geo_mesh_runfn[[NSValue valueWithPointer:(__bridge const void *)f]] = fn4_note([lib newFunctionWithName:run], lib, run, nil) ?: NSNull.null; }
+            g_geo_mesh_runfn[[NSValue valueWithPointer:(__bridge const void *)f]] = geo_mesh_entry(lib, [@"dm_mesh_run" stringByAppendingString:[((id<MTLFunction>)f).name substringFromIndex:7]]) ?: NSNull.null; }
         static int n; if (f || n++ < 16) MLOG("geometry mesh: vertex %s kernel %s %s", vs->key, lean->key, f ? "has a mesh library" : "has no mesh library (geo_mesh.tsv): the compute path draws it");
         vs->geo_mesh[k] = f = f ?: NSNull.null;
     }
@@ -428,7 +433,7 @@ static id<MTLRenderPipelineState> geo_mesh_pso_for(NvProg *pr, id<MTLFunction> f
         // Whole through the one Metal 4 compiler, from the functions' notes (fn4_note: the mesh entry and its run twin in geo_mesh_fn, the pixel shader in shader_load); a pixel
         // shader with constants is specialized by the pipeline. No depth / stencil formats: a Metal 4 pipeline serves any. No object function: the mesh grid is the dispatch's
         MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, nil, 0);
-        MTL4FunctionDescriptor *mf = fn4_of(fn), *ff = fn4_of(d.fragmentFunction ?: mtk_nop_fragment());
+        MTL4FunctionDescriptor *mf = fn4_of_b(fn, !k.border), *ff = fn4_of_b(d.fragmentFunction ?: mtk_nop_fragment(), !k.border);   // without the border corrections unless a sampler the draw binds has a twin
         MTL4MeshRenderPipelineDescriptor *m = nil; id<MTL4Compiler> comp = mtl_comp4();
         if (mf && ff && comp) {
             m = [MTL4MeshRenderPipelineDescriptor new]; m.meshFunctionDescriptor = mf; m.fragmentFunctionDescriptor = ff;
@@ -580,9 +585,9 @@ static id<MTLFunction> mtk_nop_fragment(void) {
     return fn;
 }
 // The Metal 4 descriptor of a native mesh pipeline, whole: no base with open colour state, as a game has some hundred of them, each with functions of its own. Its depth / stencil
-// formats are not named (Metal 4 pipelines serve any). nil when a function has no Metal 4 descriptor (fn4_of)
-static MTL4MeshRenderPipelineDescriptor *mtk_desc4(MTLRenderPipelineDescriptor *d, NvShader *ts, NvShader *ms, id<MTLFunction> ff) {
-    MTL4FunctionDescriptor *mf = fn4_of(ms->fn), *of = fn4_of(ts ? ts->fn : ms->mesh_obj), *f4 = fn4_of(ff);
+// formats are not named (Metal 4 pipelines serve any). nil when a function has no Metal 4 descriptor (fn4_of: the diagnostic fragment overrides)
+static MTL4MeshRenderPipelineDescriptor *mtk_desc4(MTLRenderPipelineDescriptor *d, NvShader *ts, NvShader *ms, id<MTLFunction> ff, int border) {
+    MTL4FunctionDescriptor *mf = fn4_of_b(ms->fn, !border), *of = ts ? fn4_of_b(ts->fn, !border) : fn4_of(ms->mesh_obj), *f4 = fn4_of_b(ff, !border);
     if (!mf || !of || !f4) return nil;
     MTL4MeshRenderPipelineDescriptor *m = [MTL4MeshRenderPipelineDescriptor new];
     m.meshFunctionDescriptor = mf; m.fragmentFunctionDescriptor = f4; m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
@@ -605,7 +610,7 @@ static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvSh
     if (!pso_ds_valid((uint32_t)d.depthAttachmentPixelFormat, (uint32_t)d.stencilAttachmentPixelFormat)) return nil;
     id<MTLFunction> ff = d.fragmentFunction ?: mtk_nop_fragment();
     pso4_init();
-    MTL4MeshRenderPipelineDescriptor *m4 = mtk_desc4(d, ts, ms, ff); id<MTL4Compiler> comp = mtl_comp4();
+    MTL4MeshRenderPipelineDescriptor *m4 = mtk_desc4(d, ts, ms, ff, k->border); id<MTL4Compiler> comp = mtl_comp4();
     if (!m4 || !comp) { if (error) *error = pso_err_nodesc(!fn4_of(ms->fn) ? ms->fn : !fn4_of(ff) ? ff : ts ? ts->fn : ms->mesh_obj); return nil; }
     int from_run = 0;
     id<MTLRenderPipelineState> ps = arch_lookup(m4, 0, &from_run);   // a period of mesh pipelines alone is a p file (no vertex layout)
@@ -632,6 +637,7 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     if (!raster || !g_mtk.ms || !g_mtk.ms->fn) return nil;
     NvShader *ts = g_mtk.ts, *ms = g_mtk.ms, *fs = raster->sh[1];
     pso_key k; pso_key_fill(&k, ms, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
+    k.border |= border_need(ts, 3);
     memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);
     mtk_bind_key(&k, ts, ms, fs);
     id ps = hm_get_id(&g_pso_mtk, &k);

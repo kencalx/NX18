@@ -12,20 +12,23 @@
 #     such a draw (Metal 4 needs a fragment function whenever rasterization is on). That library is not among the game's: it is compiled here as the host compiles its own shaders
 #     (host_msl.py: the SDK of the platform, the host's minimum OS, MSL_MIN_<sdk> in dm/host/Makefile), since the archive finds a function by its hash, which the minimum OS changes
 #     and the file's path does not. The split writes no such pairs yet
-#   · a pair whose functions declare function constants is left to the device (rest_pairs.tsv): the host specializes such functions with an empty set of values, and metal-tt makes
-#     no specialized function from a library (applegpu-nt: "cannot find private metadata"), nor the function unspecialized ("cannot lower module with unresolved function constants")
+#   · a function that declares function constants is specialized as the host's prebuild specializes it (pre_fn in nvn_mtl.m): the border colour corrections' dm_border_off set (true:
+#     off), the specialization the draws that bind no sampler with a twin share (fn_off). metal-tt specializes a <key>_b or <key>_bp function, cut by dmsh_side.cut or not, and the host
+#     finds that base by its specialized descriptor (checked on Ocarina of Time's libraries, macOS 27.2, metal-tt 32023). It cannot lower a function unspecialized ("cannot lower module
+#     with unresolved function constants"), and failed with "cannot find private metadata" on a side library (<key>_bx), which no base uses. A pair whose functions declare any other
+#     constant is left to the device (rest_pairs.tsv), as before (HOST_CONSTANTS)
 # And a compute pipeline per compute shader, which depends on its function alone (the host makes it from the function, cps_new in nvn_mtl.m; the threadgroup size is the dispatch's):
 # the C rows of the profile's prewarm list (pso_manifest.tsv, recorded, in order), then every compute shader of its shader map (shader_map.tsv, stage compute), so a game whose list
 # names none (a provisional profile) still has them; per shader <key>_b, entry `entry`. Left out as the host would not find them: a reflection of another chain version or none, a
-# missing library or entry point, a function with function constants (the host specializes it with an MTL4SpecializedFunctionDescriptor and compiles it through its MTL4Compiler on the device;
-#   metal-tt cannot make a specialized function from a library)
+# missing library or entry point, a function with a function constant other than HOST_CONSTANTS (the host specializes it with an MTL4SpecializedFunctionDescriptor and compiles it
+# through its MTL4Compiler on the device). One with the border corrections' constant is specialized as for the bases, as the host's common dispatch and its prewarm take it (cps_new_b)
 # And a native task / mesh pipeline per M row of the prewarm lists (pso_manifest.tsv), whole, as the host's mtk_build describes it (mtk_desc4 in nvn_geometry.inc): its object function
 # (the task shader's entry, or the mesh shader's own entry_object when the row has no task), the mesh shader's entry (entry_z for near = 0), the pixel shader's entry, the threads and
 # payload of the reflection's mesh_stage, and the colour attachments pso_desc makes from the row's key, fully specialized. Without them a fresh install built every one at its first
 # draw or in the prepare step through the MTLDevice: 1.9-5 s each on an iPad Pro (M5), 2.1 s for one in Ocarina of Time's play on an iPhone 18 Pro Max. Left out as the host's
 # descriptor could not be matched or would not be built: a key that does not parse, a reflection of another chain version or none, stages that do not fit (a task row whose mesh shader
-# has its own object entry, or the reverse), a missing library or entry point, a function with function constants (specialized through an MTL4SpecializedFunctionDescriptor, which
-# metal-tt cannot make from a library), no pixel shader (the host's own empty fragment, dm/gfx/msl/mesh_nop.metal, is not among the game's libraries), the alpha test or a logic
+# has its own object entry, or the reverse), a missing library or entry point, a function with a function constant other than HOST_CONSTANTS, or with the border corrections' when
+# the row keeps them (its key's border: mtk_desc4 then takes the functions unspecialized) or in the mesh shader's own object entry (taken as noted), no pixel shader (the host's own empty fragment, dm/gfx/msl/mesh_nop.metal, is not among the game's libraries), the alpha test or a logic
 # operation (their fragments come from side libraries), a colour format the script cannot name. They go into groups of their own (batches.<arch>/m<index>/); a group metal-tt
 # refuses is left out of the archive with a red line and the rest is shipped, since its pipelines are still built on the device as before (GitHub issue #283: one refused pipeline
 # failed the whole archive). The refusal is kept by the key of that group's own inputs (refused.<arch> in its folder) and the archive's key is written, so the next build reuses the
@@ -60,7 +63,13 @@ from pathlib import Path
 from typing import NamedTuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import romfs, shader_lib   # the libraries may be one file (shader_lib.py), read in place; metal-tt alone needs files of its own (real_libraries)
+import dmsh_abi as abi
+
+# The function constants the host's prebuild sets in a base's functions (nvn_mtl.m pre_fn), by name: (index, bool value). A pair whose functions declare another constant is left to the
+# device: the host leaves it at its default, which metal-tt can do too, but no other constant was tried there, and one function metal-tt fails fails its whole group
+HOST_CONSTANTS = {'dm_border_off': (abi.BORDER_FC, True)}
 
 BATCH = 1000   # bases per metal-tt run: Odyssey's largest compiler lifetime footprint at this size was 2.065 GiB on an 8 GB M2
 COMPUTE_BATCH = 16   # compute pipelines per metal-tt run, JOBS runs at a time: one metal-tt keeps about 2-3 cores busy: Star Fox's 233 took 268 s in 16 groups against 453 s in one run (M5 Pro, background priority, a loaded Mac)
@@ -93,9 +102,9 @@ ADV_BLEND = {5: (B_ZERO, B_ZERO, B_ZERO, B_ZERO), 6: (B_ONE, B_ZERO, B_ONE, B_ZE
              10: (B_DA, B_ZERO, B_DA, B_ZERO), 11: (B_ZERO, B_SA, B_ZERO, B_SA), 12: (B_IDA, B_ZERO, B_IDA, B_ZERO), 13: (B_ZERO, B_ISA, B_ZERO, B_ISA),
              14: (B_DA, B_ISA, B_ZERO, B_ONE), 15: (B_IDA, B_SA, B_ONE, B_ZERO), 16: (B_IDA, B_ISA, B_IDA, B_ISA), 17: (B_ONE,) * 4, 18: (B_ONE,) * 4, 19: (B_ONE,) * 4}
 # pso_skey (dm/gfx/nvn/nvn_pso_skey.h) as the host writes it, little-endian: vs[24], fs[24], vs_stage, fs_stage, merged, fz, the fz description (34 bytes), padding to 88, then pso_key:
-# two pointers, cfmt[8], dfmt, sfmt, samples, blend_en, chmask, a2c, blend_st[8] (8 bytes each), attr[16], stream[16] (8 bytes each), lmap[8], a pointer, atest, logic, attr_hi[16].
-# Rows from before attr_hi, and also before atest / logic, are shorter and read with those fields zero, as pso_skey_parse reads them
-SKEY = 504
+# two pointers, cfmt[8], dfmt, sfmt, samples, blend_en, chmask, a2c, blend_st[8] (8 bytes each), attr[16], stream[16] (8 bytes each), lmap[8], a pointer, atest, logic, attr_hi[16],
+# border, border_spare. Rows from before border, before attr_hi, and also before atest / logic, are shorter and read with those fields zero, as pso_skey_parse reads them
+SKEY = 512
 KEY = 88
 D16, D32, S8, D32S8, X32S8 = 250, 252, 253, 260, 261   # nvn_pso_ds.h
 
@@ -192,8 +201,23 @@ def stamp(chain, zero, text):
 
 
 def functions(path, hashes=False):
-    """{entry name: declares function constants} of a .metallib, from its header: the function list (NAME tags) and each function's public metadata (a CNST tag lists its constants).
-    hashes: {entry name: its HASH tag} instead, what an archive finds the function by. Raises ValueError on a file it cannot read"""
+    """{entry name: declares function constants} of a .metallib (constants). hashes: {entry name: its HASH tag} instead, what an archive finds the function by. Raises ValueError on a
+    file it cannot read"""
+    return constants(path, hashes=True) if hashes else {k: bool(v) for k, v in constants(path).items()}
+
+
+def _constant_names(cnst):
+    """The names in a CNST tag: a 16-bit count, then per constant its name (NUL-terminated), a type byte, a 16-bit index and a byte"""
+    n, p, out = struct.unpack_from('<H', cnst, 0)[0], 2, []
+    for _ in range(n):
+        end = cnst.index(b'\0', p); out.append(cnst[p:end].decode()); p = end + 1 + 4
+    if p > len(cnst): raise ValueError('a truncated CNST tag')
+    return tuple(out)
+
+
+def constants(path, hashes=False):
+    """{entry name: the names of the function constants it declares, a tuple, empty for none} of a .metallib, from its header: the function list (NAME tags) and each function's public
+    metadata (a CNST tag lists its constants). hashes: {entry name: its HASH tag} instead. Raises ValueError on a file it cannot read"""
     with romfs.open(path, 'rb') as f: b = f.read(1 << 20)
     if b[:4] != b'MTLB' or len(b) < 0x58: raise ValueError(f'{path}: not a Metal library')
     fo, _, po, ps = struct.unpack_from('<QQQQ', b, 0x18)
@@ -211,9 +235,9 @@ def functions(path, hashes=False):
         if hashes: return dict(zip(names, hs))
         consts, p = [], po
         for _ in range(count):   # each entry: its size (not counting the size field), then tags
-            size = struct.unpack_from('<I', b, p)[0]; consts.append(b'CNST' in tags(p + 4, p + 4 + size)); p += 4 + size
+            size = struct.unpack_from('<I', b, p)[0]; t = tags(p + 4, p + 4 + size); consts.append(_constant_names(t[b'CNST']) if b'CNST' in t else ()); p += 4 + size
         if p != po + ps: raise ValueError(f'{path}: public metadata does not match the function list')
-    except (struct.error, KeyError) as e: raise ValueError(f'{path}: unreadable function list ({e})') from e
+    except (struct.error, KeyError, UnicodeDecodeError) as e: raise ValueError(f'{path}: unreadable function list ({e})') from e
     return dict(zip(names, consts))
 
 
@@ -226,9 +250,9 @@ def plan(lib_dir, chain, pairs, zero):
             except (OSError, ValueError): js[key] = None
         return js[key]
     def fn(lib):
-        if lib == NOP_LIB: return {NOP_ENTRY: False}   # the host's, compiled with the build (host_libraries)
+        if lib == NOP_LIB: return {NOP_ENTRY: ()}   # the host's, compiled with the build (host_libraries); it declares no constants
         if lib not in fns:
-            try: fns[lib] = functions(lib_dir / f'{lib}.metallib')
+            try: fns[lib] = constants(lib_dir / f'{lib}.metallib')
             except (OSError, ValueError): fns[lib] = None
         return fns[lib]
     bases, rest, seen, left = [], [], set(), dict.fromkeys(('reflection', 'mesh', 'stage inputs', 'library', 'layer', 'primitive ID', 'entry'), 0)
@@ -246,7 +270,7 @@ def plan(lib_dir, chain, pairs, zero):
         vf, ff = fn(vl), fn(fl)
         if vf is None or ff is None: left['library'] += 1; continue
         if ventry not in vf or fentry not in ff: left['entry'] += 1; continue
-        if vf[ventry] or ff[fentry]: rest.append((vk, fk)); continue
+        if any(c not in HOST_CONSTANTS for c in vf[ventry] + ff[fentry]): rest.append((vk, fk)); continue   # script specializes HOST_CONSTANTS as the host does
         b = (vl, ventry, fl, fentry)
         if b not in seen: seen.add(b); bases.append(b)
     return bases, rest, left
@@ -261,10 +285,10 @@ def plan_compute(lib_dir, chain, shaders):
         except (OSError, ValueError): j = None
         if not isinstance(j, dict) or j.get('chain') != chain or j.get('stage', 'cs') != 'cs': left['reflection'] += 1; continue
         entry = j.get('entry') or 'main0'
-        try: fs = functions(lib_dir / f'{pc}.metallib')
+        try: fs = constants(lib_dir / f'{pc}.metallib')
         except (OSError, ValueError): left['library'] += 1; continue
         if entry not in fs: left['entry'] += 1; continue
-        if fs[entry]: left['constants'] += 1; continue
+        if any(c not in HOST_CONSTANTS for c in fs[entry]): left['constants'] += 1; continue   # script specializes HOST_CONSTANTS, as cps_new looks the pipeline up
         if (pc, entry) not in seen: seen.add((pc, entry)); pipes.append((pc, entry))
     return pipes, left
 
@@ -283,7 +307,7 @@ def read_meshes(manifests):
 def parse_mesh_key(text):
     """An M row's pso_skey hex as pso_mesh_skey_parse reads it: a dict of the fields the pipeline's descriptor depends on, or None where the host refuses the row"""
     n = 2 * SKEY
-    if len(text) not in (n, n - 2 * 64, n - 2 * 64 - 2 * 8): return None
+    if len(text) not in (n, n - 2 * 8, n - 2 * 8 - 2 * 64, n - 2 * 8 - 2 * 64 - 2 * 8): return None
     try: b = bytes.fromhex(text)
     except ValueError: return None
     b += bytes(SKEY - len(b))
@@ -295,6 +319,7 @@ def parse_mesh_key(text):
     raw = struct.unpack_from('<8Q', b, KEY + 72)
     fsfn, = struct.unpack_from('<Q', b, KEY + 336)
     atest, logic = struct.unpack_from('<2I', b, KEY + 344)
+    border, = struct.unpack_from('<I', b, KEY + 416)   # 1: the draw binds a sampler with a twin, so mtk_desc4 keeps the border corrections (fn4_of_b)
     # pso_ds_pair, then the checks of pso_mesh_skey_parse (a mesh shader in the vertex place, a pixel shader or none, no merged pass, tile fragment or pointer, valid depth / stencil)
     if not dfmt and sfmt == D32S8: dfmt = D32S8
     if not sfmt and dfmt == D32S8: sfmt = D32S8
@@ -307,7 +332,7 @@ def parse_mesh_key(text):
                       'adv': v >> 37 & 0x3f, 'adv_npm': v >> 43 & 1, 'adv_ovl': v >> 44 & 3} if on else dict.fromkeys(('src_rgb', 'dst_rgb', 'src_a', 'dst_a', 'eq_rgb', 'eq_a', 'adv', 'adv_npm', 'adv_ovl'), 0))
     for i in range(8):
         if not cfmt[i]: blend_en &= ~(1 << i); chmask &= ~(0xf << 4 * i)
-    return {'vs': vs, 'fs': fs, 'cfmt': cfmt, 'samples': samples, 'blend_en': blend_en, 'chmask': chmask, 'a2c': a2c, 'blend': blend, 'atest': atest, 'logic': logic}
+    return {'vs': vs, 'fs': fs, 'cfmt': cfmt, 'samples': samples, 'blend_en': blend_en, 'chmask': chmask, 'a2c': a2c, 'blend': blend, 'atest': atest, 'logic': logic, 'border': border}
 
 
 def adv_blend(b):
@@ -379,9 +404,12 @@ def plan_mesh(lib_dir, chain, rows, zero):
         return js[key]
     def fn(lib):
         if lib not in fns:
-            try: fns[lib] = functions(lib_dir / f'{lib}.metallib')
+            try: fns[lib] = constants(lib_dir / f'{lib}.metallib')
             except (OSError, ValueError): fns[lib] = None
         return fns[lib]
+    # A function's constants the script cannot specialize as the host does: any but HOST_CONSTANTS, or any at all where the host takes the function unspecialized (no border
+    # variant: the mesh shader's own object entry, which mtk_desc4 takes by fn4_of; every function of a row that keeps the border corrections)
+    def other(cs, plain=False): return any(plain or c not in HOST_CONSTANTS for c in cs)
     pipes, seen = [], set()
     left: dict[str, int] = dict.fromkeys(('key', 'reflection', 'stages', 'library', 'entry', 'constants', 'no pixel shader', 'side library', 'format'), 0)
     for task, text in rows:
@@ -399,9 +427,10 @@ def plan_mesh(lib_dir, chain, rows, zero):
         mf, of, ff = fn(k['vs']), fn(obj[0]), fn(k['fs'])
         if mf is None or of is None or ff is None: left['library'] += 1; continue
         if ments[1] not in mf or obj[1] not in of: left['entry'] += 1; continue
-        if mf[ments[1]] or of[obj[1]]: left['constants'] += 1; continue
-        if fj.get('entry') in ff and ff[fj['entry']]: left['constants'] += 1; continue   # shader_load specializes every entry point of such a shader
-        frag = mesh_fragment(k, fj, ff)
+        plain = bool(k['border'])
+        if other(mf[ments[1]], plain) or other(of[obj[1]], plain or not task): left['constants'] += 1; continue
+        if fj.get('entry') in ff and other(ff[fj['entry']], plain): left['constants'] += 1; continue   # shader_load specializes every entry point of such a shader
+        frag = mesh_fragment(k, fj, {e: other(cs, plain) for e, cs in ff.items()})
         if isinstance(frag, str): left[frag] += 1; continue
         u16 = lambda d, x: int(d.get(x) or 0) & 0xffff   # NvShader keeps the threads and payload as uint16_t
         p = MeshPipe(tuple(obj), tuple(ments), (k['fs'], frag[0]), u16(ts, 'threads') if task else 1, u16(ms, 'threads'), (u16(ts, 'payload') + 15) & ~15 if task else 16,
@@ -425,22 +454,33 @@ def mesh_descriptor(p, fd):
 def script(lib_dir, bases, computes=()):
     """A Metal 4 pipelines script (metal4-pipelines-script(5), the .mtl4-json format metal-tt reads) with one render pipeline descriptor per base, and one compute pipeline descriptor per
     compute pipeline (library, entry) that names the function alone, as the host's lookup does (cps_bundle in nvn_mtl.m: no threadgroup size, no indirect command buffers), and one mesh
-    render pipeline descriptor per task / mesh pipeline (MeshPipe among computes) as mtk_desc4 makes it"""
+    render pipeline descriptor per task / mesh pipeline (MeshPipe among computes) as mtk_desc4 makes it. A function that declares constants is named through its specialization by
+    HOST_CONSTANTS (a pair or a row with other constants is not among them: plan, plan_mesh)"""
     meshes = [p for p in computes if isinstance(p, MeshPipe)]; computes = [p for p in computes if not isinstance(p, MeshPipe)]
-    libs, fns, pipes = {}, {}, []
+    libs, fns, specs, declared, pipes = {}, {}, {}, {}, []
     def fd(lib, entry):
-        if lib not in libs: libs[lib] = {'label': lib, 'path': str(Path(lib_path(lib_dir, lib)).resolve())}
+        if lib not in libs:
+            libs[lib] = {'label': lib, 'path': str(Path(lib_path(lib_dir, lib)).resolve())}
+            try: declared[lib] = constants(lib_path(lib_dir, lib))
+            except (OSError, ValueError): declared[lib] = {}   # plan read every base's libraries; one it could not read is not among them
         label = f'{lib}.{entry}'
         if label not in fns: fns[label] = {'label': label, 'library': f'lib:{lib}', 'name': entry}
-        return f'fnd:{label}'
+        cs = declared[lib].get(entry, ())
+        if not cs: return f'fnd:{label}'
+        if label not in specs:
+            specs[label] = {'label': f'{label}.host', 'function_descriptor': f'fnd:{label}',
+                            'constant_values': [{'id_type': 'FunctionConstantIndex', 'id': {'data': i}, 'value_type': 'ConstantBool', 'value': {'data': v}}
+                                                for i, v in sorted(HOST_CONSTANTS[c] for c in cs if c in HOST_CONSTANTS)]}
+        return f'fnd:{label}.host'
     for vl, ve, fl, fe in bases:
         pipes.append({'vertex_function_descriptor': fd(vl, ve), 'fragment_function_descriptor': fd(fl, fe),
                       'color_attachments': [dict.fromkeys(COLOUR, 'Unspecialized') for _ in range(8)]})
     descriptors = {'render_pipeline_descriptors': pipes}
     if computes: descriptors['compute_pipeline_descriptors'] = [{'compute_function_descriptor': fd(lib, entry)} for lib, entry in computes]   # none: the script of bases alone, as before
     if meshes: descriptors['mesh_render_pipeline_descriptors'] = [mesh_descriptor(p, fd) for p in meshes]
-    return {'libraries': list(libs.values()), 'function_descriptors': {'library_function_descriptors': list(fns.values())},
-            'pipeline_descriptors': descriptors}
+    functions_ = {'library_function_descriptors': list(fns.values())}
+    if specs: functions_['specialized_function_descriptors'] = list(specs.values())   # none: the script as before, so other games' archive keys hold
+    return {'libraries': list(libs.values()), 'function_descriptors': functions_, 'pipeline_descriptors': descriptors}
 
 
 def write_script(path, configuration):

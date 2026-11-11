@@ -29,14 +29,16 @@ def tag(name, data): return name + struct.pack('<H', len(data)) + data
 
 def metallib(funcs, layer=False):   # layer: the layer's name in the library, as a library with a function that writes it holds it
     """A .metallib header as the Metal compiler writes it: the function list (count, then per function its size counting the size field, NAME, ENDT) and the public metadata
-    (per function its size not counting the size field, a CNST tag for a function with constants, ENDT); funcs: [(name, has constants)]"""
+    (per function its size not counting the size field, a CNST tag for a function with constants, ENDT); funcs: [(name, has constants)], or (name, (constant name, ...))"""
     fl = struct.pack('<I', len(funcs))
     for name, _ in funcs:
         body = tag(b'NAME', name.encode() + b'\0') + tag(b'TYPE', b'\0') + b'ENDT'
         fl += struct.pack('<I', 4 + len(body)) + body
     pm = b''
     for _, const in funcs:
-        body = (tag(b'CNST', b'\x01\x00spvLinearTextureAlignmentOverride\x00\x35\xff\xff\x00') if const else b'') + b'ENDT'
+        names = const if isinstance(const, tuple) else ('spvLinearTextureAlignmentOverride',) if const else ()
+        cnst = struct.pack('<H', len(names)) + b''.join(n.encode() + b'\0\x35' + struct.pack('<H', 216 if n == 'dm_border_off' else 0xffff) + b'\0' for n in names)
+        body = (tag(b'CNST', cnst) if names else b'') + b'ENDT'
         pm += struct.pack('<I', len(body)) + body
     fo = 0x58; po_ = fo + len(fl)
     head = b'MTLB' + b'\0' * 0x14 + struct.pack('<QQQQ', fo, len(fl), po_, len(pm))
@@ -72,6 +74,13 @@ class Functions(unittest.TestCase):
             self.assertEqual(po.functions(p), {'main0': False, 'main0_z': False, 'fmain': True})
             p.write_bytes(b'not a library'); self.assertRaises(ValueError, po.functions, p)
             p.write_bytes(metallib([('main0', False)])[:0x60]); self.assertRaises(ValueError, po.functions, p)
+
+    def test_constant_names(self):   # the CNST tag as the Metal compiler writes it (Ocarina of Time's border-off libraries: count 1, "dm_border_off", bool 0x35, index 216, 0)
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t, 'x.metallib'); p.write_bytes(metallib([('main0', ('dm_border_off',)), ('main0_u', ('dm_border_off', 'spvLinearTextureAlignmentOverride')), ('vs', False)]))
+            self.assertEqual(po.constants(p), {'main0': ('dm_border_off',), 'main0_u': ('dm_border_off', 'spvLinearTextureAlignmentOverride'), 'vs': ()})
+            self.assertEqual(po.functions(p), {'main0': True, 'main0_u': True, 'vs': False})
+            self.assertEqual(po.HOST_CONSTANTS['dm_border_off'], (216, True))   # dmsh_abi.h DMSH_BORDER_FC, set as nvn_mtl.m pre_fn sets it
 
     @unittest.skipUnless(shutil.which('xcrun'), 'needs the Metal compiler')
     def test_a_real_library(self):
@@ -120,6 +129,25 @@ class Plan(unittest.TestCase):
         bases, _, _ = po.plan(self.d, CHAIN, pairs[:2], True)   # near = 0: the entry_z entries
         self.assertEqual(bases, [('pull_bp', 'main0_z', 'fs_b', 'main0'), ('plain_b', 'main0_z', 'fs_b', 'main0')])
 
+    def test_border_constant_is_specialized_as_the_host_does(self):   # pre_fn: dm_border_off true, every other constant at its default; a pair with another constant stays on the device
+        vz = [('main0', False), ('main0_z', False)]
+        self.shader('pull', {'entry_z': 'main0_z', 'pull': {'entry': 'main0'}, 'vertex_inputs': [{'location': 0}]}, {'_b': vz, '_bp': [('main0', ('dm_border_off',))]})
+        self.shader('fb', {}, {'_b': [('main0', ('dm_border_off',))]})
+        self.shader('fbs', {}, {'_b': [('main0', ('dm_border_off', 'spvLinearTextureAlignmentOverride'))]})
+        self.shader('fs', {}, {'_b': [('main0', False)]})
+        bases, rest, _ = po.plan(self.d, CHAIN, [('pull', 'fb'), ('pull', 'fbs'), ('pull', 'fs')], False)
+        self.assertEqual(bases, [('pull_bp', 'main0', 'fb_b', 'main0'), ('pull_bp', 'main0', 'fs_b', 'main0')])
+        self.assertEqual(rest, [('pull', 'fbs')])
+        j = po.script(self.d, bases)
+        spec = j['function_descriptors']['specialized_function_descriptors']
+        self.assertEqual([(s['label'], s['function_descriptor']) for s in spec], [('pull_bp.main0.host', 'fnd:pull_bp.main0'), ('fb_b.main0.host', 'fnd:fb_b.main0')])
+        self.assertEqual(spec[0]['constant_values'], [{'id_type': 'FunctionConstantIndex', 'id': {'data': 216}, 'value_type': 'ConstantBool', 'value': {'data': True}}])
+        p = j['pipeline_descriptors']['render_pipeline_descriptors']
+        self.assertEqual([(x['vertex_function_descriptor'], x['fragment_function_descriptor']) for x in p],
+                         [('fnd:pull_bp.main0.host', 'fnd:fb_b.main0.host'), ('fnd:pull_bp.main0.host', 'fnd:fs_b.main0')])
+        self.shader('plain', {}, {'_b': vz})
+        self.assertNotIn('specialized_function_descriptors', po.script(self.d, [('plain_b', 'main0', 'fs_b', 'main0')])['function_descriptors'])   # none: the script as before
+
     def test_script(self):
         j = po.script(self.d, [('v_bp', 'main0', 'f_b', 'main0'), ('w_bp', 'main0_z', 'f_b', 'main0')])
         self.assertEqual([l['label'] for l in j['libraries']], ['v_bp', 'f_b', 'w_bp'])
@@ -161,6 +189,15 @@ class Compute(unittest.TestCase):
         self.assertEqual(pipes, [('c1_b', 'main0'), ('c2_b', 'main0')])   # each once
         self.assertEqual(left, {'reflection': 3, 'library': 1, 'entry': 1, 'constants': 1})
 
+    def test_border_constant_kernel_is_specialized(self):   # the border corrections' constant alone: specialized as cps_new looks up the common dispatch's pipeline (cps_new_b)
+        self.shader('kb', {'stage': 'cs'}, {'_b': [('main0', ('dm_border_off',))]})
+        self.shader('kbs', {'stage': 'cs'}, {'_b': [('main0', ('dm_border_off', 'spvLinearTextureAlignmentOverride'))]})
+        pipes, left = po.plan_compute(self.d, CHAIN, ['kb_b', 'kbs_b'])
+        self.assertEqual(pipes, [('kb_b', 'main0')]); self.assertEqual(left['constants'], 1)
+        j = po.script(self.d, [], pipes)
+        self.assertEqual(j['pipeline_descriptors']['compute_pipeline_descriptors'], [{'compute_function_descriptor': 'fnd:kb_b.main0.host'}])
+        self.assertEqual(j['function_descriptors']['specialized_function_descriptors'][0]['constant_values'][0]['id'], {'data': 216})
+
     def test_pipelines_from_a_library_image(self):   # one-file libraries (b-<chain>.img, shader_lib.py), as dmsh_build.py writes them: read in place, as plan reads the bases
         self.shader('c1', {'stage': 'cs'}, {'_b': [('main0', False)]})
         self.shader('c3', {'stage': 'cs'}, {'_b': [('main0', True)]})
@@ -183,9 +220,9 @@ class Compute(unittest.TestCase):
         self.assertEqual([(n, len(x), len(y)) for n, x, y in po.groups_of([], c, 5, 0)], [('c00001', 0, 3)])
 
 
-def skey(vs='m_b', fs='p_b', cfmt=(70,), chmask=0xf, blend_en=0, blend=(), samples=1, a2c=0, atest=0, logic=0, dfmt=0, sfmt=0, vs_stage=4, fs_stage=1, merged=0, fz=0, ptr=0, size=504):
+def skey(vs='m_b', fs='p_b', cfmt=(70,), chmask=0xf, blend_en=0, blend=(), samples=1, a2c=0, atest=0, logic=0, dfmt=0, sfmt=0, vs_stage=4, fs_stage=1, merged=0, fz=0, ptr=0, border=0, size=512):
     """An M row's pso_skey hex, laid out as dm/gfx/nvn/nvn_pso_skey.h on arm64 (built here field by field, not with the tool's own offsets); blend: {target: blend_st fields}"""
-    k = bytearray(416)
+    k = bytearray(424)
     struct.pack_into('<Q', k, 0, ptr)
     struct.pack_into('<8I', k, 16, *(list(cfmt) + [0] * (8 - len(cfmt))))
     struct.pack_into('<6I', k, 48, dfmt, sfmt, samples, blend_en, chmask, a2c)
@@ -194,6 +231,7 @@ def skey(vs='m_b', fs='p_b', cfmt=(70,), chmask=0xf, blend_en=0, blend=(), sampl
              | f.get('adv', 0) << 37 | f.get('adv_npm', 0) << 43 | f.get('adv_ovl', 0) << 44)
         struct.pack_into('<Q', k, 72 + 8 * i, v)
     struct.pack_into('<2I', k, 344, atest, logic)
+    struct.pack_into('<I', k, 416, border)
     head = vs.encode().ljust(24, b'\0') + fs.encode().ljust(24, b'\0') + bytes((vs_stage, fs_stage if fs else 0, merged, fz)) + bytes(36)
     return (head + bytes(k)).hex()[:2 * size]
 
@@ -230,8 +268,10 @@ class Mesh(unittest.TestCase):
         self.assertEqual({x: k['blend'][0][x] for x in OVER}, OVER)
         self.assertEqual((k['blend'][2]['adv'], k['blend'][2]['adv_npm'], k['blend'][2]['adv_ovl']), (8, 1, 0))
         self.assertEqual(k['blend'][1]['src_rgb'], 0)
-        self.assertEqual(po.parse_mesh_key(skey(atest=1, size=504 - 64))['atest'], 1)   # a row written before attr_hi
-        self.assertEqual(po.parse_mesh_key(skey(atest=1, size=504 - 64 - 8))['atest'], 0)   # and one before atest / logic: those fields read as zero
+        self.assertEqual(po.parse_mesh_key(skey(atest=1, border=1, size=512 - 8))['border'], 0)   # a row written before border: it reads as 0
+        self.assertEqual(po.parse_mesh_key(skey(border=1))['border'], 1)
+        self.assertEqual(po.parse_mesh_key(skey(atest=1, size=512 - 8 - 64))['atest'], 1)   # a row written before attr_hi
+        self.assertEqual(po.parse_mesh_key(skey(atest=1, size=512 - 8 - 64 - 8))['atest'], 0)   # and one before atest / logic: those fields read as zero
         self.assertEqual(po.parse_mesh_key(skey(atest=1))['atest'], 1)
         self.assertEqual(po.parse_mesh_key(skey(fs='', cfmt=()))['fs'], '')
         self.assertEqual(po.parse_mesh_key(skey(sfmt=260))['cfmt'][0], 70)   # combined depth / stencil paired (pso_ds_pair)
@@ -255,6 +295,19 @@ class Mesh(unittest.TestCase):
         self.assertEqual((b.obj, b.mesh, b.obj_threads, b.mesh_threads, b.payload), (('n_b', 'main0_o'), ('n_b', 'main0_z'), 1, 96, 16))   # no task: one thread a block, 16 bytes
         self.assertEqual(b.colours[0], ('RGBA8Unorm', 'Red Green Blue', 'Enabled', 'Add', 'Add', 'OneMinusSourceAlpha', 'OneMinusSourceAlpha', 'SourceAlpha', 'SourceAlpha'))
         self.assertEqual(po.plan_mesh(self.d, CHAIN, rows[:1], False)[0][0].mesh, ('m_b', 'main0'))   # near = -w: the mesh shader's main0
+
+    def test_border_constant_in_rows(self):   # dm_border_off specialized as mtk_desc4 takes it (fn4_of_b); a row that keeps the corrections, or an object entry of the mesh shader's own, stays on the device
+        self.shaders()
+        self.shader('mb', {'entry_z': 'main0_z', 'mesh_stage': {'kind': 'ms', 'threads': 64, 'task': True}}, {'_b': [('main0', ('dm_border_off',)), ('main0_z', ('dm_border_off',))]})
+        self.shader('nb', {'entry_object': 'main0_o', 'mesh_stage': {'kind': 'ms', 'threads': 96, 'task': False}}, {'_b': [('main0', False), ('main0_o', ('dm_border_off',))]})
+        self.shader('pb', {'raster': {'colors': [0]}}, {'_b': [('main0', ('dm_border_off',))]})
+        rows = [('t_b', skey(vs='mb_b', fs='pb_b')), ('t_b', skey(vs='mb_b', fs='pb_b', border=1)), ('t_b', skey(fs='pb_b', border=1)), (None, skey(vs='nb_b'))]
+        pipes, left = po.plan_mesh(self.d, CHAIN, rows, False)
+        self.assertEqual([(p.mesh, p.frag) for p in pipes], [(('mb_b', 'main0'), ('pb_b', 'main0'))]); self.assertEqual(left['constants'], 3)
+        j = po.script(self.d, [], pipes)
+        m = j['pipeline_descriptors']['mesh_render_pipeline_descriptors'][0]
+        self.assertEqual((m['object_function_descriptor'], m['mesh_function_descriptor'], m['fragment_function_descriptor']), ('fnd:t_b.main0', 'fnd:mb_b.main0.host', 'fnd:pb_b.main0.host'))
+        self.assertEqual({s['label'] for s in j['function_descriptors']['specialized_function_descriptors']}, {'mb_b.main0.host', 'pb_b.main0.host'})
 
     def colours(self, fj, funcs, **key):
         return po.mesh_fragment(po.parse_mesh_key(skey(**key)), dict({'entry': 'main0'}, **fj), dict({'main0': False}, **funcs))

@@ -24,7 +24,7 @@ static void depth_draw(const char *name, id<MTLFunction> vs, int colour) {
     d.vertexFunction = vs; d.fragmentFunction = nil; d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
     if (colour) d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;   // as a shadow pass that keeps a colour target bound
     uint64_t spec = g_pb_spec, bases = g_pb_built + g_pb_archived + g_pb_reused; NSError *err = nil;
-    id<MTLRenderPipelineState> ps = pso_build(d, &err);
+    id<MTLRenderPipelineState> ps = pso_build(d, 0, &err);
     CHECK(ps != nil, "%s: a pipeline (%s)", name, err ? err.localizedDescription.UTF8String : "no error");
     if (!ps) return;
     CHECK(g_pb_built + g_pb_archived + g_pb_reused == bases + 1 && g_pb_spec == spec + 1, "%s: a base (built, from the archive or reused), then specialized", name);

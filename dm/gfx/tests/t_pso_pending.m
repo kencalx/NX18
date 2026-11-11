@@ -31,7 +31,9 @@ static int g_checks, g_failed;
 - (MTLFunctionType)functionType { return type; }
 @end
 @interface TestLibrary : NSObject @end
-@implementation TestLibrary @end
+@implementation TestLibrary
+- (id<MTLFunction>)newFunctionWithName:(NSString *)name { (void)name; return nil; }   // fn_off asks the entry for its constants: none, so no border-off variant
+@end
 static id<MTLFunction> test_function(MTLFunctionType type) {
     static id<MTLLibrary> lib; if (!lib) lib = (id<MTLLibrary>)[TestLibrary new];
     TestFunction *f = [TestFunction new]; f->type = type;

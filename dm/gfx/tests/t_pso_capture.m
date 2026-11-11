@@ -91,14 +91,14 @@ static uint32_t run_cs(id<MTLComputePipelineState> ps) {
 // Every kind of pipeline the game's draws and dispatches build, through pso_build and cps_new
 static void pipelines(const char *mode) {
     NSError *e = nil; int spec0 = n_spec, render0;
-    id<MTLRenderPipelineState> a = pso_build(render_desc(MTLPixelFormatRGBA8Unorm, t4_fn(g_lib, @"fs")), &e);
+    id<MTLRenderPipelineState> a = pso_build(render_desc(MTLPixelFormatRGBA8Unorm, t4_fn(g_lib, @"fs")), 0, &e);
     CHECK(a && draw_px(a) == 0xff4080ffu, "%s: a pipeline specialized from its base draws (%s)", mode, e ? e.localizedDescription.UTF8String : "-");
     CHECK(n_spec == spec0 + 1, "%s: by specialization (%d)", mode, n_spec - spec0);
     MTLRenderPipelineDescriptor *wd = render_desc(MTLPixelFormatRGBA8Unorm, t4_fn(g_lib, @"fs2")); wd.label = PSO_WHOLE; spec0 = n_spec; render0 = n_render;
-    id<MTLRenderPipelineState> w = pso_build(wd, &e);
+    id<MTLRenderPipelineState> w = pso_build(wd, 0, &e);
     CHECK(w && draw_px(w) == 0xff00ff00u, "%s: a pipeline built whole draws", mode);
     CHECK(n_spec == spec0 && n_render == render0 + 1, "%s: whole, by one compile (%d, %d)", mode, n_spec - spec0, n_render - render0);
-    id<MTLRenderPipelineState> z = pso_build(render_desc(MTLPixelFormatInvalid, nil), &e);
+    id<MTLRenderPipelineState> z = pso_build(render_desc(MTLPixelFormatInvalid, nil), 0, &e);
     CHECK(z != nil, "%s: a depth-only pipeline (the empty fragment)", mode);
     int compute0 = n_compute;
     id<MTLComputePipelineState> c = cps_new(t4_fn(g_lib, @"cs"), &e);
