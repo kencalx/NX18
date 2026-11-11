@@ -103,7 +103,9 @@ void dm_vi_frame_ticket(uint64_t frame, uint64_t ticket) {   // nvn_queue.inc, o
     pthread_mutex_lock(&g_vfh_mu);
     vfh_ent *e = &g_vfh[frame % VFH];
     // Before the game's call recorded the frame (the worker can be that quick): the entry is made here, with a queue time of now so that it never reads as 0; the call keeps the
-    // ticket and sets its own queue time
+    // ticket and sets its own queue time. A slot that holds a newer frame already (the worker 8 or more frames behind the game) is left alone: this frame has dropped out of the
+    // last 8, which the history lists, and writing it there would drop the newer frame from the history until the worker reached that one
+    if (e->frame > frame) { pthread_mutex_unlock(&g_vfh_mu); return; }
     if (e->frame != frame) *e = (vfh_ent){frame, ticket, guest_ns(), 0}; else e->ticket = ticket;
     pthread_mutex_unlock(&g_vfh_mu);
 }

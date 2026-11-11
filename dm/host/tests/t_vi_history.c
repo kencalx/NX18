@@ -78,6 +78,17 @@ int main(void) {
         present_worker(8); for (int i = 0; i < 8; i++) present();                                      // frames 9-16 reuse every slot
         g_done = g_in - 1; present_call();                                                            // frame 17 in frame 9's slot: queued, though ticket 9 is long handed on
         assert(h_vi_FrameHist(fi, 1, NULL) == 1 && fi[0][1] == 17 && fi[0][0] == 1);
+        // a worker 8 or more frames behind the game: an old frame's ticket leaves the newer frame in its slot alone, which stays listed and queued
+        restart(NULL);
+        for (int i = 0; i < 9; i++) present_call();                                                   // frames 1-9 called, none in the present queue yet; 9 in 1's slot
+        uint64_t q9 = g_vfh[1].queued_ns;
+        g_gns += 1000000; present_worker(1);                                                          // the worker reaches frame 1 now
+        assert(g_vfh[1].frame == 9 && g_vfh[1].ticket == VFH_UNSENT && g_vfh[1].queued_ns == q9);
+        g_done = g_in;                                                                                // ticket 1 handed on
+        assert(h_vi_FrameHist(fi, 8, NULL) == 8 && fi[0][1] == 9 && fi[0][0] == 1);                     // 9 still listed first, queued
+        for (int i = 0; i < 8; i++) assert(fi[i][0] == 1);                                             // and frames 2-9 have no present yet
+        for (uint64_t f = 2; f <= 9; f++) present_worker(f);
+        g_done = g_in; assert(h_vi_FrameHist(fi, 1, NULL) == 1 && fi[0][1] == 9 && fi[0][0] == 2);     // once its own present is handed on, 9 is shown
         // the game two frames ahead of a worker that lags: each frame queued until its own present is handed on, never shown with an earlier frame's time
         restart(NULL);
         int early = 0;
@@ -104,6 +115,6 @@ int main(void) {
         restart(NULL);
     }
     puts("vi frame history: count query 8, newest first, shown once handed on, presented or first-seen tick, dropped and queued frames not shown; a frame is queued until the "
-         "queue worker gives it its own ticket, in either order, with a worker that lags, slot reuse; DM_VI_FRAME_TICKET=0 takes the ticket at the game's call as before");
+         "queue worker gives it its own ticket, in either order, with a worker that lags, slot reuse, an old ticket leaving a newer frame alone; DM_VI_FRAME_TICKET=0 takes the ticket at the game's call as before");
     return 0;
 }
