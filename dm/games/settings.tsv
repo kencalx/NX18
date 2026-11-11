@@ -20,7 +20,7 @@
 #             A rule is [<option>:]<when>~<why>: <when> is terms joined by &, all of which must hold; <why> is one short line (settings.py WHY_MAX), the same for iPhone, iPad and Mac.
 #             Terms: <VAR>=<v>/<v> or <VAR>!=<v>/<v>, another row's value or an environment switch no row sets (settings.py ENV_ONLY; =* while it is set);
 #             device:<iphone/ipad/mac>, screen<r or screen>=r (the screen's long side over its short side), window>=r (the app window's), hz<n (the fastest connected screen),
-#             haptics:none, controller:none, tv:none (no TV connected), mfx:none (no MetalFX scaler): the front end decides these on the device;
+#             haptics:none, controller:none, tv:none (no TV connected), mfx:none (no MetalFX scaler), capture:on (Metal's capture layer loaded, or an app built for GPU capture): the front end decides these on the device;
 #             a shown-column term, ! to negate and / for any of several (DM_GAME_SCREEN_ASPECT==0, !fixups:DYNAMIC_RESOLUTION/RENDER_SCALE): settings.py decides it for the game and leaves it out of the list.
 #             hide takes device terms only. Greying and hiding never change a saved value: the player's choice comes back when the rule stops holding
 DM_FPS_TARGET	choice	30=30 fps,60=60 fps,120=120 fps?DM_GAME_FPS_MAX==120&platform:mac	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate		level=basic;inactive=120:hz<120~This display can't show 120 Hz
@@ -48,7 +48,7 @@ DM_MOD_FPS	toggle	-	0	mods:fps	Game	High frame rate	A mod from the game's mods f
 DM_MOD_ULTRAWIDE	toggle	-	0	mods:ultrawide&platform:ios	Game	Ultrawide	A mod from the game's mods folder that shows a wider view, stretched over a screen wider than 16:9 (an iPhone in landscape). Off on an iPad.	hide=device:ipad;inactive=screen<1.85~This screen isn't wider than 16:9
 DM_SCREEN_ASPECT	choice	auto=Match screen?platform:ios,1.43=iPhone Duo screen (1.43:1),0=16:9 (Switch)	auto|0	DM_GAME_SCREEN_ASPECT!=0	Game	Picture shape	Renders about a quarter more pixels: a little slower and warmer.	inactive=DM_MOD_ULTRAWIDE=1&screen>=1.85~Ultrawide keeps the 16:9 picture;hint=auto:window>=1.77~16:9 on this screen
 DM_PRESENT_SNAP	toggle	-	DM_GAME_PRESENT_SNAP	gfxapi:nvn	Performance	Frame buffering	Up to one frame more display latency.
-DM_PSO_PREBUILD	toggle	-	1	gfxapi:nvn	Performance	Pipeline prebuild	The first start waits a few minutes for it, once.	inactive=DM_GPU_CAPTURE=*~Off while GPU capture is on|MTL_CAPTURE_ENABLED=*~Off while GPU capture is on
+DM_PSO_PREBUILD	toggle	-	1	gfxapi:nvn	Performance	Pipeline prebuild	The first start waits a few minutes for it, once.	inactive=DM_GPU_CAPTURE=*~Off while GPU capture is on|capture:on~Off while GPU capture is on
 DM_NVN_ENC_THREAD	toggle	-	1|DM_GAME_ENC_THREAD	gfxapi:nvn	Performance	Encode thread
 DM_FPS_HOLD	toggle	on/off	DM_GAME_FPS_HOLD	DM_GAME_FPS_TARGET!=0&fixups:FPS_STATE_OFF	Performance	Hold frames when late		inactive=DM_FPS_TARGET=30/120~Only matters at 60 fps
 DM_METAL_HUD	toggle	-	0	always	Performance	Performance HUD

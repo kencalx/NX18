@@ -1,10 +1,13 @@
 """The host draws through Metal 4 only (release 1): no Metal 3 queue, command buffer, encoder or MTLDevice pipeline anywhere in the production code, and no classic queue in
 the graphics test fixtures. A change that brings one back fails here at once, with the file and line.
 
-Production code: dm/gfx/nvn, dm/gfx/tex, dm/host, dm/ios/Sources, dm/mac (their tests/ folders aside). Comments are skipped; string literals are not (a getenv of a retired
-switch is code). The patterns are anchored so that the Metal 4 calls with the same selector stay legal: MTL4Compiler's newRenderPipelineStateWithDescriptor:compilerTaskOptions:
-and an MTL4Archive's newRenderPipelineStateWithDescriptor:error: (a receiver the file declares as id<MTL4Archive>) are not MTLDevice pipelines, and
-MTL4SpecializedFunctionDescriptor's constantValues property is not MTLLibrary's newFunctionWithName:constantValues:.
+Production code: everything under dm/gfx (a new graphics layer too, such as an upstream merge that keeps dm/gfx/gl or dm/gfx/vk), dm/host, dm/ios/Sources and dm/mac, their
+tests/ folders and dm/gfx/tools aside. Comments are skipped; string literals are not (a getenv of a retired switch is code). The patterns are anchored so that the Metal 4 calls
+with the same selector stay legal: MTL4Compiler's newRenderPipelineStateWithDescriptor:compilerTaskOptions: and an MTL4Archive's newRenderPipelineStateWithDescriptor:error: (a
+receiver the file declares as id<MTL4Archive>) are not MTLDevice pipelines, whatever expression the receiver is (a call, a cast), and MTL4SpecializedFunctionDescriptor's
+constantValues property is not MTLLibrary's newFunctionWithName:constantValues:. Swift files are checked for the Swift names of the Metal 3 calls too (SWIFT_FORBIDDEN):
+makeCommandQueue, makeCommandBuffer (also the Swift name of MTLDevice's Metal 4 newCommandBuffer: a Swift front end that needs one goes into ALLOWED), a render or compute
+pipeline made without compilerTaskOptions:, and makeLibrary(source:.
 ALLOWED lists the only lines that may match, each with the number of times it must: the argument-buffer layout checks, which measure a function's own layout with an
 MTLArgumentEncoder that is not kept (MTLFunction's, shared with Metal 4): the shader's own function at its load, and the four side libraries' entry points against the base
 library's (critic C0 of the Metal 4 design: replacing them with the base's reflection would make them always pass). An allowed line that no longer matches fails too, so the
@@ -15,7 +18,8 @@ import subprocess
 import unittest
 
 REPO = Path(__file__).resolve().parents[3]
-PRODUCTION = ('dm/gfx/nvn', 'dm/gfx/tex', 'dm/host', 'dm/ios/Sources', 'dm/mac')
+PRODUCTION = ('dm/gfx', 'dm/host', 'dm/ios/Sources', 'dm/mac')
+NOT_PRODUCTION = ('dm/gfx/tools/',)   # the offline tools (a /tests/ folder is never production)
 FIXTURES = 'dm/gfx/tests'
 CODE = ('.c', '.m', '.mm', '.h', '.inc', '.swift', '.S')
 
@@ -28,10 +32,12 @@ FORBIDDEN = [
     ('newRenderPipelineStateWithTileDescriptor', r'newRenderPipelineStateWithTileDescriptor'),
     ('newFunctionWithName:constantValues:', r'(?<![.\w])constantValues:'),
     ('newLibraryWithSource', r'newLibraryWithSource'),
+    ('MTLBinaryArchive', r'\bnewBinaryArchiveWithDescriptor\b|\bMTLBinaryArchive'),
+    ('newFunctionWithDescriptor', r'\bnewFunctionWithDescriptor:'),   # MTLLibrary specialization through an MTLFunctionDescriptor's constantValues
     ('newCommandQueue', r'\bnewCommandQueue'),
     ('waitUntilCompleted', r'\bwaitUntilCompleted\b'),
     ('addCompletedHandler', r'\baddCompletedHandler\b'),
-    ('classic command buffer', r'\bcommandBuffer(?:WithDescriptor:|WithUnretainedReferences)?\s*\]'),
+    ('classic command buffer', r'\bcommandBuffer(?:WithDescriptor:[^\]]*|WithUnretainedReferences)?\s*\]'),
     ('classic blit encoder', r'\bblitCommandEncoder\b'),
     ('set*Bytes', r'\bset(?:Vertex|Fragment|Compute|Mesh|Object|Tile)?Bytes:'),
     ('Metal 3 command types', r'\bid\s*<\s*MTL(?:CommandQueue|CommandBuffer|CommandEncoder|RenderCommandEncoder|ComputeCommandEncoder|BlitCommandEncoder|ParallelRenderCommandEncoder)\s*>'),
@@ -49,6 +55,14 @@ FORBIDDEN = [
     ('g_pb_legacy', r'\bg_pb_legacy\b'),
     ('g_mtk_dev', r'\bg_mtk_dev\b'),
     ('DM_GAME_PSO_MTL4', r'\bDM_GAME_PSO_MTL4\b'),
+]
+# Swift names of the Metal 3 calls, in .swift files only
+SWIFT_FORBIDDEN = [
+    ('makeCommandQueue', r'\bmakeCommandQueue\b'),
+    ('makeCommandBuffer', r'\bmakeCommandBuffer(?:WithUnretainedReferences)?\b'),
+    ('Swift MTLDevice pipeline', r'\bmake(?:Render|Compute)PipelineState\((?![^)]*compilerTaskOptions:)'),
+    ('makeLibrary(source:', r'\bmakeLibrary\(\s*source:'),
+    ('makeBinaryArchive', r'\bmakeBinaryArchive\b'),
 ]
 # The fixtures: no classic queue (Lane 2's acceptance), in the Objective-C runners the Python tests write too
 FIXTURE_FORBIDDEN = [
@@ -69,7 +83,8 @@ ALLOWED = [
     ('dm/gfx/nvn/nvn_mtl.m', 'newArgumentEncoderWithBufferIndex', '[f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len', 2),   # at_fn, lo_fn
 ]
 
-PIPELINE = re.compile(r'\[\s*([A-Za-z_][\w.]*(?:->\w+)?)\s+(newRenderPipelineStateWithDescriptor|newComputePipelineStateWithDescriptor):([^\]]*)')
+# the receiver is any expression with balanced brackets (a name, a call, a cast), so that a [ earlier on the line (an index) does not start it
+PIPELINE = re.compile(r'\[\s*((?:[^\[\]\s]|\[[^\[\]]*\])(?:[^\[\]]|\[[^\[\]]*\])*?)\s+(newRenderPipelineStateWithDescriptor|newComputePipelineStateWithDescriptor):([^\]]*)')
 ARCHIVE_DECL = re.compile(r'id\s*<\s*MTL4Archive\s*>\s*(?:__strong\s*)?\*?\s*(\w+)')
 
 
@@ -106,7 +121,7 @@ def tracked(root):
 
 def code_files(root, suffixes):
     for rel in tracked(root):
-        if Path(rel).suffix in suffixes and '/tests/' not in rel and 'third_party' not in rel:
+        if Path(rel).suffix in suffixes and '/tests/' not in rel and 'third_party' not in rel and not rel.startswith(NOT_PRODUCTION):
             yield rel, REPO / rel
 
 
@@ -117,7 +132,7 @@ def device_pipelines(rel, code):
     for no, line in enumerate(code.split('\n'), 1):
         for m in PIPELINE.finditer(line):
             recv, sel, rest = m.groups()
-            if 'compilerTaskOptions:' in rest or recv in archives:
+            if 'compilerTaskOptions:' in rest or recv.strip() in archives:
                 continue
             hits.append((rel, no, 'MTLDevice render pipeline' if sel.startswith('newRender') else 'MTLDevice compute pipeline', line.strip()))
     return hits
@@ -126,12 +141,13 @@ def device_pipelines(rel, code):
 def production_hits():
     hits = []
     pats = [(name, re.compile(p)) for name, p in FORBIDDEN if p]
+    swift = pats + [(name, re.compile(p)) for name, p in SWIFT_FORBIDDEN]
     for root in PRODUCTION:
         for rel, p in code_files(root, CODE):
             code = strip_comments(p.read_text(errors='replace'), swift=p.suffix == '.swift')
             hits += device_pipelines(rel, code)
             for no, line in enumerate(code.split('\n'), 1):
-                for name, rx in pats:
+                for name, rx in swift if p.suffix == '.swift' else pats:
                     if rx.search(line):
                         hits.append((rel, no, name, line.strip()))
     return hits
@@ -181,6 +197,37 @@ class StripComments(unittest.TestCase):
         self.assertTrue(re.search(rx['classic command buffer'], '[q commandBuffer]'))
         self.assertFalse(re.search(rx['present_encode'], 'present_encode_m4(cb, src, dst)'))
         self.assertFalse(re.search(rx['g_q'], 'g_q4 = nil;'))
+        # the forms an earlier version missed: a descriptor command buffer, a call or a cast as the receiver, MTLBinaryArchive, library specialization
+        self.assertTrue(re.search(rx['classic command buffer'], '[q commandBufferWithDescriptor:d]'))
+        self.assertTrue(re.search(rx['classic command buffer'], 'id x = [q commandBufferWithUnretainedReferences];'))
+        self.assertFalse(re.search(rx['classic command buffer'], '[g_dev newCommandBufferWithDescriptor:d]'))
+        calls = ('p = [t4dev() newRenderPipelineStateWithDescriptor:d error:&e];\n'
+                 'q = [(id<MTLDevice>)o newComputePipelineStateWithDescriptor:cd options:0 reflection:nil error:&e];\n'
+                 'r = [mtl_comp4() newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:&e];\n'
+                 'id<MTL4Archive> arch; s[i] = [arch newRenderPipelineStateWithDescriptor:d error:nil];\n'
+                 't = [[x dev] newRenderPipelineStateWithDescriptor:d error:&e];\n')
+        self.assertEqual([(no, kind) for _, no, kind, _ in device_pipelines('f.m', calls)], [(1, 'MTLDevice render pipeline'), (2, 'MTLDevice compute pipeline'), (5, 'MTLDevice render pipeline')])
+        self.assertTrue(re.search(rx['MTLBinaryArchive'], 'id a = [dev newBinaryArchiveWithDescriptor:bd error:&e];'))
+        self.assertTrue(re.search(rx['newFunctionWithDescriptor'], 'f = [lib newFunctionWithDescriptor:fd error:&e];'))
+        self.assertFalse(re.search(rx['newFunctionWithDescriptor'], 'MTL4LibraryFunctionDescriptor *ld = [MTL4LibraryFunctionDescriptor new];'))
+
+    def test_swift_anchors(self):
+        rx = dict(SWIFT_FORBIDDEN)
+        for name, line in (('makeCommandQueue', 'let q = d.makeCommandQueue()!'), ('makeCommandBuffer', 'let cb = q.makeCommandBuffer()'),
+                           ('Swift MTLDevice pipeline', 'let p = try d.makeRenderPipelineState(descriptor: rd)'),
+                           ('Swift MTLDevice pipeline', 'let p = try d.makeComputePipelineState(function: f)'),
+                           ('makeLibrary(source:', 'let l = try d.makeLibrary(source: src, options: nil)'), ('makeBinaryArchive', 'try d.makeBinaryArchive(descriptor: bd)')):
+            self.assertTrue(re.search(rx[name], line), line)
+        for name, line in (('makeCommandQueue', 'let q = d.makeMTL4CommandQueue()!'), ('Swift MTLDevice pipeline', 'try c.makeRenderPipelineState(descriptor: rd, compilerTaskOptions: nil)'),
+                           ('makeLibrary(source:', 'try c.makeLibrary(descriptor: ld)')):
+            self.assertFalse(re.search(rx[name], line), line)
+
+    def test_scope(self):   # every graphics folder but the offline tools, and Swift's spellings in the front ends
+        self.assertIn('dm/gfx', PRODUCTION)
+        files = [rel for root in PRODUCTION for rel, _ in code_files(root, CODE)]
+        self.assertIn('dm/gfx/hle_nv.c', files)
+        self.assertFalse([f for f in files if f.startswith('dm/gfx/tools/') or '/tests/' in f])
+        self.assertTrue([f for f in files if f.endswith('.swift')])
 
 
 class Mtl4Only(unittest.TestCase):

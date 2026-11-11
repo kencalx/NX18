@@ -22,7 +22,7 @@ typedef struct {
 typedef struct { char vs[24], fs[24]; uint8_t vs_stage, fs_stage, merged, fz; pso_fz_desc fz_desc; pso_key k; } pso_skey;
 
 // Drop blend factors when blending is disabled, and blend / mask bits for absent normal-pass attachments. Merged passes index logical blend / mask state through lmap,
-// so physical formats cannot decide which logical targets to drop. Depth / stencil formats stay for MTLDevice pipelines, paired for combined storage (nvn_pso_ds.h). Normalize both live keys and old prewarm rows.
+// so physical formats cannot decide which logical targets to drop. Depth / stencil formats stay in the key (its format and the archive's names stay stable), paired for combined storage (nvn_pso_ds.h). Normalize both live keys and old prewarm rows.
 // See docs/reference/shaders.md, Pipeline keys omit unused colour state; measurements belong to the linked game notes.
 static inline void pso_key_norm(pso_key *k, int merged) {
     pso_ds_pair(&k->dfmt, &k->sfmt);

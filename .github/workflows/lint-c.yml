@@ -62,6 +62,8 @@ jobs:
           echo "LLVM=$RUNNER_TEMP/llvm" >> "$GITHUB_ENV"
           "$RUNNER_TEMP/llvm/bin/clang-tidy" --version
           xcodebuild -version
+      - name: Install the selected Xcode's Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain   # the compile database's first step writes the host's shaders header (make host_msl: host_msl.py)
       - name: Compile database (dry runs of the Makefiles)
         run: python3 dm/tools/lint_c.py compdb
       - name: Base branch's baseline (pull requests)

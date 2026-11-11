@@ -36,6 +36,24 @@ class Toolchain(unittest.TestCase):
         self.assertTrue(named, 'scripts/build_ipa_from_nsp.py names no Xcode version')
         self.assertEqual(set(named), {self.xcode}, f'scripts/build_ipa_from_nsp.py: the tested Xcode is not CI\'s {self.xcode}')
 
+    def test_jobs_that_compile_the_hosts_shaders_install_the_metal_toolchain(self):
+        """host_msl.py stops without a Metal compiler (the host compiles no shader source at run time), and the xcode-27 image has none until the job downloads it. So every
+        job that builds the host's shaders header (a gfx test, the host, the iOS sources, the compile database) installs the toolchain in an earlier step"""
+        builds = re.compile(r'make\b[^\n]*-C dm/gfx/tests|cd dm/gfx/tests|make\b[^\n]*-C dm/host(?:\s|$)|lint_c\.py compdb|build_smoke\.py|gen_build\.py|compile_check\.py')
+        missing, seen = [], 0
+        for wf in sorted((REPO / '.github/workflows').glob('*.yml')):
+            jobs = wf.read_text().split('\njobs:\n', 1)
+            if len(jobs) < 2: continue
+            for m in re.finditer(r'^  ([\w-]+):\n((?:(?:    .*|[ \t]*)\n)*)', jobs[1], re.M):
+                name, body = m.groups()
+                b = builds.search(body)
+                if not b: continue
+                seen += 1
+                t = body.find('downloadComponent MetalToolchain')
+                if t < 0 or t > b.start(): missing.append(f'{wf.name}: {name} ({b.group(0)})')
+        self.assertGreaterEqual(seen, 4, 'the job parser found too few jobs that build the host\'s shaders')
+        self.assertEqual(missing, [], 'jobs that compile the host\'s shaders before installing the Metal toolchain (xcodebuild -downloadComponent MetalToolchain)')
+
 
 if __name__ == '__main__':
     unittest.main()

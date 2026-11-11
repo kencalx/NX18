@@ -191,7 +191,7 @@ class LauncherSettingsTests(unittest.TestCase):
     def test_device_and_environment_rules(self):
         rows, mac = build(BOTW, 'nvn'), build('0100F2C0115B6000', 'nvn', 'mac')
         self.assertEqual(rows['DM_PAD_PRESS_TO_JOIN']['inactive'], [{'when': ['DM_PAD_MERGE=1'], 'why': 'All controllers are player 1 (env.txt)'}])
-        capture = [{'when': ['DM_GPU_CAPTURE=*'], 'why': 'Off while GPU capture is on'}, {'when': ['MTL_CAPTURE_ENABLED=*'], 'why': 'Off while GPU capture is on'}]
+        capture = [{'when': ['DM_GPU_CAPTURE=*'], 'why': 'Off while GPU capture is on'}, {'when': ['capture:on'], 'why': 'Off while GPU capture is on'}]
         self.assertEqual(rows['DM_PSO_PREBUILD']['inactive'], capture)   # the capture profile opens no archive: the prebuild has none to build into
         self.assertNotIn('inactive', mac['DM_SW2'], 'the packer writes the Bluetooth key with every list (pack_app.py info_plist): nothing to grey')
         self.assertEqual(rows['DM_SHOW_FPS']['hint'], [{'when': ['DM_METAL_HUD=1'], 'why': 'The Performance HUD shows the frame rate too'}])

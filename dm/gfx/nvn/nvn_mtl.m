@@ -1618,7 +1618,7 @@ static void rp_end_at(const char *fn, int line);
 #define rp_end() rp_end_at(__func__, __LINE__)
 static void geo_mesh_flush_pass(void);   // a waiting run of mesh draws is drawn before its pass ends (nvn_geometry.inc)
 // Metal 4 conservative barriers (first version): a consumer barrier at the start of an encoder (all prior work → this encoder) and a producer barrier at the end (this encoder and earlier → later encoders).
-// Only the one at the start is not enough: t_rt_range 'pass 1 → pass 2 → copy' read back black, and after adding the end barrier it is 19/19. Encoders outside the main command buffer (one-off command buffers, once_*; the present pass, m4_end_present) put the same queue barriers on themselves; only the classic queue's (q_cb: a device without Metal 4, the test fixtures) have none.
+// Only the one at the start is not enough: t_rt_range 'pass 1 → pass 2 → copy' read back black, and after adding the end barrier it is 19/19. Encoders outside the main command buffer (one-off command buffers, once_*; the present pass, m4_end_present) put the same queue barriers on themselves.
 static int g_pass_swrite;   // the open draw pass has shader writes (swrite_note)
 static int g_pass_order;    // ordering barriers came in the open draw pass after its draws, none of which wrote (1 primitives, 2 fragments): the next draw that writes is ordered after them first (order_draw)
 static int g_pass_late_res; // a draw of the open pass reads memory in a stage after the vertex stage (order_note)
@@ -2357,7 +2357,7 @@ static long ab_len(void); static void ab_frame(uint64_t f);
 // DM_GPU_CAPTURE=<frame>[:<frames>] (diagnostic): a Metal GPU trace of those frames (default 1) for Xcode's Metal debugger (per-draw cost, shader profiler), or DM_GPU_CAPTURE=gpu:<ms>[:<after frame>]
 // of one frame in the first scene, after that frame, whose GPU time passes <ms> in 60 frames in a row (a single long frame in a light scene fired the first iPhone capture). Read again
 // when it changes, so the Mac's DM_CTL "env DM_GPU_CAPTURE=..." can set it while the game runs. iOS needs a build with MetalCaptureEnabled (DM_METAL_CAPTURE=1 when the project is
-// made), the Mac MTL_CAPTURE_ENABLED=1 in the environment; either one, or DM_GPU_CAPTURE set at the start, runs the capture profile (pso4_capture: no pipeline archive). It captures the Metal 4 queue (Metal refuses to capture a Metal 4 device), which runs the frames, uploads, present and the one-off command
+// made), the Mac MTL_CAPTURE_ENABLED=1 in the environment (without MTL_DEBUG_LAYER, which loads in place of the capture layer); the capture layer loaded, or DM_GPU_CAPTURE set at the start, runs the capture profile (pso4_capture: no pipeline archive). It captures the Metal 4 queue (Metal refuses to capture a Metal 4 device), which runs the frames, uploads, present and the one-off command
 // buffers (once_new). The trace is dm_<date>-<time>_f<frame>.gputrace in DM_GPU_CAPTURE_DIR, by default gpu_captures/ in the working directory (the app's Documents on iOS, the run folder
 // on the Mac). A trace takes 1.5-2 GB, so before each capture that folder alone is pruned: of its dm_*.gputrace entries the newest DM_GPU_CAPTURE_KEEP - 1 stay (default 2 with the new
 // one); nothing outside it is removed
@@ -8393,18 +8393,23 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
 // MTL4CompilerTaskOptions.lookupArchives crashes in Metal4To3ConversionUtility::convertBinaryArchives; and an archive a pipeline serializer writes meanwhile serves nothing later.
 // Pipelines MTL4Compiler builds whole, and pipelines specialized from a base (newRenderPipelineStateBySpecializationWithDescriptor), capture and replay. So a run that loads the
 // layer opens no archive (neither the one bundled with the app nor pso_archive/), makes no serializer and writes no archive file, and builds every pipeline through g_comp4,
-// bases and specializations as in any run; with no archive the prebuild has nothing to build into. No run sets lookupArchives. The layer is loaded by MTL_CAPTURE_ENABLED (the
-// Mac), DM_GPU_CAPTURE asks for a capture (which needs it), and an iOS app built with DM_METAL_CAPTURE=1 has MetalCaptureEnabled in its Info.plist, which loads it with no
-// variable set (Xcode's capture button). The reason, or NULL
-static const char *capture_profile_why(const char *mtl_capture, const char *dm_capture, id plist) {
-    if (mtl_capture) return "MTL_CAPTURE_ENABLED";
+// bases and specializations as in any run; with no archive the prebuild has nothing to build into. No run sets lookupArchives. The profile is keyed on the layer itself, not on
+// the variables that load it: MTLCaptureManager's supportsDestination:GPUTraceDocument, asked after mtl_init made the device (before any device it answers NO), is YES with
+// MTL_CAPTURE_ENABLED=1 or METAL_CAPTURE_ENABLED=1 and on an iOS app whose Info.plist has MetalCaptureEnabled (DM_METAL_CAPTURE=1, Xcode's capture button), and NO with
+// MTL_CAPTURE_ENABLED=0, with none, and under MTL_DEBUG_LAYER=1, which loads the validation layer in its place (the device is MTLDebugDevice, archives work). Two more triggers:
+// DM_GPU_CAPTURE asks for a capture (which needs the layer), and the Info.plist key (a build for capture). The reason, or NULL
+static const char *capture_profile_why(int layer, const char *dm_capture, id plist) {
+    if (layer) return "Metal's capture layer";
     if (dm_capture) return "DM_GPU_CAPTURE";
     if ([plist respondsToSelector:@selector(boolValue)] && [plist boolValue]) return "Info.plist MetalCaptureEnabled";
     return NULL;
 }
-static const char *pso4_capture(void) {
+static const char *pso4_capture(void) {   // after mtl_init (pso4_init: mtl_comp4 first)
     static const char *why; static dispatch_once_t once;
-    dispatch_once(&once, ^{ why = capture_profile_why(getenv("MTL_CAPTURE_ENABLED"), getenv("DM_GPU_CAPTURE"), [NSBundle.mainBundle objectForInfoDictionaryKey:@"MetalCaptureEnabled"]); });
+    dispatch_once(&once, ^{
+        int layer = [[MTLCaptureManager sharedCaptureManager] supportsDestination:MTLCaptureDestinationGPUTraceDocument];
+        why = capture_profile_why(layer, getenv("DM_GPU_CAPTURE"), [NSBundle.mainBundle objectForInfoDictionaryKey:@"MetalCaptureEnabled"]);
+    });
     return why;
 }
 // g_comp4 (made in mtl_init, declared at the top) compiles what the archive does not capture: specializations, and every compile without an archive folder
@@ -8725,7 +8730,7 @@ static int g_arch_cap;   // compiles are captured (an archive folder, a serializ
 static dispatch_group_t g_arch_pending;   // periods handed over and not written yet
 static _Atomic uint64_t g_pb_built, g_pb_archived, g_pb_reused, g_pb_spec, g_pb_base_ns;
 // Time by kind, all threads (the 'pipelines up to frame' line): archive lookups that found the base / found none, specializations, base compiles; predictions (submit thread)
-static _Atomic uint64_t g_pt_hit_n, g_pt_hit_ns, g_pt_miss_n, g_pt_miss_ns, g_pt_spec_ns, g_pt_comp_ns, g_pt_pred_n, g_pt_pred_ns, g_pp_done_n;   // bases compiled / taken from the archive / reused, specializations, MTLDevice builds
+static _Atomic uint64_t g_pt_hit_n, g_pt_hit_ns, g_pt_miss_n, g_pt_miss_ns, g_pt_spec_ns, g_pt_comp_ns, g_pt_pred_n, g_pt_pred_ns, g_pp_done_n;   // bases compiled / taken from the archive / reused, specializations
 typedef struct { const void *vf, *ff; uint32_t samples, a2c, rast, topo, amp; uint32_t va[31][3], vl[31][3]; } pbase_key;   // what a base depends on: pso_desc's descriptor less the colour attachments
 static nvn_hmap g_pbase = {.klen = sizeof(pbase_key)};
 // Bases the archives do not have. pso4_init opens the archives once and nothing adds to them in a run, so a miss holds for the process: a later call for the base skips the search
@@ -17080,8 +17085,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 // Swapchain texture return: before AcquireTexture gets a texture it waits for the ticket of that texture's previous present to be processed (mtl_present_wait), after which the commands the game draws into it
 // are necessarily ordered after that blit on the GPU queue.
 #define PQ 8
-typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t snap_v, up_v; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait); up_v: the upload batch present_enqueue flushed for it (pup_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
-// External producer (the Vulkan layer, removed in release 1: no producer now) renders on its own queue and signals this event when a frame's rendering is done: the present of that frame waits for the value on g_q4
+typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t snap_v, up_v; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait); up_v: the upload batch present_enqueue flushed for it (pup_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime)
 static void snap_commit_wait(uint64_t v);
 // With Metal encoding on its own thread an upload batch present_enqueue flushes is only recorded (rec_commit_upload): a RO_NOTE behind it sets g_pup_cmt to its g_pup_v, and the present
 // thread waits for that before present_now commits the display command buffer straight to the queue, so the upload reaches the queue first
@@ -17329,7 +17333,6 @@ void mtl_link_pause(int on);
 void mtl_present_discard(int on) { atomic_store(&g_present_discard, on != 0); if (on) present_drop_for_suspend(); }
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]);
 uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) { return present_enqueue(t, period, crop); }
-void *mtl_device(void) { mtl_init(); return (__bridge void *)g_dev; }
 extern _Atomic uint64_t dm_present_ns;   // hle_thread.c (DM_HITCH_DUMP); every present comes through present_enqueue
 // Present snapshots (DM_PRESENT_SNAP). A game with two swapchain textures (Breath of the Wild) gets one back only when the display link has taken its previous present on a
 // tick, so the next frame's CPU work starts on the tick and the GPU idles from the end of one frame to the first work of the next. macOS reads that idle time as room and holds the GPU

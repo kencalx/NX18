@@ -34,12 +34,14 @@ DEVICE_TERMS = (r'device:(iphone|ipad|mac)(/(iphone|ipad|mac))*',   # the kind o
                 r'haptics:none',                                   # no haptic engine in the device (CHHapticEngine supportsHaptics, as haptics_apple.m and DmGamepad.m test it)
                 r'controller:none',                                # no game controller connected now
                 r'tv:none',                                        # no external display (a TV) connected now: front_ios.m shows the picture there, whole, when one is
-                r'mfx:none')                                       # no Metal 4 MetalFX spatial scaler (nvn_mtl.m's test before it upscales)
+                r'mfx:none',                                       # no Metal 4 MetalFX spatial scaler (nvn_mtl.m's test before it upscales)
+                r'capture:on')                                     # GPU capture: Metal's capture layer loaded, or an app built for capture (MetalCaptureEnabled), nvn_mtl.m's capture profile
 PACK_TERM = r'!?(fixups|mods|gfxapi|platform):[\w-]+(/[\w-]+)*|DM_GAME_\w+(==|!=)[^&]*'
 VAR_TERM = r'([A-Z][A-Z0-9_]*)(!=|=)([^&=/!]+(/[^&=/!]+)*)'
 # Switches a rule may test that no row sets, as the host reads them from the environment (an env file or the launch environment), each with the values a rule may name; None takes
-# only *, which holds while the switch is set to anything (either capture switch runs nvn_mtl.m's capture profile, which opens no pipeline archive: the prebuild has none to build into)
-ENV_ONLY = {'DM_PAD_MERGE': {'0', '1'}, 'DM_GPU_CAPTURE': None, 'MTL_CAPTURE_ENABLED': None}
+# only *, which holds while the switch is set to anything (DM_GPU_CAPTURE runs nvn_mtl.m's capture profile, which opens no pipeline archive: the prebuild has none to build into; the
+# capture layer itself, whichever variable or Info.plist key loads it, is the device term capture:on)
+ENV_ONLY = {'DM_PAD_MERGE': {'0', '1'}, 'DM_GPU_CAPTURE': None}
 # Values the host takes as another value of the row (nvn_upscale_pick.h up_parse: 1 is metalfx, 0 off). A term naming one goes out with its aliases, so a front end whose value
 # came from an env file in the other spelling still matches
 ALIASES = {'DM_PRESENT_UPSCALE': {'metalfx': ('1',), 'off': ('0',)}}

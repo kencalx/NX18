@@ -34,7 +34,7 @@ A setting that another setting or the device makes do nothing is shown greyed, w
 | Hold frames when late | Frame rate is 30 fps | Only matters at 60 fps |
 | Rumble cutoff | Rumble strength is 0 % | Rumble strength is 0 % |
 | Press a button to join | `DM_PAD_MERGE=1` in `env.txt` | All controllers are player 1 (env.txt) |
-| Pipeline prebuild | `DM_GPU_CAPTURE` or `MTL_CAPTURE_ENABLED` is set | Off while GPU capture is on |
+| Pipeline prebuild | `DM_GPU_CAPTURE` is set, Metal's capture layer is loaded (`MTL_CAPTURE_ENABLED=1` on the Mac), or the app was built for capture | Off while GPU capture is on |
 
 Some settings work only in some situations. They stay selectable, and the reason is added under the name:
 

@@ -52,6 +52,7 @@ struct DeviceFacts: Equatable, Sendable {
     var controller: Bool?      // a game controller is connected now
     var tv: Bool?              // an external display (a TV) is connected now, where front_ios.m shows the picture whole
     var metalFX: Bool?         // a Metal 4 MetalFX spatial scaler (nvn_mtl.m's test before it upscales)
+    var gpuCapture: Bool?      // GPU capture: Metal's capture layer loaded, or an app built for capture (MetalCaptureEnabled): nvn_mtl.m's capture profile, which opens no pipeline archive
 
     // A device term's truth: nil when t is not a device term (another row's value or the environment, LauncherModel.holds); false when the fact is not known
     func device(_ t: String) -> Bool? {
@@ -67,6 +68,7 @@ struct DeviceFacts: Equatable, Sendable {
         case "controller:none": return controller.map { !$0 } ?? false
         case "tv:none": return tv.map { !$0 } ?? false
         case "mfx:none": return metalFX.map { !$0 } ?? false
+        case "capture:on": return gpuCapture ?? false
         default: break
         }
         return t.first?.isLowercase == true ? false : nil   // a device term is lower case, a variable upper case: one this reader does not know is false

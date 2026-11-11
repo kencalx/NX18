@@ -17,7 +17,8 @@
 # And a compute pipeline per compute shader, which depends on its function alone (the host makes it from the function, cps_new in nvn_mtl.m; the threadgroup size is the dispatch's):
 # the C rows of the profile's prewarm list (pso_manifest.tsv, recorded, in order), then every compute shader of its shader map (shader_map.tsv, stage compute), so a game whose list
 # names none (a provisional profile) still has them; per shader <key>_b, entry `entry`. Left out as the host would not find them: a reflection of another chain version or none, a
-# missing library or entry point, a function with function constants (the host specializes it through its library, fn_lib_spec, and builds that pipeline through the MTLDevice)
+# missing library or entry point, a function with function constants (the host specializes it with an MTL4SpecializedFunctionDescriptor and compiles it through its MTL4Compiler on the device;
+#   metal-tt cannot make a specialized function from a library)
 # And a native task / mesh pipeline per M row of the prewarm lists (pso_manifest.tsv), whole, as the host's mtk_build describes it (mtk_desc4 in nvn_geometry.inc): its object function
 # (the task shader's entry, or the mesh shader's own entry_object when the row has no task), the mesh shader's entry (entry_z for near = 0), the pixel shader's entry, the threads and
 # payload of the reflection's mesh_stage, and the colour attachments pso_desc makes from the row's key, fully specialized. Without them a fresh install built every one at its first

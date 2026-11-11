@@ -15,7 +15,7 @@ import SwiftUI
 private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictionaryKey: key) as? String }
 
 // The device facts the rules are decided on (LauncherSettings.swift DeviceFacts): the connected screens' fastest rate (120 fps needs a 120 Hz screen, hle_nvn.c), the
-// controllers and MetalFX. The Metal device made here is this launcher
+// controllers, MetalFX and GPU capture. The Metal device made here is this launcher
 // process's own: the host, started after it, makes its own. No window or screen shape: nothing on the Mac stretches the picture
 @MainActor func macDeviceFacts() -> DeviceFacts {
     var f = DeviceFacts()
@@ -25,6 +25,9 @@ private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictiona
     f.controller = !GCController.controllers().isEmpty
     f.tv = false
     if let dev = MTLCreateSystemDefaultDevice() { f.metalFX = MTLFXSpatialScalerDescriptor.supportsMetal4FX(dev) }   // Metal 4 itself: launcher.c refused a Mac without it (dm_mac_metal4_missing)
+    // nvn_mtl.m's capture profile (pso4_capture): Metal's capture layer, which the environment the host inherits loads (MTL_CAPTURE_ENABLED=1 or METAL_CAPTURE_ENABLED=1); asked
+    // after the device above is made, as the host asks it after mtl_init
+    f.gpuCapture = MTLCaptureManager.shared().supportsDestination(.gpuTraceDocument)
     return f
 }
 

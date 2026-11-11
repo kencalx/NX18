@@ -57,7 +57,6 @@ void mtl_arch_save(int wait_ms, int ending);         // The pipeline archive's u
 void mtl_arch_resume(void);                          // Back in the foreground: compacting writes arm the pipeline archive's crash marker again (none while in the background)
 int mtl_arch_wait(int wait_ms);                      // Waits up to wait_ms for the archive's writes handed over (mtl_arch_save); 1: none left
 void mtl_xv_window_tex(uint64_t serial);   // Register a window (swapchain) texture: the cross-submit validity ledger never collects it
-void *mtl_device(void);   // the shared Metal device (mtl_init: one with Metal 4, or the process stops with the reason)
 #ifdef __OBJC__
 #import <Metal/Metal.h>
 id<MTL4Compiler> mtl_comp4(void);   // the host's one MTL4Compiler (made in mtl_init; a test that sets the device itself gets it at the first call): every pipeline the host builds

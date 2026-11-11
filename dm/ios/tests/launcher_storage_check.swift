@@ -238,6 +238,7 @@ import Foundation
     expect(r.hidden(x) && r.values["DM_X"] == "0", "a 120 Hz Mac hides it, value kept")
     expect(DeviceFacts().device("DM_X=1") == nil && DeviceFacts(screen: 2).device("screen>=1.85") == true && DeviceFacts(screen: 2).device("screen<1.85") == false
            && DeviceFacts().device("screen>=1.85") == false && DeviceFacts(haptics: false).device("haptics:none") == true && DeviceFacts().device("mfx:none") == false
-           && DeviceFacts(metalFX: false).device("mfx:none") == true && DeviceFacts().device("plist:-K") == false, "device terms, and a fact not known (or a term not known) is false")
+           && DeviceFacts(metalFX: false).device("mfx:none") == true && DeviceFacts().device("plist:-K") == false
+           && DeviceFacts().device("capture:on") == false && DeviceFacts(gpuCapture: true).device("capture:on") == true, "device terms, and a fact not known (or a term not known) is false")
     return failed
 }

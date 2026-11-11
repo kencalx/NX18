@@ -90,6 +90,7 @@ int main(void) { @autoreleasepool {
     if (cb->status != MTLCommandBufferStatusCompleted) { printf("t_depth16_clear: reference command buffer failed\n"); return 1; }
     if (production_clears(tex[1], tex[3], depth, N)) { puts("t_depth16_clear: production clear failed"); return 1; }
     cb = t4_begin();
+    t4_use(cb, out); for (int k = 0; k < 4; k++) t4_use(cb, tex[k]);   // Metal 4 makes nothing resident: the readback's sources and its buffer
     id<MTL4ComputeCommandEncoder> b = t4_copy(cb);
     for (int k = 0; k < 4; k++) for (int i = 0; i < N; i++)
         [b copyFromTexture:tex[k] sourceSlice:(NSUInteger)i sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, H, 1)

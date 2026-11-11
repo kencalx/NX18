@@ -55,10 +55,15 @@ static inline id<MTLDevice> t4_dev(void) {
     if (!g_dev) T4_DIE("t4_dev before mtl_init");
     return g_dev;
 #else
+    // No Metal 4 device (GitHub's virtual Macs): exit status 2, which the Python tests' runners take as a skip (an abort failed them). T4_TEST_NO_METAL4 acts as such a
+    // device (test_t_mtl4_skip.py). The fixtures that include nvn_mtl.m stop in mtl_init instead
     static id<MTLDevice> dev; static dispatch_once_t once;
-    dispatch_once(&once, ^{ dev = MTLCreateSystemDefaultDevice(); });
-    if (!dev) T4_DIE("no Metal device");
-    if (![dev supportsFamily:MTLGPUFamilyMetal4]) T4_DIE("the Metal device %s has no Metal 4", dev.name.UTF8String);
+    dispatch_once(&once, ^{ dev = getenv("T4_TEST_NO_METAL4") ? nil : MTLCreateSystemDefaultDevice(); });
+    if (!dev || ![dev supportsFamily:MTLGPUFamilyMetal4]) {
+        printf("no Metal 4 device%s%s\n", dev ? ": " : "", dev ? dev.name.UTF8String : "");
+        fflush(stdout);
+        exit(2);
+    }
     return dev;
 #endif
 }

@@ -445,24 +445,28 @@ t_pso_warm: t_pso_warm.m $(MTL_T_DEP)
 .PHONY: check_t_pso_warm
 check_t_pso_warm: t_pso_warm
 	MTL_DEBUG_LAYER=1 ./t_pso_warm
-# The GPU capture profile: a folder seeded by a run without a capture variable, which a run with one (Metal's capture layer loaded, or DM_GPU_CAPTURE) must not open or
-# write, and a run without one again (DM_PSO_MTL4=0 set: ignored) opens; that last run removes the folder (one a failed run leaves stays in /tmp)
+# The GPU capture profile: a folder seeded by a run without Metal's capture layer, which a run with it (loaded by MTL_CAPTURE_ENABLED=1 or by METAL_CAPTURE_ENABLED=1), or
+# with DM_GPU_CAPTURE, must not open or write, and a run without it again opens (MTL_CAPTURE_ENABLED=0 loads no layer; DM_PSO_MTL4=0 is ignored). The runs with the layer go
+# without MTL_DEBUG_LAYER, which loads the validation layer in its place (no capture: archives work). The last run removes the folder (one a failed run leaves stays in /tmp)
+CAPTURE_VARS = -u MTL_CAPTURE_ENABLED -u METAL_CAPTURE_ENABLED -u DM_GPU_CAPTURE
 t_pso_capture: t_pso_capture.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_capture.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_pso_capture
 check_t_pso_capture: t_pso_capture
 	d=$$(mktemp -d /tmp/t_pso_capture.XXXXXX) && \
-	env -u MTL_CAPTURE_ENABLED -u DM_GPU_CAPTURE MTL_DEBUG_LAYER=1 ./t_pso_capture seed $$d && \
-	env -u DM_GPU_CAPTURE MTL_CAPTURE_ENABLED=1 MTL_DEBUG_LAYER=1 ./t_pso_capture capture $$d && \
-	env -u MTL_CAPTURE_ENABLED DM_GPU_CAPTURE=999999 MTL_DEBUG_LAYER=1 ./t_pso_capture capture $$d && \
-	env -u MTL_CAPTURE_ENABLED -u DM_GPU_CAPTURE DM_PSO_MTL4=0 MTL_DEBUG_LAYER=1 ./t_pso_capture normal $$d
+	env $(CAPTURE_VARS) MTL_DEBUG_LAYER=1 ./t_pso_capture seed $$d && \
+	env $(CAPTURE_VARS) -u MTL_DEBUG_LAYER MTL_CAPTURE_ENABLED=1 ./t_pso_capture capture $$d && \
+	env $(CAPTURE_VARS) -u MTL_DEBUG_LAYER METAL_CAPTURE_ENABLED=1 ./t_pso_capture capture $$d && \
+	env $(CAPTURE_VARS) DM_GPU_CAPTURE=999999 MTL_DEBUG_LAYER=1 ./t_pso_capture capture $$d && \
+	env $(CAPTURE_VARS) MTL_CAPTURE_ENABLED=0 MTL_DEBUG_LAYER=1 ./t_pso_capture normal $$d keep && \
+	env $(CAPTURE_VARS) DM_PSO_MTL4=0 MTL_DEBUG_LAYER=1 ./t_pso_capture normal $$d
 # Depth-only draws (the empty fragment), in a run and in the capture profile
 t_pso_depth_only: t_pso_depth_only.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_depth_only.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_pso_depth_only
 check_t_pso_depth_only: t_pso_depth_only
-	env -u MTL_CAPTURE_ENABLED -u DM_GPU_CAPTURE MTL_DEBUG_LAYER=1 ./t_pso_depth_only
-	MTL_CAPTURE_ENABLED=1 MTL_DEBUG_LAYER=1 ./t_pso_depth_only
+	env $(CAPTURE_VARS) MTL_DEBUG_LAYER=1 ./t_pso_depth_only
+	env $(CAPTURE_VARS) -u MTL_DEBUG_LAYER MTL_CAPTURE_ENABLED=1 ./t_pso_depth_only capture
 t_pso_skey: t_pso_skey.m ../nvn/nvn_pso_skey.h ../nvn/nvn_obj.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_skey.m -framework Foundation
 t_view_swizzle: t_view_swizzle.m $(MTL_T_DEP)

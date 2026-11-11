@@ -35,6 +35,9 @@ private func info(_ key: String) -> Any? { Bundle.main.object(forInfoDictionaryK
     f.controller = !GCController.controllers().isEmpty
     f.tv = scenes.contains { $0.session.role == .windowExternalDisplayNonInteractive }
     if metalDeviceMade, let dev = MTLCreateSystemDefaultDevice() { f.metalFX = MTLFXSpatialScalerDescriptor.supportsMetal4FX(dev) }   // Metal 4 itself: the device check (main.m) refused a GPU without it
+    // nvn_mtl.m's capture profile (pso4_capture): an app built with DM_METAL_CAPTURE=1 (MetalCaptureEnabled), which loads the capture layer; the layer is asked only once a device is made
+    f.gpuCapture = (Bundle.main.object(forInfoDictionaryKey: "MetalCaptureEnabled") as? Bool) == true
+        || (metalDeviceMade && MTLCaptureManager.shared().supportsDestination(.gpuTraceDocument))
     return f
 }
 

@@ -42,6 +42,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The gfx tests below build against the host's own shaders (dm/gfx/tests MSL_H: host_msl.py), which need the Metal compiler: the host compiles no shader source at run time
+      - name: Install the selected Xcode's Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain   # a separate component, not included in the xcode-27 image
       - name: Host unit tests (dm/host/tests)
         run: |
           mkdir -p logs
@@ -261,6 +264,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install the selected Xcode's Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain   # gen_build.py compiles the host's shaders for iOS (host_msl.py)
       - name: Install XcodeGen
         run: command -v xcodegen || brew install xcodegen
       - name: Build the production iOS project with synthetic inputs

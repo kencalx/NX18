@@ -1,12 +1,13 @@
-// The GPU capture profile (nvn_mtl.m pso4_capture). A run that loads Metal's capture layer (MTL_CAPTURE_ENABLED, DM_GPU_CAPTURE, or an iOS app whose Info.plist has
-// MetalCaptureEnabled) opens no pipeline archive, neither the one bundled with the app (DM_PSO_BUNDLE) nor the device's folder (DM_PSO_ARCHIVE), makes no pipeline
+// The GPU capture profile (nvn_mtl.m pso4_capture). A run with Metal's capture layer loaded (MTL_CAPTURE_ENABLED=1 or METAL_CAPTURE_ENABLED=1 without MTL_DEBUG_LAYER, an
+// iOS app whose Info.plist has MetalCaptureEnabled), or with DM_GPU_CAPTURE set, opens no pipeline archive, neither the one bundled with the app (DM_PSO_BUNDLE) nor the device's folder (DM_PSO_ARCHIVE), makes no pipeline
 // serializer, writes no archive file and never compiles with lookupArchives; it still builds every pipeline through the Metal 4 compiler: a base specialized for its colour
 // state, a PSO_WHOLE pipeline whole, a depth-only one with the empty fragment, compute pipelines with and without function constants, and they draw and dispatch.
 // Modes (one folder, in this order, as make runs them):
 //   seed <dir>     no capture variable: builds the pipelines into <dir>/archive, writes the file, and copies it as <dir>/bundle/<GPU architecture>.mtl4a
-//   capture <dir>  a capture variable set: neither folder is opened (Metal's newArchiveWithURL is never called), nothing is written into them
-//   normal <dir>   no capture variable (DM_PSO_MTL4=0 set, which is ignored): both are opened and a serializer made, so the capture run's checks are not vacuous
-// Also: capture_profile_why's table (the Info.plist key without a variable).
+//   capture <dir>  the capture layer loaded, or DM_GPU_CAPTURE set: neither folder is opened (Metal's newArchiveWithURL is never called), nothing is written into them
+//   normal <dir> [keep]  no capture layer (MTL_CAPTURE_ENABLED=0, or DM_PSO_MTL4=0, which is ignored): both are opened and a serializer made, so the capture runs' checks are not
+//                  vacuous; without keep it is the last mode, and make's folder goes
+// Also: capture_profile_why's table (the Info.plist key without the layer).
 #include "../nvn/nvn_mtl.m"
 #include "t_mtl4.h"
 #include <objc/runtime.h>
@@ -47,12 +48,12 @@ static void count_calls(void) {
 static NSArray<NSString *> *files(NSString *dir) { return [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] sortedArrayUsingSelector:@selector(compare:)] ?: @[]; }
 
 static void table(void) {
-    CHECK(!capture_profile_why(NULL, NULL, nil), "no variable, no key: the archive");
-    CHECK(capture_profile_why("1", NULL, nil), "MTL_CAPTURE_ENABLED");
-    CHECK(capture_profile_why(NULL, "5", nil), "DM_GPU_CAPTURE");
-    CHECK(capture_profile_why(NULL, NULL, @YES) && !strcmp(capture_profile_why(NULL, NULL, @YES), "Info.plist MetalCaptureEnabled"), "Info.plist MetalCaptureEnabled with no variable (Xcode's capture button)");
-    CHECK(capture_profile_why(NULL, NULL, @"YES"), "Info.plist MetalCaptureEnabled as a string");
-    CHECK(!capture_profile_why(NULL, NULL, @NO), "Info.plist MetalCaptureEnabled false");
+    CHECK(!capture_profile_why(0, NULL, nil), "no capture layer, no DM_GPU_CAPTURE, no key: the archive");
+    CHECK(capture_profile_why(1, NULL, nil) && !strcmp(capture_profile_why(1, NULL, nil), "Metal's capture layer"), "the capture layer loaded, whichever variable loaded it");
+    CHECK(capture_profile_why(0, "5", nil), "DM_GPU_CAPTURE");
+    CHECK(capture_profile_why(0, NULL, @YES) && !strcmp(capture_profile_why(0, NULL, @YES), "Info.plist MetalCaptureEnabled"), "Info.plist MetalCaptureEnabled with no variable (Xcode's capture button)");
+    CHECK(capture_profile_why(0, NULL, @"YES"), "Info.plist MetalCaptureEnabled as a string");
+    CHECK(!capture_profile_why(0, NULL, @NO), "Info.plist MetalCaptureEnabled false");
 }
 
 static id<MTLLibrary> g_lib;
@@ -109,15 +110,15 @@ static void pipelines(const char *mode) {
 }
 
 int main(int argc, char **argv) { @autoreleasepool {
-    if (argc != 3) { fprintf(stderr, "usage: t_pso_capture seed|capture|normal <dir>\n"); return 2; }
+    if (argc != 3 && !(argc == 4 && !strcmp(argv[3], "keep"))) { fprintf(stderr, "usage: t_pso_capture seed|capture|normal <dir> [keep]\n"); return 2; }
     const char *mode = argv[1]; NSString *dir = @(argv[2]), *arch = [dir stringByAppendingPathComponent:@"archive"], *bundle = [dir stringByAppendingPathComponent:@"bundle"];
     int capture = !strcmp(mode, "capture"), seed = !strcmp(mode, "seed");
     if (!capture && !seed && strcmp(mode, "normal")) { fprintf(stderr, "unknown mode %s\n", mode); return 2; }
     table();
     setenv("DM_PSO_ARCHIVE", arch.UTF8String, 1); setenv("DM_PSO_HYBRID", "0", 1); unsetenv("DM_PSO_MANIFEST");
     if (seed) unsetenv("DM_PSO_BUNDLE"); else setenv("DM_PSO_BUNDLE", bundle.UTF8String, 1);
-    CHECK(!!pso4_capture() == capture, "%s: the capture profile %s (%s)", mode, capture ? "on" : "off", pso4_capture() ?: "no capture variable");
-    mtl_init(); NSError *err = nil;
+    mtl_init(); NSError *err = nil;   // the profile asks for the capture layer after the device is made, as pso4_init does
+    CHECK(!!pso4_capture() == capture, "%s: the capture profile %s (%s; the device is a %s)", mode, capture ? "on" : "off", pso4_capture() ?: "no capture layer", object_getClassName(g_dev));
     g_lib = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); return float4(uv * 2 - 1, 0.5, 1); }\n"
         "fragment float4 fs() { return float4(1, 0.5, 0.25, 1); }\n"
@@ -156,6 +157,6 @@ int main(int argc, char **argv) { @autoreleasepool {
         CHECK(f && [NSFileManager.defaultManager copyItemAtPath:[arch stringByAppendingPathComponent:f] toPath:to error:&err], "seed: the bundle written (%s)", err ? err.localizedDescription.UTF8String : "no file");
     }
     printf("t_pso_capture %s: %d checks, %d failed\n", mode, checks, failed);
-    if (!strcmp(mode, "normal") && [dir hasPrefix:@"/tmp/t_pso_capture."]) [NSFileManager.defaultManager removeItemAtPath:dir error:nil];   // the last mode: make's folder goes
+    if (!strcmp(mode, "normal") && argc == 3 && [dir hasPrefix:@"/tmp/t_pso_capture."]) [NSFileManager.defaultManager removeItemAtPath:dir error:nil];   // the last mode: make's folder goes
     return failed != 0;
 } }

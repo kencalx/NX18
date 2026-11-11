@@ -2,7 +2,8 @@
 // is on, so pso_build gives such a pipeline the host's empty one (nop_fragment, dm/gfx/msl/nop_frag.metal) and leaves every colour attachment's write mask none.
 // Checks, through pso_build as the draws build them: the pipeline is a base built (or taken from the archive) and specialized, with no MTLDevice path; a triangle at z = 0.25
 // writes 0.25 into the depth target where it covers it and leaves the clear value elsewhere; with a colour target in the pass (and in the pipeline's formats), its pixels
-// keep their clear colour. Make runs it once as any run and once with the capture profile (MTL_CAPTURE_ENABLED=1: no archive), which builds it the same way.
+// keep their clear colour. Make runs it once as any run and once with the capture profile (argument capture, MTL_CAPTURE_ENABLED=1 without MTL_DEBUG_LAYER: the capture layer,
+// no archive), which builds it the same way.
 #include "../nvn/nvn_mtl.m"
 #include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
@@ -66,9 +67,11 @@ static void depth_draw(const char *name, id<MTLFunction> vs, int colour) {
     }
 }
 
-int main(void) { @autoreleasepool {
+int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_PSO_ARCHIVE", "off", 1); unsetenv("DM_PSO_BUNDLE"); setenv("DM_PSO_HYBRID", "0", 1);
     mtl_init(); NSError *err = nil;
+    int capture = argc > 1 && !strcmp(argv[1], "capture");
+    CHECK(!!pso4_capture() == capture, "the capture profile %s (%s)", capture ? "on" : "off", pso4_capture() ?: "no capture layer");
     id<MTLLibrary> lib = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint n [[vertex_id]]) { float2 p[3] = {float2(-1, -1), float2(1, -1), float2(-1, 1)}; return float4(p[n], 0.25, 1); }\n", nil, &err);
     if (!lib) { fprintf(stderr, "the fixture's shader did not compile: %s\n", err.localizedDescription.UTF8String); return 1; }

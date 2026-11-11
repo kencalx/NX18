@@ -178,6 +178,18 @@ kernel void ref_resample(device const half *luma [[buffer(0)]], device const hal
 '''
 
 T4_DIR = str(Path(__file__).resolve().parent)   # t_mtl4.h, the Metal 4 queue and pipelines the runners below use
+
+
+def host_msl_flags():
+    """The flags dm/gfx/tools/host_msl.py compiles the host's libraries with for the Mac: its MSL version (STD) and the Mac host's minimum (dm/mac/min_os.mk MACOS_MIN, which
+    dm/host/Makefile passes as --min)"""
+    repo = Path(__file__).resolve().parents[3]
+    std = re.search(r"^STD = '([^']+)'", (repo / 'dm/gfx/tools/host_msl.py').read_text(), re.M)
+    low = re.search(r'^MACOS_MIN\s*:?=\s*(\S+)', (repo / 'dm/mac/min_os.mk').read_text(), re.M)
+    if not std or not low: raise AssertionError('host_msl.py STD or min_os.mk MACOS_MIN not found')
+    return [f'-mmacosx-version-min={low.group(1)}', std.group(1)]
+
+
 RUNNER = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include "t_mtl4.h"
@@ -356,6 +368,11 @@ class EngineSource(unittest.TestCase):
         self.assertEqual(o, int(re.search(r'NDVE_WBYTES = (0x[0-9a-f]+)', src).group(1), 16))
         self.assertEqual(o, 0x3c320)
 
+    def test_host_msl_flags(self):   # the GPU check compiles the engine as the host does
+        flags = host_msl_flags()
+        self.assertRegex(flags[0], r'^-mmacosx-version-min=2[7-9]')
+        self.assertRegex(flags[1], r'^-std=metal4\.')
+
     def test_safe_math(self):   # the epilogues' additions in the game's order, nothing contracted: the pragma comes before anything else
         self.assertTrue(ENGINE.read_text().split('\n#pragma METAL fp math_mode(safe)\n')[0].lstrip().startswith('//'))
 
@@ -365,8 +382,8 @@ class EngineOnGpu(unittest.TestCase):
     def test_bit_exact_with_the_translated_hmma(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
-            # the engine as the host build compiles it (host_msl.py), the references with the chain's flags (test_dmsh_hmma.compile_and_run)
-            subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-o', str(d / 'eng.metallib'), str(ENGINE)], check=True)
+            # the engine as the host build compiles it (host_msl.py: its MSL version and the Mac's minimum), the references with the chain's flags (test_dmsh_hmma.compile_and_run)
+            subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', *host_msl_flags(), '-o', str(d / 'eng.metallib'), str(ENGINE)], check=True)
             (d / 'ref.metal').write_text('#pragma METAL fp math_mode(safe)\n' + hmma_msl(HEAD + HELPER + REF))
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', str(d / 'ref.metal'), '-o', str(d / 'ref.air')], check=True)
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(d / 'ref.air'), '-o', str(d / 'ref.metallib')], check=True)
