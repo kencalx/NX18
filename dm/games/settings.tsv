@@ -12,7 +12,7 @@
 #             platform:<ios | mac>: the app's platform (SETTINGS_PLATFORM, ios when unset), for a switch only that platform's front end reads
 #   section   Game, Controls or Performance: a heading on the single settings screen. Rows appear in table order within each section
 #             Reset to tested defaults clears all launcher choices; values fixed by an env file stay
-#   label, note  the setting's name and the line under it (may be empty; only for a setting with a cost: latency, memory, heat)
+#   label, note  the setting's name and the line under it (may be empty): a setting's cost (latency, memory, heat), when to change a setting a player should normally leave alone, or what a name alone does not say
 #   meta      optional, key=value pairs separated by ; (settings.py META lists the keys; docs/frontends.md, The settings list, describes them):
 #             level=basic  a setting a front end shows first;  needs=<VAR>=<value>  a sub-setting, drawn only while the row that sets <VAR> has that value;
 #             inactive=<rule>|<rule>  the row, or one option, is drawn greyed with the rule's reason as its note while a rule holds (another setting or the device makes it do nothing);
@@ -52,6 +52,6 @@ DM_MOD_ULTRAWIDE	toggle	-	0	mods:ultrawide&platform:ios	Game	Ultrawide	A mod fro
 DM_SCREEN_ASPECT	choice	auto=Match screen?platform:ios,1.43=iPhone Duo screen (1.43:1),0=16:9 (Switch)	auto|0	DM_GAME_SCREEN_ASPECT!=0	Game	Picture shape	Renders about a quarter more pixels: a little slower and warmer.	inactive=DM_MOD_ULTRAWIDE=1&screen>=1.85~Ultrawide keeps the 16:9 picture;shows=0:DM_MOD_ULTRAWIDE=1&screen>=1.85;hint=auto:window>=1.77~16:9 on this screen
 DM_PRESENT_SNAP	toggle	-	DM_GAME_PRESENT_SNAP	gfxapi:nvn	Performance	Frame buffering	Up to one frame more display latency.
 DM_PSO_PREBUILD	toggle	-	1	gfxapi:nvn	Performance	Pipeline prebuild	The first start waits a few minutes for it, once.	inactive=DM_GPU_CAPTURE=*~Off while GPU capture is on|capture:on~Off while GPU capture is on
-DM_NVN_ENC_THREAD	toggle	-	1|DM_GAME_ENC_THREAD	gfxapi:nvn	Performance	Encode thread
+DM_NVN_ENC_THREAD	toggle	-	1|DM_GAME_ENC_THREAD	gfxapi:nvn	Performance	Encode thread	Leave on; turn it off only if a game stops with a deferred-encoding error.
 DM_FPS_HOLD	toggle	on/off	DM_GAME_FPS_HOLD	DM_GAME_FPS_TARGET!=0&fixups:FPS_STATE_OFF	Performance	Hold frames when late		inactive=DM_FPS_TARGET=30/120~Only matters at 60 fps
-DM_METAL_HUD	toggle	-	0	always	Performance	Performance HUD
+DM_METAL_HUD	toggle	-	0	always	Performance	Performance HUD	Apple's overlay: frame rate, GPU time and memory.

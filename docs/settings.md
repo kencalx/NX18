@@ -285,7 +285,7 @@ Built in the background while playing instead, the stand-ins took an iPhone 17 P
 
 The app turns the game's graphics commands into Metal commands on a thread of its own instead of the game's submitting thread, so the game's thread can go on sooner (in Breath of the Wild about 4 ms per frame instead of 8). Frame buffering needs it for games that present their frames from another thread than the one that draws them. It is on by default on the iPhone; on the Mac it is off, where it lowered the typical frame time but made the slowest frames slower.
 
-- **When to change it:** leave it on unless a game misbehaves with it; turning it off is a diagnostic step.
+- **When to change it:** leave it on; turn it off only if a game stops with a deferred-encoding error (`FATAL deferred encoding: …` in `log.txt`, a Metal command the encode thread has no stand-in for yet). Off, the game's own thread does the encoding again, so frames can take a little longer; report the line so the stand-in can be added. On the Mac the setting is off for most games already, and the same advice holds where a game turns it on.
 
 ### Hold frames when late
 
