@@ -6,9 +6,9 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`); the Vulkan and OpenGL layers were 
 
 ### Null textures in diagnostic logs
 
-- **Symptom:** clang reports null dereferences in `nvnWindowInitialize` and `clear_tex`; clearing a null texture crashes with `DM_NVN_PASSDUMP=1`.
-- **Cause:** window initialization checked the texture count but logged the first texture's dimensions without checking its pointer. Clear replay tolerated a null texture but its pass dump unconditionally read the texture serial.
-- **Fix:** check the first texture before logging its dimensions (`hle_nvn.c`) and log serial 0 for a null clear texture (`nvn_mtl.m`).
+- **Symptom:** clang reports null dereferences in `nvnWindowInitialize` and `clear_tex`; clearing a null texture crashes with `DM_NVN_PASSDUMP=1`, and so did a texture-to-texture copy with no source or destination texture (in `copy_t2t_enc`).
+- **Cause:** window initialization checked the texture count but logged the first texture's dimensions without checking its pointer. Clear replay tolerated a null texture but its pass dump unconditionally read the texture serial. Texture copy replay (`copy_t2t_enc`) printed both textures' serials in its pass-dump `T` line before its null return, and either can be NULL there (`tex_snap` in `hle_nvn.c` can record one).
+- **Fix:** check the first texture before logging its dimensions (`hle_nvn.c`) and log serial 0 for a null clear texture, and for a null source or destination of a texture copy (`nvn_mtl.m`). The copy's guard is from the earlier Nintanium line (its analyzer pass after a merge), taken again in NX 18 release 1; `t_clear_tex` runs both with the pass dump on.
 - **Found on:** clang static analysis ([issue #424](https://github.com/seedds/nxnative/issues/424)); synthetic null-texture tests, with no gameplay failure reported.
 
 ### Texture objects copied into command records

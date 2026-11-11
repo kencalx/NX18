@@ -679,7 +679,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Rendering
 
-- clang reports null dereferences in `nvnWindowInitialize` and `clear_tex`; clearing a null texture crashes with `DM_NVN_PASSDUMP=1`. → [Null textures in diagnostic logs](../reference/rendering.md#null-textures-in-diagnostic-logs)
+- clang reports null dereferences in `nvnWindowInitialize` and `clear_tex`; clearing a null texture crashes with `DM_NVN_PASSDUMP=1`, and so did a texture-to-texture copy with no source or destination texture (in `copy_t2t_enc`). → [Null textures in diagnostic logs](../reference/rendering.md#null-textures-in-diagnostic-logs)
 - Metal aborts on a texture descriptor with an absurd size (`height (1869367126) greater than … 16384`). → [Texture objects copied into command records](../reference/rendering.md#texture-objects-copied-into-command-records)
 - a decoded movie stays black even though its YUV textures contain the picture; disabling its depth test makes it visible. → [New textures start as zero](../reference/rendering.md#new-textures-start-as-zero)
 - a scene background is green and retains silhouettes of moving characters; pixels a character covers can recover their normal colour. The resolved scene is already wrong before postprocessing. → [New textures start as zero](../reference/rendering.md#new-textures-start-as-zero)

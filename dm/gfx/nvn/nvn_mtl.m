@@ -15252,7 +15252,9 @@ static id<MTLTexture> copy_t2t_enc(const p_copy_t2t *c) {
         if (zskip_has(c->src->serial, sl, ss)) zskip_add(c->dst->serial, dl, ds);
     }
     id<MTLTexture> s = tex_mtl(c->src);
-    PD("T src=%llu dst=%llu %dx%dx%d→%dx%dx%d flags=%#x", c->src->serial, c->dst->serial, c->sr.width, c->sr.height, c->sr.depth, c->dr.width, c->dr.height, c->dr.depth, c->flags);
+    // Either texture may be NULL here (the checks above test both; tex_snap records a copy with one), and the null return below comes after this line: with DM_NVN_PASSDUMP on, reading
+    // their serials crashed the dump, so a missing texture prints serial 0
+    PD("T src=%llu dst=%llu %dx%dx%d→%dx%dx%d flags=%#x", c->src ? c->src->serial : 0ull, c->dst ? c->dst->serial : 0ull, c->sr.width, c->sr.height, c->sr.depth, c->dr.width, c->dr.height, c->dr.depth, c->flags);
     if (!s || !c->dst) return nil;
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
