@@ -21,6 +21,7 @@ iPhone: no IPA was built, and the touch layout is untested.
 | `shader_groups /sysdat.cpk/=sysdat` | `game.tsv` | every shader is a BNSH entry under `sysdat.cpk` |
 | `romfs_marker data.cpk` | `game.tsv` | the RomFS is a root of CPKs |
 | `pad_layout full` | `game.tsv` | the game uses the full controller; the touch layout is untested |
+| `present_trim 60` | `game.tsv` | on an iPhone 18 Pro Max (release 1, 60 fps, edge smoothing) a frame stood in the display link's queue for the whole session, so game enqueue to display was 45–49 ms; dropping one frame after 60 ticks in a row with two or more waiting brought it to 28–29.5 ms (4 frames dropped in 73 s, frame interval p99 unchanged at 17.5–21 ms, GPU 2–6 ms a frame, no audio underruns in play). The owner felt no difference in the controls. `DM_PRESENT_TRIM` in `env.txt` overrides it (0 for off). Checked only on iOS; the Mac uses it untested ([A frame that stands in the display link's queue](../../../docs/reference/frame-rate.md#a-frame-that-stands-in-the-display-links-queue)) |
 
 ## Files
 

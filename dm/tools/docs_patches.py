@@ -118,7 +118,7 @@ SWITCH_BINDING = [
     ('enc_thread', '', {'what': 'Metal encoding on its own thread on the Mac', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
      'why': f'what iOS does for every game: {DEFAULT_SOON}'}),
     ('present_trim', '', {'what': "a frame standing in the display link's queue dropped after K ticks", 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
-     'why': 'what the display link should do for any game whose frames land two to a refresh; four games measured with it on an iPhone so far (Ocarina of Time, 13 Sentinels, Mario Kart 8 Deluxe, NieR:Automata): '
+     'why': 'what the display link should do for any game whose frames land two to a refresh; five games measured with it on an iPhone so far (Ocarina of Time, 13 Sentinels, Mario Kart 8 Deluxe, NieR:Automata, Persona 4 Golden): '
             'an iOS default after Persona 5 Royal and Super Mario Odyssey run with DM_PRESENT_TRIM=60'}),
     ('present_snap', '', {'what': 'present snapshots', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'a setting the game was tested with: {DEFAULT_SOON}'}),
     ('screen_aspect', '', {'what': 'a picture of a taller screen\'s own shape (DM_SCREEN_ASPECT)', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
