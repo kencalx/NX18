@@ -235,6 +235,10 @@ struct LauncherView: View {
     @State private var status = LauncherStatus()
     @State private var scroller = LauncherScroller()
     @State private var textHeight: CGFloat = 140   // the name, status line and buttons over the art: the height the scrim under them covers
+    @State private var checking = false            // Play is comparing this iPhone's save with the cloud's (start)
+    @State private var check = 0                   // which Play the running check is for: one the player went on from without it is dropped
+    @State private var report: SaveSyncReport?
+    @State private var asking: SaveSyncReport.Step?
     @AppStorage("launcher.advanced") private var advancedOpen = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -287,10 +291,21 @@ struct LauncherView: View {
             LauncherAboutSheet(about: content.about ?? LauncherAbout(), artwork: artwork, name: name, version: version, scroller: scroller) { sheet = nil }
                 .presentationBackground(background)
         }
+        .confirmationDialog(SaveSyncReport.chooseTitle, isPresented: isAsking(.choose), titleVisibility: .visible, presenting: report) { r in
+            Button(r.localLabel(here: "iPhone")) { go(r.localChoice) }
+            Button(r.cloudLabel) { go(r.cloudChoice) }
+            Button("Cancel", role: .cancel) {}
+        } message: { r in Text(r.chooseMessage(here: "iPhone") + (pad.connected ? " With a controller: L plays this iPhone's, R the cloud's, B cancels." : "")) }
+        .confirmationDialog(SaveSyncReport.unreadableTitle, isPresented: isAsking(.unreadable), titleVisibility: .visible, presenting: report) { r in
+            Button("Play This iPhone's Save") { go("offline") }   // the mount does not wait for the cloud again
+            Button("Try Again") { DispatchQueue.main.async { start() } }
+            Button("Cancel", role: .cancel) {}
+        } message: { r in Text(r.unreadableMessage(here: "iPhone") + (pad.connected ? " With a controller: A plays this iPhone's save, Y tries again, B cancels." : "")) }
         .task { await pad.run { handle($0) } }
         .task { await followStatus() }
         .onChange(of: sheet) { pad.holdUntilReleased() }          // a button held as a sheet opens or closes (A held while B closes the guide) is no press on what is under it
         .onChange(of: cloudPicking) { pad.holdUntilReleased() }
+        .onChange(of: asking) { pad.holdUntilReleased() }        // the press that answered a save question is no press on the settings
         .onReceive(LauncherShortcuts.requests) { shortcut($0) }   // a home screen shortcut chosen while the screen is up
         .onAppear { if !startTaken, let s = startWith { startTaken = true; shortcut(s) } }   // the one the app was opened with
     }
@@ -299,7 +314,7 @@ struct LauncherView: View {
     // opens the guide, else the manual, else About this game
     private func shortcut(_ s: LauncherShortcut) {
         switch s {
-        case .game: fputs("launcher: shortcut Game: Play\n", stderr); play()
+        case .game: fputs("launcher: shortcut Game: Play\n", stderr); start()
         case .launcher:
             if sheet != nil || cloudPicking { fputs("launcher: shortcut Launcher: back to the settings\n", stderr) }
             sheet = nil; cloudPicking = false; guideAfter = false
@@ -361,6 +376,7 @@ struct LauncherView: View {
                 }
                 LauncherStatusLine(status: status, color: NX18Palette.onArt).padding(.top, 5)
                 actions.padding(.top, 16)
+                if checking { checkingLine.padding(.top, 10) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { textHeight = $0 }   // the art layer's scrim covers this much
@@ -415,7 +431,7 @@ struct LauncherView: View {
     private enum ButtonLabel { case full, short, icon }
 
     private var playButton: some View {
-        Button(action: play) {
+        Button(action: start) {
             HStack(spacing: 10) {
                 Image(systemName: "play.fill").font(.body.weight(.bold))
                 Text("Play").font(.title3.weight(.bold))
@@ -430,6 +446,64 @@ struct LauncherView: View {
         .accessibilityLabel("Play")
         .accessibilityHint("Starts the game with these settings")
         .keyboardShortcut(.defaultAction)
+        .disabled(checking)
+    }
+
+    // While Play compares the saves (an iCloud download can take a while): say so, and let the player go on without the cloud's
+    private var checkingLine: some View {
+        HStack(spacing: 8) {
+            ProgressView().tint(NX18Palette.onArt)
+            Text("Checking the cloud save…").font(.callout).foregroundStyle(NX18Palette.onArt)
+            Button(pad.connected ? "Play Without It (B)" : "Play Without It") { playWithout() }.font(.callout.weight(.semibold)).tint(NX18Palette.cyan)
+        }
+    }
+
+    // MARK: Cloud saves before Play (SaveSyncReport.swift, shared with the Mac's launcher)
+
+    private func isAsking(_ step: SaveSyncReport.Step) -> Binding<Bool> {
+        Binding(get: { asking == step }, set: { if !$0 && asking == step { asking = nil } })
+    }
+
+    /// Play, once the cloud's save is compared with this iPhone's (save_sync_report, SaveSyncReport): a save that changed on both sides is the player's pick, not the
+    /// newer file's, and a cloud save that did not come is said so before the game starts without it. Every Play goes through here: the button, A on Play, +, the Game shortcut
+    private func start() {
+        if checking { return }
+        check += 1; checking = true; asking = nil
+        let mine = check
+        dm_cloud_saves_env()   // DM_SAVE_SYNC from the picked folder, as the game's mount will read it (front_ios.m calls it again at the start)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r = Self.compare()
+            DispatchQueue.main.async {
+                guard checking, check == mine else { return }   // the player played without it
+                checking = false
+                switch SaveSyncReport.step(r) {
+                case .play(let choice): go(choice)
+                case let step: report = r; asking = step
+                }
+            }
+        }
+    }
+
+    private func playWithout() { checking = false; go("offline") }
+
+    /// Blocks while the cloud's file downloads (SaveSyncReport.waitMs at most). nil: no report (the host then decides as it always did)
+    nonisolated private static func compare() -> SaveSyncReport? {
+        // getenv, not ProcessInfo.environment: main.m sets DM_SAVE and applies env.txt after that snapshot
+        guard let save = getenv("DM_SAVE") else { fputs("launcher: save sync: no DM_SAVE\n", stderr); return nil }
+        var buf = [CChar](repeating: 0, count: 1024)
+        guard save_sync_report(save, dm_save_title(), nil, SaveSyncReport.waitMs, &buf, buf.count) == 0 else {
+            fputs("launcher: save sync: no report on \(String(cString: save))\n", stderr)
+            return nil
+        }
+        let line = String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        fputs("launcher: save sync: \(line)\n", stderr)
+        return SaveSyncReport(line: line)
+    }
+
+    private func go(_ choice: String?) {
+        asking = nil
+        if let choice { setenv("DM_SAVE_SYNC_CHOICE", choice, 1); fputs("launcher: DM_SAVE_SYNC_CHOICE=\(choice)\n", stderr) }
+        play()
     }
 
     @ViewBuilder private func guideButton(_ l: ButtonLabel) -> some View {
@@ -630,6 +704,18 @@ struct LauncherView: View {
             return
         }
         if cloudPicking { return }   // the system's folder picker: touch only
+        if let step = asking, let r = report {   // which save to play, or what to do without the cloud's: the dialog's buttons by controller
+            switch (step, e) {
+            case (.choose, .l): go(r.localChoice)
+            case (.choose, .r): go(r.cloudChoice)
+            case (.unreadable, .a): go("offline")
+            case (.unreadable, .y): asking = nil; DispatchQueue.main.async { start() }
+            case (_, .b): asking = nil
+            default: break
+            }
+            return
+        }
+        if checking { if e == .b { playWithout() }; return }   // B plays without the cloud's save; nothing else while it is compared
         let map = focusMap
         let cur = focus.flatMap { map.contains($0) ? $0 : nil } ?? .play
         if focus != cur { focus = cur }
@@ -641,7 +727,7 @@ struct LauncherView: View {
             else if case .row(let env) = cur, let s = m.settings.first(where: { $0.env == env }) { m.advance(s, by: d) }
             else if cur == .advanced, advancedOpen != (d > 0) { toggleAdvanced() }
         case .a: activate(cur)
-        case .plus: play()
+        case .plus: start()
         case .y: openGuide()
         case .b, .l, .r: break
         }
@@ -650,7 +736,7 @@ struct LauncherView: View {
     private func activate(_ f: LauncherFocus) {
         switch f {
         case .preset(let p): m.applyPreset(p)
-        case .play: play()
+        case .play: start()
         case .guide: openGuide()
         case .about: if content.hasAbout { sheet = .about }
         case .row(let env):
