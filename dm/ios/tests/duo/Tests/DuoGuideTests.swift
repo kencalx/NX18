@@ -1,3 +1,4 @@
+import PDFKit
 import SwiftUI
 import UIKit
 import WebKit
@@ -152,6 +153,58 @@ final class DuoGuideTests: XCTestCase {
         tap(web, "item9")
         waitUntil("The end URL closed the viewer") { closed == 1 }
         XCTAssertEqual((js(web, "location.protocol") as? String), "nx18guide:", "Nothing outside the guide was loaded")
+    }
+
+    // The guide and a manual: ZR shows the manual, which lets the guide's page go (here its second page, with a history and its own B): its web view is freed, not kept by a
+    // handler, the model or a closure. The manual keeps the launcher's own buttons; ZL shows the guide again, a new page from its first one with no history
+    @MainActor
+    func testManualSwitchFreesTheGuidePage() throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let found = try XCTUnwrap(LauncherContent.findGuide(in: fixture, lang: "en-US"), "The placeholder guide at \(fixture.path)")
+        let pdf = FileManager.default.temporaryDirectory.appendingPathComponent("duo-guide-manual.pdf")
+        try UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792)).writePDF(to: pdf) { c in
+            for n in 1...3 { c.beginPage(); ("Placeholder manual page \(n)" as NSString).draw(at: CGPoint(x: 72, y: 72), withAttributes: [.font: UIFont.systemFont(ofSize: 24)]) }
+        }
+        defer { try? FileManager.default.removeItem(at: pdf) }
+        var content = LauncherContent()
+        content.guide = found.index; content.guideRoot = found.root; content.manual = pdf
+        var closed = 0
+        let scroller = LauncherScroller()
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 932, height: 430)
+        window.rootViewController = UIHostingController(rootView: LauncherGuideSheet(content: content, scroller: scroller) { closed += 1 })
+        window.isHidden = false
+        defer { window.isHidden = true; window.rootViewController = nil }
+        // Views looked up in an autorelease pool of their own: UIKit's subviews arrays are autoreleased, and the test method's own pool would keep the page alive to its end
+        func find<T: UIView>(_ v: UIView, _ t: T.Type) -> T? {
+            func walk(_ v: UIView) -> T? { (v as? T) ?? v.subviews.lazy.compactMap { walk($0) }.first }
+            return autoreleasepool { walk(v) }
+        }
+
+        weak var first: WKWebView?, firstBox: LauncherGuideBox?
+        try autoreleasepool {
+            var box: LauncherGuideBox?
+            waitUntil("The guide's page is up") { box = find(window, LauncherGuideBox.self); return box != nil }
+            let web = try XCTUnwrap(box?.web)
+            first = web; firstBox = box
+            waitUntil("The page set up", 15) { log(web).contains("ready") }
+            tap(web, "item2")
+            waitUntil("A second page, so there is a history, whose B is its own") { web.canGoBack && log(web).first == "topic2 page" }
+        }
+        XCTAssertEqual(scroller.pad?(.zr), true, "ZR switches to the manual")
+        waitUntil("The manual is shown") { find(window, PDFView.self)?.document?.pageCount == 3 && find(window, LauncherGuideBox.self) == nil }
+        waitUntil("and the guide's page is freed, its box") { firstBox == nil }
+        waitUntil("and its web view") { first == nil }
+        XCTAssertEqual(scroller.pad?(.down), false, "On the manual the launcher's buttons stay (B closes, up / down scroll, L / R switch)")
+        XCTAssertNotNil(scroller.scroll, "The manual scrolls from the controller")
+        XCTAssertEqual(scroller.pad?(.zl), true, "ZL switches back to the guide")
+        var box: LauncherGuideBox?
+        waitUntil("The guide is shown again") { box = find(window, LauncherGuideBox.self); return box != nil }
+        let web = try XCTUnwrap(box?.web)
+        waitUntil("from its first page", 15) { log(web) == ["ready", "menu"] }
+        XCTAssertFalse(web.canGoBack, "with no history")
+        XCTAssertEqual(scroller.pad?(.b), true, "B on the menu, its end (nx.endApplet)")
+        waitUntil("closes the viewer") { closed == 1 }
     }
 
     @MainActor

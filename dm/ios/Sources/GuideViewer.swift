@@ -281,9 +281,16 @@ struct LauncherGuideWebView: UIViewRepresentable {
         var history: NSKeyValueObservation?
         init(root: URL, model: LauncherGuidePageModel, close: @escaping () -> Void) { files = LauncherGuideFiles(root: root); self.model = model; self.close = close }
 
+        // The new web view's history and footer buttons in the model (the guide shown again after the manual starts with none of the old page's). The model changes after the
+        // view update that made the web view (makeUIView; .initial calls at once), never during it: SwiftUI warns of a change published during an update and may drop it
         func watch(_ web: WKWebView) {
-            history = web.observe(\.canGoBack, options: [.initial, .new]) { [weak self] w, _ in
-                MainActor.assumeIsolated { if let m = self?.model, m.canGoBack != w.canGoBack { m.canGoBack = w.canGoBack } }
+            let model = model
+            Task { @MainActor in if !model.footer.isEmpty { model.footer = [] } }
+            history = web.observe(\.canGoBack, options: [.initial, .new]) { w, _ in
+                Task { @MainActor [weak w] in
+                    let back = w?.canGoBack ?? false
+                    if model.canGoBack != back { model.canGoBack = back }
+                }
             }
         }
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
