@@ -93,9 +93,9 @@ int hle_implements(const char *name) { return hle_find(name) != NULL; }
 void stubs_report(void) { LOG("stubs=%u", g_nstub); }
 
 // ---------- Host gate dispatch ----------
-// The rewriter replaces every svc #n / mrs cntpct with a call to dm_gate; here we remember, by gate block return point (absolute address), what it originally was.
+// The rewriter replaces every svc #n / mrs cntpct / cntvct / cntfrq with a call to dm_gate; here we remember, by gate block return point (absolute address), what it originally was.
 // Lookup: open-addressing hash, one hit (it used to do module_of + a linear compare over 110 entries on every gate call, keyed by in-module offset, which would collide across modules).
-enum { G_SVC, G_CNTPCT, G_CNTVCT, G_OBS, G_SPIN };
+enum { G_SVC, G_CNTPCT, G_CNTVCT, G_OBS, G_SPIN, G_CNTFRQ };
 // Observation gates (inserted offline from the rewriter's OBS table): number → read-only callback; with no callback attached the gate returns after one pass in and out
 static void (*g_obs_fn[OBS_MAX])(uint64_t *regs, int param); static int g_obs_have[OBS_MAX];
 void gate_obs_set(int id, void (*fn)(uint64_t *regs, int param)) { if (id <= 0 || id >= OBS_MAX) die("observation gate number out of range %d", id); g_obs_fn[id] = fn; }
@@ -107,7 +107,7 @@ static int g_ngate;
 static inline unsigned gate_h(uint64_t a) { return (unsigned)(((a >> 2) * 0x9E3779B97F4A7C15ull) >> (64 - GATE_BITS)); }
 
 void gate_register(uint64_t ret_abs, const char *kind, int arg, uint64_t orig) {
-    int k = !strcmp(kind, "svc") ? G_SVC : !strcmp(kind, "cntpct") ? G_CNTPCT : !strcmp(kind, "cntvct") ? G_CNTVCT : !strcmp(kind, "obs") ? G_OBS : !strcmp(kind, "spin") ? G_SPIN : -1;
+    int k = !strcmp(kind, "svc") ? G_SVC : !strcmp(kind, "cntpct") ? G_CNTPCT : !strcmp(kind, "cntvct") ? G_CNTVCT : !strcmp(kind, "obs") ? G_OBS : !strcmp(kind, "spin") ? G_SPIN : !strcmp(kind, "cntfrq") ? G_CNTFRQ : -1;
     if (k < 0) die("unknown gate kind %s", kind);
     if (k == G_OBS) { if ((arg & 0xff) <= 0 || (arg & 0xff) >= OBS_MAX) die("observation gate number out of range %d", arg & 0xff); g_obs_have[arg & 0xff] = 1; }
     if (++g_ngate > (1 << GATE_BITS) / 4) die("gate overflow");
@@ -117,6 +117,19 @@ void gate_register(uint64_t ret_abs, const char *kind, int arg, uint64_t orig) {
 }
 
 uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr);   // hle_svc.c
+
+// mrs xN, cntfrq_el0 (patch_nso.py sends it to the gate): the frequency of the ticks the counter gates return, the guest's 19.2 MHz (31.25 MHz for the Switch 2). The host's own
+// register describes the host's counter instead: 24 MHz on earlier Apple chips, 1 GHz measured on a development Mac (dm/gfx/nvn/nvn_entry.S), so a game converting ticks to time
+// with it got times 20 % short, or 32 to 52 times short on that Mac. Before the rewriter's rule the read stayed in place and gave the host's register; DM_CNTFRQ=0 gives that value
+// again (an A/B against builds without the rule; the rewritten code is the same either way). No game is known to read the register.
+static uint64_t cntfrq_value(void) {
+    static int host = -1;
+    if (host < 0) { const char *e = getenv("DM_CNTFRQ"); host = e && *e == '0'; if (host) LOG("[gate] DM_CNTFRQ=0: mrs cntfrq_el0 gives the host's counter frequency, not the guest's"); }
+#if defined(__aarch64__)
+    if (host) { uint64_t f; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f)); return f; }
+#endif
+    return dm_sdk_ounce() ? 31250000 : 19200000;
+}
 
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
     for (unsigned i = gate_h(ret_addr);; i = (i + 1) & ((1u << GATE_BITS) - 1)) {
@@ -128,6 +141,11 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
                 // dm_gate does not restore x18 (the Apple platform register): the guest's x18 is the thread slot K18, which every rewritten x18 site reads
                 if (g->arg == 18) pthread_setspecific(g_key18, (void *)(uintptr_t)t); else regs[g->arg] = t;
                 return t;
+            }
+            case G_CNTFRQ: {   // mrs xN, cntfrq_el0, arg = N: the frequency of the ticks above (cntfrq_value); into x18 through thread slot K18, as for the counter
+                uint64_t f = cntfrq_value();
+                if (g->arg == 18) pthread_setspecific(g_key18, (void *)(uintptr_t)f); else regs[g->arg] = f;
+                return f;
             }
             case G_OBS: if (g_obs_fn[g->arg & 0xff]) g_obs_fn[g->arg & 0xff](regs, g->arg >> 8); return 0;   // dm_gate writes x0–x29 back: the original values, unless the callback changed one (OBS_STDALLOC_INIT)
             case G_SPIN: {   // a pass of a spin wait loop (patch_nso.py "Spin waits"), where the thread may sleep (hle_thread.c dm_spin_wait): inside an SVC frame, so that a thread paused there has its context

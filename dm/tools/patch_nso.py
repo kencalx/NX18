@@ -4,8 +4,8 @@
 #   x18 read/write      → thread slot K18 (TSD, via tpidrro_el0)
 #   mrs tpidr_el0       → read thread slot KTLS; msr tpidr_el0 → write KTLS
 #   mrs tpidrro_el0     → read thread slot KTLR (Horizon ThreadLocalRegion pointer)
-#   any of these with x18 as its register → a copy between thread slots, K18 among them (site_slot_copy; the host gate writes K18 for mrs x18, cntpct_el0)
-#   svc #n, mrs cntpct_el0 → host gate (gate address taken from thread slot KGATE; once in C, gates.tsv is looked up by return point)
+#   any of these with x18 as its register → a copy between thread slots, K18 among them (site_slot_copy; the host gate writes K18 for mrs x18, cntpct_el0 / cntvct_el0 / cntfrq_el0)
+#   svc #n, mrs cntpct_el0 / cntvct_el0 / cntfrq_el0 → host gate (gate address taken from thread slot KGATE; once in C, gates.tsv is looked up by return point)
 #   sub sp, sp, xN      → xN rounded up to 16 first (Apple's kernel faults on a misaligned sp, Horizon does not; site_sp_align)
 #   ldxr* / ldxp → ldaxr* / ldaxp, stxr* / stxp → stlxr* / stlxp: every exclusive access gets acquire or release ordering (exclusive_order_sites; the games ran on the Switch's Cortex-A57 without it, Apple cores need it)
 #   the completer of Trinity's per-frame rendezvous: dmb ish between its flag store and its load of the state word (trinity_completer_sites; exactly one such function in a module, or no change)
@@ -492,7 +492,9 @@ def emit_gate_call():
     emit(MRS_TPIDRRO(30)); emit_slot_addr(30, 29, 'KGATE'); emit(LDRX(30, 30)); emit(LDRX(29, 31))
 
 def site_gate(ins, kind, arg):
-    """svc / mrs cntpct_el0 → host gate. The gate address is taken from thread slot KGATE; the gate looks up gates.tsv by return point (the address of this block's ldp)."""
+    """svc / mrs cntpct_el0 / cntvct_el0 / cntfrq_el0 → host gate. The gate address is taken from thread slot KGATE; the gate looks up gates.tsv by return point (the address of this
+    block's ldp). A counter read into x18 keeps this block: dm_gate does not write x18 back (Apple's platform register), so the host writes the value into thread slot K18, the guest's
+    x18 (hle.c gate_dispatch, arg 18). An svc's arg is its number, not a register"""
     start = here()
     emit(STP_PRE(29, 30, 31, -16))
     emit_gate_call()
@@ -803,6 +805,12 @@ for o in (o for s, e in CODE_RANGES for o in range(s, e, 4)):
     if w & 0xFFFFFFE0 == 0xD53BD060: kinds[o] = ('tpidrro_r', None); continue
     if w & 0xFFFFFFE0 == 0xD53BE020: kinds[o] = ('cntpct', w & 31); continue
     if w & 0xFFFFFFE0 == 0xD53BE040: kinds[o] = ('cntvct', w & 31); continue
+    # mrs xN, cntfrq_el0: the counter's frequency. The counter reads above return the guest's ticks (19.2 MHz, 31.25 MHz for the Switch 2), while the host's register describes the
+    # host's counter: 24 MHz on earlier Apple chips (ticks converted with it come out 20 % short, 30 % long for the Switch 2), 1 GHz measured on a development Mac
+    # (dm/gfx/nvn/nvn_entry.S: 32 to 52 times short). The host gate gives the guest's frequency (hle.c G_CNTFRQ; DM_CNTFRQ=0 makes it give the host's register again, as before
+    # this rule), into x18 too (the host writes thread slot K18). mrs x18, cntfrq_el0 used to be an x18 site (site_plain: the host's register into K18), and mrs xN for any other
+    # N stayed in place. Only a module that holds the read rewrites differently: every other one is byte-identical
+    if w & 0xFFFFFFE0 == 0xD53BE000: kinds[o] = ('cntfrq', w & 31); continue
     # mrs xN, ctr_el0 (cache type): the Apple kernel does not expose it to user mode (SIGILL); SDK 16's nn::os::FlushDataCache reads it for the cache line size
     if w & 0xFFFFFFE0 == 0xD53B0020: kinds[o] = ('ctr', w & 31); continue
     # sub sp, sp, xN (extended register, LSL #0): sp may end up misaligned, which Horizon allows and Apple's kernel does not (site_sp_align); with x18 it is an x18 site (site_sp)
@@ -1382,10 +1390,15 @@ def pieces(fa, fb):
         s = cand[j]; cuts.append(s)
     b = [0] + cuts + [n]
     return [(fa + 4 * p, fa + 4 * q) for p, q in zip(b, b[1:])], far
-funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
+# The functions (pieces) that hold x18 sites are analysed, and those that hold mrs x18, cntfrq_el0, as when that read was an x18 site: an exclusive window around it (find_windows)
+# is still copied whole (site_window: the host's register, as for every counter read inside a window), not a gate entered between its ldxr and its stxr. Changing the rule
+# alone would have done that for a window whose only x18 word is this read. A read in an exclusive section the rewriter does not recognize (16 instructions or more, or code
+# without an FDE) is gated, as every other counter read there already was
+is18 = lambda k, arg: k == 'x18' or (k, arg) == ('cntfrq', 18)
+funcs = sorted({func_of(a) for a, (k, arg) in kinds.items() if is18(k, arg)})
 far_into, rmid_all, newly_accepted = [], set(), set()
 if any(fb - fa > BIG_FN for fa, fb in funcs):
-    sites18 = sorted(a for a, (k, _) in kinds.items() if k == 'x18'); split = []
+    sites18 = sorted(a for a, (k, arg) in kinds.items() if is18(k, arg)); split = []
     for fa, fb in funcs:
         if fb - fa <= BIG_FN: split.append((fa, fb)); continue
         ps, far = pieces(fa, fb); far_into += far
@@ -1498,7 +1511,7 @@ for a in sorted(kinds):
     elif k == 'tpidrro_r': st = site_sysreg_read(ins, 'KTLR'); stat(k)
     elif k == 'tpidr_w': st = site_tpidr_write(ins); stat(k)
     elif k == 'svc': st = site_gate(ins, 'svc', arg); stat(k)
-    elif k in ('cntpct', 'cntvct'): st = site_gate(ins, k, arg); stat(k)
+    elif k in ('cntpct', 'cntvct', 'cntfrq'): st = site_gate(ins, k, arg); stat(k)
     elif k == 'sp_align': st = site_sp_align(ins, arg); stat(k)
     elif k == 'ctr':   # a constant: DminLine = 4 (64-byte lines); movz xN, #4, lsl #16, in place, or into the slot K18 for x18
         if arg == 18: st = site_slot_copy(ins, 0xD2A00080 | 15, 'K18'); stat(k)
