@@ -476,7 +476,7 @@ static void spare_tables_case(void) {
     uint64_t done0 = g_done, fence0 = g_fence; int saved = g_pool_spares;
     for (int round = 0; round < 2; round++) {
         int cap = round ? POOL_SPARES_MAX : POOL_SPARES; g_pool_spares = cap;
-        while (g_npool_spare) { g_pool_spare[--g_npool_spare].buf = nil; }   // an empty set
+        while (g_npool_spare) { g_pool_spare[--g_npool_spare].buf = nil; } g_pool_spare_bytes = 0;   // an empty set
         uint64_t dropped0 = g_pool_dropped; __unsafe_unretained id<MTLBuffer> oldest = nil;
         for (int i = 0; i < cap; i++) { id<MTLBuffer> b = [g_dev newBufferWithLength:0x10000 options:MTLResourceStorageModeShared]; if (!i) oldest = b; g_fence++; pool_table_give(b); }
         CHECK(g_npool_spare == cap && g_pool_dropped == dropped0, round ? "replay_spares: 64 spare tables kept" : "16 spare tables kept");
@@ -495,7 +495,23 @@ static void spare_tables_case(void) {
         CHECK(ss[0] == g_pool_made && ss[1] == g_pool_reused && ss[2] == (uint64_t)g_npool_spare && ss[3] == (uint64_t)cap && ss[4] == g_pool_dropped, "the power line reads the tables made, reused, the spares kept of how many, and let go");
         g_done = done0;
     }
-    while (g_npool_spare) { g_pool_spare[--g_npool_spare].buf = nil; }
+    // replay_spares holds at most POOL_SPARE_BYTES of spares: six 4 MB tables fill it, a seventh with all in flight is let go, and once they have come back the oldest goes instead
+    g_pool_spares = POOL_SPARES_MAX; while (g_npool_spare) { g_pool_spare[--g_npool_spare].buf = nil; } g_pool_spare_bytes = 0;
+    uint64_t dropped1 = g_pool_dropped; __unsafe_unretained id<MTLBuffer> first4 = nil;
+    for (int i = 0; i < 6; i++) { id<MTLBuffer> b = [g_dev newBufferWithLength:4u << 20 options:MTLResourceStorageModeShared]; if (!i) first4 = b; g_fence++; pool_table_give(b); }
+    CHECK(g_npool_spare == 6 && g_pool_spare_bytes == 24u << 20 && g_pool_dropped == dropped1, "replay_spares: six 4 MB spare tables fill the 24 MB");
+    id<MTLBuffer> b7 = [g_dev newBufferWithLength:4u << 20 options:MTLResourceStorageModeShared]; g_fence++; pool_table_give(b7);
+    int kept7 = 0; for (int i = 0; i < g_npool_spare; i++) kept7 |= g_pool_spare[i].buf == b7;
+    CHECK(!kept7 && g_npool_spare == 6 && g_pool_spare_bytes == 24u << 20 && g_pool_dropped == dropped1 + 1, "a seventh with every spare in flight is let go");
+    g_done = g_fence + 1;
+    id<MTLBuffer> b8 = [g_dev newBufferWithLength:4u << 20 options:MTLResourceStorageModeShared]; g_fence++; pool_table_give(b8);
+    int kept8 = 0, kept_first = 0; for (int i = 0; i < g_npool_spare; i++) { kept8 |= g_pool_spare[i].buf == b8; kept_first |= g_pool_spare[i].buf == first4; }
+    CHECK(kept8 && !kept_first && g_npool_spare == 6 && g_pool_spare_bytes == 24u << 20, "with them back, the oldest goes and the new one is kept, still 24 MB");
+    id<MTLBuffer> huge = [g_dev newBufferWithLength:32u << 20 options:MTLResourceStorageModeShared]; uint64_t dropped2 = g_pool_dropped; pool_table_give(huge);
+    CHECK(g_npool_spare == 6 && g_pool_dropped == dropped2 + 1 && g_pool_spare_bytes == 24u << 20, "a table over the whole budget is never kept");
+    id<MTLBuffer> t4 = pool_table_take((4u << 20) - 100);
+    CHECK(t4 && g_npool_spare == 5 && g_pool_spare_bytes == 20u << 20, "taking one back lowers the spares' bytes");
+    while (g_npool_spare) { g_pool_spare[--g_npool_spare].buf = nil; } g_pool_spare_bytes = 0;
     g_pool_spares = saved; g_done = done0; g_fence = fence0;
 }
 // A cut with earlier work still running stays a boundary for the game's timestamps, and commits only when the GPU has run out; a report after it takes that boundary's time.

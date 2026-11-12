@@ -2242,13 +2242,18 @@ double nvn_rtw_size_ms(const double *v, int n, double period_ms) {
 }
 static void rtw_declare(nvn_rtw *w, uint64_t period_ns, double comp_ms) {
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
+    if (comp_ms > 50.0) comp_ms = 50.0;   // XNU refuses a computation over its largest real-time quantum (50 ms): a present period over 62.5 ms (15 fps) would ask for more
     uint64_t comp_ns = (uint64_t)(comp_ms * 1e6);
     thread_time_constraint_policy_data_t p = {
         .period = (uint32_t)(period_ns * tb.denom / tb.numer), .computation = (uint32_t)(comp_ns * tb.denom / tb.numer),
         .constraint = (uint32_t)(period_ns * tb.denom / tb.numer), .preemptible = 1};
     mach_port_t self = pthread_mach_thread_np(pthread_self());
     kern_return_t kr = thread_policy_set(self, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-    if (kr != KERN_SUCCESS) { w->failed = 1; LOG("[nvn] replay threads: '%s' time-constraint policy (period %.3f ms, computation %.3f ms) failed to set (%d): it keeps its QoS", w->name, period_ns / 1e6, comp_ms, kr); return; }
+    // Only a first declaration that fails ends the policy for good (the thread keeps its QoS). A later one that fails keeps the declaration in effect and its size, and the
+    // next tick tries again; its line is logged within the same 16
+    if (kr != KERN_SUCCESS) { int first = !(w->comp_ms > 0); if (first) w->failed = 1;
+        if (first || w->logged < 16) { if (!first) w->logged++; LOG("[nvn] replay threads: '%s' time-constraint policy (period %.3f ms, computation %.3f ms) failed to set (%d): %s", w->name, period_ns / 1e6, comp_ms, kr, first ? "it keeps its QoS" : "the previous one stays"); }
+        return; }
     pthread_mutex_lock(&g_rt_mu);   // rtw_states reads these from the thread writing the policy line
     int first = !(w->comp_ms > 0); w->comp_ms = comp_ms; w->period_ms = period_ns / 1e6;
     if (first) {   // a send right of our own, so that the line reads this thread and a thread that ended reads as ended

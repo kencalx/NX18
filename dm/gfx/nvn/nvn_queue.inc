@@ -250,7 +250,7 @@ int nvn_replay_spares(void) {
     static _Atomic int v=-1; int c=atomic_load_explicit(&v,memory_order_relaxed); if(c>=0) return c;
     const char *e=getenv("DM_REPLAY_SPARES"); int on=replay_spares_mode(e,DM_GAME_REPLAY_SPARES), was=-1;
     if(atomic_compare_exchange_strong(&v,&was,on) && on)
-        LOG("[nvn] replay spares: up to %d spare command copies (%zu MB in all) and 64 spare pool tables, the newest dropped when every spare table is in flight (%s)",NQ_SPARES_MAX,NQ_SPARE_BYTES>>20,e && *e?"DM_REPLAY_SPARES":"game profile replay_spares");
+        LOG("[nvn] replay spares: up to %d spare command copies (%zu MB in all) and 64 spare pool tables (24 MB in all), the newest dropped when every spare table is in flight (%s)",NQ_SPARES_MAX,NQ_SPARE_BYTES>>20,e && *e?"DM_REPLAY_SPARES":"game profile replay_spares");
     return on;
 }
 static int nq_spare_n(void) { if(nq_spares<0) nq_spares=nvn_replay_spares()?NQ_SPARES_MAX:NQ_SPARES; return nq_spares; }

@@ -11119,26 +11119,30 @@ static void pool_seen_scan(void) {
 // in flight, so the lowest fence that left was the next to come back. With replay_spares (nvn_replay_spares, hle_nvn.c) up to POOL_SPARES_MAX are kept, and when every one is still
 // in flight the table given now, the newest, goes instead (g_pool_dropped); a full set with one completed still lets the lowest fence go, a size the pools have left behind
 enum { POOL_SPARES = 16, POOL_SPARES_MAX = 64 };
-static struct { __strong id<MTLBuffer> buf; uint64_t fence; } g_pool_spare[POOL_SPARES_MAX]; static int g_npool_spare; static uint64_t g_pool_made, g_pool_reused, g_pool_dropped;
+#define POOL_SPARE_BYTES (24u << 20)   // replay_spares: the spares' total, as the command copies have NQ_SPARE_BYTES (Ocarina's tables were about 320 KB, 64 of them 20 MB)
+static struct { __strong id<MTLBuffer> buf; uint64_t fence; } g_pool_spare[POOL_SPARES_MAX]; static int g_npool_spare; static uint64_t g_pool_made, g_pool_reused, g_pool_dropped; static size_t g_pool_spare_bytes;
 static int g_pool_spares = -1;   // how many are kept: POOL_SPARES, or POOL_SPARES_MAX with replay_spares (a unit test may set it directly)
 static int pool_spares(void) { if (g_pool_spares < 0) g_pool_spares = nvn_replay_spares() ? POOL_SPARES_MAX : POOL_SPARES; return g_pool_spares; }
 static id<MTLBuffer> pool_table_take(size_t need) {
     size_t len = (need + 0xffff) & ~(size_t)0xffff; uint64_t done = g_done;
     for (int i = 0; i < g_npool_spare; i++) if (g_pool_spare[i].fence <= done && g_pool_spare[i].buf.length == len) {
-        id<MTLBuffer> b = g_pool_spare[i].buf; g_pool_spare[i] = g_pool_spare[--g_npool_spare]; g_pool_spare[g_npool_spare].buf = nil; g_pool_reused++; return b; }
+        id<MTLBuffer> b = g_pool_spare[i].buf; g_pool_spare_bytes -= b.length; g_pool_spare[i] = g_pool_spare[--g_npool_spare]; g_pool_spare[g_npool_spare].buf = nil; g_pool_reused++; return b; }
     id<MTLBuffer> b = [g_dev newBufferWithLength:len options:MTLResourceStorageModeShared];
     if (b) { res_add(b); g_pool_made++; }
     return b;
 }
 static void pool_table_give(id<MTLBuffer> b) {
     if (!b) return;
-    int cap = pool_spares();
-    if (g_npool_spare >= cap) {   // the oldest goes: a size the pools have left behind, most likely
+    int cap = pool_spares(), big = cap > POOL_SPARES;
+    if (big && b.length > POOL_SPARE_BYTES) { g_pool_dropped++; defer_obj_release(b); return; }   // replay_spares: one table past the whole budget is never kept
+    // the oldest goes: a size the pools have left behind, most likely. With replay_spares also while the spares' bytes are over POOL_SPARE_BYTES, so pools that grew never hold more
+    while (g_npool_spare >= cap || (big && g_npool_spare && g_pool_spare_bytes + b.length > POOL_SPARE_BYTES)) {
         int o = 0; for (int i = 1; i < g_npool_spare; i++) if (g_pool_spare[i].fence < g_pool_spare[o].fence) o = i;
         g_pool_dropped++;
-        if (cap > POOL_SPARES && g_pool_spare[o].fence > g_done) { defer_obj_release(b); return; }   // replay_spares, every spare in flight: the newest goes, not the next to come back
+        if (big && g_pool_spare[o].fence > g_done) { defer_obj_release(b); return; }   // replay_spares, every spare in flight: the newest goes, not the next to come back
+        g_pool_spare_bytes -= g_pool_spare[o].buf.length;
         defer_obj_release(g_pool_spare[o].buf); g_pool_spare[o] = g_pool_spare[--g_npool_spare]; g_pool_spare[g_npool_spare].buf = nil; }
-    g_pool_spare[g_npool_spare].buf = b; g_pool_spare[g_npool_spare].fence = g_fence + 1; g_npool_spare++;
+    g_pool_spare[g_npool_spare].buf = b; g_pool_spare[g_npool_spare].fence = g_fence + 1; g_npool_spare++; g_pool_spare_bytes += b.length;
 }
 // The spares' counts for the power line's 'pool tables up to frame' (hle_nvn.c), with replay_spares: tables made, reused, spares kept now and of how many, let go. The patch path
 // (pool_table_take in pool_gpu) makes and reuses nearly all of Ocarina of Time's tables, and the 'pool walk' line, written from the whole-table path every 500 builds, came once a run
