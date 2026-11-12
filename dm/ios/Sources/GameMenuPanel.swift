@@ -159,7 +159,7 @@ enum GameMenuLayout {
         case .a: if let f = focus, let item = page.sections.lazy.flatMap(\.items).first(where: { $0.id == f }) { activate(item) }
         case .b: back()
         case .plus: close()
-        case .y, .l, .r: break
+        case .x, .y, .minus, .l, .r, .zl, .zr: break   // X, -, ZL and ZR: the guide viewer's (LauncherGuidePageModel), nothing here
         }
     }
 }
