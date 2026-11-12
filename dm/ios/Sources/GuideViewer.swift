@@ -159,13 +159,14 @@ struct LauncherGuideSheet: View {
         .buttonStyle(.plain)
         .accessibilityLabel(label)
     }
-    // The page's L or R (its page turning), drawn as the console's shoulder buttons and named as the connected pad names them (turnNames); the page gets "L" / "R" whatever the name
+    // The page's L or R (its page turning), drawn as the console's shoulder buttons and named as the connected pad names them (turnNames); the page gets "L" / "R" whatever the name.
+    // A pad's name goes without the chevron: "LB" takes the chevron's room, so the header keeps its width (in portrait it already squeezes the Game guide / Manual switch)
     private func turnButton(_ button: String, icon: String, label: String, on: Bool) -> some View {
         Button { model.press(button) } label: {
             HStack(spacing: 4) {
-                if button == "L" { Image(systemName: icon) }
+                if button == "L" && turnNames == nil { Image(systemName: icon) }
                 Text(turnNames.map { button == "L" ? $0.l : $0.r } ?? button).lineLimit(1).fixedSize()
-                if button == "R" { Image(systemName: icon) }
+                if button == "R" && turnNames == nil { Image(systemName: icon) }
             }
             .nxFont(.subheadline, weight: .semibold).foregroundStyle(.white)
             .padding(.horizontal, 12).frame(height: 36).background(Capsule().fill(NX18Palette.row))
