@@ -298,16 +298,17 @@ struct LauncherView: View {
                                closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil) { sheet = nil }
                 .presentationBackground(background)
         }
+        // The controller sentences name the buttons as the pad labels them (pad.glyphs): handle gets Switch buttons by position, so on an Xbox pad Switch B is its A. L and R are the same on every pad
         .confirmationDialog(SaveSyncReport.chooseTitle, isPresented: isAsking(.choose), titleVisibility: .visible, presenting: report) { r in
             Button(r.localLabel(here: "iPhone")) { go(r.localChoice) }
             Button(r.cloudLabel) { go(r.cloudChoice) }
             Button("Cancel", role: .cancel) {}
-        } message: { r in Text(r.chooseMessage(here: "iPhone") + (pad.connected ? " With a controller: L plays this iPhone's, R the cloud's, B cancels." : "")) }
+        } message: { r in Text(r.chooseMessage(here: "iPhone") + (pad.connected ? " With a controller: L plays this iPhone's, R the cloud's, \(pad.glyphs.name(.b)) cancels." : "")) }
         .confirmationDialog(SaveSyncReport.unreadableTitle, isPresented: isAsking(.unreadable), titleVisibility: .visible, presenting: report) { r in
             Button("Play This iPhone's Save") { go("offline") }   // the mount does not wait for the cloud again
             Button("Try Again") { DispatchQueue.main.async { start() } }
             Button("Cancel", role: .cancel) {}
-        } message: { r in Text(r.unreadableMessage(here: "iPhone") + (pad.connected ? " With a controller: A plays this iPhone's save, Y tries again, B cancels." : "")) }
+        } message: { r in Text(r.unreadableMessage(here: "iPhone") + (pad.connected ? " With a controller: \(pad.glyphs.name(.a)) plays this iPhone's save, \(pad.glyphs.name(.y)) tries again, \(pad.glyphs.name(.b)) cancels." : "")) }
         .task { await pad.run { handle($0) } }
         .task { await followStatus() }
         .onChange(of: sheet) {          // a button held as a sheet opens or closes (A held while B closes the guide) is no press on what is under it
@@ -488,7 +489,15 @@ struct LauncherView: View {
         HStack(spacing: 8) {
             ProgressView().tint(NX18Palette.onArt)
             Text("Checking the cloud save…").nxFont(.callout).foregroundStyle(NX18Palette.onArt)
-            Button(pad.connected ? "Play Without It (B)" : "Play Without It") { playWithout() }.nxFont(.callout, weight: .semibold).tint(NX18Palette.cyan)
+            Button { playWithout() } label: {
+                HStack(spacing: 5) {
+                    Text("Play Without It")
+                    if pad.connected { NXPadGlyphView(pad.glyphs.glyph(.b), size: 15, relativeTo: .callout) }   // the pad's own button for Switch B: the bottom one, labelled A, on an Xbox pad
+                }
+            }
+            .nxFont(.callout, weight: .semibold).tint(NX18Palette.cyan)
+            .accessibilityLabel("Play Without It")
+            .accessibilityHint(pad.connected ? "Or press \(pad.glyphs.name(.b))" : "")
         }
     }
 
