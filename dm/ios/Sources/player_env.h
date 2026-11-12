@@ -18,3 +18,9 @@ static inline int dm_player_diagnostic_key(const char *key) {
     for(unsigned i=0;i<sizeof names/sizeof *names;i++)if(!strcmp(key,names[i]))return 1;
     return 0;
 }
+// A whole env.txt line: the key dropped as above, or DM_SLOWFRAME with an empty value or zeros. slow_on (hle_nvn.c) takes any value as on, and before the player build kept the key a
+// leftover DM_SLOWFRAME=0 did nothing there; dropped, it still does nothing, and =0 is the off side of an A/B as with every other kept switch
+static inline int dm_player_env_dropped(const char *key,const char *value) {
+    if(dm_player_diagnostic_key(key))return 1;
+    return !strcmp(key,"DM_SLOWFRAME")&&value&&strspn(value,"0")==strlen(value);
+}

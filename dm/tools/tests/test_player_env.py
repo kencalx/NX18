@@ -23,6 +23,11 @@ int main(void) {
    "DM_NVN_WAITS","DM_SLOWFRAME","DM_REPLAY_RT","DM_REPLAY_SPARES","DM_FPS_HOLD_BACKOFF","DM_FPS_RESUME","DM_MOVIE_RESTART","DM_FIELD_LOG"};
  for(unsigned i=0;i<sizeof drop/sizeof *drop;i++)assert(dm_player_diagnostic_key(drop[i]));
  for(unsigned i=0;i<sizeof keep/sizeof *keep;i++)assert(!dm_player_diagnostic_key(keep[i]));
+ // the whole line: DM_SLOWFRAME kept only with a value that is not empty or zeros (slow_on takes any value as on)
+ assert(dm_player_env_dropped("DM_SLOWFRAME","0")&&dm_player_env_dropped("DM_SLOWFRAME","")&&dm_player_env_dropped("DM_SLOWFRAME","00"));
+ assert(!dm_player_env_dropped("DM_SLOWFRAME","1")&&!dm_player_env_dropped("DM_SLOWFRAME","10"));
+ assert(!dm_player_env_dropped("DM_NVN_WAITS","0")&&!dm_player_env_dropped("DM_REPLAY_RT","0")&&!dm_player_env_dropped("DM_REPLAY_SPARES","0"));   // the off side of an A/B is kept
+ assert(dm_player_env_dropped("DM_NVN_PROF","1")&&!dm_player_env_dropped("DM_SHOW_FPS","0"));
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:
