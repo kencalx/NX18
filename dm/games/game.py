@@ -172,7 +172,7 @@ def header_one(g):
     if fm not in ('60', '120'): sys.exit(f'{g.id}: fps_max must be 60 or 120: {fm}')
     fh = g.get('fps_hold', 'on')   # whether the frame step may hold a frame longer than the cap's vsyncs when frames come late (hle_nvn.c fstep_tick): on / off
     if fh not in ('on', 'off'): sys.exit(f'{g.id}: fps_hold must be on or off: {fh}')
-    fhb = g.get('fps_hold_backoff', 'double')   # the waits after a held probe's run at hold 1 that ended early (nvn_fstep.h FSTEP_BURST_N, FSTEP_BURST_CAP; DM_FPS_HOLD_BACKOFF overrides): double (doubled up to 8 s) / burst (a short CPU burst paid back at hold 1)
+    fhb = g.get('fps_hold_backoff', 'double')   # the waits after a held probe's run at hold 1 that ended early (nvn_fstep.h FSTEP_BURST_N; DM_FPS_HOLD_BACKOFF overrides): double (doubled up to 8 s) / burst (a short CPU burst paid back at hold 1)
     if fhb not in ('double', 'burst'): sys.exit(f'{g.id}: fps_hold_backoff must be double or burst: {fhb}')
     frs = g.get('fps_resume', 'off')   # the frame across a stay in the background on time and owing nothing, the 30 after it not stepping the hold up (nvn_fstep.h nvn_fstep.away; DM_FPS_RESUME overrides): on / off
     if frs not in ('on', 'off'): sys.exit(f'{g.id}: fps_resume must be on or off: {frs}')

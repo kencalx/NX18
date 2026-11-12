@@ -132,7 +132,7 @@ class MovieRestart(unittest.TestCase):   # a VideoToolbox movie session iOS inva
         for d in on: self.assertIn('movie_restart', (d / 'README.md').read_text(encoding='utf-8') if (d / 'README.md').is_file() else '', d.name)
 
 
-class FpsHoldBackoff(unittest.TestCase):   # the waits after a held probe's short run at hold 1 (nvn_fstep.h FSTEP_BURST_CAP; DM_FPS_HOLD_BACKOFF overrides)
+class FpsHoldBackoff(unittest.TestCase):   # the waits after a held probe's short run at hold 1 (nvn_fstep.h FSTEP_BURST_N; DM_FPS_HOLD_BACKOFF overrides)
     def macro(self, rows, gid=None):
         with tempfile.TemporaryDirectory() as d:
             out = Path(d, 'game.h')

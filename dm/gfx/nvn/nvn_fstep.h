@@ -66,10 +66,10 @@
 // background; no step up, so no wait and nothing the probes measured is forgotten. Stepping up for each burst and back after 1 s instead switched between 60 and 30 every 1.3-2.3 s
 // for as long as the bursts came (run B: 13 step ups in 30 s against 6 when doubling), and each probe back from 30 into a GPU-bound area (run A) failed. A burst is one at kmin
 // outside a trial, in a run that has not had one in the last FSTEP_RUN frames, and lasts FSTEP_BURST_N late frames at most: a longer one, one with the GPU over the late line or
-// asking for more, and one soon after the last steps up as before. A held probe's run at kmin that ends early that way still fails, but waits FSTEP_BURST_CAP (2 s) at most.
-// Probes that fail in their own trial, fit trials that fail, and the hold-off of failed probes over budget (nvn_fstep_pheld, the GPU-bound areas of run A) are as before
-// (t_fstep: the run B and run A replays)
-#define FSTEP_BURST_CAP 120.0
+// asking for more, and one soon after the last steps up as before, and a held probe's run at kmin that ends early that way fails and doubles the waits as without backoff. An
+// earlier cap of those waits at 2 s (FSTEP_BURST_CAP) sent a probe every 2 s into the GPU-bound scene that had ended such a run (run A, log.prev.txt:944-971), each failing with
+// its 30 frames of grace late: 16 step ups and 296 late frames at hold 1 against 8 and 24 when doubling (t_fstep oot_a_held). Probes that fail in their own trial, fit trials
+// that fail, and the hold-off of failed probes over budget (nvn_fstep_pheld, the GPU-bound areas of run A) are as before (t_fstep: the run B and run A replays)
 #define FSTEP_BURST_N 5       // late frames in a row a short burst on the CPU side may last (run B's: 3)
 // A frame across a stay in the background (nvn_fstep.away, set by the caller for one call: the profile's fps_resume, DM_FPS_RESUME; Ocarina of Time, X1.0). The guest's clock is
 // frozen while the app is away, so the stay is time the game never ran: before, that frame counted as late and as a debt, capped at FSTEP_DEBT_MAX, which the game then paid
@@ -102,7 +102,7 @@ typedef struct {
     int upf;                  // frames left after a step up whose late screen verdicts are about frames before it (FSTEP_UP_LAG)
     int pin, pinned;          // set by the caller (kept): 1 = a movie above 30 fps plays, hold kmin; the last call's pin
     int away, rgrace;         // set by the caller for one call, then cleared: 1 = the frame spans a stay in the background; frames left after it whose lateness does not step up
-    int backoff;              // set by the caller (kept): 1 = a short burst on the CPU side at kmin is paid back without a step up, a held probe's run's other early ends wait FSTEP_BURST_CAP at most
+    int backoff;              // set by the caller (kept): 1 = a short burst on the CPU side at kmin is paid back without a step up (FSTEP_BURST_N)
     int inburst, bwait;       // backoff: the late frames in a row are a burst let through; frames left before another may be
     double gpu, lgpu;         // set by the caller before each call: the frame's GPU time in vsyncs (0 = none finished yet); the most of it over the late frames in a row
     uint64_t late, paid, ups, downs, failed, probes, bursts; double dropped;   // statistics for the log (bursts: runs at kmin ended by a short burst on the CPU side, with backoff)
@@ -214,11 +214,6 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
                 s->phold = s->phold * 2 < FSTEP_PHOLD_MAX * (s->per_vsync ? s->per_vsync : 1) ? s->phold * 2 : FSTEP_PHOLD_MAX * (s->per_vsync ? s->per_vsync : 1);
                 if (s->probe == 1) { s->pk = s->pn ? s->psum / s->pn : cost; s->pover = s->pk > FSTEP_OVER * kmin ? s->pover + 1 : 0; }
                 else s->pover = 0;   // its run at kmin held for a while: kmin fits, at times
-            }
-            if (s->backoff && s->probe == 2) {   // backoff: a run at kmin after a held probe waits FSTEP_BURST_CAP at most, however often it ended early
-                const double cap = FSTEP_BURST_CAP * (s->per_vsync ? s->per_vsync : 1);
-                if (s->hold > cap) s->hold = cap;
-                if (s->phold > cap) s->phold = cap;
             }
         }
         else if (s->probe == 2) { s->hold = hold0; nvn_fstep_pforget(s, hold0); }   // the probe's run at kmin lasted

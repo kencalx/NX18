@@ -106,6 +106,27 @@ static uint64_t oot_a(int backoff, double w1, uint64_t *ups) {
     }
     *ups = x.m.s.ups - u0; return x.m.s.probes - p0;
 }
+// Run A's held probe ended by a burst (log.prev.txt:906-971): hold 1 at 0.86 for 20 s, a GPU-bound stretch (1.3 at hold 1) that steps up, then a lighter one (0.95, GPU 0.92)
+// where a probe back to hold 1 holds; reps times: 150 frames at hold 1 (the log: 151), a burst on the CPU side (3 frames of 1.35, GPU 0.92: the log's 1.35 / 0.92 and 1.43 /
+// 0.99 at :944 and :1267), then the GPU-bound scene again for `heavy` vsyncs of real time, then the lighter one until a probe holds and 150 frames more. The GPU at hold 2 is 1.6
+// times its time at hold 1. Returns the step ups from the first burst on; *late1 the late frames at hold 1, *bursts the bursts
+static uint64_t oot_a_held(int backoff, int reps, double heavy, uint64_t *late1, uint64_t *bursts) {
+    ssim x = {0}; x.m.s.backoff = backoff;
+    for (int i = 0; i < 1200; i++) { x.m.s.gpu = 0.75; step1(&x, 0, 0.86); }
+    #define OOT_A1(wh1) do { int k_ = x.m.s.k; double w_ = k_ == 1 ? (wh1) : 1.6 * (wh1); x.m.s.gpu = w_; \
+                             x.m.slow = nvn_fstep_gpu_slowed(&x.g, x.m.s.gpu, k_ ? k_ : 1, 1, x.m.s.probe); run(&x.m, 1, w_, 1, 3, 0); } while (0)
+    for (double t0 = x.m.real; x.m.real - t0 < 300;) OOT_A1(1.3);
+    for (int i = 0, at1 = 0; i < 5000 && at1 < 150; i++) { OOT_A1(0.95); at1 = x.m.s.k == 1 && x.m.s.probe == 2 ? at1 + 1 : 0; }
+    uint64_t u0 = x.m.s.ups; *late1 = 0;
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i < 3; i++) { int k = x.m.s.k; double w = k == 1 ? 1.35 : 1.6 * 0.95; x.m.s.gpu = k == 1 ? 0.92 : w; uint64_t l = x.m.s.late;
+                                      x.m.slow = nvn_fstep_gpu_slowed(&x.g, x.m.s.gpu, k, 1, x.m.s.probe); run(&x.m, 1, w, 1, 3, 0); *late1 += k == 1 && x.m.s.late > l; }
+        for (double t0 = x.m.real; x.m.real - t0 < heavy;) { int k = x.m.s.k; uint64_t l = x.m.s.late; OOT_A1(1.3); *late1 += k == 1 && x.m.s.late > l; }
+        for (int i = 0, at1 = 0; i < 5000 && at1 < 150; i++) { int k = x.m.s.k; uint64_t l = x.m.s.late; OOT_A1(0.95); *late1 += k == 1 && x.m.s.late > l; at1 = x.m.s.k == 1 && (x.m.s.probe == 2 || x.m.s.probe == 0) ? at1 + 1 : 0; }
+    }
+    #undef OOT_A1
+    *bursts = x.m.s.bursts; return x.m.s.ups - u0;
+}
 // The edge of run A's heavy areas (log.prev.txt:906-970): hold 1 near its budget (cost and GPU 0.95) with a short burst on the CPU side (GPU 0.92) 150 frames into each run at
 // hold 1, and the GPU at hold 2 1.6 times its hold-1 time. Returns the share of real time at hold 2 in 60 s; *ups the step ups
 static double oot_edge(int backoff, uint64_t *ups) {
@@ -640,6 +661,14 @@ int main(void) {
         p0 = oot_a(0, 1.12, &u0); p1 = oot_a(1, 1.12, &u1);
         snprintf(b, sizeof b, "  just out of reach at 1.12: probes %llu / %llu, step ups %llu / %llu", (unsigned long long)p0, (unsigned long long)p1, (unsigned long long)u0, (unsigned long long)u1);
         check(p1 == p0 && u1 == u0 && p0 <= 6, b);
+        // A held probe's run ended by a burst, then the GPU-bound scene (oot_a_held, 8 times): the burst is paid back and the scene's own late frames step up as when doubling,
+        // one frame later. With the waits after such a run capped at 2 s, each was followed by a probe into the GPU-bound scene that failed: 16 / 296 against 8 / 24
+        for (int h = 0; h < 2; h++) {
+            uint64_t l0, l1, b0, b1, v0 = oot_a_held(0, 8, h ? 900 : 300, &l0, &b0), v1 = oot_a_held(1, 8, h ? 900 : 300, &l1, &b1);
+            snprintf(b, sizeof b, "  a held probe's run ended by a burst, then %d s GPU-bound (x8): step ups %llu / %llu, late at hold 1 %llu / %llu, bursts %llu", h ? 15 : 5,
+                     (unsigned long long)v0, (unsigned long long)v1, (unsigned long long)l0, (unsigned long long)l1, (unsigned long long)b1);
+            check(b0 == 0 && b1 == 8 && v1 <= v0 && l1 <= l0 + 8, b);
+        }
         double a0 = oot_edge(0, &u0), a1 = oot_edge(1, &u1);
         snprintf(b, sizeof b, "  at the edge (0.95, a CPU burst every 2.5 s at hold 1): %.0f%% / %.0f%% of the time at hold 2, %llu / %llu step ups a minute", 100 * a0, 100 * a1, (unsigned long long)u0, (unsigned long long)u1);
         check(a1 < a0 && u1 <= u0, b);   // the bursts are paid back at hold 1: more of the minute at 60, and no more steps between 60 and 30
