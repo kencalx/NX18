@@ -16,3 +16,6 @@ int nvn_sync_wait(const sync_t *s, uint64_t timeout);
 void nvn_event_publish(volatile uint32_t *word, unsigned mode, uint32_t value);
 void nvn_event_publish_gpu(volatile uint32_t *word, unsigned mode, uint32_t value, uint64_t fence);
 void nvn_queue_gpu_progress(void);
+// The profile's replay_spares, DM_REPLAY_SPARES=1 / 0 overriding it (nvn_queue.inc): up to 32 spare command copies (16 MB in all) instead of 4, and up to 64 spare pool tables
+// (nvn_mtl.m pool_table_give) instead of 16, the one given when every spare is still in flight going instead of the next to come back. Logs once when on
+int nvn_replay_spares(void);

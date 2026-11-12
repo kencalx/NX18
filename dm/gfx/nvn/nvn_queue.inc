@@ -205,13 +205,13 @@ static int nq_probe_full(void) {
     if(nq_probes_full<0) { const char *e=getenv("DM_NVN_SUBMIT_PROBES"); nq_probes_full=e && !strcmp(e,"full"); if(nq_probes_full) LOG("[nvn] submit-cost probes: full (DM_NVN_SUBMIT_PROBES=full): clock_gettime plus a thread port made and released per reading"); }
     return nq_probes_full;
 }
-typedef struct { uint64_t wall, cpu, instr, cycles, sys; } nq_cost;
+typedef struct { uint64_t wall, cpu, instr, cycles, sys; } nq_cost;   // a scope's start; nq_cost_end returns its wall and CPU time in the same fields
 static nq_cost nq_cost_begin(void) {
     nq_cost c={.wall=now_ns()};
     if(nq_probe_full()) { c.cpu=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); c.sys=thr_sys_ns(); } else thr_times(&c.cpu,&c.sys);
     thr_counts(&c.instr,&c.cycles); return c;
 }
-static void nq_cost_end(nq_cost c) {
+static nq_cost nq_cost_end(nq_cost c) {
     int full=nq_probe_full(); uint64_t dw=now_ns()-c.wall, cpu=0, sys=0, ins, cyc;
     if(full) cpu=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); else thr_times(&cpu,&sys);
     thr_counts(&ins,&cyc); if(full) sys=thr_sys_ns();
@@ -220,14 +220,47 @@ static void nq_cost_end(nq_cost c) {
     atomic_fetch_add(&g_sub_cpu_ns,dc); atomic_fetch_add(&g_cum_sub_cpu_ns,dc);
     atomic_fetch_add(&g_sub_instr,ins-c.instr); atomic_fetch_add(&g_cum_sub_instr,ins-c.instr);
     atomic_fetch_add(&g_cum_sub_cyc,cyc-c.cycles); atomic_fetch_add(&g_cum_sub_sys_ns,sys-c.sys);
+    return (nq_cost){.wall=dw,.cpu=dc};
+}
+// What the translation detail line splits out of the submit cost (nq_wait_stats; DM_FIELD_LOG on): the game threads' command copy (nvn_queue_submit's scope; the rest is the replay's), and
+// the wall time each side waits for g_sub_mu while the other holds it: a submit behind a replayed node, the replay behind a submit's copy. A lock is tried first, so an uncontended one
+// reads no clock (nq_sub_lock)
+static _Atomic uint64_t nq_stat_submits, nq_stat_copy_wall_ns, nq_stat_copy_cpu_ns, nq_stat_sub_wait_ns[2], nq_stat_sub_waits[2];   // [0] the game's submits, [1] the replay
+static void nq_sub_lock(int replay) {   // dm_host_mutex_lock(&g_sub_mu), timed when contended
+    if(pthread_mutex_trylock(&g_sub_mu)!=EBUSY) return;
+    uint64_t t0=now_ns(); dm_host_work++; pthread_mutex_lock(&g_sub_mu); dm_host_work--;
+    atomic_fetch_add_explicit(&nq_stat_sub_wait_ns[replay],now_ns()-t0,memory_order_relaxed); atomic_fetch_add_explicit(&nq_stat_sub_waits[replay],1,memory_order_relaxed);
+}
+static void nq_wait_stats(uint64_t v[7]) {   // running totals: submits, their copy's wall and CPU ns, g_sub_mu waits (ns, count) of the submits and of the replay
+    v[0]=atomic_load_explicit(&nq_stat_submits,memory_order_relaxed); v[1]=atomic_load_explicit(&nq_stat_copy_wall_ns,memory_order_relaxed); v[2]=atomic_load_explicit(&nq_stat_copy_cpu_ns,memory_order_relaxed);
+    for(int k=0;k<2;k++) { v[3+2*k]=atomic_load_explicit(&nq_stat_sub_wait_ns[k],memory_order_relaxed); v[4+2*k]=atomic_load_explicit(&nq_stat_sub_waits[k],memory_order_relaxed); }
 }
 // The command copies (nq_bytes) of replayed nodes go to the next submissions' nodes instead of free (nq_spare_take / nq_spare_give), so a steady frame allocates none. Both run under g_sub_mu: the
-// submitting thread copies the commands (nq_flatten) and the worker replays them (nq_worker) holding it. At most NQ_SPARES are kept, none over NQ_SPARE_MAX (a load's long stream is freed)
-enum { NQ_SPARES=4 };
+// submitting thread copies the commands (nq_flatten) and the worker replays them (nq_worker) holding it. At most NQ_SPARES are kept, none over NQ_SPARE_MAX (a load's long stream is freed).
+// Ocarina of Time makes about 20 command nodes a frame (its ~25 event waits each end one), so 4 spares left about 20 a frame to start without a copy and grow theirs from 4 KB under g_sub_mu
+// (the queue line's 'command nodes without a spare copy'). With replay_spares (nvn_replay_spares) NQ_SPARES_MAX are kept, holding at most NQ_SPARE_BYTES in all
+enum { NQ_SPARES=4, NQ_SPARES_MAX=32 };
 #define NQ_SPARE_MAX ((size_t)4<<20)
-static struct { uint8_t *bytes; size_t capacity; } nq_spare[NQ_SPARES]; static int nq_nspare;
-static void nq_spare_take(nq_node *n) { if(nq_nspare) { nq_nspare--; n->bytes=nq_spare[nq_nspare].bytes; n->capacity=nq_spare[nq_nspare].capacity; } else atomic_fetch_add_explicit(&nq_stat_no_spare,1,memory_order_relaxed); }
-static void nq_spare_give(nq_node *n) { if(n->bytes && n->capacity<=NQ_SPARE_MAX && nq_nspare<NQ_SPARES) { nq_spare[nq_nspare].bytes=n->bytes; nq_spare[nq_nspare].capacity=n->capacity; nq_nspare++; n->bytes=NULL; n->capacity=0; } }
+#define NQ_SPARE_BYTES ((size_t)16<<20)   // replay_spares: the kept copies in all (4 copies of NQ_SPARE_MAX, the most the 4 spares could hold)
+static struct { uint8_t *bytes; size_t capacity; } nq_spare[NQ_SPARES_MAX]; static int nq_nspare; static size_t nq_spare_bytes;
+static int nq_spares=-1;   // how many are kept: NQ_SPARES, or NQ_SPARES_MAX with replay_spares (a unit test may set it directly)
+static _Atomic uint64_t nq_stat_spares, nq_stat_spare_bytes;   // what is kept, for the queue line (written under g_sub_mu, read without it)
+static int replay_spares_mode(const char *e,int dflt) { return e && *e ? *e!='0' : dflt; }   // DM_REPLAY_SPARES: 1 on, 0 off; unset or empty, the profile's
+int nvn_replay_spares(void) {
+    static _Atomic int v=-1; int c=atomic_load_explicit(&v,memory_order_relaxed); if(c>=0) return c;
+    const char *e=getenv("DM_REPLAY_SPARES"); int on=replay_spares_mode(e,DM_GAME_REPLAY_SPARES), was=-1;
+    if(atomic_compare_exchange_strong(&v,&was,on) && on)
+        LOG("[nvn] replay spares: up to %d spare command copies (%zu MB in all) and 64 spare pool tables (24 MB in all), the newest dropped when every spare table is in flight (%s)",NQ_SPARES_MAX,NQ_SPARE_BYTES>>20,e && *e?"DM_REPLAY_SPARES":"game profile replay_spares");
+    return on;
+}
+static int nq_spare_n(void) { if(nq_spares<0) nq_spares=nvn_replay_spares()?NQ_SPARES_MAX:NQ_SPARES; return nq_spares; }
+static void nq_spare_stat(void) { atomic_store_explicit(&nq_stat_spares,(uint64_t)nq_nspare,memory_order_relaxed); atomic_store_explicit(&nq_stat_spare_bytes,nq_spare_bytes,memory_order_relaxed); }
+static void nq_spare_take(nq_node *n) { if(nq_nspare) { nq_nspare--; n->bytes=nq_spare[nq_nspare].bytes; n->capacity=nq_spare[nq_nspare].capacity; nq_spare_bytes-=n->capacity; nq_spare_stat(); } else atomic_fetch_add_explicit(&nq_stat_no_spare,1,memory_order_relaxed); }
+static void nq_spare_give(nq_node *n) {
+    int cap=nq_spare_n();
+    if(n->bytes && n->capacity<=NQ_SPARE_MAX && nq_nspare<cap && (cap<=NQ_SPARES || nq_spare_bytes+n->capacity<=NQ_SPARE_BYTES)) {
+        nq_spare[nq_nspare].bytes=n->bytes; nq_spare[nq_nspare].capacity=n->capacity; nq_nspare++; nq_spare_bytes+=n->capacity; n->bytes=NULL; n->capacity=0; nq_spare_stat(); }
+}
 // When the queue line is due: the first time the replay's frame passes a multiple of 300 after the last line, given the frames since it (0 when not due); the first frame seen only sets the
 // baseline. frame is the frame of the last replayed job, and it goes back whenever jobs of two queues interleave (a job of frame 599 on one queue waiting on a frame-600 job of another), so a
 // frame at or below the last line's is ignored: compared by its multiple of 300 alone, such a frame wrote a line of zeros over a wrapped frame count and moved the baseline back, and the next
@@ -245,14 +278,17 @@ static void nq_report(uint64_t frame,uint64_t frames) {
     static uint64_t p[8]; uint64_t v[8]={atomic_load(&nq_stat_nodes),atomic_load(&nq_stat_nodes_pooled),atomic_load(&nq_stat_receipts),atomic_load(&nq_stat_receipts_pooled),atomic_load(&nq_stat_no_spare),atomic_load(&nq_stat_event_writes),atomic_load(&nq_stat_event_ns),0};
     pthread_mutex_lock(&nq_mu); unsigned peak=nq_stat_event_peak, inflight=nq_event_inflight(); pthread_mutex_unlock(&nq_mu);
     double nf=frames?(double)frames:1;
-    LOG("[nvn] queue up to frame %llu, per frame: nodes %.1f (%.1f from the free list), receipts %.1f (%.1f from the free list), command nodes without a spare copy %.1f; GPU event writes %.1f, their bookkeeping %.3f ms; event words in flight %u, at most %u",
-        frame,(v[0]-p[0])/nf,(v[1]-p[1])/nf,(v[2]-p[2])/nf,(v[3]-p[3])/nf,(v[4]-p[4])/nf,(v[5]-p[5])/nf,(v[6]-p[6])/1e6/nf,inflight,peak);
+    char sp[96]=""; if(nvn_replay_spares()) snprintf(sp,sizeof sp," (spare copies kept %llu of %d, %.2f MB)",(unsigned long long)atomic_load_explicit(&nq_stat_spares,memory_order_relaxed),nq_spare_n(),atomic_load_explicit(&nq_stat_spare_bytes,memory_order_relaxed)/1048576.0);   // replay_spares only: every other game's line as before
+    LOG("[nvn] queue up to frame %llu, per frame: nodes %.1f (%.1f from the free list), receipts %.1f (%.1f from the free list), command nodes without a spare copy %.1f%s; GPU event writes %.1f, their bookkeeping %.3f ms; event words in flight %u, at most %u",
+        frame,(v[0]-p[0])/nf,(v[1]-p[1])/nf,(v[2]-p[2])/nf,(v[3]-p[3])/nf,(v[4]-p[4])/nf,sp,(v[5]-p[5])/nf,(v[6]-p[6])/1e6/nf,inflight,peak);
     memcpy(p,v,sizeof p);
 }
+// The replay's time-constraint policy (nvn_rt.h; profile key replay_rt, DM_REPLAY_RT): ticked once a frame before the node's work, outside its cost scope
+static nvn_rtw nq_rtw={.name="NVN queue replay"};
 static void *nq_worker(void *unused) {
     (void)unused; pthread_setname_np("NVN queue replay");
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
-    uint64_t frame=UINT64_MAX, reported=UINT64_MAX;
+    uint64_t frame=UINT64_MAX, reported=UINT64_MAX; const int rt=nvn_replay_rt();
     for(;;) {
         pthread_mutex_lock(&nq_mu); nq_queue *q=NULL; nq_node *n=NULL; nq_job *j=NULL;
         for(;;) {
@@ -304,8 +340,9 @@ static void *nq_worker(void *unused) {
         pthread_mutex_unlock(&nq_mu);
         uint64_t fence=0, present=0, copy=0;
         if(n->kind==NQ_COMMANDS || n->kind==NQ_PRESENT) {
-            dm_host_mutex_lock(&g_sub_mu); void *pool=objc_autoreleasePoolPush();
+            nq_sub_lock(1); void *pool=objc_autoreleasePoolPush();
             dm_host_work++; mtl_prepare(); dm_host_work--;
+            if(rt && frame!=j->frame) nvn_rtw_tick(&nq_rtw,j->frame);
             gfx_enter(); nq_cost cost=nq_cost_begin();
             if(frame!=j->frame) { frame=j->frame; mtl_set_frame(frame); }
             mtl_queue_activate(q->serial); mtl_set_queue_origin_lower_left(q->origin);
@@ -438,9 +475,10 @@ void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
     pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue job allocation failed"); j->receipt=nq_new();
     j->objects.klen=16; j->frame=dm_nvn_frame_count();
     // No scheduler lock while copying descriptors or resolving shader libraries.
-    dm_host_mutex_lock(&g_sub_mu); void *pool=objc_autoreleasePoolPush(); dm_host_work++; mtl_prepare(); dm_host_work--; nq_cost cost=nq_cost_begin();
+    nq_sub_lock(0); void *pool=objc_autoreleasePoolPush(); dm_host_work++; mtl_prepare(); dm_host_work--; nq_cost cost=nq_cost_begin();
     for(int i=0;i<count;i++) nq_flatten(j,(const uint8_t *)(uintptr_t)handles[i]); nq_end(j);
-    nq_cost_end(cost); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
+    nq_cost copy=nq_cost_end(cost); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
+    atomic_fetch_add_explicit(&nq_stat_submits,1,memory_order_relaxed); atomic_fetch_add_explicit(&nq_stat_copy_wall_ns,copy.wall,memory_order_relaxed); atomic_fetch_add_explicit(&nq_stat_copy_cpu_ns,copy.cpu,memory_order_relaxed);
     int waits=0; for(nq_node *node=j->first;node;node=node->next) waits|=node->kind==NQ_EVENT || node->kind==NQ_SYNC;
     nvn_cap_queue(q->serial,waits);
     pthread_mutex_lock(&nq_mu);

@@ -207,9 +207,13 @@ static void rec_exec(const rec_t *r) {
     }
     for (uint32_t i = 0; i < r->nobj; i++) if (a[i]) CFRelease((CFTypeRef)(uintptr_t)a[i]);
 }
+// The encode thread's time-constraint policy (nvn_rt.h; profile key replay_rt, DM_REPLAY_RT): ticked after each block at the replay's frame (mtl_set_frame), when that moved on
+static nvn_rtw g_rec_rtw = {.name = "dm-encode"};
+static _Atomic uint64_t g_cur_frame;
 static void *rec_thread(void *arg) {
     (void)arg; pthread_setname_np("dm-encode");
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    const int rt = nvn_replay_rt();
     for (;;) {
         pthread_mutex_lock(&g_rb_mu);
         while (!g_rb_head) { g_rb_sleeping = 1; pthread_cond_wait(&g_rb_work, &g_rb_mu); g_rb_sleeping = 0; atomic_fetch_add_explicit(&g_rb_wakes, 1, memory_order_relaxed); }
@@ -220,6 +224,7 @@ static void *rec_thread(void *arg) {
         b->n = 0; b->next = g_rb_free; g_rb_free = b; g_rb_busy = 0;
         if (!g_rb_head) pthread_cond_broadcast(&g_rb_idle);
         pthread_mutex_unlock(&g_rb_mu);
+        if (rt) { uint64_t f = atomic_load_explicit(&g_cur_frame, memory_order_relaxed); if (!g_rec_rtw.started || f > g_rec_rtw.frame) nvn_rtw_tick(&g_rec_rtw, f); }
     }
     return NULL;
 }
@@ -245,14 +250,18 @@ static rec_t *rec_put(uint32_t op, uint32_t nobj) {
     }
     rec_t *r = &g_rb_cur->r[g_rb_cur->n++]; r->op = op; r->nobj = nobj; return r;
 }
-// Hand over what is recorded and wait until the encode thread has made every call
+// Hand over what is recorded and wait until the encode thread has made every call. The drains, the blocked ones and their wall time are counted for the translation detail line
+// (mtl_wait_stats; a clock is read only when the drain blocks); DM_NVN_WAITS=1's ledger counts them too, with the time of every drain
+static _Atomic uint64_t g_drains, g_drains_blocked, g_drain_ns;
 static void rec_drain(void) {
     if (!g_rb_started) return;
     rec_publish();
-    uint64_t w0 = ws_t0(); int blocked = 0;
+    uint64_t w0 = ws_t0(), b0 = 0; int blocked = 0;
     pthread_mutex_lock(&g_rb_mu);
-    while (g_rb_head || g_rb_busy) { blocked = 1; pthread_cond_wait(&g_rb_idle, &g_rb_mu); }
+    while (g_rb_head || g_rb_busy) { if (!blocked) b0 = now_ns(); blocked = 1; pthread_cond_wait(&g_rb_idle, &g_rb_mu); }
     pthread_mutex_unlock(&g_rb_mu);
+    atomic_fetch_add_explicit(&g_drains, 1, memory_order_relaxed);
+    if (blocked) { atomic_fetch_add_explicit(&g_drains_blocked, 1, memory_order_relaxed); atomic_fetch_add_explicit(&g_drain_ns, now_ns() - b0, memory_order_relaxed); }
     if (ws_on()) ws_put(WS_DRAIN, w0, blocked);
 }
 // A block of records from another thread than the submit thread (the present snapshot's copy): it goes in one piece behind every block published so far. Everything the game

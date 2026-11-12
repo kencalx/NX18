@@ -685,7 +685,7 @@ static void signals_2000(int node) {
     nq_signal_node=saved;
 }
 // Allocations per signal in split mode (nq_pooled): 400 signals in one command buffer, submitted twice. The second submission takes its nodes and receipts from the free lists and keeps each
-// node's one signal inline, so it allocates about one command copy per signal (the 4 spares cover the first nodes); each signal took two nodes, a receipt and a signals array as well before
+// node's one signal inline, so it allocates about one command copy per signal (the spares, 4 or 32 with replay_spares, cover the first nodes); each signal took two nodes, a receipt and a signals array as well before
 // (DM_NVN_NODE_POOL=0, checked to be at least 4 a signal)
 static void split_allocations(void) {
     int off=env_is("DM_NVN_NODE_POOL","0");
@@ -709,6 +709,46 @@ static void split_allocations(void) {
     P(nvnSyncFinalize)(&produced); P(nvnCommandBufferFinalize)(&bigcmd);
     nq_signal_node=saved;
 }
+// Spare command copies (nq_spare_take / nq_spare_give; profile key replay_spares, DM_REPLAY_SPARES): split mode makes a command node per signal, so 20 signals a submission are about 21 command
+// nodes, as Ocarina of Time's ~20 a frame. Submitted three times: with replay_spares (32 kept) the third starts every node from a spare, with 4 at least 16 start without one, as before
+// (the queue line's 'command nodes without a spare copy'). Then copies of 4 MB: with replay_spares the kept ones stay within NQ_SPARE_BYTES; one over NQ_SPARE_MAX is never kept
+static void spare_copies(void) {
+    int on=nvn_replay_spares(); printf("CASE spare command copies (%s)\n",on?"replay_spares, 32":"4, as X1.0");
+    int saved=nq_signals_in_node(); nq_signal_node=0;
+    for(int i=0;i<20;i++) P(nvnEventSignal)(&evs[i],NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    NVNsync produced; P(nvnSyncInitialize)(&produced,&device);
+    NVNcommandHandle h=record_signals(20,&produced);
+    uint64_t miss[3]={0,0,0}, nodes[3]={0,0,0}; int done=1;
+    for(int round=0;round<3;round++) {
+        done&=queue_idle(5000000000ull);
+        uint64_t m0=atomic_load(&nq_stat_no_spare), n0=atomic_load(&nq_stat_nodes); P(nvnQueueSubmitCommands)(&queues[0],1,&h);
+        miss[round]=atomic_load(&nq_stat_no_spare)-m0; nodes[round]=atomic_load(&nq_stat_nodes)-n0;
+        done&=landed(&produced,10000000000ull);
+    }
+    done&=queue_idle(5000000000ull);
+    printf("nodes per submission %llu; command nodes without a spare copy %llu, %llu, %llu; spare copies kept %llu (%.3f MB)\n",(unsigned long long)nodes[2],(unsigned long long)miss[0],(unsigned long long)miss[1],(unsigned long long)miss[2],
+           (unsigned long long)atomic_load(&nq_stat_spares),atomic_load(&nq_stat_spare_bytes)/1048576.0);
+    CHECK(done,"three submissions of 20 signals complete");
+    if(on) CHECK(miss[2]==0,"replay_spares: every command node of the third starts from a spare");
+    else CHECK(miss[2]>=16,"4 spares: 16 or more of its command nodes start without one, as before");
+    pthread_mutex_lock(&g_sub_mu);
+    nq_node held[NQ_SPARES_MAX]; memset(held,0,sizeof held); int nheld=0;
+    while(nq_nspare) nq_spare_take(&held[nheld++]);   // the small spares out, so the big copies meet an empty set
+    CHECK(nq_spare_bytes==0,"the spares' bytes counted back to 0");
+    nq_node big[6]; memset(big,0,sizeof big);
+    for(int i=0;i<6;i++) { big[i].capacity=i<5?NQ_SPARE_MAX:NQ_SPARE_MAX+4096; big[i].bytes=malloc(big[i].capacity); nq_spare_give(&big[i]); }
+    int kept=nq_nspare; size_t bytes=nq_spare_bytes;
+    CHECK(big[5].bytes!=NULL,"a copy over 4 MB is never kept");
+    if(on) CHECK(kept==4 && bytes==NQ_SPARE_BYTES && big[4].bytes!=NULL,"replay_spares: four copies of 4 MB kept, the fifth not: 16 MB in all");
+    else CHECK(kept==4 && big[4].bytes!=NULL,"4 spares: four kept, as before");
+    for(int i=0;i<kept;i++) { nq_node t; memset(&t,0,sizeof t); nq_spare_take(&t); free(t.bytes); }
+    for(int i=0;i<6;i++) free(big[i].bytes);
+    for(int i=nheld-1;i>=0;i--) nq_spare_give(&held[i]);
+    CHECK(nq_nspare==nheld,"the small spares back");
+    pthread_mutex_unlock(&g_sub_mu);
+    P(nvnSyncFinalize)(&produced); P(nvnCommandBufferFinalize)(&bigcmd);
+    nq_signal_node=saved;
+}
 // DM_NVN_SIGNAL_EVENTS takes exactly node or split; unset or empty, the profile's signal_events. Any other value is logged and the profile's taken: Split, 0 or off chose node before (any
 // value but split), the opposite of what an A/B meant to restore, with only the startup line to tell
 static void signal_events_switch(void) {
@@ -723,6 +763,58 @@ static void signal_events_switch(void) {
     CHECK(nq_signals_in_node()==DM_GAME_SIGNAL_EVENTS_NODE,"nq_signals_in_node takes the profile's for an unknown value");
     if(was) setenv("DM_NVN_SIGNAL_EVENTS",keep,1); else unsetenv("DM_NVN_SIGNAL_EVENTS");
     nq_signal_node=saved;
+}
+// The translation detail line's split and waits (nq_wait_stats, mtl_wait_stats, wait_split): a submission counts its copy apart from the replay; a submit that finds g_sub_mu held waits
+// for it and counts that wait, an uncontended one none; the replay's g_rmu waits apart from another thread's; the encode thread's drains (DM_NVN_ENC_THREAD=1); and the line's text
+static void *hold_sub_mu(void *arg) { pthread_mutex_lock(&g_sub_mu); dispatch_semaphore_signal((__bridge dispatch_semaphore_t)arg); usleep(20000); pthread_mutex_unlock(&g_sub_mu); return NULL; }
+static void *hold_rmu(void *arg) { os_unfair_lock_lock(&g_rmu); dispatch_semaphore_signal((__bridge dispatch_semaphore_t)arg); usleep(20000); os_unfair_lock_unlock(&g_rmu); return NULL; }
+static void wait_counters(void) {
+    printf("CASE the submit's split and its waits\n");
+    CHECK(queue_idle(5000000000ull),"the replay has taken every queued job");
+    uint64_t q0[7], m0[7], q1[7], m1[7]; nq_wait_stats(q0); mtl_wait_stats(m0); uint64_t w0=atomic_load(&g_cum_sub_wall_ns), c0=atomic_load(&g_cum_sub_cpu_ns);
+    NVNsync s; P(nvnSyncInitialize)(&s,&device); NVNcommandHandle h=consumer(0,0,&s,0); P(nvnQueueSubmitCommands)(&queues[0],1,&h);
+    int fine=landed(&s,5000000000ull) && queue_idle(5000000000ull); P(nvnSyncFinalize)(&s);
+    nq_wait_stats(q1); mtl_wait_stats(m1); uint64_t w1=atomic_load(&g_cum_sub_wall_ns), c1=atomic_load(&g_cum_sub_cpu_ns);
+    CHECK(fine && q1[0]==q0[0]+1,"one submit counted");
+    CHECK(q1[1]>q0[1] && q1[1]-q0[1]<w1-w0 && q1[2]-q0[2]<=c1-c0,"its copy's wall and CPU time, a part of the submit cost (the rest the replay's)");
+    if(rec_on()) CHECK(m1[4]>m0[4],"the replay drained the encode thread");
+    else CHECK(m1[4]==m0[4],"no encode thread, no drains");
+    dispatch_semaphore_t held=dispatch_semaphore_create(0); pthread_t th;
+    pthread_create(&th,NULL,hold_sub_mu,(__bridge void *)held); dispatch_semaphore_wait(held,DISPATCH_TIME_FOREVER);
+    nq_sub_lock(0); pthread_mutex_unlock(&g_sub_mu); pthread_join(th,NULL); nq_wait_stats(q0);
+    CHECK(q0[4]==q1[4]+1 && q0[3]-q1[3]>=10000000ull,"a submit behind a held g_sub_mu: one wait, about the 20 ms it was held");
+    nq_sub_lock(0); pthread_mutex_unlock(&g_sub_mu); nq_wait_stats(q1);
+    CHECK(q1[4]==q0[4] && q1[3]==q0[3],"an uncontended g_sub_mu: no wait counted");
+    pthread_create(&th,NULL,hold_rmu,(__bridge void *)held); dispatch_semaphore_wait(held,DISPATCH_TIME_FOREVER);
+    mtl_wait_stats(m0); rmu_lock(); os_unfair_lock_unlock(&g_rmu); pthread_join(th,NULL); mtl_wait_stats(m1);
+    CHECK(m1[3]==m0[3]+1 && m1[2]-m0[2]>=10000000ull && m1[1]==m0[1],"a g_rmu wait off the replay thread counts as another thread's");
+    uint64_t pq[7]={0}, pm[7]={0}, q[7]={600,30000000,15000000,6000000,120,3000000,60}, m[7]={9000000,600,1200000,60,1200,600,12000000};
+    char line[768]; wait_split(line,sizeof line,q,pq,m,pm,300,300e6,150e6);
+    printf("line:%s\n",line);
+    CHECK(strstr(line,"command copy CPU 0.050 ms / wall 0.100 ms (2.0 submits) and the replay CPU 0.450 ms / wall 0.900 ms")!=NULL,"the line splits the copy from the replay");
+    CHECK(strstr(line,"submits for g_sub_mu 0.020 ms (0.4 waits), the replay for g_sub_mu 0.010 ms (0.2), for g_rmu 0.030 ms (2.0), other threads for g_rmu 0.004 ms (0.2), the replay for the encode thread 0.040 ms (2.0 of 4.0 drains blocked)")!=NULL,"and gives each wait per frame");
+}
+// The replay threads' time-constraint policy (nvn_rt.h; profile key replay_rt, DM_REPLAY_RT): once a present period is known, the replay thread declares one at the first node of a new
+// frame and the encode thread (DM_NVN_ENC_THREAD=1) after its first block of one, each in effect on that thread; with it off neither declares anything
+static int rt_on_port(mach_port_t p) { thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc=THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def=0;
+    return p && thread_policy_get(p,THREAD_TIME_CONSTRAINT_POLICY,(thread_policy_t)&tp,&tc,&def)==KERN_SUCCESS && !def; }
+static void replay_rt_case(void) {
+    int on=nvn_replay_rt(); printf("CASE the replay threads' time-constraint policy (%s)\n",on?"on":"off");
+    CHECK(!nq_rtw.started && !g_rec_rtw.started,"no declaration before a present period is known");
+    atomic_store(&g_rt_frame_ns,16666667ull); uint64_t f0=atomic_load(&g_frame); int done=1;
+    for(int k=1;k<=3;k++) {
+        atomic_store(&g_frame,f0+1000+(uint64_t)k); NVNsync s; P(nvnSyncInitialize)(&s,&device);
+        NVNcommandHandle h=consumer(0,0,&s,0); P(nvnQueueSubmitCommands)(&queues[0],1,&h); done&=landed(&s,5000000000ull); P(nvnSyncFinalize)(&s);
+    }
+    CHECK(done,"three frames' submissions complete");
+    for(int i=0;i<200 && on && rec_on() && !g_rec_rtw.started;i++) usleep(5000);   // the encode thread ticks after its block, which may finish after the GPU did
+    if(on) {
+        CHECK(nq_rtw.started && nq_rtw.comp_ms>0 && nq_rtw.period_ms>16 && rt_on_port(nq_rtw.port),"the replay thread declared its policy, in effect on it");
+        if(rec_on()) CHECK(g_rec_rtw.started && g_rec_rtw.comp_ms>0 && rt_on_port(g_rec_rtw.port),"the encode thread declared its own");
+        else CHECK(!g_rec_rtw.started,"no encode thread (DM_NVN_ENC_THREAD=0): nothing declared for it");
+    } else CHECK(!nq_rtw.started && !g_rec_rtw.started && !g_nrtw,"DM_REPLAY_RT=0: neither thread declares one");
+    char st[512]; rtw_states(st,sizeof st); printf("policy line part:%s\n",st);
+    atomic_store(&g_frame,f0); atomic_store(&g_rt_frame_ns,0);
 }
 int main(void) { @autoreleasepool {
     if (setvbuf(stdout, NULL, _IONBF, 0)) abort(); setenv("DM_PSO_PREPARE","0",1);
@@ -765,6 +857,9 @@ int main(void) { @autoreleasepool {
     report_due(); probe_cost(); event_bookkeeping(); signal_set();
     signals_2000(1); signals_2000(0);
     split_allocations();
+    spare_copies();
+    wait_counters();
+    replay_rt_case();
     pthread_mutex_lock(&jobs_mu); jobs_stop=1; pthread_cond_signal(&jobs_cv); pthread_mutex_unlock(&jobs_mu); pthread_join(worker,NULL);
     printf("wait-event fixture: %d checks, %d failed\n",checks,fails);
     // The process owns the fixture pool until all callbacks have retired.

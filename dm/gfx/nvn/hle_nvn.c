@@ -14,6 +14,7 @@
 #include "nvn_tex.h"
 #include "../tex/nvn_deswizzle.h"
 #include "nvn_mtl.h"
+#include "nvn_rt.h"
 #include "nvn_pace.h"
 #include "nvn_fstep.h"
 #include "nvn_timestamp.h"
@@ -1838,6 +1839,8 @@ static pthread_t g_rt_th; static char g_rt_name[64];   // the thread the time-co
 static pthread_mutex_t g_rt_mu = PTHREAD_MUTEX_INITIALIZER;
 static mach_port_t g_rt_port;   // the thread the policy was last set on (g_rt_th), with a send right of our own; 0 = none
 static _Atomic uint64_t g_acq_moves;   // acquires on another thread than the acquire before
+static _Atomic uint64_t g_rt_frame_ns;   // the present thread's real-time period (rt_period_ns at the acquire, whether or not DM_RT=0), which the replay threads declare (nvn_rtw_tick); 0 = none yet
+static nvn_rtw *g_rtw[4]; static int g_nrtw;   // the replay threads whose time-constraint policy is set (nvn_rtw_tick), under g_rt_mu: the thread policy line reads each
 static void th_name(pthread_t th, char *out, size_t n) { out[0] = 0; pthread_getname_np(th, out, n); if (!out[0]) snprintf(out, n, "thread %#x", (unsigned)pthread_mach_thread_np(th)); }
 static void dr_line(uint64_t frame);
 static int rt_on(void);
@@ -1871,6 +1874,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
         static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
         if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
+        if (rtp) atomic_store_explicit(&g_rt_frame_ns, rtp, memory_order_relaxed);
         rt_comp_tick(rtp);
         uint64_t p0 = now_ns(); int snap = mtl_snap_on();
         if (present_unpaced(o)) {}   // present interval 0: no vsync wait (below); only the free texture the ticket wait below gives
@@ -2026,9 +2030,12 @@ static void power_line(uint64_t frame) {
             frame, (fs_ - pfs) / nf, (fr - pfr) / nf, (ft - pft) / nf, (fw - pfw) / nf);
         pfs = fs_; pfr = fr; pft = ft; pfw = fw;
         void mtl_pool_stats(uint64_t s[6]); static uint64_t pps[6]; uint64_t ps[6]; mtl_pool_stats(ps);   // the tables of handles traced to no slot (nvn_mtl.m pool_gpu)
-        if (ps[0] != pps[0] || ps[2] != pps[2] || ps[3] != pps[3]) LOG("[nvn] pool tables up to frame %llu, per frame: %.2f built whole (%.2f ms), %.2f patched, %.2f kept; of these two %.2f over memory pool changes, %.2f over a new submission",
-            frame, (ps[0] - pps[0]) / nf, (ps[1] - pps[1]) / 1e3 / nf, (ps[2] - pps[2]) / nf, (ps[3] - pps[3]) / nf, (ps[4] - pps[4]) / nf, (ps[5] - pps[5]) / nf);
-        memcpy(pps, ps, sizeof pps);
+        void mtl_pool_spare_stats(uint64_t s[5]); static uint64_t pss[5]; uint64_t ss[5] = {0}; char psp[160] = "";   // the tables made and reused, the spares (nvn_mtl.m pool_table_give), for a profile with replay_spares (on or turned off, so both sides of the A/B have it) or DM_REPLAY_SPARES=1; every other game's line as before
+        if (DM_GAME_REPLAY_SPARES || nvn_replay_spares()) { mtl_pool_spare_stats(ss); snprintf(psp, sizeof psp, "; tables made %.2f, reused %.2f (spares kept %llu of %llu, let go %llu)", (ss[0] - pss[0]) / nf, (ss[1] - pss[1]) / nf,
+            (unsigned long long)ss[2], (unsigned long long)ss[3], (unsigned long long)(ss[4] - pss[4])); }
+        if (ps[0] != pps[0] || ps[2] != pps[2] || ps[3] != pps[3]) LOG("[nvn] pool tables up to frame %llu, per frame: %.2f built whole (%.2f ms), %.2f patched, %.2f kept; of these two %.2f over memory pool changes, %.2f over a new submission%s",
+            frame, (ps[0] - pps[0]) / nf, (ps[1] - pps[1]) / 1e3 / nf, (ps[2] - pps[2]) / nf, (ps[3] - pps[3]) / nf, (ps[4] - pps[4]) / nf, (ps[5] - pps[5]) / nf, psp);
+        memcpy(pps, ps, sizeof pps); memcpy(pss, ss, sizeof pss);
         void mtl_gsb_stats(uint64_t *, uint64_t *); static uint64_t pgn, pgb; uint64_t gn, gb; mtl_gsb_stats(&gn, &gb);   // GPU textures' writes stored into their storage (nvn_mtl.m gsb_store)
         if (gn != pgn) LOG("[nvn] GPU texture storage up to frame %llu: %llu regions, %.1f MB written into their storage on the GPU (%.2f regions, %.2f MB per frame)",
             frame, (unsigned long long)(gn - pgn), (gb - pgb) / 1048576.0, (gn - pgn) / nf, (gb - pgb) / 1048576.0 / nf);
@@ -2049,6 +2056,7 @@ static void power_line(uint64_t frame) {
 // thread (policy 1: demoted, as its fail-safe does to a real-time thread that runs too long without blocking) from one in effect (policy 2), and counts the acquires made on
 // another thread than the one before (rt_comp_tick measures the per-frame CPU time of whichever thread acquires: across two threads its declaration means nothing).
 // DM_FIELD_LOG=0 reads the presenting thread as X1.0 did. Logging only: the policy itself is set as before
+static void rtw_states(char *out, size_t n);
 static void rt_policy_line(unsigned wn, uint32_t wq) {
     const int fl = field_log(); mach_port_t self = pthread_mach_thread_np(pthread_self());
     pthread_mutex_lock(&g_rt_mu);
@@ -2060,7 +2068,7 @@ static void rt_policy_line(unsigned wn, uint32_t wq) {
     const char *st = rt_live ? "in effect" : "not in effect";
     if (fl && q != self && !okx && !okp) st = "unknown (the thread it was set on has ended)";
     else if (fl && rt_live && okx && xi.pth_policy != POLICY_RR) st = "set, but run as a standard thread (demoted)";
-    char who[320] = "";
+    char who[768] = "";
     if (fl) {
         char me[64]; th_name(pthread_self(), me, sizeof me); int w;
         if (q == self) w = snprintf(who, sizeof who, "; read on %s, which presents%s%s", me, !(g_rt_comp_ms > 0) ? (rt_on() ? " (no policy set yet)" : " (no policy: DM_RT=0)")
@@ -2071,10 +2079,26 @@ static void rt_policy_line(unsigned wn, uint32_t wq) {
             w = snprintf(who, sizeof who, "; read on %s, the thread it was set on (it acquires the window texture); the thread presenting is %s, QoS %#x at priority %d", g_rt_name, me, (unsigned)qc, okm ? pi.pth_curpri : -1);
         }
         static uint64_t pmv; uint64_t mv = atomic_load_explicit(&g_acq_moves, memory_order_relaxed);
-        if (mv != pmv && w > 0 && (size_t)w < sizeof who) snprintf(who + w, sizeof who - (size_t)w, "; acquired on another thread than the acquire before %llu times in this window", (unsigned long long)(mv - pmv));
+        if (mv != pmv && w > 0 && (size_t)w < sizeof who) w += snprintf(who + w, sizeof who - (size_t)w, "; acquired on another thread than the acquire before %llu times in this window", (unsigned long long)(mv - pmv));
         pmv = mv;
+        if (nvn_replay_rt() && w > 0 && (size_t)w < sizeof who) rtw_states(who + w, sizeof who - (size_t)w);
     }
     LOG("[nvn] thread policy: main thread real-time computation %.2f ms / period %.2f ms, real-time policy %s, current priority %d (base %d, policy %d); %u worker threads QoS %#x; present QoS %#x%s", g_rt_comp_ms, g_rt_period_ms, st, okx ? xi.pth_curpri : -1, okx ? xi.pth_priority : -1, okx ? xi.pth_policy : -1, wn, wq, mtl_present_qos(), who);
+}
+// The translation detail line's split of the submit cost and its waits (DM_FIELD_LOG on; logging only), per frame of the window: the game threads' command copy (nvn_queue_submit) and the
+// rest, the replay's (nq_worker's nodes and presents), in CPU and wall time, which add up to the line's own CPU and wall; then the wall time waited for g_sub_mu by the game's submits
+// (behind a replayed node) and by the replay (behind a submit's copy), for g_rmu by the replay and by the other threads together (texture and sampler registrations), and for the encode
+// thread by the replay's drains (rec_drain, about 20 a frame in Ocarina of Time). The waits are not part of the CPU time; a replay's g_sub_mu wait is outside its cost scope too, the
+// others inside it. q, m: nq_wait_stats / mtl_wait_stats now, pq, pm at the last line
+static void wait_split(char *out, size_t n, const uint64_t q[7], const uint64_t pq[7], const uint64_t m[7], const uint64_t pm[7], double nf, double wall_ns, double cpu_ns) {
+    double cw = (double)(q[1] - pq[1]), cc = (double)(q[2] - pq[2]);
+    snprintf(out, n, "; of the submit per frame, the game threads' command copy CPU %.3f ms / wall %.3f ms (%.1f submits) and the replay CPU %.3f ms / wall %.3f ms; waits per frame: "
+             "the game's submits for g_sub_mu %.3f ms (%.1f waits), the replay for g_sub_mu %.3f ms (%.1f), for g_rmu %.3f ms (%.1f), other threads for g_rmu %.3f ms (%.1f), "
+             "the replay for the encode thread %.3f ms (%.1f of %.1f drains blocked)",
+             cc / 1e6 / nf, cw / 1e6 / nf, (double)(q[0] - pq[0]) / nf, (cpu_ns - cc) / 1e6 / nf, (wall_ns - cw) / 1e6 / nf,
+             (double)(q[3] - pq[3]) / 1e6 / nf, (double)(q[4] - pq[4]) / nf, (double)(q[5] - pq[5]) / 1e6 / nf, (double)(q[6] - pq[6]) / nf,
+             (double)(m[0] - pm[0]) / 1e6 / nf, (double)(m[1] - pm[1]) / nf, (double)(m[2] - pm[2]) / 1e6 / nf, (double)(m[3] - pm[3]) / nf,
+             (double)(m[6] - pm[6]) / 1e6 / nf, (double)(m[5] - pm[5]) / nf, (double)(m[4] - pm[4]) / nf);
 }
 static void tsummary(uint64_t frame) {
     char line[1024]; size_t o = 0;
@@ -2106,14 +2130,16 @@ static void tsummary(uint64_t frame) {
       if (pf && frame > pf && dr_ > pd) LOG("[nvn] translation up to frame %llu: %.0f instructions per draw, submit per frame %.2f M instructions / CPU %.3f ms, %.0f draws per frame", frame,
           (double)(ci - pi) / (double)(dr_ - pd), (ci - pi) / 1e6 / (double)(frame - pf), (cc - pc) / 1e6 / (double)(frame - pf), (double)(dr_ - pd) / (double)(frame - pf));
       { static uint64_t py, pk, pw; uint64_t cy = atomic_load(&g_cum_sub_cyc), ck = atomic_load(&g_cum_sub_sys_ns), cw = atomic_load(&g_cum_sub_wall_ns);
+        static uint64_t pq[7], pm[7]; uint64_t q[7], m[7]; nq_wait_stats(q); mtl_wait_stats(m);   // the split and the waits (wait_split)
         if (pf && frame > pf && ci > pi && cy > py) { double nf = (double)(frame - pf), cyc = (double)(cy - py), cpu = (double)(cc - pc);
+          char wx[768] = ""; if (field_log()) wait_split(wx, sizeof wx, q, pq, m, pm, nf, (double)(cw - pw), cpu);
           qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0; pthread_get_qos_class_np(pthread_self(), &qc, &rp);
           uint64_t aw = 0, ag = 0; int an = 0; void mtl_alloc_stats(uint64_t *, uint64_t *, int *); mtl_alloc_stats(&aw, &ag, &an);
           static uint64_t pyn, pyns; uint64_t yn = 0, yns = 0; dm_main_yield_stats(&yn, &yns);
-          LOG("[nvn] translation detail up to frame %llu: submit per frame %.2f M cycles (%.2f cycles per instruction), CPU %.3f ms of which kernel %.3f ms, wall clock %.3f ms; mean clock %.2f GHz (cycles / CPU time); this thread's QoS %#x; allocator pools %d, GPU waits so far %llu; real-time declared computation %.2f ms; main thread yields per frame %.0f / %.3f ms", frame,
-              cyc / 1e6 / nf, cyc / (double)(ci - pi), cpu / 1e6 / nf, (double)(ck - pk) / 1e6 / nf, (double)(cw - pw) / 1e6 / nf, cpu > 0 ? cyc / cpu : 0, (unsigned)qc, an, (unsigned long long)aw, g_rt_comp_ms, (double)(yn - pyn) / nf, (double)(yns - pyns) / 1e6 / nf); pyn = yn; pyns = yns; }
+          LOG("[nvn] translation detail up to frame %llu: submit per frame %.2f M cycles (%.2f cycles per instruction), CPU %.3f ms of which kernel %.3f ms, wall clock %.3f ms; mean clock %.2f GHz (cycles / CPU time); this thread's QoS %#x; allocator pools %d, GPU waits so far %llu; real-time declared computation %.2f ms; main thread yields per frame %.0f / %.3f ms%s", frame,
+              cyc / 1e6 / nf, cyc / (double)(ci - pi), cpu / 1e6 / nf, (double)(ck - pk) / 1e6 / nf, (double)(cw - pw) / 1e6 / nf, cpu > 0 ? cyc / cpu : 0, (unsigned)qc, an, (unsigned long long)aw, g_rt_comp_ms, (double)(yn - pyn) / nf, (double)(yns - pyns) / 1e6 / nf, wx); pyn = yn; pyns = yns; }
         if (frame % 300 == 0) { unsigned wn = 0; uint32_t wq = dm_guest_work_qos(&wn); rt_policy_line(wn, wq); }
-        py = cy; pk = ck; pw = cw; }
+        py = cy; pk = ck; pw = cw; memcpy(pq, q, sizeof pq); memcpy(pm, m, sizeof pm); }
       pi = ci; pc = cc; pd = dr_; pf = frame; }
     uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc; mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc);
     uint64_t ptn, ptk, ptu, ptb, ptw; void mtl_part_reupload_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); mtl_part_reupload_stats(&ptn, &ptk, &ptu, &ptb, &ptw);
@@ -2195,6 +2221,82 @@ static void rt_comp_tick(uint64_t period_ns) {
     // two frames in 120 near 4.4 ms; declared at 2.5 ms (p90 × 1.25) it stalled about once a second, at 30 fps and at 60; declared above the peak it held 60 fps at the same CPU energy
     double p90 = v[107], comp = fmax(p90 * 1.25, v[119] * 1.1), cap = period_ns * 0.9 / 1e6; if (comp > cap) comp = cap; if (comp < 1) comp = 1;
     if (comp > g_rt_comp_ms * 1.15 || comp < g_rt_comp_ms * 0.85) set_time_constraint_comp(period_ns, (uint64_t)(comp * 1e6));
+}
+// ---------- The replay threads' time-constraint policy (nvn_rt.h; the profile's replay_rt, DM_REPLAY_RT) ----------
+// In Ocarina of Time's slow windows on an iPhone 18 Pro Max (X1.0) the 'NVN queue replay' thread ran the same ~60 M instructions a frame at 1.6-2.0 GHz (12-13 ms of CPU) that took 5-6 ms
+// at 3.9-4.3 GHz in the fast ones, while only the thread that acquires the window declared a frame deadline; the replay and encode threads had QoS user-interactive alone
+// (docs/reference/frame-rate.md, The replay threads declared no frame deadline)
+static int replay_rt_mode(const char *e, int dflt) { return e && *e ? *e != '0' : dflt; }   // DM_REPLAY_RT: 1 on, 0 off; unset or empty, the profile's
+int nvn_replay_rt(void) {
+    static _Atomic int v = -1; int c = atomic_load_explicit(&v, memory_order_relaxed); if (c >= 0) return c;
+    const char *e = getenv("DM_REPLAY_RT"); int on = replay_rt_mode(e, DM_GAME_REPLAY_RT), was = -1;
+    if (atomic_compare_exchange_strong(&v, &was, on) && on)
+        LOG("[nvn] replay threads: 'NVN queue replay' and 'dm-encode' declare a time-constraint policy sized to their own CPU time per frame (%s)", e && *e ? "DM_REPLAY_RT" : "game profile replay_rt");
+    return on;
+}
+double nvn_rtw_size_ms(const double *v, int n, double period_ms) {
+    double lo = fmax(1.0, period_ms * NVN_RTW_FLOOR), hi = period_ms * NVN_RTW_CAP, comp = period_ms * NVN_RTW_START;
+    if (n > NVN_RTW_WIN) n = NVN_RTW_WIN;
+    if (v && n > 0) { double s[NVN_RTW_WIN]; memcpy(s, v, (size_t)n * sizeof *s); qsort(s, (size_t)n, sizeof *s, dcmp); comp = fmax(s[(n - 1) * 9 / 10] * 1.25, s[n - 1] * 1.1); }
+    return comp < lo ? lo : comp > hi ? hi : comp;
+}
+static void rtw_declare(nvn_rtw *w, uint64_t period_ns, double comp_ms) {
+    static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
+    if (comp_ms > 50.0) comp_ms = 50.0;   // XNU refuses a computation over its largest real-time quantum (50 ms): a present period over 62.5 ms (15 fps) would ask for more
+    uint64_t comp_ns = (uint64_t)(comp_ms * 1e6);
+    thread_time_constraint_policy_data_t p = {
+        .period = (uint32_t)(period_ns * tb.denom / tb.numer), .computation = (uint32_t)(comp_ns * tb.denom / tb.numer),
+        .constraint = (uint32_t)(period_ns * tb.denom / tb.numer), .preemptible = 1};
+    mach_port_t self = pthread_mach_thread_np(pthread_self());
+    kern_return_t kr = thread_policy_set(self, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    // Only a first declaration that fails ends the policy for good (the thread keeps its QoS). A later one that fails keeps the declaration in effect and its size, and the
+    // next tick tries again; its line is logged within the same 16
+    if (kr != KERN_SUCCESS) { int first = !(w->comp_ms > 0); if (first) w->failed = 1;
+        if (first || w->logged < 16) { if (!first) w->logged++; LOG("[nvn] replay threads: '%s' time-constraint policy (period %.3f ms, computation %.3f ms) failed to set (%d): %s", w->name, period_ns / 1e6, comp_ms, kr, first ? "it keeps its QoS" : "the previous one stays"); }
+        return; }
+    pthread_mutex_lock(&g_rt_mu);   // rtw_states reads these from the thread writing the policy line
+    int first = !(w->comp_ms > 0); w->comp_ms = comp_ms; w->period_ms = period_ns / 1e6;
+    if (first) {   // a send right of our own, so that the line reads this thread and a thread that ended reads as ended
+        w->port = mach_port_mod_refs(mach_task_self(), self, MACH_PORT_RIGHT_SEND, 1) == KERN_SUCCESS ? self : 0;
+        if (g_nrtw < (int)(sizeof g_rtw / sizeof *g_rtw)) g_rtw[g_nrtw++] = w;
+    }
+    pthread_mutex_unlock(&g_rt_mu);
+    if (w->logged < 16) { w->logged++; LOG("[nvn] replay threads: '%s' time-constraint policy (period %.3f ms, computation %.3f ms) set%s", w->name, period_ns / 1e6, comp_ms, first ? " (the thread's first)" : w->logged == 16 ? "; later changes are not logged" : ""); }
+}
+void nvn_rtw_tick(nvn_rtw *w, uint64_t frame) {
+    if (w->failed || frame == UINT64_MAX) return;
+    uint64_t period = atomic_load_explicit(&g_rt_frame_ns, memory_order_relaxed);
+    if (!period) return;   // no window texture acquired yet
+    uint64_t cpu = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
+    if (!w->started) { w->started = 1; w->frame = frame; w->cpu = cpu; rtw_declare(w, period, nvn_rtw_size_ms(NULL, 0, period / 1e6)); return; }
+    if (frame <= w->frame) return;   // the replay's frame goes back when jobs of two queues interleave (nq_report_due)
+    double per = (double)(cpu - w->cpu) / 1e6 / (double)(frame - w->frame); w->frame = frame; w->cpu = cpu;
+    double pms = period / 1e6;
+    if (fabs(pms - w->period_ms) > w->period_ms * 0.01) { double c = w->comp_ms, lo = fmax(1.0, pms * NVN_RTW_FLOOR), hi = pms * NVN_RTW_CAP; rtw_declare(w, period, c < lo ? lo : c > hi ? hi : c); }   // the present period changed: the computation kept, within the new bounds
+    // A frame past the declaration is raised for at once, to 1.1 x that frame (within the cap): the window's peak covers a peak inside a window, not a step between two, and the declaration
+    // waiting for the window's end left up to 119 frames past it, each a 30-60 ms stall on Dark Souls Remastered's render thread (frame-rate.md); a lower size waits for the window
+    if (per > w->comp_ms) {
+        __atomic_fetch_add(&w->over, 1, __ATOMIC_RELAXED);
+        double c = fmin(pms * NVN_RTW_CAP, per * 1.1); if (c > w->comp_ms) rtw_declare(w, period, c);
+    }
+    w->win[w->n++] = per; if (w->n < NVN_RTW_WIN) return;
+    double comp = nvn_rtw_size_ms(w->win, w->n, pms); w->n = 0;
+    if (comp > w->comp_ms * 1.15 || comp < w->comp_ms * 0.85) rtw_declare(w, period, comp);
+}
+// For the thread policy line (rt_policy_line, DM_FIELD_LOG on): each replay thread's declaration, read on that thread's own port: in effect (policy 2), demoted (still set, run as a
+// standard thread), not in effect, or ended
+static void rtw_states(char *out, size_t n) {
+    size_t o = 0; out[0] = 0;
+    pthread_mutex_lock(&g_rt_mu);
+    if (!g_nrtw) o += (size_t)snprintf(out, n, "; replay threads: no time-constraint policy set yet");
+    for (int i = 0; i < g_nrtw && o < n; i++) {
+        nvn_rtw *w = g_rtw[i]; thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT; thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = 0;
+        int okx = w->port && thread_info(w->port, THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) == KERN_SUCCESS, okp = w->port && thread_policy_get(w->port, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&tp, &tc, &def) == KERN_SUCCESS, live = okp && !def;
+        const char *st = !okx && !okp ? "unknown (the thread has ended)" : live && okx && xi.pth_policy != POLICY_RR ? "set, but run as a standard thread (demoted)" : live ? "in effect" : "not in effect";
+        uint64_t over = __atomic_load_n(&w->over, __ATOMIC_RELAXED), since = over - w->over_shown; w->over_shown = over;   // frames whose CPU time ran past the computation declared, since the line before
+        o += (size_t)snprintf(out + o, n - o, "; %s real-time computation %.2f ms / period %.2f ms, %s, current priority %d (policy %d), %llu frames past it since the last line", w->name, w->comp_ms, w->period_ms, st, okx ? xi.pth_curpri : -1, okx ? xi.pth_policy : -1, (unsigned long long)since);
+    }
+    pthread_mutex_unlock(&g_rt_mu);
 }
 static void sleep_until_ns(uint64_t dl) {   // absolute time on the monotonic clock
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);

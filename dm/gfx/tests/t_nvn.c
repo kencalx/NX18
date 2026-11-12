@@ -97,9 +97,29 @@ static dispatch_semaphore_t rt_set_done, rt_may_end;
 static void *rt_acquirer(void *arg) { (void)arg; pthread_setname_np("0x1001 main thread"); set_time_constraint_comp(16666667ull, 2000000ull); dispatch_semaphore_signal(rt_set_done); dispatch_semaphore_wait(rt_may_end, DISPATCH_TIME_FOREVER); return NULL; }
 static int rt_set_on(mach_port_t p) { thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = 0;
     return thread_policy_get(p, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&tp, &tc, &def) != KERN_SUCCESS ? -1 : !def; }
+// The replay threads' time-constraint policy (nvn_rt.h, nvn_rtw_tick): a thread named as the replay ticks its frames, each about 0.3 ms of CPU. Its first tick declares half the period;
+// a frame that goes back is ignored; after 120 frames the computation is sized to them (the floor here, 0.1 of the period), on that thread, read through its own port. Then one frame of
+// 3 ms, past that: raised at once to 1.1 x it, not at the window's end; the window holding it keeps that size (its peak), and the next window of 0.3 ms frames lowers it to the floor again
+static nvn_rtw rtw_test = {.name = "NVN queue replay"};
+static double rtw_first_ms, rtw_floor_ms, rtw_step_per, rtw_step_ms, rtw_kept_ms; static int rtw_back_ignored; static uint64_t rtw_over_floor, rtw_over_step;
+static void rtw_spin_ms(double ms) { uint64_t c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); volatile double x = 1; while (clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - c0 < (uint64_t)(ms * 1e6)) x *= 1.0000001; }
+static void *rtw_thread(void *arg) {
+    (void)arg; pthread_setname_np("NVN queue replay");
+    nvn_rtw_tick(&rtw_test, 10); rtw_first_ms = rtw_test.comp_ms;
+    nvn_rtw_tick(&rtw_test, 9); rtw_back_ignored = rtw_test.frame == 10 && rtw_test.n == 0;
+    for (uint64_t f = 11; f <= 130; f++) { rtw_spin_ms(0.3); nvn_rtw_tick(&rtw_test, f); usleep(200); }   // it sleeps between frames, as the replay does between nodes
+    rtw_floor_ms = rtw_test.comp_ms; rtw_over_floor = rtw_test.over;
+    uint64_t c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); rtw_spin_ms(3); nvn_rtw_tick(&rtw_test, 131);
+    rtw_step_per = (double)(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - c0) / 1e6; rtw_step_ms = rtw_test.comp_ms; rtw_over_step = rtw_test.over;
+    for (uint64_t f = 132; f <= 250; f++) { rtw_spin_ms(0.3); nvn_rtw_tick(&rtw_test, f); usleep(200); }
+    rtw_kept_ms = rtw_test.comp_ms;
+    for (uint64_t f = 251; f <= 370; f++) { rtw_spin_ms(0.3); nvn_rtw_tick(&rtw_test, f); usleep(200); }
+    dispatch_semaphore_signal(rt_set_done); dispatch_semaphore_wait(rt_may_end, DISPATCH_TIME_FOREVER); return NULL;
+}
 
 int main(void) {
     setenv("DM_NVN_COUNT", "1", 1);
+    setenv("DM_REPLAY_RT", "1", 1);   // the thread policy lines below name the replay threads (rtw_states)
     {   rt_set_done = dispatch_semaphore_create(0); rt_may_end = dispatch_semaphore_create(0);
         pthread_t th; pthread_create(&th, NULL, rt_acquirer, NULL); dispatch_semaphore_wait(rt_set_done, DISPATCH_TIME_FOREVER);
         mach_port_t self = pthread_mach_thread_np(pthread_self());
@@ -113,6 +133,47 @@ int main(void) {
         for (int i = 0; i < 200 && !ended; i++) { thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT; ended = thread_info(g_rt_port, THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) != KERN_SUCCESS; if (!ended) usleep(5000); }
         EXPECT("  a thread that ended reads as ended, through our own send right", 1, ended);
         rt_policy_line(0, 0);   // unknown (the thread it was set on has ended)
+    }
+    {   // The replay threads' time-constraint policy: the size, the switch, a thread's declarations
+        double v[120], P = 16.6667;
+        for (int i = 0; i < 120; i++) v[i] = 5; v[7] = 9;
+        EXPECT("replay rt: 1.1 x the peak over 1.25 x p90 (us)", 9900, llround(nvn_rtw_size_ms(v, 120, P) * 1000));
+        for (int i = 0; i < 120; i++) v[i] = i < 12 ? 8.5 : 8;
+        EXPECT("  1.25 x p90 over 1.1 x the peak (us)", 10000, llround(nvn_rtw_size_ms(v, 120, P) * 1000));
+        for (int i = 0; i < 120; i++) v[i] = 15;
+        EXPECT("  capped at 0.8 of the period (us)", 13333, llround(nvn_rtw_size_ms(v, 120, P) * 1000));
+        for (int i = 0; i < 120; i++) v[i] = 0.1;
+        EXPECT("  at least 0.1 of the period (us)", 1667, llround(nvn_rtw_size_ms(v, 120, P) * 1000));
+        EXPECT("  and 1 ms at a short period (us)", 1000, llround(nvn_rtw_size_ms(v, 120, 8.3333) * 1000));
+        EXPECT("  half the period before a window is measured (us)", 8333, llround(nvn_rtw_size_ms(NULL, 0, P) * 1000));
+        EXPECT("replay rt: DM_REPLAY_RT=1 over a profile without it", 1, replay_rt_mode("1", 0));
+        EXPECT("  DM_REPLAY_RT=0 over a profile with it", 0, replay_rt_mode("0", 1));
+        EXPECT("  unset or empty: the profile's", 1, replay_rt_mode(NULL, 1) && replay_rt_mode("", 1) && !replay_rt_mode(NULL, 0) && !replay_rt_mode("", 0));
+        if (!strcmp(DM_GAME_ID, "0400486024DEC000")) EXPECT("  Ocarina of Time's profile sets replay_rt", 1, DM_GAME_REPLAY_RT);
+        EXPECT("  this run's switch", 1, nvn_replay_rt());
+        EXPECT("  no tick before a window gave a period", 0, (nvn_rtw_tick(&rtw_test, 5), rtw_test.started));
+        atomic_store(&g_rt_frame_ns, 16666667ull);
+        pthread_t th; pthread_create(&th, NULL, rtw_thread, NULL); dispatch_semaphore_wait(rt_set_done, DISPATCH_TIME_FOREVER);
+        EXPECT("  its first tick declares half the period (us)", 8333, llround(rtw_first_ms * 1000));
+        EXPECT("  a frame that goes back is ignored", 1, rtw_back_ignored);
+        EXPECT("  120 frames of 0.3 ms: sized to the floor (us)", 1667, llround(rtw_floor_ms * 1000));
+        EXPECT("  none of them past the declaration", 0, rtw_over_floor);
+        EXPECT("  a frame of 3 ms past it: raised at once to 1.1 x it, within 0.05 ms", 1, rtw_step_ms >= rtw_step_per * 1.1 - 0.05 && rtw_step_ms <= rtw_step_per * 1.1 + 0.05 && rtw_step_ms > 3.2);
+        EXPECT("  and counted", 1, rtw_over_step);
+        EXPECT("  the window holding it keeps that size (its peak)", 1, rtw_kept_ms == rtw_step_ms);
+        EXPECT("  the next window lowers it to the floor (us)", 1667, llround(rtw_test.comp_ms * 1000));
+        EXPECT("  set on that thread, read through its own port", 1, rtw_test.port && rt_set_on(rtw_test.port) == 1);
+        EXPECT("  registered for the policy line", 1, g_nrtw == 1 && g_rtw[0] == &rtw_test);
+        char st[512]; rtw_states(st, sizeof st);
+        EXPECT("  the line says it is in effect", 1, strstr(st, "NVN queue replay real-time computation 1.67 ms / period 16.67 ms, in effect") != NULL);
+        EXPECT("  and counts the frame past it", 1, strstr(st, "(policy 2), 1 frames past it since the last line") != NULL);
+        rtw_states(st, sizeof st);
+        EXPECT("  once: the next line counts none", 1, strstr(st, ", 0 frames past it since the last line") != NULL);
+        rt_policy_line(0, 0);
+        dispatch_semaphore_signal(rt_may_end); pthread_join(th, NULL);
+        int ended = 0; for (int i = 0; i < 200 && !ended; i++) { rtw_states(st, sizeof st); ended = strstr(st, "unknown (the thread has ended)") != NULL; if (!ended) usleep(5000); }
+        EXPECT("  a replay thread that ended reads as ended", 1, ended);
+        pthread_mutex_lock(&g_rt_mu); g_nrtw = 0; pthread_mutex_unlock(&g_rt_mu); atomic_store(&g_rt_frame_ns, 0);
     }   // the call-count checks below need the counting trampolines (off by default)
     {   // A missing control section must not publish uninitialized bytes or poison a serial's key cache.
         uint8_t control[0x880] = {0}, key[8];

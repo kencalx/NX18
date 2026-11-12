@@ -302,6 +302,7 @@ uint64_t mtl_ds_omit(void);   // Cumulative number of passes with no depth attac
 uint64_t mtl_drawable_ns_take(void);   // Take and zero: cumulative ns spent waiting for nextDrawable in present   // Cumulative useResource calls actually issued / skipped by same-encoder dedup   // Cumulative argument buffer new-encode / reuse counts
 void mtl_bw(uint64_t *load, uint64_t *store, uint64_t *full_rw_passes);   // Cumulative attachment load / store bytes, cumulative number of full load-store passes
 uint64_t mtl_udc_saved_bytes(void);                                      // Write-back bytes actually saved by DM_NVN_UNWRITTEN_DC
+void mtl_wait_stats(uint64_t v[7]);                                      // g_rmu waits of the replay and of other threads, encode-thread drains (nvn_mtl.m; the translation detail line)
 uint64_t mtl_rec_wakes(void);                                            // The encode thread's wakes so far (nvn_rec.h; the threads line)
 int mtl_has_window(void);
 int mtl_fps_target(void);                                   // target frame rate 30 / 60 / 120 (power-saving mode, DM_FPS, the game itself asking for 30, the 120 fps setting)
