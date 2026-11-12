@@ -6,7 +6,10 @@
 // a folder without this GPU's file and a file that is no archive leave no archive; the compute shaders of the shader map have their pipelines in the archive (cps_new: nothing
 // built), and a shader with function constants or not in the map is built as before; the task / mesh pipelines of the prewarm list's M rows (the host's own keys) are in the archive,
 // with a task shader and with the mesh shader's own object function, blended and with a write mask cut to the pixel shader's output map, and with no colour target (mtk_build: from the bundle, nothing built
-// or captured), and one with a pixel shader that declares function constants or with no pixel shader is built as before.
+// or captured), and one with a pixel shader that declares function constants or with no pixel shader is built as before; the layout bases of the prewarm list's R rows (keys the
+// engine writes, pso_key_fill / pso_skey_from: float, half, instanced, constant and CPU-converted (I2F) streams, 4 samples with alpha to coverage, an integer input fed its own class
+// and through its shadow inputs, integer / mixed / dual-source fragments, depth only) come from the bundle through plain lookups (pso_build(pso_desc(...)): nothing compiled), and
+// a row with a pixel shader with function constants or an attribute beyond its constant stream's stride (metal-tt refuses it) is built as before.
 // Without metal-tt (no Metal toolchain) it says so and passes
 #include "../nvn/nvn_mtl.m"
 #include "t_mtl4.h"
@@ -27,6 +30,22 @@ static int lib(NSString *dir, NSString *name, NSString *src) {   // <dir>/<name>
     return sh([NSString stringWithFormat:@"cd %@ && xcrun -sdk macosx metal -c %@.metal -o %@.air && xcrun -sdk macosx metallib %@.air -o %@.metallib && rm %@.metal %@.air", dir, name, name, name, name, name, name]);
 }
 static void reset_counts(void) { g_pre_done = g_pre_built = g_pre_archived = g_pre_skipped = g_pre_failed = 0; }
+// The R rows of the prewarm list as a draw records them (pso_key_fill from the state, pso_skey_from, pso_skey_hex), kept for the lookups: what the vertex layout and the colour
+// targets are, attribute 0 a Float4 from stream 0 and attribute 1 as the row says
+enum { NR = 16 };
+static pso_key g_rk[NR]; static NvShader *g_rv[NR], *g_rf[NR]; static const char *g_rn[NR]; static int g_nr;
+static NSMutableString *g_rrows;
+static void rrow(const char *name, NvShader *vs, NvShader *fs, int a1fmt, int a1off, int a1st, uint32_t s0, uint32_t s1, uint32_t d1, uint32_t c0, uint32_t c1, uint32_t samples, int a2c, int src1) {
+    state_reset(); S.nattr = 2;
+    S.attr[0] = (va_st){.fmt = 0x2E, .offset = 0, .stream = 0}; S.attr[1] = (va_st){.fmt = (uint32_t)a1fmt, .offset = (uint32_t)a1off, .stream = (uint32_t)a1st};
+    S.stream[0].stride = s0; if (a1st) { S.stream[a1st].stride = s1; S.stream[a1st].divisor = d1; }
+    S.ms.a2c = a2c;
+    if (src1) { S.color.blend_en = 1; S.blend[0].src_rgb = S.blend[0].src_a = NVN_BLEND_FUNC_ONE; S.blend[0].dst_rgb = S.blend[0].dst_a = NVN_BLEND_FUNC_ONE_MINUS_SRC1_COLOR; }
+    uint32_t cf[8] = {c0, c1};
+    pso_key_fill(&g_rk[g_nr], vs, fs, cf, c0 || c1 ? 0 : MTLPixelFormatDepth32Float, 0, samples, 0);
+    pso_skey sk; char hex[sizeof sk * 2 + 1]; pso_skey_from(&g_rk[g_nr], vs, fs, 0, NULL, &sk); pso_skey_hex(&sk, hex);
+    [g_rrows appendFormat:@"R\t%s\n", hex]; g_rv[g_nr] = vs; g_rf[g_nr] = fs; g_rn[g_nr] = name; g_nr++;
+}
 
 int main(void) { @autoreleasepool {
     char tmp[PATH_MAX]; snprintf(tmp, sizeof tmp, "%s/t_pso_bundle.XXXXXX", getenv("TMPDIR") ?: "/tmp"); if (!mkdtemp(tmp)) abort();
@@ -93,8 +112,52 @@ int main(void) { @autoreleasepool {
     NSString *(^mrow)(const char *, const char *, const char *, const pso_key *) = ^NSString *(const char *t, const char *m, const char *p, const pso_key *k) {
         pso_skey sk; char hex[sizeof sk * 2 + 1]; pso_skey_from(k, named(m, 4), p ? named(p, 1) : nil, 0, NULL, &sk); pso_skey_hex(&sk, hex);
         return [NSString stringWithFormat:@"M\t%s\t%s\n", t ?: "-", hex]; };
+    // Shaders with stage inputs, as the translator makes them: va (float inputs: a Float4 at 0, a float2 at 1), vi (an unsigned integer input at 1 with shadow inputs, vi_bv: its float
+    // declaration at 16, its signed one at 17, dmsh_vin.py); pixel shaders with an integer (entry_u), a mixed (entry_m, output 1 an integer) and a dual-source (entry_d) entry point
+    NSString *hd = @"#include <metal_stdlib>\nusing namespace metal;\nstruct VO { float4 p [[position]]; };\n";
+    NSString *va = [hd stringByAppendingString:@"struct VI { float4 p [[attribute(0)]]; float2 uv [[attribute(1)]]; };\n"
+        "vertex VO main0(VI i [[stage_in]]) { VO o; o.p = i.p + float4(i.uv, 0, 0); return o; }\nvertex VO main0_z(VI i [[stage_in]]) { VO o; o.p = i.p * 0.5 + float4(i.uv, 0, 0); return o; }\n"];
+    NSString *vi = [hd stringByAppendingString:@"struct VI { float4 p [[attribute(0)]]; uint4 m [[attribute(1)]]; };\nvertex VO main0(VI i [[stage_in]]) { VO o; o.p = i.p + float4(i.m); return o; }\n"];
+    NSString *vib = [hd stringByAppendingString:@"struct VI { float4 p [[attribute(0)]]; uint4 m [[attribute(1)]]; float4 m_vf [[attribute(16)]]; int4 m_vo [[attribute(17)]]; };\n"
+        "vertex VO main0(VI i [[stage_in]]) { uint4 m = i.m | as_type<uint4>(i.m_vf) | as_type<uint4>(i.m_vo); VO o; o.p = i.p + float4(m); return o; }\n"];
+    NSString *fu = @"#include <metal_stdlib>\nusing namespace metal;\nfragment float4 main0() { return float4(1); }\nfragment uint4 main0_u() { return uint4(1); }\n";
+    NSString *two = @"#include <metal_stdlib>\nusing namespace metal;\nstruct O { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; };\nfragment O main0() { return O{float4(1), float4(0.5)}; }\n";
+    NSString *fm = [two stringByAppendingString:@"struct OM { float4 c0 [[color(0)]]; uint4 c1 [[color(1)]]; };\nfragment OM main0_m() { return OM{float4(1), uint4(2)}; }\n"];
+    NSString *fd = [two stringByAppendingString:@"struct OD { float4 c0 [[color(0), index(0)]]; float4 c1 [[color(0), index(1)]]; };\nfragment OD main0_d() { return OD{float4(1), float4(0.5)}; }\n"];
+    if (lib(msl, @"va_b", va) || lib(msl, @"vi_b", vi) || lib(msl, @"vi_bv", vib) || lib(msl, @"fa_b", [NSString stringWithFormat:f, 1, 1]) || lib(msl, @"fu_b", fu) ||
+        lib(msl, @"fm_b", fm) || lib(msl, @"fd_b", fd)) { fprintf(stderr, "t_pso_bundle: the layout fixture libraries did not compile\n"); return 1; }
+    put([msl stringByAppendingPathComponent:@"va_b.json"], [NSString stringWithFormat:refl, DMSH_CHAIN, @"vs", @", \"entry_z\": \"main0_z\", \"vertex_inputs\": [{\"location\": 0, \"msl_type\": \"float4\"}, {\"location\": 1, \"msl_type\": \"float2\"}]"]);
+    put([msl stringByAppendingPathComponent:@"vi_b.json"], [NSString stringWithFormat:refl, DMSH_CHAIN, @"vs", @", \"vertex_inputs\": [{\"location\": 0, \"msl_type\": \"float4\"}, {\"location\": 1, \"msl_type\": \"uint4\"}], "
+                                                            "\"vin\": {\"shadow\": [{\"location\": 1, \"float\": 16, \"sint\": 17}]}"]);
+    put([msl stringByAppendingPathComponent:@"fa_b.json"], [NSString stringWithFormat:refl, DMSH_CHAIN, @"ps", @", \"raster\": {\"colors\": [0]}"]);
+    put([msl stringByAppendingPathComponent:@"fu_b.json"], [NSString stringWithFormat:refl, DMSH_CHAIN, @"ps", @", \"entry_u\": \"main0_u\", \"raster\": {\"colors\": [0]}"]);
+    put([msl stringByAppendingPathComponent:@"fm_b.json"], [NSString stringWithFormat:refl, DMSH_CHAIN, @"ps", @", \"entry_m\": \"main0_m\", \"uint_mask_m\": 2, \"raster\": {\"colors\": [0, 1]}"]);
+    put([msl stringByAppendingPathComponent:@"fd_b.json"], [NSString stringWithFormat:refl, DMSH_CHAIN, @"ps", @", \"entry_d\": \"main0_d\", \"raster\": {\"colors\": [0, 1]}"]);
+    shmap_read_once();   // the library folder (g_msl_dir), as shmap_load reads it before the prewarm
+    NvShader *sva = shader_load(@"va_b", 0, 0), *svi = shader_load(@"vi_b", 0, 0), *sfa = shader_load(@"fa_b", 1, 0), *sfu = shader_load(@"fu_b", 1, 0), *sfm = shader_load(@"fm_b", 1, 0),
+             *sfd = shader_load(@"fd_b", 1, 0), *sfc = shader_load(@"fc_b", 1, 0);
+    if (!sva || !svi || !sfa || !sfu || !sfm || !sfd || !sfc) { fprintf(stderr, "t_pso_bundle: the layout fixture shaders did not load\n"); return 1; }
+    const uint32_t RGBA8 = MTLPixelFormatRGBA8Unorm, RGBA8U = MTLPixelFormatRGBA8Uint;
+    g_rrows = [NSMutableString string];
+    rrow("float layout", sva, sfa, 0x16, 16, 0, 24, 0, 0, RGBA8, 0, 1, 0, 0);
+    rrow("half", sva, sfa, 0x11, 16, 0, 20, 0, 0, RGBA8, 0, 1, 0, 0);
+    rrow("instanced stream", sva, sfa, 0x16, 0, 1, 16, 8, 1, RGBA8, 0, 1, 0, 0);
+    rrow("constant stream", sva, sfa, 0x0A, 0, 2, 16, 0, 0, RGBA8, 0, 1, 0, 0);   // a Float: within the stride of 4 pso_desc gives a constant stream
+    rrow("I2F format (CPU conversion slot)", sva, sfa, 0x57, 16, 0, 20, 0, 0, RGBA8, 0, 1, 0, 0);
+    rrow("4 samples, alpha to coverage", sva, sfa, 0x16, 16, 0, 24, 0, 0, RGBA8, 0, 4, 1, 0);
+    rrow("integer input, own class", svi, sfa, 0x27, 16, 0, 20, 0, 0, RGBA8, 0, 1, 0, 0);
+    rrow("integer input, shadow input", svi, sfa, 0x11, 16, 0, 20, 0, 0, RGBA8, 0, 1, 0, 0);
+    rrow("integer input, other sign: shadow", svi, sfa, 0x15, 16, 0, 20, 0, 0, RGBA8, 0, 1, 0, 0);
+    rrow("integer fragment", sva, sfu, 0x16, 16, 0, 24, 0, 0, RGBA8U, 0, 1, 0, 0);
+    rrow("mixed fragment", sva, sfm, 0x16, 16, 0, 24, 0, 0, RGBA8, RGBA8U, 1, 0, 0);
+    rrow("dual-source fragment", sva, sfd, 0x16, 16, 0, 24, 0, 0, RGBA8, 0, 1, 0, 1);
+    rrow("depth only", sva, nil, 0x16, 16, 0, 24, 0, 0, 0, 0, 1, 0, 0);
+    int nfound = g_nr;   // the rows above come from the bundle; those below are built: a pixel shader with function constants, and a Float2 in a constant stream, beyond the
+    // stride of 4 pso_desc gives it, which the device's compiler takes and metal-tt refuses (left to the device, so that the rest of its group is not refused with it)
+    rrow("pixel shader with function constants", sva, sfc, 0x16, 16, 0, 24, 0, 0, RGBA8, 0, 1, 0, 0);
+    rrow("constant stream, attribute beyond the stride", sva, sfa, 0x16, 0, 2, 16, 0, 0, RGBA8, 0, 1, 0, 0);
     put([tables stringByAppendingPathComponent:@"pso_manifest.tsv"], [@[@"# list\n", mrow("t1_b", "m1_b", "p1_b", &mk), mrow(NULL, "m2_b", "p1_b", &mb), mrow("t1_b", "m1_b", "p1_b", &mk),
-                                                                      mrow("t1_b", "m1_b", "fc_b", &mk), mrow(NULL, "m2_b", NULL, &mk), mrow("t1_b", "m1_b", "p1_b", &md)] componentsJoinedByString:@""]);
+                                                                      mrow("t1_b", "m1_b", "fc_b", &mk), mrow(NULL, "m2_b", NULL, &mk), mrow("t1_b", "m1_b", "p1_b", &md), g_rrows] componentsJoinedByString:@""]);
     // the archive as build_ipa.sh makes it (the tool's own folder: this file is dm/gfx/tests/t_pso_bundle.m)
     NSString *tool = [[@(__FILE__) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"../tools/pso_offline.py"];
     if (sh([NSString stringWithFormat:@"python3 %@ --platform macos --gpu %@ --msl %@ --pairs %@/shader_pairs.tsv --shader-map %@/shader_map.tsv --manifest %@/pso_manifest.tsv --out %@ --work %@/work > %@/pso_offline.log 2>&1",
@@ -182,6 +245,21 @@ int main(void) { @autoreleasepool {
             EXPECT("mesh, other blend state: not in the bundle", 0, got);
             dispatch_sync(arch_harvest_q(), ^{});
             EXPECT("mesh: only those built captured for the device's archive", n0 + 3, g_arch_new);
+        }
+    }
+    // layout bases: every R row's base (a vertex layout) comes from the bundle (pso_desc as the draw and the prewarm make it, pso_build: nothing compiled), the one with a pixel
+    // shader with function constants is built
+    @autoreleasepool {
+        NSString *log = [NSString stringWithContentsOfFile:[root stringByAppendingPathComponent:@"pso_offline.log"] encoding:NSUTF8StringEncoding error:nil];
+        EXPECT("layout: the rows' bases in the archive, the constant row left out", 1, [log containsString:[NSString stringWithFormat:@"%d render rows: %d layout bases", g_nr, nfound]]);
+        for (int i = 0; i < g_nr; i++) {
+            uint64_t a0 = g_pb_archived, b0 = g_pb_built, v0 = g_pb_bundle_vd; NSError *err = nil; char what[160];
+            id<MTLRenderPipelineState> ps = pso_build(pso_desc(&g_rk[i], g_rv[i], g_rf[i], nil, 0), &err);
+            snprintf(what, sizeof what, "layout, %s: a pipeline", g_rn[i]); EXPECT(what, 1, ps != nil);
+            if (!ps) fprintf(stderr, "  %s: %s\n", g_rn[i], err.localizedDescription.UTF8String);
+            snprintf(what, sizeof what, "layout, %s: its base %s", g_rn[i], i < nfound ? "from the bundle" : "built"); EXPECT(what, i < nfound, g_pb_archived - a0);
+            snprintf(what, sizeof what, "layout, %s: %s", g_rn[i], i < nfound ? "nothing compiled" : "compiled"); EXPECT(what, i >= nfound, g_pb_built - b0);
+            snprintf(what, sizeof what, "layout, %s: %scounted as a layout base from the bundle", g_rn[i], i < nfound ? "" : "not "); EXPECT(what, i < nfound, g_pb_bundle_vd - v0);
         }
     }
     // A separate output forces one base per compiler invocation, then metal-pack merges both for this GPU.

@@ -43,6 +43,11 @@ iPhone: no IPA was built, and the touch layout is untested.
   `pso_pairs.tsv` and `shader_facts.tsv` hold only their headers.
 - `pso_manifest.tsv` covers boot, the opening movie, the title screen and a new
   game into the first Velvet Room scene.
+- With no shader pair the app had no pipeline archive made offline. Since release 1.5
+  it gets one of [layout bases](../../../docs/reference/shaders.md#pipelines-with-a-vertex-layout-compiled-at-a-fresh-installs-prepare-step) alone: the list's 23 `R` rows give 9
+  bases (`applegpu_g19p`, 2.4 s on an M4 Max); 5 rows share a base and 9 are left to
+  the device (`stride`: an attribute larger than the stride of 4 `pso_desc` gives a
+  constant stream, which `metal-tt` refuses). Not yet measured on a device.
 
 ## Memory
 
