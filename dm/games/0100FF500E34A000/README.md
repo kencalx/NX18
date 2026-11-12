@@ -10,7 +10,9 @@ events, the Sword Valley battle through its boss, targeting, movement, Monado
 arts and Shulk / Reyn's first Colony 9 combat, with real audio. Frames during
 the opening battle take about 33 ms. The unsigned 1.1.2 IPA builds successfully
 (13.2 GiB), with all 15,129 shader libraries and a complete CRC check. Further
-story progression, saving / reloading and iPhone validation remain open.
+story progression and saving / reloading remain open. On the iPhone 18 Pro Max
+(release 1, 2026-11-11) about 8 minutes of a new game held 60 fps with the 60 fps
+mod ([On the iPhone](#on-the-iphone)).
 
 ## Memory
 
@@ -58,6 +60,59 @@ opening event. In battle, close tutorial pages with `A`, target with `R`, start
 with `A`, and approach with the left stick. Select arts with the directional
 buttons and confirm with `A`. Each opening event needs its own skip.
 
+## On the iPhone
+
+The owner's run on an iPhone 18 Pro Max (iOS 27.3), release 1 (`5b302cd0`, chain
+`ac67cb709fa0`), update 1.1.2, docked, the 60 fps mod from the mods folder
+(`DM_MOD_FPS=1`), Picture Stretch, no upscaling, no edge smoothing: the first
+start after a fresh install, then about 8 minutes of a new game (28,600 frames).
+From its `log.txt` (`scripts/devlog.py`):
+
+- **Frames:** 60 fps throughout; frame time p50 16.68 ms, p95 17.27 ms; 18 of
+  28,489 frames dropped (0.06%); game GPU time p50 12 ms. 58 frames over the
+  long-frame mark (about one a minute), 47 of them the game's own work; the
+  longest, 808 ms, was the first frame's new pipelines.
+- **Power and heat:** CPU 2.18 W median (36 mJ a frame); thermal state 1 only in
+  the last 70 s. Same-core handoffs about 1,260 a second (80 ms of polling a
+  second), the same-core handoff cost found in Catherine: Full Body, whose wait
+  no longer polls after release 1 (not measured on this game since).
+- **Memory:** footprint 976 MB at the title to 1.9 GB at most, GPU allocated at
+  most 2.07 GB, at least 6.29 GB of headroom to the app's limit.
+- **Audio:** one gap, 23 underruns (119 ms) on the second output while the game
+  loaded about 300 MB.
+- **Display:** game enqueue to target display p50 46 ms (no present trim in
+  release 1; after it the iPhone trims at K = 60 by default, not measured on
+  this game).
+
+### Pipelines on a first start
+
+The prepare step with the shipped list (3,659 rows, 3,653 used) took 2.98 s
+before the first frame, behind the progress screen: 391 bases compiled, none
+from the bundled archive, 30 reused. In play 139 more bases were compiled
+(5.01 s of compile time on all threads), none of them on a frame over 60 ms
+after the first. That run's `Documents/pso_user.tsv`, which records only what
+the list did not hold, gave 215 rows, 69 shaders (`S`) and 146 render pipelines
+(`R`), all checked against [`shader_map.tsv`](shader_map.tsv) (the build's map,
+byte for byte) by `dm/tools/pso_seed.py`; they follow the first rows in
+[`pso_manifest.tsv`](pso_manifest.tsv) below their own note, in recorded order.
+The list now has 3,874 rows (3,305 `S`, 569 `R`). Six of the first rows, the
+`_bg0` / `_bgv` geometry variants of two shaders, are not library keys of the
+map and the prewarm drops them at load (`shader keys not in the shader map 4`
+plus their two `R` rows); `pso_seed.py check` refuses them, and the test expects
+exactly those six.
+
+- **Its cost on a first start** (an estimate, not measured): each added `R` row
+  takes at most one base, so at most 146 more in the prepare step; at this
+  start's rate (2.98 s for 391 bases, about 7.6 ms a base on 6 workers) about
+  1.1 s more, so about 4 s in all with release 1's archive. An app whose archive
+  also holds the list's layout bases (`pso_offline.py`'s `R` rows) takes those it
+  can describe from the app instead, so less; not measured.
+- **The settings:** the 60 fps mod changes the game's pacing and Picture Stretch
+  is the host's present; a row's pipeline key holds no picture size, so the rows
+  name the same pipelines at 30 fps and without the stretch.
+- **What it does not cover:** places past those 8 minutes, which still build
+  their pipelines at their first draw, and `pso_user.tsv` records them.
+
 ## Checks
 
 The full Metal graphics suite passes, including 56 CPU-texture / descriptor
@@ -89,5 +144,7 @@ the user's request.
 
 ## Open
 
-- iPhone device testing, further story progression and saving / reloading.
+- Further story progression and saving / reloading, on the Mac and the iPhone.
+- A fresh install's prepare step with the 3,874-row prewarm list, estimated at about 4 s ([Pipelines on a first start](#pipelines-on-a-first-start)).
+- The six `_bg0` / `_bgv` rows of the prewarm list, which the prewarm drops: recorded by an earlier build; whether the host should prewarm geometry variants is open.
 - Repeat the Xenoblade 2 comparison with a deterministic route when requested.
