@@ -6,9 +6,26 @@
 #define HLE_FORCE(mangled, why, ret, cname, ...) static ret cname(__VA_ARGS__)
 #include "../hle_movie.c"
 #include "../hle_codec_video.c"
+// VideoToolbox's decode is wrapped so a test can play iOS invalidating a session in the background (kVTInvalidSessionErr): returned by the decode, or given to the callback
+#include <VideoToolbox/VideoToolbox.h>
+static OSStatus vt_decode(VTDecompressionSessionRef, CMSampleBufferRef, VTDecodeFrameFlags, void *, VTDecodeInfoFlags *);
+#define VTDecompressionSessionDecodeFrame vt_decode
 #include "../hle_movie_avc.c"
 #include "../hle_movie_av1.c"
+#undef VTDecompressionSessionDecodeFrame
 #include <assert.h>
+static int vt_fail, vt_calls;   // vt_fail: 1 = the next decode returns kVTInvalidSessionErr, 2 = it gives that error to the callback and returns noErr (then 0 again)
+static mavc *vt_avc; static mav1 *vt_av1;   // whose callback mode 2 calls
+static OSStatus vt_decode(VTDecompressionSessionRef vs, CMSampleBufferRef sb, VTDecodeFrameFlags fl, void *src, VTDecodeInfoFlags *info) {
+    vt_calls++;
+    int f = vt_fail; vt_fail = 0;
+    if (f == 1) return kVTInvalidSessionErr;
+    if (f == 2) { if (vt_avc) on_frame(vt_avc, src, kVTInvalidSessionErr, 0, NULL, kCMTimeInvalid, kCMTimeInvalid); else av1_on_frame(vt_av1, src, kVTInvalidSessionErr, 0, NULL, kCMTimeInvalid, kCMTimeInvalid); return noErr; }
+    return VTDecompressionSessionDecodeFrame(vs, sb, fl, src, info);
+}
+static char g_err[8192];   // what one call logged
+#define LOGGED(stmt) do { fflush(stderr); int s_ = dup(2); FILE *t_ = tmpfile(); assert(s_ >= 0 && t_); dup2(fileno(t_), 2); stmt; fflush(stderr); dup2(s_, 2); close(s_); \
+                          rewind(t_); size_t k_ = fread(g_err, 1, sizeof g_err - 1, t_); g_err[k_] = 0; fclose(t_); } while (0)
 
 uint64_t now_ns(void) { return 1; }
 static uint64_t test_guest;   // the guest clock (hle_os.c guest_ns: frozen while the app is in the background), which the pacing's movie clock runs on
@@ -127,6 +144,80 @@ static int pace_self(uint64_t frame_ns, int64_t itv, int n, int bufs, uint64_t s
 static void pace_print(const char *what, const pace_res *r) {
     printf("  %s: %d frames, %d pictures shown, at most %d skipped in a frame, starved %d, monotonic %d, end of stream on the last %d, 60 fps signal %d, %d skips in the background, %d pictures on at the jump\n",
            what, r->frames, r->shown, r->max_jump - 1, r->starved, r->mono, r->eos_last, r->fps60, r->bg_skips, r->gap_jump);
+}
+
+// A VideoToolbox session iOS invalidated in the background (hle_movie_avc.c, hle_movie_av1.c; Ocarina of Time's opening movie after the notification panel): with movie_vt_restart the
+// session is dropped and a new one starts at the next key frame. The units before it reach no decoder and give no picture; one plain line says so, no red one. Off, as before
+static const uint8_t h264_p[] = {0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x00, 0x10};   // a non-IDR slice header alone: it must never reach a decoder (vt_fail fails it before)
+static const uint8_t av1_inter[] = {0x12, 0x00, 0x32, 0x02, 0x30, 0x00};   // temporal delimiter, then a frame OBU whose header starts show_existing_frame 0, frame_type 1 (inter)
+static int red_y(const uint8_t *y, size_t stride, int w, int h) { for (int r = 0; r < h; r++) for (int x = 0; x < w; x++) if (abs(y[(size_t)r * stride + x] - 81) > 4) return 0; return 1; }
+static void vt_restart_avc(void) {
+    static uint8_t nv12[64 * 64 * 3 / 2]; int64_t pts; int r, calls;
+    setenv("DM_MOVIE_RESTART", "1", 1);
+    mavc *a = mavc_new(); vt_avc = a;
+    assert(!mavc_decode(a, h264, sizeof h264, 0) && a->vs && mavc_take(a, 0, nv12, 64, 64, &pts) == 1 && red_y(nv12, 64, 64, 64));
+    vt_fail = 1; LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 1000));   // the session died while the app was away: a non-IDR packet finds it
+    assert(!r && !a->vs && a->restart && a->restarts == 1 && !mavc_queued(a));
+    assert(strstr(g_err, "[movie] AVC: VideoToolbox's session was invalidated") && strstr(g_err, "at the next IDR picture") && !strstr(g_err, "[RED]"));
+    calls = vt_calls; LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 2000));   // skipped until the IDR: no decoder, no picture, nothing logged
+    assert(!r && vt_calls == calls && !a->vs && !mavc_queued(a) && !g_err[0]);
+    assert(!mavc_decode(a, h264, sizeof h264, 3000) && a->vs && !a->restart && vt_calls == calls + 1);   // the IDR: a new session from the parameter sets
+    assert(mavc_take(a, 0, nv12, 64, 64, &pts) == 1 && pts == 3000 && red_y(nv12, 64, 64, 64));
+    vt_fail = 1; LOGGED(r = mavc_decode(a, h264, sizeof h264, 4000));   // found at an IDR: a new session decodes that same picture
+    assert(!r && a->vs && !a->restart && a->restarts == 2 && strstr(g_err, "at this IDR picture") && !strstr(g_err, "[RED]"));
+    assert(mavc_take(a, 0, nv12, 64, 64, &pts) == 1 && pts == 4000 && red_y(nv12, 64, 64, 64));
+    vt_fail = 2; LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 5000));   // the error in the callback, the decode returning noErr
+    assert(!r && !a->vs && a->restart && !a->lost && a->restarts == 3 && !strstr(g_err, "[RED]"));
+    assert(!mavc_decode(a, h264, sizeof h264, 6000) && a->vs && mavc_take(a, 0, nv12, 64, 64, &pts) == 1 && pts == 6000);
+    mavc_free(a);
+    // Off (DM_MOVIE_RESTART=0, or a profile without movie_restart): as before, the packet fails with a red line and the session is kept
+    setenv("DM_MOVIE_RESTART", "0", 1);
+    a = mavc_new(); vt_avc = a;
+    assert(!mavc_decode(a, h264, sizeof h264, 0) && mavc_take(a, 0, nv12, 64, 64, &pts) == 1);
+    vt_fail = 1; LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 1000));
+    assert(r == -1 && a->vs && !a->restart && !a->restarts && strstr(g_err, "[RED] movie: AVC decode submission failed (-12903"));
+    vt_fail = 2; LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 2000));
+    assert(!r && a->vs && !a->lost && !a->restart);   // the callback's error is the old red one (already logged once for this decoder)
+    mavc_free(a); vt_avc = NULL;
+    unsetenv("DM_MOVIE_RESTART"); assert(movie_vt_restart() == DM_GAME_MOVIE_RESTART);   // without the variable: the profile's movie_restart
+    setenv("DM_MOVIE_RESTART", "1", 1); assert(movie_vt_restart()); setenv("DM_MOVIE_RESTART", "0", 1); assert(!movie_vt_restart()); unsetenv("DM_MOVIE_RESTART");
+}
+static void vt_restart_av1(void) {
+    // Key frames: a sequence header and a key frame; a sequence header beside an inter frame is none
+    uint8_t seq_inter[32]; memcpy(seq_inter, av1, 15); memcpy(seq_inter + 15, av1_inter + 2, 4);
+    assert(av1_key(av1, sizeof av1) && !av1_key(av1_inter, sizeof av1_inter) && !av1_key(seq_inter, 19) && !av1_key(av1, 2));
+    if (!VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) { puts("AV1 session restart: skipped, this Mac has no hardware AV1 decoder"); return; }
+    setenv("DM_MOVIE_RESTART", "1", 1); setenv("DM_AV1_DAV1D", "0", 1);
+    mav1 *a = mav1_new(); vt_av1 = a; mav1_picture pic; int r, calls;
+    assert(mav1_decode(a, av1, sizeof av1, &pic) == 1 && red_y(pic.y, pic.ystride, 64, 64));
+    vt_fail = 1; LOGGED(r = mav1_decode(a, av1_inter, sizeof av1_inter, &pic));
+    assert(!r && !a->vs && a->restart && a->restarts == 1 && !a->soft);
+    assert(strstr(g_err, "[movie] AV1: VideoToolbox's session was invalidated") && strstr(g_err, "at the next key frame") && !strstr(g_err, "[RED]"));
+    calls = vt_calls; LOGGED(r = mav1_decode(a, av1_inter, sizeof av1_inter, &pic)); assert(!r && vt_calls == calls && !g_err[0]);
+    LOGGED(r = mav1_decode(a, seq_inter, 19, &pic)); assert(!r && vt_calls == calls && !a->vs && a->restart && !g_err[0]);   // a sequence header alone does not start it
+    assert(mav1_decode(a, av1, sizeof av1, &pic) == 1 && a->vs && !a->restart && red_y(pic.y, pic.ystride, 64, 64));
+    vt_fail = 1; LOGGED(r = mav1_decode(a, av1, sizeof av1, &pic));   // found at a key frame: a new session decodes it
+    assert(r == 1 && a->vs && !a->restart && a->restarts == 2 && strstr(g_err, "at this key frame") && !strstr(g_err, "[RED]") && red_y(pic.y, pic.ystride, 64, 64));
+    vt_fail = 2; LOGGED(r = mav1_decode(a, av1_inter, sizeof av1_inter, &pic));   // the error in the callback
+    assert(!r && !a->vs && a->restart && !a->lost && a->restarts == 3 && !strstr(g_err, "[RED]"));
+    mav1_reset(a); assert(!a->restart);   // a new stream (Stop / Flush) starts as before
+    mav1_free(a);
+    // Through nn::codec (hle_codec_video.c), as Ocarina of Time's opening: no picture until the key frame, which is held for a buffer, and no red line
+    _Alignas(16) static uint8_t da[0x400]; memset(da, 0, sizeof da); uint64_t id;
+    assert(!h_cv_av1tm(da, NULL, 0, 0x10000, 64, 64, 1, 3, 2, 2) && cv_of(da)); vt_av1 = cv_of(da)->av1;
+    assert(!h_cv_av1submit(&id, da, av1, sizeof av1, 0, false) && cv_of(da)->nheld == 1);
+    vt_fail = 1; LOGGED(assert(!h_cv_av1submit(&id, da, av1_inter, sizeof av1_inter, 16666667, false))); assert(cv_of(da)->nheld == 1 && !strstr(g_err, "[RED]"));
+    assert(!h_cv_av1submit(&id, da, av1_inter, sizeof av1_inter, 33333333, false) && cv_of(da)->nheld == 1);
+    assert(!h_cv_av1submit(&id, da, av1, sizeof av1, 50000000, false) && cv_of(da)->nheld == 2 && cv_of(da)->held_ts[1] == 50000000);
+    assert(!h_cv_av1fin(da)); vt_av1 = NULL;
+    // Off: as before
+    setenv("DM_MOVIE_RESTART", "0", 1);
+    a = mav1_new(); vt_av1 = a;
+    assert(mav1_decode(a, av1, sizeof av1, &pic) == 1);
+    vt_fail = 1; LOGGED(r = mav1_decode(a, av1_inter, sizeof av1_inter, &pic));
+    assert(r == -1 && a->vs && !a->restart && !a->restarts && strstr(g_err, "[RED] movie: AV1 decode submission failed (-12903"));
+    mav1_free(a); vt_av1 = NULL;
+    unsetenv("DM_MOVIE_RESTART"); unsetenv("DM_AV1_DAV1D");
 }
 
 int main(void) {
@@ -406,6 +497,8 @@ int main(void) {
         assert(!h_cv_vp9fin(td[1]) && !dm_movie_playing() && !g_cv_sig);
         for (int j = 0; j < 2; j++) h_cv_poolfin(tp[j]);
     }
+    vt_restart_avc(); vt_restart_av1();
+    puts("VideoToolbox session restart: an invalidated session is dropped, the units before the next key frame skipped, one plain line; off, the red line as before");
     printf("t_codec_video: all passed\n");
     return 0;
 }

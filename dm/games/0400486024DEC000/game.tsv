@@ -46,6 +46,12 @@ fps_target	60
 # default 60 fps and the Mac use it untested
 present_trim	60
 
+# ---- Movies ----
+# The movies are AV1 decoded by VideoToolbox. On an iPhone 18 Pro Max (X1.0) iOS ended the hardware decoder while the notification panel was down during the opening movie: every later
+# temporal unit failed with -12903 (kVTInvalidSessionErr) and the movie ran through its file in about 2 s, 365 of 9,254 pictures shown. With the key the dead session is dropped and
+# a new one starts at the next key frame (hle_movie.c movie_vt_restart; DM_MOVIE_RESTART=0 in env.txt turns it off)
+movie_restart	on
+
 # ---- Graphics ----
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here
 render_cond	on

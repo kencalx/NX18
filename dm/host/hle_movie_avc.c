@@ -18,6 +18,7 @@ struct mavc {
     uint64_t sequence; int saw_picture;
     uint8_t *au; size_t aucap;   // length-prefixed copy of the access unit being decoded
     int red, rgba;               // rgba: pictures as 4-byte RGBA (native texture mode, Monster Hunter Rise) instead of NV12
+    int lost, restart, restarts; // VideoToolbox's session invalidated by iOS (the app in the background; movie_vt_restart): lost in the callback, restart while waiting for an IDR picture
 };
 
 int mavc_bt709(const mavc *a, int h) {
@@ -125,6 +126,7 @@ void mavc_avcc(mavc *a, const uint8_t *p, size_t n) {
 
 static void on_frame(void *ref, void *src, OSStatus st, VTDecodeInfoFlags fl, CVImageBufferRef img, CMTime pts, CMTime dur) {
     (void)fl; (void)dur; mavc *a = ref;
+    if (st == kVTInvalidSessionErr && movie_vt_restart()) { a->lost = 1; return; }   // mavc_decode starts a new session at the next IDR picture
     if (st || !img) { if (!a->red++) LOG("[RED] movie: AVC decode error (VideoToolbox %d, first case)", (int)st); return; }
     if (a->nq == QMAX) { if (!a->red++) LOG("[RED] movie: AVC reorder queue full, dropping the oldest frame"); CVPixelBufferRelease(a->q[0].pb); memmove(a->q, a->q + 1, --a->nq * sizeof a->q[0]); }
     int64_t t = pts.timescale ? pts.value * 1000000 / pts.timescale : 0;
@@ -175,17 +177,32 @@ int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) {
     au_ctx c = {a, 0};
     if (n > 0 && !each_nal(p, (size_t)n, au_add, &c)) { if (!a->red++) LOG("[RED] movie: AVC packet without an Annex B start code (%d bytes), not decoded", n); return -1; }
     if (!c.len) return 0;
-    if ((a->dirty || !a->vs) && !open_session(a)) return -1;
-    if (c.picture) avc_picture_sequence(a, c.idr);
-    CMBlockBufferRef bb = NULL; CMSampleBufferRef sb = NULL;
-    OSStatus st = CMBlockBufferCreateWithMemoryBlock(NULL, NULL, c.len, NULL, NULL, 0, c.len, 0, &bb);
-    if (!st) st = CMBlockBufferReplaceDataBytes(a->au, bb, 0, c.len);
-    CMSampleTimingInfo ti = {kCMTimeInvalid, CMTimeMake(pts_us, 1000000), kCMTimeInvalid}; size_t ssz = c.len;
-    if (!st) st = CMSampleBufferCreateReady(NULL, bb, a->fd, 1, 1, &ti, 1, &ssz, &sb);
-    if (!st) st = VTDecompressionSessionDecodeFrame(a->vs, sb, 0, (void *)(uintptr_t)(a->sequence + 1), NULL);   // flags 0: synchronous, the picture is queued before this returns
-    if (sb) CFRelease(sb); if (bb) CFRelease(bb);
-    if (st) { if (!a->red++) LOG("[RED] movie: AVC decode submission failed (%d, first case)", (int)st); return -1; }
-    return 0;
+    if (a->restart) {   // iOS invalidated the session: pictures before the next IDR refer to pictures that went with it, so none is decoded (no picture, no garbage); parameter sets are kept
+        if (!c.idr) return 0;
+        a->restart = 0;
+    }
+    for (int again = 0, counted = 0;; again++) {
+        if ((a->dirty || !a->vs) && !open_session(a)) return -1;
+        if (c.picture && !counted) { avc_picture_sequence(a, c.idr); counted = 1; }
+        CMBlockBufferRef bb = NULL; CMSampleBufferRef sb = NULL;
+        OSStatus st = CMBlockBufferCreateWithMemoryBlock(NULL, NULL, c.len, NULL, NULL, 0, c.len, 0, &bb);
+        if (!st) st = CMBlockBufferReplaceDataBytes(a->au, bb, 0, c.len);
+        CMSampleTimingInfo ti = {kCMTimeInvalid, CMTimeMake(pts_us, 1000000), kCMTimeInvalid}; size_t ssz = c.len;
+        if (!st) st = CMSampleBufferCreateReady(NULL, bb, a->fd, 1, 1, &ti, 1, &ssz, &sb);
+        if (!st) st = VTDecompressionSessionDecodeFrame(a->vs, sb, 0, (void *)(uintptr_t)(a->sequence + 1), NULL);   // flags 0: synchronous, the picture is queued before this returns
+        if (sb) CFRelease(sb); if (bb) CFRelease(bb);
+        // iOS ended the hardware session while the app was in the background. Kept, it failed every later packet, across Flush and loops too (mavc_drop keeps the session). Only
+        // that error, and only with movie_vt_restart: a new session from the parameter sets kept, at once when this is an IDR picture, else at the next one. Pictures already queued stay
+        if ((st == kVTInvalidSessionErr || a->lost) && movie_vt_restart()) {
+            int now = !again && c.idr;
+            close_session(a); a->lost = 0; a->restart = !now;
+            if (++a->restarts <= 8) LOG("[movie] AVC: VideoToolbox's session was invalidated (the app was in the background), restarting %s (restart %d)", now ? "at this IDR picture" : "at the next IDR picture", a->restarts);
+            if (now) continue;
+            return 0;
+        }
+        if (st) { if (!a->red++) LOG("[RED] movie: AVC decode submission failed (%d, first case)", (int)st); return -1; }
+        return 0;
+    }
 }
 void mavc_set_rgba(mavc *a) { if (!a->rgba) { a->rgba = 1; a->dirty = 1; } }
 // BGRA picture → RGBA rows of w pixels (stride w * 4); a smaller picture is padded with opaque black, a larger one cropped
