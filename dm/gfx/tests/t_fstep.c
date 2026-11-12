@@ -143,6 +143,49 @@ int main(void) {
         run(&m, 120, 0.5, 2, 3, 0); run(&m, 1, 0.5, 1, 3, 0);
         check(m.s.k == 1 && m.s.ups == 0 && m.s.late == 0, "  movie ends (kmin 1): hold 1 at once");
     }
+    {   // A 60 fps movie (nvn_fstep.pin: Ocarina of Time's opening, nn::codec, about 16.5 ms of GPU a frame on an iPhone): hold 1 while it plays, whatever the frames cost; no step
+        // up, trial or probe, and the game's time stays real time through the debt. Before, three late frames at 1.1 vsyncs stepped to hold 2 and the probes back kept failing
+        sim m = {0}; run(&m, 600, 0.6, 1, 3, 0);
+        uint64_t ups = m.s.ups, probes = m.s.probes, downs = m.s.downs; double r0 = m.real, g0 = m.game;
+        m.s.pin = 1;
+        for (int i = 0; i < 9000; i++) run(&m, 1, i % 10 < 3 ? 1.15 : 0.98, 1, 3, 0);   // 150 s of frames around the budget: three of 19 ms in every ten
+        snprintf(b, sizeof b, "60 fps movie (pin): hold 1 for 150 s of frames at 0.98-1.15 vsyncs (k %d, %llu up, %llu probes)", m.s.k, (unsigned long long)(m.s.ups - ups), (unsigned long long)(m.s.probes - probes));
+        check(m.s.k == 1 && m.s.ups == ups && m.s.probes == probes && m.s.downs == downs, b);
+        snprintf(b, sizeof b, "  game time %.0f against real time %.0f (debt %.2f): the late frames are paid back", m.game - g0, m.real - r0, m.s.debt);
+        check(m.real - r0 - (m.game - g0) - m.s.debt > -1.01 && m.real - r0 - (m.game - g0) - m.s.debt < 1.01 && m.s.debt < 1.5, b);
+        run(&m, 600, 2.4, 1, 3, 0);
+        check(m.s.k == 1 && m.s.ups == ups, "  even 40 ms frames (a load during the movie) keep hold 1");
+        m.s.pin = 0; run(&m, 3, 1.3, 1, 3, 0);
+        check(m.s.k == 2 && m.s.ups == ups + 1, "  the movie ends: three late frames step up again");
+        run(&m, 1200, 0.6, 1, 3, 0);
+        check(m.s.k == 1, "  and a light scene comes back to hold 1");
+    }
+    {   // The same without the pin: what the iPhone did (the frame step left hold 1 at the first three late frames)
+        sim m = {0}; run(&m, 600, 0.6, 1, 3, 0);
+        for (int i = 0; i < 9000; i++) run(&m, 1, i % 10 < 3 ? 1.15 : 0.98, 1, 3, 0);
+        snprintf(b, sizeof b, "  without the pin: hold %d, %llu steps up, %llu probes in the 150 s", m.s.k, (unsigned long long)m.s.ups, (unsigned long long)m.s.probes);
+        check(m.s.ups >= 1, b);
+    }
+    {   // The thermal cap (kmin 2) during a 60 fps movie: hold 2, the fastest the cap allows, and never 3; the cap's end during the movie: hold 1 at once
+        sim m = {0}; run(&m, 600, 0.6, 1, 3, 0); m.s.pin = 1;
+        run(&m, 300, 1.1, 1, 3, 0); run(&m, 1, 1.1, 2, 2, 0);
+        check(m.s.k == 2, "60 fps movie under the thermal cap (kmin 2): hold 2 at once");
+        run(&m, 600, 2.3, 2, 2, 0);
+        check(m.s.k == 2 && m.s.ups == 0, "  frames of 2.3 vsyncs under the cap: hold 2, no step up");
+        run(&m, 1, 1.1, 1, 3, 0);
+        check(m.s.k == 1 && !m.s.trial && !m.s.probe && m.s.ups == 0, "  the cap ends during the movie: hold 1 at once, no probe to judge");
+    }
+    {   // A movie's start and end forget the probes' hold-off (two failed probes over budget, nvn_fstep_pheld) as a cap change does: another scene
+        ssim x = {0}; heavy_stretch(&x, 0);
+        int held_before = nvn_fstep_pheld(&x.m.s, 1) && x.m.s.pk > 0;
+        x.m.s.pin = 1; step1(&x, 0, 1.4);
+        snprintf(b, sizeof b, "movie start: the hold-off of two failed probes over budget is forgotten (before %d, pover %d, pk %.2f)", held_before, x.m.s.pover, x.m.s.pk);
+        check(held_before && x.m.s.pover == 0 && x.m.s.pk == 0 && x.m.s.phold == FSTEP_HOLD0 && x.m.s.k == 1, b);
+        for (int i = 0; i < 300; i++) step1(&x, 0, 1.4);
+        x.m.s.pover = 2; x.m.s.pk = 1.6; x.m.s.pfrom = 1.4; x.m.s.phold = FSTEP_PHOLD_MAX; x.m.s.hold = FSTEP_HOLD_MAX;   // as if measured during the movie
+        x.m.s.pin = 0; step1(&x, 0, 0.6);
+        check(x.m.s.pover == 0 && x.m.s.pk == 0 && x.m.s.phold == FSTEP_HOLD0 && x.m.s.hold == FSTEP_HOLD0 && x.m.s.k == 1, "  movie end: forgotten again, the trials' hold-off back to 1 s");
+    }
     {   sim m = {0}; run(&m, 600, 0.86, 1, 3, 0); run(&m, 600, 1.5, 2, 2, 0); run(&m, 1, 1.5, 1, 3, 0);
         check(m.s.k == 1 && m.s.grace == FSTEP_GRACE && m.s.trial == FSTEP_RUN && m.s.probes == 1,
               "cap release: count a probe, with all grace frames left for hold 1");

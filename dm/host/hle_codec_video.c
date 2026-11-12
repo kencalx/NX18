@@ -14,6 +14,15 @@
 // SDK 22 (Fire Emblem Fortune's Weave's movie module, subsdk2) reaches the same protocol through other names: ByTransferMemory / ByRemoteMemory initializers, a preference with an image tiling mode,
 // a pool without its mode, and a submission event returned rather than written out. Its player can take pictures the GPU route: GetDecoderImagePoolNativeImageHandle's handle goes through
 // nvnNativeImage to an RGBA texture (hle_nvn.c "Native images"), so a pool whose handle was asked for keeps each picture as RGBA in the pool's own memory, which the texture is made over
+// Pictures by their times (CV_PACE): a player that takes one picture per game frame, as the SDK's movie library does (Ocarina of Time's subsdk0, NintendoSDK_movie), plays a movie
+// at the game's frame rate rather than its own: Ocarina of Time's opening (AV1, 60 pictures a second, 9,254 pictures, 154.2 s, no sound of its own; the game plays its music and
+// voices on game time) took 251 s on an iPhone at about 36 fps and fell minutes behind the sound. A released buffer is now the player asking for the next picture: it gets the
+// newest decoded picture whose time is at or before the movie clock, and the older ones are let go (they are decoded already, so the codec's reference chain is whole). The clock
+// is the guest clock since the first picture handed out, from that picture's time: it does not run while the app is in the background (the guest clock is frozen there), while a
+// released buffer waits for a picture, or for more than CV_PACE_GAP between two asks (a player that stops asking, a load); it starts again at a new stream, a flush or a stop, and
+// follows the stream when the player asks faster than the pictures' times (nothing is held back). End of stream, sync handles and the submission event behave as before; skipped
+// pictures free their places in the queue, so the event rises and the player sends more packets. One line per movie gives its picture rate and the pictures skipped.
+// DM_CODEC_PACE=0 hands every picture out in order, as before. The movie signal (hle_movie.c dm_movie_picture) carries the stream's picture interval to the frame step
 #include "hle.h"
 #include <pthread.h>
 #include <stdbool.h>
@@ -31,6 +40,7 @@
 #define CV_HOLD 12                  // and at which packets are refused. Mario Tennis Fever's player sends one packet per signal and ignores the result (nro0+0xd16130), so a signal in flight when the
                                     // event goes down must still find room: refused at 4, a packet about 6 s into the title movie was lost, and libvpx found every frame after it corrupt
 #define CV_EVENT_OFF 0x100          // the submission-ready SystemEventType inside the decoder type
+#define CV_PACE_GAP 250000000ull    // the most the movie clock runs between two asks (ns): the frame step's FSTEP_DEBT_MAX, the stall the game's own time keeps
 #define CV_R(desc) ((Result)(0x6f | ((desc) << 9)))   // nn::codec results (module 111)
 #define CV_BUSY CV_R(3603)          // the decoder cannot take the packet now
 #define CV_NONE CV_R(3604)          // no buffer to acquire / no picture in the buffer yet
@@ -49,6 +59,11 @@ typedef struct {
     uint32_t pend[CV_BUFS], phead, pcount;    // released, waiting for a picture
     vpx_image_t *held[CV_HOLD]; int64_t held_ts[CV_HOLD]; uint8_t held_eos[CV_HOLD]; int nheld;
     int eos_pending;
+    // Pacing (CV_PACE above): the movie clock, in the pictures' time (ns), and the guest time it last moved at; the last picture handed out; a released buffer waits for a picture
+    int pace, pace_on, pace_wait; int64_t pace_clock, pace_last; uint64_t pace_t;
+    int64_t ts_first, ts_last; uint64_t ts_n;   // the decoded pictures' times in this stream (its picture rate)
+    uint64_t mv_out, mv_skip, mv_itv;           // this movie's pictures handed out and skipped, and its picture interval (ns; 0 = not known), for its pace line
+    int mv_sig;                                 // this decoder raised the movie signal (hle_movie.c), which its end drops
 } cv_dec;
 
 static cv_dec *g_cv[16];
@@ -102,20 +117,66 @@ static void pool_native_write(cv_pool *p, uint32_t i, const vpx_image_t *im) {
 // Pictures and end of stream into the released buffers, in order (decoder lock held). The event says a packet can come: it rises when one was taken (took) or room came back, not at every release.
 // Mario Tennis Fever's player counts each signal as one packet it may send: raised at every release, its count grew while a seek held back the samples (a skipped cutscene),
 // and the packets it then sent overran CV_HOLD
+static void held_drop(cv_dec *d, int n) {   // the oldest n waiting pictures leave the queue (their images are the caller's)
+    memmove(d->held, d->held + n, sizeof d->held[0] * (size_t)(CV_HOLD - n)); memmove(d->held_ts, d->held_ts + n, sizeof d->held_ts[0] * (size_t)(CV_HOLD - n));
+    memmove(d->held_eos, d->held_eos + n, (size_t)(CV_HOLD - n)); d->nheld -= n;
+}
+// The stream's picture interval from its decoded pictures' times (ns; 0 = not known or not plausible: not between 2 ms and 1 s). From 8 pictures on: WebM's times are whole
+// milliseconds, and the first two of Ocarina of Time's 60 fps movies, 17 ms apart, read as 59 pictures a second
+static uint64_t cv_interval(const cv_dec *d) {
+    uint64_t itv = d->ts_n >= 8 && d->ts_last > d->ts_first ? (uint64_t)(d->ts_last - d->ts_first) / (d->ts_n - 1) : 0;
+    return itv >= 2000000 && itv <= 1000000000 ? itv : 0;
+}
+// The movie's end (end of stream, a stop or flush, finalize, times that start again): its pace line with the pictures handed out, their rate and those skipped, and the movie
+// signal dropped (decoder lock held). The next picture starts the clock again
+static void pace_log(cv_dec *d, const char *why) {
+    if (d->mv_sig) { dm_movie_stopped(); d->mv_sig = 0; }
+    if (d->mv_out) LOG("[codec] %s decoder %u: movie paced%s (%s): %llu pictures handed out, %.2f pictures/s, %llu skipped by the pictures' times", k_cv_name[d->codec], d->id,
+                       d->pace ? "" : " off (DM_CODEC_PACE=0)", why, (unsigned long long)d->mv_out, d->mv_itv ? 1e9 / d->mv_itv : 0.0, (unsigned long long)d->mv_skip);
+    d->mv_out = d->mv_skip = d->mv_itv = 0; d->pace_on = d->pace_wait = 0;
+}
+// A released buffer asks for the next picture (decoder lock held): the clock runs the guest time since it last moved, at most CV_PACE_GAP, not while a buffer waits for a picture
+static void pace_ask(cv_dec *d) {
+    if (!d->pace || !d->pace_on) return;
+    uint64_t g = guest_ns(), dt = g - d->pace_t;
+    if (!d->pace_wait) d->pace_clock += (int64_t)(dt < CV_PACE_GAP ? dt : CV_PACE_GAP);
+    d->pace_t = g;
+}
+// How many of the waiting pictures are older than the clock's (decoder lock held): the newest whose time is at or before it is handed out. Only while their times rise, never past
+// an end of stream, and never the last one waiting; none when the next one's time is below the last handed out (a new stream, whose first picture starts a new clock)
+static int pace_skip(const cv_dec *d) {
+    if (!d->pace || !d->pace_on || d->held_ts[0] < d->pace_last) return 0;
+    int k = 0;
+    while (k + 1 < d->nheld && !d->held_eos[k] && d->held_ts[k + 1] > d->held_ts[k] && d->held_ts[k + 1] <= d->pace_clock) k++;
+    return k;
+}
+static void pace_out(cv_dec *d, int64_t ts) {   // a picture of time ts handed out (decoder lock held)
+    uint64_t g = guest_ns();
+    if (d->pace_on && ts < d->pace_last) pace_log(d, "its times started again");   // a new stream without a flush
+    if (!d->pace_on) { d->pace_on = 1; d->pace_clock = ts; d->pace_t = g; }   // the movie clock starts at the first picture's time
+    else { if (ts > d->pace_clock) d->pace_clock = ts; if (d->pace_wait) d->pace_t = g; }   // the player asks ahead of the times: the clock follows; a wait for this picture is not counted
+    d->pace_wait = 0; d->pace_last = ts; d->mv_out++;
+    uint64_t itv = cv_interval(d);
+    if (itv && ts >= d->ts_first && ts <= d->ts_last) d->mv_itv = itv;   // the estimate is this stream's
+    if (d->mv_itv) { dm_movie_picture(d->mv_itv); d->mv_sig = 1; }   // the frame step's movie signal, with the picture rate (hle_movie.c)
+}
 static void drain(cv_dec *d, int took) {
     int before = d->nheld;
     while (d->pcount && (d->nheld || d->eos_pending)) {
         uint32_t i = d->pend[d->phead]; d->phead = (d->phead + 1) % CV_BUFS; d->pcount--;
         typeof(d->buf[0]) *b = &d->buf[i];
         if (d->nheld) {
+            int skip = pace_skip(d);
+            for (int k = 0; k < skip; k++) vpx_img_free(d->held[k]);
+            if (skip) { held_drop(d, skip); d->mv_skip += (uint64_t)skip; }
             vpx_image_t *im = d->held[0]; int64_t ts = d->held_ts[0]; uint8_t eos = d->held_eos[0];
-            memmove(d->held, d->held + 1, sizeof d->held[0] * (CV_HOLD - 1)); memmove(d->held_ts, d->held_ts + 1, sizeof d->held_ts[0] * (CV_HOLD - 1));
-            memmove(d->held_eos, d->held_eos + 1, CV_HOLD - 1); d->nheld--;
+            held_drop(d, 1);
             b->w = (uint16_t)im->d_w; b->h = (uint16_t)im->d_h; b->ts = ts; b->eos = eos;
             if (b->pool && b->pidx < b->pool->count) { pool_native_write(b->pool, b->pidx, im); if (b->pool->img[b->pidx]) vpx_img_free(b->pool->img[b->pidx]); b->pool->img[b->pidx] = im; } else vpx_img_free(im);
             if (!d->pictures++) LOG("[codec] %s decoder %u: first picture %ux%u into buffer %u", k_cv_name[d->codec], d->id, b->w, b->h, i);
+            pace_out(d, ts);
         } else { b->w = b->h = 0; b->ts = 0; b->eos = 1; d->eos_pending = 0; }
-        if (b->eos) LOG("[codec] %s decoder %u: end of stream after %llu pictures", k_cv_name[d->codec], d->id, (unsigned long long)d->pictures);
+        if (b->eos) { LOG("[codec] %s decoder %u: end of stream after %llu pictures", k_cv_name[d->codec], d->id, (unsigned long long)d->pictures); pace_log(d, "end of stream"); }
         b->filled = 1; b->filled_gen = b->gen;
         spt_fire(d, i);
     }
@@ -251,6 +312,7 @@ static void cv_open(cv_dec *d) {   // (re)creates the codec state: a new stream 
 static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t in, uint32_t out, const void *csd, uint64_t csd_n) {
     cv_dec *d = calloc(1, sizeof *d);
     d->magic = CV_MAGIC; d->codec = codec; d->w = w; d->h = h; pthread_mutex_init(&d->mu, NULL);
+    const char *pe = getenv("DM_CODEC_PACE"); d->pace = !(pe && !strcmp(pe, "0"));
     if (csd && csd_n && csd_n < (1u << 20)) { d->csd = malloc((size_t)csd_n); memcpy(d->csd, csd, (size_t)csd_n); d->csd_n = (size_t)csd_n; }
     cv_open(d);
     pthread_mutex_lock(&g_cv_mu);
@@ -266,6 +328,7 @@ static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t i
 static Result cv_dec_fin(void *t) {
     cv_dec *d = cv_of(t); if (!d) return 0;
     pthread_mutex_lock(&g_cv_mu); g_cv[d->id - 1] = NULL; pthread_mutex_lock(&d->mu); pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&g_cv_mu);   // no sync handle lookup is still inside
+    pace_log(d, "decoder finalized");
     if (d->codec != CV_H264 && d->codec != CV_AV1 && d->vpx_ok) vpx_codec_destroy(&d->vpx);
     if (d->avc) mavc_free(d->avc);
     if (d->av1) mav1_free(d->av1);
@@ -305,6 +368,7 @@ static Result cv_dec_reset(void *t) {   // Stop / Flush: pictures not yet given 
     pthread_mutex_lock(&d->mu);
     for (int i = 0; i < d->nheld; i++) vpx_img_free(d->held[i]);
     d->nheld = 0; d->eos_pending = 0;
+    pace_log(d, "stopped or flushed"); d->ts_n = 0;   // a new stream: its clock and picture rate start again
     cv_open(d);
     if (d->event) hle_signal_system_event(d->event);
     pthread_mutex_unlock(&d->mu);
@@ -322,7 +386,10 @@ static Result cv_dec_start(void *t) {
 static Result cv_dec_event(void **out, void *t) { cv_dec *d = cv_of(t); *out = d ? d->event : NULL; return d ? 0 : CV_R(2004); }
 static int cv_hold(cv_dec *d, vpx_image_t *c, int64_t ts) {   // a decoded picture waits for a released buffer (decoder lock held); 0 when the host holds no more
     if (d->nheld >= CV_HOLD) { static int n; if (n++ < 4) LOG("[RED] nn::codec %s: a packet gave more pictures than the host holds: one dropped", k_cv_name[d->codec]); vpx_img_free(c); return 0; }
-    d->held[d->nheld] = c; d->held_ts[d->nheld] = ts; d->held_eos[d->nheld] = 0; d->nheld++; return 1;
+    d->held[d->nheld] = c; d->held_ts[d->nheld] = ts; d->held_eos[d->nheld] = 0; d->nheld++;
+    if (!d->ts_n || ts < d->ts_last) { d->ts_first = ts; d->ts_n = 0; }   // the stream's first picture, or its times started again
+    d->ts_last = ts; d->ts_n++;
+    return 1;
 }
 static vpx_image_t *nv12_to_i420(const uint8_t *nv12, unsigned w, unsigned h) {   // VideoToolbox's NV12 as the I420 the pool keeps
     vpx_image_t *c = vpx_img_alloc(NULL, VPX_IMG_FMT_I420, w, h, 1); if (!c) return NULL;
@@ -388,7 +455,9 @@ static void cv_dec_rel(void *t, uint32_t i, cv_sync sync) {
     d->buf[i].gen++; d->buf[i].filled = 0;
     if (d->pcount < CV_BUFS) { d->pend[(d->phead + d->pcount) % CV_BUFS] = i; d->pcount++; }
     if (d->fcount < 8) { d->fifo[(d->fhead + d->fcount) % 8] = i; d->fcount++; } else LOG("[RED] nn::codec: acquirable queue full at release %u", i);
+    pace_ask(d);
     drain(d, 0);
+    if (d->pcount && d->pace_on) d->pace_wait = 1;   // no picture for it yet: the clock waits with it
     pthread_mutex_unlock(&d->mu);
 }
 static Result cv_dec_props(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, int64_t *ts, bool *eos, void *t, uint32_t i) {

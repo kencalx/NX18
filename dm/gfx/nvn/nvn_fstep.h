@@ -49,6 +49,11 @@
 #define FSTEP_OVER_N 2        // failed probes in a row clearly over before the estimate holds the probes off
 #define FSTEP_PEST_N 8        // frames on time at the longer hold before its cost counts for the estimate
 #define FSTEP_PHOLD_MAX 1920.0   // the probes' hold-off at most, and the longest two failed probes over budget hold them off: 32 s
+// A movie above 30 pictures a second (nvn_fstep.pin, set by the caller: hle_nvn.c while hle_movie.c dm_movie_fps is over 30, Ocarina of Time's 60 fps nn::codec movies) holds kmin
+// while it plays: no step up, trial or probe, and the debt of late frames is paid back as ever. Its player takes one picture a frame and the host hands out the picture the
+// movie's clock is at (hle_codec_video.c CV_PACE), so the movie keeps its speed at any hold; kmin is for smoothness. Ocarina of Time's opening on an iPhone 18 Pro Max cost about
+// 16.5 ms of GPU a frame, right at the 60 fps budget: at thermal state 1 the frame step stepped to hold 2 and its probes back to 1 kept failing. The cap still decides kmin (a 30 fps
+// target, the thermal cap). The movie's start and end forget what failed probes measured and both hold-offs, as a cap change does: another scene
 // The screen's verdicts lag the frames (hle_nvn.c judges the frame FSTEP_UP_LAG presents back, with present snapshots): for that many frames after a step up, a frame the screen
 // calls late whose own cost fits the new hold is one made before the step, and does not count toward another (opening a menu in BotW: six frames of 34 ms at a cost of 0.72–0.76
 // stepped 1 → 2 → 3 within 3 presents)
@@ -76,6 +81,7 @@ typedef struct {
                               // progress's frames after its grace; failed probes in a row whose cost at kmin was over FSTEP_OVER of it
     double phold;             // vsyncs a probe waits for after a step up (at least hold): FSTEP_HOLD0, doubled after each failed probe up to FSTEP_PHOLD_MAX
     int upf;                  // frames left after a step up whose late screen verdicts are about frames before it (FSTEP_UP_LAG)
+    int pin, pinned;          // set by the caller (kept): 1 = a movie above 30 fps plays, hold kmin; the last call's pin
     uint64_t late, paid, ups, downs, failed, probes; double dropped;   // statistics for the log
 } nvn_fstep;
 
@@ -118,6 +124,16 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (s->debt < -1) s->debt = -1;   // ahead (a frame shorter than its step): nothing slows the game down, so at most one vsync is remembered
     s->since += shown;
     if (shown >= FSTEP_DEBT_MAX * (s->per_vsync ? s->per_vsync : 1)) nvn_fstep_pforget(s, hold0);   // a load or a trip to the background: another scene
+    if (s->pin != s->pinned) {   // a fast movie starts or ends: another scene, and no trial or probe carries over it
+        s->pinned = s->pin; s->trial = s->probe = s->grace = 0; s->late_run = s->fit_run = 0; s->upf = 0; s->run = 0; s->cn = 0;
+        s->hold = hold0; nvn_fstep_pforget(s, hold0);
+    }
+    if (s->pinned) {   // while it plays: kmin, the cap's fastest hold, whatever the frames cost; only the debt is paid back
+        s->k = s->kmin = kmin; s->screen = 0;
+        s->step = s->k + (s->debt >= 1 && s->k < FSTEP_MAX);
+        s->paid += s->step > s->k;
+        return s->step;
+    }
     int cap_probe = kmin < s->kmin && s->kmin <= FSTEP_MAX && s->k > kmin;
     if (cap_probe) {   // the cap rose: a probe at once, whose grace covers the clocks still set for the longer hold
         s->k = kmin; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
