@@ -2,7 +2,8 @@
 // range), is bound again while its source is unchanged, and goes when the source is written: inside its protected pages, in the bytes it shares a page with, or by the GPU.
 // A write beside the stream in a shared page leaves it; a range below the smallest kept one, or a stream rewritten between its sightings, is never kept.
 // The memory trim (mtl_trim_at): a pressure warning or critical level leaves the kept conversions; going to the background (level 3) drops every one, the buffers leave the residency
-// set and are freed, and each is kept again at its next sighting. The cap (vk_cap) follows the headroom curve the render-target heaps use (rh_cap), and stops new conversions
+// set and are freed, and each is kept again at its next sighting. The cap stays VK_BYTES whatever the headroom to the memory limit: a conversion refused would be made again
+// into the frame arena at every submission that draws it
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -96,20 +97,16 @@ int main(void) { @autoreleasepool {
       CHECK("its buffer left the residency set and was freed", !alive_resident(&held, &res) && !res);
       g_sub_serial++; uint64_t g7 = vk_get(&b, ba, 4);
       CHECK("kept again at the next sighting, without a back-off", g7 && same(g7, &b, mem + b.off)); }
-    // the cap: VK_BYTES on the Mac; with a headroom (iOS) the curve rh_cap reads at a submission's start
-    { CHECK("256 MB with no headroom known (the Mac)", vk_cap() == VK_BYTES);
+    // the cap: VK_BYTES with a low headroom too (iOS near the memory limit), where the render-target heaps' cap (rh_cap) falls to 32 MB. A conversion refused is made again
+    // into the frame arena at every submission that draws it (vconv_bind), so a lower cap would cost more memory and the CPU conversion every frame
+    { vk_gpu_write(0, 0);   // none kept
       g_rh_avail = fake_avail; g_fake_avail = 512ull << 20; g_rh_cap_at = 0; rh_cap();
-      CHECK("32 MB with 512 MB of headroom", vk_cap() == 32ull << 20);
-      g_fake_avail = 2ull << 30; g_rh_cap_at = 0; rh_cap();
-      CHECK("144 MB with 2 GB", vk_cap() == 144ull << 20);
-      vk_gpu_write(0, 0);   // none kept: the cap below counts only the new one
-      atomic_store(&g_head_cap, RH_CAP_MAX / 256);   // a 1 MB cap
-      vk_key c = {(uint64_t)(uintptr_t)mem, poolsize, 0, 70000, 70000, 0x14, (uint32_t)(10 * pg + 8), 4, 0}; uint64_t ca = (uint64_t)(uintptr_t)(mem + c.off);   // 1.1 MB converted
+      CHECK("the render-target heaps' cap falls to 32 MB with 512 MB of headroom", atomic_load(&g_rh_cap_now) == 32ull << 20);
+      // 70,000 vertices read and 2,200,000 converted (the rest zeros, as past a bound range): 35.2 MB, more than that 32 MB
+      vk_key c = {(uint64_t)(uintptr_t)mem, poolsize, 0, 70000, 2200000, 0x14, (uint32_t)(10 * pg + 8), 4, 0}; uint64_t ca = (uint64_t)(uintptr_t)(mem + c.off);
       g_sub_serial += 100000; vk_get(&c, ca, 4); g_sub_serial++;
-      CHECK("a conversion past the cap is not kept", !vk_get(&c, ca, 4) && !g_vk_n);
-      g_rh_avail = NULL; g_rh_cap_at = 0; rh_cap();
-      CHECK("back to 256 MB with no headroom", vk_cap() == VK_BYTES);
-      g_sub_serial++; CHECK("and then kept", vk_get(&c, ca, 4) && g_vk_n == 1); }
+      CHECK("a 35 MB conversion is still kept with 512 MB of headroom", vk_get(&c, ca, 4) && g_vk_n == 1 && g_vk_bytes == 2200000ull * 16 && same(g_vk_list[0]->gpu, &c, mem + c.off));
+      g_rh_avail = NULL; g_rh_cap_at = 0; rh_cap(); }
     // forgotten when not drawn
     uint32_t before = g_vk.n; g_sub_serial += VK_IDLE + 100; for (int i = 0; i < 64 && g_vk.n; i++) { g_vk_swept = 0; vk_sweep(); }
     CHECK("keys not drawn are forgotten", before && !g_vk.n && !g_vk_bytes);

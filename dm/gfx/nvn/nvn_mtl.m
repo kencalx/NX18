@@ -380,7 +380,6 @@ static uint64_t (*g_rh_avail)(void) = rh_avail_os;   // the headroom to the memo
 static uint64_t (*g_rh_avail)(void);
 #endif
 static _Atomic uint64_t g_rh_cap_now = RH_CAP_MAX; static uint64_t g_rh_cap_at;   // the cap as of the last submission's start, read whether or not a heap waits (rh_trim; the memory line), and when the headroom was read (submit thread)
-static _Atomic uint64_t g_head_cap = RH_CAP_MAX;   // the headroom curve below as of the last reading (RH_CAP_MAX on the Mac), whatever DM_NVN_RT_RECYCLE_CAP says: the kept vertex conversions follow it too (vk_cap)
 static uint64_t rh_cap_for(uint64_t avail) {
     const uint64_t lo = 1ull << 30, hi = 3ull << 30;
     if (avail >= hi) return RH_CAP_MAX;
@@ -390,10 +389,9 @@ static uint64_t rh_cap_for(uint64_t avail) {
 static uint64_t rh_cap(void) {   // submit thread (rh_trim)
     static int64_t fixed = -2;
     if (fixed == -2) { const char *e = getenv("DM_NVN_RT_RECYCLE_CAP"); fixed = e && *e ? (int64_t)(strtoull(e, NULL, 10) << 20) : -1; }
-    uint64_t head = RH_CAP_MAX;
-    if (g_rh_avail) { uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC); if (g_rh_cap_at && now - g_rh_cap_at < RH_CAP_EVERY_NS) head = atomic_load(&g_head_cap); else { g_rh_cap_at = now; uint64_t a = g_rh_avail(); head = a ? rh_cap_for(a) : RH_CAP_MAX; } }
-    atomic_store(&g_head_cap, head);
-    uint64_t cap = fixed >= 0 ? (uint64_t)fixed : head;
+    uint64_t cap = RH_CAP_MAX;
+    if (fixed >= 0) cap = (uint64_t)fixed;
+    else if (g_rh_avail) { uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC); if (g_rh_cap_at && now - g_rh_cap_at < RH_CAP_EVERY_NS) return atomic_load(&g_rh_cap_now); g_rh_cap_at = now; uint64_t a = g_rh_avail(); cap = a ? rh_cap_for(a) : RH_CAP_MAX; }
     atomic_store(&g_rh_cap_now, cap); return cap;
 }
 typedef struct { void *heap; uint64_t size, t; } rh_ent;   // heap: retained (CFBridgingRetain); t: when it began to wait
@@ -8247,14 +8245,13 @@ static int vc_draw_range(const p_draw *dw, const p_draw_idx *di, int64_t *lo, in
 // A source that changed drops its conversion (the buffer is released once the submissions that read it complete; it is never rewritten) and is tried again after 32 submissions,
 // twice as many after each further change (VK_STRIKES), so a stream the game rewrites every frame costs a write-protection that often. Not kept: ranges below vk_min() vertices
 // (the conversion costs less than the bookkeeping), sources outside tracked pools, anything while the game has sparse mappings (a write through an alias takes no fault), and
-// conversions past vk_cap() in all. A key not drawn for VK_IDLE submissions is forgotten. DM_NVN_VCONV_KEEP=0 turns it off, =n sets the smallest range kept.
+// conversions past VK_BYTES in all. A key not drawn for VK_IDLE submissions is forgotten. DM_NVN_VCONV_KEEP=0 turns it off, =n sets the smallest range kept.
+// The cap stays VK_BYTES on iOS near the memory limit too: a conversion refused is not skipped but made again into the frame arena (vconv_bind) at every submission that draws
+// it, which costs the CPU conversion each time and holds the same bytes once for each submission in flight, so a lower cap would raise the footprint of a stream drawn every frame.
 // Going to the background, the trim (mtl_trim_at, level 3) drops every kept conversion; each is made again from its source at its next use after the app comes back. A memory
 // pressure warning leaves them: the game is still drawing them, so they would be made again in the next submission, a CPU hitch for nothing
 enum { VK_MAX = 1024, VK_ENTS = 8192, VK_IDLE = 600, VK_STRIKES = 10 };
 static const uint64_t VK_BYTES = 256ull << 20;
-// The most bytes kept: VK_BYTES on the Mac. On iOS it follows the headroom to the memory limit on the same curve as the render-target heaps waiting (rh_cap_for, read at each
-// submission's start by rh_trim): 256 MB with 3 GB or more, 32 MB at 1 GB and below. A lower cap only stops new conversions; those kept go by the usual causes
-static uint64_t vk_cap(void) { return (uint64_t)((double)VK_BYTES * (double)atomic_load(&g_head_cap) / (double)RH_CAP_MAX); }
 typedef struct { uint64_t addr, size, v0, nv, nt; uint32_t fmt, off, stride, zero; } vk_key;
 typedef struct { vk_key k; void *buf; uint64_t gpu, bytes, lo, n, plo, pn, stamp, seen, ok, used, kept, retry; const void *span; uint8_t *edge; uint64_t sig; uint32_t strikes; int li; } vk_ent;   // buf: retained; [lo, lo+n): the source bytes, [plo, plo+pn): its protected pages; edge: a copy of the rest; ok: the submission it was last found unchanged in; li: its place in g_vk_list
 static nvn_hmap g_vk = {.klen = sizeof(vk_key)};
@@ -8328,7 +8325,7 @@ static uint64_t vk_get(const vk_key *k, uint64_t src, uint64_t es) {
     }
     uint64_t sn = (k->nv - 1) * k->stride + es, bytes = k->nt * 16, sig = vk_sig(src, sn); int changed = sig != e->sig; e->sig = sig;
     if (changed && g_sub_serial >= e->retry) { vk_drop(e, 1, 0); return 0; }   // rewritten since its last sighting
-    if (g_sub_serial < e->retry || g_vk_n >= VK_MAX || g_vk_bytes + bytes > vk_cap()) return 0;
+    if (g_sub_serial < e->retry || g_vk_n >= VK_MAX || g_vk_bytes + bytes > VK_BYTES) return 0;
     if (nvn_sparse_gen() || pend_hits(src, sn) || g_sbw_over || sbw_hits(src, src + sn) || gw_live(src, src + sn)) { vk_drop(e, 1, 2); return 0; }   // the GPU writes it, or may
     const void *span = nvn_dirty_span((const void *)(uintptr_t)src, (size_t)sn);
     if (!span) { e->retry = UINT64_MAX; return 0; }   // not in a tracked memory pool
@@ -8352,7 +8349,7 @@ static uint64_t vk_get(const vk_key *k, uint64_t src, uint64_t es) {
 }
 static void vc_stat(void) {   // every 3600 submissions
     if (g_sub_serial - g_vc_stat < 3600) return;
-    if (g_vc_stat) MLOG("vertex conversion: %.0f vertices per submission (the bound ranges: %.0f; from kept conversions %.0f more: %d kept, %llu MB of %llu allowed, %llu made, %llu dropped: %llu by a write, %llu by a write to a shared page, %llu by the GPU, %llu not drawn, %llu going to the background), %u index ranges kept%s; shadow-input libraries loaded %llu (not usable %llu), pipelines built with them %llu", g_vc_conv / 3600.0, g_vc_whole / 3600.0, g_vk_reused / 3600.0, g_vk_n, (unsigned long long)(g_vk_bytes >> 20), (unsigned long long)(vk_cap() >> 20), (unsigned long long)g_vk_made, (unsigned long long)g_vk_dropped, (unsigned long long)g_vk_why[0], (unsigned long long)g_vk_why[1], (unsigned long long)g_vk_why[2], (unsigned long long)g_vk_why[3], (unsigned long long)g_vk_why[4], g_ir.n,
+    if (g_vc_stat) MLOG("vertex conversion: %.0f vertices per submission (the bound ranges: %.0f; from kept conversions %.0f more: %d kept, %llu MB, %llu made, %llu dropped: %llu by a write, %llu by a write to a shared page, %llu by the GPU, %llu not drawn, %llu going to the background), %u index ranges kept%s; shadow-input libraries loaded %llu (not usable %llu), pipelines built with them %llu", g_vc_conv / 3600.0, g_vc_whole / 3600.0, g_vk_reused / 3600.0, g_vk_n, (unsigned long long)(g_vk_bytes >> 20), (unsigned long long)g_vk_made, (unsigned long long)g_vk_dropped, (unsigned long long)g_vk_why[0], (unsigned long long)g_vk_why[1], (unsigned long long)g_vk_why[2], (unsigned long long)g_vk_why[3], (unsigned long long)g_vk_why[4], g_ir.n,
         vc_check() ? [NSString stringWithFormat:@"; checked %llu, %llu differed", (unsigned long long)g_vc_checks, (unsigned long long)g_vc_bad].UTF8String : "",
         (unsigned long long)g_vin_loaded, (unsigned long long)g_vin_failed, (unsigned long long)g_vin_psos);
     g_vc_stat = g_sub_serial; g_vc_conv = g_vc_whole = g_vk_reused = 0;
