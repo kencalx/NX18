@@ -11,9 +11,10 @@ devlog = importlib.util.module_from_spec(spec); spec.loader.exec_module(devlog)
 V = 1000 / 60
 
 
-def lf(f: int, ms: float, *, gpu: float = 15.0, submit: float = 1.0, pso: int = 0, make: float = 0.0, hold: int | None = None) -> str:   # a long-frame line as hle_nvn.c writes it
+def lf(f: int, ms: float, *, gpu: float = 15.0, submit: float = 1.0, pso: int = 0, make: float = 0.0, hold: int | None = None, away: float = 0.0) -> str:   # a long-frame line as hle_nvn.c writes it
     return (f'[dm] [longframe] frame {f} ({f / 60:.2f} s) whole frame {ms:.1f} ms, submit+present {submit:.1f} ms, GPU {gpu:.1f} ms; new pipelines {pso} + shader libraries 0, '
-            f'{make:.1f} ms in all; texture uploads 0 first + 0 re-uploads, 0.0 MB / 0.0 ms; draws with a hybrid pipeline 0' + (f'; hold {hold} × {V:.1f} ms' if hold else ''))
+            f'{make:.1f} ms in all; texture uploads 0 first + 0 re-uploads, 0.0 MB / 0.0 ms; draws with a hybrid pipeline 0' + (f'; hold {hold} × {V:.1f} ms' if hold else '')
+            + (f'; {away:.0f} ms of it in the background' if away else ''))
 
 
 def step(a: int, b: int, present: int, last: bool = False) -> str:
@@ -87,9 +88,31 @@ class HoldFrames(unittest.TestCase):
             s = read([step(1, 2, 111), step(2, 1, 142), step(1, 2, 250), lf(280, 33.4), cut, *late])
             self.assertEqual((s['long_frames']['count'], s['long_frames']['held']), (3, 1))
 
-    def test_the_marker_matches_the_producer(self):   # every kind of frame step line the host counts toward its 40 carries the marker devlog reads
+    def test_the_marker_matches_the_producer(self):   # every kind of frame step line the host counts toward its 40 carries the marker devlog reads (X1.0's, DM_FIELD_LOG=0)
         src = (REPO / 'dm/gfx/nvn/hle_nvn.c').read_text(errors='replace')
-        self.assertEqual(src.count('++nlog == 40 ? "' + devlog.FSTEP_CUT + '"'), 4)
+        self.assertEqual(src.count('++*nl == 40 ? cutm'), 4)
+        self.assertIn('"' + devlog.FSTEP_CUT + '"', src)
+        self.assertIn('"; further changes in this window only counted in its game time line"', src)   # the field log's marker, per window of 1800 presents
+
+    def test_window_marker_is_no_cut(self):   # the field log stops a window's change lines at 40 and starts again in the next: its marker does not end the change lines, and its long frames say their hold
+        win = '[dm] [nvn] frame step: hold 2 → 1 vsyncs at present 300 (probe; cost 0.80, GPU 0.80); further changes in this window only counted in its game time line'
+        s = read([step(1, 2, 111), win, lf(500, 33.4, hold=1), lf(900, 33.3, hold=2)])
+        self.assertEqual((s['long_frames']['count'], s['long_frames']['held']), (1, 1))
+
+    def test_background_frame(self):   # a frame whose line says it spanned a stay in the background is not a long frame: named apart, not in the count, the causes or the top
+        line = lf(3998, 40454.8, gpu=26.2, submit=6.5, hold=1, away=39300)
+        m = devlog.RX['longframe'].search(line[5:]); self.assertTrue(m); assert m
+        self.assertEqual((m.group(13), m.group(15)), ('1', '39300'))
+        s = read([lf(3000, 45.0, hold=1), line, lf(3999, 93.2, submit=75.8, hold=1)])
+        lfs = s['long_frames']
+        self.assertEqual((lfs['count'], lfs['held']), (2, 0))
+        self.assertEqual([r['frame'] for r in lfs['top']], [3999, 3000])
+        self.assertEqual([(r['frame'], r['away_ms']) for r in lfs['away']], [(3998, 39300.0)])
+        text = '\n'.join(devlog.render(s, 5))
+        self.assertIn('not counted: ', text); self.assertIn('frame 3998: 40454.8 ms across a stay in the background (39.3 s of it away)', text)
+        self.assertNotIn('background 1', text)
+        src = (REPO / 'dm/gfx/nvn/hle_nvn.c').read_text(errors='replace')
+        self.assertIn('"; %.0f ms of it in the background"', src)   # the host's format
 
     def test_without_step_lines(self):   # no frame step line and no hold (a game without fps_target, or the step off): runs of 33 ms frames are the game's own dips, all counted
         s = read([*(lf(f, 33.6, gpu=9.0, submit=2.0) for f in range(200, 206)), lf(400, 33.3), lf(700, 90.0)])
