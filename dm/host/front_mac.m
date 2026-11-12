@@ -899,8 +899,10 @@ static DmCheatsMenuDelegate *g_cheats_menu;   // NSMenu keeps its delegate unret
     BOOL _finding;                // a Find Cheats… scan is running on a background queue: another click does not start a second one
 }
 
-// A button of the panel's toolbar rows
-static NSButton *panel_button(NSString *title, id target, SEL action) { NSButton *b = [NSButton buttonWithTitle:title target:target action:action]; dm_ui_control(b); return b; }
+// A button of the panel's rows, styled once at its control size (dm_ui_control makes a font each call)
+static NSButton *panel_button(NSString *title, id target, SEL action, NSControlSize size) {
+    NSButton *b = [NSButton buttonWithTitle:title target:target action:action]; b.controlSize = size; dm_ui_control(b); return b;
+}
 
 // A horizontal row of views, leading-aligned
 static NSStackView *panel_hrow(NSArray<NSView *> *views) {
@@ -945,10 +947,10 @@ static NSTextField *panel_note(NSString *text) {
     [_header setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     NSTextField *safeText = panel_note(@"Last run ended unexpectedly with cheats on: all are off.");
     safeText.textColor = NSColor.systemOrangeColor;
-    _safeRow = panel_hrow(@[safeText, panel_button(@"Restore", self, @selector(restoreSafe:))]);
+    _safeRow = panel_hrow(@[safeText, panel_button(@"Restore", self, @selector(restoreSafe:), NSControlSizeRegular)]);
     _master = [NSButton checkboxWithTitle:@"Cheats On" target:self action:@selector(toggleMaster:)]; dm_ui_control(_master);
-    _selectAll = panel_button(@"Select All", self, @selector(selectAllCheats:));
-    _deselectAll = panel_button(@"Deselect All", self, @selector(deselectAllCheats:));
+    _selectAll = panel_button(@"Select All", self, @selector(selectAllCheats:), NSControlSizeRegular);
+    _deselectAll = panel_button(@"Deselect All", self, @selector(deselectAllCheats:), NSControlSizeRegular);
     _search = [NSSearchField new];
     _search.placeholderString = @"Search"; dm_ui_control(_search);
     _search.delegate = self;
@@ -987,9 +989,9 @@ static NSTextField *panel_note(NSString *text) {
     [_details setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     _detailsFor = -2;
 
-    _openFolder = panel_button(@"Open Folder", self, @selector(openFolder:));
-    NSStackView *bottom = panel_hrow(@[panel_button(@"Reload", self, @selector(reload:)), _openFolder,
-                                       panel_button(@"Find Cheats…", self, @selector(findCheats:)), panel_button(@"Report", self, @selector(showReport:))]);
+    _openFolder = panel_button(@"Open Folder", self, @selector(openFolder:), NSControlSizeRegular);
+    NSStackView *bottom = panel_hrow(@[panel_button(@"Reload", self, @selector(reload:), NSControlSizeRegular), _openFolder,
+                                       panel_button(@"Find Cheats…", self, @selector(findCheats:), NSControlSizeRegular), panel_button(@"Report", self, @selector(showReport:), NSControlSizeRegular)]);
     // the header, the safe-mode line and the toolbar in one column: a stack view detaches a hidden view, so the safe-mode
     // line takes no room while it is hidden
     NSStackView *top = [NSStackView stackViewWithViews:@[_header, _safeRow, tools]];
@@ -1270,8 +1272,7 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
         _labels[@(i)] = l;
         [l setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
         [views addObject:l];
-        b = panel_button(@"Apply", self, @selector(cheatClicked:));
-        b.controlSize = NSControlSizeSmall; dm_ui_control(b);
+        b = panel_button(@"Apply", self, @selector(cheatClicked:), NSControlSizeSmall);
     } else {
         b = [NSButton checkboxWithTitle:title target:self action:@selector(cheatClicked:)];
         ((NSButtonCell *)b.cell).lineBreakMode = NSLineBreakByTruncatingTail; dm_ui_control(b);
@@ -1350,7 +1351,7 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
                                                 build_label(dm_cheats_other(i), dm_cheats_other_version(i))])];
     if (!dm_cheats_found())
         for (int i = 0, n = dm_cheats_nsources(); i < n; i++) {
-            NSButton *copy = panel_button(@"Copy Command", self, @selector(copyCompile:)); copy.tag = i; copy.controlSize = NSControlSizeSmall; dm_ui_control(copy);
+            NSButton *copy = panel_button(@"Copy Command", self, @selector(copyCompile:), NSControlSizeSmall); copy.tag = i;
             [_stack addArrangedSubview:panel_hrow(@[panel_note([NSString stringWithFormat:@"%@: anchored cheats, not compiled for this build yet", engine_str(dm_cheats_source(i))]), copy])];
         }
     _rows_sig = [self rowsSig];
