@@ -248,6 +248,7 @@ void dm_thread_native_wait(int entering) {
 #define HANDOFF_BACKSTOP_NS 50000
 static void thr_free(struct thr *t);
 static int g_hw_mode = -1, g_hw_spin_us = HANDOFF_SPIN_US;   // 0 poll, 1 condition variable (after the spin, if any)
+static pthread_once_t g_hw_once = PTHREAD_ONCE_INIT;   // the first handoffs of several guest threads can come at once: each reads both values only after hw_init has stored them
 static _Atomic uint64_t g_hspin_ok, g_hcv_woken;   // waits a spin ended; condition variable waits a hand_signal ended
 static _Atomic uint64_t g_ho_hist[7];   // time from the start of a wait to the held thread's hand_leave: <5, <10, <20, <50, <100, <1000, >=1000 µs
 static void hw_init(void) {
@@ -275,7 +276,7 @@ int dm_yield_to_core_peers(int all) {
     thr_t *self = pthread_getspecific(g_keythr); if (!self) return 0;
     uint64_t bit = 1ull << (self->core & 63); int waited = 0;
     if (self->mask & ~bit) return 0;
-    if (g_hw_mode < 0) hw_init();
+    pthread_once(&g_hw_once, hw_init);
     uint64_t t0 = now_ns(), spin_end = t0 + (uint64_t)g_hw_spin_us * 1000; thr_t *held = NULL; int spun = 0;
     pthread_mutex_lock(&G);
     for (;;) {
