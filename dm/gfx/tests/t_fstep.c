@@ -626,6 +626,16 @@ int main(void) {
         check(m.s.away == 0 && m.s.rgrace == FSTEP_GRACE, "  the mark holds for one call");
         double cr = m.s.crun; m.s.away = 1; m.next = nvn_fstep_next(&m.s, 2400, 2400, 1, 3, 0, 0);
         check(m.s.crun == cr && m.s.ups == 0 && m.s.debt < 1, "  the frame across the stay is no cost the scene has, and no debt");
+        // A fit trial in progress at the stay: the grace after it does not let it hold. Before, its countdown ran through the grace's late frames, the trial ended as held (the
+        // wait back to 1 s), and the step up after the grace was no failed trial
+        sim t = {0}; run(&t, 600, 0.5, 1, 3, 0); run(&t, 3, 1.6, 1, 3, 0);
+        int k2 = t.s.k; for (int i = 0; i < 200 && !t.s.trial; i++) run(&t, 1, 0.5, 1, 3, 0);
+        int tr = t.s.trial && t.s.k == 1; run(&t, 5, 0.5, 1, 3, 0);
+        t.s.away = 1; t.next = nvn_fstep_next(&t.s, 2400, 2400, 1, 3, 0, 0);
+        run(&t, FSTEP_GRACE, 1.6, 1, 3, 0);
+        int during = t.s.trial > 0 && !t.s.failed && t.s.ups == 1; run(&t, 3, 1.6, 1, 3, 0);
+        snprintf(b, sizeof b, "  a fit trial across a stay is judged after the grace: failed %llu, the wait %.0f vsyncs", (unsigned long long)t.s.failed, t.s.hold);
+        check(k2 == 2 && tr && during && t.s.failed == 1 && t.s.hold == 2 * FSTEP_HOLD0 && t.s.ups == 2, b);
     }
     {   // The long-frame log (nvn_lf_long): 60 fps at 16.7 ms frames with 10 ms of GPU work, then a step up to hold 2. Judged by the running mean alone (held 0, as before the
         // hold was passed) the first frames of 33.3 ms read as long until the mean caught up; judged against their hold none does, and a frame past the hold still counts

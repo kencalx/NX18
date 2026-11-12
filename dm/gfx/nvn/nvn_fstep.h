@@ -70,7 +70,8 @@
 // frozen while the app is away, so the stay is time the game never ran: before, that frame counted as late and as a debt, capped at FSTEP_DEBT_MAX, which the game then paid
 // back by running 15 vsyncs fast; with the late frame at the focus loss before it and the first frame after it (page-ins), three late frames stepped up to hold 2 for a second
 // (Ocarina of Time on an iPhone 18 Pro Max, run B: 41.3, 40,454.8 and 93.2 ms, then GPU frames of 26 ms; 15 vsyncs paid back). With away the frame is on time and owes nothing,
-// and for FSTEP_GRACE frames after it lateness is paid back but does not step up (the clocks and the pages the system took come back): rgrace
+// and for FSTEP_GRACE frames after it lateness is paid back but does not step up (the clocks and the pages the system took come back): rgrace. A trial or probe in progress at the
+// stay does not count its frames down in rgrace either, so the cost after the grace decides it (before, its countdown ran through late frames and it ended as held)
 
 typedef struct {
     int k, step;              // vsyncs each frame stays on screen; the step handed to the game for the next frame (k, or k + 1 while paying back)
@@ -213,7 +214,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         else if (s->probe == 2) { s->hold = hold0; nvn_fstep_pforget(s, hold0); }   // the probe's run at kmin lasted
         if (held == kmin && s->run >= hold_max) s->cref = s->crun;   // kmin held 8 s at this cost
         s->k = want; s->ups++; s->late_run = s->fit_run = 0; s->since = 0; s->probe = 0; s->upf = FSTEP_UP_LAG;
-    } else if (s->trial && !grace && !--s->trial) {   // the trial held (a probe's run at kmin is judged at the next step up)
+    } else if (s->trial && !grace && !rg && !--s->trial) {   // the trial held (a probe's run at kmin is judged at the next step up); not counted down in rgrace, whose late frames do not count
         if (s->probe) { s->probe = 2; s->since = 0; } else { s->hold = hold0; if (s->k <= kmin) nvn_fstep_pforget(s, hold0); }
     }
     double pe = nvn_fstep_pest(s);
