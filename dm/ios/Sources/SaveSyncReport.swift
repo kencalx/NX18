@@ -76,7 +76,7 @@ struct SaveSyncReport {
         return cloudDevice.isEmpty ? "another device" : cloudDevice
     }
 
-    /// `here`: "iPhone" or "Mac"
+    /// `here`: "iPhone", "iPad" or "Mac"
     func localLabel(here: String) -> String { "This \(here)'s: \(Self.when(localSaved)), \(Self.size(localSize))" }
     var cloudLabel: String { "The \(cloudDeviceKind)'s in iCloud: \(Self.when(cloudSaved)), \(Self.size(cloudSize))" }
     static let chooseTitle = "Which save do you want to play?"

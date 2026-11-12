@@ -256,6 +256,7 @@ struct LauncherView: View {
     private var name: String { (info("CFBundleDisplayName") as? String) ?? (info("CFBundleName") as? String) ?? "Game" }
     private var version: String? { (info("CFBundleShortVersionString") as? String).flatMap { $0.isEmpty ? nil : $0 } }
     private var background: Color { NX18Palette.background(tint: artwork.tint) }
+    private var here: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }   // this device in the save questions ("This iPad's save"); the Mac says "Mac"
     private var basicGroups: [LauncherRowGroup] { m.groups(basic: true) }
     private var advancedGroups: [LauncherRowGroup] { m.groups(basic: false) }
     private var launcherFromEnv: Bool { LauncherModel.launcherSetByEnv() }   // an env file's or the launch's DM_LAUNCHER, not main.m's for a program record
@@ -300,15 +301,15 @@ struct LauncherView: View {
         }
         // The controller sentences name the buttons as the pad labels them (pad.glyphs): handle gets Switch buttons by position, so on an Xbox pad Switch B is its A. L and R are the same on every pad
         .confirmationDialog(SaveSyncReport.chooseTitle, isPresented: isAsking(.choose), titleVisibility: .visible, presenting: report) { r in
-            Button(r.localLabel(here: "iPhone")) { go(r.localChoice) }
+            Button(r.localLabel(here: here)) { go(r.localChoice) }
             Button(r.cloudLabel) { go(r.cloudChoice) }
             Button("Cancel", role: .cancel) {}
-        } message: { r in Text(r.chooseMessage(here: "iPhone") + (pad.connected ? " With a controller: L plays this iPhone's, R the cloud's, \(pad.glyphs.name(.b)) cancels." : "")) }
+        } message: { r in Text(r.chooseMessage(here: here) + (pad.connected ? " With a controller: L plays this \(here)'s, R the cloud's, \(pad.glyphs.name(.b)) cancels." : "")) }
         .confirmationDialog(SaveSyncReport.unreadableTitle, isPresented: isAsking(.unreadable), titleVisibility: .visible, presenting: report) { r in
-            Button("Play This iPhone's Save") { go("offline") }   // the mount does not wait for the cloud again
+            Button("Play This \(here)'s Save") { go("offline") }   // the mount does not wait for the cloud again
             Button("Try Again") { DispatchQueue.main.async { start() } }
             Button("Cancel", role: .cancel) {}
-        } message: { r in Text(r.unreadableMessage(here: "iPhone") + (pad.connected ? " With a controller: \(pad.glyphs.name(.a)) plays this iPhone's save, \(pad.glyphs.name(.y)) tries again, \(pad.glyphs.name(.b)) cancels." : "")) }
+        } message: { r in Text(r.unreadableMessage(here: here) + (pad.connected ? " With a controller: \(pad.glyphs.name(.a)) plays this \(here)'s save, \(pad.glyphs.name(.y)) tries again, \(pad.glyphs.name(.b)) cancels." : "")) }
         .task { await pad.run { handle($0) } }
         .task { await followStatus() }
         .onChange(of: sheet) {          // a button held as a sheet opens or closes (A held while B closes the guide) is no press on what is under it
