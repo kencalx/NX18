@@ -239,6 +239,7 @@ struct LauncherView: View {
     @State private var textHeight: CGFloat = 140   // the name, status line and buttons over the art: the height the scrim under them covers
     @State private var checking = false            // Play is comparing this iPhone's save with the cloud's (start)
     @State private var check = 0                   // which Play the running check is for: one the player went on from without it is dropped
+    @State private var autoCheck = 0               // the check that runs by itself for a skipped start (checkAtStart), 0 when none: the player asking for the screen stops it (stopAutoStart)
     @State private var report: SaveSyncReport?
     @State private var asking: SaveSyncReport.Step?
     @AppStorage("launcher.advanced") private var advancedOpen = false
@@ -305,14 +306,17 @@ struct LauncherView: View {
         } message: { r in Text(r.unreadableMessage(here: "iPhone") + (pad.connected ? " With a controller: A plays this iPhone's save, Y tries again, B cancels." : "")) }
         .task { await pad.run { handle($0) } }
         .task { await followStatus() }
-        .onChange(of: sheet) { pad.holdUntilReleased() }          // a button held as a sheet opens or closes (A held while B closes the guide) is no press on what is under it
-        .onChange(of: cloudPicking) { pad.holdUntilReleased() }
+        .onChange(of: sheet) {          // a button held as a sheet opens or closes (A held while B closes the guide) is no press on what is under it
+            pad.holdUntilReleased()
+            if sheet != nil { stopAutoStart("the guide or About this game opened") }
+        }
+        .onChange(of: cloudPicking) { pad.holdUntilReleased(); if cloudPicking { stopAutoStart("the cloud-save folder picker opened") } }
         .onChange(of: asking) { pad.holdUntilReleased() }        // the press that answered a save question is no press on the settings
         .onReceive(LauncherShortcuts.requests) { shortcut($0) }   // a home screen shortcut chosen while the screen is up
         .onAppear {
             guard !startTaken else { return }
             if let s = startWith { startTaken = true; shortcut(s) }   // the one the app was opened with
-            else if checkAtStart { startTaken = true; start() }       // a skipped start's cloud-save check: as if Play had been pressed, the game starting by itself when nothing is asked
+            else if checkAtStart { startTaken = true; start(); autoCheck = check }   // a skipped start's cloud-save check: as if Play had been pressed, the game starting by itself when nothing is asked
         }
     }
 
@@ -322,9 +326,11 @@ struct LauncherView: View {
         switch s {
         case .game: fputs("launcher: shortcut Game: Play\n", stderr); start()
         case .launcher:
+            stopAutoStart("shortcut Launcher")
             if sheet != nil || cloudPicking { fputs("launcher: shortcut Launcher: back to the settings\n", stderr) }
             sheet = nil; cloudPicking = false; guideAfter = false
         case .guide:
+            stopAutoStart("shortcut Guide")
             // What the guide replaces (About, the folder picker) closes first, and the guide opens once it has gone (guideAfterClosing): changing one presentation for another in a
             // single update asked UIKit to present from a view controller that was still presenting
             let wanted: LauncherSheet? = content.hasGuide ? .guide : content.hasAbout ? .about : nil
@@ -492,6 +498,17 @@ struct LauncherView: View {
     }
 
     private func playWithout() { checking = false; go("offline") }
+
+    /// The check a skipped start runs by itself (checkAtStart) stops when the player asks for the screen while it runs (a Launcher or Guide shortcut, the guide, About this game
+    /// or the folder picker opened): the game does not start under them when it ends, and Play checks again. A check Play started carries on, as it always did
+    private func stopAutoStart(_ why: String) {
+        guard autoCheck != 0 else { return }
+        let running = checking && check == autoCheck
+        autoCheck = 0
+        guard running else { return }
+        checking = false   // its answer is dropped (start: guard checking)
+        fputs("launcher: the cloud-save check of the skipped start stopped (\(why)): the settings screen stays, and Play checks again\n", stderr)
+    }
 
     /// Blocks while the cloud's file downloads (SaveSyncReport.waitMs at most). nil: no report (the host then decides as it always did)
     nonisolated private static func compare() -> SaveSyncReport? {

@@ -7,7 +7,7 @@
 // player, the Game shortcut and Skip this screen next time, show it instead, already running the cloud-save check as if Play had been pressed (.check; Launcher.swift start): a save
 // that changed both here and in the cloud is the player's pick, not the newer file's, and a cloud save that did not come is said so. When the check finds nothing to ask (the saves
 // are the same, only one side changed, no save in the cloud) the game starts by itself with no input, so the skip still feels like one; the screen is up for as long as the check
-// takes. DM_LAUNCHER=0 from an env file or the launch (a developer's switch) stays screenless and logs that the cloud save was not checked (the newer save then wins at the game's
+// takes. A Launcher or Guide shortcut, or the guide, About or the folder picker opened while it runs, stops it (LauncherView.stopAutoStart): the screen stays, and Play checks again. DM_LAUNCHER=0 from an env file or the launch (a developer's switch) stays screenless and logs that the cloud save was not checked (the newer save then wins at the game's
 // first save mount, save_sync.c ss_decide), and the program record's hand-over runs no check: the game's first program did, before the first save mount.
 // One chosen while the app runs (main.m's windowScene:performActionForShortcutItem:, dmShortcutPerform): on the settings screen Game plays, Launcher closes the guide, About or the folder
 // picker and stays, Guide opens the guide. Once the game runs the process cannot go back to the settings screen without a restart, so Game resumes the game, and Launcher and Guide open the

@@ -8,6 +8,8 @@ import XCTest
 // Guide opens it, Game plays), one while the game runs (Game carries on, Launcher and Guide open the in-game menu), and the menu opening for it. With cloud saves on, the starts that
 // skip the screen (Skip this screen next time, the Game shortcut) show it for the cloud-save check, the game starting by itself when there is nothing to ask
 private nonisolated(unsafe) var duoPlays = 0   // dmShowLauncher's done: the game would start
+// The same for the stopped check below, apart: a settings screen an earlier test dismissed without playing stays alive and hears the shortcuts sent here, and its own done counts duoPlays
+private nonisolated(unsafe) var duoCheckPlays = 0
 
 final class DuoShortcutTests: XCTestCase {
     func testTypesAndTheStartOrder() {
@@ -361,6 +363,34 @@ final class DuoShortcutTests: XCTestCase {
         XCTAssertEqual(choice(), "ask")
         waitUntil("The screen is gone") { root.presentedViewController == nil }
         XCTAssertNil(UserDefaults.standard.object(forKey: LauncherModel.skipKey), "Skip this screen next time is not turned on")
+
+        // A check that takes a while (a large save to hash: a 1 GB sparse file, no disk used) and the player asking for the screen while it runs: a Launcher or a Guide shortcut
+        // stops it (LauncherView.stopAutoStart), the screen stays and the game does not start when the check ends; Play (the Game shortcut on the screen) then checks again and plays
+        let big = mine.appendingPathComponent("big.bin")
+        XCTAssertTrue(fm.createFile(atPath: big.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: big); try handle.truncate(atOffset: 1 << 30); try handle.close()
+        UserDefaults.standard.set(true, forKey: LauncherModel.skipKey)
+        for asked in ["dm.shortcut.launcher", "dm.shortcut.guide"] {
+            unsetenv("DM_SAVE_SYNC_CHOICE"); duoCheckPlays = 0
+            LauncherShortcuts.started = false
+            XCTAssertTrue(dmShowLauncher(Unmanaged.passUnretained(root).toOpaque(), { duoCheckPlays += 1 }))
+            waitUntil("\(asked): the screen showed for the check") { root.presentedViewController != nil }
+            let host = try XCTUnwrap(root.presentedViewController)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))   // it has appeared, and its check is hashing the save
+            XCTAssertEqual(duoCheckPlays, 0, "\(asked): the check was still running when the shortcut came (else this case tests nothing)")
+            XCTAssertTrue(dmShortcutPerform(asked))
+            RunLoop.main.run(until: Date().addingTimeInterval(6))   // longer than the check
+            XCTAssertEqual(duoCheckPlays, 0, "\(asked) stopped the start by itself")
+            XCTAssertTrue(root.presentedViewController === host, "\(asked): the settings screen stays")
+            XCTAssertNil(choice(), "\(asked): no choice made")
+            XCTAssertTrue(dmShortcutPerform("dm.shortcut.game"))
+            waitUntil("\(asked): Play checked again and started the game", 60) { duoCheckPlays == 1 }
+            XCTAssertEqual(choice(), "ask")
+            waitUntil("\(asked): the screen is gone") { root.presentedViewController == nil }
+            XCTAssertEqual(duoCheckPlays, 1, "\(asked): the game started once")
+        }
+        try fm.removeItem(at: big)
+        UserDefaults.standard.removeObject(forKey: LauncherModel.skipKey)
 
         // Both changed: another device's save in the cloud (packed by the host's own sender) and a save here that was never synced. The Game shortcut's check asks, and the game waits
         let theirs = try save("their-save", "another device's progress")
