@@ -17,12 +17,11 @@ import argparse, re, struct, sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.append(str(REPO / 'dm/gfx/tools'))
+from pso_skey_layout import SKEY, KEY as DESC, LENGTHS   # noqa: E402 (sizeof(pso_skey), where its pso_key starts, the row lengths pso_skey_parse reads: one place for this and pso_offline.py)
 STAGES = {'vertex': 0, 'pixel': 1, 'geometry': 2, 'hull': 3, 'task': 3, 'domain': 4, 'mesh': 4, 'compute': 5}   # stage_of in nvn_mtl.m
 KEY = re.compile(r'[0-9a-f]{16}_b\Z')   # a library's name: <map key>_b
-SKEY, DESC = 512, 88   # sizeof(pso_skey), and where its pso_key starts (after vs[24], fs[24], four flags, pso_fz_desc and padding)
 BORDER = DESC + 416   # pso_key.border, then border_spare
-# pso_skey_parse: a row from before border (release 1's lists), or also before attr_hi, or also before atest / logic, is shorter
-LENGTHS = (2 * SKEY, 2 * SKEY - 2 * 8, 2 * SKEY - 2 * 8 - 2 * 64, 2 * SKEY - 2 * 8 - 2 * 64 - 2 * 8)
 PROVISIONAL = '# Provisional profile: empty until recorded'
 
 

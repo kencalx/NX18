@@ -111,9 +111,8 @@ ADV_BLEND = {5: (B_ZERO, B_ZERO, B_ZERO, B_ZERO), 6: (B_ONE, B_ZERO, B_ONE, B_ZE
              14: (B_DA, B_ISA, B_ZERO, B_ONE), 15: (B_IDA, B_SA, B_ONE, B_ZERO), 16: (B_IDA, B_ISA, B_IDA, B_ISA), 17: (B_ONE,) * 4, 18: (B_ONE,) * 4, 19: (B_ONE,) * 4}
 # pso_skey (dm/gfx/nvn/nvn_pso_skey.h) as the host writes it, little-endian: vs[24], fs[24], vs_stage, fs_stage, merged, fz, the fz description (34 bytes), padding to 88, then pso_key:
 # two pointers, cfmt[8], dfmt, sfmt, samples, blend_en, chmask, a2c, blend_st[8] (8 bytes each), attr[16], stream[16] (8 bytes each), lmap[8], a pointer, atest, logic, attr_hi[16],
-# border, border_spare. Rows from before border, before attr_hi, and also before atest / logic, are shorter and read with those fields zero, as pso_skey_parse reads them
-SKEY = 512
-KEY = 88
+# border, border_spare. Rows from before border, before attr_hi, and also before atest / logic, are shorter and read with those fields zero, as pso_skey_parse reads them (LENGTHS)
+from pso_skey_layout import SKEY, KEY, LENGTHS   # noqa: E402 (beside this file, as dmsh_abi)
 D16, D32, S8, D32S8, X32S8 = 250, 252, 253, 260, 261   # nvn_pso_ds.h
 
 
@@ -315,8 +314,7 @@ def read_meshes(manifests):
 
 def parse_mesh_key(text):
     """An M row's pso_skey hex as pso_mesh_skey_parse reads it: a dict of the fields the pipeline's descriptor depends on, or None where the host refuses the row"""
-    n = 2 * SKEY
-    if len(text) not in (n, n - 2 * 8, n - 2 * 8 - 2 * 64, n - 2 * 8 - 2 * 64 - 2 * 8): return None
+    if len(text) not in LENGTHS: return None
     try: b = bytes.fromhex(text)
     except ValueError: return None
     b += bytes(SKEY - len(b))
@@ -545,8 +543,7 @@ def vfmt_for_ct(f, ct):   # nvn_mtl.m vfmt_for_ct: the format corrected by the i
 
 def parse_render_key(text):
     """An R row's pso_skey hex as pso_skey_parse reads it (pso_key_norm applied): the fields pso_desc's descriptor of a base depends on, or None where the host refuses the row"""
-    n = 2 * SKEY
-    if len(text) not in (n, n - 2 * 8, n - 2 * 8 - 2 * 64, n - 2 * 8 - 2 * 64 - 2 * 8): return None
+    if len(text) not in LENGTHS: return None
     try: b = bytes.fromhex(text)
     except ValueError: return None
     b += bytes(SKEY - len(b))
