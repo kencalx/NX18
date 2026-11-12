@@ -547,6 +547,13 @@ check_t_attachment_capacity: t_attachment_capacity
 	@for td in 0 1; do for enc in 0 1; do \
 	    DM_NVN_TBDR=$$td DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_attachment_capacity || exit $$?; \
 	done; done
+t_draw_barriers: t_draw_barriers.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_draw_barriers.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_draw_barriers
+check_t_draw_barriers: t_draw_barriers   # draw_barriers game's relaxed order, and DM_NVN_BARRIER=full, its fallback
+	@for mode in game full; do for enc in 0 1; do \
+	    DM_NVN_BARRIER=$$mode DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_draw_barriers || exit $$?; \
+	done; done
 t_image_attachment_store: t_image_attachment_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_attachment_store.m $(MTL_T_SRC) $(FW)
 check_t_image_attachment_store: RUN_ENV = MTL_DEBUG_LAYER=1
