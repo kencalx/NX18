@@ -1,7 +1,7 @@
 """Xenoblade Chronicles: Definitive Edition's committed prewarm list (dm/games/0100FF500E34A000/pso_manifest.tsv, its README "Pipelines on a first start"): an iPhone's
 first recording (build 9e592228), then an iPhone 18 Pro Max's own pso_user.tsv from the owner's play on 0.5 (the 60 fps mod, Picture Stretch) below its note. Every row must
 check clean against the profile's shader map as the host reads it (dm/tools/pso_seed.py), except exactly the six _bg0 / _bgv geometry-variant rows of the first part, which the
-prewarm drops at load; the counts must match the header and the note, with no row repeated, and the release-1 rows repeat none of the first rows (pso_user.tsv records only
+prewarm drops at load; the counts must match the header and the note, with no row repeated, and the 0.5 rows repeat none of the first rows (pso_user.tsv records only
 what the list did not hold)."""
 import re
 import sys

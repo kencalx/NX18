@@ -3151,7 +3151,7 @@ def parse_args(argv):
     """Command-line options: when given they override "Settings"; F5 in Spyder passes none, so "Settings" is used as is. -h shows the help"""
     import argparse
     ap = argparse.ArgumentParser(prog='build_ipa_from_nsp.py',
-        description='Build an unsigned IPA or prepare an Xcode project from a game\'s NSPs; a game with no profile is surveyed and gets a provisional profile.',
+        description='Build an unsigned IPA or prepare an Xcode project from your legally owned and acquired game files (NSPs, a dump folder, or a .nup or .nx file); a game with no profile is surveyed and gets a provisional profile.',
         epilog='example: python3 scripts/build_ipa_from_nsp.py ~/nsp/"Super Mario Bros Wonder" -k ~/keys/prod.keys')
     ap.add_argument('nsp_dir', nargs='?', help='folder holding one game\'s NSPs, or its files as a dump (scripts/pack_dump.py lists the layout), or one NUP container (a .nup file) or NX archive (a .nx file; the file itself may be given) (default: the NSP_DIR setting, else asked)')
     ap.add_argument('-k', '--keys', help='path of prod.keys, not needed for a dump folder, a NUP or an NX (default: the PROD_KEYS setting, else asked)')

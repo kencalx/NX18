@@ -85,7 +85,7 @@ brew install xcodegen zstd
 python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
 ```
 
-**2. Put your game in a folder**: your legally owned and acquired game, plus its update and DLC if you have them (`.nsp`, `.xci`, `.nsz` or `.xcz`):
+**2. Put your game in a folder**: the game, plus its update and DLC if you have them (`.nsp`, `.xci`, `.nsz` or `.xcz`):
 
 ```
 ~/Games/MarioWonder/
@@ -119,7 +119,7 @@ Controls, saves and settings: [Playing](docs/playing.md).
 
 #### Increased Memory Limit
 
-The bigger games, and Switch 2 games above all, need the higher memory limit iOS gives an app with the Increased Memory Limit entitlement. Without it iOS may close the game in busy scenes. Every app NX 18 builds already asks for it (and for Extended Virtual Addressing), but whether iOS grants it depends on your sideloading tool and Apple account:
+The bigger games need the higher memory limit iOS gives an app with the Increased Memory Limit entitlement. Without it iOS may close the game in busy scenes. Every app NX 18 builds already asks for it (and for Extended Virtual Addressing), but whether iOS grants it depends on your sideloading tool and Apple account:
 
 - **Installed from Xcode with a paid Apple Developer account** (or with a tool that builds through Xcode, such as NX Play): nothing to do. Xcode adds the capability to the app's App ID when it signs the app. A free account's Personal Team cannot get it this way, so such tools build without it; use one of the ways below.
 - **AltStore** (2.2 or later) and **Sideloadly**: keep the entitlement when the tool offers the choice. Nothing else to do.

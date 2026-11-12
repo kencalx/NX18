@@ -1,6 +1,6 @@
 #!/bin/bash
 # nx18-build.sh: builds one of your games with NX 18 (https://github.com/kencalx/NX18) into an iPhone or
-# iPad IPA or a Mac app, from game files you have legally owned and acquired. Run nx18-setup.sh once
+# iPad IPA or a Mac app, from your legally owned and acquired game files. Run nx18-setup.sh once
 # first; it installs what this needs.
 #
 #   1. Copy this file somewhere outside the NX 18 folder (e.g. ~/nx18-build.sh) and edit SETTINGS below.
@@ -25,7 +25,7 @@ set -e; trap 'echo "nx18-build: a setting above has a mistake (the line number i
 # The NX 18 folder nx18-setup.sh made.                                          (env NX18_DIR)
 CHECKOUT="$HOME/NX18"
 
-# Your game, from your legally owned and acquired game files, one of:           (env NX18_GAME)
+# Your legally owned and acquired game files, one of:                           (env NX18_GAME)
 #   - a folder with the game's .nsp / .xci / .nsz / .xcz files (base game, plus its update and DLC)
 #   - a folder with the game's files as a dump (base/, updates/<version>/, dlc/, or exefs/ and romfs/)
 #   - a .nup or .nx file (Switch 2 games and others), or a folder that holds one

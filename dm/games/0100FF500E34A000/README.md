@@ -62,10 +62,11 @@ buttons and confirm with `A`. Each opening event needs its own skip.
 
 ## On the iPhone
 
-The owner's run on an iPhone 18 Pro Max (iOS 27.3), 0.5 (`5b302cd0`, chain
-`ac67cb709fa0`), update 1.1.2, docked, the 60 fps mod from the mods folder
-(`DM_MOD_FPS=1`), Picture Stretch, no upscaling, no edge smoothing: the first
-start after a fresh install, then about 8 minutes of a new game (28,600 frames).
+The owner's run on an iPhone 18 Pro Max (iOS 27.3), the 0.5 build
+(`5b302cd0`, chain `ac67cb709fa0`), update 1.1.2, docked, the 60 fps mod from
+the mods folder (`DM_MOD_FPS=1`), Picture Stretch, no upscaling, no edge
+smoothing: the first start after a fresh install, then about 8 minutes of a new
+game (28,600 frames).
 From its `log.txt` (`scripts/devlog.py`):
 
 - **Frames:** 60 fps throughout; frame time p50 16.68 ms, p95 17.27 ms; 18 of
