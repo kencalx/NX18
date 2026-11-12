@@ -7,6 +7,13 @@ struct SaveSyncReport {
     /// How long the cloud's file may take to come (an iCloud download) before the launcher says it did not; the player can play without it meanwhile
     static let waitMs: Int32 = 60000
 
+    /// The report's line from save_sync_report, which each launcher calls its own way (call: the C function on this buffer and its size); nil when the call failed
+    static func run(_ call: (UnsafeMutablePointer<CChar>, Int) -> Int32) -> String? {
+        var buf = [CChar](repeating: 0, count: 1024)
+        guard buf.withUnsafeMutableBufferPointer({ call($0.baseAddress!, $0.count) }) == 0 else { return nil }
+        return String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
     var sync = false, conflict = false, sameTitle = true
     var cloud = 0   // 1 read, 0 no save there, -1 not read in time
     var localHash = "", cloudHash = "", cloudDevice = ""

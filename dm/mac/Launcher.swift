@@ -38,10 +38,8 @@ enum SaveCheck {
         guard let id = info("DMTitleID"), !id.isEmpty else { fputs("launcher: save sync: no DMTitleID\n", stderr); return nil }
         // the folder as launcher.c will pass it (cloud_saves_folder): DM_SAVE_SYNC from the launch environment or an env file, else the window's choice; "0" = off
         let folder = getenv("DM_SAVE_SYNC").map { String(cString: $0) } ?? (UserDefaults.standard.string(forKey: "cloudSaves.folder") ?? "")
-        var buf = [CChar](repeating: 0, count: 1024)
-        let r = (folder.isEmpty ? "0" : folder).withCString { save_sync_report(save, id, $0, SaveSyncReport.waitMs, &buf, buf.count) }
-        let line = String(cString: buf)
-        guard r == 0 else { fputs("launcher: save sync: no report on \(String(cString: save))\n", stderr); return nil }
+        let line = (folder.isEmpty ? "0" : folder).withCString { f in SaveSyncReport.run { save_sync_report(save, id, f, SaveSyncReport.waitMs, $0, $1) } }
+        guard let line else { fputs("launcher: save sync: no report on \(String(cString: save))\n", stderr); return nil }
         fputs("launcher: save sync: \(line)\n", stderr)
         return SaveSyncReport(line: line)
     }

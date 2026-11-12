@@ -566,12 +566,10 @@ struct LauncherView: View {
     nonisolated private static func compare() -> SaveSyncReport? {
         // getenv, not ProcessInfo.environment: main.m sets DM_SAVE and applies env.txt after that snapshot
         guard let save = getenv("DM_SAVE") else { fputs("launcher: save sync: no DM_SAVE\n", stderr); return nil }
-        var buf = [CChar](repeating: 0, count: 1024)
-        guard save_sync_report(save, dm_save_title(), nil, SaveSyncReport.waitMs, &buf, buf.count) == 0 else {
+        guard let line = SaveSyncReport.run({ save_sync_report(save, dm_save_title(), nil, SaveSyncReport.waitMs, $0, $1) }) else {
             fputs("launcher: save sync: no report on \(String(cString: save))\n", stderr)
             return nil
         }
-        let line = String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
         fputs("launcher: save sync: \(line)\n", stderr)
         return SaveSyncReport(line: line)
     }
