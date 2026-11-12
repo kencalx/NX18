@@ -15215,6 +15215,7 @@ static void bufsnap_after(NvShader *cs, id ce) {
     res_add(dst); res_commit();
     [(id<MTL4ComputeCommandEncoder>)ce barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:blit_vis()];
     [(id<MTL4ComputeCommandEncoder>)ce copyFromBuffer:(__bridge id<MTLBuffer>)mb sourceOffset:mo toBuffer:dst destinationOffset:0 size:n];
+    defer_obj_release(dst);   // out of the residency set once this submission completes (it held the copy for good); the block below keeps it alive for the write
     g_blit_ops = 1;   // the next copy or dispatch is ordered after it
     NSString *key = @(cs->key);
     [g_commit_blocks addObject:^{ BOOL ok = [[NSData dataWithBytes:dst.contents length:n] writeToFile:path atomically:NO];
