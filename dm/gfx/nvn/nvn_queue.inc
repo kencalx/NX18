@@ -249,10 +249,12 @@ static void nq_report(uint64_t frame,uint64_t frames) {
         frame,(v[0]-p[0])/nf,(v[1]-p[1])/nf,(v[2]-p[2])/nf,(v[3]-p[3])/nf,(v[4]-p[4])/nf,(v[5]-p[5])/nf,(v[6]-p[6])/1e6/nf,inflight,peak);
     memcpy(p,v,sizeof p);
 }
+// The replay's time-constraint policy (nvn_rt.h; profile key replay_rt, DM_REPLAY_RT): ticked once a frame before the node's work, outside its cost scope
+static nvn_rtw nq_rtw={.name="NVN queue replay"};
 static void *nq_worker(void *unused) {
     (void)unused; pthread_setname_np("NVN queue replay");
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
-    uint64_t frame=UINT64_MAX, reported=UINT64_MAX;
+    uint64_t frame=UINT64_MAX, reported=UINT64_MAX; const int rt=nvn_replay_rt();
     for(;;) {
         pthread_mutex_lock(&nq_mu); nq_queue *q=NULL; nq_node *n=NULL; nq_job *j=NULL;
         for(;;) {
@@ -306,6 +308,7 @@ static void *nq_worker(void *unused) {
         if(n->kind==NQ_COMMANDS || n->kind==NQ_PRESENT) {
             dm_host_mutex_lock(&g_sub_mu); void *pool=objc_autoreleasePoolPush();
             dm_host_work++; mtl_prepare(); dm_host_work--;
+            if(rt && frame!=j->frame) nvn_rtw_tick(&nq_rtw,j->frame);
             gfx_enter(); nq_cost cost=nq_cost_begin();
             if(frame!=j->frame) { frame=j->frame; mtl_set_frame(frame); }
             mtl_queue_activate(q->serial); mtl_set_queue_origin_lower_left(q->origin);

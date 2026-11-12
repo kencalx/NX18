@@ -54,6 +54,10 @@ fps_resume	on
 # set, 0 for off): at 30 fps game enqueue to display about 85 -> 53 ms, 9 frames dropped in 2.5 minutes, no smoothness cost seen. Checked only at 30 fps on iOS: the game's
 # default 60 fps and the Mac use it untested
 present_trim	60
+# In the slow windows of the X1.0 iPhone runs the 'NVN queue replay' thread ran its ~60 M instructions a frame at 1.6-2.0 GHz (12-13 ms of CPU) against 3.9-4.3 GHz (5-6 ms) in the
+# fast ones; it and 'dm-encode' had QoS user-interactive alone, no frame deadline. on: each declares a time-constraint policy sized to its own CPU time per frame (nvn_rt.h,
+# hle_nvn.c nvn_rtw_tick). DM_REPLAY_RT=0 in env.txt turns it off. Not yet run on the phone
+replay_rt	on
 
 # ---- Movies ----
 # The movies are AV1 decoded by VideoToolbox. On an iPhone 18 Pro Max (X1.0) iOS ended the hardware decoder while the notification panel was down during the opening movie: every later

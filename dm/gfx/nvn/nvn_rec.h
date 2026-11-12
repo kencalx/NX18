@@ -207,9 +207,13 @@ static void rec_exec(const rec_t *r) {
     }
     for (uint32_t i = 0; i < r->nobj; i++) if (a[i]) CFRelease((CFTypeRef)(uintptr_t)a[i]);
 }
+// The encode thread's time-constraint policy (nvn_rt.h; profile key replay_rt, DM_REPLAY_RT): ticked after each block at the replay's frame (mtl_set_frame), when that moved on
+static nvn_rtw g_rec_rtw = {.name = "dm-encode"};
+static _Atomic uint64_t g_cur_frame;
 static void *rec_thread(void *arg) {
     (void)arg; pthread_setname_np("dm-encode");
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    const int rt = nvn_replay_rt();
     for (;;) {
         pthread_mutex_lock(&g_rb_mu);
         while (!g_rb_head) { g_rb_sleeping = 1; pthread_cond_wait(&g_rb_work, &g_rb_mu); g_rb_sleeping = 0; atomic_fetch_add_explicit(&g_rb_wakes, 1, memory_order_relaxed); }
@@ -220,6 +224,7 @@ static void *rec_thread(void *arg) {
         b->n = 0; b->next = g_rb_free; g_rb_free = b; g_rb_busy = 0;
         if (!g_rb_head) pthread_cond_broadcast(&g_rb_idle);
         pthread_mutex_unlock(&g_rb_mu);
+        if (rt) { uint64_t f = atomic_load_explicit(&g_cur_frame, memory_order_relaxed); if (!g_rec_rtw.started || f > g_rec_rtw.frame) nvn_rtw_tick(&g_rec_rtw, f); }
     }
     return NULL;
 }

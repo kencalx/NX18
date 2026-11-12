@@ -14,6 +14,7 @@
 #include "nvn_tex.h"
 #include "../tex/nvn_deswizzle.h"
 #include "nvn_mtl.h"
+#include "nvn_rt.h"
 #include "nvn_pace.h"
 #include "nvn_fstep.h"
 #include "nvn_timestamp.h"
@@ -1838,6 +1839,8 @@ static pthread_t g_rt_th; static char g_rt_name[64];   // the thread the time-co
 static pthread_mutex_t g_rt_mu = PTHREAD_MUTEX_INITIALIZER;
 static mach_port_t g_rt_port;   // the thread the policy was last set on (g_rt_th), with a send right of our own; 0 = none
 static _Atomic uint64_t g_acq_moves;   // acquires on another thread than the acquire before
+static _Atomic uint64_t g_rt_frame_ns;   // the present thread's real-time period (rt_period_ns at the acquire, whether or not DM_RT=0), which the replay threads declare (nvn_rtw_tick); 0 = none yet
+static nvn_rtw *g_rtw[4]; static int g_nrtw;   // the replay threads whose time-constraint policy is set (nvn_rtw_tick), under g_rt_mu: the thread policy line reads each
 static void th_name(pthread_t th, char *out, size_t n) { out[0] = 0; pthread_getname_np(th, out, n); if (!out[0]) snprintf(out, n, "thread %#x", (unsigned)pthread_mach_thread_np(th)); }
 static void dr_line(uint64_t frame);
 static int rt_on(void);
@@ -1871,6 +1874,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
         static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
         if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
+        if (rtp) atomic_store_explicit(&g_rt_frame_ns, rtp, memory_order_relaxed);
         rt_comp_tick(rtp);
         uint64_t p0 = now_ns(); int snap = mtl_snap_on();
         if (present_unpaced(o)) {}   // present interval 0: no vsync wait (below); only the free texture the ticket wait below gives
@@ -2049,6 +2053,7 @@ static void power_line(uint64_t frame) {
 // thread (policy 1: demoted, as its fail-safe does to a real-time thread that runs too long without blocking) from one in effect (policy 2), and counts the acquires made on
 // another thread than the one before (rt_comp_tick measures the per-frame CPU time of whichever thread acquires: across two threads its declaration means nothing).
 // DM_FIELD_LOG=0 reads the presenting thread as X1.0 did. Logging only: the policy itself is set as before
+static void rtw_states(char *out, size_t n);
 static void rt_policy_line(unsigned wn, uint32_t wq) {
     const int fl = field_log(); mach_port_t self = pthread_mach_thread_np(pthread_self());
     pthread_mutex_lock(&g_rt_mu);
@@ -2060,7 +2065,7 @@ static void rt_policy_line(unsigned wn, uint32_t wq) {
     const char *st = rt_live ? "in effect" : "not in effect";
     if (fl && q != self && !okx && !okp) st = "unknown (the thread it was set on has ended)";
     else if (fl && rt_live && okx && xi.pth_policy != POLICY_RR) st = "set, but run as a standard thread (demoted)";
-    char who[320] = "";
+    char who[768] = "";
     if (fl) {
         char me[64]; th_name(pthread_self(), me, sizeof me); int w;
         if (q == self) w = snprintf(who, sizeof who, "; read on %s, which presents%s%s", me, !(g_rt_comp_ms > 0) ? (rt_on() ? " (no policy set yet)" : " (no policy: DM_RT=0)")
@@ -2071,8 +2076,9 @@ static void rt_policy_line(unsigned wn, uint32_t wq) {
             w = snprintf(who, sizeof who, "; read on %s, the thread it was set on (it acquires the window texture); the thread presenting is %s, QoS %#x at priority %d", g_rt_name, me, (unsigned)qc, okm ? pi.pth_curpri : -1);
         }
         static uint64_t pmv; uint64_t mv = atomic_load_explicit(&g_acq_moves, memory_order_relaxed);
-        if (mv != pmv && w > 0 && (size_t)w < sizeof who) snprintf(who + w, sizeof who - (size_t)w, "; acquired on another thread than the acquire before %llu times in this window", (unsigned long long)(mv - pmv));
+        if (mv != pmv && w > 0 && (size_t)w < sizeof who) w += snprintf(who + w, sizeof who - (size_t)w, "; acquired on another thread than the acquire before %llu times in this window", (unsigned long long)(mv - pmv));
         pmv = mv;
+        if (nvn_replay_rt() && w > 0 && (size_t)w < sizeof who) rtw_states(who + w, sizeof who - (size_t)w);
     }
     LOG("[nvn] thread policy: main thread real-time computation %.2f ms / period %.2f ms, real-time policy %s, current priority %d (base %d, policy %d); %u worker threads QoS %#x; present QoS %#x%s", g_rt_comp_ms, g_rt_period_ms, st, okx ? xi.pth_curpri : -1, okx ? xi.pth_priority : -1, okx ? xi.pth_policy : -1, wn, wq, mtl_present_qos(), who);
 }
@@ -2195,6 +2201,70 @@ static void rt_comp_tick(uint64_t period_ns) {
     // two frames in 120 near 4.4 ms; declared at 2.5 ms (p90 × 1.25) it stalled about once a second, at 30 fps and at 60; declared above the peak it held 60 fps at the same CPU energy
     double p90 = v[107], comp = fmax(p90 * 1.25, v[119] * 1.1), cap = period_ns * 0.9 / 1e6; if (comp > cap) comp = cap; if (comp < 1) comp = 1;
     if (comp > g_rt_comp_ms * 1.15 || comp < g_rt_comp_ms * 0.85) set_time_constraint_comp(period_ns, (uint64_t)(comp * 1e6));
+}
+// ---------- The replay threads' time-constraint policy (nvn_rt.h; the profile's replay_rt, DM_REPLAY_RT) ----------
+// In Ocarina of Time's slow windows on an iPhone 18 Pro Max (X1.0) the 'NVN queue replay' thread ran the same ~60 M instructions a frame at 1.6-2.0 GHz (12-13 ms of CPU) that took 5-6 ms
+// at 3.9-4.3 GHz in the fast ones, while only the thread that acquires the window declared a frame deadline; the replay and encode threads had QoS user-interactive alone
+// (docs/reference/frame-rate.md, The replay threads declared no frame deadline)
+static int replay_rt_mode(const char *e, int dflt) { return e && *e ? *e != '0' : dflt; }   // DM_REPLAY_RT: 1 on, 0 off; unset or empty, the profile's
+int nvn_replay_rt(void) {
+    static _Atomic int v = -1; int c = atomic_load_explicit(&v, memory_order_relaxed); if (c >= 0) return c;
+    const char *e = getenv("DM_REPLAY_RT"); int on = replay_rt_mode(e, DM_GAME_REPLAY_RT), was = -1;
+    if (atomic_compare_exchange_strong(&v, &was, on) && on)
+        LOG("[nvn] replay threads: 'NVN queue replay' and 'dm-encode' declare a time-constraint policy sized to their own CPU time per frame (%s)", e && *e ? "DM_REPLAY_RT" : "game profile replay_rt");
+    return on;
+}
+double nvn_rtw_size_ms(const double *v, int n, double period_ms) {
+    double lo = fmax(1.0, period_ms * NVN_RTW_FLOOR), hi = period_ms * NVN_RTW_CAP, comp = period_ms * NVN_RTW_START;
+    if (n > NVN_RTW_WIN) n = NVN_RTW_WIN;
+    if (v && n > 0) { double s[NVN_RTW_WIN]; memcpy(s, v, (size_t)n * sizeof *s); qsort(s, (size_t)n, sizeof *s, dcmp); comp = fmax(s[(n - 1) * 9 / 10] * 1.25, s[n - 1] * 1.1); }
+    return comp < lo ? lo : comp > hi ? hi : comp;
+}
+static void rtw_declare(nvn_rtw *w, uint64_t period_ns, double comp_ms) {
+    static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
+    uint64_t comp_ns = (uint64_t)(comp_ms * 1e6);
+    thread_time_constraint_policy_data_t p = {
+        .period = (uint32_t)(period_ns * tb.denom / tb.numer), .computation = (uint32_t)(comp_ns * tb.denom / tb.numer),
+        .constraint = (uint32_t)(period_ns * tb.denom / tb.numer), .preemptible = 1};
+    mach_port_t self = pthread_mach_thread_np(pthread_self());
+    kern_return_t kr = thread_policy_set(self, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    if (kr != KERN_SUCCESS) { w->failed = 1; LOG("[nvn] replay threads: '%s' time-constraint policy (period %.3f ms, computation %.3f ms) failed to set (%d): it keeps its QoS", w->name, period_ns / 1e6, comp_ms, kr); return; }
+    pthread_mutex_lock(&g_rt_mu);   // rtw_states reads these from the thread writing the policy line
+    int first = !(w->comp_ms > 0); w->comp_ms = comp_ms; w->period_ms = period_ns / 1e6;
+    if (first) {   // a send right of our own, so that the line reads this thread and a thread that ended reads as ended
+        w->port = mach_port_mod_refs(mach_task_self(), self, MACH_PORT_RIGHT_SEND, 1) == KERN_SUCCESS ? self : 0;
+        if (g_nrtw < (int)(sizeof g_rtw / sizeof *g_rtw)) g_rtw[g_nrtw++] = w;
+    }
+    pthread_mutex_unlock(&g_rt_mu);
+    if (w->logged < 16) { w->logged++; LOG("[nvn] replay threads: '%s' time-constraint policy (period %.3f ms, computation %.3f ms) set%s", w->name, period_ns / 1e6, comp_ms, first ? " (the thread's first)" : w->logged == 16 ? "; later changes are not logged" : ""); }
+}
+void nvn_rtw_tick(nvn_rtw *w, uint64_t frame) {
+    if (w->failed || frame == UINT64_MAX) return;
+    uint64_t period = atomic_load_explicit(&g_rt_frame_ns, memory_order_relaxed);
+    if (!period) return;   // no window texture acquired yet
+    uint64_t cpu = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
+    if (!w->started) { w->started = 1; w->frame = frame; w->cpu = cpu; rtw_declare(w, period, nvn_rtw_size_ms(NULL, 0, period / 1e6)); return; }
+    if (frame <= w->frame) return;   // the replay's frame goes back when jobs of two queues interleave (nq_report_due)
+    double per = (double)(cpu - w->cpu) / 1e6 / (double)(frame - w->frame); w->frame = frame; w->cpu = cpu;
+    double pms = period / 1e6;
+    if (fabs(pms - w->period_ms) > w->period_ms * 0.01) { double c = w->comp_ms, lo = fmax(1.0, pms * NVN_RTW_FLOOR), hi = pms * NVN_RTW_CAP; rtw_declare(w, period, c < lo ? lo : c > hi ? hi : c); }   // the present period changed: the computation kept, within the new bounds
+    w->win[w->n++] = per; if (w->n < NVN_RTW_WIN) return;
+    double comp = nvn_rtw_size_ms(w->win, w->n, pms); w->n = 0;
+    if (comp > w->comp_ms * 1.15 || comp < w->comp_ms * 0.85) rtw_declare(w, period, comp);
+}
+// For the thread policy line (rt_policy_line, DM_FIELD_LOG on): each replay thread's declaration, read on that thread's own port: in effect (policy 2), demoted (still set, run as a
+// standard thread), not in effect, or ended
+static void rtw_states(char *out, size_t n) {
+    size_t o = 0; out[0] = 0;
+    pthread_mutex_lock(&g_rt_mu);
+    if (!g_nrtw) o += (size_t)snprintf(out, n, "; replay threads: no time-constraint policy set yet");
+    for (int i = 0; i < g_nrtw && o < n; i++) {
+        const nvn_rtw *w = g_rtw[i]; thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT; thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = 0;
+        int okx = w->port && thread_info(w->port, THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) == KERN_SUCCESS, okp = w->port && thread_policy_get(w->port, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&tp, &tc, &def) == KERN_SUCCESS, live = okp && !def;
+        const char *st = !okx && !okp ? "unknown (the thread has ended)" : live && okx && xi.pth_policy != POLICY_RR ? "set, but run as a standard thread (demoted)" : live ? "in effect" : "not in effect";
+        o += (size_t)snprintf(out + o, n - o, "; %s real-time computation %.2f ms / period %.2f ms, %s, current priority %d (policy %d)", w->name, w->comp_ms, w->period_ms, st, okx ? xi.pth_curpri : -1, okx ? xi.pth_policy : -1);
+    }
+    pthread_mutex_unlock(&g_rt_mu);
 }
 static void sleep_until_ns(uint64_t dl) {   // absolute time on the monotonic clock
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);

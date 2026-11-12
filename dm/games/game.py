@@ -176,6 +176,8 @@ def header_one(g):
     if fhb not in ('double', 'burst'): sys.exit(f'{g.id}: fps_hold_backoff must be double or burst: {fhb}')
     frs = g.get('fps_resume', 'off')   # the frame across a stay in the background on time and owing nothing, the 30 after it not stepping the hold up (nvn_fstep.h nvn_fstep.away; DM_FPS_RESUME overrides): on / off
     if frs not in ('on', 'off'): sys.exit(f'{g.id}: fps_resume must be on or off: {frs}')
+    rrt = g.get('replay_rt', 'off')   # a time-constraint policy for the NVN queue replay and encode threads, sized to their CPU time per frame (hle_nvn.c nvn_rtw_tick; DM_REPLAY_RT overrides): on / off
+    if rrt not in ('on', 'off'): sys.exit(f'{g.id}: replay_rt must be on or off: {rrt}')
     utp = g.get('ue_texture_pool', '0')   # Unreal's r.Streaming.PoolSize in MB, raised to this on the Mac (hle_uecvar.c; DM_UE_TEXTURE_POOL overrides, and turns it on for iOS): 0 = the game's own pool
     if not utp.isdigit(): sys.exit(f"{g.id}: ue_texture_pool must be megabytes (0 = the game's own pool): {utp}")
     ufc = g.get('ue_fps_cvar', 't.MaxFPS')   # the Unreal console variable the host writes fps_target into (hle_fpslock.c; found by name by the rewriter, ue_cvar.py NAMES): a game's own frame limit its settings apply to t.MaxFPS
@@ -277,6 +279,7 @@ def header_one(g):
          f'#define DM_GAME_FPS_HOLD {int(fh == "on")}',
          f'#define DM_GAME_FPS_HOLD_BACKOFF {int(fhb == "burst")}',
          f'#define DM_GAME_FPS_RESUME {int(frs == "on")}',
+         f'#define DM_GAME_REPLAY_RT {int(rrt == "on")}',
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',
          f'#define DM_GAME_UE_FPS_CVAR {q(ufc)}',
          f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',

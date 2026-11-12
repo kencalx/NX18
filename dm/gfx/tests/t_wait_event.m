@@ -724,6 +724,28 @@ static void signal_events_switch(void) {
     if(was) setenv("DM_NVN_SIGNAL_EVENTS",keep,1); else unsetenv("DM_NVN_SIGNAL_EVENTS");
     nq_signal_node=saved;
 }
+// The replay threads' time-constraint policy (nvn_rt.h; profile key replay_rt, DM_REPLAY_RT): once a present period is known, the replay thread declares one at the first node of a new
+// frame and the encode thread (DM_NVN_ENC_THREAD=1) after its first block of one, each in effect on that thread; with it off neither declares anything
+static int rt_on_port(mach_port_t p) { thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc=THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def=0;
+    return p && thread_policy_get(p,THREAD_TIME_CONSTRAINT_POLICY,(thread_policy_t)&tp,&tc,&def)==KERN_SUCCESS && !def; }
+static void replay_rt_case(void) {
+    int on=nvn_replay_rt(); printf("CASE the replay threads' time-constraint policy (%s)\n",on?"on":"off");
+    CHECK(!nq_rtw.started && !g_rec_rtw.started,"no declaration before a present period is known");
+    atomic_store(&g_rt_frame_ns,16666667ull); uint64_t f0=atomic_load(&g_frame); int done=1;
+    for(int k=1;k<=3;k++) {
+        atomic_store(&g_frame,f0+1000+(uint64_t)k); NVNsync s; P(nvnSyncInitialize)(&s,&device);
+        NVNcommandHandle h=consumer(0,0,&s,0); P(nvnQueueSubmitCommands)(&queues[0],1,&h); done&=landed(&s,5000000000ull); P(nvnSyncFinalize)(&s);
+    }
+    CHECK(done,"three frames' submissions complete");
+    for(int i=0;i<200 && on && rec_on() && !g_rec_rtw.started;i++) usleep(5000);   // the encode thread ticks after its block, which may finish after the GPU did
+    if(on) {
+        CHECK(nq_rtw.started && nq_rtw.comp_ms>0 && nq_rtw.period_ms>16 && rt_on_port(nq_rtw.port),"the replay thread declared its policy, in effect on it");
+        if(rec_on()) CHECK(g_rec_rtw.started && g_rec_rtw.comp_ms>0 && rt_on_port(g_rec_rtw.port),"the encode thread declared its own");
+        else CHECK(!g_rec_rtw.started,"no encode thread (DM_NVN_ENC_THREAD=0): nothing declared for it");
+    } else CHECK(!nq_rtw.started && !g_rec_rtw.started && !g_nrtw,"DM_REPLAY_RT=0: neither thread declares one");
+    char st[512]; rtw_states(st,sizeof st); printf("policy line part:%s\n",st);
+    atomic_store(&g_frame,f0); atomic_store(&g_rt_frame_ns,0);
+}
 int main(void) { @autoreleasepool {
     if (setvbuf(stdout, NULL, _IONBF, 0)) abort(); setenv("DM_PSO_PREPARE","0",1);
     mtl_init();
@@ -765,6 +787,7 @@ int main(void) { @autoreleasepool {
     report_due(); probe_cost(); event_bookkeeping(); signal_set();
     signals_2000(1); signals_2000(0);
     split_allocations();
+    replay_rt_case();
     pthread_mutex_lock(&jobs_mu); jobs_stop=1; pthread_cond_signal(&jobs_cv); pthread_mutex_unlock(&jobs_mu); pthread_join(worker,NULL);
     printf("wait-event fixture: %d checks, %d failed\n",checks,fails);
     // The process owns the fixture pool until all callbacks have retired.

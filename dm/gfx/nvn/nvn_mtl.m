@@ -19,6 +19,7 @@
 #include <os/proc.h>   // os_proc_available_memory: for the memory readout line
 #endif
 #include "nvn_mtl.h"
+#include "nvn_rt.h"   // the encode thread's time-constraint policy (nvn_rec.h rec_thread; replay_rt)
 #include "nvn_queue.h"
 #include <mach/mach.h>
 #include "nvn_obj.h"
