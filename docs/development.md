@@ -200,6 +200,11 @@ DMSH_TEST_XLATE=$PWD/dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate DMSH_TEST_METAL=1 DM
 DMSH_TEST_XLATE=$PWD/dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate python3 -m unittest discover -s dm/tools/tests
 ```
 
+The iOS job's app link is a local gate too: run `dm/ios/tools/build_smoke.py`
+(the iOS job's command, below) into a new empty folder. It
+catches iOS-only link errors that `compile_check.py` cannot, since
+`compile_check.py` compiles each file and never links.
+
 A separate `sanitizers` job builds the same tests again with sanitizers, each
 build in a folder of its own (`build/asan`, `build/tsan`, `asan/`): every host
 unit test and the CPU texture test under AddressSanitizer and
