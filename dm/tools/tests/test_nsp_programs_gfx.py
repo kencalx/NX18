@@ -39,7 +39,7 @@ class ProgramsGfx(unittest.TestCase):
     def test_every_program_is_probed_and_a_vulkan_one_stops(self):
         args = types.SimpleNamespace(program=None, out=None)
         with mock.patch.object(nsp, 'main', self.fake_main({1: 'vulkan', 2: 'vulkan'})):
-            with self.assertRaisesRegex(nsp.BuildError, r'program 1 renders with Vulkan; NX 18 release 1 supports NVN games only'):
+            with self.assertRaisesRegex(nsp.BuildError, r'program 1 renders with Vulkan; NX 18 supports NVN games only'):
                 nsp.check_programs_gfx(args, Profile('1=010049900F546001 2=010049900F546002'))
         self.assertEqual(self.calls, [(1, {}, True)])   # stops at the first: before program 0's rewrite and shaders, which come after this call in main
         self.assertEqual((nsp.PROGRAM_INDEX, self.prog.k, self.prog.n), (0, 3, 9))   # the first program's index and progress plan, as they were

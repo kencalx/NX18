@@ -82,7 +82,7 @@ Binding conventions followed during translation (the NVN driver's layout, the sa
 | `nvn/include/nvn.h` | NVN interface declarations (third party; for the license see the file header) |
 | `nvn/names.txt` | The NVN API name list. The per-game tables described above live in the game profile `dm/games/<id>/` (named after the base game's title ID; tools pick it with `DM_GAME`, make with `GAME`; there is no default game) |
 | `tex/` | Texture format mapping, deswizzling, BC decompression, see [tex/README.md](tex/README.md) |
-| (removed) | The Vulkan layer (`vk/hle_vk.m`, `tools/vk_shaders.py`) and the OpenGL layer (`gl/hle_gl.m`, `tools/gl_shaders.py`, `msl/gl_util.metal`): removed in release 1, which renders NVN games only (Metal 4 only); they are in git at `93c34371`, to be ported to Metal 4 later. A game that calls an EGL, GL or Vulkan function stops with one `[RED]` line (`dm/host/hle.c`) |
+| (removed) | The Vulkan layer (`vk/hle_vk.m`, `tools/vk_shaders.py`) and the OpenGL layer (`gl/hle_gl.m`, `tools/gl_shaders.py`, `msl/gl_util.metal`): removed in 0.5, which renders NVN games only (Metal 4 only); they are in git at `93c34371`, to be ported to Metal 4 later. A game that calls an EGL, GL or Vulkan function stops with one `[RED]` line (`dm/host/hle.c`) |
 | `tools/` | Offline tools, see below |
 | `tests/` | Unit tests |
 | `hle_vi.c`, `hle_nv.c` | Glue layer for display service and graphics driver initialization: returns host static objects or does nothing |

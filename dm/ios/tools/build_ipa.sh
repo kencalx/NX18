@@ -8,7 +8,7 @@
 #   DM_COPY_ROMFS=NO leaves the game files (RomFS) out of the IPA, as it does for the Xcode build phase: the package then stays small (a large game's full package can exceed what iOS extracts), and the app takes the files from Documents/romfs.img (scripts/push_romfs.sh); default: they are packed
 #   DM_SHADER_FILES=1 packs an NVN game's shader library as its separate files, msl/b-<chain>/, not as the one file b-<chain>.img, for install tools that cannot copy a large file (AltServer; pack_ipa.py --shader-files); default: off
 #   DM_ENTITLEMENTS=<plist> is the unsigned IPA's entitlements, signed ad-hoc into the executable (default: Increased Memory Limit and Extended Virtual Addressing, which need a paid developer account; an empty string = none)
-#   AOC=add-on content directory (default $W/data/aoc; when it exists it goes to DmIOS.app/aoc/<index>/; an empty string = none), GFXAPI=nvn (the default; NX 18 release 1 renders NVN games only, and another value stops the build)
+#   AOC=add-on content directory (default $W/data/aoc; when it exists it goes to DmIOS.app/aoc/<index>/; an empty string = none), GFXAPI=nvn (the default; NX 18 renders NVN games only, and another value stops the build)
 #   The app name is the game name in the base NSP's control data ($W/data/v0/control.nacp, else the one next to the RomFS), the app version is the display version in the packed game's control data (the one next to the RomFS:
 #   nx_extract saves the update's there when an update is packed, else the base game's), the bundle ID is org.nxnative.<base game title ID in lowercase> (DM_DISPLAY_NAME / DM_APP_VERSION / DM_BUNDLE_ID override them);
 #   CONTROL=<control.nacp> is the file whose languages the launcher's settings offer (the NSP script's languages_control; default: the packed game's control data as above);
@@ -74,9 +74,9 @@ MODS=$(python3 "$DM/games/game.py" modules "$GAME" "$PATCHED") || die "game prof
 for f in $MODS; do [ -f "$PATCHED/$f.patched.bin" ] && [ -f "$PATCHED/$f.fixups.tsv" ] || die "no rewritten module $PATCHED/$f (run dm/tools/patch_nso.py first)"; done
 python3 "$DM/tools/romfs.py" "$ROMFS" "$MARKER" || die "no RomFS at $ROMFS (missing $MARKER)"
 V=${V:-$(sed -n 's/^#define DMSH_CHAIN "\(.*\)"/\1/p' "$DM/gfx/nvn/dmsh_chain.h")}   # the chain version the host is compiled with, one for every game
-# NX 18 release 1 is Metal 4 only and renders NVN games only: the OpenGL and Vulkan layers were removed (git 989e75d4; last present at 93c34371). GFXAPI is what the NSP script detected (nvn when unset)
+# NX 18 is Metal 4 only and renders NVN games only: the OpenGL and Vulkan layers were removed (git 989e75d4; last present at 93c34371). GFXAPI is what the NSP script detected (nvn when unset)
 GFXAPI=${GFXAPI:-nvn}
-[ "$GFXAPI" = nvn ] || die "$(gp name) renders with $([ "$GFXAPI" = vulkan ] && echo Vulkan || echo OpenGL); NX 18 release 1 supports NVN games only"
+[ "$GFXAPI" = nvn ] || die "$(gp name) renders with $([ "$GFXAPI" = vulkan ] && echo Vulkan || echo OpenGL); NX 18 supports NVN games only"
 [ -n "$V" ] && lib_has "$MSL_IOS/b-$V" || die "no iOS shader libraries $MSL_IOS/b-$V (IOSOUT=$MSL_IOS dmsh_build.py ...)"
   # One chain version serves every game and every state of a profile's tables: the libraries' stamp (b-$V/inputs.tsv, written by a full dmsh_build.py run) must name this game and the
   # digest of its profile's current inputs, and c1_full.tsv (not in the repository: the same build makes it, and cb_extent.tsv, from its Mac outputs) must name that digest, or the host ignores it

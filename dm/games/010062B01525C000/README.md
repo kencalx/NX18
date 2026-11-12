@@ -21,7 +21,7 @@ iPhone: no IPA was built, and the touch layout is untested.
 | `shader_groups /sysdat.cpk/=sysdat` | `game.tsv` | every shader is a BNSH entry under `sysdat.cpk` |
 | `romfs_marker data.cpk` | `game.tsv` | the RomFS is a root of CPKs |
 | `pad_layout full` | `game.tsv` | the game uses the full controller; the touch layout is untested |
-| `present_trim 60` | `game.tsv` | on an iPhone 18 Pro Max (release 1, 60 fps, edge smoothing) a frame stood in the display link's queue for the whole session, so game enqueue to display was 45–49 ms; dropping one frame after 60 ticks in a row with two or more waiting brought it to 28–29.5 ms (4 frames dropped in 73 s, frame interval p99 unchanged at 17.5–21 ms, GPU 2–6 ms a frame, no audio underruns in play). The owner felt no difference in the controls. `DM_PRESENT_TRIM` in `env.txt` overrides it (0 for off). Checked only on iOS; the Mac uses it untested ([A frame that stands in the display link's queue](../../../docs/reference/frame-rate.md#a-frame-that-stands-in-the-display-links-queue)) |
+| `present_trim 60` | `game.tsv` | on an iPhone 18 Pro Max (the 0.5 build, 60 fps, edge smoothing) a frame stood in the display link's queue for the whole session, so game enqueue to display was 45–49 ms; dropping one frame after 60 ticks in a row with two or more waiting brought it to 28–29.5 ms (4 frames dropped in 73 s, frame interval p99 unchanged at 17.5–21 ms, GPU 2–6 ms a frame, no audio underruns in play). The owner felt no difference in the controls. `DM_PRESENT_TRIM` in `env.txt` overrides it (0 for off). Checked only on iOS; the Mac uses it untested ([A frame that stands in the display link's queue](../../../docs/reference/frame-rate.md#a-frame-that-stands-in-the-display-links-queue)) |
 
 ## Files
 
@@ -44,7 +44,7 @@ iPhone: no IPA was built, and the touch layout is untested.
   `pso_pairs.tsv` and `shader_facts.tsv` hold only their headers.
 - `pso_manifest.tsv` covers boot, the opening movie, the title screen and a new
   game into the first Velvet Room scene.
-- With no shader pair the app had no pipeline archive made offline. Since release 1.5
+- With no shader pair the app had no pipeline archive made offline. Since X1.0
   it gets one of [layout bases](../../../docs/reference/shaders.md#pipelines-with-a-vertex-layout-compiled-at-a-fresh-installs-prepare-step) alone: the list's 23 `R` rows give 9
   bases (`applegpu_g19p`, 2.4 s on an M4 Max); 5 rows share a base and 9 are left to
   the device (`stride`: an attribute larger than the stride of 4 `pso_desc` gives a

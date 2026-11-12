@@ -8,8 +8,8 @@ import argparse, os, pathlib, re, runpy, sys
 AREAS = [   # label, color, description, paths (regular expression, matched from the start)
     ('host', '1d76db', 'The Horizon host: SVCs, services, threads, memory (dm/host)', r'dm/host/'),
     ('nvn', '0e8a16', 'NVN on Metal and its tests (dm/gfx/nvn, dm/gfx/tests)', r'dm/gfx/(nvn|tests)/'),
-    ('vulkan', '0e8a16', 'Vulkan games (the Vulkan layer, dm/gfx/vk, was removed in release 1)', r'dm/gfx/vk/'),
-    ('opengl', '0e8a16', 'OpenGL games (the OpenGL layer, dm/gfx/gl, was removed in release 1)', r'dm/gfx/gl/'),
+    ('vulkan', '0e8a16', 'Vulkan games (the Vulkan layer, dm/gfx/vk, was removed in 0.5)', r'dm/gfx/vk/'),
+    ('opengl', '0e8a16', 'OpenGL games (the OpenGL layer, dm/gfx/gl, was removed in 0.5)', r'dm/gfx/gl/'),
     ('textures', '0e8a16', 'Texture layouts and formats (dm/gfx/tex)', r'dm/gfx/tex/'),
     ('rewriter', 'fbca04', 'The NSO rewriter and per-build patches', r'dm/tools/(patch_nso|sdk_patches|nso_)|dm/games/[^/]+/patches\.py$'),
     ('packing', 'c5def5', 'Building an IPA or a Mac app: the NSP script, extraction, the shader split, the packers',

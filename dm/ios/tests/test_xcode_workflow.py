@@ -84,10 +84,10 @@ class XcodePipelineTests(unittest.TestCase):
             finally:
                 progress.close()
             events = [json.loads(line) for line in output.getvalue().splitlines()]
-            if graphics != 'nvn':   # NX 18 release 1 renders NVN games only: the build stops after the extraction, before the rewrite and the shader steps, with one message
+            if graphics != 'nvn':   # NX 18 renders NVN games only: the build stops after the extraction, before the rewrite and the shader steps, with one message
                 api = 'Vulkan' if graphics == 'vulkan' else 'OpenGL'
                 self.assertEqual(code, 1)
-                self.assertIn(f'[RED] Fixture Game renders with {api}; NX 18 release 1 supports NVN games only', output.getvalue())
+                self.assertIn(f'[RED] Fixture Game renders with {api}; NX 18 supports NVN games only', output.getvalue())
                 for step in ('rewrite', 'check_metal', 'split_shaders', 'build_shaders', 'extract_aoc'): mocks[step].assert_not_called()
                 return
             self.assertEqual(code, 0)
@@ -161,7 +161,7 @@ class ResourceStagingTests(unittest.TestCase):
                     self.assertEqual((app / 'msl' / chain / 'fixture.metallib').read_text(), chain)
                     self.assertEqual([p.name for p in (app / 'msl').iterdir()], [chain])
                     self.assertEqual((app / 'aoc/1/content').read_text(), 'dlc')
-            # A project prepared for a Vulkan or OpenGL game (msl/vk, msl/gl) before NX 18 release 1 removed those layers: stop before copying anything
+            # A project prepared for a Vulkan or OpenGL game (msl/vk, msl/gl) before NX 18 removed those layers in 0.5: stop before copying anything
             for chain in ('vk', 'gl'):
                 with self.subTest(chain=chain):
                     shader = shaders / chain

@@ -42,7 +42,7 @@ shader_note	13 Sentinels: Aegis Rim shaders
 depth_mode	zero
 
 # ---- Display ----
-# A frame stood in the display link's queue from about 15 s into play on an iPhone 18 Pro Max (release 1, 60 fps, warm start): game enqueue to display about 43 ms, two frames
+# A frame stood in the display link's queue from about 15 s into play on an iPhone 18 Pro Max (the 0.5 build, 60 fps, warm start): game enqueue to display about 43 ms, two frames
 # waiting on every tick. 60 ticks in a row with two or more frames waiting drop one (DM_PRESENT_TRIM, which env.txt can set, 0 for off): about 28.5 ms, 3 frames dropped in
 # 55 s, 60 fps held, no underruns; the owner felt the controls a little lighter. Checked only on iOS; the Mac uses it untested
 present_trim	60

@@ -249,7 +249,7 @@ def modules_supplying(exefs, want, modules, hooks=None):   # the modules left ou
 def shader_sources(imports, glsl_src, glslc_mods, unreal_paks, trinity_packs=0, legacy_paks=0, gl_names=0, oodle_pkz=0, nro_imports=frozenset(), oodle_gfpak=0, oodle_ue3=0, frostbite=False, romfs_glsl=0):
     """{name: (value, reason)}: graphics (vulkan when main imports Vulkan functions and not nvnBootstrapLoader; gl when it imports eglCreateWindowSurface and names glShaderSource, so it compiles
     GLSL through OpenGL (gl_names: how often main has that name; Absolum imports the same EGL functions for SDL3 but renders with NVN and names no GL function); else nvn; vkGetInstanceProcAddr
-    alone is SDL's Vulkan loader, which Balatro's LÖVE links and never uses). NX 18 release 1 renders NVN only: the OpenGL and Vulkan layers were removed (git 989e75d4; last present at 93c34371), and the NSP
+    alone is SDL's Vulkan loader, which Balatro's LÖVE links and never uses). NX 18 renders NVN only: the OpenGL and Vulkan layers were removed (git 989e75d4; last present at 93c34371), and the NSP
     script stops for a vulkan or gl game. glslc_capture (main holds GLSL sources and calls glslcCompile in a module the game loads: it compiles some shaders at run time), ue_decode (Unreal paks keep the shaders Oodle-compressed
     in their shader code archives, which only the game's own Oodle decodes), oodle_packs (Trinity packs, oodle_pkz PlatinumGames PKZ archives, oodle_gfpak Game Freak GFPAK archives with Oodle Kraken entries, oodle_ue3 Unreal Engine 3 packages with Oodle chunks
     or frostbite Frostbite superbundles, whose cas files are Oodle Leviathan:
@@ -269,8 +269,8 @@ def shader_sources(imports, glsl_src, glslc_mods, unreal_paks, trinity_packs=0, 
     own_glslc = 'nvnBootstrapLoader' in imports and 'glslcCompile' in imports and bool(glsl_src) and bool(glslc_mods)
     gl = not vulkan and not nro_nvn and 'eglCreateWindowSurface' in imports and bool(gl_names) and not own_glslc
     nro_glslc = not vulkan and not gl and 'glslcCompile' in nro_imports and bool(glslc_mods)
-    return {'graphics': ('vulkan', f'main imports {vk} Vulkan functions and not nvnBootstrapLoader: it renders with Vulkan, which NX 18 release 1 does not support (the layer was removed)') if vulkan else
-                        ('gl', 'main imports EGL and names glShaderSource: it renders with OpenGL, which NX 18 release 1 does not support (the layer was removed)') if gl else
+    return {'graphics': ('vulkan', f'main imports {vk} Vulkan functions and not nvnBootstrapLoader: it renders with Vulkan, which NX 18 does not support (the layer was removed)') if vulkan else
+                        ('gl', 'main imports EGL and names glShaderSource: it renders with OpenGL, which NX 18 does not support (the layer was removed)') if gl else
                         ('nvn', 'the NROs the game loads import nvnBootstrapLoader' if nro_nvn and 'nvnBootstrapLoader' not in imports else
                                 'main imports nvnBootstrapLoader and compiles its GLSL with GLSLC; its EGL and glShaderSource are left unused (Rayman 30th Anniversary Edition)' if own_glslc and 'eglCreateWindowSurface' in imports and gl_names else
                                 'main imports nvnBootstrapLoader'),

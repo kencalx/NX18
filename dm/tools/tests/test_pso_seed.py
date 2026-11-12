@@ -22,7 +22,7 @@ REPO = Path(__file__).resolve().parents[3]
 def skey(vs=V + '_b', fs=P + '_b', vs_stage=0, fs_stage=1, merged=0, fz=0, ptr=0, fsfn=0, tail=b'', border=0, spare=0, size=512):
     """An R / M row's pso_skey hex as dm/gfx/nvn/nvn_pso_skey.h lays it out on arm64, field by field: vs[24], fs[24], four flags, pso_fz_desc (34) and padding to 88,
     then pso_key (two pointers, ... the specialized fragment pointer at 336, border and border_spare at 416); tail: bytes written after the vertex key's end. size 504: a row
-    from before border (release 1's lists)"""
+    from before border (0.5's lists)"""
     k = bytearray(424)
     struct.pack_into('<Q', k, 0, ptr)
     struct.pack_into('<I', k, 16, 70)   # cfmt[0]: RGBA8Unorm
@@ -62,8 +62,8 @@ class Rows(unittest.TestCase):
     def test_repeats_are_left_out_as_the_host_leaves_them(self):
         short = f'R\t{skey(size=432)}'
         whole = f'R\t{skey(size=432)}' + '0' * (1024 - 864)   # the same key, with atest / logic, attr_hi and border written as zero
-        release1 = f'R\t{skey(size=432)}' + '0' * (1008 - 864)   # and as release 1 wrote it, without border
-        keep, bad = pso_seed.collect([f'S\t{V}_b\t0', short, f'S\t{V}_b\t0', whole, release1, f'C\t{C}_b', f'R\t{skey(border=1)}'], self.map)
+        rel05 = f'R\t{skey(size=432)}' + '0' * (1008 - 864)   # and as 0.5 wrote it, without border
+        keep, bad = pso_seed.collect([f'S\t{V}_b\t0', short, f'S\t{V}_b\t0', whole, rel05, f'C\t{C}_b', f'R\t{skey(border=1)}'], self.map)
         self.assertEqual((keep, bad), ([f'S\t{V}_b\t0', short, f'C\t{C}_b', f'R\t{skey(border=1)}'], []))   # border 1 is another pipeline
 
 

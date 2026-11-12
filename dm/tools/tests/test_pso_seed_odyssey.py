@@ -1,5 +1,5 @@
 """Super Mario Odyssey's committed prewarm list (dm/games/0100000000010000/pso_manifest.tsv, its README "Pipelines on a first start"): an iPhone 18 Pro Max's own pso_user.tsv
-from the owner's play on release 1 with Ultrawide on. Every row must check clean against the profile's shader map as the host reads it (dm/tools/pso_seed.py), in the counts its
+from the owner's play on 0.5 with Ultrawide on. Every row must check clean against the profile's shader map as the host reads it (dm/tools/pso_seed.py), in the counts its
 header gives, with no row repeated or dropped, and the C rows must be compute shaders of the map (pso_offline.py puts them first in the archive's compute groups)."""
 import re
 import sys

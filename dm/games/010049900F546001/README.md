@@ -1,6 +1,6 @@
 # Super Mario 64 in Super Mario 3D All-Stars (`010049900F546001`)
 
-> **Unsupported in NX 18 release 1.** This game renders with Vulkan, and release 1 is Metal 4 only and renders NVN games only: the Vulkan layer (`dm/gfx/vk/hle_vk.m`), its shader translator and its run-time shader capture were removed, so the NSP script stops for Super Mario 3D All-Stars, which packs this program with the launcher (`[RED] <name> renders with Vulkan; NX 18 release 1 supports NVN games only`). The notes below describe the layer as it was at git `93c34371`, where its code is; the profile stays for the port to Metal 4 ([Graphics APIs: NVN only](../../../docs/reference/rendering.md#graphics-apis-nvn-only)).
+> **Unsupported in NX 18.** This game renders with Vulkan, and NX 18 is Metal 4 only and renders NVN games only (since 0.5): the Vulkan layer (`dm/gfx/vk/hle_vk.m`), its shader translator and its run-time shader capture were removed, so the NSP script stops for Super Mario 3D All-Stars, which packs this program with the launcher (`[RED] <name> renders with Vulkan; NX 18 supports NVN games only`). The notes below describe the layer as it was at git `93c34371`, where its code is; the profile stays for the port to Metal 4 ([Graphics APIs: NVN only](../../../docs/reference/rendering.md#graphics-apis-nvn-only)).
 
 Program 1 of [Super Mario 3D All-Stars](../010049900F546000/README.md), packed with it, update 1.1.4 (v393216), SDK 10.8.1. Modules `main` and `sdk`.
 

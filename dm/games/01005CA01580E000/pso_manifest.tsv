@@ -1,5 +1,5 @@
 # Prewarm seed list (shipped in the app, next to shader_map.tsv). Rows: S<TAB>shader key<TAB>stage / R<TAB>render pipeline key (pso_skey hex) / C<TAB>compute shader key.
-# Recorded on an iPhone 18 Pro Max from the owner's play on release 1 (5b302cd0, chain ac67cb709fa0, update 1.0.2 v65536), Frame rate 60 (present_interval_choice), with no list present (everything built on the spot): Documents/pso_user.tsv after that first start, boot and about 4 minutes of play (12,500 frames), 30923 rows: 30357 S, 564 R, 2 C.
+# Recorded on an iPhone 18 Pro Max from the owner's play on 0.5 (5b302cd0, chain ac67cb709fa0, update 1.0.2 v65536), Frame rate 60 (present_interval_choice), with no list present (everything built on the spot): Documents/pso_user.tsv after that first start, boot and about 4 minutes of play (12,500 frames), 30923 rows: 30357 S, 564 R, 2 C.
 # The S rows are every library the game's program creation loaded (nearly the whole shader map); the R rows are the render pipelines its draws built, 11 frames over 100 ms on that first start (up to 1.14 s). Row order = first-use order; do not sort. Checked with dm/tools/pso_seed.py check.
 S	5db4ad55140d0927_b	0
 S	795fe2c07437dfee_b	1

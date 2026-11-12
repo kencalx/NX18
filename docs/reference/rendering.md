@@ -1,6 +1,6 @@
 # Rendering
 
-The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`); the Vulkan and OpenGL layers were removed in release 1 ([Graphics APIs: NVN only](#graphics-apis-nvn-only)). Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
+The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`); the Vulkan and OpenGL layers were removed in 0.5 ([Graphics APIs: NVN only](#graphics-apis-nvn-only)). Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
 ## Textures and formats
 
@@ -287,10 +287,10 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`); the Vulkan and OpenGL layers were 
 
 ### Sampler LOD bias
 
-- **Note:** the Vulkan layer was removed in release 1 (in git at `93c34371`); its half of this entry (`vkCreateSampler`, the red line) is history, the NVN half still applies.
-- **Symptom:** textures a mip level sharper or blurrier than on the Switch where the game biases its sampler; in the Vulkan layer (removed in release 1; history), a red line `sampler LOD bias … not implemented`.
+- **Note:** the Vulkan layer was removed in 0.5 (in git at `93c34371`); its half of this entry (`vkCreateSampler`, the red line) is history, the NVN half still applies.
+- **Symptom:** textures a mip level sharper or blurrier than on the Switch where the game biases its sampler; in the Vulkan layer (removed in 0.5; history), a red line `sampler LOD bias … not implemented`.
 - **Cause:** the host kept NVN's `SamplerBuilderSetLodBias` and Vulkan's `mipLodBias` but never gave them to Metal, taking them for something Metal samplers lack. Metal 26 has `MTLSamplerDescriptor.lodBias` (range −16 to 15.99).
-- **Fix:** `samp_by_id` (NVN) sets it, clamped to that range; the Vulkan layer's `vkCreateSampler` did too, until release 1 removed it (clamped to the ±15 the device reported as `maxSamplerLodBias`).
+- **Fix:** `samp_by_id` (NVN) sets it, clamped to that range; the Vulkan layer's `vkCreateSampler` did too, until 0.5 removed it (clamped to the ±15 the device reported as `maxSamplerLodBias`).
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md) (the Vulkan red line). MacNativeGames uses the property for its own MetalFX bias, which pointed to it.
 
 ### Border colours Metal has no sampler state for
@@ -695,7 +695,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`); the Vulkan and OpenGL layers were 
 - **Cause:** a game that never calls `nvnDeviceSetWindowOriginMode` keeps NVN's default, lower-left (OpenGL), where NDC y = -1 lands on a render target's first memory row. Read as upper-left, every texture the game renders and samples came out flipped and cancelled out, but not the text, and the game copies the frame with `MIRROR_Y`.
 - **Fix:** viewport and scissor rectangles, fragment coordinates, copies and texture coordinates address the same memory rows in both conventions, so the host flips the direction inside the viewport (negative viewport height) and flips the window image at present and in raw screenshots (`g_origin_ll` in `nvn_mtl.m`). Facing also follows the [raster flip captured at queue initialization](#queue-initialization-captures-the-raster-origin).
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md); the six games before it all switch to upper-left.
-- **Note:** the window's Y-direction system register under this origin is open ([Open: the window Y-direction register `SR_Y_DIRECTION`](shaders.md#open-the-window-y-direction-register-sr_y_direction)); the OpenGL layer (removed in release 1) rendered through this origin, and Absolum combines it with a viewport swizzle ([Viewport swizzles applied as a flipped viewport](#viewport-swizzles-applied-as-a-flipped-viewport)).
+- **Note:** the window's Y-direction system register under this origin is open ([Open: the window Y-direction register `SR_Y_DIRECTION`](shaders.md#open-the-window-y-direction-register-sr_y_direction)); the OpenGL layer (removed in 0.5) rendered through this origin, and Absolum combines it with a viewport swizzle ([Viewport swizzles applied as a flipped viewport](#viewport-swizzles-applied-as-a-flipped-viewport)).
 
 ### Queue initialization captures the raster origin
 
@@ -1565,14 +1565,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`); the Vulkan and OpenGL layers were 
 
 ## Graphics APIs: NVN only
 
-NX 18 release 1 is Metal 4 only and renders NVN games only. The Vulkan layer (`dm/gfx/vk/hle_vk.m`: Hades, Super Mario Galaxy and Super Mario Galaxy 2, Super Mario 64 and Super Mario Sunshine in Super Mario 3D All-Stars) and the OpenGL layer (`dm/gfx/gl/hle_gl.m`, NVIDIA's desktop OpenGL through EGL: Balatro, Digimon Story Cyber Sleuth: Complete Edition, Well Dweller) drew on classic Metal queues of their own, and were removed in release 1 with their shader translators (`dm/gfx/tools/vk_shaders.py`, `gl_shaders.py`), their run-time shader captures and their tests; a later release ports them to Metal 4. Their code, and the notes on them this section held, are in git at `93c34371` (`git show 93c34371:docs/reference/rendering.md`, sections "Vulkan layer" and "OpenGL layer").
+NX 18 is Metal 4 only and renders NVN games only. The Vulkan layer (`dm/gfx/vk/hle_vk.m`: Hades, Super Mario Galaxy and Super Mario Galaxy 2, Super Mario 64 and Super Mario Sunshine in Super Mario 3D All-Stars) and the OpenGL layer (`dm/gfx/gl/hle_gl.m`, NVIDIA's desktop OpenGL through EGL: Balatro, Digimon Story Cyber Sleuth: Complete Edition, Well Dweller) drew on classic Metal queues of their own, and were removed in 0.5 with their shader translators (`dm/gfx/tools/vk_shaders.py`, `gl_shaders.py`), their run-time shader captures and their tests; a later release ports them to Metal 4. Their code, and the notes on them this section held, are in git at `93c34371` (`git show 93c34371:docs/reference/rendering.md`, sections "Vulkan layer" and "OpenGL layer").
 
-- **The NSP script** still tells the graphics APIs apart (`profile_guess.py` `shader_sources`, below) and stops right after the extraction for a game it finds to render with Vulkan or OpenGL: `[RED] <name> renders with Vulkan; NX 18 release 1 supports NVN games only` (or `OpenGL`). `build_ipa.sh` stops the same way for `GFXAPI` other than `nvn`.
-- **The host** binds an NVN game's EGL, GL and Vulkan imports to named stubs, as any import it does not implement, so a game that only imports them (Absolum: SDL3's EGL and Vulkan support; Balatro's LÖVE links `vkGetInstanceProcAddr`) runs as before. Only a call to one stops the game, with `[RED] this game renders with OpenGL/Vulkan, which NX 18 does not support (Metal 4 only; the layer was removed in release 1): it called <function>` (`dm/host/hle.c` `unimpl_c`; `make -C dm/host/tests GAME=<id> symbols` tests it).
+- **The NSP script** still tells the graphics APIs apart (`profile_guess.py` `shader_sources`, below) and stops right after the extraction for a game it finds to render with Vulkan or OpenGL: `[RED] <name> renders with Vulkan; NX 18 supports NVN games only` (or `OpenGL`). `build_ipa.sh` stops the same way for `GFXAPI` other than `nvn`.
+- **The host** binds an NVN game's EGL, GL and Vulkan imports to named stubs, as any import it does not implement, so a game that only imports them (Absolum: SDL3's EGL and Vulkan support; Balatro's LÖVE links `vkGetInstanceProcAddr`) runs as before. Only a call to one stops the game, with `[RED] this game renders with OpenGL/Vulkan, which NX 18 does not support (Metal 4 only; the layer was removed in 0.5): it called <function>` (`dm/host/hle.c` `unimpl_c`; `make -C dm/host/tests GAME=<id> symbols` tests it).
 
 ### Telling a GL game from an NVN or Vulkan one
 
-- **Symptom:** (GL layer, removed in release 1; history) the NSP script's provisional profile said Vulkan, and the capture boot crashed in the GL layer.
+- **Symptom:** (GL layer, removed in 0.5; history) the NSP script's provisional profile said Vulkan, and the capture boot crashed in the GL layer.
 - **Cause:** `main` imports `vkGetInstanceProcAddr` for SDL's Vulkan loader, which nothing uses; the game draws with EGL and GL.
 - **Fix:** `profile_guess.py` decides `graphics gl` when `main` imports `eglCreateWindowSurface` and names `glShaderSource`, and now leaves `vkGetInstanceProcAddr` out of its Vulkan count.
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md): `main` imports `nvnBootstrapLoader` and 13 EGL functions. Its graphics setup (`main+0x5ed8f0`) makes an NVN device first, which only a helper beside the movie player uses (`main+0x528000`–`+0x52c400`: a memory pool and four textures next to the movie's GL textures). Then `eglGetDisplay`, `eglBindAPI(EGL_OPENGL_API)`, a 4.5 core context, a window surface on `vi::CreateLayer(w, h)` and a glad loader (`main+0x52c460`). Of the 22 games extracted here (at the time), only Digimon matches the rule. [Balatro](../../dm/games/0100CD801CE5E000/README.md) (SDK 18.3.2, LÖVE 11.4 on OpenGL with SDL and LuaJIT; one boot): `main` imports the EGL functions and `vkGetInstanceProcAddr`, SDL's Vulkan loader, which nothing calls (`subsdk1` is NVIDIA's Vulkan driver); Hades and both Galaxies import 99 or 100 Vulkan functions, `vkCreateInstance` among them.

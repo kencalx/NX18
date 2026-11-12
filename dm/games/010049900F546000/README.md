@@ -1,6 +1,6 @@
 # Super Mario 3D All-Stars (`010049900F546000`)
 
-> **Unsupported in NX 18 release 1.** Super Mario 64 and Super Mario Sunshine (programs 1 and 2) render with Vulkan, whose layer release 1 removed (Metal 4 only, NVN games only; [Graphics APIs: NVN only](../../../docs/reference/rendering.md#graphics-apis-nvn-only)), and the app packs every program, so the NSP script stops for this game (`[RED] <name> renders with Vulkan; NX 18 release 1 supports NVN games only`). The launcher (this program) is NVN; the notes below describe the game as it ran with the layer, at git `93c34371`.
+> **Unsupported in NX 18.** Super Mario 64 and Super Mario Sunshine (programs 1 and 2) render with Vulkan, whose layer NX 18 removed in 0.5 (Metal 4 only, NVN games only; [Graphics APIs: NVN only](../../../docs/reference/rendering.md#graphics-apis-nvn-only)), and the app packs every program, so the NSP script stops for this game (`[RED] <name> renders with Vulkan; NX 18 supports NVN games only`). The launcher (this program) is NVN; the notes below describe the game as it ran with the layer, at git `93c34371`.
 
 Update 1.1.4 (v393216). One game of four programs, packed as one, as on the cartridge: one NSP script run makes one IPA, one Mac app or one Mac run command, and the launcher starts the games inside it.
 

@@ -61,7 +61,7 @@ static void expect_abort(int duplicate) {
     assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
 }
 
-// The OpenGL / Vulkan names of the layers removed in release 1: an NVN game that only imports them (Absolum, Balatro's vkGetInstanceProcAddr) gets named stubs as before,
+// The OpenGL / Vulkan names of the layers removed in 0.5: an NVN game that only imports them (Absolum, Balatro's vkGetInstanceProcAddr) gets named stubs as before,
 // a call to any other stub still returns 0, and a call to one of them stops the game with the one message. In a child: it aborts, and stub indexes are its own
 static void expect_gfx_api_stop(void) {
     int fd[2]; assert(!pipe(fd));
@@ -83,7 +83,7 @@ static void expect_gfx_api_stop(void) {
     close(fd[0]);
     int status; assert(waitpid(pid, &status, 0) == pid);
     assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
-    assert(strstr(out, "[RED] this game renders with OpenGL/Vulkan, which NX 18 does not support (Metal 4 only; the layer was removed in release 1): it called eglGetDisplay"));
+    assert(strstr(out, "[RED] this game renders with OpenGL/Vulkan, which NX 18 does not support (Metal 4 only; the layer was removed in 0.5): it called eglGetDisplay"));
     assert(!strstr(out, "UNIMPL eglGetDisplay"));
 }
 

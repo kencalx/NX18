@@ -194,7 +194,7 @@ int main(void) {
     h_oe_SetFocusMode(3); dm_applet_enter("test");
     CHECK(empty() && h_oe_GetFocus() == 2, "focus mode 3: an applet changes the state without a notification");
     dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 1, "focus mode 3: back to 1 without a notification");
-    // the graphics scale: tier 0 in both modes on the Mac, the operation mode on iOS (1 docked, release 1's answer); DM_GFX_SCALE 0, 1 or 2 wins on both, anything else keeps the platform's answer
+    // the graphics scale: tier 0 in both modes on the Mac, the operation mode on iOS (1 docked, 0.5's answer); DM_GFX_SCALE 0, 1 or 2 wins on both, anything else keeps the platform's answer
     int set;
     CHECK(gfx_scale_pick(NULL, 0, 1, &set) == 0 && !set && gfx_scale_pick(NULL, 0, 0, &set) == 0 && !set, "Mac default: tier 0 docked and handheld");
     CHECK(gfx_scale_pick(NULL, 1, 1, &set) == 1 && !set && gfx_scale_pick(NULL, 1, 0, &set) == 0 && !set, "iOS default: tier 1 docked, 0 handheld");

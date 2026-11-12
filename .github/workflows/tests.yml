@@ -1,4 +1,4 @@
-# Tests that need no game files, keys or GPU. GitHub's virtual Macs have no Metal 4 (issue #112), and NX 18 is Metal 4 only (release 1 removed the classic-queue Vulkan and
+# Tests that need no game files, keys or GPU. GitHub's virtual Macs have no Metal 4 (issue #112), and NX 18 is Metal 4 only (0.5 removed the classic-queue Vulkan and
 # OpenGL layers, and their tests with them), so every test that goes through mtl_init (t_nvn, t_mip_extent, t_rt_range and the rest of dm/gfx/tests' run list) stays local:
 # run `make -C dm/gfx/tests GAME=<id> run` on an Apple-silicon Mac. Here the graphics tests are compiled, and only the CPU-only ones run.
 # `profile_guess.py --check` stays local too: it compares the guesses with the extractions of the games (it needs their files).

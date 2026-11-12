@@ -11,7 +11,7 @@ arts and Shulk / Reyn's first Colony 9 combat, with real audio. Frames during
 the opening battle take about 33 ms. The unsigned 1.1.2 IPA builds successfully
 (13.2 GiB), with all 15,129 shader libraries and a complete CRC check. Further
 story progression and saving / reloading remain open. On the iPhone 18 Pro Max
-(release 1, 2026-11-11) about 8 minutes of a new game held 60 fps with the 60 fps
+(the 0.5 build, 2026-11-11) about 8 minutes of a new game held 60 fps with the 60 fps
 mod ([On the iPhone](#on-the-iphone)).
 
 ## Memory
@@ -62,7 +62,7 @@ buttons and confirm with `A`. Each opening event needs its own skip.
 
 ## On the iPhone
 
-The owner's run on an iPhone 18 Pro Max (iOS 27.3), release 1 (`5b302cd0`, chain
+The owner's run on an iPhone 18 Pro Max (iOS 27.3), 0.5 (`5b302cd0`, chain
 `ac67cb709fa0`), update 1.1.2, docked, the 60 fps mod from the mods folder
 (`DM_MOD_FPS=1`), Picture Stretch, no upscaling, no edge smoothing: the first
 start after a fresh install, then about 8 minutes of a new game (28,600 frames).
@@ -75,13 +75,13 @@ From its `log.txt` (`scripts/devlog.py`):
 - **Power and heat:** CPU 2.18 W median (36 mJ a frame); thermal state 1 only in
   the last 70 s. Same-core handoffs about 1,260 a second (80 ms of polling a
   second), the same-core handoff cost found in Catherine: Full Body, whose wait
-  no longer polls after release 1 (not measured on this game since).
+  no longer polls after 0.5 (not measured on this game since).
 - **Memory:** footprint 976 MB at the title to 1.9 GB at most, GPU allocated at
   most 2.07 GB, at least 6.29 GB of headroom to the app's limit.
 - **Audio:** one gap, 23 underruns (119 ms) on the second output while the game
   loaded about 300 MB.
 - **Display:** game enqueue to target display p50 46 ms (no present trim in
-  release 1; after it the iPhone trims at K = 60 by default, not measured on
+  0.5; after it the iPhone trims at K = 60 by default, not measured on
   this game).
 
 ### Pipelines on a first start
@@ -104,7 +104,7 @@ exactly those six.
 - **Its cost on a first start** (an estimate, not measured): each added `R` row
   takes at most one base, so at most 146 more in the prepare step; at this
   start's rate (2.98 s for 391 bases, about 7.6 ms a base on 6 workers) about
-  1.1 s more, so about 4 s in all with release 1's archive. An app whose archive
+  1.1 s more, so about 4 s in all with 0.5's archive. An app whose archive
   also holds the list's layout bases (`pso_offline.py`'s `R` rows) takes those it
   can describe from the app instead, so less; not measured.
 - **The settings:** the 60 fps mod changes the game's pacing and Picture Stretch

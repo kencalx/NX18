@@ -26,7 +26,7 @@ No `patches.py`.
 ## Ultrawide
 
 - **Current:** with an Ultrawide mod in the game's mods folder the launcher offers **Ultrawide** (`DM_MOD_ULTRAWIDE`, off by default as for every game), and on an iPhone the row says *Can drop below 60 fps in busy scenes on iPhone* (`ultrawide_cost fps`, the row's `hint` in `settings.tsv`). It stays selectable.
-- Measured on an iPhone 18 Pro Max with release 1 (`5b302cd0`), the same route from warm starts each time, Picture on Stretch. Ultrawide off with edge smoothing (**Anti-aliasing**) on held 60 fps, with brief dips to 51–54. Ultrawide on with edge smoothing off fell to 36–52 fps for most of the route's second half, with a GPU time p50 of 17–24 ms against the 16.7 ms a frame has at 60 fps. Ultrawide adds about 1.5–2 ms of GPU time a frame in light areas and 5–9 ms in busy rooms, so the drop comes from the wider view, not from edge smoothing, which the slower run had off.
+- Measured on an iPhone 18 Pro Max with 0.5 (`5b302cd0`), the same route from warm starts each time, Picture on Stretch. Ultrawide off with edge smoothing (**Anti-aliasing**) on held 60 fps, with brief dips to 51–54. Ultrawide on with edge smoothing off fell to 36–52 fps for most of the route's second half, with a GPU time p50 of 17–24 ms against the 16.7 ms a frame has at 60 fps. Ultrawide adds about 1.5–2 ms of GPU time a frame in light areas and 5–9 ms in busy rooms, so the drop comes from the wider view, not from edge smoothing, which the slower run had off.
 
 ## Modules and memory
 

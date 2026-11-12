@@ -1,5 +1,5 @@
 """The Legend of Zelda: Breath of the Wild's committed prewarm list (dm/games/01007EF00011E000/pso_manifest.tsv, its README "Pipelines on a first start"): the Mac recording,
-then an iPhone 18 Pro Max's own pso_user.tsv from the owner's play on release 1 (Frame rate 60, Picture Stretch) below its note. Every row must check clean against the profile's
+then an iPhone 18 Pro Max's own pso_user.tsv from the owner's play on 0.5 (Frame rate 60, Picture Stretch) below its note. Every row must check clean against the profile's
 shader map as the host reads it (dm/tools/pso_seed.py), in the counts the header and the note give, with no row repeated or dropped; the iPhone rows repeat none of the Mac rows
 (pso_user.tsv records only what the list did not hold), and the C rows must be compute shaders of the map (pso_offline.py puts them first in the archive's compute groups)."""
 import re

@@ -1,6 +1,6 @@
 # Well Dweller (`0100217023F6C000`)
 
-> **Unsupported in NX 18 release 1.** This game renders with OpenGL, and release 1 is Metal 4 only and renders NVN games only: the OpenGL layer (`dm/gfx/gl/hle_gl.m`), its shader translator and its run-time shader capture were removed, so the NSP script stops for it (`[RED] <name> renders with OpenGL; NX 18 release 1 supports NVN games only`). The notes below describe the layer as it was at git `93c34371`, where its code is; the profile stays for the port to Metal 4 ([Graphics APIs: NVN only](../../../docs/reference/rendering.md#graphics-apis-nvn-only)).
+> **Unsupported in NX 18.** This game renders with OpenGL, and NX 18 is Metal 4 only and renders NVN games only (since 0.5): the OpenGL layer (`dm/gfx/gl/hle_gl.m`), its shader translator and its run-time shader capture were removed, so the NSP script stops for it (`[RED] <name> renders with OpenGL; NX 18 supports NVN games only`). The notes below describe the layer as it was at git `93c34371`, where its code is; the profile stays for the port to Metal 4 ([Graphics APIs: NVN only](../../../docs/reference/rendering.md#graphics-apis-nvn-only)).
 
 Version 1.0.0, SDK **22.2.0** (`nnSdk-22_2_0`, `NintendoSDK_NVN-22_2_0`, `NintendoSDK_OpenGL-22_2_0`). A **GameMaker Studio 2** game: the RomFS holds the runner's data file (`game.win`, 229 MB, `FORM`/`GEN8`), its entitlements, three `audiogroup*.dat` banks, `options.ini` with `[LLVM-Switch] SDKDir=…`, and its pictures.
 
@@ -43,7 +43,7 @@ General host changes first needed here; each applies to every game on the same S
 - **SDK aborts with a message** (`nn::diag::detail::VAbortImpl`) log their format before the abort, which is how the `system_error` above was named: [`clock_gettime` is `nn::time`'s steady clock (SDK 22)](../../../docs/reference/services.md#clock_gettime-is-nntimes-steady-clock-sdk-22).
 - **Resolved: no audio**, `OpenAudioOut` without a release event (SDK 22): [`OpenAudioOut` without a release event (SDK 22)](../../../docs/reference/audio.md#openaudioout-without-a-release-event-sdk-22).
 - **Resolved: a crash at `pc 0` in `nv::GetGraphicsMemoryInfo`** on a title with no NVN device: [`nv::GetGraphicsMemoryInfo` with no graphics device](../../../docs/reference/memory.md#nvgetgraphicsmemoryinfo-with-no-graphics-device).
-- **The GL layer** (removed in release 1, in git at `93c34371`): client-memory vertex arrays, `glFlush`, and the bring-up switches `DM_GL_DRAWLOG`, `DM_GL_FBLOG` and `DM_GL_MISSES` (removed with it: their rows are in `docs/env_switches.tsv` at `93c34371`, `git show 93c34371:docs/env_switches.tsv`); the translator's ES 1.00 dialect and struct uniforms (links above).
+- **The GL layer** (removed in 0.5, in git at `93c34371`): client-memory vertex arrays, `glFlush`, and the bring-up switches `DM_GL_DRAWLOG`, `DM_GL_FBLOG` and `DM_GL_MISSES` (removed with it: their rows are in `docs/env_switches.tsv` at `93c34371`, `git show 93c34371:docs/env_switches.tsv`); the translator's ES 1.00 dialect and struct uniforms (links above).
 
 ## Open
 

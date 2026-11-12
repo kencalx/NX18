@@ -2,7 +2,7 @@
 # Unsigned IPA or a device-ready Xcode project straight from the NSPs: identify the game (title ID → game profile dm/games/<id>/) → extract (nx_extract) → rewrite the code modules (patch_nso.py)
 #   → (a game that compiles shaders at run time: capture them, by booting it in the Mac host for a few seconds; an Unreal game: decode its shaders with its own Oodle, the same way)
 #   → split out the shaders and check them against the profile's tables (shader_split.py) (a game with Trinity packs, Pokémon Legends: Z-A, has them decoded for the split by its own Oodle decoder, run in the Mac host's tool mode)
-#   → iOS shader libraries (dmsh_build.py) → build_ipa.sh. A game that renders with Vulkan or OpenGL (Hades, Balatro) stops right after the extraction: NX 18 release 1 is Metal 4 only and
+#   → iOS shader libraries (dmsh_build.py) → build_ipa.sh. A game that renders with Vulkan or OpenGL (Hades, Balatro) stops right after the extraction: NX 18 is Metal 4 only and
 #   renders NVN games only (the OpenGL and Vulkan layers were removed; they are in git at 93c34371).
 #   Which of these steps a game needs follows from its files (dm/games/profile_guess.py shader_sources), not from its profile. A game with no matching profile is surveyed (<NSP folder>/<title ID>_survey/survey.md), then gets a provisional profile guessed from
 #   the survey (<build folder>/profile/<title ID>/, the build folder being <NSP folder>/<title ID>_build unless --work-dir names another; outside the repository, found through DM_GAMES_DIR) and a best-effort IPA that may not boot; SURVEY_ONLY / --survey-only stops after the survey.
@@ -134,9 +134,9 @@ class BuildError(Exception):
 
 
 def unsupported_gfx(gfx, name):
-    """The stop for a game whose graphics detection (profile_guess.py shader_sources) says vulkan or gl: NX 18 release 1 is Metal 4 only and renders NVN games only; the OpenGL and
+    """The stop for a game whose graphics detection (profile_guess.py shader_sources) says vulkan or gl: NX 18 is Metal 4 only and renders NVN games only; the OpenGL and
     Vulkan layers were removed (git 989e75d4; last present at 93c34371), to be ported later"""
-    return f'{name} renders with {"Vulkan" if gfx == "vulkan" else "OpenGL"}; NX 18 release 1 supports NVN games only'
+    return f'{name} renders with {"Vulkan" if gfx == "vulkan" else "OpenGL"}; NX 18 supports NVN games only'
 
 
 def clock():
@@ -3586,7 +3586,7 @@ def main(args=None):
     game = dirs[pkg_ver]
     # how the shaders are got follows from the packed version's files (profile_guess.py shader_sources): the graphics API, and the shaders made only at run time
     src = pg.build_sources(game / 'ExeFS', rfs.source(game), g.modules_in(game / 'ExeFS'))
-    gfx = src['graphics'][0]   # nvn; vulkan (Hades) or gl (Balatro, Digimon Story Cyber Sleuth) stop here: their layers were removed in release 1
+    gfx = src['graphics'][0]   # nvn; vulkan (Hades) or gl (Balatro, Digimon Story Cyber Sleuth) stop here: their layers were removed in 0.5
     if gfx != 'nvn': raise BuildError(unsupported_gfx(gfx, control_name(game) or g.get('name') or f'{app:016X}'))
     if probe: return gfx
     check_programs_gfx(args, g)   # the other programs of a game of several: one that is not NVN stops here too, before this one's rewrite and shaders

@@ -473,7 +473,7 @@ class Layout(unittest.TestCase):
         self.assertEqual((k['vs'], k['fs'], k['vs_stage'], k['attr'][0], k['attr'][1], k['attr'][20], k['stream'][3]), ('v_b', 'p_b', 0, (0x2E, 0, 0), (0x16, 16, 3), (0x11, 4, 2), (8, 1)))
         self.assertEqual((k['chmask'], k['blend_en']), (0xf, 1))   # pso_key_norm: the absent target's
         self.assertEqual(po.parse_render_key(rkey(attrs={20: (0x11, 4, 2)}, size=512 - 8 - 64))['attr'][20], (0, 0, 0))   # a row from before attr_hi
-        self.assertEqual(po.parse_render_key(rkey(border=1, size=512 - 8))['border'], 0)   # a row from before border (release 1's lists): it reads as 0
+        self.assertEqual(po.parse_render_key(rkey(border=1, size=512 - 8))['border'], 0)   # a row from before border (0.5's lists): it reads as 0
         self.assertEqual(po.parse_render_key(rkey(border=1))['border'], 1)
         self.assertIsNone(po.parse_render_key(rkey()[:-2]))
         self.assertEqual(po.read_layouts([self.d / 'none.tsv']), [])

@@ -249,7 +249,7 @@ class AudioLine(unittest.TestCase):   # hle_audio.c's statistics line, before an
 
 
 
-class PrepareLine(unittest.TestCase):   # nvn_mtl.m's prepare line, with the bundled archive's layout bases (release 1.5) and without (no bundle, an older log)
+class PrepareLine(unittest.TestCase):   # nvn_mtl.m's prepare line, with the bundled archive's layout bases (X1.0) and without (no bundle, an older log)
     HEAD = ('[dm] [nvn-mtl] pipeline prepare: 120 lines (10 shaders, 100 render pipelines, 10 compute pipelines) in 0.80 s on 12 workers before the first frame, progress screen shown; '
             'bases 2 compiled, 90 from the archive, 8 reused; 100 specializations')
 

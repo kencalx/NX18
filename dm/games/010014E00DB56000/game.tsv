@@ -1,10 +1,10 @@
 # Game profile of Digimon Story Cyber Sleuth: Complete Edition (Switch, update 1.0.3 = v196608). Plays on the iPhone; on the Mac from the logos through the EDEN opening and character creation into EDEN, under control
 # Format: see dm/games/README.md
 # Media.Vision's MVGL engine (the PC version's), SDK 6.4.0, on NVIDIA's desktop OpenGL 4.5 core driver through EGL (subsdk0, not loaded): main gets its GL functions from a glad loader
-# (eglGetProcAddress) and calls 79 of them, which the host's GL layer implements on Metal (dm/gfx/gl/hle_gl.m; removed in release 1, in git at 93c34371). Its NVN device serves only a helper beside the movie
-# player (a memory pool and four textures). Every game file is in nine MVGL archives (DSDB*.nx64.mvgl: MDB1, doboz-compressed entries, dm/gfx/tools/mvgl.py; removed in release 1, in git at 93c34371; four of them are CRI AFS2
+# (eglGetProcAddress) and calls 79 of them, which the host's GL layer implements on Metal (dm/gfx/gl/hle_gl.m; removed in 0.5, in git at 93c34371). Its NVN device serves only a helper beside the movie
+# player (a memory pool and four textures). Every game file is in nine MVGL archives (DSDB*.nx64.mvgl: MDB1, doboz-compressed entries, dm/gfx/tools/mvgl.py; removed in 0.5, in git at 93c34371; four of them are CRI AFS2
 # sound banks under the same extension) but the movies, loose CRI USM files (H.264 through the SDK's movie library, subsdk1, into NV12 buffers the game uploads into GL textures)
-# The shaders are GLSL ES 3.20 sources the game compiles at run time: 1,682 .shad files in the archives (615 distinct) and 37 built-in strings in main; dm/gfx/tools/gl_shaders.py (removed in release 1, in git at 93c34371)
+# The shaders are GLSL ES 3.20 sources the game compiles at run time: 1,682 .shad files in the archives (615 distinct) and 37 built-in strings in main; dm/gfx/tools/gl_shaders.py (removed in 0.5, in git at 93c34371)
 # translates them offline (glslang → SPIR-V → spirv-cross), and the host finds each by the hash of its text
 
 # ---- Identity ----
@@ -41,5 +41,5 @@ sys_resource	0x0
 mem_used	0x4a00000
 
 # ---- Shader split ----
-# no NVN shaders: the NVN tables stay empty (gl_shaders.py, removed in release 1 and in git at 93c34371, wrote the GL library and its table, not the profile)
-shader_note	Digimon Story Cyber Sleuth: Complete Edition has no NVN shaders (its GLSL shaders went through the GL layer, removed in release 1, in git at 93c34371)
+# no NVN shaders: the NVN tables stay empty (gl_shaders.py, removed in 0.5 and in git at 93c34371, wrote the GL library and its table, not the profile)
+shader_note	Digimon Story Cyber Sleuth: Complete Edition has no NVN shaders (its GLSL shaders went through the GL layer, removed in 0.5, in git at 93c34371)

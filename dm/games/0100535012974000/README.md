@@ -1,6 +1,6 @@
 # Hades (`0100535012974000`)
 
-> **Unsupported in NX 18 release 1.** This game renders with Vulkan, and release 1 is Metal 4 only and renders NVN games only: the Vulkan layer (`dm/gfx/vk/hle_vk.m`), its shader translator and its run-time shader capture were removed, so the NSP script stops for it (`[RED] <name> renders with Vulkan; NX 18 release 1 supports NVN games only`). The notes below describe the layer as it was at git `93c34371`, where its code is; the profile stays for the port to Metal 4 ([Graphics APIs: NVN only](../../../docs/reference/rendering.md#graphics-apis-nvn-only)).
+> **Unsupported in NX 18.** This game renders with Vulkan, and NX 18 is Metal 4 only and renders NVN games only (since 0.5): the Vulkan layer (`dm/gfx/vk/hle_vk.m`), its shader translator and its run-time shader capture were removed, so the NSP script stops for it (`[RED] <name> renders with Vulkan; NX 18 supports NVN games only`). The notes below describe the layer as it was at git `93c34371`, where its code is; the profile stays for the port to Metal 4 ([Graphics APIs: NVN only](../../../docs/reference/rendering.md#graphics-apis-nvn-only)).
 
 Update 1.0.38233 (v589824), SDK 9.3.0. Supergiant Games' engine on The Forge renderer, on **Vulkan**, not NVN: `main` imports 100 `vk*` functions from `subsdk0` (the Vulkan loader), which sits on NVIDIA's driver in `subsdk1` (NVN, OpenGL, Vulkan). The host implements those functions on Metal itself (`dm/gfx/vk/hle_vk.m`), so only `main` and `sdk` are loaded. Plays on the iPhone.
 

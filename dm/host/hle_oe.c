@@ -338,7 +338,7 @@ HLE_FORCE("_ZN2nn2oe22SetCpuOverclockEnabledEb", "CPU overclock switch (through 
 // (main+0x30f840; docked 2304x1296 with tier 1, 2880x1620 with 0), and as an index into {3, 12, 16} (main+0x1d1a604) whose value less 3 (0, 9, 13) its dynamic resolution
 // adds to its GPU time (main+0x549614). Star Fox keeps only "tier 0" (byte +0xa of its event 5, main+0xba69970) and renders 0.8 times smaller below it: docked, 768x432 for
 // its 1920x1080 window where tier 0 gives 960x540, its handheld size. Ocarina of Time draws 2048x1152 with tier 1 and 2560x1440 with 0. The host answered 1 docked until
-// these were found, and on the iPhone and iPad it still does (release 1.5's choice: the operation mode, 1 docked and 0 handheld, so a docked game keeps release 1's smaller
+// these were found, and on the iPhone and iPad it still does (X1.0's choice: the operation mode, 1 docked and 0 handheld, so a docked game keeps 0.5's smaller
 // picture; Ocarina of Time docked already heats the phone at 2048x1152, and Star Fox docked stays at 768x432). DM_GFX_SCALE (0, 1 or 2) sets the tier on every platform,
 // to see what a game does with a reduced one or, on iOS, DM_GFX_SCALE=0 for the full picture docked; any other value keeps the platform's answer. Which answer is used,
 // and why, is logged at the first query

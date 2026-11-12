@@ -2,7 +2,7 @@
 # NERD's "Hagi" Wii layer: the Wii game's PowerPC code is statically recompiled into main (hagi.config: Cpu Jit false, Statifier true), and Hagi stands in for the Wii
 # hardware (GX → Vulkan with SPIR-V generated at run time, the DSP with its own ROMs in data/dsp, DVD reads from the RomFS). main's bss is about 2.9 GB (0xb964d0e8: the emulated memory).
 # Renders with Vulkan: main imports 99 vk* functions, which subsdk4 (NVIDIA's Vulkan driver, on GLSLC in subsdk1) supplies; subsdk3 is NVIDIA's OpenGL driver, subsdk2 nn::pcm.
-# The host implements the vk* functions on Metal itself (dm/gfx/vk/hle_vk.m; removed in release 1, in git at 93c34371), so only main, subsdk0 (NintendoSDK_movie, for the WebM movies in data/video_replace) and sdk are loaded.
+# The host implements the vk* functions on Metal itself (dm/gfx/vk/hle_vk.m; removed in 0.5, in git at 93c34371), so only main, subsdk0 (NintendoSDK_movie, for the WebM movies in data/video_replace) and sdk are loaded.
 # Values marked "Mario's" are not measured for this game yet
 
 # ---- Identity ----
@@ -23,8 +23,8 @@ package	v327680
 shader_versions	v327680
 
 # ---- Graphics ----
-# main imports Vulkan, not NVN: the host's Vulkan layer (dm/gfx/vk/hle_vk.m; removed in release 1, in git at 93c34371). Hagi generates its GX shaders as SPIR-V at run time from data/database/pip/pipelineDB.pip during "Initializing system...":
-# 3,089 modules with the 56 built into main, and the RomFS has no SPIR-V file, so the NSP script captures them by booting the game on the Mac (vk_capture.tsv lists the keys); vk_shaders.py (removed in release 1, in git at 93c34371) translates the capture
+# main imports Vulkan, not NVN: the host's Vulkan layer (dm/gfx/vk/hle_vk.m; removed in 0.5, in git at 93c34371). Hagi generates its GX shaders as SPIR-V at run time from data/database/pip/pipelineDB.pip during "Initializing system...":
+# 3,089 modules with the 56 built into main, and the RomFS has no SPIR-V file, so the NSP script captures them by booting the game on the Mac (vk_capture.tsv lists the keys); vk_shaders.py (removed in 0.5, in git at 93c34371) translates the capture
 
 # ---- Files ----
 # load order as on Horizon: main, subsdk*, sdk; subsdk1–4 (GLSLC, nn::pcm, NVIDIA's OpenGL and Vulkan drivers) are replaced by the host's Vulkan layer and not loaded
@@ -42,4 +42,4 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 
 # ---- Shader split ----
-shader_note	Super Mario Galaxy has no NVN shaders (its SPIR-V shaders went through the Vulkan layer, removed in release 1, in git at 93c34371)
+shader_note	Super Mario Galaxy has no NVN shaders (its SPIR-V shaders went through the Vulkan layer, removed in 0.5, in git at 93c34371)

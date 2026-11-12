@@ -23,7 +23,7 @@ class NroGraphics(unittest.TestCase):
         self.assertEqual(s['graphics'][0], 'nvn')
         self.assertTrue(s['glslc_capture'][0])
 
-    def test_gl_without_nros_unchanged(self):   # Digimon Story Cyber Sleuth: no NRO, GL through EGL (the NSP script stops for it: NX 18 release 1 renders NVN games only)
+    def test_gl_without_nros_unchanged(self):   # Digimon Story Cyber Sleuth: no NRO, GL through EGL (the NSP script stops for it: NX 18 renders NVN games only)
         s = pg.shader_sources(SDL_MAIN | {'nvnBootstrapLoader'}, 0, [], 0, gl_names=1)
         self.assertEqual(s['graphics'][0], 'gl')
         self.assertIn('does not support', s['graphics'][1])

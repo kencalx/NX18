@@ -12,7 +12,7 @@ static const char *g_stub_name[MAX_STUB];
 static uint8_t g_stub_seen[MAX_STUB], g_stub_gfx[MAX_STUB];
 extern uint64_t unimpl_stubs[MAX_STUB];   // 8 bytes per stub
 
-// The OpenGL (EGL) and Vulkan layers were removed in release 1 (Metal 4 only; the code is in git at 93c34371). An NVN game may still import their functions without calling
+// The OpenGL (EGL) and Vulkan layers were removed in 0.5 (Metal 4 only; the code is in git at 93c34371). An NVN game may still import their functions without calling
 // them (Absolum: SDL3's EGL and Vulkan support; Balatro's LÖVE links vkGetInstanceProcAddr), so those names keep a named stub, and only a call to one stops the game.
 // Names as the APIs spell them: vk / egl / gl and then a capital letter (glslcCompile, NVN's own GLSL compiler in hle_glslc.c, is not one)
 static int gfx_api_name(const char *n) {
@@ -21,7 +21,7 @@ static int gfx_api_name(const char *n) {
 }
 
 uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
-    if (g_stub_gfx[idx]) die("[RED] this game renders with OpenGL/Vulkan, which NX 18 does not support (Metal 4 only; the layer was removed in release 1): it called %s", g_stub_name[idx]);
+    if (g_stub_gfx[idx]) die("[RED] this game renders with OpenGL/Vulkan, which NX 18 does not support (Metal 4 only; the layer was removed in 0.5): it called %s", g_stub_name[idx]);
     if (!g_stub_seen[idx]) {   // once per stub (a counter in the byte wrapped every 256 calls: Ace Attorney Investigations Collection calls nnProfilerRecordHeartbeat every frame)
         g_stub_seen[idx] = 1;
         LOG("UNIMPL %s (x0=%#llx x1=%#llx x2=%#llx)", g_stub_name[idx], regs[0], regs[1], regs[2]);
@@ -33,7 +33,7 @@ uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
 // runtime NRO relocation holds the loader's module write lock, so later lookups and stub insertions are serialized too.
 // resolve_import used to strcmp its way through the whole section for every import no module defines, and
 // hle_implements for every weak one: 270 entries (the HLE hooks and the libc passthrough table of hle_table.c, and then the
-// Vulkan and GL tables of the layers removed in release 1) per lookup. These were the last by-name linear scans of the loading phase
+// Vulkan and GL tables of the layers removed in 0.5) per lookup. These were the last by-name linear scans of the loading phase
 // whose module symbol tables module_sym's hash already fixed (loader.c build_symhash, whose comment measured
 // that phase at 77-86 ms of the ① load before it)
 static uint32_t name_h(const char *s) { uint32_t h = 2166136261u; while (*s) h = (h ^ (uint8_t)*s++) * 16777619u; return h; }

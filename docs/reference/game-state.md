@@ -20,7 +20,7 @@ The games' own state: saves, scripted state, and behaviour that looks like a hos
 
 - **Symptom:** a crash in `main+0x339c00` a second or two into the title, in love-nx's video module teardown (`love::video::theora::Video` → `~Worker`; its thread released the worker that the closing module deletes too).
 - **Cause:** the Lua state was closing: on the Switch, Balatro's `love.errhand` returns at once, so any Lua error quits. A `print` at the top of `love.errhand` in a copy of the RomFS (`DM_ROMFS=<copy>`) gave the error: `Shader uniform 'distortion_fac' does not exist` (the capture run had no shader library, so every program linked with no uniforms), then `bad argument #2 to 'send' (number expected, got boolean)` (a `bool` uniform reported as `GL_UNSIGNED_INT`).
-- **Fix:** look for the Lua error first; the two errors here were host faults in the GL layer's shaders and uniforms (its entries "GL shaders put together at run time and captured" and "GL uniforms, pipelines and attributes" in `docs/reference/rendering.md` at git `93c34371`: the GL layer was removed in release 1).
+- **Fix:** look for the Lua error first; the two errors here were host faults in the GL layer's shaders and uniforms (its entries "GL shaders put together at run time and captured" and "GL uniforms, pipelines and attributes" in `docs/reference/rendering.md` at git `93c34371`: the GL layer was removed in 0.5).
 - **Found on:** [Balatro](../../dm/games/0100CD801CE5E000/README.md) (SDK 18.3.2, LÖVE 11.4; one boot).
 - **Check:** probing the destructors (`DM_PROBE`) and logging every object the Lua GC released (`DM_PROBE=main:0x18b920@x0+0`: the module proxies all at once) showed it was a shutdown, not a premature collection.
 

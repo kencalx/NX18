@@ -19,8 +19,8 @@ check_program() {   # RomFS, marker, shader libraries, shader folder
         [ -f "$DM_RESOURCE_CHAIN_H" ] || die "No chain version header: $DM_RESOURCE_CHAIN_H (a project prepared before the chain version moved to dm/gfx/nvn: prepare the game again, build_ipa_from_nsp.py --prepare-xcode)"
         V=$(sed -n 's/^#define DMSH_CHAIN "\(.*\)"/\1/p' "$DM_RESOURCE_CHAIN_H")
         [ "$4" = "b-$V" ] || die "The prepared shaders are chain $4, the sources are now at b-$V: prepare the game again (build_ipa_from_nsp.py --prepare-xcode)";;
-    # msl/vk or msl/gl: a Vulkan or OpenGL game's shaders, from a project prepared before NX 18 release 1 removed those layers; the host would stop at its first Vulkan or EGL call
-    *) die "The prepared shaders are $4, a Vulkan or OpenGL game's: NX 18 release 1 supports NVN games only (prepare the game again: build_ipa_from_nsp.py --prepare-xcode stops for it)";;
+    # msl/vk or msl/gl: a Vulkan or OpenGL game's shaders, from a project prepared before NX 18 removed those layers in 0.5; the host would stop at its first Vulkan or EGL call
+    *) die "The prepared shaders are $4, a Vulkan or OpenGL game's: NX 18 supports NVN games only (prepare the game again: build_ipa_from_nsp.py --prepare-xcode stops for it)";;
     esac
 }
 # The folders beside a RomFS (nx_extract --html, the NSP script's nn::jit image) into the app folder given, where the host finds them beside its RomFS (hle_web.c, loader.c dm_jit_serve_dir)

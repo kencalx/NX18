@@ -27,7 +27,7 @@
 #   --lock FILE (DM_MEASURE_LOCK): the measuring lock bench.py --lock shares, held only while a game runs.
 #
 # What it checks, per game:
-# 1. Chain (static): the game's shaders translated by each revision's chain (dmsh_build.py through own_compilers.py; NVN games only: the Vulkan and OpenGL layers were removed in release 1), compared shader by shader: built or failed
+# 1. Chain (static): the game's shaders translated by each revision's chain (dmsh_build.py through own_compilers.py; NVN games only: the Vulkan and OpenGL layers were removed in 0.5), compared shader by shader: built or failed
 #    (newly failing by the rule of dm/gfx/tools/shader_regressions.py, which the NSP script applies to one game's previous build; a new shader that fails is listed apart),
 #    the SHA-256 of the MSL (<key>_b.metal), of the reflection (<key>_b.json without its chain fields) and of the variant libraries (_bf, _bv, _bp, _bg*). A build is kept per chain version,
 #    shader package, profile inputs and compilers (<NSP folder>/<id>-work/regress/chain/<key>/; only the few used last stay, prune_chains), so a revision whose chain did not change costs nothing, and dmsh_build.py uses the build's own shader cache (DMSH_CAS), so MSL
@@ -347,7 +347,7 @@ def chain_key(tree, g, tools):
         pairs = g.profile_dir(tree) / 'pso_pairs.tsv'
         if not pairs.is_file(): pairs = g.build / 'shader/pso_pairs.tsv'
         side += digest([pairs])
-    else: raise HarnessError(f'{g.id}: a {g.kind} game: NX 18 release 1 supports NVN games only (the Vulkan and OpenGL layers were removed)')
+    else: raise HarnessError(f'{g.id}: a {g.kind} game: NX 18 supports NVN games only (the Vulkan and OpenGL layers were removed)')
     sc = tree.path / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'
     if sc.is_file():   # earlier revisions use PATH, already covered by tools; pinned revisions also honor SPIRV_CROSS
         env = dotnet_env(g.env(tree))
@@ -444,7 +444,7 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
     env = dotnet_env(g.env(tree)); env.update(WORK=str(tmp), TMPDIR=str(tmp) + '/', J=str(jobs))
     t0 = time.time(); log = out / 'build.log'
     done = (out / 'built.ok').is_file()   # a build whose outputs are complete (a run stopped while hashing, or a build made by hand); its manifest is made again
-    if g.kind != 'nvn': raise HarnessError(f'{g.id}: a {g.kind} game: NX 18 release 1 supports NVN games only (the Vulkan and OpenGL layers were removed)')
+    if g.kind != 'nvn': raise HarnessError(f'{g.id}: a {g.kind} game: NX 18 supports NVN games only (the Vulkan and OpenGL layers were removed)')
     tools_dir = tree.path / 'dm/gfx/tools'
     cas = chain_cache(tree, g)
     env.update(XLATE=str(tools_dir / 'dmsh_xlate_bin/dmsh_xlate'), DMSH_CAS=str(cas))

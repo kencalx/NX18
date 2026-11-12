@@ -1,4 +1,4 @@
-"""The host draws through Metal 4 only (release 1): no Metal 3 queue, command buffer, encoder or MTLDevice pipeline anywhere in the production code, and no classic queue in
+"""The host draws through Metal 4 only (since 0.5): no Metal 3 queue, command buffer, encoder or MTLDevice pipeline anywhere in the production code, and no classic queue in
 the graphics test fixtures. A change that brings one back fails here at once, with the file and line.
 
 Production code: everything under dm/gfx (a new graphics layer too, such as an upstream merge that keeps dm/gfx/gl or dm/gfx/vk), dm/host, dm/ios/Sources and dm/mac, their

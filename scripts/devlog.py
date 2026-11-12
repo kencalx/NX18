@@ -88,7 +88,7 @@ RX = {k: re.compile(v) for k, v in {
     'bundle_out': r'^\[nvn-mtl\] (?:\[RED\] )?pipeline archive bundled with the app: (?:.* is left out|none for this GPU|this system cannot open)',
     'written': r'^\[nvn-mtl\] pipeline archive: (\d+) new pipeline bases(?: and \d+ compute pipelines)?(?: and \d+ task / mesh pipelines)? written to \S+ \(([\d.]+) MB, (\d+) ms\)',   # the compute part since NXNative's 30fb2136, the task / mesh part since bf420fda
     'prepare': r'^\[nvn-mtl\] pipeline prepare: (\d+) lines .*?progress screen (shown|not shown); bases (\d+) compiled, (\d+) from the archive, (\d+) reused'
-               r'(?:.*?; (\d+) layout bases from the archive bundled with the app)?',   # the layout bases' part since release 1.5 (with an archive bundled with the app)
+               r'(?:.*?; (\d+) layout bases from the archive bundled with the app)?',   # the layout bases' part since X1.0 (with an archive bundled with the app)
     'link': r'^\[nvn-mtl\] display link up to tick (\d+): ticks \d+, presents (\d+), empty ticks (\d+) .*?merging (\d+); submission ahead of target display p50 ([\d.]+) ms / min ([\d.]+) ms; '
             r'game enqueue to target display p50 ([\d.]+) ms / min ([\d.]+) / max ([\d.]+) ms',
     'longframe': r'^\[longframe\] frame (\d+) \(([\d.]+) s\) whole frame ([\d.]+) ms, submit\+present ([\d.]+) ms, GPU (-?[\d.]+) ms; new pipelines (\d+) \+ shader libraries (\d+), '
