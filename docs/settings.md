@@ -81,6 +81,8 @@ Hades II goes up to 300 %: it renders its whole picture, the HUD and text includ
 
 **Docked** renders at the Switch's TV resolution, **Handheld** at its lower handheld resolution, which is lighter on the phone and can give a higher frame rate.
 
+On the iPhone and iPad, a Switch 2 game that reads the console's graphics scale renders docked at its reduced docked size, to keep the phone cooler: Ocarina of Time at 2048x1152 rather than 2560x1440, Star Fox's scene at 768x432 rather than 960x540. `DM_GFX_SCALE=0` in `Documents/env.txt` gives the full docked picture, at more heat and battery. The Mac renders the full picture unless `DM_GFX_SCALE` says otherwise.
+
 ### Upscaling
 
 A game that renders below the screen's resolution is scaled up to the screen. **Standard**, the default, scales smoothly; **MetalFX** uses Apple's MetalFX upscaler, which sharpens edges and text as it scales.

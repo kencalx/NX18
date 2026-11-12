@@ -333,15 +333,40 @@ HLE_FORCE("_ZN2nn2oe22SetCpuOverclockEnabledEb", "CPU overclock switch (through 
 // Switch 2 SDKs: the graphics scale, which the SDK takes from am's IGraphicsScalingParametersFunctions (a session the host never opened: null read in
 // oe::GetGraphicsScalingParameters). The SDK maps the parameter's first word 10 / 20 / 30 to scale 0 / 1 / 2. Which tier a console reports when is not measured. The games that
 // read it render at full size and count their whole GPU time with tier 0, and less with 1 and 2, so it is taken as how much of the GPU the game may use, not as the operation
-// mode (an inference from their code; a system that needs the GPU itself, as for GameChat's video, would lower it, which the host never does): the host answers 0 in both
-// modes. Donkey Kong Bananza takes it as its display manager's scale index (+0x1c7, main+0x549348): its frame buffer is the display's size times {1.0, 0.8, 2/3}[tier]
+// mode (an inference from their code; a system that needs the GPU itself, as for GameChat's video, would lower it, which the host never does): on the Mac the host answers 0
+// in both modes. Donkey Kong Bananza takes it as its display manager's scale index (+0x1c7, main+0x549348): its frame buffer is the display's size times {1.0, 0.8, 2/3}[tier]
 // (main+0x30f840; docked 2304x1296 with tier 1, 2880x1620 with 0), and as an index into {3, 12, 16} (main+0x1d1a604) whose value less 3 (0, 9, 13) its dynamic resolution
 // adds to its GPU time (main+0x549614). Star Fox keeps only "tier 0" (byte +0xa of its event 5, main+0xba69970) and renders 0.8 times smaller below it: docked, 768x432 for
 // its 1920x1080 window where tier 0 gives 960x540, its handheld size. Ocarina of Time draws 2048x1152 with tier 1 and 2560x1440 with 0. The host answered 1 docked until
-// these were found. DM_GFX_SCALE sets a tier, to see what a game does with a reduced one
-static int gfx_scale(void) { const char *e = getenv("DM_GFX_SCALE"); int v = e ? atoi(e) : 0; return v >= 0 && v <= 2 ? v : 0; }
-HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): 0, the whole GPU (DM_GFX_SCALE sets 1 or 2)", int, h_oe_GfxScale, void) { return gfx_scale(); }
-HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "graphics scale change notification (Switch 2, through am); the host's scale never changes",
+// these were found, and on the iPhone and iPad it still does (release 1.5's choice: the operation mode, 1 docked and 0 handheld, so a docked game keeps release 1's smaller
+// picture; Ocarina of Time docked already heats the phone at 2048x1152, and Star Fox docked stays at 768x432). DM_GFX_SCALE (0, 1 or 2) sets the tier on every platform,
+// to see what a game does with a reduced one or, on iOS, DM_GFX_SCALE=0 for the full picture docked; any other value keeps the platform's answer. Which answer is used,
+// and why, is logged at the first query
+#if TARGET_OS_IPHONE && !TARGET_OS_MACCATALYST
+#define GFX_SCALE_IOS 1
+#else
+#define GFX_SCALE_IOS 0
+#endif
+// The answer from DM_GFX_SCALE's value (e, NULL when unset), the platform and the operation mode; *set says whether e chose it. Pure, so the test covers both platforms
+static int gfx_scale_pick(const char *e, int ios, int docked, int *set) {
+    char *end = NULL; long v = e && *e ? strtol(e, &end, 10) : -1; int digits = end && end != e;
+    while (digits && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) end++;
+    *set = digits && !*end && v >= 0 && v <= 2;
+    return *set ? (int)v : ios && docked;
+}
+static int gfx_scale(void) {
+    const char *e = getenv("DM_GFX_SCALE"); int docked = opmode() == 1, set, t = gfx_scale_pick(e, GFX_SCALE_IOS, docked, &set);
+    static atomic_int logged;
+    if (!atomic_exchange(&logged, 1)) {
+        if (e && !set) LOG("[RED] graphics scale: DM_GFX_SCALE=%s is not 0, 1 or 2: ignored", e);
+        if (set) LOG("graphics scale: tier %d (DM_GFX_SCALE=%d)", t, t);
+        else if (GFX_SCALE_IOS) LOG("graphics scale: tier %d (iOS default: follows the operation mode, %s now; DM_GFX_SCALE=0 for the full picture docked)", t, docked ? "docked" : "handheld");
+        else LOG("graphics scale: tier %d (Mac default: the full picture in both modes; DM_GFX_SCALE=1 or 2 for a reduced tier)", t);
+    }
+    return t;
+}
+HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): 0 on the Mac, on iOS the operation mode (1 docked); DM_GFX_SCALE sets 0, 1 or 2", int, h_oe_GfxScale, void) { return gfx_scale(); }
+HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "graphics scale change notification (Switch 2, through am); the scale changes only with the operation mode, on iOS",
           void, h_oe_GfxScaleNotify, unsigned on) { (void)on; }
 // The frame length the game aims at (Switch 2 SDKs): oe::SetGraphicsTargetFrameRate maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3, SetGraphicsTargetFrameRateAuto
 // to mode 0, and both call this, which locks the gs graphics server's context and sends it the mode. The host has no graphics server (nv::InitializeGraphics), so the context is null and

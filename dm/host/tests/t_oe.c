@@ -194,11 +194,23 @@ int main(void) {
     h_oe_SetFocusMode(3); dm_applet_enter("test");
     CHECK(empty() && h_oe_GetFocus() == 2, "focus mode 3: an applet changes the state without a notification");
     dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 1, "focus mode 3: back to 1 without a notification");
-    // the graphics scale does not follow the operation mode: tier 0 in both modes; DM_GFX_SCALE picks a reduced tier, nonsense keeps 0
-    unsetenv("DM_GFX_SCALE"); dm_set_opmode(1); CHECK(h_oe_GfxScale() == 0, "graphics scale docked: tier 0 (the whole GPU)");
-    dm_set_opmode(0); CHECK(h_oe_GfxScale() == 0, "graphics scale handheld: tier 0");
+    // the graphics scale: tier 0 in both modes on the Mac, the operation mode on iOS (1 docked, release 1's answer); DM_GFX_SCALE 0, 1 or 2 wins on both, anything else keeps the platform's answer
+    int set;
+    CHECK(gfx_scale_pick(NULL, 0, 1, &set) == 0 && !set && gfx_scale_pick(NULL, 0, 0, &set) == 0 && !set, "Mac default: tier 0 docked and handheld");
+    CHECK(gfx_scale_pick(NULL, 1, 1, &set) == 1 && !set && gfx_scale_pick(NULL, 1, 0, &set) == 0 && !set, "iOS default: tier 1 docked, 0 handheld");
+    CHECK(gfx_scale_pick("0", 1, 1, &set) == 0 && set, "iOS docked, DM_GFX_SCALE=0: tier 0 (an explicit 0 is not unset)");
+    CHECK(gfx_scale_pick("2", 0, 0, &set) == 2 && set && gfx_scale_pick("1", 0, 1, &set) == 1 && set && gfx_scale_pick("2", 1, 0, &set) == 2 && set, "DM_GFX_SCALE=1 or 2 wins on both platforms");
+    CHECK(gfx_scale_pick("0\n", 1, 1, &set) == 0 && set, "DM_GFX_SCALE=0 with a trailing newline: tier 0");
+    static const char *bad[] = { "7", "-1", "", "abc", "1x", " " };
+    int bad_ok = 1;
+    for (unsigned i = 0; i < sizeof bad / sizeof *bad; i++)
+        bad_ok &= gfx_scale_pick(bad[i], 1, 1, &set) == 1 && !set && gfx_scale_pick(bad[i], 0, 1, &set) == 0 && !set && gfx_scale_pick(bad[i], 1, 0, &set) == 0 && !set;
+    CHECK(bad_ok, "DM_GFX_SCALE 7, -1, empty, abc, 1x, a space: the platform's answer (iOS docked 1, else 0), not 0");
+    unsetenv("DM_GFX_SCALE"); dm_set_opmode(1); CHECK(h_oe_GfxScale() == GFX_SCALE_IOS, GFX_SCALE_IOS ? "this build (iOS): docked, tier 1" : "this build (Mac): docked, tier 0 (the whole GPU)");
+    dm_set_opmode(0); CHECK(h_oe_GfxScale() == 0, "this build: handheld, tier 0");
     setenv("DM_GFX_SCALE", "2", 1); CHECK(h_oe_GfxScale() == 2, "DM_GFX_SCALE=2: tier 2");
-    setenv("DM_GFX_SCALE", "7", 1); CHECK(h_oe_GfxScale() == 0, "DM_GFX_SCALE=7: no such tier, 0"); unsetenv("DM_GFX_SCALE");
+    setenv("DM_GFX_SCALE", "0", 1); dm_set_opmode(1); CHECK(h_oe_GfxScale() == 0, "DM_GFX_SCALE=0 docked: tier 0");
+    setenv("DM_GFX_SCALE", "7", 1); CHECK(h_oe_GfxScale() == GFX_SCALE_IOS, "DM_GFX_SCALE=7 docked: no such tier, the platform's answer"); unsetenv("DM_GFX_SCALE");
     plan_checks();
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }
