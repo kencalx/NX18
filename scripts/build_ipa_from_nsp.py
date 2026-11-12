@@ -1920,6 +1920,10 @@ def gather_glslc_play(d, sources, g):
         say(f'[RED] {got.pop(n)[0] / n}: the split reads no shader out of it, left out'); (tmp / n).unlink()
     if not got: rmtree(tmp)
     swap_in_changed(tmp, dst)
+    if not got:   # nothing captured: only the profile's /glslc_play/ rows can need a word, so a game without them (all but those GLSLC ones) is spared splitting its whole shader map
+        try: t = g.table('shader_map.tsv').read_text(errors='replace')
+        except OSError: t = ''
+        if f'\t/{GLSLC_PLAY}/' not in t: return set()
     if keys is None: return set(got)
     prof, have = shader_sources(g), {k for n in got for _, k in keys[n]}
     lost = {k for k, src in prof.items() if src.startswith(f'/{GLSLC_PLAY}/')} - have

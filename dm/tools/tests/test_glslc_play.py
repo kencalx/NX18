@@ -182,6 +182,20 @@ class GatherPlay(unittest.TestCase):
         self.said.clear(); nsp.gather_glslc_play(self.d, [src], self.profile((ka, f'/glslc_play/{fnv_name(a)}'), ('f' * 16, f'/glslc_play/{"f" * 16}.glslc')))
         self.assertTrue(any(s.startswith('[RED] the profile names 1 shaders') for s in self.said), self.said)
 
+    def test_nothing_captured_skips_the_map_split_unless_the_profile_has_play_rows(self):
+        # no capture and no /glslc_play/ row (every game but a GLSLC one): the shader map is not split into a dict, and the folder of an earlier build still goes
+        (self.d / 'glslc_play').mkdir(); (self.d / 'glslc_play' / 'old.glslc').write_bytes(b'x')
+        g = self.profile(('1' * 16, '/data/a.vs'))
+        with mock.patch.object(nsp, 'shader_sources', wraps=nsp.shader_sources) as ss:
+            self.assertEqual(nsp.gather_glslc_play(self.d, [self.tmp / 'absent'], g), set())
+            ss.assert_not_called()
+        self.assertFalse((self.d / 'glslc_play').exists())
+        self.assertFalse(any(s.startswith('[RED]') for s in self.said), self.said)
+        # a profile with /glslc_play/ rows and nothing captured: the red line that those draws stay missing is still given
+        g = self.profile(('1' * 16, '/data/a.vs'), ('f' * 16, f'/glslc_play/{"f" * 16}.glslc'))
+        self.assertEqual(nsp.gather_glslc_play(self.d, [self.tmp / 'absent'], g), set())
+        self.assertTrue(any(s.startswith('[RED] the profile names 1 shaders') for s in self.said), self.said)
+
     def test_default_sources(self):
         src = nsp.glslc_play_sources(self.tmp / 'nsp', self.tmp / 'work', 0x0100BF00112C0000, ['~/x'])
         self.assertEqual(src[0], Path.home() / 'x')
