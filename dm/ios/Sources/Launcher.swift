@@ -315,7 +315,7 @@ struct LauncherView: View {
         .onChange(of: asking) { pad.holdUntilReleased() }        // the press that answered a save question is no press on the settings
         .onReceive(LauncherShortcuts.requests) { shortcut($0) }   // a home screen shortcut chosen while the screen is up
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in startHeld() }   // back in front: a held start goes
-        .onReceive(NotificationCenter.default.publisher(for: UIScene.didActivateNotification)) { _ in startHeld() }
+        .onReceive(NotificationCenter.default.publisher(for: UIScene.didActivateNotification)) { _ in startHeld() }   // came first in the iOS 27.3 Simulator, the application still inactive, and the application's then started it: this one is for an application that stays active (a TV's scene, not tried)
         .onAppear {
             guard !startTaken else { return }
             if let s = startWith { startTaken = true; shortcut(s) }   // the one the app was opened with
@@ -495,10 +495,11 @@ struct LauncherView: View {
                 checking = false
                 switch SaveSyncReport.step(r) {
                 case .play(let choice) where !LauncherShortcuts.appActive():
-                    // The check ended while the player was away (it can take a minute while iCloud downloads): the game starts when the app is back in front (startHeld), not in the
-                    // background, where its first Metal work would be refused. A check Play started is held the same way: Play was pressed in front, but the player may have left since
+                    // The check ended while the player was away (it can take a minute while iCloud downloads), or under a system alert (the notifications prompt a game of several
+                    // programs asks at its first start): the game starts when the app is back in front (startHeld), not in the background, where its first Metal work would be refused.
+                    // A check Play started is held the same way: Play was pressed in front, but the player may have left since
                     held = HeldStart(check: mine, choice: choice)
-                    fputs("launcher: the cloud-save check ended in the background: the game starts when the app is back in front\n", stderr)
+                    fputs("launcher: the cloud-save check ended with the app not active (in the background, or under a system alert): the game starts when the app is back in front\n", stderr)
                 case .play(let choice): go(choice)
                 case let step: report = r; asking = step   // a question waits on the screen by itself
                 }
