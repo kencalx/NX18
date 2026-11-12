@@ -28,7 +28,8 @@ import WebKit
     // - The controller as keys (__nx18.key: the arrow keys 37-40 with keyCode set, A as 32 that clicks the focused link when the page does not take it), and for a page with no key
     //   handler of its own, the arrows move the focus to the nearest link or button that way (else up / down scroll it).
     // - :focus rules copied for [data-dm-focus], which follows the focus (WebKit matches :focus only in the key window, and on the iPhone the web view never takes the keyboard),
-    //   and the focus and blur events WebKit then does not send (guides show an item's picture and text in its onfocus); up / down with nothing focused focus the first item
+    //   and the focus and blur events WebKit then does not send (guides show an item's picture and text in its onfocus); up / down with nothing focused focus the first item.
+    //   The focus is looked at once a frame only for 2 s after input or a change, and every 500 ms otherwise: an idle page runs no work each frame
     static let shim = """
     (function () {
       if (window.__nx18) return;
@@ -84,12 +85,12 @@ import WebKit
         var s = document.createElement('style'); s.textContent = out.join('\\n'); (document.head || document.documentElement).appendChild(s);
         mark(document.activeElement);
       };
-      // The focus as it changes: a page focused in a view that is not the key one gets no focus events, so the focused element is also looked at once a frame
+      // The focus as it changes: a page focused in a view that is not the key one gets no focus events, so the focused element is also looked at by follow below
       document.addEventListener('focus', function (e) { mark(e.target); }, true);
       document.addEventListener('blur', function () { setTimeout(function () { mark(document.activeElement); }, 0); }, true);
       // Its focus and blur events too: WebKit sends none in a page whose view is not focused (the iPhone's web view never takes the keyboard), and guides do their work in
       // onfocus (the console's cursor is the focus: an item's picture, video and text show when it is focused). A focus change no event reported gets them here, at once after
-      // focus() or blur() and once a frame for any other change; when WebKit sent them (a focused view), nothing is sent twice
+      // focus() or blur(), and by follow below for any other change; when WebKit sent them (a focused view), nothing is sent twice
       var heard = {f: null, b: null}, seen = document.activeElement;
       document.addEventListener('focus', function (e) { heard.f = e.target; if (heard.b === e.target) heard.b = null; }, true);
       document.addEventListener('blur', function (e) { heard.b = e.target; if (heard.f === e.target) heard.f = null; }, true);
@@ -108,9 +109,26 @@ import WebKit
         var f = HTMLElement.prototype[m];
         if (f) HTMLElement.prototype[m] = function () { var r = f.apply(this, arguments); settle(); return r; };
       });
-      var focused = null;
-      var follow = function () { settle(); if (document.activeElement !== focused) { focused = document.activeElement; mark(focused); } requestAnimationFrame(follow); };
-      requestAnimationFrame(follow);
+      // Any other focus change (an element removed, a focus moved by something not wrapped above) is looked at once a frame, but only for 2 s after the page last got input or
+      // changed (a key, a touch, a click, a scroll, a resize, a focus event, an animation's end, a load), when focus changes come; then the frames stop, so an idle page costs no
+      // work each frame. A slow check every 500 ms catches a late change (a page's own timer) that comes after the frames stopped
+      var focused = null, until = 0, running = false;
+      var look = function () { settle(); if (document.activeElement !== focused) { focused = document.activeElement; mark(focused); } };
+      var follow = function () {
+        look();
+        if (!document.hidden && performance.now() < until) requestAnimationFrame(follow); else running = false;
+      };
+      var wake = function () {
+        until = performance.now() + 2000;
+        if (!running) { running = true; requestAnimationFrame(follow); }
+      };
+      ['keydown', 'keyup', 'touchstart', 'touchend', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'wheel', 'scroll', 'focus', 'blur', 'focusin', 'focusout',
+       'input', 'change', 'transitionend', 'animationend', 'load'].forEach(function (t) { window.addEventListener(t, wake, {capture: true, passive: true}); });
+      window.addEventListener('resize', wake);
+      window.addEventListener('pageshow', wake);
+      document.addEventListener('visibilitychange', function () { if (!document.hidden) wake(); });
+      setInterval(look, 500);   // a timer, not a frame: WebKit slows it further while the page is hidden
+      wake();
 
       // The console's first paint after the load: the page's own load handlers have run, and it has painted once (or 100 ms went by: a view not on the screen paints no frames)
       window.addEventListener('load', function () {
@@ -199,12 +217,14 @@ import WebKit
       window.__nx18 = {
         // A footer button: 'page' when the page took it, 'back' for B left to the viewer, 'none' otherwise
         footer: function (b) {
+          wake();
           var a = assign[b];
           if (typeof a === 'function') { try { a(); } catch (e) { console.error(e && e.message); } return 'page'; }
           return a === true && b === 'B' ? 'back' : 'none';
         },
         // An arrow key (37-40): the page's, else a focus move (or a scroll up or down)
         key: function (code) {
+          wake();
           var el = target(), go = key('keydown', code, el);
           key('keyup', code, el);
           if (!go) return;
@@ -217,6 +237,7 @@ import WebKit
         },
         // A: the page's A when it took the button over, else key 32 at the focused element, which is clicked when the page does not take the key
         a: function () {
+          wake();
           if (typeof assign.A === 'function') { try { assign.A(); } catch (e) {} return; }
           var el = target(), go = key('keydown', 32, el);
           key('keyup', 32, el);

@@ -94,6 +94,12 @@ import WebKit
         g.press("B")
         expect(spin(5) { log().hasSuffix("menu") }, "Back is the page's own: the menu")
         expect(!closed, "and the guide stays")
+        // A focus change no event reports (the focused item taken out of the page), after the page has been idle longer than the 2 s the shim looks at the focus each frame:
+        // its slow check still sees it and sends the blur (this window is off screen, so the page is hidden and gets no frames at all)
+        _ = js("document.getElementById('item3').focus(); window.lostFocus = false; true")
+        _ = spin(3) { false }
+        _ = js("var a = document.getElementById('item3'); a.addEventListener('blur', function () { window.lostFocus = true; }); a.remove(); true")
+        expect(spin(3) { js("window.lostFocus") as? Bool == true }, "a focus change no event reported is followed on an idle page")
         _ = js("document.getElementById('item9').click()")
         expect(spin(10) { closed }, "the end URL (http://localhost/) closes the guide")
         return failed
