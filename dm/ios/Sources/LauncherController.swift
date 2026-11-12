@@ -53,6 +53,8 @@ enum LauncherPadEvent: Equatable, Sendable { case up, down, left, right, a, b, x
     private var blocked: Set<Key>   // held when the screen appeared, when a sheet opened or closed, when the pads changed or the app was inactive: ignored until released
     private var nextRepeat: [Key: TimeInterval] = [:]
     private var pads: Set<ObjectIdentifier> = []   // the controllers of the last poll
+    private var glyphPad: ObjectIdentifier?   // the pad the glyphs were last read from, and polls since: a new first pad is read at once, the same one again about every 0.5 s
+    private var glyphPolls = Int.max          // (a remap in Settings, names that come late), not 60 times a second
 
     init() {
         let now = GCController.controllers().filter { $0.extendedGamepad != nil }
@@ -116,8 +118,12 @@ enum LauncherPadEvent: Equatable, Sendable { case up, down, left, right, a, b, x
     private func poll(_ handle: @MainActor (LauncherPadEvent) -> Void) {
         let pads = GCController.controllers().filter { $0.extendedGamepad != nil }
         if connected != !pads.isEmpty { connected = !pads.isEmpty }
-        let g = NXPadGlyphs.of(pads.first)
-        if glyphs != g { glyphs = g }
+        let first = pads.first.map(ObjectIdentifier.init)
+        if first != glyphPad || glyphPolls >= 30 {
+            glyphPad = first; glyphPolls = 0
+            let g = NXPadGlyphs.of(pads.first)
+            if glyphs != g { glyphs = g }
+        } else { glyphPolls += 1 }
         let now = pads.reduce(into: Set<Key>()) { $0.formUnion(Self.keys($1)) }
         // A key that vanishes because its pad went (or one that appears with a new pad), or while the app is not active (its input reads as nothing), is no press or release:
         // everything held stays blocked until it is released for real
