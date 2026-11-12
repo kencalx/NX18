@@ -139,6 +139,9 @@ SWITCH_BINDING = [
     ('present_interval_choice', '', {'what': 'the launcher offers Frame rate 30 / 60 (DM_PRESENT_INTERVAL game / display)', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
      'why': "offered only for a game whose logic runs on its own clock, checked at both rates"}),   # before present_interval: classify matches a key by its start
     ('present_interval', '', {'what': 'one frame per display tick', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'right only for games whose logic does not count frames'}),
+    ('fps_hold_backoff', '', {'what': "a held probe's run at hold 1 ended by a short burst on the CPU side is no failure, other early ends wait 2 s at most", 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
+     'why': 'what any game under the frame step whose bursts are on the CPU side should get: the GPU-bound back-off is unchanged; per game (Ocarina of Time) in X1.0 only for the frozen release',
+     'blocked': 'X1.0 is frozen: the default for every game is X2.0 work, after an iPhone A/B on Ocarina of Time and a run of Breath of the Wild or Tears of the Kingdom with it'}),   # before fps_hold: classify matches a key by its start
     ('fps_hold', '', {'what': 'no frame held past the cap', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's pacing"}),
     ('fps_target', '', {'what': 'frame rate target', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'a choice per game'}),
     ('fps_max', '', {'what': 'a frame rate of 120 allowed (fps_target and the launcher\'s Frame rate)', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',

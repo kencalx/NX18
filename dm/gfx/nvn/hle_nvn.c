@@ -2391,6 +2391,20 @@ static int fstep_hold(void) {
     }
     return h;
 }
+// The waits after a held probe's run at hold 1 that ended early (nvn_fstep.h nvn_fstep.backoff, FSTEP_BURST_CAP): the profile's fps_hold_backoff, double (the default: each such
+// end is a failed probe and doubles the waits up to 8 s) or burst (Ocarina of Time: an end by a short burst on the CPU side is none, any other waits 2 s at most);
+// DM_FPS_HOLD_BACKOFF=double / burst overrides it, also from Documents/env.txt
+static int fstep_backoff(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("DM_FPS_HOLD_BACKOFF"); int ok = e && (!strcmp(e, "double") || !strcmp(e, "burst"));
+        if (e && *e && !ok) LOG("[RED] DM_FPS_HOLD_BACKOFF=%s: must be double or burst; keeping the profile's fps_hold_backoff", e);
+        v = ok ? !strcmp(e, "burst") : DM_GAME_FPS_HOLD_BACKOFF;
+        if (v || ok) LOG("[nvn] frame step: %s (%s)", v ? "a held probe's run at hold 1 that a short burst on the CPU side ended is no failed probe; other early ends wait 2 s at most"
+                                                          : "a held probe's run at hold 1 that ends within 8 s is a failed probe, and the waits double up to 8 s", ok ? "DM_FPS_HOLD_BACKOFF" : "game profile fps_hold_backoff");
+    }
+    return v;
+}
 // The game's dynamic resolution, where a frame step stub runs it (Ocarina of Time's level function, its patches.py): the state page's +0x200 calls, +0x204 the last call's level,
 // +0x210 the load measured at each level (16 floats) and +0x250 the call each was measured at (0 = never). Only with DM_DYNAMIC_RESOLUTION=1 (+0x40), and only once the stub has
 // counted a call: no other game's stub writes there. dr_tick samples the level at each present, dr_line writes it with the window's tsummary (DM_FIELD_LOG)
@@ -2426,7 +2440,7 @@ static void fstep_tick(const win_t *o, int c) {
     int kmin = fstep_hz() / c, kmax = fps_high() ? 2 : !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
          kmin0 = g_fs.kmin, probe0 = g_fs.probe, pinned0 = g_fs.pinned;
     int fixed = dm_fps_state ? (int)__atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED) : 0;
-    uint64_t probes0 = g_fs.probes, failed0 = g_fs.failed, late0 = g_fs.late;
+    uint64_t probes0 = g_fs.probes, failed0 = g_fs.failed, late0 = g_fs.late, bursts0 = g_fs.bursts;
     // A screen whose rate is not a multiple of 60 (144, 165 Hz) shows the link's 1/60 s ticks on their nearest refreshes (nvn_mtl.m link_range), so a frame on time can show for one
     // refresh more than its hold: a cheap 50 ms frame shows 54.5 ms at 165 Hz, which counted as late kept the hold at 20 fps for good
     int hz = front_screen_max_fps(); g_fs.shown_slack = hz > fstep_hz() && hz % fstep_hz() && mtl_link_active() ? (double)fstep_hz() / hz : 0;
@@ -2456,6 +2470,7 @@ static void fstep_tick(const win_t *o, int c) {
     // (Breath of the Wild on an M5 Pro: the probe's 33 frames took the clock 338 → 432 MHz and its GPU time 24.8 → 18.5 ms, then it failed at 22 ms frames; hold 1 needed about 560 MHz)
     g_fs.ramp = mtl_probe_ramp_on();
     g_fs.per_vsync = fstep_hz() / 60;
+    g_fs.backoff = fstep_backoff(); g_fs.gpu = gpu;
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     // The last frames' CPU and GPU (vsyncs) and whether each was late, for the reason a step up gives (DM_FIELD_LOG): which side of the frame the late ones ran long on
     static double rc[3], rg[3]; static uint32_t lbits; static unsigned ri;
@@ -2500,7 +2515,11 @@ static void fstep_tick(const win_t *o, int c) {
         LOG("[nvn] frame step: the probe %s at present %llu (CPU %d%% on performance cores%s)%s", g_fs.probe == 2 ? "held" : "failed", (unsigned long long)o->presents, g_fs_pshare, pm, ++*nl == 40 ? cutm : "");
     }
     else if (probe0 == 2 && !g_fs.probe && g_fs.failed != failed0 && *nl < 40)
-        LOG("[nvn] frame step: the run at hold %d after the probe lasted under %.0f s, counted as a failed probe (CPU %d%% on performance cores)%s", kmin, FSTEP_HOLD_MAX / 60, g_fs_pshare, ++*nl == 40 ? cutm : "");
+        LOG("[nvn] frame step: the run at hold %d after the probe lasted under %.0f s, counted as a failed probe (CPU %d%% on performance cores%s)%s", kmin, FSTEP_HOLD_MAX / 60, g_fs_pshare,
+            g_fs.backoff ? "; the next probe within 2 s, fps_hold_backoff burst" : "", ++*nl == 40 ? cutm : "");
+    else if (probe0 == 2 && !g_fs.probe && g_fs.bursts != bursts0 && *nl < 40)   // fps_hold_backoff burst (nvn_fstep.h FSTEP_BURST_CAP)
+        LOG("[nvn] frame step: the run at hold %d after the probe ended in a short burst on the CPU side (GPU at most %.2f, under the late line): not a failed probe, the next one after %.0f s (fps_hold_backoff burst)%s",
+            kmin, g_fs.lgpu, g_fs.hold / 60 / g_fs.per_vsync, ++*nl == 40 ? cutm : "");
     // The end of the hold-off two failed probes over budget put on the probes (nvn_fstep.h FSTEP_OVER), once per hold-off the failed-probe line announced: the cost at the
     // longer hold fell, or the scene changed (a load, a cap change). Not when a probe ended it (its own line says what it measured: the probe held, or failed within the margin)
     // nor at hold kmin already; and the probe FSTEP_PHOLD_MAX after the step up is logged as a probe
@@ -2516,9 +2535,10 @@ static void fstep_tick(const win_t *o, int c) {
     // The counters on the game time lines run over the whole run; DM_FIELD_LOG adds this window's own (the change lines stop at 40 in a window)
     char wn[200] = ""; static uint64_t wl, wp, wu, wd, wpr, wf; static double wdr;
     if (flog && o->presents % 1800 == 0) {
-        snprintf(wn, sizeof wn, "; in this window %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials)", (unsigned long long)(g_fs.late - wl),
+        int w = snprintf(wn, sizeof wn, "; in this window %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials)", (unsigned long long)(g_fs.late - wl),
                  (unsigned long long)(g_fs.paid - wp), g_fs.dropped - wdr, (unsigned long long)(g_fs.ups - wu), (unsigned long long)(g_fs.downs - wd), (unsigned long long)(g_fs.probes - wpr), (unsigned long long)(g_fs.failed - wf));
-        wl = g_fs.late; wp = g_fs.paid; wdr = g_fs.dropped; wu = g_fs.ups; wd = g_fs.downs; wpr = g_fs.probes; wf = g_fs.failed; nwin = 0;
+        static uint64_t wb; if (g_fs.backoff && w > 0 && (size_t)w < sizeof wn) snprintf(wn + w, sizeof wn - (size_t)w, ", %llu short bursts on the CPU side not counted as failed", (unsigned long long)(g_fs.bursts - wb));
+        wl = g_fs.late; wp = g_fs.paid; wdr = g_fs.dropped; wu = g_fs.ups; wd = g_fs.downs; wpr = g_fs.probes; wf = g_fs.failed; wb = g_fs.bursts; nwin = 0;
     }
     if (!dm_fps_state) {   // 120 fps: no game clock to read; the frames at each hold say how much of the time it held 120
         if (o->presents % 1800 == 0) { LOG("[nvn] 120 fps: held 1 / 2 ticks %llu / %llu frames, %llu late, %llu up / %llu down (%llu probes, %llu failed trials)%s", (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)g_fs.late, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, wn); memset(held, 0, sizeof held); }
