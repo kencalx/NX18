@@ -41,7 +41,7 @@ int main(void) { @autoreleasepool {
         "struct A{device uint* p[[id(0)]];};\n"
         "vertex float4 v(uint n[[vertex_id]]){float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(p[n%3],0,1);}\n"
         "fragment float4 f(){return float4(1,0,0,1);}\n"
-        "fragment float4 fw(constant A&a[[buffer(0)]]){a.p[0]=0x5a5a;return float4(0,0,1,1);}\n"
+        "fragment float4 fw(constant A&a[[buffer(0)]]){uint x=a.p[1];for(uint i=0;i<(1u<<22);i++)x=x*1664525u+1013904223u;a.p[2]=x;a.p[0]=0x5a5a;return float4(0,0,1,1);}\n"
         "fragment float4 fr(constant A&a[[buffer(0)]]){return a.p[0]==0x5a5a?float4(1,0,0,1):float4(0,1,0,1);}\n", nil, &error);
     if(!lib){fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);return 1;}
     // NOLINTBEGIN(clang-analyzer-osx.cocoa.RetainCount): serial_put retains each program in g_by_serial through hm_put_id's CFBridgingRetain
@@ -87,6 +87,8 @@ int main(void) { @autoreleasepool {
     }
     // A fragment storage write in one pass, the fragment-only game barrier, and a fragment read in the next pass (on another target): the read sees the write, with and without
     // an image family heap (whose alias flush is the second pass's start barrier before its fragment stage)
+    // The writer spins (4M steps a fragment) before its write: with a write at once, the reader saw it even with no end barrier at all on the relaxed pass (the check could not fail);
+    // with the spin, dropping the relaxed end barrier fails the check without an image family heap
     for(int alias=0;alias<2;alias++){
         if(alias) atomic_fetch_add(&g_image_heap_n,1);
         data[0]=0; atomic_store_explicit(&g_last_end_relaxed,0,memory_order_relaxed);
