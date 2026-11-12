@@ -12,6 +12,7 @@ DM_ART	path	`=<image>` gives `build_ipa.sh` the launcher's key art, `dm/art.jpg`
 DM_AUDIO	switch	`1` plays audio through Core Audio, `0` uses the silent sink; real output is the default on iOS, the silent sink on the Mac (the Mac launcher sets `1`)
 DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is (16-bit, 48 kHz, channel count as in the OpenAudioOut log), to judge whether a sound played
 DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
+DM_AUDIO_ROUTE	switch	`=0` only logs an audio route change (AirPods or headphones connecting, the Mac's default output device changing) and leaves it to the audio watchdog, as before; by default the playing outputs restart at once on the new route
 DM_AUDIO_WD_MS	switch	`=<ms>` sets the audio watchdog's tick while every playing output's device calls back (default 250, 50-1000); `50` is the old fixed tick. A slower tick that sees no callback, or a last one over 50 ms old, only suspects a stall and goes back to 50 ms ticks, which decide it from the last callback's time (a stall is caught 200-350 ms after it at 250)
 DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
 DM_AV1_DAV1D	switch	`=1` decodes AV1 movies with dav1d even where VideoToolbox decodes AV1 (Apple M3 and A17 Pro on), to compare the two or to check the path older chips take (`hle_movie_av1.c`)
