@@ -228,7 +228,7 @@ private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 
 //   now (front_ios.m dm_setting_working: MetalFX upscaled at the last present, where the launcher's hint can only say it may not under Ultrawide).
 // An option a rule greys (MetalFX on a device without the scaler, or under Stretch) cannot be picked, with its reason under it; the others stay selectable. The option chosen
 // is drawn greyed as well while a rule greys it, ticked, as the settings screen's menu draws it: picking it again would change nothing. Nothing here changes a saved choice.
-// An env file's value is shown, not changed, as before
+// An env file's or the launch's value is shown, not changed, as before, said as the settings screen says it (LauncherRow.swift)
 @MainActor private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> GameMenuItem {
     let held = dm_setting_held(s.env), fixed = m.fixed.contains(s.env)
     let now = (held ? dm_setting_held_value(s.env).map { String(cString: $0) } : nil) ?? m.shown(s)   // the value the game has: Stretch while Ultrawide holds Picture
@@ -241,7 +241,7 @@ private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 
     func pick(_ v: String) { if m.choose(s, v) { dm_setting_env(s.env, v) }; _ = dm_setting_live(s.env, v) }   // saved, into the environment (under front_ios.m's lock), then applied
     if s.kind == "toggle" {
         let next = now == s.onValue ? s.offValue : s.onValue
-        return GameMenuItem(id: "row:\(s.env)", title: s.label, subtitle: fixed ? "Set in env.txt" : note,
+        return GameMenuItem(id: "row:\(s.env)", title: s.label, subtitle: fixed ? (m.fromLaunch.contains(s.env) ? "Set at launch" : "Set by an env file") : note,
                             disabled: locked || m.optionInactive(s, next) != nil, kind: .toggle(now == s.onValue)) { _ in pick(next) }   // the value it would switch to may be greyed
     }
     let options = s.options ?? []
@@ -251,5 +251,5 @@ private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 
         return GameMenuItem(id: "row:\(s.env)=\(o[0])", title: o[1], subtitle: !locked ? off.flatMap { $0.isEmpty ? nil : $0 } : nil,
                             disabled: locked || off != nil, kind: .toggle(o[0] == now)) { _ in pick(o[0]) }
     }
-    return GameMenuItem(id: "row:\(s.env)", title: s.label, subtitle: fixed ? "\(current), set in env.txt" : note, kind: .choice(picks))
+    return GameMenuItem(id: "row:\(s.env)", title: s.label, subtitle: fixed ? "\(current), \(m.fromLaunch.contains(s.env) ? "set at launch" : "set by an env file")" : note, kind: .choice(picks))
 }

@@ -713,7 +713,7 @@ struct LauncherView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Skip this screen next time")
                             Text(launcherFromEnv
-                                 ? "DM_LAUNCHER in an env file decides this"
+                                 ? "Set by an env file"   // as the in-game menu's Settings screen at start says it (GameMenu.swift)
                                  : "The game starts at once with these settings. To see this screen again, use Settings screen at start in the in-game menu (or hold a controller button while the app opens).")
                                 .nxFont(.footnote).foregroundStyle(NX18Palette.muted)
                         }
