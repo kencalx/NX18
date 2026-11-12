@@ -10,6 +10,10 @@ name	Persona 5 Royal
 ipa	Persona5Royal.ipa
 app_category	public.app-category.role-playing-games
 pad_layout	full
+# Without it a frame stood in the display link's queue for a whole session on an iPhone 18 Pro Max (release 1, 60 fps, edge smoothing): game enqueue to display 46.9-48.4 ms.
+# 60 ticks in a row with two or more frames waiting drop one (DM_PRESENT_TRIM, which env.txt can set, 0 for off): 32.4-32.8 ms, 1 trim in 2 minutes of play, frame interval p99
+# 16.8-17.0 ms (16.9-18.0 without), no underruns. Checked only on iOS; the Mac uses it untested
+present_trim	60
 
 # ---- Versions ----
 build	v65536	1.0.2	main=d4b150b29a931cd381e2a30318fc299f	subsdk0=a8cb97803f7f442a3b6cce1c7cd4ee4a	sdk=357efc198e728cb5d55265aff304f03c

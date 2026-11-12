@@ -174,12 +174,25 @@ int main(void) { @autoreleasepool {
 
     // A standing frame trimmed (DM_PRESENT_TRIM=3): two frames waiting at every tick, as when two landed in one refresh and none came without one. FIFO takes the older at the
     // first two ticks, and the third takes the newest, dropping one; then a single frame resets the run. The GPU gate is open from here on
-    // K comes from DM_PRESENT_TRIM when it is set, whatever the profile says (env.txt's 0 turns a profile's trim off), else from the profile's present_trim (0 for most games, 60 for
-    // Ocarina of Time): run with GAME=0400486024DEC000 as well as the generic suites' game to see both defaults
-    CHECK("trim: the profile's present_trim without DM_PRESENT_TRIM", g_link_trim == present_trim_k(getenv("DM_PRESENT_TRIM")) && present_trim_k(NULL) == DM_GAME_PRESENT_TRIM);
-    CHECK("trim: DM_PRESENT_TRIM wins over the profile", present_trim_k("0") == 0 && present_trim_k("45") == 45 && present_trim_k("-3") == 0 && present_trim_k("off") == 0);
-    printf("trim: K %d (game profile present_trim %d)\n", g_link_trim, DM_GAME_PRESENT_TRIM);
-    g_link_trim = 3; uint64_t drop0 = g_link_dropped, in0 = g_pq_in;
+    // K comes from DM_PRESENT_TRIM when it is set, whatever the profile says (env.txt's 0 turns a profile's trim off), else from the profile's present_trim, an explicit 0 included (60 for
+    // Ocarina of Time), else from the platform: 60 on iOS (a second of ticks on a faster link), off on the Mac. Run with GAME=0400486024DEC000 as well as the generic suites' game to see both profiles
+    { int src = -1, ios, k;
+      CHECK("trim: K read at the first tick is this host's (the Mac's)", g_link_trim == present_trim_k(getenv("DM_PRESENT_TRIM"), DM_GAME_PRESENT_TRIM, PRESENT_TRIM_PLATFORM, NULL) && !PRESENT_TRIM_PLATFORM);
+      CHECK("trim: the profile's present_trim without DM_PRESENT_TRIM", present_trim_k(NULL, DM_GAME_PRESENT_TRIM, 0, NULL) == (DM_GAME_PRESENT_TRIM > 0 ? DM_GAME_PRESENT_TRIM : 0));
+      for (ios = 0; ios < 2; ios++) {
+          CHECK("trim: DM_PRESENT_TRIM wins over the profile and the platform", present_trim_k("0", 60, ios, &src) == 0 && src == TRIM_OFF && present_trim_k("0", -1, ios, NULL) == 0 && present_trim_k("45", 60, ios, &src) == 45 && src == TRIM_ENV
+                && present_trim_k("45", -1, ios, NULL) == 45 && present_trim_k("-3", -1, ios, NULL) == 0 && present_trim_k("off", -1, ios, NULL) == 0);
+          CHECK("trim: a profile's present_trim wins over the platform, its 0 off", present_trim_k(NULL, 0, ios, &src) == 0 && src == TRIM_OFF && present_trim_k(NULL, 120, ios, &src) == 120 && src == TRIM_PROFILE
+                && present_trim_ticks(120, src, 120) == 120 && present_trim_ticks(120, src, 30) == 120);
+      }
+      k = present_trim_k(NULL, -1, 1, &src);
+      CHECK("trim: iOS without the key or the variable: 60 ticks (iOS default)", k == 60 && src == TRIM_PLATFORM && present_trim_ticks(k, src, 60) == 60 && present_trim_ticks(k, src, 30) == 60);
+      CHECK("trim: iOS default on a 120 Hz link: a second of ticks", present_trim_ticks(k, src, 120) == 120);
+      k = present_trim_k(NULL, -1, 0, &src);
+      CHECK("trim: the Mac without the key or the variable: off", k == 0 && src == TRIM_OFF && present_trim_ticks(k, src, 120) == 0);
+    }
+    printf("trim: K %d (game profile present_trim %d, -1 no key)\n", g_link_trim, DM_GAME_PRESENT_TRIM);
+    g_link_trim = 3; g_link_trim_src = TRIM_PROFILE; uint64_t drop0 = g_link_dropped, in0 = g_pq_in;
     present_enqueue(&a, 1. / 60, NULL, NULL); present_enqueue(&b, 1. / 60, NULL, NULL); tick();
     CHECK("two waiting, first tick: the older (FIFO)", g_pq_read == in0 + 1 && g_link_it_depth == 2 && g_link_trims == 0);
     present_enqueue(&b, 1. / 60, NULL, NULL); tick();

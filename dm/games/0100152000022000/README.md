@@ -15,6 +15,7 @@ Brought up on the Mac from 4.0.0: boot, the title with its demo race, the Mii pi
 | `sys_resource 0x0` | `game.tsv` | the NPDM declares 0 MB of system resource: `IsVirtualAddressMemoryEnabled` is false, as on Horizon |
 | `modules main subsdk0 sdk` | `game.tsv` | every module `main` imports from |
 | `shader_groups` (`/MapObj/`, `/Course/`, `/UI/`, `/Kart/`, `/Driver/`, …) | `game.tsv` | the shader split's groups; see [Files and shaders](#files-and-shaders) |
+| `present_trim 60` | `game.tsv` | on an iPhone 18 Pro Max (release 1, 4.0.1, 60 fps, Ultrawide on, warm start) a frame stood in the display link's queue for the whole session, so game enqueue to display was 43–47 ms; dropping one frame after 60 ticks in a row with two or more waiting brought it to 25–28 ms on the same course (3 frames dropped, all in the first 25 s, 60 fps held, no audio underruns). The owner felt no difference in the controls. `DM_PRESENT_TRIM` in `env.txt` overrides it (0 for off). Checked only on iOS; the Mac uses it untested ([A frame that stands in the display link's queue](../../../docs/reference/frame-rate.md#a-frame-that-stands-in-the-display-links-queue)) |
 
 ## Miis
 

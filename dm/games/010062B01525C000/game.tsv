@@ -4,6 +4,10 @@ name	Persona 4 Golden
 ipa	Persona4Golden.ipa
 app_category	public.app-category.role-playing-games
 pad_layout	full
+# A frame stood in the display link's queue for a whole session on an iPhone 18 Pro Max (release 1, 60 fps, edge smoothing): game enqueue to display 45-49 ms. 60 ticks in a row with
+# two or more frames waiting drop one (DM_PRESENT_TRIM, which env.txt can set, 0 for off): 28-29.5 ms, 4 frames dropped in 73 s, frame interval p99 unchanged (17.5-21 ms), GPU p50
+# 2-6 ms, no underruns in play; the owner felt no difference. Checked only on iOS; the Mac uses it untested
+present_trim	60
 build	v131072	1.0.2	main=66b2b6d53549a6364a43f69e282e3882	subsdk0=c781dd63daf0ddcdb9975da50a198f93	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
 package	v131072
 shader_versions	v131072

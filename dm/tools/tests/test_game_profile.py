@@ -1,5 +1,5 @@
 # dm/games/game.py's profile-key validation, on a synthetic profile: pso_gpu (the GPU architectures the app's offline pipeline archive is made for) takes, none and no others; the retired pso_mtl4 is tolerated (on silently, off with a warning, never an error),
-# and a profile without the key generates its header unchanged; present_sharpen's levels, off without the key; present_trim's ticks, 0 (off) without the key; post_aa's values, off without the key; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck
+# and a profile without the key generates its header unchanged; present_sharpen's levels, off without the key; present_trim's ticks, -1 (the host's default: 60 on iOS, off on the Mac) without the key; post_aa's values, off without the key; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck
 from pathlib import Path
 import os
 import subprocess
@@ -85,12 +85,12 @@ class PresentTrim(unittest.TestCase):   # DM_PRESENT_TRIM's K by default (nvn_mt
             return [l for l in out.read_text().splitlines() if 'PRESENT_TRIM' in l]
 
     def test_values_and_the_default(self):
-        self.assertEqual(self.macro(''), ['#define DM_GAME_PRESENT_TRIM 0'])   # without the key: off, as before the key
-        for v in ('0', '30', '60', '600'):
+        self.assertEqual(self.macro(''), ['#define DM_GAME_PRESENT_TRIM -1'])   # without the key: the host's default (nvn_mtl.m present_trim_k: 60 on iOS, off on the Mac)
+        for v in ('0', '30', '60', '600'):   # an explicit 0 is off on iOS too
             self.assertEqual(self.macro(f'present_trim\t{v}\n'), [f'#define DM_GAME_PRESENT_TRIM {v}'], v)
 
     def test_rejected_values(self):
-        for v in ('1', '29', '601', '-60', '60.0', 'on', ''):   # under 30 ticks a run of frame-time jitter alone could trigger it and drop the frames DM_PRESENT_FIFO keeps
+        for v in ('1', '29', '601', '-60', '-1', '60.0', 'on', ''):   # -1 is the macro without the key, not a value   # under 30 ticks a run of frame-time jitter alone could trigger it and drop the frames DM_PRESENT_FIFO keeps
             rc, out = header(f'present_trim\t{v}\n')
             self.assertNotEqual(rc, 0, v); self.assertIn('present_trim must be 0 (off) or 30 to 600 display-link ticks', out, v)
 
@@ -99,7 +99,7 @@ class PresentTrim(unittest.TestCase):   # DM_PRESENT_TRIM's K by default (nvn_mt
         on = []
         for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv')):
             keys = dict(l.split('\t', 1) for l in tsv.read_text(encoding='utf-8').splitlines() if '\t' in l and not l.startswith('#'))
-            if keys.get('present_trim', '0').strip() == '0': continue
+            if 'present_trim' not in keys: continue   # an explicit 0 needs its note too: it turns the iOS default off for the game
             on.append(tsv.parent.name); note = tsv.parent / 'README.md'
             self.assertIn('present_trim', note.read_text(encoding='utf-8') if note.is_file() else '', f'{tsv.parent.name}: its README.md should give the device run behind present_trim')
         self.assertIn('0400486024DEC000', on)
