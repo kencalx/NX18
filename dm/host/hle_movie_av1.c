@@ -18,6 +18,7 @@ struct mav1 {
     uint8_t *y8, *uv; size_t ny8, nuv;   // dav1d's picture as NV12: the chroma interleaved, and the luma of a 10- or 12-bit stream shifted to 8 bits
     int red;
     int lost, restart, restarts;   // VideoToolbox's session invalidated by iOS (the app in the background; movie_vt_restart): lost in the callback, restart while waiting for a key frame
+    CVPixelBufferRef last;         // movie_vt_restart: the last picture VideoToolbox gave (retained), shown again for each unit while waiting for a key frame
 };
 static int hw_av1(void) { const char *e = getenv("DM_AV1_DAV1D"); return !(e && *e && *e != '0') && VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1); }
 mav1 *mav1_new(void) { mav1 *a = calloc(1, sizeof *a); if (!a) die("movie: AV1 decoder allocation failed"); a->soft = !hw_av1(); return a; }
@@ -31,7 +32,7 @@ static void av1_close(mav1 *a) {
     if (a->fd) { CFRelease(a->fd); a->fd = NULL; }
     if (a->got) { CVPixelBufferRelease(a->got); a->got = NULL; }
 }
-void mav1_reset(mav1 *a) { unlock_picture(a); av1_close(a); a->nseq = 0; a->lost = a->restart = 0; if (a->dav1d) dav1d_flush(a->dav1d); a->soft = !hw_av1(); }
+void mav1_reset(mav1 *a) { unlock_picture(a); av1_close(a); if (a->last) { CVPixelBufferRelease(a->last); a->last = NULL; } a->nseq = 0; a->lost = a->restart = 0; if (a->dav1d) dav1d_flush(a->dav1d); a->soft = !hw_av1(); }
 void mav1_free(mav1 *a) { if (a) { mav1_reset(a); if (a->dav1d) dav1d_close(&a->dav1d); free(a->y8); free(a->uv); free(a); } }
 
 // ---- The sequence header (AV1 5.5), read as far as the colour config ----
@@ -215,20 +216,34 @@ static int decode_dav1d(mav1 *a, const uint8_t *data, size_t n, mav1_picture *ou
     return 1;
 }
 
+// A VideoToolbox picture, locked until the next decode, as the interface gives it
+static int vt_picture(mav1 *a, CVPixelBufferRef pb, mav1_picture *out) {
+    a->locked = pb;
+    CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    CFStringRef m = CVBufferCopyAttachment(pb, kCVImageBufferYCbCrMatrixKey, NULL);
+    *out = (mav1_picture){CVPixelBufferGetBaseAddressOfPlane(pb, 0), CVPixelBufferGetBaseAddressOfPlane(pb, 1), CVPixelBufferGetBytesPerRowOfPlane(pb, 0), CVPixelBufferGetBytesPerRowOfPlane(pb, 1),
+                          (int)CVPixelBufferGetWidthOfPlane(pb, 0), (int)CVPixelBufferGetHeightOfPlane(pb, 0),
+                          !m || CFEqual(m, kCVImageBufferYCbCrMatrix_ITU_R_709_2) ? 2 : CFEqual(m, kCVImageBufferYCbCrMatrix_ITU_R_2020) ? 5 : 1, 0};
+    if (m) CFRelease(m);
+    return 1;
+}
+// While waiting for a key frame after a restart: the last picture again, for this unit's time, so the movie's pictures keep their times and the player's clock runs through the
+// gap at real speed (a still picture) instead of jumping to the key frame and running ahead of the game's sound for the rest of the movie. None before the first picture
+static int av1_still(mav1 *a, mav1_picture *out) { return a->last ? vt_picture(a, CVPixelBufferRetain(a->last), out) : 0; }
 int mav1_decode(mav1 *a, const uint8_t *data, size_t n, mav1_picture *out) {
     unlock_picture(a);
     if (a->soft) return decode_dav1d(a, data, n, out);
     size_t seqn = 0; const uint8_t *seq = find_seq(data, n, &seqn);
     int restarting = a->restart;
-    if (a->restart) {   // iOS invalidated the session: the temporal units before the next key frame refer to pictures that went with it, so none is decoded (no picture, no garbage)
-        if (!av1_key(data, n)) return 0;
+    if (a->restart) {   // iOS invalidated the session: the temporal units before the next key frame refer to pictures that went with it, so none is decoded (no garbage: the last picture again)
+        if (!av1_key(data, n)) return av1_still(a, out);
         a->restart = 0;
     }
     for (int again = 0;; again++) {
         int o = seq && (seqn != a->nseq || memcmp(seq, a->seq, seqn) || !a->vs) ? av1_open(a, seq, seqn, restarting) : 1;
         if (o < 0) {   // no new session for this key frame: the units after it still wait for the next one, on VideoToolbox (not dav1d for the rest of the movie)
             static int log; if (log++ < 8) LOG("[movie] AV1: VideoToolbox's decoder is not available yet (the app still inactive), restarting at the next key frame");
-            av1_close(a); a->restart = 1; return 0;
+            av1_close(a); a->restart = 1; return av1_still(a, out);
         }
         if (!o) {   // a stream VideoToolbox does not take: dav1d from this temporal unit on (it holds the sequence header)
             LOG("[movie] AV1: dav1d decodes the stream instead"); av1_close(a); a->soft = 1;
@@ -249,18 +264,13 @@ int mav1_decode(mav1 *a, const uint8_t *data, size_t n, mav1_picture *out) {
             av1_close(a); a->lost = 0; a->restart = !now; restarting = 1;
             if (++a->restarts <= 8) LOG("[movie] AV1: VideoToolbox's session was invalidated (the app was in the background), restarting %s (restart %d)", now ? "at this key frame" : "at the next key frame", a->restarts);
             if (now) continue;
-            return 0;
+            return av1_still(a, out);
         }
         if (st) { if (!a->red++) LOG("[RED] movie: AV1 decode submission failed (%d, first case)", (int)st); return -1; }
         break;
     }
     if (!a->got) return 0;
-    CVPixelBufferRef pb = a->got; a->got = NULL; a->locked = pb;
-    CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
-    CFStringRef m = CVBufferCopyAttachment(pb, kCVImageBufferYCbCrMatrixKey, NULL);
-    *out = (mav1_picture){CVPixelBufferGetBaseAddressOfPlane(pb, 0), CVPixelBufferGetBaseAddressOfPlane(pb, 1), CVPixelBufferGetBytesPerRowOfPlane(pb, 0), CVPixelBufferGetBytesPerRowOfPlane(pb, 1),
-                          (int)CVPixelBufferGetWidthOfPlane(pb, 0), (int)CVPixelBufferGetHeightOfPlane(pb, 0),
-                          !m || CFEqual(m, kCVImageBufferYCbCrMatrix_ITU_R_709_2) ? 2 : CFEqual(m, kCVImageBufferYCbCrMatrix_ITU_R_2020) ? 5 : 1, 0};
-    if (m) CFRelease(m);
-    return 1;
+    CVPixelBufferRef pb = a->got; a->got = NULL;
+    if (movie_vt_restart()) { if (a->last) CVPixelBufferRelease(a->last); a->last = CVPixelBufferRetain(pb); }
+    return vt_picture(a, pb, out);
 }

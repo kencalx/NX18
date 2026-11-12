@@ -19,6 +19,7 @@ struct mavc {
     uint8_t *au; size_t aucap;   // length-prefixed copy of the access unit being decoded
     int red, rgba;               // rgba: pictures as 4-byte RGBA (native texture mode, Monster Hunter Rise) instead of NV12
     int lost, restart, restarts; // VideoToolbox's session invalidated by iOS (the app in the background; movie_vt_restart): lost in the callback, restart while waiting for an IDR picture
+    CVPixelBufferRef last; int64_t still_pts;   // movie_vt_restart: the last picture taken (retained), queued again for each picture while waiting for an IDR; the latest time it or a picture taken had
 };
 
 int mavc_bt709(const mavc *a, int h) {
@@ -31,7 +32,11 @@ static void close_session(mavc *a) {
     if (a->vs) { VTDecompressionSessionWaitForAsynchronousFrames(a->vs); VTDecompressionSessionInvalidate(a->vs); CFRelease(a->vs); a->vs = NULL; }
     if (a->fd) { CFRelease(a->fd); a->fd = NULL; }
 }
-void mavc_drop(mavc *a) { for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb); a->nq = 0; a->sequence = 0; a->saw_picture = 0; }
+void mavc_drop(mavc *a) {
+    for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb);
+    a->nq = 0; a->sequence = 0; a->saw_picture = 0;
+    if (a->last) { CVPixelBufferRelease(a->last); a->last = NULL; } a->still_pts = 0;   // another stream: nothing of this one is shown again
+}
 void mavc_free(mavc *a) { if (!a) return; close_session(a); mavc_drop(a); free(a->au); free(a); }
 int mavc_queued(const mavc *a) { return a->nq; }
 
@@ -124,6 +129,15 @@ void mavc_avcc(mavc *a, const uint8_t *p, size_t n) {
     }
 }
 
+// While waiting for an IDR picture after a restart: the last picture taken again, at this packet's time, so the movie's pictures keep their times and its player runs through the
+// gap at real speed (a still picture) instead of jumping to the IDR picture and running ahead of the game's sound. Only at a time past every picture taken or queued this way,
+// so the pictures still leave in time order (a B picture's earlier time is left out); none before the first picture
+static void avc_still(mavc *a, int64_t t) {
+    if (!a->last || a->nq == QMAX || t <= a->still_pts) return;
+    int k = a->nq;
+    while (k > 0 && (a->q[k - 1].sequence > a->sequence || (a->q[k - 1].sequence == a->sequence && a->q[k - 1].pts > t))) { a->q[k] = a->q[k - 1]; k--; }
+    a->q[k].pb = CVPixelBufferRetain(a->last); a->q[k].pts = t; a->q[k].sequence = a->sequence; a->nq++; a->still_pts = t;
+}
 static void on_frame(void *ref, void *src, OSStatus st, VTDecodeInfoFlags fl, CVImageBufferRef img, CMTime pts, CMTime dur) {
     (void)fl; (void)dur; mavc *a = ref;
     if (st == kVTInvalidSessionErr && movie_vt_restart()) { a->lost = 1; return; }   // mavc_decode starts a new session at the next IDR picture
@@ -180,15 +194,15 @@ int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) {
     if (n > 0 && !each_nal(p, (size_t)n, au_add, &c)) { if (!a->red++) LOG("[RED] movie: AVC packet without an Annex B start code (%d bytes), not decoded", n); return -1; }
     if (!c.len) return 0;
     int restarting = a->restart;
-    if (a->restart) {   // iOS invalidated the session: pictures before the next IDR refer to pictures that went with it, so none is decoded (no picture, no garbage); parameter sets are kept
-        if (!c.idr) return 0;
+    if (a->restart) {   // iOS invalidated the session: pictures before the next IDR refer to pictures that went with it, so none is decoded (no garbage: the last picture again); parameter sets are kept
+        if (!c.idr) { if (c.picture) avc_still(a, pts_us); return 0; }
         a->restart = 0;
     }
     for (int again = 0, counted = 0;; again++) {
         int o = a->dirty || !a->vs ? open_session(a, restarting) : 1;
         if (o < 1 && restarting) a->restart = 1;   // no session for this IDR: the pictures after it still wait for the next one
-        if (o < 0) { static int n; if (n++ < 8) LOG("[movie] AVC: VideoToolbox's decoder is not available yet (the app still inactive), restarting at the next IDR picture"); return 0; }
-        if (!o) return -1;
+        if (o < 0) { static int n; if (n++ < 8) LOG("[movie] AVC: VideoToolbox's decoder is not available yet (the app still inactive), restarting at the next IDR picture"); if (c.picture) avc_still(a, pts_us); return 0; }
+        if (!o) { if (restarting && c.picture) avc_still(a, pts_us); return -1; }
         if (c.picture && !counted) { avc_picture_sequence(a, c.idr); counted = 1; }
         CMBlockBufferRef bb = NULL; CMSampleBufferRef sb = NULL;
         OSStatus st = CMBlockBufferCreateWithMemoryBlock(NULL, NULL, c.len, NULL, NULL, 0, c.len, 0, &bb);
@@ -204,6 +218,7 @@ int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) {
             close_session(a); a->lost = 0; a->restart = !now; restarting = 1;
             if (++a->restarts <= 8) LOG("[movie] AVC: VideoToolbox's session was invalidated (the app was in the background), restarting %s (restart %d)", now ? "at this IDR picture" : "at the next IDR picture", a->restarts);
             if (now) continue;
+            if (c.picture) avc_still(a, pts_us);
             return 0;
         }
         if (st) { if (!a->red++) LOG("[RED] movie: AVC decode submission failed (%d, first case)", (int)st); return -1; }
@@ -225,6 +240,7 @@ static void take_rgba(CVPixelBufferRef pb, uint8_t *dst, int w, int h) {
 int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
     if (!a->nq || (!flush && a->nq <= a->depth && a->q[0].sequence == a->sequence)) return 0;
     CVPixelBufferRef pb = a->q[0].pb; if (pts_us) *pts_us = a->q[0].pts;
+    if (movie_vt_restart()) { if (a->last) CVPixelBufferRelease(a->last); a->last = CVPixelBufferRetain(pb); if (a->q[0].pts > a->still_pts) a->still_pts = a->q[0].pts; }   // avc_still() shows it again
     memmove(a->q, a->q + 1, --a->nq * sizeof a->q[0]);
     CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
     if (a->rgba) { take_rgba(pb, dst, w, h); CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly); CVPixelBufferRelease(pb); return 1; }
