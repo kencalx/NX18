@@ -18,6 +18,42 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
     }
 }
 
+// Gaps between probes from the i-th on (vsyncs): each the hold-off of two failed probes over budget (FSTEP_PHOLD_MAX), give or take the probe's own frames
+static int gaps_from(const double *gaps, int i, int n) { for (; i < n; i++) if (gaps[i] < FSTEP_PHOLD_MAX || gaps[i] > FSTEP_PHOLD_MAX + 120) return 0; return 1; }
+
+// The same with the host's present snapshots (hle_nvn.c fstep_tick): lateness is what the screen showed 8 presents back (screen = 2 late, 1 on time), so the verdicts of the
+// frames before a step up arrive after it. gpu: the GPU's own clock-follows-the-hold reference (nvn_fstep_gpu_slowed) feeds slow; shown_ms > 0 overrides what a frame shows
+typedef struct { sim m; nvn_fgpu g; unsigned char lateq[8]; long n; } ssim;
+static void srun(ssim *x, int n, double w, double shown_v) {
+    for (int i = 0; i < n; i++) {
+        sim *m = &x->m; int k = m->s.k ? m->s.k : 1, step = m->next ? m->next : 1;
+        double shown = shown_v > 0 ? shown_v : w > k ? w : k;
+        m->real += shown; m->game += step;
+        if (x->n >= 8) m->s.screen = x->lateq[x->n % 8] ? 2 : 1;
+        x->lateq[x->n % 8] = shown > k + FSTEP_LATE; x->n++;
+        m->slow = nvn_fstep_gpu_slowed(&x->g, w, k, 1, m->s.probe);
+        m->next = nvn_fstep_next(&m->s, shown, w, 1, 3, 0, m->slow);
+    }
+}
+// Breath of the Wild on an iPhone 18 Pro Max (2026-11): GPU 0.86 vsyncs at hold 1 for 20 s, then an area whose GPU work takes 1.4 vsyncs (23 ms) at every hold: hold 1 cannot
+// be held, and the GPU at hold 2 is 1.6 times its hold-1 reference. Returns the probes in the next 60 s of real time
+static uint64_t heavy_stretch(ssim *x, int screen) {
+    for (int i = 0; i < 1200; i++) { if (screen) srun(x, 1, 0.86, 0); else { x->m.slow = nvn_fstep_gpu_slowed(&x->g, 0.86, x->m.s.k ? x->m.s.k : 1, 1, x->m.s.probe); run(&x->m, 1, 0.86, 1, 3, 0); } }
+    uint64_t p0 = x->m.s.probes; double t0 = x->m.real;
+    while (x->m.real - t0 < 3600) { if (screen) srun(x, 1, 1.4, 0); else { x->m.slow = nvn_fstep_gpu_slowed(&x->g, 1.4, x->m.s.k ? x->m.s.k : 1, 1, x->m.s.probe); run(&x->m, 1, 1.4, 1, 3, 0); } }
+    return x->m.s.probes - p0;
+}
+static void step1(ssim *x, int screen, double w) { if (screen) srun(x, 1, w, 0); else { x->m.slow = nvn_fstep_gpu_slowed(&x->g, w, x->m.s.k ? x->m.s.k : 1, 1, x->m.s.probe); run(&x->m, 1, w, 1, 3, 0); } }
+// Real time (vsyncs) from the cost falling to w until the hold is 1, then 600 frames more; *held: the hold stayed 1 through them
+static double recover(ssim *x, int screen, double w, int *held) {
+    double t0 = x->m.real, t = -1;
+    for (int i = 0; i < 2000 && t < 0; i++) { step1(x, screen, w); if (x->m.s.k == 1) t = x->m.real - t0; }
+    *held = t >= 0; uint64_t ups = x->m.s.ups;
+    for (int i = 0; i < 600; i++) step1(x, screen, w);
+    *held = *held && x->m.s.k == 1 && x->m.s.ups == ups;
+    return t;
+}
+
 int main(void) {
     {   // 120 fps (hle_nvn.c fps_high): kmin 1, kmax 2, in ticks of 1/120 s. The target follows the hold, so a hold above what frames take is the game at the right speed
         sim m = {0}; m.s.per_vsync = 2;
@@ -107,6 +143,49 @@ int main(void) {
         run(&m, 120, 0.5, 2, 3, 0); run(&m, 1, 0.5, 1, 3, 0);
         check(m.s.k == 1 && m.s.ups == 0 && m.s.late == 0, "  movie ends (kmin 1): hold 1 at once");
     }
+    {   // A 60 fps movie (nvn_fstep.pin: Ocarina of Time's opening, nn::codec, about 16.5 ms of GPU a frame on an iPhone): hold 1 while it plays, whatever the frames cost; no step
+        // up, trial or probe, and the game's time stays real time through the debt. Before, three late frames at 1.1 vsyncs stepped to hold 2 and the probes back kept failing
+        sim m = {0}; run(&m, 600, 0.6, 1, 3, 0);
+        uint64_t ups = m.s.ups, probes = m.s.probes, downs = m.s.downs; double r0 = m.real, g0 = m.game;
+        m.s.pin = 1;
+        for (int i = 0; i < 9000; i++) run(&m, 1, i % 10 < 3 ? 1.15 : 0.98, 1, 3, 0);   // 150 s of frames around the budget: three of 19 ms in every ten
+        snprintf(b, sizeof b, "60 fps movie (pin): hold 1 for 150 s of frames at 0.98-1.15 vsyncs (k %d, %llu up, %llu probes)", m.s.k, (unsigned long long)(m.s.ups - ups), (unsigned long long)(m.s.probes - probes));
+        check(m.s.k == 1 && m.s.ups == ups && m.s.probes == probes && m.s.downs == downs, b);
+        snprintf(b, sizeof b, "  game time %.0f against real time %.0f (debt %.2f): the late frames are paid back", m.game - g0, m.real - r0, m.s.debt);
+        check(m.real - r0 - (m.game - g0) - m.s.debt > -1.01 && m.real - r0 - (m.game - g0) - m.s.debt < 1.01 && m.s.debt < 1.5, b);
+        run(&m, 600, 2.4, 1, 3, 0);
+        check(m.s.k == 1 && m.s.ups == ups, "  even 40 ms frames (a load during the movie) keep hold 1");
+        m.s.pin = 0; run(&m, 3, 1.3, 1, 3, 0);
+        check(m.s.k == 2 && m.s.ups == ups + 1, "  the movie ends: three late frames step up again");
+        run(&m, 1200, 0.6, 1, 3, 0);
+        check(m.s.k == 1, "  and a light scene comes back to hold 1");
+    }
+    {   // The same without the pin: what the iPhone did (the frame step left hold 1 at the first three late frames)
+        sim m = {0}; run(&m, 600, 0.6, 1, 3, 0);
+        for (int i = 0; i < 9000; i++) run(&m, 1, i % 10 < 3 ? 1.15 : 0.98, 1, 3, 0);
+        snprintf(b, sizeof b, "  without the pin: hold %d, %llu steps up, %llu probes in the 150 s", m.s.k, (unsigned long long)m.s.ups, (unsigned long long)m.s.probes);
+        check(m.s.ups >= 1, b);
+    }
+    {   // The thermal cap (kmin 2) during a 60 fps movie: hold 2, the fastest the cap allows, and never 3; the cap's end during the movie: hold 1 at once
+        sim m = {0}; run(&m, 600, 0.6, 1, 3, 0); m.s.pin = 1;
+        run(&m, 300, 1.1, 1, 3, 0); run(&m, 1, 1.1, 2, 2, 0);
+        check(m.s.k == 2, "60 fps movie under the thermal cap (kmin 2): hold 2 at once");
+        run(&m, 600, 2.3, 2, 2, 0);
+        check(m.s.k == 2 && m.s.ups == 0, "  frames of 2.3 vsyncs under the cap: hold 2, no step up");
+        run(&m, 1, 1.1, 1, 3, 0);
+        check(m.s.k == 1 && !m.s.trial && !m.s.probe && m.s.ups == 0, "  the cap ends during the movie: hold 1 at once, no probe to judge");
+    }
+    {   // A movie's start and end forget the probes' hold-off (two failed probes over budget, nvn_fstep_pheld) as a cap change does: another scene
+        ssim x = {0}; heavy_stretch(&x, 0);
+        int held_before = nvn_fstep_pheld(&x.m.s, 1) && x.m.s.pk > 0;
+        x.m.s.pin = 1; step1(&x, 0, 1.4);
+        snprintf(b, sizeof b, "movie start: the hold-off of two failed probes over budget is forgotten (before %d, pover %d, pk %.2f)", held_before, x.m.s.pover, x.m.s.pk);
+        check(held_before && x.m.s.pover == 0 && x.m.s.pk == 0 && x.m.s.phold == FSTEP_HOLD0 && x.m.s.k == 1, b);
+        for (int i = 0; i < 300; i++) step1(&x, 0, 1.4);
+        x.m.s.pover = 2; x.m.s.pk = 1.6; x.m.s.pfrom = 1.4; x.m.s.phold = FSTEP_PHOLD_MAX; x.m.s.hold = FSTEP_HOLD_MAX;   // as if measured during the movie
+        x.m.s.pin = 0; step1(&x, 0, 0.6);
+        check(x.m.s.pover == 0 && x.m.s.pk == 0 && x.m.s.phold == FSTEP_HOLD0 && x.m.s.hold == FSTEP_HOLD0 && x.m.s.k == 1, "  movie end: forgotten again, the trials' hold-off back to 1 s");
+    }
     {   sim m = {0}; run(&m, 600, 0.86, 1, 3, 0); run(&m, 600, 1.5, 2, 2, 0); run(&m, 1, 1.5, 1, 3, 0);
         check(m.s.k == 1 && m.s.grace == FSTEP_GRACE && m.s.trial == FSTEP_RUN && m.s.probes == 1,
               "cap release: count a probe, with all grace frames left for hold 1");
@@ -137,20 +216,26 @@ int main(void) {
         snprintf(b, sizeof b, "  20 late frames in the grace are paid back: game time %.0f against real time %.2f (debt %.2f)", m.game, m.real, m.s.debt);
         check(m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01 && m.s.dropped == 0, b);
     }
-    {   // slowed, but hold 1 really does not fit: each probe fails after its grace, and the probes spread out 1 → 2 → 4 → 8 s
+    {   // slowed, but hold 1 really does not fit (1.5 there, 1.2 at hold 2): each probe fails after its grace; two that measured hold 1 at 1.5 hold the probes off for 32 s
+        // at a time while the cost at hold 2 stays (before: a probe every 8 s for good)
         sim m = {0}; run(&m, 60, 0.5, 1, 3, 0); run(&m, 300, 1.3, 1, 3, 0); m.slow = 1;
-        double last = m.real, gaps[5]; int ng = 0, at1 = 0, first_len = -1; uint64_t probes = m.s.probes;
-        for (int i = 0; i < 6000 && ng < 5; i++) {
+        double last = m.real, gaps[16]; int ng = 0, at1 = 0, first_len = -1; uint64_t probes = m.s.probes;
+        for (int i = 0; i < 6000; i++) {
             run(&m, 1, m.s.k == 1 ? 1.5 : 1.2, 1, 3, 0);
             if (m.s.k == 1) at1++; else if (at1 && first_len < 0) first_len = at1;
-            if (m.s.probes != probes) { probes = m.s.probes; gaps[ng++] = m.real - last; last = m.real; }
+            if (m.s.probes != probes) { probes = m.s.probes; if (ng < 16) gaps[ng++] = m.real - last; last = m.real; }
         }
         snprintf(b, sizeof b, "slowed, hold 1 does not fit: the first probe lasts its grace + 3 late frames (%d frames at hold 1)", first_len);
         check(first_len == FSTEP_GRACE + 3, b);
-        snprintf(b, sizeof b, "  probes %.0f, %.0f, %.0f, %.0f vsyncs apart; %llu failed", gaps[1], gaps[2], gaps[3], gaps[4], (unsigned long long)m.s.failed);
-        check(ng == 5 && gaps[1] >= 120 && gaps[2] >= 240 && gaps[3] >= 480 && gaps[4] >= 480 && gaps[4] < 600 && m.s.failed >= 4, b);
+        snprintf(b, sizeof b, "  two probes %.0f vsyncs apart, then one each 32 s (%d in 200 s, %.0f / %.0f apart; failed %llu, k %d)", ng > 1 ? gaps[1] : 0, ng, ng > 2 ? gaps[2] : 0, ng > 3 ? gaps[3] : 0, (unsigned long long)m.s.failed, m.s.k);
+        check(ng >= 5 && ng <= 7 && gaps[1] >= 120 && gaps[1] < FSTEP_PHOLD_MAX && gaps_from(gaps, 2, ng) && m.s.failed == (uint64_t)ng && m.s.k == 2 && m.s.pover >= FSTEP_OVER_N, b);
         snprintf(b, sizeof b, "  game time %.0f against real time %.2f (debt %.2f, dropped %.0f)", m.game, m.real, m.s.debt, m.s.dropped);
         check(m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01 && m.s.dropped == 0, b);
+        uint64_t p2 = m.s.probes;
+        m.real += 20; m.game += m.next; m.next = nvn_fstep_next(&m.s, 20, 20, 1, 3, 0, 1);   // a load: a stall of 1/3 s
+        for (int i = 0; i < 120; i++) run(&m, 1, m.s.k == 1 ? 1.5 : 1.2, 1, 3, 0);
+        snprintf(b, sizeof b, "  a load (a stall of 1/3 s) forgets what they measured: a probe again at once (probes %llu → %llu)", (unsigned long long)p2, (unsigned long long)m.s.probes);
+        check(m.s.probes == p2 + 1 && m.s.pover < FSTEP_OVER_N, b);
     }
     {   // slowed, hold 1 holds for a while: a probe that holds but whose run at hold 1 ends within 8 s counts as failed, and the next waits twice as long
         sim m = {0}; run(&m, 60, 0.5, 1, 3, 0); run(&m, 300, 1.3, 1, 3, 0); m.slow = 1;
@@ -193,18 +278,22 @@ int main(void) {
         for (int i = 0; i < 1200; i++) { double gp = i < 600 || m.s.k == 1 ? 0.03 : 0.17, w = i < 600 ? 0.5 : 1.3; m.slow = nvn_fstep_gpu_slowed(&g, gp, m.s.k ? m.s.k : 1, 1, m.s.probe); slowed |= m.slow; run(&m, 1, w, 1, 3, 0); }
         check(m.s.k == 2 && !slowed && m.s.probes == 0, "GPU 0.03 → 0.17 under CPU lag: a GPU at 3 ms is not called slowed, no probe");
     }
-    {   // the GPU stays slow at hold 1 too: each probe fails, the reference stays the hold-1 time from before, and the probes spread out
-        sim m = {0}; nvn_fgpu g = {0}; double last = 0, gaps[4]; int ng = 0; uint64_t probes = 0;
-        for (int i = 0; i < 6000 && ng < 4; i++) {
+    {   // the GPU stays slow at hold 1 too: the probes fail, the reference stays the hold-1 time from before, and after two a probe only each 32 s while the GPU stays at 1.5
+        // (before: one every 8 s); a cap change (a movie) is another scene, and the cap's end probes again
+        sim m = {0}; nvn_fgpu g = {0}; double last = 0, gaps[16]; int ng = 0; uint64_t probes = 0;
+        for (int i = 0; i < 6000; i++) {
             double w = i < 600 ? 0.86 : i < 603 ? 1.25 : 1.5;
             m.slow = nvn_fstep_gpu_slowed(&g, w, m.s.k ? m.s.k : 1, 1, m.s.probe);
             run(&m, 1, w, 1, 3, 0);
-            if (m.s.probes != probes) { probes = m.s.probes; gaps[ng++] = m.real - last; last = m.real; }
+            if (m.s.probes != probes) { probes = m.s.probes; if (ng < 16) gaps[ng++] = m.real - last; last = m.real; }
         }
         snprintf(b, sizeof b, "GPU slow at hold 1 too: probes fail (%llu of %llu), reference kept at %.2f", (unsigned long long)m.s.failed, (unsigned long long)m.s.probes, g.ref);
-        check(ng == 4 && m.s.failed >= 3 && g.ref < 1.0, b);
-        snprintf(b, sizeof b, "  probes %.0f, %.0f, %.0f vsyncs apart; game time %.0f against real time %.2f (debt %.2f)", gaps[1], gaps[2], gaps[3], m.game, m.real, m.s.debt);
-        check(gaps[1] >= 120 && gaps[2] >= 240 && gaps[3] >= 480 && m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01, b);
+        check(ng >= 4 && m.s.failed == (uint64_t)ng && g.ref < 1.0, b);
+        snprintf(b, sizeof b, "  probes %.0f, then %.0f and %.0f vsyncs apart; game time %.0f against real time %.2f (debt %.2f)", gaps[1], ng > 2 ? gaps[2] : 0, ng > 3 ? gaps[3] : 0, m.game, m.real, m.s.debt);
+        check(gaps[1] >= 120 && gaps[1] < FSTEP_PHOLD_MAX && gaps_from(gaps, 2, ng) && m.s.k >= 2 && m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01, b);
+        uint64_t pm = m.s.probes;
+        run(&m, 300, 0.5, 2, 2, 0); run(&m, 1, 0.5, 1, 3, 0);
+        check(m.s.probes == pm + 1 && m.s.k == 1 && m.s.pover == 0, "  a movie (kmin 2) and its end: a probe at the cap's end, the measurement forgotten");
     }
     {   // Breath of the Wild on an iPhone (2026-10-21): frames of 0.80 / 0.92 vsyncs at hold 1 for 20 s, three pipeline compiles step to 2, and the scene costs the same there:
         // every other frame is above FSTEP_FIT, so no 30 fit in a row; the cost that held hold 1 starts one probe, which holds
@@ -233,17 +322,22 @@ int main(void) {
         for (int i = 0; i < 2000; i++) run(&m, 1, i % 2 ? 0.92 : 0.80, 1, 3, 0);
         check(m.s.k == 2 && m.s.probes == 0 && m.s.cref == 0, "hitch after 5 s at hold 1: no cost that held, no probe");
     }
-    {   // the cost at hold 2 is what held, but hold 1 no longer fits (1.3 there): each probe fails, the probes spread out 1 → 2 → 4 → 8 s, and the cost that held is kept
-        sim m = {0}; double last = 0, gaps[5]; int ng = 0; uint64_t probes = 0;
+    {   // the cost at hold 2 is what held, but hold 1 no longer fits (1.3 there): the probes fail and the cost that held is kept; after two a probe only each 32 s while hold 1
+        // measured 1.3 and the cost at hold 2 stays (before: one every 8 s). The cost at hold 2 falling to 0.75 brings the estimate for hold 1 to 1.13: a probe again, which holds
+        sim m = {0}; double last = 0, gaps[16]; int ng = 0; uint64_t probes = 0;
         run(&m, 1200, 0.86, 1, 3, 0); run(&m, 3, 1.6, 1, 3, 0);
-        for (int i = 0; i < 6000 && ng < 5; i++) {
+        for (int i = 0; i < 6000; i++) {
             run(&m, 1, m.s.k == 1 ? 1.3 : 0.86, 1, 3, 0);
-            if (m.s.probes != probes) { probes = m.s.probes; gaps[ng++] = m.real - last; last = m.real; }
+            if (m.s.probes != probes) { probes = m.s.probes; if (ng < 16) gaps[ng++] = m.real - last; last = m.real; }
         }
         snprintf(b, sizeof b, "same cost at hold 2 but hold 1 does not fit: probes fail (%llu of %llu), cost that held kept at %.2f", (unsigned long long)m.s.failed, (unsigned long long)m.s.probes, m.s.cref);
-        check(ng == 5 && m.s.failed >= 4 && m.s.cref > 0.85 && m.s.cref < 0.87, b);
-        snprintf(b, sizeof b, "  probes %.0f, %.0f, %.0f, %.0f vsyncs apart; game time %.0f against real time %.2f (debt %.2f)", gaps[1], gaps[2], gaps[3], gaps[4], m.game, m.real, m.s.debt);
-        check(gaps[1] >= 120 && gaps[2] >= 240 && gaps[3] >= 480 && gaps[4] >= 480 && gaps[4] < 600 && m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01, b);
+        check(ng >= 4 && m.s.failed == (uint64_t)ng && m.s.cref > 0.85 && m.s.cref < 0.87, b);
+        snprintf(b, sizeof b, "  probes %.0f, then %.0f and %.0f vsyncs apart; game time %.0f against real time %.2f (debt %.2f)", gaps[1], ng > 2 ? gaps[2] : 0, ng > 3 ? gaps[3] : 0, m.game, m.real, m.s.debt);
+        check(gaps[1] >= 120 && gaps[1] < FSTEP_PHOLD_MAX && gaps_from(gaps, 2, ng) && m.s.k == 2 && m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01, b);
+        uint64_t failed = m.s.failed;
+        run(&m, 600, 0.75, 1, 3, 0);
+        snprintf(b, sizeof b, "  the cost at hold 2 falls to 0.75: back to hold 1, and it holds (k %d, probes %llu, failed %llu)", m.s.k, (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
+        check(m.s.k == 1 && m.s.failed == failed, b);
     }
     for (int sustained = 0; sustained < 2; sustained++) {
         // The first movie follows an uninterrupted run: no earlier hitch has saved cref. Only a run of at least 8 s proves that this cost held 60.
@@ -359,6 +453,74 @@ int main(void) {
             snprintf(b, sizeof b, what[c], first_len, (unsigned long long)m.s.failed);
             check(first_len == want[c] && m.s.k == 2 && m.s.failed == 1, b);
         }
+    }
+    // A GPU-bound stretch hold 1 cannot hold (BotW on an iPhone, 2026-11: GPU 22–24 ms at hold 2, 1.6–1.7 times its hold-1 time, and as much in each probe back to hold 1).
+    // Before, a probe failed every 2–3 s for as long as the area lasted, each a stutter of 3 late frames; the measured cost at hold 1 now keeps the probes off after two
+    for (int screen = 1; screen >= 0; screen--) {
+        ssim x = {0}; uint64_t p = heavy_stretch(&x, screen);
+        snprintf(b, sizeof b, "%sGPU-bound at 1.4 vsyncs for 60 s%s: two probes, a third 32 s on (%llu, %llu failed, k %d)", screen ? "" : "  ", screen ? " (screen verdicts)" : ", judged by cost",
+                 (unsigned long long)p, (unsigned long long)x.m.s.failed, x.m.s.k);
+        check(p >= 2 && p <= 3 && x.m.s.k >= 2, b);
+        snprintf(b, sizeof b, "  game time %.0f against real time %.2f (debt %.2f, dropped %.0f)", x.m.game, x.m.real, x.m.s.debt, x.m.s.dropped);
+        check(x.m.real - x.m.game - x.m.s.debt > -1.01 && x.m.real - x.m.game - x.m.s.debt < 1.01 && x.m.s.dropped == 0, b);
+        int held; double t = recover(&x, screen, 0.55, &held);
+        snprintf(b, sizeof b, "  the area gets light (0.55, 9 ms): back to hold 1 in %.0f vsyncs, and it holds", t);
+        check(held && t <= 120, b);
+    }
+    // The heavy stretch, then a scene hold 1 can hold whose cost at the longer hold is as high: the GPU clock follows the hold (BotW on an iPhone: 14.4 ms at hold 1, about 25 at
+    // hold 2, the heavy area 22–24), here 0.86 at hold 1 once the clock rose within 10 frames and 1.5 at hold 2. The cost at hold 2 does not show the change, so the hold-off of
+    // the two failed probes would last until a load (c7f9e835: at hold 2 for good); the probe FSTEP_PHOLD_MAX after the last step up finds hold 1 again
+    for (int screen = 1; screen >= 0; screen--) {
+        ssim x = {0}; heavy_stretch(&x, screen);
+        double t0 = x.m.real, t = -1; int at1 = 0;
+        for (int i = 0; i < 4000 && t < 0; i++) {
+            int k = x.m.s.k ? x.m.s.k : 1; at1 = k == 1 ? at1 + 1 : 0;
+            step1(&x, screen, k >= 2 ? 1.5 : at1 <= 10 ? 1.5 : 0.86);
+            if (x.m.s.probe == 2) t = x.m.real - t0;
+        }
+        for (int i = 0; i < 600; i++) { int k = x.m.s.k ? x.m.s.k : 1; at1 = k == 1 ? at1 + 1 : 0; step1(&x, screen, k >= 2 ? 1.5 : at1 <= 10 ? 1.5 : 0.86); }
+        snprintf(b, sizeof b, "%sthen a scene hold 1 holds at 1.5 at hold 2 (the GPU-slowed case%s): a probe that holds after %.0f vsyncs (k %d)", screen ? "  " : "    ", screen ? "" : ", by cost", t, x.m.s.k);
+        check(t >= 0 && t <= FSTEP_PHOLD_MAX + 120 && x.m.s.k == 1, b);
+    }
+    {   // a step the game fixes itself (BotW's cutscenes, the VFR override) is another scene: what the failed probes measured is forgotten
+        ssim x = {0}; heavy_stretch(&x, 1);
+        int held = x.m.s.pover >= FSTEP_OVER_N;
+        run(&x.m, 1, 1.4, 1, 3, 2);
+        check(held && x.m.s.pover == 0 && x.m.s.pk == 0, "  the game fixes its own step: the failed probes' measurement is forgotten");
+    }
+    {   // the scene gets light just after the second failed probe, when the hold-off has doubled twice: recovery does not wait it out
+        ssim x = {0};
+        for (int i = 0; i < 1200; i++) srun(&x, 1, 0.86, 0);
+        for (int i = 0; i < 20000 && x.m.s.failed < 2; i++) srun(&x, 1, 1.4, 0);
+        srun(&x, 10, 1.4, 0);
+        int held; double t = recover(&x, 1, 0.55, &held);
+        snprintf(b, sizeof b, "  the area gets light just after the second failed probe: hold 1 in %.0f vsyncs, and it holds", t);
+        check(x.m.s.failed >= 2 && held && t <= 120, b);
+    }
+    {   // a GPU-bound stretch where hold 1 is only just out of reach (1.12 at hold 1, within FSTEP_OVER of it; 1.4 at the longer holds): the probes go on, but back off
+        // 1 → 2 → 4 → 8 → 16 → 32 s (FSTEP_PHOLD_MAX) instead of stopping at 8 s
+        ssim x = {0}; double last = 0, gaps[32]; int ng = 0; uint64_t probes = 0;
+        for (int i = 0; i < 1200; i++) srun(&x, 1, 0.86, 0);
+        while (x.m.real < 1200 + 9000 && ng < 32) {
+            srun(&x, 1, x.m.s.k == 1 ? 1.12 : 1.4, 0);
+            if (x.m.s.probes != probes) { probes = x.m.s.probes; gaps[ng++] = x.m.real - last; last = x.m.real; }
+        }
+        snprintf(b, sizeof b, "hold 1 just out of reach (1.12): %d probes in 150 s, %.0f, %.0f, %.0f vsyncs apart", ng, ng > 3 ? gaps[3] : 0, ng > 4 ? gaps[4] : 0, ng > 5 ? gaps[5] : 0);
+        check(ng >= 6 && ng <= 8 && gaps[3] >= 480 && gaps[4] >= 960 && gaps[5] >= 1900, b);
+    }
+    {   // opening a menu (BotW on an iPhone): six frames shown 34 ms late at hold 1 while their work is 0.74 vsyncs. The screen's verdicts arrive 8 presents late, so the three
+        // after the step up are about frames made before it: one step up, not 1 → 2 → 3
+        ssim x = {0};
+        for (int i = 0; i < 1200; i++) srun(&x, 1, 0.72, 0);
+        srun(&x, 6, 0.74, 2.04);
+        for (int i = 0; i < 12; i++) srun(&x, 1, 0.74, 0);
+        snprintf(b, sizeof b, "a hitch of six late frames under budget (screen verdicts): one step up (ups %llu, k %d)", (unsigned long long)x.m.s.ups, x.m.s.k);
+        check(x.m.s.ups == 1 && x.m.s.k == 2, b);
+        srun(&x, 300, 0.74, 0);
+        check(x.m.s.k == 1, "  and back to hold 1 by a trial");
+        srun(&x, 3, 0.74, 2.04); srun(&x, 12, 0.74, 0); srun(&x, 3, 2.6, 0); srun(&x, 12, 2.6, 0);
+        snprintf(b, sizeof b, "  frames that do not fit the new hold still step up again (k %d)", x.m.s.k);
+        check(x.m.s.k == 3, b);
     }
     {   // The long-frame log (nvn_lf_long): 60 fps at 16.7 ms frames with 10 ms of GPU work, then a step up to hold 2. Judged by the running mean alone (held 0, as before the
         // hold was passed) the first frames of 33.3 ms read as long until the mean caught up; judged against their hold none does, and a frame past the hold still counts

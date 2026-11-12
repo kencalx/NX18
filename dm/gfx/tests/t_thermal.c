@@ -32,9 +32,11 @@ static void target(float fps) {
     uint32_t bits; memcpy(&bits, &fps, sizeof bits);
     __atomic_store_n((uint32_t *)fps_state, bits, __ATOMIC_RELAXED);
 }
-static _Atomic int test_movie;
+static _Atomic int test_movie, test_movie_fps;
 int dm_movie_playing(void) { return atomic_load(&test_movie); }   // hle_movie.c: a movie's pictures are being handed out
+int dm_movie_fps(void) { return atomic_load(&test_movie) ? atomic_load(&test_movie_fps) : 0; }   // its pictures a second (0: the movie::Decoder path's, not known)
 static void movie(int on) { atomic_store(&test_movie, on); }
+static void movie_fps(int fps) { atomic_store(&test_movie_fps, fps); }
 
 static _Atomic int ready, start;
 static void *reader(void *unused) {
@@ -55,6 +57,7 @@ int main(void) {
         at(10, 3); CHECK("disabled: a critical device keeps the configured cap", nvn_game_fps() == 60);
         low_power(1); at(11, 0); CHECK("disabled: Low Power Mode keeps the configured cap", nvn_game_fps() == 60);
         movie(1); CHECK("disabled: the movie cap still applies", nvn_game_fps() == 30);
+        movie_fps(60); CHECK("disabled: a 60 fps movie keeps 60 fps", nvn_game_fps() == 60); movie_fps(0);
         CHECK("disabled: thermal state is never read", atomic_load(&thermal_reads) == 0);
         CHECK("disabled: Low Power Mode is never read", atomic_load(&low_power_reads) == 0);
     } else {
@@ -130,6 +133,16 @@ int main(void) {
             at(302, 2); CHECK("DM_LOW_POWER_CAP=0: heat still holds 30 fps", nvn_game_fps() == 30);
         }
         low_power(0);
+        // A movie with its picture rate (the nn::codec path, hle_codec_video.c): one of 60 is not held at 30 (the frame step holds its fastest hold instead), one of 30 is,
+        // as the movie::Decoder path's of a rate not known; the thermal cap and a 30 fps target still hold 30 during a 60 fps movie
+        at(400, 0); (void)nvn_game_fps(); at(430, 0); (void)nvn_game_fps();
+        movie(1); movie_fps(60); at(431, 1); CHECK("a 60 fps movie keeps the 60 fps cap", nvn_game_fps() == 60);
+        movie_fps(30); CHECK("a 30 fps movie with its rate holds 30 fps", nvn_game_fps() == 30);
+        movie_fps(0); CHECK("a movie of a rate not known (movie::Decoder) holds 30 fps, as before", nvn_game_fps() == 30);
+        movie_fps(60); target(30); CHECK("a 60 fps movie at a 30 fps target holds 30", nvn_game_fps() == 30);
+        target(60); at(432, 2); CHECK("a 60 fps movie on a serious device holds 30", nvn_game_fps() == 30);
+        at(433, 1); (void)nvn_game_fps(); at(463, 1); CHECK("  and comes back to 60 after the calm interval", nvn_game_fps() == 60);
+        movie(0); movie_fps(0);
     }
     printf("== %d checks, %d failed ==\n", checks, failed);
     return failed != 0;

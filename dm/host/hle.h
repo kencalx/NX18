@@ -67,7 +67,10 @@ static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_ap
 #define DM_APPLET(name) const char *const dm_applet_ __attribute__((cleanup(dm_applet_leave_))) = (name); dm_applet_enter(dm_applet_)
 // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
 extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_playing, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x18 double game seconds stepped; NULL when the build has none
-int dm_movie_playing(void);   // hle_movie.c: a video decoder of the SDK's movie library handed out a picture in the last half second (the frame step then holds 30 fps)
+int dm_movie_playing(void);   // hle_movie.c: a video decoder of the SDK's movie library handed out a picture in the last half second (the frame step then holds 30 fps, or its fastest hold for a movie above 30: dm_movie_fps)
+int dm_movie_fps(void);       // hle_movie.c: the playing movie's pictures a second (0 = none playing, or not known: the movie::Decoder path's, the Switch's 30)
+void dm_movie_picture(uint64_t interval_ns);   // hle_movie.c: a video decoder handed out a picture now; interval_ns its stream's picture interval (0 = not known)
+void dm_movie_stopped(void);  // hle_movie.c: the video decoder stopped or went away: the movie signal drops at once
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)

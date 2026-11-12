@@ -115,10 +115,20 @@ static struct {
 // A movie is playing while a video decoder hands out pictures. The frame step (hle_nvn.c fps_step_cap) then holds 30 fps, the rate the games it steps run at on the Switch:
 // their players take one picture per game frame rather than by its time. Breath of the Wild's movies (VP9 1080p, 30 fps) went at twice their speed at 60 and left their sound
 // behind (GitHub issue #636: 3,507 pictures in about 3,300 presents); Tears of the Kingdom's, from the same SDK build, had rewriter stubs at its movie start and end for this.
-// Half a second without a picture ends it (a 30 fps movie gives one every 33 ms), as does stopping or destroying the decoder
+// Half a second without a picture ends it (a 30 fps movie gives one every 33 ms), as does stopping or destroying the decoder.
+// The Switch 2's nn::codec decoders (hle_codec_video.c) raise the same signal with their stream's picture interval (dm_movie_picture): a movie above 30 pictures a second (Ocarina
+// of Time's, 60) is not capped at 30 but holds the frame step's fastest hold while it plays (dm_movie_fps, hle_nvn.c fps_step_cap); this path's movies are the Switch's 30
 #define MD_PLAYING_NS 500000000ull
 static _Atomic uint64_t g_movie_pic_ns;   // when a video decoder last handed out a picture (0 = stopped since)
+static _Atomic uint32_t g_movie_itv_us;   // that movie's picture interval in µs (0 = not known: this path's movies, the Switch's 30)
 int dm_movie_playing(void) { uint64_t t = atomic_load_explicit(&g_movie_pic_ns, memory_order_relaxed); return t && now_ns() - t < MD_PLAYING_NS; }
+void dm_movie_picture(uint64_t interval_ns) {   // a video picture handed out now (interval_ns: the stream's picture interval, 0 = not known)
+    atomic_store_explicit(&g_movie_itv_us, (uint32_t)(interval_ns / 1000 < UINT32_MAX ? interval_ns / 1000 : 0), memory_order_relaxed);
+    atomic_store_explicit(&g_movie_pic_ns, now_ns(), memory_order_relaxed);
+}
+void dm_movie_stopped(void) { atomic_store_explicit(&g_movie_pic_ns, 0, memory_order_relaxed); }   // the movie ended: the frame step's cap need not wait out MD_PLAYING_NS
+// The playing movie's pictures a second, rounded (0 = no movie playing, or its rate is not known)
+int dm_movie_fps(void) { uint32_t us = atomic_load_explicit(&g_movie_itv_us, memory_order_relaxed); return dm_movie_playing() && us ? (int)((1000000u + us / 2) / us) : 0; }
 static void *msym(const char *n) { void *p = guest_sym(n); if (!p) die("movie: missing SDK symbol %s", n); return p; }
 // SDK 1.3.1 exports mutable Buffer getters. Both overloads take the same this pointer.
 static void *buffer_getter(const char *const_name, const char *mutable_name) {
@@ -604,7 +614,7 @@ static void md_free(void **self) {
     // this decoder (md_defer_at), and one queued after the drop would reach the deferred thread after free(d)
     if (d->pk_on) { pthread_mutex_lock(&d->pkm); d->pk_quit = 1; pthread_cond_signal(&d->pkc); pthread_mutex_unlock(&d->pkm); pthread_join(d->pk, NULL); }
     md_defer_drop(d);
-    if (!MD_AUDIO(d)) atomic_store_explicit(&g_movie_pic_ns, 0, memory_order_relaxed);
+    if (!MD_AUDIO(d)) dm_movie_stopped();
     self[1] = NULL;
     LOG("[movie] decoder %p destroyed: %lu packets in, %lu frames out; decoded %llu packets, average %.2f ms per packet, longest %.2f ms", (void *)self, d->ncall[7], d->ncall[8],
         (unsigned long long)d->dec_n, d->dec_n ? d->dec_ns / 1e6 / d->dec_n : 0.0, d->dec_max / 1e6);
@@ -684,7 +694,7 @@ HLE_FORCE("_ZN5movie7Decoder4StopEv", "movie decoder stop", int, h_movie_Stop, v
     MD_TRACE(d, 3, "Stop");
     dm_host_lock(&g_dfmu); pthread_mutex_lock(&d->mu); d->started = 0; pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&g_dfmu);   // the deferred thread signals holding g_dfmu: taking it guarantees no signal afterwards
     md_defer_drop(d);
-    if (!MD_AUDIO(d)) atomic_store_explicit(&g_movie_pic_ns, 0, memory_order_relaxed);   // the movie ended: the frame step's cap need not wait out MD_PLAYING_NS
+    if (!MD_AUDIO(d)) dm_movie_stopped();
     md_reset(d, 1); return 0;
 }
 HLE_FORCE("_ZN5movie7Decoder5ResetEv", "movie decoder reset", int, h_movie_Reset, void **self) {
@@ -774,7 +784,7 @@ HLE_FORCE("_ZN5movie7Decoder24AcquireOutputBufferIndexEPiPlPjS1_", "movie decode
         *idx = s; *pts = d->out[s].pts; *flags = d->out[s].flags; *left = d->noutq; d->out[s].cli = 1; r = 0;
     }
     pthread_mutex_unlock(&d->mu);
-    if (!r && !MD_AUDIO(d)) atomic_store_explicit(&g_movie_pic_ns, now_ns(), memory_order_relaxed);
+    if (!r && !MD_AUDIO(d)) dm_movie_picture(0);
     if (!r) MD_TRACE(d, 8, "AcquireOutputBufferIndex → index %d time %lld flags %#x left %d", *idx, (long long)*pts, *flags, *left);
     return r;
 }
