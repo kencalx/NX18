@@ -118,7 +118,7 @@ private struct CloudSavesSection: View {
             NX18SectionHeader("Saves")
         } footer: {
             Text(note.isEmpty
-                 ? "Choose a folder in iCloud Drive, and the same one in the Mac app's Cloud saves. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups."
+                 ? "Choose a folder in iCloud Drive, and the same one in Cloud saves on your other iPhone, iPad or Mac. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups."
                  : note)
             .nxFontIfCustom(.footnote)
             .foregroundStyle(NX18Palette.muted)

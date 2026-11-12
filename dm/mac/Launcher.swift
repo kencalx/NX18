@@ -851,7 +851,7 @@ struct CloudSavesSection: View {
         } header: {
             NX18SectionHeader("Cloud saves")
         } footer: {
-            Text("Choose the iCloud Drive folder the iPhone app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in the save's -backups folder.")
+            Text("Choose the iCloud Drive folder the iPhone or iPad app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups.")
                 .nxFontIfCustom(.footnote)
                 .foregroundStyle(NX18Palette.muted)
         }
@@ -863,7 +863,7 @@ struct CloudSavesSection: View {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false; panel.canCreateDirectories = true
         panel.prompt = "Use for Cloud Saves"
-        panel.message = "The folder the iPhone app chose in its launcher's Cloud saves"
+        panel.message = "The folder the iPhone or iPad app chose in its launcher's Cloud saves"
         panel.directoryURL = URL(fileURLWithPath: folder.isEmpty ? Self.drive : folder)
         if panel.runModal() == .OK, let url = panel.url { folder = url.path }
     }

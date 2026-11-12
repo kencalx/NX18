@@ -55,7 +55,7 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
     return Unmanaged.passRetained(menu).toOpaque()
 }
 
-@MainActor func gameMenuTitle() -> String { gameMenuModel != nil ? "More settings on the start screen" : "" }
+@MainActor func gameMenuTitle() -> String { gameMenuModel != nil ? "More on the settings screen" : "" }
 
 // The menu as UIMenu elements (DM_GAME_MENU=system). Its text size is fixed there: front_ios.m startGame
 @MainActor func gameMenuItems() -> [UIMenuElement] { uiMenuElements(gameMenuSections()) }   // not private: the Duo harness's menu test reads the rows (dm/ios/tests/duo)
