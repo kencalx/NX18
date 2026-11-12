@@ -1,7 +1,7 @@
 // The settings screen's controller navigation (Launcher.swift's LauncherView). While the screen is up a game controller moves a cyan focus ring over the preset chips, Play, Game guide,
 // About, every setting row, Advanced, Reset, Cloud saves and Skip this screen next time: up / down (the D-pad or the left stick, repeating while held) moves, left / right moves
 // along a line of buttons or changes the focused row (a choice's next option it may pick, a slider by one step: LauncherModel.advance), A presses (a switch flips, a menu row
-// takes its next option), + plays, Y opens the game guide, B closes an open guide or About sheet. While the guide's page is up every button is the page's (GuideViewer.swift
+// takes its next option), + plays, Y opens the game guide, B closes an open guide or About sheet or the iCloud Drive folder picker. While the guide's page is up every button is the page's (GuideViewer.swift
 // LauncherGuidePageModel.handle: B goes back, L / R turn its pages) and ZL / ZR switch between the guide and the manual.
 // The buttons are read by polling (LauncherGamepad.run, a task of the view, 60 times a second): no handler is set on any controller, so none is left behind when Play hands the
 // controllers over to the game (DmGamepad.m sets its own after startGame), and a controller that connects while the screen is up is read from its next poll on. A and + act on their

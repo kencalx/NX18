@@ -327,7 +327,7 @@ On the iPhone and iPad the game's art fills the left of the screen (the app icon
 
 On the iPhone, iPad and Mac, above the settings, **Battery**, **Balanced** and **Quality** set several settings at once: **Battery** 30 fps, dynamic resolution, a lower render scale and no MetalFX upscaling, sharpening or anti-aliasing; **Quality** MetalFX upscaling, full render scale and edge smoothing; **Balanced** the tested defaults of those settings. The chip whose settings you have is filled; none is when you changed one by hand. A preset leaves alone what `Documents/env.txt` fixes and what is greyed out. The most used settings come first; the others are under **Advanced settings**, which remembers whether it is open.
 
-On the iPhone and iPad a game controller works on the screen: the D-pad or left stick moves the cyan outline, left and right change the outlined setting, A presses or switches, + starts the game and Y opens the guide.
+On the iPhone and iPad a game controller works on the screen: the D-pad or left stick moves the cyan outline, left and right change the outlined setting, A presses or switches, + starts the game, Y opens the guide and B closes the iCloud Drive folder picker.
 
 ### Skip this screen next time
 
