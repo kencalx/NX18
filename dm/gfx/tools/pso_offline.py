@@ -307,8 +307,8 @@ def read_meshes(manifests):
     out = {}
     for path in manifests or ():
         if not path or not Path(path).is_file(): continue
-        for line in Path(path).read_text(encoding='utf-8').split('\n'):
-            c = line.rstrip('\r').split('\t')
+        for line in Path(path).read_bytes().decode('utf-8').split('\n'):   # bytes as they are, split on \n alone, as warm_parse: read_text would turn \r\n into \n, which the host does not
+            c = line.split('\t')   # a row ending in \r keeps it in its key, which parse_mesh_key refuses as pso_mesh_skey_parse does
             if len(c) == 3 and c[0] == 'M' and c[1] and c[2]: out.setdefault((None if c[1] == '-' else c[1], c[2]), None)
     return list(out)
 
@@ -577,8 +577,8 @@ def read_layouts(manifests):
     out = {}
     for path in manifests or ():
         if not path or not Path(path).is_file(): continue
-        for line in Path(path).read_text(encoding='utf-8').split('\n'):
-            c = line.rstrip('\r').split('\t')
+        for line in Path(path).read_bytes().decode('utf-8').split('\n'):   # as read_meshes: a two-column row ending in \r is refused by parse_render_key, as pso_skey_parse refuses it
+            c = line.split('\t')
             if len(c) >= 2 and c[0] == 'R' and c[1]: out.setdefault(c[1], None)
     return list(out)
 

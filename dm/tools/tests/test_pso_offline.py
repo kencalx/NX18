@@ -258,8 +258,16 @@ class Mesh(unittest.TestCase):
     def test_rows_of_the_lists(self):
         l = self.d / 'pso_manifest.tsv'
         l.write_text('# list\nS\tm_b\t4\nM\tt_b\tAA\nM\t-\tBB\nM\tt_b\tAA\nM\tt_b\tCC\textra\nC\tc_b\nM\tt_b\tDD\r\n')
-        self.assertEqual(po.read_meshes([l, self.d / 'none.tsv']), [('t_b', 'AA'), (None, 'BB'), ('t_b', 'DD')])   # recorded order, each once; three columns only
+        self.assertEqual(po.read_meshes([l, self.d / 'none.tsv']), [('t_b', 'AA'), (None, 'BB'), ('t_b', 'DD\r')])   # recorded order, each once; three columns only; split on \n alone, as warm_parse
         self.assertEqual(po.read_meshes(None), [])
+
+    def test_crlf_rows_give_no_base(self):   # warm_parse splits on \n alone: a row ending in \r has a key one character too long, which the host refuses (pso_seed refuses such rows too)
+        l = self.d / 'pso_manifest.tsv'
+        l.write_text(f'M\tt_b\t{skey()}\r\nR\t{rkey()}\r\nR\t{rkey(vs="w_b")}\tnote\r\n')
+        self.assertEqual([po.parse_mesh_key(k) for _, k in po.read_meshes([l])], [None])
+        keys = po.read_layouts([l])
+        self.assertEqual(len(keys), 2); self.assertIsNone(po.parse_render_key(keys[0]))
+        self.assertEqual(po.parse_render_key(keys[1])['vs'], 'w_b')   # a third column takes the \r: the key itself is whole, as for the host
 
     def test_key_as_the_host_writes_it(self):
         k = po.parse_mesh_key(skey(cfmt=(70, 0, 115), chmask=0xfff, blend_en=0b101, blend={0: OVER, 2: dict(OVER, adv=8, adv_npm=1)}, samples=4, a2c=1))
