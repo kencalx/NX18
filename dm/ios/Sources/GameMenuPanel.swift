@@ -168,6 +168,7 @@ struct GameMenuPanelView: View {
     @ObservedObject var model: GameMenuPanelModel
     @StateObject private var pad = LauncherGamepad()
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .footnote) private var columnWidth: CGFloat = 180
     @ScaledMetric(relativeTo: .footnote) private var optionWidth: CGFloat = 140
 
@@ -213,7 +214,7 @@ struct GameMenuPanelView: View {
                 }
                 .onChange(of: model.focus) { _, f in
                     guard let f, pad.connected else { return }
-                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(f) }
+                    if reduceMotion { proxy.scrollTo(f) } else { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(f) } }   // as the settings screen scrolls
                 }
             }
         }
