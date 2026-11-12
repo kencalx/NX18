@@ -5,7 +5,8 @@
 // The look (the NX 18 palette, LauncherRow.swift): the game's key art on the left (dm/art.jpg; without it the app icon, blurred behind and sharp on top), its logo (dm/logo.png) or else its name, the status line, the coral Play pill and,
 // when the app has them, Game guide and About this game (GuideViewer.swift); the rails line; the settings on the right: the preset chips, the basic rows, Advanced (the other rows, collapsed,
 // remembered as launcher.advanced), Reset, Cloud saves and Skip this screen next time (launcher.skip: the game starts at once, as with DM_LAUNCHER=0; the in-game menu's Settings screen
-// at start turns it off, and a controller button held while the app opens shows the screen anyway, best effort). A narrow or portrait window puts the art on top. The background takes at most 12 % of the art's average colour; the accents,
+// at start turns it off, and a controller button held while the app opens shows the screen anyway, best effort; with cloud saves on, the screen shows for the cloud-save check that Play
+// runs, and the game starts by itself when the check has nothing to ask, as it does for the Game shortcut: LauncherShortcuts.swift). A narrow or portrait window puts the art on top. The background takes at most 12 % of the art's average colour; the accents,
 // the rails and the mark keep the logo's colours. A game controller drives a focus ring over all of it (LauncherController.swift)
 import CoreHaptics
 import GameController
@@ -225,6 +226,7 @@ struct LauncherView: View {
     let artwork: LauncherArtwork
     let play: () -> Void
     let startWith: LauncherShortcut?   // a home screen shortcut the screen opened for (Guide: the guide open); LauncherShortcuts.swift
+    let checkAtStart: Bool             // shown for the cloud-save check of a start that skips the screen (Skip this screen next time, the Game shortcut): Play's check runs as it appears
     @State private var content: LauncherContent
     @State private var startTaken = false
     @StateObject private var pad = LauncherGamepad()
@@ -243,8 +245,8 @@ struct LauncherView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
-    init(m: LauncherModel, dir: URL?, content: LauncherContent, artwork: LauncherArtwork, startWith: LauncherShortcut? = nil, play: @escaping () -> Void) {
-        self.m = m; self.dir = dir; self.artwork = artwork; self.startWith = startWith; self.play = play
+    init(m: LauncherModel, dir: URL?, content: LauncherContent, artwork: LauncherArtwork, startWith: LauncherShortcut? = nil, checkAtStart: Bool = false, play: @escaping () -> Void) {
+        self.m = m; self.dir = dir; self.artwork = artwork; self.startWith = startWith; self.checkAtStart = checkAtStart; self.play = play
         _content = State(initialValue: content)
     }
 
@@ -307,7 +309,11 @@ struct LauncherView: View {
         .onChange(of: cloudPicking) { pad.holdUntilReleased() }
         .onChange(of: asking) { pad.holdUntilReleased() }        // the press that answered a save question is no press on the settings
         .onReceive(LauncherShortcuts.requests) { shortcut($0) }   // a home screen shortcut chosen while the screen is up
-        .onAppear { if !startTaken, let s = startWith { startTaken = true; shortcut(s) } }   // the one the app was opened with
+        .onAppear {
+            guard !startTaken else { return }
+            if let s = startWith { startTaken = true; shortcut(s) }   // the one the app was opened with
+            else if checkAtStart { startTaken = true; start() }       // a skipped start's cloud-save check: as if Play had been pressed, the game starting by itself when nothing is asked
+        }
     }
 
     // A home screen shortcut on this screen (LauncherShortcuts.swift): Game plays, Launcher closes what is over the screen (the guide, About, the folder picker) and stays, Guide
@@ -465,7 +471,8 @@ struct LauncherView: View {
     }
 
     /// Play, once the cloud's save is compared with this iPhone's (save_sync_report, SaveSyncReport): a save that changed on both sides is the player's pick, not the
-    /// newer file's, and a cloud save that did not come is said so before the game starts without it. Every Play goes through here: the button, A on Play, +, the Game shortcut
+    /// newer file's, and a cloud save that did not come is said so before the game starts without it. Every Play goes through here: the button, A on Play, +, the Game shortcut,
+    /// and, with cloud saves on, a start that skips this screen (Skip this screen next time, the Game shortcut at a cold start: checkAtStart), which shows the screen only for this
     private func start() {
         if checking { return }
         check += 1; checking = true; asking = nil
@@ -750,7 +757,9 @@ struct LauncherView: View {
 }
 
 // Shows the launcher over the root view controller and calls done once the settings are in the environment; false (done is not called) when there is no launcher, or when it is
-// skipped. True also while the player's own skip waits a moment for a held controller button: done is then called (the game starts) without the screen, or the screen shows
+// skipped. True also while the player's own skip waits a moment for a held controller button: done is then called (the game starts) without the screen, or the screen shows. With
+// cloud saves on, a skip the player chose (Skip this screen next time, the Game shortcut) returns true and shows the screen running the cloud-save check, which calls done itself
+// when there is nothing to ask
 @_cdecl("dm_show_launcher")
 public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @convention(c) () -> Void) -> Bool {
     nonisolated(unsafe) let viewController = viewController, done = done   // a raw pointer and a C callback: not Sendable, but front_ios.m hands them over on the main thread, where they stay
@@ -777,28 +786,40 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
             metalDeviceMade = true   // the game starts as soon as this is done, before any refresh, which waits for a later main-actor turn (LauncherModel.follow)
             Task { @MainActor in model.refreshFacts() }   // that turn: the game's device is made by then, so the facts learn MetalFX (mfx:none) for the in-game menu
         }
+        // Whether the game syncs its save through a cloud folder: DM_SAVE_SYNC as the game's first save mount will read it, the picked folder put there first (CloudSaves.m; Play
+        // and front_ios.m startGame do the same). With it on, a start that would skip the screen for the player shows it for the cloud-save check instead (LauncherShortcuts.swift)
+        dm_cloud_saves_env()
+        let cloud = LauncherShortcuts.cloudSavesOn(saveSync: getenv("DM_SAVE_SYNC").map { String(cString: $0) })
+        // The settings screen already running Play's cloud-save check: the game starts by itself when there is nothing to ask, else the question shows on the screen
+        @MainActor func check(_ why: String) {
+            fputs("launcher: shown for the cloud-save check (\(why)): the game starts by itself unless the check needs an answer\n", stderr)
+            presentLauncher(model, file, dir: dir, on: parent, checkAtStart: true, done: done)
+        }
         // main.m's program record, DM_LAUNCHER from an env file or the launch, a home screen shortcut, then the player's Skip this screen next time (LauncherShortcuts.start)
-        let (start, note) = LauncherShortcuts.start(shortcut: shortcut, environment: ProcessInfo.processInfo.environment, skipChosen: UserDefaults.standard.bool(forKey: LauncherModel.skipKey))
-        if let note { fputs(note + "\n", stderr) }
+        let (start, notes) = LauncherShortcuts.start(shortcut: shortcut, environment: ProcessInfo.processInfo.environment, skipChosen: UserDefaults.standard.bool(forKey: LauncherModel.skipKey), cloudSaves: cloud)
+        for note in notes { fputs(note + "\n", stderr) }
         switch start {
         case .show(let guide): presentLauncher(model, file, dir: dir, on: parent, startWith: guide ? .guide : nil, done: done); return true
         case .skip(let why): skip(why); return false   // no screen, at once
+        case .check(let why): check(why); return true
         case .playerSkip: break
         }
         // The player's Skip this screen next time: a controller button held while the app opens asks for the screen. Controllers already paired are listed, and their buttons
         // read, only a moment after this first screen appears, so the check watches for up to 300 ms (only with the skip on: a start with the screen waits for nothing). A Launcher
-        // or Guide shortcut chosen meanwhile (LauncherShortcuts.perform keeps it) shows the screen too
+        // or Guide shortcut chosen meanwhile (LauncherShortcuts.perform keeps it) shows the screen too. Then, with cloud saves on, the screen shows for the cloud-save check
+        // (LauncherShortcuts.afterWait)
         LauncherShortcuts.started = false
         Task { @MainActor in
             let held = await LauncherGamepad.heldAtStart(within: .milliseconds(300))
             let late = LauncherShortcuts.take()
             LauncherShortcuts.started = true
-            if held || late == .launcher || late == .guide {
-                fputs("launcher: shown although skipped (\(held ? "a controller button held at start" : "shortcut \(late?.title ?? "")"))\n", stderr)
-                presentLauncher(model, file, dir: dir, on: parent, startWith: late == .guide ? .guide : nil, done: done)
-            } else {
-                skip("skipped (Skip this screen next time; the in-game menu's Settings screen at start, or a controller button held at start, shows it again)")
-                done()
+            let (after, note) = LauncherShortcuts.afterWait(held: held, late: late, cloudSaves: cloud)
+            if let note { fputs(note + "\n", stderr) }
+            switch after {
+            case .show(let guide): presentLauncher(model, file, dir: dir, on: parent, startWith: guide ? .guide : nil, done: done)
+            case .check(let why): check(why)
+            case .skip(let why): skip(why); done()
+            case .playerSkip: skip("skipped (Skip this screen next time)"); done()   // not an answer afterWait gives
             }
         }
         return true
@@ -806,11 +827,12 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
 }
 
 // The settings screen over parent; Play puts the settings into the environment, takes the screen away and calls done (front_ios.m starts the game)
-@MainActor private func presentLauncher(_ model: LauncherModel, _ file: SettingsFile, dir: URL?, on parent: UIViewController, startWith: LauncherShortcut? = nil, done: @escaping @convention(c) () -> Void) {
+@MainActor private func presentLauncher(_ model: LauncherModel, _ file: SettingsFile, dir: URL?, on parent: UIViewController, startWith: LauncherShortcut? = nil, checkAtStart: Bool = false,
+                                         done: @escaping @convention(c) () -> Void) {
     let content = LauncherContent.find(dir: dir, lang: model.values["DM_LANG"] ?? ProcessInfo.processInfo.environment["DM_LANG"])
     let artwork = LauncherArtwork.load(content)
     var host: UIViewController?
-    let view = LauncherView(m: model, dir: dir, content: content, artwork: artwork, startWith: startWith) {
+    let view = LauncherView(m: model, dir: dir, content: content, artwork: artwork, startWith: startWith, checkAtStart: checkAtStart) {
         guard let h = host else { return }
         host = nil
         LauncherShortcuts.screenUp = false   // a shortcut from now on finds the game running

@@ -19,6 +19,9 @@ targets:
       - path: ../../Sources/LauncherGuideFiles.swift    # the guide's scheme, shim and block list, shared with the Mac app's guide window
       - path: ../../Sources/LauncherShortcuts.swift    # the home screen shortcuts (Game, Launcher, Guide), handed over by the harness's scene delegate as main.m's
       - path: ../../Sources/CloudSaves.m
+      - path: ../../Sources/SaveSyncReport.swift       # the cloud-save check before Play (and before a start that skips the screen with cloud saves on): the report's line and its dialogs
+      - path: ../../Sources/SaveSync.m                 # the iPhone's copies to and from the cloud folder, NSFileCoordinator (a folder of the test's own here, not iCloud Drive)
+      - path: ../../../host/save_sync.c                # the host's comparison the check asks for (save_sync_report), real, on a save and a cloud folder the tests make
       - path: Resources/Assets.xcassets                 # the NX 18 app icon (docs/images/nx18), the screen's icon without art
       - path: ../../Sources/DmGamepad.m
       - path: ../../Sources/front_ios.m
