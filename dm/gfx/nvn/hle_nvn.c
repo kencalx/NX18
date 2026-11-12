@@ -2265,6 +2265,12 @@ void nvn_rtw_tick(nvn_rtw *w, uint64_t frame) {
     double per = (double)(cpu - w->cpu) / 1e6 / (double)(frame - w->frame); w->frame = frame; w->cpu = cpu;
     double pms = period / 1e6;
     if (fabs(pms - w->period_ms) > w->period_ms * 0.01) { double c = w->comp_ms, lo = fmax(1.0, pms * NVN_RTW_FLOOR), hi = pms * NVN_RTW_CAP; rtw_declare(w, period, c < lo ? lo : c > hi ? hi : c); }   // the present period changed: the computation kept, within the new bounds
+    // A frame past the declaration is raised for at once, to 1.1 x that frame (within the cap): the window's peak covers a peak inside a window, not a step between two, and the declaration
+    // waiting for the window's end left up to 119 frames past it, each a 30-60 ms stall on Dark Souls Remastered's render thread (frame-rate.md); a lower size waits for the window
+    if (per > w->comp_ms) {
+        __atomic_fetch_add(&w->over, 1, __ATOMIC_RELAXED);
+        double c = fmin(pms * NVN_RTW_CAP, per * 1.1); if (c > w->comp_ms) rtw_declare(w, period, c);
+    }
     w->win[w->n++] = per; if (w->n < NVN_RTW_WIN) return;
     double comp = nvn_rtw_size_ms(w->win, w->n, pms); w->n = 0;
     if (comp > w->comp_ms * 1.15 || comp < w->comp_ms * 0.85) rtw_declare(w, period, comp);
@@ -2276,10 +2282,11 @@ static void rtw_states(char *out, size_t n) {
     pthread_mutex_lock(&g_rt_mu);
     if (!g_nrtw) o += (size_t)snprintf(out, n, "; replay threads: no time-constraint policy set yet");
     for (int i = 0; i < g_nrtw && o < n; i++) {
-        const nvn_rtw *w = g_rtw[i]; thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT; thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = 0;
+        nvn_rtw *w = g_rtw[i]; thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT; thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = 0;
         int okx = w->port && thread_info(w->port, THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) == KERN_SUCCESS, okp = w->port && thread_policy_get(w->port, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&tp, &tc, &def) == KERN_SUCCESS, live = okp && !def;
         const char *st = !okx && !okp ? "unknown (the thread has ended)" : live && okx && xi.pth_policy != POLICY_RR ? "set, but run as a standard thread (demoted)" : live ? "in effect" : "not in effect";
-        o += (size_t)snprintf(out + o, n - o, "; %s real-time computation %.2f ms / period %.2f ms, %s, current priority %d (policy %d)", w->name, w->comp_ms, w->period_ms, st, okx ? xi.pth_curpri : -1, okx ? xi.pth_policy : -1);
+        uint64_t over = __atomic_load_n(&w->over, __ATOMIC_RELAXED), since = over - w->over_shown; w->over_shown = over;   // frames whose CPU time ran past the computation declared, since the line before
+        o += (size_t)snprintf(out + o, n - o, "; %s real-time computation %.2f ms / period %.2f ms, %s, current priority %d (policy %d), %llu frames past it since the last line", w->name, w->comp_ms, w->period_ms, st, okx ? xi.pth_curpri : -1, okx ? xi.pth_policy : -1, (unsigned long long)since);
     }
     pthread_mutex_unlock(&g_rt_mu);
 }
