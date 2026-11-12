@@ -45,6 +45,9 @@ fps_target	60
 # up (nvn_fstep.h FSTEP_BURST_N); the GPU-bound back-off is unchanged.
 # DM_FPS_HOLD_BACKOFF=double in env.txt turns it off. Not yet run on the phone
 fps_hold_backoff	burst
+# The owner's iPhone 18 Pro Max runs (X1.0): with the hold off the game felt better than with the hold's stays at 30 fps, every frame shown as soon as it is ready. off is the
+# launcher's Hold frames default for this game (fps_hold_backoff and fps_resume apply when a player turns it on); DM_FPS_HOLD=on in env.txt turns it back on
+fps_hold	off
 # After a trip out of the app (iPhone 18 Pro Max, X1.0, 40 s away) the frame across the stay counted as late and owed 15 vsyncs, which the game ran fast to pay back, and with the
 # frames either side three late frames held 30 fps for about a second. on: that frame is on time and owes nothing, and the 30 frames after it pay their lateness back without
 # stepping the hold up (nvn_fstep.h nvn_fstep.away). DM_FPS_RESUME=0 in env.txt turns it off. Not yet run on the phone
@@ -54,6 +57,9 @@ fps_resume	on
 # set, 0 for off): at 30 fps game enqueue to display about 85 -> 53 ms, 9 frames dropped in 2.5 minutes, no smoothness cost seen. Checked only at 30 fps on iOS: the game's
 # default 60 fps and the Mac use it untested
 present_trim	60
+# Two owner runs on the iPhone 18 Pro Max (X1.0, hold off, one with present snapshots and one without): snapshots helped a little, the swapchain texture free once its copy ran
+# (nvn_mtl.m mtl_snap_on). The launcher's Frame buffering defaults to it; DM_PRESENT_SNAP=0 in env.txt turns it off
+present_snap	on
 # In the slow windows of the X1.0 iPhone runs the 'NVN queue replay' thread ran its ~60 M instructions a frame at 1.6-2.0 GHz (12-13 ms of CPU) against 3.9-4.3 GHz (5-6 ms) in the
 # fast ones; it and 'dm-encode' had QoS user-interactive alone, no frame deadline. on: each declares a time-constraint policy sized to its own CPU time per frame (nvn_rt.h,
 # hle_nvn.c nvn_rtw_tick). DM_REPLAY_RT=0 in env.txt turns it off. Not yet run on the phone
