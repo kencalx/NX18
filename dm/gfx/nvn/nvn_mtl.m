@@ -380,6 +380,7 @@ static uint64_t (*g_rh_avail)(void) = rh_avail_os;   // the headroom to the memo
 static uint64_t (*g_rh_avail)(void);
 #endif
 static _Atomic uint64_t g_rh_cap_now = RH_CAP_MAX; static uint64_t g_rh_cap_at;   // the cap as of the last submission's start, read whether or not a heap waits (rh_trim; the memory line), and when the headroom was read (submit thread)
+static _Atomic uint64_t g_head_cap = RH_CAP_MAX;   // the headroom curve below as of the last reading (RH_CAP_MAX on the Mac), whatever DM_NVN_RT_RECYCLE_CAP says: the kept vertex conversions follow it too (vk_cap)
 static uint64_t rh_cap_for(uint64_t avail) {
     const uint64_t lo = 1ull << 30, hi = 3ull << 30;
     if (avail >= hi) return RH_CAP_MAX;
@@ -389,9 +390,10 @@ static uint64_t rh_cap_for(uint64_t avail) {
 static uint64_t rh_cap(void) {   // submit thread (rh_trim)
     static int64_t fixed = -2;
     if (fixed == -2) { const char *e = getenv("DM_NVN_RT_RECYCLE_CAP"); fixed = e && *e ? (int64_t)(strtoull(e, NULL, 10) << 20) : -1; }
-    uint64_t cap = RH_CAP_MAX;
-    if (fixed >= 0) cap = (uint64_t)fixed;
-    else if (g_rh_avail) { uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC); if (g_rh_cap_at && now - g_rh_cap_at < RH_CAP_EVERY_NS) return atomic_load(&g_rh_cap_now); g_rh_cap_at = now; uint64_t a = g_rh_avail(); cap = a ? rh_cap_for(a) : RH_CAP_MAX; }
+    uint64_t head = RH_CAP_MAX;
+    if (g_rh_avail) { uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC); if (g_rh_cap_at && now - g_rh_cap_at < RH_CAP_EVERY_NS) head = atomic_load(&g_head_cap); else { g_rh_cap_at = now; uint64_t a = g_rh_avail(); head = a ? rh_cap_for(a) : RH_CAP_MAX; } }
+    atomic_store(&g_head_cap, head);
+    uint64_t cap = fixed >= 0 ? (uint64_t)fixed : head;
     atomic_store(&g_rh_cap_now, cap); return cap;
 }
 typedef struct { void *heap; uint64_t size, t; } rh_ent;   // heap: retained (CFBridgingRetain); t: when it began to wait
@@ -8245,24 +8247,37 @@ static int vc_draw_range(const p_draw *dw, const p_draw_idx *di, int64_t *lo, in
 // A source that changed drops its conversion (the buffer is released once the submissions that read it complete; it is never rewritten) and is tried again after 32 submissions,
 // twice as many after each further change (VK_STRIKES), so a stream the game rewrites every frame costs a write-protection that often. Not kept: ranges below vk_min() vertices
 // (the conversion costs less than the bookkeeping), sources outside tracked pools, anything while the game has sparse mappings (a write through an alias takes no fault), and
-// conversions past VK_BYTES in all. A key not drawn for VK_IDLE submissions is forgotten. DM_NVN_VCONV_KEEP=0 turns it off, =n sets the smallest range kept
+// conversions past vk_cap() in all. A key not drawn for VK_IDLE submissions is forgotten. DM_NVN_VCONV_KEEP=0 turns it off, =n sets the smallest range kept.
+// Going to the background, the trim (mtl_trim_at, level 3) drops every kept conversion; each is made again from its source at its next use after the app comes back. A memory
+// pressure warning leaves them: the game is still drawing them, so they would be made again in the next submission, a CPU hitch for nothing
 enum { VK_MAX = 1024, VK_ENTS = 8192, VK_IDLE = 600, VK_STRIKES = 10 };
 static const uint64_t VK_BYTES = 256ull << 20;
+// The most bytes kept: VK_BYTES on the Mac. On iOS it follows the headroom to the memory limit on the same curve as the render-target heaps waiting (rh_cap_for, read at each
+// submission's start by rh_trim): 256 MB with 3 GB or more, 32 MB at 1 GB and below. A lower cap only stops new conversions; those kept go by the usual causes
+static uint64_t vk_cap(void) { return (uint64_t)((double)VK_BYTES * (double)atomic_load(&g_head_cap) / (double)RH_CAP_MAX); }
 typedef struct { uint64_t addr, size, v0, nv, nt; uint32_t fmt, off, stride, zero; } vk_key;
 typedef struct { vk_key k; void *buf; uint64_t gpu, bytes, lo, n, plo, pn, stamp, seen, ok, used, kept, retry; const void *span; uint8_t *edge; uint64_t sig; uint32_t strikes; int li; } vk_ent;   // buf: retained; [lo, lo+n): the source bytes, [plo, plo+pn): its protected pages; edge: a copy of the rest; ok: the submission it was last found unchanged in; li: its place in g_vk_list
 static nvn_hmap g_vk = {.klen = sizeof(vk_key)};
 static vk_ent *g_vk_list[VK_MAX]; static int g_vk_n;   // the entries that hold a conversion
-static uint64_t g_vk_bytes, g_vk_lo = UINT64_MAX, g_vk_hi, g_vk_swept, g_vk_reused, g_vk_made, g_vk_dropped, g_vk_why[4];   // g_vk_lo / hi: the span of the kept sources; reused: vertices bound from a kept conversion, made / dropped: conversions, why: dropped by a write to its pages, to its bytes in a shared page, by the GPU, as not drawn (the vertex conversion line)
+static uint64_t g_vk_bytes, g_vk_lo = UINT64_MAX, g_vk_hi, g_vk_swept, g_vk_reused, g_vk_made, g_vk_dropped, g_vk_why[5];   // g_vk_lo / hi: the span of the kept sources; reused: vertices bound from a kept conversion, made / dropped: conversions, why: dropped by a write to its pages, to its bytes in a shared page, by the GPU, as not drawn, by the background trim (the vertex conversion line)
 static int vk_min(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_VCONV_KEEP"); v = e && *e ? atoi(e) : 4096; if (v < 0) v = 0; if (v == 1) v = 4096; if (!v) MLOG("DM_NVN_VCONV_KEEP=0: vertex conversions are made again every submission"); } return v; }
-static void vk_drop(vk_ent *e, int strike, int why) {   // the conversion goes; the entry stays for its next try
+// The conversion goes; the entry stays for its next try. Its buffer waits for fence: the next submission's (vk_drop), or for the trim after a drain the last one, which has passed
+static void vk_drop_at(vk_ent *e, int strike, int why, uint64_t fence) {
     if (e->buf) {
         g_vk_why[why]++;
-        id<MTLBuffer> b = (__bridge_transfer id<MTLBuffer>)e->buf; e->buf = NULL; defer_obj_release(b);
+        id<MTLBuffer> b = (__bridge_transfer id<MTLBuffer>)e->buf; e->buf = NULL; defer_obj_at(b, 0, fence);
         g_vk_bytes -= e->bytes; g_vk_list[e->li] = g_vk_list[--g_vk_n]; g_vk_list[e->li]->li = e->li; g_vk_dropped++;
         if (!g_vk_n) { g_vk_lo = UINT64_MAX; g_vk_hi = 0; }
     }
     free(e->edge); e->edge = NULL;
     if (strike) { if (e->strikes < VK_STRIKES) e->strikes++; e->retry = g_sub_serial + (16ull << e->strikes); }
+}
+static void vk_drop(vk_ent *e, int strike, int why) { vk_drop_at(e, strike, why, g_fence + 1); }
+// The background trim (mtl_trim_at, level 3: the graphics gate closed and the GPU drained, so no submission is open and none reads them): every kept conversion goes; the bytes, *n the count
+static uint64_t vk_trim_all(uint64_t fence, int *n) {
+    uint64_t b = g_vk_bytes; *n = g_vk_n;
+    while (g_vk_n) vk_drop_at(g_vk_list[0], 0, 4, fence);
+    return b;
 }
 static void vk_gpu_write(uint64_t dst, uint64_t n) {
     if (!g_vk_n) return;
@@ -8313,7 +8328,7 @@ static uint64_t vk_get(const vk_key *k, uint64_t src, uint64_t es) {
     }
     uint64_t sn = (k->nv - 1) * k->stride + es, bytes = k->nt * 16, sig = vk_sig(src, sn); int changed = sig != e->sig; e->sig = sig;
     if (changed && g_sub_serial >= e->retry) { vk_drop(e, 1, 0); return 0; }   // rewritten since its last sighting
-    if (g_sub_serial < e->retry || g_vk_n >= VK_MAX || g_vk_bytes + bytes > VK_BYTES) return 0;
+    if (g_sub_serial < e->retry || g_vk_n >= VK_MAX || g_vk_bytes + bytes > vk_cap()) return 0;
     if (nvn_sparse_gen() || pend_hits(src, sn) || g_sbw_over || sbw_hits(src, src + sn) || gw_live(src, src + sn)) { vk_drop(e, 1, 2); return 0; }   // the GPU writes it, or may
     const void *span = nvn_dirty_span((const void *)(uintptr_t)src, (size_t)sn);
     if (!span) { e->retry = UINT64_MAX; return 0; }   // not in a tracked memory pool
@@ -8337,7 +8352,7 @@ static uint64_t vk_get(const vk_key *k, uint64_t src, uint64_t es) {
 }
 static void vc_stat(void) {   // every 3600 submissions
     if (g_sub_serial - g_vc_stat < 3600) return;
-    if (g_vc_stat) MLOG("vertex conversion: %.0f vertices per submission (the bound ranges: %.0f; from kept conversions %.0f more: %d kept, %llu MB, %llu made, %llu dropped: %llu by a write, %llu by a write to a shared page, %llu by the GPU, %llu not drawn), %u index ranges kept%s; shadow-input libraries loaded %llu (not usable %llu), pipelines built with them %llu", g_vc_conv / 3600.0, g_vc_whole / 3600.0, g_vk_reused / 3600.0, g_vk_n, (unsigned long long)(g_vk_bytes >> 20), (unsigned long long)g_vk_made, (unsigned long long)g_vk_dropped, (unsigned long long)g_vk_why[0], (unsigned long long)g_vk_why[1], (unsigned long long)g_vk_why[2], (unsigned long long)g_vk_why[3], g_ir.n,
+    if (g_vc_stat) MLOG("vertex conversion: %.0f vertices per submission (the bound ranges: %.0f; from kept conversions %.0f more: %d kept, %llu MB of %llu allowed, %llu made, %llu dropped: %llu by a write, %llu by a write to a shared page, %llu by the GPU, %llu not drawn, %llu going to the background), %u index ranges kept%s; shadow-input libraries loaded %llu (not usable %llu), pipelines built with them %llu", g_vc_conv / 3600.0, g_vc_whole / 3600.0, g_vk_reused / 3600.0, g_vk_n, (unsigned long long)(g_vk_bytes >> 20), (unsigned long long)(vk_cap() >> 20), (unsigned long long)g_vk_made, (unsigned long long)g_vk_dropped, (unsigned long long)g_vk_why[0], (unsigned long long)g_vk_why[1], (unsigned long long)g_vk_why[2], (unsigned long long)g_vk_why[3], (unsigned long long)g_vk_why[4], g_ir.n,
         vc_check() ? [NSString stringWithFormat:@"; checked %llu, %llu differed", (unsigned long long)g_vc_checks, (unsigned long long)g_vc_bad].UTF8String : "",
         (unsigned long long)g_vin_loaded, (unsigned long long)g_vin_failed, (unsigned long long)g_vin_psos);
     g_vc_stat = g_sub_serial; g_vc_conv = g_vc_whole = g_vk_reused = 0;
@@ -17506,7 +17521,8 @@ static void present_fx_idle(int kind, uint64_t ticket, int alloc_i) {
 // (dm_gfx_suspend: the graphics gate closed and every submission and present drained, so for the last fence, which has passed). It releases what is idle and large:
 // render-target heaps waiting for reuse (rh_trim_all), the upload slots' blocks above UP_SLOT_BLOCK and their overflow blocks (up_trim_idle), packaged-texture spares
 // (pkg_spare_release), same-pass feedback snapshots (fb_trim), per-frame arena blocks the GPU is done with above ARENA_KEEP_BLOCKS (arena_trim), what the deferred-release queue holds whose fence has passed (defer_drain), and it asks the present thread to
-// release edge smoothing and MetalFX if they are off (g_fx_trim_req). Each was made again on its next use before, as after the idle trims. dm_gfx_pressure also sweeps the guest's
+// release edge smoothing and MetalFX if they are off (g_fx_trim_req). Going to the background (level 3) it also drops the kept vertex conversions (vk_trim_all), which a
+// pressure warning leaves: they are still drawn, and would be made again in the next submission. Each was made again on its next use before, as after the idle trims. dm_gfx_pressure also sweeps the guest's
 // files (hle_svc.c dm_guest_file_trim, DM_GUEST_FILE). One line gives the MB per class; the memory line counts the trims. DM_MEMORY_TRIM=0 logs the pressure and trims
 // nothing; DM_BG_TRIM=0 keeps the trim going to the background off
 static int mem_trim_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_MEMORY_TRIM"); on = !e || atoi(e); } return on; }
@@ -17521,16 +17537,17 @@ static uint64_t mtl_trim_at(int level, uint64_t fence) { @autoreleasepool {
     pthread_mutex_lock(&g_deferred_mu); unsigned long q0 = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
     defer_drain();
     pthread_mutex_lock(&g_deferred_mu); unsigned long q1 = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
-    int nrh = 0, nup = 0, nsp = 0, nfb = 0, nar = 0;
+    int nrh = 0, nup = 0, nsp = 0, nfb = 0, nar = 0, nvk = 0;
     uint64_t brh = rh_trim_all(&nrh), bup = up_trim_idle(0, fence, &nup), bsp = pkg_spare_release(0, fence, &nsp), bfb = fb_trim(0, fence, &nfb), bar = g_arenas ? arena_trim(0, &nar) : 0;
+    uint64_t bvk = level == 3 ? vk_trim_all(fence, &nvk) : 0;   // going to the background only: under a pressure warning the game still draws them, and they would be made again at once
     atomic_store(&g_fx_trim_req, 1);
     res_commit();   // the heaps leave the residency set now; the rest once their fence has passed (defer_obj_at drains at once a fence the GPU has passed)
-    uint64_t total = brh + bup + bsp + bfb + bar;
+    uint64_t total = brh + bup + bsp + bfb + bar + bvk;
     atomic_fetch_add(&g_trim_n, 1); atomic_fetch_add(&g_trim_bytes, total);
     const double M = 1048576.0;
-    MLOG("memory trim (%s): %.1f MB in all: render-target heaps waiting %d (%.1f MB), upload staging blocks %d (%.1f MB), packaged-texture spares %d (%.1f MB), feedback snapshots %d (%.1f MB), per-frame arena blocks %d (%.1f MB), "
+    MLOG("memory trim (%s): %.1f MB in all: render-target heaps waiting %d (%.1f MB), upload staging blocks %d (%.1f MB), packaged-texture spares %d (%.1f MB), feedback snapshots %d (%.1f MB), per-frame arena blocks %d (%.1f MB), kept vertex conversions %d (%.1f MB), "
          "deferred-release queue %lu of %lu entries released; present effects that are off go at the next present; footprint %.0f MB before, %.1f ms",
-         g_trim_why[level >= 0 && level <= 4 ? level : 4], total / M, nrh, brh / M, nup, bup / M, nsp, bsp / M, nfb, bfb / M, nar, bar / M, q0 > q1 ? q0 - q1 : 0, q0, fp0 / M, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6);
+         g_trim_why[level >= 0 && level <= 4 ? level : 4], total / M, nrh, brh / M, nup, bup / M, nsp, bsp / M, nfb, bfb / M, nar, bar / M, nvk, bvk / M, q0 > q1 ? q0 - q1 : 0, q0, fp0 / M, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6);
     return total;
 } }
 // The trim at once (dm_gfx_trim): only with no submission open and every submission and present completed (dm_gfx_suspend after mtl_drain; the tests), so for the last fence
@@ -17553,7 +17570,7 @@ int mtl_pressure(int level) {
 #endif
     if (level <= 0) return 0;
     if (!mem_trim_on()) { MLOG("memory trim: off (DM_MEMORY_TRIM=0), the pressure is only logged"); return 0; }
-    int want = level, cur = atomic_load(&g_trim_req);
+    int want = level > 2 ? 2 : level, cur = atomic_load(&g_trim_req);   // a warning or critical; level 3 (going to the background) is dm_gfx_suspend's own, after its drain
     while (cur < want && !atomic_compare_exchange_weak(&g_trim_req, &cur, want)) {}
     return 1;
 }

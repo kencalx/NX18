@@ -16,7 +16,7 @@ DM_AUDIO_ROUTE	switch	`=0` only logs an audio route change (AirPods or headphone
 DM_AUDIO_WD_MS	switch	`=<ms>` sets the audio watchdog's tick while every playing output's device calls back (default 250, 50-1000); `50` is the old fixed tick. A slower tick that sees no callback, or a last one over 50 ms old, only suspects a stall and goes back to 50 ms ticks, which decide it from the last callback's time (a stall is caught 200-350 ms after it at 250)
 DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
 DM_AV1_DAV1D	switch	`=1` decodes AV1 movies with dav1d even where VideoToolbox decodes AV1 (Apple M3 and A17 Pro on), to compare the two or to check the path older chips take (`hle_movie_av1.c`)
-DM_BG_TRIM	switch	`0` keeps the idle graphics caches when the app goes to the background (`dm_gfx_suspend`), as before; by default they are released after the drain, as under memory pressure (`DM_MEMORY_TRIM`)
+DM_BG_TRIM	switch	`0` keeps the idle graphics caches when the app goes to the background (`dm_gfx_suspend`), as before; by default they are released after the drain, as under memory pressure (`DM_MEMORY_TRIM`), and the kept vertex conversions with them
 DM_BOOTPROF	diagnostic	When set, logs boot timing: the loader's breakdown (mapping, relocation, probes), Metal library loading, pipeline creation, texture uploads and the first present
 DM_BUNDLE_ID	switch	Overrides the iOS app's bundle ID in `build_ipa.sh` (default `org.nxnative.<title ID in lowercase>`)
 DM_CHEATS	path	Folder of Atmosphère cheat files: `<folder>/<build ID>.txt` or an SD-card layout (`atmosphere/contents/<title ID>/cheats/`) under it (default `<DM_ROOT>/cheats`); the Mac menu lists and toggles them

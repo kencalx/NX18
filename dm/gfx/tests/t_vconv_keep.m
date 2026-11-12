@@ -1,6 +1,8 @@
 // Kept vertex conversions (vk_get): a conversion is kept from a key's second submission, holds what vconv_elem gives each element (and the conversion of zeros past the bound
 // range), is bound again while its source is unchanged, and goes when the source is written: inside its protected pages, in the bytes it shares a page with, or by the GPU.
-// A write beside the stream in a shared page leaves it; a range below the smallest kept one, or a stream rewritten between its sightings, is never kept
+// A write beside the stream in a shared page leaves it; a range below the smallest kept one, or a stream rewritten between its sightings, is never kept.
+// The memory trim (mtl_trim_at): a pressure warning or critical level leaves the kept conversions; going to the background (level 3) drops every one, the buffers leave the residency
+// set and are freed, and each is kept again at its next sighting. The cap (vk_cap) follows the headroom curve the render-target heaps use (rh_cap), and stops new conversions
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -16,6 +18,12 @@ static int same(uint64_t gpu, const vk_key *k, const uint8_t *src) {   // the ke
         return 1; }
     return 0;
 }
+static int resident(id o) { pthread_mutex_lock(&g_res_mu); int r = [g_res_objects containsObject:o]; pthread_mutex_unlock(&g_res_mu); return r; }
+// The deferred releases whose fence has passed run (here, or in the drain defer_kick started), and the residency set lets go of them at its commit. The earlier drops wait for
+// fence 1, which no submission here reaches, so the queue never empties
+static void settle(void) { for (int i = 0; i < 20; i++) { usleep(10000); @autoreleasepool { defer_drain(); res_commit(); } } }
+static int alive_resident(__weak id *w, int *res) { int a = 0; *res = 0; @autoreleasepool { id o = *w; a = o != nil; *res = o && resident(o); } return a; }   // in a pool of its own: a weak read may autorelease
+static uint64_t g_fake_avail; static uint64_t fake_avail(void) { return g_fake_avail; }
 static void wr(uint8_t *p, uint8_t v) { dm_guest_write_prepare(p, 1); *p = v; }   // a host write, as the game's own goes through the fault hook
 int main(void) { @autoreleasepool {
     mtl_init();
@@ -69,6 +77,39 @@ int main(void) { @autoreleasepool {
       CHECK("a stream rewritten every submission is never kept", !kept && g_vk_made == made);
       for (int i = 0; i < 40000 && !kept; i++) { g_sub_serial++; kept += vk_get(&d, da, 4) != 0; }
       CHECK("and is kept once it stays unchanged", kept == 1 && same(g_vk_list[g_vk_n - 1]->gpu, &d, ds)); }
+    // the memory trim: kept through a warning and a critical level, dropped going to the background, and kept again at the next sighting without a back-off
+    { vk_key b = {(uint64_t)(uintptr_t)mem, poolsize, 0, 60000, 60000, 0x14, (uint32_t)(40 * pg + 8), 4, 0}; uint64_t ba = (uint64_t)(uintptr_t)(mem + b.off);
+      uint64_t g6 = 0; @autoreleasepool { g_sub_serial += 100000; vk_get(&b, ba, 4); g_sub_serial++; g6 = vk_get(&b, ba, 4); }   // a pool of its own, so nothing the making autoreleased keeps the buffer
+      int n0 = g_vk_n; uint64_t bytes0 = g_vk_bytes; uint32_t keys0 = g_vk.n;
+      CHECK("kept before the trims", g6 && n0 >= 1 && bytes0);
+      __weak id<MTLBuffer> held = nil; @autoreleasepool { for (int i = 0; i < g_vk_n; i++) if (g_vk_list[i]->gpu == g6) held = (__bridge id<MTLBuffer>)g_vk_list[i]->buf; }
+      int res = 0; CHECK("its buffer is resident", alive_resident(&held, &res) && res);
+      uint64_t tb0 = atomic_load(&g_trim_bytes);
+      mtl_trim_at(1, g_fence); mtl_trim_at(2, g_fence);
+      CHECK("a pressure warning or critical level leaves every kept conversion", g_vk_n == n0 && g_vk_bytes == bytes0);
+      g_sub_serial++; CHECK("and it is bound again", vk_get(&b, ba, 4) == g6);
+      uint64_t dropped4 = g_vk_why[4], got = mtl_trim_at(3, g_fence);
+      CHECK("going to the background drops every one", !g_vk_n && !g_vk_bytes && g_vk_why[4] == dropped4 + (uint64_t)n0);
+      CHECK("and counts its bytes in the trim", got >= bytes0 && atomic_load(&g_trim_bytes) - tb0 >= bytes0);
+      CHECK("the keys stay for their next try", g_vk.n == keys0);
+      settle();
+      CHECK("its buffer left the residency set and was freed", !alive_resident(&held, &res) && !res);
+      g_sub_serial++; uint64_t g7 = vk_get(&b, ba, 4);
+      CHECK("kept again at the next sighting, without a back-off", g7 && same(g7, &b, mem + b.off)); }
+    // the cap: VK_BYTES on the Mac; with a headroom (iOS) the curve rh_cap reads at a submission's start
+    { CHECK("256 MB with no headroom known (the Mac)", vk_cap() == VK_BYTES);
+      g_rh_avail = fake_avail; g_fake_avail = 512ull << 20; g_rh_cap_at = 0; rh_cap();
+      CHECK("32 MB with 512 MB of headroom", vk_cap() == 32ull << 20);
+      g_fake_avail = 2ull << 30; g_rh_cap_at = 0; rh_cap();
+      CHECK("144 MB with 2 GB", vk_cap() == 144ull << 20);
+      vk_gpu_write(0, 0);   // none kept: the cap below counts only the new one
+      atomic_store(&g_head_cap, RH_CAP_MAX / 256);   // a 1 MB cap
+      vk_key c = {(uint64_t)(uintptr_t)mem, poolsize, 0, 70000, 70000, 0x14, (uint32_t)(10 * pg + 8), 4, 0}; uint64_t ca = (uint64_t)(uintptr_t)(mem + c.off);   // 1.1 MB converted
+      g_sub_serial += 100000; vk_get(&c, ca, 4); g_sub_serial++;
+      CHECK("a conversion past the cap is not kept", !vk_get(&c, ca, 4) && !g_vk_n);
+      g_rh_avail = NULL; g_rh_cap_at = 0; rh_cap();
+      CHECK("back to 256 MB with no headroom", vk_cap() == VK_BYTES);
+      g_sub_serial++; CHECK("and then kept", vk_get(&c, ca, 4) && g_vk_n == 1); }
     // forgotten when not drawn
     uint32_t before = g_vk.n; g_sub_serial += VK_IDLE + 100; for (int i = 0; i < 64 && g_vk.n; i++) { g_vk_swept = 0; vk_sweep(); }
     CHECK("keys not drawn are forgotten", before && !g_vk.n && !g_vk_bytes);
