@@ -487,8 +487,8 @@ struct LauncherView: View {
     private var checkingLine: some View {
         HStack(spacing: 8) {
             ProgressView().tint(NX18Palette.onArt)
-            Text("Checking the cloud save…").font(.callout).foregroundStyle(NX18Palette.onArt)
-            Button(pad.connected ? "Play Without It (B)" : "Play Without It") { playWithout() }.font(.callout.weight(.semibold)).tint(NX18Palette.cyan)
+            Text("Checking the cloud save…").nxFont(.callout).foregroundStyle(NX18Palette.onArt)
+            Button(pad.connected ? "Play Without It (B)" : "Play Without It") { playWithout() }.nxFont(.callout, weight: .semibold).tint(NX18Palette.cyan)
         }
     }
 
