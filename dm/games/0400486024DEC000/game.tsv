@@ -58,6 +58,10 @@ present_trim	60
 # fast ones; it and 'dm-encode' had QoS user-interactive alone, no frame deadline. on: each declares a time-constraint policy sized to its own CPU time per frame (nvn_rt.h,
 # hle_nvn.c nvn_rtw_tick). DM_REPLAY_RT=0 in env.txt turns it off. Not yet run on the phone
 replay_rt	on
+# About 20 command nodes a frame against 4 spare command copies (the queue line's 'command nodes without a spare copy' about 20 a frame), and about 6 new pool tables of about 312 KB a
+# frame against 16 spares, all in flight. on: 32 copies (16 MB in all) and 64 tables, the newest table dropped when every spare is in flight (nvn_queue.inc nvn_replay_spares,
+# nvn_mtl.m pool_table_give). DM_REPLAY_SPARES=0 in env.txt turns it off. Not yet run on the phone
+replay_spares	on
 
 # ---- Movies ----
 # The movies are AV1 decoded by VideoToolbox. On an iPhone 18 Pro Max (X1.0) iOS ended the hardware decoder while the notification panel was down during the opening movie: every later

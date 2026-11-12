@@ -685,7 +685,7 @@ static void signals_2000(int node) {
     nq_signal_node=saved;
 }
 // Allocations per signal in split mode (nq_pooled): 400 signals in one command buffer, submitted twice. The second submission takes its nodes and receipts from the free lists and keeps each
-// node's one signal inline, so it allocates about one command copy per signal (the 4 spares cover the first nodes); each signal took two nodes, a receipt and a signals array as well before
+// node's one signal inline, so it allocates about one command copy per signal (the spares, 4 or 32 with replay_spares, cover the first nodes); each signal took two nodes, a receipt and a signals array as well before
 // (DM_NVN_NODE_POOL=0, checked to be at least 4 a signal)
 static void split_allocations(void) {
     int off=env_is("DM_NVN_NODE_POOL","0");
@@ -706,6 +706,46 @@ static void split_allocations(void) {
     if(off) CHECK(per>=4,"DM_NVN_NODE_POOL=0: two nodes, a receipt and a signals array per signal, as before");
     else CHECK(per<1.5,"the second submission allocates at most about a command copy per signal");
     if(!done) _Exit(2);
+    P(nvnSyncFinalize)(&produced); P(nvnCommandBufferFinalize)(&bigcmd);
+    nq_signal_node=saved;
+}
+// Spare command copies (nq_spare_take / nq_spare_give; profile key replay_spares, DM_REPLAY_SPARES): split mode makes a command node per signal, so 20 signals a submission are about 21 command
+// nodes, as Ocarina of Time's ~20 a frame. Submitted three times: with replay_spares (32 kept) the third starts every node from a spare, with 4 at least 16 start without one, as before
+// (the queue line's 'command nodes without a spare copy'). Then copies of 4 MB: with replay_spares the kept ones stay within NQ_SPARE_BYTES; one over NQ_SPARE_MAX is never kept
+static void spare_copies(void) {
+    int on=nvn_replay_spares(); printf("CASE spare command copies (%s)\n",on?"replay_spares, 32":"4, as X1.0");
+    int saved=nq_signals_in_node(); nq_signal_node=0;
+    for(int i=0;i<20;i++) P(nvnEventSignal)(&evs[i],NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    NVNsync produced; P(nvnSyncInitialize)(&produced,&device);
+    NVNcommandHandle h=record_signals(20,&produced);
+    uint64_t miss[3]={0,0,0}, nodes[3]={0,0,0}; int done=1;
+    for(int round=0;round<3;round++) {
+        done&=queue_idle(5000000000ull);
+        uint64_t m0=atomic_load(&nq_stat_no_spare), n0=atomic_load(&nq_stat_nodes); P(nvnQueueSubmitCommands)(&queues[0],1,&h);
+        miss[round]=atomic_load(&nq_stat_no_spare)-m0; nodes[round]=atomic_load(&nq_stat_nodes)-n0;
+        done&=landed(&produced,10000000000ull);
+    }
+    done&=queue_idle(5000000000ull);
+    printf("nodes per submission %llu; command nodes without a spare copy %llu, %llu, %llu; spare copies kept %llu (%.3f MB)\n",(unsigned long long)nodes[2],(unsigned long long)miss[0],(unsigned long long)miss[1],(unsigned long long)miss[2],
+           (unsigned long long)atomic_load(&nq_stat_spares),atomic_load(&nq_stat_spare_bytes)/1048576.0);
+    CHECK(done,"three submissions of 20 signals complete");
+    if(on) CHECK(miss[2]==0,"replay_spares: every command node of the third starts from a spare");
+    else CHECK(miss[2]>=16,"4 spares: 16 or more of its command nodes start without one, as before");
+    pthread_mutex_lock(&g_sub_mu);
+    nq_node held[NQ_SPARES_MAX]; memset(held,0,sizeof held); int nheld=0;
+    while(nq_nspare) nq_spare_take(&held[nheld++]);   // the small spares out, so the big copies meet an empty set
+    CHECK(nq_spare_bytes==0,"the spares' bytes counted back to 0");
+    nq_node big[6]; memset(big,0,sizeof big);
+    for(int i=0;i<6;i++) { big[i].capacity=i<5?NQ_SPARE_MAX:NQ_SPARE_MAX+4096; big[i].bytes=malloc(big[i].capacity); nq_spare_give(&big[i]); }
+    int kept=nq_nspare; size_t bytes=nq_spare_bytes;
+    CHECK(big[5].bytes!=NULL,"a copy over 4 MB is never kept");
+    if(on) CHECK(kept==4 && bytes==NQ_SPARE_BYTES && big[4].bytes!=NULL,"replay_spares: four copies of 4 MB kept, the fifth not: 16 MB in all");
+    else CHECK(kept==4 && big[4].bytes!=NULL,"4 spares: four kept, as before");
+    for(int i=0;i<kept;i++) { nq_node t; memset(&t,0,sizeof t); nq_spare_take(&t); free(t.bytes); }
+    for(int i=0;i<6;i++) free(big[i].bytes);
+    for(int i=nheld-1;i>=0;i--) nq_spare_give(&held[i]);
+    CHECK(nq_nspare==nheld,"the small spares back");
+    pthread_mutex_unlock(&g_sub_mu);
     P(nvnSyncFinalize)(&produced); P(nvnCommandBufferFinalize)(&bigcmd);
     nq_signal_node=saved;
 }
@@ -787,6 +827,7 @@ int main(void) { @autoreleasepool {
     report_due(); probe_cost(); event_bookkeeping(); signal_set();
     signals_2000(1); signals_2000(0);
     split_allocations();
+    spare_copies();
     replay_rt_case();
     pthread_mutex_lock(&jobs_mu); jobs_stop=1; pthread_cond_signal(&jobs_cv); pthread_mutex_unlock(&jobs_mu); pthread_join(worker,NULL);
     printf("wait-event fixture: %d checks, %d failed\n",checks,fails);

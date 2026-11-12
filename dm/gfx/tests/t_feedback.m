@@ -470,6 +470,32 @@ static void reuse_tables_case(void) {
     pool_table_give(b); pool_table_give(c); pool_table_give(d);
     g_done = done0; g_fence = fence0;
 }
+// The spare tables when full (pool_table_give): 16 kept, the lowest fence going even while it is in flight (X1.0); with replay_spares 64, and when every spare is in flight the table
+// given then goes instead, while a full set with one completed still lets that one go
+static void spare_tables_case(void) {
+    uint64_t done0 = g_done, fence0 = g_fence; int saved = g_pool_spares;
+    for (int round = 0; round < 2; round++) {
+        int cap = round ? POOL_SPARES_MAX : POOL_SPARES; g_pool_spares = cap;
+        while (g_npool_spare) { g_pool_spare[--g_npool_spare].buf = nil; }   // an empty set
+        uint64_t dropped0 = g_pool_dropped; __unsafe_unretained id<MTLBuffer> oldest = nil;
+        for (int i = 0; i < cap; i++) { id<MTLBuffer> b = [g_dev newBufferWithLength:0x10000 options:MTLResourceStorageModeShared]; if (!i) oldest = b; g_fence++; pool_table_give(b); }
+        CHECK(g_npool_spare == cap && g_pool_dropped == dropped0, round ? "replay_spares: 64 spare tables kept" : "16 spare tables kept");
+        id<MTLBuffer> extra = [g_dev newBufferWithLength:0x10000 options:MTLResourceStorageModeShared]; g_fence++; pool_table_give(extra);
+        int kept_extra = 0, kept_oldest = 0; for (int i = 0; i < g_npool_spare; i++) { kept_extra |= g_pool_spare[i].buf == extra; kept_oldest |= g_pool_spare[i].buf == oldest; }
+        CHECK(g_npool_spare == cap && g_pool_dropped == dropped0 + 1, "one more, every spare in flight: still full, one let go");
+        if (round) CHECK(!kept_extra && kept_oldest, "replay_spares: the table given now goes, the next to come back stays");
+        else CHECK(kept_extra && !kept_oldest, "X1.0: the lowest fence goes, though still in flight");
+        g_done = g_fence + 1;   // every spare has come back
+        id<MTLBuffer> last = [g_dev newBufferWithLength:0x10000 options:MTLResourceStorageModeShared]; g_fence++; pool_table_give(last);
+        int kept_last = 0; for (int i = 0; i < g_npool_spare; i++) kept_last |= g_pool_spare[i].buf == last;
+        CHECK(kept_last && g_npool_spare == cap, "with spares completed, the lowest fence goes and the new one is kept");
+        uint64_t reused0 = g_pool_reused; id<MTLBuffer> t = pool_table_take(1000);
+        CHECK(t && t != last && g_pool_reused == reused0 + 1, "and a completed spare is taken again");
+        g_done = done0;
+    }
+    while (g_npool_spare) { g_pool_spare[--g_npool_spare].buf = nil; }
+    g_pool_spares = saved; g_done = done0; g_fence = fence0;
+}
 // A cut with earlier work still running stays a boundary for the game's timestamps, and commits only when the GPU has run out; a report after it takes that boundary's time.
 // Run with and without the encode thread, so both the direct and the recorded timestamp writes are gated
 static void cut_boundary_case(void) {
@@ -726,6 +752,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (argc == 2) { tile_case(argv[1]); fpos_case(argv[1]); om_case(argv[1]); }
     pool_depth_case();
     reuse_tables_case();
+    spare_tables_case();
     cut_boundary_case();
     printf("feedback snapshot: %d checks, %d failed\n", checks, failed);
     return failed != 0;

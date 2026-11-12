@@ -11101,9 +11101,14 @@ static void pool_seen_scan(void) {
     }
 }
 // A table replaced by a new walk is reused once the submission that may read it has completed, the last segment's fence covering every segment before it: a new buffer each time meant an allocation, a residency add and remove, and a kernel call or more each way,
-// about 3 a frame in Ocarina of Time. Sizes round up to 64 KB, as a pool grows by a few IDs at a time. What cannot be used again soon leaves when the spares are full (the idea is from PR 1428)
-enum { POOL_SPARES = 16 };
-static struct { __strong id<MTLBuffer> buf; uint64_t fence; } g_pool_spare[POOL_SPARES]; static int g_npool_spare; static uint64_t g_pool_made, g_pool_reused;
+// about 3 a frame in Ocarina of Time. Sizes round up to 64 KB, as a pool grows by a few IDs at a time. What cannot be used again soon leaves when the spares are full (the idea is from PR 1428).
+// The X1.0 iPhone runs of Ocarina of Time made about 6 new tables of about 312 KB a frame (a residency add each) with 16 spares, which three frames in flight fill with tables still
+// in flight, so the lowest fence that left was the next to come back. With replay_spares (nvn_replay_spares, hle_nvn.c) up to POOL_SPARES_MAX are kept, and when every one is still
+// in flight the table given now, the newest, goes instead (g_pool_dropped); a full set with one completed still lets the lowest fence go, a size the pools have left behind
+enum { POOL_SPARES = 16, POOL_SPARES_MAX = 64 };
+static struct { __strong id<MTLBuffer> buf; uint64_t fence; } g_pool_spare[POOL_SPARES_MAX]; static int g_npool_spare; static uint64_t g_pool_made, g_pool_reused, g_pool_dropped;
+static int g_pool_spares = -1;   // how many are kept: POOL_SPARES, or POOL_SPARES_MAX with replay_spares (a unit test may set it directly)
+static int pool_spares(void) { if (g_pool_spares < 0) g_pool_spares = nvn_replay_spares() ? POOL_SPARES_MAX : POOL_SPARES; return g_pool_spares; }
 static id<MTLBuffer> pool_table_take(size_t need) {
     size_t len = (need + 0xffff) & ~(size_t)0xffff; uint64_t done = g_done;
     for (int i = 0; i < g_npool_spare; i++) if (g_pool_spare[i].fence <= done && g_pool_spare[i].buf.length == len) {
@@ -11114,8 +11119,11 @@ static id<MTLBuffer> pool_table_take(size_t need) {
 }
 static void pool_table_give(id<MTLBuffer> b) {
     if (!b) return;
-    if (g_npool_spare == POOL_SPARES) {   // the oldest goes: a size the pools have left behind, most likely
-        int o = 0; for (int i = 1; i < POOL_SPARES; i++) if (g_pool_spare[i].fence < g_pool_spare[o].fence) o = i;
+    int cap = pool_spares();
+    if (g_npool_spare >= cap) {   // the oldest goes: a size the pools have left behind, most likely
+        int o = 0; for (int i = 1; i < g_npool_spare; i++) if (g_pool_spare[i].fence < g_pool_spare[o].fence) o = i;
+        g_pool_dropped++;
+        if (cap > POOL_SPARES && g_pool_spare[o].fence > g_done) { defer_obj_release(b); return; }   // replay_spares, every spare in flight: the newest goes, not the next to come back
         defer_obj_release(g_pool_spare[o].buf); g_pool_spare[o] = g_pool_spare[--g_npool_spare]; g_pool_spare[g_npool_spare].buf = nil; }
     g_pool_spare[g_npool_spare].buf = b; g_pool_spare[g_npool_spare].fence = g_fence + 1; g_npool_spare++;
 }
@@ -11246,7 +11254,8 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
             for (int k = 0; k < g_npool; k++) { uint64_t sz = g_pools[k].hi - g_pools[k].lo; pall += sz; if (g_pools[k].res) pres += sz; }
             uint64_t end = 0; for (int i = 0; i < nr; i++) { uint64_t lo = MAX(rs[i].lo, end), hi = rs[i].hi; if (hi <= lo) continue; end = hi; tall += hi - lo; int q = pool_peek(lo); if (q >= 0 && g_pools[q].res) tres += hi - lo; }
             pthread_mutex_unlock(&g_mu); free(rs); }
-        MLOG("pool walk: tables made %llu, reused %llu; passes ended after a pool shader that may read depth %llu", (unsigned long long)g_pool_made, (unsigned long long)g_pool_reused, (unsigned long long)g_fb_split_pool);
+        char sp[96] = ""; if (pool_spares() > POOL_SPARES) snprintf(sp, sizeof sp, " (spares kept %d of %d, let go %llu)", g_npool_spare, pool_spares(), (unsigned long long)g_pool_dropped);   // replay_spares only: every other game's line as before
+        MLOG("pool walk: tables made %llu, reused %llu%s; passes ended after a pool shader that may read depth %llu", (unsigned long long)g_pool_made, (unsigned long long)g_pool_reused, sp, (unsigned long long)g_fb_split_pool);
         MLOG("pool walk: %d IDs, %d left out, %u read by a shader (%llu MB), allocated %llu MB; memory pools %llu MB, wired %llu MB; texture storage %llu MB, in wired pools %llu MB", n, left, nseen, (unsigned long long)(bseen >> 20), (unsigned long long)(g_dev.currentAllocatedSize >> 20), (unsigned long long)(pall >> 20), (unsigned long long)(pres >> 20), (unsigned long long)(tall >> 20), (unsigned long long)(tres >> 20)); }
     static int gone_logged; int log_gone = gone && !gone_logged++;
     if (g_stat_pool_builds++ < 16 || g_stat_pool_builds % 1000 == 0 || log_gone)

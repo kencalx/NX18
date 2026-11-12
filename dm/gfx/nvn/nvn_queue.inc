@@ -222,12 +222,31 @@ static void nq_cost_end(nq_cost c) {
     atomic_fetch_add(&g_cum_sub_cyc,cyc-c.cycles); atomic_fetch_add(&g_cum_sub_sys_ns,sys-c.sys);
 }
 // The command copies (nq_bytes) of replayed nodes go to the next submissions' nodes instead of free (nq_spare_take / nq_spare_give), so a steady frame allocates none. Both run under g_sub_mu: the
-// submitting thread copies the commands (nq_flatten) and the worker replays them (nq_worker) holding it. At most NQ_SPARES are kept, none over NQ_SPARE_MAX (a load's long stream is freed)
-enum { NQ_SPARES=4 };
+// submitting thread copies the commands (nq_flatten) and the worker replays them (nq_worker) holding it. At most NQ_SPARES are kept, none over NQ_SPARE_MAX (a load's long stream is freed).
+// Ocarina of Time makes about 20 command nodes a frame (its ~25 event waits each end one), so 4 spares left about 20 a frame to start without a copy and grow theirs from 4 KB under g_sub_mu
+// (the queue line's 'command nodes without a spare copy'). With replay_spares (nvn_replay_spares) NQ_SPARES_MAX are kept, holding at most NQ_SPARE_BYTES in all
+enum { NQ_SPARES=4, NQ_SPARES_MAX=32 };
 #define NQ_SPARE_MAX ((size_t)4<<20)
-static struct { uint8_t *bytes; size_t capacity; } nq_spare[NQ_SPARES]; static int nq_nspare;
-static void nq_spare_take(nq_node *n) { if(nq_nspare) { nq_nspare--; n->bytes=nq_spare[nq_nspare].bytes; n->capacity=nq_spare[nq_nspare].capacity; } else atomic_fetch_add_explicit(&nq_stat_no_spare,1,memory_order_relaxed); }
-static void nq_spare_give(nq_node *n) { if(n->bytes && n->capacity<=NQ_SPARE_MAX && nq_nspare<NQ_SPARES) { nq_spare[nq_nspare].bytes=n->bytes; nq_spare[nq_nspare].capacity=n->capacity; nq_nspare++; n->bytes=NULL; n->capacity=0; } }
+#define NQ_SPARE_BYTES ((size_t)16<<20)   // replay_spares: the kept copies in all (4 copies of NQ_SPARE_MAX, the most the 4 spares could hold)
+static struct { uint8_t *bytes; size_t capacity; } nq_spare[NQ_SPARES_MAX]; static int nq_nspare; static size_t nq_spare_bytes;
+static int nq_spares=-1;   // how many are kept: NQ_SPARES, or NQ_SPARES_MAX with replay_spares (a unit test may set it directly)
+static _Atomic uint64_t nq_stat_spares, nq_stat_spare_bytes;   // what is kept, for the queue line (written under g_sub_mu, read without it)
+static int replay_spares_mode(const char *e,int dflt) { return e && *e ? *e!='0' : dflt; }   // DM_REPLAY_SPARES: 1 on, 0 off; unset or empty, the profile's
+int nvn_replay_spares(void) {
+    static _Atomic int v=-1; int c=atomic_load_explicit(&v,memory_order_relaxed); if(c>=0) return c;
+    const char *e=getenv("DM_REPLAY_SPARES"); int on=replay_spares_mode(e,DM_GAME_REPLAY_SPARES), was=-1;
+    if(atomic_compare_exchange_strong(&v,&was,on) && on)
+        LOG("[nvn] replay spares: up to %d spare command copies (%zu MB in all) and 64 spare pool tables, the newest dropped when every spare table is in flight (%s)",NQ_SPARES_MAX,NQ_SPARE_BYTES>>20,e && *e?"DM_REPLAY_SPARES":"game profile replay_spares");
+    return on;
+}
+static int nq_spare_n(void) { if(nq_spares<0) nq_spares=nvn_replay_spares()?NQ_SPARES_MAX:NQ_SPARES; return nq_spares; }
+static void nq_spare_stat(void) { atomic_store_explicit(&nq_stat_spares,(uint64_t)nq_nspare,memory_order_relaxed); atomic_store_explicit(&nq_stat_spare_bytes,nq_spare_bytes,memory_order_relaxed); }
+static void nq_spare_take(nq_node *n) { if(nq_nspare) { nq_nspare--; n->bytes=nq_spare[nq_nspare].bytes; n->capacity=nq_spare[nq_nspare].capacity; nq_spare_bytes-=n->capacity; nq_spare_stat(); } else atomic_fetch_add_explicit(&nq_stat_no_spare,1,memory_order_relaxed); }
+static void nq_spare_give(nq_node *n) {
+    int cap=nq_spare_n();
+    if(n->bytes && n->capacity<=NQ_SPARE_MAX && nq_nspare<cap && (cap<=NQ_SPARES || nq_spare_bytes+n->capacity<=NQ_SPARE_BYTES)) {
+        nq_spare[nq_nspare].bytes=n->bytes; nq_spare[nq_nspare].capacity=n->capacity; nq_nspare++; nq_spare_bytes+=n->capacity; n->bytes=NULL; n->capacity=0; nq_spare_stat(); }
+}
 // When the queue line is due: the first time the replay's frame passes a multiple of 300 after the last line, given the frames since it (0 when not due); the first frame seen only sets the
 // baseline. frame is the frame of the last replayed job, and it goes back whenever jobs of two queues interleave (a job of frame 599 on one queue waiting on a frame-600 job of another), so a
 // frame at or below the last line's is ignored: compared by its multiple of 300 alone, such a frame wrote a line of zeros over a wrapped frame count and moved the baseline back, and the next
@@ -245,8 +264,9 @@ static void nq_report(uint64_t frame,uint64_t frames) {
     static uint64_t p[8]; uint64_t v[8]={atomic_load(&nq_stat_nodes),atomic_load(&nq_stat_nodes_pooled),atomic_load(&nq_stat_receipts),atomic_load(&nq_stat_receipts_pooled),atomic_load(&nq_stat_no_spare),atomic_load(&nq_stat_event_writes),atomic_load(&nq_stat_event_ns),0};
     pthread_mutex_lock(&nq_mu); unsigned peak=nq_stat_event_peak, inflight=nq_event_inflight(); pthread_mutex_unlock(&nq_mu);
     double nf=frames?(double)frames:1;
-    LOG("[nvn] queue up to frame %llu, per frame: nodes %.1f (%.1f from the free list), receipts %.1f (%.1f from the free list), command nodes without a spare copy %.1f; GPU event writes %.1f, their bookkeeping %.3f ms; event words in flight %u, at most %u",
-        frame,(v[0]-p[0])/nf,(v[1]-p[1])/nf,(v[2]-p[2])/nf,(v[3]-p[3])/nf,(v[4]-p[4])/nf,(v[5]-p[5])/nf,(v[6]-p[6])/1e6/nf,inflight,peak);
+    char sp[96]=""; if(nvn_replay_spares()) snprintf(sp,sizeof sp," (spare copies kept %llu of %d, %.2f MB)",(unsigned long long)atomic_load_explicit(&nq_stat_spares,memory_order_relaxed),nq_spare_n(),atomic_load_explicit(&nq_stat_spare_bytes,memory_order_relaxed)/1048576.0);   // replay_spares only: every other game's line as before
+    LOG("[nvn] queue up to frame %llu, per frame: nodes %.1f (%.1f from the free list), receipts %.1f (%.1f from the free list), command nodes without a spare copy %.1f%s; GPU event writes %.1f, their bookkeeping %.3f ms; event words in flight %u, at most %u",
+        frame,(v[0]-p[0])/nf,(v[1]-p[1])/nf,(v[2]-p[2])/nf,(v[3]-p[3])/nf,(v[4]-p[4])/nf,sp,(v[5]-p[5])/nf,(v[6]-p[6])/1e6/nf,inflight,peak);
     memcpy(p,v,sizeof p);
 }
 // The replay's time-constraint policy (nvn_rt.h; profile key replay_rt, DM_REPLAY_RT): ticked once a frame before the node's work, outside its cost scope

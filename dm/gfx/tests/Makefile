@@ -677,7 +677,7 @@ check_t_wait_event: t_wait_event
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_SIGNAL_EVENTS=node ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_SIGNAL_EVENTS=split ./$<
-	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_REPLAY_RT=0 ./$<   # the replay threads without a time-constraint policy (replay_rt_case), whatever the profile
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_REPLAY_RT=0 DM_REPLAY_SPARES=0 ./$<   # the replay threads without a time-constraint policy (replay_rt_case) and 4 spare copies (spare_copies), whatever the profile
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_SIGNAL_EVENTS=split ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_EVENT_MAP=0 DM_NVN_NODE_POOL=0 DM_NVN_SUBMIT_PROBES=full ./$<   # the event list, no free lists and the full probes, as before
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_WAITS=1 ./$<   # the wait ledger on: post_ring_wait checks which row a post-ring wait is counted in
