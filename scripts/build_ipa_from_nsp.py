@@ -2055,7 +2055,8 @@ def capture_glslc(repo, dirs, pkg_ver, patched, work, env, logs, g):
         PROG.say(f'---- last lines of {log} ----\n' + tail)
         raise BuildError(f'captured only {len(got)} run-time shaders'
                          + (f', the profile needs {len(want)}' if want else '') + f' (host output: {log})')
-    if want and got - want - glslc_named(g, GLSLC_PLAY): say(f'[RED] captured files the profile\'s shader map does not name: {", ".join(sorted(got - want - glslc_named(g, GLSLC_PLAY)))}')
+    extra = got - want - glslc_named(g, GLSLC_PLAY) if want else set()
+    if extra: say(f'[RED] captured files the profile\'s shader map does not name: {", ".join(sorted(extra))}')
     swap_in(cap, d / 'glslc_capture'); rmtree(rd)
     PROG.end(f'{len(got)} shaders in {hms(time.time() - t0)}')
 
