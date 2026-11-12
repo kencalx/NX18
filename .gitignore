@@ -13,3 +13,9 @@ dm/games/*/cb_extent.tsv
 /coverage.json
 # The Python virtualenv scripts/release/nx18-setup.sh makes for the build's modules
 .venv/
+# The owner's own inputs kept in the checkout, such as a UI font for --ui-font (local/fonts/): never committed. A font of one's own is bundled into the app built
+# on that Mac only (build_ipa_from_nsp.py refuses one inside the checkout that git does not ignore; dm/tools/tests/test_private_fonts.py fails on a tracked one)
+/local/
+*.private.ttf
+*.private.otf
+*.private.ttc

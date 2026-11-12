@@ -103,12 +103,13 @@ final class DuoLauncherTests: XCTestCase {
         let m = LauncherModel(s.settings, defaults: defaults)
         m.skipAtStart = true
         XCTAssertTrue(defaults.bool(forKey: LauncherModel.skipKey))
-        let row = try XCTUnwrap(settingsAtStartRow(m) as? UIAction)
+        let row = try XCTUnwrap(uiMenuElement(settingsAtStartRow(m)) as? UIAction)   // as the UIMenu shows it (DM_GAME_MENU=system)
         XCTAssertEqual(row.title, "Settings screen at start")
         XCTAssertEqual(row.state, .off, "Skipped: not ticked")
         XCTAssertTrue(LauncherModel.skipsAtStart(defaults: defaults, environment: [:]))
         m.skipAtStart = false   // what the row's action does
-        XCTAssertEqual((settingsAtStartRow(m) as? UIAction)?.state, .on)
+        XCTAssertEqual((uiMenuElement(settingsAtStartRow(m)) as? UIAction)?.state, .on)
+        XCTAssertTrue(settingsAtStartRow(m).isOn, "and as the panel shows it")
         XCTAssertNil(defaults.object(forKey: LauncherModel.skipKey), "Off is no key")
         XCTAssertFalse(LauncherModel.skipsAtStart(defaults: defaults, environment: [:]))
     }

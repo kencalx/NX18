@@ -36,6 +36,40 @@ class EnvSwitches(unittest.TestCase):
         self.assertIn('fit jpeg 1920 "$DM_ART" Gen/dm/art.jpg', art)
         self.assertNotIn('die', logo, 'an optional logo never stops the build')
 
+    def test_ui_font(self):   # DM_UI_FONT: dm/uifont/ui.<ext> in the built app (never dm/font, the game's shared fonts, and never dm/ios/Gen, inside the checkout), DMUIFontFile /
+        # DMUIFontName, no stale dm/uifont in a later IPA without it; only --prepare-xcode's project (outside the checkout) gets it in its Gen/dm
+        rows = {r.split('\t')[0]: r.split('\t')[1] for r in (REPO / 'docs/env_switches.tsv').read_text().splitlines()[1:] if r}
+        self.assertEqual((rows.get('DM_UI_FONT'), rows.get('DM_UI_FONT_NAME')), ('path', 'switch'))
+        sh = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
+        check = sh[sh.index('UI_FONT_FILE=\n'):]; check = check[:check.index('\nfi\n') + 4]
+        lines = sh.splitlines()
+        i = lines.index('rm -rf "$APP/dm/uifont"'); into_app = '\n'.join(lines[i:i + 2])
+        self.assertTrue(lines[i + 1].startswith('if [ -n "$UI_FONT_FILE" ]; then mkdir -p "$APP/dm/uifont"'))
+        plist = sh[sh.index('if [ -n "$UI_FONT_FILE" ]; then /usr/libexec/PlistBuddy'):]; plist = plist[:plist.index('; fi\n') + 5]
+        self.assertIn('Add :DMUIFontFile string $UI_FONT_FILE', plist); self.assertIn('Add :DMUIFontName string $DM_UI_FONT_NAME', plist)
+        self.assertLess(sh.index('xcodebuild -project'), sh.index(into_app)); self.assertLess(sh.index(into_app), sh.index('python3 tools/pack_ipa.py'))
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t); (t / 'Gen/dm').mkdir(parents=True); font = t / 'My Font.TTF'; font.write_bytes(b'font'); font.chmod(0o600); (t / 'notes.txt').write_text('x')
+            def run(env, script):
+                return subprocess.run(['bash', '-c', 'set -u; t() { echo "$*"; }; die() { echo "FAIL: $*"; exit 1; }\n' + script + '\necho "file=$UI_FONT_FILE"'],
+                                      cwd=t, env={'PATH': '/usr/bin:/bin', 'PREPARE_XCODE': 'NO', 'IOS': str(t), **env}, capture_output=True, text=True)
+            r = run({'DM_UI_FONT': str(font), 'DM_UI_FONT_NAME': 'NXTestUI-Regular'}, check)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertIn('file=dm/uifont/ui.ttf', r.stdout)
+            self.assertEqual(list((t / 'Gen/dm').iterdir()), [])   # an IPA build: nothing in Gen/ (dm/ios/Gen, inside the checkout)
+            self.assertIn('UI font: NXTestUI-Regular', r.stdout)
+            for bad in (str(t / 'missing.ttf'), str(t / 'notes.txt')):
+                with self.subTest(bad=bad): self.assertIn('FAIL:', run({'DM_UI_FONT': bad}, check).stdout)
+            r = run({}, check); self.assertEqual(r.returncode, 0); self.assertIn('file=\n', r.stdout + '\n')
+            r = run({'DM_UI_FONT': str(font), 'PREPARE_XCODE': 'YES'}, check)   # the per-game Xcode project, outside the checkout, reads Gen/dm
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(sorted(p.name for p in (t / 'Gen/dm/uifont').iterdir()), ['ui.ttf']); self.assertFalse((t / 'Gen/dm/font').exists())
+            app = t / 'DmIOS.app'; (app / 'dm/uifont').mkdir(parents=True); (app / 'dm/uifont/ui.ttf').write_bytes(b'old'); (app / 'dm/uifont/ui.otf').write_bytes(b'old')
+            r = run({'DM_UI_FONT': str(font)}, f'UI_FONT_FILE=dm/uifont/ui.ttf; APP={app}\n{into_app}'); self.assertNotIn('FAIL', r.stdout)
+            self.assertEqual(sorted(p.name for p in (app / 'dm/uifont').iterdir()), ['ui.ttf'])   # the build's own file only
+            self.assertEqual((app / 'dm/uifont/ui.ttf').read_bytes(), b'font'); self.assertEqual((app / 'dm/uifont/ui.ttf').stat().st_mode & 0o777, 0o644)   # readable, whatever the player's copy
+            run({}, f'UI_FONT_FILE=; APP={app}\n{into_app}')
+            self.assertFalse((app / 'dm/uifont').exists())   # an IPA without a UI font carries none
+
     @unittest.skipUnless(shutil.which('sips'), 'sips is macOS\'s')
     def test_fit_never_enlarges(self):   # build_ipa.sh's fit(): sips -Z also enlarges, so a smaller image keeps its size and a larger one is brought down to the limit
         sh = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()

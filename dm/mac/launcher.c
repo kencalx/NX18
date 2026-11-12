@@ -10,6 +10,8 @@
 // Before the host starts, the settings window (dm/mac/Launcher.swift dm_mac_launcher, linked in by pack_app.py) runs in this process and puts the player's settings into the environment; it keeps
 // what the launch environment and the env files set (DM_ENV_LAUNCH_KEYS, DM_ENV_FILE_KEYS). DM_LAUNCHER=0 or --no-launcher (open <app> --args --no-launcher) starts the game without the window,
 // with the saved choices; so does "Show this window at launch" turned off.
+// The UI font (Resources/dm/uifont, Info.plist DMUIFontFile; dm/host/ui_font.h): registered here for the settings window, which runs in this process, after the env files (DM_UI_FONT=0 in one
+// turns it off, DM_UI_FONT=<file> names another), and handed to the host as DM_UI_FONT, which registers it for its own text.
 #include <CoreFoundation/CoreFoundation.h>
 #include <ctype.h>
 #include <errno.h>
@@ -26,6 +28,7 @@
 #include <unistd.h>
 #include "romfs_image.h"
 #include "save_sync.h"
+#include "ui_font.h"
 
 extern char **environ;
 int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
@@ -200,6 +203,7 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/env.txt", dm); env_file(p);
     setenv("DM_ENV_FILE_KEYS", g_file_keys ? g_file_keys : "", 1); setenv("DM_ENV_LAUNCH_KEYS", g_launch_keys ? g_launch_keys : "", 1);
     free(g_file_keys); free(g_launch_keys);
+    dm_ui_font_register(res);   // before the window; it sets DM_UI_FONT to the file for the host
     // The host draws through Metal 4 only: say so here, not in a host that stops in mtl_init. DM_TEST_METAL4 (test_nsp_mac_app.py, whose host is a stand-in): 1 takes the GPU as
     // one with Metal 4 (GitHub's virtual Macs have none), 0 as one without
     const char *t4 = getenv("DM_TEST_METAL4");

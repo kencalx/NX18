@@ -295,6 +295,7 @@ struct LauncherView: View {
     @State private var bannerWidth: CGFloat = 600   // the banner's width, which bounds the logo's
     @State private var checking = false
     @State private var check = 0   // which Play the running check is for: one the player went on from without it is dropped
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     init(m: LauncherModel, done: @escaping (Bool) -> Void, fit: @escaping (CGFloat) -> Void, extras: LauncherExtras = .load()) {
         self.m = m; self.done = done; self.fit = fit; self.extras = extras
@@ -321,7 +322,7 @@ struct LauncherView: View {
     var body: some View {
         VStack(spacing: 0) {
             banner
-            NX18Rails(axis: .horizontal)
+            NX18Rails(axis: .horizontal, flowing: true)   // the colours drift slowly along it (still under Reduce Motion; LauncherRow.swift)
             Form {
                 if m.hasPresets {
                     Section {
@@ -330,7 +331,7 @@ struct LauncherView: View {
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Preset")
-                                Text(presetNote).font(.footnote).foregroundStyle(NX18Palette.muted)
+                                Text(presetNote).nxFont(.footnote).foregroundStyle(NX18Palette.muted)
                             }
                         }
                     }
@@ -365,15 +366,16 @@ struct LauncherView: View {
                 if checking {
                     ProgressView().controlSize(.small)
                     Text("Checking the cloud save…").foregroundStyle(NX18Palette.muted)
-                    Button("Play Without It") { checking = false; SaveCheck.apply("offline"); done(true) }
+                    Button("Play Without It") { checking = false; SaveCheck.apply("offline"); done(true) }.nxPushButton()
                 }
-                Button("Quit") { done(false) }
+                Button("Quit") { done(false) }.nxPushButton()
             }
             .padding(.horizontal, 20).padding(.vertical, 14)
             .background(NX18Palette.card(tint: extras.tint))
         }
         .background(background)
         .ignoresSafeArea(.container, edges: .top)   // the banner runs under the transparent title bar
+        .nxTextRoot()   // NX 18's UI font for every text below that names no style (NXFont.swift)
         .tint(NX18Palette.cyan)
         .environment(\.colorScheme, .dark)
         .frame(minWidth: 520, idealWidth: 600)
@@ -422,7 +424,7 @@ struct LauncherView: View {
                 if let logo = extras.logo {
                     NX18GameLogo(image: Image(nsImage: logo), natural: logo.size, name: name, dark: extras.logoDark, maxWidth: bannerWidth * 0.6, maxHeight: 72)
                 } else {
-                    Text(name).font(.system(size: 28, weight: .bold)).foregroundStyle(.white).lineLimit(2)
+                    Text(name).nxFont(size: 28, weight: .bold).foregroundStyle(.white).lineLimit(2)
                         .shadow(color: .black.opacity(0.35), radius: 6, y: 1)
                         .accessibilityAddTraits(.isHeader)
                 }
@@ -441,7 +443,9 @@ struct LauncherView: View {
         .frame(maxWidth: .infinity)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { bannerWidth = $0 }
         .overlay(alignment: .topTrailing) {
-            NX18Mark(height: 20).padding(.top, 12).padding(.trailing, 16).allowsHitTesting(false)
+            NX18Mark(height: 20)
+                .background { if extras.art != nil { NX18MarkShade(strong: reduceTransparency) } }   // over key art: the banner's top shade alone leaves it on a light grey (LauncherRow.swift)
+                .padding(.top, 12).padding(.trailing, 16).allowsHitTesting(false)
         }
         .clipped()
     }
@@ -470,7 +474,7 @@ struct LauncherView: View {
             Button { start() } label: {
                 Label("Play", systemImage: "play.fill").labelStyle(PlayLabel())
             }
-            .buttonStyle(NX18PillStyle(fill: NX18Palette.coral, text: NX18Palette.charcoal, font: .system(size: 16, weight: .bold), height: 38))
+            .buttonStyle(NX18PillStyle(fill: NX18Palette.coral, text: NX18Palette.charcoal, font: NXFont.fixed(16, weight: .bold), height: 38))
             .keyboardShortcut(.defaultAction)
             .disabled(checking)
             .accessibilityLabel("Play")
@@ -511,7 +515,7 @@ struct LauncherView: View {
                 LauncherStatusLine(status: s, color: NX18Palette.onArt)
             }
         }
-        .font(.footnote)
+        .nxFont(.footnote)
         .foregroundStyle(NX18Palette.onArt)   // the muted grey a little lighter, as it sits on the art
         .lineLimit(1)
     }
@@ -540,7 +544,7 @@ struct LauncherView: View {
             .buttonStyle(.plain)
             .disabled(!m.changed)
         } footer: {
-            Text("Brings back all settings this game was tested with.").foregroundStyle(NX18Palette.muted)
+            Text("Brings back all settings this game was tested with.").nxFontIfCustom(.footnote).foregroundStyle(NX18Palette.muted)
         }
         .listRowBackground(NX18Palette.row)
     }
@@ -565,7 +569,7 @@ struct LauncherView: View {
 // Play's label: the triangle and the word, the triangle a little smaller
 private struct PlayLabel: LabelStyle {
     func makeBody(configuration: Configuration) -> some View {
-        HStack(spacing: 7) { configuration.icon.font(.system(size: 13, weight: .bold)); configuration.title }
+        HStack(spacing: 7) { configuration.icon.font(.system(size: 13, weight: .bold)); configuration.title }   // system: symbol
     }
 }
 
@@ -636,7 +640,7 @@ private struct PlayLabel: LabelStyle {
 struct NX18PillStyle: ButtonStyle {
     var fill: Color = Color.white.opacity(0.14)
     var text: Color = .white
-    var font: Font = .system(size: 13, weight: .semibold)
+    var font: Font = NXFont.fixed(13, weight: .semibold)
     var height: CGFloat = 30
     @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
@@ -649,6 +653,22 @@ struct NX18PillStyle: ButtonStyle {
             .contentShape(Capsule())
             .opacity(enabled ? 1 : 0.5)
     }
+}
+
+// A push button (Quit, Done, the Cloud saves buttons) with the UI font: AppKit draws a bordered button's title in the system font whatever the view's font, so with the UI font it is
+// a pill of the banner's look instead (primary: the default button, cyan); without it the bordered button, as before
+private struct NXPushButton: ViewModifier {
+    let primary: Bool
+    func body(content: Content) -> some View {
+        if NXFont.name != nil {
+            content.buttonStyle(NX18PillStyle(fill: primary ? NX18Palette.cyan : Color.white.opacity(0.14), text: primary ? NX18Palette.charcoal : .white, height: 26))
+        } else {
+            content
+        }
+    }
+}
+extension View {
+    func nxPushButton(primary: Bool = false) -> some View { modifier(NXPushButton(primary: primary)) }
 }
 
 // About this game (dm/about.json, titledb's text): the art, the name, the intro and description, the publisher and release date, and where the text came from
@@ -688,19 +708,19 @@ struct AboutGameSheet: View {
             NX18Rails(axis: .horizontal)
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(text(about.name) ?? name).font(.title2.weight(.bold)).foregroundStyle(.white).accessibilityAddTraits(.isHeader)
-                    if let intro = text(about.intro) { Text(intro).font(.headline).foregroundStyle(.white) }
+                    Text(text(about.name) ?? name).nxFont(.title2, weight: .bold).foregroundStyle(.white).accessibilityAddTraits(.isHeader)
+                    if let intro = text(about.intro) { Text(intro).nxFont(.headline).foregroundStyle(.white) }
                     if let d = text(about.description) { Text(d).foregroundStyle(Color(nx18: 0xDADADF)).fixedSize(horizontal: false, vertical: true) }
                     if text(about.publisher) != nil || released != nil {
                         VStack(alignment: .leading, spacing: 4) {
                             if let p = text(about.publisher) { fact("Publisher", p) }
                             if let r = released { fact("Released", r) }
                         }
-                        .font(.callout)
+                        .nxFont(.callout)
                         .padding(.top, 4)
                     }
                     if let src = text(about.source) {
-                        Text("From \(src)").font(.footnote).foregroundStyle(NX18Palette.muted)
+                        Text("From \(src)").nxFont(.footnote).foregroundStyle(NX18Palette.muted)
                     }
                 }
                 .textSelection(.enabled)
@@ -710,12 +730,13 @@ struct AboutGameSheet: View {
             NX18Palette.separator.frame(height: 1)
             HStack {
                 Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction).nxPushButton(primary: true)
             }
             .padding(14)
         }
         .frame(width: 520, height: 560)
         .background(bg)
+        .nxTextRoot()
         .tint(NX18Palette.cyan)
         .environment(\.colorScheme, .dark)
     }
@@ -741,14 +762,15 @@ struct CloudSavesSection: View {
             }
             if fixed == nil {
                 HStack {
-                    Button(folder.isEmpty ? "Choose a folder…" : "Choose a different folder…", action: choose)
-                    if !folder.isEmpty { Button("Turn off") { folder = "" } }
+                    Button(folder.isEmpty ? "Choose a folder…" : "Choose a different folder…", action: choose).nxPushButton()
+                    if !folder.isEmpty { Button("Turn off") { folder = "" }.nxPushButton() }
                 }
             }
         } header: {
             NX18SectionHeader("Cloud saves")
         } footer: {
             Text("Choose the iCloud Drive folder the iPhone app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in the save's -backups folder.")
+                .nxFontIfCustom(.footnote)
                 .foregroundStyle(NX18Palette.muted)
         }
         .listRowBackground(NX18Palette.row)

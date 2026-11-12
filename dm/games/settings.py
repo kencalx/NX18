@@ -31,8 +31,8 @@ PRESETS = ('battery', 'quality')
 # - <VAR>=<v>/<v> or <VAR>!=<v>/<v>: another row's current value (a range compares as a number), or the environment for a switch no row sets (ENV_ONLY); false when neither has it
 # - DEVICE_TERMS: what the device, its screen or the app has
 # A third kind, the shown column's terms (PACK_TERM, ! to negate, / for any of several), settings.py decides when the app is packed: a rule whose pack terms fail is left out of
-# the list, and the others go out without them. So a rule that depends on what the game has (MetalFX's hint with Stretch: a game without Picture shape keeps the 16:9 picture,
-# one with it stretches it only where the shape chosen differs from the window's) is a few rules in the table rather than a column per game
+# the list, and the others go out without them. So a rule that depends on what the game has (MetalFX greyed under Stretch: a game without Picture shape keeps the 16:9
+# picture, one with it stretches it only where the shape chosen differs from the window's by 1 % or more, nvn_mtl.m fx_why) is a few rules in the table rather than a column per game
 # A shows rule is <value>:<when> with no reason: while it holds the row shows <value>, the value the host uses then (Ultrawide holds Picture at Stretch, front_ios.m startGame),
 # instead of the player's saved choice, which stays and comes back when the rule stops holding. It needs a whole-row inactive rule with the same terms, so the row it
 # changes is always greyed and a pick never meets a value it cannot change. Other rows' rules still test the saved value (LauncherModel.holds)

@@ -5,7 +5,13 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import QuartzCore
 import SwiftUI
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 extension LauncherModel {
     func binding(_ s: Setting) -> Binding<String> { Binding(get: { self.shown(s) }, set: { self.pick(s, $0) }) }   // the value the row shows (shown); a greyed row or option is refused (pick)
@@ -45,22 +51,51 @@ struct SettingRow: View {
     private var settingLabel: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(s.label).foregroundStyle(NX18Palette.text)
-            if !note.isEmpty { Text(note).font(.footnote).foregroundStyle(NX18Palette.muted) }
+            if !note.isEmpty { Text(note).nxFont(.footnote).foregroundStyle(NX18Palette.muted) }
         }
     }
+
+    private var options: some View {
+        ForEach(s.options ?? [], id: \.[0]) { o in
+            Text(optionLabel(o)).tag(o[0]).selectionDisabled(m.optionInactive(s, o[0]) != nil)
+        }
+    }
+    private var currentLabel: String { s.options?.first { $0[0] == current }?[1] ?? current }
+    // A choice with the UI font (NXFont.swift): the menu picker draws its value itself, in the system font on iOS (a UIKit button) and on the Mac in an NSPopUpButton whose
+    // title sits below the row's name (AppKit lays the font out with its line gap). So the value is NX 18's own text in a Menu, and only the option list is the system's menu
+    // (the same Picker, inline in it: checkmark, greyed options). Name and value side by side, the value under the name at the accessibility text sizes, as the menu picker does
+    @ViewBuilder private var fontChoice: some View {
+        let value = Menu {
+            Picker(selection: m.binding(s)) { options } label: { Text(s.label) }
+                .pickerStyle(.inline)
+        } label: {
+            HStack(spacing: 4) {
+                Text(currentLabel).nxFont(.body)
+                Image(systemName: "chevron.up.chevron.down").imageScale(.small)
+            }
+            .foregroundStyle(enabled && !locked && !inactive ? NX18Palette.cyan : NX18Palette.muted)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.button).buttonStyle(.plain).fixedSize()
+        .accessibilityLabel(Text(s.label)).accessibilityValue(Text(currentLabel))
+        if typeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 6) { settingLabel.accessibilityHidden(true); value.accessibilityHint(Text(note)) }
+        } else {
+            HStack(alignment: .firstTextBaseline) { settingLabel.accessibilityHidden(true); Spacer(minLength: 12); value.accessibilityHint(Text(note)) }
+        }
+    }
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.legibilityWeight) private var legibility
+    @Environment(\.isEnabled) private var enabled
 
     var body: some View {
         Group {
             switch s.kind {
             case "choice":
-                Picker(selection: m.binding(s)) {
-                    ForEach(s.options ?? [], id: \.[0]) { o in
-                        Text(optionLabel(o)).tag(o[0]).selectionDisabled(m.optionInactive(s, o[0]) != nil)
-                    }
-                } label: {
-                    settingLabel
+                if NXFont.name != nil && legibility != .bold { fontChoice } else {
+                    Picker(selection: m.binding(s)) { options } label: { settingLabel }
+                        .pickerStyle(.menu)
                 }
-                .pickerStyle(.menu)
             case "range":
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -94,8 +129,9 @@ public enum NX18Palette {
     public static let text = Color(nx18: 0xEDEDF0)         // a setting's name and other plain text: near white, set outright so a light-mode trait cannot turn it black
     public static let muted = Color(nx18: 0xB4B4BC)        // notes, values, chevrons: light enough to read on the cards (#9A9AA2 was too dim)
     public static let onArt = Color(nx18: 0xC4C4CA)        // the muted grey a little lighter, for small text over the art (the status line), always on a scrim
-    public static let cyan = Color(nx18: 0x00C8F5)         // section headings, switches, the slider, the focus ring, the N
-    public static let coral = Color(nx18: 0xFF6B5A)        // the Play pill, Reset, the 18 pill
+    public static let cyan = Color(nx18: cyanHex)          // section headings, switches, the slider, the focus ring, the N
+    public static let coral = Color(nx18: coralHex)        // the Play pill, Reset, the 18 pill
+    static let cyanHex: UInt32 = 0x00C8F5, coralHex: UInt32 = 0xFF6B5A   // also the rails' Core Animation layer (NX18RailsFlowView)
 
     // The art's average colour, for the tint: the image drawn into an 8 x 8 sRGB bitmap with Core Graphics, on the CPU (no Metal device or Core Image context: Launcher.swift's
     // metalDeviceMade). nil for an image Core Graphics cannot draw or one that is all transparent
@@ -215,6 +251,22 @@ struct NX18GameLogo: View {
     }
 }
 
+// A soft dark halo right behind the small NX 18 mark over key art (both launchers; the iOS one adds it to its top shade, the Mac one to its banner's): over a white sky the
+// shade alone leaves the cyan N on a light grey. An ellipse much wider than tall fading from the middle to clear at its edge, so it reads as the mark's shadow, not a patch;
+// a gradient fill, no blur. strong: Reduce Transparency, a little darker
+struct NX18MarkShade: View {
+    var strong = false
+    var body: some View {
+        let mid = strong ? 0.45 : 0.36
+        EllipticalGradient(stops: [.init(color: .black.opacity(mid), location: 0), .init(color: .black.opacity(mid * 0.8), location: 0.25),
+                                   .init(color: .black.opacity(mid * 0.45), location: 0.55), .init(color: .black.opacity(mid * 0.12), location: 0.8),
+                                   .init(color: .black.opacity(0), location: 1)])
+            .frame(width: 230, height: 100)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
 // The NX 18 mark (make_logo.py's mark() with the lockup's pill, colour version): a monoline cyan N, an X whose coral stroke passes under the cyan one with a gap, and 18 in a coral
 // pill as an exponent. Drawn as paths, no image or font; height is the whole mark's (the pill rises above the letters), the width follows (NX18MarkShape.aspect)
 struct NX18Mark: View {
@@ -282,24 +334,142 @@ struct NX18MarkShape: Shape {
     }
 }
 
-// The rails: the logo's cyan running into its coral, the thin line between the art and the settings (iOS, vertical) or under the banner (the Mac, horizontal), on every game
+// The rails: the logo's cyan running into its coral, the thin line between the art and the settings (iOS, vertical) or under the banner (the Mac, horizontal), on every game.
+// flowing (the launchers' rails): the two colours drift slowly along the line, a cycle every NX18RailsFlowView.period seconds, drawn by Core Animation (no redraw of the view);
+// still, as it was, under Reduce Motion. The guide's and About's rails stay still
 struct NX18Rails: View {
     var axis: Axis = .vertical
     var thickness: CGFloat = 2.5
+    var flowing = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        LinearGradient(colors: [NX18Palette.cyan, NX18Palette.coral],
-                       startPoint: axis == .vertical ? .top : .leading, endPoint: axis == .vertical ? .bottom : .trailing)
-            .frame(width: axis == .vertical ? thickness : nil, height: axis == .horizontal ? thickness : nil)
-            .accessibilityHidden(true)
+        Group {
+            if flowing {
+                NX18RailsFlow(axis: axis, moving: !reduceMotion)
+            } else {
+                LinearGradient(colors: [NX18Palette.cyan, NX18Palette.coral],
+                               startPoint: axis == .vertical ? .top : .leading, endPoint: axis == .vertical ? .bottom : .trailing)
+            }
+        }
+        .frame(width: axis == .vertical ? thickness : nil, height: axis == .horizontal ? thickness : nil)
+        .accessibilityHidden(true)
     }
 }
+
+#if os(macOS)
+typealias NX18PlatformView = NSView
+#else
+typealias NX18PlatformView = UIView
+#endif
+
+// The flowing rails: a gradient layer three lines long (cyan, coral, cyan, coral) slid along the line by two lengths and round again, so the line shows cyan to coral (as the
+// still rails do) at the start and end of each cycle and coral to cyan halfway. The slide is a CABasicAnimation, run by the render server: no timer, display link or SwiftUI
+// update in the app while it moves. It is only on while the view is in a window (and, on the Mac, while the window is visible: not minimised, hidden or covered), and not under
+// Reduce Motion (moving false: the still cyan-to-coral line). A change of length starts it again from the still position
+final class NX18RailsFlowView: NX18PlatformView {
+    static let period: CFTimeInterval = 14   // seconds for a point of the line to go from cyan to coral and back
+    static let key = "nx18.flow"
+    static let frameRates = CAFrameRateRange(minimum: 10, maximum: 30, preferred: 30)
+    let axis: Axis
+    private let strip = CAGradientLayer()
+    private var length: CGFloat = 0
+    private var observers: [NSObjectProtocol] = []
+    var moving = true { didSet { if moving != oldValue { restart() } } }
+    var isFlowing: Bool { strip.animation(forKey: Self.key) != nil }   // the Duo harness's check
+
+    init(axis: Axis) {
+        self.axis = axis
+        super.init(frame: .zero)
+        let c = [NX18Palette.cyanHex, NX18Palette.coralHex].map { h -> CGColor in let v = NX18RGB(hex: h); return CGColor(srgbRed: v.r, green: v.g, blue: v.b, alpha: 1) }
+        strip.colors = [c[0], c[1], c[0], c[1]]
+        strip.startPoint = axis == .vertical ? CGPoint(x: 0.5, y: 0) : CGPoint(x: 0, y: 0.5)
+        strip.endPoint = axis == .vertical ? CGPoint(x: 0.5, y: 1) : CGPoint(x: 1, y: 0.5)
+#if os(macOS)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        layer?.addSublayer(strip)
+#else
+        isUserInteractionEnabled = false
+        clipsToBounds = true
+        layer.addSublayer(strip)
+        observers.append(NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.restart() }   // the system may drop a running animation while the app is in the background
+        })
+#endif
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+    isolated deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+#if os(macOS)
+    override var isFlipped: Bool { true }   // the strip's layer laid out from the top left, as on iOS
+    override func layout() { super.layout(); place() }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        if let w = window {
+            observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: w, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.restart() }
+            })
+        }
+        restart()
+    }
+    private var visible: Bool { window.map { $0.occlusionState.contains(.visible) } ?? false }
+#else
+    override func layoutSubviews() { super.layoutSubviews(); place() }
+    override func didMoveToWindow() { super.didMoveToWindow(); restart() }
+    private var visible: Bool { window != nil }
+#endif
+
+    // The strip three lines long from the line's start; a new length starts the slide again
+    private func place() {
+        let l = axis == .vertical ? bounds.height : bounds.width
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        strip.frame = axis == .vertical ? CGRect(x: 0, y: 0, width: bounds.width, height: l * 3) : CGRect(x: 0, y: 0, width: l * 3, height: bounds.height)
+        CATransaction.commit()
+        if l != length { length = l; restart() }
+    }
+
+    private func restart() {
+        strip.removeAnimation(forKey: Self.key)
+        guard moving, visible, length > 0 else { return }
+        let path = axis == .vertical ? "position.y" : "position.x"
+        let from = axis == .vertical ? strip.position.y : strip.position.x
+        let a = CABasicAnimation(keyPath: path)
+        a.fromValue = from
+        a.toValue = from - 2 * length
+        a.duration = Self.period
+        a.repeatCount = .infinity
+        a.timingFunction = CAMediaTimingFunction(name: .linear)
+        a.isRemovedOnCompletion = false
+        // A slow drift (a few points a frame at 30 Hz) needs no ProMotion rate: without a range the render server may compose the screen at 120 Hz for it while the launcher idles
+        a.preferredFrameRateRange = Self.frameRates
+        strip.add(a, forKey: Self.key)
+    }
+}
+
+#if os(macOS)
+private struct NX18RailsFlow: NSViewRepresentable {
+    let axis: Axis
+    let moving: Bool
+    func makeNSView(context: Context) -> NX18RailsFlowView { NX18RailsFlowView(axis: axis) }
+    func updateNSView(_ v: NX18RailsFlowView, context: Context) { v.moving = moving }
+}
+#else
+private struct NX18RailsFlow: UIViewRepresentable {
+    let axis: Axis
+    let moving: Bool
+    func makeUIView(context: Context) -> NX18RailsFlowView { NX18RailsFlowView(axis: axis) }
+    func updateUIView(_ v: NX18RailsFlowView, context: Context) { v.moving = moving }
+}
+#endif
 
 // A section heading in the logo's cyan
 struct NX18SectionHeader: View {
     let title: String
     init(_ title: String) { self.title = title }
     var body: some View {
-        Text(title).font(.footnote.weight(.semibold)).foregroundStyle(NX18Palette.cyan).textCase(.uppercase)
+        Text(title).nxFont(.footnote, weight: .semibold).foregroundStyle(NX18Palette.cyan).textCase(.uppercase)
             .accessibilityAddTraits(.isHeader)
     }
 }
@@ -326,7 +496,7 @@ struct PresetChips: View {
             HStack(spacing: 8) {
                 ForEach(LauncherPreset.allCases) { p in
                     Button { m.applyPreset(p) } label: {
-                        Text(p.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                        Text(p.title).nxFont(.subheadline, weight: .semibold).lineLimit(1)
                             .foregroundStyle(active == p ? NX18Palette.charcoal : Color.white)
                             .padding(.horizontal, 14).padding(.vertical, 7)
                             .background(Capsule().fill(active == p ? NX18Palette.cyan : NX18Palette.row))
@@ -401,11 +571,11 @@ struct LauncherStatusLine: View {
         if !parts.isEmpty {
             parts.enumerated().reduce(Text(verbatim: "")) { t, e in
                 let sep = e.offset == 0 ? Text(verbatim: "") : Text(verbatim: "  ·  ")
-                let dot = e.element.dot.map { Text(Image(systemName: "circle.fill")).font(.system(size: 7)).foregroundStyle($0) } ?? Text(verbatim: "")
+                let dot = e.element.dot.map { Text(Image(systemName: "circle.fill")).font(.system(size: 7)).foregroundStyle($0) } ?? Text(verbatim: "")   // system: symbol
                 let gap = e.element.dot == nil ? "" : "\u{2009}"
                 return Text("\(t)\(sep)\(dot)\(gap)\(e.element.text)")
             }
-            .font(.footnote)
+            .nxFont(.footnote)
             .foregroundStyle(color)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(status.spoken())

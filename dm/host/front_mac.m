@@ -900,7 +900,7 @@ static DmCheatsMenuDelegate *g_cheats_menu;   // NSMenu keeps its delegate unret
 }
 
 // A button of the panel's toolbar rows
-static NSButton *panel_button(NSString *title, id target, SEL action) { return [NSButton buttonWithTitle:title target:target action:action]; }
+static NSButton *panel_button(NSString *title, id target, SEL action) { NSButton *b = [NSButton buttonWithTitle:title target:target action:action]; dm_ui_control(b); return b; }
 
 // A horizontal row of views, leading-aligned
 static NSStackView *panel_hrow(NSArray<NSView *> *views) {
@@ -912,7 +912,7 @@ static NSStackView *panel_hrow(NSArray<NSView *> *views) {
 // A secondary-colour label that truncates instead of widening the panel, its whole text in the tooltip
 static NSTextField *panel_note(NSString *text) {
     NSTextField *l = [NSTextField labelWithString:text];
-    l.textColor = NSColor.secondaryLabelColor; l.lineBreakMode = NSLineBreakByTruncatingTail; l.toolTip = text;
+    l.textColor = NSColor.secondaryLabelColor; l.lineBreakMode = NSLineBreakByTruncatingTail; l.toolTip = text; dm_ui_control(l);
     [l setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     return l;
 }
@@ -941,16 +941,16 @@ static NSTextField *panel_note(NSString *text) {
 
     _header = [NSTextField labelWithString:@""];
     _header.translatesAutoresizingMaskIntoConstraints = NO;
-    _header.lineBreakMode = NSLineBreakByTruncatingTail;
+    _header.lineBreakMode = NSLineBreakByTruncatingTail; dm_ui_control(_header);
     [_header setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     NSTextField *safeText = panel_note(@"Last run ended unexpectedly with cheats on: all are off.");
     safeText.textColor = NSColor.systemOrangeColor;
     _safeRow = panel_hrow(@[safeText, panel_button(@"Restore", self, @selector(restoreSafe:))]);
-    _master = [NSButton checkboxWithTitle:@"Cheats On" target:self action:@selector(toggleMaster:)];
+    _master = [NSButton checkboxWithTitle:@"Cheats On" target:self action:@selector(toggleMaster:)]; dm_ui_control(_master);
     _selectAll = panel_button(@"Select All", self, @selector(selectAllCheats:));
     _deselectAll = panel_button(@"Deselect All", self, @selector(deselectAllCheats:));
     _search = [NSSearchField new];
-    _search.placeholderString = @"Search";
+    _search.placeholderString = @"Search"; dm_ui_control(_search);
     _search.delegate = self;
     _search.sendsSearchStringImmediately = YES;
     [_search setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
@@ -1266,15 +1266,15 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
     NSButton *b;
     if (f & DM_CHEAT_ONCE) {
         NSTextField *l = [NSTextField labelWithString:title];
-        l.lineBreakMode = NSLineBreakByTruncatingTail; l.toolTip = tip;
+        l.lineBreakMode = NSLineBreakByTruncatingTail; l.toolTip = tip; dm_ui_control(l);
         _labels[@(i)] = l;
         [l setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
         [views addObject:l];
         b = panel_button(@"Apply", self, @selector(cheatClicked:));
-        b.controlSize = NSControlSizeSmall;
+        b.controlSize = NSControlSizeSmall; dm_ui_control(b);
     } else {
         b = [NSButton checkboxWithTitle:title target:self action:@selector(cheatClicked:)];
-        ((NSButtonCell *)b.cell).lineBreakMode = NSLineBreakByTruncatingTail;
+        ((NSButtonCell *)b.cell).lineBreakMode = NSLineBreakByTruncatingTail; dm_ui_control(b);
         [b setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
         b.state = cheat_row_state(i);
     }
@@ -1286,7 +1286,7 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
         char cur[64]; if (dm_cheat_value_get(i, cur, sizeof cur)) v.stringValue = @(cur);
         v.placeholderString = @(dm_cheat_value_bounds(i));
         v.toolTip = [NSString stringWithFormat:@"Value (%s, %s)", dm_cheat_type_at(i), dm_cheat_value_bounds(i)];
-        v.tag = i; v.delegate = self; v.controlSize = NSControlSizeSmall;
+        v.tag = i; v.delegate = self; v.controlSize = NSControlSizeSmall; dm_ui_control(v);
         [v.widthAnchor constraintEqualToConstant:90].active = YES;
         _values[@(i)] = v;
         [views addObject:v];
@@ -1302,7 +1302,7 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
 // A section header: the section's name in bold
 - (NSView *)sectionRow:(const char *)name {
     NSTextField *l = [NSTextField labelWithString:engine_str(name)];
-    l.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
+    l.font = dm_ui_heading(NSFont.systemFontSize);
     return l;
 }
 
@@ -1350,7 +1350,7 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
                                                 build_label(dm_cheats_other(i), dm_cheats_other_version(i))])];
     if (!dm_cheats_found())
         for (int i = 0, n = dm_cheats_nsources(); i < n; i++) {
-            NSButton *copy = panel_button(@"Copy Command", self, @selector(copyCompile:)); copy.tag = i; copy.controlSize = NSControlSizeSmall;
+            NSButton *copy = panel_button(@"Copy Command", self, @selector(copyCompile:)); copy.tag = i; copy.controlSize = NSControlSizeSmall; dm_ui_control(copy);
             [_stack addArrangedSubview:panel_hrow(@[panel_note([NSString stringWithFormat:@"%@: anchored cheats, not compiled for this build yet", engine_str(dm_cheats_source(i))]), copy])];
         }
     _rows_sig = [self rowsSig];
@@ -1522,6 +1522,7 @@ void front_run(void (*guest)(void)) {
         guest(); return;
     }
     @autoreleasepool {
+        dm_ui_font_register(NULL);   // the UI font the launcher hands over (DM_UI_FONT, ui_font.h), for the prompts, the progress screen and the Cheats window
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         NSRect r = NSMakeRect(0, 0, 1280, 720);
@@ -1647,7 +1648,7 @@ void front_run(void (*guest)(void)) {
 static NSView *g_prog; static NSTextField *g_prog_title, *g_prog_count; static NSProgressIndicator *g_prog_bar;
 static NSTextField *prog_label(NSRect r, CGFloat size, NSFontWeight w, NSColor *c) {
     NSTextField *t = [NSTextField labelWithString:@""]; t.frame = r; t.alignment = NSTextAlignmentCenter; t.textColor = c;
-    t.font = [NSFont monospacedDigitSystemFontOfSize:size weight:w]; return t;
+    t.font = dm_ui_mono_digits(size, w); return t;
 }
 void (*front_progress_hook)(const char *title, long done, long total);
 void front_progress(const char *title, long done, long total) {

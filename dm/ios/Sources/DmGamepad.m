@@ -1,5 +1,7 @@
 // Virtual gamepad (Nintendo button positions) + physical controllers (GameController), handed to the host through dm_input_set and dm_pad_set_player (hle_hid.c, bit layout in dm_input.h).
-//   Two layouts, three in handheld mode, picked in the in-game menu (GameMenu.swift) that the menu button at the top centre (a ring with eight rays, menuIcon) opens; the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
+//   Two layouts, three in handheld mode, picked in the in-game menu (GameMenu.swift) that the menu button at the top centre (a ring with eight rays in a cyan-to-coral gradient, menuIcon) opens; the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
+//   The menu is NX 18's panel (GameMenuPanel.swift; a tap on the button, or a controller's Home, opens and closes it), or with DM_GAME_MENU=system the UIMenu it always was, which UIKit opens from the button.
+//   While the panel is open the controllers drive it and the game gets none of their input; once it closes, a button still held (the B that closed it) reaches the game only after it is let go.
 //   The menu button is not hidden with the touch controls when a physical controller is connected, so the menu is there in every layout and with every controller (it still fades
 //   after 5 s and comes back on a double tap, as below).
 //   The menu button is hidden while playing: a double tap anywhere but on a drawn control (keys, diamond, D-pad, left stick) shows it, and it fades out again after 5 s
@@ -28,6 +30,7 @@
 #include "dm.h"
 #include "dm_input.h"
 #include "front.h"
+#include "ui_font.h"   // NX 18's UI font: the key letters and the controller prompt
 #include "game_profile.h"
 #include "haptics_apple.h"
 #include "motion_apple.h"
@@ -147,6 +150,7 @@ int front_web_touch(void);   // web_apple.m: an offline HTML page is shown over 
 - (void)menuTouched;
 - (void)menuClosed;
 - (void)menuOpenNow;
+- (void)panelToggle;
 @end
 // The menu button: a UIButton whose menu is the in-game menu (UIKit draws it and takes the touches while it is open). Its hit circle is larger than the drawn one, and a key nearer
 // to the touch wins (− / + sit beside it), so it asks the pad
@@ -162,6 +166,7 @@ int front_web_touch(void);   // web_apple.m: an offline HTML page is shown over 
 @end
 static __weak DmGamepad *g_view;
 static void pads_start(void);   // Physical controllers, below
+static void pads_release_game(void);
 
 @implementation DmGamepad {
     NSMapTable<UITouch *, NSNumber *> *_owner;     // touch → control (with the key for C_BTN or the stick for C_STICK, << 8)
@@ -173,6 +178,7 @@ static void pads_start(void);   // Physical controllers, below
     CAShapeLayer *_ring, *_knob;                   // the left stick (the right one is not drawn)
     DmMenuButton *_menu;                           // opens the in-game menu (GameMenu.swift)
     NSUInteger _menuGen; BOOL _menuOpen;           // the menu button's hide timer (each show or touch starts a new one) and whether its menu is open
+    BOOL _systemMenu;                              // DM_GAME_MENU=system: the button opens the UIMenu (dm_game_menu), else NX 18's panel (dm_game_panel_open)
     UIImpactFeedbackGenerator *_touchFeedback;       // one short feedback per touch-control press edge
     unsigned _hapticSticks;
     BOOL _stickShown;                              // the left stick was held at the last refresh
@@ -243,10 +249,17 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         _menu = [DmMenuButton buttonWithType:UIButtonTypeCustom];
         _menu.backgroundColor = menuFill; _menu.layer.borderColor = menuLine.CGColor; _menu.layer.borderWidth = 1.5;
         _menu.layer.shadowColor = UIColor.blackColor.CGColor; _menu.layer.shadowOpacity = 0.2; _menu.layer.shadowRadius = 3; _menu.layer.shadowOffset = CGSizeMake(0, 1);
-        _menu.tintColor = [UIColor colorWithRed:0 green:0xC8 / 255.0 blue:0xF5 / 255.0 alpha:1]; _menu.accessibilityLabel = @"Menu";   // NX 18's cyan (LauncherRow.swift NX18Palette): the icon (menuIcon) and the menu's ticks, as on the settings screen
-        _menu.menu = CFBridgingRelease(dm_game_menu()); _menu.showsMenuAsPrimaryAction = YES;
+        _menu.tintColor = [UIColor colorWithRed:0 green:0xC8 / 255.0 blue:0xF5 / 255.0 alpha:1]; _menu.accessibilityLabel = @"Menu";   // NX 18's cyan (LauncherRow.swift NX18Palette): the UIMenu's ticks, as on the settings screen
+        const char *gm = getenv("DM_GAME_MENU"); _systemMenu = gm && !strcmp(gm, "system");
         __weak DmGamepad *weakSelf = self;
-        [_menu addAction:[UIAction actionWithHandler:^(UIAction *a) { (void)a; [weakSelf menuOpened]; [weakSelf reset]; }] forControlEvents:UIControlEventMenuActionTriggered];   // the menu opens: release every key and touch first
+        if (_systemMenu) {   // the UIMenu, which UIKit opens from the button and closes itself
+            LOG("front end: in-game menu: the system's menu (DM_GAME_MENU=system)");
+            _menu.menu = CFBridgingRelease(dm_game_menu()); _menu.showsMenuAsPrimaryAction = YES;
+            [_menu addAction:[UIAction actionWithHandler:^(UIAction *a) { (void)a; [weakSelf menuOpened]; [weakSelf reset]; }] forControlEvents:UIControlEventMenuActionTriggered];   // the menu opens: release every key and touch first
+        } else {
+            if (gm && *gm) LOG("[RED] front end: DM_GAME_MENU=%s: only system is known; NX 18's menu", gm);
+            [_menu addAction:[UIAction actionWithHandler:^(UIAction *a) { (void)a; [weakSelf panelToggle]; }] forControlEvents:UIControlEventPrimaryActionTriggered];   // a tap (VoiceOver's too) opens it, or closes it
+        }
         [self addSubview:_menu];   // shown from here until 5 s after the game's first picture (dm_gamepad_hint), then on a double tap
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
         int l = saved ? (int)saved.integerValue : DM_GAME_PAD_LAYOUT;
@@ -299,8 +312,17 @@ static BOOL assistive_running(void) { return UIAccessibilityIsVoiceOverRunning()
 - (void)menuOpenNow {
     [_menu.layer removeAllAnimations]; _menu.hidden = NO; _menu.alpha = 1; [self menuScheduleHide];
     __weak DmGamepad *w = self;
-    dispatch_async(dispatch_get_main_queue(), ^{ DmGamepad *me = w; if (me && me.window) [me->_menu performPrimaryAction]; });
+    dispatch_async(dispatch_get_main_queue(), ^{ DmGamepad *me = w; if (me && me.window) { if (me->_systemMenu) [me->_menu performPrimaryAction]; else [me panelOpen]; } });
 }
+// NX 18's panel (GameMenuPanel.swift): every key and touch released and the controllers taken from the game first, as the UIMenu's opening releases them; it calls
+// dm_gamepad_panel_closed when it is gone
+- (void)panelOpen {
+    if (_systemMenu || dm_game_panel_shown()) return;
+    [_menu.layer removeAllAnimations];
+    [self menuOpened]; [self reset]; pads_release_game();
+    if (!dm_game_panel_open((__bridge void *)_menu)) dm_gamepad_panel_closed();
+}
+- (void)panelToggle { if (dm_game_panel_shown()) dm_game_panel_close(); else [self panelOpen]; }
 - (int)padLayout { return _tap ? 2 : _full ? 1 : 0; }
 - (int)touchHidden { return _padOff ? 1 : _tap ? 2 : 0; }   // dm_gamepad_touch_hidden
 - (void)setPadLayout:(int)l {   // the in-game menu's pick: release every touch first (no key stays held), save, lay out again
@@ -571,22 +593,30 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 
 // ---- Shapes ----
 static CGPathRef circlePath(CGPoint c, CGFloat r) { return CGPathCreateWithEllipseInRect(CGRectMake(c.x - r, c.y - r, 2 * r, 2 * r), NULL); }
-// The menu button's icon: a ring with eight straight rays (the owner's drawing), a template image the button's tintColor (NX 18's cyan) colours. side: the icon's width and height
-// in points. Ring centred at half the radius, rays from 0.72 to the edge, all strokes 0.19 of the radius, flat ends
-static UIImage *menuIcon(CGFloat side) {
-    UIGraphicsImageRendererFormat *f = [UIGraphicsImageRendererFormat preferredFormat]; f.opaque = NO;
+// The menu button's icon: a ring with eight straight rays (the owner's drawing) in NX 18's two colours, a sweep from cyan (top left) to coral (bottom right) and back around the
+// ring, so the rays take the colour of where they stand (LauncherRow.swift NX18Palette: cyan #00C8F5, coral #FF6B5A). The two blends sit between rays (the sweep turned an
+// eighth of a ray's spacing off the diagonal): one blend centred on a ray would mix it to grey. side: the icon's width and height in points, drawn at the
+// screen's scale for each touch-control size, so it stays sharp. Ring centred at half the radius, rays from 0.72 to the edge, all strokes 0.19 of the radius, flat ends
+static UIImage *menuIcon(CGFloat side, CGFloat scale) {
+    UIGraphicsImageRendererFormat *f = [UIGraphicsImageRendererFormat preferredFormat]; f.opaque = NO; f.scale = scale;
     UIImage *img = [[[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side) format:f] imageWithActions:^(UIGraphicsImageRendererContext *rc) {
         CGContextRef g = rc.CGContext; CGFloat R = side / 2, w = 0.19 * R;
-        CGContextSetFillColorWithColor(g, UIColor.blackColor.CGColor); CGContextSetStrokeColorWithColor(g, UIColor.blackColor.CGColor);
         CGContextSetLineWidth(g, w); CGContextSetLineCap(g, kCGLineCapButt);
-        CGContextStrokeEllipseInRect(g, CGRectMake(R - 0.505 * R, R - 0.505 * R, 1.01 * R, 1.01 * R));
+        CGContextAddEllipseInRect(g, CGRectMake(R - 0.505 * R, R - 0.505 * R, 1.01 * R, 1.01 * R));
         for (int i = 0; i < 8; i++) {
             CGFloat a = i * M_PI_4, c = cos(a), s = sin(a), in = 0.72 * R, out = R - w * 0.5 * (fabs(c) > 0.1 && fabs(s) > 0.1 ? 1 : 0);   // a diagonal's flat end keeps its corners inside
             CGContextMoveToPoint(g, R + in * c, R + in * s); CGContextAddLineToPoint(g, R + out * c, R + out * s);
         }
-        CGContextStrokePath(g);
+        CGContextReplacePathWithStrokedPath(g); CGContextClip(g);   // the strokes as a shape the gradient fills
+        CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        const CGFloat cyan[4] = {0, 0xC8 / 255.0, 0xF5 / 255.0, 1}, coral[4] = {1, 0x6B / 255.0, 0x5A / 255.0, 1};
+        CGColorRef c0 = CGColorCreate(cs, cyan), c1 = CGColorCreate(cs, coral);
+        const CGFloat at[6] = {0, 0.17, 0.33, 0.67, 0.83, 1};   // each colour holds most of its half, the blends short and centred a quarter turn from it, between two rays
+        CGGradientRef grad = CGGradientCreateWithColors(cs, (__bridge CFArrayRef)@[(__bridge id)c0, (__bridge id)c0, (__bridge id)c1, (__bridge id)c1, (__bridge id)c0, (__bridge id)c0], at);
+        CGContextDrawConicGradient(g, grad, CGPointMake(R, R), -5 * M_PI / 8);   // cyan centred between the top-left and top rays (UIKit's y runs down), coral opposite
+        CGGradientRelease(grad); CGColorRelease(c0); CGColorRelease(c1); CGColorSpaceRelease(cs);
     }];
-    return [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    return [img imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
 }
 static CGPathRef dropPath(CGPoint c, CGFloat r, CGFloat tipAngle, CGFloat round) {   // teardrop: circle + two tangents meeting at the tip, tip slightly rounded
     CGFloat d = r * K_DROP_TIP, th = acos(r / d);
@@ -609,9 +639,9 @@ static CGPathRef armPath(CGPoint c, CGFloat R, CGFloat w, CGFloat in, CGFloat an
 }
 static void setPath(CAShapeLayer *l, CGPathRef p) { l.path = p; l.shadowPath = p; CGPathRelease(p); }
 static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
-    CTFontRef f = CTFontCreateUIFontForLanguage(kCTFontUIFontEmphasizedSystem, fs, NULL);
-    t.font = f; t.fontSize = fs;
-    CGFloat h = CTFontGetAscent(f) + CTFontGetDescent(f) + CTFontGetLeading(f), w = fs * 3;
+    CTFontRef f = dm_ui_ctfont_emphasized(fs);
+    t.font = f; t.fontSize = CTFontGetSize(f);   // the UI font's size is scaled (DM_UI_FONT_SCALE)
+    CGFloat h = CTFontGetAscent(f) + CTFontGetDescent(f) + (dm_ui_font_on() ? 0 : CTFontGetLeading(f)), w = fs * 3;   // the UI font's line gap is below its letters: left out, so they stay centred
     t.frame = CGRectMake(c.x - w / 2, c.y - h / 2, w, h);
     CFRelease(f);
 }
@@ -643,7 +673,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     CGFloat mr = K_MENU_R * u; CGPoint mc = self.menuCenter;
     _menu.frame = CGRectMake(mc.x - mr, mc.y - mr, 2 * mr, 2 * mr); _menu.layer.cornerRadius = mr;
     _menu.layer.shadowPath = [UIBezierPath bezierPathWithOvalInRect:_menu.bounds].CGPath;
-    [_menu setImage:menuIcon(16 * u) forState:UIControlStateNormal];   // drawn for this size, so it stays sharp at every touch-control scale
+    [_menu setImage:menuIcon(16 * u, scale) forState:UIControlStateNormal];   // drawn for this size and screen, so it stays sharp at every touch-control scale
     setPath(_ring, circlePath(self.stickHome, [self stickR:0]));
     CGFloat k = K_KNOB_R * u; _knob.bounds = CGRectMake(0, 0, 2 * k, 2 * k);
     setPath(_knob, circlePath(CGPointMake(k, k), k));
@@ -676,8 +706,7 @@ static int32_t axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * 327
 static const char *pad_name(GCController *c);
 static void npad_name(int p, char *out, size_t cap);
 static int cp_poll(void);
-static void read_pad(GCExtendedGamepad *g) {
-    int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0 && !g_press_to_join) return;
+static uint64_t pad_mask(GCExtendedGamepad *g) {   // the Switch buttons a controller holds now
     _Static_assert(DM_BTN_A == 1u << B_A && DM_BTN_B == 1u << B_B && DM_BTN_X == 1u << B_X && DM_BTN_Y == 1u << B_Y, "face button bits");
     uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
     #define K(btn, bit) if (btn.isPressed) m |= 1ull << bit
@@ -686,6 +715,33 @@ static void read_pad(GCExtendedGamepad *g) {
     if (g.leftThumbstickButton) K(g.leftThumbstickButton, B_LS); if (g.rightThumbstickButton) K(g.rightThumbstickButton, B_RS);
     K(g.dpad.left, B_LEFT); K(g.dpad.up, B_UP); K(g.dpad.right, B_RIGHT); K(g.dpad.down, B_DOWN);
     #undef K
+    return m;
+}
+// The in-game panel and the controllers (main thread, as the handlers): 1 the panel is open (it reads the controllers itself, GameMenuPanel.swift), 2 it closed while a button
+// was held (the B or + that closed it), which the game must not see; 0 the game has them. Home opens and closes the panel: its press, on any controller
+static int g_menu_block;
+static NSHashTable<GCController *> *g_home_down;
+static int cp_up(void);
+static BOOL pad_home(GCExtendedGamepad *g) {   // YES on Home's press, which then opens or closes the panel
+    GCControllerButtonInput *h = g.buttonHome; GCController *c = g.controller;
+    if (!g_home_down) g_home_down = [NSHashTable weakObjectsHashTable];
+    if (!h.isPressed) { [g_home_down removeObject:c]; return NO; }
+    if ([g_home_down containsObject:c]) return NO;
+    [g_home_down addObject:c];
+    if (!g_view || cp_up()) return NO;
+    [g_view panelToggle];
+    return YES;
+}
+static BOOL pads_any_pressed(void) { for (GCController *c in GCController.controllers) if (c.extendedGamepad && pad_mask(c.extendedGamepad)) return YES; return NO; }
+static void read_pad(GCExtendedGamepad *g) {
+    int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0 && !g_press_to_join) return;
+    if (pad_home(g)) return;
+    if (g_menu_block == 1 || (g_menu_block == 2 && pads_any_pressed())) return;   // the panel has the controllers, or a button that closed it is still down
+    if (g_menu_block == 2) {   // all let go: each controller read as it is now (a stick held over the close)
+        g_menu_block = 0;
+        for (GCController *c in GCController.controllers) if (c.extendedGamepad && c.extendedGamepad != g) read_pad(c.extendedGamepad);
+    }
+    uint64_t m = pad_mask(g);
     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button, a press the game also gets
         GCController *c = g.controller; char nb[16];
         if (!m) return;
@@ -697,7 +753,7 @@ static void read_pad(GCExtendedGamepad *g) {
     dm_haptics_apple_controller(p, g.controller);
     dm_pad_set_player(p, m, axis(g.leftThumbstick.xAxis.value), axis(g.leftThumbstick.yAxis.value), axis(g.rightThumbstick.xAxis.value), axis(g.rightThumbstick.yAxis.value));
 }
-// Home and Capture: without this iOS takes them as system gestures (Home opens the Games overlay, Capture a screenshot); the app gives them no function
+// Home and Capture: without this iOS takes them as system gestures (Home opens the Games overlay, Capture a screenshot); Home opens and closes the in-game panel (pad_home), Capture has no function
 static void pad_keep_system_buttons(GCController *c) { for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled; }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
@@ -706,6 +762,17 @@ static void pads_start(void) {
     e = getenv("DM_PAD_PRESS_TO_JOIN"); g_press_to_join = !g_merge && e && atoi(e);
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : "each controller is a player of its own, the touch gamepad plays with player 1");
     if (g_press_to_join) LOG("front end: a controller becomes a player at its first button press, the lowest player free (DM_PAD_PRESS_TO_JOIN)");
+}
+// The panel opens: nothing a controller held stays pressed in the game, and the controllers' input waits until it closes (g_menu_block)
+static void pads_release_game(void) {
+    g_menu_block = 1;
+    if (g_merge) dm_pad_set(0, 0, 0, 0, 0); else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+}
+void dm_gamepad_panel_closed(void) {   // GameMenuPanel.swift, main thread
+    [g_view menuClosed];
+    if (!g_menu_block) return;
+    g_menu_block = pads_any_pressed() ? 2 : 0;   // a button that closed it still down (B, +): read_pad gives the controllers back once nothing is held; else at once
+    if (!g_menu_block) for (GCController *c in GCController.controllers) if (c.extendedGamepad) read_pad(c.extendedGamepad);   // a stick held over the close
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil otherwise); returns whether a controller is in use
 static BOOL pads_merged(GCController *gone) {
@@ -764,6 +831,7 @@ static BOOL pads_slotted(GCController *gone) {
 // Done and Cancel buttons take touches, and its scrim keeps every other touch from the game and the touch gamepad. The game gets no controller input while it is up, nor
 // until the A or B that closed it is let go. A front end passes the texts in the player's language as DM_CTRL_PROMPT_TEXT (cp_text). Main thread
 static ctrl_prompt g_cp; static int g_cp_confirm, g_cp_cancel, g_cp_ok;
+static int cp_up(void) { return g_cp.phase != CP_IDLE; }   // the prompt has the controllers: Home opens no menu
 static UIView *g_cp_view; static UILabel *g_cp_count; static UIButton *g_cp_done_btn; static dispatch_semaphore_t g_cp_done;
 @interface DmCtrlPrompt : NSObject @end
 @implementation DmCtrlPrompt
@@ -781,12 +849,20 @@ static int cp_waiting(void) {   // connected controllers that are no player yet
     return n;
 }
 static UILabel *cp_label(const char *text, CGFloat size, UIFontWeight w, CGFloat alpha) {
-    UILabel *l = [UILabel new]; l.text = @(text); l.font = [UIFont systemFontOfSize:size weight:w]; l.textColor = [UIColor colorWithWhite:1 alpha:alpha];
-    l.numberOfLines = 0; l.textAlignment = NSTextAlignmentCenter; return l;
+    UILabel *l = [UILabel new]; l.font = dm_ui_font(size, w); l.textColor = [UIColor colorWithWhite:1 alpha:alpha];
+    l.numberOfLines = 0; l.textAlignment = NSTextAlignmentCenter; dm_ui_label_text(l, @(text)); return l;
 }
 static UIButton *cp_button(const char *title, SEL action, int primary) {
     UIButtonConfiguration *cfg = primary ? UIButtonConfiguration.filledButtonConfiguration : UIButtonConfiguration.grayButtonConfiguration;
     cfg.title = @(title); cfg.cornerStyle = UIButtonConfigurationCornerStyleCapsule; cfg.buttonSize = UIButtonConfigurationSizeLarge;
+    if (dm_ui_font_on()) {   // the title in the UI font (a large button's is 17 pt at the default text size), scaled with Dynamic Type as the configuration's own font is; without it that font, as before
+        UIFont *f = dm_ui_font(17, UIFontWeightSemibold);
+        cfg.titleTextAttributesTransformer = ^NSDictionary<NSAttributedStringKey, id> *(NSDictionary<NSAttributedStringKey, id> *a) {
+            NSMutableDictionary<NSAttributedStringKey, id> *m = [a mutableCopy];
+            m[NSFontAttributeName] = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleHeadline] scaledFontForFont:f];   // the button's text size (the transformer runs with its traits)
+            return m;
+        };
+    }
     UIButton *b = [UIButton buttonWithConfiguration:cfg primaryAction:nil];
     [b addTarget:g_cp_target action:action forControlEvents:UIControlEventTouchUpInside]; return b;
 }
@@ -815,7 +891,7 @@ static void cp_show(void) {   // the card once per prompt; its count and its Don
             [card.widthAnchor constraintLessThanOrEqualToAnchor:scrim.widthAnchor constant:-32], wide]];
         [w addSubview:scrim]; g_cp_view = scrim;
     }
-    g_cp_count.text = @(t[CP_TEXT_COUNT]);
+    dm_ui_label_text(g_cp_count, @(t[CP_TEXT_COUNT]));
     g_cp_done_btn.enabled = cp_can_confirm(&g_cp);
 }
 // One step of the prompt (a button, a touch on the card, a controller joining, coming or going); returns whether it keeps the game's input
@@ -838,6 +914,7 @@ int front_ctrl_support(int min, int max) {
     if (!front_metal_layer()) return -1;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (dm_game_panel_shown()) dm_game_panel_close();   // the in-game panel gives way: it holds the controllers (g_menu_block), which the prompt needs
         [g_view reset]; dm_touch_set(NULL, 0);   // nothing the game held stays pressed while the prompt has the input
         if (g_merge) dm_pad_set(0, 0, 0, 0, 0); else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
         int a, b; cp_buttons(&a, &b);

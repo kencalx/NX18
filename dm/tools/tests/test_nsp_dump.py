@@ -183,6 +183,16 @@ class Main(Base):
         for name, value, pattern in (('ART', 'missing.jpg', 'no such art file'), ('LOGO', 'missing.png', 'no such logo file'), ('MANUAL', 'missing.pdf', 'no such manual file')):
             with mock.patch.object(nsp, name, str(self.dump / value)), self.assertRaisesRegex(nsp.BuildError, pattern): self.run_main()
 
+    def test_ui_font_is_checked_before_the_build(self):   # --ui-font / UI_FONT: a missing file, another kind of file or a picture named .ttf stops at once, not after the extraction
+        def stops(*opts, pattern):
+            with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), \
+                 mock.patch.object(nsp, 'check_prereqs', side_effect=AssertionError('went on')), self.assertRaisesRegex(nsp.BuildError, pattern):
+                nsp.main(nsp.parse_args([str(self.dump), *opts]))
+        stops('--ui-font', str(self.dump.parent / 'missing.ttf'), pattern=r'no such UI font file \(--ui-font / UI_FONT\)')
+        (self.dump.parent / 'font.txt').write_text('x'); stops('--ui-font', str(self.dump.parent / 'font.txt'), pattern='must be a .ttf, .otf or .ttc')
+        (self.dump.parent / 'png.ttf').write_bytes(b'\x89PNG\r\n\x1a\n'); stops('--ui-font', str(self.dump.parent / 'png.ttf'), pattern='not a TrueType or OpenType font')
+        with mock.patch.object(nsp, 'UI_FONT', str(self.dump / 'missing.otf')), self.assertRaisesRegex(nsp.BuildError, 'no such UI font file'): self.run_main()
+
     def test_art_options(self):
         a = nsp.parse_args([str(self.dump)])
         self.assertEqual((a.art, a.logo, a.art_online, a.manual), (None, None, None, None))   # the settings decide: ART, LOGO, ART_ONLINE (on), MANUAL

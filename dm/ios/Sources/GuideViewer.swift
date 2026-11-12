@@ -18,11 +18,12 @@ enum LauncherGuidePage: String, Identifiable, CaseIterable, Sendable {
 struct LauncherGuideSheet: View {
     let content: LauncherContent
     let scroller: LauncherScroller
+    var closeGlyph: NXPadGlyph? = nil   // the controller's B (NXButtonGlyph.swift), beside the close button while a controller is connected
     let close: () -> Void
     @State private var page: LauncherGuidePage
 
-    init(content: LauncherContent, scroller: LauncherScroller, close: @escaping () -> Void) {
-        self.content = content; self.scroller = scroller; self.close = close
+    init(content: LauncherContent, scroller: LauncherScroller, closeGlyph: NXPadGlyph? = nil, close: @escaping () -> Void) {
+        self.content = content; self.scroller = scroller; self.closeGlyph = closeGlyph; self.close = close
         _page = State(initialValue: content.guide != nil ? .guide : .manual)
     }
     private var pages: [LauncherGuidePage] { LauncherGuidePage.allCases.filter { $0 == .guide ? content.guide != nil : content.manual != nil } }
@@ -31,19 +32,25 @@ struct LauncherGuideSheet: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 NX18Mark(height: 16).accessibilityHidden(true)
-                if pages.count > 1 {
+                if pages.count > 1 && NXFont.name != nil {
+                    LauncherGuideChips(pages: pages, page: $page)   // a segmented control draws its titles in the system font: the UI font's chips instead
+                } else if pages.count > 1 {
                     Picker("Document", selection: $page) {
                         ForEach(pages) { Text($0.title).tag($0) }
                     }
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 280)
                 } else {
-                    Text(page.title).font(.headline).foregroundStyle(.white)
+                    Text(page.title).nxFont(.headline).foregroundStyle(.white)
                 }
                 Spacer()
                 Button(action: close) {
-                    Image(systemName: "xmark").font(.body.weight(.semibold)).foregroundStyle(.white)
-                        .frame(width: 36, height: 36).background(Circle().fill(NX18Palette.row))
+                    HStack(spacing: 8) {
+                        if let g = closeGlyph { NXPadGlyphView(g, size: 20, relativeTo: .body).foregroundStyle(NX18Palette.cyan) }
+                        Image(systemName: "xmark").font(.body.weight(.semibold)).foregroundStyle(.white)   // system: symbol
+                            .frame(width: 36, height: 36).background(Circle().fill(NX18Palette.row))
+                    }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close")
@@ -62,6 +69,7 @@ struct LauncherGuideSheet: View {
             .ignoresSafeArea(edges: .bottom)
         }
         .background(NX18Palette.background.ignoresSafeArea())
+        .nxTextRoot()
         .tint(NX18Palette.cyan)
         .onAppear {
             scroller.page = { step in
@@ -147,6 +155,29 @@ struct LauncherManualView: UIViewRepresentable {
     }
 }
 
+// The switch between the guide and the manual as two chips in the preset chips' look (LauncherRow.swift PresetChips), for the UI font: a segmented control draws its titles in the
+// system font whatever the view's font. The page shown is filled cyan; L and R switch them as with the segmented control (LauncherController.swift, scroller.page)
+struct LauncherGuideChips: View {
+    let pages: [LauncherGuidePage]
+    @Binding var page: LauncherGuidePage
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(pages) { p in
+                Button { page = p } label: {
+                    Text(p.title).nxFont(.subheadline, weight: .semibold).lineLimit(1)
+                        .foregroundStyle(page == p ? NX18Palette.charcoal : Color.white)
+                        .padding(.horizontal, 14).padding(.vertical, 6)
+                        .background(Capsule().fill(page == p ? NX18Palette.cyan : NX18Palette.row))
+                        .overlay(Capsule().strokeBorder(page == p ? Color.clear : NX18Palette.separator, lineWidth: 1))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(page == p ? .isSelected : [])
+            }
+        }
+    }
+}
+
 // About this game: the art (or the icon) as a header, the name, the intro and description, the publisher and release date, where the text came from, and the app's version
 struct LauncherAboutSheet: View {
     let about: LauncherAbout
@@ -154,6 +185,7 @@ struct LauncherAboutSheet: View {
     let name: String
     let version: String?
     let scroller: LauncherScroller
+    var closeGlyph: NXPadGlyph? = nil   // the controller's B, beside the close button while a controller is connected
     let close: () -> Void
     @State private var position = ScrollPosition(edge: .top)
     @State private var offset: CGFloat = 0
@@ -166,12 +198,17 @@ struct LauncherAboutSheet: View {
             VStack(alignment: .leading, spacing: 0) {
                 header
                 VStack(alignment: .leading, spacing: 14) {
-                    Text(about.name ?? name).font(.title2.weight(.bold)).foregroundStyle(.white)
-                    if let intro = about.intro { Text(intro).font(.headline).foregroundStyle(.white.opacity(0.92)) }
-                    if let d = about.description { Text(d).font(.body).foregroundStyle(.white.opacity(0.85)) }
+                    Text(about.name ?? name).nxFont(.title2, weight: .bold).foregroundStyle(.white)
+                    if let intro = about.intro { Text(intro).nxFont(.headline).foregroundStyle(.white.opacity(0.92)) }
+                    if let d = about.description { Text(d).nxFont(.body).foregroundStyle(.white.opacity(0.85)) }
                     facts
-                    if let s = about.sourceLine { Text(s).font(.footnote).foregroundStyle(NX18Palette.muted) }
-                    if let v = version { Text("Version \(v)").font(.footnote).foregroundStyle(NX18Palette.muted) }
+                    if let s = about.sourceLine { Text(s).nxFont(.footnote).foregroundStyle(NX18Palette.muted) }
+                    if let v = version { Text("Version \(v)").nxFont(.footnote).foregroundStyle(NX18Palette.muted) }
+                    VStack(alignment: .leading, spacing: 2) {   // the controller hints' glyphs (NXButtonGlyph.swift): the credit and the licence's address
+                        Text(NX18Credits.buttonIcons)
+                        Text(NX18Credits.buttonIconsLicence)
+                    }
+                    .nxFont(.caption).foregroundStyle(NX18Palette.muted)
                 }
                 .padding(.horizontal, 24).padding(.top, 4).padding(.bottom, 32)
                 .frame(maxWidth: 720, alignment: .leading)
@@ -180,10 +217,18 @@ struct LauncherAboutSheet: View {
         .scrollPosition($position)
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in offset = y }
         .background(background.ignoresSafeArea())
+        .nxTextRoot()
         .overlay(alignment: .topTrailing) {
             Button(action: close) {
-                Image(systemName: "xmark").font(.body.weight(.semibold)).foregroundStyle(.white)
-                    .frame(width: 36, height: 36).background(Circle().fill(NX18Palette.charcoal.opacity(0.85)))
+                HStack(spacing: 8) {
+                    if let g = closeGlyph {
+                        NXPadGlyphView(g, size: 20, relativeTo: .body).foregroundStyle(NX18Palette.cyan)
+                            .padding(4).background(Circle().fill(NX18Palette.charcoal.opacity(0.85)))   // over the art: a dark disc behind it
+                    }
+                    Image(systemName: "xmark").font(.body.weight(.semibold)).foregroundStyle(.white)   // system: symbol
+                        .frame(width: 36, height: 36).background(Circle().fill(NX18Palette.charcoal.opacity(0.85)))
+                }
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Close")

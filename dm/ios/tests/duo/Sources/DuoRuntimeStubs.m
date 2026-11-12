@@ -5,6 +5,7 @@
 #include "haptics_apple.h"
 #include "hle.h"
 #include <pthread.h>
+#include <stdlib.h>
 #include <string.h>
 
 NSString * const DuoHarnessInputDidChangeNotification = @"DuoHarnessInputDidChange";
@@ -125,23 +126,36 @@ void duo_harness_set_present_why(int fx, int sharp, int aa) { g_present_why[0] =
 static int g_web_touch;   // whether an offline HTML page is shown over the picture (web_apple.m is not in the harness)
 int front_web_touch(void) { return g_web_touch; }
 void duo_harness_set_web_touch(int on) { g_web_touch = on; }
-// The cheats GameMenu.swift lists (hle_cheats.c): no cheats folder in the harness, so the in-game menu has no Cheats submenu
-int dm_cheats_found(void) { return 0; }
-int dm_cheats_ncheats(void) { return 0; }
-const char *dm_cheats_build(void) { return ""; }
-const char *dm_cheats_version(void) { return ""; }
-const char *dm_cheats_dir_path(void) { return ""; }
+// The cheats GameMenu.swift lists (hle_cheats.c): no cheats folder in the harness, so the in-game menu has no Cheats submenu; DUO_CHEATS=1 gives it a placeholder cheat file
+// (made-up names, for screenshots of the Cheats page): two sections, a cheat that runs once, one that cannot run here and an always-on master, toggled in memory
+typedef struct { const char *name, *section, *why; int kind, flags, on; } DuoCheat;
+static DuoCheat g_duo_cheats[] = {
+    {"Master code", "", "", 1, 0, 1},
+    {"Placeholder: infinite health", "Player", "", 0, 0, 1},
+    {"Placeholder: moon jump", "Player", "", 0, 0, 0},
+    {"Placeholder: refill items", "Player", "", 0, 32, 0},
+    {"Placeholder: timer frozen", "World", "", 0, 0, 0},
+    {"Placeholder: code patch", "World", "(rewrites code: Mac only)", 2, 0, 0},
+};
+static int g_duo_cheats_master = 1;
+static int duo_cheats(void) { const char *c = getenv("DUO_CHEATS"); return c && atoi(c) != 0; }
+static int duo_cheat_ok(int i) { return duo_cheats() && i >= 0 && i < (int)(sizeof g_duo_cheats / sizeof g_duo_cheats[0]); }
+int dm_cheats_found(void) { return duo_cheats(); }
+int dm_cheats_ncheats(void) { return duo_cheats() ? (int)(sizeof g_duo_cheats / sizeof g_duo_cheats[0]) : 0; }
+const char *dm_cheats_build(void) { return duo_cheats() ? "0123456789ABCDEF" : ""; }
+const char *dm_cheats_version(void) { return duo_cheats() ? "1.0.0" : ""; }
+const char *dm_cheats_dir_path(void) { return duo_cheats() ? "/duo/cheats" : ""; }
 int dm_cheats_nothers(void) { return 0; }
-const char *dm_cheat_name_at(int i) { (void)i; return ""; }
-const char *dm_cheat_why_at(int i) { (void)i; return ""; }
-const char *dm_cheat_section_at(int i) { (void)i; return ""; }
-int dm_cheat_kind_at(int i) { (void)i; return 2; }
-int dm_cheat_flags_at(int i) { (void)i; return 0; }
-int dm_cheat_on_at(int i) { (void)i; return 0; }
-void dm_cheat_toggle(int i) { (void)i; }
+const char *dm_cheat_name_at(int i) { return duo_cheat_ok(i) ? g_duo_cheats[i].name : ""; }
+const char *dm_cheat_why_at(int i) { return duo_cheat_ok(i) ? g_duo_cheats[i].why : ""; }
+const char *dm_cheat_section_at(int i) { return duo_cheat_ok(i) ? g_duo_cheats[i].section : ""; }
+int dm_cheat_kind_at(int i) { return duo_cheat_ok(i) ? g_duo_cheats[i].kind : 2; }
+int dm_cheat_flags_at(int i) { return duo_cheat_ok(i) ? g_duo_cheats[i].flags : 0; }
+int dm_cheat_on_at(int i) { return duo_cheat_ok(i) ? g_duo_cheats[i].on : 0; }
+void dm_cheat_toggle(int i) { if (duo_cheat_ok(i) && !(g_duo_cheats[i].flags & 32)) g_duo_cheats[i].on = !g_duo_cheats[i].on; }
 void dm_cheats_reload(void) {}
-int dm_cheats_master(void) { return 1; }
-void dm_cheats_master_set(int on) { (void)on; }
+int dm_cheats_master(void) { return g_duo_cheats_master; }
+void dm_cheats_master_set(int on) { g_duo_cheats_master = on; }
 __thread _Atomic int dm_host_work;
 void dm_gfx_suspend(int on) { (void)on; }
 void dm_gfx_pressure(int level) { (void)level; }   // front_ios.m's memory pressure source

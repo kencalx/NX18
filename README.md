@@ -103,6 +103,8 @@ Mods: put the game's cheats (`cheats` folders) and a High frame rate or Ultrawid
 
 Launcher art: the screen before the game shows the game's key art, downloaded from titledb, else from SteamGridDB when you set a `STEAMGRIDDB_KEY` environment variable to your SteamGridDB API key. With a key it also shows the game's logo in place of its name, over SteamGridDB's textless art. `--art <image>` gives your own art, `--logo <image>` your own logo (a PNG or WebP with transparency), `--manual <file.pdf>` adds the game's manual, and `--no-art-online` keeps the build off the network ([Launcher art](docs/development.md#launcher-art-about-this-game-and-the-manual)).
 
+UI font: `--ui-font <file.ttf>` (a TTF, OTF or TTC of your own) puts one font into the app for all of NX 18's own text: the launcher, the in-game prompts and progress screens, and the Mac banner and Cheats window. The file goes only into the app built on your Mac, never into the repository (so keep that app to your own devices); without it the system font is used ([UI font](docs/development.md#ui-font)).
+
 The IPA appears in the game's folder. The first build takes 30–60 minutes and needs free disk space of about twice the game's size plus 10 GB; building again is much faster.
 
 To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the game to open from Finder. All options: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
@@ -172,6 +174,7 @@ This project is built on other people's work ([licenses](dm/third_party/README.m
 - **[LibHac](https://github.com/Thealexbarney/LibHac)**: reads NSPs and layers updates over the base game in `dm/tools/nx_extract`.
 - **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**: SPIR-V to Metal Shading Language.
 - **[MacNativeGames](https://github.com/ly05010419/MacNativeGames)** (MIT): the GPU widening of 8-bit indices and in-pass clears in `dm/gfx/nvn/nvn_mtl.m`, and the visibility-counter lowering in the shader translator.
+- **Switch Button Icons and Controls** by Zacksly: Button Icons and Controls by Zacksly (CC BY 3.0 Licensed | zacksly.itch.io), modified: recoloured. The button glyphs of the iPhone and iPad app's controller hints (the settings screen's "Press A to play", the guide's Y, B to close, the in-game menu's A and B), in [`dm/ios/Resources/ButtonIcons`](dm/ios/Resources/ButtonIcons/README.md) with the licence.
 - **[CMAA2](https://github.com/GameTechDev/CMAA2)** (Intel, Apache-2.0): the edge smoothing of the present's Anti-aliasing setting, ported to Metal in `dm/gfx/msl/cmaa2.metal`. **[FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR)** (AMD, MIT): the RCAS sharpening of its Sharpening setting, in `dm/gfx/msl/present.metal`.
 
 ## License

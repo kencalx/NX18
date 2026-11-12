@@ -34,6 +34,9 @@
 # The launcher shows the game's key art, its "About this game" text and its manual: ART / --art gives the art, else (ART_ONLINE, on) the build downloads it, the banner and text from titledb (the whole list, into ~/Library/Caches/nxnative/titledb/,
 #   so the list's host is sent no title ID; the banner itself comes from Nintendo's image server, which so learns the game), else a hero image from SteamGridDB when a key is set (STEAMGRIDDB_KEY, or the environment variable of that name); ART_ONLINE = False / --no-art-online keeps the build offline.
 #   With a key, SteamGridDB's textless hero and the game's logo come as a pair, the logo shown in place of the name (LOGO / --logo gives your own logo). Without art the launcher blurs the app icon. MANUAL / --manual packs a PDF manual of your own. They are settled once per app in <build folder>/art/ (scripts/game_art.py) and reused by the next build without the network.
+# UI_FONT / --ui-font: one font of your own (a TTF, OTF or TTC on this Mac) for all of NX 18's own text in the app built here: the launcher, the in-game prompts and progress screens,
+#   the Mac banner and Cheats window (not the game's own text, and not what the system draws: menus, alerts, title bars). It goes into the app as dm/uifont/ui.<ext>, its PostScript name into
+#   Info.plist (DMUIFontName); it is never copied into the repository, and a path inside the checkout is refused unless git ignores it (local/, see .gitignore). Empty = the system font.
 # Every intermediate file is under the build folder, <id>_build/ in the NSP folder unless --work-dir / WORK_DIR names another: nsp/ (NSZ / XCZ files converted to NSP / XCI with nsz -D, kept for the next build; pip install nsz, or an nsz 5.0 or later executable on PATH), extract/ (the extracted game files, kept for the next build unless KEEP_EXTRACTED / --no-keep-extracted), aoc/ (one RomFS image per DLC index), tools/ (the Mac host for a run-time shader capture), patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/, art/ (the launcher's art and "About this game" text, kept for the next build). The finished IPA also goes beside the build folder by default (the NSP folder, without --work-dir).
 # The DLC, the rewrite, the shader split and the iOS shaders are reused when all their inputs are as at their last successful run (the game files, the tools, the profile, Xcode and the in-repo spirv-cross: fingerprint() keys beside their output);
 #   the iOS shaders' inputs are the shader package's content and the chain's own tools, so a split that runs again and writes the same package leaves them reused.
@@ -77,6 +80,8 @@ ART_ONLINE = True                       # find the launcher's art and "About thi
 STEAMGRIDDB_KEY = ''                    # a SteamGridDB API key, for art titledb lacks (empty = the STEAMGRIDDB_KEY environment variable, else SteamGridDB is skipped); sent only to SteamGridDB, never printed or saved
                                         #   by the build. This file is tracked: never commit it with a key in it (the environment variable keeps the key out of the repository)
 MANUAL = ''                             # the game's manual, a PDF of your own, which the launcher opens (empty = none)
+UI_FONT = ''                            # the NX 18 UI font: a TTF, OTF or TTC of your own on this Mac, bundled only into the app built here, never into the repository (empty = the system font).
+                                        #   This file is tracked: never commit it with a font path in it that names the font (the --ui-font option or the release script's NX18_UI_FONT keeps it out of the repository)
 ROMFS = 'bundle'                        # 'bundle' = the game files go into the IPA (or the Xcode app), as always; 'separate' = they stay out (DM_COPY_ROMFS=NO): the IPA is small, and its rebuilds do not pack or send the RomFS again.
                                         #   Copy it to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app checks that the image is the one it was built for)
 SHADER_FILES = False                    # True = an NVN game's shader library goes into the IPA as its separate files, for install tools that cannot copy a large file (AltServer: 2 GiB; the game files
@@ -2828,12 +2833,13 @@ def mac_host(py, repo, work, env, logs, g):
     return host, font
 
 
-def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, env_file='', partial=False, parts=None, jit=False):
+def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, env_file='', partial=False, parts=None, jit=False, ui_font=None):
     """The command that runs the game in a window with sound after a Mac-only build (PLATFORM 'mac'; docs/development.md, Build by hand (Mac), step 5): its save and temporary storage in
     <id>_build/run (kept from run to run), the extracted RomFS, the Mac shader libraries (msl), the DLC, the profile's shader map (a host outside dm/host does not find it beside itself;
     c1_full.tsv and cb_extent.tsv are read beside it), the game language, and the switches of an environment file (DM_ENV_FILE / --env-file). partial (--seen-shaders): the pipeline bases go into an
     archive of their own, as the prebuild's stamp does not name the library (the whole library would find its bases done), and the command keeps its log, which the next partial build reads.
-    parts: a dict that gets the command's parts (a multi-program application's programs.tsv, mac_programs). jit: what the game's nn::jit plugin makes in play goes to jit_capture/play, for the iPhone's image (capture_jit)"""
+    parts: a dict that gets the command's parts (a multi-program application's programs.tsv, mac_programs). jit: what the game's nn::jit plugin makes in play goes to jit_capture/play, for the iPhone's image (capture_jit).
+    ui_font: --ui-font / UI_FONT (ui_font_info), which the host's own text (prompts, progress, the Cheats window) takes through DM_UI_FONT (dm/host/ui_font.h)"""
     rd = work / 'run'
     for d in ('save', 'temp'): (rd / d).mkdir(parents=True, exist_ok=True)
     renv = {'DM_ROOT': work, 'DM_ROMFS': rfs.source(game), 'DM_SAVE': rd / 'save', 'DM_TEMP': rd / 'temp', 'DM_MSL_DIR': msl, 'DM_FONT_DIR': font}
@@ -2845,6 +2851,7 @@ def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, 
     if jit: (game / 'jit_capture/play').mkdir(parents=True, exist_ok=True); renv['DM_JIT_CAPTURE'] = game / 'jit_capture/play'
     if PROGRAM_INDEX and g.get('program_of', ''): renv['DM_PROGRAM'] = PROGRAM_INDEX   # the host over the application's programs runs this one (main.c dm_game_cur)
     renv.update(DM_LANG=lang, DM_WINDOW=1, DM_AUDIO=1)
+    if ui_font: renv['DM_UI_FONT'] = ui_font[0]
     if env_file: renv.update(env_file_pairs(env_file))
     if gfx == 'nvn' and g.table('shader_pairs.tsv').is_file():
         if not g.table('pso_pairs.tsv').is_file() and (work / 'shader/pso_pairs.tsv').is_file(): renv['DM_PSO_PAIRS'] = work / 'shader/pso_pairs.tsv'   # split_shaders' copy
@@ -2969,13 +2976,14 @@ def mac_app_name(name):   # the app's file name: the game name with the characte
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
 
-def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None, gpu_option=True, art=None, about=None, manual=None, logo=None):
+def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None, gpu_option=True, art=None, about=None, manual=None, logo=None, ui_font=None):
     """The last stage of PLATFORM 'mac-app': pack the Mac app (dm/mac/pack_app.py) from what a Mac-only build made: the Mac host and font (mac_host), the packed version's RomFS and rewritten
     modules, the Mac shader libraries (msl: <shader>/cache, whose b-<chain> goes in), the DLC, the profile's tables (with the shader pairs
     the pipeline prebuild reads), the pipeline archive made offline for this Mac (mac_pso; gpus: --gpu / PSO_GPUS, gpu_option: from --gpu), the launcher settings and an environment file.
     The save and the log go to the player's Library, keyed by the folder's title ID (app); a new app replaces the old one only when it is complete. programs: a game of several programs, the others' files
     (other_programs), which go in beside the first's as one app. control: the control.nacp that lists the game's languages (languages_control), by default the packed version's.
-    art, about, manual, logo: the launcher's key art, "About this game" text, manual and the game's logo (launcher_art), each None without one"""
+    art, about, manual, logo: the launcher's key art, "About this game" text, manual and the game's logo (launcher_art), each None without one.
+    ui_font: (path, PostScript name, family) of --ui-font / UI_FONT (ui_font_info), None for the system font"""
     lib = msl / f'b-{chain_of(repo)}'
     pso = mac_pso(py, repo, work, lib, g, gpus, env, logs, gpu_option) if gfx == 'nvn' and g.table('shader_pairs.tsv').is_file() else None   # a stage of its own, before the app's
     PROG.stage('Mac app', step='starting')
@@ -2989,6 +2997,7 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
                    ('--pso', pso), ('--pso-pairs', split_pairs if gfx == 'nvn' and not g.table('pso_pairs.tsv').is_file() and split_pairs.is_file() else None),
                    ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings), ('--art', art), ('--logo', logo), ('--about', about), ('--manual', manual)):
         if v: cmd += [opt, v]
+    if ui_font: cmd += ['--ui-font', ui_font[0], '--ui-font-name', ui_font[1]]
     for n, r in (programs or {}).items(): cmd += ['--program', f'{n}\t{r["patched"]}\t{r["romfs"]}\t{r["msl"]}\t{r["tables"]}\t{r["html"]}']
     if (game / 'html').is_dir(): cmd += ['--html', game / 'html']
     unchanged = False
@@ -3038,6 +3047,8 @@ def parse_args(argv):
     ap.add_argument('--art-online', action=argparse.BooleanOptionalAction, help='find the launcher\'s art and "About this game" text online: titledb (the whole list, cached in ~/Library/Caches/nxnative/titledb), then SteamGridDB '
                     'when the STEAMGRIDDB_KEY setting or environment variable holds a key; --no-art-online keeps the build offline, art an earlier online build downloaded into the build folder\'s art/ is still used (default: the ART_ONLINE setting, on)')
     ap.add_argument('--manual', help='the game\'s manual, a PDF of your own, which the launcher opens (default: the MANUAL setting, else none)')
+    ap.add_argument('--ui-font', help='one font for all of NX 18\'s own text in the app (launcher, prompts, progress screens, the Mac banner and Cheats window): a TTF, OTF or TTC of your own on this Mac, '
+                    'bundled into the app built here only, never into the repository; a path inside the checkout must be one git ignores, such as local/fonts/ (default: the UI_FONT setting, else the system font)')
     ap.add_argument('--mac-sign', help='--platform mac-app: the codesign identity for the app, e.g. "Developer ID Application: <name> (<team>)" (default: the MAC_SIGN setting, else ad-hoc)')
     ap.add_argument('--team-id', help='Apple developer team ID (default: TEAM_ID setting, DM_TEAM_ID environment, or saved Xcode selection)')
     ap.add_argument('--xcode-workspace', help='workspace collecting prepared games (default: NxNative.xcworkspace beside the NSP folder; use with --prepare-xcode)')
@@ -3106,6 +3117,44 @@ def say_game(app, name, version, bundle_id, out, icon):
     out = the IPA or Mac app, None for an Xcode project; icon = the image the app is given: --icon / ICON, else the extracted icon.jpg, else --fallback-icon / FALLBACK_ICON; None without one, when the app gets the NX 18 icon), then the message for people"""
     PROG.event('game', title_id=f'{app:016X}', name=name, version=version, bundle_id=bundle_id, out=str(out) if out else None, icon=str(icon) if icon else None)
     say(f'app name: {name}; version: {version}; bundle ID: {bundle_id}' + (f'; app: {out}' if out and out.suffix == '.app' else ''))
+
+
+UI_FONT_MAGIC = (b'\x00\x01\x00\x00', b'true', b'OTTO', b'ttcf')   # TrueType, Apple TrueType, OpenType with CFF outlines, a collection
+
+
+def ui_font_info(given, repo):
+    """The NX 18 UI font (--ui-font / UI_FONT): (path, PostScript name, family). A TTF, OTF or TTC (by its name and its first bytes) that fontTools reads, with a PostScript name the apps
+    can look it up by (face 0 of a collection; the apps register the whole file). A path inside the checkout must be one git ignores (local/, .gitignore), so the font cannot be committed
+    by accident. Only the name table is read; nothing of the file is printed or copied here (build_ipa.sh and pack_app.py copy it into the app)"""
+    path = Path(os.path.expanduser(str(given))).resolve()
+    if path.is_dir(): raise BuildError(f'the UI font (--ui-font / UI_FONT) is a folder, not a font file: {path}')
+    if not path.is_file(): raise BuildError(f'no such UI font file (--ui-font / UI_FONT): {path}')
+    if path.suffix.lower() not in ('.ttf', '.otf', '.ttc'): raise BuildError(f'the UI font (--ui-font / UI_FONT) must be a .ttf, .otf or .ttc file: {path}')
+    try:
+        with open(path, 'rb') as f: magic = f.read(4)
+    except OSError as e: raise BuildError(f'cannot read the UI font (--ui-font / UI_FONT) {path}: {e.strerror}')
+    if magic not in UI_FONT_MAGIC: raise BuildError(f'the UI font (--ui-font / UI_FONT) is not a TrueType or OpenType font: {path}')
+    try: rel = path.relative_to(Path(repo).resolve())
+    except ValueError: rel = None
+    if rel is not None:   # in the checkout: only where git ignores it (exit 0); outside a git checkout (128), only under local/
+        r = subprocess.run(['git', '-C', str(repo), 'check-ignore', '-q', '--', str(rel)], capture_output=True)
+        if r.returncode == 1 or (r.returncode != 0 and rel.parts[0] != 'local'):
+            raise BuildError(f'the UI font (--ui-font / UI_FONT) is inside the checkout where git would track it: {path}; keep it outside the repository, or in local/fonts/, which git ignores')
+    try:
+        from fontTools.ttLib import TTCollection, TTFont
+    except ImportError: raise BuildError(f'the current Python ({sys.executable}) is missing fontTools, which reads the UI font\'s name (pip install fonttools)')
+    try:
+        coll = TTCollection(str(path), lazy=True) if magic == b'ttcf' else None
+        font = coll.fonts[0] if coll else TTFont(str(path), lazy=True)
+        try:
+            names = font['name']
+            ps, family = names.getDebugName(6), names.getDebugName(16) or names.getDebugName(1)
+        finally: (coll or font).close()
+    except Exception as e: raise BuildError(f'the UI font (--ui-font / UI_FONT) cannot be read: {path} ({type(e).__name__})')
+    # A PostScript name is printable ASCII without the characters PostScript reserves, at most 63 of them (the OpenType name table's rule for name ID 6)
+    if not ps or not re.fullmatch(r'[!-~]{1,63}', ps) or re.search(r'[\[\](){}<>/%]', ps):
+        raise BuildError(f'the UI font (--ui-font / UI_FONT) has no usable PostScript name (name ID 6), which the apps look it up by: {path}')
+    return path, ps, (family or ps).strip()
 
 
 def launcher_art(app, name, work, given, online, manual, given_logo=None):
@@ -3250,6 +3299,8 @@ def main(args=None):
     if manual:
         with open(manual, 'rb') as f:
             if f.read(4) != b'%PDF': raise BuildError(f'the manual (--manual / MANUAL) is not a PDF: {manual}')
+    ui_font = ui_font_info(args.ui_font or UI_FONT, repo) if getattr(args, 'ui_font', None) or UI_FONT else None   # (path, PostScript name, family), checked before the extraction too
+    if ui_font and not getattr(args, 'in_programs', None): say(f'UI font: {ui_font[2]} ({ui_font[1]}), {ui_font[0]}')
     art_online = ART_ONLINE if args.art_online is None else args.art_online
     sys.path.insert(0, str(repo / 'dm/games')); import game as gamemod   # game profiles
     global pg; import profile_guess as pg   # dm/games: a provisional profile's keys from the game files and from the heap check
@@ -3490,7 +3541,7 @@ def main(args=None):
         if not game_icon: say(no_game_icon_line(nup, dump, icon, "app's icon"))
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
                 (args.gpu or PSO_GPUS).strip(), programs, control, gpu_option=bool((args.gpu or '').strip()),
-                art=art, about=about, manual=manual, logo=logo)
+                art=art, about=about, manual=manual, logo=logo, ui_font=ui_font)
         cdirs = [(d, b) for d, b in [(packed_cheats, cheat_build)] + [(programs[n].get('cheats'), programs[n].get('build')) for n in sorted(programs)] if d]   # each program's own cheats too, under its builds' IDs
         c = merge_cheats(cdirs, work / MODS_STAGE / 'programs_cheats') if len(cdirs) > 1 else cdirs[0][0] if cdirs else None
         if c: install_cheats(c, Path.home() / 'Library/Application Support/nxnative' / f'{app:016X}' / 'cheats')   # the app's DM_ROOT (dm/mac/launcher.c)
@@ -3504,7 +3555,7 @@ def main(args=None):
         first = getattr(args, 'in_programs', None)   # a program packed with the application's first: its host, built over all of them, and its fonts
         host, font = (first['host'], first['font']) if first else mac_host(py, repo, work, env, logs, g)
         parts = {'font': font}
-        cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang, env, logs, g, env_file, partial=seen_shaders, parts=parts, jit=jit)
+        cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang, env, logs, g, env_file, partial=seen_shaders, parts=parts, jit=jit, ui_font=ui_font)
         if packed_cheats: install_cheats(packed_cheats, work / 'cheats')   # the run's DM_ROOT is the build folder
         rmtree(work / 'tmp')
         if getattr(args, 'in_programs', False): return parts
@@ -3534,6 +3585,7 @@ def main(args=None):
     if icon: ipa_env['DM_ICON'] = str(icon); say(f'app icon: {icon}')   # app icon (found above)
     for k, v in (('DM_ART', art), ('DM_LOGO', logo), ('DM_ABOUT', about), ('DM_MANUAL', manual)):   # the launcher's art, logo, "About this game" text and manual (launcher_art): dm/ in the app, once for every program
         if v: ipa_env[k] = str(v)
+    if ui_font: ipa_env['DM_UI_FONT'], ipa_env['DM_UI_FONT_NAME'] = str(ui_font[0]), ui_font[1]   # the UI font: dm/uifont/ in the app, its name in Info.plist (build_ipa.sh)
     if env_file: ipa_env['DM_ENV_FILE'] = str(Path(os.path.expanduser(env_file)).resolve())
     if packed_cheats: ipa_env['DM_PACKED_CHEATS'] = str(packed_cheats); say(f'cheats packed into the app from the mods folder: {", ".join(p.name for p in sorted(packed_cheats.iterdir()))} (the app copies them into its cheats folder; the in-game menu turns them on)')
     show_fps = SHOW_FPS if args.show_fps is None else args.show_fps

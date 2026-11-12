@@ -2,3 +2,4 @@
 #import "DmGameMenu.h"
 #import "DuoHarnessRuntime.h"
 #include "save_sync.h"   // DuoShortcutTests: a cloud save made with the host's own packing (save_sync_after_exit)
+#import "DmLayout.h"   // dm_gamepad_view (DuoGameMenuPanelTests.swift: a pad made with DM_GAME_MENU=system)

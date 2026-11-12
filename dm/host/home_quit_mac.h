@@ -5,6 +5,7 @@
 #pragma once
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/QuartzCore.h>
+#include "ui_font.h"   // NX 18's UI font: the prompt's, the hold pill's and the controller prompt's text
 
 static NSColor *hq_color(double r, double g, double b, double a) { return [NSColor colorWithSRGBRed:r green:g blue:b alpha:a]; }
 #define HQ_BACKGROUND hq_color(0.055, 0.055, 0.06, 1)
@@ -16,7 +17,8 @@ static CGFloat hq_scale(NSSize s) { CGFloat k = s.height / 720; return k < 1 ? 1
 
 static NSTextField *hq_label(NSString *text, CGFloat size, NSFontWeight w, NSColor *c, int wrap) {
     NSTextField *t = wrap ? [NSTextField wrappingLabelWithString:text] : [NSTextField labelWithString:text];
-    t.font = [NSFont systemFontOfSize:size weight:w]; t.textColor = c; t.alignment = NSTextAlignmentCenter;
+    t.font = dm_ui_font(size, w); t.textColor = c; t.alignment = NSTextAlignmentCenter;
+    if (wrap) dm_ui_field_text(t, text);   // the UI font's wrapped lines get the space its metrics leave out
     t.translatesAutoresizingMaskIntoConstraints = NO;
     return t;
 }
@@ -34,7 +36,7 @@ static NSImageView *hq_glyph(NSString *symbol, NSString *fallback, CGFloat size,
 #define HQ_ACTION_W 220
 // The font size that fits text into room on one line: size, or smaller down to 70 % of it
 static CGFloat hq_fit(NSString *text, CGFloat size, CGFloat room) {
-    CGFloat w = [text sizeWithAttributes:@{NSFontAttributeName: [NSFont systemFontOfSize:size weight:NSFontWeightSemibold]}].width;
+    CGFloat w = [text sizeWithAttributes:@{NSFontAttributeName: dm_ui_font(size, NSFontWeightSemibold)}].width;   // the font hq_action draws it with
     if (w <= room) return size;
     CGFloat s = floor(size * room / w * 10) / 10;
     return s < size * 0.7 ? size * 0.7 : s;
