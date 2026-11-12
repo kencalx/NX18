@@ -146,6 +146,7 @@ static void pull_case(const char *root, const char *name, const char *bundle, in
     snprintf(save, sizeof save, "%s/save", root); snprintf(dev, sizeof dev, "%s/save_device", root); snprintf(backups, sizeof backups, "%s-backups", save);
     rm_tree(save); rm_tree(dev); rm_tree(backups); mkdirs(save); mkdirs(dev);
     snprintf(p, sizeof p, "%s/a", save); put(p, "original 0"); snprintf(p, sizeof p, "%s/b", dev); put(p, "original 1");
+    for (int k = 0; k < KEEP_BACKUPS; k++) { snprintf(p, sizeof p, "%s/2000-01-01 00.00.%02d local", backups, k); mkdirs(p); snprintf(p, sizeof p, "%s/2000-01-01 00.00.%02d local/a", backups, k); put(p, "older"); }   // the most a side keeps
     snprintf(staging, sizeof staging, "%s.sync-tmp", save); staging_held = 0;
     faults[0] = f0; faults[1] = f1;
     int r = pull(save, bundle, &m, kept, sizeof kept), e = errno;
@@ -164,12 +165,18 @@ static void pull_case(const char *root, const char *name, const char *bundle, in
         snprintf(p, sizeof p, "%s/b", dev); CHECK(is(p, "original 1"), "a failed pull leaves this device's device save in place");
         CHECK(!holds(backups, "cloud"), "no cloud file is left in the backups");
         CHECK(access(kept, F_OK) == -1, "the empty backup folder is removed");
+        CHECK(holds(backups, "older") == KEEP_BACKUPS, "a failed pull removes no older backup");
     } else if (!want) {
         snprintf(p, sizeof p, "%s/a", save); CHECK(is(p, "cloud 0"), "the cloud's save is in place");
         snprintf(p, sizeof p, "%s/b", dev); CHECK(device_cloud ? is(p, "cloud 1") : access(p, F_OK) == -1, "the cloud's device save is in place, or none when it has none");
         snprintf(p, sizeof p, "%s/save/a", kept); CHECK(is(p, "original 0"), "this device's save is kept in the backup pull names");
         snprintf(p, sizeof p, "%s/save_device/b", kept); CHECK(is(p, "original 1"), "this device's device save is kept in the backup pull names");
-    } else CHECK(*kept && holds(kept, "original"), "the backup pull names holds what is not in place");
+        snprintf(p, sizeof p, "%s/2000-01-01 00.00.00 local", backups);
+        CHECK(holds(backups, "older") == KEEP_BACKUPS - 1 && access(p, F_OK) == -1, "a pull that succeeds keeps the newest KEEP_BACKUPS, its own among them");
+    } else {
+        CHECK(*kept && holds(kept, "original"), "the backup pull names holds what is not in place");
+        CHECK(holds(backups, "older") == KEEP_BACKUPS, "a pull that cannot put the save back removes no older backup");
+    }
 }
 // This device's save folder cannot be listed (EACCES here; EMFILE or ENOMEM on a device): never taken for "no save". ss_scan fails (the mount turns sync off), and a
 // pull fails before anything moves: before 2026-11-11, has_entries said empty, ss_decide pulled, and pull swapped the real folder into the staging folder and cleared it

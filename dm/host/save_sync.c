@@ -340,13 +340,14 @@ static void prune_backups(const char *save, const char *side, const char *made) 
     free_names(v, k);
 }
 
-// A folder for a save about to be replaced: <save>-backups/<date> <side> (local: this device's, cloud: the cloud's); the oldest of that side beyond KEEP_BACKUPS go
-static int backup_dir(const char *save, const char *side, char *out, size_t n) {
+// A folder for a save about to be replaced: <save>-backups/<date> <side> (local: this device's, cloud: the cloud's); with prune, the oldest of that side beyond KEEP_BACKUPS go
+// now (pull prunes only once the cloud's save is in place: a failed pull removes its folder again, and must not have cost an older backup)
+static int backup_dir(const char *save, const char *side, int prune, char *out, size_t n) {
     char stamp[32]; time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm); strftime(stamp, sizeof stamp, "%Y-%m-%d %H.%M.%S", &tm);
     snprintf(out, n, "%s-backups/%s %s", save, stamp, side);
     for (int k = 2; !access(out, F_OK); k++) snprintf(out, n, "%s-backups/%s %s %d", save, stamp, side, k);
     if (mkdirs(out)) return -1;
-    prune_backups(save, side, out);
+    if (prune) prune_backups(save, side, out);
     return 0;
 }
 
@@ -432,7 +433,7 @@ static int pull(const char *save, const char *bundle, ss_meta *r, char *kept, si
         fresh[i] = !access(incoming[i], F_OK); had[i] = has_entries(here[i]);
         if (had[i] < 0) { e = errno; rm_tree(tmp); errno = e; return -1; }   // a folder it cannot list is never taken for an empty one: nothing has moved
     }
-    if ((had[0] || had[1]) && backup_dir(save, "local", kept, kn)) { e = errno; kept[0] = 0; goto undo; }   // made before any folder moves
+    if ((had[0] || had[1]) && backup_dir(save, "local", 0, kept, kn)) { e = errno; kept[0] = 0; goto undo; }   // made before any folder moves
     for (int i = 0; i < 2; i++) {
         snprintf(old[i], sizeof old[i], "%s/%s", kept, FOLDERS[i]);
         if (had[i] && fresh[i]) {
@@ -447,6 +448,7 @@ static int pull(const char *save, const char *bundle, ss_meta *r, char *kept, si
             act[i] = PL_PLACED;
         }
     }
+    if (*kept) prune_backups(save, "local", kept);   // only now: until here a failure put everything back and removed kept
     rm_tree(tmp);
     return 0;
 undo:
@@ -485,7 +487,7 @@ static int send_save(const char *save, const char *title, const char *cloud) {
     if ((got = fetch_timed(cloud, theirs, FETCH_MS)) < 0) { SLOG("the cloud's save %s cannot be read now; sending later", cloud); goto done; }
     if (got && ss_read(theirs, NULL, &other)) {   // no save can be read from it, so no progress is lost: the file itself is kept, then replaced
         char raw[PATH_MAX + 16];
-        if (backup_dir(save, "cloud", kept, sizeof kept) || snprintf(raw, sizeof raw, "%s/save.dmsync", kept) >= (int)sizeof raw || rename(theirs, raw)) { SRED("cannot keep the cloud's damaged save before replacing it (errno=%d); not sent", errno); goto done; }
+        if (backup_dir(save, "cloud", 1, kept, sizeof kept) || snprintf(raw, sizeof raw, "%s/save.dmsync", kept) >= (int)sizeof raw || rename(theirs, raw)) { SRED("cannot keep the cloud's damaged save before replacing it (errno=%d); not sent", errno); goto done; }
         SRED("the cloud's save %s is damaged; this device's replaces it, and the damaged file is kept in %s", cloud, kept);
     }
     else if (got && !strcmp(other.hash, mine.hash)) { write_base(save, mine.hash); ok = 1; goto done; }
@@ -573,7 +575,7 @@ static void mount_once(const char *save, const char *title) {
         // Over a cloud save that changed since the last sync (the newer of two that both changed, or the player's choice): the start chose against it, so it is kept
         // first and counts as the one last synced; the sender replaces only that one (send_save), not a save another device sends meanwhile
         if (got > 0 && other.files && strcmp(other.hash, base)) {
-            if (backup_dir(save, "cloud", kept, sizeof kept) || ss_read(theirs, kept, &other)) { SRED("cannot keep the cloud's save before replacing it (errno=%d): not sent", errno); failed = 1; break; }
+            if (backup_dir(save, "cloud", 1, kept, sizeof kept) || ss_read(theirs, kept, &other)) { SRED("cannot keep the cloud's save before replacing it (errno=%d): not sent", errno); failed = 1; break; }
             write_base(save, other.hash);
         }
         when(mine.saved, t, sizeof t); when(other.saved, t2, sizeof t2);
