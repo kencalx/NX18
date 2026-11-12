@@ -205,13 +205,13 @@ static int nq_probe_full(void) {
     if(nq_probes_full<0) { const char *e=getenv("DM_NVN_SUBMIT_PROBES"); nq_probes_full=e && !strcmp(e,"full"); if(nq_probes_full) LOG("[nvn] submit-cost probes: full (DM_NVN_SUBMIT_PROBES=full): clock_gettime plus a thread port made and released per reading"); }
     return nq_probes_full;
 }
-typedef struct { uint64_t wall, cpu, instr, cycles, sys; } nq_cost;
+typedef struct { uint64_t wall, cpu, instr, cycles, sys; } nq_cost;   // a scope's start; nq_cost_end returns its wall and CPU time in the same fields
 static nq_cost nq_cost_begin(void) {
     nq_cost c={.wall=now_ns()};
     if(nq_probe_full()) { c.cpu=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); c.sys=thr_sys_ns(); } else thr_times(&c.cpu,&c.sys);
     thr_counts(&c.instr,&c.cycles); return c;
 }
-static void nq_cost_end(nq_cost c) {
+static nq_cost nq_cost_end(nq_cost c) {
     int full=nq_probe_full(); uint64_t dw=now_ns()-c.wall, cpu=0, sys=0, ins, cyc;
     if(full) cpu=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); else thr_times(&cpu,&sys);
     thr_counts(&ins,&cyc); if(full) sys=thr_sys_ns();
@@ -220,6 +220,20 @@ static void nq_cost_end(nq_cost c) {
     atomic_fetch_add(&g_sub_cpu_ns,dc); atomic_fetch_add(&g_cum_sub_cpu_ns,dc);
     atomic_fetch_add(&g_sub_instr,ins-c.instr); atomic_fetch_add(&g_cum_sub_instr,ins-c.instr);
     atomic_fetch_add(&g_cum_sub_cyc,cyc-c.cycles); atomic_fetch_add(&g_cum_sub_sys_ns,sys-c.sys);
+    return (nq_cost){.wall=dw,.cpu=dc};
+}
+// What the translation detail line splits out of the submit cost (nq_wait_stats; DM_FIELD_LOG on): the game threads' command copy (nvn_queue_submit's scope; the rest is the replay's), and
+// the wall time each side waits for g_sub_mu while the other holds it: a submit behind a replayed node, the replay behind a submit's copy. A lock is tried first, so an uncontended one
+// reads no clock (nq_sub_lock)
+static _Atomic uint64_t nq_stat_submits, nq_stat_copy_wall_ns, nq_stat_copy_cpu_ns, nq_stat_sub_wait_ns[2], nq_stat_sub_waits[2];   // [0] the game's submits, [1] the replay
+static void nq_sub_lock(int replay) {   // dm_host_mutex_lock(&g_sub_mu), timed when contended
+    if(pthread_mutex_trylock(&g_sub_mu)!=EBUSY) return;
+    uint64_t t0=now_ns(); dm_host_work++; pthread_mutex_lock(&g_sub_mu); dm_host_work--;
+    atomic_fetch_add_explicit(&nq_stat_sub_wait_ns[replay],now_ns()-t0,memory_order_relaxed); atomic_fetch_add_explicit(&nq_stat_sub_waits[replay],1,memory_order_relaxed);
+}
+static void nq_wait_stats(uint64_t v[7]) {   // running totals: submits, their copy's wall and CPU ns, g_sub_mu waits (ns, count) of the submits and of the replay
+    v[0]=atomic_load_explicit(&nq_stat_submits,memory_order_relaxed); v[1]=atomic_load_explicit(&nq_stat_copy_wall_ns,memory_order_relaxed); v[2]=atomic_load_explicit(&nq_stat_copy_cpu_ns,memory_order_relaxed);
+    for(int k=0;k<2;k++) { v[3+2*k]=atomic_load_explicit(&nq_stat_sub_wait_ns[k],memory_order_relaxed); v[4+2*k]=atomic_load_explicit(&nq_stat_sub_waits[k],memory_order_relaxed); }
 }
 // The command copies (nq_bytes) of replayed nodes go to the next submissions' nodes instead of free (nq_spare_take / nq_spare_give), so a steady frame allocates none. Both run under g_sub_mu: the
 // submitting thread copies the commands (nq_flatten) and the worker replays them (nq_worker) holding it. At most NQ_SPARES are kept, none over NQ_SPARE_MAX (a load's long stream is freed).
@@ -326,7 +340,7 @@ static void *nq_worker(void *unused) {
         pthread_mutex_unlock(&nq_mu);
         uint64_t fence=0, present=0, copy=0;
         if(n->kind==NQ_COMMANDS || n->kind==NQ_PRESENT) {
-            dm_host_mutex_lock(&g_sub_mu); void *pool=objc_autoreleasePoolPush();
+            nq_sub_lock(1); void *pool=objc_autoreleasePoolPush();
             dm_host_work++; mtl_prepare(); dm_host_work--;
             if(rt && frame!=j->frame) nvn_rtw_tick(&nq_rtw,j->frame);
             gfx_enter(); nq_cost cost=nq_cost_begin();
@@ -461,9 +475,10 @@ void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
     pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue job allocation failed"); j->receipt=nq_new();
     j->objects.klen=16; j->frame=dm_nvn_frame_count();
     // No scheduler lock while copying descriptors or resolving shader libraries.
-    dm_host_mutex_lock(&g_sub_mu); void *pool=objc_autoreleasePoolPush(); dm_host_work++; mtl_prepare(); dm_host_work--; nq_cost cost=nq_cost_begin();
+    nq_sub_lock(0); void *pool=objc_autoreleasePoolPush(); dm_host_work++; mtl_prepare(); dm_host_work--; nq_cost cost=nq_cost_begin();
     for(int i=0;i<count;i++) nq_flatten(j,(const uint8_t *)(uintptr_t)handles[i]); nq_end(j);
-    nq_cost_end(cost); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
+    nq_cost copy=nq_cost_end(cost); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
+    atomic_fetch_add_explicit(&nq_stat_submits,1,memory_order_relaxed); atomic_fetch_add_explicit(&nq_stat_copy_wall_ns,copy.wall,memory_order_relaxed); atomic_fetch_add_explicit(&nq_stat_copy_cpu_ns,copy.cpu,memory_order_relaxed);
     int waits=0; for(nq_node *node=j->first;node;node=node->next) waits|=node->kind==NQ_EVENT || node->kind==NQ_SYNC;
     nvn_cap_queue(q->serial,waits);
     pthread_mutex_lock(&nq_mu);

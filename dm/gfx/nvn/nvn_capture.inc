@@ -308,7 +308,7 @@ static void cap_tex_read(const tex_t *t, int rec) {   // rec: named by a record 
 // ---------- Registries ----------
 static void cap_registries(uint32_t submit) {   // the entries that differ from the last written ones (all of them at submit 1)
     cap_buf tb = {0}, sb = {0}; tex_t *reads = NULL; int nreads = 0;
-    os_unfair_lock_lock(&g_rmu);
+    rmu_lock();
     if (g_cap_ntreg0 < g_ntreg) { g_cap_treg0 = realloc(g_cap_treg0, g_ntreg * sizeof *g_cap_treg0); memset(g_cap_treg0 + g_cap_ntreg0, 0, (g_ntreg - g_cap_ntreg0) * sizeof *g_cap_treg0); g_cap_ntreg0 = g_ntreg; }
     reads = malloc((size_t)MAX(g_ntreg, 1) * sizeof *reads);
     for (int i = 0; i < g_ntreg; i++) {

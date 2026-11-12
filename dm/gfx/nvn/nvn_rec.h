@@ -250,14 +250,18 @@ static rec_t *rec_put(uint32_t op, uint32_t nobj) {
     }
     rec_t *r = &g_rb_cur->r[g_rb_cur->n++]; r->op = op; r->nobj = nobj; return r;
 }
-// Hand over what is recorded and wait until the encode thread has made every call
+// Hand over what is recorded and wait until the encode thread has made every call. The drains, the blocked ones and their wall time are counted for the translation detail line
+// (mtl_wait_stats; a clock is read only when the drain blocks); DM_NVN_WAITS=1's ledger counts them too, with the time of every drain
+static _Atomic uint64_t g_drains, g_drains_blocked, g_drain_ns;
 static void rec_drain(void) {
     if (!g_rb_started) return;
     rec_publish();
-    uint64_t w0 = ws_t0(); int blocked = 0;
+    uint64_t w0 = ws_t0(), b0 = 0; int blocked = 0;
     pthread_mutex_lock(&g_rb_mu);
-    while (g_rb_head || g_rb_busy) { blocked = 1; pthread_cond_wait(&g_rb_idle, &g_rb_mu); }
+    while (g_rb_head || g_rb_busy) { if (!blocked) b0 = now_ns(); blocked = 1; pthread_cond_wait(&g_rb_idle, &g_rb_mu); }
     pthread_mutex_unlock(&g_rb_mu);
+    atomic_fetch_add_explicit(&g_drains, 1, memory_order_relaxed);
+    if (blocked) { atomic_fetch_add_explicit(&g_drains_blocked, 1, memory_order_relaxed); atomic_fetch_add_explicit(&g_drain_ns, now_ns() - b0, memory_order_relaxed); }
     if (ws_on()) ws_put(WS_DRAIN, w0, blocked);
 }
 // A block of records from another thread than the submit thread (the present snapshot's copy): it goes in one piece behind every block published so far. Everything the game

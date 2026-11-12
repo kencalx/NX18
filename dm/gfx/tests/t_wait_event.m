@@ -764,6 +764,36 @@ static void signal_events_switch(void) {
     if(was) setenv("DM_NVN_SIGNAL_EVENTS",keep,1); else unsetenv("DM_NVN_SIGNAL_EVENTS");
     nq_signal_node=saved;
 }
+// The translation detail line's split and waits (nq_wait_stats, mtl_wait_stats, wait_split): a submission counts its copy apart from the replay; a submit that finds g_sub_mu held waits
+// for it and counts that wait, an uncontended one none; the replay's g_rmu waits apart from another thread's; the encode thread's drains (DM_NVN_ENC_THREAD=1); and the line's text
+static void *hold_sub_mu(void *arg) { pthread_mutex_lock(&g_sub_mu); dispatch_semaphore_signal((__bridge dispatch_semaphore_t)arg); usleep(20000); pthread_mutex_unlock(&g_sub_mu); return NULL; }
+static void *hold_rmu(void *arg) { os_unfair_lock_lock(&g_rmu); dispatch_semaphore_signal((__bridge dispatch_semaphore_t)arg); usleep(20000); os_unfair_lock_unlock(&g_rmu); return NULL; }
+static void wait_counters(void) {
+    printf("CASE the submit's split and its waits\n");
+    CHECK(queue_idle(5000000000ull),"the replay has taken every queued job");
+    uint64_t q0[7], m0[7], q1[7], m1[7]; nq_wait_stats(q0); mtl_wait_stats(m0); uint64_t w0=atomic_load(&g_cum_sub_wall_ns), c0=atomic_load(&g_cum_sub_cpu_ns);
+    NVNsync s; P(nvnSyncInitialize)(&s,&device); NVNcommandHandle h=consumer(0,0,&s,0); P(nvnQueueSubmitCommands)(&queues[0],1,&h);
+    int fine=landed(&s,5000000000ull) && queue_idle(5000000000ull); P(nvnSyncFinalize)(&s);
+    nq_wait_stats(q1); mtl_wait_stats(m1); uint64_t w1=atomic_load(&g_cum_sub_wall_ns), c1=atomic_load(&g_cum_sub_cpu_ns);
+    CHECK(fine && q1[0]==q0[0]+1,"one submit counted");
+    CHECK(q1[1]>q0[1] && q1[1]-q0[1]<w1-w0 && q1[2]-q0[2]<=c1-c0,"its copy's wall and CPU time, a part of the submit cost (the rest the replay's)");
+    if(rec_on()) CHECK(m1[4]>m0[4],"the replay drained the encode thread");
+    else CHECK(m1[4]==m0[4],"no encode thread, no drains");
+    dispatch_semaphore_t held=dispatch_semaphore_create(0); pthread_t th;
+    pthread_create(&th,NULL,hold_sub_mu,(__bridge void *)held); dispatch_semaphore_wait(held,DISPATCH_TIME_FOREVER);
+    nq_sub_lock(0); pthread_mutex_unlock(&g_sub_mu); pthread_join(th,NULL); nq_wait_stats(q0);
+    CHECK(q0[4]==q1[4]+1 && q0[3]-q1[3]>=10000000ull,"a submit behind a held g_sub_mu: one wait, about the 20 ms it was held");
+    nq_sub_lock(0); pthread_mutex_unlock(&g_sub_mu); nq_wait_stats(q1);
+    CHECK(q1[4]==q0[4] && q1[3]==q0[3],"an uncontended g_sub_mu: no wait counted");
+    pthread_create(&th,NULL,hold_rmu,(__bridge void *)held); dispatch_semaphore_wait(held,DISPATCH_TIME_FOREVER);
+    mtl_wait_stats(m0); rmu_lock(); os_unfair_lock_unlock(&g_rmu); pthread_join(th,NULL); mtl_wait_stats(m1);
+    CHECK(m1[3]==m0[3]+1 && m1[2]-m0[2]>=10000000ull && m1[1]==m0[1],"a g_rmu wait off the replay thread counts as another thread's");
+    uint64_t pq[7]={0}, pm[7]={0}, q[7]={600,30000000,15000000,6000000,120,3000000,60}, m[7]={9000000,600,1200000,60,1200,600,12000000};
+    char line[768]; wait_split(line,sizeof line,q,pq,m,pm,300,300e6,150e6);
+    printf("line:%s\n",line);
+    CHECK(strstr(line,"command copy CPU 0.050 ms / wall 0.100 ms (2.0 submits) and the replay CPU 0.450 ms / wall 0.900 ms")!=NULL,"the line splits the copy from the replay");
+    CHECK(strstr(line,"submits for g_sub_mu 0.020 ms (0.4 waits), the replay for g_sub_mu 0.010 ms (0.2), for g_rmu 0.030 ms (2.0), other threads for g_rmu 0.004 ms (0.2), the replay for the encode thread 0.040 ms (2.0 of 4.0 drains blocked)")!=NULL,"and gives each wait per frame");
+}
 // The replay threads' time-constraint policy (nvn_rt.h; profile key replay_rt, DM_REPLAY_RT): once a present period is known, the replay thread declares one at the first node of a new
 // frame and the encode thread (DM_NVN_ENC_THREAD=1) after its first block of one, each in effect on that thread; with it off neither declares anything
 static int rt_on_port(mach_port_t p) { thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc=THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def=0;
@@ -828,6 +858,7 @@ int main(void) { @autoreleasepool {
     signals_2000(1); signals_2000(0);
     split_allocations();
     spare_copies();
+    wait_counters();
     replay_rt_case();
     pthread_mutex_lock(&jobs_mu); jobs_stop=1; pthread_cond_signal(&jobs_cv); pthread_mutex_unlock(&jobs_mu); pthread_join(worker,NULL);
     printf("wait-event fixture: %d checks, %d failed\n",checks,fails);
