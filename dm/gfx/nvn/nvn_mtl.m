@@ -8804,10 +8804,12 @@ static int arch_probe_settle(void) {
          g_arch_probe_n, stamped, gone, bytes / 1048576.0, open);
     return gone;
 }
-// A pipeline from the archive: the file the index names for its key alone, else each file without a complete index (the bundle first among the p files, which plain skips: a base
-// with a vertex layout and a compute pipeline are never in one). *from_run: it came from a run file this compaction takes, so the compacting prewarm captures it again. A miss in
-// the named file asks the bundle too (not plain): the key names no translation chain (lib_name), so after an app update with a new chain and a new bundle a device file of the
-// old chain was named for bases the bundle holds, and each was compiled and captured again into a p file that then shadowed the bundle for good
+// A pipeline from the archive: the file the index names for its key alone, else each file without a complete index (the bundle first among the p files, which plain skips: the
+// device's own p files never hold a base with a vertex layout or a compute pipeline). *from_run: it came from a run file this compaction takes, so the compacting prewarm captures it
+// again. A miss in the named file asks the bundle too: the key names no translation chain (lib_name), so after an app update with a new chain and a new bundle a device file of the
+// old chain was named for bases the bundle holds, and each was compiled and captured again into a p file that then shadowed the bundle for good. A plain lookup (a base with a
+// vertex layout) asks the bundle before the device's own files too: pso_offline.py compiles the layout base of every prewarm R row into it (as pso_desc describes it), so a first
+// start takes them from the app instead of compiling them. A bundle hit is never from_run: arch_compact_takes knows only the device's files
 static int arch_compact_takes(id<MTL4Archive> a);
 static id<MTL4Archive> g_arch_bundle;   // pso_bundle_open
 // found: the file it came from (pre_pair credits a prebuild file by it, pre_credit)
@@ -8826,10 +8828,11 @@ static id arch_lookup_in(MTL4PipelineDescriptor *d, int plain, int *from_run, id
         arch_probe_note(named, ps != nil, 1);
         if (ps && from_run) *from_run = arch_compact_takes(named);
         if (ps && found) *found = named;
-        if (!ps && !plain && g_arch_bundle && named != g_arch_bundle && (ps = ask(g_arch_bundle)) && found) *found = g_arch_bundle;
+        if (!ps && g_arch_bundle && named != g_arch_bundle && (ps = ask(g_arch_bundle)) && found) *found = g_arch_bundle;
         return ps;
     }
     if (!plain) for (id<MTL4Archive> a in g_arch4p) { id ps = ask(a); arch_probe_note(a, ps != nil, 0); if (ps) { if (found) *found = a; return ps; } }
+    else if (g_arch_bundle) { id ps = ask(g_arch_bundle); if (ps) { if (found) *found = g_arch_bundle; return ps; } }   // the bundle is never probed (arch_probe_note): no file of the device's
     for (id<MTL4Archive> a in g_arch4) { id ps = ask(a); arch_probe_note(a, ps != nil, 0); if (ps) { if (from_run) *from_run = arch_compact_takes(a); if (found) *found = a; return ps; } }
     return nil;
 }
@@ -8858,7 +8861,7 @@ static NSString *pso_user_path(void);
 // The pipeline archive made offline (dm/gfx/tools/pso_offline.py, metal-tt) and bundled with the app: DM_PSO_BUNDLE=<folder> (the iOS app sets it to its pso/ folder when it has one;
 // off: not used) holds <GPU architecture>.mtl4a per architecture it was built for and prebuilt.tsv, what it covers (pso_prebuild). The file named after this device's architecture is
 // opened read only and looked up first among the files of bases without a vertex layout; it is never written or compacted. The device's own archive (pso_archive/) so takes only
-// what it lacks: a draw, the prewarm and the prebuild compile a base, and the serializer captures it, only after the bundle missed (it holds no base with a vertex layout). A system
+// what it lacks: a draw, the prewarm and the prebuild compile a base, and the serializer captures it, only after the bundle missed (it also holds the layout bases of the prewarm list's R rows, which plain lookups ask it for: arch_lookup_in). A system
 // that cannot open it (one older than the archive's minimum, or an OS update that changed the GPU compiler) or a GPU it was not built for gets an info line, and the device builds
 // the bases itself as before (the on-device prebuild is the fallback)
 static NSString *g_bundle_dir;   // and g_arch_bundle, before arch_lookup_in

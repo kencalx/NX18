@@ -314,6 +314,107 @@ class Mesh(unittest.TestCase):
         self.assertEqual([n for n, _, _ in po.groups_of([], pipes + c, 5)], ['c00001', 'm00001'])   # the kinds apart, whatever their order
 
 
+def rkey(vs='v_b', fs='p_b', attrs=(), streams=(), cfmt=(70,), samples=1, a2c=0, blend_en=0, blend=(), size=504, **kw):
+    """An R row's pso_skey hex (a vertex shader, stage 0): attrs {NVN attribute: (format, offset, stream)}, streams {stream: (stride, divisor)}, laid out field by field as
+    nvn_pso_skey.h on arm64 (va_st: fmt:8, offset:19, stream:5; attr[16] at 136, stream[16] at 200, attr_hi[16] at 352 of the key)"""
+    head = bytes.fromhex(skey(vs=vs, fs=fs, cfmt=cfmt, samples=samples, a2c=a2c, blend_en=blend_en, blend=blend, vs_stage=0, **kw))
+    b = bytearray(head)
+    for a, (f, off, st) in dict(attrs).items(): struct.pack_into('<I', b, 88 + (136 + 4 * a if a < 16 else 352 + 4 * (a - 16)), f | off << 8 | st << 27)
+    for st, (stride, div) in dict(streams).items(): struct.pack_into('<2I', b, 88 + 200 + 8 * st, stride, div)
+    return bytes(b).hex()[:2 * size]
+
+
+class Layout(unittest.TestCase):
+    """The layout bases of the R rows: the key as the host writes it, the vertex descriptor and fragment entry pso_desc makes from it (nvn_mtl.m), the rows left to the device, the script"""
+    d: Path
+    setUp, shader = Plan.setUp, Plan.shader
+    F4, F2, H2, U4 = 0x2E, 0x16, 0x11, 0x27   # NVN vertex formats: RGBA32F, RG32F, RG16F, RGBA8UI
+    POS = {0: (0x2E, 0, 0)}
+
+    def shaders(self):
+        vz = [('main0', False), ('main0_z', False)]
+        self.shader('v', {'entry_z': 'main0_z', 'vertex_inputs': [{'location': 0, 'msl_type': 'float4'}, {'location': 1, 'msl_type': 'float2'}]}, {'_b': vz})
+        self.shader('vi', {'vertex_inputs': [{'location': 0, 'msl_type': 'float4'}, {'location': 1, 'msl_type': 'uint4'}], 'vin': {'shadow': [{'location': 1, 'float': 16, 'sint': 17}]}},
+                    {'_b': vz, '_bv': vz})
+        self.shader('vn', {'vertex_inputs': [{'location': 1, 'msl_type': 'uint4'}], 'vin': {'shadow': [{'location': 1, 'float': 16}]}}, {'_b': vz})   # no _bv: the CPU conversion
+        self.shader('vc', {'vertex_inputs': [{'location': 0, 'msl_type': 'float4'}]}, {'_b': [('main0', True)]})
+        self.shader('vl', {'layer_out': True, 'vertex_inputs': [{'location': 0, 'msl_type': 'float4'}]}, {'_b': vz})
+        self.shader('np', {'vertex_inputs': []}, {'_b': vz})
+        self.shader('p', {'raster': {'colors': [0, 1]}, 'entry_u': 'main0_u', 'entry_d': 'main0_d'}, {'_b': [('main0', False), ('main0_u', False), ('main0_d', False)]})
+        self.shader('pc', {}, {'_b': [('main0', True)]})
+        self.shader('pp', {'raster': {'primitive_id': 1}}, {'_b': [('main0', False)]})
+
+    def test_key_as_the_host_writes_it(self):
+        k = po.parse_render_key(rkey(attrs={0: (0x2E, 0, 0), 1: (0x16, 16, 3), 20: (0x11, 4, 2)}, streams={0: (24, 0), 3: (8, 1)}, cfmt=(70, 0), chmask=0xff, blend_en=3))
+        self.assertEqual((k['vs'], k['fs'], k['vs_stage'], k['attr'][0], k['attr'][1], k['attr'][20], k['stream'][3]), ('v_b', 'p_b', 0, (0x2E, 0, 0), (0x16, 16, 3), (0x11, 4, 2), (8, 1)))
+        self.assertEqual((k['chmask'], k['blend_en']), (0xf, 1))   # pso_key_norm: the absent target's
+        self.assertEqual(po.parse_render_key(rkey(attrs={20: (0x11, 4, 2)}, size=504 - 64))['attr'][20], (0, 0, 0))   # a row from before attr_hi
+        self.assertIsNone(po.parse_render_key(rkey()[:-2]))
+        self.assertEqual(po.read_layouts([self.d / 'none.tsv']), [])
+
+    def plan(self, *rows, zero=False):
+        return po.plan_layout(self.d, CHAIN, list(rows), zero)
+
+    def one(self, row, **kw):
+        bases, left = self.plan(row, **kw)
+        self.assertEqual(len(bases), 1, left); return bases[0]
+
+    def test_vertex_descriptor_as_pso_desc(self):
+        self.shaders()
+        b = self.one(rkey(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)}))
+        self.assertEqual((b.vert, b.frag, b.attributes, b.layouts), (('v_b', 'main0'), ('p_b', 'main0'), ((0, 'Float4', 0, 16, ), (1, 'Float2', 16, 16)), ((16, 24, 'PerVertex', 1),)))
+        self.assertEqual(self.one(rkey(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)}), zero=True).vert, ('v_b', 'main0_z'))
+        b = self.one(rkey(attrs={**self.POS, 1: (self.F2, 0, 1)}, streams={0: (16, 0), 1: (8, 2)}))   # instanced, every second instance
+        self.assertEqual(b.layouts, ((16, 16, 'PerVertex', 1), (17, 8, 'PerInstance', 2)))
+        b = self.one(rkey(attrs={**self.POS, 1: (0x0A, 0, 14)}, streams={0: (16, 0)}))   # a constant stream (stride 0): stride 4; streams 14 and 15 keep their own slot
+        self.assertEqual(b.layouts[0], (14, 4, 'Constant', 0))
+        b = self.one(rkey(attrs={**self.POS, 1: (0x57, 16, 0)}, streams={0: (20, 0)}))   # RG8_UI2F: converted on the CPU, its own slot from 1
+        self.assertEqual((b.attributes[1], b.layouts[0]), ((1, 'Float4', 0, 1), (1, 16, 'PerVertex', 1)))
+        b = self.one(rkey(vs='vi_b', attrs={**self.POS, 1: (self.U4, 16, 0)}, streams={0: (20, 0)}))   # an integer input fed its own class: no shadow inputs
+        self.assertEqual((b.vert, b.attributes[1]), (('vi_b', 'main0'), (1, 'UChar4', 16, 16)))
+        b = self.one(rkey(vs='vi_b', attrs={**self.POS, 1: (self.H2, 16, 0)}, streams={0: (20, 0)}))   # Half2 into a uint input: the float shadow; the others read the zero buffer
+        self.assertEqual((b.vert, b.attributes), (('vi_bv', 'main0'), ((0, 'Float4', 0, 16), (1, 'UInt4', 0, 30), (16, 'Half2', 16, 16), (17, 'Int4', 0, 30))))
+        self.assertEqual(b.layouts, ((16, 20, 'PerVertex', 1), (30, 16, 'Constant', 0)))
+        b = self.one(rkey(vs='vn_b', attrs={1: (self.H2, 0, 0)}, streams={0: (4, 0)}))   # no shadow library: the conversion
+        self.assertEqual((b.vert, b.attributes, b.layouts), (('vn_b', 'main0'), ((1, 'UInt4', 0, 1),), ((1, 16, 'PerVertex', 1),)))
+        b = self.one(rkey(attrs={1: (self.F2, 0, 0)}, streams={0: (8, 0)}))   # attribute 0 unset: the zero buffer
+        self.assertEqual(b.attributes[0], (0, 'Float4', 0, 30))
+        self.assertEqual(self.one(rkey(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)}, samples=4, a2c=1))[4:], (4, True))
+
+    def test_fragment_entry_and_depth_only(self):
+        self.shaders()
+        row = dict(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)})
+        self.assertEqual(self.one(rkey(cfmt=(73,), **row)).frag, ('p_b', 'main0_u'))
+        src1 = dict(OVER, dst_rgb=0x13)
+        self.assertEqual(self.one(rkey(blend_en=1, blend={0: src1}, **row)).frag, ('p_b', 'main0_d'))
+        self.assertEqual(self.one(rkey(fs='', cfmt=(), **row)).frag, (po.NOP_LIB, po.NOP_ENTRY))
+        self.assertEqual(self.plan(rkey(vs='np_b', fs='p_b'))[0][0].attributes, ())   # no stage input: no layout
+        self.assertEqual(po.plan_layout(self.d, CHAIN, [rkey(vs='np_b', fs='p_b')], False, [('np_b', 'main0', 'p_b', 'main0')])[0], [])   # the pair base already
+
+    def test_rows_left_out(self):
+        self.shaders()
+        row = dict(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)})
+        rows = [rkey(merged=1, **row), rkey(fz=1, **row), rkey(atest=1, **row), rkey(logic=1, **row), rkey(vs='vc_b', **row), rkey(fs='pc_b', **row), rkey(vs='vl_b', **row),
+                rkey(fs='pp_b', **row), rkey(attrs={**self.POS, 1: (0x3F, 16, 0)}, streams={0: (24, 0)}), rkey(attrs={**self.POS, 1: (self.F2, 0, 2)}, streams={0: (16, 0)}),
+                rkey(vs='gone_b', **row), 'ff', rkey(**row), rkey(**row)]
+        bases, left = self.plan(*rows)
+        self.assertEqual(len(bases), 1)   # the last two: one base
+        self.assertEqual(left, {'key': 1, 'merged': 2, 'side library': 2, 'reflection': 1, 'mesh': 0, 'layer': 1, 'primitive ID': 1, 'library': 0, 'entry': 0, 'constants': 2,
+                                'format': 1, 'stride': 1})
+
+    def test_script_and_groups(self):
+        self.shaders()
+        b = self.one(rkey(vs='vi_b', attrs={**self.POS, 1: (self.H2, 16, 0)}, streams={0: (20, 0)}, samples=2))
+        j = po.script(self.d, [], [b])
+        d, = j['pipeline_descriptors']['render_pipeline_descriptors']
+        self.assertEqual((d['vertex_function_descriptor'], d['raster_sample_count'], len(d['vertex_descriptor']['attributes']), len(d['vertex_descriptor']['layouts'])),
+                         ('fnd:vi_bv.main0', 2, 18, 31))
+        self.assertEqual((d['vertex_descriptor']['attributes'][16], d['vertex_descriptor']['attributes'][2], d['vertex_descriptor']['layouts'][30]),
+                         ({'format': 'Half2', 'offset': 16, 'buffer_index': 16}, {}, {'stride': 16, 'step_function': 'Constant', 'step_rate': 0}))
+        self.assertNotIn('alpha_to_coverage_state', d)
+        self.assertEqual([n for n, _, _ in po.groups_of([('v_bp', 'main0', 'p_b', 'main0')], [('c_b', 'main0'), b, b], 5, 5, 5, 1)], ['00001', 'c00001', 'l00001', 'l00002'])
+
+
 class Build(unittest.TestCase):
     """main: one archive per architecture, made again only when its key changes; the stamp, rest_pairs.tsv and archive.tsv beside them"""
     def setUp(self):
