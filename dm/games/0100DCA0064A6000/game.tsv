@@ -42,6 +42,10 @@ mem_used	0x4600000
 # steps by the time that really passed (the same walk in the lobby ends at the same spot at 30 and 60 fps). The game asks for present interval 2 as well, which display ignores
 fps_target	60
 present_interval	display
+# an Ultrawide mod costs frames on the iPhone (iPhone 18 Pro Max, release 1, the same route from warm starts, Picture Stretch): off, with edge smoothing, 60 fps with brief dips
+# to 51-54; on, without edge smoothing, 36-52 fps for most of the route's second half, GPU p50 17-24 ms against 16.7. It adds about 1.5-2 ms of GPU time in light areas and
+# 5-9 ms in busy rooms. The launcher's Ultrawide row says so (settings.tsv hint); it stays off by default, as for every game. See README.md, Ultrawide
+ultrawide_cost	fps
 
 # ---- Input ----
 # Luigi moves with the left stick and aims with the right; the D-pad calls up the Virtual Boo: the iPhone pad starts in the 3D layout, which has both

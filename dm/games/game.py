@@ -187,6 +187,8 @@ def header_one(g):
     if psh not in SHARPEN: sys.exit(f'{g.id}: present_sharpen must be off, low, medium or high: {psh}')
     paa = g.get('post_aa', 'off')   # the present's edge smoothing by default (nvn_mtl.m aa_mode, CMAA2; DM_POST_AA and the launcher's Anti-aliasing override it): off / edge / edge-sharp
     if paa not in ('off', 'edge', 'edge-sharp'): sys.exit(f'{g.id}: post_aa must be off, edge or edge-sharp: {paa}')
+    uwc = g.get('ultrawide_cost', 'none')   # what the launcher's Ultrawide (a mod of the ultrawide role, settings.tsv DM_MOD_ULTRAWIDE) was measured to cost this game on an iPhone: none / fps (it drops below 60 fps where the game held 60 without it; the row's hint says so)
+    if uwc not in ('none', 'fps'): sys.exit(f'{g.id}: ultrawide_cost must be none or fps: {uwc}')
     # pso_mtl4 is retired: every pipeline is built through MTL4Compiler, on iOS and on the Mac. Upstream profiles still carry it, so it is tolerated: on silently, any other
     # value with a warning, never an error (the profile builds as if it were on)
     p4 = g.get('pso_mtl4', 'on')
@@ -272,6 +274,7 @@ def header_one(g):
          f'#define DM_GAME_PRESENT_TRIM {int(ptr)}',   # display-link ticks in a row with two or more frames waiting before one is dropped (0 off, -1 no key: the host's default)
          f'#define DM_GAME_PRESENT_SHARPEN {SHARPEN.index(psh)}',   # 0 off to 3 high: settings.tsv DM_PRESENT_SHARPEN's levels
          f'#define DM_GAME_POST_AA {q(paa)}',   # settings.tsv DM_POST_AA's values (nvn_upscale_pick.h aa_parse)
+         f'#define DM_GAME_ULTRAWIDE_COST {q(uwc)}',   # for the launcher only: settings.tsv DM_MOD_ULTRAWIDE's hint tests it (settings.py); the host does not read it
          f'#define DM_GAME_ENC_THREAD {int(et == "on")}',
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)
          f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch").index(pl)}',

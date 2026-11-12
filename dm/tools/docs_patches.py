@@ -140,6 +140,8 @@ SWITCH_BINDING = [
     ('fps_target', '', {'what': 'frame rate target', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'a choice per game'}),
     ('fps_max', '', {'what': 'a frame rate of 120 allowed (fps_target and the launcher\'s Frame rate)', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
      'why': "only for a game checked at that speed: its logic must keep time at 120 frames a second (hle_nvn.c fps_high)"}),
+    ('ultrawide_cost', '', {'what': "the launcher's Ultrawide row says an Ultrawide mod drops the game below 60 fps on an iPhone", 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "a measurement of the game with its mod on a device: the same route with and without it"}),
     ('ue_fps_cvar', '', {'what': "the game's own Unreal frame-limit variable", 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's own variable, which its settings apply to t.MaxFPS; the rewriter finds it by name (ue_cvar.py)"}),
     ('perf_mode', '', {'what': 'Boost whatever the operation mode', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': 'a combination a Switch 1 never reports: a choice per game'}),
     ('launch_param', '', {'what': 'the launch parameter its launcher program passes', 'now': 'game', 'goal': 'game', 'purpose': 'runtime',
