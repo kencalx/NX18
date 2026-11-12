@@ -491,6 +491,8 @@ static void spare_tables_case(void) {
         CHECK(kept_last && g_npool_spare == cap, "with spares completed, the lowest fence goes and the new one is kept");
         uint64_t reused0 = g_pool_reused; id<MTLBuffer> t = pool_table_take(1000);
         CHECK(t && t != last && g_pool_reused == reused0 + 1, "and a completed spare is taken again");
+        uint64_t ss[5]; mtl_pool_spare_stats(ss);   // the power line's counts (hle_nvn.c 'pool tables up to frame', with replay_spares)
+        CHECK(ss[0] == g_pool_made && ss[1] == g_pool_reused && ss[2] == (uint64_t)g_npool_spare && ss[3] == (uint64_t)cap && ss[4] == g_pool_dropped, "the power line reads the tables made, reused, the spares kept of how many, and let go");
         g_done = done0;
     }
     while (g_npool_spare) { g_pool_spare[--g_npool_spare].buf = nil; }

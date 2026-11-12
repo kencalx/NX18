@@ -2030,9 +2030,12 @@ static void power_line(uint64_t frame) {
             frame, (fs_ - pfs) / nf, (fr - pfr) / nf, (ft - pft) / nf, (fw - pfw) / nf);
         pfs = fs_; pfr = fr; pft = ft; pfw = fw;
         void mtl_pool_stats(uint64_t s[6]); static uint64_t pps[6]; uint64_t ps[6]; mtl_pool_stats(ps);   // the tables of handles traced to no slot (nvn_mtl.m pool_gpu)
-        if (ps[0] != pps[0] || ps[2] != pps[2] || ps[3] != pps[3]) LOG("[nvn] pool tables up to frame %llu, per frame: %.2f built whole (%.2f ms), %.2f patched, %.2f kept; of these two %.2f over memory pool changes, %.2f over a new submission",
-            frame, (ps[0] - pps[0]) / nf, (ps[1] - pps[1]) / 1e3 / nf, (ps[2] - pps[2]) / nf, (ps[3] - pps[3]) / nf, (ps[4] - pps[4]) / nf, (ps[5] - pps[5]) / nf);
-        memcpy(pps, ps, sizeof pps);
+        void mtl_pool_spare_stats(uint64_t s[5]); static uint64_t pss[5]; uint64_t ss[5] = {0}; char psp[160] = "";   // the tables made and reused, the spares (nvn_mtl.m pool_table_give), for a profile with replay_spares (on or turned off, so both sides of the A/B have it) or DM_REPLAY_SPARES=1; every other game's line as before
+        if (DM_GAME_REPLAY_SPARES || nvn_replay_spares()) { mtl_pool_spare_stats(ss); snprintf(psp, sizeof psp, "; tables made %.2f, reused %.2f (spares kept %llu of %llu, let go %llu)", (ss[0] - pss[0]) / nf, (ss[1] - pss[1]) / nf,
+            (unsigned long long)ss[2], (unsigned long long)ss[3], (unsigned long long)(ss[4] - pss[4])); }
+        if (ps[0] != pps[0] || ps[2] != pps[2] || ps[3] != pps[3]) LOG("[nvn] pool tables up to frame %llu, per frame: %.2f built whole (%.2f ms), %.2f patched, %.2f kept; of these two %.2f over memory pool changes, %.2f over a new submission%s",
+            frame, (ps[0] - pps[0]) / nf, (ps[1] - pps[1]) / 1e3 / nf, (ps[2] - pps[2]) / nf, (ps[3] - pps[3]) / nf, (ps[4] - pps[4]) / nf, (ps[5] - pps[5]) / nf, psp);
+        memcpy(pps, ps, sizeof pps); memcpy(pss, ss, sizeof pss);
         void mtl_gsb_stats(uint64_t *, uint64_t *); static uint64_t pgn, pgb; uint64_t gn, gb; mtl_gsb_stats(&gn, &gb);   // GPU textures' writes stored into their storage (nvn_mtl.m gsb_store)
         if (gn != pgn) LOG("[nvn] GPU texture storage up to frame %llu: %llu regions, %.1f MB written into their storage on the GPU (%.2f regions, %.2f MB per frame)",
             frame, (unsigned long long)(gn - pgn), (gb - pgb) / 1048576.0, (gn - pgn) / nf, (gb - pgb) / 1048576.0 / nf);

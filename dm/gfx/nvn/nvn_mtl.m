@@ -11140,6 +11140,9 @@ static void pool_table_give(id<MTLBuffer> b) {
         defer_obj_release(g_pool_spare[o].buf); g_pool_spare[o] = g_pool_spare[--g_npool_spare]; g_pool_spare[g_npool_spare].buf = nil; }
     g_pool_spare[g_npool_spare].buf = b; g_pool_spare[g_npool_spare].fence = g_fence + 1; g_npool_spare++;
 }
+// The spares' counts for the power line's 'pool tables up to frame' (hle_nvn.c), with replay_spares: tables made, reused, spares kept now and of how many, let go. The patch path
+// (pool_table_take in pool_gpu) makes and reuses nearly all of Ocarina of Time's tables, and the 'pool walk' line, written from the whole-table path every 500 builds, came once a run
+void mtl_pool_spare_stats(uint64_t s[5]) { s[0] = g_pool_made; s[1] = g_pool_reused; s[2] = (uint64_t)g_npool_spare; s[3] = (uint64_t)pool_spares(); s[4] = g_pool_dropped; }
 // One entry of a pool table, as the walk takes it: the resource ID of what the ID holds (0: nothing of the type, or a texture not made). gone counts IDs without storage, and *dead is set for
 // one whose storage does not exist (yet): one marked gone stays so until it is registered again, which is noted. left / left_req count the textures past limit (what this frame may still
 // make) and those of them a shader read. *transient is set for a view of a retired registration, which goes at the end of this submission. Caller holds g_rmu
