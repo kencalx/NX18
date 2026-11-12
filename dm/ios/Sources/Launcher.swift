@@ -71,8 +71,8 @@ private func rowBackground(_ focused: Bool, fill: Color = NX18Palette.row, first
     }
 }
 
-/// Cloud saves: an iCloud Drive folder shared with the Mac app (chosen in its settings window's
-/// Cloud saves too). The host brings the save in from there when the game starts and
+/// Cloud saves: an iCloud Drive folder shared with the game's app on the other iPhone, iPad or Mac
+/// (its Cloud saves too). The host brings the save in from there when the game starts and
 /// sends it there after each save (dm/host/save_sync.h); the folder is a bookmark (CloudSaves.m).
 private struct CloudSavesSection: View {
     @Binding var picking: Bool   // the folder picker is up (the settings screen's controller waits meanwhile, but for its B, which closes it; its A on this section opens it)

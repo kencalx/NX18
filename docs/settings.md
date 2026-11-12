@@ -180,7 +180,7 @@ Touches on the game's touch screen follow the picture in all three. With Stretch
 
 ### Picture shape
 
-Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizons). **iPhone Duo screen (1.43:1)** renders a taller picture of the Duo's own shape: the sides of 16:9 with more above and below, and the HUD at the screen's edges. **16:9** is the Switch's picture. The taller picture has about a quarter more pixels, so it runs a little slower and warmer.
+Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizons). **iPhone Duo screen (1.43:1)** renders a taller picture of the Duo's own shape: the sides of 16:9 with more above and below, and the HUD at the screen's edges. **16:9** is the Switch's picture. A taller picture has more pixels (about a quarter more at the Duo's 1.43:1, a third more with **Match screen** on a 4:3 iPad), so it runs a little slower and warmer.
 
 ### Frame-rate counter
 
@@ -367,7 +367,7 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 ## Cloud saves
 
-The Mac app and the iPhone app of one game can share a save through iCloud Drive. Choose the same iCloud Drive folder on both: **Cloud saves** › **Choose a folder…** in the Mac settings window, and **Cloud saves** in the iPhone launcher (any folder, for instance one named **nxnative Saves**). Each game keeps one file there, `<title ID>/save.dmsync`, which holds the whole save.
+The iPhone, iPad and Mac apps of one game can share a save through iCloud Drive. Choose the same iCloud Drive folder on each: **Cloud saves** › **Choose a folder…** in the Mac settings window, and **Cloud saves** in the iPhone or iPad launcher (any folder, for instance one named **nxnative Saves**). Each game keeps one file there, `<title ID>/save.dmsync`, which holds the whole save.
 
 When the game starts, it brings the save from iCloud Drive in if only that one changed since the last sync; a few seconds after the game saves, it sends its save if only this one changed. The iPhone app also sends when it goes to the background, and the Mac app once the game has quit. If you played on both without the save getting across in between, **Play** asks which save to keep: each with its date and size, since the newer one is not always the one with more progress (a new game saved a minute later is newer). The one you don't pick is kept, as below. The check runs also when you skip the screen: on the iPhone and iPad, **Skip this screen next time** and the **Game** shortcut show the screen while it checks, and the game starts by itself when there is nothing to ask; on the Mac, with the settings window off, it asks in an alert. With `DM_LAUNCHER=0`, the newer save wins (the iPhone's `log.txt` says `the cloud save was not checked`).
 

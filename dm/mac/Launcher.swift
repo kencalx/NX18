@@ -824,7 +824,7 @@ struct AboutGameSheet: View {
     }
 }
 
-/// Cloud saves: a folder the save is synced through (dm/host/save_sync.h), the one the iPhone app picks in its launcher's Cloud saves section. It is kept in this app's
+/// Cloud saves: a folder the save is synced through (dm/host/save_sync.h), the one the iPhone or iPad app picks in its launcher's Cloud saves section. It is kept in this app's
 /// preferences as cloudSaves.folder, which launcher.c puts into DM_SAVE_SYNC before the host starts; a DM_SAVE_SYNC an env file or the launch environment set wins, and is shown here.
 struct CloudSavesSection: View {
     @AppStorage("cloudSaves.folder") private var folder = ""
