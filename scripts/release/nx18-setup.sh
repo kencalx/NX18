@@ -1,5 +1,6 @@
 #!/bin/bash
-# nx18-setup.sh: gets a Mac ready to build games with NX 18 (https://github.com/kencalx/NX18).
+# nx18-setup.sh: gets a Mac ready to build games with NX 18 (https://github.com/kencalx/NX18) from
+# your legally owned and acquired game files.
 #
 # It checks the Mac, Xcode 27.3 and its Metal toolchain, installs the Homebrew tools and the Python
 # modules the build needs (in a virtualenv inside the checkout), and clones or updates NX 18.
@@ -35,9 +36,9 @@ usage() {
     cat <<EOF
 Usage: bash nx18-setup.sh [options]
 
-Gets this Mac ready to build games with NX 18: checks macOS, Xcode $NEED_XCODE and its Metal
-toolchain, installs xcodegen and zstd with Homebrew, makes a Python virtualenv with the modules the
-build needs, and clones or updates $REPO_URL.
+Gets this Mac ready to build games with NX 18 from your legally owned and acquired game files:
+checks macOS, Xcode $NEED_XCODE and its Metal toolchain, installs xcodegen and zstd with Homebrew,
+makes a Python virtualenv with the modules the build needs, and clones or updates $REPO_URL.
 
 Options:
   --check        report what is missing; install, download and change nothing

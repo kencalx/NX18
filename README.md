@@ -4,7 +4,7 @@
 
 A fork of [nxnative](https://github.com/seedds/nxnative) for the iPhone 18 Pro Max ([what this fork changes](#requirements)).
 
-Play your own Nintendo Switch and Switch 2 games natively on Apple silicon Macs, iPhone and iPad. One script packs your game into a Mac app or an unsigned IPA that you sideload.
+Play your legally owned and acquired Nintendo Switch and Switch 2 games natively on Apple silicon Macs, iPhone and iPad. One script packs your game into a Mac app or an unsigned IPA that you sideload.
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
 
@@ -14,7 +14,7 @@ It is not an emulator: the game's own code runs directly on the Apple chip, with
 
 The full [tested games table](dm/games/README.md#games) includes original Switch games, tested builds, engines and graphics APIs. Each game's note records its tested platforms, progress and known issues.
 
-These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup` or `.nx` file or a dump folder](#switch-2-games):
+These Switch 2 games have passed Mac gameplay testing. Build them from your legally owned and acquired game files, as a [`.nup` or `.nx` file or a dump folder](#switch-2-games):
 
 - [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md)
 - [Fire Emblem Fortune's Weave](dm/games/04007EF01F8AE000/README.md) — up to 120 fps
@@ -31,7 +31,7 @@ These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup`
 
 ## Community front ends
 
-Community projects build on nxnative with tools to turn your games into apps for your iPhone, iPad or Mac without the command line, and libraries to organize and launch them. They are separate projects: questions and bugs about them go to their own pages.
+Community projects build on nxnative with tools to turn your legally owned and acquired games into apps for your iPhone, iPad or Mac without the command line, and libraries to organize and launch them. They are separate projects: questions and bugs about them go to their own pages.
 
 - [NX2Apple](https://github.com/LNPANDY/NX2Apple) — Mac builder with a shared iPhone/iPad game library.
 - [NX Play](https://github.com/varyform/nx-native-wrapper) — Mac library with device installs and save sync.
@@ -60,7 +60,7 @@ Switch 2 games are built from one `.nup` or `.nx` file or a folder of their file
 Two scripts come with each [release](https://github.com/kencalx/NX18/releases) (and are in [`scripts/release`](scripts/release)). They do the steps of [Build from the command line](#build-from-the-command-line) for you:
 
 - **`nx18-setup.sh`** gets the Mac ready. It checks macOS, Xcode 27.3 (which you download from Apple yourself; it says which and how to select it) and its Metal toolchain, installs xcodegen, zstd and the Python modules (into a virtualenv, `.venv` in the NX 18 folder), and clones or updates NX 18 in `~/NX18`. It asks before each install or download and never runs `sudo`, and it leaves a folder with your own changes in it alone. `--check` only reports what is missing; `--yes` answers every question; `--dir <folder>` and `--ref <tag>` choose another folder or a release.
-- **`nx18-build.sh`** builds a game. Set your game (its folder of NSPs, a dump folder, or a `.nup` or `.nx` file), your `prod.keys` and the target (`iphone`, `ipad` or `mac-app`) in the settings at its top, then run it. It checks the settings, selects Xcode 27.3 by itself, runs the build and says where the IPA or app is. It never prints or copies your keys.
+- **`nx18-build.sh`** builds a game. Set your game (your legally owned and acquired game files: a folder of NSPs, a dump folder, or a `.nup` or `.nx` file), your `prod.keys` and the target (`iphone`, `ipad` or `mac-app`) in the settings at its top, then run it. It checks the settings, selects Xcode 27.3 by itself, runs the build and says where the IPA or app is. It never prints or copies your keys.
 
 ```
 bash ~/Downloads/nx18-setup.sh
@@ -72,7 +72,7 @@ Each setting can also be given as an environment variable (`NX18_GAME`, `NX18_KE
 
 ### Build from the command line
 
-You need an Apple silicon Mac with macOS 27.3 or later, [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.3) 27.3, [Homebrew](https://brew.sh) and Python 3.12 or newer (an arm64 one, not an Intel Homebrew's). An iPhone build also needs Xcode's iOS platform (Xcode → Settings → Components).
+You need your legally owned and acquired game files, an Apple silicon Mac with macOS 27.3 or later, [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.3) 27.3, [Homebrew](https://brew.sh) and Python 3.12 or newer (an arm64 one, not an Intel Homebrew's). An iPhone build also needs Xcode's iOS platform (Xcode → Settings → Components).
 
 The shaders are built with Xcode 27.3's Metal compiler. Select it before step 1: `sudo xcode-select -s /Applications/Xcode.app`. With several Xcode versions installed, name this one `Xcode-27.3.app` and select it with `sudo xcode-select -s /Applications/Xcode-27.3.app`.
 
@@ -85,7 +85,7 @@ brew install xcodegen zstd
 python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
 ```
 
-**2. Put your game in a folder**: the game, plus its update and DLC if you have them (`.nsp`, `.xci`, `.nsz` or `.xcz`):
+**2. Put your game in a folder**: your legally owned and acquired game, plus its update and DLC if you have them (`.nsp`, `.xci`, `.nsz` or `.xcz`):
 
 ```
 ~/Games/MarioWonder/
@@ -139,7 +139,7 @@ To check that it worked, start a game, share its log (the in-game menu › **Sha
 
 ### Switch 2 games
 
-A Switch 2 game is built from one [NUP](https://github.com/a55uka/nup) container (a `.nup` file), one [NX](https://github.com/fab918/nxformat) archive (a `.nx` file) or a folder of its files, not from NSPs. None of them needs `prod.keys`. A game this project has no profile for is surveyed and gets a provisional profile, as NSPs do ([Port another game](docs/development.md#port-another-game)), which may not boot. You get a Mac app; iPhone and iPad are untested.
+A Switch 2 game is built from your legally owned and acquired game files, in one [NUP](https://github.com/a55uka/nup) container (a `.nup` file), one [NX](https://github.com/fab918/nxformat) archive (a `.nx` file) or a folder of its files, not from NSPs. None of them needs `prod.keys`. A game this project has no profile for is surveyed and gets a provisional profile, as NSPs do ([Port another game](docs/development.md#port-another-game)), which may not boot. You get a Mac app; iPhone and iPad are untested.
 
 **From a `.nup` file**, which holds the base game, its updates and DLC in one file. Give the file, or a folder that holds it:
 

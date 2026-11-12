@@ -1,6 +1,6 @@
 # Playing
 
-How to build and install a game: [README](../README.md#how-to-play).
+How to build a game from your legally owned and acquired game files and install it: [README](../README.md#how-to-play).
 
 - **Settings:** a screen before the game starts sets frame rate, resolution, docked or handheld mode, language, rumble and more. Tap **Play**; your choices are remembered. What each one does: [Settings](settings.md).
 - **Saves and logs** are in the Files app, under the game's name: `save/` and `log.txt` (the previous run is `log.prev.txt`). When something goes wrong, send `log.txt`: the in-game menu › **Share log** sends it and `log.prev.txt` in one share sheet. A `glslc_play/` folder there holds shaders the game made while you played that your build does not have (things drawn without them are missing): copy it into the folder of the game's NSPs, and the next build adds them ([development.md](development.md)).
