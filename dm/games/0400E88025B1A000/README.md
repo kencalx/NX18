@@ -47,10 +47,10 @@ The owner's two starts on an iPhone 18 Pro Max (A20 Pro GPU), the X1.0 build (`6
 | Frames | 51.9 fps (the power windows' median); frame time p50 16.73 ms, p95 21.53 ms; 236 of 24,427 frames dropped (0.97%) | 60 fps; p50 16.67 ms, p95 17.43 ms; 78 of 11,344 dropped (0.69%) |
 | Frames over 100 ms | 48, 46 of them new pipelines; 6 over 500 ms, the longest 2,116 ms (26 pipelines, 2,071 ms of making them) | 9, 5 of them new pipelines (385, 262, 215, 173 and 169 ms), the others texture uploads and a present |
 | GPU time p50 | 10.62 ms | 14.31 ms |
-| Memory | footprint at most 3.17 GB; at least 5.0 GB of headroom to the app's limit | at most 3.07 GB; at least 5.17 GB of headroom |
+| Memory | footprint at most 3.17 GB; at least 5.02 GB of headroom to the app's limit | at most 3.07 GB; at least 5.17 GB of headroom |
 | Enqueue to display p50 | 44.1 ms | 29.05 ms |
 
-Both: thermal state 0 throughout, no audio underrun, and the five `[RED] nvnDeviceGetInteger` lines ([Open](#open)). The archive bundled with the app (73.6 MB) was taken (`holds the bases of every shader pair (16 of 16 probed bases found)`), so the `depth_mode zero` archive holds on the device too, and all 14 compute pipelines came from it, none built. Its lookups in play found nothing on the first start, as on the Mac: the bases the draws compiled are those of the render pipelines the device list records as `R` rows (the second start's prepare step found 358 of them in the device's archive), which the pair bases do not give.
+Both: thermal state 0 throughout, no audio underrun, and the five `[RED] nvnDeviceGetInteger` lines ([Open](#open)). The archive bundled with the app (73.6 MB) was taken (`holds the bases of every shader pair (16 of 16 probed bases found)`), so the `depth_mode zero` archive holds on the device too; on the second start its prepare step took all 14 compute pipelines from it, none built (the first start's log does not count them). Its lookups in play found nothing on the first start, as on the Mac: the bases the draws compiled are those of the render pipelines the device list records as `R` rows (the second start's prepare step found 358 of them in the device's archive), which the pair bases do not give.
 
 ### Pipelines on a first start
 
