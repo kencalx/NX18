@@ -38,9 +38,12 @@ class MacGuideTests(unittest.TestCase):
                 (htdocs / rel).parent.mkdir(parents=True, exist_ok=True); (htdocs / rel).write_text(text)
             (tmp / 'outside.txt').write_text('outside the guide\n')
             (htdocs / 'link.txt').symlink_to(tmp / 'outside.txt')   # inside the folder by name, outside it on disk
-            exe = tmp / 'mac_guide_check'
-            sources = [REPO / 'dm/ios/Sources/LauncherSettings.swift', REPO / 'dm/ios/Sources/LauncherRow.swift', REPO / 'dm/mac/Launcher.swift',
-                       REPO / 'dm/ios/Sources/LauncherGuideFiles.swift', Path(__file__).with_name('mac_guide_check.swift')]
+            exe, sync = tmp / 'mac_guide_check', tmp / 'save_sync.o'
+            # the window's cloud-save check calls the host's save_sync_report, which the app links as save_sync.o (dm/mac/pack_app.py)
+            c = subprocess.run(['xcrun', '-sdk', 'macosx', 'clang', '-I', str(REPO / 'dm/host'), '-c', '-o', str(sync), str(REPO / 'dm/host/save_sync.c')], capture_output=True, text=True, timeout=300)
+            self.assertEqual(c.returncode, 0, c.stdout + c.stderr)
+            sources = [REPO / 'dm/ios/Sources/LauncherSettings.swift', REPO / 'dm/ios/Sources/LauncherRow.swift', REPO / 'dm/ios/Sources/SaveSyncReport.swift', REPO / 'dm/mac/Launcher.swift',
+                       REPO / 'dm/ios/Sources/LauncherGuideFiles.swift', Path(__file__).with_name('mac_guide_check.swift'), sync]
             c = subprocess.run(['xcrun', '-sdk', 'macosx', 'swiftc', '-swift-version', '5', '-parse-as-library', '-module-cache-path', str(tmp / 'module-cache'),
                                 '-o', str(exe), *map(str, sources)], capture_output=True, text=True, timeout=300)
             self.assertEqual(c.returncode, 0, c.stdout + c.stderr)

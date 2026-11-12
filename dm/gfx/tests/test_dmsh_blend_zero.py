@@ -90,7 +90,7 @@ class BlendZero(unittest.TestCase):
         self.assertTrue(re.search(r'\n    dm_blend0\(out, dm_blend\);\n    return out;\n\}$', b))   # the last line is still the return other stages look for
         self.assertEqual(e['params'][-1], PARAM)
         self.assertEqual(e['args'].split(', ')[-1], 'dm_blend')
-        self.assertLess(out.index('struct main0_out'), out.index('void dm_blend0(main0_out& dm_o'))   # the helper takes the struct: after it, before main0
+        self.assertLess(out.index('struct main0_out'), out.index('void dm_blend0(thread main0_out& dm_o'))   # the helper takes main0's local output: after its struct, before main0
         self.assertLess(out.index('void dm_blend0('), out.index('fragment main0_out main0('))
 
     def test_each_float4_colour_by_its_index(self):

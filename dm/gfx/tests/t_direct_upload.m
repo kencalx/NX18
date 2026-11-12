@@ -31,9 +31,10 @@ static void run(int target,unsigned width,unsigned height,unsigned layers,unsign
         int fast=direct&&!(source_offset&7)&&nvn_deswz_gpu_direct_supported(&t.d);CHECK("direct upload selected only when eligible",g_direct_uploads-uploads==(uint64_t)fast);CHECK("one dispatch per mip across all faces",g_direct_dispatches-dispatches==(fast?levels:0));
         if(!round)first=image;else CHECK("pending/read texture is not overwritten",image!=previous);
         if(round==2)CHECK("idle spare texture is reused",image==first);previous=image;
+        up_wait_zero(&g_up_pending,WS_DIAG);   // a dropped batch is reported by its completion handler, after the submission's fence
         if(atomic_load(&g_up_lost_n)) {
             uint64_t recovered=atomic_load(&g_up_lost_redo);mtl_sub_begin();image=tex_mtl(&t);finish();
-            CHECK("direct target participates in dropped-upload recovery",atomic_load(&g_up_lost_redo)==recovered+1);CHECK("dropped upload marker consumed",!atomic_load(&g_up_lost_n));first=image;previous=image;
+            CHECK("direct target participates in dropped-upload recovery",atomic_load(&g_up_lost_redo)==recovered+1);CHECK("a dropped upload is uploaded again into another texture, edge copies or not",image!=previous);CHECK("dropped upload marker consumed",!atomic_load(&g_up_lost_n));first=image;previous=image;
         }
         if(!round&&direct){
             tex_t initial=t;initial.has_layout=0;initial.serial+=100000;

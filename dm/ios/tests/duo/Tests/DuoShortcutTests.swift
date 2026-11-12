@@ -5,8 +5,15 @@ import XCTest
 
 // The home screen shortcuts (LauncherShortcuts.swift): the start each gives against the program record, DM_LAUNCHER and the player's skip; a cold start's shortcut handed over before the
 // launcher decides, then the real settings screen (dmShowLauncher, over the harness's root view controller) opened with the guide, a shortcut while it is up (Launcher closes the guide,
-// Guide opens it, Game plays), one while the game runs (Game carries on, Launcher and Guide open the in-game menu), and the menu opening for it
+// Guide opens it, Game plays), one while the game runs (Game carries on, Launcher and Guide open the in-game menu), and the menu opening for it. With cloud saves on, the starts that
+// skip the screen (Skip this screen next time, the Game shortcut) show it for the cloud-save check, the game starting by itself when there is nothing to ask
 private nonisolated(unsafe) var duoPlays = 0   // dmShowLauncher's done: the game would start
+// The same for the stopped check below, apart: a settings screen an earlier test dismissed without playing stays alive and hears the shortcuts sent here, and its own done counts duoPlays
+private nonisolated(unsafe) var duoCheckPlays = 0
+// The held start below: its own starts, and the app's activity as the test fakes it (LauncherShortcuts.appActive) with how often it was asked
+private nonisolated(unsafe) var duoHeldPlays = 0
+private nonisolated(unsafe) var duoActive = true
+private nonisolated(unsafe) var duoAskedActive = 0
 
 final class DuoShortcutTests: XCTestCase {
     func testTypesAndTheStartOrder() {
@@ -16,28 +23,29 @@ final class DuoShortcutTests: XCTestCase {
         XCTAssertEqual(LauncherShortcut.allCases.map(\.type), ["dm.shortcut.game", "dm.shortcut.launcher", "dm.shortcut.guide"])
         let none: [String: String] = [:]
         // A shortcut wins over the player's skip, each this time only
-        XCTAssertEqual(LauncherShortcuts.start(shortcut: .game, environment: none, skipChosen: false).start, .skip("shortcut Game: the game starts at once with the saved choices (this time only)"))
-        XCTAssertEqual(LauncherShortcuts.start(shortcut: .launcher, environment: none, skipChosen: true).start, .show(guide: false))
-        XCTAssertEqual(LauncherShortcuts.start(shortcut: .guide, environment: none, skipChosen: true).start, .show(guide: true))
-        XCTAssertEqual(LauncherShortcuts.start(shortcut: nil, environment: none, skipChosen: true).start, .playerSkip, "Without one, the player's skip")
-        XCTAssertEqual(LauncherShortcuts.start(shortcut: nil, environment: none, skipChosen: false).start, .show(guide: false))
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: .game, environment: none, skipChosen: false, cloudSaves: false).start, .skip("shortcut Game: the game starts at once with the saved choices (this time only)"))
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: .launcher, environment: none, skipChosen: true, cloudSaves: false).start, .show(guide: false))
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: .guide, environment: none, skipChosen: true, cloudSaves: false).start, .show(guide: true))
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: nil, environment: none, skipChosen: true, cloudSaves: false).start, .playerSkip, "Without one, the player's skip")
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: nil, environment: none, skipChosen: false, cloudSaves: false).start, .show(guide: false))
         // DM_LAUNCHER from an env file or the launch wins over a shortcut, and says so when it overrules it
         let envOff = ["DM_LAUNCHER": "0", "DM_ENV_FILE_KEYS": "DM_LAUNCHER", "DM_ENV_LAUNCH_KEYS": ""]
-        let off = LauncherShortcuts.start(shortcut: .launcher, environment: envOff, skipChosen: false)
+        let off = LauncherShortcuts.start(shortcut: .launcher, environment: envOff, skipChosen: false, cloudSaves: false)
         XCTAssertEqual(off.start, .skip("off (DM_LAUNCHER=0)"))
-        XCTAssertEqual(off.note, "launcher: shortcut Launcher ignored: DM_LAUNCHER=0 from an env file or the launch decides")
-        XCTAssertNil(LauncherShortcuts.start(shortcut: .game, environment: envOff, skipChosen: false).note, "Game agrees with DM_LAUNCHER=0: nothing to say")
+        XCTAssertEqual(off.notes, ["launcher: shortcut Launcher ignored: DM_LAUNCHER=0 from an env file or the launch decides"])
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: .game, environment: envOff, skipChosen: false, cloudSaves: false).notes, [], "Game agrees with DM_LAUNCHER=0: nothing to say")
         let envOn = ["DM_LAUNCHER": "1", "DM_ENV_FILE_KEYS": "", "DM_ENV_LAUNCH_KEYS": "DM_LAUNCHER"]
-        let on = LauncherShortcuts.start(shortcut: .game, environment: envOn, skipChosen: true)
+        let on = LauncherShortcuts.start(shortcut: .game, environment: envOn, skipChosen: true, cloudSaves: false)
         XCTAssertEqual(on.start, .show(guide: false))
-        XCTAssertEqual(on.note, "launcher: shortcut Game ignored: DM_LAUNCHER=1 from an env file or the launch decides")
-        XCTAssertEqual(LauncherShortcuts.start(shortcut: .guide, environment: envOn, skipChosen: false).start, .show(guide: true), "The screen DM_LAUNCHER shows still opens the guide")
+        XCTAssertEqual(on.notes, ["launcher: shortcut Game ignored: DM_LAUNCHER=1 from an env file or the launch decides"])
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: .guide, environment: envOn, skipChosen: false, cloudSaves: false).start, .show(guide: true), "The screen DM_LAUNCHER shows still opens the guide")
         // main.m's program record (DM_LAUNCHER=0 that neither list names) wins over everything
         let record = ["DM_LAUNCHER": "0", "DM_ENV_FILE_KEYS": "", "DM_ENV_LAUNCH_KEYS": ""]
         for s in LauncherShortcut.allCases {
-            let r = LauncherShortcuts.start(shortcut: s, environment: record, skipChosen: false)
+            let r = LauncherShortcuts.start(shortcut: s, environment: record, skipChosen: false, cloudSaves: false)
             XCTAssertEqual(r.start, .skip("off (DM_LAUNCHER=0)"))
-            XCTAssertTrue(r.note?.contains("program record") ?? false, "\(s): \(r.note ?? "no note")")
+            XCTAssertEqual(r.notes.count, 1)
+            XCTAssertTrue(r.notes.first?.contains("program record") ?? false, "\(s): \(r.notes)")
         }
     }
 
@@ -207,7 +215,7 @@ final class DuoShortcutTests: XCTestCase {
             .write(to: dir.appendingPathComponent("launcher.json"))
         let skip = UserDefaults.standard.object(forKey: LauncherModel.skipKey)
         UserDefaults.standard.removeObject(forKey: LauncherModel.skipKey)   // the screen would show
-        setenv("DM_APP_DM", dir.path, 1); unsetenv("DM_LAUNCHER")
+        setenv("DM_APP_DM", dir.path, 1); unsetenv("DM_LAUNCHER"); unsetenv("DM_SAVE_SYNC")   // cloud saves off (no folder picked in the harness): no check, no screen
         defer {
             unsetenv("DM_APP_DM")
             if let skip { UserDefaults.standard.set(skip, forKey: LauncherModel.skipKey) }
@@ -227,5 +235,236 @@ final class DuoShortcutTests: XCTestCase {
         LauncherShortcuts.started = false
         XCTAssertTrue(dmShowLauncher(Unmanaged.passUnretained(root).toOpaque(), { duoPlays += 1 }))
         XCTAssertNotNil(root.presentedViewController)
+    }
+
+    // The cloud-save check of a start that skips the screen (LauncherShortcuts.start, afterWait, cloudSavesOn): the pure decisions
+    func testCloudSaveCheckDecisions() {
+        let none: [String: String] = [:]
+        // Cloud saves on: the Game shortcut shows the screen for the check; Launcher, Guide and no shortcut start as without them (the player's skip waits for afterWait)
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: .game, environment: none, skipChosen: false, cloudSaves: true).start, .check("shortcut Game, this time only"))
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: .game, environment: none, skipChosen: true, cloudSaves: true).start, .check("shortcut Game, this time only"))
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: .launcher, environment: none, skipChosen: true, cloudSaves: true).start, .show(guide: false))
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: .guide, environment: none, skipChosen: false, cloudSaves: true).start, .show(guide: true))
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: nil, environment: none, skipChosen: true, cloudSaves: true).start, .playerSkip)
+        XCTAssertEqual(LauncherShortcuts.start(shortcut: nil, environment: none, skipChosen: false, cloudSaves: true).start, .show(guide: false))
+        // DM_LAUNCHER=0 from an env file or the launch: still no screen, and one line says the cloud save was not checked; none with cloud saves off
+        let envOff = ["DM_LAUNCHER": "0", "DM_ENV_FILE_KEYS": "DM_LAUNCHER", "DM_ENV_LAUNCH_KEYS": ""]
+        for s in [nil] + LauncherShortcut.allCases.map(Optional.some) {
+            let r = LauncherShortcuts.start(shortcut: s, environment: envOff, skipChosen: true, cloudSaves: true)
+            XCTAssertEqual(r.start, .skip("off (DM_LAUNCHER=0)"))
+            XCTAssertEqual(r.notes.filter { $0 == LauncherShortcuts.notChecked }.count, 1, "\(String(describing: s)): \(r.notes)")
+            XCTAssertFalse(LauncherShortcuts.start(shortcut: s, environment: envOff, skipChosen: true, cloudSaves: false).notes.contains(LauncherShortcuts.notChecked))
+        }
+        XCTAssertTrue(LauncherShortcuts.notChecked.contains("cloud save was not checked"))
+        // DM_LAUNCHER=1 shows the screen: Play checks there, nothing to say
+        let envOn = ["DM_LAUNCHER": "1", "DM_ENV_FILE_KEYS": "", "DM_ENV_LAUNCH_KEYS": "DM_LAUNCHER"]
+        XCTAssertFalse(LauncherShortcuts.start(shortcut: nil, environment: envOn, skipChosen: true, cloudSaves: true).notes.contains(LauncherShortcuts.notChecked))
+        // main.m's program record: unchanged, no check and no line about it
+        let record = ["DM_LAUNCHER": "0", "DM_ENV_FILE_KEYS": "", "DM_ENV_LAUNCH_KEYS": ""]
+        for s in [nil] + LauncherShortcut.allCases.map(Optional.some) {
+            let r = LauncherShortcuts.start(shortcut: s, environment: record, skipChosen: true, cloudSaves: true)
+            XCTAssertEqual(r.start, .skip("off (DM_LAUNCHER=0)"))
+            XCTAssertFalse(r.notes.contains(LauncherShortcuts.notChecked))
+        }
+        // After the player's skip has watched for a held controller button: a held button, a late Launcher or Guide show the screen as before, cloud saves or not
+        for cloud in [false, true] {
+            XCTAssertEqual(LauncherShortcuts.afterWait(held: true, late: nil, cloudSaves: cloud).start, .show(guide: false))
+            XCTAssertEqual(LauncherShortcuts.afterWait(held: true, late: nil, cloudSaves: cloud).note, "launcher: shown although skipped (a controller button held at start)")
+            XCTAssertEqual(LauncherShortcuts.afterWait(held: false, late: .launcher, cloudSaves: cloud).start, .show(guide: false))
+            XCTAssertEqual(LauncherShortcuts.afterWait(held: false, late: .guide, cloudSaves: cloud).start, .show(guide: true))
+            XCTAssertEqual(LauncherShortcuts.afterWait(held: true, late: .guide, cloudSaves: cloud).start, .show(guide: true))
+        }
+        // else the check with cloud saves on (a late Game too), and no screen without them
+        XCTAssertEqual(LauncherShortcuts.afterWait(held: false, late: nil, cloudSaves: true).start, .check("Skip this screen next time is on"))
+        XCTAssertNil(LauncherShortcuts.afterWait(held: false, late: nil, cloudSaves: true).note)
+        XCTAssertEqual(LauncherShortcuts.afterWait(held: false, late: .game, cloudSaves: true).start, .check("Skip this screen next time is on; shortcut Game"))
+        guard case .skip = LauncherShortcuts.afterWait(held: false, late: nil, cloudSaves: false).start else { return XCTFail("no screen without cloud saves") }
+        guard case .skip = LauncherShortcuts.afterWait(held: false, late: .game, cloudSaves: false).start else { return XCTFail("a late Game without cloud saves: no screen") }
+        // Cloud saves on: DM_SAVE_SYNC names a folder (the picked one, or an env file's); unset, empty, 0 and the Mac's icloud are off
+        XCTAssertTrue(LauncherShortcuts.cloudSavesOn(saveSync: "/private/var/mobile/Library/Mobile Documents/com~apple~CloudDocs/Saves"))
+        for off in [nil, "", "0", "icloud"] { XCTAssertFalse(LauncherShortcuts.cloudSavesOn(saveSync: off), "\(String(describing: off))") }
+    }
+
+    // The settings screen as a skipped start shows it for the cloud-save check, against the host's real comparison (save_sync.c) on a save and a cloud folder made here: with
+    // nothing to ask the game starts by itself (DM_SAVE_SYNC_CHOICE=ask, no input); with both saves changed the question shows and the game waits for it; with cloud saves off
+    // the player's skip shows no screen. Skip this screen next time and a cold Game shortcut
+    @MainActor
+    func testSkippedStartsRunTheCloudSaveCheck() throws {
+        let root = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("duo-cloud-check-\(UUID().uuidString)")
+        let fm = FileManager.default
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data(#"{"schema": 1, "settings": [{"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Frame-rate counter", "note": "", "default": "0", "on": "1", "off": "0"}]}"#.utf8)
+            .write(to: dir.appendingPathComponent("launcher.json"))
+        func save(_ name: String, _ text: String) throws -> URL {   // a committed save folder with one file, as DM_SAVE names it
+            let s = dir.appendingPathComponent(name)
+            try fm.createDirectory(at: s, withIntermediateDirectories: true)
+            try Data(text.utf8).write(to: s.appendingPathComponent("progress.bin"))
+            return s
+        }
+        let cloud = dir.appendingPathComponent("cloud")
+        try fm.createDirectory(at: cloud, withIntermediateDirectories: true)
+        let mine = try save("save", "this device's progress")
+        let keep = ["DM_SAVE", "DM_SAVE_SYNC", "DM_SAVE_SYNC_CHOICE"].map { (k: String) in (k, getenv(k).map { String(cString: $0) }) }
+        let skip = UserDefaults.standard.object(forKey: LauncherModel.skipKey)
+        let bookmark = UserDefaults.standard.object(forKey: "cloudSavesBookmark")   // CloudSaves.m: a folder picked in the harness would turn cloud saves on below
+        UserDefaults.standard.removeObject(forKey: "cloudSavesBookmark")
+        setenv("DM_APP_DM", dir.path, 1); unsetenv("DM_LAUNCHER"); setenv("DM_SAVE", mine.path, 1)
+        defer {
+            unsetenv("DM_APP_DM")
+            for (k, v) in keep { if let v { setenv(k, v, 1) } else { unsetenv(k) } }
+            if let skip { UserDefaults.standard.set(skip, forKey: LauncherModel.skipKey) } else { UserDefaults.standard.removeObject(forKey: LauncherModel.skipKey) }
+            if let bookmark { UserDefaults.standard.set(bookmark, forKey: "cloudSavesBookmark") }
+            root.presentedViewController?.presentedViewController?.dismiss(animated: false)
+            if root.presentedViewController != nil { root.dismiss(animated: false) }
+            LauncherShortcuts.screenUp = false; LauncherShortcuts.started = true; LauncherShortcuts.pending = nil
+            gameMenuModel = nil
+            try? fm.removeItem(at: dir)
+        }
+        waitUntil("Nothing over the game (a settings screen another test showed is gone)") { root.presentedViewController == nil }
+        func choice() -> String? { getenv("DM_SAVE_SYNC_CHOICE").map { String(cString: $0) } }
+        // One start: dmShowLauncher, then the run loop watched closely until the game starts (done) or the time is up; whether the screen was seen, and what it asked
+        func run(shortcut: LauncherShortcut?, expectStart: Bool, _ timeout: TimeInterval = 10) -> (shown: Bool, returned: Bool) {
+            unsetenv("DM_SAVE_SYNC_CHOICE")
+            LauncherShortcuts.started = false
+            if let s = shortcut { dmShortcutCold(s.type) }
+            duoPlays = 0
+            var shown = false
+            let returned = dmShowLauncher(Unmanaged.passUnretained(root).toOpaque(), { duoPlays += 1 })
+            let end = Date().addingTimeInterval(timeout)
+            while Date() < end && !(expectStart && duoPlays > 0) {
+                if root.presentedViewController != nil { shown = true }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+            }
+            return (shown, returned)
+        }
+
+        // Skip this screen next time, cloud saves off: no screen, the game starts after the short wait for a held button, nothing checked
+        UserDefaults.standard.set(true, forKey: LauncherModel.skipKey)
+        unsetenv("DM_SAVE_SYNC")
+        var r = run(shortcut: nil, expectStart: true)
+        XCTAssertTrue(r.returned, "The skip waits a moment for a held controller button")
+        XCTAssertEqual(duoPlays, 1, "The game started")
+        XCTAssertFalse(r.shown, "No screen with cloud saves off")
+        XCTAssertNil(choice(), "Nothing compared")
+
+        // Skip this screen next time, cloud saves on (a folder in DM_SAVE_SYNC, as an env file's), nothing in the cloud yet: the screen shows for the check, and the game starts by itself
+        setenv("DM_SAVE_SYNC", cloud.path, 1)
+        r = run(shortcut: nil, expectStart: true)
+        XCTAssertTrue(r.returned)
+        XCTAssertTrue(r.shown, "The settings screen showed for the check")
+        XCTAssertEqual(duoPlays, 1, "The game started with no input")
+        XCTAssertEqual(choice(), "ask", "The check ran: nothing to choose")
+        waitUntil("The screen is gone") { root.presentedViewController == nil }
+        XCTAssertTrue(UserDefaults.standard.bool(forKey: LauncherModel.skipKey), "Skip this screen next time stays on")
+
+        // The Game shortcut at a cold start, cloud saves on, the player's skip off: the same
+        UserDefaults.standard.removeObject(forKey: LauncherModel.skipKey)
+        r = run(shortcut: .game, expectStart: true)
+        XCTAssertTrue(r.returned, "The screen shows: front_ios.m waits for done")
+        XCTAssertTrue(r.shown)
+        XCTAssertEqual(duoPlays, 1)
+        XCTAssertEqual(choice(), "ask")
+        waitUntil("The screen is gone") { root.presentedViewController == nil }
+        XCTAssertNil(UserDefaults.standard.object(forKey: LauncherModel.skipKey), "Skip this screen next time is not turned on")
+
+        // A check that takes a while (a large save to hash: a 1 GB sparse file, no disk used) and the player asking for the screen while it runs: a Launcher or a Guide shortcut
+        // stops it (LauncherView.stopAutoStart), the screen stays and the game does not start when the check ends; Play (the Game shortcut on the screen) then checks again and plays
+        let big = mine.appendingPathComponent("big.bin")
+        XCTAssertTrue(fm.createFile(atPath: big.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: big); try handle.truncate(atOffset: 1 << 30); try handle.close()
+        UserDefaults.standard.set(true, forKey: LauncherModel.skipKey)
+        for asked in ["dm.shortcut.launcher", "dm.shortcut.guide"] {
+            unsetenv("DM_SAVE_SYNC_CHOICE"); duoCheckPlays = 0
+            LauncherShortcuts.started = false
+            XCTAssertTrue(dmShowLauncher(Unmanaged.passUnretained(root).toOpaque(), { duoCheckPlays += 1 }))
+            waitUntil("\(asked): the screen showed for the check") { root.presentedViewController != nil }
+            let host = try XCTUnwrap(root.presentedViewController)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))   // it has appeared, and its check is hashing the save
+            XCTAssertEqual(duoCheckPlays, 0, "\(asked): the check was still running when the shortcut came (else this case tests nothing)")
+            XCTAssertTrue(dmShortcutPerform(asked))
+            RunLoop.main.run(until: Date().addingTimeInterval(6))   // longer than the check
+            XCTAssertEqual(duoCheckPlays, 0, "\(asked) stopped the start by itself")
+            XCTAssertTrue(root.presentedViewController === host, "\(asked): the settings screen stays")
+            XCTAssertNil(choice(), "\(asked): no choice made")
+            XCTAssertTrue(dmShortcutPerform("dm.shortcut.game"))
+            waitUntil("\(asked): Play checked again and started the game", 60) { duoCheckPlays == 1 }
+            XCTAssertEqual(choice(), "ask")
+            waitUntil("\(asked): the screen is gone") { root.presentedViewController == nil }
+            XCTAssertEqual(duoCheckPlays, 1, "\(asked): the game started once")
+        }
+
+        // The check ending while the app is not active (the player switched away during a long iCloud download; faked through LauncherShortcuts.appActive, the Simulator app stays in
+        // front): the answer is held, the game does not start, a notification while the app is still not active leaves it held, and the app's return starts it, once
+        let realActive = LauncherShortcuts.appActive
+        defer { LauncherShortcuts.appActive = realActive; duoActive = true }
+        LauncherShortcuts.appActive = { duoAskedActive += 1; return duoActive }
+        func backInFront() { duoActive = true; NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: UIApplication.shared) }
+        func heldStart() throws -> UIViewController {   // the skipped start's screen, its check ended while the app was away
+            unsetenv("DM_SAVE_SYNC_CHOICE"); duoHeldPlays = 0; duoActive = false; duoAskedActive = 0
+            LauncherShortcuts.started = false
+            XCTAssertTrue(dmShowLauncher(Unmanaged.passUnretained(root).toOpaque(), { duoHeldPlays += 1 }))
+            waitUntil("the screen showed for the check") { root.presentedViewController != nil }
+            let host = try XCTUnwrap(root.presentedViewController)
+            waitUntil("the check ended (it asked whether the app is active)", 60) { duoAskedActive > 0 }
+            RunLoop.main.run(until: Date().addingTimeInterval(1))
+            XCTAssertEqual(duoHeldPlays, 0, "The game does not start while the app is not active")
+            XCTAssertNil(choice(), "No choice passed yet")
+            XCTAssertTrue(root.presentedViewController === host, "The settings screen stays")
+            return host
+        }
+        _ = try heldStart()
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: UIApplication.shared)   // another scene's, the app still not in front
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(duoHeldPlays, 0, "Still held while the app is not active")
+        backInFront()
+        waitUntil("Back in front, the held start went") { duoHeldPlays == 1 }
+        XCTAssertEqual(choice(), "ask", "The check's own answer")
+        waitUntil("The screen is gone") { root.presentedViewController == nil }
+        backInFront()
+        NotificationCenter.default.post(name: UIScene.didActivateNotification, object: nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(duoHeldPlays, 1, "The game started once")
+
+        // The same, the player coming back through the Launcher shortcut: it is handed over before the app is active and waits (LauncherShortcuts.perform), the held start lets it go
+        // first, and it drops the answer (stopAutoStart): the screen stays, nothing starts, and Play checks again
+        let screen = try heldStart()
+        XCTAssertTrue(dmShortcutPerform("dm.shortcut.launcher"))
+        XCTAssertEqual(LauncherShortcuts.waiting, 1, "The shortcut waits for the app to be active")
+        backInFront()
+        waitUntil("The shortcut came") { LauncherShortcuts.waiting == 0 }
+        RunLoop.main.run(until: Date().addingTimeInterval(1))
+        XCTAssertEqual(duoHeldPlays, 0, "The Launcher shortcut dropped the held start")
+        XCTAssertTrue(root.presentedViewController === screen, "The settings screen stays")
+        XCTAssertNil(choice())
+
+        // A check Play started (the Game shortcut on that screen, in front) that ends after the player left is held the same way, and starts the game once when the app is back
+        XCTAssertTrue(dmShortcutPerform("dm.shortcut.game"))
+        duoActive = false; duoAskedActive = 0
+        waitUntil("Play's check ended (it asked whether the app is active)", 60) { duoAskedActive > 0 }
+        RunLoop.main.run(until: Date().addingTimeInterval(6))   // longer than the check: a settings screen an earlier test left hears Game too and checks the same save beside it
+        XCTAssertEqual(duoHeldPlays, 0, "Play's answer waits for the app too")
+        XCTAssertTrue(root.presentedViewController === screen)
+        backInFront()
+        waitUntil("Back in front, Play's held start went") { duoHeldPlays == 1 }
+        XCTAssertEqual(choice(), "ask")
+        waitUntil("The screen is gone") { root.presentedViewController == nil }
+        backInFront()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(duoHeldPlays, 1, "The game started once")
+        LauncherShortcuts.appActive = realActive; duoActive = true
+
+        try fm.removeItem(at: big)
+        UserDefaults.standard.removeObject(forKey: LauncherModel.skipKey)
+
+        // Both changed: another device's save in the cloud (packed by the host's own sender) and a save here that was never synced. The Game shortcut's check asks, and the game waits
+        let theirs = try save("their-save", "another device's progress")
+        XCTAssertEqual(save_sync_after_exit(theirs.path, dm_save_title()), 1, "The other device's save is in the cloud folder")
+        r = run(shortcut: .game, expectStart: false, 3)
+        XCTAssertTrue(r.returned)
+        XCTAssertEqual(duoPlays, 0, "The game waits for the player's answer")
+        XCTAssertNil(choice())
+        let host = try XCTUnwrap(root.presentedViewController, "The settings screen stays")
+        waitUntil("Which save do you want to play? shows") { (host.presentedViewController as? UIAlertController)?.title == SaveSyncReport.chooseTitle }
     }
 }

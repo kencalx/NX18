@@ -25,9 +25,10 @@ class NX18Icon(unittest.TestCase):
     def test_line(self):
         icon = nsp.NX18_ICON
         self.assertEqual(nsp.no_game_icon_line(True, True, icon, 'home-screen icon'),
-                         "no game icon: the NUP carries none; the app gets the NX 18 icon (nx18-icon-square-1024.png); --icon / ICON gives it the game's")
+                         "no game icon: the NUP carries none; the app gets the NX 18 icon (nx18-icon-square-1024.png); --icon / ICON gives it the game's, "
+                         "--fallback-icon / FALLBACK_ICON a stand-in of your own")
         self.assertEqual(nsp.no_game_icon_line(False, True, None, "app's icon"),
-                         "no game icon: a dump folder has no control data; the app's icon will be blank; --icon / ICON gives it one")
+                         "no game icon: a dump folder has no control data; the app's icon will be blank; --icon / ICON or --fallback-icon / FALLBACK_ICON gives it one")
         line = nsp.no_game_icon_line(False, False, icon, 'home-screen icon')
         self.assertTrue(line.startswith('[RED] no game icon in the extraction'))
         self.assertTrue(line.endswith('the app gets the NX 18 icon (nx18-icon-square-1024.png)'))
