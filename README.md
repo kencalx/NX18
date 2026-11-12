@@ -122,7 +122,7 @@ Controls, saves and settings: [Playing](docs/playing.md).
 The bigger games need the higher memory limit iOS gives an app with the Increased Memory Limit entitlement. Without it iOS may close the game in busy scenes. Every app NX 18 builds already asks for it (and for Extended Virtual Addressing), but whether iOS grants it depends on your sideloading tool and Apple account:
 
 - **Installed from Xcode with a paid Apple Developer account** (or with a tool that builds through Xcode, such as NX Play): nothing to do. Xcode adds the capability to the app's App ID when it signs the app. A free account's Personal Team cannot get it this way, so such tools build without it; use one of the ways below.
-- **AltStore** (2.2 or later) and **Sideloadly**: keep the entitlement when the tool offers the choice. Nothing else to do.
+- **AltStore** (2.2 or later) and **Sideloadly**: keep the entitlement when the tool offers the choice. If the check below shows clearly less room, add it with GetMoreRam as described for SideStore.
 - **SideStore with a free Apple ID**: the entitlement has to be added to the app's App ID once. The easiest way is **GetMoreRam**, a small app by [hugeBlack](https://github.com/hugeBlack/GetMoreRam) (a LiveContainer developer). [ClientQUI's fork](https://github.com/ClientQUI/GetMoreRam/releases) uses SideStore's local anisette server and is the one tested with NX 18:
   1. Install the game with SideStore (or AltStore), then sideload GetMoreRam the same way.
   2. In GetMoreRam's settings, sign in with the Apple ID that signed the game.
