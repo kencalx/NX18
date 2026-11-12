@@ -1,6 +1,6 @@
 # Luigi's Mansion 3 (`0100DCA0064A6000`)
 
-Update 1.4.0 (v327680) over the base game, SDK 7.3.2 (NVN 53). Next Level Games' own engine on NVN, with Havok physics and cloth, Wwise sound (a 6-channel AudioOut) and NEX / Pia online. Modules `main`, `subsdk0` (`nnSdkEn`, a second copy of the SDK), `subsdk1` (NintendoSDK_movie) and `sdk`; `sdk` is the build of Super Mario Odyssey ([0100000000010000](../0100000000010000/README.md)) and DRAGON QUEST XI S ([01006C300E9F0000](../01006C300E9F0000/README.md)). Playable on the iPhone at 60 fps (30 on the Switch). On the Mac: the boot notices, the title (the hotel in daylight), a new game and the opening cutscene (the bus ride, the arrival at the hotel, the lobby), then the lobby in play at 60 fps, about 3.7 GB phys_footprint (3.0 GB of Metal allocations).
+Update 1.4.0 (v327680) over the base game, SDK 7.3.2 (NVN 53). Next Level Games' own engine on NVN, with Havok physics and cloth, Wwise sound (a 6-channel AudioOut) and NEX / Pia online. Modules `main`, `subsdk0` (`nnSdkEn`, a second copy of the SDK), `subsdk1` (NintendoSDK_movie) and `sdk`; `sdk` is the build of Super Mario Odyssey ([0100000000010000](../0100000000010000/README.md)) and DRAGON QUEST XI S ([01006C300E9F0000](../01006C300E9F0000/README.md)). Playable on the iPhone at 60 fps (30 on the Switch): on an iPhone 18 Pro Max with X1.0, docked, the owner's two starts held 60 fps, and the app now ships the prewarm list they recorded ([On the iPhone](#on-the-iphone)). On the Mac: the boot notices, the title (the hotel in daylight), a new game and the opening cutscene (the bus ride, the arrival at the hotel, the lobby), then the lobby in play at 60 fps, about 3.7 GB phys_footprint (3.0 GB of Metal allocations).
 
 ## What it needs
 
@@ -27,6 +27,7 @@ No `patches.py`.
 
 - **Current:** with an Ultrawide mod in the game's mods folder the launcher offers **Ultrawide** (`DM_MOD_ULTRAWIDE`, off by default as for every game), and on an iPhone the row says *Can drop below 60 fps in busy scenes on iPhone* (`ultrawide_cost fps`, the row's `hint` in `settings.tsv`). It stays selectable.
 - Measured on an iPhone 18 Pro Max with 0.5 (`5b302cd0`), the same route from warm starts each time, Picture on Stretch. Ultrawide off with edge smoothing (**Anti-aliasing**) on held 60 fps, with brief dips to 51–54. Ultrawide on with edge smoothing off fell to 36–52 fps for most of the route's second half, with a GPU time p50 of 17–24 ms against the 16.7 ms a frame has at 60 fps. Ultrawide adds about 1.5–2 ms of GPU time a frame in light areas and 5–9 ms in busy rooms, so the drop comes from the wider view, not from edge smoothing, which the slower run had off.
+- On X1.0 (`6448f757`, docked, edge smoothing on) the owner's second start had Ultrawide on and the first had it off ([On the iPhone](#on-the-iphone)): over each start the GPU time p50 was 9.97 ms with it against 9.2 ms without, about 0.8 ms more, in the lighter places (the two routes were not the same). The second start did not reach the heavy room where the first dropped frames, so the busy-room cost above is not measured again, and the launcher's note stays.
 
 ## Modules and memory
 
@@ -70,6 +71,34 @@ A deferred renderer: the scene draws into a G-buffer of two integer targets (R32
 
 - The work folder's `run/ctl.sh` drives a run started with `DM_CTL`; `DM_KEYS=14:A,18:A,26:A,31:A,41:Right,42:A,54:A` goes from the boot notices through a new game into the opening cutscene.
 
+## On the iPhone
+
+The owner's two starts on an iPhone 18 Pro Max (A20 Pro GPU), the X1.0 build (`6448f757`, chain `222e58e346d6`), update 1.4.0, docked, Picture Stretch, edge smoothing (CMAA2), no upscaling, a controller. The first was the first start after X1.0 was installed over an older install (0.5), with no prewarm list in the app: the device's `Documents/pso_user.tsv` still held 5,579 lines from the older install's play, and its archive's 16 files were of another shader chain and were removed. The second started from the first's `pso_user.tsv` and device archive, with Ultrawide on. From their `log.txt` files (`scripts/devlog.py`, each alone and the two compared):
+
+| | First start (X1.0 over 0.5, Ultrawide off) | Second start (Ultrawide on) |
+|---|---|---|
+| Played | about 4.2 minutes (12,324 frames), into a heavy room at the end | about 2.2 minutes (6,728 frames) |
+| Before the first frame | the device's list (5,576 lines) prepared in 2.47 s on 6 workers, behind the progress screen: 246 bases compiled, none from an archive, 12 reused | the device's 5,663 lines prepared in 0.22 s, no progress screen: 314 bases from the device's archive, 31 reused, none compiled |
+| Bases compiled in play | 140 (6.95 s of compile time on all threads) | 1 (0.04 s) |
+| The submit thread waited | 1.60 s for pipelines, under 1 ms for shader libraries | 0.7 ms for pipelines, 0.3 ms for libraries |
+| Frames | 60 fps; frame time p50 16.67 ms, p95 17.02 ms; 236 of 12,288 frames dropped (1.92%), 153 of them in two windows of the heavy room (GPU time p50 19.18 and 17.24 ms there) | 60 fps; p50 16.67 ms, p95 17.07 ms; 8 of 6,589 dropped (0.12%) |
+| Frames over 100 ms | 16: 6 with new pipelines, the longest 406 ms (24 pipelines and 2 libraries, 356 ms of making them), then 314, 275 and 266 ms; 5 just after them; the boot's 700 ms frame (the game's side); 4 as the app went to the background | 2: the boot's 695 ms frame and one of 105 ms (GPU 86 ms) as the app went to the background |
+| GPU time p50 | 9.2 ms | 9.97 ms |
+| Memory | footprint at most 4.48 GB; at least 3.71 GB of headroom to the app's limit | at most 3.21 GB; at least 4.99 GB of headroom |
+| Enqueue to display p50 | 31.68 ms | 30.7 ms |
+
+Both: thermal state 0 throughout; the archive bundled with the app (63.1 MB) was taken (`holds the bases of every shader pair (16 of 16 probed bases found)`), and the compute pipeline came from it; the eight `[RED] primitive type … not implemented` lines of the tessellated draws ([Rendering](#rendering)); and the geometry shader `86a76ee7f14336b3` drawn as a compute kernel (`geometry compute: … 86a76ee7f14336b3_bg1`). The first start's 4 audio underruns (18.3 ms) followed an audio interruption; the second had none. The archive's lookups in play found nothing on the first start: the bases the draws compiled are those of the render pipelines the device list records as `R` rows, which the pair bases do not give.
+
+### Pipelines on a first start
+
+[`pso_manifest.tsv`](pso_manifest.tsv), the prewarm list the app ships, is that iPhone's own `Documents/pso_user.tsv` after the two starts: 5,663 rows, 5,317 shaders (`S`, every one of the shader map's), 345 render pipelines (`R`) and 1 compute pipeline (`C`), in the order of first use; 5,576 from the older install's play and the 87 the first X1.0 start built that those had not (the second added none). `dm/tools/pso_seed.py` checked every row against [`shader_map.tsv`](shader_map.tsv), the profile's at `6448f757`, the commit the phone's build was made from (5,317 entries, as the log's `shader map 5317 entries`), so the older install's rows are of the same game version and chain. It refused 3 rows, left out (`--drop-invalid`) as the host's prewarm leaves them out (not `<map key>_b` library keys): `S 86a76ee7f14336b3_bg1` and `S 86a76ee7f14336b3_bgv`, the geometry shader's compute kernel and reader, and the `R` row whose vertex shader is that reader (recorded on both installs); the phone's prepare steps counted the two `S` keys as `shader keys not in the shader map` and built the same 345 render pipelines.
+
+- **What it changes:** a fresh install prepares the list before its first frame, so the pipelines the first start built in play (140 bases: 6 frames of 108 to 406 ms with new pipelines, 1.60 s of the submit thread waiting) are built before play, and their bases come from the app's bundled archive instead of being compiled (the first start compiled 246 in its prepare step). At the next build `pso_offline.py` compiles the `R` rows' layout bases into that archive ([Pipelines with a vertex layout compiled at a fresh install's prepare step](../../../docs/reference/shaders.md#pipelines-with-a-vertex-layout-compiled-at-a-fresh-installs-prepare-step)): its plan for `applegpu_g19p` (`--script-only`, this list, the X1.0 libraries) gives 314 layout bases for the 345 rows, none left out (31 rows share a base with another, as the second start's 31 reused), beside the 3,852 pair bases and 4 compute pipelines.
+- **Its cost on a fresh install** (an estimate, not measured): the prepare step takes the 314 bases from the app and loads the 5,317 libraries. On this phone the second start did the same from the device's archive in 0.22 s (314 lookups, 83.5 ms of thread time; 345 specializations, 4.3 ms), so about 0.2-0.5 s. If the app's archive does not serve them (not measured on a device yet), the step compiles them: at the first start's rate (246 bases in 2.47 s on 6 workers) about 3 s.
+- **In play after it:** as the second start. The heavy room's dropped frames were GPU time (17-19 ms a frame), which the list does not change. Places past the ones played still build their pipelines at their first draw, and `pso_user.tsv` records them.
+- **The settings:** Picture Stretch and edge smoothing change no row: both are the host's present, and a row's pipeline key (`pso_skey`) holds no picture size. The second start, with Ultrawide on, recorded no row the first had not. Handheld play was not recorded, so whether it draws other pipelines is not known.
+- **The build:** the next build of this game runs the shader step again (its key covers the profile's files, `pso_manifest.tsv` among them), and `pso_offline.py` compiles its one compute group again (the `C` row puts its shader first) and the 5 new layout groups; the 4 groups of pair bases are reused, and the stamp (`prebuilt.tsv`) is unchanged, since the pairs are. No game build was run for this change. No other game's build changes.
+
 ## Found on this game
 
 General host changes first needed here; each applies to every game:
@@ -85,5 +114,7 @@ General host changes first needed here; each applies to every game:
 ## Open
 
 - Tessellation (15 hull, 18 domain shaders) and the 10 geometry shaders are not built ([Rendering](#rendering)).
-- [docs/geometry-metal-research.md](../../../docs/geometry-metal-research.md) describes geometry shaders now built as compute kernels, checked on AI: THE SOMNIUM FILES only ("Other games and iOS device execution are unvalidated"); whether this game's 10 build with it is not recorded.
+- [docs/geometry-metal-research.md](../../../docs/geometry-metal-research.md) describes geometry shaders now built as compute kernels, checked on AI: THE SOMNIUM FILES only ("Other games and iOS device execution are unvalidated"). On the iPhone with X1.0 this game drew one of its 10, `86a76ee7f14336b3`, that way on both starts ([On the iPhone](#on-the-iphone)); whether its picture is right, and the other 9, are not recorded.
 - The limiter's phase lock has frame-history entries since 51cc8bce; its effect is not measured ([Frame rate](#frame-rate)).
+- A fresh install with the 5,663-row prewarm list on the iPhone, estimated at about 0.2-0.5 s of prepare step (about 3 s if the app's archive does not serve the layout bases; [Pipelines on a first start](#pipelines-on-a-first-start)): its `pipeline prepare` line should count about 314 layout bases from the archive bundled with the app and almost none compiled, and play to the same places should have none of the first start's pipeline frames.
+- On the iPhone, handheld play and the busy rooms with Ultrawide on in X1.0 are not tested ([Ultrawide](#ultrawide)).
