@@ -4,8 +4,8 @@ device's own Documents/pso_user.tsv, which hold the same rows (S shader, R rende
 Each row is read as the host's warm_parse (dm/gfx/nvn/nvn_mtl.m) and pso_skey_parse / pso_mesh_skey_parse (dm/gfx/nvn/nvn_pso_skey.h) read it, and must also:
   · name only library keys <16 hex digits>_b of the profile's shader map (shader_map.tsv, column 4, as shmap_load reads it), each at the stage the map gives it
     (stage_of: vertex 0, pixel 1, geometry 2, hull / task 3, domain / mesh 4, compute 5): a key of another game version, or of another game, is refused
-  · carry nothing of the device that wrote it: no path, no pointer (pso_skey_from clears the shader and specialized-fragment pointers), the bytes after each key's end and
-    the description's padding zero, the flags 0 or 1
+  · carry nothing of the device that wrote it: no path, no pointer (pso_skey_from clears the shader and specialized-fragment pointers), the bytes after each key's end,
+    the description's padding and border_spare zero, the flags (merged, fz, border) 0 or 1
 The rows keep their order (the order of first use, which is the prepare step's order: never sort them); a line repeated, or an R row whose key is an earlier one's, is left out
 as the host leaves it out.
 Usage:
@@ -19,8 +19,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 STAGES = {'vertex': 0, 'pixel': 1, 'geometry': 2, 'hull': 3, 'task': 3, 'domain': 4, 'mesh': 4, 'compute': 5}   # stage_of in nvn_mtl.m
 KEY = re.compile(r'[0-9a-f]{16}_b\Z')   # a library's name: <map key>_b
-SKEY, DESC = 504, 88   # sizeof(pso_skey), and where its pso_key starts (after vs[24], fs[24], four flags, pso_fz_desc and padding)
-LENGTHS = (2 * SKEY, 2 * SKEY - 2 * 64, 2 * SKEY - 2 * 64 - 2 * 8)   # pso_skey_parse: a row from before attr_hi, or also before atest / logic, is shorter
+SKEY, DESC = 512, 88   # sizeof(pso_skey), and where its pso_key starts (after vs[24], fs[24], four flags, pso_fz_desc and padding)
+BORDER = DESC + 416   # pso_key.border, then border_spare
+# pso_skey_parse: a row from before border (release 1's lists), or also before attr_hi, or also before atest / logic, is shorter
+LENGTHS = (2 * SKEY, 2 * SKEY - 2 * 8, 2 * SKEY - 2 * 8 - 2 * 64, 2 * SKEY - 2 * 8 - 2 * 64 - 2 * 8)
 PROVISIONAL = '# Provisional profile: empty until recorded'
 
 
@@ -66,7 +68,9 @@ def skey_problem(b, shmap, mesh=False):
     if not vclean or not fclean: return 'bytes after a shader key\'s end (device memory)'
     if any(b[86:DESC]): return 'padding bytes that are not zero (device memory)'
     if struct.unpack_from('<QQ', b, DESC) != (0, 0) or struct.unpack_from('<Q', b, DESC + 336)[0]: return 'a pointer of the device that wrote it'
-    if merged > 1 or fz > 1: return f'flags merged {merged} / fz {fz} (0 or 1)'
+    border, spare = struct.unpack_from('<2I', b, BORDER)
+    if spare: return 'border_spare bytes that are not zero (device memory)'
+    if merged > 1 or fz > 1 or border > 1: return f'flags merged {merged} / fz {fz} / border {border} (0 or 1)'
     if not fz and any(b[52:86]): return 'a specialized fragment description without the fz flag'
     if not vs: return 'no vertex shader'
     if mesh and (vs_stage != 4 or merged or fz): return 'not a task / mesh pipeline (pso_mesh_skey_parse)'

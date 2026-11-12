@@ -19,13 +19,15 @@ MAP = ('# kind: evidence\npackage\tindex\tstage\tdm_ctl_sha16\tsource\n'
 REPO = Path(__file__).resolve().parents[3]
 
 
-def skey(vs=V + '_b', fs=P + '_b', vs_stage=0, fs_stage=1, merged=0, fz=0, ptr=0, fsfn=0, tail=b'', size=504):
+def skey(vs=V + '_b', fs=P + '_b', vs_stage=0, fs_stage=1, merged=0, fz=0, ptr=0, fsfn=0, tail=b'', border=0, spare=0, size=512):
     """An R / M row's pso_skey hex as dm/gfx/nvn/nvn_pso_skey.h lays it out on arm64, field by field: vs[24], fs[24], four flags, pso_fz_desc (34) and padding to 88,
-    then pso_key (two pointers, ... the specialized fragment pointer at 336); tail: bytes written after the vertex key's end"""
-    k = bytearray(416)
+    then pso_key (two pointers, ... the specialized fragment pointer at 336, border and border_spare at 416); tail: bytes written after the vertex key's end. size 504: a row
+    from before border (release 1's lists)"""
+    k = bytearray(424)
     struct.pack_into('<Q', k, 0, ptr)
     struct.pack_into('<I', k, 16, 70)   # cfmt[0]: RGBA8Unorm
     struct.pack_into('<Q', k, 336, fsfn)
+    struct.pack_into('<2I', k, 416, border, spare)
     v = (vs.encode() + b'\0' + tail).ljust(24, b'\0')[:24]
     head = v + fs.encode().ljust(24, b'\0') + bytes((vs_stage, fs_stage, merged, fz)) + bytes(36)
     return (head + bytes(k)).hex()[:2 * size]
@@ -42,7 +44,7 @@ class Rows(unittest.TestCase):
         self.assertEqual(self.map, {V: 'vertex', P: 'pixel', C: 'compute', T: 'task', M: 'mesh'})
 
     def test_rows_the_host_takes(self):
-        for line in (f'S\t{V}_b\t0', f'S\t{P}_b\t1', f'C\t{C}_b', f'R\t{skey()}', f'R\t{skey(fs="", fs_stage=0)}', f'R\t{skey(size=440)}', f'R\t{skey(size=432)}',
+        for line in (f'S\t{V}_b\t0', f'S\t{P}_b\t1', f'C\t{C}_b', f'R\t{skey()}', f'R\t{skey(fs="", fs_stage=0)}', f'R\t{skey(size=504)}', f'R\t{skey(border=1)}', f'R\t{skey(size=440)}', f'R\t{skey(size=432)}',
                      f'M\t{T}_b\t{skey(vs=M + "_b", vs_stage=4)}', f'M\t-\t{skey(vs=M + "_b", vs_stage=4)}'):
             self.assertIsNone(self.why(line), line[:40])
 
@@ -51,7 +53,7 @@ class Rows(unittest.TestCase):
             f'S\t{"f" * 16}_b\t0': 'not in the shader map', f'S\t{V}_b\t1': 'vertex shader', f'S\t{V}_bgv\t0': 'prewarm drops', f'S\t{V}\t0': 'prewarm drops',
             f'S\t{V}_b': 'S row', f'C\t{P}_b': 'pixel shader', f'R\t{skey(ptr=0x10f000000)}': 'pointer', f'R\t{skey(fsfn=0x1000)}': 'pointer',
             f'R\t{skey(tail=b"xy")}': 'after a shader key', f'R\t{skey(size=500)}': 'hex digits', f'R\t{skey()[:-2]}zz': 'not hex',
-            f'R\t{skey(vs=M + "_b", vs_stage=4)}': 'mesh shader in an R row', f'R\t{skey(fs=V + "_b")}': 'vertex shader', f'R\t{skey(merged=2)}': 'flags',
+            f'R\t{skey(vs=M + "_b", vs_stage=4)}': 'mesh shader in an R row', f'R\t{skey(fs=V + "_b")}': 'vertex shader', f'R\t{skey(merged=2)}': 'flags', f'R\t{skey(border=2)}': 'flags', f'R\t{skey(spare=1)}': 'border_spare',
             f'M\t{V}_b\t{skey(vs=M + "_b", vs_stage=4)}': 'vertex shader', f'M\t-\t{skey()}': 'not a task / mesh', f'X\t{V}_b': 'unknown row kind',
             f'S\t/var/mobile/{V}_b\t0': 'a path', f'C\t{C}_b\r': 'carriage return'}
         for line, want in cases.items():
@@ -59,9 +61,10 @@ class Rows(unittest.TestCase):
 
     def test_repeats_are_left_out_as_the_host_leaves_them(self):
         short = f'R\t{skey(size=432)}'
-        whole = f'R\t{skey(size=432)}' + '0' * (1008 - 864)   # the same key, with atest / logic and attr_hi written as zero
-        keep, bad = pso_seed.collect([f'S\t{V}_b\t0', short, f'S\t{V}_b\t0', whole, f'C\t{C}_b'], self.map)
-        self.assertEqual((keep, bad), ([f'S\t{V}_b\t0', short, f'C\t{C}_b'], []))
+        whole = f'R\t{skey(size=432)}' + '0' * (1024 - 864)   # the same key, with atest / logic, attr_hi and border written as zero
+        release1 = f'R\t{skey(size=432)}' + '0' * (1008 - 864)   # and as release 1 wrote it, without border
+        keep, bad = pso_seed.collect([f'S\t{V}_b\t0', short, f'S\t{V}_b\t0', whole, release1, f'C\t{C}_b', f'R\t{skey(border=1)}'], self.map)
+        self.assertEqual((keep, bad), ([f'S\t{V}_b\t0', short, f'C\t{C}_b', f'R\t{skey(border=1)}'], []))   # border 1 is another pipeline
 
 
 class Add(unittest.TestCase):
