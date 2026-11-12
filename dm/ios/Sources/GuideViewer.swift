@@ -66,7 +66,7 @@ enum LauncherGuidePage: String, Identifiable, CaseIterable, Sendable {
 struct LauncherGuideSheet: View {
     let content: LauncherContent
     let scroller: LauncherScroller
-    var closeGlyph: NXPadGlyph? = nil   // the controller's B (NXButtonGlyph.swift), beside the close button while a controller is connected
+    var closeGlyph: NXPadGlyph? = nil   // the controller's B (NXButtonGlyph.swift) while a controller is connected: beside Back while the guide has a page to go back to (B goes back there), else beside the close button
     let close: () -> Void
     @State private var page: LauncherGuidePage
     @StateObject private var model = LauncherGuidePageModel()
@@ -82,7 +82,7 @@ struct LauncherGuideSheet: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 if onGuide && model.hasBack {
-                    circleButton("chevron.backward", label: "Back") { model.back() }
+                    circleButton("chevron.backward", label: "Back", glyph: closeGlyph) { model.back() }
                 } else {
                     NX18Mark(height: 16).accessibilityHidden(true)
                 }
@@ -104,7 +104,7 @@ struct LauncherGuideSheet: View {
                         turnButton("R", icon: "chevron.right", label: "Next page", on: model.footer.contains("R"))
                     }
                 }
-                circleButton("xmark", label: "Close", glyph: closeGlyph, action: close)
+                circleButton("xmark", label: "Close", glyph: (onGuide && model.hasBack) ? nil : closeGlyph, action: close)
                     .keyboardShortcut(.cancelAction)
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
@@ -145,7 +145,7 @@ struct LauncherGuideSheet: View {
         .onDisappear { scroller.page = nil; scroller.scroll = nil; scroller.pad = nil }
     }
 
-    // glyph: the controller's button that does the same (the close button's B while a controller is connected), beside it
+    // glyph: the controller's button that does the same (B, on Back or the close button, while a controller is connected), beside it
     private func circleButton(_ icon: String, label: String, glyph: NXPadGlyph? = nil, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 8) {
