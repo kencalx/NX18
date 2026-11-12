@@ -553,7 +553,8 @@ struct LauncherStatus: Equatable {
         case .on: out.append(Part(id: "cloud", text: "Cloud saves on", dot: nil))
         case .synced: out.append(Part(id: "cloud", text: "Save synced", dot: nil))
         }
-        if let m = memoryFree, m > 0 { out.append(Part(id: "memory", text: "\(ByteCountFormatter.string(fromByteCount: Int64(clamping: m), countStyle: .memory)) free", dot: nil)) }
+        // with one decimal (GB of 2^30 bytes, as the memory count style): the figure refreshes every 2 s, and two decimals kept changing the line's width (a stacked hero jumped as it wrapped)
+        if let m = memoryFree, m > 0 { out.append(Part(id: "memory", text: "\((Double(m) / 1_073_741_824).formatted(.number.precision(.fractionLength(1)))) GB free", dot: nil)) }
         return out
     }
     // What VoiceOver reads for the line
@@ -581,10 +582,11 @@ struct LauncherStatusLine: View {
             parts.enumerated().reduce(Text(verbatim: "")) { t, e in
                 let sep = e.offset == 0 ? Text(verbatim: "") : Text(verbatim: "  ·  ")
                 let dot = e.element.dot.map { Text(Image(systemName: "circle.fill")).font(.system(size: 7)).foregroundStyle($0) } ?? Text(verbatim: "")   // system: symbol
-                let gap = e.element.dot == nil ? "" : "\u{2009}"
+                let gap = e.element.dot == nil ? "" : "\u{00A0}"   // a word space that keeps the dot with its word (a thin one looked like a slip)
                 return Text("\(t)\(sep)\(dot)\(gap)\(e.element.text)")
             }
             .nxFont(.footnote)
+            .monospacedDigit()   // the memory figure keeps its width as it refreshes
             .foregroundStyle(color)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(status.spoken())
