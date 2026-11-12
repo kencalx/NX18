@@ -111,11 +111,31 @@ To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the g
 
 ### Install
 
-Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, Sideloadly or LiveContainer. If your tool offers **Increased Memory Limit**, turn it on: the bigger games need it.
+Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, SideStore, Sideloadly or LiveContainer. Then make sure the game gets the [Increased Memory Limit](#increased-memory-limit).
 
 Game too big to install? Build again with `--romfs separate`, and run the command the script prints once to copy the game files to your phone ([Quick reinstalls](docs/development.md#quick-reinstalls)). With AltServer, also add `--shader-files`: it cannot install a file of 2 GiB or more.
 
 Controls, saves and settings: [Playing](docs/playing.md).
+
+#### Increased Memory Limit
+
+The bigger games, and Switch 2 games above all, need the higher memory limit iOS gives an app with the Increased Memory Limit entitlement. Without it iOS may close the game in busy scenes. Every app NX 18 builds already asks for it (and for Extended Virtual Addressing), but whether iOS grants it depends on your sideloading tool and Apple account:
+
+- **Installed from Xcode with a paid Apple Developer account** (or with a tool that builds through Xcode, such as NX Play): nothing to do. Xcode adds the capability to the app's App ID when it signs the app. A free account's Personal Team cannot get it this way, so such tools build without it; use one of the ways below.
+- **AltStore** (2.2 or later) and **Sideloadly**: keep the entitlement when the tool offers the choice. Nothing else to do.
+- **SideStore with a free Apple ID**: the entitlement has to be added to the app's App ID once. The easiest way is **GetMoreRam**, a small app by [hugeBlack](https://github.com/hugeBlack/GetMoreRam) (a LiveContainer developer). [ClientQUI's fork](https://github.com/ClientQUI/GetMoreRam/releases) uses SideStore's local anisette server and is the one tested with NX 18:
+  1. Install the game with SideStore (or AltStore), then sideload GetMoreRam the same way.
+  2. In GetMoreRam's settings, sign in with the Apple ID that signed the game.
+  3. Open **App IDs**, tap **Refresh**, pick the game's App ID and tap **Add Increased Memory Limit**.
+  4. Reinstall the game from SideStore or AltStore (a plain refresh may not pick it up). It stays through the weekly refreshes after that.
+  5. GetMoreRam takes one of a free Apple ID's three app slots: delete it afterwards to get the slot back, and install it again for the next game.
+
+  Without GetMoreRam: open Xcode signed in with the same Apple ID, add the **Increased Memory Limit** capability to the game's App ID, then do step 4.
+- **LiveContainer**: the game runs inside LiveContainer, so LiveContainer itself needs the entitlement. Installing LiveContainer with Impactor adds it automatically; with SideStore, add it to LiveContainer's App ID as above. Install any helper app the same way as LiveContainer, or the entitlement does not apply.
+
+These steps come from the sideloading tools' own docs and community guides, and can change with new versions of the tools or of iOS.
+
+To check that it worked, start a game, share its log (the in-game menu › **Share log**) and find the `[mem] guest memory` line near the start. Its `room to the memory limit` is how much the game can use: on an iPhone 18 Pro Max with the entitlement it is about 7.9–8.0 GB. A clearly lower number most likely means the entitlement was not granted.
 
 ### Switch 2 games
 

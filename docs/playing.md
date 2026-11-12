@@ -4,6 +4,7 @@ How to build and install a game: [README](../README.md#how-to-play).
 
 - **Settings:** a screen before the game starts sets frame rate, resolution, docked or handheld mode, language, rumble and more. Tap **Play**; your choices are remembered. What each one does: [Settings](settings.md).
 - **Saves and logs** are in the Files app, under the game's name: `save/` and `log.txt` (the previous run is `log.prev.txt`). When something goes wrong, send `log.txt`: the in-game menu › **Share log** sends it and `log.prev.txt` in one share sheet. A `glslc_play/` folder there holds shaders the game made while you played that your build does not have (things drawn without them are missing): copy it into the folder of the game's NSPs, and the next build adds them ([development.md](development.md)).
+- **The game closes in busy scenes** (on an iPhone or iPad, with no crash message): check that it has the Increased Memory Limit. How to get it with each sideloading tool, and how to check it in the log: [Increased Memory Limit](../README.md#increased-memory-limit).
 - **Reinstalling:** some sideloading tools give a reinstalled app a new data folder. Copy `save/` and `pso_user.tsv` over from the old one to keep your progress.
 
 ## Touch controls
