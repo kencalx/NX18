@@ -40,11 +40,26 @@ shader_note	Ocarina of Time shaders
 # The game steps its time by a frame ratio, its base rate / its frame rate, whatever the frame took: frames longer than a vsync played in slow motion. The ratio takes the host's
 # frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on any build that keeps it): 1 vsync at 60 fps, 2 when 60 does not hold, so game time = real time
 fps_target	60
+# On an iPhone 18 Pro Max (X1.0) the hold sat at 30 fps for 1, 2, 4 then 8 s after short bursts on the CPU side every 1.3-2.3 s at 60 (the GPU under the late line): each probe
+# back to 60 held, then the next burst ended its run before the 8 s that count it held, and each failure doubled the waits. burst: such a burst at 60 is paid back without a step
+# up (nvn_fstep.h FSTEP_BURST_N); the GPU-bound back-off is unchanged.
+# DM_FPS_HOLD_BACKOFF=double in env.txt turns it off. Not yet run on the phone
+fps_hold_backoff	burst
+# After a trip out of the app (iPhone 18 Pro Max, X1.0, 40 s away) the frame across the stay counted as late and owed 15 vsyncs, which the game ran fast to pay back, and with the
+# frames either side three late frames held 30 fps for about a second. on: that frame is on time and owes nothing, and the 30 frames after it pay their lateness back without
+# stepping the hold up (nvn_fstep.h nvn_fstep.away). DM_FPS_RESUME=0 in env.txt turns it off. Not yet run on the phone
+fps_resume	on
 # A frame stood in the display link's queue nearly all the time on an iPhone 18 Pro Max at 30 fps, a tick (33 ms) more from enqueue to display; the 60 fps run had two or more
 # frames waiting on part of the ticks in most windows after its first 3 minutes. 60 ticks in a row with two or more frames waiting drop one (DM_PRESENT_TRIM, which env.txt can
 # set, 0 for off): at 30 fps game enqueue to display about 85 -> 53 ms, 9 frames dropped in 2.5 minutes, no smoothness cost seen. Checked only at 30 fps on iOS: the game's
 # default 60 fps and the Mac use it untested
 present_trim	60
+
+# ---- Movies ----
+# The movies are AV1 decoded by VideoToolbox. On an iPhone 18 Pro Max (X1.0) iOS ended the hardware decoder while the notification panel was down during the opening movie: every later
+# temporal unit failed with -12903 (kVTInvalidSessionErr) and the movie ran through its file in about 2 s, 365 of 9,254 pictures shown. With the key the dead session is dropped and
+# a new one starts at the next key frame, the last picture shown until then at the skipped units' times (hle_movie.c movie_vt_restart; DM_MOVIE_RESTART=0 in env.txt turns it off)
+movie_restart	on
 
 # ---- Graphics ----
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here

@@ -21,6 +21,7 @@ What it reads (docs/development.md, Reading a device log):
   display link       [nvn-mtl] display link up to tick N: submission ahead of / game enqueue to target display; the stretches of windows whose enqueue p50 is more than half a frame
                      period above the run's median (the display link counts whole frames: a frame more latency), and what the log shows just before them
   long frames        [longframe] frame N (T s): the longest, and what each spent its time on (new pipelines, texture uploads, GPU, submit, the game's side, a return from the background).
+                     A frame whose line says it spanned a stay in the background (; N ms of it in the background) is time the game never ran: not counted, only named.
                      A frame as long as the frame step's hold asked for (2 or 3 vsyncs, within 1.25 of it) is not counted: the host's own line says the hold (; hold K × V ms,
                      hold 1 too while the frame step runs) and no longer prints such frames; in an older log the hold comes from the [nvn] frame step: hold A → B lines, and past
                      their last one from runs of three or more such frames at most two frames apart. A log with no frame step line and no hold guesses none
@@ -92,7 +93,8 @@ RX = {k: re.compile(v) for k, v in {
     'link': r'^\[nvn-mtl\] display link up to tick (\d+): ticks \d+, presents (\d+), empty ticks (\d+) .*?merging (\d+); submission ahead of target display p50 ([\d.]+) ms / min ([\d.]+) ms; '
             r'game enqueue to target display p50 ([\d.]+) ms / min ([\d.]+) / max ([\d.]+) ms',
     'longframe': r'^\[longframe\] frame (\d+) \(([\d.]+) s\) whole frame ([\d.]+) ms, submit\+present ([\d.]+) ms, GPU (-?[\d.]+) ms; new pipelines (\d+) \+ shader libraries (\d+), '
-                 r'([\d.]+) ms in all; texture uploads (\d+) first \+ (\d+) re-uploads, ([\d.]+) MB / ([\d.]+) ms(?:.*?; hold (\d+) × ([\d.]+) ms)?',   # the hold part since the hold-aware long-frame log
+                 r'([\d.]+) ms in all; texture uploads (\d+) first \+ (\d+) re-uploads, ([\d.]+) MB / ([\d.]+) ms(?:.*?; hold (\d+) × ([\d.]+) ms)?'
+                 r'(?:.*?; ([\d.]+) ms of it in the background)?',   # the hold part since the hold-aware long-frame log; the background part since X1.0's field logging
     'fstep': r'^\[nvn\] frame step: hold (\d+) → (\d+) (vsyncs|ticks of 1/120 s) at present (\d+)',
     'audio': r'^audio #(\d+) device callbacks (\d+): .*; in these (\d+), (\d+) underruns, ([\d.]+) ms zero-padded',
     'au_session': r'^audio session: sample rate (\d+) Hz, I/O buffer ([\d.]+) ms \(asked for 5 ms\)(?:, output latency ([\d.]+) ms)?',
@@ -395,11 +397,13 @@ def read(text: str, top: int = 5) -> Rec:
     for (i, m, _), after in zip(g['longframe'], lf_after):
         r: Rec = {'frame': int(m.group(1)), 't_s': float(m.group(2)), 'ms': float(m.group(3)), 'submit_ms': float(m.group(4)), 'gpu_ms': float(m.group(5)), 'pipelines': int(m.group(6)),
                   'libraries': int(m.group(7)), 'make_ms': float(m.group(8)), 'uploads': int(m.group(9)), 'reuploads': int(m.group(10)), 'upload_mb': float(m.group(11)),
-                  'upload_ms': float(m.group(12)), 'hold': int(m.group(13)) if m.group(13) else None, 'vsync_ms': float(m.group(14)) if m.group(14) else None, 'i': i}
+                  'upload_ms': float(m.group(12)), 'hold': int(m.group(13)) if m.group(13) else None, 'vsync_ms': float(m.group(14)) if m.group(14) else None, 'i': i,
+                  'away_ms': float(m.group(15)) if m.group(15) else 0.0}
         r['causes'] = lf_causes(r, after, frame_ms); lfs.append(r)
+        if r['away_ms']: r['causes'] = [f"a stay in the background ({r['away_ms'] / 1000:.1f} s of it)"]   # the host's own line says so: not a long frame
     hold_frames(lfs, [(int(m.group(4)), int(m.group(2)), 1000 / 120 if m.group(3).startswith('ticks') else VSYNC_MS, int(m.group(1))) for _, m, _ in g['fstep']],
                 fstep_cut(g['fstep_cut']))
-    held_at = {r['i'] for r in lfs if 'held_ms' in r}
+    held_at = {r['i'] for r in lfs if 'held_ms' in r}; away_at = {r['i'] for r in lfs if r['away_ms']}
     for r in lfs: del r['i']
     # display-link latency
     win = [{'i': i, 't_s': clock.at(f or int(m.group(2))), 'p50': float(m.group(7)), 'max': float(m.group(9)), 'ahead': float(m.group(5)), 'ahead_min': float(m.group(6))}
@@ -412,7 +416,7 @@ def read(text: str, top: int = 5) -> Rec:
             j = k
             while j + 1 < len(win) and win[j + 1]['p50'] > lim: j += 1
             lo, hi = (win[k - 2]['i'] if k >= 2 else -1), win[k]['i']   # just before: since the window two before the first raised one
-            nlf = sum(1 for i, _, _ in g['longframe'] if lo < i < hi and i not in held_at); nh = sum(1 for i in held_at if lo < i < hi)
+            nlf = sum(1 for i, _, _ in g['longframe'] if lo < i < hi and i not in held_at and i not in away_at); nh = sum(1 for i in held_at if lo < i < hi)
             raised.append({'from_s': win[k - 1]['t_s'] if k else 0.0, 'to_s': win[j]['t_s'], 'windows': j - k + 1, 'p50_max_ms': max(x['p50'] for x in win[k:j + 1]),
                            'before': list(dict.fromkeys(e['what'] for e in events if lo < e['i'] < hi)) + ([nof(nlf, 'long frame')] if nlf else [])
                            + ([nof(nh, 'frame') + ' at the hold the frame step asked'] if nh else []), 'to_the_end': j == len(win) - 1})
@@ -422,11 +426,14 @@ def read(text: str, top: int = 5) -> Rec:
                                'ahead_p50_ms': med([x['ahead'] for x in win]), 'ahead_min_ms': min(x['ahead_min'] for x in win),
                                'empty_ticks': int(lm.group(3)), 'merged': int(lm.group(4)), 'raised': raised, 'p50_by_window': [[x['t_s'], x['p50']] for x in win]}
     # long frames: the frames the frame step held as long as it asked are not counted (hold_frames)
-    by = collections.Counter(next(key for word, key in CAUSE_KEY if r['causes'][0].startswith(word)) for r in lfs if 'held_ms' not in r)
+    # and neither are the frames whose line says they spanned a stay in the background (away)
+    counted = [r for r in lfs if 'held_ms' not in r and not r['away_ms']]
+    by = collections.Counter(next(key for word, key in CAUSE_KEY if r['causes'][0].startswith(word)) for r in counted)
     mins_run = (out['duration_s'] or 0) / 60
-    nl = sum(by.values())
-    out['long_frames'] = {'count': nl, 'per_min': round(nl / mins_run, 2) if mins_run else None, 'by_cause': dict(by.most_common()), 'held': len(lfs) - nl,
-                          'top': sorted((r for r in lfs if 'held_ms' not in r), key=lambda r: -r['ms'])[:top]} if lfs else None
+    nl = len(counted); away = [r for r in lfs if r['away_ms'] and 'held_ms' not in r]
+    out['long_frames'] = {'count': nl, 'per_min': round(nl / mins_run, 2) if mins_run else None, 'by_cause': dict(by.most_common()), 'held': len(lfs) - nl - len(away),
+                          'away': [{'t_s': r['t_s'], 'frame': r['frame'], 'ms': r['ms'], 'away_ms': r['away_ms']} for r in away],
+                          'top': sorted(counted, key=lambda r: -r['ms'])[:top]} if lfs else None
     # events
     sus = [e for e in events if e['what'] == 'graphics suspended'] or [e for e in events if e['what'] == 'background']
     res = [e for e in events if e['what'] == 'resumed']
@@ -574,6 +581,7 @@ def render(s: Rec, top: int) -> list[str]:
         row('long frames', f"{lf['count']} ({g3(lf['per_min'])} a minute)" + (': ' + ', '.join(f'{k} {n}' for k, n in lf['by_cause'].items()) + ' (by what each spent its time on first)'
                                                                                if lf['by_cause'] else ''),
             f"not counted: {nof(lf['held'], 'frame')} as long as the frame step's hold of 2 or 3 vsyncs asked, just after a step up" if lf.get('held') else '',
+            *(f"not counted: {r['t_s']:.0f} s frame {r['frame']}: {r['ms']:g} ms across a stay in the background ({r['away_ms'] / 1000:.1f} s of it away)" for r in lf.get('away', [])),
             *(f"{r['t_s']:.0f} s frame {r['frame']}: {r['ms']:g} ms, {'; '.join(r['causes'])}" for r in lf['top']))
     ev = s['events']
     row('events', f"in the background {nof(ev['background'], 'time')}, back {ev['resumed']}, {nof(ev['focus_changes'], 'focus change')}" + ('; the log ends in the background' if ev['ended_in_background'] else ''),

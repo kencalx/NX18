@@ -13,5 +13,6 @@ void mav1_reset(mav1 *a);   // a new stream starts at the next packet with a seq
 // One temporal unit (OBUs with their sizes). 1 and *out set: a picture; 0: nothing to show (no sequence header seen yet, a unit without a shown frame); -1: the decoder refused it
 int mav1_decode(mav1 *a, const uint8_t *data, size_t n, mav1_picture *out);
 const char *mav1_backend(const mav1 *a);   // "VideoToolbox" (its hardware decoder: Apple M3 and A17 Pro on) or "dav1d"
+int movie_vt_restart(void);   // hle_movie.c: restart a session iOS invalidated in the background at the next key frame (profile movie_restart, DM_MOVIE_RESTART)
 // Exposed for its test: fills the 4 + n bytes of an av1C record from a sequence header OBU (with its header and size); 0 when the OBU cannot be read
 int mav1_av1c(const uint8_t *obu, size_t n, uint8_t c[4], int *w, int *h);

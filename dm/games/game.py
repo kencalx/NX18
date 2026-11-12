@@ -172,6 +172,10 @@ def header_one(g):
     if fm not in ('60', '120'): sys.exit(f'{g.id}: fps_max must be 60 or 120: {fm}')
     fh = g.get('fps_hold', 'on')   # whether the frame step may hold a frame longer than the cap's vsyncs when frames come late (hle_nvn.c fstep_tick): on / off
     if fh not in ('on', 'off'): sys.exit(f'{g.id}: fps_hold must be on or off: {fh}')
+    fhb = g.get('fps_hold_backoff', 'double')   # the waits after a held probe's run at hold 1 that ended early (nvn_fstep.h FSTEP_BURST_N; DM_FPS_HOLD_BACKOFF overrides): double (doubled up to 8 s) / burst (a short CPU burst paid back at hold 1)
+    if fhb not in ('double', 'burst'): sys.exit(f'{g.id}: fps_hold_backoff must be double or burst: {fhb}')
+    frs = g.get('fps_resume', 'off')   # the frame across a stay in the background on time and owing nothing, the 30 after it not stepping the hold up (nvn_fstep.h nvn_fstep.away; DM_FPS_RESUME overrides): on / off
+    if frs not in ('on', 'off'): sys.exit(f'{g.id}: fps_resume must be on or off: {frs}')
     utp = g.get('ue_texture_pool', '0')   # Unreal's r.Streaming.PoolSize in MB, raised to this on the Mac (hle_uecvar.c; DM_UE_TEXTURE_POOL overrides, and turns it on for iOS): 0 = the game's own pool
     if not utp.isdigit(): sys.exit(f"{g.id}: ue_texture_pool must be megabytes (0 = the game's own pool): {utp}")
     ufc = g.get('ue_fps_cvar', 't.MaxFPS')   # the Unreal console variable the host writes fps_target into (hle_fpslock.c; found by name by the rewriter, ue_cvar.py NAMES): a game's own frame limit its settings apply to t.MaxFPS
@@ -202,6 +206,8 @@ def header_one(g):
     if cp not in ('on', 'off'): sys.exit(f'{g.id}: core_preempt must be on or off: {cp}')
     aba = g.get('alloc_big_align', 'off')   # nn::mem::StandardAllocator::Allocate aligns blocks of 64 KB or more to 64 KB (hle_os.c; Vanillaware's memory pool storage): on / off
     if aba not in ('on', 'off'): sys.exit(f'{g.id}: alloc_big_align must be on or off: {aba}')
+    mvr = g.get('movie_restart', 'off')   # a VideoToolbox movie session iOS invalidated in the background (-12903) dropped and started again at the next key frame (hle_movie.c movie_vt_restart; DM_MOVIE_RESTART overrides): on / off
+    if mvr not in ('on', 'off'): sys.exit(f'{g.id}: movie_restart must be on or off: {mvr}')
     sf = g.get('shared_font', 'bfttf')   # what the shared-font address points at (hle_sdk16.c): bfttf = 8-byte header + TTF, ttf = the TTF alone
     if sf not in ('bfttf', 'ttf'): sys.exit(f'{g.id}: shared_font must be bfttf or ttf: {sf}')
     pl = g.get('pad_layout', 'simple')   # the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3),
@@ -265,9 +271,12 @@ def header_one(g):
          f'#define DM_GAME_PRESENT_CHOICE {int(pic == "on")}',   # the launcher's Frame rate as the present interval (settings.tsv DM_PRESENT_INTERVAL)
          f'#define DM_GAME_CORE_PREEMPT {int(cp == "on")}',
          f'#define DM_GAME_ALLOC_BIG_ALIGN {int(aba == "on")}',
+         f'#define DM_GAME_MOVIE_RESTART {int(mvr == "on")}',
          f'#define DM_GAME_FPS_TARGET {int(ft)}',
          f'#define DM_GAME_FPS_MAX {int(fm)}',
          f'#define DM_GAME_FPS_HOLD {int(fh == "on")}',
+         f'#define DM_GAME_FPS_HOLD_BACKOFF {int(fhb == "burst")}',
+         f'#define DM_GAME_FPS_RESUME {int(frs == "on")}',
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',
          f'#define DM_GAME_UE_FPS_CVAR {q(ufc)}',
          f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',

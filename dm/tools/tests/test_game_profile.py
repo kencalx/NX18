@@ -105,6 +105,87 @@ class PresentTrim(unittest.TestCase):   # DM_PRESENT_TRIM's K by default (nvn_mt
         self.assertIn('0400486024DEC000', on)
 
 
+class MovieRestart(unittest.TestCase):   # a VideoToolbox movie session iOS invalidated in the background restarted at the next key frame (hle_movie.c movie_vt_restart; DM_MOVIE_RESTART overrides)
+    def macro(self, rows, gid=None):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'game.h')
+            if gid is None:
+                Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+                env = {**os.environ, 'DM_GAMES_DIR': d}
+            else: env = {k: v for k, v in os.environ.items() if k != 'DM_GAMES_DIR'}   # a profile of the repository
+            subprocess.run([sys.executable, str(GAME), 'header', gid or ID, str(out)], env=env, check=True, capture_output=True)
+            return [l for l in out.read_text().splitlines() if 'MOVIE_RESTART' in l]
+
+    def test_values_and_the_default(self):
+        self.assertEqual(self.macro(''), ['#define DM_GAME_MOVIE_RESTART 0'])   # without the key: off, every other game as before
+        self.assertEqual(self.macro('movie_restart\ton\n'), ['#define DM_GAME_MOVIE_RESTART 1'])
+        self.assertEqual(self.macro('movie_restart\toff\n'), ['#define DM_GAME_MOVIE_RESTART 0'])
+        for v in ('1', 'yes', 'On', ''):
+            rc, out = header(f'movie_restart\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('movie_restart must be on or off', out, v)
+
+    def test_profiles_that_set_it(self):   # Ocarina of Time (X1.0), and any game that sets it names it in its note
+        on = [tsv.parent for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv'))
+              if any(l.split('\t')[:2] == ['movie_restart', 'on'] for l in tsv.read_text(encoding='utf-8').splitlines())]
+        self.assertIn('0400486024DEC000', [d.name for d in on])
+        self.assertEqual(self.macro('', '0400486024DEC000'), ['#define DM_GAME_MOVIE_RESTART 1'])
+        for d in on: self.assertIn('movie_restart', (d / 'README.md').read_text(encoding='utf-8') if (d / 'README.md').is_file() else '', d.name)
+
+
+class FpsHoldBackoff(unittest.TestCase):   # the waits after a held probe's short run at hold 1 (nvn_fstep.h FSTEP_BURST_N; DM_FPS_HOLD_BACKOFF overrides)
+    def macro(self, rows, gid=None):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'game.h')
+            if gid is None:
+                Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+                env = {**os.environ, 'DM_GAMES_DIR': d}
+            else: env = {k: v for k, v in os.environ.items() if k != 'DM_GAMES_DIR'}   # a profile of the repository
+            subprocess.run([sys.executable, str(GAME), 'header', gid or ID, str(out)], env=env, check=True, capture_output=True)
+            return [l for l in out.read_text().splitlines() if 'FPS_HOLD_BACKOFF' in l]
+
+    def test_values_and_the_default(self):
+        self.assertEqual(self.macro(''), ['#define DM_GAME_FPS_HOLD_BACKOFF 0'])   # without the key: doubling, every other game as before
+        self.assertEqual(self.macro('fps_hold_backoff\tburst\n'), ['#define DM_GAME_FPS_HOLD_BACKOFF 1'])
+        self.assertEqual(self.macro('fps_hold_backoff\tdouble\n'), ['#define DM_GAME_FPS_HOLD_BACKOFF 0'])
+        for v in ('on', '1', 'Burst', ''):
+            rc, out = header(f'fps_hold_backoff\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('fps_hold_backoff must be double or burst', out, v)
+
+    def test_profiles_that_set_it(self):   # Ocarina of Time alone (X1.0), named in its note
+        on = [tsv.parent.name for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv'))
+              if any(l.split('\t')[:2] == ['fps_hold_backoff', 'burst'] for l in tsv.read_text(encoding='utf-8').splitlines())]
+        self.assertEqual(on, ['0400486024DEC000'])
+        self.assertEqual(self.macro('', '0400486024DEC000'), ['#define DM_GAME_FPS_HOLD_BACKOFF 1'])
+        self.assertIn('fps_hold_backoff', (REPO / 'dm/games/0400486024DEC000/README.md').read_text(encoding='utf-8'))
+
+
+class FpsResume(unittest.TestCase):   # the frame across a stay in the background on time and owing nothing (nvn_fstep.h nvn_fstep.away; DM_FPS_RESUME overrides)
+    def macro(self, rows, gid=None):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'game.h')
+            if gid is None:
+                Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+                env = {**os.environ, 'DM_GAMES_DIR': d}
+            else: env = {k: v for k, v in os.environ.items() if k != 'DM_GAMES_DIR'}   # a profile of the repository
+            subprocess.run([sys.executable, str(GAME), 'header', gid or ID, str(out)], env=env, check=True, capture_output=True)
+            return [l for l in out.read_text().splitlines() if 'FPS_RESUME' in l]
+
+    def test_values_and_the_default(self):
+        self.assertEqual(self.macro(''), ['#define DM_GAME_FPS_RESUME 0'])   # without the key: off, every other game as before
+        self.assertEqual(self.macro('fps_resume\ton\n'), ['#define DM_GAME_FPS_RESUME 1'])
+        self.assertEqual(self.macro('fps_resume\toff\n'), ['#define DM_GAME_FPS_RESUME 0'])
+        for v in ('1', 'yes', 'On', ''):
+            rc, out = header(f'fps_resume\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('fps_resume must be on or off', out, v)
+
+    def test_profiles_that_set_it(self):   # Ocarina of Time alone (X1.0), named in its note
+        on = [tsv.parent.name for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv'))
+              if any(l.split('\t')[:2] == ['fps_resume', 'on'] for l in tsv.read_text(encoding='utf-8').splitlines())]
+        self.assertEqual(on, ['0400486024DEC000'])
+        self.assertEqual(self.macro('', '0400486024DEC000'), ['#define DM_GAME_FPS_RESUME 1'])
+        self.assertIn('fps_resume', (REPO / 'dm/games/0400486024DEC000/README.md').read_text(encoding='utf-8'))
+
+
 class PostAA(unittest.TestCase):   # the present's edge smoothing by default (settings.tsv DM_POST_AA's values, nvn_upscale_pick.h aa_parse)
     def macro(self, rows):
         with tempfile.TemporaryDirectory() as d:

@@ -6,9 +6,37 @@
 #define HLE_FORCE(mangled, why, ret, cname, ...) static ret cname(__VA_ARGS__)
 #include "../hle_movie.c"
 #include "../hle_codec_video.c"
+// VideoToolbox's decode is wrapped so a test can play iOS invalidating a session in the background (kVTInvalidSessionErr): returned by the decode, or given to the callback.
+// Its session creation is wrapped too, so a test can play iOS refusing a new hardware session while the app is still inactive (kVTVideoDecoderNotAvailableNowErr)
+#include <VideoToolbox/VideoToolbox.h>
+static OSStatus vt_decode(VTDecompressionSessionRef, CMSampleBufferRef, VTDecodeFrameFlags, void *, VTDecodeInfoFlags *);
+static OSStatus vt_create(CFAllocatorRef, CMVideoFormatDescriptionRef, CFDictionaryRef, CFDictionaryRef, const VTDecompressionOutputCallbackRecord *, VTDecompressionSessionRef *);
+#define VTDecompressionSessionDecodeFrame vt_decode
+#define VTDecompressionSessionCreate vt_create
 #include "../hle_movie_avc.c"
 #include "../hle_movie_av1.c"
+#undef VTDecompressionSessionDecodeFrame
+#undef VTDecompressionSessionCreate
 #include <assert.h>
+static int vt_fail, vt_calls;   // vt_fail: 1 = the next decode returns kVTInvalidSessionErr, 2 = it gives that error to the callback and returns noErr (then 0 again)
+static mavc *vt_avc; static mav1 *vt_av1;   // whose callback mode 2 calls
+static OSStatus vt_decode(VTDecompressionSessionRef vs, CMSampleBufferRef sb, VTDecodeFrameFlags fl, void *src, VTDecodeInfoFlags *info) {
+    vt_calls++;
+    int f = vt_fail; vt_fail = 0;
+    if (f == 1) return kVTInvalidSessionErr;
+    if (f == 2) { if (vt_avc) on_frame(vt_avc, src, kVTInvalidSessionErr, 0, NULL, kCMTimeInvalid, kCMTimeInvalid); else av1_on_frame(vt_av1, src, kVTInvalidSessionErr, 0, NULL, kCMTimeInvalid, kCMTimeInvalid); return noErr; }
+    return VTDecompressionSessionDecodeFrame(vs, sb, fl, src, info);
+}
+static OSStatus vt_create_fail; static int vt_creates;   // vt_create_fail: the next session creation returns it (then 0 again)
+static OSStatus vt_create(CFAllocatorRef al, CMVideoFormatDescriptionRef fd, CFDictionaryRef spec, CFDictionaryRef attrs, const VTDecompressionOutputCallbackRecord *cb, VTDecompressionSessionRef *vs) {
+    vt_creates++;
+    OSStatus f = vt_create_fail; vt_create_fail = 0;
+    if (f) { *vs = NULL; return f; }
+    return VTDecompressionSessionCreate(al, fd, spec, attrs, cb, vs);
+}
+static char g_err[8192];   // what one call logged
+#define LOGGED(stmt) do { fflush(stderr); int s_ = dup(2); FILE *t_ = tmpfile(); assert(s_ >= 0 && t_); dup2(fileno(t_), 2); stmt; fflush(stderr); dup2(s_, 2); close(s_); \
+                          rewind(t_); size_t k_ = fread(g_err, 1, sizeof g_err - 1, t_); g_err[k_] = 0; fclose(t_); } while (0)
 
 uint64_t now_ns(void) { return 1; }
 static uint64_t test_guest;   // the guest clock (hle_os.c guest_ns: frozen while the app is in the background), which the pacing's movie clock runs on
@@ -127,6 +155,148 @@ static int pace_self(uint64_t frame_ns, int64_t itv, int n, int bufs, uint64_t s
 static void pace_print(const char *what, const pace_res *r) {
     printf("  %s: %d frames, %d pictures shown, at most %d skipped in a frame, starved %d, monotonic %d, end of stream on the last %d, 60 fps signal %d, %d skips in the background, %d pictures on at the jump\n",
            what, r->frames, r->shown, r->max_jump - 1, r->starved, r->mono, r->eos_last, r->fps60, r->bg_skips, r->gap_jump);
+}
+
+// A VideoToolbox session iOS invalidated in the background (hle_movie_avc.c, hle_movie_av1.c; Ocarina of Time's opening movie after the notification panel): with movie_vt_restart the
+// session is dropped and a new one starts at the next key frame. The units before it reach no decoder and show the last picture again at their own times; one plain line says
+// so, no red one. Off, as before
+static const uint8_t h264_p[] = {0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x00, 0x10};   // a non-IDR slice header alone: it must never reach a decoder (vt_fail fails it before)
+static const uint8_t av1_inter[] = {0x12, 0x00, 0x32, 0x02, 0x30, 0x00};   // temporal delimiter, then a frame OBU whose header starts show_existing_frame 0, frame_type 1 (inter)
+static int red_y(const uint8_t *y, size_t stride, int w, int h) { for (int r = 0; r < h; r++) for (int x = 0; x < w; x++) if (abs(y[(size_t)r * stride + x] - 81) > 4) return 0; return 1; }
+static void vt_restart_avc(void) {
+    static uint8_t nv12[64 * 64 * 3 / 2]; int64_t pts; int r, calls;
+    setenv("DM_MOVIE_RESTART", "1", 1);
+    mavc *a = mavc_new(); vt_avc = a;
+    assert(!mavc_decode(a, h264, sizeof h264, 0) && a->vs && mavc_take(a, 0, nv12, 64, 64, &pts) == 1 && red_y(nv12, 64, 64, 64));
+    // Pictures before the IDR show the last picture taken again, at their own times (STILL(t): the red frame at t, and nothing else queued)
+    #define STILL(t) (mavc_queued(a) == 1 && mavc_take(a, 0, nv12, 64, 64, &pts) == 1 && pts == (t) && red_y(nv12, 64, 64, 64))
+    vt_fail = 1; LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 1000));   // the session died while the app was away: a non-IDR packet finds it
+    assert(!r && !a->vs && a->restart && a->restarts == 1 && STILL(1000));
+    assert(strstr(g_err, "[movie] AVC: VideoToolbox's session was invalidated") && strstr(g_err, "at the next IDR picture") && !strstr(g_err, "[RED]"));
+    calls = vt_calls; LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 2000));   // skipped until the IDR: no decoder, the still picture, nothing logged
+    assert(!r && vt_calls == calls && !a->vs && STILL(2000) && !g_err[0]);
+    assert(!mavc_decode(a, h264_p, sizeof h264_p, 1500) && !mavc_queued(a));   // a picture whose time is before one shown (a B picture): none, the times stay in order
+    assert(!mavc_decode(a, h264, sizeof h264, 3000) && a->vs && !a->restart && vt_calls == calls + 1);   // the IDR: a new session from the parameter sets
+    assert(mavc_take(a, 0, nv12, 64, 64, &pts) == 1 && pts == 3000 && red_y(nv12, 64, 64, 64));
+    vt_fail = 1; LOGGED(r = mavc_decode(a, h264, sizeof h264, 4000));   // found at an IDR: a new session decodes that same picture
+    assert(!r && a->vs && !a->restart && a->restarts == 2 && strstr(g_err, "at this IDR picture") && !strstr(g_err, "[RED]"));
+    assert(mavc_take(a, 0, nv12, 64, 64, &pts) == 1 && pts == 4000 && red_y(nv12, 64, 64, 64));
+    vt_fail = 2; LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 5000));   // the error in the callback, the decode returning noErr
+    assert(!r && !a->vs && a->restart && !a->lost && a->restarts == 3 && !strstr(g_err, "[RED]") && STILL(5000));
+    assert(!mavc_decode(a, h264, sizeof h264, 6000) && a->vs && mavc_take(a, 0, nv12, 64, 64, &pts) == 1 && pts == 6000);
+    // iOS refuses the new session (the app still inactive, kVTVideoDecoderNotAvailableNowErr): still waiting for an IDR, so the P pictures after it reach no session that lacks their reference
+    vt_fail = 1; LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 7000)); assert(!r && !a->vs && a->restart && a->restarts == 4 && STILL(7000));
+    vt_create_fail = kVTVideoDecoderNotAvailableNowErr; calls = vt_creates; LOGGED(r = mavc_decode(a, h264, sizeof h264, 8000));
+    assert(!r && vt_creates == calls + 1 && !a->vs && a->restart && STILL(8000) && strstr(g_err, "not available yet") && !strstr(g_err, "[RED]"));
+    calls = vt_calls; LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 9000)); assert(!r && vt_calls == calls && !a->vs && a->restart && STILL(9000) && !g_err[0]);
+    assert(!mavc_decode(a, h264, sizeof h264, 10000) && a->vs && !a->restart && mavc_take(a, 0, nv12, 64, 64, &pts) == 1 && pts == 10000 && red_y(nv12, 64, 64, 64));
+    vt_fail = 1; vt_create_fail = kVTVideoDecoderNotAvailableNowErr; LOGGED(r = mavc_decode(a, h264, sizeof h264, 11000));   // found at an IDR, and the new session refused: the next IDR
+    assert(!r && !a->vs && a->restart && a->restarts == 5 && !strstr(g_err, "[RED]") && STILL(11000));
+    LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 12000)); assert(!r && !a->vs && a->restart && STILL(12000));
+    assert(!mavc_decode(a, h264, sizeof h264, 13000) && a->vs && !a->restart && mavc_take(a, 0, nv12, 64, 64, &pts) == 1 && pts == 13000);
+    vt_fail = 1; LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 14000)); assert(a->restart && STILL(14000));   // any other refusal: the old red line, and still the next IDR
+    vt_create_fail = kVTVideoDecoderMalfunctionErr; LOGGED(r = mavc_decode(a, h264, sizeof h264, 15000));
+    assert(r == -1 && !a->vs && a->restart && strstr(g_err, "[RED] movie: VideoToolbox cannot create an AVC decode session") && STILL(15000));
+    LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 16000)); assert(!r && !a->vs && a->restart && STILL(16000));
+    assert(!mavc_decode(a, h264, sizeof h264, 17000) && a->vs && !a->restart && mavc_take(a, 0, nv12, 64, 64, &pts) == 1 && pts == 17000);
+    mavc_drop(a); assert(!a->last);   // a Flush or Stop: nothing of the old stream is shown again
+    #undef STILL
+    mavc_free(a);
+    // Off (DM_MOVIE_RESTART=0, or a profile without movie_restart): as before, the packet fails with a red line and the session is kept
+    setenv("DM_MOVIE_RESTART", "0", 1);
+    a = mavc_new(); vt_avc = a;
+    assert(!mavc_decode(a, h264, sizeof h264, 0) && mavc_take(a, 0, nv12, 64, 64, &pts) == 1);
+    vt_fail = 1; LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 1000));
+    assert(r == -1 && a->vs && !a->restart && !a->restarts && !a->last && !mavc_queued(a) && strstr(g_err, "[RED] movie: AVC decode submission failed (-12903"));
+    vt_fail = 2; LOGGED(r = mavc_decode(a, h264_p, sizeof h264_p, 2000));
+    assert(!r && a->vs && !a->lost && !a->restart);   // the callback's error is the old red one (already logged once for this decoder)
+    mavc_free(a); vt_avc = NULL;
+    unsetenv("DM_MOVIE_RESTART"); assert(movie_vt_restart() == DM_GAME_MOVIE_RESTART);   // without the variable: the profile's movie_restart
+    setenv("DM_MOVIE_RESTART", "1", 1); assert(movie_vt_restart()); setenv("DM_MOVIE_RESTART", "0", 1); assert(!movie_vt_restart()); unsetenv("DM_MOVIE_RESTART");
+}
+// Ocarina of Time's opening after a restart, as its player sees it (CV_PACE: one picture a game frame, 60 fps, packets sent until the decoder refuses one): a key frame, then
+// `gap` temporal units the invalidated session cannot decode (the first fails with kVTInvalidSessionErr), then key frames. Returns the frame at which the key frame after the gap
+// (picture `gap`) is first shown; *stills the pictures shown before it with a time inside the gap
+static int av1_gap_play(int gap, int *stills) {
+    _Alignas(16) static uint8_t da[0x400], pp[3][0x40], pm[3][64 * 64 * 4]; memset(da, 0, sizeof da);
+    cv_pref pf = h_cv_pref(64, 64, 3, 0); uint64_t sz, al; assert(!h_cv_poolsize(&sz, &al, &pf, 1));
+    for (int i = 0; i < 3; i++) assert(!h_cv_pool(pp[i], pm[i], sz, &pf, 1, 0));
+    assert(!h_cv_av1tm(da, NULL, 0, 0x10000, 64, 64, 1, 3, 2, 2)); vt_av1 = cv_of(da)->av1;
+    uint32_t idx = 0; cv_sync sy; uint16_t w, h, cw, ch; int64_t ts; bool eos;
+    for (uint32_t i = 0; i < 3; i++) assert(!h_cv_av1reg(da, i, pp[i], 0));
+    for (int i = 0; i < 3; i++) { assert(!h_cv_av1acq(&idx, &sy, da)); h_cv_av1rel(da, idx, sy); }
+    int n = gap + 120, sent = 0, have = 0, at = -1; *stills = 0;
+    for (int f = 1; f < 4 * n && at < 0; f++) {
+        test_guest += 16666667;
+        for (int k = 0; k < 8 && sent < n; k++) {
+            int key = sent == 0 || sent >= gap; uint64_t id;
+            if (sent == 1) vt_fail = 1;
+            Result x = h_cv_av1submit(&id, da, key ? av1 : av1_inter, key ? sizeof av1 : sizeof av1_inter, PACE_ITV(sent), sent == n - 1);
+            if (x == CV_BUSY) break;
+            assert(!x); sent++;
+        }
+        if (!have) { assert(!h_cv_av1acq(&idx, &sy, da)); have = 1; }
+        if (!h_gs_trywait(&sy)) continue;
+        assert(!h_cv_av1props(&w, &h, &cw, &ch, &ts, &eos, da, idx) && w == 64);
+        if (ts >= PACE_ITV(gap)) at = f; else *stills += ts > 0;
+        h_cv_av1rel(da, idx, sy); have = 0;
+    }
+    assert(!h_cv_av1fin(da)); vt_av1 = NULL;
+    for (int i = 0; i < 3; i++) h_cv_poolfin(pp[i]);
+    return at;
+}
+static void vt_restart_av1(void) {
+    // Key frames: a sequence header and a key frame; a sequence header beside an inter frame is none
+    uint8_t seq_inter[32]; memcpy(seq_inter, av1, 15); memcpy(seq_inter + 15, av1_inter + 2, 4);
+    assert(av1_key(av1, sizeof av1) && !av1_key(av1_inter, sizeof av1_inter) && !av1_key(seq_inter, 19) && !av1_key(av1, 2));
+    if (!VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) { puts("AV1 session restart: skipped, this Mac has no hardware AV1 decoder"); return; }
+    setenv("DM_MOVIE_RESTART", "1", 1); setenv("DM_AV1_DAV1D", "0", 1);
+    mav1 *a = mav1_new(); vt_av1 = a; mav1_picture pic; int r, calls;
+    assert(mav1_decode(a, av1, sizeof av1, &pic) == 1 && red_y(pic.y, pic.ystride, 64, 64));
+    // Units before the key frame show the last picture again (STILL: the red frame), for their own times
+    #define STILL (r == 1 && red_y(pic.y, pic.ystride, 64, 64))
+    vt_fail = 1; LOGGED(r = mav1_decode(a, av1_inter, sizeof av1_inter, &pic));
+    assert(STILL && !a->vs && a->restart && a->restarts == 1 && !a->soft);
+    assert(strstr(g_err, "[movie] AV1: VideoToolbox's session was invalidated") && strstr(g_err, "at the next key frame") && !strstr(g_err, "[RED]"));
+    calls = vt_calls; LOGGED(r = mav1_decode(a, av1_inter, sizeof av1_inter, &pic)); assert(STILL && vt_calls == calls && !g_err[0]);
+    LOGGED(r = mav1_decode(a, seq_inter, 19, &pic)); assert(STILL && vt_calls == calls && !a->vs && a->restart && !g_err[0]);   // a sequence header alone does not start it
+    assert(mav1_decode(a, av1, sizeof av1, &pic) == 1 && a->vs && !a->restart && red_y(pic.y, pic.ystride, 64, 64));
+    vt_fail = 1; LOGGED(r = mav1_decode(a, av1, sizeof av1, &pic));   // found at a key frame: a new session decodes it
+    assert(r == 1 && a->vs && !a->restart && a->restarts == 2 && strstr(g_err, "at this key frame") && !strstr(g_err, "[RED]") && red_y(pic.y, pic.ystride, 64, 64));
+    vt_fail = 2; LOGGED(r = mav1_decode(a, av1_inter, sizeof av1_inter, &pic));   // the error in the callback
+    assert(STILL && !a->vs && a->restart && !a->lost && a->restarts == 3 && !strstr(g_err, "[RED]"));
+    // iOS refuses the new session (the app still inactive, kVTVideoDecoderNotAvailableNowErr): still waiting for a key frame on VideoToolbox, not dav1d for the rest of the movie
+    vt_create_fail = kVTVideoDecoderNotAvailableNowErr; calls = vt_creates; LOGGED(r = mav1_decode(a, av1, sizeof av1, &pic));
+    assert(STILL && vt_creates == calls + 1 && !a->vs && a->restart && !a->soft && strstr(g_err, "not available yet") && !strstr(g_err, "[RED]"));
+    calls = vt_calls; LOGGED(r = mav1_decode(a, av1_inter, sizeof av1_inter, &pic)); assert(STILL && vt_calls == calls && !a->vs && a->restart && !g_err[0]);
+    assert(mav1_decode(a, av1, sizeof av1, &pic) == 1 && a->vs && !a->restart && !a->soft && red_y(pic.y, pic.ystride, 64, 64));
+    vt_fail = 1; vt_create_fail = kVTVideoDecoderNotAvailableNowErr; LOGGED(r = mav1_decode(a, av1, sizeof av1, &pic));   // found at a key frame, and the new session refused
+    assert(STILL && !a->vs && a->restart && !a->soft && a->restarts == 4 && !strstr(g_err, "[RED]"));
+    assert(mav1_decode(a, av1, sizeof av1, &pic) == 1 && a->vs && !a->restart && !a->soft);
+    #undef STILL
+    mav1_reset(a); assert(!a->restart && !a->last);   // a new stream (Stop / Flush) starts as before, with no picture to show again
+    mav1_free(a);
+    // Through nn::codec (hle_codec_video.c), as Ocarina of Time's opening: the last picture again for each unit until the key frame, each held for a buffer, and no red line
+    _Alignas(16) static uint8_t da[0x400]; memset(da, 0, sizeof da); uint64_t id;
+    assert(!h_cv_av1tm(da, NULL, 0, 0x10000, 64, 64, 1, 3, 2, 2) && cv_of(da)); vt_av1 = cv_of(da)->av1;
+    assert(!h_cv_av1submit(&id, da, av1, sizeof av1, 0, false) && cv_of(da)->nheld == 1);
+    vt_fail = 1; LOGGED(assert(!h_cv_av1submit(&id, da, av1_inter, sizeof av1_inter, 16666667, false))); assert(cv_of(da)->nheld == 2 && cv_of(da)->held_ts[1] == 16666667 && !strstr(g_err, "[RED]"));
+    assert(!h_cv_av1submit(&id, da, av1_inter, sizeof av1_inter, 33333333, false) && cv_of(da)->nheld == 3 && cv_of(da)->held_ts[2] == 33333333);
+    assert(!h_cv_av1submit(&id, da, av1, sizeof av1, 50000000, false) && cv_of(da)->nheld == 4 && cv_of(da)->held_ts[3] == 50000000);
+    assert(!h_cv_av1fin(da)); vt_av1 = NULL;
+    // The gap at real speed: the units before the key frame repeat the last picture at their own times, so the player's clock runs through them and the key frame comes on time
+    // (before, they gave no picture: sent at once, the clock stopped while the buffers waited, and the key frame 1 s on was shown at frame 8, the movie 1 s ahead of the game's sound)
+    int stills, at; LOGGED(at = av1_gap_play(60, &stills));
+    printf("  restart gap of 1 s through nn::codec: the key frame after it shown at frame %d, %d still pictures before it\n", at, stills);
+    assert(at >= 60 && at <= 66 && stills >= 50 && !strstr(g_err, "[RED]"));
+    // Off: as before
+    setenv("DM_MOVIE_RESTART", "0", 1);
+    a = mav1_new(); vt_av1 = a;
+    assert(mav1_decode(a, av1, sizeof av1, &pic) == 1);
+    vt_fail = 1; LOGGED(r = mav1_decode(a, av1_inter, sizeof av1_inter, &pic));
+    assert(r == -1 && a->vs && !a->restart && !a->restarts && !a->last && strstr(g_err, "[RED] movie: AV1 decode submission failed (-12903"));
+    mav1_free(a); vt_av1 = NULL;
+    unsetenv("DM_MOVIE_RESTART"); unsetenv("DM_AV1_DAV1D");
 }
 
 int main(void) {
@@ -406,6 +576,8 @@ int main(void) {
         assert(!h_cv_vp9fin(td[1]) && !dm_movie_playing() && !g_cv_sig);
         for (int j = 0; j < 2; j++) h_cv_poolfin(tp[j]);
     }
+    vt_restart_avc(); vt_restart_av1();
+    puts("VideoToolbox session restart: an invalidated session is dropped, the units before the next key frame skipped, one plain line; off, the red line as before");
     printf("t_codec_video: all passed\n");
     return 0;
 }

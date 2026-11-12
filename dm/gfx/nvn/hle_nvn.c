@@ -1704,8 +1704,17 @@ static int g_susp, g_inflight_api;
 __thread _Atomic int dm_host_work;   // see dm.h (defined here: the graphics unit tests compile this file but not hle_thread.c)
 static void gfx_enter(void) { pthread_mutex_lock(&g_susp_mu); while (g_susp) pthread_cond_wait(&g_susp_cv, &g_susp_mu); g_inflight_api++; pthread_mutex_unlock(&g_susp_mu); dm_host_work++; }
 static void gfx_leave(void) { dm_host_work--; pthread_mutex_lock(&g_susp_mu); g_inflight_api--; pthread_cond_broadcast(&g_susp_cv); pthread_mutex_unlock(&g_susp_mu); }
+// Time spent suspended (the app in the background; a minimized Mac window): in all before the current stay, and when that stay began (0 = none). A frame across a stay is time
+// the game never ran, not a long frame: the long-frame log says how much of a frame it was (away_ns at both ends), and the frame step can leave it out (fstep_tick)
+static uint64_t g_away_sum, g_away_since;
+static uint64_t away_ns(void) { pthread_mutex_lock(&g_susp_mu); uint64_t a = g_away_sum + (g_away_since ? now_ns() - g_away_since : 0); pthread_mutex_unlock(&g_susp_mu); return a; }
+// DM_FIELD_LOG=0 writes the frame step, thread policy and long-frame lines as X1.0 did: one 40-line budget for the frame step's changes and their old reasons, no counts per
+// window, no dynamic-resolution line, the thread policy read on the presenting thread with no names, no background time on a long frame. On by default (logging only)
+static int field_log(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_FIELD_LOG"); v = !(e && !strcmp(e, "0")); if (!v) LOG("[nvn] DM_FIELD_LOG=0: the frame step, thread policy and long-frame lines as in X1.0"); } return v; }
 void dm_gfx_suspend(int on) {
     pthread_mutex_lock(&g_susp_mu);
+    if (on && !g_away_since) g_away_since = now_ns() | 1;
+    else if (!on && g_away_since) { g_away_sum += now_ns() - g_away_since; g_away_since = 0; }
     g_susp = on != 0;
     if (on) while (g_inflight_api) pthread_cond_wait(&g_susp_cv, &g_susp_mu);
     else pthread_cond_broadcast(&g_susp_cv);
@@ -1825,6 +1834,13 @@ static void set_time_constraint(uint64_t period_ns);
 static void rt_comp_tick(uint64_t period_ns);
 static double g_rt_comp_ms;   // Currently declared real-time computation amount (ms; 0 = not declared)
 static double g_rt_period_ms;
+static pthread_t g_rt_th; static char g_rt_name[64];   // the thread the time-constraint policy was last set on, and its name (a guest thread's is its handle and name, hle_thread.c)
+static pthread_mutex_t g_rt_mu = PTHREAD_MUTEX_INITIALIZER;
+static mach_port_t g_rt_port;   // the thread the policy was last set on (g_rt_th), with a send right of our own; 0 = none
+static _Atomic uint64_t g_acq_moves;   // acquires on another thread than the acquire before
+static void th_name(pthread_t th, char *out, size_t n) { out[0] = 0; pthread_getname_np(th, out, n); if (!out[0]) snprintf(out, n, "thread %#x", (unsigned)pthread_mach_thread_np(th)); }
+static void dr_line(uint64_t frame);
+static int rt_on(void);
 static void sleep_until_ns(uint64_t dl);
 static uint64_t present_period(const win_t *o);
 static uint64_t rt_period_ns(const win_t *o, uint64_t period);
@@ -1842,7 +1858,7 @@ void mtl_barrier_stats(uint64_t *skip, uint64_t *full);
 extern uint32_t mtl_present_qos(void);
 static _Atomic uint64_t g_frame;
 static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait / wait for the present queue to return the texture inside acquire (with a snapshot present, for its copy to run on the GPU: mtl_present_wait_texture), recorded per frame at present (there can be several acquires within one frame)
-static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
+static uint64_t g_fs_start, g_fs_wait, g_fs_away;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), its pacing wait, and away_ns then
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
@@ -1851,6 +1867,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     *idx = n ? o->next++ % n : 0;
     // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
     uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0;
+    { static pthread_t acq_th; if (!pthread_equal(acq_th, pthread_self())) { if (acq_th) atomic_fetch_add_explicit(&g_acq_moves, 1, memory_order_relaxed); acq_th = pthread_self(); } }   // rt_policy_line counts them
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
         static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
         if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
@@ -1876,7 +1893,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
     if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); o->ticket[*idx]=0; g_pq_wait_ns += now_ns() - w0; }
     if (s) { nvn_sync_release((sync_t *)s); ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
-    if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
+    if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; g_fs_away = away_ns(); }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
 // The older API (NVN 53, Super Mario 3D World + Bowser's Fury): the queue waits for the texture on the GPU and no sync object is handed out. The host replays in submission order, so later commands already come after earlier presents; the same as WindowAcquireTexture without a sync object
@@ -1946,7 +1963,7 @@ __attribute__((weak)) int dm_thermal_now(void) { return -1; }   // Default (Mac)
 __attribute__((weak)) int dm_low_power_now(void) { return 0; }   // Low Power Mode (iOS front_ios.m); off on the Mac
 // Per-frame ring for the long-frame log (GPU time only arrives 8 frames late, so store first and judge later)
 #define LFN 16
-typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup, hy, hold; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline; hold: the vsyncs the frame was made under
+typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms, bg_ms; unsigned pso, lib, up, rup, hy, hold; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline; hold: the vsyncs the frame was made under; bg_ms: of fr, the time suspended (away_ns)
 static lf_rec g_lf[LFN];
 __attribute__((weak)) void dm_longframe_note(const char *what) { LOG("[longframe] %s", what); }   // Default (graphics unit tests); the strong definition in the host's diag.c adds scene context and writes perf.txt
 extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
@@ -2024,6 +2041,41 @@ static void power_line(uint64_t frame) {
     else { char yt[192], rs[400], tc[400], wk[1536]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); dm_wake_stats(wk, sizeof wk, 1); }   // the first call only takes the baselines
     pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes(); pnqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed); prw = mtl_rec_wakes();
 }
+// The thread policy line, every 300 frames from the present path. The time-constraint policy is set on the thread that acquires the window texture (nvnWindowAcquireTexture),
+// and X1.0 read it back on the thread writing this line, the one that presents. Super Mario Odyssey acquires and presents on one thread ('in effect, current priority 97');
+// Ocarina of Time acquires on its main thread and presents on 'Presentation Thread', so every window read 'not in effect, current priority 47' (a user-interactive thread's
+// priority) of a thread that never had the policy. The line now reads the thread the policy was set on (g_rt_port, a send right of our own so that a thread that ended reads
+// as ended, not as whatever thread reuses its name) and gives the presenting thread's class beside it. It also tells a policy the kernel still holds but runs as a standard
+// thread (policy 1: demoted, as its fail-safe does to a real-time thread that runs too long without blocking) from one in effect (policy 2), and counts the acquires made on
+// another thread than the one before (rt_comp_tick measures the per-frame CPU time of whichever thread acquires: across two threads its declaration means nothing).
+// DM_FIELD_LOG=0 reads the presenting thread as X1.0 did. Logging only: the policy itself is set as before
+static void rt_policy_line(unsigned wn, uint32_t wq) {
+    const int fl = field_log(); mach_port_t self = pthread_mach_thread_np(pthread_self());
+    pthread_mutex_lock(&g_rt_mu);
+    mach_port_t q = fl && g_rt_port ? g_rt_port : self;   // the thread described
+    thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT; int okx = thread_info(q, THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) == KERN_SUCCESS;
+    thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = 0;
+    int okp = thread_policy_get(q, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&tp, &tc, &def) == KERN_SUCCESS, rt_live = okp && !def;   // def = 1: the real-time policy is not in effect (never set / revoked)
+    pthread_mutex_unlock(&g_rt_mu);
+    const char *st = rt_live ? "in effect" : "not in effect";
+    if (fl && q != self && !okx && !okp) st = "unknown (the thread it was set on has ended)";
+    else if (fl && rt_live && okx && xi.pth_policy != POLICY_RR) st = "set, but run as a standard thread (demoted)";
+    char who[320] = "";
+    if (fl) {
+        char me[64]; th_name(pthread_self(), me, sizeof me); int w;
+        if (q == self) w = snprintf(who, sizeof who, "; read on %s, which presents%s%s", me, !(g_rt_comp_ms > 0) ? (rt_on() ? " (no policy set yet)" : " (no policy: DM_RT=0)")
+                                    : pthread_equal(g_rt_th, pthread_self()) ? " and acquires the window texture: the thread the policy was set on" : "; the policy was set on ", g_rt_comp_ms > 0 && !pthread_equal(g_rt_th, pthread_self()) ? g_rt_name : "");
+        else {
+            thread_extended_info_data_t pi; mach_msg_type_number_t pc = THREAD_EXTENDED_INFO_COUNT; int okm = thread_info(self, THREAD_EXTENDED_INFO, (thread_info_t)&pi, &pc) == KERN_SUCCESS;
+            qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0; pthread_get_qos_class_np(pthread_self(), &qc, &rp);
+            w = snprintf(who, sizeof who, "; read on %s, the thread it was set on (it acquires the window texture); the thread presenting is %s, QoS %#x at priority %d", g_rt_name, me, (unsigned)qc, okm ? pi.pth_curpri : -1);
+        }
+        static uint64_t pmv; uint64_t mv = atomic_load_explicit(&g_acq_moves, memory_order_relaxed);
+        if (mv != pmv && w > 0 && (size_t)w < sizeof who) snprintf(who + w, sizeof who - (size_t)w, "; acquired on another thread than the acquire before %llu times in this window", (unsigned long long)(mv - pmv));
+        pmv = mv;
+    }
+    LOG("[nvn] thread policy: main thread real-time computation %.2f ms / period %.2f ms, real-time policy %s, current priority %d (base %d, policy %d); %u worker threads QoS %#x; present QoS %#x%s", g_rt_comp_ms, g_rt_period_ms, st, okx ? xi.pth_curpri : -1, okx ? xi.pth_priority : -1, okx ? xi.pth_policy : -1, wn, wq, mtl_present_qos(), who);
+}
 static void tsummary(uint64_t frame) {
     char line[1024]; size_t o = 0;
     for (int k = 0; k < 6; k++) {
@@ -2044,6 +2096,7 @@ static void tsummary(uint64_t frame) {
       if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; footprint %.0f MiB; brightness %.2f; thermal %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], fp, br, dm_thermal_now()); }
       g_presn = 0; }
     power_line(frame);
+    dr_line(frame);
     { static uint64_t prev[8], pf; uint64_t v[8]; mtl_vbuf_stats(&v[0], &v[1], &v[2], &v[3], &v[4], &v[5]); mtl_ft_stats(&v[6], &v[7]);
       if (pf && frame > pf) { double nf = (double)(frame - pf);
           LOG("[nvn] vertex bindings up to frame %llu: per frame address lookups %.0f / reused %.0f, vertex table writes %.0f / skipped %.0f, streams not 4-byte aligned copied %.1f (%.2f MB); fragment table writes %.0f / skipped %.0f", frame,
@@ -2059,9 +2112,7 @@ static void tsummary(uint64_t frame) {
           static uint64_t pyn, pyns; uint64_t yn = 0, yns = 0; dm_main_yield_stats(&yn, &yns);
           LOG("[nvn] translation detail up to frame %llu: submit per frame %.2f M cycles (%.2f cycles per instruction), CPU %.3f ms of which kernel %.3f ms, wall clock %.3f ms; mean clock %.2f GHz (cycles / CPU time); this thread's QoS %#x; allocator pools %d, GPU waits so far %llu; real-time declared computation %.2f ms; main thread yields per frame %.0f / %.3f ms", frame,
               cyc / 1e6 / nf, cyc / (double)(ci - pi), cpu / 1e6 / nf, (double)(ck - pk) / 1e6 / nf, (double)(cw - pw) / 1e6 / nf, cpu > 0 ? cyc / cpu : 0, (unsigned)qc, an, (unsigned long long)aw, g_rt_comp_ms, (double)(yn - pyn) / nf, (double)(yns - pyns) / 1e6 / nf); pyn = yn; pyns = yns; }
-        if (frame % 300 == 0) { unsigned wn = 0; uint32_t wq = dm_guest_work_qos(&wn); thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT; int okx = thread_info(pthread_mach_thread_np(pthread_self()), THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) == KERN_SUCCESS;
-            thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = 0; int rt_live = thread_policy_get(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&tp, &tc, &def) == KERN_SUCCESS && !def;   // def = 1: the real-time policy is not in effect (never set / revoked)
-            LOG("[nvn] thread policy: main thread real-time computation %.2f ms / period %.2f ms, real-time policy %s, current priority %d (base %d, policy %d); %u worker threads QoS %#x; present QoS %#x", g_rt_comp_ms, g_rt_period_ms, rt_live ? "in effect" : "not in effect", okx ? xi.pth_curpri : -1, okx ? xi.pth_priority : -1, okx ? xi.pth_policy : -1, wn, wq, mtl_present_qos()); }
+        if (frame % 300 == 0) { unsigned wn = 0; uint32_t wq = dm_guest_work_qos(&wn); rt_policy_line(wn, wq); }
         py = cy; pk = ck; pw = cw; }
       pi = ci; pc = cc; pd = dr_; pf = frame; }
     uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc; mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc);
@@ -2116,7 +2167,17 @@ static void set_time_constraint_comp(uint64_t period_ns, uint64_t comp_ns) {
         .period = (uint32_t)(period_ns * tb.denom / tb.numer), .computation = (uint32_t)(comp_ns * tb.denom / tb.numer),
         .constraint = (uint32_t)(period_ns * tb.denom / tb.numer), .preemptible = 1};
     kern_return_t kr = thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-    if (kr == KERN_SUCCESS) { g_rt_comp_ms = comp_ns / 1e6; g_rt_period_ms = period_ns / 1e6; }
+    if (kr == KERN_SUCCESS) {
+        g_rt_comp_ms = comp_ns / 1e6; g_rt_period_ms = period_ns / 1e6;
+        if (!pthread_equal(g_rt_th, pthread_self())) {   // another thread: its name, and a send right of our own for rt_policy_line (the old one's given back)
+            mach_port_t p = pthread_mach_thread_np(pthread_self());
+            pthread_mutex_lock(&g_rt_mu);
+            if (g_rt_port) mach_port_deallocate(mach_task_self(), g_rt_port);
+            g_rt_port = mach_port_mod_refs(mach_task_self(), p, MACH_PORT_RIGHT_SEND, 1) == KERN_SUCCESS ? p : 0;
+            g_rt_th = pthread_self(); th_name(g_rt_th, g_rt_name, sizeof g_rt_name);
+            pthread_mutex_unlock(&g_rt_mu);
+        }
+    }
     LOG("[nvn] present thread time-constraint policy (period %.3f ms, computation %.3f ms) %s", period_ns / 1e6, comp_ns / 1e6, kr == KERN_SUCCESS ? "set" : "failed to set");
 }
 static int rt_comp_fixed_ms(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_RT_COMP"); v = e && *e && strcmp(e, "auto") ? atoi(e) : -1; } return v; }   // −1 = auto
@@ -2373,19 +2434,65 @@ static int fstep_hold(void) {
     }
     return h;
 }
+// Short bursts on the CPU side at hold 1 (nvn_fstep.h nvn_fstep.backoff, FSTEP_BURST_N): the profile's fps_hold_backoff, double (the default: they step up, and a held probe's
+// run at hold 1 they end is a failed probe that doubles the waits up to 8 s) or burst (Ocarina of Time: they are paid back without a step up, so they end no run);
+// DM_FPS_HOLD_BACKOFF=double / burst overrides it, also from Documents/env.txt
+static int fstep_backoff(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("DM_FPS_HOLD_BACKOFF"); int ok = e && (!strcmp(e, "double") || !strcmp(e, "burst"));
+        if (e && *e && !ok) LOG("[RED] DM_FPS_HOLD_BACKOFF=%s: must be double or burst; keeping the profile's fps_hold_backoff", e);
+        v = ok ? !strcmp(e, "burst") : DM_GAME_FPS_HOLD_BACKOFF;
+        if (v || ok) LOG("[nvn] frame step: %s (%s)", v ? "a short burst on the CPU side at hold 1 is paid back without a step up"
+                                                          : "a held probe's run at hold 1 that ends within 8 s is a failed probe, and the waits double up to 8 s", ok ? "DM_FPS_HOLD_BACKOFF" : "game profile fps_hold_backoff");
+    }
+    return v;
+}
+// A return from the background (nvn_fstep.h nvn_fstep.away): the profile's fps_resume, on (Ocarina of Time) or off (the default: the frame across the stay is late and owes up to
+// FSTEP_DEBT_MAX vsyncs, which the game runs fast to pay back); DM_FPS_RESUME=1 / 0 overrides it, also from Documents/env.txt
+static int fstep_resume(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_FPS_RESUME"); v = e && *e ? *e != '0' : DM_GAME_FPS_RESUME;
+        if (v) LOG("[nvn] frame step: a frame across a stay in the background is on time and owes nothing, and the 30 frames after it do not step the hold up (%s)", e && *e ? "DM_FPS_RESUME" : "game profile fps_resume"); }
+    return v;
+}
+// The game's dynamic resolution, where a frame step stub runs it (Ocarina of Time's level function, its patches.py): the state page's +0x200 calls, +0x204 the last call's level,
+// +0x210 the load measured at each level (16 floats) and +0x250 the call each was measured at (0 = never). Only with DM_DYNAMIC_RESOLUTION=1 (+0x40), and only once the stub has
+// counted a call: no other game's stub writes there. dr_tick samples the level at each present, dr_line writes it with the window's tsummary (DM_FIELD_LOG)
+static uint32_t g_dr_lo = ~0u, g_dr_hi, g_dr_chg, g_dr_last = ~0u;
+static uint32_t dr_u32(unsigned off) { return __atomic_load_n((uint32_t *)(dm_fps_state + off), __ATOMIC_RELAXED); }
+static void dr_tick(void) {
+    if (!dm_fps_state || dr_u32(0x40) != 1 || !dr_u32(0x200) || !field_log()) return;
+    uint32_t lv = dr_u32(0x204);
+    if (lv != g_dr_last) { g_dr_chg += g_dr_last != ~0u; g_dr_last = lv; }
+    if (lv < g_dr_lo) g_dr_lo = lv;
+    if (lv > g_dr_hi) g_dr_hi = lv;
+}
+static void dr_line(uint64_t frame) {
+    static uint32_t pcalls;
+    if (!dm_fps_state || dr_u32(0x40) != 1 || !field_log()) return;
+    uint32_t calls = dr_u32(0x200);
+    if (calls == pcalls || g_dr_lo == ~0u) return;
+    char ld[256]; size_t o = 0; ld[0] = 0;
+    for (unsigned i = 0; i < 16 && o < sizeof ld - 16; i++) if (dr_u32(0x250 + 4 * i)) { float f; memcpy(&f, dm_fps_state + 0x210 + 4 * i, 4); o += (size_t)snprintf(ld + o, sizeof ld - o, "%s%u %.0f", o ? ", " : "", i, f); }
+    LOG("[nvn] dynamic resolution up to frame %llu: level %u now (0 = the game's full size), %u–%u in this window with %u changes, %u calls; load measured at each level (about 0.2 ms a unit): %s",
+        (unsigned long long)frame, g_dr_last, g_dr_lo, g_dr_hi, g_dr_chg, calls - pcalls, o ? ld : "none yet");
+    pcalls = calls; g_dr_lo = ~0u; g_dr_hi = 0; g_dr_chg = 0;
+}
 // Once per present, before this frame's period is taken: the time since the previous frame's start (shown) and the frame's cost decide this frame's hold and the next frame's step.
 // Cost = max(CPU: the time between the frames' starts without the pacing wait, GPU: the latest finished frame's GPU time), in vsyncs
 static void fstep_tick(const win_t *o, int c) {
     static uint64_t prev, t0, v0, fixed_sum, held[FSTEP_MAX + 1]; static int nlog;
     const double v = 1e9 / fstep_hz();
-    uint64_t st = g_fs_start ? g_fs_start : now_ns(), pw = g_fs_wait; g_fs_start = g_fs_wait = 0;
+    uint64_t st = g_fs_start ? g_fs_start : now_ns(), pw = g_fs_wait, aw = g_fs_start ? g_fs_away : away_ns(); g_fs_start = g_fs_wait = 0;
+    static uint64_t prev_aw; double away_ms = prev ? (aw - prev_aw) / 1e6 : 0; prev_aw = aw;   // of the time since the previous frame's start, the stay in the background
     double shown = prev ? (st - prev) / v : 0, gpu = 0; prev = st;
     for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) { double g = mtl_gpu_ms(f); if (g >= 0) { gpu = g * 1e6 / v; break; } }
     double cpu = shown - pw / v, cost = cpu > gpu ? cpu : gpu;
     int kmin = fstep_hz() / c, kmax = fps_high() ? 2 : !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
          kmin0 = g_fs.kmin, probe0 = g_fs.probe, pinned0 = g_fs.pinned;
     int fixed = dm_fps_state ? (int)__atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED) : 0;
-    uint64_t probes0 = g_fs.probes, failed0 = g_fs.failed;
+    uint64_t probes0 = g_fs.probes, failed0 = g_fs.failed, late0 = g_fs.late, bursts0 = g_fs.bursts;
     // A screen whose rate is not a multiple of 60 (144, 165 Hz) shows the link's 1/60 s ticks on their nearest refreshes (nvn_mtl.m link_range), so a frame on time can show for one
     // refresh more than its hold: a cheap 50 ms frame shows 54.5 ms at 165 Hz, which counted as late kept the hold at 20 fps for good
     int hz = front_screen_max_fps(); g_fs.shown_slack = hz > fstep_hz() && hz % fstep_hz() && mtl_link_active() ? (double)fstep_hz() / hz : 0;
@@ -2415,24 +2522,41 @@ static void fstep_tick(const win_t *o, int c) {
     // (Breath of the Wild on an M5 Pro: the probe's 33 frames took the clock 338 → 432 MHz and its GPU time 24.8 → 18.5 ms, then it failed at 22 ms frames; hold 1 needed about 560 MHz)
     g_fs.ramp = mtl_probe_ramp_on();
     g_fs.per_vsync = fstep_hz() / 60;
+    g_fs.backoff = fstep_backoff(); g_fs.gpu = gpu;
+    const int away = away_ms > 0 && fstep_resume(); g_fs.away = away;   // fps_resume: the frame across a stay in the background is on time and owes nothing
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
+    // The last frames' CPU and GPU (vsyncs) and whether each was late, for the reason a step up gives (DM_FIELD_LOG): which side of the frame the late ones ran long on
+    static double rc[3], rg[3]; static uint32_t lbits; static unsigned ri;
+    lbits = lbits << 1 | (g_fs.late != late0); rc[ri % 3] = cpu; rg[ri % 3] = gpu; ri++;
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);
     atomic_store(&g_fs_k, g_fs.k);
     held[g_fs.k]++; if (fixed) fixed_sum += (uint64_t)n;   // the stubs count only the host's steps
     static int fixed_was, nfix;
     if (fixed != fixed_was && nfix < 40) { nfix++; if (fixed) LOG("[nvn] frame step: the game fixes its own step at %d vsyncs at present %llu", fixed, (unsigned long long)o->presents); else LOG("[nvn] frame step: the game hands the step back to the host at present %llu", (unsigned long long)o->presents); }
     fixed_was = fixed;
-    if (k0 && g_fs.k != k0 && nlog < 40) {
+    // The change lines: 40 in a run (DM_FIELD_LOG=0, as in X1.0), else 40 in each window of 1800 presents, whose game time line counts every change
+    const int flog = field_log(); static int nwin; int *nl = flog ? &nwin : &nlog;
+    const char *cutm = flog ? "; further changes in this window only counted in its game time line" : "; further changes only counted below";
+    if (k0 && g_fs.k != k0 && *nl < 40) {
         char why[160], held[48] = ""; int w = snprintf(why, sizeof why, "probe");
         if (cslow) w += snprintf(why + w, sizeof why - w, ", CPU %d%% on performance cores", g_fs_pshare);
         if (gslow) w += snprintf(why + w, sizeof why - w, ", GPU %.2f× its time at hold %d", g_fg.cur / g_fg.ref, kmin);
         if (nvn_fstep_same(&g_fs)) snprintf(why + w, sizeof why - w, ", cost %.2f× the cost that held hold %d", g_fs.ccur / g_fs.cref, kmin);
         if (g_fs.k > k0 && g_fs.cref > 0) snprintf(held, sizeof held, "; hold %d held at %.2f", kmin, g_fs.cref);   // what a probe compares the longer hold's cost with
+        // DM_FIELD_LOG: a step up says how many of the last 30 frames were late and on which side the three that stepped it ran long (their CPU, the time between frame starts
+        // without the pacing wait, against their GPU; the late line is the hold + FSTEP_LATE); a fit trial says what fitted
+        char up[200] = "3 late frames", fit[96] = "trial";
+        if (flog) {
+            double mc = fmax(rc[0], fmax(rc[1], rc[2])), mg = fmax(rg[0], fmax(rg[1], rg[2])), line = k0 + FSTEP_LATE;
+            snprintf(up, sizeof up, "3 late frames in a row, %d of the last 30; their CPU at most %.2f, GPU at most %.2f: %s", __builtin_popcount(lbits & 0x3fffffffu), mc, mg,
+                     mg <= line ? "the CPU side" : mc <= line ? "the GPU" : "the CPU and the GPU");
+            snprintf(fit, sizeof fit, "fit trial: %d frames in a row costing at most %.2f of hold %d", FSTEP_RUN, FSTEP_FIT, g_fs.k);
+        }
         LOG("[nvn] frame step: hold %d → %d %s at present %llu (%s; cost %.2f, GPU %.2f%s)%s", k0, g_fs.k, fps_high() ? "ticks of 1/120 s" : "vsyncs", (unsigned long long)o->presents,
-            fixed ? "the game's own step" : kmin0 > FSTEP_MAX ? "the game's own step ended" : g_fs.pinned && !pinned0 ? "a fast movie" : kmin != kmin0 ? "the cap changed" : g_fs.k > k0 ? "3 late frames" : g_fs.probes != probes0 ? why : "trial", cost, gpu, held, ++nlog == 40 ? "; further changes only counted below" : "");
+            fixed ? "the game's own step" : kmin0 > FSTEP_MAX ? "the game's own step ended" : g_fs.pinned && !pinned0 ? "a fast movie" : kmin != kmin0 ? "the cap changed" : g_fs.k > k0 ? up : g_fs.probes != probes0 ? why : fit, cost, gpu, held, ++*nl == 40 ? cutm : "");
     }
     static int pann;   // the failed-probe line said the probes are held off (nvn_fstep_pheld), and no line has said they are allowed again
-    if (probe0 == 1 && g_fs.probe != 1 && !fixed && nlog < 40) {   // whether the controller raised the clock for the shorter deadline, and what the probe measured at kmin
+    if (probe0 == 1 && g_fs.probe != 1 && !fixed && *nl < 40) {   // whether the controller raised the clock for the shorter deadline, and what the probe measured at kmin
         char pm[160] = "";
         if (g_fs.probe != 2 && g_fs.pk > 0) {
             int w = snprintf(pm, sizeof pm, "; cost %.2f at hold %d", g_fs.pk, kmin);
@@ -2441,29 +2565,47 @@ static void fstep_tick(const win_t *o, int c) {
                 pann = 1;
             }
         }
-        LOG("[nvn] frame step: the probe %s at present %llu (CPU %d%% on performance cores%s)%s", g_fs.probe == 2 ? "held" : "failed", (unsigned long long)o->presents, g_fs_pshare, pm, ++nlog == 40 ? "; further changes only counted below" : "");
+        LOG("[nvn] frame step: the probe %s at present %llu (CPU %d%% on performance cores%s)%s", g_fs.probe == 2 ? "held" : "failed", (unsigned long long)o->presents, g_fs_pshare, pm, ++*nl == 40 ? cutm : "");
     }
-    else if (probe0 == 2 && !g_fs.probe && g_fs.failed != failed0 && nlog < 40)
-        LOG("[nvn] frame step: the run at hold %d after the probe lasted under %.0f s, counted as a failed probe (CPU %d%% on performance cores)%s", kmin, FSTEP_HOLD_MAX / 60, g_fs_pshare, ++nlog == 40 ? "; further changes only counted below" : "");
+    else if (probe0 == 2 && !g_fs.probe && g_fs.failed != failed0 && *nl < 40)
+        LOG("[nvn] frame step: the run at hold %d after the probe lasted under %.0f s, counted as a failed probe (CPU %d%% on performance cores)%s", kmin, FSTEP_HOLD_MAX / 60, g_fs_pshare,
+            ++*nl == 40 ? cutm : "");
+    static int nburst;   // fps_hold_backoff burst (nvn_fstep.h FSTEP_BURST_N): the first 8 said here, the rest counted on the DM_FIELD_LOG window line
+    if (g_fs.bursts != bursts0 && nburst < 8 && *nl < 40) {
+        nburst++;
+        LOG("[nvn] frame step: a short burst on the CPU side at hold %d at present %llu (3 late frames, GPU at most %.2f, under the late line): paid back, no step up (fps_hold_backoff burst)%s",
+            kmin, (unsigned long long)o->presents, g_fs.lgpu, ++*nl == 40 ? cutm : "");
+    }
+    if (away && *nl < 40)
+        LOG("[nvn] frame step: a frame of %.1f s across %.1f s in the background at present %llu: on time and owing nothing, and the next %d frames' lateness is paid back without a step up (fps_resume)%s",
+            shown / fstep_hz(), away_ms / 1e3, (unsigned long long)o->presents, FSTEP_GRACE, ++*nl == 40 ? cutm : "");
     // The end of the hold-off two failed probes over budget put on the probes (nvn_fstep.h FSTEP_OVER), once per hold-off the failed-probe line announced: the cost at the
     // longer hold fell, or the scene changed (a load, a cap change). Not when a probe ended it (its own line says what it measured: the probe held, or failed within the margin)
     // nor at hold kmin already; and the probe FSTEP_PHOLD_MAX after the step up is logged as a probe
     if (pann && (g_fs.probe == 2 || !nvn_fstep_pheld(&g_fs, kmin))) {
         double e = nvn_fstep_pest(&g_fs);
-        if (g_fs.probe != 2 && g_fs.k > kmin && (g_fs.pk <= 0 || e > 0) && nlog < 40) {
+        if (g_fs.probe != 2 && g_fs.k > kmin && (g_fs.pk <= 0 || e > 0) && *nl < 40) {
             char why[64]; if (g_fs.pk > 0) snprintf(why, sizeof why, "about %.2f at hold %d", e, kmin); else snprintf(why, sizeof why, "the measurement forgotten");
             LOG("[nvn] frame step: probes back to hold %d allowed again at present %llu (cost %.2f at hold %d, %s)%s", kmin, (unsigned long long)o->presents,
-                g_fs.cn ? g_fs.ccur : cost, g_fs.k, why, ++nlog == 40 ? "; further changes only counted below" : "");
+                g_fs.cn ? g_fs.ccur : cost, g_fs.k, why, ++*nl == 40 ? cutm : "");
         }
         pann = 0;
     }
+    // The counters on the game time lines run over the whole run; DM_FIELD_LOG adds this window's own (the change lines stop at 40 in a window)
+    char wn[200] = ""; static uint64_t wl, wp, wu, wd, wpr, wf; static double wdr;
+    if (flog && o->presents % 1800 == 0) {
+        int w = snprintf(wn, sizeof wn, "; in this window %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials)", (unsigned long long)(g_fs.late - wl),
+                 (unsigned long long)(g_fs.paid - wp), g_fs.dropped - wdr, (unsigned long long)(g_fs.ups - wu), (unsigned long long)(g_fs.downs - wd), (unsigned long long)(g_fs.probes - wpr), (unsigned long long)(g_fs.failed - wf));
+        static uint64_t wb; if (g_fs.backoff && w > 0 && (size_t)w < sizeof wn) snprintf(wn + w, sizeof wn - (size_t)w, ", %llu short bursts on the CPU side paid back without a step up", (unsigned long long)(g_fs.bursts - wb));
+        wl = g_fs.late; wp = g_fs.paid; wdr = g_fs.dropped; wu = g_fs.ups; wd = g_fs.downs; wpr = g_fs.probes; wf = g_fs.failed; wb = g_fs.bursts; nwin = 0;
+    }
     if (!dm_fps_state) {   // 120 fps: no game clock to read; the frames at each hold say how much of the time it held 120
-        if (o->presents % 1800 == 0) { LOG("[nvn] 120 fps: held 1 / 2 ticks %llu / %llu frames, %llu late, %llu up / %llu down (%llu probes, %llu failed trials)", (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)g_fs.late, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed); memset(held, 0, sizeof held); }
+        if (o->presents % 1800 == 0) { LOG("[nvn] 120 fps: held 1 / 2 ticks %llu / %llu frames, %llu late, %llu up / %llu down (%llu probes, %llu failed trials)%s", (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)g_fs.late, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, wn); memset(held, 0, sizeof held); }
     } else if (o->presents % 1800 == 0) {   // game time against real time (1.000 = normal speed; lower when a device cannot hold 20 fps or after long stalls)
         uint64_t vs = __atomic_load_n((uint64_t *)(dm_fps_state + 0x30), __ATOMIC_RELAXED) + fixed_sum, t = now_ns();
-        if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials)",
+        if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials)%s",
                     (vs - v0) / 60.0, (t - t0) / 1e9, (vs - v0) / 60.0 / ((t - t0) / 1e9), (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)held[3],
-                    (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed);
+                    (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, wn);
         t0 = t; v0 = vs; memset(held, 0, sizeof held);
     }
 }
@@ -2487,6 +2629,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (fps_high()) high_cap_tick();
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)movie_30(), __ATOMIC_RELAXED);   // the stubs' copy of the 30 fps movie state (hle.h)
     int c = fps_step_cap();
+    dr_tick();
     if (dm_fps_state) { static int was; int th = 0; if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? (movie_30() ? " (movie playing)" : (th = thermal_capped()) & CAP_HEAT ? " (thermal state serious)" : th ? " (Low Power Mode)" : "") : ""); was = c; } }
     if (c) fstep_tick(o, c);
     dm_fps_lock_tick();   // after the frame step: at 120 fps the target follows the hold just decided
@@ -2510,7 +2653,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         if (lag) usleep((useconds_t)lag * 1000);
     }
     gfx_enter();
-    uint64_t t0 = now_ns();
+    uint64_t t0 = now_ns(), away = away_ns(); static uint64_t prev_away; double bg_ms = (away - prev_away) / 1e6; prev_away = away;   // of the time since the last present, how much the app was away
     if (idx >= 0 && idx < o->ntex && idx < 4) {   // enqueue only, return immediately
         const tex_t *t = CTX(o->tex[idx]); int lc[4]; const int *crop = present_crop(o->crop, (int)t->d.width, (int)t->d.height, lc);
         nvn_queue_present_release(o->ticket[idx]);
@@ -2575,7 +2718,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
             static uint64_t plns, ppns, pup, prup, pub, phy; uint64_t lns, pns, up, rup, ub, hy, hm_, hn_; mtl_create_ns(&lns, &pns); mtl_pkg_stats(&up, &rup); ub = mtl_upload_bytes(); mtl_hybrid_stats(&hy, &hm_, &hn_);
             lf_rec *r = &g_lf[f % LFN]; r->f = f; r->fr = fr; r->nv = nv; r->t_s = (now_ns() - g_t0_ns) / 1e9; r->pso = (unsigned)(pso_ - ppso); r->lib = (unsigned)(lib_ - plib);
             r->make_ms = ((lns - plns) + (pns - ppns)) / 1e6; r->up = (unsigned)(up - pup); r->rup = (unsigned)(rup - prup); r->up_mb = (ub - pub) / 1048576.0; r->up_ms = up_ms;
-            r->hy = (unsigned)(hy - phy); plns = lns; ppns = pns; pup = up; prup = rup; pub = ub; phy = hy;
+            r->hy = (unsigned)(hy - phy); plns = lns; ppns = pns; pup = up; prup = rup; pub = ub; phy = hy; r->bg_ms = bg_ms;
             // The hold this frame was made under is the previous present's: the acquire before this frame waited out that present's period (g_hold_ring is written at the end of each present)
             r->hold = o->presents > 1 && g_hold_ring[(o->presents - 1) % 16] ? g_hold_ring[(o->presents - 1) % 16] : 1;
         }
@@ -2600,7 +2743,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
               // A frame made under a longer hold says so, with the length it asked for (scripts/devlog.py reads it): such a frame ran past its hold, not past one vsync. While the
               // frame step runs every line says its hold, 1 too, so devlog reads a line of this host as it is and never guesses holds from runs of long frames, which would hide
               // a frame of hold 1 that took two or three vsyncs on the game's side
-              if ((held > 0 || fstep_on()) && n > 0 && (size_t)n < sizeof b) snprintf(b + n, sizeof b - (size_t)n, "; hold %u × %.1f ms", r->hold, 1000.0 / fstep_hz());
+              if ((held > 0 || fstep_on()) && n > 0 && (size_t)n < sizeof b) n += snprintf(b + n, sizeof b - (size_t)n, "; hold %u × %.1f ms", r->hold, 1000.0 / fstep_hz());
+              // A frame across a stay in the background (the app suspended, dm_gfx_suspend) says how much of it was away: time the game never ran, which scripts/devlog.py does not count as a long frame
+              if (field_log() && r->bg_ms >= 1 && n > 0 && (size_t)n < sizeof b) snprintf(b + n, sizeof b - (size_t)n, "; %.0f ms of it in the background", r->bg_ms);
               // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
               dm_longframe_note(b); } }
         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
