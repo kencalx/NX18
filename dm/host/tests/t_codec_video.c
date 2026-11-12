@@ -62,7 +62,7 @@ static pace_res pace_play(uint64_t frame_ns, int n, int until_busy, int bufs, in
     memset(pd, 0, sizeof pd);
     cv_pref pf = h_cv_pref(16, 16, 3, 0); uint64_t sz, al; assert(!h_cv_poolsize(&sz, &al, &pf, 1));
     for (int i = 0; i < bufs; i++) assert(!h_cv_pool(pp[i], pm[i], sz, &pf, 1, 0));
-    assert(!h_cv_vp9init2(pd, 0x10000, 16, 16, 1, 1, 3)); void *ev = pd + CV_EVENT_OFF;
+    assert(!h_cv_vp9init2(pd, 0x10000, 16, 16, 1, 1, 3, NULL, 0)); void *ev = pd + CV_EVENT_OFF;
     uint32_t idx = 0; cv_sync sy; uint16_t w, h, cw, ch; int64_t ts, last = -1; bool eos;
     for (uint32_t i = 0; i < (uint32_t)bufs; i++) assert(!h_cv_vp9reg(pd, i, pp[i], 0));
     for (int i = 0; i < bufs; i++) { assert(!h_cv_vp9acq(&idx, &sy, pd)); h_cv_vp9rel(pd, idx, sy); }   // every buffer asks for a picture
@@ -101,7 +101,7 @@ static int pace_self(uint64_t frame_ns, int64_t itv, int n, int bufs, uint64_t s
     memset(pd, 0, sizeof pd);
     cv_pref pf = h_cv_pref(16, 16, 3, 0); uint64_t sz, al; assert(!h_cv_poolsize(&sz, &al, &pf, 1));
     for (int i = 0; i < bufs; i++) assert(!h_cv_pool(pp[i], pm[i], sz, &pf, 1, 0));
-    assert(!h_cv_vp9init2(pd, 0x10000, 16, 16, 1, 1, 3)); void *ev = pd + CV_EVENT_OFF; cv_dec *dd = cv_of(pd);
+    assert(!h_cv_vp9init2(pd, 0x10000, 16, 16, 1, 1, 3, NULL, 0)); void *ev = pd + CV_EVENT_OFF; cv_dec *dd = cv_of(pd);
     uint32_t idx[4]; cv_sync sy[4]; int64_t bts[4]; int full[4] = {0};
     for (uint32_t i = 0; i < (uint32_t)bufs; i++) assert(!h_cv_vp9reg(pd, i, pp[i], 0));
     for (int i = 0; i < bufs; i++) { assert(!h_cv_vp9acq(&idx[i], &sy[i], pd)); h_cv_vp9rel(pd, idx[i], sy[i]); }
@@ -361,7 +361,7 @@ int main(void) {
     {   // A flush starts the clock again: a new stream from time 0 hands out its first picture, not the picture the old clock is at
         _Alignas(16) static uint8_t fd[0x400], fp[0x40], fm[16 * 16 * 4];
         cv_pref pf = h_cv_pref(16, 16, 3, 0); uint64_t sz, al; assert(!h_cv_poolsize(&sz, &al, &pf, 1) && !h_cv_pool(fp, fm, sz, &pf, 1, 0));
-        assert(!h_cv_vp9init2(fd, 0x10000, 16, 16, 1, 1, 3)); cv_dec *fdd = cv_of(fd);
+        assert(!h_cv_vp9init2(fd, 0x10000, 16, 16, 1, 1, 3, NULL, 0)); cv_dec *fdd = cv_of(fd);
         assert(!h_cv_vp9reg(fd, 0, fp, 0) && !h_cv_vp9acq(&idx, &sync, fd)); h_cv_vp9rel(fd, 0, sync);
         for (int k = 0; k < 8; k++) assert(!h_cv_vp9submit(&id, fd, vp9, sizeof vp9, PACE_ITV(k), false));
         assert(!h_cv_vp9acq(&idx, &sync, fd) && h_gs_trywait(&sync) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == 0);
@@ -396,7 +396,7 @@ int main(void) {
         _Alignas(16) static uint8_t td[2][0x400], tp[2][0x40], tm[2][16 * 16 * 4];
         cv_pref pf = h_cv_pref(16, 16, 3, 0); uint64_t sz, al; assert(!h_cv_poolsize(&sz, &al, &pf, 1));
         for (int j = 0; j < 2; j++) {
-            assert(!h_cv_pool(tp[j], tm[j], sz, &pf, 1, 0) && !h_cv_vp9init2(td[j], 0x10000, 16, 16, 1, 1, 3));
+            assert(!h_cv_pool(tp[j], tm[j], sz, &pf, 1, 0) && !h_cv_vp9init2(td[j], 0x10000, 16, 16, 1, 1, 3, NULL, 0));
             assert(!h_cv_vp9reg(td[j], 0, tp[j], 0) && !h_cv_vp9acq(&idx, &sync, td[j])); h_cv_vp9rel(td[j], 0, sync);
             for (int k = 0; k < 9; k++) assert(!h_cv_vp9submit(&id, td[j], vp9, sizeof vp9, PACE_ITV(k), false));
             assert(!h_cv_vp9acq(&idx, &sync, td[j])); h_cv_vp9rel(td[j], 0, sync);   // the second picture, handed out with 9 decoded: the signal is up
