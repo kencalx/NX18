@@ -103,6 +103,20 @@ static double oot_edge(int backoff, uint64_t *ups) {
     }
     *ups = x.m.s.ups - u0; return t2 / (x.m.real - t0);
 }
+// Ocarina of Time's trip out of the app in run B (log.txt:742-768): hold 1 at 0.85 for 20 s, a frame of 41.3 ms at the focus loss, the frame across the stay (40,454.8 ms: about
+// 39.3 s suspended, the rest the focus changes around it), one of 93.2 ms (page-ins), then GPU frames of 26 ms (1.57 vsyncs) for `slow`
+// frames and 0.85 after. mode 0: today; 1: the caller marks the frame across the stay (fps_resume). *paid: the vsyncs paid back from the focus loss on, *dropped: dropped then;
+// returns the step ups in the 10 s from the focus loss
+static uint64_t oot_trip(int mode, int slow, uint64_t *paid, double *dropped) {
+    sim m = {0}; run(&m, 1200, 0.85, 1, 3, 0);
+    uint64_t u0 = m.s.ups, p0 = m.s.paid; double d0 = m.s.dropped;
+    run(&m, 1, 41.3 / (1000.0 / 60), 1, 3, 0);
+    double stay = 40454.8 / (1000.0 / 60); m.real += stay; m.game += m.next; m.s.away = mode == 1; m.next = nvn_fstep_next(&m.s, stay, stay, 1, 3, 0, 0);
+    run(&m, 1, 93.2 / (1000.0 / 60), 1, 3, 0);
+    run(&m, slow, 1.57, 1, 3, 0); run(&m, 600 - slow, 0.85, 1, 3, 0);
+    *paid = m.s.paid - p0; *dropped = m.s.dropped - d0;
+    return m.s.ups - u0;
+}
 
 int main(void) {
     {   // 120 fps (hle_nvn.c fps_high): kmin 1, kmax 2, in ticks of 1/120 s. The target follows the hold, so a hold above what frames take is the game at the right speed
@@ -595,6 +609,23 @@ int main(void) {
         double a0 = oot_edge(0, &u0), a1 = oot_edge(1, &u1);
         snprintf(b, sizeof b, "  at the edge (0.95, a CPU burst every 2.5 s at hold 1): %.0f%% / %.0f%% of the time at hold 2, %llu / %llu step ups a minute", 100 * a0, 100 * a1, (unsigned long long)u0, (unsigned long long)u1);
         check(a1 < a0 && u1 > u0 && u1 <= 20, b);   // the trade: more of the minute at 60, more steps between 60 and 30
+    }
+    {   // Ocarina of Time's trip out of the app (oot_trip): today the frame across the stay is late and owes 15 vsyncs (the cap), and with the frames either side three late frames
+        // step up; with fps_resume it is on time and owes nothing, and the late frames either side of it (the one after within the 30 of the grace) are paid back without a step up:
+        // the payback is their own lateness, 41.3 and 93.2 ms and ten of 26 ms against 16.7 each, nothing for the stay
+        uint64_t p0, p1; double d0, d1; uint64_t u0 = oot_trip(0, 10, &p0, &d0), u1 = oot_trip(1, 10, &p1, &d1);
+        const double v = 1000.0 / 60, own = (41.3 / v - 1) + (93.2 / v - 1) + 10 * 0.57;
+        snprintf(b, sizeof b, "Ocarina's trip out of the app, today: %llu step up, %llu vsyncs paid back, %.0f dropped", (unsigned long long)u0, (unsigned long long)p0, d0);
+        check(u0 == 1 && p0 >= 15 && d0 > 2000, b);
+        snprintf(b, sizeof b, "  with fps_resume: %llu step ups, %llu paid back (the frames' own lateness %.1f), %.0f dropped", (unsigned long long)u1, (unsigned long long)p1, own, d1);
+        check(u1 == 0 && p1 + 1 > own - 1 && p1 <= own + 1 && d1 == 0, b);
+        uint64_t u3 = oot_trip(1, 40, &p1, &d1);
+        snprintf(b, sizeof b, "  GPU frames of 26 ms past the 30 frames of grace still step up (%llu)", (unsigned long long)u3);
+        check(u3 == 1, b);
+        sim m = {0}; run(&m, 600, 0.5, 1, 3, 0); m.s.away = 1; run(&m, 1, 0.5, 1, 3, 0);
+        check(m.s.away == 0 && m.s.rgrace == FSTEP_GRACE, "  the mark holds for one call");
+        double cr = m.s.crun; m.s.away = 1; m.next = nvn_fstep_next(&m.s, 2400, 2400, 1, 3, 0, 0);
+        check(m.s.crun == cr && m.s.ups == 0 && m.s.debt < 1, "  the frame across the stay is no cost the scene has, and no debt");
     }
     {   // The long-frame log (nvn_lf_long): 60 fps at 16.7 ms frames with 10 ms of GPU work, then a step up to hold 2. Judged by the running mean alone (held 0, as before the
         // hold was passed) the first frames of 33.3 ms read as long until the mean caught up; judged against their hold none does, and a frame past the hold still counts

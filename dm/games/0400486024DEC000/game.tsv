@@ -44,6 +44,10 @@ fps_target	60
 # back to 60 held, then the next burst ended its run before the 8 s that count it held, and each failure doubled the waits. burst: such a run is no failed probe, and any other
 # early end waits 2 s at most (nvn_fstep.h FSTEP_BURST_CAP); the GPU-bound back-off is unchanged. DM_FPS_HOLD_BACKOFF=double in env.txt turns it off. Not yet run on the phone
 fps_hold_backoff	burst
+# After a trip out of the app (iPhone 18 Pro Max, X1.0, 40 s away) the frame across the stay counted as late and owed 15 vsyncs, which the game ran fast to pay back, and with the
+# frames either side three late frames held 30 fps for about a second. on: that frame is on time and owes nothing, and the 30 frames after it pay their lateness back without
+# stepping the hold up (nvn_fstep.h nvn_fstep.away). DM_FPS_RESUME=0 in env.txt turns it off. Not yet run on the phone
+fps_resume	on
 # A frame stood in the display link's queue nearly all the time on an iPhone 18 Pro Max at 30 fps, a tick (33 ms) more from enqueue to display; the 60 fps run had two or more
 # frames waiting on part of the ticks in most windows after its first 3 minutes. 60 ticks in a row with two or more frames waiting drop one (DM_PRESENT_TRIM, which env.txt can
 # set, 0 for off): at 30 fps game enqueue to display about 85 -> 53 ms, 9 frames dropped in 2.5 minutes, no smoothness cost seen. Checked only at 30 fps on iOS: the game's

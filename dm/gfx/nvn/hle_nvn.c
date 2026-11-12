@@ -1858,7 +1858,7 @@ void mtl_barrier_stats(uint64_t *skip, uint64_t *full);
 extern uint32_t mtl_present_qos(void);
 static _Atomic uint64_t g_frame;
 static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait / wait for the present queue to return the texture inside acquire (with a snapshot present, for its copy to run on the GPU: mtl_present_wait_texture), recorded per frame at present (there can be several acquires within one frame)
-static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
+static uint64_t g_fs_start, g_fs_wait, g_fs_away;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), its pacing wait, and away_ns then
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
@@ -1893,7 +1893,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
     if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); o->ticket[*idx]=0; g_pq_wait_ns += now_ns() - w0; }
     if (s) { nvn_sync_release((sync_t *)s); ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
-    if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
+    if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; g_fs_away = away_ns(); }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
 // The older API (NVN 53, Super Mario 3D World + Bowser's Fury): the queue waits for the texture on the GPU and no sync object is handed out. The host replays in submission order, so later commands already come after earlier presents; the same as WindowAcquireTexture without a sync object
@@ -2448,6 +2448,14 @@ static int fstep_backoff(void) {
     }
     return v;
 }
+// A return from the background (nvn_fstep.h nvn_fstep.away): the profile's fps_resume, on (Ocarina of Time) or off (the default: the frame across the stay is late and owes up to
+// FSTEP_DEBT_MAX vsyncs, which the game runs fast to pay back); DM_FPS_RESUME=1 / 0 overrides it, also from Documents/env.txt
+static int fstep_resume(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_FPS_RESUME"); v = e && *e ? *e != '0' : DM_GAME_FPS_RESUME;
+        if (v) LOG("[nvn] frame step: a frame across a stay in the background is on time and owes nothing, and the 30 frames after it do not step the hold up (%s)", e && *e ? "DM_FPS_RESUME" : "game profile fps_resume"); }
+    return v;
+}
 // The game's dynamic resolution, where a frame step stub runs it (Ocarina of Time's level function, its patches.py): the state page's +0x200 calls, +0x204 the last call's level,
 // +0x210 the load measured at each level (16 floats) and +0x250 the call each was measured at (0 = never). Only with DM_DYNAMIC_RESOLUTION=1 (+0x40), and only once the stub has
 // counted a call: no other game's stub writes there. dr_tick samples the level at each present, dr_line writes it with the window's tsummary (DM_FIELD_LOG)
@@ -2476,7 +2484,8 @@ static void dr_line(uint64_t frame) {
 static void fstep_tick(const win_t *o, int c) {
     static uint64_t prev, t0, v0, fixed_sum, held[FSTEP_MAX + 1]; static int nlog;
     const double v = 1e9 / fstep_hz();
-    uint64_t st = g_fs_start ? g_fs_start : now_ns(), pw = g_fs_wait; g_fs_start = g_fs_wait = 0;
+    uint64_t st = g_fs_start ? g_fs_start : now_ns(), pw = g_fs_wait, aw = g_fs_start ? g_fs_away : away_ns(); g_fs_start = g_fs_wait = 0;
+    static uint64_t prev_aw; double away_ms = prev ? (aw - prev_aw) / 1e6 : 0; prev_aw = aw;   // of the time since the previous frame's start, the stay in the background
     double shown = prev ? (st - prev) / v : 0, gpu = 0; prev = st;
     for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) { double g = mtl_gpu_ms(f); if (g >= 0) { gpu = g * 1e6 / v; break; } }
     double cpu = shown - pw / v, cost = cpu > gpu ? cpu : gpu;
@@ -2514,6 +2523,7 @@ static void fstep_tick(const win_t *o, int c) {
     g_fs.ramp = mtl_probe_ramp_on();
     g_fs.per_vsync = fstep_hz() / 60;
     g_fs.backoff = fstep_backoff(); g_fs.gpu = gpu;
+    const int away = away_ms > 0 && fstep_resume(); g_fs.away = away;   // fps_resume: the frame across a stay in the background is on time and owes nothing
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     // The last frames' CPU and GPU (vsyncs) and whether each was late, for the reason a step up gives (DM_FIELD_LOG): which side of the frame the late ones ran long on
     static double rc[3], rg[3]; static uint32_t lbits; static unsigned ri;
@@ -2563,6 +2573,9 @@ static void fstep_tick(const win_t *o, int c) {
     else if (probe0 == 2 && !g_fs.probe && g_fs.bursts != bursts0 && *nl < 40)   // fps_hold_backoff burst (nvn_fstep.h FSTEP_BURST_CAP)
         LOG("[nvn] frame step: the run at hold %d after the probe ended in a short burst on the CPU side (GPU at most %.2f, under the late line): not a failed probe, the next one after %.0f s (fps_hold_backoff burst)%s",
             kmin, g_fs.lgpu, g_fs.hold / 60 / g_fs.per_vsync, ++*nl == 40 ? cutm : "");
+    if (away && *nl < 40)
+        LOG("[nvn] frame step: a frame of %.1f s across %.1f s in the background at present %llu: on time and owing nothing, and the next %d frames' lateness is paid back without a step up (fps_resume)%s",
+            shown / fstep_hz(), away_ms / 1e3, (unsigned long long)o->presents, FSTEP_GRACE, ++*nl == 40 ? cutm : "");
     // The end of the hold-off two failed probes over budget put on the probes (nvn_fstep.h FSTEP_OVER), once per hold-off the failed-probe line announced: the cost at the
     // longer hold fell, or the scene changed (a load, a cap change). Not when a probe ended it (its own line says what it measured: the probe held, or failed within the margin)
     // nor at hold kmin already; and the probe FSTEP_PHOLD_MAX after the step up is logged as a probe

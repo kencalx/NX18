@@ -159,6 +159,33 @@ class FpsHoldBackoff(unittest.TestCase):   # the waits after a held probe's shor
         self.assertIn('fps_hold_backoff', (REPO / 'dm/games/0400486024DEC000/README.md').read_text(encoding='utf-8'))
 
 
+class FpsResume(unittest.TestCase):   # the frame across a stay in the background on time and owing nothing (nvn_fstep.h nvn_fstep.away; DM_FPS_RESUME overrides)
+    def macro(self, rows, gid=None):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'game.h')
+            if gid is None:
+                Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+                env = {**os.environ, 'DM_GAMES_DIR': d}
+            else: env = {k: v for k, v in os.environ.items() if k != 'DM_GAMES_DIR'}   # a profile of the repository
+            subprocess.run([sys.executable, str(GAME), 'header', gid or ID, str(out)], env=env, check=True, capture_output=True)
+            return [l for l in out.read_text().splitlines() if 'FPS_RESUME' in l]
+
+    def test_values_and_the_default(self):
+        self.assertEqual(self.macro(''), ['#define DM_GAME_FPS_RESUME 0'])   # without the key: off, every other game as before
+        self.assertEqual(self.macro('fps_resume\ton\n'), ['#define DM_GAME_FPS_RESUME 1'])
+        self.assertEqual(self.macro('fps_resume\toff\n'), ['#define DM_GAME_FPS_RESUME 0'])
+        for v in ('1', 'yes', 'On', ''):
+            rc, out = header(f'fps_resume\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('fps_resume must be on or off', out, v)
+
+    def test_profiles_that_set_it(self):   # Ocarina of Time alone (X1.0), named in its note
+        on = [tsv.parent.name for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv'))
+              if any(l.split('\t')[:2] == ['fps_resume', 'on'] for l in tsv.read_text(encoding='utf-8').splitlines())]
+        self.assertEqual(on, ['0400486024DEC000'])
+        self.assertEqual(self.macro('', '0400486024DEC000'), ['#define DM_GAME_FPS_RESUME 1'])
+        self.assertIn('fps_resume', (REPO / 'dm/games/0400486024DEC000/README.md').read_text(encoding='utf-8'))
+
+
 class PostAA(unittest.TestCase):   # the present's edge smoothing by default (settings.tsv DM_POST_AA's values, nvn_upscale_pick.h aa_parse)
     def macro(self, rows):
         with tempfile.TemporaryDirectory() as d:

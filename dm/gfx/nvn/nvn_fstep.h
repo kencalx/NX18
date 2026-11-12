@@ -66,6 +66,11 @@
 // fails and doubles them, but to FSTEP_BURST_CAP (2 s) at most. Probes that fail in their own trial, fit trials that fail, and the hold-off of failed probes over budget
 // (nvn_fstep_pheld, the GPU-bound areas of run A) are as before (t_fstep: the run B and run A replays)
 #define FSTEP_BURST_CAP 120.0
+// A frame across a stay in the background (nvn_fstep.away, set by the caller for one call: the profile's fps_resume, DM_FPS_RESUME; Ocarina of Time, X1.0). The guest's clock is
+// frozen while the app is away, so the stay is time the game never ran: before, that frame counted as late and as a debt, capped at FSTEP_DEBT_MAX, which the game then paid
+// back by running 15 vsyncs fast; with the late frame at the focus loss before it and the first frame after it (page-ins), three late frames stepped up to hold 2 for a second
+// (Ocarina of Time on an iPhone 18 Pro Max, run B: 41.3, 40,454.8 and 93.2 ms, then GPU frames of 26 ms; 15 vsyncs paid back). With away the frame is on time and owes nothing,
+// and for FSTEP_GRACE frames after it lateness is paid back but does not step up (the clocks and the pages the system took come back): rgrace
 
 typedef struct {
     int k, step;              // vsyncs each frame stays on screen; the step handed to the game for the next frame (k, or k + 1 while paying back)
@@ -90,6 +95,7 @@ typedef struct {
     double phold;             // vsyncs a probe waits for after a step up (at least hold): FSTEP_HOLD0, doubled after each failed probe up to FSTEP_PHOLD_MAX
     int upf;                  // frames left after a step up whose late screen verdicts are about frames before it (FSTEP_UP_LAG)
     int pin, pinned;          // set by the caller (kept): 1 = a movie above 30 fps plays, hold kmin; the last call's pin
+    int away, rgrace;         // set by the caller for one call, then cleared: 1 = the frame spans a stay in the background; frames left after it whose lateness does not step up
     int backoff;              // set by the caller (kept): 1 = a held probe's run at kmin that a short burst on the CPU side ended is no failure, other early ends wait FSTEP_BURST_CAP at most
     double gpu, lgpu;         // set by the caller before each call: the frame's GPU time in vsyncs (0 = none finished yet); the most of it over the late frames in a row
     uint64_t late, paid, ups, downs, failed, probes, bursts; double dropped;   // statistics for the log (bursts: runs at kmin ended by a short burst on the CPU side, with backoff)
@@ -115,6 +121,7 @@ static inline void nvn_fstep_pstart(nvn_fstep *s, double cost) { s->pfrom = s->c
 // against kmin (probes). Returns the step for the next frame; s->k is how long that frame stays on screen
 static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int kmin, int kmax, int fixed, int slow) {
     const double hold0 = FSTEP_HOLD0 * (s->per_vsync ? s->per_vsync : 1), hold_max = FSTEP_HOLD_MAX * (s->per_vsync ? s->per_vsync : 1);
+    const int away = s->away; s->away = 0;   // the caller's, for this call only
     if (kmin < 1) kmin = 1;
     if (kmax > FSTEP_MAX) kmax = FSTEP_MAX;
     if (kmax < kmin) kmax = kmin;
@@ -129,10 +136,12 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     }
     if (!s->k) { s->k = s->step = s->kmin = kmin; return s->step; }   // first frame: nothing measured yet
     int held = s->k;   // the frame that just ended stayed on screen this long
-    s->debt += shown - s->step;
+    const double sh = away ? held : shown;   // a frame across a stay in the background: on time, owing nothing, and the frames after it get rgrace
+    s->debt += sh - s->step;
     if (s->debt > FSTEP_DEBT_MAX) { s->dropped += s->debt - FSTEP_DEBT_MAX; s->debt = FSTEP_DEBT_MAX; }
     if (s->debt < -1) s->debt = -1;   // ahead (a frame shorter than its step): nothing slows the game down, so at most one vsync is remembered
-    s->since += shown;
+    s->since += sh;
+    if (away) s->rgrace = FSTEP_GRACE;
     if (shown >= FSTEP_DEBT_MAX * (s->per_vsync ? s->per_vsync : 1)) nvn_fstep_pforget(s, hold0);   // a load or a trip to the background: another scene
     if (s->pin != s->pinned) {   // a fast movie starts or ends: another scene, and no trial or probe carries over it
         s->pinned = s->pin; s->trial = s->probe = s->grace = 0; s->late_run = s->fit_run = 0; s->upf = 0; s->run = 0; s->cn = 0;
@@ -152,7 +161,8 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (s->k > kmax) s->k = kmax;
     s->kmin = kmin;
     int scr = s->screen; s->screen = 0;
-    int late = scr ? scr == 2 : shown > held + FSTEP_LATE + s->shown_slack || cost > held + FSTEP_LATE, grace = s->grace > 0;
+    int late = away ? 0 : scr ? scr == 2 : shown > held + FSTEP_LATE + s->shown_slack || cost > held + FSTEP_LATE, grace = s->grace > 0;
+    int rg = !away && s->rgrace > 0; if (rg) s->rgrace--;
     if (grace && !cap_probe) {   // the completed frame at the old cap does not consume the new hold's grace
         if (s->grace > FSTEP_GRACE / 2) s->pa += cost; else s->pb += cost;
         s->plate += late; s->ptotal++;
@@ -160,8 +170,8 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     }
     int lagged = s->upf > 0 && scr == 2 && cost <= held + FSTEP_LATE;   // the screen's verdict on a frame before the last step up
     if (s->upf > 0) s->upf--;
-    if (late) { s->late++; s->late_run = grace || lagged ? 0 : s->late_run + 1; s->fit_run = 0; s->lgpu = s->late_run > 1 && s->lgpu > s->gpu ? s->lgpu : s->gpu; } else s->late_run = 0;
-    if (s->probe == 1 && !grace && !cap_probe && held <= kmin) { s->psum += cost; s->pn++; }   // the probe's frames after its grace: kmin's cost
+    if (late) { s->late++; s->late_run = grace || lagged || rg ? 0 : s->late_run + 1; s->fit_run = 0; s->lgpu = s->late_run > 1 && s->lgpu > s->gpu ? s->lgpu : s->gpu; } else s->late_run = 0;
+    if (s->probe == 1 && !grace && !cap_probe && held <= kmin && !away) { s->psum += cost; s->pn++; }   // the probe's frames after its grace: kmin's cost
     // The cost of the frames on time (a hitch is not what the scene costs): at kmin, and at the longer hold
     if (kmin != s->ckmin) {   // another cap: its run starts over, and what held it before comes back
         if (s->ckmin >= 1 && s->ckmin <= FSTEP_MAX) {
@@ -173,8 +183,8 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         nvn_fstep_pforget(s, hold0);
     }
     // A frame the screen showed on time while its cost did not fit (absorbed by present snapshots) is not what the hold costs: the probes would take it for the scene that held kmin
-    int fits = !scr || cost <= held;
-    if (held <= kmin) { s->run += shown; s->cn = 0; if (!late && fits && s->probe != 1) s->crun = s->crun > 0 ? s->crun + (cost - s->crun) / 32 : cost; }
+    int fits = !away && (!scr || cost <= held);   // the frame across a stay measures the stay, not the scene
+    if (held <= kmin) { s->run += sh; s->cn = 0; if (!late && fits && s->probe != 1) s->crun = s->crun > 0 ? s->crun + (cost - s->crun) / 32 : cost; }
     else {
         s->run = 0;
         if (held != s->ck) { s->ck = held; s->cn = 0; }

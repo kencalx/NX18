@@ -142,6 +142,9 @@ SWITCH_BINDING = [
     ('fps_hold_backoff', '', {'what': "a held probe's run at hold 1 ended by a short burst on the CPU side is no failure, other early ends wait 2 s at most", 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
      'why': 'what any game under the frame step whose bursts are on the CPU side should get: the GPU-bound back-off is unchanged; per game (Ocarina of Time) in X1.0 only for the frozen release',
      'blocked': 'X1.0 is frozen: the default for every game is X2.0 work, after an iPhone A/B on Ocarina of Time and a run of Breath of the Wild or Tears of the Kingdom with it'}),   # before fps_hold: classify matches a key by its start
+    ('fps_resume', '', {'what': 'the frame across a stay in the background on time and owing nothing, the 30 after it not stepping the hold up', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
+     'why': 'what every game under the frame step should get: the guest clock is frozen while the app is away, so the stay is no time the game lost; per game (Ocarina of Time) in X1.0 only for the frozen release',
+     'blocked': 'X1.0 is frozen: the default for every game is X2.0 work, after an iPhone A/B with a trip out of the app'}),
     ('fps_hold', '', {'what': 'no frame held past the cap', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's pacing"}),
     ('fps_target', '', {'what': 'frame rate target', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'a choice per game'}),
     ('fps_max', '', {'what': 'a frame rate of 120 allowed (fps_target and the launcher\'s Frame rate)', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
