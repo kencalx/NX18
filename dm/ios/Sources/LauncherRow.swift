@@ -61,9 +61,10 @@ struct SettingRow: View {
         }
     }
     private var currentLabel: String { s.options?.first { $0[0] == current }?[1] ?? current }
-    // A choice with the UI font (NXFont.swift): the menu picker draws its value itself, in the system font on iOS (a UIKit button) and on the Mac in an NSPopUpButton whose
-    // title sits below the row's name (AppKit lays the font out with its line gap). So the value is NX 18's own text in a Menu, and only the option list is the system's menu
-    // (the same Picker, inline in it: checkmark, greyed options). Name and value side by side, the value under the name at the accessibility text sizes, as the menu picker does
+    // A choice on the iPhone and iPad, and on the Mac with the UI font (NXFont.swift; sideBySide): the menu picker draws its value itself, on iOS in the system font (a UIKit
+    // button), and under the row's note when it has one instead of on the right as on the other rows, and on the Mac in an NSPopUpButton whose title sits below the row's name
+    // (AppKit lays the font out with its line gap). So the value is NX 18's own text in a Menu, and only the option list is the system's menu (the same Picker, inline in it:
+    // checkmark, greyed options). Name and value side by side, the value under the name at the accessibility text sizes, as the menu picker does
     @ViewBuilder private var fontChoice: some View {
         let value = Menu {
             Picker(selection: m.binding(s)) { options } label: { Text(s.label) }
@@ -87,12 +88,20 @@ struct SettingRow: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.legibilityWeight) private var legibility
     @Environment(\.isEnabled) private var enabled
+    // fontChoice, else the menu picker: with iOS's Bold Text on (the system's layout, whose font follows it), and in the Mac's settings window without the UI font
+    private var sideBySide: Bool {
+        #if os(iOS)
+        return legibility != .bold
+        #else
+        return NXFont.name != nil && legibility != .bold
+        #endif
+    }
 
     var body: some View {
         Group {
             switch s.kind {
             case "choice":
-                if NXFont.name != nil && legibility != .bold { fontChoice } else {
+                if sideBySide { fontChoice } else {
                     Picker(selection: m.binding(s)) { options } label: { settingLabel }
                         .pickerStyle(.menu)
                 }
