@@ -244,6 +244,7 @@ struct LauncherView: View {
     @State private var focus: LauncherFocus? = .play
     @State private var sheet: LauncherSheet?
     @State private var cloudPicking = false
+    @State private var stacked = false      // the art above the settings (portrait, a narrow window): the preset chips are below Play then, not beside it (focusMap)
     @State private var guideAfter = false   // a Guide shortcut waiting for About or the folder picker to finish closing: UIKit presents nothing from a view controller that is still presenting, so the guide opens after
     @State private var status = LauncherStatus()
     @State private var scroller = LauncherScroller()
@@ -294,6 +295,7 @@ struct LauncherView: View {
                 }
             }
             .onChange(of: g.size) { m.refreshFacts() }   // the window's shape: rotated, or resized under Stage Manager or Split View
+            .onChange(of: wide, initial: true) { stacked = !wide }
         }
         .background(background.ignoresSafeArea())
         .preferredColorScheme(.dark)
@@ -787,11 +789,13 @@ struct LauncherView: View {
 
     private var focusMap: LauncherFocusMap {
         var lines: [[LauncherFocus]] = []
-        if m.hasPresets { lines.append(LauncherPreset.allCases.map { .preset($0) }) }
         var top: [LauncherFocus] = [.play]
         if content.hasGuide { top.append(.guide) }
         if content.hasAbout { top.append(.about) }
-        lines.append(top)
+        // Play's line and the chips in the order they are on the screen: stacked, the chips are at the top of the settings, below Play; side by side, they top the settings beside it
+        if stacked { lines.append(top) }
+        if m.hasPresets { lines.append(LauncherPreset.allCases.map { .preset($0) }) }
+        if !stacked { lines.append(top) }
         lines += basicGroups.flatMap { $0.rows.map { [LauncherFocus.row($0.env)] } }
         if !advancedGroups.isEmpty {
             lines.append([.advanced])
