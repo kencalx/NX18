@@ -113,4 +113,21 @@ final class DuoLauncherTests: XCTestCase {
         XCTAssertNil(defaults.object(forKey: LauncherModel.skipKey), "Off is no key")
         XCTAssertFalse(LauncherModel.skipsAtStart(defaults: defaults, environment: [:]))
     }
+
+    // The cloud-save report's pull=<0|1> (save_sync.h): with a download of the cloud's save left unfinished nothing is asked, even beside conflict=1, and a line
+    // without the key (a host before the journal) reads as 0
+    func testSaveSyncReportPendingPullAsksNothing() throws {
+        let base = "sync=1 cloud=1 local=aa saved=10 files=1 size=3 chash=bb csaved=20 cfiles=1 csize=16 cdevice=Mac16,5 sametitle=1"
+        let old = try XCTUnwrap(SaveSyncReport(line: base + " conflict=1"))
+        XCTAssertFalse(old.pullPending)
+        XCTAssertEqual(SaveSyncReport.step(old), .choose)
+        let none = try XCTUnwrap(SaveSyncReport(line: base + " conflict=1 pull=0"))
+        XCTAssertFalse(none.pullPending)
+        XCTAssertEqual(SaveSyncReport.step(none), .choose)
+        let pending = try XCTUnwrap(SaveSyncReport(line: base + " conflict=0 pull=1"))
+        XCTAssertTrue(pending.pullPending)
+        XCTAssertEqual(SaveSyncReport.step(pending), .play("ask"), "the start's mount puts this device's save back, then compares")
+        XCTAssertEqual(SaveSyncReport.step(try XCTUnwrap(SaveSyncReport(line: base + " conflict=1 pull=1"))), .play("ask"), "no question while a pull is pending")
+        XCTAssertEqual(SaveSyncReport.step(try XCTUnwrap(SaveSyncReport(line: "sync=1 cloud=-1 local=aa conflict=0 pull=1"))), .unreadable, "a cloud not read is still said")
+    }
 }

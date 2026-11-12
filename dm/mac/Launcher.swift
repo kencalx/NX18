@@ -41,7 +41,9 @@ enum SaveCheck {
         let line = (folder.isEmpty ? "0" : folder).withCString { f in SaveSyncReport.run { save_sync_report(save, id, f, SaveSyncReport.waitMs, $0, $1) } }
         guard let line else { fputs("launcher: save sync: no report on \(String(cString: save))\n", stderr); return nil }
         fputs("launcher: save sync: \(line)\n", stderr)
-        return SaveSyncReport(line: line)
+        let r = SaveSyncReport(line: line)
+        if r?.pullPending == true { fputs("launcher: save sync: \(SaveSyncReport.pullPendingNote)\n", stderr) }
+        return r
     }
 
     /// The question the report needs, as a modal alert; `cancel` names the way back ("Cancel" to the window, "Quit" without one)

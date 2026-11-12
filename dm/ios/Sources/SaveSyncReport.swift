@@ -15,6 +15,8 @@ struct SaveSyncReport {
     }
 
     var sync = false, conflict = false, sameTitle = true
+    /// pull=1: a download of the cloud's save did not finish (<save>.pull); the start's mount puts this device's save back before it compares, so nothing is asked now
+    var pullPending = false
     var cloud = 0   // 1 read, 0 no save there, -1 not read in time
     var localHash = "", cloudHash = "", cloudDevice = ""
     var localSaved = Date(timeIntervalSince1970: 0), cloudSaved = Date(timeIntervalSince1970: 0)
@@ -31,6 +33,7 @@ struct SaveSyncReport {
         func text(_ k: String) -> String { f[k] == "-" ? "" : (f[k] ?? "") }
         func date(_ k: String) -> Date { Date(timeIntervalSince1970: Double(f[k] ?? "0") ?? 0) }
         sync = s == "1"; conflict = c == "1"; sameTitle = f["sametitle"] != "0"; cloud = cl
+        pullPending = f["pull"] == "1"   // absent (a host before the journal): 0
         localHash = text("local"); cloudHash = text("chash"); cloudDevice = text("cdevice")
         localSaved = date("saved"); cloudSaved = date("csaved")
         localSize = Int64(f["size"] ?? "0") ?? 0; cloudSize = Int64(f["csize"] ?? "0") ?? 0
@@ -46,9 +49,12 @@ struct SaveSyncReport {
     static func step(_ r: SaveSyncReport?) -> Step {
         guard let r, r.sync else { return .play(nil) }
         if r.cloud < 0 { return .unreadable }
-        if r.conflict { return .choose }
+        if r.conflict && !r.pullPending { return .choose }   // the host already says conflict=0 with pull=1: what is in place may be half the cloud's
         return .play("ask")   // nothing to choose now; if the cloud's changes before the mount, the mount replaces neither (save_sync.c read_choice)
     }
+
+    /// The launchers' log line for pull=1
+    static let pullPendingNote = "the last download of the cloud's save did not finish: the start puts this device's save back first, and compares the two after that"
 
     var localChoice: String { "local:" + localHash }
     var cloudChoice: String { "cloud:" + cloudHash }

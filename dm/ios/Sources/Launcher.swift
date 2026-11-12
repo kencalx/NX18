@@ -571,7 +571,9 @@ struct LauncherView: View {
             return nil
         }
         fputs("launcher: save sync: \(line)\n", stderr)
-        return SaveSyncReport(line: line)
+        let r = SaveSyncReport(line: line)
+        if r?.pullPending == true { fputs("launcher: save sync: \(SaveSyncReport.pullPendingNote)\n", stderr) }
+        return r
     }
 
     private func go(_ choice: String?) {
