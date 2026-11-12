@@ -1,7 +1,8 @@
 // draw_barriers game (DM_NVN_BARRIER=game): which draw passes skip the full entry barrier, also while aliases exist, and that a fragment-only game barrier still orders one
 // pass's fragment storage writes before the next pass's fragment reads. Upstream e7750541: with an image family heap every pass took the full barrier (Ocarina of Time's
 // dynamic resolution has one from its first frame), and any nonzero game barrier forced it; only ORDER_PRIMITIVES and ORDER_INDIRECT_DATA (GAME_BARRIER_FULL) do now.
-// Run with DM_NVN_BARRIER=full as well: the fallback puts every pass behind the full barrier, whatever the barrier bits or the profile say
+// Run with DM_NVN_BARRIER=full as well: the fallback puts every pass behind the full barrier, whatever the barrier bits or the profile say.
+// After NVN2's DLSS on MetalFX's temporal scaler (dlss_eval), whose encoders take no barrier, the next draw pass takes the full barrier, as after the spatial upscaler
 #include "../nvn/nvn_mtl.m"
 #include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
@@ -20,6 +21,11 @@ static void execute(void) {
     emit(OP_END,NULL,0); mtl_sub_begin(); uint64_t handle=(uint64_t)cmd; mtl_sub_index(&handle,1); mtl_exec(cmd);
     uint64_t fence=mtl_sub_commit(); CHECK(mtl_wait(fence,5000000000ull),"GPU submission completes");
     CHECK(!mtl_last_commit_error(),"GPU reports no error"); used=0;
+}
+static tex_t texture(uint64_t serial, unsigned w, unsigned h, int format) {   // as t_dlss_mfx
+    tex_t t = {.magic = MAGIC('T','E','X',0), .serial = serial, .off = serial << 24};
+    t.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = format, .width = w, .height = h, .depth = 1, .levels = 1, .samples = 1, .flags = NVN_TEXTURE_FLAGS_IMAGE};
+    nvn_tex_layout(&t.d, &t.L); mtl_tex_init(&t); return t;
 }
 static int red(const tex_t *t) {   // every pixel of the 8x8 target red (the reader saw the writer's value), not green
     mtl_sub_begin(); id<MTLBuffer> b=[g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared]; res_add(b);
@@ -102,5 +108,19 @@ int main(void) { @autoreleasepool {
         CHECK(skip1-skip0==(uint64_t)game,alias?"the reader pass skips the full barrier with an image family heap (game) or takes it (full)":"the reader pass skips the full barrier (game) or takes it (full)");
         CHECK(red(&b),alias?"after a fragment-only barrier the next pass's fragments read the previous pass's fragment write, with an image family heap":"after a fragment-only barrier the next pass's fragments read the previous pass's fragment write");
     }
+    // A draw pass ended relaxed, then DLSS through MetalFX's temporal scaler: the next draw pass takes the full barrier, so it waits for the scaler's own encoders
+    { tex_t col = texture(983020, 960, 540, NVN_FORMAT_RGBA16F), dep = texture(983021, 960, 540, NVN_FORMAT_DEPTH32F), mot = texture(983022, 960, 540, NVN_FORMAT_RG16F), out = texture(983023, 1920, 1080, NVN_FORMAT_RGBA16F);
+      p_dlss c = {.tex = {&col, &dep, &mot, &out}, .net = 1, .iw = 960, .ih = 540, .ow = 1920, .oh = 1080, .mv = {1, 1}, .pre_exposure = 1, .flags = DLSS_F_MV_LOW_RES | DLSS_F_DEPTH_INVERTED, .reset = 1};
+      mtl_sub_begin(); dlss_eval(&c); c.reset = 0;   // the first evaluation makes the scaler and gives the textures MetalFX's usages, through copies whose encoders end in full
+      atomic_store_explicit(&g_last_end_relaxed, game, memory_order_relaxed);   // as a draw pass's relaxed end leaves it (enc_r_end_pass)
+      dlss_eval(&c);   // a later frame's: nothing else is encoded
+      CHECK(g_dlss[0].sc != nil, "MetalFX made a temporal scaler");
+      CHECK(!atomic_load_explicit(&g_last_end_relaxed, memory_order_relaxed), "after the temporal scaler no relaxed end is left for the next pass");
+      MTL4RenderPassDescriptor *d = [MTL4RenderPassDescriptor new]; d.colorAttachments[0].texture = tex_mtl(&a); d.colorAttachments[0].loadAction = MTLLoadActionClear; d.colorAttachments[0].storeAction = MTLStoreActionStore;
+      uint64_t skip0, full0, skip1, full1; mtl_barrier_stats(&skip0, &full0);
+      id<MTL4RenderCommandEncoder> e = enc_r_begin_pass(d); enc_r_end_pass(e);
+      mtl_barrier_stats(&skip1, &full1);
+      CHECK(skip1 == skip0 && full1 - full0 == 1, "the draw pass after the temporal scaler takes the full barrier");
+      CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the submission with the scaler completes"); }
     printf("draw barriers (DM_NVN_BARRIER=%s): %d checks, %d failed\n",game?"game":"full",checks,fails); return fails!=0;
 } }

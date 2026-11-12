@@ -15910,6 +15910,9 @@ static void dlss_eval(const p_dlss *c) {
         sc.reset = reset;
         [sc encodeToCommandBuffer:cb];
     });
+    // The next draw pass waits for the scaler whole (enc_r_begin_pass), as after the spatial upscaler (up_mfx_encode): MetalFX's encoders take no barrier, and the relaxed end of the
+    // draw pass before it (rp_end above, draw_barriers game) orders only that pass's own work
+    atomic_store_explicit(&g_last_end_relaxed, 0, memory_order_relaxed);
     if (c->tex[DLSS_BIAS]) { static int once; if (!once++) MLOG("[RED] DLSS: the game's bias mask (a reactive mask for MetalFX) is not passed on"); }
 }
 
