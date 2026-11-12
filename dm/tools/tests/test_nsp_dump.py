@@ -212,11 +212,15 @@ class Main(Base):
         self.assertEqual(nsp.app_icon(None, None, game, base), (None, False))
         self.assertEqual(nsp.app_icon(None, spare, game, base), (spare, True))        # a dump, a NUP without an icon: the stand-in
         self.assertEqual(nsp.app_icon(given, spare, game, base), (given, False))      # --icon is asked for by name: it wins over both
-        (base / 'icon.jpg').write_bytes(b'base')
+        (base / 'icon.jpg').write_bytes(b'\xff\xd8base')
         self.assertEqual(nsp.app_icon(None, spare, game, base), (base / 'icon.jpg', False))   # the game's own icon stays
-        (game / 'icon.jpg').write_bytes(b'game')
+        (game / 'icon.jpg').write_bytes(b'\xff\xd8game')
         self.assertEqual(nsp.app_icon(None, spare, game, base), (game / 'icon.jpg', False))   # the packed version's before the base game's
         self.assertEqual(nsp.app_icon(given, None, game, base), (given, False))
+        (game / 'icon.edited.jpg').write_bytes(b'\x89PNG edited')   # an icon edited in NXConvert (game_icon_of): before the Control NCA's
+        self.assertEqual(nsp.app_icon(None, spare, game, base), (game / 'icon.edited.jpg', False))
+        (game / 'icon.edited.jpg').unlink(); (game / 'icon.jpg').write_bytes(b'GIF89a'); said = []   # not a JPEG or PNG: passed over with a line, the base game's taken
+        self.assertEqual(nsp.app_icon(None, spare, game, base, say=said.append), (base / 'icon.jpg', False)); self.assertEqual(len(said), 1)
 
     def test_title_id_must_match(self):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), self.assertRaisesRegex(nsp.BuildError, 'which holds'):

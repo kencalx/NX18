@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# A game in an NX archive (one .nx file: https://github.com/fab918/nxformat, NXFormat 1.0.2, SPEC.md; wire versions 0.2 and 0.3) → the layout build_ipa_from_nsp.py extracts NSPs into,
+# A game in an NX archive (one .nx file: https://github.com/fab918/nxformat, NXFormat 1.0.3, SPEC.md; wire versions 0.2 and 0.3) → the layout build_ipa_from_nsp.py extracts NSPs into,
 # the same as scripts/pack_nup.py writes for a NUP. build_ipa_from_nsp.py calls this when it is given a .nx file, or a folder that holds one, and goes on with its other steps; run on its own,
 # this script does only this step. It reads the format with its own code: nothing of NXFormat's (nxconvert, its C++ reader) is used or needed.
 # An NX holds decrypted Switch 1 and Switch 2 games: per application, snapshots (the base game, updates, standalone updates and DLC), each a complete file tree, never laid over another
@@ -14,7 +14,7 @@
 #     checks it against the Catalog; a DLC's add-on title ID comes from there. To pack a version, the NCA files it needs (Meta, Program, Control, Manual: never Data or delta
 #     fragments; a DLC: Meta, Data, PublicData) are staged into <build folder>/tmp/nca/<label>/, each checked against its SHA-256 as it is streamed out of the archive, and deleted
 #     after the run: an update version needs free space for its base and patch NCAs beside its output (checked first). An update is read in one folder as base and update, its patch
-#     Program NCA laid over the base one (BKTR) by nx_extract. Refused: Switch 2 or platform-unknown games and snapshot types 3 and 4 (nxconvert 1.0.2 writes none: code native),
+#     Program NCA laid over the base one (BKTR) by nx_extract. Refused: Switch 2 or platform-unknown games and snapshot types 3 and 4 (nxconvert 1.0.3 writes none: code native),
 #     anything in a snapshot root but those NCA files, an NCA without the DNCA marker, with an encrypted section, an unflattened sparse layer, an FS header other than version 2 or
 #     hash trees other than SHA-256 and IVFC, a data-only update (code nca), a sparse base game packed alone (code sparse: it runs only with its update).
 #     nx_extract writes extract/v<version>/ (its log: logs/extract_v<version>.log, with display version and build IDs) through extract/v<version>.partial/, and a stamp
@@ -24,7 +24,12 @@
 #   extract/v<version>/ExeFS/   the version's code modules
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py), written straight from the archive: the RomFS is never unpacked into loose files
 #   extract/v<version>/control.nacp, icon.jpg   the snapshot's NACP and icon, when the archive has them for it, else its exact base snapshot's (also a base that holds only metadata; never
-#     another update's); none when neither has them (sips reads a PNG icon by its content)
+#     another update's); none when neither has them (sips reads a PNG icon by its content). A NACP record that is not 0x4000 bytes is no NACP: left out, with a line, and that
+#     snapshot's display title with it (NXConvert 1.0.0 and 1.0.1 filled both from the wrong records of a NUP numbered one too low)
+#   extract/v<version>/title.txt   without a NACP, the archive's display title for the version (or its base's; when it holds only spaces or control characters, a localized one, American
+#     English first), cut to a NACP name's 511 bytes: the NSP script's app name then, before the profile's
+#   extract/v<version>/icon.edited.jpg   an NCA snapshot's own icon in the archive (one set in NXConvert's sidebar) when it differs from its Control NCA's icon.jpg and its localized icons
+#     do not hold that one (a new icon clears them; otherwise the default is the game's own in another language): the app's icon then
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − base title ID − 0x1000; DLC converted from a NUP or folders carry their add-on title ID), the host's DM_AOC_DIR
 # Checks, in the order of the format's own validator so a damaged or hostile archive gets the error the format names (Error.code):
 #   open: both header slots (magic, CRC-32C, zero page padding; the valid one of the highest generation; an older generation when the newer one's tail is damaged), the version (0.2 and 0.3
@@ -858,14 +863,27 @@ class Nx:
 
     # ---- metadata ----
     def meta(self, s):
-        """Snapshot s's own control data: {'nacp': bytes or None, 'icon': bytes or None}, from its application's record when s is its metadata snapshot, else from the metadata history"""
+        """Snapshot s's own control data: {'nacp': bytes or None, 'icon': bytes or None, 'title': str or None (its display title)}, from its application's record when s is its metadata
+        snapshot, else from the metadata history"""
+        if (rec := self._display_record(s)) is None: return {'nacp': None, 'icon': None, 'title': None}
+        nacp, icon, local, title = rec
+        def pick(rows, default, none):   # the default, else the American English one, else English, else the first (as pack_nup.control picks an icon)
+            if default != none: return default
+            by = {lang.lower(): v for lang, v in rows if v != none}
+            return by.get('en-us', by.get('en', next(iter(by.values()), none)))
+        title = pick([(lang, display_title(t)) for lang, t, _ in local], display_title(title), None)   # a title of only spaces or control characters is none: a localized one then
+        icon = pick([(lang, i) for lang, _, i in local], icon, NO)
+        return {'nacp': self.media(nacp) if nacp != NO else None, 'icon': self.media(icon) if icon != NO else None, 'title': title}
+
+    def localized_icons(self, s):   # the icons snapshot s's own display record lists per language (a new icon set with set-metadata clears them: NXConvert's CLI.md)
+        rec = self._display_record(s)
+        return [self.media(i) for _, _, i in rec[2] if i != NO] if rec is not None else []
+
+    def _display_record(self, s):   # (nacp, icon, localized, title) of snapshot s's own display record: its application's when s is its metadata snapshot, else the metadata history's; None without one
         a = s.app
-        if a.meta_snapshot == s.index: nacp, icon, local = a.nacp, a.icon, a.localized
-        elif (row := self.history.get(a.index, {}).get(s.index)) is not None: nacp, icon, local = row['nacp'], row['icon'], row['localized']
-        else: return {'nacp': None, 'icon': None}
-        icons = {lang.lower(): i for lang, _, i in local if i != NO}   # the default icon, else the American English one, else English, else the first (as pack_nup.control picks)
-        if icon == NO: icon = icons.get('en-us', icons.get('en', next(iter(icons.values()), NO)))
-        return {'nacp': self.media(nacp) if nacp != NO else None, 'icon': self.media(icon) if icon != NO else None}
+        if a.meta_snapshot == s.index: return a.nacp, a.icon, a.localized, a.title
+        if (row := self.history.get(a.index, {}).get(s.index)) is not None: return row['nacp'], row['icon'], row['localized'], row['title']
+        return None
 
 
 NPDM_MAX, MODULE_MAX = MiB, 1 << 30   # the largest main.npdm read whole (real ones are a few KB), and the largest code module or NRO written out (real ones are tens of MB)
@@ -951,7 +969,7 @@ def scan(n, want=None, platform=None):
     snaps = [s for s in a.snapshots if s.program == p.index and s.type != DLC]
     for s in a.snapshots:
         if s.kind != 'native' or s not in snaps and s.type != DLC: continue
-        if a.platform != 1: raise Error(f'{s.name}: NCA snapshots of a {PLATFORMS[a.platform]} game are not supported: NXFormat 1.0.2 writes only Switch 1 games that way; make the NX from '
+        if a.platform != 1: raise Error(f'{s.name}: NCA snapshots of a {PLATFORMS[a.platform]} game are not supported: NXFormat 1.0.3 writes only Switch 1 games that way; make the NX from '
                                         'extracted folders (nxconvert pack-tree / pack-nup)', 'native')
         if s.type in (STANDALONE, UNKNOWN): raise Error(f'{s.name}: an NCA snapshot of type {s.type} ({TYPES[s.type]}), which nxconvert never writes; not supported', 'native')
     for s in snaps:
@@ -1058,14 +1076,44 @@ def app_package(n, k):   # (as pack_nup.app_package, for the NSP script's survey
     return base_of(k)
 
 
-def control(k, out, fallback=None):   # the snapshot's control data beside its ExeFS (control.nacp, icon.jpg); what it lacks comes from fallback's (its base game). Returns {'nacp', 'icon'}
-    meta = k.nx.meta(k)
-    if fallback is not None and fallback is not k:
-        more = fallback.nx.meta(fallback)
-        meta = {key: meta[key] or more[key] for key in meta}
-    for name, data in (('control.nacp', meta['nacp']), ('icon.jpg', meta['icon'])):
+def media_meta(k, fallback, say=print):
+    """Snapshot k's control data in the archive's Media ({'nacp', 'icon', 'title'}), what it lacks from fallback's (its base game). A NACP record that is not 0x4000 bytes is left out, with a line:
+    NXConvert 1.0.0 and 1.0.1 may have stored something else as the NACP of a NUP whose meta block was numbered one too low (pack_nup.SHIFTED), and the reader takes a NACP of any size.
+    That snapshot's display title goes with it: such an archive's title is the NUP's publisher record (NXConvert 1.0.2's notes: wrong title, publisher and display version)"""
+    snaps = [k] if fallback is None or fallback is k else [k, fallback]
+    metas = [s.nx.meta(s) for s in snaps]
+    for s, m in zip(snaps, metas):
+        if m['nacp'] is not None and len(m['nacp']) != pack_nup.NACP_SIZE:
+            pack_nup.tell(s, f"{s.name}: the archive's NACP for it is {len(m['nacp']):,} bytes, not {pack_nup.NACP_SIZE:,} (0x4000): it is not a NACP, left out, and so is its "
+                             'display title, taken from the wrong record too (repack the NX with NXConvert 1.0.2 or later)', say)
+            m['nacp'] = m['title'] = None   # NXConvert 1.0.0 and 1.0.1 took a shifted NUP's publisher record as its title: never the app's name
+    return {key: next((m[key] for m in metas if m[key]), None) for key in metas[0]}
+
+
+EDITED_ICON = pack_nup.EDITED_ICON   # beside an NCA snapshot's icon.jpg: the archive's own icon for it when that differs from the Control NCA's, which the NSP script takes first
+TITLE_MAX = 0x1FF   # the bytes of a title kept as the app's name: a NACP's name field holds as many (0x200 with its NUL); the format allows 4,096
+
+
+def display_title(title):   # an archive's display title as an app's name: control and bidirectional characters dropped, spaces trimmed, at most TITLE_MAX bytes of UTF-8; None when nothing is left
+    t = _UNSHOWN.sub('', title or '').strip().encode()[:TITLE_MAX].decode('utf-8', 'ignore').strip()
+    return t or None
+
+
+def title_file(out, title):
+    """out/title.txt: the archive's display title for a version with no NACP (nxconvert --fallback-title, or a title typed in NXConvert's sidebar), which the NSP script takes as the app's
+    name then (build_ipa_from_nsp.control_name); as display_title makes it. None removes an older one: a NACP names the game"""
+    title = display_title(title)
+    if title and not (out / 'control.nacp').is_file(): (out / pack_nup.TITLE_FILE).write_text(title, encoding='utf-8')
+    else: (out / pack_nup.TITLE_FILE).unlink(missing_ok=True)
+
+
+def control(k, out, fallback=None, say=print):
+    """The snapshot's control data beside its ExeFS (control.nacp, icon.jpg, and title.txt without a NACP); what it lacks comes from fallback's (its base game). Returns {'nacp', 'icon', 'title'}"""
+    meta = media_meta(k, fallback, say)
+    for name, data in (('control.nacp', meta['nacp']), ('icon.jpg', meta['icon']), (EDITED_ICON, None)):   # (an NCA snapshot's, left by an earlier build of another archive)
         if data: (out / name).write_bytes(data)
         else: (out / name).unlink(missing_ok=True)
+    title_file(out, meta['title'])
     return meta
 
 
@@ -1075,15 +1123,16 @@ def romfs_of(k, base=None):   # the RomFS folder a version runs with: its own, a
     return k.romfs
 
 
-def pack_version(n, k, base, app, out, say=print, step=lambda s: None):   # one snapshot → out/ExeFS, out/RomFS.img and its control data; returns how pack() got the image
-    if k.kind == 'native': return pack_native(n, k, base, app, out, say, step)
+def pack_version(n, k, base, app, out, say=print, step=lambda s: None, note=None):
+    """One snapshot → out/ExeFS, out/RomFS.img and its control data; returns how pack() got the image. note: where the lines about the control data go (as pack_nup.pack_version)"""
+    if k.kind == 'native': return pack_native(n, k, base, app, out, say, step, note)
     if k.exefs == NO or n.child(k.exefs, b'main') is None or n.child(k.exefs, b'main.npdm') is None: raise Error(f'{k.name}: no exefs/main and exefs/main.npdm', 'select')
     if (pid := npdm_id(n, k)) != app: raise Error(f'{k.name}: program ID {pid:016X}, the game is {app:016X}', 'select')
     d = romfs_of(k, base)
     out.mkdir(parents=True, exist_ok=True)
     exefs(n, k, out / 'ExeFS')
     how = pack(n, d, out / 'RomFS.img', say, step)
-    if not control(k, out, base_of(k))['nacp']:
+    if not control(k, out, base_of(k), note or say)['nacp']:
         say(f'{k.name}: the archive has no NACP for this version' + ('' if k.type == BASE else ' or its base game') + ': the game\'s name and languages come from elsewhere (its profile)')
     return how
 
@@ -1342,16 +1391,28 @@ def _space(k, need, where):   # stop before staging when the volume cannot hold 
     return free
 
 
-def _control_fallback(k, out, say):   # what the Control NCA did not give (no Control NCA, no icon in it) from the archive's Media: the snapshot's own, else its exact base's
+def _control_fallback(k, out, say, note=None):   # what the Control NCA did not give (no Control NCA, no icon in it) from the archive's Media: the snapshot's own, else its exact base's
     nacp, icon = out / 'control.nacp', out / 'icon.jpg'
     if not (nacp.is_file() and icon.is_file()):
-        meta = k.nx.meta(k)
-        if (fb := base_of(k)) is not None and fb is not k:
-            more = fb.nx.meta(fb); meta = {key: meta[key] or more[key] for key in meta}
+        meta = media_meta(k, base_of(k), note or say)
         if not nacp.is_file() and meta['nacp']: nacp.write_bytes(meta['nacp'])
         if not icon.is_file() and meta['icon']: icon.write_bytes(meta['icon'])
     if not nacp.is_file():
         say(f'{k.name}: the archive has no NACP for this version' + ('' if k.type == BASE else ' or its base game') + ': the game\'s name and languages come from elsewhere (its profile)')
+
+
+def _display(k, out, say):
+    """An NCA snapshot's output, as extracted or as its stamp kept it: title.txt (the archive's display title, without a NACP) and EDITED_ICON (an icon set in NXConvert's sidebar, set-metadata,
+    which keeps the NCA files as they are: the snapshot's own icon in the archive, when it differs from the icon.jpg its Control NCA gave; never its base game's). Written after the stamp and on
+    every run, so an edit to the archive's display metadata (it appends a generation) needs no new extraction, and undoing it brings the game's icon back"""
+    title_file(out, media_meta(k, base_of(k), say)['title'] if not (out / 'control.nacp').is_file() else None)
+    own, icon, edited = k.nx.meta(k)['icon'], out / 'icon.jpg', out / EDITED_ICON
+    # a new icon clears the record's localized icons (NXConvert's CLI.md, set-metadata): while they still hold the Control NCA's icon, the record's default is the game's own in another
+    # language (as NXConvert picked it, not an edit), and the Control NCA's is kept as before
+    if own and icon.is_file() and own != (got := icon.read_bytes()) and got not in k.nx.localized_icons(k):
+        edited.write_bytes(own)
+        pack_nup.tell(k, f"{k.name}: the archive's icon for it is not its Control NCA's (set in NXConvert's sidebar or with set-metadata): the app takes the archive's ({EDITED_ICON})", say)
+    else: edited.unlink(missing_ok=True)
 
 
 def _one(k, pattern, text, what):   # the one line of nx_extract's output that matches pattern; a second is refused (text from the NCAs is printed escaped, so none can forge one)
@@ -1364,13 +1425,15 @@ def _extract_args(k, src, out, a, p, *more):
     return ['--plain', src, src if k.type == UPDATE else '-', out, '--app', f'{a.id:016x}', f'--program={p.id:016x}', *more]
 
 
-def pack_native(n, k, base, app, out, say=print, step=lambda s: None):
+def pack_native(n, k, base, app, out, say=print, step=lambda s: None, note=None):
     """NCA snapshot k (a base game or an update) → out/ExeFS, out/RomFS.img, its control data and out/html/, through nx_extract --plain on its staged NCA files; the ExeFS and RomFS are
-    an update's laid over its base game's (BKTR). Returns 'kept' (the stamp matches: nothing staged or run) or 'packed'"""
+    an update's laid over its base game's (BKTR). Returns 'kept' (the stamp matches: nothing staged or run) or 'packed'. note: where the lines about the control data go (pack_version)"""
+    note = note or say
     nat, a, p = _native(n), k.app, n.programs[k.program]
     damaged = ['--allow-damaged'] if nat.allow_damaged else []
     digest = _digest(n, k, 'NX-native-version', (a.id, p.id, app, k.type, k.version, nat.allow_damaged))
-    if _kept(out, digest): return 'kept'
+    if _kept(out, digest):
+        _display(k, out, note); return 'kept'
     files = chosen(n, k, GAME_TYPES)
     staged = sum(n.size(i) for _, i, _ in files)
     _space(k, staged + version_bytes(n, k, base), out.parent)
@@ -1405,11 +1468,12 @@ def pack_native(n, k, base, app, out, say=print, step=lambda s: None):
             for line in _reds(text): say(f'{k.name}: {line}')
             hp.rename(html)
         else: html.mkdir()
-        _control_fallback(k, part, say)
+        _control_fallback(k, part, say, note)
         _stamp(part, digest)
         shutil.rmtree(out, ignore_errors=True); part.rename(out)
     finally:
         shutil.rmtree(tmp, ignore_errors=True); shutil.rmtree(part, ignore_errors=True)
+    _display(k, out, note)
     return 'packed'
 
 
@@ -1453,6 +1517,7 @@ def survey_native(n, k, base, out, say=print):
                           run_timeout(staged))
         if code: _failed(k, code, text, log)
         _control_fallback(k, out, say)
+        _display(k, out, say)
     finally: shutil.rmtree(tmp, ignore_errors=True)
     return max(0, (out / 'romfs_manifest.tsv').read_bytes().count(b'\n') - 1)
 

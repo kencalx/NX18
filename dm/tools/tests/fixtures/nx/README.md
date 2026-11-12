@@ -3,6 +3,7 @@
 The NX archive conformance fixtures of [NXFormat](https://github.com/fab918/nxformat) by fab918, release 1.0.2, commit
 `ff6e7d8148cd782af4217ae353b21e428bb6a893` (2026-11-10), MIT licensed (`LICENSE`, copied from the repository root). They are small synthetic `.nx`
 files: no game data. dm/tools/tests/test_pack_nx.py reads them with this repository's own reader (scripts/pack_nx.py); no NXFormat code is used or run.
+Release 1.0.3 (tag V1.0.3, commit 208b815dc2, 2026-11-11) changed none of them, nor the wire format (0.2 and 0.3).
 
 `fixture_index.json` is upstream's `tests/fixtures/fixture_index.json`, unchanged: each file's size, SHA-256, expected outcome and error code. The test checks
 every file against it first. Fetched with `gh api repos/fab918/nxformat/contents/<source path>?ref=ff6e7d81 -H 'Accept: application/vnd.github.raw'`.

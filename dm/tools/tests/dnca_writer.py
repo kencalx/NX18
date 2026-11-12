@@ -1,4 +1,4 @@
-"""Synthetic decrypted NCAs (DNCA: the files an NX made by nxconvert pack holds, NXFormat 1.0.2) for the tests of nx_extract's --plain mode and of scripts/pack_nx.py's NCA
+"""Synthetic decrypted NCAs (DNCA: the files an NX made by nxconvert pack holds, NXFormat 1.0.3) for the tests of nx_extract's --plain mode and of scripts/pack_nx.py's NCA
 snapshots. Test code only, with its own layouts (switchbrew's NCA, PFS0, RomFS, IVFC, CNMT and bucket-tree records): it shares nothing with LibHac, nx_extract or pack_nx, so a
 reader bug cannot be repeated here. Nothing of NXFormat's is used. A DNCA is an NCA whose 0xC00-byte header is plaintext with the marker DNCA at 0x200 and every section's
 encryption type 1 (none); a sparse section flattened by the decrypter carries DSPF at FS header 0x1D0.

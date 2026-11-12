@@ -1,4 +1,4 @@
-"""NX archives (scripts/pack_nx.py, https://github.com/fab918/nxformat, NXFormat 1.0.2): the reader against the format's own conformance fixtures (dm/tools/tests/fixtures/nx, each accepted or
+"""NX archives (scripts/pack_nx.py, https://github.com/fab918/nxformat, NXFormat 1.0.3): the reader against the format's own conformance fixtures (dm/tools/tests/fixtures/nx, each accepted or
 refused with the error code upstream's index names), hostile archives made here (cut short, counts past the limits, unsafe names, zstd frames that break the rules or expand past their block),
 the packing of versions, DLC and control data, and the NSP script's NX path up to extraction. The archives besides the fixtures are written by nx_writer.py, test code with its own record
 layouts. No network, game files, keys or Xcode needed."""
@@ -493,6 +493,66 @@ class Pack(Base):
         self.assertEqual((self.out() / 'icon.jpg').read_bytes(), png)   # American English's, written as icon.jpg (sips reads a PNG by its content)
         self.assertFalse((self.out() / 'control.nacp').exists())
 
+    def test_title_names_a_version_without_a_nacp(self):   # the archive's display title (nxconvert --fallback-title, or typed in NXConvert's sidebar): title.txt, the app's name
+        self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': {'title': ' Archive‮ Title\x1b[2J\n', 'icon': b'\xff\xd8 icon'}},
+                        {'type': 1, 'version': VER, 'tree': version(main=b'new')}))
+        n = self.open(); app, base, vers, _ = pack_nx.scan(n)
+        vars(nsp)['nacp'] = nacp   # main sets it
+        for k, out in ((base, 'b'), (vers[VER], 'u')):   # the update has no metadata of its own: its base's
+            pack_nx.pack_version(n, k, base, app, self.out() / out, say=lambda s: None)
+            self.assertFalse((self.out() / out / 'control.nacp').exists())
+            self.assertEqual((self.out() / out / 'title.txt').read_text(encoding='utf-8'), 'Archive Title[2J')   # control and bidirectional characters dropped
+            self.assertEqual(nsp.control_name(self.out() / out), 'Archive Title[2J')
+        self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': dict(META, title='Archive Title')}))
+        n = self.open(); app, base, _, _ = pack_nx.scan(n)
+        pack_nx.pack_version(n, base, base, app, self.out() / 'b', say=lambda s: None)
+        self.assertFalse((self.out() / 'b/title.txt').exists())   # a NACP names the game: no title.txt, and an older one goes
+        self.assertEqual(nsp.control_name(self.out() / 'b'), 'Test Game')
+        self.assertEqual(nsp.control_name(self.dir), '')   # neither file
+
+    def test_odd_titles(self):   # what title.txt holds: non-ASCII kept; at most 511 bytes, cut on a character; one of only spaces or control characters is none, a localized one then
+        for meta, want in (({'title': 'Ünïcødé ゲーム', 'icon': b'\xff\xd8 icon'}, 'Ünïcødé ゲーム'),
+                           ({'title': 'é' * 300}, 'é' * 255),   # 600 bytes: 255 two-byte characters (510 bytes), not half of the 256th
+                           ({'title': ' \x1b ', 'localized': [('en-us', 'Localized', None), ('ja', 'ローカル', None)]}, 'Localized'),
+                           ({'title': '\u202e', 'localized': [('ja', 'ローカル', None)]}, 'ローカル'),
+                           ({'title': ' \t ', 'icon': b'\xff\xd8 icon'}, None)):
+            with self.subTest(title=meta['title'][:12]):
+                self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': meta}))
+                n = self.open(); app, base, _, _ = pack_nx.scan(n)
+                vars(nsp)['nacp'] = nacp   # main sets it
+                pack_nx.pack_version(n, base, base, app, self.out(), say=lambda s: None)
+                t = self.out() / 'title.txt'
+                self.assertEqual(t.read_text(encoding='utf-8') if t.exists() else None, want)
+                self.assertEqual(nsp.control_name(self.out()), want or '')
+
+    def test_edited_icon_of_an_earlier_build_goes(self):   # a snapshot of folders (its icon is the archive's) where an NCA snapshot's build left icon.edited.jpg, which the app would take
+        self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': META}))
+        n = self.open(); app, base, _, _ = pack_nx.scan(n)
+        self.out().mkdir(parents=True); (self.out() / pack_nx.EDITED_ICON).write_bytes(b'\xff\xd8 stale')
+        pack_nx.pack_version(n, base, base, app, self.out(), say=lambda s: None)
+        self.assertFalse((self.out() / pack_nx.EDITED_ICON).exists())
+        self.assertEqual(nsp.game_icon_of(self.out()), self.out() / 'icon.jpg')
+
+    def test_wrong_size_nacp_left_out(self):   # an NX that NXConvert 1.0.0 or 1.0.1 made from a shifted NUP may hold something else as its NACP: never saved as control.nacp
+        for size in (0x3FFF, 0x4001):
+            with self.subTest(size=size):
+                self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': {'nacp': b'\xff\xd8' + bytes(size - 2), 'icon': b'\xff\xd8 icon', 'title': 'T'}}))
+                n = self.open(); app, base, _, _ = pack_nx.scan(n)
+                said = []
+                pack_nx.pack_version(n, base, base, app, self.out(), say=said.append)
+                self.assertFalse((self.out() / 'control.nacp').exists())
+                self.assertFalse((self.out() / 'title.txt').exists())   # such an archive's title is the NUP's publisher record: the profile names the app, as before
+                self.assertEqual([s for s in said if 'not a NACP' in s],
+                                 [f"game.nx (base): the archive's NACP for it is {size:,} bytes, not 16,384 (0x4000): it is not a NACP, left out, and so is its display title, "
+                                  'taken from the wrong record too (repack the NX with NXConvert 1.0.2 or later)'])
+        self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': META}, {'type': 1, 'version': VER, 'tree': version(main=b'new'), 'meta': {'nacp': b'short', 'icon': b'new icon'}}))
+        n = self.open(); app, base, vers, _ = pack_nx.scan(n)
+        said = []
+        for _ in range(2): pack_nx.pack_version(n, vers[VER], base, app, self.out(), say=said.append)
+        self.assertEqual(nacp.name(self.out() / 'control.nacp'), 'Test Game')   # the update's own is left out: its base game's
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'new icon')
+        self.assertEqual(len([s for s in said if 'not a NACP' in s]), 1, said)   # said once per snapshot
+
     def test_version_without_romfs_or_main(self):
         self.write(game({'type': 0, 'version': 0, 'tree': version()}, {'type': 1, 'version': VER, 'tree': {'exefs': version()['exefs']}}))
         n = self.open(); app, base, vers, _ = pack_nx.scan(n)
@@ -767,7 +827,7 @@ class FakeTool:
         (out / 'ExeFS/main').write_bytes(b'NSO0 main'); (out / 'ExeFS/main.npdm').write_bytes(npdm(TID))
         if '--manifest' in args: (out / 'romfs_manifest.tsv').write_text('# path\tbytes\tfirst 32 bytes (hex)\n/a\t1\t00\n')
         else: (out / 'RomFS.img').write_bytes(b'image')
-        if self.control: (out / 'control.nacp').write_bytes(control_nacp('From Control', '1.2.0')); (out / 'icon.jpg').write_bytes(b'control icon')
+        if self.control: (out / 'control.nacp').write_bytes(control_nacp('From Control', '1.2.0')); (out / 'icon.jpg').write_bytes(b'\xff\xd8 control icon')
         pid = args[args.index('--app') + 2].split('=')[1]
         title = self.title or f'title {pid}' + (f', update {pid}' if args[2] != '-' else '')
         return 0, f'{title}\nmain build id {self.build[:16].hex()}\n{self.text}'
@@ -954,6 +1014,65 @@ class Native(NativeBase):
         shutil.rmtree(out)
         _, out = self.pack(n, vers[VER])   # what the Control NCA gives comes first
         self.assertEqual(nacp.name(out / 'control.nacp'), 'From Control')
+
+    def test_title_without_a_nacp(self):   # neither the Control NCA nor the archive has a NACP: the archive's display title, kept current by a repeat run that stages nothing
+        fake = FakeTool(build=self.g.bid0, control=False)
+        out = self.work() / 'extract/v0'
+        for title, how in (('Archive Title', 'packed'), ('Renamed', 'kept')):
+            self.write_game(meta={'title': title, 'icon': b'\xff\xd8 control icon'}, generation=int(how == 'kept'))
+            n, (_, base, _, _) = self.opened(fake)
+            self.assertEqual(pack_nx.pack_version(n, base, None, TID, out, say=lambda s: None), how)
+            self.assertEqual((out / 'title.txt').read_text(encoding='utf-8'), title)
+            n.close()
+
+    def test_icon_edited_in_the_archive(self):   # an icon set in NXConvert's sidebar (set-metadata) for an archive made from an NSP: icon.edited.jpg, which the app takes
+        for meta, edited in ((dict(META, icon=b'\xff\xd8 control icon'), None), (META, META['icon']), (dict(META, icon=None), None),   # the Control NCA's own icon, another, none
+                             (dict(META, localized=[('en-gb', None, b'\xff\xd8 control icon'), ('ja', None, META['icon'])]), None)):   # another language's, beside the Control NCA's: no edit
+            with self.subTest(icon=meta['icon']):
+                self.write_game(meta=meta)
+                n, (_, base, vers, _) = self.opened(FakeTool(build=self.g.bid0))
+                said = []
+                out = self.work() / 'extract/v0'
+                pack_nx.pack_version(n, base, None, TID, out, say=said.append)
+                self.assertEqual((out / 'icon.jpg').read_bytes(), b'\xff\xd8 control icon')   # the Control NCA's, as stamped
+                self.assertEqual((out / 'icon.edited.jpg').read_bytes() if (out / 'icon.edited.jpg').exists() else None, edited)
+                self.assertEqual(len([s for s in said if 'edited' in s]), int(edited is not None), said)
+                self.assertEqual(nsp.game_icon_of(out), out / ('icon.edited.jpg' if edited else 'icon.jpg'))
+                n.close()
+        self.write_game()
+        n, (_, base, vers, _) = self.opened(FakeTool(build=self.g.bid1))
+        _, out = self.pack(n, vers[VER])   # the update has no Media icon of its own (the edit is the base's): the Control NCA's
+        self.assertFalse((out / 'icon.edited.jpg').exists())
+
+    def test_icon_that_is_no_image_is_passed_over(self):   # an edited icon that is not a JPEG or PNG: the Control NCA's then, with a line (sips would stop the build at its end)
+        self.write_game(meta=dict(META, icon=b'GIF89a not taken'))
+        n, (_, base, _, _) = self.opened(FakeTool(build=self.g.bid0))
+        out = self.work() / 'extract/v0'
+        pack_nx.pack_version(n, base, None, TID, out, say=lambda s: None)
+        said = []
+        self.assertEqual(nsp.game_icon_of(out, said.append), out / 'icon.jpg')
+        self.assertEqual(said, [f"{out / 'icon.edited.jpg'}: not a JPEG or PNG image (4+ bytes beginning b'GIF8'): not used as the app icon"])
+        (out / 'icon.jpg').write_bytes(b'1.0')
+        self.assertIsNone(nsp.game_icon_of(out))
+        (out / 'icon.jpg').write_bytes(b'\x89PNG\r\n\x1a\n')
+        self.assertEqual(nsp.game_icon_of(out), out / 'icon.jpg')
+        n.close()
+
+    def test_icon_edited_after_the_extraction(self):   # a repeat run keeps the extraction (nothing staged) and still follows an edit, or its undoing
+        fake = FakeTool(build=self.g.bid0)
+        n, (_, base, _, _) = self.opened(fake)
+        out = self.work() / 'extract/v0'
+        self.assertEqual(pack_nx.pack_version(n, base, None, TID, out, say=lambda s: None), 'packed')
+        self.assertTrue((out / 'icon.edited.jpg').exists())
+        n.close()
+        for meta, edited in ((dict(META, icon=b'new icon'), b'new icon'), (dict(META, icon=b'\xff\xd8 control icon'), None)):
+            self.write_game(meta=meta, generation=1)   # an edit appends a generation; the NCA files are the same
+            n, (_, base, _, _) = self.opened(fake)
+            calls = len(fake.calls)
+            self.assertEqual(pack_nx.pack_version(n, base, None, TID, out, say=lambda s: None), 'kept')
+            self.assertEqual(len(fake.calls), calls)
+            self.assertEqual((out / 'icon.edited.jpg').read_bytes() if (out / 'icon.edited.jpg').exists() else None, edited)
+            n.close()
 
     def test_stamp_keeps_the_output(self):
         fake = FakeTool(build=self.g.bid1)
@@ -1203,6 +1322,13 @@ class Main(Base):
             self.assertEqual((v / 'ExeFS/main').read_bytes(), b'new code')
             self.assertIn('dir/new', romfs_image.read_index(v / 'RomFS.img'))
             self.assertTrue(any(s == f'update v{VER}: Game.NX (update {VER})' for s in said), said)
+
+    def test_build_says_a_nacp_left_out(self):   # the extraction keeps the packing quiet, not the lines about the control data
+        self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': META}, {'type': 1, 'version': VER, 'tree': version(main=b'new code'), 'meta': {'nacp': b'short'}}))
+        _, said = self.run_main(self.path, extract=True)
+        self.assertEqual([s for s in said if 'not a NACP' in s],
+                         [f"game.nx (update {VER}): the archive's NACP for it is 5 bytes, not 16,384 (0x4000): it is not a NACP, left out, and so is its display title, "
+                          'taken from the wrong record too (repack the NX with NXConvert 1.0.2 or later)'])
 
     def test_standalone_update_reaches_extraction_without_a_base(self):
         self.write(game({'type': 3, 'version': VER, 'tree': version(), 'meta': META}))
