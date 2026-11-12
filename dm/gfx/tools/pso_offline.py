@@ -14,7 +14,8 @@
 #     and the file's path does not. The split writes no such pairs yet
 #   · a function that declares function constants is specialized as the host's prebuild specializes it (pre_fn in nvn_mtl.m): the border colour corrections' dm_border_off set (true:
 #     off), the specialization the draws that bind no sampler with a twin share (fn_off). metal-tt specializes a <key>_b or <key>_bp function, cut by dmsh_side.cut or not, and the host
-#     finds that base by its specialized descriptor (checked on Ocarina of Time's libraries, macOS 27.2, metal-tt 32023). It cannot lower a function unspecialized ("cannot lower module
+#     finds that base by its specialized descriptor (checked on Ocarina of Time's libraries, macOS 27.2, metal-tt 32023); one that is not its library's first function, as a near = 0
+#     game's <key>_bp main0_z, from a library of its own (needs_cut). It cannot lower a function unspecialized ("cannot lower module
 #     with unresolved function constants"), and failed with "cannot find private metadata" on a side library (<key>_bx), which no base uses. A pair whose functions declare any other
 #     constant is left to the device (rest_pairs.tsv), as before (HOST_CONSTANTS)
 # And a compute pipeline per compute shader, which depends on its function alone (the host makes it from the function, cps_new in nvn_mtl.m; the threadgroup size is the dispatch's):
@@ -72,7 +73,7 @@ from typing import NamedTuple
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import romfs, shader_lib   # the libraries may be one file (shader_lib.py), read in place; metal-tt alone needs files of its own (real_libraries)
-import dmsh_abi as abi
+import dmsh_abi as abi, dmsh_side
 
 # The function constants the host's prebuild sets in a base's functions (nvn_mtl.m pre_fn), by name: (index, bool value). A pair whose functions declare another constant is left to the
 # device: the host leaves it at its default, which metal-tt can do too, but no other constant was tried there, and one function metal-tt fails fails its whole group
@@ -722,6 +723,39 @@ def pipe_libs(p):
     return (p.obj[0], p.mesh[0], p.frag[0]) if isinstance(p, MeshPipe) else (p.vert[0], p.frag[0]) if isinstance(p, LayoutBase) else (p[0],)
 
 
+def pipe_functions(p):
+    """The functions, (library, entry) each, a compute pipeline, a task / mesh pipeline (MeshPipe) or a layout base (LayoutBase) names"""
+    return (p.obj, p.mesh, p.frag) if isinstance(p, MeshPipe) else (p.vert, p.frag) if isinstance(p, LayoutBase) else (tuple(p),)
+
+
+# metal-tt specializes only a library's first function: a later one's fails in applegpu-nt with "cannot find private metadata at offset '8'" (the second function's entry), while the
+# first function of the same library specialized compiles; with the two functions swapped the other one fails, so it is the position (metal-tt 32023.922 and 32023.925, macOS 27.2
+# and 27.3, applegpu_g16s and applegpu_g19p). A near = 0 game names main0_z, the second function of each pulling library <key>_bp, of a vertex library <key>_b or <key>_bv in a
+# layout base, and of a mesh library <key>_b in a task / mesh pipeline (entry_z), and a pixel library's entry_u / entry_m / entry_d may follow its main0. So such a function is
+# specialized from a library of its own, cut from its library (dmsh_side.cut, the bytes metallib --function-name gives): the archive serves the host's lookup through the whole library,
+# as the base is found by its function, not by its library file (checked: an archive made from main0_z cut alone gives the host's specialized descriptor of main0_z in the whole
+# library, and not main0). A workaround for Apple's compiler; a function that declares no constant is not specialized and compiles in any place
+def needs_cut(declared, entry):   # declared: constants() of the function's library, in the library's order
+    return bool(declared.get(entry)) and next(iter(declared), entry) != entry
+
+
+def cut_name(lib, entry): return f'{lib}@{entry}'
+
+
+def cut_entries(lib_dir, bases, computes=()):
+    """The functions script specializes from a library of their own (needs_cut): {(library, entry)} among the bases' and the other pipelines' (computes: compute pipelines, MeshPipe,
+    LayoutBase). The host's own libraries (HOST_LIBS) declare no constants"""
+    want = {f for vl, ve, fl, fe in bases for f in ((vl, ve), (fl, fe))} | {f for p in computes for f in pipe_functions(p)}
+    declared, found = {}, set()
+    for lib, entry in want:
+        if lib in HOST_MSL or lib in HOST_LIBS: continue
+        if lib not in declared:
+            try: declared[lib] = constants(lib_path(lib_dir, lib))
+            except (OSError, ValueError): declared[lib] = {}
+        if needs_cut(declared[lib], entry): found.add((lib, entry))
+    return found
+
+
 def mesh_descriptor(p, fd):
     return {'object_function_descriptor': fd(*p.obj), 'mesh_function_descriptor': fd(*p.mesh), 'fragment_function_descriptor': fd(*p.frag),
             'max_total_threads_per_object_threadgroup': p.obj_threads, 'max_total_threads_per_mesh_threadgroup': p.mesh_threads, 'payload_memory_length': p.payload,
@@ -748,18 +782,20 @@ def script(lib_dir, bases, computes=()):
     """A Metal 4 pipelines script (metal4-pipelines-script(5), the .mtl4-json format metal-tt reads) with one render pipeline descriptor per base, and one compute pipeline descriptor per
     compute pipeline (library, entry) that names the function alone, as the host's lookup does (cps_bundle in nvn_mtl.m: no threadgroup size, no indirect command buffers), and one mesh
     render pipeline descriptor per task / mesh pipeline (MeshPipe among computes) as mtk_desc4 makes it, and one render pipeline descriptor per layout base (LayoutBase among
-    computes). A function that declares constants is named through its specialization by HOST_CONSTANTS (a pair or a row with other constants is not among them: plan, plan_mesh)"""
+    computes). A function that declares constants is named through its specialization by HOST_CONSTANTS (a pair or a row with other constants is not among them: plan, plan_mesh),
+    from a library of its own when it is not its library's first function (needs_cut)"""
     meshes = [p for p in computes if isinstance(p, MeshPipe)]; layouts = [p for p in computes if isinstance(p, LayoutBase)]
     computes = [p for p in computes if not isinstance(p, (MeshPipe, LayoutBase))]
     libs, fns, specs, declared, pipes = {}, {}, {}, {}, []
     def fd(lib, entry):
-        if lib not in libs:
-            libs[lib] = {'label': lib, 'path': str(Path(lib_path(lib_dir, lib)).resolve())}
+        if lib not in declared:
             try: declared[lib] = constants(lib_path(lib_dir, lib))
             except (OSError, ValueError): declared[lib] = {}   # plan read every base's libraries; one it could not read is not among them
-        label = f'{lib}.{entry}'
-        if label not in fns: fns[label] = {'label': label, 'library': f'lib:{lib}', 'name': entry}
         cs = declared[lib].get(entry, ())
+        source = cut_name(lib, entry) if needs_cut(declared[lib], entry) else lib   # see needs_cut: real_libraries writes it
+        if source not in libs: libs[source] = {'label': source, 'path': str(Path(lib_path(lib_dir, source)).resolve())}
+        label = f'{lib}.{entry}'
+        if label not in fns: fns[label] = {'label': label, 'library': f'lib:{source}', 'name': entry}
         if not cs: return f'fnd:{label}'
         if label not in specs:
             specs[label] = {'label': f'{label}.host', 'function_descriptor': f'fnd:{label}',
@@ -882,13 +918,19 @@ def compile_archive(js, part, work, arch, platform, osmin, count):
 
 
 def real_libraries(lib_dir, bases, work, computes=()):
-    """Where metal-tt finds the bases' libraries: it takes file paths, so the libraries of one file get a temporary folder of what this compile reads, which clear_real_libraries removes after it.
+    """Where metal-tt finds the bases' libraries: it takes file paths, so the libraries of one file, and the functions specialized from a library of their own (needs_cut), get a
+    temporary folder of what this compile reads, which clear_real_libraries removes after it: a library of a folder is linked there, one of a single file copied.
     An archive whose key still holds compiles nothing and gets none"""
-    if os.path.isdir(lib_dir): return lib_dir
+    cuts = cut_entries(lib_dir, bases, computes)
+    folder = os.path.isdir(lib_dir)
+    if folder and not cuts: return lib_dir
     real = Path(work) / 'libraries'; shutil.rmtree(real, ignore_errors=True); real.mkdir(parents=True)
     for name in sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)} | {lib for p in computes for lib in pipe_libs(p)}):
         if name in HOST_LIBS: continue   # in its own folder (lib_path)
+        if folder: (real / f'{name}.metallib').symlink_to(Path(lib_dir).resolve() / f'{name}.metallib'); continue
         with romfs.open(os.path.join(lib_dir, f'{name}.metallib'), 'rb') as f, open(real / f'{name}.metallib', 'wb') as o: shutil.copyfileobj(f, o)
+    for lib, entry in sorted(cuts):   # a function specialized from a library of its own (needs_cut)
+        (real / f'{cut_name(lib, entry)}.metallib').write_bytes(dmsh_side.cut((real / f'{lib}.metallib').read_bytes(), {entry})[1])
     return real
 
 

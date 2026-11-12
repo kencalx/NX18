@@ -148,6 +148,55 @@ class Plan(unittest.TestCase):
         self.shader('plain', {}, {'_b': vz})
         self.assertNotIn('specialized_function_descriptors', po.script(self.d, [('plain_b', 'main0', 'fs_b', 'main0')])['function_descriptors'])   # none: the script as before
 
+    def test_a_specialized_function_after_the_first_has_a_library_of_its_own(self):   # metal-tt fails on it ("cannot find private metadata at offset '8'"): needs_cut
+        both = [('main0', ('dm_border_off',)), ('main0_z', ('dm_border_off',))]
+        self.shader('pull', {'entry_z': 'main0_z', 'pull': {'entry': 'main0'}, 'vertex_inputs': [{'location': 0}]}, {'_b': both, '_bp': both})
+        self.shader('fb', {}, {'_b': [('main0', ('dm_border_off',)), ('main0_u', ('dm_border_off',))]})
+        self.shader('plainz', {'entry_z': 'main0_z', 'pull': {'entry': 'main0'}, 'vertex_inputs': [{'location': 0}]}, {'_b': both, '_bp': [('main0', False), ('main0_z', False)]})
+        bases = [('pull_bp', 'main0_z', 'fb_b', 'main0'), ('pull_bp', 'main0', 'fb_b', 'main0'), ('plainz_bp', 'main0_z', 'fb_b', 'main0')]
+        self.assertEqual(po.plan(self.d, CHAIN, [('pull', 'fb'), ('plainz', 'fb')], True)[0], [bases[0], bases[2]])   # near = 0: main0_z, the second function
+        j = po.script(self.d, bases)
+        d = self.d.resolve()
+        self.assertEqual({l['label']: l['path'] for l in j['libraries']}, {'pull_bp@main0_z': str(d / 'pull_bp@main0_z.metallib'), 'fb_b': str(d / 'fb_b.metallib'),
+                                                                          'pull_bp': str(d / 'pull_bp.metallib'), 'plainz_bp': str(d / 'plainz_bp.metallib')})
+        fns = {f['label']: f['library'] for f in j['function_descriptors']['library_function_descriptors']}
+        self.assertEqual(fns, {'pull_bp.main0_z': 'lib:pull_bp@main0_z', 'fb_b.main0': 'lib:fb_b', 'pull_bp.main0': 'lib:pull_bp', 'plainz_bp.main0_z': 'lib:plainz_bp'})   # the first function, and one unspecialized, stay
+        self.assertEqual([s['label'] for s in j['function_descriptors']['specialized_function_descriptors']], ['pull_bp.main0_z.host', 'fb_b.main0.host', 'pull_bp.main0.host'])
+        self.assertEqual(po.cut_entries(self.d, bases), {('pull_bp', 'main0_z')})
+        self.assertFalse(po.needs_cut({}, 'main0')); self.assertFalse(po.needs_cut({'main0': ('dm_border_off',)}, 'main0'))
+        self.assertTrue(po.needs_cut({'main0': (), 'main0_u': ('dm_border_off',)}, 'main0_u'))   # the position, whatever the first function declares
+        # the archive key names the cut library by its label, not its path: the same for the folder and for real_libraries' copy of it
+        cfg = dict(j, libraries=[dict(l, path='/elsewhere/' + l['label'] + '.metallib') for l in j['libraries']])
+        self.assertEqual(po.archive_key(j, 'x', 'a', 'ios', '27.3', 't'), po.archive_key(cfg, 'x', 'a', 'ios', '27.3', 't'))
+
+    @unittest.skipUnless(shutil.which('xcrun'), 'needs Xcode and Metal')
+    def test_the_cut_library_holds_the_function_alone(self):   # real_libraries writes it, for a library in a folder as for one in an image
+        src = '#include <metal_stdlib>\nusing namespace metal;\nconstant bool dm_border_off [[function_constant(216)]];\nstruct V { float4 p [[position]]; };\n' + ''.join(
+            'vertex V %s(uint id [[vertex_id]]) { V o; o.p = float4(float(id), 0, is_function_constant_defined(dm_border_off) && dm_border_off ? %d.5 : 1, 1); return o; }\n' % (e, n)
+            for n, e in enumerate(('main0', 'main0_z')))
+        (self.d / 'v.metal').write_text(src)
+        r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', str(self.d / 'v.metal'), '-o', str(self.d / 'v.air')], capture_output=True, text=True)
+        if r.returncode: self.skipTest('no Metal compiler: ' + r.stderr[-200:])
+        subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(self.d / 'v.air'), '-o', str(self.d / 'v_bp.metallib')], check=True, capture_output=True)
+        self.assertEqual(po.constants(self.d / 'v_bp.metallib'), {'main0': ('dm_border_off',), 'main0_z': ('dm_border_off',)})
+        work = self.d.parent / 'work'
+        real = po.real_libraries(self.d, [('v_bp', 'main0_z', 'v_bp', 'main0')], work)
+        self.assertEqual(real, work / 'libraries')
+        self.assertEqual(po.constants(real / 'v_bp@main0_z.metallib'), {'main0_z': ('dm_border_off',)})
+        self.assertEqual((real / 'v_bp.metallib').read_bytes(), (self.d / 'v_bp.metallib').read_bytes())
+        self.assertTrue((real / 'v_bp.metallib').is_symlink(), 'a library of a folder is linked, not copied')
+        j = po.script(real, [('v_bp', 'main0_z', 'v_bp', 'main0')])
+        self.assertEqual({l['label']: l['path'] for l in j['libraries']}, {'v_bp@main0_z': str((real / 'v_bp@main0_z.metallib').resolve()), 'v_bp': str((self.d / 'v_bp.metallib').resolve())})
+        po.clear_real_libraries(work)
+        self.assertEqual(po.real_libraries(self.d, [('v_bp', 'main0', 'v_bp', 'main0')], work), self.d, 'nothing to cut: the folder as it is')
+        whole = (self.d / 'v_bp.metallib').read_bytes()
+        for f in self.d.glob('v.*'): f.unlink()
+        self.assertTrue(po.shader_lib.pack(str(self.d), say=lambda m: None))   # one-file libraries (shader_lib.py): copied, and the cut made from the copy
+        real = po.real_libraries(po.shader_lib.view(str(self.d)), [('v_bp', 'main0_z', 'v_bp', 'main0')], work)
+        self.assertEqual(((real / 'v_bp.metallib').read_bytes(), (real / 'v_bp.metallib').is_symlink()), (whole, False))
+        self.assertEqual(po.constants(real / 'v_bp@main0_z.metallib'), {'main0_z': ('dm_border_off',)})
+        po.clear_real_libraries(work)
+
     def test_script(self):
         j = po.script(self.d, [('v_bp', 'main0', 'f_b', 'main0'), ('w_bp', 'main0_z', 'f_b', 'main0')])
         self.assertEqual([l['label'] for l in j['libraries']], ['v_bp', 'f_b', 'w_bp'])
@@ -316,6 +365,20 @@ class Mesh(unittest.TestCase):
         m = j['pipeline_descriptors']['mesh_render_pipeline_descriptors'][0]
         self.assertEqual((m['object_function_descriptor'], m['mesh_function_descriptor'], m['fragment_function_descriptor']), ('fnd:t_b.main0', 'fnd:mb_b.main0.host', 'fnd:pb_b.main0.host'))
         self.assertEqual({s['label'] for s in j['function_descriptors']['specialized_function_descriptors']}, {'mb_b.main0.host', 'pb_b.main0.host'})
+
+    def test_a_specialized_entry_z_has_a_library_of_its_own(self):   # needs_cut: a near = 0 mesh shader's main0_z, its library's second function, as a pulling library's
+        self.shaders()
+        self.shader('mb', {'entry_z': 'main0_z', 'mesh_stage': {'kind': 'ms', 'threads': 64, 'task': True}}, {'_b': [('main0', ('dm_border_off',)), ('main0_z', ('dm_border_off',))]})
+        self.shader('pb', {'raster': {'colors': [0]}}, {'_b': [('main0', ('dm_border_off',))]})
+        pipes, _ = po.plan_mesh(self.d, CHAIN, [('t_b', skey(vs='mb_b', fs='pb_b'))], True)
+        self.assertEqual([p.mesh for p in pipes], [('mb_b', 'main0_z')])
+        self.assertEqual(po.cut_entries(self.d, [], pipes), {('mb_b', 'main0_z')})
+        j = po.script(self.d, [], pipes)
+        self.assertEqual([l['label'] for l in j['libraries']], ['t_b', 'mb_b@main0_z', 'pb_b'])
+        m, = j['pipeline_descriptors']['mesh_render_pipeline_descriptors']
+        self.assertEqual(m['mesh_function_descriptor'], 'fnd:mb_b.main0_z.host')
+        self.assertIn({'label': 'mb_b.main0_z', 'library': 'lib:mb_b@main0_z', 'name': 'main0_z'}, j['function_descriptors']['library_function_descriptors'])
+        self.assertEqual(po.cut_entries(self.d, [], po.plan_mesh(self.d, CHAIN, [('t_b', skey(vs='mb_b', fs='pb_b'))], False)[0]), set())   # near = -w: main0, the first
 
     def colours(self, fj, funcs, **key):
         return po.mesh_fragment(po.parse_mesh_key(skey(**key)), dict({'entry': 'main0'}, **fj), dict({'main0': False}, **funcs))
@@ -491,6 +554,22 @@ class Layout(unittest.TestCase):
         self.assertEqual(([b.frag for b in bases], left['constants']), ([('pb_b', 'main0')], 2))   # the row from before border reads as 0: the same base
         d, = po.script(self.d, [], bases)['pipeline_descriptors']['render_pipeline_descriptors']
         self.assertEqual((d['vertex_function_descriptor'], d['fragment_function_descriptor']), ('fnd:v_b.main0', 'fnd:pb_b.main0.host'))
+
+    def test_a_specialized_vertex_function_after_the_first_has_a_library_of_its_own(self):   # needs_cut: a near = 0 layout base's main0_z, from <key>_b or <key>_bv
+        self.shaders()
+        both = [('main0', ('dm_border_off',)), ('main0_z', ('dm_border_off',))]
+        self.shader('vb', {'entry_z': 'main0_z', 'vertex_inputs': [{'location': 0, 'msl_type': 'float4'}, {'location': 1, 'msl_type': 'uint4'}],
+                           'vin': {'shadow': [{'location': 1, 'float': 16}]}}, {'_b': both, '_bv': both})
+        self.shader('pu', {'raster': {'colors': [0]}, 'entry_u': 'main0_u'}, {'_b': [('main0', ('dm_border_off',)), ('main0_u', ('dm_border_off',))]})
+        plain = self.one(rkey(vs='vb_b', fs='pu_b', attrs={**self.POS, 1: (self.U4, 16, 0)}, streams={0: (20, 0)}), zero=True)
+        shadow = self.one(rkey(vs='vb_b', fs='pu_b', cfmt=(73,), attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)}), zero=True)
+        self.assertEqual((plain.vert, plain.frag, shadow.vert, shadow.frag), (('vb_b', 'main0_z'), ('pu_b', 'main0'), ('vb_bv', 'main0_z'), ('pu_b', 'main0_u')))
+        self.assertEqual(po.cut_entries(self.d, [], [plain, shadow]), {('vb_b', 'main0_z'), ('vb_bv', 'main0_z'), ('pu_b', 'main0_u')})   # an integer target's entry_u too
+        j = po.script(self.d, [], [plain, shadow])
+        self.assertEqual([l['label'] for l in j['libraries']], ['vb_b@main0_z', 'pu_b', 'vb_bv@main0_z', 'pu_b@main0_u'])
+        self.assertEqual([(d['vertex_function_descriptor'], d['fragment_function_descriptor']) for d in j['pipeline_descriptors']['render_pipeline_descriptors']],
+                         [('fnd:vb_b.main0_z.host', 'fnd:pu_b.main0.host'), ('fnd:vb_bv.main0_z.host', 'fnd:pu_b.main0_u.host')])
+        self.assertEqual(po.cut_entries(self.d, [], [self.one(rkey(vs='vb_b', fs='pu_b', attrs={**self.POS, 1: (self.U4, 16, 0)}, streams={0: (20, 0)}))]), set())   # near = -w
 
     def test_mixed_and_dual_source_entries_follow_the_targets(self):
         self.shaders()
