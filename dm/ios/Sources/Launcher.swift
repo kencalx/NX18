@@ -6,7 +6,7 @@
 // when the app has them, Game guide and About this game (GuideViewer.swift); the rails line; the settings on the right: the preset chips, the basic rows, Advanced (the other rows, collapsed,
 // remembered as launcher.advanced), Reset, Cloud saves and Skip this screen next time (launcher.skip: the game starts at once, as with DM_LAUNCHER=0; the in-game menu's Settings screen
 // at start turns it off, and a controller button held while the app opens shows the screen anyway, best effort; with cloud saves on, the screen shows for the cloud-save check that Play
-// runs, and the game starts by itself when the check has nothing to ask, as it does for the Game shortcut: LauncherShortcuts.swift). A narrow or portrait window puts the art on top. The background takes at most 12 % of the art's average colour; the accents,
+// runs, and the game starts by itself when the check has nothing to ask, as it does for the Game shortcut, only with the app in front: LauncherShortcuts.swift). A narrow or portrait window puts the art on top. The background takes at most 12 % of the art's average colour; the accents,
 // the rails and the mark keep the logo's colours. A game controller drives a focus ring over all of it (LauncherController.swift)
 import CoreHaptics
 import GameController
@@ -240,6 +240,7 @@ struct LauncherView: View {
     @State private var checking = false            // Play is comparing this iPhone's save with the cloud's (start)
     @State private var check = 0                   // which Play the running check is for: one the player went on from without it is dropped
     @State private var autoCheck = 0               // the check that runs by itself for a skipped start (checkAtStart), 0 when none: the player asking for the screen stops it (stopAutoStart)
+    @State private var held: HeldStart?            // a check's answer that came while the app was not active: the game starts when it is next in front (startHeld)
     @State private var report: SaveSyncReport?
     @State private var asking: SaveSyncReport.Step?
     @AppStorage("launcher.advanced") private var advancedOpen = false
@@ -313,6 +314,8 @@ struct LauncherView: View {
         .onChange(of: cloudPicking) { pad.holdUntilReleased(); if cloudPicking { stopAutoStart("the cloud-save folder picker opened") } }
         .onChange(of: asking) { pad.holdUntilReleased() }        // the press that answered a save question is no press on the settings
         .onReceive(LauncherShortcuts.requests) { shortcut($0) }   // a home screen shortcut chosen while the screen is up
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in startHeld() }   // back in front: a held start goes
+        .onReceive(NotificationCenter.default.publisher(for: UIScene.didActivateNotification)) { _ in startHeld() }
         .onAppear {
             guard !startTaken else { return }
             if let s = startWith { startTaken = true; shortcut(s) }   // the one the app was opened with
@@ -478,10 +481,11 @@ struct LauncherView: View {
 
     /// Play, once the cloud's save is compared with this iPhone's (save_sync_report, SaveSyncReport): a save that changed on both sides is the player's pick, not the
     /// newer file's, and a cloud save that did not come is said so before the game starts without it. Every Play goes through here: the button, A on Play, +, the Game shortcut,
-    /// and, with cloud saves on, a start that skips this screen (Skip this screen next time, the Game shortcut at a cold start: checkAtStart), which shows the screen only for this
+    /// and, with cloud saves on, a start that skips this screen (Skip this screen next time, the Game shortcut at a cold start: checkAtStart), which shows the screen only for this.
+    /// An answer to play that comes while the app is not active waits for it to be back in front (startHeld)
     private func start() {
         if checking { return }
-        check += 1; checking = true; asking = nil
+        check += 1; checking = true; asking = nil; held = nil   // a held answer is old: this Play checks again
         let mine = check
         dm_cloud_saves_env()   // DM_SAVE_SYNC from the picked folder, as the game's mount will read it (front_ios.m calls it again at the start)
         DispatchQueue.global(qos: .userInitiated).async {
@@ -490,8 +494,13 @@ struct LauncherView: View {
                 guard checking, check == mine else { return }   // the player played without it
                 checking = false
                 switch SaveSyncReport.step(r) {
+                case .play(let choice) where !LauncherShortcuts.appActive():
+                    // The check ended while the player was away (it can take a minute while iCloud downloads): the game starts when the app is back in front (startHeld), not in the
+                    // background, where its first Metal work would be refused. A check Play started is held the same way: Play was pressed in front, but the player may have left since
+                    held = HeldStart(check: mine, choice: choice)
+                    fputs("launcher: the cloud-save check ended in the background: the game starts when the app is back in front\n", stderr)
                 case .play(let choice): go(choice)
-                case let step: report = r; asking = step
+                case let step: report = r; asking = step   // a question waits on the screen by itself
                 }
             }
         }
@@ -499,11 +508,34 @@ struct LauncherView: View {
 
     private func playWithout() { checking = false; go("offline") }
 
+    /// A check's answer that came while the app was not active (start), for the start when it is back in front
+    private struct HeldStart { let check: Int; let choice: String? }
+
+    /// The app is in front again (UIApplication.didBecomeActiveNotification, UIScene.didActivateNotification): the held start goes, once. A shortcut handed over as the app came back
+    /// goes first (LauncherShortcuts.waiting, at most 5 s as perform waits): a Launcher or Guide one drops a skipped start's answer (stopAutoStart), Game checks again (start), and
+    /// a notification for another scene, with the app's own still not in front, leaves it held
+    private func startHeld(waited: Int = 0) {
+        guard held != nil, LauncherShortcuts.appActive() else { return }
+        if LauncherShortcuts.waiting > 0 && waited < 100 {
+            Task { @MainActor in try? await Task.sleep(for: .milliseconds(50)); startHeld(waited: waited + 1) }
+            return
+        }
+        guard let h = held else { return }   // taken meanwhile: a shortcut dropped it, or another notification started it
+        held = nil
+        fputs("launcher: the app is back in front: the held start goes\n", stderr)
+        go(h.choice)
+    }
+
     /// The check a skipped start runs by itself (checkAtStart) stops when the player asks for the screen while it runs (a Launcher or Guide shortcut, the guide, About this game
-    /// or the folder picker opened): the game does not start under them when it ends, and Play checks again. A check Play started carries on, as it always did
+    /// or the folder picker opened): the game does not start under them when it ends, and Play checks again. Its answer held for the app's return (startHeld) is dropped the same
+    /// way. A check Play started carries on, as it always did
     private func stopAutoStart(_ why: String) {
         guard autoCheck != 0 else { return }
         let running = checking && check == autoCheck
+        if held?.check == autoCheck {   // it ended while the app was away, and the player came back asking for the screen
+            held = nil
+            fputs("launcher: the held start of the skipped start's cloud-save check dropped (\(why)): the settings screen stays, and Play checks again\n", stderr)
+        }
         autoCheck = 0
         guard running else { return }
         checking = false   // its answer is dropped (start: guard checking)
@@ -525,7 +557,7 @@ struct LauncherView: View {
     }
 
     private func go(_ choice: String?) {
-        asking = nil
+        asking = nil; held = nil
         if let choice { setenv("DM_SAVE_SYNC_CHOICE", choice, 1); fputs("launcher: DM_SAVE_SYNC_CHOICE=\(choice)\n", stderr) }
         play()
     }

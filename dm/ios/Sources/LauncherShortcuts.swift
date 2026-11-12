@@ -7,7 +7,9 @@
 // player, the Game shortcut and Skip this screen next time, show it instead, already running the cloud-save check as if Play had been pressed (.check; Launcher.swift start): a save
 // that changed both here and in the cloud is the player's pick, not the newer file's, and a cloud save that did not come is said so. When the check finds nothing to ask (the saves
 // are the same, only one side changed, no save in the cloud) the game starts by itself with no input, so the skip still feels like one; the screen is up for as long as the check
-// takes. A Launcher or Guide shortcut, or the guide, About or the folder picker opened while it runs, stops it (LauncherView.stopAutoStart): the screen stays, and Play checks again. DM_LAUNCHER=0 from an env file or the launch (a developer's switch) stays screenless and logs that the cloud save was not checked (the newer save then wins at the game's
+// takes. A Launcher or Guide shortcut, or the guide, About or the folder picker opened while it runs, stops it (LauncherView.stopAutoStart): the screen stays, and Play checks again.
+// The check can take up to a minute while iCloud downloads, and the player may leave meanwhile: an answer that comes while the app is not active (appActive) is kept, and the game
+// starts when the app is next in front, once, after a shortcut handed over as it comes back (waiting), so a Launcher or Guide one still stops it (LauncherView.startHeld). DM_LAUNCHER=0 from an env file or the launch (a developer's switch) stays screenless and logs that the cloud save was not checked (the newer save then wins at the game's
 // first save mount, save_sync.c ss_decide), and the program record's hand-over runs no check: the game's first program did, before the first save mount.
 // One chosen while the app runs (main.m's windowScene:performActionForShortcutItem:, dmShortcutPerform): on the settings screen Game plays, Launcher closes the guide, About or the folder
 // picker and stays, Guide opens the guide. Once the game runs the process cannot go back to the settings screen without a restart, so Game resumes the game, and Launcher and Guide open the
@@ -48,6 +50,16 @@ enum LauncherShortcuts {
     @MainActor static var screenUp = false              // the settings screen is on screen (presentLauncher until Play)
     @MainActor static let requests = PassthroughSubject<LauncherShortcut, Never>()   // to the settings screen on screen (LauncherView.shortcut)
     @MainActor static var openMenu: () -> Void = { dm_gamepad_menu_open() }   // the in-game menu, over the running game (DmGamepad.m); the Duo harness's test replaces it
+    // Whether the app is in front and taking input: the application active and its own scene (not a TV's) foreground-active. A shortcut waits for it (perform), and so does the game's
+    // start from a cloud-save check that ended while the player was away (LauncherView.startHeld): a game started from the background would make its Metal device and first GPU work
+    // there, which iOS refuses. The Duo harness's test replaces it to fake an app in the background
+    @MainActor static var appActive: @MainActor () -> Bool = {
+        let app = UIApplication.shared
+        guard app.applicationState == .active else { return false }
+        let scene = app.connectedScenes.first { $0.session.role == .windowApplication }
+        return scene.map { $0.activationState == .foregroundActive } ?? true
+    }
+    @MainActor static var waiting = 0   // shortcuts handed over while the app was not active, waiting for it (perform): a held start lets them go first (LauncherView.startHeld)
 
     @MainActor static func take() -> LauncherShortcut? {
         defer { pending = nil }
@@ -107,13 +119,15 @@ enum LauncherShortcuts {
     // controller button), else the running game's answer. Waits (up to 5 s) for the app to be active: the system hands the shortcut over as the app comes back, and a menu or a sheet
     // presented before then may not show
     @MainActor static func perform(_ s: LauncherShortcut, waited: Int = 0) {
-        if UIApplication.shared.applicationState != .active && waited < 100 {
+        if !appActive() && waited < 100 {
+            if waited == 0 { waiting += 1 }
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(50))
                 perform(s, waited: waited + 1)
             }
             return
         }
+        if waited > 0 { waiting -= 1 }
         if screenUp { fputs("launcher: shortcut \(s.title) on the settings screen\n", stderr); requests.send(s); return }
         if !started { pending = s; fputs("launcher: shortcut \(s.title) before the settings screen decided: taken at the start\n", stderr); return }
         switch s {

@@ -10,6 +10,10 @@ import XCTest
 private nonisolated(unsafe) var duoPlays = 0   // dmShowLauncher's done: the game would start
 // The same for the stopped check below, apart: a settings screen an earlier test dismissed without playing stays alive and hears the shortcuts sent here, and its own done counts duoPlays
 private nonisolated(unsafe) var duoCheckPlays = 0
+// The held start below: its own starts, and the app's activity as the test fakes it (LauncherShortcuts.appActive) with how often it was asked
+private nonisolated(unsafe) var duoHeldPlays = 0
+private nonisolated(unsafe) var duoActive = true
+private nonisolated(unsafe) var duoAskedActive = 0
 
 final class DuoShortcutTests: XCTestCase {
     func testTypesAndTheStartOrder() {
@@ -389,6 +393,67 @@ final class DuoShortcutTests: XCTestCase {
             waitUntil("\(asked): the screen is gone") { root.presentedViewController == nil }
             XCTAssertEqual(duoCheckPlays, 1, "\(asked): the game started once")
         }
+
+        // The check ending while the app is not active (the player switched away during a long iCloud download; faked through LauncherShortcuts.appActive, the Simulator app stays in
+        // front): the answer is held, the game does not start, a notification while the app is still not active leaves it held, and the app's return starts it, once
+        let realActive = LauncherShortcuts.appActive
+        defer { LauncherShortcuts.appActive = realActive; duoActive = true }
+        LauncherShortcuts.appActive = { duoAskedActive += 1; return duoActive }
+        func backInFront() { duoActive = true; NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: UIApplication.shared) }
+        func heldStart() throws -> UIViewController {   // the skipped start's screen, its check ended while the app was away
+            unsetenv("DM_SAVE_SYNC_CHOICE"); duoHeldPlays = 0; duoActive = false; duoAskedActive = 0
+            LauncherShortcuts.started = false
+            XCTAssertTrue(dmShowLauncher(Unmanaged.passUnretained(root).toOpaque(), { duoHeldPlays += 1 }))
+            waitUntil("the screen showed for the check") { root.presentedViewController != nil }
+            let host = try XCTUnwrap(root.presentedViewController)
+            waitUntil("the check ended (it asked whether the app is active)", 60) { duoAskedActive > 0 }
+            RunLoop.main.run(until: Date().addingTimeInterval(1))
+            XCTAssertEqual(duoHeldPlays, 0, "The game does not start while the app is not active")
+            XCTAssertNil(choice(), "No choice passed yet")
+            XCTAssertTrue(root.presentedViewController === host, "The settings screen stays")
+            return host
+        }
+        _ = try heldStart()
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: UIApplication.shared)   // another scene's, the app still not in front
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(duoHeldPlays, 0, "Still held while the app is not active")
+        backInFront()
+        waitUntil("Back in front, the held start went") { duoHeldPlays == 1 }
+        XCTAssertEqual(choice(), "ask", "The check's own answer")
+        waitUntil("The screen is gone") { root.presentedViewController == nil }
+        backInFront()
+        NotificationCenter.default.post(name: UIScene.didActivateNotification, object: nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(duoHeldPlays, 1, "The game started once")
+
+        // The same, the player coming back through the Launcher shortcut: it is handed over before the app is active and waits (LauncherShortcuts.perform), the held start lets it go
+        // first, and it drops the answer (stopAutoStart): the screen stays, nothing starts, and Play checks again
+        let screen = try heldStart()
+        XCTAssertTrue(dmShortcutPerform("dm.shortcut.launcher"))
+        XCTAssertEqual(LauncherShortcuts.waiting, 1, "The shortcut waits for the app to be active")
+        backInFront()
+        waitUntil("The shortcut came") { LauncherShortcuts.waiting == 0 }
+        RunLoop.main.run(until: Date().addingTimeInterval(1))
+        XCTAssertEqual(duoHeldPlays, 0, "The Launcher shortcut dropped the held start")
+        XCTAssertTrue(root.presentedViewController === screen, "The settings screen stays")
+        XCTAssertNil(choice())
+
+        // A check Play started (the Game shortcut on that screen, in front) that ends after the player left is held the same way, and starts the game once when the app is back
+        XCTAssertTrue(dmShortcutPerform("dm.shortcut.game"))
+        duoActive = false; duoAskedActive = 0
+        waitUntil("Play's check ended (it asked whether the app is active)", 60) { duoAskedActive > 0 }
+        RunLoop.main.run(until: Date().addingTimeInterval(6))   // longer than the check: a settings screen an earlier test left hears Game too and checks the same save beside it
+        XCTAssertEqual(duoHeldPlays, 0, "Play's answer waits for the app too")
+        XCTAssertTrue(root.presentedViewController === screen)
+        backInFront()
+        waitUntil("Back in front, Play's held start went") { duoHeldPlays == 1 }
+        XCTAssertEqual(choice(), "ask")
+        waitUntil("The screen is gone") { root.presentedViewController == nil }
+        backInFront()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(duoHeldPlays, 1, "The game started once")
+        LauncherShortcuts.appActive = realActive; duoActive = true
+
         try fm.removeItem(at: big)
         UserDefaults.standard.removeObject(forKey: LauncherModel.skipKey)
 
