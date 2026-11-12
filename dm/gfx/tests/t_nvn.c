@@ -91,8 +91,29 @@ static void *cmdsize_recorder(void *a) {
     }
     return NULL;
 }
+// The thread policy line (rt_policy_line) reads the thread the time-constraint policy was set on, not the one writing the line: Ocarina of Time acquires the window texture on its
+// main thread and presents on 'Presentation Thread', and X1.0's line read the presenting thread, 'not in effect, current priority 47', in every window
+static dispatch_semaphore_t rt_set_done, rt_may_end;
+static void *rt_acquirer(void *arg) { (void)arg; pthread_setname_np("0x1001 main thread"); set_time_constraint_comp(16666667ull, 2000000ull); dispatch_semaphore_signal(rt_set_done); dispatch_semaphore_wait(rt_may_end, DISPATCH_TIME_FOREVER); return NULL; }
+static int rt_set_on(mach_port_t p) { thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = 0;
+    return thread_policy_get(p, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&tp, &tc, &def) != KERN_SUCCESS ? -1 : !def; }
+
 int main(void) {
-    setenv("DM_NVN_COUNT", "1", 1);   // the call-count checks below need the counting trampolines (off by default)
+    setenv("DM_NVN_COUNT", "1", 1);
+    {   rt_set_done = dispatch_semaphore_create(0); rt_may_end = dispatch_semaphore_create(0);
+        pthread_t th; pthread_create(&th, NULL, rt_acquirer, NULL); dispatch_semaphore_wait(rt_set_done, DISPATCH_TIME_FOREVER);
+        mach_port_t self = pthread_mach_thread_np(pthread_self());
+        EXPECT("thread policy: the thread it was set on is kept", 1, g_rt_port != 0 && g_rt_port != self && pthread_equal(g_rt_th, th));
+        EXPECT("  its name", 0, strcmp(g_rt_name, "0x1001 main thread"));
+        EXPECT("  read there, the policy is set", 1, rt_set_on(g_rt_port));
+        EXPECT("  read on this other thread (X1.0's line), it is not", 0, rt_set_on(self));
+        rt_policy_line(0, 0);   // in effect, read on the main thread; this thread presents
+        dispatch_semaphore_signal(rt_may_end); pthread_join(th, NULL);
+        int ended = 0;   // the kernel ends the thread a moment after pthread_join returns
+        for (int i = 0; i < 200 && !ended; i++) { thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT; ended = thread_info(g_rt_port, THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) != KERN_SUCCESS; if (!ended) usleep(5000); }
+        EXPECT("  a thread that ended reads as ended, through our own send right", 1, ended);
+        rt_policy_line(0, 0);   // unknown (the thread it was set on has ended)
+    }   // the call-count checks below need the counting trampolines (off by default)
     {   // A missing control section must not publish uninitialized bytes or poison a serial's key cache.
         uint8_t control[0x880] = {0}, key[8];
         const uint8_t expected[8] = {0x56, 0x26, 0xd9, 0xa8, 0xf1, 0xd7, 0x36, 0x4b}; // SHA-256 of 0x880 zero bytes

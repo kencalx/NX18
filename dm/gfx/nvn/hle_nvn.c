@@ -1835,8 +1835,12 @@ static void rt_comp_tick(uint64_t period_ns);
 static double g_rt_comp_ms;   // Currently declared real-time computation amount (ms; 0 = not declared)
 static double g_rt_period_ms;
 static pthread_t g_rt_th; static char g_rt_name[64];   // the thread the time-constraint policy was last set on, and its name (a guest thread's is its handle and name, hle_thread.c)
+static pthread_mutex_t g_rt_mu = PTHREAD_MUTEX_INITIALIZER;
+static mach_port_t g_rt_port;   // the thread the policy was last set on (g_rt_th), with a send right of our own; 0 = none
+static _Atomic uint64_t g_acq_moves;   // acquires on another thread than the acquire before
 static void th_name(pthread_t th, char *out, size_t n) { out[0] = 0; pthread_getname_np(th, out, n); if (!out[0]) snprintf(out, n, "thread %#x", (unsigned)pthread_mach_thread_np(th)); }
 static void dr_line(uint64_t frame);
+static int rt_on(void);
 static void sleep_until_ns(uint64_t dl);
 static uint64_t present_period(const win_t *o);
 static uint64_t rt_period_ns(const win_t *o, uint64_t period);
@@ -1863,6 +1867,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     *idx = n ? o->next++ % n : 0;
     // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
     uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0;
+    { static pthread_t acq_th; if (!pthread_equal(acq_th, pthread_self())) { if (acq_th) atomic_fetch_add_explicit(&g_acq_moves, 1, memory_order_relaxed); acq_th = pthread_self(); } }   // rt_policy_line counts them
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
         static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
         if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
@@ -2036,6 +2041,41 @@ static void power_line(uint64_t frame) {
     else { char yt[192], rs[400], tc[400], wk[1536]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); dm_wake_stats(wk, sizeof wk, 1); }   // the first call only takes the baselines
     pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes(); pnqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed); prw = mtl_rec_wakes();
 }
+// The thread policy line, every 300 frames from the present path. The time-constraint policy is set on the thread that acquires the window texture (nvnWindowAcquireTexture),
+// and X1.0 read it back on the thread writing this line, the one that presents. Super Mario Odyssey acquires and presents on one thread ('in effect, current priority 97');
+// Ocarina of Time acquires on its main thread and presents on 'Presentation Thread', so every window read 'not in effect, current priority 47' (a user-interactive thread's
+// priority) of a thread that never had the policy. The line now reads the thread the policy was set on (g_rt_port, a send right of our own so that a thread that ended reads
+// as ended, not as whatever thread reuses its name) and gives the presenting thread's class beside it. It also tells a policy the kernel still holds but runs as a standard
+// thread (policy 1: demoted, as its fail-safe does to a real-time thread that runs too long without blocking) from one in effect (policy 2), and counts the acquires made on
+// another thread than the one before (rt_comp_tick measures the per-frame CPU time of whichever thread acquires: across two threads its declaration means nothing).
+// DM_FIELD_LOG=0 reads the presenting thread as X1.0 did. Logging only: the policy itself is set as before
+static void rt_policy_line(unsigned wn, uint32_t wq) {
+    const int fl = field_log(); mach_port_t self = pthread_mach_thread_np(pthread_self());
+    pthread_mutex_lock(&g_rt_mu);
+    mach_port_t q = fl && g_rt_port ? g_rt_port : self;   // the thread described
+    thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT; int okx = thread_info(q, THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) == KERN_SUCCESS;
+    thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = 0;
+    int okp = thread_policy_get(q, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&tp, &tc, &def) == KERN_SUCCESS, rt_live = okp && !def;   // def = 1: the real-time policy is not in effect (never set / revoked)
+    pthread_mutex_unlock(&g_rt_mu);
+    const char *st = rt_live ? "in effect" : "not in effect";
+    if (fl && q != self && !okx && !okp) st = "unknown (the thread it was set on has ended)";
+    else if (fl && rt_live && okx && xi.pth_policy != POLICY_RR) st = "set, but run as a standard thread (demoted)";
+    char who[320] = "";
+    if (fl) {
+        char me[64]; th_name(pthread_self(), me, sizeof me); int w;
+        if (q == self) w = snprintf(who, sizeof who, "; read on %s, which presents%s%s", me, !(g_rt_comp_ms > 0) ? (rt_on() ? " (no policy set yet)" : " (no policy: DM_RT=0)")
+                                    : pthread_equal(g_rt_th, pthread_self()) ? " and acquires the window texture: the thread the policy was set on" : "; the policy was set on ", g_rt_comp_ms > 0 && !pthread_equal(g_rt_th, pthread_self()) ? g_rt_name : "");
+        else {
+            thread_extended_info_data_t pi; mach_msg_type_number_t pc = THREAD_EXTENDED_INFO_COUNT; int okm = thread_info(self, THREAD_EXTENDED_INFO, (thread_info_t)&pi, &pc) == KERN_SUCCESS;
+            qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0; pthread_get_qos_class_np(pthread_self(), &qc, &rp);
+            w = snprintf(who, sizeof who, "; read on %s, the thread it was set on (it acquires the window texture); the thread presenting is %s, QoS %#x at priority %d", g_rt_name, me, (unsigned)qc, okm ? pi.pth_curpri : -1);
+        }
+        static uint64_t pmv; uint64_t mv = atomic_load_explicit(&g_acq_moves, memory_order_relaxed);
+        if (mv != pmv && w > 0 && (size_t)w < sizeof who) snprintf(who + w, sizeof who - (size_t)w, "; acquired on another thread than the acquire before %llu times in this window", (unsigned long long)(mv - pmv));
+        pmv = mv;
+    }
+    LOG("[nvn] thread policy: main thread real-time computation %.2f ms / period %.2f ms, real-time policy %s, current priority %d (base %d, policy %d); %u worker threads QoS %#x; present QoS %#x%s", g_rt_comp_ms, g_rt_period_ms, st, okx ? xi.pth_curpri : -1, okx ? xi.pth_priority : -1, okx ? xi.pth_policy : -1, wn, wq, mtl_present_qos(), who);
+}
 static void tsummary(uint64_t frame) {
     char line[1024]; size_t o = 0;
     for (int k = 0; k < 6; k++) {
@@ -2072,14 +2112,7 @@ static void tsummary(uint64_t frame) {
           static uint64_t pyn, pyns; uint64_t yn = 0, yns = 0; dm_main_yield_stats(&yn, &yns);
           LOG("[nvn] translation detail up to frame %llu: submit per frame %.2f M cycles (%.2f cycles per instruction), CPU %.3f ms of which kernel %.3f ms, wall clock %.3f ms; mean clock %.2f GHz (cycles / CPU time); this thread's QoS %#x; allocator pools %d, GPU waits so far %llu; real-time declared computation %.2f ms; main thread yields per frame %.0f / %.3f ms", frame,
               cyc / 1e6 / nf, cyc / (double)(ci - pi), cpu / 1e6 / nf, (double)(ck - pk) / 1e6 / nf, (double)(cw - pw) / 1e6 / nf, cpu > 0 ? cyc / cpu : 0, (unsigned)qc, an, (unsigned long long)aw, g_rt_comp_ms, (double)(yn - pyn) / nf, (double)(yns - pyns) / 1e6 / nf); pyn = yn; pyns = yns; }
-        if (frame % 300 == 0) { unsigned wn = 0; uint32_t wq = dm_guest_work_qos(&wn); thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT; int okx = thread_info(pthread_mach_thread_np(pthread_self()), THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) == KERN_SUCCESS;
-            thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = 0; int rt_live = thread_policy_get(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&tp, &tc, &def) == KERN_SUCCESS && !def;   // def = 1: the real-time policy is not in effect (never set / revoked)
-            // Which thread this describes: the one writing the line (the thread presenting), and the one the policy was set on (the thread acquiring the window texture). A game that
-            // presents from another thread than it acquires on (Ocarina of Time: 'Presentation Thread' and the main thread) showed 'not in effect' for a policy it never had
-            char who[256] = ""; if (field_log()) { char me[64]; th_name(pthread_self(), me, sizeof me); int same = g_rt_comp_ms > 0 && pthread_equal(g_rt_th, pthread_self());
-                snprintf(who, sizeof who, "; read on %s (the thread presenting), the policy set on %s (the thread acquiring the window texture)%s", me, g_rt_comp_ms > 0 ? g_rt_name : "no thread",
-                         same ? ": the same thread" : g_rt_comp_ms > 0 ? ": another thread, whose policy this line does not show" : ""); }
-            LOG("[nvn] thread policy: main thread real-time computation %.2f ms / period %.2f ms, real-time policy %s, current priority %d (base %d, policy %d); %u worker threads QoS %#x; present QoS %#x%s", g_rt_comp_ms, g_rt_period_ms, rt_live ? "in effect" : "not in effect", okx ? xi.pth_curpri : -1, okx ? xi.pth_priority : -1, okx ? xi.pth_policy : -1, wn, wq, mtl_present_qos(), who); }
+        if (frame % 300 == 0) { unsigned wn = 0; uint32_t wq = dm_guest_work_qos(&wn); rt_policy_line(wn, wq); }
         py = cy; pk = ck; pw = cw; }
       pi = ci; pc = cc; pd = dr_; pf = frame; }
     uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc; mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc);
@@ -2134,7 +2167,17 @@ static void set_time_constraint_comp(uint64_t period_ns, uint64_t comp_ns) {
         .period = (uint32_t)(period_ns * tb.denom / tb.numer), .computation = (uint32_t)(comp_ns * tb.denom / tb.numer),
         .constraint = (uint32_t)(period_ns * tb.denom / tb.numer), .preemptible = 1};
     kern_return_t kr = thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-    if (kr == KERN_SUCCESS) { g_rt_comp_ms = comp_ns / 1e6; g_rt_period_ms = period_ns / 1e6; if (!pthread_equal(g_rt_th, pthread_self())) { g_rt_th = pthread_self(); th_name(g_rt_th, g_rt_name, sizeof g_rt_name); } }
+    if (kr == KERN_SUCCESS) {
+        g_rt_comp_ms = comp_ns / 1e6; g_rt_period_ms = period_ns / 1e6;
+        if (!pthread_equal(g_rt_th, pthread_self())) {   // another thread: its name, and a send right of our own for rt_policy_line (the old one's given back)
+            mach_port_t p = pthread_mach_thread_np(pthread_self());
+            pthread_mutex_lock(&g_rt_mu);
+            if (g_rt_port) mach_port_deallocate(mach_task_self(), g_rt_port);
+            g_rt_port = mach_port_mod_refs(mach_task_self(), p, MACH_PORT_RIGHT_SEND, 1) == KERN_SUCCESS ? p : 0;
+            g_rt_th = pthread_self(); th_name(g_rt_th, g_rt_name, sizeof g_rt_name);
+            pthread_mutex_unlock(&g_rt_mu);
+        }
+    }
     LOG("[nvn] present thread time-constraint policy (period %.3f ms, computation %.3f ms) %s", period_ns / 1e6, comp_ns / 1e6, kr == KERN_SUCCESS ? "set" : "failed to set");
 }
 static int rt_comp_fixed_ms(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_RT_COMP"); v = e && *e && strcmp(e, "auto") ? atoi(e) : -1; } return v; }   // −1 = auto
