@@ -253,12 +253,13 @@ int main(void) { @autoreleasepool {
         NSString *log = [NSString stringWithContentsOfFile:[root stringByAppendingPathComponent:@"pso_offline.log"] encoding:NSUTF8StringEncoding error:nil];
         EXPECT("layout: the rows' bases in the archive, the constant row left out", 1, [log containsString:[NSString stringWithFormat:@"%d render rows: %d layout bases", g_nr, nfound]]);
         for (int i = 0; i < g_nr; i++) {
-            uint64_t a0 = g_pb_archived, b0 = g_pb_built; NSError *err = nil; char what[160];
+            uint64_t a0 = g_pb_archived, b0 = g_pb_built, v0 = g_pb_bundle_vd; NSError *err = nil; char what[160];
             id<MTLRenderPipelineState> ps = pso_build(pso_desc(&g_rk[i], g_rv[i], g_rf[i], nil, 0), &err);
             snprintf(what, sizeof what, "layout, %s: a pipeline", g_rn[i]); EXPECT(what, 1, ps != nil);
             if (!ps) fprintf(stderr, "  %s: %s\n", g_rn[i], err.localizedDescription.UTF8String);
             snprintf(what, sizeof what, "layout, %s: its base %s", g_rn[i], i < nfound ? "from the bundle" : "built"); EXPECT(what, i < nfound, g_pb_archived - a0);
             snprintf(what, sizeof what, "layout, %s: %s", g_rn[i], i < nfound ? "nothing compiled" : "compiled"); EXPECT(what, i >= nfound, g_pb_built - b0);
+            snprintf(what, sizeof what, "layout, %s: %scounted as a layout base from the bundle", g_rn[i], i < nfound ? "" : "not "); EXPECT(what, i < nfound, g_pb_bundle_vd - v0);
         }
     }
     // A separate output forces one base per compiler invocation, then metal-pack merges both for this GPU.

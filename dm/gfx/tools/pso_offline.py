@@ -35,14 +35,16 @@
 # And the base of every R row of the prewarm lists (pso_manifest.tsv): a pipeline with a vertex layout, as pso_desc / pso_desc4 make its base (plan_layout: the vertex function, or its
 # shadow-input one from <key>_bv; the vertex descriptor of vfmt / vfmt_for_ct / VB_SLOT, the zero buffer at 30 and the CPU conversion's slots from 1; the fragment entry the colour
 # targets call for; samples and alpha to coverage; colour unspecialized; the empty fragment for depth only). The host's plain lookups ask the bundle for them (arch_lookup_in), so a
-# first start takes them from the app instead of compiling them. Left out as the host's descriptor could not be matched or metal-tt would refuse it (plan_layout). Groups of their own
-# (batches.<arch>/l<index>/), a refused one left out as a task / mesh group is. --no-layout: none
+# first start takes them from the app instead of compiling them. Left out as the host's descriptor could not be matched or metal-tt would refuse it (plan_layout), counted in the
+# output and archive.tsv (layout_rows). Groups of their own (batches.<arch>/l<index>/); one metal-tt refuses is compiled again in halves (l<index>/a, l<index>/b, ...) down to
+# single bases, so only the bases it refuses are left out, each refusal kept by its own inputs as a task / mesh group's is. --no-layout: none
 # Output folder (what the app bundles as pso/, the host's DM_PSO_BUNDLE):
 #   <arch>.mtl4a     one archive per GPU architecture (applegpu_g18p = A19 / A19 Pro); the host opens the one named after its device's architecture
 #   prebuilt.tsv     what the archives cover, in the host's stamp format (pso_prebuild): chain version, depth mode, the pair lists' size and SHA-256. The host skips its prebuild when
 #                    it matches and a probe of a few bases finds them in the archive
 #   rest_pairs.tsv   the pairs the device still builds (only when there are any)
-#   archive.tsv      what was built: architectures, OS minimum, toolchain, bases, compute and task / mesh pipelines (for people and logs; the host does not read it)
+#   archive.tsv      what was built: architectures, OS minimum, toolchain, bases, compute and task / mesh pipelines, layout bases, the R rows and those left out by reason, and per
+#                    architecture the groups left out (refused by metal-tt) (for people and logs; the host does not read it)
 # Each archive is made again only when its compiler inputs change (key.<arch> in the work folder): the complete pipeline configuration without library locations,
 # the referenced libraries' bytes, architecture, platform, minimum OS and metal-tt version. Chain/profile stamps are validated and refreshed independently.
 # More bases than --batch-size are compiled in sequential groups (batches.<arch>/<index>/ in the work folder, each cached by its own inputs) and merged with metal-pack: one metal-tt on
@@ -50,10 +52,10 @@
 # With compute pipelines, they and the bases are separate groups (batches.<arch>/c<index>/ and <index>/) merged the same way, so new pairs leave the compute pipelines compiled, and the
 # reverse. The compute groups are small (COMPUTE_BATCH) and run --jobs at a time: one metal-tt keeps about three cores busy.
 # Usage: pso_offline.py --msl <b-<chain> folder> --out <folder> --work <folder> [--game <id>] [--pairs <shader_pairs.tsv> [--pairs <pso_pairs.tsv>]] [--gpu g18p[,g17p]]
-#          [--depth gl|zero] [--platform ios|macos] [--os-min 27.3] [--script-only] [--batch-size N] [--shader-map <shader_map.tsv>] [--manifest <pso_manifest.tsv>] [--no-compute] [--no-mesh] [--jobs N]
+#          [--depth gl|zero] [--platform ios|macos] [--os-min 27.3] [--script-only] [--batch-size N] [--shader-map <shader_map.tsv>] [--manifest <pso_manifest.tsv>] [--no-compute] [--no-mesh] [--no-layout] [--jobs N]
 #   --game: the profile (DM_GAMES_DIR as for game.py) whose shader_pairs.tsv and pso_pairs.tsv are the pairs, whose shader_map.tsv and pso_manifest.tsv name the compute shaders and the
-#   task / mesh pipelines, and whose depth_mode key the depth mode, unless --pairs / --shader-map / --manifest / --depth say; --no-compute: no compute pipelines; --no-mesh: no task / mesh
-#   pipelines; --jobs: metal-tt runs at a time for the compute and task / mesh groups;
+#   task / mesh pipelines and layout bases, and whose depth_mode key the depth mode, unless --pairs / --shader-map / --manifest / --depth say; --no-compute: no compute pipelines;
+#   --no-mesh: no task / mesh pipelines; --no-layout: no layout bases (the R rows); --jobs: metal-tt runs at a time for the compute, task / mesh and layout groups;
 #   --gpu: architectures, with or without the applegpu_ prefix (default g19p); --depth: the game's NVN depth mode (gl = near -w, NVN's default; zero = near 0, which the game sets
 #   with nvnDeviceSetDepthMode: the host knows it only at run time, so the profile says it; a wrong one costs the device its own prebuild, as without the archive);
 #   --os-min: the archives' system (default: for iOS the app's deployment target, deploymentTarget in dm/ios/project.yml (27.3), or the SDK's major version without it; for macOS
@@ -622,8 +624,8 @@ def vertex_descriptor(k, ins, on):
 
 def plan_layout(lib_dir, chain, rows, zero, pair_bases=()):
     """The bases of the prewarm lists' R rows, [LayoutBase], as the host's prewarm builds them (warm_task: pso_build(pso_desc(...)), the base pso_desc4 makes with the colour state
-    unspecialized), and counts of the rows left out: a key that does not parse, a merged pass or a specialized fragment (fz: the merge's own function, transform feedback, geometry
-    capture, rasterizer discard, view amplification), the alpha test or a logic operation (side libraries), a reflection of another chain version or none, a mesh shader, a vertex
+    unspecialized), and counts of the rows left out: a key that does not parse, a merged pass, a specialized fragment (fz: the merge's own function, or the mark of transform
+    feedback, geometry capture, rasterizer discard or view amplification, which pso_desc builds with another vertex function or none), the alpha test or a logic operation (side libraries), a reflection of another chain version or none, a mesh shader, a vertex
     shader that writes the layer (an input primitive class), a pixel shader that reads the primitive ID (built whole), a missing library or entry point, a function with function
     constants (specialized on the device), a vertex format the script cannot name, an attribute that does not fit its buffer's stride (metal-tt refuses it). A row whose vertex shader has no stage input has no layout: its base is the pair base when the
     pair lists name it (pair_bases), else one of these with no vertex descriptor"""
@@ -641,11 +643,13 @@ def plan_layout(lib_dir, chain, rows, zero, pair_bases=()):
             except (OSError, ValueError): fns[lib] = None
         return fns[lib]
     pairs = set(pair_bases); out, seen = [], set()
-    left: dict[str, int] = dict.fromkeys(('key', 'merged', 'side library', 'reflection', 'mesh', 'layer', 'primitive ID', 'library', 'entry', 'constants', 'format', 'stride'), 0)
+    left: dict[str, int] = dict.fromkeys(('key', 'merged', 'specialized', 'side library', 'reflection', 'mesh', 'layer', 'primitive ID', 'library', 'entry', 'constants', 'format',
+                                          'stride'), 0)
     for text in rows:
         k = parse_render_key(text)
         if not k or not k['vs'] or k['vs_stage'] != 0 or (k['fs'] and k['fs_stage'] != 1): left['key'] += 1; continue
-        if k['merged'] or k['fz']: left['merged'] += 1; continue
+        if k['fz']: left['specialized'] += 1; continue   # pso_skey.fz: a specialized fragment (bf_fn) or a mark (transform feedback, geometry capture, rasterizer discard, amplification)
+        if k['merged']: left['merged'] += 1; continue   # a merged pass: lmap maps its outputs, which the base's fragment choice and the alpha test depend on
         if k['atest'] or k['logic']: left['side library'] += 1; continue
         vj, fj = refl(k['vs']), refl(k['fs']) if k['fs'] else {'entry': NOP_ENTRY}
         ins = vertex_inputs(vj) if vj else None
@@ -894,31 +898,43 @@ def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain
     This bounds input count, not memory: a single pipeline can still exceed Apple's compiler resources.
     On M2, merged archives passed archive-only lookups of two synthetic pipelines and all 32,864 Odyssey bases.
     Other workloads and compiler versions can have different resource use.
-    The groups of bases run one after the other, as before; the compute and task / mesh groups, small, jobs at a time, each in its own folder (its TMPDIR).
-    A task / mesh group metal-tt refuses is left out with a red line and the others are merged: its pipelines are built on the device at their first draw, as without the archive,
-    where a refused base or compute group still stops the build. Returns the names of the groups left out: one metal-tt refused has refused.<arch> in its folder, kept by its own
-    inputs (the caller then writes the archive's key); for any other the caller keeps no key, so the next build tries it again
+    The groups of bases run one after the other, as before; the compute, task / mesh and layout groups, small, jobs at a time, each in its own folder (its TMPDIR).
+    A task / mesh or layout group metal-tt refuses is left out with a red line and the others are merged: its pipelines are built on the device at their first draw, as without the
+    archive, where a refused base or compute group still stops the build. A refused layout group of more than one base is compiled again in halves (<group>/a and <group>/b, each
+    cached and refused by its own inputs, and so on down to one base), so a row metal-tt refuses where the device's compiler takes it costs only itself: its own validation of the
+    vertex descriptor is stricter (an attribute beyond its buffer's stride cost a whole group of 64 before plan_layout left such rows out). Returns the names of the groups left out
+    (a half by its path, l00001/b/a): one metal-tt refused has refused.<arch> in its folder, kept by its own inputs (the caller then writes the archive's key); for any other the
+    caller keeps no key, so the next build tries it again
     """
     groups = groups_of(bases, computes, batch_size, compute_size); total = len(groups); names = {name for name, _, _ in groups}
     for old in [*(work / f'batches.{arch}').glob('[0-9]*'), *(work / f'batches.{arch}').glob('c[0-9]*'), *(work / f'batches.{arch}').glob('m[0-9]*'), *(work / f'batches.{arch}').glob('l[0-9]*')]:   # the groups of a longer list than this one
         if old.name not in names: shutil.rmtree(old)
     def one(index, name, group, cgroup):
+        """(the pieces, the names left out) of one group, or of a half of a refused layout group (name <group>/a ...)"""
         what = (f'{len(group)} bases' if group else f'{len(cgroup)} task / mesh pipelines' if name.startswith('m') else f'{len(cgroup)} layout bases' if name.startswith('l')
-                else f'{len(cgroup)} compute pipelines')
+                else f'{len(cgroup)} compute pipelines') + (f', {name}' if '/' in name else '')
         print(f'pso_offline: {arch}: batch {index}/{total}: {what}, compiling or checking cache', flush=True)
-        try: piece, reused = compile_batch(lib_dir, group, work / f'batches.{arch}' / name, arch, platform, osmin, toolchain, cgroup, keep_refusal=name[0] in 'ml')
+        folder = work / f'batches.{arch}' / name
+        try: piece, reused = compile_batch(lib_dir, group, folder, arch, platform, osmin, toolchain, cgroup, keep_refusal=name[0] in 'ml')
         except SystemExit as e:
             if name[0] not in 'ml': raise
+            if name[0] == 'l' and isinstance(e, Refused) and len(cgroup) > 1:
+                print(f'[RED] pso_offline: {arch}: batch {index}/{total} ({what}) refused by metal-tt: compiling it in halves, to leave out only the layout bases it refuses', flush=True)
+                half = (len(cgroup) + 1) // 2
+                parts = [one(index, f'{name}/{h}', [], c) for h, c in (('a', cgroup[:half]), ('b', cgroup[half:]))]
+                return [p for ps, _ in parts for p in ps], [n for _, ns in parts for n in ns]
             print(f'[RED] pso_offline: {arch}: batch {index}/{total} ({what}) left out of the archive, the device builds them at their first draw: {e}', flush=True)
-            return None
+            return [], [name]
+        if name[0] == 'l':
+            for h in ('a', 'b'): shutil.rmtree(folder / h, ignore_errors=True)   # the halves of an earlier refusal of this group's former inputs
         print(f'pso_offline: {arch}: batch {index}/{total}: ready ({"reused" if reused else "compiled"})', flush=True)
-        return piece
-    pieces = [p for p in (one(i, *g) for i, g in enumerate(groups, 1) if g[1]) if p is not None]   # a group of bases that fails stops the build: never None
+        return [piece], []
+    pieces = [p for i, g in enumerate(groups, 1) if g[1] for p in one(i, *g)[0]]   # a group of bases that fails stops the build: never left out
     with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as pool:   # a failed group stops the build once the others under way have finished (their pieces stay cached)
-        futures = [(g[0], pool.submit(one, i, *g)) for i, g in enumerate(groups, 1) if not g[1]]
-        done = [(name, f.result()) for name, f in futures]
-    skipped = [name for name, piece in done if piece is None]
-    pieces += [piece for _, piece in done if piece is not None]
+        futures = [pool.submit(one, i, *g) for i, g in enumerate(groups, 1) if not g[1]]
+        done = [f.result() for f in futures]
+    skipped = [n for _, names in done for n in names]
+    pieces += [p for ps, _ in done for p in ps]
     if not pieces: sys.exit(f'[RED] pso_offline: no group of {arch} compiled')
     part.unlink(missing_ok=True)
     need, free = max(2 << 30, sum(p.stat().st_size for p in pieces)), shutil.disk_usage(work).free
@@ -958,11 +974,11 @@ def main(argv=None):
     ap.add_argument('--script-only', action='store_true', help='write the script and the stamp, run no metal-tt')
     ap.add_argument('--batch-size', type=int, default=BATCH, help=f'compile sequential groups of at most N bases and merge with metal-pack, when there are more (default {BATCH}; 0: one compiler invocation)')
     ap.add_argument('--shader-map', action='append', help='shader_map.tsv: its compute shaders get pipelines (default: the profile\'s)')
-    ap.add_argument('--manifest', action='append', help='pso_manifest.tsv: its C rows first, and its M rows\' task / mesh pipelines (default: the profile\'s)')
+    ap.add_argument('--manifest', action='append', help='pso_manifest.tsv: its C rows first, its M rows\' task / mesh pipelines and its R rows\' layout bases (default: the profile\'s)')
     ap.add_argument('--no-compute', action='store_true', help='no compute pipelines')
     ap.add_argument('--no-mesh', action='store_true', help='no task / mesh pipelines (the M rows)')
     ap.add_argument('--no-layout', action='store_true', help='no layout bases (the R rows: pipelines with a vertex layout)')
-    ap.add_argument('--jobs', type=int, default=JOBS, help=f'metal-tt runs at a time for the compute and task / mesh pipelines (default {JOBS}, half the logical CPUs)')
+    ap.add_argument('--jobs', type=int, default=JOBS, help=f'metal-tt runs at a time for the compute, task / mesh and layout groups (default {JOBS}, half the logical CPUs)')
     a = ap.parse_args(argv)
     if a.batch_size < 0: ap.error('--batch-size must be zero or positive')
     if a.game:
@@ -1011,15 +1027,17 @@ def main(argv=None):
     libraries = library_digest(lib_dir, bases, pipes)
     keys = {arch: archive_key(configuration, libraries, arch, a.platform, osmin, tv) for arch in archs}
     del configuration   # the compiler reads the script from disk
+    left_out = {}   # per architecture, the groups left out of its archive (archive.tsv)
     for arch, key in keys.items():
         dst, kf = out / f'{arch}.mtl4a', work / f'key.{arch}'
         held, refused = archive_held(work, arch, kf, key)
         if dst.is_file() and held:
+            left_out[arch] = refused
             print(f'pso_offline: {arch}: reused ({dst.stat().st_size / 2**20:.0f} MB)')
-            if refused: print(f'[RED] pso_offline: {arch}: task / mesh group(s) {", ".join(refused)} left out of the archive, refused by metal-tt with these inputs; the device builds '
-                              f'them at their first draw (remove batches.{arch}/<group>/refused.{arch} to try again)', flush=True)
+            if refused: print(f'[RED] pso_offline: {arch}: group(s) {", ".join(refused)} left out of the archive, refused by metal-tt with these inputs; the device builds '
+                              f'their pipelines at their first draw (remove batches.{arch}/<group>/refused.{arch} to try again)', flush=True)
             continue
-        if held is None: print(f'pso_offline: {arch}: refused.{arch} of task / mesh group(s) '
+        if held is None: print(f'pso_offline: {arch}: refused.{arch} of group(s) '
                                + ', '.join(n for n in refused if not (work / f'batches.{arch}' / n / f'refused.{arch}').is_file()) + ' removed: trying again', flush=True)
         kf.unlink(missing_ok=True); dst.unlink(missing_ok=True)
         part = work / f'{arch}.mtl4a.partial'; part.unlink(missing_ok=True)
@@ -1031,7 +1049,7 @@ def main(argv=None):
             write_script(js, script(real_libraries(lib_dir, bases, work, pipes), bases, pipes))
             compile_archive(js, part, work, arch, a.platform, osmin, len(bases) + len(pipes))
             clear_real_libraries(work)
-        os.replace(part, dst)
+        os.replace(part, dst); left_out[arch] = sorted(skipped)
         if all((work / f'batches.{arch}' / name / f'refused.{arch}').is_file() for name in skipped):   # refusals only: kept by their own inputs, and named under the key
             kf.write_text(key + '\n' + ''.join(f'refused\t{name}\n' for name in sorted(skipped)))
         print(f'pso_offline: {arch}: {dst.stat().st_size / 2**20:.0f} MB in {time.time() - t1:.0f} s')
@@ -1041,8 +1059,11 @@ def main(argv=None):
     rp = out / 'rest_pairs.tsv'
     if rest: rp.write_text(''.join(f'{v}\t{f}\n' for v, f in rest))
     else: rp.unlink(missing_ok=True)
+    # layout_rows: the prewarm lists' R rows, then those left out by reason (nonzero only); left_out: an architecture's groups metal-tt refused or that failed (task / mesh, layout)
     (out / 'archive.tsv').write_text(f'# the pipeline archive made offline (dm/gfx/tools/pso_offline.py); the host reads prebuilt.tsv, not this file\narch\t{" ".join(archs)}\n'
-                                     f'platform\t{a.platform}\t{osmin}\ntoolchain\t{tv}\nbases\t{len(bases)}\nrest\t{len(rest)}\ncompute\t{len(computes)}\nmesh\t{len(meshes)}\nlayout\t{len(layouts)}\n')
+                                     f'platform\t{a.platform}\t{osmin}\ntoolchain\t{tv}\nbases\t{len(bases)}\nrest\t{len(rest)}\ncompute\t{len(computes)}\nmesh\t{len(meshes)}\nlayout\t{len(layouts)}\n'
+                                     f'layout_rows\t{len(layout_rows)}' + ''.join(f'\t{k} {v}' for k, v in lleft.items() if v) + '\n'
+                                     + ''.join(f'left_out\t{arch}\t{" ".join(names)}\n' for arch, names in sorted(left_out.items()) if names))
     return 0
 
 

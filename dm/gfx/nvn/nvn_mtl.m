@@ -8809,7 +8809,8 @@ static int arch_probe_settle(void) {
 // again. A miss in the named file asks the bundle too: the key names no translation chain (lib_name), so after an app update with a new chain and a new bundle a device file of the
 // old chain was named for bases the bundle holds, and each was compiled and captured again into a p file that then shadowed the bundle for good. A plain lookup (a base with a
 // vertex layout) asks the bundle before the device's own files too: pso_offline.py compiles the layout base of every prewarm R row into it (as pso_desc describes it), so a first
-// start takes them from the app instead of compiling them. A bundle hit is never from_run: arch_compact_takes knows only the device's files
+// start takes them from the app instead of compiling them (pso_build_ex counts them, g_pb_bundle_vd). A bundle hit is never from_run: arch_compact_takes knows only the device's
+// files. A compute lookup never asks the bundle here: cps_new asked it first, with the same descriptor
 static int arch_compact_takes(id<MTL4Archive> a);
 static id<MTL4Archive> g_arch_bundle;   // pso_bundle_open
 // found: the file it came from (pre_pair credits a prebuild file by it, pre_credit)
@@ -8828,11 +8829,11 @@ static id arch_lookup_in(MTL4PipelineDescriptor *d, int plain, int *from_run, id
         arch_probe_note(named, ps != nil, 1);
         if (ps && from_run) *from_run = arch_compact_takes(named);
         if (ps && found) *found = named;
-        if (!ps && g_arch_bundle && named != g_arch_bundle && (ps = ask(g_arch_bundle)) && found) *found = g_arch_bundle;
+        if (!ps && !compute && g_arch_bundle && named != g_arch_bundle && (ps = ask(g_arch_bundle)) && found) *found = g_arch_bundle;
         return ps;
     }
     if (!plain) for (id<MTL4Archive> a in g_arch4p) { id ps = ask(a); arch_probe_note(a, ps != nil, 0); if (ps) { if (found) *found = a; return ps; } }
-    else if (g_arch_bundle) { id ps = ask(g_arch_bundle); if (ps) { if (found) *found = g_arch_bundle; return ps; } }   // the bundle is never probed (arch_probe_note): no file of the device's
+    else if (g_arch_bundle && !compute) { id ps = ask(g_arch_bundle); if (ps) { if (found) *found = g_arch_bundle; return ps; } }   // the bundle is never probed (arch_probe_note): no file of the device's
     for (id<MTL4Archive> a in g_arch4) { id ps = ask(a); arch_probe_note(a, ps != nil, 0); if (ps) { if (from_run) *from_run = arch_compact_takes(a); if (found) *found = a; return ps; } }
     return nil;
 }
@@ -8842,6 +8843,7 @@ static ArchEpoch *g_ep, *g_ep_pre; static os_unfair_lock g_ep_lock = OS_UNFAIR_L
 static int g_arch_cap;   // compiles are captured (an archive folder, a serializer): immutable after pso4_init
 static dispatch_group_t g_arch_pending;   // periods handed over and not written yet
 static _Atomic uint64_t g_pb_built, g_pb_archived, g_pb_reused, g_pb_spec, g_pb_base_ns;
+static _Atomic uint64_t g_pb_bundle_vd;   // of g_pb_archived, bases with a vertex layout from the archive bundled with the app (pso_offline.py's layout bases, the prewarm list's R rows)
 // Time by kind, all threads (the 'pipelines up to frame' line): archive lookups that found the base / found none, specializations, base compiles; predictions (submit thread)
 static _Atomic uint64_t g_pt_hit_n, g_pt_hit_ns, g_pt_miss_n, g_pt_miss_ns, g_pt_spec_ns, g_pt_comp_ns, g_pt_pred_n, g_pt_pred_ns, g_pp_done_n;   // bases compiled / taken from the archive / reused, specializations
 typedef struct { const void *vf, *ff; uint32_t samples, a2c, rast, topo, amp; uint32_t va[31][3], vl[31][3]; } pbase_key;   // what a base depends on: pso_desc's descriptor less the colour attachments
@@ -9464,9 +9466,9 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
     else {
         uint64_t t0 = bp_now();
         int vd = 0; for (int i = 0; i < 31 && !vd; i++) vd = bk.va[i][0] != 0;   // a vertex layout (MTLVertexFormatInvalid is 0)
-        int from_run = 0; base = known ? nil : arch_lookup(b, vd, &from_run);
+        int from_run = 0; id<MTL4Archive> from = nil; base = known ? nil : arch_lookup_in(b, vd, &from_run, &from);
         uint64_t t1 = bp_now();
-        if (base) { g_pb_archived++; g_pt_hit_n++; g_pt_hit_ns += t1 - t0; }
+        if (base) { g_pb_archived++; g_pt_hit_n++; g_pt_hit_ns += t1 - t0; if (vd && from && from == g_arch_bundle) g_pb_bundle_vd++; }
         if (base && from_run && g_compact_enabled && atomic_load(&g_warm_running)) {
             // Metal can crash in materializeAirNTFromOnlineForSlice when serializing archive imports mixed with fresh bases (#342).
             // Work around that framework bug by capturing the original shader functions, without lookupArchives. The normal compiler cache still applies.
@@ -10240,9 +10242,10 @@ static void warm_finish(void) {
                          (unsigned long long)g_warm_mps, (unsigned long long)g_mtk_arch, (unsigned long long)g_mtk_built);
     char again[96] = "";   // only a compacting start captures bases again
     if (g_compact_enabled) snprintf(again, sizeof again, " (%d of them captured again for the compaction, %.1f ms)", (int)g_compact_bases, g_compact_ns / 1e6);
-    MLOG("pipeline bases so far: %llu compiled, %llu from the archive%s, %llu reused (%.1f ms for the bases); %llu specializations (their descriptors %s)",
+    char bvd[96] = ""; if (g_arch_bundle) snprintf(bvd, sizeof bvd, "; %llu layout bases from the archive bundled with the app", (unsigned long long)g_pb_bundle_vd);
+    MLOG("pipeline bases so far: %llu compiled, %llu from the archive%s, %llu reused (%.1f ms for the bases); %llu specializations (their descriptors %s)%s",
          (unsigned long long)g_pb_built, (unsigned long long)g_pb_archived, again, (unsigned long long)g_pb_reused, g_pb_base_ns / 1e6, (unsigned long long)g_pb_spec,
-         (const char *[]){"not asked for yet", "returned retained", "returned autoreleased"}[atomic_load(&g_spec_own) % 3]);
+         (const char *[]){"not asked for yet", "returned retained", "returned autoreleased"}[atomic_load(&g_spec_own) % 3], bvd);
     if (g_arch_bundle || g_arch_cap) MLOG("compute pipelines so far: %llu from the archive bundled with the app, %llu from this device's archive, %llu built (%.1f ms looking up, %.1f ms building)",
                                          (unsigned long long)g_cps_arch, (unsigned long long)g_cps_run, (unsigned long long)g_cps_built, g_cps_look_ns / 1e6, g_cps_build_ns / 1e6);
     // All warm tasks have joined. WarmItems retain published shaders until the submit thread claims them.
@@ -10284,7 +10287,7 @@ static int prepare_workers(void) {
 }
 static void warm_prepare(NSArray<WarmTask *> *tasks, long lines) {
     int workers = prepare_workers(); long n = (long)tasks.count;
-    uint64_t t0 = bp_now(), built0 = g_pb_built, arch0 = g_pb_archived, reused0 = g_pb_reused, spec0 = g_pb_spec;
+    uint64_t t0 = bp_now(), built0 = g_pb_built, arch0 = g_pb_archived, reused0 = g_pb_reused, spec0 = g_pb_spec, bvd0 = g_pb_bundle_vd;
     __block _Atomic long next = 0;
     dispatch_group_t g = dispatch_group_create();
     for (int w = 0; w < workers; w++) dispatch_group_async(g, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -10300,10 +10303,12 @@ static void warm_prepare(NSArray<WarmTask *> *tasks, long lines) {
     if (shown) front_progress(NULL, lines, lines);
     char again[64] = "";   // only a compacting start captures bases again
     if (g_compact_enabled) snprintf(again, sizeof again, " (%d of them captured again for the compaction)", (int)g_compact_bases);
+    // with the archive bundled with the app: how many of the bases from the archive were layout bases it holds (pso_offline.py's, the R rows'); scripts/devlog.py reads it
+    char bvd[96] = ""; if (g_arch_bundle) snprintf(bvd, sizeof bvd, "; %llu layout bases from the archive bundled with the app", (unsigned long long)(g_pb_bundle_vd - bvd0));
     MLOG("pipeline prepare: %ld lines (%llu shaders, %llu render pipelines, %llu compute pipelines) in %.2f s on %d workers before the first frame, progress screen %s; "
-         "bases %llu compiled, %llu from the archive%s, %llu reused; %llu specializations",
+         "bases %llu compiled, %llu from the archive%s, %llu reused; %llu specializations%s",
          lines, (unsigned long long)g_warm_shaders, (unsigned long long)g_warm_rps, (unsigned long long)g_warm_cps, (bp_now() - t0) / 1e9, workers, shown ? "shown" : "not shown",
-         (unsigned long long)(g_pb_built - built0), (unsigned long long)(g_pb_archived - arch0), again, (unsigned long long)(g_pb_reused - reused0), (unsigned long long)(g_pb_spec - spec0));
+         (unsigned long long)(g_pb_built - built0), (unsigned long long)(g_pb_archived - arch0), again, (unsigned long long)(g_pb_reused - reused0), (unsigned long long)(g_pb_spec - spec0), bvd);
 }
 // The prebuild in the prepare step: the bases of every shader pair are made before the game's first frame, behind the progress screen ("Preparing pipelines"), once per chain
 // version, depth mode and pair list (prebuilt.tsv), so a running game never compiles them meanwhile. Built in the background while playing, they took an iPhone 17 Pro Max's GPU

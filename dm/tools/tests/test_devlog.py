@@ -241,5 +241,21 @@ class AudioLine(unittest.TestCase):   # hle_audio.c's statistics line, before an
             self.assertEqual((au['callbacks'], au['underruns'], au['zero_padded_ms']), (2000, 2, 10.0))
 
 
+
+class PrepareLine(unittest.TestCase):   # nvn_mtl.m's prepare line, with the bundled archive's layout bases (release 1.5) and without (no bundle, an older log)
+    HEAD = ('[dm] [nvn-mtl] pipeline prepare: 120 lines (10 shaders, 100 render pipelines, 10 compute pipelines) in 0.80 s on 12 workers before the first frame, progress screen shown; '
+            'bases 2 compiled, 90 from the archive, 8 reused; 100 specializations')
+
+    def test_line_format_matches_the_producer(self):
+        src = (REPO / 'dm/gfx/nvn/nvn_mtl.m').read_text(errors='replace')
+        self.assertIn('"bases %llu compiled, %llu from the archive%s, %llu reused; %llu specializations%s"', src)
+        self.assertIn('"; %llu layout bases from the archive bundled with the app"', src)
+
+    def test_layout_bases_from_the_bundle(self):
+        pr = devlog.read(self.HEAD + '; 70 layout bases from the archive bundled with the app\n')['pipelines']['prepare']
+        self.assertEqual((pr['lines'], pr['bases_compiled'], pr['bases_from_archive'], pr['reused'], pr['bundle_layout']), (120, 2, 90, 8, 70))
+        pr = devlog.read(self.HEAD + '\n')['pipelines']['prepare']
+        self.assertEqual((pr['bases_from_archive'], pr['bundle_layout']), (90, None))
+
 if __name__ == '__main__':
     unittest.main()

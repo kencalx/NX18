@@ -314,10 +314,10 @@ class Mesh(unittest.TestCase):
         self.assertEqual([n for n, _, _ in po.groups_of([], pipes + c, 5)], ['c00001', 'm00001'])   # the kinds apart, whatever their order
 
 
-def rkey(vs='v_b', fs='p_b', attrs=(), streams=(), cfmt=(70,), samples=1, a2c=0, blend_en=0, blend=(), size=504, **kw):
+def rkey(vs='v_b', fs='p_b', attrs=(), streams=(), cfmt=(70,), samples=1, a2c=0, blend_en=0, blend=(), size=504, vs_stage=0, **kw):
     """An R row's pso_skey hex (a vertex shader, stage 0): attrs {NVN attribute: (format, offset, stream)}, streams {stream: (stride, divisor)}, laid out field by field as
     nvn_pso_skey.h on arm64 (va_st: fmt:8, offset:19, stream:5; attr[16] at 136, stream[16] at 200, attr_hi[16] at 352 of the key)"""
-    head = bytes.fromhex(skey(vs=vs, fs=fs, cfmt=cfmt, samples=samples, a2c=a2c, blend_en=blend_en, blend=blend, vs_stage=0, **kw))
+    head = bytes.fromhex(skey(vs=vs, fs=fs, cfmt=cfmt, samples=samples, a2c=a2c, blend_en=blend_en, blend=blend, vs_stage=vs_stage, **kw))
     b = bytearray(head)
     for a, (f, off, st) in dict(attrs).items(): struct.pack_into('<I', b, 88 + (136 + 4 * a if a < 16 else 352 + 4 * (a - 16)), f | off << 8 | st << 27)
     for st, (stride, div) in dict(streams).items(): struct.pack_into('<2I', b, 88 + 200 + 8 * st, stride, div)
@@ -399,8 +399,39 @@ class Layout(unittest.TestCase):
                 rkey(vs='gone_b', **row), 'ff', rkey(**row), rkey(**row)]
         bases, left = self.plan(*rows)
         self.assertEqual(len(bases), 1)   # the last two: one base
-        self.assertEqual(left, {'key': 1, 'merged': 2, 'side library': 2, 'reflection': 1, 'mesh': 0, 'layer': 1, 'primitive ID': 1, 'library': 0, 'entry': 0, 'constants': 2,
+        self.assertEqual(left, {'key': 1, 'merged': 1, 'specialized': 1, 'side library': 2, 'reflection': 1, 'mesh': 0, 'layer': 1, 'primitive ID': 1, 'library': 0, 'entry': 0, 'constants': 2,
                                 'format': 1, 'stride': 1})
+
+    def test_rows_left_out_as_the_device_leaves_them(self):   # the reasons test_rows_left_out does not reach
+        self.shaders()
+        vz = [('main0', False), ('main0_z', False)]
+        self.shader('old', {'chain': 'fedcba987654', 'vertex_inputs': [{'location': 0, 'msl_type': 'float4'}]}, {'_b': vz})   # another chain version
+        self.shader('ms', {'mesh_stage': {'kind': 'ms', 'task': False}, 'vertex_inputs': [{'location': 0, 'msl_type': 'float4'}]}, {'_b': vz})
+        self.shader('nolib', {'vertex_inputs': [{'location': 0, 'msl_type': 'float4'}]}, {})
+        self.shader('noentry', {'entry': 'main1', 'vertex_inputs': [{'location': 0, 'msl_type': 'float4'}]}, {'_b': vz})
+        self.shader('vbc', {'vertex_inputs': [{'location': 1, 'msl_type': 'uint4'}], 'vin': {'shadow': [{'location': 1, 'float': 16}]}}, {'_b': vz, '_bv': [('main0', True)]})
+        self.shader('bad', {'vertex_inputs': [{'location': 40, 'msl_type': 'float4'}]}, {'_b': vz})   # a location beyond 31: nvn_refl refuses it
+        row = dict(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)})
+        rows = [rkey(vs='old_b', **row), rkey(vs='ms_b', **row), rkey(vs='nolib_b', **row), rkey(vs='noentry_b', **row), rkey(vs='bad_b', **row), rkey(merged=1, fz=1, **row),
+                rkey(vs_stage=1, **row), rkey(fs_stage=0, **row), rkey(vs='', **row), rkey(vs='vbc_b', attrs={1: (self.H2, 0, 0)}, streams={0: (4, 0)})]
+        bases, left = self.plan(*rows)
+        self.assertEqual(bases, [])
+        self.assertEqual({k: v for k, v in left.items() if v}, {'key': 3, 'specialized': 1, 'reflection': 2, 'mesh': 1, 'library': 1, 'entry': 1, 'constants': 1})
+        self.assertEqual(self.plan(rkey(fs='old_b', **row))[1]['reflection'], 1)   # the pixel shader's reflection of another chain version
+
+    def test_mixed_and_dual_source_entries_follow_the_targets(self):
+        self.shaders()
+        self.shader('pm', {'raster': {'colors': [0, 1]}, 'entry_m': 'main0_m', 'uint_mask_m': 2, 'entry_d': 'main0_d'},
+                    {'_b': [('main0', False), ('main0_m', False), ('main0_d', False)]})
+        row = dict(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)})
+        self.assertEqual(self.one(rkey(fs='pm_b', cfmt=(70, 73), **row)).frag, ('pm_b', 'main0_m'))   # a float and an integer target, as uint_mask_m says
+        self.assertEqual(self.one(rkey(fs='pm_b', cfmt=(73, 70), **row)).frag, ('pm_b', 'main0'))   # the other way round: not this entry's set
+        src1 = dict(OVER, dst_rgb=0x13)
+        self.assertEqual(self.one(rkey(fs='pm_b', blend_en=1, blend={0: src1}, logic=0, **row)).frag, ('pm_b', 'main0_d'))
+        self.assertEqual(self.one(rkey(fs='pm_b', blend_en=1, blend={0: OVER}, **row)).frag, ('pm_b', 'main0'))   # no second source read
+        # the colour state is the specialization's: rows that differ only in it share one base
+        bases, _ = self.plan(rkey(cfmt=(70,), **row), rkey(cfmt=(80,), **row), rkey(cfmt=(70,), blend_en=1, blend={0: OVER}, **row))
+        self.assertEqual(len(bases), 1)
 
     def test_script_and_groups(self):
         self.shaders()
@@ -872,13 +903,13 @@ class Build(unittest.TestCase):
                 out.truncate(0); out.seek(0)
                 po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0'])
                 self.assertEqual((len(self.calls), tt[0]), (n, 0))
-                self.assertIn('applegpu_g19p: reused', out.getvalue()); self.assertIn('[RED] pso_offline: applegpu_g19p: task / mesh group(s) m00001 left out of the archive', out.getvalue())
+                self.assertIn('applegpu_g19p: reused', out.getvalue()); self.assertIn('[RED] pso_offline: applegpu_g19p: group(s) m00001 left out of the archive', out.getvalue())
                 # removing the refusal by hand, as the red line says, tries that group again with the same inputs (refused again here) instead of reusing the archive without it
                 (self.work / 'batches.applegpu_g19p/m00001/refused.applegpu_g19p').unlink()
                 out.truncate(0); out.seek(0)
                 po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0'])
                 self.assertEqual(tt[0], 1); self.assertNotIn('applegpu_g19p: reused', out.getvalue())
-                self.assertIn('refused.applegpu_g19p of task / mesh group(s) m00001 removed: trying again', out.getvalue())
+                self.assertIn('refused.applegpu_g19p of group(s) m00001 removed: trying again', out.getvalue())
                 self.assertTrue((self.work / 'batches.applegpu_g19p/m00001/refused.applegpu_g19p').is_file())
                 self.assertEqual((self.work / 'key.applegpu_g19p').read_text().splitlines()[1:], ['refused\tm00001'])
                 # the group's inputs change (its library): compiled again, now accepted, and merged with the bases
@@ -906,6 +937,102 @@ class Build(unittest.TestCase):
             kill[0] = False; po.main(args)
         self.assertTrue((self.work / 'key.applegpu_g19p').is_file()); self.assertEqual(sum(p.endswith('.mtl4a') for p in self.calls[-1]), 2)
 
+
+    def layout_profile(self, n=3, bad=None):   # R rows: n layout bases (strides 16, 20, ...; row `bad` with 4 samples), and one whose pixel shader has function constants
+        (self.lib / 'lv_b.json').write_text(json.dumps({'chain': CHAIN, 'entry': 'main0', 'entry_z': 'main0_z', 'vertex_inputs': [{'location': 0, 'msl_type': 'float4'}]}))
+        (self.lib / 'lv_b.metallib').write_bytes(metallib([('main0', False), ('main0_z', False)]))
+        rows = [rkey(vs='lv_b', fs='f_b', attrs={0: (0x2E, 0, 0)}, streams={0: (16 + 4 * i, 0)}, samples=4 if i == bad else 1) for i in range(n)]
+        (self.prof / 'pso_manifest.tsv').write_text('# list\n' + ''.join(f'R\t{r}\n' for r in [*rows, rkey(vs='lv_b', fs='c_b', attrs={0: (0x2E, 0, 0)}, streams={0: (16, 0)})]))
+
+    def layout_runner(self, refuse=lambda text: False, observed=None):
+        def runner(cmd, **kw):
+            cmd = [str(c) for c in cmd]
+            if 'metal-tt' in cmd and '-o' in cmd:
+                text = next(Path(p) for p in cmd if p.endswith('.mtl4-json')).read_text()
+                if observed is not None: observed.append(text)
+                if refuse(text): return subprocess.CompletedProcess(cmd, 1)
+            if 'metal-pack' in cmd:
+                self.calls.append(cmd); Path(cmd[cmd.index('-o') + 1]).write_bytes(b'merged'); return subprocess.CompletedProcess(cmd, 0)
+            return self.fake_run(cmd, **kw)
+        return runner
+
+    def run_main(self, runner, *extra):
+        with mock.patch.object(po.subprocess, 'run', runner), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(io.StringIO()) as out:
+            r = po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0', *extra])
+        return r, out.getvalue()
+
+    def test_layout_bases_are_groups_of_their_own(self):
+        self.layout_profile()
+        seen = []
+        r, out = self.run_main(self.layout_runner(observed=seen))
+        self.assertEqual(r, 0)
+        self.assertIn('4 render rows: 3 layout bases, left out: key 0, merged 0, specialized 0, side library 0, reflection 0, mesh 0, layer 0, primitive ID 0, library 0, entry 0, '
+                      'constants 1, format 0, stride 0', out)
+        self.assertIn('metal-tt, 1 bases, 0 compute pipelines, 0 task / mesh pipelines, 3 layout bases', out)
+        self.assertEqual(sorted(d.name for d in (self.work / 'batches.applegpu_g19p').iterdir()), ['00001', 'l00001'])   # the layout bases always in a group of their own
+        layout = json.loads(seen[-1])['pipeline_descriptors']['render_pipeline_descriptors']
+        self.assertEqual([d['vertex_descriptor']['layouts'][16]['stride'] for d in layout], [16, 20, 24])
+        self.assertEqual({d['vertex_function_descriptor'] for d in layout}, {'fnd:lv_b.main0_z'})   # the profile's depth_mode zero
+        tsv = (self.out / 'archive.tsv').read_text()
+        self.assertIn('layout\t3\n', tsv); self.assertIn('layout_rows\t4\tconstants 1\n', tsv); self.assertNotIn('left_out', tsv)
+        seen.clear(); self.run_main(self.layout_runner(observed=seen)); self.assertEqual(seen, [])   # unchanged: reused
+        self.run_main(self.layout_runner(), '--no-layout')
+        self.assertIn('layout\t0\nlayout_rows\t0\n', (self.out / 'archive.tsv').read_text())
+
+    def test_layout_bases_alone_make_an_archive(self):   # Persona 4 Golden: no pair the archive can hold, but R rows: an archive of layout bases, not "no base to build"
+        self.layout_profile()
+        (self.prof / 'shader_pairs.tsv').write_text('x\ty\n')   # a pair the host leaves out (no reflection)
+        r, out = self.run_main(self.layout_runner())
+        self.assertEqual(r, 0); self.assertNotIn('no base to build', out)
+        self.assertTrue((self.out / 'applegpu_g19p.mtl4a').is_file())
+        tsv = (self.out / 'archive.tsv').read_text(); self.assertIn('bases\t0\n', tsv); self.assertIn('layout\t3\n', tsv); self.assertIn('arch\tapplegpu_g19p\n', tsv)
+        (self.prof / 'shader_pairs.tsv').write_text('# pairs\n')   # a header alone (GitHub issue #338): still the layout bases
+        r, out = self.run_main(self.layout_runner())
+        self.assertEqual(r, 0); self.assertNotIn('nothing to build', out); self.assertTrue((self.out / 'applegpu_g19p.mtl4a').is_file())
+        r, out = self.run_main(self.layout_runner(), '--no-layout', '--no-compute')   # nothing at all: no archive, as before
+        self.assertEqual(list(self.out.glob('*.mtl4a')), []); self.assertIn('nothing to build, no archive', out)
+
+    def test_a_refused_layout_group_is_compiled_in_halves(self):   # one base metal-tt refuses costs only itself, not its group of up to 64
+        self.layout_profile(n=4, bad=2)
+        bad = lambda text: '"raster_sample_count": 4' in text
+        seen = []
+        r, out = self.run_main(self.layout_runner(bad, seen))
+        self.assertEqual(r, 0)
+        self.assertIn('(4 layout bases) refused by metal-tt: compiling it in halves', out)
+        self.assertIn('(1 layout bases, l00001/b/a) left out of the archive', out)
+        g = self.work / 'batches.applegpu_g19p'
+        self.assertEqual([p.relative_to(g).as_posix() for p in sorted(g.rglob('refused.applegpu_g19p'))], ['l00001/b/a/refused.applegpu_g19p', 'l00001/b/refused.applegpu_g19p',
+                                                                                                           'l00001/refused.applegpu_g19p'])
+        self.assertEqual(sum(p.endswith('.mtl4a') for p in self.calls[-1]), 3)   # the bases, l00001/a and l00001/b/b
+        self.assertEqual(len(seen), 6)   # the bases, the group, a, b, b/a, b/b
+        self.assertEqual((self.work / 'key.applegpu_g19p').read_text().splitlines()[1:], ['refused\tl00001/b/a'])
+        self.assertIn('left_out\tapplegpu_g19p\tl00001/b/a\n', (self.out / 'archive.tsv').read_text())
+        seen.clear(); r, out = self.run_main(self.layout_runner(bad, seen))   # the same inputs: reused, with neither metal-tt nor a merge
+        self.assertEqual(seen, []); self.assertIn('group(s) l00001/b/a left out of the archive', out)
+        self.assertIn('left_out\tapplegpu_g19p\tl00001/b/a\n', (self.out / 'archive.tsv').read_text())
+        (g / 'l00001/b/a/refused.applegpu_g19p').unlink()   # tried again by hand: only that base is compiled again (the group's and b's refusals still hold)
+        seen.clear(); r, out = self.run_main(self.layout_runner(bad, seen))
+        self.assertEqual(len(seen), 1); self.assertIn('refused.applegpu_g19p of group(s) l00001/b/a removed: trying again', out)
+        self.layout_profile(n=4)   # the bad row gone: the group compiles whole, its old halves are removed
+        seen.clear(); r, out = self.run_main(self.layout_runner(bad, seen))
+        self.assertEqual(len(seen), 1); self.assertFalse((g / 'l00001/a').exists()); self.assertFalse((g / 'l00001/b').exists())
+        self.assertEqual((self.work / 'key.applegpu_g19p').read_text().splitlines()[1:], [])
+        self.assertNotIn('left_out', (self.out / 'archive.tsv').read_text())
+
+    def test_a_layout_group_that_fails_otherwise_is_not_halved(self):   # a compiler killed is no refusal: the group is left out whole, no key, and the next build tries it again
+        self.layout_profile(n=4)
+        kill = [True]
+        def runner(cmd, **kw):
+            cmd = [str(c) for c in cmd]
+            if kill[0] and 'metal-tt' in cmd and '-o' in cmd and 'vertex_descriptor' in next(Path(p) for p in cmd if p.endswith('.mtl4-json')).read_text():
+                return subprocess.CompletedProcess(cmd, -9)
+            return self.layout_runner()(cmd, **kw)
+        r, out = self.run_main(runner)
+        self.assertEqual(r, 0); self.assertNotIn('in halves', out); self.assertIn('(4 layout bases) left out of the archive', out)
+        self.assertFalse((self.work / 'key.applegpu_g19p').exists())
+        self.assertIn('left_out\tapplegpu_g19p\tl00001\n', (self.out / 'archive.tsv').read_text())
+        kill[0] = False; r, out = self.run_main(runner)
+        self.assertTrue((self.work / 'key.applegpu_g19p').is_file()); self.assertNotIn('left_out', (self.out / 'archive.tsv').read_text())
 
 class IpaFallback(unittest.TestCase):
     """build_ipa.sh's own archive step with a pso_offline.py that fails: a [RED] line, no archive folder, and the build goes on (an optimization: the device builds the bases)"""

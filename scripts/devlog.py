@@ -87,7 +87,8 @@ RX = {k: re.compile(v) for k, v in {
     'bundled': r'^\[nvn-mtl\] pipeline archive bundled with the app: .*, ([\d.]+) MB, opened in ([\d.]+) ms',
     'bundle_out': r'^\[nvn-mtl\] (?:\[RED\] )?pipeline archive bundled with the app: (?:.* is left out|none for this GPU|this system cannot open)',
     'written': r'^\[nvn-mtl\] pipeline archive: (\d+) new pipeline bases(?: and \d+ compute pipelines)?(?: and \d+ task / mesh pipelines)? written to \S+ \(([\d.]+) MB, (\d+) ms\)',   # the compute part since NXNative's 30fb2136, the task / mesh part since bf420fda
-    'prepare': r'^\[nvn-mtl\] pipeline prepare: (\d+) lines .*?progress screen (shown|not shown); bases (\d+) compiled, (\d+) from the archive, (\d+) reused',
+    'prepare': r'^\[nvn-mtl\] pipeline prepare: (\d+) lines .*?progress screen (shown|not shown); bases (\d+) compiled, (\d+) from the archive, (\d+) reused'
+               r'(?:.*?; (\d+) layout bases from the archive bundled with the app)?',   # the layout bases' part since release 1.5 (with an archive bundled with the app)
     'link': r'^\[nvn-mtl\] display link up to tick (\d+): ticks \d+, presents (\d+), empty ticks (\d+) .*?merging (\d+); submission ahead of target display p50 ([\d.]+) ms / min ([\d.]+) ms; '
             r'game enqueue to target display p50 ([\d.]+) ms / min ([\d.]+) / max ([\d.]+) ms',
     'longframe': r'^\[longframe\] frame (\d+) \(([\d.]+) s\) whole frame ([\d.]+) ms, submit\+present ([\d.]+) ms, GPU (-?[\d.]+) ms; new pipelines (\d+) \+ shader libraries (\d+), '
@@ -342,7 +343,7 @@ def read(text: str, top: int = 5) -> Rec:
     out['pipelines'] = {
         'prepare_s': prepare_s, 'prebuild': prebuild,
         'prepare': {'lines': int(pp.group(1)), 'progress_screen': pp.group(2) == 'shown', 'bases_compiled': int(pp.group(3)), 'bases_from_archive': int(pp.group(4)),
-                    'reused': int(pp.group(5))} if pp else None,
+                    'reused': int(pp.group(5)), 'bundle_layout': int(pp.group(6)) if pp.group(6) else None} if pp else None,
         'archive': {'files': int(ar.group(1)), 'mb': float(ar.group(3)), 'open_ms': float(ar.group(4))} if ar else None,
         'bundled': {'mb': float(bu.group(1)), 'open_ms': float(bu.group(2))} if bu else 'left out' if 'bundle_out' in one else None,
         'written': {'files': len(wr), 'bases': sum(n for n, _ in wr), 'mb': round(sum(x for _, x in wr), 1)} if wr else None,
@@ -532,7 +533,8 @@ def render(s: Rec, top: int) -> list[str]:
     done = 'done' if not pb or pb.get('done') else f"not done in the log, at {pb.get('at', 0):.0f} of"
     ptexts = (
         f"prepare {p['prepare_s']:g} s" + (f" ({pr['lines']} lines, progress screen {'shown' if pr['progress_screen'] else 'not shown'}; bases {pr['bases_compiled']} compiled, "
-                                          f"{pr['bases_from_archive']} from the archive, {pr['reused']} reused)" if pr else '') if p['prepare_s'] is not None else '',
+                                          f"{pr['bases_from_archive']} from the archive" + (f" ({pr['bundle_layout']} layout bases from the app's)" if pr['bundle_layout'] is not None else '')
+                                          + f", {pr['reused']} reused)" if pr else '') if p['prepare_s'] is not None else '',
         f"prebuild {done}: {pb['pairs']:.0f} pairs, {pb['built']:.0f} built, {pb['archived']:.0f} already archived, {pb['failed']:.0f} failed, "
         f"{pb['secs']:g} s" if pb else '',
         ', '.join(x for x in (f"archive {ar['files']} files, {ar['mb']:g} MB (opened in {ar['open_ms']:g} ms)" if ar else '',
