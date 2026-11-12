@@ -3081,8 +3081,9 @@ def no_game_icon_line(nup, dump, icon, blank):
     why = (('no game icon: the NX carries none for this version' if dump == 'nx' else 'no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') if dump
            else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again)')
     then = f'the app gets the NX 18 icon ({icon.name})' if icon else f'the {blank} will be blank'
-    hint = "the game's" if icon else 'one'
-    return f'{why}; {then}' + (f'; --icon / ICON gives it {hint}' if dump else '')
+    hint = ("--icon / ICON gives it the game's, --fallback-icon / FALLBACK_ICON a stand-in of your own" if icon
+            else '--icon / ICON or --fallback-icon / FALLBACK_ICON gives it one')   # the fallback is taken only when the game has no icon of its own (app_icon)
+    return f'{why}; {then}' + (f'; {hint}' if dump else '')
 
 
 def icon_file(value, option):
