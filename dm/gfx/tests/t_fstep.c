@@ -76,13 +76,13 @@ static int oot_b(int backoff, int *stretch, int *nst) {
     return f2;
 }
 // The same stretch with the bursts on a clock of their own (the CPU side's, which the hold does not move): one every 114, 108, 78 and 138 vsyncs of real time (1.3-2.3 s), 3 frames
-// of 1.2 vsyncs with the GPU times above, late at hold 1 and within hold 2. Returns the frames at hold 2 in 1,800 vsyncs; *ups the step ups, *late1 the late frames at hold 1
-static int oot_bt(int backoff, uint64_t *ups, int *late1) {
+// of 1.2 vsyncs with the GPU times above, late at hold 1 and within hold 2. Returns the frames at hold 2 in T vsyncs; *ups the step ups, *late1 the late frames at hold 1
+static int oot_bt(int backoff, double T, uint64_t *ups, int *late1) {
     static const double gb[5] = {0.98, 0.81, 1.05, 1.13, 0.92}; static const int gap[4] = {114, 108, 78, 138};
     sim m = {0}; m.s.backoff = backoff;
     for (int i = 0; i < 1200; i++) { m.s.gpu = 0.75; run(&m, 1, 0.88, 1, 3, 0); }
     uint64_t u0 = m.s.ups; double t0 = m.real, next = t0; int nb = 0, burst = 0, f2 = 0; *late1 = 0;
-    while (m.real - t0 < 1800) {
+    while (m.real - t0 < T) {
         int k = m.s.k;
         if (!burst && m.real >= next) { burst = 3; next += gap[nb % 4]; }
         double w = burst ? 1.2 : k == 1 ? 0.88 : 0.80;
@@ -635,10 +635,15 @@ int main(void) {
         // Bursts on their own clock (oot_bt): with backoff the four whose GPU fitted are paid back at hold 1, and only the one over the late line (1.13) steps up; before, each
         // burst stepped up and the next probe came after 1 s, switching between 60 and 30 every 1.3-2.3 s (13 step ups in 30 s), more often than doubling. The late frames at
         // hold 1 are the bursts' own (3 each, about 17 bursts): the frames late anyway, at 60 instead of before a second or more at 30
-        uint64_t ud, ub; int ld, lb, fd = oot_bt(0, &ud, &ld), fb = oot_bt(1, &ub, &lb);
+        uint64_t ud, ub; int ld, lb, fd = oot_bt(0, 1800, &ud, &ld), fb = oot_bt(1, 1800, &ub, &lb);
         snprintf(b, sizeof b, "  bursts every 1.3-2.3 s, doubling / backoff: step ups %llu / %llu, late at hold 1 %d / %d, frames at hold 2 %d / %d", (unsigned long long)ud,
                  (unsigned long long)ub, ld, lb, fd, fb);
         check(ub * 2 < ud && ub <= 4 && lb <= 3 * (1800 / 78 + 1) && fb * 4 < fd, b);
+        // Over 5 minutes the bursts also land in probes' trials back to hold 1. Kept out of trials, each such burst failed the probe and doubled its wait: 41 step ups and 11,662
+        // vsyncs at hold 2 of 18,000. Now the step ups are the bursts whose GPU was over the late line (1.13, every fifth: 33), and hold 2 is the second after each
+        fd = oot_bt(0, 18000, &ud, &ld); fb = oot_bt(1, 18000, &ub, &lb);
+        snprintf(b, sizeof b, "  5 minutes of them: step ups %llu / %llu, vsyncs at hold 2 %d / %d of 18,000", (unsigned long long)ud, (unsigned long long)ub, 2 * fd, 2 * fb);
+        check(ub <= 18000 / 550 + 1 && fb * 2 * 5 < 18000, b);
         sim m = {0}; m.s.backoff = 1; for (int i = 0; i < 1200; i++) { m.s.gpu = 0.75; run(&m, 1, 0.88, 1, 3, 0); }
         check(m.s.bursts == 0 && m.s.failed == 0 && m.s.ups == 0, "  backoff changes nothing while hold 1 holds");
         // What is no short burst on the CPU side steps up as before: more than FSTEP_BURST_N late frames, the GPU over the late line, one asking for two vsyncs more, one within

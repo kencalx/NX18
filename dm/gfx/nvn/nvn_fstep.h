@@ -64,12 +64,13 @@
 // failures doubled the waits at hold 2: 31, 61, 121 and 240 frames, 453 of 1,800 at hold 2. With backoff such a run is not kmin's failure when the late frames that ended it had
 // their GPU under the late line and asked for one vsync more (a short burst on the CPU side): the hold stays at kmin and the lateness is paid back as debt, as after a stay in the
 // background; no step up, so no wait and nothing the probes measured is forgotten. Stepping up for each burst and back after 1 s instead switched between 60 and 30 every 1.3-2.3 s
-// for as long as the bursts came (run B: 13 step ups in 30 s against 6 when doubling), and each probe back from 30 into a GPU-bound area (run A) failed. A burst is one at kmin
-// outside a trial, in a run that has not had one in the last FSTEP_RUN frames, and lasts FSTEP_BURST_N late frames at most: a longer one, one with the GPU over the late line or
-// asking for more, and one soon after the last steps up as before, and a held probe's run at kmin that ends early that way fails and doubles the waits as without backoff. An
-// earlier cap of those waits at 2 s (FSTEP_BURST_CAP) sent a probe every 2 s into the GPU-bound scene that had ended such a run (run A, log.prev.txt:944-971), each failing with
-// its 30 frames of grace late: 16 step ups and 296 late frames at hold 1 against 8 and 24 when doubling (t_fstep oot_a_held). Probes that fail in their own trial, fit trials
-// that fail, and the hold-off of failed probes over budget (nvn_fstep_pheld, the GPU-bound areas of run A) are as before (t_fstep: the run B and run A replays)
+// for as long as the bursts came (run B: 13 step ups in 30 s against 6 when doubling), and each probe back from 30 into a GPU-bound area (run A) failed. A burst is one at
+// kmin, in a trial too (one in a probe's trial failed it and doubled its wait), not within FSTEP_RUN frames of the last, of FSTEP_BURST_N late frames at most: a longer one,
+// one with the GPU over the late line or asking for more, and one soon after the last steps up as before, and a held probe's run at kmin that ends early that way fails
+// and doubles the waits as without backoff. An earlier cap of those waits at 2 s (FSTEP_BURST_CAP) sent a probe every 2 s into the GPU-bound scene that had ended such a run
+// (run A, log.prev.txt:944-971), each failing with its 30 frames of grace late: 16 step ups and 296 late frames at hold 1 against 8 and 24 when doubling (t_fstep oot_a_held).
+// Probes that fail with late frames that are no burst, fit trials that fail, and the hold-off of failed probes over budget (nvn_fstep_pheld, the GPU-bound areas of run A)
+// are as before (t_fstep: the run B and run A replays)
 #define FSTEP_BURST_N 5       // late frames in a row a short burst on the CPU side may last (run B's: 3)
 // A frame across a stay in the background (nvn_fstep.away, set by the caller for one call: the profile's fps_resume, DM_FPS_RESUME; Ocarina of Time, X1.0). The guest's clock is
 // frozen while the app is away, so the stay is time the game never ran: before, that frame counted as late and as a debt, capped at FSTEP_DEBT_MAX, which the game then paid
@@ -203,7 +204,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (want < s->k + 1) want = s->k + 1;
     if (want > kmax) want = kmax;
     // backoff: late frames at kmin whose GPU fitted and that ask for one vsync more are a short burst on the CPU side: paid back, no step up (FSTEP_BURST_N of them at most)
-    int burst = s->backoff && s->late_run >= 3 && s->k < kmax && held <= kmin && !s->trial && s->late_run <= FSTEP_BURST_N && s->lgpu > 0 && s->lgpu <= held + FSTEP_LATE
+    int burst = s->backoff && s->late_run >= 3 && s->k < kmax && held <= kmin && s->late_run <= FSTEP_BURST_N && s->lgpu > 0 && s->lgpu <= held + FSTEP_LATE
                 && want <= held + 1 && (s->inburst || !s->bwait);
     if (burst && !s->inburst) { s->bursts++; s->inburst = 1; s->bwait = FSTEP_RUN; }
     if (s->late_run >= 3 && s->k < kmax && !burst) {   // step up to the cost, at least one vsync
