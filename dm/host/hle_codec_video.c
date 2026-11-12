@@ -18,13 +18,18 @@
 // at the game's frame rate rather than its own: Ocarina of Time's opening (AV1, 60 pictures a second, 9,254 pictures, 154.2 s, no sound of its own; the game plays its music and
 // voices on game time) took 251 s on an iPhone at about 36 fps and fell minutes behind the sound. A released buffer is now the player asking for the next picture: it gets the
 // newest decoded picture whose time is at or before the movie clock, and the older ones are let go (they are decoded already, so the codec's reference chain is whole). The clock
-// is the guest clock since the first picture handed out, from that picture's time: it does not run while the app is in the background (the guest clock is frozen there), while a
-// released buffer waits for a picture, or for more than CV_PACE_GAP between two asks (a player that stops asking, a load); it starts again at a new stream, a flush or a stop, and
-// follows the stream when the player asks faster than the pictures' times (nothing is held back). End of stream, sync handles and the submission event behave as before; skipped
-// pictures free their places in the queue, so the event rises and the player sends more packets. One line per movie gives its picture rate and the pictures skipped.
+// starts when the player gives back the first picture it was handed (a filled buffer released), at that picture's time, and then runs on the guest clock. It does not run while
+// the app is in the background (the guest clock is frozen there), while a released buffer waits for a picture, or across a gap of CV_PACE_GAP or more between two asks (a player
+// paused or stopped asking, a load); it starts again at a new stream, a flush or a stop, and follows the pictures the player gives back when it asks faster than their times
+// (nothing is held back). The clock never runs ahead of a player that paces itself by the pictures' times (Donkey Kong Bananza, Mario Tennis Fever, Mario Kart World, Fire Emblem
+// Fortune's Weave hold a few buffers and give each back when the next one is due): started at the first hand-out, or carried 0.25 s across a pause, it ran ahead by the player's
+// start-up delay, every picture it handed out was then in the player's future and was held until due, and a 30 fps movie showed about 10 pictures a second (t_codec_video).
+// End of stream, sync handles and the submission event behave as before; skipped pictures free their places in the queue, so the event rises and the player sends more packets.
+// One line per movie gives its picture rate and the pictures skipped (CV_PACE_LOGS a decoder at most: a looped menu movie).
 // DM_CODEC_PACE=0 hands every picture out in order, as before. The movie signal (hle_movie.c dm_movie_picture) carries the stream's picture interval to the frame step
 #include "hle.h"
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <sys/mman.h>
 #include "vpx/vpx_decoder.h"
@@ -40,7 +45,8 @@
 #define CV_HOLD 12                  // and at which packets are refused. Mario Tennis Fever's player sends one packet per signal and ignores the result (nro0+0xd16130), so a signal in flight when the
                                     // event goes down must still find room: refused at 4, a packet about 6 s into the title movie was lost, and libvpx found every frame after it corrupt
 #define CV_EVENT_OFF 0x100          // the submission-ready SystemEventType inside the decoder type
-#define CV_PACE_GAP 250000000ull    // the most the movie clock runs between two asks (ns): the frame step's FSTEP_DEBT_MAX, the stall the game's own time keeps
+#define CV_PACE_GAP 250000000ull    // a gap between two asks this long or longer does not run the movie clock (ns): a pause, a load (the frame step's FSTEP_DEBT_MAX)
+#define CV_PACE_LOGS 8              // pace lines a decoder logs at most
 #define CV_R(desc) ((Result)(0x6f | ((desc) << 9)))   // nn::codec results (module 111)
 #define CV_BUSY CV_R(3603)          // the decoder cannot take the packet now
 #define CV_NONE CV_R(3604)          // no buffer to acquire / no picture in the buffer yet
@@ -60,11 +66,13 @@ typedef struct {
     vpx_image_t *held[CV_HOLD]; int64_t held_ts[CV_HOLD]; uint8_t held_eos[CV_HOLD]; int nheld;
     int eos_pending;
     // Pacing (CV_PACE above): the movie clock, in the pictures' time (ns), and the guest time it last moved at; the last picture handed out; a released buffer waits for a picture
-    int pace, pace_on, pace_wait; int64_t pace_clock, pace_last; uint64_t pace_t;
+    // pace_on: a picture of this clock was handed out (pace_first the first, pace_last the latest); pace_run: the player gave one of them back and the clock runs
+    int pace, pace_on, pace_run, pace_wait; int64_t pace_clock, pace_first, pace_last; uint64_t pace_t;
     int64_t ts_first, ts_last; uint64_t ts_n;   // the decoded pictures' times in this stream (its picture rate)
     uint64_t mv_out, mv_skip, mv_itv;           // this movie's pictures handed out and skipped, and its picture interval (ns; 0 = not known), for its pace line
-    int mv_sig;                                 // this decoder raised the movie signal (hle_movie.c), which its end drops
+    int mv_sig, mv_logs;                        // this decoder raised the movie signal (hle_movie.c), which its end drops; its pace lines so far
 } cv_dec;
+static _Atomic int g_cv_sig;   // decoders raising the movie signal: the last one to stop drops it (the title movie's decoder ending must not end the next one's movie)
 
 static cv_dec *g_cv[16];
 static pthread_mutex_t g_cv_mu = PTHREAD_MUTEX_INITIALIZER;   // lock order: g_cv_mu, then a decoder's mu, then g_spt_mu
@@ -130,22 +138,27 @@ static uint64_t cv_interval(const cv_dec *d) {
 // The movie's end (end of stream, a stop or flush, finalize, times that start again): its pace line with the pictures handed out, their rate and those skipped, and the movie
 // signal dropped (decoder lock held). The next picture starts the clock again
 static void pace_log(cv_dec *d, const char *why) {
-    if (d->mv_sig) { dm_movie_stopped(); d->mv_sig = 0; }
-    if (d->mv_out) LOG("[codec] %s decoder %u: movie paced%s (%s): %llu pictures handed out, %.2f pictures/s, %llu skipped by the pictures' times", k_cv_name[d->codec], d->id,
+    if (d->mv_sig) { d->mv_sig = 0; if (atomic_fetch_sub(&g_cv_sig, 1) == 1) dm_movie_stopped(); }
+    if (d->mv_out && d->mv_logs++ < CV_PACE_LOGS) LOG("[codec] %s decoder %u: movie paced%s (%s): %llu pictures handed out, %.2f pictures/s, %llu skipped by the pictures' times", k_cv_name[d->codec], d->id,
                        d->pace ? "" : " off (DM_CODEC_PACE=0)", why, (unsigned long long)d->mv_out, d->mv_itv ? 1e9 / d->mv_itv : 0.0, (unsigned long long)d->mv_skip);
-    d->mv_out = d->mv_skip = d->mv_itv = 0; d->pace_on = d->pace_wait = 0;
+    d->mv_out = d->mv_skip = d->mv_itv = 0; d->pace_on = d->pace_run = d->pace_wait = 0;
 }
-// A released buffer asks for the next picture (decoder lock held): the clock runs the guest time since it last moved, at most CV_PACE_GAP, not while a buffer waits for a picture
-static void pace_ask(cv_dec *d) {
+// A released buffer asks for the next picture (decoder lock held); had: it held a picture of time cts, which the player is done with. The clock starts at the first picture of
+// this clock given back, at its time; then it runs the guest time since the last ask, not while a buffer waits for a picture nor across a gap of CV_PACE_GAP or more, and is
+// at least the time of the picture given back
+static void pace_ask(cv_dec *d, int had, int64_t cts) {
     if (!d->pace || !d->pace_on) return;
     uint64_t g = guest_ns(), dt = g - d->pace_t;
-    if (!d->pace_wait) d->pace_clock += (int64_t)(dt < CV_PACE_GAP ? dt : CV_PACE_GAP);
     d->pace_t = g;
+    int mine = had && cts >= d->pace_first && cts <= d->pace_last;   // a picture of this clock (not one of a stream before a flush or before its times started again)
+    if (!d->pace_run) { if (mine) { d->pace_run = 1; d->pace_clock = cts; } return; }
+    if (!d->pace_wait && dt < CV_PACE_GAP) d->pace_clock += (int64_t)dt;
+    if (mine && cts > d->pace_clock) d->pace_clock = cts;   // the player is ahead of the clock: it follows
 }
 // How many of the waiting pictures are older than the clock's (decoder lock held): the newest whose time is at or before it is handed out. Only while their times rise, never past
 // an end of stream, and never the last one waiting; none when the next one's time is below the last handed out (a new stream, whose first picture starts a new clock)
 static int pace_skip(const cv_dec *d) {
-    if (!d->pace || !d->pace_on || d->held_ts[0] < d->pace_last) return 0;
+    if (!d->pace || !d->pace_run || d->held_ts[0] < d->pace_last) return 0;
     int k = 0;
     while (k + 1 < d->nheld && !d->held_eos[k] && d->held_ts[k + 1] > d->held_ts[k] && d->held_ts[k + 1] <= d->pace_clock) k++;
     return k;
@@ -153,12 +166,12 @@ static int pace_skip(const cv_dec *d) {
 static void pace_out(cv_dec *d, int64_t ts) {   // a picture of time ts handed out (decoder lock held)
     uint64_t g = guest_ns();
     if (d->pace_on && ts < d->pace_last) pace_log(d, "its times started again");   // a new stream without a flush
-    if (!d->pace_on) { d->pace_on = 1; d->pace_clock = ts; d->pace_t = g; }   // the movie clock starts at the first picture's time
-    else { if (ts > d->pace_clock) d->pace_clock = ts; if (d->pace_wait) d->pace_t = g; }   // the player asks ahead of the times: the clock follows; a wait for this picture is not counted
+    if (!d->pace_on) { d->pace_on = 1; d->pace_run = 0; d->pace_first = ts; d->pace_t = g; }   // a new clock: it runs once the player gives a picture back (pace_ask)
+    else if (d->pace_wait) d->pace_t = g;   // a wait for this picture is not counted
     d->pace_wait = 0; d->pace_last = ts; d->mv_out++;
     uint64_t itv = cv_interval(d);
     if (itv && ts >= d->ts_first && ts <= d->ts_last) d->mv_itv = itv;   // the estimate is this stream's
-    if (d->mv_itv) { dm_movie_picture(d->mv_itv); d->mv_sig = 1; }   // the frame step's movie signal, with the picture rate (hle_movie.c)
+    if (d->mv_itv) { if (!d->mv_sig) { d->mv_sig = 1; atomic_fetch_add(&g_cv_sig, 1); } dm_movie_picture(d->mv_itv); }   // the frame step's movie signal, with the picture rate (hle_movie.c)
 }
 static void drain(cv_dec *d, int took) {
     int before = d->nheld;
@@ -180,6 +193,7 @@ static void drain(cv_dec *d, int took) {
         b->filled = 1; b->filled_gen = b->gen;
         spt_fire(d, i);
     }
+    if (d->pcount && d->pace_on) d->pace_wait = 1;   // a released buffer has no picture yet: the clock waits with it
     if (d->event) { if (d->nheld >= CV_READY) hle_clear_system_event(d->event); else if (took || before >= CV_READY) hle_signal_system_event(d->event); }
 }
 
@@ -452,12 +466,12 @@ static Result cv_dec_acq(uint32_t *idx, cv_sync *sync, void *t) {
 static void cv_dec_rel(void *t, uint32_t i, cv_sync sync) {
     (void)sync; cv_dec *d = cv_of(t); if (!d || i >= CV_BUFS || !d->buf[i].reg) { LOG("[RED] nn::codec::Release…DecoderOutputBuffer index %u", i); return; }
     pthread_mutex_lock(&d->mu);
+    int had = d->buf[i].filled && d->buf[i].w; int64_t cts = d->buf[i].ts;   // the picture the player gives back (not an end of stream without one)
     d->buf[i].gen++; d->buf[i].filled = 0;
     if (d->pcount < CV_BUFS) { d->pend[(d->phead + d->pcount) % CV_BUFS] = i; d->pcount++; }
     if (d->fcount < 8) { d->fifo[(d->fhead + d->fcount) % 8] = i; d->fcount++; } else LOG("[RED] nn::codec: acquirable queue full at release %u", i);
-    pace_ask(d);
+    pace_ask(d, had, cts);
     drain(d, 0);
-    if (d->pcount && d->pace_on) d->pace_wait = 1;   // no picture for it yet: the clock waits with it
     pthread_mutex_unlock(&d->mu);
 }
 static Result cv_dec_props(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, int64_t *ts, bool *eos, void *t, uint32_t i) {

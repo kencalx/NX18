@@ -93,6 +93,37 @@ static pace_res pace_play(uint64_t frame_ns, int n, int until_busy, int bufs, in
     for (int i = 0; i < bufs; i++) h_cv_poolfin(pp[i]);
     return r;
 }
+// A player that paces itself by the pictures' times (Donkey Kong Bananza's, Mario Tennis Fever's kind): it holds bufs buffers and shows the newest filled picture whose time is at or
+// before its own playback clock, giving the older ones back. Its clock starts start_ns after the first picture is filled (it fills its buffers first), and stops for pause_n frames
+// from pause_at (a pause menu: the guest clock runs, the player gives nothing back). Returns the distinct pictures it showed; with the host's pacing it must show every one
+static int pace_self(uint64_t frame_ns, int64_t itv, int n, int bufs, uint64_t start_ns, int pause_at, int pause_n, uint64_t *skipped) {
+    _Alignas(16) static uint8_t pd[0x400], pp[4][0x40], pm[4][16 * 16 * 4];
+    memset(pd, 0, sizeof pd);
+    cv_pref pf = h_cv_pref(16, 16, 3, 0); uint64_t sz, al; assert(!h_cv_poolsize(&sz, &al, &pf, 1));
+    for (int i = 0; i < bufs; i++) assert(!h_cv_pool(pp[i], pm[i], sz, &pf, 1, 0));
+    assert(!h_cv_vp9init2(pd, 0x10000, 16, 16, 1, 1, 3)); void *ev = pd + CV_EVENT_OFF; cv_dec *dd = cv_of(pd);
+    uint32_t idx[4]; cv_sync sy[4]; int64_t bts[4]; int full[4] = {0};
+    for (uint32_t i = 0; i < (uint32_t)bufs; i++) assert(!h_cv_vp9reg(pd, i, pp[i], 0));
+    for (int i = 0; i < bufs; i++) { assert(!h_cv_vp9acq(&idx[i], &sy[i], pd)); h_cv_vp9rel(pd, idx[i], sy[i]); }
+    for (int i = 0; i < bufs; i++) assert(!h_cv_vp9acq(&idx[i], &sy[i], pd));
+    int sent = 0, shown = 0, started = 0; int64_t cur = -1, play = 0; uint64_t first = 0; uint16_t w, h, cw, ch; int64_t ts; bool eos;
+    for (int f = 1; f < 40 * n && cur < (int64_t)(n - 1) * itv; f++) {
+        int paused = f >= pause_at && f < pause_at + pause_n;
+        test_guest += frame_ns; if (started && !paused) play += (int64_t)frame_ns;
+        while (sent < n && ev_set(ev)) { uint64_t id; Result x = h_cv_vp9submit(&id, pd, vp9, sizeof vp9, (int64_t)sent * itv, sent == n - 1); if (x == CV_BUSY) break; assert(!x); sent++; }
+        for (int i = 0; i < bufs; i++) if (!full[i] && h_gs_trywait(&sy[i])) { assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, pd, idx[i])); full[i] = 1; bts[i] = ts; if (!first) first = test_guest; }
+        if (!started && first && test_guest - first >= start_ns) started = 1;
+        if (!started || paused) continue;
+        int best = -1; for (int i = 0; i < bufs; i++) if (full[i] && bts[i] <= play && (best < 0 || bts[i] > bts[best])) best = i;
+        if (best < 0) continue;
+        if (bts[best] != cur) { cur = bts[best]; shown++; }
+        for (int i = 0; i < bufs; i++) if (full[i] && bts[i] < bts[best]) { h_cv_vp9rel(pd, idx[i], sy[i]); assert(!h_cv_vp9acq(&idx[i], &sy[i], pd)); full[i] = 0; }
+    }
+    *skipped = dd->mv_skip;   // before the end of stream's pace line (the last picture is shown while its buffer is held)
+    assert(!h_cv_vp9fin(pd));
+    for (int i = 0; i < bufs; i++) h_cv_poolfin(pp[i]);
+    return shown;
+}
 static void pace_print(const char *what, const pace_res *r) {
     printf("  %s: %d frames, %d pictures shown, at most %d skipped in a frame, starved %d, monotonic %d, end of stream on the last %d, 60 fps signal %d, %d skips in the background, %d pictures on at the jump\n",
            what, r->frames, r->shown, r->max_jump - 1, r->starved, r->mono, r->eos_last, r->fps60, r->bg_skips, r->gap_jump);
@@ -307,9 +338,20 @@ int main(void) {
         // The app in the background for 60 frames (the guest clock frozen): the clock waits, each of those frames takes the next picture
         r = pace_play(33333333, n, 1, 2, 100, 60, 0, 0); pace_print("30 Hz, 60 frames in the background", &r);
         assert(r.mono && r.eos_last && !r.starved && !r.bg_skips && r.frames >= n / 2 + 30 - 6 && r.frames <= n / 2 + 30 + 6);
-        // A player that stops asking for 2 s: the clock runs CV_PACE_GAP of it, not the whole stall (and never past the pictures decoded)
+        // A player that stops asking for 2 s (a pause, a load): the clock does not run across a gap of CV_PACE_GAP or more (the movie takes its 10 s plus the stall frame).
+        // A 0.2 s hitch is run through: the movie still takes 10 s, the 12 pictures caught up over the next frames (about 4 wait at a time)
         r = pace_play(33333333, n, 1, 2, 0, 0, 200, 2000000000ull); pace_print("30 Hz, a 2 s stall", &r);
-        assert(r.mono && r.eos_last && !r.starved && r.gap_jump >= 2 && r.gap_jump <= (int)(CV_PACE_GAP / PACE_ITV(1)) + 1);
+        assert(r.mono && r.eos_last && !r.starved && r.gap_jump == 1 && r.frames >= n / 2 - 5 && r.frames <= n / 2 + 7);
+        r = pace_play(33333333, n, 1, 2, 0, 0, 200, 200000000ull); pace_print("30 Hz, a 0.2 s hitch", &r);
+        assert(r.mono && r.eos_last && !r.starved && r.gap_jump >= 2 && r.frames >= n / 2 - 6 - 6 && r.frames <= n / 2);
+        // A player that paces itself by the pictures' times loses no picture to the host's pacing: starting 0.2 s after its buffers are filled (the clock started at the first
+        // hand-out ran that far ahead of it, and a 30 fps movie showed 102 of 300 pictures), after a 1 s pause (0.25 s ahead: 135 of 300), at 24 and 60 fps
+        uint64_t sk; int shown;
+        shown = pace_self(16666667, 33333333, 300, 4, 200000000, 0, 0, &sk); printf("  self-paced, 30 fps, started 0.2 s late: %d of 300 shown, %llu skipped\n", shown, (unsigned long long)sk); assert(shown == 300 && !sk);
+        shown = pace_self(16666667, 33333333, 300, 4, 0, 100, 60, &sk); printf("  self-paced, 30 fps, a 1 s pause: %d of 300 shown, %llu skipped\n", shown, (unsigned long long)sk); assert(shown == 300 && !sk);
+        shown = pace_self(16666667, 41666667, 240, 4, 200000000, 0, 0, &sk); printf("  self-paced, 24 fps, started 0.2 s late: %d of 240 shown, %llu skipped\n", shown, (unsigned long long)sk); assert(shown == 240 && !sk);
+        shown = pace_self(16666667, PACE_ITV(1), 600, 3, 100000000, 0, 0, &sk); printf("  self-paced, 60 fps, started 0.1 s late: %d of 600 shown, %llu skipped\n", shown, (unsigned long long)sk); assert(shown == 600 && !sk);
+        shown = pace_self(33333333, PACE_ITV(1), 600, 4, 0, 0, 0, &sk); printf("  self-paced at 30 Hz, 60 fps: %d of 600 shown, %llu skipped\n", shown, (unsigned long long)sk); assert(shown >= 295 && shown <= 305);
         // DM_CODEC_PACE=0: every picture in order, as before
         setenv("DM_CODEC_PACE", "0", 1);
         r = pace_play(33333333, n, 1, 2, 0, 0, 0, 0); pace_print("30 Hz, DM_CODEC_PACE=0", &r);
@@ -323,24 +365,46 @@ int main(void) {
         assert(!h_cv_vp9reg(fd, 0, fp, 0) && !h_cv_vp9acq(&idx, &sync, fd)); h_cv_vp9rel(fd, 0, sync);
         for (int k = 0; k < 8; k++) assert(!h_cv_vp9submit(&id, fd, vp9, sizeof vp9, PACE_ITV(k), false));
         assert(!h_cv_vp9acq(&idx, &sync, fd) && h_gs_trywait(&sync) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == 0);
-        test_guest += 100000000; h_cv_vp9rel(fd, 0, sync);   // 100 ms on: pictures 1-5 skipped, picture 6 handed out
-        assert(!h_cv_vp9acq(&idx, &sync, fd) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == PACE_ITV(6) && fdd->mv_skip == 5 && dm_movie_fps() == 60);
+        test_guest += 16666667; h_cv_vp9rel(fd, 0, sync);   // picture 0 given back: the clock starts at its time, and picture 1 is next
+        assert(!h_cv_vp9acq(&idx, &sync, fd) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == PACE_ITV(1) && fdd->pace_run && !fdd->mv_skip);
+        test_guest += 100000000; h_cv_vp9rel(fd, 0, sync);   // 100 ms on: pictures 2-5 skipped, picture 6 handed out
+        assert(!h_cv_vp9acq(&idx, &sync, fd) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == PACE_ITV(6) && fdd->mv_skip == 4 && dm_movie_fps() == 60);
         assert(!h_cv_vp9flush(fd) && !dm_movie_playing() && !fdd->pace_on);   // the flush ends the movie signal and the clock
-        h_cv_vp9rel(fd, 0, sync); test_guest += 100000000;
+        h_cv_vp9rel(fd, 0, sync); test_guest += 100000000;   // the old stream's picture given back starts no clock
         for (int k = 0; k < 8; k++) assert(!h_cv_vp9submit(&id, fd, vp9, sizeof vp9, PACE_ITV(k), false));
-        assert(!h_cv_vp9acq(&idx, &sync, fd) && h_gs_trywait(&sync) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == 0);
-        // Times that start again without a flush (a looped stream) start a new clock too
+        assert(!h_cv_vp9acq(&idx, &sync, fd) && h_gs_trywait(&sync) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == 0 && !fdd->pace_run);
         test_guest += 33333333; h_cv_vp9rel(fd, 0, sync);
-        assert(!h_cv_vp9acq(&idx, &sync, fd) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == PACE_ITV(2));
+        assert(!h_cv_vp9acq(&idx, &sync, fd) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == PACE_ITV(1));
+        test_guest += 66666667; h_cv_vp9rel(fd, 0, sync);
+        assert(!h_cv_vp9acq(&idx, &sync, fd) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == PACE_ITV(4));
+        // Times that start again without a flush (a looped stream) start a new clock too
         assert(!h_cv_vp9flush(fd));
         for (int k = 0; k < 3; k++) assert(!h_cv_vp9submit(&id, fd, vp9, sizeof vp9, PACE_ITV(100 + k), false));
         h_cv_vp9rel(fd, 0, sync); assert(!h_cv_vp9acq(&idx, &sync, fd) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == PACE_ITV(100));
         test_guest += 33333333;
         for (int k = 0; k < 3; k++) assert(!h_cv_vp9submit(&id, fd, vp9, sizeof vp9, PACE_ITV(k), false));   // back to time 0 behind 101 and 102
+        h_cv_vp9rel(fd, 0, sync); assert(!h_cv_vp9acq(&idx, &sync, fd) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == PACE_ITV(101));
+        test_guest += 100000000;
         h_cv_vp9rel(fd, 0, sync); assert(!h_cv_vp9acq(&idx, &sync, fd) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == PACE_ITV(102));   // never across the drop in times
         test_guest += 33333333;
         h_cv_vp9rel(fd, 0, sync); assert(!h_cv_vp9acq(&idx, &sync, fd) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == 0);   // the new times' first picture
+        test_guest += 100000000;
+        h_cv_vp9rel(fd, 0, sync); assert(!h_cv_vp9acq(&idx, &sync, fd) && !h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, fd, 0) && ts == PACE_ITV(1));   // a new clock, from picture 0's time
         assert(!h_cv_vp9fin(fd) && !dm_movie_playing()); h_cv_poolfin(fp);
+    }
+    {   // Two decoders at once (a title movie's decoder finalized while the next movie plays): the movie signal stays until the last one stops
+        _Alignas(16) static uint8_t td[2][0x400], tp[2][0x40], tm[2][16 * 16 * 4];
+        cv_pref pf = h_cv_pref(16, 16, 3, 0); uint64_t sz, al; assert(!h_cv_poolsize(&sz, &al, &pf, 1));
+        for (int j = 0; j < 2; j++) {
+            assert(!h_cv_pool(tp[j], tm[j], sz, &pf, 1, 0) && !h_cv_vp9init2(td[j], 0x10000, 16, 16, 1, 1, 3));
+            assert(!h_cv_vp9reg(td[j], 0, tp[j], 0) && !h_cv_vp9acq(&idx, &sync, td[j])); h_cv_vp9rel(td[j], 0, sync);
+            for (int k = 0; k < 9; k++) assert(!h_cv_vp9submit(&id, td[j], vp9, sizeof vp9, PACE_ITV(k), false));
+            assert(!h_cv_vp9acq(&idx, &sync, td[j])); h_cv_vp9rel(td[j], 0, sync);   // the second picture, handed out with 9 decoded: the signal is up
+        }
+        assert(dm_movie_fps() == 60 && g_cv_sig == 2);
+        assert(!h_cv_vp9fin(td[0]) && dm_movie_playing() && dm_movie_fps() == 60);   // the first one's end does not end the second one's movie
+        assert(!h_cv_vp9fin(td[1]) && !dm_movie_playing() && !g_cv_sig);
+        for (int j = 0; j < 2; j++) h_cv_poolfin(tp[j]);
     }
     printf("t_codec_video: all passed\n");
     return 0;

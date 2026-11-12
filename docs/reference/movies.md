@@ -314,7 +314,7 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Symptom:** a Switch 2 game's movie plays slower than its own rate whenever the game runs below it, and falls behind the game's music: Ocarina of Time's 60 fps opening took 251 s instead of 154 on an iPhone at about 36 fps.
 - **Cause:** the SDK's movie library takes one picture per game frame, and `drain` handed out every decoded picture in order.
 - **Fix:** a released buffer gets the newest decoded picture whose time is at or before the movie clock, and the older ones are let go (`CV_PACE`, `DM_CODEC_PACE=0` turns it off); the decoder also tells the frame step the movie's picture rate. The whole entry, with the clock's rules and the frame step's part: [A 60 fps movie played at the game's frame rate](frame-rate.md#a-60-fps-movie-played-at-the-games-frame-rate).
-- **Check:** `t_codec_video` (players at 30, 36, 60 and 15 Hz against a 60 fps stream, both feeders, the background, a stall, a flush).
+- **Check:** `t_codec_video` (players at 30, 36, 60 and 15 Hz against a 60 fps stream, both feeders, the background, a stall, a flush, players that pace themselves by the pictures' times, two decoders at once).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
 ### AV1 movies through SDK 22's decoder
