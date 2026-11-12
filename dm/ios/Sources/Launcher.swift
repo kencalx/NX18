@@ -833,7 +833,9 @@ struct LauncherView: View {
         }
         if checking { if e == .b { playWithout() }; return }   // B plays without the cloud's save; nothing else while it is compared
         let map = focusMap
-        let cur = focus.flatMap { map.contains($0) ? $0 : nil } ?? .play
+        // An item no longer drawn: Play, but the Advanced header for one of its rows (Advanced closed by touch), so the controller goes on from where it was
+        let cur = focus.flatMap { map.contains($0) ? $0 : nil }
+            ?? (advancedGroups.contains { $0.rows.contains { LauncherFocus.row($0.env) == focus } } ? .advanced : .play)
         if focus != cur { focus = cur }
         switch e {
         case .up, .down: focus = map.vertical(cur, e == .down ? 1 : -1)
