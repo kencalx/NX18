@@ -75,6 +75,24 @@ static int oot_b(int backoff, int *stretch, int *nst) {
     }
     return f2;
 }
+// The same stretch with the bursts on a clock of their own (the CPU side's, which the hold does not move): one every 114, 108, 78 and 138 vsyncs of real time (1.3-2.3 s), 3 frames
+// of 1.2 vsyncs with the GPU times above, late at hold 1 and within hold 2. Returns the frames at hold 2 in 1,800 vsyncs; *ups the step ups, *late1 the late frames at hold 1
+static int oot_bt(int backoff, uint64_t *ups, int *late1) {
+    static const double gb[5] = {0.98, 0.81, 1.05, 1.13, 0.92}; static const int gap[4] = {114, 108, 78, 138};
+    sim m = {0}; m.s.backoff = backoff;
+    for (int i = 0; i < 1200; i++) { m.s.gpu = 0.75; run(&m, 1, 0.88, 1, 3, 0); }
+    uint64_t u0 = m.s.ups; double t0 = m.real, next = t0; int nb = 0, burst = 0, f2 = 0; *late1 = 0;
+    while (m.real - t0 < 1800) {
+        int k = m.s.k;
+        if (!burst && m.real >= next) { burst = 3; next += gap[nb % 4]; }
+        double w = burst ? 1.2 : k == 1 ? 0.88 : 0.80;
+        m.s.gpu = burst ? gb[nb % 5] : 0.75;
+        if (burst && !--burst) nb++;
+        run(&m, 1, w, 1, 3, 0);
+        if (k > 1) f2++; else *late1 += w > 1 + FSTEP_LATE;
+    }
+    *ups = m.s.ups - u0; return f2;
+}
 // Ocarina of Time's heavy areas (run A, log.prev.txt:898-1206): GPU-bound at hold 1 (cost and GPU 1.3), at hold 2 the GPU 1.6 times that (the clock follows the hold), with a short
 // burst on the CPU side (GPU 0.95) every 2 s at hold 1; ss: the screen's verdicts. Returns the probes in 60 s of real time; *ups the step ups
 static uint64_t oot_a(int backoff, double w1, uint64_t *ups) {
@@ -593,11 +611,27 @@ int main(void) {
         int st[16], n, f2 = oot_b(0, st, &n), near = n >= 4; for (int i = 0; i < 4 && near; i++) near = st[i] >= log_st[i] - 1 && st[i] <= log_st[i] + 1;
         snprintf(b, sizeof b, "Ocarina run B, doubling (today): stays at hold 2 of %d, %d, %d, %d frames; %d of 1,800 at hold 2", n > 0 ? st[0] : -1, n > 1 ? st[1] : -1, n > 2 ? st[2] : -1, n > 3 ? st[3] : -1, f2);
         check(near && f2 > 1000, b);
-        int sb[16], nb2, g2 = oot_b(1, sb, &nb2), most = 0; for (int i = 0; i < nb2; i++) if (sb[i] > most) most = sb[i];
-        snprintf(b, sizeof b, "  with backoff: %d stays at hold 2, the longest %d frames (2 s); %d of 1,800 at hold 2", nb2, most, g2);
-        check(nb2 >= 10 && sb[0] == st[0] && sb[1] == st[0] && sb[2] == st[0] && sb[3] == st[1] && most == st[1] && g2 * 2 < f2, b);
+        // Bursts on their own clock (oot_bt): with backoff the four whose GPU fitted are paid back at hold 1, and only the one over the late line (1.13) steps up; before, each
+        // burst stepped up and the next probe came after 1 s, switching between 60 and 30 every 1.3-2.3 s (13 step ups in 30 s), more often than doubling. The late frames at
+        // hold 1 are the bursts' own (3 each, about 17 bursts): the frames late anyway, at 60 instead of before a second or more at 30
+        uint64_t ud, ub; int ld, lb, fd = oot_bt(0, &ud, &ld), fb = oot_bt(1, &ub, &lb);
+        snprintf(b, sizeof b, "  bursts every 1.3-2.3 s, doubling / backoff: step ups %llu / %llu, late at hold 1 %d / %d, frames at hold 2 %d / %d", (unsigned long long)ud,
+                 (unsigned long long)ub, ld, lb, fd, fb);
+        check(ub * 2 < ud && ub <= 4 && lb <= 3 * (1800 / 78 + 1) && fb * 4 < fd, b);
         sim m = {0}; m.s.backoff = 1; for (int i = 0; i < 1200; i++) { m.s.gpu = 0.75; run(&m, 1, 0.88, 1, 3, 0); }
         check(m.s.bursts == 0 && m.s.failed == 0 && m.s.ups == 0, "  backoff changes nothing while hold 1 holds");
+        // What is no short burst on the CPU side steps up as before: more than FSTEP_BURST_N late frames, the GPU over the late line, one asking for two vsyncs more, one within
+        // FSTEP_RUN frames of the last burst; and a burst pays its lateness back
+        m.s.gpu = 0.98; run(&m, 3, 1.4, 1, 3, 0); int one = m.s.bursts == 1 && m.s.ups == 0 && m.s.k == 1;
+        m.s.gpu = 0.75; run(&m, 3, 0.88, 1, 3, 0); int paid = m.s.paid == 1 && m.s.debt < 1;   // 1.2 vsyncs behind: one step of 2
+        m.s.gpu = 0.98; run(&m, 3, 1.2, 1, 3, 0); int soon = m.s.ups == 1 && m.s.bursts == 1;
+        sim l = {0}; l.s.backoff = 1; for (int i = 0; i < 1200; i++) { l.s.gpu = 0.75; run(&l, 1, 0.88, 1, 3, 0); }
+        l.s.gpu = 0.98; run(&l, FSTEP_BURST_N, 1.2, 1, 3, 0); int lng = l.s.ups == 0; run(&l, 1, 1.2, 1, 3, 0); lng = lng && l.s.ups == 1 && l.s.bursts == 1;
+        sim g = {0}; g.s.backoff = 1; for (int i = 0; i < 1200; i++) { g.s.gpu = 0.75; run(&g, 1, 0.88, 1, 3, 0); }
+        g.s.gpu = 1.13; run(&g, 3, 1.2, 1, 3, 0); int gpu = g.s.ups == 1 && !g.s.bursts;
+        sim w = {0}; w.s.backoff = 1; for (int i = 0; i < 1200; i++) { w.s.gpu = 0.75; run(&w, 1, 0.88, 1, 3, 0); }
+        w.s.gpu = 0.9; run(&w, 3, 2.3, 1, 3, 0); int two = w.s.ups == 1 && w.s.k == 3 && !w.s.bursts;
+        check(one && paid && soon && lng && gpu && two, "  a burst is paid back at hold 1; longer, GPU-bound, larger or repeated within 30 frames steps up");
     }
     {   // Ocarina of Time's run A (oot_a): in its GPU-bound areas backoff starts no more probes and no more step ups, at 1.3 vsyncs at hold 1 and just out of reach at 1.12
         uint64_t u0, u1, p0 = oot_a(0, 1.3, &u0), p1 = oot_a(1, 1.3, &u1);
@@ -608,7 +642,7 @@ int main(void) {
         check(p1 == p0 && u1 == u0 && p0 <= 6, b);
         double a0 = oot_edge(0, &u0), a1 = oot_edge(1, &u1);
         snprintf(b, sizeof b, "  at the edge (0.95, a CPU burst every 2.5 s at hold 1): %.0f%% / %.0f%% of the time at hold 2, %llu / %llu step ups a minute", 100 * a0, 100 * a1, (unsigned long long)u0, (unsigned long long)u1);
-        check(a1 < a0 && u1 > u0 && u1 <= 20, b);   // the trade: more of the minute at 60, more steps between 60 and 30
+        check(a1 < a0 && u1 <= u0, b);   // the bursts are paid back at hold 1: more of the minute at 60, and no more steps between 60 and 30
     }
     {   // Ocarina of Time's trip out of the app (oot_trip): today the frame across the stay is late and owes 15 vsyncs (the cap), and with the frames either side three late frames
         // step up; with fps_resume it is on time and owes nothing, and the late frames either side of it (the one after within the 30 of the grace) are paid back without a step up:

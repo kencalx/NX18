@@ -2435,7 +2435,8 @@ static int fstep_hold(void) {
     return h;
 }
 // The waits after a held probe's run at hold 1 that ended early (nvn_fstep.h nvn_fstep.backoff, FSTEP_BURST_CAP): the profile's fps_hold_backoff, double (the default: each such
-// end is a failed probe and doubles the waits up to 8 s) or burst (Ocarina of Time: an end by a short burst on the CPU side is none, any other waits 2 s at most);
+// end is a failed probe and doubles the waits up to 8 s) or burst (Ocarina of Time: a short burst on the CPU side at hold 1 is paid back without a step up, any other end of
+// such a run waits 2 s at most);
 // DM_FPS_HOLD_BACKOFF=double / burst overrides it, also from Documents/env.txt
 static int fstep_backoff(void) {
     static int v = -1;
@@ -2443,7 +2444,7 @@ static int fstep_backoff(void) {
         const char *e = getenv("DM_FPS_HOLD_BACKOFF"); int ok = e && (!strcmp(e, "double") || !strcmp(e, "burst"));
         if (e && *e && !ok) LOG("[RED] DM_FPS_HOLD_BACKOFF=%s: must be double or burst; keeping the profile's fps_hold_backoff", e);
         v = ok ? !strcmp(e, "burst") : DM_GAME_FPS_HOLD_BACKOFF;
-        if (v || ok) LOG("[nvn] frame step: %s (%s)", v ? "a held probe's run at hold 1 that a short burst on the CPU side ended is no failed probe; other early ends wait 2 s at most"
+        if (v || ok) LOG("[nvn] frame step: %s (%s)", v ? "a short burst on the CPU side at hold 1 is paid back without a step up; a held probe's run at hold 1 that ends early otherwise waits 2 s at most"
                                                           : "a held probe's run at hold 1 that ends within 8 s is a failed probe, and the waits double up to 8 s", ok ? "DM_FPS_HOLD_BACKOFF" : "game profile fps_hold_backoff");
     }
     return v;
@@ -2570,9 +2571,12 @@ static void fstep_tick(const win_t *o, int c) {
     else if (probe0 == 2 && !g_fs.probe && g_fs.failed != failed0 && *nl < 40)
         LOG("[nvn] frame step: the run at hold %d after the probe lasted under %.0f s, counted as a failed probe (CPU %d%% on performance cores%s)%s", kmin, FSTEP_HOLD_MAX / 60, g_fs_pshare,
             g_fs.backoff ? "; the next probe within 2 s, fps_hold_backoff burst" : "", ++*nl == 40 ? cutm : "");
-    else if (probe0 == 2 && !g_fs.probe && g_fs.bursts != bursts0 && *nl < 40)   // fps_hold_backoff burst (nvn_fstep.h FSTEP_BURST_CAP)
-        LOG("[nvn] frame step: the run at hold %d after the probe ended in a short burst on the CPU side (GPU at most %.2f, under the late line): not a failed probe, the next one after %.0f s (fps_hold_backoff burst)%s",
-            kmin, g_fs.lgpu, g_fs.hold / 60 / g_fs.per_vsync, ++*nl == 40 ? cutm : "");
+    static int nburst;   // fps_hold_backoff burst (nvn_fstep.h FSTEP_BURST_N): the first 8 said here, the rest counted on the DM_FIELD_LOG window line
+    if (g_fs.bursts != bursts0 && nburst < 8 && *nl < 40) {
+        nburst++;
+        LOG("[nvn] frame step: a short burst on the CPU side at hold %d at present %llu (3 late frames, GPU at most %.2f, under the late line): paid back, no step up (fps_hold_backoff burst)%s",
+            kmin, (unsigned long long)o->presents, g_fs.lgpu, ++*nl == 40 ? cutm : "");
+    }
     if (away && *nl < 40)
         LOG("[nvn] frame step: a frame of %.1f s across %.1f s in the background at present %llu: on time and owing nothing, and the next %d frames' lateness is paid back without a step up (fps_resume)%s",
             shown / fstep_hz(), away_ms / 1e3, (unsigned long long)o->presents, FSTEP_GRACE, ++*nl == 40 ? cutm : "");
@@ -2593,7 +2597,7 @@ static void fstep_tick(const win_t *o, int c) {
     if (flog && o->presents % 1800 == 0) {
         int w = snprintf(wn, sizeof wn, "; in this window %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials)", (unsigned long long)(g_fs.late - wl),
                  (unsigned long long)(g_fs.paid - wp), g_fs.dropped - wdr, (unsigned long long)(g_fs.ups - wu), (unsigned long long)(g_fs.downs - wd), (unsigned long long)(g_fs.probes - wpr), (unsigned long long)(g_fs.failed - wf));
-        static uint64_t wb; if (g_fs.backoff && w > 0 && (size_t)w < sizeof wn) snprintf(wn + w, sizeof wn - (size_t)w, ", %llu short bursts on the CPU side not counted as failed", (unsigned long long)(g_fs.bursts - wb));
+        static uint64_t wb; if (g_fs.backoff && w > 0 && (size_t)w < sizeof wn) snprintf(wn + w, sizeof wn - (size_t)w, ", %llu short bursts on the CPU side paid back without a step up", (unsigned long long)(g_fs.bursts - wb));
         wl = g_fs.late; wp = g_fs.paid; wdr = g_fs.dropped; wu = g_fs.ups; wd = g_fs.downs; wpr = g_fs.probes; wf = g_fs.failed; wb = g_fs.bursts; nwin = 0;
     }
     if (!dm_fps_state) {   // 120 fps: no game clock to read; the frames at each hold say how much of the time it held 120

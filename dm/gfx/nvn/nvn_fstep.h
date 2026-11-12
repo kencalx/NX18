@@ -62,10 +62,15 @@
 // Time on an iPhone 18 Pro Max (X1.0, run B, 90-120 s) had a short burst on the CPU side every 1.3-2.3 s at hold 1: 3 frames late at a cost of 1.12-1.23 with the GPU at 0.81-1.05
 // (the late line 1.1), beside 11-21 ms of submit against a usual 5-7. Each probe back to hold 1 held its 60 frames, the next burst ended its run under FSTEP_HOLD_MAX, and the
 // failures doubled the waits at hold 2: 31, 61, 121 and 240 frames, 453 of 1,800 at hold 2. With backoff such a run is not kmin's failure when the late frames that ended it had
-// their GPU under the late line and asked for one vsync more (a short burst on the CPU side): the hold-offs go back to 1 s, as after a run that lasted; any other early end still
-// fails and doubles them, but to FSTEP_BURST_CAP (2 s) at most. Probes that fail in their own trial, fit trials that fail, and the hold-off of failed probes over budget
-// (nvn_fstep_pheld, the GPU-bound areas of run A) are as before (t_fstep: the run B and run A replays)
+// their GPU under the late line and asked for one vsync more (a short burst on the CPU side): the hold stays at kmin and the lateness is paid back as debt, as after a stay in the
+// background; no step up, so no wait and nothing the probes measured is forgotten. Stepping up for each burst and back after 1 s instead switched between 60 and 30 every 1.3-2.3 s
+// for as long as the bursts came (run B: 13 step ups in 30 s against 6 when doubling), and each probe back from 30 into a GPU-bound area (run A) failed. A burst is one at kmin
+// outside a trial, in a run that has not had one in the last FSTEP_RUN frames, and lasts FSTEP_BURST_N late frames at most: a longer one, one with the GPU over the late line or
+// asking for more, and one soon after the last steps up as before. A held probe's run at kmin that ends early that way still fails, but waits FSTEP_BURST_CAP (2 s) at most.
+// Probes that fail in their own trial, fit trials that fail, and the hold-off of failed probes over budget (nvn_fstep_pheld, the GPU-bound areas of run A) are as before
+// (t_fstep: the run B and run A replays)
 #define FSTEP_BURST_CAP 120.0
+#define FSTEP_BURST_N 5       // late frames in a row a short burst on the CPU side may last (run B's: 3)
 // A frame across a stay in the background (nvn_fstep.away, set by the caller for one call: the profile's fps_resume, DM_FPS_RESUME; Ocarina of Time, X1.0). The guest's clock is
 // frozen while the app is away, so the stay is time the game never ran: before, that frame counted as late and as a debt, capped at FSTEP_DEBT_MAX, which the game then paid
 // back by running 15 vsyncs fast; with the late frame at the focus loss before it and the first frame after it (page-ins), three late frames stepped up to hold 2 for a second
@@ -97,7 +102,8 @@ typedef struct {
     int upf;                  // frames left after a step up whose late screen verdicts are about frames before it (FSTEP_UP_LAG)
     int pin, pinned;          // set by the caller (kept): 1 = a movie above 30 fps plays, hold kmin; the last call's pin
     int away, rgrace;         // set by the caller for one call, then cleared: 1 = the frame spans a stay in the background; frames left after it whose lateness does not step up
-    int backoff;              // set by the caller (kept): 1 = a held probe's run at kmin that a short burst on the CPU side ended is no failure, other early ends wait FSTEP_BURST_CAP at most
+    int backoff;              // set by the caller (kept): 1 = a short burst on the CPU side at kmin is paid back without a step up, a held probe's run's other early ends wait FSTEP_BURST_CAP at most
+    int inburst, bwait;       // backoff: the late frames in a row are a burst let through; frames left before another may be
     double gpu, lgpu;         // set by the caller before each call: the frame's GPU time in vsyncs (0 = none finished yet); the most of it over the late frames in a row
     uint64_t late, paid, ups, downs, failed, probes, bursts; double dropped;   // statistics for the log (bursts: runs at kmin ended by a short burst on the CPU side, with backoff)
 } nvn_fstep;
@@ -172,6 +178,8 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     int lagged = s->upf > 0 && scr == 2 && cost <= held + FSTEP_LATE;   // the screen's verdict on a frame before the last step up
     if (s->upf > 0) s->upf--;
     if (late) { s->late++; s->late_run = grace || lagged || rg ? 0 : s->late_run + 1; s->fit_run = 0; s->lgpu = s->late_run > 1 && s->lgpu > s->gpu ? s->lgpu : s->gpu; } else s->late_run = 0;
+    if (!s->late_run) s->inburst = 0;
+    if (s->bwait > 0 && !s->inburst) s->bwait--;
     if (s->probe == 1 && !grace && !cap_probe && held <= kmin && !away) { s->psum += cost; s->pn++; }   // the probe's frames after its grace: kmin's cost
     // The cost of the frames on time (a hitch is not what the scene costs): at kmin, and at the longer hold
     if (kmin != s->ckmin) {   // another cap: its run starts over, and what held it before comes back
@@ -191,14 +199,16 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         if (held != s->ck) { s->ck = held; s->cn = 0; }
         if (!late && fits) { s->ccur = s->cn ? s->ccur + (cost - s->ccur) / 8 : cost; s->cn++; }
     }
-    if (s->late_run >= 3 && s->k < kmax) {   // step up to the cost, at least one vsync
-        int want = (int)ceil(cost - 0.05);
-        if (want < s->k + 1) want = s->k + 1;
-        if (want > kmax) want = kmax;
-        // backoff: a held probe's run at kmin ended early by three frames whose GPU fitted and that ask for one vsync more is a short burst on the CPU side, not kmin's failure
-        int burst = s->backoff && s->probe == 2 && s->since < hold_max && s->lgpu > 0 && s->lgpu <= held + FSTEP_LATE && want <= held + 1;
-        if (burst) { s->bursts++; s->hold = hold0; nvn_fstep_pforget(s, hold0); }
-        else if (s->trial || (s->probe == 2 && s->since < hold_max)) {
+    int want = (int)ceil(cost - 0.05);   // a step up goes to the cost, at least one vsync
+    if (want < s->k + 1) want = s->k + 1;
+    if (want > kmax) want = kmax;
+    // backoff: late frames at kmin whose GPU fitted and that ask for one vsync more are a short burst on the CPU side: paid back, no step up (FSTEP_BURST_N of them at most)
+    int burst = s->backoff && s->late_run >= 3 && s->k < kmax && held <= kmin && !s->trial && s->late_run <= FSTEP_BURST_N && s->lgpu > 0 && s->lgpu <= held + FSTEP_LATE
+                && want <= held + 1 && (s->inburst || !s->bwait);
+    if (burst && !s->inburst) { s->bursts++; s->inburst = 1; s->bwait = FSTEP_RUN; }
+    if (s->late_run >= 3 && s->k < kmax && !burst) {   // step up to the cost, at least one vsync
+        s->inburst = 0;
+        if (s->trial || (s->probe == 2 && s->since < hold_max)) {
             s->failed++; s->trial = 0; s->hold = s->hold * 2 < hold_max ? s->hold * 2 : hold_max;
             if (s->probe) {   // a failed probe: what it measured at kmin, and the probes' own hold-off
                 s->phold = s->phold * 2 < FSTEP_PHOLD_MAX * (s->per_vsync ? s->per_vsync : 1) ? s->phold * 2 : FSTEP_PHOLD_MAX * (s->per_vsync ? s->per_vsync : 1);

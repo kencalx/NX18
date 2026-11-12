@@ -139,7 +139,7 @@ SWITCH_BINDING = [
     ('present_interval_choice', '', {'what': 'the launcher offers Frame rate 30 / 60 (DM_PRESENT_INTERVAL game / display)', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
      'why': "offered only for a game whose logic runs on its own clock, checked at both rates"}),   # before present_interval: classify matches a key by its start
     ('present_interval', '', {'what': 'one frame per display tick', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'right only for games whose logic does not count frames'}),
-    ('fps_hold_backoff', '', {'what': "a held probe's run at hold 1 ended by a short burst on the CPU side is no failure, other early ends wait 2 s at most", 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
+    ('fps_hold_backoff', '', {'what': "a short burst on the CPU side at hold 1 paid back without a step up, a held probe's run's other early ends wait 2 s at most", 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
      'why': 'what any game under the frame step whose bursts are on the CPU side should get: the GPU-bound back-off is unchanged; per game (Ocarina of Time) in X1.0 only for the frozen release',
      'blocked': 'X1.0 is frozen: the default for every game is X2.0 work, after an iPhone A/B on Ocarina of Time and a run of Breath of the Wild or Tears of the Kingdom with it'}),   # before fps_hold: classify matches a key by its start
     ('fps_resume', '', {'what': 'the frame across a stay in the background on time and owing nothing, the 30 after it not stepping the hold up', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',

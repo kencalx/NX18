@@ -90,7 +90,7 @@ class HoldFrames(unittest.TestCase):
 
     def test_the_marker_matches_the_producer(self):   # every kind of frame step line the host counts toward its 40 carries the marker devlog reads (X1.0's, DM_FIELD_LOG=0)
         src = (REPO / 'dm/gfx/nvn/hle_nvn.c').read_text(errors='replace')
-        self.assertEqual(src.count('++*nl == 40 ? cutm'), 6)   # a change of hold, a probe's end, a short run after one, a run ended by a short CPU burst (fps_hold_backoff), a frame across a stay (fps_resume), probes allowed again
+        self.assertEqual(src.count('++*nl == 40 ? cutm'), 6)   # a change of hold, a probe's end, a short run after one, a short CPU burst paid back at hold 1 (fps_hold_backoff), a frame across a stay (fps_resume), probes allowed again
         self.assertIn('"' + devlog.FSTEP_CUT + '"', src)
         self.assertIn('"; further changes in this window only counted in its game time line"', src)   # the field log's marker, per window of 1800 presents
 

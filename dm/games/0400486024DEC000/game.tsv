@@ -41,8 +41,9 @@ shader_note	Ocarina of Time shaders
 # frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on any build that keeps it): 1 vsync at 60 fps, 2 when 60 does not hold, so game time = real time
 fps_target	60
 # On an iPhone 18 Pro Max (X1.0) the hold sat at 30 fps for 1, 2, 4 then 8 s after short bursts on the CPU side every 1.3-2.3 s at 60 (the GPU under the late line): each probe
-# back to 60 held, then the next burst ended its run before the 8 s that count it held, and each failure doubled the waits. burst: such a run is no failed probe, and any other
-# early end waits 2 s at most (nvn_fstep.h FSTEP_BURST_CAP); the GPU-bound back-off is unchanged. DM_FPS_HOLD_BACKOFF=double in env.txt turns it off. Not yet run on the phone
+# back to 60 held, then the next burst ended its run before the 8 s that count it held, and each failure doubled the waits. burst: such a burst at 60 is paid back without a step
+# up, and a held probe's run that ends early otherwise waits 2 s at most (nvn_fstep.h FSTEP_BURST_N, FSTEP_BURST_CAP); the GPU-bound back-off is unchanged.
+# DM_FPS_HOLD_BACKOFF=double in env.txt turns it off. Not yet run on the phone
 fps_hold_backoff	burst
 # After a trip out of the app (iPhone 18 Pro Max, X1.0, 40 s away) the frame across the stay counted as late and owed 15 vsyncs, which the game ran fast to pay back, and with the
 # frames either side three late frames held 30 fps for about a second. on: that frame is on time and owes nothing, and the 30 frames after it pay their lateness back without
