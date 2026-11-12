@@ -1,6 +1,7 @@
 """The Mac app's Game guide (dm/mac/Launcher.swift MacGuideWindow): compile the settings window with mac_guide_check.swift and load a guide folder written here into its web view.
 The guide's pages read their other files with XMLHttpRequest and fetch and call window.nx, which a browser opening them from file: URLs refuses or lacks; the window serves them
-through nx18guide:// with the shim, as the iPhone's GuideViewer.swift does (LauncherGuideFiles.swift). No window is shown and nothing goes to the network."""
+through nx18guide:// with the shim, as the iPhone's GuideViewer.swift does (LauncherGuideFiles.swift). Then the placeholder guide (dm/ios/tests/fixtures/guide): fitted to the window
+at the console's 1280x720, set up after its first-paint event, its Back, L and R pressed from the window, and its end URL closing it. No window is shown and nothing goes to the network."""
 from pathlib import Path
 import shutil
 import subprocess
@@ -47,7 +48,8 @@ class MacGuideTests(unittest.TestCase):
             c = subprocess.run(['xcrun', '-sdk', 'macosx', 'swiftc', '-swift-version', '5', '-parse-as-library', '-module-cache-path', str(tmp / 'module-cache'),
                                 '-o', str(exe), *map(str, sources)], capture_output=True, text=True, timeout=300)
             self.assertEqual(c.returncode, 0, c.stdout + c.stderr)
-            r = subprocess.run([str(exe), str(htdocs)], capture_output=True, text=True, timeout=120)
+            placeholder = REPO / 'dm/ios/tests/fixtures/guide/html1/html-document/htmlcontents.htdocs'   # the made-up guide: fit, first paint, footer buttons, end
+            r = subprocess.run([str(exe), str(htdocs), str(placeholder)], capture_output=True, text=True, timeout=180)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertIn('mac guide: 0 failed', r.stdout)
 

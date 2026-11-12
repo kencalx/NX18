@@ -781,7 +781,8 @@ struct LauncherView: View {
     }
 
     private func handle(_ e: LauncherPadEvent) {
-        if let open = sheet {   // a viewer is up: B closes it, up / down scroll, L / R switch between the guide and the manual
+        if let open = sheet {   // a viewer is up: what it takes itself (the guide's page: every button but ZL / ZR, GuideViewer.swift), else B closes it, up / down scroll, L / R switch between the guide and the manual
+            if scroller.pad?(e) == true { return }
             switch e {
             case .b: sheet = nil
             case .up: scroller.scroll?(-160)
@@ -818,7 +819,7 @@ struct LauncherView: View {
         case .a: activate(cur)
         case .plus: start()
         case .y: openGuide()
-        case .b, .l, .r: break
+        case .b, .x, .minus, .l, .r, .zl, .zr: break
         }
     }
 

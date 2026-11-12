@@ -1,10 +1,12 @@
-// The game guide's pages, for the iPhone and iPad (GuideViewer.swift) and the Mac app's guide window (dm/mac/Launcher.swift MacGuideWindow): a WKWebView configuration that serves
+// The guide's pages, for the iPhone and iPad (GuideViewer.swift) and the Mac app's guide window (dm/mac/Launcher.swift MacGuideWindow): a WKWebView configuration that serves
 // the guide's .htdocs through a scheme of its own (nx18guide://guide/<path>), as the host's in-game viewer serves them (dm/host/web_apple.m dmweb://). Their scripts may then read the
 // guide's other files with XMLHttpRequest or fetch, which WebKit refuses between file: URLs, and the button icons in their text come from the host's stand-in for the Nintendo
-// extension font (DM_SHARED_FONT_EXT, else DM_FONT_DIR's nintendo_ext.ttf, at U+E000-E1FF). The pages were written for the Switch's web applet: a script at document start gives
-// them a harmless window.nx, which a browser opening them from file: does not have.
+// extension font (DM_SHARED_FONT_EXT, else DM_FONT_DIR's nintendo_ext.ttf, at U+E000-E1FF). The pages were written for the Switch's web applet at 1280x720: a script at document
+// start gives them the applet's window.nx, its footer buttons, its first-paint event, taps they cancel as clicks and the controller as keys (shim), and the viewers lay them out at
+// 1280x720 and scale them to fit (fit). A page ends by going to http://localhost/ (isEnd): the viewer closes.
 // Nothing here goes to the network: every response carries a Content-Security-Policy that allows the guide's own scheme only (images, scripts, styles, fetch, media), a content
-// rule list blocks http(s), ws(s), ftp and file: loads besides (attached before the first page loads), and a navigation outside the guide is refused. No UIKit or AppKit
+// rule list blocks http(s), ws(s), ftp and file: loads besides (attached before the first page loads), and a navigation outside the guide is refused (the end is cancelled too,
+// never loaded). No UIKit or AppKit
 import Foundation
 import WebKit
 
@@ -14,42 +16,259 @@ import WebKit
     static let scheme = "nx18guide"
     static let policy = "default-src nx18guide: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src nx18guide: data: blob:; form-action 'none'"
 
-    // The page's stand-in for the Switch applet's window.nx, at document start: every call does nothing and nothing throws; nx.endApplet, nx.exit and window.close post nx18Close
+    // The page's stand-in for the Switch browser's applet API and controller, at document start (dm/host/web_apple.m SHIM is the in-game viewer's; this one adds what the guides
+    // need on a touch screen). Every nx call it lacks does nothing and nothing throws; nx.endApplet, nx.exit and window.close post nx18Close.
+    // - The footer's buttons (nx.footer.setAssign: the page's Back on B, its page turning on L / R) are kept, and their names posted to nx18State when they change: the viewer
+    //   shows a Back, L and R button for them and sends the controller's buttons there (__nx18.footer). B with nothing assigned is the viewer's own back ('back').
+    // - The console's first paint (NXFirstPaintEndAfterLoad on window) once each page has loaded and painted: guides wait for it before loading their pictures and setting up;
+    //   a page shown again from the back-forward cache is loaded again (the guide set it up on its load and faded it out as it left).
+    // - A tap the page cancelled: guides written for the console call preventDefault on every touch when window.nx exists, and WebKit then sends no click. A one-finger tap that
+    //   did not move, whose touchstart or touchend the page cancelled and that no click followed, clicks what it landed on (its link, button or focusable ancestor), after focusing it;
+    //   what it landed on is what shows there, under any invisible (opacity 0) page stacked over it.
+    // - The controller as keys (__nx18.key: the arrow keys 37-40 with keyCode set, A as 32 that clicks the focused link when the page does not take it), and for a page with no key
+    //   handler of its own, the arrows move the focus to the nearest link or button that way (else up / down scroll it).
+    // - :focus rules copied for [data-dm-focus], which follows the focus (WebKit matches :focus only in the key window, and on the iPhone the web view never takes the keyboard),
+    //   and the focus and blur events WebKit then does not send (guides show an item's picture and text in its onfocus); up / down with nothing focused focus the first item
     static let shim = """
     (function () {
-      if (window.__nx18) return; window.__nx18 = 1;
-      var post = function () { try { window.webkit.messageHandlers.nx18Close.postMessage('close'); } catch (e) {} };
+      if (window.__nx18) return;
+      var post = function (name, m) { try { window.webkit.messageHandlers[name].postMessage(m); } catch (e) {} };
+      var close = function () { post('nx18Close', 'close'); };
       var nothing = function () { return stub(function () {}); };
       var stub = function (o) {
         return new Proxy(o, {get: function (t, p) { return (p in t || typeof p !== 'string' || p === 'then' || p === 'toJSON') ? t[p] : nothing(); }});
       };
-      var font = function () {   // the Nintendo extension font's button icons, as the host's viewer gives them
-        var s = document.createElement('style');
-        s.textContent = '@font-face{font-family:"nx18-nx-ext";src:url("/__nx18_font/nintendo_ext.ttf");unicode-range:U+E000-E1FF}' +
-          'html{font-family:"nx18-nx-ext",-apple-system,"Helvetica Neue",Helvetica,Arial,sans-serif}';
-        var r = document.head || document.documentElement; if (r) r.insertBefore(s, r.firstChild);
-      };
-      if (document.documentElement) font(); else document.addEventListener('DOMContentLoaded', font);
+      // The footer's buttons: true = the viewer's own action (B: back), false = none (unsetAssign), a function = the page's
+      var assign = {B: true};
+      var report = function () { post('nx18State', {footer: Object.keys(assign).filter(function (k) { return typeof assign[k] === 'function'; })}); };
       window.nx = stub({
-        endApplet: post, exit: post,
+        endApplet: close, exit: close,
         addEventListener: function () {}, removeEventListener: function () {},
         sendMessage: function () { return true; },
-        footer: stub({setAssign: function () {}, unsetAssign: function () {}, setFixed: function () {}})
+        setCursorScrollSpeed: function () {},
+        footer: stub({
+          setAssign: function (b, label, fn) { assign[b] = typeof fn === 'function' ? fn : true; report(); },
+          unsetAssign: function (b) { assign[b] = false; report(); },
+          setFixed: function () {}
+        })
       });
-      window.close = post;
+      window.close = close;
+      // A page back from the back-forward cache is loaded again, as the console's browser does: guides fade the page out as they leave it and set it up only on its load (and
+      // its first paint), so the page as it was left stays black and takes no taps
+      window.addEventListener('pageshow', function (e) { if (e.persisted) location.reload(); else report(); });
+
+      // The page's look: the Nintendo extension font's button icons (the host's stand-in), no tap highlight or text selection, no focus ring when the page asks for none
+      var style = function () {
+        var m = document.querySelector('meta[name="focus-ring-visibility"]'), s = document.createElement('style');
+        s.textContent = '@font-face{font-family:"nx18-nx-ext";src:url("/__nx18_font/nintendo_ext.ttf");unicode-range:U+E000-E1FF}' +
+          'html{font-family:"nx18-nx-ext",-apple-system,"Helvetica Neue",Helvetica,Arial,sans-serif;-webkit-tap-highlight-color:transparent;-webkit-user-select:none;-webkit-touch-callout:none}' +
+          (m && m.content === 'hidden' ? ':focus,[data-dm-focus]{outline:none!important}' : '');
+        var r = document.head || document.documentElement; if (r) r.insertBefore(s, r.firstChild);
+      };
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', style); else style();
+      var mark = function (el) {
+        var o = document.querySelectorAll('[data-dm-focus]');
+        for (var i = 0; i < o.length; i++) if (o[i] !== el) o[i].removeAttribute('data-dm-focus');
+        if (el && el !== document.body && el !== document.documentElement && el.setAttribute) el.setAttribute('data-dm-focus', '');
+      };
+      var mirror = function () {
+        var out = [];
+        var walk = function (rules) {
+          for (var i = 0; i < rules.length; i++) {
+            var r = rules[i];
+            if (r.selectorText && r.selectorText.indexOf(':focus') >= 0) out.push(r.cssText.replace(/:focus(?![-\\w])/g, '[data-dm-focus]'));
+            else if (r.cssRules && r.media) { var k = out.length; walk(r.cssRules); if (out.length > k) out.splice(k, 0, '@media ' + r.media.mediaText + '{'), out.push('}'); }
+          }
+        };
+        for (var i = 0; i < document.styleSheets.length; i++) { try { walk(document.styleSheets[i].cssRules); } catch (e) {} }
+        var s = document.createElement('style'); s.textContent = out.join('\\n'); (document.head || document.documentElement).appendChild(s);
+        mark(document.activeElement);
+      };
+      // The focus as it changes: a page focused in a view that is not the key one gets no focus events, so the focused element is also looked at once a frame
+      document.addEventListener('focus', function (e) { mark(e.target); }, true);
+      document.addEventListener('blur', function () { setTimeout(function () { mark(document.activeElement); }, 0); }, true);
+      // Its focus and blur events too: WebKit sends none in a page whose view is not focused (the iPhone's web view never takes the keyboard), and guides do their work in
+      // onfocus (the console's cursor is the focus: an item's picture, video and text show when it is focused). A focus change no event reported gets them here, at once after
+      // focus() or blur() and once a frame for any other change; when WebKit sent them (a focused view), nothing is sent twice
+      var heard = {f: null, b: null}, seen = document.activeElement;
+      document.addEventListener('focus', function (e) { heard.f = e.target; if (heard.b === e.target) heard.b = null; }, true);
+      document.addEventListener('blur', function (e) { heard.b = e.target; if (heard.f === e.target) heard.f = null; }, true);
+      var plain = function (el) { return !el || el === document.body || el === document.documentElement || !el.dispatchEvent; };
+      var fire = function (el, type, rel) {
+        try { el.dispatchEvent(new FocusEvent(type, {bubbles: type === 'focusin' || type === 'focusout', relatedTarget: rel || null})); } catch (e) { console.error(e && e.message); }
+      };
+      var settle = function () {
+        var old = seen, now = document.activeElement;
+        if (now === old) return;
+        seen = now;
+        if (!plain(old) && heard.b !== old) { fire(old, 'blur', now); fire(old, 'focusout', now); }
+        if (!plain(now) && heard.f !== now && document.activeElement === now) { fire(now, 'focus', old); if (document.activeElement === now) fire(now, 'focusin', old); }
+      };
+      ['focus', 'blur'].forEach(function (m) {
+        var f = HTMLElement.prototype[m];
+        if (f) HTMLElement.prototype[m] = function () { var r = f.apply(this, arguments); settle(); return r; };
+      });
+      var focused = null;
+      var follow = function () { settle(); if (document.activeElement !== focused) { focused = document.activeElement; mark(focused); } requestAnimationFrame(follow); };
+      requestAnimationFrame(follow);
+
+      // The console's first paint after the load: the page's own load handlers have run, and it has painted once (or 100 ms went by: a view not on the screen paints no frames)
+      window.addEventListener('load', function () {
+        mirror(); report();
+        var sent = false, paint = function () { if (!sent) { sent = true; window.dispatchEvent(new Event('NXFirstPaintEndAfterLoad')); } };
+        requestAnimationFrame(function () { setTimeout(paint, 0); });
+        setTimeout(paint, 100);
+      });
+
+      // A tap the page cancelled becomes a click (decided after the touch's listeners have all run: defaultPrevented stays set on the event)
+      var CLICKABLE = 'a[href],button,input,select,textarea,label,summary,[onclick],[tabindex]';
+      // What the player sees at a point: the topmost element there that is not see-through. Guides stack all their pages at one place and show one by its opacity (the console
+      // cancels their touches, so a page made invisible on top of the shown one never mattered there): a tap is for what is shown, not for an invisible page over it
+      var shown = function (n) {
+        for (; n && n.nodeType === 1; n = n.parentElement) { var st = getComputedStyle(n); if (st.opacity === '0' || st.visibility === 'hidden') return false; }
+        return true;
+      };
+      var seenAt = function (x, y) {
+        var all = document.elementsFromPoint ? document.elementsFromPoint(x, y) : [document.elementFromPoint(x, y)];
+        for (var i = 0; i < all.length; i++) if (all[i] && shown(all[i])) return all[i];
+        return all[0] || null;
+      };
+      var tap = null;
+      window.addEventListener('touchstart', function (e) {
+        var t = e.touches[0];
+        tap = e.touches.length === 1 && t ? {x: t.clientX, y: t.clientY, start: e, moved: false, clicked: false} : null;
+      }, true);
+      window.addEventListener('touchmove', function (e) {
+        var t = e.touches[0];
+        if (tap && t && Math.abs(t.clientX - tap.x) + Math.abs(t.clientY - tap.y) > 12) tap.moved = true;
+      }, true);
+      window.addEventListener('touchcancel', function () { tap = null; }, true);
+      window.addEventListener('click', function (e) { if (tap && e.isTrusted) tap.clicked = true; }, true);
+      window.addEventListener('touchend', function (e) {
+        var s = tap;
+        if (!s || s.moved || e.touches.length) { tap = null; return; }
+        setTimeout(function () {
+          if (tap === s) tap = null;
+          if (s.clicked || !(s.start.defaultPrevented || e.defaultPrevented)) return;   // WebKit clicked, or will: the page did not cancel the touch
+          var el = seenAt(s.x, s.y); if (!el) return;
+          var c = (el.closest && el.closest(CLICKABLE)) || el;
+          if (c.focus) { try { c.focus({preventScroll: true}); } catch (x) {} }
+          if (c.click) c.click();
+        }, 40);
+      }, true);
+      document.addEventListener('click', function (e) {   // a click focuses what it lands on, as the console's cursor does (focus-driven pages show its details)
+        var c = e.target && e.target.closest && e.target.closest(CLICKABLE);
+        if (c && c !== document.activeElement && c.focus) { try { c.focus({preventScroll: true}); } catch (x) {} }
+      }, true);
+
+      // Whether the page reads keys itself (then the arrows are only its keys, not a focus move as well)
+      var keyed = false;
+      var add = EventTarget.prototype.addEventListener;
+      EventTarget.prototype.addEventListener = function (t) { if (t === 'keydown' || t === 'keyup' || t === 'keypress') keyed = true; return add.apply(this, arguments); };
+      var reads = function () {
+        return keyed || !!(document.onkeydown || window.onkeydown || document.onkeyup || window.onkeyup || (document.body && (document.body.onkeydown || document.body.onkeyup)));
+      };
+      var KEYS = {37: ['ArrowLeft', 'ArrowLeft'], 38: ['ArrowUp', 'ArrowUp'], 39: ['ArrowRight', 'ArrowRight'], 40: ['ArrowDown', 'ArrowDown'], 32: [' ', 'Space']};
+      var target = function () { var a = document.activeElement; return a && a !== document.documentElement ? a : document.body || document.documentElement; };
+      var key = function (type, code, at) {
+        var e = new KeyboardEvent(type, {key: KEYS[code][0], code: KEYS[code][1], bubbles: true, cancelable: true});
+        Object.defineProperty(e, 'keyCode', {get: function () { return code; }});
+        Object.defineProperty(e, 'which', {get: function () { return code; }});
+        return (at || target()).dispatchEvent(e);
+      };
+      var visible = function (el) {
+        var r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight && getComputedStyle(el).visibility !== 'hidden';
+      };
+      // The nearest focusable element from the focused one in a direction (37-40); the first one when nothing is focused
+      var nearest = function (code) {
+        var all = Array.prototype.filter.call(document.querySelectorAll('a[href],button,input,select,textarea,[tabindex]:not([tabindex="-1"])'), visible);
+        var a = document.activeElement, from = a && a !== document.body && all.indexOf(a) >= 0 ? a.getBoundingClientRect() : null;
+        if (!from) return all[0] || null;
+        var fx = from.left + from.width / 2, fy = from.top + from.height / 2, best = null, score = Infinity;
+        all.forEach(function (el) {
+          if (el === a) return;
+          var r = el.getBoundingClientRect(), x = r.left + r.width / 2 - fx, y = r.top + r.height / 2 - fy;
+          var along = code === 37 ? -x : code === 39 ? x : code === 38 ? -y : y, across = code === 37 || code === 39 ? Math.abs(y) : Math.abs(x);
+          if (along <= 1) return;
+          var s = along + 2 * across;
+          if (s < score) { score = s; best = el; }
+        });
+        return best;
+      };
+      window.__nx18 = {
+        // A footer button: 'page' when the page took it, 'back' for B left to the viewer, 'none' otherwise
+        footer: function (b) {
+          var a = assign[b];
+          if (typeof a === 'function') { try { a(); } catch (e) { console.error(e && e.message); } return 'page'; }
+          return a === true && b === 'B' ? 'back' : 'none';
+        },
+        // An arrow key (37-40): the page's, else a focus move (or a scroll up or down)
+        key: function (code) {
+          var el = target(), go = key('keydown', code, el);
+          key('keyup', code, el);
+          if (!go) return;
+          // Nothing focused yet (a page that moves its focus from the focused item, as the console's cursor starts on one): up / down the page did not take focus the first item
+          if (plain(document.activeElement) && (code === 38 || code === 40)) { var f = nearest(code); if (f) { try { f.focus({preventScroll: false}); } catch (x) {} return; } }
+          if (reads()) return;
+          var n = nearest(code);
+          if (n) { try { n.focus({preventScroll: false}); } catch (x) {} }
+          else if (code === 38 || code === 40) window.scrollBy(0, code === 40 ? 160 : -160);
+        },
+        // A: the page's A when it took the button over, else key 32 at the focused element, which is clicked when the page does not take the key
+        a: function () {
+          if (typeof assign.A === 'function') { try { assign.A(); } catch (e) {} return; }
+          var el = target(), go = key('keydown', 32, el);
+          key('keyup', 32, el);
+          if (go && el.closest && el.closest(CLICKABLE) && el !== document.body) el.click();
+        },
+        state: report
+      };
     })();
     """
 
-    // The web view's configuration: no website data kept, the guide's scheme served by files, the shim in every frame, and close called for nx18Close (the caller removes the
-    // handler when the view goes: the controller keeps it)
-    static func configuration(files: LauncherGuideFiles, close: any WKScriptMessageHandler) -> WKWebViewConfiguration {
+    // The script messages the pages post: nx18Close (nx.endApplet, nx.exit, window.close) and nx18State (the footer buttons the page assigned: {footer: ["B", "L", ...]})
+    static let messages = ["nx18Close", "nx18State"]
+
+    // The web view's configuration: no website data kept, the guide's scheme served by files, the shim in every frame, and the page's messages for handler (the caller removes
+    // them with detach when the view goes: the controller keeps its handler). Sounds and videos play without a tap, inline, as on the console
+    static func configuration(files: LauncherGuideFiles, handler: any WKScriptMessageHandler) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         config.setURLSchemeHandler(files, forURLScheme: scheme)
         config.userContentController.addUserScript(WKUserScript(source: shim, injectionTime: .atDocumentStart, forMainFrameOnly: false))
-        config.userContentController.add(close, name: "nx18Close")
+        for m in messages { config.userContentController.add(handler, name: m) }
+        config.mediaTypesRequiringUserActionForPlayback = []
+        #if os(iOS)
+        config.allowsInlineMediaPlayback = true
+        #endif
         return config
     }
+    // Lets the page's handler go with the view
+    static func detach(_ web: WKWebView) {
+        for m in messages { web.configuration.userContentController.removeScriptMessageHandler(forName: m) }
+    }
+    // The footer buttons a page's nx18State message names
+    static func footer(of body: Any) -> Set<String> {
+        guard let d = body as? [String: Any], let keys = d["footer"] as? [Any] else { return [] }
+        return Set(keys.compactMap { $0 as? String })
+    }
+    // The script that presses a footer button on the page: its result is 'page', 'back' or 'none'
+    static func footerScript(_ button: String) -> String {
+        let b = button.filter { $0.isLetter }
+        return "window.__nx18 && window.__nx18.footer ? __nx18.footer('\(b)') : 'back'"
+    }
+
+    // The console page's size: the guides are laid out for the Switch's 1280x720 screen
+    static let pageSize = CGSize(width: 1280, height: 720)
+    // The page fitted into an area, centred, whole (the rest of the area is a letterbox); its scale is the rect's width / 1280
+    static func fit(in area: CGRect) -> CGRect {
+        guard area.width > 1, area.height > 1 else { return CGRect(origin: area.origin, size: .zero) }
+        var w = area.width, h = area.height
+        if w / h > pageSize.width / pageSize.height { w = h * pageSize.width / pageSize.height } else { h = w * pageSize.height / pageSize.width }
+        return CGRect(x: area.minX + ((area.width - w) / 2).rounded(.down), y: area.minY + ((area.height - h) / 2).rounded(.down), width: w, height: h)
+    }
+
     // The first page, once the network block list is attached, so no load of the page happens before it
     static func load(_ web: WKWebView, start: URL) {
         let content = web.configuration.userContentController
@@ -65,6 +284,18 @@ import WebKit
         if scheme == Self.scheme || scheme == "about" || scheme == "data" || scheme == "blob" { return true }
         fputs("launcher: guide link \(scheme) outside the guide refused\n", stderr)
         return false
+    }
+    // The page's end: the console's guides finish by going to http://localhost/ (a mode change, the last page's Back, the end from the first page), the browser applet's callback.
+    // Nothing is loaded: the viewer cancels the navigation and closes
+    static func isEnd(_ url: URL?) -> Bool {
+        guard let url, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return false }
+        return url.host?.trimmingCharacters(in: .whitespaces).lowercased() == "localhost"
+    }
+    enum Navigation: Equatable { case allow, refuse, end }
+    // What the viewer does with a navigation: the guide's own pages load, the end closes the viewer, anything else is refused
+    static func navigation(_ url: URL?) -> Navigation {
+        if isEnd(url) { fputs("launcher: the guide ended (\(url?.path ?? "/"))\n", stderr); return .end }
+        return allows(url) ? .allow : .refuse
     }
     let root: URL
     let fontDir: URL?   // where nintendo_ext.ttf is when the environment names no font (the Mac app's Resources/dm/font: its launcher runs before launcher.c sets DM_FONT_DIR for the host)

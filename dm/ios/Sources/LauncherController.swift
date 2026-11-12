@@ -1,7 +1,8 @@
 // The settings screen's controller navigation (Launcher.swift's LauncherView). While the screen is up a game controller moves a cyan focus ring over the preset chips, Play, Game guide,
 // About, every setting row, Advanced, Reset, Cloud saves and Skip this screen next time: up / down (the D-pad or the left stick, repeating while held) moves, left / right moves
 // along a line of buttons or changes the focused row (a choice's next option it may pick, a slider by one step: LauncherModel.advance), A presses (a switch flips, a menu row
-// takes its next option), + plays, Y opens the game guide, B closes an open guide or About sheet.
+// takes its next option), + plays, Y opens the game guide, B closes an open guide or About sheet. While the guide's page is up every button is the page's (GuideViewer.swift
+// LauncherGuidePageModel.handle: B goes back, L / R turn its pages) and ZL / ZR switch between the guide and the manual.
 // The buttons are read by polling (LauncherGamepad.run, a task of the view, 60 times a second): no handler is set on any controller, so none is left behind when Play hands the
 // controllers over to the game (DmGamepad.m sets its own after startGame), and a controller that connects while the screen is up is read from its next poll on. A and + act on their
 // release, so the A that pressed Play is up before the game reads the controller. Only a real release counts: a button held when the screen appears, when a sheet opens or closes,
@@ -41,13 +42,13 @@ struct LauncherFocusMap: Equatable {
 }
 
 // One controller event for the screen
-enum LauncherPadEvent: Equatable, Sendable { case up, down, left, right, a, b, y, plus, l, r }
+enum LauncherPadEvent: Equatable, Sendable { case up, down, left, right, a, b, x, y, plus, minus, l, r, zl, zr }
 
 @MainActor final class LauncherGamepad: ObservableObject {
     @Published private(set) var connected = false   // a controller with an extended gamepad profile is connected: the focus ring shows
     @Published private(set) var glyphs = NXPadGlyphs()   // the hints' glyphs and VoiceOver names of the first pad's A, B, X, Y and + (NXButtonGlyph.swift: "Press B to play" on an Xbox pad, whose right button plays)
 
-    private enum Key: CaseIterable { case up, down, left, right, a, b, y, plus, l, r }
+    private enum Key: CaseIterable { case up, down, left, right, a, b, x, y, plus, minus, l, r, zl, zr }
     private var held: Set<Key> = []
     private var blocked: Set<Key>   // held when the screen appeared, when a sheet opened or closed, when the pads changed or the app was inactive: ignored until released
     private var nextRepeat: [Key: TimeInterval] = [:]
@@ -76,12 +77,12 @@ enum LauncherPadEvent: Equatable, Sendable { case up, down, left, right, a, b, y
         return anyHeld()
     }
 
-    // A Switch layout's button from a pad: a Nintendo pad by label, any other by position (pad_apple.h dm_pad_face): right A, bottom B, left Y. Also the in-game menu's hints (GameMenuPanel.swift)
+    // A Switch layout's button from a pad: a Nintendo pad by label, any other by position (pad_apple.h dm_pad_face): right A, bottom B, top X, left Y. Also the in-game menu's hints (GameMenuPanel.swift)
     nonisolated static func labelled(_ c: GCController) -> Bool { c.productCategory == "Switch Pro Controller" || c.productCategory.contains("Joy-Con") }
     private static func keys(_ c: GCController) -> Set<Key> {
         guard let g = c.extendedGamepad else { return [] }
         let byLabel = labelled(c)
-        let a = byLabel ? g.buttonA : g.buttonB, b = byLabel ? g.buttonB : g.buttonA, y = byLabel ? g.buttonY : g.buttonX
+        let a = byLabel ? g.buttonA : g.buttonB, b = byLabel ? g.buttonB : g.buttonA, x = byLabel ? g.buttonX : g.buttonY, y = byLabel ? g.buttonY : g.buttonX
         let sx = g.leftThumbstick.xAxis.value, sy = g.leftThumbstick.yAxis.value
         var k = Set<Key>()
         if g.dpad.up.isPressed || sy > 0.6 { k.insert(.up) }
@@ -90,10 +91,14 @@ enum LauncherPadEvent: Equatable, Sendable { case up, down, left, right, a, b, y
         if g.dpad.right.isPressed || sx > 0.6 { k.insert(.right) }
         if a.isPressed { k.insert(.a) }
         if b.isPressed { k.insert(.b) }
+        if x.isPressed { k.insert(.x) }
         if y.isPressed { k.insert(.y) }
         if g.buttonMenu.isPressed { k.insert(.plus) }
+        if g.buttonOptions?.isPressed == true { k.insert(.minus) }
         if g.leftShoulder.isPressed { k.insert(.l) }
         if g.rightShoulder.isPressed { k.insert(.r) }
+        if g.leftTrigger.isPressed { k.insert(.zl) }
+        if g.rightTrigger.isPressed { k.insert(.zr) }
         return k
     }
     private static func pressedNow() -> Set<Key> { GCController.controllers().reduce(into: Set<Key>()) { $0.formUnion(keys($1)) } }
@@ -147,10 +152,14 @@ enum LauncherPadEvent: Equatable, Sendable { case up, down, left, right, a, b, y
         case .right: return .right
         case .a: return .a
         case .b: return .b
+        case .x: return .x
         case .y: return .y
         case .plus: return .plus
+        case .minus: return .minus
         case .l: return .l
         case .r: return .r
+        case .zl: return .zl
+        case .zr: return .zr
         }
     }
 }
@@ -158,7 +167,8 @@ enum LauncherPadEvent: Equatable, Sendable { case up, down, left, right, a, b, y
 // What an open sheet scrolls by when the controller asks (the guide's web view or PDF, the About text): set by the sheet that is up
 @MainActor final class LauncherScroller {
     var scroll: ((CGFloat) -> Void)?
-    var page: ((Int) -> Void)?   // L / R: the guide's other document (the guide or the manual)
+    var page: ((Int) -> Void)?   // L / R (ZL / ZR on the guide's page): the guide's other document (the guide or the manual)
+    var pad: ((LauncherPadEvent) -> Bool)?   // the open sheet's own handling of a controller event (the guide's page takes every button): true when it took it
 }
 
 extension UIScrollView {
