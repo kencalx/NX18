@@ -26,7 +26,8 @@
 // start-up delay, every picture it handed out was then in the player's future and was held until due, and a 30 fps movie showed about 10 pictures a second (t_codec_video).
 // End of stream, sync handles and the submission event behave as before; skipped pictures free their places in the queue, so the event rises and the player sends more packets.
 // One line per movie gives its picture rate and the pictures skipped (CV_PACE_LOGS a decoder at most: a looped menu movie).
-// DM_CODEC_PACE=0 hands every picture out in order, as before. The movie signal (hle_movie.c dm_movie_picture) carries the stream's picture interval to the frame step
+// DM_CODEC_PACE=0 turns off the pacing only: every picture is handed out in order and none is skipped. The movie signal (hle_movie.c dm_movie_picture) carries the stream's
+// picture interval to the frame step either way, so with =0 the frame step still caps or pins its hold for the movie (docs/env_switches.tsv)
 #include "hle.h"
 #include <pthread.h>
 #include <stdatomic.h>
