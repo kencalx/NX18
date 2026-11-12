@@ -27,7 +27,7 @@ No `patches.py`.
 
 - **Current:** with an Ultrawide mod in the game's mods folder the launcher offers **Ultrawide** (`DM_MOD_ULTRAWIDE`, off by default as for every game), and on an iPhone the row says *Can drop below 60 fps in busy scenes on iPhone* (`ultrawide_cost fps`, the row's `hint` in `settings.tsv`). It stays selectable.
 - Measured on an iPhone 18 Pro Max with 0.5 (`5b302cd0`), the same route from warm starts each time, Picture on Stretch. Ultrawide off with edge smoothing (**Anti-aliasing**) on held 60 fps, with brief dips to 51–54. Ultrawide on with edge smoothing off fell to 36–52 fps for most of the route's second half, with a GPU time p50 of 17–24 ms against the 16.7 ms a frame has at 60 fps. Ultrawide adds about 1.5–2 ms of GPU time a frame in light areas and 5–9 ms in busy rooms, so the drop comes from the wider view, not from edge smoothing, which the slower run had off.
-- On X1.0 (`6448f757`, docked, edge smoothing on) the owner's second start had Ultrawide on and the first had it off ([On the iPhone](#on-the-iphone)): over each start the GPU time p50 was 9.97 ms with it against 9.2 ms without, about 0.8 ms more, in the lighter places (the two routes were not the same). The second start did not reach the heavy room where the first dropped frames, so the busy-room cost above is not measured again, and the launcher's note stays.
+- On X1.0 (`6448f757`, docked, edge smoothing on) the owner's second start had Ultrawide on and the first had it off ([On the iPhone](#on-the-iphone)): over each start the GPU time p50 was 9.97 ms with it against 9.2 ms without, about 0.8 ms more, but the two routes were not the same (the first start's takes in the heavy room and lighter places alike), so the difference is not a measure of Ultrawide's cost. The second start did not reach the heavy room where the first dropped frames, so the busy-room cost above is not measured again, and the launcher's note stays.
 
 ## Modules and memory
 
@@ -78,7 +78,7 @@ The owner's two starts on an iPhone 18 Pro Max (A20 Pro GPU), the X1.0 build (`6
 | | First start (X1.0 over 0.5, Ultrawide off) | Second start (Ultrawide on) |
 |---|---|---|
 | Played | about 4.2 minutes (12,324 frames), into a heavy room at the end | about 2.2 minutes (6,728 frames) |
-| Before the first frame | the device's list (5,576 lines) prepared in 2.47 s on 6 workers, behind the progress screen: 246 bases compiled, none from an archive, 12 reused | the device's 5,663 lines prepared in 0.22 s, no progress screen: 314 bases from the device's archive, 31 reused, none compiled |
+| Before the first frame | 5,576 of the device's 5,579 lines prepared in 2.47 s on 6 workers, behind the progress screen: 246 bases compiled, none from an archive, 12 reused | 5,663 of the device's 5,667 lines prepared in 0.22 s, no progress screen: 314 bases from the device's archive, 31 reused, none compiled |
 | Bases compiled in play | 140 (6.95 s of compile time on all threads) | 1 (0.04 s) |
 | The submit thread waited | 1.60 s for pipelines, under 1 ms for shader libraries | 0.7 ms for pipelines, 0.3 ms for libraries |
 | Frames | 60 fps; frame time p50 16.67 ms, p95 17.02 ms; 236 of 12,288 frames dropped (1.92%), 153 of them in two windows of the heavy room (GPU time p50 19.18 and 17.24 ms there) | 60 fps; p50 16.67 ms, p95 17.07 ms; 8 of 6,589 dropped (0.12%) |
