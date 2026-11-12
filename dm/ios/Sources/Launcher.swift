@@ -53,11 +53,21 @@ private func info(_ key: String) -> Any? { Bundle.main.object(forInfoDictionaryK
     return f
 }
 
-// A settings row's card: the row colour, with the controller's focus as a cyan outline inside it (a List clips what is drawn outside a row)
-private func rowBackground(_ focused: Bool, fill: Color = NX18Palette.row) -> some View {
+// A settings row's card: the row colour, with the controller's focus as a cyan outline inside it (a List clips what is drawn outside a row).
+// The List also clips a section's first and last rows to the card's rounded corners (about 26 pt on iOS 27's inset grouped list, measured on an
+// iPhone 18 Pro Max), so the outline's corners there follow the card's, inset by the same few points, instead of being cut off; a row between
+// others keeps the small 10 pt corners. first / last: the row is its section's first / last (a section of one row is both).
+private let rowCardRadius: CGFloat = 26
+private let rowFocusInset: CGFloat = 3
+private func rowBackground(_ focused: Bool, fill: Color = NX18Palette.row, first: Bool = true, last: Bool = true) -> some View {
     ZStack {
         fill
-        if focused { RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(NX18Palette.cyan, lineWidth: 2).padding(2) }
+        if focused {
+            let outer = rowCardRadius - rowFocusInset
+            UnevenRoundedRectangle(topLeadingRadius: first ? outer : 10, bottomLeadingRadius: last ? outer : 10,
+                                   bottomTrailingRadius: last ? outer : 10, topTrailingRadius: first ? outer : 10, style: .continuous)
+                .strokeBorder(NX18Palette.cyan, lineWidth: 2).padding(rowFocusInset)
+        }
     }
 }
 
@@ -83,7 +93,7 @@ private struct CloudSavesSection: View {
             .listRowBackground(NX18Palette.row)
             Button(folder.isEmpty ? "Choose a folder in iCloud Drive…" : "Choose a different folder…") { picking = true }
                 .foregroundStyle(NX18Palette.cyan)
-                .listRowBackground(rowBackground(focused))
+                .listRowBackground(rowBackground(focused, first: false, last: folder.isEmpty))   // the section's second row; its last unless Turn off follows
                 .id(LauncherFocus.cloud)
                 // The sheet sits on the button, not on the Section: SwiftUI hands a Section's modifiers to every row, so one tap presented a picker per row and they invalidated each other (LNPANDY/NX2Apple#315).
                 .sheet(isPresented: $picking, onDismiss: closed) {
@@ -735,7 +745,7 @@ struct LauncherView: View {
             Section {
                 ForEach(g.rows) { s in
                     SettingRow(s: s, m: m)
-                        .listRowBackground(rowBackground(ring(.row(s.env))))
+                        .listRowBackground(rowBackground(ring(.row(s.env)), first: s.env == g.rows.first?.env, last: s.env == g.rows.last?.env))
                         .id(LauncherFocus.row(s.env))
                 }
             } header: {
