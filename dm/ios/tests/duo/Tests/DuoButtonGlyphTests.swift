@@ -23,6 +23,8 @@ final class DuoButtonGlyphTests: XCTestCase {
         // No controller: the Switch's own glyphs and names
         XCTAssertEqual(NXPadGlyphs().glyph(.y), .button(.y))
         XCTAssertEqual(NXPadGlyphs().name(.plus), "plus")
+        XCTAssertEqual(NXPadGlyphs().name(NXShoulder.l), "L")
+        XCTAssertEqual(NXPadGlyphs().name(NXShoulder.r), "R")
         XCTAssertNil(NXPadGlyphs.letter(ofSymbol: "xmark.circle"))
         XCTAssertEqual(NXPadGlyphs.letter(ofSymbol: "y.circle"), .y)
     }

@@ -299,12 +299,13 @@ struct LauncherView: View {
                                closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil) { sheet = nil }
                 .presentationBackground(background)
         }
-        // The controller sentences name the buttons as the pad labels them (pad.glyphs): handle gets Switch buttons by position, so on an Xbox pad Switch B is its A. L and R are the same on every pad
+        // The controller sentences name the buttons as the pad labels them (pad.glyphs): handle gets Switch buttons by position, so on an Xbox pad Switch B is its A. The shoulders
+        // are in the same place on every pad but named differently (LB on an Xbox pad, L1 on a PlayStation pad), and only they answer: the triggers (LT, L2) are ZL and ZR
         .confirmationDialog(SaveSyncReport.chooseTitle, isPresented: isAsking(.choose), titleVisibility: .visible, presenting: report) { r in
             Button(r.localLabel(here: here)) { go(r.localChoice) }
             Button(r.cloudLabel) { go(r.cloudChoice) }
             Button("Cancel", role: .cancel) {}
-        } message: { r in Text(r.chooseMessage(here: here) + (pad.connected ? " With a controller: L plays this \(here)'s, R the cloud's, \(pad.glyphs.name(.b)) cancels." : "")) }
+        } message: { r in Text(r.chooseMessage(here: here) + (pad.connected ? " With a controller: \(pad.glyphs.name(NXShoulder.l)) plays this \(here)'s, \(pad.glyphs.name(NXShoulder.r)) the cloud's, \(pad.glyphs.name(.b)) cancels." : "")) }
         .confirmationDialog(SaveSyncReport.unreadableTitle, isPresented: isAsking(.unreadable), titleVisibility: .visible, presenting: report) { r in
             Button("Play This \(here)'s Save") { go("offline") }   // the mount does not wait for the cloud again
             Button("Try Again") { DispatchQueue.main.async { start() } }

@@ -40,6 +40,13 @@ enum NXButton: String, CaseIterable, Sendable {
     }
 }
 
+// A shoulder button the hints name in words only (no glyph): the save question's L and R. The launcher gets the pad's shoulders as L and R and its triggers as ZL and ZR
+// (LauncherGamepad.keys), so the words are the pad's own: LB on an Xbox pad, L1 on a PlayStation pad, whose triggers (LT, L2) are not these buttons
+enum NXShoulder: String, CaseIterable, Sendable {
+    case l, r
+    var spoken: String { self == .l ? "L" : "R" }   // the name where the pad gives none
+}
+
 // One glyph's outline fitted into the rect (centred, aspect kept), filled with the non-zero rule as the SVG is
 struct NXButtonGlyphShape: Shape {
     let button: NXButton
@@ -77,9 +84,11 @@ enum NXPadGlyph: Equatable, Sendable {
 struct NXPadGlyphs: Equatable, Sendable {
     private var glyphs: [NXButton: NXPadGlyph] = [:]
     private var names: [NXButton: String] = [:]
+    private var shoulderNames: [NXShoulder: String] = [:]
 
     func glyph(_ b: NXButton) -> NXPadGlyph { glyphs[b] ?? .button(b) }
     func name(_ b: NXButton) -> String { names[b] ?? b.spoken }
+    func name(_ s: NXShoulder) -> String { shoulderNames[s] ?? s.spoken }
 
     // The Switch button a pad button stands for: one of the pad's lettered face buttons (an SF Symbol "a.circle", "b.circle.fill"...) as its letter; nil for anything else
     // ("xmark.circle", a PlayStation pad's cross, is no X)
@@ -111,6 +120,10 @@ struct NXPadGlyphs: Equatable, Sendable {
         for (b, input, fallback) in face {
             g.glyphs[b] = resolve(b, labelled: labelled, symbol: input?.sfSymbolsName, fallback: fallback)
             if let n = input?.localizedName, !n.isEmpty { g.names[b] = n }
+        }
+        // the shoulders are in the same place on every pad, but not named the same (L, LB, L1)
+        for (s, input) in [(NXShoulder.l, pad.leftShoulder), (.r, pad.rightShoulder)] {
+            if let n = input.localizedName, !n.isEmpty { g.shoulderNames[s] = n }
         }
         return g
     }
