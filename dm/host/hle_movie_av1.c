@@ -132,7 +132,8 @@ static void av1_on_frame(void *ref, void *src, OSStatus st, VTDecodeInfoFlags fl
     if (a->got) CVPixelBufferRelease(a->got);
     a->got = CVPixelBufferRetain(img);
 }
-static int av1_open(mav1 *a, const uint8_t *seq, size_t n) {
+// 1 = a session; 0 = none (a red line); -1 = none yet: restarting after iOS invalidated the session, and iOS refused a new hardware session for now (the app still inactive)
+static int av1_open(mav1 *a, const uint8_t *seq, size_t n, int restarting) {
     av1_close(a);
     uint8_t rec[4 + sizeof a->seq]; int w = 0, h = 0;
     if (n > sizeof a->seq || !mav1_av1c(seq, n, rec, &w, &h)) { if (!a->red++) LOG("[RED] movie: an AV1 sequence header the host cannot read (%zu bytes)", n); return 0; }
@@ -150,6 +151,7 @@ static int av1_open(mav1 *a, const uint8_t *seq, size_t n) {
     CFDictionaryRef attrs = CFDictionaryCreate(NULL, k, v, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks); CFRelease(num);
     VTDecompressionOutputCallbackRecord cb = {av1_on_frame, a};
     st = VTDecompressionSessionCreate(NULL, a->fd, NULL, attrs, &cb, &a->vs); CFRelease(attrs);
+    if (st && restarting && st == kVTVideoDecoderNotAvailableNowErr) { a->vs = NULL; return -1; }
     if (st) { if (!a->red++) LOG("[RED] movie: VideoToolbox cannot create an AV1 session (%d)", (int)st); a->vs = NULL; return 0; }
     memcpy(a->seq, seq, n); a->nseq = n;
     static int once; if (!once++) LOG("[movie] AV1: VideoToolbox decoding %dx%d, profile %d level %d", w, h, rec[1] >> 5, rec[1] & 31);
@@ -217,12 +219,18 @@ int mav1_decode(mav1 *a, const uint8_t *data, size_t n, mav1_picture *out) {
     unlock_picture(a);
     if (a->soft) return decode_dav1d(a, data, n, out);
     size_t seqn = 0; const uint8_t *seq = find_seq(data, n, &seqn);
+    int restarting = a->restart;
     if (a->restart) {   // iOS invalidated the session: the temporal units before the next key frame refer to pictures that went with it, so none is decoded (no picture, no garbage)
         if (!av1_key(data, n)) return 0;
         a->restart = 0;
     }
     for (int again = 0;; again++) {
-        if (seq && (seqn != a->nseq || memcmp(seq, a->seq, seqn) || !a->vs) && !av1_open(a, seq, seqn)) {   // a stream VideoToolbox does not take: dav1d from this temporal unit on (it holds the sequence header)
+        int o = seq && (seqn != a->nseq || memcmp(seq, a->seq, seqn) || !a->vs) ? av1_open(a, seq, seqn, restarting) : 1;
+        if (o < 0) {   // no new session for this key frame: the units after it still wait for the next one, on VideoToolbox (not dav1d for the rest of the movie)
+            static int log; if (log++ < 8) LOG("[movie] AV1: VideoToolbox's decoder is not available yet (the app still inactive), restarting at the next key frame");
+            av1_close(a); a->restart = 1; return 0;
+        }
+        if (!o) {   // a stream VideoToolbox does not take: dav1d from this temporal unit on (it holds the sequence header)
             LOG("[movie] AV1: dav1d decodes the stream instead"); av1_close(a); a->soft = 1;
             return decode_dav1d(a, data, n, out);
         }
@@ -238,7 +246,7 @@ int mav1_decode(mav1 *a, const uint8_t *data, size_t n, mav1_picture *out) {
         // the movie ran through its file in about 2 s. Only that error, and only with movie_vt_restart: a new session, at once when this unit is a key frame, else at the next one
         if ((st == kVTInvalidSessionErr || a->lost) && movie_vt_restart()) {
             int now = !again && av1_key(data, n);
-            av1_close(a); a->lost = 0; a->restart = !now;
+            av1_close(a); a->lost = 0; a->restart = !now; restarting = 1;
             if (++a->restarts <= 8) LOG("[movie] AV1: VideoToolbox's session was invalidated (the app was in the background), restarting %s (restart %d)", now ? "at this key frame" : "at the next key frame", a->restarts);
             if (now) continue;
             return 0;
