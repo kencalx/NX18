@@ -152,7 +152,8 @@ int front_web_touch(void);   // web_apple.m: an offline HTML page is shown over 
 - (void)menuOpenNow;
 - (void)panelToggle;
 @end
-// The menu button: a UIButton whose menu is the in-game menu (UIKit draws it and takes the touches while it is open). Its hit circle is larger than the drawn one, and a key nearer
+// The menu button: a UIButton that opens the in-game menu: with DM_GAME_MENU=system its menu is the UIMenu (UIKit draws it and takes the touches while it is open), else a tap
+// opens or closes NX 18's panel (panelToggle). Its hit circle is larger than the drawn one, and a key nearer
 // to the touch wins (− / + sit beside it), so it asks the pad
 @interface DmMenuButton : UIButton
 @end
@@ -315,7 +316,7 @@ static BOOL assistive_running(void) { return UIAccessibilityIsVoiceOverRunning()
     dispatch_async(dispatch_get_main_queue(), ^{ DmGamepad *me = w; if (me && me.window) { if (me->_systemMenu) [me->_menu performPrimaryAction]; else [me panelOpen]; } });
 }
 // NX 18's panel (GameMenuPanel.swift): every key and touch released and the controllers taken from the game first, as the UIMenu's opening releases them; it calls
-// dm_gamepad_panel_closed when it is gone
+// dm_gamepad_panel_closed as it starts to close
 - (void)panelOpen {
     if (_systemMenu || dm_game_panel_shown()) return;
     [_menu.layer removeAllAnimations];
@@ -718,7 +719,7 @@ static uint64_t pad_mask(GCExtendedGamepad *g) {   // the Switch buttons a contr
     return m;
 }
 // The in-game panel and the controllers (main thread, as the handlers): 1 the panel is open (it reads the controllers itself, GameMenuPanel.swift), 2 it closed while a button
-// was held (the B or + that closed it), which the game must not see; 0 the game has them. Home opens and closes the panel: its press, on any controller
+// was held (the B that closed it), which the game must not see; 0 the game has them. Home opens and closes the panel: its press, on any controller
 static int g_menu_block;
 static NSHashTable<GCController *> *g_home_down;
 static int cp_up(void);
@@ -771,7 +772,7 @@ static void pads_release_game(void) {
 void dm_gamepad_panel_closed(void) {   // GameMenuPanel.swift, main thread
     [g_view menuClosed];
     if (!g_menu_block) return;
-    g_menu_block = pads_any_pressed() ? 2 : 0;   // a button that closed it still down (B, +): read_pad gives the controllers back once nothing is held; else at once
+    g_menu_block = pads_any_pressed() ? 2 : 0;   // a button that closed it still down (B): read_pad gives the controllers back once nothing is held; else at once
     if (!g_menu_block) for (GCController *c in GCController.controllers) if (c.extendedGamepad) read_pad(c.extendedGamepad);   // a stick held over the close
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil otherwise); returns whether a controller is in use

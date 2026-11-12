@@ -8,7 +8,7 @@ extern "C" {
 #endif
 void *dm_game_menu(void);   // GameMenu.swift: a retained UIMenu, rebuilt each time it opens (DM_GAME_MENU=system)
 bool dm_game_panel_open(void *anchor);   // GameMenuPanel.swift: NX 18's panel over the view controller the menu button (anchor, a UIView) is in; false when it cannot show
-void dm_game_panel_close(void);   // closes it (a short fade), then calls dm_gamepad_panel_closed
+void dm_game_panel_close(void);   // closes it: dm_gamepad_panel_closed at once, then a short fade (it takes no touch meanwhile)
 bool dm_game_panel_shown(void);
 void dm_gamepad_panel_closed(void);   // DmGamepad.m: the panel is gone: the menu button's hide timer starts, the controllers go back to the game once their buttons are released
 int dm_pad_layout(void);   // DmGamepad.m: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
