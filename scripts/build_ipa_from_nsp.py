@@ -1861,6 +1861,11 @@ def fnv1a64(b):   # the name hle_glslc.c gives a capture file: the FNV-1a 64 of 
 GLSLC_PLAY = 'glslc_play'   # the folder of the outputs a game compiled with its own GLSLC while it was played (hle_glslc.c), beside the save: the app's Documents/glslc_play, the Mac's beside save/
 
 
+def glslc_play_env(env):   # DM_GLSLC_PLAY as a folder to take play captures from: none for the values the host reads as "save nothing" (hle_glslc.c play_dir: off, 0, empty)
+    v = env.get('DM_GLSLC_PLAY')
+    return [v] if v and v not in ('off', '0') else []
+
+
 def glslc_play_sources(nsp_dir, work, app, extra=()):
     """The folders the shaders captured in play are taken from: --glslc-play's, then glslc_play in the NSP folder and in the build folder (where the iPhone's Documents/glslc_play is copied),
     the Mac run command's (<build folder>/run/glslc_play) and the Mac app's (~/Library/Application Support/nxnative/<title ID>/glslc_play)"""
@@ -3627,7 +3632,7 @@ def main(args=None):
             PROG.add(1); g = region_check(repo, game, patched, work, env, logs, g)
     observed_glslc = capture_glslc(repo, {v: dirs[v] for v in sv}, pkg_ver, patched, work, env, logs, g) if glslc else None
     if uedec: decode_ue_shaders(repo, {v: dirs[v] for v in sv}, pkg_ver, patched, work, env, logs, g)
-    gather_glslc_play(dirs[pkg_ver], glslc_play_sources(nsp_dir, work, app, [*(getattr(args, 'glslc_play', None) or ()), *filter(None, [env.get('DM_GLSLC_PLAY')])]), g)
+    gather_glslc_play(dirs[pkg_ver], glslc_play_sources(nsp_dir, work, app, [*(getattr(args, 'glslc_play', None) or ()), *glslc_play_env(env)]), g)
     sh = work / 'shader'
     # Trinity packs and legacy Unreal paks: the split decodes them with the packed version's own decoder (Oodle, LZ5), in the Mac host built for the profile
     oodle = (lambda: {'DM_OODLE_HOST': str(build_mac_host(repo, work / 'tools/dmhost', env, logs, g)), 'DM_OODLE_MODULES': str(patched)}) if src['oodle_packs'][0] or src['ue_legacy'][0] else None

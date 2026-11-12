@@ -196,6 +196,12 @@ class GatherPlay(unittest.TestCase):
         self.assertEqual(nsp.gather_glslc_play(self.d, [self.tmp / 'absent'], g), set())
         self.assertTrue(any(s.startswith('[RED] the profile names 1 shaders') for s in self.said), self.said)
 
+    def test_env_off_values_name_no_folder(self):
+        # the values the host reads as "save nothing" (hle_glslc.c play_dir) are not a folder under the current directory
+        for v in ('off', '0', ''): self.assertEqual(nsp.glslc_play_env({'DM_GLSLC_PLAY': v}), [], v)
+        self.assertEqual(nsp.glslc_play_env({}), [])
+        self.assertEqual(nsp.glslc_play_env({'DM_GLSLC_PLAY': '~/play'}), ['~/play'])
+
     def test_default_sources(self):
         src = nsp.glslc_play_sources(self.tmp / 'nsp', self.tmp / 'work', 0x0100BF00112C0000, ['~/x'])
         self.assertEqual(src[0], Path.home() / 'x')
