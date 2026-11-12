@@ -101,6 +101,8 @@ class GuideViewerTests(unittest.TestCase):
         g = (SRC / 'GuideViewer.swift').read_text()
         for e, act in (('.b', 'back()'), ('.l', 'press("L")'), ('.r', 'press("R")'), ('.a', 'pressA()'), ('.down', 'key(40)')):
             self.assertIn(f'case {e}: {act}', g)
+        self.assertIn('Button { model.press(button) }', g, 'the header\'s page turns give the page "L" / "R", whatever the pad calls them')
+        self.assertIn('Text(turnNames.map { button == "L" ? $0.l : $0.r } ?? button)', g, 'named as the pad names its shoulders (LB, L1), else L / R')
 
     def test_placeholder_guide_is_made_up_and_shaped_like_a_console_guide(self):
         htdocs = FIXTURE / 'html1/html-document/htmlcontents.htdocs'

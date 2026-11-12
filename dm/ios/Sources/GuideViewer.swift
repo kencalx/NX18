@@ -67,12 +67,13 @@ struct LauncherGuideSheet: View {
     let content: LauncherContent
     let scroller: LauncherScroller
     var closeGlyph: NXPadGlyph? = nil   // the controller's B (NXButtonGlyph.swift) while a controller is connected: beside Back while the guide has a page to go back to (B goes back there), else beside the close button
+    var turnNames: (l: String, r: String)? = nil   // the connected pad's own names for its shoulders (LB / RB, L1 / R1: NXPadGlyphs.name), on the page-turn buttons; nil: L and R
     let close: () -> Void
     @State private var page: LauncherGuidePage
     @StateObject private var model = LauncherGuidePageModel()
 
-    init(content: LauncherContent, scroller: LauncherScroller, closeGlyph: NXPadGlyph? = nil, close: @escaping () -> Void) {
-        self.content = content; self.scroller = scroller; self.closeGlyph = closeGlyph; self.close = close
+    init(content: LauncherContent, scroller: LauncherScroller, closeGlyph: NXPadGlyph? = nil, turnNames: (l: String, r: String)? = nil, close: @escaping () -> Void) {
+        self.content = content; self.scroller = scroller; self.closeGlyph = closeGlyph; self.turnNames = turnNames; self.close = close
         _page = State(initialValue: content.guide != nil ? .guide : .manual)
     }
     private var pages: [LauncherGuidePage] { LauncherGuidePage.allCases.filter { $0 == .guide ? content.guide != nil : content.manual != nil } }
@@ -158,12 +159,12 @@ struct LauncherGuideSheet: View {
         .buttonStyle(.plain)
         .accessibilityLabel(label)
     }
-    // The page's L or R (its page turning), drawn as the console's shoulder buttons
+    // The page's L or R (its page turning), drawn as the console's shoulder buttons and named as the connected pad names them (turnNames); the page gets "L" / "R" whatever the name
     private func turnButton(_ button: String, icon: String, label: String, on: Bool) -> some View {
         Button { model.press(button) } label: {
             HStack(spacing: 4) {
                 if button == "L" { Image(systemName: icon) }
-                Text(button)
+                Text(turnNames.map { button == "L" ? $0.l : $0.r } ?? button).lineLimit(1).fixedSize()
                 if button == "R" { Image(systemName: icon) }
             }
             .nxFont(.subheadline, weight: .semibold).foregroundStyle(.white)

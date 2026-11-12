@@ -40,7 +40,7 @@ enum NXButton: String, CaseIterable, Sendable {
     }
 }
 
-// A shoulder button the hints name in words only (no glyph): the save question's L and R. The launcher gets the pad's shoulders as L and R and its triggers as ZL and ZR
+// A shoulder button the hints name in words only (no glyph): the save question's L and R, the guide's page-turn buttons. The launcher gets the pad's shoulders as L and R and its triggers as ZL and ZR
 // (LauncherGamepad.keys), so the words are the pad's own: LB on an Xbox pad, L1 on a PlayStation pad, whose triggers (LT, L2) are not these buttons
 enum NXShoulder: String, CaseIterable, Sendable {
     case l, r

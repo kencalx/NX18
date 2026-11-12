@@ -304,7 +304,8 @@ struct LauncherView: View {
         .tint(NX18Palette.cyan)
         .toggleStyle(NX18SwitchStyle())
         .fullScreenCover(isPresented: shown(.guide)) {
-            LauncherGuideSheet(content: content, scroller: scroller, closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil) { sheet = nil }
+            LauncherGuideSheet(content: content, scroller: scroller, closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil,
+                               turnNames: pad.connected ? (pad.glyphs.name(NXShoulder.l), pad.glyphs.name(NXShoulder.r)) : nil) { sheet = nil }
         }
         .sheet(isPresented: shown(.about), onDismiss: guideAfterClosing) {
             LauncherAboutSheet(about: content.about ?? LauncherAbout(), artwork: artwork, name: name, version: version, scroller: scroller,
