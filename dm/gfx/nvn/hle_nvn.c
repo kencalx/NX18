@@ -2028,9 +2028,9 @@ static void power_line(uint64_t frame) {
         char tc[400]; dm_thread_cpu(tc, sizeof tc, s);
         // Then the wake sources per second, to tell what drives the power line's wakeups: the host's sleeps and handoff polls (dm_wake_stats), the queue replay's 1 ms event polls
         // (nvn_queue.inc nq_worker) and the encode thread's wakes (nvn_rec.h rec_thread)
-        char wk[512]; dm_wake_stats(wk, sizeof wk, s); uint64_t nqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed), rw = mtl_rec_wakes();
+        char wk[1536]; dm_wake_stats(wk, sizeof wk, s); uint64_t nqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed), rw = mtl_rec_wakes();
         LOG("[nvn] threads up to frame %llu: CPU %s; wake sources per second: %s; NVN queue event polls of 1 ms %.0f; encode thread wakes %.0f", frame, tc, wk, (nqp - pnqp) / s, (rw - prw) / s); }
-    else { char yt[192], rs[400], tc[400], wk[512]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); dm_wake_stats(wk, sizeof wk, 1); }   // the first call only takes the baselines
+    else { char yt[192], rs[400], tc[400], wk[1536]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); dm_wake_stats(wk, sizeof wk, 1); }   // the first call only takes the baselines
     pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes(); pnqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed); prw = mtl_rec_wakes();
 }
 static void tsummary(uint64_t frame) {
