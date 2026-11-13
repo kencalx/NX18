@@ -1866,8 +1866,10 @@ static uint64_t g_fs_start, g_fs_wait, g_fs_away;   // frame step (fstep_tick): 
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 // The frame workgroup (the host's frame_wg.c; profile key frame_wg, DM_FRAME_WG=1 / 0 overriding it; off for every game): one work interval, finished just before the acquire's pacing
 // wait and started just after it, once per frame, with the frame's deadline (docs/reference/frame-rate.md, A frame deadline told through a work interval). The acquiring thread joins
-// when its time-constraint policy is first set on it (set_time_constraint_comp), the replay threads at their first declaration (rtw_declare), so it needs DM_RT on: with DM_RT=0
-// it is not armed. Only a thread that joined calls start or finish (frame_wg.c counts the rest as skips). The graphics unit tests link no AudioToolbox: these stand-ins do nothing
+// when its time-constraint policy is first set on it (set_time_constraint_comp; while armed, every thread's first acquire sets it, so an acquire that moves to another thread
+// takes the policy and joins there too), the replay threads at their first declaration (rtw_declare), so it needs DM_RT on: with DM_RT=0 it is not armed and nothing is called.
+// Only a thread that joined calls start or finish (frame_wg.c counts the other frames as skipped). The graphics unit tests link no AudioToolbox: these stand-ins do nothing
+// (t_nvn_framewg links counting ones)
 __attribute__((weak)) int dm_frame_wg_join(const char *who) { (void)who; return -1; }
 __attribute__((weak)) void dm_frame_wg_end(void) {}
 __attribute__((weak)) void dm_frame_wg_begin(uint64_t period_ns) { (void)period_ns; }
@@ -1884,7 +1886,7 @@ static int frame_wg_on(void) {
 }
 static void frame_wg_line(uint64_t frame) {   // every 300 frames while armed
     static dm_frame_wg_counts p; dm_frame_wg_counts c; dm_frame_wg_counts_read(&c);
-    LOG("[nvn] frame workgroup up to frame %llu: intervals started %llu, finished %llu (%llu past the deadline); skipped %llu (a start or finish on a thread that is not a member); errors start %llu, finish %llu (last %d)",
+    LOG("[nvn] frame workgroup up to frame %llu: intervals started %llu, finished %llu (%llu past the deadline); skipped %llu frames (acquired on a thread that is not a member); errors start %llu, finish %llu (last %d)",
         (unsigned long long)frame, (unsigned long long)(c.started - p.started), (unsigned long long)(c.finished - p.finished), (unsigned long long)(c.late - p.late), (unsigned long long)(c.skipped - p.skipped),
         (unsigned long long)(c.start_err - p.start_err), (unsigned long long)(c.finish_err - p.finish_err), c.last_err);
     p = c;
@@ -1899,7 +1901,8 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     { static pthread_t acq_th; if (!pthread_equal(acq_th, pthread_self())) { if (acq_th) atomic_fetch_add_explicit(&g_acq_moves, 1, memory_order_relaxed); acq_th = pthread_self(); } }   // rt_policy_line counts them
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
         static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
-        if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
+        static __thread int wg_seen; int wg_new = rtp && !wg_seen && frame_wg_on(); if (wg_new) wg_seen = 1;   // the frame workgroup: each thread that acquires gets the policy, and joins, at its first acquire
+        if (rtp && (rt_period != rtp || wg_new)) { rt_period = rtp; set_time_constraint(rtp); }   // (otherwise an acquire that moved to a thread with the same period would only ever skip)
         if (rtp) atomic_store_explicit(&g_rt_frame_ns, rtp, memory_order_relaxed);
         rt_comp_tick(rtp);
         static uint64_t wg_frame = UINT64_MAX; uint64_t wf = atomic_load_explicit(&g_frame, memory_order_relaxed); int wgb = frame_wg_on() && wf != wg_frame;   // the frame workgroup: one interval a frame (acquire can run more than once in one)
