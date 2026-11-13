@@ -68,6 +68,10 @@ replay_rt	on
 # frame against 16 spares, all in flight. on: 32 copies (16 MB in all) and 64 tables, the newest table dropped when every spare is in flight (nvn_queue.inc nvn_replay_spares,
 # nvn_mtl.m pool_table_give). DM_REPLAY_SPARES=0 in env.txt turns it off. Not yet run on the phone
 replay_spares	on
+# In one heavy area on an iPhone (X1.0) about 800 textures a frame went into the 512-entry table of finalized textures for 300 frames, then about 364, most of them ones it had pushed
+# out a frame or two before; each put and eviction sent the pool tables down their patch path (about 465 kept a frame), an estimated 1-4 ms of replay CPU a frame. Every other
+# game and run stays under about 100 a frame. 4096 (nvn_mtl.m ghost_cap); DM_NVN_GHOST=512 in env.txt takes it back. Not yet run on the phone
+ghost_table	4096
 
 # ---- Movies ----
 # The movies are AV1 decoded by VideoToolbox. On an iPhone 18 Pro Max (X1.0) iOS ended the hardware decoder while the notification panel was down during the opening movie: every later

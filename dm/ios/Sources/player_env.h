@@ -5,8 +5,8 @@
 #include <string.h>
 // Kept from env.txt in a player build too, so the owner can A/B the X1.0 changes on the phone (docs/development.md, the player build's list): measurement-only diagnostics
 // that change no behaviour (DM_NVN_WAITS: the wait ledger; DM_SLOWFRAME: the long-frame rows), and the switches that turn a profile's X1.0 change off or the field log back to X1.0's
-// lines. Named one by one: every other DM_NVN_* and test switch stays filtered
-static const char *const dm_player_kept_keys[]={"DM_NVN_WAITS","DM_SLOWFRAME","DM_REPLAY_RT","DM_REPLAY_SPARES","DM_FPS_HOLD_BACKOFF","DM_FPS_RESUME","DM_MOVIE_RESTART","DM_FIELD_LOG"};
+// lines, and DM_NVN_GHOST, which takes a profile's ghost_table back to 512 (or sets another size). Named one by one: every other DM_NVN_* and test switch stays filtered
+static const char *const dm_player_kept_keys[]={"DM_NVN_WAITS","DM_SLOWFRAME","DM_REPLAY_RT","DM_REPLAY_SPARES","DM_FPS_HOLD_BACKOFF","DM_FPS_RESUME","DM_MOVIE_RESTART","DM_FIELD_LOG","DM_NVN_GHOST"};
 static inline int dm_player_diagnostic_key(const char *key) {
     // Encoding placement changes scheduling, not diagnostics or launcher state.
     if(!strcmp(key,"DM_NVN_ENC_THREAD"))return 0;
