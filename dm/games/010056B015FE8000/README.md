@@ -166,12 +166,8 @@ The earlier direct-encoding experiment is not forced. The iPhone retest below is
 
 ### Mac: M4 Pro
 
-The author of [PR #336](https://github.com/seedds/nxnative/pull/336) reports a complete playthrough at stable 60 FPS on that revision. The 2B/Adam capture below shows 60.00 FPS, 8.48 ms GPU time and a 16.67 ms frame interval on macOS 27.0. That screenshot is one scene; the full-game result comes from that reported playthrough, not from the still image. The HUD's 2560×1440 value is the presentation size, not proof of the game's internal render resolution.
-
-![NieR on M4 Pro: 2B facing Adam, HUD at 60.00 FPS](../../../docs/images/nier-mac-m4-pro-adam-gameplay.png)
+The author of [PR #336](https://github.com/seedds/nxnative/pull/336) reports a complete playthrough at stable 60 FPS on that revision. A capture of 2B facing Adam in the copied city showed 60.00 FPS, 8.48 ms GPU time and a 16.67 ms frame interval on macOS 27.0. That capture is one scene; the full-game result comes from that reported playthrough, not from that capture. The Metal HUD's 2560×1440 value is the presentation size, not proof of the game's internal render resolution.
 
 ### iPhone: 17 Pro Max
 
-The author of PR #336 reports improved performance after retesting that revision on iPhone 17 Pro Max. It reaches 60 FPS in some areas, but it is not a constant 60 FPS through the whole game. The 2B/9S Bunker capture below shows 59.99 FPS, 11.23 ms GPU time and a 16.67 ms frame interval on iOS 27.0. This is a scene-specific example, not a full-game 60 FPS claim.
-
-![NieR on iPhone 17 Pro Max: 2B and 9S in the Bunker, HUD at 59.99 FPS](../../../docs/images/nier-iphone17-pro-max-bunker-gameplay.png)
+The author of PR #336 reports improved performance after retesting that revision on iPhone 17 Pro Max. It reaches 60 FPS in some areas, but it is not a constant 60 FPS through the whole game. A capture of 2B and 9S in the Bunker showed 59.99 FPS, 11.23 ms GPU time and a 16.67 ms frame interval on iOS 27.0 (A19 Pro, Game Mode on). This is a scene-specific example, not a full-game 60 FPS claim.
