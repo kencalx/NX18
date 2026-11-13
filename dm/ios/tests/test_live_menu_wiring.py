@@ -179,6 +179,35 @@ class LiveMenu(unittest.TestCase):
         for name in ('DM_FX_OFF', 'DM_SHARP_METALFX', 'DM_AA_RAN'):
             self.assertIn(name, read('dm/host/front.h'))
 
+    def test_the_touch_controls_rows_are_one_row_opening_a_page(self):   # the in-game menu only: the settings screen keeps its three rows
+        menu = read('dm/ios/Sources/GameMenu.swift'); panel = read('dm/ios/Sources/GameMenuPanel.swift')
+        self.assertIn('private let touchControlEnvs: Set<String> = ["DM_TOUCH_SIZE", "DM_TOUCH_OPACITY", "DM_TOUCH_HAPTICS"]', menu)
+        sections = body(menu, '@MainActor func gameMenuSections() -> [GameMenuSection] {')
+        self.assertIn('touchControlEnvs.contains(s.env)', sections)
+        self.assertIn("touch.count > 1 ? [touchControlsRow(m, touch)] : touch.map(\\.item)", sections, 'one touch row alone stays a plain row')
+        self.assertIn('m.rows(in: section)', sections, 'a row the device hides (Touch feedback without haptics) is not in the group, nor in its summary')
+        group = body(menu, '@MainActor private func touchControlsRow(_ m: LauncherModel, _ rows: [(setting: Setting, item: GameMenuItem)]) -> GameMenuItem {')
+        for part in ('title: "Touch controls"', 'summary: true', 'kind: .submenu(', 'r.item.currentOption', 'parts.joined(separator: " · ")', 'items: rows.map(\\.item)'):
+            self.assertIn(part, group)
+        self.assertIn('if case .choice = r.item.kind { return r.item.currentOption ?? m.shown(r.setting) }', group,
+                      'a choice by its kind: an env file value no option has (DM_TOUCH_SIZE=0.9) is that value, not read as the switch')
+        self.assertIn('dm_setting_why("DM_TOUCH_HAPTICS")', group, "hidden touch controls: Touch feedback's own note, in place of the values")
+        self.assertIn('if (!dm_gamepad_touch_hidden()) return NULL;', body(self.front, 'const char *dm_setting_why(const char *env) {'))
+        settings = read('dm/ios/Sources/LauncherSettings.swift') + read('dm/ios/Sources/Launcher.swift')
+        self.assertNotIn('touchControlsRow', settings)
+        # the panel: a choice on the page opens its options over it (find goes into submenus), and B goes back one page at a time
+        self.assertIn('if case .submenu(let inner) = i.kind, let f = find(id, in: inner) { return f }', panel)
+        self.assertIn('guard let last = stack.popLast() else { close(); return }', body(panel, 'func back() {'))
+        self.assertIn('if let gone = stack.firstIndex(where: { find($0) == nil }) { stack.removeSubrange(gone...) }', body(panel, 'func refresh() {'),
+                      'a page gone takes the pages opened from it too')
+        self.assertIn('name: .GCControllerDidConnect', panel, "a controller while the panel is up: the rows again (Touch controls' summary)")
+        self.assertIn('name: .GCControllerDidDisconnect', panel)
+        self.assertIn('if overview, opens, !item.summary {', panel, 'the summary goes under the name, not beside it')
+        self.assertIn('case .submenu where item.summary: return (item.subtitle ?? "").replacingOccurrences(of: " · ", with: ", ")', panel)   # VoiceOver: title, summary, button
+        self.assertIn('.accessibilityHint(item.summary ? "" : item.subtitle ?? "")', panel)
+        # the UIMenu (DM_GAME_MENU=system): a submenu with the rows in it
+        self.assertIn('return UIMenu(title: i.title, subtitle: i.subtitle, image: image, children: uiMenuElements(sections))', body(menu, 'func uiMenuElement(_ i: GameMenuItem) -> UIMenuElement {'))
+
     def test_share_log_snapshots_and_anchors(self):
         menu = read('dm/ios/Sources/GameMenu.swift'); share = body(menu, 'func dmShareLog(from anchor: UIView?) {')
         for part in ('"log.txt"', '"log.prev.txt"', 'temporaryDirectory', 'copyItem(at: src, to: copy)', 'UIActivityViewController(activityItems: files',
