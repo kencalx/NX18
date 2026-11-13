@@ -180,6 +180,8 @@ def header_one(g):
     if rrt not in ('on', 'off'): sys.exit(f'{g.id}: replay_rt must be on or off: {rrt}')
     yst = g.get('yield_storm', 'count')   # runs of yields with no other work past 500 µs (hle_thread.c ystorm_note; DM_YIELD_STORM overrides): count (counted for the power line) / sleep (each further yield sleeps up to 50 µs)
     if yst not in ('count', 'sleep'): sys.exit(f'{g.id}: yield_storm must be count or sleep: {yst}')
+    fwg = g.get('frame_wg', 'off')   # the frame deadline told through a work interval (frame_wg.c, hle_nvn.c frame_wg_on; DM_FRAME_WG overrides; needs DM_RT on): on / off
+    if fwg not in ('on', 'off'): sys.exit(f'{g.id}: frame_wg must be on or off: {fwg}')
     rsp = g.get('replay_spares', 'off')   # 32 spare command copies (16 MB in all) and 64 spare pool tables instead of 4 and 16, the newest table dropped when all are in flight (nvn_queue.inc nvn_replay_spares; DM_REPLAY_SPARES overrides): on / off
     if rsp not in ('on', 'off'): sys.exit(f'{g.id}: replay_spares must be on or off: {rsp}')
     dzc = g.get('depth_zero_copy', 'off')   # new single-sample Depth16 / Depth32F textures zeroed by copies from the zero buffer, not a clear pass (nvn_mtl.m tex_zero_fill; DM_DEPTH_ZERO_COPY overrides): on / off
@@ -290,6 +292,7 @@ def header_one(g):
          f'#define DM_GAME_FPS_HOLD_BACKOFF {int(fhb == "burst")}',
          f'#define DM_GAME_FPS_RESUME {int(frs == "on")}',
          f'#define DM_GAME_REPLAY_RT {int(rrt == "on")}',
+         f'#define DM_GAME_FRAME_WG {int(fwg == "on")}',
          f'#define DM_GAME_REPLAY_SPARES {int(rsp == "on")}',
          f'#define DM_GAME_DEPTH_ZERO_COPY {int(dzc == "on")}',
          f'#define DM_GAME_POOL_IDS_8K {int(pik == "on")}',

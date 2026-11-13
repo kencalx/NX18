@@ -120,6 +120,7 @@ static void *rtw_thread(void *arg) {
 int main(void) {
     setenv("DM_NVN_COUNT", "1", 1);
     setenv("DM_REPLAY_RT", "1", 1);   // the thread policy lines below name the replay threads (rtw_states)
+    setenv("DM_FRAME_WG", "0", 1);   // the frame workgroup off whatever the profile says: t_nvn_framewg checks it on
     {   rt_set_done = dispatch_semaphore_create(0); rt_may_end = dispatch_semaphore_create(0);
         pthread_t th; pthread_create(&th, NULL, rt_acquirer, NULL); dispatch_semaphore_wait(rt_set_done, DISPATCH_TIME_FOREVER);
         mach_port_t self = pthread_mach_thread_np(pthread_self());
@@ -151,6 +152,10 @@ int main(void) {
         EXPECT("  unset or empty: the profile's", 1, replay_rt_mode(NULL, 1) && replay_rt_mode("", 1) && !replay_rt_mode(NULL, 0) && !replay_rt_mode("", 0));
         if (!strcmp(DM_GAME_ID, "0400486024DEC000")) EXPECT("  Ocarina of Time's profile sets replay_rt", 1, DM_GAME_REPLAY_RT);
         EXPECT("  this run's switch", 1, nvn_replay_rt());
+        EXPECT("frame wg: DM_FRAME_WG=1 over a profile without it", 1, frame_wg_mode("1", 0));
+        EXPECT("  DM_FRAME_WG=0 over a profile with it", 0, frame_wg_mode("0", 1));
+        EXPECT("  unset or empty: the profile's", 1, frame_wg_mode(NULL, 1) && frame_wg_mode("", 1) && !frame_wg_mode(NULL, 0) && !frame_wg_mode("", 0));
+        EXPECT("  DM_FRAME_WG=0 in this run: off", 0, frame_wg_on());
         EXPECT("  no tick before a window gave a period", 0, (nvn_rtw_tick(&rtw_test, 5), rtw_test.started));
         atomic_store(&g_rt_frame_ns, 16666667ull);
         pthread_t th; pthread_create(&th, NULL, rtw_thread, NULL); dispatch_semaphore_wait(rt_set_done, DISPATCH_TIME_FOREVER);

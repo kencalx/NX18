@@ -214,6 +214,33 @@ class ReplayRt(unittest.TestCase):   # the NVN queue replay and encode threads' 
         self.assertIn('replay_rt', (REPO / 'dm/games/0400486024DEC000/README.md').read_text(encoding='utf-8'))
 
 
+class FrameWg(unittest.TestCase):   # the frame deadline told through a work interval (frame_wg.c, hle_nvn.c frame_wg_on; DM_FRAME_WG overrides): a test arm, off for every game
+    def macro(self, rows, gid=None):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'game.h')
+            if gid is None:
+                Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+                env = {**os.environ, 'DM_GAMES_DIR': d}
+            else: env = {k: v for k, v in os.environ.items() if k != 'DM_GAMES_DIR'}   # a profile of the repository
+            subprocess.run([sys.executable, str(GAME), 'header', gid or ID, str(out)], env=env, check=True, capture_output=True)
+            return [l for l in out.read_text().splitlines() if 'FRAME_WG' in l]
+
+    def test_values_and_the_default(self):
+        self.assertEqual(self.macro(''), ['#define DM_GAME_FRAME_WG 0'])
+        self.assertEqual(self.macro('frame_wg\ton\n'), ['#define DM_GAME_FRAME_WG 1'])
+        self.assertEqual(self.macro('frame_wg\toff\n'), ['#define DM_GAME_FRAME_WG 0'])
+        for v in ('1', 'yes', 'On', ''):
+            rc, out = header(f'frame_wg\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('frame_wg must be on or off', out, v)
+
+    def test_no_profile_sets_it(self):   # Ocarina of Time too: DM_FRAME_WG=1 in env.txt arms it for a run (its note says so)
+        on = [tsv.parent.name for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv'))
+              if any(l.split('\t')[0] == 'frame_wg' for l in tsv.read_text(encoding='utf-8').splitlines())]
+        self.assertEqual(on, [])
+        self.assertEqual(self.macro('', '0400486024DEC000'), ['#define DM_GAME_FRAME_WG 0'])
+        self.assertIn('DM_FRAME_WG', (REPO / 'dm/games/0400486024DEC000/README.md').read_text(encoding='utf-8'))
+
+
 class ReplaySpares(unittest.TestCase):   # 32 spare command copies and 64 spare pool tables (nvn_queue.inc nvn_replay_spares; DM_REPLAY_SPARES overrides)
     def macro(self, rows, gid=None):
         with tempfile.TemporaryDirectory() as d:

@@ -20,6 +20,7 @@
 #include "nvn_timestamp.h"
 #include "nvn_power.h"
 #include "../../host/front.h"
+#include "../../host/frame_wg.h"
 #include "nvn_dirty.h"
 #include "nvn_shkey.h"
 #include <mach/mach_time.h>
@@ -1865,6 +1866,33 @@ static _Atomic uint64_t g_frame;
 static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait / wait for the present queue to return the texture inside acquire (with a snapshot present, for its copy to run on the GPU: mtl_present_wait_texture), recorded per frame at present (there can be several acquires within one frame)
 static uint64_t g_fs_start, g_fs_wait, g_fs_away;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), its pacing wait, and away_ns then
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
+// The frame workgroup (the host's frame_wg.c; profile key frame_wg, DM_FRAME_WG=1 / 0 overriding it; off for every game): one work interval, finished just before the acquire's pacing
+// wait and started just after it, once per frame, with the frame's deadline (docs/reference/frame-rate.md, A frame deadline told through a work interval). The acquiring thread joins
+// when its time-constraint policy is first set on it (set_time_constraint_comp; while armed, every thread's first acquire sets it, so an acquire that moves to another thread
+// takes the policy and joins there too), the replay threads at their first declaration (rtw_declare), so it needs DM_RT on: with DM_RT=0 it is not armed and nothing is called.
+// Only a thread that joined calls start or finish (frame_wg.c counts the other frames as skipped). The graphics unit tests link no AudioToolbox: these stand-ins do nothing
+// (t_nvn_framewg links counting ones)
+__attribute__((weak)) int dm_frame_wg_join(const char *who) { (void)who; return -1; }
+__attribute__((weak)) void dm_frame_wg_end(void) {}
+__attribute__((weak)) void dm_frame_wg_begin(uint64_t period_ns) { (void)period_ns; }
+__attribute__((weak)) void dm_frame_wg_counts_read(dm_frame_wg_counts *c) { memset(c, 0, sizeof *c); }
+static int frame_wg_mode(const char *e, int dflt) { return e && *e ? *e != '0' : dflt; }   // DM_FRAME_WG: 1 on, 0 off; unset or empty, the profile's
+static int frame_wg_on(void) {
+    static _Atomic int v = -1; int c = atomic_load_explicit(&v, memory_order_relaxed); if (c >= 0) return c;
+    const char *e = getenv("DM_FRAME_WG"); int want = frame_wg_mode(e, DM_GAME_FRAME_WG), on = want && rt_on(), was = -1;
+    if (atomic_compare_exchange_strong(&v, &was, on) && want) {
+        const char *src = e && *e ? "DM_FRAME_WG" : "game profile frame_wg";
+        if (on) LOG("[nvn] frame workgroup (%s): the acquiring thread tells each frame's start and deadline through a work interval; it and the replay threads join it", src);
+        else LOG("[nvn] frame workgroup (%s) needs DM_RT on: not armed (DM_RT=0)", src); }
+    return atomic_load_explicit(&v, memory_order_relaxed);
+}
+static void frame_wg_line(uint64_t frame) {   // every 300 frames while armed
+    static dm_frame_wg_counts p; dm_frame_wg_counts c; dm_frame_wg_counts_read(&c);
+    LOG("[nvn] frame workgroup up to frame %llu: intervals started %llu, finished %llu (%llu past the deadline); skipped %llu frames (acquired on a thread that is not a member); errors start %llu, finish %llu (last %d)",
+        (unsigned long long)frame, (unsigned long long)(c.started - p.started), (unsigned long long)(c.finished - p.finished), (unsigned long long)(c.late - p.late), (unsigned long long)(c.skipped - p.skipped),
+        (unsigned long long)(c.start_err - p.start_err), (unsigned long long)(c.finish_err - p.finish_err), c.last_err);
+    p = c;
+}
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
 // The acquire thread's real-time policy, checked once a frame on that thread (DM_POWER_DETAIL, logging only): frames checked, and of them those where the thread ran as a standard thread
 // (policy not POLICY_RR, as xnu's fail-safe leaves a real-time thread that ran too long without blocking) or below priority 97. Only on the thread the policy was set on (g_rt_th, with
@@ -1892,10 +1920,13 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     dm_thread_acquire_mark();   // every acquire, not only when the pthread changes: a new acquirer can reuse an exited guest thread's pthread_t (a TLS read and a compare)
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
         static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
-        if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
+        static __thread int wg_seen; int wg_new = rtp && !wg_seen && frame_wg_on(); if (wg_new) wg_seen = 1;   // the frame workgroup: each thread that acquires gets the policy, and joins, at its first acquire
+        if (rtp && (rt_period != rtp || wg_new)) { rt_period = rtp; set_time_constraint(rtp); }   // (otherwise an acquire that moved to a thread with the same period would only ever skip)
         if (rtp) atomic_store_explicit(&g_rt_frame_ns, rtp, memory_order_relaxed);
         rt_comp_tick(rtp);
         if (rtp) acq_demote_check();
+        static uint64_t wg_frame = UINT64_MAX; uint64_t wf = atomic_load_explicit(&g_frame, memory_order_relaxed); int wgb = frame_wg_on() && wf != wg_frame;   // the frame workgroup: one interval a frame (acquire can run more than once in one)
+        if (wgb) { wg_frame = wf; dm_frame_wg_end(); }   // the frame before ends at its pacing wait
         uint64_t p0 = now_ns(); int snap = mtl_snap_on();
         if (present_unpaced(o)) {}   // present interval 0: no vsync wait (below); only the free texture the ticket wait below gives
         else if (snap && mtl_link_active() && mtl_link_stalled()) { if (wait) sleep_until_ns(at); }   // present snapshots (nvn_mtl.m) while the display link is silent (the window in the background or covered):
@@ -1905,6 +1936,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
         else if (mtl_link_active()) { if (!link_wait(o, period ? 2 * period : 33333333ull) && wait) sleep_until_ns(at); }   // DM_PRESENT_LINK: pacing fully follows the display link (wait for the present interval's display-link ticks when running fast, go immediately when behind); our own 60 Hz clock is only the fallback when no display-link tick arrives
         else if (wait) sleep_until_ns(at);
         pace_ns = now_ns() - p0;
+        if (wgb) dm_frame_wg_begin(rtp ? rtp : period ? period : 16666667ull);   // and this one starts when the wait returns, with the real-time period as its deadline
     } else {   // DM_DETCLOCK_PACE=1 (used by the screenshot gate): while the guest clock advances per frame, each frame's wall clock is no shorter than one step -- frame count and in-game time are deterministic, and the background loading thread has at least one step of wall clock available per frame;
                // When the machine is fully loaded frames only get slower and the background only gets more wall clock, so the picture captured at "the Nth frame after the message" is independent of load
         static int pace = -1; static uint64_t step, last;
@@ -2196,6 +2228,7 @@ static void tsummary(uint64_t frame) {
       g_presn = 0; }
     power_line(frame);
     dr_line(frame);
+    if (frame_wg_on()) frame_wg_line(frame);
     { static uint64_t prev[8], pf; uint64_t v[8]; mtl_vbuf_stats(&v[0], &v[1], &v[2], &v[3], &v[4], &v[5]); mtl_ft_stats(&v[6], &v[7]);
       if (pf && frame > pf) { double nf = (double)(frame - pf);
           LOG("[nvn] vertex bindings up to frame %llu: per frame address lookups %.0f / reused %.0f, vertex table writes %.0f / skipped %.0f, streams not 4-byte aligned copied %.1f (%.2f MB); fragment table writes %.0f / skipped %.0f", frame,
@@ -2277,6 +2310,7 @@ static void set_time_constraint_comp(uint64_t period_ns, uint64_t comp_ns) {
             g_rt_port = mach_port_mod_refs(mach_task_self(), p, MACH_PORT_RIGHT_SEND, 1) == KERN_SUCCESS ? p : 0;
             g_rt_th = pthread_self(); th_name(g_rt_th, g_rt_name, sizeof g_rt_name);
             pthread_mutex_unlock(&g_rt_mu);
+            if (frame_wg_on()) { char nm[64]; th_name(pthread_self(), nm, sizeof nm); dm_frame_wg_join(nm); }   // once per thread: frame_wg.c keeps each thread's first answer (a thread the acquire comes back to)
         }
     }
     LOG("[nvn] present thread time-constraint policy (period %.3f ms, computation %.3f ms) %s", period_ns / 1e6, comp_ns / 1e6, kr == KERN_SUCCESS ? "set" : "failed to set");
@@ -2336,6 +2370,7 @@ static void rtw_declare(nvn_rtw *w, uint64_t period_ns, double comp_ms) {
         if (g_nrtw < (int)(sizeof g_rtw / sizeof *g_rtw)) g_rtw[g_nrtw++] = w;
     }
     pthread_mutex_unlock(&g_rt_mu);
+    if (first && frame_wg_on()) dm_frame_wg_join(w->name);   // the frame workgroup: each replay thread joins at its first declaration
     if (w->logged < 16) { w->logged++; LOG("[nvn] replay threads: '%s' time-constraint policy (period %.3f ms, computation %.3f ms) set%s", w->name, period_ns / 1e6, comp_ms, first ? " (the thread's first)" : w->logged == 16 ? "; later changes are not logged" : ""); }
 }
 void nvn_rtw_tick(nvn_rtw *w, uint64_t frame) {

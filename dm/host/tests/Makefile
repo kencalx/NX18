@@ -191,6 +191,13 @@ $(B)/t_audio_spsc_tsan: t_audio_spsc.c ../hle_audio.c ../hle_bigstack.c ../hle.h
 run: $(B)/t_fpslock
 $(B)/t_fpslock: t_fpslock.c ../hle_fpslock.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function $(GINC) -o $@ t_fpslock.c
+# The frame workgroup (frame_wg.c, DM_FRAME_WG) on this Mac: the interval made, joined by a real-time thread, frames started and finished without errors, skips on a thread that is not a member
+framewg: $(B)/t_framewg
+	$(B)/t_framewg
+run: framewg
+.PHONY: framewg
+$(B)/t_framewg: t_framewg.c ../frame_wg.c ../frame_wg.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_framewg.c -framework AudioToolbox
 run: $(B)/t_ue_heap_span
 $(B)/t_ue_heap_span: t_ue_heap_span.c ../hle_uemalloc.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(GINC) -o $@ t_ue_heap_span.c

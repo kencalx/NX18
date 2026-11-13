@@ -132,6 +132,7 @@ dm/host/Makefile	*:*	the shared host build
 dm/host/hle_thread.c	svc:*	threads and synchronization
 dm/host/hle_svc.c	svc:*	SVCs
 dm/host/thread.c	svc:*	threads
+dm/host/frame_wg.*	api:nvn	the frame workgroup (DM_FRAME_WG, profile frame_wg; off for every game): the window acquire's work interval
 dm/host/main.c	*:*	the host's start
 dm/host/loader.c	*:*	module loading
 dm/host/hle.c	hle:*	the HLE tables
