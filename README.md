@@ -14,7 +14,7 @@ It is not an emulator: the game's own code runs directly on the Apple chip, with
 
 The full [tested games table](dm/games/README.md#games) includes original Switch games, tested builds, engines and graphics APIs. Each game's note records its tested platforms, progress and known issues.
 
-These Switch 2 games have passed Mac gameplay testing. Build them from your legally owned and acquired game files, as a [`.nup` or `.nx` file or a dump folder](#switch-2-games):
+These Switch 2 games have passed Mac gameplay testing. Ocarina of Time, Star Fox, Donkey Kong Bananza and Mario Kart World were also played on an iPhone 18 Pro Max. Build them from your legally owned and acquired game files, as a [`.nup` or `.nx` file or a dump folder](#switch-2-games):
 
 - [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md)
 - [Fire Emblem Fortune's Weave](dm/games/04007EF01F8AE000/README.md) — up to 120 fps
@@ -47,13 +47,13 @@ Community projects build on nxnative with tools to turn your legally owned and a
 
 **This fork (NX 18)** builds its iOS app for one chip, the iPhone 18 Pro Max's A20 Pro, on iOS 27.3 (`dm/ios/project.yml`: deployment target 27.3, `-mcpu=apple-a20`; the app still declares the iPad family), with Xcode 27.3, whose Metal compiler (32023.925) is the one `dm/gfx/tools/dmsh_chain.lock` records, so `--allow-other-metal` is not needed. The lock's exact compiler, 32023.925.6, is the Xcode 27.3 beta's (build 27C5020n, Metal Toolchain 27C5020k), the one the shaders were tested with; a released Xcode 27.3 whose Metal compiler reports another version is refused by the build check until the lock is raised, or needs `--allow-other-metal`; its game shaders are MSL 4.1 on both platforms (`-std=metal4.1`). An IPA from this tree needs iOS 27.3 or later and does not run on the older devices or systems listed above, which are upstream's.
 
-The games' textures are BC-compressed, which older iPhones cannot read. Switch 2 builds are tested on the Mac; check each game's note for device-specific validation.
+The games' textures are BC-compressed, which older iPhones cannot read. Switch 2 games run on the iPhone as well as the Mac; iPad builds are untested. Check each game's note for the devices it was tested on.
 
 For a game without a profile, the script writes a survey and tries a provisional build with guessed settings. That build may not start; see [Port another game](docs/development.md#port-another-game).
 
 ## How to play
 
-Switch 2 games are built from one `.nup` or `.nx` file or a folder of their files, not from NSPs, and are tested on the Mac only: see [Switch 2 games](#switch-2-games).
+Switch 2 games are built from one `.nup` or `.nx` file or a folder of their files, not from NSPs: see [Switch 2 games](#switch-2-games).
 
 ### Quick start with the release scripts
 
@@ -139,7 +139,7 @@ To check that it worked, start a game, share its log (the in-game menu › **Sha
 
 ### Switch 2 games
 
-A Switch 2 game is built from your legally owned and acquired game files, in one [NUP](https://github.com/a55uka/nup) container (a `.nup` file), one [NX](https://github.com/fab918/nxformat) archive (a `.nx` file) or a folder of its files, not from NSPs. None of them needs `prod.keys`. A game this project has no profile for is surveyed and gets a provisional profile, as NSPs do ([Port another game](docs/development.md#port-another-game)), which may not boot. You get a Mac app; iPhone and iPad are untested.
+A Switch 2 game is built from your legally owned and acquired game files, in one [NUP](https://github.com/a55uka/nup) container (a `.nup` file), one [NX](https://github.com/fab918/nxformat) archive (a `.nx` file) or a folder of its files, not from NSPs. None of them needs `prod.keys`. A game this project has no profile for is surveyed and gets a provisional profile, as NSPs do ([Port another game](docs/development.md#port-another-game)), which may not boot. You get an IPA, or a Mac app with `--platform mac-app`; iPad builds are untested. On the iPhone and iPad the game starts in Handheld, its lighter mode, and the Mac starts it in Docked; **Console mode** in the settings changes it ([Console mode](docs/settings.md#console-mode)).
 
 **From a `.nup` file**, which holds the base game, its updates and DLC in one file. Give the file, or a folder that holds it:
 
