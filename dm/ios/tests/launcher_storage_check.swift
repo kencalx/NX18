@@ -93,6 +93,12 @@ import SwiftUI
         launched.reset(); launched.apply()
         expect(launched.values["DM_OPMODE"] == "0" && d.string(forKey: "launcher.DM_OPMODE") == "1", "Reset then Play keeps the saved choice of a setting fixed at launch")
         unsetenv("DM_OPMODE"); setenv("DM_ENV_LAUNCH_KEYS", "", 1); d.removeObject(forKey: "launcher.DM_OPMODE")
+        // The cloud-save dialog's answers name the cloud's save (save_sync.c read_choice), whichever side the player keeps
+        let lh = String(repeating: "a", count: 32), ch = String(repeating: "b", count: 32)
+        let both = SaveSyncReport(line: "sync=1 cloud=1 local=\(lh) saved=1 files=1 size=1 chash=\(ch) csaved=2 cfiles=1 csize=1 cdevice=iPhone17,1 sametitle=1 conflict=1 pull=0")!
+        expect(SaveSyncReport.step(both) == .choose && both.localChoice == "local:" + ch && both.cloudChoice == "cloud:" + ch, "both changed: local:<cloud's hash> and cloud:<cloud's hash>")
+        let none = SaveSyncReport(line: "sync=1 cloud=0 local=\(lh) saved=1 files=1 size=1 chash=- csaved=0 cfiles=0 csize=0 cdevice=- sametitle=1 conflict=0 pull=0")!
+        expect(none.localChoice == "local:none", "no cloud save: local:none")
         let wonder = try! JSONDecoder().decode(SettingsFile.self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[3])))
         failed += checkRules(ios: file.settings, mac: mac.settings, wonder: wonder.settings, defaults: d)
         failed += checkLauncherLayout(LauncherModel(mac.settings, defaults: d), defaults: d)

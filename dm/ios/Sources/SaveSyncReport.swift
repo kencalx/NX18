@@ -56,7 +56,8 @@ struct SaveSyncReport {
     /// The launchers' log line for pull=1
     static let pullPendingNote = "the last download of the cloud's save did not finish: the start puts this device's save back first, and compares the two after that"
 
-    var localChoice: String { "local:" + localHash }
+    // Both choices name the cloud's save the player chose against (save_sync.c read_choice): the mount takes one only while the cloud still has that save
+    var localChoice: String { "local:" + (cloudHash.isEmpty ? "none" : cloudHash) }
     var cloudChoice: String { "cloud:" + cloudHash }
 
     private static func when(_ d: Date) -> String {
