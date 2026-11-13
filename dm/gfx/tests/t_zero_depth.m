@@ -4,6 +4,7 @@
 // then again with it off, where the clear pass zeroes them as before (no copies). Unset, the switch leaves the profile's value. A texture of 64 MB or more leaves a note for the
 // 'depth zero:' line, which gives the GPU time of the upload batch that zeroed it (its feedback handler, up_flush) and of its frame and the next two (dz_line); up to DZ_N notes wait.
 #include "../nvn/nvn_mtl.m"
+#include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -25,12 +26,11 @@ int main(void) { @autoreleasepool {
     setenv("DM_DEPTH_ZERO_COPY", "1", 1); g_depth_zero_copy = -1; CHECK(depth_zero_copy() == 1 && g_depth_zero_env, "DM_DEPTH_ZERO_COPY=1: copies");
     unsetenv("DM_DEPTH_ZERO_COPY");
     NSError *error = nil;
-    id<MTLLibrary> library = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
-        "kernel void count_nz(depth2d<float,access::read> d [[texture(0)]], device atomic_uint *o [[buffer(0)]], uint2 p [[thread_position_in_grid]]) { if (p.x < d.get_width() && p.y < d.get_height() && d.read(p) != 0.0f) atomic_fetch_add_explicit(o, 1u, memory_order_relaxed); }\n" options:nil error:&error];
-    id<MTLComputePipelineState> counter = [g_dev newComputePipelineStateWithFunction:[library newFunctionWithName:@"count_nz"] error:&error];
+    id<MTLLibrary> library = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void count_nz(depth2d<float,access::read> d [[texture(0)]], device atomic_uint *o [[buffer(0)]], uint2 p [[thread_position_in_grid]]) { if (p.x < d.get_width() && p.y < d.get_height() && d.read(p) != 0.0f) atomic_fetch_add_explicit(o, 1u, memory_order_relaxed); }\n", nil, &error);
+    id<MTLComputePipelineState> counter = t4_cps(t4_fn(library, @"count_nz"), &error);
     CHECK(counter != nil, "synthetic non-zero counter compiles");
     if (!counter) return 1;
-    id<MTLCommandQueue> queue = [g_dev newCommandQueue];
     struct { int target, format; unsigned w, h, depth, levels, pieces; const char *label; } cases[] = {   // pieces: copies into level 0 of one layer, with the 4 MB zero buffer
         {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_DEPTH16, 4096, 4096, 1, 1, 8, "Depth16 4096x4096"},
         {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_DEPTH32F, 2048, 2048, 1, 1, 4, "Depth32F 2048x2048"},
@@ -53,13 +53,13 @@ int main(void) { @autoreleasepool {
         id<MTLBuffer> poison = [g_dev newBufferWithLength:poison_bytes options:MTLResourceStorageModeShared];
         if (bpp == 2) for (size_t k = 0; k < poison_bytes / 2; k++) ((uint16_t *)poison.contents)[k] = 0xbfff;   // 0.75
         else for (size_t k = 0; k < poison_bytes / 4; k++) ((float *)poison.contents)[k] = .75f;
-        id<MTLCommandBuffer> cb = [queue commandBuffer]; id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> blit = t4_copy(cb); t4_use(cb, poison); t4_use(cb, base);
         for (NSUInteger l = 0; l < base.mipmapLevelCount; l++) for (NSUInteger s = 0; s < base.arrayLength; s++) {
             NSUInteger w = MAX(base.width >> l, 1u), h = MAX(base.height >> l, 1u);
             [blit copyFromBuffer:poison sourceOffset:0 sourceBytesPerRow:w * bpp sourceBytesPerImage:w * h * bpp sourceSize:MTLSizeMake(w, h, 1) toTexture:base destinationSlice:s destinationLevel:l destinationOrigin:MTLOriginMake(0, 0, 0)];
         }
-        [blit endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        CHECK(cb.status == MTLCommandBufferStatusCompleted, "the texture takes its non-zero depth");
+        t4_end(cb, blit);
+        CHECK(t4_wait(cb) == MTLCommandBufferStatusCompleted, "the texture takes its non-zero depth");
         res_add(base);
         state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
         dz_clear(); g_depth_zero_env = 1;   // the note as with DM_DEPTH_ZERO_COPY set, either way
@@ -84,10 +84,10 @@ int main(void) { @autoreleasepool {
         for (NSUInteger l = 0; l < base.mipmapLevelCount; l++) for (NSUInteger s = 0; s < base.arrayLength; s++) {
             id<MTLTexture> v = [base newTextureViewWithPixelFormat:base.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(l, 1) slices:NSMakeRange(s, 1)];
             *(uint32_t *)count.contents = 0;
-            cb = [queue commandBuffer]; id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
-            [e setComputePipelineState:counter]; [e setTexture:v atIndex:0]; [e setBuffer:count offset:0 atIndex:0];
-            [e dispatchThreads:MTLSizeMake(v.width, v.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
-            CHECK(cb.status == MTLCommandBufferStatusCompleted, "the texels are read on the GPU");
+            cb = t4_begin(); id<MTL4ComputeCommandEncoder> e = t4_compute(cb);
+            [e setComputePipelineState:t4_keep(cb, counter)]; t4_tex(cb, e, T4_CS, v, 0); t4_buf(cb, e, T4_CS, count, 0, 0);
+            [e dispatchThreads:MTLSizeMake(v.width, v.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)]; t4_end(cb, e);
+            CHECK(t4_wait(cb) == MTLCommandBufferStatusCompleted, "the texels are read on the GPU");
             if (*(uint32_t *)count.contents) { clean = 0; fprintf(stderr, "  level %lu layer %lu: %u texels not zero\n", (unsigned long)l, (unsigned long)s, *(uint32_t *)count.contents); }
         }
         CHECK(clean, cases[i].label);
