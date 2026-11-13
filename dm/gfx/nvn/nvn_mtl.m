@@ -290,8 +290,8 @@ static NSError *gpu_lost_test_error(void) {
 static pthread_mutex_t g_res_mu = PTHREAD_MUTEX_INITIALIZER;   // Dedicated lock for the residency set: res_add is called on paths that hold g_mu (arena_new), so it cannot share g_mu
 // ---------- What the freeze detector's dump reads (mtl_stall_dump; dm/host/stall.c, DM_STALL_LOG) ----------
 // Ocarina of Time's test 3 froze once on an iPhone 18 Pro Max, 13 s after a save load as Link stepped into water: presents stopped, audio went on, and the log said nothing, no [RED]
-// line and no crash. Every wait that could have held it is silent: a command buffer that never completes logs nothing, the game's SyncWait sleeps on the GPU event for up to an hour
-// (mtl_wait_at), and rec_drain, rec_note_wait, ubc_wait, up_wait_zero and the present waits have no limit and no line. The feedback handlers all run on the one serial queue
+// line and no crash. Every wait that could have held it was silent: a command buffer that never completes logs nothing, the game's SyncWait sleeps on the GPU event for up to an hour
+// (mtl_wait_at), and rec_drain, rec_note_wait, ubc_wait, up_wait_zero and the present waits have no limit (they now say so once at 10 s, wait_say below, and wait on). The feedback handlers all run on the one serial queue
 // g_feedback_q, and the upload batch's handler commits the residency set (res_commit, under g_res_commit_mu) every time, so one long commit holds back every completion, and g_done with
 // it, again with no line. The detector's dump therefore needs, without taking any lock those paths can hold: who holds the two residency locks and since when, which feedback handler
 // runs and when the queue last ran one, which waits are in progress, and what the encode thread is doing. Everything below is a few relaxed atomic stores; the clock is
@@ -326,6 +326,33 @@ static const char *const wn_name[WN_N] = {"SyncWait on the GPU event (fence)", "
 static struct { _Atomic int n; _Atomic uint64_t what, at; } g_wn[WN_N];
 static inline void wn_in(int k, uint64_t what) { atomic_store_explicit(&g_wn[k].what, what, memory_order_relaxed); atomic_store_explicit(&g_wn[k].at, mach_absolute_time(), memory_order_relaxed); atomic_fetch_add(&g_wn[k].n, 1); }
 static inline void wn_out(int k) { atomic_fetch_sub(&g_wn[k].n, 1); }
+// The 10 s mark: a wait with no limit that is still waiting after 10 s says so once, in a red line with its site, and then waits on exactly as before. Ocarina of Time's test 3 froze
+// with nothing in the log; the game's SyncWait sleeps on the GPU event for up to an hour (mtl_wait_at's fast wake), and up_wait_zero, the present waits (present_now's allocator,
+// mtl_present_wait), rec_drain, rec_note_wait and ubc_wait had no limit and no line, so whichever of them held the picture said nothing. The freeze detector (dm/host/stall.c)
+// names the waits in progress once presents stop in focus; these lines say it in the wait itself, in the background too and whatever stopped. Nothing changes for a wait that ends
+// before the mark: the clock is read once it blocks (CLOCK_UPTIME_RAW, the commpage, no system call), its sleeps are the same until the mark, and a wait past it wakes once there,
+// says it and goes back to the very wait it was in. Each site says it at most WAIT_SAY_MAX times a run. The graphics tests shorten the mark (g_wait_say_ns) to drive the lines
+static uint64_t g_wait_say_ns = 10000000000ull;
+enum { WAIT_SAY_MAX = 4 };
+typedef struct { uint64_t at; int told; } wait_mark;   // the mark (CLOCK_UPTIME_RAW ns), and whether this wait has said it (or has nothing to say: a limit before the mark)
+static inline void wait_mark_set(wait_mark *m) { m->at = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + g_wait_say_ns; m->told = 0; }
+static inline uint64_t wait_mark_left(const wait_mark *m) { uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); return now >= m->at ? 0 : m->at - now; }
+// 1 once, the first time it is called at or past the mark: the caller says what it waits for
+static inline int wait_mark_due(wait_mark *m) { if (m->told || wait_mark_left(m)) return 0; m->told = 1; return 1; }
+// pthread_cond_wait that also wakes at the mark (a timed-out wake is a spurious one to the caller's loop, which checks wait_mark_due); after the mark, pthread_cond_wait itself
+static void wait_mark_sleep(pthread_cond_t *cv, pthread_mutex_t *mu, const wait_mark *m) {
+    if (m->told) { pthread_cond_wait(cv, mu); return; }
+    uint64_t left = wait_mark_left(m); if (!left) return;
+    struct timespec ts = {(time_t)(left / 1000000000ull), (long)(left % 1000000000ull)};
+    pthread_cond_timedwait_relative_np(cv, mu, &ts);
+}
+// The line: "[RED] the host has waited 10 s for <what> at <site> (thread <name>): <state>", at most WAIT_SAY_MAX a site (*n, the site's own count). MLOG takes only the log's lock
+__attribute__((format(printf, 4, 5))) static void wait_say(_Atomic int *n, const char *what, const char *site, const char *fmt, ...) {
+    if (atomic_fetch_add_explicit(n, 1, memory_order_relaxed) >= WAIT_SAY_MAX) return;
+    char state[512]; va_list ap; va_start(ap, fmt); vsnprintf(state, sizeof state, fmt, ap); va_end(ap);
+    char th[64] = ""; pthread_getname_np(pthread_self(), th, sizeof th);
+    MLOG("[RED] the host has waited %g s for %s at %s (thread %s): %s", g_wait_say_ns / 1e9, what, site, th[0] ? th : "unnamed", state);
+}
 // When the last present completed on the GPU (host now_ns), for the freeze detector: dm/host/stall.c defines it, the graphics tests' t_host_stubs.c a weak stand-in
 extern _Atomic uint64_t dm_present_done_ns;
 // Time spent waiting for g_res_commit_mu (res_commit_lock: a try first, so an uncontended lock reads no clock), by the replay thread (on_sub_thread) and by every other thread together
@@ -2815,12 +2842,32 @@ static int fast_wake(void) { static int v = -1; if (v < 0) { const char *e = get
 static void post_early(uint64_t fence) {
     post_complete(fence, 0, 0);
 }
+// A fence wait at the 10 s mark (mtl_wait_at, both of its paths, once per wait): what it waits for, then what the command buffer after the last completed fence runs (cbs_fly_report).
+// Called without g_mu: the shader list's lock is never taken under it. PRAGMATA's queue worker stopped at its first 3D scene with no GPU error, and the line named the shaders
+static void wait_fence_say(uint64_t fence, int site) {
+    static _Atomic int n; if (atomic_fetch_add(&n, 1) >= WAIT_SAY_MAX) return;
+    uint64_t done = atomic_load(&g_done);
+    MLOG("[RED] the host has waited %g s for GPU work up to fence %llu (wait site %d, %s): completed %llu, submitted %llu; the GPU runs nothing it can finish",
+         g_wait_say_ns / 1e9, (unsigned long long)fence, site, site >= 0 && site < WS_N ? ws_name[site] : "?", (unsigned long long)done, (unsigned long long)atomic_load(&g_fence));
+    cbs_fly_report(done + 1);
+}
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
     uint64_t w0 = ws_t0();
+    int told = 0;   // this wait has said it reached the 10 s mark (once per wait, whichever path it was on)
     if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ) && fast_wake() && g_ev && fence <= g_fence) {   // the game's own wait: wake on the GPU's signal (rec_signal(g_ev, fence) after each submission)
         uint64_t ms = timeout_ns / 1000000ull; if (ms > 3600000ull) ms = 3600000ull;
-        wn_in(WN_EVENT, fence); int sig = [g_ev waitUntilSignaledValue:fence timeoutMS:ms]; wn_out(WN_EVENT);
+        // In slices of the mark (10 s) up to the same total: a wait still going after the first slice says so, with what the stuck command buffer runs, as the feedback wait below does
+        uint64_t slice = g_wait_say_ns / 1000000ull; if (!slice) slice = 1;
+        int sig;
+        wn_in(WN_EVENT, fence);
+        for (uint64_t left = ms;;) {
+            uint64_t s = left < slice ? left : slice;
+            sig = [g_ev waitUntilSignaledValue:fence timeoutMS:s]; left -= s;
+            if (sig || !left) break;
+            if (!told) { told = 1; wait_fence_say(fence, site); }
+        }
+        wn_out(WN_EVENT);
         if (sig) post_early(fence);
         int ok = g_done >= fence;
         if (ws_on()) { ws_put(site, w0, 1); ws_wake(fence); }
@@ -2837,20 +2884,18 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     dl.tv_sec += ns / 1000000000ull; dl.tv_nsec = ns % 1000000000ull;
     pthread_mutex_lock(&g_mu);
     int r = 0;
-    // An unbounded wait still waiting after 10 s is a hang: said once, with what it waits for (PRAGMATA's queue worker stopped here at its first 3D scene, no GPU error)
-    struct timespec said; clock_gettime(CLOCK_REALTIME, &said); said.tv_sec += 10; int told = timeout_ns != UINT64_MAX;
+    // A wait still waiting at the 10 s mark is a hang: said once, with what it waits for (PRAGMATA's queue worker stopped here at its first 3D scene, no GPU error). A wait whose limit
+    // comes first has nothing to say
+    struct timespec said; clock_gettime(CLOCK_REALTIME, &said);
+    { uint64_t sn = (uint64_t)said.tv_nsec + g_wait_say_ns; said.tv_sec += sn / 1000000000ull; said.tv_nsec = sn % 1000000000ull; }
+    told |= timeout_ns <= g_wait_say_ns;
     int noted = g_done < fence; if (noted) wn_in(WN_DONE, fence);
     while (g_done < fence) {
         int late = !told && (dl.tv_sec > said.tv_sec || (dl.tv_sec == said.tv_sec && dl.tv_nsec > said.tv_nsec));
         if (!(r = pthread_cond_timedwait(&g_cv, &g_mu, late ? &said : &dl))) continue;
         if (!late) break;
-        told = 1; static _Atomic int n;
-        if (atomic_fetch_add(&n, 1) < 4) {
-            uint64_t stuck = g_done + 1;
-            MLOG("[RED] the host has waited 10 s for GPU work up to fence %llu (wait site %d): completed %llu, submitted %llu; the GPU runs nothing it can finish",
-                 (unsigned long long)fence, site, (unsigned long long)g_done, (unsigned long long)g_fence);
-            pthread_mutex_unlock(&g_mu); cbs_fly_report(stuck); pthread_mutex_lock(&g_mu);   // the list's lock is not taken under g_mu
-        }
+        told = 1;
+        pthread_mutex_unlock(&g_mu); wait_fence_say(fence, site); pthread_mutex_lock(&g_mu);
     }
     int ok = g_done >= fence;
     if (noted) wn_out(WN_DONE);
@@ -3549,7 +3594,17 @@ static void up_wait_zero(_Atomic int *v, int site) {
     uint64_t w0 = ws_t0();
     pthread_mutex_lock(&g_up_wmu);
     wn_in(WN_UPZERO, (uint64_t)atomic_load(v));
-    while (atomic_load(v)) { struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 10000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; } pthread_cond_timedwait(&g_up_wcv, &g_up_wmu, &dl); }
+    wait_mark m; wait_mark_set(&m);   // the 10 s line, once (its 10 ms sleeps are unchanged)
+    while (atomic_load(v)) {
+        struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 10000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; } pthread_cond_timedwait(&g_up_wcv, &g_up_wmu, &dl);
+        if (atomic_load(v) && wait_mark_due(&m)) {
+            static _Atomic int n;
+            const char *fb = atomic_load_explicit(&g_fbq_what, memory_order_acquire);
+            wait_say(&n, v == &g_up_pending ? "the upload batches to complete" : "an upload slot's previous batch", ws_name[site],
+                     "%d pending; fences completed %llu, submitted %llu; feedback handler %s%s", atomic_load(v), (unsigned long long)atomic_load(&g_done), (unsigned long long)atomic_load(&g_fence),
+                     fb ? "running: " : "none running", fb ? fb : "");
+        }
+    }
     wn_out(WN_UPZERO);
     pthread_mutex_unlock(&g_up_wmu);
     if (ws_on()) ws_put(site, w0, 1);
@@ -5795,7 +5850,7 @@ static void xv_init(void) {
     const char *p = getenv("DM_XV_FILE"); if (!p || !*p) return;
     FILE *f = fopen(p, "r"); if (!f) return;
     char line[256], why[160]; unsigned long long tag; int ch, n = 0;
-    while (fgets(line, sizeof line, f) && g_xv_ndis < 128) if (sscanf(line, "%llx\t%159[^\t]\t%d", &tag, why, &ch) >= 1) g_xv_disabled[g_xv_ndis++] = tag, n++;
+    while (fgets(line, sizeof line, f) && g_xv_ndis < 128) if (sscanf(line, "%llx\t%159[^\t]\t%d", &tag, why, &ch) >= 1) g_xv_disabled[g_xv_ndis++] = tag, n++;   // NOLINT(clang-analyzer-unix.BlockInCriticalSection): DM_XV_FILE (diagnostics, at most 128 lines) is read once, at the first write-back check, which may run under the replay's lock
     fclose(f); MLOG("read %d disable records", n);
 }
 static int xv_disabled(uint64_t tag) { xv_init(); for (int i = 0; i < g_xv_ndis; i++) if (g_xv_disabled[i] == tag) return 1; return 0; }
@@ -17988,7 +18043,16 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (g_present_alloc_fence[alloc_i]) {
         pthread_mutex_lock(&g_pq_mu);
         int noted = g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]; if (noted) wn_in(WN_PALLOC, g_present_alloc_fence[alloc_i]);
-        while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+        wait_mark m = {0, 1}; if (noted) wait_mark_set(&m);   // the 10 s line, once; the wait is as long as before
+        while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]) {
+            wait_mark_sleep(&g_pq_cv, &g_pq_mu, &m);
+            if (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i] && wait_mark_due(&m)) {
+                static _Atomic int n;
+                wait_say(&n, "the present allocator's previous present on the GPU", "present_now (" LOCK_SITE ")", "allocator %d last used by ticket %llu, its feedback reported %llu; presents processed %llu, in flight %d; fences completed %llu, submitted %llu",
+                         alloc_i, (unsigned long long)g_present_alloc_fence[alloc_i], (unsigned long long)g_present_alloc_done[alloc_i], (unsigned long long)g_pq_done,
+                         g_pq_inflight, (unsigned long long)atomic_load(&g_done), (unsigned long long)atomic_load(&g_fence));
+            }
+        }
         if (noted) wn_out(WN_PALLOC);
         pthread_mutex_unlock(&g_pq_mu);
     }
@@ -18337,6 +18401,7 @@ int mtl_snap_on(void) {
     return v;
 }
 static void snap_commit_wait(uint64_t v) { if (v) rec_note_wait(&g_snap_cmt, v); }
+static void present_wait_at(uint64_t tk, const char *site);
 static void snap_drain(void) {
     // Display tickets may have been dropped during suspend, but their copies still belong to the Metal 4 queue.
     uint64_t v = g_snap_v; if (!v) return;
@@ -18348,7 +18413,7 @@ uint64_t mtl_snap_acquire_wait(void) {
     int k = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
     uint64_t ticket = atomic_load(&g_snap[k].ticket), ev = atomic_load(&g_snap[k].ev), w0 = ws_t0();
     pthread_mutex_lock(&g_pq_mu); int blocked = ticket > g_pq_done; pthread_mutex_unlock(&g_pq_mu);
-    if (ticket) mtl_present_wait(ticket);
+    if (ticket) present_wait_at(ticket, "mtl_snap_acquire_wait (a snapshot ring slot's previous present)");
     if (ev && !atomic_load(&g_present_discard) && g_snap_ev.signaledValue < ev) {
         blocked = 1;
         // On timeout present falls back to its original texture; the busy allocator is never reset.
@@ -18482,17 +18547,28 @@ void mtl_present_progress(uint64_t *queued, uint64_t *done) { pthread_mutex_lock
 // third to a half of the frames (2 slots 32/80, 4 slots 49/80, snapshots off 0/80; LNPANDY/NX2Apple#1117)
 // The wait for the copy is a CPU wait for the GPU: the ledger counts it as "snapshot copy" (WS_SNAPCOPY), apart from the ring slot's (WS_SNAP)
 void mtl_present_wait_texture(uint64_t tk, uint64_t ev) {
-    if (!ev) { mtl_present_wait(tk); return; }
+    if (!ev) { present_wait_at(tk, "mtl_present_wait_texture (a texture's next acquire, or a queue finish)"); return; }
     uint64_t w0 = ws_t0(); int blocked = !atomic_load(&g_present_discard) && g_snap_ev.signaledValue < ev;
     if (blocked && ![g_snap_ev waitUntilSignaledValue:ev timeoutMS:2000]) RED_ONCE(169, "present snapshots: a texture's copy did not finish within 2 s; the game draws into it again");
     if (ws_on()) ws_put(WS_SNAPCOPY, w0, blocked);
 }
-void mtl_present_wait(uint64_t tk) {
+// A present wait at the 10 s mark (under g_pq_mu): the ticket, the present queue's counters and the display link's, the fences. The waits below no longer lean on the display
+// link's stall drops alone: a present taken by the link or the present thread that never reaches the GPU, or one whose GPU work never completes, waited here without a line
+static void present_wait_say(uint64_t tk, const char *site) {
+    static _Atomic int n;
+    uint64_t now = now_ns(), tick = __atomic_load_n(&g_link_tick_ns, __ATOMIC_RELAXED);
+    wait_say(&n, "a present to be handed to the GPU", site, "ticket %llu; presents queued %llu, taken %llu, processed %llu, in flight %d; display link %s, its last tick %.1f s ago, stall %d; fences completed %llu, submitted %llu",
+             (unsigned long long)tk, (unsigned long long)g_pq_in, (unsigned long long)g_pq_read, (unsigned long long)g_pq_done, g_pq_inflight, g_link_owns_layer ? "owns the layer" : "does not own the layer",
+             tick && now > tick ? (now - tick) / 1e9 : -1.0, g_stall_t0 != 0, (unsigned long long)atomic_load(&g_done), (unsigned long long)atomic_load(&g_fence));
+}
+static void present_wait_at(uint64_t tk, const char *site) {
     pthread_mutex_lock(&g_pq_mu);
     int noted = g_pq_done < tk && !atomic_load(&g_present_discard); if (noted) wn_in(WN_PTICKET, tk);
+    wait_mark m = {0, 1}; if (noted) wait_mark_set(&m);   // the 10 s line, once; the untimed waits below wake at the mark once to say it, then wait as before
     while (g_pq_done < tk && !atomic_load(&g_present_discard)) {
-        if (!g_link_owns_layer) { pthread_cond_wait(&g_pq_cv, &g_pq_mu); continue; }
-        if (g_pq_read >= tk) { pthread_cond_wait(&g_pq_cv, &g_pq_mu); continue; }   // This one has already been taken by the display link and is being presented: wait for it to be handed to the GPU (the GPU completion callback will wake us)
+        if (wait_mark_due(&m)) present_wait_say(tk, site);
+        if (!g_link_owns_layer) { wait_mark_sleep(&g_pq_cv, &g_pq_mu, &m); continue; }
+        if (g_pq_read >= tk) { wait_mark_sleep(&g_pq_cv, &g_pq_mu, &m); continue; }   // This one has already been taken by the display link and is being presented: wait for it to be handed to the GPU (the GPU completion callback will wake us)
         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += (long)STALL_NS; if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
         // Already determined to be in a stall (when the display link comes back the callback first clears g_stall_t0, then records the display-link tick time): no longer wait 100 ms in vain every frame, drop directly, and the game proceeds by its own display-link wait timeout (about two ticks)
         if (!g_stall_t0 && (pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) != ETIMEDOUT || g_pq_done >= tk)) continue;
@@ -18502,7 +18578,7 @@ void mtl_present_wait(uint64_t tk) {
         uint64_t n = tk - g_pq_read;
         for (uint64_t k = g_pq_read + 1; k <= tk; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
         g_link_dropped += n; g_pq_read = tk;
-        while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+        while (g_pq_inflight) { wait_mark_sleep(&g_pq_cv, &g_pq_mu, &m); if (g_pq_inflight && wait_mark_due(&m)) present_wait_say(tk, site); }
         if (g_pq_done < tk) g_pq_done = tk;
         pthread_cond_broadcast(&g_pq_cv);
         if (!g_stall_t0) { g_stall_t0 = last ? last : now; g_stall_drop = 0; g_stall_red = 0; g_stall_logged = 0; g_stall_n++; }
@@ -18521,9 +18597,10 @@ void mtl_present_wait(uint64_t tk) {
     if (noted) wn_out(WN_PTICKET);
     pthread_mutex_unlock(&g_pq_mu);
 }
+void mtl_present_wait(uint64_t tk) { present_wait_at(tk, "mtl_present_wait"); }
 // Wait until all queued presents have been processed (used by mtl_finish = nvnQueueFinish etc.): goes through mtl_present_wait, so there is still a fallback when the display link stops (real device: the game called QueueFinish once while the display link was stopped,
 // and this used to wait here without a timeout; nobody took the 3 queued frames and the game stalled; those two runs on Mac did not hit this call)
-void mtl_present_flush(void) { pthread_mutex_lock(&g_pq_mu); uint64_t h = g_pq_in; pthread_mutex_unlock(&g_pq_mu); mtl_present_wait(h); }
+void mtl_present_flush(void) { pthread_mutex_lock(&g_pq_mu); uint64_t h = g_pq_in; pthread_mutex_unlock(&g_pq_mu); present_wait_at(h, "mtl_present_flush (a queue finish, or the suspend)"); }
 void mtl_stats(uint64_t *passes, uint64_t *draws) { *passes = g_stat_pass; *draws = g_stat_draw; cp_report(); }
 void mtl_args_stats(uint64_t *enc, uint64_t *reuse, uint64_t *patch) { *enc = g_stat_args_enc; *reuse = g_stat_args_reuse; *patch = g_stat_args_patch; }
 void mtl_vbuf_stats(uint64_t *resolve, uint64_t *reuse, uint64_t *set, uint64_t *skip, uint64_t *copies, uint64_t *copy_bytes) {

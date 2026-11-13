@@ -2,7 +2,8 @@
 // Ocarina of Time's test 3 (baf45a97) on an iPhone 18 Pro Max froze once about 13 s after a save load, as Link stepped into water: presents stopped (no frame, long-frame or power
 // tick line after about 126 s) while audio went on, with no [RED] line and no crash; the owner then closed it from the app switcher, and a second run through the same water did not
 // freeze. The log could not say where it stood: a command buffer that never completes logs nothing, the game's SyncWait sleeps on the GPU event for up to an hour, the host's own
-// waits (rec_drain, ubc_wait, up_wait_zero, the present waits) have no limit and no line, and the watchdog in crash.c is off unless DM_WATCH / DM_WATCH_STALL is set.
+// waits (rec_drain, ubc_wait, up_wait_zero, the present waits) have no limit and had no line (they now say so once at 10 s: nvn_mtl.m wait_say), and the watchdog in crash.c is off
+// unless DM_WATCH / DM_WATCH_STALL is set.
 //
 // So a thread of its own, at utility QoS, looks twice a second at when the last present completed on the GPU (dm_present_done_ns, stamped by nvn_mtl.m's present feedback handler).
 // When the game is in focus (the oe focus state the game sees is 1: not out of focus, not in the background, no library applet open), the in-game menu is closed, the game has
