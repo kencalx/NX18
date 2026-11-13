@@ -31,7 +31,7 @@ The script checks your Mac, Xcode 27.3 and its Metal toolchain. It installs xcod
 
 ## 3. Build your game
 
-Rather use an app than Terminal? You can build with NX Play, a community Mac app: see [Build with NX Play instead](#build-with-nx-play-instead) below.
+Rather build your games in an app than in Terminal? You can build with NX Play, a community Mac app: see [Build with NX Play instead](#build-with-nx-play-instead) below.
 
 Copy the build script out of Downloads, then open your copy in a text editor:
 
@@ -59,7 +59,7 @@ To play on your Mac instead, set `TARGET="mac-app"` and open the app it makes fr
 
 ### Build with NX Play instead
 
-NX 18's own Mac app is planned for X2.0. Until then, if you'd rather not use the command line, you can build your games with [NX Play](https://github.com/varyform/nx-native-wrapper), a free community Mac app by Oleh Khomei ([varyform](https://github.com/varyform)), MIT licensed. It can build an IPA or a Mac app, or install the game on your iPhone through Xcode. NX Play is not made by NX 18. It's a suggestion, not a requirement: the steps above stay the documented way.
+NX 18's own Mac app is planned for X2.0. Until then, if you'd rather not use the command line, you can build your games with [NX Play](https://github.com/varyform/nx-native-wrapper), a free community Mac app by Oleh Khomei ([varyform](https://github.com/varyform)), MIT licensed. It can build an IPA or a Mac app, or install the game on your iPhone through Xcode. NX Play is a separate project, not part of NX 18. It's a suggestion, not a requirement: the steps above stay the documented way.
 
 By default NX Play builds upstream nxnative, not NX 18. To build with NX 18:
 
