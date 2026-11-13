@@ -222,6 +222,19 @@ class Main(Base):
         (game / 'icon.edited.jpg').unlink(); (game / 'icon.jpg').write_bytes(b'GIF89a'); said = []   # not a JPEG or PNG: passed over with a line, the base game's taken
         self.assertEqual(nsp.app_icon(None, spare, game, base, say=said.append), (base / 'icon.jpg', False)); self.assertEqual(len(said), 1)
 
+    def test_nxplay_icon(self):   # NXPLAY_ICONS: the icon NX Play saved for a game, for a terminal build of a game without one of its own (main: after --fallback-icon, before the NX 18 icon)
+        icons = self.dump.parent / 'nxplay'; icons.mkdir(); said = []
+        with mock.patch.object(nsp, 'NXPLAY_ICONS', str(icons)):
+            self.assertIsNone(nsp.nxplay_icon((TID, TID)))                                # none saved
+            (icons / f'{TID:016X}.jpg').write_bytes(b'GIF89a')                             # not a JPEG or PNG: passed over with a line
+            self.assertIsNone(nsp.nxplay_icon((TID,), say=said.append)); self.assertEqual(len(said), 1)
+            (icons / f'{TID + 1:016X}.jpg').write_bytes(b'\x89PNG saved')                 # the next title ID's is taken
+            self.assertEqual(nsp.nxplay_icon((TID, TID + 1)), icons / f'{TID + 1:016X}.jpg')
+            (icons / f'{TID:016X}.jpg').write_bytes(b'\xff\xd8saved')                    # upper-case hex, as NX Play names them; the first title ID's first
+            self.assertEqual(nsp.nxplay_icon((TID, TID + 1)), icons / f'{TID:016X}.jpg')
+        with mock.patch.object(nsp, 'NXPLAY_ICONS', ''): self.assertIsNone(nsp.nxplay_icon((TID,)))   # empty: never looked at
+        self.assertEqual(nsp.NXPLAY_ICONS, '~/Library/Caches/com.varyform.nxplay/Banners/icons')
+
     def test_title_id_must_match(self):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), self.assertRaisesRegex(nsp.BuildError, 'which holds'):
             nsp.main(nsp.parse_args([str(self.dump), '--title-id', '0100000000010000']))
