@@ -290,7 +290,7 @@ class PrepareLine(unittest.TestCase):   # nvn_mtl.m's prepare line, with the bun
 
 class GhostTable(unittest.TestCase):   # nvn_mtl.m's finalized-texture table: its start line (size and source) and its line every 300 frames, read for the DM_NVN_GHOST A/B (frame-rate.md)
     def lines(self, cap: int, why: str, windows: list[tuple[int, str, str, str]]) -> list[str]:
-        return [f'[dm] [nvn-mtl] finalized-texture table: up to {cap} textures that finalized texture objects still resolve to, the oldest going when a new one comes ({why})',
+        return [f'[dm] [nvn-mtl] finalized-texture table: up to {cap} textures that finalized texture objects still resolve to, the least recently used going when a new one comes, idle ones drained back to 512 ({why})',
                 *(f'[dm] [nvn-mtl] finalized-texture table up to frame {f} ({cap} held, up to {cap}), per frame: {put} put, {thr} of them pushed out in the last 4 frames, '
                   f'{ev} pushed out; 0.400 ms in the texture misses that put, 0.900 ms patching pool tables; texture ID epochs started 0.50' for f, put, thr, ev in windows)]
 
@@ -299,11 +299,11 @@ class GhostTable(unittest.TestCase):   # nvn_mtl.m's finalized-texture table: it
         line = re.search(r'MLOG\("(finalized-texture table up to frame %llu [^"]*)"', src); start = re.search(r'MLOG\("(finalized-texture table: up to %u [^"]*)"', src)
         self.assertTrue(line and start, 'the finalized-texture table\'s format strings in nvn_mtl.m')
         assert line and start
-        vals = iter(['3600', '64', '64', '0.33', '0.02', '4', '0.12', '0.010', '0.250', '0.07'])
+        vals = iter(['3600', '64', '64', '0.33', '0.02', '4', '0.12', '0.010', '0.250', '0.07', '32', '56'])
         x = devlog.RX['ghost'].search('[nvn-mtl] ' + re.sub(r'%(?:llu|u|d|s)', lambda _: next(vals), line.group(1)))
         self.assertIsNotNone(x)
         assert x
-        self.assertEqual(x.groups(), ('3600', '64', '64', '0.33', '0.02', '0.12', '0.010', '0.250', '0.07'))
+        self.assertEqual(x.groups(), ('3600', '64', '64', '0.33', '0.02', '0.12', '0.010', '0.250', '0.07', '32', '56'))
         x = devlog.RX['ghost_cap'].search('[nvn-mtl] ' + start.group(1).replace('%u', '4096').replace('%s', 'game profile ghost_table'))
         self.assertIsNotNone(x)
         assert x
@@ -315,13 +315,20 @@ class GhostTable(unittest.TestCase):   # nvn_mtl.m's finalized-texture table: it
         ga, gb = a['ghost'], b['ghost']
         self.assertEqual((ga['cap'], ga['source'], ga['windows'], ga['put'], ga['thrash'], ga['thrash_max'], ga['evicted'], ga['miss_ms'], ga['patch_ms'], ga['epochs']),
                          (512, 'DM_NVN_GHOST', 3, 364.0, 300.0, 640.0, 360.0, 0.4, 0.9, 0.5))
-        self.assertEqual((gb['cap'], gb['thrash'], gb['put_max']), (4096, 0.0, 800.0))
+        self.assertEqual((gb['cap'], gb['thrash'], gb['put_max'], gb['drained'], gb['low_headroom']), (4096, 0.0, 800.0, 0, 0))   # lines without the drain's part (before it) read as none
         text = '\n'.join(devlog.render(a, 5))
         self.assertIn('finalized-texture table of 512 (DM_NVN_GHOST)', text)
         self.assertIn('300 pushed out in the last 4 frames (most 640)', text)
         rows = {r['label']: r for r in devlog.compare(a, b)['rows']}
         self.assertTrue(rows['finalized-texture thrash, most']['change'].endswith('better'), rows['finalized-texture thrash, most'])
         self.assertEqual((rows['finalized-texture table']['a'], rows['finalized-texture table']['b']), (512, 4096))
+
+    def test_drained_summed(self):   # the drain and the low-headroom drop counted per window and summed for the run
+        ls = self.lines(4096, 'game profile ghost_table', [(300, '800.00', '0.00', '0.00'), (600, '0.00', '0.00', '0.00')])
+        ls[1] += '; in the window 0 idle entries drained, 0 let go at low memory headroom'; ls[2] += '; in the window 640 idle entries drained, 988 let go at low memory headroom'
+        g = read(ls)['ghost']
+        self.assertEqual((g['windows'], g['drained'], g['low_headroom']), (2, 640, 988))
+        self.assertIn('in all 640 idle entries drained, 988 let go at low memory headroom', '\n'.join(devlog.render(read(ls), 5)))
 
     def test_start_line_only(self):   # a run whose table never put: its size, no window
         g = read(self.lines(512, 'the default', []))['ghost']

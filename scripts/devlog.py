@@ -21,7 +21,7 @@ What it reads (docs/development.md, Reading a device log):
   finalized textures [nvn-mtl] finalized-texture table: up to N (its size and where it came from: the default, the profile's ghost_table, DM_NVN_GHOST) and its lines every 300
                      frames (finalized-texture table up to frame F): per frame, the puts, the thrash (puts of a serial pushed out in the last 4 frames), the evictions, the ms in
                      the texture misses that put and on the pool tables' patch path less those (the two add up), the texture ID epochs; the median of the windows with a line
-                     and the most (a window with no put or eviction writes none)
+                     and the most (a window with no put, eviction, drain or drop writes none); the idle entries drained and those let go at low memory headroom, in all
   display link       [nvn-mtl] display link up to tick N: submission ahead of / game enqueue to target display; the stretches of windows whose enqueue p50 is more than half a frame
                      period above the run's median (the display link counts whole frames: a frame more latency), and what the log shows just before them
   long frames        [longframe] frame N (T s): the longest, and what each spent its time on (new pipelines, texture uploads, GPU, submit, the game's side, a return from the background).
@@ -96,7 +96,8 @@ RX = {k: re.compile(v) for k, v in {
                r'(?:.*?; (\d+) layout bases from the archive bundled with the app)?',   # the layout bases' part since X1.0 (with an archive bundled with the app)
     'ghost_cap': r'^\[nvn-mtl\] finalized-texture table: up to (\d+) textures .*\((.+)\)$',
     'ghost': r'^\[nvn-mtl\] finalized-texture table up to frame (\d+) \((\d+) held, up to (\d+)\), per frame: ([\d.]+) put, ([\d.]+) of them pushed out in the last \d+ frames, '
-             r'([\d.]+) pushed out; ([\d.]+) ms in the texture misses that put, ([\d.]+) ms patching pool tables; texture ID epochs started ([\d.]+)',
+             r'([\d.]+) pushed out; ([\d.]+) ms in the texture misses that put, ([\d.]+) ms patching pool tables; texture ID epochs started ([\d.]+)'
+             r'(?:; in the window (\d+) idle entries drained, (\d+) let go at low memory headroom)?',   # the drain and the low-headroom drop since the table is kept by use
     'link': r'^\[nvn-mtl\] display link up to tick (\d+): ticks \d+, presents (\d+), empty ticks (\d+) .*?merging (\d+); submission ahead of target display p50 ([\d.]+) ms / min ([\d.]+) ms; '
             r'game enqueue to target display p50 ([\d.]+) ms / min ([\d.]+) / max ([\d.]+) ms',
     'longframe': r'^\[longframe\] frame (\d+) \(([\d.]+) s\) whole frame ([\d.]+) ms, submit\+present ([\d.]+) ms, GPU (-?[\d.]+) ms; new pipelines (\d+) \+ shader libraries (\d+), '
@@ -467,7 +468,8 @@ def read(text: str, top: int = 5) -> Rec:
     out['ghost'] = {'cap': int(gc.group(1)) if gc else int(gh[-1][1].group(3)) if gh else None, 'source': gc.group(2) if gc else None, 'windows': len(gh),
                     'held_max': max((int(m.group(2)) for _, m, _ in gh), default=None),
                     **{k: med(col('ghost', n)) for k, n in (('put', 4), ('thrash', 5), ('evicted', 6), ('miss_ms', 7), ('patch_ms', 8), ('epochs', 9))},
-                    'put_max': max(col('ghost', 4), default=None), 'thrash_max': max(col('ghost', 5), default=None)} if gh or gc else None
+                    'put_max': max(col('ghost', 4), default=None), 'thrash_max': max(col('ghost', 5), default=None),
+                    'drained': sum(int(m.group(10) or 0) for _, m, _ in gh), 'low_headroom': sum(int(m.group(11) or 0) for _, m, _ in gh)} if gh or gc else None
     # movies: VideoToolbox's VP9 check, each AAC stream's channel order, sessions made again after iOS lost them (their red lines are in RED)
     vp, aac, vt = one.get('vp9_vt'), g['aac_order'], g['vt_rebuild']
     out['movies'] = {'vp9_hardware': vp.group(1) == 'yes' if vp else None, 'vp9_before_register': vp.group(2) == 'yes' if vp else None,
@@ -587,7 +589,8 @@ def render(s: Rec, top: int) -> list[str]:
         row('ghost table', f"finalized-texture table of {gt['cap']}" + (f" ({gt['source']})" if gt['source'] else '') + (f", at most {gt['held_max']} held" if gt['held_max'] is not None else ''),
             f"per frame over {nof(gt['windows'], 'window')} with puts (median): {g3(gt['put'])} put (most {g3(gt['put_max'])}), {g3(gt['thrash'])} pushed out in the last 4 frames "
             f"(most {g3(gt['thrash_max'])}), {g3(gt['evicted'])} pushed out; {g3(gt['miss_ms'])} ms in the misses that put, {g3(gt['patch_ms'])} ms patching pool tables; "
-            f"texture ID epochs {g3(gt['epochs'])}" if gt['windows'] else 'no window with a put or an eviction')
+            f"texture ID epochs {g3(gt['epochs'])}" + (f"; in all {gt['drained']} idle entries drained, {gt['low_headroom']} let go at low memory headroom" if gt['drained'] or gt['low_headroom'] else '')
+            if gt['windows'] else 'no window with a put or an eviction')
     dl = s['display_link']
     if dl:
         row('display link', f"game enqueue to target display p50 {g3(dl['enqueue_p50_ms'])} ms (median of {dl['windows']} windows; most {g3(dl['enqueue_max_ms'])}), submission ahead "

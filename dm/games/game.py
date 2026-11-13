@@ -188,7 +188,7 @@ def header_one(g):
     if dzc not in ('on', 'off'): sys.exit(f'{g.id}: depth_zero_copy must be on or off: {dzc}')
     pik = g.get('pool_ids_8k', 'off')   # a pool table's lists of IDs to take again hold 8,192 IDs, as one patch takes, instead of 1,024 (nvn_mtl.m pool_ids_max; DM_POOL_IDS_8K overrides): on / off
     if pik not in ('on', 'off'): sys.exit(f'{g.id}: pool_ids_8k must be on or off: {pik}')
-    gtb = g.get('ghost_table', '512')   # textures of finalized texture objects replay still resolves, the oldest going first (nvn_mtl.m ghost_cap; DM_NVN_GHOST overrides): 64 to 8192
+    gtb = g.get('ghost_table', '512')   # textures of finalized texture objects replay still resolves, at most, the least recently used going first (nvn_mtl.m ghost_cap; DM_NVN_GHOST overrides): 64 to 8192
     if not (gtb.isdigit() and 64 <= int(gtb) <= 8192): sys.exit(f'{g.id}: ghost_table must be a number of textures from 64 to 8192 (512 without the key): {gtb}')
     utp = g.get('ue_texture_pool', '0')   # Unreal's r.Streaming.PoolSize in MB, raised to this on the Mac (hle_uecvar.c; DM_UE_TEXTURE_POOL overrides, and turns it on for iOS): 0 = the game's own pool
     if not utp.isdigit(): sys.exit(f"{g.id}: ue_texture_pool must be megabytes (0 = the game's own pool): {utp}")

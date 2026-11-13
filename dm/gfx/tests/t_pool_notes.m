@@ -49,8 +49,9 @@ static void same_as_whole(id<MTLBuffer> patched, const char *label) {
 // Many retired IDs through pool_gpu: ntex textures over a pool the CPU cannot reach (each resolves to its shared texture), each registered at per IDs from RBASE, read in one
 // submission and finalized; the next submission's table holds a view of each such ID and lists them (trans), and the one after takes them again. With lists of pool_ids_max()
 // IDs (8,192 with pool_ids_8k, NXNative 034e91a8) 1,200 are patched; with 1,024, every other game's limit, the list is dropped and that submission builds the table whole, as
-// before. The textures are fewer than the 512 finalized serials the ghost ring holds (NGHOST): past it each submission's resolutions evict entries the next needs, and those
-// evictions' notes overflow the note ring (SER_LOG) before the list's limit is reached, which upstream's ghost table rewrite (not ported) answers
+// before. The textures are fewer than the 512 finalized serials the ghost table keeps (NGHOST_DEF): past its ceiling each submission's resolutions evicted entries the next needs, and
+// those evictions' notes overflowed the note ring (SER_LOG) before the list's limit was reached; the table now keeps what a submission in flight used (ghost_in_flight, after
+// upstream's ghost table rewrite, NXNative 034e91a8)
 enum { RBASE = 16 };
 static void retired_many(int max, int ntex, int per) {
     g_pool_ids_max = max; int n = ntex * per;
