@@ -475,8 +475,8 @@ class YieldStorm(unittest.TestCase):   # what the host does with a yield storm (
             rc, out = header(f'yield_storm\t{v}\n')
             self.assertNotEqual(rc, 0, v); self.assertIn('yield_storm must be count or sleep', out, v)
 
-    def test_profiles_that_sleep(self):   # sleep is a test arm for Ocarina of Time's low-power state, whose profile counts; a game that sleeps names the key in its note, with the device run behind it
-        self.assertEqual(self.macro('', '0400486024DEC000'), ['#define DM_GAME_YIELD_STORM 0'])
+    def test_profiles_that_sleep(self):   # Ocarina of Time sleeps (test 3's battery runs on an iPhone 18 Pro Max); a game that sleeps names the key in its note, with the device run behind it
+        self.assertEqual(self.macro('', '0400486024DEC000'), ['#define DM_GAME_YIELD_STORM 1'])
         for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv')):
             if not any(l.split('\t')[:2] == ['yield_storm', 'sleep'] for l in tsv.read_text(encoding='utf-8').splitlines()): continue
             note = tsv.parent / 'README.md'
