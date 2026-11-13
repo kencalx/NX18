@@ -300,6 +300,34 @@ class PoolIds8k(unittest.TestCase):   # a pool table's lists of IDs to take agai
         self.assertIn('pool_ids_8k', (REPO / 'dm/games/0400486024DEC000/README.md').read_text(encoding='utf-8'))
 
 
+class GhostTable(unittest.TestCase):   # the finalized-texture table's size (nvn_mtl.m ghost_cap; DM_NVN_GHOST overrides)
+    def macro(self, rows, gid=None):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'game.h')
+            if gid is None:
+                Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+                env = {**os.environ, 'DM_GAMES_DIR': d}
+            else: env = {k: v for k, v in os.environ.items() if k != 'DM_GAMES_DIR'}   # a profile of the repository
+            subprocess.run([sys.executable, str(GAME), 'header', gid or ID, str(out)], env=env, check=True, capture_output=True)
+            return [l for l in out.read_text().splitlines() if 'GHOST_TABLE' in l]
+
+    def test_values_and_the_default(self):
+        self.assertEqual(self.macro(''), ['#define DM_GAME_GHOST_TABLE 512'])   # without the key: 512, every other game as before
+        for v in ('64', '4096', '8192', '1000'):
+            self.assertEqual(self.macro(f'ghost_table\t{v}\n'), [f'#define DM_GAME_GHOST_TABLE {v}'], v)
+        for v in ('63', '8193', '0', '-1', 'on', '4k', ''):
+            rc, out = header(f'ghost_table\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('ghost_table must be a number of textures from 64 to 8192', out, v)
+
+    def test_profiles_that_set_it(self):   # Ocarina of Time alone, and it names the key in its note; Persona 4 Golden keeps the default
+        on = [tsv.parent.name for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv'))
+              if any(l.split('\t')[0] == 'ghost_table' for l in tsv.read_text(encoding='utf-8').splitlines())]
+        self.assertEqual(on, ['0400486024DEC000'])
+        self.assertEqual(self.macro('', '0400486024DEC000'), ['#define DM_GAME_GHOST_TABLE 4096'])
+        self.assertEqual(self.macro('', '010062B01525C000'), ['#define DM_GAME_GHOST_TABLE 512'])
+        self.assertIn('ghost_table', (REPO / 'dm/games/0400486024DEC000/README.md').read_text(encoding='utf-8'))
+
+
 class PostAA(unittest.TestCase):   # the present's edge smoothing by default (settings.tsv DM_POST_AA's values, nvn_upscale_pick.h aa_parse)
     def macro(self, rows):
         with tempfile.TemporaryDirectory() as d:

@@ -77,6 +77,10 @@ depth_zero_copy	on
 # built its texture table whole at nearly every submission (NXNative PR #2389). on: the lists hold 8,192, what one patch takes (nvn_mtl.m pool_ids_max, port of NXNative 034e91a8's
 # limit), up to 1 MB more for the lists. The oot4 iPhone run never reached 1,024. DM_POOL_IDS_8K=0 in env.txt turns it off. Not yet run on the phone
 pool_ids_8k	on
+# In one heavy area on an iPhone (X1.0) about 800 textures a frame went into the 512-entry table of finalized textures for 300 frames, then about 364, most of them ones it had pushed
+# out a frame or two before; each put and eviction sent the pool tables down their patch path (about 465 kept a frame), an estimated 1-4 ms of replay CPU a frame. Every other
+# game and run stays under about 100 a frame. 4096 (nvn_mtl.m ghost_cap); DM_NVN_GHOST=512 in env.txt takes it back. Not yet run on the phone
+ghost_table	4096
 
 # ---- Movies ----
 # The movies are AV1 decoded by VideoToolbox. On an iPhone 18 Pro Max (X1.0) iOS ended the hardware decoder while the notification panel was down during the opening movie: every later

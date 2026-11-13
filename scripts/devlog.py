@@ -18,6 +18,10 @@ What it reads (docs/development.md, Reading a device log):
                      plateaus it stays on between the steps an area load makes (a run of samples within a tolerance of their median), with the slope inside them per 10 min
                      (the run's own slope, which the steps make, only when there is a single plateau). A newer memory line's graphics ledger and guest charged come first: GPU
                      allocated counts the guest's memory pools a second time (NieR: about 4.0 GB where the real figure is about 2.6), so a log that has them is compared on them
+  finalized textures [nvn-mtl] finalized-texture table: up to N (its size and where it came from: the default, the profile's ghost_table, DM_NVN_GHOST) and its lines every 300
+                     frames (finalized-texture table up to frame F): per frame, the puts, the thrash (puts of a serial pushed out in the last 4 frames), the evictions, the ms in
+                     the texture misses that put and on the pool tables' patch path less those (the two add up), the texture ID epochs; the median of the windows with a line
+                     and the most (a window with no put or eviction writes none)
   display link       [nvn-mtl] display link up to tick N: submission ahead of / game enqueue to target display; the stretches of windows whose enqueue p50 is more than half a frame
                      period above the run's median (the display link counts whole frames: a frame more latency), and what the log shows just before them
   long frames        [longframe] frame N (T s): the longest, and what each spent its time on (new pipelines, texture uploads, GPU, submit, the game's side, a return from the background).
@@ -90,6 +94,9 @@ RX = {k: re.compile(v) for k, v in {
     'written': r'^\[nvn-mtl\] pipeline archive: (\d+) new pipeline bases(?: and \d+ compute pipelines)?(?: and \d+ task / mesh pipelines)? written to \S+ \(([\d.]+) MB, (\d+) ms\)',   # the compute part since NXNative's 30fb2136, the task / mesh part since bf420fda
     'prepare': r'^\[nvn-mtl\] pipeline prepare: (\d+) lines .*?progress screen (shown|not shown); bases (\d+) compiled, (\d+) from the archive, (\d+) reused'
                r'(?:.*?; (\d+) layout bases from the archive bundled with the app)?',   # the layout bases' part since X1.0 (with an archive bundled with the app)
+    'ghost_cap': r'^\[nvn-mtl\] finalized-texture table: up to (\d+) textures .*\((.+)\)$',
+    'ghost': r'^\[nvn-mtl\] finalized-texture table up to frame (\d+) \((\d+) held, up to (\d+)\), per frame: ([\d.]+) put, ([\d.]+) of them pushed out in the last \d+ frames, '
+             r'([\d.]+) pushed out; ([\d.]+) ms in the texture misses that put, ([\d.]+) ms patching pool tables; texture ID epochs started ([\d.]+)',
     'link': r'^\[nvn-mtl\] display link up to tick (\d+): ticks \d+, presents (\d+), empty ticks (\d+) .*?merging (\d+); submission ahead of target display p50 ([\d.]+) ms / min ([\d.]+) ms; '
             r'game enqueue to target display p50 ([\d.]+) ms / min ([\d.]+) / max ([\d.]+) ms',
     'longframe': r'^\[longframe\] frame (\d+) \(([\d.]+) s\) whole frame ([\d.]+) ms, submit\+present ([\d.]+) ms, GPU (-?[\d.]+) ms; new pipelines (\d+) \+ shader libraries (\d+), '
@@ -455,6 +462,12 @@ def read(text: str, top: int = 5) -> Rec:
     sc, ss = g['save_commit'], g['save_sync']
     out['saves'] = {'commits': len(sc), 'commit_us_max': max((int(m.group(2)) for _, m, _ in sc), default=None),
                     'sync': dict(collections.Counter(re.split(r'[:,;]', norm(m.group(1)))[0] for _, m, _ in ss).most_common())} if sc or ss else None
+    # the finalized-texture table: its size, and per frame the median of its windows with a line and the most (frame-rate.md, A finalized-texture table too small for a heavy area)
+    gh, gc = g['ghost'], one.get('ghost_cap')
+    out['ghost'] = {'cap': int(gc.group(1)) if gc else int(gh[-1][1].group(3)) if gh else None, 'source': gc.group(2) if gc else None, 'windows': len(gh),
+                    'held_max': max((int(m.group(2)) for _, m, _ in gh), default=None),
+                    **{k: med(col('ghost', n)) for k, n in (('put', 4), ('thrash', 5), ('evicted', 6), ('miss_ms', 7), ('patch_ms', 8), ('epochs', 9))},
+                    'put_max': max(col('ghost', 4), default=None), 'thrash_max': max(col('ghost', 5), default=None)} if gh or gc else None
     # movies: VideoToolbox's VP9 check, each AAC stream's channel order, sessions made again after iOS lost them (their red lines are in RED)
     vp, aac, vt = one.get('vp9_vt'), g['aac_order'], g['vt_rebuild']
     out['movies'] = {'vp9_hardware': vp.group(1) == 'yes' if vp else None, 'vp9_before_register': vp.group(2) == 'yes' if vp else None,
@@ -569,6 +582,12 @@ def render(s: Rec, top: int) -> list[str]:
                                              ('shared_textures', 'shared textures', ''), ('gl_textures', 'OpenGL textures', ''), ('vk_buffer_mb', 'Vulkan buffers', ' MB')) if k in mm
                     for t in [f'{label} {spread_text(mm[k], unit)}', *plateau_text(mm[k], 2 * top, unit)]))
     if not mm: row('memory', 'no memory lines')
+    gt = s.get('ghost')
+    if gt:
+        row('ghost table', f"finalized-texture table of {gt['cap']}" + (f" ({gt['source']})" if gt['source'] else '') + (f", at most {gt['held_max']} held" if gt['held_max'] is not None else ''),
+            f"per frame over {nof(gt['windows'], 'window')} with puts (median): {g3(gt['put'])} put (most {g3(gt['put_max'])}), {g3(gt['thrash'])} pushed out in the last 4 frames "
+            f"(most {g3(gt['thrash_max'])}), {g3(gt['evicted'])} pushed out; {g3(gt['miss_ms'])} ms in the misses that put, {g3(gt['patch_ms'])} ms patching pool tables; "
+            f"texture ID epochs {g3(gt['epochs'])}" if gt['windows'] else 'no window with a put or an eviction')
     dl = s['display_link']
     if dl:
         row('display link', f"game enqueue to target display p50 {g3(dl['enqueue_p50_ms'])} ms (median of {dl['windows']} windows; most {g3(dl['enqueue_max_ms'])}), submission ahead "
@@ -631,6 +650,9 @@ METRICS = (('commit', 'build.commit', 0), ('shader chain', 'build.chain', 0), ('
            ('guest charged drift / 10 min', 'memory.guest_charged_mb.drift_per_10min', -1),
            ('GPU allocated, last (MB)', 'memory.gpu_mb.last', 0), ('GPU allocated drift / 10 min', 'memory.gpu_mb.drift_per_10min', -1), ('headroom, least (MB)', 'memory.headroom_mb.min', 1),
            ('shared textures, last', 'memory.shared_textures.last', 0), ('shared textures drift / 10 min', 'memory.shared_textures.drift_per_10min', -1),
+           ('finalized-texture table', 'ghost.cap', 0), ('finalized-texture puts / frame', 'ghost.put', -1), ('finalized-texture thrash / frame', 'ghost.thrash', -1),
+           ('finalized-texture thrash, most', 'ghost.thrash_max', -1), ('finalized-texture evictions / frame', 'ghost.evicted', -1),
+           ('ms in misses that put / frame', 'ghost.miss_ms', -1), ('ms patching pool tables / frame', 'ghost.patch_ms', -1), ('texture ID epochs / frame', 'ghost.epochs', -1),
            ('enqueue to display p50 (ms)', 'display_link.enqueue_p50_ms', -1), ('enqueue to display, most (ms)', 'display_link.enqueue_max_ms', -1),
            ('submission ahead p50 (ms)', 'display_link.ahead_p50_ms', 0), ('stretches a frame above', 'display_link.raised', -1),
            ('long frames', 'long_frames.count', 0), ('long frames per minute', 'long_frames.per_min', -1), ('frames at the step\'s hold', 'long_frames.held', 0), ('background / back', 'events.background', 0), ('focus changes', 'events.focus_changes', 0),

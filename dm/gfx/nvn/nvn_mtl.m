@@ -782,8 +782,10 @@ static void udc_selftest(void) {
         MLOG("UDC self-check %s %s %lux%lu first value %08x, values differing from it %lu / %lu", g_dev.name.UTF8String, depth ? "Depth32F_S8" : "RGBA8", (unsigned long)w, (unsigned long)h, px[0], (unsigned long)bad, (unsigned long)(w * h));
     }
 }
+static unsigned ghost_cap(void);
 void mtl_init(void) {
     if (g_dev) return;
+    ghost_cap();   // the finalized-texture table's size and its start line (DM_NVN_GHOST, the profile's ghost_table)
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
     const char *ftc = getenv("DM_NVN_FT_CACHE"); g_ft_cache = !(ftc && !strcmp(ftc, "0"));
     const char *link = getenv("DM_PRESENT_LINK");
@@ -3079,11 +3081,46 @@ static void serial_del(uint64_t k) { pthread_mutex_lock(&g_smu); id old = hm_get
 // Texture serials owned by a live NVN texture object (TextureInitialize until Finalize or re-initialization, hle_nvn.c). Command records and texture pool registrations snapshot the
 // texture object (tex_snap in hle_nvn.c, mtl_reg_tex), so replay can resolve a texture the game has already finalized: Breath of the Wild records each frame's transient render targets
 // (the HUD captures, the 640x360 half-resolution buffers) and finalizes their objects before it submits. Those serials went back into g_by_serial and stayed there for good, as no second
-// Finalize comes: about 10 a frame, 200,000 after an hour in the first shrine. A dead serial resolves through g_ghost instead, a small table whose oldest entry goes when a new one comes,
-// so a record replayed again soon still finds its texture
-enum { NGHOST = 512 };
+// Finalize comes: about 10 a frame, 200,000 after an hour in the first shrine. A dead serial resolves through g_ghost instead, a table whose oldest entry goes when a new one comes,
+// so a record replayed again soon still finds its texture.
+// How many it holds is decided once (ghost_cap): NGHOST_DEF for every game, the profile's ghost_table (DM_GAME_GHOST_TABLE), or DM_NVN_GHOST, clamped to NGHOST_MIN..NGHOST_MAX. The ring
+// has room for NGHOST_MAX (64 KB, in pages touched only as it fills). Ocarina of Time in one heavy area on an iPhone put about 800 a frame into 512 for 300 frames, most of them textures
+// the ring had pushed out a frame or two before, and each put and eviction noted its serial (ser_note), so the pool tables went down their patch path about 465 times a frame
+enum { NGHOST_MIN = 64, NGHOST_DEF = 512, NGHOST_MAX = 8192 };
 static nvn_hmap g_tex_live = {.klen = 8};   // serial → the texture object it was initialized in (mtl_tex_release), under g_smu
-static nvn_hmap g_ghost = {.klen = 8}; static uint64_t g_ghost_ring[NGHOST]; static unsigned g_ghost_next; static uint64_t g_ghost_puts;
+static nvn_hmap g_ghost = {.klen = 8}; static uint64_t g_ghost_ring[NGHOST_MAX]; static unsigned g_ghost_next; static uint64_t g_ghost_puts;
+static unsigned g_ghost_cap;   // entries kept, 0 until ghost_cap decides (mtl_init); a unit test may set it while the table is empty
+// The table's line (mtl_ghost_stat), every 300 frames: evictions and puts of a serial evicted in the last GHOST_THRASH_FRAMES frames (thrash) under g_smu; the time of texture misses that put
+// (tex_mtl, from the miss to the texture) and of the pool tables' patch path (pool_gpu) in mach ticks, and the texture ID epochs ser_sync started, relaxed atomics
+enum { GHOST_THRASH_FRAMES = 4, GHOST_GONE = 8192 };
+static uint64_t g_ghost_evicted, g_ghost_thrash;
+static _Atomic uint64_t g_ghost_miss_ticks, g_pool_patch_ticks, g_treg_ep_bumps;
+// The serials evicted last and the frame each went (low 32 bits), by the serial's low bits: serials come from one counter, so those evicted within a few frames rarely share a slot (one
+// that does takes the slot, and the count is then low by one). Pages touched only once the table evicts. Under g_smu
+static uint64_t g_ghost_gone_ser[GHOST_GONE]; static uint32_t g_ghost_gone_frame[GHOST_GONE];
+// Texture misses timed for the line: tex_mtl_ marks the outermost miss on this thread, tex_put that it put into the ghost table, and tex_mtl adds the time when both are set.
+// tl_ghost_miss_sum is this thread's running total of those times: the pool tables' patch path resolves texture IDs (pool_entry → tex_fast_rid → tex_mtl), and most re-puts come
+// from there, so pool_patch_add leaves the misses timed inside it out of the patch time, and the line's two figures add up
+static _Thread_local uint64_t tl_ghost_miss_t0, tl_ghost_miss_sum; static _Thread_local int tl_ghost_put;
+static void pool_patch_add(uint64_t t0, uint64_t miss0) {   // the patch path from t0, less the misses that put timed inside it (miss0: tl_ghost_miss_sum at t0)
+    uint64_t el = mach_absolute_time() - t0, m = tl_ghost_miss_sum - miss0;
+    atomic_fetch_add_explicit(&g_pool_patch_ticks, el > m ? el - m : 0, memory_order_relaxed);
+}
+// The table's size from the profile's value and DM_NVN_GHOST (env, NULL when unset): a whole number there wins, held to NGHOST_MIN..NGHOST_MAX; unset, empty or not a number, the
+// profile's. *why says which, for the start line
+static unsigned ghost_cap_pick(const char *env, long profile, const char **why) {
+    long v = profile; *why = profile == NGHOST_DEF ? "the default" : "game profile ghost_table";
+    if (env && *env) { char *end; long e = strtol(env, &end, 10);
+        if (end != env && !*end) { v = e; *why = e < NGHOST_MIN || e > NGHOST_MAX ? "DM_NVN_GHOST, held to 64 to 8192" : "DM_NVN_GHOST"; }
+        else *why = profile == NGHOST_DEF ? "DM_NVN_GHOST is not a number, so the default" : "DM_NVN_GHOST is not a number, so game profile ghost_table"; }
+    return (unsigned)(v < NGHOST_MIN ? NGHOST_MIN : v > NGHOST_MAX ? NGHOST_MAX : v);
+}
+static unsigned ghost_cap(void) {   // under g_smu, or before any texture (mtl_init)
+    if (g_ghost_cap) return g_ghost_cap;
+    const char *why; g_ghost_cap = ghost_cap_pick(getenv("DM_NVN_GHOST"), DM_GAME_GHOST_TABLE, &why);
+    MLOG("finalized-texture table: up to %u textures that finalized texture objects still resolve to, the oldest going when a new one comes (%s)", g_ghost_cap, why);
+    return g_ghost_cap;
+}
 void mtl_tex_init(const tex_t *t) {
     if (!t->serial) return;
     tex_t *desc = image_shape(t) ? malloc(sizeof *desc) : NULL; if (desc) *desc = *t;
@@ -3129,13 +3166,34 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are never a ga
     if (old) count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)old, -1);
     if (old) obj_drop(old);
     else if (m == &g_ghost) {
-        uint64_t *slot = &g_ghost_ring[g_ghost_next++ % NGHOST];
-        if (*slot) { id ev = hm_get_id(&g_ghost, slot); if (ev) { ghost_held_add((__bridge void *)ev, -1); obj_drop(ev); } hm_del_id(&g_ghost, slot); ser_note(*slot); }   // the evicted serial resolves anew too
+        unsigned cap = ghost_cap(), i = g_ghost_next < cap ? g_ghost_next : 0; g_ghost_next = i + 1 < cap ? i + 1 : 0;   // the ring wraps at cap, whatever cap is
+        uint64_t *slot = &g_ghost_ring[i], f = atomic_load_explicit(&g_cur_frame, memory_order_relaxed);
+        // pushed out lately and wanted again; looked up before this put's own eviction is recorded, which may take k's slot
+        if (g_ghost_evicted) { unsigned gi = (unsigned)(k % GHOST_GONE); if (g_ghost_gone_ser[gi] == k) { g_ghost_thrash += (uint32_t)f - g_ghost_gone_frame[gi] < GHOST_THRASH_FRAMES; g_ghost_gone_ser[gi] = 0; } }
+        if (*slot) { id ev = hm_get_id(&g_ghost, slot); if (ev) { ghost_held_add((__bridge void *)ev, -1); obj_drop(ev); } hm_del_id(&g_ghost, slot); ser_note(*slot);   // the evicted serial resolves anew too
+                     unsigned gi = (unsigned)(*slot % GHOST_GONE); g_ghost_gone_ser[gi] = *slot; g_ghost_gone_frame[gi] = (uint32_t)f; g_ghost_evicted++; }
         *slot = k; g_ghost_puts++;
+        if (tl_ghost_miss_t0) tl_ghost_put = 1;
     }
     hm_put_id(m, &k, o); tex_pin *pin=nvn_hm_get(&g_tex_pins,&k); if(pin) tex_pin_set(pin,o); ser_note(k);
     count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)o, 1);
     pthread_mutex_unlock(&g_smu);
+}
+// A memory trim (mtl_trim_at, a pressure warning and up) takes a table larger than keep back down to it, the oldest first, as tex_put evicts: each entry holds its texture alive and
+// resident (a retired one waits in g_retire_held), and a profile's ghost_table of 4096 holds eight times the default's. An entry let go only makes its serial resolve anew (ser_note),
+// as an eviction does. The ring keeps its size: the emptied slots fill again without an eviction, so the oldest still goes first. Not counted as evictions or thrash
+// (mtl_ghost_stat). Returns the entries let go
+static unsigned ghost_trim(unsigned keep) {
+    unsigned n = 0;
+    pthread_mutex_lock(&g_smu);
+    unsigned cap = ghost_cap(), i = g_ghost_next < cap ? g_ghost_next : 0;   // the oldest: the next slot tex_put takes, or past the empty ones after it
+    for (unsigned j = 0; j < cap && g_ghost.n > keep; j++, i = i + 1 < cap ? i + 1 : 0) {
+        uint64_t *slot = &g_ghost_ring[i]; if (!*slot) continue;
+        id ev = hm_get_id(&g_ghost, slot); if (ev) { ghost_held_add((__bridge void *)ev, -1); obj_drop(ev); }
+        hm_del_id(&g_ghost, slot); ser_note(*slot); *slot = 0; n++;
+    }
+    pthread_mutex_unlock(&g_smu);
+    return n;
 }
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
 // spare: the texture the last re-upload replaced, kept resident and written by the next re-upload once the GPU has passed spare_fence (a texture the CPU rewrites every frame, a movie frame,
@@ -4927,7 +4985,14 @@ static void cpu_unc_drop(void) {
     free(ser);
 }
 static id<MTLTexture> tex_mtl_(const tex_t *ct);
-static id<MTLTexture> tex_mtl(const tex_t *ct) { AP_B; id<MTLTexture> r = tex_mtl_(ct); AP_E(4); return r; }
+static id<MTLTexture> tex_mtl(const tex_t *ct) {
+    AP_B; uint64_t outer = tl_ghost_miss_t0; id<MTLTexture> r = tex_mtl_(ct);
+    if (!outer && tl_ghost_miss_t0) {   // this call's miss (tex_mtl_ marks it): its time counts when it put a texture into the ghost table (mtl_ghost_stat)
+        if (tl_ghost_put) { uint64_t dt = mach_absolute_time() - tl_ghost_miss_t0; tl_ghost_miss_sum += dt; atomic_fetch_add_explicit(&g_ghost_miss_ticks, dt, memory_order_relaxed); }
+        tl_ghost_miss_t0 = 0; tl_ghost_put = 0;
+    }
+    AP_E(4); return r;
+}
 // Diagnostic DM_NVN_REUPLOADS=1: a line for each re-upload of a texture taken from its storage (the first 400): its shape and size, the pages written since its upload and where the
 // first of them lies, and the GPU writes stored into its storage since then (gsb_swz)
 static void reup_note(const NvPkg *pk, const tex_t *t) {
@@ -5064,6 +5129,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         }
     }
     id have = tex_get(t->serial);
+    if (!have && !tl_ghost_miss_t0) tl_ghost_miss_t0 = mach_absolute_time();   // a miss: timed by tex_mtl if it puts into the ghost table
     if (!packaged && !have && DM_GAME_TEX_DIRTY_UPLOAD && t->mem && on_sub_thread()) { int nvn_ft_written(const tex_t *); packaged = nvn_ft_written(t); }   // first use of a texture the CPU wrote since init without a flush (hle_nvn.c)
     if (!packaged && !have && on_sub_thread() && tex_cpu_content(t)) { mtl_tex_cpu_written(t); packaged = 1; }   // storage the CPU wrote before its first use (tex_cpu_content)
     if (!packaged && !have && on_sub_thread() && linear_storage_ok(t)) {   // a linear texture no view on its buffer can take (iOS wants 64-byte rows; Axiom Verge's 8x8 RGBA8 linear textures have 32): uploaded, and again after CPU writes
@@ -5257,6 +5323,31 @@ static uint64_t mem_guest_charged(void) {
     free(v);
     return sum;
 }
+// The finalized-texture table's line, by the frame hook every 300 frames beside the memory line (hle_nvn.c), per frame since the last: the textures put into the table, how many of
+// them it had pushed out in the last GHOST_THRASH_FRAMES frames (a table too small for what the game keeps replaying), its evictions, the time of the texture misses that put (tex_mtl)
+// and of the pool tables' patch path less those misses inside it (pool_gpu, which every put and eviction feeds through its serial's note; the two add up), and the texture ID epochs
+// ser_sync started (more notes than SER_NOTES between two syncs, among other causes). Counters only: a quiet table costs a few loads every 300 frames. A window with no put and no
+// eviction writes no line, whatever the patch path and the epochs did (they move in nearly every game, and the pool tables' own line counts them), so a game that never fills its
+// table writes none. Integers only, as the memory line: the frame hook runs on the guest thread's stack
+static void ghost_fx(char *b, size_t n, uint64_t v, uint64_t nf, unsigned dec) {   // v / nf with dec (2 or 3) decimals
+    uint64_t sc = dec == 3 ? 1000 : 100, c = v * sc / nf;
+    snprintf(b, n, dec == 3 ? "%llu.%03llu" : "%llu.%02llu", (unsigned long long)(c / sc), (unsigned long long)(c % sc));
+}
+void mtl_ghost_stat(unsigned long long frame) {
+    static unsigned long long last_frame; static uint64_t prev[6];
+    pthread_mutex_lock(&g_smu); uint64_t v[6] = {g_ghost_puts, g_ghost_thrash, g_ghost_evicted}; unsigned held = g_ghost.n, cap = ghost_cap(); pthread_mutex_unlock(&g_smu);
+    v[3] = atomic_load_explicit(&g_ghost_miss_ticks, memory_order_relaxed); v[4] = atomic_load_explicit(&g_pool_patch_ticks, memory_order_relaxed); v[5] = atomic_load_explicit(&g_treg_ep_bumps, memory_order_relaxed);
+    uint64_t d[6]; for (int i = 0; i < 6; i++) d[i] = v[i] - prev[i];
+    uint64_t any = d[0] | d[1] | d[2];   // the table's own traffic (a timed miss always put, so d[3] moves only with d[0])
+    uint64_t nf = frame > last_frame ? frame - last_frame : 1; last_frame = frame; memcpy(prev, v, sizeof prev);
+    if (!any) return;
+    static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
+    char put[24], thr[24], ev[24], miss[24], patch[24], ep[24];
+    ghost_fx(put, sizeof put, d[0], nf, 2); ghost_fx(thr, sizeof thr, d[1], nf, 2); ghost_fx(ev, sizeof ev, d[2], nf, 2); ghost_fx(ep, sizeof ep, d[5], nf, 2);
+    ghost_fx(miss, sizeof miss, d[3] * tb.numer / tb.denom / 1000, nf * 1000, 3); ghost_fx(patch, sizeof patch, d[4] * tb.numer / tb.denom / 1000, nf * 1000, 3);   // ns → µs, shown as ms
+    MLOG("finalized-texture table up to frame %llu (%u held, up to %u), per frame: %s put, %s of them pushed out in the last %d frames, %s pushed out; %s ms in the texture misses that put, %s ms patching pool tables; texture ID epochs started %s",
+         frame, held, cap, put, thr, GHOST_THRASH_FRAMES, ev, miss, patch, ep);
+}
 // Memory readout line (always on, low frequency, capped): resident memory, GPU allocated, deferred-release queue, residency set object count, registered memory pools / peak / tracking table capacity, cumulative texture re-uploads.
 // Purpose: pin down "crashes with no log". The system gives no notice before killing a process for memory, so only readouts left beforehand can show which number kept climbing.
 // Called by the frame hook every 300 frames; printed only when resident or GPU allocated changed by ≥ 64 MB since the last line, otherwise one line every 3000 frames; capped at 400 lines per game. All integers (the frame hook runs on the guest thread's small stack, so no floating-point formatting)
@@ -5268,7 +5359,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     pthread_mutex_lock(&g_deferred_mu); unsigned long nd = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
     pthread_mutex_lock(&g_res_mu); unsigned long nr = (unsigned long)g_res_objects.count; pthread_mutex_unlock(&g_res_mu);
     int live = 0, peak = 0, cap = 0; nvn_dirty_stat(&live, &peak, &cap);
-    pthread_mutex_lock(&g_smu); unsigned ns = g_by_serial.n, ashared = g_alias.n, nghost = g_ghost.n, nwait = g_retire_held.n; uint64_t ghost_puts = g_ghost_puts;
+    pthread_mutex_lock(&g_smu); unsigned ns = g_by_serial.n, ashared = g_alias.n, nghost = g_ghost.n, gcap = ghost_cap(), nwait = g_retire_held.n; uint64_t ghost_puts = g_ghost_puts;
     unsigned aorph = 0;   // shared textures no live texture object or finalized serial resolves to: kept only until their storage is taken over or their pool goes (alias_take_over)
     { CFMutableSetRef held = CFSetCreateMutable(NULL, 0, NULL);
       for (uint32_t i = 0; i < g_by_serial.cap; i++) if (g_by_serial.vals[i]) CFSetAddValue(held, g_by_serial.vals[i]);
@@ -5291,7 +5382,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     // The shaders' reflection tail blocks (nvn_refl.h): the bindings at their real number and the readable-tile tables of the shaders that have entries; with DM_NVN_REFL_FIXED=1, 3.2 KB each
     uint64_t rf_tails, rf_bytes; nvn_refl_stats(&rf_tails, &rf_bytes);
     char *tail = NULL;
-    if (asprintf(&tail, "deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total (alive %llu, %llu MB; released when idle %llu, %llu MB in total), finalized textures still referenced %u (small table, %llu put in total), retired but held by a serial %u, recycled texture heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB; cap %llu MB), upload staging blocks released when idle %llu (%llu MB in total), packaged-texture spares %llu (%llu MB; released when idle %llu, %llu MB in total), present effects released when off %llu (%llu MB in total), shader reflection blocks %llu (%llu KB), feedback snapshots %llu (%llu MB; released when idle %llu, %llu MB in total), memory trims %llu (%llu MB in total); headroom to the system memory limit %s", nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, (unsigned long long)g_arena_live, (unsigned long long)(g_arena_live_bytes >> 20), (unsigned long long)g_arena_freed, (unsigned long long)(g_arena_freed_bytes >> 20), nghost, (unsigned long long)ghost_puts, nwait,
+    if (asprintf(&tail, "deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total (alive %llu, %llu MB; released when idle %llu, %llu MB in total), finalized textures still referenced %u (table of %u, %llu put in total), retired but held by a serial %u, recycled texture heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB; cap %llu MB), upload staging blocks released when idle %llu (%llu MB in total), packaged-texture spares %llu (%llu MB; released when idle %llu, %llu MB in total), present effects released when off %llu (%llu MB in total), shader reflection blocks %llu (%llu KB), feedback snapshots %llu (%llu MB; released when idle %llu, %llu MB in total), memory trims %llu (%llu MB in total); headroom to the system memory limit %s", nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, (unsigned long long)g_arena_live, (unsigned long long)(g_arena_live_bytes >> 20), (unsigned long long)g_arena_freed, (unsigned long long)(g_arena_freed_bytes >> 20), nghost, gcap, (unsigned long long)ghost_puts, nwait,
          (unsigned long long)g_rh_made, (unsigned long long)g_rh_reused, (unsigned long long)g_rh_trimmed, rh_n, (unsigned long long)(rh_bytes >> 20), (unsigned long long)(atomic_load(&g_rh_cap_now) >> 20), (unsigned long long)g_up_trimmed, (unsigned long long)(g_up_trim_bytes >> 20),
          (unsigned long long)atomic_load(&g_pkg_spare_n), (unsigned long long)(atomic_load(&g_pkg_spare_bytes) >> 20), (unsigned long long)atomic_load(&g_pkg_spare_freed), (unsigned long long)(atomic_load(&g_pkg_spare_freed_bytes) >> 20),
          (unsigned long long)atomic_load(&g_present_fx_freed), (unsigned long long)(atomic_load(&g_present_fx_freed_bytes) >> 20), (unsigned long long)rf_tails, (unsigned long long)(rf_bytes >> 10),
@@ -6975,7 +7066,7 @@ static uint64_t g_treg_ep = 1, g_ser_synced = 1;
 static void ser_sync(void) {
     uint64_t s[SER_NOTES];
     os_unfair_lock_lock(&g_snote_lk); uint64_t sg = g_ser_gen; unsigned n = g_nsnote; memcpy(s, g_snote, n * sizeof *s); g_nsnote = 0; os_unfair_lock_unlock(&g_snote_lk);
-    if (sg - g_ser_synced != n || nvn_sparse_gen()) g_treg_ep++;
+    if (sg - g_ser_synced != n || nvn_sparse_gen()) { g_treg_ep++; atomic_fetch_add_explicit(&g_treg_ep_bumps, 1, memory_order_relaxed); }   // counted for the finalized-texture table's line
     else for (unsigned i = 0; i < n; i++) for (int k = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &s[i]); k; k = g_treg[k - 1].next) g_treg[k - 1].view_ser = 0;
     g_ser_synced = sg;
 }
@@ -11326,6 +11417,8 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
     // one is copied and patched, as draws already encoded read the old one. A sparse texture's page table follows no note (ser_sync), so then it is built whole. Ocarina of Time,
     // a seven-minute walk through Kokiri Forest: building the tables whole took about 53 s (61,000 builds)
     int nn = (samp ? g_nsreg : g_ntreg) - base; if (nn < 1) nn = 1;
+    uint64_t pt0 = p && !walk_on ? mach_absolute_time() : 0, pm0 = tl_ghost_miss_sum;   // the patch path's time, kept, patched or given up, less the texture misses that put inside it (mtl_ghost_stat)
+    #define POOL_PATCH_END() pool_patch_add(pt0, pm0)
     if (p && !walk_on) do {
         if (rg - p->reg >= REG_LOG || sg - p->ser >= SER_LOG || (!samp && p->ser != sg && nvn_sparse_gen())) { g_stat_pool_nopatch[0]++; break; }
         if (*(const uint32_t *)p->buf.contents != (uint32_t)nn) { g_stat_pool_nopatch[2]++; break; }
@@ -11374,11 +11467,13 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
         g_stat_pool_pchg += pools; g_stat_pool_schg += stale; free(p->dead.v); free(p->trans.v);
         p->reg = rg; p->ser = sg; p->sub = nt.n ? g_sub_serial : 0; p->dead = nd; p->trans = nt;
         if (left) { p->left += left; p->left_req += left_req; p->frame = atomic_load(&g_cur_frame); }   // textures past this frame's room: the walk goes on next frame, as for its own
-        if (!b) { g_stat_pool_kept++; *out = p->buf; return p->gpu; }
+        if (!b) { g_stat_pool_kept++; *out = p->buf; POOL_PATCH_END(); return p->gpu; }
         pool_table_give(p->buf); p->buf = b; p->gpu = b.gpuAddress;
         g_psnap_gen++; g_stat_pool_patched++;
-        *out = b; return p->gpu;
+        *out = b; POOL_PATCH_END(); return p->gpu;
     } while (0);
+    if (pt0) POOL_PATCH_END();
+    #undef POOL_PATCH_END
     // A change the patch cannot take starts another walk. Small pools pay little (Mario Party Superstars: 0.1 ms), but Ocarina of Time registers something between most of its draws in a pool of
     // 33,024 IDs: 8 walks a frame, a quarter of the replay, each with a new buffer and a residency commit. So past POOL_SUB_MS of walks a submission the table stands until the next submission.
     // A read of an ID registered since then finds the dummy for that long; a replaced texture stays alive until the submission that may read it has completed. A table with views of retired
@@ -17696,7 +17791,8 @@ static void present_fx_idle(int kind, uint64_t ticket, int alloc_i) {
 // queue for the fence of the submission that starts there, which no present or submission committed before it outlasts on the queue; or going to the background
 // (dm_gfx_suspend: the graphics gate closed and every submission and present drained, so for the last fence, which has passed). It releases what is idle and large:
 // render-target heaps waiting for reuse (rh_trim_all), the upload slots' blocks above UP_SLOT_BLOCK and their overflow blocks (up_trim_idle), packaged-texture spares
-// (pkg_spare_release), same-pass feedback snapshots (fb_trim), per-frame arena blocks the GPU is done with above ARENA_KEEP_BLOCKS (arena_trim), what the deferred-release queue holds whose fence has passed (defer_drain), and it asks the present thread to
+// (pkg_spare_release), same-pass feedback snapshots (fb_trim), per-frame arena blocks the GPU is done with above ARENA_KEEP_BLOCKS (arena_trim), the finalized-texture table's oldest
+// entries above the default's 512 (ghost_trim; a profile's ghost_table sets more), what the deferred-release queue holds whose fence has passed (defer_drain), and it asks the present thread to
 // release edge smoothing and MetalFX if they are off (g_fx_trim_req). Going to the background (level 3) it also drops the kept vertex conversions (vk_trim_all), which a
 // pressure warning leaves: they are still drawn, and would be made again in the next submission. Each was made again on its next use before, as after the idle trims. dm_gfx_pressure also sweeps the guest's
 // files (hle_svc.c dm_guest_file_trim, DM_GUEST_FILE). One line gives the MB per class; the memory line counts the trims. DM_MEMORY_TRIM=0 logs the pressure and trims
@@ -17716,14 +17812,15 @@ static uint64_t mtl_trim_at(int level, uint64_t fence) { @autoreleasepool {
     int nrh = 0, nup = 0, nsp = 0, nfb = 0, nar = 0, nvk = 0;
     uint64_t brh = rh_trim_all(&nrh), bup = up_trim_idle(0, fence, &nup), bsp = pkg_spare_release(0, fence, &nsp), bfb = fb_trim(0, fence, &nfb), bar = g_arenas ? arena_trim(0, &nar) : 0;
     uint64_t bvk = level == 3 ? vk_trim_all(fence, &nvk) : 0;   // going to the background only: under a pressure warning the game still draws them, and they would be made again at once
+    unsigned ngh = level >= 1 ? ghost_trim(NGHOST_DEF) : 0;   // a finalized-texture table above the default's 512 back down to it (the profile's ghost_table); its textures wait for the fence
     atomic_store(&g_fx_trim_req, 1);
     res_commit();   // the heaps leave the residency set now; the rest once their fence has passed (defer_obj_at drains at once a fence the GPU has passed)
     uint64_t total = brh + bup + bsp + bfb + bar + bvk;
     atomic_fetch_add(&g_trim_n, 1); atomic_fetch_add(&g_trim_bytes, total);
     const double M = 1048576.0;
     MLOG("memory trim (%s): %.1f MB in all: render-target heaps waiting %d (%.1f MB), upload staging blocks %d (%.1f MB), packaged-texture spares %d (%.1f MB), feedback snapshots %d (%.1f MB), per-frame arena blocks %d (%.1f MB), kept vertex conversions %d (%.1f MB), "
-         "deferred-release queue %lu of %lu entries released; present effects that are off go at the next present; footprint %.0f MB before, %.1f ms",
-         g_trim_why[level >= 0 && level <= 4 ? level : 4], total / M, nrh, brh / M, nup, bup / M, nsp, bsp / M, nfb, bfb / M, nar, bar / M, nvk, bvk / M, q0 > q1 ? q0 - q1 : 0, q0, fp0 / M, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6);
+         "finalized-texture table entries %u (down to %d), deferred-release queue %lu of %lu entries released; present effects that are off go at the next present; footprint %.0f MB before, %.1f ms",
+         g_trim_why[level >= 0 && level <= 4 ? level : 4], total / M, nrh, brh / M, nup, bup / M, nsp, bsp / M, nfb, bfb / M, nar, bar / M, nvk, bvk / M, ngh, NGHOST_DEF, q0 > q1 ? q0 - q1 : 0, q0, fp0 / M, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6);
     return total;
 } }
 // The trim at once (dm_gfx_trim): only with no submission open and every submission and present completed (dm_gfx_suspend after mtl_drain; the tests), so for the last fence

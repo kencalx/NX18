@@ -332,6 +332,16 @@ check_t_upload_slots: t_upload_slots
 	MTL_DEBUG_LAYER=1 ./t_upload_slots
 	DM_NVN_UPLOAD_REUSE=0 MTL_DEBUG_LAYER=1 ./t_upload_slots
 	DM_NVN_UPLOAD_TRIM=0 MTL_DEBUG_LAYER=1 ./t_upload_slots
+# The finalized-texture table (nvn_mtl.m g_ghost, ghost_cap, mtl_ghost_stat): the profile's size, then DM_NVN_GHOST's held to 64..8192 or ignored when not a number
+t_ghost: t_ghost.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_ghost.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_ghost
+check_t_ghost: t_ghost
+	MTL_DEBUG_LAYER=1 ./t_ghost
+	DM_NVN_GHOST=1000 MTL_DEBUG_LAYER=1 ./t_ghost --expect 1000
+	DM_NVN_GHOST=20 MTL_DEBUG_LAYER=1 ./t_ghost --expect 64
+	DM_NVN_GHOST=100000 MTL_DEBUG_LAYER=1 ./t_ghost --expect 8192
+	DM_NVN_GHOST=junk MTL_DEBUG_LAYER=1 ./t_ghost
 # The memory line's graphics ledger and guest charged (mtl_mem_stat), with a guest block of its own (mem_line_guest.c gives the host's svc_guest_range)
 t_mem_line: t_mem_line.m mem_line_guest.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_mem_line.m mem_line_guest.c $(MTL_T_SRC) $(FW)

@@ -256,7 +256,7 @@ static void handover_holders(void) {
     tex_put(sa, ta);   // a record of the finalized object replayed: its serial resolves through the ghost ring
     h_nvnTextureFinalize(&b); settle();
     CHECK(resident(ta), "hand-over: a finalized serial in the ghost ring keeps it resident");
-    for (uint64_t i = 0; i < NGHOST; i++) tex_put((1ull << 61) + i, [NSObject new]);   // the ring evicts that entry
+    for (uint64_t i = 0; i < ghost_cap(); i++) tex_put((1ull << 61) + i, [NSObject new]);   // the ring evicts that entry (its size: the profile's, or DM_NVN_GHOST)
     settle();
     pthread_mutex_lock(&g_smu); int left = g_retire_held.n; pthread_mutex_unlock(&g_smu);
     CHECK(!resident(ta) && !left, "hand-over: the last holder's release takes it out of the residency set");
