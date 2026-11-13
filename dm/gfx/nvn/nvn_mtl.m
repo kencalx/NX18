@@ -10951,28 +10951,38 @@ static uint64_t dummy_samp_rid(void) { static uint64_t rid; if (!rid) rid = dumm
 // as ubo_tex_id adds), the dummy where an ID holds nothing or a texture of another type, and the dummy at n for IDs past the table. Patched or rebuilt when a registration or a texture's
 // storage changes (g_reg_gen, g_ser_gen); the old buffer goes when the submissions that used it have completed. Every texture is in the residency set already (res_add at creation). Caller holds g_rmu
 #define POOL_SNAPS 16
-// Each table keeps two lists of IDs, so that a change takes again only the IDs it can reach (n -1: more than POOL_IDS_MAX of them, and that change builds the table whole):
+// Each table keeps two lists of IDs, so that a change takes again only the IDs it can reach (n -1: more than pool_ids_max() of them, and that change builds the table whole):
 // dead: the IDs a texture table holds the dummy for because their storage did not exist (pool_entry), which a memory pool added later can bring (REG_POOL);
 // trans: the IDs whose entry is a view of a retired registration made in submission sub, which goes at that submission's end (treg_finish_submission), so the next submission
 // takes them again. Walking through Ocarina of Time's Kokiri Forest, about 100 of its 33,025 IDs hold such a view; more than 1,024 while it streams an area in behind its pause menu.
-// A list holds as many IDs as one patch takes (pool_gpu): with 1,024 as its limit, each submission behind that menu built the table whole (1,927 of about 2,000 builds,
-// 1.4-1.6 a frame of 9 ms, 50-55 fps for five seconds; PR #2389). Port of NXNative 034e91a8's limit alone (not its ghost table). A list grows by doubling as it fills: at most
-// 32 KB, so 1 MB for the 16 tables' two lists each at the worst, against 128 KB with 1,024
-enum { POOL_IDS_MAX = 8192 };   // the IDs a patch takes at most, and a list holds
+// With pool_ids_8k a list holds as many IDs as one patch takes (pool_gpu): with 1,024 as its limit, each submission behind that menu built the table whole upstream (1,927 of about
+// 2,000 builds, 1.4-1.6 a frame of 9 ms, 50-55 fps for five seconds; PR #2389). Port of NXNative 034e91a8's limit alone (not its ghost table), which upstream gives every game; here
+// only a game whose profile asks (Ocarina of Time) while X1.0 is frozen, every other game's lists holding 1,024 as before. A list grows by doubling as it fills: at most 32 KB,
+// so 1 MB for the 16 tables' two lists each at the worst, against 128 KB with 1,024
+enum { POOL_IDS_MAX = 8192, POOL_IDS_LIST = 1024 };   // the IDs a patch takes at most (and a list holds with pool_ids_8k); what a list holds without it
+static int g_pool_ids_max = -1;   // what a list holds: POOL_IDS_LIST, or POOL_IDS_MAX with pool_ids_8k (DM_POOL_IDS_8K=1 / 0 overrides it); -1 not read yet (a unit test may set it directly)
+static int pool_ids_max(void) {   // caller holds g_rmu (pool_gpu)
+    if (g_pool_ids_max < 0) {
+        const char *e = getenv("DM_POOL_IDS_8K"); int env = e && *e, on = env ? *e != '0' : DM_GAME_POOL_IDS_8K;
+        g_pool_ids_max = on ? POOL_IDS_MAX : POOL_IDS_LIST;
+        if (on) MLOG("pool tables: a list of IDs to take again holds up to %d IDs, as one patch takes (%s)", POOL_IDS_MAX, env ? "DM_POOL_IDS_8K" : "game profile pool_ids_8k");
+    }
+    return g_pool_ids_max;
+}
 typedef struct { int *v, n, cap; } pool_ids;
 typedef struct { __strong id<MTLBuffer> buf; uint64_t gpu, reg, ser, frame, sub; int samp, dtt, dpf, base, left, left_req; pool_ids dead, trans; int over; } pool_snap;   // over: its last walk found the budget full, so what it left out has its stand-in (pool_stand)
 static pool_snap g_psnap[POOL_SNAPS]; static unsigned g_psnap_next;
 static uint64_t g_psnap_gen = 1;   // bumped by each rebuild or patch: an argument block holding a pool address is not reused past it (encode_args_)
 static uint64_t g_stat_pool_builds; static double g_stat_pool_ms;
 static uint64_t g_stat_pool_why[5];   // why a table was built whole: no table of its kind, a registration changed (g_reg_gen), a texture's storage changed (g_ser_gen), retired IDs of an earlier submission, textures left out (the walk goes on)
-// Tables patched or kept on noted changes alone; why not: [0] too many changes or a sparse texture, [1] a memory pool change over more than POOL_IDS_MAX IDs without storage,
-// [2] resized, [3] a change without a note, [4] a new submission over more than POOL_IDS_MAX retired IDs. pchg / schg: of those patched or kept, the ones over memory pool changes
+// Tables patched or kept on noted changes alone; why not: [0] too many changes or a sparse texture, [1] a memory pool change over more than pool_ids_max() IDs without storage,
+// [2] resized, [3] a change without a note, [4] a new submission over more than pool_ids_max() retired IDs. pchg / schg: of those patched or kept, the ones over memory pool changes
 // and over a new submission
 static uint64_t g_stat_pool_patched, g_stat_pool_kept, g_stat_pool_nopatch[5], g_stat_pool_pchg, g_stat_pool_schg;
 void mtl_pool_stats(uint64_t s[6]) { s[0] = g_stat_pool_builds; s[1] = (uint64_t)(g_stat_pool_ms * 1000); s[2] = g_stat_pool_patched; s[3] = g_stat_pool_kept; s[4] = g_stat_pool_pchg; s[5] = g_stat_pool_schg; }   // the power line's pool table counts (hle_nvn.c)
-static void ids_push(pool_ids *l, int id_) {   // past POOL_IDS_MAX the list is dropped (n -1)
+static void ids_push(pool_ids *l, int id_) {   // past pool_ids_max() the list is dropped (n -1)
     if (l->n < 0) return;
-    if (l->n == POOL_IDS_MAX) { free(l->v); *l = (pool_ids){NULL, -1, 0}; return; }
+    if (l->n >= pool_ids_max()) { free(l->v); *l = (pool_ids){NULL, -1, 0}; return; }
     if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 16; l->v = realloc_or_die(l->v, (size_t)l->cap * sizeof *l->v, "the pool tables' ID lists"); }
     l->v[l->n++] = id_;
 }

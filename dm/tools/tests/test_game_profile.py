@@ -271,6 +271,35 @@ class DepthZeroCopy(unittest.TestCase):   # new single-sample Depth16 / Depth32F
         self.assertIn('depth_zero_copy', (REPO / 'dm/games/0400486024DEC000/README.md').read_text(encoding='utf-8'))
 
 
+class PoolIds8k(unittest.TestCase):   # a pool table's lists of IDs to take again hold 8,192 instead of 1,024 (nvn_mtl.m pool_ids_max; DM_POOL_IDS_8K overrides)
+    def macro(self, rows, gid=None):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'game.h')
+            if gid is None:
+                Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+                env = {**os.environ, 'DM_GAMES_DIR': d}
+            else: env = {k: v for k, v in os.environ.items() if k != 'DM_GAMES_DIR'}   # a profile of the repository
+            subprocess.run([sys.executable, str(GAME), 'header', gid or ID, str(out)], env=env, check=True, capture_output=True)
+            return [l for l in out.read_text().splitlines() if 'POOL_IDS_8K' in l]
+
+    def test_values_and_the_default(self):
+        self.assertEqual(self.macro(''), ['#define DM_GAME_POOL_IDS_8K 0'])   # without the key: 1,024, every other game as before
+        self.assertEqual(self.macro('pool_ids_8k\ton\n'), ['#define DM_GAME_POOL_IDS_8K 1'])
+        self.assertEqual(self.macro('pool_ids_8k\toff\n'), ['#define DM_GAME_POOL_IDS_8K 0'])
+        for v in ('1', 'yes', 'On', '8192', ''):
+            rc, out = header(f'pool_ids_8k\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('pool_ids_8k must be on or off', out, v)
+
+    def test_profiles_that_set_it(self):   # Ocarina of Time alone while X1.0 is frozen, and it names the key in its note; Luigi's Mansion 3 and Persona 4 Golden keep the default
+        on = [tsv.parent.name for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv'))
+              if any(l.split('\t')[:2] == ['pool_ids_8k', 'on'] for l in tsv.read_text(encoding='utf-8').splitlines())]
+        self.assertEqual(on, ['0400486024DEC000'])
+        self.assertEqual(self.macro('', '0400486024DEC000'), ['#define DM_GAME_POOL_IDS_8K 1'])
+        self.assertEqual(self.macro('', '0100DCA0064A6000'), ['#define DM_GAME_POOL_IDS_8K 0'])
+        self.assertEqual(self.macro('', '010062B01525C000'), ['#define DM_GAME_POOL_IDS_8K 0'])
+        self.assertIn('pool_ids_8k', (REPO / 'dm/games/0400486024DEC000/README.md').read_text(encoding='utf-8'))
+
+
 class PostAA(unittest.TestCase):   # the present's edge smoothing by default (settings.tsv DM_POST_AA's values, nvn_upscale_pick.h aa_parse)
     def macro(self, rows):
         with tempfile.TemporaryDirectory() as d:

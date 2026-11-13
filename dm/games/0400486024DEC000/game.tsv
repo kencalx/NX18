@@ -73,6 +73,10 @@ replay_spares	on
 # 145-158 ms after it. on: such depth textures are zeroed by copies from the zero buffer (nvn_mtl.m tex_zero_fill, port of NXNative 4cdd5577), and the log's 'depth zero:' line gives
 # the GPU time of the upload batch that zeroed it and of that frame and the next two. DM_DEPTH_ZERO_COPY=0 in env.txt turns it off. Not yet run on the phone
 depth_zero_copy	on
+# A pool table keeps two lists of IDs to take again at the next change, and past 1,024 builds the table whole: upstream's log of this game, streaming an area in behind the pause menu,
+# built its texture table whole at nearly every submission (NXNative PR #2389). on: the lists hold 8,192, what one patch takes (nvn_mtl.m pool_ids_max, port of NXNative 034e91a8's
+# limit), up to 1 MB more for the lists. The oot4 iPhone run never reached 1,024. DM_POOL_IDS_8K=0 in env.txt turns it off. Not yet run on the phone
+pool_ids_8k	on
 
 # ---- Movies ----
 # The movies are AV1 decoded by VideoToolbox. On an iPhone 18 Pro Max (X1.0) iOS ended the hardware decoder while the notification panel was down during the opening movie: every later
