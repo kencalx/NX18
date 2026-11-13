@@ -377,11 +377,13 @@ struct SettingsFile: Decodable { let settings: [Setting]; let console: String? }
         fputs("launcher: skip at start \(on ? "on" : "off")\n", stderr)
     }
 
-    // DM_LAUNCHER=0: no screen, but the saved choices still apply (only DM_SAVED_CHOICES=0 ignores them); nothing is written
+    // DM_LAUNCHER=0: no screen, but the saved choices still apply (only DM_SAVED_CHOICES=0 ignores them); nothing is written. Console mode's default goes into the environment
+    // too: for a Switch 2 game on iOS the list's default (Handheld, settings.tsv) differs from the host's own (DM_GAME_OPMODE, docked). Other defaults stay unset, as before
     func applySaved() {
         for s in settings where !fixed.contains(s.env) {
             let v = values[s.env] ?? s.def
-            if !s.isDefault(v) { setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v) (saved choice)\n", stderr) }
+            let saved = !s.isDefault(v)
+            if saved || s.env == "DM_OPMODE" { setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v)\(saved ? " (saved choice)" : "")\n", stderr) }
         }
     }
 }

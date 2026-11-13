@@ -26,6 +26,10 @@ class LauncherStorageTests(unittest.TestCase):
             with patch.dict(os.environ, {'GFXAPI': 'nvn'}), patch.object(settings.nacp, 'languages', return_value=['en-US', 'ja']):
                 (tmp / 'launcher.json').write_text(json.dumps(settings.build('01007EF00011E000', tmp / 'patched', tmp / 'control.nacp')))
                 (tmp / 'launcher_wonder.json').write_text(json.dumps(settings.build('010015100B514000', tmp / 'wonder', tmp / 'control.nacp')))   # no Picture shape: MetalFX greyed with Stretch on a window not 16:9
+                sw2 = settings.build('0400486024DEC000', tmp / 'patched', tmp / 'control.nacp')   # Ocarina of Time, a Switch 2 game: Console mode defaults to Handheld on iOS
+                for s in sw2['settings']:
+                    if s['env'] == 'DM_RENDER_SCALE': s['base'] = {'docked': [1600, 900], 'handheld': [1280, 720]}   # its profile has no render_base: Breath of the Wild's, for the size shown
+                (tmp / 'launcher_sw2.json').write_text(json.dumps(sw2))
                 with patch.dict(os.environ, {'SETTINGS_PLATFORM': 'mac'}):   # the Mac window's list: Display mode, the render scale's base size
                     (tmp / 'launcher_mac.json').write_text(json.dumps(settings.build('01007EF00011E000', tmp / 'patched', tmp / 'control.nacp')))
             exe, sync = tmp / 'launcher_storage_check', tmp / 'save_sync.o'
@@ -37,7 +41,7 @@ class LauncherStorageTests(unittest.TestCase):
                             str(REPO / 'dm/mac/Launcher.swift'), str(REPO / 'dm/ios/Sources/LauncherGuideFiles.swift'), str(REPO / 'dm/ios/Sources/NXFont.swift'),
                             str(Path(__file__).with_name('launcher_layout_check.swift')), str(Path(__file__).with_name('launcher_storage_check.swift')), str(sync)], capture_output=True, text=True, timeout=300)
             self.assertEqual(compile_result.returncode, 0, compile_result.stdout + compile_result.stderr)
-            r = subprocess.run([str(exe), str(tmp / 'launcher.json'), str(tmp / 'launcher_mac.json'), str(tmp / 'launcher_wonder.json')], capture_output=True, text=True, timeout=60)
+            r = subprocess.run([str(exe), str(tmp / 'launcher.json'), str(tmp / 'launcher_mac.json'), str(tmp / 'launcher_wonder.json'), str(tmp / 'launcher_sw2.json')], capture_output=True, text=True, timeout=60)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertIn('launcher storage: 0 failed', r.stdout)
 

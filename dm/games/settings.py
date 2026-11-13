@@ -203,6 +203,7 @@ def build(gid, patched, control):
     platform = os.environ.get('SETTINGS_PLATFORM') or 'ios'
     if platform not in ('ios', 'mac'): sys.exit(f'SETTINGS_PLATFORM must be ios or mac: {platform}')
     g = game.load(gid)
+    con = console(g.id, patched)
     macros = dict(re.findall(r'^#define (DM_GAME_\w+) (.*)$', game.header_one(g), re.M))   # the host's own defaults, as it is compiled for this game
     keys = fixups_keys(Path(patched) / 'main.fixups.tsv')
     mods_tsv = Path(patched) / 'mods.tsv'   # the switchable mods the NSP script packed (build_variants): a role per row
@@ -216,7 +217,14 @@ def build(gid, patched, control):
 
     def shown(cond, n):
         if '&' in cond: return all(shown(c, n) for c in cond.split('&'))   # every one of them
+        if cond.startswith('!'): return not shown(cond[1:], n)
         if cond == 'always': return True
+        if cond.startswith('console:'):   # launcher.json's console (console())
+            if cond[8:] not in ('switch1', 'switch2'): sys.exit(f'settings.tsv:{n}: console is switch1 or switch2: {cond}')
+            return cond[8:] == con
+        if cond.startswith('profile:'):   # the profile sets the key (game.tsv), whatever its value
+            if not re.fullmatch(r'\w+', cond[8:]): sys.exit(f'settings.tsv:{n}: profile:<key> names a game.tsv key: {cond}')
+            return bool(g.values(cond[8:]))
         if cond.startswith('mods:'): return cond[5:] in mod_roles
         if cond == 'languages>1': return len(langs) > 1
         if cond.startswith('fixups:'): return cond[7:] in keys
@@ -231,6 +239,11 @@ def build(gid, patched, control):
             parts = d.split('|')
             if len(parts) != 2 or not all(parts): sys.exit(f'settings.tsv:{n}: platform default is <ios>|<mac>: {d}')
             d = parts[0] if platform == 'ios' else parts[1]
+        if ',' in d or '?' in d:   # <value>?<cond>&<cond>,...,<value>: the first whose conditions hold, the last with none
+            *first, last = d.split(',')
+            if '?' in last or not all('?' in c and c.split('?', 1)[0] and c.split('?', 1)[1] for c in first):
+                sys.exit(f'settings.tsv:{n}: a conditional default is <value>?<cond>&<cond>,...,<value>: {d}')
+            d = next((v for v, c in (c.split('?', 1) for c in first) if shown(c, n)), last)
         if d.startswith('DM_GAME_'): return macro(d, n)
         if d.startswith('build:'):
             v = os.environ.get(d[6:], '')
@@ -317,7 +330,7 @@ def build(gid, patched, control):
         linked = 'DM_RENDER_SCALE' in reads('DM_DYNAMIC_RESOLUTION') or 'DM_DYNAMIC_RESOLUTION' in reads('DM_RENDER_SCALE')
         if not linked: sys.exit(f'{g.id}: the game has both Dynamic resolution and Render scale, and below 100 % the render scale overrides the dynamic resolution: '
                                 'give one of the two rows an inactive or hint rule on the other in settings.tsv')
-    return {'schema': SCHEMA, 'game': g.id, 'console': console(g.id, patched), 'settings': out}
+    return {'schema': SCHEMA, 'game': g.id, 'console': con, 'settings': out}
 
 
 def console(gid, patched):

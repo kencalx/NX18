@@ -1,7 +1,7 @@
 // The launcher's storage (LauncherSettings.swift LauncherModel), run by test_launcher_storage.py on macOS: only choices that differ from the game's default are
 // stored, Reset to tested defaults followed by Play forgets the choices, an env file's values are kept; the rules grey, explain and hide rows as the values and the device say, and
-// leave every value as it is. Arguments: the iOS and the Mac launcher.json of Breath of the Wild, and the iOS one of Super Mario Bros. Wonder (settings.py, GFXAPI=nvn; the iOS
-// lists with the Ultrawide mod)
+// leave every value as it is. Arguments: the iOS and the Mac launcher.json of Breath of the Wild, the iOS one of Super Mario Bros. Wonder (settings.py, GFXAPI=nvn; the iOS
+// lists with the Ultrawide mod), and the iOS one of Ocarina of Time (Switch 2), its render scale row given Breath of the Wild's base size
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -103,6 +103,8 @@ import SwiftUI
         failed += checkRules(ios: file.settings, mac: mac.settings, wonder: wonder.settings, defaults: d)
         failed += checkLauncherLayout(LauncherModel(mac.settings, defaults: d), defaults: d)
         failed += checkPresetsAndLook(ios: file.settings)
+        let sw2 = try! JSONDecoder().decode(SettingsFile.self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[4])))
+        failed += checkSwitch2ConsoleMode(sw2.settings, defaults: d)
         print("launcher storage: \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }
@@ -454,5 +456,28 @@ import SwiftUI
     try? FileManager.default.removeItem(at: png)
     expect(NX18Logo.decode(png) == nil && LauncherExtras.load(resources: res).logo == nil, "no dm/logo.png: no logo")
     try? FileManager.default.removeItem(at: res)
+    return failed
+}
+
+// Console mode on iOS: a Switch 2 game's list defaults to Handheld (settings.tsv), while the host's own default, DM_GAME_OPMODE, stays docked. The screen, the render scale's size
+// and a start without the screen (applySaved) all take the list's default; a saved Docked wins over it
+@MainActor func checkSwitch2ConsoleMode(_ sw2: [Setting], defaults d: UserDefaults) -> Int {
+    var failed = 0
+    func expect(_ c: Bool, _ what: String) { print((c ? "PASS " : "FAIL ") + what); if !c { failed += 1 } }
+    setenv("DM_ENV_FILE_KEYS", "", 1); setenv("DM_ENV_LAUNCH_KEYS", "", 1); unsetenv("DM_OPMODE"); d.removeObject(forKey: "launcher.DM_OPMODE")
+    let m = LauncherModel(sw2, defaults: d)
+    let mode = sw2.first { $0.env == "DM_OPMODE" }!, scale = sw2.first { $0.env == "DM_RENDER_SCALE" }!
+    expect(mode.def == "0" && m.values["DM_OPMODE"] == "0", "a Switch 2 game starts in Handheld on iOS")
+    expect(m.rangeLabel(scale, 1.0) == "1280 × 720 (100 %)", "the render scale shows the handheld size at the default console mode")
+    m.applySaved()
+    expect(getenv("DM_OPMODE").map { String(cString: $0) } == "0" && d.object(forKey: "launcher.DM_OPMODE") == nil, "without the screen, the default Handheld goes into the environment, unsaved")
+    unsetenv("DM_OPMODE"); d.set("1", forKey: "launcher.DM_OPMODE")
+    let docked = LauncherModel(sw2, defaults: d)
+    expect(docked.values["DM_OPMODE"] == "1" && docked.rangeLabel(scale, 1.0) == "1600 × 900 (100 %)", "a saved Docked wins over the default")
+    docked.applySaved()
+    expect(getenv("DM_OPMODE").map { String(cString: $0) } == "1" && d.string(forKey: "launcher.DM_OPMODE") == "1", "and goes into the environment without the screen, still saved")
+    docked.values["DM_OPMODE"] = "0"; docked.apply()
+    expect(d.object(forKey: "launcher.DM_OPMODE") == nil, "picking Handheld again forgets the choice: it is the default")
+    unsetenv("DM_OPMODE")
     return failed
 }

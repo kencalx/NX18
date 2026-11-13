@@ -330,6 +330,36 @@ class LauncherSettingsTests(unittest.TestCase):
                     self.assertNotIn('DM_PSO_MTL4', ios); self.assertNotIn('DM_PSO_MTL4', mac)
                     self.assertEqual((ios['DM_PSO_PREBUILD']['default'], mac['DM_PSO_PREBUILD']['default']), ('1', '1'))
 
+    def test_console_mode_defaults_to_handheld_for_a_switch_2_game_on_ios(self):
+        # DM_OPMODE 0?console:switch2&!profile:op_mode,DM_GAME_OPMODE|DM_GAME_OPMODE: the iPhone and iPad list only; the host's own DM_GAME_OPMODE (game.py) stays docked
+        OOT, GALAXY = '0400486024DEC000', '0100346017304000'   # Ocarina of Time (Switch 2, no op_mode); Super Mario Galaxy (Switch 1, op_mode handheld)
+        for gid, ios, mac in [(OOT, '0', '1'), (BOTW, '1', '1'), (GALAXY, '0', '0')]:
+            with self.subTest(game=gid):
+                self.assertEqual((build(gid, 'nvn', 'ios')['DM_OPMODE']['default'], build(gid, 'nvn', 'mac')['DM_OPMODE']['default']), (ios, mac))
+        self.assertIn('#define DM_GAME_OPMODE 1', settings.game.header_one(settings.game.load(OOT)), 'the host keeps docked as its own default')
+        for op_mode, ios in [('console', '1'), ('handheld', '0')]:   # a Switch 2 profile that sets op_mode keeps it
+            with self.subTest(op_mode=op_mode), tempfile.TemporaryDirectory() as tmp:
+                d = Path(tmp) / OOT; d.mkdir()
+                (d / 'game.tsv').write_text((ROOT / 'dm/games' / OOT / 'game.tsv').read_text(encoding='utf-8') + f'op_mode\t{op_mode}\n', encoding='utf-8')
+                with patch.object(settings.game, 'load', return_value=settings.game.Game(d)):
+                    self.assertEqual((build(OOT, 'nvn', 'ios')['DM_OPMODE']['default'], build(OOT, 'nvn', 'mac')['DM_OPMODE']['default']), (ios, ios))
+        with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn'}):   # the sdk module decides the console
+            (Path(tmp) / 'sdk.patched.bin').write_bytes(b'\0' * 64 + b'nnSdk spec: Ounce ' + b'\0' * 16)
+            os.environ.pop('SETTINGS_PLATFORM', None)
+            self.assertEqual({s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}['DM_OPMODE']['default'], '0')
+
+    def test_conditional_defaults(self):   # <value>?<cond>&<cond>,...,<value>: the first whose conditions hold; ! negates one
+        choice = lambda default: build_table(row('DM_X', 'choice', '1=One,2=Two,3=Three', default))['DM_X']['default']
+        self.assertEqual(choice('2?console:switch2,3?platform:ios&!profile:op_mode,1'), '3')   # Breath of the Wild: Switch 1, no op_mode
+        self.assertEqual(choice('2?console:switch1&profile:title_id,1'), '2')
+        self.assertEqual(choice('2?platform:mac,1|3'), '1')
+        for default in ('2?console:switch2', '2?console:switch2,1?always', ',1', '2?,1', '?always,1'):
+            with self.subTest(default=default), self.assertRaisesRegex(SystemExit, 'conditional default'):
+                choice(default)
+        for default, error in (('2?console:switch3,1', 'console is switch1 or switch2'), ('2?profile:,1', 'profile:<key>'), ('2?weather:sunny,1', 'unknown condition')):
+            with self.subTest(default=default), self.assertRaisesRegex(SystemExit, error):
+                choice(default)
+
     def test_unknown_platform_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, 'SETTINGS_PLATFORM must be ios or mac'):
             build(WONDER, 'nvn', 'mca')
