@@ -3412,6 +3412,10 @@ static id<MTLTexture> tex_upgrade_pfv(const tex_t *t, id<MTLTexture> base, MTLPi
 // the same queue executes in commit order ⇒ uploads are always finished before the first sample. Uploads outside a submission are flushed on the spot. The staging area is cut from 32 MB private blocks, held by the command buffer until completion.
 static _Atomic uint64_t g_upload_ns;   // Cumulative time of deswizzle + upload encoding on the submit thread (timing instrumentation)
 static _Atomic uint64_t g_upload_gpu_ns;
+// The 'depth zero:' line's notes (dz_note): per note, the number (g_up_seq) of the upload batch that zeroes its texture in the high half, and once that batch's feedback handler has run,
+// its GPU time in microseconds + 1 in the low half (up_flush). 0: no note. Every other game's batches only read them
+enum { DZ_N = 4 };
+static _Atomic uint64_t g_dz_up[DZ_N];
 static id<MTL4CommandBuffer> g_up_cb;
 static id<MTL4ComputeCommandEncoder> g_up_ce;
 static _Atomic int g_up_alloc_busy[3];
@@ -3529,6 +3533,8 @@ static void up_flush(void) {
         }
         double d = f.GPUEndTime - f.GPUStartTime;
         if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
+        for (int i = 0; i < DZ_N; i++) { uint64_t w = (uint64_t)seq << 32;   // a large depth texture zeroed in this batch: its time for the line (dz_tick)
+            if (atomic_load_explicit(&g_dz_up[i], memory_order_relaxed) == w) atomic_compare_exchange_strong(&g_dz_up[i], &w, w | ((uint32_t)MIN(MAX(d, 0) * 1e6, 4e9) + 1u)); }
         @autoreleasepool {
             for (id<MTLResource> obj in staging) res_remove(obj);
             [staging removeAllObjects];
@@ -4362,28 +4368,40 @@ static int depth_zero_copy(void) {   // read on the submit thread only (tex_zero
     return g_depth_zero_copy;
 }
 // The frames after a large depth texture is zeroed (64 MB or more): Ocarina of Time's iPhone logs show a GPU frame of 145-158 ms after the 12288x12288 Depth16Unorm of each save load.
-// With depth_zero_copy on, or DM_DEPTH_ZERO_COPY set either way (an A/B reads the same line), the texture's frame and the next two frames' GPU times are logged once they are known
-// (dz_tick from mtl_set_frame, DZ_LAG frames on), with how it was zeroed. Written and read on the submit thread
+// With depth_zero_copy on, or DM_DEPTH_ZERO_COPY set either way (an A/B reads the same line), the GPU time of the upload batch that zeroed it (which mtl_gpu_ms does not count: it sums
+// the replay's own command buffers) and the texture's frame and the next two frames' GPU times are logged once they are known (dz_tick from mtl_set_frame, DZ_LAG frames on), with how
+// it was zeroed. Up to DZ_N notes wait at once (a save load makes a 4096x4096 Depth32F of 64 MB too); with all of them waiting, a larger texture takes the smallest one's place.
+// Written and read on the submit thread, but for g_dz_up's low half (the batch's feedback handler)
 enum { DZ_LAG = 12 };
-static struct { uint64_t frame; unsigned w, h, mb, pieces; int by_copy; MTLPixelFormat pf; } g_dz;
+typedef struct { uint64_t frame; unsigned w, h, mb, pieces, seq; int by_copy; MTLPixelFormat pf; } dz_note_t;   // frame: stored +1 so frame 0 is not "none"
+static dz_note_t g_dz[DZ_N];
 static const char *dz_pf_name(MTLPixelFormat pf) { return pf == MTLPixelFormatDepth16Unorm ? "Depth16Unorm" : pf == MTLPixelFormatDepth32Float ? "Depth32Float" : pf == MTLPixelFormatDepth32Float_Stencil8 ? "Depth32Float_Stencil8" : "depth"; }
-static void dz_note(id<MTLTexture> mt, unsigned pieces, int by_copy) {
+static void dz_note(id<MTLTexture> mt, unsigned pieces, int by_copy) {   // before up_flush, while the batch that zeroes it is g_up_seq
     if (mt.allocatedSize < (64u << 20) || !(g_depth_zero_copy > 0 || g_depth_zero_env)) return;
-    g_dz.w = (unsigned)mt.width; g_dz.h = (unsigned)mt.height; g_dz.mb = (unsigned)(mt.allocatedSize >> 20); g_dz.pieces = pieces; g_dz.by_copy = by_copy; g_dz.pf = mt.pixelFormat;
-    g_dz.frame = atomic_load(&g_cur_frame) + 1;   // stored +1 so frame 0 is not "none"
+    unsigned mb = (unsigned)(mt.allocatedSize >> 20); int k = -1;
+    for (int i = 0; i < DZ_N && k < 0; i++) if (!g_dz[i].frame) k = i;
+    for (int i = 0; i < DZ_N && k < 0; i++) if (g_dz[i].mb < mb) k = i;
+    for (int i = 0; k >= 0 && g_dz[k].frame && i < DZ_N; i++) if (g_dz[i].mb < g_dz[k].mb) k = i;
+    if (k < 0) return;   // DZ_N larger ones wait
+    g_dz[k] = (dz_note_t){atomic_load(&g_cur_frame) + 1, (unsigned)mt.width, (unsigned)mt.height, mb, pieces, g_up_seq, by_copy, mt.pixelFormat};
+    atomic_store(&g_dz_up[k], (uint64_t)g_up_seq << 32);
 }
-static void dz_line(char *b, size_t n, const double g[3]) {   // g: the GPU ms of the texture's frame and the next two, < 0 not known
-    char v[3][24]; for (int i = 0; i < 3; i++) { if (g[i] >= 0) snprintf(v[i], sizeof v[i], "%.1f ms", g[i]); else snprintf(v[i], sizeof v[i], "not known"); }
-    snprintf(b, n, "depth zero: the %ux%u %s (%u MB) made in frame %llu, zeroed by %u %s (%s): GPU %s that frame, %s and %s the next two", g_dz.w, g_dz.h, dz_pf_name(g_dz.pf), g_dz.mb,
-             (unsigned long long)(g_dz.frame - 1), g_dz.pieces, g_dz.by_copy ? (g_dz.pieces == 1 ? "copy" : "copies") : (g_dz.pieces == 1 ? "clear pass" : "clear passes"),
-             g_depth_zero_env ? "DM_DEPTH_ZERO_COPY" : "game profile depth_zero_copy", v[0], v[1], v[2]);
+static void dz_line(const dz_note_t *z, char *b, size_t n, double up, const double g[3]) {   // up: the upload batch's GPU ms, g: the GPU ms of the texture's frame and the next two; < 0 not known
+    char u[24], v[3][24]; if (up >= 0) snprintf(u, sizeof u, "%.1f ms", up); else snprintf(u, sizeof u, "not known");
+    for (int i = 0; i < 3; i++) { if (g[i] >= 0) snprintf(v[i], sizeof v[i], "%.1f ms", g[i]); else snprintf(v[i], sizeof v[i], "not known"); }
+    snprintf(b, n, "depth zero: the %ux%u %s (%u MB) made in frame %llu, zeroed by %u %s (%s): the upload batch with %s %s on the GPU; that frame's submissions %s on the GPU, %s and %s the next two",
+             z->w, z->h, dz_pf_name(z->pf), z->mb, (unsigned long long)(z->frame - 1), z->pieces, z->by_copy ? (z->pieces == 1 ? "copy" : "copies") : (z->pieces == 1 ? "clear pass" : "clear passes"),
+             g_depth_zero_env ? "DM_DEPTH_ZERO_COPY" : "game profile depth_zero_copy", z->pieces == 1 ? "it" : "them", u, v[0], v[1], v[2]);
 }
 static void dz_tick(uint64_t f) {
-    if (!g_dz.frame || f < g_dz.frame - 1 + DZ_LAG) return;
-    static int nl; double g[3]; char b[320];
-    for (int i = 0; i < 3; i++) g[i] = mtl_gpu_ms(g_dz.frame - 1 + (uint64_t)i);
-    if (nl++ < 32) { dz_line(b, sizeof b, g); MLOG("%s", b); }
-    g_dz.frame = 0;
+    static int nl;
+    for (int k = 0; k < DZ_N; k++) { dz_note_t *z = &g_dz[k];
+        if (!z->frame || f < z->frame - 1 + DZ_LAG) continue;
+        uint64_t w = atomic_exchange(&g_dz_up[k], 0); double g[3], up = (w >> 32) == z->seq && (uint32_t)w ? ((uint32_t)w - 1) / 1000.0 : -1; char b[400];
+        for (int i = 0; i < 3; i++) g[i] = mtl_gpu_ms(z->frame - 1 + (uint64_t)i);
+        if (nl++ < 32) { dz_line(z, b, sizeof b, up, g); MLOG("%s", b); }
+        z->frame = 0;
+    }
 }
 static void tex_zero_fill(id<MTLTexture> mt) {
     static int warned;
@@ -4407,9 +4425,9 @@ static void tex_zero_fill(id<MTLTexture> mt) {
             }
         }
         [g_up_texs addObject:mt];
+        dz_note(mt, pieces, 1);
         if (!g_cb) up_flush();
         if (!g_tex_zeroed++) MLOG("new-texture zeroing: on (new Metal textures are undefined; new Switch memory reads 0)");
-        dz_note(mt, pieces, 1);
         return;
     }
     if (depth || stencil || multisample) {
@@ -4430,9 +4448,9 @@ static void tex_zero_fill(id<MTLTexture> mt) {
         g_up_ce = [g_up_cb computeCommandEncoder];
         [g_up_ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()];
         [g_up_ce setArgumentTable:g_up_ct]; [g_up_texs addObject:mt];
+        if (depth && !multisample) dz_note(mt, (unsigned)(mt.mipmapLevelCount * slices), 0);
         if (!g_cb) up_flush();
         if (multisample && !depth && !stencil) { static int ms; if (!ms++) MLOG("new-texture zeroing: multisample colour textures are cleared in a render pass (first %lux%lu format %lu, %lu samples)", (unsigned long)mt.width, (unsigned long)mt.height, (unsigned long)pf, (unsigned long)mt.sampleCount); }
-        if (depth && !multisample) dz_note(mt, (unsigned)(mt.mipmapLevelCount * slices), 0);
         return;
     }
     if (tt == MTLTextureTypeTextureBuffer) return;

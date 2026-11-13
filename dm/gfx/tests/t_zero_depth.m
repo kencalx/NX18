@@ -1,8 +1,8 @@
 // A new single-sample Depth16 / Depth32F texture is zeroed in the upload batch by copies from the zero buffer, in pieces of rows (tex_zero_fill), not by a clear render pass (which fails
 // with a GPU out-of-memory error on large attachments on an M3 Pro). Every texel of every level and layer reads 0 afterwards, from a texture first filled with a non-zero depth.
 // Port of NXNative 4cdd5577: here the copies are the profile key depth_zero_copy's (Ocarina of Time; DM_DEPTH_ZERO_COPY overrides), so the cases run with it on whatever the game,
-// then again with it off, where the clear pass zeroes them as before (no copies). A texture of 64 MB or more leaves a note for the 'depth zero:' line, which gives the GPU time of
-// its frame and the next two (dz_line).
+// then again with it off, where the clear pass zeroes them as before (no copies). Unset, the switch leaves the profile's value. A texture of 64 MB or more leaves a note for the
+// 'depth zero:' line, which gives the GPU time of the upload batch that zeroed it (its feedback handler, up_flush) and of its frame and the next two (dz_line); up to DZ_N notes wait.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -11,9 +11,19 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
+static int dz_find(id<MTLTexture> t) { for (int k = 0; k < DZ_N; k++) if (g_dz[k].frame && g_dz[k].w == t.width && g_dz[k].h == t.height && g_dz[k].pf == t.pixelFormat) return k; return -1; }
+static int dz_waiting(void) { int n = 0; for (int k = 0; k < DZ_N; k++) n += g_dz[k].frame != 0; return n; }
+static void dz_clear(void) { memset(g_dz, 0, sizeof g_dz); for (int k = 0; k < DZ_N; k++) atomic_store(&g_dz_up[k], 0); }
 
 int main(void) { @autoreleasepool {
     mtl_init();
+    // The default: unset, the profile's value (Ocarina of Time on, every other game the clear pass); 1 / 0 override it
+    unsetenv("DM_DEPTH_ZERO_COPY"); g_depth_zero_copy = -1;
+    CHECK(depth_zero_copy() == DM_GAME_DEPTH_ZERO_COPY && !g_depth_zero_env, "unset, the switch leaves the profile's depth_zero_copy");
+    printf("depth_zero_copy by default: %d (the profile's %d)\n", g_depth_zero_copy, DM_GAME_DEPTH_ZERO_COPY);
+    setenv("DM_DEPTH_ZERO_COPY", "0", 1); g_depth_zero_copy = -1; CHECK(depth_zero_copy() == 0 && g_depth_zero_env, "DM_DEPTH_ZERO_COPY=0: the clear pass");
+    setenv("DM_DEPTH_ZERO_COPY", "1", 1); g_depth_zero_copy = -1; CHECK(depth_zero_copy() == 1 && g_depth_zero_env, "DM_DEPTH_ZERO_COPY=1: copies");
+    unsetenv("DM_DEPTH_ZERO_COPY");
     NSError *error = nil;
     id<MTLLibrary> library = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "kernel void count_nz(depth2d<float,access::read> d [[texture(0)]], device atomic_uint *o [[buffer(0)]], uint2 p [[thread_position_in_grid]]) { if (p.x < d.get_width() && p.y < d.get_height() && d.read(p) != 0.0f) atomic_fetch_add_explicit(o, 1u, memory_order_relaxed); }\n" options:nil error:&error];
@@ -52,17 +62,23 @@ int main(void) { @autoreleasepool {
         CHECK(cb.status == MTLCommandBufferStatusCompleted, "the texture takes its non-zero depth");
         res_add(base);
         state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
-        g_dz.frame = 0; g_depth_zero_env = 1;   // the note as with DM_DEPTH_ZERO_COPY set, either way
+        dz_clear(); g_depth_zero_env = 1;   // the note as with DM_DEPTH_ZERO_COPY set, either way
         tex_zero_fill(base);
         int pieces0 = 0; for (int k = 0; k < g_nup_blits; k++) pieces0 += g_up_blits[k].dst == base && g_up_blits[k].slice == 0 && g_up_blits[k].level == 0 && !g_up_blits[k].tsrc;
         if (mode) CHECK(pieces0 == (int)cases[i].pieces, "level 0 of a layer is zeroed by the expected number of copies, with no render pass");
         else CHECK(pieces0 == 0, "depth_zero_copy off: no copies (the clear pass, as before)");
-        int big = base.allocatedSize >= (64u << 20);
-        CHECK(big ? g_dz.frame == atomic_load(&g_cur_frame) + 1 && g_dz.by_copy == mode && g_dz.w == cases[i].w && g_dz.mb == (unsigned)(base.allocatedSize >> 20) : !g_dz.frame,
-              "a depth texture of 64 MB or more leaves a note for the 'depth zero:' line, a smaller one none");
-        g_dz.frame = 0;
+        int big = base.allocatedSize >= (64u << 20), k = dz_find(base);
+        if (i == 2) CHECK(big, "the 4096x4096 Depth32F is 64 MB or more, as on the phone");
+        CHECK(big ? k >= 0 && dz_waiting() == 1 && g_dz[k].frame == atomic_load(&g_cur_frame) + 1 && g_dz[k].by_copy == mode && g_dz[k].mb == (unsigned)(base.allocatedSize >> 20) &&
+                    g_dz[k].seq == g_up_seq && atomic_load(&g_dz_up[k]) == (uint64_t)g_up_seq << 32 : !dz_waiting(),
+              "a depth texture of 64 MB or more leaves a note for the 'depth zero:' line, with its upload batch, a smaller one none");
         mtl_sub_commit(); mtl_drain();
         CHECK(!mtl_last_commit_error(), "zero fill completes without GPU error");
+        for (int w = 0; w < 5000 && atomic_load(&g_up_pending); w++) usleep(1000);   // the batch's feedback handler
+        if (big) { uint64_t u = atomic_load(&g_dz_up[k]);
+            CHECK((u >> 32) == g_dz[k].seq && (uint32_t)u > 0, "the upload batch's feedback gives the note its GPU time");
+            printf("  upload batch with the zeroing: %.2f ms on the GPU\n", ((uint32_t)u - 1) / 1000.0); }
+        dz_clear();
         id<MTLBuffer> count = [g_dev newBufferWithLength:4 options:MTLResourceStorageModeShared];
         int clean = 1;
         for (NSUInteger l = 0; l < base.mipmapLevelCount; l++) for (NSUInteger s = 0; s < base.arrayLength; s++) {
@@ -78,16 +94,37 @@ int main(void) { @autoreleasepool {
         printf("case %u: %s: %d copies into level 0, %s\n", i, cases[i].label, pieces0, clean ? "PASS" : "FAIL");
         defer_obj_release(base);
     } }
-    // The line: 12288x12288 Depth16Unorm (296 MB), as Ocarina of Time's save load makes, zeroed by copies, with the GPU times of its frame and the next two
+    // The line: 12288x12288 Depth16Unorm (296 MB), as Ocarina of Time's save load makes, zeroed by copies, with the GPU times of its upload batch, its frame and the next two
     g_depth_zero_env = 0; g_depth_zero_copy = 1;
-    g_dz.w = g_dz.h = 12288; g_dz.mb = 296; g_dz.pieces = 72; g_dz.by_copy = 1; g_dz.pf = MTLPixelFormatDepth16Unorm; g_dz.frame = 1954;
-    char line[320]; double g3[3] = {149.04, 3.2, -1}; dz_line(line, sizeof line, g3); printf("line: %s\n", line);
-    CHECK(!strcmp(line, "depth zero: the 12288x12288 Depth16Unorm (296 MB) made in frame 1953, zeroed by 72 copies (game profile depth_zero_copy): GPU 149.0 ms that frame, 3.2 ms and not known the next two"),
-          "the 'depth zero:' line names the texture, how it was zeroed and the three frames' GPU times");
-    g_dz.by_copy = 0; g_dz.pieces = 1; g_depth_zero_env = 1; dz_line(line, sizeof line, g3);
-    CHECK(strstr(line, "zeroed by 1 clear pass (DM_DEPTH_ZERO_COPY)") != NULL, "and the clear pass, with the switch");
-    dz_tick(1954 + DZ_LAG - 2); CHECK(g_dz.frame == 1954, "the line waits until the three frames' GPU times are known");
-    dz_tick(1954 + DZ_LAG); CHECK(g_dz.frame == 0, "then it is written once");
+    dz_note_t z = {1954, 12288, 12288, 296, 72, 7, 1, MTLPixelFormatDepth16Unorm};
+    char line[400]; double g3[3] = {149.04, 3.2, -1}; dz_line(&z, line, sizeof line, 2.46, g3); printf("line: %s\n", line);
+    CHECK(!strcmp(line, "depth zero: the 12288x12288 Depth16Unorm (296 MB) made in frame 1953, zeroed by 72 copies (game profile depth_zero_copy): the upload batch with them 2.5 ms on the GPU; "
+                        "that frame's submissions 149.0 ms on the GPU, 3.2 ms and not known the next two"),
+          "the 'depth zero:' line names the texture, how it was zeroed, its upload batch's and the three frames' GPU times");
+    z.by_copy = 0; z.pieces = 1; g_depth_zero_env = 1; dz_line(&z, line, sizeof line, -1, g3);
+    CHECK(strstr(line, "zeroed by 1 clear pass (DM_DEPTH_ZERO_COPY): the upload batch with it not known on the GPU") != NULL, "and the clear pass, with the switch, its batch not back");
+    // A save load's two: the 296 MB Depth16 and the 64 MB Depth32F in the same frame give a line each, the batch's time where its feedback came back
+    MTLTextureDescriptor *d16 = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth16Unorm width:12288 height:12288 mipmapped:NO];
+    MTLTextureDescriptor *d32 = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:4096 height:4096 mipmapped:NO];
+    MTLTextureDescriptor *d32s = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:4608 height:4096 mipmapped:NO];
+    for (MTLTextureDescriptor *d in @[d16, d32, d32s]) { d.storageMode = MTLStorageModePrivate; d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; }
+    id<MTLTexture> t16 = [g_dev newTextureWithDescriptor:d16], t32 = [g_dev newTextureWithDescriptor:d32], t32s = [g_dev newTextureWithDescriptor:d32s];
+    CHECK(t16 && t32 && t32s, "the save load's depth textures allocate");
+    dz_clear(); unsigned sq = g_up_seq;
+    uint64_t f0 = atomic_load(&g_cur_frame);
+    dz_note(t16, 73, 1); dz_note(t32, 16, 1);
+    int k16 = dz_find(t16), k32 = dz_find(t32);
+    CHECK(k16 >= 0 && k32 >= 0 && k16 != k32 && dz_waiting() == 2, "two notes in one frame: both wait (the second no longer replaces the first)");
+    uint64_t w = (uint64_t)sq << 32; atomic_compare_exchange_strong(&g_dz_up[k16], &w, w | 3101u);   // as the batch's feedback handler stores 3.1 ms
+    dz_note(t32, 16, 1); dz_note(t32, 16, 1);
+    CHECK(dz_waiting() == DZ_N && dz_find(t16) == k16, "four notes fill the slots");
+    dz_note(t32s, 18, 1);
+    CHECK(dz_waiting() == DZ_N && dz_find(t32s) >= 0 && dz_find(t16) == k16, "with every slot taken, a larger texture takes a smaller one's place, the largest kept");
+    uint64_t made = g_dz[k16].frame;
+    dz_note(t32, 16, 1);
+    CHECK(dz_find(t16) == k16 && g_dz[k16].frame == made && dz_find(t32s) >= 0, "and a texture no larger than any waiting one is dropped");
+    dz_tick(f0 + DZ_LAG - 1); CHECK(dz_waiting() == DZ_N, "the lines wait until the three frames' GPU times are known");
+    dz_tick(f0 + DZ_LAG); CHECK(dz_waiting() == 0 && !atomic_load(&g_dz_up[k16]), "then each is written once, its slot free again");
     printf("depth zero fill: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

@@ -71,7 +71,7 @@ replay_spares	on
 # Each save load makes a 12288x12288 Depth16 (296 MB) and a 4096x4096 Depth32F, zeroed by a clear-only render pass: on an M3 Pro that pass failed with
 # kIOGPUCommandBufferCallbackErrorOutOfMemory and took the queue with it in about half the loads (NXNative PR #2306), and the owner's iPhone 18 Pro Max logs show a GPU frame of
 # 145-158 ms after it. on: such depth textures are zeroed by copies from the zero buffer (nvn_mtl.m tex_zero_fill, port of NXNative 4cdd5577), and the log's 'depth zero:' line gives
-# the GPU time of that frame and the next two. DM_DEPTH_ZERO_COPY=0 in env.txt turns it off. Not yet run on the phone
+# the GPU time of the upload batch that zeroed it and of that frame and the next two. DM_DEPTH_ZERO_COPY=0 in env.txt turns it off. Not yet run on the phone
 depth_zero_copy	on
 
 # ---- Movies ----
