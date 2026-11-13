@@ -20,13 +20,13 @@ int main(void) {
  const char *keep[]={"DM_SHOW_FPS","DM_METAL_HUD","MTL_HUD_ENABLED",
    "DM_FPS_TARGET","DM_DYNAMIC_RESOLUTION","DM_OPMODE","DM_RENDER_SCALE","DM_LANG","DM_RT",
    "DM_TOUCH_HAPTICS","DM_RUMBLE","DM_SAVE","DM_ROMFS","DM_NVN_ENC_THREAD","DM_DEPTH_BOUNDS",
-   "DM_NVN_WAITS","DM_SLOWFRAME","DM_REPLAY_RT","DM_REPLAY_SPARES","DM_FPS_HOLD_BACKOFF","DM_FPS_RESUME","DM_MOVIE_RESTART","DM_FIELD_LOG"};
+   "DM_NVN_WAITS","DM_SLOWFRAME","DM_REPLAY_RT","DM_REPLAY_SPARES","DM_FPS_HOLD_BACKOFF","DM_FPS_RESUME","DM_MOVIE_RESTART","DM_FIELD_LOG","DM_POWER_DETAIL","DM_YIELD_STORM"};
  for(unsigned i=0;i<sizeof drop/sizeof *drop;i++)assert(dm_player_diagnostic_key(drop[i]));
  for(unsigned i=0;i<sizeof keep/sizeof *keep;i++)assert(!dm_player_diagnostic_key(keep[i]));
  // the whole line: DM_SLOWFRAME kept only with a value that is not empty or zeros (slow_on takes any value as on)
  assert(dm_player_env_dropped("DM_SLOWFRAME","0")&&dm_player_env_dropped("DM_SLOWFRAME","")&&dm_player_env_dropped("DM_SLOWFRAME","00"));
  assert(!dm_player_env_dropped("DM_SLOWFRAME","1")&&!dm_player_env_dropped("DM_SLOWFRAME","10"));
- assert(!dm_player_env_dropped("DM_NVN_WAITS","0")&&!dm_player_env_dropped("DM_REPLAY_RT","0")&&!dm_player_env_dropped("DM_REPLAY_SPARES","0"));   // the off side of an A/B is kept
+ assert(!dm_player_env_dropped("DM_NVN_WAITS","0")&&!dm_player_env_dropped("DM_REPLAY_RT","0")&&!dm_player_env_dropped("DM_REPLAY_SPARES","0")&&!dm_player_env_dropped("DM_POWER_DETAIL","0")&&!dm_player_env_dropped("DM_YIELD_STORM","sleep"));   // both sides of an A/B are kept
  assert(dm_player_env_dropped("DM_NVN_PROF","1")&&!dm_player_env_dropped("DM_SHOW_FPS","0"));
 }
 '''
@@ -41,7 +41,7 @@ int main(void) {
         repo = pathlib.Path(__file__).resolve().parents[3]
         header = (repo / 'dm/ios/Sources/player_env.h').read_text()
         kept = re.findall(r'"(DM_[A-Z0-9_]+)"', header[header.index('dm_player_kept_keys'):header.index('dm_player_diagnostic_key')])
-        self.assertEqual(sorted(kept), sorted(['DM_NVN_WAITS', 'DM_SLOWFRAME', 'DM_REPLAY_RT', 'DM_REPLAY_SPARES', 'DM_FPS_HOLD_BACKOFF', 'DM_FPS_RESUME', 'DM_MOVIE_RESTART', 'DM_FIELD_LOG']))
+        self.assertEqual(sorted(kept), sorted(['DM_NVN_WAITS', 'DM_SLOWFRAME', 'DM_REPLAY_RT', 'DM_REPLAY_SPARES', 'DM_FPS_HOLD_BACKOFF', 'DM_FPS_RESUME', 'DM_MOVIE_RESTART', 'DM_FIELD_LOG', 'DM_POWER_DETAIL', 'DM_YIELD_STORM']))
         switches = {l.split('\t')[0] for l in (repo / 'docs/env_switches.tsv').read_text(encoding='utf-8').splitlines() if l and not l.startswith('#')}
         rows = {l.split('\t')[0] for l in (repo / 'dm/games/settings.tsv').read_text(encoding='utf-8').splitlines() if l and not l.startswith('#')}
         guide = (repo / 'docs/development.md').read_text(encoding='utf-8')

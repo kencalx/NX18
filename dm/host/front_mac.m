@@ -35,6 +35,32 @@ static void merge_rumble_to_s2(int on);
 #include "ctrl_prompt.h"
 #include <signal.h>
 #include <math.h>
+#import <IOKit/ps/IOPowerSources.h>
+#import <IOKit/ps/IOPSKeys.h>
+// The power state for the power detail line (hle_nvn.c power_detail, DM_POWER_DETAIL): the internal battery's level and charging state (IOPowerSources; a Mac with no battery
+// has none, and the line says so once) and Low Power Mode (NSProcessInfo). Both are safe off the main thread
+int dm_power_source(int *pct, int *state, int *lpm) {
+    int known = 2; *pct = -1; *state = 0; *lpm = NSProcessInfo.processInfo.lowPowerModeEnabled;
+    CFTypeRef info = IOPSCopyPowerSourcesInfo(); if (!info) return known;
+    CFArrayRef list = IOPSCopyPowerSourcesList(info);
+    for (CFIndex i = 0, n = list ? CFArrayGetCount(list) : 0; i < n; i++) {
+        CFDictionaryRef d = IOPSGetPowerSourceDescription(info, CFArrayGetValueAtIndex(list, i));
+        CFStringRef type = d ? CFDictionaryGetValue(d, CFSTR(kIOPSTypeKey)) : NULL;
+        if (!type || CFStringCompare(type, CFSTR(kIOPSInternalBatteryType), 0) != kCFCompareEqualTo) continue;
+        int cur = -1, max = -1; CFNumberRef v;
+        if ((v = CFDictionaryGetValue(d, CFSTR(kIOPSCurrentCapacityKey)))) CFNumberGetValue(v, kCFNumberIntType, &cur);
+        if ((v = CFDictionaryGetValue(d, CFSTR(kIOPSMaxCapacityKey)))) CFNumberGetValue(v, kCFNumberIntType, &max);
+        if (cur >= 0 && max > 0) *pct = (int)lround(100.0 * cur / max);
+        CFStringRef src = CFDictionaryGetValue(d, CFSTR(kIOPSPowerSourceStateKey));
+        CFBooleanRef chg = CFDictionaryGetValue(d, CFSTR(kIOPSIsChargingKey)), full = CFDictionaryGetValue(d, CFSTR(kIOPSIsChargedKey));
+        int ac = src && CFStringCompare(src, CFSTR(kIOPSACPowerValue), 0) == kCFCompareEqualTo;
+        *state = !ac ? 1 : chg && CFBooleanGetValue(chg) ? 2 : full && CFBooleanGetValue(full) ? 3 : 4;   // on AC, neither charging nor full: held below full (optimized charging)
+        known |= 1; break;
+    }
+    if (list) CFRelease(list);
+    CFRelease(info);
+    return known;
+}
 #include <sys/stat.h>
 
 static CAMetalLayer *g_layer;

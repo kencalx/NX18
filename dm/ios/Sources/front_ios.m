@@ -8,6 +8,7 @@
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
 #include <errno.h>
+#include <stdatomic.h>
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
@@ -463,7 +464,24 @@ bool dm_setting_working(const char *env) { return env && g_root.game && !strcmp(
 int dm_thermal_now(void) { return (int)NSProcessInfo.processInfo.thermalState; }
 int dm_low_power_now(void) { return NSProcessInfo.processInfo.lowPowerModeEnabled; }   // the frame step does not probe in it (hle_nvn.c fstep_cpu_slowed)
 double dm_brightness_now(void) { return g_brightness; }
+// Battery level and charging state for the power detail line (hle_nvn.c power_detail, DM_POWER_DETAIL): UIDevice is read on the main thread only, at start and on each change, and
+// kept here for the thread that writes the power line. Battery monitoring is turned on only for that line
+static _Atomic int g_bat_on, g_bat_pct = -1, g_bat_state;
+static void battery_cache(void) {
+    UIDevice *d = UIDevice.currentDevice; float l = d.batteryLevel; UIDeviceBatteryState s = d.batteryState;
+    atomic_store(&g_bat_pct, l < 0 ? -1 : (int)lroundf(l * 100));
+    atomic_store(&g_bat_state, s == UIDeviceBatteryStateUnplugged ? 1 : s == UIDeviceBatteryStateCharging ? 2 : s == UIDeviceBatteryStateFull ? 3 : 0);
+}
+int dm_power_source(int *pct, int *state, int *lpm) {
+    *pct = atomic_load(&g_bat_pct); *state = atomic_load(&g_bat_state); *lpm = dm_low_power_now();
+    return (atomic_load(&g_bat_on) ? 1 : 0) | 2;
+}
 static void front_ios_power_watch(void) {
+    if (dm_power_detail_on()) {
+        UIDevice.currentDevice.batteryMonitoringEnabled = YES; battery_cache(); atomic_store(&g_bat_on, 1);
+        for (NSNotificationName nm in @[UIDeviceBatteryLevelDidChangeNotification, UIDeviceBatteryStateDidChangeNotification])
+            [NSNotificationCenter.defaultCenter addObserverForName:nm object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; battery_cache(); }];
+    }
     [NSNotificationCenter.defaultCenter addObserverForName:UIScreenBrightnessDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; if (g_own_screen) g_brightness = g_own_screen.brightness; }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
         (void)n; LOG("front end: thermal state → %d (%.0f s after launch)", dm_thermal_now(), (now_ns() - g_t0_ns) / 1e9); }];

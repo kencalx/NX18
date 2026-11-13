@@ -18,6 +18,7 @@
 #include "nvn_pace.h"
 #include "nvn_fstep.h"
 #include "nvn_timestamp.h"
+#include "nvn_power.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
 #include "nvn_shkey.h"
@@ -1854,6 +1855,7 @@ __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n =
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
 int mtl_probe_ramp_on(void);   // nvn_mtl.m: DM_FSTEP_PROBE_RAMP (default on; ab with DM_AB)
 __attribute__((weak)) void dm_yield_top(char *out, size_t n) { if (n) snprintf(out, n, "-"); }   // hle_thread.c: the threads that yielded most since the last call; none in graphics unit tests
+__attribute__((weak)) void dm_thread_acquire_mark(void) {}   // hle_thread.c: the calling guest thread acquires the window texture, so DM_YIELD_STORM=sleep leaves its storms spinning; nothing in graphics unit tests
 __attribute__((weak)) void dm_thread_cpu(char *out, size_t n, double secs) { (void)secs; if (n) snprintf(out, n, "-"); }   // hle_thread.c: guest-thread CPU by Switch priority band since the last call
 __attribute__((weak)) void dm_wake_stats(char *out, size_t n, double secs) { (void)secs; if (n) snprintf(out, n, "-"); }   // hle_thread.c: the host's wake sources per second since the last call (sleeps, handoff polls)
 void mtl_res_stats(char *out, size_t n);
@@ -1864,6 +1866,22 @@ static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait 
 static uint64_t g_fs_start, g_fs_wait, g_fs_away;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), its pacing wait, and away_ns then
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
+// The acquire thread's real-time policy, checked once a frame on that thread (DM_POWER_DETAIL, logging only): frames checked, and of them those where the thread ran as a standard thread
+// (policy not POLICY_RR, as xnu's fail-safe leaves a real-time thread that ran too long without blocking) or below priority 97. Only on the thread the policy was set on (g_rt_th, with
+// a computation declared): a thread the acquire moved to, or one whose thread_policy_set failed, never had the policy, and its frames are not demotions. Its own port from
+// pthread_mach_thread_np, which makes no send right (mach_thread_self would leak one a frame). The thread policy line and the power tick read them
+static _Atomic uint64_t g_acq_chk, g_acq_dem;
+int dm_power_detail_on(void);
+static void acq_demote_check(void) {
+    static uint64_t last = UINT64_MAX; uint64_t f = atomic_load_explicit(&g_frame, memory_order_relaxed);
+    if (f == last || !dm_power_detail_on() || !rt_on()) return;   // once a frame: acquire can run more than once in one
+    last = f;
+    if (!(g_rt_comp_ms > 0) || !pthread_equal(g_rt_th, pthread_self())) return;   // no policy set on this thread (both written on the acquiring thread, set_time_constraint_comp)
+    thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT;
+    if (thread_info(pthread_mach_thread_np(pthread_self()), THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) != KERN_SUCCESS) return;
+    atomic_fetch_add_explicit(&g_acq_chk, 1, memory_order_relaxed);
+    if (xi.pth_policy != POLICY_RR || xi.pth_curpri < 97) atomic_fetch_add_explicit(&g_acq_dem, 1, memory_order_relaxed);
+}
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
     win_t *o = (win_t *)w;
     int n = window_active(o);
@@ -1871,11 +1889,13 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
     uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0;
     { static pthread_t acq_th; if (!pthread_equal(acq_th, pthread_self())) { if (acq_th) atomic_fetch_add_explicit(&g_acq_moves, 1, memory_order_relaxed); acq_th = pthread_self(); } }   // rt_policy_line counts them
+    dm_thread_acquire_mark();   // every acquire, not only when the pthread changes: a new acquirer can reuse an exited guest thread's pthread_t (a TLS read and a compare)
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
         static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
         if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
         if (rtp) atomic_store_explicit(&g_rt_frame_ns, rtp, memory_order_relaxed);
         rt_comp_tick(rtp);
+        if (rtp) acq_demote_check();
         uint64_t p0 = now_ns(); int snap = mtl_snap_on();
         if (present_unpaced(o)) {}   // present interval 0: no vsync wait (below); only the free texture the ticket wait below gives
         else if (snap && mtl_link_active() && mtl_link_stalled()) { if (wait) sleep_until_ns(at); }   // present snapshots (nvn_mtl.m) while the display link is silent (the window in the background or covered):
@@ -1965,6 +1985,11 @@ __attribute__((weak)) void dm_perf_present(double iv_ms) { (void)iv_ms; }   // D
 uint64_t dm_nvn_sub_cpu_ns(void) { return atomic_load(&g_cum_sub_cpu_ns); }   // Cumulative CPU nanoseconds of submit (excluding present)
 __attribute__((weak)) int dm_thermal_now(void) { return -1; }   // Default (Mac); overridden by iOS front_ios.m   // default (Mac); the strong definition in the iOS front end front_ios.m overrides it
 __attribute__((weak)) int dm_low_power_now(void) { return 0; }   // Low Power Mode (iOS front_ios.m); off on the Mac
+// The power state for the power detail line (nvn_power.h nvn_pd_power_text): battery level and charging state, Low Power Mode; → bit 1 when the battery is known, bit 2 Low Power Mode.
+// Strong definitions in front_ios.m (UIDevice, cached on the main thread) and front_mac.m (IOPowerSources); this default (unit tests) knows neither
+__attribute__((weak)) int dm_power_source(int *pct, int *state, int *lpm) { *pct = -1; *state = 0; *lpm = 0; return 0; }
+// DM_POWER_DETAIL: the power detail line after each power line, on unless =0 (front_ios.m turns battery monitoring on only then)
+int dm_power_detail_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_POWER_DETAIL"); on = !(e && *e == '0'); } return on; }
 // Per-frame ring for the long-frame log (GPU time only arrives 8 frames late, so store first and judge later)
 #define LFN 16
 typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms, bg_ms; unsigned pso, lib, up, rup, hy, hold; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline; hold: the vsyncs the frame was made under; bg_ms: of fr, the time suspended (away_ns)
@@ -1987,6 +2012,49 @@ static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y
 // Power over the window since the last summary, for the whole process: CPU energy (task_energy in nJ, Apple silicon), CPU time (100% = one core) and the share of it on performance cores,
 // wakeups per second (interrupt / out of platform idle), GPU time per second (task_gpu_utilisation), thermal state, and the guest threads that yielded most (hle_thread.c);
 // then render-target traffic per frame (attachment load / store bytes, passes that load and store everything, stores saved by DM_NVN_UNWRITTEN_DC) and guest-thread CPU by Switch priority
+// The power detail line (DM_POWER_DETAIL, on unless =0), after the power line of the same window (secs long): CPU energy, clock and time by core type, the time threads waited for a
+// core (nvn_power.h), the battery and Low Power Mode (the thermal state is on the power line). show 0 (the power line's first call) only takes the baseline; a part the platform lacks is said once
+static void power_detail(uint64_t frame, double secs, int show) {
+    static nvn_pd prev; static int have, told, rus_told;
+    if (!dm_power_detail_on()) return;
+    nvn_pd cur; int ok = nvn_pd_read(&cur);
+    if (!show) { have = ok; if (ok) prev = cur; return; }
+    char cs[256] = "", ps[160] = "";
+    if (ok && have) nvn_pd_text(cs, sizeof cs, &prev, &cur, secs);
+    else if (!ok && !rus_told) { rus_told = 1; snprintf(cs, sizeof cs, "CPU by core type: not on this platform"); }
+    have = ok; if (ok) prev = cur;
+    int pct, st, lpm, known = dm_power_source(&pct, &st, &lpm);
+    nvn_pd_power_text(ps, sizeof ps, known, pct, st, lpm, &told);
+    if (*cs || *ps) LOG("[nvn] power detail up to frame %llu: %s%s%s", (unsigned long long)frame, cs, *cs && *ps ? "; " : "", ps);
+}
+// The power tick (DM_POWER_DETAIL, on unless =0; logging only): a short line each second of presenting for the whole session, to time a drop of the clocks the 300-frame power line
+// spreads over 5 to 10 s: CPU energy, CPU time, its share on performance cores and each cluster's clock (nvn_power.h nvn_pd_tick_text), the frame rate, GPU time per second two ways,
+// and the acquiring thread's demoted frames (acq_demote_check). GPU time: the sum of each frame's command buffers' GPU time (mtl_gpu_ms, which counts overlapping command buffers twice
+// and arrives about 8 frames late), and the union of the frames' spans from first GPU start to last GPU end (mtl_gpu_span, which counts gaps inside a frame): both approximate, and
+// both replace the power line's task_gpu_utilisation, which the iPhone left at 0. A frame whose GPU time was not in 8 frames later is left out of both
+static double g_tick_gpu_ms, g_tick_span_ms; static uint64_t g_tick_span_end;   // the present thread's, since the last tick
+static void tick_gpu(double ms, int span, uint64_t g0, uint64_t g1) {
+    if (ms >= 0) g_tick_gpu_ms += ms;
+    if (!span) return;
+    uint64_t s0 = g0 > g_tick_span_end ? g0 : g_tick_span_end;   // the part not already in the union
+    if (g1 > s0) g_tick_span_ms += (g1 - s0) / 1e6;
+    if (g1 > g_tick_span_end) g_tick_span_end = g1;
+}
+void mtl_perf_profile_watch(void);   // nvn_mtl.m: the performance profile line, and again on each change
+static void power_tick(uint64_t frame) {
+    if (!dm_power_detail_on()) return;
+    static uint64_t t0, f0, c0, d0; static nvn_pd p0; static int ok0;
+    uint64_t t = now_ns(), chk = atomic_load_explicit(&g_acq_chk, memory_order_relaxed), dem = atomic_load_explicit(&g_acq_dem, memory_order_relaxed);
+    if (t0 && t - t0 < 1000000000ull) return;
+    nvn_pd p; int ok = nvn_pd_read(&p);
+    if (!t0) mtl_perf_profile_watch();
+    else if (t - t0 > 2000000000ull) {}   // after a pause or a stay in the background with no presents: a new baseline, not one line averaged over the gap
+    else {
+        char b[640]; nvn_pd_tick_text(b, sizeof b, ok && ok0 ? &p0 : NULL, &p, (t - t0) / 1e9, frame - f0, g_tick_gpu_ms, g_tick_span_ms, chk - c0, dem - d0);
+        LOG("[nvn] power tick at %.1f s, frame %llu: %s", (t - g_t0_ns) / 1e9, (unsigned long long)frame, b);
+    }
+    t0 = t; f0 = frame; c0 = chk; d0 = dem; p0 = p; ok0 = ok; g_tick_gpu_ms = g_tick_span_ms = 0;
+}
 static void power_line(uint64_t frame) {
     static uint64_t pt, pe, pcpu, pp, piw, ppw, pg, pf, pld, pst, pfu, pudc, pnqp, prw; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     task_power_info_v2_data_t pw; mach_msg_type_number_t n = TASK_POWER_INFO_V2_COUNT;
@@ -1998,10 +2066,11 @@ static void power_line(uint64_t frame) {
     uint64_t e = 0;
 #endif
     uint64_t iw = pw.cpu_energy.task_interrupt_wakeups, idw = pw.cpu_energy.task_platform_idle_wakeups, g = pw.gpu_energy.task_gpu_utilisation;
-    if (pt && t > pt) { double s = (t - pt) / 1e9; char yt[192]; dm_yield_top(yt, sizeof yt);
+    if (pt && t > pt) { double s = (t - pt) / 1e9; char yt[1536]; dm_yield_top(yt, sizeof yt);
         double nf = frame > pf ? (double)(frame - pf) : 1;   // per frame: the fair comparison when one build holds the frame rate better than another
         LOG("[nvn] power up to frame %llu: CPU energy %.2f W, %.1f mJ per frame (%.1f fps); CPU %.0f%% (100 = one core), %.0f%% of it on performance cores; wakeups %.0f/s (out of platform idle %.0f); GPU %.1f ms/s; thermal %d; top yielders: %s", frame,
             (e - pe) / 1e9 / s, (e - pe) / 1e6 / nf, nf / s, (cpu - pcpu) / 1e7 / s, cpu > pcpu ? 100.0 * (double)(p - pp) / (double)(cpu - pcpu) : 0, (iw - piw) / s, (idw - ppw) / s, (g - pg) / 1e6 / s, dm_thermal_now(), yt);
+        power_detail(frame, s, 1);
         char rs[400]; mtl_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; mtl_barrier_stats(&bs, &bf);
         uint64_t mtl_cut_count(void), mtl_copy_cut_count(void), mtl_blit_splits(void); void mtl_ubd_stats(uint64_t *, uint64_t *); static uint64_t pcut, pccut, pbsp, pud, puc; uint64_t cut = mtl_cut_count(), ccut = mtl_copy_cut_count(), bsp = mtl_blit_splits(), ud, uc; mtl_ubd_stats(&ud, &uc);
         void mtl_ubp_stats(uint64_t *, uint64_t *, uint64_t *); static uint64_t ppm, ppr, ppf; uint64_t pm, pr, pf_; mtl_ubp_stats(&pm, &pr, &pf_);
@@ -2045,7 +2114,7 @@ static void power_line(uint64_t frame) {
         // (nvn_queue.inc nq_worker) and the encode thread's wakes (nvn_rec.h rec_thread)
         char wk[1536]; dm_wake_stats(wk, sizeof wk, s); uint64_t nqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed), rw = mtl_rec_wakes();
         LOG("[nvn] threads up to frame %llu: CPU %s; wake sources per second: %s; NVN queue event polls of 1 ms %.0f; encode thread wakes %.0f", frame, tc, wk, (nqp - pnqp) / s, (rw - prw) / s); }
-    else { char yt[192], rs[400], tc[400], wk[1536]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); dm_wake_stats(wk, sizeof wk, 1); }   // the first call only takes the baselines
+    else { char yt[1024], rs[400], tc[400], wk[1536]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); dm_wake_stats(wk, sizeof wk, 1); power_detail(frame, 0, 0); }   // the first call only takes the baselines
     pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes(); pnqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed); prw = mtl_rec_wakes();
 }
 // The thread policy line, every 300 frames from the present path. The time-constraint policy is set on the thread that acquires the window texture (nvnWindowAcquireTexture),
@@ -2081,6 +2150,9 @@ static void rt_policy_line(unsigned wn, uint32_t wq) {
         static uint64_t pmv; uint64_t mv = atomic_load_explicit(&g_acq_moves, memory_order_relaxed);
         if (mv != pmv && w > 0 && (size_t)w < sizeof who) w += snprintf(who + w, sizeof who - (size_t)w, "; acquired on another thread than the acquire before %llu times in this window", (unsigned long long)(mv - pmv));
         pmv = mv;
+        static uint64_t pchk, pdem; uint64_t chk = atomic_load_explicit(&g_acq_chk, memory_order_relaxed), dem = atomic_load_explicit(&g_acq_dem, memory_order_relaxed);   // acq_demote_check (DM_POWER_DETAIL)
+        if (chk != pchk && w > 0 && (size_t)w < sizeof who) w += snprintf(who + w, sizeof who - (size_t)w, "; the acquiring thread checked in %llu frames, in %llu of them run as a standard thread or below priority 97 (demoted)", (unsigned long long)(chk - pchk), (unsigned long long)(dem - pdem));
+        pchk = chk; pdem = dem;
         if (nvn_replay_rt() && w > 0 && (size_t)w < sizeof who) rtw_states(who + w, sizeof who - (size_t)w);
     }
     LOG("[nvn] thread policy: main thread real-time computation %.2f ms / period %.2f ms, real-time policy %s, current priority %d (base %d, policy %d); %u worker threads QoS %#x; present QoS %#x%s", g_rt_comp_ms, g_rt_period_ms, st, okx ? xi.pth_curpri : -1, okx ? xi.pth_priority : -1, okx ? xi.pth_policy : -1, wn, wq, mtl_present_qos(), who);
@@ -2833,6 +2905,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     } else atomic_store(&g_nvn_ns, 0);
     g_acq_wait_ns = g_pq_wait_ns = 0;
     if (f >= 8) { double g = mtl_gpu_ms(f - 8); if (g >= 0) { tpush(3, g); trow(f - 8, "@gpu_ms", g); g_hr[g_hn++ % HRN] = g; }   // GPU time is taken 8 frames late (already completed)
+        uint64_t g0 = 0, g1 = 0; int gsp = mtl_gpu_span(f - 8, &g0, &g1); tick_gpu(g, gsp, g0, g1);   // the power tick's GPU time
         { lf_rec *r = &g_lf[(f - 8) % LFN]; if (g >= 0 && r->f == f - 8) mtl_ab_gpu(f - 8, g, r->fr); }   // DM_AB phases
         { lf_rec *r = &g_lf[(f - 8) % LFN];   // long-frame log (on by default, DM_LONGFRAME=0 turns it off): a line is printed only when the whole frame > 20 ms or GPU > 16.7 ms, it is clearly above recent conditions, and longer than its hold asked for
           static int on = -1; if (on < 0) { const char *e = getenv("DM_LONGFRAME"); on = !(e && !strcmp(e, "0")); }
@@ -2852,7 +2925,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
               if (field_log() && r->bg_ms >= 1 && n > 0 && (size_t)n < sizeof b) snprintf(b + n, sizeof b - (size_t)n, "; %.0f ms of it in the background", r->bg_ms);
               // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
               dm_longframe_note(b); } }
-        uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
+        if (frame_rec() && gsp) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
+    power_tick(f);
     prev_in = t0; prev_pass = ps; prev_draw = dr;
     dump_frame();
     { void dm_vi_frame_queued(uint64_t); dm_vi_frame_queued(g_frame); }   // the layer's frame history (hle_vi.c), numbered as GetLatestFrameNumber

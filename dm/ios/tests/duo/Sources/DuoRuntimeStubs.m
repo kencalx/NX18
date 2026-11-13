@@ -126,6 +126,7 @@ void duo_harness_set_present_why(int fx, int sharp, int aa) { g_present_why[0] =
 static int g_web_touch;   // whether an offline HTML page is shown over the picture (web_apple.m is not in the harness)
 int front_web_touch(void) { return g_web_touch; }
 void duo_harness_set_web_touch(int on) { g_web_touch = on; }
+int dm_power_detail_on(void) { return 0; }   // the power detail line (hle_nvn.c): no power line in the harness, so no battery monitoring either
 // The cheats GameMenu.swift lists (hle_cheats.c): no cheats folder in the harness, so the in-game menu has no Cheats submenu; DUO_CHEATS=1 gives it a placeholder cheat file
 // (made-up names, for screenshots of the Cheats page): two sections, a cheat that runs once, one that cannot run here and an always-on master, toggled in memory
 typedef struct { const char *name, *section, *why; int kind, flags, on; } DuoCheat;

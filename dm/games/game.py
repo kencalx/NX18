@@ -178,6 +178,8 @@ def header_one(g):
     if frs not in ('on', 'off'): sys.exit(f'{g.id}: fps_resume must be on or off: {frs}')
     rrt = g.get('replay_rt', 'off')   # a time-constraint policy for the NVN queue replay and encode threads, sized to their CPU time per frame (hle_nvn.c nvn_rtw_tick; DM_REPLAY_RT overrides): on / off
     if rrt not in ('on', 'off'): sys.exit(f'{g.id}: replay_rt must be on or off: {rrt}')
+    yst = g.get('yield_storm', 'count')   # runs of yields with no other work past 500 µs (hle_thread.c ystorm_note; DM_YIELD_STORM overrides): count (counted for the power line) / sleep (each further yield sleeps up to 50 µs)
+    if yst not in ('count', 'sleep'): sys.exit(f'{g.id}: yield_storm must be count or sleep: {yst}')
     rsp = g.get('replay_spares', 'off')   # 32 spare command copies (16 MB in all) and 64 spare pool tables instead of 4 and 16, the newest table dropped when all are in flight (nvn_queue.inc nvn_replay_spares; DM_REPLAY_SPARES overrides): on / off
     if rsp not in ('on', 'off'): sys.exit(f'{g.id}: replay_spares must be on or off: {rsp}')
     dzc = g.get('depth_zero_copy', 'off')   # new single-sample Depth16 / Depth32F textures zeroed by copies from the zero buffer, not a clear pass (nvn_mtl.m tex_zero_fill; DM_DEPTH_ZERO_COPY overrides): on / off
@@ -289,6 +291,7 @@ def header_one(g):
          f'#define DM_GAME_REPLAY_SPARES {int(rsp == "on")}',
          f'#define DM_GAME_DEPTH_ZERO_COPY {int(dzc == "on")}',
          f'#define DM_GAME_POOL_IDS_8K {int(pik == "on")}',
+         f'#define DM_GAME_YIELD_STORM {int(yst == "sleep")}',
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',
          f'#define DM_GAME_UE_FPS_CVAR {q(ufc)}',
          f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',

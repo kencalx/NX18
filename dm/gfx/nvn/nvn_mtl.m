@@ -2610,6 +2610,20 @@ int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) {
     *t0 = atomic_load(&g_gpu[k].t0); *t1 = atomic_load(&g_gpu[k].t1);
     return *t1 >= *t0 && *t1;
 }
+// The process's performance profile (NSProcessInfo hasPerformanceProfile:, Metal's MTLDeviceCertification.h) for the power detail (hle_nvn.c power_tick's first call, DM_POWER_DETAIL):
+// one line, and one more on each NSProcessInfoPerformanceProfileDidChangeNotification, with whether the device is certified for the iPhone performance gaming tier. Logging only
+static void perf_profile_line(const char *what) {
+    NSProcessInfo *pi = NSProcessInfo.processInfo;
+    LOG("[nvn] performance profile%s: default %s, sustained %s; device certified for iPhone performance gaming: %s", what, [pi hasPerformanceProfile:NSProcessPerformanceProfileDefault] ? "yes" : "no",
+        [pi hasPerformanceProfile:NSProcessPerformanceProfileSustained] ? "yes" : "no", [pi isDeviceCertifiedFor:NSDeviceCertificationiPhonePerformanceGaming] ? "yes" : "no");
+}
+void mtl_perf_profile_watch(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        perf_profile_line("");
+        [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoPerformanceProfileDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; perf_profile_line(" changed"); }];
+    });
+}
 static void rp_flush(void);
 static const char *cctx_snap(void);   // What is in this submission (printed into the failure line on error; defined before mtl_exec)
 typedef struct cbs_list cbs_list;   // The game's shaders one command buffer encoded (defined before encode_args)

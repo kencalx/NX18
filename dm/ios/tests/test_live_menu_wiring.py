@@ -63,6 +63,8 @@ class LiveMenu(unittest.TestCase):
                 self.assertIn(decl + ';', front_h)
                 self.assertIn(decl + ' {', self.nvn)
                 self.assertIn(decl + ' {', stubs)
+        self.assertIn('int dm_power_detail_on(void);', front_h)   # front_ios_power_watch: battery monitoring only for the power detail line (hle_nvn.c)
+        self.assertIn('int dm_power_detail_on(void) {', read('dm/gfx/nvn/hle_nvn.c')); self.assertIn('int dm_power_detail_on(void) {', stubs)
         self.assertIn('int front_web_touch(void) {', stubs)   # DmGamepad.m calls it; web_apple.m is not in the harness
         h = read('dm/ios/Sources/DmGameMenu.h')
         for decl in ('void dm_gamepad_touch_look(const char *env, const char *value);', 'double dm_gamepad_size(void);'):
