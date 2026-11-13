@@ -3057,6 +3057,9 @@ static const char *drain_steps(void) {
     if (!present_drop_for_suspend()) return "the present on the GPU (present_drop_for_suspend)";
     if (!present_flush_ok("mtl_present_flush (a queue finish, or the suspend)")) return "the present queue (mtl_present_flush)";
     if (!snap_drain()) return "the present snapshot copies (snap_drain)";
+    // A limit already reached commits no one-off command buffer: its wait would end at once, and the buffer would go to the queue after the suspend has given up (a drain thread
+    // let go late by a lock, in the background, or a resume's retry while the GPU stays stuck), one more never completed behind work that does not finish
+    if (drain_over()) return "a one-off command buffer behind all earlier work (once_drain)";
     mtl_init();
     if (!once_drain()) return "a one-off command buffer behind all earlier work (once_drain)";
     mtl_finish_gpu();

@@ -49,6 +49,18 @@ int main(void) { @autoreleasepool {
     mtl_drain();
     CHECK(1, "the late completion is taken, and the plain drain finishes after it");
 
+    // A limit already past when the drain reaches the one-off command buffer: none is taken from the pool or committed (the feedback queue held, so a buffer committed would
+    // not come back to the pool before the check)
+    dispatch_semaphore_t in2 = dispatch_semaphore_create(0), go2 = dispatch_semaphore_create(0);
+    dispatch_async(g_feedback_q, ^{ fb_in("stuck test"); dispatch_semaphore_signal(in2); dispatch_semaphore_wait(go2, DISPATCH_TIME_FOREVER); fb_out(); });
+    dispatch_semaphore_wait(in2, DISPATCH_TIME_FOREVER);
+    os_unfair_lock_lock(&g_once_lk); int pool0 = g_once_n; os_unfair_lock_unlock(&g_once_lk);
+    const char *past = mtl_drain_by(1);
+    os_unfair_lock_lock(&g_once_lk); int pool1 = g_once_n; os_unfair_lock_unlock(&g_once_lk);
+    printf("  mtl_drain_by with its limit past: %s; one-off pool %d -> %d\n", past ? past : "drained", pool0, pool1);
+    CHECK(pool0 > 0 && pool1 == pool0 && past && strstr(past, "(once_drain)") && !t_drain_by, "a limit already past: no one-off command buffer is committed, the step is named");
+    dispatch_semaphore_signal(go2);
+
     // A fence nothing completes
     atomic_fetch_add(&g_fence, 1);
     drain_limited();

@@ -4,7 +4,8 @@
 // The suspend's limit (hle_nvn.c dm_gfx_suspend, after Ocarina of Time's test 3 froze and the background path never returned): with a graphics call that never returns (a faked
 // in-flight count), a drain held where no wait has a limit, and a drain whose waits end at the limit (nvn_mtl.m mtl_drain_by, stubbed here), going to the background returns in
 // about 3 s with "[RED] suspend: the GPU did not drain in 3 s" naming what, and the dump; graphics stay suspended; a resume while it still does not drain keeps them suspended
-// within about 1 s and says so; once the drain finishes, the resume is a normal one. t_suspend_drain checks mtl_drain_by's own waits with real Metal
+// within about 1 s and says so; once the drain finishes, the resume is a normal one, and a resume that could not drain is tried again in the foreground until it does (a suspend
+// ends that). t_suspend_drain checks mtl_drain_by's own waits with real Metal
 #include <pthread.h>
 #include <stdatomic.h>
 #include <dispatch/dispatch.h>
@@ -118,6 +119,7 @@ static double logged(void (*fn)(int), int arg, int settle_ms) {
 }
 static int has(const char *s) { return strstr(g_out, s) != NULL; }
 static int suspended_now(void) { pthread_mutex_lock(&g_susp_mu); int s = g_susp; pthread_mutex_unlock(&g_susp_mu); return s; }
+static void wait_open(int ms) { for (int i = 0; i < ms / 10 && suspended_now(); i++) usleep(10000); }   // up to ms for the gate to open (the resume's retry)
 static void fake_call(int d) { pthread_mutex_lock(&g_susp_mu); g_inflight_api += d; pthread_cond_broadcast(&g_susp_cv); pthread_mutex_unlock(&g_susp_mu); }
 static int reached(dispatch_semaphore_t semaphore, const char *name) {
     int ok = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0;
@@ -224,6 +226,33 @@ int main(void) {
     logged(dm_gfx_suspend, 0, 0);
     CHECK("and so is its resume", has("[nvn] graphics resumed") && !has("has finished since") && !suspended_now());
     CHECK("the limit cases leave the graphics gate balanced", g_inflight_api == 0);
+
+    // A resume that could not drain is tried again in the foreground (susp_retry_main): once the call returns, the gate opens by itself, with no further suspend or resume
+    fake_call(1);
+    logged(dm_gfx_suspend, 1, 300);
+    took = logged(dm_gfx_suspend, 0, 0);
+    CHECK("a resume that cannot drain says it is tried again", has("[RED] resume: the GPU has still not drained") && has("tried again every second") && suspended_now() && took < 1.5);
+    d0 = atomic_load(&drains);
+    fake_call(-1);
+    took = logged(wait_open, 3000, 0);
+    CHECK("the retry opens the gate once the drain finishes", !suspended_now() && !g_susp_stuck && has("has finished since (") && has("graphics resumed") && took < 2.5);
+    CHECK("the retry drained once", atomic_load(&drains) == d0 + 1);
+    usleep(50000);
+    CHECK("the retry's thread has ended", !g_susp_retry && !g_susp_want);
+
+    // A suspend ends the retry: with the call still in progress the app goes to the background again, and when the call returns there the gate stays closed (no resume is owed
+    // in the background) until the next resume, which is a normal one
+    fake_call(1);
+    logged(dm_gfx_suspend, 1, 300);
+    logged(dm_gfx_suspend, 0, 0);
+    took = logged(dm_gfx_suspend, 1, 300);
+    CHECK("a second suspend with the call still in progress returns at its limit", took >= 2.9 && took < 3.5 && has("[RED] suspend: the GPU did not drain in 3 s"));
+    fake_call(-1);
+    took = logged(wait_open, 2500, 0);
+    CHECK("in the background, no retry opens the gate", suspended_now() && g_susp_stuck && !has("has finished since") && !g_susp_retry && !g_susp_want);
+    logged(dm_gfx_suspend, 0, 0);
+    CHECK("the next resume drains and resumes", has("has finished since") && has("[nvn] graphics resumed") && !suspended_now() && !g_susp_stuck);
+    CHECK("the retry cases leave the graphics gate balanced", g_inflight_api == 0);
     h_nvnQueueFinalize(&queues[0]); h_nvnQueueFinalize(&queues[1]);
     printf("graphics suspend: %d checks, %d failed\n", checks, failures);
     return failures != 0;
