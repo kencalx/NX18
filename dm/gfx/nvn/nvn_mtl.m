@@ -2578,7 +2578,8 @@ static void gpu_capture_frame(uint64_t f) {
         else MLOG("[RED] DM_GPU_CAPTURE: the capture did not start: %s", err.localizedDescription.UTF8String);
     } else if (g_cap_on && f >= (uint64_t)g_cap_f0 + (uint64_t)g_cap_n) { [m stopCapture]; g_cap_on = 0; g_cap_f0 = -1; gpu_thr = 0; MLOG("DM_GPU_CAPTURE: capture stopped at frame %llu (the trace is written in the background)", (unsigned long long)f); }
 }
-void mtl_set_frame(uint64_t f) { atomic_store(&g_cur_frame, f); if (g_ub_n) ub_frame(f); if (ab_len()) ab_frame(f); gpu_capture_frame(f); }
+static void dz_tick(uint64_t f);
+void mtl_set_frame(uint64_t f) { atomic_store(&g_cur_frame, f); if (g_ub_n) ub_frame(f); if (ab_len()) ab_frame(f); gpu_capture_frame(f); dz_tick(f); }
 // GPU timing registration: gpu_tag_begin(frame) before commit, gpu_tag_done(frame, GPU start, GPU end) on completion (seconds on the CACurrentMediaTime base).
 // The Metal 4 main submission backfills in the feedback of mtl_sub_commit (when switching to Metal 4 all the call sites were lost and the GPU column of the timing line became empty)
 static void gpu_tag_begin(uint64_t f) {
@@ -4315,6 +4316,13 @@ static id<MTLTexture> sparse_gpu_make(const tex_t *t) {
 // that every frame is "read last frame → render into a render target → copy back" and is never cleared; the undefined initial value keeps swinging through the feedback and pushes the water vertices to the top of the screen (the tall panels above the fountain).
 // Copied level by level / slice by slice from one shared all-zero buffer, executed with the upload batch (ordered before this replay). Depth / stencil use clear load actions instead:
 // Pokemon Brilliant Diamond's movie quad tests GEQUAL against a newly allocated window depth buffer without clearing it. Metal's undefined initial depth hid every movie even after VP8 decoding.
+// With depth_zero_copy (profile key; DM_DEPTH_ZERO_COPY=1 / 0 overrides it; port of NXNative 4cdd5577, PR #2306) a single-sample Depth16Unorm / Depth32Float texture is copied into
+// like a colour one, in pieces of rows that fit the zero buffer, not cleared in a render pass: a clear-only pass on a large depth attachment fails with
+// kIOGPUCommandBufferCallbackErrorOutOfMemory whatever memory is free, and every later command buffer of the queue fails the same way (M3 Pro, standalone Metal 4 program:
+// Depth32Float 4096x4096 and Depth16Unorm from about 5000x5000 up; copies into the same textures up to 16384x16384 never failed). Ocarina of Time makes a 12288x12288 Depth16Unorm
+// (296 MB) and a 4096x4096 Depth32Float at each save load, and half its loads there ended at the 32-failures stop (res_top_once). Stencil formats keep the clear load actions
+// (a plain buffer copy cannot write a combined depth-stencil texture), as do multisample ones. Upstream copies for every game; here only a game whose profile asks (Ocarina of Time)
+// while X1.0 is frozen
 // Multisample colour textures use a clear load action too, per layer (a buffer copy cannot write samples): Rune Factory 5 loads its new 1920×1080 two-sample RG11B10F scene target without
 // clearing it and blends into it, and Metal's undefined content gave a green background that kept the silhouettes of moving characters. Block-compressed formats are not filled by this path.
 static size_t mtl_pf_bytes(MTLPixelFormat pf) {
@@ -4344,6 +4352,39 @@ static id<MTLBuffer> zero_buf(size_t need) {
     return zb;
 }
 static uint64_t g_tex_zeroed;
+static int g_depth_zero_copy = -1, g_depth_zero_env;   // depth_zero_copy: 1 copies, 0 the clear pass, -1 not read yet (a unit test may set it directly); the switch was set
+static int depth_zero_copy(void) {   // read on the submit thread only (tex_zero_fill)
+    if (g_depth_zero_copy < 0) {
+        const char *e = getenv("DM_DEPTH_ZERO_COPY"); g_depth_zero_env = e && *e; g_depth_zero_copy = g_depth_zero_env ? *e != '0' : DM_GAME_DEPTH_ZERO_COPY;
+        if (g_depth_zero_copy || g_depth_zero_env) MLOG("new-texture zeroing: single-sample Depth16 / Depth32F textures %s (%s)", g_depth_zero_copy ? "by copies from the zero buffer" : "by a clear pass",
+                                                         g_depth_zero_env ? "DM_DEPTH_ZERO_COPY" : "game profile depth_zero_copy");
+    }
+    return g_depth_zero_copy;
+}
+// The frames after a large depth texture is zeroed (64 MB or more): Ocarina of Time's iPhone logs show a GPU frame of 145-158 ms after the 12288x12288 Depth16Unorm of each save load.
+// With depth_zero_copy on, or DM_DEPTH_ZERO_COPY set either way (an A/B reads the same line), the texture's frame and the next two frames' GPU times are logged once they are known
+// (dz_tick from mtl_set_frame, DZ_LAG frames on), with how it was zeroed. Written and read on the submit thread
+enum { DZ_LAG = 12 };
+static struct { uint64_t frame; unsigned w, h, mb, pieces; int by_copy; MTLPixelFormat pf; } g_dz;
+static const char *dz_pf_name(MTLPixelFormat pf) { return pf == MTLPixelFormatDepth16Unorm ? "Depth16Unorm" : pf == MTLPixelFormatDepth32Float ? "Depth32Float" : pf == MTLPixelFormatDepth32Float_Stencil8 ? "Depth32Float_Stencil8" : "depth"; }
+static void dz_note(id<MTLTexture> mt, unsigned pieces, int by_copy) {
+    if (mt.allocatedSize < (64u << 20) || !(g_depth_zero_copy > 0 || g_depth_zero_env)) return;
+    g_dz.w = (unsigned)mt.width; g_dz.h = (unsigned)mt.height; g_dz.mb = (unsigned)(mt.allocatedSize >> 20); g_dz.pieces = pieces; g_dz.by_copy = by_copy; g_dz.pf = mt.pixelFormat;
+    g_dz.frame = atomic_load(&g_cur_frame) + 1;   // stored +1 so frame 0 is not "none"
+}
+static void dz_line(char *b, size_t n, const double g[3]) {   // g: the GPU ms of the texture's frame and the next two, < 0 not known
+    char v[3][24]; for (int i = 0; i < 3; i++) { if (g[i] >= 0) snprintf(v[i], sizeof v[i], "%.1f ms", g[i]); else snprintf(v[i], sizeof v[i], "not known"); }
+    snprintf(b, n, "depth zero: the %ux%u %s (%u MB) made in frame %llu, zeroed by %u %s (%s): GPU %s that frame, %s and %s the next two", g_dz.w, g_dz.h, dz_pf_name(g_dz.pf), g_dz.mb,
+             (unsigned long long)(g_dz.frame - 1), g_dz.pieces, g_dz.by_copy ? (g_dz.pieces == 1 ? "copy" : "copies") : (g_dz.pieces == 1 ? "clear pass" : "clear passes"),
+             g_depth_zero_env ? "DM_DEPTH_ZERO_COPY" : "game profile depth_zero_copy", v[0], v[1], v[2]);
+}
+static void dz_tick(uint64_t f) {
+    if (!g_dz.frame || f < g_dz.frame - 1 + DZ_LAG) return;
+    static int nl; double g[3]; char b[320];
+    for (int i = 0; i < 3; i++) g[i] = mtl_gpu_ms(g_dz.frame - 1 + (uint64_t)i);
+    if (nl++ < 32) { dz_line(b, sizeof b, g); MLOG("%s", b); }
+    g_dz.frame = 0;
+}
 static void tex_zero_fill(id<MTLTexture> mt) {
     static int warned;
     if (!atomic_load(&g_sub_thread_set) || !on_sub_thread()) return;   // the upload batch belongs to the submit thread only
@@ -4353,6 +4394,24 @@ static void tex_zero_fill(id<MTLTexture> mt) {
     int stencil = pf == MTLPixelFormatStencil8 || pf == MTLPixelFormatDepth32Float_Stencil8;
     int multisample = tt == MTLTextureType2DMultisample || tt == MTLTextureType2DMultisampleArray;
     if (multisample && !depth && !stencil && !(mt.usage & MTLTextureUsageRenderTarget)) return;   // no render pass can clear it (tex_desc gives every multisample texture the usage)
+    size_t dbpp = multisample || !(depth && !stencil) || !depth_zero_copy() ? 0 : pf == MTLPixelFormatDepth16Unorm ? 2 : pf == MTLPixelFormatDepth32Float ? 4 : 0;
+    if (dbpp) {   // depth_zero_copy: by copies, in pieces of rows: a row is at most 64 KB (16384 x 4), the zero buffer at least 4 MB, so it is never grown for a depth texture
+        id<MTLBuffer> zb = zero_buf((size_t)mt.width * dbpp); if (!zb) return;
+        NSUInteger slices = mt.arrayLength * (tt == MTLTextureTypeCube || tt == MTLTextureTypeCubeArray ? 6 : 1); unsigned pieces = 0;
+        up_begin();
+        for (NSUInteger l = 0; l < mt.mipmapLevelCount; l++) {
+            NSUInteger w = MAX(mt.width >> l, 1u), h = MAX(mt.height >> l, 1u), step = MAX((NSUInteger)1, MIN(h, zb.length / (w * dbpp)));
+            for (NSUInteger y = 0; y < slices; y++) for (NSUInteger y0 = 0; y0 < h; y0 += step) {
+                NSUInteger n = MIN(step, h - y0);
+                up_blit_add_at(zb, 0, w * dbpp, w * dbpp * n, MTLSizeMake(w, n, 1), mt, y, l, MTLOriginMake(0, y0, 0)); pieces++;
+            }
+        }
+        [g_up_texs addObject:mt];
+        if (!g_cb) up_flush();
+        if (!g_tex_zeroed++) MLOG("new-texture zeroing: on (new Metal textures are undefined; new Switch memory reads 0)");
+        dz_note(mt, pieces, 1);
+        return;
+    }
     if (depth || stencil || multisample) {
         up_begin();
         if (g_up_ce) { m4_end(g_up_ce); g_up_ce = nil; }
@@ -4373,6 +4432,7 @@ static void tex_zero_fill(id<MTLTexture> mt) {
         [g_up_ce setArgumentTable:g_up_ct]; [g_up_texs addObject:mt];
         if (!g_cb) up_flush();
         if (multisample && !depth && !stencil) { static int ms; if (!ms++) MLOG("new-texture zeroing: multisample colour textures are cleared in a render pass (first %lux%lu format %lu, %lu samples)", (unsigned long)mt.width, (unsigned long)mt.height, (unsigned long)pf, (unsigned long)mt.sampleCount); }
+        if (depth && !multisample) dz_note(mt, (unsigned)(mt.mipmapLevelCount * slices), 0);
         return;
     }
     if (tt == MTLTextureTypeTextureBuffer) return;
