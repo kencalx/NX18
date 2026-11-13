@@ -227,7 +227,7 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 
 - **Symptom:** the serial table grows by about 10 entries a frame (276,000 after 25,000 frames).
 - **Cause:** a game that records transient render targets and finalizes them before it submits: replay put the dead serials back into `g_by_serial`.
-- **Fix:** dead serials go to a table whose oldest entry goes when a new one comes (`tex_put`, `g_ghost`; the memory line's `finalized textures still referenced`). It holds 512 by default; the profile key `ghost_table` or `DM_NVN_GHOST` sets 64 to 8,192 (`ghost_cap`; Ocarina of Time 4,096: [A finalized-texture table too small for a heavy area](frame-rate.md#a-finalized-texture-table-too-small-for-a-heavy-area)).
+- **Fix:** dead serials go to a table whose oldest entry goes when a new one comes (`tex_put`, `g_ghost`; the memory line's `finalized textures still referenced`). It holds 512 by default; the profile key `ghost_table` or `DM_NVN_GHOST` sets 64 to 8,192 (`ghost_cap`; a memory trim at a pressure warning takes a larger one back to 512, `ghost_trim`; Ocarina of Time 4,096: [A finalized-texture table too small for a heavy area](frame-rate.md#a-finalized-texture-table-too-small-for-a-heavy-area)).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (the HUD captures, the 640×360 buffers; found while fixing GitHub issue #9).
 
 ### A replay's own objects take serials above a capture's

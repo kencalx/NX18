@@ -1,6 +1,6 @@
 // The finalized-texture table (g_ghost, tex_put): its size decided once (ghost_cap: 512 by default, the profile's ghost_table, DM_NVN_GHOST held to 64..8192) and logged at the start,
 // the ring holding exactly that many with the oldest going first, and the counts of the table's 300-frame line (mtl_ghost_stat): puts, evictions, and puts of a serial the table
-// pushed out in the last 4 frames (thrash). Ocarina of Time put about 800 textures a frame into 512 in one area on an iPhone, most of them pushed out a frame or two before.
+// pushed out in the last 4 frames (thrash), the patch time less the misses inside it, and a memory trim taking a larger table back to 512 (ghost_trim). Ocarina of Time put about 800 textures a frame into 512 in one area on an iPhone, most of them pushed out a frame or two before.
 // --expect <n>: the size the run's DM_NVN_GHOST should give (without it: the profile's)
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
@@ -89,13 +89,68 @@ static void thrash(void) {
     put(base + 8);   // counted once: it is held again
     CHECK(g_ghost_thrash - th0 == 4, "a thrash put is counted once");
     g_next = base + 2000;
+    // A put whose own eviction is of a serial in the same slot of the evicted record (8,192 apart): the put's serial is looked up before that eviction takes the slot
+    ghost_reset(64); base = g_next; frame(2100);
+    put(base); put(base + GHOST_GONE); for (unsigned i = 1; i <= 62; i++) put(base + i);   // base in ring slot 0, base + 8192 in slot 1
+    put(base + 63);   // pushes base out (slot 0)
+    th0 = g_ghost_thrash; frame(2101); put(base);   // wanted again: its put pushes out base + 8192, whose record takes base's slot
+    CHECK(g_ghost_thrash - th0 == 1 && !resolves(base + GHOST_GONE), "thrash counted when the put's own eviction shares the serial's record slot");
+    g_next = base + 2 * GHOST_GONE;
+}
+
+// A memory trim takes a table above the default's size back down to it, the oldest first; the emptied slots fill again before anything is pushed out
+static void trim(void) {
+    ghost_reset(4096); uint64_t base = g_next, ev0, puts0; frame(2500);
+    for (unsigned i = 0; i < 3000; i++) put(base + i);   // not full: the oldest is slot 0
+    ev0 = g_ghost_evicted;
+    unsigned n = ghost_trim(NGHOST_DEF);
+    int gone = 1, kept = 1; for (unsigned i = 0; i < 2488; i++) gone &= !resolves(base + i);
+    for (unsigned i = 2488; i < 3000; i++) kept &= resolves(base + i);
+    CHECK(n == 2488 && held() == 512 && gone && kept && g_ghost_evicted == ev0, "3000 held in 4096, trimmed to 512: the 2488 oldest go, not counted as evictions");
+    CHECK(ghost_trim(NGHOST_DEF) == 0 && held() == 512, "a table at 512 is not trimmed");
+    g_next = base + 3000;
+    ghost_reset(1000); base = g_next;
+    for (unsigned i = 0; i < 1500; i++) put(base + i);   // wrapped: base + 500 is the oldest, in slot 500
+    n = ghost_trim(NGHOST_DEF);
+    gone = 1; kept = 1; for (unsigned i = 0; i < 988; i++) gone &= !resolves(base + i);
+    for (unsigned i = 988; i < 1500; i++) kept &= resolves(base + i);
+    CHECK(n == 488 && held() == 512 && gone && kept, "a wrapped ring trimmed from its oldest");
+    ev0 = g_ghost_evicted; puts0 = g_ghost_puts;
+    for (unsigned i = 0; i < 488; i++) put(base + 1500 + i);
+    CHECK(held() == 1000 && g_ghost_evicted == ev0, "the 488 emptied slots fill again without an eviction");
+    put(base + 1988);
+    CHECK(g_ghost_evicted - ev0 == 1 && !resolves(base + 988) && resolves(base + 989) && g_ghost_puts - puts0 == 489, "then the oldest goes first again");
+    g_next = base + 2000;
+    // Through the memory trim itself: a warning trims, back to normal does not
+    ghost_reset(4096); base = g_next;
+    for (unsigned i = 0; i < 1000; i++) put(base + i);
+    char out[8192];
+    logged(out, sizeof out, "memory trim", ^{ mtl_trim(0); });
+    CHECK(held() == 1000 && strstr(out, "finalized-texture table entries 0 (down to 512)"), "pressure back to normal: the table stays");
+    logged(out, sizeof out, "memory trim", ^{ mtl_trim(1); });
+    printf("%s", out);
+    CHECK(held() == 512 && strstr(out, "finalized-texture table entries 488 (down to 512)"), "a pressure warning: down to 512, in the trim's line");
+    g_next = base + 1000;
+}
+
+// The patch time leaves out the misses that put timed inside it (they are in the miss time), so the line's two figures add up; never below zero
+static void patch_less_misses(void) {
+    uint64_t q0 = atomic_load(&g_pool_patch_ticks), t0 = mach_absolute_time() - 100000, m0 = tl_ghost_miss_sum;
+    tl_ghost_miss_sum += 40000; pool_patch_add(t0, m0);
+    uint64_t d = atomic_load(&g_pool_patch_ticks) - q0, now = mach_absolute_time();
+    CHECK(d >= 60000 && d <= now - t0 - 40000, "the patch path's time less the misses inside it");
+    q0 = atomic_load(&g_pool_patch_ticks); t0 = mach_absolute_time(); m0 = tl_ghost_miss_sum;
+    tl_ghost_miss_sum += 1000000000ull; pool_patch_add(t0, m0);
+    CHECK(atomic_load(&g_pool_patch_ticks) == q0, "misses longer than the patch add nothing");
 }
 
 // The line: per frame since the last, quiet windows write none
 static void line(void) {
     char out[8192];
     mtl_ghost_stat(3000);   // a baseline: what came before
-    CHECK(!logged(out, sizeof out, "finalized-texture table up to frame", ^{ mtl_ghost_stat(3300); }), "a window with nothing to count writes no line");
+    // The patch path and the epochs move in nearly every game's windows: without a put or an eviction they write no line
+    atomic_fetch_add(&g_pool_patch_ticks, 1000000); atomic_fetch_add(&g_treg_ep_bumps, 3);
+    CHECK(!logged(out, sizeof out, "finalized-texture table up to frame", ^{ mtl_ghost_stat(3300); }), "a window with no put or eviction writes no line, whatever the patch path and epochs did");
     ghost_reset(64); uint64_t base = g_next; frame(3301);
     for (unsigned i = 0; i < 64 + 30; i++) put(base + i);   // 94 puts, 30 pushed out
     frame(3302); for (unsigned i = 0; i < 6; i++) put(base + i);   // 6 of them wanted again: 6 thrash, 6 more pushed out
@@ -117,8 +172,11 @@ int main(int argc, const char **argv) { @autoreleasepool {
     CHECK(g_ghost_cap == (unsigned)expect, argc > 2 ? "DM_NVN_GHOST's size" : "the profile's size");
     if (!strcmp(DM_GAME_ID, "0400486024DEC000")) CHECK(DM_GAME_GHOST_TABLE == 4096, "Ocarina of Time's profile: 4096");
     pick();
-    ring(512); ring(4096); ring(64); ring(8192);
+    ring((unsigned)expect);   // the size this run started with (1000 under DM_NVN_GHOST=1000: a size that is no power of two)
+    ring(512); ring(4096); ring(1000); ring(64); ring(8192);
     thrash();
+    trim();
+    patch_less_misses();
     line();
     printf("t_ghost (table %u at start): %d checks, %d failed\n", (unsigned)expect, checks, failed); return failed != 0;
 } }

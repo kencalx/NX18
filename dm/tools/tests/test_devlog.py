@@ -287,5 +287,47 @@ class PrepareLine(unittest.TestCase):   # nvn_mtl.m's prepare line, with the bun
         pr = devlog.read(self.HEAD + '\n')['pipelines']['prepare']
         self.assertEqual((pr['bases_from_archive'], pr['bundle_layout']), (90, None))
 
+
+class GhostTable(unittest.TestCase):   # nvn_mtl.m's finalized-texture table: its start line (size and source) and its line every 300 frames, read for the DM_NVN_GHOST A/B (frame-rate.md)
+    def lines(self, cap: int, why: str, windows: list[tuple[int, str, str, str]]) -> list[str]:
+        return [f'[dm] [nvn-mtl] finalized-texture table: up to {cap} textures that finalized texture objects still resolve to, the oldest going when a new one comes ({why})',
+                *(f'[dm] [nvn-mtl] finalized-texture table up to frame {f} ({cap} held, up to {cap}), per frame: {put} put, {thr} of them pushed out in the last 4 frames, '
+                  f'{ev} pushed out; 0.400 ms in the texture misses that put, 0.900 ms patching pool tables; texture ID epochs started 0.50' for f, put, thr, ev in windows)]
+
+    def test_line_format_matches_the_producer(self):   # the formats mtl_ghost_stat and ghost_cap print, filled in, are what the patterns read
+        src = (REPO / 'dm/gfx/nvn/nvn_mtl.m').read_text(errors='replace')
+        line = re.search(r'MLOG\("(finalized-texture table up to frame %llu [^"]*)"', src); start = re.search(r'MLOG\("(finalized-texture table: up to %u [^"]*)"', src)
+        self.assertTrue(line and start, 'the finalized-texture table\'s format strings in nvn_mtl.m')
+        assert line and start
+        vals = iter(['3600', '64', '64', '0.33', '0.02', '4', '0.12', '0.010', '0.250', '0.07'])
+        x = devlog.RX['ghost'].search('[nvn-mtl] ' + re.sub(r'%(?:llu|u|d|s)', lambda _: next(vals), line.group(1)))
+        self.assertIsNotNone(x)
+        assert x
+        self.assertEqual(x.groups(), ('3600', '64', '64', '0.33', '0.02', '0.12', '0.010', '0.250', '0.07'))
+        x = devlog.RX['ghost_cap'].search('[nvn-mtl] ' + start.group(1).replace('%u', '4096').replace('%s', 'game profile ghost_table'))
+        self.assertIsNotNone(x)
+        assert x
+        self.assertEqual(x.groups(), ('4096', 'game profile ghost_table'))
+
+    def test_read_shown_and_compared(self):   # the 512 side of Ocarina's A/B against the profile's 4096: thrash read per window and compared lower-better
+        a = read(self.lines(512, 'DM_NVN_GHOST', [(300, '2.10', '0.00', '0.00'), (600, '800.00', '640.00', '790.00'), (900, '364.00', '300.00', '360.00')]))
+        b = read(self.lines(4096, 'game profile ghost_table', [(300, '2.10', '0.00', '0.00'), (600, '800.00', '0.00', '0.00'), (900, '20.00', '0.00', '0.00')]))
+        ga, gb = a['ghost'], b['ghost']
+        self.assertEqual((ga['cap'], ga['source'], ga['windows'], ga['put'], ga['thrash'], ga['thrash_max'], ga['evicted'], ga['miss_ms'], ga['patch_ms'], ga['epochs']),
+                         (512, 'DM_NVN_GHOST', 3, 364.0, 300.0, 640.0, 360.0, 0.4, 0.9, 0.5))
+        self.assertEqual((gb['cap'], gb['thrash'], gb['put_max']), (4096, 0.0, 800.0))
+        text = '\n'.join(devlog.render(a, 5))
+        self.assertIn('finalized-texture table of 512 (DM_NVN_GHOST)', text)
+        self.assertIn('300 pushed out in the last 4 frames (most 640)', text)
+        rows = {r['label']: r for r in devlog.compare(a, b)['rows']}
+        self.assertTrue(rows['finalized-texture thrash, most']['change'].endswith('better'), rows['finalized-texture thrash, most'])
+        self.assertEqual((rows['finalized-texture table']['a'], rows['finalized-texture table']['b']), (512, 4096))
+
+    def test_start_line_only(self):   # a run whose table never put: its size, no window
+        g = read(self.lines(512, 'the default', []))['ghost']
+        self.assertEqual((g['cap'], g['windows'], g['thrash']), (512, 0, None))
+        self.assertIn('no window with a put or an eviction', '\n'.join(devlog.render(read(self.lines(512, 'the default', [])), 5)))
+        self.assertIsNone(read([])['ghost'])
+
 if __name__ == '__main__':
     unittest.main()
