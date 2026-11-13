@@ -2807,7 +2807,7 @@ int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) {
     unsigned k = f % GRING;
     if (atomic_load(&g_gpu[k].frame) != f || atomic_load(&g_gpu[k].pending)) return 0;
     *t0 = atomic_load(&g_gpu[k].t0); *t1 = atomic_load(&g_gpu[k].t1);
-    return *t1 >= *t0 && *t1;
+    return *t0 && *t0 != UINT64_MAX && *t1 >= *t0 && *t1 - *t0 <= 1000000000ull;   // none started, or a span over 1 s (a start or end that was never set): no span (nvn_power.h nvn_pd_span_add)
 }
 // The process's performance profile (NSProcessInfo hasPerformanceProfile:, Metal's MTLDeviceCertification.h) for the power detail (hle_nvn.c power_tick's first call, DM_POWER_DETAIL):
 // one line, and one more on each NSProcessInfoPerformanceProfileDidChangeNotification, with whether the device is certified for the iPhone performance gaming tier. Logging only
@@ -3798,6 +3798,19 @@ static _Atomic uint64_t g_upload_gpu_ns;
 // its GPU time in microseconds + 1 in the low half (up_flush). 0: no note. Every other game's batches only read them
 enum { DZ_N = 4 };
 static _Atomic uint64_t g_dz_up[DZ_N];
+// An upload batch's GPU time from its feedback (GPUStartTime, GPUEndTime, seconds) → seconds, or -1 when not known: a start of 0 (not set), an end before the start, or a span of 10 s
+// or more. Ocarina of Time's 'depth zero:' lines in iPhone test 3 read 4000000.0 ms (a start of 0: the end's whole uptime, cut at the 4e9 us the low half holds) and 171810.0 ms
+// (a start left over from earlier) for batches the frames around them show took a few ms
+static double up_gpu_secs(double g0, double g1) { return g0 > 0 && g1 >= g0 && g1 - g0 < 10.0 ? g1 - g0 : -1; }
+// The batch numbered seq completed with that feedback: its GPU time into g_upload_gpu_ns (the timing line's @upload_gpu_ms) and into a waiting 'depth zero:' note on its batch
+// (dz_tick); a time not known adds nothing and leaves the note's low half 0, which the line prints as "not known"
+static void up_gpu_note(unsigned seq, double g0, double g1) {
+    double d = up_gpu_secs(g0, g1);
+    if (d < 0) return;
+    if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
+    for (int i = 0; i < DZ_N; i++) { uint64_t w = (uint64_t)seq << 32;   // a large depth texture zeroed in this batch: its time for the line (dz_tick)
+        if (atomic_load_explicit(&g_dz_up[i], memory_order_relaxed) == w) atomic_compare_exchange_strong(&g_dz_up[i], &w, w | ((uint32_t)(d * 1e6) + 1u)); }
+}
 static id<MTL4CommandBuffer> g_up_cb;
 static id<MTL4ComputeCommandEncoder> g_up_ce;
 static _Atomic int g_up_alloc_busy[3];
@@ -3926,10 +3939,7 @@ static void up_flush(void) {
             pthread_mutex_lock(&g_smu); g_ser_gen++; pthread_mutex_unlock(&g_smu);   // Make the view cache of every texture ID take the slow path once (on a cache hit tex_mtl is not passed through and this record is not seen)
             MLOG("%supload command buffer dropped: the %lu textures of this batch are marked unwritten and re-uploaded on next use (%d awaiting re-upload)", fake_lost ? "DM_TEST_UP_LOST: " : "", (unsigned long)dsts.count, n);
         }
-        double d = f.GPUEndTime - f.GPUStartTime;
-        if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
-        for (int i = 0; i < DZ_N; i++) { uint64_t w = (uint64_t)seq << 32;   // a large depth texture zeroed in this batch: its time for the line (dz_tick)
-            if (atomic_load_explicit(&g_dz_up[i], memory_order_relaxed) == w) atomic_compare_exchange_strong(&g_dz_up[i], &w, w | ((uint32_t)MIN(MAX(d, 0) * 1e6, 4e9) + 1u)); }
+        up_gpu_note(seq, f.GPUStartTime, f.GPUEndTime);
         int retire = staging.count != 0;
         @autoreleasepool {
             for (id<MTLResource> obj in staging) res_remove(obj);

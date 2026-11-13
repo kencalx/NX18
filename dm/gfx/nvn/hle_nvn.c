@@ -2150,14 +2150,12 @@ static void power_detail(uint64_t frame, double secs, int show) {
 // spreads over 5 to 10 s: CPU energy, CPU time, its share on performance cores and each cluster's clock (nvn_power.h nvn_pd_tick_text), the frame rate, GPU time per second two ways,
 // and the acquiring thread's demoted frames (acq_demote_check). GPU time: the sum of each frame's command buffers' GPU time (mtl_gpu_ms, which counts overlapping command buffers twice
 // and arrives about 8 frames late), and the union of the frames' spans from first GPU start to last GPU end (mtl_gpu_span, which counts gaps inside a frame): both approximate, and
-// both replace the power line's task_gpu_utilisation, which the iPhone left at 0. A frame whose GPU time was not in 8 frames later is left out of both
+// both replace the power line's task_gpu_utilisation, which the iPhone left at 0. A frame whose GPU time was not in 8 frames later is left out of both, and a frame whose GPU start
+// or end is unset or whose span is over 1 s is left out of the union (nvn_power.h nvn_pd_span_add; the first tick of Ocarina of Time's iPhone test 3 read 42,556,079 ms/s there)
 static double g_tick_gpu_ms, g_tick_span_ms; static uint64_t g_tick_span_end;   // the present thread's, since the last tick
 static void tick_gpu(double ms, int span, uint64_t g0, uint64_t g1) {
     if (ms >= 0) g_tick_gpu_ms += ms;
-    if (!span) return;
-    uint64_t s0 = g0 > g_tick_span_end ? g0 : g_tick_span_end;   // the part not already in the union
-    if (g1 > s0) g_tick_span_ms += (g1 - s0) / 1e6;
-    if (g1 > g_tick_span_end) g_tick_span_end = g1;
+    if (span) nvn_pd_span_add(&g_tick_span_ms, &g_tick_span_end, g0, g1);
 }
 void mtl_perf_profile_watch(void);   // nvn_mtl.m: the performance profile line, and again on each change
 static void power_tick(uint64_t frame) {
@@ -2166,7 +2164,7 @@ static void power_tick(uint64_t frame) {
     uint64_t t = now_ns(), chk = atomic_load_explicit(&g_acq_chk, memory_order_relaxed), dem = atomic_load_explicit(&g_acq_dem, memory_order_relaxed);
     if (t0 && t - t0 < 1000000000ull) return;
     nvn_pd p; int ok = nvn_pd_read(&p);
-    if (!t0) mtl_perf_profile_watch();
+    if (!t0) { mtl_perf_profile_watch(); g_tick_span_end = 0; }   // the first tick: the union starts afresh, with no end left from frames before the baseline
     else if (t - t0 > 2000000000ull) {}   // after a pause or a stay in the background with no presents: a new baseline, not one line averaged over the gap
     else {
         char b[640]; nvn_pd_tick_text(b, sizeof b, ok && ok0 ? &p0 : NULL, &p, (t - t0) / 1e9, frame - f0, g_tick_gpu_ms, g_tick_span_ms, chk - c0, dem - d0);

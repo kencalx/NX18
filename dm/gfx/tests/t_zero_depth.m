@@ -125,6 +125,30 @@ int main(void) { @autoreleasepool {
     CHECK(dz_find(t16) == k16 && g_dz[k16].frame == made && dz_find(t32s) >= 0, "and a texture no larger than any waiting one is dropped");
     dz_tick(f0 + DZ_LAG - 1); CHECK(dz_waiting() == DZ_N, "the lines wait until the three frames' GPU times are known");
     dz_tick(f0 + DZ_LAG); CHECK(dz_waiting() == 0 && !atomic_load(&g_dz_up[k16]), "then each is written once, its slot free again");
+    // The batch's feedback with times that are not a GPU time (Ocarina of Time's iPhone test 3: lines of 4000000.0 ms and 171810.0 ms). Before, a start of 0 with an end at 42556.079 s
+    // of uptime stored the end's whole uptime cut at 4e9 us (4000000.0 ms), and a start 171.81 s before the end stored 171810.0 ms; both are "not known" now and add nothing to
+    // the timing line's @upload_gpu_ms. A real time still goes in (up_gpu_note, which up_flush's feedback handler calls)
+    dz_clear(); sq = ++g_up_seq; dz_note(t16, 72, 1); k16 = dz_find(t16); (void)mtl_upload_gpu_ns_take();
+    CHECK(k16 >= 0, "a note waits for the batch's feedback");
+    struct { double g0, g1; const char *label; } bad[] = {
+        {0, 42556.079, "a GPU start of 0 (was the end's uptime, 4000000.0 ms): not known"},
+        {100.0, 271.81, "a span of 171.81 s, a start left over (was 171810.0 ms): not known"},
+        {271.81, 100.0, "an end before the start: not known"},
+        {-1.0, 0.5, "a negative start: not known"}};
+    for (unsigned i = 0; k16 >= 0 && i < sizeof bad / sizeof bad[0]; i++) {
+        up_gpu_note(sq, bad[i].g0, bad[i].g1);
+        CHECK(atomic_load(&g_dz_up[k16]) == (uint64_t)sq << 32 && mtl_upload_gpu_ns_take() == 0, bad[i].label);
+    }
+    if (k16 >= 0) { double up = (uint32_t)atomic_load(&g_dz_up[k16]) ? 0 : -1; double gn[3] = {149.04, 3.2, 3.1}; dz_line(&g_dz[k16], line, sizeof line, up, gn); printf("line: %s\n", line);
+        CHECK(strstr(line, "the upload batch with them not known on the GPU") != NULL, "the line says the batch's time is not known, as dz_tick reads the empty low half"); }
+    up_gpu_note(sq + 1, 100.0, 100.00246);
+    CHECK(k16 >= 0 && atomic_load(&g_dz_up[k16]) == (uint64_t)sq << 32, "another batch's time does not land in the note");
+    uint64_t un = mtl_upload_gpu_ns_take(); CHECK(un > 2459000 && un < 2461000, "but goes into @upload_gpu_ms");
+    up_gpu_note(sq, 100.0, 100.00246); uint64_t uw = k16 >= 0 ? atomic_load(&g_dz_up[k16]) : 0;
+    CHECK((uw >> 32) == sq && (uint32_t)uw >= 2460 && (uint32_t)uw <= 2461, "a GPU time of 2.46 ms goes into the note (microseconds + 1)");
+    un = mtl_upload_gpu_ns_take(); CHECK(un > 2459000 && un < 2461000, "and into @upload_gpu_ms");
+    up_gpu_note(sq, 100.0, 109.5); CHECK(atomic_load(&g_dz_up[k16 >= 0 ? k16 : 0]) == uw && mtl_upload_gpu_ns_take() == 9500000000ull, "a span under 10 s counts; the note keeps its first time");
+    dz_clear();
     printf("depth zero fill: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }
