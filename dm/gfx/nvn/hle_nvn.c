@@ -2088,17 +2088,19 @@ static void rt_policy_line(unsigned wn, uint32_t wq) {
 // The translation detail line's split of the submit cost and its waits (DM_FIELD_LOG on; logging only), per frame of the window: the game threads' command copy (nvn_queue_submit) and the
 // rest, the replay's (nq_worker's nodes and presents), in CPU and wall time, which add up to the line's own CPU and wall; then the wall time waited for g_sub_mu by the game's submits
 // (behind a replayed node) and by the replay (behind a submit's copy), for g_rmu by the replay and by the other threads together (texture and sampler registrations), and for the encode
-// thread by the replay's drains (rec_drain, about 20 a frame in Ocarina of Time). The waits are not part of the CPU time; a replay's g_sub_mu wait is outside its cost scope too, the
-// others inside it. q, m: nq_wait_stats / mtl_wait_stats now, pq, pm at the last line
-static void wait_split(char *out, size_t n, const uint64_t q[7], const uint64_t pq[7], const uint64_t m[7], const uint64_t pm[7], double nf, double wall_ns, double cpu_ns) {
+// thread by the replay's drains (rec_drain, about 20 a frame in Ocarina of Time), and for the residency commit lock (g_res_commit_mu: the set's commit and the queue commits kept apart
+// from it) by the replay and by the other threads together. The waits are not part of the CPU time; a replay's g_sub_mu wait is outside its cost scope too, the others inside it.
+// q, m: nq_wait_stats / mtl_wait_stats now, pq, pm at the last line
+static void wait_split(char *out, size_t n, const uint64_t q[7], const uint64_t pq[7], const uint64_t m[11], const uint64_t pm[11], double nf, double wall_ns, double cpu_ns) {
     double cw = (double)(q[1] - pq[1]), cc = (double)(q[2] - pq[2]);
     snprintf(out, n, "; of the submit per frame, the game threads' command copy CPU %.3f ms / wall %.3f ms (%.1f submits) and the replay CPU %.3f ms / wall %.3f ms; waits per frame: "
              "the game's submits for g_sub_mu %.3f ms (%.1f waits), the replay for g_sub_mu %.3f ms (%.1f), for g_rmu %.3f ms (%.1f), other threads for g_rmu %.3f ms (%.1f), "
-             "the replay for the encode thread %.3f ms (%.1f of %.1f drains blocked)",
+             "the replay for the encode thread %.3f ms (%.1f of %.1f drains blocked), the replay for the residency commit lock %.3f ms (%.1f), other threads for it %.3f ms (%.1f)",
              cc / 1e6 / nf, cw / 1e6 / nf, (double)(q[0] - pq[0]) / nf, (cpu_ns - cc) / 1e6 / nf, (wall_ns - cw) / 1e6 / nf,
              (double)(q[3] - pq[3]) / 1e6 / nf, (double)(q[4] - pq[4]) / nf, (double)(q[5] - pq[5]) / 1e6 / nf, (double)(q[6] - pq[6]) / nf,
              (double)(m[0] - pm[0]) / 1e6 / nf, (double)(m[1] - pm[1]) / nf, (double)(m[2] - pm[2]) / 1e6 / nf, (double)(m[3] - pm[3]) / nf,
-             (double)(m[6] - pm[6]) / 1e6 / nf, (double)(m[5] - pm[5]) / nf, (double)(m[4] - pm[4]) / nf);
+             (double)(m[6] - pm[6]) / 1e6 / nf, (double)(m[5] - pm[5]) / nf, (double)(m[4] - pm[4]) / nf,
+             (double)(m[7] - pm[7]) / 1e6 / nf, (double)(m[8] - pm[8]) / nf, (double)(m[9] - pm[9]) / 1e6 / nf, (double)(m[10] - pm[10]) / nf);
 }
 static void tsummary(uint64_t frame) {
     char line[1024]; size_t o = 0;
@@ -2130,9 +2132,9 @@ static void tsummary(uint64_t frame) {
       if (pf && frame > pf && dr_ > pd) LOG("[nvn] translation up to frame %llu: %.0f instructions per draw, submit per frame %.2f M instructions / CPU %.3f ms, %.0f draws per frame", frame,
           (double)(ci - pi) / (double)(dr_ - pd), (ci - pi) / 1e6 / (double)(frame - pf), (cc - pc) / 1e6 / (double)(frame - pf), (double)(dr_ - pd) / (double)(frame - pf));
       { static uint64_t py, pk, pw; uint64_t cy = atomic_load(&g_cum_sub_cyc), ck = atomic_load(&g_cum_sub_sys_ns), cw = atomic_load(&g_cum_sub_wall_ns);
-        static uint64_t pq[7], pm[7]; uint64_t q[7], m[7]; nq_wait_stats(q); mtl_wait_stats(m);   // the split and the waits (wait_split)
+        static uint64_t pq[7], pm[11]; uint64_t q[7], m[11]; nq_wait_stats(q); mtl_wait_stats(m);   // the split and the waits (wait_split)
         if (pf && frame > pf && ci > pi && cy > py) { double nf = (double)(frame - pf), cyc = (double)(cy - py), cpu = (double)(cc - pc);
-          char wx[768] = ""; if (field_log()) wait_split(wx, sizeof wx, q, pq, m, pm, nf, (double)(cw - pw), cpu);
+          char wx[1024] = ""; if (field_log()) wait_split(wx, sizeof wx, q, pq, m, pm, nf, (double)(cw - pw), cpu);
           qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0; pthread_get_qos_class_np(pthread_self(), &qc, &rp);
           uint64_t aw = 0, ag = 0; int an = 0; void mtl_alloc_stats(uint64_t *, uint64_t *, int *); mtl_alloc_stats(&aw, &ag, &an);
           static uint64_t pyn, pyns; uint64_t yn = 0, yns = 0; dm_main_yield_stats(&yn, &yns);

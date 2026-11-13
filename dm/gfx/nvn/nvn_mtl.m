@@ -181,7 +181,14 @@ static int g_present_link_env;   // DM_PRESENT_LINK was set: its mode holds ever
 static uint64_t g_pq_done;
 static uint64_t g_pq_read;
 static id<MTLResidencySet> g_res;
-static int g_res_dirty;
+// Residency changes wait in g_res_q (under g_res_mu, each holding its allocation) until a commit applies them to g_res and commits it, under g_res_commit_mu alone. A commit
+// takes 10-25 ms when it adds hundreds of MB; while it held g_res_mu, as it did, every res_add and res_remove on any thread waited for it: the upload batches' completion
+// handlers commit their staging's removal, and the submit thread's res_add calls of Switch Sports Resort's court load took 42-56 ms of that frame (1.5-1.7 ms queued).
+// Queue commits that must stay apart from the set's commit (the present snapshot's, the one-off command buffers', the encode thread's in nvn_rec.h) hold g_res_commit_mu too,
+// through res_commit_lock (Port of NXNative 0c078130, PR #2379)
+typedef struct { CFTypeRef o; int add; } res_op;
+static res_op *g_res_q; static size_t g_res_qn, g_res_qcap;   // under g_res_mu
+static pthread_mutex_t g_res_commit_mu = PTHREAD_MUTEX_INITIALIZER;   // taken before g_res_mu, never inside it
 static id<MTLSharedEvent> g_ev;
 static _Atomic uint64_t g_fence;                // Highest committed fence value (incremented exclusively by the submit thread)
 static _Atomic int g_sub_on;                    // a submission is open: from mtl_sub_begin until its commit has taken its fence and encoded everything (mtl_pool_del reads it)
@@ -281,6 +288,15 @@ static NSError *gpu_lost_test_error(void) {
 }
 
 static pthread_mutex_t g_res_mu = PTHREAD_MUTEX_INITIALIZER;   // Dedicated lock for the residency set: res_add is called on paths that hold g_mu (arena_new), so it cannot share g_mu
+// Time spent waiting for g_res_commit_mu (res_commit_lock: a try first, so an uncontended lock reads no clock), by the replay thread (on_sub_thread) and by every other thread together
+// (the encode thread's queue commits, the upload batches' completion handlers, the deferred-release worker): the translation detail line (mtl_wait_stats)
+static _Atomic uint64_t g_rcm_wait_ns[2], g_rcm_waits[2];   // [0] the replay thread, [1] the others
+static int on_sub_thread(void);
+static void res_commit_lock(void) {
+    if (!pthread_mutex_trylock(&g_res_commit_mu)) return;
+    uint64_t t0 = now_ns(); pthread_mutex_lock(&g_res_commit_mu); int k = !on_sub_thread();
+    atomic_fetch_add_explicit(&g_rcm_wait_ns[k], now_ns() - t0, memory_order_relaxed); atomic_fetch_add_explicit(&g_rcm_waits[k], 1, memory_order_relaxed);
+}
 // Wait ledger (DM_NVN_WAITS=1): every place a thread of the host or the game waits on the CPU for the GPU or for the encode thread, counted per frame (calls, calls that blocked,
 // the time they blocked) and logged every 300 frames with the frame's GPU idle. The game's own SyncWait is split by how far its fence is behind the newest one (0: the last submission)
 enum { WS_SYNC, WS_SYNC_NEWEST, WS_SYNC_POLL, WS_ACQ, WS_FINISH, WS_ALLOC, WS_VIS, WS_MDI, WS_READTEX, WS_T2T, WS_DIAG, WS_SNAP, WS_UPZERO, WS_UPALLOC, WS_DRAIN, WS_UBC, WS_ONCE, WS_POST, WS_SNAPCOPY, WS_N };
@@ -328,6 +344,10 @@ enum { RS_SITES = 16 }; static struct { int line; uint64_t n, bytes; } g_rs_site
 #define res_add(r) res_add_at((r), __LINE__)
 // Both run on guest threads too (pool_res from mtl_addr, uploads), whose implicit autorelease pools never drain; containsObject: / removeObject: on a weak NSHashTable leave the object
 // autoreleased in the calling thread's pool (measured in a standalone test: the object outlived its last strong reference until the thread ended), so each has a pool of its own
+static void res_q_put(id<MTLAllocation> r, int add) {   // Caller holds g_res_mu
+    if (g_res_qn == g_res_qcap) { g_res_qcap = g_res_qcap ? 2 * g_res_qcap : 256; g_res_q = realloc_or_die(g_res_q, g_res_qcap * sizeof *g_res_q, "the residency changes"); }
+    g_res_q[g_res_qn++] = (res_op){CFBridgingRetain(r), add};
+}
 static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepool {
     if (!allocation) return;
     // An indirectly addressed placed texture needs its heap resident. The heap owner below removes it only after the last texture/view has gone.
@@ -336,9 +356,8 @@ static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepoo
     if (!g_res_objects) g_res_objects = [NSHashTable weakObjectsHashTable];
     if ([g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }   // already resident (a shared texture resolved again): marking the set dirty would cost a commit that changes nothing
     { int k = 0; while (k < RS_SITES - 1 && g_rs_site[k].line && g_rs_site[k].line != line) k++; g_rs_site[k].line = line; g_rs_site[k].n++; g_rs_site[k].bytes += r.allocatedSize; }
-    [g_res addAllocation:(id<MTLAllocation>)r];
+    res_q_put(r, 1);
     [g_res_objects addObject:r];
-    g_res_dirty = 1;
     pthread_mutex_unlock(&g_res_mu);
 } }
 static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
@@ -346,9 +365,9 @@ static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
     if ([(id)r conformsToProtocol:@protocol(MTLResource)] && ((id<MTLResource>)r).heap) return;
     pthread_mutex_lock(&g_res_mu);
     if (![g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }
-    [g_res removeAllocation:(id<MTLAllocation>)r];
+    res_q_put(r, 0);
     [g_res_objects removeObject:r];
-    g_res_dirty = 1; g_rs_rm++;
+    g_rs_rm++;
     pthread_mutex_unlock(&g_res_mu);
 } }
 // Recycled texture memory (GitHub issues #1831, #1823). An engine that keeps its render targets in a GPU-only pool and moves or resizes them with its dynamic resolution names new
@@ -534,11 +553,25 @@ static void res_check(id r, const char *what, int reg) {
         MLOG("[RED] missing residency #%d: %s slot %d %s %p (parent chain %d deep) allocated %lu B storage mode %lu%s", nbad, what, reg, is_tex ? "texture" : "buffer", (__bridge void *)a, hops, (unsigned long)a.allocatedSize, (unsigned long)a.storageMode,
              t ? [NSString stringWithFormat:@" format %lu %lux%lu type %lu usage %#lx", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.textureType, (unsigned long)t.usage].UTF8String : ""); }
 }
-static void res_commit(void) {
+// Applies and commits every change made before the call. A change another thread's commit took is in the set when this returns too: that commit holds g_res_commit_mu until it is
+// done. Each change holds its allocation until it is committed, so a removed one stays alive until it has left the set
+static void res_commit(void) { @autoreleasepool {
+    res_commit_lock();
     pthread_mutex_lock(&g_res_mu);
-    if (g_res_dirty) { uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); [g_res commit]; g_res_dirty = 0; g_rs_commits++; g_rs_commit_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0; }
+    res_op *q = g_res_q; size_t n = g_res_qn; g_res_q = NULL; g_res_qn = g_res_qcap = 0;
     pthread_mutex_unlock(&g_res_mu);
-}
+    if (n) {
+        uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        for (size_t i = 0; i < n; i++) { if (q[i].add) [g_res addAllocation:(__bridge id<MTLAllocation>)q[i].o]; else [g_res removeAllocation:(__bridge id<MTLAllocation>)q[i].o]; }
+        [g_res commit];
+        uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
+        pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; pthread_mutex_unlock(&g_res_mu);
+    }
+    pthread_mutex_unlock(&g_res_commit_mu);
+    for (size_t i = 0; i < n; i++) CFRelease(q[i].o);
+    free(q);
+} }
+static int res_pending(void) { pthread_mutex_lock(&g_res_mu); int n = g_res_qn != 0; pthread_mutex_unlock(&g_res_mu); return n; }
 // What the residency set holds: totals by kind and the largest objects. At the first GPU out-of-memory error (the error names none of them), and for DM_CTL "restop" (hle_hid.c). The set holds
 // the game's pools (shared buffers over guest memory), textures, heaps and staging alike
 static void res_top(const char *why) { @autoreleasepool {
@@ -571,12 +604,15 @@ static void res_top_once(NSError *err) {
 }
 // Since the last call: residency commits (count, time), additions by source line (count, MB; the four largest by bytes) and removals
 void mtl_res_stats(char *out, size_t n) {
+    res_commit_lock();   // the set's counts, which a commit changes
+    unsigned long set_n = g_res ? (unsigned long)g_res.allocationCount : 0ul; double set_mb = g_res ? g_res.allocatedSize / 1048576.0 : 0;
+    pthread_mutex_unlock(&g_res_commit_mu);
     pthread_mutex_lock(&g_res_mu);
     uint64_t tn = 0, tb = 0; for (int k = 0; k < RS_SITES; k++) { tn += g_rs_site[k].n; tb += g_rs_site[k].bytes; }
     size_t o = snprintf(out, n, "commits %llu / %.1f ms, added %llu, %.0f MB (", (unsigned long long)g_rs_commits, g_rs_commit_ns / 1e6, (unsigned long long)tn, tb / 1048576.0);
     for (int i = 0; i < 4 && o < n; i++) { int best = -1; for (int k = 0; k < RS_SITES; k++) if (g_rs_site[k].n && (best < 0 || g_rs_site[k].bytes > g_rs_site[best].bytes)) best = k;
         if (best < 0) break; o += snprintf(out + o, n - o, "%sline %d: %llu, %.0f MB", i ? ", " : "", g_rs_site[best].line, (unsigned long long)g_rs_site[best].n, g_rs_site[best].bytes / 1048576.0); g_rs_site[best].n = 0; }
-    if (o < n) snprintf(out + o, n - o, "), removed %llu, %lu allocations in the set (%.0f MB)", (unsigned long long)g_rs_rm, g_res ? (unsigned long)g_res.allocationCount : 0ul, g_res ? g_res.allocatedSize / 1048576.0 : 0.0);
+    if (o < n) snprintf(out + o, n - o, "), removed %llu, %lu allocations in the set (%.0f MB)", (unsigned long long)g_rs_rm, set_n, set_mb);
     memset(g_rs_site, 0, sizeof g_rs_site); g_rs_rm = g_rs_commits = g_rs_commit_ns = 0;
     pthread_mutex_unlock(&g_res_mu);
 }
@@ -670,8 +706,7 @@ static void defer_kick(void) {
 static void defer_idle_commit(void) {
     atomic_thread_fence(memory_order_seq_cst);
     if (atomic_load(&g_sub_on)) return;
-    pthread_mutex_lock(&g_res_mu); int dirty = g_res_dirty; pthread_mutex_unlock(&g_res_mu);
-    if (dirty) defer_kick();
+    if (res_pending()) defer_kick();
 }
 
 // A profile list of shader keys the host asks the next shader build for (bf_want.tsv, dual_want.tsv): each key appended once to the file the environment names. A shader's key is
@@ -1607,7 +1642,7 @@ static void once_commit(NvOnce *o, void (^done)(int ok)) {
         return;
     }
     id<MTL4CommandBuffer> buffers[] = {cb};
-    pthread_mutex_lock(&g_res_mu); [g_q4 commit:buffers count:1 options:opt]; pthread_mutex_unlock(&g_res_mu);
+    res_commit_lock(); [g_q4 commit:buffers count:1 options:opt]; pthread_mutex_unlock(&g_res_commit_mu);   // apart from the residency set's commit, as the encode thread's (nvn_rec.h)
 }
 // Commit and wait until the GPU is done; returns 0 on a GPU error. Not on the feedback queue (the completion runs there)
 static int once_wait(NvOnce *o) {
@@ -6175,10 +6210,13 @@ static void rmu_lock(void) {
     uint64_t t0 = now_ns(); os_unfair_lock_lock(&g_rmu); int k = !on_sub_thread();
     atomic_fetch_add_explicit(&g_rmu_wait_ns[k], now_ns() - t0, memory_order_relaxed); atomic_fetch_add_explicit(&g_rmu_waits[k], 1, memory_order_relaxed);
 }
-void mtl_wait_stats(uint64_t v[7]) {   // running totals: g_rmu waits (ns, count) of the replay and of the other threads; encode-thread drains, those that blocked, their ns (nvn_rec.h rec_drain)
+void mtl_wait_stats(uint64_t v[11]) {   // running totals: g_rmu waits (ns, count) of the replay and of the other threads; encode-thread drains, those that blocked, their ns (nvn_rec.h rec_drain);
+                                        // g_res_commit_mu waits (ns, count) of the replay and of the other threads (res_commit_lock)
     v[0] = atomic_load_explicit(&g_rmu_wait_ns[0], memory_order_relaxed); v[1] = atomic_load_explicit(&g_rmu_waits[0], memory_order_relaxed);
     v[2] = atomic_load_explicit(&g_rmu_wait_ns[1], memory_order_relaxed); v[3] = atomic_load_explicit(&g_rmu_waits[1], memory_order_relaxed);
     v[4] = atomic_load_explicit(&g_drains, memory_order_relaxed); v[5] = atomic_load_explicit(&g_drains_blocked, memory_order_relaxed); v[6] = atomic_load_explicit(&g_drain_ns, memory_order_relaxed);
+    v[7] = atomic_load_explicit(&g_rcm_wait_ns[0], memory_order_relaxed); v[8] = atomic_load_explicit(&g_rcm_waits[0], memory_order_relaxed);
+    v[9] = atomic_load_explicit(&g_rcm_wait_ns[1], memory_order_relaxed); v[10] = atomic_load_explicit(&g_rcm_waits[1], memory_order_relaxed);
 }
 // ---------- Shader mapping table: Switch control section hash → PC metallib (produced by dm/gfx/tools/shader_map.py) ----------
 static NSMutableDictionary<NSString *, NSString *> *g_shmap;
@@ -18110,7 +18148,7 @@ static uint64_t snap_take(const tex_t *t) {
         r = rec_own_put(b, RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_snap_cmt; r->a[1] = v;
         rec_own_push(b);
     } else {
-        pthread_mutex_lock(&g_res_mu); [g_q4 commit:&cb count:1]; [g_q4 signalEvent:g_snap_ev value:v]; pthread_mutex_unlock(&g_res_mu);
+        res_commit_lock(); [g_q4 commit:&cb count:1]; [g_q4 signalEvent:g_snap_ev value:v]; pthread_mutex_unlock(&g_res_commit_mu);
         atomic_store(&g_snap_cmt, v);
     }
     g_snap[k].ev = v;
