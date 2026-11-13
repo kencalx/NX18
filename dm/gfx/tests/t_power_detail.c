@@ -31,6 +31,19 @@ int main(void) {
     char small[24]; size_t o = nvn_pd_text(small, sizeof small, &a, &z, 2.0);
     CHECK("a short buffer is cut, not overrun", o < sizeof small && strlen(small) == o);
 
+    // The power tick over the same 2 s: energy, CPU and its share on performance cores, each cluster's clock, the frame rate, GPU time per second two ways, demoted frames
+    nvn_pd_tick_text(b, sizeof b, &a, &z, 2.0, 120, 30.0, 24.0, 120, 3); puts(b);
+    CHECK("tick: energy, CPU and the performance cores' share", strstr(b, "CPU energy 2.25 W; CPU 200% (100 = one core), 38% of it on performance cores;") != NULL);
+    CHECK("tick: each cluster's clock", strstr(b, "performance cores 3.60 GHz, efficiency cores 1.20 GHz;") != NULL);
+    CHECK("tick: frame rate and GPU time per second, labelled approximate", strstr(b, "; 60.0 fps; GPU about 15.0 ms/s summed over command buffers, about 12.0 ms/s as the union of the frames' spans (both approximate)") != NULL);
+    CHECK("tick: demoted frames of the acquiring thread", strstr(b, "; acquiring thread demoted in 3 of 120 frames") != NULL);
+    nvn_pd_tick_text(b, sizeof b, &z, &idle, 1.0, 60, 0, 0, 0, 0); puts(b);
+    CHECK("tick: an idle cluster, and no demotion part with no frames checked", strstr(b, "efficiency cores idle;") && !strstr(b, "demoted"));
+    nvn_pd_tick_text(b, sizeof b, NULL, &z, 1.0, 60, 0, 0, 0, 0);
+    CHECK("tick: no RUSAGE_INFO_V6", !strncmp(b, "CPU by core type: not on this platform; 60.0 fps", 48));
+    o = nvn_pd_tick_text(small, sizeof small, &a, &z, 2.0, 120, 30.0, 24.0, 120, 3);
+    CHECK("tick: a short buffer is cut, not overrun", o < sizeof small && strlen(small) == o);
+
     int told = 0;
     nvn_pd_power_text(b, sizeof b, 3, 63, 1, 0, &told); puts(b);
     CHECK("battery and Low Power Mode", !strcmp(b, "battery 63%, on battery; Low Power Mode off"));

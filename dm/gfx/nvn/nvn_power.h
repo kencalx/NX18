@@ -49,6 +49,32 @@ static inline size_t nvn_pd_text(char *out, size_t n, const nvn_pd *a, const nvn
     if (o < n) o += (size_t)snprintf(out + o, n - o, "; threads waited for a core %.0f ms/s", nvn_pd_d(cpu, run) / 1e6 / secs);
     return o < n ? o : n - 1;
 }
+// A cluster's clock in a window: "3.62 GHz", or "idle" with no CPU time there
+static inline size_t nvn_pd_clock(char *out, size_t n, uint64_t cyc, uint64_t ns) {
+    return ns ? (size_t)snprintf(out, n, "%.2f GHz", (double)cyc / (double)ns) : (size_t)snprintf(out, n, "idle");
+}
+// The power tick's text (hle_nvn.c power_tick) for a window from a to b, secs long (a NULL: the platform gives no RUSAGE_INFO_V6): CPU energy, CPU time (100% = one core) and its share
+// on performance cores, each cluster's clock, then frames per second, GPU time per second summed over command buffers and as the union of the frames' spans (gpu_ms, span_ms in the
+// window; both approximate), and the acquiring thread's frames checked and demoted, when it was checked
+static inline size_t nvn_pd_tick_text(char *out, size_t n, const nvn_pd *a, const nvn_pd *b, double secs, uint64_t frames, double gpu_ms, double span_ms, uint64_t chk, uint64_t dem) {
+    if (!n) return 0;
+    if (secs <= 0) return (size_t)snprintf(out, n, "no time passed");
+    size_t o;
+    if (a) {
+        uint64_t cpu = nvn_pd_d(a->cpu_ns, b->cpu_ns), p = nvn_pd_d(a->pcpu_ns, b->pcpu_ns), cyc = nvn_pd_d(a->cycles, b->cycles), pc = nvn_pd_d(a->pcycles, b->pcycles);
+        if (p > cpu) p = cpu;
+        if (pc > cyc) pc = cyc;
+        o = (size_t)snprintf(out, n, "CPU energy %.2f W; CPU %.0f%% (100 = one core), %.0f%% of it on performance cores; performance cores ", nvn_pd_d(a->energy_nj, b->energy_nj) / 1e9 / secs,
+                             cpu / 1e7 / secs, cpu ? 100.0 * (double)p / (double)cpu : 0);
+        if (o < n) o += nvn_pd_clock(out + o, n - o, pc, p);
+        if (o < n) o += (size_t)snprintf(out + o, n - o, ", efficiency cores ");
+        if (o < n) o += nvn_pd_clock(out + o, n - o, cyc - pc, cpu - p);
+    } else o = (size_t)snprintf(out, n, "CPU by core type: not on this platform");
+    if (o < n) o += (size_t)snprintf(out + o, n - o, "; %.1f fps; GPU about %.1f ms/s summed over command buffers, about %.1f ms/s as the union of the frames' spans (both approximate)",
+                                     frames / secs, gpu_ms / secs, span_ms / secs);
+    if (o < n && chk) o += (size_t)snprintf(out + o, n - o, "; acquiring thread demoted in %llu of %llu frames", (unsigned long long)dem, (unsigned long long)chk);
+    return o < n ? o : n - 1;
+}
 // The front end's power state (dm_power_source: known bit 1 battery, bit 2 Low Power Mode; state 1 on battery, 2 charging, 3 full and plugged in, 4 plugged in but not charging
 // (a Mac held below full by optimized charging), 0 unknown; pct -1 unknown): "battery 63%, on battery; Low Power Mode off". A part the platform does not give says so once (told: the parts said)
 static inline size_t nvn_pd_power_text(char *out, size_t n, int known, int pct, int state, int lpm, int *told) {
