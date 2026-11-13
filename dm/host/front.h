@@ -46,6 +46,8 @@ enum { DM_AA_OFF, DM_AA_RAN, DM_AA_FORMAT, DM_AA_FAILED };
 int mtl_present_fx_why(void);
 int mtl_present_sharp_why(void);
 int mtl_present_aa_why(void);
+// DM_POWER_DETAIL (hle_nvn.c): whether the power detail line is on (unless =0); front_ios.m turns battery monitoring on only then
+int dm_power_detail_on(void);
 // Progress screen of the first-start prepare step (nvn_mtl.m warm_prepare: "Preparing shaders" while the pipelines of the prewarm lists are built before the game's first frame):
 // title and done of total shown over the game's view (a dark screen, the title, a bar and a count), updated on each call; title NULL hides it. Any thread; the front end switches to its main
 // thread and does not block. Nothing is shown without a window

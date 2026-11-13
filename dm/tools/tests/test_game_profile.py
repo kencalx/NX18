@@ -341,3 +341,30 @@ class BuildModules(unittest.TestCase):
         r, text = self.run_game(self.ROWS.replace('subsdk1=', 'subsdk2='), 'header', ID, '{d}/game.h')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('{"' + 'd' * 32 + '", "main subsdk0 sdk"}', text)
+
+
+class YieldStorm(unittest.TestCase):   # what the host does with a yield storm (hle_thread.c ystorm_note; DM_YIELD_STORM overrides): count (the default) or sleep
+    def macro(self, rows, gid=None):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'game.h')
+            if gid is None:
+                Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+                env = {**os.environ, 'DM_GAMES_DIR': d}
+            else: env = {k: v for k, v in os.environ.items() if k != 'DM_GAMES_DIR'}   # a profile of the repository
+            subprocess.run([sys.executable, str(GAME), 'header', gid or ID, str(out)], env=env, check=True, capture_output=True)
+            return [l for l in out.read_text().splitlines() if 'YIELD_STORM' in l]
+
+    def test_values_and_the_default(self):
+        self.assertEqual(self.macro(''), ['#define DM_GAME_YIELD_STORM 0'])   # without the key: count, which changes nothing
+        self.assertEqual(self.macro('yield_storm\tcount\n'), ['#define DM_GAME_YIELD_STORM 0'])
+        self.assertEqual(self.macro('yield_storm\tsleep\n'), ['#define DM_GAME_YIELD_STORM 1'])
+        for v in ('on', '1', 'off', 'Sleep', ''):   # DM_YIELD_STORM's 1 and 0 are not the key's words
+            rc, out = header(f'yield_storm\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('yield_storm must be count or sleep', out, v)
+
+    def test_profiles_that_sleep(self):   # sleep is a test arm for Ocarina of Time's low-power state, whose profile counts; a game that sleeps names the key in its note, with the device run behind it
+        self.assertEqual(self.macro('', '0400486024DEC000'), ['#define DM_GAME_YIELD_STORM 0'])
+        for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv')):
+            if not any(l.split('\t')[:2] == ['yield_storm', 'sleep'] for l in tsv.read_text(encoding='utf-8').splitlines()): continue
+            note = tsv.parent / 'README.md'
+            self.assertIn('yield_storm', note.read_text(encoding='utf-8') if note.is_file() else '', tsv.parent.name)

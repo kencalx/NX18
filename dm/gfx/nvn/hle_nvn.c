@@ -18,6 +18,7 @@
 #include "nvn_pace.h"
 #include "nvn_fstep.h"
 #include "nvn_timestamp.h"
+#include "nvn_power.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
 #include "nvn_shkey.h"
@@ -1965,6 +1966,11 @@ __attribute__((weak)) void dm_perf_present(double iv_ms) { (void)iv_ms; }   // D
 uint64_t dm_nvn_sub_cpu_ns(void) { return atomic_load(&g_cum_sub_cpu_ns); }   // Cumulative CPU nanoseconds of submit (excluding present)
 __attribute__((weak)) int dm_thermal_now(void) { return -1; }   // Default (Mac); overridden by iOS front_ios.m   // default (Mac); the strong definition in the iOS front end front_ios.m overrides it
 __attribute__((weak)) int dm_low_power_now(void) { return 0; }   // Low Power Mode (iOS front_ios.m); off on the Mac
+// The power state for the power detail line (nvn_power.h nvn_pd_power_text): battery level and charging state, Low Power Mode; → bit 1 when the battery is known, bit 2 Low Power Mode.
+// Strong definitions in front_ios.m (UIDevice, cached on the main thread) and front_mac.m (IOPowerSources); this default (unit tests) knows neither
+__attribute__((weak)) int dm_power_source(int *pct, int *state, int *lpm) { *pct = -1; *state = 0; *lpm = 0; return 0; }
+// DM_POWER_DETAIL: the power detail line after each power line, on unless =0 (front_ios.m turns battery monitoring on only then)
+int dm_power_detail_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_POWER_DETAIL"); on = !(e && *e == '0'); } return on; }
 // Per-frame ring for the long-frame log (GPU time only arrives 8 frames late, so store first and judge later)
 #define LFN 16
 typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms, bg_ms; unsigned pso, lib, up, rup, hy, hold; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline; hold: the vsyncs the frame was made under; bg_ms: of fr, the time suspended (away_ns)
@@ -1987,6 +1993,21 @@ static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y
 // Power over the window since the last summary, for the whole process: CPU energy (task_energy in nJ, Apple silicon), CPU time (100% = one core) and the share of it on performance cores,
 // wakeups per second (interrupt / out of platform idle), GPU time per second (task_gpu_utilisation), thermal state, and the guest threads that yielded most (hle_thread.c);
 // then render-target traffic per frame (attachment load / store bytes, passes that load and store everything, stores saved by DM_NVN_UNWRITTEN_DC) and guest-thread CPU by Switch priority
+// The power detail line (DM_POWER_DETAIL, on unless =0), after the power line of the same window (secs long): CPU energy, clock and time by core type, the time threads waited for a
+// core (nvn_power.h), the battery and Low Power Mode (the thermal state is on the power line). show 0 (the power line's first call) only takes the baseline; a part the platform lacks is said once
+static void power_detail(uint64_t frame, double secs, int show) {
+    static nvn_pd prev; static int have, told, rus_told;
+    if (!dm_power_detail_on()) return;
+    nvn_pd cur; int ok = nvn_pd_read(&cur);
+    if (!show) { have = ok; if (ok) prev = cur; return; }
+    char cs[256] = "", ps[160] = "";
+    if (ok && have) nvn_pd_text(cs, sizeof cs, &prev, &cur, secs);
+    else if (!ok && !rus_told) { rus_told = 1; snprintf(cs, sizeof cs, "CPU by core type: not on this platform"); }
+    have = ok; if (ok) prev = cur;
+    int pct, st, lpm, known = dm_power_source(&pct, &st, &lpm);
+    nvn_pd_power_text(ps, sizeof ps, known, pct, st, lpm, &told);
+    if (*cs || *ps) LOG("[nvn] power detail up to frame %llu: %s%s%s", (unsigned long long)frame, cs, *cs && *ps ? "; " : "", ps);
+}
 static void power_line(uint64_t frame) {
     static uint64_t pt, pe, pcpu, pp, piw, ppw, pg, pf, pld, pst, pfu, pudc, pnqp, prw; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     task_power_info_v2_data_t pw; mach_msg_type_number_t n = TASK_POWER_INFO_V2_COUNT;
@@ -1998,10 +2019,11 @@ static void power_line(uint64_t frame) {
     uint64_t e = 0;
 #endif
     uint64_t iw = pw.cpu_energy.task_interrupt_wakeups, idw = pw.cpu_energy.task_platform_idle_wakeups, g = pw.gpu_energy.task_gpu_utilisation;
-    if (pt && t > pt) { double s = (t - pt) / 1e9; char yt[192]; dm_yield_top(yt, sizeof yt);
+    if (pt && t > pt) { double s = (t - pt) / 1e9; char yt[512]; dm_yield_top(yt, sizeof yt);
         double nf = frame > pf ? (double)(frame - pf) : 1;   // per frame: the fair comparison when one build holds the frame rate better than another
         LOG("[nvn] power up to frame %llu: CPU energy %.2f W, %.1f mJ per frame (%.1f fps); CPU %.0f%% (100 = one core), %.0f%% of it on performance cores; wakeups %.0f/s (out of platform idle %.0f); GPU %.1f ms/s; thermal %d; top yielders: %s", frame,
             (e - pe) / 1e9 / s, (e - pe) / 1e6 / nf, nf / s, (cpu - pcpu) / 1e7 / s, cpu > pcpu ? 100.0 * (double)(p - pp) / (double)(cpu - pcpu) : 0, (iw - piw) / s, (idw - ppw) / s, (g - pg) / 1e6 / s, dm_thermal_now(), yt);
+        power_detail(frame, s, 1);
         char rs[400]; mtl_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; mtl_barrier_stats(&bs, &bf);
         uint64_t mtl_cut_count(void), mtl_copy_cut_count(void), mtl_blit_splits(void); void mtl_ubd_stats(uint64_t *, uint64_t *); static uint64_t pcut, pccut, pbsp, pud, puc; uint64_t cut = mtl_cut_count(), ccut = mtl_copy_cut_count(), bsp = mtl_blit_splits(), ud, uc; mtl_ubd_stats(&ud, &uc);
         void mtl_ubp_stats(uint64_t *, uint64_t *, uint64_t *); static uint64_t ppm, ppr, ppf; uint64_t pm, pr, pf_; mtl_ubp_stats(&pm, &pr, &pf_);
@@ -2045,7 +2067,7 @@ static void power_line(uint64_t frame) {
         // (nvn_queue.inc nq_worker) and the encode thread's wakes (nvn_rec.h rec_thread)
         char wk[1536]; dm_wake_stats(wk, sizeof wk, s); uint64_t nqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed), rw = mtl_rec_wakes();
         LOG("[nvn] threads up to frame %llu: CPU %s; wake sources per second: %s; NVN queue event polls of 1 ms %.0f; encode thread wakes %.0f", frame, tc, wk, (nqp - pnqp) / s, (rw - prw) / s); }
-    else { char yt[192], rs[400], tc[400], wk[1536]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); dm_wake_stats(wk, sizeof wk, 1); }   // the first call only takes the baselines
+    else { char yt[192], rs[400], tc[400], wk[1536]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); dm_wake_stats(wk, sizeof wk, 1); power_detail(frame, 0, 0); }   // the first call only takes the baselines
     pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes(); pnqp = atomic_load_explicit(&nq_event_polls, memory_order_relaxed); prw = mtl_rec_wakes();
 }
 // The thread policy line, every 300 frames from the present path. The time-constraint policy is set on the thread that acquires the window texture (nvnWindowAcquireTexture),
