@@ -46,6 +46,46 @@ static void same_as_whole(id<MTLBuffer> patched, const char *label) {
     CHECK(same, label);
 }
 
+// Many retired IDs through pool_gpu: ntex textures over a pool the CPU cannot reach (each resolves to its shared texture), each registered at per IDs from RBASE, read in one
+// submission and finalized; the next submission's table holds a view of each such ID and lists them (trans), and the one after takes them again. With lists of pool_ids_max()
+// IDs (8,192 with pool_ids_8k, NXNative 034e91a8) 1,200 are patched; with 1,024, every other game's limit, the list is dropped and that submission builds the table whole, as
+// before. The textures are fewer than the 512 finalized serials the ghost ring holds (NGHOST): past it each submission's resolutions evict entries the next needs, and those
+// evictions' notes overflow the note ring (SER_LOG) before the list's limit is reached, which upstream's ghost table rewrite (not ported) answers
+enum { RBASE = 16 };
+static void retired_many(int max, int ntex, int per) {
+    g_pool_ids_max = max; int n = ntex * per;
+    size_t len = (size_t)ntex * 4096; uint8_t *m = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (m == MAP_FAILED) abort();
+    pool_t rp = {0}; pool_builder_t pb = {.mem = m, .size = len, .flags = NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&rp, (const NVNmemoryPoolBuilder *)&pb), "the retired textures' pool initialized");
+    NVNtextureBuilder tb = {0}; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetWidth(&tb, 4); h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    NVNtexture *ts = calloc((size_t)ntex, sizeof *ts); int ok = 1;
+    for (int i = 0; i < ntex; i++) {
+        h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&rp, (ptrdiff_t)i * 4096); ok &= h_nvnTextureInitialize(&ts[i], &tb) != 0;
+        for (int j = 0; j < per; j++) mtl_reg_tex(RBASE + i * per + j, (const tex_t *)&ts[i], NULL);
+    }
+    CHECK(ok, "the textures initialized");
+    id<MTLBuffer> b0 = table(); int held = 0; for (int i = 0; i < n; i++) held += entry(b0, RBASE + i) != dummy_of(b0);
+    CHECK(held == n, "each ID holds its texture");
+    for (int i = 0; i < ntex; i++) h_nvnTextureFinalize(&ts[i]);
+    id<MTLBuffer> b1 = table(); held = 0; int retired = 1; for (int i = 0; i < n; i++) { held += entry(b1, RBASE + i) != dummy_of(b1); retired &= g_treg[RBASE + i].retired && !g_treg[RBASE + i].view; }
+    CHECK(held == n && retired, "finalized, each ID still resolves in this submission, and its view went at the submission's end");
+    CHECK(n <= max ? snap()->trans.n == n : snap()->trans.n == -1, n <= max ? "the table lists every view of a retired registration" : "past the limit the list is dropped");
+    uint64_t builds = g_stat_pool_builds, schg = g_stat_pool_schg, over = g_stat_pool_nopatch[4], taken = g_stat_pool_patched + g_stat_pool_kept;
+    id<MTLBuffer> b2 = table();
+    if (n <= max) CHECK(g_stat_pool_builds == builds && g_stat_pool_nopatch[4] == over && g_stat_pool_schg == schg + 1 && g_stat_pool_patched + g_stat_pool_kept == taken + 1,
+                        "the next submission takes the retired IDs again (patched or kept), none of them too many");
+    else CHECK(g_stat_pool_builds == builds + 1 && g_stat_pool_nopatch[4] == over + 1 && g_stat_pool_schg == schg, "the next submission builds the table whole: a new submission over too many retired IDs");
+    atomic_fetch_add(&g_reg_gen, 1); id<MTLBuffer> w = table();   // a bump without a note: the same table built whole
+    int same = 1; held = 0;
+    for (int i = 0; i < RBASE + n; i++) { int pd = entry(b2, i) == dummy_of(b2), wd = entry(w, i) == dummy_of(w); same &= pd == wd; held += i >= RBASE && !pd; }
+    CHECK(same && held == n, "the table holds what a table built whole does: each retired ID resolves again");
+    printf("retired IDs %d (%d textures), lists of %d: %s\n", n, ntex, max, n <= max ? "taken again" : "built whole");
+    for (int i = 0; i < n; i++) mtl_reg_tex(RBASE + i, NULL, NULL);
+    table(); table();
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)&rp); free(ts); defer_drain(); munmap(m, len);
+}
+
 int main(void) { @autoreleasepool {
     setenv("DM_NVN_RT_RECYCLE", "0", 1);   // textures with allocations of their own: one placed in a recycled heap is resident through its heap, whatever retires it
     mtl_init();
@@ -222,5 +262,31 @@ int main(void) { @autoreleasepool {
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&dpool); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&epool);
     mtl_pool_del(mb); mtl_pool_del(mc);
     defer_drain(); munmap(ma, LEN); munmap(mb, LEN); munmap(mc, LEN); munmap(md, LEN); munmap(me, LEN);
+
+    // What a list holds by default: the profile's pool_ids_8k (Ocarina of Time on), 1,024 for every other game; DM_POOL_IDS_8K=1 / 0 overrides it
+    unsetenv("DM_POOL_IDS_8K"); g_pool_ids_max = -1;
+    CHECK(pool_ids_max() == (DM_GAME_POOL_IDS_8K ? POOL_IDS_MAX : POOL_IDS_LIST), "unset, a list holds what the profile asks");
+    printf("pool ID lists by default: %d (pool_ids_8k %d)\n", g_pool_ids_max, DM_GAME_POOL_IDS_8K);
+    setenv("DM_POOL_IDS_8K", "0", 1); g_pool_ids_max = -1; CHECK(pool_ids_max() == POOL_IDS_LIST, "DM_POOL_IDS_8K=0: 1,024");
+    setenv("DM_POOL_IDS_8K", "1", 1); g_pool_ids_max = -1; CHECK(pool_ids_max() == POOL_IDS_MAX, "DM_POOL_IDS_8K=1: 8,192");
+    unsetenv("DM_POOL_IDS_8K");
+    retired_many(POOL_IDS_MAX, 300, 4);
+    retired_many(POOL_IDS_LIST, 300, 4);
+
+    // With pool_ids_8k a list holds as many IDs as one patch takes (POOL_IDS_MAX, 8,192; NXNative 034e91a8): 2,000 retired IDs, past the 1,024 it holds without (each submission
+    // behind Ocarina of Time's pause menu built its table whole upstream, PR #2389), stay listed; one past 8,192 drops the list, and that change builds the table whole as before.
+    // Without it, as for every other game, 1,024 fill a list and one more drops it
+    CHECK(POOL_IDS_MAX == 8192 && POOL_IDS_LIST == 1024, "a list holds the 8,192 IDs a patch takes, or 1,024");
+    g_pool_ids_max = POOL_IDS_LIST;
+    { pool_ids l = {0}; for (int i = 0; i < POOL_IDS_LIST; i++) ids_push(&l, i);
+      CHECK(l.n == POOL_IDS_LIST && l.cap == POOL_IDS_LIST, "without pool_ids_8k 1,024 IDs fill a list, 4 KB");
+      ids_push(&l, POOL_IDS_LIST); CHECK(l.n == -1 && !l.v, "one more drops it, as before"); free(l.v); }
+    g_pool_ids_max = POOL_IDS_MAX;
+    { pool_ids l = {0}; for (int i = 0; i < 2000; i++) ids_push(&l, i);
+      CHECK(l.n == 2000 && l.v && l.v[1999] == 1999, "2,000 IDs stay on the list");
+      for (int i = 2000; i < POOL_IDS_MAX; i++) ids_push(&l, i);
+      CHECK(l.n == POOL_IDS_MAX && l.cap == POOL_IDS_MAX, "8,192 IDs fill it, 32 KB at most");
+      ids_push(&l, POOL_IDS_MAX);
+      CHECK(l.n == -1 && !l.v, "one more drops the list (the table is built whole)"); free(l.v); }
     printf("t_pool_notes: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

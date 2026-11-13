@@ -180,6 +180,10 @@ def header_one(g):
     if rrt not in ('on', 'off'): sys.exit(f'{g.id}: replay_rt must be on or off: {rrt}')
     rsp = g.get('replay_spares', 'off')   # 32 spare command copies (16 MB in all) and 64 spare pool tables instead of 4 and 16, the newest table dropped when all are in flight (nvn_queue.inc nvn_replay_spares; DM_REPLAY_SPARES overrides): on / off
     if rsp not in ('on', 'off'): sys.exit(f'{g.id}: replay_spares must be on or off: {rsp}')
+    dzc = g.get('depth_zero_copy', 'off')   # new single-sample Depth16 / Depth32F textures zeroed by copies from the zero buffer, not a clear pass (nvn_mtl.m tex_zero_fill; DM_DEPTH_ZERO_COPY overrides): on / off
+    if dzc not in ('on', 'off'): sys.exit(f'{g.id}: depth_zero_copy must be on or off: {dzc}')
+    pik = g.get('pool_ids_8k', 'off')   # a pool table's lists of IDs to take again hold 8,192 IDs, as one patch takes, instead of 1,024 (nvn_mtl.m pool_ids_max; DM_POOL_IDS_8K overrides): on / off
+    if pik not in ('on', 'off'): sys.exit(f'{g.id}: pool_ids_8k must be on or off: {pik}')
     utp = g.get('ue_texture_pool', '0')   # Unreal's r.Streaming.PoolSize in MB, raised to this on the Mac (hle_uecvar.c; DM_UE_TEXTURE_POOL overrides, and turns it on for iOS): 0 = the game's own pool
     if not utp.isdigit(): sys.exit(f"{g.id}: ue_texture_pool must be megabytes (0 = the game's own pool): {utp}")
     ufc = g.get('ue_fps_cvar', 't.MaxFPS')   # the Unreal console variable the host writes fps_target into (hle_fpslock.c; found by name by the rewriter, ue_cvar.py NAMES): a game's own frame limit its settings apply to t.MaxFPS
@@ -283,6 +287,8 @@ def header_one(g):
          f'#define DM_GAME_FPS_RESUME {int(frs == "on")}',
          f'#define DM_GAME_REPLAY_RT {int(rrt == "on")}',
          f'#define DM_GAME_REPLAY_SPARES {int(rsp == "on")}',
+         f'#define DM_GAME_DEPTH_ZERO_COPY {int(dzc == "on")}',
+         f'#define DM_GAME_POOL_IDS_8K {int(pik == "on")}',
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',
          f'#define DM_GAME_UE_FPS_CVAR {q(ufc)}',
          f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',

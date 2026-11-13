@@ -173,7 +173,7 @@ int main(void) { @autoreleasepool {
     // is whole. Copied from it, a drop reported after the copy left the copied layers unwritten for good, as only the replaced texture went into the record
     write_region(0, 0, 1, 2, 30, 30, 0xe0); CHECK(readback_ok("before the held batch"), "a re-upload before the held one reads back as written");
     id<MTLSharedEvent> gate = [g_dev newSharedEvent]; if (!gate) abort();
-    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_commit_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_commit_mu); pthread_mutex_unlock(&g_sub_mu);
     mtl_sub_begin(); write_region(0, 5, 8, 8, 24, 24, 0xe8); CHECK(tex_mtl(t) != nil, "re-upload A, its batch held"); uint64_t fa = mtl_sub_commit();
     pr0 = g_part_reuploads; uint64_t un0 = g_part_unsure; id<MTLTexture> a_tex = pk->tex;
     mtl_sub_begin(); write_region(0, 6, 9, 9, 24, 24, 0xf0); CHECK(tex_mtl(t) != nil, "re-upload B, building on A's texture"); uint64_t fb = mtl_sub_commit();

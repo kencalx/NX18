@@ -234,7 +234,7 @@ static void event_stale_gpu_reset(void) {
     *source=before; *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,1);
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
     if (!gate) abort();
-    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_commit_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_commit_mu); pthread_mutex_unlock(&g_sub_mu);
     NVNsync reset,consumed; P(nvnSyncInitialize)(&reset,&device); P(nvnSyncInitialize)(&consumed,&device);
     begin_cmd(0);
     P(nvnCommandBufferSignalEvent)(&commands[0],&event,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,0);
@@ -262,7 +262,7 @@ static void event_queued_write(int mode) {
     *source=before; *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
     if (!gate) abort();
-    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_commit_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_commit_mu); pthread_mutex_unlock(&g_sub_mu);
     NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
     begin_cmd(1); uint32_t payload=after;
     P(nvnCommandBufferUpdateUniformBuffer)(&commands[1],source_addr,4,0,4,&payload);
@@ -291,7 +291,7 @@ static void event_signal_no_cut(void) {
     P(nvnEventSignal)(&second,NVN_EVENT_SIGNAL_MODE_WRITE,0);
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
     if (!gate) abort();
-    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; uint64_t first_fence=mtl_last_fence(); pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_commit_mu); [g_q4 waitForEvent:gate value:1]; uint64_t first_fence=mtl_last_fence(); pthread_mutex_unlock(&g_res_commit_mu); pthread_mutex_unlock(&g_sub_mu);
     NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
     begin_cmd(1); uint32_t payload=after, other=before;
     P(nvnCommandBufferSignalEvent)(&commands[1],&event,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,1);
@@ -322,8 +322,8 @@ static void frame_shares_allocator(void) {
     *source=before; *result=sentinel;
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
     if (!gate) abort();
-    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1];
-    uint64_t waits=g_alloc_waits, shares=g_alloc_shares; int pool=g_alloc_n, ring=g_vis_ring_n; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_commit_mu); [g_q4 waitForEvent:gate value:1];
+    uint64_t waits=g_alloc_waits, shares=g_alloc_shares; int pool=g_alloc_n, ring=g_vis_ring_n; pthread_mutex_unlock(&g_res_commit_mu); pthread_mutex_unlock(&g_sub_mu);
     static NVNsync fences[N]; static job jobs[N]; int submitted=0, encoded=0;
     for(int i=0;i<N;i++) {
         P(nvnSyncInitialize)(&fences[i],&device); enqueue(&jobs[i],&queues[0],consumer(0,0,&fences[i],0));
@@ -354,8 +354,8 @@ static void post_ring_wait(void) {
     *source=before; *result=sentinel;
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
     if (!gate) abort();
-    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1];
-    uint64_t waits=g_alloc_waits; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_commit_mu); [g_q4 waitForEvent:gate value:1];
+    uint64_t waits=g_alloc_waits; pthread_mutex_unlock(&g_res_commit_mu); pthread_mutex_unlock(&g_sub_mu);
     uint64_t blk0[WS_N]; for(int i=0;i<WS_N;i++) blk0[i]=atomic_load(&g_ws_blk[i]);
     static NVNsync fences[N]; static job jobs[N]; int n=0, held=-1, held_returned=0;
     while(n<N) {   // up to the post ring each one encodes at once; past it, the one that does not within 300 ms is the one waiting for the held GPU
@@ -428,7 +428,7 @@ static void signals_in_node(int node) {
     *source=before; *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0); P(nvnEventSignal)(&event2,NVN_EVENT_SIGNAL_MODE_WRITE,0);
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
     if (!gate) abort();
-    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_commit_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_commit_mu); pthread_mutex_unlock(&g_sub_mu);
     NVNsync fence; P(nvnSyncInitialize)(&fence,&device);
     begin_cmd(0); uint32_t payload=after;
     P(nvnCommandBufferUpdateUniformBuffer)(&commands[0],source_addr,4,0,4,&payload);
@@ -484,7 +484,7 @@ static void signal_overwritten(int node) {
     *source=before; *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
     if (!gate) abort();
-    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_commit_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_commit_mu); pthread_mutex_unlock(&g_sub_mu);
     NVNsync consumed,produced; P(nvnSyncInitialize)(&consumed,&device); P(nvnSyncInitialize)(&produced,&device);
     begin_cmd(0); uint32_t own=sentinel;
     P(nvnCommandBufferUpdateUniformBuffer)(&commands[0],result_addr,4,0,4,&own);   // work of its own before the wait: the wait is not the queue's head when the replay starts
@@ -765,13 +765,15 @@ static void signal_events_switch(void) {
     nq_signal_node=saved;
 }
 // The translation detail line's split and waits (nq_wait_stats, mtl_wait_stats, wait_split): a submission counts its copy apart from the replay; a submit that finds g_sub_mu held waits
-// for it and counts that wait, an uncontended one none; the replay's g_rmu waits apart from another thread's; the encode thread's drains (DM_NVN_ENC_THREAD=1); and the line's text
+// for it and counts that wait, an uncontended one none; the replay's g_rmu waits apart from another thread's; the encode thread's drains (DM_NVN_ENC_THREAD=1); a residency commit
+// lock wait (res_commit_lock) off the replay thread; and the line's text
 static void *hold_sub_mu(void *arg) { pthread_mutex_lock(&g_sub_mu); dispatch_semaphore_signal((__bridge dispatch_semaphore_t)arg); usleep(20000); pthread_mutex_unlock(&g_sub_mu); return NULL; }
 static void *hold_rmu(void *arg) { os_unfair_lock_lock(&g_rmu); dispatch_semaphore_signal((__bridge dispatch_semaphore_t)arg); usleep(20000); os_unfair_lock_unlock(&g_rmu); return NULL; }
+static void *hold_rcm(void *arg) { pthread_mutex_lock(&g_res_commit_mu); dispatch_semaphore_signal((__bridge dispatch_semaphore_t)arg); usleep(20000); pthread_mutex_unlock(&g_res_commit_mu); return NULL; }
 static void wait_counters(void) {
     printf("CASE the submit's split and its waits\n");
     CHECK(queue_idle(5000000000ull),"the replay has taken every queued job");
-    uint64_t q0[7], m0[7], q1[7], m1[7]; nq_wait_stats(q0); mtl_wait_stats(m0); uint64_t w0=atomic_load(&g_cum_sub_wall_ns), c0=atomic_load(&g_cum_sub_cpu_ns);
+    uint64_t q0[7], m0[11], q1[7], m1[11]; nq_wait_stats(q0); mtl_wait_stats(m0); uint64_t w0=atomic_load(&g_cum_sub_wall_ns), c0=atomic_load(&g_cum_sub_cpu_ns);
     NVNsync s; P(nvnSyncInitialize)(&s,&device); NVNcommandHandle h=consumer(0,0,&s,0); P(nvnQueueSubmitCommands)(&queues[0],1,&h);
     int fine=landed(&s,5000000000ull) && queue_idle(5000000000ull); P(nvnSyncFinalize)(&s);
     nq_wait_stats(q1); mtl_wait_stats(m1); uint64_t w1=atomic_load(&g_cum_sub_wall_ns), c1=atomic_load(&g_cum_sub_cpu_ns);
@@ -788,11 +790,17 @@ static void wait_counters(void) {
     pthread_create(&th,NULL,hold_rmu,(__bridge void *)held); dispatch_semaphore_wait(held,DISPATCH_TIME_FOREVER);
     mtl_wait_stats(m0); rmu_lock(); os_unfair_lock_unlock(&g_rmu); pthread_join(th,NULL); mtl_wait_stats(m1);
     CHECK(m1[3]==m0[3]+1 && m1[2]-m0[2]>=10000000ull && m1[1]==m0[1],"a g_rmu wait off the replay thread counts as another thread's");
-    uint64_t pq[7]={0}, pm[7]={0}, q[7]={600,30000000,15000000,6000000,120,3000000,60}, m[7]={9000000,600,1200000,60,1200,600,12000000};
-    char line[768]; wait_split(line,sizeof line,q,pq,m,pm,300,300e6,150e6);
+    pthread_create(&th,NULL,hold_rcm,(__bridge void *)held); dispatch_semaphore_wait(held,DISPATCH_TIME_FOREVER);
+    mtl_wait_stats(m0); res_commit(); pthread_join(th,NULL); mtl_wait_stats(m1);
+    CHECK(m1[10]==m0[10]+1 && m1[9]-m0[9]>=10000000ull && m1[8]==m0[8],"a res_commit behind a held residency commit lock off the replay thread: one other thread's wait, about the 20 ms");
+    mtl_wait_stats(m0); res_commit(); mtl_wait_stats(m1);
+    CHECK(m1[10]==m0[10] && m1[8]==m0[8],"an uncontended residency commit lock: no wait counted");
+    uint64_t pq[7]={0}, pm[11]={0}, q[7]={600,30000000,15000000,6000000,120,3000000,60}, m[11]={9000000,600,1200000,60,1200,600,12000000,4500000,90,15000000,300};
+    char line[1024]; wait_split(line,sizeof line,q,pq,m,pm,300,300e6,150e6);
     printf("line:%s\n",line);
     CHECK(strstr(line,"command copy CPU 0.050 ms / wall 0.100 ms (2.0 submits) and the replay CPU 0.450 ms / wall 0.900 ms")!=NULL,"the line splits the copy from the replay");
-    CHECK(strstr(line,"submits for g_sub_mu 0.020 ms (0.4 waits), the replay for g_sub_mu 0.010 ms (0.2), for g_rmu 0.030 ms (2.0), other threads for g_rmu 0.004 ms (0.2), the replay for the encode thread 0.040 ms (2.0 of 4.0 drains blocked)")!=NULL,"and gives each wait per frame");
+    CHECK(strstr(line,"submits for g_sub_mu 0.020 ms (0.4 waits), the replay for g_sub_mu 0.010 ms (0.2), for g_rmu 0.030 ms (2.0), other threads for g_rmu 0.004 ms (0.2), the replay for the encode thread 0.040 ms (2.0 of 4.0 drains blocked), the replay for the residency commit lock 0.015 ms (0.3), other threads for it 0.050 ms (1.0)")!=NULL,"and gives each wait per frame");
+    CHECK(strlen(line)<sizeof line-1,"the line fits its buffer");
 }
 // The replay threads' time-constraint policy (nvn_rt.h; profile key replay_rt, DM_REPLAY_RT): once a present period is known, the replay thread declares one at the first node of a new
 // frame and the encode thread (DM_NVN_ENC_THREAD=1) after its first block of one, each in effect on that thread; with it off neither declares anything
