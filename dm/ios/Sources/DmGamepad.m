@@ -306,8 +306,10 @@ static BOOL assistive_running(void) { return UIAccessibilityIsVoiceOverRunning()
 // focused element instead of reaching touchesBegan); the hide timer keeps it while either runs, and once both are off it fades 5 s later
 - (void)assistiveChanged:(NSNotification *)n { (void)n; dispatch_async(dispatch_get_main_queue(), ^{ [self menuShow]; }); }
 - (void)menuTouched { [self menuShow]; }
-- (void)menuOpened { _menuOpen = YES; _menuGen++; _menu.hidden = NO; _menu.alpha = 1; }
-- (void)menuClosed { _menuOpen = NO; [self menuScheduleHide]; }
+// The freeze detector (dm/host/stall.c) holds off while the menu is open: the game may stand still behind it. The system UIMenu reports no close of its own, so it counts as
+// open until the next touch on the game (menuClosed), which only holds the detector off longer
+- (void)menuOpened { _menuOpen = YES; _menuGen++; _menu.hidden = NO; _menu.alpha = 1; dm_stall_menu(1); }
+- (void)menuClosed { _menuOpen = NO; dm_stall_menu(0); [self menuScheduleHide]; }
 // A home screen shortcut (dm_gamepad_menu_open): the button shows at once (a faded or hidden one does not open its menu) and its menu opens on the next main-queue turn, as a tap does
 // (UIControl performPrimaryAction presents a menu-as-primary-action button's menu)
 - (void)menuOpenNow {

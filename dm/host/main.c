@@ -127,6 +127,7 @@ static void host_preload(int argc, char **argv) {
     }
     { void dm_term_install(void); dm_term_install(); }   // SIGTERM graceful exit (hle_lifecycle.c)
     { void crash_set_dump_hook(void (*)(void)); void svc_thread_dump(void); crash_set_dump_hook(svc_thread_dump); }   // Dump guest thread state on a crash
+    dm_stall_start();   // the freeze detector (stall.c, DM_STALL_LOG): a red line and a state dump when presents stop while the game is in focus
     const char *names[argc + DM_GAME_NMOD]; int n = 0;
     int i = 2;
     for (; i < argc && strcmp(argv[i], "--"); i++) names[n++] = argv[i];

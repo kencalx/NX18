@@ -20,7 +20,7 @@ int main(void) {
  const char *keep[]={"DM_SHOW_FPS","DM_METAL_HUD","MTL_HUD_ENABLED",
    "DM_FPS_TARGET","DM_DYNAMIC_RESOLUTION","DM_OPMODE","DM_RENDER_SCALE","DM_LANG","DM_RT",
    "DM_TOUCH_HAPTICS","DM_RUMBLE","DM_SAVE","DM_ROMFS","DM_NVN_ENC_THREAD","DM_DEPTH_BOUNDS",
-   "DM_NVN_WAITS","DM_SLOWFRAME","DM_REPLAY_RT","DM_REPLAY_SPARES","DM_FPS_HOLD_BACKOFF","DM_FPS_RESUME","DM_MOVIE_RESTART","DM_FIELD_LOG","DM_POWER_DETAIL","DM_YIELD_STORM","DM_NVN_GHOST","DM_FRAME_WG"};
+   "DM_NVN_WAITS","DM_SLOWFRAME","DM_REPLAY_RT","DM_REPLAY_SPARES","DM_FPS_HOLD_BACKOFF","DM_FPS_RESUME","DM_MOVIE_RESTART","DM_FIELD_LOG","DM_POWER_DETAIL","DM_YIELD_STORM","DM_NVN_GHOST","DM_FRAME_WG","DM_STALL_LOG"};
  for(unsigned i=0;i<sizeof drop/sizeof *drop;i++)assert(dm_player_diagnostic_key(drop[i]));
  for(unsigned i=0;i<sizeof keep/sizeof *keep;i++)assert(!dm_player_diagnostic_key(keep[i]));
  // the whole line: DM_SLOWFRAME kept only with a value that is not empty or zeros (slow_on takes any value as on)
@@ -28,6 +28,7 @@ int main(void) {
  assert(!dm_player_env_dropped("DM_SLOWFRAME","1")&&!dm_player_env_dropped("DM_SLOWFRAME","10"));
  assert(!dm_player_env_dropped("DM_NVN_WAITS","0")&&!dm_player_env_dropped("DM_REPLAY_RT","0")&&!dm_player_env_dropped("DM_REPLAY_SPARES","0")&&!dm_player_env_dropped("DM_POWER_DETAIL","0")&&!dm_player_env_dropped("DM_YIELD_STORM","sleep")&&!dm_player_env_dropped("DM_NVN_GHOST","512"));   // both sides of an A/B are kept
  assert(!dm_player_env_dropped("DM_FRAME_WG","1")&&!dm_player_env_dropped("DM_FRAME_WG","0"));   // a test arm no filter names: it reaches a player build
+ assert(!dm_player_env_dropped("DM_STALL_LOG","0")&&!dm_player_env_dropped("DM_STALL_LOG","10"));   // the freeze detector (stall.c): its off switch and its threshold reach a player build
  assert(dm_player_env_dropped("DM_NVN_PROF","1")&&!dm_player_env_dropped("DM_SHOW_FPS","0"));
 }
 '''

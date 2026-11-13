@@ -299,7 +299,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         memcpy(k->key, rp_prc[i].key, sizeof k->key); k->ok = rp_prc[i].ok; }
     for (size_t i = 0; i < rp_nch; i++) if (rp_ch[i].c.tag == CAP_DPOL) for (size_t o = 0; o + sizeof(cap_dpol) <= rp_ch[i].c.raw; o += sizeof(cap_dpol)) { cap_dpol p; memcpy(&p, rp_ch[i].d + o, sizeof p);
         if (g_ntpb < NDPOOL) g_tpb[g_ntpb++] = (struct dpool_base){&rp_dp[p.index], p.tex_base}; if (g_nspb < NDPOOL) g_spb[g_nspb++] = (struct dpool_base){&rp_dp[p.index], p.samp_base}; }
-    // how the replay layer held each texture: live ones are initialized (kept in the serial table, not the small ghost ring), CPU-written ones uploaded from their pools
+    // how the replay layer held each texture: live ones are initialized (kept in the serial table, not the finalized-texture ghost table), CPU-written ones uploaded from their pools
     uint64_t nlive = 0, ncpu = 0;
     for (size_t i = 0; i < rp_nch; i++) if (rp_ch[i].c.tag == CAP_TKND) for (size_t o = 0; o + sizeof(cap_tknd) <= rp_ch[i].c.raw; o += sizeof(cap_tknd)) {
         cap_tknd *k = (cap_tknd *)(rp_ch[i].d + o); cap_tex_fields(&k->t, &rp_dec, NULL);

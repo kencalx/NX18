@@ -33,15 +33,22 @@ static uint64_t watch_now_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 uint64_t crash_watch_progress_count(void) { return atomic_load(&g_watch_count); }
+// No stage (each present after the first, crash_watch_frame) keeps the one in force: flipping to the other buffer unwritten would name a stale stage every other call
 void crash_watch_progress(uint32_t tick, const char *stage) {
-    int next = 1 - atomic_load(&g_watch_stage_idx);
-    if (stage && *stage) snprintf(g_watch_stage[next], sizeof g_watch_stage[next], "%s", stage);
+    if (stage && *stage) { int next = 1 - atomic_load(&g_watch_stage_idx); snprintf(g_watch_stage[next], sizeof g_watch_stage[next], "%s", stage); atomic_store(&g_watch_stage_idx, next); }
     atomic_store(&g_watch_tick, tick);
-    atomic_store(&g_watch_stage_idx, next);
     atomic_fetch_add(&g_watch_count, 1);
     atomic_store(&g_watch_last_ns, watch_now_ns());
 }
-void crash_watch_frame(void) { if (atomic_load(&g_watch_pregame)) crash_watch_progress(0, "present frame"); }
+// Every present (hle_os.c dm_guest_frame_tick) is progress, with the presents so far as its tick. The first ends the pregame: diag.c, which counted progress by the game's own ticks once a
+// run began, is gone, so crash_watch_pregame_done had no caller, the watchdog's tick stayed 0 and DM_WATCH_STALL's 1 s dump below could never fire; presents are now the progress
+// before and after it, and the dump fires from the first present on
+void crash_watch_frame(void) {
+    static _Atomic uint32_t frames;
+    uint32_t n = atomic_fetch_add(&frames, 1) + 1;
+    crash_watch_progress(n, n == 1 ? "present frame" : NULL);
+    if (n == 1) crash_watch_pregame_done();
+}
 void crash_watch_pregame_done(void) { atomic_store(&g_watch_pregame, 0); }
 void crash_watch_pregame_again(void) { atomic_store(&g_watch_pregame, 1); }   // Back from a run to the front end: count progress by presented frames again (diag.c)
 void crash_dump_now(const char *why);
@@ -79,7 +86,12 @@ static void *watchdog_main(void *arg) {
         // Dump only after entering a run; at most 3 dumps per process, at least 10 seconds between two dumps (the loading screen and the pause menu also stop ticks, do not let them flood the log)
         { static int dumps; static uint64_t last_dump, dumped_for;
           if (g_watch_stall && !atomic_load(&g_watch_pregame) && atomic_load(&g_watch_tick) > 0 && now - last >= 1000000000ull && now - last < (uint64_t)g_watch_stall * 1000000000ull
-              && dumps < 3 && dumped_for != last && (!last_dump || now - last_dump >= 10000000000ull)) { dumps++; last_dump = now; dumped_for = last; crash_dump_now("progress stalled for over 1 second"); } }
+              && dumps < 3 && dumped_for != last && (!last_dump || now - last_dump >= 10000000000ull)) { dumps++; last_dump = now; dumped_for = last;
+              // The game is still running here (crash_watch_frame ends the pregame at the first present, so this fires now): the thread dump stops each guest thread and writes
+              // its backtrace while it is stopped (hle_thread.c thr_bt), and one stopped inside a log line would hold the stderr lock that write waits on, for good. Held here
+              // first, only tried for 1 s: a dump skipped (no line either, a line would wait on that lock) beats a watchdog stuck with a guest thread suspended
+              int got = 0; for (int w = 0; w < 100 && !(got = !ftrylockfile(stderr)); w++) usleep(10000);
+              if (got) { crash_dump_now("progress stalled for over 1 second"); funlockfile(stderr); } } }
         if (g_watch_stall && now - last >= (uint64_t)g_watch_stall * 1000000000ull) {
             uint64_t sec = (now - last) / 1000000000ull;
             int idx = atomic_load(&g_watch_stage_idx);

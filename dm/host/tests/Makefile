@@ -215,6 +215,13 @@ $(B)/t_watch_sample: t_watch_sample.c ../crash.c ../dm.h $(GAME_H) | $(B)
 .PHONY: watch-sample
 watch-sample: $(B)/t_watch_sample
 	$(B)/t_watch_sample
+# The freeze detector (stall.c, DM_STALL_LOG) on a fake present clock, and DM_WATCH_STALL's 1 s dump in crash.c (crash_watch_pregame_done wired to the first present)
+run: stall
+.PHONY: stall
+stall: $(B)/t_stall
+	$(B)/t_stall $(QUIET)
+$(B)/t_stall: t_stall.c ../stall.c t_altstack_stub.c ../crash.c ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_stall.c t_altstack_stub.c ../crash.c
 $(B)/t_altstack: t_altstack.c t_altstack_stub.c ../crash.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_altstack.c t_altstack_stub.c ../crash.c
 $(B)/t_net_eventfd: t_net_eventfd.c ../hle_net.c ../hle.h ../dm.h $(GAME_H) | $(B)

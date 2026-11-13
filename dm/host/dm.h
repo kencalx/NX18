@@ -145,6 +145,7 @@ int dm_detclock_enabled(void);
 void dm_guest_clock_advanced(void);
 void guest_clock_freeze(int on);
 void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (1 background, 2 system keyboard); see hle_os.c
+int guest_clock_frozen(uint64_t *thawed);   // hle_os.c: whether the guest clock stands still now; *thawed: when it last started again (the freeze detector, stall.c)
 void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits while the app is in the background (hle_os.c)
 extern __thread uint64_t dm_clock_reads;   // the calling thread's guest reads of the system counter (hle_os.c; thr_yield tells clock waits by them)
 void dm_guest_frame_tick(void);        // Called on every present (hle_nvn.c): when DM_DETCLOCK is on, advances the guest clock by one fixed step
@@ -156,6 +157,15 @@ void crash_watch_frame(void);
 void crash_watch_pregame_done(void);
 uint64_t crash_watch_progress_count(void);
 void crash_dump_now(const char *why);   // Dump state on demand (threads + graphics wait points), without exiting
+// The freeze detector (stall.c, DM_STALL_LOG; on by default, logging only): started once by host_preload; the in-game menu's opening and closing (iOS DmGamepad.m) hold it off;
+// nvn_mtl.m stamps dm_present_done_ns when a present completes on the GPU (host now_ns)
+void dm_stall_start(void);
+void dm_stall_menu(int open);
+void dm_stall_dump(void);   // stall.c: the detector's dump (the graphics side's state, then the guest thread table, its locks only tried), also after a suspend that did not drain (hle_nvn.c, which has a weak one for builds without stall.c)
+extern _Atomic uint64_t dm_present_done_ns;
+int svc_thread_dump_try(unsigned wait_ms);   // hle_thread.c: svc_thread_dump under the guest thread lock and the stderr lock, each tried for up to wait_ms; 0 (nothing dumped) if either stays held
+int dm_focus_seen(void);   // hle_oe.c: the focus state the game sees (oe focus state: 1 in focus, 2 out of focus or a library applet open, 3 background)
+uint64_t dm_focus_in_since(void);   // hle_oe.c: when the front end last entered focus (now_ns)
 // Diagnostic switches: read once from environment variables when main starts (getenv takes the libc global environment lock, and on a hot path it would make all guest threads queue up)
 extern uint64_t g_t0_ns;   // Host start time (now_ns), used for relative times in the log
 extern struct dm_flags { int thr, svc, fs, dbg, imports, bootprof; } g_flag;

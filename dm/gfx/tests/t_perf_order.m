@@ -9,6 +9,7 @@
 static int test_budget_active;
 static struct {
     uint64_t now, event_elapsed, event_ms, event_fence;
+    uint64_t event_total_ms, event_advanced;   // the whole event wait a case asks for (its slices add up to it) and how much of event_elapsed the slices so far took
     int event_calls, event_success, cond_calls;
     int64_t cond_remaining, cond_first;   // the last and the first condition wait's deadline, from the virtual now
 } test_budget;
@@ -34,10 +35,13 @@ static int test_pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mu
 @end
 @implementation WaitBudgetEvent
 - (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds {
+    // mtl_wait_at's fast wake waits in slices of the 10 s mark (wait_fence_say after the first): event_ms is the sum of the slices, and the whole wait takes event_elapsed of the
+    // virtual clock however it is sliced (each slice before the last its own length, the last what is left)
     test_budget.event_calls++;
     test_budget.event_fence = value;
-    test_budget.event_ms = milliseconds;
-    test_budget.now += test_budget.event_elapsed;
+    test_budget.event_ms += milliseconds;
+    uint64_t adv = test_budget.event_ms >= test_budget.event_total_ms ? test_budget.event_elapsed - test_budget.event_advanced : milliseconds * 1000000ull;
+    test_budget.event_advanced += adv; test_budget.now += adv;
     return test_budget.event_success;
 }
 @end
@@ -225,18 +229,21 @@ static void wait_budgets(void) {
     for (unsigned si = 0; si < sizeof sites / sizeof *sites; si++) {
         for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) {
             const typeof(*cases) *c = &cases[i];
-            test_budget = (typeof(test_budget)){.now = 1999750000, .event_elapsed = c->elapsed};
+            test_budget = (typeof(test_budget)){.now = 1999750000, .event_elapsed = c->elapsed, .event_total_ms = c->event_ms};
             printf("budget: %s, site=%d, fast=%d, ledger=%d\n", c->name, sites[si], fast, ws_on());
             CHECK("incomplete fence returns false", !mtl_wait_at(1, c->timeout, sites[si]));
-            CHECK("event receives truncated and clamped milliseconds", test_budget.event_calls == fast
+            int slices = c->event_ms ? (int)((c->event_ms + 9999) / 10000) : 1;   // the fast wake's 10 s slices
+            CHECK("event receives truncated and clamped milliseconds, in 10 s slices", test_budget.event_calls == (fast ? slices : 0)
                 && (!fast || (test_budget.event_ms == c->event_ms && test_budget.event_fence == 1)));
             CHECK("only the virtual event advances time", test_budget.now == 1999750000 + (fast ? c->elapsed : 0));
             int fallback = fast ? c->fallback : 1;
             uint64_t remaining = fast ? c->remaining : (c->timeout > hour ? hour : c->timeout);
-            // An unbounded wait first waits to the 10 s mark, where it reports a hang (mtl_wait_at, "[RED] the host has waited 10 s"), then on to its deadline
-            int hang_mark = fallback && c->timeout == UINT64_MAX;
+            // A wait whose limit is past the 10 s mark reports a hang there, once (mtl_wait_at's wait_fence_say, "[RED] the host has waited 10 s"): the fast wake after its first
+            // 10 s slice; otherwise the feedback wait first waits to the mark, then on to its deadline
+            int fast_said = fast && c->event_ms > 10000;
+            int hang_mark = fallback && !fast_said && c->timeout > 10000000000ull;
             CHECK("feedback wait count", test_budget.cond_calls == fallback + hang_mark);
-            CHECK("an unbounded wait reports a hang at 10 s first", !hang_mark || test_budget.cond_first == 10000000000ll);
+            CHECK("a wait past the mark reports a hang at 10 s first", !hang_mark || test_budget.cond_first == 10000000000ll);
             CHECK("feedback absolute deadline has only remaining budget", !fallback
                 || test_budget.cond_remaining == (int64_t)remaining);
         }

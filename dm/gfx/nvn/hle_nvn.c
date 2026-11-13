@@ -37,6 +37,7 @@
 #define DM_MEM_CAP_DEFAULT_GB 0
 #endif
 #include <pthread/qos.h>
+#include <dispatch/dispatch.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 #include <mach/thread_policy.h>
@@ -1714,15 +1715,146 @@ static uint64_t away_ns(void) { pthread_mutex_lock(&g_susp_mu); uint64_t a = g_a
 // DM_FIELD_LOG=0 writes the frame step, thread policy and long-frame lines as X1.0 did: one 40-line budget for the frame step's changes and their old reasons, no counts per
 // window, no dynamic-resolution line, the thread policy read on the presenting thread with no names, no background time on a long frame. On by default (logging only)
 static int field_log(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_FIELD_LOG"); v = !(e && !strcmp(e, "0")); if (!v) LOG("[nvn] DM_FIELD_LOG=0: the frame step, thread policy and long-frame lines as in X1.0"); } return v; }
+// The suspend has a limit. Ocarina of Time's test 3 (baf45a97) on an iPhone 18 Pro Max froze once as Link stepped into water (presents stopped, audio went on, no [RED] line);
+// the owner closed it from the app switcher and the log ended at "oe focus state -> 2/3" and "audio suspended": front_ios.m's sceneDidEnterBackground calls this on the main
+// thread, and it waited with no limit for the graphics calls in progress (g_inflight_api), then mtl_drain for the present on the GPU, the present queue, the snapshot copies, a
+// one-off command buffer and the last fence. With the GPU or the feedback queue stuck it never returned, so archive_background and save_sync_background after it never started (the
+// cloud save of what the game had written), and the relaunch came up black. Now everything going to the background takes at most SUSP_LIMIT_NS (3 s) of the main thread: the
+// graphics calls are waited for until then, and the drain runs on a thread of its own (gfx_drain_by) with every wait on its path ending at the same time (nvn_mtl.m mtl_drain_by,
+// t_drain_by), the main thread waiting for it no longer (plus SUSP_GRACE_NS for the drain to say which step it was); a lock it takes has no limit, the thread does. When the limit
+// comes first: "[RED] suspend: the GPU did not drain in 3 s" with the step, the freeze detector's dump on a utility queue (dm_stall_dump; the guest thread table's locks are only
+// tried, but for up to a second each, which the main thread does not wait for), and the rest is skipped: the drain, the memory trim (it frees what the GPU may still read) and
+// the pipeline archive's hand-over, which needs the compiler, not the GPU (a new MTL4Compiler for the next period: nvn_mtl.m mtl_arch_hold says why). The gate stays closed, so no
+// submission or present starts, and the call returns: the archive's background task (periods handed over before) and the cloud save start as before.
+// Coming back (on 0) after such a suspend: the drain is tried again, up to SUSP_RESUME_NS; done, graphics resume as after any suspend ("the drain ... has finished since"); not,
+// the gate stays closed (nothing is submitted or presented: the game stands as it stood) with a red line, and a thread of its own tries again every second while the app stays in
+// the foreground (susp_retry_main), opening the gate when a drain finishes; a stall that only outlasted the 3 s, such as a long residency commit holding the feedback queue, then
+// resumes by itself instead of leaving the game frozen until the next trip to the background. Behaviour with a drain that finishes in time is unchanged
+#define SUSP_LIMIT_NS 3000000000ull
+#define SUSP_GRACE_NS 100000000ull
+#define SUSP_RESUME_NS 1000000000ull
+#define SUSP_RETRY_NS 1000000000ull
+static int g_susp_stuck;   // under g_susp_mu: the last suspend's drain did not finish in its limit, and none has since
+static int g_susp_want, g_susp_retry;   // under g_susp_mu: a resume is owed (a resume that could not drain sets it, any suspend clears it); the retry's thread runs
+static uint64_t g_susp_gen;   // under g_susp_mu: suspends so far; a retry's drain begun before a suspend never opens the gate after it
+static uint64_t susp_now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }   // the drain's limit's clock (nvn_mtl.m t_drain_by)
+static int susp_wait_until(pthread_cond_t *cv, pthread_mutex_t *mu, uint64_t until) {   // one timed wait; 0 once until has passed
+    uint64_t now = susp_now(); if (now >= until) return 0;
+    uint64_t left = until - now; struct timespec ts = {(time_t)(left / 1000000000ull), (long)(left % 1000000000ull)};
+    pthread_cond_timedwait_relative_np(cv, mu, &ts); return 1;
+}
+// The drain's thread: one at a time (g_drain_run), its result in g_drain_what (NULL: drained). A thread still held past its limit (by a lock) makes the next drain wait for it
+static pthread_mutex_t g_drain_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_drain_cv = PTHREAD_COND_INITIALIZER;
+static int g_drain_run; static uint64_t g_drain_by; static const char *g_drain_what;
+static void *gfx_drain_main(void *arg) {
+    (void)arg; pthread_setname_np("nvn suspend drain");
+    pthread_mutex_lock(&g_drain_mu); uint64_t by = g_drain_by; pthread_mutex_unlock(&g_drain_mu);
+    const char *what = mtl_drain_by(by);
+    pthread_mutex_lock(&g_drain_mu); g_drain_what = what; g_drain_run = 0; pthread_cond_broadcast(&g_drain_cv); pthread_mutex_unlock(&g_drain_mu);
+    return NULL;
+}
+// Drain with every wait ending at by; the caller waits no longer than by plus the grace. NULL: drained; else what did not
+static const char *gfx_drain_by(uint64_t by) {
+    pthread_mutex_lock(&g_drain_mu);
+    while (g_drain_run && susp_wait_until(&g_drain_cv, &g_drain_mu, by)) {}
+    if (g_drain_run) { pthread_mutex_unlock(&g_drain_mu); return "an earlier drain, still held where no wait has a limit (a lock)"; }
+    g_drain_run = 1; g_drain_by = by; g_drain_what = NULL;
+    pthread_mutex_unlock(&g_drain_mu);
+    pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_attr_set_qos_class_np(&at, QOS_CLASS_USER_INTERACTIVE, 0);   // the main thread waits for it
+    pthread_t th; int err = pthread_create(&th, &at, gfx_drain_main, NULL); pthread_attr_destroy(&at);
+    if (err) { pthread_mutex_lock(&g_drain_mu); g_drain_run = 0; pthread_mutex_unlock(&g_drain_mu); return "the drain's thread, which could not start"; }
+    pthread_mutex_lock(&g_drain_mu);
+    while (g_drain_run && susp_wait_until(&g_drain_cv, &g_drain_mu, by + SUSP_GRACE_NS)) {}
+    const char *what = g_drain_run ? "the drain's thread, held where no wait has a limit (a lock)" : g_drain_what;
+    pthread_mutex_unlock(&g_drain_mu);
+    return what;
+}
+// The freeze detector's dump (stall.c); a build without the detector (the graphics tests) has this weak one, the graphics wait points
+__attribute__((weak)) void dm_stall_dump(void) { mtl_wait_state_dump(); }
+static void susp_dump(void *arg) { (void)arg; dm_stall_dump(); LOG("[nvn] suspend: dump end"); }
+// The graphics calls in progress and the drain, both ending at by: NULL when done, else what was not (into buf for the calls)
+static const char *susp_drain(uint64_t by, char *buf, size_t n) {
+    pthread_mutex_lock(&g_susp_mu);
+    while (g_inflight_api && susp_wait_until(&g_susp_cv, &g_susp_mu, by)) {}
+    int api = g_inflight_api;
+    pthread_mutex_unlock(&g_susp_mu);
+    if (api) { snprintf(buf, n, "%d graphics call%s in progress (a submission or a present that did not return)", api, api == 1 ? "" : "s"); return buf; }
+    return gfx_drain_by(by);
+}
+// After a resume that could not drain, in the foreground with the gate closed: every SUSP_RETRY_NS, while that resume is still owed, a look that costs nothing (no graphics call in
+// progress, every fence back) and only then a drain of up to SUSP_RESUME_NS (so a GPU that stays stuck gets no one-off command buffer a second; the drain's own thread is still one
+// at a time). A drain done opens the gate as the resume would have; a suspend meanwhile (g_susp_want cleared, g_susp_gen moved on) ends the thread with the gate left to it
+static void *susp_retry_main(void *arg) {
+    (void)arg; pthread_setname_np("nvn resume retry");
+    uint64_t t0 = susp_now(); int tries = 0; char buf[160];
+    pthread_mutex_lock(&g_susp_mu);
+    for (;;) {
+        uint64_t until = susp_now() + SUSP_RETRY_NS;
+        while (g_susp_want && g_susp_stuck && susp_wait_until(&g_susp_cv, &g_susp_mu, until)) {}
+        if (!g_susp_want || !g_susp_stuck) break;
+        uint64_t gen = g_susp_gen; int api = g_inflight_api;
+        pthread_mutex_unlock(&g_susp_mu);
+        const char *what = "";
+        if (!api && mtl_completed_fence() >= mtl_last_fence()) { tries++; what = susp_drain(susp_now() + SUSP_RESUME_NS, buf, sizeof buf); }
+        pthread_mutex_lock(&g_susp_mu);
+        if (!what && g_susp_want && g_susp_stuck && gen == g_susp_gen) {
+            g_susp_want = 0; g_susp_stuck = 0; g_susp = 0; pthread_cond_broadcast(&g_susp_cv);
+            pthread_mutex_unlock(&g_susp_mu);
+            LOG("[nvn] the drain that did not finish going to the background has finished since (%.1f s after the resume, drain %d): graphics resumed", (susp_now() - t0) / 1e9, tries);
+            pthread_mutex_lock(&g_susp_mu);
+            break;
+        }
+    }
+    g_susp_retry = 0;
+    pthread_mutex_unlock(&g_susp_mu);
+    return NULL;
+}
+static void susp_retry_start(void) {   // a resume that could not drain: owed from now on, and the retry's thread started unless one runs
+    pthread_mutex_lock(&g_susp_mu); g_susp_want = 1; int start = !g_susp_retry; g_susp_retry = 1; pthread_mutex_unlock(&g_susp_mu);
+    if (!start) return;
+    pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_attr_set_qos_class_np(&at, QOS_CLASS_UTILITY, 0);
+    pthread_t th; int err = pthread_create(&th, &at, susp_retry_main, NULL); pthread_attr_destroy(&at);
+    if (err) { pthread_mutex_lock(&g_susp_mu); g_susp_retry = 0; pthread_mutex_unlock(&g_susp_mu); LOG("[RED] resume: the retry's thread could not start (%d): graphics stay suspended until the next suspend and resume", err); }
+}
 void dm_gfx_suspend(int on) {
+    uint64_t t0 = susp_now();
     pthread_mutex_lock(&g_susp_mu);
     if (on && !g_away_since) g_away_since = now_ns() | 1;
     else if (!on && g_away_since) { g_away_sum += now_ns() - g_away_since; g_away_since = 0; }
-    g_susp = on != 0;
-    if (on) while (g_inflight_api) pthread_cond_wait(&g_susp_cv, &g_susp_mu);
-    else pthread_cond_broadcast(&g_susp_cv);
+    int stuck = g_susp_stuck;
+    if (on) { g_susp = 1; g_susp_gen++; if (g_susp_want) { g_susp_want = 0; pthread_cond_broadcast(&g_susp_cv); } }   // a resume owed is not owed in the background: the retry ends
+    else if (!stuck) { g_susp = 0; pthread_cond_broadcast(&g_susp_cv); }
     pthread_mutex_unlock(&g_susp_mu);
-    if (on) { mtl_drain(); mtl_arch_save(0, 0); LOG("[nvn] graphics suspended: in-flight GPU work drained"); if (mtl_bg_trim_on()) dm_gfx_trim(3); } else { mtl_arch_resume(); LOG("[nvn] graphics resumed"); }
+    char buf[160];
+    if (!on) {
+        if (stuck) {   // the last suspend did not drain: resume only once it has
+            const char *what = susp_drain(t0 + SUSP_RESUME_NS, buf, sizeof buf);
+            if (what) {
+                mtl_arch_resume();
+                LOG("[RED] resume: the GPU has still not drained (%s): graphics stay suspended, nothing is submitted or presented (the picture stands); tried again every second "
+                    "while in the foreground, and by the next suspend and resume", what);
+                susp_retry_start();
+                return;
+            }
+            pthread_mutex_lock(&g_susp_mu); g_susp_stuck = 0; g_susp_want = 0; g_susp = 0; pthread_cond_broadcast(&g_susp_cv); pthread_mutex_unlock(&g_susp_mu);
+            LOG("[nvn] the drain that did not finish going to the background has finished since (%.0f ms now)", (susp_now() - t0) / 1e6);
+        }
+        mtl_arch_resume(); LOG("[nvn] graphics resumed");
+        return;
+    }
+    const char *what = susp_drain(t0 + SUSP_LIMIT_NS, buf, sizeof buf);
+    if (what) {
+        pthread_mutex_lock(&g_susp_mu); g_susp_stuck = 1; pthread_mutex_unlock(&g_susp_mu);
+        mtl_arch_hold();
+        LOG("[RED] suspend: the GPU did not drain in %.0f s (at %.1f s, still waiting for %s): the rest of the drain, the memory trim and the pipeline archive's hand-over (it needs the "
+            "compiler) are skipped; graphics stay suspended, nothing new is submitted; a dump follows", SUSP_LIMIT_NS / 1e9, (susp_now() - t0) / 1e9, what);
+        dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), NULL, susp_dump);
+        return;
+    }
+    pthread_mutex_lock(&g_susp_mu); g_susp_stuck = 0; pthread_mutex_unlock(&g_susp_mu);
+    mtl_arch_save(0, 0); LOG("[nvn] graphics suspended: in-flight GPU work drained"); if (mtl_bg_trim_on()) dm_gfx_trim(3);
     // The pipeline archive starts writing what it holds: a process in the background may be ended without a word (iOS), and a prewarm's captures wait for a full period. Then, with the gate closed and nothing in flight, the idle caches go
     // (dm_gfx_trim: a suspended app holding less is less likely to be ended for memory; DM_BG_TRIM=0 keeps them)
 }
@@ -2064,14 +2196,12 @@ static void power_detail(uint64_t frame, double secs, int show) {
 // spreads over 5 to 10 s: CPU energy, CPU time, its share on performance cores and each cluster's clock (nvn_power.h nvn_pd_tick_text), the frame rate, GPU time per second two ways,
 // and the acquiring thread's demoted frames (acq_demote_check). GPU time: the sum of each frame's command buffers' GPU time (mtl_gpu_ms, which counts overlapping command buffers twice
 // and arrives about 8 frames late), and the union of the frames' spans from first GPU start to last GPU end (mtl_gpu_span, which counts gaps inside a frame): both approximate, and
-// both replace the power line's task_gpu_utilisation, which the iPhone left at 0. A frame whose GPU time was not in 8 frames later is left out of both
+// both replace the power line's task_gpu_utilisation, which the iPhone left at 0. A frame whose GPU time was not in 8 frames later is left out of both, and a frame whose GPU start
+// or end is unset or whose span is over 1 s is left out of the union (nvn_power.h nvn_pd_span_add; the first tick of Ocarina of Time's iPhone test 3 read 42,556,079 ms/s there)
 static double g_tick_gpu_ms, g_tick_span_ms; static uint64_t g_tick_span_end;   // the present thread's, since the last tick
 static void tick_gpu(double ms, int span, uint64_t g0, uint64_t g1) {
     if (ms >= 0) g_tick_gpu_ms += ms;
-    if (!span) return;
-    uint64_t s0 = g0 > g_tick_span_end ? g0 : g_tick_span_end;   // the part not already in the union
-    if (g1 > s0) g_tick_span_ms += (g1 - s0) / 1e6;
-    if (g1 > g_tick_span_end) g_tick_span_end = g1;
+    if (span) nvn_pd_span_add(&g_tick_span_ms, &g_tick_span_end, g0, g1);
 }
 void mtl_perf_profile_watch(void);   // nvn_mtl.m: the performance profile line, and again on each change
 static void power_tick(uint64_t frame) {
@@ -2080,7 +2210,7 @@ static void power_tick(uint64_t frame) {
     uint64_t t = now_ns(), chk = atomic_load_explicit(&g_acq_chk, memory_order_relaxed), dem = atomic_load_explicit(&g_acq_dem, memory_order_relaxed);
     if (t0 && t - t0 < 1000000000ull) return;
     nvn_pd p; int ok = nvn_pd_read(&p);
-    if (!t0) mtl_perf_profile_watch();
+    if (!t0) { mtl_perf_profile_watch(); g_tick_span_end = 0; }   // the first tick: the union starts afresh, with no end left from frames before the baseline
     else if (t - t0 > 2000000000ull) {}   // after a pause or a stay in the background with no presents: a new baseline, not one line averaged over the gap
     else {
         char b[640]; nvn_pd_tick_text(b, sizeof b, ok && ok0 ? &p0 : NULL, &p, (t - t0) / 1e9, frame - f0, g_tick_gpu_ms, g_tick_span_ms, chk - c0, dem - d0);

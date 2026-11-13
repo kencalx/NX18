@@ -75,6 +75,17 @@ static inline size_t nvn_pd_tick_text(char *out, size_t n, const nvn_pd *a, cons
     if (o < n && chk) o += (size_t)snprintf(out + o, n - o, "; acquiring thread demoted in %llu of %llu frames", (unsigned long long)dem, (unsigned long long)chk);
     return o < n ? o : n - 1;
 }
+// The power tick's second GPU figure (hle_nvn.c tick_gpu): add one frame's GPU span [g0, g1] (mach absolute time, ns; nvn_mtl.m mtl_gpu_span) to the union since the last tick,
+// *span_ms, counting only the part after *end, the latest GPU end already in it. A frame whose start or end is unset (0) or whose span is over 1 s is left out: no frame of a game
+// takes a second on the GPU, and such a span is a time that was never set or was left over. Ocarina of Time's first power tick in iPhone test 3 read about 42,556,079 ms/s and
+// 133,359 ms/s as the union: the first a union counted from time 0, the second a span from a start left over from earlier. Returns 1 when the frame was counted
+static inline int nvn_pd_span_add(double *span_ms, uint64_t *end, uint64_t g0, uint64_t g1) {
+    if (!g0 || !g1 || g1 < g0 || g1 - g0 > 1000000000ull) return 0;
+    uint64_t s0 = g0 > *end ? g0 : *end;   // the part not already in the union
+    if (g1 > s0) *span_ms += (g1 - s0) / 1e6;
+    if (g1 > *end) *end = g1;
+    return 1;
+}
 // The front end's power state (dm_power_source: known bit 1 battery, bit 2 Low Power Mode; state 1 on battery, 2 charging, 3 full and plugged in, 4 plugged in but not charging
 // (a Mac held below full by optimized charging), 0 unknown; pct -1 unknown): "battery 63%, on battery; Low Power Mode off". A part the platform does not give says so once (told: the parts said)
 static inline size_t nvn_pd_power_text(char *out, size_t n, int known, int pct, int state, int lpm, int *told) {

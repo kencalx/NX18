@@ -62,6 +62,14 @@ static void reuse_case(id<CAMetalDrawable> dr, id<MTLSharedEvent> gate, uint64_t
     int left = g_pq_inflight; uint64_t done = g_pq_done; pthread_mutex_unlock(&g_pq_mu);
     CHECK("every present completed", left == 0 && done == ticket);
 }
+// What the waits write to stderr (MLOG) while f runs, echoed: the allocator wait's line at the 10 s mark (nvn_mtl.m wait_say), shortened for the case
+static char g_err[16384];
+static const char *stderr_of(void (^f)(void)) {
+    g_err[0] = 0; char path[] = "/tmp/t_present_alloc.XXXXXX"; int fd = mkstemp(path); if (fd < 0) { f(); return g_err; }
+    unlink(path); fflush(stderr); int saved = dup(2); if (saved < 0) { close(fd); f(); return g_err; }
+    dup2(fd, 2); f(); fflush(stderr); dup2(saved, 2); close(saved);
+    ssize_t n = pread(fd, g_err, sizeof g_err - 1, 0); g_err[n > 0 ? n : 0] = 0; close(fd); fputs(g_err, stderr); return g_err;
+}
 static int bad_pixels(id<MTLTexture> t, uint8_t left, uint8_t right) {
     id<MTLBuffer> out = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
     T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> b = t4_copy(cb);
@@ -149,13 +157,20 @@ int main(void) { @autoreleasepool {
 
     // A dropped frame: ticket 1 on allocator 1, then 3 (2 dropped) on allocator 0, then 4 on allocator 1 again with two presents in flight
     [g_q4 waitForEvent:gate value:1];   // nothing committed to the Metal 4 queue from here runs until the gate opens
+    CHECK("no present has completed: the freeze detector's clock (dm_present_done_ns) is 0", atomic_load(&dm_present_done_ns) == 0);
     present_enqueue(&a, 1. / 60, NULL, NULL);
     id<CAMetalDrawable> first = tick();
     present_enqueue(&b, 1. / 60, NULL, NULL); present_enqueue(&b, 1. / 60, NULL, NULL); present_enqueue(&c, 1. / 60, left_half, NULL);
     tick();
     printf("after the drop: read %llu, done %llu, in flight %d\n", (unsigned long long)g_pq_read, (unsigned long long)g_pq_done, g_pq_inflight);
     CHECK("ticket 1 has not completed", g_pq_inflight == 2);
-    reuse_case(drawable(), gate, 1, 4, 2, 1);
+    // The held tick waits 300 ms for its allocator, past the 10 s mark shortened to 100 ms: it says so once, with its site and the allocator's tickets, and still waits for the GPU
+    g_wait_say_ns = 100000000ull;
+    const char *err = stderr_of(^{ reuse_case(drawable(), gate, 1, 4, 2, 1); });
+    g_wait_say_ns = 10000000000ull;
+    { static const char line[] = "[RED] the host has waited 0.1 s for the present allocator's previous present on the GPU at present_now (nvn_mtl.m:"; const char *w = strstr(err, line);
+      CHECK("the allocator wait past the mark says so once, with its site", w && !strstr(w + sizeof line - 1, "waited 0.1 s for the present allocator") && strstr(w, "allocator 1 last used by ticket 1, its feedback reported 0;")); }
+    { uint64_t t = atomic_load(&dm_present_done_ns); CHECK("a completed present sets the freeze detector's clock", t && t <= now_ns() && now_ns() - t < 5000000000ull); }
     int bad = bad_pixels(first.texture, 50, 150); printf("ticket 1 drawable: %d of 64 pixels wrong\n", bad);
     CHECK("ticket 1 shows its own picture", bad == 0);
 

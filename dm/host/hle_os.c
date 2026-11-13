@@ -75,10 +75,15 @@ void dm_guest_frame_tick(void) {
     }
     if (!atomic_load(&g_gfz)) { atomic_fetch_add(&g_gdet, g_gdet_step); dm_guest_clock_advanced(); }
 }
+static _Atomic uint64_t g_gfz_thawed;   // when the guest clock last started again after a freeze (now_ns), for the freeze detector
 static void guest_clock_freeze_apply(int on) {
     if (on && !atomic_load(&g_gfz)) { atomic_store(&g_gfrozen, now_ns() - atomic_load(&g_glag)); atomic_store(&g_gfz, 1); }
-    else if (!on && atomic_load(&g_gfz)) { atomic_store(&g_glag, now_ns() - atomic_load(&g_gfrozen)); atomic_store(&g_gfz, 0); }
+    else if (!on && atomic_load(&g_gfz)) { atomic_store(&g_gfz_thawed, now_ns()); atomic_store(&g_glag, now_ns() - atomic_load(&g_gfrozen)); atomic_store(&g_gfz, 0); }
 }
+// The freeze detector (stall.c) holds off while the guest clock stands still for any reason: the game is held on purpose there. The inline keyboard's text box (hle_swkbd.c
+// h_ikb_Calc, Monster Hunter Rise's hunter name) blocks the game's thread in front_text_input with the clock frozen (reason 2) but no library applet open, so the game still
+// sees focus 1 and presents nothing while the player types. Returns whether it is frozen now; *thawed: when it last started again (0: never frozen)
+int guest_clock_frozen(uint64_t *thawed) { *thawed = atomic_load(&g_gfz_thawed); return atomic_load(&g_gfz); }
 // Freezing has several unrelated reasons (0 freeze tick for testing / loading screen, 1 App in background, 2 system keyboard up): freeze if any holds, release only when all are lifted --
 // otherwise "switch to background and back while the keyboard is up" would be released early by the unfreeze on returning to foreground
 static pthread_mutex_t g_gfz_mu = PTHREAD_MUTEX_INITIALIZER; static unsigned g_gfz_reasons;

@@ -166,6 +166,7 @@ void dm_audio_reset(void) {}
 void dm_audio_route_change(const char *why, int changed) { (void)why; (void)changed; }
 void dm_focus_set(int state) { (void)state; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
+void dm_stall_menu(int open) { (void)open; }   // the freeze detector (stall.c), which DmGamepad.m holds off while the in-game menu is open: no presents and no detector in the harness
 const char *front_ios_boot_message(void) { return NULL; }
 const char *front_ios_device_check(void) { return NULL; }   // a supported GPU
 const char *dm_save_title(void) { return "0100D0D0D0D0E000"; }   // hle_fs.c's, from the game's profile: the title ID the cloud file is named after (save_sync.c, compiled here, has save_sync_flush)

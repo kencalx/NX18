@@ -117,7 +117,7 @@ SWITCH_BINDING = [
     ('pool_ids_8k', '', {'what': "a pool table's lists of IDs to take again hold 8,192 instead of 1,024, past which a change builds the table whole", 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
      'why': "upstream's limit for every game (NXNative 034e91a8): one patch takes 8,192 IDs, and with 1,024 a table was built whole at nearly every submission while Ocarina of Time streamed an area behind its menu; per game (Ocarina of Time) only for the frozen release",
      'blocked': 'X1.0 is frozen: the default for every game is X2.0 work, after an iPhone log of Ocarina of Time that reaches the old limit and regress.py on games with large pools'}),
-    ('ghost_table', '', {'what': 'the finalized-texture table holds 4,096 instead of 512', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
+    ('ghost_table', '', {'what': 'the finalized-texture table holds up to 4,096 instead of 512', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
      'why': 'a table sized to what a game replays of its finalized textures; a larger one for every game holds more of those textures alive, so the size stays per game until a memory check on games near their limit',
      'blocked': 'an iPhone A/B on Ocarina of Time first, then a memory check of a larger default on games near their limit'}),
     ('movie_restart', '', {'what': 'a VideoToolbox movie session iOS invalidated in the background restarted at the next key frame', 'now': 'game', 'goal': 'host', 'purpose': 'runtime',

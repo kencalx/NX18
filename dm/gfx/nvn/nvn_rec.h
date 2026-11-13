@@ -56,20 +56,32 @@ static void *ubc_thread(void *arg) {
     }
     return NULL;
 }
-// Wait until the first seq ops are made (the replay thread, or the encode thread at a commit): spin a moment, then sleep on g_ubc_done
-static void ubc_wait(uint64_t seq) {
+// Wait until the first seq ops are made (the replay thread, or the encode thread at a commit): spin a moment, then sleep on g_ubc_done. The sleep ends at the 10 s mark once
+// (os_sync_wait_on_address_with_timeout, up to the mark only) to say it with the site (nvn_mtl.m wait_say); a waker's call finds it asleep as before, and after the mark it is the
+// plain sleep again. A timed-out sleep is a spurious return to this loop
+static void ubc_wait_at(uint64_t seq, const char *site) {
     if (atomic_load_explicit(&g_ubc_done, memory_order_acquire) >= seq) return;
-    uint64_t w0 = ws_t0();
+    uint64_t w0 = ws_t0(); wait_mark m = {0, 1}; int slept = 0;
     for (int spin = 0;; spin++) {   // the copies are queued, so the copy thread is awake or woken by their push
         if (spin < UBC_SPIN) { __builtin_arm_yield(); if (atomic_load_explicit(&g_ubc_done, memory_order_acquire) >= seq) break; continue; }
+        if (!slept) { slept = 1; wait_mark_set(&m); }
         atomic_fetch_add(&g_ubc_waiting, 1);   // counted first, then the word (as the copy thread's store and count load): it sees this waiter or this sees its store
-        uint64_t d = atomic_load(&g_ubc_done);
-        if (d < seq) os_sync_wait_on_address(&g_ubc_done, d, sizeof g_ubc_done, OS_SYNC_WAIT_ON_ADDRESS_NONE);
+        uint64_t d = atomic_load(&g_ubc_done), left = m.told ? 0 : wait_mark_left(&m);
+        if (d < seq) {
+            if (m.told) os_sync_wait_on_address(&g_ubc_done, d, sizeof g_ubc_done, OS_SYNC_WAIT_ON_ADDRESS_NONE);
+            else if (left) os_sync_wait_on_address_with_timeout(&g_ubc_done, d, sizeof g_ubc_done, OS_SYNC_WAIT_ON_ADDRESS_NONE, OS_CLOCK_MACH_ABSOLUTE_TIME, left);
+        }
         atomic_fetch_sub(&g_ubc_waiting, 1);
         if (atomic_load_explicit(&g_ubc_done, memory_order_acquire) >= seq) break;
+        if (wait_mark_due(&m)) {
+            static _Atomic int n;
+            wait_say(&n, "the uniform copies", site, "up to op %llu: made %llu of %llu queued; the copy thread %s", (unsigned long long)seq, (unsigned long long)atomic_load(&g_ubc_done),
+                     (unsigned long long)atomic_load(&g_ubc_head), atomic_load(&g_ubc_sleeping) ? "sleeps" : "is awake");
+        }
     }
     if (ws_on()) ws_put(WS_UBC, w0, 1);
 }
+#define ubc_wait(seq) ubc_wait_at(seq, LOCK_SITE)
 static inline uint64_t ubc_head(void) { return atomic_load_explicit(&g_ubc_head, memory_order_relaxed); }
 // Queue a copy (submit thread only); returns the count of ops that must be made for it to be done
 static uint64_t ubc_push(void *d, const void *s, size_t n) {
@@ -124,11 +136,35 @@ static inline uint64_t rec_f(float f) { uint32_t u; memcpy(&u, &f, 4); return u;
 static inline float rec_fv(uint64_t v) { uint32_t u = (uint32_t)v; float f; memcpy(&f, &u, 4); return f; }
 
 static pthread_mutex_t g_note_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_note_cv = PTHREAD_COND_INITIALIZER;
-// Wait until the encode thread has passed a RO_NOTE of at least v on p (only the encode thread's progress through what is queued, never the GPU)
-static void rec_note_wait(_Atomic uint64_t *p, uint64_t v) {
-    if (atomic_load(p) >= v) return;
-    pthread_mutex_lock(&g_note_mu); while (atomic_load(p) < v) pthread_cond_wait(&g_note_cv, &g_note_mu); pthread_mutex_unlock(&g_note_mu);
+
+// What the encode thread is doing, for the freeze detector's dump (nvn_mtl.m mtl_stall_dump): set where it may wait (for work, for the uniform copies, for the residency commit lock)
+// and around its queue calls, with the time it entered the state (mach ticks); not per record, so a block's calls cost nothing more
+enum { RX_IDLE, RX_BLOCK, RX_UBC, RX_RESLOCK, RX_COMMIT, RX_SIGNAL, RX_CB_BLOCK, RX_Q_BLOCK, RX_NOTE, RX_N };
+static const char *const rx_name[RX_N] = {"waiting for work", "making a block's calls", "waiting for the uniform copies (ubc_wait)", "waiting for the residency commit lock",
+    "in the queue's commit", "in the queue's event signal", "in a framework's encoding (RO_CB_BLOCK)", "in a queue operation (RO_Q_BLOCK)", "publishing a note"};
+static _Atomic uint32_t g_rx_state; static _Atomic uint64_t g_rx_since;
+static inline void rx_set(uint32_t s) { atomic_store_explicit(&g_rx_since, mach_absolute_time(), memory_order_relaxed); atomic_store_explicit(&g_rx_state, s, memory_order_relaxed); }
+// The encode thread's state for a wait's 10 s line: what it does and for how long
+static void rx_now(char *out, size_t size) {
+    uint32_t st = atomic_load_explicit(&g_rx_state, memory_order_relaxed); uint64_t since = atomic_load_explicit(&g_rx_since, memory_order_relaxed), now = mach_absolute_time();
+    snprintf(out, size, "the encode thread %s for %.1f s", rx_name[st < RX_N ? st : 0], since && now > since ? mach_s(now - since) : 0.0);
 }
+// Wait until the encode thread has passed a RO_NOTE of at least v on p (only the encode thread's progress through what is queued, never the GPU). At the 10 s mark it says so once,
+// with the caller's site and what the encode thread is doing (nvn_mtl.m wait_say), and waits on. Under the suspend's limit (nvn_mtl.m t_drain_by: snap_drain in mtl_drain_by) it
+// ends there; the caller reads the note again
+static void rec_note_wait_at(_Atomic uint64_t *p, uint64_t v, const char *site) {
+    if (atomic_load(p) >= v) return;
+    wn_in(WN_NOTE, v);
+    wait_mark m; wait_mark_set(&m);   // the 10 s line, once; the wait is as long as before
+    pthread_mutex_lock(&g_note_mu);
+    while (atomic_load(p) < v && !drain_over()) {
+        wait_mark_sleep(&g_note_cv, &g_note_mu, &m);
+        if (atomic_load(p) < v && wait_mark_due(&m)) { static _Atomic int n; char rx[160]; rx_now(rx, sizeof rx); wait_say(&n, "the encode thread's note", site, "value %llu, the note at %llu; %s", (unsigned long long)v, (unsigned long long)atomic_load(p), rx); }
+    }
+    pthread_mutex_unlock(&g_note_mu);
+    wn_out(WN_NOTE);
+}
+#define rec_note_wait(p, v) rec_note_wait_at(p, v, LOCK_SITE)
 
 // ---------- The encode thread ----------
 static id g_rx_cb, g_rx_enc;   // the encode thread's real command buffer and open encoder
@@ -138,17 +174,21 @@ static void rec_exec(const rec_t *r) {
     case RO_CB_NEW: g_rx_cb = [g_dev newCommandBuffer]; break;
     case RO_CB_BEGIN: [(id<MTL4CommandBuffer>)g_rx_cb beginCommandBufferWithAllocator:rec_id(a[0])]; break;
     case RO_CB_END: [(id<MTL4CommandBuffer>)g_rx_cb endCommandBuffer]; break;
-    case RO_CB_BLOCK: ((void (^)(id<MTL4CommandBuffer>))rec_id(a[0]))(g_rx_cb); break;
+    case RO_CB_BLOCK: rx_set(RX_CB_BLOCK); ((void (^)(id<MTL4CommandBuffer>))rec_id(a[0]))(g_rx_cb); rx_set(RX_BLOCK); break;
     case RO_COMMIT: case RO_COMMIT_REAL: {
-        if (r->op == RO_COMMIT) ubc_wait(a[2]);   // the uniform shadows this command buffer reads
+        if (r->op == RO_COMMIT) { rx_set(RX_UBC); ubc_wait(a[2]); }   // the uniform shadows this command buffer reads
         id<MTL4CommandBuffer> buffers[] = {r->op == RO_COMMIT ? g_rx_cb : rec_id(a[1])}; MTL4CommitOptions *o = rec_id(a[0]);
+        rx_set(RX_RESLOCK);
         res_commit_lock();   // apart from the residency set's commit, as the present snapshot's queue commit (nvn_mtl.m res_commit)
-        if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
-        pthread_mutex_unlock(&g_res_commit_mu);
+        rx_set(RX_COMMIT);
+        Q4_COMMIT_TIMED(r->op == RO_COMMIT ? "the encode thread (RO_COMMIT, a main command buffer)" : "the encode thread (RO_COMMIT_REAL)",
+                        if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1]);   // a commit of 100 ms or more says so (nvn_mtl.m q4_commit_slow)
+        res_commit_unlock();
+        rx_set(RX_BLOCK);
         if (r->op == RO_COMMIT) g_rx_cb = nil;
         break; }
-    case RO_SIGNAL: [g_q4 signalEvent:rec_id(a[0]) value:a[1]]; break;
-    case RO_Q_BLOCK: ((void (^)(void))rec_id(a[0]))(); break;
+    case RO_SIGNAL: rx_set(RX_SIGNAL); [g_q4 signalEvent:rec_id(a[0]) value:a[1]]; rx_set(RX_BLOCK); break;
+    case RO_Q_BLOCK: rx_set(RX_Q_BLOCK); ((void (^)(void))rec_id(a[0]))(); rx_set(RX_BLOCK); break;
     case RO_RE_BEGIN: g_rx_enc = [(id<MTL4CommandBuffer>)g_rx_cb renderCommandEncoderWithDescriptor:rec_id(a[0])]; break;
     case RO_CE_BEGIN: g_rx_enc = [(id<MTL4CommandBuffer>)g_rx_cb computeCommandEncoder]; break;
     case RO_END: [(id<MTL4CommandEncoder>)e endEncoding]; g_rx_enc = nil; break;
@@ -202,7 +242,7 @@ static void rec_exec(const rec_t *r) {
     case RO_LABEL: [(id<MTL4CommandEncoder>)e setLabel:rec_id(a[0])]; break;
     case RO_R_TS: [(id<MTL4RenderCommandEncoder>)e writeTimestampWithGranularity:a[1] afterStage:a[2] intoHeap:rec_id(a[0]) atIndex:a[3]]; break;
     case RO_C_TS: [(id<MTL4ComputeCommandEncoder>)e writeTimestampWithGranularity:a[1] intoHeap:rec_id(a[0]) atIndex:a[2]]; break;
-    case RO_NOTE: { _Atomic uint64_t *p = (_Atomic uint64_t *)(uintptr_t)a[0]; pthread_mutex_lock(&g_note_mu); if (a[1] > atomic_load(p)) atomic_store(p, a[1]); pthread_cond_broadcast(&g_note_cv); pthread_mutex_unlock(&g_note_mu); break; }
+    case RO_NOTE: { rx_set(RX_NOTE); _Atomic uint64_t *p = (_Atomic uint64_t *)(uintptr_t)a[0]; pthread_mutex_lock(&g_note_mu); if (a[1] > atomic_load(p)) atomic_store(p, a[1]); pthread_cond_broadcast(&g_note_cv); pthread_mutex_unlock(&g_note_mu); rx_set(RX_BLOCK); break; }
     default: MDIE("deferred encoding: unknown record %u", r->op);
     }
     for (uint32_t i = 0; i < r->nobj; i++) if (a[i]) CFRelease((CFTypeRef)(uintptr_t)a[i]);
@@ -215,10 +255,12 @@ static void *rec_thread(void *arg) {
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     const int rt = nvn_replay_rt();
     for (;;) {
+        rx_set(RX_IDLE);
         pthread_mutex_lock(&g_rb_mu);
         while (!g_rb_head) { g_rb_sleeping = 1; pthread_cond_wait(&g_rb_work, &g_rb_mu); g_rb_sleeping = 0; atomic_fetch_add_explicit(&g_rb_wakes, 1, memory_order_relaxed); }
         rec_blk *b = g_rb_head; g_rb_head = b->next; if (!g_rb_head) g_rb_tail = NULL; g_rb_busy = 1;
         pthread_mutex_unlock(&g_rb_mu);
+        rx_set(RX_BLOCK);
         @autoreleasepool { for (int i = 0; i < b->n; i++) rec_exec(&b->r[i]); }
         pthread_mutex_lock(&g_rb_mu);
         b->n = 0; b->next = g_rb_free; g_rb_free = b; g_rb_busy = 0;
@@ -253,17 +295,26 @@ static rec_t *rec_put(uint32_t op, uint32_t nobj) {
 // Hand over what is recorded and wait until the encode thread has made every call. The drains, the blocked ones and their wall time are counted for the translation detail line
 // (mtl_wait_stats; a clock is read only when the drain blocks); DM_NVN_WAITS=1's ledger counts them too, with the time of every drain
 static _Atomic uint64_t g_drains, g_drains_blocked, g_drain_ns;
-static void rec_drain(void) {
+static void rec_drain_at(const char *site) {
     if (!g_rb_started) return;
     rec_publish();
-    uint64_t w0 = ws_t0(), b0 = 0; int blocked = 0;
+    uint64_t w0 = ws_t0(), b0 = 0; int blocked = 0; wait_mark m = {0, 1};
     pthread_mutex_lock(&g_rb_mu);
-    while (g_rb_head || g_rb_busy) { if (!blocked) b0 = now_ns(); blocked = 1; pthread_cond_wait(&g_rb_idle, &g_rb_mu); }
+    while (g_rb_head || g_rb_busy) {
+        if (!blocked) { b0 = now_ns(); wn_in(WN_DRAIN, 0); wait_mark_set(&m); }   // the 10 s line, once; the wait is as long as before
+        blocked = 1; wait_mark_sleep(&g_rb_idle, &g_rb_mu, &m);
+        if ((g_rb_head || g_rb_busy) && wait_mark_due(&m)) {
+            static _Atomic int n; char rx[160]; rx_now(rx, sizeof rx); int blocks = 0; for (rec_blk *b = g_rb_head; b; b = b->next) blocks++;
+            wait_say(&n, "the encode thread to drain", site, "%d blocks queued, %s; fences completed %llu, submitted %llu", blocks, rx, (unsigned long long)atomic_load(&g_done), (unsigned long long)atomic_load(&g_fence));
+        }
+    }
+    if (blocked) wn_out(WN_DRAIN);
     pthread_mutex_unlock(&g_rb_mu);
     atomic_fetch_add_explicit(&g_drains, 1, memory_order_relaxed);
     if (blocked) { atomic_fetch_add_explicit(&g_drains_blocked, 1, memory_order_relaxed); atomic_fetch_add_explicit(&g_drain_ns, now_ns() - b0, memory_order_relaxed); }
     if (ws_on()) ws_put(WS_DRAIN, w0, blocked);
 }
+#define rec_drain() rec_drain_at(LOCK_SITE)
 // A block of records from another thread than the submit thread (the present snapshot's copy): it goes in one piece behind every block published so far. Everything the game
 // submitted before it presents is published by then (a submission publishes its records before it returns), so the block runs after the frame's work, and the presenting thread
 // does not wait for the encode thread
@@ -383,13 +434,13 @@ static void rec_commit(id cb, MTL4CommitOptions *o) {
     if ([cb isKindOfClass:[DmRecCB class]]) { rec_t *r = rec_put(RO_COMMIT, 1); r->a[0] = rec_obj(o); r->a[2] = ubc_head(); return; }
     ubc_wait(ubc_head());
     id<MTL4CommandBuffer> buffers[] = {cb};
-    if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+    Q4_COMMIT_TIMED("rec_commit (a main command buffer, no encode thread)", if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1]);
 }
 // An upload batch: its place in the queue is after what is recorded so far (it reads no uniform shadow)
 static void rec_commit_upload(id cb, MTL4CommitOptions *o) {
     if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_COMMIT_REAL, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); return; }
     id<MTL4CommandBuffer> buffers[] = {cb};
-    if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+    Q4_COMMIT_TIMED("rec_commit_upload (an upload batch, no encode thread)", if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1]);
 }
 // A queue operation (a sparse texture's mapping update, nvn_mtl.m sparse_*): on the encoding thread in its place among the recorded commits, so it reaches the queue before the upload batch
 // committed after it and after the command buffers committed before it

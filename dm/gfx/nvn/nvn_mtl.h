@@ -53,10 +53,13 @@ int mtl_wait(uint64_t fence, uint64_t timeout_ns);   // Returns 1 when the GPU h
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns);   // the same for a sync WindowAcquireTexture handed out (its own line in the wait ledger, DM_NVN_WAITS)
 void mtl_finish(void);                               // Wait for all submitted commands to complete
 void mtl_drain(void);                                // Wait for all commands on the queue (including presents) to complete: submit an empty command buffer and wait for it
+void mtl_wait_state_dump(void);                      // The graphics wait points in one log line (the watchdog, a suspend that did not drain)
+const char *mtl_drain_by(uint64_t by);               // mtl_drain with every wait ending at by (CLOCK_UPTIME_RAW ns; going to the background, dm_gfx_suspend): NULL when drained, else the step that reached it
 int mtl_pressure(int level);                         // The system's memory pressure changed (0 normal, 1 warning, 2 critical; any thread): logged, and a trim asked for the next submission's start; 1: asked
 uint64_t mtl_trim(int level);                        // Release what is idle and large now (no submission open, the GPU drained: dm_gfx_suspend, the tests); the bytes
 int mtl_bg_trim_on(void);                            // DM_BG_TRIM is not 0: going to the background trims (dm_gfx_suspend)
 void mtl_arch_save(int wait_ms, int ending);         // The pipeline archive's unwritten captures, written now even during the prewarm (going to the background, quitting); ending: the process ends after waiting up to wait_ms
+void mtl_arch_hold(void);                            // Going to the background with the drain not finished: the crash marker's background state only, nothing handed over (that needs the compiler)
 void mtl_arch_resume(void);                          // Back in the foreground: compacting writes arm the pipeline archive's crash marker again (none while in the background)
 int mtl_arch_wait(int wait_ms);                      // Waits up to wait_ms for the archive's writes handed over (mtl_arch_save); 1: none left
 void mtl_xv_window_tex(uint64_t serial);   // Register a window (swapchain) texture: the cross-submit validity ledger never collects it

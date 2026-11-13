@@ -125,6 +125,46 @@ int main(void) { @autoreleasepool {
     CHECK(dz_find(t16) == k16 && g_dz[k16].frame == made && dz_find(t32s) >= 0, "and a texture no larger than any waiting one is dropped");
     dz_tick(f0 + DZ_LAG - 1); CHECK(dz_waiting() == DZ_N, "the lines wait until the three frames' GPU times are known");
     dz_tick(f0 + DZ_LAG); CHECK(dz_waiting() == 0 && !atomic_load(&g_dz_up[k16]), "then each is written once, its slot free again");
+    // The batch's feedback with times that are not a GPU time (Ocarina of Time's iPhone test 3: lines of 4000000.0 ms and 171810.0 ms). Before, a start of 0 with an end at 42556.079 s
+    // of uptime stored the end's whole uptime cut at 4e9 us (4000000.0 ms), and a start 171.81 s before the end stored 171810.0 ms; both are "not known" now and add nothing to
+    // the timing line's @upload_gpu_ms. A real time still goes in (up_gpu_note, which up_flush's feedback handler calls)
+    dz_clear(); sq = ++g_up_seq; dz_note(t16, 72, 1); k16 = dz_find(t16); (void)mtl_upload_gpu_ns_take();
+    CHECK(k16 >= 0, "a note waits for the batch's feedback");
+    struct { double g0, g1; const char *label; } bad[] = {
+        {0, 42556.079, "a GPU start of 0 (was the end's uptime, 4000000.0 ms): not known"},
+        {100.0, 271.81, "a span of 171.81 s, a start left over (was 171810.0 ms): not known"},
+        {271.81, 100.0, "an end before the start: not known"},
+        {-1.0, 0.5, "a negative start: not known"}};
+    for (unsigned i = 0; k16 >= 0 && i < sizeof bad / sizeof bad[0]; i++) {
+        up_gpu_note(sq, bad[i].g0, bad[i].g1);
+        CHECK(atomic_load(&g_dz_up[k16]) == (uint64_t)sq << 32 && mtl_upload_gpu_ns_take() == 0, bad[i].label);
+    }
+    if (k16 >= 0) { double up = (uint32_t)atomic_load(&g_dz_up[k16]) ? 0 : -1; double gn[3] = {149.04, 3.2, 3.1}; dz_line(&g_dz[k16], line, sizeof line, up, gn); printf("line: %s\n", line);
+        CHECK(strstr(line, "the upload batch with them not known on the GPU") != NULL, "the line says the batch's time is not known, as dz_tick reads the empty low half"); }
+    up_gpu_note(sq + 1, 100.0, 100.00246);
+    CHECK(k16 >= 0 && atomic_load(&g_dz_up[k16]) == (uint64_t)sq << 32, "another batch's time does not land in the note");
+    uint64_t un = mtl_upload_gpu_ns_take(); CHECK(un > 2459000 && un < 2461000, "but goes into @upload_gpu_ms");
+    up_gpu_note(sq, 100.0, 100.00246); uint64_t uw = k16 >= 0 ? atomic_load(&g_dz_up[k16]) : 0;
+    CHECK((uw >> 32) == sq && (uint32_t)uw >= 2460 && (uint32_t)uw <= 2461, "a GPU time of 2.46 ms goes into the note (microseconds + 1)");
+    un = mtl_upload_gpu_ns_take(); CHECK(un > 2459000 && un < 2461000, "and into @upload_gpu_ms");
+    up_gpu_note(sq, 100.0, 109.5); CHECK(atomic_load(&g_dz_up[k16 >= 0 ? k16 : 0]) == uw && mtl_upload_gpu_ns_take() == 9500000000ull, "a span under 10 s counts; the note keeps its first time");
+    dz_clear();
+    // The power tick's span of one frame (mtl_gpu_span, which hle_nvn.c tick_gpu adds to the union through nvn_power.h nvn_pd_span_add), fed through the same ring the submissions
+    // fill (gpu_tag_begin / gpu_tag_done). Frames far above this test's own, so dz_tick's reads above are not touched. Ocarina of Time's first power tick in iPhone test 3 read about
+    // 42,556,079 ms/s as the union: a start just above 0 passes gpu_tag_done's own check and gave a span of the whole uptime, which mtl_gpu_span now does not return
+    {
+        uint64_t fs = 900000, s0 = 0, s1 = 0;
+        gpu_tag_begin(fs); gpu_tag_done(fs, 0, 0);
+        CHECK(!mtl_gpu_span(fs, &s0, &s1), "span: a frame whose command buffer came back with no GPU times has no span");
+        gpu_tag_begin(fs + 1); gpu_tag_done(fs + 1, 100.0, 100.012);
+        CHECK(mtl_gpu_span(fs + 1, &s0, &s1) && s0 == 100000000000ull && s1 - s0 > 11999000 && s1 - s0 < 12001000, "span: a 12 ms frame has its span");
+        gpu_tag_begin(fs + 2); gpu_tag_done(fs + 2, 1e-6, 42556.079);
+        CHECK(mtl_gpu_span(fs + 2, &s0, &s1) == 0 && mtl_gpu_ms(fs + 2) > 4e7, "span: a start just above 0 with an end at 42556 s of uptime has no span (was about 42,556,079 ms); the summed time is not changed");
+        gpu_tag_begin(fs + 3); gpu_tag_begin(fs + 3); gpu_tag_done(fs + 3, 100.0, 100.01); gpu_tag_done(fs + 3, 102.0, 102.01);
+        CHECK(mtl_gpu_span(fs + 3, &s0, &s1) == 0 && mtl_gpu_ms(fs + 3) > 19.99 && mtl_gpu_ms(fs + 3) < 20.01, "span: a frame whose command buffers spread over 2 s has no span, its summed time still counts");
+        gpu_tag_begin(fs + 4); gpu_tag_begin(fs + 4); gpu_tag_done(fs + 4, 100.0, 100.01);
+        CHECK(!mtl_gpu_span(fs + 4, &s0, &s1), "span: a frame with a command buffer still out has no span yet");
+    }
     printf("depth zero fill: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

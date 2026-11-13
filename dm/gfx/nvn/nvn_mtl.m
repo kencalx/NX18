@@ -186,7 +186,8 @@ static uint64_t g_pq_read;
 static id<MTLResidencySet> g_res;
 // Residency changes wait in g_res_q (under g_res_mu, each holding its allocation) until a commit applies them to g_res and commits it, under g_res_commit_mu alone. A commit
 // takes 10-25 ms when it adds hundreds of MB; while it held g_res_mu, as it did, every res_add and res_remove on any thread waited for it: the upload batches' completion
-// handlers commit their staging's removal, and the submit thread's res_add calls of Switch Sports Resort's court load took 42-56 ms of that frame (1.5-1.7 ms queued).
+// handlers committed their staging's removal (on the residency commit worker now, res_commit_async), and the submit thread's res_add calls of Switch Sports Resort's court load took
+// 42-56 ms of that frame (1.5-1.7 ms queued).
 // Queue commits that must stay apart from the set's commit (the present snapshot's, the one-off command buffers', the encode thread's in nvn_rec.h) hold g_res_commit_mu too,
 // through res_commit_lock (Port of NXNative 0c078130, PR #2379)
 typedef struct { CFTypeRef o; int add; } res_op;
@@ -291,14 +292,145 @@ static NSError *gpu_lost_test_error(void) {
 }
 
 static pthread_mutex_t g_res_mu = PTHREAD_MUTEX_INITIALIZER;   // Dedicated lock for the residency set: res_add is called on paths that hold g_mu (arena_new), so it cannot share g_mu
+// ---------- What the freeze detector's dump reads (mtl_stall_dump; dm/host/stall.c, DM_STALL_LOG) ----------
+// Ocarina of Time's test 3 froze once on an iPhone 18 Pro Max, 13 s after a save load as Link stepped into water: presents stopped, audio went on, and the log said nothing, no [RED]
+// line and no crash. Every wait that could have held it was silent: a command buffer that never completes logs nothing, the game's SyncWait sleeps on the GPU event for up to an hour
+// (mtl_wait_at), and rec_drain, rec_note_wait, ubc_wait, up_wait_zero and the present waits have no limit (they now say so once at 10 s, wait_say below, and wait on). The feedback handlers all run on the one serial queue
+// g_feedback_q, and the upload batch's handler committed the residency set (res_commit, under g_res_commit_mu) every time, so one long commit held back every completion, and g_done with
+// it, again with no line (no handler commits now: res_commit_async; a slow commit or lock wait says so, q4_commit_slow below). The detector's dump therefore needs, without taking any lock those paths can hold: who holds the two residency locks and since when, which feedback handler
+// runs and when the queue last ran one, which waits are in progress, and what the encode thread is doing. Everything below is a few relaxed atomic stores; the clock is
+// mach_absolute_time (no system call), read only where a lock is taken or a wait blocks, never per draw.
+//
+// Who holds a lock: the holder's mach thread (as svc_thread_dump names host threads), the site that took it (file:line) and since when (mach ticks), stored after each take and cleared
+// before each release. The dump reads these, never the lock, so a dump during a freeze cannot wait on the lock that froze it. A take whose note is not stored yet shows the previous holder
+#define LOCK_STR_(x) #x
+#define LOCK_STR(x) LOCK_STR_(x)
+#define LOCK_SITE __FILE_NAME__ ":" LOCK_STR(__LINE__)
+typedef struct { _Atomic uint32_t th; _Atomic(const char *) site; _Atomic uint64_t at; } lock_note;
+static lock_note g_res_commit_note, g_res_note;
+static inline void lock_note_take(lock_note *n, const char *site) {
+    atomic_store_explicit(&n->site, site, memory_order_relaxed); atomic_store_explicit(&n->at, mach_absolute_time(), memory_order_relaxed);
+    atomic_store_explicit(&n->th, pthread_mach_thread_np(pthread_self()), memory_order_release);
+}
+static inline void lock_note_drop(lock_note *n) { atomic_store_explicit(&n->th, 0, memory_order_release); }
+#define res_mu_lock() res_mu_lock_at(LOCK_SITE)
+static inline void res_mu_lock_at(const char *site) { pthread_mutex_lock(&g_res_mu); lock_note_take(&g_res_note, site); }
+static inline void res_mu_unlock(void) { lock_note_drop(&g_res_note); pthread_mutex_unlock(&g_res_mu); }
+static inline void res_commit_unlock(void) { lock_note_drop(&g_res_commit_note); pthread_mutex_unlock(&g_res_commit_mu); }
+static double mach_s(uint64_t ticks) { static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb); return (double)ticks * tb.numer / tb.denom / 1e9; }
+// The feedback queue's heartbeat: every commit feedback handler stamps its start and its end and names itself (they run one at a time on g_feedback_q), so a handler that never
+// returns shows as "running: upload batch for 12.0 s", and a queue that has run nothing for a while as the age of the last handler's end with g_done behind g_fence
+static _Atomic(const char *) g_fbq_what; static _Atomic uint64_t g_fbq_in, g_fbq_out, g_fbq_n;
+static inline void fb_in(const char *what) { atomic_store_explicit(&g_fbq_in, mach_absolute_time(), memory_order_relaxed); atomic_store_explicit(&g_fbq_what, what, memory_order_release); }
+static inline void fb_out(void) { atomic_store_explicit(&g_fbq_what, NULL, memory_order_relaxed); atomic_store_explicit(&g_fbq_out, mach_absolute_time(), memory_order_relaxed); atomic_fetch_add_explicit(&g_fbq_n, 1, memory_order_relaxed); }
+// Waits in progress: per kind, the threads blocked in it now, and what the latest one waits for and since when. Set and cleared only once a wait blocks (the fast paths pay nothing)
+enum { WN_EVENT, WN_DONE, WN_DRAIN, WN_NOTE, WN_UPZERO, WN_ONCE, WN_PALLOC, WN_PTICKET, WN_N };
+static const char *const wn_name[WN_N] = {"SyncWait on the GPU event (fence)", "wait for a fence's feedback (fence)", "encode thread drain (submit thread)", "encode thread note (value)",
+    "upload batches to complete (pending)", "one-off command buffer", "present allocator (ticket)", "present ticket (ticket)"};
+static struct { _Atomic int n; _Atomic uint64_t what, at; } g_wn[WN_N];
+static inline void wn_in(int k, uint64_t what) { atomic_store_explicit(&g_wn[k].what, what, memory_order_relaxed); atomic_store_explicit(&g_wn[k].at, mach_absolute_time(), memory_order_relaxed); atomic_fetch_add(&g_wn[k].n, 1); }
+static inline void wn_out(int k) { atomic_fetch_sub(&g_wn[k].n, 1); }
+// The 10 s mark: a wait with no limit that is still waiting after 10 s says so once, in a red line with its site, and then waits on exactly as before. Ocarina of Time's test 3 froze
+// with nothing in the log; the game's SyncWait sleeps on the GPU event for up to an hour (mtl_wait_at's fast wake), and up_wait_zero, the present waits (present_now's allocator,
+// mtl_present_wait), rec_drain, rec_note_wait and ubc_wait had no limit and no line, so whichever of them held the picture said nothing. The freeze detector (dm/host/stall.c)
+// names the waits in progress once presents stop in focus; these lines say it in the wait itself, in the background too and whatever stopped. Nothing changes for a wait that ends
+// before the mark: the clock is read once it blocks (CLOCK_UPTIME_RAW, the commpage, no system call), its sleeps are the same until the mark, and a wait past it wakes once there,
+// says it and goes back to the very wait it was in. Each site says it at most WAIT_SAY_MAX times a run. The graphics tests shorten the mark (g_wait_say_ns) to drive the lines
+static uint64_t g_wait_say_ns = 10000000000ull;
+enum { WAIT_SAY_MAX = 4 };
+typedef struct { uint64_t at; int told; } wait_mark;   // the mark (CLOCK_UPTIME_RAW ns), and whether this wait has said it (or has nothing to say: a limit before the mark)
+static inline void wait_mark_set(wait_mark *m) { m->at = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + g_wait_say_ns; m->told = 0; }
+static inline uint64_t wait_mark_left(const wait_mark *m) { uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); return now >= m->at ? 0 : m->at - now; }
+// 1 once, the first time it is called at or past the mark: the caller says what it waits for
+static inline int wait_mark_due(wait_mark *m) { if (m->told || wait_mark_left(m)) return 0; m->told = 1; return 1; }
+// The suspend's limit (mtl_drain_by; hle_nvn.c dm_gfx_suspend, going to the background). Ocarina of Time's test 3 (baf45a97) froze once on an iPhone 18 Pro Max as Link stepped
+// into water: presents stopped, audio went on, and when the owner closed it from the app switcher the log ended at "oe focus state -> 2/3" and "audio suspended". Going to the
+// background, dm_gfx_suspend runs on the main thread (front_ios.m sceneDidEnterBackground) and waited with no limit for the graphics calls in progress, the present on the GPU
+// (present_drop_for_suspend), the present queue, the snapshot copies, a one-off command buffer (once_wait, DISPATCH_TIME_FOREVER) and the last fence and upload batches
+// (mtl_finish_gpu): with the GPU or the feedback queue stuck it never returned, so the pipeline archive's background task and the cloud save after it never started, and the
+// relaunch came up black. The drain now runs with a deadline, a thread-local one so that no other caller of these waits changes: t_drain_by is set only on the thread that runs
+// mtl_drain_by (CLOCK_UPTIME_RAW ns, 0: no limit, every other thread). The waits on that path end at it, their loops checking drain_over, and say which one it was; the snapshot
+// copy's 10 s stop (snap_drain's MDIE) becomes that answer too, as a process stopped in the background is worse than one that says it did not drain
+static __thread uint64_t t_drain_by;
+static inline uint64_t drain_left(void) {   // what is left of the limit (ns); UINT64_MAX with none
+    if (!t_drain_by) return UINT64_MAX;
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); return now >= t_drain_by ? 0 : t_drain_by - now;
+}
+static inline int drain_over(void) { return t_drain_by && !drain_left(); }
+// pthread_cond_wait that also wakes at the mark (a timed-out wake is a spurious one to the caller's loop, which checks wait_mark_due); after the mark, pthread_cond_wait itself.
+// Under the suspend's limit (t_drain_by) it also wakes there, for the caller's loop to check drain_over
+static void wait_mark_sleep(pthread_cond_t *cv, pthread_mutex_t *mu, const wait_mark *m) {
+    uint64_t left = m->told ? UINT64_MAX : wait_mark_left(m), dl = drain_left();
+    if (!left || !dl) return;
+    if (dl < left) left = dl;
+    if (left == UINT64_MAX) { pthread_cond_wait(cv, mu); return; }
+    struct timespec ts = {(time_t)(left / 1000000000ull), (long)(left % 1000000000ull)};
+    pthread_cond_timedwait_relative_np(cv, mu, &ts);
+}
+// pthread_cond_wait, or under the suspend's limit a wait that ends there (present_drop_for_suspend)
+static void drain_cond_wait(pthread_cond_t *cv, pthread_mutex_t *mu) {
+    uint64_t dl = drain_left(); if (dl == UINT64_MAX) { pthread_cond_wait(cv, mu); return; }
+    if (!dl) return;
+    struct timespec ts = {(time_t)(dl / 1000000000ull), (long)(dl % 1000000000ull)};
+    pthread_cond_timedwait_relative_np(cv, mu, &ts);
+}
+// The line: "[RED] the host has waited 10 s for <what> at <site> (thread <name>): <state>", at most WAIT_SAY_MAX a site (*n, the site's own count). MLOG takes only the log's lock
+__attribute__((format(printf, 4, 5))) static void wait_say(_Atomic int *n, const char *what, const char *site, const char *fmt, ...) {
+    if (atomic_fetch_add_explicit(n, 1, memory_order_relaxed) >= WAIT_SAY_MAX) return;
+    char state[512]; va_list ap; va_start(ap, fmt); vsnprintf(state, sizeof state, fmt, ap); va_end(ap);
+    char th[64] = ""; pthread_getname_np(pthread_self(), th, sizeof th);
+    MLOG("[RED] the host has waited %g s for %s at %s (thread %s): %s", g_wait_say_ns / 1e9, what, site, th[0] ? th : "unnamed", state);
+}
+// When the last present completed on the GPU (host now_ns), for the freeze detector: dm/host/stall.c defines it, the graphics tests' t_host_stubs.c a weak stand-in
+extern _Atomic uint64_t dm_present_done_ns;
 // Time spent waiting for g_res_commit_mu (res_commit_lock: a try first, so an uncontended lock reads no clock), by the replay thread (on_sub_thread) and by every other thread together
 // (the encode thread's queue commits, the upload batches' completion handlers, the deferred-release worker): the translation detail line (mtl_wait_stats)
 static _Atomic uint64_t g_rcm_wait_ns[2], g_rcm_waits[2];   // [0] the replay thread, [1] the others
 static int on_sub_thread(void);
-static void res_commit_lock(void) {
-    if (!pthread_mutex_trylock(&g_res_commit_mu)) return;
+// ---------- Slow residency and queue commits ----------
+// Ocarina of Time's test 3 (baf45a97) froze once on an iPhone 18 Pro Max as Link stepped into water, presents stopped with audio running and nothing in the log. One of the paths the
+// audits could not rule out: a [g_res commit] or a [g_q4 commit:] that takes seconds. Every taker of g_res_commit_mu waits behind it, and while the upload batch's feedback handler
+// committed the residency set itself, so did g_feedback_q and every completion after it (g_done stopped). Nothing timed those calls: the residency set line every 300 frames sums the
+// commits' time, and it never came. So each one is timed now (CLOCK_UPTIME_RAW, the commpage: no system call, a few ns) and one of 100 ms or more says so with what it was doing:
+//   "[RED] slow residency commit: N ms (adds A, B MB; removes R, S MB) on thread T[, on the feedback queue] (#k)"   (res_commit: the queued add / remove calls and [g_res commit])
+//   "[RED] slow queue commit: N ms at <site> on thread T[, on the feedback queue] (#k)"                             (the encode thread's RO_COMMIT / RO_COMMIT_REAL, once_commit, snap_take)
+//   "[RED] slow wait for the residency commit lock: N ms at <site> on thread T; held by host thread H from <site> (#k)"   (res_commit_lock)
+// Each kind says its first 20, then every 100th (#k counts them all), so a run of slow commits cannot fill the log. A commit under the threshold costs two clock reads and a compare.
+// The graphics tests lower g_slow_commit_ns to drive the lines
+static uint64_t g_slow_commit_ns = 100000000ull;
+static char g_fbq_key;   // g_feedback_q's specific (mtl_init): set only on the feedback queue's own blocks
+static inline int on_feedback_q(void) { return dispatch_get_specific(&g_fbq_key) != NULL; }
+static inline uint64_t slow_now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+static uint64_t slow_due(_Atomic uint64_t *n) { uint64_t k = atomic_fetch_add_explicit(n, 1, memory_order_relaxed) + 1; return k <= 20 || k % 100 == 0 ? k : 0; }   // → its number when due, else 0
+static void slow_thread(char *th, size_t n) {
+    th[0] = 0; pthread_getname_np(pthread_self(), th, n);
+    if (!th[0]) snprintf(th, n, "%#x", pthread_mach_thread_np(pthread_self()));
+}
+// A [g_q4 commit:] that started at t0 (slow_now) and has just returned; site: whose
+static void q4_commit_slow(uint64_t t0, const char *site) {
+    uint64_t dt = slow_now() - t0; if (dt < g_slow_commit_ns) return;
+    static _Atomic uint64_t n; uint64_t k = slow_due(&n); if (!k) return;
+    char th[64]; slow_thread(th, sizeof th);
+    MLOG("[RED] slow queue commit: %.1f ms at %s on thread %s%s (#%llu)", dt / 1e6, site, th, on_feedback_q() ? ", on the feedback queue" : "", (unsigned long long)k);
+}
+#define Q4_COMMIT_TIMED(site, ...) do { uint64_t q4_t0_ = slow_now(); __VA_ARGS__; q4_commit_slow(q4_t0_, site); } while (0)
+#define res_commit_lock() res_commit_lock_at(LOCK_SITE)
+static void res_commit_lock_at(const char *site) {
+    if (!pthread_mutex_trylock(&g_res_commit_mu)) { lock_note_take(&g_res_commit_note, site); return; }
+    // The holder as the wait begins (its note; it may be gone by the time this thread has the lock), for a wait long enough to say
+    uint32_t hth = atomic_load_explicit(&g_res_commit_note.th, memory_order_acquire); const char *hsite = atomic_load_explicit(&g_res_commit_note.site, memory_order_relaxed);
+    uint64_t hat = atomic_load_explicit(&g_res_commit_note.at, memory_order_relaxed), at = mach_absolute_time();
     uint64_t t0 = now_ns(); pthread_mutex_lock(&g_res_commit_mu); int k = !on_sub_thread();
-    atomic_fetch_add_explicit(&g_rcm_wait_ns[k], now_ns() - t0, memory_order_relaxed); atomic_fetch_add_explicit(&g_rcm_waits[k], 1, memory_order_relaxed);
+    lock_note_take(&g_res_commit_note, site);
+    uint64_t dt = now_ns() - t0;
+    atomic_fetch_add_explicit(&g_rcm_wait_ns[k], dt, memory_order_relaxed); atomic_fetch_add_explicit(&g_rcm_waits[k], 1, memory_order_relaxed);
+    if (dt >= g_slow_commit_ns) {
+        static _Atomic uint64_t n; uint64_t s = slow_due(&n);
+        if (s) { char th[64]; slow_thread(th, sizeof th); char holder[160];
+            if (hth) snprintf(holder, sizeof holder, "held by host thread %#x from %s (for %.1f ms as the wait began)", hth, hsite ? hsite : "?", hat && at >= hat ? mach_s(at - hat) * 1e3 : 0.0);
+            else snprintf(holder, sizeof holder, "its holder had not noted itself as the wait began (last taken at %s)", hsite ? hsite : "?");
+            MLOG("[RED] slow wait for the residency commit lock: %.1f ms at %s on thread %s%s; %s (#%llu)", dt / 1e6, site, th, on_feedback_q() ? ", on the feedback queue" : "", holder, (unsigned long long)s); }
+    }
 }
 // Wait ledger (DM_NVN_WAITS=1): every place a thread of the host or the game waits on the CPU for the GPU or for the encode thread, counted per frame (calls, calls that blocked,
 // the time they blocked) and logged every 300 frames with the frame's GPU idle. The game's own SyncWait is split by how far its fence is behind the newest one (0: the last submission)
@@ -355,23 +487,23 @@ static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepoo
     if (!allocation) return;
     // An indirectly addressed placed texture needs its heap resident. The heap owner below removes it only after the last texture/view has gone.
     id<MTLAllocation> r = [(id)allocation conformsToProtocol:@protocol(MTLResource)] && ((id<MTLResource>)allocation).heap ? (id)((id<MTLResource>)allocation).heap : allocation;
-    pthread_mutex_lock(&g_res_mu);
+    res_mu_lock();
     if (!g_res_objects) g_res_objects = [NSHashTable weakObjectsHashTable];
-    if ([g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }   // already resident (a shared texture resolved again): marking the set dirty would cost a commit that changes nothing
+    if ([g_res_objects containsObject:r]) { res_mu_unlock(); return; }   // already resident (a shared texture resolved again): marking the set dirty would cost a commit that changes nothing
     { int k = 0; while (k < RS_SITES - 1 && g_rs_site[k].line && g_rs_site[k].line != line) k++; g_rs_site[k].line = line; g_rs_site[k].n++; g_rs_site[k].bytes += r.allocatedSize; }
     res_q_put(r, 1);
     [g_res_objects addObject:r];
-    pthread_mutex_unlock(&g_res_mu);
+    res_mu_unlock();
 } }
 static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
     if (!r) return;
     if ([(id)r conformsToProtocol:@protocol(MTLResource)] && ((id<MTLResource>)r).heap) return;
-    pthread_mutex_lock(&g_res_mu);
-    if (![g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }
+    res_mu_lock();
+    if (![g_res_objects containsObject:r]) { res_mu_unlock(); return; }
     res_q_put(r, 0);
     [g_res_objects removeObject:r];
     g_rs_rm++;
-    pthread_mutex_unlock(&g_res_mu);
+    res_mu_unlock();
 } }
 // Recycled texture memory (GitHub issues #1831, #1823). An engine that keeps its render targets in a GPU-only pool and moves or resizes them with its dynamic resolution names new
 // storage or a new size every few frames, and each (pool, offset, description) gets a Metal texture of its own: Ocarina of Time's 305 MB target pool made 3,468 textures in about
@@ -544,47 +676,91 @@ static void res_use_note(id o, const char *what) {
 static void res_check(id r, const char *what, int reg) {
     static int nbad;
     if (!g_res_check_on || !r) return;
-    pthread_mutex_lock(&g_res_mu); res_use_note(r, what); pthread_mutex_unlock(&g_res_mu);
+    res_mu_lock(); res_use_note(r, what); res_mu_unlock();
     if (nbad >= 40) return;
     int is_tex = [r conformsToProtocol:@protocol(MTLTexture)], is_buf = [r conformsToProtocol:@protocol(MTLBuffer)];
     if (!is_tex && !is_buf) return;   // Samplers etc. are not allocations
     id<MTLResource> a = r; int hops = 0;
     if (is_tex) { id<MTLTexture> t = (id<MTLTexture>)a; while (t.parentTexture) { t = t.parentTexture; hops++; } a = t.buffer ? (id<MTLResource>)t.buffer : (id<MTLResource>)t; }
-    if (a != r) { pthread_mutex_lock(&g_res_mu); res_use_note(a, what); pthread_mutex_unlock(&g_res_mu); }
-    pthread_mutex_lock(&g_res_mu); int ok = [g_res_objects containsObject:a.heap ? (id)a.heap : a]; pthread_mutex_unlock(&g_res_mu);
+    if (a != r) { res_mu_lock(); res_use_note(a, what); res_mu_unlock(); }
+    res_mu_lock(); int ok = [g_res_objects containsObject:a.heap ? (id)a.heap : a]; res_mu_unlock();
     if (!ok) { nbad++; id<MTLTexture> t = is_tex ? (id<MTLTexture>)r : nil;
         MLOG("[RED] missing residency #%d: %s slot %d %s %p (parent chain %d deep) allocated %lu B storage mode %lu%s", nbad, what, reg, is_tex ? "texture" : "buffer", (__bridge void *)a, hops, (unsigned long)a.allocatedSize, (unsigned long)a.storageMode,
              t ? [NSString stringWithFormat:@" format %lu %lux%lu type %lu usage %#lx", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.textureType, (unsigned long)t.usage].UTF8String : ""); }
 }
+// A residency commit of g_slow_commit_ns or more (the queued add / remove calls and [g_res commit] together): its line, with what it applied (each change still holds its allocation)
+static void res_commit_slow(const res_op *q, size_t n, uint64_t dt) {
+    static _Atomic uint64_t nslow; uint64_t k = slow_due(&nslow); if (!k) return;
+    uint64_t na = 0, nr = 0, ba = 0, br = 0;
+    for (size_t i = 0; i < n; i++) { uint64_t z = ((__bridge id<MTLAllocation>)q[i].o).allocatedSize; if (q[i].add) { na++; ba += z; } else { nr++; br += z; } }
+    char th[64]; slow_thread(th, sizeof th);
+    MLOG("[RED] slow residency commit: %.1f ms (adds %llu, %.1f MB; removes %llu, %.1f MB) on thread %s%s (#%llu)", dt / 1e6, (unsigned long long)na, ba / 1048576.0,
+         (unsigned long long)nr, br / 1048576.0, th, on_feedback_q() ? ", on the feedback queue" : "", (unsigned long long)k);
+}
 // Applies and commits every change made before the call. A change another thread's commit took is in the set when this returns too: that commit holds g_res_commit_mu until it is
-// done. Each change holds its allocation until it is committed, so a removed one stays alive until it has left the set
+// done. Each change holds its allocation until it is committed, so a removed one stays alive until it has left the set. No feedback handler calls it (res_commit_async)
 static void res_commit(void) { @autoreleasepool {
     res_commit_lock();
-    pthread_mutex_lock(&g_res_mu);
+    res_mu_lock();
     res_op *q = g_res_q; size_t n = g_res_qn; g_res_q = NULL; g_res_qn = g_res_qcap = 0;
-    pthread_mutex_unlock(&g_res_mu);
+    res_mu_unlock();
+    uint64_t dt = 0;
     if (n) {
-        uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        uint64_t t0 = slow_now();
         for (size_t i = 0; i < n; i++) { if (q[i].add) [g_res addAllocation:(__bridge id<MTLAllocation>)q[i].o]; else [g_res removeAllocation:(__bridge id<MTLAllocation>)q[i].o]; }
         [g_res commit];
-        uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
-        pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; pthread_mutex_unlock(&g_res_mu);
+        dt = slow_now() - t0;
+        res_mu_lock(); g_rs_commits++; g_rs_commit_ns += dt; res_mu_unlock();
     }
-    pthread_mutex_unlock(&g_res_commit_mu);
+    res_commit_unlock();
+    if (n && dt >= g_slow_commit_ns) res_commit_slow(q, n, dt);   // each change still holds its allocation, for its size
     for (size_t i = 0; i < n; i++) CFRelease(q[i].o);
     free(q);
 } }
-static int res_pending(void) { pthread_mutex_lock(&g_res_mu); int n = g_res_qn != 0; pthread_mutex_unlock(&g_res_mu); return n; }
+// The residency commit worker: a serial queue of its own (user-interactive, as g_feedback_q). Every Metal 4 commit feedback handler runs on the one serial queue g_feedback_q, and
+// the upload batch's handler (the staging it retires) and the one-off command buffer's (what once_use made resident) committed the residency set there, under g_res_commit_mu:
+// one long [g_res commit], or a wait for a long commit or queue commit on another thread, held back every completion behind it, g_done and the presents' with it, and said nothing
+// (Ocarina of Time's test 3 froze once with nothing in the log; this was one of the paths the audits could not rule out). The handlers now only queue the removal (res_remove: a
+// moment under g_res_mu, never g_res_commit_mu) and hand the commit here; after (may be nil) runs once it is done, on this queue. The rule that a removal is committed only once the
+// GPU is done with what it removes holds as before: the handler queues it, so only after the GPU has finished that command buffer, and any commit after that takes it (this one,
+// or another thread's first: the next submission's, an upload flush's, defer_kick's), as defer_drain's removals have always been taken. A removed allocation stays alive, held by
+// its queued change, until that commit; the upload batch counts as pending until then (g_up_pending, which mtl_finish and the drain wait for), so what was true when the drain or
+// nvnQueueFinish returned (the staging gone from the set and freed) still is
+static dispatch_queue_t res_commit_q(void) {
+    static dispatch_once_t once; static dispatch_queue_t q;
+    dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.res-commit", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0)); });
+    return q;
+}
+// The worker's state, for the freeze detector's dump and up_wait_zero's 10 s line (rcw_text): an upload batch whose staging's removal the worker has not committed yet stays pending
+// (g_up_pending) with its feedback handler long done and its slot free, so without it those lines read "1 pending ... feedback handler none running", as if the GPU had never
+// finished the batch, when the worker is waiting for the residency commit lock or is inside a long [g_res commit]. g_rcw_n: commits handed here and not finished; g_rcw_at: when
+// the current one began (mach_absolute_time, 0 between them). Relaxed atomics, a few per handed-off commit (upload batches that retire staging, one-off command buffers)
+static _Atomic int g_rcw_n; static _Atomic uint64_t g_rcw_at;
+static void res_commit_async(dispatch_block_t after) {
+    atomic_fetch_add_explicit(&g_rcw_n, 1, memory_order_relaxed);
+    dispatch_async(res_commit_q(), ^{ @autoreleasepool {
+        atomic_store_explicit(&g_rcw_at, mach_absolute_time(), memory_order_relaxed);
+        res_commit(); if (after) after();
+        atomic_store_explicit(&g_rcw_at, 0, memory_order_relaxed); atomic_fetch_sub_explicit(&g_rcw_n, 1, memory_order_relaxed);
+    } });
+}
+static void rcw_text(char *out, size_t n, uint64_t now) {
+    int k = atomic_load_explicit(&g_rcw_n, memory_order_relaxed); uint64_t at = atomic_load_explicit(&g_rcw_at, memory_order_relaxed);
+    if (k <= 0) snprintf(out, n, "idle");
+    else if (at && now >= at) snprintf(out, n, "%d commit%s queued, the current one for %.1f s", k, k == 1 ? "" : "s", mach_s(now - at));
+    else snprintf(out, n, "%d commit%s queued, none begun", k, k == 1 ? "" : "s");
+}
+static int res_pending(void) { res_mu_lock(); int n = g_res_qn != 0; res_mu_unlock(); return n; }
 // What the residency set holds: totals by kind and the largest objects. At the first GPU out-of-memory error (the error names none of them), and for DM_CTL "restop" (hle_hid.c). The set holds
 // the game's pools (shared buffers over guest memory), textures, heaps and staging alike
 static void res_top(const char *why) { @autoreleasepool {
     enum { N = 24 }; id<MTLAllocation> top[N] = {nil}; uint64_t total = 0, n = 0, kind[4] = {0}, count[4] = {0};
-    pthread_mutex_lock(&g_res_mu);
+    res_mu_lock();
     for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = o.allocatedSize; total += z; n++;
         int k = [(id)o conformsToProtocol:@protocol(MTLTexture)] ? 0 : [(id)o conformsToProtocol:@protocol(MTLHeap)] ? 1 : ((id<MTLBuffer>)o).storageMode == MTLStorageModeShared ? 2 : 3;
         kind[k] += z; count[k]++;
         for (int q = 0; q < N; q++) if (!top[q] || z > top[q].allocatedSize) { for (int j = N - 1; j > q; j--) top[j] = top[j - 1]; top[q] = o; break; } }
-    pthread_mutex_unlock(&g_res_mu);
+    res_mu_unlock();
     MLOG("%s: the residency set holds %llu objects, %llu MB (Metal's recommended working set %llu MB, GPU allocated %llu MB): textures %llu, %llu MB; heaps %llu, %llu MB; shared buffers %llu, %llu MB; private buffers %llu, %llu MB; the largest:", why,
          (unsigned long long)n, (unsigned long long)(total >> 20), (unsigned long long)(g_dev.recommendedMaxWorkingSetSize >> 20), (unsigned long long)(g_dev.currentAllocatedSize >> 20),
          (unsigned long long)count[0], (unsigned long long)(kind[0] >> 20), (unsigned long long)count[1], (unsigned long long)(kind[1] >> 20), (unsigned long long)count[2], (unsigned long long)(kind[2] >> 20), (unsigned long long)count[3], (unsigned long long)(kind[3] >> 20));
@@ -609,15 +785,15 @@ static void res_top_once(NSError *err) {
 void mtl_res_stats(char *out, size_t n) {
     res_commit_lock();   // the set's counts, which a commit changes
     unsigned long set_n = g_res ? (unsigned long)g_res.allocationCount : 0ul; double set_mb = g_res ? g_res.allocatedSize / 1048576.0 : 0;
-    pthread_mutex_unlock(&g_res_commit_mu);
-    pthread_mutex_lock(&g_res_mu);
+    res_commit_unlock();
+    res_mu_lock();
     uint64_t tn = 0, tb = 0; for (int k = 0; k < RS_SITES; k++) { tn += g_rs_site[k].n; tb += g_rs_site[k].bytes; }
     size_t o = snprintf(out, n, "commits %llu / %.1f ms, added %llu, %.0f MB (", (unsigned long long)g_rs_commits, g_rs_commit_ns / 1e6, (unsigned long long)tn, tb / 1048576.0);
     for (int i = 0; i < 4 && o < n; i++) { int best = -1; for (int k = 0; k < RS_SITES; k++) if (g_rs_site[k].n && (best < 0 || g_rs_site[k].bytes > g_rs_site[best].bytes)) best = k;
         if (best < 0) break; o += snprintf(out + o, n - o, "%sline %d: %llu, %.0f MB", i ? ", " : "", g_rs_site[best].line, (unsigned long long)g_rs_site[best].n, g_rs_site[best].bytes / 1048576.0); g_rs_site[best].n = 0; }
     if (o < n) snprintf(out + o, n - o, "), removed %llu, %lu allocations in the set (%.0f MB)", (unsigned long long)g_rs_rm, set_n, set_mb);
     memset(g_rs_site, 0, sizeof g_rs_site); g_rs_rm = g_rs_commits = g_rs_commit_ns = 0;
-    pthread_mutex_unlock(&g_res_mu);
+    res_mu_unlock();
 }
 
 @interface NvDeferredRelease : NSObject { @public id object; uint64_t fence; int keep_resident; } @end
@@ -677,15 +853,15 @@ static int defer_drain(void) { int back = 0; @autoreleasepool {
     }
     for (NvDeferredRelease *d in ready) {
         id obj = d->object;
-        if (g_res_check_on) { pthread_mutex_lock(&g_res_mu); NSArray *u = [g_res_last_use objectForKey:obj]; pthread_mutex_unlock(&g_res_mu);
+        if (g_res_check_on) { res_mu_lock(); NSArray *u = [g_res_last_use objectForKey:obj]; res_mu_unlock();
             CFIndex refs = CFGetRetainCount((__bridge CFTypeRef)obj);   // d, obj and the array's enumeration hold some; a released object has nobody else
             if (u && [u[0] unsignedLongLongValue] > d->fence && (!d->keep_resident || refs <= 3) && g_res_late++ < 40) {
                 int is_tex = [obj conformsToProtocol:@protocol(MTLTexture)]; id<MTLTexture> t = is_tex ? obj : nil;
                 MLOG("[RED] released too early #%llu: %s %p (%lux%lu format %lu) retired behind fence %llu, bound by shader %s in submission %llu; %s, references %ld", (unsigned long long)g_res_late, is_tex ? "texture" : "object", (__bridge void *)obj, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, (unsigned long long)d->fence, [u[1] UTF8String], [u[0] unsignedLongLongValue], d->keep_resident ? "reference dropped" : "out of the residency set", (long)refs); } }
         if (!d->keep_resident && [obj conformsToProtocol:@protocol(MTLResource)]) {
-            pthread_mutex_lock(&g_res_mu);
+            res_mu_lock();
             int registered = [g_res_objects containsObject:obj];
-            pthread_mutex_unlock(&g_res_mu);
+            res_mu_unlock();
             if (registered) res_remove((id<MTLResource>)obj);
         }
         d->object = nil;
@@ -813,6 +989,7 @@ void mtl_init(void) {
     if (!no4) {
         dispatch_queue_attr_t feedback_attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
         g_feedback_q = dispatch_queue_create("dm.nvn.mtl4-feedback", feedback_attr);
+        dispatch_queue_set_specific(g_feedback_q, &g_fbq_key, &g_fbq_key, NULL);   // on_feedback_q: the slow commit lines say whether they ran here
         MTL4CommandQueueDescriptor *q4d = [MTL4CommandQueueDescriptor new]; q4d.feedbackQueue = g_feedback_q;
         g_q4 = [g_dev newMTL4CommandQueueWithDescriptor:q4d error:&re];
         if (!g_q4) no4 = "failed to create the MTL4CommandQueue";
@@ -960,10 +1137,22 @@ void mtl_pool_addressed(const void *mem, uint64_t size) {
 // On-demand residency of memory pools: putting a zero-copy buffer into the residency set makes iOS read the whole pool into memory and pin it as wired, even a pool the game never uses
 // (they measured on a 17 Pro Max a 512 MB render-target pool addressed 0 times in a run, with about 530 MB more device wired memory; a 4 GB A14 was ended by the system within seconds of launch because of it).
 // So a pool is not put into the residency set when created; it is put in, and the residency set committed on the spot, the first time the GPU gets its address through mtl_addr / mtl_gpu_addr -- these are the only two ways the GPU gets pool addresses,
-// and committing on the spot is earlier than any command buffer commit that uses it. CPU-side reads of pool contents through mtl_addr trigger it too (conservative, never misses). Caller holds g_mu
-static void pool_res(int i) {
-    if (g_pools[i].res) return;
-    res_add(g_pools[i].buf); res_commit(); g_pools[i].res = 1; g_pool_res_n++;
+// and committing on the spot is earlier than any command buffer commit that uses it. CPU-side reads of pool contents through mtl_addr trigger it too (conservative, never misses). Caller holds g_mu.
+// The commit itself is made after g_mu is let go (pool_res_commit): a residency commit that wires a pool of hundreds of MB takes 10-25 ms and more, and under g_mu every pool lookup
+// on every thread (mtl_addr / mtl_gpu_addr past their per-thread cache, the pool table, the submit thread's own) waited for it. The pool is marked resident under g_mu before it is
+// committed, so another thread's lookup can find it so in between; g_pool_res_open counts the adds not committed yet, and a lookup that sees one commits too (res_commit then waits
+// for the commit under way, or takes the add itself), so no lookup returns a pool before it is in the committed set, as when the commit was made under g_mu. → 1 when it added
+static _Atomic int g_pool_res_open;
+static int pool_res(int i) {
+    if (g_pools[i].res) return 0;
+    res_add(g_pools[i].buf); g_pools[i].res = 1; g_pool_res_n++; atomic_fetch_add(&g_pool_res_open, 1);
+    return 1;
+}
+// After g_mu: commit this lookup's add (added), or one another thread's lookup made and has not committed yet. Nothing to commit costs one atomic load
+static void pool_res_commit(int added) {
+    if (!added && !atomic_load(&g_pool_res_open)) return;
+    res_commit();
+    if (added) atomic_fetch_sub(&g_pool_res_open, added);
 }
 // A large pool in chunks. Metal wires a zero-copy buffer whole while it is in the residency set, so one buffer over a large pool pins all of it, whatever the GPU reads. Mario Kart World's 2,427 MB
 // graphics pool: the GPU has touched 1,111 MB by the first race, 326 MB of it in the last 1,500 frames; on a 16 GB Mac the driver then spent half its time wiring and unwiring (3.2 s of a 6 s Metal System
@@ -1160,8 +1349,10 @@ int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
     if (i >= 0) { if (t_tex_upload_lookup) g_pools[i].n_tex_reads++; else g_pools[i].n_other++; }
-    if (i >= 0) { pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; ok = 1; }
+    int added = 0;
+    if (i >= 0) { added = pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; ok = 1; }
     pthread_mutex_unlock(&g_mu);
+    pool_res_commit(added);
     return ok;
 }
 int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_t *gpu) {
@@ -1171,8 +1362,10 @@ int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_
     pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
     if (i >= 0) { if (t_tex_upload_lookup) g_pools[i].n_tex_reads++; else g_pools[i].n_other++; }
-    if (i >= 0) { pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; *gpu = g_pools[i].gpu + *off; ok = 1; }
+    int added = 0;
+    if (i >= 0) { added = pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; *gpu = g_pools[i].gpu + *off; ok = 1; }
     pthread_mutex_unlock(&g_mu);
+    pool_res_commit(added);
     return ok;
 }
 
@@ -1571,7 +1764,9 @@ static void up_owner_check(const char *where) {
 // itself: what is made for one of them joins the residency set until it completes (once_use). A dummy_tex clear (order 0) reads nothing: no upload flush, no barrier before it, a direct commit.
 // The caller waits (once_wait, on the wait ledger as WS_ONCE) or takes the completion on the feedback queue (once_commit), where it must not wait for another one-off command buffer.
 // Allocators and command buffers are kept for reuse (up to ONCE_KEEP) once the GPU is done with them
-@interface NvOnce : NSObject { @public id<MTL4CommandBuffer> cb; id<MTL4CommandAllocator> al; NSMutableArray *temp; id<MTL4ArgumentTable> args; int order; } @end   // temp: what once_use made resident
+// temp: what once_use made resident. waiter: once_wait commits temp's removal itself once it wakes. settle: the completion sets it when it has queued a removal, and once_wait
+// when its wait ended at the suspend's limit; whichever comes second with the waiter gone hands the commit to the residency commit worker (once_commit, once_wait)
+@interface NvOnce : NSObject { @public id<MTL4CommandBuffer> cb; id<MTL4CommandAllocator> al; NSMutableArray *temp; id<MTL4ArgumentTable> args; int order, waiter, settle; } @end
 @implementation NvOnce @end
 enum { ONCE_KEEP = 4 };
 static os_unfair_lock g_once_lk = OS_UNFAIR_LOCK_INIT; static __strong id<MTL4CommandAllocator> g_once_al[ONCE_KEEP]; static __strong id<MTL4CommandBuffer> g_once_cb[ONCE_KEEP]; static int g_once_n;
@@ -1595,7 +1790,7 @@ static void once_use(NvOnce *o, id res) { @autoreleasepool {
     id<MTLHeap> heap = [r conformsToProtocol:@protocol(MTLResource)] ? ((id<MTLResource>)r).heap : nil;
     if (heap) r = heap;
     if (!r) return;
-    pthread_mutex_lock(&g_res_mu); int in = [g_res_objects containsObject:r]; pthread_mutex_unlock(&g_res_mu);
+    res_mu_lock(); int in = [g_res_objects containsObject:r]; res_mu_unlock();
     if (in || [o->temp containsObject:r]) return;
     res_add(r); [o->temp addObject:r];
 } }
@@ -1623,20 +1818,26 @@ static void once_end(NvOnce *o, id<MTL4CommandEncoder> e) {
     (void)o; [e barrierAfterStages:MTLStageAll beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
     [e endEncoding];
 }
-// done (may be nil) runs once the GPU is done: ok 0 on a GPU error. It runs on the feedback queue after the resources once_use added have left the residency set
+// done (may be nil) runs once the GPU is done: ok 0 on a GPU error. It runs on the feedback queue after the resources once_use added have been taken out of the residency set; that
+// removal is committed off the feedback queue (res_commit_async), or by once_wait on its own thread once it wakes
 static void once_commit(NvOnce *o, void (^done)(int ok)) {
     id<MTL4CommandBuffer> cb = o->cb; id<MTL4CommandAllocator> al = o->al; NSMutableArray *temp = o->temp; id<MTL4ArgumentTable> args = o->args;
     [cb endCommandBuffer];
     MTL4CommitOptions *opt = [MTL4CommitOptions new];
     [opt addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        fb_in("one-off command buffer");
         (void)args;   // kept until the GPU is done with it
         if (f.error) { MLOG("[RED] one-off command buffer (readback / screenshot / diagnostics) execution error: %s", f.error.description.UTF8String); res_top_once(f.error); gpu_lost_check(f.error, "one-off command buffer"); }
-        // The residency set holds what it removed until its next commit, and a readback buffer must be gone once the readback returns (a guest thread's pool may never drain: t_readback)
-        @autoreleasepool { if (temp.count) { for (id r in temp) res_remove(r); [temp removeAllObjects]; res_commit(); } }
+        // The residency set holds what it removed until its next commit, and a readback buffer must be gone once the readback returns (a guest thread's pool may never drain:
+        // t_readback): once_wait commits it on the waiting thread once it wakes, before it returns. Without a waiter, or with one that has given up (settle), the residency
+        // commit worker commits it; never this queue (res_commit_async)
+        @autoreleasepool { if (temp.count) { for (id r in temp) res_remove(r); [temp removeAllObjects];
+            if (!o->waiter || __atomic_exchange_n(&o->settle, 1, __ATOMIC_ACQ_REL)) res_commit_async(nil); } }
         os_unfair_lock_lock(&g_once_lk);
         if (g_once_n < ONCE_KEEP) { g_once_al[g_once_n] = al; g_once_cb[g_once_n] = cb; g_once_n++; }
         os_unfair_lock_unlock(&g_once_lk);
         if (done) done(!f.error);
+        fb_out();
     }];
     if (o->order && on_sub_thread()) {
         up_flush();   // the uploads this batch made go first
@@ -1653,14 +1854,28 @@ static void once_commit(NvOnce *o, void (^done)(int ok)) {
         return;
     }
     id<MTL4CommandBuffer> buffers[] = {cb};
-    res_commit_lock(); [g_q4 commit:buffers count:1 options:opt]; pthread_mutex_unlock(&g_res_commit_mu);   // apart from the residency set's commit, as the encode thread's (nvn_rec.h)
+    res_commit_lock(); Q4_COMMIT_TIMED("once_commit (a one-off command buffer)", [g_q4 commit:buffers count:1 options:opt]); res_commit_unlock();   // apart from the residency set's commit, as the encode thread's (nvn_rec.h)
 }
-// Commit and wait until the GPU is done; returns 0 on a GPU error. Not on the feedback queue (the completion runs there)
+// Commit and wait until the GPU is done; returns 0 on a GPU error. Not on the feedback queue (the completion runs there). Under the suspend's limit (t_drain_by: once_drain in
+// mtl_drain_by) the wait ends there and returns -1; the completion, when it comes, still signals the semaphore and stores into the block's own copy of ok, both kept alive by the block
+// The completion has queued the removal of what once_use made resident by the time this wakes, and this commits it on the waiting thread (under the suspend's limit on the
+// residency commit worker, as a commit may wait for one under way); a wait that ends at the limit leaves it to the completion or hands it on (settle)
 static int once_wait(NvOnce *o) {
     dispatch_semaphore_t sem = dispatch_semaphore_create(0); __block int ok = 0;
     uint64_t w0 = ws_t0();
+    o->waiter = 1;
     once_commit(o, ^(int k) { ok = k; dispatch_semaphore_signal(sem); });
-    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    if (dispatch_semaphore_wait(sem, DISPATCH_TIME_NOW)) {
+        uint64_t dl = drain_left();
+        wn_in(WN_ONCE, 0);
+        long late = dispatch_semaphore_wait(sem, dl == UINT64_MAX ? DISPATCH_TIME_FOREVER : dispatch_time(DISPATCH_TIME_NOW, (int64_t)dl));
+        wn_out(WN_ONCE);
+        if (late) {
+            if (__atomic_exchange_n(&o->settle, 1, __ATOMIC_ACQ_REL)) res_commit_async(nil);   // the completion came between the timeout and here: its removal is queued, uncommitted
+            if (ws_on()) ws_put(WS_ONCE, w0, 1); return -1;
+        }
+    }
+    if (__atomic_load_n(&o->settle, __ATOMIC_ACQUIRE)) { if (t_drain_by) res_commit_async(nil); else res_commit(); }   // set only when the completion queued a removal
     if (ws_on()) ws_put(WS_ONCE, w0, 1);
     return ok;
 }
@@ -1668,11 +1883,11 @@ static int once_wait(NvOnce *o) {
 // as once_commit places it (on the submit thread behind the upload batch it flushes and what the encode thread was given, from another thread behind every block published so far).
 // It ends on its commit feedback, not on a queue signal: when the queue runs none of this process's work (revoked GPU access, gpu_lost_check; a submission iOS refuses in the
 // background) no signal ever comes, but the feedback does, with the error, as it does for the frames (mtl_finish_gpu waits on g_done). A queue signalEvent here hung dm_gfx_suspend
-// on the iOS main thread (sceneDidEnterBackground: the watchdog, and save_sync_background after it never starts)
-static void once_drain(void) {
+// on the iOS main thread (sceneDidEnterBackground: the watchdog, and save_sync_background after it never starts). 0: the suspend's limit came first (once_wait's -1)
+static int once_drain(void) {
     NvOnce *o = once_new(1);
     once_end(o, once_copy(o));
-    once_wait(o);
+    return once_wait(o) >= 0;
 }
 static post_op *g_post; static int g_npost, g_postcap;
 // One autorelease pool per submission: submissions run on a guest thread (long-lived, no run loop, never drains the implicit pool), so objects autoreleased in the Metal replay
@@ -2619,7 +2834,7 @@ int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) {
     unsigned k = f % GRING;
     if (atomic_load(&g_gpu[k].frame) != f || atomic_load(&g_gpu[k].pending)) return 0;
     *t0 = atomic_load(&g_gpu[k].t0); *t1 = atomic_load(&g_gpu[k].t1);
-    return *t1 >= *t0 && *t1;
+    return *t0 && *t0 != UINT64_MAX && *t1 >= *t0 && *t1 - *t0 <= 1000000000ull;   // none started, or a span over 1 s (a start or end that was never set): no span (nvn_power.h nvn_pd_span_add)
 }
 // The process's performance profile (NSProcessInfo hasPerformanceProfile:, Metal's MTLDeviceCertification.h) for the power detail (hle_nvn.c power_tick's first call, DM_POWER_DETAIL):
 // one line, and one more on each NSProcessInfoPerformanceProfileDidChangeNotification, with whether the device is certified for the iPhone performance gaming tier. Logging only
@@ -2703,6 +2918,7 @@ static _Atomic int g_seg_inflight;   // main command buffers committed and not r
 static void rt_preserve_bound(void);
 static void queue_program_preserve(void);
 static void up_seq_drained(void);
+static void ghost_commit(void);
 uint64_t mtl_sub_commit(void) {
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
@@ -2712,6 +2928,7 @@ uint64_t mtl_sub_commit(void) {
     up_flush();
     gmem_commit_patch();
     g_cut_copy = 0;
+    ghost_commit();   // idle finalized-texture entries above 512, or all of them at low headroom, go behind this submission's fence
     treg_finish_submission();   // Late descriptor views retire behind this submission's fence.
     rt_preserve_bound();   // The game may reuse completed command memory; queue bindings must not point into its texture snapshots.
     queue_program_preserve(); // Submitted metadata may retire while these programs remain bound.
@@ -2730,7 +2947,7 @@ uint64_t mtl_sub_commit(void) {
     NSArray<dispatch_block_t> *commit_blocks = [g_commit_blocks copy];
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     atomic_fetch_add(&g_seg_inflight, 1);
-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; atomic_fetch_sub(&g_seg_inflight, 1); for (dispatch_block_t block in commit_blocks) block(); }];
+    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; fb_in("submission (its commit blocks)"); atomic_fetch_sub(&g_seg_inflight, 1); for (dispatch_block_t block in commit_blocks) block(); fb_out(); }];
     uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
     NSString *cctx = @(cctx_snap());
     cbs_list *cbs = cbs_take(); cbs_fly_put(fence, cbs);
@@ -2741,6 +2958,7 @@ uint64_t mtl_sub_commit(void) {
     pthread_mutex_unlock(&g_post_mu);
     int lost_test = gpu_lost_test();
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
+        fb_in("submission");
         gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime);
         if (ws_on()) ws_fb(fence, cb.GPUEndTime);
         uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
@@ -2750,11 +2968,12 @@ uint64_t mtl_sub_commit(void) {
         post_complete(fence, c0, c1);
         if (atomic_load(&g_gpu_lost)) gpu_lost_release();   // the GPU signals none of these fences
         defer_drain(); defer_idle_commit();
+        fb_out();
     }];
     void arena_commit(uint64_t fence); arena_commit(fence);
     res_commit();
     if (g_gp_state == 1 && !gp_active()) { int gn = g_gp_n; gp_lab *gl = malloc(sizeof(gp_lab) * (gn ? gn : 1)); memcpy(gl, g_gp_lab, sizeof(gp_lab) * gn); uint64_t gf = g_gp_frame; g_gp_state = 2; atomic_store(&g_gp_busy, 1);
-        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(gn, gl, gf); }]; }
+        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; fb_in("GPU profile report"); gp_report(gn, gl, gf); fb_out(); }]; }
     [g_cb endCommandBuffer];
     rec_commit(g_cb, o); g_cbgen++;   // the stores it holds come before any later upload batch (gsb_held)
     if (!lost_test) rec_signal(g_ev, fence);
@@ -2778,12 +2997,33 @@ static int fast_wake(void) { static int v = -1; if (v < 0) { const char *e = get
 static void post_early(uint64_t fence) {
     post_complete(fence, 0, 0);
 }
+// A fence wait at the 10 s mark (mtl_wait_at, both of its paths, once per wait): what it waits for, then what the command buffer after the last completed fence runs (cbs_fly_report).
+// Called without g_mu: the shader list's lock is never taken under it. PRAGMATA's queue worker stopped at its first 3D scene with no GPU error, and the line named the shaders
+static void wait_fence_say(uint64_t fence, int site) {
+    static _Atomic int n; if (atomic_fetch_add(&n, 1) >= WAIT_SAY_MAX) return;
+    uint64_t done = atomic_load(&g_done);
+    MLOG("[RED] the host has waited %g s for GPU work up to fence %llu (wait site %d, %s): completed %llu, submitted %llu; the GPU runs nothing it can finish",
+         g_wait_say_ns / 1e9, (unsigned long long)fence, site, site >= 0 && site < WS_N ? ws_name[site] : "?", (unsigned long long)done, (unsigned long long)atomic_load(&g_fence));
+    cbs_fly_report(done + 1);
+}
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
     uint64_t w0 = ws_t0();
+    int told = 0;   // this wait has said it reached the 10 s mark (once per wait, whichever path it was on)
     if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ) && fast_wake() && g_ev && fence <= g_fence) {   // the game's own wait: wake on the GPU's signal (rec_signal(g_ev, fence) after each submission)
         uint64_t ms = timeout_ns / 1000000ull; if (ms > 3600000ull) ms = 3600000ull;
-        if ([g_ev waitUntilSignaledValue:fence timeoutMS:ms]) post_early(fence);
+        // In slices of the mark (10 s) up to the same total: a wait still going after the first slice says so, with what the stuck command buffer runs, as the feedback wait below does
+        uint64_t slice = g_wait_say_ns / 1000000ull; if (!slice) slice = 1;
+        int sig;
+        wn_in(WN_EVENT, fence);
+        for (uint64_t left = ms;;) {
+            uint64_t s = left < slice ? left : slice;
+            sig = [g_ev waitUntilSignaledValue:fence timeoutMS:s]; left -= s;
+            if (sig || !left) break;
+            if (!told) { told = 1; wait_fence_say(fence, site); }
+        }
+        wn_out(WN_EVENT);
+        if (sig) post_early(fence);
         int ok = g_done >= fence;
         if (ws_on()) { ws_put(site, w0, 1); ws_wake(fence); }
         if (ok || timeout_ns < 1000000ull) return ok;
@@ -2799,21 +3039,21 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     dl.tv_sec += ns / 1000000000ull; dl.tv_nsec = ns % 1000000000ull;
     pthread_mutex_lock(&g_mu);
     int r = 0;
-    // An unbounded wait still waiting after 10 s is a hang: said once, with what it waits for (PRAGMATA's queue worker stopped here at its first 3D scene, no GPU error)
-    struct timespec said; clock_gettime(CLOCK_REALTIME, &said); said.tv_sec += 10; int told = timeout_ns != UINT64_MAX;
+    // A wait still waiting at the 10 s mark is a hang: said once, with what it waits for (PRAGMATA's queue worker stopped here at its first 3D scene, no GPU error). A wait whose limit
+    // comes first has nothing to say
+    struct timespec said; clock_gettime(CLOCK_REALTIME, &said);
+    { uint64_t sn = (uint64_t)said.tv_nsec + g_wait_say_ns; said.tv_sec += sn / 1000000000ull; said.tv_nsec = sn % 1000000000ull; }
+    told |= timeout_ns <= g_wait_say_ns;
+    int noted = g_done < fence; if (noted) wn_in(WN_DONE, fence);
     while (g_done < fence) {
         int late = !told && (dl.tv_sec > said.tv_sec || (dl.tv_sec == said.tv_sec && dl.tv_nsec > said.tv_nsec));
         if (!(r = pthread_cond_timedwait(&g_cv, &g_mu, late ? &said : &dl))) continue;
         if (!late) break;
-        told = 1; static _Atomic int n;
-        if (atomic_fetch_add(&n, 1) < 4) {
-            uint64_t stuck = g_done + 1;
-            MLOG("[RED] the host has waited 10 s for GPU work up to fence %llu (wait site %d): completed %llu, submitted %llu; the GPU runs nothing it can finish",
-                 (unsigned long long)fence, site, (unsigned long long)g_done, (unsigned long long)g_fence);
-            pthread_mutex_unlock(&g_mu); cbs_fly_report(stuck); pthread_mutex_lock(&g_mu);   // the list's lock is not taken under g_mu
-        }
+        told = 1;
+        pthread_mutex_unlock(&g_mu); wait_fence_say(fence, site); pthread_mutex_lock(&g_mu);
     }
     int ok = g_done >= fence;
+    if (noted) wn_out(WN_DONE);
     pthread_mutex_unlock(&g_mu);
     if (ws_on()) { ws_put(site, w0, 1); if (site == WS_SYNC_NEWEST || site == WS_SYNC || site == WS_ACQ) ws_wake(fence); }
     return ok;
@@ -2823,8 +3063,9 @@ int mtl_wait(uint64_t fence, uint64_t timeout_ns) { return mtl_wait_at(fence, ti
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns) { return mtl_wait_at(fence, timeout_ns, !timeout_ns ? WS_SYNC_POLL : WS_ACQ); }
 
 static void up_wait_zero(_Atomic int *v, int site);
+// Under the suspend's limit (t_drain_by) both waits end there; the caller (drain_steps) reads what is left
 static void mtl_finish_gpu_at(int site) {
-    if (g_fence) mtl_wait_at(g_fence, UINT64_MAX, site);
+    if (g_fence) mtl_wait_at(g_fence, drain_left(), site);
     if (on_sub_thread()) rec_publish();   // a batch's commit may still be a record in the encode thread's current block (rec_commit_upload), as in up_begin
     up_wait_zero(&g_up_pending, site);
 }
@@ -2834,13 +3075,33 @@ void mtl_present_flush(void);
 // made every QueueFinish cost one or two display frames. Fire Emblem: Three Houses' loader submits a copy and calls QueueFinish for each resource it uploads, and its first loading screen
 // took 78 s on the iPhone (5 s windowless on the Mac). A swapchain texture is not handed back before its previous present is processed (AcquireTexture waits for that ticket)
 void mtl_finish(void) { mtl_finish_gpu_at(WS_FINISH); }
-static void present_drop_for_suspend(void);
-static void snap_drain(void);
-// Everything submitted so far has run (suspend, the tests), the one-off command buffers too (once_drain)
-void mtl_drain(void) {
-    present_drop_for_suspend(); mtl_present_flush(); snap_drain(); mtl_init();
-    once_drain();
+static int present_drop_for_suspend(void);
+static int present_flush_ok(const char *site);
+static int snap_drain(void);
+// Everything submitted so far has run (suspend, the tests), the one-off command buffers too (once_drain). With no limit (t_drain_by 0) each step waits until it is done and
+// this returns NULL; under the suspend's limit (mtl_drain_by) a step whose wait reached it ends the drain, and this names it: the steps after it would only wait on the same GPU
+static const char *drain_steps(void) {
+    if (!present_drop_for_suspend()) return "the present on the GPU (present_drop_for_suspend)";
+    if (!present_flush_ok("mtl_present_flush (a queue finish, or the suspend)")) return "the present queue (mtl_present_flush)";
+    if (!snap_drain()) return "the present snapshot copies (snap_drain)";
+    // A limit already reached commits no one-off command buffer: its wait would end at once, and the buffer would go to the queue after the suspend has given up (a drain thread
+    // let go late by a lock, in the background, or a resume's retry while the GPU stays stuck), one more never completed behind work that does not finish
+    if (drain_over()) return "a one-off command buffer behind all earlier work (once_drain)";
+    mtl_init();
+    if (!once_drain()) return "a one-off command buffer behind all earlier work (once_drain)";
     mtl_finish_gpu();
+    if (g_fence && atomic_load(&g_done) < g_fence) return "the GPU work up to the last fence (mtl_finish_gpu)";
+    if (atomic_load(&g_up_pending)) return "the upload batches (mtl_finish_gpu)";
+    return NULL;
+}
+void mtl_drain(void) { drain_steps(); }
+// mtl_drain with every wait ending at by (CLOCK_UPTIME_RAW ns): NULL when everything drained, else which step's wait reached the limit. Going to the background (hle_nvn.c
+// dm_gfx_suspend), on a thread of its own whose end the main thread waits for no longer than the limit: a lock taken on the way has no limit of its own
+const char *mtl_drain_by(uint64_t by) {
+    t_drain_by = by ? by : 1;
+    const char *what = drain_steps();
+    t_drain_by = 0;
+    return what;
 }
 
 // ================= Render replay =================
@@ -2909,11 +3170,11 @@ static nvn_hmap g_pkg_share = {.klen = sizeof(alias_key)};   // see NvPkgRef
 // each candidate instead: in Ocarina of Time's cutscenes, with about 7,500 serials and thousands of shared textures, that walk was the submit thread's hottest function and
 // frames took up to a second. An entry holds its object (CFBridgingRetain), so a counted address cannot be reused while counted. Under g_smu
 static nvn_hmap g_by_serial_held = {.klen = sizeof(uintptr_t)};
-// The same count for the ghost ring (g_ghost, finalized serials a replayed record still resolves; tex_put and the upgrade's in-place replacement write it)
+// The same count for the ghost table (g_ghost, finalized serials a replayed record still resolves; tex_put and the upgrade's in-place replacement write it)
 static nvn_hmap g_ghost_held = {.klen = sizeof(uintptr_t)};
 // A retired object a serial entry still holds stays in the residency set until the last such entry lets it go. Several entries can hold one texture that no table owns: at the GPU's
 // first write over storage a packaged texture was taken from (cpu_unc_drop), every serial of the package gets the package's texture itself, live serials and finalized ones in the ghost
-// ring. The package's release and each holder's retired it, taking it out of the residency set while the others still drew with it: GPU address faults 15-45 minutes into Ocarina of
+// table. The package's release and each holder's retired it, taking it out of the residency set while the others still drew with it: GPU address faults 15-45 minutes into Ocarina of
 // Time, on 260x260 terrain tiles (GitHub issue #1326). So defer_drain asks whether a serial entry holds what it retires; one that does waits here (address → the object, retained), and
 // the count's last entry going retires it again (retire_resume). Under g_smu
 static nvn_hmap g_retire_held = {.klen = sizeof(uintptr_t)};
@@ -3054,7 +3315,7 @@ void mtl_alias_drop_pool(const void *pool) {
 // (Breath of the Wild finalizes its transient render targets before it submits and makes them again the next frame: targets sharing storage would evict each other every frame). On NVN the memory now belongs to the new texture;
 // the old private Metal texture only held a copy nothing can name again. STEINS;GATE RE:BOOT decodes every image it shows into one scratch region of a pool that lives for good and
 // finalizes the texture before the next one: each image added an entry, 468 of them and 1.58 GB of GPU memory 24,000 frames into a new game. The texture is retired (deferred until
-// the submissions that used it complete); one a finalized object still resolves through g_ghost stays resident until the ring lets it go (defer_drain, g_retire_held).
+// the submissions that used it complete); one a finalized object still resolves through g_ghost stays resident until the table lets it go (defer_drain, g_retire_held).
 // The change records a note that names no texture (ser_note(0)), as it changes no serial's texture: an entry a live serial holds is not evicted (serial_table_holds), and one a finalized
 // serial holds through g_ghost keeps its texture. A live sRGB / linear twin's serial holds a view of the shared texture, which counts as holding the texture (count_add), so a twin
 // keeps its parent as a texture of the parent's own format would; with the view alone counted the parent went, and no note sent the twin's texture IDs to tex_mtl_'s stale-view
@@ -3090,15 +3351,37 @@ static void serial_del(uint64_t k) { pthread_mutex_lock(&g_smu); id old = hm_get
 // Texture serials owned by a live NVN texture object (TextureInitialize until Finalize or re-initialization, hle_nvn.c). Command records and texture pool registrations snapshot the
 // texture object (tex_snap in hle_nvn.c, mtl_reg_tex), so replay can resolve a texture the game has already finalized: Breath of the Wild records each frame's transient render targets
 // (the HUD captures, the 640x360 half-resolution buffers) and finalizes their objects before it submits. Those serials went back into g_by_serial and stayed there for good, as no second
-// Finalize comes: about 10 a frame, 200,000 after an hour in the first shrine. A dead serial resolves through g_ghost instead, a table whose oldest entry goes when a new one comes,
-// so a record replayed again soon still finds its texture.
-// How many it holds is decided once (ghost_cap): NGHOST_DEF for every game, the profile's ghost_table (DM_GAME_GHOST_TABLE), or DM_NVN_GHOST, clamped to NGHOST_MIN..NGHOST_MAX. The ring
-// has room for NGHOST_MAX (64 KB, in pages touched only as it fills). Ocarina of Time in one heavy area on an iPhone put about 800 a frame into 512 for 300 frames, most of them textures
-// the ring had pushed out a frame or two before, and each put and eviction noted its serial (ser_note), so the pool tables went down their patch path about 465 times a frame
+// Finalize comes: about 10 a frame, 200,000 after an hour in the first shrine. A dead serial resolves through g_ghost instead, so a record replayed again soon still finds its texture.
+// Its ceiling is decided once (ghost_cap): NGHOST_DEF for every game, the profile's ghost_table (DM_GAME_GHOST_TABLE), or DM_NVN_GHOST, clamped to NGHOST_MIN..NGHOST_MAX. Ocarina of
+// Time in one heavy area on an iPhone put about 800 a frame into 512 for 300 frames, most of them textures the table had pushed out a frame or two before, and each put and eviction
+// noted its serial (ser_note), so the pool tables went down their patch path about 465 times a frame; its profile's ghost_table is 4096.
+// The table was a ring whose oldest entry went when a new one came, whatever its use, and nothing else let an entry go but a memory trim (a pressure warning). With a ceiling of 4096
+// each entry holds its texture alive and resident (a retired one waits in g_retire_held), so a ring that had filled once kept 4096 textures for good: in Ocarina of Time test 3 on an
+// iPhone 18 Pro Max (X1.0, baf45a97) it held about 2,200 in a four-minute run, and the memory line's headroom to the system memory limit fell to 2.3 GB, where test 2 (a ring of 512)
+// had 3.3-4.0 GB. The table is now kept by use, after NXNative 034e91a8 (without its nvn_owner.m refactor, which this tree does not have): each entry's last lookup or put
+// (tex_get, mtl_tex_pin, tex_put: the frame, g_cur_frame, and the submission being encoded, g_fence + 1) is kept in a list from least to most recently used (ghost_used), and
+//  - at the ceiling a put lets the least recently used go, unless a submission still in flight used it (its submission past g_done): every entry after it in the list was used
+//    later, so the table then goes past the ceiling rather than push out what the GPU is reading and the next submission resolves again. At twice the ceiling it goes all the same
+//    (its texture waits for its fence in the deferred-release queue, as every entry's does), so a GPU that stops completing cannot grow the table without end. Past the ceiling
+//    a put lets two go while the GPU is done with them, so the table comes back down to the ceiling once the submissions that used them complete;
+//  - at each submission's commit (ghost_commit) up to GHOST_DRAIN entries idle for GHOST_IDLE_FRAMES frames or GHOST_IDLE_SUBS submissions go, least recently used first, while the
+//    table is above ghost_floor (NGHOST_DEF, or a smaller ceiling): a table that grew in a heavy area drains back to 512 once its textures idle. Submissions as well as frames, so a
+//    stretch with no present does not keep every entry (about 25 submissions a frame in Ocarina of Time: 16,384 is about 650 frames there);
+//  - on iOS, when the headroom to the system memory limit (os_proc_available_memory, the memory line's figure, read at a commit at most every GHOST_HEADROOM_EVERY_NS) is under
+//    GHOST_LOW_HEADROOM, every entry above ghost_floor that no submission in flight uses goes at once (one line, at most every 300 frames; the table's line counts each one);
+//  - a memory trim (mtl_trim_at, a pressure warning and up) does the same (ghost_trim).
+// No entry a submission in flight used is ever let go below twice the ceiling: its texture would only wait for that fence, and the next resolution would put it again
 enum { NGHOST_MIN = 64, NGHOST_DEF = 512, NGHOST_MAX = 8192 };
+enum { GHOST_IDLE_FRAMES = 600, GHOST_IDLE_SUBS = 16384, GHOST_DRAIN = 32 };   // GHOST_DRAIN: idle entries let go at most per commit (each one a note: under SER_NOTES)
+static const uint64_t GHOST_LOW_HEADROOM = 3ull << 30, GHOST_HEADROOM_EVERY_NS = 250000000ull;
 static nvn_hmap g_tex_live = {.klen = 8};   // serial → the texture object it was initialized in (mtl_tex_release), under g_smu
-static nvn_hmap g_ghost = {.klen = 8}; static uint64_t g_ghost_ring[NGHOST_MAX]; static unsigned g_ghost_next; static uint64_t g_ghost_puts;
-static unsigned g_ghost_cap;   // entries kept, 0 until ghost_cap decides (mtl_init); a unit test may set it while the table is empty
+static nvn_hmap g_ghost = {.klen = 8}; static uint64_t g_ghost_puts;
+typedef struct ghost_use { struct ghost_use *prev, *next; uint64_t serial, frame, sub; } ghost_use;   // a ghost entry's last use (frame, submission) and its place in the list
+static nvn_hmap g_ghost_use = {.klen = 8};    // serial → its ghost_use: the same serials as g_ghost, under g_smu
+static ghost_use *g_ghost_lru, *g_ghost_mru;  // the list, least recently used first, under g_smu
+static unsigned g_ghost_cap;   // the ceiling, 0 until ghost_cap decides (mtl_init); a unit test may set it while the table is empty
+static uint64_t g_ghost_drained, g_ghost_low;   // entries let go idle (ghost_commit's drain) and at low headroom, in total, under g_smu (the table's line)
+static uint64_t g_ghost_hr_at;                  // when ghost_commit last read the headroom (submit thread; a test sets 0 to read it at once)
 // The table's line (mtl_ghost_stat), every 300 frames: evictions and puts of a serial evicted in the last GHOST_THRASH_FRAMES frames (thrash) under g_smu; the time of texture misses that put
 // (tex_mtl, from the miss to the texture) and of the pool tables' patch path (pool_gpu) in mach ticks, and the texture ID epochs ser_sync started, relaxed atomics
 enum { GHOST_THRASH_FRAMES = 4, GHOST_GONE = 8192 };
@@ -3127,9 +3410,11 @@ static unsigned ghost_cap_pick(const char *env, long profile, const char **why) 
 static unsigned ghost_cap(void) {   // under g_smu, or before any texture (mtl_init)
     if (g_ghost_cap) return g_ghost_cap;
     const char *why; g_ghost_cap = ghost_cap_pick(getenv("DM_NVN_GHOST"), DM_GAME_GHOST_TABLE, &why);
-    MLOG("finalized-texture table: up to %u textures that finalized texture objects still resolve to, the oldest going when a new one comes (%s)", g_ghost_cap, why);
+    MLOG("finalized-texture table: up to %u textures that finalized texture objects still resolve to, the least recently used going when a new one comes, idle ones drained back to %u (%s)",
+         g_ghost_cap, g_ghost_cap < NGHOST_DEF ? g_ghost_cap : NGHOST_DEF, why);
     return g_ghost_cap;
 }
+static unsigned ghost_floor(void) { unsigned cap = ghost_cap(); return cap < NGHOST_DEF ? cap : NGHOST_DEF; }   // what the drain, a trim and low headroom take the table back to
 void mtl_tex_init(const tex_t *t) {
     if (!t->serial) return;
     tex_t *desc = image_shape(t) ? malloc(sizeof *desc) : NULL; if (desc) *desc = *t;
@@ -3139,6 +3424,36 @@ void mtl_tex_init(const tex_t *t) {
     pthread_mutex_unlock(&g_smu);
 }
 static void obj_drop(id o) { if (alias_has(o)) defer_obj_unref(o); else defer_obj_release(o); }   // caller holds g_smu
+// The ghost table's order of use. Caller holds g_smu
+static void ghost_unlink(ghost_use *u) {
+    if (u->prev) u->prev->next = u->next; else g_ghost_lru = u->next;
+    if (u->next) u->next->prev = u->prev; else g_ghost_mru = u->prev;
+    u->prev = u->next = NULL;
+}
+static void ghost_used(uint64_t k) {   // a lookup or a put of k's ghost entry: stamped with this frame and submission, and the most recently used
+    ghost_use *u = nvn_hm_get(&g_ghost_use, &k);
+    if (!u) { u = calloc(1, sizeof *u); if (!u) MDIE("finalized-texture table allocation failed"); u->serial = k; nvn_hm_put(&g_ghost_use, &k, u); }
+    else if (u != g_ghost_mru) ghost_unlink(u);
+    u->frame = atomic_load_explicit(&g_cur_frame, memory_order_relaxed); u->sub = atomic_load_explicit(&g_fence, memory_order_relaxed) + 1;
+    if (u != g_ghost_mru) { u->prev = g_ghost_mru; if (g_ghost_mru) g_ghost_mru->next = u; else g_ghost_lru = u; g_ghost_mru = u; }
+}
+static int ghost_in_flight(const ghost_use *u) { return u->sub > atomic_load_explicit(&g_done, memory_order_relaxed); }   // a submission the GPU has not completed used it
+static void ghost_evict(uint64_t k) {   // k's ghost entry goes with its place in the list; its texture after the submission in flight, and its serial resolves anew (a note)
+    ghost_use *u = nvn_hm_del(&g_ghost_use, &k); if (u) { ghost_unlink(u); free(u); }
+    id ev = hm_get_id(&g_ghost, &k); if (!ev) return;
+    ghost_held_add((__bridge void *)ev, -1); obj_drop(ev); hm_del_id(&g_ghost, &k); ser_note(k);
+}
+// Entries above keep go, least recently used first, at most budget of them; the walk ends at the first entry a submission in flight used, and with idle_only at the first used in the
+// last GHOST_IDLE_FRAMES frames and GHOST_IDLE_SUBS submissions (every entry after either was used later). Returns the entries let go
+static unsigned ghost_release(unsigned keep, unsigned budget, int idle_only) {
+    uint64_t frame = atomic_load_explicit(&g_cur_frame, memory_order_relaxed), sub = atomic_load_explicit(&g_fence, memory_order_relaxed) + 1; unsigned n = 0;
+    for (ghost_use *u = g_ghost_lru; u && n < budget && g_ghost.n > keep; u = g_ghost_lru) {
+        if (ghost_in_flight(u)) break;
+        if (idle_only && frame < u->frame + GHOST_IDLE_FRAMES && sub < u->sub + GHOST_IDLE_SUBS) break;
+        ghost_evict(u->serial); n++;
+    }
+    return n;
+}
 static void tex_pin_set(tex_pin *pin,id object) { // g_smu held
     id old=(__bridge id)pin->object; if(old==object) return;
     if(old) {
@@ -3157,7 +3472,7 @@ void mtl_tex_pin(uint64_t serial) {
     tex_pin *pin=nvn_hm_get(&g_tex_pins,&serial);
     if(!pin) { pin=calloc(1,sizeof *pin); if(!pin) MDIE("texture retention allocation failed"); nvn_hm_put(&g_tex_pins,&serial,pin); }
     pin->refs++;
-    if(!pin->object) { id o=hm_get_id(&g_by_serial,&serial); if(!o) o=hm_get_id(&g_ghost,&serial); tex_pin_set(pin,o); }
+    if(!pin->object) { id o=hm_get_id(&g_by_serial,&serial); if(!o && (o=hm_get_id(&g_ghost,&serial))) ghost_used(serial); tex_pin_set(pin,o); }   // a ghost entry pinned is a use of it
     pthread_mutex_unlock(&g_smu);
 }
 void mtl_tex_unpin(uint64_t serial) {
@@ -3166,7 +3481,9 @@ void mtl_tex_unpin(uint64_t serial) {
     pthread_mutex_unlock(&g_smu);
 }
 static __unsafe_unretained id tex_get(uint64_t k) {
-    pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k); if (!o && g_ghost.n) o = hm_get_id(&g_ghost, &k); if(!o) { tex_pin *pin=nvn_hm_get(&g_tex_pins,&k); if(pin) o=(__bridge id)pin->object; } pthread_mutex_unlock(&g_smu); return o;
+    pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k);
+    if (!o && g_ghost.n && (o = hm_get_id(&g_ghost, &k))) ghost_used(k);   // looked up again: the youngest entry
+    if(!o) { tex_pin *pin=nvn_hm_get(&g_tex_pins,&k); if(pin) o=(__bridge id)pin->object; } pthread_mutex_unlock(&g_smu); return o;
 }
 static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are never a game texture's (the external textures of the removed GL and Vulkan layers; t_alias_takeover uses them): always kept
     pthread_mutex_lock(&g_smu);
@@ -3175,34 +3492,51 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are never a ga
     if (old) count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)old, -1);
     if (old) obj_drop(old);
     else if (m == &g_ghost) {
-        unsigned cap = ghost_cap(), i = g_ghost_next < cap ? g_ghost_next : 0; g_ghost_next = i + 1 < cap ? i + 1 : 0;   // the ring wraps at cap, whatever cap is
-        uint64_t *slot = &g_ghost_ring[i], f = atomic_load_explicit(&g_cur_frame, memory_order_relaxed);
+        uint64_t f = atomic_load_explicit(&g_cur_frame, memory_order_relaxed); unsigned cap = ghost_cap();
         // pushed out lately and wanted again; looked up before this put's own eviction is recorded, which may take k's slot
         if (g_ghost_evicted) { unsigned gi = (unsigned)(k % GHOST_GONE); if (g_ghost_gone_ser[gi] == k) { g_ghost_thrash += (uint32_t)f - g_ghost_gone_frame[gi] < GHOST_THRASH_FRAMES; g_ghost_gone_ser[gi] = 0; } }
-        if (*slot) { id ev = hm_get_id(&g_ghost, slot); if (ev) { ghost_held_add((__bridge void *)ev, -1); obj_drop(ev); } hm_del_id(&g_ghost, slot); ser_note(*slot);   // the evicted serial resolves anew too
-                     unsigned gi = (unsigned)(*slot % GHOST_GONE); g_ghost_gone_ser[gi] = *slot; g_ghost_gone_frame[gi] = (uint32_t)f; g_ghost_evicted++; }
-        *slot = k; g_ghost_puts++;
+        // At the ceiling the least recently used goes, unless a submission in flight used it (then every entry did, and the table goes past the ceiling), up to twice the ceiling.
+        // Past the ceiling (it grew while its entries were in use) a put lets a second one go once the GPU is done with it too, so the table comes back down to its ceiling as puts
+        // come. With one a put it stayed where it had grown for as long as the game kept putting: a game that replays more than its ceiling (the thrash case, the reason for
+        // Ocarina of Time's 4096) held up to twice it for good, and only an idle stretch of 600 frames brought it back
+        for (int e = 0; e < 2 && g_ghost.n >= cap && g_ghost_lru && (!ghost_in_flight(g_ghost_lru) || g_ghost.n >= 2 * cap); e++) {
+            uint64_t ek = g_ghost_lru->serial; ghost_evict(ek);   // the evicted serial resolves anew too
+            unsigned gi = (unsigned)(ek % GHOST_GONE); g_ghost_gone_ser[gi] = ek; g_ghost_gone_frame[gi] = (uint32_t)f; g_ghost_evicted++;
+        }
+        g_ghost_puts++;
         if (tl_ghost_miss_t0) tl_ghost_put = 1;
     }
     hm_put_id(m, &k, o); tex_pin *pin=nvn_hm_get(&g_tex_pins,&k); if(pin) tex_pin_set(pin,o); ser_note(k);
     count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)o, 1);
+    if (m == &g_ghost) ghost_used(k);   // a put, new or again: the youngest entry
     pthread_mutex_unlock(&g_smu);
 }
-// A memory trim (mtl_trim_at, a pressure warning and up) takes a table larger than keep back down to it, the oldest first, as tex_put evicts: each entry holds its texture alive and
-// resident (a retired one waits in g_retire_held), and a profile's ghost_table of 4096 holds eight times the default's. An entry let go only makes its serial resolve anew (ser_note),
-// as an eviction does. The ring keeps its size: the emptied slots fill again without an eviction, so the oldest still goes first. Not counted as evictions or thrash
-// (mtl_ghost_stat). Returns the entries let go
-static unsigned ghost_trim(unsigned keep) {
-    unsigned n = 0;
-    pthread_mutex_lock(&g_smu);
-    unsigned cap = ghost_cap(), i = g_ghost_next < cap ? g_ghost_next : 0;   // the oldest: the next slot tex_put takes, or past the empty ones after it
-    for (unsigned j = 0; j < cap && g_ghost.n > keep; j++, i = i + 1 < cap ? i + 1 : 0) {
-        uint64_t *slot = &g_ghost_ring[i]; if (!*slot) continue;
-        id ev = hm_get_id(&g_ghost, slot); if (ev) { ghost_held_add((__bridge void *)ev, -1); obj_drop(ev); }
-        hm_del_id(&g_ghost, slot); ser_note(*slot); *slot = 0; n++;
-    }
-    pthread_mutex_unlock(&g_smu);
+// A memory trim (mtl_trim_at, a pressure warning and up) takes the table back down to ghost_floor (512, or a smaller ceiling), least recently used first, leaving what a submission in
+// flight used: each entry holds its texture alive and resident (a retired one waits in g_retire_held), and a profile's ghost_table of 4096 holds eight times the default's. An entry let
+// go only makes its serial resolve anew (ser_note), as an eviction does. Not counted as evictions or thrash (mtl_ghost_stat). Returns the entries let go
+static unsigned ghost_trim(void) {
+    pthread_mutex_lock(&g_smu); unsigned n = ghost_release(ghost_floor(), UINT_MAX, 0); pthread_mutex_unlock(&g_smu);
     return n;
+}
+// Each submission's commit (mtl_sub_commit, submit thread): above ghost_floor, the low-headroom drop or the idle drain (see g_ghost). The headroom is read outside g_smu, at most every
+// GHOST_HEADROOM_EVERY_NS, and only while the table is above its floor; on the Mac none is known (g_rh_avail NULL) and only the drain runs. A table at its floor costs one lock
+static void ghost_commit(void) {
+    pthread_mutex_lock(&g_smu); unsigned keep = ghost_floor(), held = g_ghost.n; pthread_mutex_unlock(&g_smu);
+    if (held <= keep) return;
+    uint64_t avail = 0;
+    if (g_rh_avail) { uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC); if (!g_ghost_hr_at || now - g_ghost_hr_at >= GHOST_HEADROOM_EVERY_NS) { g_ghost_hr_at = now; avail = g_rh_avail(); } }
+    int low = avail && avail < GHOST_LOW_HEADROOM;
+    pthread_mutex_lock(&g_smu);
+    unsigned n = low ? ghost_release(keep, UINT_MAX, 0) : ghost_release(keep, GHOST_DRAIN, 1);
+    if (low) g_ghost_low += n; else g_ghost_drained += n;
+    held = g_ghost.n; pthread_mutex_unlock(&g_smu);
+    static uint64_t logged_frame; static int logged;
+    uint64_t f = atomic_load_explicit(&g_cur_frame, memory_order_relaxed);
+    if (low && n && (!logged || f >= logged_frame + 300)) {
+        logged = 1; logged_frame = f;
+        MLOG("finalized-texture table: headroom to the system memory limit %llu MB, under %llu MB: %u entries let go at once, %u held now (down to %u but for what submissions in flight use), frame %llu",
+             (unsigned long long)(avail >> 20), (unsigned long long)(GHOST_LOW_HEADROOM >> 20), n, held, keep, (unsigned long long)f);
+    }
 }
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
 // spare: the texture the last re-upload replaced, kept resident and written by the next re-upload once the GPU has passed spare_fence (a texture the CPU rewrites every frame, a movie frame,
@@ -3505,6 +3839,19 @@ static _Atomic uint64_t g_upload_gpu_ns;
 // its GPU time in microseconds + 1 in the low half (up_flush). 0: no note. Every other game's batches only read them
 enum { DZ_N = 4 };
 static _Atomic uint64_t g_dz_up[DZ_N];
+// An upload batch's GPU time from its feedback (GPUStartTime, GPUEndTime, seconds) → seconds, or -1 when not known: a start of 0 (not set), an end before the start, or a span of 10 s
+// or more. Ocarina of Time's 'depth zero:' lines in iPhone test 3 read 4000000.0 ms (a start of 0: the end's whole uptime, cut at the 4e9 us the low half holds) and 171810.0 ms
+// (a start left over from earlier) for batches the frames around them show took a few ms
+static double up_gpu_secs(double g0, double g1) { return g0 > 0 && g1 >= g0 && g1 - g0 < 10.0 ? g1 - g0 : -1; }
+// The batch numbered seq completed with that feedback: its GPU time into g_upload_gpu_ns (the timing line's @upload_gpu_ms) and into a waiting 'depth zero:' note on its batch
+// (dz_tick); a time not known adds nothing and leaves the note's low half 0, which the line prints as "not known"
+static void up_gpu_note(unsigned seq, double g0, double g1) {
+    double d = up_gpu_secs(g0, g1);
+    if (d < 0) return;
+    if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
+    for (int i = 0; i < DZ_N; i++) { uint64_t w = (uint64_t)seq << 32;   // a large depth texture zeroed in this batch: its time for the line (dz_tick)
+        if (atomic_load_explicit(&g_dz_up[i], memory_order_relaxed) == w) atomic_compare_exchange_strong(&g_dz_up[i], &w, w | ((uint32_t)(d * 1e6) + 1u)); }
+}
 static id<MTL4CommandBuffer> g_up_cb;
 static id<MTL4ComputeCommandEncoder> g_up_ce;
 static _Atomic int g_up_alloc_busy[3];
@@ -3516,7 +3863,20 @@ static void up_wait_zero(_Atomic int *v, int site) {
     if (!atomic_load(v)) { if (ws_on()) ws_put(site, 0, 0); return; }
     uint64_t w0 = ws_t0();
     pthread_mutex_lock(&g_up_wmu);
-    while (atomic_load(v)) { struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 10000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; } pthread_cond_timedwait(&g_up_wcv, &g_up_wmu, &dl); }
+    wn_in(WN_UPZERO, (uint64_t)atomic_load(v));
+    wait_mark m; wait_mark_set(&m);   // the 10 s line, once (its 10 ms sleeps are unchanged)
+    while (atomic_load(v) && !drain_over()) {   // the suspend's limit (t_drain_by, mtl_drain_by) ends it: the caller reads *v again
+        struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 10000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; } pthread_cond_timedwait(&g_up_wcv, &g_up_wmu, &dl);
+        if (atomic_load(v) && wait_mark_due(&m)) {
+            static _Atomic int n;
+            const char *fb = atomic_load_explicit(&g_fbq_what, memory_order_acquire);
+            char rw[96]; rcw_text(rw, sizeof rw, mach_absolute_time());   // a batch that retires staging stays pending until the residency commit worker has committed its removal
+            wait_say(&n, v == &g_up_pending ? "the upload batches to complete" : "an upload slot's previous batch", ws_name[site],
+                     "%d pending; fences completed %llu, submitted %llu; feedback handler %s%s; residency commit worker %s", atomic_load(v), (unsigned long long)atomic_load(&g_done), (unsigned long long)atomic_load(&g_fence),
+                     fb ? "running: " : "none running", fb ? fb : "", rw);
+        }
+    }
+    wn_out(WN_UPZERO);
     pthread_mutex_unlock(&g_up_wmu);
     if (ws_on()) ws_put(site, w0, 1);
 }
@@ -3614,26 +3974,28 @@ static void up_flush(void) {
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     atomic_fetch_add(&g_up_pending, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        fb_in("upload batch");
         if (f.error) { MLOG("[RED] upload command buffer execution error: %s", f.error.description.UTF8String); res_top_once(f.error); gpu_lost_check(f.error, "upload"); }
         if (f.error || fake_lost) {
             up_lost_add(dsts); int n = atomic_load(&g_up_lost_n);
             pthread_mutex_lock(&g_smu); g_ser_gen++; pthread_mutex_unlock(&g_smu);   // Make the view cache of every texture ID take the slow path once (on a cache hit tex_mtl is not passed through and this record is not seen)
             MLOG("%supload command buffer dropped: the %lu textures of this batch are marked unwritten and re-uploaded on next use (%d awaiting re-upload)", fake_lost ? "DM_TEST_UP_LOST: " : "", (unsigned long)dsts.count, n);
         }
-        double d = f.GPUEndTime - f.GPUStartTime;
-        if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
-        for (int i = 0; i < DZ_N; i++) { uint64_t w = (uint64_t)seq << 32;   // a large depth texture zeroed in this batch: its time for the line (dz_tick)
-            if (atomic_load_explicit(&g_dz_up[i], memory_order_relaxed) == w) atomic_compare_exchange_strong(&g_dz_up[i], &w, w | ((uint32_t)MIN(MAX(d, 0) * 1e6, 4e9) + 1u)); }
+        up_gpu_note(seq, f.GPUStartTime, f.GPUEndTime);
+        int retire = staging.count != 0;
         @autoreleasepool {
             for (id<MTLResource> obj in staging) res_remove(obj);
             [staging removeAllObjects];
             [views removeAllObjects];   // upload-only integer views share their targets' residency
-            res_commit();
         }
         atomic_store_explicit(&g_up_slot_back[slot], seq, memory_order_release);   // after a drop's g_up_lost entries (up_seq_back)
-        atomic_store(&g_up_alloc_busy[slot], 0);
-        atomic_fetch_sub(&g_up_pending, 1);
+        atomic_store(&g_up_alloc_busy[slot], 0);   // the slot's command buffer and allocator are free: its retained blocks never leave the set
+        // The staging's removal is committed on the residency commit worker, not here (res_commit_async); the batch stays pending until it is. One with nothing to retire (its
+        // slot's blocks only, the usual case) is done now, as before
+        if (retire) res_commit_async(^{ atomic_fetch_sub(&g_up_pending, 1); up_wake(); });
+        else atomic_fetch_sub(&g_up_pending, 1);
         up_wake();
+        fb_out();
     }];
     res_commit();
     [cb endCommandBuffer];
@@ -3682,7 +4044,7 @@ static void up_diag(void) { @autoreleasepool {
     int chg = g_up_swaps != said_swaps, fol = follow && now - last_ns >= 5000000000ull; if ((!chg && !fol) || lines >= 200) return;
     if (chg && last_ns && now - last_ns < 1000000000ull) return; last_ns = now; said_swaps = g_up_swaps; lines++; follow = chg;
     unsigned long alive = 0, inres = 0; uint64_t abytes = 0; NSArray *olds = g_up_old.allObjects;
-    pthread_mutex_lock(&g_res_mu); unsigned long nres = (unsigned long)g_res_objects.allObjects.count; for (id<MTLBuffer> o in olds) { alive++; abytes += o.length; inres += [g_res_objects containsObject:o]; } pthread_mutex_unlock(&g_res_mu);
+    res_mu_lock(); unsigned long nres = (unsigned long)g_res_objects.allObjects.count; for (id<MTLBuffer> o in olds) { alive++; abytes += o.length; inres += [g_res_objects containsObject:o]; } res_mu_unlock();
     pthread_mutex_lock(&g_deferred_mu); unsigned long ndef = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
     MLOG("upload staging blocks%s: %llu created in total, swapped within a batch %llu times (%llu MB of old blocks swapped out); swapped-out blocks still alive now %lu, %llu MB, still in the residency set %lu; GPU allocated %llu MB, residency set %lu objects, deferred-release queue %lu", fol && !chg ? " (settled)" : "",
          (unsigned long long)g_up_blocks_new, (unsigned long long)g_up_swaps, (unsigned long long)(g_up_swap_bytes >> 20), alive, (unsigned long long)(abytes >> 20), inres, (unsigned long long)(g_dev.currentAllocatedSize >> 20), nres, ndef);
@@ -5343,27 +5705,28 @@ static uint64_t mem_guest_charged(void) {
 // The finalized-texture table's line, by the frame hook every 300 frames beside the memory line (hle_nvn.c), per frame since the last: the textures put into the table, how many of
 // them it had pushed out in the last GHOST_THRASH_FRAMES frames (a table too small for what the game keeps replaying), its evictions, the time of the texture misses that put (tex_mtl)
 // and of the pool tables' patch path less those misses inside it (pool_gpu, which every put and eviction feeds through its serial's note; the two add up), and the texture ID epochs
-// ser_sync started (more notes than SER_NOTES between two syncs, among other causes). Counters only: a quiet table costs a few loads every 300 frames. A window with no put and no
-// eviction writes no line, whatever the patch path and the epochs did (they move in nearly every game, and the pool tables' own line counts them), so a game that never fills its
-// table writes none. Integers only, as the memory line: the frame hook runs on the guest thread's stack
+// ser_sync started (more notes than SER_NOTES between two syncs, among other causes); then, as counts in the window, the idle entries the commits drained (ghost_commit) and those let go
+// at low headroom to the memory limit. Counters only: a quiet table costs a few loads every 300 frames. A window with no put, eviction, drain or low-headroom drop writes no line,
+// whatever the patch path and the epochs did (they move in nearly every game, and the pool tables' own line counts them), so a game that never fills its table writes none. Integers
+// only, as the memory line: the frame hook runs on the guest thread's stack
 static void ghost_fx(char *b, size_t n, uint64_t v, uint64_t nf, unsigned dec) {   // v / nf with dec (2 or 3) decimals
     uint64_t sc = dec == 3 ? 1000 : 100, c = v * sc / nf;
     snprintf(b, n, dec == 3 ? "%llu.%03llu" : "%llu.%02llu", (unsigned long long)(c / sc), (unsigned long long)(c % sc));
 }
 void mtl_ghost_stat(unsigned long long frame) {
-    static unsigned long long last_frame; static uint64_t prev[6];
-    pthread_mutex_lock(&g_smu); uint64_t v[6] = {g_ghost_puts, g_ghost_thrash, g_ghost_evicted}; unsigned held = g_ghost.n, cap = ghost_cap(); pthread_mutex_unlock(&g_smu);
+    static unsigned long long last_frame; static uint64_t prev[8];
+    pthread_mutex_lock(&g_smu); uint64_t v[8] = {g_ghost_puts, g_ghost_thrash, g_ghost_evicted, 0, 0, 0, g_ghost_drained, g_ghost_low}; unsigned held = g_ghost.n, cap = ghost_cap(); pthread_mutex_unlock(&g_smu);
     v[3] = atomic_load_explicit(&g_ghost_miss_ticks, memory_order_relaxed); v[4] = atomic_load_explicit(&g_pool_patch_ticks, memory_order_relaxed); v[5] = atomic_load_explicit(&g_treg_ep_bumps, memory_order_relaxed);
-    uint64_t d[6]; for (int i = 0; i < 6; i++) d[i] = v[i] - prev[i];
-    uint64_t any = d[0] | d[1] | d[2];   // the table's own traffic (a timed miss always put, so d[3] moves only with d[0])
+    uint64_t d[8]; for (int i = 0; i < 8; i++) d[i] = v[i] - prev[i];
+    uint64_t any = d[0] | d[1] | d[2] | d[6] | d[7];   // the table's own traffic (a timed miss always put, so d[3] moves only with d[0]), its drain and low-headroom drops included
     uint64_t nf = frame > last_frame ? frame - last_frame : 1; last_frame = frame; memcpy(prev, v, sizeof prev);
     if (!any) return;
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     char put[24], thr[24], ev[24], miss[24], patch[24], ep[24];
     ghost_fx(put, sizeof put, d[0], nf, 2); ghost_fx(thr, sizeof thr, d[1], nf, 2); ghost_fx(ev, sizeof ev, d[2], nf, 2); ghost_fx(ep, sizeof ep, d[5], nf, 2);
     ghost_fx(miss, sizeof miss, d[3] * tb.numer / tb.denom / 1000, nf * 1000, 3); ghost_fx(patch, sizeof patch, d[4] * tb.numer / tb.denom / 1000, nf * 1000, 3);   // ns → µs, shown as ms
-    MLOG("finalized-texture table up to frame %llu (%u held, up to %u), per frame: %s put, %s of them pushed out in the last %d frames, %s pushed out; %s ms in the texture misses that put, %s ms patching pool tables; texture ID epochs started %s",
-         frame, held, cap, put, thr, GHOST_THRASH_FRAMES, ev, miss, patch, ep);
+    MLOG("finalized-texture table up to frame %llu (%u held, up to %u), per frame: %s put, %s of them pushed out in the last %d frames, %s pushed out; %s ms in the texture misses that put, %s ms patching pool tables; texture ID epochs started %s; in the window %llu idle entries drained, %llu let go at low memory headroom",
+         frame, held, cap, put, thr, GHOST_THRASH_FRAMES, ev, miss, patch, ep, (unsigned long long)d[6], (unsigned long long)d[7]);
 }
 // Memory readout line (always on, low frequency, capped): resident memory, GPU allocated, deferred-release queue, residency set object count, registered memory pools / peak / tracking table capacity, cumulative texture re-uploads.
 // Purpose: pin down "crashes with no log". The system gives no notice before killing a process for memory, so only readouts left beforehand can show which number kept climbing.
@@ -5374,7 +5737,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
     if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
     pthread_mutex_lock(&g_deferred_mu); unsigned long nd = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
-    pthread_mutex_lock(&g_res_mu); unsigned long nr = (unsigned long)g_res_objects.count; pthread_mutex_unlock(&g_res_mu);
+    res_mu_lock(); unsigned long nr = (unsigned long)g_res_objects.count; res_mu_unlock();
     int live = 0, peak = 0, cap = 0; nvn_dirty_stat(&live, &peak, &cap);
     pthread_mutex_lock(&g_smu); unsigned ns = g_by_serial.n, ashared = g_alias.n, nghost = g_ghost.n, gcap = ghost_cap(), nwait = g_retire_held.n; uint64_t ghost_puts = g_ghost_puts;
     unsigned aorph = 0;   // shared textures no live texture object or finalized serial resolves to: kept only until their storage is taken over or their pool goes (alias_take_over)
@@ -5759,7 +6122,7 @@ static void xv_init(void) {
     const char *p = getenv("DM_XV_FILE"); if (!p || !*p) return;
     FILE *f = fopen(p, "r"); if (!f) return;
     char line[256], why[160]; unsigned long long tag; int ch, n = 0;
-    while (fgets(line, sizeof line, f) && g_xv_ndis < 128) if (sscanf(line, "%llx\t%159[^\t]\t%d", &tag, why, &ch) >= 1) g_xv_disabled[g_xv_ndis++] = tag, n++;
+    while (fgets(line, sizeof line, f) && g_xv_ndis < 128) if (sscanf(line, "%llx\t%159[^\t]\t%d", &tag, why, &ch) >= 1) g_xv_disabled[g_xv_ndis++] = tag, n++;   // NOLINT(clang-analyzer-unix.BlockInCriticalSection): DM_XV_FILE (diagnostics, at most 128 lines) is read once, at the first write-back check, which may run under the replay's lock
     fclose(f); MLOG("read %d disable records", n);
 }
 static int xv_disabled(uint64_t tag) { xv_init(); for (int i = 0; i < g_xv_ndis; i++) if (g_xv_disabled[i] == tag) return 1; return 0; }
@@ -9915,6 +10278,11 @@ void mtl_arch_save(int wait_ms, int ending) {
                         late ? "not all written in time: those left are built again at the next start" : !wait_ms ? "not waited for" : "written", (bp_now() - t0) / 1e6);
 }
 static void arch_at_exit(void) { mtl_arch_save(ARCH_QUIT_WAIT_MS, 1); }
+// Going to the background when the suspend's drain did not finish in its limit (hle_nvn.c dm_gfx_suspend): the crash marker's background state as mtl_arch_save sets it, and
+// nothing handed over. The hand-over needs the compiler, not the GPU: it makes a new MTL4Compiler and pipeline data set serializer for the next period (ep_new), and the period
+// handed over is written once its compiles have returned (arch_submit); a device whose queue does not drain may not give either, on the main thread. Periods handed over before
+// still write (front_ios.m archive_background waits for them); the captures not handed over are written at the next flush or quit, or built again at the next start
+void mtl_arch_hold(void) { if (TARGET_OS_IPHONE) arch_mark_bg(1); }
 void mtl_arch_resume(void) { arch_mark_bg(0); }   // back in the foreground (dm_gfx_suspend(0)): compacting writes arm the marker again
 // Waits up to wait_ms for the periods handed over to be written (iOS: the background task going to the background takes, front_ios.m). 1: none left
 int mtl_arch_wait(int wait_ms) { return !g_arch_pending || !dispatch_group_wait(g_arch_pending, dispatch_time(DISPATCH_TIME_NOW, (int64_t)wait_ms * NSEC_PER_MSEC)); }
@@ -11698,14 +12066,14 @@ static id<MTLBuffer> gmem_map(void) {
     id<MTLBuffer> b = [g_dev newBufferWithLength:DMSH_GMEM_MAP_ENTRIES * DMSH_GMEM_MAP_ENTRY options:MTLResourceStorageModeShared];
     uint8_t *t = (uint8_t *)b.contents; memset(t, 0, b.length);
     for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES; k++) memset(t + (size_t)k * DMSH_GMEM_MAP_ENTRY, 0xff, 8);
-    int n = 1, over = 0; uint64_t end = 0;
+    int n = 1, over = 0, added = 0; uint64_t end = 0;
     pthread_mutex_lock(&g_mu);
     for (int k = 0; k < g_nbig; k++) if (!g_big[k].full && addr_meets(g_big[k].lo, g_big[k].hi)) { int n = big_new(&g_big[k], g_big[k].a, g_big[k].b, g_big[k].b, 0); if (n >= 0) g_big[k].full = n + 1; }   // the pool table reaches all of a large pool
     gen = atomic_load(&g_pool_gen); pidx_sort();
     for (int k = 0; k < g_npool; k++) {
         pool_ent *p = &g_pools[g_pidx[k]];
         if (!addr_meets(p->lo, p->hi)) continue;
-        if (!p->res) { res_add(p->buf); p->res = 1; g_pool_res_n++; }
+        if (!p->res) { res_add(p->buf); p->res = 1; g_pool_res_n++; atomic_fetch_add(&g_pool_res_open, 1); added++; }   // committed below, after g_mu (pool_res)
         uint64_t lo = MAX((uint64_t)p->lo, end), hi = p->hi;
         if (lo >= hi) continue;
         if (n == DMSH_GMEM_MAP_ENTRIES) { over++; continue; }
@@ -11723,6 +12091,7 @@ static id<MTLBuffer> gmem_map(void) {
     }
     if (over) RED_ONCE(140, "raw global memory: %d more memory pools than the %d entries of the pool table; addresses in them are not reached", over, DMSH_GMEM_MAP_ENTRIES - 1);
     res_add(b); res_commit();
+    if (added) atomic_fetch_sub(&g_pool_res_open, added);
     if (g_gmem_buf) defer_obj_release(g_gmem_buf);
     g_gmem_buf = b; g_gmem_gen = gen;
     { static int said; if (!said++) MLOG("raw global memory: pool table of %d ranges (pool generation %llu), rebuilt whenever a pool comes or goes", n - 1, (unsigned long long)gen); }
@@ -16329,12 +16698,14 @@ static void sub_cut(void) {
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     atomic_fetch_add(&g_seg_inflight, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
+        fb_in("segment");
         atomic_fetch_sub(&g_seg_inflight, 1);
         gpu_tag_done(f, cb.GPUStartTime, cb.GPUEndTime);
         if (sc) { if (k < SEG_CLK_N) { atomic_store(&sc->t[k][0], gpu_s_guest_ns(cb.GPUStartTime)); atomic_store(&sc->t[k][1], gpu_s_guest_ns(cb.GPUEndTime)); } seg_clk_put(sc); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("[RED] segment command buffer execution error: %s", cb.error.description.UTF8String); res_top_once(cb.error); }
         char where[64]; snprintf(where, sizeof where, "fence %llu, segment %u", (unsigned long long)cbs_fence, k); cbs_feedback(cbs, cb.error, where);
         gpu_lost_check(cb.error, "segment");
+        fb_out();
     }];
     gmem_commit_patch();
     res_commit();
@@ -16728,8 +17099,9 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
     d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
     id<MTLTexture> out = w && h ? [g_dev newTextureWithDescriptor:d] : nil; id<MTLBuffer> buf = out ? [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared] : nil;
     if (!buf) { MLOG("[RED] full-window screenshot: cannot create output (%zux%zu)", w, h); cb(NULL); return; }
-    // GPU completion starts the readback, keeping the present thread free. Each capture owns its scaler and textures until completion. On the Metal 4 queue the readback is committed from
-    // the feedback queue and completes there too, without waiting (once_commit)
+    // GPU completion starts the readback, keeping the present thread free. Each capture owns its scaler and textures until completion. The readback is made and committed on the
+    // residency commit worker (res_commit_q), not in the offscreen present's feedback handler: once_commit commits the residency set first, and no feedback handler may (a long
+    // commit would hold back every completion); it completes on the feedback queue, without waiting (once_commit)
     void (^readback)(int) = ^(int ok) {
         if (!ok) { cb(NULL); return; }
         NvOnce *cb2 = once_new(1); once_use(cb2, out); once_use(cb2, buf); id<MTL4ComputeCommandEncoder> b = once_copy(cb2);
@@ -16742,7 +17114,7 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
             CGImageRef img = ctx ? CGBitmapContextCreateImage(ctx) : NULL; cb(img);
             CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs); });
     };
-    if (!present_offscreen_m4(src, crop, out, readback)) cb(NULL);
+    if (!present_offscreen_m4(src, crop, out, ^(int ok) { dispatch_async(res_commit_q(), ^{ @autoreleasepool { readback(ok); } }); })) cb(NULL);
 }
 void dm_gfx_shot_at(long k, const char *path) {
     pthread_mutex_lock(&g_shotq_mu);
@@ -17752,11 +18124,13 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
     MTL4CommitOptions *options = [MTL4CommitOptions new];
     id<MTLTexture> aa_tex = aa.tex, aa_raw = aa.raw; id<MTLBuffer> aa_work = aa.work, aa_ctl = aa.ctl; id<MTL4ArgumentTable> aa_at = aa.at;
     [options addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        fb_in("offscreen present");
         (void)al; (void)cb; (void)raw; (void)fx.sc; (void)aa_raw; (void)aa_at;   // keep the Metal 4 commands, source view, scaler and edge smoothing's state alive too
         res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out); res_remove(aa_tex); res_remove(aa_work); res_remove(aa_ctl);
         if (aa_ctl && !f.error) aa_note(aa_ctl);
         if (f.error) { MLOG("[RED] offscreen present: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "offscreen present"); }
         done(f.error ? PRESENT_FAILED : kind);
+        fb_out();
     }];
     [g_q4 commit:&cb count:1 options:options];
     return 1;
@@ -17822,8 +18196,8 @@ static void present_fx_idle(int kind, uint64_t ticket, int alloc_i) {
 // queue for the fence of the submission that starts there, which no present or submission committed before it outlasts on the queue; or going to the background
 // (dm_gfx_suspend: the graphics gate closed and every submission and present drained, so for the last fence, which has passed). It releases what is idle and large:
 // render-target heaps waiting for reuse (rh_trim_all), the upload slots' blocks above UP_SLOT_BLOCK and their overflow blocks (up_trim_idle), packaged-texture spares
-// (pkg_spare_release), same-pass feedback snapshots (fb_trim), per-frame arena blocks the GPU is done with above ARENA_KEEP_BLOCKS (arena_trim), the finalized-texture table's oldest
-// entries above the default's 512 (ghost_trim; a profile's ghost_table sets more), what the deferred-release queue holds whose fence has passed (defer_drain), and it asks the present thread to
+// (pkg_spare_release), same-pass feedback snapshots (fb_trim), per-frame arena blocks the GPU is done with above ARENA_KEEP_BLOCKS (arena_trim), the finalized-texture table's least recently
+// used entries above the default's 512 that no submission in flight uses (ghost_trim; a profile's ghost_table sets more), what the deferred-release queue holds whose fence has passed (defer_drain), and it asks the present thread to
 // release edge smoothing and MetalFX if they are off (g_fx_trim_req). Going to the background (level 3) it also drops the kept vertex conversions (vk_trim_all), which a
 // pressure warning leaves: they are still drawn, and would be made again in the next submission. Each was made again on its next use before, as after the idle trims. dm_gfx_pressure also sweeps the guest's
 // files (hle_svc.c dm_guest_file_trim, DM_GUEST_FILE). One line gives the MB per class; the memory line counts the trims. DM_MEMORY_TRIM=0 logs the pressure and trims
@@ -17843,7 +18217,7 @@ static uint64_t mtl_trim_at(int level, uint64_t fence) { @autoreleasepool {
     int nrh = 0, nup = 0, nsp = 0, nfb = 0, nar = 0, nvk = 0;
     uint64_t brh = rh_trim_all(&nrh), bup = up_trim_idle(0, fence, &nup), bsp = pkg_spare_release(0, fence, &nsp), bfb = fb_trim(0, fence, &nfb), bar = g_arenas ? arena_trim(0, &nar) : 0;
     uint64_t bvk = level == 3 ? vk_trim_all(fence, &nvk) : 0;   // going to the background only: under a pressure warning the game still draws them, and they would be made again at once
-    unsigned ngh = level >= 1 ? ghost_trim(NGHOST_DEF) : 0;   // a finalized-texture table above the default's 512 back down to it (the profile's ghost_table); its textures wait for the fence
+    unsigned ngh = level >= 1 ? ghost_trim() : 0;   // a finalized-texture table above the default's 512 back down to it (the profile's ghost_table); its textures wait for the fence
     atomic_store(&g_fx_trim_req, 1);
     res_commit();   // the heaps leave the residency set now; the rest once their fence has passed (defer_obj_at drains at once a fence the GPU has passed)
     uint64_t total = brh + bup + bsp + bfb + bar + bvk;
@@ -17851,7 +18225,7 @@ static uint64_t mtl_trim_at(int level, uint64_t fence) { @autoreleasepool {
     const double M = 1048576.0;
     MLOG("memory trim (%s): %.1f MB in all: render-target heaps waiting %d (%.1f MB), upload staging blocks %d (%.1f MB), packaged-texture spares %d (%.1f MB), feedback snapshots %d (%.1f MB), per-frame arena blocks %d (%.1f MB), kept vertex conversions %d (%.1f MB), "
          "finalized-texture table entries %u (down to %d), deferred-release queue %lu of %lu entries released; present effects that are off go at the next present; footprint %.0f MB before, %.1f ms",
-         g_trim_why[level >= 0 && level <= 4 ? level : 4], total / M, nrh, brh / M, nup, bup / M, nsp, bsp / M, nfb, bfb / M, nar, bar / M, nvk, bvk / M, ngh, NGHOST_DEF, q0 > q1 ? q0 - q1 : 0, q0, fp0 / M, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6);
+         g_trim_why[level >= 0 && level <= 4 ? level : 4], total / M, nrh, brh / M, nup, bup / M, nsp, bsp / M, nfb, bfb / M, nar, bar / M, nvk, bvk / M, ngh, (int)ghost_floor(), q0 > q1 ? q0 - q1 : 0, q0, fp0 / M, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6);
     return total;
 } }
 // The trim at once (dm_gfx_trim): only with no submission open and every submission and present completed (dm_gfx_suspend after mtl_drain; the tests), so for the last fence
@@ -17961,7 +18335,18 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     int alloc_i = (int)(ticket % 3);
     if (g_present_alloc_fence[alloc_i]) {
         pthread_mutex_lock(&g_pq_mu);
-        while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+        int noted = g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]; if (noted) wn_in(WN_PALLOC, g_present_alloc_fence[alloc_i]);
+        wait_mark m = {0, 1}; if (noted) wait_mark_set(&m);   // the 10 s line, once; the wait is as long as before
+        while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]) {
+            wait_mark_sleep(&g_pq_cv, &g_pq_mu, &m);
+            if (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i] && wait_mark_due(&m)) {
+                static _Atomic int n;
+                wait_say(&n, "the present allocator's previous present on the GPU", "present_now (" LOCK_SITE ")", "allocator %d last used by ticket %llu, its feedback reported %llu; presents processed %llu, in flight %d; fences completed %llu, submitted %llu",
+                         alloc_i, (unsigned long long)g_present_alloc_fence[alloc_i], (unsigned long long)g_present_alloc_done[alloc_i], (unsigned long long)g_pq_done,
+                         g_pq_inflight, (unsigned long long)atomic_load(&g_done), (unsigned long long)atomic_load(&g_fence));
+            }
+        }
+        if (noted) wn_out(WN_PALLOC);
         pthread_mutex_unlock(&g_pq_mu);
     }
     [g_present_alloc4[alloc_i] reset];
@@ -17974,10 +18359,12 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     id<MTLBuffer> aa_ctl = kind & PRESENT_AA ? g_aa_present.ctl : nil;   // its counts, read when this present completes (a later present may have run by then: a log line's figures only)
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        fb_in("present");
         if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
-        else if (aa_ctl) aa_note(aa_ctl);
+        else { if (aa_ctl) aa_note(aa_ctl); atomic_store_explicit(&dm_present_done_ns, now_ns(), memory_order_relaxed); }   // a present on screen: the freeze detector's clock (dm/host/stall.c)
         pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
         present_gpu_note(f.GPUEndTime - f.GPUStartTime, kind); pthread_mutex_unlock(&g_pq_mu);
+        fb_out();
     }];
     id<MTL4CommandBuffer> buffers[] = {cb};
     pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
@@ -18233,18 +18620,23 @@ static void link_sync(void) {   // Called every frame by the game's present thre
 // Before going to the background (mtl_drain): when the display link drives presents, frames queued but not yet presented can only be taken by the display-link callback, and in the background the system no longer calls back --
 // waiting as-is for "the present queue to empty" would wait forever, the enter-background callback would not return, and the system would kill the process (the process disappears within 22 seconds after switching to another App).
 // These frames will not be seen anyway: discard them directly (accounted as dropped frames) and only wait for the one present already submitted to the GPU to finish.
-static void present_drop_for_suspend(void) {
+// Under the suspend's limit (t_drain_by, mtl_drain_by) that wait ends there and this returns 0, the queue left as it stands past the drop (no ticket is marked processed while a
+// present is still on the GPU); 1 otherwise
+static int present_drop_for_suspend(void) {
+    int ok = 1;
     pthread_mutex_lock(&g_pq_mu);
     if (g_link_owns_layer) {
         uint64_t n = g_pq_in - g_pq_read;
         for (uint64_t k = g_pq_read + 1; k <= g_pq_in; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
         g_link_dropped += n; g_pq_read = g_pq_in;
-        while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
-        if (g_pq_done < g_pq_in) g_pq_done = g_pq_in;
+        while (g_pq_inflight && !drain_over()) drain_cond_wait(&g_pq_cv, &g_pq_mu);
+        ok = !g_pq_inflight;
+        if (ok && g_pq_done < g_pq_in) g_pq_done = g_pq_in;
         pthread_cond_broadcast(&g_pq_cv);
         if (n) MLOG("entering the background: dropping %llu queued frames not yet displayed (the display link does not fire in the background)", (unsigned long long)n);
     }
     pthread_mutex_unlock(&g_pq_mu);
+    return ok;
 }
 static void *present_main(void *arg) {
     (void)arg;
@@ -18307,18 +18699,23 @@ int mtl_snap_on(void) {
     return v;
 }
 static void snap_commit_wait(uint64_t v) { if (v) rec_note_wait(&g_snap_cmt, v); }
-static void snap_drain(void) {
+static void present_wait_at(uint64_t tk, const char *site);
+// Under the suspend's limit (t_drain_by, mtl_drain_by) both waits end there and a copy not done returns 0 instead of stopping the process; 1 when the copies are done
+static int snap_drain(void) {
     // Display tickets may have been dropped during suspend, but their copies still belong to the Metal 4 queue.
-    uint64_t v = g_snap_v; if (!v) return;
+    uint64_t v = g_snap_v; if (!v) return 1;
     snap_commit_wait(v);
-    if (![g_snap_ev waitUntilSignaledValue:v timeoutMS:10000]) MDIE("present snapshots: GPU did not drain within 10 s");
+    if (atomic_load(&g_snap_cmt) < v) return 0;   // only under the limit: the note's wait ended there
+    uint64_t dl = drain_left(), ms = 10000; if (dl != UINT64_MAX && dl / 1000000ull < ms) ms = dl / 1000000ull;
+    if (![g_snap_ev waitUntilSignaledValue:v timeoutMS:ms]) { if (t_drain_by) return 0; MDIE("present snapshots: GPU did not drain within 10 s"); }
+    return 1;
 }
 uint64_t mtl_snap_acquire_wait(void) {
     if (!mtl_snap_on() || atomic_load(&g_present_discard)) return 0;
     int k = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
     uint64_t ticket = atomic_load(&g_snap[k].ticket), ev = atomic_load(&g_snap[k].ev), w0 = ws_t0();
     pthread_mutex_lock(&g_pq_mu); int blocked = ticket > g_pq_done; pthread_mutex_unlock(&g_pq_mu);
-    if (ticket) mtl_present_wait(ticket);
+    if (ticket) present_wait_at(ticket, "mtl_snap_acquire_wait (a snapshot ring slot's previous present)");
     if (ev && !atomic_load(&g_present_discard) && g_snap_ev.signaledValue < ev) {
         blocked = 1;
         // On timeout present falls back to its original texture; the busy allocator is never reset.
@@ -18381,7 +18778,7 @@ static uint64_t snap_take(const tex_t *t) {
         r = rec_own_put(b, RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_snap_cmt; r->a[1] = v;
         rec_own_push(b);
     } else {
-        res_commit_lock(); [g_q4 commit:&cb count:1]; [g_q4 signalEvent:g_snap_ev value:v]; pthread_mutex_unlock(&g_res_commit_mu);
+        res_commit_lock(); Q4_COMMIT_TIMED("snap_take (the present snapshot's copy)", [g_q4 commit:&cb count:1]); [g_q4 signalEvent:g_snap_ev value:v]; res_commit_unlock();
         atomic_store(&g_snap_cmt, v);
     }
     g_snap[k].ev = v;
@@ -18452,16 +18849,29 @@ void mtl_present_progress(uint64_t *queued, uint64_t *done) { pthread_mutex_lock
 // third to a half of the frames (2 slots 32/80, 4 slots 49/80, snapshots off 0/80; LNPANDY/NX2Apple#1117)
 // The wait for the copy is a CPU wait for the GPU: the ledger counts it as "snapshot copy" (WS_SNAPCOPY), apart from the ring slot's (WS_SNAP)
 void mtl_present_wait_texture(uint64_t tk, uint64_t ev) {
-    if (!ev) { mtl_present_wait(tk); return; }
+    if (!ev) { present_wait_at(tk, "mtl_present_wait_texture (a texture's next acquire, or a queue finish)"); return; }
     uint64_t w0 = ws_t0(); int blocked = !atomic_load(&g_present_discard) && g_snap_ev.signaledValue < ev;
     if (blocked && ![g_snap_ev waitUntilSignaledValue:ev timeoutMS:2000]) RED_ONCE(169, "present snapshots: a texture's copy did not finish within 2 s; the game draws into it again");
     if (ws_on()) ws_put(WS_SNAPCOPY, w0, blocked);
 }
-void mtl_present_wait(uint64_t tk) {
+// A present wait at the 10 s mark (under g_pq_mu): the ticket, the present queue's counters and the display link's, the fences. The waits below no longer lean on the display
+// link's stall drops alone: a present taken by the link or the present thread that never reaches the GPU, or one whose GPU work never completes, waited here without a line
+static void present_wait_say(uint64_t tk, const char *site) {
+    static _Atomic int n;
+    uint64_t now = now_ns(), tick = __atomic_load_n(&g_link_tick_ns, __ATOMIC_RELAXED);
+    wait_say(&n, "a present to be handed to the GPU", site, "ticket %llu; presents queued %llu, taken %llu, processed %llu, in flight %d; display link %s, its last tick %.1f s ago, stall %d; fences completed %llu, submitted %llu",
+             (unsigned long long)tk, (unsigned long long)g_pq_in, (unsigned long long)g_pq_read, (unsigned long long)g_pq_done, g_pq_inflight, g_link_owns_layer ? "owns the layer" : "does not own the layer",
+             tick && now > tick ? (now - tick) / 1e9 : -1.0, g_stall_t0 != 0, (unsigned long long)atomic_load(&g_done), (unsigned long long)atomic_load(&g_fence));
+}
+static void present_wait_at(uint64_t tk, const char *site) {
     pthread_mutex_lock(&g_pq_mu);
+    int noted = g_pq_done < tk && !atomic_load(&g_present_discard); if (noted) wn_in(WN_PTICKET, tk);
+    wait_mark m = {0, 1}; if (noted) wait_mark_set(&m);   // the 10 s line, once; the untimed waits below wake at the mark once to say it, then wait as before
     while (g_pq_done < tk && !atomic_load(&g_present_discard)) {
-        if (!g_link_owns_layer) { pthread_cond_wait(&g_pq_cv, &g_pq_mu); continue; }
-        if (g_pq_read >= tk) { pthread_cond_wait(&g_pq_cv, &g_pq_mu); continue; }   // This one has already been taken by the display link and is being presented: wait for it to be handed to the GPU (the GPU completion callback will wake us)
+        if (drain_over()) break;   // the suspend's limit (mtl_drain_by): present_flush_ok reads what is left
+        if (wait_mark_due(&m)) present_wait_say(tk, site);
+        if (!g_link_owns_layer) { wait_mark_sleep(&g_pq_cv, &g_pq_mu, &m); continue; }
+        if (g_pq_read >= tk) { wait_mark_sleep(&g_pq_cv, &g_pq_mu, &m); continue; }   // This one has already been taken by the display link and is being presented: wait for it to be handed to the GPU (the GPU completion callback will wake us)
         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += (long)STALL_NS; if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
         // Already determined to be in a stall (when the display link comes back the callback first clears g_stall_t0, then records the display-link tick time): no longer wait 100 ms in vain every frame, drop directly, and the game proceeds by its own display-link wait timeout (about two ticks)
         if (!g_stall_t0 && (pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) != ETIMEDOUT || g_pq_done >= tk)) continue;
@@ -18471,7 +18881,8 @@ void mtl_present_wait(uint64_t tk) {
         uint64_t n = tk - g_pq_read;
         for (uint64_t k = g_pq_read + 1; k <= tk; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
         g_link_dropped += n; g_pq_read = tk;
-        while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+        while (g_pq_inflight && !drain_over()) { wait_mark_sleep(&g_pq_cv, &g_pq_mu, &m); if (g_pq_inflight && wait_mark_due(&m)) present_wait_say(tk, site); }
+        if (g_pq_inflight) break;   // the suspend's limit came first: no ticket is marked processed while a present is still on the GPU
         if (g_pq_done < tk) g_pq_done = tk;
         pthread_cond_broadcast(&g_pq_cv);
         if (!g_stall_t0) { g_stall_t0 = last ? last : now; g_stall_drop = 0; g_stall_red = 0; g_stall_logged = 0; g_stall_n++; }
@@ -18487,11 +18898,20 @@ void mtl_present_wait(uint64_t tk) {
         }
         if (active && !g_stall_red && elapsed >= STALL_RED_NS) { g_stall_red = 1; MLOG("[RED] display link silent for %.1f s while active; presenting relies entirely on fallback frame drops, the picture is frozen", elapsed / 1e9); }
     }
+    if (noted) wn_out(WN_PTICKET);
     pthread_mutex_unlock(&g_pq_mu);
 }
+void mtl_present_wait(uint64_t tk) { present_wait_at(tk, "mtl_present_wait"); }
 // Wait until all queued presents have been processed (used by mtl_finish = nvnQueueFinish etc.): goes through mtl_present_wait, so there is still a fallback when the display link stops (real device: the game called QueueFinish once while the display link was stopped,
 // and this used to wait here without a timeout; nobody took the 3 queued frames and the game stalled; those two runs on Mac did not hit this call)
-void mtl_present_flush(void) { pthread_mutex_lock(&g_pq_mu); uint64_t h = g_pq_in; pthread_mutex_unlock(&g_pq_mu); mtl_present_wait(h); }
+// present_flush_ok: the same wait, 0 when the suspend's limit (mtl_drain_by) ended it with the queue not processed
+static int present_flush_ok(const char *site) {
+    pthread_mutex_lock(&g_pq_mu); uint64_t h = g_pq_in; pthread_mutex_unlock(&g_pq_mu);
+    present_wait_at(h, site);
+    pthread_mutex_lock(&g_pq_mu); int ok = g_pq_done >= h || atomic_load(&g_present_discard); pthread_mutex_unlock(&g_pq_mu);
+    return ok;
+}
+void mtl_present_flush(void) { present_flush_ok("mtl_present_flush (a queue finish, or the suspend)"); }
 void mtl_stats(uint64_t *passes, uint64_t *draws) { *passes = g_stat_pass; *draws = g_stat_draw; cp_report(); }
 void mtl_args_stats(uint64_t *enc, uint64_t *reuse, uint64_t *patch) { *enc = g_stat_args_enc; *reuse = g_stat_args_reuse; *patch = g_stat_args_patch; }
 void mtl_vbuf_stats(uint64_t *resolve, uint64_t *reuse, uint64_t *set, uint64_t *skip, uint64_t *copies, uint64_t *copy_bytes) {
@@ -18560,6 +18980,54 @@ void mtl_wait_state_dump(void) {
          atomic_load(&g_up_pending), atomic_load(&g_up_alloc_busy[0]), atomic_load(&g_up_alloc_busy[1]), atomic_load(&g_up_alloc_busy[2]), g_up_seq, g_up_cb != nil,
          (unsigned long long)g_pq_in, (unsigned long long)g_pq_done, g_cb != nil, atomic_load(&g_sub_thread_set));
 }
+// The freeze detector's dump (dm/host/stall.c, DM_STALL_LOG; on by default, logging only), after its "[RED] stall: no present for N s" line: what each place that can hold presents
+// back is doing (the notes at the top of this file). It runs on the detector's thread while the game may be frozen in any path it reads, so it takes no lock at all: atomics and the
+// notes, and plain counters read as they stand (__atomic_load_n: a value a moment stale misleads one line, where a lock taken here could stop the dump in the freeze it describes).
+// mtl_wait_state_dump's line, which reads the same way, ends it
+static void stall_lock_text(char *out, size_t n, lock_note *ln, uint64_t now) {
+    uint32_t th = atomic_load_explicit(&ln->th, memory_order_acquire); const char *site = atomic_load_explicit(&ln->site, memory_order_relaxed); uint64_t at = atomic_load_explicit(&ln->at, memory_order_relaxed);
+    if (!th) snprintf(out, n, "free");
+    else snprintf(out, n, "held by host thread %#x from %s for %.1f s", th, site ? site : "?", at && now >= at ? mach_s(now - at) : 0.0);
+}
+void mtl_stall_dump(void) {
+    uint64_t now = mach_absolute_time();
+    uint64_t sub = atomic_load(&g_fence), done = atomic_load(&g_done);
+    const char *fw = atomic_load_explicit(&g_fbq_what, memory_order_acquire); uint64_t fin = atomic_load(&g_fbq_in), fout = atomic_load(&g_fbq_out);
+    char fb[200];
+    if (fw) snprintf(fb, sizeof fb, "running the %s handler for %.1f s", fw, fin && now >= fin ? mach_s(now - fin) : 0.0);
+    else if (fout) snprintf(fb, sizeof fb, "idle, its last handler ended %.1f s ago", now >= fout ? mach_s(now - fout) : 0.0);
+    else snprintf(fb, sizeof fb, "idle, no handler has run yet");
+    MLOG("stall dump: fences submitted %llu / completed %llu (%llu behind); feedback queue %s, %llu handlers so far; main command buffers committed and not reported back %d",
+         (unsigned long long)sub, (unsigned long long)done, (unsigned long long)(sub > done ? sub - done : 0), fb, (unsigned long long)atomic_load(&g_fbq_n), atomic_load(&g_seg_inflight));
+    char lc[200], lr[200]; stall_lock_text(lc, sizeof lc, &g_res_commit_note, now); stall_lock_text(lr, sizeof lr, &g_res_note, now);
+    MLOG("stall dump: residency commit lock (g_res_commit_mu) %s; residency lock (g_res_mu) %s", lc, lr);
+    char rw[96]; rcw_text(rw, sizeof rw, now);   // a batch that retires staging is pending until the worker has committed its removal (res_commit_async)
+    MLOG("stall dump: upload batches pending %d, last begun seq %u, a batch open %d; slots busy [%d %d %d], completed through seq [%u %u %u]; residency commit worker %s",
+         atomic_load(&g_up_pending), __atomic_load_n(&g_up_seq, __ATOMIC_RELAXED), g_up_cb != nil,
+         atomic_load(&g_up_alloc_busy[0]), atomic_load(&g_up_alloc_busy[1]), atomic_load(&g_up_alloc_busy[2]),
+         atomic_load(&g_up_slot_back[0]), atomic_load(&g_up_slot_back[1]), atomic_load(&g_up_slot_back[2]), rw);
+    if (__atomic_load_n(&g_rb_started, __ATOMIC_RELAXED)) {
+        uint32_t st = atomic_load(&g_rx_state); uint64_t since = atomic_load(&g_rx_since);
+        MLOG("stall dump: encode thread %s for %.1f s; blocks queued %d, one in hand %d, asleep %d; drains %llu (%llu blocked); uniform copies queued %llu / made %llu, waiters asleep %u, copy thread asleep %u",
+             st < RX_N ? rx_name[st] : "?", since && now >= since ? mach_s(now - since) : 0.0, __atomic_load_n(&g_rb_head, __ATOMIC_RELAXED) != NULL,
+             __atomic_load_n(&g_rb_busy, __ATOMIC_RELAXED), __atomic_load_n(&g_rb_sleeping, __ATOMIC_RELAXED), (unsigned long long)atomic_load(&g_drains), (unsigned long long)atomic_load(&g_drains_blocked),
+             (unsigned long long)atomic_load(&g_ubc_head), (unsigned long long)atomic_load(&g_ubc_done), atomic_load(&g_ubc_waiting), atomic_load(&g_ubc_sleeping));
+    } else MLOG("stall dump: no encode thread (Metal encoding on the submit thread)");
+    uint64_t tick = __atomic_load_n(&g_link_tick_ns, __ATOMIC_RELAXED), tnow = now_ns(); char tk[64];
+    if (tick && tnow >= tick) snprintf(tk, sizeof tk, "%.1f s ago", (tnow - tick) / 1e9); else snprintf(tk, sizeof tk, "none yet");
+    MLOG("stall dump: present queue enqueued %llu / taken %llu / done %llu, on the GPU %d; allocators done [%llu %llu %llu] of [%llu %llu %llu]; presents %llu; display link %d, owns the layer %d, rescue %d, last tick %s",
+         (unsigned long long)__atomic_load_n(&g_pq_in, __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_pq_read, __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_pq_done, __ATOMIC_RELAXED),
+         __atomic_load_n(&g_pq_inflight, __ATOMIC_RELAXED),
+         (unsigned long long)__atomic_load_n(&g_present_alloc_done[0], __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_present_alloc_done[1], __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_present_alloc_done[2], __ATOMIC_RELAXED),
+         (unsigned long long)__atomic_load_n(&g_present_alloc_fence[0], __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_present_alloc_fence[1], __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_present_alloc_fence[2], __ATOMIC_RELAXED),
+         (unsigned long long)__atomic_load_n(&g_present_n, __ATOMIC_RELAXED), g_dm_present_link, __atomic_load_n(&g_link_owns_layer, __ATOMIC_RELAXED), atomic_load(&g_rescue_mode),
+         tk);
+    char w[1024]; size_t o = 0;
+    for (int k = 0; k < WN_N && o < sizeof w - 160; k++) { int n = atomic_load(&g_wn[k].n); if (n <= 0) continue; uint64_t at = atomic_load(&g_wn[k].at);
+        o += (size_t)snprintf(w + o, sizeof w - o, " %s: %d thread%s, the latest for %llu, %.1f s;", wn_name[k], n, n == 1 ? "" : "s", (unsigned long long)atomic_load(&g_wn[k].what), at && now >= at ? mach_s(now - at) : 0.0); }
+    MLOG("stall dump: blocked waits in progress:%s", o ? w : " none");
+    mtl_wait_state_dump();
+}
 uint64_t mtl_alloc_shares(void) { return g_alloc_shares; }   // main submissions that began in the allocator of the one before them
 void mtl_alloc_stats(uint64_t *waits, uint64_t *grown, int *n) { *waits = g_alloc_waits; *grown = g_alloc_grown; *n = g_alloc_n; }   // Main submit allocator pool: how many times it waited, how many times it grew, how many exist now
 // Memory census for restop (diagnostic): residency-set textures by Metal format; which of them anything still names (serial tables, sharing table, descriptor views) and which only the
@@ -18592,7 +19060,7 @@ void mem_census(const char *why) { @autoreleasepool {
     uint64_t small_n[2][2] = {{0}}, small_b[2][2] = {{0}};   // [texture][shared storage]: residency objects of 64 KB or less
     uint64_t n_ret = 0, b_ret = 0, n_named = 0, b_named = 0, n_wait = 0, b_wait = 0, n_none = 0, b_none = 0, n_buf = 0, b_buf = 0;
     enum { NF = 24 }; struct { unsigned long pf; uint64_t n, b; } fm[NF] = {{0}}; int nfm = 0;
-    pthread_mutex_lock(&g_res_mu);
+    res_mu_lock();
     for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = o.allocatedSize;
         if (z <= 65536) { int tx = [(id)o conformsToProtocol:@protocol(MTLTexture)], sh = ((id<MTLResource>)o).storageMode == MTLStorageModeShared; small_n[tx][sh]++; small_b[tx][sh] += z; }
         if (![(id)o conformsToProtocol:@protocol(MTLTexture)]) { n_buf++; b_buf += z; continue; }
@@ -18602,7 +19070,7 @@ void mem_census(const char *why) { @autoreleasepool {
         else if ([named_ret containsObject:(__bridge id)(__bridge void *)t]) { n_ret++; b_ret += z; }
         else if ([waiting containsObject:(__bridge id)(__bridge void *)t]) { n_wait++; b_wait += z; }
         else { n_none++; b_none += z; } }
-    pthread_mutex_unlock(&g_res_mu);
+    res_mu_unlock();
     uint64_t dup_addr = 0, dup_tex = 0, dup_b = 0;
     for (id key in by_mem) { NSHashTable *set = [by_mem objectForKey:key]; if (set.count < 2) continue; dup_addr++;
         uint64_t biggest = 0, sum = 0; for (id b in set) { uint64_t z = ((id<MTLTexture>)b).allocatedSize; sum += z; if (z > biggest) biggest = z; } dup_tex += set.count - 1; dup_b += sum - biggest; }

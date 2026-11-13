@@ -91,6 +91,7 @@ static void focus_sync(int applets) {   // applets: +1 an applet opens, -1 one c
 void dm_applet_enter(const char *name) { LOG("oe library applet: %s", name); focus_sync(1); }
 void dm_applet_leave(void) { focus_sync(-1); }
 int dm_focus_now(void) { return atomic_load(&g_focus); }   // the front end's state, not an applet's: the display link follows the window
+int dm_focus_seen(void) { return atomic_load(&g_seen); }   // the state the game sees (the "oe focus state" line): the freeze detector (stall.c) holds off unless it is 1, so a library applet open over the game counts as out of focus
 uint64_t dm_focus_in_since(void) { return atomic_load(&g_focus_in_ns); }   // graphics layer display link watchdog: stalls are only computed while active, counted from activation (nvn_mtl.m mtl_present_wait)
 void dm_focus_set(int st) {
     if (st < 1 || st > 3) die("dm_focus_set: invalid state %d", st);

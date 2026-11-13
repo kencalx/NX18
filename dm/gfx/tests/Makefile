@@ -338,7 +338,8 @@ check_t_upload_slots: t_upload_slots
 	MTL_DEBUG_LAYER=1 ./t_upload_slots
 	DM_NVN_UPLOAD_REUSE=0 MTL_DEBUG_LAYER=1 ./t_upload_slots
 	DM_NVN_UPLOAD_TRIM=0 MTL_DEBUG_LAYER=1 ./t_upload_slots
-# The finalized-texture table (nvn_mtl.m g_ghost, ghost_cap, mtl_ghost_stat): the profile's size, then DM_NVN_GHOST's held to 64..8192 or ignored when not a number
+# The finalized-texture table (nvn_mtl.m g_ghost, ghost_cap, mtl_ghost_stat, ghost_commit): the profile's ceiling, then DM_NVN_GHOST's held to 64..8192 or ignored when not a number;
+# use order, in-flight entries kept, the idle drain and the low-headroom drop
 t_ghost: t_ghost.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_ghost.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_ghost
@@ -510,6 +511,16 @@ check_t_border: t_border
 t_view_levels: t_view_levels.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_view_levels.m $(MTL_T_SRC) $(FW)
 check_t_view_levels: RUN_ENV = MTL_DEBUG_LAYER=1
+# The freeze detector's graphics dump (mtl_stall_dump): returns at once with the locks, a feedback handler and a fence wait it describes held, and names them
+t_stall_dump: t_stall_dump.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_stall_dump.m $(MTL_T_SRC) $(FW)
+check_t_stall_dump: RUN_ENV = MTL_DEBUG_LAYER=1
+t_wait_say: t_wait_say.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_wait_say.m $(MTL_T_SRC) $(FW)
+check_t_wait_say: RUN_ENV = MTL_DEBUG_LAYER=1
+t_suspend_drain: t_suspend_drain.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_suspend_drain.m $(MTL_T_SRC) $(FW)
+check_t_suspend_drain: RUN_ENV = MTL_DEBUG_LAYER=1
 t_res_commit: t_res_commit.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_res_commit.m $(MTL_T_SRC) $(FW)
 check_t_res_commit: RUN_ENV = MTL_DEBUG_LAYER=1

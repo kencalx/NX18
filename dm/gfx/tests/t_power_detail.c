@@ -44,6 +44,23 @@ int main(void) {
     o = nvn_pd_tick_text(small, sizeof small, &a, &z, 2.0, 120, 30.0, 24.0, 120, 3);
     CHECK("tick: a short buffer is cut, not overrun", o < sizeof small && strlen(small) == o);
 
+    // The union of the frames' spans (nvn_pd_span_add, hle_nvn.c tick_gpu). Ocarina of Time's first power tick in iPhone test 3 read about 42,556,079 ms/s and 133,359 ms/s there:
+    // a frame whose start was unset counted from time 0, and a start left over from earlier counted its whole age. Both frames are left out now; real frames still make the union
+    {
+        double ms = 0; uint64_t end = 0, up = 42556079000000ull;   // about 42,556 s of uptime, in ns
+        CHECK("span: a frame with a GPU start of 0 is left out (was 42,556,079 ms)", !nvn_pd_span_add(&ms, &end, 0, up) && ms == 0 && end == 0);
+        CHECK("span: a frame with no GPU end is left out", !nvn_pd_span_add(&ms, &end, up, 0) && ms == 0 && end == 0);
+        CHECK("span: a span of 133.359 s, a start left over, is left out (was 133,359 ms)", !nvn_pd_span_add(&ms, &end, up - 133359000000ull, up) && ms == 0 && end == 0);
+        CHECK("span: an end before the start is left out", !nvn_pd_span_add(&ms, &end, up, up - 1000) && ms == 0 && end == 0);
+        CHECK("span: a 12 ms frame counts", nvn_pd_span_add(&ms, &end, up, up + 12000000ull) && ms > 11.999 && ms < 12.001 && end == up + 12000000ull);
+        CHECK("span: an overlapping frame adds only its part after the last end", nvn_pd_span_add(&ms, &end, up + 6000000ull, up + 20000000ull) && ms > 19.999 && ms < 20.001);
+        CHECK("span: a frame inside the union adds nothing", nvn_pd_span_add(&ms, &end, up + 1000000ull, up + 2000000ull) && ms > 19.999 && ms < 20.001 && end == up + 20000000ull);
+        CHECK("span: a frame with a start of 0 after real ones still adds nothing", !nvn_pd_span_add(&ms, &end, 0, up + 30000000ull) && ms > 19.999 && ms < 20.001 && end == up + 20000000ull);
+        CHECK("span: a frame of exactly 1 s still counts", nvn_pd_span_add(&ms, &end, up + 100000000ull, up + 1100000000ull) && ms > 1019.999 && ms < 1020.001);
+        nvn_pd_tick_text(b, sizeof b, &a, &z, 1.0, 60, 30.0, ms, 0, 0);
+        CHECK("span: the tick prints the union of the real frames only", strstr(b, "about 1020.0 ms/s as the union of the frames' spans") != NULL);
+    }
+
     int told = 0;
     nvn_pd_power_text(b, sizeof b, 3, 63, 1, 0, &told); puts(b);
     CHECK("battery and Low Power Mode", !strcmp(b, "battery 63%, on battery; Low Power Mode off"));

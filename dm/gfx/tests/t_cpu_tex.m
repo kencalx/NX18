@@ -225,8 +225,8 @@ static void poll_beside(void) { printf("poll_beside: skipped, the profile has no
 static int resident(id o) { pthread_mutex_lock(&g_res_mu); int r = [g_res_objects containsObject:o]; pthread_mutex_unlock(&g_res_mu); return r; }
 static void settle(void) { for (int i = 0; i < 2; i++) { g_fence++; pthread_mutex_lock(&g_mu); g_done = g_fence; pthread_mutex_unlock(&g_mu); defer_drain(); } }   // the GPU passed every fence
 // The GPU's first write over a texture taken from its storage (cpu_unc_drop): every serial that held the package now holds its texture, the package goes, and the serials go one by
-// one, the last through the ghost ring. The texture stays resident while any serial entry, live or finalized, holds it, and leaves the residency set with the last. Ocarina of Time's
-// 260x260 terrain tiles handed over this way left the set with the package, or with the first holder a ghost-ring eviction dropped, while still drawn: GPU address faults (#1326)
+// one, the last through the ghost table. The texture stays resident while any serial entry, live or finalized, holds it, and leaves the residency set with the last. Ocarina of Time's
+// 260x260 terrain tiles handed over this way left the set with the package, or with the first holder a ghost-table eviction dropped, while still drawn: GPU address faults (#1326)
 static void handover_holders(void) {
     const size_t len = 262144;
     uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
@@ -253,10 +253,10 @@ static void handover_holders(void) {
     CHECK(resident(ta), "hand-over: the package's release leaves the texture resident for its serials");
     h_nvnTextureFinalize(&a); settle();
     CHECK(resident(ta), "hand-over: one serial's release leaves it resident for the other");
-    tex_put(sa, ta);   // a record of the finalized object replayed: its serial resolves through the ghost ring
+    tex_put(sa, ta);   // a record of the finalized object replayed: its serial resolves through the ghost table
     h_nvnTextureFinalize(&b); settle();
-    CHECK(resident(ta), "hand-over: a finalized serial in the ghost ring keeps it resident");
-    for (uint64_t i = 0; i < ghost_cap(); i++) tex_put((1ull << 61) + i, [NSObject new]);   // the ring evicts that entry (its size: the profile's, or DM_NVN_GHOST)
+    CHECK(resident(ta), "hand-over: a finalized serial in the ghost table keeps it resident");
+    for (uint64_t i = 0; i < ghost_cap(); i++) tex_put((1ull << 61) + i, [NSObject new]);   // the full table evicts that entry, the least recently used, its submission completed (its ceiling: the profile's, or DM_NVN_GHOST)
     settle();
     pthread_mutex_lock(&g_smu); int left = g_retire_held.n; pthread_mutex_unlock(&g_smu);
     CHECK(!resident(ta) && !left, "hand-over: the last holder's release takes it out of the residency set");
