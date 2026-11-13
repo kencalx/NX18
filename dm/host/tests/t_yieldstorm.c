@@ -2,11 +2,13 @@
 // (nanosleep moves it by the time asked, sched_yield by 0.5 µs), so where each storm starts, how often it sleeps and the CPU time counted in tight runs are exact. A tight run: yields
 // with no other SVC and under 2 µs of guest work between two; a storm: one past 500 µs. count (the default) counts their CPU time (sleeps left out), the storms, sched_yield calls,
 // short SleepThread calls apart from the yields and the runs by length, and changes nothing; sleep makes each further yield of a worker sleep up to 50 µs, while the thread that
-// acquires the window texture keeps spinning; 0 does neither. The clock moving by each sleep's length checks that the sleeps are taken, also those of 20 µs or less, which
-// sleep_precise would skip
+// acquires the window texture keeps spinning, and a worker again once the acquire moved to another thread; 0 does neither. The clock moving by each sleep's length checks that the
+// sleeps are taken, also those of 20 µs or less, which sleep_precise would skip. Two threads with no guest code beside this one (dummy_thr) rank the top yielders and take the mark
 #include "../dm.h"
 #include <assert.h>
+#include <pthread.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -14,7 +16,8 @@
 static _Atomic uint64_t clk = 1000000000ull;
 static uint64_t test_now_ns(void) { return atomic_load(&clk); }
 static int test_nanosleep(const struct timespec *ts, struct timespec *rem) { (void)rem; atomic_fetch_add(&clk, (uint64_t)ts->tv_sec * 1000000000ull + (uint64_t)ts->tv_nsec); return 0; }
-static int test_sched_yield(void) { atomic_fetch_add(&clk, 500); return 0; }
+static uint64_t sy_ns = 500;   // a sched_yield's length; longer: the thread was off its core
+static int test_sched_yield(void) { atomic_fetch_add(&clk, sy_ns); return 0; }
 #define now_ns test_now_ns
 #define nanosleep test_nanosleep
 #define sched_yield test_sched_yield
@@ -37,12 +40,18 @@ static void loop_for(uint64_t ns, uint64_t work, int move) { uint64_t t0 = test_
 static void short_sleep(uint64_t ns) { uint64_t r[32] = {ns}; for (int i = 19; i <= 28; i++) r[i] = 0x1000 + (uint64_t)i; svc_thread(0x0B, r); }   // SleepThread(ns), ns ≤ 20.1 µs: a yield to the host
 typedef struct { uint64_t storms, tight, sleeps, backoff, moved, sched, shorts, hist[6]; } snap;
 static snap now_counts(void) { thr_t *m = self(); snap s = {m->nstorm, m->tight_ns, m->nstsleep, m->nbackoff, m->nmoved, m->nsched, m->nshort, {0}}; memcpy(s.hist, m->ys_hist, sizeof s.hist); return s; }
+// A guest thread with no guest code, linked into the all-threads chain for dm_yield_top (its counters set by hand); thr_free unlinks it
+static thr_t *dummy_thr(uint32_t h) {
+    thr_t *t = calloc(1, sizeof *t); assert(t); t->handle = h; t->spin_mod = "main"; pthread_cond_init(&t->cv, 0); pthread_cond_init(&t->pcv, 0);
+    pthread_mutex_lock(&G); t->all = g_all; g_all = t; pthread_mutex_unlock(&G); return t;
+}
+static void *mark_as(void *t) { pthread_setspecific(g_keythr, t); dm_thread_acquire_mark(); return NULL; }   // t acquires the window texture, from a thread of its own as hle_nvn.c does
 static void mode(const char *v) { if (v) setenv("DM_YIELD_STORM", v, 1); else unsetenv("DM_YIELD_STORM"); g_ys_mode = -1; }
 
 int main(void) {
     alarm(20);
     svc_thread_main_init();
-    char line[512];
+    char line[1536];
 
     // count (the default): a spin loop of 0.5 µs passes for 2 ms is one storm, every yield moved on, and no sleep: the clock moved by the guest work alone. Its CPU time in the tight
     // run is the guest work between the yields and the first yield's sched_yield; the run, once another SVC and a yield end it, is one of 0.5-2 ms (from its first
@@ -68,6 +77,13 @@ int main(void) {
         assert(strstr(line, " ms in tight runs (") && strstr(line, "SleepThread ≤20.1 µs 2;") && strstr(line, "yield storms 1") && !strstr(line, "storm sleeps"));
         assert(strstr(line, "tight runs ended, all threads: <10 µs 1 / <100 µs 0 / <500 µs 0 / <2 ms 1 / <10 ms 0 / longer 0"));
         puts("PASS: count mode counts a 2 ms spin of moving yields as one storm, its CPU time and length, short SleepThread calls apart, and changes nothing");
+
+        // a sched_yield of 10 µs (the cores busy: the thread was off its core for most of it) counts 2 µs of CPU time at most
+        other_svc(); a = now_counts(); y0 = self()->nyield;
+        sy_ns = 10000; pass(500, 1); sy_ns = 500; loop_for(10000, 500, 1);
+        n = self()->nyield - y0; other_svc(); pass(500, 1); b = now_counts();
+        assert(b.tight - a.tight == (n - 1) * 500 + 2000);
+        puts("PASS: a yield's host time counts at most 2 µs of CPU time");
 
         // passes of 5 µs of work (a loop that works between yields), and runs that other SVCs cut every 100 µs: no storm
         other_svc(); a = now_counts();
@@ -109,8 +125,28 @@ int main(void) {
     loop_for(2000000, 500, 1);
     b = now_counts();
     assert(b.sleeps == a.sleeps && b.storms - a.storms == 1 && test_now_ns() - t0 == (self()->nyield - n0) * 500 + 500);
-    g_ys_acq = NULL;
     puts("PASS: sleep mode leaves the acquiring thread's storms spinning");
+
+    // the acquire moves to thread B: this thread (A) is a worker again and sleeps in its storms; B's exit (thr_free) clears the mark, so a thread at its address is a worker
+    thr_t *tb = dummy_thr(0x7777), *tc = dummy_thr(0x7778);
+    { pthread_t p; assert(!pthread_create(&p, 0, mark_as, tb)); pthread_join(p, 0); }
+    assert(g_ys_acq == tb);
+    dm_yield_top(line, sizeof line);
+    other_svc(); a = now_counts();
+    loop_for(1000000, 500, 1);
+    b = now_counts();
+    assert(b.sleeps - a.sleeps >= 5 && b.storms - a.storms == 1);
+    puts("PASS: once the acquire moved to another thread, the one before takes storm sleeps again");
+    // the top yielders: two by CPU time in tight runs (C's 5 ms, then this thread's), and B, with a million spin passes but none in a tight run, third
+    tc->tight_ns += 5000000; tc->nyield += 10; tb->nspin += 1000000;
+    dm_yield_top(line, sizeof line); puts(line);
+    { char *pc = strstr(line, "0x7778 '?' 5.0 ms in tight runs"), *pa = strstr(line, "0x1001 "), *pb = strstr(line, "0x7777 '?' 0.0 ms in tight runs (0 yields");
+      assert(pc && pa && pb && pc < pa && pa < pb && strstr(pb, "spin passes 1000000, last at main+0")); }
+    puts("PASS: the top yielders keep the thread with the most yields and spin passes, third");
+    pthread_mutex_lock(&G); thr_free(tb); thr_free(tc); pthread_mutex_unlock(&G);
+    assert(g_ys_acq == NULL);
+    dm_yield_top(line, sizeof line); assert(!strstr(line, "0x7777") && !strstr(line, "0x7778"));
+    puts("PASS: the acquiring thread's exit clears the mark");
 
     // sleep: a poll that keeps its registers sleeps as a storm from 500 µs, and from 2 ms takes the back-off's longer sleeps instead
     other_svc(); a = now_counts();

@@ -1867,14 +1867,16 @@ static uint64_t g_fs_start, g_fs_wait, g_fs_away;   // frame step (fstep_tick): 
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
 // The acquire thread's real-time policy, checked once a frame on that thread (DM_POWER_DETAIL, logging only): frames checked, and of them those where the thread ran as a standard thread
-// (policy not POLICY_RR, as xnu's fail-safe leaves a real-time thread that ran too long without blocking) or below priority 97. Its own port from pthread_mach_thread_np, which makes no
-// send right (mach_thread_self would leak one a frame). The thread policy line and the power tick read them
+// (policy not POLICY_RR, as xnu's fail-safe leaves a real-time thread that ran too long without blocking) or below priority 97. Only on the thread the policy was set on (g_rt_th, with
+// a computation declared): a thread the acquire moved to, or one whose thread_policy_set failed, never had the policy, and its frames are not demotions. Its own port from
+// pthread_mach_thread_np, which makes no send right (mach_thread_self would leak one a frame). The thread policy line and the power tick read them
 static _Atomic uint64_t g_acq_chk, g_acq_dem;
 int dm_power_detail_on(void);
 static void acq_demote_check(void) {
     static uint64_t last = UINT64_MAX; uint64_t f = atomic_load_explicit(&g_frame, memory_order_relaxed);
     if (f == last || !dm_power_detail_on() || !rt_on()) return;   // once a frame: acquire can run more than once in one
     last = f;
+    if (!(g_rt_comp_ms > 0) || !pthread_equal(g_rt_th, pthread_self())) return;   // no policy set on this thread (both written on the acquiring thread, set_time_constraint_comp)
     thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT;
     if (thread_info(pthread_mach_thread_np(pthread_self()), THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) != KERN_SUCCESS) return;
     atomic_fetch_add_explicit(&g_acq_chk, 1, memory_order_relaxed);
@@ -1886,7 +1888,8 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     *idx = n ? o->next++ % n : 0;
     // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
     uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0;
-    { static pthread_t acq_th; if (!pthread_equal(acq_th, pthread_self())) { if (acq_th) atomic_fetch_add_explicit(&g_acq_moves, 1, memory_order_relaxed); acq_th = pthread_self(); dm_thread_acquire_mark(); } }   // rt_policy_line counts them
+    { static pthread_t acq_th; if (!pthread_equal(acq_th, pthread_self())) { if (acq_th) atomic_fetch_add_explicit(&g_acq_moves, 1, memory_order_relaxed); acq_th = pthread_self(); } }   // rt_policy_line counts them
+    dm_thread_acquire_mark();   // every acquire, not only when the pthread changes: a new acquirer can reuse an exited guest thread's pthread_t (a TLS read and a compare)
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
         static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
         if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
@@ -2045,6 +2048,7 @@ static void power_tick(uint64_t frame) {
     if (t0 && t - t0 < 1000000000ull) return;
     nvn_pd p; int ok = nvn_pd_read(&p);
     if (!t0) mtl_perf_profile_watch();
+    else if (t - t0 > 2000000000ull) {}   // after a pause or a stay in the background with no presents: a new baseline, not one line averaged over the gap
     else {
         char b[640]; nvn_pd_tick_text(b, sizeof b, ok && ok0 ? &p0 : NULL, &p, (t - t0) / 1e9, frame - f0, g_tick_gpu_ms, g_tick_span_ms, chk - c0, dem - d0);
         LOG("[nvn] power tick at %.1f s, frame %llu: %s", (t - g_t0_ns) / 1e9, (unsigned long long)frame, b);
@@ -2062,7 +2066,7 @@ static void power_line(uint64_t frame) {
     uint64_t e = 0;
 #endif
     uint64_t iw = pw.cpu_energy.task_interrupt_wakeups, idw = pw.cpu_energy.task_platform_idle_wakeups, g = pw.gpu_energy.task_gpu_utilisation;
-    if (pt && t > pt) { double s = (t - pt) / 1e9; char yt[1024]; dm_yield_top(yt, sizeof yt);
+    if (pt && t > pt) { double s = (t - pt) / 1e9; char yt[1536]; dm_yield_top(yt, sizeof yt);
         double nf = frame > pf ? (double)(frame - pf) : 1;   // per frame: the fair comparison when one build holds the frame rate better than another
         LOG("[nvn] power up to frame %llu: CPU energy %.2f W, %.1f mJ per frame (%.1f fps); CPU %.0f%% (100 = one core), %.0f%% of it on performance cores; wakeups %.0f/s (out of platform idle %.0f); GPU %.1f ms/s; thermal %d; top yielders: %s", frame,
             (e - pe) / 1e9 / s, (e - pe) / 1e6 / nf, nf / s, (cpu - pcpu) / 1e7 / s, cpu > pcpu ? 100.0 * (double)(p - pp) / (double)(cpu - pcpu) : 0, (iw - piw) / s, (idw - ppw) / s, (g - pg) / 1e6 / s, dm_thermal_now(), yt);
