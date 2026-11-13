@@ -9,8 +9,8 @@
 //  - a residency commit, a queue commit or a wait for the commit lock past the threshold (g_slow_commit_ns, 100 ms; lowered here to drive the lines) says so, with what it
 //    applied, its site, its thread, whether it ran on the feedback queue and the lock's holder; the first 20 of a kind, then every 100th;
 //  - no feedback handler waits for the commit lock: with it held by another thread, the upload batch's and a one-off command buffer's handlers return and the feedback queue
-//    runs on; their removals are committed by the residency commit worker once the lock is free (the batch counts as pending until then), and once_wait commits its own before
-//    it returns;
+//    runs on; their removals are committed by the residency commit worker once the lock is free (the batch counts as pending until then; the freeze detector's dump says the
+//    worker's commit is in progress, so the pending batch does not read as one the GPU never finished), and once_wait commits its own before it returns;
 //  - a pool lookup that makes a pool resident commits after letting go of g_mu, and neither it nor another thread's lookup of that pool returns before the pool is committed.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
@@ -147,10 +147,17 @@ int main(void) { @autoreleasepool {
       CHECK("the feedback queue runs on behind it", feedback_runs());
       int alive; @autoreleasepool { alive = w_stg != nil; }
       CHECK("its staging's removal is queued, not committed: the staging alive, the batch still pending", res_pending() && alive && atomic_load(&g_up_pending) == 1);
+      // The freeze detector's dump says the batch waits on the worker, not on the GPU (its handler is done)
+      for (int i = 0; i < 200 && !atomic_load(&g_rcw_at); i++) usleep(1000);
+      log_new(); mtl_stall_dump(); const char *dump = log_new();
+      CHECK("the stall dump names the residency commit worker's commit in progress beside the pending batch", strstr(dump, "upload batches pending 1,") && strstr(dump, "; residency commit worker 1 commit queued, the current one for "));
       dispatch_semaphore_signal(rel); returned(done, 2000);
       up_wait_zero(&g_up_pending, WS_DIAG);
       @autoreleasepool { alive = w_stg != nil; }
-      CHECK("once the lock is free the worker commits it: the batch is done and its staging freed", atomic_load(&g_up_pending) == 0 && !alive); }
+      CHECK("once the lock is free the worker commits it: the batch is done and its staging freed", atomic_load(&g_up_pending) == 0 && !alive);
+      for (int i = 0; i < 200 && atomic_load(&g_rcw_n); i++) usleep(1000);
+      log_new(); mtl_stall_dump(); dump = log_new();
+      CHECK("then the dump shows the worker idle", strstr(dump, "; residency commit worker idle")); }
 
     // A one-off command buffer without a waiter: its handler (and its done block) run while the lock is held; the worker commits the removal once the lock is free
     { dispatch_semaphore_t gate = gate_feedback();

@@ -728,7 +728,25 @@ static dispatch_queue_t res_commit_q(void) {
     dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.res-commit", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0)); });
     return q;
 }
-static void res_commit_async(dispatch_block_t after) { dispatch_async(res_commit_q(), ^{ @autoreleasepool { res_commit(); if (after) after(); } }); }
+// The worker's state, for the freeze detector's dump and up_wait_zero's 10 s line (rcw_text): an upload batch whose staging's removal the worker has not committed yet stays pending
+// (g_up_pending) with its feedback handler long done and its slot free, so without it those lines read "1 pending ... feedback handler none running", as if the GPU had never
+// finished the batch, when the worker is waiting for the residency commit lock or is inside a long [g_res commit]. g_rcw_n: commits handed here and not finished; g_rcw_at: when
+// the current one began (mach_absolute_time, 0 between them). Relaxed atomics, a few per handed-off commit (upload batches that retire staging, one-off command buffers)
+static _Atomic int g_rcw_n; static _Atomic uint64_t g_rcw_at;
+static void res_commit_async(dispatch_block_t after) {
+    atomic_fetch_add_explicit(&g_rcw_n, 1, memory_order_relaxed);
+    dispatch_async(res_commit_q(), ^{ @autoreleasepool {
+        atomic_store_explicit(&g_rcw_at, mach_absolute_time(), memory_order_relaxed);
+        res_commit(); if (after) after();
+        atomic_store_explicit(&g_rcw_at, 0, memory_order_relaxed); atomic_fetch_sub_explicit(&g_rcw_n, 1, memory_order_relaxed);
+    } });
+}
+static void rcw_text(char *out, size_t n, uint64_t now) {
+    int k = atomic_load_explicit(&g_rcw_n, memory_order_relaxed); uint64_t at = atomic_load_explicit(&g_rcw_at, memory_order_relaxed);
+    if (k <= 0) snprintf(out, n, "idle");
+    else if (at && now >= at) snprintf(out, n, "%d commit%s queued, the current one for %.1f s", k, k == 1 ? "" : "s", mach_s(now - at));
+    else snprintf(out, n, "%d commit%s queued, none begun", k, k == 1 ? "" : "s");
+}
 static int res_pending(void) { res_mu_lock(); int n = g_res_qn != 0; res_mu_unlock(); return n; }
 // What the residency set holds: totals by kind and the largest objects. At the first GPU out-of-memory error (the error names none of them), and for DM_CTL "restop" (hle_hid.c). The set holds
 // the game's pools (shared buffers over guest memory), textures, heaps and staging alike
@@ -3832,9 +3850,10 @@ static void up_wait_zero(_Atomic int *v, int site) {
         if (atomic_load(v) && wait_mark_due(&m)) {
             static _Atomic int n;
             const char *fb = atomic_load_explicit(&g_fbq_what, memory_order_acquire);
+            char rw[96]; rcw_text(rw, sizeof rw, mach_absolute_time());   // a batch that retires staging stays pending until the residency commit worker has committed its removal
             wait_say(&n, v == &g_up_pending ? "the upload batches to complete" : "an upload slot's previous batch", ws_name[site],
-                     "%d pending; fences completed %llu, submitted %llu; feedback handler %s%s", atomic_load(v), (unsigned long long)atomic_load(&g_done), (unsigned long long)atomic_load(&g_fence),
-                     fb ? "running: " : "none running", fb ? fb : "");
+                     "%d pending; fences completed %llu, submitted %llu; feedback handler %s%s; residency commit worker %s", atomic_load(v), (unsigned long long)atomic_load(&g_done), (unsigned long long)atomic_load(&g_fence),
+                     fb ? "running: " : "none running", fb ? fb : "", rw);
         }
     }
     wn_out(WN_UPZERO);
@@ -18948,10 +18967,11 @@ void mtl_stall_dump(void) {
          (unsigned long long)sub, (unsigned long long)done, (unsigned long long)(sub > done ? sub - done : 0), fb, (unsigned long long)atomic_load(&g_fbq_n), atomic_load(&g_seg_inflight));
     char lc[200], lr[200]; stall_lock_text(lc, sizeof lc, &g_res_commit_note, now); stall_lock_text(lr, sizeof lr, &g_res_note, now);
     MLOG("stall dump: residency commit lock (g_res_commit_mu) %s; residency lock (g_res_mu) %s", lc, lr);
-    MLOG("stall dump: upload batches pending %d, last begun seq %u, a batch open %d; slots busy [%d %d %d], completed through seq [%u %u %u]",
+    char rw[96]; rcw_text(rw, sizeof rw, now);   // a batch that retires staging is pending until the worker has committed its removal (res_commit_async)
+    MLOG("stall dump: upload batches pending %d, last begun seq %u, a batch open %d; slots busy [%d %d %d], completed through seq [%u %u %u]; residency commit worker %s",
          atomic_load(&g_up_pending), __atomic_load_n(&g_up_seq, __ATOMIC_RELAXED), g_up_cb != nil,
          atomic_load(&g_up_alloc_busy[0]), atomic_load(&g_up_alloc_busy[1]), atomic_load(&g_up_alloc_busy[2]),
-         atomic_load(&g_up_slot_back[0]), atomic_load(&g_up_slot_back[1]), atomic_load(&g_up_slot_back[2]));
+         atomic_load(&g_up_slot_back[0]), atomic_load(&g_up_slot_back[1]), atomic_load(&g_up_slot_back[2]), rw);
     if (__atomic_load_n(&g_rb_started, __ATOMIC_RELAXED)) {
         uint32_t st = atomic_load(&g_rx_state); uint64_t since = atomic_load(&g_rx_since);
         MLOG("stall dump: encode thread %s for %.1f s; blocks queued %d, one in hand %d, asleep %d; drains %llu (%llu blocked); uniform copies queued %llu / made %llu, waiters asleep %u, copy thread asleep %u",
