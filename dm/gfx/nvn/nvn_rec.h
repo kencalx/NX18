@@ -181,7 +181,8 @@ static void rec_exec(const rec_t *r) {
         rx_set(RX_RESLOCK);
         res_commit_lock();   // apart from the residency set's commit, as the present snapshot's queue commit (nvn_mtl.m res_commit)
         rx_set(RX_COMMIT);
-        if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+        Q4_COMMIT_TIMED(r->op == RO_COMMIT ? "the encode thread (RO_COMMIT, a main command buffer)" : "the encode thread (RO_COMMIT_REAL)",
+                        if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1]);   // a commit of 100 ms or more says so (nvn_mtl.m q4_commit_slow)
         res_commit_unlock();
         rx_set(RX_BLOCK);
         if (r->op == RO_COMMIT) g_rx_cb = nil;
@@ -432,13 +433,13 @@ static void rec_commit(id cb, MTL4CommitOptions *o) {
     if ([cb isKindOfClass:[DmRecCB class]]) { rec_t *r = rec_put(RO_COMMIT, 1); r->a[0] = rec_obj(o); r->a[2] = ubc_head(); return; }
     ubc_wait(ubc_head());
     id<MTL4CommandBuffer> buffers[] = {cb};
-    if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+    Q4_COMMIT_TIMED("rec_commit (a main command buffer, no encode thread)", if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1]);
 }
 // An upload batch: its place in the queue is after what is recorded so far (it reads no uniform shadow)
 static void rec_commit_upload(id cb, MTL4CommitOptions *o) {
     if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_COMMIT_REAL, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); return; }
     id<MTL4CommandBuffer> buffers[] = {cb};
-    if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+    Q4_COMMIT_TIMED("rec_commit_upload (an upload batch, no encode thread)", if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1]);
 }
 // A queue operation (a sparse texture's mapping update, nvn_mtl.m sparse_*): on the encoding thread in its place among the recorded commits, so it reaches the queue before the upload batch
 // committed after it and after the command buffers committed before it
