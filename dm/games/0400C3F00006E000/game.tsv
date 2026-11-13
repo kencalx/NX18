@@ -43,6 +43,10 @@ shader_note	Mario Kart World shaders
 # slow motion. The interval takes the host's frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on any build that keeps it), at most 2; the game's own
 # 30 fps mode stays its own
 fps_target	60
+# The owner's iPhone 18 Pro Max runs (X1.0, 2026-11-13): with the hold on, a first play stepped to 30 or 20 fps 16 times in 6.5 minutes, 14 of them after
+# pipeline builds; with it off the race held 60 fps in nearly every window and felt much better, game time 0.997-1.000 of real time (late frames are paid back).
+# off is the launcher's Hold frames default for this game; DM_FPS_HOLD=on in env.txt turns it back on
+fps_hold	off
 
 # ---- Graphics ----
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here, to be confirmed on this game

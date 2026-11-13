@@ -10,6 +10,7 @@ A Switch 2 game. Brought up on the base game (v0), SDK 19.3.3 built for the Swit
 | `app_pool 0x240000000`, `mem_reserve 0x320000000`, `mem_alias 0x100000000` | `game.tsv` | the Switch 2's 9 GB, as Donkey Kong Bananza's. `SetHeapSize` asks for 0x1dbc00000 (7.43 GB; 1.8.0 asks 0x1de400000 by pull request #1116), and with a 7.5 GB heap region the first boot stopped there (`SetHeapSize OOM`): an 8 GB heap region. The alias region is mapped up to +1.75 GB by the title |
 | `modules main subsdk0 subsdk1 sdk` | `game.tsv` | the base game has no `subsdk1`; each build row names its own modules ([A version without one of the profile's modules](../../../docs/reference/packing.md#a-version-without-one-of-the-profiles-modules-stops-the-host-at-boot)) |
 | `render_cond on` | `game.tsv` | agl wraps its clears in render conditions, as in Donkey Kong Bananza and Splatoon Raiders; not tried without it here |
+| `fps_hold off` | `game.tsv` | on the owner's iPhone 18 Pro Max (X1.0) a first play with the hold on stepped to 30 or 20 fps 16 times in 6.5 minutes, 14 of them after pipeline builds; with it off the race held 60 fps in nearly every window, felt much better, and kept game time at 0.997–1.000 of real time. The launcher's Hold frames defaults to off for this game; `DM_FPS_HOLD=on` in `Documents/env.txt` turns it back on |
 | `romfs_marker Movie/StaffRoll_00.webm` | `game.tsv` | a file of both versions' RomFS |
 
 ## Files
