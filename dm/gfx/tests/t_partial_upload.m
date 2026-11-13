@@ -123,6 +123,9 @@ static void run(const char *name, int target, NVNformat format, unsigned w, unsi
     write_image(f, 0, mid); look(f, 0, "one image written after two in one submission");
     for (unsigned l = 0; l < levels; l++) for (unsigned y = 0; y < f->layers; y++) write_image(f, l, y);
     look(f, 1, "every image written");
+    // A 1D array's own partial re-uploads: its kept layers are copied from the texture built on, one row each (up_tcopy_add's size from tex_lsize); the total over all cases below would
+    // still pass if 1D arrays stopped being re-uploaded partly, and this case would no longer test those copies
+    if (g_nvn_deswz_gpu && part_reupload_on() && target == NVN_TEXTURE_TARGET_1D_ARRAY) CHECK(g_part_reuploads > p0, "a 1D array's re-uploads are partial (kept layers copied one row each)");
     g_partials += (unsigned)(g_part_reuploads - p0);
     printf("t_partial_upload: %s (%s): %u levels x %u layers, %zu bytes, %llu partial re-uploads\n", name, g_mode, levels, f->layers, f->bytes, (unsigned long long)(g_part_reuploads - p0));
     drop(f);
