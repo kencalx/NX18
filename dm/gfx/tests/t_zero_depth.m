@@ -149,6 +149,22 @@ int main(void) { @autoreleasepool {
     un = mtl_upload_gpu_ns_take(); CHECK(un > 2459000 && un < 2461000, "and into @upload_gpu_ms");
     up_gpu_note(sq, 100.0, 109.5); CHECK(atomic_load(&g_dz_up[k16 >= 0 ? k16 : 0]) == uw && mtl_upload_gpu_ns_take() == 9500000000ull, "a span under 10 s counts; the note keeps its first time");
     dz_clear();
+    // The power tick's span of one frame (mtl_gpu_span, which hle_nvn.c tick_gpu adds to the union through nvn_power.h nvn_pd_span_add), fed through the same ring the submissions
+    // fill (gpu_tag_begin / gpu_tag_done). Frames far above this test's own, so dz_tick's reads above are not touched. Ocarina of Time's first power tick in iPhone test 3 read about
+    // 42,556,079 ms/s as the union: a start just above 0 passes gpu_tag_done's own check and gave a span of the whole uptime, which mtl_gpu_span now does not return
+    {
+        uint64_t fs = 900000, s0 = 0, s1 = 0;
+        gpu_tag_begin(fs); gpu_tag_done(fs, 0, 0);
+        CHECK(!mtl_gpu_span(fs, &s0, &s1), "span: a frame whose command buffer came back with no GPU times has no span");
+        gpu_tag_begin(fs + 1); gpu_tag_done(fs + 1, 100.0, 100.012);
+        CHECK(mtl_gpu_span(fs + 1, &s0, &s1) && s0 == 100000000000ull && s1 - s0 > 11999000 && s1 - s0 < 12001000, "span: a 12 ms frame has its span");
+        gpu_tag_begin(fs + 2); gpu_tag_done(fs + 2, 1e-6, 42556.079);
+        CHECK(mtl_gpu_span(fs + 2, &s0, &s1) == 0 && mtl_gpu_ms(fs + 2) > 4e7, "span: a start just above 0 with an end at 42556 s of uptime has no span (was about 42,556,079 ms); the summed time is not changed");
+        gpu_tag_begin(fs + 3); gpu_tag_begin(fs + 3); gpu_tag_done(fs + 3, 100.0, 100.01); gpu_tag_done(fs + 3, 102.0, 102.01);
+        CHECK(mtl_gpu_span(fs + 3, &s0, &s1) == 0 && mtl_gpu_ms(fs + 3) > 19.99 && mtl_gpu_ms(fs + 3) < 20.01, "span: a frame whose command buffers spread over 2 s has no span, its summed time still counts");
+        gpu_tag_begin(fs + 4); gpu_tag_begin(fs + 4); gpu_tag_done(fs + 4, 100.0, 100.01);
+        CHECK(!mtl_gpu_span(fs + 4, &s0, &s1), "span: a frame with a command buffer still out has no span yet");
+    }
     printf("depth zero fill: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }
