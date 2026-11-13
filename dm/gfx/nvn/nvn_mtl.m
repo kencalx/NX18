@@ -10876,8 +10876,11 @@ static uint64_t dummy_samp_rid(void) { static uint64_t rid; if (!rid) rid = dumm
 // Each table keeps two lists of IDs, so that a change takes again only the IDs it can reach (n -1: more than POOL_IDS_MAX of them, and that change builds the table whole):
 // dead: the IDs a texture table holds the dummy for because their storage did not exist (pool_entry), which a memory pool added later can bring (REG_POOL);
 // trans: the IDs whose entry is a view of a retired registration made in submission sub, which goes at that submission's end (treg_finish_submission), so the next submission
-// takes them again. Walking through Ocarina of Time's Kokiri Forest, about 100 of its 33,025 IDs hold such a view
-enum { POOL_IDS_MAX = 1024 };
+// takes them again. Walking through Ocarina of Time's Kokiri Forest, about 100 of its 33,025 IDs hold such a view; more than 1,024 while it streams an area in behind its pause menu.
+// A list holds as many IDs as one patch takes (pool_gpu): with 1,024 as its limit, each submission behind that menu built the table whole (1,927 of about 2,000 builds,
+// 1.4-1.6 a frame of 9 ms, 50-55 fps for five seconds; PR #2389). Port of NXNative 034e91a8's limit alone (not its ghost table). A list grows by doubling as it fills: at most
+// 32 KB, so 1 MB for the 16 tables' two lists each at the worst, against 128 KB with 1,024
+enum { POOL_IDS_MAX = 8192 };   // the IDs a patch takes at most, and a list holds
 typedef struct { int *v, n, cap; } pool_ids;
 typedef struct { __strong id<MTLBuffer> buf; uint64_t gpu, reg, ser, frame, sub; int samp, dtt, dpf, base, left, left_req; pool_ids dead, trans; int over; } pool_snap;   // over: its last walk found the budget full, so what it left out has its stand-in (pool_stand)
 static pool_snap g_psnap[POOL_SNAPS]; static unsigned g_psnap_next;
@@ -11236,7 +11239,7 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
             os_unfair_lock_lock(&g_snote_lk);
             for (uint64_t g = p->ser + 1; g <= sg && known; g++) {
                 const ser_lnote *sn = &g_ser_log[g % SER_LOG]; known = sn->gen == g;
-                if (known) for (int k = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &sn->serial); k && nid < 8192; k = g_treg[k - 1].next) POOL_ID(k - 1);
+                if (known) for (int k = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &sn->serial); k && nid < POOL_IDS_MAX; k = g_treg[k - 1].next) POOL_ID(k - 1);
             }
             os_unfair_lock_unlock(&g_snote_lk);
         }
@@ -11250,7 +11253,7 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
         }
         #undef POOL_ID
         if (!known) { g_stat_pool_nopatch[3]++; break; }
-        if (nid >= 8192) { g_stat_pool_nopatch[0]++; break; }
+        if (nid >= POOL_IDS_MAX) { g_stat_pool_nopatch[0]++; break; }
         uint64_t *e = (uint64_t *)((uint8_t *)p->buf.contents + DMSH_POOL_HEAD), dummy = e[nn], room = samp ? UINT64_MAX : pool_room(), spent = g_walk_spent;
         int gone = 0, left = 0, left_req = 0; id<MTLBuffer> b = nil; uint64_t *be = NULL;
         pool_ids nd = {0}, nt = {0}; ids_begin(0); ids_begin(1);

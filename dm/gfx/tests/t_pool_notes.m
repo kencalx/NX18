@@ -222,5 +222,15 @@ int main(void) { @autoreleasepool {
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&dpool); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&epool);
     mtl_pool_del(mb); mtl_pool_del(mc);
     defer_drain(); munmap(ma, LEN); munmap(mb, LEN); munmap(mc, LEN); munmap(md, LEN); munmap(me, LEN);
+
+    // A list holds as many IDs as one patch takes (POOL_IDS_MAX, 8,192; NXNative 034e91a8): 2,000 retired IDs, past the 1,024 it held before (each submission behind Ocarina of
+    // Time's pause menu built its table whole, PR #2389), stay listed; one past 8,192 drops the list, and that change builds the table whole as before
+    CHECK(POOL_IDS_MAX == 8192, "a list holds the 8,192 IDs a patch takes");
+    { pool_ids l = {0}; for (int i = 0; i < 2000; i++) ids_push(&l, i);
+      CHECK(l.n == 2000 && l.v && l.v[1999] == 1999, "2,000 IDs stay on the list");
+      for (int i = 2000; i < POOL_IDS_MAX; i++) ids_push(&l, i);
+      CHECK(l.n == POOL_IDS_MAX && l.cap == POOL_IDS_MAX, "8,192 IDs fill it, 32 KB at most");
+      ids_push(&l, POOL_IDS_MAX);
+      CHECK(l.n == -1 && !l.v, "one more drops the list (the table is built whole)"); free(l.v); }
     printf("t_pool_notes: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }
