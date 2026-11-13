@@ -178,6 +178,8 @@ def header_one(g):
     if frs not in ('on', 'off'): sys.exit(f'{g.id}: fps_resume must be on or off: {frs}')
     rrt = g.get('replay_rt', 'off')   # a time-constraint policy for the NVN queue replay and encode threads, sized to their CPU time per frame (hle_nvn.c nvn_rtw_tick; DM_REPLAY_RT overrides): on / off
     if rrt not in ('on', 'off'): sys.exit(f'{g.id}: replay_rt must be on or off: {rrt}')
+    fwg = g.get('frame_wg', 'off')   # the frame deadline told through a work interval (frame_wg.c, hle_nvn.c frame_wg_on; DM_FRAME_WG overrides; needs DM_RT on): on / off
+    if fwg not in ('on', 'off'): sys.exit(f'{g.id}: frame_wg must be on or off: {fwg}')
     rsp = g.get('replay_spares', 'off')   # 32 spare command copies (16 MB in all) and 64 spare pool tables instead of 4 and 16, the newest table dropped when all are in flight (nvn_queue.inc nvn_replay_spares; DM_REPLAY_SPARES overrides): on / off
     if rsp not in ('on', 'off'): sys.exit(f'{g.id}: replay_spares must be on or off: {rsp}')
     utp = g.get('ue_texture_pool', '0')   # Unreal's r.Streaming.PoolSize in MB, raised to this on the Mac (hle_uecvar.c; DM_UE_TEXTURE_POOL overrides, and turns it on for iOS): 0 = the game's own pool
@@ -282,6 +284,7 @@ def header_one(g):
          f'#define DM_GAME_FPS_HOLD_BACKOFF {int(fhb == "burst")}',
          f'#define DM_GAME_FPS_RESUME {int(frs == "on")}',
          f'#define DM_GAME_REPLAY_RT {int(rrt == "on")}',
+         f'#define DM_GAME_FRAME_WG {int(fwg == "on")}',
          f'#define DM_GAME_REPLAY_SPARES {int(rsp == "on")}',
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',
          f'#define DM_GAME_UE_FPS_CVAR {q(ufc)}',
