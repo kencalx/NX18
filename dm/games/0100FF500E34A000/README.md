@@ -141,12 +141,16 @@ exactly those six.
   `pso_offline.py` compiles the new `R` rows' layout bases (at most 270) into the archive
   bundled with the app ([Pipelines with a vertex layout compiled at a fresh install's prepare step](../../../docs/reference/shaders.md#pipelines-with-a-vertex-layout-compiled-at-a-fresh-installs-prepare-step)),
   so a fresh install takes them from the app as the X1.0 run took its 501, and
-  the step stays about 0.2-0.3 s (0.14 s for 3,870 lines on that run). If the
-  app's archive does not serve them, each takes at most one base, so at most 270
-  more; at the 0.5 first start's rate (about 7.6 ms a base on 6 workers) about
-  2.1 s more, so about 2.3 s. Either way the bases the X1.0 run compiled in play
-  (271, the 434 ms frame's pipeline among them: `pso_user.tsv` records each
-  pipeline built on the spot) are built before the first frame.
+  the step would take about 0.2-0.3 s (from the X1.0 run's later start, 0.14 s
+  for 3,870 lines with 4 bases already in the device's archive; a fresh install's
+  step on X1.0 is not measured). If the app's archive does not serve them, each
+  takes at most one base, so at most 270 more; at the 0.5 first start's rate
+  (about 7.6 ms a base on 6 workers) about 2.1 s more, so about 2.3 s. Either
+  way the 270 new `R` rows' pipelines are prepared before the first frame (268
+  of them the X1.0 run recorded in play: `pso_user.tsv` records each pipeline
+  built on the spot), except the `_bgv` geometry variants, which the prewarm
+  still drops and play still builds. Whether the 434 ms frame's pipeline is one
+  of the new rows is not known: nothing in the log ties it to a row.
 - **The settings:** the 60 fps mod changes the game's pacing and Picture Stretch
   is the host's present; a row's pipeline key holds no picture size, so the rows
   name the same pipelines at 30 fps and without the stretch.

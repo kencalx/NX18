@@ -2,8 +2,8 @@
 first recording (build 9e592228), then an iPhone 18 Pro Max's own pso_user.tsv from the owner's play on 0.5 (the 60 fps mod, Picture Stretch) below its note, then the same
 iPhone's pso_user.tsv from the owner's play on X1.0 (the same settings) below its own note. Every row must check clean against the profile's shader map as the host reads it
 (dm/tools/pso_seed.py), except exactly the six _bg0 / _bgv geometry-variant rows of the first part, which the prewarm drops at load; the counts must match the header and the
-notes, with no row repeated, and each later part repeats no row of the parts above it (pso_user.tsv records only what the lists did not hold, and pso_seed.py add leaves out
-what the list names)."""
+notes, with no row repeated, and each later part repeats no row of the parts above it
+(pso_seed.py add leaves out what the list names)."""
 import re
 import sys
 import unittest
