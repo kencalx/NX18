@@ -837,23 +837,30 @@ void svc_thread_dump(void) {
     if (task_threads(mach_task_self(), &ths, &nth) == KERN_SUCCESS) {
         for (mach_msg_type_number_t i = 0; i < nth; i++) {
             int guest = 0; for (thr_t *t = g_all; t; t = t->all) if (t->mport == ths[i]) { guest = 1; break; }
+            // The frames are read while the thread is suspended and named once it runs again: dladdr takes dyld's lock, which the suspended thread may hold (a dump from a running
+            // process, the freeze detector's, would then wait on it with that thread never resumed)
             if (!guest && ths[i] != mach_thread_self() && thread_suspend(ths[i]) == KERN_SUCCESS) {
-                arm_thread_state64_t st; mach_msg_type_number_t n = ARM_THREAD_STATE64_COUNT;
+                arm_thread_state64_t st; mach_msg_type_number_t n = ARM_THREAD_STATE64_COUNT; uint64_t pcs[12]; int npc = 0;
                 if (thread_get_state(ths[i], ARM_THREAD_STATE64, (thread_state_t)&st, &n) == KERN_SUCCESS) {
-                    char line[1200]; int p = snprintf(line, sizeof line, "[dm] host thread %#x:", ths[i]);
                     uint64_t fp = __darwin_arm_thread_state64_get_fp(st), pc = __darwin_arm_thread_state64_get_pc(st);
-                    for (int k = 0; k < 12 && p < (int)sizeof line - 80; k++) {
-                        Dl_info di; module_t *m = module_of((void *)pc);
-                        if (m) p += snprintf(line + p, sizeof line - p, " %s+%#llx", m->name, pc - (uint64_t)m->base);
-                        else if (dladdr((void *)pc, &di) && di.dli_sname) p += snprintf(line + p, sizeof line - p, " %s+%#lx", di.dli_sname, (unsigned long)(pc - (uint64_t)di.dli_saddr));
-                        else p += snprintf(line + p, sizeof line - p, " %#llx", pc);
+                    for (; npc < 12;) {
+                        pcs[npc++] = pc;
                         uint64_t fr[2]; vm_size_t g2 = 0;
                         if (!fp || vm_read_overwrite(mach_task_self(), fp, 16, (vm_address_t)fr, &g2) || g2 != 16 || fr[0] <= fp) break;
                         fp = fr[0]; pc = fr[1];
                     }
-                    fprintf(stderr, "%s\n", line);
                 }
                 thread_resume(ths[i]);
+                if (npc) {
+                    char line[1200]; int p = snprintf(line, sizeof line, "[dm] host thread %#x:", ths[i]);
+                    for (int k = 0; k < npc && p < (int)sizeof line - 80; k++) {
+                        uint64_t pc = pcs[k]; Dl_info di; module_t *m = module_of((void *)pc);
+                        if (m) p += snprintf(line + p, sizeof line - p, " %s+%#llx", m->name, pc - (uint64_t)m->base);
+                        else if (dladdr((void *)pc, &di) && di.dli_sname) p += snprintf(line + p, sizeof line - p, " %s+%#lx", di.dli_sname, (unsigned long)(pc - (uint64_t)di.dli_saddr));
+                        else p += snprintf(line + p, sizeof line - p, " %#llx", pc);
+                    }
+                    fprintf(stderr, "%s\n", line);
+                }
             }
             mach_port_deallocate(mach_task_self(), ths[i]);
         }
@@ -861,6 +868,23 @@ void svc_thread_dump(void) {
     }
 }
 
+// svc_thread_dump from a process that is still running (the freeze detector, stall.c): under the guest thread lock G, so no thread in the list is freed or leaves meanwhile, and
+// under the stderr lock, so no thread it suspends can hold the lock its lines are written under (thr_bt writes while the thread is stopped). Each lock is tried for up to
+// wait_ms, never waited on: the freeze being dumped may be a thread that holds one. Returns 0 when either stayed held (nothing dumped; the caller says "busy")
+static int try_for(int (*take)(void *), void *what, unsigned wait_ms) {
+    for (unsigned waited = 0; take(what); waited += 10) { if (waited >= wait_ms) return 0; usleep(10000); }
+    return 1;
+}
+static int take_g(void *m) { return pthread_mutex_trylock(m); }
+static int take_stderr(void *f) { return ftrylockfile(f); }
+int svc_thread_dump_try(unsigned wait_ms) {
+    if (!try_for(take_stderr, stderr, wait_ms)) return 0;
+    if (!try_for(take_g, &G, wait_ms)) { funlockfile(stderr); return 0; }
+    svc_thread_dump();
+    pthread_mutex_unlock(&G);
+    funlockfile(stderr);
+    return 1;
+}
 // Same-core wake handoffs apply to every game. core_preempt additionally checks
 // already-runnable peers after every thread SVC; DM_PREEMPT overrides that option.
 // These are cooperative boundaries, not an asynchronous guest-core scheduler.

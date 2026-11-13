@@ -41,7 +41,15 @@ void crash_watch_progress(uint32_t tick, const char *stage) {
     atomic_fetch_add(&g_watch_count, 1);
     atomic_store(&g_watch_last_ns, watch_now_ns());
 }
-void crash_watch_frame(void) { if (atomic_load(&g_watch_pregame)) crash_watch_progress(0, "present frame"); }
+// Every present (hle_os.c dm_guest_frame_tick) is progress, with the presents so far as its tick. The first ends the pregame: diag.c, which counted progress by the game's own ticks once a
+// run began, is gone, so crash_watch_pregame_done had no caller, the watchdog's tick stayed 0 and DM_WATCH_STALL's 1 s dump below could never fire; presents are now the progress
+// before and after it, and the dump fires from the first present on
+void crash_watch_frame(void) {
+    static _Atomic uint32_t frames;
+    uint32_t n = atomic_fetch_add(&frames, 1) + 1;
+    crash_watch_progress(n, n == 1 ? "present frame" : NULL);
+    if (n == 1) crash_watch_pregame_done();
+}
 void crash_watch_pregame_done(void) { atomic_store(&g_watch_pregame, 0); }
 void crash_watch_pregame_again(void) { atomic_store(&g_watch_pregame, 1); }   // Back from a run to the front end: count progress by presented frames again (diag.c)
 void crash_dump_now(const char *why);

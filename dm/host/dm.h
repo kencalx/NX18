@@ -156,6 +156,14 @@ void crash_watch_frame(void);
 void crash_watch_pregame_done(void);
 uint64_t crash_watch_progress_count(void);
 void crash_dump_now(const char *why);   // Dump state on demand (threads + graphics wait points), without exiting
+// The freeze detector (stall.c, DM_STALL_LOG; on by default, logging only): started once by host_preload; the in-game menu's opening and closing (iOS DmGamepad.m) hold it off;
+// nvn_mtl.m stamps dm_present_done_ns when a present completes on the GPU (host now_ns)
+void dm_stall_start(void);
+void dm_stall_menu(int open);
+extern _Atomic uint64_t dm_present_done_ns;
+int svc_thread_dump_try(unsigned wait_ms);   // hle_thread.c: svc_thread_dump under the guest thread lock and the stderr lock, each tried for up to wait_ms; 0 (nothing dumped) if either stays held
+int dm_focus_seen(void);   // hle_oe.c: the focus state the game sees (oe focus state: 1 in focus, 2 out of focus or a library applet open, 3 background)
+uint64_t dm_focus_in_since(void);   // hle_oe.c: when the front end last entered focus (now_ns)
 // Diagnostic switches: read once from environment variables when main starts (getenv takes the libc global environment lock, and on a hot path it would make all guest threads queue up)
 extern uint64_t g_t0_ns;   // Host start time (now_ns), used for relative times in the log
 extern struct dm_flags { int thr, svc, fs, dbg, imports, bootprof; } g_flag;

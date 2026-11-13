@@ -149,6 +149,7 @@ int main(void) { @autoreleasepool {
 
     // A dropped frame: ticket 1 on allocator 1, then 3 (2 dropped) on allocator 0, then 4 on allocator 1 again with two presents in flight
     [g_q4 waitForEvent:gate value:1];   // nothing committed to the Metal 4 queue from here runs until the gate opens
+    CHECK("no present has completed: the freeze detector's clock (dm_present_done_ns) is 0", atomic_load(&dm_present_done_ns) == 0);
     present_enqueue(&a, 1. / 60, NULL, NULL);
     id<CAMetalDrawable> first = tick();
     present_enqueue(&b, 1. / 60, NULL, NULL); present_enqueue(&b, 1. / 60, NULL, NULL); present_enqueue(&c, 1. / 60, left_half, NULL);
@@ -156,6 +157,7 @@ int main(void) { @autoreleasepool {
     printf("after the drop: read %llu, done %llu, in flight %d\n", (unsigned long long)g_pq_read, (unsigned long long)g_pq_done, g_pq_inflight);
     CHECK("ticket 1 has not completed", g_pq_inflight == 2);
     reuse_case(drawable(), gate, 1, 4, 2, 1);
+    { uint64_t t = atomic_load(&dm_present_done_ns); CHECK("a completed present sets the freeze detector's clock", t && t <= now_ns() && now_ns() - t < 5000000000ull); }
     int bad = bad_pixels(first.texture, 50, 150); printf("ticket 1 drawable: %d of 64 pixels wrong\n", bad);
     CHECK("ticket 1 shows its own picture", bad == 0);
 

@@ -288,13 +288,55 @@ static NSError *gpu_lost_test_error(void) {
 }
 
 static pthread_mutex_t g_res_mu = PTHREAD_MUTEX_INITIALIZER;   // Dedicated lock for the residency set: res_add is called on paths that hold g_mu (arena_new), so it cannot share g_mu
+// ---------- What the freeze detector's dump reads (mtl_stall_dump; dm/host/stall.c, DM_STALL_LOG) ----------
+// Ocarina of Time's test 3 froze once on an iPhone 18 Pro Max, 13 s after a save load as Link stepped into water: presents stopped, audio went on, and the log said nothing, no [RED]
+// line and no crash. Every wait that could have held it is silent: a command buffer that never completes logs nothing, the game's SyncWait sleeps on the GPU event for up to an hour
+// (mtl_wait_at), and rec_drain, rec_note_wait, ubc_wait, up_wait_zero and the present waits have no limit and no line. The feedback handlers all run on the one serial queue
+// g_feedback_q, and the upload batch's handler commits the residency set (res_commit, under g_res_commit_mu) every time, so one long commit holds back every completion, and g_done with
+// it, again with no line. The detector's dump therefore needs, without taking any lock those paths can hold: who holds the two residency locks and since when, which feedback handler
+// runs and when the queue last ran one, which waits are in progress, and what the encode thread is doing. Everything below is a few relaxed atomic stores; the clock is
+// mach_absolute_time (no system call), read only where a lock is taken or a wait blocks, never per draw.
+//
+// Who holds a lock: the holder's mach thread (as svc_thread_dump names host threads), the site that took it (file:line) and since when (mach ticks), stored after each take and cleared
+// before each release. The dump reads these, never the lock, so a dump during a freeze cannot wait on the lock that froze it. A take whose note is not stored yet shows the previous holder
+#define LOCK_STR_(x) #x
+#define LOCK_STR(x) LOCK_STR_(x)
+#define LOCK_SITE __FILE_NAME__ ":" LOCK_STR(__LINE__)
+typedef struct { _Atomic uint32_t th; _Atomic(const char *) site; _Atomic uint64_t at; } lock_note;
+static lock_note g_res_commit_note, g_res_note;
+static inline void lock_note_take(lock_note *n, const char *site) {
+    atomic_store_explicit(&n->site, site, memory_order_relaxed); atomic_store_explicit(&n->at, mach_absolute_time(), memory_order_relaxed);
+    atomic_store_explicit(&n->th, pthread_mach_thread_np(pthread_self()), memory_order_release);
+}
+static inline void lock_note_drop(lock_note *n) { atomic_store_explicit(&n->th, 0, memory_order_release); }
+#define res_mu_lock() res_mu_lock_at(LOCK_SITE)
+static inline void res_mu_lock_at(const char *site) { pthread_mutex_lock(&g_res_mu); lock_note_take(&g_res_note, site); }
+static inline void res_mu_unlock(void) { lock_note_drop(&g_res_note); pthread_mutex_unlock(&g_res_mu); }
+static inline void res_commit_unlock(void) { lock_note_drop(&g_res_commit_note); pthread_mutex_unlock(&g_res_commit_mu); }
+static double mach_s(uint64_t ticks) { static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb); return (double)ticks * tb.numer / tb.denom / 1e9; }
+// The feedback queue's heartbeat: every commit feedback handler stamps its start and its end and names itself (they run one at a time on g_feedback_q), so a handler that never
+// returns shows as "running: upload batch for 12.0 s", and a queue that has run nothing for a while as the age of the last handler's end with g_done behind g_fence
+static _Atomic(const char *) g_fbq_what; static _Atomic uint64_t g_fbq_in, g_fbq_out, g_fbq_n;
+static inline void fb_in(const char *what) { atomic_store_explicit(&g_fbq_in, mach_absolute_time(), memory_order_relaxed); atomic_store_explicit(&g_fbq_what, what, memory_order_release); }
+static inline void fb_out(void) { atomic_store_explicit(&g_fbq_what, NULL, memory_order_relaxed); atomic_store_explicit(&g_fbq_out, mach_absolute_time(), memory_order_relaxed); atomic_fetch_add_explicit(&g_fbq_n, 1, memory_order_relaxed); }
+// Waits in progress: per kind, the threads blocked in it now, and what the latest one waits for and since when. Set and cleared only once a wait blocks (the fast paths pay nothing)
+enum { WN_EVENT, WN_DONE, WN_DRAIN, WN_NOTE, WN_UPZERO, WN_ONCE, WN_PALLOC, WN_PTICKET, WN_N };
+static const char *const wn_name[WN_N] = {"SyncWait on the GPU event (fence)", "wait for a fence's feedback (fence)", "encode thread drain (submit thread)", "encode thread note (value)",
+    "upload batches to complete (pending)", "one-off command buffer", "present allocator (ticket)", "present ticket (ticket)"};
+static struct { _Atomic int n; _Atomic uint64_t what, at; } g_wn[WN_N];
+static inline void wn_in(int k, uint64_t what) { atomic_store_explicit(&g_wn[k].what, what, memory_order_relaxed); atomic_store_explicit(&g_wn[k].at, mach_absolute_time(), memory_order_relaxed); atomic_fetch_add(&g_wn[k].n, 1); }
+static inline void wn_out(int k) { atomic_fetch_sub(&g_wn[k].n, 1); }
+// When the last present completed on the GPU (host now_ns), for the freeze detector: dm/host/stall.c defines it, the graphics tests' t_host_stubs.c a weak stand-in
+extern _Atomic uint64_t dm_present_done_ns;
 // Time spent waiting for g_res_commit_mu (res_commit_lock: a try first, so an uncontended lock reads no clock), by the replay thread (on_sub_thread) and by every other thread together
 // (the encode thread's queue commits, the upload batches' completion handlers, the deferred-release worker): the translation detail line (mtl_wait_stats)
 static _Atomic uint64_t g_rcm_wait_ns[2], g_rcm_waits[2];   // [0] the replay thread, [1] the others
 static int on_sub_thread(void);
-static void res_commit_lock(void) {
-    if (!pthread_mutex_trylock(&g_res_commit_mu)) return;
+#define res_commit_lock() res_commit_lock_at(LOCK_SITE)
+static void res_commit_lock_at(const char *site) {
+    if (!pthread_mutex_trylock(&g_res_commit_mu)) { lock_note_take(&g_res_commit_note, site); return; }
     uint64_t t0 = now_ns(); pthread_mutex_lock(&g_res_commit_mu); int k = !on_sub_thread();
+    lock_note_take(&g_res_commit_note, site);
     atomic_fetch_add_explicit(&g_rcm_wait_ns[k], now_ns() - t0, memory_order_relaxed); atomic_fetch_add_explicit(&g_rcm_waits[k], 1, memory_order_relaxed);
 }
 // Wait ledger (DM_NVN_WAITS=1): every place a thread of the host or the game waits on the CPU for the GPU or for the encode thread, counted per frame (calls, calls that blocked,
@@ -352,23 +394,23 @@ static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepoo
     if (!allocation) return;
     // An indirectly addressed placed texture needs its heap resident. The heap owner below removes it only after the last texture/view has gone.
     id<MTLAllocation> r = [(id)allocation conformsToProtocol:@protocol(MTLResource)] && ((id<MTLResource>)allocation).heap ? (id)((id<MTLResource>)allocation).heap : allocation;
-    pthread_mutex_lock(&g_res_mu);
+    res_mu_lock();
     if (!g_res_objects) g_res_objects = [NSHashTable weakObjectsHashTable];
-    if ([g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }   // already resident (a shared texture resolved again): marking the set dirty would cost a commit that changes nothing
+    if ([g_res_objects containsObject:r]) { res_mu_unlock(); return; }   // already resident (a shared texture resolved again): marking the set dirty would cost a commit that changes nothing
     { int k = 0; while (k < RS_SITES - 1 && g_rs_site[k].line && g_rs_site[k].line != line) k++; g_rs_site[k].line = line; g_rs_site[k].n++; g_rs_site[k].bytes += r.allocatedSize; }
     res_q_put(r, 1);
     [g_res_objects addObject:r];
-    pthread_mutex_unlock(&g_res_mu);
+    res_mu_unlock();
 } }
 static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
     if (!r) return;
     if ([(id)r conformsToProtocol:@protocol(MTLResource)] && ((id<MTLResource>)r).heap) return;
-    pthread_mutex_lock(&g_res_mu);
-    if (![g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }
+    res_mu_lock();
+    if (![g_res_objects containsObject:r]) { res_mu_unlock(); return; }
     res_q_put(r, 0);
     [g_res_objects removeObject:r];
     g_rs_rm++;
-    pthread_mutex_unlock(&g_res_mu);
+    res_mu_unlock();
 } }
 // Recycled texture memory (GitHub issues #1831, #1823). An engine that keeps its render targets in a GPU-only pool and moves or resizes them with its dynamic resolution names new
 // storage or a new size every few frames, and each (pool, offset, description) gets a Metal texture of its own: Ocarina of Time's 305 MB target pool made 3,468 textures in about
@@ -541,14 +583,14 @@ static void res_use_note(id o, const char *what) {
 static void res_check(id r, const char *what, int reg) {
     static int nbad;
     if (!g_res_check_on || !r) return;
-    pthread_mutex_lock(&g_res_mu); res_use_note(r, what); pthread_mutex_unlock(&g_res_mu);
+    res_mu_lock(); res_use_note(r, what); res_mu_unlock();
     if (nbad >= 40) return;
     int is_tex = [r conformsToProtocol:@protocol(MTLTexture)], is_buf = [r conformsToProtocol:@protocol(MTLBuffer)];
     if (!is_tex && !is_buf) return;   // Samplers etc. are not allocations
     id<MTLResource> a = r; int hops = 0;
     if (is_tex) { id<MTLTexture> t = (id<MTLTexture>)a; while (t.parentTexture) { t = t.parentTexture; hops++; } a = t.buffer ? (id<MTLResource>)t.buffer : (id<MTLResource>)t; }
-    if (a != r) { pthread_mutex_lock(&g_res_mu); res_use_note(a, what); pthread_mutex_unlock(&g_res_mu); }
-    pthread_mutex_lock(&g_res_mu); int ok = [g_res_objects containsObject:a.heap ? (id)a.heap : a]; pthread_mutex_unlock(&g_res_mu);
+    if (a != r) { res_mu_lock(); res_use_note(a, what); res_mu_unlock(); }
+    res_mu_lock(); int ok = [g_res_objects containsObject:a.heap ? (id)a.heap : a]; res_mu_unlock();
     if (!ok) { nbad++; id<MTLTexture> t = is_tex ? (id<MTLTexture>)r : nil;
         MLOG("[RED] missing residency #%d: %s slot %d %s %p (parent chain %d deep) allocated %lu B storage mode %lu%s", nbad, what, reg, is_tex ? "texture" : "buffer", (__bridge void *)a, hops, (unsigned long)a.allocatedSize, (unsigned long)a.storageMode,
              t ? [NSString stringWithFormat:@" format %lu %lux%lu type %lu usage %#lx", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.textureType, (unsigned long)t.usage].UTF8String : ""); }
@@ -557,31 +599,31 @@ static void res_check(id r, const char *what, int reg) {
 // done. Each change holds its allocation until it is committed, so a removed one stays alive until it has left the set
 static void res_commit(void) { @autoreleasepool {
     res_commit_lock();
-    pthread_mutex_lock(&g_res_mu);
+    res_mu_lock();
     res_op *q = g_res_q; size_t n = g_res_qn; g_res_q = NULL; g_res_qn = g_res_qcap = 0;
-    pthread_mutex_unlock(&g_res_mu);
+    res_mu_unlock();
     if (n) {
         uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         for (size_t i = 0; i < n; i++) { if (q[i].add) [g_res addAllocation:(__bridge id<MTLAllocation>)q[i].o]; else [g_res removeAllocation:(__bridge id<MTLAllocation>)q[i].o]; }
         [g_res commit];
         uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
-        pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; pthread_mutex_unlock(&g_res_mu);
+        res_mu_lock(); g_rs_commits++; g_rs_commit_ns += dt; res_mu_unlock();
     }
-    pthread_mutex_unlock(&g_res_commit_mu);
+    res_commit_unlock();
     for (size_t i = 0; i < n; i++) CFRelease(q[i].o);
     free(q);
 } }
-static int res_pending(void) { pthread_mutex_lock(&g_res_mu); int n = g_res_qn != 0; pthread_mutex_unlock(&g_res_mu); return n; }
+static int res_pending(void) { res_mu_lock(); int n = g_res_qn != 0; res_mu_unlock(); return n; }
 // What the residency set holds: totals by kind and the largest objects. At the first GPU out-of-memory error (the error names none of them), and for DM_CTL "restop" (hle_hid.c). The set holds
 // the game's pools (shared buffers over guest memory), textures, heaps and staging alike
 static void res_top(const char *why) { @autoreleasepool {
     enum { N = 24 }; id<MTLAllocation> top[N] = {nil}; uint64_t total = 0, n = 0, kind[4] = {0}, count[4] = {0};
-    pthread_mutex_lock(&g_res_mu);
+    res_mu_lock();
     for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = o.allocatedSize; total += z; n++;
         int k = [(id)o conformsToProtocol:@protocol(MTLTexture)] ? 0 : [(id)o conformsToProtocol:@protocol(MTLHeap)] ? 1 : ((id<MTLBuffer>)o).storageMode == MTLStorageModeShared ? 2 : 3;
         kind[k] += z; count[k]++;
         for (int q = 0; q < N; q++) if (!top[q] || z > top[q].allocatedSize) { for (int j = N - 1; j > q; j--) top[j] = top[j - 1]; top[q] = o; break; } }
-    pthread_mutex_unlock(&g_res_mu);
+    res_mu_unlock();
     MLOG("%s: the residency set holds %llu objects, %llu MB (Metal's recommended working set %llu MB, GPU allocated %llu MB): textures %llu, %llu MB; heaps %llu, %llu MB; shared buffers %llu, %llu MB; private buffers %llu, %llu MB; the largest:", why,
          (unsigned long long)n, (unsigned long long)(total >> 20), (unsigned long long)(g_dev.recommendedMaxWorkingSetSize >> 20), (unsigned long long)(g_dev.currentAllocatedSize >> 20),
          (unsigned long long)count[0], (unsigned long long)(kind[0] >> 20), (unsigned long long)count[1], (unsigned long long)(kind[1] >> 20), (unsigned long long)count[2], (unsigned long long)(kind[2] >> 20), (unsigned long long)count[3], (unsigned long long)(kind[3] >> 20));
@@ -606,15 +648,15 @@ static void res_top_once(NSError *err) {
 void mtl_res_stats(char *out, size_t n) {
     res_commit_lock();   // the set's counts, which a commit changes
     unsigned long set_n = g_res ? (unsigned long)g_res.allocationCount : 0ul; double set_mb = g_res ? g_res.allocatedSize / 1048576.0 : 0;
-    pthread_mutex_unlock(&g_res_commit_mu);
-    pthread_mutex_lock(&g_res_mu);
+    res_commit_unlock();
+    res_mu_lock();
     uint64_t tn = 0, tb = 0; for (int k = 0; k < RS_SITES; k++) { tn += g_rs_site[k].n; tb += g_rs_site[k].bytes; }
     size_t o = snprintf(out, n, "commits %llu / %.1f ms, added %llu, %.0f MB (", (unsigned long long)g_rs_commits, g_rs_commit_ns / 1e6, (unsigned long long)tn, tb / 1048576.0);
     for (int i = 0; i < 4 && o < n; i++) { int best = -1; for (int k = 0; k < RS_SITES; k++) if (g_rs_site[k].n && (best < 0 || g_rs_site[k].bytes > g_rs_site[best].bytes)) best = k;
         if (best < 0) break; o += snprintf(out + o, n - o, "%sline %d: %llu, %.0f MB", i ? ", " : "", g_rs_site[best].line, (unsigned long long)g_rs_site[best].n, g_rs_site[best].bytes / 1048576.0); g_rs_site[best].n = 0; }
     if (o < n) snprintf(out + o, n - o, "), removed %llu, %lu allocations in the set (%.0f MB)", (unsigned long long)g_rs_rm, set_n, set_mb);
     memset(g_rs_site, 0, sizeof g_rs_site); g_rs_rm = g_rs_commits = g_rs_commit_ns = 0;
-    pthread_mutex_unlock(&g_res_mu);
+    res_mu_unlock();
 }
 
 @interface NvDeferredRelease : NSObject { @public id object; uint64_t fence; int keep_resident; } @end
@@ -674,15 +716,15 @@ static int defer_drain(void) { int back = 0; @autoreleasepool {
     }
     for (NvDeferredRelease *d in ready) {
         id obj = d->object;
-        if (g_res_check_on) { pthread_mutex_lock(&g_res_mu); NSArray *u = [g_res_last_use objectForKey:obj]; pthread_mutex_unlock(&g_res_mu);
+        if (g_res_check_on) { res_mu_lock(); NSArray *u = [g_res_last_use objectForKey:obj]; res_mu_unlock();
             CFIndex refs = CFGetRetainCount((__bridge CFTypeRef)obj);   // d, obj and the array's enumeration hold some; a released object has nobody else
             if (u && [u[0] unsignedLongLongValue] > d->fence && (!d->keep_resident || refs <= 3) && g_res_late++ < 40) {
                 int is_tex = [obj conformsToProtocol:@protocol(MTLTexture)]; id<MTLTexture> t = is_tex ? obj : nil;
                 MLOG("[RED] released too early #%llu: %s %p (%lux%lu format %lu) retired behind fence %llu, bound by shader %s in submission %llu; %s, references %ld", (unsigned long long)g_res_late, is_tex ? "texture" : "object", (__bridge void *)obj, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, (unsigned long long)d->fence, [u[1] UTF8String], [u[0] unsignedLongLongValue], d->keep_resident ? "reference dropped" : "out of the residency set", (long)refs); } }
         if (!d->keep_resident && [obj conformsToProtocol:@protocol(MTLResource)]) {
-            pthread_mutex_lock(&g_res_mu);
+            res_mu_lock();
             int registered = [g_res_objects containsObject:obj];
-            pthread_mutex_unlock(&g_res_mu);
+            res_mu_unlock();
             if (registered) res_remove((id<MTLResource>)obj);
         }
         d->object = nil;
@@ -1586,7 +1628,7 @@ static void once_use(NvOnce *o, id res) { @autoreleasepool {
     id<MTLHeap> heap = [r conformsToProtocol:@protocol(MTLResource)] ? ((id<MTLResource>)r).heap : nil;
     if (heap) r = heap;
     if (!r) return;
-    pthread_mutex_lock(&g_res_mu); int in = [g_res_objects containsObject:r]; pthread_mutex_unlock(&g_res_mu);
+    res_mu_lock(); int in = [g_res_objects containsObject:r]; res_mu_unlock();
     if (in || [o->temp containsObject:r]) return;
     res_add(r); [o->temp addObject:r];
 } }
@@ -1620,6 +1662,7 @@ static void once_commit(NvOnce *o, void (^done)(int ok)) {
     [cb endCommandBuffer];
     MTL4CommitOptions *opt = [MTL4CommitOptions new];
     [opt addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        fb_in("one-off command buffer");
         (void)args;   // kept until the GPU is done with it
         if (f.error) { MLOG("[RED] one-off command buffer (readback / screenshot / diagnostics) execution error: %s", f.error.description.UTF8String); res_top_once(f.error); gpu_lost_check(f.error, "one-off command buffer"); }
         // The residency set holds what it removed until its next commit, and a readback buffer must be gone once the readback returns (a guest thread's pool may never drain: t_readback)
@@ -1628,6 +1671,7 @@ static void once_commit(NvOnce *o, void (^done)(int ok)) {
         if (g_once_n < ONCE_KEEP) { g_once_al[g_once_n] = al; g_once_cb[g_once_n] = cb; g_once_n++; }
         os_unfair_lock_unlock(&g_once_lk);
         if (done) done(!f.error);
+        fb_out();
     }];
     if (o->order && on_sub_thread()) {
         up_flush();   // the uploads this batch made go first
@@ -1644,14 +1688,14 @@ static void once_commit(NvOnce *o, void (^done)(int ok)) {
         return;
     }
     id<MTL4CommandBuffer> buffers[] = {cb};
-    res_commit_lock(); [g_q4 commit:buffers count:1 options:opt]; pthread_mutex_unlock(&g_res_commit_mu);   // apart from the residency set's commit, as the encode thread's (nvn_rec.h)
+    res_commit_lock(); [g_q4 commit:buffers count:1 options:opt]; res_commit_unlock();   // apart from the residency set's commit, as the encode thread's (nvn_rec.h)
 }
 // Commit and wait until the GPU is done; returns 0 on a GPU error. Not on the feedback queue (the completion runs there)
 static int once_wait(NvOnce *o) {
     dispatch_semaphore_t sem = dispatch_semaphore_create(0); __block int ok = 0;
     uint64_t w0 = ws_t0();
     once_commit(o, ^(int k) { ok = k; dispatch_semaphore_signal(sem); });
-    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    if (dispatch_semaphore_wait(sem, DISPATCH_TIME_NOW)) { wn_in(WN_ONCE, 0); dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER); wn_out(WN_ONCE); }
     if (ws_on()) ws_put(WS_ONCE, w0, 1);
     return ok;
 }
@@ -2721,7 +2765,7 @@ uint64_t mtl_sub_commit(void) {
     NSArray<dispatch_block_t> *commit_blocks = [g_commit_blocks copy];
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     atomic_fetch_add(&g_seg_inflight, 1);
-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; atomic_fetch_sub(&g_seg_inflight, 1); for (dispatch_block_t block in commit_blocks) block(); }];
+    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; fb_in("submission (its commit blocks)"); atomic_fetch_sub(&g_seg_inflight, 1); for (dispatch_block_t block in commit_blocks) block(); fb_out(); }];
     uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
     NSString *cctx = @(cctx_snap());
     cbs_list *cbs = cbs_take(); cbs_fly_put(fence, cbs);
@@ -2732,6 +2776,7 @@ uint64_t mtl_sub_commit(void) {
     pthread_mutex_unlock(&g_post_mu);
     int lost_test = gpu_lost_test();
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
+        fb_in("submission");
         gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime);
         if (ws_on()) ws_fb(fence, cb.GPUEndTime);
         uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
@@ -2741,11 +2786,12 @@ uint64_t mtl_sub_commit(void) {
         post_complete(fence, c0, c1);
         if (atomic_load(&g_gpu_lost)) gpu_lost_release();   // the GPU signals none of these fences
         defer_drain(); defer_idle_commit();
+        fb_out();
     }];
     void arena_commit(uint64_t fence); arena_commit(fence);
     res_commit();
     if (g_gp_state == 1 && !gp_active()) { int gn = g_gp_n; gp_lab *gl = malloc(sizeof(gp_lab) * (gn ? gn : 1)); memcpy(gl, g_gp_lab, sizeof(gp_lab) * gn); uint64_t gf = g_gp_frame; g_gp_state = 2; atomic_store(&g_gp_busy, 1);
-        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(gn, gl, gf); }]; }
+        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; fb_in("GPU profile report"); gp_report(gn, gl, gf); fb_out(); }]; }
     [g_cb endCommandBuffer];
     rec_commit(g_cb, o); g_cbgen++;   // the stores it holds come before any later upload batch (gsb_held)
     if (!lost_test) rec_signal(g_ev, fence);
@@ -2774,7 +2820,8 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     uint64_t w0 = ws_t0();
     if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ) && fast_wake() && g_ev && fence <= g_fence) {   // the game's own wait: wake on the GPU's signal (rec_signal(g_ev, fence) after each submission)
         uint64_t ms = timeout_ns / 1000000ull; if (ms > 3600000ull) ms = 3600000ull;
-        if ([g_ev waitUntilSignaledValue:fence timeoutMS:ms]) post_early(fence);
+        wn_in(WN_EVENT, fence); int sig = [g_ev waitUntilSignaledValue:fence timeoutMS:ms]; wn_out(WN_EVENT);
+        if (sig) post_early(fence);
         int ok = g_done >= fence;
         if (ws_on()) { ws_put(site, w0, 1); ws_wake(fence); }
         if (ok || timeout_ns < 1000000ull) return ok;
@@ -2792,6 +2839,7 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     int r = 0;
     // An unbounded wait still waiting after 10 s is a hang: said once, with what it waits for (PRAGMATA's queue worker stopped here at its first 3D scene, no GPU error)
     struct timespec said; clock_gettime(CLOCK_REALTIME, &said); said.tv_sec += 10; int told = timeout_ns != UINT64_MAX;
+    int noted = g_done < fence; if (noted) wn_in(WN_DONE, fence);
     while (g_done < fence) {
         int late = !told && (dl.tv_sec > said.tv_sec || (dl.tv_sec == said.tv_sec && dl.tv_nsec > said.tv_nsec));
         if (!(r = pthread_cond_timedwait(&g_cv, &g_mu, late ? &said : &dl))) continue;
@@ -2805,6 +2853,7 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
         }
     }
     int ok = g_done >= fence;
+    if (noted) wn_out(WN_DONE);
     pthread_mutex_unlock(&g_mu);
     if (ws_on()) { ws_put(site, w0, 1); if (site == WS_SYNC_NEWEST || site == WS_SYNC || site == WS_ACQ) ws_wake(fence); }
     return ok;
@@ -3499,7 +3548,9 @@ static void up_wait_zero(_Atomic int *v, int site) {
     if (!atomic_load(v)) { if (ws_on()) ws_put(site, 0, 0); return; }
     uint64_t w0 = ws_t0();
     pthread_mutex_lock(&g_up_wmu);
+    wn_in(WN_UPZERO, (uint64_t)atomic_load(v));
     while (atomic_load(v)) { struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 10000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; } pthread_cond_timedwait(&g_up_wcv, &g_up_wmu, &dl); }
+    wn_out(WN_UPZERO);
     pthread_mutex_unlock(&g_up_wmu);
     if (ws_on()) ws_put(site, w0, 1);
 }
@@ -3597,6 +3648,7 @@ static void up_flush(void) {
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     atomic_fetch_add(&g_up_pending, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        fb_in("upload batch");
         if (f.error) { MLOG("[RED] upload command buffer execution error: %s", f.error.description.UTF8String); res_top_once(f.error); gpu_lost_check(f.error, "upload"); }
         if (f.error || fake_lost) {
             up_lost_add(dsts); int n = atomic_load(&g_up_lost_n);
@@ -3617,6 +3669,7 @@ static void up_flush(void) {
         atomic_store(&g_up_alloc_busy[slot], 0);
         atomic_fetch_sub(&g_up_pending, 1);
         up_wake();
+        fb_out();
     }];
     res_commit();
     [cb endCommandBuffer];
@@ -3665,7 +3718,7 @@ static void up_diag(void) { @autoreleasepool {
     int chg = g_up_swaps != said_swaps, fol = follow && now - last_ns >= 5000000000ull; if ((!chg && !fol) || lines >= 200) return;
     if (chg && last_ns && now - last_ns < 1000000000ull) return; last_ns = now; said_swaps = g_up_swaps; lines++; follow = chg;
     unsigned long alive = 0, inres = 0; uint64_t abytes = 0; NSArray *olds = g_up_old.allObjects;
-    pthread_mutex_lock(&g_res_mu); unsigned long nres = (unsigned long)g_res_objects.allObjects.count; for (id<MTLBuffer> o in olds) { alive++; abytes += o.length; inres += [g_res_objects containsObject:o]; } pthread_mutex_unlock(&g_res_mu);
+    res_mu_lock(); unsigned long nres = (unsigned long)g_res_objects.allObjects.count; for (id<MTLBuffer> o in olds) { alive++; abytes += o.length; inres += [g_res_objects containsObject:o]; } res_mu_unlock();
     pthread_mutex_lock(&g_deferred_mu); unsigned long ndef = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
     MLOG("upload staging blocks%s: %llu created in total, swapped within a batch %llu times (%llu MB of old blocks swapped out); swapped-out blocks still alive now %lu, %llu MB, still in the residency set %lu; GPU allocated %llu MB, residency set %lu objects, deferred-release queue %lu", fol && !chg ? " (settled)" : "",
          (unsigned long long)g_up_blocks_new, (unsigned long long)g_up_swaps, (unsigned long long)(g_up_swap_bytes >> 20), alive, (unsigned long long)(abytes >> 20), inres, (unsigned long long)(g_dev.currentAllocatedSize >> 20), nres, ndef);
@@ -5357,7 +5410,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
     if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
     pthread_mutex_lock(&g_deferred_mu); unsigned long nd = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
-    pthread_mutex_lock(&g_res_mu); unsigned long nr = (unsigned long)g_res_objects.count; pthread_mutex_unlock(&g_res_mu);
+    res_mu_lock(); unsigned long nr = (unsigned long)g_res_objects.count; res_mu_unlock();
     int live = 0, peak = 0, cap = 0; nvn_dirty_stat(&live, &peak, &cap);
     pthread_mutex_lock(&g_smu); unsigned ns = g_by_serial.n, ashared = g_alias.n, nghost = g_ghost.n, gcap = ghost_cap(), nwait = g_retire_held.n; uint64_t ghost_puts = g_ghost_puts;
     unsigned aorph = 0;   // shared textures no live texture object or finalized serial resolves to: kept only until their storage is taken over or their pool goes (alias_take_over)
@@ -16298,12 +16351,14 @@ static void sub_cut(void) {
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     atomic_fetch_add(&g_seg_inflight, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
+        fb_in("segment");
         atomic_fetch_sub(&g_seg_inflight, 1);
         gpu_tag_done(f, cb.GPUStartTime, cb.GPUEndTime);
         if (sc) { if (k < SEG_CLK_N) { atomic_store(&sc->t[k][0], gpu_s_guest_ns(cb.GPUStartTime)); atomic_store(&sc->t[k][1], gpu_s_guest_ns(cb.GPUEndTime)); } seg_clk_put(sc); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("[RED] segment command buffer execution error: %s", cb.error.description.UTF8String); res_top_once(cb.error); }
         char where[64]; snprintf(where, sizeof where, "fence %llu, segment %u", (unsigned long long)cbs_fence, k); cbs_feedback(cbs, cb.error, where);
         gpu_lost_check(cb.error, "segment");
+        fb_out();
     }];
     gmem_commit_patch();
     res_commit();
@@ -17721,11 +17776,13 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
     MTL4CommitOptions *options = [MTL4CommitOptions new];
     id<MTLTexture> aa_tex = aa.tex, aa_raw = aa.raw; id<MTLBuffer> aa_work = aa.work, aa_ctl = aa.ctl; id<MTL4ArgumentTable> aa_at = aa.at;
     [options addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        fb_in("offscreen present");
         (void)al; (void)cb; (void)raw; (void)fx.sc; (void)aa_raw; (void)aa_at;   // keep the Metal 4 commands, source view, scaler and edge smoothing's state alive too
         res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out); res_remove(aa_tex); res_remove(aa_work); res_remove(aa_ctl);
         if (aa_ctl && !f.error) aa_note(aa_ctl);
         if (f.error) { MLOG("[RED] offscreen present: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "offscreen present"); }
         done(f.error ? PRESENT_FAILED : kind);
+        fb_out();
     }];
     [g_q4 commit:&cb count:1 options:options];
     return 1;
@@ -17930,7 +17987,9 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     int alloc_i = (int)(ticket % 3);
     if (g_present_alloc_fence[alloc_i]) {
         pthread_mutex_lock(&g_pq_mu);
+        int noted = g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]; if (noted) wn_in(WN_PALLOC, g_present_alloc_fence[alloc_i]);
         while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+        if (noted) wn_out(WN_PALLOC);
         pthread_mutex_unlock(&g_pq_mu);
     }
     [g_present_alloc4[alloc_i] reset];
@@ -17943,10 +18002,12 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     id<MTLBuffer> aa_ctl = kind & PRESENT_AA ? g_aa_present.ctl : nil;   // its counts, read when this present completes (a later present may have run by then: a log line's figures only)
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        fb_in("present");
         if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
-        else if (aa_ctl) aa_note(aa_ctl);
+        else { if (aa_ctl) aa_note(aa_ctl); atomic_store_explicit(&dm_present_done_ns, now_ns(), memory_order_relaxed); }   // a present on screen: the freeze detector's clock (dm/host/stall.c)
         pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
         present_gpu_note(f.GPUEndTime - f.GPUStartTime, kind); pthread_mutex_unlock(&g_pq_mu);
+        fb_out();
     }];
     id<MTL4CommandBuffer> buffers[] = {cb};
     pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
@@ -18350,7 +18411,7 @@ static uint64_t snap_take(const tex_t *t) {
         r = rec_own_put(b, RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_snap_cmt; r->a[1] = v;
         rec_own_push(b);
     } else {
-        res_commit_lock(); [g_q4 commit:&cb count:1]; [g_q4 signalEvent:g_snap_ev value:v]; pthread_mutex_unlock(&g_res_commit_mu);
+        res_commit_lock(); [g_q4 commit:&cb count:1]; [g_q4 signalEvent:g_snap_ev value:v]; res_commit_unlock();
         atomic_store(&g_snap_cmt, v);
     }
     g_snap[k].ev = v;
@@ -18428,6 +18489,7 @@ void mtl_present_wait_texture(uint64_t tk, uint64_t ev) {
 }
 void mtl_present_wait(uint64_t tk) {
     pthread_mutex_lock(&g_pq_mu);
+    int noted = g_pq_done < tk && !atomic_load(&g_present_discard); if (noted) wn_in(WN_PTICKET, tk);
     while (g_pq_done < tk && !atomic_load(&g_present_discard)) {
         if (!g_link_owns_layer) { pthread_cond_wait(&g_pq_cv, &g_pq_mu); continue; }
         if (g_pq_read >= tk) { pthread_cond_wait(&g_pq_cv, &g_pq_mu); continue; }   // This one has already been taken by the display link and is being presented: wait for it to be handed to the GPU (the GPU completion callback will wake us)
@@ -18456,6 +18518,7 @@ void mtl_present_wait(uint64_t tk) {
         }
         if (active && !g_stall_red && elapsed >= STALL_RED_NS) { g_stall_red = 1; MLOG("[RED] display link silent for %.1f s while active; presenting relies entirely on fallback frame drops, the picture is frozen", elapsed / 1e9); }
     }
+    if (noted) wn_out(WN_PTICKET);
     pthread_mutex_unlock(&g_pq_mu);
 }
 // Wait until all queued presents have been processed (used by mtl_finish = nvnQueueFinish etc.): goes through mtl_present_wait, so there is still a fallback when the display link stops (real device: the game called QueueFinish once while the display link was stopped,
@@ -18529,6 +18592,53 @@ void mtl_wait_state_dump(void) {
          atomic_load(&g_up_pending), atomic_load(&g_up_alloc_busy[0]), atomic_load(&g_up_alloc_busy[1]), atomic_load(&g_up_alloc_busy[2]), g_up_seq, g_up_cb != nil,
          (unsigned long long)g_pq_in, (unsigned long long)g_pq_done, g_cb != nil, atomic_load(&g_sub_thread_set));
 }
+// The freeze detector's dump (dm/host/stall.c, DM_STALL_LOG; on by default, logging only), after its "[RED] stall: no present for N s" line: what each place that can hold presents
+// back is doing (the notes at the top of this file). It runs on the detector's thread while the game may be frozen in any path it reads, so it takes no lock at all: atomics and the
+// notes, and plain counters read as they stand (__atomic_load_n: a value a moment stale misleads one line, where a lock taken here could stop the dump in the freeze it describes).
+// mtl_wait_state_dump's line, which reads the same way, ends it
+static void stall_lock_text(char *out, size_t n, lock_note *ln, uint64_t now) {
+    uint32_t th = atomic_load_explicit(&ln->th, memory_order_acquire); const char *site = atomic_load_explicit(&ln->site, memory_order_relaxed); uint64_t at = atomic_load_explicit(&ln->at, memory_order_relaxed);
+    if (!th) snprintf(out, n, "free");
+    else snprintf(out, n, "held by host thread %#x from %s for %.1f s", th, site ? site : "?", at && now >= at ? mach_s(now - at) : 0.0);
+}
+void mtl_stall_dump(void) {
+    uint64_t now = mach_absolute_time();
+    uint64_t sub = atomic_load(&g_fence), done = atomic_load(&g_done);
+    const char *fw = atomic_load_explicit(&g_fbq_what, memory_order_acquire); uint64_t fin = atomic_load(&g_fbq_in), fout = atomic_load(&g_fbq_out);
+    char fb[200];
+    if (fw) snprintf(fb, sizeof fb, "running the %s handler for %.1f s", fw, fin && now >= fin ? mach_s(now - fin) : 0.0);
+    else if (fout) snprintf(fb, sizeof fb, "idle, its last handler ended %.1f s ago", now >= fout ? mach_s(now - fout) : 0.0);
+    else snprintf(fb, sizeof fb, "idle, no handler has run yet");
+    MLOG("stall dump: fences submitted %llu / completed %llu (%llu behind); feedback queue %s, %llu handlers so far; main command buffers committed and not reported back %d",
+         (unsigned long long)sub, (unsigned long long)done, (unsigned long long)(sub > done ? sub - done : 0), fb, (unsigned long long)atomic_load(&g_fbq_n), atomic_load(&g_seg_inflight));
+    char lc[200], lr[200]; stall_lock_text(lc, sizeof lc, &g_res_commit_note, now); stall_lock_text(lr, sizeof lr, &g_res_note, now);
+    MLOG("stall dump: residency commit lock (g_res_commit_mu) %s; residency lock (g_res_mu) %s", lc, lr);
+    MLOG("stall dump: upload batches pending %d, last begun seq %u, a batch open %d; slots busy [%d %d %d], completed through seq [%u %u %u]",
+         atomic_load(&g_up_pending), __atomic_load_n(&g_up_seq, __ATOMIC_RELAXED), g_up_cb != nil,
+         atomic_load(&g_up_alloc_busy[0]), atomic_load(&g_up_alloc_busy[1]), atomic_load(&g_up_alloc_busy[2]),
+         atomic_load(&g_up_slot_back[0]), atomic_load(&g_up_slot_back[1]), atomic_load(&g_up_slot_back[2]));
+    if (__atomic_load_n(&g_rb_started, __ATOMIC_RELAXED)) {
+        uint32_t st = atomic_load(&g_rx_state); uint64_t since = atomic_load(&g_rx_since);
+        MLOG("stall dump: encode thread %s for %.1f s; blocks queued %d, one in hand %d, asleep %d; drains %llu (%llu blocked); uniform copies queued %llu / made %llu, waiters asleep %u, copy thread asleep %u",
+             st < RX_N ? rx_name[st] : "?", since && now >= since ? mach_s(now - since) : 0.0, __atomic_load_n(&g_rb_head, __ATOMIC_RELAXED) != NULL,
+             __atomic_load_n(&g_rb_busy, __ATOMIC_RELAXED), __atomic_load_n(&g_rb_sleeping, __ATOMIC_RELAXED), (unsigned long long)atomic_load(&g_drains), (unsigned long long)atomic_load(&g_drains_blocked),
+             (unsigned long long)atomic_load(&g_ubc_head), (unsigned long long)atomic_load(&g_ubc_done), atomic_load(&g_ubc_waiting), atomic_load(&g_ubc_sleeping));
+    } else MLOG("stall dump: no encode thread (Metal encoding on the submit thread)");
+    uint64_t tick = __atomic_load_n(&g_link_tick_ns, __ATOMIC_RELAXED), tnow = now_ns(); char tk[64];
+    if (tick && tnow >= tick) snprintf(tk, sizeof tk, "%.1f s ago", (tnow - tick) / 1e9); else snprintf(tk, sizeof tk, "none yet");
+    MLOG("stall dump: present queue enqueued %llu / taken %llu / done %llu, on the GPU %d; allocators done [%llu %llu %llu] of [%llu %llu %llu]; presents %llu; display link %d, owns the layer %d, rescue %d, last tick %s",
+         (unsigned long long)__atomic_load_n(&g_pq_in, __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_pq_read, __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_pq_done, __ATOMIC_RELAXED),
+         __atomic_load_n(&g_pq_inflight, __ATOMIC_RELAXED),
+         (unsigned long long)__atomic_load_n(&g_present_alloc_done[0], __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_present_alloc_done[1], __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_present_alloc_done[2], __ATOMIC_RELAXED),
+         (unsigned long long)__atomic_load_n(&g_present_alloc_fence[0], __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_present_alloc_fence[1], __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_present_alloc_fence[2], __ATOMIC_RELAXED),
+         (unsigned long long)__atomic_load_n(&g_present_n, __ATOMIC_RELAXED), g_dm_present_link, __atomic_load_n(&g_link_owns_layer, __ATOMIC_RELAXED), atomic_load(&g_rescue_mode),
+         tk);
+    char w[1024]; size_t o = 0;
+    for (int k = 0; k < WN_N && o < sizeof w - 160; k++) { int n = atomic_load(&g_wn[k].n); if (n <= 0) continue; uint64_t at = atomic_load(&g_wn[k].at);
+        o += (size_t)snprintf(w + o, sizeof w - o, " %s: %d thread%s, the latest for %llu, %.1f s;", wn_name[k], n, n == 1 ? "" : "s", (unsigned long long)atomic_load(&g_wn[k].what), at && now >= at ? mach_s(now - at) : 0.0); }
+    MLOG("stall dump: blocked waits in progress:%s", o ? w : " none");
+    mtl_wait_state_dump();
+}
 uint64_t mtl_alloc_shares(void) { return g_alloc_shares; }   // main submissions that began in the allocator of the one before them
 void mtl_alloc_stats(uint64_t *waits, uint64_t *grown, int *n) { *waits = g_alloc_waits; *grown = g_alloc_grown; *n = g_alloc_n; }   // Main submit allocator pool: how many times it waited, how many times it grew, how many exist now
 // Memory census for restop (diagnostic): residency-set textures by Metal format; which of them anything still names (serial tables, sharing table, descriptor views) and which only the
@@ -18561,7 +18671,7 @@ void mem_census(const char *why) { @autoreleasepool {
     uint64_t small_n[2][2] = {{0}}, small_b[2][2] = {{0}};   // [texture][shared storage]: residency objects of 64 KB or less
     uint64_t n_ret = 0, b_ret = 0, n_named = 0, b_named = 0, n_wait = 0, b_wait = 0, n_none = 0, b_none = 0, n_buf = 0, b_buf = 0;
     enum { NF = 24 }; struct { unsigned long pf; uint64_t n, b; } fm[NF] = {{0}}; int nfm = 0;
-    pthread_mutex_lock(&g_res_mu);
+    res_mu_lock();
     for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = o.allocatedSize;
         if (z <= 65536) { int tx = [(id)o conformsToProtocol:@protocol(MTLTexture)], sh = ((id<MTLResource>)o).storageMode == MTLStorageModeShared; small_n[tx][sh]++; small_b[tx][sh] += z; }
         if (![(id)o conformsToProtocol:@protocol(MTLTexture)]) { n_buf++; b_buf += z; continue; }
@@ -18571,7 +18681,7 @@ void mem_census(const char *why) { @autoreleasepool {
         else if ([named_ret containsObject:(__bridge id)(__bridge void *)t]) { n_ret++; b_ret += z; }
         else if ([waiting containsObject:(__bridge id)(__bridge void *)t]) { n_wait++; b_wait += z; }
         else { n_none++; b_none += z; } }
-    pthread_mutex_unlock(&g_res_mu);
+    res_mu_unlock();
     uint64_t dup_addr = 0, dup_tex = 0, dup_b = 0;
     for (id key in by_mem) { NSHashTable *set = [by_mem objectForKey:key]; if (set.count < 2) continue; dup_addr++;
         uint64_t biggest = 0, sum = 0; for (id b in set) { uint64_t z = ((id<MTLTexture>)b).allocatedSize; sum += z; if (z > biggest) biggest = z; } dup_tex += set.count - 1; dup_b += sum - biggest; }

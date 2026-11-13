@@ -503,6 +503,10 @@ check_t_border: t_border
 t_view_levels: t_view_levels.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_view_levels.m $(MTL_T_SRC) $(FW)
 check_t_view_levels: RUN_ENV = MTL_DEBUG_LAYER=1
+# The freeze detector's graphics dump (mtl_stall_dump): returns at once with the locks, a feedback handler and a fence wait it describes held, and names them
+t_stall_dump: t_stall_dump.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_stall_dump.m $(MTL_T_SRC) $(FW)
+check_t_stall_dump: RUN_ENV = MTL_DEBUG_LAYER=1
 t_res_commit: t_res_commit.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_res_commit.m $(MTL_T_SRC) $(FW)
 check_t_res_commit: RUN_ENV = MTL_DEBUG_LAYER=1

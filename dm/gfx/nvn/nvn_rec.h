@@ -127,8 +127,18 @@ static pthread_mutex_t g_note_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_con
 // Wait until the encode thread has passed a RO_NOTE of at least v on p (only the encode thread's progress through what is queued, never the GPU)
 static void rec_note_wait(_Atomic uint64_t *p, uint64_t v) {
     if (atomic_load(p) >= v) return;
+    wn_in(WN_NOTE, v);
     pthread_mutex_lock(&g_note_mu); while (atomic_load(p) < v) pthread_cond_wait(&g_note_cv, &g_note_mu); pthread_mutex_unlock(&g_note_mu);
+    wn_out(WN_NOTE);
 }
+
+// What the encode thread is doing, for the freeze detector's dump (nvn_mtl.m mtl_stall_dump): set where it may wait (for work, for the uniform copies, for the residency commit lock)
+// and around its queue calls, with the time it entered the state (mach ticks); not per record, so a block's calls cost nothing more
+enum { RX_IDLE, RX_BLOCK, RX_UBC, RX_RESLOCK, RX_COMMIT, RX_SIGNAL, RX_CB_BLOCK, RX_Q_BLOCK, RX_NOTE, RX_N };
+static const char *const rx_name[RX_N] = {"waiting for work", "making a block's calls", "waiting for the uniform copies (ubc_wait)", "waiting for the residency commit lock",
+    "in the queue's commit", "in the queue's event signal", "in a framework's encoding (RO_CB_BLOCK)", "in a queue operation (RO_Q_BLOCK)", "publishing a note"};
+static _Atomic uint32_t g_rx_state; static _Atomic uint64_t g_rx_since;
+static inline void rx_set(uint32_t s) { atomic_store_explicit(&g_rx_since, mach_absolute_time(), memory_order_relaxed); atomic_store_explicit(&g_rx_state, s, memory_order_relaxed); }
 
 // ---------- The encode thread ----------
 static id g_rx_cb, g_rx_enc;   // the encode thread's real command buffer and open encoder
@@ -138,17 +148,20 @@ static void rec_exec(const rec_t *r) {
     case RO_CB_NEW: g_rx_cb = [g_dev newCommandBuffer]; break;
     case RO_CB_BEGIN: [(id<MTL4CommandBuffer>)g_rx_cb beginCommandBufferWithAllocator:rec_id(a[0])]; break;
     case RO_CB_END: [(id<MTL4CommandBuffer>)g_rx_cb endCommandBuffer]; break;
-    case RO_CB_BLOCK: ((void (^)(id<MTL4CommandBuffer>))rec_id(a[0]))(g_rx_cb); break;
+    case RO_CB_BLOCK: rx_set(RX_CB_BLOCK); ((void (^)(id<MTL4CommandBuffer>))rec_id(a[0]))(g_rx_cb); rx_set(RX_BLOCK); break;
     case RO_COMMIT: case RO_COMMIT_REAL: {
-        if (r->op == RO_COMMIT) ubc_wait(a[2]);   // the uniform shadows this command buffer reads
+        if (r->op == RO_COMMIT) { rx_set(RX_UBC); ubc_wait(a[2]); }   // the uniform shadows this command buffer reads
         id<MTL4CommandBuffer> buffers[] = {r->op == RO_COMMIT ? g_rx_cb : rec_id(a[1])}; MTL4CommitOptions *o = rec_id(a[0]);
+        rx_set(RX_RESLOCK);
         res_commit_lock();   // apart from the residency set's commit, as the present snapshot's queue commit (nvn_mtl.m res_commit)
+        rx_set(RX_COMMIT);
         if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
-        pthread_mutex_unlock(&g_res_commit_mu);
+        res_commit_unlock();
+        rx_set(RX_BLOCK);
         if (r->op == RO_COMMIT) g_rx_cb = nil;
         break; }
-    case RO_SIGNAL: [g_q4 signalEvent:rec_id(a[0]) value:a[1]]; break;
-    case RO_Q_BLOCK: ((void (^)(void))rec_id(a[0]))(); break;
+    case RO_SIGNAL: rx_set(RX_SIGNAL); [g_q4 signalEvent:rec_id(a[0]) value:a[1]]; rx_set(RX_BLOCK); break;
+    case RO_Q_BLOCK: rx_set(RX_Q_BLOCK); ((void (^)(void))rec_id(a[0]))(); rx_set(RX_BLOCK); break;
     case RO_RE_BEGIN: g_rx_enc = [(id<MTL4CommandBuffer>)g_rx_cb renderCommandEncoderWithDescriptor:rec_id(a[0])]; break;
     case RO_CE_BEGIN: g_rx_enc = [(id<MTL4CommandBuffer>)g_rx_cb computeCommandEncoder]; break;
     case RO_END: [(id<MTL4CommandEncoder>)e endEncoding]; g_rx_enc = nil; break;
@@ -202,7 +215,7 @@ static void rec_exec(const rec_t *r) {
     case RO_LABEL: [(id<MTL4CommandEncoder>)e setLabel:rec_id(a[0])]; break;
     case RO_R_TS: [(id<MTL4RenderCommandEncoder>)e writeTimestampWithGranularity:a[1] afterStage:a[2] intoHeap:rec_id(a[0]) atIndex:a[3]]; break;
     case RO_C_TS: [(id<MTL4ComputeCommandEncoder>)e writeTimestampWithGranularity:a[1] intoHeap:rec_id(a[0]) atIndex:a[2]]; break;
-    case RO_NOTE: { _Atomic uint64_t *p = (_Atomic uint64_t *)(uintptr_t)a[0]; pthread_mutex_lock(&g_note_mu); if (a[1] > atomic_load(p)) atomic_store(p, a[1]); pthread_cond_broadcast(&g_note_cv); pthread_mutex_unlock(&g_note_mu); break; }
+    case RO_NOTE: { rx_set(RX_NOTE); _Atomic uint64_t *p = (_Atomic uint64_t *)(uintptr_t)a[0]; pthread_mutex_lock(&g_note_mu); if (a[1] > atomic_load(p)) atomic_store(p, a[1]); pthread_cond_broadcast(&g_note_cv); pthread_mutex_unlock(&g_note_mu); rx_set(RX_BLOCK); break; }
     default: MDIE("deferred encoding: unknown record %u", r->op);
     }
     for (uint32_t i = 0; i < r->nobj; i++) if (a[i]) CFRelease((CFTypeRef)(uintptr_t)a[i]);
@@ -215,10 +228,12 @@ static void *rec_thread(void *arg) {
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     const int rt = nvn_replay_rt();
     for (;;) {
+        rx_set(RX_IDLE);
         pthread_mutex_lock(&g_rb_mu);
         while (!g_rb_head) { g_rb_sleeping = 1; pthread_cond_wait(&g_rb_work, &g_rb_mu); g_rb_sleeping = 0; atomic_fetch_add_explicit(&g_rb_wakes, 1, memory_order_relaxed); }
         rec_blk *b = g_rb_head; g_rb_head = b->next; if (!g_rb_head) g_rb_tail = NULL; g_rb_busy = 1;
         pthread_mutex_unlock(&g_rb_mu);
+        rx_set(RX_BLOCK);
         @autoreleasepool { for (int i = 0; i < b->n; i++) rec_exec(&b->r[i]); }
         pthread_mutex_lock(&g_rb_mu);
         b->n = 0; b->next = g_rb_free; g_rb_free = b; g_rb_busy = 0;
@@ -258,7 +273,8 @@ static void rec_drain(void) {
     rec_publish();
     uint64_t w0 = ws_t0(), b0 = 0; int blocked = 0;
     pthread_mutex_lock(&g_rb_mu);
-    while (g_rb_head || g_rb_busy) { if (!blocked) b0 = now_ns(); blocked = 1; pthread_cond_wait(&g_rb_idle, &g_rb_mu); }
+    while (g_rb_head || g_rb_busy) { if (!blocked) { b0 = now_ns(); wn_in(WN_DRAIN, 0); } blocked = 1; pthread_cond_wait(&g_rb_idle, &g_rb_mu); }
+    if (blocked) wn_out(WN_DRAIN);
     pthread_mutex_unlock(&g_rb_mu);
     atomic_fetch_add_explicit(&g_drains, 1, memory_order_relaxed);
     if (blocked) { atomic_fetch_add_explicit(&g_drains_blocked, 1, memory_order_relaxed); atomic_fetch_add_explicit(&g_drain_ns, now_ns() - b0, memory_order_relaxed); }
