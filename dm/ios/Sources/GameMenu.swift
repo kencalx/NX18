@@ -1,11 +1,11 @@
 // The in-game menu, opened by the gamepad's menu button at the top centre (DmGamepad.m): the controller layout, then the settings-screen settings the running game takes at once
-// (front_ios.m dm_setting_live), grouped as on the settings screen, one row each, then the Cheats submenu (cheatsMenu), Settings screen at start (settingsAtStartRow) and Share log
-// (dmShareLog). A pick is saved as Play saves it (LauncherModel.choose), so the settings screen shows it at the next start; a setting an env file fixes is shown, not changed. Settings
-// that need the next start (language, pipelines, the frame rate and so on), and the sliders, stay on the settings screen, which the menu's title points to. A row that does nothing
-// at the moment says why under its name (gameMenuRow): greyed when nothing the player picks there can take effect, still selectable when only the current choice does nothing.
-// The menu is built here once as GameMenuItem rows (gameMenuSections), each time it opens, and drawn two ways: by default as NX 18's own panel (GameMenuPanel.swift: NX 18's colours
-// and UI font, touch, controller and VoiceOver), and with DM_GAME_MENU=system as the UIMenu it always was (gameMenuItems, uiMenuElement; DmGamepad.m picks), so both show the same
-// rows, notes and actions
+// (front_ios.m dm_setting_live), grouped as on the settings screen, one row each (the touch controls' three: one Touch controls row, touchControlsRow), then the Cheats submenu
+// (cheatsMenu), Settings screen at start (settingsAtStartRow) and Share log (dmShareLog). A pick is saved as Play saves it (LauncherModel.choose), so the settings screen shows it
+// at the next start; a setting an env file fixes is shown, not changed. Settings that need the next start (language, pipelines, the frame rate and so on), and the sliders, stay on
+// the settings screen, which the menu's title points to. A row that does nothing at the moment says why under its name (gameMenuRow): greyed when nothing the player picks there
+// can take effect, still selectable when only the current choice does nothing. The menu is built here once as GameMenuItem rows (gameMenuSections), each time it opens, and drawn
+// two ways: by default as NX 18's own panel (GameMenuPanel.swift: NX 18's colours and UI font, touch, controller and VoiceOver), and with DM_GAME_MENU=system as the UIMenu it
+// always was (gameMenuItems, uiMenuElement; DmGamepad.m picks), so both show the same rows, notes and actions
 import UIKit
 
 @MainActor var gameMenuModel: LauncherModel?   // main-actor state: written by dm_show_launcher, read by the menu, both on the main thread; the settings screen's model (Launcher.swift); nil in an app without one: the menu has the layout only
@@ -16,7 +16,7 @@ struct GameMenuItem: Identifiable {
         case action                       // a button: Share log, Reload cheats, a cheat that runs once, a greyed line that only informs
         case toggle(Bool)                 // on or off: ticked in the UIMenu, a switch in the panel (an option of a choice: the one chosen)
         case choice([GameMenuItem])       // one of several (each a .toggle, the current one on): a single-selection submenu, a page of options in the panel
-        case submenu([GameMenuSection])   // Cheats
+        case submenu([GameMenuSection])   // Cheats, Touch controls
     }
     let id: String                        // unique in the menu: the panel's focus and VoiceOver keep their place by it while the rows are built again
     var title: String
@@ -24,12 +24,14 @@ struct GameMenuItem: Identifiable {
     var symbol: String?                   // an SF Symbol
     var disabled = false
     var closesMenu = false                // the panel closes first (Share log: the share sheet or the alert is the system's, over the game)
+    var summary = false                   // a submenu whose subtitle sums up its page's values (Touch controls): the panel draws it under the name, VoiceOver reads it as the value
     var kind: Kind
     var perform: (@MainActor (UIView?) -> Void)?   // the pick; its argument is the menu button (an iPad's popover points at it)
 
-    init(id: String, title: String, subtitle: String? = nil, symbol: String? = nil, disabled: Bool = false, closesMenu: Bool = false, kind: Kind = .action,
+    init(id: String, title: String, subtitle: String? = nil, symbol: String? = nil, disabled: Bool = false, closesMenu: Bool = false, summary: Bool = false, kind: Kind = .action,
          perform: (@MainActor (UIView?) -> Void)? = nil) {
-        self.id = id; self.title = title; self.subtitle = subtitle; self.symbol = symbol; self.disabled = disabled; self.closesMenu = closesMenu; self.kind = kind; self.perform = perform
+        self.id = id; self.title = title; self.subtitle = subtitle; self.symbol = symbol; self.disabled = disabled; self.closesMenu = closesMenu; self.summary = summary; self.kind = kind
+        self.perform = perform
     }
 
     var isOn: Bool { if case .toggle(let on) = kind { return on }; return false }
@@ -96,7 +98,11 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
         for section in m.sections {
             var rows: [GameMenuItem] = section == "Controls" ? [layout] : []
             if section == "Controls" { placed = true }
-            for s in m.rows(in: section) where (s.kind == "choice" || s.kind == "toggle") && dm_setting_live(s.env, nil) { rows.append(gameMenuRow(m, s)) }
+            var touch: [(setting: Setting, item: GameMenuItem)] = [], touchAt = 0   // the touch controls' rows shown, and where the first was
+            for s in m.rows(in: section) where (s.kind == "choice" || s.kind == "toggle") && dm_setting_live(s.env, nil) {
+                if touchControlEnvs.contains(s.env) { if touch.isEmpty { touchAt = rows.count }; touch.append((s, gameMenuRow(m, s))) } else { rows.append(gameMenuRow(m, s)) }
+            }
+            if !touch.isEmpty { rows.insert(contentsOf: touch.count > 1 ? [touchControlsRow(touch)] : touch.map(\.item), at: touchAt) }   // one alone stays a plain row
             if !rows.isEmpty { sections.append(GameMenuSection(id: "section:\(section)", heading: section, items: rows)) }
         }
     }
@@ -107,6 +113,23 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
     if let m = gameMenuModel { last.append(settingsAtStartRow(m)) }
     sections.append(GameMenuSection(id: "section:app", heading: "More", items: last + [share]))
     return sections
+}
+
+// Touch controls: the touch controls' rows (Touch control size, Touch control opacity, and Touch feedback where the device has haptics: the launcher's hide rule leaves it out
+// of m.rows elsewhere) as one row opening a page of them, as Cheats does, where each choice opens its options and B goes back a page at a time. Its subtitle sums up their values
+// ("Large · Normal · Feedback on", without a hidden row's part), or, while the touch controls are hidden (a controller, the Tap layout), says so as Touch feedback's own note does
+// (front_ios.m dm_setting_why). The settings screen keeps its three rows
+private let touchControlEnvs: Set<String> = ["DM_TOUCH_SIZE", "DM_TOUCH_OPACITY", "DM_TOUCH_HAPTICS"]
+
+@MainActor private func touchControlsRow(_ rows: [(setting: Setting, item: GameMenuItem)]) -> GameMenuItem {
+    let parts = rows.map { r -> String in
+        if let v = r.item.currentOption { return v }   // a choice: the option it has
+        let name = r.setting.label.hasPrefix("Touch ") ? String(r.setting.label.dropFirst(6)) : r.setting.label   // Touch feedback: "Feedback on"
+        return name.prefix(1).uppercased() + name.dropFirst() + (r.item.isOn ? " on" : " off")
+    }
+    let hidden = dm_setting_why("DM_TOUCH_HAPTICS").map { String(cString: $0) }
+    return GameMenuItem(id: "touch", title: "Touch controls", subtitle: hidden ?? parts.joined(separator: " · "), summary: true,
+                        kind: .submenu([GameMenuSection(id: "touch.all", inline: false, items: rows.map(\.item))]))
 }
 
 // Settings screen at start: ticked while the settings screen shows when the app starts, unticked while the player's Skip this screen next time skips it (launcher.skip, stored at once:

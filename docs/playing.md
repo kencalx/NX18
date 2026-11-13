@@ -15,7 +15,7 @@ In 3D, the right stick (the camera in most games) is not drawn: swipe on the rig
 
 A connected game controller hides the touch controls, all but the menu button, and keeps every button.
 
-**Touch control size** (Large, Medium, Small) and **Touch control opacity** (Faint, Light, Normal, Strong), on the settings screen and in the in-game menu, make the controls smaller or more see-through, at once ([Settings](settings.md#touch-control-size)).
+**Touch control size** (Large, Medium, Small) and **Touch control opacity** (Faint, Light, Normal, Strong), on the settings screen and in the in-game menu (› **Touch controls**, with **Touch feedback**), make the controls smaller or more see-through, at once ([Settings](settings.md#touch-control-size)).
 
 In portrait (an iPad, an iPhone Duo's inner screen) the picture sits above the controls; so it does on a Duo half folded, the picture on the upper half. An iPad game also runs in a window of any size (Stage Manager).
 

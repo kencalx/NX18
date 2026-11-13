@@ -1,9 +1,9 @@
 // The in-game menu as NX 18's own panel (the default; DM_GAME_MENU=system keeps the UIMenu, DmGamepad.m). The same rows as the UIMenu (GameMenu.swift gameMenuSections), drawn so
 // they keep out of the game's way: a wide, low panel of see-through charcoal over a light dim (no blur), the rows in columns side by side (the settings screen's sections, More),
 // cyan for switches, ticks and the controller's focus, coral only for Close, the text in NX 18's UI font (NXFont.swift). Landscape: below the menu button at the top centre, as
-// wide as the screen allows; portrait: across the bottom, fewer columns, scrolling when it is taller than the room it has. A choice and Cheats open as a page of the panel
-// (‹ back). The game keeps running, as under the UIMenu; the touch controls and the controllers' input to the game wait while it is open (DmGamepad.m), and nothing pressed to
-// close it reaches the game.
+// wide as the screen allows; portrait: across the bottom, fewer columns, scrolling when it is taller than the room it has. A choice, Cheats and Touch controls open as a page of
+// the panel (‹ back; a choice on the Touch controls page opens a page over it, and B goes back one page at a time). The game keeps running, as under the UIMenu; the touch
+// controls and the controllers' input to the game wait while it is open (DmGamepad.m), and nothing pressed to close it reaches the game.
 //   Touch: a tap on a row picks it, on the dim (the menu button too) closes. A controller (LauncherController.swift's polling, while the panel is open only): the D-pad or the left
 //   stick moves the cyan ring, A picks, B goes back a page or closes, + closes; Home opens and closes it (DmGamepad.m). VoiceOver: a modal of buttons with their values and notes,
 //   the escape gesture goes back or closes. Dynamic Type: the system's text size (the window keeps the UIMenu's one small size, front_ios.m), up to accessibility 3: fewer,
@@ -309,7 +309,8 @@ struct GameMenuPanelView: View {
 }
 
 // One row: its name and note, and at the end a switch, a tick, the choice made with ›, or › alone. On the first page a choice or a submenu shows its name alone: a choice's note
-// heads its page (a dot marks it, and VoiceOver reads it), a submenu's is its value. A switch or an action has no page, so its note stays under its name
+// heads its page (a dot marks it, and VoiceOver reads it), a submenu's is its value; a summary (Touch controls: its page's values) goes under its name, read as its value. A
+// switch or an action has no page, so its note stays under its name
 private struct GameMenuRowView: View {
     let item: GameMenuItem
     let option: Bool   // an option of a choice: a tick and a cyan tint when it is the one chosen
@@ -324,7 +325,7 @@ private struct GameMenuRowView: View {
                 if let s = item.symbol {
                     Image(systemName: s).font(.footnote.weight(.medium)).foregroundStyle(NX18Palette.cyan).frame(minWidth: 16)   // system: symbol
                 }
-                if overview, opens {   // the dot takes no room
+                if overview, opens, !item.summary {   // the dot takes no room
                     Text(item.title).nxFont(.footnote).foregroundStyle(NX18Palette.text).fixedSize(horizontal: false, vertical: true)
                         .overlay(alignment: .topTrailing) {
                             if dot { Circle().fill(NX18Palette.muted).frame(width: 5, height: 5).offset(x: 8, y: 2).accessibilityHidden(true) }
@@ -353,7 +354,7 @@ private struct GameMenuRowView: View {
         .padding(2)   // room for the focus ring inside the scroll view's clip
         .accessibilityLabel(item.title)
         .accessibilityValue(value)
-        .accessibilityHint(item.subtitle ?? "")
+        .accessibilityHint(item.summary ? "" : item.subtitle ?? "")
         .accessibilityAddTraits(traits)
     }
 
@@ -383,7 +384,7 @@ private struct GameMenuRowView: View {
             }
             .fixedSize()
         case .submenu:
-            if overview, let s = item.subtitle, !s.isEmpty { Text(s).nxFont(.footnote).foregroundStyle(NX18Palette.cyan).lineLimit(1).fixedSize() }   // Cheats: "1 on" as its value
+            if overview, !item.summary, let s = item.subtitle, !s.isEmpty { Text(s).nxFont(.footnote).foregroundStyle(NX18Palette.cyan).lineLimit(1).fixedSize() }   // Cheats: "1 on" as its value
             Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(NX18Palette.muted)   // system: symbol
         case .action:
             EmptyView()
@@ -394,6 +395,7 @@ private struct GameMenuRowView: View {
         switch item.kind {
         case .toggle(let on): return option ? "" : on ? "On" : "Off"
         case .choice: return item.currentOption ?? ""
+        case .submenu where item.summary: return (item.subtitle ?? "").replacingOccurrences(of: " · ", with: ", ")   // Touch controls: "Large, Normal, Feedback on"
         default: return ""
         }
     }
