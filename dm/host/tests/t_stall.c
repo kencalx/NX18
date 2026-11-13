@@ -1,7 +1,7 @@
 // The freeze detector (stall.c, DM_STALL_LOG) driven by a fake present clock: dm_present_done_ns and the time of each look are set here, the focus, the menu and the dumps are
 // stand-ins that count. Checks: no line before the first present or under the threshold; one line and one dump at the threshold, and only one per stall; "presents resumed" with the
 // stall's length; at least 30 s between lines and at most 3 a run; nothing out of focus, in the background, with a library applet open or with the in-game menu open, and the time
-// counted again from the return to focus and from the menu's closing; "busy" when the guest thread table's locks stay held; the switch's values; off means never.
+// counted again from the return to focus, from the menu's closing and from the guest clock's restart (a text box up); "busy" when the guest thread table's locks stay held; the switch's values; off means never.
 // Then DM_WATCH_STALL's 1 s dump in crash.c, which never fired while crash_watch_pregame_done had no caller: one present, then no progress for over a second, dumps once.
 #include <stdarg.h>
 #include <stdio.h>
@@ -9,7 +9,8 @@
 #define DM_LOG_IMPL   // dm.h leaves dm_log's definition out: this file's records the lines
 #include "../stall.c"
 
-static uint64_t fake_now, fake_focus_in; static int fake_focus = 1, dumps, thread_dumps, table_busy;
+static uint64_t fake_now, fake_focus_in, fake_thawed; static int fake_focus = 1, fake_frozen, dumps, thread_dumps, table_busy;
+int guest_clock_frozen(uint64_t *thawed) { *thawed = fake_thawed; return fake_frozen; }
 uint64_t now_ns(void) { return fake_now; }
 int dm_focus_seen(void) { return fake_focus; }
 uint64_t dm_focus_in_since(void) { return fake_focus_in; }
@@ -27,7 +28,7 @@ static int checks, failures;
 static int has(const char *text) { for (int i = 0; i < nlines; i++) if (strstr(lines[i], text)) return 1; return 0; }
 static void reset(unsigned threshold_s) {
     memset(&g_stall, 0, sizeof g_stall); g_stall.threshold_ns = threshold_s * 1000000000ull;
-    nlines = dumps = thread_dumps = table_busy = 0; fake_focus = 1; fake_focus_in = 0; fake_now = 0;
+    nlines = dumps = thread_dumps = table_busy = fake_frozen = 0; fake_focus = 1; fake_focus_in = fake_thawed = 0; fake_now = 0;
     atomic_store(&dm_present_done_ns, 0); atomic_store(&g_stall_menu, 0); atomic_store(&g_stall_menu_closed, 0);
 }
 static int look(double t) { fake_now = S(t); return stall_poll(fake_now); }   // one look at t seconds
@@ -99,6 +100,14 @@ int main(void) {
     look(30); look(34.5); CHECK(dumps == 0, "after closing it, the time counts from the closing");
     look(35); CHECK(dumps == 1, "and fires once the threshold has passed since");
 
+    // The guest clock frozen with the game in focus (the inline keyboard's text box, Monster Hunter Rise's hunter name): never while frozen, counted from the restart
+    reset(5); present(10);
+    fake_frozen = 1; looks(10.5, 40);
+    CHECK(dumps == 0, "nothing while the guest clock stands still (a text box up)");
+    fake_frozen = 0; fake_thawed = S(40);
+    look(40); look(44.5); CHECK(dumps == 0, "after the restart, the time counts from it");
+    look(45); CHECK(dumps == 1, "and fires once the threshold has passed since");
+
     // The guest thread table's locks stay held: the dump says so and goes on
     reset(5); table_busy = 1; present(10); look(15);
     CHECK(dumps == 1 && thread_dumps == 0 && has("guest thread table busy"), "busy, not a wait");
@@ -114,6 +123,13 @@ int main(void) {
     crash_watch_frame();
     for (int i = 0; i < 40 && !atomic_load(&watch_dumps); i++) usleep(50000);   // up to 2 s; the dump comes after 1 s
     CHECK(atomic_load(&watch_dumps) == 1, "DM_WATCH_STALL: the 1 s dump fires after the first present");
+    // The watchdog's stage stays "present frame" over later presents, which name none (it alternated with "startup" every other present)
+    crash_watch_frame(); crash_watch_frame(); crash_watch_frame();
+    { char path[] = "/tmp/t_stall.XXXXXX"; int fd = mkstemp(path), saved = dup(2); char text[512] = "";
+      if (fd >= 0 && saved >= 0) { fflush(stderr); dup2(fd, 2); crash_dump_now("t_stall"); fflush(stderr); dup2(saved, 2);
+          FILE *f = fopen(path, "r"); if (f) { size_t n = fread(text, 1, sizeof text - 1, f); text[n] = 0; fclose(f); } }
+      if (fd >= 0) { close(fd); unlink(path); } if (saved >= 0) close(saved);
+      CHECK(strstr(text, "tick 4 / stage present frame") != NULL, "the watchdog names the present stage and counts presents as its tick"); }
     printf("stall log: %d checks, %d failures\n", checks, failures);
     return failures != 0;   // before the watchdog's 4 s
 }

@@ -11,8 +11,9 @@
 // "[RED] stall: no present for N s" line and a dump: the graphics side's state (nvn_mtl.m mtl_stall_dump: fences submitted and completed, the feedback queue's heartbeat, the
 // residency locks' holders, the upload slots, the encode thread, the present queue, the waits in progress, mtl_wait_state_dump) and the guest thread table (svc_thread_dump, which
 // also lists the host threads with their frames). At most 3 lines a run, at least 30 s apart, once per stall; when presents come back after a line, "stall: presents resumed after
-// N s" says how long the picture stood. The time counts from the latest of the last present, the return to focus and the menu's closing, so a picture that stood while out of
-// focus or behind the menu is not a stall.
+// N s" says how long the picture stood. The guest clock frozen holds it off too: the inline keyboard's text box (hle_swkbd.c) stops the game's thread with the clock frozen and
+// no library applet, so the game still sees focus 1 while the player types. The time counts from the latest of the last present, the return to focus, the menu's closing and the
+// guest clock's restart, so a picture that stood while out of focus, behind the menu or behind the text box is not a stall.
 //
 // It takes no lock the render, replay, present or feedback paths can hold: the clock it reads is an atomic, the focus and the menu are atomics, the graphics dump reads only
 // atomics and notes, and the guest thread table is dumped under locks it only tries (svc_thread_dump_try; "busy" when one stays held). A dump during a freeze therefore cannot
@@ -42,8 +43,8 @@ typedef struct {
     uint64_t open_present;   // the last present before the stall a line was written for, until presents resume (0: none open)
     uint64_t fired_for;      // the present the last line was written for (one line per stall)
 } stall_t;
-// One look at time now: present is the last completed present (0: none yet), focus the oe focus state the game sees, menu whether the in-game menu is open, since the latest of the
-// return to focus and the menu's closing. Returns STALL_FIRE (write a stall line and the dump; *secs: seconds since the last present) or STALL_RESUMED (presents came back after a
+// One look at time now: present is the last completed present (0: none yet), focus the oe focus state the game sees, menu whether the in-game menu is open or the guest clock
+// frozen, since the latest of the return to focus, the menu's closing and the clock's restart. Returns STALL_FIRE (write a stall line and the dump; *secs: seconds since the last present) or STALL_RESUMED (presents came back after a
 // line; *secs: seconds between the last present before the stall and the first after it), else STALL_QUIET
 static int stall_step(stall_t *s, uint64_t now, uint64_t present, int focus, int menu, uint64_t since, double *secs) {
     if (s->open_present && present != s->open_present) {
@@ -71,9 +72,12 @@ static void stall_dump(void) {
 void dm_stall_dump(void) { stall_dump(); }   // also after a suspend whose drain did not finish (hle_nvn.c dm_gfx_suspend), on a utility queue
 // One look by the detector's thread (t_stall calls it with its own clock)
 static int stall_poll(uint64_t now) {
-    uint64_t present = atomic_load(&dm_present_done_ns), since = dm_focus_in_since(), closed = atomic_load(&g_stall_menu_closed);
+    uint64_t present = atomic_load(&dm_present_done_ns), since = dm_focus_in_since(), closed = atomic_load(&g_stall_menu_closed), thawed = 0;
     if (closed > since) since = closed;
-    int focus = dm_focus_seen(), menu = atomic_load(&g_stall_menu); double secs = 0;
+    // The guest clock frozen (the inline keyboard's text box, hle_os.c guest_clock_frozen) holds it off as the menu does, and the time counts again from the clock's restart
+    int frozen = guest_clock_frozen(&thawed);
+    if (thawed > since) since = thawed;
+    int focus = dm_focus_seen(), menu = atomic_load(&g_stall_menu) || frozen; double secs = 0;
     int r = stall_step(&g_stall, now, present, focus, menu, since, &secs);
     if (r == STALL_FIRE) {
         LOG("[RED] stall: no present for %.1f s while the game is in focus (line %d of at most %d; a dump follows; DM_STALL_LOG=0 turns this off)", secs, g_stall.lines, STALL_LINES);
