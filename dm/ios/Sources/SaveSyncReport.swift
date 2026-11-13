@@ -84,7 +84,7 @@ struct SaveSyncReport {
         "Both this \(here)'s save and the one in iCloud changed since they were last the same. The newer one is not always the one with more progress: "
             + "a new game saved a minute later is newer. The one you don't pick is kept in the save's backups folder."
     }
-    static let unreadableTitle = "The cloud save didn't come"
+    static let unreadableTitle = "Couldn't Get the iCloud Save"
     func unreadableMessage(here: String) -> String {
         "iCloud didn't deliver this game's save in \(Self.waitMs / 1000) seconds. If you play this \(here)'s save now, it is not sent to iCloud "
             + "until it has been compared with the cloud's at a later start."

@@ -61,9 +61,10 @@ struct SettingRow: View {
         }
     }
     private var currentLabel: String { s.options?.first { $0[0] == current }?[1] ?? current }
-    // A choice with the UI font (NXFont.swift): the menu picker draws its value itself, in the system font on iOS (a UIKit button) and on the Mac in an NSPopUpButton whose
-    // title sits below the row's name (AppKit lays the font out with its line gap). So the value is NX 18's own text in a Menu, and only the option list is the system's menu
-    // (the same Picker, inline in it: checkmark, greyed options). Name and value side by side, the value under the name at the accessibility text sizes, as the menu picker does
+    // A choice on the iPhone and iPad, and on the Mac with the UI font (NXFont.swift; sideBySide): the menu picker draws its value itself, on iOS in the system font (a UIKit
+    // button), and under the row's note when it has one instead of on the right as on the other rows, and on the Mac in an NSPopUpButton whose title sits below the row's name
+    // (AppKit lays the font out with its line gap). So the value is NX 18's own text in a Menu, and only the option list is the system's menu (the same Picker, inline in it:
+    // checkmark, greyed options). Name and value side by side, the value under the name at the accessibility text sizes, as the menu picker does
     @ViewBuilder private var fontChoice: some View {
         let value = Menu {
             Picker(selection: m.binding(s)) { options } label: { Text(s.label) }
@@ -87,12 +88,20 @@ struct SettingRow: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.legibilityWeight) private var legibility
     @Environment(\.isEnabled) private var enabled
+    // fontChoice, else the menu picker: with iOS's Bold Text on (the system's layout, whose font follows it), and in the Mac's settings window without the UI font
+    private var sideBySide: Bool {
+        #if os(iOS)
+        return legibility != .bold
+        #else
+        return NXFont.name != nil && legibility != .bold
+        #endif
+    }
 
     var body: some View {
         Group {
             switch s.kind {
             case "choice":
-                if NXFont.name != nil && legibility != .bold { fontChoice } else {
+                if sideBySide { fontChoice } else {
                     Picker(selection: m.binding(s)) { options } label: { settingLabel }
                         .pickerStyle(.menu)
                 }
@@ -544,7 +553,8 @@ struct LauncherStatus: Equatable {
         case .on: out.append(Part(id: "cloud", text: "Cloud saves on", dot: nil))
         case .synced: out.append(Part(id: "cloud", text: "Save synced", dot: nil))
         }
-        if let m = memoryFree, m > 0 { out.append(Part(id: "memory", text: "\(ByteCountFormatter.string(fromByteCount: Int64(clamping: m), countStyle: .memory)) free", dot: nil)) }
+        // with one decimal (GB of 2^30 bytes, as the memory count style): the figure refreshes every 2 s, and two decimals kept changing the line's width (a stacked hero jumped as it wrapped)
+        if let m = memoryFree, m > 0 { out.append(Part(id: "memory", text: "\((Double(m) / 1_073_741_824).formatted(.number.precision(.fractionLength(1)))) GB free", dot: nil)) }
         return out
     }
     // What VoiceOver reads for the line
@@ -572,10 +582,11 @@ struct LauncherStatusLine: View {
             parts.enumerated().reduce(Text(verbatim: "")) { t, e in
                 let sep = e.offset == 0 ? Text(verbatim: "") : Text(verbatim: "  ·  ")
                 let dot = e.element.dot.map { Text(Image(systemName: "circle.fill")).font(.system(size: 7)).foregroundStyle($0) } ?? Text(verbatim: "")   // system: symbol
-                let gap = e.element.dot == nil ? "" : "\u{2009}"
+                let gap = e.element.dot == nil ? "" : "\u{00A0}"   // a word space that keeps the dot with its word (a thin one looked like a slip)
                 return Text("\(t)\(sep)\(dot)\(gap)\(e.element.text)")
             }
             .nxFont(.footnote)
+            .monospacedDigit()   // the memory figure keeps its width as it refreshes
             .foregroundStyle(color)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(status.spoken())

@@ -71,11 +71,11 @@ private func rowBackground(_ focused: Bool, fill: Color = NX18Palette.row, first
     }
 }
 
-/// Cloud saves: an iCloud Drive folder shared with the Mac app (chosen in its settings window's
-/// Cloud saves too). The host brings the save in from there when the game starts and
+/// Cloud saves: an iCloud Drive folder shared with the game's app on the other iPhone, iPad or Mac
+/// (its Cloud saves too). The host brings the save in from there when the game starts and
 /// sends it there after each save (dm/host/save_sync.h); the folder is a bookmark (CloudSaves.m).
 private struct CloudSavesSection: View {
-    @Binding var picking: Bool   // the folder picker is up (the settings screen's controller waits meanwhile; its A on this section opens it)
+    @Binding var picking: Bool   // the folder picker is up (the settings screen's controller waits meanwhile, but for its B, which closes it; its A on this section opens it)
     var focused = false
     var closed: () -> Void = {}   // the picker has finished closing (a Guide shortcut waits for it)
     var changed: () -> Void = {}
@@ -118,7 +118,7 @@ private struct CloudSavesSection: View {
             NX18SectionHeader("Saves")
         } footer: {
             Text(note.isEmpty
-                 ? "Choose a folder in iCloud Drive, and the same one in the Mac app's Cloud saves. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups."
+                 ? "Choose a folder in iCloud Drive, and the same one in Cloud saves on your other iPhone, iPad or Mac. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups."
                  : note)
             .nxFontIfCustom(.footnote)
             .foregroundStyle(NX18Palette.muted)
@@ -244,6 +244,7 @@ struct LauncherView: View {
     @State private var focus: LauncherFocus? = .play
     @State private var sheet: LauncherSheet?
     @State private var cloudPicking = false
+    @State private var stacked = false      // the art above the settings (portrait, a narrow window): the preset chips are below Play then, not beside it (focusMap)
     @State private var guideAfter = false   // a Guide shortcut waiting for About or the folder picker to finish closing: UIKit presents nothing from a view controller that is still presenting, so the guide opens after
     @State private var status = LauncherStatus()
     @State private var scroller = LauncherScroller()
@@ -294,6 +295,7 @@ struct LauncherView: View {
                 }
             }
             .onChange(of: g.size) { m.refreshFacts() }   // the window's shape: rotated, or resized under Stage Manager or Split View
+            .onChange(of: wide, initial: true) { stacked = !wide }
         }
         .background(background.ignoresSafeArea())
         .preferredColorScheme(.dark)
@@ -302,7 +304,8 @@ struct LauncherView: View {
         .tint(NX18Palette.cyan)
         .toggleStyle(NX18SwitchStyle())
         .fullScreenCover(isPresented: shown(.guide)) {
-            LauncherGuideSheet(content: content, scroller: scroller, closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil) { sheet = nil }
+            LauncherGuideSheet(content: content, scroller: scroller, closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil,
+                               turnNames: pad.connected ? (pad.glyphs.name(NXShoulder.l), pad.glyphs.name(NXShoulder.r)) : nil) { sheet = nil }
         }
         .sheet(isPresented: shown(.about), onDismiss: guideAfterClosing) {
             LauncherAboutSheet(about: content.about ?? LauncherAbout(), artwork: artwork, name: name, version: version, scroller: scroller,
@@ -711,7 +714,7 @@ struct LauncherView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Skip this screen next time")
                             Text(launcherFromEnv
-                                 ? "DM_LAUNCHER in an env file decides this"
+                                 ? "Set by an env file"   // as the in-game menu's Settings screen at start says it (GameMenu.swift)
                                  : "The game starts at once with these settings. To see this screen again, use Settings screen at start in the in-game menu (or hold a controller button while the app opens).")
                                 .nxFont(.footnote).foregroundStyle(NX18Palette.muted)
                         }
@@ -787,11 +790,13 @@ struct LauncherView: View {
 
     private var focusMap: LauncherFocusMap {
         var lines: [[LauncherFocus]] = []
-        if m.hasPresets { lines.append(LauncherPreset.allCases.map { .preset($0) }) }
         var top: [LauncherFocus] = [.play]
         if content.hasGuide { top.append(.guide) }
         if content.hasAbout { top.append(.about) }
-        lines.append(top)
+        // Play's line and the chips in the order they are on the screen: stacked, the chips are at the top of the settings, below Play; side by side, they top the settings beside it
+        if stacked { lines.append(top) }
+        if m.hasPresets { lines.append(LauncherPreset.allCases.map { .preset($0) }) }
+        if !stacked { lines.append(top) }
         lines += basicGroups.flatMap { $0.rows.map { [LauncherFocus.row($0.env)] } }
         if !advancedGroups.isEmpty {
             lines.append([.advanced])
@@ -814,7 +819,7 @@ struct LauncherView: View {
             }
             return
         }
-        if cloudPicking { return }   // the system's folder picker: touch only
+        if cloudPicking { if e == .b { cloudPicking = false }; return }   // the system's folder picker, which a controller cannot drive: B closes it, as the Launcher and Guide shortcuts do (the B held is no press on the settings: onChange of cloudPicking)
         if let step = asking, let r = report {   // which save to play, or what to do without the cloud's: the dialog's buttons by controller
             switch (step, e) {
             case (.choose, .l): go(r.localChoice)
@@ -828,7 +833,9 @@ struct LauncherView: View {
         }
         if checking { if e == .b { playWithout() }; return }   // B plays without the cloud's save; nothing else while it is compared
         let map = focusMap
-        let cur = focus.flatMap { map.contains($0) ? $0 : nil } ?? .play
+        // An item no longer drawn: Play, but the Advanced header for one of its rows (Advanced closed by touch), so the controller goes on from where it was
+        let cur = focus.flatMap { map.contains($0) ? $0 : nil }
+            ?? (advancedGroups.contains { $0.rows.contains { LauncherFocus.row($0.env) == focus } } ? .advanced : .play)
         if focus != cur { focus = cur }
         switch e {
         case .up, .down: focus = map.vertical(cur, e == .down ? 1 : -1)

@@ -380,7 +380,7 @@ import SwiftUI
     let st = LauncherStatus(lastPlayed: now.addingTimeInterval(-7200), cloud: .synced, memoryFree: 3 << 30, console: .switch2)
     let parts = st.parts(now: now)
     expect(parts.map(\.id) == ["console", "played", "cloud", "memory"] && parts[0].text == "Switch 2" && parts[0].dot == NX18Palette.coral
-           && parts[1].text.hasPrefix("Last played ") && parts[2].text == "Save synced" && parts[3].text.hasSuffix(" free"), "status parts")
+           && parts[1].text.hasPrefix("Last played ") && parts[2].text == "Save synced" && parts[3].text == "\(3.0.formatted(.number.precision(.fractionLength(1)))) GB free", "status parts")
     expect(LauncherStatus(console: .switch1).parts().map(\.text) == ["Switch 1"] && LauncherStatus.Console.switch1.dot == NX18Palette.cyan
            && LauncherStatus.Console(rawValue: "switch3") == nil
            && LauncherStatus().parts().isEmpty && LauncherStatus(cloud: .on).parts().map(\.text) == ["Cloud saves on"], "unknown parts are left out")
