@@ -3353,7 +3353,8 @@ static void serial_del(uint64_t k) { pthread_mutex_lock(&g_smu); id old = hm_get
 // (tex_get, mtl_tex_pin, tex_put: the frame, g_cur_frame, and the submission being encoded, g_fence + 1) is kept in a list from least to most recently used (ghost_used), and
 //  - at the ceiling a put lets the least recently used go, unless a submission still in flight used it (its submission past g_done): every entry after it in the list was used
 //    later, so the table then goes past the ceiling rather than push out what the GPU is reading and the next submission resolves again. At twice the ceiling it goes all the same
-//    (its texture waits for its fence in the deferred-release queue, as every entry's does), so a GPU that stops completing cannot grow the table without end;
+//    (its texture waits for its fence in the deferred-release queue, as every entry's does), so a GPU that stops completing cannot grow the table without end. Past the ceiling
+//    a put lets two go while the GPU is done with them, so the table comes back down to the ceiling once the submissions that used them complete;
 //  - at each submission's commit (ghost_commit) up to GHOST_DRAIN entries idle for GHOST_IDLE_FRAMES frames or GHOST_IDLE_SUBS submissions go, least recently used first, while the
 //    table is above ghost_floor (NGHOST_DEF, or a smaller ceiling): a table that grew in a heavy area drains back to 512 once its textures idle. Submissions as well as frames, so a
 //    stretch with no present does not keep every entry (about 25 submissions a frame in Ocarina of Time: 16,384 is about 650 frames there);
@@ -3485,10 +3486,12 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are never a ga
         uint64_t f = atomic_load_explicit(&g_cur_frame, memory_order_relaxed); unsigned cap = ghost_cap();
         // pushed out lately and wanted again; looked up before this put's own eviction is recorded, which may take k's slot
         if (g_ghost_evicted) { unsigned gi = (unsigned)(k % GHOST_GONE); if (g_ghost_gone_ser[gi] == k) { g_ghost_thrash += (uint32_t)f - g_ghost_gone_frame[gi] < GHOST_THRASH_FRAMES; g_ghost_gone_ser[gi] = 0; } }
-        // At the ceiling the least recently used goes, unless a submission in flight used it (then every entry did, and the table goes past the ceiling), up to twice the ceiling
-        const ghost_use *lru = g_ghost_lru;
-        if (g_ghost.n >= cap && lru && (!ghost_in_flight(lru) || g_ghost.n >= 2 * cap)) {
-            uint64_t ek = lru->serial; ghost_evict(ek);   // the evicted serial resolves anew too
+        // At the ceiling the least recently used goes, unless a submission in flight used it (then every entry did, and the table goes past the ceiling), up to twice the ceiling.
+        // Past the ceiling (it grew while its entries were in use) a put lets a second one go once the GPU is done with it too, so the table comes back down to its ceiling as puts
+        // come. With one a put it stayed where it had grown for as long as the game kept putting: a game that replays more than its ceiling (the thrash case, the reason for
+        // Ocarina of Time's 4096) held up to twice it for good, and only an idle stretch of 600 frames brought it back
+        for (int e = 0; e < 2 && g_ghost.n >= cap && g_ghost_lru && (!ghost_in_flight(g_ghost_lru) || g_ghost.n >= 2 * cap); e++) {
+            uint64_t ek = g_ghost_lru->serial; ghost_evict(ek);   // the evicted serial resolves anew too
             unsigned gi = (unsigned)(ek % GHOST_GONE); g_ghost_gone_ser[gi] = ek; g_ghost_gone_frame[gi] = (uint32_t)f; g_ghost_evicted++;
         }
         g_ghost_puts++;

@@ -177,7 +177,7 @@ static void lru(void) {
     g_next = base + 200;
 }
 
-// A submission in flight's entries stay: a full table goes past its ceiling rather than let them go, up to twice it; once the GPU passes the fence the oldest goes again
+// A submission in flight's entries stay: a full table goes past its ceiling rather than let them go, up to twice it; once the GPU passes the fence a put lets two go, back to the ceiling
 static void in_flight(void) {
     ghost_reset(64); uint64_t base = g_next, ev0 = g_ghost_evicted; frame(2800);
     for (unsigned i = 0; i < 64; i++) put(base + i);
@@ -192,9 +192,17 @@ static void in_flight(void) {
     CHECK(held() == 128 && !has(base + 1) && g_ghost_evicted - ev0 == 2, "a committed submission not completed: still past the ceiling, still bounded");
     settle();
     put(base + 130);
-    CHECK(held() == 128 && !has(base + 2) && g_ghost_evicted - ev0 == 3, "once the GPU passed it, the oldest goes and the table stays where it is");
+    CHECK(held() == 127 && !has(base + 2) && !has(base + 3) && has(base + 4) && g_ghost_evicted - ev0 == 4, "once the GPU passed it, a put past the ceiling lets the two oldest go");
+    for (unsigned i = 131; i < 131 + 62; i++) put(base + i);   // the thrash case goes on: each put one entry nearer the ceiling
+    CHECK(held() == 65 && g_ghost_evicted - ev0 == 128, "62 more puts: 65 held, two let go each");
+    put(base + 193);   // the last two entries the GPU is done with (base + 128 and + 129) go
+    CHECK(held() == 64 && g_ghost_evicted - ev0 == 130 && !has(base + 129) && has(base + 130), "back at the ceiling of 64");
     pthread_mutex_lock(&g_smu); unsigned n = ghost_release(0, UINT_MAX, 0); pthread_mutex_unlock(&g_smu);
-    CHECK(n == 127 && held() == 1 && has(base + 130), "a release to nothing stops at the entry the submission being encoded put");
+    CHECK(n == 0 && held() == 64, "every entry put by the submission being encoded: a release lets none go");
+    settle(); put(base + 194);   // in a submission of its own: at the ceiling one goes, no more
+    CHECK(held() == 64 && g_ghost_evicted - ev0 == 131 && !has(base + 130) && has(base + 131), "at the ceiling a put lets one go");
+    pthread_mutex_lock(&g_smu); n = ghost_release(0, UINT_MAX, 0); pthread_mutex_unlock(&g_smu);
+    CHECK(n == 63 && held() == 1 && has(base + 194), "a release to nothing stops at the entry the submission being encoded put");
     LIST_OK("in flight");
     g_next = base + 200;
 }
