@@ -1,8 +1,58 @@
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/nx18/nx18-lockup-dark.svg"><img src="docs/images/nx18/nx18-lockup-light.svg" alt="NX 18" width="360"></picture></p>
+<p align="center"><a href="https://github.com/kencalx/NX18/releases"><img src="docs/images/nx18/readme/nx18-readme-hero.png" alt="NX 18 System update X1.0 release. Native apps, built on your Mac, for your legally owned and acquired games on A20 iPhones, iPads and M-series Macs. Not an emulator. NX 18 includes no games, keys or mods." width="100%"></a></p>
 
-# NX 18
+<p align="center">
+<a href="https://github.com/kencalx/NX18/releases"><img src="docs/images/nx18/readme/nx18-badge-x1-release.png" alt="X1.0 Release" width="150"></a>
+<a href="#requirements"><img src="docs/images/nx18/readme/nx18-badge-metal4.png" alt="Metal 4" width="96"></a>
+<a href="#what-you-need"><img src="docs/images/nx18/readme/nx18-badge-a20.png" alt="A20 iPhone · iPad" width="181"></a>
+<a href="#what-you-need"><img src="docs/images/nx18/readme/nx18-badge-mac.png" alt="M-series Mac" width="146"></a>
+<a href="LICENSE"><img src="docs/images/nx18/readme/nx18-badge-mit.png" alt="MIT License" width="130"></a>
+</p>
 
-A fork of [nxnative](https://github.com/seedds/nxnative) for the iPhone 18 Pro Max ([what this fork changes](#requirements)).
+<p align="center">
+Your legally owned and acquired Switch and Switch 2 games, as native apps for your iPhone, iPad and Mac.<br>
+Built on your Mac. Not an emulator: the game's own code runs on the Apple chip, with its graphics on Metal 4.<br>
+<b>NX 18 includes no games, no keys and no mods, and is not affiliated with Nintendo.</b>
+</p>
+
+<p align="center">
+<a href="docs/getting-started.md"><b>Getting started</b></a> · <a href="https://github.com/kencalx/NX18/releases"><b>Releases</b></a> · <a href="docs/settings.md"><b>Settings</b></a> · <a href="#reporting-a-problem"><b>Report a problem</b></a> · <a href="#acknowledgements"><b>Acknowledgements</b></a>
+</p>
+
+## System update X1.0
+
+<p align="center"><a href="https://github.com/kencalx/NX18/releases"><img src="docs/images/nx18/readme/nx18-readme-more.png" alt="More! System update X1.0. More frames: ready-made pipelines in the app, faster first starts, fewer hitches. More efficient: 0.5 W of CPU power for a 3D platformer at 60 fps. More screen: Stretch or Match screen, and your own Ultrawide mod becomes an option. More responsive: 25 to 33 ms from game to display on iPhone, down from about 43 to 49 ms. More to come: X2.0 is planned, with lower power use among its goals. Measured on iPhone 18 Pro Max, iOS 27.3. CPU power of the game's own process only. Times are approximate. 0.5 W with the player's own Ultrawide mod on. NX 18 includes no games, keys or mods. Plans, not promises." width="900"></a></p>
+
+- **More frames.** Ready-made pipelines now ship in the app, so a first start compiles far less, and fewer are built while you play.
+- **More efficient.** About 0.5 W of CPU power for a 3D platformer at 60 fps on an iPhone 18 Pro Max, and fewer CPU wakeups in lock-heavy games.
+- **More responsive.** On iPhone and iPad, a frame that waits too long for the screen is skipped, so the picture keeps up with your input. On the iPhone, game-to-display time fell from about 43–49 ms to about 25–33 ms.
+- **More screen.** Fit, Fill or Stretch the picture, and match a taller screen in games that support it. Your own Ultrawide mod becomes a switch in the launcher, which now shows its frame-rate cost where it was measured.
+- **More console.** NX 18's own in-game menu and a refreshed launcher, with touch, a controller or VoiceOver.
+- **More to come.** X2.0 is planned, with lower power use among its goals. Plans, not promises.
+
+Power figures are CPU power: the game's own process, not the GPU or the display. The full release notes, with how each figure was measured, are on the [Releases](https://github.com/kencalx/NX18/releases) page.
+
+## What you need
+
+- **Your legally owned and acquired games**, dumped from your own Switch or Switch 2, and your own `prod.keys` for `.nsp` and `.xci` games. NX 18 includes no games, keys or firmware.
+- **A Mac** with Apple silicon (M-series) and Metal 4, on macOS 27.3 or later. To build: Xcode 27.3, [Homebrew](https://brew.sh) and Python 3.12 or newer.
+- **To play on iPhone or iPad:** a device with an Apple A20 chip, on iOS or iPadOS 27.3 or later. NX 18 is built for the A20 and tested on the iPhone 18 Pro Max. The iPhone 18 Pro, iPhone Duo and iPad mini 8 should work too, but aren't tested yet.
+- **A sideloading tool** for iPhone and iPad, such as AltStore, SideStore, Sideloadly or LiveContainer. A paid Apple Developer account is recommended, not required.
+
+Every detail, down to the Metal compiler: [Requirements](#requirements).
+
+## Get started
+
+1. **Get your Mac ready.** Download `nx18-setup.sh` and `nx18-build.sh` from the [latest release](https://github.com/kencalx/NX18/releases/latest) and run `bash ~/Downloads/nx18-setup.sh`. It asks before every install or download.
+2. **Build your game.** Copy `nx18-build.sh` to your home folder, set your game, your keys and the target (`iphone`, `ipad` or `mac-app`) at its top, and run it. It says where the IPA or Mac app is. Your keys stay on your Mac.
+3. **Play.** On the Mac, open the app. On iPhone or iPad, sideload the IPA, then make sure the game gets the [Increased Memory Limit](#increased-memory-limit).
+
+New to this? [Getting started](docs/getting-started.md) goes one step at a time, from a new Mac to playing. Rather build in an app than in Terminal? [Build with NX Play instead](docs/getting-started.md#build-with-nx-play-instead): NX Play, a community Mac app, builds with your NX 18 folder. Every step in detail: [How to play](#how-to-play).
+
+<p align="center"><img src="docs/images/nx18/readme/nx18-readme-divider.png" alt="" width="100%"></p>
+
+## About this fork
+
+A fork of [nxnative](https://github.com/seedds/nxnative), built for the Apple A20 chip and tested on the iPhone 18 Pro Max ([what this fork changes](#requirements)).
 
 Play your legally owned and acquired Nintendo Switch and Switch 2 games natively on Apple silicon Macs, and on iPhones and iPads with an Apple A20 chip. One script packs your game into a Mac app or an unsigned IPA that you sideload.
 
