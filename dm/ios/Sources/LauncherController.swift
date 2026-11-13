@@ -14,7 +14,7 @@ import UIKit
 
 // What the focus ring can be on
 enum LauncherFocus: Hashable, Sendable {
-    case preset(LauncherPreset), play, guide, about, row(String), advanced, reset, cloud, skip
+    case preset(LauncherPreset), play, guide, about, row(String), advanced, reset, cloud, skip, acknowledgements
 }
 
 // The focusable items as lines on the screen, in order: up / down go from line to line (keeping the column where the next line has it), left / right along a line

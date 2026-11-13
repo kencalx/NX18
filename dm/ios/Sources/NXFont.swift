@@ -6,6 +6,9 @@
 // (nxTextRoot). Characters it lacks (a thin space, Hangul, symbols) come from the system's fallback fonts. The Mac app compiles this file too (dm/mac/pack_app.py swift_sources)
 import CoreText
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 enum NXFont {
     /// The registered UI font's PostScript name, nil for the system font. DM_UI_FONT_NAME, taken only when a font of that name is there (a stale name gives the system font)
@@ -57,6 +60,14 @@ enum NXFont {
         if let n = name, !boldText { return .custom(n, size: base(s) * scale, relativeTo: s) }
         return weight == .regular ? .system(s) : .system(s).weight(weight)
     }
+
+    /// The license texts of Acknowledgements (GuideViewer.swift LauncherNoticesSheet), laid out in fixed-width columns as their authors wrote them: the system's monospaced font
+    /// at the style, whatever the UI font
+    static func mono(_ s: Font.TextStyle) -> Font { .system(s, design: .monospaced) }
+    #if os(macOS)
+    /// The same for the Mac window's text view (dm/mac/Launcher.swift MacNoticesWindow)
+    static func monoNS(size: CGFloat) -> NSFont { .monospacedSystemFont(ofSize: size, weight: .regular) }
+    #endif
 
     /// A fixed size (the Mac banner's name and pills): the UI font at size times the scale, else the system font at size and weight
     static func fixed(_ size: CGFloat, weight: Font.Weight = .regular, boldText: Bool = false) -> Font {
@@ -110,6 +121,8 @@ extension View {
     func nxFontIfCustom(_ style: Font.TextStyle) -> some View {
         modifier(NXFontModifier(kind: .style(style), weight: .regular, onlyCustom: true))
     }
+    /// Fixed-width text (a license's text, NXFont.mono): the system's monospaced font at the style, with or without the UI font
+    func nxMono(_ style: Font.TextStyle) -> some View { font(NXFont.mono(style)) }
     /// A screen's or sheet's root: body text in the UI font and its wrapped lines spaced; nothing without the UI font
     func nxTextRoot() -> some View { modifier(NXTextRoot()) }
 }

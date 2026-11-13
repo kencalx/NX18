@@ -351,6 +351,21 @@ struct LauncherView: View {
                         resetSection
                     }
                 }
+                if MacNoticesWindow.url != nil {   // the third-party notices the app carries (Resources/dm/ThirdPartyNotices.txt), as on the iPhone below the settings; also in the app menu
+                    Section {
+                        Button { MacNoticesWindow.show(title: name) } label: {
+                            HStack {
+                                Text("Acknowledgements").foregroundStyle(.white)
+                                Spacer()
+                                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(NX18Palette.muted)   // system: symbol
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Shows the licenses of the code this app is built with")
+                    }
+                    .listRowBackground(NX18Palette.row)
+                }
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
@@ -718,6 +733,58 @@ final class MacGuideBox: NSView {
     override func layout() { super.layout(); place() }
 }
 
+// Acknowledgements: the third-party notices every app carries, Resources/dm/ThirdPartyNotices.txt (dm/tools/third_party_notices.py; dm/mac/pack_app.py copies it in): each piece of
+// others' work in the app with its author, what NX 18 uses it for and its license text. A window of its own, dark as the settings, the text read-only and selectable, in the
+// monospaced font its license texts are laid out for, each entry's name in cyan. The settings' Acknowledgements row and the app menu open it; again only brings it forward
+@MainActor final class MacNoticesWindow: NSObject, NSWindowDelegate {
+    private(set) static var current: MacNoticesWindow?
+    nonisolated static var url: URL? {
+        guard let u = Bundle.main.resourceURL?.appendingPathComponent("dm/ThirdPartyNotices.txt"), FileManager.default.isReadableFile(atPath: u.path) else { return nil }
+        return u
+    }
+    private var window: NSWindow?
+
+    /// The file as the window shows it: every line in the light text colour, the line after each "====" rule (an entry's number and name) in cyan
+    static func styled(_ text: String) -> NSAttributedString {
+        let font = NXFont.monoNS(size: 12), out = NSMutableAttributedString()
+        let plain: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor(white: 0.86, alpha: 1)]
+        let heading: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor(NX18Palette.cyan)]
+        var afterRule = false
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            out.append(NSAttributedString(string: line + "\n", attributes: afterRule ? heading : plain))
+            afterRule = line.hasPrefix("====")
+        }
+        return out
+    }
+
+    static func show(title: String) {
+        if let w = current?.window { w.makeKeyAndOrderFront(nil); return }
+        guard let url, let text = try? String(contentsOf: url, encoding: .utf8) else { fputs("[RED] launcher: no dm/ThirdPartyNotices.txt in the app\n", stderr); return }
+        let n = MacNoticesWindow()
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 640), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        w.title = "\(title): Acknowledgements"; w.isReleasedWhenClosed = false; w.delegate = n
+        w.appearance = NSAppearance(named: .darkAqua)
+        w.backgroundColor = NSColor(NX18Palette.background)
+        w.contentMinSize = NSSize(width: 480, height: 300)
+        let scroll = NSTextView.scrollableTextView()
+        scroll.drawsBackground = false
+        if let tv = scroll.documentView as? NSTextView {
+            tv.isEditable = false; tv.isSelectable = true; tv.drawsBackground = false
+            tv.textContainerInset = NSSize(width: 22, height: 18)
+            tv.textStorage?.setAttributedString(styled(text))
+            tv.setAccessibilityLabel("Acknowledgements")
+        }
+        w.contentView = scroll
+        w.center()
+        n.window = w; current = n
+        w.makeKeyAndOrderFront(nil)
+        fputs("launcher: acknowledgements \(url.path)\n", stderr)
+    }
+
+    func close() { window?.delegate = nil; window?.close(); window = nil; if Self.current === self { Self.current = nil } }
+    func windowWillClose(_ n: Notification) { window = nil; if Self.current === self { Self.current = nil } }
+}
+
 // A capsule button on the banner: the coral Play pill, or a quiet one (white on a translucent dark fill) for the guide and About
 struct NX18PillStyle: ButtonStyle {
     var fill: Color = Color.white.opacity(0.14)
@@ -887,6 +954,10 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
     func applicationDidFinishLaunching(_ n: Notification) {
         let name = info("CFBundleName") ?? "Game"
         let menu = NSMenu(), item = NSMenuItem(), app = NSMenu()
+        if MacNoticesWindow.url != nil {   // the app's third-party notices (MacNoticesWindow), as the settings' last row
+            app.addItem(withTitle: "Acknowledgements", action: #selector(showNotices), keyEquivalent: "").target = self
+            app.addItem(.separator())
+        }
         app.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         app.addItem(withTitle: "Quit \(name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
@@ -910,6 +981,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         // no activation and no ordering in front of another app's windows: LaunchServices activates an app opened from Finder or the Dock (applicationDidBecomeActive), open -g does not
         if NSApp.isActive { w.makeKeyAndOrderFront(nil) } else { w.orderBack(nil) }
     }
+    @objc func showNotices() { MainActor.assumeIsolated { MacNoticesWindow.show(title: info("CFBundleName") ?? "Game") } }   // the menu runs on the main thread
     func applicationDidBecomeActive(_ n: Notification) { window?.makeKeyAndOrderFront(nil) }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {   // ⌘Q, or a logout or restart: the app ends without the game (exit 0, as Quit)
         fputs("launcher: quit without starting the game\n", stderr)
@@ -930,7 +1002,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         // and dmMacLauncher flushes the order-out (AppKit commits it at the end of a pass). Without both, the window stayed on screen, not responding, until the game ended
         w.animationBehavior = .none
         if let sheet = w.attachedSheet { w.endSheet(sheet) }   // About this game, if open
-        MainActor.assumeIsolated { MacGuideWindow.current?.close() }   // the guide window, if open (finish runs on the main thread: the window's buttons and its delegate)
+        MainActor.assumeIsolated { MacGuideWindow.current?.close(); MacNoticesWindow.current?.close() }   // the guide and Acknowledgements windows, if open (finish runs on the main thread: the window's buttons and its delegate)
         w.delegate = nil; w.orderOut(nil)
         NSApp.stop(nil)
         NSApp.postEvent(NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0)!, atStart: true)   // run returns at the next event

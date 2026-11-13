@@ -212,7 +212,7 @@ private struct NX18SwitchTrack: View {
     }
 }
 
-private enum LauncherSheet: Identifiable { case guide, about; var id: Self { self } }
+private enum LauncherSheet: Identifiable { case guide, about, acknowledgements; var id: Self { self } }
 
 // The stacked layout's art side: as tall as its content needs at the width it gets (its ideal height), but at least least and at most most, its content then laid out at that
 // height (the Spacer above the name takes what is left). A fixed frame let a large text size or a short window push Play under the settings
@@ -312,6 +312,10 @@ struct LauncherView: View {
                                closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil) { sheet = nil }
                 .presentationBackground(background)
         }
+        .sheet(isPresented: shown(.acknowledgements), onDismiss: guideAfterClosing) {   // the app's third-party notices (GuideViewer.swift LauncherNoticesSheet)
+            LauncherNoticesSheet(tint: artwork.tint, scroller: scroller, closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil) { sheet = nil }
+                .presentationBackground(background)
+        }
         // The controller sentences name the buttons as the pad labels them (pad.glyphs): handle gets Switch buttons by position, so on an Xbox pad Switch B is its A. The shoulders
         // are in the same place on every pad but named differently (LB on an Xbox pad, L1 on a PlayStation pad), and only they answer: the triggers (LT, L2) are ZL and ZR
         .confirmationDialog(SaveSyncReport.chooseTitle, isPresented: isAsking(.choose), titleVisibility: .visible, presenting: report) { r in
@@ -328,7 +332,7 @@ struct LauncherView: View {
         .task { await followStatus() }
         .onChange(of: sheet) {          // a button held as a sheet opens or closes (A held while B closes the guide) is no press on what is under it
             pad.holdUntilReleased()
-            if sheet != nil { stopAutoStart("the guide or About this game opened") }
+            if sheet != nil { stopAutoStart("the guide, About this game or Acknowledgements opened") }
         }
         .onChange(of: cloudPicking) { pad.holdUntilReleased(); if cloudPicking { stopAutoStart("the cloud-save folder picker opened") } }
         .onChange(of: asking) { pad.holdUntilReleased() }        // the press that answered a save question is no press on the settings
@@ -729,6 +733,21 @@ struct LauncherView: View {
                     }
                     .nxFontIfCustom(.footnote).foregroundStyle(NX18Palette.muted)
                 }
+                if LauncherNotices.available {   // the third-party notices the app carries (dm/ThirdPartyNotices.txt), below the credit line
+                    Section {
+                        Button { sheet = .acknowledgements } label: {
+                            HStack {
+                                Text("Acknowledgements").foregroundStyle(.white)
+                                Spacer()
+                                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(NX18Palette.muted)   // system: symbol
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .listRowBackground(rowBackground(ring(.acknowledgements)))
+                        .accessibilityHint("Shows the licenses of the code and art this app is built with")
+                        .id(LauncherFocus.acknowledgements)
+                    }
+                }
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
@@ -803,6 +822,7 @@ struct LauncherView: View {
             if advancedOpen { lines += advancedGroups.flatMap { $0.rows.map { [LauncherFocus.row($0.env)] } } }
         }
         lines += [[.reset], [.cloud], [.skip]]
+        if LauncherNotices.available { lines.append([.acknowledgements]) }
         return LauncherFocusMap(lines: lines)
     }
 
@@ -813,8 +833,8 @@ struct LauncherView: View {
             case .b: sheet = nil
             case .up: scroller.scroll?(-160)
             case .down: scroller.scroll?(160)
-            case .l, .left: if open == .guide { scroller.page?(-1) }
-            case .r, .right: if open == .guide { scroller.page?(1) }
+            case .l, .left: if open == .guide { scroller.page?(-1) } else if open == .acknowledgements { scroller.scroll?(-600) }   // the notices: L / R a screenful
+            case .r, .right: if open == .guide { scroller.page?(1) } else if open == .acknowledgements { scroller.scroll?(600) }
             default: break
             }
             return
@@ -863,6 +883,7 @@ struct LauncherView: View {
         case .reset: if m.changed { m.reset() }
         case .cloud: cloudPicking = true
         case .skip: if !launcherFromEnv { m.skipAtStart.toggle() }
+        case .acknowledgements: if LauncherNotices.available { sheet = .acknowledgements }
         }
     }
 }

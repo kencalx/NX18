@@ -27,6 +27,8 @@ targets:
       - path: ../../Sources/SaveSync.m                 # the iPhone's copies to and from the cloud folder, NSFileCoordinator (a folder of the test's own here, not iCloud Drive)
       - path: ../../../host/save_sync.c                # the host's comparison the check asks for (save_sync_report), real, on a save and a cloud folder the tests make
       - path: Resources/Assets.xcassets                 # the NX 18 app icon (docs/images/nx18), the screen's icon without art
+      - path: ../../Resources/ThirdPartyNotices.txt     # the app's third-party notices (dm/tools/third_party_notices.py), which the settings screen's Acknowledgements shows
+        buildPhase: resources
       - path: ../../Sources/DmGamepad.m
       - path: ../../Sources/front_ios.m
     dependencies:

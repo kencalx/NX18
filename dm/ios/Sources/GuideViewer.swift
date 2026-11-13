@@ -1,6 +1,7 @@
 // The settings screen's viewers (Launcher.swift): the game guide, full screen, which shows the game's own guide (its offline HTML pages in a WKWebView, read from the app's files
 // only) and the player's manual (manual.pdf in a PDFView), the guide first, with a switch between them when the app has both; and the About this game sheet (about.json's text
-// under the art). Both close with their close button or the controller's B (LauncherController.swift) when nothing is left to go back to.
+// under the art), and Acknowledgements (the app's third-party notices, LauncherNoticesSheet). They close with their close button or the controller's B (LauncherController.swift)
+// when nothing is left to go back to.
 // The guide's pages were written for the Switch's web applet at 1280x720: they are laid out at that size and scaled to fit under the header, whole (LauncherGuideBox), and a script
 // at document start gives them window.nx and what the console's browser does for them (LauncherGuideFiles.swift shim). The header's Back, a swipe from the left edge and the
 // controller's B go back: the page's own Back when it assigned one (nx.footer B), else the previous page, else the viewer closes. The page's L / R page turning shows as two buttons
@@ -476,5 +477,116 @@ struct LauncherAboutSheet: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 11)
         .accessibilityElement(children: .combine)
+    }
+}
+
+// Acknowledgements: the third-party notices every app carries, dm/ThirdPartyNotices.txt in the bundle (dm/tools/third_party_notices.py makes it from the repository's license files;
+// build_ipa.sh copies it in). Each piece of others' work in the app with its author, what NX 18 uses it for and its license text, which keeps its authors' fixed-width layout
+enum LauncherNotices {
+    // <App>/dm/ThirdPartyNotices.txt; at the bundle's top only in the Duo harness (dm/ios/tests/duo/project.yml), which has no dm folder
+    static var url: URL? {
+        Bundle.main.url(forResource: "ThirdPartyNotices", withExtension: "txt", subdirectory: "dm") ?? Bundle.main.url(forResource: "ThirdPartyNotices", withExtension: "txt")
+    }
+    static var available: Bool { url != nil }
+
+    enum Kind: Sendable { case title, heading, meta, prose, license }
+    struct Block: Identifiable, Sendable { let id: Int; let kind: Kind; let text: String }
+
+    /// The file as blocks to draw, one per paragraph: the title, then each entry's number and name, its author and license, what NX 18 uses it for, and its license text.
+    /// The file's rule lines ("====" before an entry, "----" after its use) mark where each kind starts
+    static func blocks(_ text: String) -> [Block] {
+        var out: [Block] = []
+        var inLicense = false
+        func add(_ k: Kind, _ s: String) { if !s.isEmpty { out.append(Block(id: out.count, kind: k, text: s)) } }
+        for para in text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n\n") {
+            var lines = para.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            while lines.first?.isEmpty == true { lines.removeFirst() }
+            while lines.last?.isEmpty == true { lines.removeLast() }
+            guard let first = lines.first else { continue }
+            if out.isEmpty { add(.title, lines.joined(separator: "\n")); continue }
+            if first.hasPrefix("====") {   // an entry: "<n>. <name>", then its author, license and address; or the closing line
+                inLicense = false
+                lines.removeFirst()
+                guard let head = lines.first else { continue }
+                if head.first?.isNumber == true { add(.heading, head); add(.meta, lines.dropFirst().joined(separator: "\n")) }
+                else { add(.meta, lines.joined(separator: "\n")) }
+            } else if lines.last?.hasPrefix("----") == true {   // what NX 18 uses it for; its license text follows
+                add(.prose, lines.dropLast().joined(separator: "\n"))
+                inLicense = true
+            } else {
+                add(inLicense ? .license : .prose, lines.joined(separator: "\n"))
+            }
+        }
+        return out
+    }
+}
+
+struct LauncherNoticesSheet: View {
+    let tint: NX18RGB?
+    let scroller: LauncherScroller
+    var closeGlyph: NXPadGlyph? = nil   // the controller's B, beside the close button while a controller is connected
+    let close: () -> Void
+    @State private var blocks: [LauncherNotices.Block] = []
+    @State private var position = ScrollPosition(edge: .top)
+    @State private var offset: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var background: Color { NX18Palette.background(tint: tint) }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {   // lazy: the texts run to about 700 lines
+                NX18Mark(height: 18).padding(.bottom, 4).accessibilityHidden(true)
+                ForEach(blocks) { b in block(b) }
+            }
+            .padding(.horizontal, 24).padding(.top, 22).padding(.bottom, 32)
+            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .scrollPosition($position)
+        .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in offset = y }
+        .background(background.ignoresSafeArea())
+        .nxTextRoot()
+        .overlay(alignment: .topTrailing) {
+            Button(action: close) {
+                HStack(spacing: 8) {
+                    if let g = closeGlyph { NXPadGlyphView(g, size: 20, relativeTo: .body).foregroundStyle(NX18Palette.cyan) }
+                    Image(systemName: "xmark").font(.body.weight(.semibold)).foregroundStyle(.white)   // system: symbol
+                        .frame(width: 36, height: 36).background(Circle().fill(NX18Palette.charcoal.opacity(0.85)))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close")
+            .keyboardShortcut(.cancelAction)
+            .padding(14)
+        }
+        .task {
+            guard blocks.isEmpty, let url = LauncherNotices.url, let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+            blocks = LauncherNotices.blocks(text)
+        }
+        .onAppear { scroller.scroll = { dy in
+            if reduceMotion { position.scrollTo(y: Swift.max(0, offset + dy)) } else { withAnimation(.easeOut(duration: 0.15)) { position.scrollTo(y: Swift.max(0, offset + dy)) } }
+        } }
+        .onDisappear { scroller.scroll = nil }
+    }
+
+    @ViewBuilder private func block(_ b: LauncherNotices.Block) -> some View {
+        switch b.kind {
+        case .title:
+            Text(b.text).nxFont(.title2, weight: .bold).foregroundStyle(.white).accessibilityAddTraits(.isHeader)
+        case .heading:
+            VStack(alignment: .leading, spacing: 10) {
+                NX18Palette.separator.frame(height: 1)
+                Text(b.text).nxFont(.headline, weight: .semibold).foregroundStyle(NX18Palette.cyan).accessibilityAddTraits(.isHeader)
+            }
+            .padding(.top, 14)
+        case .meta:
+            Text(b.text).nxFont(.footnote).foregroundStyle(NX18Palette.muted)
+        case .prose:
+            Text(b.text).nxFont(.callout).foregroundStyle(.white.opacity(0.9))
+        case .license:
+            Text(b.text).nxMono(.caption).foregroundStyle(.white.opacity(0.78)).textSelection(.enabled)
+        }
     }
 }

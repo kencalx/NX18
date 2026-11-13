@@ -112,7 +112,7 @@ class PackReuse(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix='pack-reuse-', dir=TEST_ROOT)).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
         t = self.tmp
-        for d in ('patched', 'romfs/empty', 'msl', 'profile', 'font', 'aoc/1', 'pso', 'bin', 'sdk', 'source', 'host', 'tools', 'ios/Sources'):
+        for d in ('patched', 'romfs/empty', 'msl', 'profile', 'font', 'aoc/1', 'pso', 'bin', 'sdk', 'source', 'host', 'tools', 'ios/Sources', 'ios/Resources'):
             (t / d).mkdir(parents=True)
         files = {
             'dmhost': b'host', 'patched/main.patched.bin': b'code', 'patched/main.fixups.tsv': b'fixups',
@@ -124,6 +124,7 @@ class PackReuse(unittest.TestCase):
             'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'host/ui_font.h': b'ui font api', 'tools/romfs.py': b'reader',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/LauncherGuideFiles.swift': b'guide',
             'ios/Sources/SaveSyncReport.swift': b'report', 'ios/Sources/NXFont.swift': b'text styles', 'uifont.ttf': b'\x00\x01\x00\x00 stand-in font',
+            'ios/Resources/ThirdPartyNotices.txt': b'notices',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
         for n, content in files.items(): (t / n).write_bytes(content)
@@ -213,7 +214,8 @@ class PackReuse(unittest.TestCase):
                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'art.jpg', 'logo.png', 'about.json', 'manual.pdf', 'source/launcher.c',
                  'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/LauncherGuideFiles.swift', 'ios/Sources/SaveSyncReport.swift',
                  'ios/Sources/NXFont.swift',   # the settings window's sources
-                 'host/save_sync.c', 'host/save_sync.h', 'host/ui_font.h']   # the cloud-save code the launcher links (its send after the host exits), the UI font's registration
+                 'host/save_sync.c', 'host/save_sync.h', 'host/ui_font.h',   # the cloud-save code the launcher links (its send after the host exits), the UI font's registration
+                 'ios/Resources/ThirdPartyNotices.txt']   # the third-party notices every app carries
         names += ['profile/' + n for n in pack_app.TABLES]
         for name in names:
             with self.subTest(name=name):
@@ -357,6 +359,7 @@ class PackReuse(unittest.TestCase):
         for name in ('art', 'logo', 'about', 'manual'): setattr(self.args, name, None)
         self.assert_repacked()
         self.assertEqual([n for n in ('art.jpg', 'logo.png', 'about.json', 'manual.pdf') if (dm / n).exists()], [])
+        self.assertEqual((dm / 'ThirdPartyNotices.txt').read_bytes(), b'notices')   # every app, art or none: the window's Acknowledgements (dm/tools/third_party_notices.py)
 
     def test_ui_font_lands_in_resources_dm_uifont(self):   # --ui-font: Resources/dm/uifont/ui.<ext> (never dm/font, the game's shared fonts) and its name in Info.plist; without it neither
         self.pack()
@@ -545,7 +548,7 @@ class App(unittest.TestCase):
         self.assertFalse(self.app.with_name(self.app.name + '.partial').exists())
         self.assertEqual(sorted(p.name for p in (c / 'MacOS').iterdir()), ['dmhost', 'nxnative'])
         self.assertEqual(sorted(p.name for p in (c / 'Resources/dm').iterdir()),
-                         ['c1_full.tsv', 'env.txt', 'font', 'launcher.json', 'main.changed.tsv', 'main.cuts.tsv', 'main.fixups.tsv', 'main.gates.tsv', 'main.obs.tsv', 'main.patched.bin', 'pso_manifest.tsv', 'pso_pairs.tsv',
+                         ['ThirdPartyNotices.txt', 'c1_full.tsv', 'env.txt', 'font', 'launcher.json', 'main.changed.tsv', 'main.cuts.tsv', 'main.fixups.tsv', 'main.gates.tsv', 'main.obs.tsv', 'main.patched.bin', 'pso_manifest.tsv', 'pso_pairs.tsv',
                           'shader_map.tsv', 'shader_pairs.tsv'])   # the shader pairs: the pipeline prebuild's, without which hybrid draws have no stand-in
         self.assertEqual([p.name for p in (c / 'Resources/msl').iterdir()], ['b-0123456789ab.img'])   # the libraries only, as one file, not the compile cache
         sys.path.insert(0, str(Path(__file__).resolve().parents[1])); import romfs

@@ -217,6 +217,8 @@ This project is built on other people's work ([licenses](dm/third_party/README.m
 - Code included under its own license ([dm/third_party](dm/third_party/README.md)): dav1d, libvpx, stb_vorbis, deko3d's texture layout (fincs), `nvn.h` (h1k421) and MiniEngine's pixel packing.
 - **nxnative's contributors**: the changes NX 18 ported from upstream, with their authors, are listed in [Changes ported from upstream](docs/development.md#changes-ported-from-upstream).
 
+Every game app shows the licenses of the code and art it is built with, under **Acknowledgements**. On the iPhone and iPad it is at the bottom of the settings screen. On the Mac it is the last row of the settings window, and in the app menu.
+
 ## License
 
 MIT ([LICENSE](LICENSE)). Third-party code keeps its own license ([dm/third_party](dm/third_party/README.md)).

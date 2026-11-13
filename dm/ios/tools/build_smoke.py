@@ -32,6 +32,7 @@ def main():
     gen = project / 'Gen'
     tables = gen / 'dm'
     tables.mkdir(parents=True)
+    shutil.copyfile(ios / 'Resources/ThirdPartyNotices.txt', tables / 'ThirdPartyNotices.txt')   # as build_ipa.sh copies it: DmIOS.app/dm/ThirdPartyNotices.txt
     for name in ('Sources', 'tools'):
         (project / name).symlink_to(ios / name, target_is_directory=True)
     shutil.copyfile(ios / 'project.yml', project / 'project.yml')
@@ -96,6 +97,8 @@ def main():
                            (shaders / marker, app / 'msl' / f'b-{chain}' / marker)):
         if source.read_bytes() != packed.read_bytes():
             raise RuntimeError(f'Resource staging failed: {packed}')
+    if (app / 'dm/ThirdPartyNotices.txt').read_bytes() != (ios / 'Resources/ThirdPartyNotices.txt').read_bytes():
+        raise RuntimeError('The app does not carry the third-party notices at dm/ThirdPartyNotices.txt')
     if (app / '_CodeSignature').exists() or (app / 'embedded.mobileprovision').exists():
         raise RuntimeError('The smoke-test app must be unsigned')
     print(f'iOS smoke build passed: {executable}', flush=True)

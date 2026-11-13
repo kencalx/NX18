@@ -172,6 +172,8 @@ if [ -n "${DM_LOGO:-}" ] && [ -f "$DM_LOGO" ]; then case "$(printf %s "$DM_LOGO"
   && t "launcher logo: $DM_LOGO" || { rm -f Gen/dm/logo.png; t "[RED] launcher logo: cannot pack $DM_LOGO; the app is built without it (the launcher shows the game's name)"; }; fi
 if [ -n "${DM_ABOUT:-}" ] && [ -f "$DM_ABOUT" ]; then cp "$DM_ABOUT" Gen/dm/about.json || die "copy DM_ABOUT"; t "About this game: $DM_ABOUT"; fi
 if [ -n "${DM_MANUAL:-}" ] && [ -f "$DM_MANUAL" ]; then cp "$DM_MANUAL" Gen/dm/manual.pdf || die "copy DM_MANUAL"; t "manual: $DM_MANUAL"; fi
+# The third-party notices (dm/tools/third_party_notices.py): every app carries them as DmIOS.app/dm/ThirdPartyNotices.txt, which the settings screen's Acknowledgements shows (GuideViewer.swift)
+cp "$IOS_SOURCE/Resources/ThirdPartyNotices.txt" Gen/dm/ThirdPartyNotices.txt || die "copy the third-party notices"
 # The UI font (DM_UI_FONT, the NSP script's --ui-font): dm/uifont/ui.<ext> in the app, a name that says nothing of the font; not dm/font, the game's shared-font stand-ins. Asked for, so a missing
 # file ends the build. An IPA build's Gen/ is dm/ios/Gen, inside the checkout (git ignores it, but it is the repository's folder), so the font is not copied there: it goes into the built app in
 # the build folder after xcodebuild (below). --prepare-xcode's Gen/dm is the per-game project's, outside the checkout (DM_XCODE_PROJECT_DIR, <build folder>/xcode), so the project gets it there

@@ -93,6 +93,21 @@ final class DuoLauncherTests: XCTestCase {
         XCTAssertFalse(LauncherAbout(name: "Only a name").hasText, "A name alone gives no About button")
     }
 
+    func testAcknowledgementsAreBundledAndSplitIntoEntries() throws {   // the settings screen's Acknowledgements (GuideViewer.swift LauncherNoticesSheet)
+        let url = try XCTUnwrap(LauncherNotices.url, "The notices are in the app")
+        XCTAssertTrue(LauncherNotices.available)
+        let blocks = LauncherNotices.blocks(try String(contentsOf: url, encoding: .utf8))
+        XCTAssertEqual(blocks.first?.kind, .title)
+        let headings = blocks.filter { $0.kind == .heading }.map(\.text)
+        XCTAssertGreaterThanOrEqual(headings.count, 15)
+        XCTAssertEqual(headings.first, "1. nxnative")
+        XCTAssertTrue(headings.contains { $0.hasSuffix("Switch Button Icons and Controls") })
+        XCTAssertTrue(blocks.contains { $0.kind == .license && $0.text.contains("Copyright (c) 2026 jhaizhou") }, "The license texts are drawn as license text")
+        XCTAssertTrue(blocks.contains { $0.kind == .prose && $0.text.hasPrefix("Decodes the games' AV1 movies") }, "What NX 18 uses it for is prose")
+        XCTAssertFalse(blocks.contains { $0.text.hasPrefix("====") || $0.text.hasSuffix("----") }, "The rule lines are not drawn")
+        XCTAssertEqual(Set(blocks.map(\.id)).count, blocks.count)
+    }
+
     @MainActor
     func testInGameMenuTurnsTheSkipOff() throws {
         let suite = "DuoLauncherTests"
