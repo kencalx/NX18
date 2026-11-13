@@ -104,7 +104,7 @@ enum GameMenuLayout {
 
     func refresh() {
         root = gameMenuSections()
-        while let last = stack.last, find(last) == nil { stack.removeLast() }   // a submenu gone (the cheats reloaded to none)
+        if let gone = stack.firstIndex(where: { find($0) == nil }) { stack.removeSubrange(gone...) }   // a page gone (the cheats reloaded to none), and every page opened from it
     }
     private func find(_ id: String, in sections: [GameMenuSection]? = nil) -> GameMenuItem? {
         for s in sections ?? root { for i in s.items {
@@ -240,7 +240,7 @@ struct GameMenuPanelView: View {
                 .accessibilityLabel("Back")
                 VStack(alignment: .leading, spacing: NXFont.name == nil ? 1 : 3) {
                     Text(page.title).nxFont(.footnote, weight: .semibold).foregroundStyle(NX18Palette.text).lineLimit(1)
-                    if let s = page.subtitle { Text(s).nxFont(.caption2).foregroundStyle(NX18Palette.muted).lineLimit(1) }
+                    if let s = page.subtitle { Text(s).nxFont(.caption2).foregroundStyle(NX18Palette.muted).lineLimit(1).accessibilityLabel(s.replacingOccurrences(of: " · ", with: ", ")) }   // VoiceOver: the summary as the row reads it
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityAddTraits(.isHeader)
@@ -450,6 +450,8 @@ private struct GameMenuPressStyle: ButtonStyle {
         view.accessibilityViewIsModal = true
         followTextSize()
         NotificationCenter.default.addObserver(self, selector: #selector(textSizeChanged), name: UIContentSizeCategory.didChangeNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(padsChanged), name: .GCControllerDidConnect, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(padsChanged), name: .GCControllerDidDisconnect, object: nil)
         parent.view.addSubview(view)
         followAnchor()
         didMove(toParent: parent)
@@ -460,6 +462,14 @@ private struct GameMenuPressStyle: ButtonStyle {
         UIAccessibility.post(notification: .screenChanged, argument: nil)
     }
     @objc private func textSizeChanged() { followTextSize() }
+    // A controller connected or gone while the panel is up: the rows again, once DmGamepad.m's padsChanged has shown or hidden the touch controls (its own main-queue block),
+    // so Touch controls' summary says whether they are hidden now. Nonisolated: GameController may post from another thread; the panel shown then is the one refreshed
+    @objc nonisolated private func padsChanged() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(100))
+            gameMenuPanel?.model.refresh()   // nil once closed
+        }
+    }
 
     func hide() {
         guard !closing else { return }

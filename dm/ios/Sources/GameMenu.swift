@@ -102,7 +102,7 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
             for s in m.rows(in: section) where (s.kind == "choice" || s.kind == "toggle") && dm_setting_live(s.env, nil) {
                 if touchControlEnvs.contains(s.env) { if touch.isEmpty { touchAt = rows.count }; touch.append((s, gameMenuRow(m, s))) } else { rows.append(gameMenuRow(m, s)) }
             }
-            if !touch.isEmpty { rows.insert(contentsOf: touch.count > 1 ? [touchControlsRow(touch)] : touch.map(\.item), at: touchAt) }   // one alone stays a plain row
+            if !touch.isEmpty { rows.insert(contentsOf: touch.count > 1 ? [touchControlsRow(m, touch)] : touch.map(\.item), at: touchAt) }   // one alone stays a plain row
             if !rows.isEmpty { sections.append(GameMenuSection(id: "section:\(section)", heading: section, items: rows)) }
         }
     }
@@ -121,9 +121,9 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
 // (front_ios.m dm_setting_why). The settings screen keeps its three rows
 private let touchControlEnvs: Set<String> = ["DM_TOUCH_SIZE", "DM_TOUCH_OPACITY", "DM_TOUCH_HAPTICS"]
 
-@MainActor private func touchControlsRow(_ rows: [(setting: Setting, item: GameMenuItem)]) -> GameMenuItem {
+@MainActor private func touchControlsRow(_ m: LauncherModel, _ rows: [(setting: Setting, item: GameMenuItem)]) -> GameMenuItem {
     let parts = rows.map { r -> String in
-        if let v = r.item.currentOption { return v }   // a choice: the option it has
+        if case .choice = r.item.kind { return r.item.currentOption ?? m.shown(r.setting) }   // a choice: the option it has, or an env file's value no option has (DM_TOUCH_SIZE=0.9), as its row's subtitle shows it
         let name = r.setting.label.hasPrefix("Touch ") ? String(r.setting.label.dropFirst(6)) : r.setting.label   // Touch feedback: "Feedback on"
         return name.prefix(1).uppercased() + name.dropFirst() + (r.item.isOn ? " on" : " off")
     }

@@ -141,6 +141,84 @@ final class DuoGameMenuPanelTests: XCTestCase {
         waitUntil("the panel is gone") { again.parent == nil }
     }
 
+    private static let touchList = """
+    {"schema": 1, "settings": [
+     {"env": "DM_TOUCH_SIZE", "kind": "choice", "section": "Controls", "label": "Touch control size", "note": "", "default": "1", "options": [["0.7", "Small"], ["0.85", "Medium"], ["1", "Large"]]},
+     {"env": "DM_TOUCH_OPACITY", "kind": "choice", "section": "Controls", "label": "Touch control opacity", "note": "", "default": "1", "options": [["0.4", "Faint"], ["0.7", "Light"], ["1", "Normal"], ["1.5", "Strong"]]},
+     {"env": "DM_TOUCH_HAPTICS", "kind": "toggle", "section": "Controls", "label": "Touch feedback", "note": "", "default": "1"},
+     {"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Frame-rate counter", "note": "", "default": "0"}
+    ]}
+    """
+
+    // Touch controls: the three touch rows as one row whose subtitle sums them up, opening a page of them; a choice there opens its options, a pick comes back to the page,
+    // B goes back to the menu, then closes. An env file's value no option has shows as itself in the summary. DM_GAME_MENU=system: the same page as a submenu
+    @MainActor
+    func testTheTouchControlsRowOpensAPageOfThem() throws {
+        let suite = "DuoGameMenuPanelTests.touch"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        let file = try JSONDecoder().decode(SettingsFile.self, from: Data(Self.touchList.utf8))
+        let m = LauncherModel(file.settings, defaults: defaults)
+        gameMenuModel = m
+        defer {
+            gameMenuModel = nil
+            _ = dm_setting_live("DM_TOUCH_SIZE", "1"); unsetenv("DM_TOUCH_SIZE")
+            defaults.removePersistentDomain(forName: suite)
+        }
+        let hidden = dm_setting_why("DM_TOUCH_HAPTICS").map { String(cString: $0) }   // a controller (the Simulator's virtual one) hides the touch controls
+        func touchRow() throws -> GameMenuItem { try XCTUnwrap(gameMenuSections().flatMap(\.items).first { $0.id == "touch" }, "One Touch controls row") }
+
+        let ids = gameMenuSections().flatMap(\.items).map(\.id)
+        XCTAssertFalse(ids.contains("row:DM_TOUCH_SIZE") || ids.contains("row:DM_TOUCH_OPACITY") || ids.contains("row:DM_TOUCH_HAPTICS"), "Not on the menu's first page: \(ids)")
+        XCTAssertEqual(ids.firstIndex(of: "touch"), ids.firstIndex(of: "layout").map { $0 + 1 }, "In Controls, where the first of them was")
+        var row = try touchRow()
+        XCTAssertTrue(row.summary)
+        XCTAssertEqual(row.subtitle, hidden ?? "Large · Normal · Feedback on")
+        m.values["DM_TOUCH_SIZE"] = "0.9"   // an env file's value inside the range, no option's
+        XCTAssertEqual(try touchRow().subtitle, hidden ?? "0.9 · Normal · Feedback on", "The value itself, not read as a switch")
+        m.values["DM_TOUCH_SIZE"] = nil
+
+        let model = GameMenuPanelModel(anchor: nil)
+        var closed = false
+        model.close = { closed = true }
+        model.activate(row)
+        XCTAssertEqual(model.page.id, "touch")
+        XCTAssertFalse(model.page.options)
+        XCTAssertEqual(model.page.title, "Touch controls")
+        XCTAssertEqual(model.page.subtitle, row.subtitle)
+        XCTAssertEqual(model.page.sections.flatMap(\.items).map(\.id), ["row:DM_TOUCH_SIZE", "row:DM_TOUCH_OPACITY", "row:DM_TOUCH_HAPTICS"])
+        XCTAssertEqual(model.focus, "row:DM_TOUCH_SIZE")
+        model.activate(try XCTUnwrap(model.page.sections.flatMap(\.items).first))
+        XCTAssertTrue(model.page.options, "A choice on the page opens its options")
+        XCTAssertEqual(model.page.title, "Touch control size")
+        XCTAssertEqual(model.focus, "row:DM_TOUCH_SIZE=1")
+        model.activate(try XCTUnwrap(model.page.sections.flatMap(\.items).first { $0.id == "row:DM_TOUCH_SIZE=0.7" }))
+        XCTAssertEqual(m.values["DM_TOUCH_SIZE"], "0.7")
+        XCTAssertEqual(model.page.id, "touch", "A pick comes back to the Touch controls page")
+        XCTAssertEqual(model.focus, "row:DM_TOUCH_SIZE")
+        row = try touchRow()
+        XCTAssertEqual(row.subtitle, hidden ?? "Small · Normal · Feedback on")
+        XCTAssertEqual(model.page.subtitle, row.subtitle, "The page's header follows")
+
+        model.activate(try XCTUnwrap(model.page.sections.flatMap(\.items).first))
+        model.columnsShown = GameMenuLayout.columns(model.page.sections, fit: 3, split: 1)
+        model.handle(.b)
+        XCTAssertEqual(model.page.id, "touch", "B: from the options back to the page")
+        model.columnsShown = GameMenuLayout.columns(model.page.sections, fit: 3, split: 1)
+        model.handle(.b)
+        XCTAssertNil(model.page.id, "then to the menu")
+        XCTAssertEqual(model.focus, "touch")
+        XCTAssertFalse(closed)
+        model.columnsShown = GameMenuLayout.columns(model.page.sections, fit: 3, split: 3)
+        model.handle(.b)
+        XCTAssertTrue(closed, "then closes")
+
+        let menu = try XCTUnwrap(gameMenuItems().flatMap { ($0 as? UIMenu)?.children ?? [$0] }.first { $0.title == "Touch controls" } as? UIMenu, "DM_GAME_MENU=system: a submenu")
+        XCTAssertEqual(menu.subtitle, row.subtitle)
+        XCTAssertEqual(menu.children.map(\.title), ["Touch control size", "Touch control opacity", "Touch feedback"])
+        XCTAssertEqual((menu.children.first as? UIMenu)?.options.contains(.singleSelection), true, "Each choice its own options")
+    }
+
     @MainActor
     func testTheMenuButtonsIconSweepsFromCyanToCoral() throws {
         let (_, button) = try productionMenuButton()
