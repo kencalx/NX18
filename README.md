@@ -4,7 +4,7 @@
 
 A fork of [nxnative](https://github.com/seedds/nxnative) for the iPhone 18 Pro Max ([what this fork changes](#requirements)).
 
-Play your legally owned and acquired Nintendo Switch and Switch 2 games natively on Apple silicon Macs, iPhone and iPad. One script packs your game into a Mac app or an unsigned IPA that you sideload.
+Play your legally owned and acquired Nintendo Switch and Switch 2 games natively on Apple silicon Macs, and on iPhones and iPads with an Apple A20 chip. One script packs your game into a Mac app or an unsigned IPA that you sideload.
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
 
@@ -44,9 +44,9 @@ Community projects build on nxnative with tools to turn your legally owned and a
 - **iPhone:** A17 Pro chip or later, with iOS 26 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iOS 27.3 or later (below).
 - **iPad:** M1 chip or later, with iPadOS 26 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iPadOS 27.3 or later (below).
 
-**This fork (NX 18)** builds its iOS app for one chip, the iPhone 18 Pro Max's A20 Pro, on iOS 27.3 (`dm/ios/project.yml`: deployment target 27.3, `-mcpu=apple-a20`; the app still declares the iPad family), with Xcode 27.3, whose Metal compiler (32023.925) is the one `dm/gfx/tools/dmsh_chain.lock` records, so `--allow-other-metal` is not needed. The lock's exact compiler, 32023.925.6, is the Xcode 27.3 beta's (build 27C5020n, Metal Toolchain 27C5020k), the one the shaders were tested with; a released Xcode 27.3 whose Metal compiler reports another version is refused by the build check until the lock is raised, or needs `--allow-other-metal`; its game shaders are MSL 4.1 on both platforms (`-std=metal4.1`). An IPA from this tree needs iOS 27.3 or later and does not run on the older devices or systems listed above, which are upstream's.
+**This fork (NX 18)** builds its iOS app for the Apple A20 chip, on iOS 27.3 (`dm/ios/project.yml`: deployment target 27.3, `-mcpu=apple-a20`; the app still declares the iPad family), with Xcode 27.3, whose Metal compiler (32023.925) is the one `dm/gfx/tools/dmsh_chain.lock` records, so `--allow-other-metal` is not needed. The lock's exact compiler, 32023.925.6, is the Xcode 27.3 beta's (build 27C5020n, Metal Toolchain 27C5020k), the one the shaders were tested with; a released Xcode 27.3 whose Metal compiler reports another version is refused by the build check until the lock is raised, or needs `--allow-other-metal`; its game shaders are MSL 4.1 on both platforms (`-std=metal4.1`). An IPA from this tree needs iOS 27.3 or later and does not run on the older devices or systems listed above, which are upstream's. It is tested on an iPhone 18 Pro Max. The iPhone 18 Pro, iPhone Duo and iPad mini 8 should work too, but haven't been tested yet.
 
-The games' textures are BC-compressed, which older iPhones cannot read. Switch 2 games run on the iPhone as well as the Mac; iPad builds are untested. Check each game's note for the devices it was tested on.
+The games' textures are BC-compressed, which older iPhones cannot read. Switch 2 games run on the iPhone as well as the Mac. On iPad, only the iPad mini 8 (A20) should work, and it is untested. Check each game's note for the devices it was tested on.
 
 For a game without a profile, the script writes a survey and tries a provisional build with guessed settings. That build may not start; see [Port another game](docs/development.md#port-another-game).
 

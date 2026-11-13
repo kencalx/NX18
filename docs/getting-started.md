@@ -4,7 +4,7 @@ This page takes you from nothing to playing one of your legally owned and acquir
 
 ## 1. What you need
 
-- **An iPhone 18** on iOS 27.3 or later. NX 18 is built for the A20 chip (the iPhone 18 family) and tested on an iPhone 18 Pro Max. Older iPhones and older iOS versions are not supported. iPad builds have not been tested.
+- **A device with an Apple A20 chip** (iPhone 18 Pro, iPhone 18 Pro Max, iPhone Duo or iPad mini 8) on iOS or iPadOS 27.3 or later. NX 18 is tested on an iPhone 18 Pro Max; the others should work, but haven't been tested yet. Older devices and older iOS versions are not supported.
 - **An M-series Mac** (Apple silicon, M1 or later) on macOS 27.3 or later. A virtual Mac isn't supported: its GPU has no Metal 4.
 - **Xcode 27.3**, which you download from Apple yourself (step 2 says where).
 - **Your legally owned and acquired games**, dumped from your own Switch or Switch 2, and the `prod.keys` dumped from your own Switch for games in `.nsp`, `.xci`, `.nsz` or `.xcz` files. A `.nup` or `.nx` file or a dump folder needs no keys.
