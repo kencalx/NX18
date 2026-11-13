@@ -35,7 +35,6 @@ Community projects build on nxnative with tools to turn your legally owned and a
 
 - [NX2Apple](https://github.com/LNPANDY/NX2Apple) — Mac builder with a shared iPhone/iPad game library.
 - [NX Play](https://github.com/varyform/nx-native-wrapper) — Mac library with device installs and save sync. To build your games with NX 18, choose your NX 18 folder in its settings ([steps](docs/getting-started.md#build-with-nx-play-instead)).
-- [NxNative Launcher](https://github.com/rennan101/nxnative_Launcher) — Mac launcher with guided builds and controller mapping.
 - [LumaNX](https://github.com/Xc1Ym/LumaNX) — Mac game builder with IPA export.
 - [GameCase](https://github.com/Tiaoge-tou/GameCase) — iOS game library based on LiveContainer.
 
@@ -147,7 +146,7 @@ To check that it worked, start a game, share its log (the in-game menu › **Sha
 
 ### Switch 2 games
 
-A Switch 2 game is built from your legally owned and acquired game files, in one [NUP](https://github.com/a55uka/nup) container (a `.nup` file), one [NX](https://github.com/fab918/nxformat) archive (a `.nx` file) or a folder of its files, not from NSPs. None of them needs `prod.keys`: a Switch 2 game dumped from your own console is already unpacked to its files. A game this project has no profile for is surveyed and gets a provisional profile, as NSPs do ([Port another game](docs/development.md#port-another-game)), which may not boot. You get an IPA, or a Mac app with `--platform mac-app`; iPad builds are untested. On the iPhone and iPad the game starts in Handheld, its lighter mode, and the Mac starts it in Docked; **Console mode** in the settings changes it ([Console mode](docs/settings.md#console-mode)).
+A Switch 2 game is built from your legally owned and acquired game files, in one [NUP](https://github.com/a55uka/nup) container (by a55uka; a `.nup` file), one [NX](https://github.com/fab918/nxformat) archive (a `.nx` file) or a folder of its files, not from NSPs. None of them needs `prod.keys`: a Switch 2 game dumped from your own console is already unpacked to its files. A game this project has no profile for is surveyed and gets a provisional profile, as NSPs do ([Port another game](docs/development.md#port-another-game)), which may not boot. You get an IPA, or a Mac app with `--platform mac-app`; iPad builds are untested. On the iPhone and iPad the game starts in Handheld, its lighter mode, and the Mac starts it in Docked; **Console mode** in the settings changes it ([Console mode](docs/settings.md#console-mode)).
 
 **From a `.nup` file**, which holds the base game, its updates and DLC in one file. Give the file, or a folder that holds it:
 
@@ -205,12 +204,18 @@ This project is built on other people's work ([licenses](dm/third_party/README.m
 
 - **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)** (MIT) developed this native-execution approach, for Diablo II: Resurrected. nxnative started as a copy of its generic parts: the NSO rewriter, the host that stands in for Horizon, the NVN-on-Metal layer and the iOS app shell. Fixes go both ways.
 - **Ryujinx** (MIT): its shader translator (`Ryujinx.Graphics.Shader`, `Ryujinx.Common` and `Spv.Generator` 1.3.2, in `dm/third_party/ryujinx` with a few fixes listed in [its README](dm/third_party/ryujinx/README.md)) turns the games' shaders into SPIR-V. Its emulation of the kernel and system services is also a reference when the host's behaviour is in doubt.
-- **[Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)**: its kernel, mesosphère, is the reference for Horizon's synchronization semantics (address arbiter, condition variables).
-- **[LibHac](https://github.com/Thealexbarney/LibHac)**: reads NSPs and layers updates over the base game in `dm/tools/nx_extract`.
-- **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**: SPIR-V to Metal Shading Language.
+- **[Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)**: its kernel, mesosphère, is the reference for Horizon's synchronization semantics (address arbiter, condition variables). Its cheat VM (dmnt) is the reference for the cheat engine in `dm/host/hle_cheats.c`.
+- **[LibHac 0.19.0](https://www.nuget.org/packages/LibHac/0.19.0)** by Alex Barney (MIT): reads NSPs and layers updates over the base game in `dm/tools/nx_extract`.
+- **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)** (Apache-2.0): SPIR-V to Metal Shading Language.
 - **[MacNativeGames](https://github.com/ly05010419/MacNativeGames)** (MIT): the GPU widening of 8-bit indices and in-pass clears in `dm/gfx/nvn/nvn_mtl.m`, and the visibility-counter lowering in the shader translator.
 - **Switch Button Icons and Controls** by Zacksly: Button Icons and Controls by Zacksly (CC BY 3.0 Licensed | zacksly.itch.io), modified: recoloured. The button glyphs of the iPhone and iPad app's controller hints (the settings screen's "Press A to play", the guide's Y, B to close, the in-game menu's A and B), in [`dm/ios/Resources/ButtonIcons`](dm/ios/Resources/ButtonIcons/README.md) with the licence.
 - **[CMAA2](https://github.com/GameTechDev/CMAA2)** (Intel, Apache-2.0): the edge smoothing of the present's Anti-aliasing setting, ported to Metal in `dm/gfx/msl/cmaa2.metal`. **[FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR)** (AMD, MIT): the RCAS sharpening of its Sharpening setting, in `dm/gfx/msl/present.metal`.
+- **[FPSLocker-Warehouse](https://github.com/masagrator/FPSLocker-Warehouse)** by masagrator: the frame-rate addresses and patch sites behind 60 fps in Monster Hunter Rise, Need for Speed: Hot Pursuit Remastered (one instruction found by theboy181), NieR:Automata and Tears of the Kingdom. NX 18 re-implements them in `dm/host/hle_fpslock.c` and the games' `patches.py`.
+- **[AstralChain-Dynamic-FPS](https://github.com/yogesh1239/AstralChain-Dynamic-FPS)** v1.1.1 by yogesh1239 (MIT): the timer and camera helpers in `dm/games/01007300020FA000/patches.py`.
+- **[TypeTreeDumps](https://github.com/AssetRipper/TypeTreeDumps)** by AssetRipper: the layouts of Unity's `Shader` and `ComputeShader` objects in `dm/gfx/tools/unityfs.py`.
+- **[NUP](https://github.com/a55uka/nup)** by a55uka and **[NXFormat](https://github.com/fab918/nxformat)** by fab918: the container formats that `scripts/pack_nup.py` and `scripts/pack_nx.py` read, with their own code. NXFormat's conformance fixtures are test data in `dm/tools/tests/fixtures/nx`.
+- Code included under its own license ([dm/third_party](dm/third_party/README.md)): dav1d, libvpx, stb_vorbis, deko3d's texture layout (fincs), `nvn.h` (h1k421) and MiniEngine's pixel packing.
+- **nxnative's contributors**: the changes NX 18 ported from upstream, with their authors, are listed in [Changes ported from upstream](docs/development.md#changes-ported-from-upstream).
 
 ## License
 

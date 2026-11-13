@@ -1020,3 +1020,30 @@ python3 dm/tools/il2cpp_sym.py "$W/extract/exefs/main" "$W/il2cpp/script.json" -
 The tool loads NSO/NRO segments with `nso.py`, prints the `ScriptMethod` name plus the offset into it, and annotates direct `b`/`bl` targets with Capstone. Aliases at one address are sorted and shown together. The table has no method sizes and leaves out native code, so the tool bounds each name by the module's `.eh_frame` functions (`nso_code.fde_ranges`; IL2CPP keeps unwind tables for its C++ exceptions, and they cover 98% of BALL x PIT's text): the nearest preceding method is named only when it starts in the function that holds the address. An address in a function no method starts prints `unknown (function 0x…+0x…)`, and one outside every function `unknown`; a module without `.eh_frame` ranges is an error. Use the exact original module/build that produced the table: inputs and `ScriptMethod.Address` must be module-relative offsets, not compressed-file offsets or absolute guest/Ghidra addresses. It rejects out-of-text addresses.
 
 For NSOs with separate file and memory offsets, Il2CppDumper's [NSO reader](https://github.com/Perfare/Il2CppDumper/blob/master/Il2CppDumper/ExecutableFormats/NSO.cs) may fail with `Sequence contains no matching element` while mapping MOD0. If its source still has `Position = header.TextSegment.FileOffset + modOffset + 4;`, change that line to `Position = MapVATR(modOffset) + 4;` and rebuild the dumper with the SDK its project targets. The correction is conditional and applies to the external dumper; it is not vendored here. Keep metadata, dumper output and all extracted files in the game's NSP work folder.
+
+## Changes ported from upstream
+
+NX 18 takes some fixes from [nxnative](https://github.com/seedds/nxnative) by hand, adapted to this tree. Each port names its upstream commit in its message. The people who wrote them upstream are listed below.
+
+How to credit upstream work in a commit:
+
+- NX 18's own work is committed under NX 18's identity ([AGENTS.md](../AGENTS.md)), never under a personal email.
+- A cherry-pick keeps the upstream author: `git cherry-pick -x`.
+- A hand port keeps or adds a `Co-authored-by:` trailer for the upstream author and each upstream co-author, names the upstream commit, and says what NX 18 changed. It also gets a row in the table below.
+- Whoever reported or diagnosed the problem gets a thanks line in the message, not a trailer.
+
+| NX 18 commit | Upstream commit | Upstream authors | What it changed |
+|---|---|---|---|
+| `79c10803` | `9f3963d02` | Atomsk | A feedback GPU time read in its own clock tick no longer counts as in the future |
+| `fbfa6f3e` | `1f35a05b` | seedds, with computerguy526 and uncraftablexd | 1D array textures upload one row per layer |
+| `fca0b01a` | `1f35a05b` (follow-up) | seedds, with computerguy526 and uncraftablexd | The partial upload test checks each 1D array case |
+| `4861a2b1` | `2fb82008` | seedds, with secretlemur28 | Each stencil face tests its own reference value |
+| `b42e61a3` | `2fb82008` (follow-up) | seedds, with secretlemur28 | The stencil test checks two-sided references through the replay |
+| `96fa5f4a` | `b5150895` | seedds, with Stan Bono | The visibility ring holds a buffer for every submission in flight |
+| `6a6abced` | `90b7cefd` | seedds, with Rob Young and computerguy526 | A shader in both the game and a DLC is the game's row |
+| `2d9c8044` | `4cdd5577` | seedds, with AmateurWizrd | Depth textures zeroed by copies, not a clear pass (`depth_zero_copy`) |
+| `2392184a` | `034e91a8` (its pool limit alone) | seedds, with Roan de Graaf (the pool limit, from PR #2389); thanks to devMlGUE for the mechanism and reproduction in upstream issue #2213 | A pool table's list of IDs holds 8,192 (`pool_ids_8k`) |
+| `af7adfdc` | `0c078130` | seedds, with bymaxmarc | Residency changes are queued; commits hold a lock of their own |
+| `6e0b093f` | `53cbb993` | seedds | Pipeline prediction runs only at a submission's first new miss |
+| `67e0a06e` | `9ef08c89` | seedds | Each cloud save fetch writes a file of its own |
+| `2471e6ad` | `3b102271` | seedds | "This device's save" names the cloud save it replaces |

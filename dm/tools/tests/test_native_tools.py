@@ -63,9 +63,11 @@ class NativeTools(unittest.TestCase):
                 self.assertEqual(weak_imports(exe.read_bytes()), {'arm64': [], 'x86_64': []},
                                  f"{exe.name} imports functions its minimum macOS does not have: rebuild it with Microsoft's .NET SDK (dm/tools/native_tools.sh {exe.name})")
 
-    def test_only_the_executable_is_committed(self):   # no dlls, runtimeconfig or satellite folders of a framework-dependent build left beside it
+    def test_only_the_executable_is_committed(self):   # no dlls, runtimeconfig or satellite folders of a framework-dependent build left beside it; only its license notices
         for exe in (XLATE, NX):
-            with self.subTest(exe=exe.name): self.assertEqual(sorted(p.name for p in exe.parent.iterdir() if not p.name.startswith('.')), [exe.name])
+            with self.subTest(exe=exe.name):
+                self.assertEqual(sorted(p.name for p in exe.parent.iterdir() if not p.name.startswith('.') and p.name != 'THIRD-PARTY-NOTICES.txt'), [exe.name])
+                self.assertTrue((exe.parent / 'THIRD-PARTY-NOTICES.txt').is_file(), f'{exe.name} has no THIRD-PARTY-NOTICES.txt beside it')
 
     def test_projects_publish_native(self):
         for proj in ('dm/gfx/tools/dmsh_xlate/dmsh_xlate.csproj', 'dm/tools/nx_extract/nx_extract.csproj'):

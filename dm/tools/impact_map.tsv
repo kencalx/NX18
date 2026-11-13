@@ -18,6 +18,8 @@ dm/ios/tests/*	-	iOS tests
 .github/*	-	CI
 dm/games/*/README.md	-	a game's note
 dm/games/*/smoke.tsv	-	a harness route
+dm/tools/nx_extract_bin/THIRD-PARTY-NOTICES.txt	-	license notices
+dm/gfx/tools/dmsh_xlate_bin/THIRD-PARTY-NOTICES.txt	-	license notices
 dm/games/*/bench.tsv	-	a benchmark route
 dm/games/*/usage.tsv	-	a usage manifest
 dm/games/*	profile	one game's profile
