@@ -386,6 +386,13 @@ t_direct_upload: t_direct_upload.m $(MTL_T_DEP)
 check_t_direct_upload: t_direct_upload
 	MTL_DEBUG_LAYER=1 ./t_direct_upload
 	DM_TEST_UP_LOST=13 MTL_DEBUG_LAYER=1 ./t_direct_upload
+# Whole and partial uploads of textures from guest memory against a CPU reference, 1D arrays among them (one row a layer), under Metal API validation, partial re-upload on and off
+t_partial_upload: t_partial_upload.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_partial_upload.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_partial_upload
+check_t_partial_upload: t_partial_upload
+	MTL_DEBUG_LAYER=1 ./t_partial_upload
+	MTL_DEBUG_LAYER=1 DM_NVN_REUPLOAD_PART=0 ./t_partial_upload
 t_geometry_hazards: t_geometry_hazards.m t_geometry.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_geometry_hazards.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_geometry_hazards

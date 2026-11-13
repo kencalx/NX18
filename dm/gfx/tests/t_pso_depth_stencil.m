@@ -154,6 +154,87 @@ static void draws(NvProg *p) {
     mtl_tex_release(&color);
 }
 
+// Each face tests its own stencil reference (SetStencilRef takes a face; docs/reference/rendering.md, "Front and back stencil reference values"). The plane holds 0xa5 and
+// both faces test EQUAL with KEEP: the triangle passes only where its face's own value is 0xa5. The vertex shader's triangle winds counter-clockwise, so with a clockwise front
+// it is a back face and with a counter-clockwise front a front face. Under DM_NVN_ENC_THREAD=1 the call goes through the recorder's RO_R_SREF, which must carry both values.
+static void two_sided_ref(NvProg *p) {
+    const struct { MTLWinding front; uint32_t ref_f, ref_b; int pass; } cases[] = {
+        {MTLWindingClockwise, 0x00, 0xa5, 1},          // back face, its own value matches (the front value alone failed here)
+        {MTLWindingClockwise, 0xa5, 0x00, 0},          // back face, only the front value matches
+        {MTLWindingCounterClockwise, 0xa5, 0x00, 1},   // front face, its own value matches
+        {MTLWindingCounterClockwise, 0x00, 0xa5, 0},   // front face, only the back value matches
+    };
+    tex_t color = texture(NVN_FORMAT_RGBA8);
+    for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) {
+        tex_t ds = texture(NVN_FORMAT_DEPTH24_STENCIL8); seed(&ds);
+        state_reset(); memset(&R, 0, sizeof R);
+        S.ds = (ds_st){.dt = 0, .dw = 0, .df = NVN_DEPTH_FUNC_ALWAYS, .st = 1, .sf_f = NVN_STENCIL_FUNC_EQUAL, .sf_b = NVN_STENCIL_FUNC_EQUAL,
+            .fail_f = NVN_STENCIL_OP_KEEP, .zfail_f = NVN_STENCIL_OP_KEEP, .zpass_f = NVN_STENCIL_OP_KEEP,
+            .fail_b = NVN_STENCIL_OP_KEEP, .zfail_b = NVN_STENCIL_OP_KEEP, .zpass_b = NVN_STENCIL_OP_KEEP};
+        S.st_vmask[0] = S.st_vmask[1] = S.st_wmask[0] = S.st_wmask[1] = 255;
+        R.has_rt = R.has_sc = 1; R.sc = (p_scissor){0,0,8,8}; R.rt.n = 1;
+        R.rt.color[0] = &color; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0,0,1,1); R.rt.depth = &ds;
+        mtl_sub_begin(); id<MTL4RenderCommandEncoder> e = rp_begin_ex(0);
+        CHECK(e != nil, "two-sided stencil pass opens");
+        id<MTLRenderPipelineState> ps = pso_get_(p);
+        CHECK(ps != nil, "two-sided stencil pipeline lookup succeeds");
+        // NOLINTBEGIN(clang-analyzer-osx.cocoa.RetainCount): dss_get retains the state in g_dss through hm_put_id's CFBridgingRetain
+        if (e && ps) {
+            enc_r_pso(e, ps); enc_r_dss(e, dss_get(g_pass.hd, g_pass.hs)); enc_r_stencil_ref(e, cases[i].ref_f, cases[i].ref_b);
+            enc_r_viewport(e, (MTLViewport){0,0,8,8,0,1}); enc_r_scissor(e, (MTLScissorRect){0,0,8,8});
+            enc_r_cull(e, MTLCullModeNone); enc_r_winding(e, cases[i].front); enc_r_draw(e, MTLPrimitiveTypeTriangle, 0, 3);
+        }
+        // NOLINTEND(clang-analyzer-osx.cocoa.RetainCount)
+        mtl_sub_commit(); mtl_drain(); CHECK(!mtl_last_commit_error(), "two-sided stencil draw completes without Metal errors");
+        NSData *bytes = read_plane(&color, 4, MTLBlitOptionNone); const uint8_t *v = bytes.bytes; int good = 1;
+        for (unsigned n = 0; n < 64; n++) good &= cases[i].pass ? v[4*n] == 255 && v[4*n+2] == 0 : v[4*n] == 0 && v[4*n+2] == 255;
+        CHECK(good, cases[i].pass ? "a face passes against its own stencil reference value" : "a face does not pass against the other face's reference value");
+        mtl_tex_release(&ds);
+    }
+    mtl_tex_release(&color);
+}
+
+// The same through the replay: OP_STENCIL sets one face's value (S.st_ref), and draw_ sends both and resends when either changes (g_ed.sref, g_ed.sref_b). Four back-face draws
+// in one encoder, two rows each, on a plane of 0xa5 with EQUAL/KEEP: (front 0, back 0xa5) passes; the back value alone set to 0 fails (the cache must notice a back-only change);
+// the front value set to 0xa5 still fails (a back face does not test it); the back value alone set to 0xa5 again passes.
+static void two_sided_ref_replay(NvProg *p) {
+    static prog_t program = {.serial = 980900}; serial_put(program.serial, p);
+    tex_t color = texture(NVN_FORMAT_RGBA8), ds = texture(NVN_FORMAT_DEPTH24_STENCIL8); seed(&ds);
+    uint8_t *commands; if (posix_memalign((void **)&commands, getpagesize(), 65536)) abort(); memset(commands, 0, 65536); mtl_pool_add(commands, 65536);
+    size_t used = 0;
+    #define EMIT(OP, X) do { size_t z = (8 + sizeof(X) + 7) & ~7ull; op_hdr h = {OP, (uint32_t)z}; memcpy(commands + used, &h, 8); memcpy(commands + used + 8, &(X), sizeof(X)); used += z; } while (0)
+    p_set_rt rt = {.n = 1, .depth = &ds}; rt.color[0] = &color; EMIT(OP_SET_RT, rt);
+    p_clear_color cl = {.index = 0, .mask = 15, .rgba = {0, 0, 1, 1}}; EMIT(OP_CLEAR_COLOR, cl);
+    p_bind_program bp = {&program, 3}; EMIT(OP_BIND_PROGRAM, bp);
+    const struct { int face; uint32_t ref; int pass; } steps[] = {{2, 0xa5, 1}, {2, 0x00, 0}, {1, 0xa5, 0}, {2, 0xa5, 1}};
+    p_stencil front0 = {.face = 1, .ref = 0, .which = 2}; EMIT(OP_STENCIL, front0);
+    for (int k = 0; k < 4; k++) {
+        p_stencil st = {.face = steps[k].face, .ref = (int32_t)steps[k].ref, .which = 2}; EMIT(OP_STENCIL, st);
+        p_scissor sc = {0, 2 * k, 8, 2}; EMIT(OP_SCISSOR, sc);
+        p_draw dr = {.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1}; EMIT(OP_DRAW, dr);
+    }
+    op_hdr end = {OP_END, 8}; memcpy(commands + used, &end, 8);
+    #undef EMIT
+    state_reset(); memset(&R, 0, sizeof R);
+    S.ds = (ds_st){.dt = 0, .dw = 0, .df = NVN_DEPTH_FUNC_ALWAYS, .st = 1, .sf_f = NVN_STENCIL_FUNC_EQUAL, .sf_b = NVN_STENCIL_FUNC_EQUAL,
+        .fail_f = NVN_STENCIL_OP_KEEP, .zfail_f = NVN_STENCIL_OP_KEEP, .zpass_f = NVN_STENCIL_OP_KEEP,
+        .fail_b = NVN_STENCIL_OP_KEEP, .zfail_b = NVN_STENCIL_OP_KEEP, .zpass_b = NVN_STENCIL_OP_KEEP};
+    S.st_vmask[0] = S.st_vmask[1] = S.st_wmask[0] = S.st_wmask[1] = 255;
+    S.poly.cull = NVN_FACE_NONE; S.poly.front = g_queue_origin_ll ? NVN_FRONT_FACE_CCW : NVN_FRONT_FACE_CW;   // a clockwise front: the vertex shader's counter-clockwise triangle is a back face
+    mtl_sub_begin(); uint64_t handle = (uint64_t)commands; mtl_sub_index(&handle, 1); mtl_exec(commands);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "replayed two-sided stencil draws complete");
+    CHECK(!mtl_last_commit_error(), "replayed two-sided stencil draws have no Metal errors");
+    NSData *bytes = read_plane(&color, 4, MTLBlitOptionNone); const uint8_t *v = bytes.bytes;
+    for (int k = 0; k < 4; k++) {
+        int good = 1;
+        for (unsigned n = 16 * k; n < 16 * (k + 1); n++) good &= steps[k].pass ? v[4*n] == 255 && v[4*n+2] == 0 : v[4*n] == 0 && v[4*n+2] == 255;
+        if (!good) fprintf(stderr, "replayed two-sided stencil step %d: pixel (%u,%u) %u,%u,%u\n", k, 0u, 2u * k, v[64*k], v[64*k+1], v[64*k+2]);
+        CHECK(good, steps[k].pass ? "a replayed back face passes against its own reference value" : "a replayed back face does not pass against a stale or front reference value");
+    }
+    mtl_pool_del(commands); mtl_drain(); free(commands);
+    mtl_tex_release(&ds); mtl_tex_release(&color);
+}
+
 static void invalid_descriptors(NvProg *p) {
     const uint32_t cases[][2] = {{0,260}, {260,0}, {250,260}, {260,253}, {70,0}, {0,70}, {0xffffffffu,0}};
     for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) for (int compile = 0; compile <= 1; compile++) {
@@ -208,6 +289,27 @@ static void prediction_made_base(id<MTLLibrary> lib) {
     CHECK(pso_build_ex(pso_desc(&alt, p->sh[0], p->sh[1], nil, 0), !alt.border, &error, 0) != nil && g_pb_built == built, "its draw takes the pipeline without compiling");
 }
 
+// A key that already drew with a stand-in asked for its own build then (pso_pend_demand): the prediction leaves it out of its candidates instead of asking whether its base
+// is made (a descriptor on the submit thread) in every submission until that build lands (issue #2438). Its attachment-free variant, with no stand-in, is still handed over
+static void prediction_standin(id<MTLLibrary> lib, id<MTLLibrary> other) {
+    NvProg *p = program(lib); static prog_t pg = {.serial = 980102}; serial_put(pg.serial, p);
+    state_reset(); S.prog = &pg; memset(&g_pass, 0, sizeof g_pass); g_pass.cfmt[0] = 70; g_pass.dfmt = g_pass.sfmt = 260; g_pass.samples = 1;
+    pso_key k, alt; pso_key_fill(&k, p->sh[0], p->sh[1], g_pass.cfmt, 260, 260, 1, 0); pso_key_fill(&alt, p->sh[0], p->sh[1], g_pass.cfmt, 0, 0, 1, 0);
+    NvProg *q = program(other); pso_key ko; pso_key_fill(&ko, q->sh[0], q->sh[1], g_pass.cfmt, 260, 260, 1, 0);
+    NSError *error = nil; id<MTLRenderPipelineState> stand = pso_build(pso_desc(&ko, q->sh[0], q->sh[1], nil, 0), !ko.border, &error);   // any pipeline: only its presence counts
+    CHECK(stand != nil, "a stand-in pipeline builds"); if (!stand) return;
+    hm_put_id(&g_pso_hy, &k, stand);
+    uint8_t commands[1024] = {0}; p_draw draw = {.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3};
+    unsigned size = (unsigned)((8 + sizeof draw + 7) & ~7u); op_hdr h = {OP_DRAW, size}, end = {OP_END, 8};
+    memcpy(commands, &h, 8); memcpy(commands + 8, &draw, sizeof draw); memcpy(commands + size, &end, 8);
+    uint64_t kicked = g_pp_kicked, admitted = g_pp_admit;
+    g_exec_next = commands; pso_predict_rest_(); g_exec_next = NULL;
+    CHECK(g_pp_kicked - kicked == 1 && g_pp_admit - admitted == 1, "the key with a stand-in is no candidate; its attachment-free variant is handed over");
+    pthread_mutex_lock(&g_pp_mu); int has_k = pso_pend_find(&k) >= 0, has_alt = pso_pend_find(&alt) >= 0; pthread_mutex_unlock(&g_pp_mu);
+    CHECK(!has_k && has_alt, "the build handed over is the attachment-free variant's");
+    CHECK(pso_pend_take(&alt) != nil, "and can be claimed");
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     keys();
     if (argc == 2 && !strcmp(argv[1], "--keys-only")) { printf("depth/stencil keys: %d checks, %d failed\n", checks, failed); return failed != 0; }
@@ -222,7 +324,11 @@ int main(int argc, char **argv) { @autoreleasepool {
         "vertex float4 v(uint n[[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[n],.5,1); }\n"
         "fragment float4 f() { return float4(0,1,0,1); }\n", nil, &error);   // no base made from it: its predicted keys need a compile
     CHECK(fresh != nil, "second synthetic library compiles"); if (!fresh) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
-    NvProg *p = program(lib); draws(p); invalid_descriptors(p); prediction(fresh); prediction_made_base(lib);
+    id<MTLLibrary> cold = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "vertex float4 v(uint n[[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[n],.75,1); }\n"
+        "fragment float4 f() { return float4(0,0,1,1); }\n", nil, &error);   // no base made from it either, for the stand-in case
+    CHECK(cold != nil, "third synthetic library compiles"); if (!cold) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
+    NvProg *p = program(lib); draws(p); two_sided_ref(p); two_sided_ref_replay(p); invalid_descriptors(p); prediction(fresh); prediction_made_base(lib); prediction_standin(cold, lib);
     CHECK(g_comp4 != nil && g_pb_spec > 0, "pipelines are built through the Metal 4 compiler");
     printf("depth/stencil pipelines: %d checks, %d failed\n", checks, failed);
     return failed != 0;

@@ -392,6 +392,29 @@ static void receipt_unfenced(int command_wait) {
     CHECK(r && done && *result==before,"the work after the wait runs and its fence lands"); if(!done) _Exit(2);
     P(nvnSyncFinalize)(&never); P(nvnSyncFinalize)(&consumed);
 }
+// Counting submissions in flight each take a buffer of the visibility ring, which grows, instead of a one-off buffer that joins the residency set and leaves it after the
+// submission: 24 of them, three times the old ring of 8, with none complete; once they are, the next one reuses a ring buffer and the ring does not grow (upstream b5150895)
+static void vis_ring_grows(void) {
+    enum { N=24 };
+    printf("CASE counting submissions in flight take buffers of the visibility ring\n");
+    pthread_mutex_lock(&g_sub_mu);
+    const uint64_t far=g_done+(1ull<<40); __strong id<MTLBuffer> taken[N]; int took=0;
+    for(int i=0;i<N;i++) {
+        g_vis_ring_i=-1; g_vis=nil; vis_take(); taken[i]=g_vis;
+        if(g_vis && g_vis_ring_i>=0 && vis_in_ring(g_vis)) { took++; g_vis_ring[g_vis_ring_i].fence=far+(uint64_t)i; }   // in flight: its fence is far ahead of g_done
+    }
+    CHECK(took==N,"24 counting submissions in flight each take a ring buffer");
+    int distinct=1; for(int i=0;i<N;i++) for(int k=0;k<i;k++) if(taken[i]==taken[k]) distinct=0;
+    CHECK(distinct,"no two of them share a buffer");
+    CHECK(VIS_RING>POST_RING,"the ring holds a buffer for every submission the post ring lets stand, and the one being encoded");
+    const int grown=g_vis_ring_n;
+    for(int i=0;i<grown;i++) if(g_vis_ring[i].fence>=far) g_vis_ring[i].fence=0;   // their submissions complete
+    g_vis_ring_i=-1; g_vis=nil; vis_take();
+    CHECK(g_vis && g_vis_ring_n==grown && vis_in_ring(g_vis),"once they complete, the next one reuses a ring buffer");
+    if(g_vis_ring_i>=0) g_vis_ring[g_vis_ring_i].fence=0;
+    g_vis_ring_i=-1; g_vis=nil; g_vis_n=0;
+    pthread_mutex_unlock(&g_sub_mu);
+}
 static void receipt_tests(void) {
     receipt_unrelated_completion(); receipt_snapshot(0); receipt_snapshot(1); receipt_wait_only(0); receipt_wait_only(1); receipt_unfenced(0); receipt_unfenced(1);
 }
@@ -853,6 +876,7 @@ int main(void) { @autoreleasepool {
     event_queued_write(NVN_EVENT_SIGNAL_MODE_ADD);
     event_signal_no_cut();
     frame_shares_allocator();
+    vis_ring_grows();
     post_ring_wait();
     signal_events_switch();
     receipt_tests();
