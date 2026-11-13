@@ -34,7 +34,7 @@ These Switch 2 games have passed Mac gameplay testing. Ocarina of Time, Star Fox
 Community projects build on nxnative with tools to turn your legally owned and acquired games into apps for your iPhone, iPad or Mac without the command line, and libraries to organize and launch them. They are separate projects: questions and bugs about them go to their own pages.
 
 - [NX2Apple](https://github.com/LNPANDY/NX2Apple) — Mac builder with a shared iPhone/iPad game library.
-- [NX Play](https://github.com/varyform/nx-native-wrapper) — Mac library with device installs and save sync.
+- [NX Play](https://github.com/varyform/nx-native-wrapper) — Mac library with device installs and save sync. To build NX 18 with it, choose your NX 18 folder in its settings ([steps](docs/getting-started.md#build-with-nx-play-instead)).
 - [NxNative Launcher](https://github.com/rennan101/nxnative_Launcher) — Mac launcher with guided builds and controller mapping.
 - [LumaNX](https://github.com/Xc1Ym/LumaNX) — Mac game builder with IPA export.
 - [GameCase](https://github.com/Tiaoge-tou/GameCase) — iOS game library based on LiveContainer.
@@ -56,6 +56,8 @@ For a game without a profile, the script writes a survey and tries a provisional
 **Your games and keys.** NX 18 works only from what you dump from your own Switch or Switch 2: your legally owned and acquired games, with their updates and DLC, and your `prod.keys`. NX 18 does not provide game files, keys or firmware.
 
 New to this? [Getting started](docs/getting-started.md) takes you from a new Mac and iPhone to playing, one step at a time.
+
+Rather use an app than the command line? Until NX 18's own Mac app (planned for X2.0), you can build with [NX Play](#community-front-ends), a community Mac app, pointed at your NX 18 folder: [Build with NX Play instead](docs/getting-started.md#build-with-nx-play-instead) shows how.
 
 Switch 2 games are built from one `.nup` or `.nx` file or a folder of their files, not from NSPs: see [Switch 2 games](#switch-2-games).
 

@@ -31,6 +31,8 @@ The script checks your Mac, Xcode 27.3 and its Metal toolchain. It installs xcod
 
 ## 3. Build your game
 
+Rather use an app than Terminal? You can build with NX Play, a community Mac app: see [Build with NX Play instead](#build-with-nx-play-instead) below.
+
 Copy the build script out of Downloads, then open your copy in a text editor:
 
 ```
@@ -55,6 +57,20 @@ A first build takes 30 to 60 minutes and needs free space of about twice the gam
 
 To play on your Mac instead, set `TARGET="mac-app"` and open the app it makes from Finder.
 
+### Build with NX Play instead
+
+NX 18's own Mac app is planned for X2.0. Until then, if you'd rather not use the command line, you can build your games with [NX Play](https://github.com/varyform/nx-native-wrapper), a free community Mac app by Oleh Khomei ([varyform](https://github.com/varyform)), MIT licensed. It can build an IPA or a Mac app, or install the game on your iPhone through Xcode. NX Play is not made by NX 18. It's a suggestion, not a requirement: the steps above stay the documented way.
+
+By default NX Play builds upstream nxnative, not NX 18. To build with NX 18:
+
+1. Do [step 2](#2-set-up-your-mac). It puts NX 18 in `~/NX18`. You can also clone it yourself: `git clone https://github.com/kencalx/NX18.git ~/NX18`.
+2. Download NX Play from its [releases](https://github.com/varyform/nx-native-wrapper/releases) and drag it to Applications.
+3. In NX Play, open **Settings › General**. At **nxnative repository**, click **Choose…** and pick your `NX18` folder. A green check means it found NX 18's build script. Do this before its Setup installs anything, so it doesn't download upstream nxnative as well.
+4. NX Play uses the Xcode your Mac has selected. If you have more than one Xcode, select 27.3: `sudo xcode-select -s /Applications/Xcode-27.3.app`. Leave **Allow a Metal compiler nxnative didn't test** off: it's the build's `--allow-other-metal`, which NX 18 doesn't need with Xcode 27.3.
+5. Add your legally owned and acquired games and your `prod.keys` as NX Play's own guide describes.
+
+Before it builds, NX Play brings that folder up to date with NX 18 on GitHub. A release checked out with `nx18-setup.sh --ref <tag>` has nothing to follow, so it stays as it is. Keep your own changes to NX 18 in another folder. NX Play doesn't use `nx18-build.sh`, so the settings above don't apply to it. Questions and bugs about NX Play go to [its own page](https://github.com/varyform/nx-native-wrapper/issues).
+
 ## 4. Choose how to install
 
 You install the game on your iPhone with Xcode, or install the IPA with a sideloading tool. Pick one:
@@ -75,7 +91,7 @@ A few things to know:
 
 - **Use AltStore Classic, not AltStore PAL.** Classic installs any `.ipa`. PAL installs only notarized apps ([the difference](https://faq.altstore.io/altstore-pal-v.-altstore-classic)).
 - **LiveContainer runs your games inside itself,** so LiveContainer is the app that needs the Increased Memory Limit (step 5).
-- **[NX Play](../README.md#community-front-ends)**, a community Mac app, can also build a game and install it through Xcode. By default it builds upstream nxnative, not NX 18. To build a game with NX 18, link the game's folder to your checkout: `ln -s ~/NX18 "<game folder>/nxnative"` ([NX Play's steps](https://github.com/varyform/nx-native-wrapper#testing-an-nxnative-branch)). It doesn't use `nx18-build.sh`; questions about it go to its own page.
+- **NX Play**, a community Mac app, can also install the game through Xcode, once its settings point at your NX 18 folder ([Build with NX Play instead](#build-with-nx-play-instead)).
 - **With Xcode,** keep `TARGET="iphone"` and build with `bash ~/nx18-build.sh --prepare-xcode`. You get an Xcode workspace, `NxNative.xcworkspace` beside the game's folder, instead of an IPA, and Xcode signs and installs the game for you. [NX 18's Xcode steps](development.md#build-and-run-on-a-device-with-xcode) walk you through it.
 - **On your iPhone,** turn on **Developer Mode** in Settings › Privacy & Security, then restart and tap **Enable** ([Apple's steps](https://developer.apple.com/documentation/xcode/enabling-developer-mode-on-a-device)). The switch shows up only after your iPhone has been connected to a computer, so connect it first. With a sideloading tool, also trust the developer profile under Settings › General › VPN & Device Management the first time.
 - **A free Apple ID has limits:** 3 apps per device, apps that stop opening after 7 days until you refresh them, and at most 10 App IDs at a time ([Apple's comparison](https://developer.apple.com/support/compare-memberships/)).
