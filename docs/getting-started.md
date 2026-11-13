@@ -64,10 +64,10 @@ NX 18's own Mac app is planned for X2.0. Until then, if you'd rather not use the
 By default NX Play builds upstream nxnative, not NX 18. To build with NX 18:
 
 1. Do [step 2](#2-set-up-your-mac). It puts NX 18 in `~/NX18`. You can also clone it yourself: `git clone https://github.com/kencalx/NX18.git ~/NX18`.
-2. Download NX Play from its [releases](https://github.com/varyform/nx-native-wrapper/releases) and drag it to Applications.
-3. In NX Play, open **Settings › General**. At **nxnative repository**, click **Choose…** and pick your `NX18` folder. A green check means it found NX 18's build script. Do this before its Setup installs anything, so it doesn't download upstream nxnative as well.
-4. NX Play uses the Xcode your Mac has selected. If you have more than one Xcode, select 27.3: `sudo xcode-select -s /Applications/Xcode-27.3.app`. Leave **Allow a Metal compiler nxnative didn't test** off: it's the build's `--allow-other-metal`, which NX 18 doesn't need with Xcode 27.3.
-5. Add your legally owned and acquired games and your `prod.keys` as NX Play's own guide describes.
+2. Download NX Play from its [releases](https://github.com/varyform/nx-native-wrapper/releases), drag it to Applications and open it. Its **Setup** window opens by itself: don't click **Install Missing** yet.
+3. Open **Settings › General**. At **nxnative repository**, click **Choose…** and pick your `NX18` folder. A green check means it found NX 18's build script. Then go back to Setup (**NX Play › Setup…**) and click **Install Missing**. It installs the tools and Python packages NX Play's builds use, and it finds NX 18 in your folder instead of downloading upstream nxnative.
+4. NX Play uses the Xcode your Mac has selected. If you have more than one Xcode, select 27.3: `sudo xcode-select -s /Applications/Xcode-27.3.app`. Leave **Allow a Metal compiler nxnative didn't test** off (it's the build's `--allow-other-metal`). If a build stops because the Metal compiler is not the one the shaders were tested with, install the Xcode 27.3 build named in the README's [Requirements](../README.md#requirements). Turning the setting on builds anyway, but untested shaders can render wrong pictures.
+5. Add your legally owned and acquired games and your `prod.keys` from your own Switch, as NX Play's own guide describes.
 
 Before it builds, NX Play brings that folder up to date with NX 18 on GitHub. A release checked out with `nx18-setup.sh --ref <tag>` has nothing to follow, so it stays as it is. Keep your own changes to NX 18 in another folder. NX Play doesn't use `nx18-build.sh`, so the settings above don't apply to it. Questions and bugs about NX Play go to [its own page](https://github.com/varyform/nx-native-wrapper/issues).
 
@@ -100,7 +100,7 @@ A few things to know:
 
 The bigger games need the higher memory limit iOS gives an app with the **Increased Memory Limit**. Without it, iOS may close the game in busy scenes. Every app NX 18 builds asks for it, but whether iOS grants it depends on how you installed:
 
-- **Xcode with a paid account** (or NX Play): nothing to do.
+- **Xcode with a paid account** (or NX Play's Install on Device with a paid team): nothing to do. A free account's Personal Team builds without it.
 - **Any other way:** follow the steps for your tool in the README's [Increased Memory Limit](../README.md#increased-memory-limit) section.
 
 That section also shows how to check that it worked, from the game's log.
