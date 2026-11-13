@@ -11,8 +11,8 @@ arts and Shulk / Reyn's first Colony 9 combat, with real audio. Frames during
 the opening battle take about 33 ms. The unsigned 1.1.2 IPA builds successfully
 (13.2 GiB), with all 15,129 shader libraries and a complete CRC check. Further
 story progression and saving / reloading remain open. On the iPhone 18 Pro Max
-(the 0.5 build, 2026-11-11) about 8 minutes of a new game held 60 fps with the 60 fps
-mod ([On the iPhone](#on-the-iphone)).
+(the 0.5 build, 2026-11-11, and X1.0, 2026-11-12) about 8 minutes of a new game
+held 60 fps with the 60 fps mod each time ([On the iPhone](#on-the-iphone)).
 
 ## Memory
 
@@ -85,9 +85,34 @@ From its `log.txt` (`scripts/devlog.py`):
   0.5; after it the iPhone trims at K = 60 by default, not measured on
   this game).
 
+The owner's second run, on the same iPhone with X1.0 (`6448f757`, chain
+`222e58e346d6`), the same settings (docked, the 60 fps mod, Picture Stretch, no
+upscaling, no edge smoothing), a controller: a later start of X1.0 installed
+over 0.5 (the device's `pso_user.tsv` held 219 lines, the 0.5 run's 215 rows and
+4 an earlier X1.0 start wrote; its archive 2 files), then about 8 minutes of a
+new game (29,070 frames on screen). From its `log.txt` (`scripts/devlog.py`):
+
+- **Frames:** 60 fps; frame time p50 16.67 ms, p95 17.34 ms; 43 frames dropped
+  (0.15%); game GPU time p50 11.96 ms. 43 frames over the long-frame mark (5.2
+  a minute), 10 of them new pipelines first. The longest, 434 ms at 236 s
+  (frame 13,683), built one new pipeline (423 ms of making it, with 173 draws on
+  a hybrid pipeline meanwhile), right after a 126 ms frame that loaded 124
+  shader libraries (107 ms).
+- **Pipelines:** the prepare step took 0.14 s (3,870 lines, no progress screen):
+  8 bases compiled, 505 from the archive (501 of them layout bases from the
+  archive bundled with the app), 56 reused. In play 271 more bases were compiled
+  (10.1 s of compile time on all threads); the submit thread waited 1.60 s for
+  pipelines and 0.12 s for shader libraries in all.
+- **Power and heat:** CPU 2.22 W median (36.9 mJ a frame); thermal state 0
+  throughout.
+- **Memory:** footprint 970 MB at the start to 2.07 GB at most, GPU allocated at
+  most 2.81 GB, at least 6.12 GB of headroom to the app's limit.
+- **Audio:** no underruns.
+- **Display:** game enqueue to target display p50 29 ms.
+
 ### Pipelines on a first start
 
-The prepare step with the shipped list (3,659 rows, 3,653 used) took 2.98 s
+On 0.5 the prepare step with the shipped list (3,659 rows, 3,653 used) took 2.98 s
 before the first frame, behind the progress screen: 391 bases compiled, none
 from the bundled archive, 30 reused. In play 139 more bases were compiled
 (5.01 s of compile time on all threads), none of them on a frame over 60 ms
@@ -96,23 +121,42 @@ the list did not hold, gave 215 rows, 69 shaders (`S`) and 146 render pipelines
 (`R`), all checked against [`shader_map.tsv`](shader_map.tsv) (the build's map,
 byte for byte) by `dm/tools/pso_seed.py`; they follow the first rows in
 [`pso_manifest.tsv`](pso_manifest.tsv) below their own note, in recorded order.
-The list now has 3,874 rows (3,305 `S`, 569 `R`). Six of the first rows, the
+The X1.0 run's `Documents/pso_user.tsv` (1,055 lines) gave 838 rows the list
+did not hold, 568 `S` and 270 `R`, checked the same way (`shader_map.tsv` is the
+X1.0 build's, byte for byte) and added below their own note: the other 217 lines
+are rows the list already held (the 0.5 run's 215, and the two `_bgv` render
+pipelines of the six rows below, which `pso_seed.py` refuses), X1.0's `R` rows
+carry the border field (1,024 hex digits), and none of the 838 was refused.
+The list now has 4,712 rows (3,873 `S`, 839 `R`). Six of the first rows, the
 `_bg0` / `_bgv` geometry variants of two shaders, are not library keys of the
 map and the prewarm drops them at load (`shader keys not in the shader map 4`
 plus their two `R` rows); `pso_seed.py check` refuses them, and the test expects
 exactly those six.
 
-- **Its cost on a first start** (an estimate, not measured): each added `R` row
-  takes at most one base, so at most 146 more in the prepare step; at this
-  start's rate (2.98 s for 391 bases, about 7.6 ms a base on 6 workers) about
-  1.1 s more, so about 4 s in all with 0.5's archive. An app whose archive
-  also holds the list's layout bases (`pso_offline.py`'s `R` rows) takes those it
-  can describe from the app instead, so less; not measured.
+- **Its cost on a first start** (an estimate, not measured): with 0.5, each
+  added `R` row takes at most one base, so at most 146 more in the prepare step;
+  at that start's rate (2.98 s for 391 bases, about 7.6 ms a base on 6 workers)
+  about 1.1 s more, so about 4 s in all with 0.5's archive.
+- **With the X1.0 rows** (an estimate, not measured): the next build's
+  `pso_offline.py` compiles the new `R` rows' layout bases (at most 270) into the archive
+  bundled with the app ([Pipelines with a vertex layout compiled at a fresh install's prepare step](../../../docs/reference/shaders.md#pipelines-with-a-vertex-layout-compiled-at-a-fresh-installs-prepare-step)),
+  so a fresh install takes them from the app as the X1.0 run took its 501, and
+  the step would take about 0.2-0.3 s (from the X1.0 run's later start, 0.14 s
+  for 3,870 lines with 4 bases already in the device's archive; a fresh install's
+  step on X1.0 is not measured). If the app's archive does not serve them, each
+  takes at most one base, so at most 270 more; at the 0.5 first start's rate
+  (about 7.6 ms a base on 6 workers) about 2.1 s more, so about 2.3 s. Either
+  way the 270 new `R` rows' pipelines are prepared before the first frame (268
+  of them the X1.0 run recorded in play: `pso_user.tsv` records each pipeline
+  built on the spot), except the `_bgv` geometry variants, which the prewarm
+  still drops and play still builds. Whether the 434 ms frame's pipeline is one
+  of the new rows is not known: nothing in the log ties it to a row.
 - **The settings:** the 60 fps mod changes the game's pacing and Picture Stretch
   is the host's present; a row's pipeline key holds no picture size, so the rows
   name the same pipelines at 30 fps and without the stretch.
-- **What it does not cover:** places past those 8 minutes, which still build
-  their pipelines at their first draw, and `pso_user.tsv` records them.
+- **What it does not cover:** places past those two runs' 8 minutes each, which
+  still build their pipelines at their first draw, and `pso_user.tsv` records
+  them.
 
 ## Checks
 
@@ -146,6 +190,6 @@ the user's request.
 ## Open
 
 - Further story progression and saving / reloading, on the Mac and the iPhone.
-- A fresh install's prepare step with the 3,874-row prewarm list, estimated at about 4 s ([Pipelines on a first start](#pipelines-on-a-first-start)).
+- A fresh install's prepare step with the 4,712-row prewarm list on X1.0's next build, estimated at about 0.2-0.3 s with the app's archive (about 2.3 s if it does not serve the new layout bases), and play over the same 8 minutes without the X1.0 run's new-pipeline frames ([Pipelines on a first start](#pipelines-on-a-first-start)).
 - The six `_bg0` / `_bgv` rows of the prewarm list, which the prewarm drops: recorded by an earlier build; whether the host should prewarm geometry variants is open.
 - Repeat the Xenoblade 2 comparison with a deterministic route when requested.
