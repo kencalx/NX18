@@ -160,6 +160,7 @@ void crash_dump_now(const char *why);   // Dump state on demand (threads + graph
 // nvn_mtl.m stamps dm_present_done_ns when a present completes on the GPU (host now_ns)
 void dm_stall_start(void);
 void dm_stall_menu(int open);
+void dm_stall_dump(void);   // stall.c: the detector's dump (the graphics side's state, then the guest thread table, its locks only tried), also after a suspend that did not drain (hle_nvn.c, which has a weak one for builds without stall.c)
 extern _Atomic uint64_t dm_present_done_ns;
 int svc_thread_dump_try(unsigned wait_ms);   // hle_thread.c: svc_thread_dump under the guest thread lock and the stderr lock, each tried for up to wait_ms; 0 (nothing dumped) if either stays held
 int dm_focus_seen(void);   // hle_oe.c: the focus state the game sees (oe focus state: 1 in focus, 2 out of focus or a library applet open, 3 background)

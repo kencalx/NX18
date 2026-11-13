@@ -150,13 +150,14 @@ static void rx_now(char *out, size_t size) {
     snprintf(out, size, "the encode thread %s for %.1f s", rx_name[st < RX_N ? st : 0], since && now > since ? mach_s(now - since) : 0.0);
 }
 // Wait until the encode thread has passed a RO_NOTE of at least v on p (only the encode thread's progress through what is queued, never the GPU). At the 10 s mark it says so once,
-// with the caller's site and what the encode thread is doing (nvn_mtl.m wait_say), and waits on
+// with the caller's site and what the encode thread is doing (nvn_mtl.m wait_say), and waits on. Under the suspend's limit (nvn_mtl.m t_drain_by: snap_drain in mtl_drain_by) it
+// ends there; the caller reads the note again
 static void rec_note_wait_at(_Atomic uint64_t *p, uint64_t v, const char *site) {
     if (atomic_load(p) >= v) return;
     wn_in(WN_NOTE, v);
     wait_mark m; wait_mark_set(&m);   // the 10 s line, once; the wait is as long as before
     pthread_mutex_lock(&g_note_mu);
-    while (atomic_load(p) < v) {
+    while (atomic_load(p) < v && !drain_over()) {
         wait_mark_sleep(&g_note_cv, &g_note_mu, &m);
         if (atomic_load(p) < v && wait_mark_due(&m)) { static _Atomic int n; char rx[160]; rx_now(rx, sizeof rx); wait_say(&n, "the encode thread's note", site, "value %llu, the note at %llu; %s", (unsigned long long)v, (unsigned long long)atomic_load(p), rx); }
     }

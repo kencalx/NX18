@@ -68,6 +68,7 @@ static void stall_dump(void) {
     mtl_stall_dump();
     if (!svc_thread_dump_try(1000)) LOG("stall dump: guest thread table busy (its lock or the log's stayed held for 1 s)");
 }
+void dm_stall_dump(void) { stall_dump(); }   // also after a suspend whose drain did not finish (hle_nvn.c dm_gfx_suspend), on a utility queue
 // One look by the detector's thread (t_stall calls it with its own clock)
 static int stall_poll(uint64_t now) {
     uint64_t present = atomic_load(&dm_present_done_ns), since = dm_focus_in_since(), closed = atomic_load(&g_stall_menu_closed);

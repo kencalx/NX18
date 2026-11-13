@@ -741,6 +741,8 @@ static void front_ios_audio_watch(void) {
 }
 
 // Scene lifecycle (called by SceneDelegate in main.m): 0 resign active, 1 enter background, 2 return to foreground, 3 become active. On entering background, freeze the guest clock and suspend after in-flight GPU work completes (submitting GPU work in background gets the process killed).
+// dm_gfx_suspend returns within about 3 s even when the GPU does not drain (hle_nvn.c: a red line and a dump, graphics left suspended, the archive's hand-over skipped), so the two
+// background tasks after it always start: Ocarina of Time's test 3 froze once, and closing it from the app switcher then never got past dm_gfx_suspend, the cloud save with it
 // The screen stays on while the game is active: only touches reset the idle timer, so with a controller (or during a cutscene) the screen dimmed and locked mid-game
 // Cloud saves (save_sync.h): what the game committed goes out before iOS suspends the app, without the sender's quiet wait. iOS gives a background task about half a minute
 static void save_sync_background(void) {
