@@ -81,6 +81,12 @@ pool_ids_8k	on
 # out a frame or two before; each put and eviction sent the pool tables down their patch path (about 465 kept a frame), an estimated 1-4 ms of replay CPU a frame. Every other
 # game and run stays under about 100 a frame. 4096 (nvn_mtl.m ghost_cap); DM_NVN_GHOST=512 in env.txt takes it back. Not yet run on the phone
 ghost_table	4096
+# Test 3 on an iPhone 18 Pro Max (X1.0, both runs on battery, same build): after the clock drop that follows each save load, the game's threads spent 4.1-5.3 s of CPU a
+# 300-frame window in runs of yields with no other work (2.5-5.3 s overall), 43-53 fps, 38-107 frames dropped a window; with storm sleeps 1.2-1.7 s, 45-58 fps, 6-89 dropped,
+# and in the opening movie 0.10-0.14 W of CPU power against 0.31-0.36 W at the same 58 fps. sleep: once a worker's yields have run 500 us with no other work, each further
+# yield sleeps up to 50 us; the thread that acquires the window texture keeps spinning (hle_thread.c ystorm_note). It does not stop the clock drop. DM_YIELD_STORM=0 in env.txt
+# turns it off
+yield_storm	sleep
 
 # ---- Movies ----
 # The movies are AV1 decoded by VideoToolbox. On an iPhone 18 Pro Max (X1.0) iOS ended the hardware decoder while the notification panel was down during the opening movie: every later
