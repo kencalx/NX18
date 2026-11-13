@@ -16,7 +16,7 @@ Never commit or attach game files, keys, title keys or anything extracted from a
 
 - Read [AGENTS.md](AGENTS.md): it lists where to start for each kind of task, and the rules for profiles, per-build knowledge and the shader translation chain.
 - A crash, a hang or a wrong picture: search the [symptom index](docs/agents/symptoms.md) for the text in the log first.
-- Another game: run `scripts/build_ipa_from_nsp.py` on its NSP folder and follow [Port another game](docs/development.md#port-another-game).
+- Another game: run `scripts/build_ipa_from_nsp.py` on your own dump of it (your legally owned and acquired game files) and follow [Port another game](docs/development.md#port-another-game).
 - Prefer a fix that holds for every game to a game-specific rule, and fix a bug at its cause ([AGENTS.md](AGENTS.md)).
 
 ## A pull request

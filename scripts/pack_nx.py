@@ -2,7 +2,7 @@
 # A game in an NX archive (one .nx file: https://github.com/fab918/nxformat, NXFormat 1.0.3, SPEC.md; wire versions 0.2 and 0.3) → the layout build_ipa_from_nsp.py extracts NSPs into,
 # the same as scripts/pack_nup.py writes for a NUP. build_ipa_from_nsp.py calls this when it is given a .nx file, or a folder that holds one, and goes on with its other steps; run on its own,
 # this script does only this step. It reads the format with its own code: nothing of NXFormat's (nxconvert, its C++ reader) is used or needed.
-# An NX holds decrypted Switch 1 and Switch 2 games: per application, snapshots (the base game, updates, standalone updates and DLC), each a complete file tree, never laid over another
+# An NX holds Switch 1 and Switch 2 games dumped from your console and decrypted with its keys: per application, snapshots (the base game, updates, standalone updates and DLC), each a complete file tree, never laid over another
 # (SPEC §8). The files are cut into blocks of 64 KiB to 1 MiB, each stored raw or as one zstd frame, shared between files and snapshots (dedup), with a CRC-32C per 16 KiB of a block and a SHA-256
 # per file. Its files are not encrypted, so it needs no keys. The NACP and the icons are records of their own (Media), each tied to one exact snapshot.
 # Two kinds of tree, by what NXConvert packed:
@@ -273,7 +273,7 @@ class Nx:
         if required != 1: self.fail('feature', f'required feature bits {required:#06x}: this reader knows bit 0 (separate header pages) only; the archive needs a newer reader')
         if optional: self.fail('feature', f'optional feature bits {optional:#06x}: none is defined in NX {major}.{minor}')
         if reserved != bytes(24) or check_size != CHECK: self.fail('header', 'reserved header bytes or integrity check size invalid')
-        if self.archive_size > len(self.mm): self.fail('length', f'{len(self.mm):,} bytes, its header says {self.archive_size:,} (copied or downloaded partly?)')
+        if self.archive_size > len(self.mm): self.fail('length', f'{len(self.mm):,} bytes, its header says {self.archive_size:,} (copied partly? copy it again, or pack it again from your own dump)')
         if self.archive_size > INT64_MAX or cat_size > 16 * MiB: self.fail('resource', 'archive or Catalog size above the format limit')
         if nblocks > 1 << 32 or integ_size % 4: self.fail('structure', 'block count or integrity table size invalid')
         if nblocks == 0:
@@ -1312,8 +1312,8 @@ def _failed(k, code, text, log) -> NoReturn:   # nx_extract's exit code → Erro
         bad = [r.removeprefix('hash check failed: ') for r in reds if r.startswith('hash check failed: ')]
         what = (f'{len(bad)} file(s) fail the NCA\'s own hash check ({", ".join(bad[:3])}{", …" if len(bad) > 3 else ""})' if bad else
                 'its filesystem tables fail the NCA\'s own hash check')
-        raise Error(f'{where}: {what}. The archive\'s own hashes pass, so the NCA was already damaged when it was packed (by the decrypter or its source); pack it again from a good '
-                    'dump, or pass --allow-damaged to pack them as read', 'nca_hash')
+        raise Error(f'{where}: {what}. The archive\'s own hashes pass, so the NCA was already damaged when it was packed (by the tool that decrypted it with your console\'s keys, or in your dump); '
+                    'dump the game again from your Switch and pack it again, or pass --allow-damaged to pack them as read', 'nca_hash')
     if code == 4: raise Error(f'{where}: the base game\'s program is sparse (the decrypter left out data its update carries): it runs only with its update; pack an update version '
                               '(--version <N> / -p v<N>)', 'sparse')
     if code == 5: raise Error(f'{where}: its content meta cannot be read: {first}', 'nca')

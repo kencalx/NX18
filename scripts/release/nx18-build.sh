@@ -10,7 +10,7 @@
 #   bash ~/nx18-build.sh --language ja
 # A first build takes 30-60 minutes and needs free space of about twice the game's size plus 10 GB.
 # Your keys stay on this Mac: this script never prints, copies, logs or sends them, and it has no telemetry.
-# The only download is the launcher's key art (from titledb, or SteamGridDB when STEAMGRIDDB_KEY is set);
+# The only download is the launcher's key art and game description (the game's eShop page data from a public title database, or SteamGridDB when STEAMGRIDDB_KEY is set);
 # EXTRA_ARGS=(--no-art-online) keeps the build offline.
 
 # a mistake in the settings (a path with spaces but no quotes) stops here, naming its line
@@ -31,7 +31,7 @@ CHECKOUT="$HOME/NX18"
 #   - a .nup or .nx file (Switch 2 games and others), or a folder that holds one
 GAME="/Users/YOUR-NAME/Games/YOUR-GAME"
 
-# Your prod.keys. Only .nsp / .xci / .nsz / .xcz games need it.                 (env NX18_KEYS)
+# Your prod.keys, dumped from your own Switch. Only .nsp / .xci / .nsz / .xcz games need it.   (env NX18_KEYS)
 KEYS="$HOME/keys/prod.keys"
 
 # What to build: iphone, ipad or mac-app                                       (env NX18_TARGET)
@@ -193,7 +193,7 @@ elif [ -d "$GAME" ]; then
         :
     else
         die "GAME holds no game files: $GAME" \
-            "Expected .nsp / .xci / .nsz / .xcz files, one .nup or .nx file, or a dump (base/, updates/<version>/, dlc/, or exefs/ and romfs/)."
+            "Expected your game's .nsp / .xci / .nsz / .xcz files, one .nup or .nx file, or your dump of it (base/, updates/<version>/, dlc/, or exefs/ and romfs/)."
     fi
 else
     die "GAME is neither a folder nor a file: $GAME"

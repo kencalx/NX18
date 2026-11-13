@@ -3,7 +3,7 @@
 // With a base RomFS dir in legacy mode, files whose content matches it become APFS clones (no new space).
 // --manifest: the RomFS is not written, only a list <output dir>/romfs_manifest.tsv (path, size, first 32 bytes), for surveying a new game (a large game's RomFS is well over 10 GB),
 //   and its NRO modules under <output dir>/romfs_nro/ (small: their imports decide the graphics API and the modules, Portal 2's 21 NROs are 60 MB).
-// A damaged NSP (a file whose data fails the NCA's hash check, e.g. a copy cut short or a broken download) stops the extraction with exit code 3 after listing every damaged file;
+// A damaged NSP (a file whose data fails the NCA's hash check, e.g. a copy cut short or a failing drive) stops the extraction with exit code 3 after listing every damaged file;
 //   --allow-damaged writes those files as read instead and only lists them (Super Mario Galaxy's base NSP with 147 MB zeroed: its two prologue WebM movies). A RomFS image marks them in its index, and the host names them in its log.
 // A sparse base program (Minecraft Dungeons II: its Program NCA leaves out data that its update carries) can be read only with its update: without one, exit code 4.
 // Add-on content: nx_extract <prod.keys> --aoc <DLC NSP> <output dir> writes the RomFS of the DLC's data NCA to <output dir> (the packing script puts it at aoc/<index>/, the host mounts it through DM_AOC_DIR).
@@ -72,7 +72,7 @@ static class P {
         // named or written as read. Exit code 3, as for damaged files, not an unhandled exception's stack trace
         catch (HorizonResultException e) when (HashError(e)) {
             Console.WriteLine(g_plain ? "[RED] the NCA files are damaged: a filesystem's own tables fail the NCA's hash check, so --allow-damaged cannot read them either"
-                                      : "[RED] the NSP is damaged: a filesystem's own tables fail the NCA's hash check, so --allow-damaged cannot read it either: an incomplete copy or a broken download, which a SHA-256 of each NCA shows (its file name is the hash's first 16 bytes); copy or download it again");
+                                      : "[RED] the NSP is damaged: a filesystem's own tables fail the NCA's hash check, so --allow-damaged cannot read it either: an incomplete copy, which a SHA-256 of each NCA shows (its file name is the hash's first 16 bytes); copy it again from your own dump, or dump the game again from your Switch");
             return 3;
         }
         // Decrypted NCAs come from an archive anyone can make: whatever LibHac cannot read is one line and exit code 8, never a stack trace
@@ -505,7 +505,7 @@ static class P {
             if (opens) continue;
             int rev = Math.Max(n.Header.KeyGeneration - 1, 0);   // the master key revision, as LibHac takes it from the header's key generation (0 and 1 are both revision 0)
             if (n.Header.HasRightsId && !ks.ExternalKeySet.Contains(new RightsId(n.Header.RightsId))) {
-                worst ??= (-1, $"no title key for rights ID {Convert.ToHexString(n.Header.RightsId).ToLowerInvariant()}: the package has no common ticket for it", Path.GetFileName(path));
+                worst ??= (-1, $"no title key for rights ID {Convert.ToHexString(n.Header.RightsId).ToLowerInvariant()}: the package has no common ticket for it; dump the game again from your own Switch with its ticket", Path.GetFileName(path));
                 continue;
             }
             int area = n.Header.KeyAreaKeyIndex;
@@ -525,7 +525,7 @@ static class P {
         if (rev < 0) throw new KeysMissing($"{file}{more}: {key}");
         string fw = rev < Firmware.Length ? $"firmware {Firmware[rev]}" : $"a firmware after {Firmware[^1]}";
         throw new KeysMissing($"{file}{more}: prod.keys has no {key} (master key {rev:x2}, which came with {fw}): the keys are older than the game; " +
-                              $"dump prod.keys again from a console on {fw}{(rev < Firmware.Length ? " or later" : "")}");
+                              $"update your Switch to {fw}{(rev < Firmware.Length ? " or later" : "")} and dump prod.keys again from it");
     }
 
     static bool Sparse(Nca n) {   // a section on sparse storage, or one the decrypter flattened from it (plain mode: its sparse info is cleared before LibHac reads it)
@@ -546,7 +546,7 @@ static class P {
         string what = g_plain ? "the NCA files are damaged" : "the NSP is damaged";
         if (g_allow) { Console.WriteLine($"[RED] {what}: {g_damaged.Count} files written as read (--allow-damaged)"); return 0; }
         Console.WriteLine($"[RED] {what}: {g_damaged.Count} files fail the NCA's hash check " +
-                          (g_plain ? "(damaged before the archive was made: its own hashes describe these bytes); pack them again from a good dump" : "(an incomplete copy or a broken download); copy or download it again") +
+                          (g_plain ? "(damaged before the archive was made: its own hashes describe these bytes); pack them again from a good dump" : "(an incomplete copy); copy it again from your own dump, or dump the game again from your Switch") +
                           ", or pass --allow-damaged to write them as read");
         return 3;
     }
@@ -624,7 +624,7 @@ static class P {
             IStorage st = f.Release().AsStorage();
             if (e.Name.EndsWith(".tik", StringComparison.OrdinalIgnoreCase)) {
                 byte[] t = new byte[0x2c0]; st.Read(0, t).ThrowIfFailure();
-                if (t[0x281] != 0) { Console.Error.WriteLine($"[RED] {e.Name} is not a common ticket; supply the title key separately"); continue; }
+                if (t[0x281] != 0) { Console.Error.WriteLine($"[RED] {e.Name} is a personalized ticket (tied to the Switch account that bought the game), which this tool does not read: dump the game again from your own Switch with your dump tool's option to remove console-specific data"); continue; }
                 ks.ExternalKeySet.Add(new RightsId(t.AsSpan(0x2a0, 0x10)), new AccessKey(t.AsSpan(0x180, 0x10))).ThrowIfFailure();
             } else if (e.Name.EndsWith(".nca", StringComparison.OrdinalIgnoreCase)) { ncas.Add(new Nca(ks, st)); ids.Add(e.Name[..e.Name.IndexOf('.')].ToLowerInvariant()); }
             else if (ncz && e.Name.EndsWith(".ncz", StringComparison.OrdinalIgnoreCase)) { ncas.Add(new Nca(ks, st.Slice(0, 0x4000))); ids.Add(e.Name[..e.Name.IndexOf('.')].ToLowerInvariant()); }

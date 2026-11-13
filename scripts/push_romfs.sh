@@ -56,7 +56,7 @@ elif [ "$via" = devicectl ]; then
     xcrun devicectl device copy to --device "$dev" --domain-type appDataContainer --domain-identifier "$id" --source "$img" --destination Documents/romfs.img -q
 else echo "ROMFS_PUSH_VIA is afc or devicectl, not $via" >&2; exit 1; fi
 # Add-on content (DLC): <index>.img files or legacy <index>/ trees. resources.env describes the complete DLC set, so Documents/aoc is replaced, not merged (a merge would keep
-# removed DLC that the host still reports owned). An empty set leaves an empty Documents/aoc, which also takes precedence over bundled DLC at startup. Over AFC only: devicectl's
+# removed DLC that the host still reports installed). An empty set leaves an empty Documents/aoc, which also takes precedence over bundled DLC at startup. Over AFC only: devicectl's
 # --remove-existing-content true, given Documents/aoc, empties the app's whole data container, saves included, and then fails with "Failed to retrieve the file node for
 # Documents/aoc" (CoreDevice 651.32; docs/reference/packing.md), so devicectl never syncs DLC here.
 if [ "$sync_aoc" = 1 ]; then

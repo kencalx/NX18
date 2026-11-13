@@ -88,7 +88,7 @@ final class DuoLauncherTests: XCTestCase {
         XCTAssertNil(a.intro, "Empty is none")
         XCTAssertNil(a.publisher, "A number where text belongs is none, not a failure")
         XCTAssertNotNil(a.released)
-        XCTAssertEqual(a.sourceLine, "From titledb")
+        XCTAssertEqual(a.sourceLine, "From the game's eShop page", "The title database is not named on screen")
         XCTAssertTrue(a.hasText)
         XCTAssertFalse(LauncherAbout(name: "Only a name").hasText, "A name alone gives no About button")
     }

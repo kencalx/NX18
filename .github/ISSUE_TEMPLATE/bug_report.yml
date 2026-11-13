@@ -5,7 +5,8 @@ body:
     attributes:
       value: |
         Thanks for the report. The fields below are what a problem is usually traced with; without them the first reply is a request for them.
-        Never attach game files, keys, title keys or anything extracted from a game (RomFS, NSOs, shaders). Logs and screenshots are fine.
+        Still setting up? [Getting started](https://github.com/kencalx/NX18/blob/main/docs/getting-started.md) covers the common problems.
+        Never attach game files, keys, title keys or anything extracted from a game (RomFS, NSOs, shaders). Logs and screenshots are fine: logs never contain keys or game files.
   - type: textarea
     id: what
     attributes:
@@ -30,8 +31,8 @@ body:
   - type: input
     id: commit
     attributes:
-      label: nxnative commit
-      description: "`git rev-parse --short HEAD` in the checkout you built from (or the date you downloaded it)."
+      label: NX 18 commit or release
+      description: "`git rev-parse --short HEAD` in the checkout you built from (or the release, or the date you downloaded it)."
       placeholder: 4639c511
     validations:
       required: true
@@ -61,7 +62,7 @@ body:
     attributes:
       label: Device and OS
       description: The Mac or iPhone model with its chip, and the macOS or iOS version (Apple menu > About This Mac, or Settings > General > About).
-      placeholder: MacBook Pro M2 Max, macOS 26.1
+      placeholder: iPhone 18 Pro Max, iOS 27.3
     validations:
       required: true
   - type: textarea
@@ -77,13 +78,14 @@ body:
     attributes:
       label: Logs
       description: |
-        Run `python3 scripts/bug_report.py <title ID>` to collect the logs, versions and settings into one file to attach (it contains no game files). Or attach the logs yourself:
         Attach the whole log from the start of the run (drag the file here), not excerpts:
-        - Mac app: `~/Library/Logs/nxnative/<title ID>.log` (the run before is `<title ID>.prev.log`)
+        - iPhone or iPad: the in-game menu › **Share log**, which sends `log.txt` and `log.prev.txt` (this run and the one before). Both are also in the Files app under the app's name.
+        - Mac: run `python3 scripts/bug_report.py <title ID>` to collect the logs, versions and settings into one file to attach (it contains no game files). Or attach the Mac app's log yourself: `~/Library/Logs/nxnative/<title ID>.log` (the run before is `<title ID>.prev.log`)
         - Terminal (`--platform mac`): the host's output, e.g. the command followed by `2>&1 | tee run.log`
-        - iPhone or iPad: `log.txt` in the Files app under the app's name (the run before is `log.prev.txt`)
         - Graphics problems: also `<title ID>_build/logs/dmsh_build.log` from the build you ran
         - Script or build failures: the script's full console output
+
+        Logs never contain keys or game files. A Mac log can contain your folder names; `bug_report.py` replaces your home folder with `~`.
     validations:
       required: true
   - type: checkboxes

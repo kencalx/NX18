@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Game files already extracted (a console dump: folders, not NSPs) → the layout build_ipa_from_nsp.py extracts NSPs into. build_ipa_from_nsp.py calls this when it is given such a folder, and
+# Game files already extracted (your dump of your own game from your Switch: folders, not NSPs) → the layout build_ipa_from_nsp.py extracts NSPs into. build_ipa_from_nsp.py calls this when it is given such a folder, and
 # goes on with its other steps; run on its own, this script does only this step.
 # The dump folder holds:
 #   base/exefs/ (main, main.npdm, sdk, rtld, subsdk*), base/romfs/   (base/romfs is optional when an update has its RomFS: that one is whole, and nothing packs the base's for it)
@@ -111,7 +111,7 @@ def pack_dlc(app, dlc, aoc, say=print):   # {DLC title ID: its RomFS folder} →
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Pack a dumped game (base/, updates/<version>/, dlc/) into the extraction layout of build_ipa_from_nsp.py')
+    ap = argparse.ArgumentParser(description='Pack a game you dumped from your own Switch (base/, updates/<version>/, dlc/) into the extraction layout of build_ipa_from_nsp.py')
     ap.add_argument('dump', type=Path, help='the dump folder (holds base/exefs with base/romfs or updates/<version>/romfs, or updates/<version>/ with exefs and romfs, or exefs and romfs directly)')
     ap.add_argument('--version', type=int, help='the update version to pack (default: the newest in updates/; 0 = the base game)')
     ap.add_argument('--work-dir', type=Path, help='the build folder (default: <dump>/<title ID>_build)')

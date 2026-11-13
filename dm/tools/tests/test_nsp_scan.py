@@ -191,8 +191,8 @@ class Reader(unittest.TestCase):
 
     def test_keys_that_cannot_open_the_metas_stop_with_nx_extract_s_line(self):
         self.out, self.code = ('[RED] a.nsp: prod.keys has no key_area_key_application_10 (master key 10, which came with firmware 17.0.0): the keys are older than the game; '
-                               'dump prod.keys again from a console on firmware 17.0.0 or later\n'), 6
-        with self.assertRaisesRegex(nsp.BuildError, r'^a\.nsp: prod\.keys has no key_area_key_application_10 .* firmware 17\.0\.0 or later$'): self.reader().contents([self.tmp / 'a.nsp'])
+                               'update your Switch to firmware 17.0.0 or later and dump prod.keys again from it\n'), 6
+        with self.assertRaisesRegex(nsp.BuildError, r'^a\.nsp: prod\.keys has no key_area_key_application_10 .* firmware 17\.0\.0 or later and dump prod\.keys again from it$'): self.reader().contents([self.tmp / 'a.nsp'])
 
     def test_any_other_failure_stops_with_its_output(self):
         self.out, self.code = 'Unhandled exception. System.IO.IOException: boom\n', 134
@@ -214,8 +214,8 @@ class Reader(unittest.TestCase):
         r.check_keys(fam)
         self.assertEqual(self.calls[0][0], ['nx', self.keys, '--keys', m, upd]); self.assertIn(6, self.calls[0][1])
         self.out = ('[RED] m.nsz (and 1 more files): prod.keys has no key_area_key_application_10 (master key 10, which came with firmware 17.0.0): the keys are older than the game; '
-                    'dump prod.keys again from a console on firmware 17.0.0 or later\n')
-        with self.assertRaisesRegex(nsp.BuildError, r'^m\.nsz \(and 1 more files\): prod\.keys has no key_area_key_application_10 .* firmware 17\.0\.0 or later$'): r.check_keys(fam)
+                    'update your Switch to firmware 17.0.0 or later and dump prod.keys again from it\n')
+        with self.assertRaisesRegex(nsp.BuildError, r'^m\.nsz \(and 1 more files\): prod\.keys has no key_area_key_application_10 .* firmware 17\.0\.0 or later and dump prod\.keys again from it$'): r.check_keys(fam)
         self.out, self.code = 'Unhandled exception. System.IO.IOException\n', 134
         r.check_keys(fam)
 

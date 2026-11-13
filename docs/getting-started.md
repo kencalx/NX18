@@ -4,12 +4,12 @@ This page takes you from nothing to playing one of your legally owned and acquir
 
 ## 1. What you need
 
-- **An iPhone 18 Pro Max** on iOS 27.3 or later. NX 18 is built and tested for its A20 Pro chip. Older iPhones and older iOS versions are not supported. iPad builds have not been tested.
+- **An iPhone 18** on iOS 27.3 or later. NX 18 is built for the A20 chip (the iPhone 18 family) and tested on an iPhone 18 Pro Max. Older iPhones and older iOS versions are not supported. iPad builds have not been tested.
 - **An M-series Mac** (Apple silicon, M1 or later) on macOS 27.3 or later. A virtual Mac isn't supported: its GPU has no Metal 4.
 - **Xcode 27.3**, which you download from Apple yourself (step 2 says where).
-- **Your legally owned and acquired games**, and your own `prod.keys` for games in `.nsp`, `.xci`, `.nsz` or `.xcz` files. A `.nup` or `.nx` file or a dump folder needs no keys.
+- **Your legally owned and acquired games**, dumped from your own Switch or Switch 2, and the `prod.keys` dumped from your own Switch for games in `.nsp`, `.xci`, `.nsz` or `.xcz` files. A `.nup` or `.nx` file or a dump folder needs no keys.
 
-NX 18 includes no games and no keys. This guide doesn't say where to get them.
+NX 18 includes no games, keys or firmware. Everything it builds from comes from your own console and your own purchases.
 
 ## 2. Set up your Mac
 
@@ -40,7 +40,7 @@ cp -n ~/Downloads/nx18-build.sh ~/nx18-build.sh
 Edit the **SETTINGS** at its top:
 
 - `GAME`: your legally owned and acquired game files. That's a folder with the game's `.nsp`, `.xci`, `.nsz` or `.xcz` files (with its update and DLC beside them), a dump folder, or a `.nup` or `.nx` file.
-- `KEYS`: where your `prod.keys` is. Only `.nsp`, `.xci`, `.nsz` and `.xcz` games need it.
+- `KEYS`: where your `prod.keys` is, dumped from your own Switch. Only `.nsp`, `.xci`, `.nsz` and `.xcz` games need it.
 - `TARGET`: `iphone` (or `ipad` or `mac-app`).
 
 Keep the quotes around each path. Spaces in folder names are fine. Then run it:
@@ -75,7 +75,7 @@ A few things to know:
 
 - **Use AltStore Classic, not AltStore PAL.** Classic installs any `.ipa`. PAL installs only notarized apps ([the difference](https://faq.altstore.io/altstore-pal-v.-altstore-classic)).
 - **LiveContainer runs your games inside itself,** so LiveContainer is the app that needs the Increased Memory Limit (step 5).
-- **[NX Play](../README.md#community-front-ends)**, a community Mac app, can also build a game and install it through Xcode. It builds from its own copy of the code, not with `nx18-build.sh`; questions about it go to its own page.
+- **[NX Play](../README.md#community-front-ends)**, a community Mac app, can also build a game and install it through Xcode. By default it builds upstream nxnative, not NX 18. To build a game with NX 18, link the game's folder to your checkout: `ln -s ~/NX18 "<game folder>/nxnative"` ([NX Play's steps](https://github.com/varyform/nx-native-wrapper#testing-an-nxnative-branch)). It doesn't use `nx18-build.sh`; questions about it go to its own page.
 - **With Xcode,** keep `TARGET="iphone"` and build with `bash ~/nx18-build.sh --prepare-xcode`. You get an Xcode workspace, `NxNative.xcworkspace` beside the game's folder, instead of an IPA, and Xcode signs and installs the game for you. [NX 18's Xcode steps](development.md#build-and-run-on-a-device-with-xcode) walk you through it.
 - **On your iPhone,** turn on **Developer Mode** in Settings › Privacy & Security, then restart and tap **Enable** ([Apple's steps](https://developer.apple.com/documentation/xcode/enabling-developer-mode-on-a-device)). The switch shows up only after your iPhone has been connected to a computer, so connect it first. With a sideloading tool, also trust the developer profile under Settings › General › VPN & Device Management the first time.
 - **A free Apple ID has limits:** 3 apps per device, apps that stop opening after 7 days until you refresh them, and at most 10 App IDs at a time ([Apple's comparison](https://developer.apple.com/support/compare-memberships/)).
@@ -93,7 +93,7 @@ That section also shows how to check that it worked, from the game's log.
 
 - **On a free Apple ID, refresh every 7 days.** Your tool re-signs the game before it expires. In SideStore, tap the **7 DAYS** counter in **My Apps**. Sideloadly can re-sign it for you in the background.
 - **Updating to a new build:** install the new IPA over the game already on your phone. **Never delete the game first:** deleting it deletes its data, saves included. Some tools give a reinstalled app a new data folder. If yours does, copy `save/` and `pso_user.tsv` over from the old one ([Playing](playing.md)).
-- **Updating NX 18:** run `bash ~/Downloads/nx18-setup.sh` again (or the newer copy from the release). It updates `~/NX18`. Then build your games again.
+- **Updating NX 18:** run `bash ~/Downloads/nx18-setup.sh` again (or the newer copy from the release). It updates `~/NX18`. When a release changes `nx18-build.sh`, copy your settings into the newer copy. Then build your games again.
 - **Back up your saves:** they are in the Files app, under the game's name, in `save/`.
 - **Play on more than one device:** cloud saves share one game's save between your iPhone, iPad and Mac through iCloud Drive ([Cloud saves](settings.md#cloud-saves)).
 
@@ -105,9 +105,18 @@ That section also shows how to check that it worked, from the game's log.
 - **The game is too big to install:** set `ROMFS_SEPARATE="yes"` and build again. Then copy the game files to your phone once with the command the script prints. With AltServer, also set `SHADER_FILES="yes"`: AltServer can't install a file of 2 GiB or more.
 - **Donkey Kong Bananza stays at 30 fps:** the game picks 60 or 30 fps itself, and on an iPhone it can settle at 30 after a busy scene. Open and close the pause menu to bring it back to 60. This is a known limit.
 
-Still stuck? Ask in [Discussions](../README.md#discussions), with the game's log (in-game menu › **Share log**).
+Still stuck? Open an issue in NX 18's [Issues](https://github.com/kencalx/NX18/issues), with the game's log. [Step 8](#8-reporting-a-problem) says how.
 
-## 8. Learn more
+## 8. Reporting a problem
+
+Report a problem in NX 18's [Issues](https://github.com/kencalx/NX18/issues) and attach the game's log:
+
+- **On your iPhone or iPad:** open the in-game menu and tap **Share log**. It sends `log.txt` and `log.prev.txt`, the logs of this run and the one before.
+- **On your Mac:** run `python3 scripts/bug_report.py <title ID>` in `~/NX18`. It collects the logs, versions and settings into one file to attach. You can also attach the log files yourself ([README](../README.md#reporting-a-problem)).
+
+Never attach game files, keys or anything extracted from a game. Logs never contain keys or game files. A Mac log can contain your folder names; `bug_report.py` replaces your home folder with `~`.
+
+## 9. Learn more
 
 - [Apple: Choosing a Membership](https://developer.apple.com/support/compare-memberships/): what a free Apple ID can and can't do, and why apps expire after 7 days.
 - [Apple: Enabling Developer Mode on a device](https://developer.apple.com/documentation/xcode/enabling-developer-mode-on-a-device): the switch every sideloading tool needs.

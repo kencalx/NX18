@@ -4,8 +4,8 @@
 #   With a key, SteamGridDB's game is looked up first: when it has both a hero (textless by design) and a logo, that pair is the art (art.jpg) and the logo (logo.png), as titledb's banner has the logo painted in.
 # The logo (the game's title wordmark, a transparent PNG the launcher shows in place of the name): the player's own (--logo / LOGO), else SteamGridDB's with a key, which goes over a SteamGridDB hero or the
 #   player's art but never over a titledb banner (two logos); a player's logo goes over whatever art there is. titledb has no logo. A logo that fails is a line, and the art falls back to the banner.
-#   titledb: https://github.com/blawar/titledb's US.en.json (about 90 MB, keyed by nsuId), downloaded whole, so the list's host is sent no title ID, into CACHE_ROOT/titledb/; it is turned into a small index.json
-#   ({TITLE ID: name, bannerUrl, screenshots, description, intro, publisher, releaseDate}) and the 90 MB file is deleted. The index is checked again when it is older than 14 days, with If-None-Match /
+#   titledb: a public title database's US.en.json (TITLEDB_URL; the game's eShop page data, about 90 MB, keyed by nsuId), downloaded whole, so the list's host is sent no title ID, into CACHE_ROOT/titledb/; it is turned into a small index.json
+#   ({TITLE ID: name, bannerUrl, screenshots, description, intro, publisher, releaseDate}) and the 90 MB file is deleted; no other field of it is kept or used. The index is checked again when it is older than 14 days, with If-None-Match /
 #   If-Modified-Since, so an unchanged list is not downloaded again. Its text is also the launcher's "About this game" (about.json), whatever the art came from.
 #   SteamGridDB: only with a key (STEAMGRIDDB_KEY), which goes only into the Authorization header of SteamGridDB's API requests: never into a URL, a say line, art.json, argv or the environment
 #   (the curl fallback reads it on stdin). The search term is the game's name. A key with characters an API key does not have (a pasted second line) is not used.

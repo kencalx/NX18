@@ -753,7 +753,7 @@ extension View {
     func nxPushButton(primary: Bool = false) -> some View { modifier(NXPushButton(primary: primary)) }
 }
 
-// About this game (dm/about.json, titledb's text): the art, the name, the intro and description, the publisher and release date, and where the text came from
+// About this game (dm/about.json, the game's eShop page text from a public title database): the art, the name, the intro and description, the publisher and release date, and where the text came from
 struct AboutGameSheet: View {
     let about: LauncherExtras.About
     let name: String
@@ -802,7 +802,7 @@ struct AboutGameSheet: View {
                         .padding(.top, 4)
                     }
                     if let src = text(about.source) {
-                        Text("From \(src)").nxFont(.footnote).foregroundStyle(NX18Palette.muted)
+                        Text(src == "titledb" ? "From the game's eShop page" : "From \(src)").nxFont(.footnote).foregroundStyle(NX18Palette.muted)   // as on iOS (LauncherAbout.sourceLine)
                     }
                 }
                 .textSelection(.enabled)

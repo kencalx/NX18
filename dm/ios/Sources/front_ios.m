@@ -174,7 +174,7 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
     front_ios_notify_setup();
     if (!front_ios_boot_ok()) {   // No game files: show a hint and do not start the host
         const char *why = front_ios_boot_message();
-        [self showHint:why ? [NSString stringWithFormat:@"Game files unusable.\n%s", why] : @"Game files not found.\nPut the RomFS folder into this App's Documents as \"romfs\" (Files app), then restart."]; return;
+        [self showHint:why ? [NSString stringWithFormat:@"Game files unusable.\n%s", why] : @"Game files not found.\nPut the RomFS folder from your own dump of this game into this App's Documents as \"romfs\" (Files app), then restart."]; return;
     }
     front_ios_audio_watch();
     {   // iOS 27 offers a TV scene only to a registered scene accessory, no longer from the Info.plist entry alone (the entry stays: main.m's App names its "TV" configuration)

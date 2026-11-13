@@ -1,6 +1,6 @@
 # NieR:Automata The End of YoRHa Edition, Asian release (`0100B8E016F76000`)
 
-Update 1.0.3 (v131072, update title `0100B8E016F76800`) over the Asian base game, SDK 12.3.9: the Japanese / Korean / Chinese release under its own title ID. PlatinumGames' engine on NVN, as in the global release ([010056B015FE8000](../010056B015FE8000/README.md)), whose note covers the game, its keys, its shaders and its 60 fps. Modules `main`, `subsdk0` and `sdk`; `subsdk0` (`be1ee79a…`) and `sdk` (`e8cdceb1…`) are the global release's builds, `main` (`98397a10…`) is not.
+Update 1.0.3 (v131072, update title `0100B8E016F76800`) over the Asian base game, SDK 12.3.9: the Japanese / Korean / Chinese release under its own title ID. PlatinumGames' engine on NVN, as in the global release ([010056B015FE8000](../010056B015FE8000/README.md)), whose note covers the game, its profile and shader keys, its shaders and its 60 fps. Modules `main`, `subsdk0` and `sdk`; `subsdk0` (`be1ee79a…`) and `sdk` (`e8cdceb1…`) are the global release's builds, `main` (`98397a10…`) is not.
 
 ## What it needs
 

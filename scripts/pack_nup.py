@@ -3,9 +3,9 @@
 # a .nup file, or a folder that holds one, and goes on with its other steps; run on its own, this script does only this step.
 # A NUP holds the same packages as a dump folder (scripts/pack_dump.py): the base game, updates by version and DLC by title ID, each an exefs/ and romfs/ tree, its files stored raw or as one zstd
 # frame each, with a SHA-256 per file. Its files are not encrypted, so it needs no keys. Unlike a dump it may carry control data in each package's meta block: the NACP and the icon. Its name,
-# publisher and display version records are labels the packer typed (Hyrule Warriors: Age of Imprisonment's says "HWAoI"), not the console's: without a NACP the name comes from the profile.
-# A container may hold no base game, in two forms that mean the same: no base record, with standalone_update on every update (SPEC §3.1.2), or a base record with no files (title ID 0), as packers
-# leave when an update holds the whole game (Pokemon Pokopia's v655360). The title ID is then the program ID of the code present, there is no version 0, and the selected update needs its own ExeFS
+# publisher and display version records are labels typed when the NUP was packed (Hyrule Warriors: Age of Imprisonment's says "HWAoI"), not the console's: without a NACP the name comes from the profile.
+# A container may hold no base game, in two forms that mean the same: no base record, with standalone_update on every update (SPEC §3.1.2), or a base record with no files (title ID 0), as a NUP is
+# packed when an update holds the whole game (Pokemon Pokopia's v655360). The title ID is then the program ID of the code present, there is no version 0, and the selected update needs its own ExeFS
 # and RomFS, taken as the whole game. The flag does not promise that (the spec says such an update needs a matching base elsewhere), and nothing in a container can prove it, so the scripts say so
 # (NO_BASE). What was measured: the update RomFS of both NUPs at hand holds every path of its base (Hyrule Warriors: Age of Imprisonment, Yoshi and the Mysterious Book).
 # Writes, under the build folder (<folder of the .nup>/<title ID>_build unless --work-dir names another):
@@ -113,7 +113,7 @@ class Nup:
         if magic[:3] != b'NUP': raise Error(f'{self.path}: not a NUP')
         if magic[3] != 1: raise Error(f'{self.path}: NUP format version {magic[3]}; this reads version 1')
         if hsize < SUPER.size or toc_off != hsize or flags: raise Error(f'{self.path}: unsupported NUP header')
-        if fsize != len(self.mm): raise Error(f'{self.path}: {len(self.mm):,} bytes, its header says {fsize:,} (copied or downloaded partly?)')
+        if fsize != len(self.mm): raise Error(f'{self.path}: {len(self.mm):,} bytes, its header says {fsize:,} (copied partly? copy it again, or pack it again from your own dump)')
         if self.blob < toc_off + toc_size or self.blob % 16 or self.blob > fsize: raise Error(f'{self.path}: TOC and data regions overlap')
         toc = self.mm[toc_off:toc_off + toc_size]
         self.toc_sha = toc_sha
@@ -328,7 +328,7 @@ def pick(tags, code):   # the record for a language code: the exact tag, then it
     return tags.get(code) or tags.get(code.split('-')[0])
 
 
-def app_package(n, k=None):   # (k: the package, as pack_nx.app_package takes it) the record that holds application metadata when no base game is there (SPEC §5.1): a base record with no files, as packers attach it there, else the first package
+def app_package(n, k=None):   # (k: the package, as pack_nx.app_package takes it) the record that holds application metadata when no base game is there (SPEC §5.1): a base record with no files, as some NUPs are packed, else the first package
     return next((k for k in n.packages if k.kind == BASE), n.packages[0])
 
 
@@ -385,7 +385,7 @@ def pack_dlc(n, app, dlc, aoc, say=print):   # {DLC title ID: package} → aoc/<
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Pack a game in a NUP container into the extraction layout of build_ipa_from_nsp.py')
+    ap = argparse.ArgumentParser(description='Pack your game\'s NUP container (made from your own dump) into the extraction layout of build_ipa_from_nsp.py')
     ap.add_argument('nup', type=Path, help='the .nup file')
     ap.add_argument('--version', type=int, help='the update version to pack (default: the newest in the container; 0 = the base game)')
     ap.add_argument('--work-dir', type=Path, help='the build folder (default: <folder of the .nup>/<title ID>_build)')

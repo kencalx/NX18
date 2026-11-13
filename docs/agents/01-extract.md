@@ -9,8 +9,8 @@
   HOME="$(cd "$(dirname "$0")" && pwd)" exec "$(dirname "$0")/../../tools/hactool/hactool" --disablekeywarns "$@"
   ```
 
-- Dumped `prod.keys` files may contain malformed lines (seen: 33 `*master_kek_source_*` lines with the wrong length) that make hactool refuse the whole file. Drop lines whose value length is wrong for the key type; keep a backup of the original.
-- Title key: the NSP carries `<rights id>.tik`. For a common ticket the encrypted title key is the first 16 bytes of the title-key block at 0x180; append `<rights id> = <key hex>` to `title.keys`. Never print the value.
+- A `prod.keys` dumped from the user's own console may contain malformed lines (seen: 33 `*master_kek_source_*` lines with the wrong length) that make hactool refuse the whole file. Drop lines whose value length is wrong for the key type; keep a backup of the original.
+- Title key: the user's own NSP carries `<rights id>.tik`, the ticket of their purchase. For a common ticket the encrypted title key is the first 16 bytes of the title-key block at 0x180; append `<rights id> = <key hex>` to `title.keys`. Never print or share the value.
 
 ## NSP → NCA → ExeFS / RomFS
 
@@ -28,9 +28,9 @@ ht -t nca --exefsdir=$W/data/v0/ExeFS --romfsdir=$W/data/v0/RomFS $W/build/nsp/<
 - **A cartridge dump (`.xci`) as the base game** (Monster Hunter Rise): the card header's magic `HEAD` sits at 0x100, and its root HFS0 holds the `update`, `logo`, `normal` and `secure` partitions; the game's NCAs are in `secure` (here the 7 GB program NCA, control, legal information, HTML manual and the meta NCA). Cartridge NCAs carry their key in the key area, so there is no ticket. `nx_extract` opens either kind as the base game (`OpenNsp`), and the NSP script takes `*.xci` beside `*.nsp`; the update and DLC stay NSPs.
 - Decompressed NSO images for analysis: `dm/tools/nso.py <nso> <out.bin>` (lz4; use a venv that has `lz4`). A tool that reads a module's code loads it through `nso.load` / `nso.read` there, never a copy of its own. `dm/tools/nso2elf.py` makes an ELF for Ghidra / REA / objdump.
 
-**A damaged NSP** (an incomplete copy, a broken download) shows as a hash error while the RomFS is read. `nx_extract` lists every file whose data fails the NCA's hash check and exits with code 3; `--allow-damaged` (the NSP script's `ALLOW_DAMAGED` / `--allow-damaged`) writes them as read and only lists them. A RomFS image marks those files, and the host names them in its log ([A crash from a damaged NSP's file](../reference/packing.md#a-crash-from-a-damaged-nsps-file-looks-like-a-host-bug)). To check a whole NCA, its file name is the first 16 bytes of its SHA-256: Super Mario Galaxy's base program NCA hashed differently, with 12 MB runs of zeros near its end (147 MB of damaged RomFS: the two WebM prologue movies), while its update and the small NCAs matched their names.
+**A damaged NSP** (an interrupted dump, or an incomplete copy from the console's SD card or over USB) shows as a hash error while the RomFS is read. `nx_extract` lists every file whose data fails the NCA's hash check and exits with code 3; `--allow-damaged` (the NSP script's `ALLOW_DAMAGED` / `--allow-damaged`) writes them as read and only lists them. A RomFS image marks those files, and the host names them in its log ([A crash from a damaged NSP's file](../reference/packing.md#a-crash-from-a-damaged-nsps-file-looks-like-a-host-bug)). To check a whole NCA, its file name is the first 16 bytes of its SHA-256: Super Mario Galaxy's base program NCA hashed differently, with 12 MB runs of zeros near its end (147 MB of damaged RomFS: the two WebM prologue movies), while its update and the small NCAs matched their names.
 
-**Keys older than the game** (a prod.keys from a console on older firmware): `nx_extract` names the newest key it lacks and the firmware it came with, and exits with code 6 before decrypting anything; `nx_extract <prod.keys> --keys <package>...` runs only that check ([keys](../reference/packing.md#keys-older-than-the-game-stop-the-extraction-with-an-unhandled-missingkeyexception)).
+**Keys older than the game** (a prod.keys dumped from your console while it ran older firmware; update the console and dump the keys again): `nx_extract` names the newest key it lacks and the firmware it came with, and exits with code 6 before decrypting anything; `nx_extract <prod.keys> --keys <package>...` runs only that check ([keys](../reference/packing.md#keys-older-than-the-game-stop-the-extraction-with-an-unhandled-missingkeyexception)).
 
 ## Workspace layout used so far
 

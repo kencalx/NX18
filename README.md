@@ -8,7 +8,7 @@ Play your legally owned and acquired Nintendo Switch and Switch 2 games natively
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
 
-[Games](#games) · [Community front ends](#community-front-ends) · [Requirements](#requirements) · [How to play](#how-to-play) · [Discussions](#discussions) · [For developers](#for-developers)
+[Games](#games) · [Community front ends](#community-front-ends) · [Requirements](#requirements) · [How to play](#how-to-play) · [Reporting a problem](#reporting-a-problem) · [For developers](#for-developers)
 
 ## Games
 
@@ -53,6 +53,10 @@ For a game without a profile, the script writes a survey and tries a provisional
 
 ## How to play
 
+**Your games and keys.** NX 18 works only from what you dump from your own Switch or Switch 2: your legally owned and acquired games, with their updates and DLC, and your `prod.keys`. NX 18 does not provide game files, keys or firmware.
+
+New to this? [Getting started](docs/getting-started.md) takes you from a new Mac and iPhone to playing, one step at a time.
+
 Switch 2 games are built from one `.nup` or `.nx` file or a folder of their files, not from NSPs: see [Switch 2 games](#switch-2-games).
 
 ### Quick start with the release scripts
@@ -60,7 +64,7 @@ Switch 2 games are built from one `.nup` or `.nx` file or a folder of their file
 Two scripts come with each [release](https://github.com/kencalx/NX18/releases) (and are in [`scripts/release`](scripts/release)). They do the steps of [Build from the command line](#build-from-the-command-line) for you:
 
 - **`nx18-setup.sh`** gets the Mac ready. It checks macOS, Xcode 27.3 (which you download from Apple yourself; it says which and how to select it) and its Metal toolchain, installs xcodegen, zstd and the Python modules (into a virtualenv, `.venv` in the NX 18 folder), and clones or updates NX 18 in `~/NX18`. It asks before each install or download and never runs `sudo`, and it leaves a folder with your own changes in it alone. `--check` only reports what is missing; `--yes` answers every question; `--dir <folder>` and `--ref <tag>` choose another folder or a release.
-- **`nx18-build.sh`** builds a game. Set your game (your legally owned and acquired game files: a folder of NSPs, a dump folder, or a `.nup` or `.nx` file), your `prod.keys` and the target (`iphone`, `ipad` or `mac-app`) in the settings at its top, then run it. It checks the settings, selects Xcode 27.3 by itself, runs the build and says where the IPA or app is. It never prints or copies your keys.
+- **`nx18-build.sh`** builds a game. Set your game (your legally owned and acquired game files: a folder of NSPs, a dump folder, or a `.nup` or `.nx` file), your `prod.keys` (dumped from your own Switch; only NSPs and XCIs need it) and the target (`iphone`, `ipad` or `mac-app`) in the settings at its top, then run it. It checks the settings, selects Xcode 27.3 by itself, runs the build and says where the IPA or app is. It never prints or copies your keys.
 
 ```
 bash ~/Downloads/nx18-setup.sh
@@ -85,7 +89,7 @@ brew install xcodegen zstd
 python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
 ```
 
-**2. Put your game in a folder**: the game, plus its update and DLC if you have them (`.nsp`, `.xci`, `.nsz` or `.xcz`):
+**2. Put your game in a folder**: your dump of the game, plus its update and DLC if you own them (`.nsp`, `.xci`, `.nsz` or `.xcz`):
 
 ```
 ~/Games/MarioWonder/
@@ -93,15 +97,15 @@ python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; 
   Super Mario Bros. Wonder [010015100B514800][v327680].nsp
 ```
 
-**3. Build**, with your game folder and your `prod.keys`:
+**3. Build**, with your game folder and the `prod.keys` dumped from your own Switch:
 
 ```
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys
 ```
 
-Mods: put the game's cheats (`cheats` folders) and a High frame rate or Ultrawide mod (`.ips`, `.pchtxt`, in a folder named for it, such as `60FPS` or `Ultrawide`) in a folder named `mods` inside the game's folder, as Atmosphère, yuzu or Ryujinx lay them out: the cheats are packed into the app and the mod becomes a switch in the launcher ([Mods and patches](docs/playing.md#mods-and-patches)). Other code patches and replacement files (`romfs` folders) are left out.
+Mods: put the game's cheats (`cheats` folders) and a High frame rate or Ultrawide mod (`.ips`, `.pchtxt`, in a folder named for it, such as `60FPS` or `Ultrawide`) in a folder named `mods` inside the game's folder, as Atmosphère lays them out on your Switch's SD card: the cheats are packed into the app and the mod becomes a switch in the launcher ([Mods and patches](docs/playing.md#mods-and-patches)). Other code patches and replacement files (`romfs` folders) are left out.
 
-Launcher art: the screen before the game shows the game's key art, downloaded from titledb, else from SteamGridDB when you set a `STEAMGRIDDB_KEY` environment variable to your SteamGridDB API key. With a key it also shows the game's logo in place of its name, over SteamGridDB's textless art. `--art <image>` gives your own art, `--logo <image>` your own logo (a PNG or WebP with transparency), `--manual <file.pdf>` adds the game's manual, and `--no-art-online` keeps the build off the network ([Launcher art](docs/development.md#launcher-art-about-this-game-and-the-manual)).
+Launcher art: the screen before the game shows the game's key art, downloaded from a public title database, else from SteamGridDB when you set a `STEAMGRIDDB_KEY` environment variable to your SteamGridDB API key. With a key it also shows the game's logo in place of its name, over SteamGridDB's textless art. `--art <image>` gives your own art, `--logo <image>` your own logo (a PNG or WebP with transparency), `--manual <file.pdf>` adds the game's manual, and `--no-art-online` keeps the build off the network ([Launcher art](docs/development.md#launcher-art-about-this-game-and-the-manual)).
 
 UI font: `--ui-font <file.ttf>` (a TTF, OTF or TTC of your own) puts one font into the app for all of NX 18's own text: the launcher, the in-game prompts and progress screens, and the Mac banner and Cheats window. The file goes only into the app built on your Mac, never into the repository (so keep that app to your own devices); without it the system font is used ([UI font](docs/development.md#ui-font)).
 
@@ -112,6 +116,8 @@ To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the g
 ### Install
 
 Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, SideStore, Sideloadly or LiveContainer. Then make sure the game gets the [Increased Memory Limit](#increased-memory-limit).
+
+**Recommended, not required: a paid Apple Developer account.** Apps stay signed for a year instead of 7 days, there's no 3-app limit, and the Increased Memory Limit comes through automatically when you install from Xcode. A free Apple ID works too. Making NX 18 friendlier to free accounts is planned. [Getting started](docs/getting-started.md#4-choose-how-to-install) compares the ways to install and links each tool's guide.
 
 Game too big to install? Build again with `--romfs separate`, and run the command the script prints once to copy the game files to your phone ([Quick reinstalls](docs/development.md#quick-reinstalls)). With AltServer, also add `--shader-files`: it cannot install a file of 2 GiB or more.
 
@@ -139,7 +145,7 @@ To check that it worked, start a game, share its log (the in-game menu › **Sha
 
 ### Switch 2 games
 
-A Switch 2 game is built from your legally owned and acquired game files, in one [NUP](https://github.com/a55uka/nup) container (a `.nup` file), one [NX](https://github.com/fab918/nxformat) archive (a `.nx` file) or a folder of its files, not from NSPs. None of them needs `prod.keys`. A game this project has no profile for is surveyed and gets a provisional profile, as NSPs do ([Port another game](docs/development.md#port-another-game)), which may not boot. You get an IPA, or a Mac app with `--platform mac-app`; iPad builds are untested. On the iPhone and iPad the game starts in Handheld, its lighter mode, and the Mac starts it in Docked; **Console mode** in the settings changes it ([Console mode](docs/settings.md#console-mode)).
+A Switch 2 game is built from your legally owned and acquired game files, in one [NUP](https://github.com/a55uka/nup) container (a `.nup` file), one [NX](https://github.com/fab918/nxformat) archive (a `.nx` file) or a folder of its files, not from NSPs. None of them needs `prod.keys`: a Switch 2 game dumped from your own console is already unpacked to its files. A game this project has no profile for is surveyed and gets a provisional profile, as NSPs do ([Port another game](docs/development.md#port-another-game)), which may not boot. You get an IPA, or a Mac app with `--platform mac-app`; iPad builds are untested. On the iPhone and iPad the game starts in Handheld, its lighter mode, and the Mac starts it in Docked; **Console mode** in the settings changes it ([Console mode](docs/settings.md#console-mode)).
 
 **From a `.nup` file**, which holds the base game, its updates and DLC in one file. Give the file, or a folder that holds it:
 
@@ -157,7 +163,7 @@ A NUP without the base game also works, when its base package is empty or it has
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nx --platform mac-app
 ```
 
-Every version in an NX is the whole game, so a newer update needs no base game beside it; `--package v<N>` selects a version, the newest by default. Each version carries its own NACP and icon when the archive has them, and DLC converted from a NUP or folders comes along. A version without a NACP takes the archive's title as the app's name (the title given to `nxconvert --fallback-title` or typed in NXConvert's sidebar), else the profile's. An icon set in NXConvert's sidebar becomes the app's icon, also for an NX made from NSPs or XCIs. An NX without an icon gets the one NX Play saved for the game when there is one, else the NX 18 icon; `--icon <image>` gives it another. Every file is checked against its SHA-256 as it is unpacked, and a damaged archive stops the build with the file it failed on; `python3 scripts/pack_nx.py game.nx --list` lists what an archive holds and `--verify` checks all of it. An NX that holds several games needs `--title-id`. An NX made from decrypted NSPs or XCIs (`nxconvert pack game.dnsp`, Switch 1 games) holds the decrypted NCA files themselves: it builds too, still with no `prod.keys`. The repository's `nx_extract` reads them and lays an update over its base game, as it does for NSPs. It needs temporary space for the NCA files of the version it extracts (an update's base and patch NCAs together, deleted after each), and a repeat build reuses the extraction without staging them again. Its base game alone cannot be packed when that base is sparse (the decrypter left out data its update carries); pack the update version. An NX of a newer format version than 0.2 or 0.3 is refused with a line saying a newer NX 18 is needed. Keep one `.nup` or `.nx` per folder.
+Every version in an NX is the whole game, so a newer update needs no base game beside it; `--package v<N>` selects a version, the newest by default. Each version carries its own NACP and icon when the archive has them, and DLC converted from a NUP or folders comes along. A version without a NACP takes the archive's title as the app's name (the title given to `nxconvert --fallback-title` or typed in NXConvert's sidebar), else the profile's. An icon set in NXConvert's sidebar becomes the app's icon, also for an NX made from NSPs or XCIs. An NX without an icon gets the one NX Play saved for the game when there is one, else the NX 18 icon; `--icon <image>` gives it another. Every file is checked against its SHA-256 as it is unpacked, and a damaged archive stops the build with the file it failed on; `python3 scripts/pack_nx.py game.nx --list` lists what an archive holds and `--verify` checks all of it. An NX that holds several games needs `--title-id`. An NX made from your NSPs or XCIs after you decrypted them with your own console's keys (`nxconvert pack game.dnsp`, Switch 1 games) holds the decrypted NCA files themselves: it builds without `prod.keys` being given again. The repository's `nx_extract` reads them and lays an update over its base game, as it does for NSPs. It needs temporary space for the NCA files of the version it extracts (an update's base and patch NCAs together, deleted after each), and a repeat build reuses the extraction without staging them again. Its base game alone cannot be packed when that base is sparse (the decrypting tool left out data its update carries); pack the update version. An NX of a newer format version than 0.2 or 0.3 is refused with a line saying a newer NX 18 is needed. Keep one `.nup` or `.nx` per folder.
 
 **From a folder of files**. The script expects this layout (`updates` and `dlc` are optional):
 
@@ -176,9 +182,16 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-a
 
 An update's folder alone will do (no `base/`), and so will `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, which count as `base/`. The folder holds no icon, so the app gets the icon NX Play saved for the game when there is one, else the NX 18 icon; `--icon <image>` (`ICON` in Spyder) gives it the game's. To turn such a folder into a NUP: `nup pack ~/Games/DonkeyKongBananza game.nup`.
 
-## Discussions
+## Reporting a problem
 
-Questions, how a game runs on your Mac or iPhone, and ideas go in [Discussions](https://github.com/seedds/nxnative/discussions); [Issues](https://github.com/seedds/nxnative/issues) are for bugs, with the log. Ocarina of Time's performance (frame rate, resolution, which Macs hold 60 fps) is followed in [Ocarina of Time: state on main](https://github.com/seedds/nxnative/discussions/1789).
+Report a problem in NX 18's [Issues](https://github.com/kencalx/NX18/issues), with the game's log attached. Questions and ideas go there too.
+
+- **iPhone or iPad:** the in-game menu › **Share log**. It sends `log.txt` and `log.prev.txt`, the logs of this run and the one before.
+- **Mac:** `python3 scripts/bug_report.py <title ID>` collects the logs, versions and settings into one file to attach. You can also attach `~/Library/Logs/nxnative/<title ID>.log` yourself.
+
+Never attach game files, keys or anything extracted from a game. Logs never contain keys or game files. A Mac log can contain your folder names; `bug_report.py` replaces your home folder with `~`.
+
+Each game's state on NX 18 (frame rate, resolution, devices tested) is in its [game note](dm/games/README.md#games). Questions about a community front end go to that project's own page.
 
 ## For developers
 

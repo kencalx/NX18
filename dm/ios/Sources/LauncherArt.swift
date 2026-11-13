@@ -7,7 +7,7 @@
 import Foundation
 import UIKit
 
-// about.json: titledb's text for the game (scripts/game_art.py). Every field may be missing or of another type; such a field is nil
+// about.json: the game's eShop page text, from a public title database (scripts/game_art.py). Every field may be missing or of another type; such a field is nil
 struct LauncherAbout: Decodable, Equatable, Sendable {
     var name, intro, description, publisher, releaseDate, source: String?
 
@@ -33,8 +33,8 @@ struct LauncherAbout: Decodable, Equatable, Sendable {
         f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = TimeZone(identifier: "UTC"); f.dateFormat = "yyyy-MM-dd"
         return f.date(from: r)
     }
-    // Where the text came from, as the sheet's last line ("From titledb")
-    var sourceLine: String? { source.map { "From \($0)" } }
+    // Where the text came from, as the sheet's last line: game_art.py's "titledb" (a public title database's copy of the eShop page) shows as "From the game's eShop page"
+    var sourceLine: String? { source.map { $0 == "titledb" ? "From the game's eShop page" : "From \($0)" } }
 }
 
 struct LauncherContent: Equatable, Sendable {

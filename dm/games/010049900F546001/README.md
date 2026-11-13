@@ -4,7 +4,7 @@
 
 Program 1 of [Super Mario 3D All-Stars](../010049900F546000/README.md), packed with it, update 1.1.4 (v393216), SDK 10.8.1. Modules `main` and `sdk`.
 
-Nintendo's N64 layer ("EmuAppNX64") on the Japanese Shindou ROM with English text patched in by Lua scripts:
+Nintendo's N64 layer ("EmuAppNX64") running the Japanese Shindou version that Nintendo ships inside the collection, with English text patched in by the collection's own Lua scripts:
 
 - the MIPS code is recompiled to arm64 in an NRO (`rom/Stardust_JP/05_UNSMJ3.002.nro`), which the game loads with `nn::ro`;
 - a precompiled block list goes through a JIT plugin (`nro/EmuSystemJITPlugin.nro`) under `nn::jit`, 14 MB of code at boot, and a few blocks are compiled in play;

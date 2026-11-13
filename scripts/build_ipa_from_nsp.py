@@ -21,11 +21,11 @@
 #   yuzu / Ryujinx code patches, .ips, .ips32, .pchtxt, by its folder's name), which the launcher's High frame rate / Ultrawide turn on and off (build_variants); it is never written in
 #   for good. Other code patches and RomFS mods (romfs/ folders) are left out, each with a line. The build's own files are in <build folder>/mods_stage/; the extraction is never changed.
 #   MODS = 'none' / --no-mods packs the game without them.
-# Uses only three things: this repository, a folder holding one game's NSPs (the base game, with or without an update; DLC NSPs, when present, are packed too and unlock the add-on content already in the game), and prod.keys.
+# Uses only three things: this repository, a folder holding one of your legally owned and acquired games' NSPs (the base game, with or without an update; your DLC NSPs, when present, are packed too, so the add-on content you bought plays as it does on your console), and the prod.keys dumped from your own Switch.
 #   Instead of NSPs, the folder may hold the game's files as a dump (base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): that needs no prod.keys. A game with no profile is surveyed from those files. A dump has no control data: the name comes from the profile (a provisional one takes the folder's name), and the app gets the NX 18 icon (docs/images/nx18) unless --icon / ICON gives it one (--fallback-icon / FALLBACK_ICON: only when the game has none; without one, the icon NX Play saved for the game, NXPLAY_ICONS, when there is one).
 #   Or the folder may hold the game as one NUP container (a .nup file: base game, updates and DLC; scripts/pack_nup.py), or the .nup file may be given in its place: it needs no prod.keys, like a dump; a game with no profile is surveyed from the container's files (its newest version's code modules and RomFS file headers),
-#   and its RomFS images are written straight from it; the name, display version and icon come from the NACP and icon it carries, else as for a dump (its name record is a packer's label, not the game's), and --icon / ICON gives the app an icon when it carries none.
-#   Or the folder may hold the game as one NX archive (a .nx file, https://github.com/fab918/nxformat: NXConvert by fab918 makes them from decrypted dumps or NUPs; scripts/pack_nx.py), or the .nx file may be given in its place: read
+#   and its RomFS images are written straight from it; the name, display version and icon come from the NACP and icon it carries, else as for a dump (its name record is a label typed when it was packed, not the game's), and --icon / ICON gives the app an icon when it carries none.
+#   Or the folder may hold the game as one NX archive (a .nx file, https://github.com/fab918/nxformat: NXConvert by fab918 makes them from your own dumps (decrypted with your console's keys) or NUPs; scripts/pack_nx.py), or the .nx file may be given in its place: read
 #   like a NUP (no prod.keys; the versions and DLC it holds, its NACP and icon tied to each version, Switch 1 and Switch 2), every file checked against its SHA-256. An NX holding decrypted NCA files
 #   (nxconvert pack from a decrypted NSP or XCI, Switch 1) is read by the in-repo nx_extract (--plain: still no keys), its update's patch laid over its base game as for NSPs; it needs
 #   temporary space for the NCA files of the version being extracted (<build folder>/tmp/nca, deleted after each).
@@ -66,7 +66,7 @@ import game_art   # the launcher's key art and "About this game" text (titledb, 
 
 # ---- Settings ----
 NSP_DIR = ''                            # folder holding the NSPs, or the game's .nup or .nx file (empty = ask at run time)
-PROD_KEYS = ''                          # path of prod.keys (empty = ask at run time)
+PROD_KEYS = ''                          # path of your console's prod.keys (empty = ask at run time)
 PACKAGE = ''                            # version packed into the IPA (empty = the newest in the folder; Mario 'v327680' i.e. 1.2.1, or 'v0')
 TITLE_ID = ''                           # the game to pack when the folder holds several, e.g. a cartridge dump with two games: '0100FD8022DAA000' (empty = the folder's one game); an NX that holds the ID on two platforms: '0100FD8022DAA000:switch2' (or :switch1, :unknown)
 WORK_DIR = ''                           # the game's build folder (empty = <title ID>_build in the NSP folder); the extracted files, shader cache and temporary files live there, and the IPA (or app) goes beside it unless OUT_IPA names it
@@ -112,7 +112,7 @@ SURVEY_ONLY = False                     # a game with no profile in dm/games: on
 PROFILE_OUT = ''                        # where a provisional profile goes (empty = <build folder>/profile, i.e. <NSP folder>/<title ID>_build/profile unless WORK_DIR is set; the profile is <this>/<title ID>/)
 PROGRAM_INDEX = 0                       # a multi-program application (Super Mario 3D All-Stars: a launcher and one program per game): which program to pack, 0 = the application's own; its title ID is the application's + the index.
                                         #   A game of several programs (its profile's key programs) is packed as one from program 0: this setting packs one of them alone, for bring-up
-ALLOW_DAMAGED = False                   # a damaged NSP (files failing the NCA's hash check: an incomplete copy or a broken download), or files whose bytes do not start as their names promise (a .zs that is no zstd stream: a NUP or a dump has no hashes, and an NX's hashes describe the bytes it was made from), stop the build; True writes those files as read and goes on
+ALLOW_DAMAGED = False                   # a damaged NSP (files failing the NCA's hash check: an incomplete copy or a failing drive), or files whose bytes do not start as their names promise (a .zs that is no zstd stream: a NUP or a dump has no hashes, and an NX's hashes describe the bytes it was made from), stop the build; True writes those files as read and goes on
 ALLOW_SHADER_REGRESSIONS = False        # shaders that translated in this game's previous build and fail with the current translation chain stop the build (logs/shader_regressions.log lists them);
                                         #   True packs the app without them
 ALLOW_OTHER_METAL = False               # an NVN game's shaders are built only with the Metal compiler they were tested with (dm/gfx/tools/dmsh_chain.lock: Xcode 27.3); another one stops the build,
@@ -607,8 +607,8 @@ PACKAGE_SUFFIXES = ('.nsp', '.xci', '.nsz', '.xcz')
 
 
 def files_with_suffix(folder, *suffixes):
-    """The files of folder whose extension is one of suffixes in any letter case (`Game [id].NSP` from a download or a card dump): Path.glob('*.nsp') compares case-sensitively on every
-    POSIX system, a case-insensitive Mac volume included. An AppleDouble file does not count: on an exFAT / FAT drive macOS keeps a file's extended attributes (a download's quarantine
+    """The files of folder whose extension is one of suffixes in any letter case (`Game [id].NSP` from a dump tool or a cartridge dump): Path.glob('*.nsp') compares case-sensitively on every
+    POSIX system, a case-insensitive Mac volume included. An AppleDouble file does not count: on an exFAT / FAT drive macOS keeps a file's extended attributes (a Finder or quarantine
     flag) in `._<name>`, one beside each game file"""
     return sorted(p for p in folder.iterdir() if p.suffix.lower() in suffixes and not p.name.startswith('._') and p.is_file())
 
@@ -636,9 +636,9 @@ def scan_nsps(nsp_dir, contents_of, want=None):
         else: f['dlc'].append((tid, version, p))
     packages, listing = [], files_with_suffix(nsp_dir, *PACKAGE_SUFFIXES)   # a base game may be a cartridge dump (.xci: Monster Hunter Rise); nx_extract reads its secure partition
     for p in listing:
-        if p.stat().st_size == 0:   # an empty file left by an incomplete download (the Zelda BotW folder holds a 0-byte DLC NSP next to the complete (1).nsp)
+        if p.stat().st_size == 0:   # an empty file left by a copy that did not finish (a 0-byte DLC NSP beside the complete one)
             say(f'skipping an empty file: {p.name}'); continue
-        if not is_package(p):   # a failed download saved under the game's name, a file cut off before its header: nx_extract would stop on it
+        if not is_package(p):   # a copy cut off before its header, or a file that is no game package: nx_extract would stop on it
             say(f'skipping {p.name}: neither an NSP (PFS0) nor an XCI (HEAD at 0x100)'); continue
         beside = next((q for q in listing if q.suffix.lower() == COMPRESSED.get(p.suffix.lower()) and q.stem.lower() == p.stem.lower()), None)   # from the listing: `Game.NSP` is beside `Game.nsz` on a case-sensitive volume too
         if beside: say(f'skipping {p.name}: {beside.name} is beside it'); continue
@@ -1005,7 +1005,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
         # NRR files register NROs by hash; with none loose the NROs are inside an archive (Super Smash Bros. Ultimate: 14 NRRs, 98 NROs in data.arc, whose exports main imports)
         notes.append(f'imports nn::ro (loads NRO modules at run time): the RomFS has {nro} .nro files and {nrr} .nrr files; registered NROs are collected and rewritten beside the other modules'
                      + (' (look inside archives for the registered modules)' if nrr and not nro else '') + ' and embedded in the iOS app (gen_embed.py)')
-    if fam['dlc']: notes.append('DLC present: it is extracted into the IPA and the host reports the indices as owned and mounts them; check that the host hooks every aoc / fs add-on content call main imports')
+    if fam['dlc']: notes.append('DLC present: your DLC is extracted into the IPA, and the host reports exactly those add-ons (the ones in the folder) as installed and mounts them; check that the host hooks every aoc / fs add-on content call main imports')
     R += ['', '## What it means for a port', ''] + [f'- {n}' for n in notes or ['—']]
     R += ['', '## Provisional profile keys (dm/games/profile_guess.py)', '', 'What the game files decide; mem_used follows the rewrite, and a game with virtual address memory that sets a heap gets a heap check on the Mac (scripts/build_ipa_from_nsp.py heap_check).', '', '```']
     R += [f'{k}\t{v}' + (f'\t# {why}' if why else '') for k, (v, why) in G.items()] + ['```']
@@ -1474,7 +1474,7 @@ def extract_dump(ex, name, src, app):   # one version of a dump folder (src: bas
 
 def extract_aoc(nx, keys, repo, work, app, fam, logs):
     """DLC NSPs in the folder → <id>_build/aoc/<index>.img (the RomFS of each one's data NCA; index = title ID − base − 0x1000, base the application's title ID even for one of its programs,
-    app + N, whose DLC are the application's). The host reports these indices as owned and mounts them (DM_AOC_DIR).
+    app + N, whose DLC are the application's). The host reports the DLC you supplied as installed and mounts it (DM_AOC_DIR).
     Returns None without DLC. Reused when the DLC NSPs (names, sizes and times) and nx_extract's sources are as at the last extraction (Monster Hunter Rise: 250 DLC, 30 s),
     and aoc/ holds the files that extraction wrote (names, sizes and times): a NUP, an NX or a dump folder packs its DLC into the same aoc/"""
     if not fam['dlc']: return None
@@ -3155,7 +3155,7 @@ def parse_args(argv):
         description='Build an unsigned IPA or prepare an Xcode project from your legally owned and acquired game files (NSPs, a dump folder, or a .nup or .nx file); a game with no profile is surveyed and gets a provisional profile.',
         epilog='example: python3 scripts/build_ipa_from_nsp.py ~/nsp/"Super Mario Bros Wonder" -k ~/keys/prod.keys')
     ap.add_argument('nsp_dir', nargs='?', help='folder holding one game\'s NSPs, or its files as a dump (scripts/pack_dump.py lists the layout), or one NUP container (a .nup file) or NX archive (a .nx file; the file itself may be given) (default: the NSP_DIR setting, else asked)')
-    ap.add_argument('-k', '--keys', help='path of prod.keys, not needed for a dump folder, a NUP or an NX (default: the PROD_KEYS setting, else asked)')
+    ap.add_argument('-k', '--keys', help='path of the prod.keys dumped from your own Switch, not needed for a dump folder, a NUP or an NX (default: the PROD_KEYS setting, else asked)')
     ap.add_argument('--title-id', help='the game to pack when the folder holds several (a cartridge dump with two games): its title ID, 16 hex digits, with :switch1, :switch2 or :unknown after it '
                     'for an NX that holds the ID on two platforms (default: the TITLE_ID setting)')
     ap.add_argument('-p', '--package', help='version packed into the IPA, e.g. v327680 / v0 (default: the newest in the folder)')
@@ -3429,7 +3429,7 @@ def main(args=None):
     if romfs_mode == 'separate' and not keep: raise BuildError('--romfs separate requires --keep-extracted: the image must remain available for the one-time transfer to the phone')
     shader_files = SHADER_FILES if args.shader_files is None else args.shader_files
     if shader_files and (mac or prepare_xcode): raise BuildError('SHADER_FILES / --shader-files shapes the IPA for install tools that cannot copy a large file: it cannot be combined with ' + (f'--platform {platform}' if mac else '--prepare-xcode, which Xcode installs'))
-    nsp_dir = Path(os.path.expanduser(args.nsp_dir or NSP_DIR or ask('NSP folder: ', 'the NSP folder'))).resolve()
+    nsp_dir = Path(os.path.expanduser(args.nsp_dir or NSP_DIR or ask('folder of your game\'s NSPs: ', 'the NSP folder'))).resolve()
     if not nsp_dir.exists(): raise BuildError(f'not a folder: {nsp_dir}')
     nxa = nx_file(nsp_dir)   # an NX or a NUP file given in place of the folder: its folder is the NSP folder (the build folder and the IPA go there)
     nup = nxa or nup_file(nsp_dir)   # the container file, an NX's or a NUP's
@@ -3438,7 +3438,7 @@ def main(args=None):
     global NSP_FOLDER; NSP_FOLDER = nsp_dir
     mods_root = mods_folder(args, nsp_dir)   # before the extraction: a --mods / MODS that is not a folder stops the build here
     dump = 'nx' if nxa else 'nup' if nup else 'folder' if dump_folder(nsp_dir) else None   # their files are not encrypted, so they need no keys
-    keys = None if dump else Path(os.path.expanduser(args.keys or PROD_KEYS or ask('path of prod.keys: ', 'prod.keys (-k)'))).resolve()
+    keys = None if dump else Path(os.path.expanduser(args.keys or PROD_KEYS or ask('path of your Switch\'s prod.keys: ', 'prod.keys (-k)'))).resolve()
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
     user_icon = icon_file(args.icon or ICON, '--icon / ICON'); spare_icon = icon_file(args.fallback_icon or FALLBACK_ICON, '--fallback-icon / FALLBACK_ICON')
     user_art = Path(os.path.expanduser(args.art or ART)).resolve() if args.art or ART else None   # the launcher's art and manual, checked now too
