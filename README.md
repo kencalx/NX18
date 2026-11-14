@@ -10,7 +10,7 @@
 
 <p align="center">
 Your legally owned and acquired Switch and Switch 2 games, as native apps for your iPhone, iPad and Mac.<br>
-Built on your Mac. Not an emulator: the game's own code runs on the Apple chip, with its graphics on Metal 4.<br>
+Built on your Mac. Not an emulator. The game's code runs natively on the Apple chip, and Metal 4 draws every frame.<br>
 <b>NX 18 includes no games, no keys and no mods, and is not affiliated with Nintendo.</b>
 </p>
 
@@ -46,47 +46,55 @@ Every detail, down to the Metal compiler: [Requirements](#requirements).
 2. **Build your game.** Copy `nx18-build.sh` to your home folder, set your game, your keys and the target (`iphone`, `ipad` or `mac-app`) at its top, and run it. It says where the IPA or Mac app is. Your keys stay on your Mac.
 3. **Play.** On the Mac, open the app. On iPhone or iPad, sideload the IPA, then make sure the game gets the [Increased Memory Limit](#increased-memory-limit).
 
-New to this? [Getting started](docs/getting-started.md) goes one step at a time, from a new Mac to playing. Rather build in an app than in Terminal? [Build with NX Play instead](docs/getting-started.md#build-with-nx-play-instead): NX Play, a community Mac app, builds with your NX 18 folder. Every step in detail: [How to play](#how-to-play).
+New to this? [Getting started](docs/getting-started.md) goes one step at a time, from a new Mac to playing. Rather build in an app than in Terminal? [Build with NX Play instead](docs/getting-started.md#build-with-nx-play-instead): NX Play, a community Mac app, builds with your NX 18 folder. Every command and option: [Building](docs/building.md).
 
 <p align="center"><img src="docs/images/nx18/readme/nx18-readme-divider.png" alt="" width="100%"></p>
 
-## About this fork
+## About NX 18
 
-A fork of [nxnative](https://github.com/seedds/nxnative), built for the Apple A20 chip and tested on the iPhone 18 Pro Max ([what this fork changes](#requirements)).
+NX 18 is built on [NXNative](https://github.com/seedds/nxnative) by seedds and its contributors. It aims NXNative at the newest Apple hardware: the Apple A20 chip and M-series Macs, drawing through Metal 4 only. NX 18 adds its own in-game menu, a refreshed launcher, ready-made pipelines and release scripts, and keeps taking in NXNative's fixes ([Acknowledgements](#acknowledgements)).
 
-Play your legally owned and acquired Nintendo Switch and Switch 2 games natively on Apple silicon Macs, and on iPhones and iPads with an Apple A20 chip. One script packs your game into a Mac app or an unsigned IPA that you sideload.
-
-It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
-
-[Games](#games) · [Community front ends](#community-front-ends) · [Requirements](#requirements) · [How to play](#how-to-play) · [Reporting a problem](#reporting-a-problem) · [For developers](#for-developers)
+This repository holds no game code, art or files. NX 18 is an unofficial fan project, not affiliated with Nintendo, Apple or any game publisher.
 
 ## Games
 
-The full [tested games table](dm/games/README.md#games) includes original Switch games, tested builds, engines and graphics APIs. Each game's note records its tested platforms, progress and known issues.
+Each game has its own note, with the devices it was tested on, its frame rate and what still goes wrong. For original Switch games, see the [tested games table](dm/games/README.md#games): each row gives the build, the engine and the graphics API.
 
-These Switch 2 games have passed Mac gameplay testing. Ocarina of Time, Star Fox, Donkey Kong Bananza and Mario Kart World were also played on an iPhone 18 Pro Max. Build them from your legally owned and acquired game files, as a [`.nup` or `.nx` file or a dump folder](#switch-2-games):
+These Switch 2 games were tested by playing them on the Mac. Four were also played on an iPhone 18 Pro Max.
 
-- [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md)
-- [Fire Emblem Fortune's Weave](dm/games/04007EF01F8AE000/README.md) — up to 120 fps
-- [Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md)
-- [Kirby Air Riders](dm/games/040077201BE50000/README.md)
-- [Mario Kart World](dm/games/0400C3F00006E000/README.md)
-- [Mario Tennis Fever](dm/games/0400D4201C6EA000/README.md)
-- [Pokémon Pokopia](dm/games/0400A3A01EE4C000/README.md)
-- [PRAGMATA](dm/games/0400C76024710000/README.md)
-- [Splatoon Raiders](dm/games/0400380020056000/README.md)
-- [Star Fox](dm/games/0400E88025B1A000/README.md)
-- [The Legend of Zelda: Ocarina of Time](dm/games/0400486024DEC000/README.md)
-- [Yoshi and the Mysterious Book](dm/games/0400245021D2C000/README.md)
+| Switch 2 game | Played on |
+| --- | --- |
+| [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md) | Mac · iPhone 18 Pro Max |
+| [Fire Emblem Fortune's Weave](dm/games/04007EF01F8AE000/README.md) | Mac, up to 120 fps |
+| [Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) | Mac |
+| [Kirby Air Riders](dm/games/040077201BE50000/README.md) | Mac |
+| [Mario Kart World](dm/games/0400C3F00006E000/README.md) | Mac · iPhone 18 Pro Max |
+| [Mario Tennis Fever](dm/games/0400D4201C6EA000/README.md) | Mac |
+| [Pokémon Pokopia](dm/games/0400A3A01EE4C000/README.md) | Mac |
+| [PRAGMATA](dm/games/0400C76024710000/README.md) | Mac |
+| [Splatoon Raiders](dm/games/0400380020056000/README.md) | Mac |
+| [Star Fox](dm/games/0400E88025B1A000/README.md) | Mac · iPhone 18 Pro Max |
+| [The Legend of Zelda: Ocarina of Time](dm/games/0400486024DEC000/README.md) | Mac · iPhone 18 Pro Max |
+| [Yoshi and the Mysterious Book](dm/games/0400245021D2C000/README.md) | Mac |
 
-## Community front ends
+- **Switch 2 games** build from your legally owned and acquired game files: a `.nup` or `.nx` file, or a dump folder ([Switch 2 games](docs/building.md#switch-2-games)).
+- **NVN games.** NX 18 runs games that draw with NVN, the Switch's own graphics API. Games that draw with OpenGL or Vulkan were set aside in the 0.5 pre-release. They are planned to return in X2.0 with a Metal 4 port ([What's next](#whats-next)).
+- **A new game?** One without a profile gets a survey and a provisional build, which may not start ([Port another game](docs/development.md#port-another-game)).
 
-Community projects build on nxnative with tools to turn your legally owned and acquired games into apps for your iPhone, iPad or Mac without the command line, and libraries to organize and launch them. They are separate projects: questions and bugs about them go to their own pages.
+## Settings and the console feel
 
-- [NX2Apple](https://github.com/LNPANDY/NX2Apple) — Mac builder with a shared iPhone/iPad game library.
-- [NX Play](https://github.com/varyform/nx-native-wrapper) — Mac library with device installs and save sync. To build your games with NX 18, choose your NX 18 folder in its settings ([steps](docs/getting-started.md#build-with-nx-play-instead)).
-- [LumaNX](https://github.com/Xc1Ym/LumaNX) — Mac game builder with IPA export.
-- [GameCase](https://github.com/Tiaoge-tou/GameCase) — iOS game library based on LiveContainer.
+Every game app opens like a console game: its art, its settings, then **Play**.
+
+- **Launcher.** The game's art and logo, when you last played, and three presets: **Battery**, **Balanced** and **Quality**. **Game guide**, the manual and **About this game** are read from the app, never from the internet. Touch or a controller both work: **+** starts the game, **Y** opens the guide. Home Screen shortcuts (**Game**, **Launcher**, **Guide**) and **Skip this screen next time** get you in faster. The Mac shows the same screen as a settings window. [Presets, the guide and a controller](docs/settings.md#presets-the-guide-and-a-controller)
+- **In-game menu.** Tap the ring button at the top centre (double-tap to show it), or press a controller's **Home** button. A wide, low panel opens over the game, and the game keeps running. It works with touch, a controller or VoiceOver, and holds **Cheats** and **Share log**. [In-game menu](docs/settings.md#in-game-menu)
+- **Console mode.** **Handheld** is lighter on the device. **Docked** renders at the Switch's TV resolution. A Switch 2 game starts in Handheld on iPhone and iPad, and in Docked on the Mac. A Switch game starts in Docked. On a TV, the game stays Docked. [Console mode](docs/settings.md#console-mode)
+- **TV.** Connect a cable or start Screen Mirroring. The game fills the TV in 16:9, at up to 1080p, and the device keeps the controls. [TV](docs/settings.md#tv)
+- **Picture.** **Fit**, **Fill** or **Stretch**, and **Match screen** for a taller picture in games that support it. [Picture](docs/settings.md#picture)
+- **Your mods and cheats, as options.** Your own High frame rate or Ultrawide mod becomes a switch in the launcher. Your own cheats turn on and off in the in-game menu, or in the Cheats window on the Mac. NX 18 includes no mods or cheats. [Mods and patches](docs/playing.md#mods-and-patches) · [Cheats](docs/playing.md#cheats)
+- **Cloud saves.** One save, shared by your iPhone, iPad and Mac through iCloud Drive. When both changed, **Play** asks which to keep, and the other is kept as a backup. [Cloud saves](docs/settings.md#cloud-saves)
+- **Acknowledgements.** Every game app lists the code and art it is built with, and their licenses. On iPhone and iPad it's at the bottom of the settings. On the Mac it's the settings window's last row, and in the app menu.
+
+Every setting: [Settings](docs/settings.md). Controls and saves: [Playing](docs/playing.md).
 
 ## Requirements
 
@@ -94,181 +102,90 @@ Community projects build on nxnative with tools to turn your legally owned and a
 - **iPhone:** A17 Pro chip or later, with iOS 26 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iOS 27.3 or later (below).
 - **iPad:** M1 chip or later, with iPadOS 26 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iPadOS 27.3 or later (below).
 
-**This fork (NX 18)** builds its iOS app for the Apple A20 chip, on iOS 27.3 (`dm/ios/project.yml`: deployment target 27.3, `-mcpu=apple-a20`; the app still declares the iPad family), with Xcode 27.3, whose Metal compiler (32023.925) is the one `dm/gfx/tools/dmsh_chain.lock` records, so `--allow-other-metal` is not needed. The lock's exact compiler, 32023.925.6, is the Xcode 27.3 beta's (build 27C5020n, Metal Toolchain 27C5020k), the one the shaders were tested with; a released Xcode 27.3 whose Metal compiler reports another version is refused by the build check until the lock is raised, or needs `--allow-other-metal`; its game shaders are MSL 4.1 on both platforms (`-std=metal4.1`). An IPA from this tree needs iOS 27.3 or later and does not run on the older devices or systems listed above, which are upstream's. It is tested on an iPhone 18 Pro Max. The iPhone 18 Pro, iPhone Duo and iPad mini 8 should work too, but haven't been tested yet.
+NX 18's iPhone and iPad builds are made for the Apple A20 chip and need iOS or iPadOS 27.3 or later. They don't run on older chips or older systems.
 
-The games' textures are BC-compressed, which older iPhones cannot read. Switch 2 games run on the iPhone as well as the Mac. On iPad, only the iPad mini 8 (A20) should work, and it is untested. Check each game's note for the devices it was tested on.
+- **Tested** on the iPhone 18 Pro Max.
+- **Should work, not tested yet:** the iPhone 18 Pro, iPhone Duo and iPad mini 8.
+- **Switch 2 games:** all were tested on the Mac, and four were also played on the iPhone 18 Pro Max. iPad builds are untested. Each game's note lists the devices it was tested on.
+- **To build:** [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.3) 27.3, the beta build 27C5020n with Metal Toolchain 27C5020k (Metal compiler 32023.925.6). The shaders were tested with that compiler, and the build check refuses another one unless you allow it: [Xcode and the Metal compiler](docs/building.md#xcode-and-the-metal-compiler).
 
-For a game without a profile, the script writes a survey and tries a provisional build with guessed settings. That build may not start; see [Port another game](docs/development.md#port-another-game).
+## Increased Memory Limit
 
-## How to play
+The bigger games need more memory than iOS gives an app by default. Without the **Increased Memory Limit**, iOS may close the game in busy scenes.
 
-**Your games and keys.** NX 18 works only from what you dump from your own Switch or Switch 2: your legally owned and acquired games, with their updates and DLC, and your `prod.keys`. NX 18 does not provide game files, keys or firmware.
+Every app NX 18 builds asks for it, and for Extended Virtual Addressing. Whether iOS grants it depends on your sideloading tool and your Apple account:
 
-New to this? [Getting started](docs/getting-started.md) takes you from a new Mac and iPhone to playing, one step at a time.
-
-Rather build in an app than on the command line? Until NX 18's own Mac app (planned for X2.0), you can build with [NX Play](#community-front-ends), a community Mac app, pointed at your NX 18 folder: [Build with NX Play instead](docs/getting-started.md#build-with-nx-play-instead) shows how.
-
-Switch 2 games are built from one `.nup` or `.nx` file or a folder of their files, not from NSPs: see [Switch 2 games](#switch-2-games).
-
-### Quick start with the release scripts
-
-Two scripts come with each [release](https://github.com/kencalx/NX18/releases) (and are in [`scripts/release`](scripts/release)). They do the steps of [Build from the command line](#build-from-the-command-line) for you:
-
-- **`nx18-setup.sh`** gets the Mac ready. It checks macOS, Xcode 27.3 (which you download from Apple yourself; it says which and how to select it) and its Metal toolchain, installs xcodegen, zstd and the Python modules (into a virtualenv, `.venv` in the NX 18 folder), and clones or updates NX 18 in `~/NX18`. It asks before each install or download and never runs `sudo`, and it leaves a folder with your own changes in it alone. `--check` only reports what is missing; `--yes` answers every question; `--dir <folder>` and `--ref <tag>` choose another folder or a release.
-- **`nx18-build.sh`** builds a game. Set your game (your legally owned and acquired game files: a folder of NSPs, a dump folder, or a `.nup` or `.nx` file), your `prod.keys` (dumped from your own Switch; only NSPs and XCIs need it) and the target (`iphone`, `ipad` or `mac-app`) in the settings at its top, then run it. It checks the settings, selects Xcode 27.3 by itself, runs the build and says where the IPA or app is. It never prints or copies your keys.
-
-```
-bash ~/Downloads/nx18-setup.sh
-cp -n ~/Downloads/nx18-build.sh ~/nx18-build.sh   # -n keeps a copy you already edited; then edit the settings at its top
-bash ~/nx18-build.sh
-```
-
-Each setting can also be given as an environment variable (`NX18_GAME`, `NX18_KEYS`, `NX18_TARGET`, ...: the comment beside it names it), and other options of the packing script go after the script's name: `bash ~/nx18-build.sh --language ja`. Keep your copy of `nx18-build.sh` outside the NX 18 folder: `nx18-setup.sh` does not update a folder with changed files in it.
-
-### Build from the command line
-
-You need your legally owned and acquired game files, an Apple silicon Mac with macOS 27.3 or later, [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.3) 27.3, [Homebrew](https://brew.sh) and Python 3.12 or newer (an arm64 one, not an Intel Homebrew's). An iPhone build also needs Xcode's iOS platform (Xcode → Settings → Components).
-
-The shaders are built with Xcode 27.3's Metal compiler. Select it before step 1: `sudo xcode-select -s /Applications/Xcode.app`. With several Xcode versions installed, name this one `Xcode-27.3.app` and select it with `sudo xcode-select -s /Applications/Xcode-27.3.app`.
-
-**1. Install the tools** (only once), in Terminal:
-
-```
-xcodebuild -downloadComponent MetalToolchain   # required: without it the build stops with an error
-git clone https://github.com/kencalx/NX18.git && cd NX18   # this fork; upstream's nxnative tree has other requirements (its own Xcode and Metal compiler lock)
-brew install xcodegen zstd
-python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
-```
-
-**2. Put your game in a folder**: your dump of the game, plus its update and DLC if you own them (`.nsp`, `.xci`, `.nsz` or `.xcz`):
-
-```
-~/Games/MarioWonder/
-  Super Mario Bros. Wonder [010015100B514000][v0].nsp
-  Super Mario Bros. Wonder [010015100B514800][v327680].nsp
-```
-
-**3. Build**, with your game folder and the `prod.keys` dumped from your own Switch:
-
-```
-python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys
-```
-
-Mods: put the game's cheats (`cheats` folders) and a High frame rate or Ultrawide mod (`.ips`, `.pchtxt`, in a folder named for it, such as `60FPS` or `Ultrawide`) in a folder named `mods` inside the game's folder, as Atmosphère lays them out on your Switch's SD card: the cheats are packed into the app and the mod becomes a switch in the launcher ([Mods and patches](docs/playing.md#mods-and-patches)). Other code patches and replacement files (`romfs` folders) are left out.
-
-Launcher art: the screen before the game shows the game's key art, downloaded from a public title database, else from SteamGridDB when you set a `STEAMGRIDDB_KEY` environment variable to your SteamGridDB API key. With a key it also shows the game's logo in place of its name, over SteamGridDB's textless art. `--art <image>` gives your own art, `--logo <image>` your own logo (a PNG or WebP with transparency), `--manual <file.pdf>` adds the game's manual, and `--no-art-online` keeps the build off the network ([Launcher art](docs/development.md#launcher-art-about-this-game-and-the-manual)).
-
-UI font: `--ui-font <file.ttf>` (a TTF, OTF or TTC of your own) puts one font into the app for all of NX 18's own text: the launcher, the in-game prompts and progress screens, and the Mac banner and Cheats window. The file goes only into the app built on your Mac, never into the repository (so keep that app to your own devices); without it the system font is used ([UI font](docs/development.md#ui-font)).
-
-The IPA appears in the game's folder. The first build takes 30–60 minutes and needs free disk space of about twice the game's size plus 10 GB; building again is much faster.
-
-To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the game to open from Finder. All options: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
-
-### Install
-
-Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, SideStore, Sideloadly or LiveContainer. Then make sure the game gets the [Increased Memory Limit](#increased-memory-limit).
-
-**Recommended, not required: a paid Apple Developer account.** Apps stay signed for a year instead of 7 days, there's no 3-app limit, and the Increased Memory Limit comes through automatically when you install from Xcode. A free Apple ID works too. Making NX 18 friendlier to free accounts is planned. [Getting started](docs/getting-started.md#4-choose-how-to-install) compares the ways to install and links each tool's guide.
-
-Game too big to install? Build again with `--romfs separate`, and run the command the script prints once to copy the game files to your phone ([Quick reinstalls](docs/development.md#quick-reinstalls)). With AltServer, also add `--shader-files`: it cannot install a file of 2 GiB or more.
-
-Controls, saves and settings: [Playing](docs/playing.md).
-
-#### Increased Memory Limit
-
-The bigger games need the higher memory limit iOS gives an app with the Increased Memory Limit entitlement. Without it iOS may close the game in busy scenes. Every app NX 18 builds already asks for it (and for Extended Virtual Addressing), but whether iOS grants it depends on your sideloading tool and Apple account:
-
-- **Installed from Xcode with a paid Apple Developer account** (or with a tool that builds through Xcode, such as NX Play): nothing to do. Xcode adds the capability to the app's App ID when it signs the app. A free account's Personal Team cannot get it this way, so such tools build without it; use one of the ways below.
-- **AltStore** (2.2 or later) and **Sideloadly**: keep the entitlement when the tool offers the choice. If the check below shows clearly less room, add it with GetMoreRam as described for SideStore.
-- **SideStore with a free Apple ID**: the entitlement has to be added to the app's App ID once. The easiest way is **GetMoreRam**, a small app by [hugeBlack](https://github.com/hugeBlack/GetMoreRam) (a LiveContainer developer). [ClientQUI's fork](https://github.com/ClientQUI/GetMoreRam/releases) uses SideStore's local anisette server and is the one tested with NX 18:
-  1. Install the game with SideStore (or AltStore), then sideload GetMoreRam the same way.
+- **Xcode, with a paid Apple Developer account** (or a tool that builds through Xcode, such as NX Play): nothing to do. Xcode adds the capability to the app's App ID as it signs the app. A free account's Personal Team can't get it this way, so those builds go without it: use one of the ways below.
+- **AltStore 2.2 or later, and Sideloadly:** when the tool offers the choice, keep the entitlement. If the check below shows clearly less room, add it with GetMoreRam, as for SideStore.
+- **SideStore with a free Apple ID:** add the entitlement to the game's App ID, once. GetMoreRam does it: a small app by [hugeBlack](https://github.com/hugeBlack/GetMoreRam), a LiveContainer developer. [ClientQUI's fork](https://github.com/ClientQUI/GetMoreRam/releases) uses SideStore's local anisette server, and it's the version tested with NX 18.
+  1. Install the game with SideStore (or AltStore). Sideload GetMoreRam the same way.
   2. In GetMoreRam's settings, sign in with the Apple ID that signed the game.
-  3. Open **App IDs**, tap **Refresh**, pick the game's App ID and tap **Add Increased Memory Limit**.
-  4. Reinstall the game from SideStore or AltStore (a plain refresh may not pick it up). It stays through the weekly refreshes after that.
-  5. GetMoreRam takes one of a free Apple ID's three app slots: delete it afterwards to get the slot back, and install it again for the next game.
+  3. Open **App IDs** and tap **Refresh**. Pick the game's App ID and tap **Add Increased Memory Limit**.
+  4. Reinstall the game from SideStore or AltStore. A plain refresh may not pick it up. After that, it stays through the weekly refreshes.
+  5. GetMoreRam takes one of a free Apple ID's three app slots. Delete it afterwards to free the slot, and install it again for the next game.
 
-  Without GetMoreRam: open Xcode signed in with the same Apple ID, add the **Increased Memory Limit** capability to the game's App ID, then do step 4.
-- **LiveContainer**: the game runs inside LiveContainer, so LiveContainer itself needs the entitlement. Installing LiveContainer with Impactor adds it automatically; with SideStore, add it to LiveContainer's App ID as above. Install any helper app the same way as LiveContainer, or the entitlement does not apply.
+  No GetMoreRam? Open Xcode, signed in with the same Apple ID. Add the **Increased Memory Limit** capability to the game's App ID, then do step 4.
+- **LiveContainer:** your game runs inside LiveContainer, so LiveContainer is the app that needs the entitlement. Install LiveContainer with Impactor, and it's added for you. With SideStore, add it to LiveContainer's App ID as above. Install any helper app the same way as LiveContainer, or the entitlement won't apply.
 
-These steps come from the sideloading tools' own docs and community guides, and can change with new versions of the tools or of iOS.
+These steps come from the tools' own docs and community guides. New versions of the tools or of iOS can change them.
 
-To check that it worked, start a game, share its log (the in-game menu › **Share log**) and find the `[mem] guest memory` line near the start. Its `room to the memory limit` is how much the game can use: on an iPhone 18 Pro Max with the entitlement it is about 7.9–8.0 GB. A clearly lower number most likely means the entitlement was not granted.
+**Check that it worked.** Start a game and share its log: in-game menu › **Share log**. Near the start, find the `[mem] guest memory` line. Its `room to the memory limit` is how much the game can use. On an iPhone 18 Pro Max with the entitlement, that's about 7.9–8.0 GB. A clearly lower number most likely means the entitlement wasn't granted.
 
-### Switch 2 games
+## Community front ends
 
-A Switch 2 game is built from your legally owned and acquired game files, in one [NUP](https://github.com/a55uka/nup) container (by a55uka; a `.nup` file), one [NX](https://github.com/fab918/nxformat) archive (a `.nx` file) or a folder of its files, not from NSPs. None of them needs `prod.keys`: a Switch 2 game dumped from your own console is already unpacked to its files. A game this project has no profile for is surveyed and gets a provisional profile, as NSPs do ([Port another game](docs/development.md#port-another-game)), which may not boot. You get an IPA, or a Mac app with `--platform mac-app`; iPad builds are untested. On the iPhone and iPad the game starts in Handheld, its lighter mode, and the Mac starts it in Docked; **Console mode** in the settings changes it ([Console mode](docs/settings.md#console-mode)).
+Prefer an app to Terminal? These community Mac apps build your legally owned and acquired games with NX 18, and some keep a game library too. Each is its own project, so ask its makers on its page. NX 18's own Mac app is planned for X2.0.
 
-**From a `.nup` file**, which holds the base game, its updates and DLC in one file. Give the file, or a folder that holds it:
-
-```
-python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform mac-app
-```
-
-[Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) is played this way: its 47 GB NUP unpacks in under five minutes. A NUP that carries the game's control data (its NACP) and icon gives the app the game's name and icon; otherwise the name comes from the game's profile and the app gets the icon [NX Play](https://github.com/varyform/nx-native-wrapper) saved for the game (`~/Library/Caches/com.varyform.nxplay/Banners/icons`, `NXPLAY_ICONS` in Spyder) when there is one, else the NX 18 icon (`docs/images/nx18/nx18-icon-square-1024.png`), unless you give it one with `--icon <image>` (`ICON` in Spyder; a JPEG or PNG of any size). The `nup` tool numbers a NUP's metadata one too low since 2026-11-04 (its PR #20); the script reads such a NUP correctly and says so.
-
-A NUP without the base game also works, when its base package is empty or it has none and its updates are marked `standalone_update`: the update is taken as the whole game, and the script says so. If the game then stops on missing files, that update holds only what changed: pack a NUP with the base game. The newest update is selected by default; `--package v<N>` selects another version in the container. Such a container has no `v0` (base game) to select.
-
-**From a `.nx` file**, an NX archive ([NXFormat](https://github.com/fab918/nxformat) 1.0.x, by fab918), which also holds the base game, updates and DLC in one file, for Switch 1 and Switch 2 games alike. Its NXConvert makes one from a NUP (`nxconvert pack-nup game.nup game.nx --platform switch2`) or from extracted folders (`nxconvert pack-tree`). Give the file, or a folder that holds it:
-
-```
-python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nx --platform mac-app
-```
-
-Every version in an NX is the whole game, so a newer update needs no base game beside it; `--package v<N>` selects a version, the newest by default. Each version carries its own NACP and icon when the archive has them, and DLC converted from a NUP or folders comes along. A version without a NACP takes the archive's title as the app's name (the title given to `nxconvert --fallback-title` or typed in NXConvert's sidebar), else the profile's. An icon set in NXConvert's sidebar becomes the app's icon, also for an NX made from NSPs or XCIs. An NX without an icon gets the one NX Play saved for the game when there is one, else the NX 18 icon; `--icon <image>` gives it another. Every file is checked against its SHA-256 as it is unpacked, and a damaged archive stops the build with the file it failed on; `python3 scripts/pack_nx.py game.nx --list` lists what an archive holds and `--verify` checks all of it. An NX that holds several games needs `--title-id`. An NX made from your NSPs or XCIs after you decrypted them with your own console's keys (`nxconvert pack game.dnsp`, Switch 1 games) holds the decrypted NCA files themselves: it builds without `prod.keys` being given again. The repository's `nx_extract` reads them and lays an update over its base game, as it does for NSPs. It needs temporary space for the NCA files of the version it extracts (an update's base and patch NCAs together, deleted after each), and a repeat build reuses the extraction without staging them again. Its base game alone cannot be packed when that base is sparse (the decrypting tool left out data its update carries); pack the update version. An NX of a newer format version than 0.2 or 0.3 is refused with a line saying a newer NX 18 is needed. Keep one `.nup` or `.nx` per folder.
-
-**From a folder of files**. The script expects this layout (`updates` and `dlc` are optional):
-
-```
-~/Games/DonkeyKongBananza/
-  base/exefs/                     main, main.npdm, sdk, rtld
-  base/romfs/
-  updates/458752/exefs/           the update's version, as a decimal number
-  updates/458752/romfs/           the patched RomFS, not a patch
-  dlc/040074a01bf13001/0/romfs/   the DLC's title ID
-```
-
-```
-python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-app
-```
-
-An update's folder alone will do (no `base/`), and so will `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, which count as `base/`. The folder holds no icon, so the app gets the icon NX Play saved for the game when there is one, else the NX 18 icon; `--icon <image>` (`ICON` in Spyder) gives it the game's. To turn such a folder into a NUP: `nup pack ~/Games/DonkeyKongBananza game.nup`.
+- [NX2Apple](https://github.com/LNPANDY/NX2Apple): builds on the Mac, with one game library for iPhone and iPad.
+- [NX Play](https://github.com/varyform/nx-native-wrapper), by varyform: a Mac game library that installs to your devices and syncs saves. It points at NXNative by default, so choose your NX 18 folder in its settings ([steps](docs/getting-started.md#build-with-nx-play-instead)).
+- [LumaNX](https://github.com/Xc1Ym/LumaNX): builds games on the Mac and exports IPAs.
+- [GameCase](https://github.com/Tiaoge-tou/GameCase): a game library on iOS that runs your games through LiveContainer.
 
 ## Reporting a problem
 
-Report a problem in NX 18's [Issues](https://github.com/kencalx/NX18/issues), with the game's log attached. Questions and ideas go there too.
+Open an issue in NX 18's [Issues](https://github.com/kencalx/NX18/issues), with the game's log attached. Questions and ideas are welcome there too.
 
-- **iPhone or iPad:** the in-game menu › **Share log**. It sends `log.txt` and `log.prev.txt`, the logs of this run and the one before.
-- **Mac:** `python3 scripts/bug_report.py <title ID>` collects the logs, versions and settings into one file to attach. You can also attach `~/Library/Logs/nxnative/<title ID>.log` yourself.
+- **iPhone or iPad:** in-game menu › **Share log**. It sends `log.txt` and `log.prev.txt`: this run's log and the one before.
+- **Mac:** `python3 scripts/bug_report.py <title ID>` gathers the logs, versions and settings into one file to attach. Or attach `~/Library/Logs/nxnative/<title ID>.log` yourself.
 
-Never attach game files, keys or anything extracted from a game. Logs never contain keys or game files. A Mac log can contain your folder names; `bug_report.py` replaces your home folder with `~`.
+Never attach game files, keys or anything extracted from a game. Logs never contain keys or game files. A Mac log can show your folder names; `bug_report.py` replaces your home folder with `~`.
 
-Each game's state on NX 18 (frame rate, resolution, devices tested) is in its [game note](dm/games/README.md#games). Questions about a community front end go to that project's own page.
+How each game runs on NX 18 (frame rate, resolution, devices tested) is in its [game note](dm/games/README.md#games).
+
+## What's next
+
+Plans, not promises. Nothing here has a date. X2.0 is planned with:
+
+- **More room for games.** Less memory and storage use, Switch 2 games first. A one-time notice when a game seems to run without the Increased Memory Limit.
+- **Lower power use.** More efficiency work, on top of X1.0's.
+- **New ways to play.** Portrait on iPhone. A Play on TV row that guides you through AirPlay, and turns the phone into the controller. A companion screen with guides and quick settings. Per-game button mapping, frame generation and a Performance preset.
+- **NX 18's own Mac app.** It builds and installs your legally owned and acquired games, with mods, cheats, artwork and guides in one place, and step-by-step help with sideloading, LiveContainer included.
+- **Games and fixes.** OpenGL and Vulkan games come back with a Metal 4 port. The Nintendo Switch Sports Resort shader fix. More ready-made pipeline lists. A steadier 60 fps in the heaviest Switch 2 games. Newer fixes from NXNative. A Switch 2 mode for games that carry their Nintendo Switch 2 Edition, when your copy includes it. A fit check for the iPhone Duo.
 
 ## For developers
 
-[How it works](docs/development.md) · [Game notes](dm/games/README.md#games) · [Bring-up and debugging](docs/agents/README.md) · [Front ends](docs/frontends.md) · [Contributing](CONTRIBUTING.md)
+How NX 18 works, every build option, and how to bring up a game:
+
+[Building](docs/building.md) · [How it works](docs/development.md) · [Game notes](dm/games/README.md#games) · [Bring-up and debugging](docs/agents/README.md) · [Front ends](docs/frontends.md) · [Contributing](CONTRIBUTING.md)
 
 ## Acknowledgements
 
-This project is built on other people's work ([licenses](dm/third_party/README.md)):
+NX 18 stands on other people's work. Their licenses: [dm/third_party](dm/third_party/README.md).
 
-- **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)** (MIT) developed this native-execution approach, for Diablo II: Resurrected. nxnative started as a copy of its generic parts: the NSO rewriter, the host that stands in for Horizon, the NVN-on-Metal layer and the iOS app shell. Fixes go both ways.
-- **Ryujinx** (MIT): its shader translator (`Ryujinx.Graphics.Shader`, `Ryujinx.Common` and `Spv.Generator` 1.3.2, in `dm/third_party/ryujinx` with a few fixes listed in [its README](dm/third_party/ryujinx/README.md)) turns the games' shaders into SPIR-V. Its emulation of the kernel and system services is also a reference when the host's behaviour is in doubt.
-- **[Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)**: its kernel, mesosphère, is the reference for Horizon's synchronization semantics (address arbiter, condition variables). Its cheat VM (dmnt) is the reference for the cheat engine in `dm/host/hle_cheats.c`.
-- **[LibHac 0.19.0](https://www.nuget.org/packages/LibHac/0.19.0)** by Alex Barney (MIT): reads NSPs and layers updates over the base game in `dm/tools/nx_extract`.
-- **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)** (Apache-2.0): SPIR-V to Metal Shading Language.
-- **[MacNativeGames](https://github.com/ly05010419/MacNativeGames)** (MIT): the GPU widening of 8-bit indices and in-pass clears in `dm/gfx/nvn/nvn_mtl.m`, and the visibility-counter lowering in the shader translator.
+- **[NXNative](https://github.com/seedds/nxnative)** by seedds and its contributors (MIT): the project NX 18 is built on. The changes NX 18 ported, with their authors, are in [Changes ported from upstream](docs/development.md#changes-ported-from-upstream).
+- **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)** (MIT): it worked out this way of running a game natively, for Diablo II: Resurrected. NXNative grew from the parts of it that suit any game: its iOS app shell, NSO rewriter, NVN-on-Metal layer and Horizon stand-in host. The two projects still trade fixes.
+- **Ryujinx** (MIT): its shader translator brings the games' shaders to SPIR-V. NX 18 keeps a lightly patched copy (`Ryujinx.Graphics.Shader`, `Ryujinx.Common`, `Spv.Generator` 1.3.2) in `dm/third_party/ryujinx`; [its README](dm/third_party/ryujinx/README.md) lists the patches. When it's unclear how the host should behave, NX 18 also looks at how Ryujinx emulates the kernel and system services.
+- **[Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)**: NX 18 follows mesosphère, its kernel, for how Horizon synchronizes threads (address arbiter, condition variables), and dmnt, its cheat VM, for the cheat engine in `dm/host/hle_cheats.c`.
+- **[LibHac 0.19.0](https://www.nuget.org/packages/LibHac/0.19.0)** by Alex Barney (MIT): `dm/tools/nx_extract` uses it to read NSPs and lay updates over the base game.
+- **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)** (Apache-2.0): turns SPIR-V into Metal Shading Language.
+- **[MacNativeGames](https://github.com/ly05010419/MacNativeGames)** (MIT): in `dm/gfx/nvn/nvn_mtl.m`, 8-bit indices widened on the GPU and clears inside a pass; in the shader translator, the visibility-counter lowering.
 - **Switch Button Icons and Controls** by Zacksly: Button Icons and Controls by Zacksly (CC BY 3.0 Licensed | zacksly.itch.io), modified: recoloured. The button glyphs of the iPhone and iPad app's controller hints (the settings screen's "Press A to play", the guide's Y, B to close, the in-game menu's A and B), in [`dm/ios/Resources/ButtonIcons`](dm/ios/Resources/ButtonIcons/README.md) with the licence.
-- **[CMAA2](https://github.com/GameTechDev/CMAA2)** (Intel, Apache-2.0): the edge smoothing of the present's Anti-aliasing setting, ported to Metal in `dm/gfx/msl/cmaa2.metal`. **[FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR)** (AMD, MIT): the RCAS sharpening of its Sharpening setting, in `dm/gfx/msl/present.metal`.
+- **[CMAA2](https://github.com/GameTechDev/CMAA2)** (Intel, Apache-2.0): the edge smoothing behind the Anti-aliasing setting, ported to Metal in `dm/gfx/msl/cmaa2.metal`. **[FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR)** (AMD, MIT): the RCAS sharpening behind the Sharpening setting, in `dm/gfx/msl/present.metal`.
 - **[FPSLocker-Warehouse](https://github.com/masagrator/FPSLocker-Warehouse)** by masagrator: the frame-rate addresses and patch sites behind 60 fps in Monster Hunter Rise, Need for Speed: Hot Pursuit Remastered (one instruction found by theboy181), NieR:Automata and Tears of the Kingdom. NX 18 re-implements them in `dm/host/hle_fpslock.c` and the games' `patches.py`.
 - **[AstralChain-Dynamic-FPS](https://github.com/yogesh1239/AstralChain-Dynamic-FPS)** v1.1.1 by yogesh1239 (MIT): the timer and camera helpers in `dm/games/01007300020FA000/patches.py`.
 - **[TypeTreeDumps](https://github.com/AssetRipper/TypeTreeDumps)** by AssetRipper: the layouts of Unity's `Shader` and `ComputeShader` objects in `dm/gfx/tools/unityfs.py`.
 - **[NUP](https://github.com/a55uka/nup)** by a55uka and **[NXFormat](https://github.com/fab918/nxformat)** by fab918: the container formats that `scripts/pack_nup.py` and `scripts/pack_nx.py` read, with their own code. NXFormat's conformance fixtures are test data in `dm/tools/tests/fixtures/nx`.
-- Code included under its own license ([dm/third_party](dm/third_party/README.md)): dav1d, libvpx, stb_vorbis, deko3d's texture layout (fincs), `nvn.h` (h1k421) and MiniEngine's pixel packing.
-- **nxnative's contributors**: the changes NX 18 ported from upstream, with their authors, are listed in [Changes ported from upstream](docs/development.md#changes-ported-from-upstream).
-
-Every game app shows the licenses of the code and art it is built with, under **Acknowledgements**. On the iPhone and iPad it is at the bottom of the settings screen. On the Mac it is the last row of the settings window, and in the app menu.
+- Other included code, each part with its license listed in [dm/third_party](dm/third_party/README.md): dav1d, libvpx, stb_vorbis, deko3d's texture layout (fincs), `nvn.h` (h1k421) and MiniEngine's pixel packing.
 
 ## License
 
-MIT ([LICENSE](LICENSE)). Third-party code keeps its own license ([dm/third_party](dm/third_party/README.md)).
+NX 18 is MIT licensed, as NXNative is ([LICENSE](LICENSE), copyright seedds). Code from other projects keeps the license it came with ([dm/third_party](dm/third_party/README.md)).
