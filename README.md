@@ -25,7 +25,7 @@ Built on your Mac. Not an emulator. The game's code runs natively on the Apple c
 - **More frames.** Ready-made pipelines now ship in the app, so a first start compiles far less, and fewer are built while you play.
 - **More efficient.** About 0.5 W of CPU power for a 3D platformer at 60 fps on an iPhone 18 Pro Max, and fewer CPU wakeups in lock-heavy games.
 - **More responsive.** On iPhone and iPad, a frame that waits too long for the screen is skipped, so the picture keeps up with your input. On the iPhone, game-to-display time fell from about 43–49 ms to about 25–33 ms.
-- **More screen.** Fit, Fill or Stretch the picture, and match a taller screen in games that support it. Your own Ultrawide mod becomes a switch in the launcher, which now shows its frame-rate cost where it was measured.
+- **More screen.** Fit, Fill or Stretch the picture, and match a taller screen in games that support it. Your own Ultrawide mod becomes an option in the launcher, which now shows its frame-rate cost where it was measured.
 - **More console.** NX 18's own in-game menu and a refreshed launcher, with touch, a controller or VoiceOver.
 - **More to come.** X2.0 is planned, with lower power use among its goals. Plans, not promises.
 
@@ -90,7 +90,7 @@ Every game app opens like a console game: its art, its settings, then **Play**.
 - **Console mode.** **Handheld** is lighter on the device. **Docked** renders at the Switch's TV resolution. A Switch 2 game starts in Handheld on iPhone and iPad, and in Docked on the Mac. A Switch game starts in Docked. On a TV, the game stays Docked. [Console mode](docs/settings.md#console-mode)
 - **TV.** Connect a cable or start Screen Mirroring. The game fills the TV in 16:9, at up to 1080p, and the device keeps the controls. [TV](docs/settings.md#tv)
 - **Picture.** **Fit**, **Fill** or **Stretch**, and **Match screen** for a taller picture in games that support it. [Picture](docs/settings.md#picture)
-- **Your mods and cheats, as options.** Your own High frame rate or Ultrawide mod becomes a switch in the launcher. Your own cheats turn on and off in the in-game menu, or in the Cheats window on the Mac. NX 18 includes no mods or cheats. [Mods and patches](docs/playing.md#mods-and-patches) · [Cheats](docs/playing.md#cheats)
+- **Your mods and cheats, as options.** Your own High frame rate or Ultrawide mod becomes an option in the launcher. Your own cheats turn on and off in the in-game menu, or in the Cheats window on the Mac. NX 18 includes no mods or cheats. [Mods and patches](docs/playing.md#mods-and-patches) · [Cheats](docs/playing.md#cheats)
 - **Cloud saves.** One save, shared by your iPhone, iPad and Mac through iCloud Drive. When both changed, **Play** asks which to keep, and the other is kept as a backup. [Cloud saves](docs/settings.md#cloud-saves)
 - **Acknowledgements.** Every game app lists the code and art it is built with, and their licenses. On iPhone and iPad it's at the bottom of the settings. On the Mac it's the settings window's last row, and in the app menu.
 
