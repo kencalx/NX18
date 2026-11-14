@@ -99,8 +99,8 @@ Every setting: [Settings](docs/settings.md). Controls and saves: [Playing](docs/
 ## Requirements
 
 - **Mac:** Apple silicon with Metal 4, macOS 27.3 or later (NX 18 draws through Metal 4 only; a virtual Mac, whose GPU has no Metal 4, is not supported). Building games requires Xcode 27.3.
-- **iPhone:** A17 Pro chip or later, with iOS 26 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iOS 27.3 or later (below).
-- **iPad:** M1 chip or later, with iPadOS 26 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iPadOS 27.3 or later (below).
+- **iPhone:** A20 chip (iPhone 18 family, iPhone Duo, iPad mini 8) or later, with iOS 27 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iOS 27.3 or later (below).
+- **iPad:** M4 chip or later, with iPadOS 27 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iPadOS 27.3 or later (below).
 
 NX 18's iPhone and iPad builds are made for the Apple A20 chip and need iOS or iPadOS 27.3 or later. They don't run on older chips or older systems.
 
