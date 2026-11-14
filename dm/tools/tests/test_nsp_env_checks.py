@@ -97,7 +97,7 @@ class Prereqs(unittest.TestCase):
     def test_glslang_is_not_a_prerequisite(self):   # it compiled OpenGL games' GLSL; NX 18 renders NVN games only (the OpenGL layer was removed)
         self.check(which=lambda t, **k: None if t == 'glslangValidator' else '/x')
 
-    def test_zbic_is_a_prerequisite(self):   # README installs it; a game with ZBIC modules would otherwise stop only at the rewrite, after its whole RomFS is unpacked (Ocarina of Time: 23 minutes)
+    def test_zbic_is_a_prerequisite(self):   # docs/building.md installs it; a game with ZBIC modules would otherwise stop only at the rewrite, after its whole RomFS is unpacked (Ocarina of Time: 23 minutes)
         with mock.patch.object(nsp, '_importable', lambda m: m != 'zbic'), self.assertRaisesRegex(nsp.BuildError, r'missing modules: zbic \(pip install .*zbic'):
             nsp.check_prereqs({'PATH': '/usr/bin'}, Path('/nonexistent'), True)
 

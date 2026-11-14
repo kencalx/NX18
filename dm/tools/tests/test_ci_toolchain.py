@@ -27,6 +27,12 @@ class Toolchain(unittest.TestCase):
         self.assertEqual(set(named), {self.xcode}, f'README.md: the Xcode to install is not CI\'s {self.xcode}')
         self.assertEqual(set(re.findall(r'Xcode[ -](\d+\.\d+)', readme)), {self.xcode}, f'README.md: an Xcode it names (the side-by-side one too) is not CI\'s {self.xcode}')
 
+    def test_building_page_names_the_same_xcode(self):   # docs/building.md has the command-line steps the README's Requirements link to
+        page = (REPO / 'docs/building.md').read_text()
+        named = re.findall(r'\[Xcode\]\([^)]*\) (\d+\.\d+)', page)
+        self.assertEqual(set(named), {self.xcode}, f'docs/building.md: the Xcode to install is not CI\'s {self.xcode}')
+        self.assertEqual(set(re.findall(r'Xcode[ -](\d+\.\d+)', page)), {self.xcode}, f'docs/building.md: an Xcode it names (the side-by-side one too) is not CI\'s {self.xcode}')
+
     def test_development_page_and_lint_workflow_name_the_same_xcode(self):   # docs/development.md's CI section and lint-c.yml's DEVELOPER_DIR (its clang-tidy reads the SDK's headers)
         named = re.findall(r"Xcode (\d+\.\d+) on GitHub's", (REPO / 'docs/development.md').read_text())
         self.assertTrue(named, 'docs/development.md names no Xcode for CI')

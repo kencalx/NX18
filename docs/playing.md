@@ -1,6 +1,6 @@
 # Playing
 
-New to NX 18? [Getting started](getting-started.md) takes you from a new Mac and iPhone to playing, one step at a time. How to build a game from your legally owned and acquired game files and install it, in more detail: [README](../README.md#how-to-play).
+New to NX 18? [Getting started](getting-started.md) takes you from a new Mac and iPhone to playing, one step at a time. How to build a game from your legally owned and acquired game files and install it, in more detail: [Building](building.md).
 
 - **Settings:** a screen before the game starts sets frame rate, resolution, docked or handheld mode, language, rumble and more. Tap **Play**; your choices are remembered. What each one does: [Settings](settings.md).
 - **Saves and logs** are in the Files app, under the game's name: `save/` and `log.txt` (the previous run is `log.prev.txt`). When something goes wrong, report it in NX 18's [Issues](https://github.com/kencalx/NX18/issues) with the log attached: the in-game menu › **Share log** sends `log.txt` and `log.prev.txt` in one share sheet. Logs never contain keys or game files. Never attach game files, keys or anything extracted from a game ([Reporting a problem](../README.md#reporting-a-problem)). A `glslc_play/` folder there holds shaders the game made while you played that your build does not have (things drawn without them are missing): copy it into the folder of the game's NSPs, and the next build adds them ([development.md](development.md)).

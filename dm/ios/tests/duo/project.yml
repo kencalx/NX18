@@ -12,7 +12,7 @@ targets:
       - path: ../../Sources/GameMenu.swift
       - path: ../../Sources/GameMenuPanel.swift           # the in-game menu as NX 18's panel (the default; DM_GAME_MENU=system keeps the UIMenu)
       - path: ../../Sources/LauncherSettings.swift
-      - path: ../../Sources/LauncherRow.swift          # the settings screen itself (dm_show_launcher), shown when the launch gives a launcher list (README.md, The settings screen)
+      - path: ../../Sources/LauncherRow.swift          # the settings screen itself (dm_show_launcher), shown when the launch gives a launcher list (docs/settings.md, Presets, the guide and a controller)
       - path: ../../Sources/Launcher.swift
       - path: ../../Sources/LauncherController.swift
       - path: ../../Sources/LauncherArt.swift

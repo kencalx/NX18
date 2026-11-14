@@ -39,7 +39,7 @@ static NSArray<NSArray<NSNumber *> *> *DuoHarnessTouchArray(DuoHarnessInput inpu
 }
 @end
 
-// A scripted controller for the settings screen (README.md, The settings screen): DUO_PAD_SCRIPT is a comma-separated list of steps run one every 0.35 s on a hidden virtual
+// A scripted controller for the settings screen (docs/settings.md, Presets, the guide and a controller): DUO_PAD_SCRIPT is a comma-separated list of steps run one every 0.35 s on a hidden virtual
 // controller, after DUO_PAD_DELAY seconds (default 2): up, down, left, right (the D-pad), a, b, y, plus, l, r (Switch buttons: the virtual pad is not a Nintendo one, so A is its
 // right button, as pad_apple.h maps it), wait (one step of nothing). The controller stays connected afterwards, so the focus ring stays on screen for a screenshot
 API_AVAILABLE(ios(17.0)) static GCVirtualController *g_script_pad;
@@ -156,7 +156,7 @@ static void duo_pad_script(void) {
     duo_backdrop(root, 0);
     duo_pad_kind();
     duo_pad_script();
-    double menuAt = NSProcessInfo.processInfo.environment[@"DUO_MENU_OPEN"].doubleValue;   // README.md, The in-game menu: open it after that many seconds, for a screenshot
+    double menuAt = NSProcessInfo.processInfo.environment[@"DUO_MENU_OPEN"].doubleValue;   // docs/settings.md, In-game menu: open it after that many seconds, for a screenshot
     if (menuAt > 0) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC * menuAt)), dispatch_get_main_queue(), ^{ NSLog(@"duo: in-game menu open"); dm_gamepad_menu_open(); });
 
     self.diagnosticHingeStatus = -1;

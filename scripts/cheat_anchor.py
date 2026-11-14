@@ -19,7 +19,7 @@
 #   cheat_anchor.py import  <cheats.txt> --nso <ExeFS/main of the file's build> -o <game>.cheats.toml
 #   cheat_anchor.py compile <game>.cheats.toml --nso <ExeFS/main of the target build> -o <cheats folder> [--plain] [--replace]
 #   cheat_anchor.py check   <game>.cheats.toml --nso <ExeFS/main of the target build>
-# Needs Python 3.11+ (tomllib) and the README's packages (lz4, capstone). Exit status: 0 everything resolved, 2 some cheats
+# Needs Python 3.11+ (tomllib) and the packages docs/building.md installs (lz4, capstone). Exit status: 0 everything resolved, 2 some cheats
 # were skipped or kept bound to one build (the file is still written; the report says why), 1 an error (nothing written).
 import argparse, bisect, datetime, hashlib, re, struct, sys, tomllib
 from pathlib import Path

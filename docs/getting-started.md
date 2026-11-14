@@ -1,6 +1,6 @@
 # Getting started
 
-This page takes you from nothing to playing one of your legally owned and acquired games on your iPhone. Follow it top to bottom. The [README](../README.md#how-to-play) has more detail on each step.
+This page takes you from nothing to playing one of your legally owned and acquired games on your iPhone. Follow it top to bottom. [Building](building.md) has every command and option.
 
 ## 1. What you need
 
