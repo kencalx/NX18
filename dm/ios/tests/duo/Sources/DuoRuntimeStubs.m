@@ -3,6 +3,7 @@
 #include "dm.h"
 #include "dm_input.h"
 #include "haptics_apple.h"
+#include "pad_switch2_apple.h"
 #include "hle.h"
 #include "touch_draw.h"
 #include <pthread.h>
@@ -105,6 +106,12 @@ void dm_haptics_set_enabled(int on) { g_rumble = on; }
 int duo_harness_rumble(void) { return g_rumble; }
 void dm_haptics_apple_init(void) {}
 void dm_haptics_apple_controller(int player, GCController *controller) { (void)player; (void)controller; }
+void dm_haptics_apple_set_sink(int player, void (*sink)(const dm_haptic_state *state)) { (void)player; (void)sink; }
+// Switch 2 controllers over Bluetooth (pad_switch2_apple.m, which the app builds from the host's sources): off in the harness, which has no Bluetooth
+int dm_switch2_start(const dm_switch2_front *front) { (void)front; return 0; }
+void dm_switch2_active(int on) { (void)on; }
+s2_pad *dm_switch2_pads(void) { return NULL; }
+void dm_switch2_rumble(const dm_haptic_state *state) { (void)state; }
 
 int front_ios_boot_ok(void) { return 1; }
 void front_ios_boot(void) {}

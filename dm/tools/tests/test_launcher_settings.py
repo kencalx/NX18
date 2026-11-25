@@ -130,7 +130,7 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
         self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_TOUCH_SIZE', 'DM_TOUCH_OPACITY', 'DM_PICTURE_FIT', 'DM_LOW_POWER_CAP'})   # Low Power Mode at 30 fps: the Mac reports no Low Power Mode
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
-        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only)
+        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN'})   # the Mac window's Display mode (front_mac.m reads 1 or 0)
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
 
@@ -402,7 +402,7 @@ class LauncherSettingsTests(unittest.TestCase):
             listed = settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
         rows = {s['env']: s for s in listed['settings']}
         self.assertEqual(listed['schema'], 1)
-        self.assertEqual([e for e, s in rows.items() if s.get('level') == 'basic'], ['DM_OPMODE', 'DM_LANG', 'DM_PICTURE_FIT', 'DM_SHOW_FPS', 'DM_TOUCH_SIZE', 'DM_TOUCH_OPACITY', 'DM_TOUCH_HAPTICS', 'DM_RUMBLE'])   # the quick tiles (presets-first §5)
+        self.assertEqual([e for e, s in rows.items() if s.get('level') == 'basic'], ['DM_OPMODE', 'DM_LANG', 'DM_PICTURE_FIT', 'DM_SHOW_FPS', 'DM_TOUCH_SIZE', 'DM_TOUCH_OPACITY', 'DM_TOUCH_HAPTICS', 'DM_RUMBLE', 'DM_SW2'])   # the quick tiles (presets-first §5)
         self.assertFalse([e for e, s in rows.items() if s.get('level') == 'basic' and 'preset' in s], 'no preset moves a quick tile')
         self.assertEqual((listed['presets'], listed['moves']['battery'][:2]), (['battery', 'balanced', 'quality'], ['DM_FPS_TARGET', 'DM_RENDER_SCALE']))
         self.assertEqual(rows['DM_RUMBLE_GAIN']['needs'], 'DM_RUMBLE=1')

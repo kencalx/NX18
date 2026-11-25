@@ -1,0 +1,85 @@
+# NX 18 Beam, the Mac app that builds and installs the player's legally owned and acquired games (NX18-X2.0 beam-design.md).
+# `xcodegen generate` in this folder makes Beam.xcodeproj (not committed); beam/README.md has the steps.
+name: Beam
+options:
+  deploymentTarget:
+    macOS: "27.3"
+  createIntermediateGroups: true
+configFiles:
+  Debug: Config/Beam.xcconfig
+  Release: Config/Beam.xcconfig
+targets:
+  Beam:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+      - path: Resources/Assets.xcassets
+      - path: Resources/Credits.rtf
+        buildPhase: resources
+      # NX 18's own UI, compiled as the Mac launcher compiles it (dm/mac/pack_app.py swift_sources, less Launcher.swift, whose MacCloud Beam's Shims.swift stands in for):
+      # the look, glass, font, button glyphs, the NX 18 card and Profile, and the Gate panel they come with
+      - path: ../dm/ios/Sources/LauncherSettings.swift
+      - path: ../dm/ios/Sources/LauncherRow.swift          # NX18Palette and GateColor
+      - path: ../dm/ios/Sources/LauncherGuideFiles.swift
+      - path: ../dm/ios/Sources/SaveSyncReport.swift
+      - path: ../dm/ios/Sources/NXFont.swift
+      - path: ../dm/ios/Sources/LauncherPanel.swift
+      - path: ../dm/ios/Sources/LauncherFocus.swift
+      - path: ../dm/ios/Sources/NX18Look.swift
+      - path: ../dm/ios/Sources/NX18Glass.swift
+      - path: ../dm/ios/Sources/NXButtonGlyph.swift
+      - path: ../dm/ios/Sources/NXButtonGlyphData.swift
+      - path: ../dm/ios/Sources/NX18Card.swift
+      - path: ../dm/ios/Sources/NX18Profile.swift
+    dependencies:
+      - sdk: SwiftUI.framework
+      - sdk: AppKit.framework
+      - sdk: WebKit.framework
+      - sdk: GameController.framework
+      - sdk: CoreText.framework
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: NX 18 Beam
+        CFBundleName: Beam
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.utilities
+        LSMinimumSystemVersion: "27.3"
+        CFBundleDocumentTypes:   # a game's files dropped on the Dock icon: a NUP, an NX, or a folder of NSPs or a dump
+          - CFBundleTypeName: Game files
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: None
+            LSItemContentTypes: [public.folder, public.data]
+        NSHumanReadableCopyright: "NX 18 Beam. Builds your legally owned and acquired games; includes no games, keys or firmware."
+    entitlements:
+      path: Config/Beam.entitlements
+      properties: {}   # no App Sandbox (beam-design §4.5): Beam runs Python, xcodebuild and devicectl and writes other apps' preferences
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(BEAM_BUNDLE_ID)
+        PRODUCT_NAME: NX 18 Beam
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  BeamTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: Beam
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(BEAM_BUNDLE_ID).tests
+        BUNDLE_LOADER: $(TEST_HOST)
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/NX 18 Beam.app/Contents/MacOS/NX 18 Beam
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Beam:
+    build:
+      targets:
+        Beam: all
+        BeamTests: [test]
+    test:
+      targets:
+        - BeamTests

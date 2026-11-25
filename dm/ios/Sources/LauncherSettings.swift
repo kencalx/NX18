@@ -308,6 +308,13 @@ struct SettingsFile: Decodable {
         fputs("launcher: settings reset to the game's defaults\n", stderr)
     }
 
+    // The choices stored as apply() stores them, without putting them into this process's environment: a front end that edits a game's settings for it (NX 18 Beam's
+    // settings sheet, beam/Sources/Views/GameSettingsView.swift) saves them where the game's own window would, and the game reads them at its next start
+    func save() {
+        startPreset()
+        for s in settings where !fixed.contains(s.env) { store(s, values[s.env] ?? s.def) }
+    }
+
     // Before the game starts: every setting not set by an env file goes into the environment (DM_LANG replaces the packed language main.m set as a default). Only a choice that
     // differs from the game's default is stored: a setting the player left at its default follows the defaults of a later build (the settings it was tested with)
     func apply() {

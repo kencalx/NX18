@@ -10,6 +10,8 @@
 > With NX Play, choose `~/NX18-preview` at **Settings › General › nxnative repository**. NX Play brings it up to date with this branch before each build. With the script, run it from `~/NX18-preview`, after `git -C ~/NX18-preview pull` for the latest preview.
 >
 > **Telling us how it went.** Share what worked and what didn't in [Testing](https://github.com/kencalx/NX18/discussions/categories/testing). Bugs go in an [issue](https://github.com/kencalx/NX18/issues/new/choose), with the log from Share log. iPhone Duo owners: see [Testing on iPhone Duo](docs/duo-testing.md) and its [report form](https://github.com/kencalx/NX18/issues/new?template=duo_report.yml). Never share game files, keys or saves.
+>
+> **New to try: Switch 2 controllers on iPhone and iPad.** Joy-Con 2 and the Pro Controller 2 now work on iPhone and iPad as well as on the Mac. Turn on **Switch 2 controllers** (a quick tile on the game's start screen, or `DM_SW2=1` in `env.txt`). On iPhone and iPad, hold the small Sync button on a controller after each start of the game until its lights sweep; iOS asks once for Bluetooth access. In [Testing](https://github.com/kencalx/NX18/discussions/categories/testing), say which controller and device you used, whether it paired, and how the buttons, sticks, motion and rumble felt.
 
 <p align="center"><a href="https://github.com/kencalx/NX18/releases"><img src="docs/images/nx18/readme/nx18-readme-hero.png" alt="NX 18 System update X1.0 release. Native apps, built on your Mac, for your legally owned and acquired games on A20 iPhones, iPads and M-series Macs. Not an emulator. NX 18 includes no games, keys or mods." width="100%"></a></p>
 

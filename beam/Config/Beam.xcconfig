@@ -1,0 +1,21 @@
+// NX 18 Beam's build settings, shared by Debug and Release. Signing identity and team come from Local.xcconfig (not committed; Local.xcconfig.example shows it).
+MARKETING_VERSION = 0.1
+CURRENT_PROJECT_VERSION = 1
+BEAM_BUNDLE_ID = org.nx18.beam
+
+SWIFT_VERSION = 6.0
+SWIFT_STRICT_CONCURRENCY = complete
+SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated
+MACOSX_DEPLOYMENT_TARGET = 27.3
+ARCHS = arm64                       // Apple silicon only: NX 18's games need Metal 4
+ENABLE_HARDENED_RUNTIME = YES       // needed for notarization
+ENABLE_APP_SANDBOX = NO
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -              // ad hoc until Local.xcconfig names the Developer ID
+DEVELOPMENT_TEAM =
+GCC_TREAT_WARNINGS_AS_ERRORS = NO
+SWIFT_TREAT_WARNINGS_AS_ERRORS = NO
+ENABLE_USER_SCRIPT_SANDBOXING = YES
+DEAD_CODE_STRIPPING = YES
+
+#include? "Local.xcconfig"

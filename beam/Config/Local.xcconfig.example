@@ -1,0 +1,4 @@
+// Copy to Local.xcconfig (git ignores it) on the Mac that signs Beam's releases. Never commit the team ID.
+DEVELOPMENT_TEAM = ABCDE12345
+CODE_SIGN_IDENTITY = Developer ID Application
+// OTHER_CODE_SIGN_FLAGS = --timestamp   // added by the release script's export; set here to sign local builds the same way

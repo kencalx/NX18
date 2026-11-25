@@ -1,0 +1,478 @@
+{
+ "schema": 1,
+ "game": "0400486024DEC000",
+ "console": "switch2",
+ "presets": [
+  "battery",
+  "balanced",
+  "quality"
+ ],
+ "moves": {
+  "battery": [
+   "DM_FPS_TARGET"
+  ],
+  "quality": [
+   "DM_DYNAMIC_RESOLUTION",
+   "DM_PRESENT_UPSCALE",
+   "DM_POST_AA",
+   "DM_NVN_CUBE_ALT"
+  ]
+ },
+ "preset_env": {
+  "quality": {
+   "DM_NVN_CUBE_ALT": "0"
+  }
+ },
+ "settings": [
+  {
+   "env": "DM_FPS_TARGET",
+   "kind": "choice",
+   "section": "Game",
+   "label": "Frame rate",
+   "note": "",
+   "default": "60",
+   "options": [
+    [
+     "30",
+     "30 fps"
+    ],
+    [
+     "60",
+     "60 fps"
+    ]
+   ],
+   "preset": {
+    "battery": "30",
+    "quality": "60",
+    "performance": "60"
+   }
+  },
+  {
+   "env": "DM_DYNAMIC_RESOLUTION",
+   "kind": "toggle",
+   "section": "Game",
+   "label": "Dynamic resolution",
+   "note": "Lets the game lower its resolution under load, on by default (Balanced and Battery Saver). Turn off to keep full resolution for the selected console mode.",
+   "default": "1",
+   "on": "1",
+   "off": "0",
+   "preset": {
+    "battery": "1",
+    "quality": "0",
+    "performance": "0"
+   }
+  },
+  {
+   "env": "DM_OPMODE",
+   "kind": "choice",
+   "section": "Game",
+   "label": "Console mode",
+   "note": "",
+   "default": "1",
+   "level": "basic",
+   "options": [
+    [
+     "1",
+     "Docked"
+    ],
+    [
+     "0",
+     "Handheld"
+    ]
+   ]
+  },
+  {
+   "env": "DM_PRESENT_UPSCALE",
+   "kind": "choice",
+   "section": "Game",
+   "label": "Upscaling",
+   "note": "Uses more GPU time and can increase heat.",
+   "default": "off",
+   "options": [
+    [
+     "off",
+     "Standard"
+    ],
+    [
+     "metalfx",
+     "MetalFX"
+    ]
+   ],
+   "preset": {
+    "battery": "off",
+    "quality": "metalfx",
+    "performance": "off"
+   },
+   "inactive": [
+    {
+     "option": "metalfx",
+     "when": [
+      "mfx:none"
+     ],
+     "why": "This device has no MetalFX scaler"
+    }
+   ]
+  },
+  {
+   "env": "DM_PRESENT_SHARPEN",
+   "kind": "choice",
+   "section": "Game",
+   "label": "Sharpening",
+   "note": "Not applied while MetalFX upscales the picture. High can leave light rims around text.",
+   "default": "0",
+   "options": [
+    [
+     "0",
+     "Off"
+    ],
+    [
+     "1",
+     "Low"
+    ],
+    [
+     "2",
+     "Medium"
+    ],
+    [
+     "3",
+     "High"
+    ]
+   ],
+   "preset": {
+    "battery": "0",
+    "quality": "0",
+    "performance": "0"
+   },
+   "hint": [
+    {
+     "when": [
+      "DM_UPSCALER=metalfx"
+     ],
+     "why": "Off while MetalFX runs the game's upscaler"
+    }
+   ]
+  },
+  {
+   "env": "DM_POST_AA",
+   "kind": "choice",
+   "section": "Game",
+   "label": "Anti-aliasing",
+   "note": "Smooths jagged edges, the HUD and text included (less with sharp). Uses some GPU time.",
+   "default": "off",
+   "options": [
+    [
+     "off",
+     "Off"
+    ],
+    [
+     "edge",
+     "Edge smoothing"
+    ],
+    [
+     "edge-sharp",
+     "Edge smoothing (sharp)"
+    ]
+   ],
+   "preset": {
+    "battery": "off",
+    "quality": "edge",
+    "performance": "off"
+   }
+  },
+  {
+   "env": "DM_UPSCALER",
+   "kind": "choice",
+   "section": "Game",
+   "label": "Game's upscaler",
+   "note": "",
+   "default": "game",
+   "options": [
+    [
+     "game",
+     "Game's own"
+    ],
+    [
+     "metalfx",
+     "MetalFX"
+    ]
+   ],
+   "preset": {
+    "battery": "game",
+    "quality": "game",
+    "performance": "game"
+   }
+  },
+  {
+   "env": "DM_LANG",
+   "kind": "choice",
+   "section": "Game",
+   "label": "Game language",
+   "note": "This game's files do not list its languages, so some of these may not be in the game. It may then show another one.",
+   "default": "en-US",
+   "level": "basic",
+   "options": [
+    [
+     "en-US",
+     "American English"
+    ],
+    [
+     "en-GB",
+     "British English"
+    ],
+    [
+     "ja",
+     "Japanese"
+    ],
+    [
+     "fr",
+     "French"
+    ],
+    [
+     "de",
+     "German"
+    ],
+    [
+     "es-419",
+     "Latin American Spanish"
+    ],
+    [
+     "es",
+     "Spanish"
+    ],
+    [
+     "it",
+     "Italian"
+    ],
+    [
+     "nl",
+     "Dutch"
+    ],
+    [
+     "fr-CA",
+     "Canadian French"
+    ],
+    [
+     "pt",
+     "Portuguese"
+    ],
+    [
+     "ru",
+     "Russian"
+    ],
+    [
+     "ko",
+     "Korean"
+    ],
+    [
+     "zh-Hant",
+     "Traditional Chinese"
+    ],
+    [
+     "zh-Hans",
+     "Simplified Chinese"
+    ],
+    [
+     "pt-BR",
+     "Brazilian Portuguese"
+    ],
+    [
+     "pl",
+     "Polish"
+    ],
+    [
+     "th",
+     "Thai"
+    ]
+   ]
+  },
+  {
+   "env": "DM_FULLSCREEN",
+   "kind": "choice",
+   "section": "Game",
+   "label": "Display mode",
+   "note": "",
+   "default": "0",
+   "level": "basic",
+   "options": [
+    [
+     "0",
+     "Window"
+    ],
+    [
+     "1",
+     "Fullscreen"
+    ]
+   ]
+  },
+  {
+   "env": "DM_RUMBLE",
+   "kind": "toggle",
+   "section": "Controls",
+   "label": "Game rumble",
+   "note": "",
+   "default": "1",
+   "level": "basic",
+   "on": "1",
+   "off": "0",
+   "hint": [
+    {
+     "when": [
+      "haptics:none",
+      "controller:none"
+     ],
+     "why": "Rumble needs a controller on this device"
+    }
+   ]
+  },
+  {
+   "env": "DM_RUMBLE_GAIN",
+   "kind": "range",
+   "section": "Controls",
+   "label": "Rumble strength",
+   "note": "",
+   "default": "1.0",
+   "needs": "DM_RUMBLE=1",
+   "min": 0.0,
+   "max": 3.0,
+   "step": 0.1,
+   "hint": [
+    {
+     "when": [
+      "haptics:none",
+      "controller:none"
+     ],
+     "why": "Rumble needs a controller on this device"
+    }
+   ]
+  },
+  {
+   "env": "DM_RUMBLE_MIN",
+   "kind": "range",
+   "section": "Controls",
+   "label": "Rumble cutoff",
+   "note": "",
+   "default": "0",
+   "needs": "DM_RUMBLE=1",
+   "min": 0.0,
+   "max": 0.9,
+   "step": 0.05,
+   "inactive": [
+    {
+     "when": [
+      "DM_RUMBLE_GAIN=0"
+     ],
+     "why": "Rumble strength is 0 %"
+    }
+   ]
+  },
+  {
+   "env": "DM_PAD_PRESS_TO_JOIN",
+   "kind": "toggle",
+   "section": "Controls",
+   "label": "Press a button to join",
+   "note": "",
+   "default": "0",
+   "on": "1",
+   "off": "0",
+   "inactive": [
+    {
+     "when": [
+      "DM_PAD_MERGE=1"
+     ],
+     "why": "All controllers are player 1 (env.txt)"
+    }
+   ]
+  },
+  {
+   "env": "DM_SW2",
+   "kind": "toggle",
+   "section": "Controls",
+   "label": "Switch 2 controllers",
+   "note": "Plays Joy-Con 2 and Pro Controller 2 over Bluetooth: hold Sync on one during the game to pair it. macOS asks once for Bluetooth access.",
+   "default": "0",
+   "level": "basic",
+   "on": "1",
+   "off": "0"
+  },
+  {
+   "env": "DM_PRESENT_SNAP",
+   "kind": "toggle",
+   "section": "Troubleshooting",
+   "label": "Frame buffering",
+   "note": "Up to one frame more display latency.",
+   "default": "1",
+   "on": "1",
+   "off": "0"
+  },
+  {
+   "env": "DM_PSO_PREBUILD",
+   "kind": "toggle",
+   "section": "Troubleshooting",
+   "label": "Pipeline prebuild",
+   "note": "The first start waits a few minutes for it, once.",
+   "default": "1",
+   "on": "1",
+   "off": "0",
+   "inactive": [
+    {
+     "when": [
+      "DM_GPU_CAPTURE=*"
+     ],
+     "why": "Off while GPU capture is on"
+    },
+    {
+     "when": [
+      "capture:on"
+     ],
+     "why": "Off while GPU capture is on"
+    }
+   ]
+  },
+  {
+   "env": "DM_NVN_ENC_THREAD",
+   "kind": "toggle",
+   "section": "Troubleshooting",
+   "label": "Encode thread",
+   "note": "Leave on; turn it off only if a game stops with a deferred-encoding error.",
+   "default": "0",
+   "on": "1",
+   "off": "0",
+   "hint": [
+    {
+     "when": [
+      "device:mac"
+     ],
+     "why": "Off on the Mac by default: steadier slowest frames"
+    }
+   ]
+  },
+  {
+   "env": "DM_FPS_HOLD",
+   "kind": "toggle",
+   "section": "Troubleshooting",
+   "label": "Hold frames when late",
+   "note": "",
+   "default": "off",
+   "on": "on",
+   "off": "off",
+   "inactive": [
+    {
+     "when": [
+      "DM_FPS_TARGET=30/120"
+     ],
+     "why": "Only matters at 60 fps"
+    }
+   ]
+  },
+  {
+   "env": "DM_METAL_HUD",
+   "kind": "toggle",
+   "section": "Troubleshooting",
+   "label": "Performance HUD",
+   "note": "Apple's overlay: frame rate, GPU time and memory.",
+   "default": "0",
+   "on": "1",
+   "off": "0"
+  }
+ ]
+}

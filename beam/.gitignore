@@ -1,0 +1,5 @@
+Beam.xcodeproj/
+build/
+Config/Local.xcconfig
+Info.plist
+Config/Beam.entitlements
