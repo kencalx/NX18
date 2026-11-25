@@ -34,8 +34,8 @@ Power figures are CPU power: the game's own process, not the GPU or the display.
 ## What you need
 
 - **Your legally owned and acquired games**, dumped from your own Switch or Switch 2, and your own `prod.keys` for `.nsp` and `.xci` games. NX 18 includes no games, keys or firmware.
-- **A Mac** with Apple silicon (M-series) and Metal 4, on macOS 27.3 or later. To build: Xcode 27.3, [Homebrew](https://brew.sh) and Python 3.12 or newer.
-- **To play on iPhone or iPad:** a device with an Apple A20 chip, on iOS or iPadOS 27.3 or later. NX 18 is built for the A20 and tested on the iPhone 18 Pro Max. The iPhone 18 Pro, iPhone Duo and iPad mini 8 should work too, but aren't tested yet.
+- **A Mac** with Apple silicon (M-series) and Metal 4, on macOS 27.2 or later. To build: Xcode 27.2, [Homebrew](https://brew.sh) and Python 3.12 or newer.
+- **To play on iPhone or iPad:** a device with an Apple A20 chip, on iOS or iPadOS 27.2 or later. NX 18 is built for the A20 and tested on the iPhone 18 Pro Max. The iPhone 18 Pro, iPhone Duo and iPad mini 8 should work too, but aren't tested yet.
 - **A sideloading tool** for iPhone and iPad, such as AltStore, SideStore, Sideloadly or LiveContainer. A paid Apple Developer account is recommended, not required.
 
 Every detail, down to the Metal compiler: [Requirements](#requirements).
