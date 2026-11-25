@@ -78,8 +78,9 @@ representative at an online or offline event.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement at
-the **Report content** option in the "..." menu of any issue, pull request,
-comment or discussion. Choose to report it to the repository's maintainers.
+**nx18@proton.me**. You can also use the **Report content** option in the "..."
+menu of any issue, pull request, comment or discussion, which reaches GitHub's
+staff.
 All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the
