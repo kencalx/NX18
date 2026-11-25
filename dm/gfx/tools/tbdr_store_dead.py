@@ -6,7 +6,7 @@ L=[l.split(None,2)[2].strip() if False else l.strip() for l in open(sys.argv[1])
 BPP={70:4,71:4,80:4,81:4,90:4,92:4,93:4,115:8,125:16,55:4,25:2,65:4,105:4,103:4,252:4,250:2,260:5,255:4,10:1,20:2,30:2,60:4}
 ev=[]   # (frame, kind, pass, ser, load|clear, bytes, fmt, w, h, slot, (lv, sl))
 for l in L:
-    m=re.match(r'\[pass\] F(\d+) P (\d+) (c\d+|d) ser=(\d+) fmt=(\d+) (\d+)x(\d+)(?:.*? lv(\d+) sl(\d+))?.*?(clear|load|dontcare)$',l)
+    m=re.match(r'\[pass\] F(\d+) P (\d+) (c\d+|d) ser=(\d+) fmt=(\d+) (\d+)x(\d+)(?:.*? lv(\d+) sl(\d+))?.*?(clear|load|dontcare)(?: mtl=\S+)?$',l)
     if m:
         f,p,slot,s,fmt,w,h,lv,sl,act=m.groups(); fmt=int(fmt); lv=int(lv or 0); sl=int(sl or 0); w=max(int(w)>>lv,1); h=max(int(h)>>lv,1)
         ev.append((int(f),'P',int(p),int(s),act,int(w)*int(h)*BPP.get(fmt,4),fmt,int(w),int(h),slot,(lv,sl))); continue

@@ -151,6 +151,39 @@ static void resize_case(void) {
     snap_present(&big);
     CHECK("slot 1's old texture leaves at its next use", ![g_snap_res containsAllocation:old1] && !g_snap[1].old);
 }
+// The copy takes the present's crop alone, at its own place in a slot of the window texture's size (MacNativeGames 78cf9896): inside the crop the new picture, outside it what the
+// slot held before. A crop off the texture, or the whole texture, copies it whole; `crop whole` runs under DM_PRESENT_SNAP_WHOLE=1, which copies the whole texture every time
+static int slot_px(id<MTLTexture> t, int x, int y) {   // one texel's red byte of a 16x16 slot
+    id<MTLBuffer> out = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared];
+    T4 *cb = t4_begin(); id<MTL4ComputeCommandEncoder> b = t4_copy(cb);
+    t4_use(cb, t), t4_use(cb, out), [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(16,16,1)
+        toBuffer:out destinationOffset:0 destinationBytesPerRow:64 destinationBytesPerImage:1024];
+    t4_end(cb, b); t4_wait(cb);
+    return ((uint8_t *)out.contents)[(y * 16 + x) * 4];
+}
+static void crop_case(int whole) {
+    tex_t t = source_n(40, 16); id<MTLTexture> mt = tex_mtl(&t);   // 113 everywhere
+    snap_present(&t); snap_present(&t);
+    CHECK("both slots hold the whole picture", [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);
+    uint8_t bytes[1024]; memset(bytes, 150, sizeof bytes); [mt replaceRegion:MTLRegionMake2D(0, 0, 16, 16) mipmapLevel:0 withBytes:bytes bytesPerRow:64];   // the next frame: 150 everywhere
+    const int crop[4] = {2, 3, 8, 9}; uint64_t c0 = g_snap_cropped, n0 = g_snap_copies;
+    for (int i = 0; i < 2; i++) { present_enqueue(&t, 1. / 60, crop, NULL); mtl_present_flush(); snap_commit_wait(g_snap_v); }
+    CHECK("the cropped copies complete", [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000] && g_snap_copies == n0 + 2);
+    for (int k = 0; k < 2; k++) {
+        id<MTLTexture> sl = g_snap[k].tex;
+        CHECK("the slot keeps the window texture's size", sl.width == 16 && sl.height == 16);
+        CHECK("inside the crop: the new picture", slot_px(sl, 2, 3) == 150 && slot_px(sl, 9, 11) == 150);
+        if (whole) CHECK("whole: outside the crop too", slot_px(sl, 0, 0) == 150 && slot_px(sl, 10, 3) == 150 && slot_px(sl, 2, 12) == 150);
+        else CHECK("outside the crop: what the slot held", slot_px(sl, 0, 0) == 113 && slot_px(sl, 10, 3) == 113 && slot_px(sl, 2, 12) == 113 && slot_px(sl, 1, 3) == 113);
+    }
+    CHECK(whole ? "whole: no copy counted as cropped" : "both copies counted as cropped", g_snap_cropped == c0 + (whole ? 0 : 2));
+    memset(bytes, 170, sizeof bytes); [mt replaceRegion:MTLRegionMake2D(0, 0, 16, 16) mipmapLevel:0 withBytes:bytes bytesPerRow:64];
+    const int off[4] = {10, 10, 8, 8}, all[4] = {0, 0, 16, 16}; c0 = g_snap_cropped;   // a crop off the texture, and one that is all of it
+    present_enqueue(&t, 1. / 60, off, NULL); mtl_present_flush(); snap_commit_wait(g_snap_v);
+    present_enqueue(&t, 1. / 60, all, NULL); mtl_present_flush(); snap_commit_wait(g_snap_v);
+    CHECK("those copies complete", [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);
+    CHECK("a crop off the texture or all of it copies the whole texture", g_snap_cropped == c0 && slot_px(g_snap[0].tex, 0, 0) == 170 && slot_px(g_snap[1].tex, 15, 15) == 170);
+}
 typedef struct { win_t *window; int index; dispatch_semaphore_t started, done; } acquire_job;
 static void *acquire_thread(void *arg) { @autoreleasepool {
     acquire_job *job = arg; dispatch_semaphore_signal(job->started);
@@ -249,6 +282,7 @@ static void queued_case(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(15); setbuf(stdout, NULL);
     if (argc != 2) return 2;
+    if (!strcmp(argv[1], "crop_whole")) setenv("DM_PRESENT_SNAP_WHOLE", "1", 1);
     setenv("DM_PRESENT_SNAP", "1", 1); setenv("DM_PRESENT_HZ", "0", 1);
     if (!strcmp(argv[1], "ticket")) setenv("DM_NVN_WAITS", "1", 1);   // the wait ledger, which ticket_case reads
     mtl_init();
@@ -259,6 +293,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     else if (!strcmp(argv[1], "pacing")) pacing_case();
     else if (!strcmp(argv[1], "copy")) pending_copy_case();
     else if (!strcmp(argv[1], "resize")) resize_case();
+    else if (!strcmp(argv[1], "crop")) crop_case(0);
+    else if (!strcmp(argv[1], "crop_whole")) crop_case(1);
     else if (!strcmp(argv[1], "queued")) queued_case();
     else if (!strcmp(argv[1], "ticket")) ticket_case();
     else return 2;

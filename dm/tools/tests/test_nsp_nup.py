@@ -156,6 +156,19 @@ class Read(Base):
         self.path.write_bytes(b[:-16])
         with self.assertRaisesRegex(pack_nup.Error, 'header says'): pack_nup.Nup(self.path)
 
+    def test_folder_cycle_refused(self):   # a TOC whose hash matches but whose folder names an ancestor as a child: the tree walks would recurse for ever
+        n = self.open(); ndirs, slots, dirs = n.ndirs, list(n.slots), list(n.dirs)
+        slots_at = 0x80 + 0x30 + len(n.packages) * 0x40 + ndirs * 0x18 + len(n.files) * 0x50; n.close()
+        orig = self.path.read_bytes(); toc_size = struct.unpack_from('<Q', orig, 0x10)[0]
+        def folders(d): _, first, count = dirs[d]; return [first + j for j in range(count) if slots[first + j] < ndirs]   # the slots of d's folder children
+        j = next(j for j in folders(0) if folders(slots[j])); sub = slots[j]   # the base's romfs/, which has a folder
+        for at, to in ((j, 0), (folders(sub)[0], sub)):   # romfs/ made the root itself; then romfs/dir made romfs/ (a cycle of two)
+            b = bytearray(orig); struct.pack_into('<I', b, slots_at + 4 * at, to)
+            b[0x18:0x38] = hashlib.sha256(bytes(b[0x80:0x80 + toc_size])).digest(); self.path.write_bytes(b)
+            with self.assertRaisesRegex(pack_nup.Error, 'contains itself'): pack_nup.Nup(self.path)
+        r = subprocess.run([sys.executable, str(REPO / 'scripts/pack_nup.py'), str(self.path)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1); self.assertIn('contains itself', r.stderr); self.assertNotIn('Traceback', r.stderr)
+
     def test_damaged_content_refused(self):
         n = self.open(); app, base, vers, _ = pack_nup.scan(n)
         i = next(i for i, f in enumerate(n.files) if f[5] == 1)
@@ -237,7 +250,7 @@ class Survey(Base):
         write_nup(self.path, [(0, NEW, 0, version(main=nso('ab' * 16), tid=NEW), META), (1, NEW, VER, version(main=nso('cd' * 16), tid=NEW), b'')])
         app, fam = nsp.scan_nup(self.path); self.addCleanup(fam['nup'].close)
         seen, prof = [], mock.Mock(id='P', builds=lambda: {'v0': {'main': 'ab' * 16}})
-        games = mock.Mock(by_build=lambda bid: seen.append(bid) or (prof if bid == 'ab' * 16 else None))
+        games = mock.Mock(by_build=lambda bid, skip=(): seen.append(bid) or (prof if bid == 'ab' * 16 else None))
         with mock.patch.dict(sys.modules, {'game': games}), mock.patch.object(nsp, 'PROG', mock.Mock()), \
              mock.patch.object(nsp, 'find_nx_extract', side_effect=AssertionError('built nx_extract')):
             self.assertEqual(nsp.same_build(self.dir, app, fam, None, REPO, {}), (prof, 'v0', 'ab' * 16))
@@ -615,6 +628,7 @@ class ShiftedMeta(Base):
         said = self.pack(tlv([(2, control_nacp('First', 'テス', '1.0.0')), (2, control_nacp('Second', 'テス', '2.0.0')), (3, b''), (3, ICON)]))
         self.assertEqual(nacp.name(self.out() / 'control.nacp'), 'First')
         self.assertFalse((self.out() / 'icon.jpg').exists())
+        self.assertFalse([s for s in said if pack_nup.SHIFTED in s or 'meta block' in s], said)   # the repeated NACP is read where SPEC puts it, not taken for a shifted block
         self.pack(tlv([(2, control_nacp('Test Game', 'テス', '1.2.3')), (3, ICON)]) + b'\3\0\0')   # a trailing scrap shorter than a record header is ignored
         self.assertEqual(self.control(), ('Test Game', '1.2.3', ICON))
         cut = tlv([(2, control_nacp('Test Game', 'テス', '1.2.3')), (3, ICON)])[:-2]

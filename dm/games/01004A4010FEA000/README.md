@@ -22,6 +22,7 @@ Update 1.2.0 (v131072) over the base game, SDK 13.3.2 (no other game's `sdk` bui
 - **Two domain shaders do not build** (`DS_Vanish05_*.dso`: `SPIRV-Cross threw an exception: Subgroup builtins are not available in this type of function`); the one-lane rewrite (`spv_single_lane`) covers vertex shaders only, and tessellated draws are skipped anyway.
 - From the title to the prologue's first play the picture is right as far as compared (title scene, menus, the VP9 opening movie, the first real-time scene, play with the HUD). Two red lines, once each: a pixel shader declares a cube texture where the game binds a 2D one (the zero cube is bound), and a draw whose stage 0 reads cb1 with none bound.
 - The spin-wait search takes 37 loops in `main` (35 before its store rule) ([development.md, Power](../../../docs/development.md#power)).
+- **Resolved upstream, ported: opaque character draws missing in the prologue.** The body and hair draws are indexed indirect-count multi-draws whose count is a visibility flag the depth prepass writes; the host had copied their arguments (count 0) before the prepass, and the game's `0x21` primitive barrier did not expire the copy, so the draws were masked out. See [Indirect-count multi-draws split the pass an earlier draw opened](../../../docs/reference/rendering.md#indirect-count-multi-draws-split-the-pass-an-earlier-draw-opened) (upstream `5d1010307`, [PR #2945](https://github.com/seedds/nxnative/pull/2945); the PR's author saw the bodies opaque on an M4 Max and an iPhone 17 Pro Max). Not yet run here.
 
 ## Files and shaders
 
@@ -45,8 +46,11 @@ General host changes first needed here; each applies to every game:
 - **The NVN layer advertises support for the game’s GPU-code versions** (`hle_nvn.c`), `nvnWindowGetCrop` and `nvnSamplerBuilderGetLodClamp`: [Newest GPU code version reported by the driver](../../../docs/reference/nvn-objects.md#newest-gpu-code-version-reported-by-the-driver), [NVN calls that were red stubs](../../../docs/reference/nvn-objects.md#nvn-calls-that-were-red-stubs).
 - **Oodle's streaming decoder in the Mac host's tool mode** (`hle_oodle.c`, `OodleLZDecoder_*`, `oodle_packs`) and the **PKZ / DAT readers**: [01, Compressed RomFS content](../../../docs/agents/01-extract.md#compressed-romfs-content).
 - **PlatinumGames shader objects** (`pg_shader`): [PlatinumGames' shader objects](../../../docs/reference/shaders.md#platinumgames-shader-objects).
+- **Indirect visibility counts written by a depth prepass**: [Indirect-count multi-draws split the pass an earlier draw opened](../../../docs/reference/rendering.md#indirect-count-multi-draws-split-the-pass-an-earlier-draw-opened).
 
 ## Open
 
 - Dotted patches on some surfaces (a grid every 4 pixels: the platforms breaking up in the prologue, a floor near the camera) look like the engine's dithered dissolve; not compared with the Switch yet.
 - The two domain shaders and the two red lines above.
+
+- **Depth mode (2026-11-21):** the game sets NVN's near = 0 depth mode. Without `depth_mode zero` the bundled pipeline archive was made for the other mode: the iPhone 18 Pro Max refused it, rebuilt 6,141 bases before the first frame (106 s) and compiled pipelines during play (up to 4.8 s of compiles per 300 frames, dropped frames and 33-67 ms hitches in action). The profile now sets it.

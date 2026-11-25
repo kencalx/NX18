@@ -191,4 +191,15 @@ class HostReader(Base):
         self.assertEqual(subprocess.run([self.reader(), self.image, 'e_b.metallib'], capture_output=True).stdout, b'unmapped 22\n')
 
 
+class Write(Base):
+    def test_write_reports_progress(self):   # (files done, files, bytes written) at the start and after each file, for dmsh_build.py's progress (upstream NXNative d2939c1eb)
+        events = []
+        shader_lib.write({'a': b'1234', 'b': lambda: b'56789'}, str(self.image), on_progress=lambda d, t, b: events.append((d, t, b)))
+        self.assertEqual([(d, t) for d, t, _ in events], [(0, 2), (1, 2), (2, 2)])
+        self.assertEqual(events[0][2], 0); self.assertGreater(events[1][2], 0); self.assertGreater(events[2][2], events[1][2])
+        empty = []
+        shader_lib.write({}, str(self.root / 'empty.img'), on_progress=lambda d, t, b: empty.append((d, t, b)))
+        self.assertEqual(empty, [(0, 0, 0)])
+
+
 if __name__ == '__main__': unittest.main()

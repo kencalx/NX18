@@ -2,7 +2,9 @@
 // Three runs (check_t_nvn_framewg): with DM_FRAME_WG=1 the thread that acquires the window texture joins when its policy is set, acquires within one frame finish and start
 // once, the start's deadline is the real-time period, an acquire that moves to another thread with the same period sets the policy and joins there (before, it only skipped),
 // one that comes back to a thread that joined calls no join, and a replay thread joins at its first declaration only. With DM_FRAME_WG=1 DM_RT=0 (--rt-off) and with
-// DM_FRAME_WG=0 (--off) nothing is called
+// DM_FRAME_WG=0 (--off) nothing is called. DM_FRAME_WG_PERIOD (frame_wg_period): its parse in every run; unset, the deadline at the game's interval 2 is 33.333 ms as before; with
+// DM_FRAME_WG_PERIOD=16 (--period) it is 16.667 ms at interval 2 and 1, and the present thread's policy and the replay threads' period follow it; with the workgroup off
+// (--period-off) the switch is ignored and the period follows the interval
 #include "../nvn/hle_nvn.c"
 #include <dispatch/dispatch.h>
 #include <time.h>
@@ -40,6 +42,33 @@ static void next_frame(void) { atomic_fetch_add(&g_frame, 1); }
 
 int main(int argc, char **argv) {
     int rt_off = argc > 1 && !strcmp(argv[1], "--rt-off"), off = argc > 1 && !strcmp(argv[1], "--off");
+    int period = argc > 1 && !strcmp(argv[1], "--period"), period_off = argc > 1 && !strcmp(argv[1], "--period-off");
+    if (period || period_off) {
+        setenv("DM_FRAME_WG", period ? "1" : "0", 1); setenv("DM_FRAME_WG_PERIOD", "16", 1); unsetenv("DM_RT"); unsetenv("DM_DETCLOCK"); unsetenv("DM_RT_COMP");
+        nvn_present_config(60, 0); dm_fps_state = NULL;
+        printf("t_nvn_framewg: DM_FRAME_WG=%s DM_FRAME_WG_PERIOD=16\n", period ? "1" : "0");
+        EXPECT("the period reads (ns)", period ? 16666666 : 0, frame_wg_period());
+        win.interval = 2; const uint64_t own = rt_period_ns(&win, present_period(&win));   // 33.333 ms, or 16.667 where a frame step keeps the cap's deadline (Ocarina of Time)
+        on_new_thread("0x1001 main thread", acquire);
+        EXPECT("interval 2: the policy's period (us)", period ? 16667 : llround(own / 1e3), llround(g_rt_period_ms * 1000));
+        EXPECT("  the replay threads' period (ns)", period ? 16666666 : (long long)own, atomic_load(&g_rt_frame_ns));
+        if (period) {
+            EXPECT("  the workgroup's deadline (ns)", 16666666, fwg_last_period);
+            EXPECT("  counted as a frame at a longer present interval where its own period is longer", own > 16666666, atomic_load(&g_wg_longer));
+            win.interval = 1; next_frame(); on_new_thread("0x1001 main thread", acquire);
+            EXPECT("interval 1: the same deadline (ns)", 16666666, fwg_last_period);
+            EXPECT("  not counted as longer", own > 16666666, atomic_load(&g_wg_longer));
+        } else EXPECT("  nothing called", 0, fwg_begins + fwg_joins);
+        printf(g_fail ? "t_nvn_framewg: %d failed\n" : "t_nvn_framewg: all passed\n", g_fail);
+        return g_fail != 0;
+    }
+    // DM_FRAME_WG_PERIOD's parse: 8, 11, 16 and 33 name 120, 90, 60 and 30 Hz's period; other values in 8-34 are milliseconds; the rest refused (UINT64_MAX), unset 0
+    EXPECT("parse: unset", 0, nvn_frame_wg_period_parse(NULL) + nvn_frame_wg_period_parse(""));
+    EXPECT("parse: 16 is 60 Hz's period (ns)", 16666666, nvn_frame_wg_period_parse("16"));
+    EXPECT("parse: 8, 11, 33 are 120, 90, 30 Hz's", 1, nvn_frame_wg_period_parse("8") == 8333333 && nvn_frame_wg_period_parse("11") == 11111111 && nvn_frame_wg_period_parse("33") == 33333333);
+    EXPECT("parse: 20 and 16.7 as written (us)", 1, nvn_frame_wg_period_parse("20") == 20000000 && nvn_frame_wg_period_parse("16.7") == 16700000);
+    EXPECT("parse: 7, 35, 16ms, x refused", 1, nvn_frame_wg_period_parse("7") == UINT64_MAX && nvn_frame_wg_period_parse("35") == UINT64_MAX && nvn_frame_wg_period_parse("16ms") == UINT64_MAX && nvn_frame_wg_period_parse("x") == UINT64_MAX);
+    unsetenv("DM_FRAME_WG_PERIOD");
     setenv("DM_FRAME_WG", off ? "0" : "1", 1);
     if (rt_off) setenv("DM_RT", "0", 1); else unsetenv("DM_RT");
     unsetenv("DM_DETCLOCK"); unsetenv("DM_RT_COMP");
@@ -84,6 +113,11 @@ int main(int argc, char **argv) {
         EXPECT("a replay thread joins at its first declaration only", 3, fwg_joins);
         EXPECT("  under its name", 0, strcmp(fwg_last_who, "NVN queue replay"));
         EXPECT("  and calls no finish or start", 1, fwg_ends == 4 && fwg_begins == 4);
+        win.interval = 2; next_frame(); on_a(acquire);
+        EXPECT("DM_FRAME_WG_PERIOD unset: at interval 2 the deadline is the real-time period, as before (ns)", (long long)rt_period_ns(&win, present_period(&win)), fwg_last_period);
+        printf("  (%.3f ms: 33.333 unless a frame step keeps its cap's deadline)\n", fwg_last_period / 1e6);
+        EXPECT("  and no frame counted at a longer interval", 0, atomic_load(&g_wg_longer));
+        win.interval = 1;
     }
     a_fn = NULL; dispatch_semaphore_signal(a_go); pthread_join(a, NULL);
     printf(g_fail ? "t_nvn_framewg: %d failed\n" : "t_nvn_framewg: all passed\n", g_fail);

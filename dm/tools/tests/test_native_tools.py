@@ -8,6 +8,7 @@ import importlib.util
 import struct
 import subprocess
 import sys
+import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[3]
@@ -77,6 +78,23 @@ class NativeTools(unittest.TestCase):
         with open(dmsh_chain.LOCK) as f: lock = dict(l.rstrip('\n').split('\t', 1) for l in f if '\t' in l and not l.startswith('#'))
         self.assertEqual(hashlib.sha256(XLATE.read_bytes()).hexdigest()[:16], lock.get('dmsh_xlate'), 'rebuilt translator: tool_lock.py --update-lock and dmsh_chain.py --header')
         self.assertEqual(lock.get('xlate_source'), dmsh_chain.xlate_source_sha(), 'dmsh_xlate sources changed: rebuild it with dm/tools/native_tools.sh dmsh_xlate')
+
+    def test_xlate_source_sha_covers_the_vendored_ryujinx_sources(self):   # an edit there with the old translator left in place passed before (upstream NXNative f856c78d5)
+        files = {Path(p).relative_to(REPO / 'dm').as_posix() for p in dmsh_chain.xlate_source_files()}
+        for want in ('gfx/tools/dmsh_xlate/Program.cs', 'gfx/tools/dmsh_xlate/dmsh_xlate.csproj', 'third_party/ryujinx/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs',
+                     'third_party/ryujinx/Directory.Build.props'):
+            self.assertIn(want, files)
+        with tempfile.TemporaryDirectory(prefix='xlate_sha_') as tmp:
+            dm = Path(tmp) / 'dm'; gfx = dm / 'gfx'; (gfx / 'tools/dmsh_xlate').mkdir(parents=True)
+            (gfx / 'tools/dmsh_xlate/Program.cs').write_text('// a\n'); (gfx / 'tools/dmsh_xlate/dmsh_xlate.csproj').write_text('<Project />\n')
+            ryu = dm / 'third_party/ryujinx/src/Ryujinx.Graphics.Shader'; ryu.mkdir(parents=True)
+            spv = ryu / 'SpirvGenerator.cs'; spv.write_text('class SpirvGenerator {}\n')
+            base = dmsh_chain.xlate_source_sha(gfx)
+            (dm / 'third_party/ryujinx/README.md').write_text('ignored\n')   # not compiled, and the build's outputs: no change
+            for d in ('obj', 'bin'): (ryu / d).mkdir(); (ryu / d / 'out.cs').write_text('ignored\n')
+            self.assertEqual(dmsh_chain.xlate_source_sha(gfx), base)
+            spv.write_text('class SpirvGenerator { /* edited */ }\n')   # a vendored source edited: another digest, so the old translator fails the check
+            self.assertNotEqual(dmsh_chain.xlate_source_sha(gfx), base)
 
     @unittest.skipUnless(sys.platform == 'darwin', 'runs the Mac executables')
     def test_built_from_the_sources_beside_them(self):

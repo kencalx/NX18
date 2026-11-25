@@ -15,6 +15,11 @@
 // no library applet, so the game still sees focus 1 while the player types. The time counts from the latest of the last present, the return to focus, the menu's closing and the
 // guest clock's restart, so a picture that stood while out of focus, behind the menu or behind the text box is not a stall.
 //
+// A residency commit that does not come back from the kernel is named sooner, at about 1 s (STALL_COMMIT_NS, looked at twice a second, in or out of focus): Ocarina of Time on the
+// iPhone 18 Pro Max (build 431d5d18) froze with the replay thread 16.5 s in iokit_user_client_trap under res_commit, holding the residency commit lock, and this said so only at its
+// 5 s mark. "[RED] stall: <the commit> (presents wait behind it; a dump follows)", once per commit and at most STALL_LINES a run (commit_step); the 5 s line for the same freeze then
+// says the dump is above instead of writing it again. nvn_mtl.m mtl_res_commit_stuck reads it without a lock.
+//
 // It takes no lock the render, replay, present or feedback paths can hold: the clock it reads is an atomic, the focus and the menu are atomics, the graphics dump reads only
 // atomics and notes, and the guest thread table is dumped under locks it only tries (svc_thread_dump_try; "busy" when one stays held). A dump during a freeze therefore cannot
 // wait on the freeze. The step (stall_step) is a pure function of the clock and the state, which t_stall drives with a fake present clock.
@@ -31,6 +36,8 @@ void dm_stall_menu(int open) {
     atomic_store(&g_stall_menu, !!open);
 }
 void mtl_stall_dump(void);   // nvn_mtl.m
+uint64_t mtl_res_commit_stuck(uint64_t min_ns, char *out, size_t n);   // nvn_mtl.m: a residency commit in the kernel for min_ns or more (when it began; 0: none)
+#define STALL_COMMIT_NS 1000000000ull
 
 enum { STALL_QUIET, STALL_FIRE, STALL_RESUMED };
 enum { STALL_LINES = 3 };
@@ -42,7 +49,16 @@ typedef struct {
     uint64_t last_line;      // when the last one was written
     uint64_t open_present;   // the last present before the stall a line was written for, until presents resume (0: none open)
     uint64_t fired_for;      // the present the last line was written for (one line per stall)
+    int commit_lines;        // residency commit lines written
+    uint64_t commit_for;     // the commit (its start) the last one was written for, while it is still in the kernel (0: none)
 } stall_t;
+// One look for a residency commit in the kernel: at, its start as mtl_res_commit_stuck returns it for STALL_COMMIT_NS (0: none so long). 1: write its line and the dump
+static int commit_step(stall_t *s, uint64_t at) {
+    if (!at) { s->commit_for = 0; return 0; }
+    if (!s->threshold_ns || at == s->commit_for || s->commit_lines >= STALL_LINES) return 0;
+    s->commit_lines++; s->commit_for = at;
+    return 1;
+}
 // One look at time now: present is the last completed present (0: none yet), focus the oe focus state the game sees, menu whether the in-game menu is open or the guest clock
 // frozen, since the latest of the return to focus, the menu's closing and the clock's restart. Returns STALL_FIRE (write a stall line and the dump; *secs: seconds since the last present) or STALL_RESUMED (presents came back after a
 // line; *secs: seconds between the last present before the stall and the first after it), else STALL_QUIET
@@ -78,11 +94,18 @@ static int stall_poll(uint64_t now) {
     int frozen = guest_clock_frozen(&thawed);
     if (thawed > since) since = thawed;
     int focus = dm_focus_seen(), menu = atomic_load(&g_stall_menu) || frozen; double secs = 0;
-    int r = stall_step(&g_stall, now, present, focus, menu, since, &secs);
-    if (r == STALL_FIRE) {
-        LOG("[RED] stall: no present for %.1f s while the game is in focus (line %d of at most %d; a dump follows; DM_STALL_LOG=0 turns this off)", secs, g_stall.lines, STALL_LINES);
+    char rk[300] = "";
+    if (commit_step(&g_stall, mtl_res_commit_stuck(STALL_COMMIT_NS, rk, sizeof rk))) {
+        LOG("[RED] stall: %s (presents wait behind it; residency commit line %d of at most %d; a dump follows; DM_STALL_LOG=0 turns this off)", rk, g_stall.commit_lines, STALL_LINES);
         stall_dump();
         LOG("stall dump: end");
+    }
+    int r = stall_step(&g_stall, now, present, focus, menu, since, &secs);
+    if (r == STALL_FIRE) {
+        int above = g_stall.commit_for != 0;   // the commit named above is still in the kernel: its dump says it
+        LOG("[RED] stall: no present for %.1f s while the game is in focus (line %d of at most %d; %s; DM_STALL_LOG=0 turns this off)", secs, g_stall.lines, STALL_LINES,
+            above ? "the residency commit named above is still in the kernel, its dump is above" : "a dump follows");
+        if (!above) { stall_dump(); LOG("stall dump: end"); }
     } else if (r == STALL_RESUMED) LOG("stall: presents resumed after %.1f s", secs);
     return r;
 }

@@ -109,6 +109,9 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                 else if ([el hasPrefix:@"texture_buffer"]) { r->kind = NVN_RB_TEXD; r->dtt = (uint8_t)MTLTextureTypeTextureBuffer; uint8_t tt; dummy_kind(el, &tt, &r->dpf); }
                 else if ([el hasPrefix:@"texture"] || [el hasPrefix:@"depth"]) { r->kind = NVN_RB_TEXD; dummy_kind(el, &r->dtt, &r->dpf); }
                 else FAIL("B binding %s: dynamic handle array of %s", nm.UTF8String, el.UTF8String);
+                id dx = b[@"tbx"];   // an array of buffer textures: its first element's entry in the offset table, the rest following it (dmsh_reflect.py buffer_image_bias)
+                if (dx) { int x = [dx intValue]; if (x < 0 || x + n > DMSH_TBIAS_SLOTS || r->dtt != (uint8_t)MTLTextureTypeTextureBuffer) FAIL("B binding %s: offset table entries %d + %d of an array that is not of buffer textures", nm.UTF8String, x, n);
+                    r->tbx = (uint16_t)(x + 1); }
                 r->n = (uint8_t)n; o->dyn = 1; o->nb++; continue;
             }
             if ([k isEqualToString:@DMSH_KIND_CBUF]) { int fx = [b[@"fixed"] intValue]; if (fx < 0 || fx > 65536 || fx % 4) FAIL("B binding %s: %d bytes read at fixed offsets", nm.UTF8String, fx);
@@ -155,9 +158,18 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_GMEM_LOG]) { r->kind = NVN_RB_GMEML; r->rw = 1; }
             else if ([k isEqualToString:@DMSH_KIND_C1]) r->kind = NVN_RB_C1;
             else if ([k isEqualToString:@DMSH_KIND_CBSIZE]) r->kind = NVN_RB_CBSIZE;
+            else if ([k isEqualToString:@DMSH_KIND_TBIAS]) { int tn = [b[@"n"] intValue];   // the offset table: its length in entries, as the shader declares it
+                if (tn < 4 || tn > DMSH_TBIAS_SLOTS || tn % 4 || o->tbias_n) FAIL("B binding %s: offset table of %d entries", nm.UTF8String, tn);
+                r->kind = NVN_RB_TBIAS; o->tbias_n = (uint16_t)tn; }
             else if ([k isEqualToString:@DMSH_KIND_DRVCB]) r->kind = [b[@"bank"] intValue] == DMSH_PUSH_BANK ? NVN_RB_PUSH : [b[@"bank"] intValue] == 2 ? NVN_RB_DRV2 : NVN_RB_DRV0;
             else if ([k isEqualToString:@DMSH_KIND_BORDER]) { if (o->border) FAIL("two border colour blocks"); r->kind = NVN_RB_BORDER; o->border = (uint8_t)(o->nb + 1); }
             else FAIL("B binding kind %s not implemented (%s)", k.UTF8String, [b[@"msl_name"] UTF8String]);
+            id tx = b[@"tbx"];   // a buffer image's or buffer texture's index in the offset table, an array of buffer textures' first (dmsh_reflect.py buffer_image_bias)
+            if (tx) { int x = [tx intValue], arr = r->kind == NVN_RB_TEXA;
+                if (x < 0 || x + (arr ? r->n : 1) > DMSH_TBIAS_SLOTS || (r->kind != NVN_RB_IMG && r->kind != NVN_RB_IMGU && r->kind != NVN_RB_TBUF && r->kind != NVN_RB_TBUFU &&
+                                                                            !(arr && r->dtt == (uint8_t)MTLTextureTypeTextureBuffer)))
+                    FAIL("B binding %s: offset table index %d of a binding that is not an image or buffer texture, nor an array of buffer textures", nm.UTF8String, x);
+                r->tbx = (uint16_t)(x + 1); }
             id bb = b[@"border_bit"];   // a twin sampler (dmsh_rewrite.py border_emu)
             if (bb) { int bit = [bb intValue]; if (bit < 0 || bit >= DMSH_BORDER_SAMPLERS || (r->kind != NVN_RB_SAMP && r->kind != NVN_RB_SAMPT && r->kind != NVN_RB_SAMPU && r->kind != NVN_RB_SAMPI) || r->n)
                     FAIL("B binding %s: border colour twin %d of a binding that is not one sampler", nm.UTF8String, bit);
@@ -165,6 +177,10 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             if ((r->kind == NVN_RB_CBUF || r->kind == NVN_RB_SAMP || r->kind == NVN_RB_SAMPT || r->kind == NVN_RB_TEX || r->kind == NVN_RB_IMG || r->kind == NVN_RB_TBUF || r->kind == NVN_RB_SBUFP || r->kind == NVN_RB_UBOP || r->kind == NVN_RB_SBUFU || r->kind == NVN_RB_TEXU || r->kind == NVN_RB_SAMPU || r->kind == NVN_RB_SAMPI || r->kind == NVN_RB_IMGU || r->kind == NVN_RB_TBUFU || r->kind == NVN_RB_TEXH || r->kind == NVN_RB_SAMPH) && reg < 0)
                 FAIL("B binding %s has no resolved slot number", [b[@"msl_name"] UTF8String]);
             o->nb++;
+        }
+        for (int i = 0; i < o->nb; i++) {   // every offset table entry a binding takes lies in the table the shader declares
+            const nvn_rbind *r = &o->b[i]; int many = r->kind == NVN_RB_TEXD || r->kind == NVN_RB_TEXA;
+            if (r->tbx && r->tbx - 1 + (many ? r->n : 1) > o->tbias_n) FAIL("B binding %d: offset table entries %d + %d past the table's %d", i, r->tbx - 1, many ? r->n : 1, o->tbias_n);
         }
         NSDictionary *dr = j[@"drv_reads"];
         if ([dr isKindOfClass:[NSDictionary class]]) { o->drv_read[0] = dr[@"0"] != nil; o->drv_read[2] = dr[@"2"] != nil; }
@@ -206,8 +222,11 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             if (ra[@"discard"]) o->may_discard = [ra[@"discard"] intValue] != 0;
             if (ra[@"sample_mask"]) o->writes_smask = [ra[@"sample_mask"] intValue] != 0;
             o->reads_prim_id = [ra[@"primitive_id"] intValue] != 0;
+            o->pos_far = [ra[@"far"] intValue] != 0;
             for (NSNumber *c in ra[@"colors"]) if (c.intValue >= 0 && c.intValue < 8) o->color_mask |= (uint8_t)(1u << c.intValue);
             o->color_known = [ra[@"colors"] isKindOfClass:[NSArray class]];
+            if ([ra[@"float_colors"] isKindOfClass:[NSNumber class]]) { o->fcols = (uint8_t)[ra[@"float_colors"] unsignedIntValue]; o->fcols_known = 1;
+                o->ucols = (uint8_t)[ra[@"uint_colors"] unsignedIntValue]; o->scols = (uint8_t)[ra[@"sint_colors"] unsignedIntValue]; }
             if ([ra[@"omap"] isKindOfClass:[NSNumber class]]) { o->omap = (uint32_t)[ra[@"omap"] unsignedLongLongValue]; o->omap_known = 1; }
         }
         NSDictionary *ua = [ra isKindOfClass:[NSDictionary class]] ? ra[@"uv_affine"] : nil;
@@ -222,6 +241,8 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         if ([uv isKindOfClass:[NSDictionary class]]) for (NSString *k in uv) { int l = k.intValue, a = [uv[k] intValue]; if (l >= 0 && l < 32 && a >= 0 && a < 16) U->uv_attr[l] = (int8_t)a; }
         NSArray *scr = [ra isKindOfClass:[NSDictionary class]] ? ra[@"screen"] : nil;
         if ([scr isKindOfClass:[NSArray class]]) for (NSNumber *k in scr) if (k.intValue >= 0 && k.intValue < 32) o->scr_locn |= 1u << k.intValue;
+        NSArray *spos = [ra isKindOfClass:[NSDictionary class]] ? ra[@"screen_pos"] : nil;   // outputs that are gl_Position itself (nvn_refl.h scr_pos)
+        if ([spos isKindOfClass:[NSArray class]]) for (NSNumber *k in spos) if ([k isKindOfClass:[NSNumber class]] && k.intValue >= 0 && k.intValue < 32) o->scr_pos |= 1u << k.intValue;
         NSDictionary *fe = j[@"fetch"];
         if ([fe isKindOfClass:[NSDictionary class]]) {
             for (NSDictionary *c in fe[@"calls"]) { int i = [c[@"fc"] intValue], r = [c[@"tex_reg"] intValue], l = [c[@"varying_locn"] intValue]; NSArray *fp = c[@"frag_pos"];
@@ -234,13 +255,16 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                 else if (l < 0 || l >= 32) l = -1;
                 if (i != o->nfc || i >= 32 || r < 0 || r >= 256 || l < 0) FAIL("fetch call table not contiguous or out of range (entry %d)", i);
                 if ([c[@"proj"] intValue]) o->fc_proj |= 1u << i;
+                if ([c[@"ndc"] intValue]) o->fc_ndc |= 1u << i;
                 F->fc_reg[o->nfc] = (uint8_t)r; F->fc_locn[o->nfc] = (uint8_t)l; o->nfc++; }
             for (NSNumber *r in fe[@"mixed_regs"]) if (r.intValue >= 0 && r.intValue < 256) F->fc_mixed[r.intValue >> 6] |= 1ull << (r.intValue & 63);
-            for (NSDictionary *u in fe[@"outputs"]) { if (o->nfo >= 4) FAIL("more than 4 fetch outputs"); o->fo_color[o->nfo++] = (uint8_t)[u[@"color"] intValue]; }
+            for (NSDictionary *u in fe[@"outputs"]) { if (o->nfo >= 8) FAIL("more than 8 fetch outputs"); o->fo_color[o->nfo++] = (uint8_t)[u[@"color"] intValue]; }
         }
         NSArray *tg = j[@"threadgroup_size"];
         if ([tg isKindOfClass:[NSArray class]] && tg.count == 3) for (int i = 0; i < 3; i++) o->tg[i] = (uint16_t)[tg[i] intValue];
         o->tg_spill = (uint32_t)[j[@"tg_spill"] unsignedIntValue];
+        o->loop_sites = (uint32_t)[j[@"loop_sites"] count];
+        o->mesh_spill = [j[@"mesh_spill"] boolValue];
         for (NSDictionary *u in j[@"first_store"]) { if (o->nfirst >= 4) FAIL("more than 4 first-invocation stores");
             int reg = [u[@"reg"] intValue]; if (reg < 0 || reg >= 16) FAIL("first-invocation store to storage slot %d", reg);
             o->first[o->nfirst].reg = (uint8_t)reg; o->first[o->nfirst].word = (uint16_t)[u[@"word"] intValue]; o->first[o->nfirst++].value = (uint32_t)[u[@"value"] unsignedIntValue]; }

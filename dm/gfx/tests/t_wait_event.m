@@ -281,6 +281,32 @@ static void event_queued_write(int mode) {
     CHECK(done && *result==after,"the consumer's copy reads the producer's payload"); if(!done) { P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,1); _Exit(2); }
     P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed);
 }
+// A fence right behind such a wait, with no commands between them, waits for the writer: the wait hands the writer's fence on to its queue
+static void event_queued_write_fence(void) {
+    printf("CASE a fence right behind a wait on an in-flight WRITE waits for the writer\n");
+    *source=before; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    P(nvnQueueFinish)(&queues[0]);   // the consumer queue's last fence is reached: the stale fence would read signalled at once
+    id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    if (!gate) abort();
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_commit_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_commit_mu); pthread_mutex_unlock(&g_sub_mu);
+    NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
+    begin_cmd(1); uint32_t payload=after;
+    P(nvnCommandBufferUpdateUniformBuffer)(&commands[1],source_addr,4,0,4,&payload);
+    P(nvnCommandBufferSignalEvent)(&commands[1],&event,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,1);
+    P(nvnCommandBufferFenceSync)(&commands[1],&produced,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    job pj,cj; enqueue(&pj,&queues[1],P(nvnCommandBufferEndRecording)(&commands[1])); int pr=returned(&pj,250000000ull);
+    CHECK(pr && receipt_encoded(&produced,1000000000ull),"producer encodes while its GPU work is held by a shared-event gate");
+    begin_cmd(0); P(nvnCommandBufferWaitEvent)(&commands[0],&event,NVN_EVENT_WAIT_MODE_EQUAL,1);
+    P(nvnCommandBufferFenceSync)(&commands[0],&consumed,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    enqueue(&cj,&queues[0],P(nvnCommandBufferEndRecording)(&commands[0])); int cr=returned(&cj,250000000ull);
+    CHECK(cr && receipt_encoded(&consumed,1000000000ull),"the fence behind the wait publishes while the writer is in flight");
+    CHECK(!landed(&produced,0) && !landed(&consumed,0),"and is not reached before the writer");
+    gate.signaledValue=1;   // always release the GPU before cleanup, including assertion failures
+    require_returned(&pj,pr); require_returned(&cj,cr);
+    int done=landed(&produced,5000000000ull) && landed(&consumed,5000000000ull);
+    CHECK(done && *source==after,"both are reached after the writer"); if(!done) _Exit(2);
+    P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed);
+}
 // A signal does not cut its recording (issue #2112): two signals with commands between them are one Metal submission, and a wait on the first of them, which is not the
 // recording's last, is still encoded behind the in-flight write. This is signal_events node, the default; split (signals_in_node(0)) cuts at each signal
 static void event_signal_no_cut(void) {
@@ -557,7 +583,7 @@ static void probe_cost(void) {
     enum { N=4000 };
     uint64_t c0=atomic_load(&g_cum_sub_cpu_ns), s0=atomic_load(&g_cum_sub_sys_ns), k0=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
     unsigned self0=t_thread_self, info0=t_thread_info; volatile double x=1;
-    for(int i=0;i<N;i++) { nq_cost c=nq_cost_begin(); for(int k=0;k<3000;k++) x*=1.0000001; nq_cost_end(c); }
+    for(int i=0;i<N;i++) { nq_cost c=nq_cost_begin(); for(int k=0;k<20000;k++) x*=1.0000001; nq_cost_end(c); }   // about 60 us a scope: the probes' own ~1-2 us outside it stays well inside the ratio's margin
     uint64_t k1=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), c1=atomic_load(&g_cum_sub_cpu_ns), s1=atomic_load(&g_cum_sub_sys_ns);
     unsigned self=t_thread_self-self0, info=t_thread_info-info0;
     uint64_t t0=now_ns(); for(int i=0;i<N;i++) nq_cost_end(nq_cost_begin()); double per=(double)(now_ns()-t0)/N;
@@ -802,7 +828,9 @@ static void wait_counters(void) {
     nq_wait_stats(q1); mtl_wait_stats(m1); uint64_t w1=atomic_load(&g_cum_sub_wall_ns), c1=atomic_load(&g_cum_sub_cpu_ns);
     CHECK(fine && q1[0]==q0[0]+1,"one submit counted");
     CHECK(q1[1]>q0[1] && q1[1]-q0[1]<w1-w0 && q1[2]-q0[2]<=c1-c0,"its copy's wall and CPU time, a part of the submit cost (the rest the replay's)");
-    if(rec_on()) CHECK(m1[4]>m0[4],"the replay drained the encode thread");
+    // a submission's end hands its records to the encode thread with a note and no longer drains it (held submissions, upstream b2ae958f2; DM_NVN_SUB_DRAIN=1 drains there again):
+    // the drain counter is checked with a drain of its own
+    if(rec_on()) { uint64_t d0=m1[4]; rec_drain(); mtl_wait_stats(m1); CHECK(m1[4]==d0+1,"a drain of the encode thread is counted"); }
     else CHECK(m1[4]==m0[4],"no encode thread, no drains");
     dispatch_semaphore_t held=dispatch_semaphore_create(0); pthread_t th;
     pthread_create(&th,NULL,hold_sub_mu,(__bridge void *)held); dispatch_semaphore_wait(held,DISPATCH_TIME_FOREVER);
@@ -814,7 +842,9 @@ static void wait_counters(void) {
     mtl_wait_stats(m0); rmu_lock(); os_unfair_lock_unlock(&g_rmu); pthread_join(th,NULL); mtl_wait_stats(m1);
     CHECK(m1[3]==m0[3]+1 && m1[2]-m0[2]>=10000000ull && m1[1]==m0[1],"a g_rmu wait off the replay thread counts as another thread's");
     pthread_create(&th,NULL,hold_rcm,(__bridge void *)held); dispatch_semaphore_wait(held,DISPATCH_TIME_FOREVER);
-    mtl_wait_stats(m0); res_commit(); pthread_join(th,NULL); mtl_wait_stats(m1);
+    // a change to commit: with nothing queued res_commit returns at once (g_res_done is past it) and never waits for the lock
+    id<MTLBuffer> rb=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared]; res_add(rb);
+    mtl_wait_stats(m0); res_commit(); pthread_join(th,NULL); mtl_wait_stats(m1); res_remove(rb); res_commit();
     CHECK(m1[10]==m0[10]+1 && m1[9]-m0[9]>=10000000ull && m1[8]==m0[8],"a res_commit behind a held residency commit lock off the replay thread: one other thread's wait, about the 20 ms");
     mtl_wait_stats(m0); res_commit(); mtl_wait_stats(m1);
     CHECK(m1[10]==m0[10] && m1[8]==m0[8],"an uncontended residency commit lock: no wait counted");
@@ -874,6 +904,7 @@ int main(void) { @autoreleasepool {
     event_stale_gpu_reset();
     event_queued_write(NVN_EVENT_SIGNAL_MODE_WRITE);
     event_queued_write(NVN_EVENT_SIGNAL_MODE_ADD);
+    event_queued_write_fence();
     event_signal_no_cut();
     frame_shares_allocator();
     vis_ring_grows();

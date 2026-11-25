@@ -42,31 +42,40 @@
 # first start takes them from the app instead of compiling them. Left out as the host's descriptor could not be matched or metal-tt would refuse it (plan_layout), counted in the
 # output and archive.tsv (layout_rows). Groups of their own (batches.<arch>/l<index>/); one metal-tt refuses is compiled again in halves (l<index>/a, l<index>/b, ...) down to
 # single bases, so only the bases it refuses are left out, each refusal kept by its own inputs as a task / mesh group's is. --no-layout: none
+# And a stand-in per R row whose vertex shader has a pulling library (plan_standins): the pulling base hybrid_get asks for when a later draw of the same pair misses its pipeline (another
+# vertex layout or colour state), as pso_desc_pull describes it (the <key>_bp function, no vertex descriptor, the row's fragment entry, samples and alpha to coverage). The pair bases
+# above are those of the pair lists, which for a game of single-stage programs are covers no draw makes (13 Sentinels, Luigi's Mansion 3, Persona 5 Royal, Catherine) and for others
+# miss pairs made only at draw time (Smash): such a miss had no stand-in and its draw waited for the compiler (Persona 5 Royal: 935 misses, stalls of 0.57-0.95 s). The R rows are
+# read here alone: not a pair list, so they feed neither vs_pad's padding nor the host's prebuild stamp. A pair whose pixel shader reads a [[user(locnN)]] input the pulling library
+# does not write is left out (GitHub issue #283; user_locations reads the libraries' AIR metadata strings), and the stand-ins are groups of their own (batches.<arch>/s<index>/),
+# halved down to a base metal-tt refuses as the layout groups are. --no-standins: none
 # Output folder (what the app bundles as pso/, the host's DM_PSO_BUNDLE):
 #   <arch>.mtl4a     one archive per GPU architecture (applegpu_g18p = A19 / A19 Pro); the host opens the one named after its device's architecture
 #   prebuilt.tsv     what the archives cover, in the host's stamp format (pso_prebuild): chain version, depth mode, the pair lists' size and SHA-256. The host skips its prebuild when
 #                    it matches and a probe of a few bases finds them in the archive
 #   rest_pairs.tsv   the pairs the device still builds (only when there are any)
-#   archive.tsv      what was built: architectures, OS minimum, toolchain, bases, compute and task / mesh pipelines, layout bases, the R rows and those left out by reason, and per
-#                    architecture the groups left out (refused by metal-tt) (for people and logs; the host does not read it)
+#   standins.tsv     the stand-ins the archives hold (standin_rows), which the host's probe of the bundle asks a few of (only when there are any)
+#   archive.tsv      what was built: architectures, OS minimum, toolchain, bases, compute and task / mesh pipelines, layout bases, the R rows and those left out by reason, the
+#                    stand-ins and the rows left without one by reason, and per architecture the groups left out (refused by metal-tt) (for people and logs; the host does not read it)
 # Each archive is made again only when its compiler inputs change (key.<arch> in the work folder): the complete pipeline configuration without library locations,
 # the referenced libraries' bytes, architecture, platform, minimum OS and metal-tt version. Chain/profile stamps are validated and refreshed independently.
-# More bases than --batch-size are compiled in sequential groups (batches.<arch>/<index>/ in the work folder, each cached by its own inputs) and merged with metal-pack: one metal-tt on
+# More bases than --batch-size are compiled in groups (base_jobs at a time; batches.<arch>/<index>/ in the work folder, each cached by its own inputs) and merged with metal-pack: one metal-tt on
 # Super Mario Odyssey's 32,864 bases runs an 8 GB Mac out of paging space (docs/reference/shaders.md, Bounded groups for the offline pipeline compiler). The output is the same single file.
 # With compute pipelines, they and the bases are separate groups (batches.<arch>/c<index>/ and <index>/) merged the same way, so new pairs leave the compute pipelines compiled, and the
 # reverse. The compute groups are small (COMPUTE_BATCH) and run --jobs at a time: one metal-tt keeps about three cores busy.
 # Usage: pso_offline.py --msl <b-<chain> folder> --out <folder> --work <folder> [--game <id>] [--pairs <shader_pairs.tsv> [--pairs <pso_pairs.tsv>]] [--gpu g18p[,g17p]]
-#          [--depth gl|zero] [--platform ios|macos] [--os-min 27.3] [--script-only] [--batch-size N] [--shader-map <shader_map.tsv>] [--manifest <pso_manifest.tsv>] [--no-compute] [--no-mesh] [--no-layout] [--jobs N]
+#          [--depth gl|zero] [--platform ios|macos] [--os-min 27.3] [--script-only] [--batch-size N] [--shader-map <shader_map.tsv>] [--manifest <pso_manifest.tsv>] [--no-compute] [--no-mesh] [--no-layout] [--no-standins] [--jobs N]
 #   --game: the profile (DM_GAMES_DIR as for game.py) whose shader_pairs.tsv and pso_pairs.tsv are the pairs, whose shader_map.tsv and pso_manifest.tsv name the compute shaders and the
 #   task / mesh pipelines and layout bases, and whose depth_mode key the depth mode, unless --pairs / --shader-map / --manifest / --depth say; --no-compute: no compute pipelines;
-#   --no-mesh: no task / mesh pipelines; --no-layout: no layout bases (the R rows); --jobs: metal-tt runs at a time for the compute, task / mesh and layout groups;
+#   --no-mesh: no task / mesh pipelines; --no-layout: no layout bases (the R rows); --no-standins: no stand-ins (the R rows' pulling bases); --jobs: metal-tt runs at a time for
+#   the compute, task / mesh, layout and stand-in groups;
 #   --gpu: architectures, with or without the applegpu_ prefix (default g19p); --depth: the game's NVN depth mode (gl = near -w, NVN's default; zero = near 0, which the game sets
 #   with nvnDeviceSetDepthMode: the host knows it only at run time, so the profile says it; a wrong one costs the device its own prebuild, as without the archive);
 #   --os-min: the archives' system (default: for iOS the app's deployment target, deploymentTarget in dm/ios/project.yml (27.3), or the SDK's major version without it; for macOS
 #   the major version this Mac runs, since the Mac app is built for the Mac that builds it).
 #   A device opens only an archive of its own major version (macOS 27.2 refused archives made for 26.0 and 26.6 and opened those for 27.0 and 27.2), and builds the bases itself
 #   otherwise: the SDK's version on a Mac whose system is older than its Xcode's SDK (macOS 26.6 with Xcode 27.1) left that Mac without them (GitHub issue #673)
-import argparse, concurrent.futures, filecmp, hashlib, json, os, re, shutil, struct, subprocess, sys, time
+import argparse, concurrent.futures, filecmp, hashlib, json, os, re, shutil, struct, subprocess, sys, threading, time
 from pathlib import Path
 from typing import NamedTuple
 
@@ -74,6 +83,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import romfs, shader_lib   # the libraries may be one file (shader_lib.py), read in place; metal-tt alone needs files of its own (real_libraries)
 import dmsh_abi as abi, dmsh_side
+import vol_space   # the space metal-tt may write, with what APFS frees on demand
 
 # The function constants the host's prebuild sets in a base's functions (nvn_mtl.m pre_fn), by name: (index, bool value). A pair whose functions declare another constant is left to the
 # device: the host leaves it at its default, which metal-tt can do too, but no other constant was tried there, and one function metal-tt fails fails its whole group
@@ -82,10 +92,22 @@ HOST_CONSTANTS = {'dm_border_off': (abi.BORDER_FC, True)}
 BATCH = 1000   # bases per metal-tt run: Odyssey's largest compiler lifetime footprint at this size was 2.065 GiB on an 8 GB M2
 COMPUTE_BATCH = 16   # compute pipelines per metal-tt run, JOBS runs at a time: one metal-tt keeps about 2-3 cores busy: Star Fox's 233 took 268 s in 16 groups against 453 s in one run (M5 Pro, background priority, a loaded Mac)
 JOBS = max(1, (os.cpu_count() or 2) // 2)
+def base_jobs(cpus=None, ram=None):
+    """Base groups (BATCH bases each) compiled at once: one metal-tt keeps about three cores busy and its largest footprint at BATCH was 2.065 GiB (Odyssey, 8 GB M2), so a core
+    count over three and a memory budget of 6 GiB a group, the first 4 GiB left to the system and the rest of the build. An 8 GB Mac keeps one at a time, as all did before;
+    the M4 Max (16 cores, 48 GB) runs five. The archive holds the same pipelines: each group is its own folder and metal-pack merges them in their order (its bytes are not
+    reproducible either way: two sequential runs of Donkey Kong Bananza's 21,225 bases gave 1,861,781,840 and 1,861,384,992 bytes, metal-tt 32023.925, and metal-pack
+    merging the same 65 pieces twice gave two different files of the same size; -nthreads 8 merged them in 17 s against 18-24 s, so the merge keeps one thread)"""
+    cpus = cpus or os.cpu_count() or 2
+    if ram is None:
+        try: ram = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+        except (ValueError, OSError, AttributeError): ram = 0
+    return max(1, min(cpus // 3, (ram - (4 << 30)) // (6 << 30)))
 COLOUR = ('pixel_format', 'write_mask', 'blending_state', 'alpha_blend_operation', 'rgb_blend_operation', 'destination_alpha_blend_factor', 'destination_rgb_blend_factor',
           'source_alpha_blend_factor', 'source_rgb_blend_factor')
 MESH_BATCH = 16   # task / mesh pipelines per metal-tt run, --jobs runs at a time, as the compute groups; a group metal-tt refuses costs only its own pipelines
 LAYOUT_BATCH = 64   # layout bases (the R rows') per metal-tt run, --jobs runs at a time; a group metal-tt refuses costs only its own bases, as a task / mesh group
+STANDIN_BATCH = 64   # stand-ins (the R rows' pulling bases, plan_standins) per metal-tt run, as the layout groups
 
 # The colour formats a render target can have, MTLPixelFormat's value → the script's name (metal4-pipelines-script(5), PIXEL FORMAT: the enumerator less its MTLPixelFormat prefix).
 # The key stores the value (pso_key.cfmt); a value not here leaves its row to the device
@@ -97,7 +119,7 @@ PIXEL_FORMATS = {
     90: 'RGB10A2Unorm', 91: 'RGB10A2Uint', 92: 'RG11B10Float', 93: 'RGB9E5Float', 94: 'BGR10A2Unorm', 103: 'RG32Uint', 104: 'RG32Sint', 105: 'RG32Float',
     110: 'RGBA16Unorm', 112: 'RGBA16Snorm', 113: 'RGBA16Uint', 114: 'RGBA16Sint', 115: 'RGBA16Float', 123: 'RGBA32Uint', 124: 'RGBA32Sint', 125: 'RGBA32Float',
     552: 'BGRA10_XR', 553: 'BGRA10_XR_sRGB', 554: 'BGR10_XR', 555: 'BGR10_XR_sRGB'}
-UINT_FORMATS = {13, 23, 53, 33, 63, 73, 91, 113, 123}   # mtl_fmt_uint in nvn_mtl.m
+UINT_FORMATS = {13, 23, 53, 33, 63, 73, 91, 113, 123}   # pf_int_kind's unsigned formats in nvn_mtl.m (kind 1)
 SINT_FORMATS = {14, 24, 54, 34, 64, 74, 114, 124}   # with UINT_FORMATS, pf_int_kind's integer formats: never blended
 # NVN's blend functions (NVNblendFunc) → MTLBlendFactor, as bfac maps them (anything else: One); its equations (NVNblendEquation) → MTLBlendOperation, as bop does (anything else: Add)
 BLEND_FACTORS = {1: 'Zero', 2: 'One', 3: 'SourceColor', 4: 'OneMinusSourceColor', 5: 'SourceAlpha', 6: 'OneMinusSourceAlpha', 7: 'DestinationAlpha', 8: 'OneMinusDestinationAlpha',
@@ -182,12 +204,27 @@ def pair_text(paths):
 
 
 def read_pairs(text):
-    """(vertex key, pixel key) per line, in order, without empty lines, comments and repeated lines (pso_prebuild's reading)"""
-    seen, out = set(), []
+    """(vertex key, pixel key) per line, in order, without empty lines, comments, # cover padding sections and repeated lines (pso_prebuild's reading)"""
+    seen, out, cover = set(), [], False
     for line in text.decode('utf-8').split('\n'):
-        if not line or line.startswith('#') or line in seen: continue
+        if not line: continue
+        if line.startswith('#'):
+            if line.startswith('# cover') and (len(line) == 7 or line[7] in ':\t '): cover = True
+            elif line.startswith('# kind:'): cover = False
+            continue
+        if cover or line in seen: continue
         seen.add(line); c = line.split('\t')
         if len(c) >= 2: out.append((c[0], c[1]))
+    return out
+
+
+def read_pairs_files(paths):
+    """read_pairs across files independently so a # cover section in one file never hides a headerless later file."""
+    seen, out = set(), []
+    for p in paths:
+        if not p or not Path(p).is_file(): continue
+        for row in read_pairs(Path(p).read_bytes()):
+            if row not in seen: seen.add(row); out.append(row)
     return out
 
 
@@ -358,22 +395,30 @@ DEFAULT_COLOUR = ('Invalid', 'All', 'Disabled', 'Add', 'Add', 'Zero', 'Zero', 'O
 
 
 def fragment_entry(k, fj, funcs):
-    """pso_desc's fragment entry point for a pipeline that is not merged and has no specialized fragment: the integer (entry_u, pso_all_uint), mixed (entry_m, pso_mixed_uint) or
-    dual-source (entry_d, pso_reads_src1) one where the targets call for it, else the shader's entry. (entry, dual, dual_fn), or a reason the row is left out ('entry', 'constants').
+    """pso_desc's fragment entry point for a pipeline that is not merged and has no specialized fragment: the dual-source one (entry_d, pso_reads_src1) where the targets call for it,
+    else the shader's entry. A colour target of another class than main0 declares (pso_cls: the reflection's float_colors / uint_colors / sint_colors, every output a float when it
+    has none) takes the typed-output entry point (entry_u, typed_fn), specialized for the pipeline's classes: the build puts it in the side library <key>_bx with its constants, so
+    such a row is left out ('entry' when funcs, the base library's, does not hold it; 'constants' when it declares any); a shader without one keeps main0, as pso_desc does with its red
+    line. (entry, dual, dual_fn), or a reason the row is left out.
     A base leaves the colour state open but not its fragment function, so a layout base (plan_layout) takes this choice as the pipeline's colour targets make it"""
     raster = fj.get('raster') if isinstance(fj.get('raster'), dict) else {}
     colors = raster.get('colors'); known = isinstance(colors, list)
     mask = sum(1 << c for c in set(colors) if isinstance(c, int) and 0 <= c < 8) if known else 0
     cfmt, entry = k['cfmt'], fj.get('entry')
     def has(name): return bool(name) and name in funcs
-    written = [i for i in range(8) if cfmt[i] and (not known or mask >> i & 1)]
-    all_uint = bool(written) and all(cfmt[i] in UINT_FORMATS for i in written)
-    mask_m = fj.get('uint_mask_m') if isinstance(fj.get('uint_mask_m'), int) else 0
-    mixed = (all((cfmt[i] in UINT_FORMATS) == bool(mask_m >> i & 1) for i in written)
-             and any(cfmt[i] in UINT_FORMATS for i in written) and any(cfmt[i] not in UINT_FORMATS for i in written))
+    bits = {c: raster.get(c) for c in ('float_colors', 'uint_colors', 'sint_colors')}
+    classes = all(isinstance(v, int) and not isinstance(v, bool) for v in bits.values())
     fn = entry
-    if has(fj.get('entry_u')) and all_uint: fn = fj['entry_u']
-    elif has(fj.get('entry_m')) and mixed: fn = fj['entry_m']
+    for i in range(8):
+        if not cfmt[i]: continue
+        if classes:
+            decl = 1 if bits['uint_colors'] >> i & 1 else 2 if bits['sint_colors'] >> i & 1 else 0 if bits['float_colors'] >> i & 1 else None
+            if decl is None: continue   # an output main0 does not declare takes no constant
+        else:
+            if known and not mask >> i & 1: continue
+            decl = 0   # a reflection without the classes: every output a float, as the translator declares them
+        kind = 1 if cfmt[i] in UINT_FORMATS else 2 if cfmt[i] in SINT_FORMATS else 0
+        if kind != decl: fn = fj.get('entry_u') or entry; break   # main0_u for the classes; a shader without one keeps main0 (pso_desc's red line)
     b0 = adv_blend(k['blend'][0])
     src1 = cfmt[0] and k['blend_en'] & 1 and any(b0[x] in B_SRC1 for x in ('src_rgb', 'dst_rgb', 'src_a', 'dst_a'))
     dual = bool(known and mask & 2 and fn == entry and src1 and not k.get('logic'))   # a logic operation takes the place of blending
@@ -474,7 +519,7 @@ class LayoutBase(NamedTuple):
 
 
 # vfmt in nvn_mtl.m: NVN's vertex formats (NVNformat) → MTLVertexFormat, by the script's names (metal4-pipelines-script(5), ATTRIBUTE FORMAT: the enumerator less its prefix);
-# the *_UI2F / *_I2F formats (vconv_i2f) are read through the integer format of the same layout (vfmt_name)
+# the *_UI2F / *_I2F formats (vconv_i2f) are read through the integer format of the same layout (vfmt_name), which Metal's fetch converts into a float input (8 / 16-bit, i2f_native)
 VFMT = {0x01: 'UCharNormalized', 0x02: 'CharNormalized', 0x03: 'UChar', 0x04: 'Char', 0x05: 'Half', 0x06: 'UShortNormalized', 0x07: 'ShortNormalized', 0x08: 'UShort', 0x09: 'Short',
         0x0A: 'Float', 0x0B: 'UInt', 0x0C: 'Int', 0x0D: 'UChar2Normalized', 0x0E: 'Char2Normalized', 0x0F: 'UChar2', 0x10: 'Char2', 0x11: 'Half2', 0x12: 'UShort2Normalized',
         0x13: 'Short2Normalized', 0x14: 'UShort2', 0x15: 'Short2', 0x16: 'Float2', 0x17: 'UInt2', 0x18: 'Int2', 0x19: 'UChar3Normalized', 0x1A: 'Char3Normalized', 0x1B: 'UChar3',
@@ -599,17 +644,22 @@ def vertex_inputs(vj):
     return ins, used
 
 
-def vin_ct(v, f, on):   # nvn_mtl.m vin_ct: the class input v takes its attribute as
+def i2f_native(f):   # nvn_mtl.m vin_i2f_native: an 8 / 16-bit integer-read-as-float format, which Metal's fetch converts into a float input (native integer-to-float fetch, on by default:
+    c = vconv_i2f(f)   # a device run with DM_NVN_I2F_NATIVE=0 builds such layouts itself; a row is never a capture's, whose routes are the CPU conversion's)
+    return bool(c) and c[1] < 32
+
+
+def vin_ct(v, f, on):   # nvn_mtl.m vin_ct: the class input v takes its attribute as (on: the shadow inputs; native integer-to-float fetch is always on here)
     _, ct, sh = v
     if not on or ct == CT_FLOAT: return ct
     c = vconv_int(f)
-    want = CT_FLOAT if vconv_ncomp(f) else (CT_INT if c[2] else CT_UINT) if c else ct
+    want = CT_FLOAT if vconv_ncomp(f) or i2f_native(f) else (CT_INT if c[2] else CT_UINT) if c else ct
     return want if want != ct and want in sh else ct
 
 
 def vconv_wanted(v, f, on):   # nvn_mtl.m vconv_wanted: input v of this pipeline takes the CPU's converted data
     _, ct, _ = v
-    if vconv_i2f(f): return True
+    if vconv_i2f(f): return not i2f_native(f) or vin_ct(v, f, on) != CT_FLOAT   # native fetch into a float input or a float shadow
     c = vconv_int(f)
     if ct == CT_FLOAT: return bool(c)
     if vin_ct(v, f, on) != ct: return False
@@ -682,7 +732,7 @@ def plan_layout(lib_dir, chain, rows, zero, pair_bases=()):
         if k['fz']: left['specialized'] += 1; continue   # pso_skey.fz: a specialized fragment (bf_fn) or a mark (transform feedback, geometry capture, rasterizer discard, amplification)
         if k['merged']: left['merged'] += 1; continue   # a merged pass: lmap maps its outputs, which the base's fragment choice and the alpha test depend on
         if k['atest'] or k['logic']: left['side library'] += 1; continue
-        vj, fj = refl(k['vs']), refl(k['fs']) if k['fs'] else {'entry': NOP_ENTRY}
+        vj = refl(k['vs']); fj: dict | None = refl(k['fs']) if k['fs'] else {'entry': NOP_ENTRY}   # dict, not the literal's dict[str, str]: a reflection's values are not all strings
         ins = vertex_inputs(vj) if vj else None
         if not vj or not fj or ins is None: left['reflection'] += 1; continue
         if vj.get('mesh_stage'): left['mesh'] += 1; continue
@@ -697,8 +747,8 @@ def plan_layout(lib_dir, chain, rows, zero, pair_bases=()):
         if other(vf[ventry], plain): left['constants'] += 1; continue
         vlib = k['vs']
         need = has_vin and any(vin_ct(v, k['attr'][v[0]][0], 1) != v[1] for v in ins)
-        bv = fn(k['vs'][:-2] + '_bv') if need else None   # vin_fn: <key less _b>_bv; no library or entry point there keeps the conversion
-        on = bool(bv and ventry in bv)
+        bv = (fn(k['vs'][:-2] + '_bv') if need else None) or {}   # vin_fn: <key less _b>_bv; no library or entry point there keeps the conversion
+        on = ventry in bv
         if on:
             if other(bv[ventry], plain): left['constants'] += 1; continue
             vlib = k['vs'][:-2] + '_bv'
@@ -718,6 +768,111 @@ def plan_layout(lib_dir, chain, rows, zero, pair_bases=()):
     return out, left
 
 
+class StandIn(LayoutBase):
+    """A stand-in: the pulling base of a shader pair an R row draws with, as hybrid_get looks it up (pso_desc_pull in nvn_mtl.m: pso_desc's pipeline with the pulling vertex function
+    <key>_bp and no vertex descriptor, the fragment entry the row's colour targets call for, the row's samples and alpha to coverage, colour unspecialized). A LayoutBase with no
+    vertex descriptor, compiled in groups of its own (s<index>)"""
+    __slots__ = ()
+
+
+USER_LOC = re.compile(rb'user\(locn(\d+)\)')
+
+
+def user_locations(path):
+    """The [[user(locnN)]] locations a library's functions name, from the metadata strings of its AIR (air.vertex_output / air.fragment_input: a vertex library's outputs, a fragment
+    library's inputs), {N}; None when the file cannot be read or holds no AIR metadata strings (no 'air.' at all), so nothing is known. Each string is stored once per library, so
+    the set is the union over its functions (main0, main0_z, the integer and dual-source entries), and it holds no types: a pair whose types differ is left to metal-tt's refusal"""
+    try:
+        with romfs.open(path, 'rb') as f: b = f.read()
+    except (OSError, ValueError): return None
+    if b'air.' not in b: return None
+    return {int(m.group(1)) for m in USER_LOC.finditer(b)}
+
+
+def plan_standins(lib_dir, chain, rows, zero, pair_bases=()):
+    """The stand-ins of the prewarm lists' R rows, [StandIn]: for each row whose vertex shader has a pulling library (its reflection's pull: the shaders with stage inputs), the pulling
+    base hybrid_get asks for when a draw of the same pair misses its pipeline (another vertex layout or colour state than the row's), so the draw has a stand-in from the app instead
+    of waiting for the compiler. The shader split pairs single-stage programs through a cover (shader_pairs.tsv), and its other lists miss pairs made only at draw time, so the pair
+    bases (plan) are not the pairs these games draw with; the R rows are, as the device recorded them. They are read here alone, never by the shader build: a pair list of their own
+    would feed vs_pad's padding (dmsh_build.py load_pairs) and the libraries' inputs, and the host's prebuild stamp (prebuilt.tsv) covers only the pair lists.
+    Left out, counted by reason: the reasons plan_layout leaves a row out (key, merged, specialized, side library, reflection, mesh, layer, primitive ID, library, entry, constants),
+    a vertex shader with no pulling library (no stand-in: its draws wait, or it has no stage input and the row's own base serves), a base the pair bases already hold (pair base), a
+    base met before (each once, not counted), and the interface check of GitHub issue #283: a pixel shader that reads a [[user(locnN)]] input the pulling vertex library does not
+    write (user_locations), which metal-tt refuses, and with it its group (the groups are halved down to a base it refuses, as the layout groups are)"""
+    lib_dir = romfs.Path(lib_dir); js, fns, locs = {}, {}, {}
+    def refl(key):
+        if key not in js:
+            try: js[key] = json.loads((lib_dir / f'{key}.json').read_bytes())
+            except (OSError, ValueError): js[key] = None
+            if not isinstance(js[key], dict) or js[key].get('chain') != chain: js[key] = None
+        return js[key]
+    def fn(lib):
+        if lib == NOP_LIB: return {NOP_ENTRY: ()}
+        if lib not in fns:
+            try: fns[lib] = constants(lib_dir / f'{lib}.metallib')
+            except (OSError, ValueError): fns[lib] = None
+        return fns[lib]
+    def loc(lib):
+        if lib == NOP_LIB: return set()   # the host's empty fragment reads nothing
+        if lib not in locs: locs[lib] = user_locations(lib_dir / f'{lib}.metallib')
+        return locs[lib]
+    def other(cs, plain): return any(plain or c not in HOST_CONSTANTS for c in cs)   # as plan_layout
+    held = set(pair_bases); out, seen = [], set()
+    left: dict[str, int] = dict.fromkeys(('key', 'merged', 'specialized', 'side library', 'reflection', 'mesh', 'no pulling library', 'layer', 'primitive ID', 'library', 'entry',
+                                          'constants', 'pair base', 'interface'), 0)
+    for text in rows:
+        k = parse_render_key(text)
+        if not k or not k['vs'] or k['vs_stage'] != 0 or (k['fs'] and k['fs_stage'] != 1): left['key'] += 1; continue
+        if k['fz']: left['specialized'] += 1; continue
+        if k['merged']: left['merged'] += 1; continue   # hybrid_get is not for merged passes
+        if k['atest'] or k['logic']: left['side library'] += 1; continue
+        vj = refl(k['vs']); fj: dict | None = refl(k['fs']) if k['fs'] else {'entry': NOP_ENTRY}
+        if not vj or not fj: left['reflection'] += 1; continue
+        if vj.get('mesh_stage'): left['mesh'] += 1; continue
+        if not isinstance(vj.get('pull'), dict): left['no pulling library'] += 1; continue   # NvShader.has_pull: pull_fn gives no function
+        if vj.get('layer_out'): left['layer'] += 1; continue   # nor to a vertex shader that writes the layer
+        if (fj.get('raster') or {}).get('primitive_id'): left['primitive ID'] += 1; continue
+        ventry = vj['entry_z'] if zero and vj.get('entry_z') else vj.get('entry')   # pull_load: the vertex shader's entry for the depth mode, from <key>_bp
+        vlib = k['vs'][:-2] + '_bp'
+        vf = fn(vlib)
+        if vf is None: left['library'] += 1; continue
+        if ventry not in vf: left['entry'] += 1; continue
+        plain = bool(k['border'])
+        if other(vf[ventry], plain): left['constants'] += 1; continue
+        if k['fs']:
+            ff = fn(k['fs'])
+            if ff is None: left['library'] += 1; continue
+            if fj.get('entry') in ff and other(ff[fj['entry']], plain): left['constants'] += 1; continue
+            chosen = fragment_entry(k, fj, {e: other(cs, plain) for e, cs in ff.items()})
+            if isinstance(chosen, str): left[chosen] += 1; continue
+            frag = (k['fs'], chosen[0])
+        else: frag = (NOP_LIB, NOP_ENTRY)
+        b = StandIn((vlib, ventry), frag, (), (), k['samples'] or 1, bool(k['a2c']))
+        if b in seen: continue
+        seen.add(b)
+        if b.samples == 1 and not b.a2c and (vlib, ventry, *frag) in held: left['pair base'] += 1; continue   # plan's base of a listed pair is this pipeline
+        vo, fi = loc(vlib), loc(frag[0])
+        if vo is not None and fi is not None and fi - vo: left['interface'] += 1; continue
+        out.append(b)
+    return out, left
+
+
+def group_items(groups, name):
+    """The pipelines of a group compile_batches compiled or left out, by its name: a group of groups_of, or a half of a refused one (<group>/a, <group>/b/a, ...)"""
+    head, *halves = name.split('/')
+    items = next((list(b or c) for n, b, c in groups if n == head), [])
+    for h in halves:
+        half = (len(items) + 1) // 2
+        items = items[:half] if h == 'a' else items[half:]
+    return items
+
+
+def standin_rows(standins):
+    """standins.tsv beside the archive, read by the host's probe (pso_bundle_covers): a stand-in per line, <vertex key> <pixel key, empty for depth only> <pixel entry> <samples>
+    <alpha to coverage 0 / 1>"""
+    return ''.join(f'{s.vert[0][:-3]}\t{"" if s.frag[0] == NOP_LIB else s.frag[0][:-2]}\t{s.frag[1]}\t{s.samples}\t{int(s.a2c)}\n' for s in standins)
+
+
 def pipe_libs(p):
     """The libraries a compute pipeline (library, entry), a task / mesh pipeline (MeshPipe) or a layout base (LayoutBase) is made of"""
     return (p.obj[0], p.mesh[0], p.frag[0]) if isinstance(p, MeshPipe) else (p.vert[0], p.frag[0]) if isinstance(p, LayoutBase) else (p[0],)
@@ -731,7 +886,7 @@ def pipe_functions(p):
 # metal-tt specializes only a library's first function: a later one's fails in applegpu-nt with "cannot find private metadata at offset '8'" (the second function's entry), while the
 # first function of the same library specialized compiles; with the two functions swapped the other one fails, so it is the position (metal-tt 32023.922 and 32023.925, macOS 27.2
 # and 27.3, applegpu_g16s and applegpu_g19p). A near = 0 game names main0_z, the second function of each pulling library <key>_bp, of a vertex library <key>_b or <key>_bv in a
-# layout base, and of a mesh library <key>_b in a task / mesh pipeline (entry_z), and a pixel library's entry_u / entry_m / entry_d may follow its main0. So such a function is
+# layout base, and of a mesh library <key>_b in a task / mesh pipeline (entry_z), and a pixel library's entry_u / entry_d may follow its main0. So such a function is
 # specialized from a library of its own, cut from its library (dmsh_side.cut, the bytes metallib --function-name gives): the archive serves the host's lookup through the whole library,
 # as the base is found by its function, not by its library file (checked: an archive made from main0_z cut alone gives the host's specialized descriptor of main0_z in the whole
 # library, and not main0). A workaround for Apple's compiler; a function that declares no constant is not specialized and compiles in any place
@@ -903,14 +1058,14 @@ def compile_archive(js, part, work, arch, platform, osmin, count):
     """One compiler invocation, with its temporaries on the work volume. Never publish a failed output."""
     part.unlink(missing_ok=True)
     clear_temporaries(work)
-    need, free = space_needed(count), shutil.disk_usage(work).free
+    need, free = space_needed(count), vol_space.free_bytes(work)
     if free < need: sys.exit(f'[RED] pso_offline: {free / 2**30:.1f} GB free on the volume of {work}, metal-tt needs about {need / 2**30:.0f} GB for {count} bases: free some space and run again')
     cmd = ['xcrun', '-sdk', sdk(platform), 'metal-tt', '-arch', arch, f'-{platform}-version-min', osmin, str(js), '-o', str(part)]
     log_path = work / f'metal-tt.{arch}.log'
     with log_path.open('w') as log:
         r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, TMPDIR=str(work)))
     if r.returncode or not part.is_file() or not part.stat().st_size:
-        free = shutil.disk_usage(work).free
+        free = shutil.disk_usage(work).free   # what was really left as it failed, not what APFS could still free
         clear_temporaries(work); part.unlink(missing_ok=True)
         full = f' ({free / 2**30:.1f} GB free on the volume of {work} when it failed: likely out of disk space)' if free < 1 << 30 else ''
         text = f'[RED] pso_offline: metal-tt failed for {arch} (exit {r.returncode}){full}: {log_path.read_text()[-2000:]}'
@@ -962,13 +1117,15 @@ def compile_batch(lib_dir, bases, work, arch, platform, osmin, toolchain, comput
     return dst, False
 
 
-def groups_of(bases, computes, batch_size, compute_size=COMPUTE_BATCH, mesh_size=MESH_BATCH, layout_size=LAYOUT_BATCH):
+def groups_of(bases, computes, batch_size, compute_size=COMPUTE_BATCH, mesh_size=MESH_BATCH, layout_size=LAYOUT_BATCH, standin_size=STANDIN_BATCH):
     """The groups compile_batches compiles, [(folder name, bases, other pipelines)]: the bases in groups of batch_size (00001, ...), then the compute pipelines in groups of compute_size
     of their own (c00001, ...), then the task / mesh pipelines (the MeshPipe among computes) in groups of mesh_size (m00001, ...), then the layout bases (the LayoutBase among
-    computes) in groups of layout_size (l00001, ...), so that a change to one kind leaves the others' groups as they are. 0: one group of each"""
-    groups, meshes, layouts = [], [p for p in computes if isinstance(p, MeshPipe)], [p for p in computes if isinstance(p, LayoutBase)]
+    computes) in groups of layout_size (l00001, ...), then the stand-ins (the StandIn among computes) in groups of standin_size (s00001, ...), so that a change to one kind leaves
+    the others' groups as they are. 0: one group of each"""
+    groups, meshes = [], [p for p in computes if isinstance(p, MeshPipe)]
+    layouts, standins = [p for p in computes if isinstance(p, LayoutBase) and not isinstance(p, StandIn)], [p for p in computes if isinstance(p, StandIn)]
     for prefix, items, size in (('', bases, batch_size), ('c', [p for p in computes if not isinstance(p, (MeshPipe, LayoutBase))], compute_size), ('m', meshes, mesh_size),
-                                ('l', layouts, layout_size)):
+                                ('l', layouts, layout_size), ('s', standins, standin_size)):
         size = size or len(items) or 1
         for index, start in enumerate(range(0, len(items), size), 1):
             group = items[start:start + size]
@@ -976,52 +1133,64 @@ def groups_of(bases, computes, batch_size, compute_size=COMPUTE_BATCH, mesh_size
     return groups
 
 
-def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain, batch_size, computes=(), jobs=1, compute_size=COMPUTE_BATCH):
+def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain, batch_size, computes=(), jobs=1, compute_size=COMPUTE_BATCH, bjobs=1):
     """Limit compiler input size, then combine every completed group into the usual single archive.
 
     This bounds input count, not memory: a single pipeline can still exceed Apple's compiler resources.
     On M2, merged archives passed archive-only lookups of two synthetic pipelines and all 32,864 Odyssey bases.
     Other workloads and compiler versions can have different resource use.
-    The groups of bases run one after the other, as before; the compute, task / mesh and layout groups, small, jobs at a time, each in its own folder (its TMPDIR).
-    A task / mesh or layout group metal-tt refuses is left out with a red line and the others are merged: its pipelines are built on the device at their first draw, as without the
-    archive, where a refused base or compute group still stops the build. A refused layout group of more than one base is compiled again in halves (<group>/a and <group>/b, each
-    cached and refused by its own inputs, and so on down to one base), so a row metal-tt refuses where the device's compiler takes it costs only itself: its own validation of the
-    vertex descriptor is stricter (an attribute beyond its buffer's stride cost a whole group of 64 before plan_layout left such rows out). Returns the names of the groups left out
+    The groups of bases run bjobs at a time (base_jobs: one after the other on a Mac with little memory, as before), then the compute, task / mesh, layout and stand-in groups,
+    small, jobs at a time; each group is in its own folder (its TMPDIR), and the pieces are merged in the groups' order whatever order they finished in.
+    A task / mesh, layout or stand-in group metal-tt refuses is left out with a red line and the others are merged: its pipelines are built on the device at their first draw, as
+    without the archive, where a refused base or compute group still stops the build. A refused layout or stand-in group of more than one base is compiled again in halves
+    (<group>/a and <group>/b, each cached and refused by its own inputs, and so on down to one base), so a row metal-tt refuses where the device's compiler takes it costs only itself:
+    its own validation of the vertex descriptor is stricter (an attribute beyond its buffer's stride cost a whole group of 64 before plan_layout left such rows out), and a stand-in's
+    pair was never checked by the shader build's padding (vs_pad), only by user_locations (GitHub issue #283). Returns the names of the groups left out
     (a half by its path, l00001/b/a): one metal-tt refused has refused.<arch> in its folder, kept by its own inputs (the caller then writes the archive's key); for any other the
     caller keeps no key, so the next build tries it again
     """
     groups = groups_of(bases, computes, batch_size, compute_size); total = len(groups); names = {name for name, _, _ in groups}
-    for old in [*(work / f'batches.{arch}').glob('[0-9]*'), *(work / f'batches.{arch}').glob('c[0-9]*'), *(work / f'batches.{arch}').glob('m[0-9]*'), *(work / f'batches.{arch}').glob('l[0-9]*')]:   # the groups of a longer list than this one
+    for old in [*(work / f'batches.{arch}').glob('[0-9]*'), *(work / f'batches.{arch}').glob('[cmls][0-9]*')]:   # the groups of a longer list than this one
         if old.name not in names: shutil.rmtree(old)
     def one(index, name, group, cgroup):
         """(the pieces, the names left out) of one group, or of a half of a refused layout group (name <group>/a ...)"""
         what = (f'{len(group)} bases' if group else f'{len(cgroup)} task / mesh pipelines' if name.startswith('m') else f'{len(cgroup)} layout bases' if name.startswith('l')
-                else f'{len(cgroup)} compute pipelines') + (f', {name}' if '/' in name else '')
+                else f'{len(cgroup)} stand-ins' if name.startswith('s') else f'{len(cgroup)} compute pipelines') + (f', {name}' if '/' in name else '')
         print(f'pso_offline: {arch}: batch {index}/{total}: {what}, compiling or checking cache', flush=True)
         folder = work / f'batches.{arch}' / name
-        try: piece, reused = compile_batch(lib_dir, group, folder, arch, platform, osmin, toolchain, cgroup, keep_refusal=name[0] in 'ml')
+        try: piece, reused = compile_batch(lib_dir, group, folder, arch, platform, osmin, toolchain, cgroup, keep_refusal=name[0] in 'mls')
         except SystemExit as e:
-            if name[0] not in 'ml': raise
-            if name[0] == 'l' and isinstance(e, Refused) and len(cgroup) > 1:
-                print(f'[RED] pso_offline: {arch}: batch {index}/{total} ({what}) refused by metal-tt: compiling it in halves, to leave out only the layout bases it refuses', flush=True)
+            if name[0] not in 'mls': raise
+            if name[0] in 'ls' and isinstance(e, Refused) and len(cgroup) > 1:
+                print(f'[RED] pso_offline: {arch}: batch {index}/{total} ({what}) refused by metal-tt: compiling it in halves, to leave out only the '
+                      f'{"layout bases" if name[0] == "l" else "stand-ins"} it refuses', flush=True)
                 half = (len(cgroup) + 1) // 2
                 parts = [one(index, f'{name}/{h}', [], c) for h, c in (('a', cgroup[:half]), ('b', cgroup[half:]))]
                 return [p for ps, _ in parts for p in ps], [n for _, ns in parts for n in ns]
             print(f'[RED] pso_offline: {arch}: batch {index}/{total} ({what}) left out of the archive, the device builds them at their first draw: {e}', flush=True)
             return [], [name]
-        if name[0] == 'l':
+        if name[0] in 'ls':
             for h in ('a', 'b'): shutil.rmtree(folder / h, ignore_errors=True)   # the halves of an earlier refusal of this group's former inputs
         print(f'pso_offline: {arch}: batch {index}/{total}: ready ({"reused" if reused else "compiled"})', flush=True)
         return [piece], []
-    pieces = [p for i, g in enumerate(groups, 1) if g[1] for p in one(i, *g)[0]]   # a group of bases that fails stops the build: never left out
-    with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as pool:   # a failed group stops the build once the others under way have finished (their pieces stay cached)
-        futures = [pool.submit(one, i, *g) for i, g in enumerate(groups, 1) if not g[1]]
-        done = [f.result() for f in futures]
+    def run_all(todo, n):   # the groups' results in their order, n at a time; a failure stops the build once the groups under way have finished (their pieces stay cached),
+        stop = threading.Event()   # and the groups not started yet are dropped (with n = 1, the groups after the failed one, as before)
+        def guarded(i, g):
+            if stop.is_set(): return [], []
+            try: return one(i, *g)
+            except BaseException: stop.set(); raise
+        with concurrent.futures.ThreadPoolExecutor(max(1, n)) as pool:
+            futures = [pool.submit(guarded, i, g) for i, g in todo]
+            try: return [f.result() for f in futures]
+            except BaseException:
+                stop.set(); pool.shutdown(wait=True, cancel_futures=True); raise
+    pieces = [p for ps, _ in run_all([(i, g) for i, g in enumerate(groups, 1) if g[1]], bjobs) for p in ps]   # a group of bases that fails stops the build: never left out
+    done = run_all([(i, g) for i, g in enumerate(groups, 1) if not g[1]], jobs)
     skipped = [n for _, names in done for n in names]
     pieces += [p for ps, _ in done for p in ps]
     if not pieces: sys.exit(f'[RED] pso_offline: no group of {arch} compiled')
     part.unlink(missing_ok=True)
-    need, free = max(2 << 30, sum(p.stat().st_size for p in pieces)), shutil.disk_usage(work).free
+    need, free = max(2 << 30, sum(p.stat().st_size for p in pieces)), vol_space.free_bytes(work)
     if free < need: sys.exit(f'[RED] pso_offline: {free / 2**30:.1f} GB free before merging; need at least {need / 2**30:.1f} GB')
     print(f'pso_offline: {arch}: merging {len(pieces)} batches', flush=True)
     cmd = ['xcrun', '-sdk', sdk(platform), 'metal-pack', '-nthreads', '1', *map(str, pieces), '-o', str(part)]
@@ -1062,7 +1231,9 @@ def main(argv=None):
     ap.add_argument('--no-compute', action='store_true', help='no compute pipelines')
     ap.add_argument('--no-mesh', action='store_true', help='no task / mesh pipelines (the M rows)')
     ap.add_argument('--no-layout', action='store_true', help='no layout bases (the R rows: pipelines with a vertex layout)')
+    ap.add_argument('--no-standins', action='store_true', help='no stand-ins (the pulling bases of the pairs the R rows draw with)')
     ap.add_argument('--jobs', type=int, default=JOBS, help=f'metal-tt runs at a time for the compute, task / mesh and layout groups (default {JOBS}, half the logical CPUs)')
+    ap.add_argument('--base-jobs', type=int, default=base_jobs(), help=f'groups of bases compiled at once (default {base_jobs()} here: a third of the logical CPUs, at most one per 6 GiB of memory over 4 GiB; 1: one after the other)')
     a = ap.parse_args(argv)
     if a.batch_size < 0: ap.error('--batch-size must be zero or positive')
     if a.game:
@@ -1082,7 +1253,7 @@ def main(argv=None):
     if not text: sys.exit(f'[RED] pso_offline: no pair list ({", ".join(a.pairs)})')
     zero = a.depth == 'zero'
     t0 = time.time()
-    pairs = read_pairs(text)
+    pairs = read_pairs_files(a.pairs)   # each file on its own: # cover sections (synthetic padding pairs) are not built
     bases, rest, left = plan(lib_dir, chain, pairs, zero)
     shaders = [] if a.no_compute else read_computes(a.shader_map, a.manifest)
     computes, cleft = plan_compute(lib_dir, chain, shaders)
@@ -1090,7 +1261,8 @@ def main(argv=None):
     meshes, mleft = plan_mesh(lib_dir, chain, mesh_rows, zero)
     layout_rows = [] if a.no_layout else read_layouts(a.manifest)
     layouts, lleft = plan_layout(lib_dir, chain, layout_rows, zero, bases)
-    pipes = computes + meshes + layouts   # the pipelines beside the bases: script, groups and keys tell the kinds apart (MeshPipe, LayoutBase)
+    standins, sleft = plan_standins(lib_dir, chain, [] if a.no_standins else layout_rows, zero, bases)
+    pipes = computes + meshes + layouts + standins   # the pipelines beside the bases: script, groups and keys tell the kinds apart (MeshPipe, LayoutBase, StandIn)
     work.mkdir(parents=True, exist_ok=True); out.mkdir(parents=True, exist_ok=True)
     host_libraries(bases, a.platform, work, pipes)   # the empty fragment of depth-only pairs and rows; none without them, so no other archive's key changes
     js = work / 'bases.mtl4-json'   # metal-tt takes the format from the extension: .mtl4-json is Metal 4's (.mtlp-json is the Metal 3 format)
@@ -1103,8 +1275,10 @@ def main(argv=None):
                       + ', '.join(f'{k} {v}' for k, v in cleft.items()))
     if mesh_rows: print(f'pso_offline: {len(mesh_rows)} task / mesh rows: {len(meshes)} task / mesh pipelines, left out: ' + ', '.join(f'{k} {v}' for k, v in mleft.items()))
     if layout_rows: print(f'pso_offline: {len(layout_rows)} render rows: {len(layouts)} layout bases, left out: ' + ', '.join(f'{k} {v}' for k, v in lleft.items()))
+    if layout_rows and not a.no_standins: print(f'pso_offline: {len(layout_rows)} render rows: {len(standins)} stand-ins for {len({(s.vert[0], s.frag[0]) for s in standins})} '
+                                                 'shader pairs, left out: ' + ', '.join(f'{k} {v}' for k, v in sleft.items()))
     if a.script_only: (out / 'prebuilt.tsv').write_text(st); return 0
-    if pairs and not bases and not rest and not layouts: sys.exit('[RED] pso_offline: no base to build')   # pairs, but the host would leave out every one: wrong or missing libraries
+    if pairs and not bases and not rest and not layouts and not standins: sys.exit('[RED] pso_offline: no base to build')   # pairs, but the host would leave out every one: wrong or missing libraries
     if not pairs: print('pso_offline: no pairs (only a header)' + (': nothing to build, no archive' if not pipes else ''))   # a profile whose split found no pair (GitHub issue #338)
     if not bases and not pipes: archs = []   # no pair, or every eligible pair needs device specialization, and no compute pipeline; clear old archives and still write the stamp and the remainder list
     osmin = a.os_min or os_min_default(a.platform); tv = tool_version(a.platform) if bases or pipes else 'not used (function constants only)'
@@ -1125,10 +1299,11 @@ def main(argv=None):
                                + ', '.join(n for n in refused if not (work / f'batches.{arch}' / n / f'refused.{arch}').is_file()) + ' removed: trying again', flush=True)
         kf.unlink(missing_ok=True); dst.unlink(missing_ok=True)
         part = work / f'{arch}.mtl4a.partial'; part.unlink(missing_ok=True)
-        t1 = time.time(); print(f'pso_offline: {arch}: metal-tt, {len(bases)} bases, {len(computes)} compute pipelines, {len(meshes)} task / mesh pipelines, {len(layouts)} layout bases (minutes) ...', flush=True)
+        t1 = time.time(); print(f'pso_offline: {arch}: metal-tt, {len(bases)} bases, {len(computes)} compute pipelines, {len(meshes)} task / mesh pipelines, {len(layouts)} layout bases'
+                                + (f', {len(standins)} stand-ins' if standins else '') + ' (minutes) ...', flush=True)
         skipped = []
-        if meshes or layouts or (a.batch_size and len(groups_of(bases, pipes, a.batch_size)) > 1):   # task / mesh pipelines and layout bases always in groups: one metal-tt refuses must not cost the archive
-            skipped = compile_batches(lib_dir, bases, work, part, arch, a.platform, osmin, tv, a.batch_size, pipes, a.jobs)
+        if meshes or layouts or standins or (a.batch_size and len(groups_of(bases, pipes, a.batch_size)) > 1):   # task / mesh pipelines, layout bases and stand-ins always in groups: one metal-tt refuses must not cost the archive
+            skipped = compile_batches(lib_dir, bases, work, part, arch, a.platform, osmin, tv, a.batch_size, pipes, a.jobs, bjobs=a.base_jobs)
         else:
             write_script(js, script(real_libraries(lib_dir, bases, work, pipes), bases, pipes))
             compile_archive(js, part, work, arch, a.platform, osmin, len(bases) + len(pipes))
@@ -1143,10 +1318,16 @@ def main(argv=None):
     rp = out / 'rest_pairs.tsv'
     if rest: rp.write_text(''.join(f'{v}\t{f}\n' for v, f in rest))
     else: rp.unlink(missing_ok=True)
+    sp = out / 'standins.tsv'   # read by the host's probe: the stand-ins every archive holds (none left out of one by metal-tt); none without stand-ins or without an archive
+    gone = {p for names in left_out.values() for n in names if n.startswith('s') for p in group_items(groups_of(bases, pipes, a.batch_size), n)}
+    held = [p for p in standins if p not in gone]
+    if held and archs: sp.write_text(standin_rows(held))
+    else: sp.unlink(missing_ok=True)
     # layout_rows: the prewarm lists' R rows, then those left out by reason (nonzero only); left_out: an architecture's groups metal-tt refused or that failed (task / mesh, layout)
     (out / 'archive.tsv').write_text(f'# the pipeline archive made offline (dm/gfx/tools/pso_offline.py); the host reads prebuilt.tsv, not this file\narch\t{" ".join(archs)}\n'
                                      f'platform\t{a.platform}\t{osmin}\ntoolchain\t{tv}\nbases\t{len(bases)}\nrest\t{len(rest)}\ncompute\t{len(computes)}\nmesh\t{len(meshes)}\nlayout\t{len(layouts)}\n'
                                      f'layout_rows\t{len(layout_rows)}' + ''.join(f'\t{k} {v}' for k, v in lleft.items() if v) + '\n'
+                                     + (f'standin\t{len(standins)}' + ''.join(f'\t{k} {v}' for k, v in sleft.items() if v) + '\n' if layout_rows and not a.no_standins else '')
                                      + ''.join(f'left_out\t{arch}\t{" ".join(names)}\n' for arch, names in sorted(left_out.items()) if names))
     return 0
 

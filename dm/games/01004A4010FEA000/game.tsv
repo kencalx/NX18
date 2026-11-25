@@ -45,3 +45,9 @@ mem_used	0x7400000
 # ---- Shader split (shader_split.py; the shader objects in root_000.pkz) ----
 shader_groups	/autoshadereff.dat/=eff /shadereff=eff /shader=core
 shader_note	Bayonetta 3 shaders
+
+# ---- Graphics ----
+# The NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0): its iPhone 18 Pro Max start on ccd735061 (2026-11-21) refused the bundled pipeline archive,
+# made for near = -w ("the game's depth mode is not the one built for"), rebuilt 6,141 bases before the first frame (106 s) and compiled pipelines in play
+# (up to 4.8 s per 300 frames). With this the archive made offline holds the main0_z vertex entries (dm/gfx/tools/pso_offline.py)
+depth_mode	zero

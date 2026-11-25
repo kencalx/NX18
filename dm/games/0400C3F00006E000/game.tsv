@@ -51,3 +51,16 @@ fps_hold	off
 # ---- Graphics ----
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here, to be confirmed on this game
 render_cond	on
+
+# ---- Heat ----
+# The heat ladder's resolution rungs (85%, 70%) and the GPU clock rescue lower this game's resolution through its own dynamic resolution, which steers by the GPU time
+# its counter reports read (agl): the host stretches that time (hle_nvn.c scale_set, nvn_mtl.m post_run; NX18-X2.0 heat-ladder.md §6), no game patch. DM_HEAT_GPU_STRETCH
+# in env.txt sets the stretches for an A/B
+heat_gpu_stretch	on
+# The GPU headroom controller through the same stretch (nvn_drs_gpu.h, hle_nvn.c drs_gpu_tick): while the GPU stays over 75% busy the host stretches the GPU time its dynamic
+# resolution reads one step more (factors 0.9 to 0.5 of the picture side), and takes each step back when the GPU's busy did not fall; Balanced and Battery Saver, Quality off
+drs_gpu_scale	on
+preset	quality	DM_DRS_GPU_SCALE=0
+# The GPU clock kick and the present repeat, as Donkey Kong Bananza's (hle_nvn.c clock_kick_tick, nvn_present_repeat.inc): this game's iPhone run showed the same stuck clock (the GPU probe at 3.2x in stretches, fps falling to the 40s-50s; NX18-X2.0 gpu-clock-collapse.md), and on Bananza the pair held 57.4 fps over 22 min (run 16). DM_CLOCK_KICK=0 / DM_PRESENT_REPEAT=0 turn them off
+clock_kick	120
+present_repeat	on

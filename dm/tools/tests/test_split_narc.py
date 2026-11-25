@@ -100,6 +100,18 @@ class LooseNarc(unittest.TestCase):
         (_, keys, pairs, extra), log = self.scan(archive([member(0x10, b'BNTX' + bytes(64)), b'']))
         self.assertEqual((keys, pairs, extra, log), ({}, set(), {}, ''))
 
+    def test_malformed_archives_keep_the_reader_diagnosis(self):   # upstream 049f8e0e9: each a red line naming the archive and what the reader found, which the fuzz harness accepts
+        raw = archive([b'plain'])
+        cases = [(b'NARC', 'header cut short'), (struct.pack('<4sHHIHH', b'NARC', 0xfffe, 0, 16, 16, 0), 'no BTAF or GMIF')]
+        for offset, value, message in ((20, 0, 'a section of size 0x0'), (20, len(raw), 'past the end or shorter'),
+                                       (24, 0xffffffff, 'past its section'), (32, 0xffffffff, 'past the end of GMIF')):
+            data = bytearray(raw); struct.pack_into('<I', data, offset, value); cases.append((bytes(data), message))
+        for data, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(SystemExit, r'\[RED\] /court.narc: .*' + message):
+                    ss.scan_blob(data, '/court.narc', [])
+                fz.check(data)
+
     def test_cli_matches_a_plain_archive(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); rom = root / 'RomFS'; rom.mkdir()

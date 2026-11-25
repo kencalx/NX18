@@ -46,3 +46,9 @@ pad_layout	full
 # Shaders are inline in cooked packages in the six Unreal paks (Oodle / Zlib blocks, inline shader records).
 shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
 shader_note	SHIN MEGAMI TENSEI V: Vengeance shaders
+
+# ---- Graphics ----
+# The NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0): its iPhone 18 Pro Max start on ccd735061 (2026-11-20) refused the bundled pipeline archive,
+# made for near = -w ("the game's depth mode is not the one built for"), and rebuilt 7,966 bases before the first frame (213 s, thermal 2). With this the archive made
+# offline holds the main0_z vertex entries (dm/gfx/tools/pso_offline.py)
+depth_mode	zero

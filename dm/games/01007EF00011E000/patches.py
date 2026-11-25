@@ -1,7 +1,7 @@
 # The Legend of Zelda: Breath of the Wild (01007EF00011E000): the rewriter's patches of this game's own builds. dm/tools/patch_nso.py loads every profile's patches.py and applies those of a module's NSO build ID;
 # CUTS, OBS and FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
 import struct
-from nso_asm import ADDI, ADRP, B, LDRX
+from nso_asm import ADDI, ADRP, B, BL, LDRX, NOP
 CUTS = {
   # The Legend of Zelda: Breath of the Wild 1.9.0 (v1114112) main: 60 fps. The main loop of sead::GameFrameworkNx (main+0x112660c) runs a dynamic interval (framework +0x267 = 1):
   # every frame it computes how many vsyncs the last frame needed (rounded up), clamped to [2, max 3] (the max comes from the interval controller +0xc, constructed at main+0x1126c04); it steps up after 3 overrunning frames in a row,
@@ -85,30 +85,51 @@ def frame_step(ctx):
     # scale in 0.8–1.0 rounded to 0.05 steps (+0x1218, main+0x1266818), or the game's forced 0.75 / 0.5 (+0x284 & 0x1800), in s8; from main+0x1266880 it applies s8: each view's
     # scale (+0x28a0 / +0x28a4 = s8 × base width (+0x1214: 1600 docked, 1280 handheld) / output width), from which the scene buffers are sized each frame (main+0x106340c), the
     # shader ratio uking_dynamic_resolution_ratio and the other readers (main+0xc3c3f4, an LOD check at main+0x14126b4). Setting s8 there keeps them all consistent (a multiply in the
-    # size function, TOTK's way, would leave the ratio and those readers at the old scale). The apply block runs only when the dynamic path has just recomputed the scale (+0x280 bit 4,
-    # set at main+0x1266830) or in a forced mode, else main+0x126686c skips it; with a factor it is taken every frame, as in the dynamic mode, so the factor holds with dynamic
-    # resolution off too. Factors above 1.0 are refused by the loader: the per-frame texture pool's size is unknown. x8, s0, s1 and the flags are dead at both sites
+    # size function, TOTK's way, would leave the ratio and those readers at the old scale). The apply block runs whenever +0x280 bit 4 is set or in a forced mode, else
+    # main+0x126686c skips it. In 1.9.0 that is every call: the dynamic mode (+0x284 bit 21) is set at init (main+0x1261e6c) and nothing in the class clears it, and on that
+    # path main+0x1266830 sets bit 4 on every call (the kept scale and the recompute at main+0x1267070 both reach main+0x1266818), so the skip is reached only with the dynamic
+    # mode off, a state 1.9.0 does not enter in play. The skip site's tests (a scale or factor set: take the block) are kept for that state. Factors above 1.0 are refused by
+    # the loader: the per-frame texture pool's size is unknown. x8, s0, s1 and the flags are dead at both sites.
+    # The host's live factor (state +0x14, float; 0 = none yet; hle_nvn.c scale_set, the heat ladder's 85% / 70% and the GPU clock rescue's 0.75, composed under the player's and
+    # floored so player × it is at least 0.5): under a fixed Render scale (+0x10 neither 0 nor 1.0) s8 = that scale × the factor; at the game's own scale, the lower of s8 and the
+    # factor, so a heat step never raises the resolution. s8 is the game's scale at the apply block whenever the block runs (main+0x1266854: the rounded kept scale,
+    # main+0x126687c: a forced mode, main+0x126678c: +0x1224 with the dynamic mode off), and the block runs every call, so a factor back at 1.0 gives the game's own scale at the
+    # next call, as +0x10 back at 1.0 always did (there was no lagging restore: heat-ladder.md §6)
     fs_site(0x1266880, '88ae40f9'); fs_site(0x126686c, struct.pack('<I', B(0x126686c, 0x1266950)).hex())
     apply = here(); emit(ADRP(8, here(), FS_STATE_OFF))
     for w in (0xbd401100,   # ldr s0,[x8,#0x10]      render scale
               0x1e202008,   # fcmp s0,#0.0
-              0x540000ad,   # b.le orig (+5)         not set
+              0x5400014d,   # b.le own (+10)         not set: the game's own scale
               0x1e2e1001,   # fmov s1,#1.0
               0x1e212000,   # fcmp s0,s1
-              0x54000040,   # b.eq orig (+2)         1.0: the game's own scale
-              0x1e204008,   # fmov s8,s0             the host's scale
+              0x540000e0,   # b.eq own (+7)          1.0: the game's own scale
+              0x1e204008,   # fmov s8,s0             the player's scale
+              0xbd401500,   # ldr s0,[x8,#0x14]      the host's factor
+              0x1e202008,   # fcmp s0,#0.0
+              0x540000ed,   # b.le orig (+7)         none
+              0x1e200908,   # fmul s8,s8,s0          the player's scale × the host's factor
+              0x14000005,   # b orig (+5)
+              0xbd401500,   # own: ldr s0,[x8,#0x14] the host's factor
+              0x1e202008,   # fcmp s0,#0.0
+              0x5400004d,   # b.le orig (+2)         none
+              0x1e207908,   # fminnm s8,s8,s0        the lower of the game's scale and the host's factor
               0xf940ae88):  # orig: ldr x8,[x20,#0x158]
         emit(w)
     emit(B(here(), 0x1266884))
-    fs_put(0x1266880, [B(0x1266880, apply)], '3D view scale = the host render scale (1.0 = the game\'s dynamic resolution)'); ctx.render_scale = 1
+    fs_put(0x1266880, [B(0x1266880, apply)], '3D view scale = the host render scale (1.0 = the game\'s dynamic resolution) × the host\'s live factor (+0x14; at the game\'s own scale, the lower of the two)')
+    ctx.render_scale = 1; ctx.live_scale = 1
     start = here(); emit(ADRP(8, here(), FS_STATE_OFF))
+    for w in (0xb9401508,   # ldr w8,[x8,#0x14]      the host's factor (float bits)
+              0x350000c8):  # cbnz w8,apply (+6)     set: every frame
+        emit(w)
+    emit(ADRP(8, here(), FS_STATE_OFF))
     for w in (0xb9401108,   # ldr w8,[x8,#0x10]      render scale (float bits)
               0x34000088,   # cbz w8,skip (+4)       not set
               0x52091908,   # eor w8,w8,#0x3f800000
               0x34000048):  # cbz w8,skip (+2)       1.0
         emit(w)
     emit(B(here(), 0x1266880)); emit(B(here(), 0x1266950))   # apply the host's scale; skip: the original branch
-    fs_put(0x126686c, [B(0x126686c, start)], 'scale apply block taken every frame when the host render scale is not 1.0')
+    fs_put(0x126686c, [B(0x126686c, start)], 'scale apply block taken every frame when the host render scale is not 1.0 or the host has set its live factor')
     # Screen shape: a screen taller than 16:9 (the iPhone Duo's, about 1.43:1) gets a picture of its own shape instead of a stretched
     # or cut one. The game's sizes are constants: the output size static [main+0x1e43dc0] (1920x1080; set in nnMain and by its getter main+0x1261880) that sizes the
     # framework's window textures, the layout size static [main+0x1e43dd0] (1280x720; nnMain, getter main+0x12618dc), and the display mode switch main+0x1266074, which
@@ -471,6 +492,69 @@ def frame_step(ctx):
     emit(B(here(), 0xed81f4))
     fs_put(0xf75ba4, [B(0xf75ba4, start) | 0x80000000], 'screen copy into a 16:9 picture (camera photo): the screen\'s middle 16:9 band, not the whole taller screen squashed into it')
 
+    # Moving platforms above 30 fps (MacNativeGames b87be2a6f; cause and cure found by Phosquitos for SavageWindRecomp, its pull request #312, issue #209). The bodies the game moves
+    # (a Divine Beast's floor while it tilts, lifts, gates) get each physics step the angular velocity toward their target: main+0x12d57fc takes the angle of the turn left from
+    # hkQuaternion::getAngle (main+0xb06d4), 2 acos(|w|). Under about half a milliradian w rounds to 1.0 in a float and the turn reads as none; Vah Medoh's floor turns about
+    # 1.7 mrad per 30 fps frame, less per step at higher rates, so the floor stood still for some steps and then caught up at once, and Link on it hopped in place, more the higher
+    # the frame rate (MacNativeGames' report, 2026-11-13). The call goes to a stub that returns 2 atan2(|xyz|, |w|), the same angle without the rounding, through the game's own
+    # atan2f import (PLT main+0x159ff10, GOT main+0x1d78050); at target fps 0 it runs getAngle as shipped. The caller only reads s0 back (main+0x12d5804) and keeps its values on
+    # the stack across the call; the stub uses only caller-saved registers, as getAngle and its acosf call do
+    for at, w in ((0x12d57f8, 0x3c9983a0), (0x12d57fc, 0x97b76bb6), (0x12d5800, 0x3cd883a6), (0x12d5804, 0x1e2008c0),   # the call site and the reads of its result
+                  (0xb06d4, 0x3dc00000), (0xb06f8, 0x9453bdf6),                                                       # getAngle: the quaternion load, its acosf call
+                  (0x159ff10, 0xb0003ed0), (0x159ff14, 0xf9402a11), (0x159ff1c, 0xd61f0220)):                         # atan2f's PLT stub
+        fs_site(at, struct.pack('<I', w).hex())
+    start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    for w in (0xb9400211,   # ldr w17,[x16]          target fps (0 = off)
+              0x340001f1,   # cbz w17,orig (+15)
+              0x3dc00000,   # ldr q0,[x0]            x, y, z, w of the turn left
+              0x6e20dc01,   # fmul v1.4s,v0.4s,v0.4s
+              0x7e30d822,   # faddp s2,v1.2s         x^2 + y^2
+              0x5e140423,   # mov s3,v1.s[2]
+              0x1e232842,   # fadd s2,s2,s3          + z^2
+              0x5e1c0401,   # mov s1,v0.s[3]
+              0x1e20c021,   # fabs s1,s1             |w|
+              0x1e21c040,   # fsqrt s0,s2            |xyz|
+              0xa9bf7bfd,   # stp x29,x30,[sp,#-16]!
+              0x910003fd):  # mov x29,sp
+        emit(w)
+    emit(BL(here(), 0x159ff10))   # atan2f
+    for w in (0xa8c17bfd,   # ldp x29,x30,[sp],#16
+              0x1e202800,   # fadd s0,s0,s0          2 atan2(|xyz|, |w|)
+              0xd65f03c0):  # ret
+        emit(w)
+    emit(B(here(), 0xb06d4))   # orig: getAngle as shipped (a tail call: the caller's return address stays)
+    fs_put(0x12d57fc, [BL(0x12d57fc, start)], 'moving platforms: the turn angle is 2 atan2(|xyz|, |w|), small turns kept above 30 fps (state page target fps; 0 = hkQuaternion::getAngle)')
+    camera_aspect(ctx)
+
+
+# Ultrawide's camera (the launcher's Ultrawide on an iPhone, loader.c dm_game_aspect): the camera update (main+0x10eda5c) sets the scene projection's aspect each world frame in
+# the 13 words from main+0x10edae0. The stub runs them from the patch area, read from the image (ctx.words; the site is checked by its bytes' SHA-256, so no game code is kept
+# here), with the last one, the aspect's store, taking the host's ratio (state +0x64; 0 = the game's own) and then storing that ratio at +0x68 with release order, after the
+# projection has it: the host squeezes the HUD and the picture is stretched only once the camera really draws wider. The game still renders its 16:9 targets; the wider view
+# is drawn into them and Ultrawide's Stretch widens it on the screen. x8 / x9 are free at the site.
+# Adapted from ComicBit/nxnative eb9a42ba4 / a2f038d3f (MIT), which adapted MacNativeGames' games/totk/runtime/game_patches_botw.c (MIT, Copyright (c) 2026 MacNativeGames
+# contributors; https://github.com/ly05010419/MacNativeGames; the full notice is in dm/gfx/nvn/nvn_aspect.h)
+cam_want = 0x64   # state +0x64 the ratio the host asks for, +0x68 the ratio the camera last wrote (patch_nso.py, "State page")
+
+
+def camera_aspect(ctx):
+    site, n = 0x10edae0, 13
+    ctx.site(site, 'sha256:52:0c27a29c158781d29b905baa55e23f3ee6d23a34a09886594aaaac59f570c64d')
+    words = getattr(ctx, 'words', lambda off, k: [NOP] * k)(site, n)   # a dry run (docs_patches.py) has no image
+    start = ctx.here()
+    for w in words[:-1]: ctx.emit(w)
+    ctx.emit(ADRP(8, ctx.here(), ctx.state))
+    for w in (ADDI(8, 8, cam_want),
+              0x88dffd09,       # ldar w9,[x8]       the host's ratio (float bits)
+              0x34000049,       # cbz w9,+2          0: the game's own ratio
+              0x1e270120,       # fmov s0,w9
+              words[-1],        # the aspect's store
+              ADDI(8, 8, 4),    # +0x68
+              0x889ffd09):      # stlr w9,[x8]       after the store (0 too: the game's own again)
+        ctx.emit(w)
+    ctx.emit(B(ctx.here(), site + 4 * n))
+    ctx.put(site, [B(site, start)] + [NOP] * (n - 1), "camera aspect: the host's ratio (state +0x64; 0 = the game's own), acknowledged at +0x68 after the store (Ultrawide)")
+    ctx.capabilities.add('CAMERA_ASPECT')
 
 FRAME_STEP = {'cd57b23fa4bbad65803d9788c01821ee': frame_step}
 
@@ -485,4 +569,11 @@ BINDING = [
             'functions recur)',
      'checked': 'nso_fnmap of its 44 sites into those 13 mains (2026-11-09)',
      'kept': '44 sites in 34 functions to fingerprint for an update that may not come (1.9.0, the Switch 2 Edition release); convert when a new build appears'},
+    {'what': "moving platforms' turn angle without float rounding (hkQuaternion::getAngle's caller)", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "the game's keyframed-body step at a fixed call site; Havok's getAngle is shared, but the fix belongs to this caller, which only matters above the game's own 30 fps",
+     'kept': 'one call site in a build that may not be updated (1.9.0); convert with the frame step when a new build appears'},
+    {'what': "Ultrawide's camera: the scene projection's aspect from the host, acknowledged after the store", 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the game's camera update and its projection's layout; the host's ratio, the HUD squeeze and the Stretch are general host behaviour",
+     'blocked': 'the camera update has no reviewed function fingerprint yet',
+     'checked': "the site's 13 words by SHA-256 in main cd57b23f…; ComicBit/nxnative's Mac play at 16:9 and wider (outdoors, the inventory, the map); not run in NX 18"},
 ]

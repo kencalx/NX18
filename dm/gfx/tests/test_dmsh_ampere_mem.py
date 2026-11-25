@@ -5,6 +5,7 @@ import json, os, re, struct, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
+sys.path.insert(0, str(TOOLS)); import dmsh_chain   # noqa: E402  (the chain's MSL version)
 EXIT = (0x000fea0003800000, 0x000000000000794d)   # hi, lo: EXIT
 # SUATOM.ADD.U32 R12, [R3], R12 on the 1D image whose handle is word 12 of c0 (AMapC0: image slot 1), as the game encodes it but unpredicated (PT)
 SUATOM = (0x002ea200001ee000, 0x00000c0c030c7593)
@@ -27,11 +28,8 @@ class Translated(unittest.TestCase):
             self.res = json.loads((work / 'k.res.json').read_text())   # the translator's own report of the shader
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            xc = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']
-            if atomics:   # as dmsh_build runs it for image atomics: MSL 3.1 and the native-atomic checks and rewrites (dmsh_atomic.py)
-                import dmsh_atomic
-                xc = dmsh_atomic.cross_args(xc, str(work / 'k.spv'))
-            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), *xc, str(work / 'k.spv')], capture_output=True, text=True)
+            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), *dmsh_chain.CROSS_MSL, str(work / 'k.spv')], capture_output=True, text=True)
+            import dmsh_atomic   # with image atomics: the native-atomic checks and rewrites, as dmsh_build makes them (dmsh_atomic.py)
             self.assertEqual(r.returncode, 0, r.stderr)
             return dmsh_atomic.check_msl(r.stdout) if atomics else r.stdout
 
@@ -134,6 +132,27 @@ class GuardedWrites(Translated):
         self.assertIn('cp_t_cb262147_10068006', msl)
 
 
+class GatherOffsets(Translated):
+    def test_runtime_per_texel_offsets_move_the_coordinates(self):
+        # MOV R16, c4[0]; MOV R17, c4[4]; TLD4.PTP R24, R6, R16. The atomic keeps a gather result live.
+        load0 = (0x000fe20000000f00, 0x0100000000107a02)
+        load1 = (0x000fe20000000f00, 0x0100010000117a02)
+        gather = (0x000f4600001e2f0e, 0x3000041006189b63)
+        # The depth-compare form has a third source in its second block, R18.
+        reference = (0x000fe20000000f00, 0x3f00000000127802)
+        gather_compare = (0x000f4600001e6f0e, 0x2000041006189b63)
+        use = (0x020ea200001ee000, 0x00000c18030c7593)
+        for call, body in (('.gather(', (gather,)), ('.gather_compare(', (reference, gather_compare))):
+            with self.subTest(call=call):
+                msl = self.translate(b''.join(inst(*op) for op in (load0, load1, *body, use, EXIT)))
+                self.assertIn('.get_width()', msl)
+                self.assertIn('.get_height()', msl)
+                self.assertEqual(msl.count(call), 4)
+                for line in msl.splitlines():
+                    if call in line:
+                        self.assertNotRegex(line, r', int2\((?!0\))')
+
+
 class Suatom(Translated):
     def test_handle_in_the_games_uniform_buffer(self):   # Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]: the same word 12, in bank 3
         msl = self.translate(inst(SUATOM[0], SUATOM[1] | 3 << 54) + inst(*EXIT))
@@ -207,7 +226,7 @@ class PixelCovered(unittest.TestCase):
             if not (work / 'k.spv').exists(): return None, r.stdout + r.stderr
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            m = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
+            m = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
             self.assertEqual(m.returncode, 0, m.stderr)
             return m.stdout, r.stdout + r.stderr
 
@@ -300,6 +319,28 @@ class StageMemory(Translated):
 
     def test_input_is_at_its_offset(self):   # 0x10 + 0x20
         self.assertRegex(self.msl(self.INPUT, self.KEEP_R19), r'as_type<float>\(_\d+\[12\]\)')
+
+    def test_subword_inputs_are_unsigned_and_keep_the_byte_offset(self):
+        # Fast Fusion reads packed U16 entries with mode 0x34. The high half of word 12 must stay unsigned, as must an U8 input at its own byte within the word.
+        for mode, offset, bits in ((0x34, 0x22, 16), (0x30, 0x23, 8)):
+            read = (self.INPUT[0] & ~0xff00 | mode << 8, self.INPUT[1] & ~(0xffffff << 40) | offset << 40)
+            src = self.msl(read, self.KEEP_R19)
+            self.assertIn('[12]', src)
+            self.assertRegex(src, rf'uint\(as_type<int>\(\w+\)\) >> uint\({(offset & 3) * 8}\)')
+            self.assertIn(f'& {(1 << bits) - 1};', src)
+
+    def test_subword_payload_stores_use_their_width(self):
+        for mode, bits in ((0xb4, 16), (0xb0, 8)):
+            write = (self.PAYLOAD[0] & ~0xff00 | mode << 8, self.PAYLOAD[1])
+            self.assertRegex(self.msl(write), rf'void dmsh_shared_store{bits}_\d+\(')
+
+    def test_subword_vertex_records_keep_the_offset_within_the_word(self):
+        # A U16 output read at byte 0x202 must read the high half of its remapped SoA word, not its low half.
+        read = (self.READBACK[0] & ~0xff00 | 0xb400, self.READBACK[1] & ~(0xffffff << 40) | 0x202 << 40)
+        src = self.translate(inst(*read) + inst(*self.KEEP_R8) + inst(*EXIT), stage_memory=[0, 0x10, 0x120, 0x400, 0x200, 6, 128 * 24], shared=0x800)
+        self.assertIn('[72]', src)
+        self.assertIn('>> uint(16)', src)
+        self.assertIn('& 65535;', src)
 
     def test_word_store_goes_to_the_outputs(self):   # 0x120 + 0x80
         self.assertIn('0 + 416', self.msl(self.ATTRIBUTE))
@@ -634,9 +675,9 @@ class WideAtomics(unittest.TestCase):
     PAIR = ('        uint _40 = spvDescriptorSet0.cp_i_tcb_4A_rg32ui.atomic_fetch_max(uint2(_29), uint(_12)).x;\n'
             '        uint _41 = spvDescriptorSet0.cp_i_tcb_4A_rg32ui.atomic_fetch_max(uint2(_29), as_type<uint>(f(_13, 2))).x;\n')
 
-    def wide(self, body):
+    def wide(self, body, decl=DECL):
         sys.path.insert(0, str(TOOLS)); import dmsh_atomic
-        return dmsh_atomic.wide_atomics(self.DECL + self.GUARD + body + '    }\n')
+        return dmsh_atomic.wide_atomics(decl + self.GUARD + body + '    }\n')
 
     def test_pair(self):
         out = self.wide(self.PAIR)
@@ -655,6 +696,16 @@ class WideAtomics(unittest.TestCase):
     def test_another_access_fails(self):
         with self.assertRaisesRegex(ValueError, 'accesses of a 64-bit atomic image'):
             self.wide(self.PAIR + '        uint4 _50 = spvDescriptorSet0.cp_i_tcb_4A_rg32ui.read(uint2(_29));\n')
+
+    def test_a_coherent_image_is_one_too(self):
+        # MSL 3.2 adds memory_coherence_device to an image the translator decorated Coherent (a Maxwell SULD / SUST .CG of it): the pattern takes it, so such a read fails the shader
+        # as any other (test_dmsh_coherent_image.py has the translator's case) rather than leave the pair as two 32-bit atomics on the rg32ui image, and the qualifier stays
+        coherent = self.DECL.replace('access::read_write>', 'access::read_write, memory_coherence_device>')
+        with self.assertRaisesRegex(ValueError, 'accesses of a 64-bit atomic image'):
+            self.wide(self.PAIR + '        uint4 _50 = spvDescriptorSet0.cp_i_tcb_4A_rg32ui.read(uint2(_29));\n', coherent)
+        out = self.wide(self.PAIR, coherent)
+        self.assertIn('texture2d<ulong, access::read_write, memory_coherence_device> cp_i_tcb_4A_rg32ui', out)
+        self.assertNotIn('atomic_fetch', out)
 
     def test_32_bit_images_are_left_alone(self):
         sys.path.insert(0, str(TOOLS)); import dmsh_atomic

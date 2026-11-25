@@ -24,8 +24,35 @@ static int cmp64(const void *a, const void *b) { uint64_t x = *(const uint64_t *
 static _Atomic int g_stop; static _Atomic uint64_t g_side_waits;
 static void *side_waiter(void *arg) { (void)arg; while (!atomic_load(&g_stop)) { ubc_wait(ubc_head()); atomic_fetch_add(&g_side_waits, 1); } return NULL; }
 
+// 6. A replay-shaped run, for the spin's figures (DM_HOST_SPIN, dm_spin.h): 30 submissions a frame, each queueing 15 copies of 1-64 KB (about 14 MB and 450 copies a frame, as Breath
+// of the Wild's) with 3 µs of translation between them, and the commit's wait for all of them at its end; the waits by length (ubc_stats) and the process's energy, yield spin
+// against WFET
+#include <libproc.h>
+static uint64_t energy_nj(void) { struct rusage_info_v6 r; memset(&r, 0, sizeof r); proc_pid_rusage(getpid(), RUSAGE_INFO_V6, (rusage_info_t *)&r); return r.ri_energy_nj; }
+static void replay_shape(int wfet, uint8_t *src, uint8_t *dst) {
+    dm_spin_v = wfet; char st[600] = ""; (void)ubc_stats(st, sizeof st, 1);   // the counts start here
+    uint64_t e0 = energy_nj(), t0 = ns(); uint32_t rng = 12345;
+    enum { FRAMES = 60, SUBS = 30, COPIES = 15 };
+    for (int f = 0; f < FRAMES; f++) {
+        for (int sb = 0; sb < SUBS; sb++) {
+            uint64_t seq = 0; size_t off = 0;
+            for (int c = 0; c < COPIES; c++) {
+                rng = rng * 1103515245u + 12345u; size_t n = 1024 + (rng >> 8) % (63 * 1024);
+                seq = ubc_push(dst + off, src + (rng % 4096), n); off += n;
+                uint64_t w = ns(); while (ns() - w < 3000) {}
+            }
+            ubc_wait(seq);
+        }
+        usleep(2000);   // the rest of the frame: the copy thread goes to sleep
+    }
+    uint64_t t1 = ns(), e1 = energy_nj();
+    size_t o = ubc_stats(st, sizeof st, FRAMES);
+    printf("t_ubc_wait replay shape (%s): %.1f ms a frame, process energy %.2f mJ a frame; per frame:%s\n", wfet ? "WFET" : "yield spin", (t1 - t0) / 1e6 / FRAMES, (e1 - e0) / 1e6 / FRAMES, o ? st : " no waits");
+}
+
 int main(void) { @autoreleasepool {
-    alarm(60);   // a lost wake-up hangs: the alarm ends the test as a failure
+    alarm(60);
+    setenv("DM_NVN_WAITS", "1", 1);   // the waits by length (ubc_stats, case 6)   // a lost wake-up hangs: the alarm ends the test as a failure
     uint64_t a = 7, b = 0; ubc_wait(ubc_push(&b, &a, sizeof a));   // starts the copy thread
     CHECK(b == 7, "the first copy was not made");
 
@@ -99,6 +126,12 @@ int main(void) { @autoreleasepool {
         if (late_lost) { fprintf(stderr, "t_ubc_wait: %d checks, %d failed (the copy thread is lost asleep)\n", checks, failed); _exit(1); }
     }
 
+    {   // 6
+        uint8_t *src = malloc(1 << 20), *dst = malloc(16 << 20); memset(src, 0x3c, 1 << 20); memset(dst, 0, 16 << 20);
+        replay_shape(0, src, dst);
+        int f = 0; size_t fn = sizeof f; if (!sysctlbyname("hw.optional.arm.FEAT_WFxT", &f, &fn, NULL, 0) && f) replay_shape(1, src, dst);
+        dm_spin_v = -1; free(src); free(dst);
+    }
     printf("t_ubc_wait: sleeping-thread wait p50 %.1f us p99 %.1f us, %.2f wake calls a wait (max %d); 64 MB copy %.1f ms, %d wakes; stress %d pushes %llu+%llu waits %.0f ms, %llu wake calls; %d checks, %d failed\n",
            n1 ? lat[n1 / 2] / 1e3 : 0, n1 ? lat[n1 * 99 / 100] / 1e3 : 0, n1 ? (double)sumw / n1 : 0, maxw, big_ns / 1e6, bigw, NS * ROUNDS, (unsigned long long)waits, (unsigned long long)side, stress_ns / 1e6, (unsigned long long)sw, checks, failed);
     fflush(stdout);

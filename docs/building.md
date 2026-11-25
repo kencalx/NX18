@@ -76,7 +76,7 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys
 
 The result is an unsigned IPA, in the game's folder, ready to [sideload](#install).
 
-- Expect 30–60 minutes for a first build. Later builds are much faster.
+- Expect 15–60 minutes for a first build, depending on the game and your Mac. Later builds are much faster. [Build time](#build-time)
 - Keep about twice the game's size free on disk, plus 10 GB.
 - For the Mac, add `--platform mac-app`. You then get the game as a Mac app: open it from Finder.
 
@@ -87,6 +87,26 @@ The result is an unsigned IPA, in the game's folder, ready to [sideload](#instal
 - **UI font.** `--ui-font <file.ttf>` puts one font of your own (a TTF, OTF or TTC) into the app, for all of NX 18's own text: the launcher, the in-game prompts and progress screens, and the Mac banner and Cheats window. The file goes only into the app built on your Mac, never into the repository, so keep that app to your own devices. Without it, the system font is used. [UI font](development.md#ui-font)
 - **Spyder.** `build_ipa_from_nsp.py` also runs in Spyder: set the settings block at its top and press F5. Command-line options override those settings.
 - **Everything else.** `-h` lists every option. [The packing script in detail](development.md#the-packing-script-in-detail) explains them.
+
+### Build time
+
+Most of a first build is your Mac compiling the game's shaders for the iPhone (every core busy), then the pipeline archive that spares the iPhone that work at the first start. Packing the IPA takes a minute or less. A later build reuses every step whose inputs did not change, so a build after an NX 18 update usually only builds the app and packs the IPA again, in a few minutes.
+
+On an M4 Max (16 cores, 48 GB), the build folder and the IPA on an external SSD:
+
+| Game | Step | Before | Now |
+| --- | --- | --- | --- |
+| Donkey Kong Bananza (10.3 GB IPA), first build | iOS shaders (23,638) | 7:36 | 7:56 (not changed) |
+| | app build (pipeline archive, Xcode) | 5:41 | 4:52 |
+| | IPA pack | 4:51 | 0:28 |
+| | whole build | 19:16 | 14:12 |
+| Ocarina of Time (29.6 GB IPA), first build | iOS shaders (42,848) | 24:03 | 24:03 (not changed) |
+| | app build (pipeline archive, Xcode) | 15:37 | 14:36 |
+| | IPA pack | 10:31 | 0:59 |
+| | whole build | 53:59 | about 43 min (from the steps; not run end to end) |
+| Ocarina of Time, nothing changed, to a new IPA | whole build | 12:39 (pack 11:08) | 1:33 (pack 0:59) |
+
+What changed: the IPA pack deflates big files on all cores ([The IPA pack deflated its big files on one core](reference/packing.md#the-ipa-pack-deflated-its-big-files-on-one-core)), the pipeline archive compiles several groups at once where the Mac has the memory ([Bounded groups for the offline pipeline compiler](reference/shaders.md#bounded-groups-for-the-offline-pipeline-compiler)), and the RomFS checks no longer resolve every file again ([Every build spends half a minute walking the RomFS image](reference/packing.md#every-build-spends-half-a-minute-walking-the-romfs-image)).
 
 ## Switch 2 games
 
@@ -116,6 +136,7 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform m
 - **Newer `nup` files.** Since 2026-11-04 (its PR #20), the `nup` tool numbers a NUP's metadata one too low. The script still reads such a NUP right, and says so.
 - **No base game.** Some NUPs have an empty base package, or none, and mark their updates `standalone_update`. The script then builds the update as the full game and tells you so. If the game halts because files are missing, the update only holds what changed: pack a NUP that includes the base game.
 - **Versions.** The script builds the newest update unless `--package v<N>` names another. A container with no base game has no `v0`.
+- **Nintendo Switch 2 Edition.** A NUP of a game with its Switch 2 Edition can hold two programs: the Switch 1 game (program 0) and the Switch 2 one (program 1). NX 18 doesn't support the Switch 2 program yet. The script stops with a red line that says so, and names the Switch 1 game when the NUP holds it: `--program 0` builds that one (`PROGRAM_INDEX = 0` in Spyder). A NUP, `.nx` file or dump folder that holds only the Switch 2 program (Xenoblade Chronicles X: Definitive Edition's NUP), or any other program than program 0 packed alone, stops the same way. `python3 scripts/pack_nup.py game.nup --list` shows what a NUP holds.
 
 ### From a `.nx` file
 

@@ -2,7 +2,7 @@
 // The host is not exec'ed: macOS privacy checks (TCC) attribute a child's file access to the app that launched it, while a launcher that hands its process over (a shell script exec'ing
 // dmhost) gets EPERM on every open on a removable volume, with no prompt, signed or not. The launcher forwards SIGTERM / SIGINT / SIGHUP to the host and returns its exit code.
 // Bundle layout: Resources/romfs.img (the game's RomFS image; legacy romfs/ also supported), Resources/msl/<b-chain.img | vk | gl> (the Mac shader libraries), Resources/aoc/<index> (DLC), Resources/pso (the pipeline archive made
-// offline, handed to the host as DM_PSO_BUNDLE as the iOS app's main.m does), Resources/dm (the rewritten modules, the shader tables and pairs, font/, env.txt). Saves, the pipeline list and temporary files go to ~/Library/Application Support/nxnative/<title ID>/, the host's output to ~/Library/Logs/nxnative/<title ID>.log
+// offline, handed to the host as DM_PSO_BUNDLE as the iOS app's main.m does), Resources/dm (the rewritten modules, the shader tables and pairs, font/, env.txt); romfs.img, msl, aoc and pso are links into the signed data bundles in Contents/PlugIns (pack_app.py). Saves, the pipeline list and temporary files go to ~/Library/Application Support/nxnative/<title ID>/, the host's output to ~/Library/Logs/nxnative/<title ID>.log
 // (the previous run's kept as <title ID>.prev.log). Environment switches: one KEY=VALUE per line in <Application Support folder>/env.txt, then Resources/dm/env.txt (the first one wins; neither
 // replaces a variable already set), as the iOS app reads Documents/env.txt and dm/env.txt. Then the player's saved choices: launcher.<VAR> strings in the app's preferences domain (its bundle ID), which a
 // front end or a settings window writes, each checked against the bundle's settings (Info.plist DMSettings, from launcher.json) and used only for a variable still unset; DM_SAVED_CHOICES=0 ignores them.
@@ -25,15 +25,20 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
+#include "log_redirect.h"
 #include "romfs_image.h"
 #include "save_sync.h"
 #include "ui_font.h"
+// The Profile's name and picture path stay out of the log (gate-ui §20.5 Privacy)
+static int env_private(const char *k) { return !strcmp(k, "DM_NICK") || !strcmp(k, "DM_PROFILE_IMAGE"); }
 
 extern char **environ;
 int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
 char *dm_mac_metal4_missing(int assume_missing);   // Launcher.swift: why this Mac cannot draw the game (no Metal 4), or NULL
 void dm_mac_forget_retired(void);    // Launcher.swift: drops the saved choices of switches the host no longer has (launcher.DM_PSO_MTL4)
+void dm_mac_preset_env(void);        // Launcher.swift: DM_PRESET, the preset the saved choices make, for a start without the window (frame generation's Battery Saver)
 static pid_t g_child;
 static char *g_file_keys, *g_launch_keys;   // the variables the env files set, and the settings the launch environment set (DM_ENV_FILE_KEYS, DM_ENV_LAUNCH_KEYS)
 
@@ -44,6 +49,7 @@ static void add_key(char **list, const char *k) {   // a space-separated list of
 }
 
 static void forward(int sig) { if (g_child > 0) kill(g_child, sig); }
+
 
 static int info_string(const char *key, char *out, size_t n) {   // a string key of the bundle's Info.plist
     CFBundleRef b = CFBundleGetMainBundle(); if (!b) return 0;
@@ -87,7 +93,7 @@ static void env_file(const char *path) {   // KEY=VALUE lines, # starts a commen
         char *eq = strchr(s, '=');
         if (*s == '#' || !eq || eq == s) continue;
         *eq = 0; char *k = s; for (char *t = eq - 1; t > k && (*t == ' ' || *t == '\t'); t--) *t = 0;
-        if (!getenv(k)) { setenv(k, eq + 1, 0); add_key(&g_file_keys, k); fprintf(stderr, "launcher: env %s=%s (%s)\n", k, eq + 1, path); }
+        if (!getenv(k)) { setenv(k, eq + 1, 0); add_key(&g_file_keys, k); fprintf(stderr, "launcher: env %s=%s (%s)\n", k, env_private(k) ? "(set)" : eq + 1, path); }
     }
     fclose(f);
 }
@@ -133,8 +139,8 @@ static void saved_choices(void) {   // after the env files, before the bundle's 
         if (!v) continue;
         if (CFGetTypeID(v) != CFStringGetTypeID() || !CFStringGetCString(v, s, sizeof s, kCFStringEncodingUTF8)) fprintf(stderr, "launcher: saved choice for %s ignored: not a string of at most %zu bytes\n", env, sizeof s - 1);
         else if (!saved_accepted(rule, v, s)) fprintf(stderr, "launcher: saved choice %s=%s ignored: this build does not offer it\n", env, s);
-        else if (getenv(env)) fprintf(stderr, "launcher: saved choice %s=%s not used: %s=%s is set (environment or env.txt)\n", env, s, env, getenv(env));
-        else { setenv(env, s, 0); fprintf(stderr, "launcher: env %s=%s (saved choice)\n", env, s); }
+        else if (getenv(env)) fprintf(stderr, "launcher: saved choice %s=%s not used: %s=%s is set (environment or env.txt)\n", env, env_private(env) ? "(set)" : s, env, env_private(env) ? "(set)" : getenv(env));
+        else { setenv(env, s, 0); fprintf(stderr, "launcher: env %s=%s (saved choice)\n", env, env_private(env) ? "(set)" : s); }
         CFRelease(v);
     }
 }
@@ -151,6 +157,24 @@ static void cloud_saves_folder(void) {
     if (v) CFRelease(v);
 }
 
+// The NX 18 Profile (gate-ui §20.5): the name and picture the games see, from ~/Library/Application Support/nxnative/Profile/ (shared by every NX 18 Mac app; plain
+// files, written by the settings window's card, NX18Profile.swift). nx18.profile in this app's preferences turns it off for this game. An env file or launch value wins;
+// neither value is logged (only "profile: on" / "off")
+static void profile_env(void) {
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
+    int on = 1;
+    if (domain) { CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("nx18.profile"), domain); if (v && CFGetTypeID(v) == CFBooleanGetTypeID()) on = CFBooleanGetValue(v); if (v) CFRelease(v); }
+    const char *home = getenv("HOME"); char dir[PATH_MAX], p[PATH_MAX], name[96] = "";
+    if (!home) return;
+    snprintf(dir, sizeof dir, "%s/Library/Application Support/nxnative/Profile", home);
+    snprintf(p, sizeof p, "%s/name.txt", dir);
+    FILE *f = fopen(p, "r"); if (f) { if (fgets(name, sizeof name, f)) name[strcspn(name, "\r\n")] = 0; fclose(f); }
+    if (on && *name && strcmp(name, "Player") && !getenv("DM_NICK")) setenv("DM_NICK", name, 1);
+    snprintf(p, sizeof p, "%s/picture.jpg", dir);
+    if (on && !access(p, R_OK) && !getenv("DM_PROFILE_IMAGE")) setenv("DM_PROFILE_IMAGE", p, 1);
+    fprintf(stderr, "profile: %s\n", on ? "on" : "off");
+}
+
 // A game of several programs (Super Mario 3D All-Stars): pack_app.py's table of them, with this app's paths filled in (it may move), for oe::ExecuteProgram (DM_PROGRAMS, hle_oe.c)
 static void programs_table(const char *contents, const char *res, const char *sup) {
     char in[PATH_MAX], out[PATH_MAX]; snprintf(in, sizeof in, "%s/dm/programs.tsv", res); snprintf(out, sizeof out, "%s/programs.tsv", sup);
@@ -165,7 +189,20 @@ static void programs_table(const char *contents, const char *res, const char *su
     fclose(f); fclose(o); setenv("DM_PROGRAMS", out, 0);
 }
 
+// ~/Library/Logs/nxnative/<title ID>.log onto descriptors 1 and 2, which the launcher's lines, the settings window's (Launcher.swift) and the host, which inherits
+// both, all write to (dm_log_redirect in dm/host/log_redirect.h says why and how). It was open, dup2 onto 1 and 2, close: when the launch left 2 (or 1) closed (a shell's 2>&-,
+// a parent that closed it), open returned that very descriptor and the close freed it, so the next file opened took it (an env file, programs.tsv, the host's first file,
+// possibly a save) and got the log lines after that. Now no standard descriptor is free when the host starts: a log that cannot be opened leaves 1 and 2 where the launch put
+// them, or on /dev/null when the launch left one closed, and says so there. An opened log is as before: the same file, mode 0644, truncated, stdout line-buffered. A normal
+// start (Finder, the Dock, open, a terminal) has all three open and is unchanged
+static void log_open(const char *log) {
+    int err = dm_log_redirect(log, 0644, STDOUT_FILENO);
+    if (err) { fprintf(stderr, "[RED] launcher: %s cannot be written (%s): no log for this run\n", log, strerror(err)); return; }
+    setvbuf(stdout, NULL, _IOLBF, 0);
+}
+
 int main(int argc, char **argv) {
+    struct timespec opened; clock_gettime(CLOCK_REALTIME, &opened);   // with no settings window the app's opening is its Play (DM_PLAY_AT, below)
     char self[PATH_MAX], exe[PATH_MAX]; uint32_t n = sizeof self;
     if (_NSGetExecutablePath(self, &n) || !realpath(self, exe)) return 1;
     char contents[PATH_MAX], res[PATH_MAX], host[PATH_MAX], dm[PATH_MAX], romfs[PATH_MAX], p[PATH_MAX];
@@ -194,8 +231,7 @@ int main(int argc, char **argv) {
     snprintf(log, sizeof log, "%s/%s.log", logs, id); snprintf(prev, sizeof prev, "%s/%s.prev.log", logs, id);
     mkdirs(save); mkdirs(temp); mkdirs(logs);
     rename(log, prev);
-    int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); setvbuf(stdout, NULL, _IOLBF, 0); }
+    log_open(log);
     fprintf(stderr, "launcher: %s (%s), host %s\n", name, id, host);
     CFArrayRef rules = setting_rules();   // the settings the launch environment already set: the window shows them, fixed
     for (CFIndex i = 0; rules && i < CFArrayGetCount(rules); i++) { char env[128]; if (rule_env(CFArrayGetValueAtIndex(rules, i), env, sizeof env) && getenv(env)) add_key(&g_launch_keys, env); }
@@ -216,14 +252,18 @@ int main(int argc, char **argv) {
     if (!window) fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");
     int shown = window ? dm_mac_launcher() : 2;
     if (!shown) return 0;   // Quit: no game
-    if (shown == 2) saved_choices();
+    if (shown == 2) { saved_choices(); dm_mac_preset_env(); }   // the window's Play sets DM_PRESET and a preset's switches with the settings (LauncherModel.apply); the env files and the launch environment are in by now. It returns at once without frame generation or a preset switch (preset_env)
+    if (shown == 2 && !getenv("DM_PLAY_AT")) {   // the start's timeline (dm/host/hle_lifecycle.c): the window's Play sets it (Launcher.swift); with no window, from the app's opening
+        char v[32]; snprintf(v, sizeof v, "%lld.%06ld", (long long)opened.tv_sec, opened.tv_nsec / 1000); setenv("DM_PLAY_AT", v, 1);
+    }
     cloud_saves_folder();
+    profile_env();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);
     snprintf(p, sizeof p, "%s/shader_map.tsv", dm); if (!stat(p, &st)) setenv("DM_NVN_SHMAP", p, 0);
     snprintf(p, sizeof p, "%s/aoc", res); if (!stat(p, &st)) setenv("DM_AOC_DIR", p, 0);
-    snprintf(p, sizeof p, "%s/pso", res); if (!stat(p, &st)) setenv("DM_PSO_BUNDLE", p, 0);   // the bases of every shader pair: the first start builds none
+    snprintf(p, sizeof p, "%s/pso", res); if (!stat(p, &st)) setenv("DM_PSO_BUNDLE", p, 0);   // the bases of the listed shader pairs: the first start builds none of those (a game listed through cover pairs still compiles its real pairs' bases as the draws meet them)
     if (*lang) setenv("DM_LANG", lang, 0);
     setenv("DM_WINDOW", "1", 0); setenv("DM_AUDIO", "1", 0);
     programs_table(contents, res, sup);

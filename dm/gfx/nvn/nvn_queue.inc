@@ -4,6 +4,7 @@
 
 void *objc_autoreleasePoolPush(void);
 void objc_autoreleasePoolPop(void *);
+void dm_vi_frame_ticket(uint64_t frame, uint64_t ticket);   // hle_vi.c: a frame's present is in the present queue with this ticket (the layer's frame history)
 
 // Ready continuations of NVN queues share the renderer's one ordered Metal queue.
 // An unresolved wait parks its queue, never the submitting CPU or another queue.
@@ -18,7 +19,7 @@ typedef struct nq_node {
     tex_t texture; double period; int crop[4];
 } nq_node;
 typedef struct nq_owned { struct nq_owned *next; unsigned kind; uint64_t data[]; } nq_owned;
-typedef struct nq_job { struct nq_job *next; nq_node *first, *last; nq_receipt *receipt; nq_owned *owned; nvn_hmap objects; uint64_t frame; } nq_job;
+typedef struct nq_job { struct nq_job *next; nq_node *first, *last; nq_receipt *receipt; nq_owned *owned; nvn_hmap objects; uint64_t frame, submitted, written, seq; } nq_job;   // seq: its place in enqueue order (nq_enqueue)   // submitted: guest ns of its nvnQueueSubmitCommands (mtl_sub_ready); written: the dirty-page clock then (mtl_sub_cpu_limit)
 static void nq_job_free(nq_job *j) {
     for(nq_owned *o=j->owned,*next;o;o=next) { next=o->next; if(o->kind==CAP_K_PROG) mtl_prog_unpin((prog_t *)o->data); else if(o->kind==CAP_K_TEX) mtl_tex_unpin(((tex_t *)o->data)->serial); free(o); }
     free(j->objects.keys); free(j->objects.vals); free(j);
@@ -38,7 +39,7 @@ static int nq_snapshot_object(void *ctx,int kind,uint64_t *field,uint8_t *payloa
 }
 static const cap_ops nq_snapshot_ops={nq_snapshot_address,nq_snapshot_object};
 typedef struct nq_queue {
-    struct nq_queue *next; uint64_t serial, physical, present, copy; int origin;
+    struct nq_queue *next; uint64_t serial, physical, present, copy, wait_passed, wait_written; int origin;   // wait_passed: guest ns a wait it held for passed (mtl_sub_ready); wait_written: the dirty-page clock when its last wait was passed (mtl_sub_cpu_limit)
     nq_job *first, *last; nq_receipt *tail;
 } nq_queue;
 static pthread_mutex_t nq_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -205,19 +206,27 @@ static int nq_probe_full(void) {
     if(nq_probes_full<0) { const char *e=getenv("DM_NVN_SUBMIT_PROBES"); nq_probes_full=e && !strcmp(e,"full"); if(nq_probes_full) LOG("[nvn] submit-cost probes: full (DM_NVN_SUBMIT_PROBES=full): clock_gettime plus a thread port made and released per reading"); }
     return nq_probes_full;
 }
-typedef struct { uint64_t wall, cpu, instr, cycles, sys; } nq_cost;   // a scope's start; nq_cost_end returns its wall and CPU time in the same fields
+typedef struct { uint64_t wall, cpu, instr, cycles, sys, out, pin, flt; } nq_cost;   // pin / flt: the process's page-ins and faults at the start (nq_task_events)   // a scope's start; nq_cost_end returns its wall and CPU time in the same fields
+// The wall time this thread spent out of its scope (nq_sub_yield: the replay's lends of g_sub_mu, counted as its g_sub_mu waits instead): left out of the scope's wall time
+static __thread uint64_t nq_cost_out_ns;
 static nq_cost nq_cost_begin(void) {
-    nq_cost c={.wall=now_ns()};
+    nq_cost c={.wall=now_ns(),.out=nq_cost_out_ns}; nq_task_events(&c.pin,&c.flt);
     if(nq_probe_full()) { c.cpu=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); c.sys=thr_sys_ns(); } else thr_times(&c.cpu,&c.sys);
     thr_counts(&c.instr,&c.cycles); return c;
 }
-static nq_cost nq_cost_end(nq_cost c) {
-    int full=nq_probe_full(); uint64_t dw=now_ns()-c.wall, cpu=0, sys=0, ins, cyc;
+static nq_cost nq_cost_end_role(nq_cost c, int replay);
+static nq_cost nq_cost_end(nq_cost c) { return nq_cost_end_role(c, 0); }
+// replay: the scope is a replayed node's (the replay's own work), else a submit on the game's thread; the long-frame line splits them (g_lfs, hle_nvn.c)
+static nq_cost nq_cost_end_role(nq_cost c, int replay) {
+    int full=nq_probe_full(); uint64_t dw=now_ns()-c.wall, cpu=0, sys=0, ins, cyc, out=nq_cost_out_ns-c.out; dw=dw>out?dw-out:0;
     if(full) cpu=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); else thr_times(&cpu,&sys);
     thr_counts(&ins,&cyc); if(full) sys=thr_sys_ns();
     uint64_t dc=cpu-c.cpu;
     atomic_fetch_add(&g_nvn_ns,dw); atomic_fetch_add(&g_sub_wall_ns,dw); atomic_fetch_add(&g_cum_sub_wall_ns,dw);
     atomic_fetch_add(&g_sub_cpu_ns,dc); atomic_fetch_add(&g_cum_sub_cpu_ns,dc);
+    { uint64_t pin=0,flt=0; nq_task_events(&pin,&flt); const int k0=replay ? 0 : 1;
+      if(c.pin|c.flt) { atomic_fetch_add_explicit(&g_lfs_pin[k0],pin-c.pin,memory_order_relaxed); atomic_fetch_add_explicit(&g_lfs_flt[k0],flt-c.flt,memory_order_relaxed); } }
+    { const int k=replay ? 0 : 1; atomic_fetch_add_explicit(&g_lfs_wall[k],dw,memory_order_relaxed); atomic_fetch_add_explicit(&g_lfs_cpu[k],dc,memory_order_relaxed); atomic_fetch_add_explicit(&g_lfs_sys[k],sys-c.sys,memory_order_relaxed); }
     atomic_fetch_add(&g_sub_instr,ins-c.instr); atomic_fetch_add(&g_cum_sub_instr,ins-c.instr);
     atomic_fetch_add(&g_cum_sub_cyc,cyc-c.cycles); atomic_fetch_add(&g_cum_sub_sys_ns,sys-c.sys);
     return (nq_cost){.wall=dw,.cpu=dc};
@@ -226,10 +235,57 @@ static nq_cost nq_cost_end(nq_cost c) {
 // the wall time each side waits for g_sub_mu while the other holds it: a submit behind a replayed node, the replay behind a submit's copy. A lock is tried first, so an uncontended one
 // reads no clock (nq_sub_lock)
 static _Atomic uint64_t nq_stat_submits, nq_stat_copy_wall_ns, nq_stat_copy_cpu_ns, nq_stat_sub_wait_ns[2], nq_stat_sub_waits[2];   // [0] the game's submits, [1] the replay
+// The replay lends g_sub_mu to a waiting submit between two commands of a long node (DM_NVN_SUB_YIELD, on by default; =0 as before, kept in player builds). The replay held it across a
+// whole node, so the game's submit, which needs it only to copy its commands (nq_flatten), waited for the rest of the node: Ocarina of Time's submit thread about 1 ms a frame, 2-4 ms
+// in heavy stretches (NX18-X2.0 oot-alldata-analysis.md, ranked fix 3). A submit that finds the lock taken counts itself in g_exec_yield_want; the replay, at the top of mtl_exec's
+// loop (the previous command done, the next not begun), sees it, marks the lock lent (g_sub_lent), lets it go, waits until the submit has taken it (at most NQ_YIELD_WAIT_NS), takes
+// it back once the submit's copy is done and goes on with the node.
+// Why that point is safe for a submit's copy: the replay is blocked while the copy runs, so nothing runs at the same time that did not before; only where in the node the copy's
+// effects land moves. Those effects are a new node of the submit's own job, spare command copies (nq_spare_take; the replay gives its node's back only after the node), the queue's
+// signal words (nq_signal_*, the submit's alone), and the snapshots of the programs and textures its commands name (nq_snapshot_object): a program pin (g_prog_pins: the replay
+// changes it only at a node's start or end, at commit, or in a finalize), the program's translation built or found (prog_get: shader and program caches only added to, its one-entry
+// cache checked by object, serial and serial-table generation, and a new serial table entry, as texture objects made on game threads add while the replay runs), and a texture pin
+// (under g_smu, as on any game thread). The replay keeps no state across commands that these change, and each of its own look-ups is done by the end of a command.
+// Program and queue finalization (hle_nvn.c sub_lock_whole) change the replay's bindings, so they never take a lent lock: they wait until the replay has it back. At most one yield
+// every NQ_YIELD_GAP_NS of a node, so submits arriving one after another cannot keep the replay off its node. A submit that does not take the lent lock within NQ_YIELD_WAIT_NS (woken
+// but not running: low QoS, an efficiency core) ends the lending for the rest of the node (g_exec_yield cleared until the next node), so a lend costs the replay at most that wait plus a
+// copy, and a starved submitter one such wait a node. The gap is checked by the clock only every NQ_YIELD_SKIP commands while a submit waits.
+// The replay's time without the lock counts as its g_sub_mu wait (nq_stat_sub_wait_ns[1]) and is left out of its node's cost scope (nq_cost_out_ns)
+enum { NQ_YIELD_GAP_NS=50000, NQ_YIELD_WAIT_NS=200000, NQ_YIELD_SKIP=16 };
+static int nq_yield=-1;   // 1 lend, 0 never; read once at the worker's start (nq_start). A unit test may set it directly while no node is replayed
+static void nq_yield_init(void) { const char *e=getenv("DM_NVN_SUB_YIELD"); int on=!(e && !strcmp(e,"0")); if(!on) LOG("[nvn] the replay holds g_sub_mu across each whole command node, as before (DM_NVN_SUB_YIELD=0)"); nq_yield=on; }
+static int nq_yield_on(void) { return nq_yield>0; }
+static pthread_mutex_t nq_lend_mu=PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t nq_lend_cv=PTHREAD_COND_INITIALIZER;
+static uint64_t nq_lend_taken;   // under nq_lend_mu: submits that took a lent g_sub_mu
+static uint64_t nq_yield_last; static unsigned nq_yield_skip;   // the replay's: when it last had the lock back from a yield; commands left before the gap is checked again
+static _Atomic uint64_t nq_stat_yields, nq_stat_yield_ns, nq_stat_yield_copies, nq_stat_yield_timeouts;   // the queue line: yields, the replay's time without the lock in them, submits that copied in them, lends no submit took
 static void nq_sub_lock(int replay) {   // dm_host_mutex_lock(&g_sub_mu), timed when contended
     if(pthread_mutex_trylock(&g_sub_mu)!=EBUSY) return;
-    uint64_t t0=now_ns(); dm_host_work++; pthread_mutex_lock(&g_sub_mu); dm_host_work--;
+    int lend=!replay && nq_yield_on();
+    uint64_t t0=now_ns(); dm_host_work++;
+    if(lend) atomic_fetch_add_explicit(&g_exec_yield_want,1,memory_order_acq_rel);
+    pthread_mutex_lock(&g_sub_mu); dm_host_work--;
+    if(lend) {
+        atomic_fetch_sub_explicit(&g_exec_yield_want,1,memory_order_acq_rel);
+        if(g_sub_lent) { atomic_fetch_add_explicit(&nq_stat_yield_copies,1,memory_order_relaxed); pthread_mutex_lock(&nq_lend_mu); nq_lend_taken++; pthread_cond_signal(&nq_lend_cv); pthread_mutex_unlock(&nq_lend_mu); }
+    }
     atomic_fetch_add_explicit(&nq_stat_sub_wait_ns[replay],now_ns()-t0,memory_order_relaxed); atomic_fetch_add_explicit(&nq_stat_sub_waits[replay],1,memory_order_relaxed);
+}
+static void nq_sub_yield(void) {   // the replay, g_sub_mu held, between two commands of a node (mtl_exec): a game submit waits for the lock
+    if(nq_yield_skip) { nq_yield_skip--; return; }
+    uint64_t t0=now_ns(); if(t0-nq_yield_last<NQ_YIELD_GAP_NS) { nq_yield_skip=NQ_YIELD_SKIP; return; }
+    pthread_mutex_lock(&nq_lend_mu); uint64_t seq=nq_lend_taken; pthread_mutex_unlock(&nq_lend_mu);
+    g_sub_lent=1; pthread_mutex_unlock(&g_sub_mu); dm_host_work++;
+    pthread_mutex_lock(&nq_lend_mu);   // until a submit has taken it (it may already have), or none waits any more, or the bound
+    for(uint64_t el;nq_lend_taken==seq && atomic_load_explicit(&g_exec_yield_want,memory_order_acquire)>0 && (el=now_ns()-t0)<NQ_YIELD_WAIT_NS;) {
+        uint64_t left=NQ_YIELD_WAIT_NS-el; struct timespec tick={0,(long)left}; pthread_cond_timedwait_relative_np(&nq_lend_cv,&nq_lend_mu,&tick); }
+    int taken=nq_lend_taken!=seq; pthread_mutex_unlock(&nq_lend_mu);
+    pthread_mutex_lock(&g_sub_mu); dm_host_work--;
+    g_sub_lent=0; pthread_cond_broadcast(&g_sub_lent_cv);   // a finalize that found it lent takes it at the node's end
+    if(!taken) { g_exec_yield=NULL; atomic_fetch_add_explicit(&nq_stat_yield_timeouts,1,memory_order_relaxed); }   // no submit came: no more lending in this node
+    uint64_t t1=now_ns(); nq_yield_last=t1; nq_yield_skip=NQ_YIELD_SKIP; nq_cost_out_ns+=t1-t0;
+    atomic_fetch_add_explicit(&nq_stat_yields,1,memory_order_relaxed); atomic_fetch_add_explicit(&nq_stat_yield_ns,t1-t0,memory_order_relaxed);
+    atomic_fetch_add_explicit(&nq_stat_sub_wait_ns[1],t1-t0,memory_order_relaxed); atomic_fetch_add_explicit(&nq_stat_sub_waits[1],1,memory_order_relaxed);   // the replay's g_sub_mu waits
 }
 static void nq_wait_stats(uint64_t v[7]) {   // running totals: submits, their copy's wall and CPU ns, g_sub_mu waits (ns, count) of the submits and of the replay
     v[0]=atomic_load_explicit(&nq_stat_submits,memory_order_relaxed); v[1]=atomic_load_explicit(&nq_stat_copy_wall_ns,memory_order_relaxed); v[2]=atomic_load_explicit(&nq_stat_copy_cpu_ns,memory_order_relaxed);
@@ -275,15 +331,18 @@ static uint64_t nq_report_due(uint64_t frame,uint64_t *reported) {
 // started without a spare copy (they allocate it as they grow), the GPU event writes recorded (nq_event_issued) and the time this bookkeeping took on the replay thread and in GPU progress,
 // with the event words in flight now and the most at once since the start, counted with the map and with the list (DM_NVN_EVENT_MAP=0) alike
 static void nq_report(uint64_t frame,uint64_t frames) {
-    static uint64_t p[8]; uint64_t v[8]={atomic_load(&nq_stat_nodes),atomic_load(&nq_stat_nodes_pooled),atomic_load(&nq_stat_receipts),atomic_load(&nq_stat_receipts_pooled),atomic_load(&nq_stat_no_spare),atomic_load(&nq_stat_event_writes),atomic_load(&nq_stat_event_ns),0};
+    static uint64_t p[11]; uint64_t v[11]={atomic_load(&nq_stat_nodes),atomic_load(&nq_stat_nodes_pooled),atomic_load(&nq_stat_receipts),atomic_load(&nq_stat_receipts_pooled),atomic_load(&nq_stat_no_spare),atomic_load(&nq_stat_event_writes),atomic_load(&nq_stat_event_ns),
+                                          atomic_load(&nq_stat_yields),atomic_load(&nq_stat_yield_copies),atomic_load(&nq_stat_yield_ns),atomic_load(&nq_stat_yield_timeouts)};
     pthread_mutex_lock(&nq_mu); unsigned peak=nq_stat_event_peak, inflight=nq_event_inflight(); pthread_mutex_unlock(&nq_mu);
     double nf=frames?(double)frames:1;
     char sp[96]=""; if(nvn_replay_spares()) snprintf(sp,sizeof sp," (spare copies kept %llu of %d, %.2f MB)",(unsigned long long)atomic_load_explicit(&nq_stat_spares,memory_order_relaxed),nq_spare_n(),atomic_load_explicit(&nq_stat_spare_bytes,memory_order_relaxed)/1048576.0);   // replay_spares only: every other game's line as before
-    LOG("[nvn] queue up to frame %llu, per frame: nodes %.1f (%.1f from the free list), receipts %.1f (%.1f from the free list), command nodes without a spare copy %.1f%s; GPU event writes %.1f, their bookkeeping %.3f ms; event words in flight %u, at most %u",
-        frame,(v[0]-p[0])/nf,(v[1]-p[1])/nf,(v[2]-p[2])/nf,(v[3]-p[3])/nf,(v[4]-p[4])/nf,sp,(v[5]-p[5])/nf,(v[6]-p[6])/1e6/nf,inflight,peak);
+    char ly[160]=""; if(nq_yield_on()) snprintf(ly,sizeof ly,"; g_sub_mu lent to the game's submits mid-node %.1f (%.1f copies, %.1f not taken), the replay without it %.3f ms",(v[7]-p[7])/nf,(v[8]-p[8])/nf,(v[10]-p[10])/nf,(v[9]-p[9])/1e6/nf);   // DM_NVN_SUB_YIELD=0: the line as before
+    LOG("[nvn] queue up to frame %llu, per frame: nodes %.1f (%.1f from the free list), receipts %.1f (%.1f from the free list), command nodes without a spare copy %.1f%s; GPU event writes %.1f, their bookkeeping %.3f ms; event words in flight %u, at most %u%s",
+        frame,(v[0]-p[0])/nf,(v[1]-p[1])/nf,(v[2]-p[2])/nf,(v[3]-p[3])/nf,(v[4]-p[4])/nf,sp,(v[5]-p[5])/nf,(v[6]-p[6])/1e6/nf,inflight,peak,ly);
     memcpy(p,v,sizeof p);
 }
 // The replay's time-constraint policy (nvn_rt.h; profile key replay_rt, DM_REPLAY_RT): ticked once a frame before the node's work, outside its cost scope
+static uint64_t nq_oldest(void) { uint64_t o=UINT64_MAX; for(nq_queue *q=nq_queues;q;q=q->next) if(q->first && q->first->seq<o) o=q->first->seq; return o; }   // under nq_mu
 static nvn_rtw nq_rtw={.name="NVN queue replay"};
 static void *nq_worker(void *unused) {
     (void)unused; pthread_setname_np("NVN queue replay");
@@ -305,8 +364,10 @@ static void *nq_worker(void *unused) {
                     // The queued GPU write satisfies the wait: the GPU runs this continuation after it (nq_event_write). Ocarina of Time waits on about 25 events a frame; each wait
                     // for the writer's completion left the GPU idle while the host encoded the next submission, 2 ms of its 14.5 ms frame, which its dynamic resolution read as work
                     nq_event_write *queued=predecessor>mtl_completed_fence() ? nq_event_write_of(n->event) : NULL;
-                    if(queued && queued->exact && nq_predicate(queued->value,n->mode,n->value)) break;
-                    if(predecessor>mtl_completed_fence() || !nq_predicate(atomic_load_explicit((_Atomic uint32_t *)n->event,memory_order_acquire),n->mode,n->value)) {
+                    // The writer's fence goes with the wait (q->physical below): a fence right behind it waits for the writer
+                    if(queued && queued->exact && nq_predicate(queued->value,n->mode,n->value)) { n->wait_fence=queued->fence; break; }
+                    // A GPU taken as lost (mtl_gpu_gone) writes nothing more: the wait gives way, as every wait on the GPU then does
+                    if(!mtl_gpu_gone() && (predecessor>mtl_completed_fence() || !nq_predicate(atomic_load_explicit((_Atomic uint32_t *)n->event,memory_order_acquire),n->mode,n->value))) {
                         // A queue held more than 5 s by one event wait: what it waits for, since the game's own GPU watchdog acts on the fences behind it (PRAGMATA aborts after 15 s)
                         uint64_t t=now_ns(); if(!n->wait_since) n->wait_since=t;
                         else if(t-n->wait_since>5000000000ull && !n->wait_said) { static _Atomic int said; n->wait_said=1; if(atomic_fetch_add(&said,1)<8)
@@ -336,26 +397,38 @@ static void *nq_worker(void *unused) {
         // Round-robin ready queues: a continually fed independent producer cannot starve another queue.
         if(q->next) { nq_queue **link=&nq_queues; while(*link!=q) link=&(*link)->next; *link=q->next; nq_queue *tail=nq_queues; while(tail->next) tail=tail->next; tail->next=q; q->next=NULL; }
         if(n->kind==NQ_SYNC || n->kind==NQ_EVENT) { uint64_t f=n->receipt?n->receipt->fence:n->wait_fence; if(f>q->physical) q->physical=f; }
+        if((n->kind==NQ_SYNC || n->kind==NQ_EVENT) && n->wait_since) q->wait_passed=guest_ns();   // the GPU could not start what follows before this either
+        // What follows a wait may read what the game wrote before the wait passed, after its submit (a CPU write, then the event word it waits for): its writes' limit is then at least now
+        if(n->kind==NQ_SYNC || n->kind==NQ_EVENT) q->wait_written=nvn_dirty_now();
         if(n->kind==NQ_FENCE) nq_publish(n->receipt,q->physical);
+        uint64_t oldest=nq_oldest();   // this job is still at its queue's head
         pthread_mutex_unlock(&nq_mu);
         uint64_t fence=0, present=0, copy=0;
         if(n->kind==NQ_COMMANDS || n->kind==NQ_PRESENT) {
             nq_sub_lock(1); void *pool=objc_autoreleasePoolPush();
             dm_host_work++; mtl_prepare(); dm_host_work--;
+            mtl_prog_release_drain();   // programs a game thread re-set meanwhile (nvnProgramSetShaders): their old serials go now, under g_sub_mu
             if(rt && frame!=j->frame) nvn_rtw_tick(&nq_rtw,j->frame);
-            gfx_enter(); nq_cost cost=nq_cost_begin();
+            gfx_enter(); nq_cost cost=nq_cost_begin(); mtl_pf_scope(1);
             if(frame!=j->frame) { frame=j->frame; mtl_set_frame(frame); }
             mtl_queue_activate(q->serial); mtl_set_queue_origin_lower_left(q->origin);
             if(n->kind==NQ_COMMANDS) {
                 uint64_t handle=(uintptr_t)n->bytes;
                 nvn_cap_submit(1,&handle);
-                mtl_sub_begin(); nvn_ft_poll(); mtl_sub_index(&handle,1);
-                mtl_exec_rest(NULL,0); mtl_exec(n->bytes); fence=mtl_sub_commit();
+                mtl_sub_begin(); mtl_pool_reap(oldest); mtl_sub_ready(j->submitted>q->wait_passed?j->submitted:q->wait_passed); mtl_sub_cpu_limit(j->written>q->wait_written?j->written:q->wait_written); nvn_ft_poll();
+                mtl_exec_rest(NULL,0);
+                g_exec_yield=nq_yield_on()?nq_sub_yield:NULL; nq_yield_last=0; nq_yield_skip=0; mtl_exec(n->bytes); g_exec_yield=NULL;   // a waiting submit may take g_sub_mu between its commands (nq_sub_yield)
+                fence=mtl_sub_commit(); mtl_sub_cpu_limit(UINT64_MAX);
             } else {
                 nvn_cap_present(&n->texture,n->crop);
                 present=mtl_present(&n->texture,n->period,n->crop,&copy); mtl_tex_unpin(n->texture.serial);
+                // The layer's frame history (hle_vi.c) learns this frame's ticket in the present queue only now: until here vi::ListFrameHistory reports the frame queued. j->frame is
+                // dm_nvn_frame_count() before the present's dump_frame counted it (hle_nvn.c), and the history numbers it after: +1. The ticket is the queue's own count, not
+                // mtl_present's answer: in the background (mtl_present_discard) that is 0 and the count stays where it was, so the frame reads as the one before it, as it did when the
+                // ticket was read at the game's call. One worker presents, under g_sub_mu, so the count is this present's
+                { uint64_t pq,pd; mtl_present_progress(&pq,&pd); dm_vi_frame_ticket(j->frame+1,pq); }
             }
-            nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); if(n->kind==NQ_COMMANDS) nq_spare_give(n); pthread_mutex_unlock(&g_sub_mu);
+            mtl_pf_scope(0); nq_cost_end_role(cost,1); gfx_leave(); objc_autoreleasePoolPop(pool); if(n->kind==NQ_COMMANDS) nq_spare_give(n); pthread_mutex_unlock(&g_sub_mu);
         }
         pthread_mutex_lock(&nq_mu); if(n->kind==NQ_PRESENT) { q->present=present; q->copy=copy; j->receipt->present=present; j->receipt->copy=copy; }
         if(fence) { q->physical=fence; if(n->nsignals) { uint64_t t0=now_ns(); for(unsigned i=0;i<n->nsignals;i++) nq_event_issued(n->signals[i].word,fence,n->signals[i].mode,n->signals[i].value); atomic_fetch_add_explicit(&nq_stat_event_ns,now_ns()-t0,memory_order_relaxed); } }
@@ -364,10 +437,25 @@ static void *nq_worker(void *unused) {
     }
     return NULL;
 }
-static void nq_start(void) { pthread_t t; if(pthread_create(&t,NULL,nq_worker,NULL)) die("NVN queue worker failed"); pthread_detach(t); }
+static void nq_start(void) { nq_yield_init(); pthread_t t; if(pthread_create(&t,NULL,nq_worker,NULL)) die("NVN queue worker failed"); pthread_detach(t); }
 static nq_node *nq_append(nq_job *j,unsigned kind) { nq_node *n=nq_node_new(); n->kind=kind; if(j->last) j->last->next=n; else j->first=n; j->last=n; return n; }
-// A node's command copy grows by doubling (from 4 KB): growing 4 KB at a time took a reallocation for every 4 KB, each possibly a copy of all before it, under g_sub_mu
-static void nq_bytes(nq_node *n,const void *bytes,size_t length) { if(n->length+length>n->capacity) { size_t want=(n->length+length+4095)&~(size_t)4095, grown=n->capacity*2; n->capacity=grown>want?grown:want; n->bytes=realloc(n->bytes,n->capacity); if(!n->bytes) die("queue commands allocation failed"); } memcpy(n->bytes+n->length,bytes,length); n->length+=length; } // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts, so the old buffer cannot leak into a continuing process
+// A node's command copy grows by doubling (from 4 KB): growing 4 KB at a time took a reallocation for every 4 KB, each possibly a copy of all before it, under g_sub_mu.
+// The size addition is checked before allocating (upstream 2a67900bf)
+static void nq_bytes(nq_node *n, const void *bytes, size_t length) {
+    if (length > SIZE_MAX - n->length) die("queue commands allocation overflow");
+    size_t want = n->length + length;
+    if (want > n->capacity) {
+        size_t cap = n->capacity <= SIZE_MAX / 2 ? 2 * n->capacity : want;
+        cap = cap < want ? want : cap;
+        if (cap < 4096) cap = 4096;
+        void *grown = realloc(n->bytes, cap);
+        if (!grown) die("queue commands allocation failed");
+        n->bytes = grown;
+        n->capacity = cap;
+    }
+    memcpy(n->bytes + n->length, bytes, length);
+    n->length = want;
+}
 // Where a GPU event signal leaves the commands around it (profile key signal_events; DM_NVN_SIGNAL_EVENTS=node / split overrides it). node (the default, upstream's behaviour since
 // issue #2112): the signal stays inside its node, which goes on to the next wait (WAIT_EVENT, WAIT_SYNC), FENCE_SYNC or the end of the submitted commands, and the node's signals publish in
 // recorded order when the whole node completes: each still after every GPU write before it (post_run in nvn_mtl.m publishes the events last), only later. split (a fallback): the signal
@@ -457,23 +545,27 @@ static void nq_record(nq_job *j,const uint8_t *p,op_hdr h) {
     uint8_t x[REC_EXPAND_MAX] __attribute__((aligned(8))); size_t n=rec_expand(p,x);
     for(size_t o=0;o<n;) { op_hdr c; memcpy(&c,x+o,8); nq_record_one(j,x+o,c); o+=c.size; }
 }
-// A handle is the recording's control list (nvn_obj.h ctl_e): its pieces of records, its links to more control memory. Calls were copied in when they were recorded
+// A handle is the recording's control list (nvn_obj.h ctl_e): its pieces of records, its links to more control memory. Calls were copied in when they were recorded.
+// A piece runs what its command memory holds at submit, as the GPU runs a command set's bytes: the records that fit in it (nvn_piece_record). A game may record over a called
+// recording before the list that calls it is submitted (docs/reference/nvn-objects.md, "A called recording recorded over before its caller is submitted")
 static void nq_flatten(nq_job *j,const uint8_t *list) {
     for(const uint8_t *e=list;;e+=8) {
         uint64_t v; memcpy(&v,e,8); unsigned k=ctl_kind(v);
         if(k==CTL_LINK) { e=ctl_addr(v)-8; continue; }
         if(k!=CTL_CHUNK) die("NVN command list %p: corrupt control entry %#llx at %p",(const void *)list,(unsigned long long)v,(const void *)e);
-        const uint8_t *p=ctl_addr(v),*pe=p+ctl_chunk_bytes(v);
-        while(p<pe) { op_hdr h; memcpy(&h,p,8);
-            if(h.size<8 || h.size&7 || h.size>(size_t)(pe-p)) die("NVN command list %p: record {op %u, size %u} at %p, %zu bytes into its piece of %zu at %p",(const void *)list,h.op,h.size,(const void *)p,(size_t)(p-ctl_addr(v)),ctl_chunk_bytes(v),(const void *)ctl_addr(v));
-            nq_record(j,p,h); p+=h.size; }
+        const uint8_t *p=ctl_addr(v),*pe=p+ctl_chunk_bytes(v); op_hdr h;
+        while(nvn_piece_record(list,v,p,pe,&h)) { nq_record(j,p,h); p+=h.size; }
         if(v&CTL_LAST) return;
     }
 }
-static void nq_enqueue(nq_queue *q,nq_job *j) { if(q->last) q->last->next=j; else q->first=j; q->last=j; nq_put(q->tail); q->tail=j->receipt; q->tail->refs++; pthread_cond_broadcast(&nq_cv); }
+// Submissions enqueued so far, in enqueue order (nq_mu): a job's seq. nvnMemoryPoolFinalize notes the count (nvn_queue_seq); the replay tells nvn_mtl.m the oldest job not done at each
+// submission it begins (mtl_pool_reap), so a finalized pool stays findable until the first submission after its Finalize has been replayed
+static _Atomic uint64_t nq_seq;
+uint64_t nvn_queue_seq(void) { return atomic_load_explicit(&nq_seq,memory_order_acquire); }
+static void nq_enqueue(nq_queue *q,nq_job *j) { j->seq=atomic_fetch_add_explicit(&nq_seq,1,memory_order_acq_rel)+1; if(q->last) q->last->next=j; else q->first=j; q->last=j; nq_put(q->tail); q->tail=j->receipt; q->tail->refs++; pthread_cond_broadcast(&nq_cv); }
 void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
     pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue job allocation failed"); j->receipt=nq_new();
-    j->objects.klen=16; j->frame=dm_nvn_frame_count();
+    j->objects.klen=16; j->frame=dm_nvn_frame_count(); j->submitted=guest_ns();
     // No scheduler lock while copying descriptors or resolving shader libraries.
     nq_sub_lock(0); void *pool=objc_autoreleasePoolPush(); dm_host_work++; mtl_prepare(); dm_host_work--; nq_cost cost=nq_cost_begin();
     for(int i=0;i<count;i++) nq_flatten(j,(const uint8_t *)(uintptr_t)handles[i]); nq_end(j);
@@ -486,6 +578,7 @@ void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
         if(node->kind==NQ_FENCE) nq_set_sync((sync_t *)node->sync_source,node->receipt); else nq_snapshot_sync(node,node->sync_source);
         node->sync_source=NULL;
     }
+    j->written=nvn_dirty_now();   // the game's writes up to its submit: those its commands may read (nvn_mtl.m reup_defer)
     nq_enqueue(nq_get(q),j); pthread_mutex_unlock(&nq_mu);
 }
 // The window retains this logical receipt until it reacquires or finalizes that image.
@@ -504,7 +597,9 @@ void nvn_queue_present_release(uint64_t ticket) {
 }
 void nvn_queue_present_wait(uint64_t ticket) {
     if(!ticket) return; nq_receipt *r=(nq_receipt *)(uintptr_t)ticket;
-    pthread_mutex_lock(&nq_mu); while(!r->published) pthread_cond_wait(&nq_cv,&nq_mu); uint64_t physical=r->present, copy=r->copy; pthread_mutex_unlock(&nq_mu);
+    pthread_mutex_lock(&nq_mu);
+    if(!r->published) { pthread_mutex_unlock(&nq_mu); nvn_acquire_block(); pthread_mutex_lock(&nq_mu); }   // it blocks: inside an acquire, the acquiring guest thread gives its core away (hle_nvn.c; not under this lock)
+    while(!r->published) pthread_cond_wait(&nq_cv,&nq_mu); uint64_t physical=r->present, copy=r->copy; pthread_mutex_unlock(&nq_mu);
     if(physical) mtl_present_wait_texture(physical,copy);   // the texture's next acquire: a snapshot's copy, else the present itself
 }
 void nvn_queue_fence(queue_t *q,sync_t *s) {
@@ -513,9 +608,10 @@ void nvn_queue_fence(queue_t *q,sync_t *s) {
     pthread_mutex_unlock(&nq_mu);
 }
 int nvn_sync_wait(const sync_t *s,uint64_t timeout) {
-    uint64_t start=now_ns(),fence=0; pthread_mutex_lock(&nq_mu);
+    uint64_t start=now_ns(),fence=0; int blk=0; pthread_mutex_lock(&nq_mu);
     while(!nq_sync_encoded(s,&fence)) {
         uint64_t elapsed=now_ns()-start; if(timeout!=UINT64_MAX && elapsed>=timeout) { pthread_mutex_unlock(&nq_mu); return 0; }
+        if(!blk) { blk=1; pthread_mutex_unlock(&nq_mu); nvn_acquire_block(); pthread_mutex_lock(&nq_mu); continue; }   // it blocks until the replay has encoded the work: inside the game's nvnQueueFinish or nvnSyncWait the guest thread gives its core away (hle_nvn.c; not under this lock)
         if(timeout==UINT64_MAX) pthread_cond_wait(&nq_cv,&nq_mu);
         else { uint64_t left=timeout-elapsed; struct timespec ts={(time_t)(left/1000000000ull),(long)(left%1000000000ull)}; pthread_cond_timedwait_relative_np(&nq_cv,&nq_mu,&ts); }
     }

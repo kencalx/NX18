@@ -1,0 +1,2 @@
+# t_pool_unwire_tsan: a race older than the unwire (nvn_mtl.m mtl_sub_begin rewrites g_sub_thread, which on_sub_thread reads on the residency worker); everything else is reported
+race:g_sub_thread

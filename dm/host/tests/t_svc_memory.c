@@ -21,12 +21,15 @@ static int memory_getpagesize(void) {
 #endif
 }
 static void *memory_calloc(size_t n, size_t size);
+static int memory_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*entry)(void *), void *arg);
 #define getpagesize memory_getpagesize
+#define pthread_create memory_pthread_create
 #define mprotect memory_mprotect
 #define mmap memory_mmap
 #define abort memory_abort
 #define calloc memory_calloc
 #include "../hle_svc.c"
+#undef pthread_create
 #undef calloc
 #undef abort
 #undef mprotect
@@ -499,13 +502,26 @@ static void release_fallback(void) {
     fail_mmap = 0;
 }
 // A heap given back reads 0 when it grows again: a fresh mapping in anonymous memory, and SetHeapSize's zeroing with the guest in files (DM_GUEST_FILE), where the pages keep their bytes
-// The rule that puts the guest in files: the switch when it is set, otherwise a pool over a known room to the memory limit
+// The rule that puts the guest in files: the switch when it is set, otherwise a pool and the host's margin over a known room to the memory limit
 static void file_rule(void) {
-    const uint64_t G = 1ull << 30, pool9 = 9 * G, pool3 = 0xCD500000;
-    assert(guest_file_wanted(NULL, pool9, 8 * G) && guest_file_wanted("", pool9, 6 * G));   // Mario Kart World's pool on an 8 and a 6 GiB limit
-    assert(!guest_file_wanted(NULL, pool9, 12 * G) && !guest_file_wanted(NULL, pool3, 6 * G));   // it fits an iPad's 12 GiB; a Switch game's pool fits 6
-    assert(!guest_file_wanted(NULL, pool9, 0));   // no limit known: the Mac
-    assert(!guest_file_wanted("0", pool9, 8 * G) && guest_file_wanted("1", pool3, 12 * G) && guest_file_wanted("1", pool3, 0));
+    unsetenv("DM_GUEST_FILE_HOST");
+    const uint64_t G = 1ull << 30, M = 1ull << 20, pool9 = 9 * G, pool3 = 0xCD500000, h9 = guest_host_margin(pool9), h3 = guest_host_margin(pool3);
+    assert(h9 == pool9 / 2 && h3 == pool3 / 2);   // half the pool
+    assert(guest_file_wanted(NULL, pool9, h9, 8 * G) && guest_file_wanted("", pool9, h9, 6 * G));   // Mario Kart World's pool on an 8 and a 6 GiB limit
+    assert(guest_file_wanted(NULL, pool9, h9, 11 * G + 993 * M));   // and on the iPad of nxnative issue #1184, where the pool alone fitted and the host's memory did not
+    assert(!guest_file_wanted(NULL, pool9, 0, 11 * G + 993 * M));   // the rule before the margin
+    assert(!guest_file_wanted(NULL, pool3, h3, 7 * G + 993 * M) && !guest_file_wanted(NULL, pool3, h3, 5 * G + 819 * M));   // a Switch game's pool stays anonymous with 8 and 6 GiB limits
+    assert(!guest_file_wanted(NULL, pool9, h9, 0));   // no limit known: the Mac
+    assert(!guest_file_wanted("0", pool9, h9, 8 * G) && guest_file_wanted("1", pool3, h3, 12 * G) && guest_file_wanted("1", pool3, h3, 0));
+    // The dirty count's interval: every 10 s while the disk, less the whole block, is within a gigabyte of the minimum (or its free space is unknown), else every 60 s
+    const double GB = (double)G, blk = 12.5 * GB;
+    assert(guest_file_count_every(360 * GB, blk, 2 * G) == GF_COUNT_FAR);   // the round's logs: 360 GB free
+    assert(guest_file_count_every(blk + 3 * GB + 1, blk, 2 * G) == GF_COUNT_FAR && guest_file_count_every(blk + 3 * GB - 1, blk, 2 * G) == GF_COUNT_NEAR);   // the edge: min + 1 GB beyond the block
+    assert(guest_file_count_every(5 * GB, blk, 2 * G) == GF_COUNT_NEAR && guest_file_count_every(-1, blk, 2 * G) == GF_COUNT_NEAR);   // near, and fstatfs failed
+    assert(guest_file_count_every(5 * GB, blk, 0) == GF_COUNT_FAR);   // DM_GUEST_FILE_MIN_FREE=0: nothing to stop
+    setenv("DM_GUEST_FILE_HOST", "1G", 1); assert(guest_host_margin(pool9) == G);
+    setenv("DM_GUEST_FILE_HOST", "0", 1); assert(!guest_host_margin(pool9));
+    unsetenv("DM_GUEST_FILE_HOST");
 }
 // With the guest in files, what the game gives back in the alias region is punched out by the sweep once it has stayed given back over a whole sweep interval: a page mapped again in between keeps
 // its blocks, the rest give theirs back and read 0 when mapped again
@@ -529,6 +545,49 @@ static void file_sweep(void) {
     for (size_t i = 0; i < 7 * pg; ++i) assert(((uint8_t *)a)[pg + i] == 0);
     assert(!pages(0, a, 8 * pg));
     guest_file_sweep(); guest_file_sweep();
+}
+// The files' pages under a range asked for ahead (dm_guest_file_advise: a buffer about to join the residency set) come into memory clean; a range across two files is asked of
+// both, one partly outside the block only for its part inside, one outside it not at all, and nothing while the guest is anonymous
+static size_t in_core(uintptr_t a, size_t n, int bit) { size_t pg = (size_t)getpagesize(), c = 0; char v[256]; assert(n / pg <= sizeof v && !mincore((void *)a, n, v)); for (size_t i = 0; i < n / pg; i++) c += (v[i] & bit) != 0; return c; }
+static void file_advise(void) {
+    size_t pg = memory_getpagesize(), hpg = (size_t)getpagesize(), n = 16 * pg; uintptr_t a = alias + 128 * pg;   // clear of file_sweep's pages
+    if (!g_gf_n) { assert(!dm_guest_file_advise((void *)a, n)); return; }
+    assert(!pages(1, a, n));
+    memset((void *)a, 0x5a, n); assert(!msync((void *)a, n, MS_SYNC)); assert(!msync((void *)a, n, MS_INVALIDATE));
+    assert(!in_core(a, n, MINCORE_INCORE));   // written out and dropped: the next touch would be a page-in
+    assert(dm_guest_file_advise((void *)a, n) == n);
+    for (int i = 0; i < 300 && (in_core(a, n, MINCORE_INCORE) < n / hpg || in_core(a, n, MINCORE_MODIFIED)); i++) usleep(10000);   // a page still being read reads modified
+    assert(in_core(a, n, MINCORE_INCORE) == n / hpg && !in_core(a, n, MINCORE_MODIFIED));   // all read in, none dirtied
+    assert(((uint8_t *)a)[0] == 0x5a && ((uint8_t *)a)[n - 1] == 0x5a);
+    if (g_gf_n > 1) { uintptr_t edge = (uintptr_t)g_as + g_gf_chunk; assert(dm_guest_file_advise((void *)(edge - 2 * hpg), 4 * hpg) == 4 * hpg); }
+    uintptr_t end = (uintptr_t)g_as + g_reserve;
+    assert(dm_guest_file_advise((void *)(end - hpg), 4 * hpg) == hpg);
+    assert(!dm_guest_file_advise((void *)((uintptr_t)g_as - 4 * hpg), 2 * hpg) && !dm_guest_file_advise((void *)end, hpg));
+    assert(!pages(0, a, n));
+}
+// Whether a range is in the guest's files, from the layout (dm_guest_file_backed: the residency's pre-wire asks it for every shared buffer instead of the kernel): 1 inside the
+// block with the files, 0 with the guest anonymous, and the kernel agrees (an external pager under the mapping, the short look nvn_mtl.m's fwire_kernel makes) on pages the game
+// has mapped, given back (protected and punched) and never touched; -1 for a range not wholly inside the block, which the caller asks the kernel about
+#include <mach/mach_vm.h>
+static int kernel_says_file(uintptr_t a) {
+    mach_vm_address_t ra = a; mach_vm_size_t sz = 0; natural_t depth = 0; vm_region_submap_short_info_data_64_t info; mach_msg_type_number_t c = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
+    assert(!mach_vm_region_recurse(mach_task_self(), &ra, &sz, &depth, (vm_region_recurse_info_t)&info, &c) && ra <= a);
+    return info.external_pager != 0;
+}
+static void file_backed(void) {
+    size_t pg = memory_getpagesize(), hpg = (size_t)getpagesize(), n = 16 * pg; uintptr_t a = alias + 160 * pg, b0 = (uintptr_t)g_as, end = b0 + g_reserve;   // clear of file_advise's pages
+    int want = g_gf_n != 0;
+    assert(dm_guest_file_backed((void *)b0, g_reserve) == want && dm_guest_file_backed((void *)a, n) == want && dm_guest_file_backed((void *)heap, hpg) == want);
+    assert(dm_guest_file_backed((void *)stack, hpg) == want && dm_guest_file_backed((void *)(end - hpg), hpg) == want);
+    assert(kernel_says_file(a) == want);   // never touched
+    assert(!pages(1, a, n)); memset((void *)a, 0x5a, n);
+    assert(kernel_says_file(a) == want && kernel_says_file(a + n - hpg) == want);   // mapped and written
+    assert(!pages(0, a, n));
+    assert(kernel_says_file(a) == want);   // given back
+    assert(dm_guest_file_backed((void *)(end - hpg), 2 * hpg) == -1 && dm_guest_file_backed((void *)end, hpg) == -1);
+    assert(dm_guest_file_backed((void *)(b0 - hpg), 2 * hpg) == -1 && dm_guest_file_backed((void *)(b0 - 4 * hpg), hpg) == -1);
+    assert(dm_guest_file_backed((void *)b0, g_reserve + 1) == -1);
+    int on_heap = 0; assert(dm_guest_file_backed(&on_heap, sizeof on_heap) == -1);
 }
 static void heap_regrow(void) {
     assert(!resize(4 * 1024 * 1024));
@@ -582,7 +641,19 @@ static void guest_helper(void) {
 }
 static void *init_worker(void *arg) { *(uint64_t *)arg = info(I_AliasAddr); return NULL; }
 // The block: 256 MB in front, the heap region, the stack region, the alias region up to its end. The heap and stack sizes are the profile's, whatever the alias region's size
+// The guest-file watcher starts only once the layout and the alias bitmaps are set (upstream NXNative 71a9a829d): checked at its creation, so the result does not depend on when it first runs
+static int file_worker_starts;
+static int memory_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*entry)(void *), void *arg) {
+    if (entry == guest_file_thread) {
+        assert(g_gf_n > 0);
+        assert(g_heap && g_stack && g_alias && g_alias_cap);
+        assert(g_alias_bits && g_alias_exposed && g_alias_rel && g_alias_aged);
+        ++file_worker_starts;
+    }
+    return pthread_create(thread, attr, entry, arg);
+}
 static void layout_order(void) {
+    assert(file_worker_starts == (g_gf_n > 0));
     assert(info(I_HeapAddr) == (uint64_t)(uintptr_t)g_as + 0x10000000);
     assert(info(I_HeapSize) == DM_GAME_MEM_RESERVE - DM_GAME_MEM_ALIAS - DM_GAME_MEM_STACK - 0x10000000);
     assert(info(I_StackAddr) == info(I_HeapAddr) + info(I_HeapSize) && info(I_StackSize) == DM_GAME_MEM_STACK);
@@ -605,6 +676,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     pthread_t threads[8]; uint64_t addresses[8];
+    { int x = 0; assert(dm_guest_file_backed(&x, sizeof x) == -1); }   // before the guest's memory is made: not known
     atomic_store(&sweep_in_init, 1);
     for (unsigned i = 0; i < 8; ++i) assert(!pthread_create(&threads[i], NULL, init_worker, &addresses[i]));
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
@@ -614,7 +686,7 @@ int main(int argc, char **argv) {
     if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
 #endif
     layout_order();
-    lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); file_sweep(); heap_regrow(); concurrency(); fragmented_queries();
+    lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); file_sweep(); file_advise(); file_backed(); heap_regrow(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import struct
 import sys
 import tempfile
 from typing import Any
@@ -129,9 +130,20 @@ class Registry(unittest.TestCase):
                     if rule.get('others'):   # none found: the stub leaves those parts out
                         rest = []
                         ctx = docs_patches.types.SimpleNamespace(here=lambda: 0x8000000, emit=lambda w: None, site=lambda off, orig: None, put=lambda off, words, why, rest=rest: rest.append(off),
-                                                                 state=0x9000000, render_scale=0, base=0x100000, others={label: None for label in rule['others']}, capabilities=set())
+                                                                 state=0x9000000, render_scale=0, step_max=0, base=0x100000, others={label: None for label in rule['others']}, capabilities=set())
                         rule['stub'](ctx)
                         self.assertTrue(all(0x100000 <= off < 0x100000 + rule['size'] for off in rest), f'{p}: {rule["name"]} writes outside its function without its others')
+
+    def test_mario_kart_world_declares_its_largest_step(self):
+        # its stub caps the step it gives the game at 2 (mov w8,#2; csel ls), the game's own intervals, and says so (ctx.step_max), or the host holds frames 3 vsyncs while the game
+        # steps 2 (slow motion) and loses the debt it pays back with a step of 3 (upstream NXNative 1e3fd031)
+        m = MODS[REPO / 'dm/games/0400C3F00006E000/patches.py']
+        words = []
+        ctx = docs_patches.types.SimpleNamespace(here=lambda: 0x8000000, emit=words.append, site=lambda off, orig: None, put=lambda off, words, why: None, state=0x9000000,
+                                                 render_scale=0, step_max=0, base=0x100000, others={}, found=None, capabilities=set(), address=lambda off: 0)
+        m.MATCH_FRAME_STEP['main'][0]['stub'](ctx)
+        self.assertIn(0x52800048, words)   # mov w8,#2: the cap
+        self.assertEqual(ctx.step_max, 2)
 
     def test_sdk_wide_rules_change_what_their_names_say(self):
         # the rules were taken from registered SDK cuts, and the builds they reproduce exactly have no row any more: each cut replaces the constant its rule names (0x3fe00000, the node
@@ -159,6 +171,157 @@ class Registry(unittest.TestCase):
         m = MODS[REPO / 'dm/tools/sdk_patches.py']
         self.assertFalse(getattr(m, 'OBS', {}) or getattr(m, 'FRAME_STEP', {}) or getattr(m, 'STUBS', {}))
         for bid in m.CUTS: self.assertIn(bid, sdk, f'sdk_patches.py: {bid} is no sdk build of any profile')
+
+
+# The render-scale stubs that read the host's live factor at state +0x14 (heat ladder step 4, hle_nvn.c scale_set): run on a small evaluator of the instructions they use, with
+# the player's Render scale at +0x10, the factor at +0x14 and the game's own scale in its register, so what each combination draws at is checked, not only the words
+AREA, STATE = 0x8000000, 0x9000000
+def f32(x): return struct.unpack('<f', struct.pack('<f', x))[0]
+
+
+def a64(code, pc, x, s, mem, stop):
+    """Run the stub's words (code at AREA) from pc until a branch leaves the patch area: returns that target; x / s (registers) and the flags change in place. mem(addr, size)
+    reads memory. Only the instructions the render-scale stubs use: adrp, ldr (unsigned offset: w, x, s), fcmp, b.cond, b, cbz / cbnz, fmov (immediate, register, from w),
+    fmul, fminnm, mov (movz) and eor w8,w8,#0x3f800000"""
+    n = z = c = v = 0
+    for _ in range(200):
+        if not AREA <= pc < AREA + len(code): return pc
+        w = struct.unpack_from('<I', code, pc - AREA)[0]; nxt = pc + 4
+        rd, rn, rm = w & 31, (w >> 5) & 31, (w >> 16) & 31
+        sx = lambda val, bits: val - (1 << bits) if val & 1 << (bits - 1) else val
+        if w & 0x9f000000 == 0x90000000:   # adrp
+            x[rd] = (pc & ~0xfff) + (sx(((w >> 5) & 0x7ffff) << 2 | (w >> 29) & 3, 21) << 12)
+        elif w & 0x3b400000 == 0x39400000:   # ldr (unsigned offset)
+            size, fp = w >> 30, (w >> 26) & 1; a = x[rn] + (((w >> 10) & 0xfff) << size)
+            if fp: assert size == 2; s[rd] = struct.unpack('<f', mem(a, 4))[0]
+            else: x[rd] = int.from_bytes(mem(a, 1 << size), 'little')
+        elif w & 0xffe0fc17 == 0x1e202000:   # fcmp s, s / #0.0
+            a, b = s[rn], 0.0 if w & 8 else s[rm]
+            n, z, c, v = (1, 0, 0, 0) if a < b else (0, 1, 1, 0) if a == b else (0, 0, 1, 0) if a > b else (0, 0, 1, 1)
+        elif w & 0xff000010 == 0x54000000:   # b.cond
+            cond = w & 15; take = {0: z, 1: not z, 0xa: n == v, 0xb: n != v, 0xc: not z and n == v, 0xd: z or n != v}[cond]
+            if take: nxt = pc + 4 * sx((w >> 5) & 0x7ffff, 19)
+        elif w & 0xfc000000 == 0x14000000: nxt = pc + 4 * sx(w & 0x3ffffff, 26)   # b
+        elif w & 0xfe000000 == 0x34000000:   # cbz / cbnz (32-bit)
+            if ((x[rd] & 0xffffffff) == 0) != bool(w & 0x01000000): nxt = pc + 4 * sx((w >> 5) & 0x7ffff, 19)
+        elif w & 0xff201fe0 == 0x1e201000:   # fmov s, #imm
+            i8 = (w >> 13) & 0xff; b6 = (i8 >> 6) & 1
+            s[rd] = struct.unpack('<f', struct.pack('<I', (i8 >> 7) << 31 | ((1 - b6) << 7 | (0x1f if b6 else 0) << 2 | (i8 >> 4) & 3) << 23 | (i8 & 15) << 19))[0]
+        elif w & 0xfffffc00 == 0x1e204000: s[rd] = s[rn]   # fmov s, s
+        elif w & 0xffe0fc00 == 0x1e200800: s[rd] = f32(s[rn] * s[rm])   # fmul
+        elif w & 0xffe0fc00 == 0x1e207800: s[rd] = min(s[rn], s[rm])   # fminnm (no NaN here)
+        elif w == 0x52091908: x[8] = (x[8] ^ 0x3f800000) & 0xffffffff   # eor w8,w8,#0x3f800000
+        elif w & 0xff800000 == 0x52800000: x[rd] = ((w >> 5) & 0xffff) << (16 * ((w >> 21) & 3))   # mov (movz) w, #imm
+        elif w & 0xfffffc00 == 0x1e270000: s[rd] = struct.unpack('<f', struct.pack('<I', x[rn] & 0xffffffff))[0]   # fmov s, w
+        else: raise AssertionError(f'{pc:#x}: {w:08x} is not an instruction this evaluator knows')
+        pc = nxt
+    raise AssertionError('no exit in 200 instructions')
+
+
+def stub_run(path, call):
+    """Assemble a game's frame step stubs at AREA against a recording ctx: (code, {site: (words, why)}, ctx)"""
+    m = load(path, 'live'); words, puts = [], {}
+    ctx = docs_patches.types.SimpleNamespace(here=lambda: AREA + 4 * len(words), emit=words.append, site=lambda off, orig: None, put=lambda off, ws, why: puts.__setitem__(off, (ws, why)),
+                                             state=STATE, render_scale=0, live_scale=0, step_max=0, base=0x100000, others={}, found=None, capabilities=set(), address=lambda off: 0)
+    call(m, ctx)
+    return b''.join(struct.pack('<I', w) for w in words), puts, ctx
+
+
+def branch_target(puts, site):
+    (w,), why = puts[site]
+    assert w & 0xfc000000 == 0x14000000, f'{site:#x}: not a branch'
+    d = w & 0x3ffffff; d -= (d & 0x2000000) << 1
+    return site + 4 * d, why
+
+
+def state_mem(p, h, extra=None):
+    page = bytearray(0x40); struct.pack_into('<ff', page, 0x10, p, h)
+    def mem(a, size):
+        if STATE <= a < STATE + 0x40: return bytes(page[a - STATE:a - STATE + size])
+        if extra and a in extra: return extra[a]
+        return bytes(size)
+    return mem
+
+
+class LiveScaleStubs(unittest.TestCase):
+    # (player's Render scale at +0x10 (0: unset), the host's factor at +0x14 (0: none yet), the game's own scale) -> what the 3D views are drawn at
+    CASES = [(0, 0, 0.9, 0.9), (1.0, 0, 0.9, 0.9), (0.75, 0, 0.9, 0.75),   # no factor: as before LIVE_SCALE (the game's own, or the player's fixed scale)
+             (1.0, 0.85, 0.9, 0.85), (1.0, 0.85, 0.8, 0.8), (0, 0.7, 1.0, 0.7), (1.0, 0.5, 0.5, 0.5),   # at the game's own scale: the lower of it and the factor
+             (0.75, 0.85, 0.9, 0.6375), (0.5, 1.0, 0.9, 0.5), (0.75, 0.6667, 1.0, 0.500025),   # under a fixed scale: player x factor (the host floors the product at 0.5)
+             (1.0, 1.0, 0.8, 0.8), (0.75, 1.0, 0.9, 0.75)]   # the factor back at 1.0: the game's own scale or the player's, at once
+
+    def test_breath_of_the_wild(self):
+        code, puts, ctx = stub_run(REPO / 'dm/games/01007EF00011E000/patches.py', lambda m, c: m.frame_step(c))
+        self.assertEqual((ctx.render_scale, ctx.live_scale), (1, 1), 'a render-scale stub that reads +0x14: the fixups table says LIVE_SCALE')
+        apply, why = branch_target(puts, 0x1266880); self.assertIn('+0x14', why)
+        for p, h, game_scale, want in self.CASES:
+            x, sv = [0] * 32, [0.0] * 32; x[20] = 0x7000000; sv[8] = f32(game_scale)
+            out = a64(code, apply, x, sv, state_mem(p, h, {0x7000158: struct.pack('<Q', 0xabcdef)}), None)
+            self.assertEqual(out, 0x1266884, 'back after the replaced load')
+            self.assertEqual(x[8], 0xabcdef, 'the replaced ldr x8,[x20,#0x158] still runs')
+            self.assertAlmostEqual(sv[8], f32(want), 6, f'player {p}, factor {h}, the game at {game_scale}: s8 {sv[8]}, want {want}')
+        skip, _ = branch_target(puts, 0x126686c)
+        for p, h, taken in ((0, 0, False), (1.0, 0, False), (0.75, 0, True), (1.0, 0.85, True), (0, 1.0, True), (1.0, 1.0, True)):
+            out = a64(code, skip, [0] * 32, [0.0] * 32, state_mem(p, h), None)
+            self.assertEqual(out, 0x1266880 if taken else 0x1266950, f'player {p}, factor {h}, at the skip site (reached only with the dynamic mode off): {"the apply block" if taken else "the original skip"}')
+
+    def test_tears_of_the_kingdom(self):
+        view = 0x600000
+        code, puts, ctx = stub_run(REPO / 'dm/games/0100F2C0115B6000/patches.py', lambda m, c: m.stub(c, 0x100000, 0x200000, 0x300000, 0x400000, 0x500000, view))
+        self.assertEqual((ctx.render_scale, ctx.live_scale), (1, 1), 'a render-scale stub that reads +0x14: the fixups table says LIVE_SCALE')
+        size, _ = branch_target(puts, view + 0x9c); dyn, why = branch_target(puts, view + 0x15c); self.assertIn('+0x14', why)
+        for p, h, game_scale, want in self.CASES:
+            # the size: the extents x the player's scale (main+0xd5cc0, unchanged), then x the multiplier this stub leaves in s6
+            x, sv = [0] * 32, [0.0] * 32; sv[2], sv[5], sv[3], sv[4] = 1600.0, 1.0, 896.0, 1.0
+            self.assertEqual(a64(code, size, x, sv, state_mem(p, h), None), view + 0xac)
+            extent = sv[0]
+            x, sv = [0] * 32, [0.0] * 32; x[8] = 0x7000000
+            self.assertEqual(a64(code, dyn, x, sv, state_mem(p, h, {0x7000028: struct.pack('<f', game_scale)}), None), view + 0x160)
+            self.assertAlmostEqual(extent * sv[6] / 1600.0, f32(want), 5, f'player {p}, factor {h}, the game at {game_scale}: {extent} x {sv[6]}, want {want} of 1600')
+
+
+class CatherineSixty(unittest.TestCase):
+    # Catherine: Full Body (upstream NXNative 8d44bd6ac, NX 18's form): GFD's startup rate and the game's 60 Hz flag follow the target the loader writes at state +0 (0, 30.0 or
+    # 60.0): at 60 the rate is 60, the flag 1 and a fixed step of 1 vsync is published at +0x24; at 0 or 30 the original instructions run (Battery Saver keeps the stock 30)
+    BASE, GETTER, FLAG = 0x100000, 0x200000, 0x300360
+
+    def assemble(self, others):
+        m = load(REPO / 'dm/games/0100BF00112C0000/patches.py', 'catherine'); words, puts, sites = [], {}, []
+        ctx = docs_patches.types.SimpleNamespace(here=lambda: AREA + 4 * len(words), emit=words.append, site=lambda off, orig: sites.append((off, orig)),
+                                                 put=lambda off, ws, why: puts.__setitem__(off, (ws, why)), state=STATE, base=self.BASE, others=others,
+                                                 address=lambda off: self.FLAG if off == self.GETTER else 0)
+        m.MATCH_FRAME_STEP['main'][0]['stub'](ctx)
+        return b''.join(struct.pack('<I', w) for w in words), puts, sites
+
+    def test_both_or_neither(self):
+        code, puts, _ = self.assemble({'timing getter': None})
+        self.assertEqual((code, puts), (b'', {}), 'without the getter nothing is written (the rewriter then leaves no state page)')
+        _, puts, sites = self.assemble({'timing getter': self.GETTER})
+        self.assertEqual(sorted(puts), [self.BASE + 0x84, self.GETTER + 4])
+        self.assertEqual(sites, [(self.BASE + 0x84, 'e80f1f32'), (self.GETTER + 4, '00814d39')], 'the original mov w8,#30 and ldrb w0,[x8,#0x360]')
+
+    def test_target_selects_the_mode(self):
+        try:
+            from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
+            from unicorn.arm64_const import UC_ARM64_REG_PC, UC_ARM64_REG_X0, UC_ARM64_REG_X8, UC_ARM64_REG_NZCV
+        except ImportError: self.skipTest('unicorn not installed')
+        code, puts, _ = self.assemble({'timing getter': self.GETTER})
+        rate, _ = branch_target(puts, self.BASE + 0x84); timing, _ = branch_target(puts, self.GETTER + 4)
+        for target, mode in ((0.0, 0), (30.0, 0), (60.0, 1)):
+            for game_flag in (0, 1):
+                uc = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+                for page in (AREA, STATE, self.BASE, self.GETTER, self.FLAG & ~0xfff): uc.mem_map(page, 0x1000)
+                uc.mem_write(AREA, code); uc.mem_write(STATE, struct.pack('<f', target)); uc.mem_write(self.FLAG, bytes([game_flag]))
+                uc.reg_write(UC_ARM64_REG_NZCV, 0x60000000); uc.reg_write(UC_ARM64_REG_X8, 0xdead)
+                uc.emu_start(rate, self.BASE + 0x88, count=20)
+                self.assertEqual(uc.reg_read(UC_ARM64_REG_PC), self.BASE + 0x88)
+                self.assertEqual(uc.reg_read(UC_ARM64_REG_X8), 60 if mode else 30, f'target {target}: the startup rate')
+                uc.reg_write(UC_ARM64_REG_X8, self.FLAG & ~0xfff)   # the getter's own adrp x8 ran before the site
+                uc.emu_start(timing, self.GETTER + 8, count=20)
+                self.assertEqual(uc.reg_read(UC_ARM64_REG_PC), self.GETTER + 8, 'back at the getter\'s ret')
+                self.assertEqual(uc.reg_read(UC_ARM64_REG_X0), 1 if mode else game_flag, f'target {target}, the game\'s flag {game_flag}')
+                self.assertEqual(struct.unpack('<I', uc.mem_read(STATE + 0x24, 4))[0], mode, f'target {target}: the fixed step (+0x24)')
+                self.assertEqual(uc.reg_read(UC_ARM64_REG_NZCV), 0x60000000, 'the flags are left alone')
 
 
 class ExternalRegistry(unittest.TestCase):

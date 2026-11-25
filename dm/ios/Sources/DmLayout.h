@@ -110,6 +110,24 @@ static inline CGSize dm_drawable_size(CGSize bounds, CGFloat scale, CGSize px, B
     return s < scale ? CGSizeMake(round(bounds.width * s), round(bounds.height * s)) : d;
 }
 
+// While the touch controls are drawn into the game's frame (dm/host/touch_draw.h; front_ios.m, DmGamepad.m), nothing may sit over the game's layer, so the layer must hold every
+// control: the game view takes the whole view b (with Fit's bars, and a portrait or tabletop split's controls below the picture), or with Fill the picture's rectangle, which is
+// larger, each edge put on a whole pixel at scale pixels a point outward, so the drawable's pixels are the screen's and a control lands on the pixels its layer had. The picture
+// keeps its rectangle on it (dm_touch_picture); the present clears the rest to black, as the root view's background was
+static inline CGRect dm_touch_canvas(DmLayout l, CGRect b, CGFloat scale) {
+    CGRect u = CGRectIsEmpty(l.game) ? b : CGRectUnion(b, l.game);
+    if (CGRectIsEmpty(u) || scale <= 0) return u;
+    CGFloat x0 = floor(CGRectGetMinX(u) * scale + 1e-6) / scale, y0 = floor(CGRectGetMinY(u) * scale + 1e-6) / scale;
+    CGFloat x1 = ceil(CGRectGetMaxX(u) * scale - 1e-6) / scale, y1 = ceil(CGRectGetMaxY(u) * scale - 1e-6) / scale;
+    return CGRectMake(x0, y0, x1 - x0, y1 - y0);
+}
+// The picture's rectangle (game, the layout's) on that canvas, normalized on it (x, y, w, h; y down): where the present draws the picture (touch_frame pic)
+static inline CGRect dm_touch_picture(CGRect game, CGRect canvas) {
+    CGFloat w = canvas.size.width, h = canvas.size.height;
+    if (w <= 0 || h <= 0 || CGRectIsEmpty(game)) return CGRectZero;
+    return CGRectMake((CGRectGetMinX(game) - CGRectGetMinX(canvas)) / w, (CGRectGetMinY(game) - CGRectGetMinY(canvas)) / h, game.size.width / w, game.size.height / h);
+}
+
 // A point in the view as the game's touch screen sees it: normalized on the game rectangle, which with Fill is larger than the view,
 // so a touch on the visible part lands where that part of the picture is; with Stretch it is the view, stretched as the picture is. Clamped to [0, 0.999].
 static inline CGPoint dm_game_touch_point(CGRect game, CGPoint p) {
@@ -122,5 +140,10 @@ UIView *dm_gamepad_view(CGRect frame);
 void dm_gamepad_arrange(UIView *view, DmLayout layout);
 void dm_gamepad_reset(void);
 void dm_gamepad_opmode_changed(void);   // the console mode changed (the in-game menu, a TV): the Tap layout exists only in handheld mode
+CGRect dm_gamepad_top_center(UIView *view);   // − and + with the menu button between them, in the pad's (the root's) coordinates: Vitals keeps clear of it
+BOOL dm_gamepad_controls_shown(UIView *view);   // the drawn controls show: no controller in use and not the Tap layout (the menu button aside)
+// The present draws the controls into the game's frame (on: the control layers stay hidden), on a canvas (the game view's frame, in the pad's points) of scale pixels a point, the
+// picture at picture on it (normalized, dm_touch_picture); off: their layers again
+void dm_gamepad_touch_draw(UIView *view, BOOL on, CGRect canvas, CGFloat scale, CGRect picture);
 
 NS_ASSUME_NONNULL_END

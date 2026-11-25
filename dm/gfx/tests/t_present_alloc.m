@@ -5,6 +5,7 @@
 @interface FakeLinkUpdate : NSObject
 @property id<CAMetalDrawable> drawable;
 @property CFTimeInterval targetPresentationTimestamp;
+@property CFTimeInterval targetTimestamp;   // the callback's deadline (the display link line reads it)
 @end
 @implementation FakeLinkUpdate
 @end

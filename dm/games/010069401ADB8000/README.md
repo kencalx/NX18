@@ -2,6 +2,8 @@
 
 Update 1.05 (v262144) over the base game, SDK 16.2.4. Vanillaware's engine, as in 13 Sentinels: Aegis Rim ([01003FC01670C000](../01003FC01670C000/README.md)), on NVN. Its ExeFS holds only `main` and `sdk` (no movie module); the `sdk` build is the one Brain Memory Training Academy ships ([0100F5D01DA3A000](../0100F5D01DA3A000/README.md)). Playable on the iPhone at 60 fps; on the Mac brought up through the logos, the title, a new game and the opening story scene with no red line.
 
+- **Split again 2026-11-24** under the first-copy rule for duplicate shaders (the owner's dump, update 1.05): `shader_map.tsv`, `shader_facts.tsv` and `pso_pairs.tsv` from that split; 1,366 shader_map rows changed copy ([Duplicate selection](../../../docs/reference/packing.md)).
+
 ## What it needs
 
 | Setting | Where | Why |

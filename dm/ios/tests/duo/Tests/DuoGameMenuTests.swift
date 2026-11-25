@@ -31,7 +31,7 @@ final class DuoGameMenuTests: XCTestCase {
         return nil
     }
 
-    private func row(_ title: String, in elements: [UIMenuElement]) -> UIMenu? {
+    @MainActor private func row(_ title: String, in elements: [UIMenuElement]) -> UIMenu? {
         for e in elements {
             guard let m = e as? UIMenu else { continue }
             if m.title == title { return m }

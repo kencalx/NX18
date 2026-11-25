@@ -14,3 +14,6 @@ id<MTLComputePipelineState> host_msl_cps(id<MTL4Compiler> comp, id<MTLLibrary> l
 // pipeline names no depth / stencil format: it serves any
 id<MTLRenderPipelineState> host_msl_rps(id<MTL4Compiler> comp, id<MTLLibrary> lib, NSString *vs, NSString *fs, int ncol, const MTLPixelFormat *cf, const MTLColorWriteMask *wm,
                                         NSUInteger samples, NSError **e);
+// A render pipeline of lib's vs and fs into one colour attachment of format cf, blended as premultiplied alpha over what the attachment holds (source + destination times one
+// minus the source's alpha, as Core Animation composites a layer): the touch controls the present draws over the picture (nvn_mtl.m touch_draw)
+id<MTLRenderPipelineState> host_msl_rps_over(id<MTL4Compiler> comp, id<MTLLibrary> lib, NSString *vs, NSString *fs, MTLPixelFormat cf, NSError **e);

@@ -31,6 +31,11 @@ class GlyphError(Exception):
     pass
 
 
+def point(x: float, y: float, rel: bool):
+    """A path step's point reader: relative coordinates from the step's start point (x, y), absolute ones as they are"""
+    return lambda px, py: (x + px, y + py) if rel else (px, py)
+
+
 def path_steps(d):
     """An SVG path's data as absolute steps: ('M', x, y), ('L', x, y), ('C', x1, y1, x2, y2, x, y), ('Z',). H / V become lines, S / T their reflected curves, a quadratic a cubic"""
     tokens = TOKEN.findall(d)
@@ -56,7 +61,7 @@ def path_steps(d):
         i += n
         rel = cmd.islower()
         c = cmd.upper()
-        def pt(px, py): return (x + px, y + py) if rel else (px, py)
+        pt = point(x, y, rel)
         if c == 'M':
             x, y = pt(*vals); sx, sy = x, y
             steps.append(('M', x, y)); last_c = last_q = None
@@ -208,7 +213,7 @@ def swift():
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(description=(__doc__ or 'button_glyphs').splitlines()[0])
     ap.add_argument('--check', action='store_true', help='fail when the Swift file is not what the SVGs give (changes nothing)')
     a = ap.parse_args(argv)
     try:

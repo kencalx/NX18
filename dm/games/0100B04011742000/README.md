@@ -99,3 +99,5 @@ General host changes first needed here; each applies to every game:
 - Texture layout: NVN's automatic block height now truncates for every game (`pick_tile(ah * 3 / 16)`), which matters for this game's sparse textures; not re-checked here ([Automatic block height truncates](../../../docs/reference/rendering.md#automatic-block-height-truncates)).
 - The 53 geometry shaders and the 121 fully dynamic handles (type 4) are not supported.
 - 8- and 16-bit integer formats feeding float inputs still go through the CPU conversion (red line 99).
+
+- **Depth mode (2026-11-21):** the game sets NVN's near = 0 depth mode. Without `depth_mode zero` in the profile the bundled pipeline archive (7 GB) was made for the other mode, the iPhone 18 Pro Max refused it at start and built 102,341 pipeline bases itself for 27.5 minutes before the first frame (thermal state 2). The profile now sets it; the next build's archive matches.

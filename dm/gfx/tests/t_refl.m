@@ -151,7 +151,21 @@ int main(void) { @autoreleasepool {
         check("fetch calls: a vector past c[x][63] converts (Mario Kart World's c6[989])", 0, nvn_refl_from_json(far, &r, err, sizeof err));
         check("fetch calls: slot 6, vector 989, x", 6 << 16 | 989 << 2, r.fc->fc_scale[0][0]);
         NSDictionary *bad = @{@"route": @"B", @"stage": @"ps", @"bindings": @[], @"fetch": @{@"calls": @[@{@"fc": @0, @"tex_reg": @3, @"frag_pos": @[@[@16, @6, @0], @[@0, @6, @1]]}]}};
-        check("fetch calls: a uniform slot out of range is refused", 1, nvn_refl_from_json(bad, &r, err, sizeof err) != 0);
+        check("fetch calls: a uniform slot out of range is refused", 1, nvn_refl_from_json(bad, &r, err, sizeof err) != 0);        // an NDC sample (S2Arm 4804ac50) and eight outputs (69f75818): the ndc bit beside the projective one; a ninth output is refused
+        NSMutableArray *outs = [NSMutableArray array]; for (int q = 0; q < 8; q++) [outs addObject:@{@"color": @(q), @"type": @"float4"}];
+        NSDictionary *ndc = @{@"route": @"B", @"stage": @"ps", @"bindings": @[], @"fetch": @{@"calls": @[@{@"fc": @0, @"tex_reg": @1, @"varying_locn": @3},
+            @{@"fc": @1, @"tex_reg": @2, @"varying_locn": @4, @"proj": @1, @"ndc": @1}], @"outputs": outs}};
+        check("fetch calls: NDC sample converts", 0, nvn_refl_from_json(ndc, &r, err, sizeof err));
+        check("fetch calls: NDC sample is projective", 2, r.fc_proj);
+        check("fetch calls: NDC bit", 2, r.fc_ndc);
+        check("fetch calls: eight outputs", 8, r.nfo);
+        check("fetch calls: eighth output's colour", 7, r.fo_color[7]);
+        NSDictionary *nine = @{@"route": @"B", @"stage": @"ps", @"bindings": @[], @"fetch": @{@"calls": @[], @"outputs": [outs arrayByAddingObject:@{@"color": @0, @"type": @"float4"}]}};
+        check("fetch calls: a ninth output is refused", 1, nvn_refl_from_json(nine, &r, err, sizeof err) != 0);
+        NSDictionary *vpos = @{@"route": @"B", @"stage": @"vs", @"bindings": @[], @"raster": @{@"pos_attr": @-1, @"screen": @[@1], @"screen_pos": @[@0, @5]}};
+        check("vertex: screen_pos converts", 0, nvn_refl_from_json(vpos, &r, err, sizeof err));
+        check("vertex: screen_pos bits", 0x21, r.scr_pos);
+        check("vertex: screen bits apart", 2, r.scr_locn);
     }
     {   int f0 = fail;   // Route A is retired: PC-chain reflection (no route = B) must be rejected
         NSDictionary *pc = @{@"arg_buffer_index": @0, @"bindings": @[@{@"type": @"cbuffer", @"reg": @10, @"arg_id": @0, @"access": @"constant", @"msl_type": @"constant cb1_struct*"}], @"vertex_inputs": @[]};

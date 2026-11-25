@@ -38,6 +38,7 @@
 #include "hle_movie_yuv.h"
 #include "hle_movie_avc.h"   // H.264 on VideoToolbox
 #include "hle_movie_av1.h"   // AV1 on VideoToolbox
+#include "hle_movie_vt.h"
 
 #define CV_MAGIC 0x56436d44u        // 'DmCV'
 #define CV_SYNC 0x53436d44u         // 'DmCS': a sync handle the host made (dec id, index, generation)
@@ -62,6 +63,7 @@ typedef struct {
     int codec; uint16_t w, h; mavc *avc; uint8_t *csd; size_t csd_n;   // H.264: VideoToolbox and the parameter sets Initialize gave
     uint8_t *nv12; size_t nv12_n;   // H.264: VideoToolbox's picture as NV12, reused for every packet (it only grows; nv12_to_i420 copies out of it, so nothing keeps a pointer to it)
     mav1 *av1;   // AV1: VideoToolbox, or dav1d where the chip has no AV1 decoder (hle_movie_av1.c)
+    movie_vt_control vt;
     struct { cv_pool *pool; uint32_t pidx; int reg, filled; uint32_t gen, filled_gen; uint16_t w, h; int64_t ts; uint8_t eos; } buf[CV_BUFS];
     uint32_t fifo[8], fhead, fcount;          // acquirable indices
     uint32_t pend[CV_BUFS], phead, pcount;    // released, waiting for a picture
@@ -78,6 +80,7 @@ static _Atomic int g_cv_sig;   // decoders raising the movie signal: the last on
 
 static cv_dec *g_cv[16];
 static pthread_mutex_t g_cv_mu = PTHREAD_MUTEX_INITIALIZER;   // lock order: g_cv_mu, then a decoder's mu, then g_spt_mu
+static _Atomic uint64_t g_cv_reset_ns, g_cv_poolfin_ns;   // the last stop or flush of a decoder, the last image pool finalized (now_ns; dm_movie_state)
 
 static cv_dec *cv_of(void *t) { cv_dec *d = t ? *(cv_dec **)t : NULL; return d && d->magic == CV_MAGIC ? d : NULL; }
 static cv_pool *pool_of(const void *t) { cv_pool *p = t ? *(cv_pool *const *)t : NULL; return p && p->magic == CV_MAGIC ? p : NULL; }
@@ -234,6 +237,7 @@ HLE_FORCE("_ZN2nn5codec24FinalizeDecoderImagePoolEPNS0_25VideoDecoderImagePoolTy
     pthread_mutex_unlock(&g_cv_mu);
     for (uint32_t i = 0; i < p->count; i++) if (p->img[i]) vpx_img_free(p->img[i]);
     free(p->img); p->magic = 0; free(p); *(cv_pool **)t = NULL;
+    atomic_store_explicit(&g_cv_poolfin_ns, now_ns(), memory_order_relaxed);
 }
 HLE_FORCE("_ZN2nn5codec36GetDecoderImagePoolNativeImageHandleEPKNS0_25VideoDecoderImagePoolTypeEj", "a handle the host's nvnNativeImage knows; the pool keeps its pictures as RGBA from now on",
           uint32_t, h_cv_native, const void *t, uint32_t i) {
@@ -315,14 +319,15 @@ HLE_FORCE("_ZN2nn5codec26ReadDecoderOutputImageNv12EPKNS0_25VideoDecoderImagePoo
 // VP8 and VP9 through libvpx, H.264 through VideoToolbox and AV1 through VideoToolbox or dav1d (hle_movie_avc.c, hle_movie_av1.c, whose NV12 pictures are copied into the pool as I420)
 static void cv_open(cv_dec *d) {   // (re)creates the codec state: a new stream starts at the next key frame
     if (d->codec == CV_AV1) {
-        if (!d->av1) d->av1 = mav1_new(); else mav1_reset(d->av1);
+        if (!d->av1) d->av1 = mav1_new(&d->vt); else mav1_reset(d->av1);
         d->vpx_ok = 1;
         return;
     }
-    if (d->codec == CV_H264) { if (!d->avc) d->avc = mavc_new(); else mavc_drop(d->avc); if (d->csd_n) mavc_param_sets(d->avc, d->csd, d->csd_n); d->vpx_ok = 1; return; }
+    if (d->codec == CV_H264) { if (!d->avc) d->avc = mavc_new(&d->vt); else mavc_drop(d->avc); if (d->csd_n) mavc_param_sets(d->avc, d->csd, d->csd_n); d->vpx_ok = 1; return; }
     if (d->vpx_ok) vpx_codec_destroy(&d->vpx);
-    vpx_codec_dec_cfg_t cfg = {.threads = 2, .w = d->w, .h = d->h};
-    d->vpx_ok = vpx_codec_dec_init(&d->vpx, d->codec == CV_VP8 ? vpx_codec_vp8_dx() : vpx_codec_vp9_dx(), &cfg, 0) == VPX_CODEC_OK;
+    // Made as hle_movie.c makes its own (md_vpx_open). With 2 threads and no row threading, Mario Tennis Fever's 2560x1440 60 fps opening decoded too slowly for its player,
+    // which stopped the sound for 60-80 ms at a time whenever the picture fell behind
+    d->vpx_ok = md_vpx_open(&d->vpx, d->codec == CV_VP9, d->w, d->h) == VPX_CODEC_OK;
     if (!d->vpx_ok) LOG("[RED] nn::codec %s decoder: libvpx init failed", k_cv_name[d->codec]);
 }
 static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t in, uint32_t out, const void *csd, uint64_t csd_n) {
@@ -343,6 +348,7 @@ static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t i
 }
 static Result cv_dec_fin(void *t) {
     cv_dec *d = cv_of(t); if (!d) return 0;
+    movie_vt_cancel(&d->vt);   // a submission waiting for the app to become active (hle_movie_vt.h) gives up and lets go of the decoder's lock
     pthread_mutex_lock(&g_cv_mu); g_cv[d->id - 1] = NULL; pthread_mutex_lock(&d->mu); pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&g_cv_mu);   // no sync handle lookup is still inside
     pace_log(d, "decoder finalized");
     if (d->codec != CV_H264 && d->codec != CV_AV1 && d->vpx_ok) vpx_codec_destroy(&d->vpx);
@@ -382,11 +388,13 @@ static Result cv_dec_unreg(void *t, uint32_t i) {   // the buffer leaves the dec
 }
 static Result cv_dec_reset(void *t) {   // Stop / Flush: pictures not yet given to a buffer and a pending end of stream are dropped, the decoder starts over at the next key frame
     cv_dec *d = cv_of(t); if (!d) return 0;
+    movie_vt_cancel(&d->vt);   // first, without the lock: a submission waiting for the app to become active holds it (hle_movie_vt.h)
     pthread_mutex_lock(&d->mu);
     for (int i = 0; i < d->nheld; i++) vpx_img_free(d->held[i]);
     d->nheld = 0; d->eos_pending = 0;
     pace_log(d, "stopped or flushed"); d->ts_n = 0;   // a new stream: its clock and picture rate start again
-    cv_open(d);
+    atomic_store_explicit(&g_cv_reset_ns, now_ns(), memory_order_relaxed);
+    cv_open(d); movie_vt_continue(&d->vt);
     if (d->event) hle_signal_system_event(d->event);
     pthread_mutex_unlock(&d->mu);
     return 0;
@@ -656,4 +664,31 @@ HLE_FORCE("_ZN2nn6syncpt3sdk21DestroySyncPointEventEPNS1_18SyncPointEventTypeE",
     spt_unarm(e);
     static void (*destroy)(void *); if (!destroy && !(destroy = guest_sym("_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE"))) die("nn::os::DestroySystemEvent missing");
     destroy(e); SPT(e)->magic = 0;
+}
+
+// What the movies were doing, for the line of the run's first innocent-victim GPU error (nvn_mtl.m victim_note; its weak default says there is no movie layer): Fire Emblem
+// Fortune's Weave's one GPU error of the 2026-11-15 round came as an AV1 movie stopped, its pictures going the GPU route (native images over the pool's memory). The movie
+// signal, each decoder (codec, size, pictures, those waiting, its clock, the GPU route), and how long before the last stop or flush and the last image pool finalized were.
+// It runs in a command buffer's feedback handler, so the tables are only tried, never waited for: a busy one says so
+uint64_t dm_movie_picture_ns(uint32_t *interval_us);   // hle_movie.c
+void dm_movie_state(char *out, size_t n) {
+    if (!n) return;
+    uint64_t now = now_ns(); uint32_t us = 0; uint64_t pic = dm_movie_picture_ns(&us);
+    int o = pic ? snprintf(out, n, "the last picture %.2f s before (interval %u us)", now > pic ? (now - pic) / 1e9 : 0.0, us) : snprintf(out, n, "no movie picture since the last stop");
+    if (pthread_mutex_trylock(&g_cv_mu)) { if (o >= 0 && (size_t)o < n) snprintf(out + o, n - (size_t)o, "; the decoder table busy"); return; }
+    int k = 0;
+    for (int i = 0; i < 16 && o >= 0 && (size_t)o < n; i++) {
+        cv_dec *d = g_cv[i]; if (!d) continue; k++;
+        if (pthread_mutex_trylock(&d->mu)) { o += snprintf(out + o, n - (size_t)o, "; %s decoder %u: busy (decoding)", k_cv_name[d->codec], d->id); continue; }
+        int native = 0; for (int b = 0; b < CV_BUFS; b++) native |= d->buf[b].pool && d->buf[b].pool->native;
+        o += snprintf(out + o, n - (size_t)o, "; %s decoder %u %ux%u: %llu pictures handed out, %llu of them in this movie, %d decoded and waiting%s, its clock %s%s", k_cv_name[d->codec], d->id, d->w, d->h,
+                      (unsigned long long)d->pictures, (unsigned long long)d->mv_out, d->nheld, d->eos_pending ? ", end of stream pending" : "", d->pace_run ? "running" : "stopped",
+                      native ? ", pictures to the GPU (native images)" : "");
+        pthread_mutex_unlock(&d->mu);
+    }
+    pthread_mutex_unlock(&g_cv_mu);
+    if (!k && o >= 0 && (size_t)o < n) o += snprintf(out + o, n - (size_t)o, "; no video decoder");
+    uint64_t r = atomic_load_explicit(&g_cv_reset_ns, memory_order_relaxed), f = atomic_load_explicit(&g_cv_poolfin_ns, memory_order_relaxed);
+    if (r && o >= 0 && (size_t)o < n) o += snprintf(out + o, n - (size_t)o, "; the last stop or flush %.2f s before", now > r ? (now - r) / 1e9 : 0.0);
+    if (f && o >= 0 && (size_t)o < n) snprintf(out + o, n - (size_t)o, "; the last image pool finalized %.2f s before", now > f ? (now - f) / 1e9 : 0.0);
 }

@@ -81,6 +81,17 @@ class GameNotes(unittest.TestCase):
             self.assertIn(g, profiles, f'the games table lists {g}, which has no profile')
 
 
+class ProfileKeys(unittest.TestCase):
+    def test_every_key_game_py_reads_has_a_row(self):   # heat_gpu_stretch was read by game.py and set by three profiles with no row in the Keys table
+        src = (REPO / 'dm/games/game.py').read_text()
+        keys = set(re.findall(r"\b(?:g|self)\.(?:get|words|values|pairs|int)\(\s*'([a-z0-9_]+)'", src))
+        readme = (REPO / 'dm/games/README.md').read_text()
+        table = readme[readme.index('## Keys'):].split('\n\n')[1]   # the table right under the heading
+        rows = {k for line in table.split('\n') if line.startswith('| `') for k in re.findall(r'`([a-z0-9_]+)', line.split('|')[1])}
+        self.assertGreater(len(keys), 30, 'the keys game.py reads: did the way it reads them change?')
+        self.assertEqual(sorted(keys - rows), [], 'profile keys game.py reads with no row in the Keys table of dm/games/README.md')
+
+
 class SymptomIndex(unittest.TestCase):
     def test_index_is_current(self):
         self.assertEqual(docs_symptoms.OUT.read_text(), docs_symptoms.index(), 'docs/agents/symptoms.md is out of date: run dm/tools/docs_symptoms.py')

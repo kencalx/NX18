@@ -8,6 +8,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <limits.h>
+#include <math.h>
+#include <stdatomic.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
@@ -210,26 +212,72 @@ static uint64_t resolve_sym(module_t *m, const char *name) {
     return resolve_import(m, name);
 }
 
+static const char k_language_list[] = "_ZN2nn8settings25GetAvailableLanguageCodesEPNS0_12LanguageCodeEi";
+static const char k_language_count[] = "_ZN2nn8settings29GetAvailableLanguageCodeCountEv";
+// The language list and count exports of these Ounce SDKs only read the SDK's own table (Polish and Thai included), so they stay bound to the guest; an unknown SDK, or one without
+// both exports, keeps both host fallbacks (hle_sdk16.c). Known by the SDK's revision stamp in its read-only data (upstream PR #1508; docs/reference/services.md)
+static int sdk_has_local_language_list(void) {
+    static const char prefix[] = "FS_ACCESS: { sdk_version: ";
+    static const char *const reviewed[] = {
+        "20.5.19, spec: Ounce }", "20.5.25, spec: Ounce }", "21.4.0, spec: Ounce }",
+        "21.4.1, spec: Ounce }", "22.2.8, spec: Ounce }", "22.2.10, spec: Ounce }",
+    };
+    for (int i = 0; i < g_nmod; i++) {
+        module_t *m = &g_mod[i];
+        if (strcmp(m->name, "sdk") || m->ro_off >= m->data_off || m->data_off > m->size ||
+            !module_sym(m, k_language_list) || !module_sym(m, k_language_count)) continue;
+        const uint8_t *p = m->base + m->ro_off, *end = m->base + m->data_off;
+        while ((p = memmem(p, (size_t)(end - p), prefix, sizeof prefix - 1))) {
+            p += sizeof prefix - 1;
+            for (size_t j = 0; j < sizeof reviewed / sizeof *reviewed; j++) {
+                size_t len = strlen(reviewed[j]);
+                if ((size_t)(end - p) >= len && !memcmp(p, reviewed[j], len)) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 // Forced take-over table (hle.h HLE_FORCE, the __DATA,swforce section): a hit overrides the definition inside the module
 static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *g_force_hits;
 static unsigned *g_fidx, g_fmask;   // name hash over the table: force_lookup runs for every named relocation, and each lookup used to strcmp its way through all 722 entries (the swhle table's scan is hashed the same way, hle.c)
+static const unsigned k_force_disabled = UINT_MAX;   // g_force_hits: an entry left to the guest's own definition (sdk_has_local_language_list)
 static void force_init(void) {
     unsigned long sz; g_force = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &sz);
     g_nforce = g_force ? (unsigned)(sz / sizeof *g_force) : 0;
     g_force_hits = calloc(g_nforce + 1, sizeof *g_force_hits);
     unsigned cap = 16; while (cap < g_nforce * 2) cap <<= 1;
     g_fidx = calloc(cap, sizeof *g_fidx); g_fmask = cap - 1;
-    for (unsigned i = 0; i < g_nforce; i++)   // insertion doubles as the duplicate check (a wrong list must still fail loudly, at once)
+    int native_language_list = sdk_has_local_language_list();
+    for (unsigned i = 0; i < g_nforce; i++) {   // insertion doubles as the duplicate check (a wrong list must still fail loudly, at once)
+        if (native_language_list && (!strcmp(g_force[i].name, k_language_list) || !strcmp(g_force[i].name, k_language_count)))
+            g_force_hits[i] = k_force_disabled;
         for (unsigned j = sym_hash(g_force[i].name) & g_fmask;; j = (j + 1) & g_fmask) {
             if (!g_fidx[j]) { g_fidx[j] = i + 1; break; }
             if (!strcmp(g_force[g_fidx[j] - 1].name, g_force[i].name)) die("duplicate entry in the forced takeover list: %s", g_force[i].name);
         }
+    }
+    if (native_language_list) LOG("force: the sdk's own language list and count are kept (a reviewed Ounce SDK; Polish and Thai included)");
+    for (unsigned i = 0; i < g_nforce; i++)   // an alias binds to the guest's definition: a target the host takes over would bypass that take-over
+        if (g_force[i].to)
+            for (unsigned j = sym_hash(g_force[i].to) & g_fmask; g_fidx[j]; j = (j + 1) & g_fmask)
+                if (g_force_hits[g_fidx[j] - 1] != k_force_disabled && !strcmp(g_force[g_fidx[j] - 1].name, g_force[i].to))
+                    die("forced alias %s: its target %s is itself taken over", g_force[i].name, g_force[i].to);
 }
 static void *force_lookup(const char *name) {
     if (!g_fmask) return NULL;
     for (unsigned j = sym_hash(name) & g_fmask; g_fidx[j]; j = (j + 1) & g_fmask) {
         unsigned i = g_fidx[j] - 1;
         if (!strcmp(g_force[i].name, name)) {
+            if (g_force_hits[i] == k_force_disabled) return NULL;   // left to the guest's own definition: normal symbol resolution binds it
+            if (g_force[i].to) {   // a guest alias (hle.h HLE_FORCE_ALIAS); the caller holds g_modules_mu or is relocating at startup, as for resolve_sym
+                void *p = loaded_sym(g_force[i].to);
+                if (!g_force_hits[i]++) {
+                    if (!p) LOG("[RED] forced alias %s: no loaded module defines %s; bound without the alias", name, g_force[i].to);
+                    else if (g_flag.imports) LOG("force %s -> %s  (%s)", name, g_force[i].to, g_force[i].why);
+                }
+                void *hlecount_wrap(const char *, const char *, void *); return p ? hlecount_wrap("ALIAS", name, p) : NULL;
+            }
             if (!g_force_hits[i]++ && g_flag.imports) LOG("force %s  (%s)", name, g_force[i].why);
             void *hlecount_wrap(const char *, const char *, void *); return hlecount_wrap("FORCE", name, g_force[i].fn);   // A counting stub when DM_HLECOUNT is set
         }
@@ -238,11 +286,12 @@ static void *force_lookup(const char *name) {
 }
 // Generic host: the list serves several games, so entries a game does not reference are only noted; with DM_FORCE_STRICT=1 it still fails loudly (for checking a mistyped list)
 static void force_check(void) {
-    unsigned unused = 0; int strict = getenv("DM_FORCE_STRICT") != NULL;
+    unsigned unused = 0, disabled = 0; int strict = getenv("DM_FORCE_STRICT") != NULL;
     for (unsigned i = 0; i < g_nforce; i++)
-        if (!g_force_hits[i]) { if (strict || g_flag.imports) LOG("forced takeover entry with no reference at all: %s", g_force[i].name); unused++; }
+        if (g_force_hits[i] == k_force_disabled) disabled++;
+        else if (!g_force_hits[i]) { if (strict || g_flag.imports) LOG("forced takeover entry with no reference at all: %s", g_force[i].name); unused++; }
     if (unused && strict) die("forced takeover list is wrong");
-    LOG("force: %u entries hit, %u not referenced by this game", g_nforce - unused, unused);
+    LOG("force: %u entries hit, %u not referenced by this game", g_nforce - unused - disabled, unused);
 }
 
 // Read the rewriter table header (segment boundaries, slot numbers); any row beyond the header means an old-format build output (code modified at load time), which is rejected
@@ -266,6 +315,9 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
+        else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
+        else if (!strcmp(key, "LIVE_SCALE")) m->live_scale = (uint32_t)v;
+        else if (!strcmp(key, "CAMERA_ASPECT")) m->camera_aspect = (uint32_t)v;
         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
         else if (!strcmp(key, "UE_MALLOC_SLOT")) m->ue_malloc_slot = (unsigned)v;
         else if (!strcmp(key, "FPS_TARGET_PTR")) m->fps_target_ptr = v;
@@ -305,12 +357,40 @@ static void read_layout(module_t *m, const char *dir) {
 // target, 0 = the game's own interval logic. The profile's fps_target, overridden by DM_FPS_TARGET (0, 30 or 60); the graphics layer decides the steps and paces presents
 // (hle_nvn.c fstep_tick)
 uint8_t *dm_fps_state;
+int dm_fps_step_max;   // the largest step the stubs give the game (STEP_MAX in its fixups table; 0 = FSTEP_MAX): the frame step holds frames and pays back within it (hle_nvn.c; upstream 1e3fd031)
 static const char *g_fps_mod;   // the module holding the state page (for the log)
-static float g_render_scale_max = 1.0f;   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
+static float g_render_scale_max = 1.0f;
+static int g_render_scale_stub;   // the game's build has a render-scale stub that reads state +0x10 (every frame in Breath of the Wild and Tears of the Kingdom, once at layer creation in Hades II): hle_nvn.c scale_lever
+int dm_render_scale_stub(void) { return g_render_scale_stub; }   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
+// The build's render-scale stubs also read the host's live factor at state +0x14 (LIVE_SCALE in its fixups table: Breath of the Wild's and Tears of the Kingdom's since the
+// heat ladder's step 4): the heat ladder's resolution rungs and the GPU clock rescue set it there (hle_nvn.c scale_set), the player's Render scale staying at +0x10
+static int g_live_scale_stub;
+int dm_live_scale_stub(void) { return g_live_scale_stub; }
+// Ultrawide's camera (the CAMERA_ASPECT capability: Breath of the Wild 1.9.0's and Tears of the Kingdom 1.4.3's camera stubs, their patches.py): with Ultrawide on, on a
+// screen wider than 16:9, the game's camera draws the screen's ratio into its 16:9 picture, and the front end's Stretch (front_ios.m startGame) widens that picture back over
+// the screen, so the world shows more at the sides at its own proportions. State +0x64 float: the ratio the host asks for (0: the game's own), written when the game starts;
+// +0x68 float: the ratio the camera stub last wrote, stored by the guest after the projection's store with release order. dm_game_aspect reads +0x68, never +0x64, so the
+// HUD squeeze (nvn_mtl.m aspect_ui) begins only once the camera really draws wider. Only the builds whose stubs were checked publish anything.
+// Adapted from ComicBit/nxnative eb9a42ba4 / a2f038d3f (MIT)
+static _Atomic(uint8_t *) g_cam_state;   // the state page, for a build with the camera stubs; NULL: none
+static float g_cam_screen;               // the screen's width / height the iOS front end gave for Ultrawide (dm_camera_aspect_screen); 0: none
+void dm_camera_aspect_screen(float r) { g_cam_screen = isfinite(r) && r > 0 ? r : 0; }
+float dm_game_aspect(void) {
+    uint8_t *st = atomic_load_explicit(&g_cam_state, memory_order_acquire);
+    if (!st) return 0;
+    uint32_t bits = atomic_load_explicit((_Atomic uint32_t *)(void *)(st + 0x68), memory_order_acquire); float r; memcpy(&r, &bits, sizeof r);
+    return isfinite(r) && r > 16.0f / 9.0f * 1.001f && r <= 8.0f ? r : 0;
+}
 static void install_fps_state(module_t *m) {
     if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
-    dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name;
+    dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
+    if (m->camera_aspect && !strcmp(m->name, "main") && (!strcmp(m->build_id, "cd57b23fa4bbad65803d9788c01821ee") || !strcmp(m->build_id, "277178b7dba1b6d4949a84778d4abc58"))) {
+        if (m->fps_state_off + 0x6c > m->size) die("%s: frame step state page too small for the camera aspect", m->name);
+        atomic_store_explicit(&g_cam_state, dm_fps_state, memory_order_release);
+    }
     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
+    if (m->render_scale_max) g_render_scale_stub = 1;
+    if (m->render_scale_max && m->live_scale) g_live_scale_stub = 1;
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
@@ -365,6 +445,16 @@ void dm_fps_state_apply(void) {
             LOG("%s: screen shape: HUD moves out by %.0f (edge %.0f, listed widgets %.0f), panes %.0fx%.0f or larger stretched %.3f", g_fps_mod, anc[0], anc[2], anc[3], anc[4], anc[5], anc[1]);
             LOG("%s: screen shape %.3f: output 1920x%u, layout 1280x%u (DM_SCREEN_ASPECT; only builds with screen-shape stubs follow it)", g_fps_mod, a, oh, lh);
         }
+    }
+    // Ultrawide's camera: the screen's ratio while Ultrawide is on (the front end leaves DM_MOD_ULTRAWIDE set only on a screen wider than 16:9, where it stretches the picture)
+    // and no taller Picture shape is asked for (the front end sets DM_SCREEN_ASPECT=0 under Ultrawide)
+    uint8_t *cam = atomic_load_explicit(&g_cam_state, memory_order_relaxed);
+    if (cam) {
+        const char *uw = getenv("DM_MOD_ULTRAWIDE"), *sa = getenv("DM_SCREEN_ASPECT");
+        float want = uw && !strcmp(uw, "1") && (!sa || !*sa || !strcmp(sa, "0") || !strcmp(sa, "auto")) && g_cam_screen > 16.0f / 9.0f * 1.001f && g_cam_screen <= 8.0f ? g_cam_screen : 0;
+        uint32_t bits; memcpy(&bits, &want, sizeof bits);
+        atomic_store_explicit((_Atomic uint32_t *)(void *)(cam + 0x64), bits, memory_order_release);
+        if (want > 0) LOG("%s: Ultrawide: the game's camera draws %.3f:1 into its 16:9 picture, stretched over the screen; the HUD keeps its shape", g_fps_mod, want);
     }
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
     LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");
@@ -1016,10 +1106,13 @@ void dm_mod_variants_apply(void) {
 #endif
 }
 
-// Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT in forward order of the load list.
+// Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT. The order is reverse of the load list:
+// modules later in the list are the ones the earlier ones depend on, so the sdk module's DT_INIT, which constructs the
+// libc++ globals (std::cout and friends), runs before main's static initializers, which already write to them. Forward
+// order crashed Little Busters! Converted Edition at its first log line (std::ostream::write on an unconstructed cout; upstream acd6bd022).
 // The timing is decided by nn::init::Start: after nninitStartup and _init_libc2, before nnMain (the 4th argument callback of Start).
 void run_module_inits(void) {
-    for (int i = 0; i < g_nmod; i++) {
+    for (int i = g_nmod - 1; i >= 0; i--) {
         module_t *m = &g_mod[i];
         if (!m->init || m->nro) continue;   // an NRO's init runs when the game loads it (hle_ro.c)
         LOG("%s: DT_INIT +%#llx (init_array %llu entries)", m->name, m->init, m->init_arraysz / 8);

@@ -43,13 +43,15 @@ static snap now_counts(void) { thr_t *m = self(); snap s = {m->nstorm, m->tight_
 // A guest thread with no guest code, linked into the all-threads chain for dm_yield_top (its counters set by hand); thr_free unlinks it
 static thr_t *dummy_thr(uint32_t h) {
     thr_t *t = calloc(1, sizeof *t); assert(t); t->handle = h; t->spin_mod = "main"; pthread_cond_init(&t->cv, 0); pthread_cond_init(&t->pcv, 0);
-    pthread_mutex_lock(&G); t->all = g_all; g_all = t; pthread_mutex_unlock(&G); return t;
+    g_lock(); t->all = g_all; g_all = t; g_unlock(); return t;
 }
 static void *mark_as(void *t) { pthread_setspecific(g_keythr, t); dm_thread_acquire_mark(); return NULL; }   // t acquires the window texture, from a thread of its own as hle_nvn.c does
 static void mode(const char *v) { if (v) setenv("DM_YIELD_STORM", v, 1); else unsetenv("DM_YIELD_STORM"); g_ys_mode = -1; }
 
 int main(void) {
     alarm(20);
+    // parked yields (DM_YIELD_PARK, on by default) wait on the real clock, which the test clock does not follow: off here; t_yieldpark tests them
+    setenv("DM_YIELD_PARK", "0", 1);
     svc_thread_main_init();
     char line[1536];
 
@@ -143,7 +145,7 @@ int main(void) {
     { char *pc = strstr(line, "0x7778 '?' 5.0 ms in tight runs"), *pa = strstr(line, "0x1001 "), *pb = strstr(line, "0x7777 '?' 0.0 ms in tight runs (0 yields");
       assert(pc && pa && pb && pc < pa && pa < pb && strstr(pb, "spin passes 1000000, last at main+0")); }
     puts("PASS: the top yielders keep the thread with the most yields and spin passes, third");
-    pthread_mutex_lock(&G); thr_free(tb); thr_free(tc); pthread_mutex_unlock(&G);
+    g_lock(); thr_free(tb); thr_free(tc); g_unlock();
     assert(g_ys_acq == NULL);
     dm_yield_top(line, sizeof line); assert(!strstr(line, "0x7777") && !strstr(line, "0x7778"));
     puts("PASS: the acquiring thread's exit clears the mark");

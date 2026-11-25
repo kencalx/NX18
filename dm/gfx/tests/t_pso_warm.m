@@ -317,6 +317,156 @@ static void native_mesh(NSString *dir) {
     g_warm_t0 = bp_now(); warm_finish();
 }
 
+// The prepare step's shader-only lines (warm_split_late, warm_late_arm, warm_late_start): an S line whose shader an R, M or C line uses stays before the first frame, in its
+// place; the rest wait for the first frame and then load on the utility workers, a library the game has loaded already is skipped, and each one loaded is claimed at the next
+// submission. A run that never presents starts them after PREPARE_LATE_SUBS submissions (warm_late_tick). The prepare step timed with every S line before the first frame and
+// with the split models what a list of many shader-only lines costs the first frame (printed, not checked: the split runs first, so the other run finds the pair's bases made)
+static WarmTask *task(int kind, NSString *key, NSString *vkey, NSString *fkey, NSString *tkey) {
+    WarmTask *t = [WarmTask new]; t->kind = kind; t->key = key; t->vkey = vkey; t->fkey = fkey; t->tkey = tkey; t->stage = 1; return t;
+}
+static int late_wait(int state) { for (int i = 0; i < 1000 && atomic_load(&g_warm_late_state) != state; i++) usleep(10000); return atomic_load(&g_warm_late_state) == state; }
+static void late_lines(NSString *dir) {
+    {   // the split alone: kept are the pipeline lines and the S lines of the shaders they use, in the lists' order; the others go, in theirs
+        NSArray<WarmTask *> *tasks = @[task(0, @"a", nil, nil, nil), task(1, nil, @"v", @"f", nil), task(0, @"v", nil, nil, nil), task(0, @"f", nil, nil, nil), task(2, @"c", nil, nil, nil),
+                                       task(0, @"c", nil, nil, nil), task(3, nil, @"m", @"mf", @"mt"), task(0, @"mt", nil, nil, nil), task(0, @"mf", nil, nil, nil), task(0, @"z", nil, nil, nil)];
+        NSMutableArray<WarmTask *> *late = [NSMutableArray array]; long lines = 12;
+        NSArray<WarmTask *> *now = warm_split_late(tasks, late, &lines);
+        EXPECT("two shader-only lines no pipeline line uses wait", 2, late.count);
+        EXPECT("they keep their order", 1, late.count == 2 && [late[0]->key isEqual:@"a"] && [late[1]->key isEqual:@"z"]);
+        EXPECT("the lines before the first frame lose them", 10, lines);
+        EXPECT("the rest stay", 8, now.count);
+        int order = now.count == 8; for (NSUInteger i = 0; order && i < now.count; i++) order = now[i] == tasks[i + 1];
+        EXPECT("in their order, the S lines of R, C and M shaders with them", 1, order);
+    }
+    enum { K = 48 };
+    for (int i = 0; i <= K; i++) {
+        for (NSString *ext in @[@"json", @"metallib"]) {
+            NSString *to = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"late-%02d.%@", i, ext]];
+            if (![NSFileManager.defaultManager fileExistsAtPath:to])
+                EXPECT("shader-only fixture copied", 1, [NSFileManager.defaultManager copyItemAtPath:[dir stringByAppendingPathComponent:[@"warm-fs." stringByAppendingString:ext]] toPath:to error:nil]);
+        }
+        g_shmap[[NSString stringWithFormat:@"late-%02d", i]] = @"pixel";
+    }
+    pso_key key = {0}; key.cfmt[0] = MTLPixelFormatRGBA8Unorm; key.samples = 1; key.chmask = 15;
+    NSMutableString *text = [NSMutableString stringWithFormat:@"S\twarm-vs\t0\nS\twarm-fs\t1\n%@", row(&key, 0)];
+    for (int i = 0; i < K; i++) [text appendFormat:@"S\tlate-%02d\t1\n", i];
+    NSString *manifest = [dir stringByAppendingPathComponent:@"late.tsv"];
+    EXPECT("shader-only manifest written", 1, [text writeToFile:manifest atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    // The prepare step with the split, then with every line (the model)
+    nvn_hm_clear(&g_pso, hm_rel); g_shcache = nil; g_warm_items = [NSMutableArray array]; atomic_store(&g_warm_ready, 0); g_warm_done = 0; g_warm_shaders = 0;
+    long lines = 0; NSArray<WarmTask *> *all = warm_parse(@[manifest], &lines);
+    EXPECT("every line parsed", K + 3, lines);
+    NSMutableArray<WarmTask *> *late = [NSMutableArray array]; long before = lines;
+    NSArray<WarmTask *> *now = warm_split_late(all, late, &before);
+    EXPECT("the shader-only lines wait", K, late.count);
+    EXPECT("the pair's S lines and its R line stay", 3, before);
+    warm_load_begin(); uint64_t t0 = bp_now(); warm_prepare(now, before, (long)late.count); double split_ms = (bp_now() - t0) / 1e6;
+    EXPECT("before the first frame: the pair's two shaders", 2, g_warm_shaders);
+    nvn_hm_clear(&g_pso, hm_rel); g_shcache = nil; [g_warm_items removeAllObjects]; atomic_store(&g_warm_ready, 0); g_warm_done = 0; g_warm_shaders = 0;
+    warm_load_begin(); t0 = bp_now(); warm_prepare(all, lines, 0); double all_ms = (bp_now() - t0) / 1e6;
+    EXPECT("with every line before the first frame, every shader", K + 2, g_warm_shaders);
+    printf("prepare model: %ld lines before the first frame in %.1f ms with every shader-only line there, %ld lines in %.1f ms with %d left to after it (%.2f ms a shader-only line)\n",
+           lines, all_ms, before, split_ms, (int)K, (all_ms - split_ms) / K);
+    g_warm_t0 = bp_now(); warm_finish();
+    // After the first frame: one library the game's prefetch has already is skipped, the rest load and are claimed
+    g_shcache = nil; [g_warm_items removeAllObjects]; atomic_store(&g_warm_ready, 0);
+    progpf_first(@"late-05");
+    uint64_t loaded0 = g_warm_late_loaded, had0 = g_warm_late_had;
+    warm_late_arm(late);
+    EXPECT("the lines wait for the first frame", 1, atomic_load(&g_warm_late_state));
+    warm_late_start("the test's first frame");
+    EXPECT("they load and end", 1, late_wait(3));
+    EXPECT("every library but the prefetched one loaded", K - 1, g_warm_late_loaded - loaded0);
+    EXPECT("the prefetched one skipped", 1, g_warm_late_had - had0);
+    warm_claim();
+    int claimed = 0; for (int i = 0; i < K; i++) claimed += g_shcache[[NSString stringWithFormat:@"late-%02d", i]] != nil;
+    EXPECT("each loaded library claimed by the next submission", K - 1, claimed);
+    EXPECT("not the one the game loads itself", 1, g_shcache[@"late-05"] == nil);
+    warm_late_start("again"); EXPECT("a second start does nothing", 3, atomic_load(&g_warm_late_state));
+    // A run that never presents: the lines start after PREPARE_LATE_SUBS submissions
+    atomic_store(&g_warm_late_state, 0); warm_late_arm(@[task(0, [NSString stringWithFormat:@"late-%02d", (int)K], nil, nil, nil)]);
+    for (int i = 0; i < PREPARE_LATE_SUBS - 1; i++) warm_late_tick();
+    EXPECT("they wait while the submissions are few", 1, atomic_load(&g_warm_late_state));
+    loaded0 = g_warm_late_loaded; warm_late_tick();
+    EXPECT("and start at the last one", 1, late_wait(3));
+    EXPECT("their library loaded", 1, g_warm_late_loaded - loaded0);
+    g_shcache = nil; [g_warm_items removeAllObjects]; atomic_store(&g_warm_ready, 0); nvn_hm_clear(&g_pso, hm_rel);
+}
+
+// The paths that load a library share one preparation (shader_acquire; adapted from ComicBit/nxnative bee12ec, MIT): the prewarm, a draw's own load and a shader-only line
+// after the first frame ask for the same key while the first load is held at the device, and the library loads once, all three taking the same shader. A failed preparation is
+// not kept (the next caller loads it), DM_NVN_SHADER_SHARE=0 prepares each copy again, and nothing the sharing kept outlives the caches that hold its shaders.
+@interface ShareLookupDictionary : NSObject { @public NSMutableDictionary *dictionary; NSString *key; dispatch_semaphore_t looked; } @end
+@implementation ShareLookupDictionary
+- (id)forwardingTargetForSelector:(SEL)selector { return dictionary; }
+- (id)objectForKeyedSubscript:(id)k { if ([k isEqual:key]) dispatch_semaphore_signal(looked); return dictionary[k]; }
+@end
+static void shared_paths(NSString *dir) {
+    for (NSString *name in @[@"share-fs", @"share-off"]) for (NSString *ext in @[@"json", @"metallib"]) {
+        NSString *to = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.%@", name, ext]];
+        if (![NSFileManager.defaultManager fileExistsAtPath:to])
+            EXPECT("sharing fixture copied", 1, [NSFileManager.defaultManager copyItemAtPath:[dir stringByAppendingPathComponent:[@"warm-fs." stringByAppendingString:ext]] toPath:to error:nil]);
+    }
+    g_shmap[@"share-fs"] = g_shmap[@"share-off"] = g_shmap[@"share-bad"] = @"pixel";
+    g_shshare = 1; g_shload = nil; g_shcache = [NSMutableDictionary dictionary]; g_warm_items = [NSMutableArray array]; atomic_store(&g_warm_ready, 0);
+    __weak NvShader *weak_shader = nil; __weak ShLoad *weak_record = nil;
+    @autoreleasepool {
+        warm_load_begin();
+        ShareLookupDictionary *lookup = [ShareLookupDictionary new]; lookup->dictionary = [NSMutableDictionary dictionary]; lookup->key = @"share-fs";
+        lookup->looked = dispatch_semaphore_create(0); g_shload = (NSMutableDictionary *)lookup;
+        WarmGateDevice *gate = [WarmGateDevice new]; gate->device = g_dev;
+        gate->entered = dispatch_semaphore_create(0); gate->release = dispatch_semaphore_create(0);
+        g_dev = (id<MTLDevice>)gate;
+        uint64_t made0 = g_shload_made, joined0 = g_shload_joined, late0 = g_warm_late_loaded;
+        __block NvShader *warm = nil, *demand = nil;
+        dispatch_group_t callers = dispatch_group_create();
+        dispatch_group_async(callers, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool { warm = warm_shader(@"share-fs", 1); } });
+        EXPECT("the prewarm's load reaches the device gate", 0, dispatch_semaphore_wait(gate->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+        EXPECT("the prewarm looked the key up", 0, dispatch_semaphore_wait(lookup->looked, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+        dispatch_group_async(callers, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{ @autoreleasepool { demand = shader_get(@"share-fs", 1); } });
+        dispatch_group_async(callers, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ warm_late_one(task(0, @"share-fs", nil, nil, nil)); });
+        EXPECT("the draw's load finds the key in flight", 0, dispatch_semaphore_wait(lookup->looked, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+        EXPECT("the late line finds the key in flight", 0, dispatch_semaphore_wait(lookup->looked, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+        dispatch_semaphore_signal(gate->release);
+        EXPECT("the three paths finish", 0, dispatch_group_wait(callers, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)));
+        EXPECT("the library loads once for three paths", 1, atomic_load(&gate->library_calls));
+        EXPECT("one preparation made", 1, g_shload_made - made0);
+        EXPECT("two preparations joined", 2, g_shload_joined - joined0);
+        EXPECT("the late line handed its shader on", 1, g_warm_late_loaded - late0);
+        NvShader *late = g_warm_items.count == 1 ? g_warm_items[0]->shader : nil;
+        EXPECT("all three paths have the same shader", 1, warm && warm == demand && demand == late);
+        EXPECT("the draw's load entered it in the cache", 1, g_shcache[@"share-fs"] == demand);
+        NvShader *again = shader_acquire(@"share-fs", 1, 0);
+        EXPECT("a later caller takes the finished shader", 1, again == warm);
+        EXPECT("without a load", 1, atomic_load(&gate->library_calls));
+        weak_shader = warm; weak_record = lookup->dictionary[@"share-fs"];
+        // A failed preparation is not kept: the next caller loads it, and succeeds once the library exists
+        made0 = g_shload_made;
+        EXPECT("a missing library fails", 1, shader_acquire(@"share-bad", 1, 0) == nil);
+        EXPECT("the failure leaves the table", 1, lookup->dictionary[@"share-bad"] == nil);
+        for (NSString *ext in @[@"json", @"metallib"])
+            EXPECT("retry fixture copied", 1, [NSFileManager.defaultManager copyItemAtPath:[dir stringByAppendingPathComponent:[@"warm-fs." stringByAppendingString:ext]]
+                                                                                   toPath:[dir stringByAppendingPathComponent:[@"share-bad." stringByAppendingString:ext]] error:nil]);
+        NvShader *retried = shader_acquire(@"share-bad", 1, 0);
+        EXPECT("the next caller prepares it again and succeeds", 1, retried != nil);
+        EXPECT("two preparations for the failure and the retry", 2, g_shload_made - made0);
+        EXPECT("a later caller takes the retried shader", 1, shader_acquire(@"share-bad", 1, 0) == retried);
+        // DM_NVN_SHADER_SHARE=0: each caller prepares its own copy, and nothing enters the table
+        g_shshare = 0; unsigned calls = atomic_load(&gate->library_calls); made0 = g_shload_made; joined0 = g_shload_joined;
+        NvShader *a = shader_acquire(@"share-off", 1, 0), *b = shader_acquire(@"share-off", 1, 0);
+        EXPECT("switched off: two copies", 1, a && b && a != b);
+        EXPECT("switched off: two loads", calls + 2, atomic_load(&gate->library_calls));
+        EXPECT("switched off: nothing shared or counted", 1, lookup->dictionary[@"share-off"] == nil && g_shload_made == made0 && g_shload_joined == joined0);
+        g_shshare = 1;
+        g_dev = gate->device;
+        warm = demand = late = again = retried = nil;
+        g_shload = nil; g_shcache = nil; [g_warm_items removeAllObjects]; atomic_store(&g_warm_ready, 0); g_warm_dict = nil; g_warm_loads = nil;
+    }
+    EXPECT("the shared shader is released with the caches that held it", 1, weak_shader == nil);
+    EXPECT("its record is released with the table", 1, weak_record == nil);
+    for (NSString *ext in @[@"json", @"metallib"]) [NSFileManager.defaultManager removeItemAtPath:[dir stringByAppendingPathComponent:[@"share-bad." stringByAppendingString:ext]] error:nil];
+}
+
 int main(void) { @autoreleasepool {
     alarm(60);   // A regression in owner/waiter progress must fail rather than hang the suite.
     setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_NVN_PREDICT", "0", 1);
@@ -329,6 +479,8 @@ int main(void) { @autoreleasepool {
     singleflight(@(dir));
     scenario(@(dir), 0); scenario(@(dir), 1);
     native_mesh(@(dir));
+    late_lines(@(dir));
+    shared_paths(@(dir));
     EXPECT("pipelines are built through the Metal 4 compiler", 1, g_comp4 != nil && g_pb_spec > 0);
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
     printf("t_pso_warm: %d checks, %d failed\n", checks, failed);

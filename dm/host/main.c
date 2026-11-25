@@ -98,13 +98,16 @@ static int profile_modules(const char *dir, const char **names) {
 static pthread_key_t g_race_keys[512];
 static unsigned g_race_n, g_race_want;
 static void *keyrace_thread(void *unused);
+extern uint64_t g_host_start_ns;   // hle_lifecycle.c: the start's timeline counts from here when no Play time is given (DM_PLAY_AT)
 static void host_preload(int argc, char **argv) {
+    g_host_start_ns = now_ns();
     g_t0_ns = proc_start_mono_ns();
     flags_init();
+    { void dm_diag_samplers_start(void); dm_diag_samplers_start(); }   // DM_MEMSTAT / DM_THRCPU (memstat.m): after the iOS front end has set the env files' switches
     if (argc < 2) die("usage: dmhost <dir> [mod...] [-- game arguments...]");
-    // Time zone: the game converts absolute time to local time along two paths, both ending in the host libc -- nn::time::ToCalendarTime (hle_time.c, localtime_r) and the guest libc's
-    // localtime_r / mktime (hle_table.c wires them straight to the host). So only when the host follows the system time zone do the original game's screens (chronicle discovery time etc.) show this machine's time.
-    // Only deterministic comparison (DM_FIXED_TIME) pins it to UTC: the same replay must convert to the same calendar time on this machine (UTC+8) and on the second Mac (UTC+9)
+    // Time zone: a game gets local time from nn::time (ToCalendarTime / ToPosixTime, hle_time.c), which converts with the host's zone, so its screens show this machine's time.
+    // The guest C library's localtime / mktime stay UTC, as on a Switch. Only deterministic comparison (DM_FIXED_TIME) pins the host to UTC: the same replay must convert to the same
+    // calendar time on this machine (UTC+8) and on the second Mac (UTC+9)
     if (getenv("DM_FIXED_TIME")) setenv("TZ", "UTC", 1);
     // Open file limit: the soft limit starts at 256 on iOS (and in a default macOS shell), while the game's file handles, the RomFS archives, save transactions and Metal caches share it. Raise it to 4096 (as far as the hard limit allows)
     struct rlimit rl; if (!getrlimit(RLIMIT_NOFILE, &rl) && rl.rlim_cur < 4096) {
@@ -116,6 +119,20 @@ static void host_preload(int argc, char **argv) {
         CFBundleRef b = CFBundleGetMainBundle(); CFTypeRef c = b ? CFBundleGetValueForInfoDictionaryKey(b, CFSTR("DMCommit")) : NULL; char cs[64] = "not recorded";
         if (c && CFGetTypeID(c) == CFStringGetTypeID()) CFStringGetCString((CFStringRef)c, cs, sizeof cs, kCFStringEncodingUTF8);
         LOG("build: commit %s, shader chain %s, profile %s", cs, DMSH_CHAIN, DM_GAME_ID);
+        // G17: who built it (the builder's Profile name at build time, the one name the log carries, by the owner's decision) and the build ID, then the acknowledgement's day
+        // (nx18.ack: "<version> <day>"). The live Profile is never logged
+        char by[96] = "", bid[32] = "", ack[48] = "";
+        CFTypeRef v = b ? CFBundleGetValueForInfoDictionaryKey(b, CFSTR("DMBuiltBy")) : NULL;
+        if (v && CFGetTypeID(v) == CFStringGetTypeID()) CFStringGetCString((CFStringRef)v, by, sizeof by, kCFStringEncodingUTF8);
+        v = b ? CFBundleGetValueForInfoDictionaryKey(b, CFSTR("DMBuildID")) : NULL;
+        if (v && CFGetTypeID(v) == CFStringGetTypeID()) CFStringGetCString((CFStringRef)v, bid, sizeof bid, kCFStringEncodingUTF8);
+        CFPropertyListRef a = CFPreferencesCopyAppValue(CFSTR("nx18.ack"), kCFPreferencesCurrentApplication);
+        if (a && CFGetTypeID(a) == CFStringGetTypeID()) { char s[48]; if (CFStringGetCString((CFStringRef)a, s, sizeof s, kCFStringEncodingUTF8)) { const char *sp = strchr(s, ' '); snprintf(ack, sizeof ack, "%s", sp ? sp + 1 : s); } }
+        if (a) CFRelease(a);
+        if (bid[0]) {
+            if (by[0]) LOG("build: built by %s, build ID %s, %s%s", by, bid, ack[0] ? "acknowledged " : "not acknowledged yet", ack);
+            else LOG("build: build ID %s (no profile name at build), %s%s", bid, ack[0] ? "acknowledged " : "not acknowledged yet", ack);
+        }
     }
     const char *race = getenv("DM_TEST_KEYRACE");
     if (race && *race) {
@@ -179,6 +196,11 @@ int main(int argc, char **argv) {
     } else host_preload(argc, argv);
     { void dm_fps_state_apply(void); dm_fps_state_apply(); }   // frame rate and render scale into the frame step state page (loader.c): the iOS launcher sets them after the loading began
     { void dm_mod_variants_apply(void); dm_mod_variants_apply(); }   // the switchable mods the launcher turned on (loader.c), before any guest code runs
+    // The pipeline archive bundled with the app starts opening beside the game's own start, instead of at its first submission (nvn_mtl.m mtl_pso_bundle_preopen), once the guest's
+    // address space is reserved (hle_svc.c mem_init_once, at the game's first memory call): the order of the two largest mappings stays as it was, the guest's block first. The
+    // launcher's settings are in the environment by now
+    { void mtl_pso_bundle_preopen(void); dm_mem_ready_hook = mtl_pso_bundle_preopen; }
+    dm_start_game();   // the "start: Play at" line; the host load part of the start's timeline ends here (hle_lifecycle.c)
     front_run(guest_main);
     return 0;
 }

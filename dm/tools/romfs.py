@@ -157,7 +157,11 @@ else:
 def stat(path, **kwargs):
     resolved = _resolve(path)
     if not resolved: return _os.stat(path, **kwargs)
-    image, relative = resolved; k = image.find(relative)
+    image, relative = resolved
+    return _stat_of(image, image.find(relative))
+
+
+def _stat_of(image, k):
     a, b, _, _, t, _ = image.entry(k); s = image.stat
     return SimpleNamespace(st_mode=(_stat.S_IFREG | 0o444) if t else (_stat.S_IFDIR | 0o555), st_size=b if t else 0,
                            st_ino=k + 1, st_dev=s.st_dev, st_mtime=s.st_mtime, st_mtime_ns=s.st_mtime_ns,
@@ -175,11 +179,12 @@ def isfile(path):
     except OSError: return False
 
 
-class _Entry:
-    def __init__(self, parent, name): self.name, self.path = name, _os.path.join(parent, name)
-    def stat(self, **kwargs): return stat(self.path)
-    def is_dir(self, **kwargs): return isdir(self.path)
-    def is_file(self, **kwargs): return isfile(self.path)
+class _Entry:   # an image entry a listing found: its image and index answer stat / is_dir / is_file, with no path resolved again (a walk of Ocarina of Time's 186,583 files
+    # resolved each one from the root: os.stat of the image and a search per path part, 20 s of every build's shader sources check)
+    def __init__(self, parent, name, image, k): self.name, self.path, self._image, self._k = name, _os.path.join(parent, name), image, k
+    def stat(self, **kwargs): return _stat_of(self._image, self._k)
+    def is_dir(self, **kwargs): return not self._image.entry(self._k)[4]
+    def is_file(self, **kwargs): return bool(self._image.entry(self._k)[4])
     def is_symlink(self): return False
     def inode(self): return self.stat().st_ino
     def __fspath__(self): return self.path
@@ -198,7 +203,7 @@ def scandir(path):
     resolved = _resolve(path)
     if not resolved: return _os.scandir(path)
     image, relative = resolved
-    return _Scan(_Entry(path, name) for name, _ in image.children(image.find(relative)))
+    return _Scan(_Entry(path, name, image, k) for name, k in image.children(image.find(relative)))
 
 
 def walk(top, topdown=True, onerror=None, followlinks=False):

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A game's prewarm seed list (dm/games/<id>/pso_manifest.tsv, docs/development.md "Prewarm lists") checked, or grown from recorded lists: a Mac run's DM_PSO_RECORD file or a
-device's own Documents/pso_user.tsv, which hold the same rows (S shader, R render pipeline, C compute pipeline, M native task / mesh pipeline).
+device's own Documents/pso_user.tsv, which hold the same rows (S shader, R render pipeline, C compute pipeline, M native task / mesh pipeline, G geometry pair with no mesh library).
 Each row is read as the host's warm_parse (dm/gfx/nvn/nvn_mtl.m) and pso_skey_parse / pso_mesh_skey_parse (dm/gfx/nvn/nvn_pso_skey.h) read it, and must also:
   · name only library keys <16 hex digits>_b of the profile's shader map (shader_map.tsv, column 4, as shmap_load reads it), each at the stage the map gives it
     (stage_of: vertex 0, pixel 1, geometry 2, hull / task 3, domain / mesh 4, compute 5): a key of another game version, or of another game, is refused
@@ -11,7 +11,7 @@ as the host leaves it out.
 Usage:
   pso_seed.py check (--game <id> | --map <shader_map.tsv>) [<list>...]       every row of the lists (default: the game's pso_manifest.tsv); exit 1 on a refused row
   pso_seed.py add (--game <id> | --map <shader_map.tsv> --manifest <file>) [--note <text>]... [--drop-invalid] <recorded list>...
-      appends to the manifest the rows of the recorded lists it does not name yet, below its rows and the notes (one comment line each; {S} {R} {C} {M} {rows} are the counts
+      appends to the manifest the rows of the recorded lists it does not name yet, below its rows and the notes (one comment line each; {S} {R} {C} {M} {G} {rows} are the counts
       of the rows added). The provisional profile's line "empty until recorded" goes. A refused row stops it (nothing written) unless --drop-invalid leaves those rows out"""
 import argparse, re, struct, sys
 from pathlib import Path
@@ -29,7 +29,7 @@ def read_map(path):
     """{key: stage name} of a shader map, as shmap_load reads it"""
     out = {}
     for line in Path(path).read_text(encoding='utf-8').split('\n'):
-        if not line or line.startswith('#') or line.startswith('package'): continue
+        if not line or line.startswith(('#', 'package')): continue
         c = line.split('\t')
         if len(c) > 3: out[c[3]] = c[2]
     return out
@@ -102,6 +102,12 @@ def row_problem(line, shmap):
         if c[1] != '-' and (why := key_problem(c[1], shmap, 'task')): return why
         b, why = parse_skey(c[2])
         return why or skey_problem(b, shmap, mesh=True)
+    if kind == 'G':   # a lean geometry pair drawn with no mesh library (nvn_geometry.inc geo_mesh_fn): dmsh_chain.mesh_pairs builds its library, the host does not prewarm it
+        if len(c) != 3 or not all(re.fullmatch(r'[0-9a-f]{16}', k) for k in c[1:]): return 'a G row is G<TAB>vertex key<TAB>geometry key (16 hex digits each)'
+        return key_problem(c[1] + '_b', shmap, 'vertex') or key_problem(c[2] + '_b', shmap, 'geometry')
+    if kind == 'K':   # a one-draw pass's vertex / pixel pair with no pass-as-compute kernel (nvn_mtl.m pcm_kernel): dmsh_chain.pc_pairs builds its kernel; the prewarm starts its pipeline
+        if len(c) != 3 or not all(re.fullmatch(r'[0-9a-f]{16}', k) for k in c[1:]): return 'a K row is K<TAB>vertex key<TAB>pixel key (16 hex digits each)'
+        return key_problem(c[1] + '_b', shmap, 'vertex') or key_problem(c[2] + '_b', shmap, 'pixel')
     return f'an unknown row kind {kind!r}'
 
 
@@ -134,10 +140,14 @@ def collect(lines, shmap, known=()):
 
 
 def counts(rows):
-    out = dict.fromkeys('SRCM', 0)
+    out = dict.fromkeys('SRCM', 0)   # G rows only when there are any
     for r in rows: out[r.split('\t', 1)[0]] = out.get(r.split('\t', 1)[0], 0) + 1
     out['rows'] = len(rows)
     return out
+
+
+def g_count(n):   # ', G <n>' / ', K <n>' in a count line when the rows hold G or K rows, else nothing (the lists without any print as before)
+    return (', G %d' % n['G'] if 'G' in n else '') + (', K %d' % n['K'] if 'K' in n else '')
 
 
 def report(bad, limit=10):
@@ -155,24 +165,25 @@ def add(manifest, sources, shmap, notes=(), drop_invalid=False):
     if (bad and not drop_invalid) or not new: return new, bad
     n = counts(new)
     kept = [ln.rstrip('\r') for ln in text.split('\n') if ln.rstrip('\r') and not ln.startswith(PROVISIONAL)]   # the list as it is, its notes where they stand
-    notes = [t.format(**n) if t.startswith('#') else '# ' + t.format(**n) for t in notes]
+    notes = [t.format(**{'G': 0, **n}) if t.startswith('#') else '# ' + t.format(**{'G': 0, **n}) for t in notes]
     manifest.write_text('\n'.join(kept + notes + new) + '\n', encoding='utf-8')
     return new, bad
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    ap = argparse.ArgumentParser(description=(__doc__ or '').split('\n')[0])   # python3 -OO strips the docstring
     ap.add_argument('action', choices=('check', 'add'))
     ap.add_argument('lists', nargs='*', help='check: the lists to check (default: the game\'s pso_manifest.tsv); add: the recorded lists')
     ap.add_argument('--game', help='the profile under dm/games: its shader_map.tsv and pso_manifest.tsv')
     ap.add_argument('--map', help='the shader map (default: the game\'s)')
     ap.add_argument('--manifest', help='add: the seed list to append to (default: the game\'s)')
-    ap.add_argument('--note', action='append', default=[], help='add: a comment line above the added rows; {S} {R} {C} {M} {rows} are their counts')
+    ap.add_argument('--note', action='append', default=[], help='add: a comment line above the added rows; {S} {R} {C} {M} {G} {rows} are their counts')
     ap.add_argument('--drop-invalid', action='store_true', help='add: leave refused rows out instead of writing nothing')
     a = ap.parse_args(argv)
     gdir = REPO / 'dm/games' / a.game if a.game else None
-    if not a.map and not gdir: ap.error('--game or --map')
-    shmap = read_map(a.map or gdir / 'shader_map.tsv')
+    if a.map: shmap = read_map(a.map)
+    elif gdir: shmap = read_map(gdir / 'shader_map.tsv')
+    else: ap.error('--game or --map')
     if a.action == 'check':
         paths = a.lists or ([gdir / 'pso_manifest.tsv'] if gdir else [])
         if not paths: ap.error('check: a list, or --game')
@@ -181,7 +192,7 @@ def main(argv=None):
             rows = rows_of(Path(p).read_bytes().decode('utf-8'), strip_cr=False)   # bytes as they are: read_text would turn \r\n into \n, which the host does not
             keep, bad = collect(rows, shmap)
             n = counts(keep)
-            print(f'{p}: {len(rows)} rows, {n["rows"]} kept (S {n["S"]}, R {n["R"]}, C {n["C"]}, M {n["M"]}), {len(rows) - len(keep) - len(bad)} repeated, {len(bad)} refused')
+            print(f'{p}: {len(rows)} rows, {n["rows"]} kept (S {n["S"]}, R {n["R"]}, C {n["C"]}, M {n["M"]}{g_count(n)}), {len(rows) - len(keep) - len(bad)} repeated, {len(bad)} refused')
             if bad: status = 1; report(bad)
         return status
     if not a.lists: ap.error('add: the recorded lists')
@@ -193,7 +204,7 @@ def main(argv=None):
         print(f'[RED] {len(bad)} rows refused' + (', left out:' if a.drop_invalid else ': nothing written (--drop-invalid leaves them out)'), file=sys.stderr)
         report(bad)
         if not a.drop_invalid: return 1
-    print(f'{manifest}: {n["rows"]} rows added (S {n["S"]}, R {n["R"]}, C {n["C"]}, M {n["M"]})')
+    print(f'{manifest}: {n["rows"]} rows added (S {n["S"]}, R {n["R"]}, C {n["C"]}, M {n["M"]}{g_count(n)})')
     return 0
 
 

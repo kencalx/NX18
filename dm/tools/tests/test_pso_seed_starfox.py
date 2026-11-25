@@ -20,12 +20,19 @@ class Committed(unittest.TestCase):
         self.shmap = pso_seed.read_map(GAME / 'shader_map.tsv')
         self.lines = [ln for ln in self.text.split('\n') if ln]
 
+    def found(self, pattern, text):
+        """re.search(pattern, text).groups(), or the test fails naming the pattern"""
+        m = re.search(pattern, text)
+        if m is None: self.fail(f'{pattern!r} not in {text!r}')
+        return m.groups()
+
     def test_checks_clean_none_refused(self):
         rows = [ln for ln in self.lines if not ln.startswith('#')]   # as the host splits them: a '\r' would stay in the row
         keep, bad = pso_seed.collect(rows, self.shmap)
         self.assertEqual((bad, len(keep)), ([], len(rows)))
-        self.assertEqual(pso_seed.counts(keep), {'S': 542, 'R': 443, 'C': 14, 'M': 0, 'rows': 999})
-        self.assertEqual(len({pso_seed.identity(r) for r in rows}), 999)
+        self.assertEqual(pso_seed.counts(keep), {'S': 651, 'R': 567, 'C': 15, 'M': 0, 'rows': 1233})   # the X1.0 recording, X2.0 sessions, then NXNative's ring course rows
+        self.assertEqual(len({pso_seed.identity(r) for r in rows}), 1233)
+        self.assertEqual(pso_seed.counts(pso_seed.collect(rows[:999], self.shmap)[0]), {'S': 542, 'R': 443, 'C': 14, 'M': 0, 'rows': 999})   # the recording comes first
 
     def test_header_counts_and_source(self):
         head = [ln for ln in self.lines if ln.startswith('#')]
@@ -35,13 +42,13 @@ class Committed(unittest.TestCase):
         rec = next(ln for ln in head if ln.startswith('# Recorded on an iPhone 18 Pro Max'))
         for word in ('X1.0', '6448f757', 'chain 222e58e346d6', 'v131072', 'handheld', 'Picture Stretch', 'fresh install', 'Documents/pso_user.tsv'):
             self.assertIn(word, rec)
-        self.assertEqual(re.search(r'(\d+) rows: (\d+) S, (\d+) R, (\d+) C\.', rec).groups(), ('999', '542', '443', '14'))
-        self.assertEqual(re.search(r'recording (\d+) rows .* the (\d+) rows they did not hold', rec).groups(), ('929', '70'))
+        self.assertEqual(self.found(r'(\d+) rows: (\d+) S, (\d+) R, (\d+) C\.', rec), ('999', '542', '443', '14'))
+        self.assertEqual(self.found(r'recording (\d+) rows .* the (\d+) rows they did not hold', rec), ('929', '70'))
         self.assertIn('no row refused', next(ln for ln in head if 'pso_seed.py check' in ln))
 
     def test_compute_rows_are_map_compute_shaders(self):
         c = [ln.split('\t')[1] for ln in self.lines if ln.startswith('C\t')]
-        self.assertEqual(len(c), 14)
+        self.assertEqual(len(c), 15)
         self.assertTrue(all(self.shmap.get(k[:-2]) == 'compute' for k in c))
 
 

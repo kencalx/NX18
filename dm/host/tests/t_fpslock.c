@@ -7,6 +7,8 @@ static int test_fps_max = 120;
 #define DM_GAME_FPS_MAX test_fps_max
 static int test_high = 120;   // what the frame step's hold allows (hle_nvn.c)
 int nvn_fps_high_now(void) { return test_high; }
+static const char *test_hold;   // the graphics layer's heat or Low Power Mode hold (hle_nvn.c nvn_fps_hold_why): NULL, or its cause
+const char *nvn_fps_hold_why(void) { return test_hold; }
 #include "../hle_fpslock.c"
 #include <assert.h>
 #include <math.h>
@@ -67,13 +69,15 @@ static void check(int which) {
     } else if (which == 7) {
         strcpy(g_mod[0].build_id, "79e5950ffa85acf63e28c9aec051eac2");
         f = (float *)(base + 0x13c94dc); *f = 1000.0f / 30;
-    } else if (which == 8) {   // Octopath Traveler 0: the frame limit and the present interval, and a variable the host does not write
+    } else if (which == 8) {   // Octopath Traveler 0: the frame limit and the present interval, and a variable the host does not write; FINAL FANTASY RESONANCE's dynamic-resolution budget
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
-        cvar("r.Streaming.PoolSize", 0x7c71608); cvar(DM_GAME_UE_FPS_CVAR, 0x7c738d0); cvar("rhi.SyncInterval", 0x7b32690);
+        cvar("r.Streaming.PoolSize", 0x7c71608); cvar(DM_GAME_UE_FPS_CVAR, 0x7c738d0); cvar("rhi.SyncInterval", 0x7b32690); cvar("r.DynamicRes.FrameTimeBudget", 0x8be8118);
         *(uintptr_t *)(base + 0x7c738d0 + 0x10) = (uintptr_t)object;
         *(uintptr_t *)(base + 0x7b32690 + 0x10) = (uintptr_t)(object + 16);
+        *(uintptr_t *)(base + 0x8be8118 + 0x10) = (uintptr_t)(object + 32);
         f = (float *)object; f[0] = f[1] = 30;
         sync = (int32_t *)(object + 16); sync[0] = sync[1] = 2;
+        float *budget = (float *)(object + 32); budget[0] = budget[1] = 33.33f;
     } else if (which == 14) {
         strcpy(g_mod[0].build_id, "a48c0de3bc353efa0e4d359bde05ef24");
         *(uintptr_t *)(base + 0xda20e38) = (uintptr_t)object;
@@ -117,6 +121,10 @@ static void check(int which) {
         g_mod[0].fps_target_ptr = 0x21e60d8; g_mod[0].fps_target_field = 0x1dc;
         *(uintptr_t *)(base + 0x21e60d8) = (uintptr_t)object;
         *(int32_t *)(object + 0x1dc) = which == 17 ? 30 : 60;
+    } else if (which == 30) {   // NieR:Automata 1.0.3: the present interval at [display]+0x9c160 (2 = 30 fps) and the interval mode at display+0x504 (1 = 30 fps), both set by the game to 30
+        strcpy(g_mod[0].build_id, "3c10ec35c5ef4c3686b4053afb0e58e7");
+        *(uintptr_t *)(base + 0x192be00) = (uintptr_t)(base + 0x2000000);
+        *(uint32_t *)(base + 0x2000000 + 0x9c160) = 2; *(uint32_t *)(base + 0x192be00 + 0x504) = 1;
     } else if (which >= 9) {   // the present interval alone (UE 4.18's nvn.SyncInterval); 12: a main the rewriter found no variable in
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         if (which != 12) cvar("nvn.SyncInterval", 0x8adca10);
@@ -133,6 +141,7 @@ static void check(int which) {
         test_high = 60; dm_fps_lock_tick(); assert(*t == 60);
         test_high = 120; dm_fps_lock_tick(); assert(*t == 120);
         *t = 30; dm_fps_lock_tick(); assert(*t == 120);
+        test_hold = "Low Power Mode"; dm_fps_lock_tick(); assert(*t == 120);   // at 120 the hold follows the frame step's hold (high_cap_tick's 60), not this one
         munmap(base, len); return;
     }
     if (which == 20) { assert(*(int32_t *)(object + 0x1dc) == 60); munmap(base, len); return; }   // a game not checked at 120 runs at 60
@@ -155,12 +164,21 @@ static void check(int which) {
             assert(*sync == 1 && *t == -1 && writes == 1);
             dm_fps_lock_tick(); assert(writes == 1);
             *sync = 2; dm_fps_lock_tick(); assert(*sync == 1 && writes == 2);
+            test_hold = "Low Power Mode"; dm_fps_lock_tick(); assert(*sync == 2 && *t == -1 && writes == 3);   // two vsyncs a frame at the hold; targetFrameRate unset stays
+            test_hold = NULL; dm_fps_lock_tick(); assert(*sync == 1 && writes == 4);
         } else if (which == 26) {   // 120: still one vsync; the target follows the hold
             assert(*sync == 1 && *t == 120);
             test_high = 60; dm_fps_lock_tick(); assert(*sync == 1 && *t == 60);
         } else if (which == 27) assert(*sync == 2 && *t == -1 && writes == 0);   // no target: left as the game sets them, though the engine limit is there
         else if (which == 28) assert(*sync == 1 && *unity == 60 && writes == 2);   // the count and the target, each written once
         else assert(*sync == 0 && *t == 60 && writes == 1);   // 29: a count of 0 is the game's choice to pace by targetFrameRate, which is raised
+        munmap(base, len); return;
+    }
+    if (which == 30) {   // 60, then the hold's 30 (the game's own interval and mode), then 60 again
+        uint32_t *itv = (uint32_t *)(base + 0x2000000 + 0x9c160), *mode = (uint32_t *)(base + 0x192be00 + 0x504);
+        assert(*itv == 1 && *mode == 0);
+        test_hold = "thermal state serious"; dm_fps_lock_tick(); assert(*itv == 2 && *mode == 1);
+        test_hold = NULL; dm_fps_lock_tick(); assert(*itv == 1 && *mode == 0);
         munmap(base, len); return;
     }
     if (which == 21) {
@@ -172,30 +190,57 @@ static void check(int which) {
         assert(*unity == 60 && writes == 1);
         dm_fps_lock_tick(); assert(writes == 1);
         *unity = 30; dm_fps_lock_tick(); assert(*unity == 60 && writes == 2);
-    } else if (which == 1) assert(*unity == 30 && writes == 1);
+        test_hold = "Low Power Mode"; dm_fps_lock_tick(); assert(*unity == 30 && writes == 3);   // the hold: 30, and back to 60 when it ends
+        test_hold = NULL; dm_fps_lock_tick(); assert(*unity == 60 && writes == 4);
+    } else if (which == 1) { assert(*unity == 30 && writes == 1); test_hold = "thermal state serious"; dm_fps_lock_tick(); assert(*unity == 30 && writes == 1); }   // a 30 target: nothing to hold
     else if (which >= 2 && which <= 5) {
         assert(writes == 0);
         assert(*unity == (which == 4 ? -1 : which == 5 ? 0 : 30));
-    } else if (which == 6) assert(*f == 60 && writes == 1);
-    else if (which == 7) assert(fabsf(*f - (1000.0f / 60 - 0.5f)) < 0.001f && writes == 1);
-    else if (which == 8) assert(f[0] == 60 && f[1] == 60 && sync[0] == 1 && sync[1] == 1 && writes == 4);
+    } else if (which == 6) {
+        assert(*f == 60 && writes == 1);
+        test_hold = "thermal state serious"; dm_fps_lock_tick(); assert(*f == 30 && writes == 2);   // RE Engine steps by the time that passed: 30 is the limit alone
+        test_hold = NULL; dm_fps_lock_tick(); assert(*f == 60 && writes == 3);
+    } else if (which == 7) {   // Luigi's Mansion 3: the game's own 33.333 ms at the hold, as at a 30 target (no margin), and the 60 fps time with its margin after it
+        assert(fabsf(*f - (1000.0f / 60 - 0.5f)) < 0.001f && writes == 1);
+        test_hold = "Low Power Mode"; dm_fps_lock_tick(); assert(fabsf(*f - 1000.0f / 30) < 0.001f && writes == 2);
+        dm_fps_lock_tick(); assert(writes == 2);
+        test_hold = NULL; dm_fps_lock_tick(); assert(fabsf(*f - (1000.0f / 60 - 0.5f)) < 0.001f && writes == 3);
+    } else if (which == 8) {   // Unreal: the frame limit, the present interval and the dynamic resolution's budget (the target's frame time, less the 60 fps margin: ms_want)
+        float *budget = (float *)(object + 32);
+        assert(f[0] == 60 && f[1] == 60 && sync[0] == 1 && sync[1] == 1 && fabsf(budget[0] - (1000.0f / 60 - 0.5f)) < 0.001f && budget[1] == budget[0] && writes == 6);
+        test_hold = "Low Power Mode"; dm_fps_lock_tick(); assert(f[0] == 30 && f[1] == 30 && sync[0] == 2 && sync[1] == 2 && fabsf(budget[0] - 1000.0f / 30) < 0.001f && writes == 12);
+        test_hold = NULL; dm_fps_lock_tick(); assert(f[0] == 60 && f[1] == 60 && sync[0] == 1 && sync[1] == 1 && fabsf(budget[1] - (1000.0f / 60 - 0.5f)) < 0.001f && writes == 18);
+    }
     else if (which == 9) {
         assert(sync[0] == 1 && sync[1] == 1 && writes == 2);
         dm_fps_lock_tick(); assert(writes == 2);
         sync[0] = sync[1] = 2; dm_fps_lock_tick();
         assert(sync[0] == 1 && sync[1] == 1 && writes == 4);
     } else if (which == 10) assert(sync[0] == 2 && sync[1] == 2 && writes == 2);
-    else if (which == 14) { double *d = (double *)(object + 8); assert(d[0] == 60 && d[1] == 60 && writes == 2); }
+    else if (which == 14) {   // EA SPORTS FC 27's regulator: target and reported rate
+        double *d = (double *)(object + 8); assert(d[0] == 60 && d[1] == 60 && writes == 2);
+        test_hold = "thermal state serious"; dm_fps_lock_tick(); assert(d[0] == 30 && d[1] == 30 && writes == 4);
+        test_hold = NULL; dm_fps_lock_tick(); assert(d[0] == 60 && d[1] == 60 && writes == 6);
+    }
     else if (which == 15) {
         assert(*(float *)(object + 0x34) == 60 && *(int32_t *)(object + 0x38) == 60 && writes == 2);
         dm_fps_lock_tick(); assert(writes == 2);
         *(int32_t *)(object + 0x38) = 30; dm_fps_lock_tick(); assert(*(int32_t *)(object + 0x38) == 60 && writes == 3);
+        test_hold = "Low Power Mode"; dm_fps_lock_tick(); assert(*(float *)(object + 0x34) == 30 && *(int32_t *)(object + 0x38) == 30 && writes == 5);   // Frostbite's simulation rate at the hold
+        test_hold = NULL; dm_fps_lock_tick(); assert(*(float *)(object + 0x34) == 60 && *(int32_t *)(object + 0x38) == 60 && writes == 7);
     } else if (which == 17) {
         int32_t *t = (int32_t *)(object + 0x1dc);
         assert(*t == 60 && writes == 1);
         dm_fps_lock_tick(); assert(writes == 1);
         *t = 30; dm_fps_lock_tick(); assert(*t == 60 && writes == 2);   // the game sets 30 again where gameplay starts
-    } else if (which == 18) assert(*(int32_t *)(object + 0x1dc) == 30 && writes == 1);
+        // Heat or Low Power Mode: the target the game steps by (60.0 / target a frame) goes to 30, the game's own value, and back to 60 once the hold ends
+        test_hold = "Low Power Mode"; dm_fps_lock_tick(); assert(*t == 30 && writes == 3);
+        dm_fps_lock_tick(); assert(*t == 30 && writes == 3);
+        test_hold = NULL; dm_fps_lock_tick(); assert(*t == 60 && writes == 4);
+    } else if (which == 18) {   // a 30 target: the hold changes nothing
+        assert(*(int32_t *)(object + 0x1dc) == 30 && writes == 1);
+        test_hold = "thermal state serious"; dm_fps_lock_tick(); assert(*(int32_t *)(object + 0x1dc) == 30 && writes == 1);
+    }
     else if (which == 16) assert(*(float *)(object + 0x34) == 30 && *(int32_t *)(object + 0x38) == 30 && writes == 0);
     else if (which == 13) {
         assert(sync[0] == 2 && sync[1] == 2 && writes == 0);
@@ -209,10 +254,10 @@ static void check(int which) {
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < 31; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, build gates, found fields and overrides passed");
+    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, build gates, found fields, overrides and the heat / Low Power Mode hold passed");
 }

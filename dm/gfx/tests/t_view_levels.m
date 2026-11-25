@@ -30,6 +30,33 @@ static void view_case(int tid, unsigned level, unsigned count, unsigned expected
     }
     os_unfair_lock_unlock(&g_rmu);
 }
+// A registered texture whose serial holds a view already (an sRGB / linear twin in production, tex_mtl_): the registration's view is made from the resident root, the two level and
+// slice offsets composed, and the cache keeps it (upstream 81e22cca1, PR #1696; NX 18's view cache is keyed by serial and checks the root)
+static void nested_registered_view(void) {
+    tex_t t = {.magic=MAGIC('T','E','X',0), .serial=99001};
+    t.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_RGBA8, .width=64, .height=64, .depth=1, .levels=3, .samples=1};
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:128 height:128 mipmapped:YES];
+    d.textureType = MTLTextureType2DArray; d.arrayLength = 4;
+    id<MTLTexture> root = [g_dev newTextureWithDescriptor:d]; res_add(root);
+    id<MTLTexture> base = [root newTextureViewWithPixelFormat:root.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(1, 3) slices:NSMakeRange(2, 1)];
+    // A serial's view refers to a parent in the storage-sharing table (tex_mtl_ drops one whose parent left it)
+    alias_key key = {.pool=0x99000, .d=t.d}; key.d.target = NVN_TEXTURE_TARGET_2D_ARRAY; key.d.width = key.d.height = 128; key.d.depth = 4;
+    smu_lock(); alias_put(&key, root); pthread_mutex_unlock(&g_smu);
+    mtl_tex_init(&t); serial_put(t.serial, base);   // live, so the view cache keeps its views (vc_set_for)
+    view_t range = {.set_levels=1, .base_level=1, .nlevels=1};
+    mtl_reg_tex(310, &t, &range);
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLTexture> view = tex_by_id(310);
+    CHECK(view.parentTexture == root, "registered range is made from the resident root");
+    CHECK(view.parentRelativeLevel == 2 && view.parentRelativeSlice == 2 && view.width == 32, "base and registered range offsets are composed");
+    CHECK(tex_by_id(310) == view, "root view is retained by the registration");
+    uint64_t made = g_vc_new;
+    os_unfair_lock_unlock(&g_rmu);
+    mtl_reg_tex(311, &t, &range);   // a second ID with the same range: the cached view, not a new one
+    os_unfair_lock_lock(&g_rmu);
+    CHECK(tex_by_id(311) == view && g_vc_new == made, "a second registration of the range finds the cached view");
+    os_unfair_lock_unlock(&g_rmu);
+}
 static MTLTextureDescriptor *desc_of(int target, unsigned w, unsigned h, unsigned depth, unsigned levels, unsigned samples) {
     tex_t t = {.magic=MAGIC('T','E','X',0), .serial=98000};
     t.d = (nvn_texdesc){.target=target, .format=NVN_FORMAT_RGBA8, .width=w, .height=h, .depth=depth, .levels=levels, .samples=samples};
@@ -51,7 +78,7 @@ static void desc_caps(void) {
     CHECK(d && d.arrayLength == 1 && [g_dev newTextureWithDescriptor:d], "array of no layers: one");
     CHECK(desc_of(NVN_TEXTURE_TARGET_1D_ARRAY, 8, 4096, 1, 1, 1) == nil, "1D array of 4096 layers: not made");
     d = desc_of(NVN_TEXTURE_TARGET_2D_MULTISAMPLE, 16, 16, 1, 1, 8);
-    CHECK([g_dev supportsTextureSampleCount:8] ? d && d.sampleCount == 8 && [g_dev newTextureWithDescriptor:d] : d == nil, "8 samples: made where the GPU has them, else not made");
+    CHECK(d && d.sampleCount == ([g_dev supportsTextureSampleCount:8] ? 8 : 4) && [g_dev newTextureWithDescriptor:d], "8 samples: made where the GPU has them, else with 4 (t_ms_fit)");
     d = desc_of(NVN_TEXTURE_TARGET_2D_MULTISAMPLE, 16, 16, 1, 1, 4);
     CHECK(d && d.sampleCount == 4 && d.mipmapLevelCount == 1 && [g_dev newTextureWithDescriptor:d], "4 samples: made");
     CHECK(desc_of(NVN_TEXTURE_TARGET_2D_MULTISAMPLE, 16, 16, 1, 1, 1) == nil, "multisample of one sample: not made");
@@ -59,6 +86,7 @@ static void desc_caps(void) {
 int main(void) { @autoreleasepool {
     mtl_init();
     desc_caps();
+    nested_registered_view();
     view_case(300, 0, 7, 7, 1);
     view_case(301, 1, 7, 6, 6);
     view_case(302, 1, 2, 2, 1);

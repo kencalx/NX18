@@ -1,7 +1,9 @@
 """The Legend of Zelda: Breath of the Wild's committed prewarm list (dm/games/01007EF00011E000/pso_manifest.tsv, its README "Pipelines on a first start"): the Mac recording,
-then an iPhone 18 Pro Max's own pso_user.tsv from the owner's play on 0.5 (Frame rate 60, Picture Stretch) below its note. Every row must check clean against the profile's
-shader map as the host reads it (dm/tools/pso_seed.py), in the counts the header and the note give, with no row repeated or dropped; the iPhone rows repeat none of the Mac rows
-(pso_user.tsv records only what the list did not hold), and the C rows must be compute shaders of the map (pso_offline.py puts them first in the archive's compute groups)."""
+then an iPhone 18 Pro Max's own pso_user.tsv from the owner's play on 0.5 (Frame rate 60, Picture Stretch) below its note, then the same iPhone's pso_user.tsv after a start of
+X1.0 (docked) below its own note: the rows the lists did not hold, 82 from later play on 0.5 (release 1's 1,008-digit keys) and then 153 from X1.0 (the border field, 1,024).
+Every row must check clean against the profile's shader map as the host reads it (dm/tools/pso_seed.py), in the counts the header and the notes give, with no row repeated or
+dropped; each part repeats none of the rows above it (pso_user.tsv records only what the list did not hold), and the C rows must be compute shaders of the map (pso_offline.py
+puts them first in the archive's compute groups)."""
 import re
 import sys
 import unittest
@@ -19,33 +21,63 @@ class Committed(unittest.TestCase):
         self.text = (GAME / 'pso_manifest.tsv').read_bytes().decode('utf-8')
         self.shmap = pso_seed.read_map(GAME / 'shader_map.tsv')
         self.lines = [ln for ln in self.text.split('\n') if ln]
-        self.note = next(i for i, ln in enumerate(self.lines) if ln.startswith('# Recorded on an iPhone 18 Pro Max'))
+        notes = [i for i, ln in enumerate(self.lines) if ln.startswith('# Recorded on an iPhone 18 Pro Max from the owner')]
+        play05 = [i for i in notes if self.lines[i].startswith("# Recorded on an iPhone 18 Pro Max from the owner's play on 0.5 ")]
+        playx1 = [i for i in notes if self.lines[i].startswith("# Recorded on an iPhone 18 Pro Max from the owner's play on X1.0 ")]
+        self.assertEqual((len(notes), len(play05), len(playx1)), (2, 1, 1), 'one note for each phone part')
+        self.note, self.x1 = play05[0], playx1[0]
+        self.r3 = next(i for i, ln in enumerate(self.lines) if ln.startswith('# The rows below:') and '29dcbb4d' in ln)
+        self.assertLess(self.note, self.x1, 'the 0.5 rows come before the X1.0 rows')
+
+    def found(self, pattern, text):
+        """re.search(pattern, text).groups(), or the test fails naming the pattern"""
+        m = re.search(pattern, text)
+        if m is None: self.fail(f'{pattern!r} not in {text!r}')
+        return m.groups()
 
     def test_checks_clean(self):
         rows = [ln for ln in self.lines if not ln.startswith('#')]   # as the host splits them: a '\r' would stay in the row
         keep, bad = pso_seed.collect(rows, self.shmap)
         self.assertEqual((bad, len(keep)), ([], len(rows)))
-        self.assertEqual(pso_seed.counts(keep), {'S': 4889, 'R': 1352, 'C': 15, 'M': 0, 'rows': 6256})
+        self.assertEqual(pso_seed.counts(keep), {'S': 6040, 'R': 2172, 'C': 19, 'M': 0, 'rows': 8231})
 
     def test_the_mac_rows_then_the_iphone_rows(self):
         mac = [ln for ln in self.lines[:self.note] if not ln.startswith('#')]
-        phone = [ln for ln in self.lines[self.note:] if not ln.startswith('#')]
+        phone = [ln for ln in self.lines[self.note:self.x1] if not ln.startswith('#')]
+        x1 = [ln for ln in self.lines[self.x1:self.r3] if not ln.startswith('#')]
+        r4 = next(i for i, ln in enumerate(self.lines) if ln.startswith('# Grown on 2026-11-19'))   # the X2.0 runs' block after it
+        r3 = [ln for ln in self.lines[self.r3:r4] if not ln.startswith('#')]
+        r4rows = [ln for ln in self.lines[r4:] if not ln.startswith('#')]
         self.assertEqual(pso_seed.counts(mac), {'S': 819, 'R': 960, 'C': 10, 'M': 0, 'rows': 1789})
         self.assertEqual(pso_seed.counts(phone), {'S': 4070, 'R': 392, 'C': 5, 'M': 0, 'rows': 4467})
-        self.assertFalse({pso_seed.identity(r) for r in mac} & {pso_seed.identity(r) for r in phone})
+        self.assertEqual(pso_seed.counts(x1), {'S': 38, 'R': 197, 'C': 0, 'M': 0, 'rows': 235})
+        ids = [{pso_seed.identity(r) for r in part} for part in (mac, phone, x1)]
+        self.assertFalse(ids[0] & ids[1])
+        self.assertFalse((ids[0] | ids[1]) & ids[2])
+        self.assertEqual(pso_seed.counts(r3), {'S': 801, 'R': 496, 'C': 4, 'M': 0, 'rows': 1301})
+        self.assertFalse((ids[0] | ids[1] | ids[2]) & {pso_seed.identity(r) for r in r3}, 'the X2.0 rows repeat none above them')
+        self.assertEqual(pso_seed.counts(r4rows), {'S': 312, 'R': 127, 'C': 0, 'M': 0, 'rows': 439})
+        self.assertFalse((ids[0] | ids[1] | ids[2] | {pso_seed.identity(r) for r in r3}) & {pso_seed.identity(r) for r in r4rows}, 'the 2026-11-19 rows repeat none above them')
+        lengths = [len(r.split('\t')[1]) for r in x1 if r.startswith('R\t')]
+        self.assertEqual((lengths[:66].count(1008), lengths[66:].count(1024)), (66, 131), 'the later 0.5 rows, then X1.0\'s with the border field')
 
     def test_header_counts_and_source(self):
         head = [ln for ln in self.lines if ln.startswith('#')]
         self.assertNotIn('Provisional', ''.join(head))
         rec = self.lines[self.note]
         self.assertIn('Picture Stretch', rec)
-        self.assertEqual(re.search(r'(\d+) rows: (\d+) S, (\d+) R, (\d+) C\.', rec).groups(), ('4467', '4070', '392', '5'))
+        self.assertEqual(self.found(r'(\d+) rows: (\d+) S, (\d+) R, (\d+) C\.', rec), ('4467', '4070', '392', '5'))
+        rec = self.lines[self.x1]
+        for word in ('6448f757', 'chain 222e58e346d6', 'v1114112', 'docked', 'Picture Stretch', 'edge smoothing', 'held 4549 lines', 'Documents/pso_user.tsv'):
+            self.assertIn(word, rec)
+        self.assertEqual(self.found(r'(\d+) rows: (\d+) S, (\d+) R, (\d+) C:', rec), ('235', '38', '197', '0'))
+        self.assertIn('no row refused', self.lines[self.x1 + 1])
         top = next(ln for ln in head[:4] if ln.startswith('# Then, below the Mac rows'))
-        self.assertEqual(re.search(r'In all (\d+) rows: (\d+) S, (\d+) R, (\d+) C\.', top).groups(), ('6256', '4889', '1352', '15'))
+        self.assertEqual(self.found(r'In all (\d+) rows: (\d+) S, (\d+) R, (\d+) C\.', top), ('7792', '5728', '2045', '19'))
 
     def test_compute_rows_are_map_compute_shaders(self):
         c = [ln.split('\t')[1] for ln in self.lines if ln.startswith('C\t')]
-        self.assertEqual(len(c), 15)
+        self.assertEqual(len(c), 19)
         self.assertTrue(all(self.shmap.get(k[:-2]) == 'compute' for k in c))
 
 

@@ -6,9 +6,24 @@ vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); 
 // p[0] = source origin (texels) + source texels per destination texel, p[1] = destination origin + source level size
 fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant float4 *p [[buffer(0)]]) {
   float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; return t.sample(s, st / p[1].zw, level(0)); }
+// DLSS's alpha-only pass: p[2] bounds the input content's texel centers. Clamp before sampling so padding around a dynamic or offset input never contributes alpha.
+fragment float4 fsa(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant float4 *p [[buffer(0)]]) {
+  float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; st = clamp(st, p[2].xy, p[2].zw); return float4(0, 0, 0, t.sample(s, st / p[1].zw, level(0)).a); }
+// fs with each colour channel squared, keeping its sign: c * |c| (COPY_T2T_SQUARE: an upscaler's square-rooted input into linear colour, up_mfx_encode)
+fragment float4 fsq(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant float4 *p [[buffer(0)]]) {
+  float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; float4 c = t.sample(s, st / p[1].zw, level(0)); return float4(c.rgb * abs(c.rgb), c.a); }
 struct D { float d [[depth(any)]]; };
 fragment D fsd(V in [[stage_in]], depth2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant float4 *p [[buffer(0)]]) {
   float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; D o; o.d = t.read(uint2(st)); return o; }
 struct DS { float d [[depth(any)]]; uint s [[stencil]]; };
 fragment DS fsds(V in [[stage_in]], depth2d<float> t [[texture(0)]], texture2d<uint> ts [[texture(1)]], constant float4 *p [[buffer(0)]]) {
   float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; DS o; o.d = t.read(uint2(st)); o.s = ts.read(uint2(st)).r; return o; }
+// Depth into a float colour's first channel, a float colour's first channel into depth, and integer texels read as they are, unfiltered (copy_t2t_draw's t2t_kind; ported from S2Arm c5eb1fd7)
+fragment float4 fsdc(V in [[stage_in]], depth2d<float> t [[texture(0)]], constant float4 *p [[buffer(0)]]) {
+  float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; return float4(t.read(uint2(st)), 0, 0, 1); }
+fragment D fscd(V in [[stage_in]], texture2d<float> t [[texture(0)]], constant float4 *p [[buffer(0)]]) {
+  float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; D o; o.d = t.read(uint2(st)).r; return o; }
+fragment uint4 fsu(V in [[stage_in]], texture2d<uint> t [[texture(0)]], constant float4 *p [[buffer(0)]]) {
+  float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; return t.read(uint2(st)); }
+fragment int4 fsi(V in [[stage_in]], texture2d<int> t [[texture(0)]], constant float4 *p [[buffer(0)]]) {
+  float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; return t.read(uint2(st)); }

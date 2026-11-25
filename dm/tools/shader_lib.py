@@ -71,15 +71,17 @@ def _names(folder):
     return out
 
 
-def write(files, dst):
+def write(files, dst, on_progress=None):
     """files: {name: path to read (a romfs path may name a file inside an image), the bytes, or a function returning them (read only when its file is written: dmsh_build.py's outputs staged in the
-    shader cache, so that no library is held in memory whole)} → the image dst, by way of dst.part. A stopped write leaves only the .part, and an image is whole or absent"""
+    shader cache, so that no library is held in memory whole)} → the image dst, by way of dst.part. A stopped write leaves only the .part, and an image is whole or absent.
+    on_progress(files done, files, bytes written): at the start and after each file, for dmsh_build.py's progress (upstream NXNative d2939c1eb)"""
     part = dst + '.part'
     names = sorted((n.encode() for n in files))
     ents, off = [], romfs.HEAD.size
+    if on_progress: on_progress(0, len(names), 0)
     with builtins.open(part, 'wb') as out:
         out.write(b'\0' * off)
-        for name in names:
+        for i, name in enumerate(names, 1):
             off += -off % ALIGN
             out.seek(off)
             n, source = 0, files[name.decode()]
@@ -91,6 +93,7 @@ def write(files, dst):
                 with romfs.open(source, 'rb') as f:
                     while b := f.read(8 << 20): out.write(b); n += len(b)
             ents.append((name, off, n)); off += n
+            if on_progress: on_progress(i, len(names), off)
         out.seek(off)
         pool, idx = bytearray(), bytearray(romfs.ENT.pack(1, len(names), 0, 0, 0, 0))   # entry 0, the root: its children are every other entry
         for name, a, b in ents:

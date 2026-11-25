@@ -49,6 +49,10 @@ enum LauncherShortcuts {
     @MainActor static var started = false               // dmShowLauncher has decided: the settings screen is up, or the game started
     @MainActor static var screenUp = false              // the settings screen is on screen (presentLauncher until Play)
     @MainActor static let requests = PassthroughSubject<LauncherShortcut, Never>()   // to the settings screen on screen (LauncherView.shortcut)
+    // The settings screen shortcuts go to: each presentation gets the next number (presentLauncher), and only the screen with the current one acts on a request. A screen dismissed
+    // earlier can still be alive (SwiftUI keeps a view's state while anything holds its host), and it heard every request too: in the Duo harness's full run an earlier test's screen
+    // took the Guide and Game shortcuts meant for the new one
+    @MainActor static var screen = 0
     @MainActor static var openMenu: () -> Void = { dm_gamepad_menu_open() }   // the in-game menu, over the running game (DmGamepad.m); the Duo harness's test replaces it
     // Whether the app is in front and taking input: the application active and its own scene (not a TV's) foreground-active. A shortcut waits for it (perform), and so does the game's
     // start from a cloud-save check that ended while the player was away (LauncherView.startHeld): a game started from the background would make its Metal device and first GPU work

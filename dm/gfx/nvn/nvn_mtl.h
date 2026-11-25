@@ -6,6 +6,10 @@
 #include <stddef.h>
 
 void mtl_init(void);
+// The frame chain's threads by core type (hle_nvn.c, the threads line): each samples itself at most once a frame
+enum { DM_TCORE_MAIN, DM_TCORE_REPLAY, DM_TCORE_ENCODE, DM_TCORE_PRESENT, DM_TCORE_N };
+void dm_tcore_sample(int role, uint64_t frame);
+void dm_tcore_text(char *out, size_t n, double secs);   // the threads line's part since the last call (secs: the window's length)
 void mtl_vbuf_stats(uint64_t *resolve, uint64_t *reuse, uint64_t *set, uint64_t *skip, uint64_t *copies, uint64_t *copy_bytes);
 void mtl_ft_stats(uint64_t *set, uint64_t *skip);   // fragment argument table writes made / skipped as unchanged (g_ft_addr in nvn_mtl.m)
 void mtl_set_depth_zero(int on);          // NVN depth mode: 1 = near is 0 (D3D / Metal), 0 = near is -w (GL, NVN's default); picks the vertex shaders' entry point (see shader_load in nvn_mtl.m)
@@ -15,8 +19,16 @@ void bf_want_note(const char *key);
 
 // Memory pool: [mem, mem+size) is expanded outward to page boundaries to build a zero-copy buffer; look up the buffer and offset by GPU address (= CPU address)
 void mtl_pool_add(const void *mem, uint64_t size);
+void mtl_preread(const void *mem, uint64_t size);   // DM_NVN_PREREAD (on by default): read this guest range ahead in the background (kid-with-sword-remake L7.7)
 void mtl_pool_addressed(const void *mem, uint64_t size);   // the game holds a GPU address in this range, so raw global memory may reach it
+enum { AK_POOL = 1, AK_BUF = 2, AK_TEX = 4 };   // how the address was given: the pool's own (nvnMemoryPoolGetBufferAddress, MapVirtual), a buffer's, a texture's (census only)
+void mtl_pool_addressed_k(const void *mem, uint64_t size, int kind);   // mtl_pool_addressed, noting the kind in the pools the range meets
+void mtl_unwire_report(void);   // the upload-only unwire's 10 s line (DM_NVN_UNWIRE_UP; hle_svc.c, beside the guest file's line)
+void pool_res_classes(char *out, size_t n);   // the resident memory pools by class (U1 / U2 / U3 / EV) for a log line
+void mtl_pool_code_address(const void *mem, uint64_t size);   // a shader-code pool's own address (hle_nvn.c nvnMemoryPoolGetBufferAddress): counted, kept out of the raw pool table
 void mtl_pool_del(const void *mem);
+void mtl_pool_retire(const void *mem, uint64_t size, uint64_t after);   // a pool the game finalized, after `after` queue submissions: findable until the replay is past them (mtl_pool_reap)
+void mtl_pool_reap(uint64_t oldest);   // the replay begins a submission; oldest: the queue's oldest submission not done
 void mtl_pool_replace(const void *const *del, int ndel, const void *const *add, const uint64_t *size, int nadd);   // in one step for every lookup (a sparse pool's runs, hle_nvn.c vrun_set)
 void dm_gfx_addr_note(uint64_t a, char *note, size_t n);   // what the graphics layer knows of an address (the crash dump, red lines)
 // memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table
@@ -40,6 +52,8 @@ void mtl_res_snapshot(mtl_res_count *out);
 // One submit: begin -> several operations -> commit (returns the fence value at which this submit completes)
 void mtl_prepare(void);                                // the first submission's prepare step (prewarm, pipeline prebuild): no GPU work, called outside the graphics gate
 void mtl_sub_begin(void);
+void mtl_sub_ready(uint64_t guest_ns);   // the guest ns the submission being encoded was ready to run: its submit, or a wait it held for passing (counter timestamps: sub_place)
+void mtl_sub_cpu_limit(uint64_t dirty_clock);   // the dirty-page clock at the game's submit of the submission being encoded (UINT64_MAX: none): CPU writes past it wait for a later one's re-upload
 void mtl_queue_activate(uint64_t serial);              // submit lock held: restore this queue's persistent GPU state
 void mtl_queue_forget(uint64_t serial);                // finalize: discard its state, including guest object pointers
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n);               // Buffer copy in GPU ordering
@@ -48,21 +62,30 @@ void mtl_sub_counter(uint64_t addr, uint32_t type);                       // Wri
 uint64_t mtl_sub_commit(void);
 
 uint64_t mtl_completed_fence(void);                 // Completed physical submissions, including CPU-visible post effects
+int mtl_gpu_gone(void);                             // the GPU was taken as lost (DM_GPU_LOST_S, nvn_mtl.m gpu_watch): nothing more is sent to it and every wait on it gives way
 uint64_t mtl_last_fence(void);                       // Fence value of the most recent submit (0 = never submitted)
+enum { POOL_STATS = 14 };
+void mtl_pool_stats(uint64_t s[POOL_STATS]);              // the pool tables' counts for the power line (nvn_mtl.m mtl_pool_stats)
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);   // Returns 1 when the GPU has completed up to fence, 0 on timeout
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns);   // the same for a sync WindowAcquireTexture handed out (its own line in the wait ledger, DM_NVN_WAITS)
 void mtl_finish(void);                               // Wait for all submitted commands to complete
 void mtl_drain(void);                                // Wait for all commands on the queue (including presents) to complete: submit an empty command buffer and wait for it
 void mtl_wait_state_dump(void);                      // The graphics wait points in one log line (the watchdog, a suspend that did not drain)
 const char *mtl_drain_by(uint64_t by);               // mtl_drain with every wait ending at by (CLOCK_UPTIME_RAW ns; going to the background, dm_gfx_suspend): NULL when drained, else the step that reached it
+uint64_t mtl_res_commit_stuck(uint64_t min_ns, char *out, size_t n);   // a residency commit in the kernel for min_ns or more: when it began (nonzero), and what it is into out; 0 with none (no lock: the freeze detector, the suspend)
+void mtl_pso_guard_away(int why, int on);            // the app goes away (on 1) or comes back (0), why: 1 the background (dm_gfx_suspend), 2 inactive (dm_gfx_inactive), 4 the graceful exit (dm_gfx_exiting): the bundled pipeline archive's crash guard (nvn_pso_guard.h) does not count a start that ends meanwhile
+void mtl_pso_bundle_preopen(void);                  // the game's start, once the guest's address space is reserved (hle_svc.c dm_mem_ready_hook, set by main.c): the pipeline archive bundled with the app starts opening in the background, and the first submission takes it (pso_bundle_join)
 int mtl_pressure(int level);                         // The system's memory pressure changed (0 normal, 1 warning, 2 critical; any thread): logged, and a trim asked for the next submission's start; 1: asked
 uint64_t mtl_trim(int level);                        // Release what is idle and large now (no submission open, the GPU drained: dm_gfx_suspend, the tests); the bytes
 int mtl_bg_trim_on(void);                            // DM_BG_TRIM is not 0: going to the background trims (dm_gfx_suspend)
+void mtl_bg_purge(int bg);                           // Going to the background (1, the GPU drained) the host's packaged textures and render targets are marked purgeable; coming back (0, before the gate opens) non-volatile again, the emptied ones uploaded again or drawn again (DM_NVN_BG_PURGE)
+int mtl_bg_purge_on(void);                           // DM_NVN_BG_PURGE is not 0
 void mtl_arch_save(int wait_ms, int ending);         // The pipeline archive's unwritten captures, written now even during the prewarm (going to the background, quitting); ending: the process ends after waiting up to wait_ms
 void mtl_arch_hold(void);                            // Going to the background with the drain not finished: the crash marker's background state only, nothing handed over (that needs the compiler)
 void mtl_arch_resume(void);                          // Back in the foreground: compacting writes arm the pipeline archive's crash marker again (none while in the background)
 int mtl_arch_wait(int wait_ms);                      // Waits up to wait_ms for the archive's writes handed over (mtl_arch_save); 1: none left
-void mtl_xv_window_tex(uint64_t serial);   // Register a window (swapchain) texture: the cross-submit validity ledger never collects it
+enum { MTL_QUIT_ARCH_MS = 10000 };   // what quitting gives the archive's write (atexit; the graceful exit: dm.h DM_QUIT_ARCH_MS, the same): a file of 900 bases took 1.8-4 s on Macs
+void mtl_warm_stop(void);   // the process is ending: the pipeline prewarm takes no more lines, and what it has not built is left to the next start (no compiles beside the archive's write)
 #ifdef __OBJC__
 #import <Metal/Metal.h>
 id<MTL4Compiler> mtl_comp4(void);   // the host's one MTL4Compiler (made in mtl_init; a test that sets the device itself gets it at the first call): every pipeline the host builds

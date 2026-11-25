@@ -7,12 +7,16 @@
 #include <signal.h>
 #include <sys/wait.h>
 void dm_thread_native_wait(int entering) { (void)entering; } // queue-only test, without the guest scheduler
-uint64_t now_ns(void) { return 0; }
+static uint64_t t_now;   // the test's clock: the front-end menu's tail (FRONT_MENU_TAIL_NS) is timed on it
+uint64_t now_ns(void) { return t_now; }
 void dm_audio_suspend(int on) { (void)on; }   // stubs for the bg item of DM_OE_SCRIPT (hle_audio.c / hle_os.c / hle_nvn.c)
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_gfx_suspend(int on) { (void)on; }
+void dm_gfx_quit_begin(void) {}
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) { (void)why; (void)then; (void)arg; }   // oe_start, which never returns: this test checks its plan (oe_plan)
 void dm_host_shutdown(const char *why) { (void)why; }
+static int soon_n; static const char *soon_why;   // save_sync.c: the cloud save's send asked for at once (the in-game menu, the background)
+void save_sync_soon(const char *why) { soon_n++; soon_why = why; }
 // The notification event (hle_thread.c binds a kernel event): the unit test only tracks whether it is signalled
 static int ev_bound, ev_sig;
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; ev_bound = 1; }
@@ -69,11 +73,14 @@ static void plan_checks(void) {
     char dir[] = "/tmp/t_oe_plan.XXXXXX", old[4096], path[4200], self[4096], tsv[4200]; uint32_t ssz = sizeof self;
     if (!mkdtemp(dir) || !getcwd(old, sizeof old) || chdir(dir) || _NSGetExecutablePath(self, &ssz)) { CHECK(0, "plan: a scratch folder"); return; }
     int cur = (int)(DM_GAME_PROGRAM_ID & 0xf); prog_plan P;
-    unsetenv("DM_PROGRAMS"); setenv("DM_LAUNCH_PARAM", "/x/launch_param.bin", 1); setenv("DM_PREV_PROGRAM", "3", 1); setenv("DM_RELAUNCH", "1", 1); setenv("T_OE_KEEP", "yes", 1);
+    unsetenv("DM_PROGRAMS"); setenv("DM_PLAY_AT", "1000.5", 1); setenv("DM_LAUNCH_PARAM", "/x/launch_param.bin", 1); setenv("DM_PREV_PROGRAM", "3", 1); setenv("DM_RELAUNCH", "1", 1); setenv("T_OE_KEEP", "yes", 1);
     // a program run by itself: the relaunch is this host again, same arguments and folder, DM_RELAUNCH=1 once, no parameter or previous program
     CHECK(oe_plan(0, NULL, 0, 1, &P, "relaunch") && !strcmp(P.exe, self) && P.argv == *_NSGetArgv() && !P.cwd, "relaunch, no table: this host again, its own arguments, this folder");
     CHECK(env_count(P.env, "DM_RELAUNCH=1", 0) == 1 && !env_count(P.env, "DM_LAUNCH_PARAM=", 1) && !env_count(P.env, "DM_PREV_PROGRAM=", 1) && env_count(P.env, "T_OE_KEEP=yes", 0) == 1,
           "relaunch, no table: DM_RELAUNCH=1 once, no launch parameter, no previous program, the rest kept");
+    {   const char *pa = env_get(P.env, "DM_PLAY_AT"); double at = pa ? atof(pa) : 0; struct timespec w; clock_gettime(CLOCK_REALTIME, &w);
+        CHECK(env_count(P.env, "DM_PLAY_AT=", 1) == 1 && env_count(P.env, "DM_PLAY_AT=1000.5", 0) == 0 && at > w.tv_sec - 60 && at <= w.tv_sec + 1,
+              "the program that starts counts its start from the hand-over: DM_PLAY_AT once, now, not this program's Play"); }
     snprintf(path, sizeof path, "%s/launch_param.bin", dir); unlink(path);
     CHECK(access(path, F_OK) != 0, "relaunch, no table: no launch parameter file");
     // ExecuteProgram of its own index restarts it with the parameters; another program cannot start
@@ -93,7 +100,7 @@ static void plan_checks(void) {
     CHECK(oe_plan(1, "xyz", 3, 0, &P, "exec 1") && !strcmp(P.exe, "/h/p1") && env_count(P.env, "T_OE_ROW=one", 0) == 1 && env_count(P.env, "T_OE_ONLY1=x", 0) == 1
           && !env_count(P.env, "DM_RELAUNCH=", 1) && (lp = env_get(P.env, "DM_LAUNCH_PARAM")) && file_is(lp, "xyz", 3), "ExecuteProgram(1), table: its row, its keys, the parameters");
     CHECK(oe_plan(7, "xyz", 3, 0, &P, "exec 7") && !strcmp(P.exe, "/h/p0") && (lp = env_get(P.env, "DM_LAUNCH_PARAM")) && file_is(lp, "", 0), "ExecuteProgram(7), no such row: program 0, no parameters");
-    unsetenv("DM_PROGRAMS"); unsetenv("DM_LAUNCH_PARAM"); unsetenv("DM_PREV_PROGRAM"); unsetenv("DM_RELAUNCH"); unsetenv("T_OE_KEEP"); unsetenv("T_OE_ONLY1"); unsetenv("T_OE_ROW");
+    unsetenv("DM_PROGRAMS"); unsetenv("DM_PLAY_AT"); unsetenv("DM_LAUNCH_PARAM"); unsetenv("DM_PREV_PROGRAM"); unsetenv("DM_RELAUNCH"); unsetenv("T_OE_KEEP"); unsetenv("T_OE_ONLY1"); unsetenv("T_OE_ROW");
     unlink(path); unlink(tsv); if (chdir(old)) {} rmdir(dir);
 }
 int main(void) {
@@ -106,13 +113,29 @@ int main(void) {
     h_oe_InactivityExtSafe(0x100);
     CHECK(h_oe_InactivityMode() == 0 && !h_oe_InactivityExtQ(), "clearing the extension restores mode 0");
     CHECK(empty(), "empty queue at start: returns false and leaves the output alone");
+    h_oe_FinishLogo();
+    CHECK(empty(), "finishing absent startup logo does not notify without registration");
+    h_oe_EnableStartupLogoMessage();
+    CHECK(pop_is(95) && empty(), "startup logo already absent: registration queues notification 95");
+    h_oe_GetMsgEv();
+    h_oe_EnableStartupLogoMessage();
+    CHECK(ev_sig && pop_is(95) && !ev_sig && empty(), "startup-logo notification signals and clears the existing message event");
     dm_focus_set(1); dm_set_opmode(1); CHECK(empty(), "same state sends no notification"); CHECK(hid_moves == 0, "an unchanged mode moves no npad");
     dm_set_opmode(0); CHECK(hid_moves == 1, "to handheld: hid is told that the npads moved");
     dm_set_opmode(1); CHECK(hid_moves == 2 && empty(), "and back to console (no notification: the game has not turned it on)");
+    soon_n = 0;
     dm_focus_set(3); CHECK(h_oe_GetFocus() == 3, "background state 3 can be queried before popping");
+    CHECK(soon_n == 1 && soon_why && strstr(soon_why, "background"), "the background asks the cloud save to go at once (save_sync_soon)");
     CHECK(pop_is(15) && empty(), "background change notification 15 exactly once");
     dm_focus_set(2); dm_focus_set(1);
+    CHECK(soon_n == 1, "back from the background through out of focus asks for no send");
     CHECK(pop_is(15) && empty() && h_oe_GetFocus() == 1, "unpopped focus-lost/resume merged, final focus queried as 1");
+    soon_why = NULL; dm_focus_set(2);
+    CHECK(soon_n == 2 && soon_why && strstr(soon_why, "lost focus"), "losing focus asks the cloud save to go at once: the iPhone's resign active, all there is before a swipe in the app switcher kills the app");
+    dm_focus_set(3);
+    CHECK(soon_n == 3 && strstr(soon_why, "background"), "the background after it asks again (a Commit made in between goes too)");
+    dm_focus_set(2); dm_focus_set(2); dm_focus_set(1);
+    CHECK(soon_n == 3, "coming back, a repeated state and getting focus back ask for no send");
     reset(); g_ntf_opmode = g_ntf_perfmode = 1;
     dm_focus_set(2); dm_set_opmode(0); dm_focus_set(3); dm_set_opmode(1);
     CHECK(pop_is(15) && pop_is(30) && pop_is(31) && empty(), "first positions of the three kinds FIFO=15,30,31, repeats do not move them");
@@ -212,5 +235,25 @@ int main(void) {
     setenv("DM_GFX_SCALE", "0", 1); dm_set_opmode(1); CHECK(h_oe_GfxScale() == 0, "DM_GFX_SCALE=0 docked: tier 0");
     setenv("DM_GFX_SCALE", "7", 1); CHECK(h_oe_GfxScale() == GFX_SCALE_IOS, "DM_GFX_SCALE=7 docked: no such tier, the platform's answer"); unsetenv("DM_GFX_SCALE");
     plan_checks();
+    // The front end's own menu over the game (dm_front_menu_set / dm_front_menu_now, front.h): diagnostics only. The game sees nothing of it (no notification, its focus
+    // unchanged); the present path reads it to tag long frames, open from the open report until FRONT_MENU_TAIL_NS past the close (its dismissal is still drawn), then shut
+    reset(); t_now = 1000;
+    CHECK(!dm_front_menu_now(), "front-end menu: shut at the start");
+    dm_front_menu_set(0, NULL); CHECK(!dm_front_menu_now() && atomic_load(&g_front_menu_tail) == 0, "a close report while shut starts no tail");
+    soon_n = 0;
+    dm_front_menu_set(1, NULL); CHECK(dm_front_menu_now() && empty() && h_oe_GetFocus() == 1 && dm_focus_now() == 1, "menu opens: open, nothing for the game, focus unchanged");
+    CHECK(soon_n == 1 && soon_why && strstr(soon_why, "in-game menu"), "menu opens: the cloud save goes at once (save_sync_soon), past the sender's gap");
+    dm_front_menu_set(1, NULL); CHECK(dm_front_menu_now() && soon_n == 1, "a second open report: still open, no second send asked");
+    t_now += 5000000000ull; dm_front_menu_set(0, NULL);
+    CHECK(dm_front_menu_now() && empty() && h_oe_GetFocus() == 1, "menu closes: still open while its dismissal is drawn, nothing for the game");
+    CHECK(atomic_load(&g_front_menu) == 0 && atomic_load(&g_front_menu_tail) == t_now + FRONT_MENU_TAIL_NS, "the close leaves the flag down and its tail set (stored before the flag)");
+    t_now += FRONT_MENU_TAIL_NS - 1; dm_front_menu_set(0, NULL);
+    CHECK(dm_front_menu_now(), "a second close report (the Duo harness repeats one) starts no new tail: open until the first one's ends");
+    t_now += 1; CHECK(!dm_front_menu_now(), "the tail over: shut");
+    CHECK(atomic_load(&g_front_menu_tail) == 0, "and the tail cleared, so later reads take no clock");
+    dm_front_menu_set(1, "menu bar"); t_now += 100; dm_front_menu_set(0, "menu bar"); t_now += 100; dm_front_menu_set(1, "menu bar");
+    t_now += 10 * FRONT_MENU_TAIL_NS; CHECK(dm_front_menu_now(), "opened again within the tail: open however long it stays open");
+    dm_front_menu_set(0, ""); t_now += FRONT_MENU_TAIL_NS; CHECK(!dm_front_menu_now(), "and shut a tail after that close");
+    dm_focus_set(2); pop_is(15); CHECK(!dm_front_menu_now() && dm_focus_now() == 2, "focus is its own state: losing it opens no menu");
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

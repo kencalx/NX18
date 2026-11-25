@@ -7,7 +7,8 @@ typedef struct mav1 mav1;
 // What one decode gave: an NV12 picture of w x h in the decoder's memory, valid until the next call, its matrix as vpx_color_space_t's values (BT.601 = 1, BT.709 = 2, BT.2020 = 5)
 typedef struct { const uint8_t *y, *uv; size_t ystride, uvstride; int w, h, matrix, full_range; } mav1_picture;
 
-mav1 *mav1_new(void);
+struct movie_vt_control;
+mav1 *mav1_new(struct movie_vt_control *control);
 void mav1_free(mav1 *a);
 void mav1_reset(mav1 *a);   // a new stream starts at the next packet with a sequence header
 // One temporal unit (OBUs with their sizes). 1 and *out set: a picture; 0: nothing to show (no sequence header seen yet, a unit without a shown frame); -1: the decoder refused it

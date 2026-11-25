@@ -6,6 +6,7 @@
 // here, which would come before the game's first device (Launcher.swift metalDeviceMade)
 import Foundation
 import UIKit
+import CoreImage
 
 // about.json: the game's eShop page text, from a public title database (scripts/game_art.py). Every field may be missing or of another type; such a field is nil
 struct LauncherAbout: Decodable, Equatable, Sendable {
@@ -37,10 +38,59 @@ struct LauncherAbout: Decodable, Equatable, Sendable {
     var sourceLine: String? { source.map { $0 == "titledb" ? "From the game's eShop page" : "From \($0)" } }
 }
 
+// facts.json (dm/tools/about_facts.py, gate-ui §18.1): the control data's age ratings by body, the profile's tested line and known issue, and the packed switchable mods'
+// credits. Every part optional; a field of another type is left out
+struct LauncherFacts: Decodable, Equatable, Sendable {
+    struct Mod: Decodable, Equatable, Sendable, Identifiable {
+        var role: String, name: String
+        var author: String? = nil, link: String? = nil, license: String? = nil
+        var id: String { role + "/" + name }
+        var url: URL? { link.flatMap { $0.hasPrefix("https://") || $0.hasPrefix("http://") ? URL(string: $0) : nil } }   // only a web link
+    }
+    var ratings: [String: Int] = [:]
+    var tested: String? = nil
+    var knownIssue: String? = nil
+    var mods: [Mod] = []
+    enum CodingKeys: String, CodingKey { case ratings, tested, knownIssue = "known_issue", mods }
+
+    init(ratings: [String: Int] = [:], tested: String? = nil, knownIssue: String? = nil, mods: [Mod] = []) {
+        self.ratings = ratings; self.tested = tested; self.knownIssue = knownIssue; self.mods = mods
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ratings = ((try? c.decodeIfPresent([String: Int].self, forKey: .ratings)) ?? nil) ?? [:]
+        func text(_ k: CodingKeys) -> String? { ((try? c.decodeIfPresent(String.self, forKey: k)) ?? nil).flatMap { $0.isEmpty ? nil : $0 } }
+        tested = text(.tested); knownIssue = text(.knownIssue).map { String($0.prefix(80)) }
+        mods = ((try? c.decodeIfPresent([Mod].self, forKey: .mods)) ?? nil) ?? []
+    }
+
+    // The rating body for the device's region setting (not its location): US, CA ESRB; DE USK; JP CERO; AU ACB; BR ClassInd; KR GRAC; else PEGI. The region's own body first,
+    // then PEGI, then any other the game has
+    static func body(region: String?) -> String {
+        switch region ?? "" {
+        case "US", "CA": return "ESRB"
+        case "DE": return "USK"
+        case "JP": return "CERO"
+        case "AU": return "ACB"
+        case "BR": return "ClassInd"
+        case "KR": return "GRAC"
+        default: return "PEGI"
+        }
+    }
+    // "Ages 10 and up (ESRB)"; "All ages (CERO)" for 0; nil when unrated
+    func ratingLine(region: String? = Locale.current.region?.identifier) -> String? {
+        let want = Self.body(region: region)
+        guard let (body, age) = [want, "PEGI"].lazy.compactMap({ b in self.ratings[b].map { (b, $0) } }).first ?? ratings.sorted(by: { $0.key < $1.key }).first.map({ ($0.key, $0.value) })
+        else { return nil }
+        return age == 0 ? "All ages (\(body))" : "Ages \(age) and up (\(body))"
+    }
+}
+
 struct LauncherContent: Equatable, Sendable {
     var art: URL?
     var logo: URL?         // dm/logo.png, the game's title wordmark with transparency (scripts/game_art.py: SteamGridDB's, or the player's --logo)
     var about: LauncherAbout?
+    var facts = LauncherFacts()   // dm/facts.json (About's age rating, tested line, known issue, mod credits)
     var manual: URL?
     var guide: URL?        // the guide's index.html, in the player's language when the guide has it
     var guideRoot: URL?    // the folder the guide's pages may read (its .htdocs)
@@ -66,6 +116,7 @@ struct LauncherContent: Equatable, Sendable {
         if let a = file("about.json"), let data = try? Data(contentsOf: a) {
             if let about = try? JSONDecoder().decode(LauncherAbout.self, from: data) { c.about = about } else { fputs("[RED] launcher: \(a.lastPathComponent) cannot be read; no About this game\n", stderr) }
         }
+        if let f = file("facts.json"), let data = try? Data(contentsOf: f), let facts = try? JSONDecoder().decode(LauncherFacts.self, from: data) { c.facts = facts }
         if let g = guideFolder(environment: environment, bundle: bundle), let found = findGuide(in: g, lang: lang) { c.guide = found.index; c.guideRoot = found.root }
         return c
     }
@@ -135,6 +186,7 @@ struct LauncherArtwork {
     var logo: UIImage?   // decoded and trimmed on the CPU (NX18Logo.decode); nil without dm/logo.png or when it cannot be decoded or shows nothing, and the hero then shows the name
     var logoDark = false   // a black wordmark, drawn with a light glow (NX18Logo.isDark)
     var tint: NX18RGB?
+    var wash: UIImage?   // the settings side's backdrop (LauncherBackdrop): the art, or the icon, as a 48 × 27 blurred colour field; made once here, drawn scaled up
 
     @MainActor static func load(_ content: LauncherContent) -> LauncherArtwork {
         var w = LauncherArtwork()
@@ -145,7 +197,30 @@ struct LauncherArtwork {
         }
         w.icon = appIcon()
         w.tint = (w.art ?? w.icon)?.cgImage.flatMap(NX18Palette.average)
+        w.wash = wash(w.art ?? w.icon)
         return w
+    }
+
+    // The art's colours as a tiny blurred field (48 × 27): averaged down by the draw, blurred once by Core Image, so drawn scaled up it is a soft multi-colour gradient with
+    // no detail and no live blur (nothing redraws per frame). Without art or icon: NX 18's teal into coral, as the art side's fallback
+    static func wash(_ image: UIImage?) -> UIImage? {
+        let w = 48, h = 27
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.interpolationQuality = .high
+        if let cg = image?.cgImage {
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        } else {
+            let c = NX18RGB(hex: NX18Palette.cyanHex), k = NX18RGB(hex: NX18Palette.coralHex)
+            let colours = [CGColor(srgbRed: c.r, green: c.g, blue: c.b, alpha: 1), CGColor(srgbRed: k.r, green: k.g, blue: k.b, alpha: 1)] as CFArray
+            if let g = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: colours, locations: [0, 1]) {
+                ctx.drawLinearGradient(g, start: CGPoint(x: 0, y: h), end: CGPoint(x: w, y: 0), options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+            }
+        }
+        guard let small = ctx.makeImage() else { return nil }
+        let ci = CIImage(cgImage: small).clampedToExtent().applyingGaussianBlur(sigma: 3).cropped(to: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let out = CIContext(options: [.useSoftwareRenderer: false]).createCGImage(ci, from: ci.extent) else { return UIImage(cgImage: small) }
+        return UIImage(cgImage: out)
     }
 
     // The app icon: the asset catalog's (build_ipa.sh's AppIcon), else the largest the Info.plist names

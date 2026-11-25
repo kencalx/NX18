@@ -144,6 +144,25 @@ class Matching(unittest.TestCase):
         missing = image({0x100: caller(0x100, 0x500)})
         with self.assertRaisesRegex(MatchError, '0 matching'): Image(missing, 0x2000).match(self.rule)
 
+    def test_called_by_identifies_one_of_two_identical_callees(self):
+        leaf = [0x52800020, RET]
+        init = [0x52800080, RET]
+        original = image({0x100: caller(0x100, 0x500), 0x500: leaf, 0x600: leaf, 0x700: init})
+        parsed = Image(original, 0x2000)
+        clock = dict(size=8, fingerprints=[parsed.fingerprint(0x500)], cuts=[(0, '20008052', '40008052', 'clock')])
+        with self.assertRaisesRegex(MatchError, '2 matching'):
+            parsed.match(dict(clock, name='clock'))
+
+        clock['called_by'] = dict(size=28, fingerprints=[parsed.fingerprint(0x100)], call=12)
+        startup = dict(size=8, fingerprints=[parsed.fingerprint(0x700)], cuts=[(0, '80008052', '60008052', 'startup')])
+        rule = dict(name='rate', functions=[startup, clock])
+        moved = image({0x800: caller(0x800, 0x1200), 0x1200: leaf, 0x1400: leaf, 0x1600: init})
+        self.assertEqual([cut[0] for cut in Image(moved, 0x2000).match_patch(rule)], [0x1600, 0x1200])
+
+        # A changed callee invalidates the caller fingerprint, so the startup cut is withheld as well.
+        struct.pack_into('<I', moved, 0x1200, 0x52800040)
+        self.assertEqual(resolve(moved, 0x2000, [rule], lambda _: None), [])
+
     def test_original_bytes_still_required(self):
         rule = copy.deepcopy(self.rule); rule['cuts'][0] = (8, '00000000', 'e0124091', 'heap')
         with self.assertRaisesRegex(MatchError, 'original bytes differ'): Image(self.original, 0x2000).match(rule)
@@ -192,6 +211,18 @@ class Matching(unittest.TestCase):
         self.assertEqual(locate_stub(moved, 0x2000, [found], messages.append), (found, 0x800, {'leaf': 0x1200, 'gone': None}, None))
         self.assertEqual([m for m in messages if m.startswith('[RED]')], ["[RED] frame step 'step': gone left out: 0 matching functions (need exactly one)"])
         with self.assertRaisesRegex(ValueError, 'needs size and fingerprints'): locate_stub(moved, 0x2000, [dict(stub, others={'leaf': dict(size=8)})], messages.append)
+        # an other found through its caller's direct call (called_by): one of two identical short functions, and none when the caller's call reaches another
+        twin = image({0x800: caller(0x800, 0x1200, 0x2980), 0x1200: [0xd2800020, RET], 0x1400: [0xd2800020, RET]})
+        mine = Image(twin, 0x2000).fingerprint(0x800)
+        by_call = dict(stub, others={'leaf': dict(size=8, fingerprints=[leaf], called_by=dict(size=28, fingerprints=[mine], call=12))})
+        messages = []
+        self.assertEqual(locate_stub(twin, 0x2000, [by_call], messages.append), (by_call, 0x800, {'leaf': 0x1200}, None))
+        self.assertEqual(locate_stub(twin, 0x2000, [dict(stub, others={'leaf': dict(size=8, fingerprints=[leaf])})], messages.append)[2], {'leaf': None})
+        wrong = dict(stub, others={'leaf': dict(size=8, fingerprints=[leaf], called_by=dict(size=28, fingerprints=[mine], call=8))})
+        messages = []
+        self.assertEqual(locate_stub(twin, 0x2000, [wrong], messages.append)[2], {'leaf': None})
+        self.assertIn('expected a direct call', messages[-1])
+        with self.assertRaisesRegex(ValueError, 'call offset'): locate_stub(twin, 0x2000, [dict(stub, others={'leaf': dict(size=8, fingerprints=[leaf], called_by=dict(size=28))})], messages.append)
         duplicate = image({0x100: caller(0x100, 0x500), 0x800: caller(0x800, 0x500), 0x500: [0xd2800020, RET]})
         for img in (duplicate, image({0x100: [RET]})):
             messages = []

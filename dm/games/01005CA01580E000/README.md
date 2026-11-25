@@ -4,6 +4,8 @@ Update 1.0.2 (`v65536`) over the base game, SDK 13.3.2. Atlus GFD / Needle on NV
 
 **Current:** opening casino gameplay tested on Mac with the complete shader library. The unsigned 1.0.2 IPA is built (15,969,549,546 bytes, about 14.9 GiB). iOS and later battles have not been tested.
 
+The base game (1.0.0, `v0`) also played in upstream's Mac run ([nxnative](https://github.com/seedds/nxnative), 2026-11-12; not yet checked on NX 18 or on iOS): a self-contained Mac app was built from the base game's NSP alone, with no update, through a profile derived from this one (which registers 1.0.2 alone). Boot, the Thieves Guild network prompt, the opening movie, the title screen, the main menu, the load screen's existing saves, New Game with English voices and the opening casino cutscene rendered at 30 fps with no red line; movement in the casino was not exercised. Its 30,646 shader keys match 1.0.2's, and its shaders were compiled for the Mac with Xcode 27.3's Metal.
+
 ## What it needs
 
 | Setting | Where | Why |
@@ -25,6 +27,7 @@ Update 1.0.2 (`v65536`) over the base game, SDK 13.3.2. Atlus GFD / Needle on NV
 - `CPK/ALL_USEU.CPK` contains 94,631 files, 74,521 CRILAYLA-compressed; `CPK/PATCH1.CPK` contains one USM movie. The host reads the archives through the game's own CRI file system.
 - The available release supports English, French, German, Spanish and Italian language codes. The build defaults to American English.
 - Only the merged update is extracted and registered. Fixed addresses in this note refer to `main` build `d4b150b29a931cd381e2a30318fc299f`.
+- The Asian title `01004B10157F2000` v65536 (1.0.2) has the same `main` build but ships `CPK/ALL_ASIA.CPK` instead of `CPK/ALL_USEU.CPK`, and packs from a profile derived under its own title ID, whose marker is taken from its own RomFS ([the finding](../../../docs/reference/packing.md#another-editions-files-lack-the-profiles-romfs-marker), upstream `6229bbd11`). Upstream packed its Mac app; not packed or played on NX 18.
 
 ## Shaders
 
@@ -36,6 +39,8 @@ Update 1.0.2 (`v65536`) over the base game, SDK 13.3.2. Atlus GFD / Needle on NV
 
 [`pso_manifest.tsv`](pso_manifest.tsv), the prewarm list the app ships, is an iPhone 18 Pro Max's own `Documents/pso_user.tsv` from the owner's play on 0.5 (`5b302cd0`, Frame rate 60): the first start, boot and about 4 minutes of play (12,500 frames), with no list present, so everything it drew was built on the spot. Its 30,923 rows are 30,357 shaders (`S`), 564 render pipelines (`R`) and 2 compute pipelines (`C`), in the order of first use, every one checked against [`shader_map.tsv`](shader_map.tsv) by `dm/tools/pso_seed.py` (keys, stages, no pointer or other device bytes, no path, no repeats). The `S` rows are kept, as in every recorded list: they are nearly the whole shader map, every library the game's program creation loads, and the prepare step loads them on every core before the first frame. They come first in the list and cost about 1 s of each start's prepare step (the second start had done 15,766 lines, all of them shaders, after 0.5 s); without them in the list, the device's `pso_user.tsv` would record the same rows in the first play (the program-creation prefetch's libraries are recorded) and the prepare step would load them from the next start on.
 
+Grown on 2026-11-15 from a second session on the same phone (about 23 minutes, build `431d5d18`, with its log): 716 more rows (715 R, 1 C), the render pipelines that session still compiled in play (1,009 bases, 45 s on all threads, stalls of up to about 0.95 s). The list is now 31,639 rows (30,357 S, 1,279 R, 3 C).
+
 - **Without it** (that first start): the prewarm lists held nothing, and 847 pipeline bases were compiled in play (37 ms each, 31.7 s of compile time on all threads), and the submit thread waited 6.2 s for pipelines: 11 frames over 100 ms, the worst 1,142 ms (96 pipelines), 836 ms and 840 ms; in the 300 frames up to frame 4200 alone, 199 draws waited 2.36 s for a pulling base not made yet.
 - **The list's own measure** (the second start, the device's list then 30,923 lines): prepared before the first frame in 2.19 s on 6 workers behind the progress screen (305 bases compiled, 140 from the device's archive, 119 reused; 564 specializations), and no frame over 100 ms in play (the longest 39 ms).
 - **Its cost on a first start** (an estimate, not measured): a fresh install has no device archive, so about 445 bases are compiled (the 305 and 140 above). At the second start's 23.5 ms a base, or the first start's 37 ms, that is 10-17 s of compile time, 1.7-2.8 s on 6 workers (the second start's 7.2 s of bases took about 1.2 s); with about 1 s for the `S` rows, the prepare step takes about 3-4 s (2.7-3.8 s) behind the progress screen, in place of the stalls above. The estimate counts all of them: the archive bundled with the app holds the shader pairs' and compute bases, and also the layout bases of the list's `R` rows that `pso_offline.py` can describe ([Pipelines with a vertex layout compiled at a fresh install's prepare step](../../../docs/reference/shaders.md#pipelines-with-a-vertex-layout-compiled-at-a-fresh-installs-prepare-step)), so an app built with this list should compile fewer; how many fewer has not been measured. A Mac measurement was not possible: the Mac build folder's library image for this chain (`b-ac67cb709fa0`) holds no Mac libraries, since the release build was for iPhone.
@@ -43,6 +48,8 @@ Update 1.0.2 (`v65536`) over the base game, SDK 13.3.2. Atlus GFD / Needle on NV
 - **The build:** the next build of this game runs the shader step again (its key covers the profile's files, `pso_manifest.tsv` among them; the libraries come back from the shader cache), and `pso_offline.py` compiles its compute group again, since the 2 `C` rows put those compute shaders first, then merges the archive; the 3,342 bases' groups are reused. No other game's build changes.
 
 ## Testing and running
+
+In upstream's run the packed app's first launch took about four minutes ([A Mac app](../../../docs/development.md#a-mac-app), signing).
 
 On 2026-10-25, update 1.0.2 was tested on an M4 Pro Mac with Metal API validation enabled. Boot, startup movies, title and language menus, opening dialogue, and casino gameplay rendered. Movement, camera control and the first two platform jumps were exercised. The full-library run exceeded 35 minutes without a crash, missing shader or Metal validation error. Recent casino frame-time windows measured p50 33.33 ms and p95 33.36 ms (about 30 fps); occasional longer frames occurred during the run. Resident memory was about 1.9 GB and GPU allocations about 1.75 GB. This is an opening-sequence check, not a full playthrough.
 
@@ -57,7 +64,9 @@ Choose offline mode at the network prompt, then New Game and English voices. Adv
 - [Stale prebuild files kept in the pipeline archive](../../../docs/reference/shaders.md#stale-prebuild-files-kept-in-the-pipeline-archive): an iPhone 18 Pro Max run of a fork of this tree with `DM_PSO_MTL4=1` kept 20 files of bases without a vertex layout (259.6 MB in all with the plain files) beside a bundled archive that holds every pair's base.
 
 - [Texture clears with partial channel masks or regions](../../../docs/reference/rendering.md#texture-clears-with-partial-channel-masks-or-regions): a load/store draw applies the requested write mask and rectangle.
+- [Another edition's files lack the profile's RomFS marker](../../../docs/reference/packing.md#another-editions-files-lack-the-profiles-romfs-marker): the Asian title's derived profile takes its marker from its own RomFS, and its extraction is reused.
 - [A frame that stands in the display link's queue](../../../docs/reference/frame-rate.md#a-frame-that-stands-in-the-display-links-queue) and [the iPhone's drawable at the picture's render size](../../../docs/reference/rendering.md#the-iphones-drawable-at-the-pictures-render-size): seen in its iPhone 18 Pro Max logs (enqueue to display p50 65.5 ms against a 33.2 ms lead; Stretch drawables of the screen's pixels).
+- **Stand-ins for the pairs the prewarm rows draw with** (`pso_offline.py` `plan_standins`, `standins.tsv`): the pair lists are cover pairs (1,114 vertex shaders over 3 pixel shaders), so the archive held no pulling base a hybrid miss asks for, and an iPhone 18 Pro Max session of about 23 minutes (build `431d5d18`) had 935 misses with no stand-in, 9.2 s of pipeline time on the submit thread and stalls of 0.57-0.95 s. The next build's archive holds a stand-in for each of the up to 976 pairs its `R` rows name (about 45 MB more, estimated); not yet built or run: [Bundled archive of cover pairs](../../../docs/reference/shaders.md#bundled-archive-of-cover-pairs).
 
 ## Open
 

@@ -31,6 +31,7 @@ Measured on the M4 Pro, in a 1920x1080 window: 60 fps at the title, 44 to 52 fps
 
 ## Found on this game
 
+- [Compute loops that outlive the process](../../../docs/reference/shaders.md#compute-loops-that-outlive-the-process): compute-only containment with attributable cap-hit logging, including helpers. The queue mismatch's root cause and binding remain open in [#2664](https://github.com/seedds/nxnative/issues/2664); this does not close it or establish a fresh reproduction.
 - [A registered build without the profile's DLC stops at the shader split](../../../docs/reference/packing.md#a-registered-build-without-the-profiles-dlc-stops-at-the-shader-split): resolved; `re_dlc_000.pak` holds 45 of the game's shaders, which are now the game's rows in `shader_map.tsv` (36,779 shaders with the DLC, 36,649 without).
 - [H.264 parameter sets past the eighth argument](../../../docs/reference/movies.md#h264-parameter-sets-past-the-eighth-argument): its opening movies.
 - [More than 1,024 mapped runs in a sparse pool](../../../docs/reference/nvn-objects.md#more-than-1024-mapped-runs-in-a-sparse-pool): the GPU hang 3 to 4 minutes into the intro.
@@ -42,7 +43,7 @@ Measured on the M4 Pro, in a 1920x1080 window: 60 fps at the title, 44 to 52 fps
 - [A 1D array texture uploaded as its layer count of rows per layer](../../../docs/reference/rendering.md#a-1d-array-texture-uploaded-as-its-layer-count-of-rows-per-layer): its light-profile lookup table.
 - [Touch gestures recognized from the touch points](../../../docs/reference/services.md#touch-gestures-recognized-from-the-touch-points).
 - [SDF definitions in RE Engine PAKs](../../../docs/reference/shaders.md#sdf-definitions-in-re-engine-paks).
-- [Integer outputs told from float bits](../../../docs/reference/shaders.md#integer-outputs-told-from-float-bits).
+- [Integer outputs told by the pipeline's targets](../../../docs/reference/shaders.md#integer-outputs-told-by-the-pipelines-targets).
 - [Mesh shader per-primitive system values: the primitive count overwritten, the primitive id lost](../../../docs/reference/shaders.md#mesh-shader-per-primitive-system-values-the-primitive-count-overwritten-the-primitive-id-lost).
 - [Mesh shaders that also address their vertices as records](../../../docs/reference/shaders.md#mesh-shaders-that-also-address-their-vertices-as-records).
 - [Mesh shaders that read their own outputs back](../../../docs/reference/shaders.md#mesh-shaders-that-read-their-own-outputs-back).

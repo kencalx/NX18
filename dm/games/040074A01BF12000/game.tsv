@@ -41,3 +41,47 @@ shader_note	Donkey Kong Bananza shaders
 # agl's render buffer binding wraps its clears in render conditions (SetRenderEnableConditional(RENDER_IF_NOT_EQUAL) at main+0x12798c before the ClearColor at main+0x1279d4):
 # without the key, a clear-only rebinding of the composite target right after the composite draw wiped it before the upscaler read it, and every gameplay frame came out black
 render_cond	on
+
+# ---- Heat ----
+# The heat ladder's resolution rungs (85%, 70%) and the GPU clock rescue lower this game's resolution through its own dynamic resolution, which steers by the GPU time
+# its counter reports read (agl): the host stretches that time (hle_nvn.c scale_set, nvn_mtl.m post_run; NX18-X2.0 heat-ladder.md §6), no game patch. DM_HEAT_GPU_STRETCH
+# in env.txt sets the stretches for an A/B
+heat_gpu_stretch	on
+# The GPU headroom controller through the same stretch (nvn_drs_gpu.h, hle_nvn.c drs_gpu_tick): while the GPU stays over 75% busy the host stretches the GPU time its dynamic
+# resolution reads one step more (factors 0.9 to 0.5 of the picture side), and takes each step back when the GPU's busy did not fall; Balanced and Battery Saver, Quality off
+drs_gpu_scale	on
+preset	quality	DM_DRS_GPU_SCALE=0
+# The GPU time between its counter reports reads 0.6144 of its length (384 / 625), as before NVN2 timestamps were nanoseconds (upstream d6bb5894c): the owner's choice after
+# the iPhone 18 Pro Max run with true times (60 fps 59% of the time, against 83-93% before). Each submission's reports move toward its end, which stays; the heat ladder's and
+# the clock rescue's stretch multiply it (nvn_heat.h nvn_scale_stretch_at). DM_GPU_TIME_SCALE=1 in env.txt gives the true times for an A/B
+gpu_time_scale	0.6144
+
+# ---- Presets ----
+# Battery Saver holds the game's own frame-rate controller at 30 fps for good (hle_fctl.c DM_FPS_CTL=hold30): no probes back to 60, and its counter reports read their true
+# times (gpu_time_scale off), so its dynamic resolution has the whole 33 ms. Balanced and Quality keep the host's rule and the scale (settings.py PRESET_ENV)
+preset	battery	DM_FPS_CTL=hold30
+# Its 128x128 view (RG11B10Float colour + Depth32Float, up to 1,700 draws; 1.35 ms a frame at the lower GPU clock) is drawn every other frame, keeping the previous frame's picture in between (nvn_pass_alt.h; the owner's Balanced and Battery Saver trade, the Quality preset turns it off: NX18-X2.0 gpu-clock-collapse.md)
+# On as a picture trade (owner, 2026-11-18: a little pop-in is fine on the phone's screen). The view is the game's visibility test (every draw counts an occlusion query, none is
+# dropped): in a kept frame its depth is loaded, not cleared, so its queries test this frame's objects against last frame's depth too and the game judges more of them hidden.
+# Same area, otherwise the same code: on (ef879f36) 59.7 fps mean, 60 held 9 min; off (c7ab1aad) 47.7 fps, 60 held ~150 s; no pop-in seen (NX18-X2.0 gpu-clock-collapse.md).
+# Balanced and Battery Saver take it; Quality draws the view every frame (its preset line below)
+# Its environment cube's mip chain and filters (the cube is 128x128, 8 levels, RG11B10Float; levels 1-7 drawn from the level above by agl's d1a506c1a94ffdfa and 89dfaeb53f85920a, then the
+# prefiltered cube by 62dc9b15931e0290: docs/reference/rendering.md, Mip-chain pass sampling the level it renders) at half rate too: every pass into a cube texture in RG11B10Float with no
+# depth is drawn every other frame, each level and face on its own, so a face the game updates once in several frames always draws (nvn_pass_alt.h). Reflections and the ambient light from
+# the cube follow the scene a frame later on alternate frames (~0.05-0.15 ms a frame on average, NX18-X2.0 bananza-alldata-analysis.md ranked fix 6). Balanced and Battery Saver take it;
+# Quality draws them every frame (DM_NVN_CUBE_ALT=0, its preset line below)
+pass_alternate	128x128:92/252,cube:92
+# Draw passes ordered by the game's own barriers (draw_barriers, as Ocarina of Time): with the full barrier before every one of its ~140 passes a frame, the iPhone profile showed 1.5-2.8 ms a frame of GPU idle inside the frame's span (NX18-X2.0 gpu-clock-collapse.md). DM_NVN_BARRIER=full goes back for an A/B
+draw_barriers	game
+preset	quality	DM_NVN_PASS_ALT=0
+preset	quality	DM_NVN_CUBE_ALT=0
+# The game's upscaler (agl's NDSR network, which DM_UPSCALER=metalfx, the iPhone's default, has MetalFX's spatial scaler draw) as a plain bilinear stretch from its input rectangle
+# to its output rectangle instead (nvn_mtl.m up_bil_on): MetalFX took 0.6-1.4 ms a frame of GPU time on the iPhone 18 Pro Max, its RGBA16F output then drawn back into the game's R11G11B10F
+# image; the stretch is that one draw (NX18-X2.0 bananza-alldata-analysis.md, ranked fix 2). A picture trade (owner: on the 6.9" screen resolution trades barely show): the 3D picture is
+# softer, edges blurrier, no MetalFX sharpening; the UI is drawn after it at full size and stays sharp. Balanced and Battery Saver take it; Quality keeps MetalFX (its preset line below)
+upscaler_bilinear	on
+preset	quality	DM_NVN_UP_BILINEAR=0
+# The GPU clock kick (hle_nvn.c clock_kick_tick): iOS holds the GPU near a third of its clock after a few minutes even at thermal 0-2, and only a moment of idle GPU (as the pause menu gives) lifts it. Once stuck, a present holds the game 120 ms. Run 13 (NX18-X2.0 gpu-clock-collapse.md): four kicks, then 59-60 fps to 13 min where earlier runs sat near 40. DM_CLOCK_KICK=0 turns it off for an A/B
+clock_kick	120
+# The present repeat (nvn_present_repeat.inc): the display link presents on every tick, the last frame again when there is no new one, as the pause menu keeps the screen fed. The clock kick needs it: run 13 (with it) lifted the clock, run 14 (without) did not once; no power cost seen at 60 fps. DM_PRESENT_REPEAT=0 turns it off
+present_repeat	on

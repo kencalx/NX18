@@ -38,6 +38,20 @@ Update 1.0.3 (v131072) over the base cartridge dump. PlatinumGames' engine, SDK 
 - Initial upstream build validation (before the integration below): both standard NSP build workflows pass. The unsigned `NieRAutomata.ipa` is 11,712,290,740 bytes (about 10.9 GiB), with all 1,225 Mac/iOS shader libraries on chain `20fe3d62b9f6` and 331 recorded prewarm entries. Its four cuts and all three embedded main sections match the tested rewrite; all 3,551 archive entries pass CRC verification. The normal Mac executable is `010056B015FE8000_build/tools/dmhost`.
 - Work folder: `/Volumes/T7/nsp/NieR Automata The End of YoRHa Edition/010056B015FE8000-work`. `run/boot.py <name> <seconds> [KEY=VALUE ...]` runs the adjacent `010056B015FE8000_build/tools/dmhost` with bounded duration, control file `run/<name>.ctl`, logs and save data beside it.
 
+## Preparation cost of a recorded backlog
+
+**Controlled measurement, 2026-11-17:** the general host's [demand-time pipeline recording](../../../docs/reference/shaders.md#a-pipeline-a-hybrid-draw-stood-in-for-listed-only-once-built), integrated from PR #2018 onto `b04c42b0`, on an M4 Pro (48 GB), macOS 27.2.1, Xcode 27.2, chain `5ea15f2c8240`. This measures the preparation cost of retaining unfinished work. It is not a naturally observed 400-pipeline backlog in this game, or an iPhone timing result: two bounded 125-second diagnostic collections, without render-pipeline prewarm and then with shader-only preparation and primed pulling bases, produced no hybrid demands on this Mac.
+
+The two preparation lists differ by the first 400 `R` rows of this profile's recorded seed list; all shader, compute and other render rows are identical. After the warmer's normalization those rows add 390 distinct render pipelines. Each measurement uses a fresh process, 14 preparation workers, no bundled archive, and its own copy of the same pulling-only device archive, so ordinary layout bases must be built. The system Metal cache is warm: both lists are primed once, then measured three times each in A/B, B/A, A/B order. The harness marked every timed run idle.
+
+| Preparation | Completed-only control | With the 400-row backlog |
+|---|---:|---:|
+| Median time (range) | 0.95 s (0.94–0.97) | 1.68 s (1.62–1.69) |
+| Render pipelines prepared | 248 | 638 |
+| Bases compiled / reused | 237 / 11 | 507 / 131 |
+
+The extra rows add **0.73 s** to median preparation and compile **270** more bases. This is work moved before gameplay, not compilation removed; the size of the increase depends on the demanded states, base sharing, archives, Metal cache and device. The manifests, per-run logs, measurement driver and `report.json` remain in `010056B015FE8000-work/regress/pr2018-backlog400/` beside the NSPs.
+
 ## 60 fps
 
 Four of main build `3c10ec35c5ef4c3686b4053afb0e58e7`'s eight verified cuts replace the threshold constants at `0x9bf434`, `0x9bf484`, `0x9bf4d4` and `0x9bf4f8`, with original-byte assertions, following the [FPSLocker 1.0.3 threshold sites](https://github.com/masagrator/FPSLocker-Warehouse/blob/v4/SaltySD/plugins/FPSLocker/patches/010056B015FE8000/3C10EC35C5EF4C36.yaml). The other four initialize the 60 Hz interval and make the native resolution lower bounds follow the preset minimum. All addresses are build-gated; no function-matched cuts are enabled.
@@ -83,6 +97,9 @@ The objects in `data000.cpk/shader.dat` decode as follows:
 
 ## Found on this game
 
+- [SIGTERM during the first Metal initialization](../../../docs/reference/rendering.md#sigterm-during-the-first-metal-initialization): ported from upstream (`4f4bfb6a7`). Upstream (M4 Pro, macOS 27.2.1), early SIGTERM trapped in 16 of 24 windowless NieR 1.0.3 launches before the fix and none of 24 after. Not seen on NX 18's devices.
+- [A pipeline a hybrid draw stood in for listed only once built](../../../docs/reference/shaders.md#a-pipeline-a-hybrid-draw-stood-in-for-listed-only-once-built): controlled [preparation-cost measurement](#preparation-cost-of-a-recorded-backlog); the unfinished gameplay backlog was not reproduced on this Mac.
+- [Touch controls over the game's layer cost a refresh of latency](../../../docs/reference/frame-rate.md#touch-controls-over-the-games-layer-cost-a-refresh-of-latency): a touch run on an iPhone 18 Pro Max had `submission ahead of target display` p50 32.9 ms and game enqueue to target display 47-49 ms. The present now draws the controls into the frame; not measured on the phone yet (open).
 - **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree).
 - [Size-delimited PlatinumGames shader objects](../../../docs/reference/shaders.md#size-delimited-platinumgames-shader-objects).
 - [Mapped-range flushes taken as uploads](../../../docs/reference/nvn-objects.md#mapped-range-flushes-taken-as-uploads-tex_flush_upload).

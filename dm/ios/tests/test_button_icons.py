@@ -76,7 +76,9 @@ class ButtonIcons(unittest.TestCase):
 
     def test_rails_flow_by_core_animation_and_stop_under_reduce_motion(self):
         row = read('dm/ios/Sources/LauncherRow.swift')
-        self.assertIn('NX18RailsFlow(axis: axis, moving: !reduceMotion)', row)
+        self.assertIn('NX18RailsFlow(axis: axis, moving: !reduceMotion && !lowPower, light: scheme == .light)', row)   # the look's pair (gate-ui §11a.3a): only the colours change, the slide is left alone; still under Low Power Mode too (GW19)
+        self.assertIn('a.repeatCount = NX18RailsIdle.endless ? .infinity : 1', row)   # one cycle, then the still line; an input runs one more (GW19)
+        self.assertIn('var light = false { didSet { if light != oldValue { paint() } } }', row)
         self.assertIn('CABasicAnimation(keyPath: path)', row)
         for banned in ('TimelineView', 'CADisplayLink', 'Timer.publish', 'repeatForever'):
             self.assertNotIn(banned, row)
@@ -84,6 +86,7 @@ class ButtonIcons(unittest.TestCase):
         self.assertIn('NX18Rails(axis: .horizontal, flowing: true)', read('dm/ios/Sources/Launcher.swift'))
         self.assertIn('NX18Rails(axis: .horizontal, flowing: true)', read('dm/mac/Launcher.swift'))
         self.assertIn('NX18Rails(axis: .horizontal, thickness: 2)', read('dm/ios/Sources/GuideViewer.swift'))   # the guide's stays still
+        self.assertIn('NX18Rails(axis: .horizontal)', read('dm/ios/Sources/GuideViewer.swift'))   # and About this game's, under its art header
 
 
 if __name__ == '__main__':

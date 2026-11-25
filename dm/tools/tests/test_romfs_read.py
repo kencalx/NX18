@@ -155,7 +155,7 @@ class ExtractImage(unittest.TestCase):
                 bad[f'bad{i}.nro'] = bytes(body); good[f'good{i}'] = bytes([0x60 + i]) * 0x10000
             for name, data in {**bad, **good}.items(): (src / name).write_bytes(data)
             project = root / 'fixture.csproj'
-            project.write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>'
+            project.write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><RollForward>Major</RollForward>'
                                '<StartupObject>Fixture</StartupObject><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup><ItemGroup>'
                                f'<Compile Include="{REPO}/dm/tools/nx_extract/Program.cs" Link="Extractor.cs" />'
                                '<PackageReference Include="LibHac" Version="0.19.0" /></ItemGroup></Project>')
@@ -186,7 +186,7 @@ class ExtractImage(unittest.TestCase):
             data = b'\x00\x01\x02\xff' * (2 << 20)
             (src / 'data/large').write_bytes(data); (src / 'zero').touch()
             project = root / 'fixture.csproj'
-            project.write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>'
+            project.write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><RollForward>Major</RollForward>'
                                '<StartupObject>Fixture</StartupObject><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup><ItemGroup>'
                                f'<Compile Include="{REPO}/dm/tools/nx_extract/Program.cs" Link="Extractor.cs" />'
                                '<PackageReference Include="LibHac" Version="0.19.0" /></ItemGroup></Project>')

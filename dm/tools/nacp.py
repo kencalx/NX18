@@ -7,8 +7,10 @@ import re, struct, sys, zlib
 from pathlib import Path
 
 # The NACP's languages in its own order (the bit order of SupportedLanguageFlag and the order of the title entries): the language code nn::oe::GetDesiredLanguage returns for each, and its name
+# Polish and Thai are control-data bits 16 and 17 on either console; the SDK's language enum numbers them 18 and 19 (hle_sdk16.c; upstream PR #1508)
 LANGUAGES = [('en-US', 'American English'), ('en-GB', 'British English'), ('ja', 'Japanese'), ('fr', 'French'), ('de', 'German'), ('es-419', 'Latin American Spanish'), ('es', 'Spanish'), ('it', 'Italian'),
-             ('nl', 'Dutch'), ('fr-CA', 'Canadian French'), ('pt', 'Portuguese'), ('ru', 'Russian'), ('ko', 'Korean'), ('zh-Hant', 'Traditional Chinese'), ('zh-Hans', 'Simplified Chinese'), ('pt-BR', 'Brazilian Portuguese')]
+             ('nl', 'Dutch'), ('fr-CA', 'Canadian French'), ('pt', 'Portuguese'), ('ru', 'Russian'), ('ko', 'Korean'), ('zh-Hant', 'Traditional Chinese'), ('zh-Hans', 'Simplified Chinese'), ('pt-BR', 'Brazilian Portuguese'),
+             ('pl', 'Polish'), ('th', 'Thai')]
 
 
 def name(path):
@@ -49,8 +51,26 @@ def languages(path):
     return [c for i, (c, _) in enumerate(LANGUAGES) if f >> i & 1]
 
 
+# The rating bodies in RatingAge's order (0x20 bytes at 0x3040, one signed age per body, -1 / 0xFF for none; SwitchBrew NACP)
+RATING_BODIES = ['CERO', 'GRAC', 'GSRMR', 'ESRB', 'ClassInd', 'USK', 'PEGI', 'PEGI Portugal', 'PEGI BBFC', 'Russian', 'ACB', 'OFLC', 'IARC']
+
+
+def ratings(path):
+    """{rating body: minimum age} from the control data's RatingAge; bodies with no rating are left out; a missing or short file gives {}"""
+    p = Path(path)
+    if not p.is_file(): return {}
+    b = p.read_bytes()
+    if len(b) < 0x3060: return {}
+    out = {}
+    for i, body in enumerate(RATING_BODIES):
+        a = struct.unpack_from('<b', b, 0x3040 + i)[0]
+        if 0 <= a <= 25: out[body] = a
+    return out
+
+
 if __name__ == '__main__':
-    a = sys.argv[1:]; f = {'--version': version, '--languages': lambda p: ' '.join(languages(p))}.get(a[0] if a else '', name)
+    a = sys.argv[1:]; f = {'--version': version, '--languages': lambda p: ' '.join(languages(p)),
+                           '--ratings': lambda p: ' '.join(f'{k}={v}' for k, v in ratings(p).items())}.get(a[0] if a else '', name)
     if f is not name: a = a[1:]
-    if len(a) != 1: sys.exit('usage: nacp.py [--version | --languages] <control.nacp>')
+    if len(a) != 1: sys.exit('usage: nacp.py [--version | --languages | --ratings] <control.nacp>')
     n = f(a[0]); print(n); sys.exit(0 if n else 1)

@@ -9,3 +9,6 @@ int g_size_w, g_size_h; void front_picture_size(int w, int h) { g_size_w = w; g_
 __attribute__((weak)) void dm_vi_layer_crop(int c[4]) { c[0] = c[1] = c[2] = c[3] = 0; }   // no vi layer crop (hle_vi.c), read by hle_nvn's present
 __attribute__((weak)) void dm_device_share(const void *p, uint64_t size, int share) { (void)p; (void)size; (void)share; }   // no SVC layer (hle_svc.c), told of each memory pool's storage by hle_nvn
 __attribute__((weak)) void dm_vi_frame_queued(uint64_t frame) { (void)frame; }   // no vi layer frame history (hle_vi.c), told of each present by hle_nvn
+__attribute__((weak)) void dm_vi_frame_ticket(uint64_t frame, uint64_t ticket) { (void)frame; (void)ticket; }   // and of its present queue ticket by the NVN queue worker (nvn_queue.inc)
+uint64_t now_ns(void);
+__attribute__((weak)) uint64_t now_cont_ns(void) { return now_ns(); }   // the clock that counts the device's sleep (hle_os.c): a test's own now_ns, so a test clock drives the heat hold's timers too (t_thermal has its own)

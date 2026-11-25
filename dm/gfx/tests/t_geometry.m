@@ -60,6 +60,24 @@ static void capture_indices(void) {
     uint32_t restart[]={17,17};memset(out,0xcc,sizeof out);
     EXPECT("restart-only capture",0,geo_capture_unique(restart,2,1,17,0,1,out,8));
     EXPECT("restart-only output canary",0xcccccccc,out[0]);
+    {   // geo_read_indices (S2Arm dd39bf78's per-width loops): each width without restart against the index-by-index reading, then with restart, then a non-indexed draw
+        uint32_t vals[]={300,7,65535,0,70000,12,7,65534,4294967295u,1}, ord[16], lo, hi, rlo, rhi; uint8_t raw[64];
+        for(int w=0;w<3;w++){
+            int isz=1<<w; uint32_t mask=w==0?0xffu:w==1?0xffffu:0xffffffffu, want[10], wl=UINT32_MAX, wh=0;
+            for(int i=0;i<10;i++){uint32_t v=vals[i]&mask;memcpy(raw+i*isz,&v,isz);want[i]=v;wl=MIN(wl,v);wh=MAX(wh,v);}
+            memset(ord,0xcc,sizeof ord);
+            EXPECT("index read without restart: count",10,geo_read_indices(raw,isz,10,0,0,ord,&lo,&hi));
+            EXPECT("index read without restart: vertex numbers",0,memcmp(ord,want,sizeof want));
+            EXPECT("index read without restart: lowest",wl,lo); EXPECT("index read without restart: highest",wh,hi);
+            EXPECT("index read without restart: nothing past count",0xcccccccc,ord[10]);
+            uint32_t marker=7&mask, n=geo_read_indices(raw,isz,10,1,marker,ord,&rlo,&rhi);
+            EXPECT("index read with restart: markers left out of the count",8,n);
+            EXPECT("index read with restart: markers kept in order",marker,ord[1]);
+        }
+        EXPECT("non-indexed draw: count",5,geo_read_indices(NULL,0,5,0,0,ord,&lo,&hi));
+        EXPECT("non-indexed draw: vertex numbers",1,ord[0]==0&&ord[4]==4&&lo==0&&hi==4);
+        EXPECT("no indices: none",0,geo_read_indices(raw,2,0,0,0,ord,&lo,&hi));
+    }
     uint32_t invalid[]={9,11};
     EXPECT("capture below declared span rejected",SIZE_MAX,geo_capture_unique(invalid,2,0,0,10,2,out,8));
     EXPECT("capture above declared span rejected",SIZE_MAX,geo_capture_unique(invalid,2,0,0,9,2,out,8));
@@ -484,7 +502,7 @@ static void replay(int mode) {
     }
     if(mode==14)g_sbw_over=1;
     if(mode==15)g_pend_over=1;
-    uint64_t h=(uint64_t)commands;mtl_sub_index(&h,1);mtl_exec(commands);
+    mtl_exec(commands);
     char wait_name[80];snprintf(wait_name,sizeof wait_name,"geometry CPU snapshot wait mode %d",mode);
     EXPECT(wait_name,mode==7||mode==8||mode==9||mode==13||mode>=14,g_mdi_v-waits);
     if(conversion) {
@@ -583,7 +601,7 @@ static void replay_local(int mode) {
     uint64_t waits=g_mdi_waits,omits=g_geo_color_omits,passes=g_stat_pass;
     uint64_t small_before=g_geo_pack_small,large_before=g_geo_pack_large;
     int full=g_geo_full_colors;if(mode>=11)g_geo_full_colors=mode==13;
-    mtl_sub_begin();uint64_t h=(uint64_t)commands;mtl_sub_index(&h,1);mtl_exec(commands);
+    mtl_sub_begin();mtl_exec(commands);
     if(mode==0||mode==6){int use_small=mode==0&&!geo_pack_legacy();EXPECT("production draw selects bounded fused path",use_small,g_geo_pack_small-small_before);EXPECT("production large draw retains multi-stage path",!use_small,g_geo_pack_large-large_before);}
     if(mode>=11)EXPECT("only bounded masked geometry omits color",mode>=16?2:mode==11||mode==12?1:0,g_geo_color_omits-omits);
     if(mode>=16) { const char *policy=getenv("DM_NVN_GEOMETRY_WAIT"); if(!(policy&&!strcmp(policy,"always"))) { int split=mode==17&&!geo_query_run();EXPECT("geometry run batches consecutive draws",split?1:2,g_geo_nrun); EXPECT("geometry run shares depth pass before cover pass",split?4:3,g_stat_pass-passes); } }
@@ -610,7 +628,7 @@ static void replay_local(int mode) {
         if(step==1){uint16_t value=80;dm_guest_write_prepare(commands+8192,12);memcpy(commands+8192,&value,2);memcpy(commands+8200,&value,2);}
         if(step==2){uint16_t original[]={12,10,65535,11,12,10};dm_guest_write_prepare(commands+32768,12);memcpy(commands+32768,original,12);}
         state_reset();memset(&R,0,sizeof R);mtl_sub_begin();if(step==2)mtl_sub_copy((uint64_t)(commands+32768),(uint64_t)(commands+8192),12);
-        mtl_sub_index(&h,1);mtl_exec(commands);
+        mtl_exec(commands);
         [blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:b destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
         int count=0;uint8_t *p=b.contents;for(int i=0;i<1024;i++)count+=p[i*4]>200;
         EXPECT("warm/edit/GPU-copy geometry pixel oracle",step==1?144:216,count);

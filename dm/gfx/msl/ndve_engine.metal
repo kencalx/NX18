@@ -289,6 +289,14 @@ kernel void resample(device const half *luma [[buffer(0)]], device const half *w
     }
 }
 
+// DM_NDVE_ENGINE=mfx (the iPhone's default, nvn_ndve.inc ndve_mfx_scale): the converted picture turned upside down into MetalFX's own input, for a resampler whose
+// constants flip its rows (c4.w on, c4.z the last row). MetalFX writes no rows in reverse, and a spatial scale of the flipped picture is the flipped scale
+kernel void flip_rows(texture2d<float, access::read> src [[texture(0)]], texture2d<float, access::write> dst [[texture(1)]], uint2 g [[thread_position_in_grid]]) {
+    const uint w = src.get_width(), h = src.get_height();
+    if (g.x >= w || g.y >= h) return;
+    dst.write(src.read(uint2(g.x, h - 1 - g.y)), g);
+}
+
 // DM_NDVE_ENGINE=check: the game's image against the engine's, texel by texel: n[0] the texels that differ, n[1] the largest difference of a component (1/1023 of its range)
 kernel void cmp_img(texture2d<float, access::read> a [[texture(0)]], texture2d<float, access::read> b [[texture(1)]], device atomic_uint *n [[buffer(1)]], uint2 g [[thread_position_in_grid]]) {
     if (g.x >= a.get_width() || g.y >= a.get_height()) return;

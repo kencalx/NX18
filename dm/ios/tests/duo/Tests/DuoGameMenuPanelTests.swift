@@ -1,4 +1,5 @@
 import UIKit
+import SwiftUI
 import XCTest
 @testable import DuoHarness
 
@@ -9,7 +10,7 @@ final class DuoGameMenuPanelTests: XCTestCase {
     private static let list = """
     {"schema": 1, "settings": [
      {"env": "DM_PICTURE_FIT", "kind": "choice", "section": "Game", "label": "Picture", "note": "", "default": "fit", "options": [["fit", "Fit"], ["fill", "Fill"], ["stretch", "Stretch"]]},
-     {"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Frame-rate counter", "note": "", "default": "0"}
+     {"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Vitals", "note": "", "default": "0"}
     ]}
     """
 
@@ -98,7 +99,9 @@ final class DuoGameMenuPanelTests: XCTestCase {
         XCTAssertEqual(rows.map(\.title), menu.map(\.title), "The same rows as the UIMenu, in the same order")
         XCTAssertEqual(model.root.compactMap(\.heading), ["Controls", "Game", "More"])
         XCTAssertEqual(rows.last?.title, "Share log")
-        XCTAssertEqual(model.focus, "layout", "The controller's ring starts on the first row")
+        XCTAssertEqual(model.focus, "row:DM_PICTURE_FIT", "No presets in this list: the controller's ring starts on the first quick tile")
+        XCTAssertEqual(model.home.tiles.map(\.id), ["row:DM_PICTURE_FIT", "row:DM_SHOW_FPS", "layout"], "The first page's quick tiles, in the Gate's order (gate-ui §19.2)")
+        XCTAssertEqual(model.home.doors.map(\.id), ["door.more"], "No Customize without other live rows; More holds Gate at start and Share log")
 
         // A switch: takes effect, and the panel stays
         let fps = try XCTUnwrap(rows.first { $0.id == "row:DM_SHOW_FPS" })
@@ -146,7 +149,7 @@ final class DuoGameMenuPanelTests: XCTestCase {
      {"env": "DM_TOUCH_SIZE", "kind": "choice", "section": "Controls", "label": "Touch control size", "note": "", "default": "1", "options": [["0.7", "Small"], ["0.85", "Medium"], ["1", "Large"]]},
      {"env": "DM_TOUCH_OPACITY", "kind": "choice", "section": "Controls", "label": "Touch control opacity", "note": "", "default": "1", "options": [["0.4", "Faint"], ["0.7", "Light"], ["1", "Normal"], ["1.5", "Strong"]]},
      {"env": "DM_TOUCH_HAPTICS", "kind": "toggle", "section": "Controls", "label": "Touch feedback", "note": "", "default": "1"},
-     {"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Frame-rate counter", "note": "", "default": "0"}
+     {"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Vitals", "note": "", "default": "0"}
     ]}
     """
 
@@ -236,12 +239,17 @@ final class DuoGameMenuPanelTests: XCTestCase {
         }
         XCTAssertGreaterThan(cyan, 10, "Cyan in the ring")
         XCTAssertGreaterThan(coral, 10, "and coral")
-        // each ray is one colour or the other, none a grey blend of the two: the middle of each ray (rays run from 0.72 of the radius to the edge)
+        // each ray is one colour or the other, none a grey blend of the two: the middle of each ray (rays run from 0.72 of the radius to the edge). The most opaque pixel of the
+        // 3x3 around that point: on a small icon (the Duo's 53 px) the point can land on a diagonal ray's anti-aliased edge (alpha 193) with the ray's body one pixel inward
         var rays: [String] = []
         for i in 0..<8 {
             let a = Double(i) * .pi / 4, d = 0.84 * Double(w) / 2
-            let x = Int((Double(w) / 2 + d * cos(a)).rounded(.down)), y = Int((Double(h) / 2 + d * sin(a)).rounded(.down))   // the bitmap's rows run down, as UIKit's y
-            let o = (y * w + x) * 4, r = Int(px[o]), b = Int(px[o + 2])
+            let cx = Int((Double(w) / 2 + d * cos(a)).rounded(.down)), cy = Int((Double(h) / 2 + d * sin(a)).rounded(.down))   // the bitmap's rows run down, as UIKit's y
+            var o = (cy * w + cx) * 4
+            for y in max(cy - 1, 0)...min(cy + 1, h - 1) {
+                for x in max(cx - 1, 0)...min(cx + 1, w - 1) where px[(y * w + x) * 4 + 3] > px[o + 3] { o = (y * w + x) * 4 }
+            }
+            let r = Int(px[o]), b = Int(px[o + 2])
             XCTAssertGreaterThan(px[o + 3], 200, "ray \(i) is drawn at its middle")
             rays.append(b > r + 120 ? "cyan" : r > b + 80 ? "coral" : "grey (\(r), \(px[o + 1]), \(b))")
         }
@@ -259,5 +267,143 @@ final class DuoGameMenuPanelTests: XCTestCase {
         XCTAssertEqual(button?.showsMenuAsPrimaryAction, true)
         let plain = dm_gamepad_view(CGRect(x: 0, y: 0, width: 844, height: 390)).subviews.compactMap { $0 as? UIButton }.first { $0.accessibilityLabel == "Menu" }
         XCTAssertNil(plain?.menu, "Without it: the panel")
+    }
+
+    // The header's save part (gate-ui §19.8): from the game's last commit, in whole minutes, then hours
+    @MainActor func testTheHeaderSaysWhenTheGameLastSaved() {
+        let ns: UInt64 = 1_000_000_000, t: UInt64 = 10_000 * ns
+        XCTAssertEqual(GameMenuHeaderLine.savedText(now: t, last: 0), "Not saved yet this session")
+        XCTAssertEqual(GameMenuHeaderLine.savedText(now: t, last: t - 5 * ns), "Saved just now")
+        XCTAssertEqual(GameMenuHeaderLine.savedText(now: t, last: t - 59 * ns), "Saved just now")
+        XCTAssertEqual(GameMenuHeaderLine.savedText(now: t, last: t - 60 * ns), "Saved 1 min ago")
+        XCTAssertEqual(GameMenuHeaderLine.savedText(now: t, last: t - 3599 * ns), "Saved 59 min ago")
+        XCTAssertEqual(GameMenuHeaderLine.savedText(now: t, last: t - 7300 * ns), "Saved 2 h ago")
+    }
+    // The preset chooser in the menu (gate-ui §19.3, presets-first P7 (b)): a chip, L / R, X and Undo move the presets as on the Gate; the rows the game takes live apply at once,
+    // the rest wait for the next start and the line says so; the choice is saved for the Gate. Customize holds the live preset rows and ends with Back while Custom
+    private static let presetList = """
+    {"schema": 1, "presets": ["battery", "balanced", "quality"], "settings": [
+     {"env": "DM_FPS_TARGET", "kind": "choice", "section": "Game", "label": "Frame rate", "note": "", "default": "60", "options": [["30", "30 fps"], ["60", "60 fps"]], "preset": {"battery": "30"}},
+     {"env": "DM_PRESENT_UPSCALE", "kind": "choice", "section": "Game", "label": "Upscaling", "note": "", "default": "off", "options": [["off", "Off"], ["bilinear", "Bilinear"], ["metalfx", "MetalFX"]], "preset": {"quality": "metalfx"}},
+     {"env": "DM_PICTURE_FIT", "kind": "choice", "section": "Game", "label": "Picture", "note": "", "default": "fit", "options": [["fit", "Fit"], ["fill", "Fill"], ["stretch", "Stretch"]]},
+     {"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Vitals", "note": "", "default": "0"}
+    ]}
+    """
+
+    @MainActor
+    func testThePresetChooserAppliesTheLivePartNow() throws {
+        let (root, button) = try productionMenuButton()
+        let suite = "DuoGameMenuPanelTests.presets"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        let file = try JSONDecoder().decode(SettingsFile.self, from: Data(Self.presetList.utf8))
+        unsetenv("DM_PRESET")   // not set at launch: the menu writes it (the model's launch snapshot)
+        setenv("DM_FRAMEGEN", "1", 1)   // frame generation on: DM_PRESET's only reader (LauncherModel.framegenOn); without it the menu sets none (below)
+        let m = LauncherModel(file.settings, defaults: defaults)
+        m.takeList(file)
+        gameMenuModel = m
+        unsetenv("DM_FPS_TARGET"); unsetenv("DM_PRESENT_UPSCALE")
+        defer {
+            gameMenuModel = nil
+            if dm_game_panel_shown() { dm_game_panel_close() }
+            _ = dm_setting_live("DM_PRESENT_UPSCALE", "off"); unsetenv("DM_PRESENT_UPSCALE"); unsetenv("DM_FPS_TARGET"); unsetenv("DM_PRESET"); unsetenv("DM_FRAMEGEN")
+            defaults.removePersistentDomain(forName: suite)
+        }
+        func preset() -> String? { getenv("DM_PRESET").map { String(cString: $0) } }   // what the host's frame generation reads again once a second (front_env_copy)
+        button.sendActions(for: .primaryActionTriggered)
+        let host = try XCTUnwrap(root.children.compactMap { $0 as? GameMenuPanelHost }.first)
+        let model = host.model
+        XCTAssertEqual(model.focus, "preset:balanced", "The ring starts on the chosen preset's chip")
+        XCTAssertEqual(model.home.doors.map(\.id), ["door.customize", "door.more"])
+        guard case .submenu(let groups) = try XCTUnwrap(model.home.doors.first).kind else { return XCTFail("Customize opens a page") }
+        XCTAssertEqual(groups.flatMap(\.items).map(\.id), ["row:DM_PRESENT_UPSCALE"], "Customize: the live preset rows (Frame rate is not live: it stays on the Gate)")
+
+        // A chip: Battery Saver. Its frame rate waits for the next start; the choice is saved for the Gate; Undo puts it back
+        model.choosePreset(.battery)
+        XCTAssertEqual(m.values["DM_FPS_TARGET"], "30")
+        XCTAssertEqual(defaults.string(forKey: "launcher.DM_FPS_TARGET"), "30", "Saved at once, as a pick in the menu is")
+        XCTAssertEqual(defaults.string(forKey: LauncherModel.presetKey), "battery", "The base is stored: the Gate shows Battery Saver next time")
+        XCTAssertNil(getenv("DM_FPS_TARGET"), "Not live: the running game keeps its rate")
+        XCTAssertEqual(preset(), "battery", "The preset goes into the environment at once: frame generation steps aside in Battery Saver")
+        XCTAssertEqual(model.pending, ["30 fps"], "At next start: 30 fps")
+        XCTAssertEqual(model.toast, "Battery Saver · at next start")
+        XCTAssertTrue(model.canUndo)
+        model.handle(.x)   // X while the toast shows: Undo
+        XCTAssertEqual(m.values["DM_FPS_TARGET"], "60")
+        XCTAssertEqual(model.pending, [])
+        XCTAssertEqual(m.activePreset, .balanced)
+        XCTAssertEqual(preset(), "balanced", "Undo puts the preset back in the environment too")
+        XCTAssertNil(model.toast)
+
+        // R: the next preset, Quality. Upscaling is live: into the environment and applied now
+        model.handle(.r)
+        XCTAssertEqual(m.activePreset, .quality)
+        XCTAssertEqual(m.values["DM_PRESENT_UPSCALE"], "metalfx")
+        XCTAssertEqual(getenv("DM_PRESENT_UPSCALE").map { String(cString: $0) }, "metalfx", "A live row applies at once")
+        XCTAssertEqual(model.toast, "Quality · Upscaling MetalFX")
+        XCTAssertEqual(preset(), "quality")
+
+        // A hand change on Customize: Custom (from Quality); X goes back to the base, and Customize's last row is Back while Custom
+        model.activate(try XCTUnwrap(model.home.doors.first))
+        XCTAssertEqual(model.page.title, "Customize")
+        let row = try XCTUnwrap(model.page.sections.flatMap(\.items).first { $0.id == "row:DM_PRESENT_UPSCALE" })
+        model.activate(row)
+        model.activate(try XCTUnwrap(model.page.sections.flatMap(\.items).first { $0.id == "row:DM_PRESENT_UPSCALE=bilinear" }))
+        XCTAssertTrue(m.isCustom)
+        XCTAssertEqual(m.presetLabel, "Custom (from Quality)")
+        XCTAssertEqual(preset(), "custom", "A hand change to a preset row: Custom")
+        XCTAssertEqual(model.page.sections.last?.items.last?.title, "Back to Quality", "Customize ends with Back while Custom")
+        model.handle(.x)
+        XCTAssertFalse(m.isCustom)
+        XCTAssertEqual(m.values["DM_PRESENT_UPSCALE"], "metalfx")
+        XCTAssertEqual(preset(), "quality", "Back to the base")
+
+        // The first page's ring: zones side by side, along a line into the next zone, up and down in a zone
+        model.back()
+        model.homeZones = [[["preset:battery", "preset:balanced"], ["preset:quality"]], [["row:DM_PICTURE_FIT", "row:DM_SHOW_FPS", "layout"], ["door.customize", "door.more"]]]
+        model.focus = "preset:balanced"
+        model.handle(.right); XCTAssertEqual(model.focus, "row:DM_PICTURE_FIT")
+        model.handle(.down); XCTAssertEqual(model.focus, "door.customize")
+        model.handle(.left); XCTAssertEqual(model.focus, "preset:quality")
+        model.handle(.up); XCTAssertEqual(model.focus, "preset:battery")
+        model.handle(.a); XCTAssertEqual(m.activePreset, .battery)
+        XCTAssertEqual(preset(), "battery")
+        // Frame generation off (no DM_FRAMEGEN): a preset change in game sets no DM_PRESET, as before frame generation
+        unsetenv("DM_FRAMEGEN")
+        model.choosePreset(.quality)
+        XCTAssertEqual(m.activePreset, .quality)
+        XCTAssertEqual(preset(), "battery", "Without frame generation the menu leaves DM_PRESET alone")
+        model.handle(.b)
+        XCTAssertFalse(dm_game_panel_shown(), "B on the first page closes")
+    }
+
+    func testTheFirstPagesStepsAcrossZones() {
+        let zones = [[["a", "b"], ["c"]], [["t1", "t2", "t3"], ["t4"], ["d1", "d2"]]]
+        XCTAssertEqual(GameMenuLayout.homeStep(nil, 0, 0, in: zones), "a")
+        XCTAssertEqual(GameMenuLayout.homeStep("b", 1, 0, in: zones), "t1")
+        XCTAssertEqual(GameMenuLayout.homeStep("c", 1, 0, in: zones), "t4")
+        XCTAssertEqual(GameMenuLayout.homeStep("t1", -1, 0, in: zones), "b", "Back into the chooser at the same line, its last item")
+        XCTAssertEqual(GameMenuLayout.homeStep("d2", -1, 0, in: zones), "d1")
+        XCTAssertEqual(GameMenuLayout.homeStep("d1", -1, 0, in: zones), "c", "A line past the chooser's last: its last line")
+        XCTAssertEqual(GameMenuLayout.homeStep("t3", 0, 1, in: zones), "t4", "Down keeps the column where the next line has it")
+        XCTAssertEqual(GameMenuLayout.homeStep("d1", 0, 1, in: zones), "d1", "No wrap")
+        XCTAssertEqual(GameMenuLayout.homeStep("t3", 1, 0, in: zones), "t3", "No zone further right")
+        XCTAssertEqual(GameMenuLayout.homeStep("c", 0, 0, in: [[["c"]], []]), "c")
+    }
+
+    // The menu's dim light set (gate-ui §11a.5): its slab, tiles and chosen chip resolve to the dimmer values in light, the Gate's dark ones in dark
+    func testTheMenuTakesTheDimLightSet() {
+        func hex(_ c: Color, _ style: UIUserInterfaceStyle) -> UInt32 {
+            let ui = UIColor(c).resolvedColor(with: UITraitCollection(userInterfaceStyle: style))
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            ui.getRed(&r, green: &g, blue: &b, alpha: &a)
+            return UInt32((r * 255).rounded()) << 16 | UInt32((g * 255).rounded()) << 8 | UInt32((b * 255).rounded())
+        }
+        XCTAssertEqual(hex(MenuColor.slab, .light), 0xBDBDC3)
+        XCTAssertEqual(hex(MenuColor.tile, .light), 0xCACACF)
+        XCTAssertEqual(hex(MenuColor.chosen, .light), 0xC29A91)
+        XCTAssertEqual(hex(MenuColor.bar, .light), 0x743C35)
+        XCTAssertEqual(hex(MenuColor.slab, .dark), 0x2A2A2D)
+        XCTAssertEqual(hex(MenuColor.chosen, .dark), 0x9CD1E2)
     }
 }

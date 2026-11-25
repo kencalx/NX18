@@ -127,6 +127,26 @@ int main(void) {
         CHECK(h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 3 && !strcmp(de[0].name, "a") && de[0].size == 5 && de[1].type == ENT_DIR && !strcmp(de[2].name, "c"), "lists a, b, c"); h_fs_CloseDirectory(h);
         CHECK(h_fs_OpenDirectory(&h, "rom:/", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 0, "the file filter hides directories"); h_fs_CloseDirectory(h);
         CHECK(h_fs_OpenDirectory(&h, "rom:/data/b", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 0, "an empty directory"); h_fs_CloseDirectory(h);
+        {   // image directory handle streams via cursor without a snapshot: batched filtered reads, zeroed padding, and DirCount leaves cursor untouched
+            CHECK(h_fs_OpenDirectory(&h, "rom:/data", DIRMODE_FILE) == RES_OK && !((dirh_t *)h)->snap && ((dirh_t *)h)->img, "image directory opens with a cursor and no snapshot");
+            memset(de, 0xaa, sizeof de);
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 0) == RES_OK && cnt == 0, "a 0-entry read returns 0 and leaves the cursor at the start");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 1 && !strcmp(de[0].name, "a") && de[0].type == ENT_FILE && de[0].size == 5, "first filtered 1-entry batch returns a");
+            int zero = 1; for (size_t i = 2; i < sizeof de[0].name; i++) zero &= !de[0].name[i];
+            for (size_t i = 0; i < sizeof de[0].pad0; i++) zero &= !de[0].pad0[i];
+            for (size_t i = 0; i < sizeof de[0].pad1; i++) zero &= !de[0].pad1[i];
+            CHECK(zero, "DirectoryEntry padding and name tail are zeroed");
+            CHECK(h_fs_DirCount(&cnt, h) == RES_OK && cnt == 2, "DirCount counts filtered files (2) mid-read");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 1 && !strcmp(de[0].name, "c") && de[0].type == ENT_FILE && de[0].size == 2, "second batch skips directory b and returns c (cursor untouched by DirCount)");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 0, "third batch reaches the end");
+            h_fs_CloseDirectory(h);
+            CHECK(h_fs_OpenDirectory(&h, "rom:/data", DIRMODE_DIR) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 1, "dir-only filter counts 1");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 1 && !strcmp(de[0].name, "b") && de[0].type == ENT_DIR && de[0].size == 0, "dir-only batch returns b with size 0");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 0, "dir-only second batch reaches the end");
+            h_fs_CloseDirectory(h);
+            CHECK(h_fs_OpenDirectory(&h, "rom:/data", 0) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 0 && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 0, "mode 0 counts and lists nothing");
+            h_fs_CloseDirectory(h);
+        }
         g_nmnt = 0;
         char ov[1100], ovd[1200]; snprintf(ov, sizeof ov, "%s/imgov", root); snprintf(ovd, sizeof ovd, "%s/data", ov); mkdir(ov, 0755); mkdir(ovd, 0755);
         snprintf(fn, sizeof fn, "%s/a", ovd); put(fn, "mod"); snprintf(fn, sizeof fn, "%s/new", ovd); put(fn, "added");
@@ -305,6 +325,21 @@ int main(void) {
         CHECK(read_fs("save:/dir/f", got, sizeof got) && !strcmp(got, "bs"), "it is save:/dir/f");
         CHECK(h_fs_RenameFile("save:\\dir\\f", "save:\\dir\\g") == RES_OK && h_fs_GetEntryType(&t, "save:/dir/g") == RES_OK && t == ENT_FILE, "rename by backslash path");
         h = 0; CHECK(h_fs_OpenDirectory(&h, "save:\\dir", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 1 && !strcmp(de[0].name, "g"), "the directory lists g, not a name with backslashes (%s)", cnt ? de[0].name : "-"); h_fs_CloseDirectory(h);
+    }
+
+    printf("⑦b a rename between two mounts is refused before either is touched, as Horizon refuses it (ResultRenameToOtherFileSystem)\n");
+    {   char rod[1100], tmpd[1100], q[1200]; int32_t t = -1;
+        snprintf(rod, sizeof rod, "%s/rodir", root); mkdir(rod, 0755); snprintf(tmpd, sizeof tmpd, "%s/tmpst", root); mkdir(tmpd, 0755);
+        CHECK(mount("rodir", rod, 1) == RES_OK && mount("tmpst", tmpd, 0) == RES_OK && mount_ex("dsave", save, 0, 1) == RES_OK && g_mnt[g_nmnt - 1].txn_root == g_mnt[0].txn_root,
+              "mount a read-only folder, a writable one and a second name for the save (one transaction)");
+        CHECK(h_fs_RenameFile("save:/dir/g", "rodir:/g") == RES_RENAME_OTHER_FS && h_fs_GetEntryType(&t, "save:/dir/g") == RES_OK, "a file into the read-only mount is refused, and stays");
+        snprintf(q, sizeof q, "%s/g", rod); CHECK(access(q, F_OK) != 0, "nothing is written into the read-only folder");
+        CHECK(h_fs_RenameDir("save:/dir", "tmpst:/dir") == RES_RENAME_OTHER_FS && h_fs_GetEntryType(&t, "save:/dir") == RES_OK && h_fs_GetEntryType(&t, "tmpst:/dir") != RES_OK,
+              "a directory into another writable mount is refused, and stays");
+        CHECK(h_fs_RenameFile("dsave:/dir/g", "save:/dir/h") == RES_RENAME_OTHER_FS && h_fs_GetEntryType(&t, "dsave:/dir/g") == RES_OK && h_fs_GetEntryType(&t, "save:/dir/h") != RES_OK,
+              "between two names of one save too: two mounts on Horizon");
+        CHECK(h_fs_RenameFile("dsave:/dir/g", "dsave:/dir/h") == RES_OK && h_fs_GetEntryType(&t, "save:/dir/h") == RES_OK, "on one mount the rename is made");
+        CHECK(h_fs_CreateFile("tmpst:/a", 0) == RES_OK && h_fs_RenameFile("tmpst:/a", "tmpst:/b") == RES_OK && h_fs_GetEntryType(&t, "tmpst:/b") == RES_OK, "and on a plain writable mount");
     }
 
     printf("⑧ a save folder that cannot clone, and symlinks in recursive deletes\n");

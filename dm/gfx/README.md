@@ -22,7 +22,7 @@ For the build steps of the whole project see [docs/building.md](../../docs/build
   - Pipeline states and depth-stencil states are cached by state hash; at startup, shaders and pipelines are pre-built according to the warm-up manifests (the bundled seed `pso_manifest.tsv`, then this device's `pso_user.tsv`; see below): with a window, on every core before the game's first frame behind a "Preparing shaders" screen (docs/development.md, "The prepare step"), else in the background. A pipeline that fails to build is cached as failed and reported once with its shader keys.
   - Render pipelines are made through `MTL4Compiler` from a base whose colour state is left unspecialized, one base per pipeline less its colour state, specialized per colour state; the bases are kept in the per-game pipeline archive (`pso_archive/` beside `pso_user.tsv`) and taken from it at the next start (`pso_build`; see docs/development.md, "Pipeline bases and the pipeline archive"). A draw whose pipeline is not built yet draws with its shader pair's pulling pipeline (no vertex descriptor) while its own is built in the background (docs/development.md, "Hybrid pipelines").
   - The game's packaged textures are in Tegra block-linear layout and are deswizzled before upload (see `tex/README.md`).
-  - Presentation: the game's swapchain texture is drawn to a `CAMetalLayer`, and presentation timing is scheduled by the pacer in `nvn/nvn_pace.h`. The layer's drawables are render targets only (`framebufferOnly`) on the Mac and on iOS: the present pass's colour attachment is the only use of one (`DM_DRAWABLE_SHADER_ACCESS=1` gives the iOS layer shader access again, for an A/B).
+  - Presentation: the game's swapchain texture is drawn to a `CAMetalLayer`, and presentation timing is scheduled by the pacer in `nvn/nvn_pace.h`. The layer's drawables are render targets only (`framebufferOnly`) on the Mac and on iOS: the present pass's colour attachment is the only use of one (`DM_DRAWABLE_SHADER_ACCESS=1` gives the iOS layer shader access again, for an A/B). On iOS the live present also draws the touch controls into the frame while they show (`nvn_mtl.m` `touch_draw`, `dm/host/touch_draw.h`), so no layer sits over the game's.
 
 For which Metal object each NVN object and command lands on, see [nvn_metal_mapping.md](nvn_metal_mapping.md).
 
@@ -77,7 +77,7 @@ Binding conventions followed during translation (the NVN driver's layout, the sa
 | `nvn/nvn_tex.c`, `nvn/nvn_tex.h` | Storage size, alignment and per-level offsets of block-linear textures (ported from deko3d) |
 | `nvn/nvn_dirty.c`, `nvn/nvn_dirty.h` | Tracks dirty pages of game memory with write protection, to decide whether texture contents have changed and need re-uploading |
 | `nvn/nvn_refl.m`, `nvn/nvn_refl.h` | Converts shader reflection json into fixed-length C arrays, so that drawing only walks arrays |
-| `nvn/nvn_hmap.h`, `nvn/nvn_cover.h`, `nvn/nvn_pace.h`, `nvn/nvn_pso_skey.h`, `nvn/nvn_primitive.h` | Hash table, geometric proof of full-coverage draws, presentation pacer, pipeline manifest key, indexed triangle fans and quads as triangle lists (primitive restart kept) |
+| `nvn/nvn_hmap.h`, `nvn/nvn_pace.h`, `nvn/nvn_pso_skey.h`, `nvn/nvn_primitive.h` | Hash table, presentation pacer, pipeline manifest key, indexed triangle fans and quads as triangle lists (primitive restart kept) |
 | `nvn/nvn_builtin.h` | Hand-written MSL for the 4 compute shaders embedded in the main program |
 | `nvn/include/nvn.h` | NVN interface declarations (third party; for the license see the file header) |
 | `nvn/names.txt` | The NVN API name list. The per-game tables described above live in the game profile `dm/games/<id>/` (named after the base game's title ID; tools pick it with `DM_GAME`, make with `GAME`; there is no default game) |
@@ -130,13 +130,13 @@ The host and the tests draw through Metal 4 only. A fixture's command buffers an
 |---|---|
 | `t_nvn` | Interface layer: fetches addresses from `nvnBootstrapLoader` the way the game does, all the way through to presentation |
 | `t_builtin` | The 4 embedded compute shaders |
-| `t_refl`, `t_hmap`, `t_cover`, `t_pace`, `t_pso_skey`, `t_dirty_slots` | Reflection parsing, hash table, full-coverage proof, pacer, pipeline manifest key, dirty page tracking |
+| `t_refl`, `t_hmap`, `t_pace`, `t_pso_skey`, `t_dirty_slots` | Reflection parsing, hash table, pacer, pipeline manifest key, dirty page tracking |
 | `t_pso_warm` | Historical manifest normalization and deduplication, draw-time cache reuse and GPU pixels for normal and merged passes, and one preparation per shader key across concurrent warm tasks with unrelated keys left free, through the Metal 4 compiler |
 | `t_deswz_gpu` | GPU deswizzling |
 | `t_present_crop` | Presentation cropping |
 | `t_pso_capture`, `t_pso_depth_only` | The GPU capture profile (no pipeline archive opened or written, pipelines still built and specialized); depth-only draws through the host's empty fragment, with and without that profile (`make check_t_pso_capture`, `check_t_pso_depth_only`, under `MTL_DEBUG_LAYER=1`) |
 | `t_mip_extent` | Effective size when rendering to a mip level other than level 0 |
-| `t_fuse_check`, `t_reorder_chain`, `t_defer_chain`, `t_zskip`, `t_xv`, `t_ub`, `t_pfv`, `t_rt_range`, `t_rt_range_shape`, `t_rt_range_ro`, `t_rt_depth_ro` | Compile the replay layer `nvn_mtl.m` in directly and check the various optimization and diagnostic logic inside the replay layer |
+| `t_reorder_chain`, `t_ub`, `t_pfv` | Compile the replay layer `nvn_mtl.m` in directly and check the various optimization and diagnostic logic inside the replay layer |
 | `test_tbdr_budget.py` | The parsing in `tools/tbdr_budget.py` |
 
 ## Common run-time switches
@@ -181,9 +181,7 @@ Comparison and testing:
 
 | Switch | Effect |
 |---|---|
-| `DM_NVN_TBDR=1` | Turns on the pass optimizations of the replay layer (store / load elision, pass merging). They are off by default: they infer which textures a draw reads from its bound slots, which bindless textures defeat ([docs/agents/04-graphics.md](../../docs/agents/04-graphics.md) section 4) |
-| `DM_NVN_UNWRITTEN_DC=0` | With `DM_NVN_TBDR=1`, turns off the single item "attachments not written in this pass are not stored" |
-| `DM_NVN_FUSE_CHECK=1` | Same-frame check of pass merging; logs the comparison result every time |
+| `DM_NVN_UNWRITTEN_DC=0` | Turns off "attachments not written in this pass are not stored" (for picture comparisons) |
 | `DM_NVN_CS_HOIST=0` | A compute dispatch between the draws of a pass ends it (by default it runs ahead of the pass when that changes nothing the draws before it read: [reference](../../docs/reference/rendering.md#compute-dispatches-between-the-draws-of-a-pass-run-ahead-of-it)) |
 | `DM_NVN_SLICE_MERGE=0` | Passes into other layers of one array or cube texture level stay apart (by default they run as one layered pass: [reference](../../docs/reference/rendering.md#passes-into-other-layers-of-one-texture-level-run-as-one-layered-pass)) |
 | `DM_FPS=30` or `60` | Pins the target frame rate |

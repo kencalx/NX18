@@ -55,7 +55,14 @@ iPhone: no IPA was built, and the touch layout is untested.
 - Resident memory was 1370 MB with 1672 MB of Metal allocations at the end of a
   long run, after the game had loaded its opening scenes.
 
+## Found on this game
+
+- [Sticks past the Switch's circle](../../../docs/reference/services.md#sticks-past-the-switchs-circle):
+  on a GameSir G8+ the character moved erratically at full stick tilt and fine
+  at small tilts. Open until a device run confirms it with the clamp in place.
+
 ## Open
+
 
 - The memory keys are the provisional ones; they hold through the tested route
   and were not measured further.

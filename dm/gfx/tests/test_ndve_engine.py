@@ -347,7 +347,7 @@ class EngineSource(unittest.TestCase):
         src = ENGINE.read_text()
         defined = set(re.findall(r'\bkernel void (\w+)\(', src)) | set(re.findall(r'^(?:CONV|CONV3S|UP)\((\w+),', src, re.M))
         bound = kernels_bound()
-        self.assertEqual(len(bound), 12)
+        self.assertEqual(len(bound), 13)
         self.assertEqual(sorted(set(bound) - defined), [])
 
     def test_weight_offsets_follow_from_the_layers(self):

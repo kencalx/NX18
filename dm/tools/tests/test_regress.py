@@ -106,6 +106,72 @@ class Regress(unittest.TestCase):
         self.assertIsNone(regress.msl_io(VS, 'main1', 'vs'))
         self.assertEqual(regress.msl_io('fragment main0_out main0(constant X& x [[buffer(0)]])\n{\n}\n', 'main0', 'ps'), {})   # no stage inputs
 
+    # pso_offline.py as a stub with the planner's interface: R rows are "<vertex key>:<pixel key>:<fragment entry>"; plan_layout keeps a row's own vertex library, plan_standins
+    # takes the pulling one (<key>_bp); both skip a base the pair bases hold, as the real planner does
+    PLANNER = """
+from collections import namedtuple
+from pathlib import Path
+B = namedtuple('B', 'vert frag attributes layouts samples a2c')
+def pair_text(paths): return ''.join(Path(p).read_text() for p in paths)
+def read_pairs(text): return [tuple((l.split('\\t') + [''])[:2]) for l in text.splitlines() if l and not l.startswith('#')]
+def plan(lib, chain, pairs, zero): return [(v + '_b', 'main0', f + '_b', 'main0') for v, f in pairs], [], {}
+def read_layouts(paths): return [l.split('\\t')[1] for p in paths for l in Path(p).read_text().splitlines() if l.startswith('R\\t')]
+def parse_render_key(text): v, f, e = text.split(':'); return {'vs': v + '_b', 'fs': f + '_b', 'fe': e}
+def plan_layout(lib, chain, rows, zero, pair_bases=()):
+    ks = [parse_render_key(t) for t in rows]
+    return [B((k['vs'], 'main0'), (k['fs'], k['fe']), (), (), 1, False) for k in ks if (k['vs'], 'main0', k['fs'], k['fe']) not in set(pair_bases)], {}
+"""
+    STANDINS = """
+def plan_standins(lib, chain, rows, zero, pair_bases=()):
+    ks = [parse_render_key(t) for t in rows]
+    return [B((k['vs'][:-2] + '_bp', 'main0'), (k['fs'], k['fe']), (), (), 1, False) for k in ks], {}
+"""
+
+    def interface(self, standins=True, manifest=True):
+        """interface_check on a chain build of four vertex and four pixel shaders, a pair list and a prewarm list, with a revision whose planner has stand-ins or not"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); lib = root / 'out/b-chainX'; lib.mkdir(parents=True); prof = root / 'prof'; prof.mkdir()
+            tools = root / 'tree/dm/gfx/tools'; tools.mkdir(parents=True); (tools / 'pso_offline.py').write_text(self.PLANNER + (self.STANDINS if standins else ''))
+            def shader(k, src, **refl): (lib / f'{k}_b.json').write_text(json.dumps({'chain': 'chainX', 'entry': 'main0', **refl})); (lib / f'{k}_b.metal').write_text(src)
+            out3 = 'struct main0_out\n{\n    float4 a [[user(locn0)]];\n    float4 b [[user(locn1)]];\n    float4 c [[user(locn2)]];\n};\n\nvertex main0_out main0()\n{\n}\n'
+            shader('va', VS); shader('vb', out3)
+            shader('pa', PS)   # locn1 not written by va, locn2 an int4 where va writes a float4
+            shader('pb', PS)   # with vb: locn2 int4 / float4
+            # pc: main0 reads float4s (fine with vb), its integer entry main0_u reads locn2 as an int4
+            pc = ('struct main0_in\n{\n    float4 a [[user(locn0)]];\n};\n\nstruct main0_u_in\n{\n    int4 c [[user(locn2)]];\n};\n\n'
+                  'fragment main0_out main0(main0_in in [[stage_in]])\n{\n}\n\nfragment main0_out main0_u(main0_u_in in [[stage_in]])\n{\n}\n')
+            shader('pc', pc, entry_u='main0_u')
+            shader('pd', 'struct main0_in\n{\n    float4 a [[user(locn0)]];\n};\n\nfragment main0_out main0(main0_in in [[stage_in]])\n{\n}\n')   # fine with vb
+            (prof / 'shader_pairs.tsv').write_text('va\tpa\nvb\tpd\n')
+            if manifest: (prof / 'pso_manifest.tsv').write_text('R\tvb:pb:main0\nR\tvb:pc:main0\nR\tvb:pc:main0_u\nR\tvb:pd:main0\nR\tva:pa:main0\nC\tx\n')
+            g = NS(id='0100000000000000', build=root / 'build', profile_dir=lambda tree: prof)
+            with patch.object(regress, 'depth_zero', return_value=False):
+                return regress.interface_check(NS(id='t-' + str(standins), path=root / 'tree'), g, root / 'out')
+
+    def test_interface_check_covers_the_rows_bases(self):
+        """The pair bases' check, then the R rows' layout bases and stand-ins (GitHub issue #283, the review of the stand-ins: regress.py read the pair lists alone): each base
+        metal-tt would refuse, with the fragment entry the planner chose; a row whose base is a pair's is reported once, as the pair's"""
+        r = self.interface()
+        self.assertEqual(r['checked'], 2)
+        self.assertEqual([(x['vs'], x['ps'], x['missing'], x['type']) for x in r['bad']], [('va', 'pa', ['locn1'], ['locn2 float4/int4'])])
+        self.assertEqual(r['rows_checked'], 4)   # vb with pb, pc and pd, va with pa
+        got = sorted((x['base'], x['vs'], x['ps'], x['ps_entry'], tuple(x['missing']), tuple(x['type'])) for x in r['halved'])
+        self.assertEqual(got, [('layout', 'vb', 'pb', 'main0', (), ('locn2 float4/int4',)), ('layout', 'vb', 'pc', 'main0_u', (), ('locn2 float4/int4',)),
+                               ('stand-in', 'va', 'pa', 'main0', ('locn1',), ('locn2 float4/int4',)),   # the pulling base is not the pair's (_bp): reported as a stand-in
+                               ('stand-in', 'vb', 'pb', 'main0', (), ('locn2 float4/int4',)), ('stand-in', 'vb', 'pc', 'main0_u', (), ('locn2 float4/int4',))])
+        # a revision whose planner has no stand-ins, and a profile without a prewarm list
+        self.assertEqual({x['base'] for x in self.interface(standins=False)['halved']}, {'layout'})
+        r = self.interface(manifest=False)
+        self.assertEqual((r['rows_checked'], r['halved'], len(r['bad'])), (0, [], 1))
+
+    def test_interface_rows_in_the_comparison(self):   # a row base metal-tt halves around is a change, not a failure; one the baseline had is known
+        x = {'base': 'stand-in', 'vs': 'v', 'entry': 'main0', 'ps': 'p', 'ps_entry': 'main0_u', 'missing': [], 'type': ['locn2 float4/int4']}
+        y = dict(x, base='layout')
+        d = regress.chain_diff({'shaders': {}, 'interface': {'bad': [], 'halved': [y]}}, {'shaders': {}, 'interface': {'bad': [], 'halved': [y, x], 'rows_checked': 3}})
+        self.assertEqual((d['interface']['new'], d['interface']['halved_new'], d['interface']['halved_known'], d['interface']['rows_checked']), ([], [x], [y], 3))
+        d = regress.chain_diff({'shaders': {}, 'interface': {'bad': []}}, {'shaders': {}, 'interface': {'bad': []}})   # older manifests: no rows
+        self.assertEqual((d['interface']['halved_new'], d['interface']['halved_known']), ([], []))
+
     def test_red_normalized(self):
         a = regress.normalize_red('[dm] [RED] shader 0a91af5bef8578e2: 12 bindings at 0x1f00 in /Volumes/NX/games/x [y]/b')
         b = regress.normalize_red('[dm] [RED] shader 1b91af5bef8578e3: 7 bindings at 0x2000 in /tmp/z')
@@ -261,6 +327,30 @@ class Regress(unittest.TestCase):
             self.assertEqual(gr['status'], 'NEW-FAIL')
             md = regress.report_md({'baseline': None, 'candidate': None, 'command': 'chain', 'mode': 'chain', 'status': 'NEW-FAIL', 'machine': {'chip': 'x', 'macos': 'x', 'xcode': 'x'}, 'secs': 1, 'games': {'game': {'secs': {}, **gr}}})
             self.assertIn('`0123456789abcdef`', md); self.assertIn('extra entry points', md)
+
+    def test_check_reports_row_bases_metal_tt_halves_around_as_a_change(self):   # interface_check's halved: not a failure (only a pair base's refusal stops the archive)
+        with tempfile.TemporaryDirectory() as td, ExitStack() as stack:
+            root = Path(td)
+            a = NS(baseline='base', candidate='cand', no_smoke=True, rewrite=False, quick=False)
+            stack.enter_context(patch.object(regress, 'Tree', return_value=NS(id='tree')))
+            stack.enter_context(patch.object(regress, 'select', return_value=[NS(id='game', name='game')]))
+            stack.enter_context(patch.object(regress, 'rewriter_key', return_value='same'))
+            x = {'base': 'stand-in', 'vs': '0123456789abcdef', 'entry': 'main0', 'ps': 'fedcba9876543210', 'ps_entry': 'main0_u', 'missing': [], 'type': ['locn2 float4/int4']}
+            y = dict(x, base='layout', ps_entry='main0')
+            man = {'kind': 'nvn', 'ok': 1, 'total': 1, 'failed': 0, 'shaders': {'0123456789abcdef': {'st': 'ok'}}}
+            stack.enter_context(patch.object(regress, 'chain_build', side_effect=[({**man, 'interface': {'bad': [], 'halved': [y]}}, root),
+                                                                                  ({**man, 'interface': {'bad': [], 'halved': [y, x], 'rows_checked': 2}}, root)]))
+            stack.enter_context(patch.object(regress, 'new_report', return_value={'games': {}}))
+            finish = stack.enter_context(patch.object(regress, 'finish', return_value=0))
+            stack.enter_context(patch.object(regress, 'say'))
+            regress.cmd_check(a)
+            gr = finish.call_args.args[0]['games']['game']
+            self.assertEqual(gr['status'], 'CHANGED')
+            self.assertTrue(any('1 new layout bases or stand-ins' in r for r in gr['reasons']), gr['reasons'])
+            self.assertTrue(any('as in the baseline: their groups are compiled in halves' in k for k in gr['known']), gr['known'])
+            md = regress.report_md({'baseline': None, 'candidate': None, 'command': 'chain', 'mode': 'chain', 'status': 'CHANGED', 'machine': {'chip': 'x', 'macos': 'x', 'xcode': 'x'}, 'secs': 1, 'games': {'game': {'secs': {}, **gr}}})
+            self.assertIn('new stand-in interface (its group compiled in halves): vs `0123456789abcdef` main0 → ps `fedcba9876543210` main0_u: locn2 float4/int4', md)
+            self.assertIn('known layout interface (its group compiled in halves)', md)
 
     def test_smoke_diff(self):
         route = {'reach': (100, 30.0)}
@@ -473,7 +563,10 @@ class Regress(unittest.TestCase):
                  (True, depth + rejected.replace('depth near=-w', 'depth near=0').replace('made for chain b3ca4b7c621f', 'made for chain old'), 'bundled pipeline archive stamp'),
                  (True, depth + '[dm] [nvn-mtl] pipeline archive bundled with the app: made for (no prebuilt.tsv), this run needs chain current; depth near=0: the device builds the bases it does not hold\n', 'bundled pipeline archive stamp'),
                  (False, '', None), (False, '[dm] [nvn] depth mode near=-w (GL)\n', None),
-                 (True, depth + '[dm] [nvn-mtl] pipeline archive bundled with the app: holds the bases of every shader pair (16 of 16 probed bases found, 26.0 ms)\n', None)]
+                 (True, depth + '[dm] [nvn-mtl] pipeline archive bundled with the app: holds the bases of the listed shader pairs (16 of 16 probed pairs from shader_pairs.tsv found, 26.0 ms)\n', None),
+                 (True, depth + '[dm] [nvn-mtl] pipeline archive bundled with the app: holds the bases of the listed shader pairs (16 of 16 probed pairs from shader_pairs.tsv found, 26.0 ms); '
+                  'cover pairs only: the pairs the game draws with are not in this archive (it holds only the layout bases of the prewarm list\'s R rows, which the prepare '
+                  'line counts), their other bases are compiled as the draws meet them\n', None)]
         route = dict(secs=10, quick=10, prebuild='off', keys='', reach=None, shots=[], hang=20)
         for zero, text, failure in cases:
             with self.subTest(zero=zero, text=text), tempfile.TemporaryDirectory() as td:

@@ -4,8 +4,8 @@
 #   x18 read/write      → thread slot K18 (TSD, via tpidrro_el0)
 #   mrs tpidr_el0       → read thread slot KTLS; msr tpidr_el0 → write KTLS
 #   mrs tpidrro_el0     → read thread slot KTLR (Horizon ThreadLocalRegion pointer)
-#   any of these with x18 as its register → a copy between thread slots, K18 among them (site_slot_copy; the host gate writes K18 for mrs x18, cntpct_el0)
-#   svc #n, mrs cntpct_el0 → host gate (gate address taken from thread slot KGATE; once in C, gates.tsv is looked up by return point)
+#   any of these with x18 as its register → a copy between thread slots, K18 among them (site_slot_copy; the host gate writes K18 for mrs x18, cntpct_el0 / cntvct_el0 / cntfrq_el0)
+#   svc #n, mrs cntpct_el0 / cntvct_el0 / cntfrq_el0 → host gate (gate address taken from thread slot KGATE; once in C, gates.tsv is looked up by return point)
 #   sub sp, sp, xN      → xN rounded up to 16 first (Apple's kernel faults on a misaligned sp, Horizon does not; site_sp_align)
 #   ldxr* / ldxp → ldaxr* / ldaxp, stxr* / stxp → stlxr* / stlxp: every exclusive access gets acquire or release ordering (exclusive_order_sites; the games ran on the Switch's Cortex-A57 without it, Apple cores need it)
 #   the completer of Trinity's per-frame rendezvous: dmb ish between its flag store and its load of the state word (trinity_completer_sites; exactly one such function in a module, or no change)
@@ -15,7 +15,7 @@
 #   Registered observation gates (OBS of the patch files, restricted by build ID): one instruction at the entry is replaced with "enter the host observation callback → execute the original instruction → jump back", so diagnostics modify zero code at runtime; listed in <name>.obs.tsv
 # The key page only stores "actual key number × 8" at the end of the data segment, and patch code fetches thread slots indirectly through the key page: the loader may use any key number.
 # Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF; when that would start beyond 112 MB the patch area sits before the base, see FAR; a text longer than a B reaches adds a second one after the image, see TWO), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv, <name>.changed.tsv (the text words whose instructions no longer run as the file has them)
-import struct, re, sys, os, glob, shlex, types, importlib.util, multiprocessing, signal
+import struct, re, sys, os, glob, shlex, types, importlib.util, multiprocessing, signal, hashlib
 from itertools import combinations
 import capstone
 if capstone.cs_version()[0] != 5:   # the rewriter uses Capstone 5's names (CS_ARCH_ARM64, ARM64_OP_*), which Capstone 6 renamed: see "Capstone API version" in docs/reference/rewriter.md
@@ -87,7 +87,9 @@ else:
 #   MATCH_FRAME_STEP = {'main': [{name, size, fingerprints, stub}, ...]}: the frame step stubs of any main without FRAME_STEP, placed by the function they patch (nso_match.locate_stub:
 #     one complete unwind function of that size and fingerprint, or no stubs and a red line); stub(ctx) writes its sites at ctx.base + offsets inside that function. Rules are
 #     one patch's reviewed implementations (one name). Only the profile selected by DM_GAME participates, as for MATCH_CUTS. A rule's others = {label: {size, fingerprints}}
-#     are more functions its stub patches or depends on, found the same way: ctx.others[label] is the start of each, or None (a red line) when it does not match, and the stub leaves that part out
+#     are more functions its stub patches or depends on, found the same way (a short one through its matched caller's direct call: called_by = {size, fingerprints, call}, as in
+#     MATCH_CUTS): ctx.others[label] is the start of each, or None (a red line) when it does not match, and the stub leaves that part out. A matched stub that writes no site
+#     at all leaves the main without a state page, so the host keeps the game's own present interval (below)
 #     An anchored rule {name, calls, find, stub, reviewed} is found instead as the one function that calls the imported symbol calls; find(fn) (nso_match.Function) checks the code there
 #     and returns what the stub needs (ctx.found: its sites, registers), or raises MatchError (a red line, no stubs); reviewed lists what find returned on the builds checked by hand. It holds over updates that change the function elsewhere
 #   MATCH_CUTS = {module name: [nso_match rule, ...]}: fallback for modules without registered CUTS. Only the profile selected by DM_GAME participates; a derived profile uses
@@ -349,6 +351,65 @@ def site_plain(ins):
     emit(LDP(S, T, 31, save - dlt)); emit(B(here(), ins.address + 4))
     return start
 
+def select_x18(ins):
+    """A CSEL with one guest x18 source and a normal register destination."""
+    word = struct.unpack('<I', ins.bytes)[0]
+    rd, rn, rm, cond = word & 31, (word >> 5) & 31, (word >> 16) & 31, (word >> 12) & 15
+    if word & 0x7FE00C00 != 0x1A800000 or rd in (18, 31) or (rn == 18) == (rm == 18) or cond >= 14: return None
+    return rd, (rm if rn == 18 else rn), (cond ^ (rn == 18)), bool(word >> 31)
+
+
+# Only these instructions can carry a proof of a dead register across them. The first operand of a writer is a full xN/wN definition unless the instruction
+# also reads it (including as an address register). A wN definition zeros the high half of xN. Stores, compares and NOP can never end a register's lifetime.
+SELECT_WRITES = set('adr adrp add adds and ands asr bic csel eor ldr ldrb ldrh ldrsb ldrsh ldrsw ldur lsl lsr mov movn movz mul orn orr sbfx sub subs ubfx'.split())
+SELECT_READS = {'cmp', 'cmn', 'tst', 'nop', 'str', 'strb', 'strh', 'stur', 'sturb', 'sturh'}
+
+
+def select_scratch(at, by_address, function_end, rd):
+    """One dead AAPCS64 temporary for a select, or None. The old value must be overwritten before a read on every path, or reach a normal return
+    inside the same unwind function. Keep x0–x8, callee-saved registers and LR out of the search. Calls, unknown instructions, outgoing branches and
+    an exhausted search budget give no proof."""
+    budget = 64
+
+    def dead_after(pc, pending):
+        nonlocal budget
+        if not pending or budget == 0 or pc >= function_end or (ins := by_address.get(pc)) is None: return set()
+        budget -= 1
+        m = ins.mnemonic
+        if m == 'ret' and not ins.op_str: return pending
+        if m == 'b': return dead_after(ins.operands[-1].imm, pending)
+        if m.startswith('b.') or m in ('cbz', 'cbnz', 'tbz', 'tbnz'):
+            pending = pending - regs_in(ins)
+            return dead_after(pc + 4, pending) & dead_after(ins.operands[-1].imm, pending)
+        if m not in SELECT_WRITES and m not in SELECT_READS: return set()
+        dead = set()
+        if m in SELECT_WRITES and not ins.writeback:
+            dst, _, sources = ins.op_str.partition(',')
+            dst_n = num(dst)
+            if dst_n in pending:
+                reads, _ = regset(ins)
+                if not any(num(name) == dst_n for name in reads | set(re.findall(r'\b[xw]\d+\b', sources))):
+                    dead.add(dst_n)
+        return dead | dead_after(pc + 4, pending - regs_in(ins))
+
+    return min(dead_after(at + 4, set(range(9, 18)) - {rd}), default=None)
+
+
+def site_select(ins, args, temp):
+    """Split CSEL on its original flags. Only the arm selecting x18 needs the key page. In that arm the destination's old value is dead,
+    so the destination and one dead temporary can load K18 without touching the guest stack."""
+    rd, other, other_cond, wide = args
+    start, skip = here(), len(patch)
+    emit(NOP)  # filled with the conditional branch once the other arm's address is known
+    emit(MRS_TPIDRRO(temp)); emit_slot_addr(temp, rd, 'K18')
+    emit(LDRX(rd, temp) if wide else 0xB9400000 | (temp << 5) | rd)  # ldr wD,[xT] zero-extends the result
+    emit(B(here(), ins.address + 4))
+    struct.pack_into('<I', patch, skip, BEQ(start, here()) | other_cond)
+    if not wide or rd != other: emit(MOVX(rd, other) if wide else MOVX(rd, other) & 0x7FFFFFFF)
+    emit(B(here(), ins.address + 4))
+    return start
+
+
 def site_sp(ins):
     """Destination is sp and a source is x18 (Engage's alloca: mov x18, sp; sub x18, x18, x0; mov sp, x18). site_plain saves its scratch relative to the old sp and would restore it relative to the new one:
     copy the old sp into T first, and after the instruction restore S / T relative to T (without writeback, ldp may use the base register as a destination). x18 is not written, so the slot is not written back"""
@@ -492,7 +553,9 @@ def emit_gate_call():
     emit(MRS_TPIDRRO(30)); emit_slot_addr(30, 29, 'KGATE'); emit(LDRX(30, 30)); emit(LDRX(29, 31))
 
 def site_gate(ins, kind, arg):
-    """svc / mrs cntpct_el0 → host gate. The gate address is taken from thread slot KGATE; the gate looks up gates.tsv by return point (the address of this block's ldp)."""
+    """svc / mrs cntpct_el0 / cntvct_el0 / cntfrq_el0 → host gate. The gate address is taken from thread slot KGATE; the gate looks up gates.tsv by return point (the address of this
+    block's ldp). A counter read into x18 keeps this block: dm_gate does not write x18 back (Apple's platform register), so the host writes the value into thread slot K18, the guest's
+    x18 (hle.c gate_dispatch, arg 18). An svc's arg is its number, not a register"""
     start = here()
     emit(STP_PRE(29, 30, 31, -16))
     emit_gate_call()
@@ -803,6 +866,12 @@ for o in (o for s, e in CODE_RANGES for o in range(s, e, 4)):
     if w & 0xFFFFFFE0 == 0xD53BD060: kinds[o] = ('tpidrro_r', None); continue
     if w & 0xFFFFFFE0 == 0xD53BE020: kinds[o] = ('cntpct', w & 31); continue
     if w & 0xFFFFFFE0 == 0xD53BE040: kinds[o] = ('cntvct', w & 31); continue
+    # mrs xN, cntfrq_el0: the counter's frequency. The counter reads above return the guest's ticks (19.2 MHz, 31.25 MHz for the Switch 2), while the host's register describes the
+    # host's counter: 24 MHz on earlier Apple chips (ticks converted with it come out 20 % short, 30 % long for the Switch 2), 1 GHz measured on a development Mac
+    # (dm/gfx/nvn/nvn_entry.S: 32 to 52 times short). The host gate gives the guest's frequency (hle.c G_CNTFRQ; DM_CNTFRQ=0 makes it give the host's register again, as before
+    # this rule), into x18 too (the host writes thread slot K18). mrs x18, cntfrq_el0 used to be an x18 site (site_plain: the host's register into K18), and mrs xN for any other
+    # N stayed in place. Only a module that holds the read rewrites differently: every other one is byte-identical
+    if w & 0xFFFFFFE0 == 0xD53BE000: kinds[o] = ('cntfrq', w & 31); continue
     # mrs xN, ctr_el0 (cache type): the Apple kernel does not expose it to user mode (SIGILL); SDK 16's nn::os::FlushDataCache reads it for the cache line size
     if w & 0xFFFFFFE0 == 0xD53B0020: kinds[o] = ('ctr', w & 31); continue
     # sub sp, sp, xN (extended register, LSL #0): sp may end up misaligned, which Horizon allows and Apple's kernel does not (site_sp_align); with x18 it is an x18 site (site_sp)
@@ -820,6 +889,8 @@ def func_of(a):
     if i >= 0: return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END)
     return (max((e for s, e in DATA_BLOCKS if e <= a), default=0), starts[0]) if starts else (a, a + 4)
 done = set(); windows = []; jumps = {}; tabjumps = {}; tailcalls = set(); retries = []
+guarded_tails = []   # (guard, br) of each table jump_guarded_tail resolved: nothing may land past the guard
+guarded_cfg = {}   # (function or piece) → one br x18 jump_guarded_cfg resolved there: rechecked with the direct branches from elsewhere and the tables resolved later
 def guarded_count(ctx, kc, kl):
     """How many entries the compare ctx[kc] (cmp index,#N) lets the table load ctx[kl] read, or None when no branch on its flags guards the load. A compare bounds the index only
     through the branch that acts on it: cmp w18,#4; b.hi exit; cmp w18,#1; ldrsw x18,[x4,x18,lsl #2] has a nearer compare that bounds nothing, and taking it read 2 entries of a table of 5
@@ -947,45 +1018,6 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
     if page is None: return None
     tb = page + lo
     return [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
-def jump_zero_extended(insl, j):
-    """cmp wS,#N; b.hi exit; and xI,xS,#0xffffffff; ldrsw xE,[xB,xI,lsl #2]; add x18,xE,xB; br x18.
-    Mario Tennis Aces 1.0.0 main+0x35837c zero-extends the checked value rather than checking another masked copy. Require straight-line data flow from the guard to the br,
-    with no entry past the check, and decoded targets outside that run. Tried after every older recognizer, so previously recognized tables keep their targets."""
-    ctx = insl[max(0, j - 16):j + 1]
-    add = next((p for p in reversed(ctx[:-1]) if p.mnemonic == 'add' and re.fullmatch(r'x18, x\d+, x\d+', p.op_str)), None)
-    if not add: return None
-    _, ent, base = add.op_str.split(', '); ka = ctx.index(add)
-    ld = next((p for p in reversed(ctx[:ka]) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'{ent}, \[{base}, x\d+, lsl #2\]', p.op_str)), None)
-    if not ld: return None
-    kl = ctx.index(ld); idx = ld.op_str.split(', ')[2]
-    if base in (ent, idx): return None
-    mask = next((p for p in reversed(ctx[:kl]) if p.mnemonic == 'and' and re.fullmatch(rf'{idx}, x\d+, #0xffffffff', p.op_str)), None)
-    if not mask: return None
-    km = ctx.index(mask); src = mask.op_str.split(', ')[1]
-    check = next((p for p in reversed(ctx[:km]) if p.mnemonic == 'cmp' and re.fullmatch(rf'w{src[1:]}, #(0x[0-9a-f]+|\d+)', p.op_str)), None)
-    if not check: return None
-    kc = ctx.index(check); branch = ctx[kc + 1]
-    if branch.mnemonic != 'b.hi': return None
-    run = ctx[kc:]; head, end = check.address, insl[j].address
-    if any(b.address != a.address + 4 for a, b in zip(run, run[1:])): return None
-    if head <= branch.operands[0].imm <= end: return None
-    # Calls and system calls can overwrite registers without appearing in Capstone's register writes. Reject control flow and traps after the guard.
-    if any(p.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'eret', 'drps') or p.mnemonic.startswith('b.') for p in ctx[kc + 2:-1]): return None
-    def writes(p, reg):   # Capstone lists a compare's first operand as written; only its flags change.
-        names = [p.reg_name(r) for r in p.regs_access()[1]]
-        return p.mnemonic not in ('cmp', 'cmn', 'tst') and any(name is None or name in (reg, 'w' + reg[1:], {'x29': 'fp', 'x30': 'lr'}.get(reg)) for name in names)
-    if any(writes(p, src) for p in ctx[kc + 2:km]) or any(writes(p, idx) for p in ctx[km + 1:kl]) or \
-       any(writes(p, ent) or writes(p, base) for p in ctx[kl + 1:ka]) or any(writes(p, 'x18') for p in ctx[ka + 1:-1]): return None
-    for p in insl:
-        if p.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.'):
-            if head < p.operands[-1].imm <= end: return None
-    if any(head < t <= end for targets in tabjumps.values() for t in targets): return None
-    if any(b <= end and b + 4 * width > head + 4 for b, width in jumps.values()): return None
-    tb = copied_base(insl, insl.index(ld), base); n = int(check.op_str.split('#')[1], 0) + 1
-    if tb is None or tb < 0 or tb + 4 * n > len(IMG): return None
-    targets = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
-    addresses = {p.address for p in insl}
-    return targets if all(t in addresses and not head < t <= end for t in targets) else None
 def forward_table_base(insl, k, rb, n):
     """A loop's base initialized after its dispatch in address order (Blasphemous 1.0.8 main+0xae95f8: x17 is set at +0xae96dc, then the block branches backward).
     Used only after every older recognizer failed. Require exactly two writers of the full base in the function, an adjacent adrp + add after the load, no call that can clobber it,
@@ -1046,47 +1078,165 @@ def copied_base(insl, k, rb):
         if lo is not None and p.mnemonic == 'adrp' and ops[0] == r: return p.operands[1].imm + lo
         return None
     return None
-def jump_masked_not(insl, j):
-    """A zero-guarded complemented index: tst wS,#M; b.eq exit; mvn wS,wS; and xI,xS,#M; ldrsw xE,[xB,xI,lsl #2]; add x18,xE,xB; br x18.
-    Return of the Obra Dinn 1.0.1 main+0x6eea88 / +0x6eeac0 (Unity 2017.4) has seven entries, not eight: M is 7, the tst excludes zero, and the complement maps 1..7 to 6..0.
-    Read exactly M entries for a contiguous low-bit mask, only after the older recognizers fail. Straight-line data flow and no entry past the guard are required."""
-    ctx = insl[max(0, j - 16):j + 1]
-    add = next((p for p in reversed(ctx[:-1]) if p.mnemonic == 'add' and re.fullmatch(r'x18, x\d+, x\d+', p.op_str)), None)
+def guarded_run(insl, j):
+    """The dispatch tail ending at the br insl[j], its index bounded by a guard on one straight run to the br, at most 32 instructions:
+      guard; ...; [and xI,xS,#M; ...;] ldrsw xE,[xB,xI,lsl #2]; ...; add xD,xE,xB; ...; br xD, with M a low-bit mask.
+    The guard (and the mask) give the number of entries, one of five forms, each found on a game where no older recognizer matched:
+      cmp wI,#N; b.hi exit on the index itself: N + 1. The form jump_offsets reads, further back than its 16 instructions: ULTRA STREET FIGHTER II 1.1.1 main+0x63607c has its cmp
+        24 instructions before the br, with the base, the load and nine constants moved into registers between them.
+      and wI,wS,#M; cmp wI,#M; b.eq exit: the mask's highest value leaves, so M, not M + 1. Tied Together 1.0.2: and w18,w17,#7; cmp w18,#7; b.eq, 7 entries.
+      cmp wS,#N; b.hi exit, then M = 0xffffffff (the checked value zero-extended): N + 1. Mario Tennis Aces 1.0.0 main+0x35837c, 5 entries.
+      tst wS,#M; b.eq exit; mvn wS,wS right before the and: the zero case is gone and the complement maps 1..M to M - 1..0, so M. Return of the Obra Dinn 1.0.1 main+0x6eea88 / +0x6eeac0
+        (Unity 2017.4): 7 entries, where the mask alone would read an eighth word from the next table.
+      tbnz wS,#B,exit with M = 2^(B + 1) - 1: bit B is clear on the fall-through, so 2^B, not M + 1. ULTRA STREET FIGHTER II 1.1.1 main+0x590ee8: tbnz w17,#3; and x18,x17,#0xf, 8 entries.
+    One proof for all: no gap in the run from the guard to the br, the guard's branch leaves the run, no control flow or trap in it but that branch (calls and system calls write registers
+    Capstone does not list), S unchanged from the guard to the and (the complement apart), I to the load, E and B to the add, D to the br. Entries at the run's first instruction pass the
+    guard; nothing else may land in the run, which jump_guarded_tail and jump_guarded_cfg check. Returns (the run's first index, the entries, the load's index, B) in insl, or None"""
+    k0 = max(0, j - 32); ctx = insl[k0:j + 1]; dest = insl[j].op_str
+    if not re.fullmatch(r'x\d+', dest): return None
+    add = next((p for p in reversed(ctx[:-1]) if p.mnemonic == 'add' and re.fullmatch(rf'{dest}, x\d+, x\d+', p.op_str)), None)
     if not add: return None
     _, ent, base = add.op_str.split(', '); ka = ctx.index(add)
     ld = next((p for p in reversed(ctx[:ka]) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'{ent}, \[{base}, x\d+, lsl #2\]', p.op_str)), None)
     if not ld: return None
     kl = ctx.index(ld); idx = ld.op_str.split(', ')[2]
     if base in (ent, idx): return None
+    def bound(k, ws):   # cmp wS,#N; b.hi at k → (k, k + 1, k + 2, N + 1)
+        m = re.fullmatch(rf'{ws}, #(0x[0-9a-f]+|\d+)', ctx[k].op_str) if ctx[k].mnemonic == 'cmp' else None
+        return (k, k + 1, k + 2, int(m.group(1), 0) + 1) if m and ctx[k + 1].mnemonic == 'b.hi' else None
+    guard = None   # (its first instruction, its branch, the first instruction S may not change at, the entries)
     mask = next((p for p in reversed(ctx[:kl]) if p.mnemonic == 'and' and re.fullmatch(rf'{idx}, x\d+, #(0x[0-9a-f]+|\d+)', p.op_str)), None)
-    if not mask: return None
-    km = ctx.index(mask)
-    if km < 3: return None
-    _, src, imm = mask.op_str.split(', '); n = int(imm[1:], 0)
-    if not n or n & (n + 1) or n > 0xffffffff: return None
-    test, branch, invert = ctx[km - 3:km]
-    if test.mnemonic != 'tst' or test.op_str != f'w{src[1:]}, {imm}' or branch.mnemonic != 'b.eq' or \
-       invert.mnemonic != 'mvn' or invert.op_str != f'w{src[1:]}, w{src[1:]}': return None
-    run = ctx[km - 3:]
-    if any(b.address != a.address + 4 for a, b in zip(run, run[1:])): return None
-    head, end = test.address, insl[j].address
-    if head <= branch.operands[0].imm <= end: return None
-    def writes(p, reg):
-        if p.mnemonic in ('bl', 'blr') and int(reg[1:]) <= 18: return True
-        return writes_reg(p, reg)
-    if any(writes(p, idx) for p in ctx[km + 1:kl]) or any(writes(p, ent) for p in ctx[kl + 1:ka]) or \
-       any(writes(p, base) for p in ctx[kl + 1:ka + 1]) or any(writes(p, 'x18') for p in ctx[ka + 1:-1]): return None
-    if any(p.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.') for p in ctx[km + 1:-1]): return None
+    km0 = -1
+    if mask:
+        km = km0 = ctx.index(mask); _, src, imm = mask.op_str.split(', '); m = int(imm[1:], 0); ws = 'w' + src[1:]
+        if not m or m & (m + 1) or m > 0xffffffff: return None
+        if m == 0xffffffff:
+            kc = next((k for k in range(km - 1, -1, -1) if ctx[k].mnemonic == 'cmp' and ctx[k].op_str.startswith(ws + ',')), None)
+            guard = bound(kc, ws) if kc is not None else None
+        elif km >= 3 and [p.mnemonic for p in ctx[km - 3:km]] == ['tst', 'b.eq', 'mvn'] and ctx[km - 3].op_str == f'{ws}, {imm}' and ctx[km - 1].op_str == f'{ws}, {ws}':
+            guard = (km - 3, km - 2, km, m)
+        else:
+            kt = next((k for k in range(km - 1, -1, -1) if ctx[k].mnemonic == 'tbnz'), None)
+            t = re.fullmatch(rf'{ws}, #(0x[0-9a-f]+|\d+), #(0x[0-9a-f]+|\d+)', ctx[kt].op_str) if kt is not None else None
+            if kt is not None and t and m == (2 << int(t.group(1), 0)) - 1: guard = (kt, kt, kt + 1, (m + 1) // 2)
+    if guard is None:   # the index checked itself (after the mask, if any): unchanged from the check to the load
+        km, src = kl, idx
+        kc = next((k for k in range(kl - 1, km0, -1) if writes_reg(ctx[k], idx) or ctx[k].mnemonic == 'cmp' and ctx[k].op_str.startswith(f'w{idx[1:]},')), None)
+        guard = bound(kc, 'w' + idx[1:]) if kc is not None else None
+        if kc is not None and ctx[kc].mnemonic == 'cmp' and ctx[kc + 1].mnemonic == 'b.eq':   # and wI,wS,#M; cmp wI,#M; b.eq: the run starts at the and
+            c = re.fullmatch(rf'w{idx[1:]}, #(0x[0-9a-f]+|\d+)', ctx[kc].op_str)
+            kw = next((k for k in range(kc - 1, -1, -1) if writes_reg(ctx[k], idx)), None)
+            a = re.fullmatch(rf'[xw]{idx[1:]}, [xw]\d+, #(0x[0-9a-f]+|\d+)', ctx[kw].op_str) if kw is not None and ctx[kw].mnemonic == 'and' else None
+            n = int(a.group(1), 0) if a else 0
+            if kw is not None and c and n and n == int(c.group(1), 0) and not n & (n + 1) and n <= 0xffffffff: guard = (kw, kc + 1, kw + 1, n)
+    if guard is None: return None
+    kg, kb, kfree, n = guard
+    run = ctx[kg:]; head, end = ctx[kg].address, insl[j].address
+    if any(q.address != p.address + 4 for p, q in zip(run, run[1:])): return None
+    if head <= ctx[kb].operands[-1].imm <= end: return None
+    if any(p.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'eret', 'drps') or p.mnemonic.startswith('b.')
+           for k, p in enumerate(ctx[kg:-1], kg) if k != kb): return None
+    if any(writes_reg(p, src) for p in ctx[kfree:km]) or any(writes_reg(p, idx) for p in ctx[km + 1:kl]) or \
+       any(writes_reg(p, ent) or writes_reg(p, base) for p in ctx[kl + 1:ka]) or any(writes_reg(p, dest) for p in ctx[ka + 1:-1]): return None
+    return k0 + kg, n, k0 + kl, base
+def jump_guarded_tail(insl, j):
+    """A guarded_run whose base is found by copied_base: adrp + add, then only register copies, in address order (ULTRA STREET FIGHTER II builds x13 before the two loops around its dispatch,
+    whose back edges land before the guard). No direct branch of the function or jump table resolved so far may land past the guard (the driver keeps the run in guarded_tails, for tables
+    resolved later and branches from other functions). Every target must be a decoded instruction of the function outside the run. Tried after every older recognizer, so tables they
+    resolve keep their targets. Returns (targets, guard address), or None"""
+    g = guarded_run(insl, j)
+    if g is None: return None
+    kg, n, kl, base = g; head, end = insl[kg].address, insl[j].address
     for p in insl:
         if p.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.'):
             if head < p.operands[-1].imm <= end: return None
     if any(head < t <= end for targets in tabjumps.values() for t in targets): return None
     if any(b <= end and b + 4 * width > head + 4 for b, width in jumps.values()): return None
-    tb = copied_base(insl, insl.index(ld), base)
+    tb = copied_base(insl, kl, base)
     if tb is None or tb < 0 or tb + 4 * n > len(IMG): return None
     targets = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
     addresses = {p.address for p in insl}
-    return targets if all(t in addresses and not head < t <= end for t in targets) else None
+    return (targets, head) if all(t in addresses and not head < t <= end for t in targets) else None
+def jump_guarded_cfg(insl, j, fa, fb, entries=()):
+    """Guarded runs whose bases are set on other paths: Tied Together 1.0.2 initializes the first loop's base later in address order, and another loop reuses the register for its own
+    table, so a writer chain in address order (copied_base) proves nothing. Every br in the function (or analysis piece) must be a guarded_run; their tables are proved together by constant
+    propagation of the base registers over the function's control flow, from unknown values at its start, at the given entries (direct branches from elsewhere, which the driver supplies on
+    its last check) and at the targets of tables resolved outside it. Each run's base is a straight-line adrp + add candidate whose table decodes to instructions of the function, chosen by
+    copied_base when it names one and otherwise only if unique, or the one whose targets a recognizer already resolved; every reachable load must receive it. Edges into a run past its
+    first instruction refuse the proof, as do calls, traps, writes of x30 (ret is an exit only while the caller's return address is preserved), and any instruction not decoded.
+    Tried last, so tables older recognizers resolve keep their targets. Returns the targets of insl[j], or None"""
+    if not insl or insl[0].address != fa or insl[-1].address + 4 != fb or any(b.address != a.address + 4 for a, b in zip(insl, insl[1:])): return None
+    addresses = {p.address: k for k, p in enumerate(insl)}
+    def direct(p): return p.mnemonic in ('b', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.')
+    def control(p): return direct(p) or p.mnemonic in ('br', 'ret')
+    for p in insl:
+        if p.mnemonic == 'ret' and p.op_str not in ('', 'x30', 'lr'): return None
+        if writes_reg(p, 'x30'): return None
+        if any(p.group(g) for g in (CS_GRP_JUMP, CS_GRP_CALL, CS_GRP_RET, CS_GRP_INT, CS_GRP_IRET)) and not control(p): return None
+        if p.mnemonic in ('bl', 'blr', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'eret', 'drps'): return None
+    candidates = {}   # adrp + add of a register, separated by any instructions but control flow or another write of it
+    for k, p in enumerate(insl):
+        m = re.fullmatch(r'(x\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'adrp' else None
+        if not m: continue
+        rb = m.group(1)
+        for q in insl[k + 1:]:
+            if control(q): break
+            if not writes_reg(q, rb): continue
+            add = re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', q.op_str) if q.mnemonic == 'add' else None
+            if add: candidates.setdefault(rb, set()).add(p.operands[1].imm + int(add.group(1), 0))
+            break
+    dispatches, protected = {}, set()
+    for k, p in enumerate(insl):
+        if p.mnemonic != 'br': continue
+        g = guarded_run(insl, k)
+        if g is None: return None
+        kg, n, kl, rb = g
+        protected |= {q.address for q in insl[kg + 1:k + 1]}
+        valid = {}
+        for tb in candidates.get(rb, ()):
+            if not 0 <= tb <= len(IMG) - 4 * n: continue
+            targets = [tb + struct.unpack_from('<i', IMG, tb + 4 * z)[0] for z in range(n)]
+            if all(t in addresses for t in targets): valid[tb] = targets
+        if p.address in tabjumps: tb = next((tb for tb, targets in valid.items() if targets == tabjumps[p.address]), None)
+        else:
+            tb = copied_base(insl, kl, rb)
+            if tb not in valid: tb = next(iter(valid)) if len(valid) == 1 else None
+        if tb is None: return None
+        dispatches[k] = (kl, rb, tb, valid[tb])
+    entries = set(entries) | {fa}
+    entries.update(t for at, targets in tabjumps.items() if not fa <= at < fb for t in targets if t in addresses)
+    entries.update(t for at, (b, width) in jumps.items() if not fa <= at < fb and b < fb and fa < b + 4 * width for t in addresses if b <= t < b + 4 * width)
+    if j not in dispatches or not entries <= addresses.keys() or entries & protected: return None
+    if any(p.operands[-1].imm in protected for p in insl if direct(p)): return None
+    if any(t in protected for _, _, _, targets in dispatches.values() for t in targets): return None
+    if any(t in protected for targets in tabjumps.values() for t in targets): return None
+    if any(any(b <= t < b + 4 * width for t in protected) for b, width in jumps.values()): return None
+    edges = {}
+    for k, p in enumerate(insl):
+        if p.mnemonic == 'br': targets = dispatches[k][3]
+        elif p.mnemonic == 'ret': targets = []
+        elif direct(p): targets = [p.operands[-1].imm] + ([] if p.mnemonic == 'b' else [p.address + 4])
+        else: targets = [p.address + 4]
+        edges[k] = [addresses[t] for t in targets if t in addresses]
+    bases = sorted({rb for _, rb, _, _ in dispatches.values()})
+    # A missing state is unreachable; None in a reachable state is unknown, and a known value joined with another value or with unknown is unknown
+    states = {addresses[t]: (None,) * len(bases) for t in entries}; pending = list(states)
+    while pending:
+        k = pending.pop(); p = insl[k]; state = list(states[k])
+        for r, rb in enumerate(bases):
+            if not writes_reg(p, rb): continue
+            val = None
+            if p.mnemonic == 'adrp' and p.op_str.startswith(rb + ','): val = p.operands[1].imm
+            m = re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'add' else None
+            if m and (prev := state[r]) is not None: val = (prev + int(m.group(1), 0)) & 0xffffffffffffffff
+            state[r] = val
+        state = tuple(state)
+        for dest in edges[k]:
+            old = states.get(dest)
+            merged = state if old is None else tuple(a if a == b else None for a, b in zip(old, state))
+            if old != merged: states[dest] = merged; pending.append(dest)
+    if any(kl not in states or states[kl][bases.index(rb)] != tb for kl, rb, tb, _ in dispatches.values()): return None
+    return dispatches[j][3]
 def jump_adr_offsets(insl, j):
     """Entries relative to an adr rather than to the table (Tears of the Kingdom main+0x393bb0): cmp w0,#5; b.hi; ...; adr x18,#L; ldrsw x1,[x17,x0,lsl #2];
     add x18,x18,x1; br x18 → target = L + entry, with the table base x17 from adrp + add. Tried only where jump_offsets finds nothing. Returns all targets, or None if not recognized"""
@@ -1382,23 +1532,36 @@ def pieces(fa, fb):
         s = cand[j]; cuts.append(s)
     b = [0] + cuts + [n]
     return [(fa + 4 * p, fa + 4 * q) for p, q in zip(b, b[1:])], far
-funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
+# The functions (pieces) that hold x18 sites are analysed, and those that hold mrs x18, cntfrq_el0, as when that read was an x18 site: an exclusive window around it (find_windows)
+# is still copied whole (site_window: the host's register, as for every counter read inside a window), not a gate entered between its ldxr and its stxr. Changing the rule
+# alone would have done that for a window whose only x18 word is this read. A read in an exclusive section the rewriter does not recognize (16 instructions or more, or code
+# without an FDE) is gated, as every other counter read there already was
+is18 = lambda k, arg: k == 'x18' or (k, arg) == ('cntfrq', 18)
+funcs = sorted({func_of(a) for a, (k, arg) in kinds.items() if is18(k, arg)})
 far_into, rmid_all, newly_accepted = [], set(), set()
 if any(fb - fa > BIG_FN for fa, fb in funcs):
-    sites18 = sorted(a for a, (k, _) in kinds.items() if k == 'x18'); split = []
+    sites18 = sorted(a for a, (k, arg) in kinds.items() if is18(k, arg)); split = []
     for fa, fb in funcs:
         if fb - fa <= BIG_FN: split.append((fa, fb)); continue
         ps, far = pieces(fa, fb); far_into += far
         split += [(p, q) for p, q in ps if bisect.bisect_left(sites18, p) < bisect.bisect_left(sites18, q)]   # the pieces that hold x18 sites
         print(f'function {fa:#x}..{fb:#x} ({(fb - fa) / 2**20:.2f} MB, no unwind entries) analysed in {len(ps)} pieces')
     funcs = split
+selects = {}
+function_ends = dict(nso_code.fde_ranges(IMG))
 for fa, fb in funcs:
     insl = disasm_fn(fa, fb)
+    by_address = None
     ws = find_windows(insl)
     for wseg in ws:
         windows.append(wseg); done |= {x.address for x in wseg}
         if any(x.mnemonic == 'b' for x in wseg): newly_accepted.add(wseg[0].address)
     for j, ins in enumerate(insl):
+        if ins.mnemonic == 'csel' and fa in function_ends and ins.address < function_ends[fa] <= fb and ins.address not in done:
+            if args := select_x18(ins):
+                if by_address is None: by_address = {p.address: p for p in insl}
+                temp = select_scratch(ins.address, by_address, function_ends[fa], args[0])
+                if temp is not None: selects[ins.address] = args, temp
         if ins.mnemonic == 'br' and ins.op_str == 'x18':
             base = width = None
             # 16 instructions back, as for the offset-table form: Hades main+0x1135d0 has six vector moves between the add and the br, which put its adr x18 nine back
@@ -1420,9 +1583,9 @@ for fa, fb in funcs:
                 if not tgt and (far := jump_bytes_far(insl, j)): jumps[ins.address] = far; continue
                 if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True)   # the index copied before the check (check_before_copy) or the base set far back, only where every other form failed
                 if not tgt: tgt = jump_masked_pred(insl, j)   # the check on a masked copy made in the block, the index masked in the block that branches to it
-                if not tgt: tgt = jump_masked_not(insl, j)   # a complemented low-bit index with its zero case branched away: exactly mask entries
                 if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True, forward_base=True)   # a unique base initialized in a later block that branches backward
-                if not tgt: tgt = jump_zero_extended(insl, j)   # a 32-bit checked value zero-extended into the index, with its full path to the br verified
+                if not tgt and (g := jump_guarded_tail(insl, j)): tgt = g[0]; guarded_tails.append((g[1], ins.address))   # the index a mask of a value another guard bounds
+                if not tgt and (tgt := jump_guarded_cfg(insl, j, fa, fb)): guarded_cfg.setdefault((fa, fb), ins.address)   # guarded runs whose bases other paths set
                 assert tgt, f'jump table {ins.address:x}'
                 tabjumps[ins.address] = tgt; continue
             jumps[ins.address] = (base, width)
@@ -1463,7 +1626,12 @@ for w in windows:
     if w[0].address in newly_accepted:
         assert all(b.address == a.address + 4 for a, b in zip(w, w[1:])), f'noncontiguous window {w[0].address:x}'
 new_mid = {x.address for w in windows if w[0].address in newly_accepted for x in w[1:]}
-if new_mid:
+# jump_guarded_tail saw the direct branches of its own function (or piece) and the tables resolved before it; tables resolved later and branches from anywhere else are checked here
+past_guard = {a for head, end in guarded_tails for a in range(head + 4, end + 4, 4)}
+for at, tgt in tabjumps.items(): assert not past_guard.intersection(tgt), f'jump table past a guard {at:x}'
+for at, (b, width) in jumps.items(): assert not any(b <= a < b + 4 * width for a in past_guard), f'jump table past a guard {at:x}'
+cfg_ranges = sorted(guarded_cfg); cfg_starts = [fa for fa, _ in cfg_ranges]; cfg_entries = {r: set() for r in cfg_ranges}
+if new_mid or past_guard or cfg_ranges:
     for start, end in CODE_RANGES:
         for at in range(start, end - 3, 4):
             w = struct.unpack_from('<I', IMG, at)[0]; t = w >> 24
@@ -1472,7 +1640,14 @@ if new_mid:
             elif t & 0x7C == 0x14: d = w & 0x3FFFFFF; d -= (d & 0x2000000) << 1
             else: continue
             dest = at + 4 * d
+            assert dest not in past_guard, f'branch past a guard {at:x}'
             if dest in new_mid: assert func_of(at) == func_of(dest), f'branch into window from another function {at:x}'
+            if cfg_ranges and (i := bisect.bisect_right(cfg_starts, dest) - 1) >= 0 and dest < cfg_ranges[i][1] and not cfg_ranges[i][0] <= at < cfg_ranges[i][1]:
+                cfg_entries[cfg_ranges[i]].add(dest)   # a direct entry from elsewhere (an embedded word that decodes as one only makes the proof stricter)
+# jump_guarded_cfg saw the tables resolved before it and none of the branches from elsewhere: prove each of its functions again with all of them
+for (fa, fb), at in guarded_cfg.items():
+    insl = disasm_fn(fa, fb)
+    assert jump_guarded_cfg(insl, next(k for k, p in enumerate(insl) if p.address == at), fa, fb, cfg_entries[(fa, fb)]) == tabjumps[at], f'jump table {at:x}: an entry from elsewhere is not proved'
 
 def put_branch(at, to): struct.pack_into('<I', IMG, at, B(at, to))
 for wseg in windows:
@@ -1492,13 +1667,14 @@ for a in sorted(kinds):
         elif m in ('adr', 'adrp'): st = site_pcrel(ins); stat('pcrel')
         elif m == 'blr': st = site_blr(ins); stat('blr')
         elif re.match(r'(sp|wsp),', ins.op_str): st = site_sp(ins); stat('sp')
+        elif a in selects: st = site_select(ins, *selects[a]); stat('select')
         elif m in ('ret', 'b', 'bl') or (m == 'ldr' and '[' not in ins.op_str): raise RuntimeError(f'{a:x} {m} {ins.op_str}')
         else: st = site_plain(ins); stat('plain')
     elif k == 'tpidr_r': st = site_sysreg_read(ins, 'KTLS'); stat(k)
     elif k == 'tpidrro_r': st = site_sysreg_read(ins, 'KTLR'); stat(k)
     elif k == 'tpidr_w': st = site_tpidr_write(ins); stat(k)
     elif k == 'svc': st = site_gate(ins, 'svc', arg); stat(k)
-    elif k in ('cntpct', 'cntvct'): st = site_gate(ins, k, arg); stat(k)
+    elif k in ('cntpct', 'cntvct', 'cntfrq'): st = site_gate(ins, k, arg); stat(k)
     elif k == 'sp_align': st = site_sp_align(ins, arg); stat(k)
     elif k == 'ctr':   # a constant: DminLine = 4 (64-byte lines); movz xN, #4, lsl #16, in place, or into the slot K18 for x18
         if arg == 18: st = site_slot_copy(ins, 0xD2A00080 | 15, 'K18'); stat(k)
@@ -1519,7 +1695,7 @@ for off, oid, ow, why in obs:
 # who asked for it and how much of it is used. They only read registers. VammManager::AllocateAddressRegion(this, uintptr_t *out, size_t size): at its entry the size (x2) and the caller's
 # frames; at the one store of the region's address through out (copied from x1 in its prologue: str xA, [xB]) the address, A passed in the gate number's upper bits;
 # VammManager::FreeAddressRegion(this, address): at its entry. A build where one of them is not found that way gets none of them (logged); the host then has no region table
-OBS_UE_MALLOC, OBS_REGION_ASK, OBS_REGION_GOT, OBS_REGION_FREE, OBS_STDALLOC_INIT, OBS_UE_REGION = 21, 22, 23, 24, 25, 26   # dm/host/dm.h
+OBS_UE_MALLOC, OBS_REGION_ASK, OBS_REGION_GOT, OBS_REGION_FREE, OBS_STDALLOC_INIT, OBS_UE_REGION = 21, 22, 23, 24, 25, 26   # dm/host/dm.h (27, OBS_FPS_CTL, is written by a game's patches.py)
 def region_gates():
     from nso_syms import defined
     sym = defined(IMG)
@@ -1575,18 +1751,24 @@ obs += region_obs
 # a late frame, so motion is even and game time = real time. The steps stay values the games' own logic uses (1 to 3). Age of Calamity's updates are not held by the presents:
 # its stubs run them at the cap, and the host only paces its presents (its patches.py).
 # State page = the page after the key page (zero in the file, read-write in both loaders): +0 float target fps written by the loader (fps_target, DM_FPS_TARGET; 0 = every stub
-# runs the original instructions), +4 30 fps movie/cinematic flag, +8 double lead (TOTK), +0x10 float render scale (TOTK, BotW), +0x18 double game seconds (TOTK),
+# runs the original instructions), +4 30 fps movie/cinematic flag, +8 double lead (TOTK), +0x10 float render scale (TOTK, BotW), +0x14 float the host's live factor under it
+# (ctx.live_scale: the heat ladder's resolution rungs and the GPU clock rescue, hle_nvn.c scale_set; 0 = none yet), +0x18 double game seconds (TOTK),
 # +0x20 u32 step in vsyncs (host; 0 = not decided yet), +0x24 u32 a step the game fixes itself (BotW's VFR override; 0 = none), +0x28 u32 AoC's vsyncs per update, marked by
 # its first stub (0 = off), +0x30 u64 vsyncs stepped (the stubs; logged by the host to check the game's speed), +0x40 u32 1 = the game's own dynamic resolution runs, 0 = its
-# stub holds full resolution (DM_DYNAMIC_RESOLUTION, written by the loader; the stub declares the DYNAMIC_RESOLUTION capability). Stub bodies assembled with clang
+# stub holds full resolution (DM_DYNAMIC_RESOLUTION, written by the loader; the stub declares the DYNAMIC_RESOLUTION capability), +0x64 float the camera aspect the host asks for
+# (Ultrawide on a wider screen: its width / height; 0 = the game's own), +0x68 float the aspect the camera stub last wrote, stored after it (the CAMERA_ASPECT capability: Breath of the
+# Wild 1.9.0 and Tears of the Kingdom 1.4.3; loader.c dm_game_aspect). Stub bodies assembled with clang
 # A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area, ctx.site(offset, original bytes) asserts a site and that it is
 # no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, ctx.render_scale = n marks a render-scale stub that takes scales up to n (1: it only lowers the game's size),
-# ctx.others the other functions a MATCH_FRAME_STEP rule names, ctx.found what an anchored rule's find returned, ctx.address(offset) the data address an adrp there and the add / load / store after it make (in the original
+# ctx.live_scale = 1 one that also reads the host's live factor at +0x14 (LIVE_SCALE in the fixups table: the host sets the heat ladder's resolution rungs there),
+# ctx.words(offset, n) the n words at a site ctx.site checked (a stub that replays them), ctx.build the module's build ID (a matched stub's part bound to one build), ctx.others the other functions a MATCH_FRAME_STEP rule names, ctx.found what an anchored rule's find returned, ctx.address(offset) the data address an adrp there and the add / load / store after it make (in the original
 # text: the fingerprints mask those pages, so a matched stub reads the globals it needs from its functions), and ctx.capabilities.add(name) declares a launcher capability the
 # stubs provide (written as CAPABILITIES are)
 FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
+STEP_MAX = 0   # n = the stubs give the game steps of at most n vsyncs (ctx.step_max): the fixups table says so (STEP_MAX n), and the host holds frames at most n vsyncs (nvn_fstep.h smax; upstream 1e3fd031)
 RENDER_SCALE = 0   # n = the build has a render-scale stub (state +0x10) that takes scales up to n: the fixups table says so (RENDER_SCALE n), the loader holds DM_RENDER_SCALE to it and the launcher offers the setting up to it (dm/games/settings.tsv)
+LIVE_SCALE = 0   # 1 = its render-scale stubs also read the host's live factor at state +0x14 (ctx.live_scale): the fixups table says so (LIVE_SCALE 1), and the host sets the heat ladder's resolution rungs and the GPU clock rescue there (hle_nvn.c scale_set)
 FS_CAPABILITIES = set()   # capabilities the frame step stubs declare (ctx.capabilities)
 if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
     FS_STATE_OFF = KEY_PAGE_OFF + 0x4000
@@ -1598,8 +1780,14 @@ if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
 # What frame step and stub code (STUBS below) may write: a site whose original bytes match and that holds no rewrite site, the cuts list (<name>.cuts.tsv) that names it, and
 # data addresses read from the original text
 def stub_site(off, orig, what):
-    ob = bytes.fromhex(orig)
-    assert IMG[off:off + len(ob)] == ob, f'{what} original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
+    # orig: the original bytes in hex, or sha256:<length>:<digest> (the bytes' SHA-256), for a site whose words a stub replays from the image (ctx.words) without the
+    # patch file holding them
+    if orig.startswith('sha256:'):
+        _, n, digest = orig.split(':'); ob = bytes(IMG[off:off + int(n)])
+        assert len(ob) == int(n) and hashlib.sha256(ob).hexdigest() == digest, f'{what} original bytes mismatch {off:#x}: SHA-256 {hashlib.sha256(ob).hexdigest()}'
+    else:
+        ob = bytes.fromhex(orig)
+        assert IMG[off:off + len(ob)] == ob, f'{what} original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
     for o in range(off, off + len(ob), 4):
         assert o not in kinds and not any(seg[0].address <= o < seg[-1].address + 4 for seg in windows), f'{what} site is a rewrite site {o:#x}'
 def stub_put(off, words, why, kind):
@@ -1618,9 +1806,17 @@ def stub_address(off, what):   # the data address the adrp at off and the add / 
 if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py), or those placed by their function (MATCH_FRAME_STEP: ctx.base is its start)
     use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=lambda off, orig: stub_site(off, orig, 'frame step'),
                                             put=lambda off, words, why: stub_put(off, words, why + (' [function match]' if FS_MATCH else ''), 'frame_step'),
-                                            state=FS_STATE_OFF, render_scale=0, base=FS_MATCH[1] if FS_MATCH else 0, others=FS_MATCH[2] if FS_MATCH else {},
-                                            found=FS_MATCH[3] if FS_MATCH else None, capabilities=set(), address=lambda off: stub_address(off, 'frame step'))
-    (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; FS_CAPABILITIES = fs.capabilities
+                                            state=FS_STATE_OFF, render_scale=0, live_scale=0, step_max=0, base=FS_MATCH[1] if FS_MATCH else 0, others=FS_MATCH[2] if FS_MATCH else {},
+                                            found=FS_MATCH[3] if FS_MATCH else None, capabilities=set(), address=lambda off: stub_address(off, 'frame step'), build=BUILD_ID,
+                                            words=lambda off, n: list(struct.unpack_from(f'<{n}I', IMG, off)))   # a checked site's words, to replay them
+    _fs_puts = stats.get('frame_step', 0)
+    (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; LIVE_SCALE = fs.live_scale; STEP_MAX = fs.step_max; FS_CAPABILITIES = fs.capabilities
+    # CAMERA_ASPECT stubs read the host's camera aspect at state +0x64 and acknowledge it at +0x68 (loader.c dm_game_aspect): the state page must hold them
+    assert 'CAMERA_ASPECT' not in FS_CAPABILITIES or FAR or FS_STATE_OFF + 0x6c <= PATCH_OFF, 'frame step state page too small for the camera aspect (+0x64..+0x6b)'
+    # A matched stub that wrote no site (a part it needs was not found: Catherine: Full Body's timing getter, Age of Calamity's other functions): no state page in the fixups
+    # table, so the host does not take the main for one with a frame step and keeps the game's own present interval at any fps_target (hle_nvn.c fps_step_cap)
+    if FS_MATCH and stats.get('frame_step', 0) == _fs_puts:
+        print(f'{NAME}: frame step {FS_MATCH[0]["name"]!r} wrote no site: no state page, the game keeps its own frame rate'); FS_STATE_OFF = 0
 
 # ---- Stubs (the modules whose patch file has STUBS of their build) ----
 # A fix of the game's own code that needs more instructions than its sites hold: STUBS[build ID](ctx) in its patches.py assembles them into the patch area and branches there from
@@ -1646,6 +1842,8 @@ if BUILD_ID in STUBS:
 # same region over the same back-edges or a wider one over more. Breath of the Wild's job queue (main+0xef62dc) is such a poll: the first item of some jobs is for the
 # thread of core 0, and the others wait until it is taken, taking and releasing the queue's lock on every pass; polled at full speed by two workers, the lock went back and
 # forth between their cores, and the main thread, whose item it was, lost nearly every exclusive store to them (CPU frames of 30-200 ms with three cores spinning there).
+# 1.6.0's compiler writes the same lock without clrex, its failed test going straight back to the exclusive load (main+0x12c0e48); spin_lock takes both forms. A lock that
+# heads no poll still has its own retry loop as a spin wait (Mario vs. Donkey Kong's test-and-test-and-set locks, main+0x470fa8).
 # Such a pass leaves memory and registers as it found them (a pass with stores, from its last state change on), so only another thread can end the loop, and a pause
 # there changes only timing. R is copied into the patch area; the original back-edges jump to the copy (no pause on the first pass, so a
 # single retry costs nothing), the copy's back-edges go through a spin gate, which the host takes as a yield with the yield back-off (hle_thread.c dm_spin_wait), and exits
@@ -1708,8 +1906,11 @@ def spin_rmw(a):
 def spin_lock(a):
     """An exclusive spin lock sequence or a test loop entered at a → (kind, xN, its instructions, how many of them come before a, how many from a on, registers read, registers written)
     'acq'  ld(a)xr wA,[xN]; cbz wA,+16; clrex; b <the load>; st(l)xr wS,wK,[xN]; cbnz wS,<the load>    test-and-set, retried until the store succeeds (wK not zero)
+           ld(a)xr wA,[xN]; cbnz wA,<the load>; st(l)xr wS,wK,[xN]; cbnz wS,<the load>                    the same without clrex (Breath of the Wild 1.6.0's compiler)
     'rel'  clrex; ld(a)xr wA,[xN]; cmp wA,#k; b.ne <the clrex>; st(l)xr wS,wzr,[xN]; cbnz wS,<the load>  compare-and-clear, entered at the load; or stlr wzr,[xN]
-    'tst'  ldr|ldrb|ldrh wA,[xN{,#imm}]; cmp wA,#k; b.eq|b.ne <the load>                                 a test loop that only another thread ends"""
+           ld(a)xr wA,[xN]; cmp wA,#k; b.ne <the load>; st(l)xr wS,wzr,[xN]; cbnz wS,<the load>           the same without clrex
+    'tst'  ldr|ldrb|ldrh wA,[xN{,#imm}]; cmp wA,#k; b.eq|b.ne <the load>                                 a test loop that only another thread ends
+    The forms without clrex retry the exclusive load at once: the next exclusive load replaces the reservation the failed test left"""
     l = [spin_ins(a + 4 * i) for i in range(6)]
     if l[0] is None: return None
     r = lambda x, i: x.reg_name(x.operands[i].reg)
@@ -1717,6 +1918,14 @@ def spin_lock(a):
     m0 = l[0].mnemonic
     if m0 in ('ldxr', 'ldaxr') and None not in l and r(l[0], 0).startswith('w') and plain(l[0], 1):
         base = l[0].operands[1].mem.base; bn = spin_norm(l[0].reg_name(base))
+        if (l[1].mnemonic == 'cbnz' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].imm == a
+                and l[2].mnemonic in ('stxr', 'stlxr') and plain(l[2], 2) and l[2].operands[2].mem.base == base and r(l[2], 1) not in ('wzr', 'xzr')
+                and l[3].mnemonic == 'cbnz' and r(l[3], 0) == r(l[2], 0) and l[3].operands[1].imm == a):
+            return ('acq', bn, l[:4], 0, 4, {bn, spin_norm(r(l[2], 1))}, {spin_norm(r(l[0], 0)), spin_norm(r(l[2], 0))})
+        if (l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
+                and l[2].mnemonic == 'b.ne' and l[2].operands[0].imm == a and l[3].mnemonic in ('stxr', 'stlxr') and r(l[3], 1) == 'wzr'
+                and plain(l[3], 2) and l[3].operands[2].mem.base == base and l[4].mnemonic == 'cbnz' and r(l[4], 0) == r(l[3], 0) and l[4].operands[1].imm == a):
+            return ('rel', bn, l[:5], 0, 5, {bn}, {spin_norm(r(l[0], 0)), spin_norm(r(l[3], 0)), 'nzcv'})
         if (l[1].mnemonic == 'cbz' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].imm == a + 16 and l[2].mnemonic == 'clrex' and l[3].mnemonic == 'b' and l[3].operands[0].imm == a
                 and l[4].mnemonic in ('stxr', 'stlxr') and plain(l[4], 2) and l[4].operands[2].mem.base == base and r(l[4], 1) not in ('wzr', 'xzr')
                 and l[5].mnemonic == 'cbnz' and r(l[5], 0) == r(l[4], 0) and l[5].operands[1].imm == a):
@@ -1775,15 +1984,21 @@ class SpinNo(Exception): pass
 def spin_region(T, bes):
     """the spin wait region with head T (bes: the backward branches to T found by the scan) → dict, or None. A store whose value or address a pass changes is no part of a region:
     the paths through it are dropped and the region is found again without them (a poll that takes its item once the wait is over stores the new cursor there). When the paths
-    through stores bring in a register that a pass changes, the region is looked for once more with every store ending its path, as before stores could be part of one"""
-    ban = set()
-    for _ in range(8):
-        g = spin_region1(T, bes, ban, True)
-        if not isinstance(g, set): break
-        ban |= g
-    old = spin_region1(T, bes, set(), False)   # the region without stores, which the search took before: the wider one only when it covers its back-edges
-    return g if isinstance(g, dict) and (not old or old['valid'] <= g['valid']) else old
-def spin_region1(T, bes, ban, stores):
+    through stores bring in a register that a pass changes, the region is looked for once more with every store ending its path, as before stores could be part of one.
+    A lock sequence at T is one node of a poll that it heads (its own branches back to T stay inside it); when there is no such poll, T is the head of the sequence's own retry
+    loop (a lock's wait for its holder, ld(a)xr; cbnz <the load>), found as plain instructions as before the lock rules"""
+    lk = spin_lock(T)
+    for head in (True, False) if lk and lk[0] in ('acq', 'rel') else (True,):
+        ban = set()
+        for _ in range(8):
+            g = spin_region1(T, bes, ban, True, head)
+            if not isinstance(g, set): break
+            ban |= g
+        old = spin_region1(T, bes, set(), False, head)   # the region without stores, which the search took before: the wider one only when it covers its back-edges
+        g = g if isinstance(g, dict) and (not old or old['valid'] <= g['valid']) else old
+        if g: break
+    return g
+def spin_region1(T, bes, ban, stores, head):
     hi = max(bes)
     if any(s < hi + 4 and T < e for s, e in DATA_BLOCKS) or not spin_quick(T, hi): return None
     nodes, back, bad, inner = {}, set(), set(), set()
@@ -1794,7 +2009,7 @@ def spin_region1(T, bes, ban, stores):
         if a in ban: bad.add(a); continue
         rmw = spin_rmw(a) if a + 12 <= hi and struct.unpack_from('<I', IMG, a)[0] & 0x3FE00000 == 0x08400000 else None   # ldxr / ldaxr
         lk = None if rmw else spin_lock(a)
-        if lk and lk[0] == 'tst' and a == T: lk = None   # the region's own test loop
+        if lk and a == T and (lk[0] == 'tst' or not head): lk = None   # the region's own test loop, or a lock sequence taken as plain instructions (spin_region)
         if rmw:
             n = {'kind': 'rmw', 'base': rmw[0], 'k': rmw[1], 'ins': rmw[3], 'uses': {rmw[0]}, 'defs': rmw[2], 'succ': [a + 16]}
         elif lk:
@@ -1969,6 +2184,12 @@ with open(P('fixups.tsv'), 'w') as f:
     if RENDER_SCALE:   # a render-scale stub reads state +0x10, up to this scale (the loader holds DM_RENDER_SCALE to it; dm/games/settings.py offers the setting up to it)
         assert isinstance(RENDER_SCALE, int) and 1 <= RENDER_SCALE <= 9, f'render scale stub: ctx.render_scale is a whole largest scale, 1 to 9: {RENDER_SCALE!r}'
         f.write(f'# RENDER_SCALE\t{RENDER_SCALE}\n')
+    if LIVE_SCALE:   # its render-scale stubs also read the host's live factor at state +0x14 (the loader's dm_live_scale_stub: the heat ladder's resolution rungs)
+        assert LIVE_SCALE == 1 and RENDER_SCALE, f'live scale stub: ctx.live_scale is 1, on a render-scale stub (ctx.render_scale): {LIVE_SCALE!r}'
+        f.write('# LIVE_SCALE\t1\n')
+    if STEP_MAX:   # the largest step the frame step stubs give the game (the host holds frames and pays back within it)
+        assert isinstance(STEP_MAX, int) and 1 <= STEP_MAX <= 3, f'frame step stub: ctx.step_max is a whole step, 1 to 3: {STEP_MAX!r}'
+        f.write(f'# STEP_MAX\t{STEP_MAX}\n')
     if NAME == 'main':
         for capability in sorted(set(PATCHES['CAPABILITIES'].get(BUILD_ID, ())) | FS_CAPABILITIES):
             assert re.fullmatch(r'[A-Z][A-Z0-9_]*', capability), f'invalid capability {capability}'

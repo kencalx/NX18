@@ -14,12 +14,16 @@
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py: the host's DM_ROMFS, the IPA's romfs.img)
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − base title ID − 0x1000), the host's DM_AOC_DIR
 # A dump has no control data, so there is no control.nacp or icon.jpg beside them, as there is after nx_extract.
-# The title ID is the program ID in main.npdm. A repeat run keeps code modules that are the same and an image whose source tree, packer and image are unchanged (romfs_image.py --reuse).
+# The title ID is the program ID in main.npdm: a program of a multi-program application (a Nintendo Switch 2 Edition's Switch 2 program dumped on its own) packs under its own ID, its DLC
+# numbered from the application (dm/tools/programs.py); a folder holds one program's files, so --program is for NUPs, NX archives and NSPs. A program other than the application's own
+# (program 0) is not packed yet: the script stops with a red line that says so (programs.unsupported).
+# A repeat run keeps code modules that are the same and an image whose source tree, packer and image are unchanged (romfs_image.py --reuse).
 # Usage: pack_dump.py <dump folder> [--version N] [--work-dir DIR]   (exit 1 on error)
 import argparse, filecmp, shutil, struct, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
 import romfs_image
+import programs   # a program of an application packs under its own ID, its DLC numbered from the application (pack_nup.py)
 
 
 class Error(Exception): pass
@@ -78,17 +82,19 @@ def is_dump(folder):   # whether a folder has the layout above: a base game's co
     return any(is_version(p) for p in ups)
 
 
-def scan(dump):
-    """What a dump folder holds: (title ID, {update version: its folder}, {DLC title ID: its RomFS folder}). The title ID is the base game's program ID, else the newest whole update's"""
+def scan(dump, dev=None):
+    """What a dump folder holds: (title ID, {update version: its folder}, {DLC title ID: its RomFS folder}). The title ID is the base game's program ID, else the newest whole update's.
+    A program other than program 0 stops the scan unless dev, or NX18_DEV with dev None, lets it through (programs.supported)"""
     if not is_dump(dump): raise Error(f'{dump}: no base/exefs/main.npdm with a RomFS in base/ or updates/<version>/, nor exefs/main.npdm and romfs in the folder or in updates/<version>/')
     vers = updates(dump)
     app = program_id((base_of(dump) or max((p for p in vers.values() if is_version(p)), key=lambda p: int(p.name))) / 'exefs/main.npdm')
-    if app & 0xFFF: raise Error(f'{dump}: base program ID {app:016X} is not a base title ID')
+    if programs.index(app) is None: raise Error(f'{dump}: program ID {app:016X} is not a base title ID nor a program of one')
+    if not programs.supported(app, dev): raise Error(programs.unsupported(dump.name, app))   # read right, but built only with NX18_DEV on: not supported yet
     dlc = {}
     for d in sorted(p for p in (dump / 'dlc').iterdir() if p.is_dir()) if (dump / 'dlc').is_dir() else []:
         try: tid = int(d.name, 16)
         except ValueError: raise Error(f'{d}: not a DLC title ID') from None
-        if not 0 < tid - app - 0x1000 <= 2000: raise Error(f'{d}: {tid:016X} is not a DLC of {app:016X}')
+        if programs.dlc_index(tid, app) is None: raise Error(f'{d}: {tid:016X} is not a DLC of {app:016X}')
         roms = sorted(d.glob('*/romfs')) or ([d / 'romfs'] if (d / 'romfs').is_dir() else [])
         if len(roms) != 1: raise Error(f'{d}: expected one <n>/romfs folder, found {len(roms)}')
         dlc[tid] = roms[0]
@@ -103,7 +109,7 @@ def pack_version(src, app, out, say=print):   # one version's folder (base/ or u
 
 
 def pack_dlc(app, dlc, aoc, say=print):   # {DLC title ID: its RomFS folder} → aoc/<index>.img; images of DLC no longer in the folder go
-    want = {f'{tid - app - 0x1000}.img': roms for tid, roms in dlc.items()}
+    want = {f'{programs.dlc_index(tid, app)}.img': roms for tid, roms in dlc.items()}   # a program's DLC are the application's (numbered from the title ID itself for a base game)
     if aoc.is_dir():
         for f in aoc.iterdir():
             if f.name.removesuffix('.inputs.json') not in want: f.unlink()
@@ -126,6 +132,7 @@ def main():
         src = vers[ver] if ver else base
         work = (a.work_dir or dump / f'{app:016X}_build').resolve()
         out = work / 'extract' / f'v{ver}'
+        if line := programs.note(dump.name, {programs.index(app): app}, programs.index(app), ''): print(line, flush=True)
         print(f'{app:016X} version {ver}: {src}', flush=True)
         say = lambda s: print(s, flush=True)
         pack_version(src, app, out, say)

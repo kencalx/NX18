@@ -250,7 +250,16 @@ namespace Ryujinx.Graphics.Shader.Decoders
                         SetUserAttributeUses(definitions, context, a.Bits(40, 50), a.Bits(74, 76) + 1, a.Bit(79), a.Ra != RegisterConsts.RegisterZeroIndex, a.Bit(76));
                         break;
                     case AmpereOpcodes.Ast:
-                        SetUserAttributeUses(definitions, context, a.Bits(40, 50), a.Bits(74, 76) + 1, true, a.Ra != RegisterConsts.RegisterZeroIndex, a.Bit(76));
+                        if (a.Bit(76) && !a.Bit(77) && a.Ra != RegisterConsts.RegisterZeroIndex)
+                        {
+                            // An indexed AST.P can reach any patch word, not the per-control-point output array. The emitter dispatches by fixed patch location.
+                            SetUserAttributeUses(definitions, context, AttributeConsts.UserAttributePerPatchBase,
+                                (AttributeConsts.UserAttributePerPatchEnd - AttributeConsts.UserAttributePerPatchBase) / 4, true, false, true);
+                        }
+                        else
+                        {
+                            SetUserAttributeUses(definitions, context, a.Bits(40, 50), a.Bits(74, 76) + 1, true, a.Ra != RegisterConsts.RegisterZeroIndex, a.Bit(76));
+                        }
                         break;
                     case 0x389:
                     case 0x589:

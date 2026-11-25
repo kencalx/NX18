@@ -15,7 +15,16 @@ targets:
       - path: ../../Sources/LauncherRow.swift          # the settings screen itself (dm_show_launcher), shown when the launch gives a launcher list (docs/settings.md, Presets, the guide and a controller)
       - path: ../../Sources/Launcher.swift
       - path: ../../Sources/LauncherController.swift
+      - path: ../../Sources/LauncherFocus.swift          # the Gate's focus model, shared with the Mac
+      - path: ../../Sources/LauncherPanel.swift        # the Gate's system menu: the slab, preset chips, quick tiles, doors and pages (gate-ui A9a-2b)
+      - path: ../../Sources/NX18Look.swift             # the light look's tokens and the Appearance choice (gate-ui §11a, G20)
+      - path: ../../Sources/NX18Card.swift             # the NX 18 card under the mark (§20)
+      - path: ../../Sources/NX18Glass.swift            # glass as an accent: the hero buttons and the card's rim, and the fallbacks (gate-ui §11)
+      - path: ../../Sources/NX18Welcome.swift          # the first-start acknowledgement (§21.2a)
+      - path: ../../Sources/NX18Profile.swift          # the NX 18 Profile: storage, the folder's stamp rules, dm_profile_env (§20.5)
+      - path: ../../Sources/NX18ProfileFlow.swift      # the card's Profile flows: photo picker and crop, name bar, folder pick, the move (§20-§21)
       - path: ../../Sources/LauncherArt.swift
+      - path: ../../Sources/PlayRecord.swift            # the play record and the battery estimate (gate-ui §18.2), on the device only
       - path: ../../Sources/GuideViewer.swift
       - path: ../../Sources/LauncherGuideFiles.swift    # the guide's scheme, shim and block list, shared with the Mac app's guide window
       - path: ../../Sources/NXFont.swift                # the UI font's text styles (dm/host/ui_font.h registers it; SIMCTL_CHILD_DM_UI_FONT=<file>)
@@ -26,11 +35,13 @@ targets:
       - path: ../../Sources/SaveSyncReport.swift       # the cloud-save check before Play (and before a start that skips the screen with cloud saves on): the report's line and its dialogs
       - path: ../../Sources/SaveSync.m                 # the iPhone's copies to and from the cloud folder, NSFileCoordinator (a folder of the test's own here, not iCloud Drive)
       - path: ../../../host/save_sync.c                # the host's comparison the check asks for (save_sync_report), real, on a save and a cloud folder the tests make
+      - path: ../../../host/state_report.m             # the StateReporting states front_ios.m and DmGamepad.m report (Gate, Menu, Background)
       - path: Resources/Assets.xcassets                 # the NX 18 app icon (docs/images/nx18), the screen's icon without art
       - path: ../../Resources/ThirdPartyNotices.txt     # the app's third-party notices (dm/tools/third_party_notices.py), which the settings screen's Acknowledgements shows
         buildPhase: resources
       - path: ../../Sources/DmGamepad.m
       - path: ../../Sources/front_ios.m
+      - path: ../../Sources/DmVitals.m                 # Vitals over the picture and the in-game menu's header line (vitals.md)
     dependencies:
       - sdk: UIKit.framework
       - sdk: GameController.framework
@@ -42,6 +53,7 @@ targets:
       - sdk: AVFAudio.framework
       - sdk: WebKit.framework
       - sdk: PDFKit.framework
+      - sdk: StateReporting.framework
     info:
       path: Info.plist
       properties:
@@ -93,8 +105,10 @@ targets:
           - $(inherited)
           - $(SRCROOT)/../../../host
           - $(SRCROOT)/../../Sources
+          - $(SRCROOT)/../../../gfx/nvn
           - $(SRCROOT)/Sources/Fixtures
         SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/../../Sources/DmIOS-Bridging-Header.h
+        SWIFT_VERSION: "6.0"   # the iOS sources it compiles ship in Swift 6 (dm/ios/project.yml)
         CLANG_ENABLE_OBJC_ARC: YES
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: ""
@@ -116,9 +130,11 @@ targets:
           - $(inherited)
           - $(SRCROOT)/../../../host
           - $(SRCROOT)/../../Sources
+          - $(SRCROOT)/../../../gfx/nvn
           - $(SRCROOT)/Sources/Fixtures
           - $(SRCROOT)/Sources
         SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/Tests/DuoHarnessTests-Bridging-Header.h
+        SWIFT_VERSION: "6.0"
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/DuoHarness.app/DuoHarness
         BUNDLE_LOADER: $(TEST_HOST)
         CLANG_ENABLE_OBJC_ARC: YES

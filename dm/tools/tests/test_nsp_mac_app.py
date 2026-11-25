@@ -2,6 +2,7 @@
 runtime; the launcher's environment for the host (the bundle's files, the save, temporary files and log in the player's Library), the previous log kept, environment files, the host's exit
 code returned and SIGTERM forwarded to it, an alert when the game data is missing; the script's options and its pack_app.py command line; --seen-shaders' keys and partial library.
 No game files, keys or Xcode needed: a stand-in host compiled here records what it was given (temporary files only in a temporary folder)."""
+import argparse
 import contextlib
 import errno
 import importlib.util
@@ -41,10 +42,10 @@ extern char **environ;
 static void term(int s) { (void)s; _exit(3); }
 int main(int argc, char **argv) {
     char p[1024]; snprintf(p, sizeof p, "%s/host_run.txt", getenv("HOME")); FILE *f = fopen(p, "w");
+    printf("standin host output\n"); fflush(stdout); fprintf(stderr, "standin host error output\n");   // while host_run.txt is open: a 1 or 2 the launcher left free is that file's
     for (char **e = environ; *e; e++) fprintf(f, "%s\n", *e);
     for (int i = 0; i < argc; i++) fprintf(f, "argv%d=%s\n", i, argv[i]);
     char cwd[1024]; fprintf(f, "cwd=%s\n", getcwd(cwd, sizeof cwd)); fclose(f);
-    printf("standin host output\n"); fflush(stdout);
     if (getenv("STANDIN_WAIT")) { signal(SIGTERM, term); for (;;) pause(); }
     return 7;
 }
@@ -119,11 +120,11 @@ class PackReuse(unittest.TestCase):
             'patched/main.gates.tsv': b'gates', 'patched/main.cuts.tsv': b'cuts', 'patched/main.obs.tsv': b'obs', 'patched/nro.tsv': b'nro',
             'romfs/marker': b'game', 'msl/k.metallib': b'lib', 'msl/k.json': b'{}', 'msl/inputs.tsv': b'stamp',
             'font/nintendo_ext.ttf': b'font', 'aoc/1/data': b'dlc', 'pso/gpu.mtl4a': b'archive',
-            'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
+            'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/standins.tsv': b'standins', 'pso/archive.tsv': b'index',
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'art.jpg': b'art', 'logo.png': b'\x89PNG logo', 'about.json': b'{}', 'manual.pdf': b'%PDF-1.7', 'source/launcher.c': b'launcher',
-            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'host/ui_font.h': b'ui font api', 'tools/romfs.py': b'reader',
+            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'host/ui_font.h': b'ui font api', 'host/log_redirect.h': b'log', 'tools/romfs.py': b'reader',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/LauncherGuideFiles.swift': b'guide',
-            'ios/Sources/SaveSyncReport.swift': b'report', 'ios/Sources/NXFont.swift': b'text styles', 'uifont.ttf': b'\x00\x01\x00\x00 stand-in font',
+            'ios/Sources/SaveSyncReport.swift': b'report', 'ios/Sources/NXFont.swift': b'text styles', 'ios/Sources/LauncherPanel.swift': b'gate', 'ios/Sources/LauncherFocus.swift': b'gate', 'ios/Sources/NX18Look.swift': b'gate', 'ios/Sources/NX18Glass.swift': b'gate', 'ios/Sources/NXButtonGlyph.swift': b'gate', 'ios/Sources/NXButtonGlyphData.swift': b'gate', 'ios/Sources/NX18Card.swift': b'gate', 'ios/Sources/NX18Profile.swift': b'profile', 'uifont.ttf': b'\x00\x01\x00\x00 stand-in font',
             'ios/Resources/ThirdPartyNotices.txt': b'notices',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
@@ -211,11 +212,12 @@ class PackReuse(unittest.TestCase):
         self.pack()
         names = ['dmhost', 'patched/main.patched.bin', 'patched/main.fixups.tsv', 'patched/main.gates.tsv', 'patched/main.cuts.tsv',
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
-                 'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'art.jpg', 'logo.png', 'about.json', 'manual.pdf', 'source/launcher.c',
+                 'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/standins.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'art.jpg', 'logo.png', 'about.json', 'manual.pdf', 'source/launcher.c',
                  'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/LauncherGuideFiles.swift', 'ios/Sources/SaveSyncReport.swift',
-                 'ios/Sources/NXFont.swift',   # the settings window's sources
+                 'ios/Sources/NXFont.swift', 'ios/Sources/LauncherPanel.swift', 'ios/Sources/LauncherFocus.swift', 'ios/Sources/NX18Look.swift', 'ios/Sources/NX18Glass.swift', 'ios/Sources/NXButtonGlyph.swift', 'ios/Sources/NXButtonGlyphData.swift', 'ios/Sources/NX18Card.swift', 'ios/Sources/NX18Profile.swift',   # the settings window's sources, the Gate panel's with them
                  'host/save_sync.c', 'host/save_sync.h', 'host/ui_font.h',   # the cloud-save code the launcher links (its send after the host exits), the UI font's registration
-                 'ios/Resources/ThirdPartyNotices.txt']   # the third-party notices every app carries
+                 'ios/Resources/ThirdPartyNotices.txt',   # the third-party notices every app carries
+                 'host/log_redirect.h']   # the launcher's log onto 1 and 2
         names += ['profile/' + n for n in pack_app.TABLES]
         for name in names:
             with self.subTest(name=name):
@@ -276,7 +278,7 @@ class PackReuse(unittest.TestCase):
         sync = next(c for c in self.commands if Path(c[0]).name == 'clang' and '-o' in c and c[-1].endswith('save_sync.c'))
         self.assertIn(sync[sync.index('-o') + 1], s)   # save_sync.c's object: the launcher sends the save once the host has exited
         self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], ['Launcher.swift', 'LauncherSettings.swift', 'LauncherRow.swift', 'LauncherGuideFiles.swift', 'SaveSyncReport.swift',
-                                                                           'NXFont.swift'])
+                                                                           'NXFont.swift', 'LauncherPanel.swift', 'LauncherFocus.swift', 'NX18Look.swift', 'NX18Glass.swift', 'NXButtonGlyph.swift', 'NXButtonGlyphData.swift', 'NX18Card.swift', 'NX18Profile.swift'])
         self.assertIn('CoreText', [s[i + 1] for i, x in enumerate(s) if x == '-framework'])   # ui_font.h's registration
 
     def test_selected_file_modes_and_file_additions_and_removals_invalidate(self):
@@ -304,7 +306,7 @@ class PackReuse(unittest.TestCase):
         info = plistlib.loads((out / 'Contents/Info.plist').read_bytes())
         self.assertEqual(info['DMModuleFiles'], ['main.cuts.tsv', 'main.fixups.tsv', 'main.gates.tsv', 'main.obs.tsv', 'main.patched.bin', 'nro.tsv'])
         self.assertEqual(sorted(p.name for p in (out / 'Contents/Resources/dm/font').iterdir()), ['nintendo_ext.ttf'])
-        self.assertEqual(sorted(p.name for p in (out / 'Contents/Resources/pso').iterdir()), ['archive.tsv', 'gpu.mtl4a', 'prebuilt.tsv', 'rest_pairs.tsv'])
+        self.assertEqual(sorted(p.name for p in (out / 'Contents/Resources/pso').iterdir()), ['archive.tsv', 'gpu.mtl4a', 'prebuilt.tsv', 'rest_pairs.tsv', 'standins.tsv'])
         self.assert_reused()
 
     def test_output_path_and_optional_inputs_invalidate(self):
@@ -332,6 +334,62 @@ class PackReuse(unittest.TestCase):
         empty.chmod(0o700); self.assert_repacked()
         empty.rename(empty.with_name('renamed')); self.assert_repacked()
         shutil.rmtree(self.args.out); self.assert_repacked()
+
+    def test_data_bundles_reused_only_as_the_last_pack_left_them(self):
+        # a pack that changes the host clones the data bundles with their signatures; one whose files changed since the last pack (its seal in the app is its code hash only) is made again
+        def signed(): return {Path(c[-1]).name for c in self.commands if '--sign' in c}   # what the last pack signed
+        self.pack()
+        app, plugins = Path(self.args.out), Path(self.args.out) / 'Contents/PlugIns'
+        bundles = {'GameData.bundle', 'ShaderLibraries.bundle', 'PipelineArchive.bundle', 'AddOnContent.bundle'}
+        self.assertEqual({p.name for p in plugins.iterdir()}, bundles)
+        (self.tmp / 'dmhost').write_bytes(b'other host')
+        out = self.pack()
+        for label in ('game files', 'shader libraries', 'pipeline archive', 'add-on content'): self.assertIn(f'step: {label} (reused, signed)\n', out)
+        self.assertEqual(signed(), {'dmhost', app.name + '.partial'})
+        res = app / 'Contents/Resources'
+        changes = (('romfs/marker', lambda p: p.write_bytes(b'gamf')),   # the same size
+                   ('msl/msl/added.metallib', lambda p: p.write_bytes(b'x')), ('pso/gpu.mtl4a', Path.unlink), ('aoc/1/data', lambda p: p.chmod(0o600)))
+        for name, change in changes:
+            with self.subTest(change=name):
+                change(res / name); out = self.pack()
+                self.assertEqual(len([n for n in signed() if n.endswith('.bundle')]), 1)   # that bundle only
+                self.assertEqual(out.count('(reused, signed)'), 3)
+        self.assertEqual((app / 'Contents/Resources/romfs/marker').read_bytes(), b'game')
+        self.assertFalse((app / 'Contents/Resources/msl/msl/added.metallib').exists())
+        self.assertTrue((app / 'Contents/Resources/pso/gpu.mtl4a').is_file())
+        self.key.unlink(); self.args.name = 'Renamed'   # no record of what the last pack left: nothing is reused
+        self.pack(); self.assertEqual(signed() & bundles, bundles)
+
+    def test_large_files_are_not_read_for_the_keys(self):
+        # the shader libraries and the pipeline archive are keyed by stat, as the RomFS: a pack that changes only the host reads none of the game's data
+        self.pack(); (self.tmp / 'dmhost').write_bytes(b'other host')
+        real, read = pack_app.digest, []
+        with mock.patch.object(pack_app, 'digest', lambda p: (read.append(Path(p)), real(p))[1]): self.pack()
+        self.assertIn(self.tmp / 'dmhost', read)
+        self.assertFalse([p for p in read if p.parent in (self.tmp / 'msl', self.tmp / 'pso')])
+
+    def test_programs_in_data_bundles(self):
+        # a game of several programs: each other program's RomFS in a data bundle of its own, its libraries with the first's in ShaderLibraries, reused as the first program's
+        t = self.tmp
+        for d in ('p1/patched', 'p1/romfs', 'p1/msl', 'p1/profile', 'p1/html'): (t / d).mkdir(parents=True)
+        for n, b in (('patched/main.patched.bin', b'code1'), ('patched/main.fixups.tsv', b'f1'), ('romfs/data', b'game1'), ('msl/k.metallib', b'lib1'), ('profile/shader_map.tsv', b'map1'), ('html/index.html', b'page')):
+            (t / 'p1' / n).write_bytes(b)
+        self.args.program = ['\t'.join(['1', *(str(t / 'p1' / d) for d in ('patched', 'romfs', 'msl', 'profile', 'html'))])]
+        self.pack()
+        res, plugins = Path(self.args.out) / 'Contents/Resources', Path(self.args.out) / 'Contents/PlugIns'
+        self.assertTrue((res / 'p1/romfs').is_symlink())
+        self.assertEqual((res / 'p1/romfs').resolve(), (plugins / 'GameData1.bundle/Contents/Resources/p1/romfs').resolve())
+        self.assertEqual((res / 'p1/romfs/data').read_bytes(), b'game1'); self.assertEqual((res / 'p1/html/index.html').read_bytes(), b'page')
+        self.assertEqual((plugins / 'ShaderLibraries.bundle/Contents/Resources/msl/p1/msl/k.metallib').read_bytes(), b'lib1')
+        self.assertIn('DM_ROMFS=@R@/p1/romfs\tDM_MSL_DIR=@R@/msl/p1', (res / 'dm/programs.tsv').read_text())
+        (t / 'dmhost').write_bytes(b'other host')
+        self.assertEqual(self.pack().count('(reused, signed)'), 5)
+        (t / 'p1/romfs/data').write_bytes(b'game2')
+        out = self.pack()
+        self.assertIn('step: program 1 game files\n', out); self.assertEqual(out.count('(reused, signed)'), 4)
+        self.assertEqual((res / 'p1/romfs/data').read_bytes(), b'game2')
+        (t / 'p1/msl/k.metallib').write_bytes(b'lib2')
+        self.assertIn('step: shader libraries\n', self.pack())
 
     def test_unpacked_files_and_unselected_split_pairs_do_not_invalidate(self):
         self.pack()
@@ -531,11 +589,13 @@ class App(unittest.TestCase):
     @classmethod
     def tearDownClass(cls): shutil.rmtree(cls.tmp)
 
-    def launch(self, wait=False, app=None, args=(), **env):
+    def launch(self, wait=False, app=None, args=(), closed=None, **env):
         home = self.tmp / 'home'
         e = dict(HOME=str(home), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin', **{'DM_LAUNCHER': '0', 'DM_TEST_METAL4': '1', **env})   # never the settings window in a test; Metal 4 taken as there (the host is a stand-in)
         if wait: e['STANDIN_WAIT'] = '1'
-        return subprocess.Popen([(app or self.app) / 'Contents/MacOS/nxnative', *args], env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        cmd = [(app or self.app) / 'Contents/MacOS/nxnative', *args]
+        if closed is not None: cmd = ['/bin/sh', '-c', f'exec "$@" {closed}>&-', 'sh', *cmd]   # started with that descriptor closed
+        return subprocess.Popen(cmd, env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
     def host_run(self):
         out = {}
@@ -581,6 +641,7 @@ class App(unittest.TestCase):
         self.assertIs(p['LSSupportsGameMode'], False)   # macOS's Game Mode holds the GPU at its lowest clock (frame-rate.md)
         self.assertEqual(p['DMSettings'], [])   # launcher.json's settings, as the saved choices they accept: none here
         self.assertRegex(p['DMCommit'], r'^[0-9a-f]{12}(\+dirty)?$')   # the packing checkout (scripts/bug_report.py, the host's start line)
+        self.assertEqual(p['DMRelease'], (REPO / 'dm/RELEASE').read_text().split()[0])   # NX 18's release name, shown on the Gate with the commit
         self.assertEqual(p['DMChain'], '0123456789ab')   # the chain of the libraries packed (msl/b-<chain>)
 
     def test_packed_language_is_the_lists(self):   # --lang a game lacks: the Game language row's default (settings.py: the game's first), with or without the window
@@ -598,7 +659,8 @@ class App(unittest.TestCase):
         after the launch environment, the player's env.txt and the bundle's, and ignored with DM_SAVED_CHOICES=0"""
         domain = f'org.nxnative.test.{uuid.uuid4().hex}'   # never a real game's domain
         listed = {'schema': 1, 'game': TID, 'settings': [
-            {'env': 'DM_FPS_TARGET', 'kind': 'choice', 'section': 'Game', 'label': 'Frame rate', 'note': '', 'default': '60', 'options': [['30', '30 fps'], ['60', '60 fps']]},
+            {'env': 'DM_FPS_TARGET', 'kind': 'choice', 'section': 'Game', 'label': 'Frame rate', 'note': '', 'default': '60', 'options': [['30', '30 fps'], ['60', '60 fps']],
+             'preset': {'battery': '30'}},   # a preset row: the saved 30 is Battery Saver (DM_PRESET, frame generation's only)
             {'env': 'DM_RENDER_SCALE', 'kind': 'range', 'section': 'Game', 'label': 'Render scale', 'note': '', 'default': '1.0', 'min': 0.5, 'max': 1.0, 'step': 0.05},
             {'env': 'DM_FPS_HOLD', 'kind': 'toggle', 'section': 'Performance', 'label': 'Hold', 'note': '', 'default': 'on', 'on': 'on', 'off': 'off'},
             {'env': 'DM_LANG', 'kind': 'choice', 'section': 'Game', 'label': 'Language', 'note': '', 'default': 'fr', 'options': [['fr', 'French'], ['ja', 'Japanese']]},
@@ -634,6 +696,13 @@ class App(unittest.TestCase):
             self.assertEqual((r['DM_BOTH'], r['DM_BAKED']), ('player', '1'))   # the player's env.txt and the bundle's win over a saved choice
             self.assertNotIn('DM_OPMODE', r)
             self.assertEqual((r['DM_ENV_FILE_KEYS'], r['DM_ENV_LAUNCH_KEYS']), ('DM_BOTH DM_BAKED', ''))   # what the settings window keeps: the env files' variables
+            log = lambda: (self.tmp / f'home/Library/Logs/nxnative/{TID}.log').read_text()
+            # Frame generation off (no DM_FRAMEGEN, every player who leaves it so): the saved choices and nothing else, no DM_PRESET and no line for it
+            self.assertNotIn('DM_PRESET', r); self.assertNotIn('DM_PRESET', log())
+            r = run(app, DM_FRAMEGEN='1')   # frame generation on: the preset the saved choices make, for its Battery Saver step-aside
+            self.assertEqual(r['DM_PRESET'], 'battery'); self.assertIn('launcher: DM_PRESET=battery', log())
+            r = run(app, DM_FRAMEGEN='1', DM_PRESET='quality')   # the launch's own value stays
+            self.assertEqual(r['DM_PRESET'], 'quality'); self.assertNotIn('launcher: DM_PRESET=', log())
             r = run(app, DM_FPS_TARGET='60', DM_RENDER_SCALE='0.5')   # a front end's launch overrides: they win, and are not saved
             self.assertEqual((r['DM_FPS_TARGET'], r['DM_RENDER_SCALE']), ('60', '0.5'))
             self.assertEqual(r['DM_ENV_LAUNCH_KEYS'], 'DM_FPS_TARGET DM_RENDER_SCALE')   # the window shows them fixed ("Set at launch")
@@ -642,6 +711,10 @@ class App(unittest.TestCase):
             self.assertEqual(subprocess.run(['defaults', 'read', domain, 'launcher.DM_FPS_TARGET'], capture_output=True, text=True).stdout.strip(), '30')
             r = run(app, DM_SAVED_CHOICES='0')
             self.assertEqual((r.get('DM_FPS_TARGET'), r.get('DM_RENDER_SCALE'), r['DM_LANG']), (None, None, 'fr'))
+            # The settings model (Launcher.swift dm_mac_preset_env) is built only with frame generation on: its init says this line again, launcher.c's saved_choices says it once
+            self.assertEqual((log().count('saved choices ignored (DM_SAVED_CHOICES=0)'), r.get('DM_PRESET')), (1, None))
+            r = run(app, DM_SAVED_CHOICES='0', DM_FRAMEGEN='1')
+            self.assertEqual((log().count('saved choices ignored (DM_SAVED_CHOICES=0)'), r.get('DM_PRESET')), (2, 'balanced'))
             save('DM_RENDER_SCALE', '-float', '0.75')   # not a string
             self.assertNotIn('DM_RENDER_SCALE', run(app))
             save('DM_RENDER_SCALE', '-string', ' 0.75')   # a number the iPhone's settings screen would not take either
@@ -702,6 +775,20 @@ class App(unittest.TestCase):
         p = self.launch(); p.communicate(timeout=30)   # an app built without one: nothing set, nothing logged
         r = self.host_run(); self.assertNotIn('DM_UI_FONT', r); self.assertNotIn('DM_UI_FONT_NAME', r); self.assertNotIn('ui font', logs.read_text())
 
+    def test_launch_with_a_standard_descriptor_closed(self):
+        """Started with 2 (or 1) closed, open() gave the log that very descriptor and the launcher closed it after the dup2s, so the next file opened took it. Now every line is
+        in the log, the launcher's and the host's, and the file the host opens first (host_run.txt) gets none (dm/host/log_redirect.h; t_log_redirect covers the other mixes)"""
+        log, run = self.tmp / f'home/Library/Logs/nxnative/{TID}.log', self.tmp / 'home/host_run.txt'
+        for closed in (2, 1):
+            with self.subTest(closed=closed):
+                p = self.launch(closed=closed); out = p.communicate(timeout=30)[0]
+                self.assertEqual(p.returncode, 7)
+                text = log.read_text()
+                for line in (f'launcher: Game: Test ({TID}), host ', 'launcher: no settings window', 'launcher: the host exited with 7', 'standin host output', 'standin host error output'):
+                    self.assertIn(line, text)
+                self.assertNotIn('standin host', run.read_text()); self.assertNotIn('launcher:', run.read_text())
+                self.assertNotIn(b'launcher:', out)
+
     def test_sigterm(self):   # forwarded to the host, whose exit code comes back
         p = self.launch(wait=True)
         for _ in range(100):
@@ -714,7 +801,8 @@ class App(unittest.TestCase):
     def test_missing_data(self):
         broken = self.tmp / 'Broken.app'; shutil.rmtree(broken, ignore_errors=True)
         subprocess.run(['/bin/cp', '-R', self.app, broken], check=True)
-        shutil.rmtree(broken / 'Contents/Resources/romfs')
+        r = broken / 'Contents/Resources/romfs'
+        shutil.rmtree(r.resolve() if r.is_symlink() else r)   # the data itself: in its data bundle, behind the link
         (self.tmp / 'home/alert.txt').unlink(missing_ok=True)
         p = subprocess.run([broken / 'Contents/MacOS/nxnative'], env=dict(HOME=str(self.tmp / 'home'), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin'), capture_output=True, text=True, timeout=30)
         self.assertEqual(p.returncode, 1)
@@ -728,6 +816,33 @@ class App(unittest.TestCase):
         self.assertFalse((home / 'host_run.txt').exists())
         self.assertIn('does not support Metal 4', (home / 'alert.txt').read_text())
         self.assertIn('does not support Metal 4', (home / f'Library/Logs/nxnative/{TID}.log').read_text())
+
+    def test_data_bundles(self):
+        # the game's files sit in signed nested bundles (Contents/PlugIns/<name>.bundle) behind links in Resources, and the app's signature holds them by hash
+        r = Path(self.app) / 'Contents/Resources/romfs'
+        self.assertTrue(r.is_symlink())
+        self.assertEqual(r.resolve(), (Path(self.app) / 'Contents/PlugIns/GameData.bundle/Contents/Resources/romfs').resolve())
+        self.assertFalse((Path(self.app) / 'Contents/PlugIns/GameData.bundle/Contents/MacOS').exists())   # data only: no executable
+        self.assertEqual(len(json.loads(Path(f'{self.app}.key').read_text())['data']['GameData']), 64)
+        subprocess.run(['codesign', '--verify', '--strict', self.app], check=True, capture_output=True)
+        seal = plistlib.loads((Path(self.app) / 'Contents/_CodeSignature/CodeResources').read_bytes())['files2']
+        self.assertIn('cdhash', seal['PlugIns/GameData.bundle'])
+        self.assertFalse(any(k.startswith('PlugIns/GameData.bundle/') for k in seal))
+
+    def test_data_bundles_repacked(self):
+        # another host: the data bundles are cloned with their signatures; a data file changed in the app since: its bundle is made again. Each result verifies whole (--deep reads every file)
+        out, host = self.tmp / 'Repack.app', self.tmp / 'host-other'
+        subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-O1', '-o', host, self.tmp / 'host.c'], check=True)
+        args = argparse.Namespace(**{**vars(self.args), 'out': str(out)})
+        def pack():
+            with contextlib.redirect_stdout(io.StringIO()) as o: pack_app.pack(args)
+            subprocess.run(['codesign', '--verify', '--deep', '--strict', out], check=True, capture_output=True)
+            return o.getvalue()
+        pack(); args.host = str(host)
+        self.assertEqual(pack().count('(reused, signed)'), 4)
+        data = out / 'Contents/Resources/romfs/region_common/audio/edward.bfsar'; data.write_bytes(b'snf')
+        self.assertEqual(pack().count('(reused, signed)'), 3)
+        self.assertEqual(data.read_bytes(), b'snd')
 
     def test_missing_modules(self):
         for missing in (('main.patched.bin',), ('main.fixups.tsv',), ('main.patched.bin', 'main.fixups.tsv')):
@@ -797,7 +912,7 @@ class App(unittest.TestCase):
         msls = sum(p.stat().st_size for pat in pack_app.MSL_FILES for p in Path(a.msl).glob(pat) if p.is_file() and p.name != '_b_build.json')
         pso = sum(p.stat().st_size for pat in pack_app.PSO_FILES for p in Path(a.pso).glob(pat))
         with mock.patch.object(pack_app, 'can_clone', lambda *a: False), mock.patch.object(pack_app, 'tree_bytes', lambda d: 0), \
-             mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + msls + pso - 1)), contextlib.redirect_stdout(io.StringIO()) as o:
+             mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + msls + pso - 1)), mock.patch.object(pack_app.vol_space, 'important_bytes', lambda p: None), contextlib.redirect_stdout(io.StringIO()) as o:
             with self.assertRaisesRegex(SystemExit, 'the app needs'): pack_app.pack(a)
         self.assertEqual(o.getvalue(), ''); self.assertFalse(Path(a.out).exists())
 
@@ -809,7 +924,7 @@ class App(unittest.TestCase):
         lists = sum(p.stat().st_size for d, pats in (('patched', pack_app.MODULE_FILES), ('msl', pack_app.MSL_FILES), ('pso', pack_app.PSO_FILES))
                     for pat in pats for p in (self.tmp / d).glob(pat) if p.is_file() and p.name != '_b_build.json')
         with mock.patch.object(pack_app, 'can_clone', can_clone), mock.patch.object(pack_app, 'tree_bytes', tree_bytes), \
-             mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + lists - 1)), contextlib.redirect_stdout(io.StringIO()):
+             mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + lists - 1)), mock.patch.object(pack_app.vol_space, 'important_bytes', lambda p: None), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(SystemExit, 'the app needs'): pack_app.pack(a)
         self.assertEqual(len(probed), 5); self.assertEqual(counted, [(self.tmp / 'aoc').resolve()])
 

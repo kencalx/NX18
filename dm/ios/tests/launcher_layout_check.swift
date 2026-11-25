@@ -1,46 +1,22 @@
-// The Mac settings window (dm/mac/Launcher.swift), run by test_launcher_storage.py: measure the real grouped Form without creating or showing a window.
+// The Mac's Gate window (dm/mac/Launcher.swift), run by test_launcher_storage.py: lay out the real window content (the banner and the Gate panel, LauncherPanel.swift) at the
+// window's minimum and ideal sizes, in both looks, without creating or showing a window; and the window-fit helper's edges.
 import AppKit
 import SwiftUI
 
-func checkLauncherLayout(_ model: LauncherModel, defaults: UserDefaults) -> Int {
+@MainActor func checkLauncherLayout(_ model: LauncherModel, defaults: UserDefaults) -> Int {
     NSApplication.shared.setActivationPolicy(.prohibited)
     var failed = 0
     func expect(_ c: Bool, _ what: String) { print((c ? "PASS " : "FAIL ") + what); if !c { failed += 1 } }
-    func measure(_ advanced: Bool, width: CGFloat) -> CGFloat {
-        defaults.set(advanced, forKey: "window.advanced")
-        var extra: CGFloat?
-        let view = NSHostingView(rootView: LauncherView(m: model, done: { _ in }, fit: { extra = $0 }).defaultAppStorage(defaults))
-        view.sizingOptions = []
-        // SwiftUI reports the Form's scroll geometry on a later pass, an estimate first and the measured rows a few ms after it, later still on a slow runner (issue #445): run the
-        // loop until the report meets the step's expectation and has held for 0.2 s; after 5 s the check sees whatever was reported last
-        func settle(_ want: (CGFloat) -> Bool) {
-            let limit = Date().addingTimeInterval(5)
-            var held = extra, since = Date()
-            while Date() < limit {
-                view.layoutSubtreeIfNeeded()
-                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
-                if extra != held { held = extra; since = Date() } else if let e = extra, want(e), Date().timeIntervalSince(since) >= 0.2 { return }
-            }
-        }
-        view.frame = NSRect(x: 0, y: 0, width: width, height: 660)
-        settle { _ in true }
-        guard let delta = extra else { expect(false, "native Form reports its scroll content size"); return 0 }
-        let height = 660 + delta
-        view.frame.size.height = height
-        settle { abs($0) < 1 }
-        expect(abs(extra ?? .infinity) < 1, "native Form fits its measured height (advanced=\(advanced), width=\(width), height=\(height))")
-        defaults.set(!advanced, forKey: "window.advanced")
-        settle { advanced ? $0 < 0 : $0 > 0 }
-        expect(advanced ? (extra ?? 0) < 0 : (extra ?? 0) > 0, "the same Form reports expansion and collapse after its saved state changes")
-        view.frame.size.height += extra ?? 0
-        settle { abs($0) < 1 }
-        expect(abs(extra ?? .infinity) < 1, "the same Form fits after its saved state changes")
-        return height
-    }
-    for width: CGFloat in [520, 560] {
-        // each measurement in its own pool: a hosting view left autoreleased stays alive and lays out its Form again on every later change of window.advanced
-        let closed = autoreleasepool { measure(false, width: width) }, open = autoreleasepool { measure(true, width: width) }
-        expect(closed > 0 && open > closed, "Advanced expands the measured native content")
+    for (size, look) in [(NSSize(width: 520, height: 640), "NSAppearanceNameDarkAqua"), (NSSize(width: 600, height: 760), "NSAppearanceNameAqua"), (NSSize(width: 900, height: 900), "NSAppearanceNameDarkAqua")] {
+        let view = NSHostingView(rootView: LauncherView(m: model, done: { _ in }, fit: { _ in }).defaultAppStorage(defaults))
+        view.appearance = NSAppearance(named: NSAppearance.Name(look))
+        view.frame = NSRect(origin: .zero, size: size)
+        view.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        view.layoutSubtreeIfNeeded()
+        let fit = view.fittingSize
+        expect(fit.width <= max(size.width, 600) + 0.5 && fit.height <= max(size.height, 760) + 0.5, "the Gate asks no more than its ideal 600 x 760 (\(Int(size.width)) x \(Int(size.height)) pt, \(look)): \(Int(fit.width)) x \(Int(fit.height))")
+        expect(view.appearance?.name.rawValue == look, "the window's look applies (\(look))")
     }
     let visible = NSRect(x: -1920, y: 40, width: 1920, height: 900)
     let initial = NSRect(x: -1500, y: 540, width: 560, height: 400)

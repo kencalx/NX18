@@ -7,3 +7,5 @@ t_*
 nvn_replay
 .precommit.err
 .precommit_snap/
+# The GAME the tests were last built for (the Makefile's GAME_DEP)
+.last_game

@@ -47,6 +47,7 @@ The game builds Mii heads from the console's MiiModel system data, starting at b
 ## Files and shaders
 
 - 29,785 shaders across 4.0.0 and 4.0.1 (12,579 vertex, 17,177 pixel, 28 compute, 1 geometry): BNSH in the courses' and objects' `.bfsha` / `.bfres` archives inside the `.szs` SARCs (courses, objects, karts, drivers), the effects' `.ptcl`, the layouts, agl's two BAHS sharcb and `main`; 19,012 variation pairs.
+- The prewarm list, [`pso_manifest.tsv`](pso_manifest.tsv), began as a Mac recording with prewarm off (boot, the title and its demo race, the menus, Grand Prix setup and Mario Kart Stadium's first two laps: 1,516 rows, 739 shaders (`S`), 776 render pipelines (`R`), 1 compute pipeline (`C`)). Grown on 2026-11-15 from the owner's iPhone 18 Pro Max session (about 5 minutes, build `431d5d18`, with its log): 3,133 more rows (2,566 S, 564 R, 3 C), what that session built beyond the shipped list (it still compiled 72 bases in play, 4.1 s on all threads), and 395 rows (272 S, 123 R) of the same phone's earlier list on 0.5 (`5b302cd0`; `pso_seed.py check` accepted all of its 2,615 rows against this shader map) that neither held. The list is now 5,044 rows (3,577 S, 1,463 R, 4 C).
 - The NSP script's Mac-only build (`--platform mac`) saves about 30,000 iOS shader compiles and the 12 GB IPA for this game ([development.md, A Mac-only build for development](../../../docs/development.md#a-mac-only-build-for-development)). The player README gives the IPA as about 11.9 GB.
 
 ## Rewriter
@@ -62,6 +63,8 @@ The game builds Mii heads from the console's MiiModel system data, starting at b
 
 ## Found on this game
 
+- [Offline HTML startup overflows a small guest stack](../../../docs/reference/services.md#offline-html-startup-overflows-a-small-guest-stack): the Info screen (main menu, bottom row) crashed on 4.0.1. Upstream checked it on the Mac with 4.0.0 (2026-11-13; NX 18: owner device check pending): the page (`htmlcontents.htdocs/html/USen/index.html`) shows, B closes it (exit reason 1), it opens again and the menu takes input after. Open: the page does not move between its entries or open one (its buttons are `tabindex` elements moved by the Switch browser's own focus navigation, and their handlers call `window.nx.playSystemSe`, which the host does not define), and the footer's back-button icon draws as an empty square.
+- **Sky-High Sundae's sky in red blocks (fixed upstream on the Mac; not yet checked in play on NX 18):** the blue dome lost its depth test against the sunset panorama under it by one rounding step: [Depth on the far plane](../../../docs/reference/rendering.md#depth-on-the-far-plane). A depth bias with clamping on the course's four dome shaders removed the blocks in an on/off test of the same frame; the fix covers every vertex shader with z = w (a far value above the near one), and the course was checked in play upstream on an M5 MacBook Air.
 - **Display sleep during controller play on the Mac (resolved, player-confirmed):** [Mac display sleep during controller play](../../../docs/reference/services.md#mac-display-sleep-during-controller-play).
 - **Resolved in the sanitizer audit:** [Unaligned command headers during layout probing](../../../docs/reference/audio.md#unaligned-command-headers-during-layout-probing), reproduced with the SDK 4 command-list fixture.
 

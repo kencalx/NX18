@@ -9,47 +9,11 @@ the texture every other access of the image uses, for buffer, 2D, 2D-array and
 3D images. The translator still guards each coordinate (IGN bounds) before the
 atomic.
 
-Only shaders with image atomics (OpImageTexelPointer) are written at MSL 3.1:
-every other shader keeps its MSL 2.3 source byte for byte, so its library comes
-from the MSL-keyed compile cache. The emulation must never come back silently:
-check_msl fails the shader when SPIRV-Cross writes the pointer form anyway.
+Every shader is written at MSL 3.2 (dmsh_chain.CROSS_MSL), so SPIRV-Cross always
+takes the native form. The emulation must never come back silently: check_msl
+fails the shader when SPIRV-Cross writes the pointer form anyway.
 """
 import re
-import struct
-
-MSL_VERSION = '20300'
-MSL_VERSION_ATOMICS = '30100'
-OP_IMAGE_TEXEL_POINTER = 60
-
-
-def uses_image_atomics(spv):
-    """Whether the SPIR-V module (path) has an image texel pointer, the operand of every image atomic"""
-    with open(spv, 'rb') as f:
-        data = f.read()
-    if len(data) < 20 or data[:4] != b'\x03\x02\x23\x07':
-        raise ValueError('not a SPIR-V module: ' + spv)
-    if b'\x3c\x00\x06\x00' not in data:   # the instruction's first word (always 6 words long, opcode 60), nowhere in the module: most shaders, without walking their instructions in Python
-        return False
-    words = struct.unpack('<%dI' % (len(data) // 4), data[:len(data) // 4 * 4])
-    i = 5
-    while i < len(words):
-        n, op = words[i] >> 16, words[i] & 0xffff
-        if op == OP_IMAGE_TEXEL_POINTER:
-            return True
-        if n == 0:
-            raise ValueError('malformed SPIR-V instruction in ' + spv)
-        i += n
-    return False
-
-
-def cross_args(xc, spv):
-    """spirv-cross arguments for this module: xc with its --msl-version raised to 3.1 when the module has image atomics"""
-    if not uses_image_atomics(spv):
-        return list(xc)
-    args = list(xc)
-    args[args.index('--msl-version') + 1] = MSL_VERSION_ATOMICS
-    return args
-
 
 _EMULATED = re.compile(r'\bspvImage2DAtomicCoord\b|device\s+atomic_u?int\s*\*\s*\w+_atomic\b')
 
@@ -60,8 +24,11 @@ _EMULATED = re.compile(r'\bspvImage2DAtomicCoord\b|device\s+atomic_u?int\s*\*\s*
 # (CodeGen/Spirv GenerateImageAtomic) writes the operation on its rg32ui image as two 32-bit atomics of the same operation on the same texel, the low word then the high word,
 # inside the IGN bounds check. wide_atomics turns each such pair into the one 64-bit atomic and declares the image as ulong; the high word is the more significant half, as the
 # RG32Uint texel's R channel holds the low 32 bits (Metal's ulong view of RG32Uint, little-endian as the guest's 64-bit texel). The image may be bound only for that: any
-# other access of it (a read, a write, a lone 32-bit atomic) fails the shader rather than run on the wrong type
-_WIDE_DECL = re.compile(r'\b(texture(?:2d|2d_array|3d))<uint, access::read_write>(\s+)(\w+_rg32ui)\b')
+# other access of it (a read, a write, a lone 32-bit atomic) fails the shader rather than run on the wrong type.
+# The declaration may end in memory_coherence_device: MSL 3.2 writes so an image the translator decorated Coherent (its last SULD / SUST in the shader has .CG). Before the pattern took
+# that form, a Maxwell SULD.D.64.CG of an image a SUATOM.U64 max also updates hid the image from it, and the pair went through as two 32-bit atomics on the rg32ui image; now that read
+# fails the shader as any other does
+_WIDE_DECL = re.compile(r'\b(texture(?:2d|2d_array|3d))<uint, access::read_write(, memory_coherence_device)?>(\s+)(\w+_rg32ui)\b')
 _WIDE_STMT = r'^([ \t]*)(?:uint _\d+ = )?([\w.]*?\b%s)\.atomic_fetch_(max|min)\((.*)\)(?:\.x)?;[ \t]*$'
 _WIDE_QUERY = r'\.get_(?:width|height|depth|array_size)\(\)'
 
@@ -84,7 +51,7 @@ def wide_atomics(source):
     if '_rg32ui' not in source:
         return source
     for m in list(_WIDE_DECL.finditer(source)):
-        name = m.group(3)
+        name = m.group(4)
         if not re.search(r'\b%s\.atomic_' % re.escape(name), source):
             continue   # an rg32ui image the shader only reads or writes: not this case
         lines = source.split('\n')
@@ -107,7 +74,7 @@ def wide_atomics(source):
         uses = len(re.findall(r'\b%s\b' % re.escape(name), left))
         if uses != 1:   # the declaration alone
             raise ValueError(f'{name}: {uses - 1} accesses of a 64-bit atomic image besides its atomics and size queries')
-        source = re.sub(r'\b(texture(?:2d|2d_array|3d))<uint, access::read_write>(\s+%s)\b' % re.escape(name), r'\1<ulong, access::read_write>\2', source)
+        source = re.sub(r'\b(texture(?:2d|2d_array|3d))<uint, access::read_write(, memory_coherence_device)?>(\s+%s)\b' % re.escape(name), r'\1<ulong, access::read_write\2>\3', source)
     return source
 
 

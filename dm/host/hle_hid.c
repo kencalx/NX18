@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <strings.h>
 #include <pthread.h>
+#include <string.h>
 #include <time.h>
 #include <math.h>
 #include "motion_fusion.h"
@@ -227,7 +228,8 @@ void hid_keys_init(void) {
 //   address (nvn_mtl.m dm_gfx_addr_note: its memory pool, a texture's storage, a recorded GPU write, the raw memory table, a sparse pool's page), "drag <x0> <y0> <x1> <y1> [seconds=0.3]" moves one finger in a straight line between the two normalized picture
 //   points over that time and lifts it (the touch screen's pans and swipes, hle_touch.c gesture_sample), "dump" logs what each guest thread waits on and the graphics wait points
 //   (crash_dump_now, as the iOS app's DM_LOG_PORT dump; scripts/regress.py asks for it before stopping a hung game), "program <n>" makes oe::ExecuteProgram(n) with no parameters (a multi-program application's way between its programs, headless), "webshot <path>" saves the offline page shown as a PNG, "pressure <0|1|2>" acts as the system's memory pressure going normal, warning or critical (dm_gfx_pressure: the
-//   memory line and the trim at the next submission; macOS lets only root simulate one, memory_pressure -S), "#…" is ignored.
+//   memory line and the trim at the next submission; macOS lets only root simulate one, memory_pressure -S), "scale <factor>" sets the GPU headroom owner's factor (0.5-1) on the
+//   game's render scale lever as the controller would (hle_nvn.c dm_ctl_scale: measuring a lever with the game running), "#…" is ignored.
 //   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script
 static void *ctl_main(void *arg) {
     const char *path = arg; long off = 0; char line[1100];
@@ -247,6 +249,7 @@ static void *ctl_main(void *arg) {
                 if (!strncmp(line, "webshot ", 8)) { void front_web_shot(const char *path); front_web_shot(line + 8); continue; }
                 if (!strncmp(line, "shot ", 5)) { dm_gfx_shot_at(1, line + 5); LOG("DM_CTL: screenshot of the next frame → %s", line + 5); continue; }
                 if (!strncmp(line, "texlist ", 8)) { void dm_gfx_texlist(int target); dm_gfx_texlist(atoi(line + 8)); continue; }
+                if (!strncmp(line, "scale ", 6)) { void dm_ctl_scale(double f); dm_ctl_scale(atof(line + 6)); continue; }   // the GPU headroom owner's factor on the game's render scale lever (hle_nvn.c)
                 if (!strcmp(line, "restop")) { void dm_gfx_restop(void); dm_gfx_restop(); continue; }   // what the residency set holds (nvn_mtl.m res_top)
                 if (!strncmp(line, "pressure ", 9)) { LOG("DM_CTL: memory pressure %d, as the system's dispatch source gives it", atoi(line + 9)); dm_gfx_pressure(atoi(line + 9)); continue; }   // 0 normal, 1 warning, 2 critical (hle_nvn.c dm_gfx_pressure: the log line and the trim)
                 if (!strncmp(line, "addr ", 5)) { void dm_gfx_addr_note(uint64_t a, char *note, size_t n); char note[600]; uint64_t a = strtoull(line + 5, NULL, 16);   // what the host knows of a guest address
@@ -370,6 +373,24 @@ static uint32_t style_of(uint32_t id) { return kind_style(npad_resolve(id), id);
 static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }
 static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // whichever of two sources is deflected more
 
+// DM_HID_TRACE=1 (diagnostic, logging only): the controller's start as the game sees it, for a controller connected at boot that the game reads no input from until it is
+// unplugged and plugged in again (Ocarina of Time, Luigi's Mansion 3; NX18-X2.0 gpu-clock-collapse.md). Lines "hid trace +<s>": each style event bound (the style it read, signalled
+// or not) and signalled (the style before and after, bound or not), each style query's answer when it changes, and each npad's state read when its connected attributes change
+// (the first read too), with the buttons held then. At most HT_MAX lines, so a long run stays readable
+enum { HT_MAX = 400 };
+static int ht_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_HID_TRACE"); v = e && *e == '1'; if (v) LOG("hid trace on (DM_HID_TRACE=1): the controller's start as the game sees it, at most %d lines", HT_MAX); } return v; }
+static _Atomic int g_ht_n;
+static double ht_t(void) { static struct timespec t0; struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); if (!t0.tv_sec) t0 = t; return (t.tv_sec - t0.tv_sec) + (t.tv_nsec - t0.tv_nsec) / 1e9; }
+#define HT(...) do { if (ht_on() && atomic_fetch_add(&g_ht_n, 1) < HT_MAX) { char b_[256]; snprintf(b_, sizeof b_, __VA_ARGS__); LOG("hid trace +%.3f %s", ht_t(), b_); } } while (0)
+static const char *ht_id(uint32_t id, char *b) { if (id < 8) snprintf(b, 12, "No%u", id + 1); else if (id == 0x20) strcpy(b, "Handheld"); else if (id == 0x10) strcpy(b, "Other"); else snprintf(b, 12, "%#x", id); return b; }
+static void ht_read(uint32_t id, uint32_t style, const NpadState *s) {   // a state read: logged when its attributes for this id and style change (or it is the first)
+    if (!ht_on()) return;
+    static uint32_t last[16][8]; static uint8_t seen[16][8];
+    int ii = id < 8 ? (int)id : id == 0x20 ? 8 : id == 0x10 ? 9 : 10, si = 0; for (uint32_t m = style; m > 1 && si < 7; m >>= 1) si++;
+    if (seen[ii][si] && last[ii][si] == s->attributes) return;
+    seen[ii][si] = 1; last[ii][si] = s->attributes; char b[12];
+    HT("state read %s style %#x: attributes %#x (connected %d), buttons %#llx", ht_id(id, b), style, s->attributes, (int)(s->attributes & 1), (unsigned long long)s->buttons);
+}
 // Style update events bound per npad (BindNpadStyleSetUpdateEvent; slots No1..No8 by id, then Handheld): the hid service signals an npad's event when its controller comes,
 // goes or changes kind, which here is whenever the npad's style (style_of) changes. styles_sync is the one place that does it: everything a style depends on calls it after its
 // change (the players and their Joy-Cons, the console mode, the ids and styles the game supports, its Joy-Con assignment), and it signals each npad whose style is no longer
@@ -385,6 +406,7 @@ static void styles_sync(void) {
     for (int i = 0; i < STYLE_SLOTS; i++) {
         uint32_t st = style_of(i < DM_PLAYERS ? (uint32_t)i : NPAD_HANDHELD);
         if (st == g_style_told[i]) continue;
+        { char b[12]; HT("style event %s: style %#x -> %#x, %s", ht_id(i < DM_PLAYERS ? (uint32_t)i : NPAD_HANDHELD, b), g_style_told[i], st, g_style_ev[i] ? "signalled" : "not bound: nothing signalled"); }
         g_style_told[i] = st;
         if (g_style_ev[i]) hle_signal_bound_system_event(g_style_ev[i]);
     }
@@ -542,6 +564,33 @@ static uint64_t stick_dirs(const int32_t a[4]) {
     if (a[3] < -STICK_THRESH) b |= 1u << 23;
     return b;
 }
+// A Switch stick reports inside a circle of radius DM_STICK_MAX (round gates; a real Pro Controller or Joy-Con peaks near 30000 after calibration), but the front ends scale each
+// axis on its own: GameController's per-axis [-1, 1] (DmGamepad.m axis, front_mac.m), the HID pads' square-gated corners (pad_hid.h), and the merge (pick) is per axis too. So
+// a physical stick pushed fully could reach the game longer than full tilt: up to 46340 in a corner, and a little past 32767 on a full push in one direction whose other axis
+// wobbles. Persona 4 Golden (010062B01525C000) moved erratically at full tilt on a GameSir G8+ and fine at small tilts (upstream seedds/nxnative#1150 reports legacy ports that
+// overflow past 32767). Every stick is scaled back onto the circle here, after the merge, so every source and every game sees what Switch hardware can report; a stick
+// inside the circle is unchanged. Each new peak length (up to STICK_PEAK_LOGS lines) is logged once, to confirm on a device what a controller reaches
+enum { STICK_PEAK_LOGS = 6 };
+static _Atomic int64_t g_stick_peak;   // the longest stick logged so far (0: none yet)
+static _Atomic int g_stick_logs;
+// DM_STICK_RADIUS (diagnostic, 16384-32767, default DM_STICK_MAX): a smaller circle, for a game that may expect a calibrated stick's peak (about 30000) rather than full scale
+static int stick_radius(void) {
+    static _Atomic int r;
+    int v = atomic_load_explicit(&r, memory_order_relaxed);
+    if (v) return v;
+    const char *e = getenv("DM_STICK_RADIUS"); v = DM_STICK_MAX;
+    if (e && *e) { int n = atoi(e); if (n >= 16384 && n <= DM_STICK_MAX) { v = n; LOG("hid: sticks held inside a circle of %d (DM_STICK_RADIUS)", v); } else LOG("[RED] DM_STICK_RADIUS=%s: 16384 to %d; keeping %d", e, DM_STICK_MAX, DM_STICK_MAX); }
+    atomic_store_explicit(&r, v, memory_order_relaxed); return v;
+}
+static void stick_circle(int32_t *x, int32_t *y) {
+    int64_t l2 = (int64_t)*x * *x + (int64_t)*y * *y, R = stick_radius();
+    if (l2 <= R * R) return;
+    int64_t peak = atomic_load_explicit(&g_stick_peak, memory_order_relaxed);
+    if (l2 > peak + peak / 32 && atomic_compare_exchange_strong(&g_stick_peak, &peak, l2) && atomic_fetch_add(&g_stick_logs, 1) < STICK_PEAK_LOGS)
+        LOG("hid: a stick reached (%d, %d), length %.0f past the circle of %d: scaled onto it", *x, *y, sqrt((double)l2), (int)R);
+    double k = (double)R / sqrt((double)l2);
+    *x = (int32_t)(*x * k); *y = (int32_t)(*y * k);   // truncated toward zero: the length stays at or below R
+}
 // A Joy-Con style npad (JoyDual: both Joy-Cons of pad r.pad; JoyLeft / JoyRight: one): each Joy-Con's own buttons, rail buttons included, and its own stick, in the stick field of its side
 static void fill_joy(NpadState *s, npad_ref r) {
     uint64_t b = 0; int32_t a[4] = {0}; int left = r.kind != KIND_RIGHT, right = r.kind != KIND_LEFT;
@@ -549,11 +598,14 @@ static void fill_joy(NpadState *s, npad_ref r) {
         b |= atomic_load(&g_joy_btn[r.pad][side]) | atomic_exchange(&g_joy_latch[r.pad][side], 0);
         uint64_t v = atomic_load(&g_joy_axes[r.pad][side]); a[2 * side] = ax(v, 0); a[2 * side + 1] = ax(v, 1);
     }
+    stick_circle(&a[0], &a[1]); stick_circle(&a[2], &a[3]);
     s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     s->buttons = (b & 0x0f00ffffull) | stick_dirs(a);
     s->attributes = ATTR_CONNECTED | (left ? ATTR_LEFT_CONN : 0) | (right ? ATTR_RIGHT_CONN : 0);
 }
-static void fill(NpadState *s, uint32_t id, uint32_t style) {
+static void fill_(NpadState *s, uint32_t id, uint32_t style);
+static void fill(NpadState *s, uint32_t id, uint32_t style) { fill_(s, id, style); ht_read(id, style, s); }
+static void fill_(NpadState *s, uint32_t id, uint32_t style) {
     memset(s, 0, sizeof *s);
     s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
     npad_ref ref = npad_resolve(id);
@@ -578,6 +630,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
         uint64_t c = atomic_load(&g_sc_axes); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(c, i));
     }
     if (atomic_load(&g_hold)) { b = 0; memset(a, 0, sizeof a); }   // an applet is in front: the game reads nothing (the latches were taken all the same)
+    stick_circle(&a[0], &a[1]); stick_circle(&a[2], &a[3]);
     s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     b &= 0xffffull;
     if (s->lx < -STICK_THRESH) b |= 1u << 16;
@@ -644,7 +697,12 @@ HLE_FORCE("_ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12
     LOG("hid supported controller styles %#x", styles); g_styles_supported = styles;
     styles_sync();   // Joy-Cons show as the styles the game supports (npad_resolve)
 }
-HLE_FORCE("_ZN2nn3hid15GetNpadStyleSetERKj", "controller style query; follows DM_OPMODE", uint32_t, h_hid_GetStyle, const uint32_t *id) { return style_of(*id); }
+HLE_FORCE("_ZN2nn3hid15GetNpadStyleSetERKj", "controller style query; follows DM_OPMODE", uint32_t, h_hid_GetStyle, const uint32_t *id) {
+    uint32_t st = style_of(*id);
+    if (ht_on()) { static uint32_t last[16]; static uint8_t seen[16]; int ii = *id < 8 ? (int)*id : *id == 0x20 ? 8 : *id == 0x10 ? 9 : 10;
+        if (!seen[ii] || last[ii] != st) { seen[ii] = 1; last[ii] = st; char b[12]; HT("style query %s: %#x", ht_id(*id, b), st); } }
+    return st;
+}
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadFullKeyStateEiRKj", "full-key controller states", int, h_hid_StatesFullKey, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_FULLKEY); }
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj", "handheld controller states", int, h_hid_StatesHandheld, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_HANDHELD); }
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyDualStateEiRKj", "dual Joy-Con states (not connected on the host)", int, h_hid_StatesJoyDual, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYDUAL); }
@@ -1157,6 +1215,7 @@ HLE_FORCE("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeEN
     int slot = style_slot(*id); uint32_t st;
     if (slot >= 0) { pthread_mutex_lock(&g_style_lock); g_style_ev[slot] = ev; g_style_told[slot] = st = style_of(*id); pthread_mutex_unlock(&g_style_lock); }
     else st = style_of(*id);
+    { char b[12]; HT("style event %s bound: style %#x, %s", ht_id(*id, b), st, st ? "signalled at once" : "not signalled (no controller there yet)"); }
     if (st) hle_signal_system_event(ev);
 }
 // The Switch's player LEDs by npad (No1 1, No2 1-2, No3 1-3, No4 1-4, No5 1+4, No6 1+3, No7 1+3+4, No8 2+3; bit 0 = LED 1); Handheld and Other light LED 1 as before
@@ -1176,18 +1235,49 @@ HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUp
 // Touch screen: TouchScreenState<N> = { int64 sampling number; int32 count; int32 reserved; TouchState[N] }, filled from the front end's touch points (hle_touch.c touch_fill_n:
 // the Mac's mouse, the iPhone touches no gamepad control takes, DM_KEYS taps) in handheld mode, as on the Switch, whose screen is out of reach when docked: a game may read touches
 // without checking the mode, so in console mode the state has no touch points. Super Mario Galaxy's pointer is the touch screen in handheld mode. hle_touch.c numbers
-// the states of both modes from its one count
+// the states of both modes from its one count.
+// A read makes a sample only when 4 ms have passed since the newest one (or the mode changed) and otherwise copies the newest, as the Switch's touch resource does: it writes the
+// screen's LIFO every 4 ms (yuzu: GestureUpdatePeriod), so two reads within 4 ms see one sample and a Start / End edge sits in exactly one sampling number. The last 16 samples are kept
+// and GetTouchScreenStates returns the newest min(n, 16) of them, newest first, as Unity's reader expects (Pokemon Friends main+0xb00670 walks them from index n - 1 down and takes each
+// number above the last it took). Two games need this. Animal Crossing: New Horizons reads twice in one original frame (its input manager at main+0x1b65260 and its own keyboard's
+// reader): a read that used up the edges let the second reader see only a held point, so the keyboard highlighted a key and entered nothing (issue #2567). Unity 2022.3 (Pokemon Friends
+// 1.1.5) polls on its own thread at 60 Hz whatever the frame rate, and a poll that takes no new state while a finger is down (main+0x60d6a0) ends every live touch as cancelled: with one
+// sample per presented frame, the second poll of a 30 fps frame cancelled every drag. Giving each read a new number instead made Unity take the same Start again on every state.
 int touch_fill_n(void *out, int max, uint64_t now_ns, int points);
-static void touch_read(void *s, int n) {
+#define TOUCH_GRID_NS 4000000ull   // the touch sampler's period (250 Hz)
+#define TOUCH_HIST 16              // samples kept: the most GetTouchScreenStates<16> returns
+static pthread_mutex_t g_touch_mu = PTHREAD_MUTEX_INITIALIZER;   // guards the ring and the newest sample's time and mode; taken before hle_touch.c's g_tl
+static uint8_t g_touch_hist[TOUCH_HIST][0x290];   // TouchScreenState<16>: 0x10 + 0x28 * 16
+static int g_touch_kept, g_touch_newest, g_touch_points;   // samples kept (0-16), index of the newest, the points it was made with (1 handheld, 0 console)
+static uint64_t g_touch_at;   // now_ns() of the newest
+// Copy the newest min(want, kept) samples, newest first, into a TouchScreenState<N> array and return how many; a sample is made first when the grid or the mode asks for one
+static int touch_read(void *s, int N, int want) {
     keys_sync();   // DM_KEYS frame steps due in this frame (their touches), before the read
-    touch_fill_n(s, n, now_ns(), dm_opmode() == 0);
+    size_t stride = 0x10 + 0x28 * (size_t)N;
+    pthread_mutex_lock(&g_touch_mu);
+    uint64_t now = now_ns();   // under the lock: read before it, another thread's newer sample would make now - g_touch_at wrap
+    int handheld = dm_opmode() == 0;
+    if (!g_touch_kept || now - g_touch_at >= TOUCH_GRID_NS || g_touch_points != handheld) {   // console mode: no touch points, as before
+        int next = g_touch_kept ? (g_touch_newest + 1) % TOUCH_HIST : 0;
+        touch_fill_n(g_touch_hist[next], 16, now, handheld);
+        g_touch_newest = next; g_touch_at = now; g_touch_points = handheld;
+        if (g_touch_kept < TOUCH_HIST) g_touch_kept++;
+    }
+    int cnt = want < g_touch_kept ? want : g_touch_kept;
+    for (int i = 0; i < cnt; i++) {
+        uint8_t *d = (uint8_t *)s + stride * (size_t)i;
+        memcpy(d, g_touch_hist[(g_touch_newest + TOUCH_HIST - i) % TOUCH_HIST], stride);
+        if (((int32_t *)d)[2] > N) ((int32_t *)d)[2] = N;   // more fingers than this reader asked for: the rest stay unseen here
+    }
+    pthread_mutex_unlock(&g_touch_mu);
+    return cnt;
 }
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "connect to the hid touch screen; the host takes touch points from the front end", void, h_hid_InitTouch, void) {}
 // SDK 18 overload with two ints (Super Mario Galaxy); the SDK's own one opens the hid service and aborts in sm::Initialize
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEii", "connect to the hid touch screen (SDK 18 two-argument version); the host takes touch points from the front end", void, h_hid_InitTouch2, int a, int b) { (void)a; (void)b; }
 #define TOUCH(N) \
-    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "touch screen current state (touch points only in handheld mode)", void, h_hid_Touch1_##N, void *s) { touch_read(s, N); } \
-    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "touch screen states: 1 entry (touch points only in handheld mode)", int, h_hid_TouchN_##N, void *s, int n) { if (n <= 0) return 0; touch_read(s, N); return 1; }
+    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "touch screen current state (touch points only in handheld mode)", void, h_hid_Touch1_##N, void *s) { touch_read(s, N, 1); } \
+    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "touch screen states: the newest min(n, 16) of a 16-sample history, newest first (touch points only in handheld mode)", int, h_hid_TouchN_##N, void *s, int n) { return n <= 0 ? 0 : touch_read(s, N, n > TOUCH_HIST ? TOUCH_HIST : n); }
 TOUCH(1) TOUCH(2) TOUCH(3) TOUCH(4) TOUCH(5) TOUCH(6) TOUCH(7) TOUCH(8) TOUCH(9) TOUCH(10) TOUCH(11) TOUCH(12) TOUCH(13) TOUCH(14) TOUCH(15) TOUCH(16)
 // Gestures: recognized from the same touch points (hle_touch.c gesture_fill), so only in handheld mode too
 int gesture_fill(void *out, int n, uint64_t now_ns);

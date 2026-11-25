@@ -9,6 +9,7 @@
 #include <VideoToolbox/VideoToolbox.h>
 #include <arm_neon.h>
 #include "hle_movie_avc.h"
+#include "hle_movie_vt.h"
 
 #define QMAX 16
 struct mavc {
@@ -18,8 +19,9 @@ struct mavc {
     uint64_t sequence; int saw_picture;
     uint8_t *au; size_t aucap;   // length-prefixed copy of the access unit being decoded
     int red, rgba;               // rgba: pictures as 4-byte RGBA (native texture mode, Monster Hunter Rise) instead of NV12
-    int lost, restart, restarts; // VideoToolbox's session invalidated by iOS (the app in the background; movie_vt_restart): lost in the callback, restart while waiting for an IDR picture
+    int restart, restarts;       // movie_vt_restart: replaying into a new session was not possible (hle_movie_vt.h), so a new one starts at the next IDR picture
     CVPixelBufferRef last; int64_t still_pts;   // movie_vt_restart: the last picture taken (retained), queued again for each picture while waiting for an IDR; the latest time it or a picture taken had
+    movie_vt_history history;    // the compressed pictures since the last IDR, replayed into a new session after iOS invalidated the old one (hle_movie_vt.h)
 };
 
 int mavc_bt709(const mavc *a, int h) {
@@ -27,14 +29,14 @@ int mavc_bt709(const mavc *a, int h) {
     if (m && CFGetTypeID(m) == CFStringGetTypeID()) return CFEqual(m, kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2);
     return h >= 720;
 }
-mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); return a; }
+mavc *mavc_new(movie_vt_control *control) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); a->history.control = control; return a; }
 static void close_session(mavc *a) {
     if (a->vs) { VTDecompressionSessionWaitForAsynchronousFrames(a->vs); VTDecompressionSessionInvalidate(a->vs); CFRelease(a->vs); a->vs = NULL; }
     if (a->fd) { CFRelease(a->fd); a->fd = NULL; }
 }
 void mavc_drop(mavc *a) {
     for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb);
-    a->nq = 0; a->sequence = 0; a->saw_picture = 0;
+    a->nq = 0; a->sequence = 0; a->saw_picture = 0; movie_vt_clear(&a->history);
     if (a->last) { CVPixelBufferRelease(a->last); a->last = NULL; } a->still_pts = 0;   // another stream: nothing of this one is shown again
 }
 void mavc_free(mavc *a) { if (!a) return; close_session(a); mavc_drop(a); free(a->au); free(a); }
@@ -140,8 +142,8 @@ static void avc_still(mavc *a, int64_t t) {
 }
 static void on_frame(void *ref, void *src, OSStatus st, VTDecodeInfoFlags fl, CVImageBufferRef img, CMTime pts, CMTime dur) {
     (void)fl; (void)dur; mavc *a = ref;
-    if (st == kVTInvalidSessionErr && movie_vt_restart()) { a->lost = 1; return; }   // mavc_decode starts a new session at the next IDR picture
-    if (st || !img) { if (!a->red++) LOG("[RED] movie: AVC decode error (VideoToolbox %d, first case)", (int)st); return; }
+    if (st) { a->history.status = st; return; }   // movie_vt_submit returns it: kVTInvalidSessionErr replays into a new session, any other error is the submission's red line
+    if (a->history.replaying || !img) return;
     if (a->nq == QMAX) { if (!a->red++) LOG("[RED] movie: AVC reorder queue full, dropping the oldest frame"); CVPixelBufferRelease(a->q[0].pb); memmove(a->q, a->q + 1, --a->nq * sizeof a->q[0]); }
     int64_t t = pts.timescale ? pts.value * 1000000 / pts.timescale : 0;
     uint64_t sequence = src ? (uint64_t)(uintptr_t)src - 1 : a->sequence;
@@ -150,7 +152,8 @@ static void on_frame(void *ref, void *src, OSStatus st, VTDecodeInfoFlags fl, CV
                     (a->q[k - 1].sequence == sequence && a->q[k - 1].pts > t))) { a->q[k] = a->q[k - 1]; k--; }
     a->q[k].pb = CVPixelBufferRetain(img); a->q[k].pts = t; a->q[k].sequence = sequence; a->nq++;
 }
-// 1 = a session; 0 = none (a red line); -1 = none yet: restarting after iOS invalidated the session, and iOS refused a new hardware session for now (the app still inactive)
+// 1 = a session; 0 = none (a red line); -1 = none yet: restarting after iOS invalidated the session, and iOS refused a new hardware session for now; -2 = Stop / Flush / Finalize
+// cancelled a wait for the app to become active (hle_movie_vt.h)
 static int open_session(mavc *a, int restarting) {
     close_session(a);
     if (!a->nsps || !a->npps) { if (!a->red++) LOG("[RED] movie: AVC has no SPS / PPS, outputting black frames"); return 0; }
@@ -162,7 +165,8 @@ static int open_session(mavc *a, int restarting) {
     const void *k[] = {kCVPixelBufferPixelFormatTypeKey}, *v[] = {n};
     CFDictionaryRef attrs = CFDictionaryCreate(NULL, k, v, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks); CFRelease(n);
     VTDecompressionOutputCallbackRecord cb = {on_frame, a};
-    st = VTDecompressionSessionCreate(NULL, a->fd, NULL, attrs, &cb, &a->vs); CFRelease(attrs);
+    st = movie_vt_create(&a->history, a->fd, attrs, &cb, &a->vs); CFRelease(attrs);   // waits while the app is inactive (hle_movie_vt.h)
+    if (st == MOVIE_VT_CANCELLED) { a->vs = NULL; return -2; }
     if (st && restarting && st == kVTVideoDecoderNotAvailableNowErr) { a->vs = NULL; return -1; }
     if (st) { if (!a->red++) LOG("[RED] movie: VideoToolbox cannot create an AVC decode session (%d), outputting black frames", (int)st); a->vs = NULL; return 0; }
     CMVideoDimensions dm = CMVideoFormatDescriptionGetDimensions(a->fd);
@@ -194,28 +198,45 @@ int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) {
     if (n > 0 && !each_nal(p, (size_t)n, au_add, &c)) { if (!a->red++) LOG("[RED] movie: AVC packet without an Annex B start code (%d bytes), not decoded", n); return -1; }
     if (!c.len) return 0;
     int restarting = a->restart;
-    if (a->restart) {   // iOS invalidated the session: pictures before the next IDR refer to pictures that went with it, so none is decoded (no garbage: the last picture again); parameter sets are kept
+    if (a->restart) {   // iOS invalidated the session and no replay could rebuild it: pictures before the next IDR refer to pictures that went with it, so none is decoded (no garbage: the last picture again); parameter sets are kept
         if (!c.idr) { if (c.picture) avc_still(a, pts_us); return 0; }
         a->restart = 0;
     }
+    if (a->dirty || c.idr) { movie_vt_clear(&a->history); a->history.key = c.idr; }   // the replay history starts at an IDR picture, under the parameter sets in use
     for (int again = 0, counted = 0;; again++) {
         int o = a->dirty || !a->vs ? open_session(a, restarting) : 1;
+        if (o == -2) return 0;   // Stop / Flush / Finalize cancelled a wait for the app to become active
         if (o < 1 && restarting) a->restart = 1;   // no session for this IDR: the pictures after it still wait for the next one
         if (o < 0) { static int n; if (n++ < 8) LOG("[movie] AVC: VideoToolbox's decoder is not available yet (the app still inactive), restarting at the next IDR picture"); if (c.picture) avc_still(a, pts_us); return 0; }
         if (!o) { if (restarting && c.picture) avc_still(a, pts_us); return -1; }
         if (c.picture && !counted) { avc_picture_sequence(a, c.idr); counted = 1; }
+        void *order = (void *)(uintptr_t)(a->sequence + 1);
         CMBlockBufferRef bb = NULL; CMSampleBufferRef sb = NULL;
         OSStatus st = CMBlockBufferCreateWithMemoryBlock(NULL, NULL, c.len, NULL, NULL, 0, c.len, 0, &bb);
         if (!st) st = CMBlockBufferReplaceDataBytes(a->au, bb, 0, c.len);
         CMSampleTimingInfo ti = {kCMTimeInvalid, CMTimeMake(pts_us, 1000000), kCMTimeInvalid}; size_t ssz = c.len;
         if (!st) st = CMSampleBufferCreateReady(NULL, bb, a->fd, 1, 1, &ti, 1, &ssz, &sb);
-        if (!st) st = VTDecompressionSessionDecodeFrame(a->vs, sb, 0, (void *)(uintptr_t)(a->sequence + 1), NULL);   // flags 0: synchronous, the picture is queued before this returns
+        if (!st) {
+            st = movie_vt_submit(&a->history, a->vs, sb, order);   // synchronous, the picture is queued before this returns
+            // iOS ended the hardware session while the app was in the background. Kept, it failed every later packet, across Flush and loops too (mavc_drop keeps the session).
+            // A new session, waiting for the app to be active, takes the pictures since the last IDR without showing them, then this one: no picture lost, each with its time (upstream PR #2877)
+            while (st == kVTInvalidSessionErr && a->history.key) {
+                int opened = open_session(a, 1);
+                if (opened == -2) st = MOVIE_VT_CANCELLED;
+                else if (opened == 1) {
+                    st = movie_vt_replay(&a->history, a->vs);
+                    if (!st) st = movie_vt_submit(&a->history, a->vs, sb, order);
+                } else break;   // no new session: movie_vt_restart below, or the red line
+            }
+            if (!st) movie_vt_remember(&a->history, sb);
+        }
         if (sb) CFRelease(sb); if (bb) CFRelease(bb);
-        // iOS ended the hardware session while the app was in the background. Kept, it failed every later packet, across Flush and loops too (mavc_drop keeps the session). Only
-        // that error, and only with movie_vt_restart: a new session from the parameter sets kept, at once when this is an IDR picture, else at the next one. Pictures already queued stay
-        if ((st == kVTInvalidSessionErr || a->lost) && movie_vt_restart()) {
+        if (st == MOVIE_VT_CANCELLED) return 0;
+        // No replay was possible (no IDR since the session began, or no new session): only that error, and only with movie_vt_restart, a new session from the parameter sets kept,
+        // at once when this is an IDR picture, else at the next one; pictures already queued stay (X1.0's restart, kept as the fallback)
+        if (st == kVTInvalidSessionErr && movie_vt_restart()) {
             int now = !again && c.idr;
-            close_session(a); a->lost = 0; a->restart = !now; restarting = 1;
+            close_session(a); a->restart = !now; restarting = 1;
             if (++a->restarts <= 8) LOG("[movie] AVC: VideoToolbox's session was invalidated (the app was in the background), restarting %s (restart %d)", now ? "at this IDR picture" : "at the next IDR picture", a->restarts);
             if (now) continue;
             if (c.picture) avc_still(a, pts_us);

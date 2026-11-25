@@ -49,6 +49,7 @@ Moving objects get their ambient light from eight values per object in a storage
 - [Whether a vibration device is mounted](../../../docs/reference/services.md#whether-a-vibration-device-is-mounted): a crash soon after boot in a run with a window, not in the headless runs.
 - [`nfp`'s extended application area](../../../docs/reference/services.md#nfps-extended-application-area).
 - [`nvnTextureBuilderGetViewOffset`, `nvnTextureViewCompare`, `nvnBlendStateSetAdvancedNormalizedDst`](../../../docs/reference/nvn-objects.md#nvntexturebuildergetviewoffset-nvntextureviewcompare-nvnblendstatesetadvancednormalizeddst).
+- [Compute loops that outlive the process](../../../docs/reference/shaders.md#compute-loops-that-outlive-the-process): containment of the particle simulation's runaway (upstream); its failing loop/input remains open.
 
 ## Open
 

@@ -24,7 +24,7 @@ class Pfs0Storage(unittest.TestCase):
             assert package is not None
             version = package.attrib['Version']
             (tmp / 'test.csproj').write_text(f'''<Project Sdk="Microsoft.NET.Sdk">
-<PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><AllowUnsafeBlocks>true</AllowUnsafeBlocks><StartupObject>Pfs0StorageTests</StartupObject></PropertyGroup>
+<PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><RollForward>Major</RollForward><AllowUnsafeBlocks>true</AllowUnsafeBlocks><StartupObject>Pfs0StorageTests</StartupObject></PropertyGroup>
 <ItemGroup><PackageReference Include="LibHac" Version="{escape(version)}" />
 <Compile Include="{escape(str(ROOT / 'dm/tools/nx_extract/Program.cs'))}" />
 <Compile Include="{escape(str(ROOT / 'dm/tools/tests/fixtures/Pfs0StorageTests.cs'))}" /></ItemGroup></Project>''')

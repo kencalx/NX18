@@ -2,6 +2,7 @@
 // only sleeps and yields advance (nanosleep moves it by the time asked, sched_yield by 0.5 µs), so where each wait ends is exact.
 #include "../dm.h"
 #include <assert.h>
+#include <stdlib.h>
 #include <stdatomic.h>
 #include <time.h>
 #include <unistd.h>
@@ -30,6 +31,8 @@ static uint64_t limiter(uint64_t dl) {
 }
 int main(void) {
     alarm(20);
+    // parked yields (DM_YIELD_PARK, on by default) wait on the real clock, which the test clock does not follow: off here; t_yieldpark tests them
+    setenv("DM_YIELD_PARK", "0", 1);
     svc_thread_main_init();
 
     // A run of yields with no clock read: plain yields for its first 2 ms; with a read in each pass: back-off sleeps from its second yield (its first follows another SVC)

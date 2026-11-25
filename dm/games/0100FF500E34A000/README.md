@@ -183,6 +183,7 @@ the user's request.
 
 ## Found on this game
 
+- [Screen UVs a pixel shader computes from the clip position](../../../docs/reference/shaders.md#screen-uvs-a-pixel-shader-computes-from-the-clip-position): the same engine as Xenoblade Chronicles 3, where S2Arm measured 2,000 to 3,600 whole-attachment snapshots a frame in battle on an iPhone. Read through the new readable-tile rule, this game's chain `ae1dd68dc11c` library gives 1,277 more readable-tile versions with an NDC sample and 3,438 vertex shaders with a `screen_pos` output; not yet run or measured here.
 - [Float32 vertex padding through integer inputs](../../../docs/reference/rendering.md#float32-vertex-padding-through-integer-inputs).
 - [Monolith ARH1, XBC1 and HCPS/SLCT shader containers](../../../docs/reference/shaders.md#monolith-arh1-xbc1-and-hcpsslct-shader-containers): loose programs, effects and model/map streams.
 - [Finalized textures kept by registered descriptor views](../../../docs/reference/nvn-objects.md#finalized-textures-kept-by-registered-descriptor-views).

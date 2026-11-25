@@ -49,6 +49,15 @@ class LiveMenu(unittest.TestCase):
         self.assertNotIn('DM_UPSCALER', live, "the game's own upscaler stays a start-time setting")
         self.assertNotIn('DM_SCREEN_ASPECT', live, 'the picture shape is the game\'s, read when it starts')
 
+    def test_low_power_mode_at_30_fps_applies_while_the_game_runs(self):   # the host's 30 fps hold in Low Power Mode (hle_nvn.c thermal_capped, sampled by the heat ladder's heat_sample) takes the pick at its next sample
+        self.assertIn('if (!strcmp(env, "DM_LOW_POWER_CAP")) { if (value) dm_low_power_cap_set(atoi(value) != 0); return true; }', self.live)
+        decl = 'void dm_low_power_cap_set(int on)'
+        nvn = read('dm/gfx/nvn/hle_nvn.c')
+        self.assertIn(decl + ';', self.front); self.assertIn(decl + ' {', nvn); self.assertIn(decl + ' {', read('dm/ios/tests/duo/Sources/DuoRuntimeStubs.m'))
+        self.assertIn('front_env_copy("DM_LOW_POWER_CAP"', body(nvn, 'static int heat_sample(void) {'))   # its first read is under the menu's lock (the heat ladder's sample since the heat core)
+        row = settings_rows()['DM_LOW_POWER_CAP']
+        self.assertEqual((row[1], row[5]), ('toggle', 'Game'))   # a choice in Customize › Other choices, not Troubleshooting
+
     def test_the_harness_has_the_host_calls_front_ios_makes(self):   # the Duo harness links front_ios.m and DmGamepad.m alone (dm/ios/tests/duo/project.yml)
         stubs = read('dm/ios/tests/duo/Sources/DuoRuntimeStubs.m')
         for decl, home in (('void mtl_present_upscale_set(const char *mode)', self.nvn), ('void mtl_present_sharpen_set(const char *level)', self.nvn),
@@ -66,6 +75,11 @@ class LiveMenu(unittest.TestCase):
         self.assertIn('int dm_power_detail_on(void);', front_h)   # front_ios_power_watch: battery monitoring only for the power detail line (hle_nvn.c)
         self.assertIn('int dm_power_detail_on(void) {', read('dm/gfx/nvn/hle_nvn.c')); self.assertIn('int dm_power_detail_on(void) {', stubs)
         self.assertIn('int front_web_touch(void) {', stubs)   # DmGamepad.m calls it; web_apple.m is not in the harness
+        # DmGamepad.m tells the host its menu opened and closed (front.h dm_front_menu_set, hle_oe.c: the log line and the long-frame tag); the harness keeps what it was told
+        decl = 'void dm_front_menu_set(int open, const char *where)'
+        self.assertIn(decl + ';', front_h); self.assertIn(decl + ' {', read('dm/host/hle_oe.c')); self.assertIn(decl + ' {', stubs)
+        for header, call in (('- (void)menuOpened {', 'dm_front_menu_set(1, NULL)'), ('- (void)menuClosed {', 'dm_front_menu_set(0, NULL)')):
+            self.assertIn(call, body(self.pad, header))
         h = read('dm/ios/Sources/DmGameMenu.h')
         for decl in ('void dm_gamepad_touch_look(const char *env, const char *value);', 'double dm_gamepad_size(void);'):
             self.assertIn(decl, h); self.assertIn(decl[:-1] + ' {', self.pad)
@@ -105,10 +119,46 @@ class LiveMenu(unittest.TestCase):
         self.assertIn('&g_aa_present', body(self.nvn, 'static int present_now('))   # the live present's own state; a capture makes its own (present_offscreen_m4)
         self.assertIn('aa_state aa = {0}', body(self.nvn, 'static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int)) {'))
 
+    def test_the_preset_reaches_the_host_at_every_start_and_after_an_in_game_change(self):   # DM_PRESET: frame generation steps aside in Battery Saver (nvn_framegen.inc fg_power_why)
+        swift = read('dm/ios/Sources/LauncherSettings.swift'); menu = read('dm/ios/Sources/GameMenu.swift')
+        for f in ('func apply() {', 'func applySaved() {'):   # Play, and a start without the screen (Skip this screen next time, DM_LAUNCHER=0, a shortcut, a program handing over)
+            self.assertIn('exportPreset()', body(swift, f), f)
+        export = body(swift, 'func exportPreset() {')
+        self.assertIn('setenv("DM_PRESET", p, 1)', export)   # before the host's threads run
+        self.assertIn('guard Self.framegenOn,', export)   # only with frame generation, DM_PRESET's only reader: a player without it starts as before (no line, no variable)
+        self.assertIn('guard let e = getenv("DM_FRAMEGEN"), strcmp(e, "1") == 0 else { return false }', swift)   # read as nvn_framegen.inc fg_on reads it: only 1 counts
+        self.assertIn('return getenv("DM_PRESENT_REPEAT").map { strcmp($0, "1") != 0 } ?? true', swift)   # and off with the present repeat, as fg_on
+        self.assertIn('gameMenuPresetEnv(m)', body(menu, '@MainActor func gameMenuApplyPreset('))   # a chip, L / R, X, Back, Undo
+        env = body(menu, '@discardableResult @MainActor func gameMenuPresetEnv(_ m: LauncherModel) -> [String] {')
+        self.assertIn('dm_setting_env("DM_PRESET", p)', env); self.assertNotIn('setenv(', env)   # the host's threads run: under front_ios.m's lock
+        self.assertIn('guard LauncherModel.framegenOn,', env)
+        fg = read('dm/gfx/nvn/nvn_framegen.inc')
+        self.assertIn('front_env_copy("DM_PRESET", e, sizeof e)', body(fg, 'static int fg_power_why(void) {'))   # read under the same lock, once a second
+        self.assertIn('v = e && !strcmp(e, "1");', body(fg, 'static int fg_on(void) {'))   # the switch the launcher's side reads the same way
+        # The Mac's start without its window: the Swift side decides (a settings model, this Mac's screens and controllers only with frame generation on or a preset switch)
+        launcher = read('dm/mac/launcher.c')
+        self.assertIn('if (shown == 2) { saved_choices(); dm_mac_preset_env(); }', launcher)
+        mac = body(read('dm/mac/Launcher.swift'), 'public func dmMacPresetEnv() {')
+        self.assertIn('model.exportPreset()', mac)
+        self.assertLess(mac.index('guard LauncherModel.framegenOn || switches else { return }'), mac.index('let model = LauncherModel(file.settings)'))   # nothing built without either
+        self.assertLess(mac.index('guard model.hasPresets, getenv("DM_PRESET") == nil || switches else { return }'), mac.index('model.follow(macDeviceFacts, on: [])'))   # no device facts without presets
+
+    def test_a_preset_switch_reaches_the_host_at_every_start_and_live(self):   # preset_env (Bananza's Battery Saver DM_FPS_CTL=hold30): no row, the host reads it again once a second
+        swift = read('dm/ios/Sources/LauncherSettings.swift'); menu = read('dm/ios/Sources/GameMenu.swift')
+        export = body(swift, 'func exportPreset() {')
+        self.assertLess(export.index('for (e, v) in presetSwitches { setenv(e, v, 1);'), export.index('guard Self.framegenOn,'))   # whatever frame generation does
+        self.assertIn('.filter { !fixed.contains($0) }', body(swift, 'var presetSwitches: [(env: String, value: String)] {'))   # an env file's or the launch's value stays
+        env = body(menu, '@discardableResult @MainActor func gameMenuPresetEnv(_ m: LauncherModel) -> [String] {')
+        self.assertIn('dm_setting_env(e, v)', env); self.assertNotIn('setenv(', env)
+        self.assertLess(env.index('for (e, v) in m.presetSwitches'), env.index('guard LauncherModel.framegenOn'))
+        fctl = read('dm/host/hle_fctl.c')
+        self.assertIn('front_env_copy("DM_FPS_CTL", e, sizeof e)', body(fctl, 'static void fctl_mode_poll(uint64_t now) {'))   # under the menu's lock, once a second
+        self.assertNotIn('getenv("DM_FPS_CTL")', fctl)
+
     def test_a_pick_reaches_the_environment_under_the_lock_the_present_thread_reads_it_under(self):   # setenv rewrites or reallocates a value another thread's getenv points at
         swift = read('dm/ios/Sources/LauncherSettings.swift'); menu = read('dm/ios/Sources/GameMenu.swift')
         self.assertNotIn('setenv', body(swift, 'func choose(_ s: Setting, _ v: String) -> Bool {'))   # the model saves; the menu sets the environment
-        self.assertIn('func pick(_ v: String) { if m.choose(s, v) { dm_setting_env(s.env, v) }; _ = dm_setting_live(s.env, v) }', menu)
+        self.assertIn('func pick(_ v: String) { if m.choose(s, v) { dm_setting_env(s.env, v); if s.preset != nil { gameMenuPresetEnv(m) } }; _ = dm_setting_live(s.env, v) }', menu)
         self.assertIn('void dm_setting_env(const char *env, const char *value);', read('dm/ios/Sources/DmGameMenu.h'))
         setter, copier = body(self.front, 'void dm_setting_env(const char *env, const char *value) {'), body(self.front, 'int front_env_copy(const char *name, char *out, size_t cap) {')
         for b, call in ((setter, 'setenv(env, value, 1)'), (copier, 'getenv(name)')):

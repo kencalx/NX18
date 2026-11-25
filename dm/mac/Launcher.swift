@@ -1,10 +1,10 @@
 // Mac app launcher: the settings window shown before the game starts, in the launcher's own process (launcher.c calls dm_mac_launcher before it starts the host). Its settings come from the
 // app's Resources/dm/launcher.json (dm/games/settings.py with SETTINGS_PLATFORM=mac); the model and the rows are the iOS launcher's (dm/ios/Sources/LauncherSettings.swift, LauncherRow.swift),
-// and so is the store: launcher.<VAR> in the app's preferences, which launcher.c reads when the window is not shown (docs/frontends.md, Saved choices). Basic settings (level basic) come
-// first, the others under Advanced settings, each in the list's sections (a game without basic rows shows them all, with no Advanced). Play puts the settings into this process's environment,
-// which the host inherits; Quit and closing the window end the app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the
+// and so is the store: launcher.<VAR> in the app's preferences, which launcher.c reads when the window is not shown (docs/frontends.md, Saved choices). Below the banner is the iPhone's Gate
+// panel (LauncherPanel.swift, gate-ui §13): presets, quick tiles, Customize and Cloud saves, by pointer or keyboard. Play puts the settings into this process's environment,
+// which the host inherits; Quit and closing the window end the app without the game. Gate at start off ("window.show"): no window unless Option is held at launch, and launcher.c applies the
 // saved choices. The window never takes focus by itself: an app opened in the background (open -g) keeps its window behind until the player switches to it.
-// The look is the NX 18 one the iOS launcher has (LauncherRow.swift's NX18Palette): a dark window, a banner across the top with the game's key art (Resources/dm/art.jpg; without it the app
+// The look is the NX 18 one the iOS launcher has (LauncherRow.swift's NX18Palette, NX18Look.swift's light and dark): the window follows Appearance, a banner across the top with the game's key art (Resources/dm/art.jpg; without it the app
 // icon blurred, with the icon itself on it), the game's logo (Resources/dm/logo.png) or else its name and the status line over it, the coral Play pill, Game guide (the game's own pages under Resources/html in a window of the app's own, MacGuideWindow, or
 // Resources/dm/manual.pdf) and About this game (Resources/dm/about.json, a sheet), the cyan-to-coral rails under the banner, the preset chips, cyan section headings and controls on
 // charcoal rows. Only the window's background takes a little of the art's colour; the accents, the rails and the mark keep the logo's
@@ -16,9 +16,11 @@ import Metal
 import MetalFX
 import QuartzCore
 import SwiftUI
+import UniformTypeIdentifiers
 import WebKit
 
 private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictionaryKey: key) as? String }
+// nx18Line (NX 18's release and build) is shared: dm/ios/Sources/NX18Look.swift
 
 /// The host's comparison of the two saves (dm/host/save_sync.c). This launcher links save_sync.o but imports no C header (pack_app.py builds it with swiftc and no bridging
 /// header), so the symbol is declared here.
@@ -47,7 +49,7 @@ enum SaveCheck {
     }
 
     /// The question the report needs, as a modal alert; `cancel` names the way back ("Cancel" to the window, "Quit" without one)
-    static func ask(_ r: SaveSyncReport?, cancel: String) -> Outcome {
+    @MainActor static func ask(_ r: SaveSyncReport?, cancel: String) -> Outcome {
         switch SaveSyncReport.step(r) {
         case .play(let choice): return .play(choice)
         case .choose:
@@ -89,7 +91,7 @@ enum SaveCheck {
     }
 
     /// With the window off: the check and its question before the game, the app in front only while it asks. false: the player quit
-    static func withoutWindow() -> Bool {
+    @MainActor static func withoutWindow() -> Bool {
         final class Box: @unchecked Sendable { let lock = NSLock(); var report: SaveSyncReport?; var waiting = false }
         let app = NSApplication.shared
         defer { app.setActivationPolicy(.prohibited) }
@@ -174,7 +176,7 @@ struct LauncherExtras {
     var guides: [URL] = []   // the folders holding a guide's language folders (…/html<n>/html-document/htmlcontents.htdocs/html), first program first
 
     // From the app's Resources: dm/art.jpg, dm/logo.png, dm/about.json, dm/manual.pdf, and the guides under html/ (an app of several programs: p<N>/html/ too)
-    static func load(resources: URL? = Bundle.main.resourceURL) -> LauncherExtras {
+    @MainActor static func load(resources: URL? = Bundle.main.resourceURL) -> LauncherExtras {
         var x = LauncherExtras()
         guard let res = resources else { return x }
         let fm = FileManager.default
@@ -288,13 +290,16 @@ struct LauncherView: View {
     let fit: (CGFloat) -> Void
     let extras: LauncherExtras
     @AppStorage("window.show") private var show = true
-    @AppStorage("window.advanced") private var advanced = false
     @AppStorage("cloudSaves.folder") private var cloudFolder = ""
     @State private var lastPlayed: Date?
     @State private var aboutShown = false
     @State private var bannerWidth: CGFloat = 600   // the banner's width, which bounds the logo's
     @State private var checking = false
     @State private var check = 0   // which Play the running check is for: one the player went on from without it is dropped
+    @State private var pages: [GatePage] = []         // the Gate panel's page stack (LauncherPanel.swift)
+    @State private var focus: LauncherFocus?          // the keyboard's focus on the panel: nil until an arrow key moves it, again nil after a click
+    @State private var cardOpen = false               // the NX 18 card (NX18Card.swift): the mark opens it
+    @State private var look = NX18Appearance.current  // the Appearance choice (the card's row; gate-ui §11a.9)
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     init(m: LauncherModel, done: @escaping (Bool) -> Void, fit: @escaping (CGFloat) -> Void, extras: LauncherExtras = .load()) {
@@ -302,15 +307,7 @@ struct LauncherView: View {
     }
 
     private var name: String { info("CFBundleName") ?? "Game" }
-    private var background: Color { NX18Palette.background(tint: extras.tint) }
-    private var presetNote: String {
-        switch m.activePreset {
-        case .battery?: return "Lower frame rate and resolution, for a cooler Mac"
-        case .balanced?: return "The settings this game was tested with"
-        case .quality?: return "Full resolution and MetalFX upscaling"
-        case nil: return "Your own choices"
-        }
-    }
+    private var background: Color { NX18Palette.background(tint: extras.tint) }   // the banner's fades
     private var status: LauncherStatus {
         var s = LauncherStatus()
         s.lastPlayed = lastPlayed
@@ -322,78 +319,36 @@ struct LauncherView: View {
     var body: some View {
         VStack(spacing: 0) {
             banner
-            NX18Rails(axis: .horizontal, flowing: true)   // the colours drift slowly along it (still under Reduce Motion; LauncherRow.swift)
-            Form {
-                if m.hasPresets {
-                    Section {
-                        LabeledContent {
-                            PresetChips(m: m)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Preset")
-                                Text(presetNote).nxFont(.footnote).foregroundStyle(NX18Palette.muted)
-                            }
-                        }
-                    }
-                    .listRowBackground(NX18Palette.row)
-                }
-                settingSections(basic: true)
-                CloudSavesSection()
-                if !m.hasBasicRows {
-                    resetSection
-                } else {
-                    Section {
-                        DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
-                    }
-                    .listRowBackground(NX18Palette.row)
-                    if advanced {
-                        settingSections(basic: false)
-                        resetSection
-                    }
-                }
-                if MacNoticesWindow.url != nil {   // the third-party notices the app carries (Resources/dm/ThirdPartyNotices.txt), as on the iPhone below the settings; also in the app menu
-                    Section {
-                        Button { MacNoticesWindow.show(title: name) } label: {
-                            HStack {
-                                Text("Acknowledgements").foregroundStyle(.white)
-                                Spacer()
-                                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(NX18Palette.muted)   // system: symbol
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("Shows the licenses of the code this app is built with")
-                    }
-                    .listRowBackground(NX18Palette.row)
-                }
-            }
-            .formStyle(.grouped)
-            .scrollContentBackground(.hidden)
-            .onScrollGeometryChange(for: CGFloat.self) {
-                $0.contentSize.height + $0.contentInsets.top + $0.contentInsets.bottom - $0.containerSize.height
-            } action: { _, extraHeight in
-                fit(extraHeight)
-            }
-            NX18Palette.separator.frame(height: 1)
+                .environment(\.colorScheme, .dark)   // the banner stays dark in every look: art, name, status line, Play and the pills (§11a.2)
+            NX18Rails(axis: .horizontal, flowing: true)   // one cycle, then still; an input runs one more (GW19, LauncherRow.swift)
+            GatePanel(m: m, pages: $pages, focus: focus, padShown: focus != nil, quiet: cardOpen, glyphs: NXPadGlyphs(), status: cloudStatus,
+                      gateAtStartLocked: false, footer: AnyView(panelFooter), acknowledgements: MacNoticesWindow.url != nil,
+                      touched: { _ in focus = nil; NX18RailsIdle.pulse() }, act: act)
+                .frame(maxHeight: .infinity)
             HStack {
-                Toggle("Show this window at launch", isOn: $show).toggleStyle(.checkbox)
-                Spacer()
                 if checking {
                     ProgressView().controlSize(.small)
-                    Text("Checking the cloud save…").foregroundStyle(NX18Palette.muted)
+                    Text("Checking the cloud save…").foregroundStyle(GateColor.muted)
                     Button("Play Without It") { checking = false; SaveCheck.apply("offline"); done(true) }.nxPushButton()
                 }
+                Spacer()
                 Button("Quit") { done(false) }.nxPushButton()
             }
-            .padding(.horizontal, 20).padding(.vertical, 14)
-            .background(NX18Palette.card(tint: extras.tint))
+            .padding(.horizontal, 20).padding(.bottom, 12)
         }
-        .background(background)
+        .background(NX18PageColor.page(tint: extras.tint))
         .ignoresSafeArea(.container, edges: .top)   // the banner runs under the transparent title bar
         .nxTextRoot()   // NX 18's UI font for every text below that names no style (NXFont.swift)
         .tint(NX18Palette.cyan)
-        .environment(\.colorScheme, .dark)
-        .frame(minWidth: 520, idealWidth: 600)
+        .frame(minWidth: 520, idealWidth: 600, minHeight: 640, idealHeight: 760)
+        .overlay { if cardOpen { cardLayer } }
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(keys: [.upArrow, .downArrow, .leftArrow, .rightArrow, .return, .space, .escape, .delete]) { k in key(k.key) ? .handled : .ignored }
+        .onChange(of: focus) { NX18RailsIdle.pulse() }
+        .onAppear { if m.skipAtStart == show { m.skipAtStart = !show } }   // Gate at start (Customize) is the Mac's "Show this window at launch"
+        .onChange(of: m.skipAtStart) { _, skip in show = !skip }
+        .onReceive(NotificationCenter.default.publisher(for: NX18Appearance.changed)) { _ in look = NX18Appearance.current; NSApp.keyWindow?.appearance = look.appearance }
         .sheet(isPresented: $aboutShown) {
             if let a = extras.about { AboutGameSheet(about: a, name: name, art: extras.art, tint: extras.tint) }
         }
@@ -401,6 +356,121 @@ struct LauncherView: View {
             let folder = Self.saveFolder
             lastPlayed = await Task.detached(priority: .utility) { folder.flatMap { LauncherStatus.lastModified(under: $0) } }.value
         }
+    }
+
+    private var cloudStatus: LauncherStatus.Cloud { (CloudSavesSection.fixed ?? cloudFolder).isEmpty ? .off : .on }
+    // The end of Customize: the game's and NX 18's versions (About this game carries the rest on the iPhone)
+    private var panelFooter: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Version \(info("CFBundleShortVersionString") ?? "1.0")").nxFont(.caption).foregroundStyle(GateColor.muted)
+            if let n = nx18Line { Text(verbatim: n).nxFont(.caption).foregroundStyle(GateColor.muted) }
+        }
+        .padding(.horizontal, 4).padding(.top, 6)
+    }
+    // What a press on the panel asks the window for: the folder panel, and the questions before Turn off and Reset all settings (alerts: no console holds to confirm)
+    private func act(_ a: GateAction) {
+        switch a {
+        case .chooseCloudFolder: if let f = CloudSavesSection.choose(from: cloudFolder) { cloudFolder = f }
+        case .confirmCloudOff: if confirm("Turn off cloud saves?", "This Mac keeps its own save.", "Turn Off") { cloudFolder = "" }
+        case .confirmReset: if confirm("Reset all settings?", "Brings back the settings this game was tested with.", "Reset") { m.reset() }
+        case .acknowledgements: MacNoticesWindow.show(title: name)
+        }
+    }
+    private func confirm(_ title: String, _ text: String, _ button: String) -> Bool {
+        let alert = NSAlert(); alert.messageText = title; alert.informativeText = text
+        alert.addButton(withTitle: button); alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    // The NX 18 card over the window (a click on the mark): the window behind blurred, a light dim on top (§20.1), and Appearance (§11a.9)
+    private var cardLayer: some View {
+        ZStack(alignment: .topTrailing) {
+            Rectangle().fill(.ultraThinMaterial).overlay(Color.black.opacity(0.18)).ignoresSafeArea()
+                .contentShape(Rectangle()).onTapGesture { cardOpen = false }
+            NX18Card(gameVersion: info("CFBundleShortVersionString"), focused: nil, glyphs: nil, close: { cardOpen = false }, art: extras.art != nil, profileRows: MacProfileFlow.rows)
+                .frame(width: 340).padding(.top, 44).padding(.trailing, 16)
+                .onExitCommand { cardOpen = false }
+        }
+    }
+
+    // The keyboard on the panel (gate-ui §13): arrows move the focus ring over the panel's lines, left / right step a focused choice where the line has one item, Return or
+    // Space presses, Escape or Delete goes back a page. The first arrow only shows the ring
+    private func key(_ k: KeyEquivalent) -> Bool {
+        let map = macFocusMap
+        guard let cur = focus.flatMap({ map.contains($0) ? $0 : nil }) else {
+            if [.upArrow, .downArrow, .leftArrow, .rightArrow].contains(k) { focus = map.lines.first?.first; return true }
+            if k == .escape || k == .delete, !pages.isEmpty { pages.removeLast(); return true }
+            return false
+        }
+        switch k {
+        case .upArrow, .downArrow: focus = map.vertical(cur, k == .downArrow ? 1 : -1)
+        case .leftArrow, .rightArrow:
+            let d = k == .rightArrow ? 1 : -1
+            if let f = map.horizontal(cur, d) { focus = f }
+            else if case .row(let env) = cur, let s = m.gateRow(env) { m.advance(s, by: d) }
+            else if case .tile(let env) = cur, let s = m.gateRow(env) { m.advance(s, by: d) }
+        case .return, .space: press(cur)
+        case .escape, .delete:
+            guard let p = pages.popLast() else { focus = nil; return true }
+            switch p {
+            case .customize: focus = .door("customize")
+            case .cloud: focus = .door("cloud")
+            case .options(let env): focus = pages.isEmpty ? .tile(env) : .row(env)
+            default: focus = map.lines.first?.first
+            }
+        default: return false
+        }
+        return true
+    }
+    private func press(_ f: LauncherFocus) {
+        switch f {
+        case .preset(let p): m.applyPreset(p)
+        case .backToPreset: m.backToBase()
+        case .door("customize"): pages.append(.customize); focus = .pageBack
+        case .door("cloud"): pages.append(.cloud); focus = .pageBack
+        case .tile(let env), .row(let env):
+            guard let s = m.gateRow(env), m.editable(s) else { return }
+            if s.kind == "choice", (s.options?.count ?? 0) >= 3 { pages.append(.options(env)); focus = .option(env, m.shown(s)) }
+            else if s.kind != "range" { m.advance(s, by: 1) }
+        case .option(let env, let v):
+            guard let s = m.gateRow(env), m.canPick(s, v), !m.fixed.contains(env) else { return }
+            m.pick(s, v); pages.removeLast(); focus = pages.isEmpty ? .tile(env) : .row(env)
+        case .action("gate"): m.skipAtStart.toggle()
+        case .action("cloud.choose"): act(.chooseCloudFolder)
+        case .action("cloud.off"): act(.confirmCloudOff)
+        case .pageBack: _ = key(.escape)
+        case .reset: if m.changed { act(.confirmReset) }
+        case .acknowledgements: act(.acknowledgements)
+        default: break
+        }
+    }
+    // The panel's lines as the keyboard moves over them, page by page (the iPhone's map without the hero: Play is the window's default button)
+    private var macFocusMap: LauncherFocusMap {
+        var lines: [[LauncherFocus]] = []
+        switch pages.last ?? .main {
+        case .main:
+            if m.hasPresets {
+                lines.append(m.offeredPresets.map { LauncherFocus.preset($0) })
+                if m.activePreset == nil { lines.append([.backToPreset]) }
+            }
+            if !m.gateFirstTiles.isEmpty { lines.append(m.gateFirstTiles.map { LauncherFocus.tile($0) }) }
+            lines.append([.door("customize"), .door("cloud")])
+            for row in [m.gateSecondTiles, m.gateModTiles] where !row.isEmpty { lines.append(row.map { LauncherFocus.tile($0) }) }
+        case .customize:
+            lines.append([.pageBack])
+            for g in m.gateCustomizeGroups { lines += g.rows.map { [LauncherFocus.row($0.env)] } }
+            lines.append([.action("gate")])
+            if MacNoticesWindow.url != nil { lines.append([.acknowledgements]) }
+            lines.append([.reset])
+        case .cloud:
+            lines += [[.pageBack], [.action("cloud.choose")]]
+            if cloudStatus != .off { lines.append([.action("cloud.off")]) }
+        case .touch:
+            lines.append([.pageBack]); lines += m.gateTouchRows.map { [LauncherFocus.row($0.env)] }
+        case .options(let env):
+            lines.append([.pageBack]); lines += (m.gateRow(env)?.options ?? []).map { [LauncherFocus.option(env, $0[0])] }
+        }
+        return LauncherFocusMap(lines: lines)
     }
 
     // The banner: the key art (or the blurred icon with the icon on it), faded into the window at the bottom, the mark, the logo (else the name), the status line and the buttons
@@ -458,15 +528,22 @@ struct LauncherView: View {
         .frame(maxWidth: .infinity)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { bannerWidth = $0 }
         .overlay(alignment: .topTrailing) {
-            NX18Mark(height: 20)
-                .background { if extras.art != nil { NX18MarkShade(strong: reduceTransparency) } }   // over key art: the banner's top shade alone leaves it on a light grey (LauncherRow.swift)
-                .padding(.top, 12).padding(.trailing, 16).allowsHitTesting(false)
+            Button { cardOpen = true } label: {
+                NX18Mark(height: 20)
+                    .background { if extras.art != nil { NX18MarkShade(strong: reduceTransparency) } }   // over key art: the banner's top shade alone leaves it on a light grey (LauncherRow.swift)
+                    .padding(6).contentShape(Rectangle())
+            }
+            .buttonStyle(NX18PressStyle())
+            .help("Shows NX 18's version and Appearance")
+            .accessibilityLabel("NX 18").accessibilityHint("Shows the version and the Appearance choice")
+            .padding(.top, 6).padding(.trailing, 10)
         }
         .clipped()
     }
 
     /// Play, once the cloud's save is compared with this Mac's: a save that changed on both sides is the player's pick, not the newer file's (SaveCheck)
     private func start() {
+        setenv("DM_PLAY_AT", String(format: "%.6f", Date().timeIntervalSince1970), 1)   // Play: the start's timeline counts from here, the cloud-save check in it (dm/host/hle_lifecycle.c)
         check += 1; checking = true
         let mine = check
         DispatchQueue.global(qos: .userInitiated).async {
@@ -484,12 +561,16 @@ struct LauncherView: View {
     }
 
     private enum PillLabel { case full, short, icon }
+    private var heroGlass: Bool { extras.art != nil && !cardOpen }   // glass over the banner art only, and solid while the card is open (GW26)
     private func buttons(_ l: PillLabel) -> some View {
+        GlassEffectContainer(spacing: 4) { buttonRow(l) }
+    }
+    private func buttonRow(_ l: PillLabel) -> some View {
         HStack(spacing: 10) {
             Button { start() } label: {
                 Label("Play", systemImage: "play.fill").labelStyle(PlayLabel())
             }
-            .buttonStyle(NX18PillStyle(fill: NX18Palette.coral, text: NX18Palette.charcoal, font: NXFont.fixed(16, weight: .bold), height: 38))
+            .buttonStyle(NX18PillStyle(fill: NX18Palette.coral, text: NX18Palette.charcoal, font: NXFont.fixed(16, weight: .bold), height: 38, glassTint: Color(nx18: 0xF48875), art: heroGlass))
             .keyboardShortcut(.defaultAction)
             .disabled(checking)
             .accessibilityLabel("Play")
@@ -516,7 +597,7 @@ struct LauncherView: View {
             case .icon: Image(systemName: icon)
             }
         }
-        .buttonStyle(NX18PillStyle())
+        .buttonStyle(NX18PillStyle(glassTint: NX18Palette.charcoal.opacity(0.25), art: heroGlass))
         .help(l == .full ? help : "\(title): \(help.prefix(1).lowercased() + help.dropFirst())")
         .accessibilityLabel(title)
     }
@@ -525,6 +606,7 @@ struct LauncherView: View {
         let s = status
         return HStack(spacing: 0) {
             Text("Version \(info("CFBundleShortVersionString") ?? "1.0")")
+            if let n = nx18Line { Text(verbatim: "  ·  ").accessibilityHidden(true); Text(verbatim: n) }
             if !s.parts().isEmpty {
                 Text(verbatim: "  ·  ").accessibilityHidden(true)
                 LauncherStatusLine(status: s, color: NX18Palette.onArt)
@@ -535,34 +617,7 @@ struct LauncherView: View {
         .lineLimit(1)
     }
 
-    // The basic rows' sections, or those under Advanced. Each section is keyed by its part as well as its title: both parts can have a section of the same name (Game), and the
-    // grouped Form mixed up the two parts' rows and boxes when two of its sections shared an identity
-    @ViewBuilder private func settingSections(basic: Bool) -> some View {
-        ForEach(m.groups(basic: basic).map { (key: (basic ? "basic/" : "advanced/") + $0.section, group: $0) }, id: \.key) { item in
-            let g = item.group
-            Section {
-                ForEach(g.rows) { SettingRow(s: $0, m: m) }
-            } header: {
-                NX18SectionHeader(g.section)
-            }
-            .listRowBackground(NX18Palette.row)
-            .listRowSeparatorTint(NX18Palette.separator)
-        }
-    }
 
-    private var resetSection: some View {
-        Section {
-            Button { m.reset() } label: {
-                Text("Reset to tested defaults").foregroundStyle(m.changed ? NX18Palette.coral : NX18Palette.muted)
-                    .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(!m.changed)
-        } footer: {
-            Text("Brings back all settings this game was tested with.").nxFontIfCustom(.footnote).foregroundStyle(NX18Palette.muted)
-        }
-        .listRowBackground(NX18Palette.row)
-    }
 
     // The guide in the game language the window shows (Game language, else the app's DMLanguage), in the guide window (MacGuideWindow), not a browser: one opening the pages from
     // file: URLs refuses their scripts' reads of the guide's other files and has no window.nx
@@ -791,13 +846,15 @@ struct NX18PillStyle: ButtonStyle {
     var text: Color = .white
     var font: Font = NXFont.fixed(13, weight: .semibold)
     var height: CGFloat = 30
+    var glassTint: Color? = nil   // the banner's hero pills over key art: faint glass where allowed (gate-ui §11, NX18Glass.swift), else this fill
+    var art = false
     @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(font).foregroundStyle(text).lineLimit(1)
             .padding(.horizontal, height * 0.55)
             .frame(height: height)
-            .background(Capsule().fill(fill))
+            .nx18Surface(Capsule(), fill: fill, hairline: .clear, tint: glassTint, art: art && glassTint != nil)
             .overlay(Capsule().fill(Color.black.opacity(configuration.isPressed ? 0.18 : 0)))
             .contentShape(Capsule())
             .opacity(enabled ? 1 : 0.5)
@@ -893,46 +950,31 @@ struct AboutGameSheet: View {
 
 /// Cloud saves: a folder the save is synced through (dm/host/save_sync.h), the one the iPhone or iPad app picks in its launcher's Cloud saves section. It is kept in this app's
 /// preferences as cloudSaves.folder, which launcher.c puts into DM_SAVE_SYNC before the host starts; a DM_SAVE_SYNC an env file or the launch environment set wins, and is shown here.
-struct CloudSavesSection: View {
-    @AppStorage("cloudSaves.folder") private var folder = ""
+// The Gate panel's Cloud saves page reads the chosen folder's name from here (LauncherPanel.swift)
+@MainActor enum MacCloud {
+    static var folderName: String? {
+        let f = CloudSavesSection.fixed ?? UserDefaults.standard.string(forKey: "cloudSaves.folder") ?? ""
+        return f.isEmpty ? nil : (f as NSString).lastPathComponent
+    }
+}
+
+enum CloudSavesSection {   // the folder's helpers; the page itself is the Gate panel's Cloud saves (LauncherPanel.swift)
     // DM_SAVE_SYNC as an env file or the launch environment set it; nil when neither did
     static let fixed: String? = {
         let env = ProcessInfo.processInfo.environment
         let keys = ((env["DM_ENV_FILE_KEYS"] ?? "") + " " + (env["DM_ENV_LAUNCH_KEYS"] ?? "")).split(separator: " ")
         return keys.contains("DM_SAVE_SYNC") || env["DM_SAVE_SYNC"] != nil ? env["DM_SAVE_SYNC"] : nil
     }()
-    private var fixed: String? { Self.fixed }
 
-    var body: some View {
-        Section {
-            LabeledContent("Cloud saves") {
-                Text(fixed.map { "\(Self.shown($0)) (env.txt)" } ?? (folder.isEmpty ? "Off" : Self.shown(folder)))
-                    .foregroundStyle(NX18Palette.muted).lineLimit(1).truncationMode(.head)
-            }
-            if fixed == nil {
-                HStack {
-                    Button(folder.isEmpty ? "Choose a folder…" : "Choose a different folder…", action: choose).nxPushButton()
-                    if !folder.isEmpty { Button("Turn off") { folder = "" }.nxPushButton() }
-                }
-            }
-        } header: {
-            NX18SectionHeader("Cloud saves")
-        } footer: {
-            Text("Choose the iCloud Drive folder the iPhone or iPad app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups.")
-                .nxFontIfCustom(.footnote)
-                .foregroundStyle(NX18Palette.muted)
-        }
-        .listRowBackground(NX18Palette.row)
-        .listRowSeparatorTint(NX18Palette.separator)
-    }
 
-    private func choose() {
+    // The folder panel; the chosen path, or nil when cancelled
+    @MainActor static func choose(from folder: String) -> String? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false; panel.canCreateDirectories = true
         panel.prompt = "Use for Cloud Saves"
         panel.message = "The folder the iPhone or iPad app chose in its launcher's Cloud saves"
         panel.directoryURL = URL(fileURLWithPath: folder.isEmpty ? Self.drive : folder)
-        if panel.runModal() == .OK, let url = panel.url { folder = url.path }
+        return panel.runModal() == .OK ? panel.url?.path : nil
     }
 
     static let drive = NSHomeDirectory() + "/Library/Mobile Documents/com~apple~CloudDocs"   // iCloud Drive, as the Finder shows it
@@ -963,18 +1005,18 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
         let extras = LauncherExtras.load()
         // the banner runs under a transparent title bar (the traffic lights over the art); a dark window whatever the system's appearance, as the iPhone's screen is
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 700), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 760), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         w.title = name; w.isReleasedWhenClosed = false; w.delegate = self
         w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden
-        w.appearance = NSAppearance(named: .darkAqua)
-        w.backgroundColor = NSColor(NX18Palette.background(tint: extras.tint))
+        w.appearance = NX18Appearance.current.appearance   // Match device follows System Settings; the banner stays dark (§11a.9)
+        w.backgroundColor = NSColor(NX18PageColor.page(tint: extras.tint))   // dynamic: it follows the window's appearance
         w.contentMinSize = NSSize(width: 520, height: 0)
         window = w
         if let screen = w.screen ?? NSScreen.main {
             w.setFrameTopLeftPoint(NSPoint(x: screen.visibleFrame.midX - w.frame.width / 2, y: screen.visibleFrame.maxY))
         }
         let host = NSHostingView(rootView: LauncherView(m: model, done: { [weak self] in self?.finish($0) }, fit: { [weak self] in self?.fit($0) }, extras: extras))
-        host.sizingOptions = []   // the Form's measured scroll content owns the height, including after collapse
+        host.sizingOptions = []   // the window keeps its size; the panel scrolls inside it
         w.contentView = host
         host.layoutSubtreeIfNeeded()
         fputs("launcher: art \(extras.art == nil ? "none (the icon)" : "dm/art.jpg"), logo \(extras.logo == nil ? "no" : "yes"), guide \(extras.hasGuide ? "yes" : "no"), manual \(extras.manual == nil ? "no" : "yes"), about \(extras.about == nil ? "no" : "yes")\n", stderr)
@@ -989,20 +1031,20 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
     func windowWillClose(_ n: Notification) { finish(false) }
 
-    func fit(_ extraHeight: CGFloat) {
+    @MainActor func fit(_ extraHeight: CGFloat) {
         guard let w = window, let screen = w.screen else { return }
         let frame = LauncherWindowLayout.fitted(w.frame, extraHeight: extraHeight, visible: screen.visibleFrame)
         if abs(frame.height - w.frame.height) > 0.5 { w.setFrame(frame, display: true) }
     }
 
-    func finish(_ play: Bool) {
+    @MainActor func finish(_ play: Bool) {
         guard let w = window else { return }
         window = nil; self.play = play
         // The main thread blocks in launcher.c's waitpid once run() returns, so the window must leave the screen now: no fade-out (it runs on later run-loop passes),
         // and dmMacLauncher flushes the order-out (AppKit commits it at the end of a pass). Without both, the window stayed on screen, not responding, until the game ended
         w.animationBehavior = .none
         if let sheet = w.attachedSheet { w.endSheet(sheet) }   // About this game, if open
-        MainActor.assumeIsolated { MacGuideWindow.current?.close(); MacNoticesWindow.current?.close() }   // the guide and Acknowledgements windows, if open (finish runs on the main thread: the window's buttons and its delegate)
+        MacGuideWindow.current?.close(); MacNoticesWindow.current?.close()   // the guide and Acknowledgements windows, if open (finish is main-actor: the window's buttons and its delegate call it)
         w.delegate = nil; w.orderOut(nil)
         NSApp.stop(nil)
         NSApp.postEvent(NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0)!, atStart: true)   // run returns at the next event
@@ -1031,6 +1073,25 @@ public func dmMacMetal4Missing(_ assumeMissing: Int32) -> UnsafeMutablePointer<C
 @_cdecl("dm_mac_forget_retired")
 public func dmMacForgetRetired() { LauncherModel.forgetRetired(.standard) }
 
+// A start without the window (DM_LAUNCHER=0, --no-launcher, "Show this window at launch" off) with frame generation on (DM_FRAMEGEN=1), or for a game whose list has a preset's
+// switches no row sets (preset_env: Bananza's Battery Saver DM_FPS_CTL=hold30); without either nothing is built or probed here: the preset the saved choices make goes into the environment as DM_PRESET, as Play's apply() puts it there
+// (LauncherModel.exportPreset; the host's frame generation steps aside in Battery Saver). launcher.c calls it after it applies the saved choices, on the main thread, before the host
+// starts. An env file's or the launch's DM_PRESET stays; nothing without a launcher list or presets, and then this Mac's screens and controllers are not asked
+@_cdecl("dm_mac_preset_env")
+public func dmMacPresetEnv() {
+    MainActor.assumeIsolated {
+        guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/launcher.json"), let data = try? Data(contentsOf: url),
+              let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { return }
+        let switches = !(file.presetEnv ?? [:]).isEmpty   // a preset's switches no row sets (Bananza's Battery Saver hold): exported whatever frame generation does
+        guard LauncherModel.framegenOn || switches else { return }
+        let model = LauncherModel(file.settings)
+        guard model.hasPresets, getenv("DM_PRESET") == nil || switches else { return }   // neither needs the device facts: no preset rows, or an env file's or the launch's value stays
+        model.takeList(file)   // the drawn presets and the stored base preset
+        model.follow(macDeviceFacts, on: [])   // the rules that decide which preset the values are (a greyed option), on this Mac
+        model.exportPreset()
+    }
+}
+
 // 1: Play (the window's settings are in the environment), 0: the player quit, 2: no window (no launcher.json, or "Show this window at launch" off): launcher.c applies the saved choices
 @_cdecl("dm_mac_launcher")
 public func dmMacLauncher() -> Int32 {
@@ -1042,7 +1103,7 @@ public func dmMacLauncher() -> Int32 {
             return SaveCheck.withoutWindow() ? 2 : 0
         }
         let model = LauncherModel(file.settings)
-        model.console = file.console
+        model.takeList(file)   // the console, the drawn presets and the stored base preset
         model.follow(macDeviceFacts, on: [.GCControllerDidConnect, .GCControllerDidDisconnect, NSApplication.didChangeScreenParametersNotification])
         let app = NSApplication.shared, launcher = Launcher(model)
         app.setActivationPolicy(.regular)
@@ -1054,5 +1115,44 @@ public func dmMacLauncher() -> Int32 {
         guard launcher.play else { fputs("launcher: quit without starting the game\n", stderr); return 0 }
         model.apply()
         return 1
+    }
+}
+
+// The NX 18 card's Profile on the Mac (gate-ui §20.3, §20.5): ~/Library/Application Support/nxnative/Profile, shared by every NX 18 Mac app, which launcher.c hands the games
+// (DM_NICK, DM_PROFILE_IMAGE). The name in a small field; the picture from an image file, its centre square at 256 x 256; the NX 18 folder's path in nxnative/nx18-folder. This
+// game's saves stay on the Cloud saves page (no shared mode on the Mac yet)
+@MainActor enum MacProfileFlow {
+    static var rows: NX18CardProfile {
+        NX18CardProfile(choosePicture: choosePicture, editName: editName, toggle: { NX18Profile.shared.enabled.toggle() }, chooseFolder: chooseFolder)
+    }
+    static func editName() {
+        let a = NSAlert(); a.messageText = "Name"; a.informativeText = NX18ProfileName.refusal
+        let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+        f.stringValue = NX18Profile.shared.name == "Player" ? "" : NX18Profile.shared.name; f.placeholderString = "Player"
+        a.accessoryView = f; a.addButton(withTitle: "Done"); a.addButton(withTitle: "Cancel")
+        a.window.initialFirstResponder = f
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        if !NX18Profile.shared.setName(f.stringValue) { NSSound.beep() }
+    }
+    static func choosePicture() {
+        let p = NSOpenPanel(); p.allowedContentTypes = [.image]; p.allowsMultipleSelection = false; p.prompt = "Use picture"; p.message = "Choose a picture"
+        guard p.runModal() == .OK, let url = p.url, let img = NX18ProfilePicture.thumbnail(of: url) else { return }
+        let side = min(img.width, img.height)
+        guard let square = img.cropping(to: CGRect(x: (img.width - side) / 2, y: (img.height - side) / 2, width: side, height: side)),
+              let jpeg = NX18ProfilePicture.jpeg(from: square) else { NSSound.beep(); return }
+        NX18Profile.shared.setPicture(jpeg: jpeg)
+    }
+    static func chooseFolder() {
+        let p = NSOpenPanel(); p.canChooseDirectories = true; p.canChooseFiles = false; p.canCreateDirectories = true; p.prompt = "Choose"
+        p.message = "Choose or create a folder named NX 18 in iCloud Drive."
+        guard p.runModal() == .OK, let url = p.url else { return }
+        let f = NX18Profile.localRoot().deletingLastPathComponent().appendingPathComponent("nx18-folder")
+        try? FileManager.default.createDirectory(at: f.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard (try? (url.path + "\n").write(to: f, atomically: true, encoding: .utf8)) != nil else { NSSound.beep(); return }
+        fputs("launcher: NX 18 folder chosen\n", stderr)   // never its path
+        let local = NX18Profile.shared.local
+        // the folder's Profile when it has a newer one, else this Mac's goes there
+        if !NX18ProfileSync.pull(local: local, folder: url) { NX18ProfileSync.push(local: local, folder: url) }
+        NX18Profile.shared.reload(); NX18Profile.shared.refreshFolderState()
     }
 }

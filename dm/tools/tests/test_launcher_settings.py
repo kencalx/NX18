@@ -11,11 +11,12 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('launcher_settings', ROOT / 'dm/games/settings.py')
+assert spec and spec.loader, 'dm/games/settings.py: no module spec'
 settings = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(settings)
 
 BOTW, WONDER, DQ11S = '01007EF00011E000', '010015100B514000', '01006C300E9F0000'
-PERFORMANCE_NVN = ['DM_PRESENT_SNAP', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD', 'DM_FPS_HOLD', 'DM_METAL_HUD']
+TROUBLE_NVN = ['DM_PRESENT_SNAP', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD', 'DM_FPS_HOLD', 'DM_METAL_HUD']   # Troubleshooting (presets-first P6): drawn only while one differs
 FRAME_STEP = ('FPS_STATE_OFF',)   # main's rewriter table of a build with a frame step state page (patch_nso.py): Hold frames when late reads it
 
 
@@ -97,19 +98,26 @@ class LauncherSettingsTests(unittest.TestCase):
                 self.assertEqual('DM_PRESENT_SNAP' in rows, api == 'nvn')
                 if api == 'nvn':
                     s = rows['DM_PRESENT_SNAP']
-                    self.assertEqual((s['kind'], s['section'], s['default']), ('toggle', 'Performance', '1'))   # Breath of the Wild's profile: present_snap on
+                    self.assertEqual((s['kind'], s['section'], s['default']), ('toggle', 'Troubleshooting', '1'))   # Breath of the Wild's profile: present_snap on
                     self.assertIn('latency', s['note'])
 
     def test_sections_keep_the_profile_defaults(self):
         botw, wonder = build(BOTW, 'nvn', fixups=FRAME_STEP), build(WONDER, 'nvn')
-        self.assertEqual([e for e, s in botw.items() if s['section'] == 'Performance'], PERFORMANCE_NVN)
+        self.assertEqual([e for e, s in botw.items() if s['section'] == 'Troubleshooting'], TROUBLE_NVN)
+        self.assertEqual(botw['DM_LOW_POWER_CAP']['section'], 'Game', 'Low Power Mode at 30 fps is a choice (Other choices), not troubleshooting')
         self.assertNotIn('DM_PSO_MTL4', botw)   # retired: every pipeline is built through MTL4Compiler, nothing to choose
         self.assertNotIn('needs', botw['DM_PSO_PREBUILD'])   # the prebuild is always there to turn off
         self.assertEqual(wonder['DM_PRESENT_SNAP']['default'], '0')
         self.assertEqual((botw['DM_PSO_PREBUILD']['default'], botw['DM_NVN_ENC_THREAD']['default'], botw['DM_METAL_HUD']['default']), ('1', '1', '0'))   # the host's iOS defaults
-        self.assertEqual(list(dict.fromkeys(s['section'] for s in botw.values())), ['Game', 'Controls', 'Performance'])
+        self.assertEqual(list(dict.fromkeys(s['section'] for s in botw.values())), ['Game', 'Controls', 'Troubleshooting'])
         self.assertNotIn('DM_FPS_HOLD', wonder)   # no frame step, as the Frame rate row
         self.assertIn('first start', botw['DM_PSO_PREBUILD']['note'])   # it runs once in the prepare step, before the first frame
+        self.assertIn('deferred-encoding error', botw['DM_NVN_ENC_THREAD']['note'])   # off only for a FATAL deferred encoding stop (docs/settings.md, Encode thread)
+        self.assertIn('GPU time', botw['DM_METAL_HUD']['note'])   # what Apple's overlay shows, as docs/settings.md's Performance HUD says
+        # On the Mac the row is off by default (the profile's enc_thread off), so the iPhone's "Leave on" note would push a Mac player against the tested default: a
+        # device:mac hint replaces it there, and only for games whose profile leaves it off (Need for Speed: Hot Pursuit Remastered's enc_thread on keeps the plain note on the Mac too)
+        self.assertEqual(botw['DM_NVN_ENC_THREAD']['hint'], [{'when': ['device:mac'], 'why': 'Off on the Mac by default: steadier slowest frames'}])
+        self.assertNotIn('hint', build('010029B0118E8000', 'nvn', 'mac')['DM_NVN_ENC_THREAD'])
 
     def test_hold_frames_takes_on_and_off(self):   # the host reads DM_FPS_HOLD as on / off (hle_nvn.c), not 1 / 0
         s = build(BOTW, 'nvn', fixups=FRAME_STEP)['DM_FPS_HOLD']
@@ -120,7 +128,7 @@ class LauncherSettingsTests(unittest.TestCase):
     def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter and touch feedback are the iOS front end's (front_ios.m, DmGamepad.m)
         ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
-        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_TOUCH_SIZE', 'DM_TOUCH_OPACITY', 'DM_PICTURE_FIT'})
+        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_TOUCH_SIZE', 'DM_TOUCH_OPACITY', 'DM_PICTURE_FIT', 'DM_LOW_POWER_CAP'})   # Low Power Mode at 30 fps: the Mac reports no Low Power Mode
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
         self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only)
         s = mac['DM_FULLSCREEN']
@@ -178,7 +186,9 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual((mac['inactive'], mac.get('hint')), ([nofx], None))
         for r in s['inactive'][1:]:   # each rule's window bounds against fx_why's 1 % around the picture's shape: greyed outside, MetalFX inside
             shape = {'DM_SCREEN_ASPECT=1.43': 1.43}.get(r['when'][2], 16 / 9)
-            op, bound = re.fullmatch(r'window(<|>=)([\d.]+)', r['when'][-1]).groups()
+            w = re.fullmatch(r'window(<|>=)([\d.]+)', r['when'][-1])
+            assert w, f'{r["when"]}: last condition is not a window bound'
+            op, bound = w.groups()
             if r['when'][2] == 'DM_SCREEN_ASPECT=auto' and op == '<': self.assertEqual(bound, '1.3'); continue   # below Match screen's 1.3 the picture is 16:9 (front_ios.m)
             off = abs(float(bound) / shape - 1)
             self.assertTrue(0.0099 <= off <= 0.0101, f'{r["when"]}: {off:.4f} off {shape:.3f}')
@@ -306,6 +316,19 @@ class LauncherSettingsTests(unittest.TestCase):
         mac = rows(['fps', 'ultrawide'], 'mac')
         self.assertIn('DM_MOD_FPS', mac); self.assertNotIn('DM_MOD_ULTRAWIDE', mac, 'Ultrawide stretches the picture, which only the iPhone and iPad front end does')
 
+    def test_ultrawide_for_the_games_own_camera(self):   # Breath of the Wild 1.9.0 / Tears of the Kingdom 1.4.3: the camera stubs declare CAMERA_ASPECT (patch_nso.py), no mod needed
+        rows = build(BOTW, 'nvn', fixups=FRAME_STEP + ('CAMERA_ASPECT',))
+        self.assertIn('DM_MOD_ULTRAWIDE', rows, 'the same Ultrawide row, no new one')
+        self.assertEqual(rows['DM_MOD_ULTRAWIDE']['label'], 'Ultrawide')
+        self.assertEqual(rows['DM_PICTURE_FIT']['inactive'], [{'when': ['DM_MOD_ULTRAWIDE=1', 'screen>=1.85'], 'why': 'Ultrawide always stretches the picture'}])
+        self.assertNotIn('DM_MOD_ULTRAWIDE', build(BOTW, 'nvn', fixups=FRAME_STEP), 'a build without the camera stubs and no mod: no row')
+        self.assertNotIn('DM_MOD_ULTRAWIDE', build(BOTW, 'nvn', 'mac', fixups=FRAME_STEP + ('CAMERA_ASPECT',)), 'the iPhone and iPad front end only')
+
+    def test_any_of_several_shown_terms(self):   # / in the shown column: any of them; a term without a kind takes the one before it
+        text = row('DM_A', shown='mods:ultrawide/fixups:K') + row('DM_B', shown='fixups:L/K') + row('DM_C', shown='fixups:L/M') + row('DM_D', shown='!fixups:L/K')
+        got = build_table(text, fixups=('K',))
+        self.assertTrue({'DM_A', 'DM_B'} <= set(got)); self.assertFalse({'DM_C', 'DM_D'} & set(got), '! negates the whole any')
+
     def test_frame_rate_as_the_present_interval(self):   # present_interval_choice: Persona 5 Royal's 30 / 60 (DM_PRESENT_INTERVAL game / display)
         p5r = build('01005CA01580E000', 'nvn')['DM_PRESENT_INTERVAL']
         self.assertEqual((p5r['label'], p5r['default'], p5r['options']), ('Frame rate', 'game', [['game', '30 fps'], ['display', '60 fps']]))
@@ -379,7 +402,9 @@ class LauncherSettingsTests(unittest.TestCase):
             listed = settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
         rows = {s['env']: s for s in listed['settings']}
         self.assertEqual(listed['schema'], 1)
-        self.assertEqual([e for e, s in rows.items() if s.get('level') == 'basic'], ['DM_FPS_TARGET', 'DM_RENDER_SCALE', 'DM_OPMODE', 'DM_LANG', 'DM_RUMBLE'])
+        self.assertEqual([e for e, s in rows.items() if s.get('level') == 'basic'], ['DM_OPMODE', 'DM_LANG', 'DM_PICTURE_FIT', 'DM_SHOW_FPS', 'DM_TOUCH_SIZE', 'DM_TOUCH_OPACITY', 'DM_TOUCH_HAPTICS', 'DM_RUMBLE'])   # the quick tiles (presets-first §5)
+        self.assertFalse([e for e, s in rows.items() if s.get('level') == 'basic' and 'preset' in s], 'no preset moves a quick tile')
+        self.assertEqual((listed['presets'], listed['moves']['battery'][:2]), (['battery', 'balanced', 'quality'], ['DM_FPS_TARGET', 'DM_RENDER_SCALE']))
         self.assertEqual(rows['DM_RUMBLE_GAIN']['needs'], 'DM_RUMBLE=1')
         self.assertFalse({'level', 'needs'} & set(rows['DM_METAL_HUD']), 'a row without meta has no optional fields')
 
@@ -398,18 +423,30 @@ class LauncherSettingsTests(unittest.TestCase):
         """preset: Battery and Quality's value per row (Balanced is the defaults), def resolved to the game's default, written for every preset"""
         rows = build(BOTW, 'nvn', fixups=('RENDER_SCALE',), mods=('fps',))
         fps, scale, up, aa, sharpen = (rows[v]['preset'] for v in ('DM_FPS_TARGET', 'DM_RENDER_SCALE', 'DM_PRESENT_UPSCALE', 'DM_POST_AA', 'DM_PRESENT_SHARPEN'))
-        self.assertEqual(fps, {'battery': '30', 'quality': rows['DM_FPS_TARGET']['default']})   # Quality keeps the tested frame rate
-        self.assertEqual((scale, up, aa), ({'battery': '0.75', 'quality': '1.0'}, {'battery': 'off', 'quality': 'metalfx'}, {'battery': 'off', 'quality': 'edge'}))
-        self.assertEqual(sharpen, {'battery': '0', 'quality': rows['DM_PRESENT_SHARPEN']['default']})
-        self.assertEqual(rows['DM_MOD_FPS']['preset'], {'battery': '0', 'quality': '0'})
+        self.assertEqual(fps, {'battery': '30', 'quality': rows['DM_FPS_TARGET']['default'], 'performance': rows['DM_FPS_TARGET']['default']})   # 120 where not offered: the default   # Quality keeps the tested frame rate
+        self.assertEqual((scale, up, aa), ({'battery': '0.75', 'quality': '1.0', 'performance': '1.0'}, {'battery': 'off', 'quality': 'metalfx', 'performance': 'off'}, {'battery': 'off', 'quality': 'edge', 'performance': 'off'}))
+        self.assertEqual(sharpen, {'battery': '0', 'quality': rows['DM_PRESENT_SHARPEN']['default'], 'performance': rows['DM_PRESENT_SHARPEN']['default']})
+        self.assertNotIn('preset', rows['DM_MOD_FPS'], 'the High frame rate mod is a quick tile (P2)')
+        lp = rows['DM_LOW_POWER_CAP']   # Low Power Mode at 30 fps: off by default; automatic (greyed, shown on) at 30 fps, which the Battery preset sets
+        self.assertEqual(lp['default'], '0')
+        self.assertNotIn('preset', lp)
+        self.assertIn('DM_FPS_TARGET=30', str(lp.get('inactive')))
+        self.assertIn('1', str(lp.get('shows')))
         for v in ('DM_OPMODE', 'DM_LANG', 'DM_RUMBLE', 'DM_PRESENT_SNAP', 'DM_PSO_MTL4', 'DM_METAL_HUD'):
             self.assertNotIn('preset', rows.get(v, {}), f'{v}: no preset touches it')
         dr = build('010056B015FE8000', 'nvn', fixups=('DYNAMIC_RESOLUTION',))['DM_DYNAMIC_RESOLUTION']['preset']   # NieR:Automata's dynamic resolution
-        self.assertEqual(dr, {'battery': '1', 'quality': '0'})
+        self.assertEqual(dr, {'battery': '1', 'quality': '0', 'performance': '1'})
+        oot = build('0400486024DEC000', 'nvn', fixups=('DYNAMIC_RESOLUTION',))['DM_DYNAMIC_RESOLUTION']   # the profile's preset row: off in Performance only; on in Balanced (the default) and Battery Saver
+        self.assertEqual((oot['default'], oot['preset']), ('1', {'battery': '1', 'quality': '0', 'performance': '0'}))
+        hades = build('0100A00019DE0000', 'nvn', fixups=('RENDER_SCALE',))['DM_RENDER_SCALE']['preset']   # Hades II: its HUD scales with it
+        self.assertEqual((hades['battery'], hades['performance']), ('1.0', '1.0'))
+        with self.assertRaises(SystemExit) as e:
+            build_table(row('DM_X', meta='level=basic;preset=battery:1'))
+        self.assertIn('quick tile', str(e.exception))
         t = build_table(row('DM_A', 'choice', '1=One,2=Two?platform:mac', '1', 'preset=quality:2') + row('DM_B', 'toggle', 'on/off', '1', 'preset=battery:off')
                         + row('DM_C', 'range', '0.5:1:0.05', '1', 'preset=battery:0.5'))
-        self.assertEqual(t['DM_A']['preset'], {'battery': '1', 'quality': '1'}, 'an option this game does not offer, and a preset not named: the default')
-        self.assertEqual((t['DM_B']['preset'], t['DM_C']['preset']), ({'battery': 'off', 'quality': 'on'}, {'battery': '0.5', 'quality': '1'}))
+        self.assertEqual(t['DM_A']['preset'], {'battery': '1', 'quality': '1', 'performance': '1'}, 'an option this game does not offer, and a preset not named: the default')
+        self.assertEqual((t['DM_B']['preset'], t['DM_C']['preset']), ({'battery': 'off', 'quality': 'on', 'performance': 'on'}, {'battery': '0.5', 'quality': '1', 'performance': '1'}))
         for bad, why in [(row('DM_X', meta='preset=eco:1'), 'unknown preset'), (row('DM_X', meta='preset=battery:1,battery:0'), 'twice'),
                          (row('DM_X', meta='preset=battery:2'), 'never takes'), (row('DM_X', 'range', '0.5:1:0.05', '1', 'preset=battery:0.25'), 'never takes'),
                          (row('DM_X', 'range', '0.5:1:0.05', '1', 'preset=battery:low'), 'not a number'), (row('DM_X', 'choice', 'languages', 'en-US', 'preset=battery:ja'), 'only def')]:
@@ -461,6 +498,23 @@ class LauncherSettingsTests(unittest.TestCase):
         row = {'env': 'DM_X', 'kind': 'toggle', 'section': 'Picture', 'label': 'X', 'note': '', 'default': '1', 'on': '1', 'off': '0'}
         self.assertEqual(conforms({'schema': 1, 'game': BOTW, 'settings': [row]}, schema, schema), [])
         self.assertNotEqual(conforms({'schema': 1, 'game': BOTW, 'settings': [{**row, 'kind': 'slider'}]}, schema, schema), [])
+
+    def test_a_preset_switch_no_row_sets_draws_its_chip(self):   # Donkey Kong Bananza: Battery Saver holds its own controller at 30 (DM_FPS_CTL=hold30, hle_fctl.c), no row
+        schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
+        def listed(gid):
+            with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn'}):
+                os.environ.pop('SETTINGS_PLATFORM', None)
+                return settings.build(gid, tmp, Path(tmp) / 'control.nacp')
+        bz = listed('040074A01BF12000')
+        self.assertIn('battery', bz['presets'])
+        self.assertEqual(bz['preset_env'], {'battery': {'DM_FPS_CTL': 'hold30'}, 'quality': {'DM_NVN_PASS_ALT': '0', 'DM_NVN_CUBE_ALT': '0', 'DM_NVN_UP_BILINEAR': '0', 'DM_DRS_GPU_SCALE': '0'}})   # Battery Saver holds 30; Quality draws the visibility view and the environment cube every frame (no stale-depth keep) and its upscaler by MetalFX (no bilinear stretch)
+        for sw in ('DM_NVN_UP_BILINEAR', 'DM_NVN_CUBE_ALT'): self.assertNotIn(sw, {r['env'] for r in bz['settings']})   # no new row: the profile key turns it on, the Quality preset off
+        self.assertEqual([e for e in bz['moves']['battery'] if not any(r['env'] == e for r in bz['settings'])], ['DM_FPS_CTL'])   # it moves only that switch beside the rows
+        self.assertNotIn('DM_FPS_CTL', {r['env'] for r in bz['settings']})   # no new row
+        self.assertNotIn('DM_FPS_CTL', bz['moves'].get('quality', []))
+        self.assertEqual(conforms(bz, schema, schema), [])
+        self.assertNotIn('preset_env', listed(WONDER))   # a game without it: the list as before
+        self.assertNotIn('preset_env', listed(BOTW))   # Breath of the Wild: GPU headroom off (2026-11-23), so no Quality line either
 
     def test_render_base_goes_into_the_render_scale_row(self):
         schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))

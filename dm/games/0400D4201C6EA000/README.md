@@ -25,7 +25,7 @@ The NRO and the archive need no key: the NSP script captures one and `shader_spl
 
 35,045 in [`shader_map.tsv`](shader_map.tsv): 26,096 from models (one FSHA each), 5,331 from `ssg_system`, 3,316 from effects, 138 from `shader/`, 124 from layouts, 40 in the NRO's data. All translate. A full build takes about an hour on an M4 Pro with another job running (not timed from an empty cache in one go). [`pso_manifest.tsv`](pso_manifest.tsv) (1,351 lines) is one Mac session: boot, the movie, the menus, a match.
 
-One does not load (current): `3032440e5027bbe5`, `shader/audience/audience_compute`, reads `array<texture2d<float>, 32> cp_t2d_cb0_0`, the compute texture handles of NVN2's per-shader `c[0]` indexed by its workgroup ID. `dmsh_reflect.py` `c2_array` only knows c2; fixing it is a chain change. The dispatch is skipped, a red line says so, and the crowd still draws; what the shader adds has not been seen.
+One did not load before chain M4: `3032440e5027bbe5`, `shader/audience/audience_compute`, reads `array<texture2d<float>, 32> cp_t2d_cb0_0`, the compute texture handles of NVN2's per-shader `c[0]` indexed by its workgroup ID. `dmsh_reflect.py` `c2_array` only knows c2, so the dispatch was skipped with a red line (the crowd still drew). The translator now maps indexed compute texture handles into the driver's c2 tables (upstream `174f1e922`, which fixed the same case in Fast Fusion's volumetric fog), which should make this shader load; not checked on this game yet: after its rebuild, look for the red line.
 
 ## Rendering
 
@@ -49,10 +49,12 @@ The work folder `0400D4201C6EA000-work` beside the dump has `run/boot.sh <log> <
 
 ## Found on this game
 
+- [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): the `main` duplicate-selection mismatch is resolved, 2026-11-18, with the registered shader identities preserved.
 - [A game that decodes its code at run time](../../../docs/reference/services.md#a-game-that-decodes-its-code-at-run-time) and [NRR version 1](../../../docs/reference/services.md#nrr-version-1).
 - [One scrambled archive indexed by the NRO](../../../docs/reference/shaders.md#one-scrambled-archive-indexed-by-the-nro).
-- [A shared font larger than the game's font engine memory](../../../docs/reference/services.md#a-shared-font-larger-than-the-games-font-engine-memory): a null pointer in `nn::font` at boot.
+- [Shared font stand-ins sized for the game's font engines](../../../docs/reference/services.md#shared-font-stand-ins-sized-for-the-games-font-engines): a null pointer in `nn::font` at boot (resolved: the host's fonts load in the game's own 50 KB engine).
 - [A thread's arguments in slots its starter reuses after connecting to a service](../../../docs/reference/threads.md#a-threads-arguments-in-slots-its-starter-reuses-after-connecting-to-a-service): a crash at boot about once in a dozen runs.
 - [The submission-ready event counted as packets](../../../docs/reference/movies.md#the-submission-ready-event-counted-as-packets): black movies, then corrupt frames.
 - [A passthrough geometry shader that writes the layer](../../../docs/reference/shaders.md#a-passthrough-geometry-shader-that-writes-the-layer): a blue wash over every 3D scene with atmosphere.
 - [Null vertex buffers bound past stream 15](../../../docs/reference/rendering.md#null-vertex-buffers-bound-past-stream-15).
+- [One libvpx setup for both decoder paths](../../../docs/reference/movies.md#one-libvpx-setup-for-both-decoder-paths): chopped sound in the opening movie, gone upstream with this setup (measured on a host without `nn::codec`'s decoder thread, as NX 18 still is); not run on NX 18; one or two short gaps near its start are open.

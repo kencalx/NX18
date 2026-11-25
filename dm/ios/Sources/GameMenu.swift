@@ -1,6 +1,6 @@
 // The in-game menu, opened by the gamepad's menu button at the top centre (DmGamepad.m): the controller layout, then the settings-screen settings the running game takes at once
 // (front_ios.m dm_setting_live), grouped as on the settings screen, one row each (the touch controls' three: one Touch controls row, touchControlsRow), then the Cheats submenu
-// (cheatsMenu), Settings screen at start (settingsAtStartRow) and Share log (dmShareLog). A pick is saved as Play saves it (LauncherModel.choose), so the settings screen shows it
+// (cheatsMenu), Gate at start (settingsAtStartRow) and Share log (dmShareLog). A pick is saved as Play saves it (LauncherModel.choose), so the settings screen shows it
 // at the next start; a setting an env file fixes is shown, not changed. Settings that need the next start (language, pipelines, the frame rate and so on), and the sliders, stay on
 // the settings screen, which the menu's title points to. A row that does nothing at the moment says why under its name (gameMenuRow): greyed when nothing the player picks there
 // can take effect, still selectable when only the current choice does nothing. The menu is built here once as GameMenuItem rows (gameMenuSections), each time it opens, and drawn
@@ -115,6 +115,98 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
     return sections
 }
 
+// The panel's first page in the Gate's language (gate-ui §19.2, presets-first §8): the preset chooser (the panel draws it from the launcher's model), the live quick tiles,
+// 3 per row (Picture, Console mode, Vitals, Game rumble, Touch controls, Controller layout: each only where the game takes it live and the list shows it), and the doors:
+// Customize (the live rows a preset sets, then the other live rows, then Back to the base while Custom), Cheats (only with a cheats folder) and More (Gate at start, Share log).
+// The same items as gameMenuSections (its rows, ids and actions), so a pick does what it does in the UIMenu; DM_GAME_MENU=system keeps that flat list
+struct GameMenuHome {
+    var tiles: [GameMenuItem] = []
+    var doors: [GameMenuItem] = []
+}
+let gameMenuTileOrder = ["DM_PICTURE_FIT", "DM_OPMODE", "DM_SHOW_FPS", "DM_RUMBLE", "touch", "layout"]
+
+@MainActor func gameMenuHome() -> GameMenuHome {
+    let flat = gameMenuSections().flatMap(\.items)
+    func item(_ key: String) -> GameMenuItem? {
+        switch key {
+        case "touch": return flat.first { $0.id == "touch" } ?? flat.first { touchControlEnvs.contains(String($0.id.dropFirst(4))) }
+        case "layout": return flat.first { $0.id == "layout" }
+        default: return flat.first { $0.id == "row:\(key)" }
+        }
+    }
+    var home = GameMenuHome()
+    home.tiles = gameMenuTileOrder.compactMap(item)
+    let onTiles = Set(home.tiles.map(\.id) + flat.filter { touchControlEnvs.contains(String($0.id.dropFirst(4))) }.map(\.id))
+    let rest = flat.filter { $0.id.hasPrefix("row:") && !onTiles.contains($0.id) }
+    var groups: [GameMenuSection] = []
+    if let m = gameMenuModel {
+        let preset = Set(m.presetRows.map { "row:\($0.env)" })
+        let a = rest.filter { preset.contains($0.id) }, b = rest.filter { !preset.contains($0.id) }
+        if !a.isEmpty { groups.append(GameMenuSection(id: "customize.preset", heading: "Picture", items: a)) }
+        if !b.isEmpty { groups.append(GameMenuSection(id: "customize.other", heading: "Other choices", items: b)) }
+        if m.isCustom {
+            let base = m.basePreset
+            groups.append(GameMenuSection(id: "customize.back", items: [GameMenuItem(id: "customize.back", title: "Back to \(base.title)", subtitle: "The preset's settings again", symbol: "arrow.uturn.backward") { _ in
+                _ = gameMenuApplyPreset(m) { m.backToBase() }
+            }]))
+        }
+    } else if !rest.isEmpty {
+        groups.append(GameMenuSection(id: "customize.other", heading: "Other choices", items: rest))
+    }
+    if !groups.isEmpty {
+        let n = groups.flatMap(\.items).filter { $0.id.hasPrefix("row:") }.count
+        home.doors.append(GameMenuItem(id: "door.customize", title: "Customize", subtitle: n == 1 ? "1 setting" : "\(n) settings", symbol: "slider.horizontal.3", kind: .submenu(groups)))
+    }
+    if let cheats = flat.first(where: { $0.id == "cheats" }) { home.doors.append(cheats) }
+    let more = flat.filter { $0.id == "atstart" || $0.id == "share" }
+    home.doors.append(GameMenuItem(id: "door.more", title: "More", subtitle: "Gate at start, Share log", symbol: "ellipsis.circle", kind: .submenu([GameMenuSection(id: "more.all", inline: false, items: more)])))
+    return home
+}
+
+// A preset change in game (gate-ui §19.3): the launcher's model moves and saves the values (LauncherModel.inGame); the rows the game takes live go into the environment under
+// front_ios.m's lock and apply at once (dm_setting_env, dm_setting_live), the others wait for the next start. Returns what changed now and what waits, as short words
+@MainActor func gameMenuApplyPreset(_ m: LauncherModel, _ change: () -> Void) -> (now: [String], next: [String]) {
+    var now: [String] = [], next: [String] = []
+    for s in m.inGame(change) {
+        let v = m.values[s.env] ?? s.def
+        if dm_setting_live(s.env, nil) { dm_setting_env(s.env, v); _ = dm_setting_live(s.env, v); now.append(gameMenuWords(m, s)) } else { next.append(gameMenuWords(m, s)) }
+    }
+    now += gameMenuPresetEnv(m)   // also when no row moved: Undo or Back can change the preset alone
+    return (now, next)
+}
+
+// The preset the values are now (LauncherModel.presetEnvValue) into the environment while the game runs, under front_ios.m's lock as a pick goes (dm_setting_env): the host's frame
+// generation reads DM_PRESET again once a second through front_env_copy (nvn_framegen.inc fg_power_why) and steps aside in Battery Saver, or comes back from it. After every preset
+// change in game (gameMenuApplyPreset: a chip, L / R, X, Back to the base, Undo) and a hand change to a preset row, which can make it Custom or another preset. Nothing without
+// frame generation (LauncherModel.framegenOn), when an env file or the launch set DM_PRESET, or when it is already that.
+// The preset's switches no row sets (LauncherModel.presetSwitches: Bananza's Battery Saver DM_FPS_CTL=hold30) go in the same way; the host reads DM_FPS_CTL again once a second
+// (hle_fctl.c fctl_mode_poll), so they apply while the game runs. Returns their words for the toast ("Steady 30 fps", "Up to 60 fps")
+@discardableResult @MainActor func gameMenuPresetEnv(_ m: LauncherModel) -> [String] {
+    var words: [String] = []
+    for (e, v) in m.presetSwitches where (getenv(e).map { String(cString: $0) } ?? "") != v {   // the main thread is the only one that writes them
+        dm_setting_env(e, v); fputs("launcher: \(e)=\(v) (in-game menu)\n", stderr)
+        if e == "DM_FPS_CTL" { words.append(v == "hold30" ? "Steady 30 fps" : "Up to 60 fps") }
+    }
+    guard LauncherModel.framegenOn, let p = m.presetEnvValue, getenv("DM_PRESET").map({ String(cString: $0) }) != p else { return words }
+    dm_setting_env("DM_PRESET", p); fputs("launcher: DM_PRESET=\(p) (in-game menu)\n", stderr)
+    return words
+}
+
+// What a preset row's value is now in a few words: "30 fps", "Render scale 85 %", "Upscaling MetalFX"
+@MainActor func gameMenuWords(_ m: LauncherModel, _ s: Setting) -> String {
+    let v = m.gateValue(s)
+    return s.label == "Frame rate" ? v : "\(s.label) \(v)"
+}
+
+// The preset rows the game does not take live whose saved value differs from the one this run started with (the environment at Play: Launcher.swift apply, or applySaved's
+// saved choices over the defaults): "At next start: 30 fps". Read when the menu draws, so it holds across openings and ends with the run
+@MainActor func gameMenuPending(_ m: LauncherModel) -> [String] {
+    m.presetRows.filter { m.visible($0) && !m.hidden($0) && !dm_setting_live($0.env, nil) }.compactMap { s in
+        let started = getenv(s.env).map { String(cString: $0) } ?? s.def
+        return s.same(started, m.values[s.env] ?? s.def) ? nil : gameMenuWords(m, s)
+    }
+}
+
 // Touch controls: the touch controls' rows (Touch control size, Touch control opacity, and Touch feedback where the device has haptics: the launcher's hide rule leaves it out
 // of m.rows elsewhere) as one row opening a page of them, as Cheats does, where each choice opens its options and B goes back a page at a time. Its subtitle sums up their values
 // ("Large · Normal · Feedback on", without a hidden row's part), or, while the touch controls are hidden (a controller, the Tap layout), says so as Touch feedback's own note does
@@ -132,14 +224,14 @@ private let touchControlEnvs: Set<String> = ["DM_TOUCH_SIZE", "DM_TOUCH_OPACITY"
                         kind: .submenu([GameMenuSection(id: "touch.all", inline: false, items: rows.map(\.item))]))
 }
 
-// Settings screen at start: ticked while the settings screen shows when the app starts, unticked while the player's Skip this screen next time skips it (launcher.skip, stored at once:
+// Gate at start (gate-ui GW28; the row was "Settings screen at start"): ticked while the Gate shows when the app starts, unticked while the player's Skip this screen next time skips it (launcher.skip, stored at once:
 // LauncherModel.skipAtStart). Picking it brings the screen back at the next start, or skips it again. Greyed while DM_LAUNCHER from an env file or the launch decides
 // (LauncherModel.launcherSetByEnv); main.m's own DM_LAUNCHER=0 for a start from a program record skips only that start, so the row stays the player's then
 @MainActor func settingsAtStartRow(_ m: LauncherModel) -> GameMenuItem {
     let env = ProcessInfo.processInfo.environment
     let fixed = LauncherModel.launcherSetByEnv(environment: env)
     let on = fixed ? env["DM_LAUNCHER"] != "0" : !m.skipAtStart
-    return GameMenuItem(id: "atstart", title: "Settings screen at start", subtitle: fixed ? "Set by an env file" : nil, symbol: "slider.horizontal.3", disabled: fixed, kind: .toggle(on)) { _ in
+    return GameMenuItem(id: "atstart", title: "Gate at start", subtitle: fixed ? "Set by an env file" : nil, symbol: "slider.horizontal.3", disabled: fixed, kind: .toggle(on)) { _ in
         m.skipAtStart.toggle()
     }
 }
@@ -261,7 +353,7 @@ private let cheatLabel: Int32 = 1, cheatPairOff: Int32 = 16, cheatOnce: Int32 = 
     let why = greyed ?? ruled ?? live ?? (dm_setting_working(s.env) ? nil : m.reason(s)?.why)
     let note = why.flatMap { $0.isEmpty ? nil : $0 }
     let locked = fixed || greyed != nil
-    func pick(_ v: String) { if m.choose(s, v) { dm_setting_env(s.env, v) }; _ = dm_setting_live(s.env, v) }   // saved, into the environment (under front_ios.m's lock), then applied
+    func pick(_ v: String) { if m.choose(s, v) { dm_setting_env(s.env, v); if s.preset != nil { gameMenuPresetEnv(m) } }; _ = dm_setting_live(s.env, v) }   // saved, into the environment (under front_ios.m's lock), then applied; a preset row's change can change the preset
     if s.kind == "toggle" {
         let next = now == s.onValue ? s.offValue : s.onValue
         return GameMenuItem(id: "row:\(s.env)", title: s.label, subtitle: fixed ? (m.fromLaunch.contains(s.env) ? "Set at launch" : "Set by an env file") : note,

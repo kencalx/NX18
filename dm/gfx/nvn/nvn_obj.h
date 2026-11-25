@@ -21,8 +21,8 @@ FITS(queue_builder_t, NVNqueueBuilder);
 typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll; uint64_t serial; } queue_t;  FITS(queue_t, NVNqueue);
 
 typedef struct { NVNdevice *dev; void *mem; uint64_t size; uint32_t flags; } pool_builder_t;  FITS(pool_builder_t, NVNmemoryPoolBuilder);
-// A virtual pool (flags 0x200) keeps its sparse state in vp (hle_nvn.c struct vpool, NULL for an aliased one); vmode: 0 not mapped yet, 1 aliased onto one physical pool, 2 sparse
-typedef struct { uint32_t magic, flags; uint8_t *mem; uint64_t size; struct vpool *vp; int vmode; } pool_t;   FITS(pool_t, NVNmemoryPool);
+// A virtual pool (flags 0x200) keeps its sparse state in vp (hle_nvn.c struct vpool, NULL for an aliased one); vmode: 0 not mapped yet, 1 aliased onto one physical pool, 2 sparse; asked: an address that puts the pool in the raw pool table was handed out (hle_nvn.c)
+typedef struct { uint32_t magic, flags; uint8_t *mem; uint64_t size; struct vpool *vp; int vmode; uint8_t asked; } pool_t;   FITS(pool_t, NVNmemoryPool);
 
 typedef struct { const pool_t *pool; int64_t off; int32_t n; } dpool_t;                       // Texture / sampler descriptor pool
 FITS(dpool_t, NVNtexturePool); FITS(dpool_t, NVNsamplerPool);
@@ -70,7 +70,7 @@ typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; int32_t nactive; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
 // avail[i]: time at which swapchain image i can be acquired again (ns, monotonic clock) = its display time + one present period; pace: target time of this window's present pacer
-typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; int32_t nactive; } win_t;   // ticket[i]: ticket of the most recent present of image i; nactive as in win_builder_t
+typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; int32_t nactive, follow; } win_t;   // ticket[i]: ticket of the most recent present of image i; nactive as in win_builder_t; follow: see nvn_pace_follow
 FITS(win_t, NVNwindow);
 
 // Command buffer: commands are written into the command memory given by the game (AddCommandMemory), and the list that strings a recording's pieces together into its control memory
@@ -82,7 +82,7 @@ typedef struct {
                                          // +0x10 is left to the game: its inlined NVN header code writes byte 1 here after AddCommandMemory and before BeginRecording / CallCommands (an internal flag of real NVN; main+0x4da5c, main+0xb8dec etc.).
                                          // This used to be the low byte of end: rewritten to 01 it cut the segment end by up to 254 bytes, and SMBW's material setup handles (512-byte blocks at minimum) kept overflowing into host segments at the iPhone's addresses
     uint8_t *end;                        // End of the current command memory segment
-    uint8_t *begin;                      // First record of this recording; recording 2 = not written yet (host-lent segments hang off the recording's guest bytes from here)
+    uint8_t *begin;                      // First record of this recording; recording 2 = not written yet
     PFNNVNCOMMANDBUFFERMEMORYCALLBACKPROC cb; void *cb_data;
     NVNdevice *dev;
     uint64_t used;                       // Record bytes written since the game last added command memory, across recordings and host segments (returned by GetCommandMemoryUsed)
@@ -95,6 +95,9 @@ typedef struct {
                                          // for the next record, so that the game's control-memory callback never runs inside its own command-memory callback (hle_nvn.c ctl_push)
     uint8_t *ctl_list;                   // The recording's first control entry once written: its handle (NULL before)
     uint8_t *chunk;                      // Start of the recording's piece of records in the current segment not yet in a CTL_CHUNK entry (NULL = none open)
+    uint32_t rec_id;                     // The current or last recording's serial (hle_nvn.c BeginRecording): its own host-lent segments are not freed by its own writes (hostseg_written)
+    uint32_t own_back;                   // end - the recording's first byte in the current segment: its first record there, or the write position where a record did not fit (0 = none yet);
+                                         // a segment the host lends hangs off [that byte, write position) (hle_nvn.c cmd_own, hostseg_take)
 } cmd_t;                                                                                   FITS(cmd_t, NVNcommandBuffer);
 
 // ---------- State objects (defaults follow the NVN / GL defaults) ----------
@@ -143,7 +146,7 @@ enum {
     OPC_DRAW_IDX,          // prim, index type << 8 | count, base vertex, ibuf (u64)     → OP_DRAW_IDX, one instance
     OPC_DRAW_IDX_INST,     // prim, index type << 8 | count, base vertex, base instance, instances, ibuf
     OPC_DRAW_IDX_IND,      // prim, index type << 8 | ibuf, ind (u64)                    → OP_DRAW_IDX, indirect
-    OPC_VIEWPORTS,         // first, n << 8 | n × {x, y, w, h} (f32)                     → OP_VIEWPORTS
+    OPC_VIEWPORTS,         // first | n << 8 | (origin + 1) << 16; n × {x, y, w, h} (f32) → OP_VIEWPORTS
     OPC_STENCIL,           // face, which << 2, value << 4 (20 bits) | none              → OP_STENCIL
     OPC_HANDLES,           // op, stage << 6, first << 9, n << 17 | n × handle (u32)     → op (OP_BIND_TEX / _SAMP / _IMG), handles already moved to the bound pools
     OPC_BUFS,              // op, stage << 6, first << 9, n << 17 | n × {addr (u64), size (u32)} → n records of op (OP_BIND_UBO_SMALL / OP_BIND_SSBO)
@@ -182,7 +185,13 @@ typedef struct { int32_t index, mask; float rgba[4]; } p_clear_color;
 typedef struct { uint64_t h; NVNdrawTextureRegion d, s; } p_draw_tex;   // nvnCommandBufferDrawTexture: texture handle, destination (pixels) and source (texels) regions
 typedef struct { int32_t mode, pad; uint64_t addr; } p_render_cond;   // mode 0 / 1: SetRenderEnableConditional (render if the 64-bit counters at addr and addr + 16 are equal / not equal), 2 / 3: SetRenderEnable(true / false)
 typedef struct { float depth; int32_t depth_mask, stencil, stencil_mask; } p_clear_ds;
-typedef struct { int32_t first, n; float v[16][6]; } p_viewports;          // x, y, w, h, near, far (near and far are overridden by DEPTH_RANGE)
+// Keep the old six-float viewport stride and record size: depth range is a separate
+// command, so the first viewport's unused near slot carries the recording origin.
+// Zero keeps legacy captures' device-origin behavior; otherwise 1 + NVNwindowOriginMode.
+typedef struct {
+    int32_t first, n;
+    union { float v[16][6]; struct { float xywh[4]; int32_t origin; }; };
+} p_viewports;
 typedef struct { int32_t x, y, w, h; } p_scissor;
 typedef struct { float n, f; } p_depth_range;
 typedef struct { uint32_t on, index; } p_prim_restart;
@@ -257,6 +266,7 @@ typedef struct { int64_t stride; int image; } p_copy_stride;   // image: SetCopy
 // Super Smash Bros. Ultimate records one upload in 256 bytes of command memory: SetCopyRowStride, SetCopyImageStride, CopyBufferToTexture, as two 24-byte records before the copy,
 // went past them and called the game's out-of-memory callback, which that command buffer never set (a jump to 0, docs/reference/nvn-objects.md "Copy strides are command buffer state")
 typedef struct { int64_t row, image; } p_copy_strides;
+#define DM_COPY_SNAPSHOT 0x20000000   // a buffer → texture copy whose CPU bytes follow the copy strides in the record (hle_nvn.c rec_staged_texture_upload), its src 0
 #define COPY_STRIDES_OFF ((((sizeof(p_copy_b2t) + 7) & ~(size_t)7)) + sizeof(tex_t))   // payload offset: after the record and its one texture snapshot (REC_SNAP)
 static inline const p_copy_strides *copy_strides(const void *a, uint32_t size) {
     return size >= 8 && size - 8 >= COPY_STRIDES_OFF + sizeof(p_copy_strides) ? (const p_copy_strides *)((const uint8_t *)a + COPY_STRIDES_OFF) : NULL;
@@ -282,6 +292,7 @@ void mtl_exec_rest(const uint64_t *handles, int n);   // Tells which handles in 
 // Present: draw the swapchain texture to the front-end CAMetalLayer (only counts when there is no window)
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4], uint64_t *copy);   // Enqueue a present and return the ticket immediately; period_s: minimum time this image is displayed (= present period, 0 = unlimited); *copy: its snapshot copy (0 = none), for mtl_present_wait_texture
 void mtl_present_wait(uint64_t ticket);                    // Wait until the present with this ticket has been processed (blit committed to the GPU queue)
+void mtl_present_progress(uint64_t *queued, uint64_t *done);   // the ticket of the last present queued, and of the last one handed on (the layer's frame history, hle_vi.c)
 void mtl_present_wait_texture(uint64_t ticket, uint64_t copy);   // the next acquire of a presented texture, or a queue finish: with a snapshot (copy, from mtl_present) its copy has run on the GPU, else as mtl_present_wait
 void mtl_present_flush(void);                              // Wait until all enqueued presents have been processed
 void mtl_present_test_stall(uint64_t ns);                  // Unit test: extra pause in ns before each present on the present thread
@@ -291,14 +302,15 @@ void mtl_set_tex_pool_n(int n);                            // Texture descriptor
 void mtl_set_frame(uint64_t f);
 void mtl_ub_present(double iv_ms);   // Same-process alternating measurement (DM_NVN_UB): the present thread reports the actual present interval every frame
 double mtl_gpu_ms(uint64_t f);
+uint64_t mtl_gpu_busy_ns(void);   // The Metal 4 queue's GPU busy time since the start, in ns: every command buffer's GPU start-to-end interval, overlaps counted once (the power line's GPU ms/s; nvn_gpu_diag.h)
 void mtl_ab_gpu(uint64_t f, double gpu_ms, double frame_ms);   // DM_AB phases (nvn_mtl.m)
-void mtl_sub_index(const uint64_t *h, int n);   // Start of submission: build the store lookahead index in replay order (nvn_mtl.m)
-void xv_test_counts(int *dc, int *viol);
 int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1);   // The frame's earliest GPUStart / latest GPUEnd (mach absolute time, ns); returns 0 if not all complete or there is no GPU time
 void mtl_stats(uint64_t *passes, uint64_t *draws);
 void mtl_args_stats(uint64_t *enc, uint64_t *reuse, uint64_t *patch);
+uint64_t mtl_args_partial_stat(void);   // of the patches, the partial ones: texture, sampler, storage or base instance entries written again (DM_NVN_ARGS_PARTIAL)
+uint64_t mtl_args_xpass_stat(void);   // argument blocks reused or patched across passes or program changes (DM_NVN_ARGS_XPASS), part of reuse and patch
+int mtl_args_stats_log(uint64_t frame, double frames);   // DM_NVN_ARGS_STATS: the "[args-stats]" lines of a log window of that many frames (lines written; 0 with the switch off)
 void mtl_use_stats(uint64_t *call, uint64_t *skip);
-uint64_t mtl_ds_omit(void);   // Cumulative number of passes with no depth attachment because the lookahead proved depth-stencil unused
 uint64_t mtl_drawable_ns_take(void);   // Take and zero: cumulative ns spent waiting for nextDrawable in present   // Cumulative useResource calls actually issued / skipped by same-encoder dedup   // Cumulative argument buffer new-encode / reuse counts
 void mtl_bw(uint64_t *load, uint64_t *store, uint64_t *full_rw_passes);   // Cumulative attachment load / store bytes, cumulative number of full load-store passes
 uint64_t mtl_udc_saved_bytes(void);                                      // Write-back bytes actually saved by DM_NVN_UNWRITTEN_DC
@@ -310,16 +322,19 @@ int mtl_warm_wait(int timeout_ms);
 int mtl_link_active(void);
 int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns);   // vsyncs = the game's present interval
 int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns);   // the same in the display link's own ticks
+void nvn_acquire_block(void);   // hle_nvn.c: called just before a wait of the window texture's acquire, or of the game's nvnQueueFinish / nvnSyncWait, blocks; the waiting guest thread gives its core away (nothing outside those)
 int mtl_link_rate(void);   // the display link's rate: 120, 60 or 30 Hz
 void mtl_link_mode_set(int mode);   // the display link's pacing mode (DM_PRESENT_LINK's values), applied at the next present
 double mtl_presented_time(uint64_t n);
-int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms);   // the display-link tick that took the n-th present (0 = none: no display link, or not taken yet)
+double mtl_presented_shift(uint64_t n);   // nvn_framegen.inc: the n-th present was shown one tick after the tick that took it (its generated frame took that one): the tick in seconds; 0 otherwise or with frame generation off
+double pres_shifted_ms(uint64_t n, double a, double b);   // hle_nvn.c: the on-screen interval between presents n - 1 and n (presented at b and a, seconds) in ms, less frame generation's shifts; (a - b) * 1e3 exactly while it is off
+int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms);   // the display-link tick that took the n-th present (frame generation: the next one, which showed it after its generated frame; 0 = none: no display link, or not taken yet)
 int mtl_link_stalled(void);   // the display link is silent (background, occluded window, a stall) and queued frames are dropped instead of shown
 int mtl_snap_on(void); uint64_t mtl_snap_acquire_wait(void);   // present snapshots (DM_PRESENT_SNAP): on, and acquire's wait for ring capacity (returns ns spent pacing)
    // Actual presentation time (seconds) of the n-th present (counted from 1); 0 = not ready, −1 = dropped
 // Texture release (at Finalize)
 void mtl_tex_init(const tex_t *t);      // TextureInitialize: the serial belongs to a live texture object until mtl_tex_release
-void mtl_tex_release(tex_t *t);
+int mtl_tex_release(tex_t *t);         // → 0 when the texture lives on (a copy's Finalize: the object it was initialized in still holds it), else 1
 void mtl_tex_pin(uint64_t serial);
 void mtl_tex_unpin(uint64_t serial);
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
@@ -352,6 +367,11 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]);
 void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode);   // a control section's bytes in the shader key and its code area's length (NVN or NVN2), hle_nvn.c
 void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);
+void mtl_prog_release_later(uint64_t serial);   // a game thread: queued for the replay (no g_sub_mu)
+void mtl_prog_release_drain(void);   // the replay, under g_sub_mu
+// The replay's safe point between two commands of a node (nvn_mtl.m mtl_exec, nvn_queue.inc nq_sub_yield): g_exec_yield is set by the replay around a node's mtl_exec, with g_sub_mu
+// held; g_exec_yield_want counts the game's submits waiting for g_sub_mu. NULL / 0: mtl_exec runs as before
+extern void (*g_exec_yield)(void); extern _Atomic int g_exec_yield_want;
 void mtl_prog_unpin(prog_t *p); // submit lock held: release a queued descriptor or saved binding
 void mtl_prog_snapshot(prog_t *copy, const prog_t *source); // submit lock held: retain compiled shaders behind owned metadata
 void mtl_prog_prefetch(const prog_t *p);   // loads a new program's shader libraries in the background (nvn_mtl.m)

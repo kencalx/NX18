@@ -24,9 +24,13 @@ zip_store	.zs:.bwav:.webm:.metallib
 
 # ---- Memory ----
 # The Switch 2 leaves games 9 GB of its 12 GB (Donkey Kong Bananza's figure). The NPDM declares 48 MB of system resource, so virtual address memory is on.
-# nninitStartup asks SetHeapSize 0x18ce00000 (6.2 GB) with the 9 GB pool, as Mario Kart World. 256 MB in front + 4 GB alias region + 256 MB stack region + 8 GB heap region: a starting split, to be measured
-mem_reserve	0x320000000
-mem_alias	0x100000000
+# nninitStartup asks SetHeapSize 0x18ce00000 (6.2 GB) with the 9 GB pool, as Mario Kart World. 256 MiB in front + 8 GiB heap + 256 MiB stacks + 8 GiB alias region (NXNative
+# f7ae8a3a4, MIT): at 4 GiB the Chamber of Sages transition finds no aligned gap for a 50.03 MiB address region (SDK result 0x1803) and the game keeps presenting a white frame
+# (NXNative #3103, confirmed fixed on an iPhone 18 Pro). 16 GiB since 2026-11-21 (HookLink c03d45bd6, MIT, on an iPhone 18 Pro Max): after many area changes the
+# game had mapped up to +7.75 GB of the 8, and pulling the Master Sword left the white screen for good with nothing refused. The guest reservation is 24.5 GiB of
+# address space, not memory (guest files are sparse); the heap region stays 8 GiB
+mem_reserve	0x620000000
+mem_alias	0x400000000
 mem_map_limit	on
 mem_stack	0x10000000
 app_pool	0x240000000
@@ -102,3 +106,10 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# Presets whose values differ here (settings.py preset_overrides; presets-first §6): Dynamic resolution stays off in Performance. Balanced and Battery Saver take the row's
+# default, on (owner, 2026-11-21: Balanced is 60 fps with dynamic resolution; an iPhone run on 7c56558b1 had the game step down to level 7 in heavy stretches with the GPU
+# still 86% busy, so the levels it takes do lighten the GPU even though the main scene passes are under half of its time)
+preset	performance	DM_DYNAMIC_RESOLUTION=0
+# The environment cube's mip chain and filters at half rate, as Donkey Kong Bananza's (pass_alternate cube:<colour>, nvn_pass_alt.h; since 2026-11-23 per visit: the game redraws two faces a frame over three frames, docs/reference/rendering.md Cubes spread over several frames): gpuprof on the iPhone (8f17ac43, heavy frames) put the RG11B10Float cube chain (64x64 down to 4x4, six faces) at ~1.0 ms of a 16.4 ms GPU frame. Reflections and the cube's ambient light follow the scene a frame later on alternate frames. A picture trade for Balanced and Battery Saver (owner, 2026-11-20); Quality draws it every frame (DM_NVN_CUBE_ALT=0). NX18-X2.0 open-optimizations.md
+pass_alternate	cube:92
+preset	quality	DM_NVN_CUBE_ALT=0

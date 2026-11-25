@@ -1,7 +1,8 @@
 // GPU access revoked (nvn_mtl.m gpu_lost_check; issue #1326), imitated by DM_TEST_GPU_LOST=3: from the third submission on, each submission's feedback reports the access revoked in the
 // shape the #1326 logs show, and the GPU does not signal its fence. Checks that the revoked access is found under Metal's top-level error and an innocent victim's, a page fault's or
 // a hang's error is not taken for it; that the front end is told once; that a SyncWait on such a fence returns at its feedback instead of waiting out its timeout, for the later
-// submissions too; and that a present no longer asks for the layer to take a drawable from. Real Metal 4 queue, no window, no game files
+// submissions too; and that a present no longer asks for the layer to take a drawable from. Real Metal 4 queue, no window, no game files. Also the line of the run's first
+// innocent-victim error (victim_note): once a run, only for that error, with what was in flight, the movies, the GPU probe and the thermal state
 #include "../nvn/nvn_mtl.m"
 static _Atomic int g_layer_asks;   // present_now asks for the layer just before it takes a drawable; with none it returns, as without a window
 void *front_metal_layer(void) { atomic_fetch_add(&g_layer_asks, 1); return NULL; }
@@ -46,6 +47,19 @@ int main(void) { @autoreleasepool {
     CHECK("no error is not taken for it", !revoked(nil));
 
     mtl_init();
+    {   // the run's first innocent victim: its line once, with each part; nothing for no error or another kind
+        NSError *victim = nested(mtl4, 1, [NSError errorWithDomain:mtl4 code:1 userInfo:@{NSLocalizedDescriptionKey: @"Discarded (victim of GPU error/recovery) (00000005:kIOGPUCommandBufferCallbackErrorInnocentVictim)",
+                                                                                    NSUnderlyingErrorKey: nested(iogpu, 5, nil)}]);
+        CHECK("no line for no error or a page fault", !victim_note(nil, "test", 0) && !victim_note(nested(mtl4, MTL4CommandQueueErrorTimeout, nested(mtl4, MTL4CommandQueueErrorNotPermitted, nested(iogpu, 11, nil))), "test", 0));
+        static char out[8192]; fflush(stderr); int keep = dup(2); FILE *tf = tmpfile(); dup2(fileno(tf), 2);
+        int said = victim_note(victim, "submission", 974397), again = victim_note(victim, "submission", 974398);
+        fflush(stderr); dup2(keep, 2); close(keep); rewind(tf); out[fread(out, 1, sizeof out - 1, tf)] = 0; fclose(tf); fputs(out, stdout);
+        CHECK("the first innocent victim says what was in flight", said && strstr(out, "[RED] GPU error: the run's first innocent-victim command buffer (submission, fence 974397)")
+              && strstr(out, "  in flight: fences submitted ") && strstr(out, "present queue enqueued ") && strstr(out, "residency commit worker idle"));
+        CHECK("  the movies, without a movie layer here", !!strstr(out, "  movies: no movie layer in this build; native-image pools 0 live, 0 finalized"));
+        CHECK("  the GPU probe, thermal state and the drawn-over release", strstr(out, "  GPU probe: not made yet; thermal state ") && strstr(out, "render targets drawn over (DM_NVN_RT_DEAD): none released"));
+        CHECK("  once a run", !again && !strstr(out, "fence 974398"));
+    }
     tex_t pic = picture();
     int ok = 0; double ms = 0; uint64_t f = 0;
     for (int i = 0; i < 2; i++) f = submit_wait(&ok, &ms);

@@ -2,7 +2,9 @@
 rebuilt after an iOS-only NVN build and an iOS build is not reused after a Mac-only one but builds its Mac libraries again (kept for the Mac run command), neither key without the Mac outputs' stamp (inputs.tsv, which the one
 chain version's c1_full.tsv / cb_extent.tsv name); the run command's environment file is read as the iOS app reads it.
 No game files, keys or Xcode needed (temporary files only in a temporary folder)."""
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import shutil
 import sys
@@ -274,6 +276,10 @@ class Nvn(Base):
         (self.tmp / 'cb_extent.tsv').write_text(f'# chain b-{CHAIN} inputs bbbbbbbbbbbb 2026-10-23T00:00:00+00:00\n')
         self.assertEqual(self.build(True), self.sh / 'cache'); self.assertEqual([Path(c[1]).name for c, _ in self.ran], ['cb_extent.py'])
 
+    def test_the_build_hands_the_table_memo(self):   # c1_guard.py / cb_extent.py keep their answers in the shader cache (DMSH_TABLE_MEMO)
+        self.build(True)
+        self.assertEqual(self.ran[0][1]['DMSH_TABLE_MEMO'], str(self.sh / 'cache'))
+
     def test_split_pairs_invalidate_shader_reuse(self):
         # A registered profile may have no pso_pairs.tsv: the split's copy feeds vs_pad.
         def fingerprint(*args, **kwargs):
@@ -297,6 +303,29 @@ class Nvn(Base):
         self.assertEqual(watch(), {'step': 'compiling', 'done': 7, 'total': 10, 'unit': 'shaders', 'note': '4 not cached'})
         p.write_text('{"step": "comp')   # half written: no progress this time, not an error
         self.assertIsNone(watch())
+
+    def test_shader_watch_follows_all_phases(self):   # the steps after the shaders, each under its own name (upstream NXNative d2939c1eb): mesh libraries, the library image(s), the tables
+        p = self.tmp / 'progress.json'; watch = nsp.ShaderWatch(p)
+        p.write_text('{"step": "compiling", "done": 42848, "total": 42848, "cached": 42848, "misses": 0}')
+        self.assertEqual(watch(), {'step': 'compiling', 'done': 42848, 'total': 42848, 'unit': 'shaders', 'note': ''})
+        p.write_text('{"step": "compiling mesh libraries", "done": 3, "total": 12, "unit": "pairs"}')
+        self.assertEqual(watch(), {'step': 'compiling mesh libraries', 'done': 3, 'total': 12, 'unit': 'pairs'})
+        p.write_text('{"step": "writing the library image", "done": 0, "total": 100, "unit": "files", "bytes": 0}')
+        self.assertEqual(watch(), {'step': 'writing the library image', 'done': 0, 'total': 100, 'unit': 'files'})
+        p.write_text('{"step": "writing the Mac library image", "done": 50, "total": 100, "unit": "files", "bytes": 2097152}')
+        self.assertEqual(watch(), {'step': 'writing the Mac library image', 'done': 50, 'total': 100, 'unit': 'files', 'note': '2.0 MB'})
+        p.write_text('{"step": "c1 guard"}')
+        self.assertEqual(watch(), {'step': 'c1 guard'})
+        p.write_text('{"step": "uniform read extents"}')
+        self.assertEqual(watch(), {'step': 'uniform read extents'})
+        with contextlib.redirect_stdout(io.StringIO()):
+            prog = nsp.Progress('off'); prog.plan(1); prog.stage('iOS shaders')
+            for payload in ('{"step": "writing the Mac library image", "done": 50, "total": 100, "unit": "files", "bytes": 2097152}',
+                            '{"step": "writing the iOS library image", "done": 10, "total": 40, "unit": "files", "bytes": 1048576}', '{"step": "c1 guard"}'):
+                p.write_text(payload); got = watch(); assert got is not None; prog.set(**got)
+            assert prog.cur is not None
+            self.assertEqual((prog.cur.step, prog.cur.done, prog.cur.total, prog.cur.unit, prog.cur.note), ('c1 guard', None, None, '', ''))
+            prog.close()
 
 
 class EnvFile(Base):

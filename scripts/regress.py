@@ -31,8 +31,9 @@
 #    (newly failing by the rule of dm/gfx/tools/shader_regressions.py, which the NSP script applies to one game's previous build; a new shader that fails is listed apart),
 #    the SHA-256 of the MSL (<key>_b.metal), of the reflection (<key>_b.json without its chain fields) and of the variant libraries (_bf, _bv, _bp, _bg*). A build is kept per chain version,
 #    shader package, profile inputs and compilers (<NSP folder>/<id>-work/regress/chain/<key>/; only the few used last stay, prune_chains), so a revision whose chain did not change costs nothing, and dmsh_build.py uses the build's own shader cache (DMSH_CAS), so MSL
-#    that did not change is not compiled again. Then the vertex / pixel interface of every pipeline base pso_offline.py would put into the pipeline archive (shader_pairs.tsv and
-#    pso_pairs.tsv): a pixel shader input [[user(locnN)]] the vertex shader does not write, or writes with another type, makes metal-tt refuse the whole archive (GitHub issue #283).
+#    that did not change is not compiled again. Then the vertex / pixel interface of the pipeline bases pso_offline.py would put into the pipeline archive: a pixel shader input
+#    [[user(locnN)]] the vertex shader does not write, or writes with another type, makes metal-tt refuse it (GitHub issue #283). For a base of the pairs of shader_pairs.tsv and
+#    pso_pairs.tsv, that stops the archive's build; for a layout base or stand-in of the prewarm list's R rows (pso_manifest.tsv), its group is compiled again in halves.
 # 2. Smoke (runtime): the game in the Mac host (window, no audio), from a copy of the route's save, with the route's buttons, under a watchdog: the frame it must reach, crash (exit status,
 #    the host's CRASH line, a DiagnosticReports file), hang (no frame for `hang` seconds once frames came; before stopping the host the harness asks for its state dump, DM_CTL
 #    "dump", into the log and samples every host thread into the run folder's hang_sample.txt), the prepare step's time, [RED] lines (numbers, addresses and paths normalized; a shader
@@ -58,11 +59,12 @@
 #       "chain": {"kind": "nvn", "baseline": BUILD, "candidate": BUILD, "newly_failing": [{"key", "status", "error"}], "added_failing": [same],
 #                 "newly_passing": [key],
 #                 "changed": {"msl", "reflection", "variants", "shaders", "keys": [key, at most 200]}, "added": n, "removed": n,
-#                 "interface": {"baseline": n, "candidate": n, "new": [PAIR], "known": [PAIR, at most 50]}},
+#                 "interface": {"baseline": n, "candidate": n, "new": [PAIR], "known": [PAIR, at most 50], "rows_checked": n, "halved_new": [ROWBASE], "halved_known": [ROWBASE, at most 50]}},
 #       "smoke": {"route": {...}, "baseline": [RUN], "candidate": [RUN], "diff": {"new_red": [{"text", "count"}], "missing_libs": [baseline, candidate median per run], "shots": {<s>: {"dhash_bits", "rgb_diff", "baseline_noise"}},
 #                 "fps_p50_change_pct", "frame_p99_change_pct", "peak_footprint_change_pct", "prepare_change_s", "prebuild_change_s"}}}}}
 #   BUILD = {"key", "chain", "inputs", "total", "ok", "failed", "secs" (the build's time, 0 when reused), "failed_by_status": {status: n}}
 #   PAIR = {"vs", "entry", "ps", "missing": [locnN], "type": ["locnN vs-type/ps-type"]}
+#   ROWBASE = PAIR with "base": "layout" or "stand-in" and "ps_entry" (the fragment entry the row's targets call for)
 #   RUN = {"exit": code or -signal or null (stopped by the harness), "crash": {"line", "type", "signal"} or null, "hang_at_s", "hang_sample" (file name or null), "hang_dump" (the log holds the host's state dump), "first_frame_s", "max_frame", "reached",
 #          "prepare_s", "prebuild": {"secs", "pairs", "built", "archived", "failed", "done", "hang"}, "fps", "frame_p50", "frame_p99", "frame_max", "dropped", "over_budget",
 #          "peak_footprint_mb", "red": {normalized text: count}, "shots": {<s>: {"dhash"}}, "secs", "modules", "host",
@@ -545,39 +547,78 @@ def msl_io(src, entry, stage):
 
 
 def interface_check(tree, g, out):
-    """The shader pairs of shader_pairs.tsv and pso_pairs.tsv whose pixel shader reads a [[user(locnN)]] input that the vertex shader does not write, or writes with another type,
-    among the pipeline bases pso_offline.py would put into the archive (the tree's pso_offline.plan, run on those pairs only: it reads every library): metal-tt refuses such a
-    pipeline, and one refused pipeline fails the whole archive (GitHub issue #283). The entry points are pso_offline's: the reflection's entry (entry_z for a near = 0 game)"""
+    """The pipeline bases pso_offline.py would put into the archive whose pixel shader reads a [[user(locnN)]] input that the vertex shader does not write, or writes with another
+    type: metal-tt refuses such a pipeline (GitHub issue #283). The tree's own planner (pso_offline.py) decides which bases the archive holds, run on the suspects only (it reads
+    every library):
+    - bad: the bases of the pairs of shader_pairs.tsv and pso_pairs.tsv (plan). A refused group of pair bases stops the archive's build, so one is a failure;
+    - halved: the layout bases (plan_layout) and stand-ins (plan_standins) of the profile's prewarm list's R rows (pso_manifest.tsv), each {'base': 'layout' or 'stand-in', ...}.
+      metal-tt refusing one of their groups of 64 is not fatal: the group is compiled again in halves down to the base it refuses, about 2 x log2(64) = 12 more metal-tt runs for
+      each such base, which is then left to the device. plan_standins's own filter (user_locations, the AIR's location strings) sees no types, and plan_layout has none.
+    The vertex shader's outputs are read from <key>_b.metal whatever its library (_b, or the shadow-input _bv and pulling _bp variants, which change its inputs only and whose MSL
+    is not kept). The entry points are pso_offline's: the vertex reflection's entry (entry_z for a near = 0 game); for a pair, the pixel shader's entry; for an R row, the one its
+    targets call for (fragment_entry: entry_u, entry_m, entry_d), every one of them weighed for the suspects, the planner's choice for the result"""
     lib = chain_lib(out); chain = shader_lib.name_of(lib)[2:]
     prof = g.profile_dir(tree)
     pairs = [prof / 'shader_pairs.tsv', prof / 'pso_pairs.tsv' if (prof / 'pso_pairs.tsv').is_file() else g.build / 'shader/pso_pairs.tsv']
     po = tree.path / 'dm/gfx/tools/pso_offline.py'
     if not po.is_file(): return {'checked': 0, 'note': 'no pso_offline.py in this revision', 'bad': []}
     mod = load_module('pso_offline_' + tree.id.replace('-', '_'), po)
-    todo = mod.read_pairs(mod.pair_text([p for p in pairs if p.is_file()]))
+    todo = (mod.read_pairs_files([p for p in pairs if p.is_file()]) if hasattr(mod, 'read_pairs_files') else mod.read_pairs(mod.pair_text([p for p in pairs if p.is_file()])))   # a baseline tree before NXNative faf91a9df has no read_pairs_files
     zero = depth_zero(g, tree)
-    keys = {k for pr in todo for k in pr}
+    man, rows = prof / 'pso_manifest.tsv', []   # (R row, vertex key, pixel key) of the rows with both shaders; a revision before the layout bases reads none
+    if man.is_file() and all(hasattr(mod, f) for f in ('read_layouts', 'parse_render_key')):
+        for text in mod.read_layouts([str(man)]):
+            k = mod.parse_render_key(text)
+            if k and str(k.get('vs', '')).endswith('_b') and str(k.get('fs', '')).endswith('_b'): rows.append((text, k['vs'][:-2], k['fs'][:-2]))
+    keys = {k for pr in todo for k in pr} | {k for _, vk, fk in rows for k in (vk, fk)}
     def load(k):
         try: return k, json.loads((lib / f'{k}_b.json').read_bytes()), (lib / f'{k}_b.metal').read_text(errors='replace')
         except (OSError, ValueError): return k, None, None
     with cf.ThreadPoolExecutor(8) as ex: got = {k: (j, src) for k, j, src in ex.map(load, keys)}
     cache, suspects = {}, {}
     def io(k, entry, stage):
-        if (k, entry) not in cache: cache[k, entry] = msl_io(got[k][1], entry, stage) if got[k][1] else None
+        if (k, entry) not in cache: cache[k, entry] = msl_io(got[k][1], entry, stage) if k in got and got[k][1] else None
         return cache[k, entry]
-    checked = 0
-    for vk, fk in todo:
-        vj, fj = got[vk][0], got[fk][0]
-        if not vj or not fj or vj.get('chain') != chain or fj.get('chain') != chain: continue
-        ve = vj['entry_z'] if zero and vj.get('entry_z') else vj.get('entry'); fe = fj.get('entry') or 'main0'
-        vo, fi = io(vk, ve, 'vs'), io(fk, fe, 'ps'); checked += 1
-        if vo is None or fi is None: continue
+    def mismatch(vk, ve, fk, fe):   # (locations not written, 'locnN vertex type/pixel type'), or None: none, or not known
+        vo, fi = io(vk, ve, 'vs'), io(fk, fe, 'ps')
+        if vo is None or fi is None: return None
         miss = sorted((l for l in fi if l not in vo), key=lambda l: int(l[4:]))
         ty = [f'{l} {vo[l]}/{fi[l]}' for l in sorted(fi, key=lambda l: int(l[4:])) if l in vo and vo[l] != fi[l]]
-        if miss or ty: suspects[vk, fk] = {'vs': vk, 'entry': ve, 'ps': fk, 'missing': miss, 'type': ty}
+        return (miss, ty) if miss or ty else None
+    def refl(vk, fk):
+        vj, fj = got.get(vk, (None,))[0], got.get(fk, (None,))[0]
+        return (vj, fj) if vj and fj and vj.get('chain') == chain and fj.get('chain') == chain else None
+    def ventry(vj): return vj['entry_z'] if zero and vj.get('entry_z') else vj.get('entry')
+    checked = 0
+    for vk, fk in todo:
+        r = refl(vk, fk)
+        if not r: continue
+        ve = ventry(r[0]); fe = r[1].get('entry') or 'main0'; checked += 1
+        mm = mismatch(vk, ve, fk, fe)
+        if mm: suspects[vk, fk] = {'vs': vk, 'entry': ve, 'ps': fk, 'missing': mm[0], 'type': mm[1]}
     bases, _, _ = mod.plan(lib, chain, list(suspects), zero) if suspects else ([], [], {})
-    planned = {(vl[:16], fl[:16]) for vl, _, fl, _ in bases}
-    return {'checked': checked, 'bad': [x for pr, x in suspects.items() if pr in planned], 'not_in_archive': len(suspects) - len(planned & suspects.keys())}
+    planned = {(vl.rsplit('_', 1)[0], fl.rsplit('_', 1)[0]) for vl, _, fl, _ in bases}   # <key>_b / <key>_bp
+    res = {'checked': checked, 'bad': [x for pr, x in suspects.items() if pr in planned], 'not_in_archive': len(suspects) - len(planned & suspects.keys())}
+    # the R rows: a pair is a suspect when any fragment entry it may take reads what the vertex shader does not write as it reads it; the planners then say which bases of the
+    # suspects' rows the archive holds, and with which entry points
+    sus, rsus = {}, []
+    for text, vk, fk in rows:
+        if (vk, fk) not in sus:
+            r = refl(vk, fk)
+            ents = ({r[1].get(e) for e in ('entry', 'entry_u', 'entry_m', 'entry_d') if r[1].get(e)} or {'main0'}) if r else set()
+            sus[vk, fk] = bool(r) and any(mismatch(vk, ventry(r[0]), fk, fe) for fe in ents)
+        if sus[vk, fk]: rsus.append(text)
+    halved, seen = [], set()
+    for kind, fn in (('layout', 'plan_layout'), ('stand-in', 'plan_standins')):
+        if not rsus or not hasattr(mod, fn): continue
+        for b in getattr(mod, fn)(lib, chain, rsus, zero, bases)[0]:   # bases: a row's base that is a pair's is reported once, above
+            (vl, ve), (fl, fe) = b.vert, b.frag
+            vk, fk = vl.rsplit('_', 1)[0], fl.rsplit('_', 1)[0]
+            mm = mismatch(vk, ve, fk, fe) if fl.endswith('_b') else None
+            sig = (kind, vk, ve, fk, fe)
+            if mm and sig not in seen: seen.add(sig); halved.append({'base': kind, 'vs': vk, 'entry': ve, 'ps': fk, 'ps_entry': fe, 'missing': mm[0], 'type': mm[1]})
+    res['rows_checked'] = sum(1 for (vk, fk) in sus if refl(vk, fk)); res['halved'] = halved
+    return res
 
 
 def chain_diff(b, c):
@@ -598,11 +639,14 @@ def chain_diff(b, c):
            'added': len(cs.keys() - bs.keys()), 'removed': len(bs.keys() - cs.keys())}
     bi, ci = b.get('interface'), c.get('interface')
     if bi is not None or ci is not None:
-        sig = lambda x: (x['vs'], x['entry'], x['ps'])
+        sig = lambda x: (x.get('base', 'pair'), x['vs'], x['entry'], x['ps'], x.get('ps_entry'))
         old = {sig(x) for x in (bi or {}).get('bad', [])}
         cb = (ci or {}).get('bad', [])
         out['interface'] = {'baseline': len((bi or {}).get('bad', [])), 'candidate': len(cb), 'checked': (ci or {}).get('checked'),
                             'new': [x for x in cb if sig(x) not in old], 'known': [x for x in cb if sig(x) in old][:50]}
+        # the R rows' layout bases and stand-ins metal-tt will refuse: each costs its group's halving, not the archive (interface_check)
+        oh = {sig(x) for x in (bi or {}).get('halved', [])}; ch = (ci or {}).get('halved', [])
+        out['interface'].update(halved_new=[x for x in ch if sig(x) not in oh], halved_known=[x for x in ch if sig(x) in oh][:50], rows_checked=(ci or {}).get('rows_checked'))
     out['losses'] = loss_diff(bs, cs)
     return out
 
@@ -1246,6 +1290,9 @@ def cmd_baseline(a):
             if m.get('interface', {}).get('bad'):
                 bad = m['interface']['bad']; gr['chain']['interface'] = {'baseline': len(bad), 'checked': m['interface']['checked'], 'known': bad[:50]}
                 gr['status'] = 'NEW-FAIL'; gr['reasons'].append(f'{len(bad)} pipeline bases whose pixel shader reads an output the vertex shader does not write (metal-tt refuses the archive)')
+            if m.get('interface', {}).get('halved'):
+                hv = m['interface']['halved']; gr['chain'].setdefault('interface', {'baseline': 0, 'checked': m['interface']['checked'], 'known': []})['halved_known'] = hv[:50]
+                gr['known'].append(f'{len(hv)} layout bases or stand-ins of the prewarm rows with a pixel input the vertex shader does not write as it reads it (metal-tt refuses each: its group is compiled in halves)')
             if route:
                 t1 = time.time()
                 runs = smoke_series(g, tree, art, route, a.quick, 'baseline', a, a.runs)
@@ -1295,6 +1342,8 @@ def cmd_check(a, smoke=True):
             itf = cd.get('interface')
             if itf and itf['new']: levels['NEW-FAIL'].append(f"{len(itf['new'])} new pipeline bases with a pixel input the vertex shader does not write (metal-tt refuses the archive)")
             if itf and itf['known']: gr['known'].append(f"{itf['candidate'] - len(itf['new'])} pipeline bases with a pixel input the vertex shader does not write (as in the baseline: GitHub issue #283)")
+            if itf and itf.get('halved_new'): levels['CHANGED'].append(f"{len(itf['halved_new'])} new layout bases or stand-ins of the prewarm rows with a pixel input the vertex shader does not write as it reads it (metal-tt refuses each: its group is compiled in halves, about 12 more metal-tt runs, and that base left to the device)")
+            if itf and itf.get('halved_known'): gr['known'].append(f"{len(itf['halved_known'])} layout bases or stand-ins of the prewarm rows with a pixel input the vertex shader does not write as it reads it (as in the baseline: their groups are compiled in halves)")
             if route:
                 t1 = time.time(); mode = 'quick' if a.quick else 'full'
                 bf = baseline_dir(base, g) / f'smoke-{mode}.json'
@@ -1626,7 +1675,10 @@ def report_md(rep):
         if ch.get('changed', {}).get('keys'): L.append('  - changed shaders: ' + ', '.join(f'`{k}`' for k in ch['changed']['keys'][:40]) + (' …' if ch['changed']['shaders'] > 40 else ''))
         itf = ch.get('interface') or {}
         for x in (itf.get('new', []) + itf.get('known', []))[:20]:
-            L.append(f"  - {'new' if x in itf.get('new', []) else 'known'} interface: vs `{x['vs']}` {x['entry']} → ps `{x['ps']}`: " + ', '.join(f'{l} not written' for l in x['missing']) + ', '.join(x['type']))
+            L.append(f"  - {'new' if x in itf.get('new', []) else 'known'} interface: vs `{x['vs']}` {x['entry']} → ps `{x['ps']}`: " + ', '.join([f'{l} not written' for l in x['missing']] + x['type']))
+        for x in (itf.get('halved_new', []) + itf.get('halved_known', []))[:20]:
+            L.append(f"  - {'new' if x in itf.get('halved_new', []) else 'known'} {x['base']} interface (its group compiled in halves): vs `{x['vs']}` {x['entry']} → ps `{x['ps']}` {x['ps_entry']}: "
+                     + ', '.join([f'{l} not written' for l in x['missing']] + x['type']))
         d = (g.get('smoke') or {}).get('diff') or {}
         for x in d.get('new_red', [])[:15]: L.append(f"  - new RED ×{x['count']}: `{x['text']}`")
         if d.get('shots'): L.append('  - screenshots (s: dHash bits / RGB diff / baseline noise): ' + ', '.join(f"{t}: {v['dhash_bits']}/{v['rgb_diff']}/{v['baseline_noise']}" for t, v in d['shots'].items()))

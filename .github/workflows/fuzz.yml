@@ -1,7 +1,8 @@
 # Fuzzing of the Python file parsers (dm/tools/fuzz): each harness mutates synthetic seeds it builds in code, never game files, for a fixed time with atheris (libFuzzer).
 # A finding is an exception other than the parser's declared rejection, a hang or an oversized allocation (dm/tools/fuzz/fuzzlib.py); the findings already recorded in
 # dm/tools/fuzz/known.tsv are skipped, so the job fails only on a new one, and uploads its input. Nightly and by hand only: it never slows a pull request down. The inputs
-# found are replayed on every pull request by dm/tools/tests/test_fuzz_corpus.py (tests.yml) once they are in dm/tools/fuzz/corpus.
+# found are replayed with the tool tests by dm/tools/tests/test_fuzz_corpus.py (tests.yml, by hand until the image has Xcode 27.3, and the local gates) once they are in
+# dm/tools/fuzz/corpus.
 name: fuzz
 
 on:

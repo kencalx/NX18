@@ -120,7 +120,7 @@ int main(void) { @autoreleasepool {
         NvShader *sh = [NvShader new]; sh->rf.b = rb; sh->rf.nb = 2; sh->rf.cap = 2; sh->rf.abi = 0; sh->arg_len = 256; memcpy(sh->key, "t_arena_trim", 13);
         __strong id<MTLBuffer> ab0; size_t o0 = arena_alloc(256, &ab0); memset((uint8_t *)ab0.contents + o0, 0xab, 256);
         sh->ab_buf = ab0; sh->ab_off = o0; sh->ab_gpu = ab0.gpuAddress + o0; sh->ab_pass = g_pass.serial; sh->ab_binst = g_draw_binst; sh->ab_pgen = g_psnap_gen;
-        args_sync_dirty(); g_args_dirty[0] = 0; g_args_ubo[0] = 1;
+        args_sync_dirty(); sh->ab_gen = g_args_gen[0]; sh->ab_ugen = g_args_ugen[0]; args_dirty_ubo(0);   // the block current but for what its uniform slots point at
         NvArena *before = g_cur_arena; before->used = before->len - 256;   // room for the block's copy, none for the size table after it
         uint64_t patched = g_stat_args_patch;
         encode_args_(nil, sh, 0, 1);
@@ -148,7 +148,7 @@ int main(void) { @autoreleasepool {
         __strong id<MTLBuffer> tmp; arena_alloc(256, &tmp);
         NvArena *before = g_cur_arena; before->used = before->len - 512;   // room for the padded copy, none for the shadow after it
         uint64_t made = g_ubp_made, deferred = (uint64_t)g_nubd;
-        __strong id<MTLBuffer> use; uint64_t g = cbuf_slot(sh, 1, &b, &use);
+        __unsafe_unretained id<MTLBuffer> use; uint64_t g = cbuf_slot(sh, 1, &b, &use);
         const uint32_t *w = (const uint32_t *)(const void *)(before->cpu + before->len - 512);
         printf("padded slot: %llu deferred, %llu shadow made, shadow in %s block; slot at block %s offset %#llx; written %#x %#x %#x %#x %#x\n", (unsigned long long)deferred,
                (unsigned long long)(g_ubp_made - made), g_cur_arena != before ? "a new" : "the same", g >= before->gpu && g < before->gpu + before->len ? "written" : "other",
@@ -174,7 +174,7 @@ int main(void) { @autoreleasepool {
         NvShader *sh = [NvShader new]; sh->rf.b = &b0; sh->rf.nb = 1; sh->rf.cap = 1; memcpy(sh->key, "t_arena_trim", 13);
         void *pb; uint64_t po, pg; int mapped = mtl_gpu_addr((uint64_t)(uintptr_t)mem, LEN, &pb, &po, &pg);
         uint64_t shorts = g_ub_short;
-        __strong id<MTLBuffer> use0, use1, tu; uint64_t g0 = cbuf_slot(sh, 1, &b0, &use0), g1 = cbuf_slot(sh, 1, &b1, &use1);
+        __unsafe_unretained id<MTLBuffer> use0, use1, tu; uint64_t g0 = cbuf_slot(sh, 1, &b0, &use0), g1 = cbuf_slot(sh, 1, &b1, &use1);
         const uint32_t *w = (const uint32_t *)(const void *)((const uint8_t *)use1.contents + (g1 - use1.gpuAddress));
         uint64_t tg = cbsize_table(1, &tu); const uint32_t *t = (const uint32_t *)(const void *)((const uint8_t *)tu.contents + (tg - tu.gpuAddress));
         printf("readable sizes: 192 bound at %s, 16 at the pool's end %s (%#x %#x %#x %#x), %llu padded; size table %u %u\n", g0 == pg ? "the memory" : "a copy",

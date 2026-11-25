@@ -1,0 +1,78 @@
+#!/bin/sh
+# Pre-push: the Python lint ratchet (dm/tools/lint_python.py, as .github/workflows/lint-python.yml runs it, without that workflow's --against check of a pull request's base) on
+# what a push sends. On with
+#   git config core.hooksPath .githooks
+#   git config nx18.lintPython /path/to/lint-venv/bin/python3      # a python3 with .github/requirements/lint.txt installed (a leading ~/ is expanded)
+# Without nx18.lintPython it says so and lets the push go. It reads git's ref lines on stdin and checks each commit pushed that brings Python files or lint settings (*.py*, *.toml,
+# lint.txt, the baseline) the remote side has not (the remote's old commit, and every remote-tracking branch): in the working tree when that commit is HEAD and nothing in that scope
+# is changed or untracked, else in that commit's own files of that scope exported to a temporary folder. A deletion, or a push with nothing new in that scope, is not checked.
+# It fails the push when the Python does not run, lacks a pin of the checked tree's lint.txt at its version (other versions find other things), or the ratchet fails.
+# Emergency: git push --no-verify. dm/tools/tests/test_pre_push_hook.py runs it in temporary repositories with a stub ratchet.
+set -f   # the scope's patterns go to git, not the shell
+py=$(git config --type=path --get nx18.lintPython)
+if [ -z "$py" ]; then
+	echo "pre-push: Python lint skipped: no nx18.lintPython (git config nx18.lintPython /path/to/lint-venv/bin/python3; docs/development.md)" >&2
+	exit 0
+fi
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root" || exit 1
+head=$(git rev-parse -q --verify HEAD)
+scope='*.py* *.toml .github/requirements/lint.txt dm/tools/lint_python_baseline.tsv'
+shas=
+while read -r lref lsha rref rsha; do
+	[ -n "$lsha" ] || continue
+	case $lsha in *[!0]*) ;; *) continue ;; esac   # all zeros: a deletion
+	if ! c=$(git rev-parse -q --verify "$lsha^{commit}"); then echo "pre-push: $lref is not a commit; Python lint does not check it" >&2; continue; fi
+	not=--remotes
+	case $rsha in *[!0]*) git cat-file -e "$rsha^{commit}" 2>/dev/null && not="$rsha --remotes" ;; esac
+	[ -n "$(git rev-list -1 "$c" --not $not -- $scope)" ] || continue
+	case " $shas " in *" $c "*) ;; *) shas="$shas $c" ;; esac
+done
+if [ -z "$shas" ]; then
+	echo "pre-push: Python lint: nothing to check (a deletion, or no Python file or lint setting the remote side lacks)" >&2
+	exit 0
+fi
+if ! "$py" -c 'import sys' >/dev/null 2>&1; then
+	echo "pre-push: [RED] nx18.lintPython ($py) does not run; point it at a python3 with .github/requirements/lint.txt installed (git push --no-verify skips the check)" >&2
+	exit 1
+fi
+check() {   # $1: a tree with dm/tools/lint_python.py, $2: what it is
+	# every name==version line of that tree's lint.txt, at that version in this Python
+	"$py" - "$1/.github/requirements/lint.txt" <<'EOF' || return 1
+import importlib.metadata as md, re, sys
+bad = []
+for line in open(sys.argv[1], encoding='utf-8'):
+    m = re.match(r'([A-Za-z0-9_.-]+)==(\S+)', line)
+    if not m: continue
+    try: have = md.version(m.group(1))
+    except md.PackageNotFoundError: have = None
+    if have != m.group(2): bad.append(f'{m.group(1)} {have or "missing"} (pinned {m.group(2)})')
+if bad:
+    sys.exit(f'pre-push: [RED] {sys.executable} (nx18.lintPython) lacks the pinned lint tools: {", ".join(bad)}\n'
+             f'  {sys.executable} -m pip install -r .github/requirements/lint.txt   (git push --no-verify skips the check)')
+EOF
+	if ! (cd "$1" && "$py" dm/tools/lint_python.py); then
+		echo "pre-push: [RED] the Python lint ratchet failed on $2 (above): fix the findings, or run dm/tools/lint_python.py --update for fixed ones. Emergency only: git push --no-verify" >&2
+		return 1
+	fi
+}
+tmp=
+for c in $shas; do
+	short=$(git rev-parse --short "$c")
+	for f in dm/tools/lint_python.py pyproject.toml .github/requirements/lint.txt; do
+		if ! git cat-file -e "$c:$f" 2>/dev/null; then echo "pre-push: commit $short has no $f; Python lint does not check it" >&2; continue 2; fi
+	done
+	if [ "$c" = "$head" ] && [ -z "$(git status --porcelain --untracked-files=all -- $scope)" ]; then
+		check "$root" "the working tree (HEAD, $short)" || exit 1
+		continue
+	fi
+	if [ -z "$tmp" ]; then
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/nx18-pre-push.XXXXXX") || exit 1
+		trap 'rm -rf "$tmp"' EXIT
+		trap 'exit 1' HUP INT TERM
+	fi
+	set -- '*.py*' '*.toml' .github/requirements/lint.txt
+	git cat-file -e "$c:dm/tools/lint_python_baseline.tsv" 2>/dev/null && set -- "$@" dm/tools/lint_python_baseline.tsv
+	mkdir "$tmp/$short" && git archive -o "$tmp/$short.tar" "$c" -- "$@" && tar -xf "$tmp/$short.tar" -C "$tmp/$short" || exit 1
+	check "$tmp/$short" "commit $short (its files, exported: the working tree is another commit or has changes)" || exit 1
+done

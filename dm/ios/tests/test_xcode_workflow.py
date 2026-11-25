@@ -285,5 +285,15 @@ class ImageStaging(unittest.TestCase):
             stage(packed); self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc.img'])
 
 
+from unittest import mock
+
+_dev_env = None
+def setUpModule():   # these tests expect NX18_DEV off, whatever the Mac's ~/NX18-work/NX18_DEV says (docs/development.md, "The developer switch")
+    global _dev_env
+    _dev_env = mock.patch.dict(os.environ, {'NX18_DEV': '0'}); _dev_env.start(); setattr(build, 'DEV', None)
+def tearDownModule():
+    if _dev_env is not None: _dev_env.stop()
+
+
 if __name__ == '__main__':
     unittest.main()

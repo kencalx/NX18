@@ -2,6 +2,7 @@
 // settings the running game takes at once (front_ios.m dm_setting_live) and the cheats; the other settings stay on the settings screen before the game starts.
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -10,6 +11,7 @@ void *dm_game_menu(void);   // GameMenu.swift: a retained UIMenu, rebuilt each t
 bool dm_game_panel_open(void *anchor);   // GameMenuPanel.swift: NX 18's panel over the view controller the menu button (anchor, a UIView) is in; false when it cannot show
 void dm_game_panel_close(void);   // closes it: dm_gamepad_panel_closed at once, then a short fade (it takes no touch meanwhile)
 bool dm_game_panel_shown(void);
+uint64_t dm_fs_last_commit_ns(void);   // hle_fs.c: the game's last save commit (CLOCK_MONOTONIC), 0 none yet: the panel header's "Saved 2 min ago"
 void dm_gamepad_panel_closed(void);   // DmGamepad.m: the panel is gone: the menu button's hide timer starts, the controllers go back to the game once their buttons are released
 int dm_pad_layout(void);   // DmGamepad.m: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
 bool dm_pad_layout_offered(int layout);   // Tap only in handheld mode

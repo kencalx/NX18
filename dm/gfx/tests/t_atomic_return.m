@@ -1,6 +1,8 @@
 // Execute a generated IGN image atomic fixture on a native atomic texture (dmsh_atomic.py). First max(value, 1) at the fixture's
 // coordinate, then add its returned old value to texel zero; invalid first coordinates add zero. Every other texel must stay 3.
-// Usage: t_atomic_return <metallib> <expected texel 0> <buffer|2d|2darray|3d>; the image is 8 wide, 4 high, 3 layers or slices deep
+// Usage: t_atomic_return <metallib> <expected texel 0> <buffer|2d|2darray|3d> [<bias> <table id> <image id>]; the image is 8 wide, 4 high, 3 layers or slices deep.
+// A buffer image is bound as the host binds one (nvn_mtl.m tbias_view): a view from word 0 of its buffer, bias elements wider, its texel 0 at word bias, and bias in the
+// shader's offset table (dmsh_abi.h DMSH_TBIAS_BANK, argument buffer member <table id>), so the words before the image are checked to stay 3 as well
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <assert.h>
@@ -8,7 +10,8 @@
 #include "t_mtl4.h"
 
 int main(int argc, const char **argv) { @autoreleasepool {
-    assert(argc == 4);
+    assert(argc == 4 || argc == 7);   // the image is argument buffer member 0 unless the shader has the offset table, whose member comes first
+    const uint32_t bias = argc == 7 ? (uint32_t)atoi(argv[4]) : 0; const int table_id = argc == 7 ? atoi(argv[5]) : -1, image_id = argc == 7 ? atoi(argv[6]) : 0;
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); assert(dev);
     NSError *error = nil;
     id<MTLLibrary> lib = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&error];
@@ -24,8 +27,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
     if (!strcmp(shape, "buffer")) {   // a view of a buffer, as the host makes for buffer images; texels outside it stay 3 too
         data = [dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];
         uint32_t *words = data.contents; for (int i = 0; i < 1024; i++) words[i] = 3;
-        MTLTextureDescriptor *desc = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:MTLPixelFormatR32Uint width:W resourceOptions:data.resourceOptions usage:usage];
-        tex = [data newTextureWithDescriptor:desc offset:0 bytesPerRow:32]; n = 1024;
+        MTLTextureDescriptor *desc = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:MTLPixelFormatR32Uint width:W + bias resourceOptions:data.resourceOptions usage:usage];
+        tex = [data newTextureWithDescriptor:desc offset:0 bytesPerRow:((W + bias) * 4 + 15) / 16 * 16]; n = 1024;
     } else {
         MTLTextureDescriptor *desc = [MTLTextureDescriptor new];
         desc.textureType = !strcmp(shape, "2d") ? MTLTextureType2D : !strcmp(shape, "2darray") ? MTLTextureType2DArray : MTLTextureType3D;
@@ -42,12 +45,18 @@ int main(int argc, const char **argv) { @autoreleasepool {
     id<MTLArgumentEncoder> args = [fn newArgumentEncoderWithBufferIndex:0];
     id<MTLBuffer> ab = [dev newBufferWithLength:args.encodedLength options:MTLResourceStorageModeShared];
     [args setArgumentBuffer:ab offset:0];
-    [args setTexture:tex atIndex:0];
+    [args setTexture:tex atIndex:(NSUInteger)image_id];
+    id<MTLBuffer> table = nil;
+    if (table_id >= 0) {   // the offset table: four uint4, the image's element offset at index 0
+        table = [dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; memset(table.contents, 0, 64); memcpy(table.contents, &bias, 4);
+        [args setBuffer:table offset:0 atIndex:(NSUInteger)table_id];
+    }
     T4 *command = t4_begin();
     id<MTL4ComputeCommandEncoder> enc = t4_compute(command);
     [enc setComputePipelineState:t4_keep(command, pso)];
     t4_buf(command, enc, T4_CS, ab, 0, 0);
     t4_use(command, tex);
+    if (table) t4_use(command, table);
     [enc dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
     t4_end(command, enc); t4_wait(command);
     assert(command->status == MTLCommandBufferStatusCompleted);
@@ -56,8 +65,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
     else if (tex.textureType == MTLTextureType2DArray)
         for (NSUInteger s = 0; s < L; s++) [tex getBytes:out + s * W * H bytesPerRow:W * 4 bytesPerImage:W * H * 4 fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0 slice:s];
     else [tex getBytes:out bytesPerRow:W * 4 bytesPerImage:W * H * 4 fromRegion:MTLRegionMake3D(0, 0, 0, W, H, tex.depth) mipmapLevel:0 slice:0];
-    assert(out[0] == (uint32_t)atoi(argv[2]));
-    for (NSUInteger i = 1; i < n; i++) assert(out[i] == 3);
-    printf("returning IGN atomic on a native %s texture: result and sentinel checks passed\n", shape);
+    assert(out[bias] == (uint32_t)atoi(argv[2]));
+    for (NSUInteger i = 0; i < n; i++) assert(i == bias || out[i] == 3);
+    printf("returning IGN atomic on a native %s texture (element offset %u): result and sentinel checks passed\n", shape, bias);
     return 0;
 }}

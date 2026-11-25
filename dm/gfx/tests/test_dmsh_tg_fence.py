@@ -39,6 +39,9 @@ kernel void main0(device B& out [[buffer(1)]], uint3 gl_LocalInvocationID [[thre
     out._m0[_10] = _39[_10];
 }
 """
+# The same with MEMBAR.CTA; BAR.SYNC between the first store and the loads, as the chain's MSL 3.2 writes them (dmsh_chain.CROSS_MSL)
+MEMBAR_CTA = 'atomic_thread_fence(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture, memory_order_seq_cst, thread_scope_threadgroup);'
+MEMBAR_SCAN = SCAN.replace('    uint _11 =', '    ' + MEMBAR_CTA + '\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    uint _11 =')
 PLAIN = """#include <metal_stdlib>
 using namespace metal;
 struct B { uint _m0[1]; };
@@ -88,9 +91,16 @@ class TgFence(unittest.TestCase):
         self.assertGreater(spill, abi.TG_MAX)
         self.assertEqual(src.count('mem_flags::mem_device | mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_simdgroup'), 2)
 
+    def test_a_spilled_kernel_keeps_membar_fence_and_barrier(self):
+        # MEMBAR.CTA; BAR.SYNC as SPIRV-Cross writes them at the chain's MSL 3.2 (test_dmsh_membar_fence.py): after tg_spill the fence and the barrier order the device slice
+        # the array moved to, and the fence keeps its threadgroup scope (only that group's threads use the slice)
+        out, spill = tg_spill(tg_fence(MEMBAR_SCAN % (abi.TG_MAX // 4 + 1024)))
+        self.assertGreater(spill, abi.TG_MAX)
+        self.assertIn('    ' + MEMBAR_CTA + '\n    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);\n', out)
+
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
-        for src in (tg_fence(SCAN % 64), tg_spill(tg_fence(SCAN % (abi.TG_MAX // 4 + 1024)))[0]):
+        for src in (tg_fence(SCAN % 64), tg_spill(tg_fence(SCAN % (abi.TG_MAX // 4 + 1024)))[0], tg_spill(tg_fence(MEMBAR_SCAN % (abi.TG_MAX // 4 + 1024)))[0]):
             with tempfile.TemporaryDirectory() as d:
                 p = Path(d) / 'k.metal'
                 p.write_text(src)

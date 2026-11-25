@@ -3,10 +3,9 @@
 // to [0, 1], off at (0, 1), nothing passing for min above max or a NaN); on this GPU, that a game turning the test on makes no encoder call and draws as if it were off; then, with
 // the GPU taken as having it (g_dbnd_hw) and the encoder call taken by g_dbnd_test_enc, the calls the replay makes: the bounds at the first draw, none for a draw with the same bounds,
 // again after a copy splits the pass, (0, 1) when the game turns the test off and around a clear inside the pass, none in a pass without depth; draws whose bounds pass nothing are
-// skipped (their pixels checked) where the GPU has the test and drawn where it has not, and DM_DEPTH_BOUNDS=0 ignores all of it. Under DM_NVN_TBDR=1 a pass whose draws test
-// neither depth nor write it but have bounds keeps its depth attached (pass_ds_need), a first draw with bounds keeps the colour load (first_draw_covers), a draw with bounds after
-// a same-target continuation splits the pass to attach the depth, and the readable-tile merge refuses a later-pass draw with bounds against the earlier pass's depth; with the GPU taken
-// as lacking the test (g_dbnd_hw 0) none of that planning changes (dbnd_live): the same passes, loads and stores with the bounds on as off, and the merge taken. Every submission runs under MTL_DEBUG_LAYER=1 (make GAME=<id> check_t_depth_bounds), which
+// skipped (their pixels checked) where the GPU has the test and drawn where it has not, and DM_DEPTH_BOUNDS=0 ignores all of it. A draw with bounds after a same-target
+// continuation tests them against the depth; with the GPU taken as lacking the test (g_dbnd_hw 0) the passes, loads and stores are the same with the bounds on as off.
+// Every submission runs under MTL_DEBUG_LAYER=1 (make GAME=<id> check_t_depth_bounds), which
 // would stop at a depth bounds call reaching this GPU's encoder
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
@@ -159,45 +158,23 @@ int main(void) { @autoreleasepool {
     // A pass without depth: nothing to test, so neither the bounds nor the skip apply
     rec_begin(0); bounds(1, .25f, .75f); tri(); bounds(1, .9f, .1f); tri(); copy_out(0); run(P(nvnCommandBufferEndRecording)(&command));
     CHECK(ncalls == 0 && pixels(0, 0, 255, 0), "no depth attachment: no call, drawn");
-    // The depth attached but neither tested nor written, as a light volume's stencil pass: the bounds read it all the same. Under DM_NVN_TBDR=1 the pass's lookahead
-    // (pass_ds_need) leaves out a depth attachment no draw needs; bounds count as a need, else the draw would see a pass without depth and the bounds would do nothing
+    // The depth attached but neither tested nor written, as a light volume's stencil pass: the bounds read it all the same
     NVNdepthStencilState no_depth, defaults; P(nvnDepthStencilStateSetDefaults)(&no_depth); P(nvnDepthStencilStateSetDefaults)(&defaults);
     P(nvnDepthStencilStateSetDepthTestEnable)(&no_depth, 0); P(nvnDepthStencilStateSetDepthWriteEnable)(&no_depth, 0);
     rec_begin(2); P(nvnCommandBufferBindDepthStencilState)(&command, &no_depth); bounds(1, .25f, .75f); tri(); copy_out(0); run(P(nvnCommandBufferEndRecording)(&command));
-    CHECK(ncalls == 1 && call_is(0, .25f, .75f) && pixels(0, 0, 255, 0), tbdr_on() ? "TBDR: bounds keep the depth attached, sent, drawn" : "depth neither tested nor written: the bounds sent, drawn");
+    CHECK(ncalls == 1 && call_is(0, .25f, .75f) && pixels(0, 0, 255, 0), "depth neither tested nor written: the bounds sent, drawn");
     ncalls = 0; uint64_t empty1 = g_dbnd_empty;
     rec_begin(2); P(nvnCommandBufferBindDepthStencilState)(&command, &no_depth); bounds(1, .9f, .1f); tri(); copy_out(0); run(P(nvnCommandBufferEndRecording)(&command));
-    CHECK(ncalls == 0 && g_dbnd_empty == empty1 + 1 && pixels(0, 0, 0, 255), tbdr_on() ? "TBDR: bounds that pass nothing skip the draw" : "depth neither tested nor written: bounds that pass nothing skip the draw");
-    // The draw that opens a pass with no clear can have its colour load elided when it covers the target (first_draw_covers, under DM_NVN_TBDR=1). Bounds that can reject
-    // something leave the rejected pixels as they were loaded, so they stop the proof as a depth test does (reason 5); bounds that reject nothing do not
-    rec_begin(2); P(nvnCommandBufferBindDepthStencilState)(&command, &no_depth); bounds(1, .25f, .75f); tri(); copy_out(0); run(P(nvnCommandBufferEndRecording)(&command));
-    int why_bounds = g_fd_why;
-    rec_begin(2); P(nvnCommandBufferBindDepthStencilState)(&command, &no_depth); bounds(1, -1, 2); tri(); copy_out(0); run(P(nvnCommandBufferEndRecording)(&command));
-    printf("load elision reason: bounds %d, bounds rejecting nothing %d\n", why_bounds, g_fd_why);
-    if (tbdr_on()) { CHECK(why_bounds == 5, "TBDR: bounds that can reject something keep the colour load");
-        CHECK(g_fd_why != 5, "TBDR: bounds wider than [0, 1] do not stop the load elision"); }
-    // A same-target continuation (SetRenderTargets with the same targets) goes on in the open pass. Under DM_NVN_TBDR=1 the pass was opened without depth, since its lookahead stops at
-    // that SetRenderTargets and its one draw needed none; a later draw with bounds needs the depth as a depth test does, so the pass is split there and reopened with it
+    CHECK(ncalls == 0 && g_dbnd_empty == empty1 + 1 && pixels(0, 0, 0, 255), "depth neither tested nor written: bounds that pass nothing skip the draw");
+    // A same-target continuation (SetRenderTargets with the same targets) goes on in the open pass, its depth attached: a later draw with bounds tests them against it
     ncalls = 0;
     rec_begin(2); P(nvnCommandBufferBindDepthStencilState)(&command, &no_depth); bounds(0, 0, 1); tri();
     { const NVNtexture *colors[] = {&color}; P(nvnCommandBufferSetRenderTargets)(&command, 1, colors, NULL, &depth, NULL); }
     bounds(1, .25f, .75f); tri(); copy_out(0); run(P(nvnCommandBufferEndRecording)(&command));
-    CHECK(ncalls == 1 && call_is(0, .25f, .75f) && pixels(0, 0, 255, 0), "a draw with bounds after a same-target continuation tests them against the depth (the pass is split to attach it)");
+    CHECK(ncalls == 1 && call_is(0, .25f, .75f) && pixels(0, 0, 255, 0), "a draw with bounds after a same-target continuation tests them against the depth");
     P(nvnCommandBufferBeginRecording)(&command); P(nvnCommandBufferBindDepthStencilState)(&command, &defaults); run(P(nvnCommandBufferEndRecording)(&command));
-    // The readable-tile merge (fz_p2_draw): a draw of the later pass, which had no depth, runs with the earlier pass's depth attached. Bounds the game left on do nothing on the
-    // Switch in a pass without depth, but in the merged pass they would test that depth, so such a draw cannot be merged
-    { static typeof(S) Ssave; memcpy(&Ssave, &S, sizeof S); typeof(R) Rsave = R; typeof(g_fz) Fsave = g_fz;
-      tex_t fake_depth = {0}; memset(&g_fz, 0, sizeof g_fz); g_fz.active = 1; g_fz.phase = 2; g_fz.n1 = 1; g_fz.rt2.n = 1; memset(g_fz.p2map, -1, sizeof g_fz.p2map); g_fz.p2map[0] = 0;
-      R.rt.depth = &fake_depth; S.ds.dt = S.ds.dw = S.ds.st = 0; p_draw dw = {NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3}; uint8_t lmap[8]; id<MTLFunction> fn = nil;
-      S.dbnd.on = 0; int plain = fz_p2_draw(compiled, &dw, NULL, lmap, &fn);
-      S.dbnd = (p_depth_bounds){1, .25f, .75f}; int with_bounds = fz_p2_draw(compiled, &dw, NULL, lmap, &fn);
-      CHECK(plain == 1 && with_bounds == 0, "merge: a later-pass draw with bounds on is not run against the earlier pass's depth");
-      g_dbnd_hw = 0; int apple9 = fz_p2_draw(compiled, &dw, NULL, lmap, &fn); g_dbnd_hw = 1;
-      CHECK(apple9 == 1, "merge: on a GPU without the test a draw with bounds is merged as one without (they test nothing there)");
-      memcpy(&S, &Ssave, sizeof S); R = Rsave; g_fz = Fsave; args_dirty_all(); }
     // A GPU without the test (g_dbnd_hw 0 stands for one on any host): the bounds change nothing a pass draws, so they change nothing in how the passes are planned either
-    // (dbnd_live). The two TBDR cases above, with the bounds on and off: the same passes, the same attachment loads and stores (pass_ds_need leaves the depth out,
-    // first_draw_covers skips the colour load, the continuation is not split), no call, drawn
+    // (dbnd_live). The two cases above, with the bounds on and off: the same passes, the same attachment loads and stores, no call, drawn
     g_dbnd_hw = 0; ncalls = 0;
     for (int cont = 0; cont < 2; cont++) {
         uint64_t shape[2][3];
@@ -209,7 +186,6 @@ int main(void) { @autoreleasepool {
             run(P(nvnCommandBufferEndRecording)(&command));
             shape[on][0] = g_stat_pass - passes; shape[on][1] = g_bw_load - loads; shape[on][2] = g_bw_store - stores;
             CHECK(pixels(0, 0, 255, 0), "no test on the GPU: drawn");
-            if (on && !cont && tbdr_on()) CHECK(g_fd_why != 5, "TBDR, no test on the GPU: bounds do not stop the colour load elision");
         }
         printf("%s, no test on the GPU: passes %llu / %llu, load bytes %llu / %llu, store bytes %llu / %llu (bounds off / on)\n", cont ? "continuation" : "first draw",
                shape[0][0], shape[1][0], shape[0][1], shape[1][1], shape[0][2], shape[1][2]);

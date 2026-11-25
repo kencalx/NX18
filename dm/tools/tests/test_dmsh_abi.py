@@ -21,9 +21,11 @@ import dmsh_abi as abi   # noqa: E402
 # where it is not the push constant block's size (DMSH_PUSH_SIZE): a viewport swizzle value in nvn_mtl.m, the start of compute code in a package record in dmsh_build.py,
 # a single texture bind record's flag bit in nvn_obj.h (BIND_TEX1_NOBASE).
 # 0x1000 where it is not the pool table's entry count (DMSH_GMEM_MAP_ENTRIES): the 4 KB page step of nvn_mtl.m's sparse residency map.
+# In nvn_mtl.m also: 'tex', 'samp' and 'img' as log names of why a stage's argument blocks changed (g_aw_name), and 0x100 / 0x110 as the compute run-ahead's stop reasons
+# (scan reasons from 0x100, the g_csh_why_n table of 0x110), none of them the ABI's values.
 # A count may only go down; when it does, lower it here.
 BASELINE = {
-    'dm/gfx/nvn/nvn_mtl.m': {"'?'": 3, "'geometry'": 3, '0x100': 2, '0x1000': 2},
+    'dm/gfx/nvn/nvn_mtl.m': {"'?'": 3, "'geometry'": 3, "'tex'": 1, "'samp'": 1, "'img'": 1, '0x100': 6, '0x110': 4, '0x1000': 2},
     'dm/gfx/nvn/nvn_refl.m': {"'c1'": 1},
     'dm/gfx/nvn/nvn_refl.h': {},
     'dm/gfx/nvn/nvn_obj.h': {'0x100': 1},
@@ -141,9 +143,11 @@ class Host(unittest.TestCase):
     def test_uniform_bounds_agree(self):   # the translator's size table (Ryujinx Constants.cs) is the bank and the slots the host fills (nvn_mtl.m NVN_RB_CBSIZE)
         src = (REPO / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Constants.cs').read_text()
         got = {n: int(v) for n, v in re.findall(r'public const int (Nx\w+) = (\d+);', src)}
-        self.assertEqual(got, {'NxFirstUniformSlot': 3, 'NxUniformSlots': abi.CBSIZE_SLOTS, 'NxUniformSizesBank': abi.CBSIZE_BANK})
+        self.assertEqual(got, {'NxFirstUniformSlot': 3, 'NxUniformSlots': abi.CBSIZE_SLOTS, 'NxUniformSizesBank': abi.CBSIZE_BANK,
+                               'NxBufferImageBiasBank': abi.TBIAS_BANK, 'NxBufferImageBiases': abi.TBIAS_SLOTS})
         self.assertEqual(abi.CBSIZE_SLOTS, 16 - 3 + 1, 'uniform slots c[3] to c[16], as dmsh_build.py reflects them')
         self.assertIn('TranslationFlags.MetalUniformBounds', (REPO / 'dm/gfx/tools/dmsh_xlate/Program.cs').read_text())
+        self.assertIn('TranslationFlags.MetalBufferImageBias', (REPO / 'dm/gfx/tools/dmsh_xlate/Program.cs').read_text())   # the offset table (nvn_mtl.m NVN_RB_TBIAS)
 
 
 class Ratchet(unittest.TestCase):

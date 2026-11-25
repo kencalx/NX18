@@ -64,7 +64,7 @@ static size_t env_size(const char *name, size_t min, size_t align) {
 // ends an app at, which otherwise charges every page the game has touched; they take the same memory while they stay in it, and the kernel can write them to the files when it needs the room, which it
 // cannot do with an iPhone app's anonymous pages. A page never written reads 0, and mprotect (dirty tracking), vm_remap (virtual pools) and Metal's no-copy buffers work on them as on anonymous pages.
 // The cost is disk: the files take up to what the game has touched, and the kernel writes them back as it does any file (Mario Kart World on a 16 GB Mac: 5.6 GB on disk and 8-10 GB of logical writes
-// in 5.5 minutes). So a game that fits stays anonymous: on iOS the files are on when the game's memory pool is larger than the room to the memory limit at start (guest_file_wanted), and on the Mac,
+// in 5.5 minutes). So a game that fits stays anonymous: on iOS the files are on when the game's memory pool and the host's margin are larger than the room to the memory limit at start (guest_file_wanted), and on the Mac,
 // which can swap, only when asked. DM_GUEST_FILE=1 forces them on and 0 off.
 // DM_GUEST_FILE_CHUNK=<size> sets each file's size (default 1G, at least 64M, raised to make at most GF_MAX files; one file when it is not under the block's size). The stall at the system's periodic
 // flush, about every 30 s, grows with the file: threads touching the memory stalled 130-432 ms on an iPhone with one 20 GB file, and on a 16 GB M5 Mac with 1 GB touched up to 148 ms with one 20 GB
@@ -160,23 +160,36 @@ static double guest_file_free_important(void) {
 // (mincore), so the kernel can never drop them again (on the iPad, memory taken from everything else until something is killed), and every other write to the disk fails with ENOSPC
 // (saves, Metal's shader cache, the system's own files). The room counts f_bavail first; only when that is short does it ask for the free space with what the system can purge
 // (guest_file_free_important, at most every 10 s), and goes on on that while f_bavail's own room stays above half the minimum, since the system purges only as the disk fills.
-// Every 10th second one line, [RED] with under a gigabyte to the minimum: what the disk cost so far and the footprint's parts
+// Every 10th second one line, [RED] with under a gigabyte to the minimum: what the disk cost so far and the footprint's parts.
+// The dirty count (guest_file_dirty) takes 190-275 ms on an iPhone for a 9 GB pool (every Switch 2 title), so it runs every 10 s only while it can matter: while the disk's free space,
+// less the whole block (dirty pages are file pages of the block, so they never take more), is within a gigabyte of the minimum (GF_COUNT_NEAR; the [RED] line's margin), and at once
+// when the disk first comes that near. Farther from it no count can stop the game or turn the line red, and the count runs every GF_COUNT_FAR for the log alone (the round's logs had
+// 360 GB free). DM_GUEST_FILE_SCAN counts afresh before each scan
+enum { GF_COUNT_NEAR = 10, GF_COUNT_FAR = 60 };
+static unsigned guest_file_count_every(double avail, double reserve, uint64_t min_free) {
+    if (!min_free) return GF_COUNT_FAR;   // DM_GUEST_FILE_MIN_FREE=0: nothing to stop
+    return avail < 0 || avail - reserve < (double)min_free + 1073741824.0 ? GF_COUNT_NEAR : GF_COUNT_FAR;   // fstatfs failed: as near
+}
+__attribute__((weak)) void mtl_unwire_report(void) {}   // nvn_mtl.m's takes its place; this one for builds without the graphics layer (the host tests)
 static void *guest_file_thread(void *arg) {
     (void)arg; const double G = 1073741824.0; size_t pg = (size_t)getpagesize(); char *vec = malloc(g_reserve / pg + 1);
     const char *sc = getenv("DM_GUEST_FILE_SCAN"); int scan = sc && atoi(sc) > 0, purge_told = 0;
-    double imp = -1, dirty = -1, count_ms = 0; unsigned imp_at = 0;
+    double imp = -1, dirty = -1, count_ms = 0; unsigned imp_at = 0, count_at = 0, every = GF_COUNT_NEAR, counts = 0;
     pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
     for (unsigned sec = 1;; sec++) {
         sleep(1);
         struct statfs fs; struct rusage_info_v4 ru; task_vm_info_data_t vi; mach_msg_type_number_t n = TASK_VM_INFO_COUNT; struct stat st; struct timespec t0, t1;
         if (sec % 10 == 0) guest_file_sweep();
-        if (sec % 10 == 1) {   // every 10 s, from the first second (a burst of new dirty pages between two counts is what the margin's other half is for)
+        int fs_ok = !fstatfs(g_gf_tab[0], &fs); double avail = fs_ok ? (double)fs.f_bavail * fs.f_bsize : -1;
+        unsigned was = every; every = guest_file_count_every(avail, (double)g_reserve, g_gf_min_free);
+        // From the first second; then every `every` seconds, at once when the disk comes near the minimum (a burst of new dirty pages between two counts is what the margin's other
+        // half is for), and before each DM_GUEST_FILE_SCAN scan, which reads the pages this count marks
+        if (!count_at || sec - count_at >= every || every < was || (scan && sec % 30 == 0)) {
             clock_gettime(CLOCK_MONOTONIC, &t0);
-            dirty = vec ? guest_file_dirty(vec, pg) : -1;
+            dirty = vec ? guest_file_dirty(vec, pg) : -1; count_at = sec; counts++;
             clock_gettime(CLOCK_MONOTONIC, &t1); count_ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
         }
-        double need = dirty > 0 ? dirty : 0, held = 0;
-        int fs_ok = !fstatfs(g_gf_tab[0], &fs); double avail = fs_ok ? (double)fs.f_bavail * fs.f_bsize : -1, room = avail - need;
+        double need = dirty > 0 ? dirty : 0, held = 0, room = avail - need;
         if (fs_ok && g_gf_min_free && room < (double)g_gf_min_free) {
             if (imp < 0 || sec - imp_at >= 10) { imp = guest_file_free_important(); imp_at = sec; }
             if (room < g_gf_min_free / 2.0 || imp - need < (double)g_gf_min_free) {
@@ -193,16 +206,31 @@ static void *guest_file_thread(void *arg) {
         for (int i = 0; i < g_gf_n; i++) if (!fstat(g_gf_tab[i], &st)) held += st.st_blocks * 512.0;
         int ru_ok = !proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&ru);
         if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &n) != KERN_SUCCESS) memset(&vi, 0, sizeof vi);
-        LOG("%s[mem] guest file: %.2f GB allocated on disk, %.2f GB dirty in memory (%.0f ms to count, every 10 s), %.2f GB given back as holes; process read %.2f GB, %llu page-ins, logical writes %.2f GB; "
+        LOG("%s[mem] guest file: %.2f GB allocated on disk, %.2f GB dirty in memory (counted %u s ago in %.0f ms, every %u s: %s; %u counts), %.2f GB given back as holes; process read %.2f GB, %llu page-ins, logical writes %.2f GB; "
             "footprint %.2f GB (internal %.2f, compressed %.2f, peak so far %.2f), file pages mapped (external) %.2f GB; %.1f GB free on its disk (%.1f with what the system can purge)",
-            g_gf_min_free && fs_ok && (imp > avail ? imp : avail) - need < g_gf_min_free + G ? "[RED] " : "", held / G, dirty / G, count_ms, atomic_load(&g_gf_punched) / G,
+            g_gf_min_free && fs_ok && (imp > avail ? imp : avail) - need < g_gf_min_free + G ? "[RED] " : "", held / G, dirty / G, sec - count_at, count_ms, every,
+            every == GF_COUNT_NEAR ? "the disk is near the minimum" : "far from the minimum", counts, atomic_load(&g_gf_punched) / G,
             ru_ok ? ru.ri_diskio_bytesread / G : -1, ru_ok ? (unsigned long long)ru.ri_pageins : 0ull,
             ru_ok ? ru.ri_logical_writes / G : -1, vi.phys_footprint / G, vi.internal / G, vi.compressed / G, ru_ok ? ru.ri_lifetime_max_phys_footprint / G : -1, vi.external / G, avail / G, imp / G);
+        mtl_unwire_report();   // beside it: the pools the upload-only unwire took out of the residency set (DM_NVN_UNWIRE_UP), and the resident pools by class
     }
     return NULL;
 }
-// Whether the guest goes in files: DM_GUEST_FILE when it is set, otherwise when the game's memory pool does not fit the room to the memory limit (room 0: no limit known, as on the Mac)
-static int guest_file_wanted(const char *e, uint64_t pool, uint64_t room) { return e && *e ? atoi(e) > 0 : room && pool > room; }
+// The host's own memory to come, which the room at start (os_proc_available_memory, read before the game runs) has to hold beside the guest's pages: mostly graphics memory, Metal's
+// copies of the game's textures (Metal cannot sample the guest's block-linear storage), render targets and upload staging, then malloc. It follows what the game keeps in its pool, from
+// a tenth of the pool to all of it, while the guest touches only part of its pool; what has to fit is the two together. Upstream's measurements (nxnative fb26adfc9, a 16 GB Mac with the
+// guest in files, host memory = footprint less DM_MEMSTAT's guest class, as a share of the pool): The Binding of Isaac 0.21, Mario Golf: Super Rush 1.23, Fast Fusion at least 0.77, Ocarina
+// of Time about 1.24, and Mario Kart World at least 1.33, where iOS ended it on an iPad with 11.97 GB of room after 28 minutes, the guest anonymous because its pool alone fitted
+// (nxnative issue #1184). Half the pool covers them all, and with it a Switch game's 3.21 GB pool stays anonymous with 6 and 8 GB limits while every 9 GB pool goes in files on iOS.
+// DM_GUEST_FILE_HOST=<size> sets the margin instead (0 for none, the rule before it)
+#define GUEST_HOST_PCT 50
+static uint64_t guest_host_margin(uint64_t pool) {
+    const char *h = getenv("DM_GUEST_FILE_HOST");
+    return h && *h ? env_size("DM_GUEST_FILE_HOST", 0, 0x100000) : pool * GUEST_HOST_PCT / 100;
+}
+// Whether the guest goes in files: DM_GUEST_FILE when it is set, otherwise when the game's memory pool and the host's margin (guest_host_margin) do not fit the room to the memory limit
+// (room 0: no limit known, as on the Mac)
+static int guest_file_wanted(const char *e, uint64_t pool, uint64_t host, uint64_t room) { return e && *e ? atoi(e) > 0 : room && pool + host > room; }
 // A new file of this process's own, never a link's target (O_EXCL, O_NOFOLLOW): one a dead process with the same number left is replaced
 static int guest_file_open(const char *path) {
     const int fl = O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC;
@@ -271,11 +299,12 @@ static int guest_files_map(const char *dir, size_t chunk, int n, struct statfs *
 static void guest_file_init(void) {
     const double G = 1073741824.0; const char *e = getenv("DM_GUEST_FILE"), *d = getenv("DM_GUEST_FILE_DIR"), *mf = getenv("DM_GUEST_FILE_MIN_FREE");
 #if TARGET_OS_IPHONE
-    uint64_t room = os_proc_available_memory();
-    int want = guest_file_wanted(e, DM_GAME_APP_POOL, room);
-    LOG("[mem] guest memory: memory pool %.2f GB, room to the memory limit %.2f GB, DM_GUEST_FILE %s: %s", DM_GAME_APP_POOL / G, room / G, e && *e ? e : "unset", want ? "in files" : "anonymous");
+    uint64_t room = os_proc_available_memory(), host = guest_host_margin(DM_GAME_APP_POOL);
+    int want = guest_file_wanted(e, DM_GAME_APP_POOL, host, room);
+    LOG("[mem] guest memory: memory pool %.2f GB and the host's margin %.2f GB (%s), room to the memory limit %.2f GB, DM_GUEST_FILE %s: %s", DM_GAME_APP_POOL / G, host / G,
+        getenv("DM_GUEST_FILE_HOST") && *getenv("DM_GUEST_FILE_HOST") ? "DM_GUEST_FILE_HOST" : "half the pool", room / G, e && *e ? e : "unset", want ? "in files" : "anonymous");
 #else
-    int want = guest_file_wanted(e, DM_GAME_APP_POOL, 0);
+    int want = guest_file_wanted(e, DM_GAME_APP_POOL, guest_host_margin(DM_GAME_APP_POOL), 0);   // no limit known: only the switch
 #endif
     if (!want) return;
     g_gf_min_free = mf && *mf ? env_size("DM_GUEST_FILE_MIN_FREE", 0, 0x100000) : (uint64_t)2 << 30;
@@ -295,9 +324,6 @@ static void guest_file_init(void) {
     if (g_gf_min_free && most < DM_GAME_APP_POOL + g_gf_min_free)
         LOG("[RED] [mem] guest file: the files may take up to the memory pool, %.1f GB, and %.1f GB is free: the game is stopped if under %.1f GB is left", DM_GAME_APP_POOL / G, most / G, g_gf_min_free / G);
     if (strcmp(fs.f_fstypename, "apfs") || !(fs.f_flags & MNT_LOCAL)) LOG("[RED] [mem] guest file: not on a local APFS volume, where it may not be sparse, or be slow");
-    pthread_t th; int rc = pthread_create(&th, NULL, guest_file_thread, NULL);
-    if (!rc) pthread_detach(th);
-    else LOG("[RED] [mem] guest file: no thread to watch it (error %d): no 10-s line, and nothing stops the game when its disk fills", rc);
 }
 
 static void *alias_windows_thread(void *arg);
@@ -338,13 +364,22 @@ static void mem_init_once(void) {
     if (!(g_alias_exposed = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_exposed))) die("alias exposure bitmap calloc");
     if (!(g_alias_rel = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_rel)) || !(g_alias_aged = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_aged))) die("alias release bitmap calloc");
     atomic_store_explicit(&g_mem_ready, 1, memory_order_release);
+    // The watcher starts only now (upstream NXNative 71a9a829d): its dirty-page count reads the guest layout (g_heap, g_stack, g_alias) and its sweep the alias bitmaps, which the
+    // thread's creation publishes to it. Started in guest_file_init, its first count a second later could read them before they were set if this function took that long
+    if (g_gf_n) {
+        pthread_t th; int rc = pthread_create(&th, NULL, guest_file_thread, NULL);
+        if (!rc) pthread_detach(th);
+        else LOG("[RED] [mem] guest file: no thread to watch it (error %d): no 10-s line, and nothing stops the game when its disk fills", rc);
+    }
     LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)g_reserve, g_heap, g_alias, g_stack);
     if ((uint64_t)(uintptr_t)g_alias > UINT64_C(1) << 39) LOG("[mem] the heap and stacks reach past 2^39, which a Switch's addresses never do: a crash on a cut-off pointer points here (DM_ALIAS_SIZE=<profile's mem_alias> keeps them lower)");
     const char *aw = getenv("DM_ALIAS_WINDOWS");
     if (aw && atoi(aw) > 0) { pthread_t th; if (!pthread_create(&th, NULL, alias_windows_thread, (void *)(uintptr_t)atoi(aw))) pthread_detach(th); }
     const char *rf = getenv("DM_REGIONS");
     if (rf && *rf) { pthread_t th; if (!pthread_create(&th, NULL, regions_thread, (void *)rf)) pthread_detach(th); }
+    if (dm_mem_ready_hook) dm_mem_ready_hook();   // after the block: a mapping made now (the bundled pipeline archive's, 4.6 GB for Ocarina of Time) cannot take the room it needs
 }
+void (*dm_mem_ready_hook)(void);
 static void mem_init(void) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
     pthread_once(&once, mem_init_once);
@@ -410,6 +445,33 @@ uint64_t dm_guest_file_trim(void) {
     uint64_t b0 = atomic_load(&g_gf_punched);
     guest_file_sweep();
     return atomic_load(&g_gf_punched) - b0;
+}
+// The files' pages under [p, p + n) asked for ahead (F_RDADVISE): the kernel reads what is not in memory into the file cache and returns before the reads complete. Nothing is mapped,
+// wired or dirtied (a mapped page that comes in this way stays clean), and a hole reads as a clean zero page. For a shared buffer over the files about to join the residency set (nvn_mtl.m
+// fwire_advise_run: merged ranges, in batches on a queue of its own with no lock held), so the mlock calls before its commit find the pages in memory or on their way. Any thread,
+// after the guest's memory is made (g_mem_ready); the files stay open for the run. The bytes asked for; 0 while the guest is anonymous or for a range outside the block
+uint64_t dm_guest_file_advise(const void *p, size_t n) {
+    if (!atomic_load_explicit(&g_mem_ready, memory_order_acquire) || !g_gf_n) return 0;
+    uintptr_t b0 = (uintptr_t)g_as, b1 = b0 + g_reserve, lo = (uintptr_t)p < b0 ? b0 : (uintptr_t)p, hi = (uintptr_t)p + n > b1 ? b1 : (uintptr_t)p + n; uint64_t asked = 0;
+    while (lo < hi) {
+        size_t off = lo - b0, k = off / g_gf_chunk, in = off - k * g_gf_chunk, fsz = (int)k == g_gf_n - 1 ? g_reserve - k * g_gf_chunk : g_gf_chunk;
+        size_t len = hi - lo < fsz - in ? hi - lo : fsz - in; if (len > ((size_t)1 << 30)) len = (size_t)1 << 30;   // ra_count is an int
+        struct radvisory ra = {(off_t)in, (int)len};
+        if (!fcntl(g_gf_tab[k], F_RDADVISE, &ra)) asked += len;
+        lo += len;
+    }
+    return asked;
+}
+// Whether [p, p + n) lies in the guest's files, from the block's layout alone: 1 wholly inside the block with the guest in files, 0 wholly inside it with the guest anonymous, -1
+// not wholly inside it, or before the guest's memory is made (the caller asks the kernel). With the files, every page of the block is MAP_SHARED over them from guest_files_map
+// to the end: what the game gives back is only protected and punched (guest_release), MapMemory copies, and nothing maps anonymous memory over them. For the residency's
+// pre-wire (nvn_mtl.m fwire_range, under g_res_mu and often g_mu, for every shared buffer that joins the set): a few loads and no system call, where the kernel's look at a
+// buffer's mapping took 0.1-3.7 ms an add on a 1 GB file (memory.md, "The residency commit froze over the guest's files"). Any thread, as dm_guest_file_advise
+int dm_guest_file_backed(const void *p, size_t n) {
+    if (!atomic_load_explicit(&g_mem_ready, memory_order_acquire)) return -1;
+    uintptr_t b0 = (uintptr_t)g_as, a = (uintptr_t)p;
+    if (a < b0 || a - b0 >= g_reserve || n > g_reserve - (a - b0)) return -1;
+    return g_gf_n != 0;
 }
 // A hole-free read / write of guest heap bytes for the cheat VM (hle_cheats.c): under g_map_lock no concurrent SetHeapSize
 // can mprotect the span away between the bounds check and the copy (both hold this same lock), so a live heap address cannot

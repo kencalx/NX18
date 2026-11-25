@@ -26,6 +26,9 @@ struct GameMenuColumn: Identifiable {
 enum GameMenuLayout {
     // The sections in at most n columns. Fewer sections than columns: each its own column, and the tallest split over more, while it has more than split rows per column (the
     // first page keeps a short section whole; a page of options or cheats spreads out). More sections than columns: in order, cut where the columns come out even
+    // The preset chips' columns: 2 × 2 for four (or two), one row of three for three, so the grid never shows an empty slot
+    static func presetColumns(_ count: Int) -> Int { count == 3 ? 3 : 2 }
+
     static func columns(_ sections: [GameMenuSection], fit n: Int, split: Int) -> [GameMenuColumn] {
         var merged: [GameMenuSection] = []   // neighbours under one heading (More: Cheats, then Settings screen at start and Share log) are one block
         for s in sections where !s.items.isEmpty {
@@ -72,6 +75,28 @@ enum GameMenuLayout {
         return out
     }
 
+    // The first page's step (gate-ui §19.2): zones side by side (the preset chooser, then the tiles and doors), each a list of lines. Up / down stay in the zone, keeping the
+    // column where the next line has it; left / right go along the line and past its end into the next zone, at the same line or its last
+    static func homeStep(_ id: String?, _ dx: Int, _ dy: Int, in zones: [[[String]]]) -> String? {
+        let zs = zones.map { $0.filter { !$0.isEmpty } }.filter { !$0.isEmpty }
+        func place(_ id: String) -> (z: Int, l: Int, c: Int)? {
+            for (z, zone) in zs.enumerated() { for (l, line) in zone.enumerated() { if let c = line.firstIndex(of: id) { return (z, l, c) } } }
+            return nil
+        }
+        guard let id, let p = place(id) else { return zs.first?.first?.first }
+        let zone = zs[p.z]
+        if dy != 0 {
+            let l = Swift.min(Swift.max(p.l + dy.signum(), 0), zone.count - 1)
+            return zone[l][Swift.min(p.c, zone[l].count - 1)]
+        }
+        let c = p.c + dx.signum()
+        if zone[p.l].indices.contains(c) { return zone[p.l][c] }
+        let z = p.z + dx.signum()
+        guard zs.indices.contains(z) else { return id }
+        let line = zs[z][Swift.min(p.l, zs[z].count - 1)]
+        return dx > 0 ? line.first : line.last
+    }
+
     // The controller's step from id in columns: up / down in its column (no wrap), left / right to the next column at the same row, or the column's last row
     static func step(_ id: String?, _ dx: Int, _ dy: Int, in columns: [GameMenuColumn]) -> String? {
         let grid = columns.map(\.ids).filter { !$0.isEmpty }
@@ -87,27 +112,37 @@ enum GameMenuLayout {
 @MainActor final class GameMenuPanelModel: ObservableObject {
     struct Page { let id: String?; let title: String; let subtitle: String?; let sections: [GameMenuSection]; let options: Bool }
     @Published private(set) var root: [GameMenuSection] = []
+    @Published private(set) var home = GameMenuHome()   // the first page: tiles and doors (GameMenu.swift gameMenuHome); the chips come from the launcher's model
+    @Published private(set) var toast: String?          // a preset change's toast (gate-ui §19.3, W9), with Undo while the change can be undone; about 5 s
+    @Published private(set) var pending: [String] = []  // the preset rows that wait for the next start: "At next start: 30 fps"
+    let launcher = gameMenuModel                         // the Gate's model: the presets, Custom and Back (nil in an app without a launcher: no chooser)
+    var homeZones: [[[String]]] = []                     // the first page as last laid out: the controller's steps go by it
+    private var toastTask: Task<Void, Never>?
     @Published private(set) var stack: [String] = []   // the ids of the choice or submenu open, outermost first
     @Published var focus: String?
     @Published var anchorBottom: CGFloat = 0            // the menu button's lower edge in the panel's view: the landscape panel starts below it (GameMenuPanelHost keeps it, rotation too)
     let title = gameMenuTitle()
     weak var anchor: UIView?                            // the menu button
     var closed = false                                  // closing: the controller's presses during the fade do nothing
+    @Published var leaving = false                      // closing: the panel leaves (its rim dematerializes, the content fades), then the host goes
     var columnsShown: [GameMenuColumn] = []            // the page as last laid out: the controller's steps go by it
     var close: () -> Void = {}
 
     init(anchor: UIView?) {
         self.anchor = anchor
         refresh()
-        focus = root.first?.items.first?.id   // where the controller's ring starts (drawn only while a controller is connected)
+        // where the controller's ring starts (drawn only while a controller is connected): the chosen preset's chip, else the first tile
+        if let m = launcher, m.hasPresets { focus = "preset:" + (m.activePreset ?? m.basePreset).rawValue } else { focus = home.tiles.first?.id ?? root.first?.items.first?.id }
     }
 
     func refresh() {
         root = gameMenuSections()
+        home = gameMenuHome()
+        pending = launcher.map(gameMenuPending) ?? []
         if let gone = stack.firstIndex(where: { find($0) == nil }) { stack.removeSubrange(gone...) }   // a page gone (the cheats reloaded to none), and every page opened from it
     }
     private func find(_ id: String, in sections: [GameMenuSection]? = nil) -> GameMenuItem? {
-        for s in sections ?? root { for i in s.items {
+        for s in sections ?? (root + [GameMenuSection(id: "home", items: home.tiles + home.doors)]) { for i in s.items {
             if i.id == id { return i }
             if case .submenu(let inner) = i.kind, let f = find(id, in: inner) { return f }
         } }
@@ -124,6 +159,7 @@ enum GameMenuLayout {
 
     func activate(_ item: GameMenuItem) {
         guard !item.disabled else { return }
+        if item.id == "customize.back" { backToBase(); if stack.last == "door.customize" { focus = page.sections.last?.items.last?.id }; return }   // through the chooser: the toast and the live rows
         switch item.kind {
         case .choice(let o):
             stack.append(item.id); focus = (o.first(where: \.isOn) ?? o.first)?.id
@@ -132,6 +168,7 @@ enum GameMenuLayout {
         case .action, .toggle:
             if item.closesMenu { close(); item.perform?(anchor); return }
             let option = page.options
+            if item.id.hasPrefix("row:"), toast != nil { toastTask?.cancel(); toast = nil; launcher?.dropUndo() }   // a hand change ends the preset step's Undo: X then goes back to the base
             item.perform?(anchor)
             refresh()
             if option { back() }   // a choice picked: back to its row, which shows it
@@ -145,8 +182,43 @@ enum GameMenuLayout {
         guard let last = stack.popLast() else { close(); return }
         focus = last
     }
+    // The preset chooser (gate-ui §19.3): a chip, L / R, X, Back to X and Undo move the values as on the Gate; the live rows apply now, the rest at the next start
+    func choosePreset(_ p: LauncherPreset) { change { $0.applyPreset(p) } }
+    func stepPreset(_ d: Int) { change { $0.stepPreset(d) } }
+    func backToBase() { change { $0.backToBase() } }
+    func undo() {
+        guard let m = launcher, m.undoState != nil else { return }
+        _ = gameMenuApplyPreset(m) { m.undo() }
+        toastTask?.cancel(); toast = nil
+        refresh()
+        AccessibilityNotification.Announcement("Undone: \(m.presetLabel)").post()
+    }
+    private func change(_ f: (LauncherModel) -> Void) {
+        guard let m = launcher, m.hasPresets else { return }
+        let r = gameMenuApplyPreset(m) { f(m) }
+        refresh()
+        if let p = m.activePreset { focus = focus?.hasPrefix("preset:") == true ? "preset:" + p.rawValue : focus }
+        let words = r.now.isEmpty ? (r.next.isEmpty ? nil : "at next start") : r.now.joined(separator: ", ")
+        toast = m.presetLabel + (words.map { " · " + $0 } ?? "")
+        AccessibilityNotification.Announcement(toast! + (r.next.isEmpty || r.now.isEmpty ? "" : ". At next start: " + r.next.joined(separator: ", "))).post()
+        toastTask?.cancel()
+        toastTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            self?.toast = nil; self?.launcher?.dropUndo()
+        }
+    }
+    var canUndo: Bool { toast != nil && launcher?.undoState != nil }
+
     func handle(_ e: LauncherPadEvent) {
         if closed { return }
+        switch e {   // the chooser's buttons act on every page (L / R only inside the menu: the game has no controllers while it is open)
+        case .l: stepPreset(-1); return
+        case .r: stepPreset(1); return
+        case .x: if canUndo { undo() } else if launcher?.isCustom == true { backToBase() }; return
+        default: break
+        }
+        if page.id == nil { handleHome(e); return }
         let cols = columnsShown
         let ids = Set(cols.flatMap(\.ids))
         // no ring on a row shown (the rows changed under it): the first row gets it, and only B and + act at once; A picks nothing the player has not seen ringed
@@ -159,7 +231,25 @@ enum GameMenuLayout {
         case .a: if let f = focus, let item = page.sections.lazy.flatMap(\.items).first(where: { $0.id == f }) { activate(item) }
         case .b: back()
         case .plus: close()
-        case .x, .y, .minus, .l, .r, .zl, .zr: break   // X, -, ZL and ZR: the guide viewer's (LauncherGuidePageModel), nothing here
+        case .x, .y, .minus, .l, .r, .zl, .zr: break   // -, ZL and ZR: nothing here (L, R and X above)
+        }
+    }
+    private func handleHome(_ e: LauncherPadEvent) {
+        let zones = homeZones
+        let ids = Set(zones.flatMap { $0.flatMap { $0 } })
+        if focus == nil || !ids.contains(focus!) { focus = GameMenuLayout.homeStep(nil, 0, 0, in: zones); if e != .b && e != .plus { return } }
+        switch e {
+        case .up: focus = GameMenuLayout.homeStep(focus, 0, -1, in: zones)
+        case .down: focus = GameMenuLayout.homeStep(focus, 0, 1, in: zones)
+        case .left: focus = GameMenuLayout.homeStep(focus, -1, 0, in: zones)
+        case .right: focus = GameMenuLayout.homeStep(focus, 1, 0, in: zones)
+        case .a:
+            guard let f = focus else { return }
+            if f.hasPrefix("preset:"), let p = LauncherPreset(rawValue: String(f.dropFirst(7))) { choosePreset(p) }
+            else if f == "back" { backToBase() }
+            else if let item = (home.tiles + home.doors).first(where: { $0.id == f }) { activate(item) }
+        case .b, .plus: close()
+        default: break
         }
     }
 }
@@ -169,8 +259,12 @@ struct GameMenuPanelView: View {
     @StateObject private var pad = LauncherGamepad()
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @ScaledMetric(relativeTo: .footnote) private var columnWidth: CGFloat = 180
-    @ScaledMetric(relativeTo: .footnote) private var optionWidth: CGFloat = 140
+    @Environment(\.colorScheme) private var scheme
+    @ScaledMetric(relativeTo: .footnote) private var columnWidth: CGFloat = 200
+    @ScaledMetric(relativeTo: .footnote) private var optionWidth: CGFloat = 150
+    @State private var vitalsTick = 0   // DmVitals.m posts after each 1 s tick while the menu is open: the header's line and the save minute follow it
+    @State private var shown = false   // the inner content's fade and slide (the glass rim materializes on its own: no opacity on glass, gate-ui §19.4)
+    @Namespace private var ringSpace   // the shared focus ring (LauncherPanel.swift GateRing): it slides from tile to tile
 
     var body: some View {
         GeometryReader { geo in
@@ -186,97 +280,324 @@ struct GameMenuPanelView: View {
                     .contentShape(Rectangle())
                     .onTapGesture { model.close() }
                     .accessibilityHidden(true)
-                panel(width: width, maxHeight: maxHeight, landscape: landscape)
-                    .padding(.top, landscape ? top : 0)
-                    .padding(.bottom, landscape ? 0 : 10)
+                if !model.leaving {
+                    panel(width: width, maxHeight: maxHeight, landscape: landscape)
+                        .padding(.top, landscape ? top : 0)
+                        .padding(.bottom, landscape ? 0 : 10)
+                        .glassEffectTransition(.materialize)
+                }
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
+        .environment(\.gateRing, ringSpace)
         .dynamicTypeSize(...DynamicTypeSize.accessibility3)
         .nxTextRoot()
         .task { await pad.run { model.handle($0) } }   // only while the panel is up: the task ends with it
+        .onReceive(NotificationCenter.default.publisher(for: .DmVitalsTick)) { _ in vitalsTick &+= 1 }
+        .onAppear {   // the content's 160 ms fade and 6 pt slide; under Reduce Motion a jump in dark, a fade with no slide in light (a grey slab never pops on over a dark game)
+            if reduceMotion && scheme == .dark { shown = true } else { withAnimation(.easeOut(duration: 0.16)) { shown = true } }
+        }
+        .animation(reduceMotion ? nil : .spring(duration: 0.18), value: pad.connected ? model.focus : nil)   // the ring slides with the controller's focus
     }
 
     private func panel(width: CGFloat, maxHeight: CGFloat, landscape: Bool) -> some View {
         let page = model.page
-        let inner = width - 24
+        let inner = width - 36
         let n = max(1, Int((inner + 8) / ((page.options ? optionWidth : columnWidth) + 8)))
         let columns = GameMenuLayout.columns(page.sections, fit: n, split: page.options || page.id != nil ? 1 : 2)
         let colWidth = (inner - CGFloat(max(columns.count - 1, 0)) * 8) / CGFloat(max(columns.count, 1))
-        return VStack(alignment: .leading, spacing: 0) {
-            header(page, width: width)
-                .accessibilityElement(children: .contain)
-                .accessibilitySortPriority(Double(columns.count + 1))   // VoiceOver: the header first, then the columns left to right (grid)
-            ScrollViewReader { proxy in
-                ViewThatFits(in: .vertical) {
-                    grid(columns, page: page, colWidth: colWidth)
-                    ScrollView(.vertical) { grid(columns, page: page, colWidth: colWidth) }.scrollIndicators(.automatic)
+        let zoned = landscape && !typeSize.isAccessibilitySize && width >= 640
+        let head = header(page, width: width)
+            .accessibilityElement(children: .contain)
+            .accessibilitySortPriority(Double(columns.count + 2))   // VoiceOver: the header first, then the page, then the strip
+        // A page that fits stands between the header and the strip; one that scrolls runs under them as bars (safeAreaBar), with the system's soft scroll edge effect keeping
+        // them clear of it (Apple HIG, Scroll views, iOS 27), as the Gate's panel does
+        return ScrollViewReader { proxy in
+            ViewThatFits(in: .vertical) {
+                VStack(alignment: .leading, spacing: 0) {
+                    head
+                    pageBody(page, columns: columns, colWidth: colWidth, zoned: zoned, inner: inner)
+                    strip(page)
                 }
-                .onChange(of: model.focus) { _, f in
-                    guard let f, pad.connected else { return }
-                    if reduceMotion { proxy.scrollTo(f) } else { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(f) } }   // as the settings screen scrolls
-                }
+                ScrollView(.vertical) { pageBody(page, columns: columns, colWidth: colWidth, zoned: zoned, inner: inner) }
+                    .scrollIndicators(.automatic)
+                    .safeAreaBar(edge: .top, spacing: 0) { head }
+                    .safeAreaBar(edge: .bottom, spacing: 0) { strip(page) }
+                    .scrollEdgeEffectStyle(.automatic, for: .vertical)   // the HIG's preference: the header and strip are text outside glass, for which automatic gives the firmer separation
+            }
+            .onChange(of: model.focus) { _, f in
+                guard let f, pad.connected else { return }
+                if reduceMotion { proxy.scrollTo(f) } else { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(f) } }   // as the Gate scrolls
             }
         }
+        .overlay(alignment: .bottom) { if let t = model.toast { toast(t).padding(.bottom, pad.connected ? 52 : 34).transition(.opacity) } }
+        .opacity(shown ? 1 : 0).offset(y: shown || reduceMotion ? 0 : (landscape ? -6 : 6))   // the inner content only: the rim stays glass
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(MenuColor.slab).padding(6))   // the solid inner fill, 6 pt inside the rim (gate-ui §19.2)
         .frame(width: width)
-        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(NX18Palette.background.opacity(0.84)))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+        .nx18Surface(RoundedRectangle(cornerRadius: 22, style: .continuous), fill: MenuColor.slab, hairline: MenuColor.hairline, art: true)   // the glass rim over the running game
         .frame(maxHeight: maxHeight, alignment: landscape ? .top : .bottom)   // the most it may take: a page that fits is as tall as its rows (ViewThatFits), a taller one scrolls
-        .onAppear { model.columnsShown = columns }
+        .onAppear { model.columnsShown = columns; model.homeZones = homeZones(zoned: zoned) }
         .onChange(of: columns.map(\.ids)) { _, _ in model.columnsShown = columns }
+        .onChange(of: homeZones(zoned: zoned)) { _, z in model.homeZones = z }
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
         .accessibilityAction(.escape) { model.back() }
+        .gesture(swipeClose(landscape: landscape))
+    }
+
+    // A swipe on the panel toward the edge it came from closes it (up in landscape, down in portrait); a right swipe from its leading edge goes back a page
+    private func swipeClose(landscape: Bool) -> some Gesture {
+        DragGesture(minimumDistance: 24).onEnded { g in
+            let dx = g.translation.width, dy = g.translation.height
+            if model.page.id != nil, g.startLocation.x < 34, dx > 60, abs(dy) < 40 { model.back(); return }
+            if abs(dy) > 60, abs(dy) > abs(dx) * 1.5, (landscape ? dy < 0 : dy > 0) { model.close() }
+        }
+    }
+
+    @ViewBuilder private func pageBody(_ page: GameMenuPanelModel.Page, columns: [GameMenuColumn], colWidth: CGFloat, zoned: Bool, inner: CGFloat) -> some View {
+        if page.id == nil { home(zoned: zoned, inner: inner) } else { grid(columns, page: page, colWidth: colWidth) }
     }
 
     @ViewBuilder private func header(_ page: GameMenuPanelModel.Page, width: CGFloat) -> some View {
         HStack(spacing: 10) {
             if page.id != nil {
                 Button { model.back() } label: {
-                    Image(systemName: "chevron.left").font(.subheadline.weight(.semibold)).foregroundStyle(NX18Palette.cyan)   // system: symbol
-                        .frame(width: 30, height: 30).contentShape(Rectangle())
+                    Image(systemName: "chevron.left").font(.subheadline.weight(.semibold)).foregroundStyle(MenuColor.line)   // system: symbol
+                        .frame(width: 44, height: 44).contentShape(Rectangle())   // 44 pt (gate-ui §19.5)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Back")
                 VStack(alignment: .leading, spacing: NXFont.name == nil ? 1 : 3) {
-                    Text(page.title).nxFont(.footnote, weight: .semibold).foregroundStyle(NX18Palette.text).lineLimit(1)
-                    if let s = page.subtitle { Text(s).nxFont(.caption2).foregroundStyle(NX18Palette.muted).lineLimit(1).accessibilityLabel(s.replacingOccurrences(of: " · ", with: ", ")) }   // VoiceOver: the summary as the row reads it
+                    Text(page.title).nxFont(.footnote, weight: .semibold).foregroundStyle(MenuColor.text).lineLimit(1)
+                    if let s = page.subtitle { Text(s).nxFont(.caption2).foregroundStyle(MenuColor.muted).lineLimit(1).accessibilityLabel(s.replacingOccurrences(of: " · ", with: ", ")) }   // VoiceOver: the summary as the row reads it
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityAddTraits(.isHeader)
             } else {
-                Text(page.title.isEmpty ? "Menu" : page.title).nxFont(.caption).foregroundStyle(NX18Palette.muted).lineLimit(1)
-                    .accessibilityAddTraits(.isHeader)
+                GameMenuHeaderLine(tick: vitalsTick)   // "Menu · Game Title · Saved 2 min ago" (gate-ui §19.8)
+                    .layoutPriority(0)
             }
             Spacer(minLength: 8)
-            if pad.connected && !(typeSize.isAccessibilitySize && width < 600) { hints(page) }   // an accessibility text size in a narrow panel: no room for them beside the title
+            if !typeSize.isAccessibilitySize { VitalsCompactLine(tick: vitalsTick).layoutPriority(1) }   // never cut by the left line; at accessibility sizes it moves to its own line below
             Button { model.close() } label: {
                 Label("Close", systemImage: "xmark")
                     .labelStyle(.iconOnly)
                     .font(.system(size: 11, weight: .bold))   // system: symbol
-                    .foregroundStyle(NX18Palette.charcoal)
+                    .foregroundStyle(MenuColor.ink)
                     .frame(width: 24, height: 24)
-                    .background(Circle().fill(NX18Palette.coral))
-                    .frame(width: 36, height: 34).contentShape(Rectangle())
+                    .background(Circle().fill(MenuColor.second))
+                    .frame(width: 44, height: 44).contentShape(Rectangle())   // 44 pt (gate-ui §19.5)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Close menu")
         }
-        .padding(.leading, page.id != nil ? 6 : 14)
+        .padding(.leading, page.id != nil ? 6 : 18)
         .padding(.trailing, 6)
-        .padding(.top, 2)
+        .padding(.top, 6)
+        if typeSize.isAccessibilitySize { VitalsCompactLine(tick: vitalsTick).padding(.horizontal, 18).padding(.bottom, 4) }   // the Vitals line's own line at accessibility sizes (gate-ui §19.2)
     }
 
-    // The controller's A and B as the pack's glyphs (NXButtonGlyph.swift: the first pad's buttons, a Nintendo pad by its labels, any other by position as the game maps them),
-    // each in the colour of what it does: A selects (cyan), B closes (Close's coral) or goes back a page (cyan)
-    private func hints(_ page: GameMenuPanelModel.Page) -> some View {
-        let g = pad.glyphs
-        return HStack(spacing: 10) {
-            hint(g.glyph(.a), "Select", NX18Palette.cyan)
-            hint(g.glyph(.b), page.id != nil ? "Back" : "Close", page.id != nil ? NX18Palette.cyan : NX18Palette.coral)
+    // MARK: The first page (gate-ui §19.2): the chooser on the left, the tiles and doors on the right; one column in portrait and at accessibility sizes
+
+    private func homeZones(zoned: Bool) -> [[[String]]] {
+        var chooser: [[String]] = []
+        if let m = model.launcher, m.hasPresets {
+            let ids = m.offeredPresets.map { "preset:" + $0.rawValue }
+            let per = GameMenuLayout.presetColumns(ids.count)
+            chooser = stride(from: 0, to: ids.count, by: per).map { Array(ids[$0..<min($0 + per, ids.count)]) }
+            if m.isCustom { chooser.append(["back"]) }
         }
-        .nxFont(.caption2).foregroundStyle(NX18Palette.muted)
-        .accessibilityHidden(true)   // VoiceOver has its own gestures; the controller's are said by the buttons themselves
+        let tiles = model.home.tiles.map(\.id)
+        var right = stride(from: 0, to: tiles.count, by: 3).map { Array(tiles[$0..<min($0 + 3, tiles.count)]) }
+        right.append(model.home.doors.map(\.id))
+        return zoned ? [chooser, right] : [chooser + right]
+    }
+
+    @ViewBuilder private func home(zoned: Bool, inner: CGFloat) -> some View {
+        let m = model.launcher
+        Group {
+            if zoned, let m, m.hasPresets {
+                HStack(alignment: .top, spacing: 12) {
+                    chooser(m).frame(width: max((inner - 12) * 0.38, 0))
+                    tilesAndDoors
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    if let m, m.hasPresets { chooser(m) }
+                    tilesAndDoors
+                }
+            }
+        }
+        .padding(.horizontal, 18).padding(.top, 4).padding(.bottom, 8)
+    }
+
+    // The preset chips, 2 × 2 (three: one row of three, so no slot stays empty), then the line: "Frame rate and resolution change at next start" (and what waits, once something does), or the Custom bar with Back (presets-first P7 (b))
+    private func chooser(_ m: LauncherModel) -> some View {
+        let active = m.activePreset
+        return VStack(alignment: .leading, spacing: 8) {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: GameMenuLayout.presetColumns(m.offeredPresets.count)), spacing: 8) {
+                ForEach(m.offeredPresets) { p in
+                    let id = "preset:" + p.rawValue
+                    Button { model.focus = id; model.choosePreset(p) } label: {
+                        VStack(spacing: 4) {
+                            NX18Icon(kind: NX18Icon.forPreset(p), size: 20).foregroundStyle(active == p ? MenuColor.chosenIcon : MenuColor.text)
+                            Text(p.gateName).nxFont(.footnote, weight: .semibold).lineLimit(1).minimumScaleFactor(0.75)
+                            if scheme == .light { Capsule().fill(active == p ? MenuColor.bar : .clear).frame(width: 28, height: 3).accessibilityHidden(true) }   // chosen: a bar inside; focused: a ring outside
+                        }
+                        .foregroundStyle(active == p && scheme != .light ? MenuColor.ink : MenuColor.text)   // dark: charcoal on powder cyan; light: the text tone on the dim chosen fill
+                        .frame(maxWidth: .infinity, minHeight: 60)
+                    }
+                    .buttonStyle(MenuTileStyle(focused: pad.connected && model.focus == id, fill: active == p ? MenuColor.chosen : MenuColor.tile))
+                    .accessibilityLabel(p.gateName)
+                    .accessibilityHint(GateText.presetNote(m, p))
+                    .accessibilityAddTraits(active == p ? .isSelected : [])
+                    .id(id)
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Preset")
+            .accessibilityValue(m.isCustom ? "Custom, from \(m.basePreset.title)" : active?.title ?? "")
+            .accessibilityActions {
+                if m.isCustom { Button("Back to \(m.basePreset.title)") { model.backToBase() } }
+                if model.canUndo { Button("Undo") { model.undo() } }
+            }
+            if active != nil {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Frame rate and resolution change at next start").nxFont(.caption2).foregroundStyle(MenuColor.muted).fixedSize(horizontal: false, vertical: true)
+                    if !model.pending.isEmpty {
+                        Text("At next start: " + model.pending.joined(separator: " · ")).nxFont(.caption2, weight: .semibold).foregroundStyle(MenuColor.line).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.horizontal, 4)
+            } else {
+                HStack(spacing: 8) {
+                    Circle().fill(MenuColor.line).frame(width: 7, height: 7)
+                    Text(m.presetLabel).nxFont(.footnote, weight: .semibold).foregroundStyle(MenuColor.text).lineLimit(1).minimumScaleFactor(0.8)
+                    Spacer(minLength: 4)
+                    Button { model.focus = "back"; model.backToBase() } label: {
+                        Text("Back to \(m.basePreset.title)").nxFont(.caption, weight: .semibold).foregroundStyle(MenuColor.line).lineLimit(1).minimumScaleFactor(0.8)
+                            .padding(.horizontal, 10).frame(minHeight: 44)
+                    }
+                    .buttonStyle(MenuTileStyle(focused: pad.connected && model.focus == "back", fill: MenuColor.well, radius: 12))
+                    .id("back")
+                }
+                .padding(.leading, 6)
+                .accessibilityElement(children: .contain)
+            }
+        }
+    }
+
+    private var tilesAndDoors: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+                ForEach(model.home.tiles) { item in tile(item) }
+            }
+            HStack(spacing: 8) {
+                ForEach(model.home.doors) { item in door(item) }
+            }
+        }
+    }
+
+    // A live quick tile (gate-ui §19.2): the value or a lamp at the top, the name below. A tap does what A does: a switch flips, a choice opens its options, Touch controls its page
+    private func tile(_ item: GameMenuItem) -> some View {
+        let greyed = item.disabled
+        let key = item.id.hasPrefix("row:") ? String(item.id.dropFirst(4)) : item.id
+        let value: String? = { switch item.kind {
+            case .choice: return item.currentOption
+            case .submenu where item.summary: return dm_setting_why("DM_TOUCH_HAPTICS") != nil ? "Hidden" : item.subtitle?.components(separatedBy: " · ").first   // the reason goes to the strip
+            default: return nil } }()
+        let lamp: Bool? = { if case .toggle(let on) = item.kind { return on }; return nil }()
+        return Button { model.focus = item.id; model.activate(item) } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    NX18Icon(kind: key == "layout" ? .console : NX18Icon.forTile(key), size: 16).foregroundStyle(greyed ? MenuColor.muted : MenuColor.line)
+                    if let lamp { MenuLamp(on: lamp) }
+                    if let value { Text(value).nxFont(.footnote, weight: .semibold).foregroundStyle(greyed ? MenuColor.muted : MenuColor.line).lineLimit(1).minimumScaleFactor(0.6) }
+                }
+                Text(item.title).nxFont(.caption).foregroundStyle(greyed ? MenuColor.muted : MenuColor.text).lineLimit(2).minimumScaleFactor(0.85)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
+            .opacity(greyed ? 0.6 : 1)
+        }
+        .buttonStyle(MenuTileStyle(focused: pad.connected && model.focus == item.id))
+        .disabled(greyed)
+        .accessibilityLabel(item.title)
+        .accessibilityValue(value ?? (lamp.map { $0 ? "On" : "Off" } ?? ""))
+        .accessibilityHint(greyed ? "Dimmed. \(item.subtitle ?? "")" : item.summary ? "" : item.subtitle ?? "")
+        .accessibilityAddTraits(lamp != nil ? .isToggle : [])
+        .id(item.id)
+    }
+
+    private func door(_ item: GameMenuItem) -> some View {
+        Button { model.focus = item.id; model.activate(item) } label: {
+            HStack(spacing: 8) {
+                if let s = item.symbol { Image(systemName: s).font(.footnote.weight(.medium)).foregroundStyle(MenuColor.line) }   // system: symbol
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.title).nxFont(.footnote, weight: .semibold).foregroundStyle(MenuColor.text).lineLimit(1).minimumScaleFactor(0.8)
+                    if let s = item.subtitle { Text(s).nxFont(.caption2).foregroundStyle(MenuColor.muted).lineLimit(1).minimumScaleFactor(0.8) }
+                }
+                Spacer(minLength: 0)
+                Text(verbatim: "›").nxFont(.body).foregroundStyle(MenuColor.muted)
+            }
+            .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 54)
+        }
+        .buttonStyle(MenuTileStyle(focused: pad.connected && model.focus == item.id))
+        .accessibilityLabel(item.title).accessibilityValue(item.subtitle ?? "")
+        .id(item.id)
+    }
+
+    // The toast after a preset change: what moved now, and Undo (44 pt; X with a controller while it shows)
+    private func toast(_ text: String) -> some View {
+        HStack(spacing: 10) {
+            Text(text).nxFont(.footnote, weight: .semibold).foregroundStyle(MenuColor.text).lineLimit(1).minimumScaleFactor(0.8)
+            if model.canUndo {
+                Button { model.undo() } label: {
+                    HStack(spacing: 4) {
+                        if pad.connected { NXPadGlyphView(pad.glyphs.glyph(.x), size: 14, relativeTo: .caption2).foregroundStyle(MenuColor.line) }
+                        Text("Undo").nxFont(.footnote, weight: .semibold).foregroundStyle(MenuColor.line)
+                    }
+                    .padding(.horizontal, 12).frame(minHeight: 44)
+                }
+                .buttonStyle(MenuTileStyle(fill: MenuColor.well, radius: 12))
+                .accessibilityHint("Puts back the settings before this preset")
+            }
+        }
+        .padding(.leading, 14).padding(.trailing, 4).padding(.vertical, 2)
+        .background(Capsule().fill(MenuColor.tile).shadow(color: .black.opacity(0.25), radius: 8, y: 2))
+        .overlay(Capsule().strokeBorder(MenuColor.hairline, lineWidth: 1))
+        .accessibilityElement(children: .contain)
+    }
+
+    // The hint strip at the foot (gate-ui §19.2): line 1, the focused item's note; line 2, only with a pad, the buttons
+    private func strip(_ page: GameMenuPanelModel.Page) -> some View {
+        let note = focusedNote(page)
+        let g = pad.glyphs
+        return VStack(alignment: .leading, spacing: 3) {
+            if let note, !note.isEmpty { Text(GateText.brief(note)).nxFont(.caption2).foregroundStyle(MenuColor.muted).lineLimit(1) }
+            if pad.connected {
+                HStack(spacing: 10) {
+                    hint(g.glyph(.a), "Choose", MenuColor.line)
+                    hint(g.glyph(.b), page.id != nil ? "Back" : "Close", page.id != nil ? MenuColor.line : MenuColor.second)
+                    if model.launcher?.hasPresets == true {
+                        Text("\(GateText.shoulder(g.name(NXShoulder.l))) \(GateText.shoulder(g.name(NXShoulder.r))) Preset").nxFont(.caption2).foregroundStyle(MenuColor.muted).lineLimit(1).fixedSize()
+                    }
+                    hint(g.glyph(.plus), "Close", MenuColor.second)
+                }
+                .nxFont(.caption2).foregroundStyle(MenuColor.muted)
+                .accessibilityHidden(true)   // VoiceOver has its own gestures
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 18).padding(.top, 2).padding(.bottom, 12)
+        .accessibilityHidden(note == nil && !pad.connected)
+    }
+    private func focusedNote(_ page: GameMenuPanelModel.Page) -> String? {
+        guard pad.connected, let f = model.focus else { return nil }
+        if f.hasPrefix("preset:"), let m = model.launcher, let p = LauncherPreset(rawValue: String(f.dropFirst(7))) { return GateText.presetNote(m, p) }
+        if f == "back", let m = model.launcher { return "The \(m.basePreset.title) preset's settings again" }
+        let items = page.id == nil ? model.home.tiles + model.home.doors : page.sections.flatMap(\.items)
+        return items.first { $0.id == f }?.subtitle
     }
     private func hint(_ glyph: NXPadGlyph, _ text: String, _ tint: Color) -> some View {
         HStack(spacing: 4) { NXPadGlyphView(glyph, size: 15, relativeTo: .caption2).foregroundStyle(tint); Text(text) }.fixedSize()
@@ -285,7 +606,7 @@ struct GameMenuPanelView: View {
     private func grid(_ columns: [GameMenuColumn], page: GameMenuPanelModel.Page, colWidth: CGFloat) -> some View {
         HStack(alignment: .top, spacing: 8) {
             ForEach(Array(columns.enumerated()), id: \.element.id) { index, col in
-                VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 6) {
                     ForEach(col.blocks) { block in
                         if let h = block.heading, !h.isEmpty {
                             NX18SectionHeader(h).padding(.horizontal, 10).padding(.bottom, 2)
@@ -293,7 +614,7 @@ struct GameMenuPanelView: View {
                             NX18SectionHeader(h).padding(.horizontal, 10).padding(.bottom, 2).hidden().accessibilityHidden(true)   // its room only: the rows line up with the column before
                         }
                         ForEach(block.items) { item in
-                            GameMenuRowView(item: item, option: page.options, overview: page.id == nil, focused: pad.connected && model.focus == item.id) { model.activate(item) }
+                            GameMenuRowView(item: item, option: page.options, overview: page.id == nil, focused: pad.connected && model.focus == item.id) { model.focus = item.id; model.activate(item) }
                                 .id(item.id)
                         }
                     }
@@ -303,8 +624,35 @@ struct GameMenuPanelView: View {
                 .accessibilitySortPriority(Double(columns.count - index))   // and the columns in their order (a column whose heading is the one before's starts lower)
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 18)
         .padding(.bottom, 8)
+    }
+}
+
+// The in-game tile's press and focus (the Gate's GateTileStyle in the menu's set, gate-ui §11a.5): the lit fill while pressed or focused, the shared ring 3 pt outside
+struct MenuTileStyle: ButtonStyle {
+    var focused = false
+    var fill: Color = MenuColor.tile
+    var radius: CGFloat = 14
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(configuration.isPressed || focused ? (fill == MenuColor.tile ? MenuColor.lit : fill) : fill))
+            .overlay { if focused { GateRing(radius: radius) } }
+            .scaleEffect(focused && !reduceMotion ? 1.015 : 1)
+            .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+    }
+}
+
+// A switch tile's lamp in the menu's set: no glow in light
+struct MenuLamp: View {
+    let on: Bool
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        Circle().fill(on ? MenuColor.line : Color.clear)
+            .overlay(Circle().strokeBorder(on ? MenuColor.line : MenuColor.muted, lineWidth: 1.5))
+            .frame(width: 10, height: 10)
+            .shadow(color: on && scheme != .light ? MenuColor.line.opacity(0.5) : .clear, radius: 3)
     }
 }
 
@@ -323,35 +671,32 @@ private struct GameMenuRowView: View {
         Button(action: pick) {
             HStack(spacing: 6) {
                 if let s = item.symbol {
-                    Image(systemName: s).font(.footnote.weight(.medium)).foregroundStyle(NX18Palette.cyan).frame(minWidth: 16)   // system: symbol
+                    Image(systemName: s).font(.footnote.weight(.medium)).foregroundStyle(MenuColor.line).frame(minWidth: 16)   // system: symbol
                 }
                 if overview, opens, !item.summary {   // the dot takes no room
-                    Text(item.title).nxFont(.footnote).foregroundStyle(NX18Palette.text).fixedSize(horizontal: false, vertical: true)
+                    Text(item.title).nxFont(.footnote).foregroundStyle(MenuColor.text).fixedSize(horizontal: false, vertical: true)
                         .overlay(alignment: .topTrailing) {
-                            if dot { Circle().fill(NX18Palette.muted).frame(width: 5, height: 5).offset(x: 8, y: 2).accessibilityHidden(true) }
+                            if dot { Circle().fill(MenuColor.muted).frame(width: 5, height: 5).offset(x: 8, y: 2).accessibilityHidden(true) }
                         }
                 } else {
                     VStack(alignment: .leading, spacing: NXFont.name == nil ? 1 : 3) {   // the UI font's lines carry no gap of their own (NXFont.swift)
-                        Text(item.title).nxFont(.footnote).foregroundStyle(NX18Palette.text).fixedSize(horizontal: false, vertical: true)
+                        Text(item.title).nxFont(.footnote).foregroundStyle(MenuColor.text).fixedSize(horizontal: false, vertical: true)
                         if let s = item.subtitle, !s.isEmpty {
-                            Text(s).nxFont(.caption2).foregroundStyle(NX18Palette.muted).fixedSize(horizontal: false, vertical: true)
+                            Text(s).nxFont(.caption2).foregroundStyle(MenuColor.muted).fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
                 Spacer(minLength: 2)
                 trailing
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, overview ? 3 : 4)
-            .frame(minHeight: overview ? 30 : 34)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(fill))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .frame(minHeight: 46)   // rows 46 pt (gate-ui §19.5)
             .opacity(item.disabled ? 0.45 : 1)
-            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
-        .buttonStyle(GameMenuPressStyle())
+        .buttonStyle(MenuTileStyle(focused: focused, fill: fill))
         .disabled(item.disabled)
-        .nx18Focus(focused, cornerRadius: 12)
-        .padding(2)   // room for the focus ring inside the scroll view's clip
+        .padding(3)   // room for the focus ring inside the scroll view's clip
         .accessibilityLabel(item.title)
         .accessibilityValue(value)
         .accessibilityHint(item.summary ? "" : item.subtitle ?? "")
@@ -362,30 +707,27 @@ private struct GameMenuRowView: View {
     private var dot: Bool { if case .choice = item.kind { return !(item.subtitle ?? "").isEmpty }; return false }   // a submenu's note is its value
 
     private var fill: Color {
-        if option && item.isOn { return NX18Palette.cyan.opacity(0.18) }
-        return Color.white.opacity(focused ? 0.08 : 0.04)
+        if option && item.isOn { return MenuColor.line.opacity(0.18) }
+        return MenuColor.tile
     }
 
     @ViewBuilder private var trailing: some View {
         switch item.kind {
         case .toggle(let on):
             if option {
-                Image(systemName: "checkmark").font(.footnote.weight(.bold)).foregroundStyle(NX18Palette.cyan).opacity(on ? 1 : 0)   // system: symbol
+                Image(systemName: "checkmark").font(.footnote.weight(.bold)).foregroundStyle(MenuColor.line).opacity(on ? 1 : 0)   // system: symbol
             } else {
-                Capsule().fill(on ? NX18Palette.cyan : Color(nx18: 0x4A4A50))
-                    .frame(width: 34, height: 20)
-                    .overlay(alignment: on ? .trailing : .leading) { Circle().fill(.white).padding(2) }
-                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.12), value: on)
+                OnOffCapsule(on: on, enabled: !item.disabled)   // the Gate's capsule (gate-ui §8)
             }
         case .choice:
             HStack(spacing: 4) {
-                if let v = item.currentOption { Text(v).nxFont(.footnote).foregroundStyle(NX18Palette.cyan).lineLimit(1) }
-                Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(NX18Palette.muted)   // system: symbol
+                if let v = item.currentOption { Text(v).nxFont(.footnote).foregroundStyle(MenuColor.line).lineLimit(1) }
+                Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(MenuColor.muted)   // system: symbol
             }
             .fixedSize()
         case .submenu:
-            if overview, !item.summary, let s = item.subtitle, !s.isEmpty { Text(s).nxFont(.footnote).foregroundStyle(NX18Palette.cyan).lineLimit(1).fixedSize() }   // Cheats: "1 on" as its value
-            Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(NX18Palette.muted)   // system: symbol
+            if overview, !item.summary, let s = item.subtitle, !s.isEmpty { Text(s).nxFont(.footnote).foregroundStyle(MenuColor.line).lineLimit(1).fixedSize() }   // Cheats: "1 on" as its value
+            Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(MenuColor.muted)   // system: symbol
         case .action:
             EmptyView()
         }
@@ -407,10 +749,6 @@ private struct GameMenuRowView: View {
     }
 }
 
-private struct GameMenuPressStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View { configuration.label.opacity(configuration.isPressed ? 0.75 : 1) }
-}
-
 // The panel over the game: a child of the game's view controller, its view over the touch controls; opened and closed with a short fade (and a small slide without Reduce Motion)
 @MainActor final class GameMenuPanelHost: UIHostingController<GameMenuPanelView> {
     let model: GameMenuPanelModel
@@ -418,6 +756,7 @@ private struct GameMenuPressStyle: ButtonStyle {
     init(model: GameMenuPanelModel) {
         self.model = model
         super.init(rootView: GameMenuPanelView(model: model))
+        overrideUserInterfaceStyle = NX18Appearance.current.style   // the look the NX 18 card chose, read as the menu opens (it never changes during play, §20.5b)
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("not from a storyboard") }
 
@@ -455,9 +794,7 @@ private struct GameMenuPressStyle: ButtonStyle {
         parent.view.addSubview(view)
         followAnchor()
         didMove(toParent: parent)
-        view.alpha = 0
-        if !UIAccessibility.isReduceMotionEnabled { view.transform = CGAffineTransform(translationX: 0, y: -6) }
-        UIView.animate(withDuration: 0.16, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) { self.view.alpha = 1; self.view.transform = .identity }
+        // no fade on the hosting view: opacity on glass leaves a flat grey panel (gate-ui §19.4). The rim materializes and the content fades in (GameMenuPanelView)
         becomeFirstResponder()
         UIAccessibility.post(notification: .screenChanged, argument: nil)
     }
@@ -477,9 +814,8 @@ private struct GameMenuPressStyle: ButtonStyle {
         view.isUserInteractionEnabled = false
         resignFirstResponder()
         NotificationCenter.default.removeObserver(self)
-        UIView.animate(withDuration: 0.12, delay: 0, options: [.curveEaseIn]) {
-            self.view.alpha = 0
-        } completion: { _ in
+        withAnimation(.easeIn(duration: 0.12)) { model.leaving = true }   // the panel leaves inside the view: the rim dematerializes, the dim stays until the host goes
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
             self.willMove(toParent: nil); self.view.removeFromSuperview(); self.removeFromParent()
             UIAccessibility.post(notification: .screenChanged, argument: nil)
         }
@@ -520,3 +856,68 @@ public func dmGamePanelClose() { MainActor.assumeIsolated { gameMenuPanelClose()
 
 @_cdecl("dm_game_panel_shown")
 public func dmGamePanelShown() -> Bool { MainActor.assumeIsolated { gameMenuPanel != nil } }
+
+// The in-game menu's header, left (gate-ui §19.8): "Menu · Game Title · Saved 2 min ago". The save part drops first, then the title truncates; the Vitals line beside it never cuts.
+// The time is the game's own last save commit (hle_fs.c dm_fs_last_commit_ns), read when the menu opens and again on each 1 s tick the Vitals line already uses
+struct GameMenuHeaderLine: View {
+    let tick: Int
+    private static var title: String { (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String) ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String) ?? "Game" }
+    static func savedText(now: UInt64 = clock_gettime_nsec_np(CLOCK_MONOTONIC), last: UInt64 = dm_fs_last_commit_ns()) -> String {
+        guard last > 0, now >= last else { return "Not saved yet this session" }
+        let s = (now - last) / 1_000_000_000
+        return s < 60 ? "Saved just now" : s < 3600 ? "Saved \(s / 60) min ago" : "Saved \(s / 3600) h ago"
+    }
+    var body: some View {
+        let saved = Self.savedText(), title = Self.title
+        _ = tick
+        return ViewThatFits(in: .horizontal) {
+            line(title, saved)
+            line(title, nil)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Menu, \(title), \(saved.prefix(1).lowercased() + saved.dropFirst())")
+        .accessibilityAddTraits(.isHeader)
+    }
+    private func line(_ title: String, _ saved: String?) -> some View {
+        HStack(spacing: 0) {
+            Text("Menu · ").nxFont(.caption, weight: .semibold).foregroundStyle(MenuColor.text)
+            Text(title).nxFont(.caption, weight: .semibold).foregroundStyle(MenuColor.text).lineLimit(1).truncationMode(.tail)
+            if let saved { Text(" · " + saved).nxFont(.caption).foregroundStyle(MenuColor.muted).lineLimit(1).fixedSize() }
+        }
+    }
+}
+
+// The compact Vitals line in the header (vitals.md §2, §7): "60 fps · 🌡 Warm · ▮82% · 9:41", shown even with Vitals off. The time drops first, then the heat word; the frame rate and
+// the battery stay. 🌡 and ▮ are the thermometer and battery symbols (cyan, coral when hot; yellow battery in Low Power Mode is iOS's own cue and stays for Vitals over the game)
+struct VitalsCompactLine: View {
+    let tick: Int
+    var body: some View {
+        _ = tick
+        return ViewThatFits(in: .horizontal) {
+            line(String(cString: dm_vitals_compact_text(0)))
+            line(String(cString: dm_vitals_compact_text(1)))
+            line(String(cString: dm_vitals_compact_text(2)))
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(String(cString: dm_vitals_compact_text(0)).replacingOccurrences(of: "🌡 ", with: "").replacingOccurrences(of: "🌡", with: "").replacingOccurrences(of: "▮", with: "battery ").replacingOccurrences(of: " · ", with: ", "))
+    }
+    private func line(_ s: String) -> some View {
+        var t = Text("")
+        var run = ""
+        for ch in s {
+            if ch == "🌡" || ch == "▮" {
+                if !run.isEmpty { t = Text("\(t)\(Text(run))"); run = "" }   // Text interpolation: Text's + is deprecated in iOS 26
+                t = Text("\(t)\(Text(Image(systemName: Self.symbol(ch))).foregroundColor(Self.tint(ch)))")   // system: symbol
+            } else { run.append(ch) }
+        }
+        if !run.isEmpty { t = Text("\(t)\(Text(run))") }
+        return t.nxFont(.caption).monospacedDigit().foregroundStyle(MenuColor.text).lineLimit(1)
+    }
+    static func symbol(_ ch: Character) -> String {
+        if ch == "🌡" { let h = dm_vitals_thermal(); return h <= 0 ? "thermometer.low" : h == 1 ? "thermometer.medium" : "thermometer.high" }
+        let b = dm_vitals_battery()
+        return b >= 88 ? "battery.100percent" : b >= 63 ? "battery.75percent" : b >= 38 ? "battery.50percent" : b >= 13 ? "battery.25percent" : "battery.0percent"
+    }
+    static func tint(_ ch: Character) -> Color { ch == "🌡" ? (dm_vitals_thermal() >= 2 ? MenuColor.second : MenuColor.line) : MenuColor.text }
+}

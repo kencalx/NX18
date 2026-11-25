@@ -26,7 +26,6 @@ static void words(const uint32_t *got, const uint32_t *want, int n, const char *
 }
 
 int main(void) { @autoreleasepool {
-    setenv("DM_NVN_TBDR", "0", 1);
     mtl_init();
     mem = mmap(NULL, LEN, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     CHECK(mem != MAP_FAILED, "memory allocated"); if (mem == MAP_FAILED) return 1;
@@ -88,10 +87,15 @@ int main(void) { @autoreleasepool {
     CHECK(made_shadow(0x10000, 32) != NULL || (update(0x10004, 0xb6, 4), made_shadow(0x10000, 32) != NULL), "and another block's shadow is not refused");
     commit_as_running();
 
-    // The list has no fixed size: four times that (43,400 updates, past the 32,768 a fixed list would have held next) still fits, and the shadow after it shows the last update
-    for (int q = 0; q < 6200; q++) for (int k = 0; k < 7; k++) update(0x1c000 + 16 * k, (uint32_t)q, 4);
+    // The list has no fixed size: four times that (43,400 updates, past the 32,768 a fixed list would have held next) still fits, and the shadow after it shows the last update. A draw
+    // reads the block after each query's updates, as the game's do, so each shadow starts from the one before and looks up only the 7 updates since; a lookup that would walk more than
+    // PEND_SINCE_MAX queued writes answers cannot tell and its shadow is refused (pend_since, ported from S2Arm 8cdae876), as a block first read after all of them is
+    const uint32_t *last = NULL; int made = 0;
+    for (int q = 0; q < 6200; q++) { for (int k = 0; k < 7; k++) update(0x1c000 + 16 * k, (uint32_t)q, 4); made += (last = made_shadow(0x1c000, 4)) != NULL; }
     CHECK(!g_pend_over, "a submission of 43,400 inline updates fits the pending list");
-    { const uint32_t want[] = {6199}; words(made_shadow(0x1c000, 4), want, 1, "and a shadow in it shows the last one"); }
+    CHECK(made == 6200, "a shadow after each query's updates is made every time");
+    { const uint32_t want[] = {6199}; words(last, want, 1, "and the last one shows the last update"); }
+    CHECK(made_shadow(0x1c010, 4) == NULL, "a block first read after 43,400 updates on its page is refused (past PEND_SINCE_MAX)");
     commit_as_running();
 
     // A shadow of 512 bytes or more that a running submission's update is laid over (um_overlay) is copied here: queued to the copy thread it was waited for at once, on

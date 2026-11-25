@@ -4,10 +4,12 @@
 // Metal 4 descriptor gets no pipeline (there is no MTLDevice path); pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one per full period despite a
 // mid-prewarm timer flush, removing them only after its last period, counting them for the prepare line, and a compaction that did not finish is not tried again on the same system build; a timer flush waits for any prewarm, so a cold start writes a file per full period; depth-only draws write depth; concurrent colour variants compile
 // one base; archive flushes preserve unrelated compiler state; a function with function constants is specialized by its pipeline's descriptor, not through its library
-// (fn_spec asks the library for no specialization); the descriptor for a specialization is the caller's whether the driver returns it retained or autoreleased; a compute pipeline is captured into a plain file and taken from it later, one without a Metal 4 descriptor never looked up; a native mesh pipeline is captured into a p file and taken from it later, with or without a task shader or a pixel shader, captured again by a compaction, and one without a Metal 4 descriptor refused; a capture that fails builds the pipeline all the same and hands a full period over, or stops capturing after a failure in a period that captured nothing; run files are compacted by size tier from the pipeline count in their names (a tier of more than PSO_ARCH_COMPACT files and every smaller one, never a full period's, old and malformed names as the largest tier, the same across fresh processes), and a compute or task / mesh pipeline in a file left out is not captured again
+// (fn_spec asks the library for no specialization); the descriptor for a specialization is the caller's whether the driver returns it retained or autoreleased; a compute pipeline is captured into a plain file and taken from it later, one without a Metal 4 descriptor never looked up; a native mesh pipeline is captured into a p file and taken from it later, with or without a task shader or a pixel shader, captured again by a compaction, and one without a Metal 4 descriptor refused; a capture that fails builds the pipeline all the same and hands a full period over, or stops capturing after a failure in a period that captured nothing; run files are compacted by size tier from the pipeline count in their names (a tier of more than PSO_ARCH_COMPACT files and every smaller one, never a full period's, old and malformed names as the largest tier, the same across fresh processes), and a compute or task / mesh pipeline in a file left out is not captured again. A compaction's recapture whose vertex function other captures hold (fn_claim) waits for them in a prewarm task and is captured; elsewhere it keeps the old file's base after its limit, built again by no compiler, and the compaction keeps the old files and says why
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dispatch/dispatch.h>
 // Keep the host's cache observations/deletions in a directory owned by this test.
 // Metal itself still uses its real compiler cache; only this translation unit's
 // confstr calls see the fixture parent, including when testing the former cleanup.
@@ -19,25 +21,64 @@ static size_t archive_confstr(int name, char *buffer, size_t length) {
     return size;
 }
 #define confstr archive_confstr
+static void archive_dispatch_after(dispatch_time_t when, dispatch_queue_t queue, dispatch_block_t block);   // --active-flush drives the archive's timer itself
+#define dispatch_after archive_dispatch_after
 #include "../nvn/nvn_mtl.m"
+#undef dispatch_after
 #include "t_mtl4.h"
 static void archive_cache_cleanup(void) {
     [NSFileManager.defaultManager removeItemAtPath:@(archive_cache_root) error:nil];
 }
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
-void *front_metal_layer(void) { return NULL; }
+static CAMetalLayer *test_layer;   // --active-flush: a window (mtl_has_window), with no present made through it
+void *front_metal_layer(void) { return (__bridge void *)test_layer; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
+void hlecount_flush(void) {} void dm_rec_finish(void) {} void dm_cheats_exit(void) {} void dm_audio_suspend(int on) { (void)on; }   // what the graceful exit (hle_lifecycle.c) calls besides graphics
+void save_sync_soon(const char *why) { (void)why; } int save_sync_flush(int timeout_ms) { (void)timeout_ms; return 1; }   // and the cloud save's send (save_sync.c): sync off
 static int checks, failed;
+// The next program of a test hand-over (--exec-seed): it starts only after the archive's write, so the folder holds the file; it says so in exec.txt (the test reads it)
+static void exec_then(void *dir) {
+    int files = 0; for (NSString *f in [NSFileManager.defaultManager contentsOfDirectoryAtPath:@((const char *)dir) error:nil]) files += [f hasSuffix:@".mtl4a"];
+    [[NSString stringWithFormat:@"%d\n", files] writeToFile:[@((const char *)dir) stringByAppendingPathComponent:@"exec.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
 #define EXPECT(name, want, got) do { uint64_t w = (want), g = (got); checks++; if (w != g) { fprintf(stderr, "%s: expected %llu, got %llu\n", name, (unsigned long long)w, (unsigned long long)g); failed++; } } while (0)
+// The archive's timer (arch_note_new) on its queue, run by the test (--active-flush) instead of 10 s later; every other dispatch_after as before
+static int test_archive_timer;
+static dispatch_block_t test_timer_block;
+static void archive_dispatch_after(dispatch_time_t when, dispatch_queue_t queue, dispatch_block_t block) {
+    if (test_archive_timer && queue == g_arch_q) { EXPECT("at most one archive timer queued", 1, test_timer_block == nil); test_timer_block = block; }
+    else dispatch_after(when, queue, block);
+}
+static void fire_archive_timer(void) {
+    dispatch_sync(g_arch_q, ^{ dispatch_block_t tick = test_timer_block; EXPECT("archive timer armed", 1, tick != nil); test_timer_block = nil; if (tick) tick(); });
+}
 
 static id<MTLLibrary> g_lib, g_lib2, g_lib3;   // g_lib2: the same source again, for functions with no Metal 4 descriptor (a library hands out one function object per name);
                                               // g_lib3: once more, through the fixture's compiler, for whole reference pipelines (t4_rps)
 static NSArray<NSString *> *archive_files(NSString *dir) {   // the archive's files, without their indexes (<file>.keys)
     return [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]];
+}
+// The compaction's state as a start has it before its prewarm (compact_note, compact_step): no notes, no pass, nothing captured; a step scheduled before does nothing
+static void compact_reset(void) {
+    atomic_fetch_add(&g_cpass_gen, 1);
+    os_unfair_lock_lock(&g_cnote_lock); g_cnotes = nil; g_cnote_keys = nil; g_cnote_next = 0; os_unfair_lock_unlock(&g_cnote_lock);
+    g_cpass = 0; g_cpass_held = 0; g_cpass_subs = 0; g_cpass_holds = 0; g_cpass_files = 0; g_cpass_cap_ns = 0; g_cpass_held_ns = 0; g_cpass_hold_test = -1;
+    g_cpass_start_ms = COMPACT_START_MS; g_cpass_batch = COMPACT_BATCH; g_cpass_rest_ms = COMPACT_REST_MS; g_cpass_hold_ms = COMPACT_HOLD_MS;
+    g_compacted = 0; g_compact_bases = 0; g_compact_ns = 0; g_compact_bad = 0; g_compact_busy = 0; g_compact_closed = 0; g_compact_periods = 0; g_compact_once = 0;
+}
+static void compact_step_now(void) { dispatch_sync(compact_q(), ^{ @autoreleasepool { compact_step(); } }); }   // one step of the pass, here and now
+// The pass as the game runs it after the prewarm (compact_schedule), with no wait before it or rest between its batches, the first frame presented: returns once it closed
+// (or stopped) and every period it handed over is written, and the old files are gone when it finished
+static void compact_pass_run(void) {
+    uint64_t pn = g_present_n; g_present_n = 1; g_cpass_start_ms = 0; g_cpass_rest_ms = 0; g_cpass_hold_ms = 5; g_cpass_hold_test = 0;   // not the Mac's heat or Low Power Mode
+    compact_schedule();
+    for (int i = 0; i < 120000 && (atomic_load(&g_cpass) == 1 || atomic_load(&g_cpass) == 2); i++) usleep(1000);
+    g_present_n = pn;
+    arch_flush_wait(); dispatch_sync(g_arch_q, ^{});
 }
 static id<MTLFunction> test_fn(id<MTLLibrary> lib, NSString *name, int registered) {
     id<MTLFunction> f = [lib newFunctionWithName:name];
@@ -67,6 +108,11 @@ static void functions_unspecialized(id<MTLLibrary> library) {
     EXPECT("functions: a set of constants of its own is its own object and note", 1, b != c && fn4_of(b) && fn4_of(c) && fn4_of(b) != fn4_of(c));
     EXPECT("functions: its note specializes it", 1, [fn4_of(b) isKindOfClass:MTL4SpecializedFunctionDescriptor.class] && [((MTL4SpecializedFunctionDescriptor *)fn4_of(b)).constantValues isEqual:set]);
 }
+// fail 2: the compiler service died (err_compiler_died's text); any other: an ordinary compile error
+static NSError *compile_error(int kind) {
+    return kind == 2 ? [NSError errorWithDomain:@"AGXMetalG14G" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Compilation failed due to an interrupted connection: XPC_ERROR_CONNECTION_INTERRUPTED."}]
+                     : [NSError errorWithDomain:@"test" code:1 userInfo:nil];
+}
 // Hold the first base build while other callers request colour variants and an unrelated base.
 @interface ArchiveGateCompiler : NSObject {
 @public id<MTL4Compiler> compiler; dispatch_semaphore_t entered, release; _Atomic int calls, lookup_calls; int fail;
@@ -78,7 +124,7 @@ static void functions_unspecialized(id<MTLLibrary> library) {
     if (opts.lookupArchives.count) atomic_fetch_add(&lookup_calls, 1);
     int call = atomic_fetch_add(&calls, 1);
     if (!call) { dispatch_semaphore_signal(entered); dispatch_semaphore_wait(release, DISPATCH_TIME_FOREVER); }
-    if (fail) { if (error) *error = [NSError errorWithDomain:@"test" code:1 userInfo:nil]; return nil; }
+    if (fail) { if (error) *error = compile_error(fail); return nil; }
     return [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opts error:error];
 }
 @end
@@ -134,19 +180,24 @@ static void compute_pipelines(void) {
     EXPECT("compute again: not from a bundle", arch, g_cps_arch);
     EXPECT("compute again: nothing captured", pending, g_arch_new);
     EXPECT("compute again: its dispatch writes", 1, run_kernel(kp2));
-    // compaction during the prewarm: captured again from its function, for the file that replaces the old ones
-    g_compact_enabled = 1; g_compacted = 0; atomic_store(&g_warm_running, 1);
+    // compaction during the prewarm: noted and captured nothing; captured again from its function after the first frame (compact_step), for the file that replaces the old ones
+    compact_reset(); g_compact_enabled = 1; atomic_store(&g_warm_running, 1);
     EXPECT("compute, compaction: a pipeline", 1, cps_new(kf, &err) != nil);
     EXPECT("compute, compaction: from the archive", run + 2, g_cps_run);
     dispatch_sync(arch_harvest_q(), ^{});
-    EXPECT("compute, compaction: captured again", 1, g_compacted);
-    g_compact_state = calloc(g_arch4.count + 1, 1); g_compacted = 0;   // a pick that leaves the file it is in: not captured again
+    EXPECT("compute, compaction: noted", 1, g_compact_bases);
+    EXPECT("compute, compaction: nothing captured in the prewarm", 1, !g_compacted && g_arch_new == pending);
+    g_compact_state = calloc(g_arch4.count + 1, 1);   // a pick that leaves the file it is in: not noted
+    g_cnotes = nil; g_cnote_keys = nil; g_compact_bases = 0;
     EXPECT("compute, compaction of other files: a pipeline", 1, cps_new(kf, &err) != nil);
-    dispatch_sync(arch_harvest_q(), ^{});
-    EXPECT("compute, compaction of other files: not captured again", 0, g_compacted);
-    g_compact_state = NULL;
-    EXPECT("compute, compaction: waits for the flush", pending + 1, g_arch_new);
-    atomic_store(&g_warm_running, 0); g_compact_enabled = 0; g_compacted = 0;
+    EXPECT("compute, compaction of other files: not noted", 0, g_compact_bases);
+    free(g_compact_state); g_compact_state = NULL;
+    EXPECT("compute, compaction: noted again", 1, cps_new(kf, &err) != nil && g_compact_bases == 1);
+    atomic_store(&g_warm_running, 0);
+    compact_pass_run();
+    EXPECT("compute, compaction: captured again after the first frame", 1, g_compacted);
+    EXPECT("compute, compaction: closed", 1, g_cpass == 3 && g_compact_closed && !g_compact_bad);
+    compact_reset(); g_compact_enabled = 0;
     arch_flush_wait();
     // no Metal 4 descriptor: no pipeline (every function a pipeline is built from is noted), no lookup, nothing captured
     int looked = la->lookups; built = g_cps_built; pending = g_arch_new;
@@ -239,18 +290,23 @@ static void mesh_pipelines(void) {
     arch_flush_wait();
     // the same file as a plain one during a compacting prewarm: captured again from its functions, for the file that replaces the old ones
     g_arch4p = @[]; g_arch4 = file ? @[file] : @[];
-    g_compact_enabled = 1; g_compacted = 0; atomic_store(&g_warm_running, 1); pending = g_arch_new;
+    compact_reset(); g_compact_enabled = 1; atomic_store(&g_warm_running, 1); pending = g_arch_new;
     EXPECT("mesh, compaction: a pipeline", 1, mtk_build(&k, nil, ms, fs, &err, NULL) != nil);
     EXPECT("mesh, compaction: from the archive", arch + 4, g_mtk_arch);
     dispatch_sync(arch_harvest_q(), ^{});
-    EXPECT("mesh, compaction: captured again", 1, g_compacted);
-    g_compact_state = calloc(g_arch4.count + 1, 1); g_compacted = 0;   // a pick that leaves the file it is in: not captured again
+    EXPECT("mesh, compaction: noted", 1, g_compact_bases);
+    EXPECT("mesh, compaction: nothing captured in the prewarm", 1, !g_compacted && g_arch_new == pending);
+    g_compact_state = calloc(g_arch4.count + 1, 1);   // a pick that leaves the file it is in: not noted
+    g_cnotes = nil; g_cnote_keys = nil; g_compact_bases = 0;
     EXPECT("mesh, compaction of other files: a pipeline", 1, mtk_build(&k, nil, ms, fs, &err, NULL) != nil);
-    dispatch_sync(arch_harvest_q(), ^{});
-    EXPECT("mesh, compaction of other files: not captured again", 0, g_compacted);
-    g_compact_state = NULL;
-    EXPECT("mesh, compaction: waits for the flush", pending + 1, g_arch_new);
-    atomic_store(&g_warm_running, 0); g_compact_enabled = 0; g_compacted = 0;
+    EXPECT("mesh, compaction of other files: not noted", 0, g_compact_bases);
+    free(g_compact_state); g_compact_state = NULL;
+    EXPECT("mesh, compaction: noted again", 1, mtk_build(&k, nil, ms, fs, &err, NULL) != nil && g_compact_bases == 1);
+    atomic_store(&g_warm_running, 0);
+    compact_pass_run();
+    EXPECT("mesh, compaction: captured again after the first frame", 1, g_compacted);
+    EXPECT("mesh, compaction: closed", 1, g_cpass == 3 && g_compact_closed && !g_compact_bad);
+    compact_reset(); g_compact_enabled = 0;
     arch_flush_wait();
     // no Metal 4 descriptor: no pipeline (every function a pipeline is built from is noted), nothing captured
     pending = g_arch_new; built = g_mtk_built;
@@ -365,6 +421,43 @@ static void depth_only(void) {
     EXPECT("depth only: command completed", MTLCommandBufferStatusCompleted, t4_wait(cb));
     EXPECT("depth only: rasterization wrote zero depth", 1, ((float *)out.contents)[65] == 0.0f);
 }
+// A capture the compiler service died under (arch_capture_try, err_compiler_died; upstream NXNative 9bd8bb386): its period is handed over and not written, the counts of
+// unwritten pipelines drop by what it held, and the run goes on capturing into a new period that is written. A written crashed period made Ocarina of Time's every later start
+// abort in Metal's archive lookup. Then the service dying under a compile that is not a capture (arch_died through compile_done): the current period is not written either
+static void crashed_period(void) {
+    char cdir[] = "/tmp/t_pso_crashed.XXXXXX"; if (!mkdtemp(cdir)) abort();
+    arch_flush_wait(); NSString *saved = g_arch_dir; g_arch_dir = @(cdir); nvn_hm_clear(&g_pbase, hm_rel);
+    NSError *err = nil;
+    MTLRenderPipelineDescriptor *a = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); a.vertexDescriptor.layouts[16].stride = 4096;
+    EXPECT("crashed: a capture before", 1, pso_build(a, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
+    ArchEpoch *ep = g_ep; ArchiveGateCompiler *gate = [ArchiveGateCompiler new]; gate->compiler = ep->comp; gate->fail = 2; gate->calls = 1; ep->comp = (id<MTL4Compiler>)gate;
+    MTLRenderPipelineDescriptor *b = desc(MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); b.vertexDescriptor.layouts[16].stride = 3072;
+    err = nil; EXPECT("crashed: the pipeline built by the plain compiler", 1, pso_build(b, 0, &err) != nil && !err);
+    EXPECT("crashed: the period marked", 1, atomic_load(&ep->crashed));
+    EXPECT("crashed: handed over", 1, g_ep != ep);
+    EXPECT("crashed: still capturing", 1, arch_capturing());
+    ep->comp = gate->compiler;
+    arch_flush_wait();
+    EXPECT("crashed: the period not written", 0, (int)archive_files(@(cdir)).count);
+    EXPECT("crashed: nothing left counted as unwritten", 0, atomic_load(&g_arch_new));
+    MTLRenderPipelineDescriptor *c = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); c.vertexDescriptor.layouts[16].stride = 2560;
+    EXPECT("crashed: the next period captures", 1, pso_build(c, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
+    arch_flush(); arch_flush_wait();
+    EXPECT("crashed: the next period written", 1, (int)archive_files(@(cdir)).count);
+    MTLRenderPipelineDescriptor *d = desc(MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); d.vertexDescriptor.layouts[16].stride = 2048;
+    EXPECT("died elsewhere: a capture before", 1, pso_build(d, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
+    ArchEpoch *ep2 = g_ep;
+    NSError *out = nil;
+    EXPECT("died elsewhere: compile_done hands the error on", 1, compile_done(nil, compile_error(2), &out) == nil && out != nil);
+    arch_died(compile_error(1));   // any other error: nothing
+    EXPECT("died elsewhere: the period marked", 1, atomic_load(&ep2->crashed));
+    EXPECT("died elsewhere: handed over", 1, g_ep != ep2);
+    arch_flush_wait();
+    EXPECT("died elsewhere: the period not written", 1, (int)archive_files(@(cdir)).count);
+    EXPECT("died elsewhere: nothing left counted as unwritten", 0, atomic_load(&g_arch_new));
+    nvn_hm_clear(&g_pbase, hm_rel);
+    [NSFileManager.defaultManager removeItemAtPath:@(cdir) error:nil]; g_arch_dir = saved;
+}
 static void concurrent_bases(int fail) {
     nvn_hm_clear(&g_pbase, hm_rel);
     if (fail) {   // the period has captured a pipeline: a capture that fails then means its store is full
@@ -385,15 +478,18 @@ static void concurrent_bases(int fail) {
         }
     });
     EXPECT("concurrent: first compiler entered", 0, dispatch_semaphore_wait(gate->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
-    // An unrelated key must complete while the first remains blocked.
+    // An unrelated key must complete while the first remains blocked. It has the held compile's stage functions, so it is not captured beside it (fn_claim, Metal crashes on
+    // that): after the wait the plain compiler builds it
+    int plain0 = g_fn_plain; g_fn_wait_ms = 200;
     MTLRenderPipelineDescriptor *other = [ds[0] copy]; other.vertexDescriptor = [other.vertexDescriptor copy]; other.vertexDescriptor.layouts[16].stride = 1024;
     dispatch_group_t separate = dispatch_group_create();
     dispatch_group_async(separate, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { pso_build(other, 0, NULL); } });
     EXPECT("concurrent: unrelated base progresses", 0, dispatch_group_wait(separate, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    EXPECT("concurrent: the unrelated base built without the archive", 1, g_fn_plain - plain0); g_fn_wait_ms = FN_WAIT_MS;
     dispatch_semaphore_signal(gate->release);
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER); dispatch_group_wait(separate, DISPATCH_TIME_FOREVER);
     EXPECT("concurrent: all callers receive result", 8, good);
-    if (!fail) EXPECT("concurrent: one compile per base", 2, gate->calls);
+    if (!fail) EXPECT("concurrent: one compile per base, the unrelated one by the plain compiler", 1, gate->calls);
     EXPECT("concurrent: no unfinished builds", 0, g_pbase_pending.n);
     ep->comp = gate->compiler;
     if (!fail) return;
@@ -421,6 +517,73 @@ static void concurrent_bases(int fail) {
     atomic_store(&fresh->n, 0); g_comp4 = plain; fresh->comp = fg->compiler;
     nvn_hm_clear(&g_pbase, hm_rel); err = nil;
     EXPECT("concurrent: failed base can retry", 1, pso_build(ds[0], 0, &err) != nil);
+}
+static void fn_hand_over(const uint64_t *k, int n) {   // the capture holding k's functions returns and another of them takes them at once, before any waiter can
+    pthread_mutex_lock(&g_fn_mu); uint64_t ser = ++g_fn_ser;
+    for (int j = 0; j < g_fn_nbusy; j++) if (fn_mine(k, n, j)) g_fn_busy[j].ser = ser;
+    pthread_cond_broadcast(&g_fn_cv); pthread_mutex_unlock(&g_fn_mu);
+}
+// A compaction's recapture whose vertex function other captures hold (fn_claim). The pass after the first frame (compact_one) waits as long as they keep returning and is
+// captured: when the prewarm's pair tasks recaptured, those that shared a vertex shader took turns, and the fourth gave up after 2 s and failed the whole compaction. One whose
+// function stays held past g_fn_patient_ms keeps the base from the old file, built again by no compiler; the old files then stay, and the red line says why. A draw of the prewarm
+// takes the old file's base and only notes it: it waits for no capture
+static void compaction_claim(void) {
+    char cdir[] = "/tmp/t_pso_compact_claim.XXXXXX"; if (!mkdtemp(cdir)) abort();
+    NSString *saved = g_arch_dir; NSArray<id<MTL4Archive>> *saved4 = g_arch4, *saved4p = g_arch4p;
+    g_arch_dir = @(cdir); nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+    NSError *err = nil; NSMutableArray<MTLRenderPipelineDescriptor *> *descs = [NSMutableArray array];
+    for (int i = 0; i < 2; i++) {   // two bases of one vertex function in an old file: the strides of their layouts tell them apart
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        cd.vertexDescriptor.layouts[16].stride = 16 * (i + 40); [descs addObject:cd];
+        EXPECT("compaction claim: a base", 1, pso_build(cd, 0, &err) != nil);
+    }
+    arch_flush_wait();
+    NSArray<NSString *> *names = archive_files(@(cdir)); NSMutableArray<NSString *> *paths = [NSMutableArray array]; NSMutableArray<id<MTL4Archive>> *open = [NSMutableArray array];
+    for (NSString *n in names) { NSString *f = [@(cdir) stringByAppendingPathComponent:n]; [paths addObject:f]; [open addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:f] error:&err]]; }
+    EXPECT("compaction claim: the old file", 1, names.count);
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = open;   // as a start that compacts it
+    compact_reset(); g_compact_enabled = 1; g_compact_files = paths;
+    uint64_t k[3]; int n = fn_ids(pso_desc4(descs[0], 1, 0), k), *np = &n; uint64_t *kp = k;   // the bases' vertex function (kp, np: a block cannot take the array)
+    EXPECT("compaction claim: one function, under way in another capture", 1, n == 1 && fn_claim(k, n, 0));
+    g_fn_wait_ms = 200; g_fn_patient_ms = 200;
+    // the prewarm (a draw of it alike): the old file's bases at once, though another capture holds their function; noted, none captured
+    atomic_store(&g_warm_running, 1);
+    uint64_t arch0 = g_pb_archived, t0 = bp_now();
+    for (MTLRenderPipelineDescriptor *cd in descs) EXPECT("compaction claim, prewarm: a pipeline", 1, pso_build(cd, 0, &err) != nil);
+    EXPECT("compaction claim, prewarm: no wait for the capture under way", 1, bp_now() - t0 < 150 * NSEC_PER_MSEC);
+    EXPECT("compaction claim, prewarm: both from the old file", arch0 + 2, g_pb_archived);
+    EXPECT("compaction claim, prewarm: both noted, none captured", 1, g_compact_bases == 2 && !g_compacted);
+    atomic_store(&g_warm_running, 0);
+    ArchiveGateCompiler *plain = [ArchiveGateCompiler new]; plain->compiler = g_comp4; plain->calls = 1; g_comp4 = (id<MTL4Compiler>)plain;   // counts what the plain compiler builds
+    atomic_store(&g_cpass, 2);   // the pass captures (its periods may hold its bases)
+    // the pass: three captures of the function return one after another, each within the limit, then the last one
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ for (int i = 0; i < 3; i++) { usleep(150000); fn_hand_over(kp, *np); } usleep(150000); fn_release(kp, *np); });
+    t0 = bp_now();
+    dispatch_sync(compact_q(), ^{ @autoreleasepool { compact_one(g_cnotes[0]); } });
+    uint64_t waited = bp_now() - t0;
+    EXPECT("compaction claim, pass: waited for every capture ahead, past the limit", 1, waited >= 550 * NSEC_PER_MSEC);
+    EXPECT("compaction claim, pass: captured again", 1, g_compacted);
+    EXPECT("compaction claim, pass: the compaction goes on", 0, g_compact_bad);
+    // a capture under way that does not return within g_fn_patient_ms
+    EXPECT("compaction claim, held: under way again", 1, fn_claim(k, n, 0));
+    t0 = bp_now();
+    dispatch_sync(compact_q(), ^{ @autoreleasepool { compact_one(g_cnotes[1]); } });
+    waited = bp_now() - t0;
+    EXPECT("compaction claim, held: after its limit", 1, waited >= 150 * NSEC_PER_MSEC && waited < 1500 * NSEC_PER_MSEC);
+    EXPECT("compaction claim, held: the plain compiler built nothing", 1, plain->calls);
+    EXPECT("compaction claim, held: not captured again", 1, g_compacted);
+    EXPECT("compaction claim, held: the compaction fails", 1, g_compact_bad);
+    EXPECT("compaction claim, held: for fn_claim", 1, g_compact_busy);
+    fn_release(k, n); g_comp4 = plain->compiler; g_fn_wait_ms = FN_WAIT_MS; g_fn_patient_ms = FN_PATIENT_MS;
+    // every note taken: the pass closes, its period is written, and the compaction ends with the old file kept and the note that holds it back
+    g_cnote_next = 2; dispatch_sync(compact_q(), ^{ compact_close(); });
+    arch_flush_wait(); dispatch_sync(g_arch_q, ^{});
+    EXPECT("compaction claim: the period written", 1, g_compact_closed && !g_compact_periods);
+    EXPECT("compaction claim: the old file stays", 1, [NSFileManager.defaultManager fileExistsAtPath:paths[0]]);
+    EXPECT("compaction claim: compact_failed.tsv names it", 1, [[NSString stringWithContentsOfFile:arch_compact_fail_path() encoding:NSUTF8StringEncoding error:nil] containsString:names[0]]);
+    compact_reset(); g_compact_enabled = 0; g_compact_files = nil;
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = saved4; g_arch4p = saved4p; g_arch_dir = saved;
+    [NSFileManager.defaultManager removeItemAtPath:@(cdir) error:nil];
 }
 static void capture_preserves_foreign_folder(void) {
     arch_flush_wait();   // Finish earlier captures: the captures below go into a new flush period
@@ -525,6 +688,26 @@ static void repeated_archive_miss(void) {
     nvn_hm_clear(&g_pbase_miss, hm_rel);
 }
 
+// An app's folder of Metal's build folders (ga_claim): a start with no other copy running lists the earlier runs' folders; a copy started beside it lists none; and once the first
+// exits, a third start still lists none while the second runs, whose folders are live. Each claim opens the lock anew, and flock locks of separate opens conflict as between processes
+static void app_folder_claim(void) {
+    EXPECT("app folder: a host without a bundle shares Metal's folder", 0, ga_own());
+    EXPECT("app folder: Metal's folder", 1, [ga_dir() hasSuffix:@"/com.apple.gpuarchiver"]);
+    NSString *dir = [@(archive_cache_root) stringByAppendingPathComponent:@"org.nxnative.test/com.apple.gpuarchiver"];
+    for (NSString *n in @[@"gpuarchiver-aaaaaa", @"gpuarchiver-bbbbbb"]) [NSFileManager.defaultManager createDirectoryAtPath:[dir stringByAppendingPathComponent:n] withIntermediateDirectories:YES attributes:nil error:nil];
+    [@"x" writeToFile:[dir stringByAppendingPathComponent:@"other"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    int a, b, c, d;
+    NSSet<NSString *> *got = ga_claim(dir, &a), *want = [NSSet setWithObjects:@"gpuarchiver-aaaaaa", @"gpuarchiver-bbbbbb", nil];
+    EXPECT("app folder: the first copy lists the earlier runs' folders", 1, a >= 0 && [got isEqualToSet:want]);
+    EXPECT("app folder: a second copy lists none", 1, ga_claim(dir, &b) == nil && b >= 0);
+    close(a);   // the first copy quits
+    EXPECT("app folder: a third copy lists none while the second runs", 1, ga_claim(dir, &c) == nil && c >= 0);
+    close(b); close(c);
+    EXPECT("app folder: with no copy running, a start lists them again", 2, ga_claim(dir, &d).count);
+    close(d);
+    EXPECT("app folder: no folder, no lock", 1, ga_claim(nil, &d) == nil && d < 0);
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     if (!mkdtemp(archive_cache_root)) abort();
     atexit(archive_cache_cleanup);
@@ -557,6 +740,121 @@ int main(int argc, char **argv) { @autoreleasepool {
     g_lib3 = t4_lib([src stringByAppendingString:@"// the whole reference pipelines' library\n"], nil, &err);
     if (!g_lib2 || !g_lib3) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); return 1; }
     lib_tag(g_lib, @"fixture.metallib"); lib_tag(g_lib2, @"fixture2.metallib");   // as lib_from_file names the game's: their pipelines have index keys
+    // A period's write and the pipeline compiles do not overlap (ser_begin / ser_compile_begin; port of NXNative cc8f44906): the write waits for a compile under way, a compile
+    // waits for a write under way (counted as held back), and a compile that does not return holds a write back SER_WAIT_MS at most
+    if (argc == 2 && !strcmp(argv[1], "--ser-gate")) {
+        pso4_init();
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        EXPECT("gate: a capture", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_arch_new) == 1);
+        ser_compile_begin();   // a compile under way
+        arch_flush(); usleep(400000);
+        EXPECT("gate: the period's write waits for the compile under way", 0, archive_files(@(dir)).count);
+        ser_compile_end();
+        EXPECT("gate: written once the compile returned", 0, dispatch_group_wait(g_arch_pending, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+        EXPECT("gate: one file", 1, archive_files(@(dir)).count);
+        ser_begin();   // a period serializing
+        uint64_t holds = atomic_load(&g_ser_holds);
+        cd.vertexDescriptor.layouts[16].stride += 16;
+        __block int built = 0; dispatch_semaphore_t done = dispatch_semaphore_create(0); MTLRenderPipelineDescriptor *cd2 = [cd copy];
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { built = pso_build(cd2, 0, NULL) != nil; } dispatch_semaphore_signal(done); });
+        EXPECT("gate: a compile waits while a period serializes", 1, dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC)) != 0);
+        pthread_mutex_lock(&g_ser_mu); int beside = g_ser_compiles; pthread_mutex_unlock(&g_ser_mu);
+        EXPECT("gate: no compile under way beside the write", 0, beside);
+        ser_end();
+        EXPECT("gate: the compile goes on once the period is written", 0, dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)));
+        EXPECT("gate: built, and counted as held back", 1, built && atomic_load(&g_ser_holds) == holds + 1);
+        ser_compile_begin();   // a compile that does not return
+        uint64_t t0 = now_ns(); arch_flush();
+        EXPECT("gate: the write goes ahead beside it", 0, dispatch_group_wait(g_arch_pending, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)));
+        double held = (now_ns() - t0) / 1e9;
+        EXPECT("gate: after SER_WAIT_MS", 1, held > SER_WAIT_MS / 1e3 * 0.8 && held < SER_WAIT_MS / 1e3 + 2);
+        EXPECT("gate: two files", 2, archive_files(@(dir)).count);
+        ser_compile_end();
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive serialization gate: %d checks, %d failed\n", checks, failed); return failed != 0;
+    }
+    // The windowed timer's write in play (port of NXNative f539b2dcd): with a window, the timer writes only once no frame was presented for ARCH_FLUSH_INTERVAL_S and no compile
+    // is under way, and looks again meanwhile with the captures kept in the current period; a save, a full period and a run without a window write as before
+    if (argc == 2 && !strcmp(argv[1], "--active-flush")) {
+        pso4_init();
+        test_archive_timer = 1; test_layer = [CAMetalLayer layer];
+        const uint64_t idle_ns = (ARCH_FLUSH_INTERVAL_S + 1) * (uint64_t)NSEC_PER_SEC;
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        EXPECT("timer: a capture", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_arch_new) == 1);
+        atomic_store(&dm_present_ns, now_ns() - idle_ns);
+        ser_compile_begin(); ArchEpoch *busy = ep_enter(0);   // a compile under way in the period
+        fire_archive_timer();
+        EXPECT("timer: idle, but a compile under way: the period stays", 1, busy == g_ep);
+        atomic_store(&dm_present_ns, now_ns());   // the game presents again before the compile returns
+        ep_leave(busy); ser_compile_end();
+        fire_archive_timer();
+        EXPECT("timer: presenting: deferred, nothing written", 0, archive_files(@(dir)).count);
+        EXPECT("timer: the period still holds its capture", 1, atomic_load(&g_arch_new));
+        atomic_store(&dm_present_ns, now_ns() - idle_ns);
+        fire_archive_timer();
+        EXPECT("timer: idle with no compile under way: written at once", 1, archive_files(@(dir)).count);
+        EXPECT("timer: nothing left", 0, atomic_load(&g_arch_new));
+        EXPECT("timer: no retry after the write", 1, test_timer_block == nil);
+        atomic_store(&dm_present_ns, now_ns());
+        cd.vertexDescriptor.layouts[16].stride += 16;
+        EXPECT("timer: a capture in play", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_arch_new) == 1);
+        fire_archive_timer();
+        EXPECT("timer: deferred in play, its retry armed", 1, archive_files(@(dir)).count == 1 && test_timer_block != nil);
+        cd.vertexDescriptor.layouts[16].stride += 16;
+        uint64_t holds = atomic_load(&g_ser_holds);
+        EXPECT("timer: a deferred write holds no compile back", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_ser_holds) == holds && atomic_load(&g_arch_new) == 2);
+        mtl_arch_save(5000, 0);
+        EXPECT("timer: a save writes in play", 2, archive_files(@(dir)).count);
+        fire_archive_timer();
+        EXPECT("timer: nothing left, no retry", 1, test_timer_block == nil && atomic_load(&g_arch_new) == 0);
+        g_arch_period_max = 1; cd.vertexDescriptor.layouts[16].stride += 16;
+        EXPECT("timer: a capture fills a period", 1, pso_build(cd, 0, &err) != nil);
+        dispatch_group_wait(g_arch_pending, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+        EXPECT("timer: a full period writes in play", 3, archive_files(@(dir)).count);
+        g_arch_period_max = ARCH_PERIOD_MAX;
+        if (test_timer_block) fire_archive_timer();
+        test_layer = nil; cd.vertexDescriptor.layouts[16].stride += 16;
+        EXPECT("timer: a capture without a window", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_arch_new) == 1);
+        atomic_store(&dm_present_ns, now_ns());
+        fire_archive_timer();
+        dispatch_group_wait(g_arch_pending, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+        EXPECT("timer: without a window it writes as before", 4, archive_files(@(dir)).count);
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive windowed timer: %d checks, %d failed\n", checks, failed); return failed != 0;
+    }
+    // The prebuild's new files opened before the first frame (arch_adopt_prebuilt, upstream NXNative 4add5fbb4): a base without a vertex layout captured into a p file after
+    // pso4_init is found by a compile 0 lookup in the same run, from its index, with the miss recorded before it forgotten and nothing compiled; the file is not probed or noted
+    // for the prebuild's trim; a second call opens nothing again; with too little address space left beside it the file is not opened, and a later call with room takes it
+    if (argc == 2 && !strcmp(argv[1], "--adopt-prebuilt")) {
+        pso4_init();
+        MTLRenderPipelineDescriptor *nd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        nd.vertexFunction = fn4_note([g_lib newFunctionWithName:@"vs0"], g_lib, @"vs0", nil);
+        nd.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
+        EXPECT("adopt: none in the archive yet", 1, pso_build_ex(nd, 0, &err, 0) == nil);
+        EXPECT("adopt: the miss recorded", 1, g_pbase_miss.n);
+        MTL4RenderPipelineDescriptor *m4 = pso_desc4(nd, 1, 0);
+        EXPECT("adopt: its Metal 4 base descriptor", 1, m4 != nil);
+        EXPECT("adopt: captured as the prebuild would", 1, arch_capture(m4, &err, 0, NULL) != nil);
+        arch_flush_wait();
+        NSArray<NSString *> *af = archive_files(@(dir));
+        EXPECT("adopt: a p file written after pso4_init", 1, af.count == 1 && arch_name_kind(af[0]) == 1);
+        g_arch_adopt_reserve = UINT64_MAX / 2;   // more than any task's address space
+        arch_adopt_prebuilt();
+        EXPECT("adopt, no room: not opened", 1, g_arch_ix.n == 0 && g_arch_ixf.count == 0);
+        EXPECT("adopt, no room: the miss kept", 1, g_pbase_miss.n);
+        g_arch_adopt_reserve = 2ull << 30;
+        uint64_t arch0 = g_pb_archived, built0 = g_pb_built, asks0 = g_arch_asks;
+        arch_adopt_prebuilt();
+        EXPECT("adopt: indexed", 1, g_arch_ix.n == 1 && g_arch_ixf.count == 1);
+        EXPECT("adopt: the miss forgotten", 0, g_pbase_miss.n);
+        EXPECT("adopt: not probed, not the prebuild's to trim", 0, g_arch_probe_n + g_arch_pre_files.count);
+        EXPECT("adopt: a compile 0 lookup finds it in the same run", 1, pso_build_ex(nd, 0, &err, 0) != nil);
+        EXPECT("adopt: from the file its index names, nothing compiled", 1, g_pb_archived == arch0 + 1 && g_pb_built == built0 && g_arch_asks == asks0 + 1);
+        arch_adopt_prebuilt();
+        EXPECT("adopt: a second call opens nothing again", 1, g_arch_ixf.count == 1 && g_arch4p.count == 0);
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive adopt prebuilt: %d checks, %d failed\n", checks, failed); return failed != 0;
+    }
     if (argc == 3 && !strncmp(argv[1], "--cold-", 7)) {   // across fresh processes: a cold start's prewarm with a timer flush after each new base, then the next start
         g_arch_period_max = 4; int seed = !strcmp(argv[1], "--cold-seed"), cut = !strcmp(argv[1], "--cold-cut-seed"), after_cut = !strcmp(argv[1], "--cold-after-cut");
         int quit = !strcmp(argv[1], "--cold-quit-seed"), after_quit = !strcmp(argv[1], "--cold-after-quit");
@@ -590,6 +888,44 @@ int main(int argc, char **argv) { @autoreleasepool {
         printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
         return failed != 0;
     }
+    // Across fresh processes: a run ends in its prewarm, before any full period (Ocarina of Time's warm-up runs of 2026-11-10 without a window: 400-500 bases held, none written).
+    // --warmflush-: the timer's flush in a prewarm the game plays through hands the period over once it is DM_PSO_ARCH_WARM_FLUSH_MS old, so a run killed after it (no exit write)
+    // keeps them. --warmprep-: the same in the prepare step, which ends before the first frame, hands nothing over: the next start compiles them. --term-: SIGTERM while a draw is
+    // still in the graphics layer (DM_TEST_STUCK_DRAW: it never leaves, as one compiling its pipeline did), so the drain never returns; the archive is written all the same.
+    // --exec-: oe::ExecuteProgram's hand-over (dm_host_shutdown_then) with that draw: the next program (exec_then) starts after the write, and finds the file there. Then the
+    // next start takes every base from the archive and compiles none
+    if (argc == 3 && (!strncmp(argv[1], "--warmflush-", 12) || !strncmp(argv[1], "--warmprep-", 11) || !strncmp(argv[1], "--term-", 7) || !strncmp(argv[1], "--exec-", 7))) {
+        int term = !strncmp(argv[1], "--term-", 7), exec = !strncmp(argv[1], "--exec-", 7), prep = !strncmp(argv[1], "--warmprep-", 11), seed = strstr(argv[1], "-seed") != NULL;
+        enum { K = 5 };
+        if (seed && term) { void dm_term_install(void); dm_term_install(); }
+        pso4_init();
+        uint64_t arch0 = g_pb_archived, built0 = g_pb_built;
+        atomic_store(&g_warm_running, 1); atomic_store(&g_warm_bg, !prep);
+        for (int i = 0; i < K; i++) {
+            MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+            cd.vertexDescriptor.layouts[16].stride = 16 * (i + 120);
+            EXPECT("end in the prewarm: pipeline", 1, pso_build(cd, 0, &err) != nil);
+        }
+        if (seed) {
+            EXPECT("end in the prewarm: compiled", K, (int)(g_pb_built - built0));
+            if (!term && !exec) {   // the timer's flush, once the period is old enough; then the run is killed (no exit write)
+                usleep(400 * 1000); dispatch_sync(g_arch_q, ^{ arch_flush(); }); dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER);
+                printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed); fflush(stdout);
+                _exit(failed != 0);
+            }
+            if (getenv("DM_TEST_STUCK_DRAW")) { void dm_gfx_enter(void); dm_gfx_enter(); }   // a draw under way that does not return
+            printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed); fflush(stdout);
+            if (failed) _exit(1);
+            if (exec) { void dm_host_shutdown_then(const char *, void (*)(void *), void *); dm_host_shutdown_then("test hand-over", exec_then, argv[2]); }
+            kill(getpid(), SIGTERM);   // to the process, as a harness sends it: raise() aims it at this thread, where the ignored signal never reaches the GCD signal source
+            for (;;) pause();
+        }
+        atomic_store(&g_warm_running, 0); arch_flush_wait();
+        EXPECT("after an end in the prewarm: bases from the archive", prep ? 0 : K, (int)(g_pb_archived - arch0));
+        EXPECT("after an end in the prewarm: bases compiled", prep ? K : 0, (int)(g_pb_built - built0));
+        printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
+        return failed != 0;
+    }
     // A fresh process is essential: a compiler that built the source archives still has their online binaries.
     if (argc == 3 && !strncmp(argv[1], "--oldname-", 10)) {   // across fresh processes: nine run files named before the count (the test renames them) are compacted once, then not again
         int seed = !strcmp(argv[1], "--oldname-seed"), replay = !strcmp(argv[1], "--oldname-replay");
@@ -608,6 +944,9 @@ int main(int argc, char **argv) { @autoreleasepool {
             atomic_store(&g_warm_running, 0);
             EXPECT("old names restart: every base from disk", arch0 + descs.count, g_pb_archived);
             EXPECT("old names restart: none compiled", built0, g_pb_built);
+            EXPECT("old names restart: none captured before the first frame", 0, g_compacted);
+            compact_pass_run();
+            EXPECT("old names restart: the nine captured again after it", replay ? PSO_ARCH_COMPACT + 1 : 0, g_compacted);
             arch_flush_wait();
         }
         [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
@@ -634,8 +973,50 @@ int main(int argc, char **argv) { @autoreleasepool {
             atomic_store(&g_warm_running, 0);
             EXPECT("tier restart: every base from disk", arch0 + descs.count, g_pb_archived);
             EXPECT("tier restart: none compiled", built0, g_pb_built);
+            EXPECT("tier restart: the small files' bases alone noted", replay ? PSO_ARCH_COMPACT + 1 : 0, g_compact_bases);
+            compact_pass_run();
             EXPECT("tier restart: the small files' bases alone captured again", replay ? PSO_ARCH_COMPACT + 1 : 0, g_compacted);
             arch_flush_wait();
+        }
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
+        return failed != 0;
+    }
+    // Across fresh processes, the compaction's pass after the first frame cut short by a quit: --defer-seed writes nine files of one base; --defer-quit compacts them with a
+    // period of 4 (its prepare step captures nothing), captures 5 of them again and quits mid-pass (exit(): the period under way is written, the pass stops): the nine old files
+    // stay beside the two new ones; --defer-replay finds every base (the 5 in the newer files), compacts what is left and removes the old files; --defer-verify compacts nothing
+    if (argc == 3 && !strncmp(argv[1], "--defer-", 8)) {
+        g_arch_period_max = 4; int seed = !strcmp(argv[1], "--defer-seed"), quit = !strcmp(argv[1], "--defer-quit"), replay = !strcmp(argv[1], "--defer-replay");
+        pso4_init();
+        NSMutableArray<MTLRenderPipelineDescriptor *> *descs = [NSMutableArray array];
+        for (int i = 0; i <= PSO_ARCH_COMPACT; i++) {
+            MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+            cd.vertexDescriptor.layouts[16].stride = 16 * (i + 160); [descs addObject:cd];
+        }
+        if (seed) for (MTLRenderPipelineDescriptor *cd in descs) { EXPECT("deferred compaction: pipeline", 1, pso_build(cd, 0, &err) != nil); arch_flush_wait(); }
+        else {
+            EXPECT("deferred compaction: compacting", quit || replay, g_compact_enabled);
+            uint64_t arch0 = g_pb_archived, built0 = g_pb_built; int new0 = g_arch_new;
+            atomic_store(&g_warm_running, 1);
+            dispatch_apply(descs.count, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) { @autoreleasepool { pso_build(descs[i], 0, NULL); } });
+            atomic_store(&g_warm_running, 0);
+            EXPECT("deferred compaction: every base from disk", arch0 + descs.count, g_pb_archived);
+            EXPECT("deferred compaction: none compiled", built0, g_pb_built);
+            EXPECT("deferred compaction: none captured before the first frame", 1, g_arch_new == new0 && !g_compacted);
+            EXPECT("deferred compaction: noted", quit ? PSO_ARCH_COMPACT + 1 : replay ? 5 : 0, g_compact_bases);   // replay: the 4 of the full period's file are in no tier
+            if (quit) {
+                g_present_n = 1; g_cpass_start_ms = g_cpass_rest_ms = g_cpass_hold_ms = 3600000; g_cpass_batch = 5;
+                g_cpass_hold_test = 0; compact_schedule(); compact_step_now();   // ready at once: the first batch
+                EXPECT("deferred compaction: 5 captured again before the quit", 5, g_compacted);
+                arch_flush_wait();
+                mtl_warm_stop(); compact_step_now();   // the quit: the pass stops at its next step
+                EXPECT("deferred compaction: stopped", 4, g_cpass);
+                printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed); fflush(stdout);
+                exit(failed != 0);   // arch_at_exit writes the period under way (1 base)
+            }
+            compact_pass_run();
+            EXPECT("deferred compaction: captured again after the first frame", replay ? 5 : 0, g_compacted);
+            if (replay) EXPECT("deferred compaction: done", 1, g_cpass == 3 && g_compact_closed && !g_compact_periods && !g_compact_bad);
         }
         [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
         printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
@@ -730,8 +1111,12 @@ int main(int argc, char **argv) { @autoreleasepool {
             EXPECT("restart: every base from disk", PSO_ARCH_COMPACT + 1 + (fresh && !compacting), g_pb_archived);
             EXPECT("restart: compiled bases", fresh && compacting, g_pb_built);
             dispatch_sync(g_arch_q, ^{ arch_flush(); });
-            if (g_compact_files) EXPECT("restart: timed flush keeps recaptures pending", PSO_ARCH_COMPACT + 1 + fresh, g_arch_new);
+            if (g_compact_files) EXPECT("restart: the prepare step captures none again, the timed flush keeps the fresh base pending", fresh, g_arch_new);
             atomic_store(&g_warm_running, 0);
+            if (g_compact_files) {   // the pass after the first frame: its recaptures join the fresh base's period (issue #342: mixed in one serializer)
+                compact_pass_run();
+                EXPECT("restart: every base captured again after the first frame", PSO_ARCH_COMPACT + 1, g_compacted);
+            }
             arch_flush_wait();
         }
         if (seed && getenv("DM_TEST_ARCHIVE_MIXED")) [arch_os_build() writeToFile:arch_compact_marker() atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -834,30 +1219,60 @@ int main(int argc, char **argv) { @autoreleasepool {
         NSMutableArray<id<MTL4Archive>> *open = [NSMutableArray array]; NSMutableArray<NSString *> *paths = [NSMutableArray array];
         for (NSString *n in names.reverseObjectEnumerator) { NSString *f = [@(cdir) stringByAppendingPathComponent:n]; [paths addObject:f]; [open addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:f] error:&err]]; }
         nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = open;   // as a new start with that many files
-        g_compact_enabled = 1; g_compact_files = paths; g_compacted = 0; g_compact_bases = 0; g_compact_ns = 0;
-        g_arch_period_max = 4;   // the recaptured bases fill two periods and part of a third: each full one is handed over, the timer's flushes wait
-        uint64_t arch0 = g_pb_archived, built0 = g_pb_built;
-        ArchEpoch *ep = g_ep; ArchiveGateCompiler *gate = [ArchiveGateCompiler new]; gate->compiler = ep->comp; gate->calls = 1; ep->comp = (id<MTL4Compiler>)gate;
+        compact_reset(); g_compact_enabled = 1; g_compact_files = paths;
+        g_arch_period_max = 4;   // the recaptured bases fill two periods and part of a third: each full one is handed over, the timer's flushes wait while the pass captures
+        uint64_t arch0 = g_pb_archived, built0 = g_pb_built; int new0 = g_arch_new;
         atomic_store(&g_warm_running, 1);
         for (MTLRenderPipelineDescriptor *cd in descs) pso_build(cd, 0, &err);
-        EXPECT("compaction: captures original shader functions, not archive imports", 0, gate->lookup_calls);
-        ep->comp = gate->compiler;
+        // the prepare step: lookups alone, every base noted, none captured before the first frame
+        EXPECT("compaction: the prepare step captures nothing (captures before the first frame)", new0, g_arch_new);
+        EXPECT("compaction: none captured again before the first frame", 0, g_compacted);
+        EXPECT("compaction: the prepare line counts the bases noted", descs.count, g_compact_bases);
         dispatch_sync(g_arch_q, ^{ arch_flush(); });   // the timer fires while prewarm still has other work
-        arch_flush_wait();   // the timer's flush waits for the prewarm; the full periods are written
-        EXPECT("compaction: timed flush keeps the last recaptured bases pending", descs.count % 4, g_arch_new);
-        EXPECT("compaction: a file per full period", PSO_ARCH_COMPACT + 1 + descs.count / 4, archive_files(@(cdir)).count);
-        int kept = 0; for (NSString *f in paths) kept += [NSFileManager.defaultManager fileExistsAtPath:f];
-        EXPECT("compaction: the old files stay until its last period is written", paths.count, kept);
+        arch_flush_wait();
+        EXPECT("compaction: no file written in the prepare step", PSO_ARCH_COMPACT + 1, archive_files(@(cdir)).count);
         atomic_store(&g_warm_running, 0);
         EXPECT("compaction: every base from the archive", arch0 + descs.count, g_pb_archived);
         EXPECT("compaction: none compiled", built0, g_pb_built);
-        EXPECT("compaction: every base captured again", descs.count, g_compacted);
-        EXPECT("compaction: the prepare line counts them", descs.count, g_compact_bases);
-        EXPECT("compaction: and their time", 1, g_compact_ns > 0);
-        MarkerSerializer *ms = [MarkerSerializer new]; ms->ser = g_ep->ser; g_ep->ser = (id<MTL4PipelineDataSetSerializer>)ms;   // the period being written
+        // the pass, a step at a time (its own waits are an hour long): not before the first frame, held while hot, then batches of 5
+        uint64_t pn = g_present_n; g_present_n = 0; g_cpass_start_ms = g_cpass_rest_ms = g_cpass_hold_ms = 3600000; g_cpass_batch = 5;
+        compact_schedule();
+        EXPECT("compaction: the pass scheduled after the prewarm", 1, g_cpass);
+        compact_step_now();
+        EXPECT("compaction: the pass waits for the first frame", 1, g_cpass == 1 && !g_compacted);
+        g_present_n = 1; g_cpass_hold_test = 1; compact_step_now();
+        EXPECT("compaction: held while the device is hot", 1, g_cpass == 1 && g_cpass_held && !g_compacted);
+        g_cpass_hold_test = 0;
+        ArchEpoch *ep = g_ep; ArchiveGateCompiler *gate = [ArchiveGateCompiler new]; gate->compiler = ep->comp; gate->calls = 1; ep->comp = (id<MTL4Compiler>)gate;
+        compact_step_now();   // 5: the 4th hands its period over (ARCH_PERIOD_MAX), the 5th starts the next
+        ep->comp = gate->compiler;
+        EXPECT("compaction: captures original shader functions, not archive imports", 0, gate->lookup_calls);
+        EXPECT("compaction: the first batch captured", 1, g_cpass == 2 && !g_cpass_held && g_compacted == 5);
+        dispatch_sync(g_arch_q, ^{ arch_flush(); });   // the timer fires while the pass captures
+        arch_flush_wait();
+        EXPECT("compaction: the timer's flush waits for the pass", 1, g_arch_new);
+        EXPECT("compaction: a file per full period", PSO_ARCH_COMPACT + 2, archive_files(@(cdir)).count);
+        g_cpass_hold_test = 2; compact_step_now();   // Low Power Mode: held, and the timer's flushes go on meanwhile
+        EXPECT("compaction: held in Low Power Mode", 1, g_cpass_held && g_compacted == 5);
+        dispatch_sync(g_arch_q, ^{ arch_flush(); }); arch_flush_wait();
+        EXPECT("compaction: while held the timer's flush writes", 0, g_arch_new);
+        EXPECT("compaction: its period a file", PSO_ARCH_COMPACT + 3, archive_files(@(cdir)).count);
+        g_cpass_hold_test = 0;
+        MarkerSerializer *ms = [MarkerSerializer new]; ms->ser = g_ep->ser; g_ep->ser = (id<MTL4PipelineDataSetSerializer>)ms;   // the period the last batch fills
+        g_cpass_batch = 4; compact_step_now();   // the last 4: a full period, handed over at its 4th capture
         arch_flush_wait();
         EXPECT("compaction: the marker exists while the flush writes", 1, ms->calls == 1 && ms->marked == 1);
         EXPECT("compaction: the flush that returned removed the marker", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_marker()]);
+        EXPECT("compaction: every base captured again", descs.count, g_compacted);
+        EXPECT("compaction: and their time", 1, g_compact_ns > 0);
+        int kept = 0; for (NSString *f in paths) kept += [NSFileManager.defaultManager fileExistsAtPath:f];
+        EXPECT("compaction: the old files stay until it closes", paths.count, kept);
+        compact_step_now();   // no note left: it closes, and the old files go once its periods are written
+        arch_flush_wait(); dispatch_sync(g_arch_q, ^{});
+        EXPECT("compaction: closed", 3, g_cpass);
+        kept = 0; for (NSString *f in paths) kept += [NSFileManager.defaultManager fileExistsAtPath:f];
+        EXPECT("compaction: the old files removed", 0, kept);
+        g_present_n = pn;
         // in the background (iOS, mtl_arch_save to mtl_arch_resume) no write arms the marker, and one armed when the app went there goes: iOS may SIGKILL a suspended app
         arch_mark_bg(1); arch_mark(1);
         EXPECT("compaction: no marker while in the background", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_marker()]);
@@ -873,6 +1288,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("compaction: a file per period left", (descs.count + 3) / 4, names.count);
         EXPECT("compaction: done", 0, g_compact_periods + !g_compact_closed + g_compact_bad);
         EXPECT("compaction: no failure file after one that finished", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_fail_path()]);
+        compact_reset();
         g_arch_period_max = ARCH_PERIOD_MAX;
         // a compaction that did not finish: the same files, or up to PSO_ARCH_COMPACT more, are not compacted again on this system build; more, a missing one or another build try again
         {
@@ -894,6 +1310,16 @@ int main(int argc, char **argv) { @autoreleasepool {
             NSString *other = [[NSString stringWithContentsOfFile:arch_compact_fail_path() encoding:NSUTF8StringEncoding error:nil] stringByReplacingOccurrencesOfString:arch_os_build() withString:@"os\t1A1\n"];
             [other writeToFile:arch_compact_fail_path() atomically:YES encoding:NSUTF8StringEncoding error:nil];
             EXPECT("failed compaction: again on another system build", 1, arch_compact_retry(runf));
+            // a plain file the start kept but could not open or read (g_arch_unusable) is none of the run's files: the note leaves it out, or every start tried again
+            {
+                NSString *kept = [NSString stringWithFormat:@"%s/77777.mtl4a", cdir];
+                [@"x" writeToFile:kept atomically:YES encoding:NSUTF8StringEncoding error:nil]; g_arch_unusable = [NSMutableSet setWithObject:kept.lastPathComponent];
+                arch_compact_fail_note();
+                NSString *kn = [NSString stringWithContentsOfFile:arch_compact_fail_path() encoding:NSUTF8StringEncoding error:nil];
+                EXPECT("failed compaction: a file kept unread is not in the note", 0, [kn containsString:@"77777.mtl4a"]);
+                EXPECT("failed compaction: and does not make the next start try again", 0, arch_compact_retry(runf));
+                g_arch_unusable = nil; unlink(kept.fileSystemRepresentation); unlink(arch_compact_fail_path().fileSystemRepresentation);
+            }
             // the start's pick asks it (arch_compact_pick): a tier over PSO_ARCH_COMPACT on the files a failed compaction named, and up to PSO_ARCH_COMPACT more, is not picked
             NSMutableArray<NSString *> *pick = [runf mutableCopy]; for (int i = 0; i < PSO_ARCH_COMPACT; i++) [pick addObject:[NSString stringWithFormat:@"%s/8%04d-1.mtl4a", cdir, i]];
             arch_compact_fail_note(); g_compact_enabled = 0; g_compact_files = nil; g_compact_state = NULL;
@@ -980,7 +1406,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         char cdir[] = "/tmp/t_pso_tier.XXXXXX"; if (!mkdtemp(cdir)) abort();
         NSString *saved = g_arch_dir; g_arch_dir = @(cdir); nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
         g_arch_period_max = 4;
-        g_compact_enabled = 0; g_compact_files = nil; g_compact_state = NULL; g_compacted = 0; g_compact_periods = 0; g_compact_closed = 0; g_compact_bad = 0;
+        g_compact_enabled = 0; g_compact_files = nil; g_compact_state = NULL; compact_reset();
         NSMutableArray<MTLRenderPipelineDescriptor *> *full = [NSMutableArray array], *unused = [NSMutableArray array], *small = [NSMutableArray array];
         for (int k = 0; k < 2; k++) {   // two full periods: each 4th capture hands its period over
             for (int i = 0; i < 4; i++) {
@@ -1015,8 +1441,10 @@ int main(int argc, char **argv) { @autoreleasepool {
         atomic_store(&g_warm_running, 0);
         EXPECT("tier: every base from the archive", arch0 + full.count + small.count, g_pb_archived);
         EXPECT("tier: none compiled", built0, g_pb_built);
+        EXPECT("tier: only the small files' bases noted", small.count, g_compact_bases);
+        EXPECT("tier: none captured before the first frame", 0, g_compacted);
+        compact_pass_run();   // after the first frame
         EXPECT("tier: only the small files' bases captured again", small.count, g_compacted);
-        arch_flush_wait();
         EXPECT("tier: done", 0, g_compact_periods + !g_compact_closed + g_compact_bad);
         EXPECT("tier: the full period's file the prewarm took from stays", 1, [NSFileManager.defaultManager fileExistsAtPath:kept]);
         EXPECT("tier: the full period's file the run took nothing from stays too", 1, [NSFileManager.defaultManager fileExistsAtPath:gone]);
@@ -1024,7 +1452,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("tier: the small files removed", 0, left);
         names = [archive_files(@(cdir)) sortedArrayUsingSelector:@selector(compare:)];
         EXPECT("tier: the two full files and a file per period", 2 + (small.count + 3) / 4, names.count);
-        nvn_hm_clear(&g_pbase, hm_rel); g_compact_enabled = 0; g_compact_files = nil; g_compact_state = NULL; g_compacted = 0;
+        nvn_hm_clear(&g_pbase, hm_rel); g_compact_enabled = 0; g_compact_files = nil; g_compact_state = NULL; compact_reset();
         NSMutableArray<id<MTL4Archive>> *again = [NSMutableArray array];
         for (NSString *n in names.reverseObjectEnumerator) [again addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:[@(cdir) stringByAppendingPathComponent:n]] error:&err]];
         g_arch4 = again; arch0 = g_pb_archived; built0 = g_pb_built;
@@ -1066,6 +1494,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     depth_only();
     concurrent_bases(0);
     concurrent_bases(1);
+    crashed_period();
+    compaction_claim();
     // key normalization
     pso_key k; memset(&k, 0, sizeof k); k.blend_en = 0x5; k.dfmt = MTLPixelFormatDepth32Float; k.sfmt = MTLPixelFormatStencil8;
     for (int i = 0; i < 8; i++) { k.cfmt[i] = MTLPixelFormatRGBA8Unorm; k.blend[i].src_rgb = 5; k.blend[i].dst_rgb = 6; }   // every target present: only the blend rule acts
@@ -1095,6 +1525,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     repeated_archive_miss();
     spec_desc_ownership();
     capture_preserves_foreign_folder();
+    app_folder_claim();
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
     printf("t_pso_archive: %d checks, %d failed\n", checks, failed);
     return failed != 0;

@@ -3,7 +3,9 @@
 # with no Payload/ copy first. Replaces zip -qry -n with the same entries: folders, Unix modes (the executable's x bit), symlinks as links, DOS times, the UTF-8 flag for non-ASCII names;
 # deflate level 6, a file whose deflate is not smaller is stored (zip's rule), and names ending in a --store suffix are always stored (the profile's zip_store, compared without regard to case).
 # Speed (Info-ZIP managed about 100 MB/s on the T7): files up to BIG are read, and deflated, by a thread pool (zlib releases the GIL) while this thread writes them in order;
-# bigger files are streamed here, their CRC patched into the local header afterwards (no data descriptors). Zip64 fields wherever a size, an offset or the entry count passes its 32 / 16-bit field.
+# bigger files are streamed here, their CRC patched into the local header afterwards (no data descriptors). A big file's deflate is split as pigz splits it: BLOCK-sized blocks deflated
+# by the same pool, each primed with the 32 KB before it (zdict) and ended with a sync flush, the last with the final block, so their concatenation is one ordinary deflate stream
+# that any unzip reads; the blocks are fixed, so the bytes do not depend on the core count. One core deflated about 55-70 MB/s, which made the RomFS image most of a build's pack. Zip64 fields wherever a size, an offset or the entry count passes its 32 / 16-bit field.
 # Usage: pack_ipa.py <out.ipa> [--store .a:.b] [--skip <archive path>]... <archive path>=<source file or folder>...
 #   Mappings are packed in command-line order; put the files that change least first, and the app last
 #   --skip: an archive path left out of the walk of the folder that holds it (folders a stale app build still has, the signature); a mapping of its own still adds it
@@ -21,11 +23,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), '..
 import shader_lib
 
 LEVEL = 6
-IDX_VERSION = 3
+IDX_VERSION = 4   # 4: big files deflated in blocks (an IPA packed before is packed again once, so a repeat pack stays the bytes of a fresh one)
 BIG = 256 << 20      # files above this are streamed by the writer; smaller ones go through the pool
 WINDOW = 2 << 30     # input bytes in the pool at once
 QUEUE = 4096         # entries in the pool at once (folders of tiny files)
+AHEAD = 2 * (os.cpu_count() or 4)   # a big file's blocks in the pool at once
 CHUNK = 16 << 20
+BLOCK = 8 << 20      # a big file's deflate block (parallel_deflate); part of the output bytes, as LEVEL is
+WINDOW_DICT = 32 << 10
 L32, L16 = 0xFFFFFFFF, 0xFFFF
 DIR_MODE = stat.S_IFDIR | 0o755   # a parent folder no source folder stands for (Payload/, msl/); its time is 1980-01-01, so it is the same in every pack
 Entry = collections.namedtuple('Entry', 'name path st root')   # st None: a synthetic parent; root: the mapping's source folder
@@ -67,6 +72,18 @@ def load(path, deflate):   # in the pool: (method, CRC, the bytes to write, unco
         c = zlib.compressobj(LEVEL, zlib.DEFLATED, -15); z = c.compress(data) + c.flush()
         if len(z) < len(data): return 8, crc, z, usize
     return 0, crc, data, usize
+
+
+def deflate_block(fd, off, n, last):   # in the pool: (the block's bytes, their deflate) for a big file's block at off, primed with the 32 KB before it
+    pre = min(off, WINDOW_DICT); want = pre + n; data = os.pread(fd, want, off - pre)
+    while len(data) < want:
+        b = os.pread(fd, want - len(data), off - pre + len(data))
+        if not b: break
+        data += b
+    if len(data) != want: return None, None   # the file shrank: the writer stops
+    raw = memoryview(data)[pre:]
+    c = zlib.compressobj(LEVEL, zlib.DEFLATED, -15, zdict=data[:pre]) if pre else zlib.compressobj(LEVEL, zlib.DEFLATED, -15)
+    return raw, c.compress(raw) + c.flush(zlib.Z_FINISH if last else zlib.Z_SYNC_FLUSH)
 
 
 def dos_time(t):
@@ -143,23 +160,35 @@ class Zip:
     def patch(self, at, b):
         self.f.seek(at); self.f.write(b); self.written += len(b)
 
-    def stream(self, e, deflate):   # a big file: the local header first, its CRC (and a deflated size) patched in afterwards
+    def stream(self, e, deflate, pool=None):   # a big file: the local header first, its CRC (and a deflated size) patched in afterwards; deflated in blocks by pool (deflate_block)
         usize = e.st.st_size; z64 = usize >= L32   # a deflate that is not smaller is redone stored, so the deflated size stays below usize
         h = self.local(e, 8 if deflate else 0, 0, 0 if deflate else usize, usize, z64)
-        crc, csize, read, c = 0, 0, 0, zlib.compressobj(LEVEL, zlib.DEFLATED, -15) if deflate else None
+        crc, csize, read = 0, 0, 0
         with open(e.path, 'rb') as f:
-            while b := f.read(CHUNK):
-                read += len(b); crc = zlib.crc32(b, crc)
-                if c: b = c.compress(b)
-                self.w(b); csize += len(b)
-            if c: b = c.flush(); self.w(b); csize += len(b)
+            if deflate:
+                n, pend = -(-usize // BLOCK), collections.deque()
+                def drain():
+                    nonlocal crc, csize, read
+                    raw, z = pend.popleft().result()
+                    if raw is None: sys.exit(f'[RED] pack_ipa: {e.path} changed size while it was packed')
+                    read += len(raw); crc = zlib.crc32(raw, crc); self.w(z); csize += len(z)
+                for i in range(n):
+                    while len(pend) >= AHEAD: drain()
+                    args = (f.fileno(), i * BLOCK, min(BLOCK, usize - i * BLOCK), i == n - 1)
+                    if pool: pend.append(pool.submit(deflate_block, *args))
+                    else: done = cf.Future(); done.set_result(deflate_block(*args)); pend.append(done)
+                while pend: drain()
+                if os.fstat(f.fileno()).st_size != usize: read = -1
+            else:
+                while b := f.read(CHUNK):
+                    read += len(b); crc = zlib.crc32(b, crc); self.w(b); csize += len(b)
         if read != usize: sys.exit(f'[RED] pack_ipa: {e.path} changed size while it was packed')
-        if c and csize >= usize:   # not smaller: stored instead
+        if deflate and csize >= usize:   # not smaller: stored instead
             self.f.seek(h[0]); self.f.truncate(); self.pos = h[0]; return self.stream(e, False)
         self.patch(h[0] + 14, struct.pack('<I', crc) + (b'' if z64 else struct.pack('<II', csize, usize)))
         if z64: self.patch(h[0] + 30 + len(h[1]) + 4, struct.pack('<QQ', usize, csize))
         self.f.seek(self.pos)
-        self.central(e, h, 8 if c else 0, crc, csize, usize)
+        self.central(e, h, 8 if deflate else 0, crc, csize, usize)
 
     def reuse(self, e, info, h, old):   # copy already compressed bytes, after the checked local header
         method, crc, csize, usize = info.compress_type, info.CRC, info.compress_size, info.file_size
@@ -313,7 +342,7 @@ def main():
                 if h is not None: pend.append(('reuse', e, (info, h))); continue
                 if e.st.st_size > BIG:
                     while pend: inflight -= one()
-                    z.stream(e, deflate); continue
+                    z.stream(e, deflate, pool); continue
                 while pend and (len(pend) >= QUEUE or inflight + e.st.st_size > WINDOW): inflight -= one()
                 pend.append(('load', e, pool.submit(load, e.path, deflate))); inflight += e.st.st_size
             while pend: inflight -= one()

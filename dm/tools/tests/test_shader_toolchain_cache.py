@@ -4,8 +4,10 @@ Exercise the builder's real key/restore functions without game files or Xcode.
 import ast
 import collections
 import concurrent.futures as cf
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -15,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 from typing import Any
 import unittest
@@ -447,6 +450,86 @@ class MetalPrefill(unittest.TestCase):
         with self.assertRaises(ValueError): self.cache.compile_split('mac', str(msl), [str(a), str(b)], lambda lib: (lib,))   # fewer pieces than libraries
         self.assertEqual(sorted(p.name for p in self.root.glob('a.metallib*')), [])
         self.assertFalse(b.exists()); self.assertEqual(self.cache.stats['mac', 'compiled'], 0)
+
+
+class BuildProgress(unittest.TestCase):
+    """dmsh_build.py's DMSH_PROGRESS as ShaderWatch reads it (upstream NXNative d2939c1eb): the throttle within a step, the final count, the mesh libraries, one or two library images
+    and the tables, the file gone at the end"""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
+
+    def load_progress(self, path):   # dmsh_build.py's _prog and progress, run on their own
+        start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == '_prog' for t in n.targets))
+        end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.FunctionDef) and n.name == 'progress') + 1
+        ns: dict[str, Any] = dict(os=os, json=json, time=time, threading=threading, PROGRESS=str(path))
+        exec(compile(ast.Module(body=self.tree.body[start:end], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        return ns
+
+    def recorded(self, ns, path):   # every progress call, as ShaderWatch reads the file right after it
+        watch, seen, orig = nsp.ShaderWatch(path), [], ns['progress']
+        def record(*a, **kw):
+            orig(*a, **kw); w = watch()
+            if w is not None: seen.append(w)
+        ns['progress'] = record
+        return seen
+
+    def test_throttle_within_a_step_and_at_once_on_a_new_step_or_a_final_count(self):
+        prog = self.root / 'progress.json'; ns = self.load_progress(prog); now = [100.0]
+        ns['time'] = types.SimpleNamespace(time=lambda: now[0])
+        ns['progress']('compiling', 1, 10, cached=10, misses=0); self.assertEqual(json.loads(prog.read_text())['done'], 1)
+        now[0] = 100.1
+        ns['progress']('compiling', 2, 10, cached=10, misses=0); self.assertEqual(json.loads(prog.read_text())['done'], 1)   # within half a second of the same step
+        ns['progress']('compiling', 10, 10, force=True, cached=10, misses=0); self.assertEqual(json.loads(prog.read_text())['done'], 10)   # the final count
+        ns['progress']('c1 guard'); self.assertEqual(json.loads(prog.read_text()), {'step': 'c1 guard'})   # a new step
+
+    def test_the_last_shader_and_the_mesh_libraries(self):
+        prog = self.root / 'progress.json'; ns = self.load_progress(prog); seen = self.recorded(ns, prog)
+        fn: ast.stmt = next(n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name == 'finished')
+        ns.update(DONE=collections.Counter(), keys=['a', 'b'], cache_hits={'a', 'b'}, NMISS=0)
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        ns['finished'](); ns['finished']()
+        self.assertEqual(seen[-1], {'step': 'compiling', 'done': 2, 'total': 2, 'unit': 'shaders', 'note': ''})
+        seen.clear()
+        start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == '_mesh' for t in n.targets))
+        end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.If)) + 1
+        ns.update(cf=cf, NJ=2, GAME=None, mesh_finish=lambda pair: None, dmsh_chain=types.SimpleNamespace(mesh_pairs=lambda *a: {('v1', 'g1'), ('v2', 'g2')}))
+        exec(compile(ast.Module(body=self.tree.body[start:end], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        self.assertEqual((seen[0], seen[-1]), ({'step': 'compiling mesh libraries', 'done': 0, 'total': 2, 'unit': 'pairs'},
+                                               {'step': 'compiling mesh libraries', 'done': 2, 'total': 2, 'unit': 'pairs'}))
+
+    def tail(self, ios=False, want=()):   # dmsh_build.py from the library images to its end, with one or two library folders
+        tag = f'{"ios" if ios else "mac"}-{len(want)}'
+        prog = self.root / f'progress-{tag}.json'; ns = self.load_progress(prog); seen = self.recorded(ns, prog)
+        mac = self.root / f'mac-{tag}' / 'b-0123456789ab'; mac.mkdir(parents=True); (mac / '0000000000000001_b.metal').write_bytes(b'msl' * 100)
+        ios_dir = self.root / f'ios-{tag}' / 'b-0123456789ab'
+        if ios: ios_dir.mkdir(parents=True); (ios_dir / '0000000000000001_b.metallib').write_bytes(b'lib' * 100)
+        funcs: list[ast.stmt] = [n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name in ('label_dir', 'publish_library', 'owned_output')]
+        store = shader_cache.Store(self.root / f'cas-{tag}.db'); self.addCleanup(store.close)
+        ns.update(os=os, sys=sys, re=re, shutil=shutil, shader_lib=shader_lib, dmsh_chain=dmsh_chain, STORE=store, STAGE='stage/test', OLD_IMAGE={},
+                  OUT_KEY=re.compile(r'([0-9a-f]{16})_b'), out=str(mac), IOSOUT=str(ios_dir) if ios else None, want=set(want),
+                  GAME=types.SimpleNamespace(id='0100000000000000', table=lambda n: self.root / n), INPUTS='aaaaaaaaaaaa', STAMP_BEFORE='aaaaaaaaaaaa',
+                  __file__=str(TOOLS / 'dmsh_build.py'), subprocess=types.SimpleNamespace(run=lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, 'ok\n', '')))
+        exec(compile(ast.Module(body=funcs, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == '_img_labels' for t in n.targets))
+        with contextlib.redirect_stdout(io.StringIO()):
+            exec(compile(ast.Module(body=self.tree.body[start:], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        return [s['step'] for s in seen], seen, prog.exists()
+
+    def test_the_steps_after_the_shaders(self):
+        steps, seen, left = self.tail()
+        self.assertFalse(left)
+        self.assertEqual(list(dict.fromkeys(steps)), ['writing the library image', 'c1 guard', 'uniform read extents'])
+        img = [s for s in seen if s['step'] == 'writing the library image']
+        self.assertEqual((img[0]['done'], img[-1]['done'], img[-1]['total'], img[-1]['unit']), (0, 1, 1, 'files'))
+        self.assertIn('note', img[-1])
+        steps, _, left = self.tail(ios=True)
+        self.assertFalse(left)
+        self.assertEqual(list(dict.fromkeys(steps)), ['writing the Mac library image', 'writing the iOS library image', 'c1 guard', 'uniform read extents'])
+        steps, _, left = self.tail(want=('0000000000000001',))   # a partial build: no tables
+        self.assertFalse(left)
+        self.assertEqual(list(dict.fromkeys(steps)), ['writing the library image'])
 
 
 if __name__ == '__main__':

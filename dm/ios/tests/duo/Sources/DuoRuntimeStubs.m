@@ -4,6 +4,7 @@
 #include "dm_input.h"
 #include "haptics_apple.h"
 #include "hle.h"
+#include "touch_draw.h"
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -125,8 +126,27 @@ int mtl_present_aa_why(void) { return g_present_why[2]; }
 void duo_harness_set_present_why(int fx, int sharp, int aa) { g_present_why[0] = fx; g_present_why[1] = sharp; g_present_why[2] = aa; }
 static int g_web_touch;   // whether an offline HTML page is shown over the picture (web_apple.m is not in the harness)
 int front_web_touch(void) { return g_web_touch; }
-void duo_harness_set_web_touch(int on) { g_web_touch = on; }
-int dm_power_detail_on(void) { return 0; }   // the power detail line (hle_nvn.c): no power line in the harness, so no battery monitoring either
+void front_web_shown(void);   // front_ios.m: the root lays out again (web_apple.m calls it at each change)
+void duo_harness_set_web_touch(int on) { if (g_web_touch == on) return; g_web_touch = on; front_web_shown(); }
+void dm_camera_aspect_screen(float ratio) { (void)ratio; }   // Ultrawide's camera (loader.c): no game in the harness
+void dm_low_power_cap_set(int on) { (void)on; }   // the in-game menu's Low Power Mode at 30 fps (hle_nvn.c): no frame cap in the harness
+int dm_power_detail_on(void) { return 0; }
+// Vitals' figures (hle_nvn.c publishes them from the present thread): a test sets one window (duo_harness_set_vitals); now_ns is 1 here, so a window stamped 1 is fresh
+#include "nvn_vitals.h"
+static nvn_vitals g_duo_vitals; static int g_duo_vitals_level, g_duo_vitals_menu;
+void duo_harness_set_vitals(int fps, int cpu_mw, int capped);
+int dm_vitals_read(nvn_vitals *out) {   // DUO_VITALS=1 (screenshots): a steady 60 fps at 2.1 W until a test sets its own
+    if (!g_duo_vitals.stamp_ns && getenv("DUO_VITALS") && atoi(getenv("DUO_VITALS"))) duo_harness_set_vitals(60, 2140, 0);
+    *out = g_duo_vitals; return 1;
+}
+void dm_vitals_level_set(int level) { g_duo_vitals_level = level; }
+void dm_vitals_menu_set(int open) { g_duo_vitals_menu = open; }
+int duo_harness_vitals_level(void) { return g_duo_vitals_level; }
+int duo_harness_vitals_menu(void) { return g_duo_vitals_menu; }
+void duo_harness_set_vitals(int fps, int cpu_mw, int capped) { g_duo_vitals = (nvn_vitals){.stamp_ns = 1, .cpu_mw = cpu_mw, .pshare_pm = 820, .gpu_busy_pm = 640, .fps10 = fps * 10, .max_gap_100us = 330, .capped = (int8_t)capped}; }
+static uint64_t g_duo_saved;
+uint64_t dm_fs_last_commit_ns(void) { return g_duo_saved; }
+void duo_harness_set_saved_ns(uint64_t ns) { g_duo_saved = ns; }   // the power detail line (hle_nvn.c): no power line in the harness, so no battery monitoring either
 // The cheats GameMenu.swift lists (hle_cheats.c): no cheats folder in the harness, so the in-game menu has no Cheats submenu; DUO_CHEATS=1 gives it a placeholder cheat file
 // (made-up names, for screenshots of the Cheats page): two sections, a cheat that runs once, one that cannot run here and an always-on master, toggled in memory
 typedef struct { const char *name, *section, *why; int kind, flags, on; } DuoCheat;
@@ -159,15 +179,57 @@ int dm_cheats_master(void) { return g_duo_cheats_master; }
 void dm_cheats_master_set(int on) { g_duo_cheats_master = on; }
 __thread _Atomic int dm_host_work;
 void dm_gfx_suspend(int on) { (void)on; }
+void dm_gfx_inactive(int on) { (void)on; }   // the bundled pipeline archive's crash guard (hle_nvn.c): no archive in the harness
 void dm_gfx_pressure(int level) { (void)level; }   // front_ios.m's memory pressure source
+void dm_heat_poke(void) {}   // hle_nvn.c: the heat ladder's thermal-state poke (front_ios.m's notification); no heat ladder in the harness
+void dm_heat_timer_tick(void) {}   // hle_nvn.c: the heat ladder's 1 s timer (front_ios.m); nothing to sample in the harness
 int dm_gfx_save_wait(int wait_ms) { (void)wait_ms; return 1; }
 void dm_audio_suspend(int on) { (void)on; }
 void dm_audio_reset(void) {}
+void dm_movie_active(int active) { (void)active; }   // front_ios.m: a movie decoder iOS ended waits for the app to be active again (hle_movie_vt.h); no movies here
 void dm_audio_route_change(const char *why, int changed) { (void)why; (void)changed; }
+int dm_audio_io_ms(void) { return 0; }   // DM_AUDIO_IO_MS unset (audio_io.h)
+void dm_audio_io_granted(double seconds) { (void)seconds; }
+uint32_t dm_audio_io_frames(void) { return 0; }
 void dm_focus_set(int state) { (void)state; }
+static int g_front_menu;   // hle_oe.c's front-end menu state, as DmGamepad.m last reported it (dm_front_menu_set: its log line and the long-frame tag)
+void dm_front_menu_set(int open, const char *where) { (void)where; g_front_menu = open != 0; }
+int duo_harness_front_menu(void) { return g_front_menu; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_stall_menu(int open) { (void)open; }   // the freeze detector (stall.c), which DmGamepad.m holds off while the in-game menu is open: no presents and no detector in the harness
 const char *front_ios_boot_message(void) { return NULL; }
 const char *front_ios_device_check(void) { return NULL; }   // a supported GPU
+bool front_ios_hud_enabled_from_saved_choice(void) { return false; }   // main.m: no saved Performance HUD choice turned the HUD on at launch
 const char *dm_save_title(void) { return "0100D0D0D0D0E000"; }   // hle_fs.c's, from the game's profile: the title ID the cloud file is named after (save_sync.c, compiled here, has save_sync_flush)
-int dm_players_reported(void) { return 1; }   // hle_hid.c: DmGamepad.m asks for the player count; the harness has only player 1
+int dm_players_reported(void) { return __builtin_popcount(duo_harness_state().connected_players | 1u); }   // hle_hid.c: DmGamepad.m asks for the player count (the controller prompt's joined count); player 1 always, as the touch gamepad
+// The touch controls drawn into the frame (nvn_mtl.m, touch_draw.h): no present in the harness, so the last frame and atlas the gamepad handed over are kept for the tests
+static touch_frame g_touch_frame; static int g_touch_frames;
+static NSData *g_touch_atlas; static int g_touch_atlas_w, g_touch_atlas_h, g_touch_atlas_channels; static uint32_t g_touch_atlas_gen;
+static touch_box g_touch_box_h; static uint32_t g_touch_seq_h, g_touch_ack_h; static int g_touch_releases; static uint64_t g_touch_idle = UINT64_MAX;
+uint32_t mtl_present_touch(const touch_frame *f) { g_touch_frame = *f; g_touch_frames++; return g_touch_seq_h = touch_publish(&g_touch_box_h, f); }   // the sequence as the present's box gives it
+void mtl_present_touch_ack(uint32_t seq) { g_touch_ack_h = seq; }
+void mtl_present_touch_release(void) { g_touch_releases++; g_touch_atlas = nil; g_touch_atlas_gen = 0; }
+uint64_t mtl_present_touch_idle_ns(void) { return g_touch_idle; }
+void duo_harness_set_present_idle(uint64_t ns) { g_touch_idle = ns; }
+int duo_harness_touch_releases(void) { return g_touch_releases; }
+int duo_harness_present_draws(void) {   // as nvn_mtl.m's present_now completing a live present that drew the last frame: the front end hears of it once per request (front_touch_drawn)
+    g_touch_idle = 0;
+    if (g_touch_frame.on != TOUCH_ON || !g_touch_frame.n || !g_touch_atlas || g_touch_frame.atlas != g_touch_atlas_gen) return 0;
+    if (!g_touch_ack_h || !touch_seq_since(g_touch_seq_h, g_touch_ack_h)) return 0;
+    g_touch_ack_h = 0; front_touch_drawn(g_touch_seq_h); return 1;
+}
+int mtl_present_touch_atlas(const void *px, int w, int h, size_t row, int channels, uint32_t gen) {   // kept as BGRA (a grey and alpha atlas expanded, as fs_touch_grey does)
+    NSMutableData *d = [NSMutableData dataWithLength:(NSUInteger)w * h * 4]; uint8_t *o = d.mutableBytes;
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+        const uint8_t *p = (const uint8_t *)px + (size_t)y * row + (size_t)x * channels; uint8_t *q = o + ((size_t)y * w + x) * 4;
+        if (channels == 2) { q[0] = q[1] = q[2] = p[0]; q[3] = p[1]; } else memcpy(q, p, 4);
+    }
+    g_touch_atlas_channels = channels;
+    g_touch_atlas = d; g_touch_atlas_w = w; g_touch_atlas_h = h; g_touch_atlas_gen = gen; return 1;
+}
+int duo_harness_touch_frame(touch_frame *f) { if (f) *f = g_touch_frame; return g_touch_frames; }
+int duo_harness_touch_atlas_channels(void) { return g_touch_atlas_channels; }
+const uint8_t *duo_harness_touch_atlas(int *w, int *h, uint32_t *gen) { if (w) *w = g_touch_atlas_w; if (h) *h = g_touch_atlas_h; if (gen) *gen = g_touch_atlas_gen; return g_touch_atlas.bytes; }
+// The GPU-lost path front_ios.m now links (front_gpu_lost): the harness never loses its GPU
+int mtl_gpu_lost_why(void) { return 0; }
+void dm_host_shutdown(const char *why) { (void)why; }

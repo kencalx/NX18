@@ -357,6 +357,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     context.SelectionMerge(context.GetNextLabel(mergeBlock), SelectionControlMask.MaskNone);
                     context.BranchConditional(condition, context.GetNextLabel(ifTrueBlock), context.GetNextLabel(ifFalseBlock));
                 }
+                else if (e.Block.Type == AstBlockType.ElseIf)
+                {
+                    // nxnative (upstream NXNative 2f0210dba): an If's false edge goes to an Else only, so an ElseIf here would be unreachable; StructuredProgram keeps nested Else / If for SPIR-V
+                    throw new InvalidOperationException("SPIR-V code generation expects nested Else/If blocks, not ElseIf.");
+                }
                 else if (e.Block.Type == AstBlockType.DoWhile)
                 {
                     SpvInstruction continueTarget = context.Label();
@@ -406,8 +411,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     }
 
                     bool hasElse = AstHelper.Next(e.Block) is AstBlock nextBlock &&
-                        (nextBlock.Type == AstBlockType.Else ||
-                         nextBlock.Type == AstBlockType.ElseIf);
+                        nextBlock.Type == AstBlockType.Else;
 
                     // Re-enter the parent block.
                     if (e.Block.Parent != null && !hasElse)

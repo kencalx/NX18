@@ -1,12 +1,44 @@
 // nn::account: the real device manages users via the acc:u0 service; the host has one fixed local user.
-// Online accounts (network service account / Nintendo Account authorization / tokens) are out of scope and uniformly return RES_FAIL; the async context's completion event fires immediately.
-// Environment switch: DM_NICK=nickname (default Player).
+// Online accounts (network service account / Nintendo Account authorization / tokens) are out of scope and return RES_FAIL, except the network account check, which returns
+// the account applet's cancellation (RES_ACC_CANCELED); the async context's completion event fires immediately.
+// Environment switches: DM_NICK=nickname (default Player), DM_PROFILE_IMAGE=a 256x256 baseline JPEG for the user's picture; the Gate sets both from the NX 18 Profile
+// (NX18Profile.swift dm_profile_env), and neither value is ever logged.
 #include "hle.h"
+#include <pthread.h>
+#include <stdio.h>
+
+// The name the games see: at most 32 bytes of UTF-8 (nn::account::Nickname holds 33 with the end), cut at the last whole character, never in the middle of one
+static void acc_nick_cut(const char *in, char out[33]) {
+    size_t n = strlen(in);
+    if (n > 32) { n = 32; while (n > 0 && ((unsigned char)in[n] & 0xC0) == 0x80) n--; }   // in[n] continues a character: step back to its first byte
+    memcpy(out, in, n); out[n] = 0;
+}
+// The Profile's picture as a console would hold it: a JPEG of at most 128 KiB, SOI first and EOI last, a baseline (SOF0) frame of 256 x 256. Anything else is refused
+// and the built-in picture used. Walks the marker segments up to the frame header
+enum { PROFILE_JPEG_MAX = 128 * 1024 };
+static int acc_jpeg_ok(const uint8_t *b, size_t n) {
+    if (n < 8 || n > PROFILE_JPEG_MAX || b[0] != 0xFF || b[1] != 0xD8 || b[n - 2] != 0xFF || b[n - 1] != 0xD9) return 0;
+    size_t i = 2;
+    while (i + 4 <= n) {
+        if (b[i] != 0xFF) return 0;
+        uint8_t m = b[i + 1];
+        if (m == 0xFF) { i++; continue; }   // fill byte
+        if (m == 0xD9 || m == 0xDA) return 0;   // the scan or the end before any frame header
+        size_t len = (size_t)b[i + 2] << 8 | b[i + 3];
+        if (len < 2 || i + 2 + len > n) return 0;
+        if (m == 0xC0) return len >= 7 && ((size_t)b[i + 5] << 8 | b[i + 6]) == 256 && ((size_t)b[i + 7] << 8 | b[i + 8]) == 256;   // height, width
+        if (m >= 0xC1 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC) return 0;   // another frame kind: progressive, lossless, arithmetic
+        i += 2 + len;
+    }
+    return 0;
+}
 
 typedef struct { uint64_t v[2]; } Uid;                 // nn::account::Uid, 16 bytes
 typedef struct { uint64_t v[3]; } UserHandle;          // nn::account::UserHandle, 24 bytes
 _Static_assert(sizeof(Uid) == 16, "Uid");
 static const Uid k_uid = {{0x78626c0000000001ull, 0x53574e4154495645ull}};   // Non-zero means valid
+// The handle's third word is the SDK's session object; the host has no sessions and writes this marker, which helps reading a dump but which nothing checks:
+// games also pass handles they built themselves (see GetUserId)
 #define HANDLE_MAGIC 0x55534552484e444cull                                    // "USERHNDL"
 
 HLE_FORCE("_ZN2nn7account10InitializeEv", "connects to the acc:u0 account service; the host has one fixed local user", void, h_acc_Init, void) {}
@@ -43,19 +75,23 @@ HLE_FORCE("_ZN2nn7account8OpenUserEPNS0_10UserHandleERKNS0_3UidE", "open user; t
     h->v[0] = uid->v[0]; h->v[1] = uid->v[1]; h->v[2] = HANDLE_MAGIC; return RES_OK;
 }
 HLE_FORCE("_ZN2nn7account9GetUserIdEPNS0_3UidERKNS0_10UserHandleE", "gets the Uid from the handle", Result, h_acc_GetUserId, Uid *out, const UserHandle *h) {
-    if (h->v[2] != HANDLE_MAGIC) die("account::GetUserId: the handle was not issued by the host (%#llx)", h->v[2]);
+    // The SDK's accessor copies the Uid, the handle's first 16 bytes, and returns 0; it never reads the third word (FC 27: nn::account::GetUserId sdk+0x1c0040 calls
+    // detail::GetUserId sdk+0x1bede0, ldp x8, x1, [x0]). EA SPORTS FC 27 passes a handle it built and never filled for a second controller's player (third word 0x2)
     out->v[0] = h->v[0]; out->v[1] = h->v[1]; return RES_OK;
 }
 // nn::account::Nickname = struct { char name[33]; }, UTF-8
 HLE_FORCE("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", "user nickname; taken from DM_NICK", Result, h_acc_GetNick, char *nick, const Uid *uid) {
     (void)uid;
     const char *e = getenv("DM_NICK");
-    memset(nick, 0, 33); strncpy(nick, e ? e : "Player", 32);
+    memset(nick, 0, 33); acc_nick_cut(e && *e ? e : "Player", nick);
     return RES_OK;
 }
 
 // ---------- Online accounts: cut ----------
-HLE_FORCE("_ZN2nn7account36EnsureNetworkServiceAccountAvailableERKNS0_10UserHandleE", "network service account, out of scope; cut: always unavailable", Result, h_acc_EnsureNsa, const UserHandle *h) { (void)h; return RES_FAIL; }
+// The host has only local accounts. Return the result of cancelling the SDK account applet, ResultCancelledByUser (2124-0001): Taiko no Tatsujin: Rhythm Festival takes it
+// as "continue offline" and retries on anything else. See "The network account check is cancelled offline" in docs/reference/services.md.
+#define RES_ACC_CANCELED (124u | 1u << 9)
+HLE_FORCE("_ZN2nn7account36EnsureNetworkServiceAccountAvailableERKNS0_10UserHandleE", "offline network account check returns applet cancellation", Result, h_acc_EnsureNsa, const UserHandle *h) { (void)h; return RES_ACC_CANCELED; }
 HLE_FORCE("_ZN2nn7account26GetNetworkServiceAccountIdEPNS0_23NetworkServiceAccountIdERKNS0_10UserHandleE", "network service account, out of scope; cut", Result, h_acc_GetNsaId, void *id, const UserHandle *h) { (void)id; (void)h; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7account37LoadNetworkServiceAccountIdTokenCacheEPmPcmRKNS0_10UserHandleE", "network service account token, out of scope; cut", Result, h_acc_LoadTok, uint64_t *n, char *buf, uint64_t sz, const UserHandle *h) {
     (void)buf; (void)sz; (void)h; if (n) *n = 0; return RES_FAIL;
@@ -122,9 +158,21 @@ static const char k_profile_jpeg[] =
     "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
     "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
     "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x3f\xff\xd9";
+// The Profile's picture (DM_PROFILE_IMAGE), read once and kept for the session; a file that is not a 256 x 256 baseline JPEG of at most 128 KiB gives the built-in one
+static pthread_once_t g_img_once = PTHREAD_ONCE_INIT; static uint8_t *g_img; static uint64_t g_img_n;
+static void acc_img_load(void) {
+    const char *p = getenv("DM_PROFILE_IMAGE");
+    if (!p || !*p) return;
+    FILE *f = fopen(p, "rb");
+    if (!f) { LOG("account: the profile picture cannot be read; the built-in picture is used"); return; }
+    uint8_t *b = malloc(PROFILE_JPEG_MAX + 1); size_t n = b ? fread(b, 1, PROFILE_JPEG_MAX + 1, f) : 0; fclose(f);
+    if (b && acc_jpeg_ok(b, n)) { g_img = b; g_img_n = n; return; }
+    free(b); LOG("account: the profile picture is not a 256x256 baseline JPEG of at most 128 KiB; the built-in picture is used");
+}
 HLE_FORCE("_ZN2nn7account16LoadProfileImageEPmPvmRKNS0_3UidE", "user profile image: the local user's, a plain 256x256 JPEG", Result, h_acc_LoadImage, uint64_t *n, void *buf, uint64_t sz, const Uid *uid) {
-    (void)uid; uint64_t len = sizeof k_profile_jpeg - 1;
-    if (buf) memcpy(buf, k_profile_jpeg, sz < len ? sz : len);
+    (void)uid; pthread_once(&g_img_once, acc_img_load);
+    const uint8_t *img = g_img ? g_img : (const uint8_t *)k_profile_jpeg; uint64_t len = g_img ? g_img_n : sizeof k_profile_jpeg - 1;
+    if (buf) memcpy(buf, img, sz < len ? sz : len);
     if (n) *n = len; return RES_OK;
 }
 // The save-data thumbnail is what the system's data management screen shows next to a save (The Great Ace Attorney Chronicles, SDK 10); the host has no such screen and keeps none

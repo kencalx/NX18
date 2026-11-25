@@ -64,16 +64,53 @@ HLE_FORCE("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE", "the layer's latest
 // FlushRenderingCommands, which waits for every fence (FFrameEndSync, main+0x15015f0), waited for ever right after the opening movie: the game thread polled its fence each ms, nothing
 // was presented again. FrameInfo is 40 bytes, as the SDK's ListFrameHistory (sdk 20.5.15, sdk+0x4510a0) fills it from the compositor's records: status (2 shown with a present
 // time, 1 queued and not shown yet), frame number (the numbering of GetLatestFrameNumber), the queue tick and the present tick twice; sorted by frame number, newest first.
-// A frame is shown once the present queue has handed it on (nvn_mtl.m g_pq_done) and the system did not drop it; its present time is the drawable's presented time when Metal
-// reports one, else (headless, or before the handler runs) the time it was first seen handed on
+// A frame is shown once the present queue has handed it on (nvn_mtl.m g_pq_done); its present time is the drawable's presented time when Metal reports one, else (headless, before
+// the handler runs, or a frame never put on screen) the time it was first seen handed on. A Switch's compositor shows every frame it is handed, in order, so a frame the host
+// dropped (presented time -1: Metal's presentedTime 0, a display-link merge, a link-stall drop, the drop before an iPhone suspend) still counts as shown. Listed as queued, the
+// newest ones stayed so for ever when the game presented nothing more until their flip came (upstream, an Unreal Engine 5 Switch 2 game: its FFrameEndSync waited for the flip of
+// a frame Metal had dropped until Unreal aborted, "GameThread timed out waiting for ...").
+// A frame's ticket in that queue is known only once the NVN queue worker has put its present there (nvn_queue.inc, NQ_PRESENT: dm_vi_frame_ticket), after the commands the game
+// submitted before it; until then the entry is queued, status 1. Since NXNative's queue worker (ea0c98df) the game's present call only queues a job for the worker, so the queue
+// count read at the call (as the history did when it was written, before the worker) was the previous frame's ticket, or an older one when the worker lagged: a frame was
+// reported shown, with the previous frame's present time, about a frame before its own present was even handed on, and the very first frame before anything was presented
+// (ticket 0). Unreal Engine 5 completes its frame-end fences from the first shown entry (Minecraft Dungeons II, both Octopath Travelers) and Luigi's Mansion 3 paces its render
+// thread by the newest one, so they were told of flips that had not happened yet. The worker and the game's call may come in either order: whichever is first makes the entry.
+// A present the call did not queue (an invalid window texture index) gets no ticket and stays queued until the ring reuses its slot; a newer frame shown is listed before it.
+// DM_VI_FRAME_TICKET=0 takes the ticket at the game's call again, the history as before this fix, for an A/B of the games above on a device (logged once at the first present)
 #define VFH 8
 typedef struct { uint64_t frame, ticket, queued_ns, seen_ns; } vfh_ent;
 static vfh_ent g_vfh[VFH]; static pthread_mutex_t g_vfh_mu = PTHREAD_MUTEX_INITIALIZER;
 void mtl_present_progress(uint64_t *queued, uint64_t *done);   // nvn_mtl.m
 double mtl_presented_time(uint64_t n);                         // nvn_mtl.m: CACurrentMediaTime seconds (the now_ns clock), 0 not yet, -1 dropped by the system
+#define VFH_UNSENT UINT64_MAX   // an entry's ticket until its present is in the present queue: above every handed-on count, so it reads as queued
+static _Atomic int g_vfh_worker = -1;   // 1: the queue worker gives each frame its ticket (the default); 0: DM_VI_FRAME_TICKET=0, the ticket is read at the game's call; -1 not read yet
+static int vfh_worker_ticket(void) {
+    int v = atomic_load(&g_vfh_worker);
+    if (v < 0) {
+        const char *e = getenv("DM_VI_FRAME_TICKET"); v = !(e && !strcmp(e, "0"));
+        if (atomic_exchange(&g_vfh_worker, v) < 0 && !v) LOG("vi::ListFrameHistory: DM_VI_FRAME_TICKET=0: a frame takes the present queue's count at the game's present call, as before the fix (shown about a frame early)");
+    }
+    return v;
+}
 void dm_vi_frame_queued(uint64_t frame) {   // hle_nvn.c, at each present the game queues: frame = GetLatestFrameNumber's count with it
-    uint64_t q, d; mtl_present_progress(&q, &d);
-    pthread_mutex_lock(&g_vfh_mu); g_vfh[frame % VFH] = (vfh_ent){frame, q, guest_ns(), 0}; pthread_mutex_unlock(&g_vfh_mu);
+    uint64_t tk = VFH_UNSENT;
+    if (!vfh_worker_ticket()) { uint64_t q, d; mtl_present_progress(&q, &d); tk = q; }   // DM_VI_FRAME_TICKET=0: the count at the call
+    pthread_mutex_lock(&g_vfh_mu);
+    vfh_ent *e = &g_vfh[frame % VFH];
+    if (tk == VFH_UNSENT && e->frame == frame) tk = e->ticket;   // the worker has put this frame's present in the queue already: keep its ticket
+    *e = (vfh_ent){frame, tk, guest_ns(), 0};
+    pthread_mutex_unlock(&g_vfh_mu);
+}
+void dm_vi_frame_ticket(uint64_t frame, uint64_t ticket) {   // nvn_queue.inc, once the worker has put that frame's present in the present queue: its ticket there (g_pq_in)
+    if (!vfh_worker_ticket()) return;
+    pthread_mutex_lock(&g_vfh_mu);
+    vfh_ent *e = &g_vfh[frame % VFH];
+    // Before the game's call recorded the frame (the worker can be that quick): the entry is made here, with a queue time of now so that it never reads as 0; the call keeps the
+    // ticket and sets its own queue time. A slot that holds a newer frame already (the worker 8 or more frames behind the game) is left alone: this frame has dropped out of the
+    // last 8, which the history lists, and writing it there would drop the newer frame from the history until the worker reached that one
+    if (e->frame > frame) { pthread_mutex_unlock(&g_vfh_mu); return; }
+    if (e->frame != frame) *e = (vfh_ent){frame, ticket, guest_ns(), 0}; else e->ticket = ticket;
+    pthread_mutex_unlock(&g_vfh_mu);
 }
 static uint64_t vfh_ticks(uint64_t ns) { return dm_sdk_ounce() ? ns / 32 : ns * 12 / 625; }   // as guest_ticks (hle_os.c)
 HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the layer's frame history: the last 8 presents, newest first, shown once the present queue handed them on", int, h_vi_FrameHist, void *out, int n, const void *layer) {
@@ -86,9 +123,9 @@ HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the lay
     for (uint64_t f = latest; f > 0 && latest - f < VFH && k < n; f--) {
         vfh_ent *e = &g_vfh[f % VFH]; if (e->frame != f) continue;
         uint64_t *o = (uint64_t *)out + 5 * k++, shown = 0;
-        double pt = e->ticket <= d ? mtl_presented_time(e->ticket) : -1;
+        double pt = e->ticket <= d ? mtl_presented_time(e->ticket) : 0;
         if (pt > 0) { uint64_t ago = hnow > (uint64_t)(pt * 1e9) ? hnow - (uint64_t)(pt * 1e9) : 0; shown = gnow > ago ? gnow - ago : 1; }
-        else if (pt == 0) { if (!e->seen_ns) e->seen_ns = gnow; shown = e->seen_ns; }
+        else if (e->ticket <= d) { if (!e->seen_ns) e->seen_ns = gnow; shown = e->seen_ns; }
         o[0] = shown ? 2 : 1; o[1] = f; o[2] = vfh_ticks(e->queued_ns); o[3] = o[4] = shown ? vfh_ticks(shown) : 0;
     }
     pthread_mutex_unlock(&g_vfh_mu);
@@ -100,12 +137,27 @@ HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the lay
 HLE_FORCE("_ZN2nn2vi32GetDefaultDisplayPanelIdentifierEPNS0_15PanelIdentifierE", "built-in panel identity; the host has no panel: all zero", Result, h_vi_PanelId, void *out) {
     memset(out, 0, 0x18); return RES_OK;
 }
+// Switch 2 BufferMaxResolution tiers. Handheld and an unknown docked display report 1080p; a known docked display gets the largest tier it holds.
+__attribute__((weak)) int front_display_pixels(int *w, int *h) { (void)w; (void)h; return 0; }   // front_mac.m, front_ios.m; graphics unit tests have none
+static const int k_buf_max_res[4][2] = {{1280, 720}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
+static uint32_t buf_max_res(int *w, int *h) {
+    *w = *h = 0;
+    if (dm_opmode() != 1 || !front_display_pixels(w, h)) return 1;
+    if (*w < *h) { int t = *w; *w = *h; *h = t; }
+    uint32_t r = 0;
+    for (uint32_t i = 1; i < 4; i++) if (*w >= k_buf_max_res[i][0] && *h >= k_buf_max_res[i][1]) r = i;
+    return r;
+}
 // The Great Ace Attorney Chronicles (SDK 10) lists up to 10 displays before opening the default one (main+0x808f08) and does not read the list. DisplayInfo is 0x60 bytes:
-//   name[0x40], bool has a layer limit at +0x40, then u64 layer count limit, largest layer width and height. One display, "Default", as Horizon lists for an application
-HLE_FORCE("_ZN2nn2vi12ListDisplaysEPNS0_11DisplayInfoEi", "list displays; the host has one, \"Default\"", int, h_vi_ListDisp, void *out, int n) {
+//   name[0x40], bool has a layer limit at +0x40, then u64 layer count limit, largest layer width and height. One display, "Default", as Horizon lists for an application.
+// Star Fox sizes its docked window from the largest layer and clamps it to QueryDisplayBufferMaxResolution. Both replies use the same tier for Switch 2.
+HLE_FORCE("_ZN2nn2vi12ListDisplaysEPNS0_11DisplayInfoEi", "list the Default display and its largest layer", int, h_vi_ListDisp, void *out, int n) {
     if (n <= 0 || !out) return 0;
+    int w, h;
+    uint32_t r = dm_sdk_ounce() ? buf_max_res(&w, &h) : 1;
     uint8_t *p = out; memset(p, 0, 0x60); strcpy((char *)p, "Default");
-    p[0x40] = 1; uint64_t lim[3] = {1, 1920, 1080}; memcpy(p + 0x48, lim, sizeof lim);
+    p[0x40] = 1; uint64_t lim[3] = {1, (uint64_t)k_buf_max_res[r][0], (uint64_t)k_buf_max_res[r][1]}; memcpy(p + 0x48, lim, sizeof lim);
+    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::ListDisplays: \"Default\", largest layer %dx%d", k_buf_max_res[r][0], k_buf_max_res[r][1]);
     return 1;
 }
 HLE_FORCE("_ZN2nn2vi12DestroyLayerEPNS0_5LayerE", "destroy layer; host static object", void, h_vi_DestroyLayer, void *layer) { (void)layer; }
@@ -127,18 +179,11 @@ HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "display VRR cap
     (void)disp; (void)on; return RES_OK; }
 // The largest display buffer (vi2 through the SDK, sdk+0x5e10c0, which the host does not serve: Result 0x272 and the output left as the game set it). BufferMaxResolution is
 // 0 1280x720, 1 1920x1080, 2 2560x1440, 3 3840x2160 (Fire Emblem Fortune's Weave's own table, main+0x1abc2c0 / +0x1abc050). Fire Emblem Fortune's Weave sets 0 first, so the failed call
-// told it 720p: it chose its 1280x720 DLSS network and rendered at 640x360, and the host scaled that to the window. Answered as a Switch 2 would: in handheld mode its own 1920x1080
-// screen; docked, the largest of the four the display it is shown on holds (front_display_pixels), 1920x1080 when that is not known
-__attribute__((weak)) int front_display_pixels(int *w, int *h) { (void)w; (void)h; return 0; }   // front_mac.m, front_ios.m; graphics unit tests have none
+// told it 720p: it chose its 1280x720 DLSS network and rendered at 640x360, and the host scaled that to the window.
 HLE_FORCE("_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolutionEPKNS0_7DisplayE", "largest display buffer: the Switch 2's screen handheld, the host display's docked",
           Result, h_vi_BufMaxRes, uint32_t *out, const void *disp) {
-    (void)disp; static const int k[4][2] = {{1280, 720}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
-    uint32_t r = 1; int w = 0, h = 0;
-    if (dm_opmode() == 1 && front_display_pixels(&w, &h)) {
-        if (w < h) { int t = w; w = h; h = t; }
-        r = 0; for (uint32_t i = 0; i < 4; i++) if (w >= k[i][0] && h >= k[i][1]) r = i;
-    }
-    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: %dx%d (%s, display %dx%d)", k[r][0], k[r][1], dm_opmode() == 1 ? "docked" : "handheld", w, h);
+    (void)disp; int w, h; uint32_t r = buf_max_res(&w, &h);
+    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: %dx%d (%s, display %dx%d)", k_buf_max_res[r][0], k_buf_max_res[r][1], dm_opmode() == 1 ? "docked" : "handheld", w, h);
     if (out) *out = r; return RES_OK;
 }
 // The extended swap interval asks for a presentation rate between whole vsync intervals (VRR); without VRR the swap interval NVN sets stays in effect

@@ -133,6 +133,9 @@ static void duo_pad_script(void) {
     // Synthetic touches should not start device motion or trigger hardware feedback.
     setenv("DM_MOTION", "0", 1);
     setenv("DM_TOUCH_HAPTICS", "0", 1);
+    // The first-start acknowledgement (NX18Welcome.swift) would come before every Gate the tests show: off unless a test sets DM_TEST_ACK=1
+    setenv("DM_TEST_ACK", "0", 0);
+    setenv("DM_WELCOME", "0", 0);   // and the welcome (NX18Welcome.swift, §21.1): off unless a test sets DM_WELCOME=1
     return YES;
 }
 - (UISceneConfiguration *)application:(UIApplication *)application

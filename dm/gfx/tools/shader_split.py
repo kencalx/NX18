@@ -54,7 +54,7 @@
 # Output: <package dir>/<stage>_<source group>.bin, each record = 'BTCDBTCD' + header (+0x08 the key's 8 bytes, +0x28 control length, +0x2c code length) padded to 0x38 + code area + control section, one copy per key
 #   (dmsh_build.py finds a map row's record by that key, not by the row's index: a package from another split than the map stops it instead of translating a neighbour's bytes, issue #1841);
 #   map rows have the same columns as D2R's shader_map.tsv (column 5 records where the key first appeared); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
-# Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated>]]]   Environment J=concurrency (default 8)
+# Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> (mesh_pairs.tsv is written beside it) [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated>]]]   Environment J=concurrency (default 8)
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
@@ -180,7 +180,55 @@ def bnsh_shaders(d, base, label):
 
 def nvn2_stage(ctl, code):   # an NVN2 shader's stage: compute, task and mesh by the control section's stage byte (+0x56: 5, 6, 7; a task or mesh shader's SPH reads as vertex or domain), else the SPH at the code area's start (no code header)
     if len(ctl) > 0x56 and ctl[0x56] in (5, 6, 7): return {5: 'cs', 6: 'ts', 7: 'ms'}[ctl[0x56]]
-    return sph_stage(bytes(0x30) + code[:4]) if len(code) >= 4 else None
+    if len(code) < 4: return None
+    st = sph_stage(bytes(0x30) + code[:4])
+    # A graphics stage's code starts with an SPH (type 1 or 2, a stage that sph_stage reads); a compute shader's has none. One Switch 2 game's compute shaders carry stage byte 1
+    #   (pixel) and no SPH, and the game dispatches them: with a vertex, pixel or geometry stage byte (+0x56: 0, 1, 2) and no valid SPH, the shader is compute (ported from S2Arm
+    #   576b5653, Apache-2.0). A shader with a valid SPH keeps the stage the SPH gives
+    if len(ctl) > 0x56 and ctl[0x56] in (0, 1, 2) and (code[0] & 0x1f not in (1, 2) or st is None): return 'cs'
+    return st
+
+def shn_shaders(d, label):
+    """Shin'en's SHN! resources: three {offset, stored length, length} triples at +4, +0x18 and +0x24 name metadata, relocations and GPU data, raw or LZ4 blocks when lengths differ.
+    SHDROUNC objects in the metadata (loose shaders and SCENOUNC models) have a variant count at +0xc and an absolute metadata offset at +0x30 to nine 0x50-byte stage records per
+    variant: {u64 GPU offset, u64 control offset}, then code/control lengths at +0x40. Relocations are for the game's CPU pointers; these offsets are read before relocation.
+    Verified against Fast Fusion's loose shaders, embedded scene programs and the control keys and GPU bytes captured at startup (see the game's note).
+    Decode GPU data only after finding shader objects: texture resources use the same wrapper but their large pixel payloads hold no shaders."""
+    import lz4.block
+    span(d, 0, 0x44, f'{label} SHN! header')
+    def block(at):
+        off, stored, size = field(d, '<III', at, f'{label} SHN! block')
+        if stored and off < 0x44: red(f'{label} SHN! block at {at:#x}: data overlaps the header')
+        raw = span(d, off, stored, f'{label} SHN! block at {at:#x}')
+        if stored == size: return raw
+        # LZ4's match-length extensions add at most 255 decoded bytes per stored byte. Reject a damaged length before the decoder allocates it.
+        if not stored or size > 255 * stored: red(f'{label} SHN! block at {at:#x}: impossible LZ4 length {size:#x} for {stored:#x} bytes')
+        try: raw = lz4.block.decompress(raw, uncompressed_size=size)
+        except lz4.block.LZ4BlockError as e: red(f'{label} SHN! block at {at:#x}: invalid LZ4 data: {e}')
+        if len(raw) != size: red(f'{label} SHN! block at {at:#x}: decoded {len(raw):#x} bytes, expected {size:#x}')
+        return raw
+    meta = block(4)
+    objects = [m.start() for m in re.finditer(b'SHDROUNC', meta)]
+    if not objects: return []
+    data, out = block(0x24), []
+    for h in objects:
+        count = field(meta, '<I', h + 0xc, f'{label} SHDROUNC header')[0]
+        table = field(meta, '<Q', h + 0x30, f'{label} SHDROUNC header')[0]
+        span(meta, table, count * 9 * 0x50, f'{label} SHDROUNC stage table')
+        for v in range(count):
+            for slot in range(9):
+                r = table + (v * 9 + slot) * 0x50
+                k, c = struct.unpack_from('<QQ', meta, r)
+                if not c: continue
+                nk, nc = struct.unpack_from('<II', meta, r + 0x40)
+                ctl = span(meta, c, nc, f'{label} SHDROUNC control section')
+                code = span(data, k, nk, f'{label} SHDROUNC code area')
+                if not nvn2_ctl(ctl): red(f'{label} SHDROUNC: invalid NVN2 control section at {c:#x}')
+                st = nvn2_stage(ctl, code)
+                why = check(label, st, ctl, code) if st else 'unknown shader stage'
+                if why: red(f'{label} SHDROUNC variant {v} slot {slot}: {why}')
+                out.append((f'{label}#SHN@{h:#x}#var{v}', st, ctl, code))
+    return out
 
 def bahs_shaders(d, label):
     rsz, region = field(d, '<II', 0x18, f'{label} BAHS header')
@@ -1523,14 +1571,16 @@ def zstd_frame_len(d, p):
         if h & 1: return q + 4 * (fhd >> 2 & 1) - p
 
 def nlg4_unzs(d):
-    """zstd frames, decompressed as one stream (the zstd command, as unzs; fed the bytes, since inside a RomFS image the path is not a file the command can open). A '.data' pads some
+    """zstd frames, decompressed as one stream in-process (as unzs). A '.data' pads some
     frames to 8 bytes (init.data: the third at 0x26688 after one ending at 0x26683) and the command stops at the padding, so each frame is measured and the zero gaps are left out"""
     frames, p = [], 0
     while p < len(d):
         if d[p:p + 4] == ZSTD_MAGIC: n = zstd_frame_len(d, p); frames.append(d[p:p + n]); p += n
         elif not d[p]: p += 1
         else: red(f'not a zstd frame at {p:#x} ({d[p:p + 8].hex(" ")})')
-    return subprocess.run(['zstd', '-d', '-c', '-q'], input=b''.join(frames), capture_output=True, check=True).stdout
+    zstd = zstd_mod()
+    try: return zstd.decompress(b''.join(frames))   # in-process, as unzs: no pipe to the zstd command
+    except zstd.ZstdError as e: red(f'NLG4 frames: invalid zstd stream ({e})')
 
 def nlg4_programs(idx):
     """The shader table of a revision-4 index: 12-byte entries {u8 kind (1 code area, 2 control section), u16 type, u8 number, u32 length, u32 offset in its section}, four per shader
@@ -2748,12 +2798,13 @@ def unzs_dict(d, did, where):
     return zstd.decompress(d, zstd_dict=_ZD[did])
 
 def unzs(path):
-    """A zstd file decompressed: frames without a dictionary through the zstd command as before (fed the bytes: inside a RomFS image the path is not a file the command can open),
-    frames that name one with that dictionary from ZDICTS"""
-    d = open(path, 'rb').read()
+    """A zstd file decompressed in-process (compression.zstd, or backports.zstd before Python 3.14), with the dictionary from ZDICTS when the frame names one. The zstd command fed
+    through stdin with its stdout captured hung for good on Ocarina of Time's sound archives (NX2Apple #837, upstream PR #1463); the library also reads a bounded RomFS image entry"""
+    with open(path, 'rb') as stream: d = stream.read()
     did = zs_dict_id(d)
-    if not did: return subprocess.run(['zstd', '-d', '-c', '-q'], input=d, capture_output=True, check=True).stdout
-    return unzs_dict(d, did, path)
+    zstd = zstd_mod()
+    try: return unzs_dict(d, did, path) if did else zstd.decompress(d)
+    except zstd.ZstdError as e: red(f'{path}: invalid zstd stream ({e})')
 
 def frame_size(f):
     """The uncompressed size a zstd or LZ4 frame header records, None when it records none"""
@@ -2918,6 +2969,7 @@ NEST = 16   # archives in archives scan_blob opens (SARC, PlatinumGames' DAT): r
             # that expands 9 times, which then added up to 18 times the file)
 def scan_blob(d, label, out, depth=0, left=None):
     if depth > NEST: red(f'{label}: archives nested more than {NEST} deep')
+    if d[:4] == b'SHN!': out.extend(shn_shaders(d, label)); return
     if d[:8] == SUMO_MUX:
         members = list(sumo_members(d, label))
         if left is None: left = [NEST * sum(len(member) for _, member in members)] * 2   # as with Yaz0, count decoded bytes, not compressed bytes
@@ -2942,7 +2994,15 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     if d[:4] == b'NARC':   # Camelot's containers (cra.py): each member packed by its first byte, so its size says nothing about the budget above
         import cra
-        for i, m in enumerate(cra.narc_members(d, label)): scan_blob(cra.undo(m), f'{label}/{i}', out, depth + 1)
+        # A NARC whose header or member table is cut or damaged, and a member that does not unpack (a cut LZ4 or zstd stream, an LZ4 size past its largest ratio, MMMM
+        # chunks nested past 32), stop the split with a red line naming the archive and the member, as for SARC, instead of a Python traceback (cra.Error; struct.error and
+        # IndexError from the older packers' readers). A well-formed archive splits as before. The nightly fuzz harness found the first one (corpus/shader_split/narc-*)
+        try: members = cra.narc_members(d, label)
+        except cra.Error as e: red(f'{e} (a damaged or cut NARC)')
+        for i, m in enumerate(members):
+            try: u = cra.undo(m)
+            except (cra.Error, struct.error, IndexError) as e: red(f'{label}/{i}: a packed member that does not unpack ({type(e).__name__}: {e})')
+            scan_blob(u, f'{label}/{i}', out, depth + 1)
         return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
     if d[:4] == RGXD: out.extend(rgxd_shaders(d, label)); return
@@ -3130,12 +3190,15 @@ def ue_shaders(d, label):
 def var_pairs(found):
     """(vertex or mesh key, pixel key) within the same BNSH variation; (vertex key, pixel key, 'prog') within the same BAHS program variation (bahs_variations).
     The tables stay separate; dmsh_build.py pads against both, as the pipeline prebuild uses both. A mesh shader is the stage before the pixel shader as a vertex shader is
-    (NVN2: Ocarina of Time's foliage meshes leave locations unwritten that their pixel shaders read, which dmsh_meshstage.to_stage pads)."""
+    (NVN2: Ocarina of Time's foliage meshes leave locations unwritten that their pixel shaders read, which dmsh_meshstage.to_stage pads).
+    (task key or '-', mesh key, pixel key or '-', 'mesh') within the same variation: mesh_pairs.tsv, the triples whose Metal 4 mesh pipeline bases pso_offline.py builds into the app's
+    archive and the host prebuilds (pso_prebuild), so a task / mesh draw only specializes its base instead of compiling a pipeline for seconds at its first draw (upstream NXNative 685d2aecf)"""
     var = collections.defaultdict(dict)
     for where, st, ctl, code in found:
         g = where if '#var' in where else BAHS_VAR.get(where)
         if g: var[g][st] = skey(ctl, code)
-    return {(v[st], v['ps']) + (('prog',) if '#BAHS#prog' in g else ()) for g, v in var.items() for st in ('vs', 'ms') if st in v and 'ps' in v}
+    return ({(v[st], v['ps']) + (('prog',) if '#BAHS#prog' in g else ()) for g, v in var.items() for st in ('vs', 'ms') if st in v and 'ps' in v}
+            | {(v.get('ts', '-'), v['ms'], v.get('ps', '-'), 'mesh') for v in var.values() if 'ms' in v})
 
 def play_shaders(keys, played, per_src):
     """The run-time outputs captured in play (/glslc_play/) into keys, after every other source: only keys no other source has get a row of theirs, so the rows without them are what a split with
@@ -3148,7 +3211,7 @@ def play_shaders(keys, played, per_src):
             continue
         new[key] = v; per_src[group(v[0])] += 1
     keys.update(new)
-    return {p for p in var_pairs(played) if p[0] in new or p[1] in new}
+    return {p for p in var_pairs(played) if any(k in new for k in p[:3])}   # a mesh triple's pixel shader too (task, mesh, pixel)
 
 def glslc_keys_main(paths):
     """shader_split.py --glslc-keys FILE…: every stage of each GLSLC output file as the split reads and keys it (glslc_shaders, skey), one '<file name>\t<stage>\t<key>' line each; '<file name>\t-\t-'
@@ -3281,6 +3344,9 @@ def scan_file_in(args):
     if head[:4] == ZSTD_MAGIC: d = unzs(path)   # by the magic: Paper Mario: The Thousand-Year Door names its zstd files .zst (8,726, its shaders among them)
     else:
         with open(path, 'rb') as f: d = f.read()
+    if d[:4] == b'SHN!':
+        found += shn_shaders(d, '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if d[:3] == b'\x1f\x8b\x08':   # standard gzip: Skyward Sword HD's Shaders.arc.gz wraps paired GLSLC outputs
         d = ungzip(d, '/' + rel); head = d[:16]   # later format probes inspect decoded bytes, not the gzip timestamp
     if head[4:5] == b'\x78' and path.endswith('.gz') and (z := gust_gz(d)) is not None: d = z   # Gust's chunked zlib (gust_gz)
@@ -3306,7 +3372,7 @@ def scan_file_in(args):
         import unityfs
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
-        return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
+        return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'cover') for a, b in pairs}, trees
     elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
@@ -3393,7 +3459,7 @@ def main():
         names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode') and not f.startswith('._')) if os.path.isdir(ued) else []   # AppleDouble metadata, not decoded shader archives
         if not names and uepak.unreal_paks(romfs, inline=False, mains=[mainnso]): red(f'the RomFS has Unreal paks, but there are no decoded shader code archives in {ued} (the NSP script writes them)')
         for nm in names: found += ue_shaders(open(os.path.join(ued, nm), 'rb').read(), f'/ue_shaders/{nm}')
-        results.append(('main', {skey(c, k): (w, s, c, k) for w, s, c, k in found}, var_pairs(found), {}))
+        results.append(('main', uniq_keys(found), var_pairs(found), {}))
     for romfs in dlc_v:
         name = os.path.basename(os.path.normpath(romfs))
         tag = 'aoc/' + (name.removesuffix('.img') if is_image(romfs) else name)
@@ -3438,8 +3504,14 @@ def main():
     if bad: print(f'[RED] {sum(e[2] for e in bad)} file(s) could not be read, their shaders are left out (first: {bad[0][1]})', flush=True)   # build_ipa_from_nsp.py reads this line
     keys, pairs, per_src = merge_keys(results)
     pairs |= play_shaders(keys, played, per_src)
-    prog = {(a, b) for a, b, *t in pairs if t} - pairs; pairs = {x for x in pairs if len(x) == 2}
-    sp, cover = separable_pairs(keys); pairs |= sp
+    mesh = {(a, b, c) for a, b, c, *t in (x for x in pairs if len(x) == 4) if t == ['mesh']}; pairs -= {(a, b, c, 'mesh') for a, b, c in mesh}   # mesh_pairs.tsv's, out before prog takes every longer tuple
+    prog = {(a, b) for a, b, *t in pairs if t == ['prog']}
+    pso_cover = {(a, b) for a, b, *t in pairs if t == ['cover']}   # legacy Unity pass-input padding (NXNative faf91a9df)
+    pairs = {x for x in pairs if len(x) == 2}
+    prog -= pairs
+    pso_cover -= pairs | prog
+    sp, cover = separable_pairs(keys)
+    sp_cover = sp - pairs   # synthetic single-stage covers stay apart from the real variation pairs: pso_offline.py and pso_prebuild skip them, dmsh_build.py still pads outputs with them
     if cover: print(f'single-stage programs: {len({v for v, _ in sp}):,} vertex shaders are paired with a cover of {len(cover)} pixel shader(s) ({" ".join(cover)})')
     os.makedirs(pkg, exist_ok=True)
     for f in os.listdir(pkg):
@@ -3484,10 +3556,20 @@ def main():
         with open(pairsout, 'w') as f:
             f.write('# kind: evidence  vertex / pixel shader pairs within BNSH variations (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
             for a, b in sorted(pairs): f.write(f'{a}\t{b}\n')
+            if sp_cover:
+                f.write('# cover: single-stage padding pairs (for vertex output padding only; skipped by pso_offline.py and pso_prebuild)\n')
+                for a, b in sorted(sp_cover): f.write(f'{a}\t{b}\n')
+        # beside it: mesh_pairs.tsv (var_pairs), the task / mesh / pixel triples whose Metal 4 mesh bases pso_offline.py and the host's prebuild make; the NSP script keeps it as it keeps pso_pairs.tsv
+        with open(os.path.join(os.path.dirname(os.path.abspath(pairsout)), 'mesh_pairs.tsv'), 'w') as f:
+            f.write('# kind: evidence  task / mesh / pixel shader triples within shader variations, for mesh pipeline bases (generated by dm/gfx/tools/shader_split.py, do not edit): M <TAB> task key (or -) <TAB> mesh key <TAB> pixel key (or -)\n')
+            for a, b, c in sorted(mesh): f.write(f'M\t{a}\t{b}\t{c}\n')
     if psopairsout:
         with open(psopairsout, 'w') as f:
             f.write('# kind: evidence  supplemental vertex / pixel shader pairs (BAHS program variations and legacy Unity pass-input covers) for vertex output padding and the pipeline prebuild (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
-            for a, b in sorted(prog - pairs): f.write(f'{a}\t{b}\n')
+            for a, b in sorted(prog): f.write(f'{a}\t{b}\n')
+            if pso_cover:
+                f.write('# cover: legacy Unity pass-input padding pairs (for vertex output padding only; skipped by pso_offline.py and pso_prebuild)\n')
+                for a, b in sorted(pso_cover): f.write(f'{a}\t{b}\n')
     print(f'shaders: {len(rows)} (' + ', '.join(f'{STAGE_NAME[s]} {n}' for s, n in sorted(stat.items())) + '); sources ' + ', '.join(f'{g} {n}' for g, n in per_src.most_common()) + f'; compute shader answers {len(facts)} rows' + (f'; variation pairs {len(pairs)}' if pairsout else ''))
 
 if __name__ == '__main__':

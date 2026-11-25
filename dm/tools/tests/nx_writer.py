@@ -1,4 +1,4 @@
-"""Writes NX archives (https://github.com/fab918/nxformat, SPEC.md 1.0.3, wire versions 0.2 and 0.3) for the tests of scripts/pack_nx.py. Test code only: it declares its own record layouts
+"""Writes NX archives (https://github.com/fab918/nxformat, SPEC.md 1.0.4, wire versions 0.2 and 0.3) for the tests of scripts/pack_nx.py. Test code only: it declares its own record layouts
 from the spec and shares nothing with the reader, so a reader bug the writer repeats would still fail on the upstream conformance fixtures (dm/tools/tests/fixtures/nx).
 
 write(path, apps, ...) writes a compact archive: both header slots, blocks deduplicated by content (RAW, or one zstd frame each when that is smaller), the CRC-32C table, Media (NACP and icons),
@@ -142,11 +142,11 @@ def identity(platform, app_id, program_id, stype, version, content_id, nodes, fi
     return sha(b)
 
 
-def write(path, apps, *, minor=2, chunk_log2=16, compress=True, extensions=(), resources=(), generation=0, history=True):
+def write(path, apps, *, minor=2, chunk_log2=16, compress=True, extensions=(), resources=(), extra=None, generation=0, history=True):
     """apps: [{'id', 'platform' (1), 'programs' ([id]), 'snapshots': [{'type', 'version', 'program' (index into programs, None for DLC with no program), 'tree' (nested dict of bytes or
     Frame), 'addon' (a DLC's add-on title ID), 'content_id', 'build_id', 'display', 'meta': {'nacp', 'icon', 'icon_type' (2 JPEG), 'title', 'publisher', 'localized': [(tag, title, icon)]}}]}].
     The application's metadata snapshot is its highest-version snapshot with meta (not DLC); the others' meta go to the Snapshot Metadata History (history=False leaves them out).
-    extensions: extra (type, flags, owner kind, owner index, payload). resources (0.3): [(kind, {name: bytes})], owned by the first application. Returns the bytes written"""
+    extensions: extra (type, flags, owner kind, owner index, payload). resources (0.3): [(kind, {name: bytes})], owned by the first application. extra: a nested dict, the Optional Extra Files tree (1.0.4). Returns the bytes written"""
     man = _Manifest(chunk_log2, compress)
     strings, pool = {}, bytearray()
     def sref(s):
@@ -215,6 +215,8 @@ def write(path, apps, *, minor=2, chunk_log2=16, compress=True, extensions=(), r
             recs.append((kind, man.tree(files)))
         recs.sort()
         ext_rows.append((0x00010008, 1, 1, 0, struct.pack('<4sHHII', b'NXSR', 1, 16, len(recs), 0) + b''.join(struct.pack('<II', *r) for r in recs)))
+    if extra is not None:
+        ext_rows.append((0x00010009, 0, 0, NO, struct.pack('<4sHHII', b'NXEX', 1, 16, man.tree(nest(extra)), 0)))
     ext_rows += list(extensions)
     ext_rows.sort(key=lambda e: (e[0], e[2], e[3]))
     # Catalog

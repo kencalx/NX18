@@ -3,9 +3,11 @@
 # Built offline, as the entry point main0_f of the shader's own compile (fold); at runtime only function-constant specialization is done (no source compilation).
 # Usage: fold(msl, bindings, om_only_ok=False) → (the source with main0_f, metadata) or (None, reason)
 # Function constant numbering: FX_i (which color index the i-th rewritable sample reads, -1 = sample as usual) = i; FB_k (enable color input k) = 32 + k;
-#               OM_j_k (the j-th output writes to attachment k) = 64 + 8 j + k
+#               OM_j_k (the j-th output writes to attachment k) = 64 + 8 j + k, for up to 8 outputs (64-127: no other function constant of the compile is below 200)
 # Rewritable samples: .sample(sampler, select(_N, float2(0.0), isnan(_N))) on a 2D float texture, where _N = float2(in.m_X.x, in.m_X.y) (interpolated output unchanged),
 # or _N = float2(in.m_X.x / in.m_X.w, in.m_X.y / in.m_X.w) (projective: 'proj', the screen position deferred decals sample their G-buffer at; screen_varyings gives the vertex side),
+# or _N = float2(fma(in.m_X.x / in.m_X.w, 0.5, 0.5), fma(in.m_X.y / in.m_X.w, -0.5, 0.5)) (the clip position's NDC turned into a screen UV by the pixel shader itself: 'proj' and 'ndc',
+# Xenoblade Chronicles 3's G-buffer decals and lights; screen_positions gives the vertex side, an output that is gl_Position itself; S2Arm 4804ac50),
 # or _N = float2(gl_FragCoord.x [/ render scale] * U, gl_FragCoord.y [/ render scale] * V) with U, V uniform components ('frag_pos': their [slot, vector, component]; Splatoon Raiders'
 # ink stamps read their map at gl_FragCoord / 6400);
 # whether the texel is really fetched at this pixel is proven at runtime (correspondence between vertex uv and position, a screen varying with the viewport over the whole target,
@@ -41,6 +43,13 @@ def _proj(msl, var, comp, locn):
         return None
     m = re.search(r'float %s = (_\d+) / (_\d+);' % re.escape(var), msl)
     return src(m.group(1), comp) if m and src(m.group(1), comp) == src(m.group(2), 'w') else None
+
+def _ndc(msl, var, comp, locn):
+    """var = fma(P, 0.5, 0.5) (comp x) or fma(P, -0.5, 0.5) (comp y), P a projective component (_proj) of in.m_X, var assigned once → m_X, or None (S2Arm 4804ac50: Xenoblade
+    Chronicles 3's G-buffer decals and lights turn the clip position's NDC into their screen UV themselves)"""
+    if not _once(msl, var): return None
+    m = re.search(r'float %s = fma\((_\d+), %s, 0\.5\);' % (re.escape(var), r'0\.5' if comp == 'x' else r'\(?-0\.5\)?'), msl)
+    return _proj(msl, m.group(1), comp, locn) if m else None
 
 _UNI = re.compile(r'\(\*spvDescriptorSet0\.fp_c(\d+)\)\._m0\[(\d+)\]\.([xyzw])')
 
@@ -158,8 +167,11 @@ def _lin(expr, env):
     except (ValueError, ZeroDivisionError):
         return None
 
-def _entry_screen(body, locn):
-    """The locns (out struct members → K) that are screen varyings in one entry point's body (the text between its braces)"""
+SCREEN = {'x': {'Px': 0.5, 'Pw': 0.5}, 'y': {'Py': -0.5, 'Pw': 0.5}, 'w': {'Pw': 1.0}}   # the clip → screen varying
+POSITION = {'x': {'Px': 1.0}, 'y': {'Py': 1.0}, 'w': {'Pw': 1.0}}                        # gl_Position itself
+
+def _entry_screen(body, locn, want=SCREEN):
+    """The locns (out struct members → K) whose .x, .y, .w are the linear forms want of the final position in one entry point's body (the text between its braces)"""
     if len(re.findall(r'\breturn\b', body)) != 1 or not re.search(r'\n    return out;\n$', body + '\n'): return set()
     depth, stmts = 0, []   # (depth, text) of each statement line
     lines = [ln.strip() for ln in body.split('\n')]
@@ -198,7 +210,6 @@ def _entry_screen(body, locn):
             if not d or d[0] >= at or nassign[name] != 1: return None
             memo[name] = None; memo[name] = _lin(d[2], env_at(d[0])); return memo[name]
         return env
-    want = {'x': {'Px': 0.5, 'Pw': 0.5}, 'y': {'Py': -0.5, 'Pw': 0.5}, 'w': {'Pw': 1.0}}
     got = set()
     for mem, k in locn.items():
         ok = True
@@ -208,15 +219,20 @@ def _entry_screen(body, locn):
         if ok: got.add(k)
     return got
 
-def screen_varyings(msl):
+def screen_varyings(msl, want=SCREEN):
     """The interpolated outputs (locn numbers, sorted) of a vertex shader that are its clip → screen varying in every entry point that returns the output struct"""
     ost = re.search(r'struct main0_out\s*\{(.*?)\};', msl, re.S)
     locn = {m.group(1): int(m.group(2)) for m in re.finditer(r'float4 (m_\d+) \[\[user\(locn(\d+)\)\]\]', ost.group(1) if ost else '')}
     entries = list(re.finditer(r'\nvertex main0_out \w+\(.*?\)\n\{\n(.*?)\n\}\n', msl, re.S))
     if not locn or not entries: return []
     got = set(locn.values())
-    for e in entries: got &= _entry_screen(e.group(1), locn)
+    for e in entries: got &= _entry_screen(e.group(1), locn, want)
     return sorted(got)
+
+def screen_positions(msl):
+    """The interpolated outputs (locn numbers, sorted) of a vertex shader that are gl_Position itself (.x, .y, .w) in every entry point that returns the output struct: the vertex side of
+    an 'ndc' sample, whose pixel shader turns it into the screen UV (S2Arm 4804ac50)"""
+    return screen_varyings(msl, POSITION)
 
 def fold(msl, bindings, om_only_ok=False):
     """The readable-tile version main0_f added to msl (a pixel shader's source, or the compile unit dmsh_side.unit made of it), to be cut from the one compile of the shader's other entry
@@ -247,7 +263,9 @@ def fold(msl, bindings, om_only_ok=False):
         else:
             pa, pb = (_proj(text, d.group(1), 'x', locn), _proj(text, d.group(2), 'y', locn)) if d else (None, None)
             fx, fy = (_frag_pos(text, d.group(1), 'x'), _frag_pos(text, d.group(2), 'y')) if d else (None, None)
+            na, nb = (_ndc(text, d.group(1), 'x', locn), _ndc(text, d.group(2), 'y', locn)) if d and not (pa and pa == pb) else (None, None)
             if pa and pa == pb: how = {'varying_locn': locn[pa], 'proj': 1}
+            elif na and na == nb: how = {'varying_locn': locn[na], 'proj': 1, 'ndc': 1}
             elif fx and fy: how = {'frag_pos': [fx, fy]}
             else: continue
         i = len(calls)
@@ -263,7 +281,11 @@ def fold(msl, bindings, om_only_ok=False):
     om = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
     if not om: return None, 'no output struct'
     outs = [(t, n, int(c)) for t, n, c in re.findall(r'(\w+) (m_\d+) \[\[color\((\d+)\)\]\];', om.group(1))]
-    if not outs or len(outs) > 4 or re.sub(r'\w+ m_\d+ \[\[color\(\d+\)\]\];', '', om.group(1)).strip(): return None, 'the output struct is not plain color outputs (or has more than 4)'
+    # up to 8 outputs (S2Arm 69f75818: Xenoblade Chronicles 3's G-buffer decals and lights write 5 and 6), OM_j_k 64-127
+    if not outs or len(outs) > 8 or re.sub(r'\w+ m_\d+ \[\[color\(\d+\)\]\];', '', om.group(1)).strip(): return None, 'the output struct is not plain color outputs (or has more than 8)'
+    # Past 4 outputs only with a sample the host can prove reads this pixel (projective, NDC or pixel-position: nvn_mtl.m fb_tile_plan takes no other), or a profile's bf_want row: a
+    # version with only samples at a plain interpolated output is never drawn, and Xenoblade Chronicles 3 would have built 14,707 of them (about 22 KB each, Mac and iPhone)
+    if len(outs) > 4 and not om_only_ok and not any(c.get('proj') or c.get('frag_pos') for c in calls): return None, 'more than 4 outputs and no sample a tile read can prove'
     rest = src[end:]
     if calls:   # the body's new parameters, and every call of it (the definition comes first) passing what turns the tile read off
         params = [f'int fx{i}' for i in range(len(calls))] + [f'float4 fb{k}' for k in range(NFB)]

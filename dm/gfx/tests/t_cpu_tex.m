@@ -105,7 +105,9 @@ static void finalized_upload(int write_after_record) {
 }
 // nvnMemoryPoolFinalize on a game thread while the submit thread walks the texture IDs (pool_gpu, holding g_rmu): the finalize dropped the pool's CPU-written classification before it
 // marked the pool's IDs gone, so a walk in between found a live ID, a pool still set and a texture no longer CPU-written, and tex_mtl_ handed out its packaged entry (an NvPkg) as the
-// texture: "-[NvPkg buffer]: unrecognized selector" in tex_by_id (Ocarina of Time, reference/nvn-objects.md). Here the test holds g_rmu as the walk does while another thread finalizes
+// texture: "-[NvPkg buffer]: unrecognized selector" in tex_by_id (Ocarina of Time, reference/nvn-objects.md). Here the test holds g_rmu as the walk does while another thread finalizes.
+// The finalize also clears the pool's magic before anything else, and marks the IDs gone and ends the textures' entries in one hold of g_rmu: with the entries ended first, in a hold
+// of g_smu alone, a resolution in between made the texture again and kept it under its serial until the object's own Finalize (mtl_alias_drop_pool)
 static void *finalize_pool(void *pool) { h_nvnMemoryPoolFinalize((NVNmemoryPool *)pool); return NULL; }
 static void finalize_during_walk(void) {
     const size_t len = 262144;
@@ -126,15 +128,20 @@ static void finalize_during_walk(void) {
     os_unfair_lock_lock(&g_rmu);
     id<MTLTexture> first = tex_by_id(1);
     CHECK(first && first.width == 4, "the packaged texture resolves");
-    CHECK([tex_get(serial) isKindOfClass:[NvPkg class]], "its table entry is an NvPkg");
+    id entry = tex_get(serial);
+    CHECK([entry isKindOfClass:[NvPkg class]], "its table entry is an NvPkg");
     pthread_t th; pthread_create(&th, NULL, finalize_pool, &pool);
+    for (int i = 0; i < 5000 && pool.magic; i++) usleep(1000);   // started: the magic goes first
     usleep(100000);   // the finalize runs as far as it can while the walk holds g_rmu
     CHECK(tex_cpu_written(serial), "the pool's classification stays while a walk can still find its IDs live");
+    CHECK(pool.magic == 0 && serial_get(serial) == entry && !g_treg[1].gone, "the finalize has cleared the pool's magic, but marked no ID and ended no entry while the walk holds g_rmu");
     id again = tex_mtl((const tex_t *)&tex);
     CHECK(again && ![again isKindOfClass:[NvPkg class]], "tex_mtl does not hand out the NvPkg during the finalize");
+    CHECK(again == first, "it takes the texture the entry has, and makes none");
     os_unfair_lock_unlock(&g_rmu);
     pthread_join(th, NULL);
     CHECK(!tex_cpu_written(serial) && g_treg[1].gone, "after the finalize the ID is gone and the classification dropped");
+    CHECK(!serial_get(serial), "and no entry is left under the serial");
     os_unfair_lock_lock(&g_rmu); id after = tex_by_id(1); os_unfair_lock_unlock(&g_rmu);
     CHECK(![after isKindOfClass:[NvPkg class]], "the gone ID does not hand out the NvPkg either");
     CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "submission completed");
@@ -264,6 +271,126 @@ static void handover_holders(void) {
     CHECK(!resident(tc), "hand-over: the pool's own texture goes with the pool");
     munmap(mem, len);
 }
+// The GPU's first write over a texture taken from its storage, met while its memory pool is finalized (cpu_unc_drop): the drop has read the texture's record when the pool's Finalize
+// lands on a game thread (nvn_mtl.m g_pool_read_after runs it there), and hands the package's texture over after it. A queued descriptor (a pin) still holds the package, and the
+// texture object was finalized before its pool, so no mark stands for the serial: the hand-over keeps nothing, as the drop read the finalize count before the record (pool_fin_since),
+// and the texture leaves the residency set once unpinned. Handed over, it stayed in the finalized-texture table, resident, until that table pushed it out
+static NVNmemoryPool *g_unc_pool;
+static void unc_finalize(const void *pool) { if (g_unc_pool && pool == (const void *)g_unc_pool) { NVNmemoryPool *p = g_unc_pool; g_unc_pool = NULL; h_nvnMemoryPoolFinalize(p); } }
+static void handover_during_finalize(void) {
+    const size_t len = 262144;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) abort();
+    memset(mem + 65536, 0x5a, 4096);   // what the CPU wrote before the first use
+    pool_t pool = {0}; pool_builder_t pb = {.mem=mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&pool, (const NVNmemoryPoolBuilder *)&pb), "hand-over during the Finalize: pool initialized");
+    NVNtextureBuilder tb; NVNtexture a = {0}; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetWidth(&tb, 4); h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 65536);
+    CHECK(h_nvnTextureInitialize(&a, &tb), "hand-over during the Finalize: a texture object over the storage");
+    uint64_t sa = ((tex_t *)&a)->serial;
+    mtl_sub_begin();
+    __weak id<MTLTexture> wt;
+    @autoreleasepool {
+        id<MTLTexture> ta = tex_mtl((const tex_t *)&a); wt = ta;
+        CHECK(ta && [tex_get(sa) isKindOfClass:[NvPkg class]], "hand-over during the Finalize: a package taken from the storage");
+    }
+    mtl_tex_pin(sa);   // a queued descriptor holds the package
+    mtl_tex_gpu_written((const tex_t *)&a);   // the GPU writes over the storage
+    h_nvnTextureFinalize(&a);   // the texture object finalized before its pool
+    g_unc_pool = (NVNmemoryPool *)&pool; g_pool_read_after = unc_finalize;
+    cpu_unc_drop();
+    g_pool_read_after = NULL;
+    CHECK(!g_unc_pool && pool.magic == 0, "hand-over during the Finalize: the pool's Finalize lands as the drop hands the texture over");
+    pthread_mutex_lock(&g_smu); int held = nvn_hm_get(&g_ghost, &sa) || nvn_hm_get(&g_by_serial, &sa); pthread_mutex_unlock(&g_smu);
+    CHECK(!held, "hand-over during the Finalize: the serial is handed nothing, no entry live or finalized");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "hand-over during the Finalize: submission completed");
+    mtl_tex_unpin(sa); settle();
+    CHECK(!resident(wt), "hand-over during the Finalize: unpinned, the package's texture leaves the residency set");
+    munmap(mem, len);
+}
+// A CPU write published through a buffer must be visible to a texture sharing its
+// storage. Compare no flush, a direct pool flush, and a buffer-relative flush.
+static void flushed_buffer_upload(int flush_kind) {
+    const size_t len = 262144, buffer_off = 65536, flush_off = 4096, output_off = 131072;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) abort();
+    NVNmemoryPool pool = {0}; NVNmemoryPoolBuilder pb = {0};
+    h_nvnMemoryPoolBuilderSetDefaults(&pb); h_nvnMemoryPoolBuilderSetStorage(&pb, mem, len);
+    h_nvnMemoryPoolBuilderSetFlags(&pb, NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+    CHECK(h_nvnMemoryPoolInitialize(&pool, &pb), "flush test pool initialized");
+    NVNbufferBuilder bb = {0}; NVNbuffer buffer = {0};
+    h_nvnBufferBuilderSetDefaults(&bb); h_nvnBufferBuilderSetStorage(&bb, &pool, buffer_off, 32768);
+    CHECK(h_nvnBufferInitialize(&buffer, &bb), "flush test buffer initialized at nonzero pool offset");
+    NVNtextureBuilder tb = {0}; NVNtexture tex = {0};
+    h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetWidth(&tb, 4); h_nvnTextureBuilderSetHeight(&tb, 4);
+    // Storage images may be GPU-written, so their contents are not inferred from
+    // CPU storage at first use. Only an explicit flush publishes this upload.
+    h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_IMAGE);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetStorage(&tb, &pool, buffer_off + flush_off);
+    uint8_t pixels[64], zeros[64] = {0}; for (int i=0;i<64;i++) pixels[i]=(uint8_t)(i+32);
+    // Fill before registration so a dirty-upload profile cannot infer publication
+    // from a later write. TextureWriteTexels would bypass the flush path as well.
+    CHECK(nvn_swizzle(&((const tex_builder_t *)&tb)->d, 0, 0, pixels, 16, mem + buffer_off + flush_off) == 0, "CPU pixels swizzled into buffer storage");
+    CHECK(h_nvnTextureInitialize(&tex, &tb), "flush test texture initialized without packaged layout");
+    const tex_t *t = (const tex_t *)&tex;
+    if (flush_kind == 1) h_nvnMemoryPoolFlushMappedRange(&pool, buffer_off + flush_off, t->L.size);
+    if (flush_kind == 2) h_nvnBufferFlushMappedRange(&buffer, flush_off, t->L.size);
+    NVNcommandBuffer cmd; CHECK(h_nvnCommandBufferInitialize(&cmd, NULL), "flush test command buffer initialized");
+    h_nvnCommandBufferAddCommandMemory(&cmd, &pool, 0, buffer_off); h_nvnCommandBufferBeginRecording(&cmd);
+    NVNcopyRegion region = {0,0,0,4,4,1};
+    h_nvnCommandBufferCopyTextureToBuffer(&cmd, &tex, NULL, &region, (uint64_t)mem + output_off, 0);
+    NVNcommandHandle handle = h_nvnCommandBufferEndRecording(&cmd);
+    state_reset(); memset(&R,0,sizeof R); mtl_sub_begin();
+    uint8_t *records = nvn_rec_linear(handle, NULL); mtl_exec(records); free(records);
+    CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "flushed storage GPU readback completed");
+    CHECK(!mtl_last_commit_error(), "flushed storage readback has no GPU error");
+    CHECK(!memcmp(mem + output_off, flush_kind ? pixels : zeros, sizeof pixels),
+          flush_kind == 2 ? "buffer flush publishes texture pixels to Metal" :
+          flush_kind == 1 ? "pool flush publishes texture pixels to Metal" : "unflushed cached storage does not trigger first-use upload");
+    h_nvnCommandBufferFinalize(&cmd); h_nvnTextureFinalize(&tex); h_nvnBufferFinalize(&buffer); h_nvnMemoryPoolFinalize(&pool);
+    CHECK(!nvn_flushed(mem + buffer_off + flush_off, 1), "pool finalization retires buffer flush ranges");
+    defer_drain(); munmap(mem,len);
+}
+// One storage named by a sampled 3D RGBA16F texture (flags 0, data in its storage at first use: taken from storage, an NvPkg) and by an image object (IMAGE: the shared GPU texture),
+// ported from S2Arm 2e9a6ce7. Sampled first: the image write through the shared texture makes the sampled object that texture, out of the CPU-written set (cpu_key_join). Image first:
+// the sampled object is not taken from storage the image wrote (gws_owned), and resolves to the shared texture. A 2D texture keeps its own rule (cpu_unc_drop), not checked here
+static void image_over_3d(int image_first) {
+    const size_t len = 1 << 20, off = 65536;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) abort();
+    pool_t pool = {0}; pool_builder_t pb = {.mem=mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&pool, (const NVNmemoryPoolBuilder *)&pb), "3D: CPU-cached pool initialized");
+    NVNtextureBuilder tb; NVNtexture sampled = {0}, image = {0}; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_3D); h_nvnTextureBuilderSetSize3D(&tb, 16, 16, 16); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA16F);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, (ptrdiff_t)off);
+    memset(mem + off, 0x3c, 16 * 16 * 16 * 8);   // data in the storage before the texture objects are made (the CPU fills before nvnTextureInitialize, no flush)
+    CHECK(h_nvnTextureInitialize(&sampled, &tb), "3D: sampled texture initialized");
+    h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_IMAGE);
+    CHECK(h_nvnTextureInitialize(&image, &tb), "3D: image texture initialized over the same storage");
+    const tex_t *ts = (const tex_t *)&sampled, *ti = (const tex_t *)&image;
+    mtl_reg_image(3, ti, NULL);
+    NvProg *program = [NvProg new]; NvShader *shader = [NvShader new]; program->sh[5] = shader;
+    shader->rf.nb = 1; shader->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .dtt=MTLTextureType3D, .dpf=NVN_DPF_FLOAT, .reg=0, .rw=1};
+    S.img[5][0] = 3;
+    mtl_sub_begin();
+    const char *ord = image_first ? "3D, image first" : "3D, sampled first";
+    char m[160];
+    if (!image_first) {
+        (void)tex_mtl(ts);
+        snprintf(m, sizeof m, "%s: the sampled texture is taken from its storage", ord); CHECK([tex_get(ts->serial) isKindOfClass:[NvPkg class]] && tex_cpu_written(ts->serial), m);
+    }
+    image_prepare(program, 0x20);
+    id<MTLTexture> wt = tex_mtl(ti), st = tex_mtl(ts);
+    snprintf(m, sizeof m, "%s: the image's texture is the storage's shared texture", ord);
+    pthread_mutex_lock(&g_smu); alias_key k = tex_alias_key(ti); int shared = hm_get_id(&g_alias, &k) == wt; pthread_mutex_unlock(&g_smu); CHECK(wt && shared, m);
+    snprintf(m, sizeof m, "%s: the sampled object resolves to the texture the image writes", ord); CHECK(st == wt, m);
+    snprintf(m, sizeof m, "%s: and is not CPU-written", ord); CHECK(!tex_cpu_written(ts->serial) && ![tex_get(ts->serial) isKindOfClass:[NvPkg class]], m);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "3D: submission completed");
+    h_nvnTextureFinalize(&sampled); h_nvnTextureFinalize(&image); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
+    CHECK(!g_cpu_key_n, "3D: the pool's Finalize leaves no storage key");
+    defer_drain(); munmap(mem, len);
+}
 int main(int argc, const char **argv) { @autoreleasepool {
     enum { N = 6442, BASE = 1000 };
     static tex_t t[N];
@@ -298,6 +425,6 @@ int main(int argc, const char **argv) { @autoreleasepool {
     own.serial = 900002; mtl_tex_init(&own); moved = own; own.magic = 0; mtl_tex_release(&moved);
     CHECK(!nvn_hm_get(&g_tex_live, &moved.serial), "a copy outliving the object it was initialized in ends the texture");
     retired_classification(); descriptor_replacement();
-    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); }
+    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); for (int i=0;i<3;i++) flushed_buffer_upload(i); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); handover_during_finalize(); image_over_3d(0); image_over_3d(1); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

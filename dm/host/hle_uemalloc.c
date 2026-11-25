@@ -61,10 +61,41 @@ static void *alloc(size_t n, uint32_t a) {
     if (p) used((int64_t)malloc_size(p));
     return p;
 }
-static void release(void *p) { if (p) { used(-(int64_t)malloc_size(p)); malloc_zone_free(g_zone, p); } }
+// Freed small blocks keep their contents for a while (the last LATE_N frees of blocks up to LATE_MAX bytes go to the zone only when later frees push them out). Unreal's
+// FMallocBinned3 leaves a freed small block as it was until the block is handed out again, and the zone zeroes it at once, so a game that reads a block just after freeing it worked
+// on the Switch and read zeros here. SHIN MEGAMI TENSEI V: Vengeance's battle tasks (BattleActionTaskFactory's AddPoolTaskListInner, main+0xe704f8): it appends the new task to its
+// wait group's list in place, then TMap::Add(Key, *Found) with that reference into the map's own elements; when Add needs a new slot the elements are reallocated and the value is
+// copied from the freed block, so the group's list read as empty, the waiting task (the attack's battle message) never started, and every landed hit or escape left the battle
+// waiting forever (upstream issues #1034 and #2345). Binned3's small blocks end at 64 KiB; larger ones are the OS's on the Switch too and are freed at once. At most LATE_N x LATE_MAX
+// (8 MiB) is held, in practice a few KiB
+enum { LATE_N = 256, LATE_MAX = 32768 };
+static void *_Atomic g_late[LATE_N];
+static _Atomic unsigned g_late_i;
+static void release(void *p) {
+    if (!p) return;
+    size_t n = malloc_size(p);
+    if (n <= LATE_MAX) {
+        p = atomic_exchange(&g_late[atomic_fetch_add(&g_late_i, 1) % LATE_N], p);
+        if (!p) return;
+        n = malloc_size(p);
+    }
+    used(-(int64_t)n); malloc_zone_free(g_zone, p);
+}
+static void late_flush(void) {   // tests: give every held block to the zone
+    for (int i = 0; i < LATE_N; i++) { void *p = atomic_exchange(&g_late[i], NULL); if (p) { used(-(int64_t)malloc_size(p)); malloc_zone_free(g_zone, p); } }
+}
 static void *realloc_aligned(void *p, size_t n, uint32_t a) {
     if (!p) return alloc(n, a);
     if (!n) { release(p); return NULL; }
+    // A small block is moved by hand, so the old one is released as above and keeps its contents: a block that still holds the new size at its boundary stays where it is
+    // (unless it would be more than half empty), as Binned3's realloc keeps a block whose bin holds the new size
+    size_t have = malloc_size(p);
+    if (have <= LATE_MAX) {
+        size_t alignment = align_of(n, a);
+        if (n <= have && n * 2 >= have && !((uintptr_t)p & (alignment - 1))) return p;
+        void *r = alloc(n, a); if (!r) return NULL;
+        memcpy(r, p, have < n ? have : n); release(p); return r;
+    }
     // The zone's realloc first: it grows in place and gives back what a shrink leaves, and an in-place block keeps its boundary. Only a block it leaves off the boundary is copied
     size_t old = malloc_size(p), alignment = align_of(n, a);
     void *q = malloc_zone_realloc(g_zone, p, n); if (!q) return NULL;
@@ -98,12 +129,17 @@ static void *m_Realloc32(void *self, void *p, uint32_t n, uint32_t a) { return m
 static uint32_t m_QuantizeSize32(void *self, uint32_t n, uint32_t a) { (void)self; (void)a; size_t q = malloc_good_size(n); return q > UINT32_MAX ? n : (uint32_t)q; }
 static bool m_GetAllocationSize32(void *self, void *p, uint32_t *out) { (void)self; if (!p) return false; *out = (uint32_t)malloc_size(p); return true; }
 static void m_Nothing(void *self) { (void)self; }   // Trim (its bool argument is ignored), the thread-local cache setup and teardown, DumpAllocatorStats
-static void *g_vt[NSLOT];
+// The host's vtable with the two words before its address point: Itanium's offset to top and RTTI, copied from the guest's, so code that reads the allocator's type (a dynamic_cast,
+// typeid) still finds FMallocBinned3's typeinfo; the guest's vtable may carry it (ue_malloc.py), and a bare array put zeros or other data there
+static struct {
+    void *header[2];   // Itanium offset to top and RTTI, immediately before the address point
+    void *slots[NSLOT];
+} g_vtable;
 static const char *g_what;
 
 // Observation gate OBS_UE_MALLOC, on the cut constructor call: the object in the register the gate number's upper bits name (x0), before anything calls it
 static void obj_made(uint64_t *regs, int param) {
-    *(void **)(uintptr_t)regs[param] = g_vt;
+    *(void **)(uintptr_t)regs[param] = g_vtable.slots;
     static int once; if (!once++) LOG("%s: Unreal's allocator (FMallocBinned3 at %#llx) runs on a host malloc zone", g_what, (unsigned long long)regs[param]);
 }
 
@@ -123,14 +159,16 @@ int dm_ue_heap_owns(uint64_t a, uint64_t n) {
 
 // The host's vtable over the guest's (the trivial slots stay the guest's), and the zone behind it
 static void fill(const uint8_t *vtable, int L, const char *what) {
-    memcpy(g_vt, vtable, sizeof g_vt[0] * k_lay[L].nslot);
+    memcpy(g_vtable.header, vtable - sizeof g_vtable.header, sizeof g_vtable.header);
+    void **slots = g_vtable.slots;
+    memcpy(slots, vtable, sizeof slots[0] * k_lay[L].nslot);
     bool s32 = k_lay[L].size32;
-    g_vt[k_lay[L].malloc_] = s32 ? (void *)m_Malloc32 : (void *)m_Malloc; g_vt[k_lay[L].realloc_] = s32 ? (void *)m_Realloc32 : (void *)m_Realloc;
-    if (k_lay[L].try_malloc) g_vt[k_lay[L].try_malloc] = (void *)m_TryMalloc;
-    if (k_lay[L].try_realloc) g_vt[k_lay[L].try_realloc] = (void *)m_TryRealloc;
-    g_vt[k_lay[L].free_] = (void *)m_Free;
-    g_vt[k_lay[L].quantize] = s32 ? (void *)m_QuantizeSize32 : (void *)m_QuantizeSize; g_vt[k_lay[L].get_size] = s32 ? (void *)m_GetAllocationSize32 : (void *)m_GetAllocationSize;
-    for (int s = 0; s < 6 && k_lay[L].nothing[s]; s++) g_vt[k_lay[L].nothing[s]] = (void *)m_Nothing;
+    slots[k_lay[L].malloc_] = s32 ? (void *)m_Malloc32 : (void *)m_Malloc; slots[k_lay[L].realloc_] = s32 ? (void *)m_Realloc32 : (void *)m_Realloc;
+    if (k_lay[L].try_malloc) slots[k_lay[L].try_malloc] = (void *)m_TryMalloc;
+    if (k_lay[L].try_realloc) slots[k_lay[L].try_realloc] = (void *)m_TryRealloc;
+    slots[k_lay[L].free_] = (void *)m_Free;
+    slots[k_lay[L].quantize] = s32 ? (void *)m_QuantizeSize32 : (void *)m_QuantizeSize; slots[k_lay[L].get_size] = s32 ? (void *)m_GetAllocationSize32 : (void *)m_GetAllocationSize;
+    for (int s = 0; s < 6 && k_lay[L].nothing[s]; s++) slots[k_lay[L].nothing[s]] = (void *)m_Nothing;
     g_zone = malloc_create_zone(0, 0); malloc_set_zone_name(g_zone, "guest Unreal heap"); g_what = what;
 }
 
@@ -151,7 +189,7 @@ void dm_ue_malloc_install(void) {
         for (int k = 0; k < (int)(sizeof k_ue / sizeof k_ue[0]); k++) if (!strcmp(m->build_id, k_ue[k].build)) {
             if (*(uint32_t *)(b + k_ue[k].cut) != (k_ue[k].cut_insn ? k_ue[k].cut_insn : 0xd503201f)) { LOG("[RED] %s: main is rewritten without the allocator cut (its patches.py): Unreal's own allocator runs", k_ue[k].what); return; }
             fill(b + k_ue[k].vtable, k_ue[k].layout, k_ue[k].what);
-            *(void **)(b + k_ue[k].obj) = g_vt;
+            *(void **)(b + k_ue[k].obj) = g_vtable.slots;
             LOG("%s: Unreal's allocator (main+%#llx) runs on a host malloc zone", k_ue[k].what, (unsigned long long)k_ue[k].obj);
         }
     }

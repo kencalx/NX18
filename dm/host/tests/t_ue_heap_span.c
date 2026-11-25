@@ -48,6 +48,7 @@ int main(void) {
         assert(malloc_size(less) < big);
         m_Free(NULL, less);
     }
+    late_flush();
     assert(atomic_load(&g_used) == 0);
     malloc_destroy_zone(g_zone);
     puts("Unreal virtual-span alignment and realloc contents passed");

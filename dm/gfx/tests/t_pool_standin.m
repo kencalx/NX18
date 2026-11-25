@@ -1,7 +1,7 @@
 // A texture the pool walk leaves out for good (the budget is full, no shader has read its ID) holds a stand-in in the tables until its first read: its own smallest levels, or its
 // last level cut down to every n-th block when it has none that small (pool_stand, issue #1969). Below the budget the entry stays the dummy, as the walk goes on and makes the
 // texture; so does a texture of a type that has no stand-in and an unwritten render target. A read makes the texture and lets the stand-in go, as does another registration.
-// DM_NVN_POOL_STANDIN=0: the dummy everywhere, as before
+// DM_NVN_POOL_STANDIN=1 (off by default since 2026-11-22): the stand-ins above; unset or 0: the dummy everywhere
 #include "../nvn/nvn_mtl.m"
 #include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
@@ -66,9 +66,12 @@ static int picked_is(id<MTLTexture> t, uint32_t nx, uint32_t ny, uint32_t bpb, u
     return 1;
 }
 static id<MTLTexture> stand(int i) { return (__bridge id<MTLTexture>)g_treg[i].stand; }
+// The read-ahead queue's asks (g_fwire_advise_hook, for dm_guest_file_advise): how many, and the last range (DM_NVN_POOL_READAHEAD)
+static _Atomic int ra_k; static const void *ra_p; static size_t ra_n;
+static uint64_t ra_rec(const void *p, size_t n) { ra_p = p; ra_n = n; atomic_fetch_add(&ra_k, 1); return n; }
 int main(void) { @autoreleasepool {
     mtl_init();
-    const char *e = getenv("DM_NVN_POOL_STANDIN"); int on = !(e && !strcmp(e, "0"));
+    const char *e = getenv("DM_NVN_POOL_STANDIN"); int on = e && atoi(e) > 0;   // off by default (stand_on)
     enum { SLOT = 1 << 17, N = 10, LEN = N * SLOT, MANY = STAND_FRAME + 40 };
     uint8_t *mem = mmap(NULL, LEN, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (mem == MAP_FAILED) abort();
     pool_t p = {.magic = MAGIC('P', 'O', 'O', 'L'), .mem = mem, .size = LEN, .flags = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
@@ -93,8 +96,12 @@ int main(void) { @autoreleasepool {
     view_t layer1 = {.set_target = 1, .target = NVN_TEXTURE_TARGET_2D, .set_layers = 1, .min_layer = 1, .nlayers = 1};
 
     // Below the budget a texture this frame has no room for is made by a later walk: the dummy until then, and no stand-in
+    g_fwire_advise_hook = ra_rec; g_pra_on = 1;
     mtl_reg_tex(10, &t[0], NULL);
     id<MTLBuffer> b0 = table(1);
+    dispatch_sync(fwire_adv_q(), ^{});
+    // DM_NVN_POOL_READAHEAD: a walk with no room this frame makes nothing, so asks for nothing
+    CHECK(atomic_load(&ra_k) == 0, "a walk with no room asks for nothing ahead");
     CHECK(entry(b0, 10) == dummy(b0) && !g_treg[10].stand && !g_treg[10].view, "below the budget a texture left out holds the dummy");
     CHECK(snap() && snap()->left > 0 && !snap()->over, "and its table goes on walking");
 
@@ -104,7 +111,15 @@ int main(void) { @autoreleasepool {
     mtl_reg_tex(11, &t[2], NULL); mtl_reg_tex(12, &t[3], NULL); mtl_reg_tex(13, &t[4], NULL); mtl_reg_tex(14, &t[5], NULL); mtl_reg_tex(15, &t[6], &srgb);
     mtl_reg_tex(16, &t[4], &layer1); mtl_reg_tex(17, &t[8], NULL); mtl_reg_tex(18, &t[9], NULL);
     uint64_t builds = g_stat_pool_builds; atomic_fetch_add(&g_cur_frame, 1);   // a later frame
+    int ra0 = atomic_load(&ra_k);
     id<MTLBuffer> b1 = table(0);
+    dispatch_sync(fwire_adv_q(), ^{});
+    // DM_NVN_POOL_READAHEAD, over the budget: the walk makes stand-ins, and asks ahead only for their levels (from the first level a stand-in takes to the end of each layer it reads)
+    if (on) {
+        CHECK(atomic_load(&ra_k) > ra0 && atomic_load(&g_pra_tail_n) >= 1 && ra_n <= t[9].L.size, "over the budget the walk asks ahead for the stand-ins' levels"); }
+    { int k1 = atomic_load(&ra_k); atomic_fetch_add(&g_cur_frame, 1); (void)table(0); dispatch_sync(fwire_adv_q(), ^{});
+      CHECK(atomic_load(&ra_k) == k1, "and asks for each only once, however often it walks past it"); }
+    g_fwire_advise_hook = NULL;
     if (on) { CHECK(g_stat_pool_builds == builds + 1 && snap()->over, "the budget filled: the table is walked once more"); builds++; }
     else CHECK(g_stat_pool_builds == builds, "DM_NVN_POOL_STANDIN=0: the registrations patch the table, with no walk");
     CHECK(!g_treg[10].view && !tex_get(t[0].serial), "the walk makes no unread texture");
@@ -163,20 +178,22 @@ int main(void) { @autoreleasepool {
     id<MTLBuffer> b5 = table(0);
     CHECK(entry(b5, 12) == dummy(b5) && !g_treg[12].stand && entry(b5, 15) == dummy(b5) && !g_treg[15].stand, "an emptied ID and one whose storage went hold the dummy");
 
-    // More registrations than a frame's share of stand-ins: the rest hold the dummy until the next submission, which writes theirs into the table in place
+    // More registrations than a frame's share of stand-ins: the rest hold the dummy until the next submission, which forks the table via copy-on-write so an in-flight buffer stays untouched
     for (int i = 0; i < MANY; i++) mtl_reg_tex(100 + i, &t[7], NULL);
     uint64_t made = g_stand_made; atomic_fetch_add(&g_cur_frame, 1);
     id<MTLBuffer> b6 = table(0);
     int with = 0; for (int i = 0; i < MANY; i++) with += entry(b6, 100 + i) != dummy(b6);
     if (on) {
         CHECK(g_stand_made == made + STAND_FRAME && g_stand_todo_n == MANY - STAND_FRAME, "a frame makes its share of stand-ins, and the rest wait");
-        // (b6's entries are written in place below, so the count is taken before)
         CHECK(with == STAND_FRAME, "the rest hold the dummy for now");
         atomic_fetch_add(&g_cur_frame, 1);
+        uint64_t pgen = g_psnap_gen;
         mtl_sub_begin(); os_unfair_lock_lock(&g_rmu); pool_seen_scan(); os_unfair_lock_unlock(&g_rmu);   // as the next submission's first pool draw does, before it asks for the table
-        int all = 1; for (int i = 0; i < MANY; i++) all &= g_treg[100 + i].stand && entry(b6, 100 + i) == g_treg[100 + i].stand_rid;
+        id<MTLBuffer> b7 = snap()->buf;
+        int all = 1; for (int i = 0; i < MANY; i++) all &= g_treg[100 + i].stand && entry(b7, 100 + i) == g_treg[100 + i].stand_rid;
+        int kept = 0; for (int i = 0; i < MANY; i++) kept += entry(b6, 100 + i) != dummy(b6);
         CHECK(all && !g_stand_todo_n && g_stand_made == made + MANY, "the next frame makes the rest");
-        CHECK(snap()->buf == b6, "written into the table in place: the same buffer");
+        CHECK(b7 != b6 && kept == STAND_FRAME && g_psnap_gen > pgen, "written via copy-on-write: new buffer holds the stand-ins and the old buffer stays untouched");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission completed");
         CHECK(level_is(stand(100 + MANY - 1), 0, 16 * 16 * 4, 64, 0x82), "and they hold the texture's levels");
     } else CHECK(!with && !g_stand_made, "DM_NVN_POOL_STANDIN=0: the dummy");

@@ -31,8 +31,12 @@ void front_screen_match(int fps);
 // lays the picture out in that shape instead of 16:9, so a profile with screen_aspect under DM_SCREEN_ASPECT (1920x1344) fills a 1.43:1 screen and touches map onto the picture
 // as drawn. Before the first call the picture is 16:9. Called from the present thread; the front end switches to its main thread and does not block
 void front_picture_shape(int w, int h);
-// The pixel size the picture is rendered at (nvn_mtl.m present_now: the presented texture's pixels in present_shape's shape, not the crop's, which dynamic resolution moves), called
-// at the first present and when a new size has held for 30 presents: the iOS front end sizes its drawable to it where the present scales bilinearly anyway (front_ios.m DmGameView),
+// Ultrawide's camera (loader.c): the iOS front end gives the screen's width / height when Ultrawide is on and stretches the picture (startGame), before the game starts; a build
+// with camera stubs (CAMERA_ASPECT) then draws that ratio. dm_game_aspect: the ratio the game's camera last drew (its stub's acknowledgement), 0 for the game's own 16:9; any thread
+void dm_camera_aspect_screen(float ratio);
+float dm_game_aspect(void);
+// The pixel size the picture is rendered at (nvn_mtl.m present_now, present_size_step: the crop's pixels in present_shape's shape, the largest crop since the window texture took
+// its size, so a dynamic resolution's smaller crops resize nothing), called at the first present and when a new size has held for 30 presents: the iOS front end sizes its drawable to it where the present scales bilinearly anyway (front_ios.m DmGameView),
 // and Core Animation scales the layer to the view. Called from the present thread; the front end switches to its main thread and does not block. The Mac has none (a weak default)
 void front_picture_size(int w, int h);
 // What the live present last did with the picture settings the player can change while the game runs (nvn_mtl.m: written by the present thread at each live present, read on any
@@ -68,6 +72,13 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
 // 0: closed (B, Escape); -1 with no window: nothing shown, the caller answers as the player closing it
 int front_ctrl_support(int min, int max);
 
+// The front end's own menu over the running game (hle_oe.c; diagnostics only, the game sees nothing): the iOS front end reports its in-game menu (the gear button's, DmGamepad.m)
+// opening and closing, the Mac front end a menu of its menu bar (where = "menu bar"; NULL or "" names nothing). Each change is one log line, "front end: in-game menu open" or
+// "... closed after N s"; a repeat of the same state is ignored. Call it on the main thread. dm_front_menu_now: 1 while the menu is open and for half a second after it closes
+// (its dismissal is still drawn), from any thread; the present path tags its long frames and its 300-frame windows with it (hle_nvn.c front_ui)
+void dm_front_menu_set(int open, const char *where);
+int dm_front_menu_now(void);
+
 // Early start of host loading (main.c): reading the NSO / relocation / forced takeover / prefetch start are moved to a background thread, in parallel with the front end (UIKit launch chain, Metal view);
 // the dm_main / main called afterwards waits for it to finish. For call timing and preconditions see the comments in main.c (set DM_ROMFS and the other environment variables and the cwd first; arguments identical item by item to those of the later main).
 void dm_host_preload_start(int argc, char **argv);
@@ -87,11 +98,15 @@ void dm_touch_script(const dm_touch *t, int n);   // scripted touches (DM_KEYS, 
 // the next transaction that succeeds commits as usual, and the front end need not do any recovery. err = the first failing errno (ENOSPC = 28 means out of space). Called on the game thread; the front end switches to the main thread itself and must not block
 void front_save_failed(int err);
 
-// GPU lost (called by the graphics backend's nvn_mtl.m gpu_lost_check, once): the first command buffer came back MTL4CommandQueueErrorAccessRevoked, so macOS runs none of the process's GPU work
-// any more and nothing is drawn again. By then presents have stopped and the game's waits for the GPU are released, so the game runs on with nothing on screen until the front end ends it.
-// The Mac front end leaves full screen, says why in an alert and quits with exit status 70; without a window it ends the run as the default weak implementation (nvn_mtl.m) does, which the iOS
-// front end keeps: a FATAL line and an abort. Called on Metal's feedback queue; the front end switches to the main thread itself and must not block
+// GPU lost (called by the graphics backend, once): mtl_gpu_lost_why() says why. 1: the first command buffer came back MTL4CommandQueueErrorAccessRevoked (nvn_mtl.m gpu_lost_check),
+// so macOS runs none of the process's GPU work any more and nothing is drawn again. 2: with work waiting, no GPU work finished for DM_GPU_LOST_S seconds (nvn_mtl.m gpu_watch, a hang).
+// 3: a command buffer came back out of GPU memory (gpu_lost_check), and the residency set is emptied at once.
+// By then presents have stopped and the game's waits for the GPU are released (from 2 on nothing more is sent to the GPU), so the game runs on with nothing on screen until the front
+// end ends it. The Mac front end leaves full screen, says why in an alert and quits with exit status 70; without a window it ends the run as the default weak implementation (nvn_mtl.m)
+// does: a FATAL line and an abort. The iOS front end saves and quits: a line in place of the picture, the graceful exit (the cloud save sent, the pipeline archive written), and a note
+// at the next launch. Called on Metal's feedback queue or the watchdog's; the front end switches threads itself and must not block
 void front_gpu_lost(void);
+int mtl_gpu_lost_why(void);   // nvn_mtl.m: 0 not lost, 1 access revoked, 2 no GPU work finished (DM_GPU_LOST_S), 3 GPU memory full
 
 // Offline HTML pages (the web applet's offline pages; hle_web.c): a web view over the game picture (web_apple.m, Mac and iPhone). Called from guest threads; the front end works on its main
 // thread. front_web_open: dir = the folder the document path is relative to (an HtmlDocument's html-document), path = the document path with its query, callback = the URL prefix whose

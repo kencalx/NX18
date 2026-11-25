@@ -1,4 +1,4 @@
-"""NX archives (scripts/pack_nx.py, https://github.com/fab918/nxformat, NXFormat 1.0.3): the reader against the format's own conformance fixtures (dm/tools/tests/fixtures/nx, each accepted or
+"""NX archives (scripts/pack_nx.py, https://github.com/fab918/nxformat, NXFormat 1.0.4): the reader against the format's own conformance fixtures (dm/tools/tests/fixtures/nx, each accepted or
 refused with the error code upstream's index names), hostile archives made here (cut short, counts past the limits, unsafe names, zstd frames that break the rules or expand past their block),
 the packing of versions, DLC and control data, and the NSP script's NX path up to extraction. The archives besides the fixtures are written by nx_writer.py, test code with its own record
 layouts. No network, game files, keys or Xcode needed."""
@@ -350,6 +350,28 @@ class Hostile(Base):
         self.refused(self.patch_minor(self.write(game(*snaps), minor=3, resources=[(0, {'a': b'1'})]), 2), 'catalog', 'with Source Resources')
         self.refused(self.write(game(*snaps), minor=3, resources=[(1, {'other.bin': b'1'})]), 'manifest', 'partition.hfs0')
 
+    def test_extra_files(self):   # NXFormat 1.0.4's Optional Extra Files: an archive-wide tree outside the game, checked and never extracted
+        snaps = ({'type': 0, 'version': 0, 'tree': version()},)
+        def ext(root, magic=b'NXEX', ver=1, size=16, rsv=0, flags=0, okind=0, oidx=nx_writer.NO, extra=b''):
+            return [(0x00010009, flags, okind, oidx, struct.pack('<4sHHII', magic, ver, size, root, rsv) + extra)]
+        self.write(game(*snaps), extra={'notes/readme.txt': b'hello', 'cheats/a.txt': b'code'})   # the same bytes as the game's main: one shared block, its own file record
+        n = self.open()
+        self.assertNotEqual(n.extra_root, nx_writer.NO)
+        n.verify(); pack_nx.scan(n)
+        self.write(game(*snaps), minor=3, resources=[(0, {'a': b'1'})], extra={'b': b'1'})   # with Source Resources (0.3); the same bytes may share blocks
+        self.open().verify()
+        for bad, code, text in ((ext(0), 'manifest', 'extra files folder'),                     # a snapshot's root
+                                (ext(1), 'manifest', 'extra files folder'),                     # a folder inside a snapshot
+                                (ext(10 ** 6), 'manifest', 'extra files folder'),               # out of range
+                                (ext(0, magic=b'NXEY'), 'catalog', 'Extra Files header'),
+                                (ext(0, ver=2), 'catalog', 'Extra Files header'),
+                                (ext(0, rsv=1), 'catalog', 'Extra Files header'),
+                                (ext(0, extra=bytes(8)), 'catalog', 'Extra Files extension record'),
+                                (ext(0, okind=1, oidx=0), 'catalog', 'Extra Files extension record')):
+            self.refused(self.write(game(*snaps), extensions=bad), code, text)
+        self.refused(self.write(game(*snaps), extensions=ext(0, flags=1)), 'catalog', 'Extra Files extension record')
+        self.refused(self.write(game(*snaps), extra={}), 'manifest', 'extra files folder is empty')
+
     def patch_minor(self, data, minor):
         b = bytearray(data); struct.pack_into('<H', b, 6, minor); return nx_writer.reseal(bytes(b))
 
@@ -494,7 +516,7 @@ class Pack(Base):
         self.assertFalse((self.out() / 'control.nacp').exists())
 
     def test_title_names_a_version_without_a_nacp(self):   # the archive's display title (nxconvert --fallback-title, or typed in NXConvert's sidebar): title.txt, the app's name
-        self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': {'title': ' Archive‮ Title\x1b[2J\n', 'icon': b'\xff\xd8 icon'}},
+        self.write(game({'type': 0, 'version': 0, 'tree': version(), 'meta': {'title': ' Archive\u202e Title\x1b[2J\n', 'icon': b'\xff\xd8 icon'}},
                         {'type': 1, 'version': VER, 'tree': version(main=b'new')}))
         n = self.open(); app, base, vers, _ = pack_nx.scan(n)
         vars(nsp)['nacp'] = nacp   # main sets it
@@ -1510,7 +1532,7 @@ class NativeMain(NativeBase):
         app, fam = nsp.scan_nx(self.path, repo=REPO, env=None); self.addCleanup(fam['nx'].close)
         sys.path.insert(0, str(REPO / 'dm/games')); import game as gamemod
         asked = []
-        with mock.patch.object(gamemod, 'by_build', side_effect=asked.append), mock.patch.object(nsp, 'PROG'), \
+        with mock.patch.object(gamemod, 'by_build', side_effect=lambda bid, skip=(): asked.append(bid)), mock.patch.object(nsp, 'PROG'), \
              mock.patch.object(pack_nx, '_run', side_effect=AssertionError('ran nx_extract')):
             self.assertIsNone(nsp.same_build(self.dir, app, fam, None, REPO, None))
         self.assertEqual(asked, [self.g.bid1[:16].hex(), self.g.bid0[:16].hex()])

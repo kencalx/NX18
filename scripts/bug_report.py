@@ -40,6 +40,7 @@ HEX = r'[0-9a-fA-F]'
 KEY_LINE = re.compile(rf'(?i)key\w*[\s=:"\'\[\],]*{HEX}{{32,}}')
 KEY_LINE2 = re.compile(rf'(?i)(?:title|master|prod|common|aes|kek|rights)[\w ]*[=:]\s*"?{HEX}{{32,}}\b')   # "titlekek_source = <hex>" and the like
 SECRET_NAME = re.compile(r'(?i)(key|secret|token|password)')
+BUILT_BY = re.compile(r'(build: built by ).*?(, build ID )')
 
 
 def redact(text, home):
@@ -50,6 +51,7 @@ def redact(text, home):
         if KEY_LINE.search(line) or KEY_LINE2.search(line):
             dropped += 1; continue
         for h in sorted(homes, key=len, reverse=True): line = line.replace(h, '~')
+        line = BUILT_BY.sub(r'\1(name)\2', line)   # the builder's Profile name on the host's start line (G17, GW32)
         out.append(line)
     if dropped: out.append(f'[bug_report: {dropped} line(s) that look like key material were removed]\n')
     return ''.join(out), dropped
@@ -238,6 +240,7 @@ def collect(target, ios_log=None, home=None, total_cap=TOTAL_CAP, file_cap=FILE_
     bdirs = shader_dirs(app, build)
     source = 'app' if app else 'build' if build else 'target'
     commit = plist.get('DMCommit') or f'unknown (not recorded by the {source})'
+    if plist.get('DMBuildID'): commit += f"\nBuild ID: {plist['DMBuildID']}" + ('\nBuilt by: a profile name (not copied)' if plist.get('DMBuiltBy') else '')   # G17 (GW32)
     # The collector's checkout need not be the checkout that built this app. A packaged app's sole b-<V> directory is its actual library chain.
     chain = plist.get('DMChain') or (Path(bdirs[0]).name[2:] if app and len(bdirs) == 1 else None)
     chain_text = chain or f'unknown (not recorded by the {source})'

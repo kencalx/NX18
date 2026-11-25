@@ -16,10 +16,12 @@ import subprocess
 import tempfile
 import unittest
 import tracemalloc
+from typing import Any
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('pso_offline', REPO / 'dm/gfx/tools/pso_offline.py')
+assert spec and spec.loader, 'cannot load dm/gfx/tools/pso_offline.py'
 po = importlib.util.module_from_spec(spec); spec.loader.exec_module(po)
 CHAIN = '0123456789ab'
 
@@ -50,6 +52,15 @@ class Pairs(unittest.TestCase):
     def test_read_pairs_as_the_host(self):
         text = b'# header\nv1\tf1\n\nv2\tf2\nv1\tf1\nv3\n v4\tf4\nv1\tf1\textra\n'
         self.assertEqual(po.read_pairs(text), [('v1', 'f1'), ('v2', 'f2'), (' v4', 'f4'), ('v1', 'f1')])   # the last: another line, the same pair (plan drops the base twice)
+
+    def test_read_pairs_skips_cover_sections_and_resets_across_files(self):
+        text = b'# kind: evidence\nv1\tf1\n# cover: single-stage padding pairs\nv2\tf2\n# kind: evidence\nv3\tf3\n# cover\nv4\tf4\n'
+        self.assertEqual(po.read_pairs(text), [('v1', 'f1'), ('v3', 'f3')])
+        with tempfile.TemporaryDirectory() as t:
+            a, b = Path(t, 'shader_pairs.tsv'), Path(t, 'pso_pairs.tsv')
+            a.write_bytes(b'# kind: evidence\nv1\tf1\n# cover: padding\nv2\tf2\n')
+            b.write_bytes(b'v3\tf3\n')   # headerless second file must not be hidden by first file's # cover
+            self.assertEqual(po.read_pairs_files([a, b]), [('v1', 'f1'), ('v3', 'f3')])
 
     def test_stamp_matches_the_hosts_format(self):
         text = b'a\tb\n' + b'c\td\n'
@@ -384,11 +395,15 @@ class Mesh(unittest.TestCase):
         return po.mesh_fragment(po.parse_mesh_key(skey(**key)), dict({'entry': 'main0'}, **fj), dict({'main0': False}, **funcs))
 
     def test_fragment_entry_and_colour_state_as_pso_desc(self):
-        u = {'entry_u': 'main0_u', 'entry_m': 'main0_m', 'uint_mask_m': 2, 'entry_d': 'main0_d'}; uf = dict.fromkeys(('main0_u', 'main0_m', 'main0_d'), False)
-        e, c = self.colours(u, uf, cfmt=(73,), blend_en=1, blend={0: OVER})   # every written target unsigned: the integer entry; an integer target is never blended
+        u = {'entry_u': 'main0_u', 'entry_d': 'main0_d'}; uf = dict.fromkeys(('main0_u', 'main0_d'), False)
+        e, c = self.colours(u, uf, cfmt=(73,), blend_en=1, blend={0: OVER})   # a target of another class than main0 declares: the typed-output entry; an integer target is never blended
         self.assertEqual((e, c[0][:3]), ('main0_u', ('RGBA8Uint', 'All', 'Disabled')))
-        self.assertEqual(self.colours(u, uf, cfmt=(70, 73), chmask=0xff)[0], 'main0_m')   # mixed, as the mixed entry's mask says
-        self.assertEqual(self.colours(dict(u, uint_mask_m=1), uf, cfmt=(70, 73), chmask=0xff)[0], 'main0')   # mixed, but not the outputs the mixed entry returns as integers
+        self.assertEqual(self.colours(u, uf, cfmt=(70, 73), chmask=0xff)[0], 'main0_u')   # a float and an integer target: the same entry, the pipeline's classes its constants (pso_cls)
+        self.assertEqual(self.colours(u, uf, cfmt=(70, 70), chmask=0xff)[0], 'main0')   # every target the class main0 declares
+        self.assertEqual(self.colours(dict(u, raster={'colors': [0], 'float_colors': 1, 'uint_colors': 2, 'sint_colors': 0}), uf, cfmt=(70, 73), chmask=0xff)[0], 'main0')   # main0 declares output 1 unsigned
+        self.assertEqual(self.colours(dict(u, raster={'colors': [0], 'float_colors': 1, 'uint_colors': 2, 'sint_colors': 0}), uf, cfmt=(70, 70), chmask=0xff)[0], 'main0_u')   # and a float target there the reverse
+        self.assertEqual(self.colours(u, {}, cfmt=(73,)), 'entry')   # main0_u in the side library (not the base's): left to the device
+        self.assertEqual(self.colours(u, {'main0_u': True}, cfmt=(73,)), 'constants')   # with its function constants: likewise
         self.assertEqual(self.colours({}, {}, cfmt=(73,))[0], 'main0')   # no integer entry: main0
         src1 = dict(OVER, dst_rgb=0x13, dst_a=0x12)
         e, c = self.colours(dict(u, raster={'colors': [0, 1]}), uf, cfmt=(70, 70), chmask=0xff, blend_en=1, blend={0: src1})   # dual-source: its entry, output 1 no colour output
@@ -494,8 +509,14 @@ class Layout(unittest.TestCase):
         self.assertEqual(b.layouts, ((16, 16, 'PerVertex', 1), (17, 8, 'PerInstance', 2)))
         b = self.one(rkey(attrs={**self.POS, 1: (0x0A, 0, 14)}, streams={0: (16, 0)}))   # a constant stream (stride 0): stride 4; streams 14 and 15 keep their own slot
         self.assertEqual(b.layouts[0], (14, 4, 'Constant', 0))
-        b = self.one(rkey(attrs={**self.POS, 1: (0x57, 16, 0)}, streams={0: (20, 0)}))   # RG8_UI2F: converted on the CPU, its own slot from 1
+        b = self.one(rkey(attrs={**self.POS, 1: (0x57, 16, 0)}, streams={0: (20, 0)}))   # RG8_UI2F into a float input: Metal's fetch converts it (native integer-to-float fetch)
+        self.assertEqual((b.attributes[1], b.layouts), ((1, 'UChar2', 16, 16), ((16, 20, 'PerVertex', 1),)))
+        b = self.one(rkey(attrs={**self.POS, 1: (0x5B, 0, 1)}, streams={0: (16, 0), 1: (8, 0)}))   # RG32_UI2F: converted on the CPU, its own slot from 1
         self.assertEqual((b.attributes[1], b.layouts[0]), ((1, 'Float4', 0, 1), (1, 16, 'PerVertex', 1)))
+        b = self.one(rkey(vs='vi_b', attrs={**self.POS, 1: (0x57, 16, 0)}, streams={0: (20, 0)}))   # RG8_UI2F into a uint input: its float shadow
+        self.assertEqual((b.vert, b.attributes), (('vi_bv', 'main0'), ((0, 'Float4', 0, 16), (1, 'UInt4', 0, 30), (16, 'UChar2', 16, 16), (17, 'Int4', 0, 30))))
+        b = self.one(rkey(vs='vn_b', attrs={1: (0x57, 0, 0)}, streams={0: (4, 0)}))   # into a uint input with no shadow library: the conversion
+        self.assertEqual((b.vert, b.attributes), (('vn_b', 'main0'), ((1, 'UInt4', 0, 1),)))
         b = self.one(rkey(vs='vi_b', attrs={**self.POS, 1: (self.U4, 16, 0)}, streams={0: (20, 0)}))   # an integer input fed its own class: no shadow inputs
         self.assertEqual((b.vert, b.attributes[1]), (('vi_b', 'main0'), (1, 'UChar4', 16, 16)))
         b = self.one(rkey(vs='vi_b', attrs={**self.POS, 1: (self.H2, 16, 0)}, streams={0: (20, 0)}))   # Half2 into a uint input: the float shadow; the others read the zero buffer
@@ -509,7 +530,7 @@ class Layout(unittest.TestCase):
 
     def test_fragment_entry_and_depth_only(self):
         self.shaders()
-        row = dict(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)})
+        row: dict[str, Any] = dict(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)})
         self.assertEqual(self.one(rkey(cfmt=(73,), **row)).frag, ('p_b', 'main0_u'))
         src1 = dict(OVER, dst_rgb=0x13)
         self.assertEqual(self.one(rkey(blend_en=1, blend={0: src1}, **row)).frag, ('p_b', 'main0_d'))
@@ -519,7 +540,7 @@ class Layout(unittest.TestCase):
 
     def test_rows_left_out(self):
         self.shaders()
-        row = dict(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)})
+        row: dict[str, Any] = dict(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)})
         rows = [rkey(merged=1, **row), rkey(fz=1, **row), rkey(atest=1, **row), rkey(logic=1, **row), rkey(vs='vc_b', **row), rkey(fs='pc_b', **row), rkey(vs='vl_b', **row),
                 rkey(fs='pp_b', **row), rkey(attrs={**self.POS, 1: (0x3F, 16, 0)}, streams={0: (24, 0)}), rkey(attrs={**self.POS, 1: (self.F2, 0, 2)}, streams={0: (16, 0)}),
                 rkey(vs='gone_b', **row), 'ff', rkey(**row), rkey(**row)]
@@ -537,7 +558,7 @@ class Layout(unittest.TestCase):
         self.shader('noentry', {'entry': 'main1', 'vertex_inputs': [{'location': 0, 'msl_type': 'float4'}]}, {'_b': vz})
         self.shader('vbc', {'vertex_inputs': [{'location': 1, 'msl_type': 'uint4'}], 'vin': {'shadow': [{'location': 1, 'float': 16}]}}, {'_b': vz, '_bv': [('main0', True)]})
         self.shader('bad', {'vertex_inputs': [{'location': 40, 'msl_type': 'float4'}]}, {'_b': vz})   # a location beyond 31: nvn_refl refuses it
-        row = dict(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)})
+        row: dict[str, Any] = dict(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)})
         rows = [rkey(vs='old_b', **row), rkey(vs='ms_b', **row), rkey(vs='nolib_b', **row), rkey(vs='noentry_b', **row), rkey(vs='bad_b', **row), rkey(merged=1, fz=1, **row),
                 rkey(vs_stage=1, **row), rkey(fs_stage=0, **row), rkey(vs='', **row), rkey(vs='vbc_b', attrs={1: (self.H2, 0, 0)}, streams={0: (4, 0)})]
         bases, left = self.plan(*rows)
@@ -549,7 +570,7 @@ class Layout(unittest.TestCase):
         self.shaders()
         self.shader('pb', {'raster': {'colors': [0]}}, {'_b': [('main0', ('dm_border_off',))]})
         self.shader('pbs', {'raster': {'colors': [0]}}, {'_b': [('main0', ('dm_border_off', 'spvLinearTextureAlignmentOverride'))]})
-        row = dict(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)})
+        row: dict[str, Any] = dict(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)})
         bases, left = self.plan(rkey(fs='pb_b', **row), rkey(fs='pb_b', border=1, **row), rkey(fs='pbs_b', **row), rkey(fs='pb_b', size=512 - 8, **row))
         self.assertEqual(([b.frag for b in bases], left['constants']), ([('pb_b', 'main0')], 2))   # the row from before border reads as 0: the same base
         d, = po.script(self.d, [], bases)['pipeline_descriptors']['render_pipeline_descriptors']
@@ -573,11 +594,11 @@ class Layout(unittest.TestCase):
 
     def test_mixed_and_dual_source_entries_follow_the_targets(self):
         self.shaders()
-        self.shader('pm', {'raster': {'colors': [0, 1]}, 'entry_m': 'main0_m', 'uint_mask_m': 2, 'entry_d': 'main0_d'},
-                    {'_b': [('main0', False), ('main0_m', False), ('main0_d', False)]})
-        row = dict(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)})
-        self.assertEqual(self.one(rkey(fs='pm_b', cfmt=(70, 73), **row)).frag, ('pm_b', 'main0_m'))   # a float and an integer target, as uint_mask_m says
-        self.assertEqual(self.one(rkey(fs='pm_b', cfmt=(73, 70), **row)).frag, ('pm_b', 'main0'))   # the other way round: not this entry's set
+        self.shader('pm', {'raster': {'colors': [0, 1]}, 'entry_u': 'main0_u', 'entry_d': 'main0_d'},
+                    {'_b': [('main0', False), ('main0_u', False), ('main0_d', False)]})
+        row: dict[str, Any] = dict(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)})
+        self.assertEqual(self.one(rkey(fs='pm_b', cfmt=(70, 73), **row)).frag, ('pm_b', 'main0_u'))   # a float and an integer target: the typed-output entry (pso_cls)
+        self.assertEqual(self.one(rkey(fs='pm_b', cfmt=(73, 70), **row)).frag, ('pm_b', 'main0_u'))   # the other way round too: its constants say which
         src1 = dict(OVER, dst_rgb=0x13)
         self.assertEqual(self.one(rkey(fs='pm_b', blend_en=1, blend={0: src1}, logic=0, **row)).frag, ('pm_b', 'main0_d'))
         self.assertEqual(self.one(rkey(fs='pm_b', blend_en=1, blend={0: OVER}, **row)).frag, ('pm_b', 'main0'))   # no second source read
@@ -596,6 +617,123 @@ class Layout(unittest.TestCase):
                          ({'format': 'Half2', 'offset': 16, 'buffer_index': 16}, {}, {'stride': 16, 'step_function': 'Constant', 'step_rate': 0}))
         self.assertNotIn('alpha_to_coverage_state', d)
         self.assertEqual([n for n, _, _ in po.groups_of([('v_bp', 'main0', 'p_b', 'main0')], [('c_b', 'main0'), b, b], 5, 5, 5, 1)], ['00001', 'c00001', 'l00001', 'l00002'])
+
+
+def air(kind, locs):   # the AIR metadata strings a library holds (user_locations): kind 'vertex_output' or 'fragment_input', and its [[user(locnN)]] locations
+    return b'air.compile.fast_math_enable' + f'air.{kind}'.encode() + b''.join(f'user(locn{n})air.arg_type_namefloat4air.arg_namem_{n}'.encode() for n in locs)
+
+
+class StandIns(unittest.TestCase):
+    """The stand-ins of the R rows (plan_standins): the pulling base hybrid_get asks for when a draw of a pair the rows name misses its pipeline (pso_desc_pull: the <key>_bp function
+    for the depth mode, no vertex descriptor, the fragment entry of the row's targets, its samples and alpha to coverage), the rows left without one and why, the interface check of
+    GitHub issue #283 on the libraries' AIR strings, standins.tsv, and the groups"""
+    d: Path
+    setUp = Plan.setUp
+    POS = {0: (0x2E, 0, 0)}
+
+    def shader(self, key, j, libs, locs=None):   # Plan.shader, with the AIR strings of each library (locs: {suffix: (kind, locations)})
+        Plan.shader(self, key, j, libs)
+        for suf, (kind, ls) in (locs or {}).items():
+            p = self.d / f'{key}{suf}.metallib'; p.write_bytes(p.read_bytes() + air(kind, ls))
+
+    def shaders(self):
+        vz = [('main0', False), ('main0_z', False)]
+        vout = ('vertex_output', (1, 2))
+        self.shader('v', {'entry_z': 'main0_z', 'pull': {'entry': 'main0'}, 'vertex_inputs': [{'location': 0, 'msl_type': 'float4'}]}, {'_b': vz, '_bp': vz}, {'_b': vout, '_bp': vout})
+        self.shader('w', {'pull': {}, 'vertex_inputs': [{'location': 0, 'msl_type': 'float4'}]}, {'_b': vz, '_bp': vz}, {'_bp': ('vertex_output', (1,))})   # writes locn1 alone
+        self.shader('nop', {'vertex_inputs': [{'location': 0, 'msl_type': 'float4'}]}, {'_b': vz})   # stage inputs, no pulling library
+        self.shader('np', {'vertex_inputs': []}, {'_b': vz})   # no stage input: no pulling library either, the row's own base serves
+        self.shader('vl', {'pull': {}, 'layer_out': True, 'vertex_inputs': [{'location': 0}]}, {'_b': vz, '_bp': vz})
+        self.shader('vb', {'pull': {}, 'vertex_inputs': [{'location': 0}]}, {'_b': vz, '_bp': [('main0', ('dm_border_off',)), ('main0_z', ('dm_border_off',))]})
+        self.shader('vg', {'pull': {}, 'vertex_inputs': [{'location': 0}]}, {'_b': vz})   # no _bp library on disk
+        self.shader('p', {'raster': {'colors': [0, 1]}, 'entry_u': 'main0_u', 'entry_d': 'main0_d'}, {'_b': [('main0', False), ('main0_u', False), ('main0_d', False)]},
+                    {'_b': ('fragment_input', (1, 2))})
+        self.shader('q', {}, {'_b': [('main0', False)]}, {'_b': ('fragment_input', (2,))})   # reads locn2: not with w
+        self.shader('pp', {'raster': {'primitive_id': 1}}, {'_b': [('main0', False)]})
+        self.shader('pc', {}, {'_b': [('main0', True)]})
+        self.shader('pn', {}, {'_b': [('main0', False)]})   # no AIR strings: nothing known, kept
+
+    def row(self, **kw): return rkey(**dict(dict(attrs=self.POS, streams={0: (16, 0)}), **kw))
+
+    def plan(self, *rows, zero=False, pairs=()): return po.plan_standins(self.d, CHAIN, list(rows), zero, pairs)
+
+    def test_the_pulling_base_hybrid_get_asks_for(self):
+        self.shaders()
+        s, left = self.plan(self.row(), self.row(attrs={0: (0x2E, 0, 0), 1: (0x16, 16, 0)}, streams={0: (24, 0)}))   # two layouts of one pair: one stand-in
+        self.assertEqual((s, sum(left.values())), ([po.StandIn(('v_bp', 'main0'), ('p_b', 'main0'), (), (), 1, False)], 0))
+        self.assertIsInstance(s[0], po.LayoutBase)   # the script and the archive key take it as a layout base with no vertex descriptor
+        self.assertEqual(self.plan(self.row(), zero=True)[0][0].vert, ('v_bp', 'main0_z'))   # near = 0: pull_load's entry for the depth mode
+        self.assertEqual(self.plan(self.row(cfmt=(73,)))[0][0].frag, ('p_b', 'main0_u'))   # the row's integer target: the entry pso_desc picks
+        self.assertEqual(self.plan(self.row(blend_en=1, blend={0: dict(OVER, dst_rgb=0x13)}))[0][0].frag, ('p_b', 'main0_d'))
+        self.assertEqual(self.plan(self.row(samples=4, a2c=1))[0][0][4:], (4, True))
+        self.assertEqual(self.plan(self.row(fs='', cfmt=()))[0][0].frag, (po.NOP_LIB, po.NOP_ENTRY))   # depth only: the host's empty fragment
+        self.assertEqual(self.plan(self.row(border=1, vs='vb_b'))[1]['constants'], 1)   # the row keeps the border corrections: pso_build takes the functions unspecialized
+        self.assertEqual(self.plan(self.row(vs='vb_b'))[0][0].vert, ('vb_bp', 'main0'))   # dm_border_off alone: specialized as for the pair bases
+
+    def test_a_pair_base_already_held_is_not_made_twice(self):
+        self.shaders()
+        base = ('v_bp', 'main0', 'p_b', 'main0')
+        s, left = self.plan(self.row(), self.row(samples=4), pairs=[base])
+        self.assertEqual(([x.samples for x in s], left['pair base']), ([4], 1))   # 4 samples: another base than the pair list's
+        bases, _, _ = po.plan(self.d, CHAIN, [('v', 'p')], False)
+        self.assertEqual(bases, [base])   # plan's base of the listed pair is the stand-in of a one-sample row
+
+    def test_rows_left_without_one(self):
+        self.shaders()
+        rows = [self.row(merged=1), self.row(fz=1), self.row(atest=1), self.row(logic=1), self.row(vs='gone_b'), self.row(vs='nop_b'), self.row(vs='np_b', attrs={}, streams={}),
+                self.row(vs='vl_b'), self.row(fs='pp_b'), self.row(vs='vg_b'), self.row(fs='pc_b'), self.row(vs='w_b', fs='q_b'), 'ff', self.row(vs='w_b', fs='pn_b')]
+        s, left = self.plan(*rows)
+        self.assertEqual(s, [po.StandIn(('w_bp', 'main0'), ('pn_b', 'main0'), (), (), 1, False)])   # pn: no AIR strings, nothing known: kept for metal-tt to judge
+        self.assertEqual(left, {'key': 1, 'merged': 1, 'specialized': 1, 'side library': 2, 'reflection': 1, 'mesh': 0, 'no pulling library': 2, 'layer': 1, 'primitive ID': 1,
+                                'library': 1, 'entry': 0, 'constants': 1, 'pair base': 0, 'interface': 1})
+        self.assertEqual(self.plan(self.row(vs='w_b', fs='p_b'))[1]['interface'], 1)   # p reads locn1 and locn2, w writes locn1 alone (GitHub issue #283)
+        self.assertEqual(len(self.plan(self.row(vs='v_b', fs='q_b'))[0]), 1)   # q's locn2 is among v's outputs
+
+    def test_user_locations(self):
+        p = self.d / 'x.metallib'
+        p.write_bytes(metallib([('main0', False)]) + air('vertex_output', (0, 7, 12)) + b'user(locn7)')
+        self.assertEqual(po.user_locations(p), {0, 7, 12})
+        p.write_bytes(metallib([('main0', False)]) + b'air.compile.fast_math_enable')
+        self.assertEqual(po.user_locations(p), set())   # AIR strings and no user location: writes or reads none
+        p.write_bytes(metallib([('main0', False)]))
+        self.assertIsNone(po.user_locations(p))   # no AIR strings at all: not known
+        self.assertIsNone(po.user_locations(self.d / 'gone.metallib'))
+
+    @unittest.skipUnless(shutil.which('xcrun'), 'needs the Metal compiler')
+    def test_user_locations_of_real_libraries(self):   # the strings as the Metal compiler stores them: the vertex outputs and the fragment inputs, each location once
+        vs = ('#include <metal_stdlib>\nusing namespace metal;\nstruct O { float4 p [[position]]; float4 a [[user(locn1)]]; half4 b [[user(locn5)]]; };\n'
+              'vertex O main0(uint i [[vertex_id]]) { O o = {}; o.p = float4(i); o.a = float4(1); o.b = half4(2); return o; }\n'
+              'vertex O main0_z(uint i [[vertex_id]]) { O o = {}; o.p = float4(i); return o; }\n')
+        fs = ('#include <metal_stdlib>\nusing namespace metal;\nstruct I { float4 a [[user(locn5)]]; float2 c [[user(locn9)]]; };\n'
+              'fragment float4 main0(I in [[stage_in]]) { return in.a + in.c.xyxy; }\n')
+        with tempfile.TemporaryDirectory() as t:
+            got = []
+            for name, src in (('v', vs), ('f', fs)):
+                m, a, lib = Path(t, f'{name}.metal'), Path(t, f'{name}.air'), Path(t, f'{name}.metallib'); m.write_text(src)
+                r = subprocess.run(['xcrun', '-sdk', 'iphoneos', 'metal', '-c', m, '-o', a], capture_output=True)
+                if r.returncode: self.skipTest('no iOS Metal compiler')
+                subprocess.run(['xcrun', '-sdk', 'iphoneos', 'metallib', a, '-o', lib], check=True, capture_output=True)
+                got.append(po.user_locations(lib))
+            self.assertEqual(got, [{1, 5}, {5, 9}])
+
+    def test_rows_file_and_groups(self):
+        self.shaders()
+        s, _ = self.plan(self.row(), self.row(samples=4), self.row(fs='', cfmt=()), self.row(vs='w_b', fs='pn_b', a2c=1))
+        self.assertEqual(po.standin_rows(s), 'v\tp\tmain0\t1\t0\nv\tp\tmain0\t4\t0\nv\t\tdm_nop\t1\t0\nw\tpn\tmain0\t1\t1\n')
+        d = po.script(self.d, [], s)['pipeline_descriptors']['render_pipeline_descriptors']
+        self.assertEqual([(x['vertex_function_descriptor'], 'vertex_descriptor' in x, x.get('raster_sample_count', 1)) for x in d],
+                         [('fnd:v_bp.main0', False, 1), ('fnd:v_bp.main0', False, 4), ('fnd:v_bp.main0', False, 1), ('fnd:w_bp.main0', False, 1)])
+        lb = po.LayoutBase(('v_b', 'main0'), ('p_b', 'main0'), ((0, 'Float4', 0, 16),), ((16, 16, 'PerVertex', 1),), 1, False)
+        g = po.groups_of([('v_bp', 'main0', 'p_b', 'main0')], [('c_b', 'main0'), lb, *s], 5, 5, 5, 5, 3)
+        self.assertEqual([(n, len(b or c)) for n, b, c in g], [('00001', 1), ('c00001', 1), ('l00001', 1), ('s00001', 3), ('s00002', 1)])
+        self.assertEqual(po.group_items(g, 's00001'), s[:3]); self.assertEqual(po.group_items(g, 's00001/b'), s[2:3]); self.assertEqual(po.group_items(g, 's00001/a/b'), s[1:2])
+
+    def test_the_build_reads_no_rows(self):   # the R rows feed neither the shader build's padding (vs_pad) nor its inputs: pso_offline alone reads them
+        tables = re.search(r'^INPUT_TABLES = (\[.*?\])', (REPO / 'dm/gfx/tools/dmsh_chain.py').read_text(), re.M)
+        self.assertIsNotNone(tables)
+        self.assertIn('pso_pairs.tsv', tables.group(1)); self.assertNotIn('pso_manifest.tsv', tables.group(1)); self.assertNotIn('standins.tsv', tables.group(1))
+        src = (REPO / 'dm/gfx/tools/dmsh_build.py').read_text()
+        self.assertIn("for table in ('shader_pairs.tsv', 'pso_pairs.tsv'):", src); self.assertNotIn('pso_manifest', src)
 
 
 class Build(unittest.TestCase):
@@ -622,7 +760,7 @@ class Build(unittest.TestCase):
         return subprocess.CompletedProcess(cmd, 0)
 
     def main(self, *extra):
-        args = ['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), *extra]
+        args = ['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), *(() if '--base-jobs' in extra else ('--base-jobs', '1')), *extra]   # one group of bases at a time, as these orders expect
         with mock.patch.object(po.subprocess, 'run', self.fake_run), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(io.StringIO()):
             return po.main(args)
 
@@ -787,7 +925,8 @@ class Build(unittest.TestCase):
                     '01003E601E324000', '010020400E1C2000', '0100429011144000', '010014C011146000',
                     '0100ACD0163D0000', '010040801A4C8000', '0100C49025D3E000', '0100A3900C3E2000',
                     '01006A800016E000',   # Super Smash Bros. Ultimate: a player's start log (its note)
-                    '0400E88025B1A000')   # Star Fox: a Mac app's start log (its note)
+                    '0400E88025B1A000',   # Star Fox: a Mac app's start log (its note)
+                    '0100606026F12000')   # FINAL FANTASY RESONANCE: the owner's iPhone start log (its note; NXNative d144e6e8b)
         for gid in profiles:
             with self.subTest(game=gid):
                 self.main('--game', gid, '--pairs', str(self.prof / 'shader_pairs.tsv'), '--script-only')
@@ -827,6 +966,17 @@ class Build(unittest.TestCase):
         self.assertEqual(list(self.out.glob('*.mtl4a')), [])   # the old archive goes: mac_pso() then packs the app without one
         self.assertFalse((self.out / 'rest_pairs.tsv').exists())
         self.assertIn('bases\t0\n', (self.out / 'archive.tsv').read_text())
+
+    def test_cover_only_pairs_skip_bases_and_keep_compute(self):
+        (self.prof / 'shader_pairs.tsv').write_text('# kind: evidence\n# cover: single-stage padding pairs\nv\tf\n')
+        (self.prof / 'shader_map.tsv').write_text('# map\npkg\t0\tcompute\tc\tsrc\n')
+        (self.lib / 'c_b.metallib').write_bytes(metallib([('main0', False)]))
+        self.assertEqual(self.main('--gpu', 'g18p'), 0)
+        self.assertEqual(len(self.calls), 1)
+        script = json.loads(next(self.work.glob('*.mtl4-json')).read_text())
+        self.assertEqual(script['pipeline_descriptors'].get('render_pipeline_descriptors', []), [])
+        self.assertEqual(len(script['pipeline_descriptors']['compute_pipeline_descriptors']), 1)
+        self.assertIn('bases\t0\nrest\t0\ncompute\t1\n', (self.out / 'archive.tsv').read_text())
 
     def test_pairs_all_left_out_is_an_error(self):   # pairs whose libraries the host would not take: still a failure
         (self.prof / 'shader_pairs.tsv').write_text('x\ty\n')
@@ -893,6 +1043,16 @@ class Build(unittest.TestCase):
             self.main('--batch-size','2','--os-min','27.0')
         self.assertEqual(first.stat().st_mtime_ns, identity)
         self.assertEqual(observed, [('compile',['vertex2','vertex3']),('compile',['vertex4']),('merge',3)])
+
+    def test_parallel_batch_failure_publishes_nothing(self):   # groups of bases at once (base_jobs): the failed one still stops the build, after the groups under way
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(7)]
+        runner, observed = self.batched_runner(fail_compile='vertex2')
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})), self.assertRaises(SystemExit):
+            self.main('--batch-size','2','--os-min','27.0','--base-jobs','3')
+        self.assertIn(('compile',['vertex2','vertex3']), observed); self.assertFalse([o for o in observed if o[0] == 'merge'])
+        self.assertFalse((self.out/'prebuilt.tsv').exists())
+        self.assertFalse((self.work/'key.applegpu_g19p').exists())
+        self.assertFalse(list(self.out.glob('*.mtl4a')))
 
     def test_merge_failure_never_publishes_partial_archive(self):
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(3)]
@@ -977,7 +1137,8 @@ class Build(unittest.TestCase):
 
     def test_low_disk_space_stops_before_metal_tt(self):   # Cruis'n Blast: a full volume made metal-tt fail with only "applegpu-nt command failed"
         self.work.mkdir(parents=True); (self.work / 'translate-0001').write_bytes(b'x'); (self.work / 'a.airp').write_bytes(b'x')
-        with mock.patch.object(po.shutil, 'disk_usage', return_value=shutil._ntuple_diskusage(1 << 40, 1 << 40, 300 << 20)), self.assertRaises(SystemExit) as e: self.main()
+        with mock.patch.object(po.shutil, 'disk_usage', return_value=shutil._ntuple_diskusage(1 << 40, 1 << 40, 300 << 20)), mock.patch.object(po.vol_space, 'important_bytes', lambda p: None), \
+                self.assertRaises(SystemExit) as e: self.main()
         self.assertIn('GB free', str(e.exception)); self.assertEqual(self.calls, [])
         self.assertEqual(sorted(p.name for p in self.work.iterdir()), ['bases.mtl4-json'])   # a failed run's temporaries cleared
 
@@ -1186,6 +1347,46 @@ class Build(unittest.TestCase):
         self.assertIn('left_out\tapplegpu_g19p\tl00001\n', (self.out / 'archive.tsv').read_text())
         kill[0] = False; r, out = self.run_main(runner)
         self.assertTrue((self.work / 'key.applegpu_g19p').is_file()); self.assertNotIn('left_out', (self.out / 'archive.tsv').read_text())
+
+    def standin_profile(self, samples=(2, 4, 8, 16)):   # R rows of the pair v + f, which the pair list names (pulling vertex shader v), with these sample counts: a stand-in each
+        (self.prof / 'pso_manifest.tsv').write_text('# list\n' + ''.join(f'R\t{rkey(vs="v_b", fs="f_b", samples=n)}\n' for n in samples))
+
+    def test_standins_are_groups_of_their_own(self):
+        self.standin_profile()
+        seen = []
+        r, out = self.run_main(self.layout_runner(observed=seen))
+        self.assertEqual(r, 0)
+        self.assertIn('4 render rows: 4 stand-ins for 1 shader pairs, left out: key 0', out)
+        self.assertIn('4 layout bases, 4 stand-ins (minutes)', out)
+        self.assertEqual(sorted(d.name for d in (self.work / 'batches.applegpu_g19p').iterdir()), ['00001', 'l00001', 's00001'])
+        s = next(json.loads(t) for t in seen if '"raster_sample_count"' in t and 'v_bp' in t)['pipeline_descriptors']['render_pipeline_descriptors']   # groups run in parallel
+        self.assertEqual([(d['vertex_function_descriptor'], d['raster_sample_count'], 'vertex_descriptor' in d) for d in s],
+                         [('fnd:v_bp.main0_z', n, False) for n in (2, 4, 8, 16)])   # the pulling library for the profile's near = 0, no vertex descriptor
+        self.assertEqual((self.out / 'standins.tsv').read_text(), ''.join(f'v\tf\tmain0\t{n}\t0\n' for n in (2, 4, 8, 16)))
+        self.assertIn('standin\t4\n', (self.out / 'archive.tsv').read_text())
+        self.assertEqual((self.out / 'prebuilt.tsv').read_text(), po.stamp(CHAIN, True, (self.prof / 'shader_pairs.tsv').read_bytes()))   # the pair lists' stamp alone
+        seen.clear(); self.run_main(self.layout_runner(observed=seen)); self.assertEqual(seen, [])   # unchanged: reused
+        self.standin_profile((1,))   # a one-sample row of a listed pair: the pair base already
+        r, out = self.run_main(self.layout_runner())
+        self.assertIn('1 render rows: 0 stand-ins for 0 shader pairs', out); self.assertIn('pair base 1', out)
+        self.assertFalse((self.out / 'standins.tsv').exists()); self.assertIn('standin\t0\tpair base 1\n', (self.out / 'archive.tsv').read_text())
+        self.standin_profile()
+        r, out = self.run_main(self.layout_runner(), '--no-standins')
+        self.assertFalse((self.out / 'standins.tsv').exists()); self.assertNotIn('standin', (self.out / 'archive.tsv').read_text())
+        self.assertFalse((self.work / 'batches.applegpu_g19p' / 's00001').exists())   # the groups of a longer list are removed
+
+    def test_a_refused_standin_group_is_compiled_in_halves(self):   # GitHub issue #283 past user_locations: one stand-in metal-tt refuses costs only itself
+        self.standin_profile()
+        bad = lambda text: 'fnd:v_bp' in text and '"raster_sample_count": 8' in text
+        r, out = self.run_main(self.layout_runner(bad))
+        self.assertEqual(r, 0)
+        self.assertIn('(4 stand-ins) refused by metal-tt: compiling it in halves, to leave out only the stand-ins it refuses', out)
+        self.assertIn('(1 stand-ins, s00001/b/a) left out of the archive', out)
+        self.assertEqual((self.work / 'key.applegpu_g19p').read_text().splitlines()[1:], ['refused\ts00001/b/a'])
+        self.assertEqual((self.out / 'standins.tsv').read_text(), ''.join(f'v\tf\tmain0\t{n}\t0\n' for n in (2, 4, 16)))   # the probe asks for none the archive lacks
+        r, out = self.run_main(self.layout_runner(bad))   # reused: the same file
+        self.assertIn('group(s) s00001/b/a left out of the archive', out)
+        self.assertEqual((self.out / 'standins.tsv').read_text(), ''.join(f'v\tf\tmain0\t{n}\t0\n' for n in (2, 4, 16)))
 
 class IpaFallback(unittest.TestCase):
     """build_ipa.sh's own archive step with a pso_offline.py that fails: a [RED] line, no archive folder, and the build goes on (an optimization: the device builds the bases)"""

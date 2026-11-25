@@ -22,6 +22,12 @@ build	v131072	1.0.1a	main=93a79c77da81f7f15db021c5c7431eb4	subsdk0=c8a3cc0b1d185
 package	v131072
 shader_versions	v131072
 
+# ---- Frame rate ----
+# 30 fps on the Switch (present interval 2, 30 Hz game timing). patches.py (upstream NXNative 8d44bd6ac) gives GFD a startup rate of 60 and takes the game's 60 Hz timing branch
+# when the target at start is 60, else keeps the stock code: the launcher's Frame rate, Battery Saver 30. At 60 the game fixes its step at 1 vsync (state +0x24), so no host cap
+# holds its frames longer (its steps are fixed: a hold would play it slowly). Not yet run in NX 18: upstream's Mac runs only (README, Frame rate)
+fps_target	60
+
 # ---- Files ----
 # load order as on Horizon: main, subsdk*, sdk (subsdk0 = GLSLC, subsdk1 = NintendoSDK_movie)
 modules	main subsdk0 subsdk1 sdk
@@ -42,3 +48,9 @@ mem_used	0x6000000
 # ---- Shader split (shader_split.py; GLSLC outputs in loose RomFS files, main and the run-time capture) ----
 shader_groups	/data/=data
 shader_note	Catherine: Full Body shaders
+# Its rate is fixed when it starts, so the heat hold and Low Power Mode do not lower it mid-game (owner, 2026-11-20: "it's not very demanding"); the Low Power Mode row is left out for it
+fps_fixed_at_start	on
+
+# ---- Texture uploads ----
+# GFD's CPU staging upload at CopyBufferToTexture: the resource thread can reuse the block as soon as the call returns (upstream NXNative ff18e88a4; return address after main+0x32bd74)
+tex_copy_staging	93a79c77da81f7f15db021c5c7431eb4:0x32bd78

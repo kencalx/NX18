@@ -3,6 +3,7 @@ for a material): the host saves an output with a stage whose shader key its shad
 into <version dir>/glslc_play (gather_glslc_play), and shader_split.py gives each new key a /glslc_play/ row. The keys decide everywhere, not the file names: a game that compiles combinations
 of stages its files hold already (Portal, Portal 2) saves nothing and gets no red line. Synthetic GLSLC outputs only, no game files."""
 import hashlib
+import importlib
 import os
 from pathlib import Path
 import shutil
@@ -15,7 +16,7 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'scripts')); sys.path.insert(0, str(REPO / 'dm/games'))
-import build_ipa_from_nsp as nsp   # noqa: E402
+nsp = importlib.import_module('build_ipa_from_nsp')
 import game   # noqa: E402
 
 GAME = '01007BB017812000'
@@ -65,12 +66,13 @@ def glslc_program(vs, ps):
 def fnv_name(b): return f'{nsp.fnv1a64(b):016x}.glslc'
 
 
-def split_keys(paths, profile=GAME):   # {file name: [key of each stage]} as shader_split.py reads and keys them
+def split_keys(paths, profile: str | Path = GAME):   # {file name: [key of each stage]} as shader_split.py reads and keys them
     r = subprocess.run([sys.executable, REPO / 'dm/gfx/tools/shader_split.py', '--glslc-keys', *paths], env=dict(os.environ, DM_GAME=str(profile)), capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     out = {}
     for ln in r.stdout.splitlines():
-        n, _, k = ln.split('\t'); out.setdefault(n, []); k != '-' and out[n].append(k)
+        n, _, k = ln.split('\t'); out.setdefault(n, [])
+        if k != '-': out[n].append(k)
     return out
 
 
@@ -226,6 +228,27 @@ class GatherPlay(unittest.TestCase):
             with self.subTest(name):
                 (tables / 'shader_map.tsv').write_text(split_map); (tables / 'shader_facts.tsv').write_text('')
                 self.assertEqual(nsp.dlc_only_shader_change(g, tables), want)
+
+    def test_tables_differing_only_in_play_pairs_derive(self):
+        # the same map, other pairs (upstream ae5d8f51e): two play captures can bring the same new stages in other combinations
+        tables = self.tmp / 'tables'; tables.mkdir()
+        smap = ('vs_data.bin\t0\tvertex\tbase\t/data/a.vs#GLSLC@0x0\nps_data.bin\t0\tpixel\tbpix\t/data/a.ps#GLSLC@0x0\n'
+                'ps_other.bin\t0\tpixel\tplay\t/glslc_play/aaaaaaaaaaaaaaaa.glslc#GLSLC@0x0\n')
+        for t in (self.prof, tables): (t / 'shader_map.tsv').write_text(smap); (t / 'shader_facts.tsv').write_text('')
+        (self.prof / 'shader_pairs.tsv').write_text('# header\nbase\tbpix\n')
+        g = game.Game(self.prof)
+        for name, pairs, want in (('a play pair added', 'base\tbpix\nbase\tplay\n', True),
+                                  ('only the header differs', '# other header\nbase\tbpix\n', False),
+                                  ('a game pair differs', 'base\tbpix\nbpix\tbase\n', False),
+                                  ('a game pair and a play pair differ', 'base\tplay\nbpix\tbase\n', False)):
+            with self.subTest(name):
+                (tables / 'shader_pairs.tsv').write_text(pairs)
+                self.assertEqual(nsp.dlc_only_shader_change(g, tables), want)
+        # no /glslc_play/ rows: a pairs-only change never derives
+        nplay = smap.replace('/glslc_play/aaaaaaaaaaaaaaaa.glslc', '/data/b.ps')
+        for t in (self.prof, tables): (t / 'shader_map.tsv').write_text(nplay)
+        (tables / 'shader_pairs.tsv').write_text('base\tbpix\nbase\tplay\n')
+        self.assertFalse(nsp.dlc_only_shader_change(game.Game(self.prof), tables))
 
 
 # hle_glslc.c with a stand-in glslcCompile, and the renderer's map lookup (nvn_mtl.m mtl_shmap_has) as a reader of DM_NVN_SHMAP's key column

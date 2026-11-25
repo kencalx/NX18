@@ -41,15 +41,23 @@ int nvn_deswz_gpu_direct_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTa
     return 0;
 }
 
-int nvn_deswz_gpu_encode_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTable> table,
-                            id<MTLBuffer> params, size_t params_off, id<MTLBuffer> src, uint64_t src_off,
-                            const nvn_texdesc *d, unsigned level, unsigned layer,
-                            id<MTLBuffer> dst, uint64_t dst_off, size_t dst_pitch) {
+// Block rows [row0, row0 + nrows) of one level and layer (row0 a multiple of a GOB block's rows, 8 << th; nrows clipped to the level), into dst from dst_off on: the band's GOB blocks lie
+// contiguously from base + (row0 / (8 << th)) * gobs_x * block, so the band is a level of its own that starts there. Not for 3D levels (their blocks interleave the depth planes)
+static int deswz_encode(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTable> table,
+                        id<MTLBuffer> params, size_t params_off, id<MTLBuffer> src, uint64_t src_off,
+                        const nvn_texdesc *d, unsigned level, unsigned layer, uint32_t row0, uint32_t nrows,
+                        id<MTLBuffer> dst, uint64_t dst_off, size_t dst_pitch) {
     if (!g_nvn_deswz_pipeline || !enc || !table || !params || !src || !dst || !d) return -1;
     uint32_t row_bytes, rows, slices, bpb;
     uint64_t base;
     unsigned th, td;
     if (nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &bpb) || dst_pitch < row_bytes) return -1;
+    if (row0 || nrows != UINT32_MAX) {
+        uint32_t band = 8u << th;
+        if (slices != 1 || row0 % band || row0 >= rows || !nrows) return -1;
+        base += (uint64_t)(row0 / band) * MAX(nvn_tex_level_gobs(d, level), (row_bytes + 63u) >> 6) * 512u * (1u << th);
+        rows = MIN(nrows, rows - row0);
+    }
     struct { uint64_t src_off, dst_off, base, pitch; uint32_t row_bytes, rows, slices, th, td, gobs_x, gob2; } p = {
         src_off, dst_off, base, dst_pitch, row_bytes, rows, slices, th, td, MAX(nvn_tex_level_gobs(d, level), (row_bytes + 63u) >> 6), (uint32_t)nvn_gob_switch2   // GOB columns as laid out (nvn_tex_level_gobs)
     };
@@ -63,4 +71,17 @@ int nvn_deswz_gpu_encode_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTa
     NSUInteger gobs_y = (rows + 7u) >> 3;
     [enc dispatchThreadgroups:MTLSizeMake(gobs_x, gobs_y, slices) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     return 0;
+}
+int nvn_deswz_gpu_encode_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTable> table,
+                            id<MTLBuffer> params, size_t params_off, id<MTLBuffer> src, uint64_t src_off,
+                            const nvn_texdesc *d, unsigned level, unsigned layer,
+                            id<MTLBuffer> dst, uint64_t dst_off, size_t dst_pitch) {
+    return deswz_encode(enc, table, params, params_off, src, src_off, d, level, layer, 0, UINT32_MAX, dst, dst_off, dst_pitch);
+}
+int nvn_deswz_gpu_encode_rows_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTable> table,
+                                 id<MTLBuffer> params, size_t params_off, id<MTLBuffer> src, uint64_t src_off,
+                                 const nvn_texdesc *d, unsigned level, unsigned layer, uint32_t row0, uint32_t nrows,
+                                 id<MTLBuffer> dst, uint64_t dst_off, size_t dst_pitch) {
+    if (!nrows || nrows == UINT32_MAX) return -1;
+    return deswz_encode(enc, table, params, params_off, src, src_off, d, level, layer, row0, nrows, dst, dst_off, dst_pitch);
 }

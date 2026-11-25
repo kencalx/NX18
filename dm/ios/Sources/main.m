@@ -4,12 +4,14 @@
 #import <Metal/Metal.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "game_profile.h"   // game profile constants (the RomFS marker path)
 #include "front.h"
+#include "log_redirect.h"   // dm_log_redirect (log_open)
 #include "romfs_image.h"
 #include "romfs_identity.h"
 #include "player_env.h"
@@ -24,6 +26,7 @@ int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=
 UIViewController *front_ios_root(void);
 void front_ios_scene(UIWindowScene *scene);
 void front_ios_focus_event(int ev);
+void dm_memory_reports_start(void);   // MemoryReports.swift: iOS's memory-kill reports of earlier runs into log.txt
 void dm_shortcut_cold(const char *type);   // LauncherShortcuts.swift: the home screen shortcut the app was opened with, for the launcher's start
 bool dm_shortcut_perform(const char *type);   // and one chosen while the app runs; false when it is not one of the app's
 
@@ -106,10 +109,14 @@ static void aoc_locate(void) {
 // Why a slim build found no usable game files: the verdict on Documents/romfs.img (the first of romfs_document_images), in the log and for the screen (front_ios_boot_message). NULL when the build has no romfs.id
 static char g_boot_message[640];
 const char *front_ios_boot_message(void) { return g_boot_message[0] ? g_boot_message : NULL; }
+// The saved Performance HUD choice turned Metal's process HUD on at launch (boot_env); startGame (front_ios.m) then turns the game layer's HUD off if the player switched it off before Play
+static bool g_hud_enabled_from_saved_choice;
+bool front_ios_hud_enabled_from_saved_choice(void) { return g_hud_enabled_from_saved_choice; }
 // Why this device cannot run the games: its GPU has no Metal 4, the only way the host draws (Metal 4 command queues and MTL4Compiler pipelines; mtl_init stops without it), or no BC
 // texture formats, which the games' textures use and the host does not decompress (dm/gfx/tex/README.md; the A16 and older, GitHub issue #704), so the screen says so instead of Metal
 // aborting at start or at the game's first BC texture. NULL on a supported device. Called by startGame (front_ios.m) once the launcher has set its switches: this makes the process's
-// first Metal device, and Metal reads MTL_HUD_ENABLED then; checked at launch, it kept the launcher's Performance HUD off (GitHub issue #840)
+// first Metal device, and Metal reads MTL_HUD_ENABLED then; checked at launch, it kept the launcher's Performance HUD off (GitHub issue #840). On an M4 iPad Air even that was too
+// late (upstream PR #1966): boot_env applies the saved HUD choice before UIApplicationMain
 const char *front_ios_device_check(void) {
     static char msg[320]; static int done;
     if (done++) return msg[0] ? msg : NULL;
@@ -130,6 +137,8 @@ static void romfs_identity_report(NSString *doc) {
     fprintf(stderr, "[RED] boot: %s\n", g_boot_message);
 }
 
+// The Profile's name and picture path stay out of the log (gate-ui §20.5 Privacy): an env file's value shows as "(set)"
+static int dm_env_private(const char *k) { return !strcmp(k, "DM_NICK") || !strcmp(k, "DM_PROFILE_IMAGE"); }
 static NSString *program_env(void);
 // Cheats (dm/host/hle_cheats.c): Atmosphère cheat files, <build ID>.txt or the SD card's atmosphere/contents/<title ID>/cheats/ tree, in Documents/cheats unless an env file or the
 // launch environment names another folder with DM_CHEATS (DM_CHEATS= with no folder turns cheats off). The folder is made, with a README, so the Files app shows where they go; the in-game
@@ -174,21 +183,36 @@ static void pso_archive_exclude(void) {
     if (![[NSURL fileURLWithPath:dir isDirectory:YES] setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:&e]) fprintf(stderr, "boot: %s could not be excluded from backup: %s\n", dir.fileSystemRepresentation, e.localizedDescription.UTF8String);
 }
 
+// Documents/log.txt onto descriptor 2, which the stream stderr, Swift's launcher log and crash.c's write(2, ...) all use (dm_log_redirect in log_redirect.h says why and how). It
+// was freopen(log, "w", stderr), which closes descriptor 2 before it opens the file and leaves it closed when the open fails (a full disk: log.txt has just been moved to
+// log.prev.txt, so it has to be created). The next file the app opened, possibly a save, then took descriptor 2, and a crash report or NSLog output went into it (the stream
+// stderr, closed by the failed freopen, wrote nothing). Now descriptor 2 is never free: a log that cannot be opened leaves stderr where the launch put it (/dev/null from the
+// Home Screen, Xcode's console), or on /dev/null when the launch left it closed, and says so there. An opened log.txt is as before: the same file, created with freopen's mode
+// (0666 less the umask) and truncated, line-buffered. This runs before the preload thread starts (dm_host_preload_start, at the end of boot_env)
+static void log_open(NSString *log) {
+    int err = dm_log_redirect(log.fileSystemRepresentation, 0666, STDERR_FILENO);
+    if (err) { fprintf(stderr, "[RED] boot: %s cannot be written (%s): no log for this run\n", log.fileSystemRepresentation, strerror(err)); return; }
+    clearerr(stderr); setvbuf(stderr, NULL, _IOLBF, 0);
+}
+
 static int boot_env(void) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
     NSString *res = NSBundle.mainBundle.resourcePath;
     for (NSString *d in @[@"save", @"temp"]) [fm createDirectoryAtPath:[doc stringByAppendingPathComponent:d] withIntermediateDirectories:YES attributes:nil error:nil];
+    // Log: the host only writes to stderr; redirect it to Documents/log.txt (the previous one is kept as log.prev.txt), retrieve it from the Files app when something goes wrong
+    NSString *log = [doc stringByAppendingPathComponent:@"log.txt"], *prev = [doc stringByAppendingPathComponent:@"log.prev.txt"];
+    [fm removeItemAtPath:prev error:nil]; [fm moveItemAtPath:log toPath:prev error:nil];
+    log_open(log);   // first: nothing is written to stderr before it, so its setvbuf comes before any output on the stream (C leaves it undefined after), and a line below goes into the log
+#if DM_DEV_BUILD
+    fprintf(stderr, "boot: developer build (NX18_DEV, DM_DEV_BUILD=1)%s\n", DM_PLAYER_BUILD ? ": env.txt's DM_NVN_* and DM_SLOWFRAME lines are taken in this player build too" : "");
+#endif
     // Keep game files and scratch data out of device backups (Documents is backed up by default; a RomFS placed there is many GB). Saves, logs and the pipeline list stay in the backup;
     // the pipeline archive, which the device makes again from that list, is left out below (pso_archive_exclude), once DM_SAVE, whose folder it is in, is known
     for (NSString *d in [@[@"romfs", @"aoc", @"temp"] arrayByAddingObjectsFromArray:[romfs_document_images(doc) valueForKey:@"lastPathComponent"]]) {
         NSURL *u = [NSURL fileURLWithPath:[doc stringByAppendingPathComponent:d]]; NSError *e = nil;
         if ([fm fileExistsAtPath:u.path] && ![u setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:&e]) fprintf(stderr, "boot: %s could not be excluded from backup: %s\n", d.UTF8String, e.localizedDescription.UTF8String);
     }
-    // Log: the host only writes to stderr; redirect it to Documents/log.txt (the previous one is kept as log.prev.txt), retrieve it from the Files app when something goes wrong
-    NSString *log = [doc stringByAppendingPathComponent:@"log.txt"], *prev = [doc stringByAppendingPathComponent:@"log.prev.txt"];
-    [fm removeItemAtPath:prev error:nil]; [fm moveItemAtPath:log toPath:prev error:nil];
-    if (freopen(log.fileSystemRepresentation, "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
     // Environment switch files (for on-device diagnostics: a sideloaded app cannot be given environment variables from outside): one KEY=VALUE per line, # starts a comment; Documents/env.txt takes precedence over dm/env.txt in the bundle (put there by build_ipa.sh's DM_ENV_FILE)
     NSMutableArray<NSString *> *from_file = [NSMutableArray array], *from_launch = [NSMutableArray array];
     for (char **e = environ; *e; e++) {   // set at launch (Xcode, devicectl): before the env files, and the launcher keeps them
@@ -213,13 +237,26 @@ static int boot_env(void) {
             if (dm_player_env_dropped(k.UTF8String, v.UTF8String) || [launcher_keys containsObject:k] ||
                 ([launcher_keys containsObject:@"DM_METAL_HUD"] && [k isEqualToString:@"MTL_HUD_ENABLED"])) continue;
 #endif
-            if (!getenv(k.UTF8String)) { setenv(k.UTF8String, v.UTF8String, 0); [from_file addObject:k]; fprintf(stderr, "boot: env %s=%s (%s)\n", k.UTF8String, v.UTF8String, ef.lastPathComponent.UTF8String); }
+            if (!getenv(k.UTF8String)) { setenv(k.UTF8String, v.UTF8String, 0); [from_file addObject:k]; fprintf(stderr, "boot: env %s=%s (%s)\n", k.UTF8String, dm_env_private(k.UTF8String) ? "(set)" : v.UTF8String, ef.lastPathComponent.UTF8String); }
         }
     }
     setenv("DM_ENV_FILE_KEYS", [from_file componentsJoinedByString:@" "].UTF8String, 1);   // the launcher keeps what an env file set (LauncherSettings.swift)
     setenv("DM_ENV_LAUNCH_KEYS", [from_launch componentsJoinedByString:@" "].UTF8String, 1);   // and what the launch environment set (docs/frontends.md, Saved choices)
     dm_ui_font_register(res.fileSystemRepresentation);   // the UI font, before UIApplicationMain: every UIKit and SwiftUI text of NX 18 takes it (an env file's DM_UI_FONT=0 turns it off)
-    front_hud_env();   // an env file's DM_METAL_HUD; nothing in this process makes a Metal device before startGame (front_ios.m), which applies the launcher's
+    front_hud_env();   // DM_METAL_HUD from the launch environment or an env file
+    // The Gate's saved Performance HUD choice, before UIApplicationMain: on an M4 iPad Air MTL_HUD_ENABLED set at Play (startGame, front_ios.m) was too late for Metal's process-wide HUD
+    // (GitHub issue #840, upstream PR #1966). Not over an explicit DM_METAL_HUD or MTL_HUD_ENABLED, nor with DM_SAVED_CHOICES=0. DM_METAL_HUD is unset again, so Play still sets the
+    // player's choice; switched off before Play, startGame turns the game layer's HUD off (front_ios_hud_enabled_from_saved_choice). A first switch on takes effect at the next launch
+    const char *ignore_saved = getenv("DM_SAVED_CHOICES");
+    if (!getenv("DM_METAL_HUD") && !getenv("MTL_HUD_ENABLED") && (!ignore_saved || strcmp(ignore_saved, "0"))) {
+        id saved = [NSUserDefaults.standardUserDefaults objectForKey:@"launcher.DM_METAL_HUD"];   // LauncherSettings.swift's key, a string
+        if ([saved isKindOfClass:NSString.class] && [saved isEqualToString:@"1"]) {
+            setenv("DM_METAL_HUD", "1", 0);
+            front_hud_env();
+            unsetenv("DM_METAL_HUD");
+            g_hud_enabled_from_saved_choice = getenv("MTL_HUD_ENABLED") != NULL;
+        }
+    }
     // Game language (nn::oe::GetDesiredLanguage, hle_oe.c): the one the IPA was packed with (the NSP script's LANGUAGE / --language → DMLanguage in Info.plist), unless an env file sets DM_LANG
     // (or the launcher, which replaces this default before the game starts)
     NSString *lang = [NSBundle.mainBundle objectForInfoDictionaryKey:@"DMLanguage"];
@@ -231,7 +268,7 @@ static int boot_env(void) {
     setenv("DM_TEMP", [doc stringByAppendingPathComponent:@"temp"].fileSystemRepresentation, 0);
     pso_archive_exclude();
     setenv("DM_GUEST_FILE_DIR", NSTemporaryDirectory().fileSystemRepresentation, 0);   // DM_GUEST_FILE (hle_svc.c) keeps the guest's memory in files there
-    setenv("DM_FONT_DIR", [[res stringByAppendingPathComponent:@"dm"] stringByAppendingPathComponent:@"font"].fileSystemRepresentation, 0);   // Shared-font stand-ins (standard.ttf / nintendo_ext.ttf): iOS lacks the macOS font path
+    setenv("DM_FONT_DIR", [[res stringByAppendingPathComponent:@"dm"] stringByAppendingPathComponent:@"font"].fileSystemRepresentation, 0);   // Shared-font stand-ins, one per type (make_shared_fonts.py): iOS lacks the macOS font path
     aoc_locate();   // add-on content: Documents/aoc, else <App>/aoc; an empty Documents/aoc explicitly selects no DLC
     cheats_locate(doc, res);   // cheats: Documents/cheats, seeded from <App>/dm/cheats
     NSString *pso = [res stringByAppendingPathComponent:@"pso"];   // the pipeline archive made offline (build_ipa.sh, dm/gfx/tools/pso_offline.py): the shader pairs' bases, which the device then does not build
@@ -334,5 +371,6 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 
 int main(int argc, char **argv) {
     @autoreleasepool { g_boot_ok = boot_env(); }
+    dm_memory_reports_start();   // subscribed early: a late subscription can miss reports (WWDC26 session 222)
     @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(App.class)); }
 }

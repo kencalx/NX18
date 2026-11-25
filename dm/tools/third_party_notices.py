@@ -179,7 +179,7 @@ def render():
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    ap = argparse.ArgumentParser(description=(__doc__ or 'third_party_notices').split('\n')[0])
     ap.add_argument('--check', action='store_true', help='exit 1 when the committed file differs from what the sources make')
     a = ap.parse_args()
     text = render()

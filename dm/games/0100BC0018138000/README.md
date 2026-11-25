@@ -25,7 +25,7 @@ Update 1.0.1 (v65536) over the base game, SDK 14.3.1. Unity 2021.3.15f1 IL2CPP w
 
 - The merged RomFS has 1,934 files, 6.35 GB: 1,277 UnityFS bundles and 46 CRI USM movies (1.01 GB). The survey also reports an FMOD marker in `main`.
 - 82,032 shaders (40,983 vertex, 40,987 pixel, 56 compute, 6 geometry): 82,021 from `Data/` and the player's 11 GLSLC outputs in `main`. All built for the Mac with no failure. It takes about an hour and a half on an M6 on a busy Mac, the longest step of a first build.
-- `pso_manifest.tsv` has 380 lines (263 shaders, 117 render pipelines): the `pso_user.tsv` of two runs along the route below, not a separate `DM_PSO_RECORD` pass with prewarm off.
+- `pso_manifest.tsv` has 380 lines (263 shaders, 117 render pipelines): the `pso_user.tsv` of two runs along the route below, not a separate `DM_PSO_RECORD` pass with prewarm off. Grown on 2026-11-15 from the owner's iPhone 18 Pro Max session (about 4 minutes, build `431d5d18`, with its log): 444 more rows (246 S, 198 R), what that session built beyond the shipped list (it compiled 154 bases in play, 9.0 s on all threads, the longest such frame 142 ms). The list is now 824 rows (509 S, 315 R).
 
 ## Mac routes
 
@@ -39,6 +39,7 @@ Update 1.0.1 (v65536) over the base game, SDK 14.3.1. Unity 2021.3.15f1 IL2CPP w
 - Mushroom Way's battle ground and lower foliage were nearly black, Mario and the UI lit: the baked shadowmask is RGBA4, and its channels read reversed: [RGBA4 textures in Metal's channel order](../../../docs/reference/rendering.md#rgba4-textures-in-metals-channel-order). Checked from a copied save at Mushroom Way: a Goomba battle dark on the host before the fix, lit after it, with an attack played, windowless and muted.
 - The first NSP script run prebuilt its pipeline archive at the default depth mode: [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree). The check boots now set the key.
 - Calls `nvnCommandBufferSetSubpixelPrecisionBias` and `nvnCommandBufferSetConservativeRasterDilate` repeatedly (thousands of times in six minutes) without turning conservative rasterization on, on the route tested: see [Conservative rasterization remains unimplemented](../../../docs/reference/rendering.md#conservative-rasterization-remains-unimplemented).
+- [The bundled pipeline archive opened at the first submission](../../../docs/reference/shaders.md#the-bundled-pipeline-archive-opened-at-the-first-submission): its 2.5 GB archive took 1.2 s to open at the first submission on an iPhone 18 Pro Max (2026-11-15); it now starts opening at the game's start, beside the rest of it. Not yet measured on the phone.
 
 ## Open
 

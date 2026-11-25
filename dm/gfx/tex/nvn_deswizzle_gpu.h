@@ -15,3 +15,9 @@ int nvn_deswz_gpu_encode_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTa
                             id<MTLBuffer> params, size_t params_off, id<MTLBuffer> src, uint64_t src_off,
                             const nvn_texdesc *d, unsigned level, unsigned layer,
                             id<MTLBuffer> dst, uint64_t dst_off, size_t dst_pitch);
+// Block rows [row0, row0 + nrows) only (row0 a multiple of the level's GOB block rows, 8 << its block height; not 3D): a band of a level re-uploaded where its storage was written (nvn_mtl.m
+// pkg_upload_), into dst as rows of dst_pitch from dst_off
+int nvn_deswz_gpu_encode_rows_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTable> table,
+                                 id<MTLBuffer> params, size_t params_off, id<MTLBuffer> src, uint64_t src_off,
+                                 const nvn_texdesc *d, unsigned level, unsigned layer, uint32_t row0, uint32_t nrows,
+                                 id<MTLBuffer> dst, uint64_t dst_off, size_t dst_pitch);

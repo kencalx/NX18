@@ -1,3 +1,4 @@
+#import "DmVitals.h"
 #import <XCTest/XCTest.h>
 #import <GameController/GameController.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -13,6 +14,8 @@
 #import "DmGameMenu.h"
 #import "DuoHarnessRuntime.h"
 #include "dm_input.h"
+#include "front.h"   // front_metal_layer, front_ctrl_support (the controller applet's prompt, DmGamepad.m)
+#include "touch_draw.h"   // touch_frame_fits (the drawable at DM_PRESENT_DRAWABLE=game)
 #include <math.h>
 #include <stdio.h>
 void front_picture_shape(int w, int h);   // front_ios.m (dm/host/front.h)
@@ -28,6 +31,14 @@ static UIView *gDuoHarnessReservedRegionView;
 static id gDuoHarnessReservedRegion;
 static BOOL gDuoHarnessSawIncludeInactiveDivisionQuery;
 static NSUInteger gDuoHarnessProbeViewClassSerial;
+
+// A view's frame read back from UIKit against the rect it was given: UIKit keeps a frame as centre plus bounds, so a fitted 16:9 width such as 221 x 16/9 can come back
+// off by about 1e-13 pt (184.00000000000003 for 184). A thousandth of a point is far below a pixel at any screen scale
+static BOOL DuoRectsMatch(CGRect a, CGRect b) {
+    const CGFloat tolerance = 0.001;
+    return fabs(CGRectGetMinX(a) - CGRectGetMinX(b)) < tolerance && fabs(CGRectGetMinY(a) - CGRectGetMinY(b)) < tolerance &&
+           fabs(CGRectGetWidth(a) - CGRectGetWidth(b)) < tolerance && fabs(CGRectGetHeight(a) - CGRectGetHeight(b)) < tolerance;
+}
 
 @interface GCController (DuoHarnessControllerList)
 + (NSArray<GCController *> *)duo_harness_controllers;
@@ -51,6 +62,72 @@ static NSUInteger gDuoHarnessProbeViewClassSerial;
 
 @implementation DuoFakeTouch
 - (CGPoint)locationInView:(UIView *)view { (void)view; return self.point; }
+@end
+
+// A lone Joy-Con as GameController presents it (DmGamepad.m pad_live_input; ported from upstream 985ea6cf6): live input, no extended gamepad profile
+@interface DuoLiveButton : NSObject
+@property (nonatomic, getter=isPressed) BOOL pressed;
+- (DuoLiveButton *)pressedInput;
+@end
+@implementation DuoLiveButton
+- (DuoLiveButton *)pressedInput { return self; }
+@end
+
+typedef void (^DuoLiveHandler)(id<GCDevicePhysicalInput>, id<GCPhysicalInputElement>);
+
+// Live profiles cannot be constructed through GameController's public snapshot API.
+@interface DuoLiveInput : NSObject
+@property (nonatomic, copy) DuoLiveHandler elementValueDidChangeHandler;
+@property (nonatomic, copy) NSDictionary<NSString *, DuoLiveButton *> *buttons;
+@property (nonatomic, copy) NSDictionary<NSString *, GCControllerDirectionPad *> *dpads;
+- (void)setPressed:(BOOL)pressed button:(NSString *)name;
+- (void)moveX:(float)x y:(float)y;
+@end
+@implementation DuoLiveInput
+- (instancetype)init {
+    if ((self = [super init])) {
+        NSMutableDictionary *buttons = [NSMutableDictionary dictionary];
+        for (NSString *name in @[GCInputButtonA, GCInputButtonB, GCInputButtonX, GCInputButtonY,
+                                 GCInputLeftShoulder, GCInputRightShoulder, GCInputButtonMenu, GCInputButtonHome])
+            buttons[name] = [DuoLiveButton new];
+        _buttons = [buttons copy];
+        _dpads = @{ GCInputDirectionPad: [GCController controllerWithExtendedGamepad].extendedGamepad.dpad };
+    }
+    return self;
+}
+- (void)setPressed:(BOOL)pressed button:(NSString *)name {
+    DuoLiveButton *button = self.buttons[name];
+    button.pressed = pressed;
+    DuoLiveHandler handler = self.elementValueDidChangeHandler;
+    if (handler) handler((id)self, (id)button);
+}
+- (void)moveX:(float)x y:(float)y {
+    GCControllerDirectionPad *stick = self.dpads[GCInputDirectionPad];
+    [stick setValueForXAxis:x yAxis:y];
+    DuoLiveHandler handler = self.elementValueDidChangeHandler;
+    if (handler) handler((id)self, (id)stick);
+}
+@end
+
+@interface DuoLiveController : NSObject
+@property (nonatomic, copy) NSString *productCategory;
+@property (nonatomic, readonly) NSString *vendorName;
+@property (nonatomic, readonly) GCExtendedGamepad *extendedGamepad;
+@property (nonatomic, readonly) GCMotion *motion;
+@property (nonatomic, readonly) DuoLiveInput *input;
+- (instancetype)initWithCategory:(NSString *)category;
+@end
+@implementation DuoLiveController
+- (instancetype)initWithCategory:(NSString *)category {
+    if ((self = [super init])) {
+        _productCategory = [category copy];
+        _input = [DuoLiveInput new];
+    }
+    return self;
+}
+- (NSString *)vendorName { return self.productCategory; }
+- (GCExtendedGamepad *)extendedGamepad { return nil; }
+- (GCMotion *)motion { return nil; }
 @end
 
 #if DUO_HARNESS_HAS_NATIVE_POSE_API
@@ -526,14 +603,16 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     [self waitForExpectations:@[applied] timeout:2];
     [root.view layoutIfNeeded];
     BOOL portrait = root.view.bounds.size.height > root.view.bounds.size.width;
-    XCTAssertEqualWithAccuracy(game.frame.size.width / game.frame.size.height, 1920.0 / 1344.0, 0.01, @"The game's view takes the presented shape: %@", NSStringFromCGRect(game.frame));
-    if (!portrait) XCTAssertEqualWithAccuracy(game.frame.size.height, root.view.bounds.size.height, 1.0);
+    CGRect picture = [self pictureRectInRoot:root];
+    XCTAssertEqualWithAccuracy(picture.size.width / picture.size.height, 1920.0 / 1344.0, 0.01, @"The game's picture takes the presented shape: %@ (game view %@)", NSStringFromCGRect(picture), NSStringFromCGRect(game.frame));
+    if (!portrait) XCTAssertEqualWithAccuracy(picture.size.height, root.view.bounds.size.height, 1.0);
     front_picture_shape(1920, 1080);   // back to 16:9 for the other tests
     XCTestExpectation *restored = [self expectationWithDescription:@"16:9 restored"];
     dispatch_async(dispatch_get_main_queue(), ^{ [restored fulfill]; });
     [self waitForExpectations:@[restored] timeout:2];
     [root.view layoutIfNeeded];
-    XCTAssertEqualWithAccuracy(game.frame.size.width / game.frame.size.height, 16.0 / 9.0, 0.01);
+    CGRect back = [self pictureRectInRoot:root];
+    XCTAssertEqualWithAccuracy(back.size.width / back.size.height, 16.0 / 9.0, 0.01);
 }
 
 - (void)testSmallSeparatedHitTargetsMeetMinimumsWithoutGrowingArtwork {
@@ -867,14 +946,14 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     BOOL duo = [[root valueForKey:@"hingeStatus"] integerValue] != 0;
     DmLayout fit = dm_layout(b, dm_game_safe_insets(b, root.view.safeAreaInsets, duo), [[root valueForKey:@"partiallyOpen"] boolValue], CGRectNull, DM_PICTURE_16_9);
     dm_setting_live("DM_PICTURE_FIT", "fill"); [root.view layoutIfNeeded];
-    XCTAssertTrue(CGRectEqualToRect(game.frame, dm_layout_picture(fit, b, YES, DM_PICTURE_16_9).game), @"Fill applies at once: %@", NSStringFromCGRect(game.frame));
+    XCTAssertTrue(DuoRectsMatch([self pictureRectInRoot:root], dm_layout_picture(fit, b, YES, DM_PICTURE_16_9).game), @"Fill applies at once: %@ (game view %@)", NSStringFromCGRect([self pictureRectInRoot:root]), NSStringFromCGRect(game.frame));
     XCTAssertEqual(duo_harness_present_stretch(), 0, @"Fill keeps the picture's shape in the present");
     dm_setting_live("DM_PICTURE_FIT", "stretch"); [root.view layoutIfNeeded];
     DmLayout stretch = dm_layout_picture(fit, b, DmPictureStretch, DM_PICTURE_16_9);
-    XCTAssertTrue(CGRectEqualToRect(game.frame, stretch.game), @"Stretch applies at once: %@", NSStringFromCGRect(game.frame));
+    XCTAssertTrue(DuoRectsMatch([self pictureRectInRoot:root], stretch.game), @"Stretch applies at once: %@", NSStringFromCGRect([self pictureRectInRoot:root]));
     XCTAssertEqual(duo_harness_present_stretch(), (int)dm_layout_stretched(stretch, DmPictureStretch, DM_PICTURE_16_9), @"and tells the present to stretch where the shapes differ");
     dm_setting_live("DM_PICTURE_FIT", "fit"); [root.view layoutIfNeeded];
-    XCTAssertTrue(CGRectEqualToRect(game.frame, fit.game), @"and Fit brings the bars back: %@", NSStringFromCGRect(game.frame));
+    XCTAssertTrue(DuoRectsMatch([self pictureRectInRoot:root], fit.game), @"and Fit brings the bars back: %@", NSStringFromCGRect([self pictureRectInRoot:root]));
     XCTAssertEqual(duo_harness_present_stretch(), 0, @"and the picture's shape");
 
     dm_setting_live("DM_RUMBLE", "0"); XCTAssertEqual(duo_harness_rumble(), 0);
@@ -882,9 +961,82 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     dm_setting_live("DM_OPMODE", "1"); XCTAssertEqual(dm_opmode(), 1);
     dm_setting_live("DM_OPMODE", "0"); XCTAssertEqual(dm_opmode(), 0);
     dm_setting_live("DM_SHOW_FPS", "1");
-    UILabel *fps = [root valueForKey:@"fps"];
-    XCTAssertNotNil(fps); XCTAssertFalse(fps.hidden);
-    dm_setting_live("DM_SHOW_FPS", "0"); XCTAssertTrue(fps.hidden);
+    UIView *vitals = [root valueForKey:@"vitals"];
+    XCTAssertNotNil(vitals); XCTAssertFalse(vitals.hidden);
+    dm_setting_live("DM_SHOW_FPS", "0"); XCTAssertTrue(vitals.hidden);
+}
+
+// Vitals (DmVitals.m, vitals.md): the level live from the menu (YES is Standard, 2 Detailed), the publisher told, display only (no touch taken), the halves either side of
+// − (≡) + and never over them, the one 1 s timer only while on or the menu is open, and the menu's header line reading the same figures with Vitals off
+- (NSString *)vitalsText:(UIView *)vitals half:(NSString *)half line:(NSString *)line {
+    UILabel *l = [[vitals valueForKey:half] valueForKey:line];
+    return l.hidden ? @"" : (l.attributedText.string ?: @"");
+}
+- (void)testVitalsLevelsPassThroughAndPlace {
+    UIViewController *root = [self harnessRootViewController];
+    XCTAssertNotNil(root);
+    duo_harness_set_vitals(60, 2140, 0);
+    dm_setting_live("DM_SHOW_FPS", "YES"); [root.view layoutIfNeeded];
+    UIView *vitals = [root valueForKey:@"vitals"];
+    XCTAssertNotNil(vitals); XCTAssertFalse(vitals.hidden);
+    XCTAssertEqual(dm_vitals_get_level(), 1, @"YES is Standard"); XCTAssertEqual(duo_harness_vitals_level(), 1, @"and the host's publisher is told");
+    XCTAssertTrue(dm_vitals_timer_running(), @"one 1 s timer while on");
+    // the full line where there is room beside − (≡) +; a narrower screen (an iPhone Duo's cover screen) drops fields in the fixed order, the frame rate kept
+    NSString *left1 = [self vitalsText:vitals half:@"left" line:@"line1"];
+    if (root.view.bounds.size.width >= 900) XCTAssertEqualObjects(left1, @"60 fps · CPU 2.1 W");
+    else XCTAssertTrue([left1 hasPrefix:@"60 fps"], @"the frame rate stays on a narrow screen: %@", left1);
+    XCTAssertGreaterThan([self vitalsText:vitals half:@"right" line:@"line1"].length, 3, @"heat, the battery where the device gives one, and the time: %@", [self vitalsText:vitals half:@"right" line:@"line1"]);
+    XCTAssertEqualObjects([self vitalsText:vitals half:@"left" line:@"line2"], @"", @"no second line at Standard");
+    XCTAssertTrue([vitals.accessibilityLabel hasPrefix:@"60 frames per second. CPU power 2.1 watts"], @"VoiceOver reads it in words: %@", vitals.accessibilityLabel);
+    XCTAssertTrue(vitals.accessibilityTraits & UIAccessibilityTraitUpdatesFrequently);
+    // display only: a touch anywhere on it goes to what is under it
+    UIView *L = [vitals valueForKey:@"left"], *R = [vitals valueForKey:@"right"];
+    CGPoint inL = [vitals convertPoint:CGPointMake(CGRectGetMidX(L.frame), CGRectGetMidY(L.frame)) toView:root.view];
+    XCTAssertNil([vitals hitTest:[root.view convertPoint:inL toView:vitals] withEvent:nil]);
+    XCTAssertFalse([root.view hitTest:inL withEvent:nil] == L || [root.view hitTest:inL withEvent:nil] == vitals, @"the pad or the game takes the touch");
+    // either side of − (≡) +, never over them
+    CGRect center = dm_gamepad_top_center([root valueForKey:@"pad"]);
+    XCTAssertLessThanOrEqual(CGRectGetMaxX(L.frame), CGRectGetMinX(center) - 7, @"left half %@ clear of %@", NSStringFromCGRect(L.frame), NSStringFromCGRect(center));
+    XCTAssertGreaterThanOrEqual(CGRectGetMinX(R.frame), CGRectGetMaxX(center) + 7, @"right half %@ clear of %@", NSStringFromCGRect(R.frame), NSStringFromCGRect(center));
+    XCTAssertGreaterThan(L.frame.size.width, 40); XCTAssertGreaterThan(R.frame.size.width, 40);
+    // the worst Standard string still fits, dropping fields in the fixed order rather than overlap
+    duo_harness_set_vitals(30, 12400, 1);
+    dm_setting_live("DM_SHOW_FPS", "1"); [root.view setNeedsLayout]; [root.view layoutIfNeeded];
+    NSString *worst = [self vitalsText:vitals half:@"left" line:@"line1"];
+    XCTAssertTrue([worst hasPrefix:@"30 fps cap"], @"%@", worst);
+    XCTAssertLessThanOrEqual(CGRectGetMaxX(L.frame), CGRectGetMinX(center) - 7);
+    // Detailed: the second line
+    duo_harness_set_vitals(60, 2140, 0);
+    dm_setting_live("DM_SHOW_FPS", "2"); [root.view layoutIfNeeded];
+    XCTAssertEqual(dm_vitals_get_level(), 2);
+    XCTAssertEqualObjects([self vitalsText:vitals half:@"left" line:@"line2"], @"GPU busy 64% · max 33 ms");
+    XCTAssertEqualObjects([self vitalsText:vitals half:@"right" line:@"line2"], @"P-cores 82%");
+    // off: hidden, the publisher's gate closed, no timer
+    dm_setting_live("DM_SHOW_FPS", "0");
+    XCTAssertTrue(vitals.hidden); XCTAssertEqual(duo_harness_vitals_level(), 0); XCTAssertFalse(dm_vitals_timer_running(), @"no timer while off");
+}
+- (void)testVitalsHideUnderTheMenuAndItsHeaderReadsThem {
+    UIViewController *root = [self harnessRootViewController];
+    XCTAssertNotNil(root);
+    duo_harness_set_vitals(60, 2140, 0);
+    dm_setting_live("DM_SHOW_FPS", "0");
+    XCTAssertFalse(dm_vitals_timer_running());
+    dm_vitals_menu_open(1);
+    XCTAssertEqual(duo_harness_vitals_menu(), 1, @"the header keeps the figures coming with Vitals off");
+    XCTAssertTrue(dm_vitals_timer_running(), @"the one timer runs while the menu is open");
+    NSString *line = @(dm_vitals_compact_text(0));
+    XCTAssertTrue([line hasPrefix:@"60 fps · "], @"%@", line);
+    XCTAssertFalse([line containsString:@"⚡"], @"no charging bolt in the header line");
+    NSString *short2 = @(dm_vitals_compact_text(2));
+    XCTAssertLessThanOrEqual(short2.length, line.length);
+    dm_setting_live("DM_SHOW_FPS", "1"); [root.view layoutIfNeeded];
+    UIView *vitals = [root valueForKey:@"vitals"];
+    XCTAssertTrue(vitals.hidden, @"Vitals over the picture hides while the menu is open");
+    dm_vitals_menu_open(0); [root.view layoutIfNeeded];
+    XCTAssertFalse(vitals.hidden); XCTAssertEqual(duo_harness_vitals_menu(), 0);
+    dm_vitals_foreground(0); XCTAssertFalse(dm_vitals_timer_running(), @"no timer in the background");
+    dm_vitals_foreground(1); XCTAssertTrue(dm_vitals_timer_running());
+    dm_setting_live("DM_SHOW_FPS", "0"); XCTAssertFalse(dm_vitals_timer_running());
 }
 
 - (void)testGameViewDrawableHonoursAPixelCap {
@@ -900,6 +1052,23 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertEqualWithAccuracy(metal.drawableSize.width, 300, 1);
     [game setValue:@0 forKey:@"maxPixelWidth"]; [game setNeedsLayout]; [game layoutIfNeeded];
     XCTAssertEqualWithAccuracy(metal.drawableSize.width, full, 1);
+}
+
+- (void)testGameViewDrawableTakesTheGameScaleWithTouchControlsInTheFrame {   // DM_PRESENT_DRAWABLE=game (front_ios.m viewDidLayoutSubviews, touch_draw.h touch_drawable_scale)
+    UIViewController *root = [self harnessRootViewController];
+    [root.view layoutIfNeeded];
+    UIView *game = [root valueForKey:@"game"];
+    CAMetalLayer *metal = (CAMetalLayer *)game.layer;
+    CGSize full = metal.drawableSize, b = game.bounds.size;
+    CGFloat screen = full.width / MAX(b.width, 1), s = screen * 0.75;
+    [game setValue:@(s) forKey:@"drawableScale"]; [game layoutIfNeeded];
+    XCTAssertTrue(CGSizeEqualToSize(metal.drawableSize, CGSizeMake(round(b.width * s), round(b.height * s))), @"the canvas's points at the scale given, rounded as the gamepad's frame: %@", NSStringFromCGSize(metal.drawableSize));
+    touch_frame f = {0}; f.canvas_w = (uint32_t)lround(b.width * s); f.canvas_h = (uint32_t)lround(b.height * s);
+    XCTAssertTrue(touch_frame_fits(&f, metal.drawableSize.width, metal.drawableSize.height), @"the touch controls' frame fits the smaller drawable");
+    [game setValue:@(screen * 2) forKey:@"drawableScale"]; [game layoutIfNeeded];
+    XCTAssertEqualWithAccuracy(metal.drawableSize.width, full.width, 1, @"never above the screen's pixels");
+    [game setValue:@0 forKey:@"drawableScale"]; [game layoutIfNeeded];
+    XCTAssertTrue(CGSizeEqualToSize(metal.drawableSize, full), @"0: as before");
 }
 
 - (void)testGameViewDrawableTakesThePictureSizeWhereMetalFXDoesNotRun {
@@ -919,7 +1088,9 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertTrue(dm_layout_fx_shape(far, NO, aspect), @"Not stretched: MetalFX's shape");
 
     UIViewController *root = [self harnessRootViewController];
-    [root.view layoutIfNeeded];
+    UIView *pad = [root valueForKey:@"pad"];
+    [pad setValue:@YES forKey:@"padOff"];   // as with a controller in use: the touch controls are not drawn into the frame, which takes the screen's pixels (below)
+    [root.view setNeedsLayout]; [root.view layoutIfNeeded];
     UIView *game = [root valueForKey:@"game"];
     CAMetalLayer *metal = (CAMetalLayer *)game.layer;
     CGSize native = metal.drawableSize; CGRect frame = game.frame;
@@ -938,8 +1109,16 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertTrue(CGSizeEqualToSize(metal.drawableSize, native), @"Upscaling MetalFX: the view's pixels for the scaler, %@", NSStringFromCGSize(metal.drawableSize));
     dm_setting_live("DM_PRESENT_UPSCALE", "off"); [root.view layoutIfNeeded];
     XCTAssertEqualWithAccuracy(metal.drawableSize.width, 320, 1, @"and back at once");
+    // The touch controls drawn into the frame: the drawable keeps the screen's pixels, Upscaling Standard too, so their pictures land 1:1
+    front_picture_shape(1920, 1080); [pad setValue:@NO forKey:@"padOff"]; settle();
+    XCTAssertTrue(dm_touch_in_frame());
+    CGFloat scale = root.view.window.windowScene.screen.nativeScale;
+    XCTAssertEqualWithAccuracy(metal.drawableSize.width, game.bounds.size.width * scale, 1, @"In the frame: the screen's pixels, %@", NSStringFromCGSize(metal.drawableSize));
+    XCTAssertEqualWithAccuracy(metal.drawableSize.height, game.bounds.size.height * scale, 1);
     front_picture_size(100000, 56250); settle();   // back to the view's pixels for the other tests
+    [pad setValue:@YES forKey:@"padOff"]; [root.view setNeedsLayout]; [root.view layoutIfNeeded];
     XCTAssertTrue(CGSizeEqualToSize(metal.drawableSize, native));
+    [pad setValue:@NO forKey:@"padOff"]; [root.view setNeedsLayout]; [root.view layoutIfNeeded];
 }
 
 - (void)testSceneConnectCachesTheScreenForOtherThreads {
@@ -1011,9 +1190,11 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     BOOL duo = [[root valueForKey:@"hingeStatus"] integerValue] != 0 || !CGRectIsNull(division);
     UIEdgeInsets insets = dm_game_safe_insets(root.view.bounds, root.view.safeAreaInsets, duo);
     DmLayout layout = dm_layout(root.view.bounds, insets, partiallyOpen, division, DM_PICTURE_16_9);
-    XCTAssertTrue(CGRectEqualToRect(game.frame, layout.game),
-                  @"The production game view must use the current scene bounds and native division region: actual %@, expected %@",
-                  NSStringFromCGRect(game.frame), NSStringFromCGRect(layout.game));
+    XCTAssertTrue(DuoRectsMatch([self pictureRectInRoot:root], layout.game),
+                  @"The production game picture must use the current scene bounds and native division region: actual %@, expected %@",
+                  NSStringFromCGRect([self pictureRectInRoot:root]), NSStringFromCGRect(layout.game));
+    if (dm_touch_in_frame()) XCTAssertTrue(CGRectEqualToRect(game.frame, dm_touch_canvas(layout, root.view.bounds, root.view.window.windowScene.screen.nativeScale)),
+                                           @"With the touch controls drawn into the frame the game view is the canvas: %@", NSStringFromCGRect(game.frame));
     XCTAssertTrue(CGRectEqualToRect(pad.frame, root.view.bounds));
     XCTAssertTrue([game.layer isKindOfClass:CAMetalLayer.class]);
     CAMetalLayer *metal = (CAMetalLayer *)game.layer;
@@ -1042,14 +1223,15 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
             XCTAssertTrue(CGSizeEqualToSize(root.view.bounds.size, sizes[i]));
             XCTAssertTrue(CGRectEqualToRect(pad.frame, root.view.bounds));
             XCTAssertTrue(CGRectContainsRect(root.view.bounds, game.frame));
-            XCTAssertEqualWithAccuracy(game.bounds.size.width / game.bounds.size.height, 16.0 / 9.0, 0.001);
+            CGRect picture = [self pictureRectInRoot:root];   // the game view itself, or the picture on it while the present draws the touch controls
+            XCTAssertEqualWithAccuracy(picture.size.width / picture.size.height, 16.0 / 9.0, 0.001);
             CAMetalLayer *metal = (CAMetalLayer *)game.layer;
             CGFloat scale = root.view.window.windowScene.screen.nativeScale;
             XCTAssertEqualWithAccuracy(metal.drawableSize.width, game.bounds.size.width * scale, 1.0);
             XCTAssertEqualWithAccuracy(metal.drawableSize.height, game.bounds.size.height * scale, 1.0);
             [self assertButton:DM_BTN_A at:[self controlCenterNamed:@"A" inPad:pad] onPad:pad time:i + 1];
             [pad setValue:@YES forKey:@"tap"];
-            DuoFakeTouch *touch = [self touchAt:CGPointMake(CGRectGetMidX(game.frame), CGRectGetMidY(game.frame)) time:i + 1];
+            DuoFakeTouch *touch = [self touchAt:CGPointMake(CGRectGetMidX(picture), CGRectGetMidY(picture)) time:i + 1];
             [self beginTouches:@[touch] onPad:pad];
             XCTAssertEqual(duo_harness_input().touch_count, 1);
             XCTAssertEqualWithAccuracy(duo_harness_input().touches[0].x, 0.5, 0.001);
@@ -1191,8 +1373,10 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
                           @"The root must query UIKit's IncludeInactive option for the division boundary");
             XCTAssertFalse(region.isActive, @"This boundary case must use an inactive native division");
             XCTAssertTrue(expected.separated);
-            XCTAssertTrue(CGRectEqualToRect(game.frame, expected.game),
-                          @"An inactive but valid horizontal division should still separate the panels");
+            (void)game;
+            XCTAssertTrue(DuoRectsMatch([self pictureRectInRoot:root], expected.game),
+                          @"An inactive but valid horizontal division should still separate the panels: %@ against %@",
+                          NSStringFromCGRect([self pictureRectInRoot:root]), NSStringFromCGRect(expected.game));
 
             hinge.status = UIHingeStatusFullyOpen;
             [(id)root hingeChanged:hinge];
@@ -1200,8 +1384,9 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
             DmLayout fullyOpen = dm_layout(view.bounds, dm_game_safe_insets(view.bounds, view.safeAreaInsets, YES), NO, region.frame, DM_PICTURE_16_9);
             XCTAssertEqual(fullyOpen.separated, view.bounds.size.height > view.bounds.size.width,
                            @"A fully-open landscape display overlays while portrait remains separated");
-            XCTAssertTrue(CGRectEqualToRect(game.frame, fullyOpen.game),
-                          @"Fully-open layout follows the stable portrait-split, landscape-overlay policy");
+            XCTAssertTrue(DuoRectsMatch([self pictureRectInRoot:root], fullyOpen.game),
+                          @"Fully-open layout follows the stable portrait-split, landscape-overlay policy: %@ against %@",
+                          NSStringFromCGRect([self pictureRectInRoot:root]), NSStringFromCGRect(fullyOpen.game));
         } @finally {
             object_setClass(view, originalClass);
             gDuoHarnessReservedRegionView = nil;
@@ -1225,6 +1410,15 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
         for (UIWindow *window in ((UIWindowScene *)scene).windows) if (window.isKeyWindow) return window.rootViewController;
     }
     return nil;
+}
+
+// The game's picture in the root view: the game view's frame, or while the present draws the touch controls into the frame (the game view is then the whole screen,
+// dm_touch_canvas) the picture's place on it, as the gamepad handed it to the present
+- (CGRect)pictureRectInRoot:(UIViewController *)root {
+    UIView *game = [root valueForKey:@"game"]; CGRect c = game.frame;
+    if (!dm_touch_in_frame()) return c;
+    touch_frame f; duo_harness_touch_frame(&f);
+    return CGRectMake(CGRectGetMinX(c) + f.pic[0] * c.size.width, CGRectGetMinY(c) + f.pic[1] * c.size.height, f.pic[2] * c.size.width, f.pic[3] * c.size.height);
 }
 
 - (DmLayout)separatedLayout:(CGRect)bounds {
@@ -1522,6 +1716,104 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     }
 }
 
+
+- (void)testLiveJoyConMapsSidewaysAndKeepsItsOwnPlayer {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    DuoLiveController *joy = [[DuoLiveController alloc] initWithCategory:@"Nintendo Switch Joy-Con (R)"];
+    DuoLiveController *remote = [[DuoLiveController alloc] initWithCategory:@"Siri Remote"];
+    [self setHarnessControllers:@[(GCController *)joy, (GCController *)remote] notification:GCControllerDidConnectNotification];
+    XCTAssertEqual(duo_harness_state().connected_players, 1u);
+    XCTAssertNil(remote.input.elementValueDidChangeHandler);
+
+    NSArray *names = @[GCInputButtonX, GCInputButtonA, GCInputButtonY, GCInputButtonB,
+                       GCInputLeftShoulder, GCInputRightShoulder, GCInputButtonMenu];
+    const uint64_t mapped[] = {DM_BTN_A, DM_BTN_B, DM_BTN_X, DM_BTN_Y, DM_BTN_L, DM_BTN_R, DM_BTN_PLUS};
+    for (NSUInteger i = 0; i < names.count; i++) {
+        [joy.input setPressed:YES button:names[i]];
+        XCTAssertEqual(duo_harness_state().players[0].buttons, mapped[i]);
+        [joy.input setPressed:NO button:names[i]];
+        XCTAssertEqual(duo_harness_state().players[0].buttons, 0u);
+    }
+    [joy.input moveX:1 y:-1];
+    DuoHarnessPlayerInput player = duo_harness_state().players[0];
+    XCTAssertEqual(player.lx, 32767);
+    XCTAssertEqual(player.ly, -32767);
+    XCTAssertEqual(player.rx, 0);
+    XCTAssertEqual(player.ry, 0);
+
+    GCController *extended = [GCController controllerWithExtendedGamepad];
+    [self setHarnessControllers:@[extended, (GCController *)joy] notification:GCControllerDidConnectNotification];
+    uint32_t other = duo_harness_state().connected_players & ~1u;
+    XCTAssertEqual(__builtin_popcount(other), 1);
+    if (other) {
+        int slot = __builtin_ctz(other);
+        [self deliverSnapshotChangeFor:extended button:extended.extendedGamepad.buttonB value:1];
+        [joy.input setPressed:YES button:GCInputButtonA];
+        XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_B);
+        XCTAssertEqual(duo_harness_state().players[slot].buttons, DM_BTN_A);
+
+        DuoLiveHandler stale = joy.input.elementValueDidChangeHandler;
+        [self setHarnessControllers:@[extended] notification:GCControllerDidDisconnectNotification];
+        XCTAssertNil(joy.input.elementValueDidChangeHandler);
+        if (stale) stale((id)joy.input, (id)joy.input.buttons[GCInputButtonA]);
+        DuoHarnessState state = duo_harness_state();
+        XCTAssertEqual(state.connected_players, other);
+        XCTAssertEqual(state.players[0].buttons, 0u);
+        XCTAssertEqual(state.players[0].lx, 0);
+        XCTAssertEqual(state.players[slot].buttons, DM_BTN_A);
+    }
+    [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+}
+
+- (void)testLiveJoyConsJoinOnButtonAndKeepPromptInputOutOfGame {
+    UIWindow *window = [self harnessRootViewController].view.window;
+    XCTAssertTrue(window && front_metal_layer());
+    if (!window || !front_metal_layer()) return;
+
+    const char *env = getenv("DM_PAD_PRESS_TO_JOIN");
+    NSString *saved = env ? @(env) : nil;
+    setenv("DM_PAD_PRESS_TO_JOIN", "1", 1);
+    CGRect bounds = window.bounds;
+    [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    if (saved) setenv("DM_PAD_PRESS_TO_JOIN", saved.UTF8String, 1);
+    else unsetenv("DM_PAD_PRESS_TO_JOIN");
+
+    DuoLiveController *left = [[DuoLiveController alloc] initWithCategory:@"Nintendo Switch Joy-Con (L)"];
+    DuoLiveController *right = [[DuoLiveController alloc] initWithCategory:@"Nintendo Switch Joy-Con (R)"];
+    [self setHarnessControllers:@[(GCController *)right, (GCController *)left] notification:GCControllerDidConnectNotification];
+    XCTAssertEqual(duo_harness_state().connected_players, 0u);
+    [left.input moveX:1 y:0];
+    [left.input setPressed:YES button:GCInputButtonHome];
+    XCTAssertEqual(duo_harness_state().connected_players, 0u, @"Stick and system Home must not join a player");
+    [left.input setPressed:YES button:GCInputLeftShoulder];
+    XCTAssertEqual(duo_harness_state().connected_players, 1u, @"First press gets player 1 even when listed second");
+    XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_L);
+
+    NSUInteger originalSubviews = window.subviews.count;
+    XCTestExpectation *closed = [self expectationWithDescription:@"controller prompt returns"];
+    __block int result = -1;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        result = front_ctrl_support(2, 2);
+        [closed fulfill];
+    });
+    NSPredicate *shown = [NSPredicate predicateWithBlock:^BOOL(UIWindow *candidate, NSDictionary *bindings) {
+        (void)bindings; return candidate.subviews.count > originalSubviews;
+    }];
+    XCTNSPredicateExpectation *open = [[XCTNSPredicateExpectation alloc] initWithPredicate:shown object:window];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[open] timeout:5], XCTWaiterResultCompleted);
+    XCTAssertEqual(duo_harness_state().players[0].buttons, 0u);
+    [right.input setPressed:YES button:GCInputButtonA];   // Switch B joins the second player and completes the prompt
+    [self waitForExpectations:@[closed] timeout:5];
+    XCTAssertEqual(result, 1);
+    XCTAssertEqual(duo_harness_state().connected_players, 3u);
+    XCTAssertEqual(duo_harness_state().players[1].buttons, 0u, @"The button that closed the prompt is held back until release");
+    [right.input setPressed:NO button:GCInputButtonA];
+    XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_L, @"Both players' current input is restored on release");
+    [right.input setPressed:YES button:GCInputButtonA];
+    XCTAssertEqual(duo_harness_state().players[1].buttons, DM_BTN_B);
+    [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+}
 
 - (void)testControllersKeepIndependentPlayersAndLayoutKeepsMotionState {
     if (@available(iOS 13.0, *)) {

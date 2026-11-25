@@ -1,6 +1,7 @@
 // Exercise production memory policy with native/old/wrong-build images, at
 // every FPS choice. No game assets or executable guest code are needed.
 #include "../hle_fpslock.c"
+const char *nvn_fps_hold_why(void) { return NULL; }   // hle_nvn.c: no heat or Low Power Mode hold here
 static module_t modules[1];
 module_t *g_mod = modules; int g_nmod = 1;
 static int writes;

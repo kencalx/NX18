@@ -52,8 +52,13 @@ int main(void) { @autoreleasepool {
     CHECK(peak <= (512u << 20), "streaming burst staging stays within 512 MiB");
     // Demand reuse retains a primary and one bounded overflow block per slot.
     // Everything beyond those six blocks must retire before the rendering fence.
-    CHECK(idle <= (up_reuse() ? (192u << 20) : (96u << 20)),
-          "completed uploads retain only the bounded slot staging cache");
+    // The staging pool (up_pool_put, DM_NVN_STAGE_POOL_MB) keeps retired temporary blocks resident up to its cap; released, only the slot cache is left
+    size_t slots = up_reuse() ? (192u << 20) : (96u << 20), pooled = (size_t)g_up_pool_bytes;
+    CHECK(pooled <= up_pool_cap(), "the staging pool stays within its cap");
+    CHECK(idle <= slots + pooled, "completed uploads retain only the bounded slot staging cache and the staging pool");
+    { int n; up_pool_release(&n); res_commit(); }
+    size_t unpooled = live_bytes(buffers);
+    CHECK(unpooled <= slots, "with the pool released, completed uploads retain only the bounded slot staging cache");
     m4_end(encoder);
     uint64_t fence = mtl_sub_commit();
     CHECK(mtl_wait(fence, 5000000000ull), "rendering submission completes");
@@ -67,6 +72,6 @@ int main(void) { @autoreleasepool {
         [textures[i] getBytes:pixel bytesPerRow:4 fromRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0];
         for (int c = 0; c < 4; c++) CHECK(pixel[c] == i + 1, "upload pixels survive batch splitting and staging retirement");
     }
-    printf("upload budget: peak %zu MiB, completed %zu MiB, %d checks, %d failed\n", peak >> 20, idle >> 20, checks, fails);
+    printf("upload budget: peak %zu MiB, completed %zu MiB (%zu MiB of it the staging pool; %zu MiB once released), %d checks, %d failed\n", peak >> 20, idle >> 20, pooled >> 20, unpooled >> 20, checks, fails);
     return fails != 0;
 } }

@@ -10,7 +10,9 @@
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
 #include "hle_movie_avc.h"   // H.264 on VideoToolbox
+#include "hle_movie_vt.h"
 #include "hle_movie_yuv.h"   // md_nv12 / md_rgba, shared with hle_codec_video.c
+#include "hle_movie_aac_order.h"      // the console's channel order for AAC (md_aac_layout)
 #include <AudioToolbox/AudioToolbox.h>   // AAC
 // Vorbis (movie audio tracks, Link's Awakening): stb_vorbis, built into this file (dm/third_party/stb_vorbis); only its push-data API, floats out
 #define STB_VORBIS_NO_STDIO
@@ -86,6 +88,7 @@ typedef struct {
     int job; const uint8_t *jp; int jn, jslot, jgot; int64_t jpts, jpts_out; int jflush;
     mavc *avc; int avc_drain; int64_t drain_pts; // H.264 (hle_movie_avc.c); avc_drain: the end-of-stream packet's output had a picture; the pictures still queued leave one per free slot, then an empty output with the
                                                  // end-of-stream flag and the packet's time (drain_pts)
+    movie_vt_control vt;                         // a VideoToolbox wait for activation, cancelled by Stop / Flush / destruction (hle_movie_vt.h)
     vpx_codec_ctx_t vpx; int vpx_on, red_dec, red_img;
     int vpx_cs, vpx_full;   // the colour matrix (vpx_color_space_t) and range of the last VP8 / VP9 picture, for md_format
     uint8_t *bgra; size_t bgra_cap;              // native-texture mode: the picture with red and blue swapped, for a BGRA8 / BGRX8 client texture (md_out_tex)
@@ -94,6 +97,7 @@ typedef struct {
     int16_t *hold; size_t hold_n, hold_cap; int vb_prev;   // decoded samples (interleaved values) not handed out yet, and the last packet's blocksize, 0 at a stream's start (md_vorbis)
     // AAC (Monster Hunter Rise's movies): AudioToolbox's converter, opened at the first packet from the AudioSpecificConfig (Configure's csd-0, kept in vhdr[0]); the packet being fed
     AudioConverterRef aac; const uint8_t *aac_pkt; UInt32 aac_pkt_n; AudioStreamPacketDescription aac_desc;
+    uint64_t aac_lay_said; int aac_reopen;      // md_aac_layout's last line (0 = none yet); a Flush closed the converter (h_movie_Flush): its reopening prints no line
     uint64_t dec_n, dec_ns, dec_max;            // decode timing (on the host thread, per packet)
     unsigned long ncall[24];
 } mdec_t;
@@ -119,6 +123,32 @@ static struct {
 // The Switch 2's nn::codec decoders (hle_codec_video.c) raise the same signal with their stream's picture interval (dm_movie_picture): a movie above 30 pictures a second (Ocarina
 // of Time's, 60) is not capped at 30 but holds the frame step's fastest hold while it plays (dm_movie_fps, hle_nvn.c fps_step_cap); this path's movies are the Switch's 30
 #define MD_PLAYING_NS 500000000ull
+// iOS can refuse hardware decoders while inactive. Keep the current packet on
+// its decoding thread until activation (the movie library's decoder thread; for nn::codec,
+// the guest thread submitting it); never consume the stream waiting for hardware.
+static pthread_mutex_t g_vt_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_vt_cv = PTHREAD_COND_INITIALIZER;
+static int g_vt_active = 1;
+void dm_movie_active(int active) {
+    pthread_mutex_lock(&g_vt_mu); g_vt_active = active; pthread_cond_broadcast(&g_vt_cv); pthread_mutex_unlock(&g_vt_mu);
+}
+void movie_vt_cancel(movie_vt_control *control) {
+    pthread_mutex_lock(&g_vt_mu); control->cancelled = 1; pthread_cond_broadcast(&g_vt_cv); pthread_mutex_unlock(&g_vt_mu);
+}
+void movie_vt_continue(movie_vt_control *control) {
+    pthread_mutex_lock(&g_vt_mu); control->cancelled = 0; pthread_mutex_unlock(&g_vt_mu);
+}
+int movie_vt_wait(movie_vt_control *control) {
+    pthread_mutex_lock(&g_vt_mu);
+    while (!g_vt_active && !(control && control->cancelled)) pthread_cond_wait(&g_vt_cv, &g_vt_mu);
+    int ready = !(control && control->cancelled); pthread_mutex_unlock(&g_vt_mu); return ready;
+}
+int movie_vt_wait_unavailable(movie_vt_control *control) {
+    pthread_mutex_lock(&g_vt_mu);
+    int waited = !g_vt_active;
+    while (!g_vt_active && !(control && control->cancelled)) pthread_cond_wait(&g_vt_cv, &g_vt_mu);
+    int result = control && control->cancelled ? -1 : waited; pthread_mutex_unlock(&g_vt_mu); return result;
+}
 static _Atomic uint64_t g_movie_pic_ns;   // when a video decoder last handed out a picture (0 = stopped since)
 static _Atomic uint32_t g_movie_itv_us;   // that movie's picture interval in µs (0 = not known: this path's movies, the Switch's 30)
 int dm_movie_playing(void) { uint64_t t = atomic_load_explicit(&g_movie_pic_ns, memory_order_relaxed); return t && now_ns() - t < MD_PLAYING_NS; }
@@ -127,6 +157,10 @@ void dm_movie_picture(uint64_t interval_ns) {   // a video picture handed out no
     atomic_store_explicit(&g_movie_pic_ns, now_ns(), memory_order_relaxed);
 }
 void dm_movie_stopped(void) { atomic_store_explicit(&g_movie_pic_ns, 0, memory_order_relaxed); }   // the movie ended: the frame step's cap need not wait out MD_PLAYING_NS
+uint64_t dm_movie_picture_ns(uint32_t *interval_us) {   // when a video decoder last handed out a picture (now_ns; 0: stopped since) and that movie's picture interval (hle_codec_video.c dm_movie_state)
+    if (interval_us) *interval_us = atomic_load_explicit(&g_movie_itv_us, memory_order_relaxed);
+    return atomic_load_explicit(&g_movie_pic_ns, memory_order_relaxed);
+}
 // The playing movie's pictures a second, rounded (0 = no movie playing, or its rate is not known)
 int dm_movie_fps(void) { uint32_t us = atomic_load_explicit(&g_movie_itv_us, memory_order_relaxed); return dm_movie_playing() && us ? (int)((1000000u + us / 2) / us) : 0; }
 static void *msym(const char *n) { void *p = guest_sym(n); if (!p) die("movie: missing SDK symbol %s", n); return p; }
@@ -203,7 +237,12 @@ static void md_defer_body(void *arg) {
         if (k >= 0) {
             mdec_t *d = g_dfq[k].d; int e = g_dfq[k].ev;
             memmove(g_dfq + k, g_dfq + k + 1, (size_t)(--g_ndfq - k) * sizeof *g_dfq);
-            if (d->started) md_event(d, e);   // not after Stop: the game takes its events apart right after Stop (a Stop within 2 ms of a Flush let the deferred signal hit events being torn down)
+            // Not after Stop: the game takes its events apart right after Stop (a Stop within 2 ms of a Flush let the deferred signal hit events being torn down). An output event
+            // only while an output is queued: an acquisition can re-arm it after a Flush emptied the queue (upstream NXNative d1d126e3c). Stop takes these locks in the same order
+            dm_host_mutex_lock(&d->mu);
+            int ready = d->started && (e != 1 || d->noutq);
+            pthread_mutex_unlock(&d->mu);
+            if (ready) md_event(d, e);
             continue;
         }
         if (!next) pthread_cond_wait(&g_dfcv, &g_dfmu);
@@ -251,6 +290,12 @@ static void md_dims(const mdec_t *d, int *w, int *h, int *stride, int *slice) {
 // ---------- Host decoding thread ----------
 enum { MDJ_NONE, MDJ_DECODE, MDJ_CLOSE, MDJ_QUIT, MDJ_TAKE };
 static int md_threads(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n >= 8 ? 4 : 2; }
+vpx_codec_err_t md_vpx_open(vpx_codec_ctx_t *ctx, int vp9, unsigned w, unsigned h) {
+    vpx_codec_dec_cfg_t cfg = { .threads = (unsigned)md_threads(), .w = w, .h = h };
+    vpx_codec_err_t e = vpx_codec_dec_init(ctx, vp9 ? vpx_codec_vp9_dx() : vpx_codec_vp8_dx(), &cfg, 0);
+    if (!e && vp9) vpx_codec_control(ctx, VP9D_SET_ROW_MT, 1);
+    return e;
+}
 // I420 → NV12 (stride = width, plane height = height); a smaller picture is padded with black, a larger one cropped
 void md_nv12(const vpx_image_t *im, uint8_t *dst, int w, int h) {
     int cw = (int)im->d_w < w ? (int)im->d_w : w, ch = (int)im->d_h < h ? (int)im->d_h : h;
@@ -289,13 +334,10 @@ void md_rgba(const vpx_image_t *im, uint8_t *dst, int w, int h) {
 static int md_vpx(mdec_t *d, const uint8_t *p, int n, int slot) {
     const char *codec = d->type == MD_TYPE_VP8 ? "VP8" : "VP9";
     if (!d->vpx_on) {
-        vpx_codec_dec_cfg_t cfg = { .threads = (unsigned)md_threads(), .w = (unsigned)d->w, .h = (unsigned)d->h };
-        vpx_codec_iface_t *iface = d->type == MD_TYPE_VP8 ? vpx_codec_vp8_dx() : vpx_codec_vp9_dx();
-        vpx_codec_err_t e = vpx_codec_dec_init(&d->vpx, iface, &cfg, 0);
+        vpx_codec_err_t e = md_vpx_open(&d->vpx, d->type == MD_TYPE_VP9, (unsigned)d->w, (unsigned)d->h);
         if (e) { LOG("[RED] movie: libvpx failed to create the %s decoder: %s", codec, vpx_codec_err_to_string(e)); return 0; }
-        if (d->type == MD_TYPE_VP9) vpx_codec_control(&d->vpx, VP9D_SET_ROW_MT, 1);
         d->vpx_on = 1;
-        LOG("[movie] libvpx %s: %s decoder, %d threads", vpx_codec_version_str(), codec, cfg.threads);
+        LOG("[movie] libvpx %s: %s decoder, %d threads", vpx_codec_version_str(), codec, md_threads());
     }
     if (vpx_codec_decode(&d->vpx, p, (unsigned)n, NULL, 0)) {
         if (!d->red_dec++) LOG("[RED] movie: %s decode error (first case, %d bytes): %s %s", codec, n, vpx_codec_error(&d->vpx), vpx_codec_error_detail(&d->vpx) ? vpx_codec_error_detail(&d->vpx) : "");
@@ -395,6 +437,87 @@ static OSStatus aac_feed(AudioConverterRef c, UInt32 *np, AudioBufferList *bl, A
     d->aac_desc = (AudioStreamPacketDescription){0, 0, d->aac_pkt_n}; if (pd) *pd = &d->aac_desc;
     *np = 1; d->aac_pkt = NULL; return 0;
 }
+// ---------- AAC channel order ----------
+// The console hands a game MediaCodec's channel order (hle_movie_aac_order.h: 5.1 is L R C LFE Ls Rs); AudioToolbox's converter hands out the order its output channel layout names.
+// md_aac_layout reads that layout once per stream, before the first packet, and for 3 channels or more logs it and sets the same labels in the console's order
+// (kAudioConverterOutputChannelLayout, as Chromium's AudioToolbox decoder sets it): the converter then moves whole channels between slots, the samples stay what it decodes.
+// Off by default in release 1 until a device A/B with a 5.1 AAC movie confirms that the layout AudioToolbox reports is the order its samples come out in (t_movie_vpx checks
+// it on the Mac): DM_AAC_LAYOUT=1 sets the console's order, unset or 0 keeps AudioToolbox's order, as before (the order is still read and logged either way).
+// g_aac_layout: -1 until read (t_movie_vpx sets it). Atomic: each movie decoder's own thread reads it, and two may read it first at once (the value is the same either way)
+static _Atomic int g_aac_layout = -1;
+static int md_aac_layout_on(void) { if (g_aac_layout < 0) { const char *e = getenv("DM_AAC_LAYOUT"); g_aac_layout = e && !strcmp(e, "1"); } return g_aac_layout; }
+_Static_assert(AACL_LEFT == kAudioChannelLabel_Left && AACL_RIGHT == kAudioChannelLabel_Right && AACL_CENTER == kAudioChannelLabel_Center && AACL_LFE == kAudioChannelLabel_LFEScreen &&
+               AACL_LS == kAudioChannelLabel_LeftSurround && AACL_RS == kAudioChannelLabel_RightSurround && AACL_LC == kAudioChannelLabel_LeftCenter &&
+               AACL_RC == kAudioChannelLabel_RightCenter && AACL_CS == kAudioChannelLabel_CenterSurround && AACL_LSD == kAudioChannelLabel_LeftSurroundDirect &&
+               AACL_RSD == kAudioChannelLabel_RightSurroundDirect && AACL_TS == kAudioChannelLabel_TopCenterSurround && AACL_VHL == kAudioChannelLabel_VerticalHeightLeft &&
+               AACL_VHC == kAudioChannelLabel_VerticalHeightCenter && AACL_VHR == kAudioChannelLabel_VerticalHeightRight && AACL_TBL == kAudioChannelLabel_TopBackLeft &&
+               AACL_TBC == kAudioChannelLabel_TopBackCenter && AACL_TBR == kAudioChannelLabel_TopBackRight && AACL_RLS == kAudioChannelLabel_RearSurroundLeft &&
+               AACL_RRS == kAudioChannelLabel_RearSurroundRight && AACL_MONO == kAudioChannelLabel_Mono && kAudioChannelLabel_LeftWide == 35 &&
+               kAudioChannelLabel_RightWide == 36 && kAudioChannelLabel_LFE2 == 37, "hle_movie_aac_order.h's labels are CoreAudioTypes' (CoreAudioBaseTypes.h)");
+// The labels of an AudioChannelLayout of size bytes, a tag or a bitmap expanded by AudioToolbox (kAudioFormatProperty_ChannelLayoutForTag / ForBitmap); → how many, 0 when
+// it names none or more than cap. A layout is as long as its descriptions: one with a tag or a bitmap and none is MD_LAYOUT_HEAD (12) bytes, less than sizeof(AudioChannelLayout)
+#define MD_LAYOUT_HEAD offsetof(AudioChannelLayout, mChannelDescriptions)
+static int md_layout_labels(const AudioChannelLayout *l, UInt32 size, uint32_t *lab, int cap) {
+    AudioChannelLayout *x = NULL;
+    if (l->mChannelLayoutTag != kAudioChannelLayoutTag_UseChannelDescriptions) {
+        int bm = l->mChannelLayoutTag == kAudioChannelLayoutTag_UseChannelBitmap;
+        AudioFormatPropertyID id = bm ? kAudioFormatProperty_ChannelLayoutForBitmap : kAudioFormatProperty_ChannelLayoutForTag;
+        const void *spec = bm ? (const void *)&l->mChannelBitmap : (const void *)&l->mChannelLayoutTag;
+        UInt32 n = 0, ss = bm ? (UInt32)sizeof l->mChannelBitmap : (UInt32)sizeof l->mChannelLayoutTag;
+        if (AudioFormatGetPropertyInfo(id, ss, spec, &n) || n < MD_LAYOUT_HEAD || !(x = malloc(n))) return 0;
+        if (AudioFormatGetProperty(id, ss, spec, &n, x) || n < MD_LAYOUT_HEAD) { free(x); return 0; }
+        l = x; size = n;
+    }
+    int k = 0; UInt32 nd = l->mNumberChannelDescriptions;
+    if (nd <= (UInt32)cap && size >= MD_LAYOUT_HEAD + (size_t)nd * sizeof(AudioChannelDescription))
+        for (; k < (int)nd; k++) lab[k] = l->mChannelDescriptions[k].mChannelLabel;
+    free(x);
+    return k;
+}
+// The converter's output channel layout as labels (n of them, 0 when it gives none), and its tag
+static int md_aac_labels(mdec_t *d, uint32_t *lab, AudioChannelLayoutTag *tag, OSStatus *st) {
+    UInt32 size = 0; int n = 0; AudioChannelLayout *l = NULL; *tag = 0;
+    *st = AudioConverterGetPropertyInfo(d->aac, kAudioConverterOutputChannelLayout, &size, NULL);
+    if (!*st && size >= MD_LAYOUT_HEAD && (l = malloc(size)) && !(*st = AudioConverterGetProperty(d->aac, kAudioConverterOutputChannelLayout, &size, l)) && size >= MD_LAYOUT_HEAD) {
+        *tag = l->mChannelLayoutTag; n = md_layout_labels(l, size, lab, AAC_LAYOUT_MAX);
+    }
+    free(l);
+    return n;
+}
+static _Atomic unsigned g_aac_lay_lines;
+static void md_aac_layout(mdec_t *d) {
+    if (d->ch < 3) return;   // mono and stereo have one order
+    uint32_t from[AAC_LAYOUT_MAX], to[AAC_LAYOUT_MAX], now[AAC_LAYOUT_MAX]; AudioChannelLayoutTag tag, tag2; OSStatus st, st2 = 0, st3;
+    int n = md_aac_labels(d, from, &tag, &st), r = n == d->ch ? aac_wave_order(from, n, to) : -1, on = md_aac_layout_on(), took = 0, n2 = 0;
+    if (r == 1 && on) {
+        UInt32 ls = (UInt32)(MD_LAYOUT_HEAD + (size_t)n * sizeof(AudioChannelDescription));
+        AudioChannelLayout *w = calloc(1, ls);
+        if (w) {
+            w->mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelDescriptions; w->mNumberChannelDescriptions = (UInt32)n;
+            for (int i = 0; i < n; i++) w->mChannelDescriptions[i].mChannelLabel = to[i];   // flags all off, no coordinates
+            st2 = AudioConverterSetProperty(d->aac, kAudioConverterOutputChannelLayout, ls, w); free(w);
+        } else st2 = -108;   // memFullErr
+        n2 = st2 ? 0 : md_aac_labels(d, now, &tag2, &st3);   // what it reports now
+        took = n2 == n && !memcmp(now, to, (size_t)n * sizeof *now);
+    }
+    // One line per stream, when it says something new for this decoder (a Stop and Start opens the converter again), and at most 16 a run, then every 2^k-th
+    uint64_t said = (uint64_t)(r + 2) << 60 | (uint64_t)on << 59 | (uint64_t)took << 58 | (uint64_t)(tag & 0xffffff) << 24 | (uint64_t)(n & 15) << 20 | (uint64_t)(st2 & 0xfffff);
+    if (said == d->aac_lay_said) return;
+    d->aac_lay_said = said;
+    unsigned k = ++g_aac_lay_lines; if (k > 16 && (k & (k - 1))) return;
+    char a[64], b[64], c[64]; aac_labels_text(from, n, a, sizeof a);
+    if (!n) LOG("[RED] movie: AAC: AudioToolbox gives no output channel layout for %d channels (%d): its own channel order is kept", d->ch, (int)st);
+    else if (n != d->ch) LOG("[RED] movie: AAC: AudioToolbox's output channel layout has %d channels (%s, layout tag %#x) for a %d-channel stream: its order is kept", n, a, (unsigned)tag, d->ch);
+    else if (r < 0) LOG("[RED] movie: AAC: %d channels in AudioToolbox's order %s (layout tag %#x): a channel has no place in MediaCodec's order, AudioToolbox's is kept", n, a, (unsigned)tag);
+    else if (!r) LOG("[movie] AAC: %d channels in AudioToolbox's order %s (layout tag %#x), already the console's (MediaCodec's)", n, a, (unsigned)tag);
+    else {
+        aac_labels_text(to, n, b, sizeof b);
+        if (!on) LOG("[movie] AAC: %d channels in AudioToolbox's order %s (layout tag %#x), kept (DM_AAC_LAYOUT=0); the console's (MediaCodec's) is %s", n, a, (unsigned)tag, b);
+        else if (took) LOG("[movie] AAC: %d channels in AudioToolbox's order %s (layout tag %#x), handed out in the console's (MediaCodec's) order %s (DM_AAC_LAYOUT)", n, a, (unsigned)tag, b);
+        else { aac_labels_text(now, n2, c, sizeof c);
+               LOG("[RED] movie: AAC: AudioToolbox did not take the console's channel order %s (%d; it reports %s): %d channels in its order %s (layout tag %#x)", b, (int)st2, n2 ? c : "no layout", n, a, (unsigned)tag); }
+    }
+}
 static int md_aac_open(mdec_t *d) {
     static const int rates[] = {96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350};
     uint8_t asc[64]; int an = d->vhdr_n[0] > 0 && d->vhdr_n[0] <= (int)sizeof asc ? d->vhdr_n[0] : 0;
@@ -416,7 +539,9 @@ static int md_aac_open(mdec_t *d) {
     p = esds_descr(p, 5, (unsigned)an); memcpy(p, asc, (size_t)an); p += an;
     st = AudioConverterSetProperty(d->aac, kAudioConverterDecompressionMagicCookie, (UInt32)(p - ck), ck);
     if (st && !d->red_vb++) LOG("[RED] movie: AAC configuration not accepted by AudioToolbox (%d)", (int)st);
-    LOG("[movie] AAC: %d channels %d Hz, AudioSpecificConfig %d bytes (object type %d)", d->ch, d->rate, an, asc[0] >> 3);
+    if (!d->aac_reopen) LOG("[movie] AAC: %d channels %d Hz, AudioSpecificConfig %d bytes (object type %d)", d->ch, d->rate, an, asc[0] >> 3);
+    d->aac_reopen = 0;
+    md_aac_layout(d);
     return 1;
 }
 // one packet → PCM16 interleaved in the slot; 1 when there are samples (the decoder's start-up delay may give none for the first packet)
@@ -435,7 +560,7 @@ static int md_aac(mdec_t *d, const uint8_t *p, int n, int slot) {
 }
 // The H.264 decoder, made by Configure (when the stream's parameter sets come with it) or by the first packet; RGBA pictures in the native texture mode either way.
 // Absolum's movies bring csd-0 / csd-1 to Configure, and a decoder made there used to stay NV12: the frames' bytes went into the RGBA texture as they were
-static void md_avc_open(mdec_t *d) { if (!d->avc) { d->avc = mavc_new(); if (d->fmt == MD_FMT_ABGR) mavc_set_rgba(d->avc); } }
+static void md_avc_open(mdec_t *d) { if (!d->avc) { d->avc = mavc_new(&d->vt); if (d->fmt == MD_FMT_ABGR) mavc_set_rgba(d->avc); } }
 // H.264: decode the packet (if any) and hand out the next picture in presentation order (with jflush every queued one in turn); 1 = a picture is in the slot, its time in jpts_out
 static int md_avc(mdec_t *d, const uint8_t *p, int n, int slot, int take_only) {
     md_avc_open(d);
@@ -613,6 +738,7 @@ HLE_FORCE("_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatE", "mov
           void **self, int type, int fmt) { h_movie_Decoder3(self, type, fmt); }
 static void md_free(void **self) {
     mdec_t *d = md_of(self); if (!d) return;
+    movie_vt_cancel(&d->vt);
     // The pump thread first, before its pending signals are dropped, the decoder thread is told to quit and any buffer is freed: a pump still running queues signals for
     // this decoder (md_defer_at), and one queued after the drop would reach the deferred thread after free(d)
     if (d->pk_on) { pthread_mutex_lock(&d->pkm); d->pk_quit = 1; pthread_cond_signal(&d->pkc); pthread_mutex_unlock(&d->pkm); pthread_join(d->pk, NULL); }
@@ -676,10 +802,25 @@ HLE_FORCE("_ZN5movie7Decoder5StartEv", "movie decoder start: all inputs empty, n
     md_defer(d, 0);
     return 0;
 }
-// clear the queues and slots; with close, the libvpx decoder is closed too (rebuilt at the next packet)
+static int md_aac_flush_on(void) { static _Atomic int on = -1;   // atomic: guest threads read it, two may read it first at once
+    if (on < 0) { const char *e = getenv("DM_AAC_FLUSH"); on = !(e && !strcmp(e, "0")); } return on; }
+// clear the queues and slots; with close (Stop, Reset), every decoder is closed too (rebuilt at the next packet). Without (a Flush), libvpx and H.264 are kept and the
+// audio decoder is closed, in the same hold of dmu, so no packet a client sends meanwhile decodes in the old one (md_pump decodes audio on the caller under dmu):
+// - A seek: start the overlap afresh. The Vorbis decoder is closed and the next packet opens it again from the headers (md_vorbis_open). stb_vorbis_flush_pushdata is not used:
+//   it puts the decoder into its page search mode, and the packets md_vorbis hands it after that (one whole page per call) never gave a sample again (Smash: the opening movie
+//   lost its sound for good after the first Flush; t_movie_vpx)
+// - AAC the same way: the converter is disposed on its thread as at a Stop (MDJ_CLOSE, which an AAC decoder holds nothing else for), and the next packet opens it again
+//   (md_aac_open), so the sound after a seek or a loop starts as after Stop and Start, which games already get, and not with the old position's overlap: MediaCodec, which
+//   movie::Decoder wraps, empties its decoder at a flush (Android's C2SoftAacDec onFlush_sm), and Apple asks for AudioConverterReset after a discontinuity. Disposing it is
+//   what Stop does; a reset would be a state no game has met here. DM_AAC_FLUSH=0 keeps the converter across a Flush, as before
 static void md_reset(mdec_t *d, int close) {
+    movie_vt_cancel(&d->vt);
     dm_host_lock(&d->dmu);   // wait for the packet being decoded
-    if (close) md_job(d, MDJ_CLOSE);
+    if (close) { md_job(d, MDJ_CLOSE); d->aac_reopen = 0; }   // the next stream's converter prints its line, though a Flush closed the last one
+    else {
+        if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; }
+        if (d->type == MD_TYPE_AAC && d->aac && md_aac_flush_on()) { md_job(d, MDJ_CLOSE); d->aac_reopen = 1; }
+    }
     if (d->avc) mavc_drop(d->avc);   // H.264 pictures waiting for their turn belong to the old position
     dm_host_mutex_lock(&d->mu);
     // Every input goes back to the free list, as with MediaCodec, but one the client holds may still be sent: Big Brain Academy: Brain vs. Brain's event thread acquires inputs while its
@@ -690,6 +831,7 @@ static void md_reset(mdec_t *d, int close) {
     // a flush keeps each slot's last picture: the same game reads an output it acquired before the flush right after it (a black frame in the loop otherwise)
     for (int i = 0; i < MD_NOUT; i++) { d->out[i].used = 0; d->out[i].cli = 0; d->out[i].rnd = 0; if (close) d->out[i].pic = 0; }
     pthread_mutex_unlock(&d->mu);
+    movie_vt_continue(&d->vt);
     pthread_mutex_unlock(&d->dmu);
 }
 HLE_FORCE("_ZN5movie7Decoder4StopEv", "movie decoder stop", int, h_movie_Stop, void **self) {
@@ -708,10 +850,11 @@ HLE_FORCE("_ZN5movie7Decoder5ResetEv", "movie decoder reset", int, h_movie_Reset
 // Metroid Dread ends a movie with Flush, Flush, Stop, destroy; a signal raised at the flush let its "input available" handler post the wrapper object to the message queue, the object was destroyed right after, and the worker thread read the freed object; when looping it calls Start after the Flush
 HLE_FORCE("_ZN5movie7Decoder5FlushEv", "movie decoder flush: all inputs and outputs returned", int, h_movie_Flush, void **self) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
-    MD_TRACE(d, 5, "Flush"); md_defer_drop(d); md_reset(d, 0);
-    // A seek: start the overlap afresh. The decoder is closed and the next packet opens it again from the headers (md_vorbis_open). stb_vorbis_flush_pushdata is not used: it puts the decoder into its page search mode,
-    // and the packets md_vorbis hands it after that (one whole page per call) never gave a sample again (Smash: the opening movie lost its sound for good after the first Flush; t_movie_vpx)
-    if (d->vb) { dm_host_lock(&d->dmu); stb_vorbis_close(d->vb); d->vb = NULL; pthread_mutex_unlock(&d->dmu); }
+    MD_TRACE(d, 5, "Flush"); md_defer_drop(d); md_reset(d, 0);   // the audio decoder is closed there (Vorbis; AAC under DM_AAC_FLUSH); the slots' pictures stay
+    if (!MD_AUDIO(d)) {   // a deferred video signal taken after the drop above may still be running: wait for it with both decoder locks free, keeping events queued since (upstream NXNative d1d126e3c)
+        dm_host_lock(&g_dfmu);
+        pthread_mutex_unlock(&g_dfmu);
+    }
     return 0;
 }
 HLE_FORCE("_ZN5movie7Decoder23AcquireInputBufferIndexEPiS1_", "movie decoder: acquire a free input index", int, h_movie_AcqIn, void **self, int *idx, int *left) {
@@ -798,7 +941,11 @@ HLE_FORCE("_ZN5movie7Decoder24AcquireOutputBufferIndexEPiPlPjS1_", "movie decode
         *idx = s; *pts = d->out[s].pts; *flags = d->out[s].flags; *left = d->noutq; d->out[s].cli = 1; r = 0;
     }
     pthread_mutex_unlock(&d->mu);
-    if (!r && !MD_AUDIO(d)) dm_movie_picture(0);
+    if (!r && !MD_AUDIO(d)) {
+        dm_movie_picture(0);
+        // Deferred notifications coalesce. A client taking one output per event (Super Mario Sunshine's Hagi) still needs a wake for the rest of the batch (upstream 34fa4691a)
+        if (*left) md_pump_ev(d, 1);
+    }
     if (!r) MD_TRACE(d, 8, "AcquireOutputBufferIndex → index %d time %lld flags %#x left %d", *idx, (long long)*pts, *flags, *left);
     return r;
 }

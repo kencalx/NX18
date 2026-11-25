@@ -17,116 +17,6 @@ extension LauncherModel {
     func binding(_ s: Setting) -> Binding<String> { Binding(get: { self.shown(s) }, set: { self.pick(s, $0) }) }   // the value the row shows (shown); a greyed row or option is refused (pick)
 }
 
-struct SettingRow: View {
-    let s: Setting
-    @ObservedObject var m: LauncherModel
-
-    private var locked: Bool { m.fixed.contains(s.env) }
-    private var inactive: Bool { m.inactiveWhy(s) != nil }
-    private var current: String { m.shown(s) }   // the player's choice, or the value a greyed row shows (Picture's Stretch under Ultrawide)
-    // The setting's note, the reason a rule gives (in its place when the row does nothing: what the setting costs no longer matters then), and the lock. Each line is decided
-    // as the values change, as is the row's disabled state
-    private var note: String {
-        var parts: [String] = []
-        let reason = m.reason(s)
-        if let r = reason, r.inactive { parts.append(r.why) } else {
-            if !s.note.isEmpty { parts.append(s.note) }
-            if let r = reason, !r.why.isEmpty { parts.append(r.why) }
-        }
-        if locked { parts.append(m.fromLaunch.contains(s.env) ? "Set at launch" : "Set by an env file") }
-        return parts.joined(separator: " · ")
-    }
-    // An option's label in the menu: with its reason beside it while a rule greys it or gives it a hint. The chosen option keeps its plain label, as the menu's button shows it,
-    // and its reason is the row's note
-    private func optionLabel(_ o: [String]) -> String {
-        guard o[0] != current, let why = m.optionInactive(s, o[0]) ?? m.optionHint(s, o[0]), !why.isEmpty else { return o[1] }
-        return "\(o[1]) (\(why))"
-    }
-    private var rangeValue: Binding<Double> {
-        Binding(get: { Double(m.shown(s)) ?? s.max ?? 1 },
-                set: { m.values[s.env] = String(format: "%.2f", $0) })
-    }
-    private var percentage: String { m.rangeLabel(s, rangeValue.wrappedValue) }
-
-    private var settingLabel: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(s.label).foregroundStyle(NX18Palette.text)
-            if !note.isEmpty { Text(note).nxFont(.footnote).foregroundStyle(NX18Palette.muted) }
-        }
-    }
-
-    private var options: some View {
-        ForEach(s.options ?? [], id: \.[0]) { o in
-            Text(optionLabel(o)).tag(o[0]).selectionDisabled(m.optionInactive(s, o[0]) != nil)
-        }
-    }
-    private var currentLabel: String { s.options?.first { $0[0] == current }?[1] ?? current }
-    // A choice on the iPhone and iPad, and on the Mac with the UI font (NXFont.swift; sideBySide): the menu picker draws its value itself, on iOS in the system font (a UIKit
-    // button), and under the row's note when it has one instead of on the right as on the other rows, and on the Mac in an NSPopUpButton whose title sits below the row's name
-    // (AppKit lays the font out with its line gap). So the value is NX 18's own text in a Menu, and only the option list is the system's menu (the same Picker, inline in it:
-    // checkmark, greyed options). Name and value side by side, the value under the name at the accessibility text sizes, as the menu picker does
-    @ViewBuilder private var fontChoice: some View {
-        let value = Menu {
-            Picker(selection: m.binding(s)) { options } label: { Text(s.label) }
-                .pickerStyle(.inline)
-        } label: {
-            HStack(spacing: 4) {
-                Text(currentLabel).nxFont(.body)
-                Image(systemName: "chevron.up.chevron.down").imageScale(.small)
-            }
-            .foregroundStyle(enabled && !locked && !inactive ? NX18Palette.cyan : NX18Palette.muted)
-            .contentShape(Rectangle())
-        }
-        .menuStyle(.button).buttonStyle(.plain).fixedSize()
-        .accessibilityLabel(Text(s.label)).accessibilityValue(Text(currentLabel))
-        if typeSize.isAccessibilitySize {
-            VStack(alignment: .leading, spacing: 6) { settingLabel.accessibilityHidden(true); value.accessibilityHint(Text(note)) }
-        } else {
-            HStack(alignment: .firstTextBaseline) { settingLabel.accessibilityHidden(true); Spacer(minLength: 12); value.accessibilityHint(Text(note)) }
-        }
-    }
-    @Environment(\.dynamicTypeSize) private var typeSize
-    @Environment(\.legibilityWeight) private var legibility
-    @Environment(\.isEnabled) private var enabled
-    // fontChoice, else the menu picker: with iOS's Bold Text on (the system's layout, whose font follows it), and in the Mac's settings window without the UI font
-    private var sideBySide: Bool {
-        #if os(iOS)
-        return legibility != .bold
-        #else
-        return NXFont.name != nil && legibility != .bold
-        #endif
-    }
-
-    var body: some View {
-        Group {
-            switch s.kind {
-            case "choice":
-                if sideBySide { fontChoice } else {
-                    Picker(selection: m.binding(s)) { options } label: { settingLabel }
-                        .pickerStyle(.menu)
-                }
-            case "range":
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        settingLabel
-                        Spacer()
-                        Text(percentage).monospacedDigit().foregroundStyle(NX18Palette.muted)
-                    }
-                    Slider(value: rangeValue, in: (s.min ?? 0)...(s.max ?? 1), step: s.step ?? 0.05)
-                        .accessibilityLabel(s.label)
-                        .accessibilityValue(percentage)
-                }
-            default:
-                Toggle(isOn: Binding(get: { current == s.onValue }, set: { m.pick(s, $0 ? s.onValue : s.offValue) })) {
-                    settingLabel
-                }
-                .disabled(m.optionInactive(s, current == s.onValue ? s.offValue : s.onValue) != nil)   // the value it would switch to is greyed
-            }
-        }
-        .disabled(locked || inactive)
-        .tint(NX18Palette.cyan)   // switches on, the slider, the menu's value: the logo's cyan
-    }
-}
 
 // MARK: - The NX 18 look (docs/images/nx18/make_logo.py): charcoal surfaces, cyan accents, coral for Play, Reset and the 18. The accents, the rails and the mark keep these
 // colours on every game; only the background may take a little of the art's colour (background(tint:))
@@ -141,6 +31,7 @@ public enum NX18Palette {
     public static let cyan = Color(nx18: cyanHex)          // section headings, switches, the slider, the focus ring, the N
     public static let coral = Color(nx18: coralHex)        // the Play pill, Reset, the 18 pill
     static let cyanHex: UInt32 = 0x00C8F5, coralHex: UInt32 = 0xFF6B5A   // also the rails' Core Animation layer (NX18RailsFlowView)
+    static let railCyanLightHex: UInt32 = 0x0488A7, railCoralLightHex: UInt32 = 0xDC4A3C   // the rails in the light look: deeper shades of the logo's hues at full strength (gate-ui §11a.3a)
 
     // The art's average colour, for the tint: the image drawn into an 8 x 8 sRGB bitmap with Core Graphics, on the CPU (no Metal device or Core Image context: Launcher.swift's
     // metalDeviceMade). nil for an image Core Graphics cannot draw or one that is all transparent
@@ -280,12 +171,13 @@ struct NX18MarkShade: View {
 // pill as an exponent. Drawn as paths, no image or font; height is the whole mark's (the pill rises above the letters), the width follows (NX18MarkShape.aspect)
 struct NX18Mark: View {
     var height: CGFloat = 24
+    var light = false   // on a light card or welcome (gate-ui §11a.3a, owner check 8): the rails' deeper pair, the 18's digits cut out in the light fill
     var body: some View {
         ZStack {
-            NX18MarkShape(part: .cyan).fill(NX18Palette.cyan)
-            NX18MarkShape(part: .coral).fill(NX18Palette.coral)
-            NX18MarkShape(part: .pill).fill(NX18Palette.coral)
-            NX18MarkShape(part: .digits).fill(NX18Palette.charcoal)
+            NX18MarkShape(part: .cyan).fill(light ? Color(nx18: NX18Palette.railCyanLightHex) : NX18Palette.cyan)
+            NX18MarkShape(part: .coral).fill(light ? Color(nx18: NX18Palette.railCoralLightHex) : NX18Palette.coral)
+            NX18MarkShape(part: .pill).fill(light ? Color(nx18: NX18Palette.railCoralLightHex) : NX18Palette.coral)
+            NX18MarkShape(part: .digits).fill(light ? Color(nx18: 0xECECF0) : NX18Palette.charcoal)
         }
         .frame(width: height * NX18MarkShape.aspect, height: height)
         .accessibilityElement()
@@ -351,12 +243,15 @@ struct NX18Rails: View {
     var thickness: CGFloat = 2.5
     var flowing = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var scheme   // the page the rail borders: the deeper pair in light (§11a.3a)
+    @State private var lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled   // still under Low Power Mode too (GW19)
     var body: some View {
         Group {
             if flowing {
-                NX18RailsFlow(axis: axis, moving: !reduceMotion)
+                NX18RailsFlow(axis: axis, moving: !reduceMotion && !lowPower, light: scheme == .light)
+                    .onReceive(NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange)) { _ in lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled }
             } else {
-                LinearGradient(colors: [NX18Palette.cyan, NX18Palette.coral],
+                LinearGradient(colors: scheme == .light ? [Color(nx18: NX18Palette.railCyanLightHex), Color(nx18: NX18Palette.railCoralLightHex)] : [NX18Palette.cyan, NX18Palette.coral],
                                startPoint: axis == .vertical ? .top : .leading, endPoint: axis == .vertical ? .bottom : .trailing)
             }
         }
@@ -371,11 +266,19 @@ typealias NX18PlatformView = NSView
 typealias NX18PlatformView = UIView
 #endif
 
-// The flowing rails: a gradient layer three lines long (cyan, coral, cyan, coral) slid along the line by two lengths and round again, so the line shows cyan to coral (as the
+// The rails' idle rule (gate-ui GW19): one cycle, then the still cyan-to-coral line; an input (NX18RailsIdle.pulse: a touch, a pad or key event on the Gate) runs one more, at most one
+// queued. DM_UI_IDLE=0 brings back the endless flow, for the A/B. Low Power Mode keeps them still, as Reduce Motion does
+enum NX18RailsIdle {
+    static let pulseNote = Notification.Name("nx18.rails.pulse")
+    static let endless: Bool = { ProcessInfo.processInfo.environment["DM_UI_IDLE"] == "0" }()
+    @MainActor static func pulse() { NotificationCenter.default.post(name: pulseNote, object: nil) }
+}
+
+// The flowing rails: a gradient layer three lines long (cyan, coral, cyan, coral) slid along the line by two lengths, so the line shows cyan to coral (as the
 // still rails do) at the start and end of each cycle and coral to cyan halfway. The slide is a CABasicAnimation, run by the render server: no timer, display link or SwiftUI
 // update in the app while it moves. It is only on while the view is in a window (and, on the Mac, while the window is visible: not minimised, hidden or covered), and not under
 // Reduce Motion (moving false: the still cyan-to-coral line). A change of length starts it again from the still position
-final class NX18RailsFlowView: NX18PlatformView {
+final class NX18RailsFlowView: NX18PlatformView, CAAnimationDelegate {
     static let period: CFTimeInterval = 14   // seconds for a point of the line to go from cyan to coral and back
     static let key = "nx18.flow"
     static let frameRates = CAFrameRateRange(minimum: 10, maximum: 30, preferred: 30)
@@ -383,14 +286,24 @@ final class NX18RailsFlowView: NX18PlatformView {
     private let strip = CAGradientLayer()
     private var length: CGFloat = 0
     private var observers: [NSObjectProtocol] = []
+    private var queued = false   // an input came while a cycle ran: one more after it
     var moving = true { didSet { if moving != oldValue { restart() } } }
+    // The look's pair: the logo's in dark, the deeper one in light (§11a.3a). Only the colours change: the slide is left alone, so the flow neither restarts nor jumps
+    var light = false { didSet { if light != oldValue { paint() } } }
     var isFlowing: Bool { strip.animation(forKey: Self.key) != nil }   // the Duo harness's check
+    private func paint() {
+        let pair = light ? [NX18Palette.railCyanLightHex, NX18Palette.railCoralLightHex] : [NX18Palette.cyanHex, NX18Palette.coralHex]
+        let c = pair.map { h -> CGColor in let v = NX18RGB(hex: h); return CGColor(srgbRed: v.r, green: v.g, blue: v.b, alpha: 1) }
+        strip.colors = [c[0], c[1], c[0], c[1]]
+    }
 
     init(axis: Axis) {
         self.axis = axis
         super.init(frame: .zero)
-        let c = [NX18Palette.cyanHex, NX18Palette.coralHex].map { h -> CGColor in let v = NX18RGB(hex: h); return CGColor(srgbRed: v.r, green: v.g, blue: v.b, alpha: 1) }
-        strip.colors = [c[0], c[1], c[0], c[1]]
+        paint()
+        pulseObserver = NotificationCenter.default.addObserver(forName: NX18RailsIdle.pulseNote, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pulse() }
+        }
         strip.startPoint = axis == .vertical ? CGPoint(x: 0.5, y: 0) : CGPoint(x: 0, y: 0.5)
         strip.endPoint = axis == .vertical ? CGPoint(x: 0.5, y: 1) : CGPoint(x: 1, y: 0.5)
 #if os(macOS)
@@ -407,7 +320,13 @@ final class NX18RailsFlowView: NX18PlatformView {
 #endif
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
-    isolated deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+    private var pulseObserver: NSObjectProtocol?
+    isolated deinit { observers.forEach(NotificationCenter.default.removeObserver); pulseObserver.map(NotificationCenter.default.removeObserver) }
+    // One more cycle after an input: now when the line is still, else after the running one (at most one queued)
+    func pulse() { if isFlowing { queued = true } else { restart() } }
+    nonisolated func animationDidStop(_ anim: CAAnimation, finished flag: Bool) {
+        MainActor.assumeIsolated { if flag, queued { queued = false; restart() } }
+    }
 
 #if os(macOS)
     override var isFlipped: Bool { true }   // the strip's layer laid out from the top left, as on iOS
@@ -448,9 +367,10 @@ final class NX18RailsFlowView: NX18PlatformView {
         a.fromValue = from
         a.toValue = from - 2 * length
         a.duration = Self.period
-        a.repeatCount = .infinity
+        a.repeatCount = NX18RailsIdle.endless ? .infinity : 1   // one cycle, then the still line (GW19): its end is the start's picture, so it stops without a jump
         a.timingFunction = CAMediaTimingFunction(name: .linear)
-        a.isRemovedOnCompletion = false
+        a.isRemovedOnCompletion = !NX18RailsIdle.endless
+        a.delegate = self
         // A slow drift (a few points a frame at 30 Hz) needs no ProMotion rate: without a range the render server may compose the screen at 120 Hz for it while the launcher idles
         a.preferredFrameRateRange = Self.frameRates
         strip.add(a, forKey: Self.key)
@@ -461,15 +381,17 @@ final class NX18RailsFlowView: NX18PlatformView {
 private struct NX18RailsFlow: NSViewRepresentable {
     let axis: Axis
     let moving: Bool
-    func makeNSView(context: Context) -> NX18RailsFlowView { NX18RailsFlowView(axis: axis) }
-    func updateNSView(_ v: NX18RailsFlowView, context: Context) { v.moving = moving }
+    var light = false
+    func makeNSView(context: Context) -> NX18RailsFlowView { let v = NX18RailsFlowView(axis: axis); v.light = light; return v }
+    func updateNSView(_ v: NX18RailsFlowView, context: Context) { v.moving = moving; v.light = light }
 }
 #else
 private struct NX18RailsFlow: UIViewRepresentable {
     let axis: Axis
     let moving: Bool
-    func makeUIView(context: Context) -> NX18RailsFlowView { NX18RailsFlowView(axis: axis) }
-    func updateUIView(_ v: NX18RailsFlowView, context: Context) { v.moving = moving }
+    var light = false
+    func makeUIView(context: Context) -> NX18RailsFlowView { let v = NX18RailsFlowView(axis: axis); v.light = light; return v }
+    func updateUIView(_ v: NX18RailsFlowView, context: Context) { v.moving = moving; v.light = light }
 }
 #endif
 
@@ -494,34 +416,6 @@ extension View {
     }
 }
 
-// The presets as chips (Battery · Balanced · Quality): the one the values are is filled cyan, none when they match no preset. A tap applies one (LauncherModel.applyPreset,
-// which leaves fixed and greyed rows). Nothing is drawn for a list without presets. focused: the chip the controller's focus is on
-struct PresetChips: View {
-    @ObservedObject var m: LauncherModel
-    var focused: LauncherPreset? = nil
-    var body: some View {
-        if m.hasPresets {
-            let active = m.activePreset
-            HStack(spacing: 8) {
-                ForEach(LauncherPreset.allCases) { p in
-                    Button { m.applyPreset(p) } label: {
-                        Text(p.title).nxFont(.subheadline, weight: .semibold).lineLimit(1)
-                            .foregroundStyle(active == p ? NX18Palette.charcoal : Color.white)
-                            .padding(.horizontal, 14).padding(.vertical, 7)
-                            .background(Capsule().fill(active == p ? NX18Palette.cyan : NX18Palette.row))
-                            .overlay(Capsule().strokeBorder(active == p ? Color.clear : NX18Palette.separator, lineWidth: 1))
-                            .contentShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .nx18Focus(focused == p, cornerRadius: 100)
-                    .accessibilityLabel("\(p.title) preset")
-                    .accessibilityHint(p == .balanced ? "The settings this game was tested with" : "Sets frame rate, resolution and image quality for \(p.title.lowercased())")
-                    .accessibilityAddTraits(active == p ? .isSelected : [])
-                }
-            }
-        }
-    }
-}
 
 // The line under the game's name: the console the game was built for, when it was last played, cloud saves and free memory, each only when known. The launcher passes what
 // it knows (launcher.json's console, Documents/save's newest file, CloudSaves, os_proc_available_memory) and refreshes it
@@ -539,10 +433,12 @@ struct LauncherStatus: Equatable {
     var cloud: Cloud = .off
     var memoryFree: UInt64? = nil
     var console: Console? = nil
+    var preset: String? = nil   // the preset state ("Balanced", "Custom (from Balanced)"): the Gate's line holds only it and the console (gate-ui O4)
 
     func parts(now: Date = Date()) -> [Part] {
         var out: [Part] = []
         if let c = console { out.append(Part(id: "console", text: c.text, dot: c.dot)) }
+        if let p = preset { out.append(Part(id: "preset", text: p, dot: nil)) }
         if let d = lastPlayed {
             let f = RelativeDateTimeFormatter()
             f.unitsStyle = .full

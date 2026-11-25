@@ -65,7 +65,7 @@ class CodeForm(unittest.TestCase):
         src = (TOOLS / 'dmsh_build.py').read_text()
         self.assertEqual(form(src + '\n# trailing comment\n'), form(src))
         self.assertNotEqual(form(src + '\nX = 1\n'), form(src))
-        self.assertNotEqual(form(src.replace("'--msl-version', '20300'", "'--msl-version', '20400'")), form(src))
+        self.assertNotEqual(form(src.replace("'--msl-pad-fragment-output'", "'--msl-pad-fragment-output', '--msl-decoration-binding'")), form(src))
 
 
 NO_OUTPUT = {'dmsh_mtlcache', 'dmsh_pch'}   # they only make a compile cheaper, and never change an output
@@ -92,7 +92,8 @@ class Coverage(unittest.TestCase):
         self.assertEqual(self.imported - self.keyed - NO_OUTPUT - {'dmsh_fetch', 'dmsh_vin', 'dmsh_pull', 'dmsh_mesh', 'dmsh_facts'}, set())
 
     def test_screen_varyings_in_the_shader_key(self):   # raster_facts takes it when a shader misses the cache, and a hit restores what it gave from the reflection
-        self.assertIn('screen_varyings', {n.attr for n in ast.walk(self.code_fp) if isinstance(n, ast.Attribute)})
+        names = {n.attr for n in ast.walk(self.code_fp) if isinstance(n, ast.Attribute)}
+        for f in ('screen_varyings', 'screen_positions', '_entry_screen', '_lin'): self.assertIn(f, names)
 
 
 if __name__ == '__main__':

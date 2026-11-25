@@ -68,9 +68,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     }
                 }
 
-                GotoElimination.Eliminate(context.GetGotos());
+                GotoElimination.Eliminate(context.GetGotos(), context.NewTemp);
 
-                AstOptimizer.Optimize(context);
+                // nxnative (upstream NXNative 2f0210dba): SPIR-V has no else-if construct, and SpirvGenerator sends an If's false edge to an Else only: with XLATE_DEBUG=0 (no comment
+                // per instruction to keep an Else from holding only an If) the flattened ElseIf and any Else after it became unreachable. Keep nested Else { If } blocks for SPIR-V
+                AstOptimizer.Optimize(context, flattenElseIf: targetLanguage != TargetLanguage.Spirv);
 
                 context.LeaveFunction();
             }
@@ -150,6 +152,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     if (index - 1 < inArgsCount)
                     {
                         AstOperand argTemp = context.NewTemp(FuncParameterType);
+                        argTemp.AddressTaken = true;
                         context.AddNode(new AstAssignment(argTemp, source));
                         sources[index] = argTemp;
                     }
@@ -172,12 +175,21 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 AstOperand oper = context.GetOperand(operation.GetDest(1 + index));
 
                 oper.VarType = InstructionInfo.GetSrcVarType(inst, sourcesCount + index);
+                if (inst == Instruction.Call)
+                {
+                    oper.AddressTaken = true;
+                }
 
                 sources[sourcesCount + index] = oper;
             }
 
             AstTextureOperation GetAstTextureOperation(TextureOperation texOp)
             {
+                if ((texOp.Type & SamplerType.Mask) == SamplerType.TextureBuffer)
+                {
+                    context.ResourceManager.NoteBufferResource(inst.IsImage(), texOp.Set, texOp.Binding);   // nxnative: buffer image and buffer texture offsets
+                }
+
                 return new AstTextureOperation(
                     inst,
                     texOp.Type,

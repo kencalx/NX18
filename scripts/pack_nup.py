@@ -8,6 +8,11 @@
 # packed when an update holds the whole game (Pokemon Pokopia's v655360). The title ID is then the program ID of the code present, there is no version 0, and the selected update needs its own ExeFS
 # and RomFS, taken as the whole game. The flag does not promise that (the spec says such an update needs a matching base elsewhere), and nothing in a container can prove it, so the scripts say so
 # (NO_BASE). What was measured: the update RomFS of both NUPs at hand holds every path of its base (Hyrule Warriors: Age of Imprisonment, Yoshi and the Mysterious Book).
+# A NUP may hold code of several programs of one application (dm/tools/programs.py), base and update packages per program, told apart by the program ID each one's exefs/main.npdm
+# names: a Nintendo Switch 2 Edition's update holds the Switch 1 game as program 0 and the Switch 2 one as program 1, whose title ID starts 04 (Xenoblade Chronicles X: Definitive Edition).
+# One program is packed, under its own program ID (the profile's and the build folder's): --program N, else the Switch 2 Edition's Switch 2 program, else program 0; a program with no
+# base package of its own is packed from its update alone, which carries it whole. No such NUP was at hand when this was written: --list prints each package and the program it names.
+# A program other than the application's own (program 0) is read and chosen the same way, but not packed yet: the script stops with a red line that says so (programs.unsupported).
 # Writes, under the build folder (<folder of the .nup>/<title ID>_build unless --work-dir names another):
 #   extract/v<version>/ExeFS/   the version's code modules
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py), written straight from the container: the RomFS is never unpacked into loose files
@@ -21,11 +26,12 @@
 # Every file read is checked against its SHA-256. A repeat run keeps code modules whose content is the same and an image made from the same container tree by the same packer,
 # or, after a packer update, an image whose bytes check against the container's hashes.
 # Needs the zstd module: compression.zstd (Python 3.14+) or backports.zstd, as the NSP script.
-# Usage: pack_nup.py <game.nup> [--version N] [--work-dir DIR]   (exit 1 on error)
+# Usage: pack_nup.py <game.nup> [--version N] [--program N] [--work-dir DIR] [--list]   (exit 1 on error)
 import argparse, hashlib, mmap, os, shutil, struct, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
 import romfs_image
+import programs   # the programs of an application: which one a NUP holding several packs, and its DLC numbering
 try: from compression import zstd
 except ImportError:
     try: from backports import zstd   # pyright: ignore[reportMissingImports]  # an optional package, only Python before 3.14 needs it
@@ -50,6 +56,7 @@ TITLE_FILE, EDITED_ICON = 'title.txt', 'icon.edited.jpg'   # beside an NX versio
 NACP_SIZE = 0x4000   # every NACP's size: a record of another size is something else
 SHIFTED = 'its meta block numbers every record one too low (written by nup after its PR #20 of 2026-11-04): read one type up, so its NACP and icon are the right records'
 ARTIFACTS = {b'.listing'}   # dump-tool files a producer may have kept (SPEC §6.3): not game files
+ADDED = 'its update is taken as the whole program (an update that adds a program, as a Nintendo Switch 2 Edition\'s, carries it whole, not as a patch)'
 NO_BASE = 'no base game in this NUP: its update is taken as the whole game (if the game then stops on missing files, the update holds only what changed: pack a NUP with the base game)'
 
 
@@ -61,6 +68,7 @@ class Package:
         if r1 or r2 or self.flags & ~STANDALONE: raise Error(f'{nup.path}: package {index} has reserved fields or flags set')
         self.shifted = self.marked = False   # set by meta()
         self.name = f'{nup.path.name} ({KINDS[self.kind]}' + (f' {self.version}' if self.kind == UPDATE else f' {self.title_id:016X}' if self.kind == ADDON else '') + ')'   # what pick_nsps prints
+        self.label = self.name   # the name before scan adds the program of a NUP that holds several
 
     def meta(self):
         """{TLV type in SPEC §5's numbers: payload}, the first record of each type. nup since its PR #20 (merged 2026-11-04) writes every type one too low (NPDM 0, NACP 1, icon 2 …
@@ -100,6 +108,10 @@ class Nup:
     """A validated NUP (SPEC §6.1): the superblock, the TOC's SHA-256, every record's bounds. File content is checked against its SHA-256 as it is read"""
     def __init__(self, path):
         self.path = Path(path)
+        self.programs: dict[int, int] = {}   # what scan sets: {index: program ID} of the programs it holds code of, the index packed, the lines to print, the line for no base package
+        self.program: int | None = None
+        self.notes: list[str] = []
+        self.no_base = ''
         with open(self.path, 'rb') as f:   # the map keeps its own descriptor
             try: self.mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
             except ValueError: raise Error(f'{self.path}: empty file') from None
@@ -144,9 +156,24 @@ class Nup:
             if first + count > len(self.slots): raise Error(f'{self.path}: folder {n!r} out of bounds')
         for s in self.slots:
             if s >= self.ndirs + nfiles: raise Error(f'{self.path}: child {s} out of bounds')
+        self._acyclic()
         for k in self.packages:
             if k.root >= self.ndirs or any(d != NO_DIR and d >= self.ndirs for d in (k.exefs, k.romfs)) or k.meta_size and k.meta_off + k.meta_size > fsize:
                 raise Error(f'{self.path}: package {k.index} out of bounds')
+
+    def _acyclic(self):
+        """Refuses a folder that contains itself, at any depth: the bounds checks pass it, and every walk of the tree (tree_bytes, entries) would recurse or loop for ever"""
+        kids = [[s for s in self.slots[first:first + count] if s < self.ndirs] for _, first, count in self.dirs]
+        state = bytearray(self.ndirs)   # 0 not seen, 1 on the current path, 2 done
+        for top in range(self.ndirs):
+            if state[top]: continue
+            state[top], stack = 1, [(top, 0)]
+            while stack:   # depth first without recursion: a container's depth is not bounded by Python's recursion limit
+                d, i = stack[-1]
+                if i == len(kids[d]): state[d] = 2; stack.pop(); continue
+                stack[-1] = (d, i + 1); c = kids[d][i]
+                if state[c] == 1: raise Error(f'{self.path}: folder {self.dirs[c][0]!r} (index {c}) contains itself (damaged file)')
+                if not state[c]: state[c] = 1; stack.append((c, 0))
 
     def close(self):
         self.mm.close()
@@ -224,29 +251,54 @@ def is_nup(path):
     except OSError: return False
 
 
-def scan(n):
-    """What a NUP holds: (title ID, base package or None, {update version: package}, {DLC title ID: package}), with the checks pack_dump.scan makes"""
+def scan(n, program=None, known=None, dev=None):
+    """What a NUP holds: (title ID, base package or None, {update version: package}, {DLC title ID: package}), with the checks pack_dump.scan makes.
+    A NUP may hold code of several programs of one application (dm/tools/programs.py), a package per program and version: a Nintendo Switch 2 Edition's update carries the Switch 1
+    game as program 0 and the Switch 2 one as program 1. One program is packed, and its own program ID is the title ID: program (an index), else programs.pick's choice
+    (known(title ID): whether that program has a game profile). Each package is the program's its exefs/main.npdm names; one without code is the program its record's title ID names,
+    else the lowest. Sets n.programs ({index: program ID}), n.program (the index packed), n.notes (lines to print) and n.no_base (the line for a program with no base package).
+    A program other than program 0 stops the scan (gate) unless dev, or NX18_DEV with dev None, lets it through: programs.supported"""
     bases = [k for k in n.packages if k.kind == BASE]
-    if len(bases) > 1: raise Error(f'{n.path}: {len(bases)} base packages')
     updates = [k for k in n.packages if k.kind == UPDATE]
     if not bases and (not updates or any(not k.flags & STANDALONE for k in updates)):
         raise Error(f'{n.path}: no base game: pack the base game and its update into one NUP, or use updates marked standalone_update with complete exefs/ and romfs/')
-    base = bases[0] if bases and n.tree_bytes(bases[0].root) else None   # a base record with no files is no base game
     # With no base the game is identified from the code actually present; each selected version is checked by pack_version.
-    ids ={program_id(n.read(i), f'{k.name} exefs/main.npdm') for k in n.packages if k.kind in (BASE, UPDATE) and k.exefs != NO_DIR
-           if (i := n.child(k.exefs, b'main.npdm')) is not None}
+    pid = {k.index: program_id(n.read(i), f'{k.name} exefs/main.npdm') for k in bases + updates if k.exefs != NO_DIR and (i := n.child(k.exefs, b'main.npdm')) is not None}
+    ids = set(pid.values())
     if not ids: raise Error(f'{n.path}: no exefs/main.npdm in the base or updates')
-    if len(ids) != 1: raise Error(f'{n.path}: base and updates have different program IDs: ' + ', '.join(f'{pid:016X}' for pid in sorted(ids)))
-    app = ids.pop()
-    if app & 0xFFF: raise Error(f'{n.path}: base program ID {app:016X} is not a base title ID')
-    vers, dlc = {}, {}
+    progs = {}   # {index: program ID}
+    for x in sorted(ids):
+        if (i := programs.index(x)) is None: raise Error(f'{n.path}: program ID {x:016X} is not a base title ID nor a program of one')
+        progs[i] = x
+    if len(progs) != len(ids) or len({programs.application(x) for x in ids}) != 1:
+        raise Error(f'{n.path}: base and updates have different program IDs: ' + ', '.join(f'{x:016X}' for x in sorted(ids)))
+    by_id = {x: i for i, x in progs.items()}
+    def owner(k):   # the program index of a base or update package
+        if k.index in pid: return by_id[pid[k.index]]
+        return by_id.get(k.title_id, by_id.get(k.title_id & ~0x800, min(progs)))   # an update record may carry the update's ID (…800)
+    per = {i: ([], {}) for i in progs}
+    for k in bases + updates:
+        b, vers = per[owner(k)]
+        if k.kind == BASE: b.append(k); continue
+        if not k.version: raise Error(f'{n.path}: an update of version 0')
+        if k.version in vers: raise Error(f'{n.path}: two updates of version {k.version}' + (f' of program {owner(k)}' if len(progs) > 1 else ''))
+        vers[k.version] = k
+    for i, (b, _) in per.items():
+        if len(b) > 1: raise Error(f'{n.path}: {len(b)} base packages' + (f' of program {i}' if len(progs) > 1 else ''))
+    i, why = programs.pick(progs, program, known)
+    if i is None: raise Error(f'{n.path}: no program {program} (--program / PROGRAM_INDEX): it holds programs {programs.listing(progs)}')
+    app, (b, vers) = progs[i], per[i]
+    if len(progs) > 1:
+        for k in bases + updates: k.name = k.label[:-1] + f', program {owner(k)})'   # two packages of one version: what pick_nsps prints tells them apart
+    base = b[0] if b and n.tree_bytes(b[0].root) else None   # a base record with no files is no base game
+    n.programs, n.program = progs, i
+    n.notes = [line] if (line := programs.note(n.path.name, progs, i, why)) else []
+    n.no_base = NO_BASE if not any(n.tree_bytes(k.root) for k in bases) else f'program {i} has no base package of its own: {ADDED}'
+    gate(n, app, dev)
+    dlc = {}
     for k in n.packages:
-        if k.kind == UPDATE:
-            if k.version in vers: raise Error(f'{n.path}: two updates of version {k.version}')
-            if not k.version: raise Error(f'{n.path}: an update of version 0')
-            vers[k.version] = k
-        elif k.kind == ADDON:
-            if not 0 < k.title_id - app - 0x1000 <= 2000: raise Error(f'{n.path}: {k.title_id:016X} is not a DLC of {app:016X}')
+        if k.kind == ADDON:
+            if programs.dlc_index(k.title_id, app) is None: raise Error(f'{n.path}: {k.title_id:016X} is not a DLC of {app:016X}')
             if k.romfs == NO_DIR: raise Error(f'{n.path}: DLC {k.title_id:016X} has no romfs/')
             if k.title_id in dlc: raise Error(f'{n.path}: DLC {k.title_id:016X} more than once')
             dlc[k.title_id] = k
@@ -377,28 +429,57 @@ def pack_version(n, k, base, app, out, say=print, step=lambda s: None, note=None
 
 
 def pack_dlc(n, app, dlc, aoc, say=print):   # {DLC title ID: package} → aoc/<index>.img; images of DLC no longer in the container go
-    want = {f'{tid - app - 0x1000}.img': k for tid, k in dlc.items()}
+    want = {f'{programs.dlc_index(tid, app)}.img': k for tid, k in dlc.items()}   # a program's DLC are the application's (numbered from the title ID itself for a base game)
     if aoc.is_dir():
         for f in aoc.iterdir():
             if f.name.removesuffix('.inputs.json') not in want: f.unlink()
     for name, k in want.items(): pack(n, k.romfs, aoc / name, say)
 
 
+def gate(n, app, dev=None):   # a program other than the application's own is read and chosen, but built only with NX18_DEV on (programs.supported): else a red line says it is not supported yet
+    if not programs.supported(app, dev): raise Error(programs.unsupported(n.path.name, app, getattr(n, 'programs', None)))
+
+
+def listing(n):   # the --list lines: every package, with the program ID its code names
+    out = []
+    for k in n.packages:
+        i = n.child(k.exefs, b'main.npdm') if k.exefs != NO_DIR else None
+        try: code = f'{program_id(n.read(i), k.name):016X}' if i is not None else '-'
+        except Error as e: code = f'? ({e})'
+        out.append(f'{k.index}\t{KINDS[k.kind]}\ttitle {k.title_id:016X}\tversion {k.version}\tprogram {code}\texefs/ {"yes" if k.exefs != NO_DIR else "no"}\tromfs/ {"yes" if k.romfs != NO_DIR else "no"}'
+                   f'\t{n.tree_bytes(k.root):,} bytes' + ('\tstandalone' if k.flags & STANDALONE else ''))
+    return out
+
+
+def has_profile(tid):   # whether a game profile has title ID tid (dm/games, DM_GAMES_DIR): the program the NSP script would pick of several (programs.pick's known)
+    games = str(Path(__file__).resolve().parents[1] / 'dm/games')
+    if games not in sys.path: sys.path.insert(0, games)
+    import game
+    return game.by_title(tid) is not None
+
+
 def main():
     ap = argparse.ArgumentParser(description='Pack your game\'s NUP container (made from your own dump) into the extraction layout of build_ipa_from_nsp.py')
     ap.add_argument('nup', type=Path, help='the .nup file')
     ap.add_argument('--version', type=int, help='the update version to pack (default: the newest in the container; 0 = the base game)')
+    ap.add_argument('--program', type=int, help='a NUP holding several programs of one application (a Nintendo Switch 2 Edition): the program index to pack '
+                    '(default, as the NSP script chooses: of the Switch 2 Edition\'s Switch 2 program and program 0, the first with a game profile in dm/games or DM_GAMES_DIR, else the first). '
+                    'Only program 0 packs for now: another stops, not supported yet')
     ap.add_argument('--work-dir', type=Path, help='the build folder (default: <folder of the .nup>/<title ID>_build)')
+    ap.add_argument('--list', action='store_true', help='list the packages and the program each one\'s code names, and pack nothing')
     a = ap.parse_args()
     path = a.nup.resolve()
     try:
         with Nup(path) as n:
-            app, base, vers, dlc = scan(n)
+            if a.list:
+                print('\n'.join(listing(n))); return
+            app, base, vers, dlc = scan(n, a.program, has_profile)
+            for line in n.notes: print(line, flush=True)
             ver = a.version if a.version is not None else max(vers, default=0)
             if ver and ver not in vers: raise Error(f'no update {ver} in {path.name} (have: {", ".join(map(str, sorted(vers))) or "none"})')
             k = vers[ver] if ver else base
             if k is None: raise Error(f'{path.name}: no base game (version 0); choose a standalone update version')
-            if base is None: print(NO_BASE, flush=True)
+            if base is None: print(n.no_base, flush=True)
             work =(a.work_dir or path.parent / f'{app:016X}_build').resolve()
             out = work / 'extract' / f'v{ver}'
             print(f'{app:016X} version {ver}: {k.name}', flush=True)

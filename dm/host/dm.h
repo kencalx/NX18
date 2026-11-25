@@ -74,7 +74,10 @@ typedef struct {
     uint64_t unity_qs_ptr;     // Unity's QualitySettings (main's offset of the global pointer); the current level's vSyncCount, an int32, is at
     uint32_t unity_qs_idx, unity_qs_arr, unity_qs_size, unity_qs_vsync;   // [obj + arr] + (int32)[obj + idx] * size + vsync; 0 = none
     uint64_t fps_state_off;    // frame step state page (patch_nso.py FRAME_STEP: Tears of the Kingdom 1.4.3 and Breath of the Wild 1.9.0 main); 0 = none
+    uint32_t step_max;         // the largest step the frame step stubs give the game (the fixups table's STEP_MAX, patch_nso.py ctx.step_max); 0 = FSTEP_MAX (upstream 1e3fd031)
     uint32_t render_scale_max; // a render-scale stub's largest scale (the fixups table's RENDER_SCALE, patch_nso.py): DM_RENDER_SCALE is held to it; 0 = no such stub
+    uint32_t live_scale;       // 1: the render-scale stubs also read the host's live factor at state +0x14 (the fixups table's LIVE_SCALE, patch_nso.py ctx.live_scale; heat ladder step 4)
+    uint32_t camera_aspect;    // 1: the frame step stubs set the camera's aspect from state +0x64 and acknowledge it at +0x68 (the fixups table's CAMERA_ASPECT; loader.c dm_game_aspect)
     int64_t patch_off;         // patch area relative to the base; negative = before the base (image too large, see patch_nso.py FAR), and size does not include it
     uint64_t image_size, file_image_len, patch_len;   // only with the patch area before the base: whole image (with bss and key page), length of the image part of the file, patch area length
     uint64_t back_off, back_len;   // a second patch area after the image (patch_nso.py TWO: a text longer than a B reaches), inside size; 0 = none
@@ -132,21 +135,24 @@ enum { OBS_UE_MALLOC = 21,                                       // Unreal's FMa
        OBS_REGION_ASK = 22, OBS_REGION_GOT = 23, OBS_REGION_FREE = 24,   // the SDK's address regions, gates the rewriter places by symbol in every sdk (patch_nso.py "Address regions", hle_svc.c)
        OBS_STDALLOC_INIT = 25,                                         // StandardAllocator::Initialize's entry, the same way: its callback writes the size (hle_svc.c)
        OBS_UE_REGION = 26,                                             // the store of Unreal's engine region size before nninitStartup reserves it: the register its upper bits name (dm/tools/ue_region.py, hle_svc.c)
-       OBS_MAX = 27 };
+       OBS_FPS_CTL = 27,                                               // a game's frame-rate controller, at the test of its off switch: its measure of the frame, which the callback may change (a game's patches.py, hle_fctl.c)
+       OBS_MAX = 28 };
 // A gate number's bits from 8 up are a parameter for its callback (OBS_REGION_GOT: the register that holds the address). Callbacks read the registers; a write to x0–x29 takes
 // effect when the gate returns (entry.S restores them from the frame), which OBS_STDALLOC_INIT and OBS_UE_REGION do
 void gate_obs_set(int id, void (*fn)(uint64_t *regs, int param));
 int gate_obs_present(int id);
 uint64_t now_ns(void);
+uint64_t now_cont_ns(void);           // hle_os.c: now_ns counting the device's sleep too (mach_continuous_time), for timers across a break (the heat hold's)
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
 uint64_t guest_ns_at_host_time(uint64_t host_ns);  // Host Mach-absolute ns projected into the current guest clock
 uint64_t guest_ticks(void);           // The guest's system counter on that clock: 19.2 MHz, or 31.25 MHz for the Switch 2 (hle_os.c)
+uint64_t guest_tick_hz(void);         // Its rate: 19200000, or 31250000 for the Switch 2 (hle_os.c)
 int dm_detclock_enabled(void);
-void dm_guest_clock_advanced(void);
 void guest_clock_freeze(int on);
-void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (1 background, 2 system keyboard); see hle_os.c
+void dm_movie_active(int active);   // iOS movie decoder recovery waits for activation; Stop / Flush / Finalize cancel the wait
+void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (0 tick hold, 1 background, 2 system keyboard, 3 NVN prepare, 4 NVN archive init); see hle_os.c
 int guest_clock_frozen(uint64_t *thawed);   // hle_os.c: whether the guest clock stands still now; *thawed: when it last started again (the freeze detector, stall.c)
-void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits while the app is in the background (hle_os.c)
+void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits while backgrounded or preparing (hle_os.c)
 extern __thread uint64_t dm_clock_reads;   // the calling thread's guest reads of the system counter (hle_os.c; thr_yield tells clock waits by them)
 void dm_guest_frame_tick(void);        // Called on every present (hle_nvn.c): when DM_DETCLOCK is on, advances the guest clock by one fixed step
 uint64_t dm_nvn_frame_count(void);
@@ -230,11 +236,23 @@ const char *dm_cheats_source(int i);
 void dm_cheats_exit(void);            // a clean exit (hle_lifecycle.c, atexit): removes the safe-mode flag
 // Graphics lifecycle (hle_nvn.c): on=1 suspends (afterwards submit / present block, and in-flight GPU work is drained before returning), on=0 resumes; called by the iOS front end when entering and leaving the background
 void dm_gfx_suspend(int on);
+void dm_gfx_inactive(int on);   // hle_nvn.c: the iOS scene resigns active (1) or becomes active (0), for the bundled pipeline archive's crash guard alone (nvn_pso_guard.h)
+void dm_gfx_exiting(void);      // hle_nvn.c: the graceful exit begins (hle_lifecycle.c, first), for the crash guard alone: a start that ends there is no crash of the archive
+extern void (*dm_mem_ready_hook)(void);   // hle_svc.c: called once the guest's address space is reserved (mem_init_once); main.c sets it (the bundled pipeline archive's early open, nvn_mtl.m)
 void dm_gfx_pressure(int level);   // hle_nvn.c: the system's memory pressure (the front ends' dispatch source): 0 back to normal, 1 warning, 2 critical; logged, and idle memory given back (DM_MEMORY_TRIM=0: logged only)
+void dm_heat_poke(void);              // hle_nvn.c: the thermal state changed (the front end's notification): the heat ladder samples at the next call (nvn_heat.h)
+void dm_heat_timer_tick(void);        // hle_nvn.c: the front end's 1 s timer: the heat ladder samples while no frames are presented; nothing while the app is away
 uint64_t dm_gfx_trim(int level);   // hle_nvn.c: give back the idle graphics caches and sweep the guest's files now; only with no submission open and the GPU drained (dm_gfx_suspend does it going to the background); the bytes
 int dm_gfx_save_wait(int wait_ms);   // hle_nvn.c: waits up to wait_ms for the pipeline archive's writes dm_gfx_suspend started (iOS: within the app's background time); 1: all written
 void dm_gfx_quit(int wait_ms);   // hle_nvn.c: the process is ending (the graceful exit): what the pipeline archive has not written yet, written, waiting up to wait_ms
+void dm_gfx_quit_begin(void);   // hle_nvn.c: the process is about to end (the graceful exit, oe::ExecuteProgram's hand-over): the pipeline prewarm stops and the archive starts writing what it holds, without waiting
+enum { DM_QUIT_ARCH_MS = 10000 };   // what any end of the process the host controls gives the pipeline archive's write (atexit, the graceful exit): a file of 900 bases took 1.8-4 s on Macs
+void dm_gfx_enter(void); void dm_gfx_leave(void);   // hle_nvn.c: the gate dm_gfx_suspend closes, entered from outside the NVN calls (the tests)
 void dm_gfx_shot_at(long k, const char *path);
 void dm_shot_written(const char *path, int ok);   // The graphics side finished writing a screenshot to disk (diag.c: DM_TICK_HOLD=E:SHOT unfreezes on this)
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg);   // The same, then(arg) in place of the last _exit(0) (oe::ExecuteProgram: execve of the next program)
-void dm_host_shutdown(const char *why);   // Graceful exit (crash.c): stop background threads and audio, drain graphics, then _exit(0); used by SIGTERM and the iOS App termination callback   // graphics side: screenshot of the k-th frame after the current presented frame (nvn_mtl.m)
+// The start's timeline (hle_lifecycle.c, start_line.h): the "start: Play at" and "start: first frame N s after Play" lines
+void dm_start_game(void);                     // main.c: the host is loaded and runs the game's code from here (reads DM_PLAY_AT, logs the Play line)
+void dm_start_prepared(uint64_t ns);          // nvn_mtl.m: the prepare step held the first frame this long
+void dm_start_first_frame(uint64_t at_ns);    // nvn_mtl.m: a present completed on the GPU at at_ns (now_ns); the first one logs the first-frame line
+void dm_host_shutdown(const char *why);   // Graceful exit (hle_lifecycle.c): stop background threads and audio, stop the pipeline prewarm, drain graphics, write the pipeline archive, then _exit(0); used by SIGTERM and oe::ExecuteProgram

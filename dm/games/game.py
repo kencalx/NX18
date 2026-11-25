@@ -84,25 +84,29 @@ def load(name=None):
     return Game(d)
 
 
-def all_games():
-    out, seen = [], set()
+def all_games(skip=()):   # skip: profile folders left out (the NSP script's own provisional and derived profiles, which it never takes as registered ones)
+    out, seen, skip = [], set(), {Path(d).resolve() for d in skip}
     for root in search_dirs():
-        if not root.is_dir(): continue
+        if not root.is_dir() or root.resolve() in skip: continue
         for d in sorted(root.iterdir()):
             if (d / 'game.tsv').exists() and d.name not in seen: seen.add(d.name); out.append(Game(d))
     return out
 
 
-def by_title(tid):
-    return next((g for g in all_games() if g.title_id == tid), None)
+def by_title(tid, skip=()):
+    return next((g for g in all_games(skip) if g.title_id == tid), None)
 
 
-def by_build(main_id):   # the profile whose build rows register this main build ID (a release of the same build under another title ID: the NSP script's same_build)
-    return next((g for g in all_games() if any(b.get('main') == main_id for b in g.builds().values())), None)
+def by_build(main_id, skip=()):   # the profile whose build rows register this main build ID (a release of the same build under another title ID: the NSP script's same_build)
+    return next((g for g in all_games(skip) if any(b.get('main') == main_id for b in g.builds().values())), None)
 
 
-# agl's upscaler network (NDSR), by where the shader map found each key: the compute shaders of agl_ndsr.pck (Donkey Kong Bananza's 24 in its release library, Splatoon Raiders' 20 in its debug one)
-UPSCALER_SOURCE = re.compile(r'/agl_ndsr\.pck#')
+# The upscaler network (NDSR), by where the shader map found each key: the compute shaders of an NDSR pack (shader_split.py ndsr_shaders: a source ending in #NDSR@<offset>), whatever
+# ships it. The pack is a library several engines carry under their own names: agl's agl_ndsr.pck (Donkey Kong Bananza, Splatoon Raiders, Mario Kart World, Nintendo Switch Sports Resort)
+# and its siblings agl_ndsr_vr.pck and agl_ndsr_vr_light.pck (Ocarina of Time), Kirby Air Riders' and Fast Fusion's .ndsr files (the same 20 networks), Star Fox's nested in a VIPR container
+# (Splatoon Raiders' 20), and the pack inside nn::ndve's movie file. Being named only lets the host read a shader's colour from its code; one whose colour it does not know, or a dispatch
+# it cannot draw, runs as the game's (nvn_mtl.m up_mfx_color, up_mfx_encode)
+UPSCALER_SOURCE = re.compile(r'#NDSR@0x[0-9a-f]+$')
 
 
 def upscaler_keys(g):
@@ -186,10 +190,14 @@ def header_one(g):
     if rsp not in ('on', 'off'): sys.exit(f'{g.id}: replay_spares must be on or off: {rsp}')
     dzc = g.get('depth_zero_copy', 'off')   # new single-sample Depth16 / Depth32F textures zeroed by copies from the zero buffer, not a clear pass (nvn_mtl.m tex_zero_fill; DM_DEPTH_ZERO_COPY overrides): on / off
     if dzc not in ('on', 'off'): sys.exit(f'{g.id}: depth_zero_copy must be on or off: {dzc}')
+    dlz = g.get('depth_lazy', 'off')   # single-sample 2D Depth16 / Depth32F textures of 64 MB or more made placement sparse, tiles mapped where the GPU writes (nvn_mtl.m lz_make; DM_NVN_DEPTH_LAZY overrides): on / off
+    if dlz not in ('on', 'off'): sys.exit(f'{g.id}: depth_lazy must be on or off: {dlz}')
     pik = g.get('pool_ids_8k', 'off')   # a pool table's lists of IDs to take again hold 8,192 IDs, as one patch takes, instead of 1,024 (nvn_mtl.m pool_ids_max; DM_POOL_IDS_8K overrides): on / off
     if pik not in ('on', 'off'): sys.exit(f'{g.id}: pool_ids_8k must be on or off: {pik}')
     gtb = g.get('ghost_table', '512')   # textures of finalized texture objects replay still resolves, at most, the least recently used going first (nvn_mtl.m ghost_cap; DM_NVN_GHOST overrides): 64 to 8192
     if not (gtb.isdigit() and 64 <= int(gtb) <= 8192): sys.exit(f'{g.id}: ghost_table must be a number of textures from 64 to 8192 (512 without the key): {gtb}')
+    upsl = g.get('upload_slots', '3')   # upload batch slots in rotation, how many batches the submit thread may be ahead of the GPU (nvn_mtl.m up_slots_pick; DM_NVN_UP_SLOTS overrides): 3 to 8
+    if not (upsl.isdigit() and 3 <= int(upsl) <= 8): sys.exit(f'{g.id}: upload_slots must be a number of slots from 3 to 8 (3 without the key): {upsl}')
     utp = g.get('ue_texture_pool', '0')   # Unreal's r.Streaming.PoolSize in MB, raised to this on the Mac (hle_uecvar.c; DM_UE_TEXTURE_POOL overrides, and turns it on for iOS): 0 = the game's own pool
     if not utp.isdigit(): sys.exit(f"{g.id}: ue_texture_pool must be megabytes (0 = the game's own pool): {utp}")
     ufc = g.get('ue_fps_cvar', 't.MaxFPS')   # the Unreal console variable the host writes fps_target into (hle_fpslock.c; found by name by the rewriter, ue_cvar.py NAMES): a game's own frame limit its settings apply to t.MaxFPS
@@ -231,8 +239,40 @@ def header_one(g):
     if sks and (not m or not 0x30 <= int(m[1], 0) or not 0 < int(m[2], 0) or int(m[1], 0) + int(m[2], 0) > 0x880 or (int(m[1], 0) < 0x760 and int(m[1], 0) + int(m[2], 0) > 0x700)):   # not over +0x700..+0x75f, the code area and compute fields the tools read
         sys.exit(f'{g.id}: shader_key_skip takes <offset>+<length> within the first 0x880 bytes of the control section, past its header (+0x30) and clear of +0x700..+0x75f: {sks}')
     sko, skl = (int(m[1], 0), int(m[2], 0)) if m else (0, 0)
+    aui = g.words('aspect_ui_prefixes', '')   # Ultrawide's camera: the vertex shaders (their keys' first 8 hex digits) that draw the HUD onto a floating-point final picture (nvn_mtl.m aspect_ui)
+    if any(not re.fullmatch(r'[0-9a-f]{8}', p) for p in aui): sys.exit(f'{g.id}: aspect_ui_prefixes takes 8 lowercase hex digits per vertex shader key: {" ".join(aui)}')
     rcd = g.get('render_cond', 'off')   # NVN conditional rendering evaluated at replay, timestamp reports with counter 0 (nvn_mtl.m OP_RENDER_COND): on / off
     if rcd not in ('on', 'off'): sys.exit(f'{g.id}: render_cond must be on or off: {rcd}')
+    # the profile's patches.py gives its render-scale stubs the host's live factor (ctx.live_scale = 1: Breath of the Wild, Tears of the Kingdom), so a build of it whose fixups
+    # table lacks LIVE_SCALE is from before it and a repack gives it the heat ladder's resolution rungs (hle_nvn.c scale_lever's line says so; not a profile key)
+    pp = g.dir / 'patches.py'
+    lsp = int(pp.is_file() and re.search(r'^[^#\n]*\bctx\.live_scale\s*=\s*1\b', pp.read_text(encoding='utf-8'), re.M) is not None)
+    hgs = g.get('heat_gpu_stretch', 'off')   # the heat ladder's resolution rungs and the GPU clock rescue through the GPU time the game's own dynamic resolution reads, stretched (hle_nvn.c scale_set, nvn_mtl.m post_run; NX18-X2.0 heat-ladder.md §6): on / off
+    if hgs not in ('on', 'off'): sys.exit(f'{g.id}: heat_gpu_stretch must be on or off: {hgs}')
+    dgs = g.get('drs_gpu_scale', 'off')   # the GPU headroom controller (nvn_drs_gpu.h) through the game's live render scale lever, the stretch or the +0x14 stubs: its factor composes with the heat's (hle_nvn.c drs_gpu_tick; DM_DRS_GPU_SCALE=0, Quality's preset line, turns it off)
+    if dgs not in ('on', 'off') or (dgs == 'on' and hgs != 'on' and not lsp): sys.exit(f'{g.id}: drs_gpu_scale must be on or off, and on needs heat_gpu_stretch on or a patches.py with ctx.live_scale = 1: {dgs}')
+    gts_s = g.get('gpu_time_scale', '1')   # the GPU time between the game's counter reports read at this factor, under the heat stretch (nvn_heat.h nvn_scale_stretch_at, nvn_mtl.m post_run; DM_GPU_TIME_SCALE overrides): 0.25 to 1, needs heat_gpu_stretch on
+    try: gts = float(gts_s)
+    except ValueError: gts = -1.0
+    if not (0.25 <= gts <= 1) or (gts != 1 and hgs != 'on'): sys.exit(f'{g.id}: gpu_time_scale must be from 0.25 to 1, and below 1 needs heat_gpu_stretch on: {gts_s}')
+    # Passes drawn every other frame (nvn_pass_alt.h, nvn_mtl.m rp_begin_ex_): off, or shapes joined by commas (at most 4), each <W>x<H>:<colour>/<depth> (Metal pixel formats; DM_NVN_PASS_ALT=0
+    # turns these off) or cube:<colour> (any level and face of a cube texture in that format, no depth; DM_NVN_CUBE_ALT=0 turns these off)
+    pal = g.get('pass_alternate', 'off'); pas = []
+    for sh in ([] if pal == 'off' else pal.split(',')):
+        pam, pcm = re.fullmatch(r'(\d+)x(\d+):(\d+)/(\d+)', sh), re.fullmatch(r'cube:(\d+)', sh)
+        if pam and all(0 < int(v) < 65536 for v in pam.groups()): pas.append((*(int(v) for v in pam.groups()), 0))
+        elif pcm and 0 < int(pcm[1]) < 65536: pas.append((0, 0, int(pcm[1]), 0, 1))
+        else: sys.exit(f'{g.id}: pass_alternate must be off or shapes joined by commas, each <W>x<H>:<colour>/<depth> or cube:<colour> (Metal pixel formats): {pal}')
+    if len(pas) > 4 or len(set(pas)) != len(pas): sys.exit(f'{g.id}: pass_alternate takes at most 4 shapes, none twice: {pal}')
+    ubl = g.get('upscaler_bilinear', 'off')   # the game's upscaler, where MetalFX would draw it, a bilinear stretch instead (nvn_mtl.m up_bil_on; DM_NVN_UP_BILINEAR=0 / =1 overrides): on / off
+    if ubl not in ('on', 'off'): sys.exit(f'{g.id}: upscaler_bilinear must be on or off: {ubl}')
+    ck_s = g.get('clock_kick', 'off')   # the GPU clock kick (hle_nvn.c clock_kick_tick; DM_CLOCK_KICK=<ms> or =0 overrides): off, or a hold of 20 to 300 ms at a present once the clock is stuck
+    if ck_s != 'off' and not (ck_s.isdigit() and 20 <= int(ck_s) <= 300): sys.exit(f'{g.id}: clock_kick must be off or 20 to 300 (ms): {ck_s}')
+    ckm = 0 if ck_s == 'off' else int(ck_s)
+    ffs = g.get('fps_fixed_at_start', 'off')   # the game takes its frame rate once at start (a patch chooses it from the target then): no cap can lower it mid-game, so the Low Power Mode row is not offered (settings.tsv)
+    if ffs not in ('on', 'off'): sys.exit(f'{g.id}: fps_fixed_at_start must be on or off: {ffs}')
+    prp = g.get('present_repeat', 'off')   # the present repeat on by default (nvn_present_repeat.inc rep_on; DM_PRESENT_REPEAT=1 / =0 overrides): on / off
+    if prp not in ('on', 'off'): sys.exit(f'{g.id}: present_repeat must be on or off: {prp}')
     tfu = g.get('tex_flush_upload', 'off')   # textures written by the CPU into a pool and published with nvnMemoryPoolFlushMappedRange are uploaded like packaged ones (hle_nvn.c): on / off
     if tfu not in ('on', 'off'): sys.exit(f'{g.id}: tex_flush_upload must be on or off: {tfu}')
     tdu = g.get('tex_dirty_upload', 'off')   # with tex_flush_upload: a registered texture the CPU writes after init without any flush is uploaded too (dirty pages, hle_nvn.c nvn_ft_written): on / off
@@ -246,6 +286,8 @@ def header_one(g):
     ups = upscaler_keys(g)   # the game's own upscaler shaders, which DM_UPSCALER=metalfx (the launcher's Game's upscaler) replaces with MetalFX's spatial scaler (nvn_mtl.m up_mfx_encode)
     dbr = g.get('draw_barriers', 'full')   # how draw passes are ordered (nvn_mtl.m barrier_game): full = each waits for all earlier GPU work, game = by the game's own barriers, so vertex work overlaps the previous pass's fragments
     if dbr not in ('full', 'game'): sys.exit(f'{g.id}: draw_barriers must be full or game: {dbr}')
+    pcm = g.get('pass_compute', 'on')   # one-draw colour passes as compute dispatches of the pairs' kernels (nvn_mtl.m pcm_run; dmsh_pcomp.py; DM_NVN_PCM overrides): on (the default, for testing every game) / off (a game whose picture or run shows a fault with it)
+    if pcm not in ('on', 'off'): sys.exit(f'{g.id}: pass_compute must be on or off: {pcm}')
     sev = g.get('signal_events', 'node')   # where a GPU event signal leaves its submission's commands (nvn_queue.inc nq_signals_in_node; DM_NVN_SIGNAL_EVENTS overrides): node (the default) = the node goes on and its signals publish in order at its completion, split = it ends its command node (one Metal submission each; a fallback)
     if sev not in ('split', 'node'): sys.exit(f'{g.id}: signal_events must be split or node: {sev}')
     om = g.get('op_mode', 'console')   # the operation mode reported at start (hle_oe.c dm_opmode; DM_OPMODE overrides): console = docked, handheld = touch screen in use (Super Mario Galaxy's pointer)
@@ -255,6 +297,10 @@ def header_one(g):
     if pm not in ('follow', 'boost'): sys.exit(f'{g.id}: perf_mode must be follow or boost: {pm}')
     dmo = g.get('depth_mode', 'gl')   # the NVN depth mode the game sets, for the pipeline archive made offline (dm/gfx/tools/pso_offline.py; the host follows the game at run time): gl / zero
     if dmo not in ('gl', 'zero'): sys.exit(f'{g.id}: depth_mode must be gl or zero: {dmo}')
+    stage_copy = g.get('tex_copy_staging', '')   # <main build ID>:<return address offset> of a verified caller of nvnCommandBufferCopyBufferToTexture whose staging bytes are taken at record time (hle_nvn.c rec_staged_texture_upload)
+    sc = re.fullmatch(r'([0-9a-f]{32}):(0x[0-9a-f]+)', stage_copy) if stage_copy else None
+    if stage_copy and (not sc or not 0 < int(sc[2], 16) <= 0x7ffffffc or int(sc[2], 16) % 4):
+        sys.exit(f'{g.id}: tex_copy_staging takes a main build ID and an aligned return address offset: {stage_copy}')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -295,9 +341,11 @@ def header_one(g):
          f'#define DM_GAME_FRAME_WG {int(fwg == "on")}',
          f'#define DM_GAME_REPLAY_SPARES {int(rsp == "on")}',
          f'#define DM_GAME_DEPTH_ZERO_COPY {int(dzc == "on")}',
+         f'#define DM_GAME_DEPTH_LAZY {int(dlz == "on")}',
          f'#define DM_GAME_POOL_IDS_8K {int(pik == "on")}',
          f'#define DM_GAME_YIELD_STORM {int(yst == "sleep")}',
          f'#define DM_GAME_GHOST_TABLE {int(gtb)}',
+         f'#define DM_GAME_UPLOAD_SLOTS {int(upsl)}',
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',
          f'#define DM_GAME_UE_FPS_CVAR {q(ufc)}',
          f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',
@@ -312,10 +360,24 @@ def header_one(g):
          f'#define DM_GAME_PERF_BOOST {int(pm == "boost")}',
          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',
          f'#define DM_GAME_SHADER_KEY_SKIP_OFF {sko:#x}', f'#define DM_GAME_SHADER_KEY_SKIP_LEN {skl:#x}',
+         f'#define DM_GAME_ASPECT_UI_PREFIXES {q(" ".join(aui))}',   # for nvn_mtl.m aspect_ui (Ultrawide's camera: CAMERA_ASPECT builds); empty: a packed final picture needs none
          f'#define DM_GAME_RENDER_COND {int(rcd == "on")}',
+         f'#define DM_GAME_HEAT_GPU_STRETCH {int(hgs == "on")}',
+         f'#define DM_GAME_DRS_GPU_SCALE {int(dgs == "on")}',
+         f'#define DM_GAME_GPU_TIME_SCALE {gts!r}',   # 1.0: the reports' true times
+         f'#define DM_GAME_PASS_ALT_N {len(pas)}',   # 0: no pass drawn every other frame
+         f'#define DM_GAME_PASS_ALT_SHAPES {{{", ".join("{%d, %d, %d, %d, %d}" % sh for sh in pas) or "{0}"}}}',   # pa_shape: w, h, colour, depth, cube
+         f'#define DM_GAME_UP_BILINEAR {int(ubl == "on")}',
+         f'#define DM_GAME_CLOCK_KICK {ckm}',   # 0: no GPU clock kick
+         f'#define DM_GAME_FPS_FIXED_START {int(ffs == "on")}',
+         f'#define DM_GAME_PRESENT_REPEAT {int(prp == "on")}',
+         f'#define DM_GAME_LIVE_SCALE_PATCH {lsp}',
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
+         f'#define DM_GAME_TEX_COPY_STAGING_BUILD "{sc[1] if sc else ""}"',
+         f'#define DM_GAME_TEX_COPY_STAGING_PC {sc[2] if sc else 0}',
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
+         f'#define DM_GAME_PASS_COMPUTE {int(pcm == "on")}',
          f'#define DM_GAME_SIGNAL_EVENTS_NODE {int(sev == "node")}',
          f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',

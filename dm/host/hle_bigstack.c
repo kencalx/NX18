@@ -10,6 +10,8 @@
 // iOS does not allow generating executable code at run time, so the stubs are generated at compile time by the macro, not written at run time as DM_HLECOUNT does
 // Log lines take the same entry (dm_log below, dm.h LOG): any take-over may log, and formatting one line takes about 2.7 KB of stack, so a line logged on a guest stack is
 // written on the host stack whether or not its take-over is registered through HLE_FORCE_BIG (the controller applet's stand-in from a game thread of Drag x Drive, PR #1943)
+#include <stdatomic.h>
+#include <time.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -109,8 +111,34 @@ static void log_emit(const char *fmt, va_list *ap) {
 void log_emit_bs(const char *fmt, va_list *ap);
 __asm__(".text\n.p2align 2\n.globl _log_emit_bs\n.private_extern _log_emit_bs\n_log_emit_bs:\n"
         "    adrp x16, _log_emit@PAGE\n    add x16, x16, _log_emit@PAGEOFF\n    b _dm_bigstack_enter\n");
+// DM_LOG_COST=1 (diagnostic): what the log itself costs, for a run with many logging switches on (the owner's all-data runs of 2026-11-18): every 5 s one line with the lines
+// written, the time spent writing them (formatting, the lock, the write) per second of the run, the slowest single line and how many lines took over 1 ms, all threads together.
+// Two clock reads a line while on, one relaxed load while off
+// read again every 256th line while off: the first lines come before the app applies env.txt (DM_LOG_COST=1 there printed nothing in the run of 12147a05)
+static int log_cost_on(void) {
+    static _Atomic int v = -1; static _Atomic uint32_t n; int x = atomic_load_explicit(&v, memory_order_relaxed);
+    if (x == 1) return 1;
+    if (x < 0 || !(atomic_fetch_add_explicit(&n, 1, memory_order_relaxed) & 255)) { const char *e = getenv("DM_LOG_COST"); x = e && *e == '1'; atomic_store_explicit(&v, x, memory_order_relaxed); }
+    return x;
+}
+static _Atomic uint64_t g_lc_ns, g_lc_lines, g_lc_max, g_lc_slow, g_lc_t0;
+static void log_cost_line(const char *fmt, ...) { va_list ap; va_start(ap, fmt); log_emit_bs(fmt, &ap); va_end(ap); }
 void dm_log(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
+    if (!log_cost_on()) { log_emit_bs(fmt, &ap); va_end(ap); return; }
+    const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     log_emit_bs(fmt, &ap);
     va_end(ap);
+    const uint64_t t1 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), d = t1 - t0;
+    atomic_fetch_add_explicit(&g_lc_ns, d, memory_order_relaxed); atomic_fetch_add_explicit(&g_lc_lines, 1, memory_order_relaxed);
+    if (d > 1000000) atomic_fetch_add_explicit(&g_lc_slow, 1, memory_order_relaxed);
+    uint64_t m = atomic_load_explicit(&g_lc_max, memory_order_relaxed); while (d > m && !atomic_compare_exchange_weak_explicit(&g_lc_max, &m, d, memory_order_relaxed, memory_order_relaxed)) {}
+    uint64_t w0 = atomic_load_explicit(&g_lc_t0, memory_order_relaxed);
+    if (!w0) { atomic_compare_exchange_strong(&g_lc_t0, &w0, t1); return; }
+    if (t1 - w0 < 5000000000ull || !atomic_compare_exchange_strong(&g_lc_t0, &w0, t1)) return;   // one thread reports each window
+    const uint64_t ns = atomic_exchange_explicit(&g_lc_ns, 0, memory_order_relaxed), n = atomic_exchange_explicit(&g_lc_lines, 0, memory_order_relaxed),
+                   mx = atomic_exchange_explicit(&g_lc_max, 0, memory_order_relaxed), sl = atomic_exchange_explicit(&g_lc_slow, 0, memory_order_relaxed);
+    const double s = (t1 - w0) / 1e9;
+    log_cost_line("[dm] log cost over %.1f s: %llu lines (%.0f a second), %.2f ms a second writing them (all threads), slowest %.2f ms, %llu over 1 ms (DM_LOG_COST)",
+                  s, (unsigned long long)n, n / s, ns / 1e6 / s, mx / 1e6, (unsigned long long)sl);
 }

@@ -44,3 +44,6 @@ mem_used	0x6c00000
 # ---- Shader split ----
 shader_groups	/Shaders/=shaders
 shader_note	Hades II shaders (Shaders/NVN/bin)
+# Presets whose values differ here (settings.py preset_overrides; presets-first §6): Render scale stays 1.0 in Battery Saver and Performance, as the HUD and text scale with it
+preset	battery	DM_RENDER_SCALE=1.0
+preset	performance	DM_RENDER_SCALE=1.0

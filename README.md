@@ -60,12 +60,12 @@ This repository holds no game code, art or files. NX 18 is an unofficial fan pro
 
 Each game has its own note, with the devices it was tested on, its frame rate and what still goes wrong. For original Switch games, see the [tested games table](dm/games/README.md#games): each row gives the build, the engine and the graphics API.
 
-These Switch 2 games were tested by playing them on the Mac. Four were also played on an iPhone 18 Pro Max.
+These Switch 2 games were tested by playing them on the Mac. Five were also played on an iPhone 18 Pro Max.
 
 | Switch 2 game | Played on |
 | --- | --- |
 | [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md) | Mac · iPhone 18 Pro Max |
-| [Fire Emblem Fortune's Weave](dm/games/04007EF01F8AE000/README.md) | Mac, up to 120 fps |
+| [Fire Emblem Fortune's Weave](dm/games/04007EF01F8AE000/README.md) | Mac, up to 120 fps · iPhone 18 Pro Max |
 | [Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) | Mac |
 | [Kirby Air Riders](dm/games/040077201BE50000/README.md) | Mac |
 | [Mario Kart World](dm/games/0400C3F00006E000/README.md) | Mac · iPhone 18 Pro Max |
@@ -106,7 +106,7 @@ NX 18's iPhone and iPad builds are made for the Apple A20 chip and need iOS or i
 
 - **Tested** on the iPhone 18 Pro Max.
 - **Should work, not tested yet:** the iPhone 18 Pro, iPhone Duo and iPad mini 8.
-- **Switch 2 games:** all were tested on the Mac, and four were also played on the iPhone 18 Pro Max. iPad builds are untested. Each game's note lists the devices it was tested on.
+- **Switch 2 games:** all were tested on the Mac, and five were also played on the iPhone 18 Pro Max. iPad builds are untested. Each game's note lists the devices it was tested on.
 - **To build:** [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.3) 27.3, the beta build 27C5020n with Metal Toolchain 27C5020k (Metal compiler 32023.925.6). The shaders were tested with that compiler, and the build check refuses another one unless you allow it: [Xcode and the Metal compiler](docs/building.md#xcode-and-the-metal-compiler).
 
 ## Increased Memory Limit
@@ -177,7 +177,9 @@ NX 18 stands on other people's work. Their licenses: [dm/third_party](dm/third_p
 - **[Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)**: NX 18 follows mesosphère, its kernel, for how Horizon synchronizes threads (address arbiter, condition variables), and dmnt, its cheat VM, for the cheat engine in `dm/host/hle_cheats.c`.
 - **[LibHac 0.19.0](https://www.nuget.org/packages/LibHac/0.19.0)** by Alex Barney (MIT): `dm/tools/nx_extract` uses it to read NSPs and lay updates over the base game.
 - **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)** (Apache-2.0): turns SPIR-V into Metal Shading Language.
-- **[MacNativeGames](https://github.com/ly05010419/MacNativeGames)** (MIT): in `dm/gfx/nvn/nvn_mtl.m`, 8-bit indices widened on the GPU and clears inside a pass; in the shader translator, the visibility-counter lowering.
+- **[MacNativeGames](https://github.com/ly05010419/MacNativeGames)** (MIT): in `dm/gfx/nvn/nvn_mtl.m`, 8-bit indices widened on the GPU, clears inside a pass and the upload slot count for Breath of the Wild (its `6ecb27c1`); in the shader translator, the visibility-counter lowering; and, in `dm/gfx/nvn/nvn_ndve.inc`, the idea of skipping the movie network for a MetalFX scale on the iPhone; and, in `scripts/build_ipa_from_nsp.py`, the idea of reading and hashing a build's input files on all cores (its `f0bb4fd5394`) (none of its code).
+- **[kid-with-sword-remake](https://github.com/cheemu21/kid-with-sword-remake)** (MIT), an NXNative fork for The Legend of Zelda: Ocarina of Time: in `dm/gfx/nvn/nvn_mtl.m` and `dm/gfx/nvn/hle_nvn.c`, the read-ahead of pools, buffers and textures at setup (`DM_NVN_PREREAD`, its L7.7) and the addressed pools made resident a few at a time ahead of the raw memory table (`DM_NVN_RES_TRICKLE_MB`, its L7.8), adapted to NX 18's residency ([frame rate](docs/reference/frame-rate.md#area-loads-waited-on-the-replays-own-page-faults)).
+- **[S2Arm](https://github.com/jhaizhou-ops/S2Arm)** (Apache-2.0), which shares this NVN-on-Metal layer's ancestry: its reports and fixes, re-written by hand against NX 18's code (none of its code copied): a present interval past the hardware's maximum, polygons drawn as triangle fans, RGB9E5 render targets written through R32UI views, a cap on nested command list calls, compute dispatches ordered by the memory they touch and then by the game's barriers, same-pass tile reads for pixel shaders that turn the clip position into their screen UV themselves, with up to 8 outputs (Xenoblade), and earlier the swap chain's active texture count and vertex streams in no memory pool. Each is credited where it is described ([rendering](docs/reference/rendering.md), [frame rate](docs/reference/frame-rate.md), [NVN objects](docs/reference/nvn-objects.md)).
 - **Switch Button Icons and Controls** by Zacksly: Button Icons and Controls by Zacksly (CC BY 3.0 Licensed | zacksly.itch.io), modified: recoloured. The button glyphs of the iPhone and iPad app's controller hints (the settings screen's "Press A to play", the guide's Y, B to close, the in-game menu's A and B), in [`dm/ios/Resources/ButtonIcons`](dm/ios/Resources/ButtonIcons/README.md) with the licence.
 - **[CMAA2](https://github.com/GameTechDev/CMAA2)** (Intel, Apache-2.0): the edge smoothing behind the Anti-aliasing setting, ported to Metal in `dm/gfx/msl/cmaa2.metal`. **[FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR)** (AMD, MIT): the RCAS sharpening behind the Sharpening setting, in `dm/gfx/msl/present.metal`.
 - **[FPSLocker-Warehouse](https://github.com/masagrator/FPSLocker-Warehouse)** by masagrator: the frame-rate addresses and patch sites behind 60 fps in Monster Hunter Rise, Need for Speed: Hot Pursuit Remastered (one instruction found by theboy181), NieR:Automata and Tears of the Kingdom. NX 18 re-implements them in `dm/host/hle_fpslock.c` and the games' `patches.py`.

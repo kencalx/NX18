@@ -30,10 +30,28 @@ static const struct { int on, src, dst, eq; char a0, a1; uint32_t word; } rows[]
 };
 enum { NROWS = sizeof rows / sizeof *rows };
 static blend_st state(int r) { blend_st b = {.target = 0, .src_rgb = (uint64_t)rows[r].src, .dst_rgb = (uint64_t)rows[r].dst, .src_a = O, .dst_a = Z, .eq_rgb = (uint64_t)rows[r].eq, .eq_a = ADD}; return b; }
+// ONE + ZERO under ADD for colour and alpha on a float attachment is a direct write, blending off (upstream ce41059a4: LEGO Star Wars' bloom held +Inf in an R11G11B10F target
+// blended so); a state that reads the destination, or a unorm target, keeps blending
+static void replace_float_case(void) {
+    pso_key key = {.blend_en = 1, .chmask = 0xf};
+    key.cfmt[0] = MTLPixelFormatRG11B10Float;
+    key.blend[0] = state(0);
+    CHECK(!pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+    key.cfmt[0] = MTLPixelFormatRGBA16Float;
+    CHECK(!pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+    key.blend[0].dst_a = O;
+    CHECK(pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+    key.blend[0] = state(2);
+    CHECK(pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+    key.cfmt[0] = MTLPixelFormatRGBA8Unorm;
+    key.blend[0] = state(0);
+    CHECK(pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+}
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc != 2) return 2;
     setenv("DM_MSL_DIR", argv[1], 1);
     mtl_init(); g_msl_dir = @(argv[1]);
+    replace_float_case();
     int on = bz_on();
     NSError *error = nil; NSString *source = [NSString stringWithContentsOfFile:[g_msl_dir stringByAppendingString:@"/blend.metal"] encoding:NSUTF8StringEncoding error:&error];
     id<MTLLibrary> lib = t4_lib(source, nil, &error);
@@ -64,7 +82,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     op_hdr end = {OP_END, 8}; memcpy(commands + used, &end, 8);
     #undef EMIT
     state_reset();
-    memset(&R, 0, sizeof R); mtl_sub_begin(); uint64_t handle = (uint64_t)commands; mtl_sub_index(&handle, 1); mtl_exec(commands);
+    memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec(commands);
     id<MTLBuffer> pixels = [g_dev newBufferWithLength:256 * NROWS options:MTLResourceStorageModeShared];
     if (!pixels) abort();
     res_add(pixels); res_commit();   // the copy below writes it: resident as everything an encoder touches (t_mtl4.h)

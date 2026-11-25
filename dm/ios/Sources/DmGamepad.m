@@ -10,7 +10,7 @@
 //   offline HTML page is shown (touches off the controls go to the page, so a double tap cannot reach the pad). A double tap on a control is a double press, not a request
 //   for the menu, so it never shows the button
 //   Tap (touch): no control but the menu button, every other touch goes to the game's local touch viewport; offered only while the game is in handheld mode, the only one in which it reads the touch screen (Balatro, played by touch).
-//   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone);
+//   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (its ring centres where the thumb lands while it is held, tilt measured from there, and goes home when let go, small dead zone);
 //     the A (right) B (bottom) X (top) Y (left) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
 //   3D (full, Pro Controller style): everything in 2D (left stick and diamond keep their place and size), plus a D-pad (inward of and below the left stick, 8-way), a right stick that is not drawn
 //     (a touch landing in the right third of the screen on no control holds it: centred where it lands, the centre dragged along once the finger passes the stick radius) and L3 / R3 (small round keys in the top row, inward of ZL / ZR).
@@ -18,6 +18,8 @@
 //   Touch-down ownership: the menu button where it is nearer than a locked key (a view of its own, DmMenuButton), locked keys next (shoulders, − / +, L3 / R3), then whichever of the diamond, the D-pad and the left stick has the smallest distance / grab radius (the left stick's grab circle borders the D-pad),
 //     then in 3D the right stick for a touch in the right third.
 //   Everything hugs the edges and corners to leave the picture room; controls sit over the picture, one CAShapeLayer each: a press only swaps the fill, a stick only moves its knob, nothing redraws the whole screen.
+//   While they show with the game's picture on the phone, the present draws them into the game's frame instead and their layers stay hidden (touchDraw:, below; dm/host/touch_draw.h):
+//   a layer over the game's made iOS composite the two, a refresh more of latency. This view takes every touch as before either way.
 //   Touches no control takes (in 3D, those outside the right third) go to the game's touch screen when DmLayout assigns a local game viewport (pushGame; Super Mario Galaxy's pointer in handheld mode).
 //   The virtual gamepad (all but the menu button) hides while a physical controller is connected and comes back when it is removed; unclaimed touches go to the game only when a local game viewport exists. Physical controllers keep every button (D-pad and right stick included) and map by position: bottom = B, right = A, left = Y, top = X (same positions as on a Switch controller); a Nintendo pad maps by its labels (pad_apple.h).
 //   Each physical controller is a player of its own (local co-op), as on the Mac: the first one connected is player 1, together with the touch gamepad, the next player 2, and so on up to 8; see "Physical controllers" below.
@@ -29,6 +31,8 @@
 #include <pthread.h>
 #include "dm.h"
 #include "dm_input.h"
+#include "state_report.h"   // Menu while NX 18's panel shows
+#import "DmVitals.h"   // Vitals over the picture hides while the panel shows; its header line keeps the figures coming
 #include "front.h"
 #include "ui_font.h"   // NX 18's UI font: the key letters and the controller prompt
 #include "game_profile.h"
@@ -38,12 +42,14 @@
 #include "pad_apple.h"
 #include "pad_slots.h"
 #include "ctrl_prompt.h"
+#include "touch_draw.h"   // the controls drawn into the game's frame by the present (nvn_mtl.m touch_draw)
 #include <stdatomic.h>
 #import "DmLayout.h"
 #import "DmGameMenu.h"
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_N };
 enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_GAME };   // which control a touch holds; C_GAME: none, the touch goes to the game's touch screen (finger slot << 8)
+enum { S_RING = B_N, S_KNOB, S_N };   // the pictures of the controls drawn into the game's frame: one per key, then the left stick's ring and knob (touchAtlas)
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_touch_btn, g_shake_btn;
@@ -166,6 +172,7 @@ int front_web_touch(void);   // web_apple.m: an offline HTML page is shown over 
 }
 @end
 static __weak DmGamepad *g_view;
+static __weak DmGamepad *g_touch_pad;   // the pad that last handed the present a frame (touchPublish): the present's answers go to it (front_touch_drawn, front_touch_unfit)
 static void pads_start(void);   // Physical controllers, below
 static void pads_release_game(void);
 
@@ -173,6 +180,7 @@ static void pads_release_game(void);
     NSMapTable<UITouch *, NSNumber *> *_owner;     // touch → control (with the key for C_BTN or the stick for C_STICK, << 8)
     UITouch *_stick[2]; CGPoint _stickNow[2];      // the touch holding each stick and where it is now (0 left, 1 right)
     CGPoint _rCentre;                              // the right stick's centre: where its touch landed, dragged along past K_RSTICK_R
+    CGPoint _lCentre;                              // the left stick's centre while it is held: where its touch landed (Apple HIG, Game controls: a movement stick where the thumb lands); home when let go
     uint64_t _faceBits, _dpadBits, _btnBits;
     NSMapTable<UITouch *, NSNumber *> *_faceOf;    // which keys each touch on the diamond currently holds
     CAShapeLayer *_key[B_N]; CATextLayer *_label[B_N];   // one layer per key
@@ -184,7 +192,18 @@ static void pads_release_game(void);
     unsigned _hapticSticks;
     BOOL _stickShown;                              // the left stick was held at the last refresh
     BOOL _full, _tap;                              // the 3D layout / the Tap layout is current
-    CALayer *_controls;                            // holds every control layer: hidden while a physical controller is connected (the view itself stays, for game touches)
+    CALayer *_controls;                            // holds every control layer: hidden while a physical controller is connected (the view itself stays, for game touches), and while the present draws them
+    // The controls drawn into the game's frame (dm/host/touch_draw.h): front_ios.m turns it on (touchDraw:) with the canvas, the game view's frame (pad points), its pixels a
+    // point and the picture's place on it. A picture of each control at those pixels, normal and pressed (touchAtlas: the control layers themselves rendered, so they look as
+    // they did), goes to the present once per look; each change of a press or the knob hands it a frame of quads (touchPublish). The layers hide only once a present that drew
+    // the controls completed (_inFrame, front_touch_drawn), and show again while the canvas changes (until the pictures are made for it), while the game presents nothing
+    // (a press would not show until the next present) and when the drawable stops fitting the frame (front_touch_unfit)
+    BOOL _touchDraw, _inFrame, _sprites; CGRect _canvas, _canvasPic; CGFloat _canvasScale;
+    uint32_t _ackFrom;                             // the first frame after the last change, whose drawing (or a later one's) hides the layers; 0: none published yet
+    uint32_t _offs;                                // times the present stopped drawing them (touchDraw: off): the frame is cleared after the last one only
+    NSData *_atlasKey; uint32_t _atlasGen; BOOL _atlasOK;
+    CGRect _spritePt[S_N];                         // each picture's rectangle in its layer's points (the knob's in its own bounds), whole pixels
+    CGRect _spriteUV[S_N][2];                      // where it is in the atlas, normalized: normal [0] and pressed [1] (the ring has one look)
     BOOL _padOff;                                  // a physical controller is connected: every touch goes to the game
     DmLayout _layout;
     UITouch *_game[16];                            // touches on the game's touch screen by finger slot
@@ -207,6 +226,13 @@ static void make_colors(CGFloat o) {   // each colour carries its own low opacit
     k_ringFill = [UIColor colorWithWhite:1 alpha:MIN(0.06 * o, 1)]; k_text = [UIColor colorWithWhite:1 alpha:MIN(0.6 * o, 1)]; k_textOn = [UIColor colorWithWhite:0 alpha:MIN(0.7 * o, 1)];
 }
 static float shadow_opacity(void) { return 0.2f * (float)MIN(g_touch_opacity, 1); }
+// A pressed key or a held knob glows past its edge (Apple HIG, Game controls: a press state players see even when the finger covers the control): its drop shadow becomes a
+// soft white halo while it is down, in the layers and in the atlas's pressed pictures alike, so the present draws the same. K_GLOW_R: the halo's blur radius (points)
+enum { K_GLOW_R = 8 };
+static void press_glow(CAShapeLayer *l, BOOL on) {
+    if (on) { l.shadowColor = UIColor.whiteColor.CGColor; l.shadowOpacity = (float)MIN(0.6 * g_touch_opacity, 0.9); l.shadowRadius = K_GLOW_R; l.shadowOffset = CGSizeZero; }
+    else { l.shadowColor = UIColor.blackColor.CGColor; l.shadowOpacity = shadow_opacity(); l.shadowRadius = 3; l.shadowOffset = CGSizeMake(0, 1); }
+}
 static CAShapeLayer *shape(CALayer *parent) {
     CAShapeLayer *l = [CAShapeLayer layer];
     l.fillColor = k_idle.CGColor; l.strokeColor = k_line.CGColor; l.lineWidth = 1.5;
@@ -306,10 +332,15 @@ static BOOL assistive_running(void) { return UIAccessibilityIsVoiceOverRunning()
 // focused element instead of reaching touchesBegan); the hide timer keeps it while either runs, and once both are off it fades 5 s later
 - (void)assistiveChanged:(NSNotification *)n { (void)n; dispatch_async(dispatch_get_main_queue(), ^{ [self menuShow]; }); }
 - (void)menuTouched { [self menuShow]; }
-// The freeze detector (dm/host/stall.c) holds off while the menu is open: the game may stand still behind it. The system UIMenu reports no close of its own, so it counts as
-// open until the next touch on the game (menuClosed), which only holds the detector off longer
-- (void)menuOpened { _menuOpen = YES; _menuGen++; _menu.hidden = NO; _menu.alpha = 1; dm_stall_menu(1); }
-- (void)menuClosed { _menuOpen = NO; dm_stall_menu(0); [self menuScheduleHide]; }
+// The freeze detector (dm/host/stall.c) holds off while the menu is open: the game may stand still behind it. The system UIMenu's close comes from willEnd or, when that never
+// came, from the next touch on the game (menuClosed), which only holds the detector off longer
+// The log hears each open and close through the same two methods (hle_oe.c dm_front_menu_set: "front end: in-game menu open" / "... closed after N s"). UIKit draws the menu over
+// the game on the same GPU, and 13 Sentinels on an iPhone showed GPU spikes and dropped frames while it was open that the log could not tell from the game's own; the long-frame
+// lines and the 300-frame windows now say which frames were made under the menu (hle_nvn.c front_ui). Each close is reported once: willEnd clears _menuOpen, so the touch on the
+// game that also closes the menu (touchesBegan) reports one only when willEnd never came. The host ignores a repeated report all the same. Both of NX 18's menus (the panel and
+// DM_GAME_MENU=system's UIMenu) reach these two, so the detector and the log always see the same menu
+- (void)menuOpened { _menuOpen = YES; _menuGen++; _menu.hidden = NO; _menu.alpha = 1; dm_stall_menu(1); dm_front_menu_set(1, NULL); }
+- (void)menuClosed { _menuOpen = NO; dm_stall_menu(0); dm_front_menu_set(0, NULL); [self menuScheduleHide]; }
 // A home screen shortcut (dm_gamepad_menu_open): the button shows at once (a faded or hidden one does not open its menu) and its menu opens on the next main-queue turn, as a tap does
 // (UIControl performPrimaryAction presents a menu-as-primary-action button's menu)
 - (void)menuOpenNow {
@@ -323,7 +354,8 @@ static BOOL assistive_running(void) { return UIAccessibilityIsVoiceOverRunning()
     if (_systemMenu || dm_game_panel_shown()) return;
     [_menu.layer removeAllAnimations];
     [self menuOpened]; [self reset]; pads_release_game();
-    if (!dm_game_panel_open((__bridge void *)_menu)) dm_gamepad_panel_closed();
+    if (dm_game_panel_open((__bridge void *)_menu)) { dm_state_menu(1); dm_vitals_menu_open(1); }
+    else dm_gamepad_panel_closed();
 }
 - (void)panelToggle { if (dm_game_panel_shown()) dm_game_panel_close(); else [self panelOpen]; }
 - (int)padLayout { return _tap ? 2 : _full ? 1 : 0; }
@@ -333,11 +365,11 @@ static BOOL assistive_running(void) { return UIAccessibilityIsVoiceOverRunning()
     [self reset];
     _full = l == 1; _tap = l == 2;
     [NSUserDefaults.standardUserDefaults setObject:@(l) forKey:k_layout_key];
-    [self applyLayout]; [self setNeedsLayout];
+    [self applyLayout]; [self setNeedsLayout]; [self.superview setNeedsLayout];   // Tap draws no control: the front end takes the game view back to the picture
 }
 - (void)opmodeChanged {   // docked: the Tap layout goes (the game reads no touch screen then), unsaved, so handheld mode at the next start brings it back
     if (!_tap || dm_opmode() == 0) return;
-    [self reset]; _tap = NO; _full = NO; [self applyLayout]; [self setNeedsLayout];
+    [self reset]; _tap = NO; _full = NO; [self applyLayout]; [self setNeedsLayout]; [self.superview setNeedsLayout];
 }
 - (void)setTouchFeedback:(BOOL)on {
     if (!on) { if (_touchFeedback) [self removeInteraction:_touchFeedback]; _touchFeedback = nil; return; }   // the generator is one of this view's interactions: it goes with it
@@ -382,7 +414,9 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
     return side(s, 1, MAX(K_FACE_X * u, edge), CGRectGetMaxY(s) - MAX(K_PAD_Y * u, edge)); }
 - (CGFloat)faceGap { return K_FACE_GAP * self.u; }
 - (CGFloat)faceR { return K_FACE_R * self.u; }
-- (CGFloat)faceHitR { return MAX(self.faceR * 1.25, _layout.separated ? 22 : 0); }
+// Touch targets keep Apple's minimums at every Touch control size (HIG, Game controls: 44 pt for the frequent controls, 28 pt for the rest): the drawing shrinks, the target
+// stops at 22 pt of radius (the diamond's at 85% of its key spacing, so a touch between two keys still presses one or both as at the larger sizes, never three)
+- (CGFloat)faceHitR { return MAX(self.faceR * 1.25, _layout.separated ? 22 : MIN(22, self.faceGap * 0.85)); }
 - (CGPoint)facePos:(int)b { CGPoint c = self.faceCenter; CGFloat g = self.faceGap;
     switch (b) { case B_A: return CGPointMake(c.x + g, c.y); case B_B: return CGPointMake(c.x, c.y + g); case B_X: return CGPointMake(c.x, c.y - g); default: return CGPointMake(c.x - g, c.y); } }
 - (CGPoint)stickHome {
@@ -394,7 +428,8 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
     CGRect s = self.corner;
     return side(s, 0, K_STICK_X * self.u, CGRectGetMaxY(s) - K_PAD_Y * self.u);
 }
-- (CGPoint)stickCentre:(int)i { return i ? _rCentre : self.stickHome; }
+- (CGPoint)stickCentre:(int)i { return i ? _rCentre : _stick[0] ? _lCentre : self.stickHome; }
+- (CGPoint)ringShift { if (!_stick[0]) return CGPointZero; CGPoint h = self.stickHome; return CGPointMake(_lCentre.x - h.x, _lCentre.y - h.y); }   // the drawn ring follows the held stick's centre
 - (CGFloat)stickR:(int)i { return i ? K_RSTICK_R * self.u / g_touch_size : K_STICK_R * self.u; }   // the right stick is not drawn: its swipe keeps the Large length whatever Touch control size
 - (BOOL)inRightArea:(CGPoint)p { CGRect b = _layout.controls; return p.x >= CGRectGetMaxX(b) - b.size.width * K_RSWIPE; }
 - (CGPoint)dpadCenter {
@@ -423,11 +458,11 @@ static BOOL isClick(int b) { return b == B_LS || b == B_RS; }
 static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); }
 - (CGFloat)buttonDistance:(int)b point:(CGPoint)p {
     CGFloat u = self.u;
-    if (isDrop(b)) return dist(p, [self dropCenter:b]) / MAX([self dropR:b] * 1.35, _layout.separated ? 22 : 0);
-    if (isClick(b)) return dist(p, [self clickCenter:b]) / MAX(K_CLICK_R * u * 1.35, _layout.separated ? 22 : 0);
+    if (isDrop(b)) return dist(p, [self dropCenter:b]) / MAX([self dropR:b] * 1.35, 22);   // 44 pt at least (faceHitR)
+    if (isClick(b)) return dist(p, [self clickCenter:b]) / MAX(K_CLICK_R * u * 1.35, _layout.separated ? 22 : 14);   // L3 / R3: 28 pt at least
     CGRect r = CGRectInset([self pillRect:b], -8 * u, -8 * u);
-    if (!_layout.separated && !CGRectContainsPoint(r, p)) return CGFLOAT_MAX;
-    CGFloat w = MAX(r.size.width, _layout.separated ? 28 : 0), h = MAX(r.size.height, _layout.separated ? 28 : 0);
+    CGFloat w = MAX(r.size.width, 28), h = MAX(r.size.height, 28);   // − / +: 28 pt at least
+    if (!_layout.separated && !CGRectContainsPoint(CGRectInset(r, -(w - r.size.width) / 2, -(h - r.size.height) / 2), p)) return CGFLOAT_MAX;
     return MAX(fabs(p.x - CGRectGetMidX(r)) / (w / 2), fabs(p.y - CGRectGetMidY(r)) / (h / 2));
 }
 - (int)btnAt:(CGPoint)p {   // Locked at touch-down; nearest normalized target wins overlapping separated-layout hits.
@@ -561,7 +596,9 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; }   // the right stick: centred where the touch lands
         if (kind == C_FACE) { [_owner setObject:@(C_FACE) forKey:t]; [_faceOf setObject:@([self faceAt:p]) forKey:t]; }
         else if (kind == C_DPAD) [_owner setObject:@(C_DPAD) forKey:t];
-        else if (kind == C_STICK) { [_owner setObject:@(C_STICK | (uint64_t)idx << 8) forKey:t]; _stick[idx] = t; _stickNow[idx] = p; }
+        else if (kind == C_STICK) { [_owner setObject:@(C_STICK | (uint64_t)idx << 8) forKey:t]; _stick[idx] = t; _stickNow[idx] = p;
+            if (idx == 0) { CGRect b = self.bounds; CGFloat m = [self stickR:0] * 0.5;   // centred where the thumb lands, at least half the ring on the screen
+                _lCentre = CGPointMake(MIN(MAX(p.x, CGRectGetMinX(b) + m), CGRectGetMaxX(b) - m), MIN(MAX(p.y, CGRectGetMinY(b) + m), CGRectGetMaxY(b) - m)); } }
         else game |= [self gameBegin:t];
     }
     if (game) [self pushGame];
@@ -683,21 +720,205 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     CAShapeLayer *in = (CAShapeLayer *)_knob.sublayers.firstObject; CGPathRef ip = circlePath(CGPointMake(k, k), k * 0.62);
     in.frame = _knob.bounds; in.path = ip; CGPathRelease(ip);
     [CATransaction commit];
+    _sprites = YES;   // the paths are laid out for the canvas: refresh makes the pictures for them (touchAtlas) before a frame draws them
     [self refresh];
 }
 - (void)safeAreaInsetsDidChange { [super safeAreaInsetsDidChange]; [self setNeedsLayout]; }
-- (void)refresh {   // pressed state → fill, sticks → knob position
+#define TOUCH_STALL_NS 100000000ull   // no present for this long: a press shows on the layers (refresh)
+- (void)refresh {   // pressed state → fill, sticks → knob position: in the frame the present draws them into (touchPublish), and on the layers while they show
+    if (_touchDraw) {
+        [self touchAtlas];
+        // The game presents nothing (a load, a hitch, a program hand-off): the controls in the frame would not follow this press until the next present, so the layers show it,
+        // as before; the next present that draws the controls hides them again
+        if (_inFrame && mtl_present_touch_idle_ns() > TOUCH_STALL_NS) [self touchLayers:"the game presents nothing"];
+        [self touchPublish];
+        if (_inFrame) return;   // the layers are hidden: they keep the look they had, and get the current one when they show again
+    }
+    [self layerLook];
+}
+- (void)layerLook {
     uint64_t all = _faceBits | _dpadBits | _btnBits;
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     for (int b = 0; b < B_N; b++) { BOOL on = (all >> b) & 1;
-        _key[b].fillColor = (on ? k_on : k_idle).CGColor; _label[b].foregroundColor = (on ? k_textOn : k_text).CGColor; }
-    CGPoint h = self.stickHome, o = [self knobOffset:0];
-    _knob.position = CGPointMake(h.x + o.x, h.y + o.y); _knob.fillColor = (_stick[0] ? k_on : k_idle).CGColor;
+        _key[b].fillColor = (on ? k_on : k_idle).CGColor; _label[b].foregroundColor = (on ? k_textOn : k_text).CGColor; press_glow(_key[b], on); }
+    CGPoint h = [self stickCentre:0], o = [self knobOffset:0], rs = self.ringShift;
+    _knob.position = CGPointMake(h.x + o.x, h.y + o.y); _knob.fillColor = (_stick[0] ? k_on : k_idle).CGColor; press_glow(_knob, _stick[0] != 0);
+    _ring.affineTransform = CGAffineTransformMakeTranslation(rs.x, rs.y);
     [CATransaction commit];
 }
 
+// ---- The controls drawn into the game's frame (dm/host/touch_draw.h) ----
+// A visible layer over the game's CAMetalLayer makes iOS composite the two, which costs one refresh between the present and the screen (docs/reference/frame-rate.md, "Touch
+// controls over the game's layer cost a refresh of latency"). So while the controls show, front_ios.m makes the game view the whole screen (dm_touch_canvas) and turns this on:
+// the control layers stay hidden, as with a controller, and the live present draws the controls into its drawable instead, over the picture. The view itself stays and takes
+// every touch as before (hit tests, the game's touch screen, the sticks, the double tap); the menu button is a view of its own and stays one (it shows 5 s at a time)
+- (void)touchDraw:(BOOL)on canvas:(CGRect)canvas scale:(CGFloat)scale picture:(CGRect)pic {
+    if (on == _touchDraw && (!on || (CGRectEqualToRect(canvas, _canvas) && scale == _canvasScale && CGRectEqualToRect(pic, _canvasPic)))) return;
+    BOOL was = _touchDraw;
+    _touchDraw = on;
+    if (on) {   // the canvas and the picture's place on it at once (TOUCH_PLACE: no control yet, the pictures and their places are for the last canvas); the layers show the
+                // controls until a present has drawn them for this canvas. layoutSubviews lays the paths out, makes the atlas for these pixels if they changed and hands over
+                // the frame with the controls (refresh)
+        _canvas = canvas; _canvasScale = scale; _canvasPic = pic; _sprites = NO;
+        [self touchLayers:NULL]; [self touchPublish]; [self setNeedsLayout]; return;
+    }
+    if (was) {   // the present stops drawing them: a last frame that is off (it keeps the canvas, so a drawable made before the game view left it still places the picture
+                 // there: touch_frame_places), the atlas let go (made again when they come back), and the layers take the current look
+        touch_frame f = {0}; [self touchFrameHead:&f]; f.on = TOUCH_OFF; mtl_present_touch(&f);
+        mtl_present_touch_release(); _atlasKey = nil; _atlasOK = NO;
+        [self touchLayers:NULL]; [self refresh];
+        // Then, once those drawables are long gone, no frame at all: nothing the front end no longer lays out stays published
+        __weak DmGamepad *me = self; uint32_t off = ++_offs;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            DmGamepad *p = me; if (!p || p->_touchDraw || p->_offs != off || g_touch_pad != p) return;
+            touch_frame z = {0}; mtl_present_touch(&z);
+        });
+    }
+}
+// The control layers show again (why: logged; NULL for a change the front end logs itself) until a present has drawn the controls from a frame published after this
+- (void)touchLayers:(const char *)why {
+    BOOL showed = !_controls.hidden;
+    _inFrame = NO; _ackFrom = 0;
+    [CATransaction begin]; [CATransaction setDisableActions:YES]; _controls.hidden = _padOff; [CATransaction commit];
+    if (!showed && !_padOff) [self layerLook];
+    if (why) { static int said; if (said++ < 8 || said % 100 == 0) LOG("front end: touch controls on their layers until the next present draws them (%s)", why); }
+}
+// A live present that drew the controls from frame seq or later completed (nvn_mtl.m, through front_touch_drawn): the controls are on screen in the frame, so the layers hide
+- (void)touchDrawn:(uint32_t)seq {
+    if (!_touchDraw || _inFrame || !_ackFrom || !touch_seq_since(seq, _ackFrom)) return;
+    _inFrame = YES;
+    [CATransaction begin]; [CATransaction setDisableActions:YES]; _controls.hidden = YES; [CATransaction commit];
+}
+// The present had drawables the frame is not laid out for, many in a row (nvn_mtl.m, through front_touch_unfit): the layers show and the root lays the view out again
+- (void)touchUnfit {
+    if (!_touchDraw) return;
+    [self touchLayers:"the drawable does not fit the frame"]; [self touchPublish]; [self.superview setNeedsLayout];
+}
+// What the pictures of the controls depend on: the pixels a point, the opacity, and each layer's path and whether it shows (positions too: a control's place within its picture's
+// pixels follows its position, so each keeps the fraction of a pixel its layer had)
+- (NSData *)touchLook {
+    NSMutableData *d = [NSMutableData data];
+    CGFloat head[2] = {_canvasScale, g_touch_opacity}; [d appendBytes:head length:sizeof head];
+    CAShapeLayer *ls[S_N]; for (int b = 0; b < B_N; b++) ls[b] = _key[b]; ls[S_RING] = _ring; ls[S_KNOB] = _knob;
+    for (int i = 0; i < S_N; i++) {
+        CGRect r = ls[i].path ? CGPathGetPathBoundingBox(ls[i].path) : CGRectNull; CGFloat v[5] = {ls[i].hidden, r.origin.x, r.origin.y, r.size.width, r.size.height};
+        [d appendBytes:v length:sizeof v];
+    }
+    return d;
+}
+// A layer's shadow as Core Animation draws it: its shadowPath as an opaque shape, blurred by shadowRadius, offset, in shadowColor at shadowOpacity, under the whole shape, so it
+// shows through a translucent fill (renderInContext takes a shadow from what it draws instead, the fill's 14 % alpha: hardly any). The shape is drawn outside the picture's
+// rectangle (pt, the clip) and its shadow brought back by the offset. A shadow's offset and blur are in the context's base space (pixels, y up), whatever the transform. Core
+// Graphics' blur of 2.2 times the radius matches the render server's shadow best (the Duo harness's DuoTouchDrawTests against drawViewHierarchyInRect: a mean difference of
+// 0.065 of 255 per channel over the screen, 0.10 at 2 and 0.32 at 1)
+#define TOUCH_SHADOW_BLUR 2.2
+static void touch_shadow(CGContextRef g, CAShapeLayer *l, CGFloat sc, CGRect pt) {
+    if (!l.shadowPath || l.shadowOpacity <= 0 || !l.shadowColor) return;
+    CGFloat away = pt.size.width + 64;
+    CGColorRef c = CGColorCreateCopyWithAlpha(l.shadowColor, CGColorGetAlpha(l.shadowColor) * l.shadowOpacity);
+    CGContextSaveGState(g);
+    CGContextSetShadowWithColor(g, CGSizeMake((l.shadowOffset.width - away) * sc, -l.shadowOffset.height * sc), l.shadowRadius * sc * TOUCH_SHADOW_BLUR, c);
+    CGContextTranslateCTM(g, away, 0); CGContextAddPath(g, l.shadowPath); CGContextSetGrayFillColor(g, 0, 1); CGContextFillPath(g);
+    CGContextRestoreGState(g);
+    CGColorRelease(c);
+}
+// The pictures of the controls at the canvas's pixels a point: each layer as it is, rendered by Core Animation's own renderer (renderInContext: the path's fill and outline,
+// the label; the shadow by touch_shadow), normal and pressed, into one atlas the present samples, grey and alpha when every pixel is a grey (touch_grey). Made again only when
+// the look changes (touchLook). Main thread, 10-30 ms
+- (void)touchAtlas {
+    NSData *key = [self touchLook];
+    if ([key isEqualToData:_atlasKey]) return;
+    _atlasKey = key; _atlasOK = NO;
+    CGFloat sc = _canvasScale; if (sc <= 0) return;
+    double t0 = CACurrentMediaTime();
+    CAShapeLayer *ls[S_N]; for (int b = 0; b < B_N; b++) ls[b] = _key[b]; ls[S_RING] = _ring; ls[S_KNOB] = _knob;
+    int idx[2 * S_N], st[2 * S_N], w[2 * S_N], h[2 * S_N], x[2 * S_N], y[2 * S_N], n = 0;
+    for (int i = 0; i < S_N; i++) {
+        _spritePt[i] = CGRectNull;
+        if (ls[i].hidden || !ls[i].path) continue;
+        // the path, its outline and its shadow (a blur of shadowRadius, offset), whole pixels outward
+        CGFloat m = ls[i].lineWidth / 2 + 2 * MAX(ls[i].shadowRadius, i == S_RING ? 0 : K_GLOW_R) + MAX(fabs(ls[i].shadowOffset.width), fabs(ls[i].shadowOffset.height)) + 1;   // the pressed look's glow too
+        CGRect r = CGRectInset(i == S_KNOB ? ls[i].bounds : CGPathGetPathBoundingBox(ls[i].path), -m, -m);
+        CGFloat x0 = floor(CGRectGetMinX(r) * sc) / sc, y0 = floor(CGRectGetMinY(r) * sc) / sc, x1 = ceil(CGRectGetMaxX(r) * sc) / sc, y1 = ceil(CGRectGetMaxY(r) * sc) / sc;
+        _spritePt[i] = CGRectMake(x0, y0, x1 - x0, y1 - y0);
+        for (int s = 0; s < (i == S_RING ? 1 : 2); s++) { idx[n] = i; st[n] = s; w[n] = (int)lround((x1 - x0) * sc); h[n] = (int)lround((y1 - y0) * sc); n++; }
+    }
+    int width = 2048, height = 0;
+    for (int k = 0; k < n; k++) width = MAX(width, w[k] + 4);
+    if (!n || !(height = touch_pack(n, w, h, width, 2, x, y))) return;   // nothing to draw (_atlasOK stays NO: touchPublish places the picture only)
+    size_t row = (size_t)width * 4; void *px = calloc((size_t)height, row);
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef g = px ? CGBitmapContextCreate(px, (size_t)width, (size_t)height, 8, row, cs, (CGBitmapInfo)kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little) : NULL;   // BGRA, premultiplied: the atlas's texture
+    CGColorSpaceRelease(cs);
+    if (!g) { free(px); LOG("[RED] front end: no bitmap for the touch controls' %dx%d atlas; they go back to their layers", width, height); front_touch_draw_failed(); return; }
+    CGContextTranslateCTM(g, 0, height); CGContextScaleCTM(g, 1, -1);   // UIKit's way up, as a layer renders
+    [CATransaction begin]; [CATransaction setDisableActions:YES];   // looks set and put back in one transaction: the render server sees none of them
+    BOOL hidden = _controls.hidden; _controls.hidden = NO;
+    CGAffineTransform ringT = _ring.affineTransform; _ring.affineTransform = CGAffineTransformIdentity;   // pictured at home: the held stick's shift is applied where it is placed (ringShift)
+    for (int k = 0; k < n; k++) {
+        int i = idx[k]; BOOL on = st[k];
+        if (i < B_N) { ls[i].fillColor = (on ? k_on : k_idle).CGColor; _label[i].foregroundColor = (on ? k_textOn : k_text).CGColor; press_glow(ls[i], on); }
+        else if (i == S_KNOB) { ls[i].fillColor = (on ? k_on : k_idle).CGColor; press_glow(ls[i], on); }
+        CGContextSaveGState(g);
+        CGContextTranslateCTM(g, x[k], y[k]); CGContextClipToRect(g, CGRectMake(0, 0, w[k], h[k]));
+        CGContextScaleCTM(g, sc, sc); CGContextTranslateCTM(g, -_spritePt[i].origin.x, -_spritePt[i].origin.y);
+        touch_shadow(g, ls[i], sc, _spritePt[i]);
+        float so = ls[i].shadowOpacity; ls[i].shadowOpacity = 0;   // drawn above; renderInContext would take it from the fill's alpha
+        [ls[i] renderInContext:g];
+        ls[i].shadowOpacity = so;
+        CGContextRestoreGState(g);
+        _spriteUV[i][on] = CGRectMake((CGFloat)x[k] / width, (CGFloat)y[k] / height, (CGFloat)w[k] / width, (CGFloat)h[k] / height);
+    }
+    for (int b = 0; b < B_N; b++) { _key[b].fillColor = k_idle.CGColor; _label[b].foregroundColor = k_text.CGColor; press_glow(_key[b], NO); }   // refresh gives the layers their look when they show again
+    _knob.fillColor = k_idle.CGColor; press_glow(_knob, NO);
+    _controls.hidden = hidden; _ring.affineTransform = ringT;
+    [CATransaction commit];
+    CGContextRelease(g);
+    uint8_t *grey = malloc((size_t)width * height * 2);   // every colour of the controls is a grey (white, black): two bytes a pixel, half the memory, when that holds
+    int ch = grey && touch_grey(px, width, height, row, grey) ? 2 : 4;
+    _atlasOK = mtl_present_touch_atlas(ch == 2 ? grey : px, width, height, ch == 2 ? (size_t)width * 2 : row, ch, ++_atlasGen) != 0;
+    free(grey); free(px);
+    if (!_atlasOK) { front_touch_draw_failed(); return; }
+    static int said; if (said++ < 4 || said % 50 == 0)   // the first few, then one in 50: a rotation or a size pick each make one
+        LOG("front end: touch controls pictured for the present: %d pictures, atlas %dx%d %s (%.1f MB) at %.2f pixels a point, %.1f ms", n, width, height, ch == 2 ? "grey and alpha" : "BGRA",
+            (double)width * height * ch / 1048576.0, sc, (CACurrentMediaTime() - t0) * 1e3);
+}
+- (void)touchFrameHead:(touch_frame *)f {   // the canvas and the picture's place on it
+    f->canvas_w = (uint32_t)lround(_canvas.size.width * _canvasScale); f->canvas_h = (uint32_t)lround(_canvas.size.height * _canvasScale);
+    f->pic[0] = (float)_canvasPic.origin.x; f->pic[1] = (float)_canvasPic.origin.y; f->pic[2] = (float)_canvasPic.size.width; f->pic[3] = (float)_canvasPic.size.height;
+}
+static void touch_quad_at(touch_frame *f, CGRect pt, CGRect canvas, CGRect uv) {   // a picture at pt (pad points) on the canvas
+    if (f->n >= TOUCH_QUADS || CGRectIsNull(pt) || canvas.size.width <= 0 || canvas.size.height <= 0) return;
+    touch_quad *q = &f->q[f->n++];
+    q->dst[0] = (float)((pt.origin.x - canvas.origin.x) / canvas.size.width); q->dst[1] = (float)((pt.origin.y - canvas.origin.y) / canvas.size.height);
+    q->dst[2] = (float)(pt.size.width / canvas.size.width); q->dst[3] = (float)(pt.size.height / canvas.size.height);
+    q->src[0] = (float)uv.origin.x; q->src[1] = (float)uv.origin.y; q->src[2] = (float)uv.size.width; q->src[3] = (float)uv.size.height;
+}
+// The frame the present draws next: every control that shows, in the order its layer had (the ring, the knob, then the keys), each in its look now (pressed, the knob held)
+- (void)touchPublish {
+    touch_frame f = {0}; [self touchFrameHead:&f];
+    BOOL ready = _atlasOK && _sprites;   // the pictures and their places are for this canvas (not before layoutSubviews has laid it out and touchAtlas made them)
+    f.on = ready ? TOUCH_ON : TOUCH_PLACE; f.atlas = _atlasGen;
+    if (ready) {
+        uint64_t all = _faceBits | _dpadBits | _btnBits;
+        if (!_ring.hidden) { CGPoint rs = self.ringShift; touch_quad_at(&f, CGRectOffset(_spritePt[S_RING], rs.x, rs.y), _canvas, _spriteUV[S_RING][0]); }
+        if (!_knob.hidden) {   // the knob's picture is in its own bounds: placed where the layer's position puts them (its anchor is the centre)
+            CGPoint h = [self stickCentre:0], o = [self knobOffset:0]; CGSize k = _knob.bounds.size; CGRect p = _spritePt[S_KNOB];
+            touch_quad_at(&f, CGRectOffset(p, h.x + o.x - k.width / 2, h.y + o.y - k.height / 2), _canvas, _spriteUV[S_KNOB][_stick[0] != nil]);
+        }
+        for (int b = 0; b < B_N; b++) if (!_key[b].hidden) touch_quad_at(&f, _spritePt[b], _canvas, _spriteUV[b][(all >> b) & 1]);
+    }
+    g_touch_pad = self;
+    uint32_t seq = mtl_present_touch(&f);
+    if (ready && !_inFrame) {   // the layers show: the present says when it has drawn this frame or a later one (touchDrawn)
+        if (!_ackFrom) _ackFrom = seq;
+        mtl_present_touch_ack(_ackFrom);
+    }
+}
+- (BOOL)controlsShown { return !_padOff && !_tap; }
+
 // ---- Physical controllers ----
-// Each controller with an extended gamepad profile is a player of its own, as on the Mac (front_mac.m): it holds a slot (pad_slots.h: player 1 first, a reconnected controller
+// Each supported controller (an extended gamepad profile, or a lone Joy-Con held sideways: pad_live_input) is a player of its own, as on the Mac (front_mac.m): it holds a slot (pad_slots.h: player 1 first, a reconnected controller
 // gets its player back) and goes to dm_pad_set_player, and hle_hid.c reports player n on its own npad while the slot is held (dm_pad_players). Player 1's controller is ORed
 // with the touch gamepad; a one-player game that supports only No1 / Handheld still sees every controller as player 1 (hle_hid.c). Each player has its controller's rumble and
 // gyro; the phone's gyro is player 1's. With DM_PAD_MERGE=1 every controller is player 1, as before (the last one moved wins). With DM_PAD_PRESS_TO_JOIN=1 a controller is
@@ -720,6 +941,29 @@ static uint64_t pad_mask(GCExtendedGamepad *g) {   // the Switch buttons a contr
     #undef K
     return m;
 }
+// A lone Joy-Con: iOS presents it held sideways through live input, with no extended gamepad profile (upstream issue #2971, ported from upstream 985ea6cf6). Its direction pad
+// is the stick, and its face buttons go by position as in SDL's Apple mapping. nil for any other controller without an extended profile
+static GCControllerLiveInput *pad_live_input(GCController *c) {
+    NSString *category = c.productCategory;
+    if ([category isEqualToString:@"Nintendo Switch Joy-Con (L)"] || [category isEqualToString:@"Nintendo Switch Joy-Con (R)"]) return c.input;
+    return nil;
+}
+static id<GCDirectionPadElement> pad_live_stick(GCControllerLiveInput *input) { return input.dpads[GCInputLeftThumbstick] ?: input.dpads[GCInputDirectionPad]; }
+static BOOL pad_usable(GCController *c) {   // a controller the game can play with
+    if (c.extendedGamepad) return YES;
+    GCControllerLiveInput *input = pad_live_input(c);
+    return pad_live_stick(input) || input.buttons[GCInputButtonA] || input.buttons[GCInputButtonX];
+}
+static uint64_t pad_live_buttons(GCControllerLiveInput *input) {
+    uint64_t m = 0;
+    #define K(name, bit) if (input.buttons[name].pressedInput.pressed) m |= 1ull << bit
+    K(GCInputButtonX, B_A); K(GCInputButtonA, B_B); K(GCInputButtonY, B_X); K(GCInputButtonB, B_Y);
+    K(GCInputLeftShoulder, B_L); K(GCInputRightShoulder, B_R); K(GCInputLeftTrigger, B_ZL); K(GCInputRightTrigger, B_ZR);
+    K(GCInputButtonMenu, B_PLUS); K(GCInputButtonOptions, B_MINUS); K(GCInputLeftThumbstickButton, B_LS);
+    #undef K
+    return m;
+}
+static uint64_t pad_buttons(GCController *c) { return c.extendedGamepad ? pad_mask(c.extendedGamepad) : pad_live_buttons(pad_live_input(c)); }   // either kind
 // The in-game panel and the controllers (main thread, as the handlers): 1 the panel is open (it reads the controllers itself, GameMenuPanel.swift), 2 it closed while a button
 // was held (the B that closed it), which the game must not see; 0 the game has them. Home opens and closes the panel: its press, on any controller
 static int g_menu_block;
@@ -735,29 +979,56 @@ static BOOL pad_home(GCExtendedGamepad *g) {   // YES on Home's press, which the
     [g_view panelToggle];
     return YES;
 }
-static BOOL pads_any_pressed(void) { for (GCController *c in GCController.controllers) if (c.extendedGamepad && pad_mask(c.extendedGamepad)) return YES; return NO; }
-static void read_pad(GCExtendedGamepad *g) {
-    int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0 && !g_press_to_join) return;
-    if (pad_home(g)) return;
+static BOOL pads_any_pressed(void) { for (GCController *c in GCController.controllers) if (pad_usable(c) && pad_buttons(c)) return YES; return NO; }
+static void read_pad(GCController *c) {
+    GCExtendedGamepad *g = c.extendedGamepad;
+    if (!g && !pad_live_input(c)) return;
+    int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c); if (p < 0 && !g_press_to_join) return;
+    if (g && pad_home(g)) return;   // a lone Joy-Con's Home stays with the system (pad_listen)
     if (g_menu_block == 1 || (g_menu_block == 2 && pads_any_pressed())) return;   // the panel has the controllers, or a button that closed it is still down
     if (g_menu_block == 2) {   // all let go: each controller read as it is now (a stick held over the close)
         g_menu_block = 0;
-        for (GCController *c in GCController.controllers) if (c.extendedGamepad && c.extendedGamepad != g) read_pad(c.extendedGamepad);
+        for (GCController *o in GCController.controllers) if (o != c && pad_usable(o)) read_pad(o);
     }
-    uint64_t m = pad_mask(g);
+    uint64_t m = pad_buttons(c);
+    float lx, ly, rx = 0, ry = 0;
+    if (g) { lx = g.leftThumbstick.xAxis.value; ly = g.leftThumbstick.yAxis.value; rx = g.rightThumbstick.xAxis.value; ry = g.rightThumbstick.yAxis.value; }
+    else { id<GCDirectionPadElement> stick = pad_live_stick(pad_live_input(c)); lx = stick.xAxis.value; ly = stick.yAxis.value; }
     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button, a press the game also gets
-        GCController *c = g.controller; char nb[16];
+        char nb[16];
         if (!m) return;
         if ((p = pad_slot_take_lowest(&g_slots, (__bridge const void *)c, pad_name(c))) < 0) { LOG("controller '%s': a button pressed, but all %d players are taken", pad_name(c), DM_PLAYERS); return; }
         g_held[p] = c; dm_motion_attach(c, p); dm_pad_players(pad_slot_mask(&g_slots));
         npad_name(p, nb, sizeof nb); LOG("controller '%s': a button pressed: player %d (npad %s)", pad_name(c), p + 1, nb);
     }
     if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
-    dm_haptics_apple_controller(p, g.controller);
-    dm_pad_set_player(p, m, axis(g.leftThumbstick.xAxis.value), axis(g.leftThumbstick.yAxis.value), axis(g.rightThumbstick.xAxis.value), axis(g.rightThumbstick.yAxis.value));
+    dm_haptics_apple_controller(p, c);
+    dm_pad_set_player(p, m, axis(lx), axis(ly), axis(rx), axis(ry));
 }
-// Home and Capture: without this iOS takes them as system gestures (Home opens the Games overlay, Capture a screenshot); Home opens and closes the in-game panel (pad_home), Capture has no function
-static void pad_keep_system_buttons(GCController *c) { for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled; }
+// The controller's input handler (one per controller: the extended profile's, or a lone Joy-Con's live input's); YES when it is set now, so a controller waiting to join is
+// logged once. Home and Capture of an extended pad: without this iOS takes them as system gestures (Home opens the Games overlay, Capture a screenshot); Home opens and closes
+// the in-game panel (pad_home), Capture has no function. A lone Joy-Con's stay with the system, as upstream keeps them
+static BOOL pad_listen(GCController *c) {
+    GCExtendedGamepad *g = c.extendedGamepad;
+    if (g) {
+        for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled;
+        if (g.valueChangedHandler) return NO;
+        g.valueChangedHandler = ^(GCExtendedGamepad *profile, GCControllerElement *el) { (void)el; if (profile.valueChangedHandler) read_pad(profile.controller); };
+        return YES;
+    }
+    GCControllerLiveInput *input = pad_live_input(c);
+    if (!input || input.elementValueDidChangeHandler) return NO;
+    __weak GCController *weak = c;
+    input.elementValueDidChangeHandler = ^(id<GCDevicePhysicalInput> state, id<GCPhysicalInputElement> el) {
+        (void)el; GCController *controller = weak;
+        if (controller && state.elementValueDidChangeHandler) read_pad(controller);
+    };
+    return YES;
+}
+static void pad_unlisten(GCController *c) {
+    if (c.extendedGamepad) c.extendedGamepad.valueChangedHandler = nil;
+    else pad_live_input(c).elementValueDidChangeHandler = nil;
+}
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
 static void pads_start(void) {
@@ -773,19 +1044,20 @@ static void pads_release_game(void) {
 }
 void dm_gamepad_panel_closed(void) {   // GameMenuPanel.swift, main thread
     [g_view menuClosed];
+    dm_state_menu(0); dm_vitals_menu_open(0);
     if (!g_menu_block) return;
     g_menu_block = pads_any_pressed() ? 2 : 0;   // a button that closed it still down (B): read_pad gives the controllers back once nothing is held; else at once
-    if (!g_menu_block) for (GCController *c in GCController.controllers) if (c.extendedGamepad) read_pad(c.extendedGamepad);   // a stick held over the close
+    if (!g_menu_block) for (GCController *c in GCController.controllers) if (pad_usable(c)) read_pad(c);   // a stick held over the close
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil otherwise); returns whether a controller is in use
 static BOOL pads_merged(GCController *gone) {
-    if (gone) { gone.extendedGamepad.valueChangedHandler = nil; dm_motion_detach(gone, 0); }
+    if (gone) dm_motion_detach(gone, 0);   // its handler: padsChanged
     BOOL any = NO; int motion = 0;
-    for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad) {
+    for (GCController *c in GCController.controllers) if (c != gone && pad_usable(c)) {
         if (c.motion.hasRotationRate) motion = 1;
-        any = YES; pad_keep_system_buttons(c); c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; read_pad(g); };
+        any = YES; pad_listen(c);
         dm_motion_attach(c, 0);   // every controller is player 1: the last one moved drives its six-axis sensor
-        read_pad(c.extendedGamepad);
+        read_pad(c);
     }
     if (!any || !motion) dm_motion_clear(0);   // the phone's gyro (if on) takes over from its next sample
     if (!any) { dm_haptics_apple_controller(0, nil); dm_pad_set(0, 0, 0, 0, 0); }
@@ -795,26 +1067,24 @@ static BOOL pads_slotted(GCController *gone) {
     NSArray<GCController *> *now = GCController.controllers; char nb[16]; BOOL waiting = NO;
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]])) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
-        g_held[p].extendedGamepad.valueChangedHandler = nil;
+        pad_unlisten(g_held[p]);
         dm_motion_detach(g_held[p], p);   // player 1's: the phone's gyro (if on) takes over from its next sample
         dm_haptics_apple_controller(p, nil);
         pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
         dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     }
-    for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
+    for (GCController *c in now) if (c != gone && pad_usable(c) && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
         if (g_press_to_join) {   // a player at its first button (read_pad)
-            waiting = YES; pad_keep_system_buttons(c);
-            if (!c.extendedGamepad.valueChangedHandler) LOG("controller '%s' connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", pad_name(c));
-            c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; read_pad(g); };
+            waiting = YES;
+            if (pad_listen(c)) LOG("controller '%s' connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", pad_name(c));
             continue;
         }
         int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
         if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
-        g_held[p] = c; pad_keep_system_buttons(c);
-        c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; read_pad(g); };
+        g_held[p] = c; pad_listen(c);
         dm_motion_attach(c, p);
         npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
-        read_pad(c.extendedGamepad);
+        read_pad(c);
     }
     dm_pad_players(pad_slot_mask(&g_slots));
     dispatch_async(dispatch_get_main_queue(), ^{ cp_poll(); });   // a controller came or went while the controller applet's prompt is up
@@ -822,15 +1092,18 @@ static BOOL pads_slotted(GCController *gone) {
 }
 - (void)padsChanged:(NSNotification *)note {
     GCController *c = note.object, *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? c : nil;
-    if (c && (!c.extendedGamepad || g_merge)) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
+    if (gone) pad_unlisten(gone);   // even a controller still waiting for its first press can have a handler
+    if (c) { BOOL usable = pad_usable(c); if (!usable || g_merge) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), usable ? "" : " (no supported gamepad profile: not used)"); }
     BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
-    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });   // the touch gamepad hides while any controller is in use
+    dispatch_async(dispatch_get_main_queue(), ^{   // the touch gamepad hides while any controller is in use; the front end lays the game view out again (with them hidden, as it was before the controls were drawn into its frame)
+        self->_padOff = any; self->_controls.hidden = any || (self->_touchDraw && self->_inFrame); [self reset]; [self.superview setNeedsLayout];
+    });
 }
 @end
 
 // The controller applet's prompt (front.h front_ctrl_support, ctrl_prompt.h; GitHub issue #1640), as the Mac's (front_mac.m): the game asked for more players than it sees, and
 // the game's thread waits while a card is up over the game. A controller that joins meanwhile is a player at once (its first button with DM_PAD_PRESS_TO_JOIN, its connection
-// without) and the count follows. A and B are GameController's buttonA and buttonB on any controller (the press that makes a controller join does not count); the card's
+// without) and the count follows. A and B are GameController's buttonA and buttonB on an extended pad, or a lone Joy-Con's mapped A and B (the joining press does not count); the card's
 // Done and Cancel buttons take touches, and its scrim keeps every other touch from the game and the touch gamepad. The game gets no controller input while it is up, nor
 // until the A or B that closed it is let go. A front end passes the texts in the player's language as DM_CTRL_PROMPT_TEXT (cp_text). Main thread
 static ctrl_prompt g_cp; static int g_cp_confirm, g_cp_cancel, g_cp_ok;
@@ -844,11 +1117,15 @@ static UIView *g_cp_view; static UILabel *g_cp_count; static UIButton *g_cp_done
 static DmCtrlPrompt *g_cp_target;
 static void cp_buttons(int *a, int *b) {
     *a = *b = 0;
-    for (GCController *c in GCController.controllers) { GCExtendedGamepad *g = c.extendedGamepad; if (g) { *a |= g.buttonA.isPressed; *b |= g.buttonB.isPressed; } }
+    for (GCController *c in GCController.controllers) {
+        GCExtendedGamepad *g = c.extendedGamepad;
+        if (g) { *a |= g.buttonA.isPressed; *b |= g.buttonB.isPressed; }
+        else if (pad_usable(c)) { uint64_t m = pad_live_buttons(pad_live_input(c)); *a |= (m & DM_BTN_A) != 0; *b |= (m & DM_BTN_B) != 0; }
+    }
 }
 static int cp_waiting(void) {   // connected controllers that are no player yet
     int n = 0;
-    if (!g_merge) for (GCController *c in GCController.controllers) if (c.extendedGamepad && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) n++;
+    if (!g_merge) for (GCController *c in GCController.controllers) if (pad_usable(c) && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) n++;
     return n;
 }
 static UILabel *cp_label(const char *text, CGFloat size, UIFontWeight w, CGFloat alpha) {
@@ -910,7 +1187,7 @@ static int cp_poll(void) {
         g_cp_ok = g_cp.ok; dispatch_semaphore_signal(g_cp_done);
         ph = cp_step(&g_cp, joined, 0, a, b, 0, 0);   // nothing held: the game has its input at once
     }
-    if (ph == CP_IDLE) { for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) read_pad(g_held[p].extendedGamepad); return 0; }   // each controller read as it is now
+    if (ph == CP_IDLE) { for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) read_pad(g_held[p]); return 0; }   // each controller read as it is now
     return 1;
 }
 int front_ctrl_support(int min, int max) {
@@ -932,6 +1209,11 @@ int front_ctrl_support(int min, int max) {
 UIView *dm_gamepad_view(CGRect frame) { DmGamepad *v = [[DmGamepad alloc] initWithFrame:frame]; g_view = v; return v; }
 void dm_gamepad_arrange(UIView *view, DmLayout layout) { [(DmGamepad *)view arrange:layout]; }
 void dm_gamepad_opmode_changed(void) { [g_view opmodeChanged]; }
+BOOL dm_gamepad_controls_shown(UIView *view) { return [(DmGamepad *)view controlsShown]; }
+CGRect dm_gamepad_top_center(UIView *view) { DmGamepad *g = (DmGamepad *)view; return CGRectUnion([g pillRect:B_MINUS], [g pillRect:B_PLUS]); }
+void dm_gamepad_touch_draw(UIView *view, BOOL on, CGRect canvas, CGFloat scale, CGRect picture) { [(DmGamepad *)view touchDraw:on canvas:canvas scale:scale picture:picture]; }
+void front_touch_drawn(uint32_t seq) { dispatch_async(dispatch_get_main_queue(), ^{ [g_touch_pad touchDrawn:seq]; }); }   // touch_draw.h: the present's completion handler
+void front_touch_unfit(void) { dispatch_async(dispatch_get_main_queue(), ^{ [g_touch_pad touchUnfit]; }); }   // touch_draw.h: the present thread
 void dm_gamepad_touch_feedback(bool on) { [g_view setTouchFeedback:on]; }
 void dm_gamepad_touch_look(const char *env, const char *value) {   // front_ios.m dm_setting_live: DM_TOUCH_SIZE or DM_TOUCH_OPACITY from the in-game menu, at once
     BOOL size = !strcmp(env, "DM_TOUCH_SIZE");

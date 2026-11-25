@@ -71,8 +71,8 @@ import SwiftUI
         let mac = try! JSONDecoder().decode(SettingsFile.self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2])))
         setenv("DM_ENV_FILE_KEYS", "", 1); unsetenv("DM_FULLSCREEN"); unsetenv("DM_OPMODE")
         let mm = LauncherModel(mac.settings, defaults: d)
-        expect(mm.sections(basic: true) == ["Game", "Controls"] && mm.sections(basic: false) == ["Game", "Controls", "Performance"], "Basic and Advanced keep the list's sections")
-        expect(mm.rows(in: "Game", basic: true).map(\.env) == ["DM_FPS_TARGET", "DM_RENDER_SCALE", "DM_OPMODE", "DM_LANG", "DM_FULLSCREEN"], "Basic rows in the list's order")
+        expect(mm.sections(basic: true) == ["Game", "Controls"] && mm.sections(basic: false) == ["Game", "Controls", "Troubleshooting"], "Basic and Advanced keep the list's sections")
+        expect(mm.rows(in: "Game", basic: true).map(\.env) == ["DM_OPMODE", "DM_LANG", "DM_FULLSCREEN"], "Basic rows in the list's order: the quick tiles (Frame rate and Render scale moved behind Customize)")
         expect(!file.settings.contains { $0.env == "DM_FULLSCREEN" } && mm.values["DM_FULLSCREEN"] == "0", "Display mode is the Mac's, Window by default")
         mm.values["DM_FULLSCREEN"] = "1"; mm.apply()
         expect(String(cString: getenv("DM_FULLSCREEN")) == "1" && d.string(forKey: "launcher.DM_FULLSCREEN") == "1", "Fullscreen goes into the environment and is saved")
@@ -301,13 +301,13 @@ import SwiftUI
     let suite = "nxnative.launcher-test." + UUID().uuidString
     let d = UserDefaults(suiteName: suite)!
     defer { d.removePersistentDomain(forName: suite) }
-    setenv("DM_ENV_FILE_KEYS", "", 1); setenv("DM_ENV_LAUNCH_KEYS", "", 1); unsetenv("DM_SAVED_CHOICES")
+    setenv("DM_ENV_FILE_KEYS", "", 1); setenv("DM_ENV_LAUNCH_KEYS", "", 1); unsetenv("DM_SAVED_CHOICES"); unsetenv("DM_PRESET")   // the main checks' Play set DM_PRESET: unset, as at a launch
     let iphone = DeviceFacts(kind: .iphone, screen: 2.17, window: 2.17, hz: 120, haptics: true, controller: false, tv: false, metalFX: true)
     func row(_ m: LauncherModel, _ env: String) -> Setting { m.settings.first { $0.env == env }! }
     let m = LauncherModel(ios, defaults: d)
     m.facts = iphone
     let fpsDef = row(m, "DM_FPS_TARGET").def
-    expect(row(m, "DM_RENDER_SCALE").preset == ["battery": "0.75", "quality": "1.0"] && row(m, "DM_OPMODE").preset == nil, "presets decode; a row without one has none")
+    expect(row(m, "DM_RENDER_SCALE").preset == ["battery": "0.75", "quality": "1.0", "performance": "1.0"] && row(m, "DM_OPMODE").preset == nil, "presets decode; a row without one has none")
     expect(m.hasPresets && m.activePreset == .balanced, "the tested defaults are Balanced")
     m.values["DM_OPMODE"] = "0"; m.values["DM_LANG"] = "ja"
     m.applyPreset(.battery)
@@ -330,13 +330,94 @@ import SwiftUI
     fixed.applyPreset(.battery)
     expect(fixed.values["DM_FPS_TARGET"] == "60" && fixed.values["DM_POST_AA"] == "off" && fixed.activePreset == .battery, "a preset never changes an env file's value")
     setenv("DM_ENV_FILE_KEYS", "", 1); unsetenv("DM_FPS_TARGET")
+    // The base preset, Custom and Back, Undo, L / R, the start's retune and Reset (presets-first §7, §10, §11, W9)
+    m.facts = iphone
+    m.applyPreset(.balanced)
+    m.applyPreset(.battery)
+    expect(m.basePreset == .battery && m.presetTapped && m.presetLabel == "Battery Saver", "a chip tap sets the base and marks it chosen")
+    m.values["DM_RENDER_SCALE"] = "0.90"
+    expect(m.isCustom && m.presetLabel == "Custom (from Battery Saver)" && m.changedFromBase(row(m, "DM_RENDER_SCALE")) && !m.changedFromBase(row(m, "DM_FPS_TARGET")),
+           "a hand change: Custom from the base, the changed row marked")
+    m.values["DM_OPMODE"] = "1"
+    m.backToBase()
+    expect(m.activePreset == .battery && m.values["DM_RENDER_SCALE"] == "0.75" && m.values["DM_OPMODE"] == "1", "Back to the base sets only the preset rows")
+    m.applyPreset(.quality)
+    expect(m.activePreset == .quality && m.undoState != nil, "a preset change keeps the state before for Undo")
+    m.undo()
+    expect(m.activePreset == .battery && m.basePreset == .battery && m.undoState == nil, "Undo puts back the values and the base")
+    m.stepPreset(1)
+    expect(m.activePreset == .balanced, "R steps to the next drawn preset (Battery Saver, Balanced, Quality)")
+    m.stepPreset(-1); m.stepPreset(-1)
+    expect(m.activePreset == .quality, "L steps back with wrap")
+    expect(!m.offeredPresets.contains(.performance), "Performance's chip waits for A9b (P12)")
+    let pq = row(m, "DM_PRESENT_UPSCALE")
+    m.facts.metalFX = false
+    expect(m.presetValue(pq, "metalfx") == "off", "a preset's option a rule greys falls back to the highest option not greyed (P9)")
+    m.facts = iphone
+    m.applyPreset(.battery)
+    m.apply()
+    let stored = d.dictionary(forKey: LauncherModel.presetValuesKey) as? [String: String]
+    expect(d.string(forKey: LauncherModel.presetKey) == "battery" && d.bool(forKey: LauncherModel.tappedKey) && stored?["DM_RENDER_SCALE"] == "0.75" && stored?["_v"] != nil,
+           "Play stores the base, the tap and the values it set")
+    // DM_PRESET, the preset for the host (frame generation steps aside in Battery Saver), only with frame generation on (DM_FRAMEGEN=1, its only reader): Play sets it, and so does
+    // a start without the screen (applySaved: Skip this screen next time, DM_LAUNCHER=0, a home screen shortcut, a program handing over) from the saved choices; an env file's
+    // stays; values matching no preset are custom. Without DM_FRAMEGEN=1 neither sets it (nor logs it): a player who leaves frame generation off starts as before it
+    func env(_ k: String) -> String? { getenv(k).map { String(cString: $0) } }
+    unsetenv("DM_FRAMEGEN")
+    expect(env("DM_PRESET") == nil && !LauncherModel.framegenOn, "frame generation off (no DM_FRAMEGEN): Play sets no DM_PRESET")
+    let skippedOff = LauncherModel(ios, defaults: d); skippedOff.facts = iphone; skippedOff.takeList(SettingsFile(settings: ios, console: nil, presets: nil, moves: nil))
+    skippedOff.applySaved()
+    expect(env("DM_PRESET") == nil && env("DM_FPS_TARGET") == "30", "frame generation off: a start without the screen applies the saved choices and sets no DM_PRESET")
+    setenv("DM_FRAMEGEN", "0", 1); skippedOff.applySaved()
+    expect(env("DM_PRESET") == nil, "DM_FRAMEGEN=0: no DM_PRESET either (only 1 turns frame generation on)")
+    setenv("DM_FRAMEGEN", "1", 1); setenv("DM_PRESENT_REPEAT", "1", 1)
+    m.apply(); skippedOff.applySaved()
+    expect(env("DM_PRESET") == nil && !LauncherModel.framegenOn, "DM_FRAMEGEN=1 with DM_PRESENT_REPEAT=1: frame generation is off (fg_on), so no DM_PRESET at Play or a start without the screen")
+    unsetenv("DM_PRESENT_REPEAT")
+    m.apply()
+    expect(env("DM_PRESET") == "battery", "Play sets DM_PRESET to the preset the values are: battery")
+    unsetenv("DM_PRESET")
+    let skipped = LauncherModel(ios, defaults: d); skipped.facts = iphone; skipped.takeList(SettingsFile(settings: ios, console: nil, presets: nil, moves: nil))
+    skipped.applySaved()
+    expect(env("DM_PRESET") == "battery" && env("DM_FPS_TARGET") == "30", "a start without the screen sets DM_PRESET from the saved choices (Battery Saver), as Play does")
+    setenv("DM_PRESET", "balanced", 1)   // from an env file, read at launch
+    let pinned = LauncherModel(ios, defaults: d); pinned.facts = iphone; pinned.takeList(SettingsFile(settings: ios, console: nil, presets: nil, moves: nil))
+    pinned.applySaved(); pinned.apply()
+    expect(env("DM_PRESET") == "balanced" && pinned.presetEnvValue == nil, "a DM_PRESET set at launch or by an env file stays")
+    unsetenv("DM_PRESET"); unsetenv("DM_FRAMEGEN")
+    let hand = LauncherModel(ios, defaults: d); hand.facts = iphone; hand.takeList(SettingsFile(settings: ios, console: nil, presets: nil, moves: nil))
+    expect(hand.presetEnvValue == "battery", "the saved Battery Saver is the preset the values are")
+    hand.values["DM_RENDER_SCALE"] = "0.90"
+    expect(hand.presetEnvValue == "custom", "a hand change matching no preset: custom")
+    var olderTune = stored!; olderTune["DM_RENDER_SCALE"] = "0.80"   // the values a build that tuned Battery Saver at 0.80 set, nobody edited since
+    d.set(olderTune, forKey: LauncherModel.presetValuesKey); d.set("0.80", forKey: "launcher.DM_RENDER_SCALE")
+    let next = LauncherModel(ios, defaults: d); next.facts = iphone; next.takeList(SettingsFile(settings: ios, console: nil, presets: nil, moves: nil))
+    expect(next.basePreset == .battery && next.isCustom, "the next start: the stored base; the old tuning reads as Custom until Play")
+    next.apply()
+    expect(next.values["DM_RENDER_SCALE"] == "0.75" && next.activePreset == .battery, "a retuned preset nobody edited is applied again at start")
+    d.set(olderTune, forKey: LauncherModel.presetValuesKey); d.set("0.90", forKey: "launcher.DM_RENDER_SCALE")
+    let edited = LauncherModel(ios, defaults: d); edited.facts = iphone; edited.takeList(SettingsFile(settings: ios, console: nil, presets: nil, moves: nil))
+    edited.apply()
+    expect(edited.values["DM_RENDER_SCALE"] == "0.90" && edited.isCustom, "a foreign edit is left alone and shown as Custom")
+    d.set("performance", forKey: LauncherModel.presetKey)
+    let gone = LauncherModel(ios, defaults: d); gone.takeList(SettingsFile(settings: ios, console: nil, presets: ["battery", "balanced", "quality"], moves: nil))
+    expect(gone.basePreset == .balanced, "a stored base this build does not draw moves to Balanced")
+    d.removeObject(forKey: LauncherModel.presetKey); d.removeObject(forKey: LauncherModel.tappedKey); d.removeObject(forKey: LauncherModel.presetValuesKey)
+    d.set("30", forKey: "launcher.DM_FPS_TARGET"); d.set("0.80", forKey: "launcher.DM_RENDER_SCALE")   // two hand changes: one row off Battery Saver, two off Balanced
+    let migrated = LauncherModel(ios, defaults: d); migrated.facts = iphone; migrated.takeList(SettingsFile(settings: ios, console: nil, presets: nil, moves: nil))
+    expect(migrated.basePreset == .battery && !migrated.presetTapped && migrated.isCustom, "an old install with no stored base: the nearest preset, not chosen by a tap")
+    migrated.reset()
+    expect(migrated.basePreset == .balanced && !migrated.presetTapped && migrated.activePreset == .balanced, "Reset all settings: Balanced, the base and the tap cleared")
+    d.removeObject(forKey: "launcher.DM_FPS_TARGET"); d.removeObject(forKey: "launcher.DM_RENDER_SCALE"); d.removeObject(forKey: LauncherModel.presetKey); d.removeObject(forKey: LauncherModel.tappedKey); d.removeObject(forKey: LauncherModel.presetValuesKey)
+    m.applyPreset(.balanced)
+
     let gain = row(m, "DM_RUMBLE_GAIN")
     expect(gain.preset == nil && gain.target(.battery) == nil && row(m, "DM_POST_AA").target(.balanced) == row(m, "DM_POST_AA").def, "a row without a preset has no target; Balanced is the default")
 
     // Basic first, the others under Advanced; a list without basic rows shows every row first
     let basic = m.groups(basic: true), advanced = m.groups(basic: false)
     expect(m.hasBasicRows && basic.map(\.section) == ["Game", "Controls"] && basic.allSatisfy { $0.rows.allSatisfy(\.basic) }, "basic rows first, in their sections")
-    expect(advanced.contains { $0.section == "Performance" } && advanced.allSatisfy { !$0.rows.isEmpty && $0.rows.allSatisfy { !$0.basic } }, "the others under Advanced, no empty section")
+    expect(advanced.contains { $0.section == "Troubleshooting" } && advanced.allSatisfy { !$0.rows.isEmpty && $0.rows.allSatisfy { !$0.basic } }, "the others under Advanced, no empty section")
     let flat = LauncherModel(ios.filter { !$0.basic }, defaults: d)
     expect(!flat.hasBasicRows && flat.groups(basic: true).map(\.section) == flat.sections && flat.groups(basic: false).isEmpty, "no basic rows: everything first, nothing under Advanced")
 

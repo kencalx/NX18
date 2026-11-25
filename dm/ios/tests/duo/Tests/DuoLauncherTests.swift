@@ -114,12 +114,12 @@ final class DuoLauncherTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defaults.removePersistentDomain(forName: suite)
         defer { defaults.removePersistentDomain(forName: suite) }
-        let s = try JSONDecoder().decode(SettingsFile.self, from: Data(#"{"settings": [{"env": "DM_SHOW_FPS", "kind": "toggle", "label": "Frame-rate counter", "note": "", "default": "0"}]}"#.utf8))
+        let s = try JSONDecoder().decode(SettingsFile.self, from: Data(#"{"settings": [{"env": "DM_SHOW_FPS", "kind": "toggle", "label": "Vitals", "note": "", "default": "0"}]}"#.utf8))
         let m = LauncherModel(s.settings, defaults: defaults)
         m.skipAtStart = true
         XCTAssertTrue(defaults.bool(forKey: LauncherModel.skipKey))
         let row = try XCTUnwrap(uiMenuElement(settingsAtStartRow(m)) as? UIAction)   // as the UIMenu shows it (DM_GAME_MENU=system)
-        XCTAssertEqual(row.title, "Settings screen at start")
+        XCTAssertEqual(row.title, "Gate at start", "The row's name (gate-ui GW28)")
         XCTAssertEqual(row.state, .off, "Skipped: not ticked")
         XCTAssertTrue(LauncherModel.skipsAtStart(defaults: defaults, environment: [:]))
         m.skipAtStart = false   // what the row's action does
@@ -145,4 +145,59 @@ final class DuoLauncherTests: XCTestCase {
         XCTAssertEqual(SaveSyncReport.step(try XCTUnwrap(SaveSyncReport(line: base + " conflict=1 pull=1"))), .play("ask"), "no question while a pull is pending")
         XCTAssertEqual(SaveSyncReport.step(try XCTUnwrap(SaveSyncReport(line: "sync=1 cloud=-1 local=aa conflict=0 pull=1"))), .unreadable, "a cloud not read is still said")
     }
+
+    // The Gate panel (LauncherPanel.swift): the strip's notes stay one line of at most 60 characters, and Customize repeats no row of the main page or the Touch page
+    @MainActor
+    func testGatePanelBriefsAndPages() throws {
+        XCTAssertEqual(GateText.brief("Short note. Second sentence that is long."), "Short note.")
+        let long = String(repeating: "word ", count: 30)
+        XCTAssertLessThanOrEqual(GateText.brief(long).count, 60)
+        XCTAssertTrue(GateText.brief(long).hasSuffix("…"))
+        let json = #"{"settings": [{"env": "DM_OPMODE", "kind": "choice", "section": "Game", "label": "Console mode", "note": "", "default": "1", "options": [["1", "Docked"], ["0", "Handheld"]]},"#
+            + #"{"env": "DM_FPS_TARGET", "kind": "choice", "section": "Game", "label": "Frame rate", "note": "", "default": "60", "options": [["30", "30 fps"], ["60", "60 fps"]], "preset": {"battery": "30"}},"#
+            + #"{"env": "DM_TOUCH_SIZE", "kind": "choice", "section": "Controls", "label": "Touch control size", "note": "", "default": "1", "options": [["0.7", "Small"], ["1", "Large"]]},"#
+            + #"{"env": "DM_PSO_PREBUILD", "kind": "toggle", "section": "Performance", "label": "Pipeline prebuild", "note": "", "default": "1"}]}"#
+        let file = try JSONDecoder().decode(SettingsFile.self, from: Data(json.utf8))
+        let m = LauncherModel(file.settings, defaults: UserDefaults(suiteName: "duo-gate-\(UUID().uuidString)")!)
+        XCTAssertEqual(m.gateFirstTiles, ["DM_OPMODE"])
+        XCTAssertEqual(m.gateSecondTiles, ["touch"], "Touch controls is a door to its page")
+        XCTAssertEqual(m.gateCustomizeGroups.map(\.title), ["Picture and performance"], "Troubleshooting only while one of its rows differs (presets-first P6)")
+        m.values["DM_PSO_PREBUILD"] = "0"
+        let groups = m.gateCustomizeGroups
+        XCTAssertEqual(groups.map(\.title), ["Picture and performance", "Troubleshooting"])
+        XCTAssertEqual(groups.flatMap(\.rows).map(\.env), ["DM_FPS_TARGET", "DM_PSO_PREBUILD"])
+        XCTAssertEqual(LauncherPreset.battery.gateName, "Battery Saver")
+    }
+
+    // The presets on the Gate (presets-first §4, §7, W9, W12; gate-ui O4): the drawn chips from the list, Custom from the base with Back to it, a toast's Undo, the notes built
+    // from the rows a preset moves, and the status line holding only the console and the preset state
+    @MainActor
+    func testGatePresetsCustomBackAndStatus() throws {
+        let json = #"{"presets": ["battery", "balanced", "quality"], "moves": {"battery": ["DM_FPS_TARGET", "DM_RENDER_SCALE"], "quality": ["DM_PRESENT_UPSCALE"]}, "settings": ["#
+            + #"{"env": "DM_FPS_TARGET", "kind": "choice", "section": "Game", "label": "Frame rate", "note": "", "default": "60", "options": [["30", "30 fps"], ["60", "60 fps"]], "preset": {"battery": "30", "quality": "60", "performance": "60"}},"#
+            + #"{"env": "DM_RENDER_SCALE", "kind": "range", "section": "Game", "label": "Render scale", "note": "", "default": "1.0", "min": 0.5, "max": 1.0, "step": 0.05, "preset": {"battery": "0.75", "quality": "1.0", "performance": "1.0"}},"#
+            + #"{"env": "DM_PRESENT_UPSCALE", "kind": "choice", "section": "Game", "label": "Upscaling", "note": "", "default": "off", "options": [["off", "Standard"], ["metalfx", "MetalFX"]], "inactive": [{"option": "metalfx", "when": ["mfx:none"], "why": "This device has no MetalFX scaler"}], "preset": {"battery": "off", "quality": "metalfx", "performance": "off"}},"#
+            + #"{"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Vitals", "note": "", "default": "0", "level": "basic"}]}"#
+        let file = try JSONDecoder().decode(SettingsFile.self, from: Data(json.utf8))
+        let m = LauncherModel(file.settings, defaults: UserDefaults(suiteName: "duo-presets-\(UUID().uuidString)")!)
+        m.takeList(file)
+        XCTAssertEqual(m.offeredPresets, [.battery, .balanced, .quality], "the list's drawn chips, Performance waiting for A9b")
+        XCTAssertEqual(GateText.presetNote(m, .battery), "30 fps, lower resolution: less power and heat.")
+        XCTAssertTrue(GateText.presetNote(m, .quality).hasPrefix("MetalFX upscaling"))
+        m.applyPreset(.battery)
+        m.values["DM_RENDER_SCALE"] = "0.90"
+        XCTAssertEqual(m.presetLabel, "Custom (from Battery Saver)")
+        m.backToBase()
+        XCTAssertEqual(m.activePreset, .battery); XCTAssertEqual(m.values["DM_RENDER_SCALE"], "0.75")
+        m.applyPreset(.quality)
+        m.undo()
+        XCTAssertEqual(m.activePreset, .battery, "Undo")
+        var st = LauncherStatus(); st.console = .switch1; st.preset = m.presetLabel
+        XCTAssertEqual(st.parts().map(\.text), ["Switch 1", "Battery Saver"], "the Gate's line: the console and the preset state only")
+        XCTAssertEqual(m.gateRow("DM_SHOW_FPS")?.label, "Vitals")
+        m.facts.metalFX = false
+        m.applyPreset(.quality)
+        XCTAssertEqual(m.values["DM_PRESENT_UPSCALE"], "off", "a greyed option falls back"); XCTAssertEqual(m.activePreset, .quality, "the preset still lights")
+    }
+
 }

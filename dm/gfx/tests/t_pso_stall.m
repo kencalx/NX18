@@ -8,7 +8,15 @@
 // its own pair list, alternating in one folder (arch_pre_mine): neither removes the other's files, and one the bundle covers removes only its own, and the stamp only when it is its own
 // The same trim when the prebuild's files have a complete index (<file>.keys, read as pso4_init reads it: reopen_ix), which puts them in g_arch_ixf, not g_arch4p.
 // A library file the app does not carry (a pulling library; a shader): the stamp names it, a later start of that app does nothing, one with the file builds the pair; a stamp from
-// before this check runs once. The same with the library as one image (shader_lib.py pack), and a file added beside it
+// before this check runs once. The same with the library as one image (shader_lib.py pack), and a file added beside it.
+// Captures of one vertex function never compile at once (fn_claim, upstream NXNative 75758b940): a capture of another function goes ahead, one of the same waits, one that waits
+// in vain is built without the archive, the prebuild's try neither waits nor builds; the prebuild's order (pre_order). The prebuild with a capture of one of its pairs' functions
+// under way puts them back and never builds them beside it; the process ending meanwhile leaves no stamp and removes none of its earlier files, and builds none of them when
+// the capture returns after the stop (mtl_warm_stop: no compile beside the archive's write); once it returns they are built
+// and stamped. The prepare step waits for the pairs put back, and stops waiting once none has finished for its limit (a compile that does not return, #294). A capture that
+// waits lends its QoS to the thread whose capture holds the function (fn_lend). One that waits FN_PATIENT waits as long as the captures ahead of it return. A library of
+// the same bytes under another shader key is the same function to the claims (lib_sum). The prepare step opens the files its prebuild wrote before the first frame
+// (arch_adopt_prebuilt), and a compile that does not return holds it g_pre_tail_ms at most, with none of its files opened
 #include "../nvn/nvn_mtl.m"
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
@@ -77,6 +85,15 @@ static void reopen_ix(NSString *dir) {   // the same with the files' indexes, as
 static NSArray<NSString *> *named(NSString *dir, NSString *prefix) {   // the folder's .mtl4a files whose names start with prefix
     return [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self BEGINSWITH %@ AND self ENDSWITH '.mtl4a'", prefix]];
 }
+static void fn_hand_over(const uint64_t *k, int n) {   // the capture holding k's functions returns and another of them takes them at once, before any waiter can
+    pthread_mutex_lock(&g_fn_mu); uint64_t ser = ++g_fn_ser;
+    for (int j = 0; j < g_fn_nbusy; j++) if (fn_mine(k, n, j)) g_fn_busy[j].ser = ser;
+    pthread_cond_broadcast(&g_fn_cv); pthread_mutex_unlock(&g_fn_mu);
+}
+static int thread_curpri(mach_port_t t) {   // the thread's scheduling priority now, overrides included (-1: none)
+    thread_extended_info_data_t info; mach_msg_type_number_t n = THREAD_EXTENDED_INFO_COUNT;
+    return t != MACH_PORT_NULL && thread_info(t, THREAD_EXTENDED_INFO, (thread_info_t)&info, &n) == KERN_SUCCESS ? info.pth_curpri : -1;
+}
 static int until(int (^cond)(void), double seconds) { uint64_t t0 = bp_now(); while (!cond()) { if (bp_now() - t0 > seconds * 1e9) return 0; usleep(10000); } return 1; }
 
 int main(void) { @autoreleasepool {
@@ -88,21 +105,122 @@ int main(void) { @autoreleasepool {
     NSString *f = @"#include <metal_stdlib>\nusing namespace metal;\nfragment float4 %@() { return float4(%d, %d, %d.0 / 65536.0, 1); }\n";
     [NSFileManager.defaultManager createDirectoryAtPath:msl withIntermediateDirectories:YES attributes:nil error:nil];
     int pid = getpid() & 0xffff;
-    if (lib(msl, @"v1_bp", v) || lib(msl, @"f1_b", [NSString stringWithFormat:f, @"hold", 1, 0, pid]) || lib(msl, @"f2_b", [NSString stringWithFormat:f, @"main0", 0, 1, pid]) ||
+    NSString *v3 = [v stringByReplacingOccurrencesOfString:@"0, 1); return o;" withString:@"0.5, 1); return o;"];   // the held pair's own vertex function
+    if (lib(msl, @"v1_bp", v) || lib(msl, @"v3_bp", v3) || lib(msl, @"f1_b", [NSString stringWithFormat:f, @"hold", 1, 0, pid]) || lib(msl, @"f2_b", [NSString stringWithFormat:f, @"main0", 0, 1, pid]) ||
         lib(msl, @"f3_b", [NSString stringWithFormat:f, @"main0", 1, 1, pid]) || lib(msl, @"f4_b", [NSString stringWithFormat:f, @"main0", 0, 0, pid]) ||
         lib(msl, @"f5_b", [NSString stringWithFormat:f, @"bad", 2, 0, pid]) || lib(msl, @"f6_b", [NSString stringWithFormat:f, @"main0", 0, 2, pid])) {
         printf("t_pso_stall: no Metal compiler (xcrun metal), not run\n"); return 0; }
     put([msl stringByAppendingPathComponent:@"v1_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"pull\": {}, \"vertex_inputs\": []}", DMSH_CHAIN]);
+    put([msl stringByAppendingPathComponent:@"v3_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"pull\": {}, \"vertex_inputs\": []}", DMSH_CHAIN]);
+    // v4: another shader key whose library is v1's bytes (shared sources compile alike: shaders.md, A library that depends on its source's file name)
+    [NSFileManager.defaultManager copyItemAtPath:[msl stringByAppendingPathComponent:@"v1_bp.metallib"] toPath:[msl stringByAppendingPathComponent:@"v4_bp.metallib"] error:nil];
+    put([msl stringByAppendingPathComponent:@"v4_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"pull\": {}, \"vertex_inputs\": []}", DMSH_CHAIN]);
     put([msl stringByAppendingPathComponent:@"f1_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"hold\"}", DMSH_CHAIN]);
     put([msl stringByAppendingPathComponent:@"f5_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"bad\"}", DMSH_CHAIN]);
     for (NSString *k in @[@"f2", @"f3", @"f4", @"f6"]) put([msl stringByAppendingFormat:@"/%@_b.json", k], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\"}", DMSH_CHAIN]);
     put([tables stringByAppendingPathComponent:@"shader_map.tsv"], @"# empty\n");
-    put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], @"# pairs\nv1\tf1\nv1\tf2\nv1\tf3\n");
+    put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], @"# pairs\nv3\tf1\nv1\tf2\nv1\tf3\n");
     setenv("DM_NVN_SHMAP", [tables stringByAppendingPathComponent:@"shader_map.tsv"].UTF8String, 1);
     setenv("DM_MSL_DIR", [root stringByAppendingPathComponent:@"msl"].UTF8String, 1);
     setenv("DM_PSO_ARCHIVE", arch.UTF8String, 1); setenv("DM_PSO_MANIFEST", "off", 1);
     mtl_init(); pso4_init();
     if (!g_comp4 || !g_arch_cap) { printf("t_pso_stall: no Metal 4 compiler, not run\n"); return 0; }
+
+    // captures that share a vertex function never compile at once (fn_claim, upstream issue #815): a capture of another function goes ahead; one of the same waits, and when the
+    // other does not return it is built without the archive, never beside it; the prebuild's try (no wait) builds nothing and says so
+    {
+        shmap_load(); uint64_t ka[3], kb[3], kc[3]; int na = fn_ids(pre_desc(@"v1", @"f2", 0), ka), nb = fn_ids(pre_desc(@"v1", @"f3", 0), kb), nc = fn_ids(pre_desc(@"v3", @"f2", 0), kc);
+        EXPECT("fn: the vertex function only", 1, na); EXPECT("fn: the other pairs too", 1, nb == 1 && nc == 1);
+        EXPECT("fn: the same vertex function", 1, ka[0] == kb[0]); EXPECT("fn: another vertex function, the same pixel one", 1, ka[0] != kc[0]);
+        EXPECT("fn: claimed", 1, fn_claim(ka, na, g_fn_wait_ms));
+        // Metal keys a program by its content: a library of the same bytes under another shader key is the same function (lib_sum), not another claim beside it
+        uint64_t kd[3]; int nd = fn_ids(pre_desc(@"v4", @"f3", 0), kd);
+        EXPECT("fn: the same bytes under another shader key, the same function", 1, nd == 1 && kd[0] == ka[0]);
+        EXPECT("fn: so its capture does not claim it beside the other", 0, fn_claim(kd, nd, 0));
+        EXPECT("fn: a library with another function's bytes, another", 1, kc[0] != kd[0]);
+        __block _Atomic int got = 0; dispatch_group_t fg = dispatch_group_create(); uint64_t *kp = kb;
+        dispatch_group_async(fg, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ if (fn_claim(kp, nb, 10000)) { got = 1; fn_release(kp, nb); } });
+        uint64_t t0 = bp_now();
+        EXPECT("fn: a capture of another vertex function with the same pixel one claims", 1, fn_claim(kc, nc, g_fn_wait_ms));
+        EXPECT("fn: without waiting", 1, bp_now() - t0 < 100 * NSEC_PER_MSEC); fn_release(kc, nc);
+        usleep(300000); EXPECT("fn: a capture of the same function waits", 0, got);
+        fn_release(ka, na);
+        EXPECT("fn: and goes on once the other is done", 0, dispatch_group_wait(fg, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+        EXPECT("fn: it claimed them", 1, got);
+        // a wait lends its QoS to the thread whose capture holds the function (fn_lend), as pso_pend_take does: a draw's capture that waits for a later draw's on a utility queue
+        {
+            __block mach_port_t holder = MACH_PORT_NULL; dispatch_semaphore_t held = dispatch_semaphore_create(0), go = dispatch_semaphore_create(0); uint64_t *kap = ka;
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                if (!fn_claim(kap, na, 0)) return;
+                holder = pthread_mach_thread_np(pthread_self()); dispatch_semaphore_signal(held);
+                dispatch_semaphore_wait(go, DISPATCH_TIME_FOREVER); fn_release(kap, na);
+            });
+            EXPECT("lend: a capture at utility QoS holds v1", 0, dispatch_semaphore_wait(held, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+            int pri0 = thread_curpri(holder);
+            pthread_mutex_lock(&g_fn_mu); uint64_t lent0 = g_fn_lent; pthread_mutex_unlock(&g_fn_mu);
+            __block int pri = -1;
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{   // once the wait has lent its QoS: the holder's priority, then it returns
+                until(^{ pthread_mutex_lock(&g_fn_mu); int l = g_fn_lent > lent0; pthread_mutex_unlock(&g_fn_mu); return l; }, 5);
+                usleep(20000); pri = thread_curpri(holder); dispatch_semaphore_signal(go);
+            });
+            qos_class_t own = qos_class_self(); pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+            EXPECT("lend: the waiting capture claims once the other returns", 1, fn_claim(kb, nb, 10000));
+            fn_release(kb, nb); if (own != QOS_CLASS_UNSPECIFIED) pthread_set_qos_class_self_np(own, 0);
+            pthread_mutex_lock(&g_fn_mu); uint64_t lent = g_fn_lent - lent0; pthread_mutex_unlock(&g_fn_mu);
+            printf("t_pso_stall: a capture's thread at priority %d at utility QoS, %d while a user-initiated capture waits for its function\n", pri0, pri);
+            EXPECT("lend: the wait lent its QoS to the holder, once", 1, lent);
+            EXPECT("lend: the holder ran above its utility priority meanwhile", 1, pri0 > 0 && pri > pri0);
+            EXPECT("lend: nothing left under way", 0, g_fn_nbusy);
+        }
+        // the other does not return (#294)
+        EXPECT("fn: claimed again", 1, fn_claim(ka, na, g_fn_wait_ms));
+        t0 = bp_now(); EXPECT("fn: the prebuild's try does not get them", 0, fn_claim(kb, nb, 0));
+        EXPECT("fn: and does not wait", 1, bp_now() - t0 < 100 * NSEC_PER_MSEC);
+        g_fn_wait_ms = 200; t0 = bp_now();
+        EXPECT("fn: a wait that runs out does not get them", 0, fn_claim(kb, nb, g_fn_wait_ms));
+        uint64_t waited = bp_now() - t0;
+        EXPECT("fn: after the wait", 1, waited >= 150 * NSEC_PER_MSEC && waited < 1500 * NSEC_PER_MSEC);
+        EXPECT("fn: nothing taken beside the holder", na, g_fn_nbusy);
+        // FN_PATIENT (a compaction's recapture in a prewarm task, a harvest): it waits as long as the captures of its function keep returning, the limit counted again from
+        // each, and gives up once none has returned for the limit
+        {
+            g_fn_patient_ms = 200; uint64_t *kh = ka;
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ for (int i = 0; i < 3; i++) { usleep(150000); fn_hand_over(kh, 1); } });
+            t0 = bp_now(); EXPECT("patient: the last capture ahead does not return", 0, fn_claim(kb, nb, FN_PATIENT));
+            waited = bp_now() - t0;
+            EXPECT("patient: waited through the three that returned, then its limit", 1, waited >= 600 * NSEC_PER_MSEC && waited < 2000 * NSEC_PER_MSEC);
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ for (int i = 0; i < 3; i++) { usleep(150000); fn_hand_over(kh, 1); } usleep(150000); fn_release(kh, 1); });
+            t0 = bp_now(); EXPECT("patient: claims once the last capture ahead returns", 1, fn_claim(kb, nb, FN_PATIENT));
+            waited = bp_now() - t0;
+            EXPECT("patient: after all four, past its limit", 1, waited >= 550 * NSEC_PER_MSEC && waited < 2000 * NSEC_PER_MSEC);
+            fn_release(kb, nb); g_fn_patient_ms = FN_PATIENT_MS;
+            EXPECT("patient: v1 under way again", 1, fn_claim(ka, na, 0));
+        }
+        int cap = -1, busy = -1; NSError *ce = nil; int new0 = g_arch_new;
+        EXPECT("fn: the prebuild's capture builds nothing", 1, arch_capture_try(pre_desc(@"v1", @"f3", 0), &ce, 0, &cap, 1, 0, &busy) == nil);
+        EXPECT("fn: and says its function is busy", 1, busy);
+        id<MTLRenderPipelineState> ps = arch_capture(pre_desc(@"v1", @"f3", 0), &ce, 0, &cap);
+        EXPECT("fn: a draw's capture that waited in vain builds the pipeline", 1, ps != nil);
+        EXPECT("fn: without the archive", 0, cap);
+        EXPECT("fn: nothing captured", new0, g_arch_new);
+        EXPECT("fn: counted", 1, g_fn_plain);
+        fn_release(ka, na); g_fn_wait_ms = FN_WAIT_MS;
+        EXPECT("fn: nothing left under way", 0, g_fn_nbusy);
+        // the prebuild's order: every pair once, a vertex shader's pairs together, the shader with the most first, then by key, in list order within one
+        NSArray<NSNumber *> *ord = pre_order(@[@[@"b", @"x"], @[@"c", @"y"], @[@"a", @"z"], @[@"c", @"w"], @[@"d", @"q"], @[@"c", @"r"], @[@"b", @"s"]]);
+        EXPECT("pre_order: the most-shared shader first, each one's pairs together", 1, [ord isEqualToArray:@[@1, @3, @5, @0, @6, @2, @4]]);
+        // NX 18 sorts integers (pre_order_cmp): the order of upstream's comparator, a stable sort of the indices by count and key, on 3,000 pairs over 400 shaders
+        NSMutableArray<NSArray<NSString *> *> *many = [NSMutableArray array]; uint32_t lcg = 7;   // the same list at every run
+        for (int i = 0; i < 3000; i++) { lcg = lcg * 1664525u + 1013904223u; [many addObject:@[[NSString stringWithFormat:@"%016x", (lcg >> 8) % 400 * 2654435761u], [NSString stringWithFormat:@"f%d", i]]]; }
+        NSMutableDictionary<NSString *, NSNumber *> *cnt = [NSMutableDictionary dictionary];
+        for (NSArray<NSString *> *p in many) cnt[p[0]] = @(cnt[p[0]].intValue + 1);
+        NSMutableArray<NSNumber *> *want = [NSMutableArray array]; for (NSUInteger i = 0; i < many.count; i++) [want addObject:@(i)];
+        [want sortWithOptions:NSSortStable usingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
+            NSString *va = many[a.unsignedIntegerValue][0], *vb = many[b.unsignedIntegerValue][0]; int na = cnt[va].intValue, nb = cnt[vb].intValue;
+            return na != nb ? (na > nb ? NSOrderedAscending : NSOrderedDescending) : [va compare:vb]; }];
+        EXPECT("pre_order: upstream's order", 1, [pre_order(many) isEqualToArray:want]);
+        EXPECT("pre_order: no pairs", 0, pre_order(@[]).count);
+    }
 
     g_ep_pre = ep_new(1); ArchEpoch *ep1 = g_ep_pre; HoldCompiler *hold = [HoldCompiler new]; hold->compiler = ep1->comp;   // the prebuild's period
     hold->entered = dispatch_semaphore_create(0); hold->release = dispatch_semaphore_create(0); ep1->comp = (id<MTL4Compiler>)hold;
@@ -145,7 +263,7 @@ int main(void) { @autoreleasepool {
     }
     int found = 0;
     for (NSString *k in @[@"f1", @"f2", @"f3", @"f4"]) @autoreleasepool {
-        MTL4RenderPipelineDescriptor *d = pre_desc(@"v1", k, 0);
+        MTL4RenderPipelineDescriptor *d = pre_desc([k isEqualToString:@"f1"] ? @"v3" : @"v1", k, 0);
         for (id<MTL4Archive> a in open) if ([a newRenderPipelineStateWithDescriptor:d error:nil]) { found++; break; }
     }
     EXPECT("every base in the files", 4, found);
@@ -323,6 +441,133 @@ int main(void) { @autoreleasepool {
     EXPECT("indexed covered: its index removed", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_keys_path([arch7 stringByAppendingPathComponent:ib])]);
     EXPECT("indexed covered: prebuilt.tsv removed", 0, [NSFileManager.defaultManager fileExistsAtPath:[arch7 stringByAppendingPathComponent:@"prebuilt.tsv"]]);
     g_arch_bundle = nil; g_bundle_dir = nil; nvn_hm_clear(&g_arch_ix, NULL); g_arch_ixf = nil;
+
+    // the prebuild with a capture of one of its pairs' functions under way: the pairs are put back and never built beside it. The process ending while it is still under way
+    // leaves them unbuilt and no stamp, so the next start builds them; once it returns, they are built and stamped
+    g_arch4 = @[]; g_arch4p = @[];
+    NSString *arch8 = [root stringByAppendingPathComponent:@"archive8"], *stamp8 = [arch8 stringByAppendingPathComponent:@"prebuilt.tsv"];
+    [NSFileManager.defaultManager createDirectoryAtPath:arch8 withIntermediateDirectories:YES attributes:nil error:nil];
+    g_arch_dir = arch8;
+    put(pairs, @"# pairs\nv1\tf4\nv1\tf6\nv3\tf2\n");
+    uint64_t kv[3], *kvp = kv; int nk = fn_ids(pre_desc(@"v1", @"f4", 0), kv);   // kvp: a block cannot take the array
+    EXPECT("busy: v1 under way", 1, nk == 1 && fn_claim(kv, 1, 0));
+    reset_counts(); uint64_t t8 = bp_now();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ atomic_store(&g_warm_stop, 1); });
+    EXPECT("busy: three pairs", 3, pso_prebuild(2, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("busy: waited for it until the end", 1, bp_now() - t8 >= 250000000ull);
+    EXPECT("busy: the other built", 1, g_pre_built);
+    EXPECT("busy: both put back", 1, g_pre_deferred >= 2);
+    EXPECT("busy: none built beside it", 0, (int)g_pre_failed + (int)g_pre_skipped);
+    EXPECT("busy: no stamp", 0, [NSFileManager.defaultManager fileExistsAtPath:stamp8]);
+    atomic_store(&g_warm_stop, 0);
+    // the process ends, then the capture returns before the workers look again: the pairs put back stay put back (pre_later_take looks at the stop first), none is built
+    // after the stop, and nothing is stamped
+    reopen(arch8); reset_counts();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ atomic_store(&g_warm_stop, 1); fn_release(kvp, 1); });
+    EXPECT("stopped, then free: three pairs", 3, pso_prebuild(2, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("stopped, then free: none built after the stop", 0, g_pre_built);
+    EXPECT("stopped, then free: the other from the archive", 1, g_pre_archived);
+    EXPECT("stopped, then free: both still put back", 2, pre_later_count());
+    EXPECT("stopped, then free: no stamp", 0, [NSFileManager.defaultManager fileExistsAtPath:stamp8]);
+    atomic_store(&g_warm_stop, 0);
+    EXPECT("busy again: v1 under way", 1, fn_claim(kv, 1, 0));
+    reopen(arch8); reset_counts(); t8 = bp_now();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ fn_release(kvp, 1); });
+    EXPECT("returned: three pairs", 3, pso_prebuild(2, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("returned: built once it returned", 1, bp_now() - t8 >= 250000000ull);
+    EXPECT("returned: both built", 2, g_pre_built);
+    EXPECT("returned: the other from the archive", 1, g_pre_archived);
+    EXPECT("returned: put back first", 1, g_pre_deferred >= 2);
+    EXPECT("returned: stamped", 1, [NSFileManager.defaultManager fileExistsAtPath:stamp8]);
+    EXPECT("returned: nothing left under way", 0, g_fn_nbusy);
+    // NX 18's own files (pre_trim): a prebuild the process's end cuts short before it looked its pairs up removes none of its earlier files, and stamps nothing; the next one
+    // finds every pair in them
+    NSString *pairs8 = @"# pairs\nv3\tf2\nv1\tf6\nv1\tf4\n"; NSUInteger pb8 = named(arch8, @"pb").count;
+    EXPECT("cut short: the prebuild's files", 2, pb8);
+    put(pairs, pairs8); reopen(arch8); reset_counts(); atomic_store(&g_warm_stop, 1);
+    EXPECT("cut short: three pairs", 3, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    atomic_store(&g_warm_stop, 0);
+    EXPECT("cut short: no pair done", 0, g_pre_done);
+    EXPECT("cut short: none of its files removed", pb8, named(arch8, @"pb").count);
+    EXPECT("cut short: not stamped", 0, [slurp(stamp8) hasPrefix:pre_stamp(pairs8, 0)]);
+    reopen(arch8); reset_counts();
+    EXPECT("after it: three pairs", 3, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("after it: every one from the files", 3, g_pre_archived);
+    EXPECT("after it: the files stay", pb8, named(arch8, @"pb").count);
+    EXPECT("after it: stamped", 1, [slurp(stamp8) hasPrefix:pre_stamp(pairs8, 0)]);
+    // the prepare step (prepare_prebuild) with a capture of a vertex function under way that its pairs share (claimed here, as a compile Apple's compiler takes long over holds it):
+    // it waits for the pairs put back once that capture returns; and when no pair finishes for its limit (a compile that does not return, #294), it stops waiting and leaves
+    // them to the background
+    setenv("DM_PSO_PREPARE_THREADS", "2", 1);
+    NSString *arch9 = [root stringByAppendingPathComponent:@"archive9"], *pairs9 = @"# pairs\nv1\tf2\nv1\tf3\nv3\tf4\n";
+    [NSFileManager.defaultManager createDirectoryAtPath:arch9 withIntermediateDirectories:YES attributes:nil error:nil];
+    g_arch_dir = arch9; g_arch4 = @[]; g_arch4p = @[]; put(pairs, pairs9);
+    EXPECT("prepare: v1 under way", 1, fn_claim(kv, 1, 0));
+    reset_counts(); uint64_t t9 = bp_now();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ fn_release(kvp, 1); });
+    prepare_prebuild();
+    EXPECT("prepare: waited for the capture under way", 1, bp_now() - t9 >= 250000000ull);
+    EXPECT("prepare: every pair handed out", 1, atomic_load(&g_pre_next) >= 3);
+    EXPECT("prepare: none left put back", 0, pre_later_count());
+    EXPECT("prepare: both put back first", 1, g_pre_deferred >= 2);
+    EXPECT("prepare: the prebuild finished", 1, until(^{ return (int)!g_pre_running; }, 30));
+    EXPECT("prepare: every pair built", 3, g_pre_built);
+    EXPECT("prepare: stamped", 1, [slurp([arch9 stringByAppendingPathComponent:@"prebuilt.tsv"]) hasPrefix:pre_stamp(pairs9, 0)]);
+    NSString *arch10 = [root stringByAppendingPathComponent:@"archive10"];
+    [NSFileManager.defaultManager createDirectoryAtPath:arch10 withIntermediateDirectories:YES attributes:nil error:nil];
+    g_arch_dir = arch10; g_arch4 = @[]; g_arch4p = @[]; nvn_hm_clear(&g_arch_ix, NULL); g_arch_ixf = @[];   // archive9's prepare opened its file (arch_adopt_prebuilt)
+    EXPECT("prepare, stuck: v1 under way", 1, fn_claim(kv, 1, 0));
+    reset_counts(); g_pre_prep_idle_ms = 300; uint64_t t10 = bp_now();
+    prepare_prebuild();
+    uint64_t waited10 = bp_now() - t10;
+    EXPECT("prepare, stuck: stopped waiting after its limit", 1, waited10 >= 250000000ull && waited10 < 3000000000ull);
+    EXPECT("prepare, stuck: the other built", 1, until(^{ return (int)(g_pre_built == 1); }, 10));
+    EXPECT("prepare, stuck: the pairs behind it still put back", 2, pre_later_count());
+    EXPECT("prepare, stuck: the prebuild goes on in the background", 1, g_pre_running);
+    fn_release(kv, 1);
+    EXPECT("prepare, stuck: the prebuild finished once it returned", 1, until(^{ return (int)!g_pre_running; }, 30));
+    EXPECT("prepare, stuck: every pair built", 3, g_pre_built);
+    EXPECT("prepare, stuck: stamped", 1, [slurp([arch10 stringByAppendingPathComponent:@"prebuilt.tsv"]) hasPrefix:pre_stamp(pairs9, 0)]);
+    // the prepare step opens the files its prebuild wrote before the first frame (arch_adopt_prebuilt, upstream NXNative 4add5fbb4): their index names the pairs' bases in the
+    // same run, a miss recorded before is forgotten, the files are not the trim's, and a second call opens nothing again (archive9's prepare above opened its file the same way)
+    nvn_hm_clear(&g_arch_ix, NULL); g_arch_ixf = @[]; g_arch4 = @[]; g_arch4p = @[];
+    NSString *arch11 = [root stringByAppendingPathComponent:@"archive11"];
+    [NSFileManager.defaultManager createDirectoryAtPath:arch11 withIntermediateDirectories:YES attributes:nil error:nil];
+    g_arch_dir = arch11; put(pairs, @"# pairs\nv1\tf4\nv1\tf6\n");
+    pbase_key mk; memset(&mk, 0, sizeof mk); mk.samples = 99;   // a base the archives were searched for and lacked
+    os_unfair_lock_lock(&g_pbase_lock); nvn_hm_clear(&g_pbase_miss, hm_rel); hm_put_id(&g_pbase_miss, &mk, NSNull.null); os_unfair_lock_unlock(&g_pbase_lock);
+    reset_counts();
+    prepare_prebuild();
+    EXPECT("adopt: the prebuild finished before the first frame", 0, (int)atomic_load(&g_pre_running));
+    EXPECT("adopt: both bases built", 2, g_pre_built);
+    NSUInteger nf11 = named(arch11, @"pb").count;   // one per period: the first worker to find no pair left hands its period over while the other's compile is in it
+    EXPECT("adopt: its files opened through their indexes", 1, nf11 >= 1 && g_arch_ix.n == 2 && g_arch_ixf.count == nf11 && g_arch4p.count == 0);
+    EXPECT("adopt: the miss forgotten", 0, g_pbase_miss.n);
+    uint64_t asks11 = g_arch_asks; id<MTL4Archive> from11 = nil;
+    EXPECT("adopt: a pair's base found in the same run, from the file its index names", 1,
+           arch_lookup_in(pre_desc(@"v1", @"f4", 0), 0, NULL, &from11) != nil && g_arch_asks == asks11 + 1 && from11 && [g_arch_ixf containsObject:from11]);
+    int trim11 = 0; for (id<MTL4Archive> a in g_arch_ixf) trim11 += [g_arch_pre_files objectForKey:a] != nil;
+    EXPECT("adopt: not the trim's", 0, trim11);
+    arch_adopt_prebuilt();
+    EXPECT("adopt: a second call opens nothing again", 1, g_arch_ixf.count == nf11 && g_arch_ix.n == 2);
+    // a compile that does not return (#294): the prepare step waits g_pre_tail_ms for it, then goes on with the prebuild in the background and opens none of its files
+    NSString *arch12 = [root stringByAppendingPathComponent:@"archive12"];
+    [NSFileManager.defaultManager createDirectoryAtPath:arch12 withIntermediateDirectories:YES attributes:nil error:nil];
+    nvn_hm_clear(&g_arch_ix, NULL); g_arch_ixf = @[]; g_arch4 = @[]; g_arch4p = @[];
+    g_arch_dir = arch12; put(pairs, @"# pairs\nv3\tf1\nv1\tf2\n");
+    HoldCompiler *hold12 = [HoldCompiler new]; hold12->entered = dispatch_semaphore_create(0); hold12->release = dispatch_semaphore_create(0);
+    arm(hold12); reset_counts(); g_pre_tail_ms = 300; uint64_t t12 = bp_now();
+    prepare_prebuild();
+    uint64_t waited12 = bp_now() - t12;
+    EXPECT("adopt, held: returned after the tail limit", 1, waited12 >= 250000000ull && waited12 < 5000000000ull);
+    EXPECT("adopt, held: the prebuild goes on in the background", 1, (int)atomic_load(&g_pre_running));
+    EXPECT("adopt, held: none of its files opened", 0, g_arch_ixf.count + g_arch_ix.n);
+    dispatch_semaphore_signal(hold12->release);
+    EXPECT("adopt, held: finished once it returned", 1, until(^{ return (int)!atomic_load(&g_pre_running); }, 30));
+    g_pre_tail_ms = PRE_TAIL_MS;
+    if (g_ep_pre && (id)g_ep_pre->comp == hold12) g_ep_pre->comp = hold12->compiler;
+    nvn_hm_clear(&g_arch_ix, NULL); g_arch_ixf = @[];
+    g_pre_prep_idle_ms = PRE_PREP_IDLE_MS; unsetenv("DM_PSO_PREPARE_THREADS");
 
     // the other blocks' state: no files open, the first pair list
     g_arch4 = @[]; g_arch4p = @[]; reset_counts(); g_pre_nolib = 0; g_pre_nolib_file = nil;

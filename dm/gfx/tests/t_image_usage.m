@@ -1,4 +1,5 @@
 // RegisterImage on a COMPRESSIBLE-only render texture: first use adds image usage, keeps the open pass's clear and every mip, and updates sampled aliases.
+// Then a dispatch's uint image slot over an RG32F texture without the format-view usage, upgraded before the dispatch (class_view_case).
 #include "../nvn/nvn_mtl.m"
 #include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
@@ -77,8 +78,47 @@ static void image_case(int explicit_image) { @autoreleasepool {
     read_level(tex_mtl(&alias), 1, pixels); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == (i == 5 ? 0x3400 : 0x3a00);
     CHECK(same, "sampled alias sees the image write and untouched pixels");
 } }
+// A dispatch's image slot declared uint over an RG32F texture made without the format-view usage (ported from S2Arm 2e9a6ce7): img_fit_prescan upgrades it before the dispatch's
+// encoder, so the slot gets the RG32Uint view at once and a kernel's write through it reaches the texture its other names see. Without it the slot was bound as is until the next draw pass
+static void class_view_case(void) { @autoreleasepool {
+    tex_t texture = {.magic=MAGIC('T','E','X',0), .serial=99701, .off=3 << 20};
+    texture.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_RG32F, .flags=NVN_TEXTURE_FLAGS_IMAGE, .width=4, .height=4, .depth=1, .levels=1, .samples=1};
+    nvn_tex_layout(&texture.d, &texture.L); mtl_tex_init(&texture);
+    tex_t alias = texture; alias.serial++; alias.d.flags = 0; mtl_tex_init(&alias);
+    id<MTLTexture> old = tex_mtl(&texture);
+    CHECK(old && old.pixelFormat == MTLPixelFormatRG32Float && !(old.usage & MTLTextureUsagePixelFormatView), "the RG32F texture is made without the format-view usage");
+    mtl_reg_image(604, &texture, NULL);
+    mtl_sub_begin();
+    NvShader *shader = [NvShader new];
+    shader->rf.nb = 1; shader->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .dtt=MTLTextureType2D, .dpf=NVN_DPF_UINT, .reg=1, .rw=1};
+    S.img[5][1] = 604;
+    img_fit_prescan(shader);
+    id<MTLTexture> up = tex_mtl(&texture);
+    CHECK(up != old && (up.usage & MTLTextureUsagePixelFormatView) && !g_imfit_npend, "the dispatch's prescan upgrades the texture before its encoder");
+    CHECK(tex_mtl(&alias) == up, "the other name follows the upgraded texture");
+    os_unfair_lock_lock(&g_rmu); uint64_t rid; int real;
+    id<MTLTexture> image = img_binding(604, &shader->rf.b[0], &rid, &real);
+    os_unfair_lock_unlock(&g_rmu);
+    CHECK(real && image.pixelFormat == MTLPixelFormatRG32Uint && image.parentTexture == up, "the slot gets the uint view of the upgraded texture at once");
+    mtl_sub_commit(); mtl_drain();
+    NSError *error = nil;
+    id<MTLLibrary> lib = t4_lib(@"#include <metal_stdlib>\nusing namespace metal;\nkernel void put(texture2d<uint, access::write> t [[texture(0)]], uint2 p [[thread_position_in_grid]]) { t.write(uint4(0x3f800000u + p.x, 0x40000000u + p.y, 0, 0), p); }\n", nil, &error);
+    id<MTLComputePipelineState> pipeline = t4_cps(t4_fn(lib, @"put"), &error);
+    CHECK(pipeline != nil, "uint image writer compiled");
+    T4 *write = t4_begin(); id<MTL4ComputeCommandEncoder> encoder = t4_compute(write);
+    [encoder setComputePipelineState:t4_keep(write, pipeline)]; t4_tex(write, encoder, T4_CS, image, 0);
+    [encoder dispatchThreads:MTLSizeMake(4,4,1) threadsPerThreadgroup:MTLSizeMake(4,4,1)]; t4_end(write, encoder); t4_wait(write);
+    id<MTLBuffer> rb = [g_dev newBufferWithLength:4 * 4 * 8 options:MTLResourceStorageModeShared];
+    T4 *rd = t4_begin(); id<MTL4ComputeCommandEncoder> copy = t4_copy(rd); id<MTLTexture> seen = tex_mtl(&alias);
+    t4_use(rd, seen), t4_use(rd, rb), [copy copyFromTexture:seen sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(4,4,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:128];
+    t4_end(rd, copy); t4_wait(rd);
+    const uint32_t *w = rb.contents; int ok = 1;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) ok &= w[(x + y * 4) * 2] == 0x3f800000u + x && w[(x + y * 4) * 2 + 1] == 0x40000000u + y;
+    CHECK(ok, "every word the kernel wrote through the uint view is in the texture the other name sees");
+    mtl_tex_release(&texture); mtl_tex_release(&alias);
+} }
 int main(void) { @autoreleasepool {
-    mtl_init(); image_case(0); image_case(1);
+    mtl_init(); image_case(0); image_case(1); class_view_case();
     printf("explicit image usage: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

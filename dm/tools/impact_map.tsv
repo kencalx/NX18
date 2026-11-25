@@ -14,6 +14,12 @@ dm/gfx/tests/*	-	graphics tests
 dm/host/tests/*	-	host tests
 dm/gfx/tex/tests/*	-	CPU texture tests
 dm/sanitizers/*	-	test sanitizer configuration
+dm/host/hle_movie_av1.*	hle:*Av1Decoder*	AV1 decoding inside the nn::codec submission, beyond the static caller graph
+dm/host/hle_movie_avc.*	hle:*H264Decoder*	H.264 decoding inside the nn::codec submission, beyond the static caller graph
+dm/host/hle_movie_avc.*	hle:_ZN*5movie7Decoder*	H.264 decoding on the movie worker, beyond the static caller graph
+dm/host/hle_movie_vt.h	hle:*Av1Decoder*	VideoToolbox reference history and lifecycle recovery
+dm/host/hle_movie_vt.h	hle:*H264Decoder*	VideoToolbox reference history and lifecycle recovery
+dm/host/hle_movie_vt.h	hle:_ZN*5movie7Decoder*	VideoToolbox reference history and lifecycle recovery
 dm/ios/tests/*	-	iOS tests
 .github/*	-	CI
 dm/games/*/README.md	-	a game's note
@@ -151,5 +157,6 @@ dm/host/switch2_proto.h	hle:*hid*	Switch 2 controller protocol: reports, sticks,
 dm/host/pad_switch2_apple.h	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
 dm/host/pad_switch2_apple.m	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
 dm/host/front.h	present:*	the front end
+dm/host/front_bright.h	*:*	the iOS app's brightness lines (front_ios.m)
 dm/ios/*	*:*	the iOS app
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs	shader:stage:gs	geometry compute input and output lowering

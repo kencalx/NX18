@@ -1,5 +1,5 @@
 # dm/games/game.py's profile-key validation, on a synthetic profile: pso_gpu (the GPU architectures the app's offline pipeline archive is made for) takes, none and no others; the retired pso_mtl4 is tolerated (on silently, off with a warning, never an error),
-# and a profile without the key generates its header unchanged; present_sharpen's levels, off without the key; present_trim's ticks, -1 (the host's default: 60 on iOS, off on the Mac) without the key; post_aa's values, off without the key; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck
+# and a profile without the key generates its header unchanged; present_sharpen's levels, off without the key; present_trim's ticks, -1 (the host's default: 60 on iOS, off on the Mac) without the key; post_aa's values, off without the key; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in an NDSR pack, under any name or container
 from pathlib import Path
 import os
 import subprocess
@@ -269,6 +269,32 @@ class ReplaySpares(unittest.TestCase):   # 32 spare command copies and 64 spare 
         self.assertIn('replay_spares', (REPO / 'dm/games/0400486024DEC000/README.md').read_text(encoding='utf-8'))
 
 
+class DepthLazy(unittest.TestCase):   # large depth textures made placement sparse, tiles mapped where the GPU writes (nvn_mtl.m lz_make; DM_NVN_DEPTH_LAZY overrides)
+    def macro(self, rows, gid=None):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'game.h')
+            if gid is None:
+                Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+                env = {**os.environ, 'DM_GAMES_DIR': d}
+            else: env = {k: v for k, v in os.environ.items() if k != 'DM_GAMES_DIR'}
+            subprocess.run([sys.executable, str(GAME), 'header', gid or ID, str(out)], env=env, check=True, capture_output=True)
+            return [l for l in out.read_text().splitlines() if 'DEPTH_LAZY' in l]
+
+    def test_values_and_the_default(self):
+        self.assertEqual(self.macro(''), ['#define DM_GAME_DEPTH_LAZY 0'])
+        self.assertEqual(self.macro('depth_lazy\ton\n'), ['#define DM_GAME_DEPTH_LAZY 1'])
+        self.assertEqual(self.macro('depth_lazy\toff\n'), ['#define DM_GAME_DEPTH_LAZY 0'])
+        for v in ('1', 'yes', 'On', ''):
+            rc, out = header(f'depth_lazy\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('depth_lazy must be on or off', out, v)
+
+    def test_no_profile_sets_it_yet(self):   # off for every game until a device A/B decides (Ocarina of Time first)
+        on = [tsv.parent.name for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv'))
+              if any(l.split('\t')[:1] == ['depth_lazy'] for l in tsv.read_text(encoding='utf-8').splitlines())]
+        self.assertEqual(on, [])
+        self.assertEqual(self.macro('', '0400486024DEC000'), ['#define DM_GAME_DEPTH_LAZY 0'])
+
+
 class DepthZeroCopy(unittest.TestCase):   # new single-sample Depth16 / Depth32F textures zeroed by copies, not a clear pass (nvn_mtl.m tex_zero_fill; DM_DEPTH_ZERO_COPY overrides)
     def macro(self, rows, gid=None):
         with tempfile.TemporaryDirectory() as d:
@@ -355,6 +381,34 @@ class GhostTable(unittest.TestCase):   # the finalized-texture table's size (nvn
         self.assertIn('ghost_table', (REPO / 'dm/games/0400486024DEC000/README.md').read_text(encoding='utf-8'))
 
 
+class UploadSlots(unittest.TestCase):   # upload batch slots in rotation (nvn_mtl.m up_slots_pick; DM_NVN_UP_SLOTS overrides; adapted from MacNativeGames 6ecb27c1)
+    def macro(self, rows, gid=None):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'game.h')
+            if gid is None:
+                Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+                env = {**os.environ, 'DM_GAMES_DIR': d}
+            else: env = {k: v for k, v in os.environ.items() if k != 'DM_GAMES_DIR'}   # a profile of the repository
+            subprocess.run([sys.executable, str(GAME), 'header', gid or ID, str(out)], env=env, check=True, capture_output=True)
+            return [l for l in out.read_text().splitlines() if 'UPLOAD_SLOTS' in l]
+
+    def test_values_and_the_default(self):
+        self.assertEqual(self.macro(''), ['#define DM_GAME_UPLOAD_SLOTS 3'])   # without the key: 3, every other game as before
+        for v in ('3', '5', '8'):
+            self.assertEqual(self.macro(f'upload_slots\t{v}\n'), [f'#define DM_GAME_UPLOAD_SLOTS {v}'], v)
+        for v in ('2', '9', '0', '-1', 'on', '8x', ''):
+            rc, out = header(f'upload_slots\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('upload_slots must be a number of slots from 3 to 8', out, v)
+
+    def test_profiles_that_set_it(self):   # Breath of the Wild alone, and it names the key in its README; Tears of the Kingdom keeps 3 (no gain measured)
+        on = [tsv.parent.name for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv'))
+              if any(l.split('\t')[0] == 'upload_slots' for l in tsv.read_text(encoding='utf-8').splitlines())]
+        self.assertEqual(on, ['01007EF00011E000'])
+        self.assertEqual(self.macro('', '01007EF00011E000'), ['#define DM_GAME_UPLOAD_SLOTS 8'])
+        self.assertEqual(self.macro('', '0100F2C0115B6000'), ['#define DM_GAME_UPLOAD_SLOTS 3'])
+        self.assertIn('upload_slots', (REPO / 'dm/games/01007EF00011E000/README.md').read_text(encoding='utf-8'))
+
+
 class PostAA(unittest.TestCase):   # the present's edge smoothing by default (settings.tsv DM_POST_AA's values, nvn_upscale_pick.h aa_parse)
     def macro(self, rows):
         with tempfile.TemporaryDirectory() as d:
@@ -384,7 +438,12 @@ MAP = ('# kind: evidence  Test shaders\n# column 5 records where each key first 
        'cs_other.bin\t2\tcompute\t7629d857a0a93833\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.debug.sarc.zs/agl_ndsr.pck#NDSR@0xeb4c0\n'
        'cs_other.bin\t3\tcompute\t7629d857a0a93833\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_ndsr.pck#NDSR@0x124a00\n'   # a key twice: once
        'ps_other.bin\t4\tpixel\t0e423e497f1e3355\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_ndsr.pck#NDSR@0x1247d8\n'   # the pack's draw shaders: not the upscaler
-       'cs_other.bin\t5\tcompute\t0123456789abcdef\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_common.sharcb#BAHS@0x40\n')
+       'cs_other.bin\t5\tcompute\t0123456789abcdef\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_common.sharcb#BAHS@0x40\n'
+       'cs_other.bin\t6\tcompute\tfa3033d05c0a41d6\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_ndsr_vr_light.pck#NDSR@0x84910\n'   # Ocarina of Time's sibling packs
+       'cs_other.bin\t7\tcompute\t805f2de96bd6d78d\t/Bin/Nvn2-upper_left.ndsr#NDSR@0xc4500\n'   # the pack under another engine's name (Kirby Air Riders)
+       'cs_other.bin\t8\tcompute\tddc729bcdb4c8df9\t/data.zip/66e36a907a6b7251#NDSR@0x12da#NDSR@0xec640\n'   # nested in another container (Star Fox)
+       'cs_other.bin\t9\tcompute\tc2fc2ddd604c25e7\t/Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs#NDSR@0x1000\n'   # the pack inside nn::ndve's movie file
+       'cs_other.bin\t10\tcompute\tba079f68ae288dba\t/Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs#NDVE@0x1423e8\n')   # that file's own movie network: not the pack's
 
 
 def macros(shader_map):
@@ -402,11 +461,9 @@ class UpscalerKeys(unittest.TestCase):
         none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0']   # the launcher hides the setting
         self.assertEqual(macros(None), none)
         self.assertEqual(macros(MAP.split('cs_other.bin')[0]), none)
-        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,c56db3d5a0f1b5af"', '#define DM_GAME_UPSCALER_N 2'])
+        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,805f2de96bd6d78d,c2fc2ddd604c25e7,c56db3d5a0f1b5af,ddc729bcdb4c8df9,fa3033d05c0a41d6"', '#define DM_GAME_UPSCALER_N 6'])
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 
 class BuildModules(unittest.TestCase):
@@ -481,3 +538,54 @@ class YieldStorm(unittest.TestCase):   # what the host does with a yield storm (
             if not any(l.split('\t')[:2] == ['yield_storm', 'sleep'] for l in tsv.read_text(encoding='utf-8').splitlines()): continue
             note = tsv.parent / 'README.md'
             self.assertIn('yield_storm', note.read_text(encoding='utf-8') if note.is_file() else '', tsv.parent.name)
+
+
+def profile_macros(rows, word):
+    """The lines of a synthetic profile's header that name word, with these extra rows"""
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, ID).mkdir()
+        (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+        subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, check=True, capture_output=True)
+        return [l for l in (Path(d, ID) / 'game.h').read_text().splitlines() if word in l]
+
+
+class UpscalerBilinear(unittest.TestCase):   # the game's upscaler, where MetalFX would draw it, as a bilinear stretch (nvn_mtl.m up_bil_on; DM_NVN_UP_BILINEAR overrides)
+    def test_values_and_the_default(self):
+        self.assertEqual(profile_macros('', 'UP_BILINEAR'), ['#define DM_GAME_UP_BILINEAR 0'])   # without the key: MetalFX
+        self.assertEqual(profile_macros('upscaler_bilinear\ton\n', 'UP_BILINEAR'), ['#define DM_GAME_UP_BILINEAR 1'])
+        self.assertEqual(profile_macros('upscaler_bilinear\toff\n', 'UP_BILINEAR'), ['#define DM_GAME_UP_BILINEAR 0'])
+
+    def test_rejected_values(self):
+        for v in ('1', 'yes', 'On', ''):
+            rc, out = header(f'upscaler_bilinear\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('upscaler_bilinear must be on or off', out, v)
+
+    def test_profiles_that_set_it(self):   # Donkey Kong Bananza alone, and its Quality preset turns it off
+        on = [t.parent.name for t in sorted((REPO / 'dm/games').glob('*/game.tsv')) if 'upscaler_bilinear\ton' in t.read_text(encoding='utf-8').splitlines()]
+        self.assertEqual(on, ['040074A01BF12000'])
+        self.assertIn('preset\tquality\tDM_NVN_UP_BILINEAR=0', (REPO / 'dm/games/040074A01BF12000/game.tsv').read_text(encoding='utf-8').splitlines())
+
+
+class PassAlternate(unittest.TestCase):   # passes drawn every other frame by shape (nvn_pass_alt.h): <W>x<H>:<colour>/<depth> as before, and cube:<colour>, joined by commas
+    def test_values_and_the_default(self):
+        self.assertEqual(profile_macros('', 'PASS_ALT'), ['#define DM_GAME_PASS_ALT_N 0', '#define DM_GAME_PASS_ALT_SHAPES {{0}}'])   # without the key: none
+        self.assertEqual(profile_macros('pass_alternate\toff\n', 'PASS_ALT'), ['#define DM_GAME_PASS_ALT_N 0', '#define DM_GAME_PASS_ALT_SHAPES {{0}}'])
+        self.assertEqual(profile_macros('pass_alternate\t128x128:92/252\n', 'PASS_ALT'), ['#define DM_GAME_PASS_ALT_N 1', '#define DM_GAME_PASS_ALT_SHAPES {{128, 128, 92, 252, 0}}'])   # the one-shape spelling as before
+        self.assertEqual(profile_macros('pass_alternate\t128x128:92/252,cube:92\n', 'PASS_ALT'), ['#define DM_GAME_PASS_ALT_N 2', '#define DM_GAME_PASS_ALT_SHAPES {{128, 128, 92, 252, 0}, {0, 0, 92, 0, 1}}'])
+        self.assertEqual(profile_macros('pass_alternate\tcube:115\n', 'PASS_ALT'), ['#define DM_GAME_PASS_ALT_N 1', '#define DM_GAME_PASS_ALT_SHAPES {{0, 0, 115, 0, 1}}'])
+
+    def test_rejected_values(self):
+        for v in ('on', '128x128:92', '128x128:92/0', '0x128:92/252', 'cube', 'cube:0', 'cube:92/252', '128x128:92/252,', '128x128:92/252 cube:92', 'cube:92,cube:92',
+                  'cube:1,cube:2,cube:3,cube:4,cube:5', ''):
+            rc, out = header(f'pass_alternate\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('pass_alternate', out, v)
+
+    def test_profiles_that_set_it(self):   # Donkey Kong Bananza alone: its 128x128 view and its RG11B10Float cubes, both off in its Quality preset
+        on = {t.parent.name: l.split('\t')[1] for t in sorted((REPO / 'dm/games').glob('*/game.tsv')) for l in t.read_text(encoding='utf-8').splitlines() if l.startswith('pass_alternate\t')}
+        self.assertEqual(on, {'040074A01BF12000': '128x128:92/252,cube:92', '0400486024DEC000': 'cube:92'})
+        rows = (REPO / 'dm/games/040074A01BF12000/game.tsv').read_text(encoding='utf-8').splitlines()
+        for sw in ('DM_NVN_PASS_ALT', 'DM_NVN_CUBE_ALT'): self.assertIn(f'preset\tquality\t{sw}=0', rows)
+
+
+if __name__ == '__main__':
+    unittest.main()

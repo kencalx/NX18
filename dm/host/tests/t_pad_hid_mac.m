@@ -1,5 +1,6 @@
 // Identical pads (pad_hid_mac.h) with fake IOKit entries and fake GameController controllers: only an entry that sends reports counts as a pad of its model, so one
-// Pro Controller with a second, silent entry stays with GameController (GitHub issue #2237), while two that both stream are read as twins (GitHub issue #1218)
+// Pro Controller with a second, silent entry stays with GameController (GitHub issue #2237), while two that both stream are read as twins (GitHub issue #1218).
+// Raw HID layouts: Steam Link's virtual Xbox 360 pad (045e:028e, GitHub issue #2465) through discovery and the value callback
 #import <Foundation/Foundation.h>
 #import <IOKit/hid/IOHIDManager.h>
 #import <GameController/GameController.h>
@@ -12,21 +13,33 @@
 @interface TestDev : NSObject
 @property int vid, pid; @property long loc; @property uint64_t entry; @property NSString *transport;
 @property uint8_t *buffer; @property IOHIDReportCallback callback; @property void *context;
+@property NSString *name; @property NSArray *elements; @property IOHIDValueCallback valueCallback; @property void *valueContext;
 @end
 @implementation TestDev
+@end
+@interface TestElem : NSObject
+@property uint32_t page, usage;
+@end
+@implementation TestElem
+@end
+static TestElem *elem(uint32_t page, uint32_t usage) { TestElem *e = [TestElem new]; e.page = page; e.usage = usage; return e; }
+@interface TestValue : NSObject
+@property TestElem *element; @property CFIndex value;
+@end
+@implementation TestValue
 @end
 @interface TestGC : NSObject
 @property NSString *productCategory, *vendorName; @property id extendedGamepad;
 @end
 @implementation TestGC
-static NSMutableArray *g_gc;
+static NSMutableArray *g_gc; static BOOL g_supports = YES;
 + (NSArray *)controllers { return g_gc; }
-+ (BOOL)supportsHIDDevice:(IOHIDDeviceRef)d { (void)d; return YES; }
++ (BOOL)supportsHIDDevice:(IOHIDDeviceRef)d { (void)d; return g_supports; }
 @end
 
 static CFTypeRef test_property(IOHIDDeviceRef device, CFStringRef key) {
     TestDev *d = (__bridge id)device;
-    if (CFEqual(key, CFSTR(kIOHIDProductKey))) return (__bridge CFTypeRef)@"Pro Controller";
+    if (CFEqual(key, CFSTR(kIOHIDProductKey))) return (__bridge CFTypeRef)(d.name ?: @"Pro Controller");
     if (CFEqual(key, CFSTR(kIOHIDVendorIDKey))) return (__bridge CFTypeRef)@(d.vid);
     if (CFEqual(key, CFSTR(kIOHIDProductIDKey))) return (__bridge CFTypeRef)@(d.pid);
     if (CFEqual(key, CFSTR(kIOHIDLocationIDKey))) return (__bridge CFTypeRef)@(d.loc);
@@ -37,8 +50,14 @@ static void test_report_cb(IOHIDDeviceRef device, uint8_t *buffer, CFIndex len, 
     TestDev *d = (__bridge id)device; assert(len >= 49);
     d.buffer = buffer; d.callback = callback; d.context = ctx;
 }
-static void test_value_cb(IOHIDDeviceRef device, IOHIDValueCallback callback, void *ctx) { (void)device; (void)callback; (void)ctx; }
-static CFArrayRef test_elements(IOHIDDeviceRef device, CFDictionaryRef match, IOOptionBits o) { (void)device; (void)match; (void)o; return CFBridgingRetain(@[]); }
+static void test_value_cb(IOHIDDeviceRef device, IOHIDValueCallback callback, void *ctx) { TestDev *d = (__bridge id)device; d.valueCallback = callback; d.valueContext = ctx; }
+static CFArrayRef test_elements(IOHIDDeviceRef device, CFDictionaryRef match, IOOptionBits o) { (void)match; (void)o; return CFBridgingRetain(((__bridge TestDev *)device).elements ?: @[]); }
+static IOHIDElementRef test_val_element(IOHIDValueRef v) { return (__bridge IOHIDElementRef)((__bridge TestValue *)v).element; }
+static CFIndex test_val_int(IOHIDValueRef v) { return ((__bridge TestValue *)v).value; }
+static CFIndex test_el_min(IOHIDElementRef e) { (void)e; return 0; }
+static CFIndex test_el_max(IOHIDElementRef e) { (void)e; return 1; }
+static uint32_t test_el_page(IOHIDElementRef e) { return ((__bridge TestElem *)e).page; }
+static uint32_t test_el_usage(IOHIDElementRef e) { return ((__bridge TestElem *)e).usage; }
 static io_service_t test_service(IOHIDDeviceRef device) { return (io_service_t)((__bridge TestDev *)device).entry; }
 static kern_return_t test_entry_id(io_registry_entry_t e, uint64_t *id) { *id = e; return KERN_SUCCESS; }
 static IOReturn test_set_report(IOHIDDeviceRef d, IOHIDReportType t, CFIndex id, const uint8_t *r, CFIndex n) { (void)d; (void)t; (void)id; (void)r; (void)n; return kIOReturnSuccess; }
@@ -50,16 +69,22 @@ uint64_t now_ns(void) { return tick; }
 #define IOHIDDeviceRegisterInputReportCallback test_report_cb
 #define IOHIDDeviceRegisterInputValueCallback test_value_cb
 #define IOHIDDeviceCopyMatchingElements test_elements
+#define IOHIDValueGetElement test_val_element
+#define IOHIDValueGetIntegerValue test_val_int
+#define IOHIDElementGetLogicalMin test_el_min
+#define IOHIDElementGetLogicalMax test_el_max
+#define IOHIDElementGetUsagePage test_el_page
+#define IOHIDElementGetUsage test_el_usage
 #define IOHIDDeviceGetService test_service
 #define IORegistryEntryGetRegistryEntryID test_entry_id
 #define IOHIDDeviceSetReport test_set_report
 #define GCController TestGC
 #include "../pad_hid_mac.h"
 
-static int attached, changes;
+static int attached, changes, reads; static uint64_t buttons;
 static void hidpad_attach(hid_pad *d) { (void)d; attached++; }
 static void hidpad_detach(hid_pad *d) { (void)d; attached--; }
-static void hidpad_read(hid_pad *d) { (void)d; }
+static void hidpad_read(hid_pad *d) { reads++; buttons = pad_hid_buttons(&d->st); }
 static void hidpad_motion(hid_pad *d, const pro_motion_sample *s, int n) { (void)d; (void)s; (void)n; }
 static void hidpad_models_changed(void) { changes++; hidpad_twins_eval(nil); hidpad_twins_release(); hidpad_twins_take(nil); }   // front_mac.m's pads_changed, without its slots
 
@@ -73,9 +98,47 @@ static void report(TestDev *d) {
 }
 static int twins(void) { int n = 0; for (hid_pad *d = g_hidpads; d; d = d->next) n += d->twin; return n; }
 static hid_pad *find(TestDev *t) { for (int pass = 0; pass < 2; pass++) for (hid_pad *d = pass ? g_hidpads : g_hidpads_gc; d; d = d->next) if (d->hid == ref(t)) return d; return NULL; }
+static void push_value(TestDev *d, TestElem *element, CFIndex value) {
+    assert(d.valueCallback);
+    TestValue *v = [TestValue new]; v.element = element; v.value = value;
+    int before = reads; d.valueCallback(d.valueContext, kIOReturnSuccess, ref(d), (__bridge IOHIDValueRef)v);
+    assert(reads == before + 1);
+}
+// The Xbox 360 layout is chosen from the ID and the descriptor's axes, and discovery and the value callback map Z / Rz to the triggers alike. The devices are ones
+// GameController does not support, so they are read as HID at once
+static void hid_layouts(void) {
+    TestElem *x = elem(1, 0x30), *y = elem(1, 0x31), *z = elem(1, 0x32), *rz = elem(1, 0x35), *rx = elem(1, 0x33), *ry = elem(1, 0x34);
+    TestElem *face = elem(9, 3), *brake = elem(2, 0xC5), *accel = elem(2, 0xC4);
+    TestDev *steam = [TestDev new]; steam.name = @"Remote controller"; steam.vid = 0x045e; steam.pid = 0x028e; steam.entry = 113; steam.elements = @[x, y, z, rz, rx, ry, face];
+    TestDev *other = [TestDev new]; other.name = @"Xbox ID with dedicated triggers"; other.vid = 0x045e; other.pid = 0x028e; other.entry = 114; other.elements = @[x, y, rx, ry, brake, accel, face];
+    g_supports = NO;
+    for (TestDev *d in @[steam, other]) hidpad_found(NULL, kIOReturnSuccess, NULL, ref(d));
+    g_supports = YES;
+    assert(attached == 2 && find(steam)->st.layout == PAD_HID_X360 && find(other)->st.layout == PAD_HID_DEFAULT);
+    assert(find(steam)->st.has[PH_BRAKE] && find(steam)->st.has[PH_ACCEL] && !find(steam)->st.has[PH_Z] && !find(steam)->st.has[PH_RZ]);
+
+    int32_t s[4];
+    push_value(steam, face, 1); assert(buttons == DM_BTN_Y);
+    push_value(steam, face, 0); assert(buttons == 0);
+    push_value(steam, rx, 1);
+    push_value(steam, z, 1); assert(buttons == DM_BTN_ZL);
+    push_value(steam, rz, 1); assert(buttons == (DM_BTN_ZL | DM_BTN_ZR));
+    pad_hid_sticks(&find(steam)->st, s); assert(s[2] == DM_STICK_MAX && s[3] == 0);
+    push_value(steam, z, 0); assert(buttons == DM_BTN_ZR);
+    push_value(steam, rz, 0); assert(buttons == 0);
+
+    push_value(other, face, 1); assert(buttons == 0);   // the default map has no usage 3
+    push_value(other, brake, 1); assert(buttons == DM_BTN_ZL);
+    push_value(other, accel, 1); assert(buttons == (DM_BTN_ZL | DM_BTN_ZR));
+    push_value(other, brake, 0); push_value(other, accel, 0); assert(buttons == 0);
+    for (TestDev *d in @[steam, other]) hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(d));
+    assert(!attached && !g_hidpads && !g_hidpads_gc && !g_hidpads_waiting);
+    puts("t_pad_hid_mac: Xbox 360 axis matching passed");
+}
 
 int main(void) { @autoreleasepool {
     g_gc = [NSMutableArray new];
+    hid_layouts();
     TestGC *gc = [TestGC new]; gc.productCategory = @"Switch Pro Controller"; gc.vendorName = @"Pro Controller"; gc.extendedGamepad = @1;
     // issue #2237: one Pro Controller over Bluetooth, which GameController lists, and a second entry of its model at location 0 that sends nothing
     [g_gc addObject:gc];

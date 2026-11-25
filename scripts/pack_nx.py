@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# A game in an NX archive (one .nx file: https://github.com/fab918/nxformat, NXFormat 1.0.3, SPEC.md; wire versions 0.2 and 0.3) → the layout build_ipa_from_nsp.py extracts NSPs into,
+# A game in an NX archive (one .nx file: https://github.com/fab918/nxformat, NXFormat 1.0.4, SPEC.md; wire versions 0.2 and 0.3) → the layout build_ipa_from_nsp.py extracts NSPs into,
 # the same as scripts/pack_nup.py writes for a NUP. build_ipa_from_nsp.py calls this when it is given a .nx file, or a folder that holds one, and goes on with its other steps; run on its own,
 # this script does only this step. It reads the format with its own code: nothing of NXFormat's (nxconvert, its C++ reader) is used or needed.
 # An NX holds Switch 1 and Switch 2 games dumped from your console and decrypted with its keys: per application, snapshots (the base game, updates, standalone updates and DLC), each a complete file tree, never laid over another
@@ -34,7 +34,7 @@
 # Checks, in the order of the format's own validator so a damaged or hostile archive gets the error the format names (Error.code):
 #   open: both header slots (magic, CRC-32C, zero page padding; the valid one of the highest generation; an older generation when the newer one's tail is damaged), the version (0.2 and 0.3
 #     only: a newer NX needs a newer reader), required and optional feature bits, the region layout, SHA-256 of the Catalog, the Manifest and the block index, every table, string, media
-#     reference and extension (an unknown required extension refuses the archive, an unknown optional one is skipped), every directory tree (names, cycles, a node reached twice) and every
+#     reference and extension (an unknown required extension refuses the archive, an unknown optional one is skipped; 1.0.4's Extra Files tree is checked, never extracted), every directory tree (names, cycles, a node reached twice) and every
 #     snapshot's identity, recomputed. The format's limits (SECURITY.md) and lower budgets of this reader (Budgets: the Manifest and block index are held in memory) bound all of it.
 #   read: a zstd block must be one frame with its content size, no dictionary, a window of 1 MiB at most and no trailing bytes, and decodes to at most its logical size; every file streamed
 #     is checked against its SHA-256 before the image is published. A file that fails has its blocks' CRC-32C checked to name the damaged block. CRC-32C is computed here in Python
@@ -47,8 +47,11 @@
 # bytes check against the archive's hashes. An edit that appends a generation (nxconvert add) or recompresses the archive keeps those trees, so the images are kept.
 # Needs the zstd module for zstd blocks: compression.zstd (Python 3.14+) or backports.zstd, as the NSP script.
 # A base snapshot with no game files (no exefs/main, nothing in romfs/: one that holds only the application's metadata) is no base game, as a NUP's empty base record.
+# An application of several programs packs its own program (or its one primary one), --program N another, under that program's ID; a program's DLC are numbered from the
+# application (dm/tools/programs.py), also when the program's ID starts 04 and the application's 01 (a Nintendo Switch 2 Edition's Switch 2 program). A program other than the
+# application's own (program 0) is not packed yet: the script stops with a red line that says so (programs.unsupported).
 # An archive may hold one title ID on two platforms: --title-id <ID>:switch1 / :switch2 / :unknown picks one, and its build folder is <ID>-<platform>_build.
-# Usage: pack_nx.py <game.nx> [--version N] [--title-id ID[:PLATFORM]] [--work-dir DIR] [--list] [--verify] [--crc] [--allow-damaged]   (exit 1 on error)
+# Usage: pack_nx.py <game.nx> [--version N] [--title-id ID[:PLATFORM]] [--program N] [--work-dir DIR] [--list] [--verify] [--crc] [--allow-damaged]   (exit 1 on error)
 import argparse, hashlib, json, os, re, shutil, struct, subprocess, sys, tempfile, unicodedata
 import typing
 from typing import NoReturn
@@ -56,6 +59,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
 import romfs_image
+import programs   # a program of an application packs under its own ID, its DLC numbered from the application (pack_nup.py)
 import pack_nup   # the NUP packer: program_id, entries and the error class both share
 try: from compression import zstd
 except ImportError:
@@ -96,7 +100,7 @@ BASE, UPDATE, DLC, STANDALONE, UNKNOWN = range(5)
 TYPES = ('base', 'update', 'DLC', 'standalone update', 'unknown')
 PLATFORMS = {0: 'platform unknown', 1: 'Switch 1', 2: 'Switch 2'}
 PNG, JPEG, NPDM, NACP, OPAQUE = 1, 2, 3, 4, 5
-EXT_FIRMWARE, EXT_LANGUAGES, EXT_REGIONS, EXT_HISTORY, EXT_NATIVE, EXT_RECIPES, EXT_RESOURCES = 0x00010001, 0x00010002, 0x00010003, 0x00010004, 0x00010005, 0x00010006, 0x00010008
+EXT_FIRMWARE, EXT_LANGUAGES, EXT_REGIONS, EXT_HISTORY, EXT_NATIVE, EXT_RECIPES, EXT_RESOURCES, EXT_EXTRA = 0x00010001, 0x00010002, 0x00010003, 0x00010004, 0x00010005, 0x00010006, 0x00010008, 0x00010009
 KNOWN_REQUIRED = {EXT_FIRMWARE, EXT_LANGUAGES, EXT_REGIONS, EXT_HISTORY, EXT_NATIVE, EXT_RESOURCES}
 DAMAGE = {'length', 'bounds', 'structure', 'padding', 'catalog_hash', 'manifest_hash', 'index_hash'}   # failures of a newer generation that fall back to the older one (SPEC §1)
 
@@ -311,6 +315,7 @@ class Nx:
         self._blocks(data_off)
         self._resources()
         self._trees()
+        self._extra()
 
     def _range(self, at, size, limit, what, code='bounds'):
         if at < 0 or size < 0 or at > limit or size > limit - at: self.fail(code, f'{what} ([{at:#x}, +{size:#x})) lies outside its region of {limit:#x} bytes')
@@ -447,6 +452,7 @@ class Nx:
         for kind, flags, r0, cid, target, r1 in deps:
             if kind not in (1, 2, 3) or flags & ~1 or r0 or r1 or target == bytes(32): self.fail('catalog', 'invalid dependency record')
             if bool(flags & 1) == (cid == bytes(16)): self.fail('catalog', 'dependency content ID flag and value disagree')
+        self.extra_root = NO   # the Optional Extra Files tree's root folder (NXFormat 1.0.4), checked and never read: not game files
         self.history, self.native, self.resource_dirs = {}, {}, []   # {app index: {snapshot index: row}}, {snapshot index: (NPDM media, firmware or None)}, [(kind, root directory)]
         prior = None
         for e in range(nexts):
@@ -490,6 +496,11 @@ class Nx:
             elif type_id == EXT_RECIPES:   # optional: checked, then not used
                 if okind != 1 or flags != 0: self.fail('catalog', 'invalid Rebuild Recipes extension record')
                 self._recipes(payload)
+            elif type_id == EXT_EXTRA:   # optional, archive-wide (SPEC 1.0.4 §4): one folder tree outside every snapshot and source resource
+                if okind != 0 or flags != 0 or p_size != 16: self.fail('catalog', 'invalid Extra Files extension record')
+                magic, v, hs, root, rr = struct.unpack_from('<4sHHII', payload)
+                if (magic, v, hs, rr) != (b'NXEX', 1, 16, 0): self.fail('catalog', 'invalid Extra Files header')
+                self.extra_root = root
             elif flags & 1: self.fail('feature', f'extension {type_id:#010x} is required and unknown to this reader: the archive was made by a newer NXConvert; it needs a newer NX 18')
         if len(self.resource_dirs) > 4096 or (minor == 3) != bool(self.resource_dirs):
             self.fail('catalog', f'NX 0.{minor} ' + ('without Source Resources (0.3 has them)' if minor == 3 else 'with Source Resources (only 0.3 has them)'))
@@ -711,9 +722,32 @@ class Nx:
             if not members or any(isdir for _, isdir, _ in members) or len({t for _, _, t in members}) != len(members): self.fail('manifest', 'a source resource is not a flat set of distinct files')
             if kind == 1 and (len(members) != 1 or members[0][0] != b'partition.hfs0'): self.fail('manifest', 'a system update resource without partition.hfs0')
 
+    def _extra(self):   # the Optional Extra Files tree: present, nonempty, and sharing no folder or file record with a snapshot or source resource, nor within itself
+        if self.extra_root == NO: return
+        b, root = self.budgets, self.extra_root
+        kids = {t for _, isdir, t in self.ents if isdir}
+        res_dirs = {r for _, r in self.resource_dirs}
+        res_files = {t for r in res_dirs for _, _, t in self.children(r)}
+        if root >= len(self.dirs) or root in kids or root in res_dirs or root in self._tree_dirs: self.fail('manifest', f'extra files folder {root} is invalid')
+        if not self.children(root): self.fail('manifest', 'the extra files folder is empty')
+        seen_d, seen_f, todo, pbytes = {root}, set(), [(root, 0, 0)], 0
+        while todo:
+            d, depth, plen = todo.pop()
+            for name, isdir, t in self.children(d):
+                pbytes += plen + len(name) + 1
+                if len(seen_d) + len(seen_f) > b.nodes or pbytes > b.path_bytes: self.fail('resource', 'the extra files tree is larger than this reader\'s budgets (Budgets.nodes, path_bytes)')
+                if isdir:
+                    if depth + 1 > 256: self.fail('resource', 'extra files: folders nested deeper than 256')
+                    if t in seen_d or t in self._tree_dirs or t in res_dirs: self.fail('manifest', 'extra files: a folder is reached twice or belongs to a game snapshot or source resource')
+                    seen_d.add(t); todo.append((t, depth + 1, plen + len(name) + 1))
+                else:
+                    if t in seen_f or t in self._tree_files or t in res_files: self.fail('manifest', 'extra files: a file record is reached twice or belongs to a game snapshot or source resource')
+                    seen_f.add(t)
+
     # ---- snapshot trees and identities (SPEC §6, §12) ----
     def _trees(self):
         b, visits, pbytes = self.budgets, 0, 0
+        self._tree_dirs, self._tree_files = set(), set()   # every folder and file record of a snapshot's tree (the extra tree may share none)
         for s in self.snapshots:
             if s.root >= len(self.dirs): self.fail('manifest', f'snapshot {s.index}: root folder out of range')
             nodes, seen_d, seen_f, total = [(b'', 1, -1)], {s.root}, set(), 0
@@ -731,7 +765,7 @@ class Nx:
                         if t in seen_f: self.fail('manifest', f'snapshot {s.index}: file {path!r} is a file record already in this snapshot')
                         seen_f.add(t); nodes.append((path, 2, t)); total += self.files[t][0]
                     if len(nodes) > b.nodes: self.fail('resource', f'snapshot {s.index}: more than {b.nodes:,} files and folders (Budgets.nodes)')
-            visits += len(nodes)
+            visits += len(nodes); self._tree_dirs |= seen_d; self._tree_files |= seen_f
             if visits > b.visits or pbytes > b.path_bytes: self.fail('resource', 'the snapshots\' trees are larger than this reader\'s budgets (Budgets.visits, path_bytes)')
             if total != s.logical_size: self.fail('manifest', f'snapshot {s.index}: its files add up to {total:,} bytes, its record says {s.logical_size:,}')
             nodes.sort(key=lambda x: x[0])
@@ -944,9 +978,11 @@ def has_game(n, k):   # whether snapshot k holds game files: exefs/main, or file
     return (k.exefs != NO and n.child(k.exefs, b'main') is not None) or (k.romfs != NO and bool(n.children(k.romfs)))
 
 
-def scan(n, want=None, platform=None):
+def scan(n, want=None, platform=None, program=None, dev=None):
     """What an NX holds for the game to pack: (title ID, base snapshot or None, {update version: snapshot}, {DLC title ID: snapshot}), with the checks pack_nup.scan makes.
-    want: the application ID (--title-id) when the archive holds more than one game; platform: its platform (1 Switch 1, 2 Switch 2, 0 unknown) when it holds that ID on two.
+    want: the application ID (--title-id) when the archive holds more than one game; platform: its platform (1 Switch 1, 2 Switch 2, 0 unknown) when it holds that ID on two;
+    program: the program index (dm/tools/programs.py) of an application with several programs, by default the application's own (primary). The program's ID is the title ID.
+    A program other than program 0 stops the scan unless dev, or NX18_DEV with dev None, lets it through (programs.supported).
     A base snapshot with no game files is no base game, as a NUP's empty base record (pack_nup.scan); its metadata still serves its updates (base_of). Lines about what is left out go to n.notes"""
     games = [a for a in n.apps if any(s.type != DLC for s in a.snapshots)]
     def listing(apps):
@@ -964,8 +1000,13 @@ def scan(n, want=None, platform=None):
                     + (' as listed, with its platform after the ID (:switch1, :switch2 or :unknown): the archive holds one title ID on two platforms' if twice else ''), 'select')
     a = n.selected = games[0]
     p = primary(a)
+    if program is not None:   # --program N: the program whose ID has index N
+        p = next((q for q in a.programs if programs.same_application(q.id, a.id) and programs.index(q.id) == program), None)
+        if p is None: raise Error(f'{n.path.name}: application {a.id:016X} has no program {program} (--program / PROGRAM_INDEX): its programs are '
+                                  + ', '.join(f'{q.id:016X}' for q in a.programs), 'select')
     if p is None: raise Error(f'{n.path.name}: application {a.id:016X} has {len(a.programs)} programs and none is its own: ' + ', '.join(f'{q.id:016X}' for q in a.programs), 'select')
-    if len(a.programs) > 1: n.notes.append(f'{n.path.name}: application {a.id:016X} has {len(a.programs)} programs: packing {p.id:016X}, its own')
+    if len(a.programs) > 1: n.notes.append(f'{n.path.name}: application {a.id:016X} has {len(a.programs)} programs: packing {p.id:016X}'
+                                           + (f', program {program}' if program is not None else ', its own') + '; --program N packs another')
     snaps = [s for s in a.snapshots if s.program == p.index and s.type != DLC]
     for s in a.snapshots:
         if s.kind != 'native' or s not in snaps and s.type != DLC: continue
@@ -992,12 +1033,15 @@ def scan(n, want=None, platform=None):
     ids = {npdm_id(n, s) for s in snaps if s.exefs != NO and n.child(s.exefs, b'main.npdm') is not None}
     if ids - {p.id}: raise Error(f'{n.path.name}: program {p.id:016X} has code of other program IDs: ' + ', '.join(f'{x:016X}' for x in sorted(ids - {p.id})), 'select')
     app = p.id
-    if app & 0xFFF: raise Error(f'{n.path.name}: program ID {app:016X} is not a base title ID', 'select')
+    if programs.index(app) is None: raise Error(f'{n.path.name}: program ID {app:016X} is not a base title ID nor a program of one', 'select')
+    if not programs.supported(app, dev):   # read and chosen, but built only with NX18_DEV on: not supported yet
+        raise Error(programs.unsupported(n.path.name, app, {i: q.id for q in a.programs if programs.same_application(q.id, a.id) and (i := programs.index(q.id)) is not None}), 'select')
+    if len(a.programs) == 1 and (line := programs.note(n.path.name, {programs.index(app): app}, programs.index(app), '')): n.notes.append(line)   # a program packed alone
     dlc = {}
     for s in a.snapshots:
         if s.type != DLC: continue
         if s.title_id is None: n.notes.append(f'{s.name}: a DLC with no add-on title ID, left out'); continue
-        if not 0 < s.title_id - app - 0x1000 <= 2000: raise Error(f'{n.path.name}: {s.title_id:016X} is not a DLC of {app:016X}', 'select')
+        if programs.dlc_index(s.title_id, app) is None: raise Error(f'{n.path.name}: {s.title_id:016X} is not a DLC of {app:016X}', 'select')
         if s.romfs == NO and s.kind != 'native': raise Error(f'{n.path.name}: DLC {s.title_id:016X} has no romfs/', 'select')
         if s.title_id in dlc: n.notes.append(f'{n.path.name}: DLC {s.title_id:016X} in versions {dlc[s.title_id].version} and {s.version}: packing the newer')
         if s.title_id not in dlc or s.version > dlc[s.title_id].version: dlc[s.title_id] = s
@@ -1138,7 +1182,7 @@ def pack_version(n, k, base, app, out, say=print, step=lambda s: None, note=None
 
 
 def pack_dlc(n, app, dlc, aoc, say=print):   # {DLC title ID: snapshot} → aoc/<index>.img; images of DLC no longer in the archive go
-    want = {f'{tid - app - 0x1000}.img': k for tid, k in dlc.items()}
+    want = {f'{programs.dlc_index(tid, app)}.img': k for tid, k in dlc.items()}   # a program's DLC are the application's (numbered from the title ID itself for a base game)
     if aoc.is_dir():
         for f in aoc.iterdir():
             if f.name.removesuffix('.inputs.json') not in want: f.unlink()
@@ -1528,6 +1572,8 @@ def main():
     ap.add_argument('--version', type=int, help='the version to pack (default: the newest in the archive; the base game\'s own, 0 for most, packs the base game)')
     ap.add_argument('--title-id', help='the game to pack when the archive holds several: its application ID, 16 hex digits, with :switch1, :switch2 or :unknown after it when the archive '
                     'holds that ID on two platforms')
+    ap.add_argument('--program', type=int, help='an application of several programs: the program index to pack (default: the application\'s own); its program ID is the title ID. '
+                    'Only program 0 packs for now: another stops, not supported yet')
     ap.add_argument('--work-dir', type=Path, help='the build folder (default: <folder of the .nx>/<title ID>_build; <title ID>-<platform>_build for an ID the archive holds on two platforms)')
     ap.add_argument('--list', action='store_true', help='list the applications and snapshots, and pack nothing')
     ap.add_argument('--verify', action='store_true', help='check the whole archive (every Media record, every block with its CRC-32C at about 17 MiB/s, and every file), and pack nothing')
@@ -1550,7 +1596,7 @@ def main():
                 finally:
                     if tty: print('\r' + ' ' * 40 + '\r', end='', flush=True)
                 print(f'{path.name}: verified ({len(n.files):,} files, {n.nblocks:,} blocks, every CRC-32C)'); return
-            app, base, vers, dlc = scan(n, *sel)
+            app, base, vers, dlc = scan(n, *sel, program=a.program)
             for line in n.notes[told:]: print(shown(line), flush=True)
             have = dict(vers)
             if base is not None: have[base.version] = base

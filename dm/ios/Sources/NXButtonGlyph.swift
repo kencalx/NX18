@@ -108,7 +108,7 @@ struct NXPadGlyphs: Equatable, Sendable {
     @MainActor static func of(_ c: GCController?) -> NXPadGlyphs {
         var g = NXPadGlyphs()
         guard let c, let pad = c.extendedGamepad else { return g }
-        let labelled = LauncherGamepad.labelled(c)
+        let labelled = c.productCategory == "Switch Pro Controller" || c.productCategory.contains("Joy-Con")   // as LauncherGamepad.labelled (pad_apple.h)
         // the pad button each Switch button is (pad_apple.h dm_pad_face: by label, else right A, bottom B, top X, left Y), and its letter on a pad lettered by position (Xbox)
         let face: [(NXButton, GCControllerButtonInput?, NXButton)] = [
             (.a, labelled ? pad.buttonA : pad.buttonB, .b),

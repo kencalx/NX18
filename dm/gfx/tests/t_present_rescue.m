@@ -1,4 +1,5 @@
 // Exercise the production watchdog with a silent display link and a controlled clock; no GPU or game files. --metal also checks real layer ownership.
+// Checks: startup_rescue: a callback that enters during rescue leaves the stall clock and the ticks alone, the acquire after it returns, and a link published after the last enqueue keeps the layer until run-loop invalidation and then releases it.
 #import <QuartzCore/CAMetalDisplayLink.h>
 #import <QuartzCore/CAMetalLayer.h>
 @interface SilentDisplayLink : NSObject
@@ -22,6 +23,12 @@
 - (void)addToRunLoop:(NSRunLoop *)loop forMode:(NSRunLoopMode)mode { (void)mode; [loop addPort:[NSMachPort port] forMode:NSDefaultRunLoopMode]; }
 - (void)invalidate { self.invalidated = YES; }
 @end
+@interface RescueUpdate : NSObject
+@property CFTimeInterval targetPresentationTimestamp;
+@property CFTimeInterval targetTimestamp;   // the callback's deadline (the display link line reads it)
+@end
+@implementation RescueUpdate
+@end
 #define CAMetalDisplayLink SilentDisplayLink
 #define nvn_game_fps test_game_fps_now   // hle_nvn.c, linked here, has the strong nvn_game_fps; t_present_rescue_focus.c sets the rate
 #include "../nvn/nvn_mtl.m"
@@ -39,7 +46,7 @@ void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
-uint64_t now_ns(void) { return test_now; }
+uint64_t now_ns(void) { return __atomic_load_n(&test_now, __ATOMIC_RELAXED); }
 static int checks, failed;
 #define CHECK(name, ok) do { int pass = !!(ok); checks++; failed += !pass; printf("%s: %s\n", name, pass ? "PASS" : "FAIL"); } while (0)
 static void reset(void) {
@@ -100,6 +107,26 @@ static void lifecycle(void) {
     CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
     CHECK("rescue invalidates the link before releasing the layer", link.invalidated && !g_link && !g_link_owns_layer);
     g_link_started = 0;
+}
+static void startup_rescue(void) {   // upstream PR #3004: rescue asks for mode 0 before the link's first mode was applied
+    reset(); g_link_started = 1; g_link_rl = CFRunLoopGetCurrent();
+    test_fullscreen = 1; test_screen_hz = 144;
+    link_sync();   // link_main owns the layer but has not published the link yet
+    SilentDisplayLink *link = [SilentDisplayLink new];
+    link.preferredFrameRateRange = link_range(g_link_mode);
+    wait_frame(); link_sync();   // rescue requested before the first mode has been applied
+    g_link = link;
+    uint64_t tick = g_link_tick_n, last = g_link_tick_ns;
+    RescueUpdate *update = [RescueUpdate new]; update.targetPresentationTimestamp = CACurrentMediaTime();
+    [[NvMetalDisplayLinkDelegate new] metalDisplayLink:(id)link needsUpdate:(id)update];
+    CHECK("a callback during rescue keeps the watchdog stalled", g_stall_t0 && g_link_tick_ns == last && g_link_tick_n == tick);
+    wait_frame();   // the next acquire must return before there can be another enqueue
+    test_screen_hz = 120;
+    link_sync();
+    CHECK("the newly published link still owns the layer until invalidated", g_link_owns_layer);
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
+    CHECK("rescue releases a link published after the last enqueue", link.invalidated && !g_link && !g_link_owns_layer);
+    g_link_started = 0; g_link = nil; test_fullscreen = test_screen_hz = 0;
 }
 static void latency(void) {   // Only variable-refresh fullscreen needs the latency-2 workaround; a new link takes the current policy as link_main does.
     reset(); test_fullscreen = 0; test_variable_refresh = 1; g_present_latency = 0;
@@ -181,10 +208,24 @@ static void metal_lifecycle(void) {
     CHECK("present thread can take a real drawable after rescue", drawable != nil);
     [drawable present]; g_link_started = 0;
 }
+// A link tick stamped after the wait read its clock (the display-link callback stamps under g_link_mu, not g_pq_mu): last is newer than now, which must read as a running link,
+// not wrap into a stall that drops the queued frame at once (MacNativeGames 0cedee77d7c's raced clock). The wait runs on a thread; the clock then passes the stall mark and the frame drops
+static void *raced_wait(void *arg) { mtl_present_wait(*(uint64_t *)arg); return NULL; }
+static void raced_tick(void) {
+    reset(); g_stall_t0 = 0; g_link_tick_ns = test_now + 5000000ull;   // the tick 5 ms after the wait's now
+    uint64_t ticket = ++g_pq_in, dropped = g_link_dropped; pthread_t th;
+    pthread_create(&th, NULL, raced_wait, &ticket);
+    usleep(350000);   // past three of the wait's 100 ms timed waits
+    pthread_mutex_lock(&g_pq_mu); int held = g_pq_done < ticket && g_link_dropped == dropped && !g_stall_t0; pthread_mutex_unlock(&g_pq_mu);
+    CHECK("a tick newer than the wait's clock is not a stall", held);
+    __atomic_store_n(&test_now, g_link_tick_ns + STALL_NS + 1, __ATOMIC_RELAXED);
+    pthread_join(th, NULL);
+    CHECK("the link silent past the stall mark still drops the frame", g_pq_done == ticket && g_link_dropped == dropped + 1);
+}
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(10); setbuf(stdout, NULL);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--metal"))) return 2;
-    thresholds(); backoff(); settings(); lifecycle(); latency(); thirty(); vrr120();
+    thresholds(); backoff(); settings(); startup_rescue(); lifecycle(); latency(); thirty(); vrr120(); raced_tick();
     if (argc == 2) metal_lifecycle();
     printf("present rescue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

@@ -5,7 +5,8 @@ an early return or a uniform coefficient; a sample at gl_FragCoord.xy [/ render 
 position, scale or uniform; the readable-tile version main0_f compiles for the Mac and the iPhone, beside the other entry points calling main0's body (main0_d, a compile unit's), with
 only the body rewritten and main0 without function constants. With --fixture <dir>, writes t_feedback.m's tile-read shaders: fb_vs.metal, fb_fs.metal, the readable-tile library
 fedcba9876543210_bf.metallib (main0_f, cut from the shader's compile as the build cuts it) and facts.json (the vertex shader's screen varyings and the fragment shader's calls), the
-pixel-position shader fb_pos.metal with fedcba9876543211_bf.metallib and pos.json, and the output-mapping-only fedcba9876543212_bf.metallib with om.json"""
+pixel-position shader fb_pos.metal with fedcba9876543211_bf.metallib and pos.json, the output-mapping-only fedcba9876543212_bf.metallib with om.json, and the NDC pair
+fb_vs_pos.metal, fb_ndc.metal with fedcba9876543213_bf.metallib and ndc.json (S2Arm 4804ac50)"""
 import json, pathlib, subprocess, sys, tempfile, unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'tools'))
 import dmsh_abi, dmsh_fetch, dmsh_side, pso_offline
@@ -214,6 +215,110 @@ class ProjectiveSample(unittest.TestCase):
                     except subprocess.CalledProcessError as e: self.fail(e.stderr)
 
 
+# The clip position's NDC turned into the screen UV by the pixel shader itself, as Xenoblade Chronicles 3's G-buffer decals and lights do (S2Arm 4804ac50): FS with its projective
+# components through fma(·, 0.5, 0.5) and fma(·, -0.5, 0.5)
+FS_NDC = FS.replace('    float2 _309 = float2(_69, _71);', '    float _73 = fma(_69, 0.5, 0.5);\n    float _75 = fma(_71, -0.5, 0.5);\n    float2 _309 = float2(_73, _75);')
+# A vertex shader whose output 4 is gl_Position itself (the vertex side of an NDC sample), written per component from the position's variables and once from the position read back
+NDC_KEY = 'fedcba9876543213'
+VS_POS = VS.replace('    out.m_45.x = _361;\n    out.m_45.y = _363;\n', '    out.m_45.x = _309;\n    out.m_45.y = out.gl_Position.y;\n')
+
+
+# A refraction read (checked against MacNativeGames 3657c12f (MIT): Tears of the Kingdom's Rauru ghost in Ukouh Shrine samples the HDR target it draws into at its screen position
+# plus an offset read from a normal map): FS with a second texture read at the screen position, its x and y scaled into the offset of the target's read. The target's read is not this
+# pixel's, so it is no rewritable sample and its slot is mixed: nvn_mtl.m fb_tile_plan takes no tile read for it, and fb_prepare gives the draw a snapshot (t_feedback.m tile_case)
+FS_REFRACT = FS.replace('    texture2d<float> fp_t_tcb_8 [[id(0)]];\n    sampler fp_t_tcb_8Smplr [[id(1)]];\n',
+                        '    texture2d<float> fp_t_tcb_8 [[id(0)]];\n    sampler fp_t_tcb_8Smplr [[id(1)]];\n    texture2d<float> fp_t_tcb_9 [[id(2)]];\n    sampler fp_t_tcb_9Smplr [[id(3)]];\n'
+               ).replace('    float4 _84 = spvDescriptorSet0.fp_t_tcb_8.sample(spvDescriptorSet0.fp_t_tcb_8Smplr, select(_309, float2(0.0), isnan(_309))).xyzw;\n',
+                         '    float4 _80 = spvDescriptorSet0.fp_t_tcb_9.sample(spvDescriptorSet0.fp_t_tcb_9Smplr, select(_309, float2(0.0), isnan(_309))).xyzw;\n'
+                         '    float _86 = fma(_80.x, 0.05, _69);\n    float _88 = fma(_80.y, 0.05, _71);\n    float2 _90 = float2(_86, _88);\n'
+                         '    float4 _84 = spvDescriptorSet0.fp_t_tcb_8.sample(spvDescriptorSet0.fp_t_tcb_8Smplr, select(_90, float2(0.0), isnan(_90))).xyzw;\n')
+BINDINGS_REFRACT = BINDINGS + [{'kind': dmsh_abi.KIND_TEX, 'msl_name': 'fp_t_tcb_9', 'reg': 1}]
+
+
+class OffsetSample(unittest.TestCase):
+    def test_the_fixture_reads_at_an_offset(self):
+        self.assertIn('select(_90, float2(0.0), isnan(_90))', FS_REFRACT); self.assertIn('fp_t_tcb_9.sample(', FS_REFRACT)
+
+    def test_an_offset_read_is_no_tile_read(self):   # only the normal map's read at the screen position is rewritable; the target's slot is mixed
+        v, meta = dmsh_fetch.fold(FS_REFRACT, BINDINGS_REFRACT)
+        self.assertIsNotNone(v, meta)
+        self.assertEqual([c['tex_reg'] for c in meta['calls']], [1])
+        self.assertEqual(meta['mixed_regs'], [0])
+
+    def test_with_a_read_at_its_own_pixel_too(self):   # the same target also read at the screen position: that read is rewritable, but its slot stays mixed
+        src = FS_REFRACT.replace('    out.m_46 = ', '    float4 _92 = spvDescriptorSet0.fp_t_tcb_8.sample(spvDescriptorSet0.fp_t_tcb_8Smplr, select(_309, float2(0.0), isnan(_309))).xyzw;\n    out.m_46 = _92 + ')
+        v, meta = dmsh_fetch.fold(src, BINDINGS_REFRACT)
+        self.assertIsNotNone(v, meta)
+        self.assertIn(0, [c['tex_reg'] for c in meta['calls']])
+        self.assertIn(0, meta['mixed_regs'])
+
+
+class NdcSample(unittest.TestCase):
+    def calls(self, src):
+        v, meta = dmsh_fetch.fold(src, BINDINGS)
+        return meta if v is None else meta['calls']
+
+    def test_fma_to_screen_uv(self):
+        self.assertEqual(self.calls(FS_NDC), [{'fc': 0, 'tex_reg': 0, 'varying_locn': 4, 'proj': 1, 'ndc': 1}])
+        self.assertEqual(self.calls(FS_NDC.replace('fma(_71, -0.5, 0.5)', 'fma(_71, (-0.5), 0.5)'))[0].get('ndc'), 1)
+
+    def test_not_rewritten(self):
+        for why, src in (('y not flipped', FS_NDC.replace('fma(_71, -0.5, 0.5)', 'fma(_71, 0.5, 0.5)')),
+                         ('x flipped', FS_NDC.replace('fma(_69, 0.5, 0.5)', 'fma(_69, -0.5, 0.5)')),
+                         ('another offset', FS_NDC.replace('fma(_69, 0.5, 0.5)', 'fma(_69, 0.5, 0.25)')),
+                         ('another scale', FS_NDC.replace('fma(_71, -0.5, 0.5)', 'fma(_71, -0.25, 0.5)')),
+                         ('not divided by w', FS_NDC.replace('float _67 = 1.0 / _57;', 'float _67 = 2.0 / _57;')),
+                         ('components swapped', FS_NDC.replace('float2(_73, _75)', 'float2(_75, _73)')),
+                         ('a name assigned twice', FS_NDC.replace('    float2 _309', '    _73 = 0.5;\n    float2 _309'))):
+            with self.subTest(why=why): self.assertEqual(self.calls(src), 'no rewritable sample')
+
+    def test_compiles_on_both_platforms(self):
+        v, _ = dmsh_fetch.fold(FS_NDC, BINDINGS)
+        with tempfile.TemporaryDirectory() as d:
+            for sdk in ('macosx', 'iphoneos'):
+                with self.subTest(sdk=sdk):
+                    try: compile_lib(v, pathlib.Path(d), 'ndc_' + sdk, sdk)
+                    except subprocess.CalledProcessError as e: self.fail(e.stderr)
+
+
+class EightOutputs(unittest.TestCase):   # S2Arm 69f75818: Xenoblade Chronicles 3's decals and lights write 5 and 6 targets
+    @staticmethod
+    def outputs(n):
+        members = ''.join(f'    float4 m_{46 + q} [[color({q})]];\n' for q in range(n))
+        stores = ''.join(f'    out.m_{46 + q} = _84;\n' for q in range(1, n))
+        return FS.replace('    float4 m_46 [[color(0)]];\n', members).replace('    return out;', stores + '    return out;')
+
+    def test_up_to_eight(self):
+        for n in (5, 6, 8):
+            with self.subTest(outputs=n):
+                v, meta = dmsh_fetch.fold(self.outputs(n), BINDINGS)
+                self.assertIsNotNone(v, meta)
+                self.assertEqual([o['color'] for o in meta['outputs']], list(range(n)))
+                self.assertIn(f'constant bool OM_{n - 1}_7 [[function_constant({64 + 8 * (n - 1) + 7})]]', v)
+
+    def test_past_four_only_with_a_provable_sample(self):
+        plain = self.outputs(5).replace('float2 _309 = float2(_69, _71);', 'float2 _309 = float2(_59, _61);')
+        self.assertEqual(dmsh_fetch.fold(plain, BINDINGS), (None, 'more than 4 outputs and no sample a tile read can prove'))
+        self.assertIsNotNone(dmsh_fetch.fold(plain, BINDINGS, om_only_ok=True)[0], 'a bf_want row')
+        four = self.outputs(4).replace('float2 _309 = float2(_69, _71);', 'float2 _309 = float2(_59, _61);')
+        self.assertIsNotNone(dmsh_fetch.fold(four, BINDINGS)[0], 'up to 4 outputs as before')
+
+    def test_nine_refused(self):
+        self.assertEqual(dmsh_fetch.fold(self.outputs(9), BINDINGS), (None, 'the output struct is not plain color outputs (or has more than 8)'))
+
+    def test_a_sample_mask_member_refused(self):   # a game's own sample mask output: the readable-tile version would not write it
+        src = FS.replace('    float4 m_46 [[color(0)]];\n', '    float4 m_46 [[color(0)]];\n    uint gl_SampleMask [[sample_mask]];\n')
+        self.assertIsNone(dmsh_fetch.fold(src, BINDINGS)[0])
+
+    def test_eight_compile_on_both_platforms(self):
+        v, _ = dmsh_fetch.fold(self.outputs(8), BINDINGS)
+        with tempfile.TemporaryDirectory() as d:
+            for sdk in ('macosx', 'iphoneos'):
+                with self.subTest(sdk=sdk):
+                    try: compile_lib(v, pathlib.Path(d), 'eight_' + sdk, sdk)
+                    except subprocess.CalledProcessError as e: self.fail(e.stderr)
+
+
 class PixelPositionSample(unittest.TestCase):
     def calls(self, src):
         v, meta = dmsh_fetch.fold(src, BINDINGS)
@@ -292,6 +397,24 @@ class ScreenVaryings(unittest.TestCase):
             with self.subTest(why=why): self.assertNotIn(4, dmsh_fetch.screen_varyings(src))
         early = VS.replace('    float _92', '    if (_81)\n    {\n        return out;\n    }\n    float _92')
         self.assertEqual(dmsh_fetch.screen_varyings(early), [], 'an early return')
+
+
+class ScreenPositions(unittest.TestCase):   # the vertex side of an NDC sample (S2Arm 4804ac50)
+    def test_the_position_itself(self):
+        self.assertEqual(dmsh_fetch.screen_positions(VS_POS), [4])
+        self.assertEqual(dmsh_fetch.screen_varyings(VS_POS), [5], 'no longer a screen varying')
+        self.assertEqual(dmsh_fetch.screen_positions(VS), [], 'screen varyings are not positions')
+
+    def test_every_entry_point(self):
+        z = VS_POS.split('vertex main0_out main0(')[1].replace('out.m_45.x = _309;', 'out.m_45.x = _311;')
+        self.assertEqual(dmsh_fetch.screen_positions(VS_POS + '\nvertex main0_out main0_z(' + z), [])
+
+    def test_not_the_position(self):
+        for why, src in (('y flipped', VS_POS.replace('out.m_45.y = out.gl_Position.y;', 'out.m_45.y = -_311;')),
+                         ('another w', VS_POS.replace('out.m_45.w = _313;', 'out.m_45.w = 1.0;')),
+                         ('x and y swapped', VS_POS.replace('out.m_45.x = _309;', 'out.m_45.x = _311;')),
+                         ('assigned in a branch', VS_POS.replace('    out.m_45.x = _309;\n', '    if (_81)\n    {\n        out.m_45.x = _309;\n    }\n'))):
+            with self.subTest(why=why): self.assertEqual(dmsh_fetch.screen_positions(src), [])
 
 
 class OutputMappingOnly(unittest.TestCase):
@@ -381,10 +504,13 @@ class OtherEntryPoints(unittest.TestCase):
 def fixture(out):
     out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True)
     (out / 'fb_vs.metal').write_text(VS); (out / 'fb_fs.metal').write_text(FS); (out / 'fb_pos.metal').write_text(FS_POS)
-    for src, key, name, facts, om in ((FS, FS_KEY, 'v', 'facts.json', False), (FS_POS, POS_KEY, 'vp', 'pos.json', False), (FS_OM, OM_KEY, 'vom', 'om.json', True)):
+    (out / 'fb_vs_pos.metal').write_text(VS_POS); (out / 'fb_ndc.metal').write_text(FS_NDC)
+    for src, key, name, facts, om in ((FS, FS_KEY, 'v', 'facts.json', False), (FS_POS, POS_KEY, 'vp', 'pos.json', False), (FS_OM, OM_KEY, 'vom', 'om.json', True),
+                                      (FS_NDC, NDC_KEY, 'vn', 'ndc.json', False)):
         v, meta = dmsh_fetch.fold(src, BINDINGS if not om else [], om_only_ok=om)
         tile_library(v, out, name)[-1].rename(out / f'{key}_bf.metallib')
-        (out / facts).write_text(json.dumps({**({'screen': dmsh_fetch.screen_varyings(VS)} if src is FS else {}), 'calls': meta['calls'], 'outputs': meta['outputs']}))
+        (out / facts).write_text(json.dumps({**({'screen': dmsh_fetch.screen_varyings(VS)} if src is FS else {}),
+                                             **({'screen_pos': dmsh_fetch.screen_positions(VS_POS)} if src is FS_NDC else {}), 'calls': meta['calls'], 'outputs': meta['outputs']}))
 
 if __name__ == '__main__':
     if len(sys.argv) == 3 and sys.argv[1] == '--fixture': fixture(sys.argv[2])

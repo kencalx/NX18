@@ -2,6 +2,7 @@
 // stand-ins that count. Checks: no line before the first present or under the threshold; one line and one dump at the threshold, and only one per stall; "presents resumed" with the
 // stall's length; at least 30 s between lines and at most 3 a run; nothing out of focus, in the background, with a library applet open or with the in-game menu open, and the time
 // counted again from the return to focus, from the menu's closing and from the guest clock's restart (a text box up); "busy" when the guest thread table's locks stay held; the switch's values; off means never.
+// A residency commit in the kernel for 1 s: its own line and dump, once per commit, at most 3 a run, and the 5 s line of the same freeze pointing at it.
 // Then DM_WATCH_STALL's 1 s dump in crash.c, which never fired while crash_watch_pregame_done had no caller: one present, then no progress for over a second, dumps once.
 #include <stdarg.h>
 #include <stdio.h>
@@ -15,6 +16,13 @@ uint64_t now_ns(void) { return fake_now; }
 int dm_focus_seen(void) { return fake_focus; }
 uint64_t dm_focus_in_since(void) { return fake_focus_in; }
 void mtl_stall_dump(void) { dumps++; }
+// A residency commit in the kernel since fake_rk_at (fake clock; 0: none), as nvn_mtl.m mtl_res_commit_stuck answers
+static uint64_t fake_rk_at;
+uint64_t mtl_res_commit_stuck(uint64_t min_ns, char *out, size_t n) {
+    if (!fake_rk_at || fake_now < fake_rk_at || fake_now - fake_rk_at < min_ns) return 0;
+    snprintf(out, n, "a residency commit ([g_res commit], 3 changes, 0 MB of file pages wired for it) in the kernel for %.1f s on host thread 0x1, holding the residency commit lock", (fake_now - fake_rk_at) / 1e9);
+    return fake_rk_at;
+}
 int svc_thread_dump_try(unsigned wait_ms) { (void)wait_ms; if (table_busy) return 0; thread_dumps++; return 1; }
 static char lines[64][400]; static int nlines;
 void dm_log(const char *fmt, ...) {
@@ -28,7 +36,7 @@ static int checks, failures;
 static int has(const char *text) { for (int i = 0; i < nlines; i++) if (strstr(lines[i], text)) return 1; return 0; }
 static void reset(unsigned threshold_s) {
     memset(&g_stall, 0, sizeof g_stall); g_stall.threshold_ns = threshold_s * 1000000000ull;
-    nlines = dumps = thread_dumps = table_busy = fake_frozen = 0; fake_focus = 1; fake_focus_in = fake_thawed = 0; fake_now = 0;
+    nlines = dumps = thread_dumps = table_busy = fake_frozen = 0; fake_focus = 1; fake_focus_in = fake_thawed = fake_rk_at = 0; fake_now = 0;
     atomic_store(&dm_present_done_ns, 0); atomic_store(&g_stall_menu, 0); atomic_store(&g_stall_menu_closed, 0);
 }
 static int look(double t) { fake_now = S(t); return stall_poll(fake_now); }   // one look at t seconds
@@ -111,6 +119,24 @@ int main(void) {
     // The guest thread table's locks stay held: the dump says so and goes on
     reset(5); table_busy = 1; present(10); look(15);
     CHECK(dumps == 1 && thread_dumps == 0 && has("guest thread table busy"), "busy, not a wait");
+
+    // A residency commit that does not come back from the kernel (Ocarina of Time on the iPhone 18 Pro Max: 16.5 s under res_commit): named at about 1 s, once per commit, with
+    // its dump; the 5 s line for the same freeze then points at that dump instead of writing it again; a later commit gets its own line; out of focus too; at most 3 a run
+    reset(5); present(10); fake_rk_at = S(10.2);
+    look(10.5); look(11);
+    CHECK(dumps == 0, "a commit under a second is not named");
+    look(11.5);
+    CHECK(dumps == 1 && has("[RED] stall: a residency commit ([g_res commit], 3 changes") && has("presents wait behind it; residency commit line 1"), "named at about 1 s, with a dump");
+    looks(12, 15);
+    CHECK(dumps == 1, "once per commit");
+    CHECK(look(15) == STALL_FIRE && dumps == 1 && has("no present for 5.0 s") && has("its dump is above"), "the 5 s line points at the commit's dump");
+    fake_rk_at = 0; atomic_store(&dm_present_done_ns, S(16)); look(16);
+    fake_rk_at = S(17); look(18);
+    CHECK(dumps == 2, "the next commit stuck gets its own line");
+    reset(5); present(10); fake_focus = 3;
+    for (int k = 0; k < 5; k++) { fake_rk_at = S(20 + 10 * k); look(20 + 10 * k + 1.5); fake_rk_at = 0; look(20 + 10 * k + 2); }
+    CHECK(dumps == 3, "in the background too, at most 3 a run");
+    reset(0); present(10); fake_rk_at = S(10); looks(10, 30); CHECK(nlines == 0, "off: no commit line either");
 
     // Another threshold, and off
     reset(12); present(10); look(21.5); CHECK(dumps == 0, "DM_STALL_LOG=12: quiet at 11.5 s"); look(22); CHECK(dumps == 1, "a line at 12 s");

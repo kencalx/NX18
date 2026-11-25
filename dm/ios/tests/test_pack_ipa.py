@@ -270,16 +270,34 @@ class PackIpa(unittest.TestCase):
     def test_stream_drains_pool_before_later_jobs(self):
         load, stream, events, submitted = pack.load, pack.Zip.stream, [], []
         class Pool(pack.cf.ThreadPoolExecutor):
-            def submit(self, fn, path, deflate):
-                submitted.append(Path(path).name)
-                return super().submit(fn, path, deflate)
+            def submit(self, fn, *args):
+                if fn is pack.load: submitted.append(Path(args[0]).name)
+                return super().submit(fn, *args)
         def loaded(path, deflate):
             result = load(path, deflate); events.append(Path(path).name); return result
-        def streamed(z, e, deflate):
+        def streamed(z, e, deflate, pool=None):
             self.assertIn('random.bin', events); self.assertNotIn('exe', submitted)
-            return stream(z, e, deflate)
+            return stream(z, e, deflate, pool)
         with patch.object(pack, 'load', loaded), patch.object(pack.Zip, 'stream', streamed), patch.object(pack.cf, 'ThreadPoolExecutor', Pool): self.run_pack(big=40000)
         self.same_as_fresh(big=40000)
+
+    def test_block_deflate_is_one_stream_whatever_the_pool(self):   # big files deflated in blocks (deflate_block): a valid zip, the same bytes with any worker count, and smaller blocks lose little
+        (self.rom / 'big.bin').write_bytes(b''.join(os.urandom(64) * 37 + bytes([i % 251]) * 300 for i in range(400)))
+        outs = {}
+        for block, workers in ((1 << 20, 4), (1000, 1), (1000, 8), (4096, 3)):
+            with self.subTest(block=block, workers=workers), patch.object(pack, 'BLOCK', block), patch.object(pack, 'AHEAD', 2 * workers), \
+                    patch.object(pack.os, 'cpu_count', return_value=workers):
+                out = self.tmp / f'b{block}-{workers}.ipa'; self.run_pack(out, '--no-reuse', big=1024)
+                with zipfile.ZipFile(out) as z:
+                    self.assertIsNone(z.testzip())
+                    info = z.getinfo('Payload/DmIOS.app/romfs/big.bin'); self.assertEqual(info.compress_type, 8)
+                    self.assertEqual(z.read(info), (self.rom / 'big.bin').read_bytes())
+                    self.assertEqual(z.read('Payload/DmIOS.app/romfs/random.bin'), (self.rom / 'random.bin').read_bytes())
+                    self.assertEqual(z.getinfo('Payload/DmIOS.app/romfs/random.bin').compress_type, 0)   # not smaller deflated: stored
+                outs.setdefault(block, set()).add(out.read_bytes())
+                self.assertEqual(subprocess.run(['unzip', '-tqq', str(out)]).returncode, 0)
+        self.assertEqual(len(outs[1000]), 1)   # 1 and 8 workers: the same bytes
+        with patch.object(pack, 'BLOCK', 1000): self.run_pack(big=1024); self.run_pack(big=1024); self.assertEqual(self.reused, 7); self.same_as_fresh(big=1024)
 
     def test_local_header_mismatch_recompresses(self):
         self.run_pack(); offset = self.offset('exe')
@@ -353,10 +371,10 @@ class PackIpa(unittest.TestCase):
             for grow in (False, True):
                 with self.subTest(store=store, grow=grow):
                     source.write_bytes(b'code' * 3000)
-                    def changed(z, e, deflate):
+                    def changed(z, e, deflate, pool=None):
                         if e.path == str(source):
                             data = source.read_bytes(); source.write_bytes(data + b'grow' if grow else data[:-4])
-                        return stream(z, e, deflate)
+                        return stream(z, e, deflate, pool)
                     with patch.object(pack.Zip, 'stream', changed), self.assertRaisesRegex(SystemExit, 'changed size while it was packed'):
                         self.run_pack(None, *(['--store', 'exe'] if store else []), big=1024)
                     self.assertEqual(self.out.read_bytes(), before); self.assertEqual(Path(str(self.out) + '.idx').read_bytes(), index)

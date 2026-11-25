@@ -46,8 +46,11 @@ int main(void) { @autoreleasepool {
     for (int i = 0; i < 4; i++) {
         k.blend[0] = (blend_st){.src_rgb=factors[i], .dst_rgb=factors[(i+1)%4], .src_a=factors[(i+2)%4], .dst_a=factors[(i+3)%4], .eq_rgb=1, .eq_a=1};
         MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, nil, 0);
-        CHECK(d.colorAttachments[0].blendingEnabled, "blending remains enabled");
-        MTLRenderPipelineDescriptor *ref = [d copy]; ref.fragmentFunction = t4_fn(lib, @"f2");
+        // Folded to ONE + ZERO for colour and alpha (a source-only replacement), a float target is written directly with blending off (upstream ce41059a4); any other fold keeps blending
+        blend_st fb = k.blend[0]; int replace = blend_zero_src1(fb.src_rgb) == NVN_BLEND_FUNC_ONE && blend_zero_src1(fb.dst_rgb) == NVN_BLEND_FUNC_ZERO &&
+                                                blend_zero_src1(fb.src_a) == NVN_BLEND_FUNC_ONE && blend_zero_src1(fb.dst_a) == NVN_BLEND_FUNC_ZERO;
+        CHECK(d.colorAttachments[0].blendingEnabled == !replace, "blending remains enabled unless the folded state only replaces the target");
+        MTLRenderPipelineDescriptor *ref = [d copy]; ref.fragmentFunction = t4_fn(lib, @"f2"); ref.colorAttachments[0].blendingEnabled = YES;
         ref.colorAttachments[0].sourceRGBBlendFactor = bfac(k.blend[0].src_rgb); ref.colorAttachments[0].destinationRGBBlendFactor = bfac(k.blend[0].dst_rgb);
         ref.colorAttachments[0].sourceAlphaBlendFactor = bfac(k.blend[0].src_a); ref.colorAttachments[0].destinationAlphaBlendFactor = bfac(k.blend[0].dst_a);
         id<MTLRenderPipelineState> reference = t4_rps(ref, &error);

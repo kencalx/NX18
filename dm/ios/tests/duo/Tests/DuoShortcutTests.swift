@@ -59,9 +59,13 @@ final class DuoShortcutTests: XCTestCase {
     @MainActor
     func testColdAndWarmShortcutsOnTheSettingsScreenAndInTheRunningGame() throws {
         let root = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController)
+        // An earlier test's screen can still be presented on the root (the full run): the settings screen this test shows could not be presented over it, and the test talked
+        // to the old one. Start from a bare root
+        if root.presentedViewController != nil { root.dismiss(animated: false) }
+        waitUntil("an earlier test's presentation is gone", 5) { root.presentedViewController == nil }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("duo-shortcuts-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try Data(#"{"schema": 1, "settings": [{"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Frame-rate counter", "note": "", "default": "0", "on": "1", "off": "0"}]}"#.utf8)
+        try Data(#"{"schema": 1, "settings": [{"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Vitals", "note": "", "default": "0", "on": "1", "off": "0"}]}"#.utf8)
             .write(to: dir.appendingPathComponent("launcher.json"))
         let pdf = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 200, height: 200)).pdfData { c in c.beginPage(); UIColor.gray.setFill(); c.fill(CGRect(x: 20, y: 20, width: 80, height: 80)) }
         try pdf.write(to: dir.appendingPathComponent("manual.pdf"))   // a placeholder manual: the Guide shortcut opens it, as the app has no game guide
@@ -132,11 +136,13 @@ final class DuoShortcutTests: XCTestCase {
         XCTAssertEqual(pad.value(forKey: "menuOpen") as? Bool, false)
         _ = pad.perform(NSSelectorFromString("menuOpenNow"))   // what dm_gamepad_menu_open asks of the app's one pad (here other tests make pads of their own, and the last one made is the one it asks)
         waitUntil("The in-game menu opened") { pad.value(forKey: "menuOpen") as? Bool == true }
+        XCTAssertEqual(duo_harness_front_menu(), 1, "The host heard the menu open (its log line, the long-frame tag)")
         XCTAssertFalse(button.isHidden)
         XCTAssertEqual(button.alpha, 1)
         button.contextMenuInteraction?.dismissMenu()   // closed again for the tests after this one; a dismissal from code need not reach the button's willEnd, so the pad hears it here
         _ = pad.perform(NSSelectorFromString("menuClosed"))
         XCTAssertEqual(pad.value(forKey: "menuOpen") as? Bool, false)
+        XCTAssertEqual(duo_harness_front_menu(), 0, "and close")
     }
 
     // One press on a hidden virtual controller, which the settings screen polls (LauncherGamepad): a Switch button (the pad is not a Nintendo one, so A is its right button) or a D-pad direction
@@ -154,7 +160,7 @@ final class DuoShortcutTests: XCTestCase {
         let root = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController)
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("duo-shortcut-over-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try Data(#"{"schema": 1, "settings": [{"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Frame-rate counter", "note": "", "default": "0", "on": "1", "off": "0"}]}"#.utf8)
+        try Data(#"{"schema": 1, "settings": [{"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Vitals", "note": "", "default": "0", "on": "1", "off": "0"}]}"#.utf8)
             .write(to: dir.appendingPathComponent("launcher.json"))
         try Data(#"{"name": "Placeholder", "description": "Placeholder text for the test."}"#.utf8).write(to: dir.appendingPathComponent("about.json"))
         let pdf = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 200, height: 200)).pdfData { c in c.beginPage(); UIColor.gray.setFill(); c.fill(CGRect(x: 20, y: 20, width: 80, height: 80)) }
@@ -176,11 +182,13 @@ final class DuoShortcutTests: XCTestCase {
         config.isHidden = true
         config.elements = [GCInputButtonA, GCInputButtonB, GCInputButtonX, GCInputButtonY, GCInputDirectionPad, GCInputLeftThumbstick]
         let pad = GCVirtualController(configuration: config)
-        var connected: Bool?
-        pad.connect { connected = $0 == nil }
+        final class Answer: @unchecked Sendable { let lock = NSLock(); var connected: Bool? }   // connect's handler is Sendable: its answer goes through a lock
+        let answer = Answer()
+        pad.connect { error in answer.lock.withLock { answer.connected = error == nil } }
         defer { pad.disconnect() }
-        waitUntil("The virtual controller answered", 10) { connected != nil }
-        guard connected == true else { throw XCTSkip("Simulator has no virtual controller") }
+        func connected() -> Bool? { answer.lock.withLock { answer.connected } }
+        waitUntil("The virtual controller answered", 10) { connected() != nil }
+        guard connected() == true else { throw XCTSkip("Simulator has no virtual controller") }
         waitUntil("GameController lists it") { GCController.controllers().contains { $0.extendedGamepad != nil } }
         LauncherShortcuts.started = false
         XCTAssertTrue(dmShowLauncher(Unmanaged.passUnretained(root).toOpaque(), {}))
@@ -198,9 +206,16 @@ final class DuoShortcutTests: XCTestCase {
         waitUntil("Launcher closed it") { host.presentedViewController == nil }
 
         // The folder picker up, then Guide
-        // Reset, Cloud saves, Skip are the last three lines: down to the end, up one, A
-        for _ in 0..<8 { press(pad, dpad: CGPoint(x: 0, y: -1)) }
-        press(pad, dpad: CGPoint(x: 0, y: 1)); press(pad, button: GCInputButtonB)
+        // The Gate panel (LauncherPanel.swift): up to the NX 18 mark's line above Play's, down to Play, right to About, down to the doors (Customize, Cloud saves: the column of
+        // About is past its end, so Cloud saves), A opens the Cloud saves page with focus on its back button, down to Choose a folder, A
+        // (the virtual pad's y is up positive: y -1 is down)
+        for _ in 0..<4 { press(pad, dpad: CGPoint(x: 0, y: 1)) }
+        press(pad, dpad: CGPoint(x: 0, y: -1))
+        press(pad, dpad: CGPoint(x: 1, y: 0)); press(pad, dpad: CGPoint(x: 1, y: 0))
+        press(pad, dpad: CGPoint(x: 0, y: -1))
+        press(pad, button: GCInputButtonB)
+        press(pad, dpad: CGPoint(x: 0, y: -1))
+        press(pad, button: GCInputButtonB)
         waitUntil("The folder picker opened", 10) { host.presentedViewController != nil && !guideUp() }
         XCTAssertTrue(dmShortcutPerform("dm.shortcut.guide"))
         waitUntil("Guide closed the picker and opened the manual", 10) { guideUp() }
@@ -211,7 +226,7 @@ final class DuoShortcutTests: XCTestCase {
         let root = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController)
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("duo-shortcut-game-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try Data(#"{"schema": 1, "settings": [{"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Frame-rate counter", "note": "", "default": "0", "on": "1", "off": "0"}]}"#.utf8)
+        try Data(#"{"schema": 1, "settings": [{"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Vitals", "note": "", "default": "0", "on": "1", "off": "0"}]}"#.utf8)
             .write(to: dir.appendingPathComponent("launcher.json"))
         let skip = UserDefaults.standard.object(forKey: LauncherModel.skipKey)
         UserDefaults.standard.removeObject(forKey: LauncherModel.skipKey)   // the screen would show
@@ -294,7 +309,7 @@ final class DuoShortcutTests: XCTestCase {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("duo-cloud-check-\(UUID().uuidString)")
         let fm = FileManager.default
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        try Data(#"{"schema": 1, "settings": [{"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Frame-rate counter", "note": "", "default": "0", "on": "1", "off": "0"}]}"#.utf8)
+        try Data(#"{"schema": 1, "settings": [{"env": "DM_SHOW_FPS", "kind": "toggle", "section": "Game", "label": "Vitals", "note": "", "default": "0", "on": "1", "off": "0"}]}"#.utf8)
             .write(to: dir.appendingPathComponent("launcher.json"))
         func save(_ name: String, _ text: String) throws -> URL {   // a committed save folder with one file, as DM_SAVE names it
             let s = dir.appendingPathComponent(name)

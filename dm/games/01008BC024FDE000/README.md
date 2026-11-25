@@ -54,6 +54,10 @@ General host changes first needed here; each applies to every game:
 - **Storage takeover in the storage-sharing texture table** (`alias_take_over` in `nvn_mtl.m`, with its guards for live texture objects and lookups in the last 16 submissions, and the `shared textures N (…)` memory line): [Shared-storage entries taken over by a new texture](../../../docs/reference/rendering.md#shared-storage-entries-taken-over-by-a-new-texture).
 - The halfword jump-table padding (`half_count`) changed 1 to 6 tables in some `main`s, this one among them: [Halfword jump table landing pads sized to the largest entry](../../../docs/reference/rewriter.md#halfword-jump-table-landing-pads-sized-to-the-largest-entry).
 
+Also:
+
+- [Two captures of one shader function crash in Metal's binary cache](../../../docs/reference/rendering.md#two-captures-of-one-shader-function-crash-in-metals-binary-cache): not seen here, but its prebuild pays most for the workaround: 474 of its 483 pairs share one vertex shader, whose captures follow one another, so the Mac tool prebuild takes about one capture at a time (from the list; not timed).
+
 ## Open
 
 - 04 and `game.tsv` say the start-up code sets the render size to 1280x720 through the setter `main+0x389e90`; 05 describes the same setter as one "its start-up code calls with 0". Not reconciled.

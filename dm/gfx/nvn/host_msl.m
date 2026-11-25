@@ -59,3 +59,16 @@ id<MTLRenderPipelineState> host_msl_rps(id<MTL4Compiler> comp, id<MTLLibrary> li
     for (int i = 0; i < ncol; i++) if (cf[i]) { d.colorAttachments[i].pixelFormat = cf[i]; d.colorAttachments[i].writeMask = wm ? wm[i] : MTLColorWriteMaskAll; }
     return [comp newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
 }
+
+id<MTLRenderPipelineState> host_msl_rps_over(id<MTL4Compiler> comp, id<MTLLibrary> lib, NSString *vs, NSString *fs, MTLPixelFormat cf, NSError **e) {
+    if (!comp || !lib || !vs || !fs || !cf) return nil;
+    MTL4RenderPipelineDescriptor *d = [MTL4RenderPipelineDescriptor new];
+    if (!(d.vertexFunctionDescriptor = host_fd(lib, vs, nil, e)) || !(d.fragmentFunctionDescriptor = host_fd(lib, fs, nil, e))) return nil;
+    d.rasterSampleCount = 1; d.label = [NSString stringWithFormat:@"%@/%@ over", vs, fs];
+    MTL4RenderPipelineColorAttachmentDescriptor *c = d.colorAttachments[0];
+    c.pixelFormat = cf; c.writeMask = MTLColorWriteMaskAll; c.blendingState = MTL4BlendStateEnabled;
+    c.sourceRGBBlendFactor = c.sourceAlphaBlendFactor = MTLBlendFactorOne;
+    c.destinationRGBBlendFactor = c.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    c.rgbBlendOperation = c.alphaBlendOperation = MTLBlendOperationAdd;
+    return [comp newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
+}

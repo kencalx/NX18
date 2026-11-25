@@ -353,7 +353,7 @@ struct LauncherManualView: UIViewRepresentable {
     }
 }
 
-// The switch between the guide and the manual as two chips in the preset chips' look (LauncherRow.swift PresetChips), for the UI font: a segmented control draws its titles in the
+// The switch between the guide and the manual as two chips in the preset chips' look (the Gate's preset chips, LauncherPanel.swift), for the UI font: a segmented control draws its titles in the
 // system font whatever the view's font. The page shown is filled cyan; L and R switch them as with the segmented control (LauncherController.swift, scroller.page)
 struct LauncherGuideChips: View {
     let pages: [LauncherGuidePage]
@@ -376,7 +376,11 @@ struct LauncherGuideChips: View {
     }
 }
 
-// About this game: the art (or the icon) as a header, the name, the intro and description, the publisher and release date, where the text came from, and the app's version
+// About this game (NX18-X2.0 gate-ui.md §18, O5): one sheet from the hero's About button, always shown. Three short sections, About · On NX 18 · Your play, then a footer card.
+// Everything comes from the app and this device; nothing is fetched. The sheet follows the look (NX18Look.swift); the art header stays dark and ends in the rail, and no text sits on
+// the art or the glass: the title, the section bar, the cards and the footer are on solid surfaces of the look (§18.4). A tap on a section chip jumps there, L / R with a controller
+// (scroller.page), up / down scroll, B or ✕ (44 pt) or a swipe down closes.
+// Later (F9): the age rating and NX 18's device report and known issue (dm/facts.json), mod credits, the play record (play time, sessions, the battery estimate) and Clear play history
 struct LauncherAboutSheet: View {
     let about: LauncherAbout
     let artwork: LauncherArtwork
@@ -384,69 +388,94 @@ struct LauncherAboutSheet: View {
     let version: String?
     let scroller: LauncherScroller
     var closeGlyph: NXPadGlyph? = nil   // the controller's B, beside the close button while a controller is connected
+    var languages: [String] = []        // the game's languages by name (the Game language row's options); hidden with one
+    var badges: [String] = []           // what this app offers (60 fps, MetalFX, Auto scaling ...), derived from its rows
+    var lastPlayed: Date? = nil         // the save folder's newest file: the fallback for the play record's last session
+    var cloudOn = false
+    var facts = LauncherFacts()         // dm/facts.json: the age rating, tested line, known issue and mod credits (§18.1)
+    var preset: (key: String, title: String)? = nil   // the preset now (the battery estimate is for it only)
+    var playRecordURL = PlayRecord.defaultURL
     let close: () -> Void
+    @State private var record = PlayRecordData()
+    @State private var clearAsk = false
     @State private var position = ScrollPosition(edge: .top)
     @State private var offset: CGFloat = 0
+    @State private var sectionY: [String: CGFloat] = [:]   // each section's top in the page's content, measured: the chips and L / R scroll there by offset (position.scrollTo(y:), as the D-pad does)
+    @State private var storage: String?
+    @State private var notices = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var background: Color { NX18Palette.background(tint: artwork.tint) }
+    private static let sections = ["About", "On NX 18", "Your play"]
+    static var headerWidth: CGFloat = 0   // the art header's width as last laid out (DuoAboutTests: the window's whole width, side safe areas included)
+    private var background: Color { NX18PageColor.page(tint: artwork.tint) }
 
+    // The art header, its rail and the title-and-chips band run edge to edge (under the side safe areas, the backgrounds only); text, chips and the close button keep to the
+    // safe area, so nothing sits under the camera housing or the rounded corners (owner, 2026-11-16)
+    @State private var side = EdgeInsets()
     var body: some View {
+        GeometryReader { geo in
+            content.onChange(of: geo.safeAreaInsets, initial: true) { side = geo.safeAreaInsets }
+        }
+    }
+    private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                header
-                VStack(alignment: .leading, spacing: 14) {
-                    Text(about.name ?? name).nxFont(.title2, weight: .bold).foregroundStyle(.white)
-                    if let intro = about.intro { Text(intro).nxFont(.headline).foregroundStyle(.white.opacity(0.92)) }
-                    if let d = about.description { Text(d).nxFont(.body).foregroundStyle(.white.opacity(0.85)) }
-                    facts
-                    if let s = about.sourceLine { Text(s).nxFont(.footnote).foregroundStyle(NX18Palette.muted) }
-                    if let v = version { Text("Version \(v)").nxFont(.footnote).foregroundStyle(NX18Palette.muted) }
-                    VStack(alignment: .leading, spacing: 2) {   // the controller hints' glyphs (NXButtonGlyph.swift): the credit and the licence's address
-                        Text(NX18Credits.buttonIcons)
-                        Text(NX18Credits.buttonIconsLicence)
-                    }
-                    .nxFont(.caption).foregroundStyle(NX18Palette.muted)
+                header.environment(\.colorScheme, .dark)   // the art header stays dark in every look (§11a.2)
+                    // the close button on the art: it scrolls away with the header, so the wide content below never runs under it (owner, 2026-11-17); B, Escape and the
+                    // sheet's swipe down close it from anywhere
+                    .overlay(alignment: .topTrailing) { closeButton }
+                NX18Rails(axis: .horizontal)               // ends in the rail, static (the seam rule)
+                sectionBar
+                VStack(alignment: .leading, spacing: 18) {
+                    aboutSection.id(Self.sections[0]).modifier(SectionTop(name: Self.sections[0], tops: $sectionY))
+                    nx18Section.id(Self.sections[1]).modifier(SectionTop(name: Self.sections[1], tops: $sectionY))
+                    playSection.id(Self.sections[2]).modifier(SectionTop(name: Self.sections[2], tops: $sectionY))
+                    footer
                 }
-                .padding(.horizontal, 24).padding(.top, 4).padding(.bottom, 32)
-                .frame(maxWidth: 720, alignment: .leading)
+                .padding(.horizontal, 24).padding(.top, 14).padding(.bottom, 32)
+                .frame(maxWidth: 1200, alignment: .leading)   // out toward the edges (owner, 2026-11-17); a cap only for a very wide window
+                .padding(.leading, side.leading).padding(.trailing, side.trailing)
             }
+            .coordinateSpace(.named(SectionTop.space))   // the content's own space: a section's top here does not move as the page scrolls
         }
+        .ignoresSafeArea(.container, edges: .horizontal)
         .scrollPosition($position)
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in offset = y }
-        .background(background.ignoresSafeArea())
+        // the same soft colour field from the art as the Gate's settings side (LauncherBackdrop), under the dark art header it meets at the top
+        .background { LauncherBackdrop(wash: artwork.wash, page: background, edge: NX18Palette.background(tint: artwork.tint), blend: .top).ignoresSafeArea() }
         .nxTextRoot()
-        .overlay(alignment: .topTrailing) {
-            Button(action: close) {
-                HStack(spacing: 8) {
-                    if let g = closeGlyph {
-                        NXPadGlyphView(g, size: 20, relativeTo: .body).foregroundStyle(NX18Palette.cyan)
-                            .padding(4).background(Circle().fill(NX18Palette.charcoal.opacity(0.85)))   // over the art: a dark disc behind it
-                    }
-                    Image(systemName: "xmark").font(.body.weight(.semibold)).foregroundStyle(.white)   // system: symbol
-                        .frame(width: 36, height: 36).background(Circle().fill(NX18Palette.charcoal.opacity(0.85)))
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close")
-            .keyboardShortcut(.cancelAction)
-            .padding(14)
+        .sheet(isPresented: $notices) {
+            LauncherNoticesSheet(tint: artwork.tint, scroller: LauncherScroller()) { notices = false }
+                .presentationBackground(background)
+                .preferredColorScheme(NX18Appearance.current.scheme)
         }
-        .onAppear { scroller.scroll = { dy in
-            if reduceMotion { position.scrollTo(y: Swift.max(0, offset + dy)) } else { withAnimation(.easeOut(duration: 0.15)) { position.scrollTo(y: Swift.max(0, offset + dy)) } }
-        } }
-        .onDisappear { scroller.scroll = nil }
+        .onAppear {
+            scroller.scroll = { dy in
+                if reduceMotion { position.scrollTo(y: Swift.max(0, offset + dy)) } else { withAnimation(.easeOut(duration: 0.15)) { position.scrollTo(y: Swift.max(0, offset + dy)) } }
+            }
+            scroller.page = { step in jump(step) }
+        }
+        .onDisappear { scroller.scroll = nil; scroller.page = nil }
+        .task { storage = await Self.storageLine() }
+        .task { let u = playRecordURL; record = await Task.detached(priority: .utility) { PlayRecord.read(u) }.value }
+        .alert("Clear play history?", isPresented: $clearAsk) {
+            Button("Clear", role: .destructive) { PlayRecord.shared.url = playRecordURL; PlayRecord.shared.clear(); record = PlayRecordData() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Play time, sessions and the battery estimate start again. Your saves are not touched.")
+        }
     }
 
     private var header: some View {
         ZStack(alignment: .bottomLeading) {
+            NX18Palette.background(tint: artwork.tint).frame(height: 200)   // the dark base: a light sheet never shows through the art (§11a.2)
             Color.clear.frame(height: 200).overlay {
                 if let art = artwork.art { Image(uiImage: art).resizable().scaledToFill() }
                 else if let icon = artwork.icon { Image(uiImage: icon).resizable().scaledToFill().blur(radius: 40).opacity(0.6) }
             }
             .clipped()
-            LinearGradient(stops: [.init(color: background.opacity(0), location: 0.35), .init(color: background, location: 1)], startPoint: .top, endPoint: .bottom)
+            let dark = NX18Palette.background(tint: artwork.tint)
+            LinearGradient(stops: [.init(color: dark.opacity(0), location: 0.35), .init(color: dark, location: 1)], startPoint: .top, endPoint: .bottom)
             HStack(spacing: 14) {
                 if artwork.art == nil, let icon = artwork.icon {
                     Image(uiImage: icon).resizable().frame(width: 72, height: 72).clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -454,29 +483,250 @@ struct LauncherAboutSheet: View {
                 NX18Mark(height: 18)
             }
             .padding(.horizontal, 24).padding(.bottom, 12)
+            .padding(.leading, side.leading).padding(.trailing, side.trailing)
         }
+        .frame(maxWidth: .infinity)
         .accessibilityHidden(true)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { Self.headerWidth = $0 }   // for the Duo check that it runs edge to edge
     }
 
-    @ViewBuilder private var facts: some View {
-        let released = about.released.map { $0.formatted(Date.FormatStyle(date: .long, time: .omitted, timeZone: TimeZone(identifier: "UTC") ?? .current)) }
-        if about.publisher != nil || released != nil {
-            VStack(alignment: .leading, spacing: 0) {
-                if let p = about.publisher { fact("Publisher", p) }
-                if about.publisher != nil && released != nil { Rectangle().fill(NX18Palette.separator).frame(height: 0.5).padding(.leading, 14) }
-                if let r = released { fact("Released", r) }
+    private var closeButton: some View {
+        Button(action: close) {
+            HStack(spacing: 8) {
+                if let g = closeGlyph {
+                    NXPadGlyphView(g, size: 20, relativeTo: .body).foregroundStyle(NX18Palette.cyan)
+                        .padding(4).background(Circle().fill(NX18Palette.charcoal.opacity(0.85)))   // over the art: a dark disc behind it
+                }
+                Image(systemName: "xmark").font(.body.weight(.semibold)).foregroundStyle(.white)   // system: symbol
+                    .frame(width: 44, height: 44).background(Circle().fill(NX18Palette.charcoal.opacity(0.85)))   // 44 pt (§18.4); the disc over the art stays dark
             }
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(NX18Palette.row))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Close")
+        .keyboardShortcut(.cancelAction)
+        .padding(12).padding(.trailing, side.trailing)
+    }
+
+    // The title and the three section chips on a solid strip of the look's slab (§18.4)
+    private var sectionBar: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(about.name ?? name).nxFont(.title2, weight: .bold).foregroundStyle(GateColor.text).accessibilityAddTraits(.isHeader)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { chips }
+                VStack(alignment: .leading, spacing: 8) { chips }
+            }
+        }
+        .padding(.horizontal, 20).padding(.vertical, 12)
+        .padding(.leading, side.leading).padding(.trailing, side.trailing)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(GateColor.slab)
+    }
+    @ViewBuilder private var chips: some View {
+        ForEach(Self.sections, id: \.self) { t in
+            Button { go(t) } label: {
+                Text(t).nxFont(.subheadline, weight: .semibold).foregroundStyle(GateColor.text)
+                    .padding(.horizontal, 14).frame(minHeight: 44)
+                    .background(Capsule().fill(GateColor.tile))
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(NX18PressStyle())
+            .accessibilityLabel(t).accessibilityHint("Goes to this section")
         }
     }
-    private func fact(_ k: String, _ v: String) -> some View {
-        HStack {
-            Text(k).foregroundStyle(.white)
-            Spacer()
-            Text(v).foregroundStyle(NX18Palette.muted).multilineTextAlignment(.trailing)
+    // To a section's measured top. position.scrollTo(id:) did nothing here on the iPhone, with or without a scroll target layout (owner, 2026-11-18); scrolling to the measured
+    // offset is what the D-pad's scroll already does, and works
+    private func go(_ t: String) {
+        guard let y = sectionY[t] else { return }
+        let to = Swift.max(0, y - 8)
+        if reduceMotion { position.scrollTo(y: to) } else { withAnimation(.easeOut(duration: 0.2)) { position.scrollTo(y: to) } }
+    }
+    // L / R: the next or previous section, from the one nearest the top
+    private func jump(_ step: Int) {
+        let here = Self.sections.lastIndex { (sectionY[$0] ?? .infinity) <= offset + 40 } ?? 0   // the section whose top has passed the top of the page
+        let i = Swift.max(0, Swift.min(Self.sections.count - 1, here + step.signum()))
+        go(Self.sections[i])
+    }
+
+    // MARK: Sections
+
+    private var aboutSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionTitle("About")
+            if let intro = about.intro { Text(intro).nxFont(.headline).foregroundStyle(GateColor.text).fixedSize(horizontal: false, vertical: true) }
+            if let d = about.description { Text(d).nxFont(.body).foregroundStyle(GateColor.text.opacity(0.9)).fixedSize(horizontal: false, vertical: true) }
+            let released = about.released.map { $0.formatted(Date.FormatStyle(date: .long, time: .omitted, timeZone: TimeZone(identifier: "UTC") ?? .current)) }
+            let dlc = Self.addOnCount()
+            card([("Publisher", about.publisher), ("Released", released), ("Version", version),
+                  ("Age rating", facts.ratingLine()),
+                  ("Add-ons", dlc == 0 ? "No add-ons" : dlc == 1 ? "1 add-on installed" : "\(dlc) add-ons installed"),
+                  ("Languages", languages.count > 1 ? languages.joined(separator: ", ") : nil)])
+            if let s = about.sourceLine { Text(s).nxFont(.footnote).foregroundStyle(GateColor.muted) }
         }
-        .padding(.horizontal, 14).padding(.vertical, 11)
-        .accessibilityElement(children: .combine)
+    }
+    private var nx18Section: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionTitle("On NX 18")
+            if badges.isEmpty { Text("No features to list").nxFont(.footnote).foregroundStyle(GateColor.muted) }
+            else {
+                FlowRow(spacing: 8) {
+                    ForEach(badges, id: \.self) { b in
+                        Text(b).nxFont(.footnote, weight: .semibold).foregroundStyle(GateColor.text)
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .background(Capsule().fill(GateColor.tile))
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Features: " + badges.joined(separator: ", "))
+            }
+            card([("Tested", facts.tested ?? "No device report yet"), ("Known issue", facts.knownIssue)])
+            if !facts.mods.isEmpty { modsCard }
+        }
+    }
+    // Each packed mod by role, with its author and license; its link opens in the browser only when tapped (nothing loads before)
+    private var modsCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(facts.mods.enumerated()), id: \.element.id) { i, mod in
+                if i > 0 { Rectangle().fill(GateColor.separator).frame(height: 0.5).padding(.leading, 14) }
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(mod.role).foregroundStyle(GateColor.text)
+                        Spacer(minLength: 12)
+                        Text(mod.name).foregroundStyle(GateColor.muted).multilineTextAlignment(.trailing)
+                    }
+                    .nxFont(.subheadline)
+                    let by = [mod.author.map { "By \($0)" }, mod.license].compactMap { $0 }
+                    Text(by.isEmpty ? "No credit given in the mod's folder" : by.joined(separator: " · ")).nxFont(.footnote).foregroundStyle(GateColor.muted)
+                    if let u = mod.url {
+                        Link(destination: u) {
+                            HStack(spacing: 4) { Text(u.host() ?? u.absoluteString); Image(systemName: "arrow.up.right").font(.caption2.weight(.semibold)) }   // system: symbol
+                                .nxFont(.footnote, weight: .semibold).foregroundStyle(GateColor.line).frame(minHeight: 44, alignment: .leading).contentShape(Rectangle())
+                        }
+                        .accessibilityHint("Opens the mod's page in the browser")
+                    }
+                }
+                .padding(.horizontal, 14).padding(.vertical, 11)
+                .accessibilityElement(children: .combine)
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(GateColor.tile))
+    }
+    private var playSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionTitle("Your play")
+            let last = [record.lastPlayed, lastPlayed].compactMap { $0 }.max()
+            let estimate = preset.flatMap { p in record.batteryEstimate(preset: p.key).map { PlayRecordText.battery(minutes: $0, preset: p.title) } }
+            card([("Play time", record.totalSessions > 0 ? PlayRecordText.duration(minutes: record.totalMinutes) : nil),
+                  ("Last played", last.map { PlayRecordText.day($0) } ?? "Not yet"),
+                  ("Sessions", record.totalSessions > 0 ? PlayRecordText.sessions(record.totalSessions) : nil),
+                  ("Battery", estimate),
+                  ("Cloud saves", cloudOn ? "On" : "Off"), ("Storage", storage ?? "…")])
+            if record.totalSessions > 0 {
+                Button { clearAsk = true } label: {
+                    HStack { Text("Clear play history").nxFont(.subheadline, weight: .semibold); Spacer() }
+                        .foregroundStyle(GateColor.line).frame(minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(NX18PressStyle())
+                .accessibilityHint("Play time, sessions and the battery estimate start again; saves are kept")
+            }
+            Text("Kept on this device only. Nothing is sent anywhere.").nxFont(.caption).foregroundStyle(GateColor.muted)
+        }
+    }
+
+    // The footer card (§18.1): the personal-build line, NX 18's release and build, the button-icon credit and Acknowledgements
+    private var footer: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Personal build: made from your own legally owned and acquired game and keys. Please don't share it.")
+                .nxFont(.footnote, weight: .semibold).foregroundStyle(GateColor.text).fixedSize(horizontal: false, vertical: true)
+            if let l = nx18FooterLine { Text(verbatim: l).nxFont(.footnote).foregroundStyle(GateColor.muted) }
+            VStack(alignment: .leading, spacing: 2) {   // the controller hints' glyphs (NXButtonGlyph.swift): the credit and the licence's address
+                Text(NX18Credits.buttonIcons)
+                Text(NX18Credits.buttonIconsLicence)
+            }
+            .nxFont(.caption).foregroundStyle(GateColor.muted)
+            if LauncherNotices.available {
+                Button { notices = true } label: {
+                    HStack { Text("Acknowledgements").nxFont(.subheadline, weight: .semibold); Spacer(); Image(systemName: "chevron.right").font(.caption.weight(.semibold)) }   // system: symbol
+                        .foregroundStyle(GateColor.line).frame(minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(NX18PressStyle())
+                .accessibilityHint("The third-party notices")
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(GateColor.tile))
+    }
+
+    private func sectionTitle(_ t: String) -> some View {
+        Text(t).nxFont(.footnote, weight: .semibold).foregroundStyle(GateColor.text).textCase(.uppercase).accessibilityAddTraits(.isHeader)   // text primary: no accent text on the bare page (§11a.4)
+    }
+    @ViewBuilder private func card(_ rows: [(String, String?)]) -> some View {
+        let shown = rows.compactMap { r in r.1.map { (r.0, $0) } }
+        if !shown.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(shown.enumerated()), id: \.offset) { i, r in
+                    if i > 0 { Rectangle().fill(GateColor.separator).frame(height: 0.5).padding(.leading, 14) }
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(r.0).foregroundStyle(GateColor.text)
+                        Spacer(minLength: 12)
+                        Text(r.1).foregroundStyle(GateColor.muted).multilineTextAlignment(.trailing)
+                    }
+                    .nxFont(.subheadline)
+                    .padding(.horizontal, 14).padding(.vertical, 11)
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(GateColor.tile))
+        }
+    }
+
+    // The add-ons the build packed: <App>/aoc/<index>/ (build_ipa.sh AOC), counted as the sheet opens
+    static func addOnCount(bundle: Bundle = .main) -> Int {
+        guard let root = bundle.resourceURL?.appendingPathComponent("aoc"),
+              let items = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey]) else { return 0 }
+        return items.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }.count
+    }
+    // "Game 14.2 GB · Saves 3 MB · Caches 410 MB", read off the main actor once per open
+    static func storageLine() async -> String {
+        await Task.detached(priority: .utility) {
+            let fm = FileManager.default
+            func size(_ u: URL?) -> Int64 {
+                guard let u, let e = fm.enumerator(at: u, includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey]) else { return 0 }
+                var n: Int64 = 0
+                for case let f as URL in e { n += Int64((try? f.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0) }
+                return n
+            }
+            let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first
+            let saves = size(docs?.appendingPathComponent("save")) + size(docs?.appendingPathComponent("save-backups"))
+            let caches = size(docs?.appendingPathComponent("pso_archive")) + size(fm.urls(for: .cachesDirectory, in: .userDomainMask).first)
+            let f = ByteCountFormatter(); f.countStyle = .file; f.allowsNonnumericFormatting = false   // "0 bytes", never "Zero KB"
+            return "Game \(f.string(fromByteCount: size(Bundle.main.bundleURL))) · Saves \(f.string(fromByteCount: saves)) · Caches \(f.string(fromByteCount: caches))"
+        }.value
+    }
+}
+
+// Chips that wrap onto the next line when the width runs out
+struct FlowRow: Layout {
+    var spacing: CGFloat = 8
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let w = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, line: CGFloat = 0, widest: CGFloat = 0
+        for v in subviews {
+            let s = v.sizeThatFits(.unspecified)
+            if x > 0, x + s.width > w { y += line + spacing; x = 0; line = 0 }
+            x += s.width + spacing; line = Swift.max(line, s.height); widest = Swift.max(widest, x - spacing)
+        }
+        return CGSize(width: proposal.width ?? widest, height: y + line)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, line: CGFloat = 0
+        for v in subviews {
+            let s = v.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + s.width > bounds.maxX { y += line + spacing; x = bounds.minX; line = 0 }
+            v.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(s))
+            x += s.width + spacing; line = Swift.max(line, s.height)
+        }
     }
 }
 
@@ -531,7 +781,7 @@ struct LauncherNoticesSheet: View {
     @State private var offset: CGFloat = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var background: Color { NX18Palette.background(tint: tint) }
+    private var background: Color { NX18PageColor.page(tint: tint) }   // the look's page (NX18Look.swift)
 
     var body: some View {
         ScrollView {
@@ -550,9 +800,9 @@ struct LauncherNoticesSheet: View {
         .overlay(alignment: .topTrailing) {
             Button(action: close) {
                 HStack(spacing: 8) {
-                    if let g = closeGlyph { NXPadGlyphView(g, size: 20, relativeTo: .body).foregroundStyle(NX18Palette.cyan) }
-                    Image(systemName: "xmark").font(.body.weight(.semibold)).foregroundStyle(.white)   // system: symbol
-                        .frame(width: 36, height: 36).background(Circle().fill(NX18Palette.charcoal.opacity(0.85)))
+                    if let g = closeGlyph { NXPadGlyphView(g, size: 20, relativeTo: .body).foregroundStyle(GateColor.line) }
+                    Image(systemName: "xmark").font(.body.weight(.semibold)).foregroundStyle(GateColor.text)   // system: symbol
+                        .frame(width: 44, height: 44).background(Circle().fill(GateColor.tile))
                 }
                 .contentShape(Rectangle())
             }
@@ -574,19 +824,29 @@ struct LauncherNoticesSheet: View {
     @ViewBuilder private func block(_ b: LauncherNotices.Block) -> some View {
         switch b.kind {
         case .title:
-            Text(b.text).nxFont(.title2, weight: .bold).foregroundStyle(.white).accessibilityAddTraits(.isHeader)
+            Text(b.text).nxFont(.title2, weight: .bold).foregroundStyle(GateColor.text).accessibilityAddTraits(.isHeader)
         case .heading:
             VStack(alignment: .leading, spacing: 10) {
-                NX18Palette.separator.frame(height: 1)
-                Text(b.text).nxFont(.headline, weight: .semibold).foregroundStyle(NX18Palette.cyan).accessibilityAddTraits(.isHeader)
+                GateColor.separator.frame(height: 1)
+                Text(b.text).nxFont(.headline, weight: .semibold).foregroundStyle(GateColor.text).accessibilityAddTraits(.isHeader)
             }
             .padding(.top, 14)
         case .meta:
-            Text(b.text).nxFont(.footnote).foregroundStyle(NX18Palette.muted)
+            Text(b.text).nxFont(.footnote).foregroundStyle(GateColor.muted)
         case .prose:
-            Text(b.text).nxFont(.callout).foregroundStyle(.white.opacity(0.9))
+            Text(b.text).nxFont(.callout).foregroundStyle(GateColor.text.opacity(0.9))
         case .license:
-            Text(b.text).nxMono(.caption).foregroundStyle(.white.opacity(0.78)).textSelection(.enabled)
+            Text(b.text).nxMono(.caption).foregroundStyle(GateColor.muted).textSelection(.enabled)
         }
+    }
+}
+
+// A guide section's top in the page's content (GuideViewer.sectionY), for its chip and L / R
+private struct SectionTop: ViewModifier {
+    nonisolated static let space = "guideContent"   // a constant: read from the geometry closure, which is Sendable
+    let name: String
+    @Binding var tops: [String: CGFloat]
+    func body(content: Content) -> some View {
+        content.onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).minY } action: { tops[name] = $0 }
     }
 }

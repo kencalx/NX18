@@ -80,7 +80,7 @@ FIXTURE_FORBIDDEN = [
 ALLOWED = [
     ('dm/gfx/nvn/nvn_mtl.m', 'newArgumentEncoderWithBufferIndex', '[o->fn newArgumentEncoderWithBufferIndex:o->rf.abi].encodedLength', 1),   # the shader's own function, at its load
     ('dm/gfx/nvn/nvn_mtl.m', 'newArgumentEncoderWithBufferIndex', '[f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len', 2),   # vin_fn, pull_load
-    ('dm/gfx/nvn/nvn_mtl.m', 'newArgumentEncoderWithBufferIndex', '[f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len', 2),   # at_fn, lo_fn
+    ('dm/gfx/nvn/nvn_mtl.m', 'newArgumentEncoderWithBufferIndex', '[f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength == fs->arg_len', 1),   # fn_args_match: at_fn, lo_fn and the typed outputs' side entry points (upstream 009418177 made it one check)
 ]
 
 # the receiver is any expression with balanced brackets (a name, a call, a cast), so that a [ earlier on the line (an index) does not start it

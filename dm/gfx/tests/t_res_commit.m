@@ -95,28 +95,32 @@ int main(void) { @autoreleasepool {
     int all = 1; for (id<MTLBuffer> s in small) all &= [g_res containsAllocation:s];
     CHECK("everything added is in the set after the commit", all);
 
-    // A change another thread's commit took is in the set when this thread's res_commit returns
+    // A change another thread's commit took is in the set (and any removal's allocation is released) when this thread's res_commit returns
     for (int round = 0; round < 50; round++) {
         id<MTLBuffer> x = buf(BIG_BYTES / 4), y = buf(4096);
+        __weak id<MTLBuffer> weak_d = nil;
+        @autoreleasepool { id<MTLBuffer> d = buf(BIG_BYTES / 8); weak_d = d; res_add(d); res_commit(); res_remove(d); }
         res_add(x);
         dispatch_semaphore_t go = dispatch_semaphore_create(0), fin = dispatch_semaphore_create(0);
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ dispatch_semaphore_signal(go); res_commit(); dispatch_semaphore_signal(fin); });
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ dispatch_semaphore_signal(go); res_commit(); dispatch_semaphore_signal(fin); });
         dispatch_semaphore_wait(go, DISPATCH_TIME_FOREVER);
         res_add(y); res_commit();
-        int ok = [g_res containsAllocation:x] && [g_res containsAllocation:y];
+        int ok = [g_res containsAllocation:x] && [g_res containsAllocation:y] && weak_d == nil;
         dispatch_semaphore_wait(fin, DISPATCH_TIME_FOREVER);
-        if (!ok) { CHECK("a change committed by another thread is in the set when res_commit returns", 0); break; }
+        if (!ok) { CHECK("a change committed by another thread is in the set and released when res_commit returns", 0); break; }
         res_remove(x); res_remove(y); res_commit();
     }
     CHECK("racing commits leave nothing queued", !res_pending());
     const char *log = log_new();   // the bare mutex's 100 ms hold above may or may not have passed the threshold by the time res_commit took it: not counted
 
     // A wait for the commit lock past the threshold: the waiter's site and thread, and the holder's site
-    { dispatch_semaphore_t rel = dispatch_semaphore_create(0), done = hold_lock(rel);
+    // This thread's commit has a change to apply: with nothing queued it returns at once (g_res_done is past it) and never waits for the lock
+    { id<MTLBuffer> w = buf(4096); res_add(w);
+      dispatch_semaphore_t rel = dispatch_semaphore_create(0), done = hold_lock(rel);
       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ dispatch_semaphore_signal(rel); });
-      res_commit(); returned(done, 2000); }
+      res_commit(); returned(done, 2000); res_remove(w); res_commit(); }
     log = log_new();
-    CHECK("a 150 ms wait for the commit lock says so once, with the waiter's site and the holder's", count(log, "[RED] slow wait for the residency commit lock") == 1 && strstr(log, "at nvn_mtl.m:") && strstr(log, "held by host thread") && strstr(log, "from t_res_commit.m:"));
+    CHECK("a 150 ms wait for the commit lock says so once, with the waiter's site and the holder's", count(log, "[RED] slow wait for the residency commit lock") == 1 && strstr(log, "ms at t_res_commit.m:") && strstr(log, "held by host thread") && strstr(log, "from t_res_commit.m:"));   // the waiter's site is its res_commit call (LOCK_SITE)
 
     // Slow residency commits (the threshold lowered to 0: every commit with changes says it): what it applied, its thread, the feedback queue
     g_slow_commit_ns = 0;

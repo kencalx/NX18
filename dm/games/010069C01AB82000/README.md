@@ -55,11 +55,14 @@ The NSP script's build directory is `<NSP folder>/010069C01AB82000_build`; analy
 - **Provisional Unreal profiles leave room for the initial heap** (`profile_guess.py`): [Provisional Unreal layout leaves no heap](../../../docs/reference/memory.md#provisional-unreal-layout-leaves-no-heap).
 - **Returning `IGN` image atomics** (the offline translator, `t_atomic_return.m`): [Bounds of image atomics](../../../docs/reference/shaders.md#bounds-of-image-atomics).
 - **A game's own frame-limit variable written instead of `t.MaxFPS`** (profile key `ue_fps_cvar`, `hle_fpslock.c`): [Unreal's frame limit and present interval, found by name](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name).
+- **Battles stalled after every landed hit** (`hle_uemalloc.c`, `t_ue_heap_late.c`): the game copies a battle-task map value from a block it has just freed, which Unreal's own allocator leaves intact; the host keeps freed small blocks as they were for a while: [Freed blocks of Unreal's heap keep their contents for a while](../../../docs/reference/memory.md#freed-blocks-of-unreals-heap-keep-their-contents-for-a-while)
 - **Buffer-image reflection preserves its Metal texture type** (`nvn_refl.m`, `t_refl.m`): [Buffer image reflection keeps its texture type](../../../docs/reference/shaders.md#buffer-image-reflection-keeps-its-texture-type).
 
 ## Open
 
 - The engine region's gate (2.81 GB instead of the 2 GB `game_args` gave) has not been run on this game yet: the `[mem] Unreal's engine region` line in a boot's log shows it.
-- Combat, later areas and the Canon of Vengeance route remain untested, at either frame rate.
+- Combat: the first battle runs to its result screen on the Mac at 60 fps (2026-11-23, after the heap fix above); later battles, later areas and the Canon of Vengeance route remain untested.
 - 60 fps on an iPhone is not tested yet.
 - The unsigned IPA is built beside the source dumps. Device testing remains the user's next step; no device installation or signing is performed.
+
+- **Depth mode (2026-11-21):** the game sets NVN's near = 0 depth mode. Without `depth_mode zero` the bundled pipeline archive was made for the other mode: the iPhone 18 Pro Max refused it on the first start and rebuilt 7,966 bases before the first frame (213 s). The next start (device archive in place) played at a steady 60 fps at 0.3-1.5 W, thermal 0; two 5.5 s waits with no present were the game's own (NX 18's GPU, replay and encode thread idle). The profile now sets the depth mode.

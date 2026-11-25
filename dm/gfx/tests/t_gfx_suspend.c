@@ -5,7 +5,8 @@
 // in-flight count), a drain held where no wait has a limit, and a drain whose waits end at the limit (nvn_mtl.m mtl_drain_by, stubbed here), going to the background returns in
 // about 3 s with "[RED] suspend: the GPU did not drain in 3 s" naming what, and the dump; graphics stay suspended; a resume while it still does not drain keeps them suspended
 // within about 1 s and says so; once the drain finishes, the resume is a normal one, and a resume that could not drain is tried again in the foreground until it does (a suspend
-// ends that). t_suspend_drain checks mtl_drain_by's own waits with real Metal
+// ends that). A residency commit in the kernel for 1 s or more (a faked mtl_res_commit_stuck) is not waited for: the suspend and the resume go at once, or at about 1 s when
+// it gets stuck during their wait for a graphics call or for a drain begun before it, naming it, with no drain started. t_suspend_drain checks mtl_drain_by's own waits with real Metal
 #include <pthread.h>
 #include <stdatomic.h>
 #include <dispatch/dispatch.h>
@@ -22,11 +23,11 @@ static int observed_mutex_lock(pthread_mutex_t *mutex);
 #define mtl_sub_commit test_sub_commit
 #define mtl_queue_activate test_queue_activate
 #define mtl_set_queue_origin_lower_left test_queue_origin
-#define mtl_sub_index test_sub_index
 #define mtl_exec_rest test_exec_rest
 #define mtl_exec test_exec
 #define mtl_set_frame test_set_frame
 #define mtl_drain_by test_drain_by
+#define mtl_res_commit_stuck test_res_commit_stuck
 #include "../nvn/hle_nvn.c"
 #undef pthread_mutex_lock
 #undef mtl_prepare
@@ -34,11 +35,11 @@ static int observed_mutex_lock(pthread_mutex_t *mutex);
 #undef mtl_sub_commit
 #undef mtl_queue_activate
 #undef mtl_set_queue_origin_lower_left
-#undef mtl_sub_index
 #undef mtl_exec_rest
 #undef mtl_exec
 #undef mtl_set_frame
 #undef mtl_drain_by
+#undef mtl_res_commit_stuck
 
 module_t *g_mod; int g_nmod;
 void *front_metal_layer(void) { return NULL; }
@@ -72,7 +73,6 @@ void test_sub_begin(void) {}
 uint64_t test_sub_commit(void) { atomic_fetch_add(&commits, 1); dispatch_semaphore_signal(committed); return 0; }
 void test_queue_activate(uint64_t serial) { (void)serial; }
 void test_queue_origin(int on) { (void)on; }
-void test_sub_index(const uint64_t *handles, int count) { (void)handles; (void)count; }
 void test_exec_rest(const uint64_t *handles, int count) { (void)handles; (void)count; }
 void test_exec(const uint8_t *commands) { (void)commands; }
 void test_set_frame(uint64_t frame) { (void)frame; }
@@ -84,6 +84,18 @@ const char *test_drain_by(uint64_t by) {
     if (hold == 1) { dispatch_semaphore_wait(drain_go, DISPATCH_TIME_FOREVER); return NULL; }
     if (hold == 2) { uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); if (by > now) usleep((useconds_t)((by - now) / 1000)); return "the GPU work up to the last fence (mtl_finish_gpu)"; }
     return NULL;
+}
+
+// A residency commit in the kernel since rk_at (CLOCK_UPTIME_RAW ns; 0: none), as nvn_mtl.m mtl_res_commit_stuck answers; with rk_pagein, its page-in at its longest
+static _Atomic uint64_t rk_at; static _Atomic int rk_pagein;
+uint64_t test_res_commit_stuck(uint64_t min_ns, char *out, size_t n) {
+    uint64_t at = atomic_load(&rk_at), now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (!at || now < at || now - at < min_ns) return 0;
+    if (atomic_load(&rk_pagein))
+        snprintf(out, n, "a residency commit's page-in (mlock of 12345 MB of file pages before [g_res commit], 12345 changes; 12345 MB wired so far in calls of 8 MB, the current call 123.4 s in) "
+                 "in the kernel for %.1f s on host thread 0x12345678, holding the residency commit lock", (now - at) / 1e9);
+    else snprintf(out, n, "a residency commit ([g_res commit], 7 changes, 0 MB of file pages wired for it) in the kernel for %.1f s on host thread 0x1, holding the residency commit lock", (now - at) / 1e9);
+    return at;
 }
 
 static NVNqueue queues[2];
@@ -253,6 +265,50 @@ int main(void) {
     logged(dm_gfx_suspend, 0, 0);
     CHECK("the next resume drains and resumes", has("has finished since") && has("[nvn] graphics resumed") && !suspended_now() && !g_susp_stuck);
     CHECK("the retry cases leave the graphics gate balanced", g_inflight_api == 0);
+
+    // A residency commit that does not come back from the kernel, inside a graphics call (Ocarina of Time on the iPhone 18 Pro Max: the replay thread 16.5 s under res_commit):
+    // already past 1 s, the suspend goes at once with a red line that names it, and starts no drain (every step would wait for its lock, and nothing may touch g_res meanwhile)
+    fake_call(1); atomic_store(&rk_at, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - 5000000000ull);
+    d0 = atomic_load(&drains);
+    took = logged(dm_gfx_suspend, 1, 300);
+    CHECK("a commit stuck in the kernel: the suspend does not wait for it", took < 0.3);
+    CHECK("the red line names the commit", has("[RED] suspend: not waiting for a residency commit ([g_res commit], 7 changes") && has("no drain is started") && has("a dump follows"));
+    CHECK("no drain behind it", atomic_load(&drains) == d0 && suspended_now() && g_susp_stuck);
+    took = logged(dm_gfx_suspend, 0, 0);
+    CHECK("a resume with it still there keeps graphics suspended, at once", has("[RED] resume: the GPU has still not drained (a residency commit") && suspended_now() && took < 0.3);
+    CHECK("and starts no drain either", atomic_load(&drains) == d0);
+    atomic_store(&rk_pagein, 1);   // a page-in's mark with its progress, the longest the commit's text gets: named whole
+    logged(dm_gfx_suspend, 1, 300);
+    CHECK("a page-in's mark is named whole", has("[RED] suspend: not waiting for a residency commit's page-in (mlock of 12345 MB") && has("the current call 123.4 s in) in the kernel for")
+          && has("on host thread 0x12345678, holding the residency commit lock (at "));
+    atomic_store(&rk_pagein, 0);
+    // A commit that enters the kernel during the resume's wait for the call: the resume stops waiting once it has been there 1 s, as its own 1 s limit would, naming the commit
+    atomic_store(&rk_at, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+    took = logged(dm_gfx_suspend, 0, 0);
+    CHECK("a commit stuck while the resume waits: it goes at about 1 s", took >= 0.9 && took < 1.6);
+    CHECK("naming the commit, graphics still suspended", has("[RED] resume: the GPU has still not drained (a residency commit ([g_res commit]") && suspended_now() && atomic_load(&drains) == d0);
+    // A commit that enters the kernel during the suspend's wait for the call: the suspend stops waiting once it has been there 1 s, not at the 3 s limit
+    atomic_store(&rk_at, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+    took = logged(dm_gfx_suspend, 1, 300);
+    CHECK("a commit stuck while the suspend waits: it goes at about 1 s", took >= 0.9 && took < 1.6 && has("[RED] suspend: not waiting for a residency commit") && has("no drain is started"));
+    CHECK("still no drain behind it", atomic_load(&drains) == d0);
+    atomic_store(&rk_at, 0); fake_call(-1);   // the commit comes back, the call returns: the next resume is a normal one
+    logged(dm_gfx_suspend, 0, 0);
+    CHECK("once the commit is back, the resume drains and resumes", has("has finished since") && has("[nvn] graphics resumed") && !suspended_now() && !g_susp_stuck);
+    // No graphics call in progress (the guest in SyncWait): the drain begins, its thread waits behind the commit's lock (drain_hold 1), and the commit turns stuck meanwhile. The
+    // suspend stops waiting for the drain at about 1 s and names the commit, not "the drain's thread" at 3 s
+    atomic_store(&drain_hold, 1); d0 = atomic_load(&drains);
+    atomic_store(&rk_at, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+    took = logged(dm_gfx_suspend, 1, 300);
+    CHECK("a commit stuck while the drain waits: the suspend goes at about 1 s", took >= 0.9 && took < 1.6);
+    CHECK("naming the commit and the drain behind it", has("[RED] suspend: not waiting for a residency commit") && has("the drain begun before it waits behind it") && !has("the drain's thread, held"));
+    CHECK("the one drain was begun", atomic_load(&drains) == d0 + 1 && suspended_now() && g_susp_stuck);
+    took = logged(dm_gfx_suspend, 0, 0);
+    CHECK("a resume with it still there goes at once, naming it", has("[RED] resume: the GPU has still not drained (a residency commit") && suspended_now() && took < 0.3);
+    atomic_store(&rk_at, 0); atomic_store(&drain_hold, 0); dispatch_semaphore_signal(drain_go);   // the commit comes back and the drain behind it finishes
+    logged(dm_gfx_suspend, 0, 0);
+    CHECK("then the resume drains and resumes", has("graphics resumed") && !suspended_now() && !g_susp_stuck);
+    CHECK("the commit cases leave the graphics gate balanced", g_inflight_api == 0);
     h_nvnQueueFinalize(&queues[0]); h_nvnQueueFinalize(&queues[1]);
     printf("graphics suspend: %d checks, %d failed\n", checks, failures);
     return failures != 0;

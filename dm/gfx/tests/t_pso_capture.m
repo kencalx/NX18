@@ -139,7 +139,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     }
     pipelines(mode);
     if (!capture) arch_flush_wait();
-    mtl_arch_save(ARCH_QUIT_WAIT_MS, 0);
+    mtl_arch_save(MTL_QUIT_ARCH_MS, 0);
     NSArray<NSString *> *after = files(arch);
     if (capture) {
         CHECK(n_archive == 0, "capture: newArchiveWithURL never called (%d)", n_archive);

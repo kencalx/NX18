@@ -1,4 +1,4 @@
-// Texture clears preserve channels and pixels outside their explicit mask and region.
+// Texture clears preserve channels and pixels outside their explicit mask and region. A clear or a texture copy with a missing texture is safe with the pass dump on.
 #include "../nvn/nvn_mtl.m"
 #include "t_mtl4.h"
 void *front_metal_layer(void) { return NULL; }
@@ -14,6 +14,10 @@ int main(void) { @autoreleasepool {
     mtl_init();
     CHECK(passdump(), "null clear runs with pass-dump diagnostics enabled");
     clear_tex(&(p_clear_tex){0});   // A missing texture must also be safe in pass-dump diagnostics.
+    // So must a texture copy with no source or no destination (copy_t2t_enc read both serials for its pass-dump line before its null return)
+    CHECK(copy_t2t_enc(&(p_copy_t2t){0}) == nil, "a texture copy with neither texture encodes nothing");
+    { tex_t only = {.magic = MAGIC('T','E','X',0), .serial = 99599};
+      CHECK(copy_t2t_enc(&(p_copy_t2t){.dst = &only}) == nil, "a texture copy with no source encodes nothing"); }
     struct { int mask, x, y, w, h, layer, level, ui; const char *label; } cases[]={
         {8,0,0,8,8,0,0,0,"alpha-only clear preserves RGB"},
         {5,2,1,3,2,0,0,0,"masked rectangle preserves other pixels and channels"},

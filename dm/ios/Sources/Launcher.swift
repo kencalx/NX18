@@ -3,10 +3,11 @@
 // dm/env.txt; main.m lists them in DM_ENV_FILE_KEYS) is shown but kept. All settings share one screen, grouped by section (rows: LauncherRow.swift). Choices that differ from the game's default are kept
 // in UserDefaults; Reset to tested defaults shows the defaults, and Play then forgets them. DM_LAUNCHER=0 in Documents/env.txt starts the game at once with the saved choices; DM_SAVED_CHOICES=0 ignores them (and keeps them)
 // The look (the NX 18 palette, LauncherRow.swift): the game's key art on the left (dm/art.jpg; without it the app icon, blurred behind and sharp on top), its logo (dm/logo.png) or else its name, the status line, the coral Play pill and,
-// when the app has them, Game guide and About this game (GuideViewer.swift); the rails line; the settings on the right: the preset chips, the basic rows, Advanced (the other rows, collapsed,
-// remembered as launcher.advanced), Reset, Cloud saves and Skip this screen next time (launcher.skip: the game starts at once, as with DM_LAUNCHER=0; the in-game menu's Settings screen
-// at start turns it off, and a controller button held while the app opens shows the screen anyway, best effort; with cloud saves on, the screen shows for the cloud-save check that Play
-// runs, and the game starts by itself when the check has nothing to ask, as it does for the Game shortcut, only with the app in front: LauncherShortcuts.swift). A narrow or portrait window puts the art on top. The background takes at most 12 % of the art's average colour; the accents,
+// when the app has them, Game guide and About this game (GuideViewer.swift); the rails line; the settings on the right as the Gate's system menu (LauncherPanel.swift, NX18-X2.0
+// gate-ui.md): the preset chips, quick tiles (Console mode, Game language, Picture; Vitals, Game rumble, Touch controls; mod tiles), the Customize and Cloud saves doors, and their
+// pages; Customize ends with Gate at start (launcher.skip, stored inverted: off = the game starts at once, as with DM_LAUNCHER=0; the in-game menu's Settings screen at start turns
+// it back on, and a controller button held while the app opens shows the screen anyway, best effort; with cloud saves on, the screen shows for the cloud-save check that Play
+// runs, and the game starts by itself when the check has nothing to ask, as it does for the Game shortcut, only with the app in front: LauncherShortcuts.swift)
 // the rails and the mark keep the logo's colours. A game controller drives a focus ring over all of it (LauncherController.swift)
 import CoreHaptics
 import GameController
@@ -53,90 +54,6 @@ private func info(_ key: String) -> Any? { Bundle.main.object(forInfoDictionaryK
     return f
 }
 
-// A settings row's card: the row colour, with the controller's focus as a cyan outline inside it (a List clips what is drawn outside a row).
-// The List also clips a section's first and last rows to the card's rounded corners (about 26 pt on iOS 27's inset grouped list, measured on an
-// iPhone 18 Pro Max), so the outline's corners there follow the card's, inset by the same few points, instead of being cut off; a row between
-// others keeps the small 10 pt corners. first / last: the row is its section's first / last (a section of one row is both).
-private let rowCardRadius: CGFloat = 26
-private let rowFocusInset: CGFloat = 3
-private func rowBackground(_ focused: Bool, fill: Color = NX18Palette.row, first: Bool = true, last: Bool = true) -> some View {
-    ZStack {
-        fill
-        if focused {
-            let outer = rowCardRadius - rowFocusInset
-            UnevenRoundedRectangle(topLeadingRadius: first ? outer : 10, bottomLeadingRadius: last ? outer : 10,
-                                   bottomTrailingRadius: last ? outer : 10, topTrailingRadius: first ? outer : 10, style: .continuous)
-                .strokeBorder(NX18Palette.cyan, lineWidth: 2).padding(rowFocusInset)
-        }
-    }
-}
-
-/// Cloud saves: an iCloud Drive folder shared with the game's app on the other iPhone, iPad or Mac
-/// (its Cloud saves too). The host brings the save in from there when the game starts and
-/// sends it there after each save (dm/host/save_sync.h); the folder is a bookmark (CloudSaves.m).
-private struct CloudSavesSection: View {
-    @Binding var picking: Bool   // the folder picker is up (the settings screen's controller waits meanwhile, but for its B, which closes it; its A on this section opens it)
-    var focused = false
-    var closed: () -> Void = {}   // the picker has finished closing (a Guide shortcut waits for it)
-    var changed: () -> Void = {}
-    @State private var folder: String = ""
-    @State private var note: String = ""
-
-    var body: some View {
-        Section {
-            HStack {
-                Text("Cloud saves")
-                Spacer()
-                Text(folder.isEmpty ? "Off" : (folder as NSString).lastPathComponent)
-                    .foregroundStyle(NX18Palette.muted).lineLimit(1).truncationMode(.middle)
-            }
-            .listRowBackground(NX18Palette.row)
-            Button(folder.isEmpty ? "Choose a folder in iCloud Drive…" : "Choose a different folder…") { picking = true }
-                .foregroundStyle(NX18Palette.cyan)
-                .listRowBackground(rowBackground(focused, first: false, last: folder.isEmpty))   // the section's second row; its last unless Turn off follows
-                .id(LauncherFocus.cloud)
-                // The sheet sits on the button, not on the Section: SwiftUI hands a Section's modifiers to every row, so one tap presented a picker per row and they invalidated each other (LNPANDY/NX2Apple#315).
-                .sheet(isPresented: $picking, onDismiss: closed) {
-                    DocumentPicker(types: [.folder]) { url in
-                        picking = false
-                        if dm_store_cloud_saves(url) {
-                            note = "Saved. The game uses this folder when you press Play."
-                            refresh()
-                        } else {
-                            note = "That folder could not be remembered — try a different one."
-                        }
-                    } onCancel: { picking = false }
-                }
-            if !folder.isEmpty {
-                Button("Turn off cloud saves") {
-                    dm_clear_cloud_saves(); refresh(); note = ""
-                }
-                .foregroundStyle(NX18Palette.coral)
-                .listRowBackground(NX18Palette.row)
-            }
-        } header: {
-            NX18SectionHeader("Saves")
-        } footer: {
-            Text(note.isEmpty
-                 ? "Choose a folder in iCloud Drive, and the same one in Cloud saves on your other iPhone, iPad or Mac. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups."
-                 : note)
-            .nxFontIfCustom(.footnote)
-            .foregroundStyle(NX18Palette.muted)
-        }
-        .listRowSeparatorTint(NX18Palette.separator)
-        .onAppear(perform: refresh)
-    }
-
-    private func refresh() {
-        var stale: ObjCBool = false
-        folder = dm_cloud_saves_path(&stale) ?? ""
-        if stale.boolValue && folder.isEmpty {
-            note = "The folder you chose before is no longer readable (the app was signed differently). Please choose it again."
-        }
-        changed()
-    }
-}
-
 /// UIDocumentPickerViewController for a folder, in the two callbacks a SwiftUI sheet wants.
 private struct DocumentPicker: UIViewControllerRepresentable {
     var types: [UTType] = [.folder]
@@ -168,49 +85,7 @@ private struct DocumentPicker: UIViewControllerRepresentable {
     }
 }
 
-// The coral Play pill's and the small buttons' press: a little dimmer and smaller while held
-private struct NX18PressStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label.opacity(configuration.isPressed ? 0.82 : 1).scaleEffect(configuration.isPressed ? 0.97 : 1)
-    }
-}
 
-// The screen's switches as in the mockup: the track cyan when on and #4A4A50 when off (the system's off track all but disappears on the #333337 rows), a white knob. Set on
-// the whole screen, so the setting rows' toggles (LauncherRow.swift, shared with the Mac, which keeps its own) take it; a tap anywhere on the row flips it, as VoiceOver's activate does
-private struct NX18SwitchStyle: ToggleStyle {
-    func makeBody(configuration: Configuration) -> some View { NX18Switch(configuration: configuration) }
-}
-private struct NX18Switch: View {
-    let configuration: ToggleStyleConfiguration
-    @Environment(\.isEnabled) private var enabled   // a fixed or greyed row (SettingRow's .disabled): shown, not flipped
-    var body: some View {
-        HStack(spacing: 12) {
-            configuration.label
-            Spacer(minLength: 0)
-            NX18SwitchTrack(on: configuration.isOn)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture { if enabled { configuration.isOn.toggle() } }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isToggle)
-        .accessibilityValue(configuration.isOn ? "On" : "Off")
-        .accessibilityAction { if enabled { configuration.isOn.toggle() } }
-    }
-}
-private struct NX18SwitchTrack: View {
-    let on: Bool
-    @Environment(\.isEnabled) private var enabled
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    var body: some View {
-        Capsule().fill(on ? NX18Palette.cyan : Color(nx18: 0x4A4A50))
-            .frame(width: 51, height: 31)
-            .overlay(alignment: on ? .trailing : .leading) {
-                Circle().fill(.white).padding(2.5).shadow(color: .black.opacity(0.18), radius: 2, y: 1)
-            }
-            .opacity(enabled ? 1 : 0.45)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: on)
-    }
-}
 
 private enum LauncherSheet: Identifiable { case guide, about, acknowledgements; var id: Self { self } }
 
@@ -237,6 +112,7 @@ struct LauncherView: View {
     let artwork: LauncherArtwork
     let play: () -> Void
     let startWith: LauncherShortcut?   // a home screen shortcut the screen opened for (Guide: the guide open); LauncherShortcuts.swift
+    let screen: Int   // this presentation's number (LauncherShortcuts.screen): a shortcut reaches only the current screen
     let checkAtStart: Bool             // shown for the cloud-save check of a start that skips the screen (Skip this screen next time, the Game shortcut): Play's check runs as it appears
     @State private var content: LauncherContent
     @State private var startTaken = false
@@ -255,34 +131,69 @@ struct LauncherView: View {
     @State private var held: HeldStart?            // a check's answer that came while the app was not active: the game starts when it is next in front (startHeld)
     @State private var report: SaveSyncReport?
     @State private var asking: SaveSyncReport.Step?
-    @AppStorage("launcher.advanced") private var advancedOpen = false
+    @State private var pages: [GatePage] = []       // the Gate panel's page stack (LauncherPanel.swift): empty is the main page
+    @State private var confirming: GateAction?      // Reset all settings or Turn off cloud saves, waiting for the question's answer
+    @State private var cardOpen = false             // the NX 18 card over the hero (NX18Card.swift)
+    @State private var cardFocus: NX18CardItem = .picture   // the pad's focus inside the card (§20.1: it starts on the picture)
+    @StateObject private var profileFlow = NX18ProfileFlow()  // the card's Profile rows and their flows (NX18ProfileFlow.swift)
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var arrived = LauncherView.arrivedOnce   // the arrival fade has run (once per launch)
+    @MainActor static var arrivedOnce = false
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass   // the NX 18 card's width and scrolling (cardLayer): the space the Gate has, not the device
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
 
-    init(m: LauncherModel, dir: URL?, content: LauncherContent, artwork: LauncherArtwork, startWith: LauncherShortcut? = nil, checkAtStart: Bool = false, play: @escaping () -> Void) {
-        self.m = m; self.dir = dir; self.artwork = artwork; self.startWith = startWith; self.checkAtStart = checkAtStart; self.play = play
+    init(m: LauncherModel, dir: URL?, content: LauncherContent, artwork: LauncherArtwork, startWith: LauncherShortcut? = nil, checkAtStart: Bool = false, screen: Int = 0, play: @escaping () -> Void) {
+        self.m = m; self.dir = dir; self.artwork = artwork; self.startWith = startWith; self.checkAtStart = checkAtStart; self.screen = screen; self.play = play
         _content = State(initialValue: content)
     }
 
     private var name: String { (info("CFBundleDisplayName") as? String) ?? (info("CFBundleName") as? String) ?? "Game" }
     private var version: String? { (info("CFBundleShortVersionString") as? String).flatMap { $0.isEmpty ? nil : $0 } }
-    private var background: Color { NX18Palette.background(tint: artwork.tint) }
+    private var background: Color { NX18Palette.background(tint: artwork.tint) }   // the art side's: dark in every look
+    // About this game's lists (GuideViewer.swift LauncherAboutSheet): the game's languages by name, and what this app offers, from its rows (§18.1, derived)
+    private var aboutLanguages: [String] { m.gateRow("DM_LANG")?.options?.map { $0.count > 1 ? $0[1] : $0[0] } ?? [] }
+    private var aboutBadges: [String] {
+        var b: [String] = []
+        if let o = m.gateRow("DM_FPS_TARGET")?.options, o.contains(where: { $0.first == "60" }) { b.append("60 fps") }
+        if m.gateRow("DM_UPSCALER") != nil { b.append("MetalFX") }
+        if m.gateRow("DM_DYNAMIC_RESOLUTION") != nil { b.append("Auto scaling") }
+        if m.gateRow("DM_RUMBLE") != nil { b.append("Rumble") }
+        b.append("Touch controls"); b.append("Cloud saves")
+        if content.hasGuide { b.append("Game guide") }
+        if content.manual != nil { b.append("Manual") }
+        return b
+    }
+    private var pageBackground: Color { NX18PageColor.page(tint: artwork.tint) }      // the look's page, with the art's tint (12 % dark, 6 % light), under the backdrop
+    @State private var housingTrailing = false   // the camera housing is on the settings' side (iPhone landscape, top of the phone to the right)
+    // From the window scene's orientation: landscape left has the home side on the left, so the top of the phone, and its camera housing, on the right
+    private static func housingOnTrailing() -> Bool {
+        guard UIDevice.current.userInterfaceIdiom == .phone,
+              let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first(where: { $0.activationState == .foregroundActive }) ??
+                UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else { return true }
+        return scene.effectiveGeometry.interfaceOrientation != .landscapeRight
+    }
     private var here: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }   // this device in the save questions ("This iPad's save"); the Mac says "Mac"
-    private var basicGroups: [LauncherRowGroup] { m.groups(basic: true) }
-    private var advancedGroups: [LauncherRowGroup] { m.groups(basic: false) }
     private var launcherFromEnv: Bool { LauncherModel.launcherSetByEnv() }   // an env file's or the launch's DM_LAUNCHER, not main.m's for a program record
-    private func ring(_ f: LauncherFocus) -> Bool { pad.connected && focus == f && sheet == nil }
+    private func ring(_ f: LauncherFocus) -> Bool { pad.connected && focus == f && sheet == nil && !cardOpen }   // the card's own focus only while it is open
 
     var body: some View {
         GeometryReader { g in
-            let wide = g.size.width > g.size.height * 1.15 && g.size.width >= 640
+            // Side by side whenever the window is clearly landscape and at least 560 pt wide: an iPhone Duo's cover screen in landscape leaves about 590 pt beside its camera, and
+            // stacked there (a 466 pt tall screen) the settings had about 200 pt of height under a 250 pt hero. Below about 760 pt the art takes 40 %
+            let wide = g.size.width > g.size.height * 1.15 && g.size.width >= 560
+            let artShare: CGFloat = g.size.width < 760 ? 0.4 : 0.55   // the settings take 60 % there: at half, "Customize" and "Cloud saves" were cut and the hints wrapped
             let tall = Swift.min(Swift.max(g.size.height * 0.4, 250), 400)
             Group {
                 if wide {
                     HStack(spacing: 0) {
-                        hero(wide: true, width: (g.size.width * 0.55).rounded(), height: g.size.height).frame(width: (g.size.width * 0.55).rounded())
+                        hero(wide: true, width: (g.size.width * artShare).rounded(), height: g.size.height).frame(width: (g.size.width * artShare).rounded())
                         NX18Rails(flowing: true).ignoresSafeArea(edges: .vertical)
-                        settings
+                        // the slab runs to the screen's trailing edge, less the camera housing's inset when it is on that side (iPhone landscape) and a small margin, as at
+                        // its top and bottom: the safe area's other side is only the rounded corner, which the slab's own margin clears
+                        settings(blend: .leading)
+                            .padding(.trailing, housingTrailing ? Swift.max(g.safeAreaInsets.trailing - 6, 4) : 4)
+                            .ignoresSafeArea(.container, edges: .trailing)
                     }
                 } else {
                     VStack(spacing: 0) {
@@ -290,31 +201,45 @@ struct LauncherView: View {
                         HeroHeight(least: tall, most: Swift.max(tall, g.size.height * 0.7)) { hero(wide: false, width: g.size.width, height: tall) }
                             .clipped()
                         NX18Rails(axis: .horizontal, flowing: true).ignoresSafeArea(edges: .horizontal)
-                        settings
+                        settings(blend: .top)
                     }
                 }
             }
-            .onChange(of: g.size) { m.refreshFacts() }   // the window's shape: rotated, or resized under Stage Manager or Split View
+            .onChange(of: g.size, initial: true) { m.refreshFacts(); housingTrailing = Self.housingOnTrailing() }   // the window's shape: rotated, or resized under Stage Manager or Split View
             .onChange(of: wide, initial: true) { stacked = !wide }
         }
-        .background(background.ignoresSafeArea())
-        .preferredColorScheme(.dark)
-        .environment(\.colorScheme, .dark)   // a fullScreenCover from a light-mode app keeps its light traits otherwise, which drew the settings' names black
+        .background(pageBackground.ignoresSafeArea())
+        // The Gate's arrival (owner, 2026-11-17): once per launch it fades in from the launch screen while settling from 101.5 % to its size, 0.55 s, ease-out; under
+        // Reduce Motion a plain 0.3 s fade. Nothing animates after it (the Gate's idle rules, gate-ui §22); a return to the Gate from a game shows it at once
+        .opacity(arrived ? 1 : 0)
+        .scaleEffect(arrived || reduceMotion ? 1 : 1.015)
+        .onAppear {
+            guard !arrived else { return }
+            if Self.arrivedOnce { arrived = true; return }
+            Self.arrivedOnce = true
+            withAnimation(reduceMotion ? .easeOut(duration: 0.3) : .easeOut(duration: 0.55)) { arrived = true }
+        }
+        // The look follows the NX 18 card's Appearance choice through the host's style (NX18Look.swift, DmHostingController.followAppearance); the art side holds itself dark
+        .overlay(alignment: .topLeading) { if cardOpen { cardLayer } }
         .nxTextRoot()   // NX 18's UI font for every text below that names no style (NXFont.swift); the guide and About set it again on their own roots
-        .tint(NX18Palette.cyan)
-        .toggleStyle(NX18SwitchStyle())
+        .tint(GateColor.line)
         .fullScreenCover(isPresented: shown(.guide)) {
             LauncherGuideSheet(content: content, scroller: scroller, closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil,
                                turnNames: pad.connected ? (pad.glyphs.name(NXShoulder.l), pad.glyphs.name(NXShoulder.r)) : nil) { sheet = nil }
+                .preferredColorScheme(.dark)   // the Guide reader stays dark in every look (gate-ui owner check 5)
         }
         .sheet(isPresented: shown(.about), onDismiss: guideAfterClosing) {
             LauncherAboutSheet(about: content.about ?? LauncherAbout(), artwork: artwork, name: name, version: version, scroller: scroller,
-                               closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil) { sheet = nil }
-                .presentationBackground(background)
+                               closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil, languages: aboutLanguages, badges: aboutBadges,
+                               lastPlayed: status.lastPlayed, cloudOn: status.cloud != .off, facts: content.facts,
+                               preset: m.activePreset.map { ($0.rawValue, $0.title) }) { sheet = nil }
+                .presentationBackground(pageBackground)
+                .preferredColorScheme(NX18Appearance.current.scheme)   // a sheet does not take the host's style: the look, set again here
         }
         .sheet(isPresented: shown(.acknowledgements), onDismiss: guideAfterClosing) {   // the app's third-party notices (GuideViewer.swift LauncherNoticesSheet)
             LauncherNoticesSheet(tint: artwork.tint, scroller: scroller, closeGlyph: pad.connected ? pad.glyphs.glyph(.b) : nil) { sheet = nil }
-                .presentationBackground(background)
+                .presentationBackground(pageBackground)
+                .preferredColorScheme(NX18Appearance.current.scheme)
         }
         // The controller sentences name the buttons as the pad labels them (pad.glyphs): handle gets Switch buttons by position, so on an Xbox pad Switch B is its A. The shoulders
         // are in the same place on every pad but named differently (LB on an Xbox pad, L1 on a PlayStation pad), and only they answer: the triggers (LT, L2) are ZL and ZR
@@ -329,6 +254,7 @@ struct LauncherView: View {
             Button("Cancel", role: .cancel) {}
         } message: { r in Text(r.unreadableMessage(here: here) + (pad.connected ? " With a controller: \(pad.glyphs.name(.a)) plays this \(here)'s save, \(pad.glyphs.name(.y)) tries again, \(pad.glyphs.name(.b)) cancels." : "")) }
         .task { await pad.run { handle($0) } }
+        .onChange(of: focus) { NX18RailsIdle.pulse() }   // a touch or a pad move: the rails run one more cycle (GW19)
         .task { await followStatus() }
         .onChange(of: sheet) {          // a button held as a sheet opens or closes (A held while B closes the guide) is no press on what is under it
             pad.holdUntilReleased()
@@ -336,10 +262,11 @@ struct LauncherView: View {
         }
         .onChange(of: cloudPicking) { pad.holdUntilReleased(); if cloudPicking { stopAutoStart("the cloud-save folder picker opened") } }
         .onChange(of: asking) { pad.holdUntilReleased() }        // the press that answered a save question is no press on the settings
-        .onReceive(LauncherShortcuts.requests) { shortcut($0) }   // a home screen shortcut chosen while the screen is up
+        .onReceive(LauncherShortcuts.requests) { if screen == LauncherShortcuts.screen { shortcut($0) } }   // a home screen shortcut chosen while the screen is up, for this screen only
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in startHeld() }   // back in front: a held start goes
         .onReceive(NotificationCenter.default.publisher(for: UIScene.didActivateNotification)) { _ in startHeld() }   // came first in the iOS 27.3 Simulator, the application still inactive, and the application's then started it: this one is for an application that stays active (a TV's scene, not tried)
         .onAppear {
+            NX18Profile.shared.lookAtFolder()   // the NX 18 folder's Profile at Gate open: a cheap look within 1 s (§20.5)
             guard !startTaken else { return }
             if let s = startWith { startTaken = true; shortcut(s) }   // the one the app was opened with
             else if checkAtStart { startTaken = true; start(); autoCheck = check }   // a skipped start's cloud-save check: as if Play had been pressed, the game starting by itself when nothing is asked
@@ -390,8 +317,15 @@ struct LauncherView: View {
     private func hero(wide: Bool, width: CGFloat, height: CGFloat) -> some View {
         let iconSide = Swift.min(Swift.max(height * 0.3, wide ? 96 : 72), 150)
         return VStack(alignment: .leading, spacing: 0) {
-            NX18Mark(height: 20)
-                .background { if artwork.art != nil { NX18MarkShade(strong: reduceTransparency) } }   // over art only: the plain backdrop is dark already
+            Button { openCard() } label: {
+                NX18Mark(height: 24)
+                    .background { if artwork.art != nil { NX18MarkShade(strong: reduceTransparency) } }   // over art only: the plain backdrop is dark already
+                    .frame(minWidth: 44, minHeight: 44, alignment: .leading).contentShape(Rectangle())   // a 44 pt target (G12)
+            }
+            .buttonStyle(NX18PressStyle())
+            .nx18Focus(ring(.mark), cornerRadius: 8)
+            .accessibilityLabel("NX 18").accessibilityHint("Opens the NX 18 card: the version and Appearance")
+            .padding(.top, -10)
             if artwork.art == nil, height >= 300, let icon = artwork.icon {   // the sharp icon only where it leaves the name and buttons room (the blurred one stays behind)
                 Image(uiImage: icon).resizable().aspectRatio(1, contentMode: .fit)
                     .frame(width: iconSide, height: iconSide)
@@ -413,7 +347,7 @@ struct LauncherView: View {
                         .shadow(color: .black.opacity(0.35), radius: 6, y: 1)
                         .accessibilityAddTraits(.isHeader)
                 }
-                LauncherStatusLine(status: status, color: NX18Palette.onArt).padding(.top, 5)
+                LauncherStatusLine(status: gateStatus, color: NX18Palette.onArt).padding(.top, 5)
                 actions.padding(.top, 16)
                 if checking { checkingLine.padding(.top, 10) }
             }
@@ -424,6 +358,7 @@ struct LauncherView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .dynamicTypeSize(...DynamicTypeSize.accessibility1)
         .background { artLayer(wide: wide).ignoresSafeArea() }
+        .environment(\.colorScheme, .dark)   // the art side stays dark in every look: art, scrim, title, status line, Play, Guide, About and the mark (§11a.2)
     }
 
     // The art aspect-filled and clipped (else the icon enlarged and blurred), fading into the background to the right (beside the settings) and to the bottom
@@ -469,7 +404,12 @@ struct LauncherView: View {
 
     // Play, then the guide and About when the app has them, and "Press A to play" (+ while the outline is elsewhere) while a controller is connected: in one line, with the buttons' full names when they fit, else
     // without the hint, else short names, else icons only; else Play above the rest
+    // Glass on the hero buttons only over art, and solid while the NX 18 card is open over them (GW26)
+    private var heroGlass: Bool { artwork.art != nil && !cardOpen }
     private var actions: some View {
+        GlassEffectContainer(spacing: 4) { actionsLaidOut }   // one container: below the 10 pt gap, so the buttons never merge
+    }
+    private var actionsLaidOut: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) { playButton; guideButton(.full); aboutButton(.full); padHint }
             HStack(spacing: 12) { playButton; guideButton(.full); aboutButton(.full) }
@@ -492,10 +432,10 @@ struct LauncherView: View {
             }
             .foregroundStyle(NX18Palette.charcoal)
             .padding(.horizontal, 34).frame(minHeight: 46)
-            .background(Capsule().fill(NX18Palette.coral))
+            .nx18Surface(Capsule(), fill: NX18Palette.coral, hairline: .clear, tint: Color(nx18: 0xF48875), interactive: true, art: heroGlass)   // faint coral glass over art (§11)
             .contentShape(Capsule())
         }
-        .buttonStyle(NX18PressStyle())
+        .buttonStyle(NX18HeroButtonStyle())
         .nx18Focus(ring(.play), cornerRadius: 100)
         .accessibilityLabel("Play")
         .accessibilityHint("Starts the game with these settings")
@@ -532,9 +472,12 @@ struct LauncherView: View {
     /// An answer to play that comes while the app is not active waits for it to be back in front (startHeld)
     private func start() {
         if checking { return }
+        setenv("DM_PLAY_AT", String(format: "%.6f", Date().timeIntervalSince1970), 1)   // Play: the start's timeline counts from here, the cloud-save check in it (dm/host/hle_lifecycle.c)
         check += 1; checking = true; asking = nil; held = nil   // a held answer is old: this Play checks again
         let mine = check
         dm_cloud_saves_env()   // DM_SAVE_SYNC from the picked folder, as the game's mount will read it (front_ios.m calls it again at the start)
+        dm_profile_env()       // the Profile's name and picture for the games (NX18Profile.swift); an env.txt value wins
+        setenv("DM_PLAY_PRESET", m.activePreset?.rawValue ?? "custom", 1)   // the play record's preset for this session (PlayRecord.swift)
         DispatchQueue.global(qos: .userInitiated).async {
             let r = Self.compare()
             DispatchQueue.main.async {
@@ -577,6 +520,52 @@ struct LauncherView: View {
     /// The check a skipped start runs by itself (checkAtStart) stops when the player asks for the screen while it runs (a Launcher or Guide shortcut, the guide, About this game
     /// or the folder picker opened): the game does not start under them when it ends, and Play checks again. Its answer held for the app's return (startHeld) is dropped the same
     /// way. A check Play started carries on, as it always did
+    // The NX 18 card: under the mark, over the hero; a tap outside only closes it (it never reaches what is under it), and focus goes back to the mark
+    private func openCard() {
+        stopAutoStart("the NX 18 card opened")
+        cardFocus = .picture; cardOpen = true; profileFlow.strip = nil; profileFlow.note = nil
+        NX18Profile.shared.refreshFolderState()
+        if pad.connected { focus = .mark }
+        pad.holdUntilReleased()
+    }
+    private func closeCard() { cardOpen = false; if pad.connected { focus = .mark }; pad.holdUntilReleased() }
+    private var cardLayer: some View {
+        GeometryReader { g in
+            let wide = g.size.width > g.size.height * 1.15 && g.size.width >= 640
+            let w: CGFloat = horizontalSizeClass == .regular && verticalSizeClass == .regular ? 360 : wide ? 320 : g.size.width - 32   // §20.1: room on both axes (an iPad, an open iPhone Duo) by size class, not the device
+            ZStack(alignment: .topLeading) {
+                // the Gate behind goes soft, as under a console's quick menu: the system's thin material (the compositor's blur, no work of ours per frame), and a light dim
+                // over it so the card stands out (owner, 2026-11-16); both go when the card closes
+                ZStack { Rectangle().fill(.ultraThinMaterial); Color.black.opacity(0.15) }
+                    .ignoresSafeArea().contentShape(Rectangle()).onTapGesture { closeCard() }
+                    .accessibilityLabel("Close the NX 18 card").accessibilityAddTraits(.isButton)
+                NX18Card(gameVersion: version, focused: pad.connected ? cardFocus : nil, glyphs: pad.connected ? pad.glyphs : nil, close: { closeCard() }, art: artwork.art != nil,
+                         profileRows: cardProfileRows, scrolls: wide && verticalSizeClass == .compact)   // short of height (iPhone landscape): the body scrolls
+                    .frame(width: w)
+                    .frame(maxHeight: g.size.height - 58 - 21, alignment: .top)   // §20.1: in iPhone landscape the body scrolls under the fixed header
+                    .padding(.leading, 16).padding(.top, 58)
+            }
+        }
+        .transition(.opacity)
+        .nx18ProfileFlow(profileFlow)
+    }
+    private var cardProfileRows: NX18CardProfile {
+        let f = profileFlow, padOn = pad.connected
+        return NX18CardProfile(busy: f.busy, note: f.note, strip: padOn ? f.strip : nil, shared: f.cloudShared,
+                               choosePicture: { f.choosePicture(pad: false) }, editName: { f.editName(pad: false) },
+                               toggle: { f.toggleProfile() }, chooseFolder: { f.chooseFolder(pad: false) }, saves: { f.savesTapped() })
+    }
+    // The card's pad order (§20.1), as it reads top to bottom: ✕, the picture, name, the switch, the folder and saves rows while the switch is on, then Appearance
+    private var cardOrder: [NX18CardItem] {
+        var o: [NX18CardItem] = [.close, .picture, .name, .profile]
+        if NX18Profile.shared.enabled {
+            o.append(.folder)
+            if case .chosen = NX18Profile.shared.folderState { o.append(.saves) }
+        }
+        o.append(.appearance)
+        return o
+    }
+
     private func stopAutoStart(_ why: String) {
         guard autoCheck != 0 else { return }
         let running = checking && check == autoCheck
@@ -617,12 +606,11 @@ struct LauncherView: View {
         }
     }
     @ViewBuilder private func aboutButton(_ l: ButtonLabel) -> some View {
-        if content.hasAbout { smallButton("About this game", short: "About", icon: "info.circle", label: l, focus: .about) { sheet = .about } }
+        smallButton("About this game", short: "About", icon: "info.circle", label: l, focus: .about) { sheet = .about }   // always: On NX 18 and Your play always have content (§18)
     }
     // pad: the controller button that presses it from anywhere on the screen (Y: the guide), its glyph at the end of a named button while a controller is connected
     private func smallButton(_ title: String, short: String, icon: String, label: ButtonLabel, focus f: LauncherFocus, pad button: NXButton? = nil,
                              action: @escaping () -> Void) -> some View {
-        let fill = NX18Palette.row.opacity(reduceTransparency || artwork.art == nil ? 1 : 0.82)
         let glyph = pad.connected ? button.map { pad.glyphs.glyph($0) } : nil
         return Button(action: action) {
             Group {
@@ -638,11 +626,10 @@ struct LauncherView: View {
             }
             .nxFont(.subheadline, weight: .semibold).foregroundStyle(.white).lineLimit(1).fixedSize()
             .frame(minHeight: 40)
-            .background(Capsule().fill(fill))
-            .overlay(Capsule().strokeBorder(NX18Palette.separator, lineWidth: 1))
+            .nx18Surface(Capsule(), fill: NX18Palette.row, hairline: NX18Palette.separator, tint: NX18Palette.charcoal.opacity(0.25), art: heroGlass)   // faint glass over art (§11)
             .contentShape(Capsule())
         }
-        .buttonStyle(NX18PressStyle())
+        .buttonStyle(NX18HeroButtonStyle())
         .nx18Focus(ring(f), cornerRadius: 100)
         .accessibilityLabel(title)
         .accessibilityHint(glyph != nil && button != nil ? "Or press \(pad.glyphs.name(button ?? .y))" : "")
@@ -666,119 +653,56 @@ struct LauncherView: View {
 
     // MARK: The settings side
 
-    private var focusedPreset: LauncherPreset? {
-        guard pad.connected, sheet == nil, case .preset(let p)? = focus else { return nil }
-        return p
+    // The Gate's system menu (LauncherPanel.swift): the slab with its pages, beside the art (or under it, stacked)
+    private func settings(blend: Edge) -> some View {
+        GatePanel(m: m, pages: $pages, focus: focus, padShown: pad.connected && sheet == nil && !cloudPicking && !cardOpen, quiet: cardOpen, glyphs: pad.glyphs, status: status.cloud,
+                  gateAtStartLocked: launcherFromEnv, footer: AnyView(panelFooter), acknowledgements: LauncherNotices.available,
+                  touched: { focus = $0 }, act: gateAct)
+            .background { LauncherBackdrop(wash: artwork.wash, page: pageBackground, edge: background, blend: blend).ignoresSafeArea() }
+            .sheet(isPresented: $cloudPicking, onDismiss: guideAfterClosing) {
+                DocumentPicker(types: [.folder]) { url in
+                    cloudPicking = false
+                    if dm_store_cloud_saves(url) {
+                        fputs("launcher: cloud saves folder chosen\n", stderr)
+                        if dm_nx18_cloud_shared() { dm_set_nx18_cloud_shared(false); profileFlow.cloudShared = false }   // a folder picked here is this game's own: its saves leave the NX 18 folder
+                    }
+                    else { fputs("launcher: cloud saves folder could not be remembered\n", stderr) }
+                    refreshCloud()
+                } onCancel: { cloudPicking = false }
+            }
+            .alert(confirming == .confirmReset ? "Reset all settings?" : "Turn off cloud saves?", isPresented: confirmShown) {
+                Button(confirming == .confirmReset ? "Reset" : "Turn Off", role: .destructive) { confirmYes() }
+                Button("Cancel", role: .cancel) { confirming = nil }
+            } message: {
+                let what = confirming == .confirmReset ? "Every setting goes back to the values this game was tested with. Gate at start and cloud saves stay as they are."
+                                                       : "This device keeps its own save. Your other devices keep theirs."
+                Text(verbatim: what + (pad.connected ? " With a controller: \(pad.glyphs.name(.a)) confirms, \(pad.glyphs.name(.b)) cancels." : ""))   // one string: Text's + is deprecated in iOS 26
+            }
     }
-
-    private var settings: some View {
-        ScrollViewReader { proxy in
-            List {
-                if m.hasPresets {
-                    Section {
-                        PresetChips(m: m, focused: focusedPreset)
-                            .padding(.vertical, 6)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .listRowBackground(Color.clear)
-                            .listRowInsets(EdgeInsets(top: 4, leading: 4, bottom: 0, trailing: 4))
-                            .id(LauncherFocus.preset(.balanced))
-                    }
-                }
-                rows(basicGroups)
-                if !advancedGroups.isEmpty {
-                    Section {
-                        Button { toggleAdvanced() } label: {
-                            HStack {
-                                Text("Advanced settings").foregroundStyle(.white)
-                                Spacer()
-                                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(NX18Palette.muted)   // system: symbol
-                                    .rotationEffect(.degrees(advancedOpen ? 90 : 0))
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .listRowBackground(rowBackground(ring(.advanced)))
-                        .accessibilityValue(advancedOpen ? "Shown" : "Hidden")
-                        .accessibilityHint(advancedOpen ? "Hides the other settings" : "Shows the other settings")
-                        .id(LauncherFocus.advanced)
-                    }
-                    if advancedOpen { rows(advancedGroups) }
-                }
-                Section {
-                    Button("Reset to tested defaults") { m.reset() }
-                        .foregroundStyle(NX18Palette.coral.opacity(m.changed ? 1 : 0.55))
-                        .disabled(!m.changed)
-                        .listRowBackground(rowBackground(ring(.reset), fill: .clear))
-                        .id(LauncherFocus.reset)
-                } footer: {
-                    Text("Brings back all settings this game was tested with.").nxFontIfCustom(.footnote).foregroundStyle(NX18Palette.muted)
-                }
-                CloudSavesSection(picking: $cloudPicking, focused: ring(.cloud), closed: guideAfterClosing) { refreshCloud() }
-                Section {
-                    Toggle(isOn: $m.skipAtStart) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Skip this screen next time")
-                            Text(launcherFromEnv
-                                 ? "Set by an env file"   // as the in-game menu's Settings screen at start says it (GameMenu.swift)
-                                 : "The game starts at once with these settings. To see this screen again, use Settings screen at start in the in-game menu (or hold a controller button while the app opens).")
-                                .nxFont(.footnote).foregroundStyle(NX18Palette.muted)
-                        }
-                    }
-                    .disabled(launcherFromEnv)
-                    .listRowBackground(rowBackground(ring(.skip)))
-                    .id(LauncherFocus.skip)
-                } footer: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if let v = version { Text("Version \(v)") }
-                        Text(NX18Credits.buttonIcons)
-                    }
-                    .nxFontIfCustom(.footnote).foregroundStyle(NX18Palette.muted)
-                }
-                if LauncherNotices.available {   // the third-party notices the app carries (dm/ThirdPartyNotices.txt), below the credit line
-                    Section {
-                        Button { sheet = .acknowledgements } label: {
-                            HStack {
-                                Text("Acknowledgements").foregroundStyle(.white)
-                                Spacer()
-                                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(NX18Palette.muted)   // system: symbol
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .listRowBackground(rowBackground(ring(.acknowledgements)))
-                        .accessibilityHint("Shows the licenses of the code and art this app is built with")
-                        .id(LauncherFocus.acknowledgements)
-                    }
-                }
-            }
-            .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
-            .background(background)
-            .listSectionSpacing(14)
-            .onChange(of: focus) { _, f in
-                guard pad.connected, let f, f != .play, f != .guide, f != .about else { return }
-                let id: LauncherFocus
-                if case .preset = f { id = .preset(.balanced) } else { id = f }
-                if reduceMotion { proxy.scrollTo(id) } else { withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(id) } }
-            }
+    private var panelFooter: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let v = version { Text("Version \(v)") }
+            if let n = nx18Line { Text(verbatim: n) }
+            Text(NX18Credits.buttonIcons)
         }
     }
-
-    private func rows(_ groups: [LauncherRowGroup]) -> some View {
-        ForEach(groups) { g in
-            Section {
-                ForEach(g.rows) { s in
-                    SettingRow(s: s, m: m)
-                        .listRowBackground(rowBackground(ring(.row(s.env)), first: s.env == g.rows.first?.env, last: s.env == g.rows.last?.env))
-                        .id(LauncherFocus.row(s.env))
-                }
-            } header: {
-                NX18SectionHeader(g.section)
-            }
-            .listRowSeparatorTint(NX18Palette.separator)
+    private var confirmShown: Binding<Bool> { Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }) }
+    private func confirmYes() {
+        switch confirming {
+        case .confirmReset?: if m.changed { m.reset() }
+        case .confirmCloudOff?:
+            if dm_nx18_cloud_shared() { dm_set_nx18_cloud_shared(false); profileFlow.cloudShared = false }   // off means off: not in the NX 18 folder either
+            dm_clear_cloud_saves(); refreshCloud(); fputs("launcher: cloud saves turned off\n", stderr)
+        default: break
         }
+        confirming = nil
     }
-
-    private func toggleAdvanced() {
-        if reduceMotion { advancedOpen.toggle() } else { withAnimation(.easeInOut(duration: 0.2)) { advancedOpen.toggle() } }
+    private func gateAct(_ a: GateAction) {
+        switch a {
+        case .chooseCloudFolder: cloudPicking = true
+        case .confirmReset, .confirmCloudOff: confirming = a
+        case .acknowledgements: if LauncherNotices.available { sheet = .acknowledgements }
+        }
     }
 
     private func openGuide() {
@@ -796,45 +720,96 @@ struct LauncherView: View {
             ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("save")
         if let saves { status.lastPlayed = await Task.detached(priority: .utility) { LauncherStatus.lastModified(under: saves) }.value }
         status.console = m.console.flatMap(LauncherStatus.Console.init(rawValue:))
-        refreshCloud()
-        while !Task.isCancelled {
-            let free = os_proc_available_memory()
-            status.memoryFree = free > 0 ? UInt64(free) : nil
-            try? await Task.sleep(for: .seconds(2))
-        }
+        refreshCloud()   // free memory left the line with the Gate panel (gate-ui O4), and its 2-second refresh with it
     }
-    private func refreshCloud() { status.cloud = dm_cloud_saves_path(nil) != nil ? .on : .off }
+    // The Gate's status line (gate-ui O4): only the console and the preset state; last played and cloud saves live in About this game › Your play
+    private var gateStatus: LauncherStatus {
+        var s = LauncherStatus()
+        s.console = status.console
+        s.preset = m.hasPresets ? m.presetLabel : nil
+        return s
+    }
+    // This game's cloud-save folder as the start uses it (CloudSaves.m dm_cloud_saves_env): the NX 18 folder while the Profile shares this game's saves there, else the game's own
+    // folder. The status and the Cloud saves page read only the own folder before, so a game whose saves went to the NX 18 folder (the Profile's Connect or Create) showed Off
+    private func refreshCloud() { status.cloud = dmCloudFolderName() != nil ? .on : .off }
 
     // MARK: The controller (LauncherController.swift)
 
+    // The focus lines of the page the panel shows (gate-ui §8 LauncherFocusMap): on the main page Play's line, the presets, Back to Balanced while the values match no
+    // preset, the first tile row, the two doors, the second tile row and the mod tiles; on a page its back button, then its rows, one a line
     private var focusMap: LauncherFocusMap {
         var lines: [[LauncherFocus]] = []
-        var top: [LauncherFocus] = [.play]
-        if content.hasGuide { top.append(.guide) }
-        if content.hasAbout { top.append(.about) }
-        // Play's line and the chips in the order they are on the screen: stacked, the chips are at the top of the settings, below Play; side by side, they top the settings beside it
-        if stacked { lines.append(top) }
-        if m.hasPresets { lines.append(LauncherPreset.allCases.map { .preset($0) }) }
-        if !stacked { lines.append(top) }
-        lines += basicGroups.flatMap { $0.rows.map { [LauncherFocus.row($0.env)] } }
-        if !advancedGroups.isEmpty {
-            lines.append([.advanced])
-            if advancedOpen { lines += advancedGroups.flatMap { $0.rows.map { [LauncherFocus.row($0.env)] } } }
+        switch pages.last ?? .main {
+        case .main:
+            var top: [LauncherFocus] = [.play]
+            if content.hasGuide { top.append(.guide) }
+            top.append(.about)
+            lines.append([.mark])   // the NX 18 mark above Play (G12)
+            lines.append(top)
+            if m.hasPresets {
+                let chips = m.offeredPresets.map { LauncherFocus.preset($0) }
+                let cols = stackedChips ? 2 : chips.count
+                lines += stride(from: 0, to: chips.count, by: cols).map { Array(chips[$0..<Swift.min($0 + cols, chips.count)]) }
+                if m.activePreset == nil { lines.append([.backToPreset]) }
+            }
+            for row in [m.gateFirstTiles, m.gateSecondTiles, m.gateModTiles] where !row.isEmpty {
+                lines.append(row.map { LauncherFocus.tile($0) })
+                if row == m.gateFirstTiles { lines.append([.door("customize"), .door("cloud")]) }   // the doors sit between the tile rows (G10)
+            }
+            if m.gateFirstTiles.isEmpty { lines.insert([.door("customize"), .door("cloud")], at: lines.count - [m.gateSecondTiles, m.gateModTiles].filter { !$0.isEmpty }.count) }
+        case .customize:
+            lines.append([.pageBack])
+            for g in m.gateCustomizeGroups {
+                lines += g.rows.map { [LauncherFocus.row($0.env)] }
+                if g.title == "Other choices" { lines.append([.action("gate")]); if LauncherNotices.available { lines.append([.acknowledgements]) } }
+            }
+            if !m.gateCustomizeGroups.contains(where: { $0.title == "Other choices" }) {
+                lines.append([.action("gate")]); if LauncherNotices.available { lines.append([.acknowledgements]) }
+            }
+            lines.append([.reset])
+        case .cloud:
+            lines += [[.pageBack], [.action("cloud.choose")]]
+            if status.cloud != .off { lines.append([.action("cloud.off")]) }
+        case .touch:
+            lines.append([.pageBack]); lines += m.gateTouchRows.map { [LauncherFocus.row($0.env)] }
+        case .options(let env):
+            lines.append([.pageBack]); lines += (m.gateRow(env)?.options ?? []).map { [LauncherFocus.option(env, $0[0])] }
         }
-        lines += [[.reset], [.cloud], [.skip]]
-        if LauncherNotices.available { lines.append([.acknowledgements]) }
         return LauncherFocusMap(lines: lines)
     }
+    @Environment(\.dynamicTypeSize) private var typeSize
+    private var stackedChips: Bool { typeSize >= .xxLarge }   // the panel's 2 × 2 (and one column) chips: two a line for the controller too
 
     private func handle(_ e: LauncherPadEvent) {
+        if cardOpen {   // the NX 18 card: up / down between ✕ and Appearance, left / right step Appearance, A presses, B closes; L / R wait until it closes (§20.1)
+            switch e {
+            case .up, .down:
+                let o = cardOrder, i = o.firstIndex(of: cardFocus) ?? (o.firstIndex(of: .picture) ?? 0)
+                cardFocus = o[max(0, min(o.count - 1, i + (e == .down ? 1 : -1)))]; profileFlow.strip = nil
+            case .left, .right: if cardFocus == .appearance { NX18Appearance.current = NX18Appearance.current.stepped(e == .right ? 1 : -1) }   // no swipe-step on the saves row (§20.2)
+            case .a:
+                switch cardFocus {
+                case .close: closeCard()
+                case .appearance: NX18Appearance.current = NX18Appearance.current.stepped(1)
+                case .picture: profileFlow.choosePicture(pad: true)
+                case .name: profileFlow.editName(pad: true)
+                case .profile: profileFlow.toggleProfile()
+                case .folder: profileFlow.chooseFolder(pad: true)
+                case .saves: profileFlow.savesTapped()
+                }
+            case .b: closeCard()
+            default: break
+            }
+            return
+        }
         if let open = sheet {   // a viewer is up: what it takes itself (the guide's page: every button but ZL / ZR, GuideViewer.swift), else B closes it, up / down scroll, L / R switch between the guide and the manual
             if scroller.pad?(e) == true { return }
             switch e {
             case .b: sheet = nil
             case .up: scroller.scroll?(-160)
             case .down: scroller.scroll?(160)
-            case .l, .left: if open == .guide { scroller.page?(-1) } else if open == .acknowledgements { scroller.scroll?(-600) }   // the notices: L / R a screenful
-            case .r, .right: if open == .guide { scroller.page?(1) } else if open == .acknowledgements { scroller.scroll?(600) }
+            case .l, .left: if open == .guide || open == .about { scroller.page?(-1) } else if open == .acknowledgements { scroller.scroll?(-600) }   // About: the section before   // the notices: L / R a screenful
+            case .r, .right: if open == .guide || open == .about { scroller.page?(1) } else if open == .acknowledgements { scroller.scroll?(600) }
             default: break
             }
             return
@@ -852,22 +827,40 @@ struct LauncherView: View {
             return
         }
         if checking { if e == .b { playWithout() }; return }   // B plays without the cloud's save; nothing else while it is compared
+        if let c = confirming {   // Reset all settings or Turn off cloud saves asks first: A confirms, B cancels
+            if e == .a { confirming = c; confirmYes() } else if e == .b { confirming = nil }
+            return
+        }
+        // L and R step the drawn presets with wrap from anywhere; X is Undo while a preset change's toast shows, else goes back to the base preset while Custom (presets-first W9)
+        if m.hasPresets, e == .l || e == .r { m.stepPreset(e == .r ? 1 : -1); return }
+        if e == .x { if m.undoState != nil { m.undo() } else if m.isCustom { m.backToBase() }; return }
         let map = focusMap
-        // An item no longer drawn: Play, but the Advanced header for one of its rows (Advanced closed by touch), so the controller goes on from where it was
-        let cur = focus.flatMap { map.contains($0) ? $0 : nil }
-            ?? (advancedGroups.contains { $0.rows.contains { LauncherFocus.row($0.env) == focus } } ? .advanced : .play)
+        // An item no longer drawn (a page changed by touch, Back to Balanced gone): the page's first item, or Play on the main page
+        let cur = focus.flatMap { map.contains($0) ? $0 : nil } ?? (pages.isEmpty ? .play : map.lines.first?.first ?? .play)
         if focus != cur { focus = cur }
         switch e {
         case .up, .down: focus = map.vertical(cur, e == .down ? 1 : -1)
         case .left, .right:
             let d = e == .right ? 1 : -1
+            // Left and right only move: a tile changes with A alone (owner, 2026-11-17), and left from the slab's first column goes over to the hero's About this game
+            // (side by side; stacked, nothing is to its left). A list row on a page keeps its ‹ › step
             if let f = map.horizontal(cur, d) { focus = f }
-            else if case .row(let env) = cur, let s = m.settings.first(where: { $0.env == env }) { m.advance(s, by: d) }
-            else if cur == .advanced, advancedOpen != (d > 0) { toggleAdvanced() }
+            else if case .row(let env) = cur, let s = m.gateRow(env) { m.advance(s, by: d) }
+            else if case .tile = cur, d < 0, !stacked { focus = .about }
         case .a: activate(cur)
+        case .b:   // back a page (focus returns to what opened it), or on the main page to Play
+            if let p = pages.popLast() {
+                switch p {
+                case .customize: focus = .door("customize")
+                case .cloud: focus = .door("cloud")
+                case .touch: focus = .tile("touch")
+                case .options(let env): focus = pages.last == nil ? .tile(env) : .row(env)
+                case .main: focus = .play
+                }
+            } else { focus = .play }
         case .plus: start()
         case .y: openGuide()
-        case .b, .x, .minus, .l, .r, .zl, .zr: break
+        case .x, .minus, .l, .r, .zl, .zr: break
         }
     }
 
@@ -876,13 +869,27 @@ struct LauncherView: View {
         case .preset(let p): m.applyPreset(p)
         case .play: start()
         case .guide: openGuide()
-        case .about: if content.hasAbout { sheet = .about }
-        case .row(let env):
-            if let s = m.settings.first(where: { $0.env == env }), s.kind != "range" { m.advance(s, by: 1) }
-        case .advanced: toggleAdvanced()
-        case .reset: if m.changed { m.reset() }
-        case .cloud: cloudPicking = true
-        case .skip: if !launcherFromEnv { m.skipAtStart.toggle() }
+        case .about: sheet = .about
+        case .mark: openCard()
+        case .card: break   // the card's own items: NX18Card handles them (handle)
+        case .backToPreset: m.backToBase()
+        case .door("customize"): pages.append(.customize); focus = .pageBack
+        case .door("cloud"): pages.append(.cloud); focus = .pageBack
+        case .door: break
+        case .tile("touch"): pages.append(.touch); focus = .pageBack
+        case .tile(let env), .row(let env):
+            guard let s = m.gateRow(env), m.editable(s) else { return }
+            if s.kind == "choice", (s.options?.count ?? 0) >= 3 { pages.append(.options(env)); focus = .option(env, m.shown(s)) }
+            else if s.kind != "range" { m.advance(s, by: 1) }
+        case .option(let env, let v):
+            guard let s = m.gateRow(env), m.canPick(s, v), !m.fixed.contains(env) else { return }
+            m.pick(s, v); pages.removeLast(); focus = pages.isEmpty ? .tile(env) : .row(env)
+        case .action("gate"): if !launcherFromEnv { m.skipAtStart.toggle() }
+        case .action("cloud.choose"): cloudPicking = true
+        case .action("cloud.off"): confirming = .confirmCloudOff
+        case .action: break
+        case .pageBack: handle(.b)
+        case .reset: if m.changed { confirming = .confirmReset }
         case .acknowledgements: if LauncherNotices.available { sheet = .acknowledgements }
         }
     }
@@ -892,9 +899,24 @@ struct LauncherView: View {
 // skipped. True also while the player's own skip waits a moment for a held controller button: done is then called (the game starts) without the screen, or the screen shows. With
 // cloud saves on, a skip the player chose (Skip this screen next time, the Game shortcut) returns true and shows the screen running the cloud-save check, which calls done itself
 // when there is nothing to ask
+// The first-start acknowledgement (NX18Welcome.swift, gate-ui §21.2a) comes first when it is due, before launcher.json is read, so an app with no Gate and every skipped start ask
+// too: its panel shows, true is returned, and after I understand the start goes on as it would have (gateStart), done called at once when that start has no screen
 @_cdecl("dm_show_launcher")
 public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @convention(c) () -> Void) -> Bool {
     nonisolated(unsafe) let viewController = viewController, done = done   // a raw pointer and a C callback: not Sendable, but front_ios.m hands them over on the main thread, where they stay
+    return MainActor.assumeIsolated {
+        guard NX18Acknowledge.due() else { return gateStart(viewController, done) }
+        let dir = getenv("DM_APP_DM").map { URL(fileURLWithPath: String(cString: $0)) } ?? Bundle.main.resourceURL?.appendingPathComponent("dm")
+        let content = LauncherContent.find(dir: dir, lang: ProcessInfo.processInfo.environment["DM_LANG"])
+        let parent = Unmanaged<UIViewController>.fromOpaque(viewController).takeUnretainedValue()
+        NX18Acknowledge.present(on: parent, artwork: LauncherArtwork.load(content)) {
+            if !gateStart(viewController, done) { done() }
+        }
+        return true
+    }
+}
+@MainActor private func gateStart(_ viewController: UnsafeMutableRawPointer, _ done: @escaping @convention(c) () -> Void) -> Bool {
+    nonisolated(unsafe) let viewController = viewController
     return MainActor.assumeIsolated {   // front_ios.m calls it from its view controller on the main thread (UIKit); gameMenuModel is main-actor state (GameMenu.swift)
         // a game of several programs (main.m): the running program's settings, in its dm/p<N>
         let dir = getenv("DM_APP_DM").map { URL(fileURLWithPath: String(cString: $0)) } ?? Bundle.main.resourceURL?.appendingPathComponent("dm")
@@ -907,7 +929,7 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
         guard let url = dir?.appendingPathComponent("launcher.json"), let data = try? Data(contentsOf: url) else { return none() }
         guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return none() }
         let model = LauncherModel(file.settings)
-        model.console = file.console
+        model.takeList(file)   // the console, the drawn presets and their moves, then the stored base preset
         model.follow(iosDeviceFacts, on: [.GCControllerDidConnect, .GCControllerDidDisconnect, UIScene.willConnectNotification, UIScene.didDisconnectNotification])
         gameMenuModel = model   // the in-game menu shows and saves the same choices (GameMenu.swift)
         let parent = Unmanaged<UIViewController>.fromOpaque(viewController).takeUnretainedValue()
@@ -960,11 +982,21 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
 
 // The settings screen over parent; Play puts the settings into the environment, takes the screen away and calls done (front_ios.m starts the game)
 @MainActor private func presentLauncher(_ model: LauncherModel, _ file: SettingsFile, dir: URL?, on parent: UIViewController, startWith: LauncherShortcut? = nil, checkAtStart: Bool = false,
-                                         done: @escaping @convention(c) () -> Void) {
+                                         welcomed: Bool = false, done: @escaping @convention(c) () -> Void) {
     let content = LauncherContent.find(dir: dir, lang: model.values["DM_LANG"] ?? ProcessInfo.processInfo.environment["DM_LANG"])
     let artwork = LauncherArtwork.load(content)
-    var host: UIViewController?
-    let view = LauncherView(m: model, dir: dir, content: content, artwork: artwork, startWith: startWith, checkAtStart: checkAtStart) {
+    // The welcome (NX18Welcome.swift, gate-ui §21.1): on the first Gate of this app, before the Gate is built; not for the skipped start's cloud-save check, nor a shortcut's guide
+    if !welcomed, !checkAtStart, startWith == nil, NX18WelcomeGate.due() {
+        NX18WelcomeGate.present(on: parent, artwork: artwork) {
+            presentLauncher(model, file, dir: dir, on: parent, startWith: startWith, checkAtStart: checkAtStart, welcomed: true, done: done)
+        }
+        return
+    }
+    // Weak: the view holds this closure and the hosting controller holds the view, so a strong hold would keep the screen, its art and its controller poll alive whenever it goes
+    // without Play (Play sets it to nil before it dismisses). While the screen is up its presenter holds it
+    weak var host: UIViewController?
+    LauncherShortcuts.screen += 1
+    let view = LauncherView(m: model, dir: dir, content: content, artwork: artwork, startWith: startWith, checkAtStart: checkAtStart, screen: LauncherShortcuts.screen) {
         guard let h = host else { return }
         host = nil
         LauncherShortcuts.screenUp = false   // a shortcut from now on finds the game running
@@ -974,10 +1006,46 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
         (h.presentingViewController ?? h).dismiss(animated: false) { done(); metalDeviceMade = true; model.refreshFacts() }   // done() started the game, whose device is made: the facts learn MetalFX now
     }
     let h = DmHostingController(rootView: view)
-    h.overrideUserInterfaceStyle = .dark   // the screen is always dark, whatever the device's appearance: pickers and menus too
+    h.followAppearance()   // the look the NX 18 card's Appearance asks for (Match device by default): the screen, its sheets, pickers and menus; the art side holds itself dark
     h.modalPresentationStyle = .fullScreen
     host = h
     LauncherShortcuts.screenUp = true
     parent.present(h, animated: false)
     fputs("launcher: \(file.settings.count) settings shown\(content.art != nil ? ", with art" : "")\(artwork.logo != nil ? ", logo" : "")\(content.guide != nil ? ", game guide" : "")\(content.manual != nil ? ", manual" : "")\(content.hasAbout ? ", about" : "")\n", stderr)
 }
+
+// The page behind the settings slab: the art's colours (LauncherArtwork.wash, made once, 48 × 27 and blurred) drawn scaled up as a soft multi-colour gradient, under the look's
+// page colour so it stays calm (more page in light, so the opaque slab's text keeps its contrast), fading into the art side's colour at the edge it meets (the divider), so the
+// two read as one backdrop. Static: an image and two fills, nothing that animates or redraws per frame (the Gate's idle rules, gate-ui §22)
+struct LauncherBackdrop: View {
+    let wash: UIImage?
+    let page: Color
+    let edge: Color      // the art side's background (dark in every look)
+    let blend: Edge      // the side that meets the art: leading beside it, top under it
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        let dark = scheme == .dark
+        ZStack {
+            page
+            if let wash {
+                Image(uiImage: wash).resizable().interpolation(.high).opacity(dark ? 0.62 : 0.34)
+                page.opacity(dark ? 0.38 : 0.5)
+            }
+            if dark {
+                LinearGradient(stops: [.init(color: edge, location: 0), .init(color: edge.opacity(0), location: 0.35)],
+                               startPoint: blend == .top ? .top : .leading, endPoint: blend == .top ? .bottom : .trailing)
+            }
+        }
+        .accessibilityHidden(true)
+        .allowsHitTesting(false)
+    }
+}
+
+#if os(iOS)
+/// The folder this game's cloud saves go through, by name, or nil when they are off: the NX 18 folder while the Profile shares this game's saves there
+/// (dm_nx18_cloud_shared, the card's This game's saves), else the game's own folder (the Cloud saves page). As CloudSaves.m dm_cloud_saves_env picks it at the start
+func dmCloudFolderName() -> String? {
+    if dm_nx18_cloud_shared(), let f = NX18Profile.folderURL() { return "\(f.lastPathComponent) (NX 18 folder)" }
+    return dm_cloud_saves_path(nil).map { ($0 as NSString).lastPathComponent }
+}
+#endif

@@ -1,6 +1,7 @@
 // Engine frame limits kept in game memory (FPSLocker's evaluate_write entries): some engines cap their own frame rate with a value the host can raise. The target is the profile's
 // fps_target (DM_FPS_TARGET overrides; 0 = leave the game's own limit), the same key that drives Tears of the Kingdom's frame step (loader.c install_fps_state). Called on every present
-// (hle_nvn.c); the game sets the values after boot and may set them again, so each is written whenever it differs. Fixed addresses: each row runs only on the main build it was found in (AGENTS.md).
+// (hle_nvn.c); the game sets the values after boot and may set them again, so each is written whenever it differs. At a target of 60 the graphics layer's heat and Low Power
+// Mode hold (hle_nvn.c nvn_engine_hold_tick, nvn_fps_hold_why) writes 30 while it lasts, as a target of 30 would, and its present cap follows on the same frame. Fixed addresses: each row runs only on the main build it was found in (AGENTS.md).
 // A target frame rate the game steps by needs no row either: the rewriter finds it by its readers in any build (dm/tools/fps_target.py, main's fixups FPS_TARGET_PTR / FPS_TARGET_FIELD).
 // Nor do Unity's Application.targetFrameRate and QualitySettings.vSyncCount: the rewriter finds them through the engine's internal-call table (dm/tools/unity_fps.py, main's fixups UNITY_*).
 // Unreal Engine needs no row: the rewriter finds its console variables by their registered names in any build (dm/tools/ue_cvar.py, main's fixups UE_CVAR:<name>), and the host writes
@@ -191,16 +192,18 @@ static int target_row(const module_t *m, lock_t *out) {
     return 1;
 }
 
-// The Unreal rows of this main: the profile's frame-limit variable and the present intervals, at the objects the rewriter found, and the engine's fixed frame rate on GEngine (0 rows:
-// not an Unreal main). *missing: an Unreal main (the rewriter found some of its variables) without the profile's frame-limit variable
+// The Unreal rows of this main: the profile's frame-limit variable, the present intervals and the dynamic resolution's frame-time budget, at the objects the rewriter found, and the
+// engine's fixed frame rate on GEngine (0 rows: not an Unreal main). r.DynamicRes.FrameTimeBudget: the engine's Switch device profile sets it to 33.33 ms (BaseSwitchDeviceProfiles.ini),
+// so at 60 fps a game whose profile turns dynamic resolution on lowers its resolution only once a frame takes twice the target; FINAL FANTASY RESONANCE (60-80 %) stayed at 80 % at
+// 40 fps. It is written at the target's frame time (MS_F32, with the 60 fps margin); a game without dynamic resolution does not read it (upstream NXNative 62a38b800). *missing: an Unreal main (the rewriter found some of its variables) without the profile's frame-limit variable
 static int ue_rows(const module_t *m, lock_t *out, int *missing) {
-    static char what[4][48]; int n = 0, have = 0;
+    static char what[5][48]; int n = 0, have = 0;
     if (m->ue_fixed_ptr && m->ue_fixed_flag) out[n++] = (lock_t){ "", "Unreal fixed frame rate (GEngine->FixedFrameRate)", m->ue_fixed_ptr, m->ue_fixed_field, FPS_F32, 1, 0, m->ue_fixed_flag };
-    for (int k = 0; k < m->n_ue_cvar && n < 4; k++) {
-        const char *name = m->ue_cvar[k].name; int fps = !strcmp(name, DM_GAME_UE_FPS_CVAR);
-        if (!fps && strcmp(name, "rhi.SyncInterval") && strcmp(name, "nvn.SyncInterval")) continue;
+    for (int k = 0; k < m->n_ue_cvar && n < 5; k++) {
+        const char *name = m->ue_cvar[k].name; int fps = !strcmp(name, DM_GAME_UE_FPS_CVAR), budget = !strcmp(name, "r.DynamicRes.FrameTimeBudget");
+        if (!fps && !budget && strcmp(name, "rhi.SyncInterval") && strcmp(name, "nvn.SyncInterval")) continue;
         have |= fps; snprintf(what[n], sizeof what[n], "Unreal %s", name);
-        out[n] = (lock_t){ "", what[n], m->ue_cvar[k].off + 0x10, 0, fps ? FPS_F32 : VSYNCS_I32, 2, 0 }; n++;
+        out[n] = (lock_t){ "", what[n], m->ue_cvar[k].off + 0x10, 0, fps ? FPS_F32 : budget ? MS_F32 : VSYNCS_I32, 2, 0 }; n++;
     }
     *missing = m->n_ue_cvar > 0 && !have;
     return n;
@@ -223,7 +226,7 @@ static void unity_vsync_tick(int target, const char *src) {
     if (nlog < 8) { nlog++; LOG("main: Unity QualitySettings.vSyncCount (level %d) %u → %u vsyncs (%d fps; %s)", lvl, cur, want, target, src); }
 }
 // The running main's engine limiters, found once: by the first present (dm_fps_lock_tick) or by the graphics layer's present cap, which may ask first (dm_fps_lock_engine, from the acquire)
-static lock_t ue[4], target_lock, unity_tfr; static const lock_t *rows[NLOCKS + 6]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
+static lock_t ue[5], target_lock, unity_tfr; static const lock_t *rows[NLOCKS + 7]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
 static pthread_once_t g_found = PTHREAD_ONCE_INIT;
 static void lock_find(void) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
@@ -250,9 +253,10 @@ static void lock_find(void) {
 // presenting at a cap the game does not step by runs a fixed-step game fast or slow (Tears of the Kingdom 1.4.2 at 2x with DM_FPS_TARGET=60)
 int dm_fps_lock_engine(void) { pthread_once(&g_found, lock_find); return nrow || nier || fb.n || uq.base; }
 int nvn_fps_high_now(void);   // hle_nvn.c
+const char *nvn_fps_hold_why(void);   // hle_nvn.c: why the graphics layer holds a 60 fps target at 30 now (heat, Low Power Mode), or NULL
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap
-    static int state = -2, nlog[NLOCKS + 5], target, high; static const char *src;
+    static int state = -2, nlog[NLOCKS + 7], target, chosen, high; static const char *src, *src0;
     if (state == -1) return;
     if (state == -2) {
         state = -1; pthread_once(&g_found, lock_find);
@@ -265,9 +269,12 @@ void dm_fps_lock_tick(void) {
         if (!nrow && !nier && !fb.n && !uq.base) return;
         if (!t) { for (int r = 0; r < nrow; r++) LOG("main: %s left as the game sets it (%s)", rows[r]->what, src); if (nier) LOG("main: NieR frame interval left as the game sets it (%s)", src);
                   if (fb.n) LOG("main: Frostbite simulation rate left as the game sets it (%s)", src); if (uq.base) LOG("main: Unity vSyncCount left as the game sets it (%s)", src); return; }
-        target = t; state = 0;
+        chosen = target = t; src0 = src; state = 0;
     }
     if (high) target = nvn_fps_high_now();   // 120 while frames fit, else 60: the game's step stays what the screen shows (hle_nvn.c fps_high)
+    else if (chosen == 60) {   // heat or Low Power Mode: 30, together with the present cap (hle_nvn.c nvn_engine_hold_tick, decided just before this call), the values a 30 fps target writes
+        const char *why = nvn_fps_hold_why(); target = why ? 30 : 60; src = why ? why : src0;
+    }
     if (nier) {
         // NieR:Automata US/EU 1.0.3 (3c10ec35c5ef4c3686b4053afb0e58e7):
         // - [base + 0x192be00] points to the NVN graphics device object whose +0x9c160 holds the present interval (1 = 60 FPS, 2 = 30 FPS),

@@ -12,37 +12,7 @@ import GameController
 import SwiftUI
 import UIKit
 
-// What the focus ring can be on
-enum LauncherFocus: Hashable, Sendable {
-    case preset(LauncherPreset), play, guide, about, row(String), advanced, reset, cloud, skip, acknowledgements
-}
-
-// The focusable items as lines on the screen, in order: up / down go from line to line (keeping the column where the next line has it), left / right along a line
-struct LauncherFocusMap: Equatable {
-    let lines: [[LauncherFocus]]
-
-    func contains(_ f: LauncherFocus) -> Bool { lines.contains { $0.contains(f) } }
-    private func place(_ f: LauncherFocus) -> (line: Int, column: Int)? {
-        for (l, line) in lines.enumerated() { if let c = line.firstIndex(of: f) { return (l, c) } }
-        return nil
-    }
-    // The item a step up (-1) or down (+1) reaches; the same item at either end (no wrap). From nothing (or an item no longer drawn): the first item
-    func vertical(_ from: LauncherFocus?, _ step: Int) -> LauncherFocus? {
-        guard let from, let p = place(from) else { return lines.first?.first }
-        let l = Swift.min(Swift.max(p.line + step.signum(), 0), lines.count - 1)
-        guard l != p.line else { return from }
-        return lines[l][Swift.min(p.column, lines[l].count - 1)]
-    }
-    // The item a step left (-1) or right (+1) reaches on the same line; nil on a line of one item (the step changes the row instead) or past either end
-    func horizontal(_ from: LauncherFocus, _ step: Int) -> LauncherFocus? {
-        guard let p = place(from), lines[p.line].count > 1 else { return nil }
-        let c = p.column + step.signum()
-        return lines[p.line].indices.contains(c) ? lines[p.line][c] : nil
-    }
-}
-
-// One controller event for the screen
-enum LauncherPadEvent: Equatable, Sendable { case up, down, left, right, a, b, x, y, plus, minus, l, r, zl, zr }
+// LauncherFocus, LauncherFocusMap and LauncherPadEvent are in LauncherFocus.swift, shared with the Mac's Gate
 
 @MainActor final class LauncherGamepad: ObservableObject {
     @Published private(set) var connected = false   // a controller with an extended gamepad profile is connected: the focus ring shows
@@ -105,12 +75,40 @@ enum LauncherPadEvent: Equatable, Sendable { case up, down, left, right, a, b, x
     }
     private static func pressedNow() -> Set<Key> { GCController.controllers().reduce(into: Set<Key>()) { $0.formUnion(keys($1)) } }
 
-    // Polls every connected controller until the task is cancelled (the screen goes), calling handle on the main actor for each event
+    // Polls the connected controllers until the task is cancelled (the screen goes), calling handle on the main actor for each event. The idle rule (gate-ui GW20): every 16 ms
+    // only while a controller is connected, the app is active and input is changing (a button held, or within 2 s of the last change); then the loop sleeps until a pad's
+    // input (its valueChangedHandler, set only for that wait and taken off after it) or a controller connecting or going wakes it. With none connected it waits for one to
+    // connect. DM_UI_IDLE=0 keeps the constant 16 ms poll, for the A/B (§22.4)
     func run(_ handle: @escaping @MainActor (LauncherPadEvent) -> Void) async {
+        var lastChange = ProcessInfo.processInfo.systemUptime, lastHeld: Set<Key> = []
         while !Task.isCancelled {
             poll(handle)
-            try? await Task.sleep(for: .milliseconds(16))
+            if held != lastHeld || !held.isEmpty { lastHeld = held; lastChange = ProcessInfo.processInfo.systemUptime; NX18RailsIdle.pulse() }
+            let idle = !NX18RailsIdle.endless && (!connected || (held.isEmpty && ProcessInfo.processInfo.systemUptime - lastChange > 2))
+            if idle { await waitForInput(); lastChange = ProcessInfo.processInfo.systemUptime }
+            else { try? await Task.sleep(for: .milliseconds(16)) }
         }
+    }
+    private(set) var idleWaits = 0   // the Duo harness's check: how often the loop went to sleep
+    private(set) var waiting = false
+    // Until a connected pad's input changes, a controller connects or goes, or the app becomes active again; a pad's handler is set only for this wait
+    private func waitForInput() async {
+        idleWaits += 1; waiting = true
+        defer { waiting = false }
+        let (stream, cont) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let pads = GCController.controllers().compactMap(\.extendedGamepad)
+        // The handler each pad had (the game's read_pad while the in-game menu's panel waits, DmGamepad.m): put back after the wait, never cleared, or the game's controllers
+        // stop answering once the panel closes (owner, 2026-11-17: after a pause in the menu, e.g. switching Vitals)
+        let previous = pads.map(\.valueChangedHandler)
+        for g in pads { let before = g.valueChangedHandler; g.valueChangedHandler = { p, e in before?(p, e); cont.yield() } }
+        let names: [Notification.Name] = [.GCControllerDidConnect, .GCControllerDidDisconnect, UIApplication.didBecomeActiveNotification]
+        let obs = names.map { NotificationCenter.default.addObserver(forName: $0, object: nil, queue: .main) { _ in cont.yield() } }
+        defer {
+            for (g, h) in zip(pads, previous) { g.valueChangedHandler = h }   // as before the wait: none on the Gate, the game's own while its menu is open
+            obs.forEach(NotificationCenter.default.removeObserver)
+            cont.finish()
+        }
+        for await _ in stream { break }   // ends at the first wake, or when the task is cancelled (the screen goes)
     }
     // After a sheet opens or closes: the buttons held now (the A that opened it) wait for their release
     func holdUntilReleased() { blocked.formUnion(held) }

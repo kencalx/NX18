@@ -62,7 +62,7 @@ def host_hooks(host, forced=True):
     for f in glob.glob(os.path.join(d, '*.c')) + glob.glob(os.path.join(d, '../gfx/*.c')) + glob.glob(os.path.join(d, '../gfx/nvn/*.c')):
         t = open(f, encoding='utf-8', errors='replace').read()
         hooks |= set(re.findall(r'\bHLE\(\s*"([^"]+)"', t))
-        if forced: hooks |= set(re.findall(r'\bHLE_FORCE(?:_BIG)?\(\s*"([^"]+)"', t))
+        if forced: hooks |= set(re.findall(r'\bHLE_FORCE(?:_BIG|_ALIAS)?\(\s*"([^"]+)"', t))
         if os.path.basename(f) == 'hle_table.c': hooks |= set(re.findall(r'\bL\((\w+)\)', t))
     return hooks
 

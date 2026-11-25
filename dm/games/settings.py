@@ -10,7 +10,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE)); sys.path.insert(0, str(HERE.parent / 'tools'))
 import game, nacp
 
-SECTIONS = ('Game', 'Controls', 'Performance')   # headings on the single settings screen
+SECTIONS = ('Game', 'Controls', 'Troubleshooting')   # headings; Troubleshooting's rows a front end draws only while one differs from its default (presets-first P6)
 SCHEMA = 1   # launcher.json's version (docs/launcher.schema.json); it grows only by optional fields, so a reader of 1 reads every 1
 # The meta column's keys, each with the pattern its value must match. A key is added here, in docs/frontends.md and in
 # docs/launcher.schema.json together (test_launcher_settings.py checks that the three agree); a reader ignores keys it does not know
@@ -25,8 +25,16 @@ META = {
 }
 RULE_KEYS = ('inactive', 'hint', 'hide', 'shows')
 # The launcher's presets besides Balanced, which is the tested defaults (Reset): a front end shows them as one choice over the rows that have a preset (frame rate, resolution,
-# upscaling, anti-aliasing). Applying one sets each such row to its preset value, except a row an env file or the launch sets, a row a rule greys and an option a rule greys
-PRESETS = ('battery', 'quality')
+# upscaling, anti-aliasing). Applying one sets each such row to its preset value, except a row an env file or the launch sets and a row a rule greys; where the value is an
+# option a rule greys, the highest option not greyed (presets-first P9). battery is the player's Battery Saver (only the title changed; the stored name stays)
+PRESETS = ('battery', 'quality', 'performance')
+# The presets a front end draws as chips (launcher.json's presets), Balanced always among them: each only where it moves at least one row of this game (presets-first P4).
+# Performance's values are in the table (so a later build's chip finds them), but its chip is drawn only from A9b, after its on-battery verdict (P12)
+DRAWN = ('battery', 'quality')
+# Switches a preset may give the host that no row sets (a profile's "preset<TAB><preset><TAB><VAR>=<value>" naming one), each with the values it may take: launcher.json's
+# preset_env, which a front end puts into the environment for that preset and clears ("", the host's default) for any other, unless an env file or the launch set it; the preset
+# counts as moving the game then (its chip is drawn). DM_FPS_CTL=hold30: the Battery Saver hold of a game's own 60/30 frame-rate controller at 30 (hle_fctl.c; Donkey Kong Bananza)
+PRESET_ENV = {'DM_FPS_CTL': {'hold30'}, 'DM_NVN_PASS_ALT': {'0'}, 'DM_NVN_CUBE_ALT': {'0'}, 'DM_NVN_UP_BILINEAR': {'0'}, 'DM_DRS_GPU_SCALE': {'0'}}   # =0: Quality draws a profile's pass_alternate passes (sized, cube) every frame, and lets MetalFX draw the game's upscaler a profile's upscaler_bilinear stretches (the owner's preset plan)
 # A rule is [<option>:]<when>~<why>, and <when> is terms joined by &, all of which must hold. A front end evaluates two kinds of term on the device:
 # - <VAR>=<v>/<v> or <VAR>!=<v>/<v>: another row's current value (a range compares as a number), or the environment for a switch no row sets (ENV_ONLY); false when neither has it
 # - DEVICE_TERMS: what the device, its screen or the app has
@@ -172,6 +180,17 @@ def greying_cycle(table_rules):
     return None
 
 
+def preset_overrides(g):
+    """The profile's preset rows ("preset<TAB><preset><TAB><VAR>=<value>": a game whose preset value differs from the table's, Hades II's Render scale 1.0 in Battery Saver) as
+    {VAR: {preset: value}}; the value is checked as the table's are, when the row is read"""
+    out = {}
+    for row in g.values('preset'):
+        if len(row) != 2 or row[0] not in PRESETS or '=' not in row[1]: sys.exit(f'{g.id}: preset is "<preset><TAB><VAR>=<value>" ({", ".join(PRESETS)}): {row}')
+        var, _, v = row[1].partition('=')
+        out.setdefault(var, {})[row[0]] = v
+    return out
+
+
 def render_base(g):
     """The profile's render_base ("<w>x<h> <w>x<h>": the 3D views' base size docked, then handheld, which DM_RENDER_SCALE scales) as
     {"docked": [w, h], "handheld": [w, h]}, for a front end to show the render scale in pixels; None when the profile has none"""
@@ -217,7 +236,14 @@ def build(gid, patched, control):
 
     def shown(cond, n):
         if '&' in cond: return all(shown(c, n) for c in cond.split('&'))   # every one of them
-        if cond.startswith('!'): return not shown(cond[1:], n)
+        if cond.startswith('!'): return not shown(cond[1:], n)   # (of the whole any below too, as in the rules' pack-time terms)
+        if '/' in cond and not cond.startswith('DM_GAME_'):   # any of them; a term without a kind takes the one before it (fixups:K/L)
+            terms, kind = [], ''
+            for t in cond.split('/'):
+                if ':' in t: kind = t.partition(':')[0]
+                else: t = f'{kind}:{t}'
+                terms.append(t)
+            return any(shown(t, n) for t in terms)
         if cond == 'always': return True
         if cond.startswith('console:'):   # launcher.json's console (console())
             if cond[8:] not in ('switch1', 'switch2'): sys.exit(f'settings.tsv:{n}: console is switch1 or switch2: {cond}')
@@ -277,7 +303,15 @@ def build(gid, patched, control):
         return out
 
     out, base = [], render_base(g)
+    overrides = preset_overrides(g)
     table = {r[1][0]: (r[1][1], r[1][2]) for r in rows()}
+    penv = {}   # preset -> {switch: value}: the profile's preset values for switches no row sets (PRESET_ENV)
+    for var, by in overrides.items():
+        if var in table: continue
+        if var not in PRESET_ENV: sys.exit(f'{g.id}: preset sets {var}, which is neither a settings.tsv row nor a switch a preset may set ({", ".join(sorted(PRESET_ENV))})')
+        for name, v in by.items():
+            if v not in PRESET_ENV[var]: sys.exit(f'{g.id}: preset {name} sets {var} to {v}, which a preset may not ({", ".join(sorted(PRESET_ENV[var]))})')
+            penv.setdefault(name, {})[var] = v
     listed = {var for n, (var, kind, values, default, cond, *_) in rows() if shown(cond, n)}
     inactive = {}   # every row's inactive rules, this game's or not, for the greying cycle check
     for n, (var, kind, values, default, cond, section, label, note, extra) in rows():
@@ -292,6 +326,9 @@ def build(gid, patched, control):
             if not any(o is None and t == terms for o, t, _ in parsed.get('inactive', [])):
                 sys.exit(f'settings.tsv:{n}: a shows rule needs a whole-row inactive rule with the same terms, so the row is greyed while it shows the value: {"&".join(terms)}')
         preset = presets(m.pop('preset'), n, var, table) if 'preset' in m else None
+        if preset is not None and m.get('level') == 'basic': sys.exit(f'settings.tsv:{n}: a level=basic row is a quick tile, which no preset may move: drop its preset or its level')
+        if preset is not None:   # the game's own preset values (the profile's preset key: Hades II's Render scale, OoT's Dynamic resolution)
+            for name, ov in overrides.get(var, {}).items(): preset[name] = ov
         inactive[var] = parsed.get('inactive', [])
         if not shown(cond, n): continue
         s = {'env': var, 'kind': kind, 'section': section, 'label': label, 'note': note, 'default': value(default, n), **m}
@@ -330,7 +367,11 @@ def build(gid, patched, control):
         linked = 'DM_RENDER_SCALE' in reads('DM_DYNAMIC_RESOLUTION') or 'DM_DYNAMIC_RESOLUTION' in reads('DM_RENDER_SCALE')
         if not linked: sys.exit(f'{g.id}: the game has both Dynamic resolution and Render scale, and below 100 % the render scale overrides the dynamic resolution: '
                                 'give one of the two rows an inactive or hint rule on the other in settings.tsv')
-    return {'schema': SCHEMA, 'game': g.id, 'console': con, 'settings': out}
+    # The presets a front end draws (DRAWN, Balanced with them) and, per preset, the rows it moves in this game: a front end builds its notes from them (presets-first W12)
+    moves = {p: [s['env'] for s in out if 'preset' in s and s['preset'][p] != s['default']] + sorted(penv.get(p, {})) for p in PRESETS}
+    drawn = [p for p in ('battery', 'balanced', 'quality', 'performance') if p == 'balanced' or (p in DRAWN and moves[p])]
+    return {'schema': SCHEMA, 'game': g.id, 'console': con, 'presets': drawn, 'moves': {p: moves[p] for p in drawn if p != 'balanced'},
+            **({'preset_env': {p: penv[p] for p in drawn if p in penv}} if any(p in penv for p in drawn) else {}), 'settings': out}
 
 
 def console(gid, patched):

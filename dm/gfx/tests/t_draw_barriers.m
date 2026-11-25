@@ -18,7 +18,7 @@ static void emit(unsigned op, const void *p, size_t n) {
     memcpy(cmd + used, &h, 8); if (n) memcpy(cmd + used + 8, p, n); used += z;
 }
 static void execute(void) {
-    emit(OP_END,NULL,0); mtl_sub_begin(); uint64_t handle=(uint64_t)cmd; mtl_sub_index(&handle,1); mtl_exec(cmd);
+    emit(OP_END,NULL,0); mtl_sub_begin(); mtl_exec(cmd);
     uint64_t fence=mtl_sub_commit(); CHECK(mtl_wait(fence,5000000000ull),"GPU submission completes");
     CHECK(!mtl_last_commit_error(),"GPU reports no error"); used=0;
 }
@@ -37,7 +37,7 @@ static int red(const tex_t *t) {   // every pixel of the 8x8 target red (the rea
 int main(void) { @autoreleasepool {
     const char *mode = getenv("DM_NVN_BARRIER"); if (!mode) { setenv("DM_NVN_BARRIER","game",1); mode = "game"; }
     const int game = !strcmp(mode,"game");
-    setenv("DM_NVN_TBDR","0",1); setenv("DM_PSO_ARCHIVE","off",1); setenv("DM_PSO_MANIFEST","off",1); setenv("DM_PSO_USER","/dev/null",1);
+    setenv("DM_PSO_ARCHIVE","off",1); setenv("DM_PSO_MANIFEST","off",1); setenv("DM_PSO_USER","/dev/null",1);
     setenv("DM_PSO_PREBUILD","0",1); setenv("DM_PSO_HYBRID","0",1); setenv("DM_NVN_PREDICT","0",1);
     mtl_init();
     CHECK(barrier_game()==game,"DM_NVN_BARRIER picks the draw-pass order");

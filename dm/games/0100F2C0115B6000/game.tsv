@@ -41,11 +41,27 @@ app_pool	0xCD500000
 tex_flush_upload	on
 render_cond	on
 tex_dirty_upload	on
+# Ultrawide's camera (patches.py camera_aspect, nvn_mtl.m aspect_ui): the vertex shaders that draw the HUD and menus onto the game's floating-point final picture (their keys'
+# first 8 hex digits, which also take their translated variants). Their quads are squeezed to the middle of the picture, so the HUD keeps its shape once Stretch widens it;
+# the inventory's scene pictures and full-screen triangles are not. From ComicBit/nxnative 76f085084 (MIT), which took them from MacNativeGames' nvn_mtl.m (MIT; notice in nvn_aspect.h)
+aspect_ui_prefixes	7f2113e2 e9fd7b43 a662e313 16684efc 3e11cee5 48c18ae6 35cbc686 4872bec9 9f47ed90 1a40e5f5 2117f58b 8d4e36d0 1469983f
 # 60 fps (30 on the Switch): the host decides each frame's step in whole vsyncs and holds the frame that long (rewriter stubs at FPSLocker's sites, patches.py FRAME_STEP);
 # 30 when 60 does not hold, game time = real time. DM_FPS_TARGET=30 (Documents/env.txt on the iPhone) saves power, 0 = the game's own step. Until the host has decided a step
 # (the first frames) the stub steps by the measured frame time
 fps_target	60
 
+# The GPU clock kick and the present repeat, as Donkey Kong Bananza's, Mario Kart World's and Star Fox's (hle_nvn.c clock_kick_tick, nvn_present_repeat.inc): this game's
+# iPhone run (bd454996, 23 min) showed the same stuck clock (the GPU probe at 3.2x, held at 30 or lower in stretches; a swipe to the Home Screen and back brought 60 back at once),
+# and its old clock rescue fired 8 times without lifting it, so the kick turns that rescue off (NX18-X2.0 gpu-clock-collapse.md). DM_CLOCK_KICK=0 / DM_PRESENT_REPEAT=0 turn them off
+clock_kick	120
+present_repeat	on
+
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shader/ApplicationPackage=layout /Shader/=shader /Effect/=effect /UI/=layout
 shader_note	Tears of the Kingdom shaders
+# The GPU headroom controller through the live render scale (nvn_drs_gpu.h, hle_nvn.c drs_gpu_tick): while the GPU time per frame stays over 75% of the target's frame time the
+# host lowers the 3D views' factor at state +0x14 one step (0.9 to 0.5 of the side; at Render scale 1.0 the stubs take the lower of it and the game's own dynamic scale), and
+# takes each step back when the GPU time per frame did not fall. Off since 2026-11-23: on the iPhone 18 Pro Max (Tears of the Kingdom, c8351b8cf, about 7 min) the factor
+# held 0.5-0.6 for about 5 min with the GPU time per frame unchanged (10-11 ms, as at 1.0) and no softer picture seen, so +0x14 does not reach the views' size on the
+# device; Breath of the Wild's lever is unmeasured. On again once a run shows the factor cutting the GPU time
+drs_gpu_scale	off

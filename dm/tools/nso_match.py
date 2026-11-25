@@ -7,8 +7,12 @@ game still needs a workaround; enrolling a patch requires checking that assumpti
 A rule covers one function ({name, size, fingerprints, cuts}) or several that must change
 together ({name, functions: [{size, fingerprints, cuts}, ...]}): a multi-function rule
 applies only when every one of its functions matches, never in part.
+A rule can identify a short callee through a direct call in a uniquely matched
+caller ({called_by: {size, fingerprints, call}}), checking the callee's own
+fingerprint and original bytes at the resolved target.
 A frame-step rule ({name, size, fingerprints, stub}; patch_nso.py MATCH_FRAME_STEP) locates
 one function the same way and hands its start to the stub, which writes its sites there.
+Its others may name a short callee the same way ({size, fingerprints, called_by}).
 An anchored frame-step rule ({name, calls, find, stub, reviewed}) locates instead the one function that
 calls an imported symbol, whatever else changed in it, and its find(fn) reads that function
 and returns the site it checked (its own assumptions included) or raises MatchError.
@@ -205,9 +209,26 @@ class Image:
         if len(matches) != 1: raise MatchError(f'{len(matches)} matching functions (need exactly one)')
         return matches[0]
 
+    def locate_callee(self, size, fingerprints, caller):
+        """The start of the function the direct call at caller['call'] in the one function matching the caller's size and fingerprints reaches, checked by its own size
+        and fingerprint (a short function whose fingerprint alone is ambiguous); MatchError otherwise"""
+        site = self.locate(caller['size'], caller['fingerprints']) + caller['call']
+        word, = struct.unpack_from('<I', self.image, site)
+        if word & 0xfc000000 != 0x94000000:
+            raise MatchError(f'expected a direct call at {site:#x}')
+        start = site + 4 * _signed(word & 0x3ffffff, 26)
+        if (self.functions.get(start) != start + size
+                or self.fingerprint(start) not in fingerprints):
+            raise MatchError(f'callee at {start:#x} does not match')
+        return start
+
     def match(self, rule):
         validate(rule)
-        start = self.locate(rule['size'], rule['fingerprints'])
+        caller = rule.get('called_by')
+        if caller is None:
+            start = self.locate(rule['size'], rule['fingerprints'])
+        else:
+            start = self.locate_callee(rule['size'], rule['fingerprints'], caller)
         cuts = []
         for delta, old, new, reason in rule['cuts']:
             off = start + delta
@@ -232,6 +253,16 @@ class Image:
         return cuts
 
 
+def validate_called_by(caller, name):
+    """called_by = {size, fingerprints, call}: the caller, matched by its size and fingerprints, and the function-relative offset of its direct call to the function"""
+    if not isinstance(caller, dict) or set(caller) != {'size', 'fingerprints', 'call'}:
+        raise ValueError('called_by needs the caller size, fingerprints and call offset')
+    validate_function(dict(caller, name=name))
+    call = caller['call']
+    if not isinstance(call, int) or call % 4 or not 0 <= call < caller['size']:
+        raise ValueError('invalid function-relative call')
+
+
 def validate_function(rule):
     """The function part of a rule: a name, its size and its fingerprints"""
     if not rule['name'] or not isinstance(rule['size'], int) or rule['size'] <= 0 or rule['size'] % 4: raise ValueError('invalid function size/name')
@@ -242,8 +273,8 @@ def validate_function(rule):
 
 def validate_stub(rule):
     """A frame-step rule (patch_nso.py MATCH_FRAME_STEP): {name, size, fingerprints, stub[, others]}, stub(ctx) writing its sites at ctx.base + offsets inside the function;
-    others = {label: {size, fingerprints}} names more functions the stub patches or depends on (fields it reads), each found the same way (ctx.others[label], None when not
-    exactly one matches). Or anchored: {name, calls, find, stub, reviewed}, the one function that calls the imported symbol calls; find(fn) (a Function) returns what the stub
+    others = {label: {size, fingerprints[, called_by]}} names more functions the stub patches or depends on (fields it reads), each found the same way, or a short one through
+    the direct call of a matched caller (called_by, as in a cut rule) (ctx.others[label], None when not exactly one matches). Or anchored: {name, calls, find, stub, reviewed}, the one function that calls the imported symbol calls; find(fn) (a Function) returns what the stub
     needs (ctx.found) after checking its assumptions, or raises MatchError; reviewed lists what find returned on the builds checked by hand (the binding page and the tests run
     the stub with each)"""
     if 'calls' in rule:
@@ -258,8 +289,10 @@ def validate_stub(rule):
     if not callable(rule['stub']): raise ValueError('a frame-step rule\'s stub must be a function of the context')
     if not isinstance(rule.get('others', {}), dict): raise ValueError('a frame-step rule\'s others are {label: {size, fingerprints}}')
     for label, fn in rule.get('others', {}).items():
-        if not isinstance(fn, dict) or set(fn) != {'size', 'fingerprints'}: raise ValueError(f'another function of a frame-step rule ({label}) needs size and fingerprints')
+        if not isinstance(fn, dict) or not {'size', 'fingerprints'} <= set(fn) <= {'size', 'fingerprints', 'called_by'}:
+            raise ValueError(f'another function of a frame-step rule ({label}) needs size and fingerprints (and may name called_by)')
         validate_function(dict(fn, name=label))
+        if 'called_by' in fn: validate_called_by(fn['called_by'], label)
 
 
 def locate_stub(image, text_end, rules, report=print):
@@ -293,7 +326,8 @@ def locate_stub(image, text_end, rules, report=print):
     others = {}
     for label, fn in rule.get('others', {}).items():
         try:
-            others[label] = module.locate(fn['size'], fn['fingerprints']); report(f'frame step {name!r}: {label} at {others[label]:#x}')
+            others[label] = (module.locate_callee(fn['size'], fn['fingerprints'], fn['called_by']) if 'called_by' in fn
+                             else module.locate(fn['size'], fn['fingerprints'])); report(f'frame step {name!r}: {label} at {others[label]:#x}')
         except MatchError as e:
             others[label] = None; report(f'[RED] frame step {name!r}: {label} left out: {e}')
     return rule, start, others, got
@@ -338,11 +372,14 @@ def validate(rule):
         if set(rule) != {'name', 'functions'}: raise ValueError('a patch of several functions needs only name and functions')
         if not isinstance(rule['functions'], (list, tuple)) or len(rule['functions']) < 2: raise ValueError('a patch of several functions needs at least two')
         for fn in rule['functions']:
-            if 'name' in fn or 'functions' in fn: raise ValueError('a function of a patch has size, fingerprints and cuts only')
+            if 'name' in fn or 'functions' in fn: raise ValueError('a function of a patch has size, fingerprints, cuts and optional called_by')
             validate(dict(fn, name=rule['name']))
         return
-    if set(rule) != {'name', 'size', 'fingerprints', 'cuts'}: raise ValueError('function patch needs name, size, fingerprints and cuts')
+    required = {'name', 'size', 'fingerprints', 'cuts'}
+    if not required <= set(rule) <= required | {'called_by'}:
+        raise ValueError('function patch needs name, size, fingerprints and cuts')
     validate_function(rule)
+    if 'called_by' in rule: validate_called_by(rule['called_by'], rule['name'])
     if not rule['cuts']: raise ValueError('function patch has no cuts')
     used = set()
     for delta, old, new, reason in rule['cuts']:

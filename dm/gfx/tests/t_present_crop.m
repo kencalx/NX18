@@ -388,6 +388,17 @@ int main(void) { @autoreleasepool {
     pthread_mutex_lock(&g_pq_mu);
     int saved=tk && memcmp(g_pq[(tk-1)%PQ].crop,br,sizeof br)==0;pthread_mutex_unlock(&g_pq_mu);
     EXPECT("real QueuePresent: the frame's crop copy does not change with the window",1,saved);
+    {   // The window textures' render area (nvn_win_area.h): a crop held for WA_HOLD presents through the real QueuePresent becomes the texture's pass area, also when the present
+        // takes a snapshot (DM_PRESENT_SNAP=1: the area is the window texture's, not the snapshot's)
+        set((NVNwindow *)&win,0,0,4,4);
+        for(int i=0;i<=WA_HOLD;i++)present(&queue,(NVNwindow *)&win,0);
+        uint32_t a=0;for(int i=0;i<400&&!(a=wa_area(&g_wa,tex.serial));i++)usleep(5000);
+        EXPECT("window area: the presented 4x4 crop of the 8x8 window texture, once held",4<<16|4,(int)a);
+        set((NVNwindow *)&win,0,0,6,6);present(&queue,(NVNwindow *)&win,0);
+        for(int i=0;i<400&&(a=wa_area(&g_wa,tex.serial));i++)usleep(5000);
+        EXPECT("window area: a larger crop turns it off",0,(int)a);
+        nvn_queue_present_wait(win.ticket[0]);uint64_t qd,dd;mtl_present_progress(&qd,&dd);mtl_present_wait(qd);   // every one of these presents out of the way of the checks below
+    }
     h_nvnWindowFinalize((NVNwindow *)&win);
     {   // A window without a crop of its own presents by the vi layer crop (Link's Awakening in handheld mode: 1280x720 of its 1920x1080 window textures, cropped through vi::SetLayerCrop)
         int none[4]={0},lay[4]={0,4,4,4},over[4]={0,0,16,16},lc[4];
@@ -431,19 +442,38 @@ int main(void) { @autoreleasepool {
         present_shape(tall,&sa,&sb);EXPECT("a taller texture without DM_SCREEN_ASPECT: 16:9",1080,(int)sb);
         mtl_present_screen(1920,1344);present_shape(tall,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a texture that follows it keeps the taller shape",1344,(int)sb);
         present_shape(sw,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a 16:9 texture of a build without stubs stays 16:9",1080,(int)sb);mtl_present_screen(0,0);
-        {   // The render size for the iPhone's drawable (front_picture_size): the texture's pixels in the picture's shape, whichever direction needs more; never the crop's
-            int rw,rh;present_render_size(sw,1920,1080,&rw,&rh);EXPECT("render size of a 64x36 texture shown at 16:9, width",64,rw);EXPECT("render size of a 64x36 texture shown at 16:9, height",36,rh);
-            present_render_size(tall,1920,1080,&rw,&rh);EXPECT("render size of a 1920x1344 texture shown at 16:9 keeps its 1344 rows, width",2389,rw);EXPECT("height",1344,rh);
-            present_render_size(sw,4,3,&rw,&rh);EXPECT("render size of a 64x36 texture shown at 4:3: its 64 columns, width",64,rw);EXPECT("height",48,rh);
+        {   // The render size for the iPhone's drawable (front_picture_size): a source's pixels in the picture's shape, whichever direction needs more
+            int rw,rh;present_render_size(sw.width,sw.height,1920,1080,&rw,&rh);EXPECT("render size of a 64x36 texture shown at 16:9, width",64,rw);EXPECT("render size of a 64x36 texture shown at 16:9, height",36,rh);
+            present_render_size(tall.width,tall.height,1920,1080,&rw,&rh);EXPECT("render size of a 1920x1344 texture shown at 16:9 keeps its 1344 rows, width",2389,rw);EXPECT("height",1344,rh);
+            present_render_size(sw.width,sw.height,4,3,&rw,&rh);EXPECT("render size of a 64x36 texture shown at 4:3: its 64 columns, width",64,rw);EXPECT("height",48,rh);
+            present_render_size(1920,1080,1920,1080,&rw,&rh);EXPECT("a 1920x1080 crop of a 3840x2160 texture (Fortune's Weave): the crop's 1920 columns",1920,rw);EXPECT("and 1080 rows",1080,rh);
+        }
+        {   // present_size_step: the largest crop since the texture's size last changed, a new size after 30 presents (the first at once)
+            present_size_hold z={0};int pw=0,ph=0,n,i;
+            EXPECT("the first present reports at once",1,present_size_step(&z,3840,2160,1920,1080,&pw,&ph));EXPECT("the crop's width, not the texture's",1920,pw);EXPECT("height",1080,ph);
+            for(n=0,i=0;i<200;i++)n+=present_size_step(&z,3840,2160,1280+(i%7)*80,720+(i%7)*45,&pw,&ph);
+            EXPECT("a dynamic resolution's smaller crops resize nothing",0,n);
+            for(n=0,i=0;i<29;i++)n+=present_size_step(&z,3840,2160,2560,1440,&pw,&ph);
+            EXPECT("a larger crop waits 29 presents",0,n);
+            EXPECT("and counts at the 30th",1,present_size_step(&z,3840,2160,1280,720,&pw,&ph));EXPECT("held at the largest, width",2560,pw);EXPECT("height",1440,ph);
+            for(n=0,i=0;i<100;i++)n+=present_size_step(&z,3840,2160,1920,1080,&pw,&ph);
+            EXPECT("held through smaller crops after it",0,n);
+            for(n=0,i=0;i<100;i++)n+=present_size_step(&z,i&1?1280:3840,i&1?720:2160,i&1?1280:1920,i&1?720:1080,&pw,&ph);
+            EXPECT("two texture sizes in turn resize nothing",0,n);
+            for(n=0,i=0;i<29;i++)n+=present_size_step(&z,1280,720,960,540,&pw,&ph);
+            EXPECT("a new texture size waits 29 presents",0,n);
+            for(n=0,i=0;i<30;i++)n+=present_size_step(&z,1280,720,960,540,&pw,&ph);
+            EXPECT("then its crop counts after its own 30 (a mode change shrinks the drawable)",1,n);EXPECT("width",960,pw);EXPECT("height",540,ph);
         }
         // The front end's layout and the mouse follow the same shape, not the crop's (front_picture_shape): a real present of the 5:4 crop
         tex_t st={.magic=MAGIC('T', 'E', 'X', 0), .serial =10002};st.d.width=TW;st.d.height=TH;st.d.depth=st.d.levels=1;st.d.format=NVN_FORMAT_RGBA8;st.d.target=NVN_TEXTURE_TARGET_2D;serial_put(st.serial,sw);
         win_t w3={.ntex=1};w3.tex[0]=(NVNtexture *)&st;set((NVNwindow *)&w3,crop54[0],crop54[1],crop54[2],crop54[3]);
+        g_present_size=(present_size_hold){0};   // a first present: its size counts at once
         mtl_present_progress(&before,&done);
         present(&queue,(NVNwindow *)&w3,0);display_ticket(w3.ticket[0],before);
         h_nvnWindowFinalize((NVNwindow *)&w3);
         EXPECT("the shape reported to the front end is the layer's, width",1920,g_shape_w);EXPECT("the shape reported to the front end is the layer's, height",1080,g_shape_h);
-        EXPECT("a render size was reported to the front end",1,g_size_w>0&&g_size_h>0);
+        EXPECT("the render size reported to the front end is the 40x32 crop's in 16:9, width",57,g_size_w);EXPECT("height",32,g_size_h);
         res_remove(sw);
     }
     h_nvnQueueFinalize(&queue);

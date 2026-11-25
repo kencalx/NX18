@@ -42,7 +42,7 @@ static inline void nvn_hm_grow(nvn_hmap *m) {
 }
 // v must not be NULL; returns the old value for the same key (NULL if none)
 static inline void *nvn_hm_put(nvn_hmap *m, const void *k, void *v) {
-    if ((m->n + 1) * 4 > m->cap * 3) nvn_hm_grow(m);   // Load factor <= 3/4
+    if ((m->n + 1) * 2 > m->cap) nvn_hm_grow(m);   // load factor <= 1/2: linear probing at 3/4 walks about 8 slots on a miss (keys and values in two arrays, two cache lines a probe); at 1/2 about 2.5 (nvn_hm_get was 6% of the replay thread in an Ocarina of Time Mac profile)
     for (uint32_t i = (uint32_t)nvn_hm_hash(k, m->klen) & (m->cap - 1);; i = (i + 1) & (m->cap - 1)) {
         uint8_t *ki = m->keys + (size_t)i * m->klen;
         if (!m->vals[i]) { memcpy(ki, k, m->klen); m->vals[i] = v; m->n++; return NULL; }

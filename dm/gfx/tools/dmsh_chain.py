@@ -9,12 +9,14 @@
 # Usage: dmsh_chain.py                 print V (default options)
 #       dmsh_chain.py --header        rewrite dm/gfx/nvn/dmsh_chain.h (run after changing any file listed above, and commit it with the change)
 #       dmsh_chain.py --inputs        print the digest of the current game profile's inputs (DM_GAME), as b-<V>/inputs.tsv records it
+#       dmsh_chain.py --xlate-source-sha   print the digest of the translator's sources and the vendored Ryujinx sources it is built from (native_tools.sh stamps it into dmsh_xlate)
 #       (checking the tools against dmsh_chain.lock, and rewriting it, is tool_lock.py's: the checks decide no output, so they are outside V and the shaders' cache keys)
 # Environment: XLATE_DEBUG / XLATE_REDUCED (same meaning as in dmsh_build.py, default 1 / 1; non-default options yield a different V, which the host will not load)
 import os, sys, ast, hashlib
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HERE = os.path.dirname(os.path.abspath(__file__)); GFX = os.path.dirname(HERE); HOME = os.path.expanduser('~')
 FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', 'tools/dmsh_wide.py', 'tools/dmsh_fetch.py', 'tools/dmsh_vin.py', 'tools/dmsh_pull.py', 'tools/dmsh_pull.metal', 'tools/dmsh_alpha.py', 'tools/dmsh_logic.py', 'tools/dmsh_side.py', 'tools/dmsh_rewrite.py', 'tools/dmsh_reflect.py', 'tools/dmsh_entry.py', 'tools/dmsh_geometry.py', 'tools/dmsh_mesh.py', 'tools/dmsh_meshstage.py', 'tools/dmsh_facts.py', 'tools/dmsh_ampere.py', 'nvn/dmsh_abi.h', 'tools/dmsh_abi.py', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
+FILES += ['tools/dmsh_pcomp.py']   # pass-as-compute kernels (<vertex>_<pixel>_pc), which the build writes into the library
 # This target-specific lowering lives in the vendored translator. Include its
 # sources as well as the rebuilt translator's fingerprint; no old shader cache can bypass it.
 FILES += ['../third_party/ryujinx/src/Ryujinx.Graphics.Shader/' + f for f in (
@@ -30,7 +32,16 @@ FILES += ['../mac/min_os.mk']   # MAC_MIN below
 # MAC_METAL names this minimum (with -std=metal4.1; test_shader_msl_version.py holds them equal) and dmsh_dryrun.py passes MAC_MIN_FLAG; the iPhone's line is ios_metal.py's
 MAC_MIN = open(os.path.join(GFX, '../mac/min_os.mk')).read().split('MACOS_MIN := ')[1].split()[0]
 MAC_MIN_FLAG = f'-mmacosx-version-min={MAC_MIN}'
-INPUT_TABLES = ['shader_facts.tsv', 'shader_map.tsv', 'shader_map.tsv.conflicts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'bf_want.tsv', 'geo_mesh.tsv', 'dual_want.tsv']   # in the game profile folder
+# The MSL that spirv-cross writes for every shader of the chain (dmsh_build.py XC, dmsh_dryrun.py; tests convert with MSL_VERSION too). 3.2 is within what both compile lines take (-std=metal4.1 for
+# macOS 27.3 and iOS 27.3: dmsh_build.py MAC_METAL, ios_metal.py METAL) and the first version in which spirv-cross writes a memory barrier as the fence it is: OpMemoryBarrier (MEMBAR.CTA,
+# .GL / .SYS) becomes atomic_thread_fence at threadgroup or device scope, with no execution barrier, and OpControlBarrier (BAR.SYNC) is always written. Below 3.2 it wrote both MEMBARs as one
+# threadgroup_barrier, an execution barrier, and left out a BAR.SYNC that directly followed one (spirv_msl.cpp, OpControlBarrier): the membar_fence text rule made that line a fence, so the
+# group no longer waited for its other threads (upstream 6dad34067ce, GitHub issue #2786). 3.1's texture atomics (dmsh_atomic.py) are part of it. 3.2 changes images too: one the translator
+# decorates Coherent (Maxwell only: the image's last SULD / SUST in the shader has .CG) becomes a device-coherent texture, memory_coherence_device, and access::read where the shader only
+# reads it (2.3 wrote no qualifier there, sample), a texture path no game has been timed on (docs/reference/shaders.md, "A BAR.SYNC right after a MEMBAR lost"; test_dmsh_coherent_image.py)
+MSL_VERSION = '30200'
+CROSS_MSL = ['--msl', '--msl-version', MSL_VERSION, '--msl-argument-buffers', '--msl-texture-buffer-native']
+INPUT_TABLES = ['shader_facts.tsv', 'shader_map.tsv', 'shader_map.tsv.conflicts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'bf_want.tsv', 'geo_mesh.tsv', 'dual_want.tsv', 'pass_compute.tsv']   # in the game profile folder
 LOCK = os.path.join(HERE, 'dmsh_chain.lock'); HEADER = os.path.join(GFX, 'nvn/dmsh_chain.h')
 STAMP = 'inputs.tsv'   # in the library directory b-<V>/
 # the translator defaults to the in-repo build that matches the lock file (dm/tools/native_tools.sh; a rebuild has another fingerprint)
@@ -67,12 +78,38 @@ def load_game():   # the current game profile (DM_GAME), only for what needs one
 def profile_rows(g):   # the profile keys that change how a shader is built (nvn_*, shader_*)
     return ''.join(f'{k}\t{chr(9).join(v)}\n' for k, v in g.rows if k.startswith(('nvn_', 'shader_'))).encode()
 
+def table_pairs(p, kind=None):
+    """{(vertex key, geometry key)} of a pair table: geo_mesh.tsv's rows (kind None), or the G or K rows of a pipeline record (kind 'G', 'K'); a missing table has none"""
+    out = set()
+    if not p.exists(): return out
+    for ln in p.read_text().splitlines():
+        c = ln.split('\t') if kind else ln.split()
+        if kind: c = c[1:] if c[:1] == [kind] else []
+        elif not ln.strip() or ln.startswith('#'): continue
+        if len(c) >= 2 and c[0] and c[1]: out.add((c[0][:16], c[1][:16]))
+    return out
+
+def mesh_pairs(g):
+    """The vertex / geometry pairs that get a mesh library (dmsh_mesh.py): those the game drew with a lean geometry kernel and no mesh library, which the host writes to the pipeline record
+    as G rows (pso_manifest.tsv; nvn_geometry.inc geo_mesh_fn), and the hand-written geo_mesh.tsv, for pairs no recording has reached yet"""
+    return table_pairs(g.table('pso_manifest.tsv'), 'G') | table_pairs(g.table('geo_mesh.tsv'))
+
+def pc_pairs(g):
+    """The vertex / pixel pairs that get a pass-as-compute kernel (dmsh_pcomp.py): those the game drew in a one-draw pass with no kernel, which the host writes to the pipeline record as
+    K rows (pso_manifest.tsv; nvn_mtl.m pcm_kernel), and the hand-written pass_compute.tsv"""
+    return table_pairs(g.table('pso_manifest.tsv'), 'K') | table_pairs(g.table('pass_compute.tsv'))
+
 def inputs(g):
-    """Digest of a game profile's inputs to its shader library: the shader tables (a missing one counts as such) and the nvn_* / shader_* keys"""
+    """Digest of a game profile's inputs to its shader library: the shader tables (a missing one counts as such) and the nvn_* / shader_* keys. Of the pipeline record only its G rows
+    (mesh_pairs), and only when it has any: a profile whose record has none keeps its digest, and recording other pipelines again changes nothing"""
     h = hashlib.sha256()
     for f in INPUT_TABLES:
         p = g.table(f)
         h.update(f'game/{f}'.encode() + b'\0' + (p.read_bytes() if p.exists() else b'missing') + b'\0')
+    rec = table_pairs(g.table('pso_manifest.tsv'), 'G')
+    if rec: h.update(b'game/pso_manifest.tsv G\0' + ''.join(f'{v}\t{k}\n' for v, k in sorted(rec)).encode() + b'\0')
+    rk = table_pairs(g.table('pso_manifest.tsv'), 'K')
+    if rk: h.update(b'game/pso_manifest.tsv K\0' + ''.join(f'{v}\t{k}\n' for v, k in sorted(rk)).encode() + b'\0')
     h.update(profile_rows(g))
     return h.hexdigest()[:12]
 
@@ -88,8 +125,24 @@ def write_stamp(lib, game_id, digest):
 def table_head(lib):   # the header c1_full.tsv / cb_extent.tsv start with: the library's chain version and its inputs ("none" when it has no stamp, which nothing takes)
     return f'# chain {os.path.basename(os.path.normpath(lib))} inputs {read_stamp(lib).get("inputs", "none")}'
 
-def xlate_source_sha():   # same convention as dmsh_xlate --source-sha: the embedded Program.cs and csproj concatenated in that order
-    return hashlib.sha256(b''.join(open(os.path.join(HERE, 'dmsh_xlate', f), 'rb').read() for f in ('Program.cs', 'dmsh_xlate.csproj'))).hexdigest()[:16]
+XLATE_RYU_SUFFIXES = ('.cs', '.csproj', '.glsl', '.props')   # what the build of dm/third_party/ryujinx compiles or reads; not its README, LICENSE or build outputs (bin/, obj/)
+
+def xlate_source_files(gfx_dir=None):
+    """Every in-repo file the translator is built from, by path relative to dm/: Program.cs, dmsh_xlate.csproj and the vendored Ryujinx sources (dm/third_party/ryujinx). Before, the
+    digest took Program.cs and the csproj alone, so an edit under dm/third_party/ryujinx with the old translator left in place passed tool_lock.py and test_native_tools.py
+    (upstream NXNative f856c78d5, noted in PR #3253)"""
+    gfx = os.fspath(gfx_dir) if gfx_dir is not None else GFX; dm = os.path.dirname(gfx)
+    files = [os.path.join(gfx, 'tools/dmsh_xlate', f) for f in ('Program.cs', 'dmsh_xlate.csproj')]
+    for root, dirs, names in os.walk(os.path.join(dm, 'third_party/ryujinx')):
+        dirs[:] = sorted(d for d in dirs if d not in ('bin', 'obj') and not d.startswith('.'))
+        files += [os.path.join(root, n) for n in sorted(names) if not n.startswith('.') and n.endswith(XLATE_RYU_SUFFIXES)]
+    return sorted(files, key=lambda p: os.path.relpath(p, dm).replace(os.sep, '/'))
+
+def xlate_source_sha(gfx_dir=None):   # dmsh_xlate --source-sha prints the same: native_tools.sh stamps this into it at its build (-p:XlateSourceSha)
+    gfx = os.fspath(gfx_dir) if gfx_dir is not None else GFX; dm = os.path.dirname(gfx); h = hashlib.sha256()
+    for p in xlate_source_files(gfx):
+        with open(p, 'rb') as f: h.update(os.path.relpath(p, dm).replace(os.sep, '/').encode() + b'\0' + f.read() + b'\0')
+    return h.hexdigest()[:16]
 
 def header_text(v):
     return (f'// Generated file (dm/gfx/tools/dmsh_chain.py --header): the B shader library translation chain version this source tree expects (default options), one for every game;\n'
@@ -102,5 +155,6 @@ if __name__ == '__main__':
         open(HEADER, 'w').write(header_text(version()))
         print(version())
     elif a == ['--inputs']: print(inputs(load_game()))
+    elif a == ['--xlate-source-sha']: print(xlate_source_sha())
     elif not a: print(version())
     else: sys.exit(__doc__ if __doc__ else 'usage: see the file header')

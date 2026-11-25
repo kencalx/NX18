@@ -6,7 +6,7 @@ BPP={70:4,71:4,80:4,81:4,90:4,92:4,93:4,115:8,125:16,55:4,25:2,65:4,105:4,103:4,
 P=collections.defaultdict(list); D={}; FA=None
 for l in open(sys.argv[1]):
     l=l.strip()
-    m=re.match(r'\[pass\] F(\d+) P (\d+) (c\d+|d) ser=(\d+) fmt=(\d+) (\d+)x(\d+)(?:.*? lv(\d+))?.*?(clear|load|dontcare)$',l)
+    m=re.match(r'\[pass\] F(\d+) P (\d+) (c\d+|d) ser=(\d+) fmt=(\d+) (\d+)x(\d+)(?:.*? lv(\d+))?.*?(clear|load|dontcare)(?: mtl=\S+)?$',l)
     if m:
         f,p,slot,s,fmt,w,h,lv,act=m.groups()
         if FA is None: FA=int(f)

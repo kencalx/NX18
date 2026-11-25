@@ -33,6 +33,7 @@ Update 1.3.7 (v655360) over the base game; its DLC (The Delicious Last Course) i
 
 ## Mac routes
 
+- **NVN contract validation (2026-11-17, PR #1285):** the full 85-second map route passed against upstream main `2925d7af` (ported to NX 18 from `fa2ed14d7`; not run on NX 18), covering Unity's pool/buffer access, builder state and texture uploads. Both revisions used the local build's derived profile; 3,131 shaders were unchanged, with no new red diagnostics or screenshot regression. On an M4 Pro, macOS 27.2.1: 59.6 → 59.7 fps, frame p99 17.19 → 17.16 ms, peak footprint 2,374 → 2,361 MB. This establishes no regression; the [buffer-flush defect](../../../docs/reference/nvn-objects.md#buffer-flushes-publish-the-corresponding-pool-range) is reproduced independently by GPU readback. iOS was not rerun.
 - A fresh save through the title (L+R), a new slot, the storybook and the house to the map (at about 160 s): `DM_KEYS="20:L+R,26:A,32:A,38:A,44:A,50:A,56:A*20/3,120:LRight~4,125:A,127:LRight~3,131:A*10/2,152:LLeft~3,155.5:A"`.
 - From that save, across the bridge (its entry is narrow between the posts) into Forest Follies (play from about 68 s; Y shoots): `DM_KEYS="20:L+R,26:A,32:A,35:A,40:LRight~1.5,42:LDown~1.5,45:LRight~3,49:LUp~1,51:LRight~3,54.5:LLeft~0.5,55.2:LUp~0.25,55.6:LRight~2,58:LUp~0.2,58.4:LRight~0.25,58.8:LUp~0.2,59.2:LRight~0.25,59.6:LUp~0.2,60:LRight~0.25,60.4:LUp~0.2,61:A,63:A"`.
 

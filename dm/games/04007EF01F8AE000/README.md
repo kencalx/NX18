@@ -1,6 +1,6 @@
 # Fire Emblem Fortune's Weave (`04007EF01F8AE000`)
 
-A Switch 2 game: v131072, SDK 22.2.0 built for the Switch 2 (`Ounce`), NVN2 API 231.40. Intelligent Systems' engine on NintendoWare (G3d, Ui2d, Vfx, Atk), PhysX 5.6, a deferred renderer. Modules `main`, `subsdk2` (movies) and `sdk`; `subsdk0` (DLSS) and `subsdk1` (CUDA) are not loaded. **Plays on the Mac**: the opening movie, the dialogue and the first battle map, whose first turn matches published footage, and its battle scenes in the user's playtest. No IPA has been built.
+A Switch 2 game: v131072, SDK 22.2.0 built for the Switch 2 (`Ounce`), NVN2 API 231.40. Intelligent Systems' engine on NintendoWare (G3d, Ui2d, Vfx, Atk), PhysX 5.6, a deferred renderer. Modules `main`, `subsdk2` (movies) and `sdk`; `subsdk0` (DLSS) and `subsdk1` (CUDA) are not loaded. **Plays on the Mac**: the opening movie, the dialogue and the first battle map, whose first turn matches published footage, and its battle scenes in the user's playtest. **Plays on the iPhone 18 Pro Max** (X1.0, handheld): about 18.7 minutes of the owner's play at 60 fps on a fresh install; the app's prewarm list now holds the rows that run recorded too ([On the iPhone](#on-the-iphone)).
 
 ## What it needs
 
@@ -47,20 +47,50 @@ All 16,888 translate (current). One shader has 10 texture handles the translator
   - Frame rate: on the map, headless, 107-119 fps with 96-100% of frames at 120 per 1,800 frames (frame time p50 8.3 ms, GPU 5.5 ms, about 840 draws). In the window on the prototype, without the fallback, most of the user's session held 106-117 fps at 600-990 draws, and 65-72 fps where the GPU took 12-13 ms; that stretch would now run at 60. Added lag of 12 ms a frame holds a steady 60 with the target at 60. In a window the host picks the 120 Hz display link by itself (open: the frame rate of this build in a window; the one short run had two other games running on the Mac and measured nothing).
   - Known: `game::telop::ListResultMenuItemBase` (`main+0x17885f8`) adds max(int(step), 1) to a timer each update, 8 times that while an input flag is set, so its In / Out timer runs at double speed at 120. It is a results list's menu item, a matter of looks, and is left as it is (a cut would tie this to the build). Systems that ignore the step altogether would also run fast; none has been seen so far.
 
+## On the iPhone
+
+The owner's start on an iPhone 18 Pro Max (A20 Pro GPU), the X1.0 build (`6448f757`, chain `222e58e346d6`), v131072, handheld (graphics scale tier 0), Picture Stretch, no upscaling, no edge smoothing, Frame rate 60, a controller: the first start after a fresh install, with the app's 1,811-row prewarm list (the Mac recording) and an empty device archive. From its `log.txt` (`scripts/devlog.py`):
+
+| | First start (fresh install) |
+|---|---|
+| Played | about 18.7 minutes (55,814 frames) |
+| Before the first frame | the app's 1,811-line list prepared in 1.14 s on 6 workers: 2 bases compiled, 379 from the archive (333 layout bases from the archive bundled with the app), 60 reused; its 26 compute pipelines from the app's archive |
+| Bases compiled in play | 185 (21.6 s of compile time on all threads); the submit thread waited 1.22 s for pipelines |
+| Frames | 60 fps (the power windows' median); frame time p50 16.67 ms, p95 17.46 ms; 389 of 55,732 frames dropped (0.7%) |
+| Frames over 100 ms | 12, 5 of them with new pipelines (336, 253, 178, 131 ms, and the first frame's 879 ms, mostly its present); the longest, 3,064 ms, spanned a system applet (a focus change) |
+| GPU time p50 | 10.49 ms |
+| CPU | 0.49 W (median), 8.3 mJ a frame; thermal state 0 throughout |
+| Memory | footprint at most 1.93 GB; at least 6.26 GB of headroom to the app's limit |
+| Enqueue to display p50 | 28.16 ms |
+
+No audio underrun. The archive bundled with the app (933.1 MB) was taken (`holds the bases of every shader pair (16 of 16 probed bases found)`). The address space held: the host reserved the guest's 16 GB alias region, the game's allocator took the 15.69 GB it has room for (`StandardAllocator::Initialize(nullptr, 36.00 GB) … 15.69 GB of address space`), and the region was mapped up to +15.75 GB. `[RED]` lines: the known `stage 1 cb4 has no uniform buffer bound` once, and 17 `command buffer execution error` lines from about frame 17,100, the first with `Discarded (victim of GPU error/recovery)` ([Open](#open)).
+
+### Pipelines on a first start
+
+[`pso_manifest.tsv`](pso_manifest.tsv), the prewarm list the app ships, is the Mac recording (1,811 rows: boot, the opening movie, the dialogue, the first battle map to its enemy phase) and, below it and its own note, that iPhone's own `Documents/pso_user.tsv` after the run. `pso_user.tsv` records only what the list did not hold, so its 474 rows, 220 shaders (`S`), 241 render pipelines (`R`) and 13 compute pipelines (`C`), are all new: the list now has 2,285 rows (1,563 `S`, 683 `R`, 39 `C`), in the order of first use. `dm/tools/pso_seed.py` checked every row against [`shader_map.tsv`](shader_map.tsv), the profile's at `6448f757`, the commit the phone's build was made from (16,888 entries, as the log's `shader map 16888 entries`): none refused, none repeated, none a repeat of a Mac row. Grown on 2026-11-16 by the 3,711 rows (2,058 S, 1,608 R, 45 C) the owner's iPhone recorded over two X2.0 sessions (`431d5d18`, about 35 min, which compiled 687 bases in play; `29dcbb4d`, about 9 min, 77), its geometry-path rows left out: 5,996 rows in all (3,621 S, 2,291 R, 84 C). On that phone the second session's start took 9.3 s, most of it a one-time compaction of its own pipeline archive (49 files, 447 bases captured again, about 6 s), not the list.
+
+- **What it changes:** a fresh install also prepares the 474 rows before its first frame, so the run's in-play compiles (185 bases, 5 frames over 100 ms with new pipelines, up to 336 ms) move into the prepare step and, at the next build, into the app's bundled archive, whose layout bases `pso_offline.py` then also makes for the 241 new `R` rows ([Pipelines with a vertex layout compiled at a fresh install's prepare step](../../../docs/reference/shaders.md#pipelines-with-a-vertex-layout-compiled-at-a-fresh-installs-prepare-step)); its plan for this list has not been run.
+- **Its cost on a fresh install** (an estimate, not measured): the run's 1.14 s for the 1,811 rows, with nearly every base from the app, plus the 220 libraries and the new bases: about 1.3-1.5 s with those bases in the app's archive, or about 3-6 s if it does not serve them (at most 241 more bases at 7.6 ms, Xenoblade Chronicles: Definitive Edition's measured prepare step, to 20 ms a base on 6 workers).
+- **In play after it:** places past those 18.7 minutes still build their pipelines at their first draw, and `pso_user.tsv` records them.
+- **The settings:** handheld and Picture Stretch change no row: the stretch is the host's present, and a row's pipeline key (`pso_skey`) holds no picture size. Docked play on the iPhone was not recorded.
+- **The build:** the next build of this game runs the shader step again (its key covers the profile's files, `pso_manifest.tsv` among them), and `pso_offline.py` compiles its compute groups again (the 13 new `C` rows move those shaders up) and the new layout groups. No game build was run for this change. No other game's build changes.
+
 ## Driving it on the Mac
 
 Keyboard in a window: J K U I are A B X Y, WASD the left stick, Shift + arrows the right stick, Z and C are ZL (threat range) and ZR (settings). The work folder has `win.sh` (a window with Metal's HUD, `run/ctl.txt` as `DM_CTL`), `mash.sh <secs> [dir]` (A every 0.8 s, with shots), `rebuild.sh` (a host copy, `build/fewhost`), `shaders.sh`, and `scripts/shdump.py <key> [ops]` for a shader's raw instructions. Pressing A from boot goes through the movie and the dialogue to the first battle map in about 80 s. Serials shift between runs, so read them from a pass dump; `DM_NVN_PASSDUMP_ALL=1` lists every dispatch's bindings.
 
 ## Open
 
-- Nothing past the first map has been played on this build.
+- On the Mac, nothing past the first map has been played on this build. The iPhone run's 18.7 minutes were not mapped to a route.
 - `stage 1 cb4 has no uniform buffer bound`, once a run, with no effect seen.
-- MetalFX's jitter sign and DLSS's bias mask are unchecked; the bias mask is only logged. No ghosting has been seen so far.
-- An IPA: the 16 GB alias region is over iOS's limit, as for [Splatoon Raiders](../0400380020056000/README.md).
+- MetalFX's jitter sign is unchecked, and what this game's DLSS bias mask holds has not been looked at (it reaches MetalFX as its reactive mask: [NVN2's DLSS on MetalFX](../../../docs/reference/rendering.md#nvn2s-dlss-on-metalfx)). No ghosting has been seen so far.
+- A fresh install with the 2,285-row prewarm list on the iPhone, estimated at about 1.3-1.5 s of prepare step ([Pipelines on a first start](#pipelines-on-a-first-start)): its `pipeline prepare` line, and whether play to the same places has none of the 5 frames over 100 ms with new pipelines.
+- 17 `[RED] command buffer execution error` lines on the iPhone from about frame 17,100, the first with `Discarded (victim of GPU error/recovery)`: another command buffer's GPU fault, which the log does not name. Nothing in the run's frame lines points at it; not reproduced.
 - `dm/games/profile_guess.py` does not recognise the SDK's `Generic` version name.
 
 ## Found on this game
 
+- [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): the `main` duplicate-selection mismatch is resolved, 2026-11-17, with the registered shader identities preserved.
 - [Scaled shared memory addresses](../../../docs/reference/shaders.md#scaled-shared-memory-addresses) and [IMAD.HI adds a register pair, and IMAD.X its carry](../../../docs/reference/shaders.md#imadhi-adds-a-register-pair-and-imadx-its-carry): the dark map.
 - [Pending clears land before a compute dispatch](../../../docs/reference/rendering.md#pending-clears-land-before-a-compute-dispatch): battles and scene changes blown white.
 - [NVN2 compute reads its workgroup counts at c0 + 4](../../../docs/reference/shaders.md#nvn2-compute-reads-its-workgroup-counts-at-c0--4).
@@ -78,3 +108,6 @@ Keyboard in a window: J K U I are A B X Y, WASD the left stick, Shift + arrows t
 - [The output device notification under its SDK 21 and 22 name](../../../docs/reference/audio.md#the-output-device-notification-under-its-sdk-21-and-22-name): an abort at start without it.
 - [An SDK 21 Switch 2 game with a 4.5 GB alias region](../../../docs/reference/memory.md#an-sdk-21-switch-2-game-with-a-45-gb-alias-region): SDK 22's node area.
 - The title screen's hand-over to the opening demo finalizes a program its queue still has bound: [Finalized programs leave every queue's bindings](../../../docs/reference/nvn-objects.md#finalized-programs-leave-every-queues-bindings) (resolved).
+- [Top mip levels left out on the phone](../../../docs/reference/memory.md#top-mip-levels-left-out-on-the-phone): the mip drop line's tally of why an upload kept every level (`md_tally`), after the 2026-11-15 round left out the levels of only 0-1 of its textures with about 1.3 GB of packaged textures.
+- [Innocent-victim GPU errors said nothing of what ran beside them](../../../docs/reference/rendering.md#innocent-victim-gpu-errors-said-nothing-of-what-ran-beside-them): 7 command buffers discarded as innocent victims as an AV1 movie stopped (the 2026-11-15 round); the run's first one now says what was in flight, open.
+- [A compacting start captured every old base again before its first frame](../../../docs/reference/rendering.md#a-compacting-start-captured-every-old-base-again-before-its-first-frame): a start of 9.32 s on the owner's iPhone, 447 bases captured again in its prepare step (8.41 s); now after the first frame.

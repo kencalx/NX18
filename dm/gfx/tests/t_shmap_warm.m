@@ -26,6 +26,12 @@ int main(void) { @autoreleasepool {
     char tmpl[] = "/tmp/t_shmap_warm.XXXXXX";
     if (!mkdtemp(tmpl)) { perror("mkdtemp"); return 2; }
     NSString *dir = @(tmpl);
+    NSString *lib = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"b-%s", DMSH_CHAIN]];   // the library's stamp, and the two tables made from it with a header of no clock time
+    [NSFileManager.defaultManager createDirectoryAtPath:lib withIntermediateDirectories:YES attributes:nil error:nil];
+    put(lib, @"inputs.tsv", [NSString stringWithFormat:@"game\t%s\ninputs\taaaaaaaaaaaa\n", DM_GAME_ID]);
+    NSString *head = [NSString stringWithFormat:@"# chain b-%s inputs aaaaaaaaaaaa", DMSH_CHAIN];
+    put(dir, @"c1_full.tsv", [head stringByAppendingString:@"\n00112233aabbccdd\n"]);
+    put(dir, @"cb_extent.tsv", [head stringByAppendingString:@"\n# comment\n00112233aabbccdd\t0:64\n"]);
     put(dir, @"shader_map.tsv", @"# one shader\nvs_other.bin\t0\tvertex\t0123456789abcdef\t/glslc_play/fedcba9876543210.glslc#GLSLC@0x0\n");
     put(dir, @"pso_manifest.tsv", @"# an empty seed list: the prepare step goes on to the prebuild\n");
     setenv("DM_NVN_SHMAP", [dir stringByAppendingPathComponent:@"shader_map.tsv"].UTF8String, 1);
@@ -42,8 +48,16 @@ int main(void) { @autoreleasepool {
     EXPECT_EQ("a key the map lists", 1, mtl_shmap_has("0123456789abcdef"));
     EXPECT_EQ("a key it does not", 0, mtl_shmap_has("fedcba9876543210"));
 
+    EXPECT_EQ("table_head_ok: a header of no clock time", 1, table_head_ok(head, head));
+    EXPECT_EQ("table_head_ok: with \\r", 1, table_head_ok([head stringByAppendingString:@"\r"], head));
+    EXPECT_EQ("table_head_ok: an older header with the time", 1, table_head_ok([head stringByAppendingString:@" 2026-11-01T21:36:26+00:00"], head));
+    EXPECT_EQ("table_head_ok: a longer digest is another library's", 0, table_head_ok([head stringByAppendingString:@"0"], head));
+    EXPECT_EQ("table_head_ok: no header", 0, table_head_ok(nil, head));
+
     shmap_read_once();   // what the prefetch does at the game's first program
     EXPECT_EQ("the map is read without starting the prewarm", 0, g_warm_started);
+    EXPECT_EQ("c1_full.tsv taken with a header of no clock time", 1, g_c1_full_valid && [g_c1_full containsObject:@"00112233aabbccdd"]);
+    EXPECT_EQ("cb_extent.tsv taken with a header of no clock time", 1, [g_cb_ext[@"00112233aabbccdd"] isEqualToString:@"0:64"]);
 
     warm_enqueue([WarmItem new]);   // a library the prefetch finished before the first submission
     EXPECT_EQ("an item finished before the prewarm starts is kept", 1, g_warm_items.count);

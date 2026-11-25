@@ -3,16 +3,18 @@
 #   dm/tools/lint_c_baseline.tsv (counts per file and check), so the job fails when a file has more findings of a check than listed there (a new one: fix it, or silence a
 #   false positive with // NOLINT(<check>) and a reason), when it has fewer (run lint_c.py tidy --update), and on a pull request whose baseline grew over its base's.
 # It runs on a Mac because the compile database comes from the Makefiles' dry runs, whose sources need the macOS SDK's headers and frameworks.
+# Manual-only (workflow_dispatch) until GitHub's xcode-27 image ships Xcode 27.3, as tests.yml (which says why and when): until then run lint_c.py locally (docs/development.md).
+# Then put back above workflow_dispatch:
+#   pull_request:
+#     paths: ['dm/host/**', 'dm/gfx/**.[chm]', 'dm/gfx/**.mm', 'dm/gfx/**.cpp', 'dm/gfx/**/Makefile', .clang-tidy, dm/tools/lint_c.py,
+#             dm/tools/lint_c_baseline.tsv, .github/workflows/lint-c.yml]
+#   push:
+#     branches: [main]
+#     paths: ['dm/host/**', 'dm/gfx/**.[chm]', 'dm/gfx/**.mm', 'dm/gfx/**.cpp', 'dm/gfx/**/Makefile', .clang-tidy, dm/tools/lint_c.py,
+#             dm/tools/lint_c_baseline.tsv, .github/workflows/lint-c.yml]
 name: lint-c
 
 on:
-  pull_request:
-    paths: ['dm/host/**', 'dm/gfx/**.[chm]', 'dm/gfx/**.mm', 'dm/gfx/**.cpp', 'dm/gfx/**/Makefile', .clang-tidy, dm/tools/lint_c.py,
-            dm/tools/lint_c_baseline.tsv, .github/workflows/lint-c.yml]
-  push:
-    branches: [main]
-    paths: ['dm/host/**', 'dm/gfx/**.[chm]', 'dm/gfx/**.mm', 'dm/gfx/**.cpp', 'dm/gfx/**/Makefile', .clang-tidy, dm/tools/lint_c.py,
-            dm/tools/lint_c_baseline.tsv, .github/workflows/lint-c.yml]
   workflow_dispatch:
 
 permissions:

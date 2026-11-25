@@ -33,7 +33,7 @@ void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
-uint64_t now_ns(void) { return bp_now(); }
+uint64_t now_ns(void) { return test_now; }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
 // Only the OS wait is replaced: the production wait loop, timeout calculation,
@@ -65,6 +65,28 @@ static void acquire_ticks(int hz, int display, int interval, double want, const 
     double got = per_acquire(hz, display, interval);
     printf("%s: %.2f ticks per acquire (expected %.2f)\n", label, got, want);
     CHECK(got == want, label);
+}
+static void acquire_lateness(void) {
+    char *rows = NULL;
+    size_t size = 0;
+    FILE *tsv = open_memstream(&rows, &size);
+    CHECK(tsv != NULL, "open a capture for the acquire timing rows");
+    if (!tsv) return;
+    g_tsv = tsv;
+    g_link_mode = 1;
+    nvn_present_config(60, 0);
+    win_t win = {.interval = 1, .ntex = 1}; int idx;
+    // The test wait delivers each link tick 2 ms after entering the acquire.
+    win.avail[0] = test_now + 3000000ull;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx);
+    win.avail[0] = test_now + 750000ull;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx);
+    g_tsv = NULL;
+    const char *line_end = fclose(tsv) == 0 && rows ? strchr(rows, '\n') : NULL;
+    const char early[] = "0\t@late_ms\t0.000\n";
+    CHECK(line_end && !strncmp(rows, early, sizeof early - 1), "a link wake 1 ms before the slot logs zero lateness");
+    CHECK(line_end && !strcmp(line_end + 1, "0\t@late_ms\t1.250\n"), "a link wake 1.25 ms after the slot logs 1.250 ms");
+    free(rows);
 }
 // Present snapshots (mtl_snap_on, fixed for the process: run as "t_link_ticks snap"): the acquire takes the display link's wait as without them, the ring slot wait only on top.
 // It used to wait for a free slot alone, and the link frees slots by dropping frames, so a game ran ahead of its present interval (Donkey Kong Bananza at the 30 fps cap: 43-65 fps).
@@ -152,6 +174,24 @@ int main(int argc, char **argv) { @autoreleasepool {
     CHECK(g_link_tick_n == tick && test_now - start == 5000000ull, "timeout reaches its deadline without inventing ticks");
     test_silent = 0;
     CHECK(mtl_link_wait_ticks(2, 10000000ull) && g_link_tick_n - tick == 2, "ticks resume from the last successful wait after timeout");
+    // The acquire gives the acquiring guest thread's core away only while one of its waits blocks (nvn_acquire_block → hle_thread.c dm_thread_display_wait), so a same-core
+    // handoff that made it runnable lets its waker go then: a link wait that blocks enters once an acquire and the acquire's return leaves; one whose ticks have already passed
+    // (the frame is behind) keeps the core, as on Horizon; a link wait outside an acquire changes nothing
+    {
+        g_link_mode = 1; nvn_present_config(60, 0); win_t win = {.interval = 1}; int idx;
+        uint64_t b0 = g_acq_blocks; waits = test_waits;
+        h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx);
+        CHECK(test_waits > waits && g_acq_blocks == b0 + 1 && !t_acq_blocked && !t_acq_in, "an acquire whose link wait blocks takes the display wait once and leaves it on return");
+        g_link_tick_n += 4; b0 = g_acq_blocks; waits = test_waits;
+        h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx);
+        CHECK(test_waits == waits && g_acq_blocks == b0 && !t_acq_blocked, "an acquire whose tick has already passed keeps its core");
+        b0 = g_acq_blocks;
+        CHECK(mtl_link_wait_ticks(1, 10000000ull) && g_acq_blocks == b0 && !t_acq_blocked, "a link wait outside an acquire takes no display wait");
+        win.interval = 0; b0 = g_acq_blocks;
+        h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx);
+        CHECK(g_acq_blocks == b0, "present interval 0 waits for nothing and keeps its core");
+    }
+    acquire_lateness();
     pid_t pid; int st = 1; extern char **environ;   // the snapshot cases in a process of their own (mtl_snap_on is decided once)
     CHECK(!posix_spawn(&pid, argv[0], NULL, NULL, (char *[]){argv[0], "snap", NULL}, environ) && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && !WEXITSTATUS(st), "the snapshot cases pass");
     printf("t_link_ticks: %d checks, %d failed\n", checks, failed); return failed != 0;

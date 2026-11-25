@@ -1,7 +1,7 @@
 # The Legend of Zelda: Tears of the Kingdom (0100F2C0115B6000): the rewriter's patches of this game's own builds. dm/tools/patch_nso.py loads every profile's patches.py and applies those of a module's NSO build ID;
 # CUTS, OBS and FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
 import struct
-from nso_asm import ADRP, B, NOP, STP_PRE
+from nso_asm import ADDI, ADRP, B, LDP_POST, NOP, STP_PRE
 
 # Tears of the Kingdom picks a present interval each frame (main+0x2db174: 2 = 30 fps, 3 under load) and steps its game time by 60 / fps (int fps at timing +0x50, read at main+0x2daa54
 # and main+0x3e562c). The stub replaces that logic: int fps = 60 / step, and the float fps (timing +0x24, unused, per masagrator's FPSLocker config for this build, which found the
@@ -108,7 +108,11 @@ def stub(ctx, step, read1, read2, fade, swap, view):
     fs_put(swap + 0x1a4, [B(swap + 0x1a4, start)], 'swapchain argument 1 when on (FPSLocker)')
     # Render scale (state +0x10, float written by the loader: DM_RENDER_SCALE, 1.0 by default). main+0xd5c24 sizes each view: screen size x the view's scale (5/6 for the scene: 1600x896
     # docked) x the dynamic-resolution multiplier, clamped to 8..16384 and floored to the view's alignment. The stub multiplies both extents by the factor (s6, w8 and the flags are dead
-    # at main+0xd5cc0: s6 is set to 8.0 right after); any factor but 1.0 also replaces the dynamic multiplier (main+0xd5d80) with 1, so the size is fixed. 1.0 = bit-exact original
+    # at main+0xd5cc0: s6 is set to 8.0 right after); any factor but 1.0 also replaces the dynamic multiplier (main+0xd5d80) with 1, so the size is fixed. 1.0 = bit-exact original.
+    # The host's live factor (state +0x14, float; 0 = none yet; hle_nvn.c scale_set, the heat ladder's 85% / 70% and the GPU clock rescue's 0.75, composed under the player's and
+    # floored so player × it is at least 0.5) takes the dynamic multiplier's place under a fixed Render scale (the extents already carry the player's scale), and at Render scale
+    # 1.0 the lower of the two, so a heat step never raises the resolution and a factor back at 1.0 gives the game's own multiplier at the next size (heat-ladder.md §6; its one caller chain,
+    # +0xd5a48 <- +0xd5960 <- +0xd57c4 <- +0xd3980 <- +0x8d760, has no size cache and hands the size straight to the view's setup at +0xe1f50: traced statically, not at run time)
     fs_site(view + 0x9c, '08d0a8524008251e6108241e0401271e'); fs_site(view + 0x15c, '062940bd')
     start = here(); emit(ADRP(8, here(), FS_STATE_OFF))
     for w in (0xbd401106,   # ldr s6,[x8,#0x10]   render scale
@@ -122,26 +126,79 @@ def stub(ctx, step, read1, read2, fade, swap, view):
               0x1e270104):  # fmov s4,w8          (original)
         emit(w)
     emit(B(here(), view + 0xac))
-    fs_put(view + 0x9c, [B(view + 0x9c, start)], 'view render size x the host render scale (1.0 = original)'); ctx.render_scale = 1
+    fs_put(view + 0x9c, [B(view + 0x9c, start)], 'view render size x the host render scale (1.0 = original)'); ctx.render_scale = 1; ctx.live_scale = 1
     start = here(); emit(0xbd402906); emit(ADRP(8, here(), FS_STATE_OFF))   # ldr s6,[x8,#0x28] (original: the dynamic multiplier); x8 is dead after it
     for w in (0xbd401107,   # ldr s7,[x8,#0x10]
               0x1e2e1010,   # fmov s16,#1.0
               0x1e3020e0,   # fcmp s7,s16
-              0x54000080,   # b.eq done (+16)     scale 1: the game's dynamic resolution
+              0x54000120,   # b.eq own (+9)       scale 1: the game's dynamic resolution
               0x1e2020e8,   # fcmp s7,#0.0
-              0x5400004d,   # b.le done (+8)      not set
-              0x1e204206):  # fmov s6,s16         a fixed scale: no dynamic multiplier
+              0x540000ed,   # b.le own (+7)       not set
+              0x1e204206,   # fmov s6,s16         a fixed scale: no dynamic multiplier
+              0xbd401507,   # ldr s7,[x8,#0x14]   the host's factor
+              0x1e2020e8,   # fcmp s7,#0.0
+              0x540000ed,   # b.le done (+7)      none
+              0x1e2040e6,   # fmov s6,s7          the host's factor in its place (the extents carry the player's scale)
+              0x14000005,   # b done (+5)
+              0xbd401507,   # own: ldr s7,[x8,#0x14]   the host's factor
+              0x1e2020e8,   # fcmp s7,#0.0
+              0x5400004d,   # b.le done (+2)      none
+              0x1e2778c6):  # fminnm s6,s6,s7     the lower of the dynamic multiplier and the host's factor
         emit(w)
     emit(B(here(), view + 0x160))
-    fs_put(view + 0x15c, [B(view + 0x15c, start)], 'dynamic resolution only at render scale 1.0')
+    fs_put(view + 0x15c, [B(view + 0x15c, start)], 'dynamic resolution only at render scale 1.0, the host\'s live factor (+0x14) under it')
 
 def matched_frame_step(ctx):
     """Any build whose six functions match: all or nothing, as the readers without the step (or the step without them) run the game at the wrong speed (the locator prints a
     red line for the one not found)"""
+    if getattr(ctx, 'build', None) == camera_build: camera_aspect(ctx)   # Ultrawide's camera (below): fixed addresses, only on the build they were found in
     o = ctx.others
     parts = [o.get(k) for k in ('game step reader 1', 'game step reader 2', 'menu fade', 'swapchain argument', 'view render size')]
     if None in parts: return
     stub(ctx, ctx.base, *parts)
+
+
+# Ultrawide's camera (the launcher's Ultrawide on an iPhone, loader.c dm_game_aspect), 1.4.3 main only: two camera updates set a perspective projection's aspect (+0xb0) at
+# main+0x628c74 and main+0xb43460 (the producer, the dirty flag, the store; the projection in x20 / x23), and two viewport projections at main+0x1ff04f4 and main+0x253fbb0
+# (in x8). Each stub runs the site's words from the patch area, read from the image (ctx.words; every site is checked by its bytes' SHA-256 before any is written, so no game
+# code is kept here); before the store, s0 takes the host's ratio (state +0x64; 0 = the game's own). Only the two camera stubs then store that ratio at +0x68 with release
+# order, after the projection has it: a viewport update alone never lets the host squeeze the HUD. x10 / x11 are saved around each stub; the flags are not touched.
+# Adapted from ComicBit/nxnative eb9a42ba4 / a2f038d3f (MIT), which adapted MacNativeGames' games/totk/runtime/aspect_patch.h, aspect_math.h and game_patches_v143.c (MIT,
+# Copyright (c) 2026 MacNativeGames contributors; https://github.com/ly05010419/MacNativeGames; the full notice is in dm/gfx/nvn/nvn_aspect.h)
+camera_build = '277178b7dba1b6d4949a84778d4abc58'
+cam_want = 0x64   # state +0x64 the ratio the host asks for, +0x68 the ratio a camera stub last wrote (patch_nso.py, "State page")
+camera_sites = (   # (offset, words, SHA-256 of their bytes, a camera update: acknowledges)
+    (0x628c74, 3, 'd04c7ed287a689e8309bc1ca82bb8b6d8ac82e71d7279f088813c3b195d186a2', True),
+    (0xb43460, 3, 'e735fd02630900e6f80cdfc33c612698b7e83c02fec90b7f2ccdfdcc16c76bd9', True),
+    (0x1ff04f4, 2, '9dd5ad589accfffd88624bba51261076d2dae7c857f91827f2456e2b042d6814', False),
+    (0x253fbb0, 2, '9dd5ad589accfffd88624bba51261076d2dae7c857f91827f2456e2b042d6814', False),
+)
+
+
+def camera_aspect(ctx):
+    for site, n, digest, _ in camera_sites: ctx.site(site, f'sha256:{4 * n}:{digest}')   # all four checked before any is written
+    read = getattr(ctx, 'words', lambda off, k: [NOP] * k)   # a dry run (docs_patches.py) has no image
+    for site, n, _, acknowledge in camera_sites:
+        words = read(site, n)
+        start = ctx.here()
+        ctx.emit(words[0])   # the producer (s0 = the game's ratio)
+        ctx.emit(STP_PRE(10, 11, 31, -16))
+        ctx.emit(ADRP(10, ctx.here(), ctx.state))
+        for w in (ADDI(10, 10, cam_want),
+                  0x88dffd4b,   # ldar w11,[x10]     the host's ratio (float bits)
+                  0x3400004b,   # cbz w11,+2         0: the game's own ratio
+                  0x1e270160):  # fmov s0,w11
+            ctx.emit(w)
+        for w in words[1:]: ctx.emit(w)   # (the dirty flag and) the store
+        if acknowledge:
+            ctx.emit(ADDI(10, 10, 4))   # +0x68
+            ctx.emit(0x889ffd4b)        # stlr w11,[x10]   after the store (0 too: the game's own again)
+        ctx.emit(LDP_POST(10, 11, 31, 16))
+        ctx.emit(B(ctx.here(), site + 4 * n))
+        ctx.put(site, [B(site, start)] + [NOP] * (n - 1),
+                "camera aspect: the host's ratio (state +0x64; 0 = the game's own), acknowledged at +0x68 after the store (Ultrawide)" if acknowledge else
+                "viewport projection aspect: the host's ratio (state +0x64; 0 = the game's own), not acknowledged (Ultrawide)")
+    ctx.capabilities.add('CAMERA_ASPECT')
 
 # Placed by the functions they patch, on any build that keeps all six (checked on 1.4.3, 2026-11-09: rewritten byte-identical to the build entry it had until then,
 # FRAME_STEP of build 277178b7…, at main+0x2db174, +0x2daa20, +0x3e55e0, +0x1fbb50, +0xbe1304 and +0xd5c24)
@@ -162,4 +219,8 @@ BINDING = [
      'why': "the game's own timing object, found by its six functions' fingerprints on any build that keeps them; no engine sibling shares the code (BotW, SMO, MK8D, ACNH, "
             'Splatoon 2 / 3, Kirby, Mario Party, Ocarina, Smash, Metroid Dread, Origami King: no exact match, 2026-11-09)',
      'checked': '1.4.3 main: one function of each fingerprint; the rule rewrites it byte-identical to its former build entry (2026-11-09)'},
+    {'what': "Ultrawide's camera: the camera and viewport projections' aspect from the host, acknowledged after the camera stores", 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the game's four projection updates and their objects' layout; the host's ratio, the HUD squeeze and the Stretch are general host behaviour",
+     'blocked': 'the projection updates have no reviewed function fingerprints yet',
+     'checked': "the four sites' words by SHA-256 in main 277178b7…; ComicBit/nxnative's Mac play at 16:9 and wider (the opening cave); not run in NX 18"},
 ]

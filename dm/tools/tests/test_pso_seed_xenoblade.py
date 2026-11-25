@@ -23,23 +23,31 @@ class Committed(unittest.TestCase):
         self.lines = [ln for ln in self.text.split('\n') if ln]
         self.note = next(i for i, ln in enumerate(self.lines) if ln.startswith('# Recorded on an iPhone 18 Pro Max') and 'on 0.5' in ln)
         self.x1 = next(i for i, ln in enumerate(self.lines) if ln.startswith('# Recorded on an iPhone 18 Pro Max') and 'on X1.0' in ln)
+        self.x2 = next(i for i, ln in enumerate(self.lines) if ln.startswith('# Grown on 2026-11-16'))   # the X2.0 sessions' rows, last
 
     def rows(self, lines):
         return [ln for ln in lines if not ln.startswith('#')]   # as the host splits them: a '\r' would stay in the row
+
+    def found(self, pattern, text):
+        """re.search(pattern, text).groups(), or the test fails naming the pattern"""
+        m = re.search(pattern, text)
+        if m is None: self.fail(f'{pattern!r} not in {text!r}')
+        return m.groups()
 
     def test_checks_clean_but_the_six_geometry_variants(self):
         rows = self.rows(self.lines)
         keep, bad = pso_seed.collect(rows, self.shmap)
         self.assertEqual(len(bad), 6)
         self.assertTrue(all(re.search(r'_bg[0v]', str(b)) for b in bad), bad)
-        self.assertEqual(pso_seed.counts(keep), {'S': 3869, 'R': 837, 'C': 0, 'M': 0, 'rows': 4706})
-        self.assertEqual(len(rows), 4712)
+        self.assertEqual(pso_seed.counts(keep), {'S': 3982, 'R': 1051, 'C': 0, 'M': 0, 'rows': 5033})
+        self.assertEqual(len(rows), 5039)
 
     def test_the_first_rows_then_the_0_5_rows_then_the_x1_0_rows(self):
         self.assertLess(self.note, self.x1)
         first = self.rows(self.lines[:self.note])
         phone = self.rows(self.lines[self.note:self.x1])
-        x1 = self.rows(self.lines[self.x1:])
+        x1 = self.rows(self.lines[self.x1:self.x2])
+        x2 = self.rows(self.lines[self.x2:])
         self.assertEqual(len(first), 3659)
         keep, bad = pso_seed.collect(phone, self.shmap)
         self.assertEqual((bad, pso_seed.counts(keep)), ([], {'S': 69, 'R': 146, 'C': 0, 'M': 0, 'rows': 215}))
@@ -48,6 +56,9 @@ class Committed(unittest.TestCase):
         ids = [{pso_seed.identity(r) for r in part} for part in (first, phone, x1)]
         self.assertFalse(ids[0] & ids[1])
         self.assertFalse((ids[0] | ids[1]) & ids[2])
+        keep, bad = pso_seed.collect(x2, self.shmap)
+        self.assertEqual((bad, pso_seed.counts(keep)), ([], {'S': 113, 'R': 214, 'C': 0, 'M': 0, 'rows': 327}))
+        self.assertFalse((ids[0] | ids[1] | ids[2]) & {pso_seed.identity(r) for r in x2})
         self.assertTrue(all(len(r) == 2 + 1024 for r in x1 if r.startswith('R\t')))   # X1.0's keys carry the border field
 
     def test_header_counts_and_source(self):
@@ -56,11 +67,11 @@ class Committed(unittest.TestCase):
             rec = self.lines[i]
             self.assertIn('Picture Stretch', rec)
             self.assertIn('60 fps mod', rec)
-            self.assertEqual(re.search(r'(\d+) rows: (\d+) S, (\d+) R, (\d+) C\b', rec).groups(), want)
+            self.assertEqual(self.found(r'(\d+) rows: (\d+) S, (\d+) R, (\d+) C\b', rec), want)
         self.assertIn('6448f757', self.lines[self.x1])
         top = next(ln for ln in head[:4] if ln.startswith('# Then, below the first rows'))
         self.assertEqual(re.findall(r'did not hold, (\d+) rows: (\d+) S, (\d+) R, (\d+) C\.', top), [('215', '69', '146', '0'), ('838', '568', '270', '0')])
-        self.assertEqual(re.search(r'In all (\d+) rows: (\d+) S, (\d+) R, (\d+) C', top).groups(), ('4712', '3873', '839', '0'))
+        self.assertEqual(self.found(r'In all (\d+) rows: (\d+) S, (\d+) R, (\d+) C', top), ('4712', '3873', '839', '0'))
 
 
 if __name__ == '__main__':

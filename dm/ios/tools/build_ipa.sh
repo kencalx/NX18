@@ -84,7 +84,7 @@ GFXAPI=${GFXAPI:-nvn}
   STAMP=$(lib_cat "$MSL_IOS/b-$V" inputs.tsv)
   printf '%s\n' "$STAMP" | grep -qxF "$(printf 'game\t%s' "$GAME")" && printf '%s\n' "$STAMP" | grep -qxF "$(printf 'inputs\t%s' "$IN")" ||
     die "the iOS shader libraries $MSL_IOS/b-$V are not a full build from this profile's current tables (inputs $IN; their stamp: $([ -n "$STAMP" ] && printf '%s\n' "$STAMP" | grep -v '^#' | tr '\n\t' '  ' || echo none)): build them again (IOSOUT=$MSL_IOS dmsh_build.py ...)"
-  head -1 "$GD/c1_full.tsv" 2> /dev/null | grep -q "^# chain b-$V inputs $IN " || die "$GD/c1_full.tsv is missing or not made from these libraries (chain $V, inputs $IN): a full dmsh_build.py run makes it and cb_extent.tsv"
+  head -1 "$GD/c1_full.tsv" 2> /dev/null | grep -Eq "^# chain b-$V inputs $IN( |$)" || die "$GD/c1_full.tsv is missing or not made from these libraries (chain $V, inputs $IN): a full dmsh_build.py run makes it and cb_extent.tsv"
 }
 check_program
 P0=$GAME; P0_PATCHED=$PATCHED; P0_ROMFS=$ROMFS; P0_MSL=$MSL_IOS; P0_GFX=$GFXAPI
@@ -105,6 +105,12 @@ t "app: $DM_DISPLAY_NAME $DM_APP_VERSION ($DM_BUNDLE_ID), language $DM_LANG$([ $
 t "generate Gen/ (host sources, embedded modules, tables)"
 rm -rf Gen && mkdir -p Gen/dm || die "mkdir Gen"
 python3 tools/gen_build.py "$DM/host" Gen > Gen/dm.xcconfig || die "gen_build"
+# NX18_DEV, the owner's developer switch (dm/tools/nx18_dev.py, docs/development.md): the app is compiled with DM_DEV_BUILD=1, so a player build (DM_PLAYER_BUILD=1) takes
+# env.txt's DM_NVN_* and DM_SLOWFRAME lines too (player_env.h) and the app's log names a developer build. Off: Gen/dm.xcconfig as before
+if NX18_DEV_SOURCE=$(python3 "$DM/tools/nx18_dev.py"); then
+  echo 'GCC_PREPROCESSOR_DEFINITIONS = $(inherited) DM_DEV_BUILD=1' >> Gen/dm.xcconfig
+  t "[RED] NX18_DEV is on ($NX18_DEV_SOURCE): a developer build (DM_DEV_BUILD=1), not for players"
+fi
 if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's modules under its tag (the host is built over a table of the programs' profiles: the first program's profile lists them, game.py header_multi)
   F=; : > Gen/embed.S
   while IFS= read -r row; do prog_set "$row"
@@ -119,7 +125,10 @@ echo "OTHER_LDFLAGS = \$(inherited) \$(DM_FRAMEWORKS) $F" >> Gen/dm.xcconfig
 program_tables() {
 cp "$PATCHED"/*.fixups.tsv "$PATCHED"/*.gates.tsv "$PATCHED"/*.cuts.tsv "$PATCHED"/*.obs.tsv $TD/ || die "copy rewriter tables"
 if [ -f "$PATCHED/nro.tsv" ]; then cp "$PATCHED/nro.tsv" $TD/ || die "copy the NRO table"; fi   # the NRO modules the game loads with nn::ro (hle_ro.c), embedded by gen_embed.py
-cp "$GD/shader_map.tsv" "$GD/pso_manifest.tsv" "$GD/c1_full.tsv" $TD/ || die "copy shader tables"
+cp "$GD/shader_map.tsv" "$GD/c1_full.tsv" $TD/ || die "copy shader tables"
+# A profile may have no recorded prewarm seeds yet (upstream NXNative 0c1346416: Pokopia). The host also reads the device's own list
+if [ -f "$GD/pso_manifest.tsv" ]; then cp "$GD/pso_manifest.tsv" $TD/ || die "copy pso_manifest.tsv"
+else t "no $GD/pso_manifest.tsv: no bundled prewarm seed list"; fi
 if [ -f "$GD/cb_extent.tsv" ]; then cp "$GD/cb_extent.tsv" $TD/ || die "copy cb_extent.tsv"; else t "no $GD/cb_extent.tsv: the host copies whole uniform bindings"; fi
 # the shader pairs, beside the shader map where the pipeline prebuild reads them (nvn_mtl.m pso_prebuild): without them the app makes no pulling bases, and a hybrid draw has no stand-in
 for f in shader_pairs.tsv pso_pairs.tsv; do if [ -f "$GD/$f" ]; then cp "$GD/$f" $TD/ || die "copy $f"; fi; done   # optional
@@ -171,6 +180,7 @@ if [ -n "${DM_ART:-}" ] && [ -f "$DM_ART" ]; then case "$(printf %s "$DM_ART" | 
 if [ -n "${DM_LOGO:-}" ] && [ -f "$DM_LOGO" ]; then case "$(printf %s "$DM_LOGO" | tr '[:upper:]' '[:lower:]')" in *.png) cp "$DM_LOGO" Gen/dm/logo.png;; *) fit png 1200 "$DM_LOGO" Gen/dm/logo.png;; esac \
   && t "launcher logo: $DM_LOGO" || { rm -f Gen/dm/logo.png; t "[RED] launcher logo: cannot pack $DM_LOGO; the app is built without it (the launcher shows the game's name)"; }; fi
 if [ -n "${DM_ABOUT:-}" ] && [ -f "$DM_ABOUT" ]; then cp "$DM_ABOUT" Gen/dm/about.json || die "copy DM_ABOUT"; t "About this game: $DM_ABOUT"; fi
+if [ -n "${DM_FACTS:-}" ] && [ -f "$DM_FACTS" ]; then cp "$DM_FACTS" Gen/dm/facts.json || die "copy DM_FACTS"; t "About facts: $DM_FACTS"; fi   # age ratings, tested line, known issue, mod credits (dm/tools/about_facts.py)
 if [ -n "${DM_MANUAL:-}" ] && [ -f "$DM_MANUAL" ]; then cp "$DM_MANUAL" Gen/dm/manual.pdf || die "copy DM_MANUAL"; t "manual: $DM_MANUAL"; fi
 # The third-party notices (dm/tools/third_party_notices.py): every app carries them as DmIOS.app/dm/ThirdPartyNotices.txt, which the settings screen's Acknowledgements shows (GuideViewer.swift)
 cp "$IOS_SOURCE/Resources/ThirdPartyNotices.txt" Gen/dm/ThirdPartyNotices.txt || die "copy the third-party notices"
@@ -188,9 +198,10 @@ if [ -n "${DM_UI_FONT:-}" ]; then
 fi
 # The shader libraries go into the archive as DmIOS.app/msl/<folder>, or as the file DmIOS.app/msl/<folder>.img (main.m sets DM_MSL_DIR to msl)
 MSLDIR=b-$V
-# Shared-font stand-ins: standard = macOS's Arial Unicode (absent on iOS), Nintendo extension = button icons generated by make_ext_font.py (needs fontTools; FONT_PY names a python that has it)
-mkdir -p Gen/dm/font && cp "${STD_FONT:-/System/Library/Fonts/Supplemental/Arial Unicode.ttf}" Gen/dm/font/standard.ttf || die "copy standard font (STD_FONT=a TTF)"
-"${FONT_PY:-python3}" "$DM/tools/make_ext_font.py" Gen/dm/font/nintendo_ext.ttf > /dev/null || die "make_ext_font.py (pip install fonttools, or FONT_PY=python with fontTools)"
+# Shared-font stand-ins, one per type (make_shared_fonts.py, about 7 s: unhinted cuts of STD_FONT, by default macOS's Arial Unicode, which iOS lacks, and the button icons; needs fontTools,
+# FONT_PY names a python that has it)
+mkdir -p Gen/dm/font && "${FONT_PY:-python3}" "$DM/tools/make_shared_fonts.py" Gen/dm/font "${STD_FONT:-/System/Library/Fonts/Supplemental/Arial Unicode.ttf}" > /dev/null \
+  || die "make_shared_fonts.py (pip install fonttools, or FONT_PY=python with fontTools; STD_FONT=a TTF)"
 # App icon: the game's own icon (icon.jpg saved from the control data by nx_extract, the English 256x256 one). DM_ICON can point at another image; by default the icon.jpg next to the RomFS is used.
 # It is scaled to a 1024x1024 PNG in the asset catalog Gen/Assets.xcassets (a single-size app icon; actool generates the other sizes); with neither, the NX 18 icon
 # (docs/images/nx18/nx18-icon-square-1024.png) stands in, so the home screen does not show a blank tile.
@@ -202,7 +213,14 @@ mkdir -p Gen/Assets.xcassets && printf '{"info":{"author":"xcode","version":1}}\
 if [ -f "$ICON" ]; then
   AI=Gen/Assets.xcassets/AppIcon.appiconset; mkdir -p "$AI" || die "mkdir $AI"
   sips -s format png -z 1024 1024 "$ICON" --out "$AI/icon.png" > /dev/null || die "sips: cannot convert the icon $ICON"
-  printf '{"images":[{"filename":"icon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}\n' > "$AI/Contents.json"
+  # The dark and tinted Home Screen looks (iOS 27 HIG, App icons > Icon formats): given one bitmap, iOS separates a foreground from the background itself and leaves out text and
+  # fine detail, which game box art does not survive. So both are given: dark is the art as it is, tinted a greyscale copy (through the grey profile and back to sRGB) the system tints
+  cp "$AI/icon.png" "$AI/icon-dark.png" || die "app icon: dark variant"
+  sips -m "/System/Library/ColorSync/Profiles/Generic Gray Gamma 2.2 Profile.icc" "$AI/icon.png" --out "$AI/icon-tinted.png" > /dev/null \
+    && sips -m "/System/Library/ColorSync/Profiles/sRGB Profile.icc" "$AI/icon-tinted.png" > /dev/null || die "sips: cannot make the tinted icon"
+  printf '%s\n' '{"images":[{"filename":"icon.png","idiom":"universal","platform":"ios","size":"1024x1024"},' \
+    '{"appearances":[{"appearance":"luminosity","value":"dark"}],"filename":"icon-dark.png","idiom":"universal","platform":"ios","size":"1024x1024"},' \
+    '{"appearances":[{"appearance":"luminosity","value":"tinted"}],"filename":"icon-tinted.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}' > "$AI/Contents.json"
   echo "DM_APPICON = AppIcon" >> Gen/dm.xcconfig
   t "app icon: $ICON"
 else t "no app icon ($ICON not found): the home-screen icon stays blank"; fi
@@ -221,7 +239,14 @@ xcodegen generate -q > /dev/null || die "xcodegen"
 # DMCommit / DMChain: the checkout that built the app (+dirty with uncommitted changes to tracked files) and the shader chain it carries, which the host logs at start (main.c)
 COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null) && { [ -z "$(git -C "$DM" status --porcelain --untracked-files=no 2> /dev/null)" ] || COMMIT=$COMMIT+dirty
   /usr/libexec/PlistBuddy -c "Add :DMCommit string $COMMIT" Gen/Info.plist > /dev/null || die "DMCommit"; t "source: $COMMIT"; }
+# DMRelease: NX 18's release name (dm/RELEASE), shown under the game's version on the Gate with the commit
+REL=$(head -n 1 "$DM/RELEASE" 2> /dev/null | tr -d '\r') && [ -n "$REL" ] && { /usr/libexec/PlistBuddy -c "Add :DMRelease string $REL" Gen/Info.plist > /dev/null || die "DMRelease"; }
 case "$MSLDIR" in b-*) /usr/libexec/PlistBuddy -c "Add :DMChain string ${MSLDIR#b-}" Gen/Info.plist > /dev/null || die "DMChain";; esac
+# DMBuiltBy / DMBuildID (G17, gate-ui §20.5a): the builder's Profile name at build time (only when the NSP script found one) and a build ID, new for every build (one is made
+# here when the script gave none). plutil takes each value as one argument, so a space or an apostrophe in a name needs no quoting
+[ -n "${DM_BUILT_BY:-}" ] && { plutil -insert DMBuiltBy -string "$DM_BUILT_BY" Gen/Info.plist || die "DMBuiltBy"; }
+BID=${DM_BUILD_ID:-$(python3 -c "import secrets; a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; print(''.join(secrets.choice(a) for _ in range(4)) + '-' + ''.join(secrets.choice(a) for _ in range(4)))")}
+plutil -insert DMBuildID -string "$BID" Gen/Info.plist || die "DMBuildID"
 # DMUIFontFile / DMUIFontName: the UI font in the app and its PostScript name (ui_font.h dm_ui_font_register reads the file's own name and logs a difference)
 if [ -n "$UI_FONT_FILE" ]; then /usr/libexec/PlistBuddy -c "Add :DMUIFontFile string $UI_FONT_FILE" Gen/Info.plist > /dev/null || die "DMUIFontFile"
   [ -z "${DM_UI_FONT_NAME:-}" ] || /usr/libexec/PlistBuddy -c "Add :DMUIFontName string $DM_UI_FONT_NAME" Gen/Info.plist > /dev/null || die "DMUIFontName"; fi

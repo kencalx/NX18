@@ -51,7 +51,7 @@ int main(void) { @autoreleasepool {
               i == BATCHES - 2 ? 4 : i == BATCHES - 1 ? 1 : 3, input, output);
         if (i == 3) CHECK("slot reuse waited for its pending upload", gate.signaledValue == 1);
         if (i == 5) warmed = g_up_blocks_new;
-        if (i == BATCHES - 3) CHECK("warm batches avoid new staging allocations", up_reuse() ? g_up_blocks_new == warmed : g_up_blocks_new > warmed);
+        if (i == BATCHES - 3) CHECK("warm batches avoid new staging allocations", up_reuse() || up_pool_cap() ? g_up_blocks_new == warmed : g_up_blocks_new > warmed);   // the staging pool (DM_NVN_STAGE_POOL_MB) gives the one-block policy's temporary blocks back too
         // Drain periodically even in the baseline: its temporary allocations
         // are retired by submission fences, not just upload slot completion.
         if (i % 9 == 8 || i + 1 == BATCHES) {

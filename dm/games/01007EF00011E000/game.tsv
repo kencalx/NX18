@@ -27,6 +27,12 @@ fps_target	60
 # only path, for every game) were first tested on the iPhone on this game: the pipeline archive, the prepare step and the hybrid pipelines (5,100 prewarm lines
 # prepared in 0.28 s at start instead of compiling on first use)
 present_snap	on
+# Upload batch slots (nvn_mtl.m up_slots_pick; adapted from MacNativeGames 6ecb27c1 (MIT)): the game makes about 20 new textures a frame in several upload batches, and with 3 slots
+# the submit thread waited about 6 ms a frame for a slot while the GPU idled (MacNativeGames, 1.9.0 on a Mac: 50.5 fps with 3, 54.5 fps with 8 and 0.0-0.2 ms of waits). Not yet run
+# on NX 18 or an iPhone: DM_NVN_WAITS=1 shows the 'upload slot' waits, DM_NVN_UP_SLOTS=3 in env.txt takes it back
+upload_slots	8
+# One-draw passes as compute dispatches (pass_compute, on by default; nvn_mtl.m pcm_run, dmsh_pcomp.py; pass_compute.tsv seeds the pairs): about half of the game's ~145 render passes a frame
+# hold one full-screen triangle (blur, luminance and mip chains, lighting quads). Mac A/B on the Great Plateau (DM_NVN_PCM=ab): 145 -> 92 passes, GPU 10.9 -> 9.8 ms a frame
 # Screen shape (patches.py): DM_SCREEN_ASPECT renders a screen taller than 16:9 in its own shape, the iPhone Duo's 1.43:1 as
 # 1920x1344 with a 1280x896 layout space, the HUD at the screen's edges and 16:9's sides in view (more above and below); the iOS launcher offers it
 screen_aspect	on
@@ -52,3 +58,9 @@ app_pool	0xCD500000
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shader/=shader /Effect/=effect /Layout/=layout /System/=gsys /Terrain/=terrain
 shader_note	Breath of the Wild shaders
+# The GPU headroom controller through the live render scale (nvn_drs_gpu.h, hle_nvn.c drs_gpu_tick): while the GPU time per frame stays over 75% of the target's frame time the
+# host lowers the 3D views' factor at state +0x14 one step (0.9 to 0.5 of the side; at Render scale 1.0 the stubs take the lower of it and the game's own dynamic scale), and
+# takes each step back when the GPU time per frame did not fall. Off since 2026-11-23: on the iPhone 18 Pro Max (Tears of the Kingdom, c8351b8cf, about 7 min) the factor
+# held 0.5-0.6 for about 5 min with the GPU time per frame unchanged (10-11 ms, as at 1.0) and no softer picture seen, so +0x14 does not reach the views' size on the
+# device; Breath of the Wild's lever is unmeasured. On again once a run shows the factor cutting the GPU time
+drs_gpu_scale	off

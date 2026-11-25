@@ -5,6 +5,8 @@
 // The candidates come from an index by pool and 64 KB cell (alias_index), which alias_put and alias_del keep: an entry that starts in an earlier cell is found, one in the same
 // cell that ends before the new texture is not, one that spans several of the new texture's cells goes once, another pool's entries are not met, and a removal or a pool drop
 // leaves no cell behind. Last, a takeover with 100,000 entries in the table, which walked the table's whole capacity before (it prints the time).
+// The memory line's count of what only the sharing table keeps (alias_unheld_locked, upstream NXNative fb4da077a): each texture's bytes once however many keys name it, the part
+// made to be drawn into, the longest any has gone without a lookup; textures a serial or a view's serial holds are left out.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -42,6 +44,16 @@ int main(void) { @autoreleasepool {
     id<MTLTexture> tc = tex_mtl(&c);
     CHECK(tc && !shared(ta), "a texture nothing resolves to goes when another description takes its storage");
     CHECK(shared(tb) && shared(tc), "the live objects' textures stay");
+
+    {   // Sample count 0 and 1 are both single-sampled: an image object with 0 and a sampled object with 1 over one storage resolve to one Metal texture (ported from S2Arm 5863a69c)
+        tex_t w = tex(91004, NVN_FORMAT_RGBA16F, 32), r = tex(91005, NVN_FORMAT_RGBA16F, 32), f = tex(91006, NVN_FORMAT_RGBA8, 32);
+        w.off = r.off = f.off = 1 << 20; w.d.samples = 0; w.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+        mtl_tex_init(&w); mtl_tex_init(&r); mtl_tex_init(&f);
+        id<MTLTexture> tw = tex_mtl(&w), tr = tex_mtl(&r), tf = tex_mtl(&f);
+        CHECK(tw && tw == tr, "sample count 0 and 1 over one storage share one texture");
+        CHECK(tf && tf != tw, "another format over the storage stays its own texture");
+        mtl_tex_release(&w); mtl_tex_release(&r); mtl_tex_release(&f);
+    }
 
     // Two serials naming one object: held until both go
     id o = [NSObject new]; uint64_t s1 = (1ull << 62) + 1, s2 = s1 + 1;
@@ -106,6 +118,12 @@ int main(void) { @autoreleasepool {
         alias_take_over(&big3);
         CHECK(!has(&big2) && g_alias_taken - t2 == n2 - g_alias.n && n2 - g_alias.n == 1u + (has(&after) ? 0 : !over), "an entry that spans several of the new texture's cells is taken once");
         alias_put(&big3, obj());
+        {   // a spared entry (looked up in this submission) that spans every cell of the new texture is looked at once, not once per cell (upstream NXNative d664d3172)
+            alias_key big4 = akey(P, 0, NVN_FORMAT_RGBA16F, 512); uint64_t l0 = g_alias_looks; int64_t cells = ((ksize(&big4) < ksize(&big3) ? ksize(&big4) : ksize(&big3)) - 1) >> ALIAS_CELL;
+            alias_take_over(&big4);
+            CHECK(cells >= 4 && has(&big3), "the entry looked up lately stays");
+            CHECK(g_alias_looks - l0 == 1u + (has(&after) && after.off < ksize(&big4)), "and is looked at once, though it lies in every cell of the new texture");
+        }
         pthread_mutex_unlock(&g_smu);
         mtl_alias_drop_pool(P);
         pthread_mutex_lock(&g_smu);
@@ -132,6 +150,33 @@ int main(void) { @autoreleasepool {
         pthread_mutex_unlock(&g_smu);
         mtl_alias_drop_pool(P);
         pthread_mutex_lock(&g_smu); CHECK(g_alias.n == before - NA, "the pool's entries go with it"); pthread_mutex_unlock(&g_smu);
+    }
+    {   // the memory line's unheld count (issue #2629)
+        static uint8_t Q[1];   // a pool of its own: its address is the keys' pool
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:64 height:64 mipmapped:NO];
+        d.usage = MTLTextureUsageShaderRead; id<MTLTexture> rd = [g_dev newTextureWithDescriptor:d], hold = [g_dev newTextureWithDescriptor:d], parent = [g_dev newTextureWithDescriptor:d];
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget; id<MTLTexture> rt = [g_dev newTextureWithDescriptor:d];
+        id<MTLTexture> view = [parent newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB];
+        alias_key k1 = akey(Q, 0, NVN_FORMAT_RGBA8, 64), k2 = akey(Q, 1ll << ALIAS_CELL, NVN_FORMAT_RGBA8, 64), k3 = akey(Q, 2ll << ALIAS_CELL, NVN_FORMAT_RGBA8, 64),
+                  k4 = akey(Q, 3ll << ALIAS_CELL, NVN_FORMAT_RGBA8, 64), k5 = akey(Q, 4ll << ALIAS_CELL, NVN_FORMAT_RGBA8, 64);
+        pthread_mutex_lock(&g_smu);
+        alias_unheld u0 = alias_unheld_locked();
+        alias_put(&k1, rd); alias_put(&k2, rd); alias_put(&k3, rt); alias_put(&k4, hold); alias_put(&k5, parent);
+        const uint64_t now = g_fence + 1;
+        nvn_hm_put(&g_alias_seen, &k1, (void *)(uintptr_t)1); nvn_hm_put(&g_alias_seen, &k2, (void *)(uintptr_t)2); nvn_hm_put(&g_alias_seen, &k3, (void *)(uintptr_t)3);   // the oldest stamps there can be
+        pthread_mutex_unlock(&g_smu);
+        serial_put(970001, hold); serial_put(970002, view);
+        pthread_mutex_lock(&g_smu); alias_unheld u = alias_unheld_locked(); pthread_mutex_unlock(&g_smu);
+        printf("unheld: %u entries, %llu bytes, %llu writable, oldest idle %llu submissions\n", u.entries - u0.entries, (unsigned long long)(u.bytes - u0.bytes), (unsigned long long)(u.writable_bytes - u0.writable_bytes), (unsigned long long)u.oldest_idle); printf("(now %llu)\n", (unsigned long long)now);
+        CHECK(u.entries - u0.entries == 3, "the unheld count takes the sharing table's entries no serial or view holds (two keys of one texture, a render target)");
+        CHECK(u.bytes - u0.bytes == rd.allocatedSize + rt.allocatedSize, "their bytes count each texture once, leaving out the serial-held one and the parent of a held view");
+        CHECK(u.writable_bytes - u0.writable_bytes == rt.allocatedSize, "the part made to be drawn into is the render target's");
+        CHECK(now > 3 && u.oldest_idle == now - 1, "the oldest idle age is the longest since any unheld entry's last lookup");
+        serial_del(970001); serial_del(970002);
+        pthread_mutex_lock(&g_smu); u = alias_unheld_locked(); pthread_mutex_unlock(&g_smu);
+        CHECK(u.entries - u0.entries == 5 && u.bytes - u0.bytes == rd.allocatedSize + rt.allocatedSize + hold.allocatedSize + parent.allocatedSize, "once their serials go, the held texture and the view's parent count too");
+        pthread_mutex_lock(&g_smu); alias_del(&k1); alias_del(&k2); alias_del(&k3); alias_del(&k4); alias_del(&k5); u = alias_unheld_locked(); pthread_mutex_unlock(&g_smu);
+        CHECK(u.entries == u0.entries && u.bytes == u0.bytes, "the entries gone, the count is what it was");
     }
     mtl_tex_release(&b); mtl_tex_release(&c);
     next_submission(); defer_drain();

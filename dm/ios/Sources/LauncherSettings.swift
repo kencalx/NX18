@@ -41,15 +41,17 @@ struct Setting: Decodable, Identifiable {
     }
     enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, on, off, inactive, hint, hide, shows, preset }
 }
-// The settings screen's presets (the chips above the settings): Balanced is the tested defaults; Battery and Quality are each row's preset values from the list
+// The settings screen's presets (the chips above the settings, presets-first W1's order): Balanced is the tested defaults; Battery Saver, Quality and Performance are each row's
+// preset values from the list. The stored names stay (battery is Battery Saver: only the title changed, W2)
 enum LauncherPreset: String, CaseIterable, Identifiable, Sendable {
-    case battery, balanced, quality
+    case battery, balanced, quality, performance
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .battery: return "Battery"
+        case .battery: return "Battery Saver"
         case .balanced: return "Balanced"
         case .quality: return "Quality"
+        case .performance: return "Performance"
         }
     }
 }
@@ -100,7 +102,16 @@ struct DeviceFacts: Equatable, Sendable {
         return t.first?.isLowercase == true ? false : nil   // a device term is lower case, a variable upper case: one this reader does not know is false
     }
 }
-struct SettingsFile: Decodable { let settings: [Setting]; let console: String? }   // console: switch1 or switch2 (settings.py console()), for the status line; absent in an older list
+// console: switch1 or switch2 (settings.py console()), for the status line; presets: the chips to draw, Balanced among them (settings.py DRAWN; absent in an older list:
+// Battery Saver, Balanced, Quality); moves: per drawn preset, the rows it moves in this game, for its note
+// The menus' feel (gate-ui GW11, GW12, G4): what a press did, for the haptic and the optional Menu sounds tone (NX18Feel.swift sets LauncherModel.feel on iOS; nil elsewhere)
+enum LauncherFeel: Sendable { case move, select, toggle, preset, back, refuse, play }
+
+// preset_env: per drawn preset, switches no row sets that it gives the host (settings.py PRESET_ENV: Donkey Kong Bananza's Battery Saver DM_FPS_CTL=hold30); absent: none
+struct SettingsFile: Decodable {
+    let settings: [Setting]; let console: String?; let presets: [String]?; let moves: [String: [String]]?; var presetEnv: [String: [String: String]]? = nil
+    enum CodingKeys: String, CodingKey { case settings, console, presets, moves, presetEnv = "preset_env" }
+}
 
 @MainActor final class LauncherModel: ObservableObject {
     let settings: [Setting]
@@ -109,6 +120,29 @@ struct SettingsFile: Decodable { let settings: [Setting]; let console: String? }
     let ignoreSaved: Bool   // DM_SAVED_CHOICES=0: start from the defaults, and leave the saved choices as they are
     @Published var values: [String: String] = [:]
     var console: String?   // launcher.json's console (SettingsFile), shown under the game's name
+    // The chips to draw (launcher.json's presets, W1's order; Balanced always): set from the list after init (Launcher.swift), every preset but Performance for an older list
+    var offeredPresets: [LauncherPreset] = [.battery, .balanced, .quality]
+    var presetMoves: [String: [String]] = [:]   // launcher.json's moves: the rows each preset moves here (W12's notes)
+    var presetEnv: [String: [String: String]] = [:]   // launcher.json's preset_env: the switches no row sets that a preset gives the host
+    func takeList(_ file: SettingsFile) {
+        console = file.console
+        if let p = file.presets {
+            let named = Set(p.compactMap(LauncherPreset.init(rawValue:)))
+            offeredPresets = LauncherPreset.allCases.filter { $0 == .balanced || named.contains($0) }
+        }
+        presetMoves = file.moves ?? [:]
+        presetEnv = file.presetEnv ?? [:]
+        loadPresetState()
+    }
+    // The base preset ("Custom (from Balanced)" and Back go to it; launcher.preset) and whether the player chose it (a chip tap, L / R, X or Back: launcher.presetTapped)
+    @Published private(set) var basePreset: LauncherPreset = .balanced
+    @Published private(set) var presetTapped = false
+    // The state before the last change that left Custom (a chip, L / R, X, Back): Undo puts it back (presets-first W9); dropped at the next preset change or when the toast ends
+    @Published private(set) var undoState: (values: [String: String], base: LauncherPreset, tapped: Bool)?
+    @Published private(set) var presetChange = 0   // counts the player's preset changes: the toast (W9) shows for each
+    static var feel: ((LauncherFeel) -> Void)? = nil   // the menus' haptic and sound (NX18Feel.swift); nil: none
+    nonisolated static let presetKey = "launcher.preset", tappedKey = "launcher.presetTapped", presetValuesKey = "launcher.presetValues"
+    nonisolated static let presetTableVersion = "1"   // presetValues' "_v": a later build that retunes a preset's values may bump it
     @Published var facts = DeviceFacts()   // the device the rules are decided on (follow), published so a row greys or comes back as a controller or a TV connects
     // "Skip this screen next time" (launcher.skip): stored as it changes, not at Play, so the in-game menu's "Settings screen at start" can turn it off while the game runs
     @Published var skipAtStart = false {
@@ -233,6 +267,8 @@ struct SettingsFile: Decodable { let settings: [Setting]; let console: String? }
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = names.map { NotificationCenter.default.addObserver(forName: $0, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.refreshFacts() } } }
     }
+    // follow's observers go with the model. It normally lives on as the in-game menu's (gameMenuModel); this matters only for one that is let go (the Duo tests let theirs go)
+    isolated deinit { observers.forEach(NotificationCenter.default.removeObserver) }
     func refreshFacts() {
         guard let f = factsSource?(), f != facts else { return }
         facts = f
@@ -268,18 +304,47 @@ struct SettingsFile: Decodable { let settings: [Setting]; let console: String? }
     // the defaults (apply() keeps no default), so Quit after Reset keeps them, and a choice a launch override hides is kept
     func reset() {
         for s in settings where !fixed.contains(s.env) { values[s.env] = s.def }
+        basePreset = .balanced; presetTapped = false; undoState = nil
         fputs("launcher: settings reset to the game's defaults\n", stderr)
     }
 
     // Before the game starts: every setting not set by an env file goes into the environment (DM_LANG replaces the packed language main.m set as a default). Only a choice that
     // differs from the game's default is stored: a setting the player left at its default follows the defaults of a later build (the settings it was tested with)
     func apply() {
+        startPreset()
         for s in settings {
             let v = values[s.env] ?? s.def
             if fixed.contains(s.env) { fputs("launcher: \(s.env) kept at \(v) (\(fromLaunch.contains(s.env) ? "launch environment" : "env file"))\n", stderr); continue }
             store(s, v)
             setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v)\(s.isDefault(v) ? "" : " (changed)")\n", stderr)
         }
+        exportPreset()
+    }
+    // The preset the settings are (battery, balanced, quality, performance; custom when none), for the host, not a row: frame generation steps aside in Battery Saver (DM_FRAMEGEN,
+    // nvn_framegen.inc fg_power_why, which reads it again once a second). nil without presets, or when an env file or the launch set DM_PRESET (it stays). With frame generation on
+    // (framegenOn) every start sets it before the game does: Play (apply), a start without the screen (applySaved: Skip this screen next time, DM_LAUNCHER=0, a home screen shortcut,
+    // a program handing over), and the Mac's start without its window (dm/mac/Launcher.swift dm_mac_preset_env); the in-game menu sets it again after a preset change or a hand
+    // change to a preset row, under front_ios.m's lock (GameMenu.swift gameMenuPresetEnv)
+    var presetEnvValue: String? { hasPresets && environment["DM_PRESET"] == nil ? (activePreset?.rawValue ?? "custom") : nil }
+    // DM_FRAMEGEN=1 without DM_PRESENT_REPEAT=1, read when asked as the host reads it once (nvn_framegen.inc fg_on; the env files and the launch environment are in before the settings
+    // screen, and neither has a row or menu pick): frame generation is DM_PRESET's only reader, so without it nothing exports the preset or logs it, at a start or in game
+    nonisolated static var framegenOn: Bool {
+        guard let e = getenv("DM_FRAMEGEN"), strcmp(e, "1") == 0 else { return false }
+        return getenv("DM_PRESENT_REPEAT").map { strcmp($0, "1") != 0 } ?? true
+    }
+    // The preset's switches no row sets (preset_env), each with the value it takes for the preset the settings are now: the preset's own, or "" (the host's default) for any other
+    // preset and for Custom. A switch an env file or the launch set stays (left out). Bananza's Battery Saver: DM_FPS_CTL=hold30, which the host reads again once a second
+    // (hle_fctl.c fctl_mode_poll), so the in-game menu's change applies while the game runs
+    var presetSwitches: [(env: String, value: String)] {
+        let p = activePreset?.rawValue
+        let names = Set(presetEnv.values.flatMap { $0.keys }).sorted().filter { !fixed.contains($0) }
+        return names.map { e in (env: e, value: p.flatMap { presetEnv[$0]?[e] } ?? "") }
+    }
+    // Before the game starts (its threads do not run yet, so setenv is safe here)
+    func exportPreset() {
+        for (e, v) in presetSwitches { setenv(e, v, 1); fputs("launcher: \(e)=\(v)\(v.isEmpty ? " (the host's default)" : "") (preset \(activePreset?.rawValue ?? "custom"))\n", stderr) }
+        guard Self.framegenOn, let p = presetEnvValue else { return }
+        setenv("DM_PRESET", p, 1); fputs("launcher: DM_PRESET=\(p)\n", stderr)
     }
     private func store(_ s: Setting, _ v: String) {
         if !ignoreSaved { if s.isDefault(v) { defaults.removeObject(forKey: "launcher." + s.env) } else { defaults.set(v, forKey: "launcher." + s.env) } }
@@ -301,6 +366,11 @@ struct SettingsFile: Decodable { let settings: [Setting]; let console: String? }
     // A controller's step on a row (left / right as -1 / +1, A as +1): a choice moves to the next option the player may pick (wrapping, greyed options skipped), a range moves by
     // its step (clamped, written as the slider writes it), a toggle flips. Nothing on a row that is not editable. Returns whether the value changed
     @discardableResult func advance(_ s: Setting, by delta: Int) -> Bool {
+        let moved = step(s, by: delta)
+        if moved { Self.feel?(s.kind == "toggle" ? .toggle : .select) }
+        return moved
+    }
+    private func step(_ s: Setting, by delta: Int) -> Bool {
         guard delta != 0, editable(s) else { return false }
         let v = shown(s)   // the saved choice: a row that shows another value is greyed, and stops above
         switch s.kind {
@@ -329,29 +399,122 @@ struct SettingsFile: Decodable { let settings: [Setting]; let console: String? }
 
     // Presets (the chips above the settings). A preset sets each row the list gives a preset value, through pick, so it never changes a row an env file or the launch fixed, a row a rule
     // greys, or picks an option a rule greys; every other row keeps the player's choice. Balanced is the tested defaults of those rows (Reset sets every row)
-    private var presetRows: [Setting] { settings.filter { $0.preset != nil && !fixed.contains($0.env) } }
+    var presetRows: [Setting] { settings.filter { $0.preset != nil && !fixed.contains($0.env) } }
     var hasPresets: Bool { !presetRows.isEmpty }
+    // The value a preset gives a row on this device: its target, or where a rule greys that option the highest option of the row not greyed (presets-first P9: Performance's 120 fps
+    // on a 60 Hz screen gives 60)
+    func presetValue(_ s: Setting, _ t: String) -> String {
+        guard s.kind == "choice", optionInactive(s, t) != nil, let opts = s.options?.map({ $0[0] }), let i = opts.firstIndex(of: t) else { return t }
+        return opts[..<i].last { optionInactive(s, $0) == nil } ?? t
+    }
     // Whether applying the preset leaves the row as it is: it has the value already, or the preset may not change it now
     private func presetLeaves(_ s: Setting, _ p: LauncherPreset) -> Bool {
-        guard let t = s.target(p) else { return true }
+        guard let t0 = s.target(p) else { return true }
+        let t = presetValue(s, t0)
         return s.same(shown(s), t) || inactiveWhy(s) != nil || !canPick(s, t)
     }
-    // The preset the screen's values are, for the chip drawn as chosen: one whose applying would change nothing (Balanced first, when two agree); nil when none, or without presets
+    // The preset the screen's values are, for the chip drawn as chosen: the base when its values match, then the first drawn one whose applying would change nothing (Balanced,
+    // Battery Saver, Quality, Performance); nil when none (Custom), or without presets
     var activePreset: LauncherPreset? {
         let rows = presetRows
         guard !rows.isEmpty else { return nil }
-        return [LauncherPreset.balanced, .battery, .quality].first { p in rows.allSatisfy { presetLeaves($0, p) } }
+        let order = [basePreset] + [LauncherPreset.balanced, .battery, .quality, .performance].filter { $0 != basePreset }
+        return order.filter(offeredPresets.contains).first { p in rows.allSatisfy { presetLeaves($0, p) } }
     }
-    // Set the preset's values. A row a value set here greys or frees is decided as the rows go, and once more after them, as a later row's value can free an earlier one
-    func applyPreset(_ p: LauncherPreset) {
+    // Set the preset's values. A row a value set here greys or frees is decided as the rows go, and once more after them, as a later row's value can free an earlier one.
+    // tapped: the player chose it (a chip, L / R, X or Back), which also keeps the state before for Undo (W9); a retune passes the stored choice
+    func applyPreset(_ p: LauncherPreset, tapped: Bool = true) {
+        if tapped { undoState = (Dictionary(uniqueKeysWithValues: presetRows.map { ($0.env, values[$0.env] ?? $0.def) }), basePreset, presetTapped); presetChange += 1; Self.feel?(.preset) }
         for _ in 0..<3 {
             var moved = false
             for s in presetRows where !presetLeaves(s, p) {
-                if let t = s.target(p), pick(s, t) { moved = true }
+                if let t = s.target(p), pick(s, presetValue(s, t)) { moved = true }
             }
             if !moved { break }
         }
+        basePreset = p; presetTapped = tapped
         fputs("launcher: preset \(p.rawValue)\(activePreset == p ? "" : " (some rows kept: fixed or greyed)")\n", stderr)
+    }
+    // L / R: the next or previous drawn preset, with wrap, from the lit one (or the base while Custom)
+    func stepPreset(_ d: Int) {
+        let all = offeredPresets
+        guard !all.isEmpty else { return }
+        let i = all.firstIndex(of: activePreset ?? basePreset) ?? all.firstIndex(of: .balanced) ?? 0
+        applyPreset(all[((i + d) % all.count + all.count) % all.count])
+    }
+
+    // MARK: The base preset (presets-first §10, §11)
+
+    // The stored base, read once the list's presets are known (takeList); none stored: the nearest preset, as a player who saved choices before this build had none
+    func loadPresetState() {
+        let stored = ignoreSaved ? nil : defaults.string(forKey: Self.presetKey)
+        if let raw = stored, let p = LauncherPreset(rawValue: raw) {
+            if offeredPresets.contains(p) { basePreset = p }
+            else { basePreset = .balanced; fputs("launcher: base preset \(raw) is not drawn in this build: Balanced\n", stderr) }
+        } else { basePreset = nearestPreset }
+        presetTapped = !ignoreSaved && defaults.bool(forKey: Self.tappedKey) && stored != nil
+    }
+    // The drawn preset fewest preset rows differ from, Balanced on a tie (and first): a player's hand changes are Custom from it
+    var nearestPreset: LauncherPreset {
+        let rows = presetRows
+        func misses(_ p: LauncherPreset) -> Int { rows.filter { !presetLeaves($0, p) }.count }
+        return offeredPresets.sorted { a, b in (misses(a), a == .balanced ? 0 : 1) < (misses(b), b == .balanced ? 0 : 1) }.first ?? .balanced
+    }
+    // While the values match no drawn preset: Custom, from the base
+    var isCustom: Bool { hasPresets && activePreset == nil }
+    var presetLabel: String { activePreset.map(\.title) ?? "Custom (from \(basePreset.title))" }
+    // A row whose value differs from the base preset's (Customize's dot, "changed from Balanced")
+    func changedFromBase(_ s: Setting) -> Bool { s.target(basePreset).map { !s.same(shown(s), presetValue(s, $0)) } ?? false }
+    // Back to the base: only the preset rows change (W4)
+    func backToBase() { applyPreset(basePreset) }
+    func undo() {
+        guard let u = undoState else { return }
+        for (k, v) in u.values { values[k] = v }
+        basePreset = u.base; presetTapped = u.tapped; undoState = nil
+        fputs("launcher: preset change undone: \(presetLabel)\n", stderr)
+    }
+    func dropUndo() { undoState = nil }
+    // The rows the preset moves in this game (launcher.json's moves; else from the rows), for its note and the toast
+    func moves(_ p: LauncherPreset) -> [Setting] {
+        if p == .balanced { return [] }
+        if let envs = presetMoves[p.rawValue] { return envs.compactMap { e in settings.first { $0.env == e } } }
+        return presetRows.filter { s in s.target(p).map { !s.same($0, s.def) } ?? false }
+    }
+    // Before the game starts, from apply() and applySaved(): the retune (a later build changed the base's values and nobody edited them: apply them again), then the base and the
+    // values it set are stored for the next start (§11)
+    func startPreset() {
+        guard hasPresets, !ignoreSaved else { return }
+        var saved = defaults.dictionary(forKey: Self.presetValuesKey) as? [String: String] ?? [:]
+        saved.removeValue(forKey: "_v")
+        if !saved.isEmpty {
+            let rows = presetRows.filter { saved[$0.env] != nil }
+            let untouched = rows.allSatisfy { s in s.same(values[s.env] ?? s.def, saved[s.env]!) }
+            let retuned = rows.contains { s in s.target(basePreset).map { !s.same(saved[s.env]!, presetValue(s, $0)) } ?? false }
+            if untouched && retuned { applyPreset(basePreset, tapped: presetTapped); fputs("launcher: the \(basePreset.title) preset's values changed in this build: applied again\n", stderr) }
+        }
+        storePresetState()
+        fputs("launcher: preset \(presetLabel)\(presetTapped ? "" : " (not chosen by a tap)")\n", stderr)
+    }
+    // The base, whether it was tapped, and the values it set, for the next start's retune check (§11): at the start (startPreset) and after a preset change in game (inGame)
+    func storePresetState() {
+        guard hasPresets, !ignoreSaved else { return }
+        var targets: [String: String] = ["_v": Self.presetTableVersion]
+        for s in presetRows { if let t = s.target(basePreset) { targets[s.env] = presetValue(s, t) } }
+        defaults.set(targets, forKey: Self.presetValuesKey)
+        defaults.set(basePreset.rawValue, forKey: Self.presetKey)
+        if presetTapped { defaults.set(true, forKey: Self.tappedKey) } else { defaults.removeObject(forKey: Self.tappedKey) }
+    }
+
+    // A preset change while the game runs (the in-game menu: a chip, L / R, X, Back to X, Undo; gate-ui §19.3): the values move as on the Gate, each preset row that moved is
+    // saved at once (as choose saves a pick), and the base is stored, so the Gate shows the new preset next time. Returns the rows that moved: the menu applies the live ones
+    // now (front_ios.m dm_setting_live) and says the rest change at the next start. Nothing goes into the environment here (the menu does that under front_ios.m's lock)
+    @discardableResult func inGame(_ change: () -> Void) -> [Setting] {
+        let before = Dictionary(uniqueKeysWithValues: presetRows.map { ($0.env, values[$0.env] ?? $0.def) })
+        change()
+        let moved = presetRows.filter { !$0.same(before[$0.env] ?? $0.def, values[$0.env] ?? $0.def) }
+        for s in moved { let v = values[s.env] ?? s.def; store(s, v); fputs("launcher: \(s.env)=\(v) (in-game menu, \(presetLabel))\n", stderr) }
+        storePresetState()
+        return moved
     }
 
     // "Skip this screen next time" (launcher.skip in the app's preferences): the game starts at once with the saved choices, as with DM_LAUNCHER=0
@@ -380,10 +543,12 @@ struct SettingsFile: Decodable { let settings: [Setting]; let console: String? }
     // DM_LAUNCHER=0: no screen, but the saved choices still apply (only DM_SAVED_CHOICES=0 ignores them); nothing is written. Console mode's default goes into the environment
     // too: for a Switch 2 game on iOS the list's default (Handheld, settings.tsv) differs from the host's own (DM_GAME_OPMODE, docked). Other defaults stay unset, as before
     func applySaved() {
+        startPreset()
         for s in settings where !fixed.contains(s.env) {
             let v = values[s.env] ?? s.def
             let saved = !s.isDefault(v)
             if saved || s.env == "DM_OPMODE" { setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v)\(saved ? " (saved choice)" : "")\n", stderr) }
         }
+        exportPreset()   // the saved choices' preset, as Play sets it
     }
 }
