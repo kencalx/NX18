@@ -95,12 +95,47 @@ class Json(unittest.TestCase):
         es = self.events()
         self.assertEqual([e['ev'] for e in es], ['game', 'say', 'game', 'say'])
         self.assertEqual({k: v for k, v in es[0].items() if k != 't'}, {'ev': 'game', 'title_id': '0400486024DEC000', 'name': 'The Legend of Zelda', 'version': '1.0',
-                                                                   'bundle_id': 'org.nxnative.0400486024dec000', 'out': str(app), 'icon': str(icon)})
+                                                                   'bundle_id': 'org.nxnative.0400486024dec000', 'out': str(app), 'icon': str(icon), 'build': None})
         self.assertIn(f'; app: {app}', es[1]['msg'])
         self.assertEqual((es[2]['out'], es[2]['icon']), (None, None))
         self.assertNotIn('; app:', es[3]['msg'])
         self.prog.mode = 'lines'; nsp.say_game(1, 'Zelda', '1.0', 'b', Path('/b/z.ipa'), None)   # the human modes get only the message
         self.assertNotIn('"ev"', self.out.getvalue().splitlines()[-1])
+
+    def test_game_build(self):   # main's build ID of the packed version (Beam N3): 16 hex digits, upper case, as cheat files and mod folders name it
+        with tempfile.TemporaryDirectory() as tmp:
+            exefs = Path(tmp)
+            self.assertIsNone(nsp.main_build(exefs), 'no main: a sparse base game')
+            (exefs / 'main').write_bytes(bytes(0x40) + bytes.fromhex('79e5950ffa85acf6' + '00' * 8))
+            nsp.say_game(1, 'Zelda', '1.0', 'b', None, None, nsp.main_build(exefs))
+        self.assertEqual(self.events('game')[0]['build'], '79E5950FFA85ACF6')
+
+    def test_mods_event(self):   # what the packer took and left out (Beam N4)
+        info = {'folder': '/g/mods', 'report': '/g/b/mods_stage/v0.txt', 'cheats': True, 'offered': [{'role': 'fps', 'mod': '60 FPS', 'runs': 3, 'left_out': []}],
+                'left_out': [{'path': 'contents/x/romfs', 'why': 'a RomFS mod (only code patches are packed)'}]}
+        nsp.mods_event(0x0100DCA0064A6000, '79E5950FFA85ACF6', info)
+        e = self.events('mods')[0]
+        self.assertEqual({k: v for k, v in e.items() if k != 't'}, dict(info, ev='mods', title_id='0100DCA0064A6000', build='79E5950FFA85ACF6'))
+
+    def test_identify_dump(self):   # --identify on a dump folder (Beam N2): every version, its build, no profile, nothing written beside the game
+        sys.path.insert(0, str(SCRIPT.parents[1] / 'dm/games')); sys.path.insert(0, str(SCRIPT.parents[1] / 'dm/tools'))
+        import profile_guess, nacp
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(nsp, 'pg', profile_guess, create=True), mock.patch.object(nsp, 'nacp', nacp, create=True):
+            d = Path(tmp) / 'Game'
+            vers = {}
+            for ver, bid in (('base', 'aa' * 8), ('updates/65536', 'bb' * 8)):
+                v = d / ver; (v / 'exefs').mkdir(parents=True); (v / 'romfs').mkdir()
+                (v / 'exefs/main.npdm').write_bytes(b'META'); (v / 'exefs/main').write_bytes(bytes(0x40) + bytes.fromhex(bid + '00' * 8))
+                vers[ver] = v
+            fam = {'base': vers['base'], 'updates': [(65536, vers['updates/65536'])], 'dlc': [(0x0100000000AAB001, None, d / 'dlc')], 'dump': True}
+            gm = mock.Mock(); gm.by_title.return_value = None; gm.by_build.return_value = None
+            before = sorted(p.relative_to(d) for p in d.rglob('*'))
+            nsp.identify(d, 0x0100000000AAA000, fam, None, SCRIPT.parents[1], {}, gm, 'folder')
+            self.assertEqual(sorted(p.relative_to(d) for p in d.rglob('*')), before, 'nothing written beside the game')
+        e = self.events('identify')[0]
+        self.assertEqual((e['title_id'], e['name'], e['platform'], e['kind'], e['packs'], e['profile']), ('0100000000AAA000', 'Game', 'switch1', 'folder', 'v65536', None))
+        self.assertEqual([(v['version'], v['build'], v['registered']) for v in e['versions']], [('v0', 'AAAAAAAAAAAAAAAA', None), ('v65536', 'BBBBBBBBBBBBBBBB', None)])
+        self.assertEqual(e['dlc'], [{'title_id': '0100000000AAB001', 'version': None}])
 
     def art(self, result=None, error=None, manual=None, key='', env_key=None, online=True, given=None, given_logo=None):
         """launcher_art with game_art.settle stubbed (no network): what settle was asked, the events and the messages"""

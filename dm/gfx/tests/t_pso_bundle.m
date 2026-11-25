@@ -106,6 +106,13 @@ int main(void) { @autoreleasepool {
         EXPECT("cover: pre_parse skips # cover and resets on # kind:", 2, pre_parse(cov).count);
         EXPECT("cover: pre_parse_files isolates headerless second file", 2, pre_parse_files(@[@"# kind: evidence\nv1\tf1\n# cover: padding\nv1\tf2\n", @"v1\tfc\n"]).count);
         EXPECT("cover: pre_parse_files deduplicates across files", 1, pre_parse_files(@[@"v1\tf1\n", @"v1\tf1\n"]).count);
+        {   // Ocarina of Time's size (34,600 rows): a set of NSArrays (hash = count) took minutes on the iPhone and the game never started; string keys keep it well under a second
+            NSMutableString *big = [NSMutableString string]; for (int i = 0; i < 40000; i++) [big appendFormat:@"v%d\tf%d\n", i, i];
+            uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); NSUInteger n = pre_parse_files(@[big, @"v1\tf1\n"]).count;
+            double ms = (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6;
+            EXPECT("cover: pre_parse_files keeps 40,000 distinct pairs once", 40000, n);
+            EXPECT("cover: pre_parse_files on 40,000 pairs takes under 2 s", 1, ms < 2000);
+        }
     }
     NSString *v = @"#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\n"
         "vertex V main0(uint id [[vertex_id]]) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.p = float4(uv * 2 - 1, 0, 1); return o; }\n"

@@ -544,6 +544,15 @@ class NspScript(unittest.TestCase):
                           (f'contents/{TITLE:016X}/cheats/{BID[:16]}.txt', b'[Max HP]\n04000000 00000010 000003E7\n')):
             (self.mods / rel).parent.mkdir(parents=True, exist_ok=True); (self.mods / rel).write_bytes(data)
 
+    def test_mods_info(self):   # the structured report a front end gets (the mods event): what was left out and why, the report file, the cheats; the same when reused
+        (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/speed')
+        work = self.root / 'work'
+        for _ in range(2):   # the first run, then a reuse
+            info = {}
+            self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE, info=info)
+            self.assertEqual((info['folder'], info['report'], info['cheats'], info['offered']), (str(self.mods), str(work / 'mods_stage/v0.txt'), True, []))
+            self.assertEqual(sorted(x['path'] for x in info['left_out']), [f'contents/{TITLE:016X}/romfs', f'exefs_patches/speed/{BID[:40]}.ips'])
+
     def test_only_cheats_and_switchable_mods_are_taken(self):
         (self.mods / 'exefs_patches/fps').rename(self.mods / 'exefs_patches/speed')   # a mod that is not switchable: left out, never written in for good
         work = self.root / 'work'
@@ -558,6 +567,7 @@ class NspScript(unittest.TestCase):
         self.assertEqual(nso.read(self.ext / 'ExeFS/main').image[0x10:0x14], TEXT[0x10:0x14], 'the extraction is never written')
         self.assertEqual(self.nsp.apply_mods(self.mods, self.ext, work, 'v0', TITLE), (cheats, variants))
         self.nsp.PROG.end.assert_called_with('reused (the mods and the game files unchanged)')
+
         self.assertEqual((work / 'mods_stage/v0.txt').read_text(), report, 'a reuse writes the same report')
 
     def test_a_renamed_mod_folder_is_built_again(self):   # the folder's name decides whether a mod is switchable

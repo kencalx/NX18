@@ -459,6 +459,11 @@ def build_id(nso):
         f.seek(0x40); return f.read(16).hex()
 
 
+def main_build(exefs):   # main's build ID as front ends, cheat files and mod folders name it: the first 16 hex digits in upper case; None without a main (a sparse base game)
+    m = Path(exefs) / 'main'
+    return build_id(m)[:16].upper() if m.is_file() else None
+
+
 def _gone(func, path, exc):   # shutil.rmtree's onexc hook (Python 3.12+, the script's floor)
     if not (isinstance(exc, OSError) and exc.errno == errno.ENOENT): raise exc   # anything but "already gone" is a real failure
 
@@ -844,6 +849,56 @@ def package_size(fam, k):   # (name, bytes) of a package for the survey report: 
 
 
 MANIFEST_HEAD = '# path\tbytes\tfirst 32 bytes (hex)\n'   # nx_extract --manifest's header
+
+
+def identify(nsp_dir, app, fam, keys, repo, env, gamemod, kind):
+    """--identify: which game this is, for a front end before its first build (docs/frontends.md, the identify event), read from each version's code modules and control data in a
+    temporary folder: nothing is written beside the game and nothing is packed. Every version the folder holds (nsp_versions) with its display version and main's build ID
+    (main_build), the DLC, a NUP's programs, the game profile (by title ID, else by main's build: same_build's regional releases) and whether the profile registers each version's
+    build. An NSZ / XCZ version is listed without its build (reading it needs nsz -D, which a build does). kind: 'nsp', 'nup', 'nx' or 'folder'"""
+    g = gamemod.by_title(app)
+    pk, n = container(fam)
+    have = nsp_versions(fam)
+    PROG.plan(1); PROG.stage('identify', step='reading the code modules', done=0, total=len(have))
+    nx, versions, name, alias = None, [], '', None
+    with tempfile.TemporaryDirectory(prefix='identify_') as t:
+        for i, (ver, upd) in enumerate(sorted(have.items(), key=lambda kv: vnum(kv[0]))):
+            PROG.set(done=i, step=ver)
+            k, tmp, log = upd or fam['base'], Path(t) / ver, Path(t) / 'logs' / f'{ver}.log'
+            row = {'version': ver, 'display': None, 'build': None, 'registered': None}
+            if isinstance(k, Path) and k.suffix.lower() in COMPRESSED:
+                row['note'] = f'{k.name} is compressed: its build is read when it is built'; versions.append(row); continue
+            if n is not None: survey_nup(n, k, fam['base'], tmp, pk)
+            elif fam.get('dump'): survey_dump(k, tmp)
+            else:
+                nx = nx or find_nx_extract(repo, env)
+                run([nx, keys, fam['base'], upd or '-', tmp, '--manifest'] + extract_flags(app), log, env=env, ok=(4,))   # 4: a sparse base game, no main of its own
+            control = tmp / 'control.nacp'
+            row['display'] = (nacp.version(control) if control.is_file() else '') or (m.group(1) if log.is_file() and (m := re.search(r'display version (\S+)', log.read_text(errors='replace'))) else None)
+            name = name or (control_name(tmp) if tmp.is_dir() else '')
+            full = build_id(tmp / 'ExeFS/main') if (tmp / 'ExeFS/main').is_file() else None
+            row['build'] = full[:16].upper() if full else None
+            if g is None and full and alias is None: alias = gamemod.by_build(full)
+            versions.append(row)
+    prof = g or alias
+    if prof is not None:
+        builds = prof.builds()
+        for row in versions:
+            b = builds.get(row['version']) if g is not None else next((b for b in builds.values() if row['build'] and b.get('main', '')[:16].upper() == row['build']), None)
+            row['registered'] = bool(b and row['build'] and b.get('main', '')[:16].upper() == row['build'])
+            if b and row['registered'] and not row['display']: row['display'] = b.get('display') or None   # a NUP without a NACP: the display version the profile registers for this build
+    name = name or (nsp_dir.name if fam.get('dump') else '') or (prof.get('name', '') if prof is not None else '')   # a dump has no control data: its folder names the game
+    programs = sorted(getattr(n, 'programs', {}).values()) if kind == 'nup' else [app]
+    dlc = [{'title_id': f'{tid:016X}', 'version': v} for tid, v, _ in fam['dlc']]
+    packs = max(have, key=vnum) if have else None
+    PROG.end(f'{app:016X} {name or "?"}: {len(versions)} version(s), {len(dlc)} DLC; ' + (f'profile {prof.id}' if prof is not None else 'no profile'))
+    PROG.event('identify', title_id=f'{app:016X}', name=name or None, platform='switch2' if appprog.switch2(app) else 'switch1', kind=kind, versions=versions, packs=packs,
+               dlc=dlc, programs=[f'{p:016X}' for p in programs], profile=prof.id if prof is not None else None, alias=alias is not None)
+    say(f'identify: {app:016X} {name or "?"} ({"Switch 2" if appprog.switch2(app) else "Switch"}, {kind}); profile: {prof.id + (" (another title ID\'s build)" if alias is not None else "") if prof is not None else "none"}')
+    for row in versions:
+        reg = '' if row['registered'] is None else ', registered' if row['registered'] else ', not a registered build'
+        say(f'  {row["version"]} {row["display"] or "?"}: main {row["build"] or "none"}{reg}' + (f' ({row["note"]})' if row.get('note') else ''))
+    for d in dlc: say(f'  DLC {d["title_id"]}' + (f' v{d["version"]}' if d['version'] is not None else ''))
 
 
 def survey_dump(src, out):
@@ -1683,7 +1738,7 @@ def pack_mod_cheats(found, main, cheats, first=True):
     return report + crep, swap_in_changed(part, cheats)
 
 
-def apply_mods(root, ext, work, ver, app, fps_ok=True, first=True):
+def apply_mods(root, ext, work, ver, app, fps_ok=True, first=True, info=None):
     """The mods of root for the game (dm/tools/game_mods.py) for version ver's extraction ext: (the folder of the cheats to pack, the switchable mods), the first None when there
     are no cheats. Only two kinds are taken: cheats, and the switchable mods (a frame-rate or ultrawide mod, by its folder's name; fps_ok False: the profile has the launcher's own
     Frame rate, so no frame-rate mod), which the launcher's High frame rate / Ultrawide turn on and off: {role: {'mod', 'exefs', 'modules', and 'left_out': the names of its patches
@@ -1693,9 +1748,12 @@ def apply_mods(root, ext, work, ver, app, fps_ok=True, first=True):
     line; a switchable mod with something left to write is still offered, with a [RED] line naming what it lacks, and one with nothing left is not. Everything is in the build
     folder's mods_stage/ (MODS_STAGE), never in a folder named mods, which may be the player's. Reused while the switchable mods' patch files (with their paths: a folder's name
     makes a mod switchable), ext's code modules and the tools are as at the last run. The cheats are not in that key: they are packed again at every run (pack_mod_cheats; first
-    False: a program of a game of several but its first), so a cheat's change makes nothing else again"""
+    False: a program of a game of several but its first), so a cheat's change makes nothing else again. info: a dict this fills for the mods event (mods_event): the folder, the report
+    file and what was left out, as {'path' (relative to root) or 'mod' and 'role', 'why'}; build_variants adds what the launcher offers"""
     import game_mods as gm
     found = gm.scan(root, app)
+    if info is None: info = {}
+    info.update(folder=str(root), report=None, cheats=False, offered=[], left_out=[{'path': str(p.relative_to(root)), 'why': why} for p, why in found.ignored])
     for p in found.ignored: say(f'mods: ignored {p[0].relative_to(root)}: {p[1]}')
     if not found.any(): say(f'mods: nothing for {app:016X} in {root}'); return None, {}
     PROG.add(1); PROG.stage('mods', step=f'{len(found.ips)} code patch files, {len(found.cheats)} cheat files')
@@ -1705,6 +1763,11 @@ def apply_mods(root, ext, work, ver, app, fps_ok=True, first=True):
     keep, chosen, role_report = gm.split_roles(found, fps_ok)
     left = [f'left out: {p.relative_to(root)}: not a switchable mod (only High frame rate and Ultrawide mods, by their folder\'s name, and cheats are packed)' for p in keep]
     left += [f'left out: {d.relative_to(root)}: a RomFS mod (only High frame rate and Ultrawide mods, by their folder\'s name, and cheats are packed)' for d in found.romfs]
+    info['left_out'] += [{'path': str(p.relative_to(root)), 'why': 'not a switchable mod (only High frame rate and Ultrawide mods, by their folder\'s name, and cheats are packed)'} for p in keep]
+    info['left_out'] += [{'path': str(d.relative_to(root)), 'why': 'a RomFS mod (only code patches are packed)'} for d in found.romfs]
+    info['report'] = str(out / f'{ver}.txt')
+    def unoffered(variants):   # a switchable mod with nothing left to write for this version
+        info['left_out'] += [{'mod': name, 'role': role, 'why': 'nothing of it applies to this version (see the report)'} for role, (name, _) in chosen.items() if role not in variants]
     files = sorted(p for _, fs in chosen.values() for p in fs)
     tools = [Path(gm.__file__).resolve().parent / f for f in ('game_mods.py', 'a64_words.py', 'nso.py')]
     key = fingerprint(('files', tools + files), ('stat', ext / 'ExeFS'), [str(p.relative_to(root)) for p in files], sorted(chosen), app, fps_ok)
@@ -1713,7 +1776,8 @@ def apply_mods(root, ext, work, ver, app, fps_ok=True, first=True):
         (out / f'{ver}.txt').write_text(''.join(line + '\n' for line in report))
         for line in report: say(f'mods: {line}')
         PROG.end('reused (the switchable mods and the game files unchanged); the cheats packed again' if cheats_changed else 'reused (the mods and the game files unchanged)')
-        return (cheats if cheats.is_dir() else None), json.loads(vjson.read_text())
+        variants = json.loads(vjson.read_text()); unoffered(variants); info['cheats'] = cheats.is_dir()
+        return (cheats if cheats.is_dir() else None), variants
     rmtree(kf)   # the outputs change from here: a stop before the end must not leave the last run's key over them
     report, variants = [], {}
     for role, (name, rfiles) in chosen.items():   # each switchable mod over the game's modules, an ExeFS folder of its own
@@ -1740,6 +1804,7 @@ def apply_mods(root, ext, work, ver, app, fps_ok=True, first=True):
     for line in report: say(f'mods: {line}')
     kf.write_text(f'{key}\n')
     PROG.end(('cheats packed from ' + str(cheats) if cheats.is_dir() else 'no cheats') + (f'; switchable: {", ".join(variants)}' if variants else ''))
+    unoffered(variants); info['cheats'] = cheats.is_dir()
     return (cheats if cheats.is_dir() else None), variants
 
 
@@ -1747,7 +1812,14 @@ def frame_rate_mods_ok(g):   # a profile with the launcher's own Frame rate (fps
     return g.get('fps_target', '0') in ('', '0') and g.get('present_interval_choice', 'off') != 'on'
 
 
-def build_variants(py, repo, variants, patched, env, logs):
+def mods_event(app, build, info):
+    """The mods event (docs/frontends.md): what the packer took from the mods folder and left out, once build_variants has settled what the launcher offers. A front end shows it in place of
+    the console's mods: lines, which stay as they are. build: main's build ID (main_build), the build a mod's patches must name"""
+    PROG.event('mods', title_id=f'{app:016X}', build=build, folder=info.get('folder'), report=info.get('report'), cheats=bool(info.get('cheats')),
+               offered=info.get('offered', []), left_out=info.get('left_out', []))
+
+
+def build_variants(py, repo, variants, patched, env, logs, info=None):
     """The switchable mods' bytes beside the rewritten modules: each mod's ExeFS (apply_mods) is rewritten as the modules were (patch_nso.py), and where the two rewrites differ
     only in bytes, <module>.variants lists them (dm/tools/game_mods.py variant_runs; the host puts them in place when the game starts with the launcher's toggle on, loader.c;
     on the iPhone the code pages come signed, gen_embed.py) and mods.tsv names the roles the launcher offers (dm/games/settings.py mods:<role>). A mod whose rewrite differs in
@@ -1755,6 +1827,8 @@ def build_variants(py, repo, variants, patched, env, logs):
     reused while its module, the base rewrite and the rewriter's inputs (its tools, the patch files of the module's build, capstone, its switches) are as at its last run"""
     import capstone
     import game_mods as gm
+    if info is None: info = {}
+    info.setdefault('offered', []); info.setdefault('left_out', [])   # info: apply_mods' dict for the mods event, given what the launcher offers and the mods the rewrite refused
     for p in list(patched.glob('*.variants')) + [patched / 'mods.tsv']: rmtree(p)
     if not variants: return
     PROG.add(1); PROG.stage('switchable mods', step=', '.join(variants))
@@ -1770,14 +1844,17 @@ def build_variants(py, repo, variants, patched, env, logs):
                 PROG.set(step=f'{role}: rewriting {m}')
                 rmtree(kf)   # the cache outlives apply_mods' rebuilds: a rewrite that stops part way must not leave the last run's key over its outputs
                 rc = run([py, repo / 'dm/tools/patch_nso.py', exefs / m, rw, m], logs / f'rewrite_{m}_{role}.log', env=env, fatal=False)
-                if rc: say(f'mods: [RED] {role}: {v["mod"]}: left out: the rewriter refused {m} with it (likely a word the game\'s profile patches too; {logs / f"rewrite_{m}_{role}.log"})'); ok = False; break
+                if rc:
+                    why = f'the rewriter refused {m} with it (likely a word the game\'s profile patches too; {logs / f"rewrite_{m}_{role}.log"})'
+                    say(f'mods: [RED] {role}: {v["mod"]}: left out: {why}'); info['left_out'].append({'mod': v['mod'], 'role': role, 'why': why}); ok = False; break
                 rmtree(kf); kf.write_text(f'{key}\n')
             try: got[m] = gm.variant_runs(patched, rw, m, nso.read(exefs / m).image)
-            except gm.ModError as e: say(f'mods: [RED] {role}: {v["mod"]}: left out: {e}'); ok = False; break
+            except gm.ModError as e: say(f'mods: [RED] {role}: {v["mod"]}: left out: {e}'); info['left_out'].append({'mod': v['mod'], 'role': role, 'why': str(e)}); ok = False; break
         if not ok: continue
         for m, runs in got.items(): rows.setdefault(m, []).extend((role, r) for r in runs)
         offered.append((role, v['mod'], sum(len(r) for r in got.values()), v.get('left_out', [])))
     for m, rs in rows.items(): gm.write_variants(patched / f'{m}.variants', rs)
+    info['offered'] = [{'role': r, 'mod': n, 'runs': c, 'left_out': list(lo)} for r, n, c, lo in offered]
     if offered: (patched / 'mods.tsv').write_text('# switchable mods the launcher offers (dm/games/settings.py mods:<role>): role\tmod\truns\n' + ''.join(f'{r}\t{n}\t{c}\n' for r, n, c, _ in offered))
     for r, n, c, lo in offered:   # a role the mods stage offers without some of its patches says so here too, where the build says what the launcher offers
         label = "High frame rate" if r == "fps" else "Ultrawide"
@@ -3335,6 +3412,8 @@ def parse_args(argv):
                     'taken into the shader tables; may be given more than once. glslc_play in the NSP folder and in the build folder, and the Mac run\'s and Mac app\'s, are always taken')
     ap.add_argument('--show-fps', action=argparse.BooleanOptionalAction, help='show the game\'s frame rate on the iPhone, frames on screen per second at the top left (default: the SHOW_FPS setting, on)')
     ap.add_argument('--motion', action=argparse.BooleanOptionalAction, help='pass a gyro controller\'s motion (on iOS also the phone\'s own) to games that read it; --no-motion builds with DM_MOTION=0, for when motion misbehaves (default: the MOTION setting, on)')
+    ap.add_argument('--identify', action='store_true', help='only say which game the folder (or NUP / NX file) holds: its title ID, name, versions with main\'s build ID, DLC, programs and '
+                    'whether NX 18 has a profile for it (the identify event with --progress json); reads the code modules and control data, writes no game files, packs nothing')
     ap.add_argument('--survey-only', action='store_true', help='a game with no profile: only the survey, no provisional profile and no IPA')
     ap.add_argument('--program', type=int, default=None, help='a multi-program application (Super Mario 3D All-Stars): pack program N of the NSPs as a game of its own, title ID = the application\'s + N; '
                     'of a NUP or an NX, program N under its own program ID (default: the PROGRAM_INDEX setting, None: program 0 of the NSPs; a game whose profile lists programs packs them all as one from program 0: this is for bring-up; '
@@ -3398,10 +3477,11 @@ def app_icon(given, spare, *dirs, say=lambda s: None):
     return given or own or spare, bool(spare and not (given or own))
 
 
-def say_game(app, name, version, bundle_id, out, icon):
+def say_game(app, name, version, bundle_id, out, icon, build=None):
     """Which game the app is, once its name, version and bundle ID are settled (before the shader stages): the event game for a front end (json mode; the base game's title ID as DMTitleID has it,
     out = the IPA or Mac app, None for an Xcode project; icon = the image the app is given: --icon / ICON, else the extracted icon.jpg, else --fallback-icon / FALLBACK_ICON, else NX Play's saved icon (NXPLAY_ICONS); None without one, when the app gets the NX 18 icon), then the message for people"""
-    PROG.event('game', title_id=f'{app:016X}', name=name, version=version, bundle_id=bundle_id, out=str(out) if out else None, icon=str(icon) if icon else None)
+    # build: main's build ID of the packed version, its first 16 hex digits in upper case (as cheat files and mod folders name it; main_build), None when the version has no main of its own
+    PROG.event('game', title_id=f'{app:016X}', name=name, version=version, bundle_id=bundle_id, out=str(out) if out else None, icon=str(icon) if icon else None, build=build)
     say(f'app name: {name}; version: {version}; bundle ID: {bundle_id}' + (f'; app: {out}' if out and out.suffix == '.app' else ''))
 
 
@@ -3678,7 +3758,7 @@ def main(args=None):
     pick = PROGRAM_INDEX   # a NUP's or an NX's program, 0 included: None (not chosen) lets the scan choose
     # a program other than program 0 of a NUP, an NX or a dump folder builds only with NX18_DEV on (programs.supported), or as one of the programs a committed profile packs as one
     # game from program 0 (its key programs: other_programs, check_programs_gfx), which is program 0's build
-    dev = bool(DEV) or getattr(args, 'in_programs', None) is not None
+    dev = bool(DEV) or getattr(args, 'in_programs', None) is not None or bool(getattr(args, 'identify', False))   # --identify reads any program and packs nothing
     if nxa:
         app, fam = scan_nx(nxa, want_id, want_platform, repo, env, pick, dev)
         n = fam['nx']
@@ -3703,7 +3783,11 @@ def main(args=None):
             packages.check_keys(fam)
         if PROGRAM_INDEX:   # one program of a multi-program application, packed as a game of its own: its title ID names the profile and the build folder
             app += PROGRAM_INDEX; say(f'program {PROGRAM_INDEX} of the application: title ID {app:016X}')
-        fam = decompress_nsz(nsp_dir, app, fam, keys, env, work_dir(args))
+        if not getattr(args, 'identify', False): fam = decompress_nsz(nsp_dir, app, fam, keys, env, work_dir(args))
+    if getattr(args, 'identify', False):
+        try: return identify(nsp_dir, app, fam, keys, repo, env, gamemod, 'nx' if nxa else 'nup' if nup else 'folder' if dump else 'nsp')
+        finally:
+            if (c := container(fam)[1]) is not None: c.close()
     force =args.provisional or PROVISIONAL   # a provisional profile even when dm/games has one (testing the guesses)
     own = own_profile_folders(args, nsp_dir, app)   # this script's own provisional and derived profiles: never taken as registered ones, wherever DM_GAMES_DIR puts them
     g, provisional, shadowed = None if force else gamemod.by_title(app, own), False, False
@@ -3805,12 +3889,13 @@ def main(args=None):
         os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
         g = gamemod.load(g.id)
         say(f'derived game profile for {pkg_ver} ({disp}): {g.dir}')
-    packed_cheats, mod_variants, cheat_build = None, {}, None
+    packed_cheats, mod_variants, cheat_build, mods_info = None, {}, None, None
     probe = getattr(args, 'gfx_probe', False)   # check_programs_gfx: this program's graphics only
     if mods_root and not probe:   # the game's mods: its cheats and its switchable mods (dm/tools/game_mods.py); a program of a game of several takes its own (game_mods.py same_title)
         say(f'mods folder: {mods_root}')
         m0 = dirs[pkg_ver] / 'ExeFS/main'; cheat_build = build_id(m0)[:16].upper() if m0.is_file() else None   # the build pack_mod_cheats names this program's own cheat file after (merge_cheats)
-        packed_cheats, mod_variants = apply_mods(mods_root, dirs[pkg_ver], work, pkg_ver, app, fps_ok=frame_rate_mods_ok(g), first=getattr(args, 'in_programs', None) is None)
+        mods_info = {}
+        packed_cheats, mod_variants = apply_mods(mods_root, dirs[pkg_ver], work, pkg_ver, app, fps_ok=frame_rate_mods_ok(g), first=getattr(args, 'in_programs', None) is None, info=mods_info)
     sv = versions if derived else need   # the versions whose files the shaders come from
     game = dirs[pkg_ver]
     # how the shaders are got follows from the packed version's files (profile_guess.py shader_sources): the graphics API, and the shaders made only at run time
@@ -3850,7 +3935,7 @@ def main(args=None):
     if (not mac or mac_pack) and getattr(args, 'in_programs', None) is None:   # an app is made, once: a program packed with the application's first (in_programs) is part of its app
         if stand_in: say(f'no game icon: the app takes the fallback icon {spare_icon} (--fallback-icon / FALLBACK_ICON)')
         elif saved_icon: say(f"no game icon: the app takes the icon NX Play saved for the game {saved_icon} (NXPLAY_ICONS); --icon / ICON or --fallback-icon / FALLBACK_ICON gives it another")
-        say_game(app, app_name, app_version or '1.0', bundle_id, None if prepare_xcode else out_ipa, game_icon)   # the image the app is given (docs/frontends.md): the fallback icon too, null without one, not the NX 18 stand-in
+        say_game(app, app_name, app_version or '1.0', bundle_id, None if prepare_xcode else out_ipa, game_icon, main_build(game / 'ExeFS'))   # the image the app is given (docs/frontends.md): the fallback icon too, null without one, not the NX 18 stand-in
         art, about, manual, logo = launcher_art(owner, app_name, work, user_art, art_online, manual, user_logo)   # titledb lists the application, program 0
     else: art = about = manual = logo = None
     # the game language: Horizon gives the game one of the languages its control data lists (the packed version's, which an update may extend), so the one packed must be among them
@@ -3863,7 +3948,8 @@ def main(args=None):
 
     patched = work / f'patched_{pkg_ver}'
     g = rewrite(py, repo, game / 'ExeFS', patched, env, logs, g, provisional)
-    build_variants(py, repo, mod_variants, patched, env, logs)   # the switchable mods' bytes beside the modules (none: earlier ones removed)
+    build_variants(py, repo, mod_variants, patched, env, logs, mods_info)   # the switchable mods' bytes beside the modules (none: earlier ones removed)
+    if mods_info is not None: mods_event(app, main_build(game / 'ExeFS'), mods_info)
     if nd := captured_nros(patched): env = dict(env, DM_NRO_DIR=str(nd))
     chain_header(py, repo, env, logs)   # before any host is built
     if provisional or derived:   # the keys that need the rewritten modules, then (provisional) the heap check (both only change keys the host is built with, not the rewrite or the shader steps)

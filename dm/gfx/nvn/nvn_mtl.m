@@ -16527,9 +16527,12 @@ static NSArray<NSArray<NSString *> *> *pre_parse(NSString *txt) {   // (vertex k
     }
     return pairs;
 }
+// A row's key for a set: its columns joined. Never a set of the NSArrays themselves: an NSArray's hash is its count, so every pair falls in one bucket and each lookup compares
+// against all of them (Ocarina of Time's 34,600 rows: some 600 million comparisons before the first frame, which never came on the iPhone)
+static NSString *pre_key(NSArray<NSString *> *p) { return [p componentsJoinedByString:@"\t"]; }
 static NSArray<NSArray<NSString *> *> *pre_parse_files(NSArray<NSString *> *texts) {   // parse each file independently so a # cover section never hides a headerless later file
-    NSMutableArray<NSArray<NSString *> *> *pairs = [NSMutableArray array]; NSMutableSet<NSArray<NSString *> *> *seen = [NSMutableSet set];
-    for (NSString *t in texts) for (NSArray<NSString *> *p in pre_parse(t)) if (![seen containsObject:p]) { [seen addObject:p]; [pairs addObject:p]; }
+    NSMutableArray<NSArray<NSString *> *> *pairs = [NSMutableArray array]; NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (NSString *t in texts) for (NSArray<NSString *> *p in pre_parse(t)) { NSString *k = pre_key(p); if (![seen containsObject:k]) { [seen addObject:k]; [pairs addObject:p]; } }
     return pairs;
 }
 // Whether the archive bundled with the app (pso_bundle_open) holds this run's prebuild: its prebuilt.tsv is the stamp the device would write for these pairs and this depth mode,
@@ -16605,9 +16608,9 @@ static int pso_bundle_covers(NSArray<NSArray<NSString *> *> *pairs, NSString *wa
              have && [have rangeOfString:zero ? @"depth\tnear=-w" : @"depth\tnear=0"].location != NSNotFound ? " (the game's depth mode is not the one built for: the profile key depth_mode)" : "");
         return 0;
     }
-    NSMutableSet<NSArray<NSString *> *> *left = [NSMutableSet setWithArray:pre_parse(rest ?: @"")];
+    NSMutableSet<NSString *> *left = [NSMutableSet set]; for (NSArray<NSString *> *p in pre_parse(rest ?: @"")) [left addObject:pre_key(p)];   // string keys (pre_key)
     NSMutableArray<NSArray<NSString *> *> *cand = [NSMutableArray array];
-    for (NSArray<NSString *> *p in pairs) if (![left containsObject:@[p[0], p[1]]]) [cand addObject:p];
+    for (NSArray<NSString *> *p in pairs) if (![left containsObject:pre_key(@[p[0], p[1]])]) [cand addObject:p];
     uint64_t t0 = bp_now(); int probed = 0, found = 0; NSUInteger n = cand.count;
     for (NSUInteger k = 0; k < PRE_PROBE && k < n; k++) @autoreleasepool {
         NSArray<NSString *> *p = cand[k * n / MIN(n, (NSUInteger)PRE_PROBE)];
