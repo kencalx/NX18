@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for testing on the iPhone Duo. The checklist is in [Testing on iPhone Duo](https://github.com/kencalx/NX18/blob/main/docs/duo-testing.md).
+        Thanks for testing on the iPhone Duo. The checklist is in [Testing on iPhone Duo](https://github.com/kencalx/NX18/blob/x2-preview/docs/duo-testing.md).
         Your own legally owned and acquired games only. Never attach game files, keys or built apps. Logs and screenshots are fine: logs never contain keys or game files.
   - type: input
     id: ios

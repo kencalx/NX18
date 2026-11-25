@@ -1,3 +1,16 @@
+> [!IMPORTANT]
+> **This is the X2.0 preview branch, for testers.** It isn't a release: for that, use [main](https://github.com/kencalx/NX18/tree/main) and the [releases](https://github.com/kencalx/NX18/releases). Expect rough edges, and back up your saves first.
+>
+> **Getting the preview.** Clone this branch into its own folder, then build your legally owned and acquired games from it as [Getting started](docs/getting-started.md) describes:
+>
+> ```bash
+> git clone -b x2-preview https://github.com/kencalx/NX18.git ~/NX18-preview
+> ```
+>
+> With NX Play, choose `~/NX18-preview` at **Settings › General › nxnative repository**. NX Play brings it up to date with this branch before each build. With the script, run it from `~/NX18-preview`, after `git -C ~/NX18-preview pull` for the latest preview.
+>
+> **Telling us how it went.** Share what worked and what didn't in [Testing](https://github.com/kencalx/NX18/discussions/categories/testing). Bugs go in an [issue](https://github.com/kencalx/NX18/issues/new/choose), with the log from Share log. iPhone Duo owners: see [Testing on iPhone Duo](docs/duo-testing.md) and its [report form](https://github.com/kencalx/NX18/issues/new?template=duo_report.yml). Never share game files, keys or saves.
+
 <p align="center"><a href="https://github.com/kencalx/NX18/releases"><img src="docs/images/nx18/readme/nx18-readme-hero.png" alt="NX 18 System update X1.0 release. Native apps, built on your Mac, for your legally owned and acquired games on A20 iPhones, iPads and M-series Macs. Not an emulator. NX 18 includes no games, keys or mods." width="100%"></a></p>
 
 <p align="center">
