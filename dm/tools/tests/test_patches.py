@@ -302,8 +302,8 @@ class CatherineSixty(unittest.TestCase):
 
     def test_target_selects_the_mode(self):
         try:
-            from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
-            from unicorn.arm64_const import UC_ARM64_REG_PC, UC_ARM64_REG_X0, UC_ARM64_REG_X8, UC_ARM64_REG_NZCV
+            from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM  # pyright: ignore[reportMissingImports]   (optional: skipped without it)
+            from unicorn.arm64_const import UC_ARM64_REG_PC, UC_ARM64_REG_X0, UC_ARM64_REG_X8, UC_ARM64_REG_NZCV  # pyright: ignore[reportMissingImports]
         except ImportError: self.skipTest('unicorn not installed')
         code, puts, _ = self.assemble({'timing getter': self.GETTER})
         rate, _ = branch_target(puts, self.BASE + 0x84); timing, _ = branch_target(puts, self.GETTER + 4)

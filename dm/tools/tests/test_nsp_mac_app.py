@@ -696,7 +696,7 @@ class App(unittest.TestCase):
             self.assertEqual((r['DM_BOTH'], r['DM_BAKED']), ('player', '1'))   # the player's env.txt and the bundle's win over a saved choice
             self.assertNotIn('DM_OPMODE', r)
             self.assertEqual((r['DM_ENV_FILE_KEYS'], r['DM_ENV_LAUNCH_KEYS']), ('DM_BOTH DM_BAKED', ''))   # what the settings window keeps: the env files' variables
-            log = lambda: (self.tmp / f'home/Library/Logs/nxnative/{TID}.log').read_text()
+            log = (self.tmp / f'home/Library/Logs/nxnative/{TID}.log').read_text   # read when called
             # Frame generation off (no DM_FRAMEGEN, every player who leaves it so): the saved choices and nothing else, no DM_PRESET and no line for it
             self.assertNotIn('DM_PRESET', r); self.assertNotIn('DM_PRESET', log())
             r = run(app, DM_FRAMEGEN='1')   # frame generation on: the preset the saved choices make, for its Battery Saver step-aside

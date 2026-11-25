@@ -389,7 +389,8 @@ class FrontEnd(unittest.TestCase):   # frames made while the in-game menu (or a 
         for f in fmts:
             line = f.replace('%d', '1').replace('%llu', '60').replace('%.0f', '5').replace('%.2f', '0.85').replace('%u', '0').replace('%s', 'x')
             self.assertTrue(devlog.RX['heat_rung'].search(line), f)
-        self.assertTrue(devlog.RX['heat_force'].search(re.search(r'LOG\("(\[heat\] DM_HEAT_FORCE: thermal state %s at %.0f s[^"]*)"', src).group(1).replace('%s', '2').replace('%.0f', '60').replace('%d', '0')))
+        force = re.search(r'LOG\("(\[heat\] DM_HEAT_FORCE: thermal state %s at %.0f s[^"]*)"', src); assert force
+        self.assertTrue(devlog.RX['heat_force'].search(force.group(1).replace('%s', '2').replace('%.0f', '60').replace('%d', '0')))
 
     def test_render_scale_and_clock_rescue(self):   # hle_nvn.c scale_set and clock_rescue_tick: each render scale change and the rescue's start and end on the timeline, the host's formats matched
         s = read(['[dm] [heat] render scale 0.85 = player 1.00 × heat 0.85 × clock rescue 1.00 (heat ladder: resolution 85%): state +0x14 0.850',
@@ -403,7 +404,8 @@ class FrontEnd(unittest.TestCase):   # frames made while the in-game menu (or a 
                           'render scale 0.64 (the GPU clock rescue): state +0x14 0.637', 'GPU clock rescue #1 over',
                           'GPU clock cool-down #2 (38.0 fps, GPU probe 3.20x)', 'GPU clock cool-down #2 over'])
         src = (REPO / 'dm/gfx/nvn/hle_nvn.c').read_text(errors='replace')
-        fmt = re.search(r'LOG\("(\[heat\] render scale %\.2f = [^"]*)"', src).group(1)
+        found = re.search(r'LOG\("(\[heat\] render scale %\.2f = [^"]*)"', src); assert found
+        fmt = found.group(1)
         self.assertTrue(devlog.RX['render_scale'].search(fmt.replace('%.2f', '0.85').replace('%s', 'x')), fmt)
         fmts = re.findall(r'LOG\("(\[nvn\] GPU clock %s #%u [^"]*)"', src)
         self.assertEqual(len(fmts), 2, fmts)   # its start and its end, for the rescue and the cool-down (%s)

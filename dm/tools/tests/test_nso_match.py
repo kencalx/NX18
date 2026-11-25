@@ -149,7 +149,7 @@ class Matching(unittest.TestCase):
         init = [0x52800080, RET]
         original = image({0x100: caller(0x100, 0x500), 0x500: leaf, 0x600: leaf, 0x700: init})
         parsed = Image(original, 0x2000)
-        clock = dict(size=8, fingerprints=[parsed.fingerprint(0x500)], cuts=[(0, '20008052', '40008052', 'clock')])
+        clock: dict[str, object] = dict(size=8, fingerprints=[parsed.fingerprint(0x500)], cuts=[(0, '20008052', '40008052', 'clock')])
         with self.assertRaisesRegex(MatchError, '2 matching'):
             parsed.match(dict(clock, name='clock'))
 
@@ -217,10 +217,12 @@ class Matching(unittest.TestCase):
         by_call = dict(stub, others={'leaf': dict(size=8, fingerprints=[leaf], called_by=dict(size=28, fingerprints=[mine], call=12))})
         messages = []
         self.assertEqual(locate_stub(twin, 0x2000, [by_call], messages.append), (by_call, 0x800, {'leaf': 0x1200}, None))
-        self.assertEqual(locate_stub(twin, 0x2000, [dict(stub, others={'leaf': dict(size=8, fingerprints=[leaf])})], messages.append)[2], {'leaf': None})
+        got = locate_stub(twin, 0x2000, [dict(stub, others={'leaf': dict(size=8, fingerprints=[leaf])})], messages.append); assert got is not None
+        self.assertEqual(got[2], {'leaf': None})
         wrong = dict(stub, others={'leaf': dict(size=8, fingerprints=[leaf], called_by=dict(size=28, fingerprints=[mine], call=8))})
         messages = []
-        self.assertEqual(locate_stub(twin, 0x2000, [wrong], messages.append)[2], {'leaf': None})
+        got = locate_stub(twin, 0x2000, [wrong], messages.append); assert got is not None
+        self.assertEqual(got[2], {'leaf': None})
         self.assertIn('expected a direct call', messages[-1])
         with self.assertRaisesRegex(ValueError, 'call offset'): locate_stub(twin, 0x2000, [dict(stub, others={'leaf': dict(size=8, fingerprints=[leaf], called_by=dict(size=28))})], messages.append)
         duplicate = image({0x100: caller(0x100, 0x500), 0x800: caller(0x800, 0x500), 0x500: [0xd2800020, RET]})

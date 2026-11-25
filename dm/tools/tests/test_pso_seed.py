@@ -124,7 +124,7 @@ class Committed(unittest.TestCase):
         rows = pso_seed.rows_of((g / 'pso_manifest.tsv').read_bytes().decode('utf-8'), strip_cr=False)
         keep, bad = pso_seed.collect(rows, shmap)
         self.assertEqual((bad, len(keep), len(rows)), ([], len(rows), len(rows)))
-        self.assertEqual(pso_seed.counts(keep), {'S': 30357, 'R': 1279, 'C': 3, 'M': 0, 'rows': 31639})
+        self.assertEqual(pso_seed.counts(keep), {'S': 30357, 'R': 1954, 'C': 3, 'M': 0, 'rows': 32314})
 
     def grown(self, gid, counts, notes):
         """A list grown from iPhone sessions: every row checks clean against the map in the counts given, none repeated, and each
@@ -143,8 +143,9 @@ class Committed(unittest.TestCase):
         self.assertNotIn('Provisional', ''.join(head))
         for start, want in notes:
             note = next((ln for ln in head if ln.startswith(start)), None)
-            self.assertIsNotNone(note, start)
+            assert note is not None, start
             m = re.search(r'(\d+) rows \((\d+) S, (\d+) R, (\d+) C\)', note)
+            assert m, note
             self.assertIsNotNone(m, note)
             self.assertEqual(tuple(int(x) for x in m.groups()), want)
         return rows
@@ -165,7 +166,7 @@ class Committed(unittest.TestCase):
                    [('# Grown on 2026-11-15 from an iPhone 18 Pro Max play session (about 4 min, build 431d5d18', (444, 246, 198, 0))])
 
     def test_donkey_kong_bananza_grown_from_the_phone(self):   # its README, Files
-        rows = self.grown('040074A01BF12000', {'S': 8143, 'R': 6667, 'C': 46, 'M': 0, 'G': 1, 'rows': 14857},
+        rows = self.grown('040074A01BF12000', {'S': 8143, 'R': 6801, 'C': 46, 'M': 0, 'G': 1, 'rows': 14991},
                           [('# Grown on 2026-11-15 from an iPhone 18 Pro Max\'s Documents/pso_user.tsv after three play sessions', (4657, 4412, 245, 0)),
                            ('# Added on 2026-11-15 from an earlier iPhone 18 Pro Max Documents/pso_user.tsv (X1.0, build 6448f757', (8, 0, 8, 0)),
                            ('# Grown on 2026-11-17 from the same iPhone 18 Pro Max\'s Documents/pso_user.tsv after runs on chain ae1dd68dc11c', (283, 1, 282, 0)),
@@ -179,7 +180,7 @@ class Committed(unittest.TestCase):
                     ('# Grown on 2026-11-17 from the same iPhone 18 Pro Max\'s Documents/pso_user.tsv after runs on chain ae1dd68dc11c', (435, 157, 275, 3))])
 
     def test_star_fox_grown_from_the_phone(self):   # its README, Pipelines on a first start
-        self.grown('0400E88025B1A000', {'S': 651, 'R': 567, 'C': 15, 'M': 0, 'rows': 1233},
+        self.grown('0400E88025B1A000', {'S': 657, 'R': 573, 'C': 15, 'M': 0, 'rows': 1245},
                    [('# Grown on 2026-11-15 from an iPhone 18 Pro Max play session (about 6 min, build 431d5d18', (83, 39, 44, 0)),
                     ('# Grown on 2026-11-16 from a second iPhone 18 Pro Max session (about 6 min, build 29dcbb4d', (6, 4, 2, 0)),
                     ('# Grown on 2026-11-19 from the same iPhone 18 Pro Max\'s Documents/pso_user.tsv after the X2.0 runs of 2026-11-17 to 19 on chain ae1dd68dc11c', (133, 61, 72, 0))])

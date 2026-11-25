@@ -13,12 +13,13 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nso_asm import B, BL   # noqa: E402
 try:
-    import unicorn as uc
-    from unicorn import arm64_const as arm
+    import unicorn as uc  # pyright: ignore[reportMissingImports]   (optional: the runs are skipped without it)
+    from unicorn import arm64_const as arm  # pyright: ignore[reportMissingImports]
 except ImportError:
     uc = arm = None
 
 spec = importlib.util.spec_from_file_location('botw_patches', Path(__file__).resolve().parents[2] / 'games/01007EF00011E000/patches.py')
+assert spec is not None and spec.loader is not None
 patch = importlib.util.module_from_spec(spec); spec.loader.exec_module(patch)
 
 BASE, AREA, STATE, SCRATCH, STACK, RET = 0x10000000, 0x2000000, 0x2100000, 0x40000000, 0x40100000, 0x40200000
@@ -32,7 +33,7 @@ TURNS = (1e-4, 2.9e-4, 4.3e-4, 8.7e-4, 1.7e-3, 1e-2, 0.5, 2.0, 3.0)
 def build():
     """Run frame_step against a recording context: (words emitted at AREA, {site: (words, why)}, {site: original hex})."""
     words, puts, sites = [], {}, {}
-    ctx = types.SimpleNamespace(here=lambda: AREA + 4 * len(words), emit=words.append, site=lambda off, orig: sites.__setitem__(off, orig),
+    ctx = types.SimpleNamespace(here=lambda: AREA + 4 * len(words), emit=words.append, site=sites.__setitem__,
                                 put=lambda off, ws, why: puts.__setitem__(off, (ws, why)), state=STATE, render_scale=0, step_max=0, capabilities=set(), address=lambda off: 0)
     patch.frame_step(ctx)
     return words, puts, sites
@@ -72,6 +73,7 @@ class Layout(unittest.TestCase):
 @unittest.skipIf(uc is None, 'optional ARM64 execution dependency: unicorn')
 class Run(unittest.TestCase):
     def angle(self, q, fps=60.0):
+        assert uc is not None and arm is not None   # the class is skipped without unicorn
         words, puts, _ = build()
         u = uc.Uc(uc.UC_ARCH_ARM64, uc.UC_MODE_ARM)
         for a, n in ((BASE, AREA), (BASE + AREA, 0x10000), (BASE + STATE, 0x4000), (SCRATCH, 0x1000), (STACK, 0x10000), (RET, 0x1000)):   # main up to the stub area: unicorn 2.1 refuses overlapping maps
@@ -87,6 +89,7 @@ class Run(unittest.TestCase):
         seen = []
 
         def library(u, address, size, _):   # atan2f answered in single precision; getAngle as shipped, from the same quaternion
+            assert arm is not None
             s = lambda r: struct.unpack('<f', struct.pack('<I', u.reg_read(r) & 0xffffffff))[0]
             if address == BASE + ATAN2F: r = f32(math.atan2(s(arm.UC_ARM64_REG_S0), s(arm.UC_ARM64_REG_S1))); seen.append('atan2f')
             else: r = shipped(struct.unpack('<4f', u.mem_read(u.reg_read(arm.UC_ARM64_REG_X0), 16))); seen.append('getAngle')

@@ -11,8 +11,8 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nso_asm import NOP   # noqa: E402
 try:
-    import unicorn as uc
-    from unicorn import arm64_const as arm
+    import unicorn as uc  # pyright: ignore[reportMissingImports]   (optional: the runs are skipped without it)
+    from unicorn import arm64_const as arm  # pyright: ignore[reportMissingImports]
 except ImportError:
     uc = arm = None
 
@@ -21,6 +21,7 @@ GAMES = Path(__file__).resolve().parents[2] / 'games'
 
 def load(gid):
     spec = importlib.util.spec_from_file_location(f'patches_{gid}', GAMES / gid / 'patches.py')
+    assert spec is not None and spec.loader is not None
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
 
 
@@ -39,6 +40,7 @@ class Ctx:
         self.cursor, self.code, self.puts, self.sites, self.order = AREA, {}, {}, {}, []
         self.state, self.render_scale, self.live_scale, self.step_max, self.capabilities = STATE, 0, 0, 0, set()
         self._words, self.refuse = words, refuse
+        self.others: dict | None = None; self.base = 0   # set by a test that runs the frame step's matcher
         if build: self.build = build
     def here(self): return self.cursor
     def emit(self, w): self.code[self.cursor] = w; self.cursor += 4
@@ -108,6 +110,7 @@ class Runs(unittest.TestCase):
 
     def run_site(self, mod, words, site, ratio, build=None):
         ctx = Ctx(words, build=build); mod.camera_aspect(ctx)
+        assert uc is not None and arm is not None   # the class is skipped without unicorn
         u = uc.Uc(uc.UC_ARCH_ARM64, uc.UC_MODE_ARM)
         u.mem_map(0, 0x5200000)
         for a, w in ctx.code.items(): u.mem_write(a, struct.pack('<I', w))
@@ -124,6 +127,7 @@ class Runs(unittest.TestCase):
         return u, aspect, ack
 
     def test_botw(self):
+        assert arm is not None   # the class is skipped without unicorn
         for ratio in (0.0, 2868 / 1320):
             u, aspect, ack = self.run_site(botw, BOTW_WORDS, 0x10edae0, ratio)
             want = struct.unpack('<f', struct.pack('<f', ratio))[0]
@@ -131,6 +135,7 @@ class Runs(unittest.TestCase):
             self.assertEqual(ack, want, 'acknowledged after the store (0 too)')
 
     def test_totk(self):
+        assert arm is not None   # the class is skipped without unicorn
         for site in TOTK_WORDS:
             for ratio in (0.0, 2868 / 1320):
                 u, aspect, ack = self.run_site(totk, TOTK_WORDS, site, ratio, TOTK_BUILD)

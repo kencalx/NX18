@@ -22,7 +22,7 @@ for l in open(sys.argv[1], errors='replace'):
     if m: fr(int(m.group(1)))[3][int(m.group(2))]=m.group(3)
 why_all=collections.Counter()
 for f,(passes,order,between,ends) in frames.items():
-    key=lambda p: tuple(sorted((a[0],a[1],a[2],a[3]) for a in passes[p]))
+    key=lambda p, passes=passes: tuple(sorted((a[0],a[1],a[2],a[3]) for a in passes[p]))
     n=0; sv=0; ex=[]
     for a,b in zip(order,order[1:]):
         if key(a)==key(b) and all(x[4]=='load' for x in passes[b]):

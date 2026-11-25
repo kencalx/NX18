@@ -3,6 +3,7 @@
 # the profile's `tested` and `known_issue` keys (set after a device sitting), and each packed switchable mod's credit (an optional credit.json in the mod's folder:
 # {"author", "link", "license"}). The app picks the rating body by the device's region and shows "No credit given in the mod's folder" for a mod without one.
 # Usage: about_facts.py <control.nacp> <game profile folder> <out facts.json> [<mods root> <role>=<mod folder name> ...]
+from typing import Any
 import json, sys
 from pathlib import Path
 
@@ -31,7 +32,7 @@ def credit(folder):
 
 
 def facts(control, game_dir, mods_root=None, roles=None):
-    f = {'ratings': nacp.ratings(control) if control else {}}
+    f: dict[str, Any] = {'ratings': nacp.ratings(control) if control else {}}
     tested, issue = profile_key(game_dir, 'tested'), profile_key(game_dir, 'known_issue')
     if tested: f['tested'] = tested
     if issue: f['known_issue'] = issue[:80]

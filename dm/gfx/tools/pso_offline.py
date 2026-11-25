@@ -412,7 +412,8 @@ def fragment_entry(k, fj, funcs):
     for i in range(8):
         if not cfmt[i]: continue
         if classes:
-            decl = 1 if bits['uint_colors'] >> i & 1 else 2 if bits['sint_colors'] >> i & 1 else 0 if bits['float_colors'] >> i & 1 else None
+            ui, si, fi = (int(bits[k] or 0) for k in ('uint_colors', 'sint_colors', 'float_colors'))   # all ints here (classes)
+            decl = 1 if ui >> i & 1 else 2 if si >> i & 1 else 0 if fi >> i & 1 else None
             if decl is None: continue   # an output main0 does not declare takes no constant
         else:
             if known and not mask >> i & 1: continue

@@ -614,8 +614,8 @@ def read(text: str, top: int = 5) -> Rec:
     fe = collections.Counter(next(k for k, w in (('probe', 'probe back'), ('down', 'by the probe'), ('held', 'interval 1 held'), ('failed', 'the probe failed'), ('dropped', 'no return'))
                                   if w in m.group(1)) for _, m, _ in g['fctl'])
     sums = dict(zip(('probes', 'down', 'held', 'failed', 'dropped'), (sum(int(m.group(k)) for _, m, _ in fs) for k in (2, 4, 5, 6, 7))))
-    tl = [tuple(float(m.group(k)) for k in (8, 9, 10)) for _, m, _ in fs if m.group(8)] + [tuple(float(m.group(k)) for k in (2, 3, 4)) for _, m, _ in fg]
-    at = [round(sum(x[k] for x in tl), 1) for k in range(3)]; tt = sum(at)
+    itv = [tuple(float(m.group(k)) for k in (8, 9, 10)) for _, m, _ in fs if m.group(8)] + [tuple(float(m.group(k)) for k in (2, 3, 4)) for _, m, _ in fg]   # seconds at each interval
+    at = [round(sum(x[k] for x in itv), 1) for k in range(3)]; tt = sum(at)
     fxf = [m for m in fx if m.group(1) == 'failed']
     host = bool(fs or fx or g['fctl'])
     cost = bool(fx) or any(m.group(11) for _, m, _ in fs)   # what failed probes cost is in the probes' lines and the summaries since X2.0: none from an older build, not 0
@@ -624,7 +624,7 @@ def read(text: str, top: int = 5) -> Rec:
             for w in ('held 8 s', 'failed', 'dropped', 'cut short') for xs in [[m for m in fx if m.group(1) == w]] if xs}
     out['frame_rate'] = {'game_changes': len(gi), 'up': sum(1 for _, m, _ in gi if int(m.group(2)) > int(m.group(1))), 'to_1': sum(1 for _, m, _ in gi if m.group(2) == '1'),
                          'from': sorted({m.group(3) for _, m, _ in gi}), **{k: max(fe[k if k != 'probes' else 'probe'], v) for k, v in sums.items()},
-                         **{f'at{k + 1}_s': at[k] if tl else None for k in range(3)}, 'at1_pct': round(100 * at[0] / tt, 1) if tt else None,
+                         **{f'at{k + 1}_s': at[k] if itv else None for k in range(3)}, 'at1_pct': round(100 * at[0] / tt, 1) if tt else None,
                          'failed_late': max(sum(int(m.group(11)) for _, m, _ in fs if m.group(11)), sum(int(m.group(8)) for m in fxf)) if cost else None,
                          'failed_over_ms': round(max(sum(float(m.group(12)) for _, m, _ in fs if m.group(12)), sum(float(m.group(9)) for m in fxf))) if cost else None,
                          'ends': ends} if gi or host or fg else None

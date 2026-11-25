@@ -1,7 +1,6 @@
 """G17 (gate-ui §20.5a): the build stamp. The builder's Profile name comes only from the build Mac's Profile files and must pass GW21; every build gets a new build
 ID; build_ipa.sh and pack_app.py write DMBuiltBy and DMBuildID; bug reports name the build ID and replace the name on the host's "build: built by" line."""
 import importlib.util
-import os
 from pathlib import Path
 import re
 import tempfile
@@ -12,6 +11,7 @@ REPO = Path(__file__).resolve().parents[3]
 
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
     return mod
 

@@ -632,7 +632,7 @@ class StandIns(unittest.TestCase):
     POS = {0: (0x2E, 0, 0)}
 
     def shader(self, key, j, libs, locs=None):   # Plan.shader, with the AIR strings of each library (locs: {suffix: (kind, locations)})
-        Plan.shader(self, key, j, libs)
+        Plan.shader(self, key, j, libs)  # pyright: ignore[reportArgumentType]   (Plan's helper, borrowed: it reads only self.d)
         for suf, (kind, ls) in (locs or {}).items():
             p = self.d / f'{key}{suf}.metallib'; p.write_bytes(p.read_bytes() + air(kind, ls))
 
@@ -653,7 +653,9 @@ class StandIns(unittest.TestCase):
         self.shader('pc', {}, {'_b': [('main0', True)]})
         self.shader('pn', {}, {'_b': [('main0', False)]})   # no AIR strings: nothing known, kept
 
-    def row(self, **kw): return rkey(**dict(dict(attrs=self.POS, streams={0: (16, 0)}), **kw))
+    def row(self, **kw):
+        args: dict[str, Any] = dict(attrs=self.POS, streams={0: (16, 0)}); args.update(kw)
+        return rkey(**args)
 
     def plan(self, *rows, zero=False, pairs=()): return po.plan_standins(self.d, CHAIN, list(rows), zero, pairs)
 
@@ -730,7 +732,7 @@ class StandIns(unittest.TestCase):
 
     def test_the_build_reads_no_rows(self):   # the R rows feed neither the shader build's padding (vs_pad) nor its inputs: pso_offline alone reads them
         tables = re.search(r'^INPUT_TABLES = (\[.*?\])', (REPO / 'dm/gfx/tools/dmsh_chain.py').read_text(), re.M)
-        self.assertIsNotNone(tables)
+        assert tables is not None
         self.assertIn('pso_pairs.tsv', tables.group(1)); self.assertNotIn('pso_manifest.tsv', tables.group(1)); self.assertNotIn('standins.tsv', tables.group(1))
         src = (REPO / 'dm/gfx/tools/dmsh_build.py').read_text()
         self.assertIn("for table in ('shader_pairs.tsv', 'pso_pairs.tsv'):", src); self.assertNotIn('pso_manifest', src)
