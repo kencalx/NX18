@@ -1,0 +1,56 @@
+name: iPhone Duo report
+description: Results from the iPhone Duo checklist (docs/duo-testing.md), whether it went well or not
+labels: ["iphone-duo"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing on the iPhone Duo. The checklist is in [Testing on iPhone Duo](https://github.com/kencalx/NX18/blob/x2-preview/docs/duo-testing.md).
+        Your own legally owned and acquired games only. Never attach game files, keys or built apps. Logs and screenshots are fine: logs never contain keys or game files.
+  - type: input
+    id: ios
+    attributes:
+      label: iOS version on the Duo
+      placeholder: "27.3"
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game, title ID and version
+      placeholder: "Super Mario Odyssey, 0100000000010000, 1.3.0"
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: NX 18 commit you built from
+      description: "The commit NX Play or `git rev-parse --short HEAD` shows; the Gate's NX 18 card shows it too."
+    validations:
+      required: true
+  - type: checkboxes
+    id: passed
+    attributes:
+      label: Steps that worked
+      description: Tick what went well; describe the rest below.
+      options:
+        - label: Closed (cover screen) - the Gate
+        - label: Closed (cover screen) - playing
+        - label: Half open - picture above the fold, controls below
+        - label: Fully open (flat) - portrait and landscape
+        - label: Folding and unfolding while playing
+        - label: With a controller
+  - type: textarea
+    id: problems
+    attributes:
+      label: What looked or felt wrong
+      description: For each problem, the posture it happened in, what you did and what you saw. Say whether it happens every time.
+    validations:
+      required: false
+  - type: textarea
+    id: files
+    attributes:
+      label: Log and screenshots
+      description: Attach log.txt and log.prev.txt from Share log, and any screenshots or a screen recording.
+    validations:
+      required: true
