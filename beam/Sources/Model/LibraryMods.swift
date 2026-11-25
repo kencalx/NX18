@@ -2,19 +2,21 @@
 import Foundation
 
 extension Library {
-    /// Beam's own pieces of a build: its mods folder (made, so --mods always names Beam's and never the player's mods folder beside the game) and the manual
+    /// Beam's own pieces of a build: the mods (Beam's folder for the game once it keeps any, else the mods folder beside the game's files, read only, as the
+    /// script itself would take it) and the manual
     func dress(_ req: inout BuildRequest, _ g: LibraryGame, _ ident: IdentifyEvent) {
         let f = ModStore.folder(titleID: ident.titleId)
         try? FileManager.default.createDirectory(at: f, withIntermediateDirectories: true)
-        req.mods = f
+        if !beamKeepsMods(ident.titleId), let own = GameFolderMods.read(g.source), !own.isEmpty { req.mods = own.folder } else { req.mods = f }
         if let m = g.manual, FileManager.default.fileExists(atPath: m.path) { req.manual = m }
         let have = { (u: URL?) in u.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil } }
         req.art = have(g.art); req.logo = have(g.logo); req.icon = have(g.icon)
+        req.appName = g.customName
     }
 
     func saveSources() {
-        try? FileManager.default.createDirectory(at: Library.defaultFolder, withIntermediateDirectories: true)
-        try? JSONEncoder().encode(sources).write(to: Library.defaultFolder.appending(path: "sources.json"), options: .atomic)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? JSONEncoder().encode(sources).write(to: folder.appending(path: "sources.json"), options: .atomic)
     }
 
     /// Reads a source and keeps it when it is one (its name, maintainer and homepage are shown before the player saves it: Settings)
@@ -56,11 +58,23 @@ extension Library {
         return Set(ident.versions.compactMap(\.build))
     }
 
+    /// Whether Beam keeps any mods or cheats of its own for a game (its folder then decides the build's mods)
+    func beamKeepsMods(_ titleID: String) -> Bool {
+        let f = ModStore.folder(titleID: titleID)
+        return ((try? FileManager.default.contentsOfDirectory(atPath: f.path)) ?? []).contains { !$0.hasPrefix(".") }
+    }
+    /// The game folder's mods copied into Beam's folder, before Beam's first mod or cheat for the game, so the build keeps carrying them
+    func bringInGameMods(_ g: LibraryGame) {
+        guard let ident = g.identity, !beamKeepsMods(ident.titleId), let own = GameFolderMods.read(g.source), !own.isEmpty else { return }
+        do { _ = try own.bringIn(to: ModStore.folder(titleID: ident.titleId)); markModsChanged(g.id) } catch { lastError = "The game folder's mods could not be brought in: \(error.localizedDescription)" }
+    }
+
     /// Gets a source's mod for a game: downloaded from its author, checked, kept. The next build carries it
     func getMod(_ o: Offer, for g: LibraryGame) async {
         guard let ident = g.identity, let kind = o.entry.role else { return }
         let work = FileManager.default.temporaryDirectory.appending(path: "beam-mod-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: work) }
+        bringInGameMods(g)
         do {
             let c = try await ModFetch.download(o.entry, into: work)
             try fitBuild(c, g)
@@ -76,6 +90,7 @@ extension Library {
         guard let ident = g.identity else { return }
         let work = FileManager.default.temporaryDirectory.appending(path: "beam-mod-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: work) }
+        bringInGameMods(g)
         do {
             let data = try Data(contentsOf: file)
             let c = try await ModFetch.unpack(data, name: file.lastPathComponent, into: work)
@@ -115,7 +130,7 @@ extension Library {
         let save = URL.applicationSupportDirectory.appending(path: "nxnative/\(titleID.uppercased())/save")
         guard FileManager.default.fileExists(atPath: save.path) else { return }
         let stamp = ISO8601DateFormatter().string(from: .now).replacingOccurrences(of: ":", with: "-")
-        let dst = Library.defaultFolder.appending(path: "Backups/\(titleID.uppercased())/\(stamp)/save")
+        let dst = folder.appending(path: "Backups/\(titleID.uppercased())/\(stamp)/save")
         do {
             try FileManager.default.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: save, to: dst)
@@ -134,6 +149,7 @@ extension Library {
         guard playing != g.id else { lastError = "Quit the game first: it reads cheats only when it starts."; return }
         guard let c = cheats(g) else { return }
         let shown = g.identity?.versions.first { $0.build == c.build }?.display ?? "this version"
+        bringInGameMods(g)
         do { try c.add(file, versionShown: shown) } catch { lastError = error.localizedDescription }
     }
     /// A switch on the Mac app's cheats: written before a start only (the host reads them at the start or on Reload Cheats)
@@ -160,7 +176,7 @@ extension Library {
 
     /// My files: the player's own guides and maps for a game, in Beam's folder (never packed into an IPA, which can be shared)
     func myFilesFolder(_ g: LibraryGame) -> URL? {
-        g.identity.map { Library.defaultFolder.appending(path: "My Files/\($0.titleId.uppercased())", directoryHint: .isDirectory) }
+        g.identity.map { folder.appending(path: "My Files/\($0.titleId.uppercased())", directoryHint: .isDirectory) }
     }
     func myFiles(_ g: LibraryGame) -> [URL] {
         guard let f = myFilesFolder(g) else { return [] }

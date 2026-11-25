@@ -7,6 +7,8 @@
 #include "../nvn/hle_nvn.c"
 #undef g_ft
 #include "t_mtl4.h"
+static dispatch_semaphore_t g_t_cap_sem;
+static void t_cap_done(void *ctx, const char *path, int ok) { (void)path; *(int *)ctx = ok; dispatch_semaphore_signal(g_t_cap_sem); }
 uint64_t g_t0_ns;   // process start time from host main.c (used by hle_nvn's per-frame @t_s); unit test stub
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -357,6 +359,27 @@ int main(void) { @autoreleasepool {
         });
         grab_present(big,whole,CGSizeMake(W,H));
         EXPECT("whole-window capture callback completes",0,(int)dispatch_semaphore_wait(grabbed,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC)));
+        {   // The player's screenshot (dm_gfx_capture, capture_present): one at a time, the picture's shape fitted in the screen, a whole PNG only under its name
+            NSString *dir=[NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString];[NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+            NSString *png=[dir stringByAppendingPathComponent:@"2026-11-25 21.04.17.png"];
+            static dispatch_semaphore_t capDone;capDone=dispatch_semaphore_create(0);static int capOk;
+            EXPECT("capture: asked",1,dm_gfx_capture(png.fileSystemRepresentation,t_cap_done,&capOk));
+            EXPECT("capture: a second while one is pending is refused",0,dm_gfx_capture(png.fileSystemRepresentation,t_cap_done,&capOk));
+            g_t_cap_sem=capDone;
+            capture_present(big,whole,CGSizeMake(W*2,H));   // a screen twice as wide: the picture keeps its shape
+            capture_present(big,whole,CGSizeMake(W*2,H));   // taken already: nothing more
+            EXPECT("capture: done",0,(int)dispatch_semaphore_wait(capDone,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC)));
+            EXPECT("capture: written",1,capOk);
+            EXPECT("capture: no part file left",0,(int)[NSFileManager.defaultManager fileExistsAtPath:[png stringByAppendingString:@".part"]]);
+            CGImageSourceRef is=CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:png],NULL);CGImageRef im=is?CGImageSourceCreateImageAtIndex(is,0,NULL):NULL;
+            EXPECT("capture: a PNG",1,im!=NULL);
+            double k=fmin(2.0*W/big.width,(double)H/big.height);   // the source's shape fitted in the screen
+            if (im) { EXPECT("capture: width keeps the shape",(int)floor(big.width*k),(int)CGImageGetWidth(im));EXPECT("capture: height",(int)floor(big.height*k),(int)CGImageGetHeight(im));CGImageRelease(im); }
+            if (is) CFRelease(is);
+            EXPECT("capture: the next is taken again",1,dm_gfx_capture([dir stringByAppendingPathComponent:@"b.png"].fileSystemRepresentation,NULL,NULL));
+            pthread_mutex_lock(&g_shotq_mu);g_pshot.pending=0;pthread_mutex_unlock(&g_shotq_mu);
+            [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
+        }
         res_remove(big);g_fx_mode=0;
     } else printf("no Metal 4 MetalFX spatial scaler on this GPU: the MetalFX present is not checked\n");
     int invalid[4][4]={{-1,0,4,4},{0,-1,4,4},{0,0,0,4},{7,0,4,4}};

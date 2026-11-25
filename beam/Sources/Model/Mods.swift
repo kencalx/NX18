@@ -135,7 +135,8 @@ enum ModStore {
     struct Kept: Identifiable, Sendable, Equatable { var id: URL { folder }; var folder: URL; var credit: ModCredit? }
     static func kept(titleID: String, root: URL? = nil) -> [Kept] {
         let f = root.map { folder(titleID: titleID, root: $0) } ?? folder(titleID: titleID)
-        let dirs = (try? FileManager.default.contentsOfDirectory(at: f, includingPropertiesForKeys: nil).filter(\.hasDirectoryPath)) ?? []
+        let dirs = ((try? FileManager.default.contentsOfDirectory(at: f, includingPropertiesForKeys: nil).filter(\.hasDirectoryPath)) ?? [])
+            .filter { $0.lastPathComponent.lowercased() != "cheats" }   // cheats have their own section
         let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601
         return dirs.sorted { $0.lastPathComponent < $1.lastPathComponent }.map { dir in
             Kept(folder: dir, credit: (try? Data(contentsOf: dir.appending(path: "beam-mod.json"))).flatMap { try? d.decode(ModCredit.self, from: $0) })
@@ -207,5 +208,67 @@ enum ModFetch {
         let out = work.appending(path: "x"); try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
         try data.write(to: out.appending(path: name))
         return try ModCheck.contents(of: out)
+    }
+}
+
+/// The mods folder beside a game's own files (the build script's default, which NX Play uses too): read, never written. Beam's builds use it while Beam keeps
+/// no mods of its own for the game; Beam lists what it holds the way the packer sorts it (dm/tools/game_mods.py role_of, scan)
+struct GameFolderMods: Sendable, Equatable {
+    struct Mod: Sendable, Equatable, Identifiable { var id: String { name }; var name: String; var kind: ModKind? }   // kind nil: the packer leaves it out
+    var folder: URL
+    var mods: [Mod]
+    var cheatFiles: Int
+    var isEmpty: Bool { mods.isEmpty && cheatFiles == 0 }
+
+    static func folder(of source: URL) -> URL { BuildRequest.gameFolder(of: source).appending(path: "mods", directoryHint: .isDirectory) }
+
+    /// The packer's name rules (role_of): Ultrawide by "ultrawide" or a 21:9-style ratio, frame rate by "fps" or "frame rate"
+    static func kind(of name: String) -> ModKind? {
+        let uw = try! NSRegularExpression(pattern: #"ultra\s*-?\s*wide|\b(\d{2})\s*[.:x]\s*(9|10)\b|\b(21|32)\s*[.:x]\s*9\b"#, options: .caseInsensitive)
+        let fps = try! NSRegularExpression(pattern: #"(\d+)\s*-?\s*fps|fps\s*-?\s*(\d+)|\bfps\b|frame\s*rate"#, options: .caseInsensitive)
+        let r = NSRange(name.startIndex..., in: name)
+        if uw.firstMatch(in: name, range: r) != nil { return .ultrawide }
+        if fps.firstMatch(in: name, range: r) != nil { return .framerate }
+        return nil
+    }
+
+    static func read(_ source: URL) -> GameFolderMods? {
+        let root = folder(of: source), fm = FileManager.default
+        var dir: ObjCBool = false
+        guard fm.fileExists(atPath: root.path, isDirectory: &dir), dir.boolValue else { return nil }
+        var names: [String] = [], cheats = 0
+        let e = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])
+        while let u = e?.nextObject() as? URL {
+            let n = u.lastPathComponent
+            if n.hasPrefix("-") { e?.skipDescendants(); continue }   // turned off, as the packer reads a leading -
+            guard (try? u.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
+            let ext = u.pathExtension.lowercased()
+            if ModCheck.patchSuffixes.contains(ext) {
+                var d = u.deletingLastPathComponent(); if d.lastPathComponent.lowercased() == "exefs" { d = d.deletingLastPathComponent() }   // the mod is the folder holding its exefs
+                if d.standardizedFileURL != root.standardizedFileURL, !names.contains(d.lastPathComponent) { names.append(d.lastPathComponent) }
+            } else if ext == "txt", u.pathComponents.contains(where: { $0.lowercased() == "cheats" }) { cheats += 1 }
+        }
+        let mods = names.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.map { Mod(name: $0, kind: kind(of: $0)) }
+        return GameFolderMods(folder: root, mods: mods, cheatFiles: cheats)
+    }
+
+    /// Copies the folder's mods into Beam's folder for the game (patch files, cheats, readmes; nothing else), keeping their folder names, so a mod added in
+    /// Beam joins them instead of replacing them in the build. The game's own folder is not changed
+    func bringIn(to beam: URL) throws -> Int {
+        let fm = FileManager.default
+        var copied = 0
+        let e = fm.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles])
+        while let u = e?.nextObject() as? URL {
+            if u.lastPathComponent.hasPrefix("-") { e?.skipDescendants(); continue }
+            let v = try u.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard v.isRegularFile == true, v.isSymbolicLink != true else { continue }
+            let ext = u.pathExtension.lowercased()
+            guard ModCheck.patchSuffixes.contains(ext) || ModCheck.textSuffixes.contains(ext) else { continue }
+            let rel = String(u.standardizedFileURL.path.dropFirst(folder.standardizedFileURL.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let to = beam.appending(path: rel)
+            try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !fm.fileExists(atPath: to.path) { try fm.copyItem(at: u, to: to); copied += 1 }
+        }
+        return copied
     }
 }

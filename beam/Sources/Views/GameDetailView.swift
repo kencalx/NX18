@@ -20,8 +20,9 @@ struct GameDetailView: View {
                     if let b = game.lastBuild { lastBuild(b) }
                 }
                 .padding(28)
-                .frame(maxWidth: 760, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)   // the page fills the window, edge to edge with the padding
             }
+            .background { HomeBackdrop(game: game, subtle: true) }   // the game's art, faintly, behind its page
             .navigationTitle(game.title)
             .sheet(isPresented: Binding(get: { settingsSource != nil }, set: { if !$0 { settingsSource = nil } })) {
                 if let s = settingsSource { GameSettingsView(title: game.title, source: s) }
@@ -42,10 +43,10 @@ struct GameDetailView: View {
         HStack(alignment: .center, spacing: 18) {
             GameIcon(game: game, size: 88)
             VStack(alignment: .leading, spacing: 6) {
-                Text(game.title).font(.largeTitle.weight(.semibold)).lineLimit(2)
+                GameTitle(title: game.title, logo: game.logo)
                 Text(game.source.path).font(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 if let i = game.identity {
-                    HStack(spacing: 8) {
+                    GlassEffectContainer(spacing: 8) { HStack(spacing: 8) {   // the floating buttons as one glass group (beam-design §4.5)
                         if library.macApp(gameID) != nil {
                             Button(library.playing == gameID ? "Playing" : "Play", systemImage: "play.fill") { library.play(gameID) }
                                 .buttonStyle(.glassProminent).tint(NX18Palette.coral)
@@ -59,7 +60,7 @@ struct GameDetailView: View {
                         }
                         .buttonStyle(.glass)
                         .disabled(library.jobs[gameID]?.isActive ?? false)
-                    }
+                    } }
                     .padding(.top, 6)
                 }
                 if let end = library.lastEnd, end.game == gameID {
@@ -92,7 +93,7 @@ struct GameDetailView: View {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(i.versions.sorted { $0.number > $1.number }, id: \.version) { v in
                     HStack {
-                        Image(systemName: (version ?? i.packs) == v.version ? "largecircle.fill.circle" : "circle").foregroundStyle(NX18Palette.cyan)
+                        Image(systemName: (version ?? i.packs) == v.version ? "largecircle.fill.circle" : "circle").foregroundStyle(NX18Palette.coral)   // the one chosen: coral
                         Text(v.display ?? v.version).frame(minWidth: 80, alignment: .leading)
                         Text(v.build.map { "build \($0)" } ?? (v.note ?? "no code of its own")).monospaced().font(.callout).foregroundStyle(.secondary)
                         Spacer()
@@ -145,9 +146,9 @@ struct BuildProgressView: View {
                     if job.isActive { Button("Stop", role: .cancel) { job.cancel() } }
                 }
                 if job.state == .waitingForPower { Text("Waiting for the power adapter. The build starts when this Mac is plugged in.").font(.callout).foregroundStyle(.secondary) }
-                if job.state == .checking { ProgressView().progressViewStyle(.linear); Text("Checking the space for the build…").font(.callout).foregroundStyle(.secondary) }
+                if job.state == .checking { NX18Bar(); Text("Checking the space for the build…").font(.callout).foregroundStyle(.secondary) }
                 if job.state == .running {
-                    if let f = job.overall { ProgressView(value: f) } else { ProgressView().progressViewStyle(.linear) }
+                    NX18Bar(value: job.overall)
                     Text(detail).font(.callout).foregroundStyle(.secondary).lineLimit(1)
                 }
                 if case .failed(let why) = job.state { Text(why).foregroundStyle(NX18Palette.coral).textSelection(.enabled) }
@@ -188,3 +189,30 @@ struct BuildProgressView: View {
 }
 
 private extension String { func ifEmpty(_ s: String) -> String { isEmpty ? s : self } }
+
+/// The game page's title: the logo the player chose in Art (SteamGridDB) in its place, else the name. The logo keeps its shape in a band as tall as the title's two lines;
+/// VoiceOver and the tooltip still read the name. A logo that is gone or unreadable falls back to the name
+struct GameTitle: View {
+    let title: String
+    let logo: URL?
+    @State private var image: NSImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image).resizable().interpolation(.high).scaledToFit()
+                    .frame(maxWidth: 440, maxHeight: 72, alignment: .leading)
+                    .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
+                    .accessibilityLabel(title).help(title)
+            } else {
+                Text(title).font(.largeTitle.weight(.semibold)).lineLimit(2)
+            }
+        }
+        .task(id: logo) { image = await Self.load(logo) }
+    }
+
+    nonisolated static func load(_ url: URL?) async -> NSImage? {
+        guard let url else { return nil }
+        return await Task.detached(priority: .userInitiated) { NSImage(contentsOf: url) }.value
+    }
+}

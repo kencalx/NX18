@@ -31,6 +31,7 @@ DM_BRIGHT_PROBE	diagnostic	`=<0.05-1.0>` (iPhone and iPad, off by default; unset
 DM_BUILD_ID	path	The build ID the NSP script hands `build_ipa.sh` (G17, `build_stamp`): written into Info.plist as `DMBuildID`; `build_ipa.sh` makes one when it is not given
 DM_BUILT_BY	path	The builder's Profile name at build time (G17, `build_stamp`, only when it passes GW21): written into Info.plist as `DMBuiltBy`; shown on the NX 18 card and in About
 DM_BUNDLE_ID	switch	Overrides the iOS app's bundle ID in `build_ipa.sh` (default `org.nxnative.<title ID in lowercase>`)
+DM_CAPTURE_SYSTEM	player	`0` stops saving NX 18's own picture to `Captures` when iOS takes a screenshot during play (side and volume buttons, or a controller's Share button iOS keeps for itself); on by default; launcher setting Save screenshots to Captures, also in the in-game menu (`DmCapture.m`)
 DM_CHEATS	path	Folder of Atmosphère cheat files: `<folder>/<build ID>.txt` or an SD-card layout (`atmosphere/contents/<title ID>/cheats/`) under it (default `<DM_ROOT>/cheats`); the Mac menu lists and toggles them
 DM_CHEATS_ANY_BUILD	switch	`1` loads a cheat file written for another build of the game when it is the only one (its addresses may not fit: for `cheat_anchor.py` checks)
 DM_CHEATS_DEBUG	diagnostic	Logs every memory write a cheat makes, its reads (a pointer chain's addresses and values; the first 600 access lines, then one in 300) and what each refused address is (a host image, the host's malloc heap, another mapping), and the cheat file context the menu's "another version" rows come from

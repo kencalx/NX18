@@ -348,7 +348,8 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** some owned DLC is missing, and `aoc: reporting` stops at 64 add-on contents.
 - **Cause:** `hle_misc.c` stored only 64 indices and stopped reading `DM_AOC_DIR` when that array filled, before sorting. The omitted indices depended on directory order; its 256-byte log buffer also truncated longer lists.
 - **Fix:** the shared array holds 2000 indices, covering the scanner's existing accepted range (1..2000), and a static buffer holds the complete index log without increasing guest-stack use. Folder and `.img` discovery, sorting, deduplication, pagination and `DM_AOC_OWNED=0` retain their behavior. This applies to every game using the add-on content hooks.
-- **Open:** the existing 1..2000 acceptance range is retained; it is not established here as Horizon's full legal range. More than 2000 accepted folder/image entries can still fill the array before deduplication, even when their unique indices fit.
+- **Resolved:** more than 2000 accepted folder/image entries no longer fill the array before deduplication: `aoc_load` marks a seen-set over 1..2000 as `readdir` returns entries and emits the sorted list from it (checked in `t_pctl`).
+- **Open:** the existing 1..2000 acceptance range is retained; it is not established here as Horizon's full legal range.
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, 99 DLC licences; PR #441).
 
 ### Add-on content mount cache sized as RomFS working memory
@@ -1053,6 +1054,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_mii.c` takes over the public methods: a console with no Mii of its own (an empty database: no index, nothing to update) that still has the six default Miis every console has. A CharInfo the host builds is the default Mii's parameters with Switch common colours, a create ID with version 4 and variant bits (fixed per default Mii, so a saved choice finds the same Mii; fresh for `BuildRandom`, which the title's demo race calls for 12 racers) and the nickname "no name"; every field is within `CharInfoRaw::Verify`'s ranges (`sdk+0x1b68c8`). The Mii editor is cancelled (0xE7E, which `ShowMiiEdit` itself treats as success).
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) (4.0.0, SDK 4.4.0; one boot). The game asks for the default Miis with `Get(…, 6, SourceFlag 2)` and never reads the count (`main+0x81e954`): its boot-time list of Mii icons (`main+0x419dc8`) builds a head model for each of the six, and zeroed entries failed the model's `CharInfoAccessor::IsValid` (`CharModel::Initialize` returned 0xd67e, `main+0x8f15b0`) and crashed at `main+0x8f152c`.
 - **Note:** the heads' model data is a stand-in with every part empty ([System data stand-in for the MiiModel archive](#system-data-stand-in-for-the-miimodel-archive)).
+
+### A Mii edited in the editor's place
+
+- **Symptom:** a crash (signal 11, address 0, `sdk+0x1e3684`) right after `mii: AppendMii`, when the player makes a Mii (Nintendo Switch Sports Resort: a second Mii).
+- **Cause:** `nn::mii::EditAndUpdateMii` opens the MiiEdit library applet on a Mii and writes the edited one to its first argument. Unhooked, the SDK's `StartImpl` reached `nn::applet::CreateLibraryApplet` with no applet service.
+- **Fix:** `hle_mii.c` `h_mii_EditUpdate` answers as the editor closed with no change: the Mii is copied to the output as given and the call succeeds, as `ShowMiiEdit` is answered ([Mii database answered by the host](#mii-database-answered-by-the-host)).
+- **Found on:** Nintendo Switch Sports Resort (04008E001F098000, v65536), which calls it right after `AppendMii`: with the hook, making a second Mii no longer crashes and the game goes on with the new Mii (Mac).
 
 ### Shop service accessors
 

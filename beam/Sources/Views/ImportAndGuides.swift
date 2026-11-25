@@ -102,7 +102,7 @@ struct SideloadGuide: View {
                         HStack(alignment: .top, spacing: 12) {
                             ZStack {
                                 Circle().fill(NX18Palette.charcoal).frame(width: 40, height: 40)
-                                Image(systemName: st.symbol).foregroundStyle(NX18Palette.cyan)
+                                Image(systemName: st.symbol).foregroundStyle(NX18Palette.accent(at: st.id - 1))
                             }
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Step \(st.id)").font(.caption).foregroundStyle(.secondary)

@@ -237,6 +237,7 @@ static inline int s2_pad_input(const s2_pad_state *p, uint64_t *buttons, int32_t
 
 // The pad's Home, A and B as raw buttons of its controllers (the Home hold-to-quit prompt reads them, as it reads GameController's)
 static inline int s2_pad_home(const s2_pad_state *p) { return ((p->pro.have ? p->pro.r.buttons : 0) | (p->left.have ? p->left.r.buttons : 0) | (p->right.have ? p->right.r.buttons : 0)) & S2_HOME ? 1 : 0; }
+static inline int s2_pad_capture(const s2_pad_state *p) { return ((p->pro.have ? p->pro.r.buttons : 0) | (p->left.have ? p->left.r.buttons : 0) | (p->right.have ? p->right.r.buttons : 0)) & S2_CAPTURE ? 1 : 0; }
 static inline void s2_pad_ab(const s2_pad_state *p, int *a, int *b) {
     uint32_t m = (p->pro.have ? p->pro.r.buttons : 0) | (p->right.have ? p->right.r.buttons : 0);   // A and B are on the right side (a left Joy-Con alone has none: the prompt also takes the keyboard)
     *a |= (m & S2_A) != 0; *b |= (m & S2_B) != 0;

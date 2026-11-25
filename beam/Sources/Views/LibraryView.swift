@@ -9,19 +9,26 @@ struct LibraryView: View {
     @State private var picking = false
     @State private var dropping = false
     @State private var importLib: NXPlayLibrary?
+    @State private var whatsNew = false
+    @State private var newName = ""
 
     var body: some View {
         Group {
-            if settings.welcomed {
+            if settings.welcomed && library.showingHome {
+                HomeView()   // the same window, as the console view (View > Beam Home, ⌃⌘H, or the toolbar's controller button)
+            } else if settings.welcomed {
                 NavigationSplitView {
                     List(selection: $selection) {
                         Section("Games") {
-                            ForEach(library.games) { g in GameRow(game: g).tag(g.id) }
+                            ForEach(library.games) { g in GameRow(game: g).tag(g.id).contextMenu { GameContextMenu(gameID: g.id) } }
                         }
                     }
                     .navigationSplitViewColumnWidth(min: 220, ideal: 260)
                     .overlay { if library.games.isEmpty { Text("No games yet").foregroundStyle(.secondary) } }
-                    .toolbar { ToolbarItem { Button("Add a Game", systemImage: "plus") { picking = true } } }
+                    .toolbar {
+                        ToolbarItem { Button("Add a Game", systemImage: "plus") { picking = true } }
+                        ToolbarItem { Button("Beam Home", systemImage: "gamecontroller") { library.showingHome = true }.help("Beam Home: your games full screen, for a controller (⌃⌘H)") }
+                    }
                 } detail: {
                     if let id = selection, library.games.contains(where: { $0.id == id }) {
                         GameDetailView(gameID: id)
@@ -47,6 +54,40 @@ struct LibraryView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .beamAddGame)) { _ in picking = true }
         .onChange(of: library.lastAdded) { _, id in if let id { selection = id } }
+        .onChange(of: library.pageRequest) { _, id in if let id { selection = id; library.pageRequest = nil } }
+        .task(id: settings.welcomed) {   // after the welcome: What's new once per version, and the daily update check when it is on
+            guard settings.welcomed else { return }
+            if settings.whatsNewSeen != BeamUpdate.currentVersion { whatsNew = true; settings.whatsNewSeen = BeamUpdate.currentVersion }
+            await library.checkForUpdateIfDue()
+        }
+        .sheet(isPresented: $whatsNew) { WhatsNewSheet() }
+        .alert("Rename \(library.games.first { $0.id == library.renameRequest }?.title ?? "the game")",
+               isPresented: Binding(get: { library.renameRequest != nil }, set: { if !$0 { library.renameRequest = nil } })) {
+            TextField(library.games.first { $0.id == library.renameRequest }?.identity?.name ?? "Name", text: $newName)
+            Button("Rename") { if let id = library.renameRequest { library.rename(id, to: newName) }; library.renameRequest = nil }
+            Button("Cancel", role: .cancel) { library.renameRequest = nil }
+        } message: {
+            Text("The new name shows in Beam, and the app gets it at its next build. Leave it empty for the game's own name.")
+        }
+        .onChange(of: library.renameRequest) { _, id in newName = id.flatMap { i in library.games.first { $0.id == i }?.customName } ?? "" }
+        .sheet(isPresented: Binding(get: { library.settingsRequest != nil }, set: { if !$0 { library.settingsRequest = nil } })) {   // one settings sheet for the library and Beam Home
+            if let id = library.settingsRequest, let src = library.library_settingsSource(id) {
+                GameSettingsView(title: library.games.first { $0.id == id }?.title ?? "Game", source: src)
+            }
+        }
+        .safeAreaInset(edge: .top) {
+            if let r = library.updateAvailable, let u = URL(string: r.htmlUrl) {
+                HStack {
+                    Image(systemName: "arrow.down.circle").foregroundStyle(NX18Palette.coral)
+                    Text("\(r.name ?? r.tagName) is available.")
+                    Link("See the release", destination: u)
+                    Spacer()
+                    Button("Later") { library.updateAvailable = nil }
+                }
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                .background(NX18Palette.charcoal)
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .beamImportNXPlay)) { _ in importLib = NXPlayLibrary.find() }
         .sheet(isPresented: Binding(get: { importLib != nil }, set: { if !$0 { importLib = nil } })) { if let l = importLib { NXPlayImportSheet(lib: l) } }
         .alert("Make room on \(library.swapQuestion?.device.name ?? "the device")?", isPresented: Binding(get: { library.swapQuestion != nil }, set: { if !$0 { library.swapQuestion = nil } })) {
@@ -94,21 +135,34 @@ private struct GameRow: View {
 struct GameIcon: View {
     let game: LibraryGame
     let size: CGFloat
+
+    /// The game's picture: the player's own pick, else the icon of Beam's latest build, else the icon NX Play cached for the game (read only, as the build
+    /// script reads it: NXPLAY_ICONS), else none (the tile shows the name's first letter)
+    static func image(for g: LibraryGame) -> NSImage? {
+        var paths = [g.icon?.path, g.builtIcon, g.lastBuild?.icon]
+        if let tid = g.identity?.titleId.uppercased() {
+            let cache = URL.libraryDirectory.appending(path: "Caches/com.varyform.nxplay/Banners/icons/\(tid).jpg").path
+            paths.append(cache)
+        }
+        for case let p? in paths { if let i = NSImage(contentsOfFile: p) { return i } }
+        return nil
+    }
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
         Group {
-            if let path = game.lastBuild?.icon, let img = NSImage(contentsOfFile: path) {
+            if let img = GameIcon.image(for: game) {
                 Image(nsImage: img).resizable().scaledToFill()
             } else {
                 ZStack {
                     NX18Palette.charcoal
-                    Text(String(game.title.prefix(1))).font(.system(size: size * 0.45, weight: .semibold)).foregroundStyle(NX18Palette.cyan)
+                    Text(String(game.title.prefix(1))).font(.system(size: size * 0.45, weight: .semibold)).foregroundStyle(NX18Palette.accent(for: game.title))
                 }
             }
         }
         .frame(width: size, height: size)
         .clipShape(shape)
         .overlay(shape.strokeBorder(.white.opacity(0.08)))
+        .accessibilityHidden(true)   // the game's name is read beside it
     }
 }
 
@@ -117,7 +171,7 @@ private struct AddGameTile: View {
     var add: () -> Void
     var body: some View {
         VStack(spacing: 14) {
-            Image(systemName: "plus.rectangle.on.folder").font(.system(size: 44, weight: .light)).foregroundStyle(NX18Palette.cyan)
+            Image(systemName: "plus.rectangle.on.folder").font(.system(size: 44, weight: .light)).foregroundStyle(NX18Palette.brand)
             Text("Add a game").font(.title2.weight(.semibold))
             Text("Drop a folder of your game's files, a .nup or an .nx here, or choose one.\nYour legally owned and acquired game files stay where they are.")
                 .multilineTextAlignment(.center).foregroundStyle(.secondary)

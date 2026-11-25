@@ -27,6 +27,7 @@
 #include "pad_apple.h"
 #include "pad_hid_mac.h"
 #include "pad_switch2_apple.h"
+#include "front_capture.h"   // the player's screenshots (mac_capture)
 static int s2pad_player(s2_pad *d);   // the Switch 2 pads' player slots (below, beside the raw HID pads')
 static void s2pad_read(s2_pad *d);
 static void (*g_merge_sink)(const dm_haptic_state *);   // DM_PAD_MERGE: where player 1's rumble goes, the pads last used (merge_rumble_to): NULL for GameController's
@@ -254,11 +255,52 @@ static void pad_read(GCExtendedGamepad *g) {
     dm_haptics_apple_controller(p, g.controller);
     pad_set(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
 }
-// Home and Capture: without this macOS takes them as system gestures (Home opens the Games app). Capture has no function in the host, Home quits when it is held (hq_poll).
+// The player's screenshot (captures-album.md): Capture on a controller, or the app menu's Take Screenshot (⇧⌘S). front_capture.h names the file in DM_ROOT/Captures (the
+// game's Application Support folder, which Beam's Album reads) and the graphics side draws the game picture into it. A small notice shows at the window's top left for two seconds
+static NSView *g_cap_notice;
+static void mac_capture_notice(NSString *text) {
+    NSView *host = g_win.contentView; if (!host) return;
+    [g_cap_notice removeFromSuperview];
+    NSTextField *l = [NSTextField labelWithString:text];
+    l.font = dm_ui_font(14, NSFontWeightSemibold); l.textColor = NSColor.whiteColor; l.translatesAutoresizingMaskIntoConstraints = NO;
+    NSView *pill = [NSView new]; pill.wantsLayer = YES; pill.translatesAutoresizingMaskIntoConstraints = NO;
+    pill.layer.backgroundColor = [NSColor colorWithWhite:0.08 alpha:0.86].CGColor; pill.layer.cornerRadius = 12; pill.layer.cornerCurve = kCACornerCurveContinuous;
+    [pill addSubview:l]; [host addSubview:pill];
+    [NSLayoutConstraint activateConstraints:@[
+        [pill.leadingAnchor constraintEqualToAnchor:host.safeAreaLayoutGuide.leadingAnchor constant:12], [pill.topAnchor constraintEqualToAnchor:host.safeAreaLayoutGuide.topAnchor constant:10],
+        [l.leadingAnchor constraintEqualToAnchor:pill.leadingAnchor constant:14], [l.trailingAnchor constraintEqualToAnchor:pill.trailingAnchor constant:-14],
+        [l.topAnchor constraintEqualToAnchor:pill.topAnchor constant:8], [l.bottomAnchor constraintEqualToAnchor:pill.bottomAnchor constant:-8]]];
+    g_cap_notice = pill;
+    NSAccessibilityPostNotificationWithUserInfo(NSApp, NSAccessibilityAnnouncementRequestedNotification, @{NSAccessibilityAnnouncementKey: text});
+    __weak NSView *weak = pill;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        NSView *p = weak; if (!p) return;
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *c) { c.duration = 0.3; p.animator.alphaValue = 0; } completionHandler:^{ [p removeFromSuperview]; if (g_cap_notice == p) g_cap_notice = nil; }];
+    });
+}
+static void mac_capture(void) {   // main thread
+    if (!front_capture_screenshot(^(NSString *path, BOOL ok) { (void)path; mac_capture_notice(ok ? @"Screenshot saved" : @"Couldn't save the screenshot"); }))
+        LOG("capture: a screenshot is still being saved, or the Captures folder cannot be made");
+}
+// Home and Capture: without this macOS takes them as system gestures (Home opens the Games app). Capture takes a screenshot (mac_capture), Home quits when it is held (hq_poll).
 // macOS 27 respects the claim when the Home button setting for apps lets the app decide (hq_log_setting names it in the log)
+// A controller without Share may have its capture under another name (a phone-clip or third-party pad's screenshot button): any other button macOS ties to a system gesture
+// that is not one of the game's buttons (DmGamepad.m pad_capture_button, the same rule)
+static GCControllerButtonInput *pad_capture_button(GCController *c) {
+    GCPhysicalInputProfile *pr = c.physicalInputProfile;
+    if (pr.buttons[GCInputButtonShare]) return pr.buttons[GCInputButtonShare];
+    NSSet<NSString *> *game = [NSSet setWithObjects:GCInputButtonA, GCInputButtonB, GCInputButtonX, GCInputButtonY, GCInputLeftShoulder, GCInputRightShoulder, GCInputLeftTrigger,
+                               GCInputRightTrigger, GCInputButtonMenu, GCInputButtonOptions, GCInputLeftThumbstickButton, GCInputRightThumbstickButton, GCInputButtonHome, nil];
+    for (NSString *n in pr.buttons) { GCControllerButtonInput *b = pr.buttons[n]; if (b.boundToSystemGesture && ![game intersectsSet:b.aliases]) return b; }
+    return nil;
+}
 static void pad_keep_system_buttons(GCController *c) {
-    for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled;
+    for (NSString *n in c.physicalInputProfile.buttons) {
+        GCControllerButtonInput *b = c.physicalInputProfile.buttons[n];
+        if (b.boundToSystemGesture || [n isEqualToString:GCInputButtonHome] || [n isEqualToString:GCInputButtonShare]) b.preferredSystemGestureState = GCSystemGestureStateDisabled;
+    }
     c.extendedGamepad.buttonHome.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; (void)down; if (g_input_on) hq_poll(); };
+    pad_capture_button(c).pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; if (down && g_input_on && !hq_blocks_input(g_hq.phase)) mac_capture(); };
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
@@ -437,9 +479,19 @@ static void merge_rumble_to(void (*sink)(const dm_haptic_state *)) {
     g_merge_sink = sink; dm_haptics_apple_set_sink(0, sink);
 }
 static int s2pad_blocked(void) { return !g_input_on || hq_blocks_input(g_hq.phase) || cp_blocks_input(g_cp.phase); }   // no input to the game (focus lost, the Home or controller prompt up): its Joy-Con states are not sent (pad_switch2_apple.m)
+static const s2_pad *g_s2_capture_down[8];   // the Switch 2 pads whose Capture is held (dropped in s2pad_detach)
+static int s2_capture_edge(const s2_pad *d, int held) {   // 1 at the press only
+    int at = -1, free_at = -1;
+    for (int i = 0; i < 8; i++) { if (g_s2_capture_down[i] == d) at = i; else if (!g_s2_capture_down[i] && free_at < 0) free_at = i; }
+    if (!held) { if (at >= 0) g_s2_capture_down[at] = NULL; return 0; }
+    if (at >= 0) return 0;
+    if (free_at >= 0) g_s2_capture_down[free_at] = d;
+    return 1;
+}
 static void s2pad_read(s2_pad *d) {
     hq_poll();   // Home and the prompt's A and B come from these pads too
     if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
+    if (s2_capture_edge(d, s2_pad_capture(&d->st))) mac_capture();   // Capture's press: a screenshot
     int p = s2pad_player(d);
     uint64_t m; int32_t s[4]; if (!s2_pad_input(&d->st, &m, s)) return;
     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: joins at its first button
@@ -460,6 +512,7 @@ static int s2pad_attach(s2_pad *d) {   // 1: kept (a player, or waiting for its 
     return 1;
 }
 static void s2pad_detach(s2_pad *d) {   // d is already off g_s2pads
+    s2_capture_edge(d, 0);
     if (g_merge) {
         LOG("controller '%s' (Bluetooth) disconnected", d->name);
         if (!dm_switch2_pads() && g_merge_sink == dm_switch2_rumble) merge_rumble_to(NULL);
@@ -885,6 +938,12 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
 // short (section headers, labels, one row per cheat, a pair as one row, "set" cheats applied on click), the other builds'
 // files when none of this build is loaded, and Reload cheats (⌘R) / Open cheats folder. A click here also refreshes the
 // panel when one exists, so the two never disagree
+@interface DmCaptureTarget : NSObject
+@end
+@implementation DmCaptureTarget
+- (void)takeScreenshot:(id)sender { (void)sender; mac_capture(); }
+@end
+static DmCaptureTarget *g_capture_target;
 @interface DmCheatsMenuDelegate : NSObject <NSMenuDelegate>
 @end
 @implementation DmCheatsMenuDelegate
@@ -1637,6 +1696,8 @@ void front_run(void (*guest)(void)) {
         // Main menu: AppKit runs ⌘ shortcuts only through menu items, so ⌘Q quits and ⌃⌘F toggles fullscreen from here (AppKit shows the item as Globe-F and keeps ⌃⌘F as a hidden twin)
         NSMenu *bar = [NSMenu new], *app = [NSMenu new], *wm = [[NSMenu alloc] initWithTitle:@"Window"];
         [[bar addItemWithTitle:@"" action:nil keyEquivalent:@""] setSubmenu:app];
+        [app addItemWithTitle:@"Take Screenshot" action:@selector(takeScreenshot:) keyEquivalent:@"S"].target = g_capture_target = [DmCaptureTarget new];   // ⇧⌘S (the capital S adds Shift)
+        [app addItem:NSMenuItem.separatorItem];
         [app addItemWithTitle:[@"Quit " stringByAppendingString:@(DM_GAME_NAME)] action:@selector(terminate:) keyEquivalent:@"q"];
         // Cheats (hle_cheats.c): the rows rebuild on every open through the delegate, the same rows the file reload changes
         g_cheats_menu = [DmCheatsMenuDelegate new];

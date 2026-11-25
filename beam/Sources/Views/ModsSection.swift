@@ -28,8 +28,9 @@ struct ModsSection: View {
                         Text(library.sources.isEmpty ? "No mods. Add a mod source in Settings, or a mod file you got yourself." : "No mods for this game in your sources.")
                             .font(.callout).foregroundStyle(.secondary)
                     }
+                    if !library.beamKeepsMods(ident.titleId), let own = GameFolderMods.read(g.source), !own.isEmpty { gameFolderRows(own) }
                     ForEach(kept) { k in keptRow(k, g) }
-                    if g.modsChanged == true { Text("Rebuild to apply the change.").font(.callout).foregroundStyle(NX18Palette.cyan) }
+                    if g.modsChanged == true { Text("Rebuild to apply the change.").font(.callout).foregroundStyle(NX18Palette.coral) }
                     ForEach(library.offers(for: g).filter { o in !kept.contains { $0.credit?.sha256 == o.entry.sha256.lowercased() } }) { o in offerRow(o, g) }
                     Divider()
                     manualRow(g)
@@ -50,14 +51,40 @@ struct ModsSection: View {
 
     private func reload(_ tid: String) { kept = ModStore.kept(titleID: tid) }
 
+    /// The mods beside the game's files, which builds use while Beam keeps none of its own; Beam brings them in by itself before its first mod or cheat
+    private func gameFolderRows(_ own: GameFolderMods) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("From the game's mods folder").font(.callout.weight(.semibold))
+                Spacer()
+                Button("Show Folder") { NSWorkspace.shared.activateFileViewerSelecting([own.folder]) }.font(.callout)
+            }
+            ForEach(own.mods) { m in
+                HStack(spacing: 10) {
+                    Image(systemName: m.kind == .ultrawide ? "rectangle.landscape.rotate" : m.kind == .framerate ? "speedometer" : "minus.circle")
+                        .foregroundStyle(m.kind == nil ? NX18Palette.muted : m.kind == .ultrawide ? NX18Palette.coral : NX18Palette.cyan).frame(width: 20)
+                    Text(m.name)
+                    Spacer()
+                    Text(m.kind?.label ?? "Left out: only frame-rate and Ultrawide mods are packed").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if own.cheatFiles > 0 { Text("\(own.cheatFiles) cheat file\(own.cheatFiles == 1 ? "" : "s"), packed with the build").font(.caption).foregroundStyle(.secondary) }
+            Text("Builds use this folder as it is. When you add a mod or cheat in Beam, Beam brings these in too, so they stay in the build.").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
     private func keptRow(_ k: ModStore.Kept, _ g: LibraryGame) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: k.credit?.kind == .ultrawide ? "rectangle.landscape.rotate" : "speedometer").foregroundStyle(NX18Palette.cyan).frame(width: 20)
+            let kind = k.credit?.kind ?? GameFolderMods.kind(of: k.folder.lastPathComponent)
+            Image(systemName: kind == .ultrawide ? "rectangle.landscape.rotate" : kind == .framerate ? "speedometer" : "minus.circle")
+                .foregroundStyle(kind == nil ? NX18Palette.muted : kind == .ultrawide ? NX18Palette.coral : NX18Palette.cyan).frame(width: 20)
             VStack(alignment: .leading, spacing: 2) {
                 Text(k.folder.lastPathComponent)
                 if let c = k.credit {
                     Text("\(c.source == nil ? "Added by you" : "By \(c.author)") · \(c.license ?? "License not stated")\(c.version.map { " · \($0)" } ?? "")").font(.caption).foregroundStyle(.secondary)
                     if c.kind == .framerate { Text("A higher frame rate uses more battery and heat on iPhone; the launcher's High frame rate switch turns it off.").font(.caption).foregroundStyle(.secondary) }
+                } else {
+                    Text("From the game's mods folder").font(.caption).foregroundStyle(.secondary)
                 }
             }
             Spacer()
@@ -85,7 +112,7 @@ struct ModsSection: View {
 
     private func manualRow(_ g: LibraryGame) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: "book.closed").foregroundStyle(NX18Palette.cyan).frame(width: 20)
+            Image(systemName: "book.closed").foregroundStyle(NX18Palette.coral).frame(width: 20)
             VStack(alignment: .leading, spacing: 2) {
                 Text(g.manual.map { "Manual: \($0.lastPathComponent)" } ?? "Manual")
                 Text(g.manual == nil ? "The game's manual (PDF), in the app's guide window." : "Goes into the app at the next build. Keep the app to your own devices.")

@@ -182,6 +182,7 @@ int dm_cheat_flags_at(int i) { return duo_cheat_ok(i) ? g_duo_cheats[i].flags : 
 int dm_cheat_on_at(int i) { return duo_cheat_ok(i) ? g_duo_cheats[i].on : 0; }
 void dm_cheat_toggle(int i) { if (duo_cheat_ok(i) && !(g_duo_cheats[i].flags & 32)) g_duo_cheats[i].on = !g_duo_cheats[i].on; }
 void dm_cheats_reload(void) {}
+int dm_gfx_capture(const char *path, void (*done)(void *ctx, const char *path, int ok), void *ctx) { (void)path; (void)done; (void)ctx; return 0; }   // no game picture in the harness
 int dm_cheats_master(void) { return g_duo_cheats_master; }
 void dm_cheats_master_set(int on) { g_duo_cheats_master = on; }
 __thread _Atomic int dm_host_work;

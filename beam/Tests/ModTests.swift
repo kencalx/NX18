@@ -86,3 +86,32 @@ import Testing
         #expect(!r.arguments(script: URL(fileURLWithPath: "/s.py")).contains("--mods"))
     }
 }
+
+/// The mods folder beside a game's files (the build script's default): read for builds and the list, brought into Beam's folder before Beam's first own mod
+@Suite struct GameFolderModTests {
+    @Test func namesAsThePackerReadsThem() {   // dm/tools/game_mods.py role_of
+        #expect(GameFolderMods.kind(of: "[21.9 Ultrawide v1.4.0]") == .ultrawide)
+        #expect(GameFolderMods.kind(of: "60 FPS - Author") == .framerate && GameFolderMods.kind(of: "Frame rate unlock") == .framerate)
+        #expect(GameFolderMods.kind(of: "[Disable Dynamic Resolution v1.4.0]") == nil && GameFolderMods.kind(of: "[Improved Level of Detail v1.4.0]") == nil)
+    }
+    @Test func readAndBringIn() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "beam-gfm-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let game = root.appending(path: "Game"), mods = game.appending(path: "mods")
+        for (p, d) in [("game.nsp", "n"), ("mods/[21.9 Ultrawide v1.4.0]/exefs/1.4.0.pchtxt", "@nsobid-0123456789ABCDEF\n"),
+                       ("mods/[Improved Level of Detail]/exefs/1.4.0.pchtxt", "x"), ("mods/-Off mod/exefs/a.ips", "x"),
+                       ("mods/cheats/0123456789ABCDEF.txt", "[Inf]\n04000000 0 0\n"), ("mods/[21.9 Ultrawide v1.4.0]/readme.md", "r"),
+                       ("mods/[21.9 Ultrawide v1.4.0]/romfs/ui/layout.bin", "texture")] {
+            let u = game.appending(path: p); try FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true); try Data(d.utf8).write(to: u)
+        }
+        let own = try #require(GameFolderMods.read(game))
+        #expect(own.mods.map(\.name) == ["[21.9 Ultrawide v1.4.0]", "[Improved Level of Detail]"] && own.cheatFiles == 1, "a turned-off (-) folder is skipped")
+        #expect(own.mods.first?.kind == .ultrawide && own.mods.last?.kind == nil)
+        let beam = root.appending(path: "Beam")
+        let n = try own.bringIn(to: beam)
+        #expect(n == 4, "patches, the cheat file and the readme; never the romfs file")
+        #expect(!FileManager.default.fileExists(atPath: beam.appending(path: "[21.9 Ultrawide v1.4.0]/romfs/ui/layout.bin").path))
+        #expect(FileManager.default.fileExists(atPath: mods.appending(path: "[21.9 Ultrawide v1.4.0]/exefs/1.4.0.pchtxt").path), "the game's folder is left as it was")
+        #expect(GameFolderMods.read(root.appending(path: "none")) == nil)
+    }
+}

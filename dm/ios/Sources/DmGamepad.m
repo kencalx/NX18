@@ -43,6 +43,7 @@
 #include "pad_slots.h"
 #include "ctrl_prompt.h"
 #include "touch_draw.h"   // the controls drawn into the game's frame by the present (nvn_mtl.m touch_draw)
+#import "DmCapture.h"   // the Capture button takes a screenshot
 #include "pad_switch2_apple.h"   // Switch 2 controllers over Bluetooth LE, shared with the Mac front end (upstream PR #1900)
 #include <stdatomic.h>
 #import "DmLayout.h"
@@ -980,6 +981,13 @@ static BOOL pad_home(GCExtendedGamepad *g) {   // YES on Home's press, which the
     [g_view panelToggle];
     return YES;
 }
+// Capture takes a screenshot (DmCapture.m), at its press, on any controller that has the button: an extended pad's Share (Capture on Nintendo pads), a phone-clip pad's own
+// screenshot button (pad_capture_button: GameSir and the like name it otherwise) and a Switch 2 pad's Capture. The game never sees it, as on the console; a held Capture is
+// the recording's (captures-album.md, later). Its own press handler, so a button outside the extended profile is heard too
+static void pad_capture_press(GCController *c) {
+    if (g_view && !cp_up() && !g_menu_block) dm_capture_screenshot(g_view);
+    (void)c;
+}
 static BOOL pads_any_pressed(void) { for (GCController *c in GCController.controllers) if (pad_usable(c) && pad_buttons(c)) return YES; return NO; }
 static int g_merge_s2_rumble;   // DM_PAD_MERGE: player 1's rumble goes to the Switch 2 pads (merge_rumble_to_s2, upstream PR #1900)
 static void merge_rumble_to_s2(int on);
@@ -1011,11 +1019,46 @@ static void read_pad(GCController *c) {
 }
 // The controller's input handler (one per controller: the extended profile's, or a lone Joy-Con's live input's); YES when it is set now, so a controller waiting to join is
 // logged once. Home and Capture of an extended pad: without this iOS takes them as system gestures (Home opens the Games overlay, Capture a screenshot); Home opens and closes
-// the in-game panel (pad_home), Capture has no function. A lone Joy-Con's stay with the system, as upstream keeps them
+// the in-game panel (pad_home), Capture takes a screenshot (pad_claim_buttons). A lone Joy-Con's stay with the system, as upstream keeps them
+// The game buttons pad_mask reads, and Home: every other button iOS ties to a system gesture is the controller's capture button
+static BOOL pad_game_button(GCControllerElement *e) {
+    static NSSet<NSString *> *game;
+    if (!game) game = [NSSet setWithObjects:GCInputButtonA, GCInputButtonB, GCInputButtonX, GCInputButtonY, GCInputLeftShoulder, GCInputRightShoulder, GCInputLeftTrigger,
+                       GCInputRightTrigger, GCInputButtonMenu, GCInputButtonOptions, GCInputLeftThumbstickButton, GCInputRightThumbstickButton, GCInputButtonHome, nil];
+    return [game intersectsSet:e.aliases];
+}
+static GCControllerButtonInput *pad_capture_button(GCController *c) {
+    GCPhysicalInputProfile *pr = c.physicalInputProfile;
+    if (pr.buttons[GCInputButtonShare]) return pr.buttons[GCInputButtonShare];
+    for (NSString *n in pr.buttons) { GCControllerButtonInput *b = pr.buttons[n]; if (b.boundToSystemGesture && !pad_game_button(b)) return b; }
+    return nil;
+}
+// iOS's system gestures: off for Home, Share and every button iOS ties to one (a phone-clip pad's screenshot button, Options' long press), so each press is the game's or
+// NX 18's at once. Logged once per controller, with the buttons' names, so a log shows which button a new controller's capture is
+static void pad_claim_buttons(GCController *c) {
+    NSMutableArray<NSString *> *bound = [NSMutableArray array];
+    GCPhysicalInputProfile *pr = c.physicalInputProfile;
+    for (NSString *n in pr.buttons) {
+        GCControllerButtonInput *b = pr.buttons[n];
+        if (!b.boundToSystemGesture && ![n isEqualToString:GCInputButtonHome] && ![n isEqualToString:GCInputButtonShare]) continue;
+        if (b.boundToSystemGesture) [bound addObject:n];
+        b.preferredSystemGestureState = GCSystemGestureStateDisabled;
+    }
+    GCControllerButtonInput *cap = pad_capture_button(c);
+    if (cap && !cap.pressedChangedHandler) {
+        __weak GCController *weak = c;
+        cap.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; GCController *k = weak; if (down && k) pad_capture_press(k); };
+    }
+    static NSHashTable<GCController *> *said; if (!said) said = [NSHashTable weakObjectsHashTable];
+    if ([said containsObject:c]) return;
+    [said addObject:c];
+    LOG("controller '%s': system gestures off for %s; capture button: %s", pad_name(c), bound.count ? [bound componentsJoinedByString:@", "].UTF8String : "Home and Share (none bound)",
+        cap ? (cap.localizedName ?: [cap.aliases.allObjects componentsJoinedByString:@"/"]).UTF8String : "none");
+}
 static BOOL pad_listen(GCController *c) {
     GCExtendedGamepad *g = c.extendedGamepad;
     if (g) {
-        for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled;
+        pad_claim_buttons(c);
         if (g.valueChangedHandler) return NO;
         g.valueChangedHandler = ^(GCExtendedGamepad *profile, GCControllerElement *el) { (void)el; if (profile.valueChangedHandler) read_pad(profile.controller); };
         return YES;
@@ -1223,10 +1266,20 @@ static void merge_rumble_to_s2(int on) {
     g_merge_s2_rumble = on; dm_haptics_apple_set_sink(0, on ? dm_switch2_rumble : NULL);
 }
 static int s2pad_blocked(void) { return g_s2_off || cp_blocks_input(g_cp.phase); }   // no input to the game (in the background, or the controller prompt up)
+static const s2_pad *g_s2_capture_down[8];   // the Switch 2 pads whose Capture is held (a pad that goes is dropped in s2pad_detach)
+static int s2_capture_edge(const s2_pad *d, int held) {   // 1 at the press only
+    int at = -1, free_at = -1;
+    for (int i = 0; i < 8; i++) { if (g_s2_capture_down[i] == d) at = i; else if (!g_s2_capture_down[i] && free_at < 0) free_at = i; }
+    if (!held) { if (at >= 0) g_s2_capture_down[at] = NULL; return 0; }
+    if (at >= 0) return 0;
+    if (free_at >= 0) g_s2_capture_down[free_at] = d;
+    return 1;
+}
 static void s2pad_read(s2_pad *d) {
     if (g_s2_off) return;
     int p = s2pad_player(d);
     uint64_t m; int32_t st[4]; if (!s2_pad_input(&d->st, &m, st)) return;
+    if (s2_capture_edge(d, s2_pad_capture(&d->st)) && g_view && !cp_up() && !g_menu_block) dm_capture_screenshot(g_view);   // Capture's press: a screenshot (pad_capture_press)
     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button, as a GameController one does (pad_report)
         char nb[16];
         if (!g_press_to_join || !m) return;
@@ -1250,6 +1303,7 @@ static int s2pad_attach(s2_pad *d) {   // 1: kept (a player, or waiting for its 
     return 1;
 }
 static void s2pad_detach(s2_pad *d) {   // d is already off the transport's list
+    s2_capture_edge(d, 0);
     if (g_merge) { LOG("controller '%s' (Bluetooth) disconnected", d->name); if (!dm_switch2_pads()) merge_rumble_to_s2(0); dm_pad_set(0, 0, 0, 0, 0); [g_view padsChanged:nil]; return; }
     int p = pad_slot_free(&g_slots, d); char nb[16]; if (p < 0) { cp_poll(); return; }   // one that had not joined: one fewer waiting
     dm_haptics_apple_set_sink(p, NULL);

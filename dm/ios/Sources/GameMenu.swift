@@ -108,16 +108,17 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
     }
     if !placed { sections.insert(GameMenuSection(id: "section:Controls", heading: "Controls", items: [layout]), at: 0) }
     if let cheats = cheatsMenu() { sections.append(GameMenuSection(id: "section:cheats", heading: "More", items: [cheats])) }
+    let shot = GameMenuItem(id: "screenshot", title: "Take Screenshot", subtitle: "Saved in the game's Captures folder", symbol: "camera", closesMenu: true) { anchor in dm_capture_screenshot(anchor) }   // DmCapture.m: the next frame, once the panel is gone
     let share = GameMenuItem(id: "share", title: "Share log", symbol: "square.and.arrow.up", closesMenu: true) { anchor in dmShareLog(from: anchor) }
     var last: [GameMenuItem] = []
     if let m = gameMenuModel { last.append(settingsAtStartRow(m)) }
-    sections.append(GameMenuSection(id: "section:app", heading: "More", items: last + [share]))
+    sections.append(GameMenuSection(id: "section:app", heading: "More", items: [shot] + last + [share]))
     return sections
 }
 
 // The panel's first page in the Gate's language (gate-ui §19.2, presets-first §8): the preset chooser (the panel draws it from the launcher's model), the live quick tiles,
 // 3 per row (Picture, Console mode, Vitals, Game rumble, Touch controls, Controller layout: each only where the game takes it live and the list shows it), and the doors:
-// Customize (the live rows a preset sets, then the other live rows, then Back to the base while Custom), Cheats (only with a cheats folder) and More (Gate at start, Share log).
+// Customize (the live rows a preset sets, then the other live rows, then Back to the base while Custom), Cheats (only with a cheats folder) and More (Take Screenshot, Gate at start, Share log).
 // The same items as gameMenuSections (its rows, ids and actions), so a pick does what it does in the UIMenu; DM_GAME_MENU=system keeps that flat list
 struct GameMenuHome {
     var tiles: [GameMenuItem] = []
@@ -158,8 +159,8 @@ let gameMenuTileOrder = ["DM_PICTURE_FIT", "DM_OPMODE", "DM_SHOW_FPS", "DM_RUMBL
         home.doors.append(GameMenuItem(id: "door.customize", title: "Customize", subtitle: n == 1 ? "1 setting" : "\(n) settings", symbol: "slider.horizontal.3", kind: .submenu(groups)))
     }
     if let cheats = flat.first(where: { $0.id == "cheats" }) { home.doors.append(cheats) }
-    let more = flat.filter { $0.id == "atstart" || $0.id == "share" }
-    home.doors.append(GameMenuItem(id: "door.more", title: "More", subtitle: "Gate at start, Share log", symbol: "ellipsis.circle", kind: .submenu([GameMenuSection(id: "more.all", inline: false, items: more)])))
+    let more = flat.filter { $0.id == "screenshot" || $0.id == "atstart" || $0.id == "share" }
+    home.doors.append(GameMenuItem(id: "door.more", title: "More", subtitle: "Screenshot, Gate at start, Share log", symbol: "ellipsis.circle", kind: .submenu([GameMenuSection(id: "more.all", inline: false, items: more)])))
     return home
 }
 

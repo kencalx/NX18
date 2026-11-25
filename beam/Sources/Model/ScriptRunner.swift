@@ -67,6 +67,30 @@ extension ScriptRunner {
     }
 }
 
+extension ScriptRunner {
+    /// A script whose stdout is lines of its own (the setup script's JSON): each line to onLine as it comes, stderr kept
+    static func runLines(_ executable: URL, _ arguments: [String], onLog: (@Sendable (String) -> Void)? = nil, onLine: @escaping @Sendable (String) -> Void) async throws -> ScriptResult {
+        let p = Process(); p.executableURL = executable; p.arguments = arguments
+        p.environment = scriptEnvironment(ProcessInfo.processInfo.environment)
+        let out = Pipe(), err = Pipe(); p.standardOutput = out; p.standardError = err; p.standardInput = FileHandle.nullDevice
+        let box = ProcessBox(p)
+        let reader = Task.detached { for try await l in out.fileHandleForReading.bytes.lines { onLine(l) } }
+        let errReader = Task.detached { () -> String in
+            var all = ""
+            for try await l in err.fileHandleForReading.bytes.lines { onLog?(l); all += l + "\n" }
+            return all
+        }
+        let code: Int32 = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Int32, any Error>) in
+                p.terminationHandler = { c.resume(returning: $0.terminationStatus) }
+                do { try p.run() } catch { p.terminationHandler = nil; try? out.fileHandleForWriting.close(); try? err.fileHandleForWriting.close(); c.resume(throwing: error) }
+            }
+        } onCancel: { box.terminate() }
+        _ = try? await reader.value
+        return ScriptResult(exit: ScriptExit(code: code), code: code, stderr: (try? await errReader.value) ?? "", lastError: nil)
+    }
+}
+
 /// A Process for the cancel handler, which runs on another thread: terminate() only (SIGTERM)
 private final class ProcessBox: @unchecked Sendable {
     private let p: Process

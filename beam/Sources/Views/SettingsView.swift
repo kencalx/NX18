@@ -10,7 +10,7 @@ struct SettingsView: View {
     @State private var pickSpace = false
     var body: some View {
         Form {
-            Section("NX 18") { CheckoutStatus() }
+            Section("NX 18") { CheckoutStatus(); SetupPanel() }
             Section {
                 LabeledContent("Keys") {
                     HStack {
@@ -32,6 +32,10 @@ struct SettingsView: View {
                 }
             } footer: {
                 Text("Builds take several gigabytes per game. By default each game's build folder is a \"build\" folder beside its files.")
+            }
+            Section("Beam") {
+                Toggle("Check for Beam updates once a day", isOn: Binding(get: { settings.updateChecks }, set: { settings.updateChecks = $0 }))
+                Toggle("Menu sounds in Beam Home", isOn: Binding(get: { UserDefaults.standard.bool(forKey: "homeSounds") }, set: { UserDefaults.standard.set($0, forKey: "homeSounds") }))
             }
             SourcesSection()
             ArtKeySection()
@@ -63,6 +67,8 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background { NX18Glow() }   // over the window's own background, light or dark
         .task { await library.loadSigning() }
         .fileImporter(isPresented: $pickP12, allowedContentTypes: [.pkcs12]) { r in if case .success(let u) = r { Task { await library.addCertificate(u) } } }
         .fileImporter(isPresented: $pickProfile, allowedContentTypes: [.data]) { r in if case .success(let u) = r { Task { await library.addProfile(u) } } }

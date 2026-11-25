@@ -14,8 +14,11 @@ targets:
     platform: macOS
     sources:
       - path: Sources
+        type: syncedFolder   # Xcode's own folder: a new file there is in the build at once, no xcodegen run needed
       - path: Resources/Assets.xcassets
       - path: Resources/Credits.rtf
+        buildPhase: resources
+      - path: ../scripts/release/nx18-setup.sh   # NX 18's setup, which Beam runs with --json before NX 18 is on the Mac (Setup.swift)
         buildPhase: resources
       # NX 18's own UI, compiled as the Mac launcher compiles it (dm/mac/pack_app.py swift_sources, less Launcher.swift, whose MacCloud Beam's Shims.swift stands in for):
       # the look, glass, font, button glyphs, the NX 18 card and Profile, and the Gate panel they come with
@@ -66,6 +69,7 @@ targets:
     platform: macOS
     sources:
       - path: Tests
+        type: syncedFolder
     dependencies:
       - target: Beam
     settings:

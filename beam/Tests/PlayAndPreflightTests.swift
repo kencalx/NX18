@@ -102,8 +102,7 @@ import Testing
         let (app, id) = try fakeApp()
         let src = try #require(GameSettingsSource(app: app))
         defer {   // the stand-in's domain and its file, so no test leaves a preference file behind
-            UserDefaults.standard.removePersistentDomain(forName: id)
-            try? FileManager.default.removeItem(at: URL.libraryDirectory.appending(path: "Preferences/\(id).plist"))
+            ScratchPrefs.clean(id)
         }
         #expect(src.bundleID == id)
         let m = src.model()

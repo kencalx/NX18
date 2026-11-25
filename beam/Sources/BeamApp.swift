@@ -4,7 +4,25 @@ import SwiftUI
 @main
 @MainActor struct BeamApp: App {
     @NSApplicationDelegateAdaptor private var delegate: BeamDelegate
-    @State private var library = Library(settings: BeamSettings())
+    @State private var library = BeamApp.makeLibrary()
+
+    /// Beam's library and settings; when Beam is only the host of its own tests, a throwaway pair, so a test run leaves nothing in the player's preferences or
+    /// Application Support (the domain is cleared at each such launch)
+    static func makeLibrary() -> Library {
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil else {
+            return Library(settings: BeamSettings())
+        }
+        let suite = "org.nx18.beam.testhost"
+        UserDefaults.standard.removePersistentDomain(forName: suite)
+        // the scratch preferences earlier test runs left (macOS writes a removed domain's file back later): Beam's own test names only, never the player's
+        let prefs = URL.libraryDirectory.appending(path: "Preferences")
+        for f in (try? FileManager.default.contentsOfDirectory(atPath: prefs.path)) ?? [] where f.hasPrefix("org.nx18.beam.test.") && f.hasSuffix(".plist") {
+            UserDefaults.standard.removePersistentDomain(forName: String(f.dropLast(6)))
+            try? FileManager.default.removeItem(at: prefs.appending(path: f))
+        }
+        let d = UserDefaults(suiteName: suite) ?? .standard
+        return Library(settings: BeamSettings(defaults: d), folder: FileManager.default.temporaryDirectory.appending(path: "beam-testhost", directoryHint: .isDirectory))
+    }
     private var settings: BeamSettings { library.settings }
 
     var body: some Scene {
@@ -24,16 +42,17 @@ import SwiftUI
                     .disabled(NXPlayLibrary.find() == nil)
             }
             CommandGroup(after: .windowArrangement) { OpenWindowButton(title: "Storage", id: "storage") }
-            CommandGroup(after: .toolbar) { OpenWindowButton(title: "Beam Home", id: "home", fullScreen: true).keyboardShortcut("h", modifiers: [.command, .control]) }
+            CommandGroup(after: .toolbar) {
+                Button(library.showingHome ? "Show Library" : "Beam Home") { library.showingHome.toggle() }   // one window: the library and Beam Home switch in place
+                    .keyboardShortcut("h", modifiers: [.command, .control])
+            }
         }
-        Window("Beam Home", id: "home") {
-            HomeView().environment(library)
-        }
-        .defaultSize(width: 1280, height: 800)
         Window("Storage", id: "storage") {
             StorageView().environment(library).environment(settings)
         }
         .defaultSize(width: 760, height: 460)
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
         Settings {
             SettingsView()
                 .environment(settings)

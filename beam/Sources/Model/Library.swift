@@ -12,7 +12,10 @@ struct LibraryGame: Codable, Identifiable, Sendable, Equatable {
     var added = Date()
     var lastBuild: BuildRecord?
     var manual: URL?                 // the game's manual (PDF) the player added: --manual at the next build
+    var customName: String?          // the player's name for the game (Rename): Beam's library, and the app's name at the next build (--app-name)
     var modsChanged: Bool?           // a mod was added or removed since the last start from Beam: the save is backed up first (beam-design §3.6)
+    var builtIcon: String?           // the icon and key art Beam's latest build of the game reported (its game and art events), for the library and Home
+    var builtArt: String?
     var art: URL?                    // the player's picks (SteamGridDB, Art.swift): --art, --logo, --icon at the next build
     var logo: URL?
     var icon: URL?
@@ -26,7 +29,7 @@ struct LibraryGame: Codable, Identifiable, Sendable, Equatable {
         var build: String?           // main's build ID the app was packed from
         var message: String?         // the reason a failed build gave
     }
-    var title: String { identity?.name ?? source.deletingPathExtension().lastPathComponent }
+    var title: String { customName ?? identity?.name ?? source.deletingPathExtension().lastPathComponent }
 }
 
 /// One run of the script for a game: its stage, its progress and its messages, for the window to show
@@ -47,6 +50,7 @@ struct LibraryGame: Codable, Identifiable, Sendable, Equatable {
     var eta: Double?
     var messages: [SayEvent] = []
     var game: GameEvent?
+    var art: ArtEvent?
     var mods: ModsEvent?
     var warned = false
     var task: Task<Void, Never>?
@@ -61,6 +65,7 @@ struct LibraryGame: Codable, Identifiable, Sendable, Equatable {
         case .stageEnd(let s): fraction = 1; if s.warn == true { warned = true }
         case .say(let s): messages.append(s); if messages.count > 500 { messages.removeFirst(messages.count - 500) }
         case .game(let g): game = g
+        case .art(let a): art = a
         case .mods(let m): mods = m
         default: break
         }
@@ -78,6 +83,10 @@ struct LibraryGame: Codable, Identifiable, Sendable, Equatable {
     var identifying: Set<UUID> = []
     var lastError: String?
     var lastAdded: UUID?             // the window selects it (a game opened with Beam from Finder or the Dock)
+    var showingHome = false
+    var pageRequest: UUID?           // a game whose page the window should show (the right-click menu, Beam Home); LibraryView clears it
+    var settingsRequest: UUID?
+    var renameRequest: UUID?         // a game the Rename sheet is asked for       // a game whose settings sheet is asked for (the right-click menu, Beam Home's Y), shown by LibraryView          // the main window shows Beam Home (the console view) in place of the library; one window, one switch
     var batteryQuestion: PendingBuild?   // a first build asked for on battery: build now, or when plugged in (beam-design §3.3)
     var playing: UUID?               // the game playing from Beam (one at a time)
     var lastEnd: (game: UUID, message: String)?   // how the last game played from Beam ended, when it was not a plain quit
@@ -92,9 +101,11 @@ struct LibraryGame: Codable, Identifiable, Sendable, Equatable {
     var swapQuestion: SwapQuestion?
     struct SwapQuestion: Equatable { var gameID: UUID; var device: DeviceInfo; var victim: String; var victimTitle: String }
     let installsFile: URL
+    var folder: URL { installsFile.deletingLastPathComponent() }   // this library's own folder (Application Support/NX 18 Beam, or a test's)
     var sources: [SavedSource] = [] { didSet { saveSources() } }   // mod sources the player added (Mods.swift); none ship with Beam
     var sourceLists: [String: ModSource] = [:]                      // read when the player opens Mods or checks for updates
     struct SavedSource: Codable, Equatable, Identifiable { var id: String { url }; var url: String; var name: String; var maintainer: String?; var homepage: String? }
+    var updateAvailable: BeamRelease?        // a newer Beam release (Updates.swift), when the player turned the check on
     var identities: [SigningIdentity] = []   // the certificates in Beam's keychain (CertificateSigning.swift)
     var profiles: [Profile] = []
     let settings: BeamSettings
@@ -206,6 +217,11 @@ struct LibraryGame: Codable, Identifiable, Sendable, Equatable {
         } catch { result = nil; job.messages.append(SayEvent(msg: "[RED] \(error.localizedDescription)")) }
         stream.continuation.finish(); await pump.value
         job.pid = nil
+        if let i = games.firstIndex(where: { $0.id == job.gameID }) {   // the build's icon and key art, kept for the library whichever route the build was for
+            if let icon = job.game?.icon { games[i].builtIcon = icon }
+            if let art = job.art?.path { games[i].builtArt = art }
+            save()
+        }
         switch result?.exit {
         case .done?: job.state = .done
         case .interrupted?, .stopped?: job.state = .cancelled

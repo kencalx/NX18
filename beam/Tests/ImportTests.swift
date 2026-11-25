@@ -22,8 +22,7 @@ import Testing
         return (d, suite, root)
     }
     func cleanup(_ suite: String, _ root: URL) {
-        UserDefaults.standard.removePersistentDomain(forName: suite)
-        try? FileManager.default.removeItem(at: URL.libraryDirectory.appending(path: "Preferences/\(suite).plist"))
+        ScratchPrefs.clean(suite)
         try? FileManager.default.removeItem(at: root)
     }
 
@@ -40,7 +39,7 @@ import Testing
         let lib = try #require(NXPlayLibrary.find(d))
         let prefs = "org.nx18.beam.test.lib.\(UUID().uuidString.prefix(8).lowercased())"
         let beamDefaults = try #require(UserDefaults(suiteName: prefs))
-        defer { UserDefaults.standard.removePersistentDomain(forName: prefs); try? FileManager.default.removeItem(at: URL.libraryDirectory.appending(path: "Preferences/\(prefs).plist")) }
+        defer { ScratchPrefs.clean(prefs) }
         let settings = BeamSettings(defaults: beamDefaults)
         settings.nx18Folder = root.appending(path: "no-nx18-here")   // identify fails at once: this test is about adding, not reading
         let library = Library(settings: settings, folder: root.appending(path: "beam"))

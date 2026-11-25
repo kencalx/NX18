@@ -44,6 +44,7 @@ struct BuildRequest: Sendable, Equatable {
     var mods: URL?               // --mods: Beam's mods folder for the game (never the player's own mods folder beside the game files)
     var manual: URL?             // --manual: the game's manual (PDF)
     var art: URL?, logo: URL?, icon: URL?   // --art, --logo, --icon: the player's picks
+    var appName: String?         // --app-name: the player's name for the game (Rename)
     var xcode: XcodePrep?        // --prepare-xcode: an Xcode project to sign with the player's account (iPhone install, beam-design §3.4 Route A)
     struct XcodePrep: Sendable, Equatable { var bundleID: String; var teamID: String; var workspace: URL }
 
@@ -69,6 +70,7 @@ struct BuildRequest: Sendable, Equatable {
         if let art { a += ["--art", art.path] }
         if let logo { a += ["--logo", logo.path] }
         if let icon { a += ["--icon", icon.path] }
+        if let appName { a += ["--app-name", appName] }
         if let output { a += ["-o", output.path] }
         if let x = xcode {   // the workspace in the build folder, never NxNative.xcworkspace beside the player's game folder
             a += ["--prepare-xcode", "--keep-extracted", "--bundle-id", x.bundleID, "--team-id", x.teamID, "--xcode-workspace", x.workspace.path]

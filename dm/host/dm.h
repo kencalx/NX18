@@ -250,6 +250,8 @@ void dm_gfx_quit_begin(void);   // hle_nvn.c: the process is about to end (the g
 enum { DM_QUIT_ARCH_MS = 10000 };   // what any end of the process the host controls gives the pipeline archive's write (atexit, the graceful exit): a file of 900 bases took 1.8-4 s on Macs
 void dm_gfx_enter(void); void dm_gfx_leave(void);   // hle_nvn.c: the gate dm_gfx_suspend closes, entered from outside the NVN calls (the tests)
 void dm_gfx_shot_at(long k, const char *path);
+// The player's screenshot of the next present's game picture, as a PNG at path (nvn_mtl.m capture_present). 0: one is still pending, nothing queued. done(ctx, path, ok) on a background queue
+int dm_gfx_capture(const char *path, void (*done)(void *ctx, const char *path, int ok), void *ctx);
 void dm_shot_written(const char *path, int ok);   // The graphics side finished writing a screenshot to disk (diag.c: DM_TICK_HOLD=E:SHOT unfreezes on this)
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg);   // The same, then(arg) in place of the last _exit(0) (oe::ExecuteProgram: execve of the next program)
 // The start's timeline (hle_lifecycle.c, start_line.h): the "start: Play at" and "start: first frame N s after Play" lines

@@ -27,6 +27,7 @@ void dm_gamepad_active(void);
 void dm_gamepad_hint(void);   // DmGamepad.m: the menu button shows for 5 s (main thread)
 #import "DmLayout.h"
 #import "DmGameMenu.h"
+#import "DmCapture.h"
 #import "DmVitals.h"   // Vitals, the frame-rate counter grown into frame rate, CPU power, heat, battery and time
 static int front_ios_vitals_parse(const char *v);
 static int front_ios_vitals_level(void);
@@ -295,6 +296,7 @@ static const char *picture_name(DmPictureMode m) { return m == DmPictureFill ? "
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
     [self.view addSubview:self.game];
     g_layer = (CAMetalLayer *)self.game.layer;
+    dm_capture_follow_system(self.game);   // iOS's own screenshots also save the game's clean picture to Captures (DmCapture.h)
     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
     else if (front_ios_hud_enabled_from_saved_choice()) { g_layer.developerHUDProperties = @{@"mode": @"disabled"}; LOG("front end: Metal performance HUD off on the game (switched off since the launch turned it on)"); }   // main.m boot_env
     dm_haptics_apple_init();
@@ -485,6 +487,7 @@ bool dm_setting_live(const char *env, const char *value) {
     }
     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root applyVitals:front_ios_vitals_parse(value)]; return true; }
     if (!strcmp(env, "DM_TOUCH_HAPTICS")) { if (value) dm_gamepad_touch_feedback(atoi(value) != 0); return true; }
+    if (!strcmp(env, "DM_CAPTURE_SYSTEM")) { if (value) dm_capture_follow_set(atoi(value) != 0); return true; }
     if (!strcmp(env, "DM_TOUCH_SIZE") || !strcmp(env, "DM_TOUCH_OPACITY")) { if (value) { dm_gamepad_touch_look(env, value); [g_root.view setNeedsLayout]; } return true; }   // the counter follows the size
     if (!strcmp(env, "DM_PRESENT_UPSCALE")) {   // taken by the present thread (nvn_mtl.m); the drawable follows (g_upscale_metalfx)
         if (value) { mtl_present_upscale_set(value); g_upscale_metalfx = upscale_is_metalfx(value); [g_root.view setNeedsLayout]; LOG("front end: upscaling %s (in-game menu)", value); }

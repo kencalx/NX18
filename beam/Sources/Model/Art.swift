@@ -70,7 +70,10 @@ enum SteamGrid {
         let (data, resp) = try await URLSession.shared.data(for: r)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if code == 401 { throw ModError.refused("SteamGridDB did not accept the key. Check it in Settings.") }
-        guard (200..<300).contains(code) else { throw ModError.refused("SteamGridDB answered \(code).") }
+        guard (200..<300).contains(code) else {   // its own reason when it gives one ({"success": false, "errors": [...]})
+            let why = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["errors"] as? [String]
+            throw ModError.refused("SteamGridDB answered \(code)\(why.map { ": " + $0.joined(separator: " ") } ?? ".")")
+        }
         return data
     }
 
@@ -79,10 +82,15 @@ enum SteamGrid {
         return try decode(try await get("search/autocomplete/\(term)"), as: [GridGame].self)
     }
     static func images(_ kind: ArtKind, game: Int) async throws -> [GridImage] {
-        // what the build takes: key art and icon as JPEG or PNG, the logo as PNG (transparency)
-        let mimes = kind == .logo ? "image/png" : "image/png,image/jpeg"
-        let q = [URLQueryItem(name: "mimes", value: mimes)]
-        return try decode(try await get("\(kind.path)/game/\(game)", query: q), as: [GridImage].self)
+        // asked for as NX 18's own art step asks (no filter: SteamGridDB answered 400 to a mimes filter), then kept to what the build takes
+        let all = try decode(try await get("\(kind.path)/game/\(game)"), as: [GridImage].self)
+        return all.filter { usable($0, kind) }
+    }
+
+    /// What --art, --icon (JPEG or PNG) and --logo (PNG or WebP) take, by the image's file type
+    static func usable(_ img: GridImage, _ kind: ArtKind) -> Bool {
+        let ext = (URL(string: img.url)?.pathExtension ?? "").lowercased()
+        return kind == .logo ? ["png", "webp"].contains(ext) : ["png", "jpg", "jpeg"].contains(ext)
     }
 
     /// The picked image saved in Beam's Art folder for the game, as art / logo / icon with its own extension; returns where

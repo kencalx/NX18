@@ -51,7 +51,7 @@ struct GameSettingsView: View {
                       gateAtStartLocked: false, footer: AnyView(footer), acknowledgements: false, touched: { _ in }, act: act)
         }
         .frame(width: 620, height: 640)
-        .background(NX18Palette.background)
+        .background { ZStack { NX18Palette.background; NX18Glow() } }
         .environment(\.colorScheme, .dark)
         .onAppear { MacCloud.defaults = source.defaults }
         .onDisappear { m.save(); MacCloud.defaults = .standard }   // stored as the game's window stores them at Play, never set in Beam's own environment

@@ -67,3 +67,12 @@ import Testing
         #expect(ScriptRunner.scriptEnvironment(["STEAMGRIDDB_KEY": "secret", "HOME": "/h"]) == ["HOME": "/h"], "the key never reaches the build")
     }
 }
+
+@Suite struct ArtFilterTests {
+    @Test func keptToWhatTheBuildTakes() {
+        func img(_ u: String) -> GridImage { GridImage(id: 1, url: u, thumb: u, width: nil, height: nil, author: nil) }
+        #expect(SteamGrid.usable(img("https://cdn/a.png"), .icon) && SteamGrid.usable(img("https://cdn/a.jpg"), .keyArt))
+        #expect(!SteamGrid.usable(img("https://cdn/a.ico"), .icon) && !SteamGrid.usable(img("https://cdn/a.webp"), .keyArt))
+        #expect(SteamGrid.usable(img("https://cdn/a.webp"), .logo) && !SteamGrid.usable(img("https://cdn/a.jpg"), .logo))
+    }
+}

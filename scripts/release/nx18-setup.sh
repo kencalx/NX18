@@ -46,6 +46,13 @@ Options:
   --dir DIR      the NX 18 folder (default: \$NX18_DIR, else ~/NX18)
   --ref REF      the branch or tag to check out (default: \$NX18_REF, else $DEFAULT_REF),
                  e.g. a release tag
+  --json         one JSON object per line on stdout, for an app that drives the setup (NX 18 Beam):
+                 sections, items (ok / warn / missing), fixes it could make (with --check), the
+                 commands it runs (their own output goes to stderr), a stop and the end. It never
+                 asks: with --check it reports, with --yes or --only it does what those allow
+  --only LIST    do only these fixes (comma-separated: brew, clone, update, metal, ios, python,
+                 venv-remake, venv, modules) and answer no to every other; with --json or --yes
+                 nothing is asked
   -h, --help     show this help
 
 Environment: NX18_DIR and NX18_REF as the options above.
@@ -56,12 +63,17 @@ EOF
 
 CHECK=0
 YES=0
+JSON=0
+ONLY=""
 DIR="${NX18_DIR:-$HOME/NX18}"
 REF="${NX18_REF:-$DEFAULT_REF}"
 while [ $# -gt 0 ]; do
     case "$1" in
         --check) CHECK=1 ;;
         -y|--yes) YES=1 ;;
+        --json) JSON=1 ;;
+        --only) [ $# -ge 2 ] || { echo "--only needs a list of fixes" >&2; exit 2; }; ONLY="$2"; shift ;;
+        --only=*) ONLY="${1#--only=}" ;;
         --dir) [ $# -ge 2 ] || { echo "--dir needs a folder" >&2; exit 2; }; DIR="$2"; shift ;;
         --dir=*) DIR="${1#--dir=}" ;;
         --ref|--tag|--branch) [ $# -ge 2 ] || { echo "$1 needs a branch or tag name" >&2; exit 2; }; REF="$2"; shift ;;
@@ -83,22 +95,36 @@ case "$REF" in ""|-*|*" "*|*..*) echo "--ref: not a branch or tag name: '$REF'" 
 if [ -t 1 ]; then B=$'\033[1m'; G=$'\033[32m'; Y=$'\033[33m'; R=$'\033[31m'; N=$'\033[0m'; else B=; G=; Y=; R=; N=; fi
 SUMMARY=""                           # one line per item: "ok|missing|warn<TAB>text"
 MISSING=0
-section() { printf '\n%s== %s ==%s\n' "$B" "$1" "$N"; }
-ok()      { printf '  %sok%s       %s\n' "$G" "$N" "$1"; SUMMARY="${SUMMARY}ok	$1
+# --json: one object per line (jstr escapes a string for JSON without needing Python, which may not be there yet)
+jstr() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\t'/\\t}"; s="${s//$'\n'/\\n}"; s="${s//$'\r'/}"; printf '"%s"' "$s"; }
+jev() { [ "$JSON" = 1 ] && printf '%s\n' "$1"; return 0; }
+if [ "$JSON" = 1 ]; then B=; G=; Y=; R=; N=; fi
+section() { if [ "$JSON" = 1 ]; then jev "{\"ev\":\"section\",\"name\":$(jstr "$1")}"; return; fi; printf '\n%s== %s ==%s\n' "$B" "$1" "$N"; }
+item()    { jev "{\"ev\":\"item\",\"state\":\"$1\",\"text\":$(jstr "$2")}"; }
+ok()      { if [ "$JSON" = 1 ]; then item ok "$1"; else printf '  %sok%s       %s\n' "$G" "$N" "$1"; fi; SUMMARY="${SUMMARY}ok	$1
 "; }
-warn()    { printf '  %swarning%s  %s\n' "$Y" "$N" "$1"; SUMMARY="${SUMMARY}warn	$1
+warn()    { if [ "$JSON" = 1 ]; then item warn "$1"; else printf '  %swarning%s  %s\n' "$Y" "$N" "$1"; fi; SUMMARY="${SUMMARY}warn	$1
 "; }
-missing() { printf '  %smissing%s  %s\n' "$R" "$N" "$1"; SUMMARY="${SUMMARY}missing	$1
+missing() { if [ "$JSON" = 1 ]; then item missing "$1"; else printf '  %smissing%s  %s\n' "$R" "$N" "$1"; fi; SUMMARY="${SUMMARY}missing	$1
 "; MISSING=$((MISSING + 1)); }
-info()    { printf '           %s\n' "$1"; }
-stop()    { printf '\n%sstopped:%s %s\n' "$R" "$N" "$1" >&2; shift; for l in "$@"; do printf '  %s\n' "$l" >&2; done; exit 1; }
+info()    { if [ "$JSON" = 1 ]; then jev "{\"ev\":\"info\",\"text\":$(jstr "$1")}"; return; fi; printf '           %s\n' "$1"; }
+stop()    {
+    if [ "$JSON" = 1 ]; then local m="$1" d="" l; shift; for l in "$@"; do d="$d${d:+,}$(jstr "$l")"; done; jev "{\"ev\":\"stop\",\"msg\":$(jstr "$m"),\"detail\":[$d]}"; exit 1; fi
+    printf '\n%sstopped:%s %s\n' "$R" "$N" "$1" >&2; shift; for l in "$@"; do printf '  %s\n' "$l" >&2; done; exit 1; }
 
-# ask "question": 0 = yes. --yes answers yes, --check answers no without asking. The answer is read from
-# the terminal (also when the script itself arrives on stdin), else from stdin; no answer means no.
+# ask ID "question": 0 = yes. --check answers no without asking (with --json it names the fix: a fixable event); --only answers yes
+# to the fixes it lists and no to the others; --yes answers yes; --json alone answers no. Otherwise the answer is read from the terminal
+# (also when the script itself arrives on stdin), else from stdin; no answer means no.
 ask() {
-    local answer=""
-    if [ "$CHECK" = 1 ]; then return 1; fi
-    if [ "$YES" = 1 ]; then printf '  %s yes (--yes)\n' "$1"; return 0; fi
+    local id="$1" answer=""; shift
+    if [ "$CHECK" = 1 ]; then jev "{\"ev\":\"fixable\",\"id\":\"$id\",\"question\":$(jstr "$1")}"; return 1; fi
+    if [ -n "$ONLY" ]; then
+        case ",$ONLY," in *",$id,"*) answer=yes ;; *) answer=no ;; esac
+        if [ "$JSON" = 1 ]; then jev "{\"ev\":\"ask\",\"id\":\"$id\",\"question\":$(jstr "$1"),\"answer\":\"$answer\"}"; else printf '  %s %s (--only)\n' "$1" "$answer"; fi
+        [ "$answer" = yes ]; return
+    fi
+    if [ "$YES" = 1 ]; then if [ "$JSON" = 1 ]; then jev "{\"ev\":\"ask\",\"id\":\"$id\",\"question\":$(jstr "$1"),\"answer\":\"yes\"}"; else printf '  %s yes (--yes)\n' "$1"; fi; return 0; fi
+    if [ "$JSON" = 1 ]; then jev "{\"ev\":\"ask\",\"id\":\"$id\",\"question\":$(jstr "$1"),\"answer\":\"no\"}"; return 1; fi
     printf '  %s [y/N] ' "$1"
     if [ -t 0 ]; then
         IFS= read -r answer || answer=""
@@ -112,7 +138,9 @@ ask() {
 }
 
 # run a command the user approved, showing it first
-run() { printf '  $'; printf ' %q' "$@"; printf '\n'; "$@"; }
+run() {
+    if [ "$JSON" = 1 ]; then jev "{\"ev\":\"run\",\"cmd\":$(jstr "$(printf '%q ' "$@")")}"; "$@" >&2; return; fi   # the command's own output to stderr: stdout stays JSON
+    printf '  $'; printf ' %q' "$@"; printf '\n'; "$@"; }
 
 ver_ge() {   # ver_ge 27.3.1 27.3: numeric, dot by dot
     local a="$1" b="$2" x y
@@ -132,8 +160,11 @@ same_series() { case "$1" in "$2"|"$2".*) return 0 ;; *) return 1 ;; esac; }   #
 export HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 git_ro() { git -C "$DIR" --no-optional-locks "$@"; }    # read-only git: does not even refresh the index
 
+if [ "$JSON" = 1 ]; then jev "{\"ev\":\"start\",\"dir\":$(jstr "$DIR"),\"ref\":$(jstr "$REF"),\"check\":$([ "$CHECK" = 1 ] && echo true || echo false)}"
+else
 printf '%sNX 18 setup%s%s\n' "$B" "$N" "$([ "$CHECK" = 1 ] && echo ' (--check: nothing is installed, downloaded or changed)')"
 printf 'folder: %s   ref: %s\n' "$DIR" "$REF"
+fi
 
 # ---- 1. the Mac --------------------------------------------------------------------------------
 section "Mac"
@@ -263,7 +294,7 @@ for t in $BREW_TOOLS; do
 done
 WANT="${WANT# }"
 if [ -n "$WANT" ]; then
-    if [ -n "$BREW" ] && ask "Install $WANT with Homebrew?"; then
+    if [ -n "$BREW" ] && ask brew "Install $WANT with Homebrew?"; then
         # shellcheck disable=SC2086 # the tool names are words
         run "$BREW" install $WANT || warn "brew install $WANT failed"
     fi
@@ -338,7 +369,8 @@ case "$REPO_STATE" in
     absent|empty)
         if [ "$CHECK" = 1 ]; then
             missing "the NX 18 checkout in $DIR (this script clones it)"
-        elif ask "Clone $REPO_URL ($REF) into $DIR (a few hundred MB)?"; then
+            ask clone "Clone $REPO_URL ($REF) into $DIR (a few hundred MB)?" || true   # --check: answers no; with --json it names the fix
+        elif ask clone "Clone $REPO_URL ($REF) into $DIR (a few hundred MB)?"; then
             run git clone --branch "$REF" "$REPO_URL" "$DIR" || stop "git clone failed (is '$REF' a branch or tag of $REPO_URL?)"
             repo_state
             ok "cloned: $(describe_head)"
@@ -349,7 +381,7 @@ case "$REPO_STATE" in
         ok "$DIR is a clean clone: $(describe_head)"
         if [ "$CHECK" = 1 ]; then
             info "(--check does not contact GitHub; run without --check to update to the newest $REF)"
-        elif ask "Fetch from GitHub and update $DIR to the newest $REF?"; then
+        elif ask update "Fetch from GitHub and update $DIR to the newest $REF?"; then
             run git -C "$DIR" fetch --tags origin || stop "git fetch failed: check the network and run this again."
             cur="$(git_ro symbolic-ref -q --short HEAD 2>/dev/null || true)"
             if git_ro show-ref --verify --quiet "refs/remotes/origin/$REF"; then
@@ -406,7 +438,7 @@ section "Metal toolchain"
 if [ -n "$DEV" ]; then
     m="$(metal_of "$DEV" macosx)"
     if [ -z "$m" ]; then
-        if ask "The Metal toolchain of $(basename "$XCODE_APP") is not installed. Download it from Apple now (about 700 MB)?"; then
+        if ask metal "The Metal toolchain of $(basename "$XCODE_APP") is not installed. Download it from Apple now (about 700 MB)?"; then
             run env DEVELOPER_DIR="$DEV" xcodebuild -downloadComponent MetalToolchain || warn "the Metal toolchain download failed"
             m="$(metal_of "$DEV" macosx)"
         fi
@@ -424,7 +456,7 @@ if [ -n "$DEV" ]; then
     if DEVELOPER_DIR="$DEV" xcrun -sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
         ok "iOS platform (for iPhone and iPad builds)"
     else
-        if ask "Xcode's iOS platform is not installed; iPhone and iPad builds need it (Mac apps do not). Download it from Apple now (several GB)?"; then
+        if ask ios "Xcode's iOS platform is not installed; iPhone and iPad builds need it (Mac apps do not). Download it from Apple now (several GB)?"; then
             run env DEVELOPER_DIR="$DEV" xcodebuild -downloadPlatform iOS || warn "the iOS platform download failed"
         fi
         if DEVELOPER_DIR="$DEV" xcrun -sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
@@ -456,7 +488,7 @@ find_python() {
 }
 PY="$(find_python || true)"
 if [ -z "$PY" ] && [ -n "$BREW" ]; then
-    if ask "No arm64 Python 3.12 or newer was found (macOS's own python3 is too old). Install Python with Homebrew?"; then
+    if ask python "No arm64 Python 3.12 or newer was found (macOS's own python3 is too old). Install Python with Homebrew?"; then
         run "$BREW" install python || warn "brew install python failed"
         PY="$(find_python || true)"
     fi
@@ -485,11 +517,11 @@ print(" ".join(bad))
 '
 if [ "$HAVE_REPO" = 1 ] || [ -d "$VENV" ]; then
     if [ -d "$VENV" ] && ! py_ok "$VPY"; then
-        if [ -n "$PY" ] && ask "The virtualenv in $VENV does not run (its Python was updated or removed). Make it again with $PY?"; then
+        if [ -n "$PY" ] && ask venv-remake "The virtualenv in $VENV does not run (its Python was updated or removed). Make it again with $PY?"; then
             run "$PY" -m venv --clear "$VENV" || warn "making the virtualenv failed"
         fi
     elif [ ! -d "$VENV" ] && [ -n "$PY" ]; then
-        if ask "Make a Python virtualenv for NX 18 in $VENV (the modules go there, not into your system Python)?"; then
+        if ask venv "Make a Python virtualenv for NX 18 in $VENV (the modules go there, not into your system Python)?"; then
             run "$PY" -m venv "$VENV" || warn "making the virtualenv failed"
         fi
     fi
@@ -497,7 +529,7 @@ if [ "$HAVE_REPO" = 1 ] || [ -d "$VENV" ]; then
         ok "virtualenv $VENV ($(py_desc "$VPY"))"
         bad="$("$VPY" -c "$MODCHECK" 2>/dev/null || echo '?')"
         if [ -n "$bad" ]; then
-            if ask "Install the Python modules NX 18 needs into the virtualenv (missing: $bad) with pip?"; then
+            if ask modules "Install the Python modules NX 18 needs into the virtualenv (missing: $bad) with pip?"; then
                 run "$VPY" -m pip install "${PY_MODULES_PIP[@]}" || warn "pip install failed"
                 bad="$("$VPY" -c "$MODCHECK" 2>/dev/null || echo '?')"
             fi
@@ -518,6 +550,7 @@ else
 fi
 
 # ---- summary -----------------------------------------------------------------------------------
+if [ "$JSON" = 1 ]; then jev "{\"ev\":\"done\",\"ready\":$([ "$MISSING" -eq 0 ] && echo true || echo false),\"missing\":$MISSING,\"dir\":$(jstr "$DIR")}"; [ "$MISSING" -eq 0 ]; exit; fi
 section "Summary"
 printf '%s' "$SUMMARY" | while IFS='	' read -r kind text; do
     case "$kind" in

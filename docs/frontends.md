@@ -34,6 +34,29 @@ A front end ignores an event it does not know, and a field it does not know in a
 
 The exit code is 0 for a finished build, 1 for a build that stopped on an error (its last `say` says why, starting with `[RED] `; an unexpected error also prints its traceback on stderr), 2 for invalid command-line arguments, 130 when interrupted, 129 when the terminal it runs in closed (SIGHUP, stopped as for SIGTERM), and 143 when stopped by SIGTERM (a front end's cancel: as for an interrupt, the running tool and everything it started get the signal first, and what is left of them 5 seconds later is killed; [Stopping a build left its tools running](reference/packing.md#stopping-a-build-left-its-tools-running)). Argument parsing happens before JSON mode starts: an argument error writes its usage and error to stderr and emits no JSON events. A front end must check the process's exit status and capture stderr as well as the JSON stream. Each tool's full output goes to `<NSP folder>/<title ID>_build/logs/`, not to stdout. The build folder `<title ID>_build/` keeps what the next build can reuse, so a second build after a change takes a fraction of the first. A front end that keeps each game's build elsewhere passes `--work-dir <folder>`: that folder is the build folder, used as given (the script does not add `<title ID>_build`), so the front end names it per game; the logs are in its `logs/`, and the provisional profile of a game without one in `profile/`, so a front end that reuses the folder for a game keeps its profile (one from an earlier run in `<NSP folder>/<title ID>_build/profile` is copied there once, and stays). Without `-o`, the IPA or Mac app goes to the folder holding it, so give `-o` to put it somewhere else.
 
+## Setting up a Mac
+
+`scripts/release/nx18-setup.sh` gets a Mac ready to build. It checks the Mac and Xcode, installs the Homebrew tools and the Python modules, and clones or updates NX 18. A front end that does this for the player runs it with `--json`:
+
+- **Output:** one JSON object per line on stdout. The output of the commands it runs goes to stderr.
+- **No prompts:** with `--json` the script never asks anything. It answers no unless told otherwise.
+
+| `ev` | Fields | When |
+|---|---|---|
+| `start` | `dir`, `ref`, `check` | first |
+| `section` | `name` | a group of checks begins |
+| `item` | `state` (`ok`, `warn` or `missing`), `text` | a check's result |
+| `fixable` | `id`, `question` | with `--check`: a fix the script could make, with the question it would ask |
+| `ask` | `id`, `question`, `answer` (`yes` or `no`) | without `--check`: the answer `--only` or `--yes` gave |
+| `run` | `cmd` | a command it runs |
+| `info` | `text` | a note for the player |
+| `stop` | `msg`, `detail` | it stopped (a folder with the player's own work, a failed download), exit code 1 |
+| `done` | `ready`, `missing`, `dir` | last: exit code 0 when ready, else 1 |
+
+A front end runs `--check --json` and shows the items and fixes. For each fix the player approves, it runs `--json --only <id>[,<id>…]` (`brew`, `clone`, `update`, `metal`, `ios`, `python`, `venv-remake`, `venv`, `modules`), then checks again: a clone makes the virtualenv and modules fixable.
+
+The script never uses sudo, and never changes a folder that holds the player's own work. Xcode itself is the player's own download from Apple. NX 18 Beam works this way; the script stays usable on its own in Terminal, with the same steps.
+
 ## The settings list
 
 A built app carries the settings its game supports, as the iPhone app's settings screen shows them ([Settings](settings.md)): `dm/launcher.json` in the app inside an IPA, `Contents/Resources/dm/launcher.json` in a Mac app. The Mac app's list leaves out the settings only the iPhone app reads (the frame-rate counter, touch feedback). `dm/games/settings.py` writes it from `dm/games/settings.tsv`, whose header describes the rows. Breath of the Wild's Mac list, shortened:

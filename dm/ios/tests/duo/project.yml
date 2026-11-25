@@ -42,6 +42,7 @@ targets:
       - path: ../../Sources/DmGamepad.m
       - path: ../../Sources/front_ios.m
       - path: ../../Sources/DmVitals.m                 # Vitals over the picture and the in-game menu's header line (vitals.md)
+      - path: ../../Sources/DmCapture.m                # the Capture button's and the in-game menu's screenshot notice (the graphics side is a stub here)
     dependencies:
       - sdk: UIKit.framework
       - sdk: GameController.framework

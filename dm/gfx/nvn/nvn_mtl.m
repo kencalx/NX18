@@ -15,6 +15,7 @@
 #include <sys/resource.h>   // RLIMIT_MEMLOCK, for a refused mlock (fwire_lock)
 #include <sys/sysctl.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <sys/file.h>   // flock: the lock beside Metal's build folders (ga_claim)
 #include <TargetConditionals.h>
 #if TARGET_OS_OSX
@@ -175,7 +176,13 @@ static dispatch_queue_t g_feedback_q;
 static gd_busy g_gpu_busy;
 // Seconds on the CACurrentMediaTime base; g_feedback_q only. An interval ending after the handler runs (beyond a second) or longer than a minute is a bad time, not GPU work, and
 // is left out (gd_busy_add_checked): counted, its end would hide every later interval for the rest of the run
-static inline void gpu_busy_note(double g0, double g1) { if (g0 > 0 && g1 > g0) gd_busy_add_checked(&g_gpu_busy, (uint64_t)(g0 * 1e9), (uint64_t)(g1 * 1e9), (uint64_t)(CACurrentMediaTime() * 1e9)); }
+// Valid completed GPU interval from Metal feedback: finite, positive, ordered, and already elapsed on Metal's clock.
+// Missing start times (0, Big Brain Academy) or faulted command buffers (unwritten UINT64_MAX tick sentinel ≈ 6.15e9 s
+// on Apple Silicon's 125/3 timebase) would otherwise poison frame/upload durations, spans, mtl_gpu_done, and integer casts.
+static inline int gpu_time_valid(double g0, double g1) {
+    return isfinite(g0) && isfinite(g1) && g0 > 0 && g1 > g0 && g1 <= CACurrentMediaTime();
+}
+static inline void gpu_busy_note(double g0, double g1) { if (gpu_time_valid(g0, g1)) gd_busy_add_checked(&g_gpu_busy, (uint64_t)(g0 * 1e9), (uint64_t)(g1 * 1e9), (uint64_t)(CACurrentMediaTime() * 1e9)); }
 uint64_t mtl_gpu_busy_ns(void) { return gd_busy_ns(&g_gpu_busy); }   // the Metal 4 queue's GPU busy time so far, in ns (hle_nvn.c power_line, any thread)
 static _Atomic uint32_t g_present_qos;
 #define ALLOC_MAX 8
@@ -4392,8 +4399,8 @@ static void gpu_tag_begin(uint64_t f) {
 static void gpu_tag_done(uint64_t f, double g0, double g1) {
     unsigned k = f % GRING;
     if (atomic_load(&g_gpu[k].frame) != f) return;
-    double d = g1 - g0;
-    if (d > 0 && g0 > 0) {   // a command buffer can complete with no start time (0, while a movie's frames upload each frame in Big Brain Academy: Brain vs. Brain), and its span would be the whole clock
+    if (gpu_time_valid(g0, g1)) {   // no start time (0, Big Brain Academy's movie uploads), a faulted buffer's unwritten tick, or a time ahead of now adds nothing (upstream 99ae7c6fc)
+        double d = g1 - g0;
         atomic_fetch_add(&g_gpu[k].ns, (uint64_t)(d * 1e9));
         uint64_t s0 = (uint64_t)(g0 * 1e9), s1 = (uint64_t)(g1 * 1e9), v;
         for (v = atomic_load(&g_gpu[k].t0); s0 < v && !atomic_compare_exchange_weak(&g_gpu[k].t0, &v, s0);) {}
@@ -6343,7 +6350,7 @@ static _Atomic uint64_t g_dz_up[DZ_N];
 // An upload batch's GPU time from its feedback (GPUStartTime, GPUEndTime, seconds) → seconds, or -1 when not known: a start of 0 (not set), an end before the start, or a span of 10 s
 // or more. Ocarina of Time's 'depth zero:' lines in iPhone test 3 read 4000000.0 ms (a start of 0: the end's whole uptime, cut at the 4e9 us the low half holds) and 171810.0 ms
 // (a start left over from earlier) for batches the frames around them show took a few ms
-static double up_gpu_secs(double g0, double g1) { return g0 > 0 && g1 >= g0 && g1 - g0 < 10.0 ? g1 - g0 : -1; }
+static double up_gpu_secs(double g0, double g1) { return gpu_time_valid(g0, g1) && g1 - g0 < 10.0 ? g1 - g0 : -1; }
 // The batch numbered seq completed with that feedback: its GPU time into g_upload_gpu_ns (the timing line's @upload_gpu_ms) and into a waiting 'depth zero:' note on its batch
 // (dz_tick); a time not known adds nothing and leaves the note's low half 0, which the line prints as "not known"
 static void up_gpu_note(unsigned seq, double g0, double g1) {
@@ -15015,19 +15022,99 @@ static NSString *ga_dir(void) {
     return dir;
 }
 static int ga_own(void) { return NSBundle.mainBundle.bundleIdentifier.length > 0 && ga_dir() != nil; }   // the folder is this game's app's, not every program's
-static NSSet<NSString *> *ga_list(NSString *dir) {
-    NSArray<NSString *> *a = dir ? [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] : nil;
-    return [NSSet setWithArray:[a filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self BEGINSWITH 'gpuarchiver-'"]] ?: @[]];
+// Each snapshotted gpuarchiver-* directory carries its (dev, ino) identity so background removal never deletes a file, symlink, or replacement directory with the same name.
+@interface GaDir : NSObject { @public NSString *name; dev_t dev; ino_t ino; } @end
+@implementation GaDir @end
+static NSArray<GaDir *> *ga_list(NSString *dir) {
+    if (!dir) return @[];
+    int dfd = open(dir.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dfd < 0) return @[];
+    DIR *dp = fdopendir(dfd);
+    if (!dp) { close(dfd); return @[]; }
+    int rfd = dirfd(dp);
+    NSMutableArray<GaDir *> *out = [NSMutableArray array];
+    struct dirent *de;
+    while ((de = readdir(dp))) {
+        if (strncmp(de->d_name, "gpuarchiver-", 12)) continue;
+        struct stat st;
+        if (fstatat(rfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) || !S_ISDIR(st.st_mode)) continue;   // skip files and symlinks; Metal's state is a directory
+        NSString *name = [NSFileManager.defaultManager stringWithFileSystemRepresentation:de->d_name length:strlen(de->d_name)];
+        if (!name) continue;
+        GaDir *g = [GaDir new]; g->name = name; g->dev = st.st_dev; g->ino = st.st_ino;
+        [out addObject:g];
+    }
+    closedir(dp);
+    return out;
+}
+// Recursively empty an already-opened directory fd without following symlinks; always consumes fd. Returns 1 when every entry was removed (or already gone).
+static int ga_rmtree_fd(int fd, int depth) {
+    if (depth > 64) { close(fd); return 0; }
+    DIR *dp = fdopendir(fd);
+    if (!dp) { close(fd); return 0; }
+    int dfd = dirfd(dp), ok = 1;
+    for (;;) {
+        int saw = 0, unlinked = 0;
+        struct dirent *de;
+        while ((de = readdir(dp))) {
+            if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+            saw = 1;
+            struct stat st;
+            if (fstatat(dfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW)) {
+                if (errno != ENOENT) ok = 0;
+                continue;
+            }
+            if (S_ISDIR(st.st_mode)) {
+                int sub = openat(dfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                if (sub < 0) {
+                    if (errno != ENOENT) ok = 0;
+                    continue;
+                }
+                if (!ga_rmtree_fd(sub, depth + 1)) ok = 0;
+                if (!unlinkat(dfd, de->d_name, AT_REMOVEDIR)) unlinked = 1;
+                else if (errno != ENOENT) ok = 0;
+            } else {
+                if (!unlinkat(dfd, de->d_name, 0)) unlinked = 1;
+                else if (errno != ENOENT) ok = 0;
+            }
+        }
+        if (!saw || !unlinked) break;
+        rewinddir(dp);
+    }
+    closedir(dp);
+    return ok;
+}
+static int ga_remove(NSString *dir, NSArray<GaDir *> *old) {
+    if (!dir || !old.count) return 0;
+    int dfd = open(dir.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dfd < 0) return 0;
+    int removed = 0;
+    for (GaDir *g in old) {
+        const char *name = g->name.fileSystemRepresentation;
+        if (!name || strncmp(name, "gpuarchiver-", 12) || strchr(name, '/')) continue;
+        int cfd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (cfd < 0) continue;   // gone, or replaced by a file or symlink
+        struct stat st;
+        if (fstat(cfd, &st) || !S_ISDIR(st.st_mode) || st.st_dev != g->dev || st.st_ino != g->ino) {
+            close(cfd);   // replaced by a different directory with the same name
+            continue;
+        }
+        if (!ga_rmtree_fd(cfd, 0)) continue;   // consumes cfd
+        // Recheck (dev, ino) before removing the directory entry itself; AT_REMOVEDIR also refuses non-empty dirs, files, and symlinks.
+        if (fstatat(dfd, name, &st, AT_SYMLINK_NOFOLLOW) || !S_ISDIR(st.st_mode) || st.st_dev != g->dev || st.st_ino != g->ino) continue;
+        if (!unlinkat(dfd, name, AT_REMOVEDIR)) removed++;
+    }
+    close(dfd);
+    return removed;
 }
 // The lock beside dir, held shared from here on through *fd (left open for the run: the lock ends with the process, a forked child sharing it). → the folders of earlier runs
 // to remove, when no other copy holds the lock; nil otherwise. Listed under the exclusive lock, before this process makes a serializer: a copy starting meanwhile waits for the
 // listing at its shared lock, so no folder of a running copy is ever among them. A copy that cannot take the lock at all removes nothing and goes on unprotected
-static NSSet<NSString *> *ga_claim(NSString *dir, int *fd) {
+static NSArray<GaDir *> *ga_claim(NSString *dir, int *fd) {
     *fd = -1;
     if (!dir || ![NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil]) return nil;
     int f = open([dir.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"gpuarchiver.lock"].fileSystemRepresentation, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (f < 0) return nil;
-    NSSet<NSString *> *old = flock(f, LOCK_EX | LOCK_NB) ? nil : ga_list(dir);
+    NSArray<GaDir *> *old = flock(f, LOCK_EX | LOCK_NB) ? nil : ga_list(dir);
     int r; while ((r = flock(f, LOCK_SH)) && errno == EINTR) {}   // from the exclusive lock, or after a starting copy's listing
     if (r) { close(f); return nil; }
     *fd = f;
@@ -15459,11 +15546,11 @@ static void pso4_init_once(void) {
             g_arch_q = dispatch_queue_create("dm.nvn.pso-archive", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
             g_arch_pending = dispatch_group_create();
             if (ga_own()) {   // before the first serializer (ep_new below): this run's folder is never among them
-                static int lock_fd; NSString *gd = ga_dir(); NSSet<NSString *> *old = ga_claim(gd, &lock_fd);
+                static int lock_fd; NSString *gd = ga_dir(); NSArray<GaDir *> *old = ga_claim(gd, &lock_fd);
                 if (lock_fd < 0) MLOG("[RED] pipeline archive: no lock beside %s: Metal's build folders there are left alone this run, and this run's may go with another copy's start", gd.UTF8String);
                 else if (!old) MLOG("pipeline archive: another copy of this app is running: Metal's build folders in %s are left alone", gd.UTF8String);
                 if (old.count) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                    uint64_t t0 = bp_now(); int n = 0; for (NSString *name in old) n += [NSFileManager.defaultManager removeItemAtPath:[gd stringByAppendingPathComponent:name] error:nil];
+                    uint64_t t0 = bp_now(); int n = ga_remove(gd, old);
                     MLOG("pipeline archive: %d of %lu of Metal's build folders left by earlier runs removed from %s in %.1f s", n, (unsigned long)old.count, gd.UTF8String, (bp_now() - t0) / 1e9);
                 });
             }
@@ -25115,9 +25202,12 @@ static int present_offscreen_wait(id<MTLTexture> src, const int crop[4], id<MTLT
 // with the same encoding as the present into an offscreen texture of the view's size, and after the GPU finishes hands out a CGImage in the completion callback. Guarded by g_shotq_mu
 static void (^g_grab_cb)(CGImageRef img);
 void mtl_grab_next_present(void (^cb)(CGImageRef img)) { pthread_mutex_lock(&g_shotq_mu); g_grab_cb = [cb copy]; pthread_mutex_unlock(&g_shotq_mu); }
+static void grab_present_to(id<MTLTexture> src, const int crop[4], CGSize sz, void (^cb)(CGImageRef img));
 static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
     pthread_mutex_lock(&g_shotq_mu); void (^cb)(CGImageRef) = g_grab_cb; g_grab_cb = nil; pthread_mutex_unlock(&g_shotq_mu);
-    if (!cb) return;
+    if (cb) grab_present_to(src, crop, sz, cb);
+}
+static void grab_present_to(id<MTLTexture> src, const int crop[4], CGSize sz, void (^cb)(CGImageRef img)) {
     size_t w = (size_t)sz.width, h = (size_t)sz.height, row = w * 4;
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:w height:h mipmapped:NO];
     d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
@@ -25139,6 +25229,52 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
             CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs); });
     };
     if (!present_offscreen_m4(src, crop, out, ^(int ok) { dispatch_async(res_commit_q(), ^{ @autoreleasepool { readback(ok); } }); })) cb(NULL);
+}
+// The player's screenshot (the Capture button, the in-game menu's Take Screenshot; front_capture.h names the file): the next present's game picture, drawn offscreen as the
+// present draws it (the same upscale, Sharpening and edge smoothing) but without the touch controls, at the size it has on the screen (the crop's shape fitted in the
+// drawable), then a PNG written beside the path and renamed onto it, so a folder watcher (iCloud Drive, Beam) never sees half a file. The present thread only encodes; the
+// readback and the PNG are off it. One at a time: 0 while one is pending. done(ctx, path, ok) comes on a background queue. Guarded by g_shotq_mu
+static struct { int pending; char path[1024];   // pending: 1 asked for, 2 being drawn and written
+    void (*done)(void *ctx, const char *path, int ok); void *ctx; } g_pshot;
+int dm_gfx_capture(const char *path, void (*done)(void *ctx, const char *path, int ok), void *ctx) {
+    pthread_mutex_lock(&g_shotq_mu);
+    int ok = !g_pshot.pending && path && strlen(path) < sizeof g_pshot.path;
+    if (ok) { g_pshot.pending = 1; strlcpy(g_pshot.path, path, sizeof g_pshot.path); g_pshot.done = done; g_pshot.ctx = ctx; }
+    pthread_mutex_unlock(&g_shotq_mu);
+    return ok;
+}
+static CGSize capture_size(id<MTLTexture> src, const int crop[4], CGSize screen) {   // the picture's shape (the crop, else the whole source) fitted in the drawable
+    double pw = crop && crop[2] > 0 && crop[3] > 0 ? crop[2] : (double)src.width, ph = crop && crop[2] > 0 && crop[3] > 0 ? crop[3] : (double)src.height;
+    if (pw <= 0 || ph <= 0 || screen.width <= 0 || screen.height <= 0) return CGSizeMake(pw, ph);
+    double k = fmin(screen.width / pw, screen.height / ph);
+    return CGSizeMake(fmax(1, floor(pw * k)), fmax(1, floor(ph * k)));
+}
+static void capture_present(id<MTLTexture> src, const int crop[4], CGSize screen) {
+    pthread_mutex_lock(&g_shotq_mu);
+    if (g_pshot.pending != 1) { pthread_mutex_unlock(&g_shotq_mu); return; }
+    g_pshot.pending = 2;   // taken: the next presents leave it alone until it is written
+    NSString *path = @(g_pshot.path); void (*done)(void *, const char *, int) = g_pshot.done; void *ctx = g_pshot.ctx;
+    pthread_mutex_unlock(&g_shotq_mu);
+    void (^finish)(int) = ^(int ok) {
+        MLOG("capture: screenshot %s", ok ? "saved" : "failed");   // the path holds no more than the date, but stays out of the log
+        pthread_mutex_lock(&g_shotq_mu); g_pshot.pending = 0; pthread_mutex_unlock(&g_shotq_mu);
+        if (done) done(ctx, path.fileSystemRepresentation, ok);
+    };
+    grab_present_to(src, crop, capture_size(src, crop, screen), ^(CGImageRef img) {
+        if (!img) { finish(0); return; }
+        CGImageRetain(img);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool {
+            NSString *part = [path stringByAppendingString:@".part"];
+            NSURL *u = [NSURL fileURLWithPath:part];
+            CGImageDestinationRef d = CGImageDestinationCreateWithURL((__bridge CFURLRef)u, (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL);
+            int ok = 0;
+            if (d) { CGImageDestinationAddImage(d, img, NULL); ok = CGImageDestinationFinalize(d); CFRelease(d); }
+            CGImageRelease(img);
+            ok = ok && rename(part.fileSystemRepresentation, path.fileSystemRepresentation) == 0;
+            if (!ok) unlink(part.fileSystemRepresentation);
+            finish(ok);
+        } });
+    });
 }
 void dm_gfx_shot_at(long k, const char *path) {
     pthread_mutex_lock(&g_shotq_mu);
@@ -26758,7 +26894,8 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // Windowed mode follows the display's vsync to prevent tearing
 #endif
     present_pipeline(layer.pixelFormat);   // Same as the original path: the first frame compiles the pipeline before taking the drawable
-    if (g_grab_cb) grab_present(src, crop, layer.drawableSize);   // Game picture needed by the whole-window screenshot (peek without the lock first; the real take locks inside the function)
+    if (g_grab_cb) grab_present(src, crop, layer.drawableSize);
+    if (g_pshot.pending == 1) capture_present(src, crop, layer.drawableSize);   // the player's screenshot (peek without the lock, as above)   // Game picture needed by the whole-window screenshot (peek without the lock first; the real take locks inside the function)
     uint64_t dt0 = now_ns();
     id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];
     if (!supplied) g_drawable_ns += now_ns() - dt0;
