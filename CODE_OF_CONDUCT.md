@@ -5,12 +5,15 @@
 These apply in every NX 18 space (issues, pull requests, discussions) on top of
 the Contributor Covenant below.
 
-- **Legally owned and acquired games only.** NX 18 is for games you own and
-  acquired yourself. It includes no games, no keys and no mods.
+- **Personal use of legally owned and acquired games only.** The project only
+  acknowledges personal use of legally owned and acquired games. NX 18
+  includes no games, no keys and no mods.
+- **Prohibited topics.** Any discussion of ROM downloads or other ways to
+  acquire games or keys, of hacking (such as custom firmware or exploits), or
+  of jailbreaking is prohibited. Such posts are removed, and repeat posts lead
+  to a ban.
 - **Never share game files, keys, title keys or saves**, and never link to
   where they can be found. This includes anything extracted from a game.
-- **No requests for games or keys**, and no help with getting them. Such posts
-  are removed, and repeat posts lead to a ban.
 - **Logs and screenshots are welcome.** Logs from NX 18 never contain keys or
   game files.
 
