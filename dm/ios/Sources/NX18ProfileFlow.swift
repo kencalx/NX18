@@ -19,6 +19,7 @@ final class NX18ProfileFlow: ObservableObject {
     @Published var note: String?          // the row's last result: "Moved and checked.", "Could not move. Try again when online."
     @Published var strip: String?         // a pad's line: what needs touch
     @Published var cloudShared = dm_nx18_cloud_shared()
+    @Published var capturesShared = dm_nx18_captures_shared()   // This game's captures: in the NX 18 folder (DmCapture.m moves them there; NX 18 Beam reads them)
     var folderPicked: ((Bool) -> Void)?   // the welcome's continuation after a pick (Create step 2, Connect)
     var connecting = false                // Connect to my NX 18 folder: a folder with no Profile asks (Create one here / Choose another) instead of taking this device's
 
@@ -130,6 +131,8 @@ final class NX18ProfileFlow: ObservableObject {
     private func setShared(_ on: Bool) { dm_set_nx18_cloud_shared(on); cloudShared = on }
 
     // ---- This game's saves: ‹ NX 18 folder | Own folder › (§20.2 item 7, §21.4) ----
+    // ---- This game's captures: ‹ NX 18 folder | Own folder ›: a flip, nothing to move (captures already taken stay where they are) ----
+    func capturesTapped() { capturesShared.toggle(); dm_set_nx18_captures_shared(capturesShared); note = nil }
     func savesTapped() {
         if !cloudShared { question = .moveSaves(toShared: true); return }
         if dm_cloud_saves_path(nil) == nil { note = "Choose this game's own folder first, on the Cloud saves page."; return }

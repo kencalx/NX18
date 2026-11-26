@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 static int fail_open, fail_write, fail_close, fail_rename, cleanup_errno;
@@ -71,12 +72,19 @@ static int test_rename(const char *from, const char *to) {
     if (!r) crash_point();
     return r;
 }
+static int fail_stage_publish;   // the next publish of a cloud backup's staging fails (backup_cloud_restore)
 static int test_renamex_np(const char *from, const char *to, unsigned flags) {
+    if (fail_stage_publish && strstr(from, "/.cloud-stage.")) { fail_stage_publish = 0; errno = EIO; return -1; }
     if (faulted(2, from, to)) return -1;
     int r = renamex_np(from, to, flags);
     if (*staging && holds(staging, "original")) staging_held = 1;
     if (!r) crash_point();
     return r;
+}
+static const char *fail_xattr_suffix; static int fail_xattr_errno;
+static ssize_t test_getxattr(const char *path, const char *name, void *value, size_t size, u_int32_t position, int options) {
+    if (fail_xattr_suffix && ends(path, fail_xattr_suffix)) { errno = fail_xattr_errno; return -1; }
+    return getxattr(path, name, value, size, position, options);
 }
 static int test_unlink(const char *path) {
     unlinks++;
@@ -90,6 +98,7 @@ static int test_unlink(const char *path) {
 #define rename test_rename
 #define unlink test_unlink
 #define renamex_np test_renamex_np
+#define getxattr test_getxattr
 #include "../save_sync.c"
 #undef fopen
 #undef fprintf
@@ -97,6 +106,7 @@ static int test_unlink(const char *path) {
 #undef rename
 #undef unlink
 #undef renamex_np
+#undef getxattr
 
 static int checks, failures;
 #define CHECK(c, label) do { checks++; if (!(c)) { failures++; fprintf(stderr, "FAIL: %s (%s)\n", name, label); } } while (0)
@@ -386,6 +396,86 @@ static void fetch_cases(const char *folder) {
     CHECK(file_is(dst, "newer") && holds_only(dir, "cloud.dmsync"), "the late fetch leaves the later attempt's file as it was and removes only its own");
     test_unlink(dst); test_unlink(src); test_unlink(fifo); rmdir(dir);
 }
+// The cloud's save kept before this device's replaces it (upstream 7886d3038): unpacked into staging, published whole under a dated name, and only then are older cloud
+// backups pruned. A failed publish or unpack costs no backup and leaves no staging; a killed start's staging goes at the next start; the player's own folders stay
+static int has_cloud_stage(const char *save) {
+    char dir[PATH_MAX], **v; size_t n; int found = 0;
+    snprintf(dir, sizeof dir, "%s-backups", save);
+    if (names_of(dir, &v, &n)) return 0;
+    for (size_t i = 0; i < n; i++) if (!strncmp(v[i], CLOUD_STAGE_PREFIX, sizeof CLOUD_STAGE_PREFIX - 1)) found = 1;
+    free_names(v, n); return found;
+}
+static int cloud_backups(const char *save, int *seeded_ok, int first) {   // the "<date> cloud" backups; *seeded_ok: the seeded ones from `first` on are there with their marks
+    char dir[PATH_MAX], **v; size_t n; int c = 0;
+    snprintf(dir, sizeof dir, "%s-backups", save); *seeded_ok = 1;
+    if (names_of(dir, &v, &n)) return 0;
+    for (size_t i = 0; i < n; i++) c += is_backup(v[i], "cloud");
+    free_names(v, n);
+    for (int i = first; i <= KEEP_BACKUPS; i++) {
+        char p[PATH_MAX], want[32]; snprintf(p, sizeof p, "%s/2020-01-%02d 00.00.00 cloud/save/mark.txt", dir, i); snprintf(want, sizeof want, "seeded-%02d", i);
+        if (!is(p, want)) *seeded_ok = 0;
+    }
+    return c;
+}
+static void cloud_backup_cases(const char *folder) {
+    const char *name = "cloud backup staging";
+    char root[PATH_MAX], remote[PATH_MAX], local[PATH_MAX], backups[PATH_MAX], bundle[PATH_MAX], p[PATH_MAX], kept[PATH_MAX];
+    ss_meta mr, got; int ok;
+    snprintf(root, sizeof root, "%s/cloud-backup", folder); snprintf(remote, sizeof remote, "%s/remote/save", root); snprintf(local, sizeof local, "%s/local/save", root);
+    snprintf(backups, sizeof backups, "%s-backups", local); snprintf(bundle, sizeof bundle, "%s/cloud.dmsync", root);
+    rm_tree(root); mkdirs(remote); mkdirs(local);
+    snprintf(p, sizeof p, "%s/a", remote); put(p, "cloud-a"); snprintf(p, sizeof p, "%s/b", remote); put(p, "cloud-b");
+    CHECK(!ss_pack(remote, "0100000000010000", bundle, &mr), "pack the cloud's save");
+    for (int i = 1; i <= KEEP_BACKUPS; i++) {
+        char want[32]; snprintf(p, sizeof p, "%s/2020-01-%02d 00.00.00 cloud/save", backups, i); mkdirs(p);
+        snprintf(p, sizeof p, "%s/2020-01-%02d 00.00.00 cloud/save/mark.txt", backups, i); snprintf(want, sizeof want, "seeded-%02d", i); put(p, want);
+    }
+    snprintf(p, sizeof p, "%s/my-manual-backup", backups); mkdirs(p); snprintf(p, sizeof p, "%s/my-manual-backup/note.txt", backups); put(p, "keep-me");
+    fail_stage_publish = 1;
+    CHECK(backup_cloud_restore(local, bundle, &got, kept, sizeof kept) == -1 && errno == EIO && !*kept, "a failed publish fails the backup with its errno");
+    CHECK(cloud_backups(local, &ok, 1) == KEEP_BACKUPS && ok && !has_cloud_stage(local), "a failed publish keeps all ten backups and leaves no staging");
+    snprintf(p, sizeof p, "%s/missing.dmsync", root);
+    CHECK(backup_cloud_restore(local, p, &got, kept, sizeof kept) == -1 && !*kept, "an unreadable cloud file fails the backup");
+    CHECK(cloud_backups(local, &ok, 1) == KEEP_BACKUPS && ok && !has_cloud_stage(local), "a failed unpack keeps all ten backups and leaves no staging");
+    snprintf(p, sizeof p, "%s/%s99999-0/save", backups, CLOUD_STAGE_PREFIX); mkdirs(p);
+    snprintf(p, sizeof p, "%s/%s99999-0/save/partial", backups, CLOUD_STAGE_PREFIX); put(p, "interrupted");
+    clean_backup_staging(local);
+    snprintf(p, sizeof p, "%s/my-manual-backup/note.txt", backups);
+    CHECK(!has_cloud_stage(local) && is(p, "keep-me") && cloud_backups(local, &ok, 1) == KEEP_BACKUPS && ok, "a killed start's staging goes; backups and the player's folder stay");
+    CHECK(!backup_cloud_restore(local, bundle, &got, kept, sizeof kept) && *kept && !strcmp(got.hash, mr.hash), "the backup is published");
+    char pa[PATH_MAX], pb[PATH_MAX]; snprintf(pa, sizeof pa, "%s/save/a", kept); snprintf(pb, sizeof pb, "%s/save/b", kept);
+    snprintf(p, sizeof p, "%s/2020-01-01 00.00.00 cloud", backups);
+    CHECK(is(pa, "cloud-a") && is(pb, "cloud-b") && access(p, F_OK) && cloud_backups(local, &ok, 2) == KEEP_BACKUPS && ok, "whole, and only then the oldest goes: ten stay");
+    snprintf(p, sizeof p, "%s/my-manual-backup/note.txt", backups);
+    CHECK(is(p, "keep-me") && !has_cloud_stage(local), "the player's folder stays and no staging is left");
+    rm_tree(root);
+}
+// A guest-name read that fails with anything but ENOATTR fails the scan and the pack with its errno (upstream 0c932bc95): packed without the name, a case alias
+// (.dm-case-N) would come back under its host name. A file with no name (ENOATTR) is an ordinary file
+static void xattr_failure_cases(const char *folder) {
+    const char *name = "guest-name getxattr failures";
+    char root[PATH_MAX], local[PATH_MAX], out[PATH_MAX], unpacked[PATH_MAX], p[PATH_MAX];
+    ss_meta ml, mr;
+    snprintf(root, sizeof root, "%s/xattr-fail", folder); snprintf(local, sizeof local, "%s/local/save", root);
+    snprintf(out, sizeof out, "%s/packed.dmsync", root); snprintf(unpacked, sizeof unpacked, "%s/unpacked", root);
+    rm_tree(root); mkdirs(local);
+    snprintf(p, sizeof p, "%s/plain", local); put(p, "ordinary-file");
+    snprintf(p, sizeof p, "%s/.dm-case-1", local); put(p, "alias-content");
+    CHECK(!setxattr(p, GUEST_NAME, "Plain", 5, 0, XATTR_NOFOLLOW), "attach guest-name xattr to .dm-case-1 alias");
+    CHECK(!ss_scan(local, &ml) && ml.files == 2, "scan succeeds with ENOATTR on an ordinary file and a readable alias name");
+    fail_xattr_suffix = "/.dm-case-1"; fail_xattr_errno = EIO; cleanup_errno = EBUSY;
+    CHECK(ss_scan(local, &mr) == -1 && errno == EIO, "ss_scan propagates EIO from getxattr");
+    CHECK(ss_pack(local, "0100000000010000", out, &mr) == -1 && errno == EIO, "ss_pack propagates EIO from getxattr through its cleanup");
+    CHECK(access(out, F_OK) == -1 && errno == ENOENT, "a failed ss_pack leaves no partial archive");
+    fail_xattr_suffix = NULL; fail_xattr_errno = 0; cleanup_errno = 0;
+    CHECK(!ss_pack(local, "0100000000010000", out, &mr) && !strcmp(mr.hash, ml.hash), "with the name readable the pack succeeds, with the scan's hash");
+    mkdirs(unpacked);
+    CHECK(!ss_read(out, unpacked, &mr) && !strcmp(mr.hash, ml.hash), "the archive unpacks with the same hash");
+    snprintf(p, sizeof p, "%s/save/.dm-case-1", unpacked);
+    char g[16] = {0}; ssize_t gl = getxattr(p, GUEST_NAME, g, sizeof g - 1, 0, XATTR_NOFOLLOW);
+    CHECK(is(p, "alias-content") && gl == 5 && !strcmp(g, "Plain"), "the .dm-case-1 alias comes back with its guest name and contents");
+    rm_tree(root);
+}
 int main(void) {
     char folder[] = "/tmp/dm-save-sync-metadata-XXXXXX", save[PATH_MAX], path[PATH_MAX];
     if (!mkdtemp(folder)) return 1;
@@ -420,6 +510,8 @@ int main(void) {
         rm_tree(root);
     }
     fetch_cases(folder);
+    cloud_backup_cases(folder);
+    xattr_failure_cases(folder);
     rmdir(folder);
     printf("save-sync metadata: %d checks, %d failed\n", checks, failures);
     return failures != 0;

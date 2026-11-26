@@ -69,7 +69,7 @@ static int tail_make(nvn_refl *r, int cap, const nvn_rbind *b, int nb, int own_f
     return 1;
 }
 void nvn_refl_init(nvn_refl *r) { memset(r, 0, sizeof *r); tables_none(r); }
-void nvn_refl_free(nvn_refl *r) { tail_drop(r); free(r->c1); nvn_refl_init(r); }
+void nvn_refl_free(nvn_refl *r) { tail_drop(r); free(r->c1); free(r->gptr); nvn_refl_init(r); }
 static int reserve(nvn_refl *r, int cap, int own_fc, int own_uv) {
     if (!r->fc) r->fc = &nvn_refl_fc_none;   // a zeroed struct
     if (!r->uv) r->uv = &nvn_refl_uv_none;
@@ -88,7 +88,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
     // Converted into whole-size arrays on the stack, then moved into a tail block of the real size (refl_done)
     nvn_rbind bt[NVN_REFL_MAXB]; nvn_refl_fc fct = nvn_refl_fc_none, *F = &fct; nvn_refl_uv uvt = nvn_refl_uv_none, *U = &uvt;
     memset(bt, 0, sizeof bt); o->b = bt;
-    #define FAIL(...) do { free(o->c1); nvn_refl_init(o); snprintf(err, errlen, __VA_ARGS__); return 1; } while (0)
+    #define FAIL(...) do { free(o->c1); free(o->gptr); nvn_refl_init(o); snprintf(err, errlen, __VA_ARGS__); return 1; } while (0)
     if (![j[@"route"] isEqual:@"B"]) FAIL("not a B reflection (route ≠ B; route A / PC-chain reflection is retired)");
     {   // Translated original Switch shaders: kind and NVN slot number are already parsed from the MSL member names by dmsh_build.py
         NSArray *bs = j[@"bindings"];
@@ -147,14 +147,28 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_TBUF]) { r->kind = NVN_RB_TBUF; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); }
             else if ([k isEqualToString:@DMSH_KIND_IMG_UBO]) { r->kind = NVN_RB_IMGU; dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf); r->off = (uint16_t)[b[@"off"] intValue]; o->bindless = 1;
                 r->rw = [ty isKindOfClass:[NSString class]] && ([ty containsString:@"access::write"] || [ty containsString:@"access::read_write"]); r->atom = [b[@"atomic"] boolValue] ? ([ty isKindOfClass:[NSString class]] && [ty containsString:@"<ulong"] ? 2 : 1) : 0; }   // 2: 64-bit atomics (texture2d<ulong>)
-            else if ([k isEqualToString:@DMSH_KIND_TBUF_UBO]) { r->kind = NVN_RB_TBUFU; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); r->off = (uint16_t)[b[@"off"] intValue]; o->bindless = 1; }
+            else if ([k isEqualToString:@DMSH_KIND_TBUF_UBO]) { r->kind = NVN_RB_TBUFU; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); r->off = (uint16_t)[b[@"off"] intValue]; o->bindless = 1;
+                if (b[@"soff"]) { r->soff = (uint16_t)([b[@"soff"] intValue] + 1); r->sreg = (uint8_t)[b[@"sreg"] intValue]; } }   // the handle's other word (upstream 44b8ab17b)
             else if ([k isEqualToString:@DMSH_KIND_SBUF]) { r->kind = NVN_RB_SBUFP; r->rw = sbuf_rw(b); }
             else if ([k isEqualToString:@DMSH_KIND_UBO_PTR]) r->kind = NVN_RB_UBOP;
             else if ([k isEqualToString:@DMSH_KIND_SBUF_UBO]) { r->kind = NVN_RB_SBUFU; r->rw = sbuf_rw(b); r->off = (uint16_t)[b[@"off"] intValue]; }
             else if ([k isEqualToString:@DMSH_KIND_SBUF_PUSH]) { r->kind = NVN_RB_SBUFQ; r->rw = sbuf_rw(b); r->off = (uint16_t)[b[@"off"] intValue]; }
             else if ([k isEqualToString:@DMSH_KIND_GEOMETRY]) { if (reg < 0 || reg > 4) FAIL("invalid geometry helper slot"); r->kind = NVN_RB_GEOMETRY; }
             else if ([k isEqualToString:@DMSH_KIND_SUPPORT]) r->kind = NVN_RB_SUPPORT;
-            else if ([k isEqualToString:@DMSH_KIND_GMEM_MAP]) { r->kind = NVN_RB_GMEM; r->rw = [b[@"rw"] boolValue]; }
+            else if ([k isEqualToString:@DMSH_KIND_GMEM_MAP]) {
+                r->kind = NVN_RB_GMEM; r->rw = [b[@"rw"] boolValue];
+                _Static_assert(DMSH_GPTR_MAX <= UINT8_MAX, "nvn_refl.ngptr counts at most DMSH_GPTR_MAX sources");
+                id sources = b[@"pointers"];   // the raw pointer sources (upstream f15d65850): none in libraries of an older translator
+                if (sources && (![sources isKindOfClass:[NSArray class]] || [sources count] > DMSH_GPTR_MAX || o->gptr)) FAIL("B binding %s: invalid or duplicate raw pointer sources", nm.UTF8String);
+                nvn_gptr gp[DMSH_GPTR_MAX]; int ng = 0;
+                for (id e in sources) {
+                    if (![e isKindOfClass:[NSArray class]] || [e count] != 2 || ![e[0] isKindOfClass:[NSNumber class]] || ![e[1] isKindOfClass:[NSNumber class]]) FAIL("B binding %s: a raw pointer source is not [slot, byte]", nm.UTF8String);
+                    int sreg = [e[0] intValue], soff = [e[1] intValue];
+                    if (sreg < 0 || sreg >= 16 || soff < 0 || soff > 0xfff8) FAIL("B binding %s: raw pointer slot %d byte %d out of range", nm.UTF8String, sreg, soff);
+                    gp[ng].reg = (uint8_t)sreg; gp[ng].off = (uint16_t)soff; ng++;
+                }
+                if (ng) { if (!(o->gptr = malloc((size_t)ng * sizeof *o->gptr))) FAIL("raw pointer sources: allocation failed"); memcpy(o->gptr, gp, (size_t)ng * sizeof *o->gptr); o->ngptr = (uint8_t)ng; }
+            }
             else if ([k isEqualToString:@DMSH_KIND_GMEM_LOG]) { r->kind = NVN_RB_GMEML; r->rw = 1; }
             else if ([k isEqualToString:@DMSH_KIND_C1]) r->kind = NVN_RB_C1;
             else if ([k isEqualToString:@DMSH_KIND_CBSIZE]) r->kind = NVN_RB_CBSIZE;

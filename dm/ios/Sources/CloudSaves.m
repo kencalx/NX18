@@ -105,6 +105,7 @@ void dm_cloud_saves_env(void) {
 // ---- the NX 18 folder (F10, gate-ui §20-§21): a second bookmark, and this game's cloud mode ----
 static NSString *const kNX18Folder = @"nx18.folder";   // the bookmark
 static NSString *const kNX18Cloud = @"nx18.cloud";     // "shared": this game's cloud saves in the NX 18 folder; "own" (or none): its own folder
+static NSString *const kNX18Captures = @"nx18.captures";   // "shared": this game's captures in the NX 18 folder; "own" (or none): Documents/Captures
 
 NSString *dm_nx18_folder_path(BOOL *stale) {
     if (stale) *stale = NO;
@@ -139,6 +140,7 @@ BOOL dm_store_nx18_folder(NSURL *url) {
 void dm_clear_nx18_folder(void) {
     [NSUserDefaults.standardUserDefaults removeObjectForKey:kNX18Folder];
     [NSUserDefaults.standardUserDefaults removeObjectForKey:kNX18Cloud];
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:kNX18Captures];
     scope_slot(1, nil);
 }
 
@@ -146,4 +148,9 @@ BOOL dm_nx18_cloud_shared(void) { return [[NSUserDefaults.standardUserDefaults s
 void dm_set_nx18_cloud_shared(BOOL shared) {
     [NSUserDefaults.standardUserDefaults setObject:shared ? @"shared" : @"own" forKey:kNX18Cloud];
     fprintf(stderr, "launcher: this game's cloud saves in %s\n", shared ? "the NX 18 folder" : "its own folder");
+}
+BOOL dm_nx18_captures_shared(void) { return [[NSUserDefaults.standardUserDefaults stringForKey:kNX18Captures] isEqualToString:@"shared"]; }
+void dm_set_nx18_captures_shared(BOOL shared) {
+    [NSUserDefaults.standardUserDefaults setObject:shared ? @"shared" : @"own" forKey:kNX18Captures];
+    fprintf(stderr, "launcher: this game's captures in %s\n", shared ? "the NX 18 folder" : "its own folder");
 }

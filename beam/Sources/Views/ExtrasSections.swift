@@ -153,43 +153,6 @@ private struct ArtPicker: View {
     }
 }
 
-struct MyFilesSection: View {
-    @Environment(Library.self) private var library
-    let gameID: UUID
-    @State private var sending = false
-
-    var body: some View {
-        if let g = library.games.first(where: { $0.id == gameID }), let folder = library.myFilesFolder(g) {
-            let files = library.myFiles(g), installs = library.installs(of: g.id)
-            GroupBox {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("My files").font(.headline)
-                        Text("your own guides and maps").font(.caption).foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Show Folder") {
-                            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                            NSWorkspace.shared.open(folder)
-                        }
-                    }
-                    if files.isEmpty {
-                        Text("Put files in the folder. They stay on this Mac and are never packed into the game's app.").font(.callout).foregroundStyle(.secondary)
-                    } else {
-                        Text(files.map(\.lastPathComponent).joined(separator: ", ")).font(.callout).lineLimit(3)
-                        ForEach(installs) { r in
-                            Button("Send to \(r.deviceName)") { Task { sending = true; await library.sendMyFiles(g, to: r); sending = false } }.disabled(sending)
-                        }
-                        if installs.isEmpty {
-                            Text("Installed another way? In Finder, select your iPhone, open Files, and drag them into the game's folder.").font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .padding(6)
-            }
-        }
-    }
-}
-
 /// Settings: the SteamGridDB key, saved in the Keychain for this Mac only
 struct ArtKeySection: View {
     @State private var key = ""

@@ -4,6 +4,9 @@
 void nvn_queue_submit(queue_t *q, int n, const uint64_t *handles);
 uint64_t nvn_queue_present(queue_t *q,const tex_t *t,double period,const int crop[4]);
 void nvn_queue_present_wait(uint64_t ticket);
+void nvn_queue_present_ref(uint64_t ticket);
+// An acquire's sync on the present after the image's last one (DM_NVN_ACQ_NEXT): its fence once that present's job has replayed (fenced 2, an acquire sync), else the receipt itself (fenced 3)
+void nvn_sync_set_present(sync_t *s, uint64_t ticket);
 void nvn_queue_present_release(uint64_t ticket);
 // Unit tests: while held (on=1), replay takes no queued work, so a test can change state between a submit or QueuePresent and its replay; work already replaying finishes
 void nvn_queue_test_hold(int on);

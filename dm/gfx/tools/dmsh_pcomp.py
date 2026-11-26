@@ -128,6 +128,13 @@ def gradient_samples(src):
     return ''.join(out)
 
 
+
+def _colour_slot(attr):
+    """The digit of a colour output's [[color(N)]] attribute."""
+    m = re.fullmatch(r'color\((\d)\)', attr)
+    if m is None: raise ValueError('pc: a colour output not understood: ' + attr)
+    return m[1]
+
 def _struct(src, name):
     m = re.search(r'\nstruct %s\n\{\n(.*?)\n\};' % name, src, re.S)
     if not m: raise ValueError('pc: no struct ' + name)
@@ -185,6 +192,7 @@ def compose(vs_src, fs_src):
         elif a[3] == 'buffer' and int(a[4]) not in (DRAW_SLOT, FS_SLOT, BLEND_SLOT): vargs.append(a[2]); vres.append(re.sub(r'\b(spvDescriptorSetBuffer0|dm_vlayout)\b', r'dm_v::\1', p))
         else: raise ValueError('pc: vertex parameter ' + p)
     pulled = pulled[:m.start()] + '\nstatic inline main0_out dm_vs(' + ', '.join(vparams) + ')\n{\n' + pulled[m.end():]
+    pulled = re.sub(r'\nvertex main0_out main0(?:_z)?_wl\([^\n]*\)\n\{\n.*?\n\}\n', '\n', pulled, flags=re.S)   # the wide-line entries (dmsh_pull.py <entry>_wl, upstream 7eaf79116): a kernel draws no lines
     pulled = re.sub(r'\nvertex main0_out main0_z\([^\n]*\)\n\{\n.*?\n\}\n', '\n', pulled, flags=re.S)
     if re.search(r'(?m)^vertex ', pulled): raise ValueError('pc: a vertex entry left over')
 
@@ -203,6 +211,7 @@ def compose(vs_src, fs_src):
     bargs = []
     for p in bparams:
         a = re.fullmatch(r'(.+?)\s*(\w+)', p)
+        if a is None: raise ValueError('pc: body parameter ' + p)
         name = a[2]
         if name == 'in': bargs.append('dm_in')
         elif 'spvDescriptorSetBuffer0' in p: bargs.append('dm_fset')
@@ -238,8 +247,8 @@ def compose(vs_src, fs_src):
     fin_decl = '\n'.join(f'    {t} {n};' for t, n, a, at in fins or [])
     if fins is not None: fsb = re.sub(r'\nstruct main0_in\n\{\n.*?\n\};', '\nstruct main0_in\n{\n' + fin_decl + '\n};', fsb, count=1, flags=re.S)
 
-    ncol = max(int(re.fullmatch(r'color\((\d)\)', at[0])[1]) for t, n, a, at in fouts) + 1
-    writes = '\n'.join(f'        dm_put(dm_t{re.fullmatch(r"color\((\d)\)", at[0])[1]}, dm_s{re.fullmatch(r"color\((\d)\)", at[0])[1]}, dm_d.bl[{re.fullmatch(r"color\((\d)\)", at[0])[1]}], dm_d.bc, dm_r.{n}, dm_px);' for t, n, a, at in fouts)
+    ncol = max(int(_colour_slot(at[0])) for t, n, a, at in fouts) + 1
+    writes = '\n'.join(f'        dm_put(dm_t{c}, dm_s{c}, dm_d.bl[{c}], dm_d.bc, dm_r.{n}, dm_px);' for t, n, a, at in fouts for c in (_colour_slot(at[0]),))
     tex = ''.join(f', texture2d<float, access::write> dm_t{i} [[texture({i})]], texture2d<float, access::read> dm_s{i} [[texture({8 + i})]]' for i in range(ncol))
     vcall = ', '.join(vargs)
     out = ['#include <metal_stdlib>', '#include <simd/simd.h>', '#include <metal_atomic>', 'using namespace metal;',

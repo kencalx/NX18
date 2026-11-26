@@ -984,9 +984,11 @@ static BOOL pad_home(GCExtendedGamepad *g) {   // YES on Home's press, which the
 // Capture takes a screenshot (DmCapture.m), at its press, on any controller that has the button: an extended pad's Share (Capture on Nintendo pads), a phone-clip pad's own
 // screenshot button (pad_capture_button: GameSir and the like name it otherwise) and a Switch 2 pad's Capture. The game never sees it, as on the console; a held Capture is
 // the recording's (captures-album.md, later). Its own press handler, so a button outside the extended profile is heard too
-static void pad_capture_press(GCController *c) {
-    if (g_view && !cp_up() && !g_menu_block) dm_capture_screenshot(g_view);
+static void pad_capture_press(GCController *c, bool down) {   // press and release: a short press is a screenshot, a held one records (DmCapture.h dm_capture_button)
     (void)c;
+    if (!g_view) return;
+    if (down && (cp_up() || g_menu_block)) return;
+    dm_capture_button(g_view, down);
 }
 static BOOL pads_any_pressed(void) { for (GCController *c in GCController.controllers) if (pad_usable(c) && pad_buttons(c)) return YES; return NO; }
 static int g_merge_s2_rumble;   // DM_PAD_MERGE: player 1's rumble goes to the Switch 2 pads (merge_rumble_to_s2, upstream PR #1900)
@@ -1047,7 +1049,7 @@ static void pad_claim_buttons(GCController *c) {
     GCControllerButtonInput *cap = pad_capture_button(c);
     if (cap && !cap.pressedChangedHandler) {
         __weak GCController *weak = c;
-        cap.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; GCController *k = weak; if (down && k) pad_capture_press(k); };
+        cap.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; GCController *k = weak; if (k) pad_capture_press(k, down); };
     }
     static NSHashTable<GCController *> *said; if (!said) said = [NSHashTable weakObjectsHashTable];
     if ([said containsObject:c]) return;
@@ -1267,10 +1269,10 @@ static void merge_rumble_to_s2(int on) {
 }
 static int s2pad_blocked(void) { return g_s2_off || cp_blocks_input(g_cp.phase); }   // no input to the game (in the background, or the controller prompt up)
 static const s2_pad *g_s2_capture_down[8];   // the Switch 2 pads whose Capture is held (a pad that goes is dropped in s2pad_detach)
-static int s2_capture_edge(const s2_pad *d, int held) {   // 1 at the press only
+static int s2_capture_edge(const s2_pad *d, int held) {   // 1 at the press, -1 at the release, 0 otherwise
     int at = -1, free_at = -1;
     for (int i = 0; i < 8; i++) { if (g_s2_capture_down[i] == d) at = i; else if (!g_s2_capture_down[i] && free_at < 0) free_at = i; }
-    if (!held) { if (at >= 0) g_s2_capture_down[at] = NULL; return 0; }
+    if (!held) { if (at >= 0) { g_s2_capture_down[at] = NULL; return -1; } return 0; }
     if (at >= 0) return 0;
     if (free_at >= 0) g_s2_capture_down[free_at] = d;
     return 1;
@@ -1279,7 +1281,7 @@ static void s2pad_read(s2_pad *d) {
     if (g_s2_off) return;
     int p = s2pad_player(d);
     uint64_t m; int32_t st[4]; if (!s2_pad_input(&d->st, &m, st)) return;
-    if (s2_capture_edge(d, s2_pad_capture(&d->st)) && g_view && !cp_up() && !g_menu_block) dm_capture_screenshot(g_view);   // Capture's press: a screenshot (pad_capture_press)
+    { int e = s2_capture_edge(d, s2_pad_capture(&d->st)); if (e) pad_capture_press(nil, e > 0); }   // Capture: a screenshot, or held, a recording (pad_capture_press)
     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button, as a GameController one does (pad_report)
         char nb[16];
         if (!g_press_to_join || !m) return;

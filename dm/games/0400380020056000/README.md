@@ -54,6 +54,7 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 
 ## Found on this game
 
+- [Absent vertex attributes lose W](../../../docs/reference/rendering.md#absent-vertex-attributes-lose-w): upstream #3181, the Slosher's airborne ink invisible while its depth pass read zero opacity from attribute 12.W of a draw that sets 0-9 (ported from upstream ef8b25d2c; not checked here).
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): the `main` duplicate-selection mismatch is resolved, 2026-11-17, with the registered shader identities preserved.
 - [GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment): dynamic resolution that never moved, then held low by the GPU's idle gaps
 - [Naming the shaders of a GPU fault](../../../docs/reference/rendering.md#naming-the-shaders-of-a-gpu-fault): added for the address fault above, which names no pass.

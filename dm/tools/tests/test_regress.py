@@ -522,6 +522,8 @@ def plan_standins(lib, chain, rows, zero, pair_bases=()):
                 s = regress.shader_cache.Store(build / 'shader/cache/cas.db'); self.addCleanup(s.close)
                 self.assertEqual(s.get('metallib/mac/abcd.metallib'), b'compiled')
                 self.assertEqual(regress.chain_cache(NS(path=root / 'revision-from-before'), g), own / 'cas')   # its dmsh_build.py wants a folder
+                gen = root / 'gen'; (gen / 'dm/tools').mkdir(parents=True); (gen / 'dm/tools/shader_cache.py').write_text('def for_chain(folder, chain): pass\n')
+                self.assertEqual(regress.chain_cache(NS(path=gen), g), build / 'shader/cache')   # one file per chain: the player's folder, where its chain's file goes
 
     def test_a_chain_build_becomes_one_file_with_the_same_hashes(self):
         k = '0123456789abcdef'

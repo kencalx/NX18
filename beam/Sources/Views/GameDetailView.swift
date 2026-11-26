@@ -16,7 +16,7 @@ struct GameDetailView: View {
                     if let i = game.identity { facts(i) } else if library.identifying.contains(gameID) { ProgressView("Asking NX 18 what this game is…") }
                     if game.identity != nil { DevicesSection(gameID: gameID) }
                     if game.identity != nil { ModsSection(gameID: gameID) }
-                    if game.identity != nil { CheatsSection(gameID: gameID); ArtSection(gameID: gameID); MyFilesSection(gameID: gameID) }
+                    if game.identity != nil { CheatsSection(gameID: gameID); ArtSection(gameID: gameID); AlbumSection(gameID: gameID) }
                     if let b = game.lastBuild { lastBuild(b) }
                 }
                 .padding(28)

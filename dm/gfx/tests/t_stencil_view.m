@@ -106,6 +106,16 @@ static void copy_kinds(void) {
       for (int y = 0; ok && y < D; y++) for (int x = 0; x < D; x++) ok &= o[x + y * D] == in[(2 * x + 1) + (2 * y + 1) * S];
       CHECK(ok, "the scaled depth reaches it");
       mtl_tex_release(&ts); mtl_tex_release(&td); }
+    // ⑩ A source layer or level past the source (S2Arm 1655fd83b, D-4T8M): a one-layer 2D source with a region z offset of 1, and level 1 of a one-level source, are not drawn,
+    //   and the destination keeps its content (the views made per layer aborted the process in Metal's validation before)
+    { id<MTLTexture> a = mk(MTLPixelFormatRGBA8Unorm, S, S, 1, RT), b = mk(MTLPixelFormatRGBA8Unorm, D, D, 1, RT);
+      uint32_t in[S * S], old[D * D]; for (int i = 0; i < S * S; i++) in[i] = 0xffffffffu; for (int i = 0; i < D * D; i++) old[i] = 0xff808080u;
+      tex_io(a, 0, 4, MTLBlitOptionNone, 1, in); tex_io(b, 0, 4, MTLBlitOptionNone, 1, old);
+      NVNcopyRegion past = {.zoffset=1, .width=S, .height=S, .depth=1};
+      mtl_sub_begin(); CHECK(!copy_t2t_draw(a, b, 0, 0, 0, 0, &past, &dr, 1, 0), "a source layer past a one-layer source is not drawn");
+      CHECK(!copy_t2t_draw(a, b, 1, 0, 0, 0, &sr, &dr, 1, 0), "a source level past a one-level source is not drawn"); mtl_sub_commit(); mtl_drain();
+      uint32_t o[D * D]; tex_io(b, 0, 4, MTLBlitOptionNone, 0, o);
+      CHECK(!memcmp(o, old, sizeof o), "the destination keeps its content"); }
 }
 int main(void) { @autoreleasepool {
     mtl_init();

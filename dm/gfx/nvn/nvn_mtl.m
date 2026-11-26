@@ -2282,8 +2282,9 @@ static int reg_read(uint64_t g, int *id_, int *samp) {   // → 0 when note g is
     if (atomic_load_explicit(&n->gen, memory_order_relaxed) != g) return 0;
     *id_ = (int)(uint32_t)w; *samp = (int)(w >> 32); return 1;
 }
-// A shader's pointer is an address the driver gave out, or one worked out from it, and the driver gives addresses out by buffer, pool or texture (hle_nvn.c pool_mark_addressed). A pool with none holds
-// only textures, which Metal keeps in textures of its own, so the table leaves it out and nothing wires it for the table's sake. Ocarina of Time: 172 pools of 3,721 MB of the 4,588 MB, its whole 2,432 MB
+// A shader's pointer is an address the driver gave out, or one worked out from it, and the driver gives addresses out by buffer, pool or texture (hle_nvn.c pool_mark_addressed). The raw table admits
+// the pools so noted, and those reached by fixed pointers read before binding (gmem_discover). A pool with neither holds only textures, which Metal keeps in textures of its own, so the table leaves it
+// out and nothing wires it for the table's sake. With the getter-only filter, Ocarina of Time: 172 pools of 3,721 MB of the 4,588 MB, its whole 2,432 MB
 // graphics pool among them; with them in, the first scene passed 12 GB of Metal's 12.1 GB working set and took a 16 GB Mac into swap, and once into a kernel panic in IOGPUGroupMemory
 static struct { uintptr_t lo, hi; } *g_addr; static int g_naddr, g_addr_cap;   // sorted, disjoint. Under g_mu
 static int addr_first(uintptr_t lo) { int a = 0, b = g_naddr; while (a < b) { int m = (a + b) / 2; if (g_addr[m].hi <= lo) a = m + 1; else b = m; } return a; }   // the first range that ends after lo
@@ -2633,6 +2634,7 @@ static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
     return n;
 }
 static int pool_held(uint64_t addr, uint64_t len) {   // the entry of g_pools holding [addr, addr + len), made by no lookup: an ordinary pool, or an existing chunk
+    if (len > UINT64_MAX - addr) return -1;   // an overflowing exclusive end cannot lie in a pool, including the cached one (upstream f15d65850)
     if (g_plast >= 0 && g_plast < g_npool && addr >= g_pools[g_plast].lo && addr + len <= g_pools[g_plast].hi) return g_plast;
     pidx_sort();
     int lo = 0, hi = g_npool - 1, hit = -1;   // the last one whose start ≤ addr
@@ -3117,6 +3119,15 @@ static uint64_t g_alloc_fence[ALLOC_MAX]; static uint64_t g_alloc_waits, g_alloc
 enum { ALLOC_SHARE = 64 };
 static _Alignas(128) _Atomic uint64_t g_cur_frame;
 static uint64_t g_alloc_frame, g_alloc_shared, g_alloc_shares; static int g_alloc_used;   // the current allocator: the frame it was taken in, the submissions it has served since its reset; submissions that shared one so far
+// Idle allocators released (DM_NVN_ALLOC_TRIM, on by default; after MacNativeGames 99e42bc8 (MIT), Yong Li). An allocator keeps the command memory of the largest frame it served
+// until it is released, and the pool only grew: a burst with frames in flight (a load, the GPU behind for a while) left up to ALLOC_MAX allocators for the whole session, none of
+// their memory in the residency set (MacNativeGames, Ocarina of Time in VR: 19 allocators, 285 MB). The pick below takes the lowest finished one, so the highest are those a
+// calmer game no longer reaches: the last allocator goes once the GPU is done with it and no submission has taken it for g_alloc_idle_frames frames. ALLOC_KEEP stay (the three
+// made at start). Frames, not submissions as upstream counts: here a frame's submissions share one allocator. DM_NVN_ALLOC_TRIM=0 keeps every allocator, as before
+enum { ALLOC_KEEP = 3 };
+static uint64_t g_alloc_take_frame[ALLOC_MAX], g_alloc_trimmed;   // the frame each allocator was last taken in; allocators released so far
+static uint64_t g_alloc_idle_frames = 600;                         // 10 s at 60 fps (a test hook lowers it; the host never changes it)
+static int alloc_trim_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ALLOC_TRIM"); v = !(e && !strcmp(e, "0")); } return v; }
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site);
 static void up_flush(void);
@@ -3472,6 +3483,11 @@ void mtl_sub_begin(void) {
     int alloc_i = -1; uint64_t done = g_done, alloc_frame = atomic_load(&g_cur_frame);
     int alloc_share = g_alloc_used && g_alloc_frame == alloc_frame && g_alloc_shared < ALLOC_SHARE && allocprof_level() != 2;
     if (alloc_share) alloc_i = g_alloc_cur;
+    while (g_alloc_n > ALLOC_KEEP && g_alloc_n - 1 != g_alloc_cur && g_alloc_fence[g_alloc_n - 1] <= done && alloc_frame - g_alloc_take_frame[g_alloc_n - 1] >= g_alloc_idle_frames
+           && allocprof_level() != 2 && alloc_trim_on()) {   // the last allocator idle and finished: released (DM_NVN_ALLOC_TRIM)
+        g_alloc_n--; g_alloc4[g_alloc_n] = nil; g_alloc_fence[g_alloc_n] = 0; g_alloc_take_frame[g_alloc_n] = 0; g_alloc_trimmed++;
+        if (g_alloc_trimmed <= 3 || !(g_alloc_trimmed & (g_alloc_trimmed - 1))) MLOG("[alloc] released an idle command allocator (%llu so far); %d kept", (unsigned long long)g_alloc_trimmed, g_alloc_n);
+    }
     for (int i = 0; alloc_i < 0 && i < g_alloc_n; i++) if (g_alloc_fence[i] <= done) { alloc_i = i; break; }
     if (alloc_i < 0 && g_alloc_n < ALLOC_MAX) { NSError *ae = nil; MTL4CommandAllocatorDescriptor *ad = [MTL4CommandAllocatorDescriptor new];
         g_alloc4[g_alloc_n] = [g_dev newCommandAllocatorWithDescriptor:ad error:&ae]; if (!g_alloc4[g_alloc_n]) MDIE("failed to create a new MTL4CommandAllocator: %s", ae.localizedDescription.UTF8String);
@@ -3484,7 +3500,7 @@ void mtl_sub_begin(void) {
           if (zz > g_cm_big_z) { g_cm_big_z = zz; g_cm_big_enc = ne; g_cm_big_draws = nd; } g_cm_enc0 = g_cm_enc; g_cm_mdraws0 = g_cm_mdraws; }
         g_alloc4[alloc_i] = [g_dev newCommandAllocatorWithDescriptor:[MTL4CommandAllocatorDescriptor new] error:nil]; g_cm_last = 0;
     }
-    g_alloc_cur = alloc_i;
+    g_alloc_cur = alloc_i; g_alloc_take_frame[alloc_i] = alloc_frame;
     if (alloc_share) { g_alloc_shared++; g_alloc_shares++; }
     else { if (gpu_gone()) gpu_gone_alloc(&g_alloc4[alloc_i]); [g_alloc4[alloc_i] reset]; g_alloc_frame = alloc_frame; g_alloc_shared = 1; g_alloc_used = 1; }
     [g_cb beginCommandBufferWithAllocator:g_alloc4[alloc_i]];
@@ -4581,6 +4597,7 @@ uint64_t mtl_sub_commit(void) {
     shared_idle_commit();   // shared textures kept by the sharing table alone and long unused go behind this fence too (DM_NVN_SHARED_IDLE)
     tex_idle_commit();   // at low headroom, live textures idle for 3 s whose storage holds their content go behind this fence too (DM_NVN_IDLE_TEX_MB)
     treg_finish_submission();   // Late descriptor views retire behind this submission's fence.
+    void dlss_retire_drain(void); dlss_retire_drain();   // finalized DLSS networks' scalers retire behind this submission's fence
     rt_preserve_bound();   // The game may reuse completed command memory; queue bindings must not point into its texture snapshots.
     queue_program_preserve(); // Submitted metadata may retire while these programs remain bound.
     // The post ring holds the completion writes of POST_RING submissions. With a frame's submissions sharing one allocator (and a visibility buffer taken only by a pass that counts
@@ -4804,7 +4821,7 @@ static BOOL obj_is_tex(id object) {
     return is_texture;
 }
 
-static int g_red_once[183];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[184];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -8178,6 +8195,45 @@ static int mem_any(const uint8_t *p, uint64_t n) {   // whether any byte is non-
     return 0;
 }
 static int tex_mem_any(const tex_t *t) { int pf = pf_enter(PF_SCAN); uint8_t *pp; int any = mem_any(tex_src(t, t->L.size, &pp), t->L.size); free(pp); pf_leave(pf); return any; }
+// Stale storage read as floating-point texels. A render target placed in CPU_NO_ACCESS memory that held other data (Splatoon 3 12.0.0's environment-probe arrays, RG11B10F, over
+// reused storage) starts as that data on the Switch too; the game renders faces with SRC_ALPHA / ONE_MINUS_SRC_ALPHA blending and alpha 1, and Maxwell's float blender (SET_BLEND_FLOAT_OPTION:
+// zero times anything is zero) drops the old value even where it decodes as NaN. Metal computes NaN x 0 = NaN, so any stale NaN stays and spreads through reflections. Workaround for Metal's
+// fixed-function blender: if a non-COMPRESSIBLE float texture's first-use storage in a CPU_NO_ACCESS pool holds any NaN or infinite element, skip the fill and start from zeros instead.
+// Only CPU_NO_ACCESS pools are checked: in CPU-visible pools the storage holds what the CPU wrote (t_direct_upload writes NaN and infinity on purpose).
+static int storage_float_size(MTLPixelFormat pf) {   // element size in bytes, 0 for a format this does not check
+    switch (pf) {
+        case MTLPixelFormatRG11B10Float: return 4;
+        case MTLPixelFormatRGBA16Float: case MTLPixelFormatRG16Float: case MTLPixelFormatR16Float: return 2;
+        case MTLPixelFormatRGBA32Float: case MTLPixelFormatRG32Float: case MTLPixelFormatR32Float: return 4;
+        default: return 0;
+    }
+}
+static int storage_has_nonfinite_(const uint8_t *p, uint64_t n, MTLPixelFormat pf, int size) {
+    if (pf == MTLPixelFormatRG11B10Float) {
+        for (size_t i = 0; i + 4 <= n; i += 4) {
+            uint32_t v; memcpy(&v, p + i, 4);
+            if (((v >> 6) & 31) == 31 || ((v >> 17) & 31) == 31 || ((v >> 27) & 31) == 31) return 1;
+        }
+        return 0;
+    }
+    if (size == 2) {
+        for (size_t i = 0; i + 2 <= n; i += 2) {
+            uint16_t v; memcpy(&v, p + i, 2);
+            if ((v & 0x7c00) == 0x7c00) return 1;
+        }
+        return 0;
+    }
+    for (size_t i = 0; i + 4 <= n; i += 4) {
+        uint32_t v; memcpy(&v, p + i, 4);
+        if ((v & 0x7f800000) == 0x7f800000) return 1;
+    }
+    return 0;
+}
+static int storage_has_nonfinite(const tex_t *t, MTLPixelFormat pf) {   // through tex_src, as tex_mem_any reads the storage (an unmapped page reads as 0)
+    int size = storage_float_size(pf);
+    if (!size) return 0;
+    int pf_ = pf_enter(PF_SCAN); uint8_t *pp; int r = storage_has_nonfinite_(tex_src(t, t->L.size, &pp), t->L.size, pf, size); free(pp); pf_leave(pf_); return r;
+}
 static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
     if (!t->mem || !t->pool || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) || t->has_layout) return 0;
     if (t->d.samples > 1 || ((int)mt.pixelFormat >= 250 && (int)mt.pixelFormat <= 262)) return 0;   // 250..262: Depth16Unorm … X24_Stencil8 (some names are macOS-only)
@@ -8189,6 +8245,13 @@ static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
     static int flush_fill = -1; if (flush_fill < 0) { const char *e = getenv("DM_NVN_FLUSH_FILL"); flush_fill = !e || atoi(e) != 0; }
     if (!no_cpu && !uncached && (!flush_fill || !nvn_flushed(t->mem, t->L.size))) return 0;
     if (!atomic_load(&g_sub_thread_set) || !on_sub_thread() || !tex_mem_any(t)) return 0;   // the upload batch belongs to the submit thread
+    static int stale_keep = -1; if (stale_keep < 0) { const char *e = getenv("DM_NVN_STALE_FLOAT"); stale_keep = e && atoi(e) == 1; }
+    if (no_cpu && !stale_keep && storage_has_nonfinite(t, mt.pixelFormat)) {
+        static uint64_t ns;
+        if (ns++ < 8 || !(ns & (ns - 1))) MLOG("initial content: ser=%llu %ux%ux%u format %#x: its storage holds non-finite float texels; starts from zeros (%llu so far; DM_NVN_STALE_FLOAT=1 keeps it)",
+                                               (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, (unsigned long long)ns);
+        return 0;
+    }
     if (pkg_upload(t, NULL, mt, 0, NULL) != mt) return 0;
     int why = no_cpu ? 0 : uncached ? 1 : 2;
     static uint64_t n[3]; if (n[why]++ < 4) MLOG("initial content: ser=%llu %ux%ux%u format %#x filled from its storage, %s (%llu so far)", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format,
@@ -9303,6 +9366,7 @@ static void preread_report(unsigned long long frame) {
     MLOG("[preread] up to frame %llu: %llu ranges, %.0f MB asked to be read ahead, %.1f ms in the calls, %llu failed (range gone), %llu skipped (asked within 2 s) (DM_NVN_PREREAD)", frame, (unsigned long long)atomic_load(&g_preread_n),
          atomic_load(&g_preread_bytes) / 1048576.0, atomic_load(&g_preread_ns) / 1e6, (unsigned long long)atomic_load(&g_preread_fail), (unsigned long long)atomic_load(&g_preread_skip));
 }
+static _Atomic uint64_t g_gptr_bindings, g_gptr_reads, g_gptr_added, g_gptr_bytes;   // gmem_discover: bindings with sources, readable words, newly addressed logical pool / run ranges and bytes
 void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     if (frame && !(frame % 600)) { preread_report(frame); edge_cold_report(frame); }
     static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
@@ -9396,6 +9460,8 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
         MLOG("GPU allocation growth by op: op%d %llu MB, op%d %llu MB, op%d %llu MB, op%d %llu MB", top[0], g_ap_bytes[top[0]] >> 20, top[1], g_ap_bytes[top[1]] >> 20, top[2], g_ap_bytes[top[2]] >> 20, top[3], g_ap_bytes[top[3]] >> 20); }
     { void mtl_gmem_words(uint64_t *, uint64_t *, uint64_t *); uint64_t gw, go, gb; mtl_gmem_words(&gw, &go, &gb);
       if (gw) MLOG("raw pool table words at commit: %llu, of them %llu held an older table than the current one and %llu the current one behind the pools", (unsigned long long)gw, (unsigned long long)go, (unsigned long long)gb); }
+    if (g_gptr_bindings) MLOG("raw pointer discovery up to frame %llu: %llu bindings, %llu pointer words read, %llu previously unaddressed ranges (%llu logical MB)", frame,
+                            (unsigned long long)g_gptr_bindings, (unsigned long long)g_gptr_reads, (unsigned long long)g_gptr_added, (unsigned long long)(g_gptr_bytes >> 20));
 }
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads) { *uploads = g_pkg_uploads; *reuploads = g_pkg_reuploads; }
 uint64_t mtl_pkg_edge_skips(void) { return g_pkg_edge_skips; }
@@ -10852,7 +10918,8 @@ static void shmap_read(void) {
     id<MTLLibrary> bflib; int bflib_state; NSMutableArray *bffn;   // bflib: the readable-tile version <key>_bf (state as afn_state), bffn: its functions specialized by their numbers (NvBfFn, bf_fn)
     uint64_t mis[4];   // mis: texture slots 0-255 already reported for a type mismatch (tex_mis_note)
     NSString *ventry; id<MTLFunction> vfn; int vfn_state;
-    id<MTLFunction> pfn; int pfn_state, has_pull;
+    NSString *pentry, *wlentry, *vinentry;   // a vertex shader's entry point in its pulling library, that library's wide-line one, and its entry point in the shadow-input library, as the reflection names them (side_entry); nil: ventry's name (a layer entry point)
+    id<MTLFunction> pfn, wlfn; int pfn_state, has_pull;   // wlfn: the wide-line entry of the pulling library (wlentry, dmsh_pull.py; nvn_wline.inc), nil when it has none
     id<MTLFunction> afn[2]; int afn_state, has_alpha, has_bz;   // has_bz: its entry points read the blend weight word (bz_bind)
     id<MTLLibrary> llib; NSMutableDictionary<NSNumber *, id<MTLFunction>> *lfn; int lfn_state, has_logic; } - (instancetype)initBare; @end   // llib: the side library <key>_bx for logic operations, lfn: fn's entry point (a shader without the typed-output one, which holds its own) specialized per set of targets (lo_fn; lfn_state as afn_state; has_logic: the reflection names its entry points, dmsh_logic.py)   // afn: the alpha test entry points of fn and fn_d in the side library <key>_bx (at_fn; afn_state 0 untried, 1 loaded, 2 failed; has_alpha: the reflection names them, dmsh_alpha.py)   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
 // A shader the replay makes (shader_new: shader_load, the builtins, the geometry slice stubs) starts with an empty reflection, which nvn_refl_from_json fills with a tail block of the real size.
@@ -11144,6 +11211,13 @@ static FnOff *fn_off(id<MTLFunction> f) {
 // f's Metal 4 descriptor, without the border corrections when off
 static MTL4FunctionDescriptor *fn4_of_b(id<MTLFunction> f, int off) { FnOff *o = off ? fn_off(f) : nil; return o ? o->d4 : fn4_of(f); }
 static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e);   // a compute shader's pipeline: from the archive bundled with the app, else built
+// A vertex shader's entry point in one of its side libraries: side is the reflection's "pull" (<key>_bp, dmsh_pull.py) or "vin" (<key>_bv, dmsh_vin.py), which names the entry point
+// under key (entry, entry_z, entry_wl, entry_z_wl). A reflection that names none there means own, the name that entry point has by the shader's own (today both libraries repeat the
+// shader's names, main0 / main0_z; the reflection decides, so a library may name its entry points otherwise). shader_load, pre_desc and pso_offline.py's vertex_entry take it alike
+static NSString *side_entry(id side, NSString *key, NSString *own) {
+    id n = [side isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)side)[key] : nil;
+    return [n isKindOfClass:[NSString class]] && [n length] ? n : own;
+}
 // layer: a vertex shader's layer entry points (entry_layer / entry_layer_z, which also write the layer) instead of main0 / main0_z, for a program whose geometry shader is a slice writer (prog_fold_gs)
 static NvShader *shader_load(NSString *pc, int stage, int layer) {
     NSError *e = nil;
@@ -11167,11 +11241,11 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (o->rf.dyn && !DM_GAME_TEX_DYN_SLOTS) {   // dynamic texture handles (TEXD / SAMPD) only where the profile says the game picks them from c2's tables, as before otherwise
         // (rf.c1 is freed by dealloc when o goes: freeing it here too was a double free, which aborted FINAL FANTASY RESONANCE at its first such shader)
         MLOG("[RED] shader %s reflection conversion failed: a texture handle the translator could not trace to one slot (profile key tex_dyn_slots off)", pc.UTF8String); return nil; }
-    NSString *entry = j[@"entry"];
+    NSString *entry = j[@"entry"]; int ez = 0;   // ez: a vertex shader's entry is its near = 0 one
     if (stage == 0) {
         atomic_fetch_add(&g_vs_loaded, 1);
         int dz = atomic_load(&g_depth_zero); o->depth_moded = 1; o->load_z = (uint8_t)dz;
-        if (dz) { if (j[@"entry_z"]) entry = j[@"entry_z"]; else RED_ONCE(85, "vertex shader %s has no near=0 entry (entry_z): depth stays in the GL convention", pc.UTF8String); }
+        if (dz) { if (j[@"entry_z"]) { entry = j[@"entry_z"]; ez = 1; } else RED_ONCE(85, "vertex shader %s has no near=0 entry (entry_z): depth stays in the GL convention", pc.UTF8String); }
         if (layer) entry = dz ? j[@"entry_layer_z"] : j[@"entry_layer"];
     }
     NSDictionary *mst = [j[@"mesh_stage"] isKindOfClass:[NSDictionary class]] ? j[@"mesh_stage"] : nil;
@@ -11195,6 +11269,11 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
         } }
     o->fn = fn4_note([lib newFunctionWithName:entry], lib, entry, nil); o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key); o->ventry = entry;
     if (stage == 0) o->aspect_ui = nvn_aspect_ui_prefix(o->key, DM_GAME_ASPECT_UI_PREFIXES);   // one of the profile's HUD vertex shaders (Ultrawide's camera, nvn_aspect.h)
+    if (stage == 0 && !layer) {   // the same entry point in the side libraries <key>_bp and <key>_bv (pull_load, vin_fn), by the names the reflection gives them
+        o->pentry = side_entry(j[@"pull"], ez ? @"entry_z" : @"entry", entry);
+        o->wlentry = side_entry(j[@"pull"], ez ? @"entry_z_wl" : @"entry_wl", [entry stringByAppendingString:@"_wl"]);
+        o->vinentry = side_entry(j[@"vin"], ez ? @"entry_z" : @"entry", entry);
+    }
     if (o->mesh_notask && !(o->mesh_obj = j[@"entry_object"] ? fn4_note([lib newFunctionWithName:j[@"entry_object"]], lib, j[@"entry_object"], nil) : nil))
         MLOG("[RED] mesh shader %s: no object entry point (entry_object) in its library: its draws are skipped", pc.UTF8String);
     // writes the layer: its passes are layered and its pipelines get an input class (pso_desc). main0 / main0_z by the reflection's layer_out (dmsh_entry.py layer_out), the layer entry points always
@@ -12770,7 +12849,7 @@ static struct {
     p_bind_buf ubo[6][16], ssbo[6][16]; uint16_t ubo_set[6];   // ubo_set: the uniform slots a bind has set (cbuf_slot: an empty binding the game made, apart from a slot never bound)
     uint64_t tex[6][NTEX], samp[6][128], img[6][32];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
-    p_poly_offset po; float vp[16][4]; float dr[2]; uint8_t vp_origin[16]; int has_vp; int depth_clamp; uint8_t vp_sw[16][4];   // vp_sw: viewport swizzles XOR the identity (p_vp_swizzle)
+    p_poly_offset po; float vp[16][4]; float dr[2]; uint8_t vp_origin[16]; int has_vp; int depth_clamp; float line_width; uint8_t vp_sw[16][4];   // vp_sw: viewport swizzles XOR the identity (p_vp_swizzle)
     float blend_color[4], alpha_ref; int64_t copy_stride, copy_img_stride;   // alpha_ref: SetAlphaRef (at_bind)
     p_depth_bounds dbnd;   // SetDepthBounds as the game set it (draw resolves it, nvn_dbnd.h); off after state_reset, as on a new NVN queue
     uint8_t push[2][DMSH_PUSH_BLOCKS * DMSH_PUSH_SIZE];   // NVN2 push constants of the graphics stages and of compute, both blocks (p_push_const), bound as c[24]
@@ -12996,6 +13075,13 @@ static uint64_t vbuf_draw_bytes(int st, const nvn_refl *rf, const p_draw *dw, co
 // dw / di: the draw (NULL: no bounds), whose fetches may resolve a mapped prefix of a stream bound past its pool (vbuf_draw_bytes); such a binding holds for this draw only
 static unsigned g_vbuf_prefix_mask;
 static uint64_t g_vbuf_prefix_bytes[16];   // the same limit bounds the draw's format conversion (vconv_bind)
+// Slot 30's 64 bytes (upstream ef8b25d2c): zeros at offset 0, for inactive shadow inputs and formats with no Metal vertex format; (0, 0, 0, 1.0) at offset 16, which an attribute the
+// draw does not set reads (pso_desc), as NVN / Maxwell give an absent attribute: Splatoon Raiders' depth shader reads attribute 12.w of a draw that sets 0-9 as its opacity
+static id<MTLBuffer> vertex_constants(void) {
+    static id<MTLBuffer> b;
+    if (!b) { b = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(b); ((uint32_t *)b.contents)[7] = 0x3f800000; }
+    return b;
+}
 static int bind_vbufs(id<MTL4RenderCommandEncoder> en, const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di) {
     static struct { uint64_t addr, size, gpu, gen; } cache[16];
     uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_acquire);
@@ -13030,8 +13116,8 @@ static int bind_vbufs(id<MTL4RenderCommandEncoder> en, const nvn_refl *rf, const
         }
         enc_r_vbuf(en, VB_SLOT(s), gpu);
     }
-    static id<MTLBuffer> zero; static uint64_t zero_gpu;
-    if (!zero) { zero = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(zero); zero_gpu = zero.gpuAddress; }
+    static uint64_t zero_gpu;
+    if (!zero_gpu) zero_gpu = vertex_constants().gpuAddress;
     enc_r_vbuf(en, 30, zero_gpu);
     return bad;
 }
@@ -13060,12 +13146,13 @@ static void pull_layout_fill(pull_layout *Lp, const nvn_refl *rf, const p_draw *
     }
     for (int a = 0; a < 32 && a < S.nattr; a++) {
         va_st v = S.attr[a];
-        if (!v.fmt || v.stream >= 16) continue;
-        if (!L.s[v.stream].base) {   // the attribute reads zeros
-            if (S.vbuf[v.stream].address && (want >> v.stream & 1)) RED_ONCE(159, "vertex stream %d's buffer %#llx is in no memory pool; its attributes read zeros", v.stream, (unsigned long long)S.vbuf[v.stream].address);
-            continue;
+        if (!v.fmt) continue;   // format 0: dm_fetch gives the absent attribute's (0, 0, 0, 1.0)
+        if (v.stream < 16) {   // a stream with no buffer keeps its format word, so dm_fetch reads zeros for it rather than the absent default (upstream ef8b25d2c)
+            if (!(want >> v.stream & 1)) continue;
+            if (!L.s[v.stream].base && S.vbuf[v.stream].address) RED_ONCE(159, "vertex stream %d's buffer %#llx is in no memory pool; its attributes read zeros", v.stream, (unsigned long long)S.vbuf[v.stream].address);
+            v.offset += lo[v.stream];
         }
-        v.offset += lo[v.stream]; memcpy(&L.attr[a], &v, 4);
+        memcpy(&L.attr[a], &v, 4);
     }
     *Lp = L;
 }
@@ -13226,6 +13313,7 @@ static void state_reset(void) {
     S.poly = (poly_st){NVN_FACE_NONE, NVN_FRONT_FACE_CCW, NVN_POLYGON_MODE_FILL, 0};
     S.ds = (ds_st){0, 1, NVN_DEPTH_FUNC_LESS, 0, NVN_STENCIL_FUNC_ALWAYS, NVN_STENCIL_FUNC_ALWAYS, 1, 1, 1, 1, 1, 1};
     S.st_vmask[0] = S.st_vmask[1] = S.st_wmask[0] = S.st_wmask[1] = 0xff; S.dr[1] = 1;
+    S.line_width = 1;   // NVN's default (SetLineWidth; nvn_wline.inc)
 }
 
 // GPU bindings belong to a queue, including across submissions. FFX/X-2 destroys its launcher's queue before creating a game's: a global S kept freed launcher programs in S.bst,
@@ -13462,8 +13550,9 @@ static id<MTLFunction> vin_fn(NvShader *vs) {   // the shadow-input entry point,
     if (!vs->vfn_state) {
         vs->vfn_state = 2;
         size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bv.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
-        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
-        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);   // as shader_load
+        NSString *name = vs->vinentry ?: vs->ventry;   // the reflection's name for it in this library (shader_load)
+        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && name ? fn4_note([lib newFunctionWithName:name], lib, name, nil) : nil;
+        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, [MTLFunctionConstantValues new], &e);   // as shader_load
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
         if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) { vs->vfn = f; vs->vfn_state = 1; g_vin_loaded++; }
@@ -13473,19 +13562,23 @@ static id<MTLFunction> vin_fn(NvShader *vs) {   // the shadow-input entry point,
     os_unfair_lock_unlock(&g_vin_lock);
     return f;
 }
-// The pulling entry point (the same name as the shader's own, main0 or main0_z, in <key>_bp: dmsh_pull.py), loaded on first need; a failure is final for the shader (its draws
-// keep waiting for their pipelines as before)
+// The pulling entry point (in <key>_bp, dmsh_pull.py, under the name the reflection's "pull" gives it: pentry, today the shader's own, main0 or main0_z), loaded on first need; a
+// failure is final for the shader (its draws keep waiting for their pipelines as before)
 static os_unfair_lock g_pull_lock = OS_UNFAIR_LOCK_INIT;
 // Loads the pulling entry into vs (pfn_state 1, or 2 when it is not usable). pull_fn holds g_pull_lock around it; shader_acquire calls it on a shader no other thread has yet (before its record is finished)
 static void pull_load(NvShader *vs) {
     {
         vs->pfn_state = 2;
         size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bp.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
-        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
-        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);
+        NSString *name = vs->pentry ?: vs->ventry;
+        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && name ? fn4_note([lib newFunctionWithName:name], lib, name, nil) : nil;
+        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, [MTLFunctionConstantValues new], &e);
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
         if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
-        if (f) { vs->pfn = f; vs->pfn_state = 1; }
+        if (f) { vs->pfn = f; vs->pfn_state = 1;
+            NSString *wn = vs->wlentry ?: [NSString stringWithFormat:@"%@_wl", vs->ventry]; id<MTLFunction> w = fn4_note([lib newFunctionWithName:wn], lib, wn, nil);
+            if (w && w.functionConstantsDictionary.count) w = fn_spec(lib, wn, [MTLFunctionConstantValues new], &e);
+            vs->wlfn = w; }
         else { static _Atomic int n; if (n++ < 8) MLOG("[RED] pulling library of %s not usable (%s%s%s): its draws wait for their pipelines", vs->key, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); }
     }
 }
@@ -14018,12 +14111,12 @@ static void at_bind(id<MTL4CommandEncoder> en) {
 // source colour keeps 0: zeroing the source would also change that term, where NVIDIA keeps the NaN. With blending off, MIN / MAX (no weights) and every other factor the bits are 0
 // and the shader returns its colour as it is. DM_NVN_BLEND_ZERO=0 gives 0 for every draw (Apple's blender as it is), for A/B runs
 static int bz_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_BLEND_ZERO"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_BLEND_ZERO=0: a non-finite colour with a zero blend weight is blended as Apple's blender does (NaN kept)"); } return v; }
-static uint32_t bz_word(void) {
+static uint32_t bz_word(const uint32_t cfmt[8]) {   // cfmt: the colour formats the draw writes (the pass's, or pass-as-compute's targets)
     if (!S.color.blend_en || !bz_on()) return 0;
     uint32_t w = 0;
     for (int i = 0; i < 8; i++) {
         unsigned l = g_pso_lmap ? g_pso_lmap[i] : (unsigned)i;
-        if (l >= 8 || !g_pass.cfmt[i] || !(S.color.blend_en >> l & 1) || !pf_is_float((MTLPixelFormat)g_pass.cfmt[i])) continue;
+        if (l >= 8 || !cfmt[i] || !(S.color.blend_en >> l & 1) || !pf_is_float((MTLPixelFormat)cfmt[i])) continue;
         blend_st b = adv_blend(S.blend[l]);
         if (b.eq_rgb == NVN_BLEND_EQUATION_MIN || b.eq_rgb == NVN_BLEND_EQUATION_MAX) continue;
         if (b.dst_rgb == NVN_BLEND_FUNC_SRC_COLOR || b.dst_rgb == NVN_BLEND_FUNC_ONE_MINUS_SRC_COLOR || blend_is_src1(b.dst_rgb)) continue;
@@ -14032,16 +14125,51 @@ static uint32_t bz_word(void) {
     }
     return w;
 }
-// The word at fragment buffer DMSH_BLEND_BUFFER, for every draw of a shader that reads it: a copy in the frame arena per value and pass, as at_bind. The value is g_draw_bz, which
-// draw_map_take works out by the draw's own physical -> logical mapping before draw_ resets g_pso_lmap (a readable-tile merge's second phase writes its outputs to other attachments)
-static uint32_t g_draw_bz;
+// NVIDIA's colour unit converts a float colour into a normalized target by rounding the float32 product x * (2^n - 1) to nearest even; Apple's rounds the exact product to nearest
+// (dm/gfx/tests/t_rop_round.m; upstream NXNative a4b590976). They differ where the colour lies within rounding of a half step: Sonic Frontiers' G-buffer flags, the float32 constant
+// 66.5 / 255, are 66 on the Switch and were 67 on a Mac, which turned its ambient light off. The pixel shader rounds such outputs itself (dmsh_rewrite.py blend_zero, dm_rop), and which
+// ones and to what width comes from here: DMSH_BLEND_ROUND_BITS bits per colour output, for an 8-bit, 16-bit or RGB10A2 normalized target whose stored value is the conversion of
+// the colour: blending off for it, MIN or MAX on both its colour and alpha (they keep one of two stored values, so a colour rounded first keeps the same one), or a logic operation
+// (which takes the place of blending and rounds the colour as the target stores it; dmsh_logic.py dm_logic_norm then finds it exact). sRGB, signed, float, packed 16-bit formats and
+// blended sums (rounded after the blend, out of a shader's reach) keep Apple's conversion. GPU cost: a shader that already calls the guard loads a second word; an output with
+// bits set pays a clamp, a multiply, rint and a divide per channel. DM_NVN_ROP_ROUND=0 gives 0 for every draw, for A/B runs
+static int rop_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ROP_ROUND"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_ROP_ROUND=0: colours go into normalized targets as Apple's GPU converts them"); } return v; }
+static uint32_t rop_class(MTLPixelFormat f) {
+    switch (f) {
+        case MTLPixelFormatR8Unorm: case MTLPixelFormatRG8Unorm: case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatBGRA8Unorm: return DMSH_ROUND_8;
+        case MTLPixelFormatR16Unorm: case MTLPixelFormatRG16Unorm: case MTLPixelFormatRGBA16Unorm: return DMSH_ROUND_16;
+        case MTLPixelFormatRGB10A2Unorm: case MTLPixelFormatBGR10A2Unorm: return DMSH_ROUND_10_2;
+        default: return 0;
+    }
+}
+static inline int lop_on(void);
+static uint32_t rop_word(const uint32_t cfmt[8]) {   // cfmt: as bz_word's
+    if (!rop_on()) return 0;
+    uint32_t w = 0;
+    for (int i = 0; i < 8; i++) {
+        unsigned l = g_pso_lmap ? g_pso_lmap[i] : (unsigned)i;
+        if (l >= 8 || !cfmt[i]) continue;
+        uint32_t c = rop_class((MTLPixelFormat)cfmt[i]); if (!c) continue;
+        if (!lop_on() && S.color.blend_en >> l & 1) {
+            blend_st b = adv_blend(S.blend[l]);
+            int mm = (b.eq_rgb == NVN_BLEND_EQUATION_MIN || b.eq_rgb == NVN_BLEND_EQUATION_MAX) && (b.eq_a == NVN_BLEND_EQUATION_MIN || b.eq_a == NVN_BLEND_EQUATION_MAX);
+            if (!mm || b.adv) continue;
+        }
+        w |= c << (DMSH_BLEND_ROUND_BITS * l);
+    }
+    return w;
+}
+// The two words at fragment buffer DMSH_BLEND_BUFFER (zero, round), for every draw of a shader that reads them: a copy in the frame arena per value and pass, as at_bind. The values are
+// g_draw_bz and g_draw_rop, which draw_map_take works out by the draw's own physical -> logical mapping before draw_ resets g_pso_lmap (a readable-tile merge's second phase writes its
+// outputs to other attachments)
+static uint32_t g_draw_bz, g_draw_rop;
 static void bz_bind(id<MTL4CommandEncoder> en) {
-    static uint64_t gpu, pass; static uint32_t last;
-    uint32_t v = g_draw_bz;
-    if (!gpu || pass != g_pass.serial || v != last) {
-        __strong id<MTLBuffer> b; size_t off = arena_alloc(16, &b); memset((uint8_t *)b.contents + off, 0, 16); memcpy((uint8_t *)b.contents + off, &v, sizeof v);
-        gpu = b.gpuAddress + off; pass = g_pass.serial; last = v;
-        if (v) { static uint64_t n; if (++n <= 3 || !(n & (n - 1))) MLOG("blend: a zero source weight on a floating-point target (outputs %#x): a non-finite colour is blended as 0 there, as NVIDIA's blender does (%llu passes or states so far)", v, (unsigned long long)n); }
+    static uint64_t gpu, pass; static uint32_t last[2];
+    uint32_t v[2] = {g_draw_bz, g_draw_rop};
+    if (!gpu || pass != g_pass.serial || memcmp(v, last, sizeof v)) {
+        __strong id<MTLBuffer> b; size_t off = arena_alloc(16, &b); memset((uint8_t *)b.contents + off, 0, 16); memcpy((uint8_t *)b.contents + off, v, sizeof v);
+        gpu = b.gpuAddress + off; pass = g_pass.serial; memcpy(last, v, sizeof v);
+        if (v[0]) { static uint64_t n; if (++n <= 3 || !(n & (n - 1))) MLOG("blend: a zero source weight on a floating-point target (outputs %#x): a non-finite colour is blended as 0 there, as NVIDIA's blender does (%llu passes or states so far)", v[0], (unsigned long long)n); }
     }
     enc_r_args((id<MTL4RenderCommandEncoder>)en, MTLRenderStageFragment, gpu, DMSH_BLEND_BUFFER);
 }
@@ -14225,7 +14353,7 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
     const nvn_refl *rf = &vs->rf; int nconv = 0, on = vin_on(vs, k, k->fsfn == TF_MARK || k->fsfn == GEO_MARK || k->fsfn == DISCARD_MARK);
     if (on & VIN_SHADOW) { d.vertexFunction = vs->vfn; g_vin_psos++; }   // the shadow-input entry point (see vin_on)
     #define ZERO_ATTR(i, ct_) do { vd.attributes[i].format = (ct_) == NVN_CT_UINT ? MTLVertexFormatUInt4 : (ct_) == NVN_CT_INT ? MTLVertexFormatInt4 : MTLVertexFormatFloat4; vd.attributes[i].offset = 0; vd.attributes[i].bufferIndex = 30; \
-                                  vd.layouts[30].stride = 16; vd.layouts[30].stepFunction = MTLVertexStepFunctionConstant; vd.layouts[30].stepRate = 0; } while (0)   // reads the zero buffer
+                                  vd.layouts[30].stride = 32; vd.layouts[30].stepFunction = MTLVertexStepFunctionConstant; vd.layouts[30].stepRate = 0; } while (0)   // reads the zero buffer (stride 32: the absent default at offset 16 fits it, which metal-tt requires; pso_offline.py)
     for (int v = 0; v < rf->nv; v++) {
         int loc = rf->v[v].loc, a = rf->v[v].nvn;   // Metal slot loc ← NVN attribute a
         va_st ka = a < 32 ? pso_key_attr(k, a) : (va_st){0};
@@ -14235,7 +14363,11 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         if (on & VIN_SHADOW) { if (at != loc) ZERO_ATTR(loc, rf->v[v].ct); for (int q = 0; q < 3; q++) if (rf->v[v].sh[q] != 0xff && rf->v[v].sh[q] != at) ZERO_ATTR(rf->v[v].sh[q], q); }
         // When a >= S.nattr, k.attr[a] keeps the 0 from memset, vfmt(0) is Invalid, the same fallback branch is taken and the RED_ONCE condition of fmt being non-0 does not hold.
         if (ka.fmt && vf == MTLVertexFormatInvalid) RED_ONCE(15, "vertex attribute format %#x not mapped", ka.fmt);
-        if (vf == MTLVertexFormatInvalid) { ZERO_ATTR(at, ct); continue; }
+        if (vf == MTLVertexFormatInvalid) {
+            ZERO_ATTR(at, ct);
+            if (!ka.fmt) vd.attributes[at].offset = 16;   // an absent attribute reads (0, 0, 0, 1.0) (vertex_constants); inactive shadow inputs and unknown formats stay zero
+            continue;
+        }
         int st = ka.stream;
         if (vconv_wanted(rf, v, k, on) && nconv < VCONV_MAX) {   // converted on the CPU at draw time (vconv_bind): the register's 32-bit values, 4 components, its own slot
             int slot = VCONV_SLOT0 + nconv++;
@@ -16539,6 +16671,7 @@ static MTL4RenderPipelineDescriptor *pre_desc_ex(NSString *vk, NSString *fk, int
     if (vj[@"mesh_stage"]) return nil;   // a mesh shader's pair (shader_pairs.tsv holds them for its padding): mesh pipelines are built at the draw (nvn_geometry.inc mtk_pso), no base
     NSString *ventry = zero && vj[@"entry_z"] ? vj[@"entry_z"] : vj[@"entry"], *fentry = fe.length ? fe : fj[@"entry"] ?: @"main0";
     int pull = [vj[@"pull"] isKindOfClass:[NSDictionary class]];
+    if (pull) ventry = side_entry(vj[@"pull"], zero && vj[@"entry_z"] ? @"entry_z" : @"entry", ventry);   // its name in the pulling library, as shader_load gives pull_load
     if (!pull && [vj[@"vertex_inputs"] count]) return nil;   // stage inputs and no pulling library: its pipelines need the draw's layout
     if ([vj[@"layer_out"] boolValue]) return nil;   // writes the layer (as shader_load takes it): its pipelines take an input primitive class (pso_desc), no pulling pipeline
     NSDictionary *fr = fj[@"raster"]; if ([fr isKindOfClass:[NSDictionary class]] && [fr[@"primitive_id"] intValue]) return nil;   // reads the primitive ID: its pipelines are built whole (pso_build_ex), no base
@@ -17057,6 +17190,8 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
     NSMutableArray<WarmTask *> *tasks = [NSMutableArray array]; NSMutableDictionary<NSString *, WarmTask *> *pairs = [NSMutableDictionary dictionary];
     NSMutableSet<NSString *> *seen = [NSMutableSet set], *stale = [NSMutableSet set]; long n = 0;
     NSMutableSet<NSData *> *seen_k = [NSMutableSet set];   // rows recorded before pso_key_norm that are one pipeline now
+    NSMutableSet<NSString *> *seen_shader = [NSMutableSet set];
+    NSMutableSet<NSArray *> *seen_mesh = [NSMutableSet set];
     for (NSString *path in paths) {
         NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
         if (!txt) { MLOG("[RED] cannot read prewarm list: %s", path.UTF8String); continue; }
@@ -17069,7 +17204,11 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
             WarmTask *t = nil;
             if (([c[0] isEqualToString:@"S"] && c.count >= 3) || ([c[0] isEqualToString:@"C"] && c.count >= 2)) {
                 if (!c[1].length || warm_stale(c[1], stale)) continue;
-                t = [WarmTask new]; t->kind = [c[0] isEqualToString:@"S"] ? 0 : 2; t->key = c[1]; t->stage = t->kind ? 5 : c[2].intValue; [tasks addObject:t];
+                int shader = [c[0] isEqualToString:@"S"];
+                int stage = stage_of(warm_map_stage(c[1]));   // Same stage as the live loader: NVN2 task/mesh 6/7 occupy host slots 3/4. Warm loads share one object per name.
+                if (stage < 0 || (!shader && stage != 5) || (shader && [seen_shader containsObject:c[1]])) continue;
+                if (shader) [seen_shader addObject:c[1]];
+                t = [WarmTask new]; t->kind = shader ? 0 : 2; t->key = c[1]; t->stage = stage; [tasks addObject:t];
             } else if ([c[0] isEqualToString:@"R"] && c.count >= 2) {
                 pso_skey sk; if (pso_skey_parse(c[1].UTF8String, &sk)) continue;
                 NSData *kd = [NSData dataWithBytes:&sk length:sizeof sk]; if ([seen_k containsObject:kd]) continue;
@@ -17090,8 +17229,12 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
                 if (![warm_map_stage(vkey) isEqualToString:@"mesh"] ||
                     (fkey.length && ![warm_map_stage(fkey) isEqualToString:@"pixel"]) ||
                     (tkey && ![warm_map_stage(tkey) isEqualToString:@"task"])) continue;
+                NSData *kd = [NSData dataWithBytes:&sk length:sizeof sk];
+                NSArray *identity = @[c[1], kd];   // The same mesh state with a different task shader is a different pipeline.
+                if ([seen_mesh containsObject:identity]) continue;
+                [seen_mesh addObject:identity];
                 t = [WarmTask new]; t->kind = 3; t->vkey = vkey; t->fkey = fkey; t->tkey = tkey;
-                t->rs = [NSMutableArray arrayWithObject:[NSData dataWithBytes:&sk length:sizeof sk]];
+                t->rs = [NSMutableArray arrayWithObject:kd];
                 [tasks addObject:t];
             } else if ([c[0] isEqualToString:@"K"] && c.count == 3) { void pcm_prewarm(const char *vk, const char *fk); pcm_prewarm(c[1].UTF8String, c[2].UTF8String); continue;   // a pass-as-compute kernel's pipeline (pcm_kernel)
             } else continue;
@@ -18946,7 +19089,12 @@ static id<MTLBuffer> gmem_map_at(int current) {
         uint64_t lo = MAX((uint64_t)p->lo, end), hi = p->hi;
         if (lo >= hi) continue;
         if (n == DMSH_GMEM_MAP_ENTRIES) { over++; continue; }
-        uint64_t e[3] = {lo, hi, p->gpu - p->base}; memcpy(t + (size_t)n++ * DMSH_GMEM_MAP_ENTRY, e, sizeof e); end = hi;
+        uint8_t *entry = t + (size_t)n++ * DMSH_GMEM_MAP_ENTRY;
+        uint64_t e[3] = {lo, hi, p->gpu - p->base}; memcpy(entry, e, sizeof e);
+        // The span (word 7, upstream 736a2ecbb): a raw load reuses its last entry by comparing the address's high word and the unsigned offset of its low word against it.
+        // Only for a range within one 4 GiB window; 0 (the memset above) sends loads through the full lookup. A translator without the short check never reads it
+        if (hi - lo <= UINT32_MAX && (lo >> 32) == ((hi - 1) >> 32)) { uint32_t span = (uint32_t)(hi - lo); memcpy(entry + 28, &span, sizeof span); }
+        end = hi;
     }
     pthread_mutex_unlock(&g_mu);
     // Each 2 MiB chunk wholly inside an entry gets a hint, so most accesses skip the binary search. A colliding chunk replaces the hint and the shader's tag check sends the other to the search
@@ -18966,6 +19114,36 @@ static id<MTLBuffer> gmem_map_at(int current) {
     return b;
 }
 static uint64_t gmem_map_gpu(void) { return gmem_map().gpuAddress; }
+// A raw pointer read from a fixed storage-buffer word can reach a pool whose address no NVN getter handed out (upstream f15d65850: the omitted pool case of its PR #1585). Discover it before
+// the draw or dispatch binds its arguments, including when its argument block is reused; gmem_commit_patch then gives every block the complete table. Record the logical pool / run, not each
+// interior pointer or the Metal buffer's page-rounded padding. The CPU sees only pointer values available now (or a complete queued inline update). GPU-generated values still rely on the
+// table; this does not fix task / mesh ordering hangs. The sources come from the translator (dmsh_reflect.py gptr_sites): libraries of an older chain have none, and nothing runs here
+static void gmem_discover(NvShader *sh, int stage) {
+    g_gptr_bindings++;
+    for (int q = 0; q < sh->rf.ngptr; q++) {
+        const p_bind_buf *u = &S.ssbo[stage][sh->rf.gptr[q].reg]; uint64_t off = sh->rf.gptr[q].off, ptr = 0;
+        if (!u->addr || (u->size && (off > u->size || u->size - off < 8))) continue;
+        uint64_t at = u->addr + off;
+        if (at < u->addr || at > UINT64_MAX - 8) continue;
+        int kind;
+        if (!pend_read(at, 8, &ptr, &kind)) {
+            // A declared size does not prove the source is mapped: sparse holes read zero on the GPU and may be PROT_NONE on the CPU
+            if (!nvn_host_readable(at, 8) || !mtl_addr_known(at, 8)) continue;
+            memcpy(&ptr, (const void *)(uintptr_t)at, 8);
+        }
+        g_gptr_reads++;
+        if (!ptr) continue;
+        uintptr_t lo = 0, hi = 0;
+        pthread_mutex_lock(&g_mu);
+        int b = big_of(ptr), p = b < 0 ? pool_held(ptr, 1) : -1;
+        if (b >= 0) { lo = g_big[b].lo; hi = g_big[b].hi; }
+        else if (p >= 0) { lo = g_pools[p].lo; hi = g_pools[p].hi; }
+        int fresh = hi > lo && !addr_meets(lo, hi);
+        pthread_mutex_unlock(&g_mu);
+        if (fresh) { g_gptr_added++; g_gptr_bytes += hi - lo; }
+        if (hi > lo) mtl_pool_addressed((const void *)lo, hi - lo);
+    }
+}
 // An argument block holds the pool table that was current when it was encoded. A pool made after that, later in the submission or on another thread while it is encoded, is not in it, and a raw
 // read of that pool gets 0: the failure that hung agl's task shaders (docs/reference/shaders.md, More memory pools than the raw pool table had entries). The GPU has not read the blocks of the
 // command buffer yet, so at each commit, whole or segment, their table words are pointed at a table of the pools as they are then (as #1407 does). A new table is built when the pools changed,
@@ -19208,18 +19386,25 @@ static __unsafe_unretained id<MTLBuffer> g_c0_dim_buf; static size_t g_c0_dim_of
 // {mask, log2 samples, z, w} at 0x630; each byte holds the sample's x (low nibble) and y (high nibble) in 1/16 pixel. Metroid Prime Remastered's G-buffer shaders pack it into an
 // integer target (30 of its pixel shaders read it); left at 0, every sample sat in the pixel's corner instead of its centre (0x88 for one sample). Metal rasterizes at its default
 // positions, the same for every pixel, so the grid masks stay 0 and the table holds those positions. Only one sample was met: the nibble order for several is the hardware's
-// (nouveau's sample locations), not seen in a game
-static void c0_sample_rows(uint8_t *d, uint32_t samples) {
-    static uint8_t table[17][DMSH_C0_SAMPLE_BYTES]; static uint32_t made;   // per sample count, made on first use
+// (nouveau's sample locations), not seen in a game.
+// NVN2's table (ounce) holds each nibble as a signed offset from the pixel centre instead (the corner form with bit 3 flipped, so 0x00 for one sample; upstream 224ecb186): its
+// shaders either flip it back before use (PRAGMATA's 154 sample position readers: (byte ^ 0x88) nibbles / 16 - 0.5, added to the pixel centre) or pass the nibbles as they are to
+// IPA's offset, which is signed from the centre (its pixel shader 4a9d4507eea6c837). With the corner form there, every sample position read half a pixel up and left. Whether
+// NVN1's table is the same was not checked (Metroid Prime Remastered only stores the byte): open
+static void c0_sample_rows(uint8_t *d, uint32_t samples, int ounce) {
+    static uint8_t table[2][17][DMSH_C0_SAMPLE_BYTES]; static uint32_t made[2];   // per driver and sample count, made on first use
     if (samples < 1 || samples > DMSH_C0_SAMPLE_BYTES) samples = 1;
-    if (!(made >> samples & 1)) {
-        if (samples == 1) table[1][0] = 0x88;
+    ounce = !!ounce;
+    if (!(made[ounce] >> samples & 1)) {
+        uint8_t *t = table[ounce][samples];
+        if (samples == 1) t[0] = 0x88;
         else { MTLSamplePosition pos[DMSH_C0_SAMPLE_BYTES]; [g_dev getDefaultSamplePositions:pos count:samples];
-               for (uint32_t i = 0; i < samples; i++) table[samples][i] = (uint8_t)(((int)(pos[i].x * 16) & 15) | ((int)(pos[i].y * 16) & 15) << 4); }
-        made |= 1u << samples;
+               for (uint32_t i = 0; i < samples; i++) t[i] = (uint8_t)(((int)(pos[i].x * 16) & 15) | ((int)(pos[i].y * 16) & 15) << 4); }
+        if (ounce) for (uint32_t i = 0; i < samples; i++) t[i] ^= 0x88;
+        made[ounce] |= 1u << samples;
     }
     uint32_t info[4] = { samples - 1, (uint32_t)__builtin_ctz(samples), 0, 0 };
-    memcpy(d + DMSH_C0_SAMPLE_TABLE, table[samples], DMSH_C0_SAMPLE_BYTES); memcpy(d + DMSH_C0_SAMPLE_INFO, info, sizeof info);
+    memcpy(d + DMSH_C0_SAMPLE_TABLE, table[ounce][samples], DMSH_C0_SAMPLE_BYTES); memcpy(d + DMSH_C0_SAMPLE_INFO, info, sizeof info);
 }
 // The driver constant segments' contents (encode_args_ DRV0 / DRV2), into a zeroed DMSH_DRV_SIZE buffer: c0 from the stage's storage buffers, the draw's base instance, the pass's
 // sample count (pixel stage) and, for compute, the dispatch size and uniform slots; c2 from the stage's texture, image and sampler handles
@@ -19241,7 +19426,7 @@ static void drv_fill_c0(uint8_t *d, int st) {
     // transform this way, and 1,550 reads in 793 of its vertex shaders. Left at 0, every box was box 0: all six queries came back empty, and the game, taking its characters for
     // hidden, posed their legs straight back from the hips. 0x640 (read by 58 shaders, added to the vertex ID) stays 0: what the driver puts there is not established
     if (st != 5) memcpy(d + DMSH_C0_BASE_INSTANCE, &g_draw_binst, 4);
-    if (st == 1) c0_sample_rows(d, g_pass.samples);
+    if (st == 1) c0_sample_rows(d, g_pass.samples, dm_sdk_ounce());
     if (st == 5) {
         memcpy(d + DMSH_C0_DISPATCH, g_dispatch_dim, 12);
         // NVN2 compute also reads them below its per-shader layout: a light culling shader's cluster is (z * c0[8] + y) * c0[4] + x, and at zero every cluster of a column wrote the same entry
@@ -19321,7 +19506,7 @@ static uint64_t drv_bank(const NvShader *sh, int st, int bank, __unsafe_unretain
             int base = c0_ssbo_base(st);
             if (k & PK_SSBO) for (int r = 0; r < DMSH_C0_SSBO_SLOTS; r++) { uint64_t ad = S.ssbo[st][r].addr; uint32_t n = (uint32_t)S.ssbo[st][r].size; memcpy(d + base + DMSH_C0_ROW * r, &ad, 8); memcpy(d + base + DMSH_C0_ROW * r + 8, &n, 4); }
             if (bi) memcpy(d + DMSH_C0_BASE_INSTANCE, &g_draw_binst, 4);
-            if (sa) c0_sample_rows(d, g_pass.samples);
+            if (sa) c0_sample_rows(d, g_pass.samples, dm_sdk_ounce());
         }
         g_stat_drv[c2][DB_DERIVED]++;
     } else {
@@ -19868,6 +20053,7 @@ static int encode_args_(id<MTL4CommandEncoder> en, NvShader *sh, int nvn_stage, 
     if (nvn_stage == 1 && !metal_vertex && sh->has_bz) bz_bind(en);
     if (nvn_stage == 1 && !metal_vertex && (sh->has_logic || sh->u_logic) && lop_on()) lo_bind(en);   // main0_u holds the operation without a main0_l (upstream 20b59b6e5)
     if (!sh->arg_len) return 1;   // no bindings (shader_load sets it with them)
+    if (sh->rf.ngptr) gmem_discover(sh, nvn_stage);   // before a reused block too (upstream f15d65850)
     args_sync_dirty(); const uint64_t rck0 = g_args_seq;   // a block written now holds IDs as current as the last registration sync (ab_rck)
     int xpass = args_xpass_on(), same = sh->ab_gen == g_args_gen[nvn_stage] && sh->ab_pass == g_pass.serial;
     int cross = !same && xpass && args_xpass_ok(sh, nvn_stage);   // good beyond its pass or program (DM_NVN_ARGS_XPASS)
@@ -20005,7 +20191,9 @@ static int encode_args_(id<MTL4CommandEncoder> en, NvShader *sh, int nvn_stage, 
             slots[aid] = trid;
             USE(t, snap >= 0 ? MTLResourceUsageRead : MTLResourceUsageRead | MTLResourceUsageWrite);
         } else if (b->kind == NVN_RB_TBUF || b->kind == NVN_RB_TBUFU) {   // Typed buffer: the buffer texture (target BUFFER) in texture slot r, or its handle in a uniform buffer (TBUFU)
-            int tid = b->kind == NVN_RB_TBUFU ? ubo_tex_id(ubo_handle(nvn_stage, reg, b->off)) : (int)(tex_slot_h(S.tex[nvn_stage], S.img[nvn_stage], reg) & 0xfffff);
+            // A type-1 handle ORs two words, in either order, even for a samplerless fetch (upstream 44b8ab17b): Civilization VI's glyph vertices take the texture ID from the second
+            // word, and reading only the first (sampler) word bound the dummy buffer and collapsed the text. The same complete handle as ordinary bindless textures
+            int tid = b->kind == NVN_RB_TBUFU ? ubo_tex_id(ubo_bind_handle(nvn_stage, b)) : (int)(tex_slot_h(S.tex[nvn_stage], S.img[nvn_stage], reg) & 0xfffff);
             void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
             if (t && t.textureType != MTLTextureTypeTextureBuffer) { tex_mis_note(sh, nvn_stage, reg, tid, t, MTLTextureTypeTextureBuffer, "a buffer slot: it reads 0 (dummy)"); t = nil; }
             if (bl) PD("B %llu st%d tbuf reg%d tid=%d %s ser=%llu fmt=%#x n=%u mem=%p", g_stat_pass, nvn_stage, reg, tid, t ? "real" : "dummy", t && tid < g_ntreg ? g_treg[tid].t.serial : 0ull,
@@ -20291,7 +20479,7 @@ static int ls_dead_scan(uint64_t ser, int has_v, const view_t *v, uint64_t mem, 
             case OP_CLEAR_BUF: { const p_clear_buf *cb = a; if (ls_range_hits(cb->addr, cb->size, mem, msize)) return 0; break; }
             case OP_BEGIN: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
             case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
-            case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST:
+            case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_LINE_WIDTH: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST:
             case OP_COPY_STRIDE: case OP_TF_BIND: case OP_TF_STATE: case OP_RAST_DISCARD: case OP_PRIM_RESTART: case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: break;
             default: return 0;   // a draw, dispatch, texture copy or clear, event, query, conditional rendering, or anything else
         }
@@ -20399,7 +20587,8 @@ static int state_op(uint32_t op, const void *a) {
             S.has_vp = 1; break; }
         case OP_DEPTH_RANGE: { const p_depth_range *b = a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
         case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_depth_clamp *)a)->on; break;
-        case OP_DEPTH_BOUNDS: S.dbnd = *(const p_depth_bounds *)a; break;   // encoder state set by draw, not part of the pipeline
+        case OP_DEPTH_BOUNDS: S.dbnd = *(const p_depth_bounds *)a; break;
+        case OP_LINE_WIDTH: S.line_width = ((const p_line_width *)a)->w; break;   // wide lines (nvn_wline.inc)   // encoder state set by draw, not part of the pipeline
         case OP_VP_SWIZZLE: { const p_vp_swizzle *b = a; memcpy(S.vp_sw[b->first], b->sw, 4 * (size_t)b->n); break; }
         case OP_BLEND_COLOR: memcpy(S.blend_color, ((const p_blend_color *)a)->rgba, 16); break;
         case OP_ALPHA_REF: S.alpha_ref = ((const p_alpha_ref *)a)->ref; break;   // data for at_bind, not part of the pipeline
@@ -20647,7 +20836,7 @@ static int sm_scan(const uint8_t *p, const p_set_rt *rt, int cur, int *lo, int *
             case OP_UPDATE_UB: if (!ubd_on()) return n; break;
             case OP_DRAW: case OP_DRAW_IDX: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM:
             case OP_BIND_VBUF: case OP_BIND_VBUF1: case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL: case OP_POLY_OFFSET:
-            case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: break;
+            case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_LINE_WIDTH: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: break;
             default: return n;
         }
         p += h.size;
@@ -21688,7 +21877,7 @@ static int tba_collect(NvShader *x, int stage, tba_job *jobs, int n) {   // call
     for (int i = 0; i < x->rf.nb; i++) { const nvn_rbind *b = &x->rf.b[i]; int reg = b->reg;
         if (b->tbx && (b->kind == NVN_RB_TBUF || b->kind == NVN_RB_TBUFU || b->kind == NVN_RB_TEXD || b->kind == NVN_RB_TEXA)) continue;   // read in place through the offset table (tbuf_lead)
         if (b->kind == NVN_RB_TBUF || b->kind == NVN_RB_TBUFU)
-            n = tba_want(b->kind == NVN_RB_TBUFU ? ubo_tex_id(ubo_handle(stage, reg, b->off)) : (int)(tex_slot_h(S.tex[stage], S.img[stage], reg) & 0xfffff), 0, jobs, n);
+            n = tba_want(b->kind == NVN_RB_TBUFU ? ubo_tex_id(ubo_bind_handle(stage, b)) : (int)(tex_slot_h(S.tex[stage], S.img[stage], reg) & 0xfffff), 0, jobs, n);   // the complete handle, as encode_args_ binds it
         else if (b->kind == NVN_RB_TEXU && b->n) { if (b->dtt == (uint8_t)MTLTextureTypeTextureBuffer) for (int k = 0; k < b->n; k++) n = tba_want(ubo_tex_id(ubo_handle(stage, reg, b->off + 8 * k)), 0, jobs, n); }
         else if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TEXU) {
             int tid = b->kind == NVN_RB_TEXU ? ubo_tex_id(ubo_bind_handle(stage, b)) : (int)(tex_slot_h(S.tex[stage], S.img[stage], reg) & 0xfffff);
@@ -22111,7 +22300,7 @@ static int fsm_encode(id<MTL4RenderCommandEncoder> en, NvProg *pr, const p_draw 
     encode_args((id<MTL4CommandEncoder>)(id)en, pr->sh[0], pr->sh[0]->stage == 4 ? 4 : 0, 1);
     encode_args((id<MTL4CommandEncoder>)(id)en, pr->sh[1], 1, 0);
     if ((id)g_enc != (id)en) return -1;   // binding upgraded a texture, which ended the pass (draw_)
-    if (pr->sh[1]->has_bz) bz_bind((id<MTL4CommandEncoder>)(id)en);
+    if (pr->sh[1]->has_bz) { g_draw_bz = bz_word(g_pass.cfmt); g_draw_rop = rop_word(g_pass.cfmt); bz_bind((id<MTL4CommandEncoder>)(id)en); }   // this draw's words, not the last draw_'s (g_pso_lmap is unset here: fsp_plan)
     g_stat_draw++;
     fsp_encode(en, (dw ? dw->prim : di->prim) == 5 ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle, dw, di);
     return 1;
@@ -22375,6 +22564,7 @@ static int mdx_next(const p_draw *dw, const p_draw_idx *di) {
 
 static int skip_fs_draw(NvProg *pr);   // DM_NVN_SKIP_FS (diagnostic), also for task / mesh draws
 #include "nvn_geometry.inc"
+#include "nvn_wline.inc"   // lines wider than a pixel: a quad per segment
 static int geo_drawing(void) { return g_geo_program != nil || g_geo_mesh.on; }
 
 // ---------- Colour loads no draw of the pass needs (DM_NVN_UNWRITTEN_LOAD) ----------
@@ -22548,7 +22738,7 @@ static int lc_keeps(uint32_t op) {
         case OP_SET_RT: case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_DRAW: case OP_DRAW_IDX: case OP_BEGIN: case OP_JUMP: case OP_CALL:
         case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
         case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
-        case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
+        case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_LINE_WIDTH: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
         case OP_TF_BIND: case OP_TF_STATE: case OP_RAST_DISCARD: case OP_PRIM_RESTART: case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_RENDER_COND:
         case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: return 1;
         default: return 0;
@@ -22659,7 +22849,7 @@ static int csh_dispatch_ahead(void) {
             case OP_DRAW: case OP_DRAW_IDX:
             case OP_ALPHA_REF: case OP_BIND_IMG: case OP_BIND_PROGRAM: case OP_BIND_SAMP: case OP_BIND_SSBO: case OP_BIND_STATE: case OP_BIND_TEX: case OP_BIND_TEX1:
             case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_VATTR: case OP_BIND_VBUF: case OP_BIND_VBUF1: case OP_BIND_VSTREAM: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
-            case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_DEPTH_RANGE: case OP_POLY_OFFSET: case OP_PRIM_RESTART: case OP_PUSH_CONST: case OP_RAST_DISCARD: case OP_SCISSOR: case OP_SET_SAMP_POOL:
+            case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_LINE_WIDTH: case OP_DEPTH_RANGE: case OP_POLY_OFFSET: case OP_PRIM_RESTART: case OP_PUSH_CONST: case OP_RAST_DISCARD: case OP_SCISSOR: case OP_SET_SAMP_POOL:
             case OP_SET_TEX_POOL: case OP_STENCIL: case OP_TF_BIND: case OP_VIEWPORTS: case OP_VP_SWIZZLE:
                 continue;
             default: g_csh_why = hq.op; return 0;   // OP_TF_STATE and everything state_op does not take stop the full scan too
@@ -22746,7 +22936,8 @@ static uint32_t draw_color_writes(NvProg *pr) {
 // logical output, formats by the physical attachment each output goes to). Then g_pso_lmap is reset, and the next draw fetches its pipeline again according to its own situation
 static uint32_t draw_map_take(NvProg *pr) {
     uint32_t raster_mask = draw_color_writes(pr);
-    g_draw_bz = pr && pr->sh[1] && pr->sh[1]->has_bz && !S.rast_discard ? bz_word() : 0;
+    int bz = pr && pr->sh[1] && pr->sh[1]->has_bz && !S.rast_discard;
+    g_draw_bz = bz ? bz_word(g_pass.cfmt) : 0; g_draw_rop = bz ? rop_word(g_pass.cfmt) : 0;   // rop_word: upstream a4b590976
     if (g_pso_lmap) { g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz); g_pso_dirty = 1; }
     return raster_mask;
 }
@@ -22983,6 +23174,9 @@ static int pcm_run(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
         d.ib = [(__bridge id<MTLBuffer>)ib gpuAddress] + io; d.itype = (uint32_t)di->itype + 1; d.base_vertex = di->base_vertex; d.base_instance = (uint32_t)di->base_instance; }
     // The draw's bindings, through the usual code into the vertex and fragment tables
     pull_bind(nil, &vs->rf, dw, di);
+    {   // the blend guard's words for this draw's own targets (bz_bind, through encode_args): no pass is open, so g_pass.cfmt and the last draw's words are another pass's
+        uint32_t cf[8] = {0}; for (int i = 0; i < n; i++) cf[i] = (uint32_t)out[i].pixelFormat;
+        g_draw_bz = fs->has_bz ? bz_word(cf) : 0; g_draw_rop = fs->has_bz ? rop_word(cf) : 0; }
     encode_args(nil, vs, 0, 1); encode_args(nil, fs, 1, 0);
     if (!g_pcm_at) { MTL4ArgumentTableDescriptor *atd = [MTL4ArgumentTableDescriptor new]; atd.maxBufferBindCount = 31; atd.maxTextureBindCount = 17; NSError *ate = nil;
         g_pcm_at = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_pcm_at) { MLOG("[RED] pass-as-compute: no argument table: %s", ate.localizedDescription.UTF8String); PCM_NO(12); } }
@@ -23035,6 +23229,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
                       a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]); }]; }
     if (!g_geo_program && S.prog) {
         __unsafe_unretained NvProg *geometry_program = prog_get(S.prog);   // borrowed: the serial table holds it (prog_get_ptr)
+        if (!g_wl.on && wl_wanted(geometry_program, dw, di) && wl_draw(geometry_program, dw, di)) return;   // lines wider than a pixel (nvn_wline.inc)
         if (geometry_program && geometry_program->sh[2] && geometry_program->sh[2]->geo_vertices) {
             if ((dw && dw->mdi_cnt && !mdi_live(dw->mdi_cnt, dw->mdi_i)) || (di && di->mdi_cnt && !mdi_live(di->mdi_cnt, di->mdi_i))) return;
             image_prepare(geometry_program, (1u << 0) | (1u << 2));
@@ -23080,7 +23275,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         if (!mdx_find(ind, cnt, &mdx)) { mdx_run(dw, di); if (!mdx_find(ind, cnt, &mdx)) mdx = 0; }
         if (!mdx && !mdi_live(cnt, i)) return; }
     else if (!g_enc && g_exec_next) mdx_prescan();   // the pass this draw opens: its multi-draws copied first (see mdx_prescan)
-    if (di && wide_wanted(di) && !wide_find(di)) wide_run(di);   // 8-bit indices written earlier in this submission: widened on the GPU before the render pass (see wide_run)
+    if (di && !g_wl.on && wide_wanted(di) && !wide_find(di)) wide_run(di);   // 8-bit indices written earlier in this submission: widened on the GPU before the render pass (see wide_run)
     // Draws that cannot draw anything (both faces culled, empty scissor) return before the render pass is opened: otherwise the render pass is already open and on TBDR the whole attachment is loaded and stored for nothing
     // (Mac character select page: 3 render passes are opened only because of such draws, all loaded, zero draws)
     // DM_NVN_SKIP_FS / DM_NVN_UB (skip_fs_draw)
@@ -23090,7 +23285,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     { static int small = -1; if (small < 0) { const char *e = getenv("DM_NVN_SKIP_SMALL"); small = e ? atoi(e) : 0; if (small) MLOG("DM_NVN_SKIP_SMALL: dropping draws whose target width is ≤ %d (diagnostic; the picture is wrong)", small); }
       if (small > 0 && R.has_rt) { int k = R.rt.n && R.rt.color[0] ? 0 : R.rt.depth ? 8 : -1;
         if (k >= 0) { uint64_t s_; int lv, sl; rt_sub(&R.rt, k, &s_, &lv, &sl); const tex_t *t = k == 8 ? R.rt.depth : R.rt.color[0]; if ((int)MAX(t->d.width >> lv, 1u) <= small) return; } } }
-    if (S.poly.cull == NVN_FACE_FRONT_AND_BACK && !S.rast_discard) { PD("Z %llu draw skipped (before the pass begins): both faces culled", g_stat_pass + !g_enc); return; }
+    if (S.poly.cull == NVN_FACE_FRONT_AND_BACK && !S.rast_discard && !g_wl.on) { PD("Z %llu draw skipped (before the pass begins): both faces culled", g_stat_pass + !g_enc); return; }
     g_samples_fb_left = 1;
     int rt_sampled = g_rt_merged && draw_samples_rt(pr); g_samples_fb_left = 0;
     if (rt_sampled) { static int once; if (!once++) MLOG("same-target continuation: a draw in the continued pass samples an attachment; split here (first case pass %llu)", g_stat_pass);
@@ -23115,7 +23310,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_rp_layered = pr->sh[0] && pr->sh[0]->layer_out;
     if (g_enc && g_pass.layered != g_rp_layered) rp_end();   // a layered pass only for layer-writing vertex shaders (see rp_begin_ex)
     if (g_enc && g_sm_pass && draw_samples_rt(pr)) { PD("M %llu a draw in the slice-merged pass samples its attachment; split here", g_stat_pass); rp_end(); }
-    if (!g_enc && !g_rp_layered && g_exec_next && !g_geo_program && sm_on()) sm_plan(pr);
+    if (g_enc && g_sm_pass && g_wl.on) { PD("M %llu a wide line in the slice-merged pass: split here", g_stat_pass); rp_end(); }   // its pipeline is not amplified (wl_pso)
+    if (!g_enc && !g_rp_layered && g_exec_next && !g_geo_program && !g_wl.on && sm_on()) sm_plan(pr);
     if (!g_enc && !g_rp_layered && !g_geo_program && !g_mtk.on && !g_geo_mesh.on) fsp_plan(pr, dw, di);
     if (g_fsp_plan.on) fsm_plan(pr, dw, di);   // later face-split draws of the same level size that can join this pass (DM_NVN_FACE_MERGE)
     pfm(PFM_D_VBUF);
@@ -23155,6 +23351,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     pfm(PFM_D_STATE);
     if (g_mtk.on) { cur_ps = mtk_pso(pr); cur_pull = 0; cur_pr = nil; if (!cur_ps) { g_mtk.miss = 1; return; } }   // a task / mesh draw (mesh_tasks_draw)
     else if (g_geo_mesh.on) { cur_ps = geo_mesh_pso(pr); cur_pull = 1; cur_pr = nil; if (!cur_ps) { g_geo_mesh.miss = 1; return; } }   // a mesh draw (geo_mesh_draw): pulls its streams; the next draw fetches its own pipeline; none yet: the compute path draws
+    else if (g_wl.on) { cur_ps = wl_pso(pr); cur_pull = 1; cur_pr = nil; if (!cur_ps) { g_wl.miss = 1; return; } }   // a wide line drawn as quads (nvn_wline.inc): pulls its streams; the next draw fetches its own pipeline
     else if (g_fsp_pass) { cur_ps = nil; for (int i = 0; i < g_fsp_n && !cur_ps; i++) cur_ps = g_fsp_ps[i]; cur_pull = 0; cur_pr = nil; g_pso_dirty = 1; }   // a face-split draw: its pipelines (fsp_encode); the next draw fetches its own
     else { border = prog_border(pr);
         if (g_pso_dirty || pr != cur_pr || cur_ps_pass != g_pass.serial || border != cur_border) { g_pso_amp = g_sm_pass; cur_ps = pso_get(pr); g_pso_amp = 0; cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_border = border; g_pso_dirty = !cur_ps || cur_pull; } }
@@ -23220,7 +23417,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     if (!(g_ed.ok & ED_SC) || memcmp(&g_ed.sc, &sc, sizeof sc)) { enc_r_scissor(en, sc); g_ed.sc = sc; g_ed.ok |= ED_SC; }
     if (g_pass.lz) lz_draw(sc, lzv);
-    if (S.poly.cull == NVN_FACE_FRONT_AND_BACK && !S.rast_discard) { PD("Z %llu draw skipped: both faces culled", g_stat_pass); return; }
+    if (S.poly.cull == NVN_FACE_FRONT_AND_BACK && !S.rast_discard && !g_wl.on) { PD("Z %llu draw skipped: both faces culled", g_stat_pass); return; }
     // Depth bounds: a pass without a depth attachment has no stored depth to test, and the test does nothing there, as on the Switch. Bounds that no stored depth meets pass no fragment
     // (nvn_dbnd.h), and Metal refuses such bounds: the draw is skipped as for both faces culled. A GPU without the test draws as if it were off (dbnd_hw), those draws too, as
     // before the test was applied: its red line comes from the first draw with bounds, whichever kind they are
@@ -23233,10 +23430,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         g_dbnd_empty++; static int once; if (!once++) MLOG("depth bounds %g..%g: no stored depth passes, so draws with such bounds are skipped", S.dbnd.lo, S.dbnd.hi);
         PD("Z %llu draw skipped: depth bounds %g..%g pass nothing", g_stat_pass, S.dbnd.lo, S.dbnd.hi); return;
     }
-    { int cu = S.poly.cull == NVN_FACE_FRONT ? MTLCullModeFront : S.poly.cull == NVN_FACE_BACK ? MTLCullModeBack : MTLCullModeNone;
+    { int cu = g_wl.on ? MTLCullModeNone : S.poly.cull == NVN_FACE_FRONT ? MTLCullModeFront : S.poly.cull == NVN_FACE_BACK ? MTLCullModeBack : MTLCullModeNone;   // a line has no faces: its quads are never culled
       int wi = (S.poly.front == NVN_FRONT_FACE_CCW) != g_queue_origin_ll ? MTLWindingCounterClockwise : MTLWindingClockwise;   // NVN's raster flip is captured when the queue is initialized, rather than when the device origin changes.
-      int fi = S.poly.mode == NVN_POLYGON_MODE_LINE ? MTLTriangleFillModeLines : MTLTriangleFillModeFill, cl = !S.depth_clamp;   // depth clip off = SetDepthClamp
-      int own_bias = (S.poly.offset_en & 4) != 0;   // NVN_POLYGON_OFFSET_ENABLE_FILL: the game's own polygon offset
+      int fi = S.poly.mode == NVN_POLYGON_MODE_LINE && !g_wl.on ? MTLTriangleFillModeLines : MTLTriangleFillModeFill, cl = !S.depth_clamp;   // depth clip off = SetDepthClamp
+      int own_bias = (S.poly.offset_en & (g_wl.on ? 2 : 4)) != 0;   // NVN_POLYGON_OFFSET_ENABLE_FILL (4): the game's own polygon offset; a wide line's is the enable for lines (LINE, 2)
       float bi[3] = {0, 0, 0}; if (own_bias) { bi[0] = S.po.units; bi[1] = S.po.factor; bi[2] = S.po.clamp; }
       // Depth on the far plane (docs/reference/rendering.md), a workaround for Apple's rasterizer: a vertex shader with z = w puts every vertex at the viewport's far value, and
       // NVIDIA's GPU fills such a triangle with exactly that value, but Apple's gives many of its pixels a depth up to 2^-23 short of it (any depth that is the same at all three
@@ -23254,7 +23451,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       if (dbk == DBND_TEST ? dbnd_hw() : g_dbnd_hw > 0) enc_dbnd(en, dbb); }   // (0, 1) puts the test off again on an encoder an earlier draw gave bounds
     const nvn_refl *vertex = pr->sh[0] ? &pr->sh[0]->rf : NULL;
     pfm(PFM_D_PULL);
-    if (cur_pull) { pull_bind(en, vertex, g_geo_vrange ? g_geo_vrange : dw, g_geo_vrange ? NULL : di); g_hy_draws += !g_geo_mesh.on; }   // a pulling pipeline reads the streams itself (no conversion either: dm_fetch decodes every format)
+    if (cur_pull) { pull_bind(en, vertex, g_geo_vrange ? g_geo_vrange : dw, g_geo_vrange ? NULL : di); g_hy_draws += !g_geo_mesh.on && !g_wl.on; }   // a pulling pipeline reads the streams itself (no conversion either: dm_fetch decodes every format)
     else {
         int bad = bind_vbufs(en, vertex, g_geo_vrange ? g_geo_vrange : dw, g_geo_vrange ? NULL : di);
         if (bad >= 0) {
@@ -23278,7 +23475,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     int prim = dw ? dw->prim : di->prim;
     MTLPrimitiveType mp;
-    switch (prim) {
+    if (g_wl.on) mp = MTLPrimitiveTypeTriangle;   // a wide line's quads (nvn_wline.inc)
+    else switch (prim) {
         case 0: mp = MTLPrimitiveTypePoint; break; case 1: mp = MTLPrimitiveTypeLine; break; case 3: mp = MTLPrimitiveTypeLineStrip; break;
         case 4: case 6: case 7: mp = MTLPrimitiveTypeTriangle; break; case 5: mp = MTLPrimitiveTypeTriangleStrip; break;   // 6 triangle fan, 7 quads: Metal has neither, expanded into triangle lists
         default: { static int n; if (n++ < 8) MLOG("[RED] primitive type %d not implemented (vertex %s hull %s domain %s fragment %s; draw skipped)", prim, pr->sh[0] ? pr->sh[0]->key : "-",
@@ -23358,6 +23556,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_fsp_pass) { fsp_encode(en, mp, dw, di); if (g_fsm_na) fsm_run((id<MTL4RenderCommandEncoder>)en); rp_end(); return; }
     if (g_mtk.on) { mtk_encode(en); return; }
     if (g_geo_mesh.on) { geo_mesh_encode(en); return; }
+    if (g_wl.on) { wl_encode(en); return; }   // nvn_wline.inc: 6 vertices a segment
     if (g_geo_program) {
         if (g_geo_count) enc_r_draw_indexed(en, mp, g_geo_count, MTLIndexTypeUInt32, g_geo_indices, g_geo_index_bytes, 1, 0, (uint32_t)g_draw_binst);   // geo_lean_tri's slots
         else enc_r_draw_indexed_indirect(en, mp, MTLIndexTypeUInt32, g_geo_indices, g_geo_index_bytes, g_geo_args);
@@ -24042,6 +24241,17 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
     if (failed || sr->width <= 0 || sr->height <= 0 || dr->width <= 0 || dr->height <= 0) return 0;
     int kind = t2t_kind(s.pixelFormat, d.pixelFormat);
     if (kind < 0 || s.textureType == MTLTextureType3D) return 0;
+    // The source's level and layers must be in the source: the views below are made per layer, and a level or layer past it aborts the process in Metal's validation of
+    // newTextureView ("newSliceRange.location + length (2) must be <= (1)": a game's scaling copy on an iPhone whose region z offset fell past a one-layer source). Such a copy reads
+    // no texel of the source, so it is not drawn (ported from S2Arm 1655fd83b, D-4T8M)
+    {   NSUInteger nl = s.textureType == MTLTextureType2D ? 1 : s.textureType == MTLTextureType2DArray ? s.arrayLength : s.textureType == MTLTextureTypeCube ? 6
+                      : s.textureType == MTLTextureTypeCubeArray ? s.arrayLength * 6 : 0;
+        long z0 = (long)ss + sr->zoffset, zn = sr->depth ? sr->depth : 1;
+        if (!nl) return 0;
+        if (sl >= s.mipmapLevelCount || z0 < 0 || (unsigned long)(z0 + zn) > nl) {
+            RED_ONCE(183, "format-converting / scaling texture copy: source level %u / layers %ld+%ld outside the source (%lu levels, %lu layers): not drawn (Metal cannot view them)",
+                     sl, z0, zn, (unsigned long)s.mipmapLevelCount, (unsigned long)nl);
+            return 0; } }
     int depth = kind == T2T_D || kind == T2T_CD, stencil = depth && d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8, d3 = d.textureType == MTLTextureType3D;   // a combined destination attaches both planes
     if (mtl_fmt_block(d.pixelFormat) || !(d.usage & MTLTextureUsageRenderTarget) || s.sampleCount > 1 || d.sampleCount > 1) return 0;
     if (!pso) {
@@ -24374,11 +24584,11 @@ static void copy_t2t(const p_copy_t2t *c) {
 // NGX's MVLowRes (motion vectors at the input's size; without it they are at the output's) and MVJittered (the vectors include the camera jitter, which the scaler then subtracts using
 // jitterOffsetX/Y) are MetalFX's outputResolutionMotionVectorsEnabled (inverted) and jitteredMotionVectorsEnabled (macOS / iOS 27). The flags are in the scaler's key, so a network whose flags change gets a scaler of its own
 enum { DLSS_F_MV_LOW_RES = 1 << 1, DLSS_F_MV_JITTERED = 1 << 2, DLSS_F_DEPTH_INVERTED = 1 << 3, DLSS_F_AUTO_EXPOSURE = 1 << 6 };
-// The networks are named by their serials (hle_nvn.c nvnDlssNetworkInitialize), so one made again in the same memory is another network here. A scaler replaced (new sizes, or its
-// slot taken by another network: nvnDlssNetworkFinalize tells the replay nothing, and Fast Fusion had made 8 networks by its 9th minute) is held until this submission completes
+// The networks are named by their serials (hle_nvn.c nvnDlssNetworkInitialize), so one made again in the same memory is another network here. A scaler retired on
+// nvnDlssNetworkFinalize (mtl_dlss_forget) or evicted when the cache is full (Fast Fusion had made 8 networks by its 9th minute) is held until this submission completes
 // (defer_obj_release): a Metal 4 command buffer does not retain what is encoded into it, and the network's earlier evaluations in the submission still use it. Dropped at once, the
-// commit crashed in -[_MTL4MachineLearningCommandEncoder encodeToCommandQueue:] ("-[AGXG17XFamilyMLContext executable]: unrecognized selector"). A new network takes the slot used
-// least recently: slot 0 was always taken, which could be the network the game was drawing with
+// commit crashed in -[_MTL4MachineLearningCommandEncoder encodeToCommandQueue:] ("-[AGXG17XFamilyMLContext executable]: unrecognized selector"). When all slots are full, a new
+// entry takes the slot used least recently: slot 0 was always taken, which could be the network the game was drawing with
 // DLSS's bias-current-colour mask is MetalFX's reactive mask: both run from 0 (the network's own history) to 1 (the current colour alone, history ignored), in the input's
 // pixels, so the scaler is made for the mask's format (a part of its key) and takes its texture and corner (Star Fox: R8, 0 or 1, over a band at the top and bottom of its
 // cinematics). A mask format MetalFX makes no scaler for is dropped with a red line and the scaler made without it (mask 0 everywhere), rather than losing the scaler to the
@@ -24413,15 +24623,71 @@ static id<MTLRenderPipelineState> dlss_alpha_pso(MTLPixelFormat pf) {
     return ps;
 }
 
-typedef struct { uint64_t net, used; id<MTL4FXTemporalScaler> sc; NSUInteger key[10]; int fresh, mask; } dlss_scaler;
-static dlss_scaler g_dlss[4];
+// One scaler per network and key (formats and sizes; NX 18 keys the input's content size), not one per network: a game with dynamic resolution renders into textures of a few sizes and steps between them every few
+// seconds, and each synchronous build stalls the replay about 80 ms (Xenoblade Chronicles DE, 0400FF500E34A001: 1280x720 to 960x540, 191 builds and 190 frames of
+// about 88 ms in 5 minutes of play). A kept scaler that becomes the network's current one again starts with a reset, as a new one does: its history is from another size.
+// Finalized networks (mtl_dlss_forget) drop all their cached scalers via deferred release on the replay thread so dead networks do not pin GPU memory across slots.
+typedef struct { uint64_t net, used; id<MTL4FXTemporalScaler> sc; NSUInteger key[10]; int fresh, mask, cur; } dlss_scaler;
+// 12 kept on the Mac, as upstream; 6 on an iPhone, where each kept scaler's history textures stay resident (upstream e9bcc5f35's 12 were measured on a Mac only)
+#if TARGET_OS_IPHONE
+#define DLSS_KEEP 6
+#else
+#define DLSS_KEEP 12
+#endif
+static dlss_scaler g_dlss[DLSS_KEEP];
 static uint64_t g_dlss_use;
 static void dlss_scaler_drop(dlss_scaler *e) { if (e->sc) defer_obj_release(e->sc); e->sc = nil; }
+static pthread_mutex_t g_dlss_retire_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t *g_dlss_retire;
+static size_t g_dlss_retire_n, g_dlss_retire_cap;
+static _Atomic size_t g_dlss_retire_pending;
+void mtl_dlss_forget(uint64_t serial) {
+    if (!serial) return;
+    pthread_mutex_lock(&g_dlss_retire_mu);
+    if (g_dlss_retire_n == g_dlss_retire_cap) {
+        size_t ncap = g_dlss_retire_cap ? g_dlss_retire_cap * 2 : 16;
+        uint64_t *p = realloc(g_dlss_retire, ncap * sizeof *p);
+        if (!p) { pthread_mutex_unlock(&g_dlss_retire_mu); return; }
+        g_dlss_retire = p; g_dlss_retire_cap = ncap;
+    }
+    g_dlss_retire[g_dlss_retire_n++] = serial;
+    atomic_store_explicit(&g_dlss_retire_pending, g_dlss_retire_n, memory_order_release);
+    pthread_mutex_unlock(&g_dlss_retire_mu);
+}
+void dlss_retire_drain(void) {
+    if (!atomic_load_explicit(&g_dlss_retire_pending, memory_order_acquire)) return;
+    for (;;) {
+        uint64_t batch[16]; size_t n = 0;
+        pthread_mutex_lock(&g_dlss_retire_mu);
+        n = g_dlss_retire_n < 16 ? g_dlss_retire_n : 16;
+        if (n) {
+            memcpy(batch, g_dlss_retire, n * sizeof *batch);
+            g_dlss_retire_n -= n;
+            if (g_dlss_retire_n) memmove(g_dlss_retire, g_dlss_retire + n, g_dlss_retire_n * sizeof *batch);
+        }
+        atomic_store_explicit(&g_dlss_retire_pending, g_dlss_retire_n, memory_order_release);
+        pthread_mutex_unlock(&g_dlss_retire_mu);
+        if (!n) break;
+        for (size_t k = 0; k < n; k++) for (int i = 0; i < DLSS_KEEP; i++) {
+            if (g_dlss[i].net != batch[k]) continue;
+            dlss_scaler_drop(&g_dlss[i]);
+            g_dlss[i].net = 0; g_dlss[i].used = 0; g_dlss[i].fresh = g_dlss[i].mask = g_dlss[i].cur = 0;
+            memset(g_dlss[i].key, 0, sizeof g_dlss[i].key);
+        }
+    }
+}
 static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLTexture> dep, id<MTLTexture> mot, id<MTLTexture> out, id<MTLTexture> bias, NSUInteger iw, NSUInteger ih) {
+    dlss_retire_drain();
     NSUInteger key[10] = {col.pixelFormat, dep.pixelFormat, mot.pixelFormat, out.pixelFormat, bias ? bias.pixelFormat : 0, iw, ih, out.width, out.height, c->flags};
-    dlss_scaler *e = NULL, *spare = NULL;
-    for (int i = 0; i < 4 && !e; i++) { if (g_dlss[i].net == c->net) e = &g_dlss[i]; else if (!spare || (spare->net && (!g_dlss[i].net || g_dlss[i].used < spare->used))) spare = &g_dlss[i]; }
-    if (!e) { e = spare; e->net = c->net; dlss_scaler_drop(e); memset(e->key, 0, sizeof e->key); }
+    dlss_scaler *e = NULL, *spare = NULL, *prev = NULL;
+    for (int i = 0; i < DLSS_KEEP; i++) {
+        dlss_scaler *s = &g_dlss[i];
+        if (s->net == c->net && s->net && s->cur) prev = s;
+        if (!e && s->net == c->net && s->net && !memcmp(s->key, key, sizeof key)) e = s;
+        else if (!spare || (spare->net && (!s->net || s->used < spare->used))) spare = s;
+    }
+    if (!e) { e = spare; if (e == prev) prev = NULL; e->net = c->net; dlss_scaler_drop(e); memset(e->key, 0, sizeof e->key); e->cur = 0; }
+    if (e != prev) { if (prev) prev->cur = 0; e->cur = 1; e->fresh = 1; }   // back to a kept scaler: its history is another size's
     e->used = ++g_dlss_use;
     if (!memcmp(e->key, key, sizeof key)) return e->sc ? e : NULL;
     memcpy(e->key, key, sizeof key); dlss_scaler_drop(e); e->fresh = 1;
@@ -24431,6 +24697,12 @@ static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLT
     d.colorTextureFormat = col.pixelFormat; d.depthTextureFormat = dep.pixelFormat; d.motionTextureFormat = mot.pixelFormat; d.outputTextureFormat = out.pixelFormat;
     d.inputWidth = iw; d.inputHeight = ih; d.outputWidth = out.width; d.outputHeight = out.height;
     d.autoExposureEnabled = (c->flags & DLSS_F_AUTO_EXPOSURE) != 0;
+    // Build the final upscaler now, not in the background. With the default (NO), MetalFX hands back an interim upscaler and swaps in the one it compiles behind it; on
+    // Xenoblade Chronicles: Definitive Edition – Nintendo Switch 2 Edition (0400FF500E34A001, 2.0.0; M2 Pro, macOS 27.3 26C5035r) that swap failed every run on the 97th
+    // evaluation of the fourth scaler the game's dynamic resolution made in its first second: MPSGraph's ANE region asserted `ANE inference operation failed`
+    // (Code=-19, inferenceCount 96) and aborted; with MTL_ERROR_MODE=nslog the GPU command buffer waiting on that inference timed out instead and macOS revoked GPU
+    // access. Built synchronously, the same boot ran 2,697 evaluations to its time limit, and the frames that make the scalers took no longer
+    d.requiresSynchronousInitialization = YES;
     d.outputResolutionMotionVectorsEnabled = !(c->flags & DLSS_F_MV_LOW_RES); d.jitteredMotionVectorsEnabled = (c->flags & DLSS_F_MV_JITTERED) != 0;
     d.inputContentPropertiesEnabled = YES; d.inputContentMinScale = scale; d.inputContentMaxScale = scale;
     const int fx = comp && [MTLFXTemporalScalerDescriptor supportsMetal4FX:g_dev];
@@ -25118,7 +25390,7 @@ void mtl_exec(const uint8_t *p) {
                 break; }
             case OP_SCISSOR: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
             case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
-            case OP_POLY_OFFSET: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
+            case OP_POLY_OFFSET: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_LINE_WIDTH: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
                 state_op(h.op, a); break;
             // PASSDUMP O lines: the viewports the game sets, with the pass they fall in (one set before its pass opens takes that pass's number, as the P lines do). The D line
             // prints the one a draw used, so a viewport the pass set is told from one carried over. Printed here, not in state_op: look-ahead scans replay state_op too

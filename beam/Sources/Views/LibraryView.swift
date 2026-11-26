@@ -137,15 +137,10 @@ struct GameIcon: View {
     let size: CGFloat
 
     /// The game's picture: the player's own pick, else the icon of Beam's latest build, else the icon NX Play cached for the game (read only, as the build
-    /// script reads it: NXPLAY_ICONS), else none (the tile shows the name's first letter)
+    /// script reads it: NXPLAY_ICONS) or Beam's copy of it, else none (the tile shows the name's first letter)
     static func image(for g: LibraryGame) -> NSImage? {
-        var paths = [g.icon?.path, g.builtIcon, g.lastBuild?.icon]
-        if let tid = g.identity?.titleId.uppercased() {
-            let cache = URL.libraryDirectory.appending(path: "Caches/com.varyform.nxplay/Banners/icons/\(tid).jpg").path
-            paths.append(cache)
-        }
-        for case let p? in paths { if let i = NSImage(contentsOfFile: p) { return i } }
-        return nil
+        for case let p? in [g.icon?.path, g.builtIcon, g.lastBuild?.icon] { if let i = NSImage(contentsOfFile: p) { return i } }
+        return g.identity.flatMap { NXPlayPicture.image(.icon, titleID: $0.titleId) }
     }
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
@@ -163,6 +158,27 @@ struct GameIcon: View {
         .clipShape(shape)
         .overlay(shape.strokeBorder(.white.opacity(0.08)))
         .accessibilityHidden(true)   // the game's name is read beside it
+    }
+}
+
+/// A picture NX Play keeps for a game in its cache folder (Banners/icons/<title ID>.jpg, Banners/<title ID>.jpg), read only. A cache is the system's to clear
+/// (a disk cleanup emptied it on 2026-11-25 and every game Beam had not built lost its icon), so the first time Beam sees one it keeps a copy in its own Art
+/// folder (Art/<title ID>/nxplay-icon.jpg, nxplay-banner.jpg: names the player's picks never take) and falls back to that copy while the cache has none
+enum NXPlayPicture: String {
+    case icon, banner
+    static func image(_ kind: NXPlayPicture, titleID: String, cache: URL = URL.libraryDirectory.appending(path: "Caches/com.varyform.nxplay/Banners"),
+                      art: URL = Library.defaultFolder.appending(path: "Art")) -> NSImage? {
+        let tid = titleID.uppercased(), fm = FileManager.default
+        let src = (kind == .icon ? cache.appending(path: "icons") : cache).appending(path: "\(tid).jpg")
+        let kept = art.appending(path: tid, directoryHint: .isDirectory).appending(path: "nxplay-\(kind.rawValue).jpg")
+        if let img = NSImage(contentsOfFile: src.path) {
+            if !fm.fileExists(atPath: kept.path) {
+                try? fm.createDirectory(at: kept.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? fm.copyItem(at: src, to: kept)
+            }
+            return img
+        }
+        return NSImage(contentsOfFile: kept.path)
     }
 }
 

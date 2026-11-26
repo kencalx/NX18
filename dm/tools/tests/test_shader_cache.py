@@ -39,6 +39,11 @@ def dies_in_batch(i):
     with s.batch(): s.put('dead', b'd'); os._exit(9)
 
 
+def remote_blob_ids(prefix):
+    assert STORE is not None
+    return STORE.blob_ids(prefix)
+
+
 def forked_stores(path, work):
     """Four forked workers of a process that has opened the store, as dmsh_build.py makes them → their results, and what the store holds then"""
     import multiprocessing
@@ -91,6 +96,16 @@ class Entries(Base):
         self.store.put('metallib/mac/d.metallib', b'L' * 100000); self.store.put('shader/d/mac/k_b.metallib', b'L' * 100000)
         self.assertEqual(self.blobs(), 1)
         self.assertEqual(self.store.get('shader/d/mac/k_b.metallib'), b'L' * 100000)
+
+    def test_blob_ids_match_shared_local_entries_only(self):
+        old = self.root / 'cas.db'   # NX 18 has no read-only fallback: an older generation's entries are what is not local here
+        o = shader_cache.Store(old); o.put('stage/a/old', b'same'); o.close()
+        s = shader_cache.Store(self.root / 'local.db', older=[old]); self.addCleanup(s.close)
+        s.put('stage/a/1', b'same'); s.put('stage/a/2', b'same'); s.put('stage/a/3', b'other'); s.put('stage/ab/1', b'same')
+        ids = s.blob_ids('stage/a/')
+        self.assertEqual(set(ids), {'stage/a/1', 'stage/a/2', 'stage/a/3'})
+        self.assertEqual(ids['stage/a/1'], ids['stage/a/2'])
+        self.assertNotEqual(ids['stage/a/1'], ids['stage/a/3'])
 
     def test_to_file_and_from_file(self):
         src, dst = self.root / 'src', self.root / 'dst'; src.write_bytes(b'data')
@@ -162,6 +177,17 @@ class Writers(Base):
         subprocess.run([sys.executable, '-c', code, str(REPO / 'dm/tools'), str(self.path)])
         self.assertEqual(self.store.names(''), {'done'})
 
+    def test_remote_blob_ids(self):
+        import concurrent.futures as cf, multiprocessing
+        global SERVED; SERVED = shader_cache.Served(self.store, 1)
+        self.store.put('stage/a/1', b'same'); self.store.put('stage/a/2', b'same'); self.store.put('stage/a/3', b'other')
+        with cf.ProcessPoolExecutor(1, mp_context=multiprocessing.get_context('fork'), initializer=worker_start) as ex:
+            ex.submit(int).result(); SERVED.start()
+            ids = ex.submit(remote_blob_ids, 'stage/a/').result()
+        self.assertEqual(set(ids), {'stage/a/1', 'stage/a/2', 'stage/a/3'})
+        self.assertEqual(ids['stage/a/1'], ids['stage/a/2'])
+        self.assertNotEqual(ids['stage/a/1'], ids['stage/a/3'])
+
 
 class Damage(unittest.TestCase):
     def setUp(self):
@@ -207,6 +233,49 @@ class Prune(Base):
         self.assertEqual(self.store.prune_shaders(set(), now)[0], 40)
         self.store.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         self.assertLess(self.path.stat().st_size, big // 4)
+
+
+class Generations(unittest.TestCase):   # one file per chain: a build writes its own, copies the Metal compiles it reads from older ones, and the older ones go whole after it
+    A, B, C = '0123456789ab', 'bbbbbbbbbbbb', 'cccccccccccc'
+
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
+        self.d = Path(t.name); self.said = []
+
+    def file(self, name, entries, when):   # a generation holding entries, last written at when
+        s = shader_cache.Store(self.d / name)
+        for n, data in entries.items(): s.put(n, data)
+        s.close(); os.utime(self.d / name, (when, when))
+
+    def names(self, path):
+        s = shader_cache.Store(path); self.addCleanup(s.close)
+        return set(s.names(''))
+
+    def test_older_compiles_are_copied_on_read(self):
+        now = time.time()
+        self.file('cas.db', {'metallib/mac/old.metallib': b'legacy', f'shader/{D1}/mac/k_b.metal': b'old chain'}, now - 300)
+        self.file(f'cas-{self.B}.db', {'metallib/mac/m.metallib': b'B', 'metallib/mac/old.metallib': b'newer'}, now - 100)
+        self.assertEqual([Path(p).name for p in shader_cache.generations(self.d)], [f'cas-{self.B}.db', 'cas.db'])   # newest first, the one file last
+        s = shader_cache.for_chain(self.d, self.A)
+        self.assertEqual(s.path, str(self.d / f'cas-{self.A}.db'))
+        self.assertTrue(s.has('metallib/mac/m.metallib'))
+        self.assertEqual(s.get('metallib/mac/old.metallib'), b'newer')   # the newest generation answers
+        self.assertIsNone(s.get(f'shader/{D1}/mac/k_b.metal')); self.assertFalse(s.has(f'shader/{D1}/mac/k_b.metal'))   # another chain's shader never hits
+        s.close()
+        self.assertEqual(self.names(self.d / f'cas-{self.A}.db'), {'metallib/mac/old.metallib'})   # what it read is its own now; what it only saw is not
+
+    def test_older_generations_go_after_a_build(self):
+        now = time.time()
+        self.file('cas.db', {'metallib/ios/i.metallib': b'ios', 'metallib/mac/x.metallib': b'old mac', f'shader/{D1}/mac/k_b.metal': b'm'}, now - 300)
+        self.file(f'cas-{self.B}.db', {'metallib/mac/b.metallib': b'B'}, now - 100)
+        self.assertEqual(shader_cache.drop_generations(self.d, self.A, self.said.append), [])   # no file of its own: nothing goes
+        self.file(f'cas-{self.A}.db', {'metallib/mac/a.metallib': b'A', f'shader/{D2}/mac/k_b.metal': b'a'}, now)
+        open(self.d / 'cas.db.lock', 'w').close()
+        self.assertEqual(sorted(shader_cache.drop_generations(self.d, self.A, self.said.append)), [f'cas-{self.B}.db', 'cas.db'])
+        self.assertEqual(sorted(p.name for p in self.d.iterdir()), [f'cas-{self.A}.db'])
+        self.assertEqual(self.names(self.d / f'cas-{self.A}.db'), {'metallib/mac/a.metallib', 'metallib/ios/i.metallib', f'shader/{D2}/mac/k_b.metal'})   # iOS, which it compiled none of, kept
+        self.assertIn('kept 1 ios Metal compiles of cas.db: this build compiled none for ios', self.said)
+        self.assertEqual(shader_cache.drop_generations(self.d, self.A, self.said.append), [])
 
 
 class Adopt(unittest.TestCase):

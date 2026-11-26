@@ -227,10 +227,8 @@ struct HomeBackdrop: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     static func art(for g: LibraryGame) -> NSImage? {
-        var paths = [g.art?.path, g.builtArt]
-        if let tid = g.identity?.titleId.uppercased() { paths.append(URL.libraryDirectory.appending(path: "Caches/com.varyform.nxplay/Banners/\(tid).jpg").path) }
-        for case let p? in paths { if let i = NSImage(contentsOfFile: p) { return i } }
-        return nil
+        for case let p? in [g.art?.path, g.builtArt] { if let i = NSImage(contentsOfFile: p) { return i } }
+        return g.identity.flatMap { NXPlayPicture.image(.banner, titleID: $0.titleId) }
     }
 
     var body: some View {

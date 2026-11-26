@@ -38,3 +38,6 @@ void dm_clear_nx18_folder(void);
 /// This game's cloud saves in the NX 18 folder (YES) or in its own folder (NO). dm_cloud_saves_env follows it.
 BOOL dm_nx18_cloud_shared(void);
 void dm_set_nx18_cloud_shared(BOOL shared);
+/// This game's captures (DmCapture.m) in the NX 18 folder, <NX 18>/<title ID>/Captures (YES), or in its own Documents/Captures (NO, the default). NX 18 Beam reads the folder
+BOOL dm_nx18_captures_shared(void);
+void dm_set_nx18_captures_shared(BOOL shared);

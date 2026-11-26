@@ -28,6 +28,7 @@ TOOLS = REPO / 'dm/gfx/tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_chain  # noqa: E402
 import dmsh_mtlcache  # noqa: E402
+import dmsh_rewrite  # noqa: E402
 import shader_cache  # noqa: E402
 sys.path.insert(0, str(REPO / 'dm/tools'))
 import romfs  # noqa: E402
@@ -270,6 +271,48 @@ class ShaderCache(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in img.iterdir()), sorted([a + '_b.metal', a + '_b.metallib', b + '_b.metal', b + '_b.metallib', 'inputs.tsv']))
         self.assertEqual((img / (a + '_b.metallib')).read_bytes(), a.encode())
 
+    def test_first_build_preserves_deduplication_from_staging_to_image(self):
+        out = Path(self.ns['out']); payload = b'compiled library' * 1024
+        names = [f'{i:016x}_b.metallib' for i in range(12)]
+        for name in names:
+            (out / name).write_bytes(payload)
+            self.ns['commit'](name.split('_')[0])
+        store = self.ns['STORE']
+        self.assertEqual(store.db.execute('SELECT count(*) FROM blob').fetchone()[0], 1)
+        real_get, gets = store.get, []
+        def counted_get(name): gets.append(name); return real_get(name)
+        with mock.patch.object(store, 'get', side_effect=counted_get):
+            self.ns['publish_library']('mac')
+        self.assertEqual(len(gets), 1, 'duplicate staged blobs must not be fetched more than once')
+        image = romfs.Image(shader_lib.image_of(str(out)))
+        self.assertEqual(len({image.entry(image.find(n))[:2] for n in names}), 1,
+                         'publishing must not expand one staged blob into a copy per shader key')
+        for name in names: self.assertEqual((shader_lib.view(out) / name).read_bytes(), payload)
+        self.assertFalse(out.exists())
+        self.assertEqual(store.names('stage/'), set())
+
+    def test_disk_override_and_partial_build_keep_remaining_sharing(self):
+        out = Path(self.ns['out']); payload = b'compiled library' * 256
+        a, b, c = '1' * 16, '2' * 16, '3' * 16
+        for key in (a, b, c):
+            (out / f'{key}_b.metallib').write_bytes(payload)
+            self.ns['commit'](key)
+        (out / f'{a}_b.metallib').write_bytes(b'disk override')
+        self.ns['publish_library']('mac')
+        img_path = shader_lib.image_of(str(out))
+        image = romfs.Image(img_path)
+        self.assertEqual(image.entry(image.find(f'{b}_b.metallib'))[:2], image.entry(image.find(f'{c}_b.metallib'))[:2])
+        self.assertNotEqual(image.entry(image.find(f'{a}_b.metallib'))[:2], image.entry(image.find(f'{b}_b.metallib'))[:2])
+        self.assertEqual((shader_lib.view(out) / f'{a}_b.metallib').read_bytes(), b'disk override')
+        out.mkdir()
+        self.ns.update(want={a}, OLD_IMAGE={'mac': romfs.Path(img_path)}, STAMP_BEFORE='inputs', INPUTS='inputs')
+        (out / f'{a}_b.metallib').write_bytes(b'rebuilt a'); self.ns['commit'](a)
+        self.ns['publish_library']('mac')
+        image = romfs.Image(img_path)
+        self.assertEqual(image.entry(image.find(f'{b}_b.metallib'))[:2], image.entry(image.find(f'{c}_b.metallib'))[:2])
+        self.assertEqual((shader_lib.view(out) / f'{a}_b.metallib').read_bytes(), b'rebuilt a')
+        self.assertEqual((shader_lib.view(out) / f'{b}_b.metallib').read_bytes(), payload)
+
     def test_partial_build_keeps_the_image_less_the_keys_it_builds(self):
         out, built, kept = Path(self.ns['out']), '1' * 16, '2' * 16
         shader_lib.write({built + '_b.metal': b'old', built + '_bf.metallib': b'old variant', kept + '_b.metal': b'kept', 'inputs.tsv': b'game\tid\ninputs\told\n'},
@@ -310,7 +353,7 @@ class TargetSelection(unittest.TestCase):
                     ns: dict[str, Any] = dict(os=os, json=json, subprocess=subprocess, out=td, w=td, TARGETS=targets,
                               IOSOUT=str(ios) if 'ios' in targets else None, MESH_STATS=collections.Counter(),
                               MTL=types.SimpleNamespace(compile=compile_target), dmsh_mesh=types.SimpleNamespace(compose=compose),
-                              output=output, commit=mock.Mock())
+                              dmsh_rewrite=dmsh_rewrite, output=output, commit=mock.Mock())
                     exec(compile(ast.Module(body=[function], type_ignores=[]), '<mesh targets>', 'exec'), ns)
                     ns['mesh_finish'](('vertex', 'geometry'))
                     compose.assert_called_once_with('vertex source', 'geometry source', [36])
@@ -426,6 +469,56 @@ class MetalPrefill(unittest.TestCase):
         (self.old / f'{2:016x}_b.metallib').write_bytes(b'CUT FROM ANOTHER SOURCE'); (self.old / f'{2:016x}_bf.metallib').write_bytes(b'TILE')
         notes = self.cache.fill(str(self.old))
         self.assertEqual(self.cache.stats['mac', 'filled'], 2, notes)
+
+    def test_a_vertex_library_beside_a_pulling_or_shadow_input_library_does_not_prefill(self):   # it may be a piece of the vertex unit (dmsh_side.vs_unit), not the compile of its .metal
+        for side in ('_bp', '_bv'):
+            with self.subTest(side=side):
+                self.cache.store = shader_cache.Store(self.root / f'cas{side}.db'); self.cache.stats.clear()
+                self.earlier_libraries(self.cache.ident['mac'].hex())
+                (self.old / f'{2:016x}_b.metallib').write_bytes(b'CUT FROM ANOTHER SOURCE'); (self.old / f'{2:016x}{side}.metallib').write_bytes(b'SIDE')
+                notes = self.cache.fill(str(self.old))
+                self.assertEqual(self.cache.stats['mac', 'filled'], 2, notes)
+                (self.old / f'{2:016x}{side}.metallib').unlink()
+
+    def test_a_cut_library_is_told_in_its_own_targets_folder(self):   # an iPhone-only build: the Mac folder holds the sources and no library that would tell
+        ios = self.root / 'ios-old'; ios.mkdir()
+        def compile_current(msl, air, lib): Path(lib).write_bytes(b'TESTED ' + Path(msl).read_bytes())
+        with mock.patch.object(dmsh_mtlcache, 'compiler_id', return_value='tested compiler and SDK'):
+            cache = dmsh_mtlcache.Cache(shader_cache.Store(self.root / 'cas-ios.db'), {'ios': ('iphoneos', 'flags', compile_current)}, str(self.root))
+        for i in range(3):
+            stem = f'{i:016x}_b'; src = f'MSL {i}'.encode()
+            (self.old / (stem + '.metal')).write_bytes(src)
+            (ios / (stem + '.metallib')).write_bytes(b'TESTED ' + src if i < 2 else b'CUT FROM ANOTHER SOURCE')
+            (ios / (stem + '.json')).write_text(json.dumps({'chain_metal': 'flags', 'stage': 'vs', 'chain_compiler': cache.ident['ios'].hex()}))
+        (ios / f'{2:016x}_bp.metallib').write_bytes(b'PULLING')
+        notes = cache.fill(str(self.old), str(ios))
+        self.assertEqual(cache.stats['ios', 'filled'], 2, notes)
+
+    def test_a_cut_ios_base_cannot_prefill_after_packing_omits_its_pulling_library(self):
+        ios = self.root / 'b-ios'; ios.mkdir()
+
+        def compile_current(msl, air, lib):
+            Path(lib).write_bytes(b'TESTED ' + Path(msl).read_bytes())
+
+        with mock.patch.object(dmsh_mtlcache, 'compiler_id', return_value='tested compiler and SDK'):
+            cache = dmsh_mtlcache.Cache(shader_cache.Store(self.root / 'cas-ios.db'), {'ios': ('iphoneos', 'flags', compile_current)}, str(self.root))
+        for i in range(3):
+            stem = f'{i:016x}_b'
+            src = f'MSL {i}'.encode()
+            (self.old / (stem + '.metal')).write_bytes(src)
+            (ios / (stem + '.metallib')).write_bytes(b'TESTED ' + src if i < 2 else b'CUT FROM ANOTHER SOURCE')
+            reflection = cache.with_compiler('ios', {'stage': 'vs'})
+            if i == 2: reflection['chain_metal_cut'] = True
+            (ios / (stem + '.json')).write_text(json.dumps(reflection))
+        (ios / f'{2:016x}_bp.metallib').write_bytes(b'PULLING')
+        self.assertTrue(shader_lib.pack(ios, leave_out=True))
+        self.assertTrue(shader_lib.left_out_pulling(ios))
+
+        notes = cache.fill(str(self.old), str(ios))
+        self.assertEqual(cache.stats['ios', 'filled'], 2, notes)
+        result = self.root / 'result.metallib'
+        cache.compile('ios', str(self.old / f'{2:016x}_b.metal'), str(result))
+        self.assertEqual(result.read_bytes(), b'TESTED MSL 2')
 
     def test_compile_split_keeps_every_piece(self):
         msl = self.root / 'unit.metal'; msl.write_bytes(b'UNIT'); a, b = self.root / 'a.metallib', self.root / 'b.metallib'

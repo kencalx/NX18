@@ -7,17 +7,19 @@
 import ImageIO
 import SwiftUI
 
-enum NX18CardItem: String, Sendable, CaseIterable { case close, appearance, picture, name, profile, folder, saves }
+enum NX18CardItem: String, Sendable, CaseIterable { case close, appearance, picture, name, profile, folder, saves, captures }
 
 // What the card's Profile rows show and do; the platform builds it (iOS: from NX18ProfileFlow). nil: the card shows no Profile section
 struct NX18CardProfile {
     var busy: String? = nil, note: String? = nil, strip: String? = nil
     var shared = false                  // This game's saves: in the NX 18 folder
+    var capturesShared = false          // This game's captures: in the NX 18 folder
     var choosePicture: (() -> Void)? = nil
     var editName: (() -> Void)? = nil
     var toggle: () -> Void = {}
     var chooseFolder: (() -> Void)? = nil
     var saves: (() -> Void)? = nil
+    var captures: (() -> Void)? = nil
 }
 
 struct NX18Card: View {
@@ -97,7 +99,7 @@ struct NX18Card: View {
     private var aHint: String {
         switch focused {
         case .appearance?: return "Change"
-        case .profile?, .saves?: return "Change"
+        case .profile?, .saves?, .captures?: return "Change"
         case .folder?: return "Choose"
         case .picture?, .name?: return "Edit"
         default: return "Close"
@@ -149,6 +151,9 @@ struct NX18Card: View {
             row(.folder, "NX 18 folder", folderValue, action: p.chooseFolder, button: "Choose")
             if case .chosen = profile.folderState, let saves = p.saves {
                 row(.saves, "This game's saves", p.shared ? "NX 18 folder" : "Own folder", action: saves, button: nil)
+            }
+            if case .chosen = profile.folderState, let captures = p.captures {   // screenshots: in the NX 18 folder, where NX 18 Beam on the Mac sorts them into the game's page
+                row(.captures, "This game's captures", p.capturesShared ? "NX 18 folder" : "Own folder", action: captures, button: nil)
             }
         }
         if let b = p.busy { HStack(spacing: 8) { ProgressView().controlSize(.small); Text(b).nxFont(.caption).foregroundStyle(GateColor.muted) } }

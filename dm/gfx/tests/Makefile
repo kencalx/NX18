@@ -37,9 +37,9 @@ MTL_T_SRC=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_s
 # The run list: every t_*.c and t_*.m but those in NOT_RUN. `make run` builds them all (in parallel with -j), then runs them one after another, each through its check_
 # target: ./t_x by default, with the environment its RUN_ENV gives it (check_t_x: RUN_ENV = MTL_DEBUG_LAYER=1, beside its build rule), or a check_t_x recipe of its own when it
 # runs several ways. A new test needs its source and its build rule; no list to add it to. NOT_RUN: helpers linked into other tests (t_host_stubs, t_present_rescue_focus, t_gpu_lost_front, t_framewg_count, t_acq_pace_hold,
-# t_gpu_wait_hold), a fixture test_image_atomic_bounds.py builds itself (t_atomic_return), t_geometry_primitive_id (the GPU half of test_dmsh_geometry.py, which gives it the directory of
-# its translated fixtures), t_compute_loops (test_dmsh_compute_loops.py supplies its rewritten fixtures), and t_gpuprof, which CI's CPU subset runs (.github/workflows/tests.yml)
-NOT_RUN = t_host_stubs t_present_rescue_focus t_gpu_lost_front t_framewg_count t_acq_pace_hold t_gpu_wait_hold t_atomic_return t_geometry_primitive_id t_compute_loops t_gpuprof
+# t_gpu_wait_hold), fixtures test_image_atomic_bounds.py and test_global_memory.py build themselves (t_atomic_return, t_global_memory), t_geometry_primitive_id (the GPU half of test_dmsh_geometry.py, which gives it the directory of
+# its translated fixtures), t_compute_loops (test_dmsh_compute_loops.py supplies its rewritten fixtures), t_gpuprof, which CI's CPU subset runs (.github/workflows/tests.yml), and t_metalwa (the GPU half of test_dmsh_metalwa.py)
+NOT_RUN = t_host_stubs t_present_rescue_focus t_gpu_lost_front t_framewg_count t_acq_pace_hold t_gpu_wait_hold t_atomic_return t_global_memory t_geometry_primitive_id t_compute_loops t_gpuprof t_metalwa
 RUN_TESTS = $(filter-out $(NOT_RUN),$(basename $(sort $(wildcard t_*.c t_*.m))))
 check_t_%: t_%
 	$(RUN_ENV) ./$<
@@ -636,6 +636,12 @@ check_t_initial_uncached: RUN_ENV = MTL_DEBUG_LAYER=1
 t_up_params: t_up_params.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_up_params.m $(MTL_T_SRC) $(FW)
 check_t_up_params: RUN_ENV = MTL_DEBUG_LAYER=1
+t_stale_float: t_stale_float.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_stale_float.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_stale_float
+check_t_stale_float: t_stale_float
+	MTL_DEBUG_LAYER=1 ./t_stale_float
+	DM_NVN_STALE_FLOAT=1 MTL_DEBUG_LAYER=1 ./t_stale_float
 t_upload_idle: t_upload_idle.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_idle.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_upload_idle
@@ -825,6 +831,13 @@ check_t_pull: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pull_inv: t_pull_inv.m ../tools/dmsh_pull.py ../tools/dmsh_pull.metal t_mtl4.h
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_pull_inv.m -framework Metal -framework Foundation
 check_t_pull_inv: RUN_ENV = MTL_DEBUG_LAYER=1
+t_vs_unit: t_vs_unit.m ../tools/dmsh_side.py ../tools/dmsh_pull.py ../tools/dmsh_pull.metal ../tools/dmsh_vin.py ../tools/dmsh_entry.py ../tools/dmsh_geometry.py
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_vs_unit.m -framework Metal -framework Foundation
+check_t_vs_unit: RUN_ENV = MTL_DEBUG_LAYER=1
+# Wide lines through dmsh_pull.py's <entry>_wl on the GPU (nvn_wline.inc; upstream 7eaf79116)
+t_wline: t_wline.m ../tools/dmsh_pull.py ../tools/dmsh_pull.metal
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_wline.m -framework Metal -framework Foundation
+check_t_wline: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pso_archive: t_pso_archive.m $(MTL_T_DEP) ../../host/hle_lifecycle.c
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_archive.m $(MTL_T_SRC) ../../host/hle_lifecycle.c $(FW)
 .PHONY: check_t_pso_archive
@@ -1284,6 +1297,14 @@ check_t_stencil_view: t_stencil_view
 t_float_pad: t_float_pad.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)
 check_t_float_pad: RUN_ENV = MTL_DEBUG_LAYER=1
+# A buffer texture handle in uniform buffers whose texture word is either of its two words (upstream 44b8ab17b)
+t_tbuf_handle: t_tbuf_handle.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tbuf_handle.m $(MTL_T_SRC) $(FW)
+check_t_tbuf_handle: RUN_ENV = MTL_DEBUG_LAYER=1
+# Absent vertex attributes read (0, 0, 0, 1.0) through the vertex descriptor and the pulling fetch (upstream ef8b25d2c)
+t_default_attrib: t_default_attrib.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_default_attrib.m $(MTL_T_SRC) $(FW)
+check_t_default_attrib: RUN_ENV = MTL_DEBUG_LAYER=1
 # Kept vertex conversions: kept from the second submission, equal to vconv_elem, dropped by a write to the source (game, host or GPU), left by a write beside it.
 t_vconv_keep: t_vconv_keep.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_vconv_keep.m $(MTL_T_SRC) $(FW)
@@ -1306,6 +1327,11 @@ t_blend_zero: t_blend_zero.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_blend_zero.m $(MTL_T_SRC) $(FW)
 check_t_blend_zero: t_blend_zero
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_blend_zero.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_blend_zero "$$work"; DM_NVN_BLEND_ZERO=0 MTL_DEBUG_LAYER=1 ./t_blend_zero "$$work"
+# NVIDIA's rounding of a float colour into a normalized target through the replay (t_rop_round.m; upstream a4b590976), with its shader from test_dmsh_blend_zero.py; then Apple's conversion as it is
+t_rop_round: t_rop_round.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rop_round.m $(MTL_T_SRC) $(FW)
+check_t_rop_round: t_rop_round
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_blend_zero.py --fixture-rop "$$work"; MTL_DEBUG_LAYER=1 ./t_rop_round "$$work"; DM_NVN_ROP_ROUND=0 MTL_DEBUG_LAYER=1 ./t_rop_round "$$work"
 # Typed outputs through the pipeline path (t_typed_outputs.m), with its libraries from test_dmsh_typed.py (Metal 4, NX 18's only pipeline path)
 t_typed_outputs: t_typed_outputs.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_typed_outputs.m $(MTL_T_SRC) $(FW)

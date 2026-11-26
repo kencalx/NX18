@@ -8,6 +8,7 @@ struct SettingsView: View {
     @State private var pickProfile = false
     @State private var pickKeys = false
     @State private var pickSpace = false
+    @State private var pickNX18 = false
     var body: some View {
         Form {
             Section("NX 18") { CheckoutStatus(); SetupPanel() }
@@ -33,12 +34,25 @@ struct SettingsView: View {
             } footer: {
                 Text("Builds take several gigabytes per game. By default each game's build folder is a \"build\" folder beside its files.")
             }
+            Section {
+                LabeledContent("iCloud NX 18 folder") {
+                    HStack {
+                        Text(Album.nx18Folder(chosen: settings.icloudNX18Folder)?.path ?? "Not found").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        Button("Choose…") { pickNX18 = true }
+                        if settings.icloudNX18Folder != nil { Button("Reset") { settings.icloudNX18Folder = nil } }
+                    }
+                }
+            } footer: {
+                Text("The folder your iPhone and iPad games use for the Profile, cloud saves and captures. Beam shows each game's captures from it in the game's Album. By default Beam uses the folder your Mac game apps use, or iCloud Drive › NX 18.")
+            }
+            .fileImporter(isPresented: $pickNX18, allowedContentTypes: [.folder]) { r in if case .success(let u) = r { settings.icloudNX18Folder = u } }
             Section("Beam") {
                 Toggle("Check for Beam updates once a day", isOn: Binding(get: { settings.updateChecks }, set: { settings.updateChecks = $0 }))
                 Toggle("Menu sounds in Beam Home", isOn: Binding(get: { UserDefaults.standard.bool(forKey: "homeSounds") }, set: { UserDefaults.standard.set($0, forKey: "homeSounds") }))
             }
             SourcesSection()
             ArtKeySection()
+            DeveloperSection()
             Section {
                 Picker("Sign with", selection: Binding(get: { settings.signWith ?? "" }, set: { settings.signWith = $0.isEmpty ? nil : $0 })) {
                     Text("The Apple account in Xcode").tag("")
@@ -74,5 +88,26 @@ struct SettingsView: View {
         .fileImporter(isPresented: $pickProfile, allowedContentTypes: [.data]) { r in if case .success(let u) = r { Task { await library.addProfile(u) } } }
         .fileImporter(isPresented: $pickKeys, allowedContentTypes: [.data]) { r in if case .success(let u) = r { settings.keys = u } }
         .fileImporter(isPresented: $pickSpace, allowedContentTypes: [.folder]) { r in if case .success(let u) = r { settings.buildSpace = u } }
+    }
+}
+
+/// The owner's developer switch (dm/tools/nx18_dev.py, docs/development.md "The developer switch"): the file ~/NX18-work/NX18_DEV turns NX18_DEV on for every
+/// build started from the Dock, Beam's and NX Play's alike. Shown only on a Mac with ~/NX18-work (the owner's work folder), so players never see the row
+struct DeveloperSection: View {
+    static let work = FileManager.default.homeDirectoryForCurrentUser.appending(path: "NX18-work", directoryHint: .isDirectory)
+    static var file: URL { work.appending(path: "NX18_DEV") }
+    @State private var on = FileManager.default.fileExists(atPath: DeveloperSection.file.path)
+    var body: some View {
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: Self.work.path, isDirectory: &isDir), isDir.boolValue {
+            Section {
+                Toggle("Developer builds (NX18_DEV)", isOn: Binding(get: { on }, set: { Self.set($0); on = FileManager.default.fileExists(atPath: Self.file.path) }))
+            } header: { Text("Developer") } footer: {
+                Text("Builds untested games and Switch 2 programs as developer builds, not for players. Applies to NX Play's builds too.")
+            }
+        }
+    }
+    static func set(_ on: Bool) {
+        if on { FileManager.default.createFile(atPath: file.path, contents: Data("on\n".utf8)) } else { try? FileManager.default.removeItem(at: file) }
     }
 }

@@ -524,7 +524,41 @@ def frame_step(ctx):
         emit(w)
     emit(B(here(), 0xb06d4))   # orig: getAngle as shipped (a tail call: the caller's return address stays)
     fs_put(0x12d57fc, [BL(0x12d57fc, start)], 'moving platforms: the turn angle is 2 atan2(|xyz|, |w|), small turns kept above 30 fps (state page target fps; 0 = hkQuaternion::getAngle)')
+    arrow_gravity(ctx)
     camera_aspect(ctx)
+
+
+# Arrows above 30 fps (MacNativeGames c9fb354b, Luís Zimmermann; cause and cure found by Savage Wind Recomp, its #144). Once an arrow falls, its update (main+0x5ee668, x20 = the
+# arrow) makes its velocity the last one's direction x its speed (+0xb4) plus a gravity vector whose Y part is +0x108, in metres per console frame, with no time step: each
+# update turns the arrow down by the same angle, so at 60 fps it turned twice as fast a second as at 30 and landed short (MacNativeGames measured -18.6 degrees a second at 30,
+# -72.9 at 120). The gravity's load goes to a stub that scales it by the VFR's ratio (+0x3c: interval / 2, 1.0 at 30 fps as shipped, 0.5 at 60), the ratio the held-button stub
+# reads, so it follows the host's frame step and the game's own interval alike; no VFR yet or a ratio that is not positive keeps the shipped gravity. Upstream scales by its
+# runtime's measured ratio and only on the Mac; here it is the VFR's, on every device. x8 is loaded again (main+0x5ee74c, after the call at main+0x5ee744) before it is read and
+# s3 is not read after the fadd at main+0x5ee730. The stub sets no flags (cbz / tbnz, no fcmp): nothing says the code after the site does not read them
+arrow_site, arrow_back = 0x5ee734, 0x5ee738
+
+
+def arrow_gravity(ctx):
+    for at, w in ((0x5ee71c, 0xbd40b680),    # ldr s0,[x20,#0xb4]      speed
+                  (0x5ee724, 0xbd410683),    # ldr s3,[x20,#0x104]
+                  (0x5ee730, 0x1e232828),    # fadd s8,s1,s3           s3's last read
+                  (arrow_site, 0xbd410a81),  # ldr s1,[x20,#0x108]     gravity, Y
+                  (arrow_back, 0x1e212849),  # fadd s9,s2,s1
+                  (0x5ee744, 0x94150f9f),    # bl main+0xb325c0
+                  (0x5ee74c, 0xf9404288),    # ldr x8,[x20,#0x80]      x8 set again
+                  (0x5ee764, 0x1e27d000)):   # fmov s0,#30.0           per console frame x 30
+        ctx.site(at, struct.pack('<I', w).hex())
+    start = ctx.here(); ctx.emit(0xbd410a81)   # ldr s1,[x20,#0x108]     the gravity, as shipped
+    ctx.emit(ADRP(8, ctx.here(), 0x1e93890)); ctx.emit(LDRX(8, 8, 0x890 // 8))   # the VFR
+    for w in (0xb40000c8,   # cbz x8,back (+6)
+              0xb9403d08,   # ldr w8,[x8,#0x3c]      its ratio (float bits)
+              0x34000088,   # cbz w8,back (+4)
+              0x37f80068,   # tbnz w8,#31,back (+3)  negative
+              0x1e270103,   # fmov s3,w8
+              0x1e230821):  # fmul s1,s1,s3          gravity x ratio
+        ctx.emit(w)
+    ctx.emit(B(ctx.here(), arrow_back))   # back
+    ctx.put(arrow_site, [B(arrow_site, start)], 'arrows: the gravity added per update scaled by the VFR ratio, so an arrow turns down at the 30 fps rate at any frame step')
 
 
 # Ultrawide's camera (the launcher's Ultrawide on an iPhone, loader.c dm_game_aspect): the camera update (main+0x10eda5c) sets the scene projection's aspect each world frame in
@@ -572,6 +606,9 @@ BINDING = [
     {'what': "moving platforms' turn angle without float rounding (hkQuaternion::getAngle's caller)", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's keyframed-body step at a fixed call site; Havok's getAngle is shared, but the fix belongs to this caller, which only matters above the game's own 30 fps",
      'kept': 'one call site in a build that may not be updated (1.9.0); convert with the frame step when a new build appears'},
+    {'what': "arrows' gravity per update scaled by the VFR ratio (the falling arrow's update)", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "the game's arrow update at a fixed site, reading the game's own VFR; it only matters above the game's own 30 fps",
+     'kept': 'one site in a build that may not be updated (1.9.0); convert with the frame step when a new build appears'},
     {'what': "Ultrawide's camera: the scene projection's aspect from the host, acknowledged after the store", 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's camera update and its projection's layout; the host's ratio, the HUD squeeze and the Stretch are general host behaviour",
      'blocked': 'the camera update has no reviewed function fingerprint yet',

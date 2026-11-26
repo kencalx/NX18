@@ -109,10 +109,12 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
     if !placed { sections.insert(GameMenuSection(id: "section:Controls", heading: "Controls", items: [layout]), at: 0) }
     if let cheats = cheatsMenu() { sections.append(GameMenuSection(id: "section:cheats", heading: "More", items: [cheats])) }
     let shot = GameMenuItem(id: "screenshot", title: "Take Screenshot", subtitle: "Saved in the game's Captures folder", symbol: "camera", closesMenu: true) { anchor in dm_capture_screenshot(anchor) }   // DmCapture.m: the next frame, once the panel is gone
+    let rec = dm_capture_recording()
+    let record = GameMenuItem(id: "record", title: rec ? "Stop Recording" : "Start Recording", subtitle: rec ? { let t = dm_capture_recording_seconds(); return "Recording for \(t / 60):\(String(format: "%02d", t % 60))" }() : "The game and its sound, until you stop it", symbol: rec ? "stop.circle" : "record.circle", closesMenu: true) { anchor in dm_capture_record_toggle(anchor) }   // DmCapture.m: ScreenCaptureKit
     let share = GameMenuItem(id: "share", title: "Share log", symbol: "square.and.arrow.up", closesMenu: true) { anchor in dmShareLog(from: anchor) }
     var last: [GameMenuItem] = []
     if let m = gameMenuModel { last.append(settingsAtStartRow(m)) }
-    sections.append(GameMenuSection(id: "section:app", heading: "More", items: [shot] + last + [share]))
+    sections.append(GameMenuSection(id: "section:app", heading: "More", items: [shot, record] + last + [share]))
     return sections
 }
 
@@ -159,8 +161,8 @@ let gameMenuTileOrder = ["DM_PICTURE_FIT", "DM_OPMODE", "DM_SHOW_FPS", "DM_RUMBL
         home.doors.append(GameMenuItem(id: "door.customize", title: "Customize", subtitle: n == 1 ? "1 setting" : "\(n) settings", symbol: "slider.horizontal.3", kind: .submenu(groups)))
     }
     if let cheats = flat.first(where: { $0.id == "cheats" }) { home.doors.append(cheats) }
-    let more = flat.filter { $0.id == "screenshot" || $0.id == "atstart" || $0.id == "share" }
-    home.doors.append(GameMenuItem(id: "door.more", title: "More", subtitle: "Screenshot, Gate at start, Share log", symbol: "ellipsis.circle", kind: .submenu([GameMenuSection(id: "more.all", inline: false, items: more)])))
+    let more = flat.filter { $0.id == "screenshot" || $0.id == "record" || $0.id == "atstart" || $0.id == "share" }
+    home.doors.append(GameMenuItem(id: "door.more", title: "More", subtitle: "Screenshot, Recording, Gate at start, Share log", symbol: "ellipsis.circle", kind: .submenu([GameMenuSection(id: "more.all", inline: false, items: more)])))
     return home
 }
 

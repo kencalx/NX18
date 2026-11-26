@@ -56,6 +56,7 @@ void mtl_sub_ready(uint64_t guest_ns);   // the guest ns the submission being en
 void mtl_sub_cpu_limit(uint64_t dirty_clock);   // the dirty-page clock at the game's submit of the submission being encoded (UINT64_MAX: none): CPU writes past it wait for a later one's re-upload
 void mtl_queue_activate(uint64_t serial);              // submit lock held: restore this queue's persistent GPU state
 void mtl_queue_forget(uint64_t serial);                // finalize: discard its state, including guest object pointers
+void mtl_dlss_forget(uint64_t serial);                 // nvnDlssNetworkFinalize: retire the network's cached MetalFX scalers on the replay thread
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n);               // Buffer copy in GPU ordering
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v);   // Write the event value after completion (0 write / 1 add)
 void mtl_sub_counter(uint64_t addr, uint32_t type);                       // Write the counter record after completion

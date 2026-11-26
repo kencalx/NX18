@@ -122,6 +122,17 @@ import XCTest
         XCTAssertLessThanOrEqual(scrolling.sizeThatFits(in: CGSize(width: 320, height: 359)).height, 359.5, "iPhone landscape: the body scrolls under the header")
     }
 
+    // This game's captures (the card's row; DmCapture.m reads it): own folder by default, the choice kept, and a flip on the flow stores it
+    func testCapturesChoice() {
+        let was = UserDefaults.standard.object(forKey: "nx18.captures"); defer { UserDefaults.standard.set(was, forKey: "nx18.captures") }
+        UserDefaults.standard.removeObject(forKey: "nx18.captures")
+        XCTAssertFalse(dm_nx18_captures_shared(), "own folder until chosen")
+        dm_set_nx18_captures_shared(true); XCTAssertTrue(dm_nx18_captures_shared())
+        let flow = NX18ProfileFlow()
+        XCTAssertTrue(flow.capturesShared)
+        flow.capturesTapped(); XCTAssertFalse(flow.capturesShared); XCTAssertFalse(dm_nx18_captures_shared(), "the flip is stored")
+    }
+
     // The welcome (§21.1): once per app, DM_WELCOME=0 skips it and 1 forces it; any choice records it
     func testWelcomeRule() throws {
         let d = try XCTUnwrap(UserDefaults(suiteName: "duo-welcome-\(UUID().uuidString)"))

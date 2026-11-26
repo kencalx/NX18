@@ -356,16 +356,20 @@ int main(void) {
     snprintf(p, sizeof p, "%s/sub", P); mkd(p); snprintf(p, sizeof p, "%s/empty", P); mkd(p); snprintf(p, sizeof p, "%s_device", P); mkd(p);
     snprintf(p, sizeof p, "%s/a", P); put(p, "hello"); set_mtime(p, 1000000000);
     snprintf(p, sizeof p, "%s/sub/b", P); put(p, "xy"); setxattr(p, FS_GUEST_NAME, "B", 1, 0, XATTR_NOFOLLOW); set_mtime(p, 1000000100);
+    snprintf(p, sizeof p, "%s/sub/.dm-case-1", P); put(p, "alias"); setxattr(p, FS_GUEST_NAME, "CaseFile", 8, 0, XATTR_NOFOLLOW); set_mtime(p, 1000000075);
     snprintf(p, sizeof p, "%s_device/d", P); put(p, "dev"); set_mtime(p, 1000000050);
-    CHECK(!ss_scan(P, &m) && m.files == 3 && strlen(m.hash) == SS_HASH && m.saved == 1000000100, "scan: 3 files, a 32-digit hash, saved = the newest file's date (%d files, saved %lld)", m.files, (long long)m.saved);
+    CHECK(!ss_scan(P, &m) && m.files == 4 && strlen(m.hash) == SS_HASH && m.saved == 1000000100, "scan: 4 files, a 32-digit hash, saved = the newest file's date (%d files, saved %lld)", m.files, (long long)m.saved);
     snprintf(bundle, sizeof bundle, "%s/pack/save.dmsync", root);
     CHECK(!ss_pack(P, "0100abc", bundle, &m2) && !strcmp(m2.hash, m.hash) && !strcmp(m2.title, "0100ABC"), "pack: the same hash as the scan, the title ID in capitals (%s)", m2.title);
-    CHECK(!ss_read(bundle, NULL, &m2) && !strcmp(m2.hash, m.hash) && m2.files == 3 && m2.saved == 1000000100 && !strcmp(m2.title, "0100ABC") && m2.device[0], "read: hash, files, date, title and device come back (from %s)", m2.device);
+    CHECK(!ss_read(bundle, NULL, &m2) && !strcmp(m2.hash, m.hash) && m2.files == 4 && m2.saved == 1000000100 && !strcmp(m2.title, "0100ABC") && m2.device[0], "read: hash, files, date, title and device come back (from %s)", m2.device);
     snprintf(u, sizeof u, "%s/pack/out", root); mkd(u);
     CHECK(!ss_read(bundle, u, &m2), "unpack");
     snprintf(p, sizeof p, "%s/save/a", u); snprintf(q, sizeof q, "%s/save/sub/b", u);
-    char g[8] = {0}; ssize_t gl = getxattr(q, FS_GUEST_NAME, g, sizeof g - 1, 0, XATTR_NOFOLLOW);
+    char g[16] = {0}; ssize_t gl = getxattr(q, FS_GUEST_NAME, g, sizeof g - 1, 0, XATTR_NOFOLLOW);
     CHECK(same(p, "hello") && same(q, "xy") && gl == 1 && g[0] == 'B', "files and the guest name (hle_fs.c's FS_GUEST_NAME) come back");
+    snprintf(q, sizeof q, "%s/save/sub/.dm-case-1", u);
+    memset(g, 0, sizeof g); gl = getxattr(q, FS_GUEST_NAME, g, sizeof g - 1, 0, XATTR_NOFOLLOW);
+    CHECK(same(q, "alias") && gl == 8 && !strcmp(g, "CaseFile"), "a .dm-case-1 alias round-trips its original guest name and contents");
     CHECK(mtime_of(p) == 1000000000, "a file's date comes back (%lld)", (long long)mtime_of(p));
     snprintf(p, sizeof p, "%s/save/empty", u); snprintf(q, sizeof q, "%s/save_device/d", u);
     struct stat st; CHECK(!stat(p, &st) && S_ISDIR(st.st_mode) && same(q, "dev"), "an empty folder and the device save come back");
@@ -655,7 +659,7 @@ int main(void) {
         set_mtime(p, time(NULL) + 100);
         snprintf(q, sizeof q, "%s/game.dat", B3);
         CHECK(session(B3, H5, "game.dat", "b3") == 0 && cloud_has(ch5, root, "game.dat", "b3"), "(16) the iPad saves and sends b3");
-        g_mkdir_fail = " cloud/save";
+        g_mkdir_fail = "/.cloud-stage.";   // the cloud's copy is unpacked into staging first (backup_cloud_restore, upstream 7886d3038)
         CHECK(run(A3, H5, NULL, NULL, NULL, NULL, READABLE) == NOT_SENT && same(p, "a-newer") && cloud_has(ch5, root, "game.dat", "b3"),
               "(16) the Mac's newer save cannot keep the cloud's first: nothing is sent");
         g_mkdir_fail = NULL;

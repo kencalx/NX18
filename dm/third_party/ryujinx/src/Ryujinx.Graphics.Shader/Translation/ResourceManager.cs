@@ -341,6 +341,44 @@ namespace Ryujinx.Graphics.Shader.Translation
             return setAndBinding.Binding;
         }
 
+        // nxnative: GlobalToStorage lowers a compute uniform-address load to a storage binding. Its origin still identifies the uniform slot, including when the loaded word is a texture handle.
+        public bool TryGetComputeUniformSlot(int binding, out int uniformSlot)
+        {
+            uniformSlot = -1;
+            if (_stage != ShaderStage.Compute) return false;
+
+            foreach ((int slot, int key) in _sbSlotsReverse)
+            {
+                if (_sbSlotToBindingMap[slot].Binding != binding) continue;
+                (int cb, int offset) = UnpackSbCbInfo(key);
+                int address = offset * 4 - Constants.NxComputeUniformBase;
+                if (cb != 0 || address < 0 || address % Constants.NxComputeUniformStride != 0 || address / Constants.NxComputeUniformStride >= Constants.NxComputeUniformSlots) return false;
+                uniformSlot = address / Constants.NxComputeUniformStride;
+                return true;
+            }
+
+            return false;
+        }
+
+        // nxnative: the constant buffer word that holds the address of a storage buffer binding (the NVN descriptor the host reads it from), for raw pointer discovery
+        public bool TryGetStorageBufferDescriptor(int binding, out int sbCbSlot, out int sbCbOffset)
+        {
+            for (int slot = 0; slot < _sbSlotToBindingMap.Length; slot++)
+            {
+                if (_sbSlotToBindingMap[slot].Binding == binding && _sbSlotsReverse.TryGetValue(slot, out int key))
+                {
+                    (sbCbSlot, sbCbOffset) = UnpackSbCbInfo(key);
+                    return true;
+                }
+            }
+
+            sbCbSlot = sbCbOffset = 0;
+            return false;
+        }
+
+        // nxnative: the shader's raw pointer sources (GlobalToStorage.FindPointerSite), by (storage buffer cb slot, cb word, byte offset of the pointer word); the value is the site number
+        public readonly Dictionary<(int, int, int), int> PointerSites = new();
+
         public bool TryGetStorageBufferBinding(int sbCbSlot, int sbCbOffset, bool write, out int binding)
         {
             if (!TryGetSbSlot((byte)sbCbSlot, (ushort)sbCbOffset, out int slot))

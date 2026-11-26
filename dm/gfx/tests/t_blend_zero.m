@@ -93,13 +93,13 @@ int main(int argc, char **argv) { @autoreleasepool {
     for (int r = 0; r < NROWS; r++) {
         memset(&S.color, 0, sizeof S.color); S.color.blend_en = (uint32_t)rows[r].on; S.blend[0] = state(r);
         memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); g_pass.cfmt[0] = MTLPixelFormatRGBA16Float; g_pso_lmap = NULL;
-        CHECK(bz_word() == (on ? rows[r].word : 0));
-        g_pass.cfmt[0] = MTLPixelFormatRGBA8Unorm; CHECK(bz_word() == 0);   // not a float target: the option is the float blender's
+        CHECK(bz_word(g_pass.cfmt) == (on ? rows[r].word : 0));
+        g_pass.cfmt[0] = MTLPixelFormatRGBA8Unorm; CHECK(bz_word(g_pass.cfmt) == 0);   // not a float target: the option is the float blender's
         g_pass.cfmt[0] = MTLPixelFormatRG11B10Float; g_pass.cfmt[1] = MTLPixelFormatRGBA16Float;
         static const uint8_t lmap[8] = {0xff, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}; g_pso_lmap = lmap;   // output 0 is physical target 1
-        CHECK(bz_word() == (on ? rows[r].word : 0));
+        CHECK(bz_word(g_pass.cfmt) == (on ? rows[r].word : 0));
         g_pso_lmap = NULL; S.color.blend_en = rows[r].on ? 2 : 0; S.blend[1] = state(r); memset(&S.blend[0], 0, sizeof S.blend[0]);
-        CHECK(bz_word() == (on ? rows[r].word << DMSH_BLEND_ZERO_BITS : 0));   // output 1's bits
+        CHECK(bz_word(g_pass.cfmt) == (on ? rows[r].word << DMSH_BLEND_ZERO_BITS : 0));   // output 1's bits
         // through draw_, which resets g_pso_lmap before it binds the draw's arguments: the word bz_bind sends is taken by the mapping first. A readable-tile merge's second phase,
         // output 0 at physical 1 (RGBA16F) while physical 0 is the first phase's normalized target: by physical index the guard would be off
         memset(&S.color, 0, sizeof S.color); S.color.blend_en = (uint32_t)rows[r].on; S.blend[0] = state(r); memset(&S.blend[1], 0, sizeof S.blend[1]); S.chmask.mask = 0xf;

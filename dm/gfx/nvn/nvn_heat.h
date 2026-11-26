@@ -122,18 +122,33 @@ static inline int nvn_heat_force_at(const nvn_heat_force *f, double t_s) {
     return r;
 }
 
-// "60 not holding" over the last 30 s (heat-ladder.md §7.2): the caller adds each frame's time (nvn_fstep_nothold's verdict, in vsyncs) and closes a bucket at each sample
+// "60 not holding" over the last 30 s (heat-ladder.md §7.2): the caller adds each frame's time (nvn_fstep_nothold's verdict, in vsyncs) and closes a bucket at each sample.
+// One-off load hitches (ported from S2Arm 022b03353): a frame that made a pipeline or a shader library on the submit thread, or packaged a texture the first time, is a hitch
+// (nvn_heat_win_add_h's hitch, the caller's to judge). While such frames are at most HEAT_HITCH_PERMILLE of the window's frames, their time is left out of the share whether
+// they held or not, so a first visit's compiles and uploads (S2Arm: 4 compiles of up to 10.5 s and 9 first uploads in 30 s put a steady 16.7 ms game over its 5% slow-frame
+// line) do not count as 60 not holding; more than that and the game compiles or uploads all the time, so they count as any frame
 #define HEAT_WIN 30
-typedef struct { double tot[HEAT_WIN], bad[HEAT_WIN], gpu[HEAT_WIN]; double ctot, cbad, cgpu; int i, n; } nvn_heat_win;
-static inline void nvn_heat_win_add(nvn_heat_win *w, int verdict, double vsyncs) {   // verdict: nvn_fstep_nothold's (-1 not counted)
+#define HEAT_HITCH_PERMILLE 25   // 2.5% of the window's frames
+typedef struct { double tot[HEAT_WIN], bad[HEAT_WIN], gpu[HEAT_WIN], htot[HEAT_WIN], hbad[HEAT_WIN], hgpu[HEAT_WIN]; uint32_t nf[HEAT_WIN], nh[HEAT_WIN];
+                 double ctot, cbad, cgpu, chtot, chbad, chgpu; uint32_t cnf, cnh; int i, n; } nvn_heat_win;   // h*: of tot / bad / gpu, the hitch frames' part; nf / nh: frames, hitch frames
+static inline void nvn_heat_win_add_h(nvn_heat_win *w, int verdict, double vsyncs, int hitch) {   // verdict: nvn_fstep_nothold's (-1 not counted)
     if (verdict < 0 || vsyncs <= 0) return;
     w->ctot += vsyncs; if (verdict) { w->cbad += vsyncs; if (verdict == 1) w->cgpu += vsyncs; }
+    w->cnf++;
+    if (hitch) { w->cnh++; w->chtot += vsyncs; if (verdict) { w->chbad += vsyncs; if (verdict == 1) w->chgpu += vsyncs; } }
 }
-static inline void nvn_heat_win_close(nvn_heat_win *w) { w->tot[w->i] = w->ctot; w->bad[w->i] = w->cbad; w->gpu[w->i] = w->cgpu; w->i = (w->i + 1) % HEAT_WIN; if (w->n < HEAT_WIN) w->n++; w->ctot = w->cbad = w->cgpu = 0; }
+static inline void nvn_heat_win_add(nvn_heat_win *w, int verdict, double vsyncs) { nvn_heat_win_add_h(w, verdict, vsyncs, 0); }
+static inline void nvn_heat_win_close(nvn_heat_win *w) {
+    w->tot[w->i] = w->ctot; w->bad[w->i] = w->cbad; w->gpu[w->i] = w->cgpu; w->htot[w->i] = w->chtot; w->hbad[w->i] = w->chbad; w->hgpu[w->i] = w->chgpu; w->nf[w->i] = w->cnf; w->nh[w->i] = w->cnh;
+    w->i = (w->i + 1) % HEAT_WIN; if (w->n < HEAT_WIN) w->n++;
+    w->ctot = w->cbad = w->cgpu = w->chtot = w->chbad = w->chgpu = 0; w->cnf = w->cnh = 0;
+}
 static inline void nvn_heat_win_reset(nvn_heat_win *w) { memset(w, 0, sizeof *w); }   // a stay away, a rung or cap change: another scene, or frames at another rung
-// The share of time not holding (-1: under 10 s of frames, nothing to judge), and whether those frames were mostly GPU-bound
+// The share of time not holding (-1: under 10 s of frames, nothing to judge), and whether those frames were mostly GPU-bound. One-off hitch frames are left out (above)
 static inline double nvn_heat_win_share(const nvn_heat_win *w, int *gpu_bound) {
-    double t = 0, b = 0, g = 0; for (int i = 0; i < HEAT_WIN; i++) { t += w->tot[i]; b += w->bad[i]; g += w->gpu[i]; }
+    double t = 0, b = 0, g = 0, ht = 0, hb = 0, hg = 0; uint64_t nf = 0, nh = 0;
+    for (int i = 0; i < HEAT_WIN; i++) { t += w->tot[i]; b += w->bad[i]; g += w->gpu[i]; ht += w->htot[i]; hb += w->hbad[i]; hg += w->hgpu[i]; nf += w->nf[i]; nh += w->nh[i]; }
+    if (nh && nh * 1000 <= nf * HEAT_HITCH_PERMILLE) { t -= ht; b -= hb; g -= hg; }
     if (gpu_bound) *gpu_bound = b > 0 && g >= 0.5 * b;
     return t >= 600 ? b / t : -1;   // 600 vsyncs: 10 s
 }

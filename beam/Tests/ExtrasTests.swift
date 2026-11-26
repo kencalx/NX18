@@ -1,6 +1,7 @@
 // Cheats, art and the build's environment (B4 part 2), with temporary folders and fixtures: no network, no Keychain, no real game's files
 import Foundation
 import Testing
+import AppKit
 @testable import NX_18_Beam
 
 @Suite struct CheatTests {
@@ -74,5 +75,23 @@ import Testing
         #expect(SteamGrid.usable(img("https://cdn/a.png"), .icon) && SteamGrid.usable(img("https://cdn/a.jpg"), .keyArt))
         #expect(!SteamGrid.usable(img("https://cdn/a.ico"), .icon) && !SteamGrid.usable(img("https://cdn/a.webp"), .keyArt))
         #expect(SteamGrid.usable(img("https://cdn/a.webp"), .logo) && !SteamGrid.usable(img("https://cdn/a.jpg"), .logo))
+    }
+}
+
+@Suite struct NXPlayPictureTests {
+    @Test func keepsACopyForWhenTheCacheIsCleared() throws {
+        let t = FileManager.default.temporaryDirectory.appending(path: "nxplay-picture-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: t) }
+        let cache = t.appending(path: "Banners"), art = t.appending(path: "Art")
+        try FileManager.default.createDirectory(at: cache.appending(path: "icons"), withIntermediateDirectories: true)
+        let png = NSImage(size: NSSize(width: 4, height: 4), flipped: false) { r in NSColor.red.setFill(); r.fill(); return true }
+        let tiff = try #require(png.tiffRepresentation)
+        let data = try #require(NSBitmapImageRep(data: tiff)?.representation(using: .jpeg, properties: [:]))
+        try data.write(to: cache.appending(path: "icons/0100ABCD00001000.jpg"))
+        #expect(NXPlayPicture.image(.icon, titleID: "0100abcd00001000", cache: cache, art: art) != nil)   // from NX Play's cache, with a copy kept
+        #expect(FileManager.default.fileExists(atPath: art.appending(path: "0100ABCD00001000/nxplay-icon.jpg").path))
+        try FileManager.default.removeItem(at: cache)   // the cache cleared
+        #expect(NXPlayPicture.image(.icon, titleID: "0100ABCD00001000", cache: cache, art: art) != nil)   // Beam's copy
+        #expect(NXPlayPicture.image(.banner, titleID: "0100ABCD00001000", cache: cache, art: art) == nil)   // never had one
     }
 }

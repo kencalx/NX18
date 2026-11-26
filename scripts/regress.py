@@ -409,9 +409,16 @@ def prune_chains(g):
 
 
 def chain_cache(tree, g):
-    """The compile cache a chain build of this revision uses: the player's build's one file when there is one, which a cache from before it moves into first, else the work folder's. A revision from before
-    shader_cache.py wants a folder, regress/cas, kept as a tar between builds. Its chain key differs, as it covers dmsh_mtlcache.py, and its compiles are not shared"""
-    if not (tree.path / 'dm/tools/shader_cache.py').is_file(): return game_root(g) / 'cas'
+    """The compile cache a chain build of this revision uses. A revision with one file per chain (shader_cache.for_chain) gets the player's cache folder, where it writes its chain's own file over the
+    older generations (the player's next build drops the files of other chains; the work folder's when the player has none yet). Before that: the player's build's one file when there is one, which a
+    cache from before it moves into first, else the work folder's. A revision from before shader_cache.py wants a folder, regress/cas, kept as a tar between builds. Its chain key differs, as it
+    covers dmsh_mtlcache.py, and its compiles are not shared"""
+    sc = tree.path / 'dm/tools/shader_cache.py'
+    if not sc.is_file(): return game_root(g) / 'cas'
+    if 'def for_chain(' in sc.read_text(errors='replace'):
+        folder = g.build / 'shader/cache' if (g.build / 'shader/cache').is_dir() else game_root(g) / 'cas-gen'
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
     shared, own = g.build / 'shader/cache/cas.db', game_root(g) / 'cas.db'
     shader_cache.adopt(g.build / 'shader/cache/cas', shared, say)
     if shared.is_file(): return shared
@@ -452,16 +459,17 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
     env.update(XLATE=str(tools_dir / 'dmsh_xlate_bin/dmsh_xlate'), DMSH_CAS=str(cas))
     entry = tools_dir / ('own_compilers.py' if (tools_dir / 'own_compilers.py').is_file() else 'dmsh_build.py')
     lib = out / f'b-{v}'
+    tar = not (tree.path / 'dm/tools/shader_cache.py').is_file()   # a revision from before shader_cache.py: its cache folder is kept as a tar
     if not done:
         say(f'  {g.id}: chain {v} (inputs {inp}) of {tree.id}: translating the shaders ({jobs} workers) → {out}')
-        if cas.suffix != '.db': tree_tar.unpack(cas, say)
+        if tar: tree_tar.unpack(cas, say)
         rc, paused = run_heavy([sys.executable, entry, g.build / 'shader/pkg', out], log, tree.path, env, a, f'{g.id} shader build'); t0 += paused
         if rc or not (shader_lib.view(lib) / '_b_build.json').is_file():   # a folder (an older revision's dmsh_build.py) or the image a newer one writes
             raise HarnessError(f'{g.id}: dmsh_build.py of {tree.id} failed (exit {rc}); last lines of {log}:\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=8)))
         prof = out / 'profile'; prof.mkdir(exist_ok=True)   # the tables the host reads beside the shader map, as this build made them
         for src in g.profile_dir(tree).glob('*.tsv'): shutil.copyfile(src, prof / src.name)
         (out / 'built.ok').write_text(f'{tree.id}\n')
-        if cas.suffix != '.db': tree_tar.pack(cas, say)
+        if tar: tree_tar.pack(cas, say)
     say(f'  {g.id}: hashing the outputs of chain {v}')
     shaders = nvn_manifest(shader_lib.view(lib), jobs)
     st = collections.Counter(s['st'] for s in shaders.values())

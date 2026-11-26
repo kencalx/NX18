@@ -127,6 +127,24 @@ int main(void) {
         snprintf(b, sizeof b, "  the game's own step of 2 at a 60 cap (BotW's VFR override): %d of 1800 frames not holding, share %.2f, 60 fits %d", counted, vs, vfit);
         check(counted == 0 && vs < 0 && !vfit && last == -1 && again == 0, b);
     }
+    {   // One-off load hitches (S2Arm 022b03353): 30 s of on-time frames with a few long compile / first-upload frames (2.2% of the frames, five of them 10 s: most of the time)
+        // are not "60 not holding"; with 4% of the frames hitches the game compiles all the time and they count. A hitch frame that holds is left out too
+        nvn_heat_win w = {0}, m = {0}; int nh = 0;
+        for (int sec = 0; sec < 30; sec++) {
+            for (int i = 0; i < 60; i++) {
+                int hitch = sec % 3 == 0 && i < 4, big = hitch && i == 0 && sec % 6 == 0;   // 40 hitch frames of 1,800 (2.2%), 5 of them 600 vsyncs long
+                nh += hitch; nvn_heat_win_add_h(&w, hitch, big ? 600 : 1, hitch);
+                int many = i < 3; nvn_heat_win_add_h(&m, many, many ? 3 : 1, many);   // 90 of 1,800 (5%)
+            }
+            nvn_heat_win_close(&w); nvn_heat_win_close(&m);
+        }
+        int gb = 0; double sh = nvn_heat_win_share(&w, &gb), shm = nvn_heat_win_share(&m, NULL);
+        nvn_heat_win p = w; double tot = 0, bad = 0; for (int i = 0; i < HEAT_WIN; i++) { tot += p.tot[i]; bad += p.bad[i]; }
+        snprintf(b, sizeof b, "one-off hitches: %d hitch frames of 1800 (%.0f%% of the time late) leave the share at %.2f; 5%% hitch frames count: %.2f", nh, 100 * bad / tot, sh, shm);
+        check(nh * 1000 <= 1800 * HEAT_HITCH_PERMILLE && bad / tot > 0.5 && sh == 0 && !gb && shm > 0.1, b);
+        nvn_heat_win z = {0}; for (int i = 0; i < 700; i++) nvn_heat_win_add_h(&z, 0, 1, i < 10); nvn_heat_win_close(&z);
+        check(nvn_heat_win_share(&z, NULL) == 0, "  hitch frames that held are left out, and the share is of the rest");
+    }
     {   // CPU-bound late frames skip 70% and effects (GPU work: neither would help, §3.1, §7.2) to 40 one gap after 85%; GPU-bound ones take 70%, then effects
         run_t c; init(&c, 1, 1, 1, 1, 1); c.in.nothold = 0.2; c.in.gpu_bound = 0; at(&c, 120, 1);
         run_t g; init(&g, 1, 1, 1, 1, 1); g.in.nothold = 0.2; g.in.gpu_bound = 1; at(&g, 80, 1);

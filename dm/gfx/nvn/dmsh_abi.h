@@ -128,12 +128,15 @@
 // holding an address by a binary search over the table's starts and accesses the address plus the pool's delta through a physical storage buffer pointer
 #define DMSH_GMEM_MAP_CB_SLOT 0xFF
 #define DMSH_GMEM_MAP_ENTRIES 8192       // entries of the table (GlobalToStorage.GmemMapLog2 = 13), sorted by start: entry 0 is empty (start 0, end 0) and unused entries start at ~0
-#define DMSH_GMEM_MAP_ENTRY 32           // bytes of an entry: start, end (exclusive) and delta (the pool's Metal GPU address minus its guest address), 64 bits each, then a 32-bit lookup hint and 4 bytes of padding
+#define DMSH_GMEM_MAP_ENTRY 32           // bytes of an entry: start, end (exclusive) and delta (the pool's Metal GPU address minus its guest address), 64 bits each, then a 32-bit lookup hint and the byte span if the range fits in one 4 GiB window (0 otherwise: a load takes the full lookup; upstream 736a2ecbb)
 #define DMSH_GMEM_HINT_SHIFT 21          // the hint in entry (chunk & (entries - 1)) names the entry that holds all of this 2 MiB guest chunk: chunk in the high bits, entry index in the low 13, 0 = none. Tagged, so a colliding chunk searches
 // Where such a store or atomic lands is known only when the GPU runs it, so each one also sets the bit of its table entry in a write log, reserved under the same slot at offset 1
 // (Ryujinx GlobalToStorage.GmemLogCbOffset): a bitmap of the entries of the table bound beside it, bit i in 32-bit word i / 32. The host learns the pools from it
 #define DMSH_KIND_GMEM_LOG "gmem_log"    // that write log: the host gives each draw or dispatch its own, cleared (nvn_mtl.m gml_take)
 #define DMSH_GMEM_LOG_CB_OFFSET 1
+// Reflection-only raw pointer sources: [NVN storage slot, byte offset] on gmem_map's "pointers". Before each binding the host reads these words and admits their actual pools
+// to the existing table (nvn_mtl.m gmem_discover; upstream f15d65850). No extra GPU binding or lookup path; unsupported sources keep relying on the table's addressed ranges.
+#define DMSH_GPTR_MAX 64
 
 // A pool binding points at a buffer the host keeps (nvn_mtl.m pool_gpu): a 32-bit bound n (the highest index the shader may read), then from DMSH_POOL_HEAD one 8-byte resource ID per ID
 #define DMSH_POOL_HEAD 16                // bytes before element 0 of a pool buffer: the bound n, 4 bytes of padding, and the 64-bit GPU address of the read bitmap: bit i in 32-bit word i / 32 is set by a shader that reads texture ID i (dmsh_reflect.py pool_arrays, nvn_mtl.m pool_seen_scan); 0 in a table of a uniform buffer's handles (htab_gpu), whose reads are not marked
@@ -145,8 +148,14 @@
 // NVIDIA's "zero times anything is zero" float blend option, which NVN's driver switches on (SET_BLEND_FLOAT_OPTION; dm/gfx/tools/dmsh_rewrite.py blend_zero): a uint at this fragment buffer
 // index, DMSH_BLEND_ZERO_BITS bits per colour output from bit 0: 0 = the output's source colour weight is not known to be zero, 1 = it is zero where the output's alpha is 0 (SRC_ALPHA),
 // 2 = where its alpha is 1 (ONE_MINUS_SRC_ALPHA) (nvn_mtl.m bz_bind). A factor of ZERO needs none: Apple's blender leaves that term out (dm/gfx/tests/t_blend_zero.m)
+// A second uint after it rounds colour outputs as NVIDIA's colour unit converts them into a normalized target (dmsh_rewrite.py blend_zero, nvn_mtl.m rop_word):
+// DMSH_BLEND_ROUND_BITS bits per colour output from bit 0, DMSH_ROUND_* the target's channel widths; 0 = stored as Apple converts it (blended, float, sRGB, signed or another width)
 #define DMSH_BLEND_BUFFER 28
 #define DMSH_BLEND_ZERO_BITS 2
+#define DMSH_BLEND_ROUND_BITS 2
+#define DMSH_ROUND_8 1                   // 8 bits a channel (255)
+#define DMSH_ROUND_16 2                  // 16 bits a channel (65535)
+#define DMSH_ROUND_10_2 3                // 10 bits rgb, 2 bits alpha (1023, 3)
 
 // Border colours Metal has no sampler state for (it has transparent black, opaque black and opaque white): the build gives each sampler member a shader samples through a twin,
 // <member>_w, and the shader a block it reads per sample, r + (twin sample - r) * k when the sampler's bit is set (dmsh_rewrite.py border_emu, nvn_border.h)

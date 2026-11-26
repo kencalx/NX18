@@ -41,6 +41,7 @@ Beam runs NX 18's own build script and relies only on what [docs/frontends.md](f
 - **Cheats:** your own cheat files, named after the game's build. Beam never downloads cheats.
 - **Art:** with a SteamGridDB key, which is kept in the Keychain and never given to the build, choose key art, a logo and an icon.
 - **Manual and My files:** add the game's manual to the app. Keep your own guides on the Mac and send them to a device Beam installed on. Keep apps with a manual to your own devices.
+- **Album:** each game's screenshots and recordings, with your own guides and maps (Add Files…), newest first. Captures come from the Mac app's own folder and, for iPhone and iPad, from the iCloud NX 18 folder once **This game's captures** is set to **NX 18 folder** on the game's NX 18 card ([Screenshots](playing.md#screenshots)). Click one to look at it in Quick Look; right-click to open it, show it in Finder, share it or move it to the Trash. Beam finds the iCloud NX 18 folder by itself (the one your Mac game apps use, else iCloud Drive › NX 18); Settings › **iCloud NX 18 folder** chooses another.
 
 ## Privacy
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """One copy of a raw global memory lookup's search (dmsh_rewrite.py raw_noinline): the translator's dmsh_raw_find (GlobalToStorage GetRawFindFunction), as spirv-cross writes it, is
-marked noinline; the access helpers that check the last entry and call it stay inline, and so does a function of the same shape without the name. The pass is idempotent, and with
-xcrun the rewritten shader compiles. test_dmsh_raw_last.py runs the translator's own lookups on the GPU in both forms."""
+marked noinline outside mesh stages; final mesh code keeps it inline in the Mac library (the M1 / M2 mesh compiler's crash) and noinline in the iPhone's, one text chosen
+by the compile's deployment target, including composed code whose inputs were already rewritten. The access helpers that check the last entry and
+call it stay inline, and so does a function of the same shape without the name. The pass is idempotent, and with xcrun the rewritten shader compiles. test_dmsh_raw_last.py runs the
+translator's own lookups on the GPU in both forms."""
 from pathlib import Path
 import re
 import shutil
@@ -12,7 +14,7 @@ import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
-from dmsh_rewrite import raw_noinline   # noqa: E402
+from dmsh_rewrite import RAW_FIND_MESH, raw_noinline   # noqa: E402
 
 HEAD = '''#include <metal_stdlib>
 #include <simd/simd.h>
@@ -72,6 +74,36 @@ def attribute(src, name):
 
 
 class RawNoinline(unittest.TestCase):
+    def test_mesh_keeps_the_search_inline_on_the_mac(self):
+        for source in (SRC, raw_noinline(SRC)):
+            with self.subTest(already_noinline=source != SRC):
+                out = raw_noinline(source, stage='ms')
+                self.assertEqual(attribute(out, 'dmsh_raw_find'), '#endif')
+                self.assertEqual(out.replace(RAW_FIND_MESH, INLINE), SRC)
+                self.assertEqual(raw_noinline(out, stage='ms'), out)
+                self.assertEqual(raw_noinline(out), raw_noinline(SRC))   # and back
+
+    def preprocessed(self, sdk, flag, src):   # the source as the compile with that deployment target reads it
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'raw.metal'; p.write_text(src)
+            r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', flag, '-std=metal4.1', '-E', '-P', str(p)], capture_output=True, text=True)
+            if 'unable to find utility' in r.stderr or 'cannot be located' in r.stderr: self.skipTest('no Metal toolchain for ' + sdk)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout
+
+    @unittest.skipUnless(shutil.which('xcrun'), 'no xcrun')
+    def test_the_deployment_target_chooses(self):
+        out = raw_noinline(SRC, stage='ms')
+        mac = self.preprocessed('macosx', '-mmacosx-version-min=27.3', out)
+        ios = self.preprocessed('iphoneos', '-mios-version-min=27.3', out)
+        self.assertRegex(mac, r'static inline __attribute__\(\(always_inline\)\)\s*int dmsh_raw_find\(')
+        self.assertRegex(ios, r'static __attribute__\(\(noinline\)\)\s*int dmsh_raw_find\(')
+
+    def test_other_stages_keep_one_search(self):
+        for stage in ('ts', 'vs', 'ps', 'cs', 'rt'):
+            with self.subTest(stage=stage):
+                self.assertEqual(raw_noinline(SRC, stage=stage), raw_noinline(SRC))
+
     def test_marks(self):
         out = raw_noinline(SRC)
         self.assertEqual(attribute(out, 'dmsh_raw_find'), NOINLINE)
@@ -87,12 +119,13 @@ class RawNoinline(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('xcrun'), 'no xcrun')
     def test_compiles(self):
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / 'raw.metal'; p.write_text(raw_noinline(SRC))
-            r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', str(p), '-o', str(Path(d) / 'raw.air')], capture_output=True, text=True)
-            if 'unable to find utility' in r.stderr: self.skipTest('no Metal toolchain')
-            self.assertEqual(r.returncode, 0, r.stderr)
-
+        for stage in ('cs', 'ms'):
+            for sdk, flag in (('macosx', '-mmacosx-version-min=27.3'), ('iphoneos', '-mios-version-min=27.3')):
+                with self.subTest(stage=stage, sdk=sdk), tempfile.TemporaryDirectory() as d:
+                    p = Path(d) / 'raw.metal'; p.write_text(raw_noinline(SRC, stage))
+                    r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', flag, '-std=metal4.1', '-c', str(p), '-o', str(Path(d) / 'raw.air')], capture_output=True, text=True)
+                    if 'unable to find utility' in r.stderr or 'cannot be located' in r.stderr: self.skipTest('no Metal toolchain for ' + sdk)
+                    self.assertEqual(r.returncode, 0, r.stderr)
 
 if __name__ == '__main__':
     unittest.main()

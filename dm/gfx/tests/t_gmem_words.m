@@ -75,5 +75,46 @@ int main(void) { @autoreleasepool {
     CHECK("that table holds the pool made after the block was encoded", table_has(w5, a + 40 * MB));
     CHECK("submission completes", mtl_wait(mtl_sub_commit(), 5000000000ull));
     CHECK("GPU has no submission error", !mtl_last_commit_error());
+    {   // A pointer in a bound storage slot reaches an existing pool that no address getter exposed (gmem_discover; upstream f15d65850, its pools moved past NX 18's 0-44 MB ones).
+        // NX 18 keeps a draw's table and makes its word current at the commit (gmem_commit_patch), so each check reads the table a word noted before the discovery holds after a commit
+        mtl_sub_begin();
+        uint8_t *src = mem + 32 * MB, *dst = mem + 48 * MB; uint64_t ptr = (uint64_t)(uintptr_t)dst + 0x100;
+        mtl_pool_add(dst, 4 * MB);
+        CHECK("unaddressed target is absent", !table_has(gmem_map_gpu(), (uint64_t)(uintptr_t)dst));
+        NvShader *sh = [NvShader new]; sh->rf.ngptr = 1; sh->rf.gptr = calloc(1, sizeof *sh->rf.gptr); sh->rf.gptr[0].reg = 0; sh->rf.gptr[0].off = 8;
+        #define DISCOVERED(guest) ({ uint64_t w_ = gmem_map_gpu(); gmem_slot_note(&w_, NULL); gmem_discover(sh, 0); gmem_commit_patch(); table_has(w_, (guest)); })
+        S.ssbo[0][0] = (p_bind_buf){.addr = (uint64_t)(uintptr_t)src, .size = 16}; memcpy(src + 8, &ptr, 8);
+        CHECK("pointer discovery patches the existing table", DISCOVERED((uint64_t)(uintptr_t)dst));
+        int ranges = g_naddr; ptr += 0x100; memcpy(src + 8, &ptr, 8); gmem_discover(sh, 0);
+        CHECK("interior pointers reuse one logical range", g_naddr == ranges);
+        uint8_t *dst2 = mem + 56 * MB; mtl_pool_add(dst2, 4 * MB); ptr = (uint64_t)(uintptr_t)dst2;
+        S.ssbo[0][0].size = 15; memcpy(src + 8, &ptr, 8);
+        CHECK("a short source stays unread", !DISCOVERED(ptr));
+        S.ssbo[0][0].size = 16;
+        CHECK("new pointer data without rebinding is discovered", DISCOVERED(ptr));
+        uint8_t *small = mem + 36 * MB + 0x1000; mtl_pool_add(small, 0x1000); uint64_t inside = (uint64_t)(uintptr_t)small + 16;
+        memcpy(src + 8, &inside, 8);
+        CHECK("discovery starts at the logical pool, excluding Metal's aligned padding", DISCOVERED((uint64_t)(uintptr_t)small));
+        uint8_t *dst3 = mem + 60 * MB; mtl_pool_add(dst3, 4 * MB); uint64_t queued = (uint64_t)(uintptr_t)dst3;
+        uint64_t invalid = UINT64_MAX; mtl_sub_update(&invalid, (uint64_t)(uintptr_t)src + 8, 8);
+        CHECK("unaddressed target can prime the lookup cache", mtl_addr_known(queued, 1));
+        CHECK("an all-ones word cannot admit an unrelated cached pool", !DISCOVERED(queued));
+        mtl_sub_update(&queued, (uint64_t)(uintptr_t)src + 8, 8);
+        CHECK("a queued inline pointer update is discovered", DISCOVERED(queued));
+        // Source lies outside registered memory, or crosses its end: no CPU dereference
+        S.ssbo[0][0].addr = 1; gmem_discover(sh, 0);
+        S.ssbo[0][0].addr = (uint64_t)(uintptr_t)src + 4 * MB - 12;
+        CHECK("invalid sources leave the table intact", DISCOVERED(ptr));
+        #undef DISCOVERED
+        CHECK("pointer update submission completes", mtl_wait(mtl_sub_commit(), 5000000000ull));
+        memset(&S.ssbo[0][0], 0, sizeof S.ssbo[0][0]);
+    }
+    {   // each entry's span (word 7, upstream 736a2ecbb): its length when the range lies in one 4 GiB window, else 0
+        const uint8_t *t = (const uint8_t *)gmem_map_at(1).contents; int ok = 1, seen = 0;
+        for (unsigned k = 1; k < DMSH_GMEM_MAP_ENTRIES; k++) { uint64_t e[2]; uint32_t span; memcpy(e, t + (size_t)k * DMSH_GMEM_MAP_ENTRY, sizeof e); memcpy(&span, t + (size_t)k * DMSH_GMEM_MAP_ENTRY + 28, sizeof span);
+            if (e[0] == ~0ull) break;
+            uint32_t want = e[1] - e[0] <= UINT32_MAX && (e[0] >> 32) == ((e[1] - 1) >> 32) ? (uint32_t)(e[1] - e[0]) : 0; ok &= span == want; seen++; }
+        CHECK("every pool table entry carries its span (0 across a 4 GiB boundary)", ok && seen > 0);
+    }
     printf("t_gmem_words: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

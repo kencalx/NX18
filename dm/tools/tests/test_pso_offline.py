@@ -140,6 +140,34 @@ class Plan(unittest.TestCase):
         bases, _, _ = po.plan(self.d, CHAIN, pairs[:2], True)   # near = 0: the entry_z entries
         self.assertEqual(bases, [('pull_bp', 'main0_z', 'fs_b', 'main0'), ('plain_b', 'main0_z', 'fs_b', 'main0')])
 
+    def test_vertex_entry_is_the_name_the_reflection_gives_the_library(self):   # nvn_mtl.m side_entry, as shader_load and pre_desc take it
+        own = {'entry': 'main0', 'entry_z': 'main0_z'}
+        self.assertEqual([po.vertex_entry(own, z) for z in (False, True)], ['main0', 'main0_z'])   # no pulling library: the shader's own, in <key>_b
+        named = dict(own, pull={'entry': 'main0_p', 'entry_z': 'main0_zp', 'slot': 16, 'inputs': [0]})
+        self.assertEqual([po.vertex_entry(named, z) for z in (False, True)], ['main0_p', 'main0_zp'])
+        for pull in ({}, {'entry': 'main0'}, {'entry': '', 'entry_z': None}, {'entry_z': 7}):   # names none for the depth mode: the shader's own (today's libraries repeat it)
+            self.assertEqual(po.vertex_entry(dict(own, pull=pull), True), 'main0_z', pull)
+        self.assertEqual(po.vertex_entry(dict(own, pull={'entry_z': 'main0_zp'}), False), 'main0')
+        self.assertEqual(po.vertex_entry(dict(own, pull=True), False), 'main0')   # not a pulling library's record
+        self.assertEqual(po.vertex_entry({'entry': 'main0', 'pull': {'entry': 'main0_p', 'entry_z': 'main0_zp'}}, True), 'main0_p')   # no near = 0 entry of its own: `entry`, as the host
+        self.assertIsNone(po.vertex_entry({}, False))
+
+    def test_a_pulling_library_with_names_of_its_own(self):   # one compile unit holding a shader's entry points and its pulling ones cannot name both main0
+        vz = [('main0', False), ('main0_z', False)]
+        refl = {'entry_z': 'main0_z', 'vertex_inputs': [{'location': 0}]}
+        self.shader('unit', dict(refl, pull={'entry': 'main0_p', 'entry_z': 'main0_zp'}), {'_b': vz, '_bp': [('main0_p', False), ('main0_zp', ('dm_border_off',))]})
+        self.shader('own', dict(refl, pull={'entry': 'main0', 'entry_z': 'main0_z'}), {'_b': vz, '_bp': vz})   # as dmsh_pull.variant names them today
+        self.shader('stale', dict(refl, pull={'entry': 'main0_p', 'entry_z': 'main0_zp'}), {'_b': vz, '_bp': vz})   # names an entry point its library does not hold: no base
+        self.shader('fs', {}, {'_b': [('main0', False)]})
+        pairs = [('unit', 'fs'), ('own', 'fs'), ('stale', 'fs')]
+        bases, rest, left = po.plan(self.d, CHAIN, pairs, False)
+        self.assertEqual(bases, [('unit_bp', 'main0_p', 'fs_b', 'main0'), ('own_bp', 'main0', 'fs_b', 'main0')])
+        self.assertEqual((rest, left['entry']), ([], 1))
+        bases, rest, left = po.plan(self.d, CHAIN, pairs, True)
+        self.assertEqual(bases, [('unit_bp', 'main0_zp', 'fs_b', 'main0'), ('own_bp', 'main0_z', 'fs_b', 'main0')])
+        self.assertEqual((rest, left['entry']), ([], 1))
+        self.assertEqual(po.cut_entries(self.d, bases), {('unit_bp', 'main0_zp')})   # specialized, and not its library's first function: from a library of its own, under that name
+
     def test_border_constant_is_specialized_as_the_host_does(self):   # pre_fn: dm_border_off true, every other constant at its default; a pair with another constant stays on the device
         vz = [('main0', False), ('main0_z', False)]
         self.shader('pull', {'entry_z': 'main0_z', 'pull': {'entry': 'main0'}, 'vertex_inputs': [{'location': 0}]}, {'_b': vz, '_bp': [('main0', ('dm_border_off',))]})
@@ -521,11 +549,11 @@ class Layout(unittest.TestCase):
         self.assertEqual((b.vert, b.attributes[1]), (('vi_b', 'main0'), (1, 'UChar4', 16, 16)))
         b = self.one(rkey(vs='vi_b', attrs={**self.POS, 1: (self.H2, 16, 0)}, streams={0: (20, 0)}))   # Half2 into a uint input: the float shadow; the others read the zero buffer
         self.assertEqual((b.vert, b.attributes), (('vi_bv', 'main0'), ((0, 'Float4', 0, 16), (1, 'UInt4', 0, 30), (16, 'Half2', 16, 16), (17, 'Int4', 0, 30))))
-        self.assertEqual(b.layouts, ((16, 20, 'PerVertex', 1), (30, 16, 'Constant', 0)))
+        self.assertEqual(b.layouts, ((16, 20, 'PerVertex', 1), (30, 32, 'Constant', 0)))
         b = self.one(rkey(vs='vn_b', attrs={1: (self.H2, 0, 0)}, streams={0: (4, 0)}))   # no shadow library: the conversion
         self.assertEqual((b.vert, b.attributes, b.layouts), (('vn_b', 'main0'), ((1, 'UInt4', 0, 1),), ((1, 16, 'PerVertex', 1),)))
-        b = self.one(rkey(attrs={1: (self.F2, 0, 0)}, streams={0: (8, 0)}))   # attribute 0 unset: the zero buffer
-        self.assertEqual(b.attributes[0], (0, 'Float4', 0, 30))
+        b = self.one(rkey(attrs={1: (self.F2, 0, 0)}, streams={0: (8, 0)}))   # attribute 0 unset: the absent default (0, 0, 0, 1.0) at offset 16 of the zero buffer (upstream ef8b25d2c)
+        self.assertEqual(b.attributes[0], (0, 'Float4', 16, 30))
         self.assertEqual(self.one(rkey(attrs={**self.POS, 1: (self.F2, 16, 0)}, streams={0: (24, 0)}, samples=4, a2c=1))[4:], (4, True))
 
     def test_fragment_entry_and_depth_only(self):
@@ -614,7 +642,7 @@ class Layout(unittest.TestCase):
         self.assertEqual((d['vertex_function_descriptor'], d['raster_sample_count'], len(d['vertex_descriptor']['attributes']), len(d['vertex_descriptor']['layouts'])),
                          ('fnd:vi_bv.main0', 2, 18, 31))
         self.assertEqual((d['vertex_descriptor']['attributes'][16], d['vertex_descriptor']['attributes'][2], d['vertex_descriptor']['layouts'][30]),
-                         ({'format': 'Half2', 'offset': 16, 'buffer_index': 16}, {}, {'stride': 16, 'step_function': 'Constant', 'step_rate': 0}))
+                         ({'format': 'Half2', 'offset': 16, 'buffer_index': 16}, {}, {'stride': 32, 'step_function': 'Constant', 'step_rate': 0}))
         self.assertNotIn('alpha_to_coverage_state', d)
         self.assertEqual([n for n, _, _ in po.groups_of([('v_bp', 'main0', 'p_b', 'main0')], [('c_b', 'main0'), b, b], 5, 5, 5, 1)], ['00001', 'c00001', 'l00001', 'l00002'])
 

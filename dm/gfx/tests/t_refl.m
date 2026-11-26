@@ -7,6 +7,7 @@
 #include <string.h>
 #include "dmsh_chain.h"   // dm/gfx/nvn (-I from the Makefile)
 #include "msl_image.h"    // a game's shader library image (DM_REFL_IMG), read in place
+#include "dmsh_abi.h"
 
 enum { C = NVN_RB_CBUF, S = NVN_RB_SAMP, T = NVN_RB_TEX, I = NVN_RB_IMG, TB = NVN_RB_TBUF };
 enum { F = NVN_DPF_FLOAT, U = NVN_DPF_UINT, D = NVN_DPF_DEPTH };
@@ -26,12 +27,13 @@ static NSDictionary *load(const char *key) {
 static int same_refl(const nvn_refl *a, const nvn_refl *b, char *why, size_t wl) {
     // Byte copies, padding included: nvn_refl_from_json zeroes the whole struct (nvn_refl_free → nvn_refl_init's memset) before it sets a field, so the bytes compared are the fields
     // and zeros, and comparing the whole representation covers a field added later without a line here
-    nvn_refl x, y; memcpy(&x, a, sizeof x); memcpy(&y, b, sizeof y); x.b = y.b = NULL; x.fc = y.fc = NULL; x.uv = y.uv = NULL; x.tail = y.tail = NULL; x.cap = y.cap = 0; x.c1 = y.c1 = NULL;
+    nvn_refl x, y; memcpy(&x, a, sizeof x); memcpy(&y, b, sizeof y); x.b = y.b = NULL; x.fc = y.fc = NULL; x.uv = y.uv = NULL; x.tail = y.tail = NULL; x.cap = y.cap = 0; x.c1 = y.c1 = NULL; x.gptr = y.gptr = NULL;
     if (memcmp(&x, &y, sizeof x)) { snprintf(why, wl, "scalar fields differ"); return 0; }   // NOLINT(bugprone-suspicious-memory-comparison): padding zeroed by nvn_refl_from_json, copied by memcpy (above)
     if (a->nb && memcmp(a->b, b->b, (size_t)a->nb * sizeof *a->b)) { snprintf(why, wl, "bindings differ"); return 0; }
     if (memcmp(a->fc, b->fc, sizeof *a->fc)) { snprintf(why, wl, "fragment readable-tile tables differ"); return 0; }
     if (memcmp(a->uv, b->uv, sizeof *a->uv)) { snprintf(why, wl, "vertex readable-tile tables differ"); return 0; }
     if (a->c1_len && memcmp(a->c1, b->c1, a->c1_len)) { snprintf(why, wl, "c1 differs"); return 0; }
+    if (a->ngptr && memcmp(a->gptr, b->gptr, (size_t)a->ngptr * sizeof *a->gptr)) { snprintf(why, wl, "raw pointer sources differ"); return 0; }
     return 1;
 }
 static const long FIXED_BLOCK = (long)(sizeof(nvn_refl_fc) + sizeof(nvn_refl_uv) + NVN_REFL_MAXB * sizeof(nvn_rbind));   // what DM_NVN_REFL_FIXED=1 gives every shader
@@ -124,6 +126,23 @@ static void roundtrip_image(const char *path) {
 
 int main(void) { @autoreleasepool {
     nvn_refl r = {0}; char err[160] = "";
+    {   // Pointer discovery is metadata on the existing pool-table binding; there is no new GPU argument (upstream f15d65850). The sources live in a block of their own, none without any
+        NSMutableDictionary *b = [@{@"kind": @"gmem_map", @"arg_id": @0, @"msl_name": @"cp_s0", @"pointers": @[@[@1, @8], @[@0, @0]]} mutableCopy];
+        NSDictionary *j = @{@"route": @"B", @"bindings": @[b]};
+        check("raw pointers: conversion", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("raw pointers: existing table kind", NVN_RB_GMEM, r.b[0].kind); check("raw pointers: count", 2, r.ngptr);
+        check("raw pointers: slot", 1, r.gptr[0].reg); check("raw pointers: byte", 8, r.gptr[0].off); check("raw pointers: second byte", 0, r.gptr[1].off);
+        for (id invalid in @[@[@[@16, @0]], @[@[@0, @65529]], @[@[@0]], @[@[@"bad", @0]], @"bad"]) {
+            b[@"pointers"] = invalid; check("raw pointers: malformed source rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+            check("raw pointers: a refused conversion holds none", 1, r.gptr == NULL && r.ngptr == 0);
+        }
+        NSMutableArray *many = [NSMutableArray array]; for (int i = 0; i <= DMSH_GPTR_MAX; i++) [many addObject:@[@0, @(8 * i)]];
+        b[@"pointers"] = many; check("raw pointers: too many rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+        [many removeLastObject]; check("raw pointers: DMSH_GPTR_MAX taken", 0, nvn_refl_from_json(j, &r, err, sizeof err)); check("raw pointers: all counted", DMSH_GPTR_MAX, r.ngptr);
+        b[@"pointers"] = @[]; check("raw pointers: an empty list converts", 0, nvn_refl_from_json(j, &r, err, sizeof err)); check("raw pointers: no block for none", 1, r.gptr == NULL && r.ngptr == 0);
+        [b removeObjectForKey:@"pointers"]; check("raw pointers: an older translator's binding converts", 0, nvn_refl_from_json(j, &r, err, sizeof err)); check("raw pointers: none", 0, r.ngptr);
+        nvn_refl_free(&r);
+    }
     {   // native image atomics (dmsh_atomic.py): one read_write image, marked atomic by the build; an image the shader only stores to is not
         NSDictionary *j = @{@"route": @"B", @"bindings": @[
             @{@"kind": @"img", @"reg": @2, @"arg_id": @0, @"msl_name": @"cp_i_cb2_4C_r32ui", @"msl_type": @"texture_buffer<uint, access::read_write>", @"atomic": @YES},
@@ -218,12 +237,13 @@ int main(void) { @autoreleasepool {
     {   int f1 = fail;   // handles in a uniform buffer beyond textures: Unreal Engine 5.4 on the Switch 2 keeps images and buffer textures there, and ORs a texture and a sampler word in either order
         NSDictionary *j = @{@"route": @"B", @"bindings": @[
             @{@"kind": @"img_ubo", @"reg": @0, @"off": @8, @"arg_id": @0, @"msl_name": @"cp_i_cb3_2_", @"msl_type": @"texture_buffer<float, access::write>", @"atomic": @YES},
-            @{@"kind": @"tbuf_ubo", @"reg": @1, @"off": @16, @"arg_id": @1, @"msl_name": @"cp_tb_cb4_4", @"msl_type": @"texture_buffer<uint>"},
+            @{@"kind": @"tbuf_ubo", @"reg": @1, @"off": @16, @"soff": @0, @"sreg": @2, @"arg_id": @1, @"msl_name": @"cp_tb_cb4_4", @"msl_type": @"texture_buffer<uint>"},
             @{@"kind": @"tex_ubo", @"reg": @0, @"off": @88, @"soff": @0, @"sreg": @2, @"arg_id": @2, @"msl_name": @"fp_t_cb262147_10000016", @"msl_type": @"texture2d<float>"},
             @{@"kind": @"tex_ubo", @"reg": @0, @"off": @24, @"arg_id": @3, @"msl_name": @"fp_t_cb3_6", @"msl_type": @"texture2d<float>"}]};
         check("B uniform handles: conversion succeeds", 0, nvn_refl_from_json(j, &r, err, sizeof err));
         check("B uniform handles: image kind", NVN_RB_IMGU, r.b[0].kind); check("B uniform handles: image offset", 8, r.b[0].off); check("B uniform handles: image written", 1, r.b[0].rw); check("B uniform handles: image atomic", 1, r.b[0].atom);
         check("B uniform handles: buffer texture kind", NVN_RB_TBUFU, r.b[1].kind); check("B uniform handles: buffer texture slot", 1, r.b[1].reg); check("B uniform handles: bindless", 1, r.bindless);
+        check("B uniform handles: buffer texture's other word at byte 0", 1, r.b[1].soff); check("B uniform handles: buffer texture's other slot", 2, r.b[1].sreg);
         check("B uniform handles: other word at byte 0 of slot 2", 1, r.b[2].soff); check("B uniform handles: its slot", 2, r.b[2].sreg); check("B uniform handles: one word has no other", 0, r.b[3].soff);
         printf("%-60s %s\n", "B images, buffer textures and two-word handles in uniform slots", fail == f1 ? "✓" : "✗");
     }

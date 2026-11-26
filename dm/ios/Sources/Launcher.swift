@@ -551,16 +551,17 @@ struct LauncherView: View {
     }
     private var cardProfileRows: NX18CardProfile {
         let f = profileFlow, padOn = pad.connected
-        return NX18CardProfile(busy: f.busy, note: f.note, strip: padOn ? f.strip : nil, shared: f.cloudShared,
+        return NX18CardProfile(busy: f.busy, note: f.note, strip: padOn ? f.strip : nil, shared: f.cloudShared, capturesShared: f.capturesShared,
                                choosePicture: { f.choosePicture(pad: false) }, editName: { f.editName(pad: false) },
-                               toggle: { f.toggleProfile() }, chooseFolder: { f.chooseFolder(pad: false) }, saves: { f.savesTapped() })
+                               toggle: { f.toggleProfile() }, chooseFolder: { f.chooseFolder(pad: false) }, saves: { f.savesTapped() },
+                               captures: { f.capturesTapped() })
     }
     // The card's pad order (§20.1), as it reads top to bottom: ✕, the picture, name, the switch, the folder and saves rows while the switch is on, then Appearance
     private var cardOrder: [NX18CardItem] {
         var o: [NX18CardItem] = [.close, .picture, .name, .profile]
         if NX18Profile.shared.enabled {
             o.append(.folder)
-            if case .chosen = NX18Profile.shared.folderState { o.append(.saves) }
+            if case .chosen = NX18Profile.shared.folderState { o.append(contentsOf: [.saves, .captures]) }
         }
         o.append(.appearance)
         return o
@@ -796,6 +797,7 @@ struct LauncherView: View {
                 case .profile: profileFlow.toggleProfile()
                 case .folder: profileFlow.chooseFolder(pad: true)
                 case .saves: profileFlow.savesTapped()
+                case .captures: profileFlow.capturesTapped()
                 }
             case .b: closeCard()
             default: break

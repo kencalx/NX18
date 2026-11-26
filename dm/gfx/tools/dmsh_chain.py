@@ -11,11 +11,11 @@
 #       dmsh_chain.py --inputs        print the digest of the current game profile's inputs (DM_GAME), as b-<V>/inputs.tsv records it
 #       dmsh_chain.py --xlate-source-sha   print the digest of the translator's sources and the vendored Ryujinx sources it is built from (native_tools.sh stamps it into dmsh_xlate)
 #       (checking the tools against dmsh_chain.lock, and rewriting it, is tool_lock.py's: the checks decide no output, so they are outside V and the shaders' cache keys)
-# Environment: XLATE_DEBUG / XLATE_REDUCED (same meaning as in dmsh_build.py, default 1 / 1; non-default options yield a different V, which the host will not load)
+# Environment: XLATE_DEBUG / XLATE_REDUCED (same meaning as in dmsh_build.py, default 1 / 1), DMSH_SCONST (dmsh_wide.constant_reads, default fp; non-default options yield a different V, which the host will not load)
 import os, sys, ast, hashlib
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HERE = os.path.dirname(os.path.abspath(__file__)); GFX = os.path.dirname(HERE); HOME = os.path.expanduser('~')
-FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', 'tools/dmsh_wide.py', 'tools/dmsh_fetch.py', 'tools/dmsh_vin.py', 'tools/dmsh_pull.py', 'tools/dmsh_pull.metal', 'tools/dmsh_alpha.py', 'tools/dmsh_logic.py', 'tools/dmsh_side.py', 'tools/dmsh_rewrite.py', 'tools/dmsh_reflect.py', 'tools/dmsh_entry.py', 'tools/dmsh_geometry.py', 'tools/dmsh_mesh.py', 'tools/dmsh_meshstage.py', 'tools/dmsh_facts.py', 'tools/dmsh_ampere.py', 'nvn/dmsh_abi.h', 'tools/dmsh_abi.py', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
+FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', 'tools/dmsh_wide.py', 'tools/dmsh_fetch.py', 'tools/dmsh_vin.py', 'tools/dmsh_pull.py', 'tools/dmsh_pull.metal', 'tools/dmsh_alpha.py', 'tools/dmsh_logic.py', 'tools/dmsh_side.py', 'tools/dmsh_rewrite.py', 'tools/dmsh_reflect.py', 'tools/dmsh_entry.py', 'tools/dmsh_geometry.py', 'tools/dmsh_mesh.py', 'tools/dmsh_meshstage.py', 'tools/dmsh_facts.py', 'tools/dmsh_ampere.py', 'tools/dmsh_metalwa.py', 'nvn/dmsh_abi.h', 'tools/dmsh_abi.py', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
 FILES += ['tools/dmsh_pcomp.py']   # pass-as-compute kernels (<vertex>_<pixel>_pc), which the build writes into the library
 # This target-specific lowering lives in the vendored translator. Include its
 # sources as well as the rebuilt translator's fingerprint; no old shader cache can bypass it.
@@ -49,8 +49,11 @@ XLATE_DIR = os.path.dirname(os.environ.get('XLATE', os.path.join(HERE, 'dmsh_xla
 # spirv-cross likewise: the in-repo build (spirv_cross_bin/build.sh, a pinned upstream commit) that matches the lock file, not the one on PATH, so every Mac converts with the same build
 SPIRV_CROSS = os.environ.get('SPIRV_CROSS', os.path.join(HERE, 'spirv_cross_bin/spirv-cross'))
 
+def storage_constant_mode():
+    return os.environ.get('DMSH_SCONST', 'fp')
+
 def options():
-    return 'debug=%s reduced=%s' % (os.environ.get('XLATE_DEBUG', '1') != '0', os.environ.get('XLATE_REDUCED', '1') == '1')
+    return 'debug=%s reduced=%s sconst=%s' % (os.environ.get('XLATE_DEBUG', '1') != '0', os.environ.get('XLATE_REDUCED', '1') == '1', storage_constant_mode())
 
 def version():
     h = hashlib.sha256()

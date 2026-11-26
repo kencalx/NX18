@@ -97,7 +97,10 @@ static int walk(const char *abs, const char *rel, visit_fn fn, void *ctx) {
         else if (S_ISDIR(st.st_mode)) { if (!(r = fn(ctx, a, p, &st))) r = walk(a, p, fn, ctx); }
         else if (S_ISREG(st.st_mode)) r = fn(ctx, a, p, &st);
     }
-    free_names(v, n); return r;
+    int err = r ? errno : 0;   // the failure's errno, not free's
+    free_names(v, n);
+    if (r) errno = err;
+    return r;
 }
 
 static int write_all(int fd, const void *b, size_t n) {
@@ -136,9 +139,12 @@ typedef struct { CC_SHA256_CTX sha; FILE *out; ss_meta *m; uint32_t entries; uin
 static int pack_entry(void *c, const char *abs, const char *rel, const struct stat *st) {
     packer *k = c;
     char guest[1024]; ssize_t gl = getxattr(abs, GUEST_NAME, guest, sizeof guest, 0, XATTR_NOFOLLOW);
-    if (gl < 0) gl = 0;   // ENOATTR: the host name is the guest's
+    if (gl < 0) {   // ENOATTR: the host name is the guest's. Any other failure fails the scan: packed without it, a case alias (.dm-case-N) would come back under its host name
+        if (errno != ENOATTR) return -1;
+        gl = 0;
+    }
     size_t pl = strlen(rel); int file = S_ISREG(st->st_mode);
-    if (pl > UINT16_MAX) return -1;
+    if (pl > UINT16_MAX) { errno = ENAMETOOLONG; return -1; }
     uint8_t h[ENT] = {(uint8_t)(file ? 2 : 1)}; uint16_t pl16 = (uint16_t)pl, gl16 = (uint16_t)gl;
     uint64_t size = file ? (uint64_t)st->st_size : 0; int64_t mt = st->st_mtimespec.tv_sec;
     memcpy(h + 2, &pl16, 2); memcpy(h + 4, &gl16, 2); memcpy(h + 8, &size, 8); memcpy(h + 16, &mt, 8);
@@ -154,8 +160,9 @@ static int pack_entry(void *c, const char *abs, const char *rel, const struct st
         if (k->out && fwrite(k->buf, 1, (size_t)got, k->out) != (size_t)got) break;
         left -= (uint64_t)got;
     }
+    int read_err = left ? errno : 0;
     close(fd);
-    if (left) return -1;   // a failed read, or a file shorter than its size (the save is a clone no Commit touches, so not one being written)
+    if (left) { errno = read_err; return -1; }   // a failed read, or a file shorter than its size (the save is a clone no Commit touches, so not one being written)
     k->m->files++; k->m->bytes += (int64_t)size;
     if (mt > k->m->saved) k->m->saved = mt;
     return 0;
@@ -175,25 +182,29 @@ static int pack_save(const char *save, packer *k) {
 int ss_scan(const char *save, ss_meta *m) {
     memset(m, 0, sizeof *m);
     packer *k = calloc(1, sizeof *k); if (!k) return -1;
-    k->m = m; int r = pack_save(save, k);
-    free(k); return r;
+    k->m = m; int r = pack_save(save, k), err = r ? errno : 0;
+    free(k);
+    if (r) errno = err;
+    return r;
 }
 
 int ss_pack(const char *save, const char *title, const char *out, ss_meta *m) {
     memset(m, 0, sizeof *m);
     upper_title(title, m->title, sizeof m->title); device_name(m->device, sizeof m->device);
     packer *k = calloc(1, sizeof *k); if (!k) return -1;
-    k->m = m; int r = -1;
+    k->m = m; int r = -1, err = 0;
     uint8_t hdr[HDR] = {0}; uint32_t version = 1;
-    if (!(k->out = fopen(out, "wb")) || fwrite(hdr, 1, HDR, k->out) != HDR || pack_save(save, k) || fwrite(END, 1, sizeof END, k->out) != sizeof END) goto done;
+    if (!(k->out = fopen(out, "wb")) || fwrite(hdr, 1, HDR, k->out) != HDR || pack_save(save, k) || fwrite(END, 1, sizeof END, k->out) != sizeof END) { err = errno; goto done; }
     memcpy(hdr, MAGIC, 8); memcpy(hdr + 8, &version, 4); memcpy(hdr + 12, &k->entries, 4); memcpy(hdr + 16, m->hash, strlen(m->hash));
     memcpy(hdr + 48, &m->saved, 8); memcpy(hdr + 56, m->title, strlen(m->title)); memcpy(hdr + 80, m->device, strlen(m->device));
-    if (fseeko(k->out, 0, SEEK_SET) || fwrite(hdr, 1, HDR, k->out) != HDR || fflush(k->out) || fsync(fileno(k->out))) goto done;
+    if (fseeko(k->out, 0, SEEK_SET) || fwrite(hdr, 1, HDR, k->out) != HDR || fflush(k->out) || fsync(fileno(k->out))) { err = errno; goto done; }
     r = 0;
 done:
-    if (k->out && fclose(k->out)) r = -1;
+    if (k->out && fclose(k->out)) { if (!err) err = errno; r = -1; }
     if (r) unlink(out);
-    free(k); return r;
+    free(k);
+    if (r) errno = err;   // the failure's errno, not the cleanup's
+    return r;
 }
 
 // A path in a packed save: under save/ or save_device/, with no empty, . or .. part (a damaged file must not write outside `into`)
@@ -390,6 +401,42 @@ static int backup_dir(const char *save, const char *side, char *out, size_t n) {
     snprintf(out, n, "%s-backups/%s %s", save, stamp, side);
     for (int k = 2; !access(out, F_OK); k++) snprintf(out, n, "%s-backups/%s %s %d", save, stamp, side, k);
     return mkdirs(out) ? -1 : 0;
+}
+
+#define CLOUD_STAGE_PREFIX ".cloud-stage."
+// The staging a start that was killed while it kept the cloud's save left in <save>-backups (backup_cloud_restore); dated backups and the player's own folders stay
+static void clean_backup_staging(const char *save) {
+    char dir[PATH_MAX], **v; size_t n;
+    if (snprintf(dir, sizeof dir, "%s-backups", save) >= (int)sizeof dir || names_of(dir, &v, &n)) return;
+    for (size_t i = 0; i < n; i++) {
+        if (strncmp(v[i], CLOUD_STAGE_PREFIX, sizeof CLOUD_STAGE_PREFIX - 1)) continue;
+        char p[PATH_MAX];
+        if (snprintf(p, sizeof p, "%s/%s", dir, v[i]) < (int)sizeof p && rm_tree(p)) SRED("cannot remove leftover backup staging %s (errno=%d)", p, errno);
+    }
+    free_names(v, n);
+}
+// The cloud's save kept before this device's replaces it: unpacked into staging beside the backups, outside their naming (a kill mid-unpack leaves no part-filled
+// "<date> cloud" folder to take a real backup's slot; the next start clears it), read whole (ss_read), then renamed to a free dated name in one step, and only then
+// are the older cloud backups pruned (upstream 7886d3038). kept: the backup's path, "" on failure
+static int backup_cloud_restore(const char *save, const char *bundle, ss_meta *other, char *kept, size_t kn) {
+    static _Atomic unsigned seq;
+    char dir[PATH_MAX], stage[PATH_MAX], stamp[32];
+    kept[0] = 0;
+    if (snprintf(dir, sizeof dir, "%s-backups", save) >= (int)sizeof dir) { errno = ENAMETOOLONG; return -1; }
+    if (mkdirs(dir)) return -1;
+    if (snprintf(stage, sizeof stage, "%s/%s%d-%u", dir, CLOUD_STAGE_PREFIX, (int)getpid(), atomic_fetch_add(&seq, 1)) >= (int)sizeof stage) { errno = ENAMETOOLONG; return -1; }
+    if (mkdir(stage, 0755)) return -1;
+    if (ss_read(bundle, stage, other)) { int e = errno; rm_tree(stage); errno = e; return -1; }
+    time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm); strftime(stamp, sizeof stamp, "%Y-%m-%d %H.%M.%S", &tm);
+    for (int k = 1; ; k++) {
+        int w = k == 1 ? snprintf(kept, kn, "%s/%s cloud", dir, stamp) : snprintf(kept, kn, "%s/%s cloud %d", dir, stamp, k);
+        if (w < 0 || w >= (int)kn) { rm_tree(stage); kept[0] = 0; errno = ENAMETOOLONG; return -1; }
+        if (!renamex_np(stage, kept, RENAME_EXCL)) break;
+        if (errno == EEXIST) continue;
+        int e = errno; rm_tree(stage); kept[0] = 0; errno = e; return -1;
+    }
+    prune_backups(save, "cloud", kept);
+    return 0;
 }
 
 // A DM_SAVE_SYNC value → <folder>/<title ID>/save.dmsync; 0 when sync is off
@@ -769,6 +816,7 @@ static int mount_once(const char *save, const char *title) {
         if (recover(save, &j)) { SRED("this device's save could not be put back (errno=%d): it is not mounted; what is not in %s is kept in %s, and the next start tries again", errno, save, *j.kept ? j.kept : "its backups"); return -1; }
         SLOG("this device's save is back as it was before that pull");
     }
+    clean_backup_staging(save);   // a killed start's staging of the cloud's backup (backup_cloud_restore)
     if (!cloud_file(title, cloud, sizeof cloud)) return 0;
     SLOG("on: %s (in play, sends at least %d s apart; at once when the in-game menu opens, the app goes to the background or the game ends)", cloud, g_gap_ms / 1000);
     snprintf(tmp, sizeof tmp, "%s.sync-tmp", save); snprintf(theirs, sizeof theirs, "%s/in.dmsync", tmp);
@@ -814,11 +862,8 @@ static int mount_once(const char *save, const char *title) {
         // start chose against it, so it is kept first and counts as the one last synced; the sender replaces only that one (send_save), not a save another device sends
         // meanwhile. This comes before the push below: a cloud save not kept stops here, before anything is forced
         if (got > 0 && other.files && strcmp(other.hash, base)) {
-            if (backup_dir(save, "cloud", kept, sizeof kept)) { SRED("cannot keep the cloud's save before replacing it (errno=%d): not sent", errno); kept[0] = 0; failed = 1; break; }
-            if (ss_read(theirs, kept, &other)) {   // only a copy (the cloud's file is still there): what was unpacked goes, so no part-filled folder takes a backup's slot
-                int e = errno; rm_tree(kept); kept[0] = 0; SRED("cannot keep the cloud's save before replacing it (errno=%d): not sent", e); failed = 1; break;
-            }
-            prune_backups(save, "cloud", kept);
+            // only a copy (the cloud's file is still there): unpacked into staging and published whole, so no part-filled folder takes a backup's slot
+            if (backup_cloud_restore(save, theirs, &other, kept, sizeof kept)) { SRED("cannot keep the cloud's save before replacing it (errno=%d): not sent", errno); failed = 1; break; }
             write_base(save, other.hash, cloud);
         }
         when(mine.saved, t, sizeof t); when(other.saved, t2, sizeof t2);

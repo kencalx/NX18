@@ -595,6 +595,15 @@ void nvn_queue_test_hold(int on) { pthread_mutex_lock(&nq_mu); nq_test_held=on; 
 void nvn_queue_present_release(uint64_t ticket) {
     if(!ticket) return; pthread_mutex_lock(&nq_mu); nq_put((nq_receipt *)(uintptr_t)ticket); pthread_mutex_unlock(&nq_mu);
 }
+void nvn_queue_present_ref(uint64_t ticket) {
+    if(!ticket) return; pthread_mutex_lock(&nq_mu); ((nq_receipt *)(uintptr_t)ticket)->refs++; pthread_mutex_unlock(&nq_mu);
+}
+void nvn_sync_set_present(sync_t *s,uint64_t ticket) {
+    nq_receipt *r=(nq_receipt *)(uintptr_t)ticket; pthread_mutex_lock(&nq_mu);
+    if(r->published) { if(s->fenced==3) nq_put((nq_receipt *)(uintptr_t)s->fence); s->fenced=2; s->fence=r->fence; }   // replayed: the GPU fence it ended at, waited as an acquire sync
+    else nq_set_sync(s,r);   // not yet: SyncWait and QueueWaitSync wait for its replay first, then its fence
+    pthread_mutex_unlock(&nq_mu);
+}
 void nvn_queue_present_wait(uint64_t ticket) {
     if(!ticket) return; nq_receipt *r=(nq_receipt *)(uintptr_t)ticket;
     pthread_mutex_lock(&nq_mu);

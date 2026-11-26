@@ -71,17 +71,31 @@ def _names(folder):
     return out
 
 
-def write(files, dst, on_progress=None):
+def write(files, dst, on_progress=None, share=None):
     """files: {name: path to read (a romfs path may name a file inside an image), the bytes, or a function returning them (read only when its file is written: dmsh_build.py's outputs staged in the
     shader cache, so that no library is held in memory whole)} → the image dst, by way of dst.part. A stopped write leaves only the .part, and an image is whole or absent.
+    share: optional {name: key}; entries sharing a non-None key reuse the first sorted entry's written (offset, size) range, without calling their loader or writing the bytes again
+    (dmsh_build.py: outputs whose staged cache entries are one blob, or one range of the image a partial build builds on; pack and subset: ranges their source image shares).
     on_progress(files done, files, bytes written): at the start and after each file, for dmsh_build.py's progress (upstream NXNative d2939c1eb)"""
     part = dst + '.part'
     names = sorted((n.encode() for n in files))
-    ents, off = [], romfs.HEAD.size
+    share = share or {}
+    first, alias = set(), {}
+    for name in names:
+        key = share.get(name.decode())
+        if key is None: continue
+        if key in first: alias[name] = key
+        else: first.add(key)
+    ents, off, placed = [], romfs.HEAD.size, {}
     if on_progress: on_progress(0, len(names), 0)
     with builtins.open(part, 'wb') as out:
         out.write(b'\0' * off)
         for i, name in enumerate(names, 1):
+            if name in alias:   # the bytes are already in the image: this name points at them
+                at, n = placed[alias[name]]
+                ents.append((name, at, n))
+                if on_progress: on_progress(i, len(names), off)
+                continue
             off += -off % ALIGN
             out.seek(off)
             n, source = 0, files[name.decode()]
@@ -92,7 +106,9 @@ def write(files, dst, on_progress=None):
             else:
                 with romfs.open(source, 'rb') as f:
                     while b := f.read(8 << 20): out.write(b); n += len(b)
-            ents.append((name, off, n)); off += n
+            ents.append((name, off, n))
+            if (key := share.get(name.decode())) is not None: placed[key] = (off, n)
+            off += n
             if on_progress: on_progress(i, len(names), off)
         out.seek(off)
         pool, idx = bytearray(), bytearray(romfs.ENT.pack(1, len(names), 0, 0, 0, 0))   # entry 0, the root: its children are every other entry
@@ -112,16 +128,19 @@ def pack(lib, say=print, leave_out=False):
         before = _names(folder) if os.path.isdir(folder) else None
         if before is not None and not before: os.rmdir(folder); before = None
         if before is None and not os.path.isfile(image): return False
-        files = {n: os.path.join(folder, n) for n in before or ()}
+        files, share = {n: os.path.join(folder, n) for n in before or ()}, {}
         if os.path.isfile(image) and (before is None or STAMP not in before):   # a partial build over a packed library, or the image alone
-            with romfs.scandir(image) as it:
-                for e in it: files.setdefault(e.name, e.path)
+            old = romfs.Image(image)
+            for name, k in old.children(0):   # names that share a range in the image keep sharing it
+                if name not in files:
+                    files[name] = os.path.join(image, name)
+                    share[name] = old.entry(k)[:2]
         pulling = [n for n in files if n.endswith(PULLING)]
         if before is None and not (leave_out and pulling): return True
         if leave_out:
-            for n in pulling: del files[n]
+            for n in pulling: del files[n]; share.pop(n, None)
             files[PULLING_LEFT_OUT] = b'the pulling vertex libraries are left out: nothing in this build reads them (dm/tools/shader_lib.py)\n'
-        write(files, image)
+        write(files, image, share=share) if share else write(files, image)
         if before is None: return True
         if _names(folder) != before:   # a build wrote to it meanwhile: the folder is the newer one, and the next pack takes it
             say(f'{folder} changed while it was packed: it stays a folder'); return True
@@ -162,7 +181,9 @@ def app_files(lib, skip_suffix=()):
 def subset(lib, dst, skip_suffix=()):   # → the number of files in the image dst
     files = app_files(lib, skip_suffix)
     if not any(n.endswith('.metallib') for n in files): raise ValueError(f'no shader libraries at {lib}')
-    write(files, os.fspath(dst))
+    src = view(lib)   # an image: names that share a range in it share one in the app's image too
+    share = {name: img.entry(k)[:2] for img in (romfs.Image(src),) for name, k in img.children(0) if name in files} if os.path.isfile(src) else {}
+    write(files, os.fspath(dst), share=share or None)
     return len(files)
 
 

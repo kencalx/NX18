@@ -36,7 +36,7 @@ typedef struct {
     uint16_t reg, aid;       // D3D register number, index within the argument buffer
     uint16_t off;            // TEXU / SAMPU: byte offset of the handle within the uniform buffer; SBUFU: of the 64-bit storage buffer address
     uint16_t n;              // TEXD / SAMPD, TEXA / SAMPA, and TEXU / SAMPU arrays (element k = the handle at byte 8k of the uniform buffer): array length (argument buffer entries aid .. aid + n - 1)
-    uint16_t soff;           // TEXA / SAMPA: c2 byte of a separate sampler word ORed into every element's handle (handle type 1), 0 = none; TEXU / SAMPU: byte of the other word ORed into the handle (handle type 1) + 1, in uniform slot sreg (DMSH_SREG_C2: SAMPU's sampler is the word at that c2 byte), 0 = none
+    uint16_t soff;           // TEXA / SAMPA: c2 byte of a separate sampler word ORed into every element's handle (handle type 1), 0 = none; TEXU / SAMPU / TBUFU: byte of the other word ORed into the handle (handle type 1) + 1, in uniform slot sreg (DMSH_SREG_C2: SAMPU's sampler is the word at that c2 byte), 0 = none
     uint8_t sreg;
     uint8_t f1d;             // TEX: read by 1D integer fetches as 2D rows of 16384 texels (dmsh_build.py "fetch1d"): a buffer texture here is bound as such rows (nvn_mtl.m tbuf_as_2d)
     uint8_t atom;            // IMG: the shader runs image atomics on it (dmsh_build.py "atomic"): the texture must allow Metal's texture atomics (nvn_mtl.m dummy_img_atomic); 2: 64-bit ones (texture2d<ulong>, an RG32Uint texture: pf_atomic)
@@ -56,6 +56,7 @@ typedef struct { uint32_t uv_aff[32][4]; int8_t uv_attr[32], uv_aff_attr[32]; } 
 // The tables of a shader that has none: all 0, and uv_attr and uv_aff_attr all -1. Shared by every such shader and never written (nvn_refl_fcw / nvn_refl_uvw give a shader its own to write)
 extern const nvn_refl_fc nvn_refl_fc_none;
 extern const nvn_refl_uv nvn_refl_uv_none;
+typedef struct { uint8_t reg; uint16_t off; } nvn_gptr;   // a raw pointer source: NVN storage slot reg, byte off (nvn_refl.gptr)
 typedef struct {
     int nb, abi, nv;         // Binding count, argument buffer slot, vertex input count
     // The bindings: nb of them in the shader's tail block (nvn_refl_from_json), not a fixed array of NVN_REFL_MAXB. That array and the readable-tile tables were embedded in every shader loaded,
@@ -104,6 +105,10 @@ typedef struct {
     uint32_t fc_ndc, scr_pos;
     // Pixel-position samples (dmsh_fetch.py 'frag_pos'): bit i: the i-th redirectable sample reads at the pixel position times fc->fc_scale[i]
     uint32_t fc_fpos;
+    // gmem_map's fixed pointer sources (dmsh_reflect.py gptr_sites; upstream f15d65850), read before argument-block reuse as well as a fresh encode (nvn_mtl.m gmem_discover): ngptr of
+    // them (DMSH_GPTR_MAX at most) in a block malloc'd by nvn_refl_from_json, NULL without any. Upstream embeds a 64-entry array; here it would add 196 bytes to every shader loaded
+    // (the tail block's reason, above), and most shaders have none
+    uint8_t ngptr; nvn_gptr *gptr;
     uint8_t *c1;             // c1 constant segment as-is (B): c1_len bytes, malloc'd by nvn_refl_from_json (NULL without one). It was a 4 KB array; Hyrule Warriors: Age of Calamity has 6 KB segments (its soldiers' vertex shaders)
 } nvn_refl;
 

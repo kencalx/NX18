@@ -279,13 +279,13 @@ To enroll a cut for any game's own module:
 - **Found on:** [Ace Attorney Investigations Collection](../../dm/games/010005501E68C000/README.md) (Unity 2022.3 IL2CPP): `main+0x1d271bc` and `+0x204ebec`.
 - **Check:** every module the rewriter accepted before comes out byte-identical.
 
-### Unframed pointer tail calls followed by zero trap padding
+### Unframed pointer tail calls followed by compiler padding
 
-- **Symptom:** `AssertionError: jump table d29e68` while rewriting Moving Out 2 1.3.315.
-- **Cause:** the function loads its method pointer with `ldp x18,x17,[x17,#0x138]`, moves caller stack arguments and ends with `br x18`, followed by one `udf #0` padding word before the next unwind entry. The terminal-tail rule accepted only `ldr` and required the branch to be the last decoded instruction.
-- **Fix:** for a tail followed by zero trap padding, accept a plain paired pointer load as well as a single load, with contiguous decoding, straight-line argument moves and memory transfers, and no writes to SP, FP or LR, including their 32-bit aliases and writeback. The last write to either `x18` or `w18` must be the pointer load. Branches, calls, nonzero traps, decoding gaps and framed thunks do not match this fallback. The terminal-tail rule and other nonterminal-tail checks are unchanged.
-- **Found on:** Moving Out 2 1.3.315, `main` build `c552b6464e7348a7bb261a708b353137`, at `+0xd29e68`. This is a rewrite-stage finding, not gameplay validation or a game profile.
-- **Check:** `dm/tools/tests/test_tail_call.py` covers synthetic paired loads, zero padding, argument stores and rejection of control flow, frame changes, pointer clobbers and missing instructions.
+- **Symptom:** `AssertionError: jump table d29e68` while rewriting Moving Out 2 1.3.315, or `jump table 478a7b4` on Hello Kitty Island Adventure 2.17.2 (`4a521d4` in 3.0.0).
+- **Cause:** Moving Out 2 loads its method pointer with `ldp x18,x17,[x17,#0x138]`, moves caller stack arguments and ends with `br x18`, followed by one `udf #0` padding word before the next unwind entry. The terminal-tail rule accepted only `ldr` and required the branch to be the last decoded instruction. Hello Kitty Island Adventure has the same unframed thunk shape with `ldr x18,[x0,#0x18]` and two trailing `nop` words; the padded-tail rule initially accepted only `udf #0`.
+- **Fix:** accept a plain paired pointer load as well as a single load when every decoded instruction after the tail is `nop` or `udf #0`, with contiguous decoding, straight-line argument moves and memory transfers, and no writes to SP, FP or LR, including their 32-bit aliases and writeback. The last write to either `x18` or `w18` must be the pointer load. Branches (including those entering the padding), calls, nonzero traps, decoding gaps and framed thunks do not match this fallback. NOPs and traps differ when executed; this proof leaves the suffix unreachable from the straight-line body after its unconditional tail branch. The terminal-tail rule and other nonterminal-tail checks are unchanged. The binding is the general rewriter's instruction shape, with no engine, game or build gate.
+- **Found on:** Moving Out 2 1.3.315, `main` build `c552b6464e7348a7bb261a708b353137`, at `+0xd29e68`. Hello Kitty Island Adventure (`010027901C89C000`) 2.17.2 and 3.0.0, reported with disassembly and rewrite results in [issue #2923](https://github.com/seedds/nxnative/issues/2923). These are rewrite-stage findings, not local gameplay validation or game profiles.
+- **Check:** `dm/tools/tests/test_tail_call.py` covers synthetic single and paired loads, zero, NOP and mixed padding, argument stores and rejection of branches into the padding, frame changes, pointer clobbers and missing instructions. A NOP followed by live code or a nonzero trap is rejected; the whole suffix must be padding.
 
 ### Loaded method-pointer tail call before an error block
 

@@ -79,6 +79,11 @@ int main(void) {
     setenv("DM_ROMFS", rom, 1); setenv("DM_ROMFS_OVERLAY", overlay, 1); CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount RomFS with two layers (base + overlay)");
     size_t rom_cache = 0; CHECK(h_fs_QueryRomCacheIdx(&rom_cache, 0) == RES_OK && rom_cache == 0x1000, "SDK 19: the cache size overload with a program index");
     CHECK(h_fs_MountRomIdx("rom2", 0, NULL, 0) == RES_OK && read_fs("rom2:/data/base", got, sizeof got) && !strcmp(got, "only-base"), "SDK 19: MountRom with a program index mounts the RomFS");
+    {   // the program's own index (Xenoblade Chronicles X's Switch 2 program mounts its index 1 as romo:) and another program's index both mount this program's RomFS, the host's only one
+        int own = (int)(DM_GAME_PROGRAM_ID & 0xfff), other = own ? 0 : 1;
+        CHECK(h_fs_MountRomIdx("own", own, NULL, 0) == RES_OK && read_fs("own:/data/base", got, sizeof got) && !strcmp(got, "only-base"), "MountRom with this program's own index %d mounts its RomFS", own);
+        CHECK(h_fs_MountRomIdx("other", other, NULL, 0) == RES_OK && read_fs("other:/data/base", got, sizeof got) && !strcmp(got, "only-base"), "MountRom with another program's index %d mounts this program's RomFS", other);
+    }
     CHECK(read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "overlay"), "the overlay file wins"); CHECK(read_fs("rom:/data/base", got, sizeof got) && !strcmp(got, "only-base"), "falls back to the base when the overlay lacks the file");
     uint64_t rh; CHECK(h_fs_OpenFile(&rh, "rom:/data/same", MODE_WRITE) == RES_FAIL, "the two-layer mount refuses writes");
     CHECK(read_fs("rom:\\data\\over", got, sizeof got) && !strcmp(got, "only-overlay") && read_fs("rom:\\data\\base", got, sizeof got) && !strcmp(got, "only-base"), "backslashes separate as slashes do, in both layers");
@@ -416,6 +421,37 @@ int main(void) {
         CHECK(h_fs_MountSave("save", NULL) == RES_OK && h_fs_OpenFile(&h, "save:/savedata0.bin", MODE_READ) != RES_OK, "an erased file stays erased at the next mount");
         CHECK(read_fs("save:/both.bin", got, sizeof got) && !strcmp(got, "new") && read_fs("save:/m/a", got, sizeof got) && !strcmp(got, "ma"), "a second mount changes nothing else");
 #undef OLD
+        g_nmnt = 0;
+    }
+
+    printf("⑩ stale writable handles refused after rollback (upstream 9a4a3c5f8)\n");
+    {   char s1[1100], s2[1100], f1[1200], f2[1200];
+        snprintf(s1, sizeof s1, "%s/stale1", root); snprintf(s2, sizeof s2, "%s/stale2", root);
+        mkdir(s1, 0755); mkdir(s2, 0755);
+        unsetenv("DM_TEST_FS_FAIL"); unsetenv("DM_TEST_FS_FAILAT");
+        setenv("DM_SAVE", s1, 1); g_nmnt = 0;
+        CHECK(h_fs_MountSave("save", NULL) == RES_OK && mount_ex("save2", s2, 0, 1) == RES_OK, "mount two independent transactional saves");
+        CHECK(h_fs_CreateFile("save:/stale", 0) == RES_OK && write_save("save:/stale", "orig") == RES_OK && h_fs_Commit("save") == RES_OK, "commit original bytes to save:/stale");
+        CHECK(h_fs_CreateFile("save2:/peer", 0) == RES_OK && write_save("save2:/peer", "peer0") == RES_OK && h_fs_Commit("save2") == RES_OK, "commit original bytes to save2:/peer");
+        uint64_t h = 0, h2 = 0, h_new = 0;
+        CHECK(h_fs_OpenFile(&h, "save:/stale", MODE_WRITE) == RES_OK, "open writable handle on save:/stale");
+        CHECK(h_fs_OpenFile(&h2, "save2:/peer", MODE_WRITE) == RES_OK, "open writable handle on unaffected save2:/peer");
+        g_mode = 1; g_calls = 0;
+        CHECK(h_fs_WriteFile(h, 0, "bad", 3, NULL) == RES_FAIL, "injected zero-byte write fails and taints save");
+        g_mode = 0;
+        CHECK(h_fs_Commit("save") == RES_FAIL, "commit rolls back save while handle h remains open");
+        snprintf(f1, sizeof f1, "%s/stale", s1); snprintf(f2, sizeof f2, "%s/peer", s2);
+        CHECK(same(f1, "orig"), "committed save:/stale remains orig after rollback");
+        CHECK(h_fs_WriteFile(h, 0, "after", 5, NULL) == RES_FAIL, "WriteFile refuses the stale handle after rollback");
+        CHECK(h_fs_SetFileSize(h, 1) == RES_FAIL, "SetFileSize refuses the stale handle after rollback");
+        CHECK(h_fs_SetFileSize(h2, 5) == RES_OK && h_fs_WriteFile(h2, 0, "peer1", 5, NULL) == RES_OK, "the other transaction's handle still writes and resizes");
+        h_fs_CloseFile(h2);
+        CHECK(h_fs_Commit("save2") == RES_OK && same(f2, "peer1"), "the other transaction commits peer1");
+        h_fs_CloseFile(h);
+        CHECK(h_fs_OpenFile(&h_new, "save:/stale", MODE_WRITE) == RES_OK, "close and reopen save:/stale (fd reuse)");
+        CHECK(h_fs_SetFileSize(h_new, 8) == RES_OK && h_fs_WriteFile(h_new, 0, "replaced", 8, NULL) == RES_OK, "the reopened handle writes");
+        h_fs_CloseFile(h_new);
+        CHECK(h_fs_Commit("save") == RES_OK && same(f1, "replaced"), "commit succeeds and save:/stale holds replaced");
         g_nmnt = 0;
     }
 

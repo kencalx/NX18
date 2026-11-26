@@ -128,13 +128,16 @@ int main(void) { @autoreleasepool {
     mtl_tex_init(&col3); mtl_tex_init(&dep3); mtl_tex_init(&mot3); mtl_tex_init(&out3);
     fill(tex_mtl(&col3), MTLClearColorMake(b[0], b[1], b[2], 1), 0); fill(tex_mtl(&dep3), MTLClearColorMake(0, 0, 0, 0), 1); fill(tex_mtl(&mot3), MTLClearColorMake(0, 0, 0, 0), 0);
     p_dlss c3 = c; c3.net = c.net = 2; c.reset = 1; c3.tex[DLSS_COLOR] = &col3; c3.tex[DLSS_DEPTH] = &dep3; c3.tex[DLSS_MOTION] = &mot3; c3.tex[DLSS_OUTPUT] = &out3; c3.iw = 960; c3.ih = 486; c3.ow = 1920; c3.oh = 972;
-    // A new network evaluated at 1920x1080, then at 1920x972 (Fast Fusion's second size) in the same submission: its first scaler is replaced before its first commit. The
-    // encoding thread has made the first evaluation's calls by then (rec_drain, as a game's frame of records hands them over in pieces), so the recording holds the scaler no longer
+    // A new network evaluated at 1920x1080, then at 1920x972 (Fast Fusion's second size) in the same submission: the first scaler is kept beside the second, then finalizing the
+    // network drops both from the cache before commit. The encoding thread has made the evaluations' calls by then (rec_drain, as a game's frame of records hands them over in pieces),
+    // so only deferred release keeps the dropped scalers alive until the submission completes (NSZombieEnabled turns an early release into a crash every time)
     mtl_sub_begin(); dlss_eval(&c);
     const void *first = (__bridge void *)g_dlss[1].sc;   // its address only: a reference here would keep it alive
     rec_drain(); dlss_eval(&c3);
-    CHECK(first && g_dlss[1].sc && (__bridge void *)g_dlss[1].sc != first, "new sizes replace the network's scaler");
-    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the submission that encoded the replaced scaler completes");
+    CHECK(first && g_dlss[1].sc && (__bridge void *)g_dlss[1].sc == first && g_dlss[2].sc && (__bridge void *)g_dlss[2].sc != first, "new sizes keep the network's earlier scaler beside the new one");
+    rec_drain(); mtl_dlss_forget(2); dlss_retire_drain();
+    CHECK(!g_dlss[1].sc && !g_dlss[2].sc, "finalizing the network drops its scalers from the cache before commit");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the submission that encoded the dropped scalers completes");
     CHECK(flat(tex_mtl(&out), a), "the first evaluation's output holds its own colour");
     CHECK(flat(tex_mtl(&out2), b), "the second evaluation through the same scaler holds its own");
     // Alpha through MetalFX (upstream NXNative 1db4bcb28): an input whose content fills only part of its texture, its padding at another alpha, keeps the content's alpha at

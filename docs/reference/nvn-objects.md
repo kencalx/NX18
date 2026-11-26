@@ -389,6 +389,13 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** the queue builder keeps each size with a set flag (`qb_set`, `qb_get` in `hle_nvn.c`); the getters answer from them, and `GetQueueMemorySize` takes the device defaults for the sizes not set, as before. The ray tracing size is kept and reported only: the host traces no rays.
 - **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md), which reads all four after `SetDefaults` and its setters.
 
+### Float blend clamp (`nvnCommandBufferSetFloatBlendClamp`)
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferSetFloatBlendClamp`; now `[RED] nvnCommandBufferSetFloatBlendClamp 1 (a float blend result that overflows becomes the largest finite value): Metal stores infinity`, once.
+- **Cause:** an NVN2 call the host did not have. The driver writes its flag into 3D method 0x10b0, a reserved software method in NVIDIA's class headers (`SET_RESERVED_SW_METHOD03`), which the Tegra kernel driver handles as `SET_BES_CROP_DEBUG4`: bit 0 chooses what a floating-point blend result that overflows becomes, infinity (0) or the format's largest finite value (1).
+- **Fix:** the call exists (`hle_nvn.c`). Metal has no such setting and stores infinity, which is mode 0, so mode 0 is silent and mode 1 logs the red line once: a platform limit. It differs only where a blend overflows (about 65,504 in a half-float target).
+- **Found on:** PRAGMATA upstream (sets 1; no frame seen to differ). Ported from upstream NXNative `224ecb186` (host half).
+
 ### Host-lent command memory segments
 
 - **Symptom:** `FATAL NVN command memory: the game's pool is empty…`.
@@ -795,6 +802,15 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** `ft_drop_pool` (`hle_nvn.c`), called at the start of `nvnMemoryPoolFinalize`, removes every `g_ft` entry belonging to that pool and serializes with `nvn_ft_poll` through `g_ft_poll_mu` so an in-flight poll finishes before the pool is torn down.
 - **Check:** `pool_finalize_drops_registration` in `make -C dm/gfx/tests GAME=0400486024DEC000 check_t_cpu_tex` finalizes a CPU-cached pool holding both a 16×16 and a 256×256 texture, unmaps its storage, poisons and frees the pool struct, and runs `nvn_ft_poll` while a second pool's texture is rewritten.
 - **Found on:** code review of `nvnMemoryPoolFinalize` and `g_ft` alongside PR #3305; no game crash is attributed to it.
+
+### Stale floating-point storage at first use
+
+- **Symptom:** reflective surfaces black, white or blown out; tone mapping turns a NaN scene into black dots and white halos. Sampling the environment-probe or cube array shows NaN texels in faces the game has just rendered.
+- **Cause:** `tex_init_fill` gives a new texture in a `CPU_NO_ACCESS` pool the bytes its storage holds ([a pool's storage at creation](#a-pools-storage-at-creation-is-its-textures-content)). A float render target placed over memory that held other data starts with those stale bytes, on the Switch too. When the game renders faces with `SRC_ALPHA` / `ONE_MINUS_SRC_ALPHA` blending and alpha 1, NVIDIA's float blender takes a zero-weighted destination term as 0 even when it is NaN (`SET_BLEND_FLOAT_OPTION`, "zero times anything is zero"), so the stale content disappears. Apple Metal's IEEE blender computes `NaN × 0 = NaN`, so stale NaNs survive and spread to every material that samples them. The source-side guard ([a NaN colour under a zero blend weight](shaders.md#a-nan-colour-under-a-zero-blend-weight)) cannot see destination texels.
+- **Fix:** general host workaround (`storage_has_nonfinite` in `nvn_mtl.m`). For a non-`COMPRESSIBLE` `RG11B10F`, `R/RG/RGBA16F` or `R/RG/RGBA32F` texture in a `CPU_NO_ACCESS` pool, if `tex_init_fill` finds any NaN or infinite element in its storage (scanning up to `t->L.size` with early exit), it skips the upload so the texture starts from zeros (`tex_zero_fill`). CPU-visible pools are unchanged (`t_direct_upload` writes NaN and infinity there on purpose). The log line `initial content: … its storage holds non-finite float texels; starts from zeros` names the first textures skipped; `DM_NVN_STALE_FLOAT=1` restores the earlier fill for A/B runs.
+- **Found on:** Splatoon 3 (`0100C2500FC20000`, 12.0.0, [PR #3140](https://github.com/seedds/nxnative/pull/3140), no profile on `main` yet): its 256×256×78 and 128×128×78 `RG11B10F` environment-probe arrays in `CPU_NO_ACCESS` pools (blend mask `0xfe`, alpha 1 on faces 1–5; 1,790,418 NaN texels / 35% in the lobby, and 14 NaN texels / 0.001% on lobby return causing black and red reflection blocks).
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_stale_float` (runs both default and `DM_NVN_STALE_FLOAT=1`, covering `RG11B10F`, `RGBA16F` and `R32F` in `CPU_NO_ACCESS` and a `CPU_UNCACHED` control) and `check_t_direct_upload`.
+- **Open:** a GPU-written NaN or infinity left in a live float render target by an earlier pass under a zero destination weight (not covered by initial-storage zeroing; see [a NaN colour under a zero blend weight](shaders.md#a-nan-colour-under-a-zero-blend-weight)).
 
 ### Mapped-range flushes taken as uploads (`tex_flush_upload`)
 

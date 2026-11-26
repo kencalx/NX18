@@ -83,7 +83,7 @@ typedef struct thr {
     uint64_t srun_svc, srun_t0, spin_ret;     // Current spin wait: nsvc at its passes, when it began, when the last pass returned
     uint64_t cpu_seen_us;                     // CPU time (µs) at the last power report (dm_thread_cpu)
     uint64_t nsleep, nsleep_seen;             // Timed SleepThread calls (over 20.1 µs; shorter ones are yields, case 0x0B), and their count at the last power report (dm_wake_stats)
-    uint64_t yrun_svc, yrun_t0, yrun_sig, yrun_sig2, poll_ret;   // Current run of yields: nsvc of the last yield, when the run began, and the caller's x19–x28 at the last two yields (a run lasts while no other SVC comes between two yields and those registers match one of the last two, thr_yield); when the last yield or short timed-out wait returned (poll_wait_begin)
+    uint64_t yrun_svc, yrun_yield, yrun_t0, yrun_sig, yrun_sig2, poll_ret;   // Current run of yields: nsvc of the last step, (nsvc + 1) of the last yield (thr_yield; only consecutive yields enter clock_wait), when the run began, and the step signature at the last two steps (a run lasts while no other SVC comes between two steps and the signature matches one of the last two); when the last yield or short timed-out wait returned (poll_wait_begin)
     uint64_t yrun_clk;                        // dm_clock_reads at the last yield: a pass that read the clock since makes the yield a clock wait (thr_yield)
     uint64_t ys_svc, ys_t0, ys_ret, ys_d, ys_n; int ys_in;   // Current tight run of yields (ystorm_note): nsvc of the last yield, when the run began, when its last yield returned, that yield's host time when it did not sleep, the yields in the run; past the storm start
     uint64_t tight_ns, tight_ns_seen, nstorm, nstorm_seen, nstsleep, nstsleep_seen, nmoved, nmoved_seen, nsched, nsched_seen, nshort, nshort_seen;   // CPU time in tight runs, yield storms, their sleeps (sleep mode), yields that moved on (x19–x28 changed), sched_yield calls, SleepThread calls of 20.1 µs or less, with the counts at the last power report (dm_yield_top)
@@ -1101,9 +1101,10 @@ static void yield_for(thr_t *me, uint64_t run_ns, int clock) {
 // A loop that waits at two yields comes back to the registers of the yield before last: Hades' NetworkPollThread (main+0x27aaa0) yields between its passes (w23 = 0) and once
 // in each pass's wait for the nifm request (w23 = 2,000, its retry count), and spun a host core as one that moved on at every yield.
 // A wait whose pass reads the system clock (dm_clock_reads moved since the last yield of the run) waits for a time, not for another thread's handoff: a clock wait (clock_wait).
+static inline uint64_t fnv_mix(uint64_t sig, uint64_t v) { return (sig ^ v) * 0x100000001b3ull; }
 static uint64_t yield_sig(const uint64_t *regs) {
     uint64_t sig = 0xcbf29ce484222325ull;
-    for (int i = 19; i <= 28; i++) sig = (sig ^ regs[i]) * 0x100000001b3ull;
+    for (int i = 19; i <= 28; i++) sig = fnv_mix(sig, regs[i]);
     return sig;
 }
 static void clock_wait(thr_t *me, uint64_t sig, uint64_t now, int predict);
@@ -1239,11 +1240,11 @@ static void park_yield(thr_t *me) {
 static void thr_yield(thr_t *me, const uint64_t *regs) {
     if (!me) { sched_yield(); return; }
     uint64_t y0 = now_ns(), sig = yield_sig(regs);
-    int same = me->yrun_svc + 1 == me->nsvc;   // no other SVC since the thread's last yield
-    int moved = same && me->yrun_sig != sig && me->yrun_sig2 != sig;   // the loop moved on since its last two yields
-    int clock = g_yield_clock && same && !moved && dm_clock_reads != me->yrun_clk;   // a wait whose pass read the clock
+    int same = me->yrun_svc + 1 == me->nsvc;   // no other SVC since the thread's last step
+    int moved = same && me->yrun_sig != sig && me->yrun_sig2 != sig;   // the loop moved on since its last two steps
+    int clock = g_yield_clock && me->yrun_yield && me->yrun_yield == me->nsvc && !moved && dm_clock_reads != me->yrun_clk;   // consecutive yields whose pass read the clock
     int clkread = same && dm_clock_reads != me->yrun_clk;   // the pass read the clock, its registers moved or not: a wait for a time, never parked (DM_YIELD_PARK)
-    me->nyield++; if (!same || moved) me->yrun_t0 = y0; me->yrun_svc = me->nsvc; me->yrun_sig2 = me->yrun_sig; me->yrun_sig = sig; me->yrun_clk = dm_clock_reads;
+    me->nyield++; if (!same || moved) me->yrun_t0 = y0; me->yrun_svc = me->nsvc; me->yrun_yield = me->nsvc + 1; me->yrun_sig2 = me->yrun_sig; me->yrun_sig = sig; me->yrun_clk = dm_clock_reads;
     // A yield that does not continue a tight run (another SVC came between, or 2 µs of guest work or more since the last yield) is progress for a parked thread: a worker back from
     // a blocking wait that ran its job with no SVC, stored its done flag and yields comes here with another SVC before it, whose bumps were before the job
     if (!(same && me->ys_ret && y0 >= me->ys_ret && y0 - me->ys_ret < YS_GAP_NS)) park_progress();
@@ -1345,23 +1346,24 @@ static int64_t poll_wait_begin(int64_t ns) {
     me->nyield++; me->nbackoff++;   // counted as a yield that backed off (the power line)
     return (int64_t)bo;
 }
-// After the wait (ns: the guest's timeout; regs: the guest registers at the SVC): a signalled wait ends the run, the loop moves on.
+// After the wait (ns: the guest's timeout; regs: the guest registers at the SVC; target_sig: the wait's target and caller lr): a signalled wait ends the run, the loop moves on.
 // Zero-timeout waits as polls too. Horizon answers a wait with a timeout of 0 at once, TimedOut while the condition holds (mesosphere's WaitIfEqual / WaitIfLessThan,
 // WaitSynchronization and the condition variable's wait, which still releases the lock), and so does the host. A loop of them that makes no progress waits for another thread:
 // an audio thread of 01007ED02424E000 made 4.7 million WaitForAddress(wait if equal, timeout 0) calls a second, a whole host core at 4 W of CPU (issue #1768), and LucaSystem's
 // PreLoad thread calls TimedWaitLightEvent(ev, 0) → WaitForAddress(wait if equal, timeout 0) ~6.5 million times a second (PR #3336). A zero-timeout poll that times out is a
 // step of the run of yields, by the yields' rules (thr_yield): it continues the run when the SVC before it was one of the run's steps, under SPIN_GAP_NS of guest work came
-// after it, and the caller's x19–x28 match one of the last two steps'. The register test matters here, unlike for short timed waits: a timeout of 0 is also the SDK's try form
-// (TryWaitSystemEvent, TryWaitAny), which a loop that works between its tries calls with its counters moving, and TimedWait* with 0 has no ticking deadline in x19–x28. Once
-// the run has lasted the back-off's start (2 ms), the thread sleeps the back-off after the poll (backoff_sleep), then answers TimedOut. A sleep, not a longer wait as
-// poll_wait_begin makes: the thread is never a waiter, so it takes no wake that a signal with a count means for a real waiter, never inflates SignalToAddress type 2's waiter
-// count, never consumes CancelSynchronization, and the answer stays Horizon's. A poll that does not time out ends the run
-static void poll_wait_end(int64_t ns, int64_t r, const uint64_t *regs) {
+// after it, and the caller's signature matches one of the last two steps'. Unlike tail-branch YieldThread, non-tail-call SDK wrappers (TryWaitSystemEvent, TryWaitInterProcessEvent,
+// TryWaitThread, TimedWaitLightEvent) save and overwrite x19–x21+ with constants (0xea01, 1, 0xec01), hiding moving caller indices and targets; mixing target_sig (SVC,
+// address/type/value or handle list, and lr) distinguishes polling distinct objects even when x19–x28 look identical. poll_wait_end does not set yrun_yield so a zero-timeout wait
+// cannot leak a stale yrun_clk into clock_wait on a subsequent yield. Once the run has lasted the back-off's start (2 ms), the thread sleeps the back-off after the poll
+// (backoff_sleep), then answers TimedOut. A sleep, not a longer wait as poll_wait_begin makes: the thread is never a waiter, so it takes no wake that a signal with a count means
+// for a real waiter, never inflates SignalToAddress type 2's waiter count, never consumes CancelSynchronization, and the answer stays Horizon's. A poll that does not time out ends the run
+static void poll_wait_end(int64_t ns, int64_t r, const uint64_t *regs, uint64_t target_sig) {
     if (ns < 0 || ns >= 20000) return;
     thr_t *me = pthread_getspecific(g_keythr); if (!me) return;
     if (r != R_TIMEOUT) { me->yrun_svc = 0; return; }
     if (ns) { me->poll_ret = now_ns(); return; }
-    uint64_t now = now_ns(), sig = yield_sig(regs);
+    uint64_t now = now_ns(), sig = fnv_mix(yield_sig(regs), target_sig);
     int same = me->yrun_svc && me->yrun_svc + 1 == me->nsvc && now >= me->poll_ret && now - me->poll_ret <= SPIN_GAP_NS;
     if (!same || (me->yrun_sig != sig && me->yrun_sig2 != sig)) me->yrun_t0 = now;   // a new run: another SVC or guest work came between, or the loop moved on
     me->yrun_svc = me->nsvc; me->yrun_sig2 = me->yrun_sig; me->yrun_sig = sig;
@@ -1785,7 +1787,8 @@ static int svc_thread_impl(int num, uint64_t *regs) {
 #endif
         int64_t r = block(t, 2, poll_wait_begin((int64_t)regs[3]));   // Timeout: the lock is not re-acquired (user mode takes it itself)
         g_unlock();
-        poll_wait_end((int64_t)regs[3], r, regs);
+        uint64_t wsig = !regs[3] && r == R_TIMEOUT ? fnv_mix(fnv_mix(fnv_mix(0x1c, addr), key), regs[30]) : 0;
+        poll_wait_end((int64_t)regs[3], r, regs, wsig);
         regs[0] = (uint64_t)r; return 1;
     }
     case 0x1D: {  // SignalProcessWideKey(x0 condition key, w1 count, <=0 all)
@@ -1808,7 +1811,10 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         if (!ok) r = R_BAD_STATE;
         else { t->waddr = addr; r = block(t, 3, poll_wait_begin((int64_t)regs[3])); }
         g_unlock();
-        if (ok) poll_wait_end((int64_t)regs[3], r, regs);
+        if (ok) {
+            uint64_t wsig = !regs[3] && r == R_TIMEOUT ? fnv_mix(fnv_mix(fnv_mix(fnv_mix(0x34, addr), (uint64_t)type), regs[2]), regs[30]) : 0;
+            poll_wait_end((int64_t)regs[3], r, regs, wsig);
+        }
         regs[0] = (uint64_t)r; return 1;
     }
     case 0x35: {  // SignalToAddress(x0 address, w1 type, w2 value, w3 count): 0 wake, 1 increment if equal and wake, 2 if equal modify the value by waiter count and wake
@@ -1875,7 +1881,12 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         }
         for (int i = 0; i < held; i++) sync_close(objects[i]);
         g_unlock();
-        poll_wait_end(ns, r, regs);
+        uint64_t wsig = 0;
+        if (!ns && r == R_TIMEOUT) {
+            wsig = fnv_mix(fnv_mix(0x18, (uint64_t)n), regs[30]);
+            for (int i = 0; i < n; i++) wsig = fnv_mix(wsig, hs[i]);
+        }
+        poll_wait_end(ns, r, regs, wsig);
         regs[0] = (uint64_t)r; regs[1] = idx >= 0 ? (uint64_t)idx : 0; return 1;
     }
     case 0x19: {  // CancelSynchronization(w0 thread)

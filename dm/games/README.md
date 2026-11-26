@@ -201,7 +201,9 @@ One row per profile; the notes are each profile's `README.md`. A game marked **u
 | [Well Dweller](0100217023F6C000/README.md) | `0100217023F6C000` | 1.0.0 | 22.2.0 | GameMaker Studio 2 (its runner) | OpenGL (**unsupported** since 0.5) |
 | [Xenoblade Chronicles: Definitive Edition](0100FF500E34A000/README.md) | `0100FF500E34A000` | 1.1.2 | 9.3.1 | Monolith's engine | NVN |
 | [Xenoblade Chronicles 2](0100E95004038000/README.md) | `0100E95004038000` | 2.1.0 | 3.5.0 | Monolith's engine | NVN |
+| [Xenoblade Chronicles 2 – Nintendo Switch 2 Edition](0400E95004038001/README.md) | `0400E95004038001` | 3.0.1 (Switch 2) | 21.4.4 (Ounce) | Monolith's engine | NVN2 |
 | [Xenoblade Chronicles 3](010074F013262000/README.md) | `010074F013262000` | 2.2.1 | 12.3.9 | Monolith's engine | NVN |
+| [Xenoblade Chronicles X: Definitive Edition – Nintendo Switch 2 Edition](0400453019AA8001/README.md) | `0400453019AA8001` | 2.0.0 (Switch 2) | 20.5.14 (Ounce) | Monolith's engine | NVN2 |
 | [Yoshi and the Mysterious Book](0400245021D2C000/README.md) | `0400245021D2C000` | 1.0.2 (Switch 2) | 20.5.15 (Ounce) | Unreal Engine 5.4.4 | NVN2 |
 | [Yoshi's Crafted World](01006000040C2000/README.md) | `01006000040C2000` | 1.0.1 | 4.4.1 | Unreal Engine 4.18 era (Good-Feel) | NVN |
 

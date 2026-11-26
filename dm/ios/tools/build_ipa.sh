@@ -212,7 +212,8 @@ if [ ! -f "$ICON" ] && [ -f "$NX18_ICON" ]; then t "no game icon ($ICON not foun
 mkdir -p Gen/Assets.xcassets && printf '{"info":{"author":"xcode","version":1}}\n' > Gen/Assets.xcassets/Contents.json || die "asset catalog"
 if [ -f "$ICON" ]; then
   AI=Gen/Assets.xcassets/AppIcon.appiconset; mkdir -p "$AI" || die "mkdir $AI"
-  sips -s format png -z 1024 1024 "$ICON" --out "$AI/icon.png" > /dev/null || die "sips: cannot convert the icon $ICON"
+  # sips skips an empty file with a warning and exits 0 without writing the PNG; actool then builds the app without an icon and says nothing, so the PNG itself is checked (upstream e8ac733c4)
+  sips -s format png -z 1024 1024 "$ICON" --out "$AI/icon.png" > /dev/null && [ -s "$AI/icon.png" ] || die "the icon $ICON is not an image sips can read (empty, unreadable or not an image): give a JPEG or PNG"
   # The dark and tinted Home Screen looks (iOS 27 HIG, App icons > Icon formats): given one bitmap, iOS separates a foreground from the background itself and leaves out text and
   # fine detail, which game box art does not survive. So both are given: dark is the art as it is, tinted a greyscale copy (through the grey profile and back to sRGB) the system tints
   cp "$AI/icon.png" "$AI/icon-dark.png" || die "app icon: dark variant"

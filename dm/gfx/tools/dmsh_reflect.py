@@ -286,7 +286,7 @@ def reflect(key, stage, msl, res):
             if nm.endswith('Smplr') and us[0] == 'c2': e.update(kind=abi.KIND_SAMP_UBO, reg=ut[0], off=ut[1], soff=us[1], sreg=abi.SREG_C2)
             elif nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1], **({'soff': ut[1], 'sreg': ut[0]} if other else {}))
             elif 'texture_buffer' in ty:
-                e.update(kind=abi.KIND_TBUF_UBO, reg=ut[0], off=ut[1])
+                e.update(kind=abi.KIND_TBUF_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
                 if not ty.startswith('array<') and (x := buffer_image_bias(nm, res)) is not None: e['tbx'] = x   # a buffer texture: its index in the offset table (the host binds one texture here)
             else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
         elif decode_ubo_img(nm):
@@ -322,7 +322,7 @@ def reflect(key, stage, msl, res):
             if b and b['cb_slot'] == abi.GMEM_MAP_CB_SLOT:   # not a game buffer: for addresses traced to no storage buffer, the host's pool table (offset 0) or the write log (DMSH_GMEM_LOG_CB_OFFSET)
                 if b['cb_offset'] == abi.GMEM_LOG_CB_OFFSET: e.update(kind=abi.KIND_GMEM_LOG, rw=True); continue
                 # rw: one of those accesses writes (the translator notes each one with its operation: Load, Store or an atomic)
-                e.update(kind=abi.KIND_GMEM_MAP, rw=any(re.search(r'operation "(Store|Atomic\w*)" traced to no storage buffer', n) for n in res.get('notes', ()))); continue
+                e.update(kind=abi.KIND_GMEM_MAP, rw=any(re.search(r'operation "(Store|Atomic\w*)" traced to no storage buffer', n) for n in res.get('notes', ())), pointers=gptr_sites(stage, res)); continue
             if stage == 'cs' and off is not None and abi.C0_CS_UBO <= off < abi.C0_CS_UBO + abi.C0_ROW * abi.C0_CS_UBO_SLOTS and (off - abi.C0_CS_UBO) % abi.C0_ROW == 0:
                 e.update(kind=abi.KIND_UBO_PTR, reg=(off - abi.C0_CS_UBO) // abi.C0_ROW)   # compute-stage uniform slot r: address at c0[C0_CS_UBO + 0x10 r], read through global memory (checked against cs_lut_combine_c reading cb10[66])
             elif b and b['cb_slot'] == abi.PUSH_BANK:   # the address is one the game pushed (c[24]; PRAGMATA's compute buffer entries in push block 1): the host reads it from its push blocks
@@ -332,6 +332,23 @@ def reflect(key, stage, msl, res):
             else: e['reg'] = (off - base) // abi.C0_ROW if off is not None and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else None
             e['rw'] = bool(b and b['flags'] & 1)   # BufferUsageFlags.Write; Program.cs serializes the translator enum unchanged (atomics count as writes too)
     return binds
+
+_GPTR_SITE = re.compile(r'translator: gptr site (\d+): c(\d+)\[(\d+)\] \+(\d+)$')
+
+def gptr_sites(stage, res):
+    """Fixed pointer words in NVN storage slots, discovered by the translator's GlobalToStorage (upstream f15d65850): metadata for the existing raw pool table
+    (nvn_mtl.m gmem_discover), not GPU site entries. A translator without the discovery notes none: []"""
+    sites = {}
+    base = SSBO.get(stage)
+    for note in res.get('notes', ()):
+        m = _GPTR_SITE.match(note)
+        if not m: continue
+        k, cb_slot, cb_word, byte = map(int, m.groups())
+        off = cb_word * 4
+        reg = (off - base) // abi.C0_ROW if cb_slot == 0 and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else -1
+        sites[k] = [reg, byte]
+    if sorted(sites) != list(range(len(sites))) or len(sites) > abi.GPTR_MAX: raise ValueError(f'gptr sites {sorted(sites)} are not 0..n-1 within {abi.GPTR_MAX}')
+    return [sites[k] for k in range(len(sites)) if sites[k][0] >= 0]
 
 DRV_FILL = {0: [(b, b + abi.C0_ROW * abi.C0_SSBO_SLOTS) for k, b in sorted(SSBO.items(), key=lambda kv: kv[1]) if k not in ('ts', 'ms')],   # c0: storage buffer address tables (vertex / compute / geometry / pixel; a task or mesh stage's: unfillable())
             2: [(TEX_BASE, SEPTEX_BASE), (IMG_BASE, IMG_BASE + abi.C2_ROW * IMG_SLOTS), (SEPTEX_BASE, SAMP_BASE), (SAMP_BASE, SAMP_BASE + abi.C2_ROW * abi.C2_SEP_SLOTS)]}   # c2: the handle tables above, all filled by the replay layer

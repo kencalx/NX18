@@ -70,7 +70,7 @@ typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; int32_t nactive; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
 // avail[i]: time at which swapchain image i can be acquired again (ns, monotonic clock) = its display time + one present period; pace: target time of this window's present pacer
-typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; int32_t nactive, follow; } win_t;   // ticket[i]: ticket of the most recent present of image i; nactive as in win_builder_t; follow: see nvn_pace_follow
+typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4], next_ticket[4]; int32_t nactive, follow, last_pres; } win_t;   // ticket[i]: ticket of the most recent present of image i; next_ticket[i]: ticket of the first present after it (Horizon hands image i back once that present has run; DM_NVN_ACQ_NEXT); last_pres: idx + 1 of the most recent present (0: none); nactive as in win_builder_t; follow: see nvn_pace_follow
 FITS(win_t, NVNwindow);
 
 // Command buffer: commands are written into the command memory given by the game (AddCommandMemory), and the list that strings a recording's pieces together into its control memory
@@ -172,7 +172,7 @@ enum {
     OP_BIND_PROGRAM, OP_BIND_STATE, OP_BIND_VATTR, OP_BIND_VSTREAM, OP_BIND_VBUF,
     OP_BIND_UBO, OP_BIND_SSBO, OP_BIND_TEX, OP_BIND_SAMP,
     OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
-    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DLSS, OP_MULTI_DRAW, OP_WAIT_EVENT, OP_WAIT_SYNC, OP_DEPTH_BOUNDS, OP_COUNT_
+    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DLSS, OP_MULTI_DRAW, OP_WAIT_EVENT, OP_WAIT_SYNC, OP_DEPTH_BOUNDS, OP_LINE_WIDTH, OP_COUNT_
 };
 // Payload (immediately follows op_hdr)
 typedef struct {
@@ -197,6 +197,7 @@ typedef struct { float n, f; } p_depth_range;
 typedef struct { uint32_t on, index; } p_prim_restart;
 typedef struct { int32_t on; } p_depth_clamp;   // SetDepthClamp: depth outside [near, far] is clamped instead of clipped (Metal's depth clip mode)
 typedef struct { int32_t on; float lo, hi; } p_depth_bounds;   // SetDepthBounds: the enable and the bounds as the game passed them (clamped and checked at replay, nvn_dbnd.h)
+typedef struct { float w; } p_line_width;   // SetLineWidth: lines wider than a pixel are drawn as quads (nvn_wline.inc)
 typedef struct { int32_t first, n; uint8_t sw[16][4]; } p_vp_swizzle;   // SetViewportSwizzles: per viewport the source of clip x, y, z, w (NVNviewportSwizzle) XOR the identity (0, 2, 4, 6), so 0 = unchanged
 typedef struct { const prog_t *prog; int32_t stages; } p_bind_program;
 // kind: 0 blend 1 color 2 chmask 3 ms 4 poly 5 ds. Recorded with the state object's own bytes only (hle_nvn.c bind_state): 16 bytes with the header for color, channel mask and polygon state,

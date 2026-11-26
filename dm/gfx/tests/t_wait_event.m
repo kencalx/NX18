@@ -369,6 +369,38 @@ static void frame_shares_allocator(void) {
     CHECK(done && *result==before,"all of them complete once the GPU runs"); if(!done) _Exit(2);
     for(int i=0;i<N;i++) P(nvnSyncFinalize)(&fences[i]);
 }
+// Allocators past the three made at start are released, the last first, once the GPU is done with them and none was taken for g_alloc_idle_frames frames (DM_NVN_ALLOC_TRIM,
+// after MacNativeGames 99e42bc8); the current one and the first three stay, and one taken within the idle span stays
+static void idle_allocators_released(void) {
+    printf("CASE idle command allocators past three are released\n");
+    *source=before; *result=sentinel;
+    NVNsync f0; P(nvnSyncInitialize)(&f0,&device); job j0; enqueue(&j0,&queues[0],consumer(0,0,&f0,0)); require_returned(&j0,0);
+    CHECK(landed(&f0,5000000000ull),"a submission completes first"); P(nvnSyncFinalize)(&f0);
+    pthread_mutex_lock(&g_sub_mu);
+    int n0=g_alloc_n, cur=g_alloc_cur; uint64_t trimmed=g_alloc_trimmed, idle=g_alloc_idle_frames, frame=atomic_load(&g_cur_frame);
+    CHECK(n0<=ALLOC_MAX-2 && cur<ALLOC_KEEP,"room for two more allocators, the current one among the first three");
+    for(int i=g_alloc_n;i<ALLOC_KEEP;i++) { g_alloc4[i]=[g_dev newCommandAllocator]; g_alloc_fence[i]=0; g_alloc_take_frame[i]=frame; }
+    if(g_alloc_n<ALLOC_KEEP) g_alloc_n=ALLOC_KEEP;
+    int base=g_alloc_n;
+    for(int i=base;i<base+2;i++) { g_alloc4[i]=[g_dev newCommandAllocator]; g_alloc_fence[i]=0; g_alloc_take_frame[i]=frame; }
+    g_alloc_n=base+2;
+    g_alloc_idle_frames=1000000;   // not idle long enough: both stay
+    pthread_mutex_unlock(&g_sub_mu);
+    NVNsync f1; P(nvnSyncInitialize)(&f1,&device); job j1; enqueue(&j1,&queues[0],consumer(0,0,&f1,0)); require_returned(&j1,0);
+    CHECK(landed(&f1,5000000000ull),"a submission with the extra allocators recent"); P(nvnSyncFinalize)(&f1);
+    pthread_mutex_lock(&g_sub_mu);
+    CHECK(g_alloc_n==base+2 && g_alloc_trimmed==trimmed,"allocators taken within the idle span stay");
+    g_alloc_idle_frames=0;   // every finished allocator is idle now
+    pthread_mutex_unlock(&g_sub_mu);
+    NVNsync f2; P(nvnSyncInitialize)(&f2,&device); job j2; enqueue(&j2,&queues[0],consumer(0,0,&f2,0)); require_returned(&j2,0);
+    CHECK(landed(&f2,5000000000ull) && *result==before,"a submission after they went idle runs"); P(nvnSyncFinalize)(&f2);
+    pthread_mutex_lock(&g_sub_mu);
+    CHECK(g_alloc_n==ALLOC_KEEP || (g_alloc_n==g_alloc_cur+1 && g_alloc_n>ALLOC_KEEP),"the idle ones past three are released, down to the current one");
+    CHECK(g_alloc_trimmed-trimmed==(uint64_t)(base+2-g_alloc_n),"each counted");
+    CHECK(g_alloc_n>=ALLOC_KEEP && g_alloc4[g_alloc_cur]!=nil,"the first three and the current one stay");
+    g_alloc_idle_frames=idle;
+    pthread_mutex_unlock(&g_sub_mu);
+}
 // More than POST_RING submissions in flight (the GPU held; the frame's submissions share one allocator and take no visibility buffer, so nothing else holds them back): the one whose post-ring
 // slot still holds a fence the GPU has not completed waits for it in mtl_sub_commit. The wait ledger (DM_NVN_WAITS=1) counts that wait as the post ring's: counted as the allocator's, it disagreed
 // with g_alloc_waits (the allocator pool's own figure, which it does not touch) and pointed at ALLOC_MAX / ALLOC_SHARE instead of POST_RING
@@ -907,6 +939,7 @@ int main(void) { @autoreleasepool {
     event_queued_write_fence();
     event_signal_no_cut();
     frame_shares_allocator();
+    idle_allocators_released();
     vis_ring_grows();
     post_ring_wait();
     signal_events_switch();

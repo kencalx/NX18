@@ -31,10 +31,14 @@ A folder named `mods` beside the game's NSPs gives the build two things: cheat f
 
 Press a controller's **Capture** button (Share on a non-Nintendo pad, or the screenshot button of a phone-clip controller), or open the in-game menu › **More** › **Take Screenshot**. NX 18 saves the game's own picture at the size it fills on the screen, without the touch controls, Vitals or menus. A small *Screenshot saved* notice shows at the top left for two seconds, and VoiceOver reads it.
 
-- **On the iPhone and iPad** the screenshot goes in the app's `Captures` folder, which you can see in the Files app under the app's name.
+- **On the iPhone and iPad** the screenshot goes in the app's `Captures` folder, which you can see in the Files app under the app's name. With **This game's captures** set to **NX 18 folder** on the NX 18 card ([Profile and NX 18 folder](settings.md)), it goes to `<NX 18 folder>/<title ID>/Captures/` in iCloud Drive instead, and the notice says so; if the folder can't be reached, it stays in the app's folder.
 - **On the Mac** it goes in `~/Library/Application Support/nxnative/<title ID>/Captures`. The app menu also has **Take Screenshot** (⇧⌘S).
 
 Each file is named by the date and time it was taken (`2026-11-25 21.04.17.png`). The game never sees the Capture button, as on a Switch. Some controllers' Share button stays with iOS whatever NX 18 asks (the GameSir G8+ does): iOS then takes its own screenshot to Photos. With **Save screenshots to Captures** on (in the settings and the in-game menu; on by default), every screenshot iOS takes during play, with a controller or the side and volume buttons, also saves NX 18's clean picture to `Captures`. `log.txt` names the button it uses for each controller (`capture button: ...`). The system's own screenshots (side button and volume up) still work as before and go to Photos, with everything on the screen.
+
+### Recordings (iPhone and iPad)
+
+Hold a controller's **Capture** button for half a second, or open the in-game menu › **More** › **Start Recording**. iOS shows its screen recording sheet once to confirm, then NX 18 records the game and its sound (never the microphone) until you hold Capture again or choose **Stop Recording** (the row shows how long it has run). Nothing is drawn over the game while it records; iOS shows its own recording indicator. Leaving the app stops the recording and saves it. A recording is an HEVC `.mov` in the same `Captures` folder as screenshots, or the NX 18 folder with **This game's captures** set to it: about 75 MB a minute. A controller whose Share button iOS keeps for itself (the GameSir G8+) records from the menu.
 
 ## Rumble
 

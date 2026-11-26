@@ -102,8 +102,19 @@ static int snap_case(void) {
     g_stall_t0 = 0;
     printf("t_link_ticks snap: %d checks, %d failed\n", checks, failed); return failed != 0;
 }
+// DM_FPS_HOLD=off at 120 fps (fstep_hold caches the setting once per process: run as "t_link_ticks hold-off"; upstream 0a554d79f):
+// kmax stays at the cap's ticks (1 at 120, 2 when capped to 60 by a movie, a 60 Hz screen, or thermal state) instead of always returning 2.
+static int hold_off_case(void) {
+    setenv("DM_FPS_TARGET", "120", 1); setenv("DM_FPS_HOLD", "off", 1);
+    g_present_cap = -1; g_fps_high = -1;
+    CHECK(fps_high(), "hold-off: a game checked at 120 takes the 120 fps target");
+    CHECK(fstep_kmax(120) == 1, "hold-off at 120 fps: kmax is 1 tick (frames are not held longer than the cap)");
+    CHECK(fstep_kmax(60) == 2, "hold-off at 120 fps with a 60 cap: kmax stays 2 ticks");
+    printf("t_link_ticks hold-off: %d checks, %d failed\n", checks, failed); return failed != 0;
+}
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc > 1 && !strcmp(argv[1], "snap")) return snap_case();
+    if (argc > 1 && !strcmp(argv[1], "hold-off")) return hold_off_case();
     setenv("DM_RT", "0", 1); setenv("DM_PRESENT_SNAP", "0", 1);
     // Test uncapped display pacing independently of the selected game's default.
     setenv("DM_FPS_TARGET", "0", 1);
@@ -138,8 +149,10 @@ int main(int argc, char **argv) { @autoreleasepool {
     acquire_ticks(120, 1, 1, 4, "the 30 fps frame step keeps two 60 Hz vsyncs");
     dm_fps_state = NULL;
     // 120 fps: the frame step's hold is in ticks of 1/120 s, whatever interval the game asks for, and the target the host writes follows it
-    setenv("DM_FPS_TARGET", "120", 1); g_present_cap = -1; g_fps_high = -1;
+    setenv("DM_FPS_TARGET", "120", 1); setenv("DM_FPS_HOLD", "on", 1); g_present_cap = -1; g_fps_high = -1;
     CHECK(fps_high(), "a game checked at 120 takes the 120 fps target");
+    CHECK(fstep_kmax(120) == 2, "120 fps, fps_hold on: kmax is 2 ticks");
+    CHECK(fstep_kmax(60) == 2, "120 fps, fps_hold on, cap 60: kmax is 2 ticks");
     atomic_store(&g_high_cap, 120); atomic_store(&g_fs_k, 1);
     acquire_ticks(120, 0, 2, 1, "120 fps: hold 1 is one tick, whatever interval the game asks for");
     CHECK(nvn_game_fps() == 120 && nvn_fps_high_now() == 120, "120 fps: hold 1 sets a target of 120");
@@ -192,7 +205,8 @@ int main(int argc, char **argv) { @autoreleasepool {
         CHECK(g_acq_blocks == b0, "present interval 0 waits for nothing and keeps its core");
     }
     acquire_lateness();
-    pid_t pid; int st = 1; extern char **environ;   // the snapshot cases in a process of their own (mtl_snap_on is decided once)
+    pid_t pid; int st = 1; extern char **environ;   // the snapshot and hold-off cases in processes of their own (mtl_snap_on and fstep_hold are decided once)
     CHECK(!posix_spawn(&pid, argv[0], NULL, NULL, (char *[]){argv[0], "snap", NULL}, environ) && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && !WEXITSTATUS(st), "the snapshot cases pass");
+    CHECK(!posix_spawn(&pid, argv[0], NULL, NULL, (char *[]){argv[0], "hold-off", NULL}, environ) && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && !WEXITSTATUS(st), "the hold-off at 120 fps cases pass");
     printf("t_link_ticks: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }
