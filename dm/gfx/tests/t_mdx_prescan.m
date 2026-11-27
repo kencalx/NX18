@@ -1,6 +1,7 @@
 // Indirect-count multi-draws after an ordinary draw in the same render pass (nvn_mtl.m mdx_prescan): once the game has drawn one, the pass the ordinary draw opens
 // copies their records first and is not split for them. An ORDER_INDIRECT_DATA barrier after a draw with shader writes ends those copies (g_mdx_wr): the multi-draw
-// after it copies again, which splits the pass; the same barrier with no shader write since the copies keeps them
+// after it copies again outside the pass; the same barrier with no shader write since the copies keeps them. The pass breaks either at the copy (g_mdx_splits)
+// or, since upstream dc9c2374b, at the barrier itself (ORDER_INDIRECT_DATA after shader writes ends the pass), so the check counts render passes
 // A real fragment producer also checks ORDER_PRIMITIVES: the count starts at zero, the shader writes 65535, and a later indexed draw must paint red with its new mask
 // (upstream NXNative 5d1010307, PR #2945)
 // Upstream NXNative a4705fe1; NX 18 builds the test's pipelines through Metal 4 (t_mtl4.h), as its other tests do
@@ -63,7 +64,7 @@ static int run(const char *name, uint8_t *pool, prog_t *green, prog_t *red, int 
     memset(&R, 0, sizeof R);
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &rt;
     S.ds.dt = S.ds.dw = S.ds.st = 0; S.poly.cull = 0; S.color.blend_en = 0; S.chmask.mask = 0xffff;
-    uint64_t splits = g_mdx_splits, pre = g_mdx_pre, waits = g_mdi_waits;
+    uint64_t splits = g_mdx_splits, pre = g_mdx_pre, waits = g_mdi_waits, passes = g_stat_pass;
     mtl_sub_begin();
     mtl_exec((const uint8_t *)(uintptr_t)handle);
     int done = mtl_wait(mtl_sub_commit(), 10000000000ull) && !mtl_last_commit_error();
@@ -71,9 +72,9 @@ static int run(const char *name, uint8_t *pool, prog_t *green, prog_t *red, int 
     [out getBytes:pixels bytesPerRow:PIXELS * 4 fromRegion:MTLRegionMake2D(0, 0, PIXELS, PIXELS) mipmapLevel:0];
     const uint8_t *c = &pixels[((PIXELS / 2) * PIXELS + PIXELS / 2) * 4];
     int red_px = c[0] == 255 && c[1] == 0, green_px = c[0] == 0 && c[1] == 255;
-    int good = done && (live ? red_px : green_px) && g_mdx_splits - splits == want_splits && (int)(g_mdx_pre - pre) >= want_pre && g_mdi_waits == waits;
-    printf("%-44s pixel=%u,%u splits=%llu (want %llu) prescans=%llu waits=%llu %s\n", name, c[0], c[1], (unsigned long long)(g_mdx_splits - splits),
-           (unsigned long long)want_splits, (unsigned long long)(g_mdx_pre - pre), (unsigned long long)(g_mdi_waits - waits), good ? "ok" : "FAILED");
+    int good = done && (live ? red_px : green_px) && g_stat_pass - passes == want_splits + 1 && (int)(g_mdx_pre - pre) >= want_pre && g_mdi_waits == waits;
+    printf("%-44s pixel=%u,%u breaks=%llu (want %llu; copy splits %llu) prescans=%llu waits=%llu %s\n", name, c[0], c[1], (unsigned long long)(g_stat_pass - passes - 1),
+           (unsigned long long)want_splits, (unsigned long long)(g_mdx_splits - splits), (unsigned long long)(g_mdx_pre - pre), (unsigned long long)(g_mdi_waits - waits), good ? "ok" : "FAILED");
     mtl_tex_release(&rt);
     return good;
 }

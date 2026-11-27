@@ -136,6 +136,22 @@ class Members(unittest.TestCase):
             nest = head + bytes(-len(head) & 15) + nest
         with self.assertRaisesRegex(cra.Error, 'nested more than 32'): cra.undo(nest)
 
+    def test_malformed_members(self):   # upstream 715a9403b's cases, with NX 18's messages
+        text = b'BNSH\0\0\0\0 shaders shaders shaders shaders ' * 40
+        lz4d = b'\x94\0\0\0' + struct.pack('<I', len(text)) + lz4.block.compress(text, store_size=False)
+        with self.assertRaisesRegex(cra.Error, 'a damaged LZ4 member'): cra.undo(lz4d[:-5])
+        with self.assertRaisesRegex(cra.Error, 'says it unpacks to 4294967295'): cra.undo(b'\x94\0\0\0\xff\xff\xff\xff\0\0\0\0')
+        with self.assertRaisesRegex(cra.Error, 'zstd member header cut'): cra.undo(b'Z\0\0\0')
+        with self.assertRaisesRegex(cra.Error, 'a damaged zstd member'): cra.undo(b'Z\0\0\0' + bytes(4) + cra.zstd_mod().compress(text)[:-4])
+        with self.assertRaisesRegex(cra.Error, 'MMMM header cut'): cra.undo(b'MMMM\0\0')
+        with self.assertRaisesRegex(cra.Error, 'MMMM table of 9 chunks'): cra.undo(b'MMMM' + struct.pack('<II', 0, 9))
+        with self.assertRaisesRegex(cra.Error, 'MMMM chunk 0 past the end'): cra.undo(b'MMMM' + struct.pack('<III', 0, 1, 64) + bytes(4))
+        nested = b'plain'
+        for _ in range(33):
+            nested = b'MMMM' + struct.pack('<III', len(nested), 1, len(nested)) + nested
+        with self.assertRaisesRegex(cra.Error, 'nested more than 32 deep'): cra.undo(nested)
+        with self.assertRaisesRegex(cra.Error, 'LZ stream cut inside a token'): cra.undo(b'\x60\0\0\0\x01')
+
     def test_kinds(self):
         text = b'BNSH\0\0\0\0 shaders shaders shaders shaders ' * 40
         lz4d = b'\x94\0\0\0' + struct.pack('<I', len(text)) + lz4.block.compress(text, store_size=False)

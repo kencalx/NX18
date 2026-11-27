@@ -21,12 +21,15 @@ static int checks, failed;
 
 enum { LEN = 1 << 20, IDS = 10 };
 static uint8_t *pages(void) { uint8_t *m = mmap(NULL, LEN, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (m == MAP_FAILED) abort(); return m; }
-// The 2D float texture table at base 0, in a submission of its own, as a draw that reads it would ask
-static id<MTLBuffer> table(void) {
-    mtl_sub_begin();
+// The 2D float texture table at base 0, as a draw that reads it would ask for it (table: in a submission of its own)
+static id<MTLBuffer> table_current(void) {
     __unsafe_unretained id<MTLBuffer> b = nil;
     os_unfair_lock_lock(&g_rmu); pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &b); os_unfair_lock_unlock(&g_rmu);
-    id<MTLBuffer> held = b;
+    return b;
+}
+static id<MTLBuffer> table(void) {
+    mtl_sub_begin();
+    id<MTLBuffer> held = table_current();
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission completed");
     return held;
 }
@@ -142,16 +145,31 @@ int main(void) { @autoreleasepool {
     mtl_reg_tex(3, (const tex_t *)&t3, NULL);
     id<MTLBuffer> b5 = table();
     CHECK(entry(b5, 3) != dummy_of(b5), "ID 3 holds its texture");
-    h_nvnTextureFinalize(&t3);
-    id<MTLBuffer> b6 = table();
+    // A replay between the serial's removal (serial_del) and its descriptors' retirement (treg_retire_serial), the two halves of mtl_tex_release: the table takes the ID as live
+    // and does not list it as a view of the submission. The retirement notes the serial again, so the next update takes the ID again (upstream NXNative ab44edaba)
+    const uint64_t ser3 = ((tex_t *)&t3)->serial;
+    smu_lock(); int was_live = nvn_hm_del(&g_tex_live, &ser3) != NULL; pthread_mutex_unlock(&g_smu);
+    CHECK(was_live, "the texture was live before its end");
+    serial_del(ser3);
+    mtl_sub_begin();
+    table_current();   // resolving the removed serial can note a change of its own
+    id<MTLBuffer> in_between = table_current();
+    CHECK(entry(in_between, 3) != dummy_of(in_between) && !lists(&snap()->trans, 3), "a replay between removal and retirement took the ID as live");
+    uint64_t gen = atomic_load(&g_ser_gen);
+    treg_retire_serial(ser3);
+    os_unfair_lock_lock(&g_snote_lk); ser_lnote ln = g_ser_log[(gen + 1) % SER_LOG]; os_unfair_lock_unlock(&g_snote_lk);
+    CHECK(ln.gen == gen + 1 && ln.serial == ser3, "the retirement notes the serial again");
+    id<MTLBuffer> b6 = table_current();
     CHECK(g_treg[3].retired && entry(b6, 3) != dummy_of(b6), "the finalized texture's ID still resolves in this submission");
     CHECK(snap()->sub == g_sub_serial && lists(&snap()->trans, 3), "the table lists it as a view of this submission");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission completed");
     CHECK(!g_treg[3].view, "its view went at the end of the submission");
     builds = g_stat_pool_builds; uint64_t schg = g_stat_pool_schg;
     id<MTLBuffer> b7 = table();
     CHECK(g_stat_pool_builds == builds && g_stat_pool_schg == schg + 1, "the next submission takes the retired ID again without building the table");
     CHECK(entry(b7, 3) != dummy_of(b7) && entry(b7, 2) == entry(b6, 2), "ID 3 resolves again, ID 2 unchanged");
     same_as_whole(b7, "the patched table holds what a table built whole does (retired ID)");
+    h_nvnTextureFinalize(&t3);   // its end above was by hand: the rest of it (no longer live, so no second retirement)
 
     // A storage takeover: ID 4 names a finalized texture that resolves to a shared one (a pool the CPU cannot reach). When a texture of another description takes its storage,
     // the change names no texture: no table is built, and no ID view is checked again. The evicted texture goes only behind the submission's fence (here the ghost table of finalized

@@ -38,6 +38,7 @@ The work folder is `<NSP folder>/010019A01E2F2000-work`: `host.sh` copies the wo
 General tool changes first needed here; each applies to every game:
 
 - **60-byte pack entries, zstd program records and `MTRL` forms, and program records whose control length is not a multiple of 0x40**, which the reader had skipped without a word in Metroid Prime Remastered too (28,479 of its shaders) (`rfrm_shaders`, `snvn_records`): [shaders.md](../../../docs/reference/shaders.md#snvn-program-records-in-retro-studios-rfrm-forms).
+- **Indexed pixel shader inputs kept only location 0's interpolation** (`Declarations.TryDeclareSplitIndexedFragmentInputs`; upstream NXNative `a7df99f84`, PR #3408: 44,121 indexed pixel shaders here, and a flat lighting-record index interpolated made MacKenzie and spherical decorations flicker; measured upstream, not here): [shaders.md](../../../docs/reference/shaders.md#indexed-fragment-inputs-lose-per-location-interpolation).
 
 ## Open
 

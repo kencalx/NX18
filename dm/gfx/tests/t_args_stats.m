@@ -1,7 +1,8 @@
 // DM_NVN_ARGS_STATS: the reasons full argument encodes are counted under (encode_args_ ast_fresh_why), the patch and registration counts, the time split, the shader table and the
 // "[args-stats]" lines. Each step draws one pixel with one change before it and checks that exactly one full encode was counted, under that change's reason: a new texture handle,
 // sampler, storage binding, push constants, texture and memory-pool registrations, a guest write, a host compute encoder, the shader's first encode, another submission, and with
-// the cross-pass rule off a new pass and a program change. Without the switch nothing is counted and no line is written. Run with and without DM_NVN_ARGS_STATS=1.
+// the cross-pass rule off a new pass and a program change. Push constants set again to the bytes held are reused (DM_NVN_PUSH_DEDUP). Without the switch nothing is counted and no
+// line is written. Run with and without DM_NVN_ARGS_STATS=1.
 #include "../nvn/nvn_mtl.m"
 #include "t_mtl4.h"
 #include <unistd.h>
@@ -109,6 +110,10 @@ int main(void) { @autoreleasepool {
     { p_bind_buf b = {.stage=1, .index=3, .addr=(uint64_t)(uintptr_t)(mem + 0x7000), .size=64}; state_op(OP_BIND_SSBO, &b); }
     step(fa, AW_SSBO, "a storage binding");
     push(7); step(fa, AW_PUSH, "push constants");
+    // The same push constant bytes again (upstream S2Arm 5442e030f): no hard change, the block is reused and no reason is counted; DM_NVN_PUSH_DEDUP=0 encodes again as before
+    { uint64_t e1 = enc_n(), r1 = g_stat_args_reuse, f1 = sum_fresh(); push(7); xdraw(fa);
+      if (g_push_dedup) CHECK(enc_n() == e1 && g_stat_args_reuse == r1 + 1 && sum_fresh() == f1, "the same push constant bytes again: the block is reused");
+      else CHECK(enc_n() == e1 + 1, "DM_NVN_PUSH_DEDUP=0: the same push constant bytes encode again"); }
     uint64_t d0 = g_ast.draws_reg, r0 = g_ast.regs_between;
     { tex_t *tc = calloc(1, sizeof *tc); texture(tc, 2); tc->mem = mem + 0x6000; tc->L.size = 8; mtl_reg_tex(TC, tc, NULL); mtl_reg_tex(TC + 1, tc, NULL); }
     step(fa, AW_REG_TEX, "texture registrations");

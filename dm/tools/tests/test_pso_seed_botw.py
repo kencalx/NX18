@@ -39,7 +39,7 @@ class Committed(unittest.TestCase):
         rows = [ln for ln in self.lines if not ln.startswith('#')]   # as the host splits them: a '\r' would stay in the row
         keep, bad = pso_seed.collect(rows, self.shmap)
         self.assertEqual((bad, len(keep)), ([], len(rows)))
-        self.assertEqual(pso_seed.counts(keep), {'S': 6040, 'R': 2172, 'C': 19, 'M': 0, 'rows': 8231})
+        self.assertEqual(pso_seed.counts(keep), {'S': 6227, 'R': 2237, 'C': 19, 'M': 0, 'rows': 8483})
 
     def test_the_mac_rows_then_the_iphone_rows(self):
         mac = [ln for ln in self.lines[:self.note] if not ln.startswith('#')]
@@ -47,7 +47,11 @@ class Committed(unittest.TestCase):
         x1 = [ln for ln in self.lines[self.x1:self.r3] if not ln.startswith('#')]
         r4 = next(i for i, ln in enumerate(self.lines) if ln.startswith('# Grown on 2026-11-19'))   # the X2.0 runs' block after it
         r3 = [ln for ln in self.lines[self.r3:r4] if not ln.startswith('#')]
-        r4rows = [ln for ln in self.lines[r4:] if not ln.startswith('#')]
+        r5 = next(i for i, ln in enumerate(self.lines) if ln.startswith('# iPhone 18 Pro Max play session 2026-11-24'))   # the 11-24 sessions' blocks
+        up = next(i for i, ln in enumerate(self.lines) if ln.startswith('# Added on 2026-11-27 from upstream NXNative 0a57ea236'))   # upstream's inbox rows, last
+        r4rows = [ln for ln in self.lines[r4:r5] if not ln.startswith('#')]
+        r5rows = [ln for ln in self.lines[r5:up] if not ln.startswith('#')]
+        uprows = [ln for ln in self.lines[up:] if not ln.startswith('#')]
         self.assertEqual(pso_seed.counts(mac), {'S': 819, 'R': 960, 'C': 10, 'M': 0, 'rows': 1789})
         self.assertEqual(pso_seed.counts(phone), {'S': 4070, 'R': 392, 'C': 5, 'M': 0, 'rows': 4467})
         self.assertEqual(pso_seed.counts(x1), {'S': 38, 'R': 197, 'C': 0, 'M': 0, 'rows': 235})
@@ -58,6 +62,11 @@ class Committed(unittest.TestCase):
         self.assertFalse((ids[0] | ids[1] | ids[2]) & {pso_seed.identity(r) for r in r3}, 'the X2.0 rows repeat none above them')
         self.assertEqual(pso_seed.counts(r4rows), {'S': 312, 'R': 127, 'C': 0, 'M': 0, 'rows': 439})
         self.assertFalse((ids[0] | ids[1] | ids[2] | {pso_seed.identity(r) for r in r3}) & {pso_seed.identity(r) for r in r4rows}, 'the 2026-11-19 rows repeat none above them')
+        self.assertEqual(pso_seed.counts(r5rows), {'S': 8, 'R': 31, 'C': 0, 'M': 0, 'rows': 39})
+        self.assertEqual(pso_seed.counts(uprows), {'S': 179, 'R': 34, 'C': 0, 'M': 0, 'rows': 213})
+        self.assertIn('213 rows (179 S, 34 R, 0 C)', self.lines[up])
+        above = set().union(*ids, *({pso_seed.identity(r) for r in part} for part in (r3, r4rows, r5rows)))
+        self.assertFalse(above & {pso_seed.identity(r) for r in uprows}, 'upstream\'s rows repeat none above them')
         lengths = [len(r.split('\t')[1]) for r in x1 if r.startswith('R\t')]
         self.assertEqual((lengths[:66].count(1008), lengths[66:].count(1024)), (66, 131), 'the later 0.5 rows, then X1.0\'s with the border field')
 

@@ -135,6 +135,24 @@ int main(void) { @autoreleasepool {
         id<MTLTexture> m5 = resolve(&tx);
         CHECK("a later check never reads the finalized pool, and sees its own change", holds(m5, T, exp, W));
         CHECK("object page released", !munmap(dead, page)); }
+    // 6. Through a texture ID (tex_fast, after upstream NXNative 6896c0c50, Fast Fusion): the cached view watches guest writes (view_pkg), so an in-place CPU write to a page already
+    // mapped, with no mapping or registration since, is uploaded at the next use; and a write found by a second use in the submission that already checked the texture (sparse_checked)
+    // keeps the texture then and is uploaded in the next submission (g_sparse_kept moves the dirty clock, which the ID's cached view compares)
+    {   mtl_reg_tex(5, T, NULL);
+        #define BY_ID() ({ os_unfair_lock_lock(&g_rmu); id<MTLTexture> v_ = (__bridge id<MTLTexture>)tex_fast(5); os_unfair_lock_unlock(&g_rmu); v_; })
+        mtl_sub_begin(); id<MTLTexture> i0 = BY_ID(); int vp = g_treg[5].view_pkg; finish();
+        CHECK("the sparse texture's ID watches guest writes (view_pkg)", i0 && vp);
+        cpu_write(A + 0x200, sb + 0x200, 0x400); memcpy(exp + 0x200, sb + 0x200, 0x400);
+        mtl_sub_begin(); id<MTLTexture> i1 = BY_ID(); finish();
+        CHECK("an in-place write to a mapped page: the ID's texture is uploaded again", i1 && i1 != i0 && holds(i1, T, exp, W));
+        mtl_sub_begin(); id<MTLTexture> i2 = BY_ID();
+        cpu_write(A + 0x800, sb + 0x800, 0x200); memcpy(exp + 0x800, sb + 0x800, 0x200);
+        id<MTLTexture> i3 = BY_ID(); int kept = g_sparse_kept; finish();
+        CHECK("a write after the submission's check: the texture is kept in that submission, and marked for the next", i3 == i2 && kept);
+        mtl_sub_begin(); id<MTLTexture> i4 = BY_ID(); finish();
+        CHECK("the next submission uploads the write through the cached ID", i4 && i4 != i3 && holds(i4, T, exp, W));
+        #undef BY_ID
+        mtl_reg_tex(5, NULL, NULL); }
     h_nvnTextureFinalize(&tx);
     printf("t_sparse_log (DM_NVN_SPARSE_LOG %s): %d checks, %d failed; page-table walks %llu, answered from the log %llu\n", on ? "on" : "off", checks, failed, (unsigned long long)g_spc_walk, (unsigned long long)g_spc_log);
     return failed != 0;

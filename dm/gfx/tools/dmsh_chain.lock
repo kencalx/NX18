@@ -1,8 +1,8 @@
 # Translation chain tool fingerprints (written by tool_lock.py --update-lock; regenerate after changing tools and commit it).
 # metal_<sdk>: one line per tested Xcode, any of which the build takes (tool_lock.py)
-dmsh_xlate	41c23e2b9588d4ac
-xlate_source	9671d713c5cc3afe
-spirv-cross	e37945d8e441d34d
+dmsh_xlate	415dd8cc0d96c833
+xlate_source	8500ca795d84bafc
+spirv-cross	76fd1e6829745948
 metal_macosx	Apple metal version 32023.925 (metalfe-32023.925.10)	Xcode 27.3
 metal_macosx	Apple metal version 32023.922 (metalfe-32023.922.4)	Xcode 27.2
 metal_iphoneos	Apple metal version 32023.925 (metalfe-32023.925.10)	Xcode 27.3

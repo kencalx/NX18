@@ -4,6 +4,7 @@ Issues #2924/#2927: source labels also order package records, so a change from
 last to first representatives needs verified profile maps, even for equal code.
 All inputs here are synthetic.
 """
+import json
 import os
 from pathlib import Path
 import re
@@ -163,6 +164,33 @@ class Representatives(unittest.TestCase):
             ss.skey(*a): ('vs_main.bin', 1, 'vertex', 'main#BNSH@0x0#var1', *a),
             ss.skey(*c): ('vs_main.bin', 2, 'vertex', 'main@v327680#BNSH@0x80#var2', *c),
         })
+
+    def test_json_paths_keep_base_update_and_dlc_under_a_path_with_commas(self):
+        """--json-paths (the NSP script's form, upstream NXNative 58c30cd37): a comma in the folder name no longer cuts the RomFS, main or DLC paths short."""
+        root = self.root / 'Game, with spaces'
+        roms = [root / version / 'RomFS' for version in ('v0', 'v65536')]
+        mains = [rom.parent / 'main' for rom in roms]
+        dlc = root / 'aoc/7'
+        for path in (*roms, dlc):
+            path.mkdir(parents=True)
+        for main in mains:
+            main.write_bytes(nso(b''))
+        ctl, code = fz.VS
+        expected = {}
+        for i, (folder, prefix) in enumerate(zip((*roms, dlc), ('', '/v65536', '/aoc/7'))):
+            shader = code[:-1] + bytes([code[-1] ^ i])
+            data, _ = bnsh([[(8, ctl, shader)]])
+            (folder / 'one.bnsh').write_bytes(data)
+            expected[ss.skey(ctl, shader)] = f'{prefix}/one.bnsh#BNSH@0x0#var0'
+        out = [self.root / name for name in ('pkg', 'map.tsv', 'facts.tsv', 'pairs.tsv', 'pso.tsv')]
+        result = subprocess.run([sys.executable, REPO / 'dm/gfx/tools/shader_split.py', '--json-paths', json.dumps([str(r) for r in roms]), json.dumps([str(m) for m in mains]),
+                                 *out, json.dumps([str(dlc)])], capture_output=True, text=True,
+                                env=dict(os.environ, DM_GAME='01007BB017812000', J='1',
+                                         DM_UE_SHADERS=str(self.root / 'ue_shaders'), DM_GLSLC_CAPTURE=str(self.root / 'glslc_capture')))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('[RED]', result.stdout + result.stderr)
+        rows = [line.split('\t') for line in out[1].read_text().splitlines() if line and not line.startswith(('#', 'package\t'))]
+        self.assertEqual({r[3]: r[4] for r in rows}, expected)
 
     def test_ue_duplicates_keep_first_archive_entry_and_record_order(self):
         a, b = ue_vertex(1), ue_vertex(2)

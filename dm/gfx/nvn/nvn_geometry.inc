@@ -784,6 +784,7 @@ static void mesh_tasks_draw(const p_draw *dw) {
         RED_ONCE(150, "DrawMeshTasks without its task and mesh shaders (task %s mesh %s): draw skipped", ts ? ts->key : "-", ms ? ms->key : "-"); return; }
     image_prepare(pr, 1u << 3 | 1u << 4);
     if (g_nubd && (g_enc || ubd_lazy()) && ((ts && ubd_conflict_sh(ts, 3)) || ubd_conflict_sh(ms, 4))) { g_ubd_conflicts++; rp_end(); ubd_land(); }   // as draw_ does for its stages
+    if (g_enc && (g_pass_vbar || g_rt_sub)) rp_end();   // a barrier from the vertex stage in the pass does not order task / mesh stages (DM_NVN_VBAR_PASS); a leading-target continuation takes no mesh draw (rt_sub_check)
     NvProg *raster = pr->geo_lean_raster;   // the pixel stage alone
     if (!raster || raster->sh[1] != pr->sh[1] || raster->sh[0]) { raster = [NvProg new]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }
     uint64_t ind = 0, ind_rec = 0;
@@ -807,6 +808,7 @@ static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     id<MTLFunction> fn = geo_mesh_fn(pr, dw, di); if (!fn) return 0;
     uint64_t ib = 0; void *mb; uint64_t mo;
     if (di && !mtl_gpu_addr(di->ibuf, 1, &mb, &mo, &ib)) { g_geo_why = GCP_IB; return 0; }
+    if (g_enc && g_pass_vbar) rp_end();   // a barrier from the vertex stage in the pass does not order the mesh stages (DM_NVN_VBAR_PASS)
     uint32_t bi = (uint32_t)(dw ? dw->base_instance : di->base_instance);
     NvProg *raster = pr->geo_lean_raster;
     if (!raster || raster->sh[0] != pr->sh[0] || raster->sh[1] != pr->sh[1]) { raster = [NvProg new]; raster->sh[0] = pr->sh[0]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }

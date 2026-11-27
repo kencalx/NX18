@@ -37,6 +37,7 @@ Each found by one boot ([Hardware Opus decoders built on the SDK's software deco
 - All data is in 7 CRI CPK archives (`Unicorn.CPK`, the profile's `romfs_marker`, `UnicornPatch.CPK` and one per language). Audio is CRI ADX2 with Opus streams (`nn::codec`'s hardware multi-stream decoder, replaced by the SDK's software one).
 - Both DLC NSPs (indices 1 and 2) are licences only: their RomFS holds just the SDK's placeholder file.
 - Shaders: not in RomFS. 2,188 GLSLC compiler outputs (magic `0x19866891`) compiled into `main`'s read-only segment, 1,725 distinct (614 vertex, 1,111 pixel), read by `shader_split.py` `glslc_shaders`. Single-stage programs, combined per draw. Every binding decodes.
+- Prewarm list: [`pso_manifest.tsv`](pso_manifest.tsv) is the owner's iPhone rows on the re-split tables (1,926), then on 2026-11-27 the 16 render pipeline rows of NXNative `a5c8dc250` (inbox captures of 1.00 from upstream's players, not recorded on NX 18's devices) that it lacked; its 1,725 shader rows were all here. 1,942 rows, every one clean against this shader map. Upstream's earlier `8386a7b32` rows were all here already.
 
 ## Input
 

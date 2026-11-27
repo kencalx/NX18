@@ -30,8 +30,9 @@ class Committed(unittest.TestCase):
         rows = [ln for ln in self.lines if not ln.startswith('#')]   # as the host splits them: a '\r' would stay in the row
         keep, bad = pso_seed.collect(rows, self.shmap)
         self.assertEqual((bad, len(keep)), ([], len(rows)))
-        self.assertEqual(pso_seed.counts(keep), {'S': 651, 'R': 567, 'C': 15, 'M': 0, 'rows': 1233})   # the X1.0 recording, X2.0 sessions, then NXNative's ring course rows
-        self.assertEqual(len({pso_seed.identity(r) for r in rows}), 1233)
+        self.assertEqual(pso_seed.counts(keep), {'S': 700, 'R': 608, 'C': 15, 'M': 0, 'rows': 1323})   # the X1.0 recording, X2.0 sessions, NXNative's ring course rows, the owner's 11-24 run, then upstream's inbox rows
+        self.assertEqual(len({pso_seed.identity(r) for r in rows}), 1323)
+        self.assertEqual(pso_seed.counts(pso_seed.collect(rows[-78:], self.shmap)[0]), {'S': 43, 'R': 35, 'C': 0, 'M': 0, 'rows': 78})   # NXNative 8e38d3e03's, last
         self.assertEqual(pso_seed.counts(pso_seed.collect(rows[:999], self.shmap)[0]), {'S': 542, 'R': 443, 'C': 14, 'M': 0, 'rows': 999})   # the recording comes first
 
     def test_header_counts_and_source(self):
@@ -45,6 +46,8 @@ class Committed(unittest.TestCase):
         self.assertEqual(self.found(r'(\d+) rows: (\d+) S, (\d+) R, (\d+) C\.', rec), ('999', '542', '443', '14'))
         self.assertEqual(self.found(r'recording (\d+) rows .* the (\d+) rows they did not hold', rec), ('929', '70'))
         self.assertIn('no row refused', next(ln for ln in head if 'pso_seed.py check' in ln))
+        up = next(ln for ln in head if ln.startswith('# Added on 2026-11-27 from upstream NXNative 8e38d3e03'))
+        self.assertIn('78 rows (43 S, 35 R, 0 C)', up)
 
     def test_compute_rows_are_map_compute_shaders(self):
         c = [ln.split('\t')[1] for ln in self.lines if ln.startswith('C\t')]

@@ -56,6 +56,7 @@
 #   map rows have the same columns as D2R's shader_map.tsv (column 5 records where the key first appeared); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
 # Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> (mesh_pairs.tsv is written beside it) [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated>]]]   Environment J=concurrency (default 8)
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
+#   --json-paths before the arguments: the RomFS, main and DLC lists are JSON arrays instead (the NSP script's form, for paths that contain commas)
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
 import base64, collections, concurrent.futures as cf, functools, glob, hashlib, json, os, re, struct, subprocess, sys, time, zlib
@@ -1014,8 +1015,12 @@ def cra_shaders(path, rel, ents, out):
     import cra
     with open(path, 'rb') as f:
         for e in ents:
-            if cra.head(f, e)[:4] in (b'FSTM', b'\x1aE\xdf\xa3'): continue
-            scan_blob(cra.undo(cra.read(f, e)), f'/{rel}/{e[1]}', out)
+            where = f'/{rel}/{e[1]}'
+            try:   # a damaged member stops the split with a red line naming the entry, as scan_blob does for NARC, not a cra.py traceback (upstream NXNative 715a9403b)
+                if cra.head(f, e)[:4] in (b'FSTM', b'\x1aE\xdf\xa3'): continue
+                d = cra.undo(cra.read(f, e))
+            except cra.Error as x: red(f'{where}: {x}')
+            scan_blob(d, where, out)
 
 PDAT, PDAT_PMAP = b'PDAT', b'PMAP'
 PDAT_ZSTD, PDAT_CTL, PDAT_SPAN = b'\x28\xb5\x2f\xfd', CTL_MAGIC + b'\xc9\0\0\0', 1 << 20   # a PMAP frame never takes up 1 MB (the largest of Kirby Air Riders' 27,299: 186 KB inflated); pdat_shaders stops if one does
@@ -2735,12 +2740,32 @@ def ungzip(d, label):
     return out
 
 
+YAZ0_RUNS = tuple((len(r[0]), tuple(map(len, r[1:]))) for r in (format(h, '08b').split('0') for h in range(256)))   # a group header's literal runs: before its first back-reference, and after each one
+YAZ0_REF = tuple((b >> 4 and (b >> 4) + 2, ((b & 15) << 8) + 1) for b in range(256))   # a back-reference's first byte: its length (0: one more byte + 0x12) and its distance less the second byte
+
+
 def yaz0(s, label='Yaz0'):
-    """Yaz0 decompression (Super Mario 3D World + Bowser's Fury: almost all of RomFS is .szs = SARC wrapped in Yaz0). Pure Python runs at about 20–45 MB/s per core, under a minute for the whole 4.7 GB RomFS in parallel, and needs no extra dependency.
-    Group header bits: 1 = one literal byte; 0 = back-reference, 2 bytes {length high nibble, 12-bit distance} (distance + 1); length 0 reads one more byte + 0x12, else + 2. Overlapping copies are expanded by their period"""
-    n = int.from_bytes(s[4:8], 'big'); out = bytearray(); si = 16
+    """Yaz0 decompression (Super Mario 3D World + Bowser's Fury: almost all of RomFS is .szs = SARC wrapped in Yaz0; Breath of the Wild's base RomFS: 31,304 Yaz0 files, 15.7 GB decoded). Pure Python, needs no extra dependency.
+    Group header bits: 1 = one literal byte; 0 = back-reference, 2 bytes {length high nibble, 12-bit distance} (distance + 1); length 0 reads one more byte + 0x12, else + 2. Overlapping copies are expanded by their period.
+    Whole groups go in batches: past the first 0x1000 bytes (no distance reaches before the start), g groups that can neither read past the stream (a group reads at most 1 + 8 * 3 bytes) nor pass n
+    (it writes at most 8 * 0x111), each literal run one slice (YAZ0_RUNS). The rest, the start, the end and a damaged stream, goes item by item, with the same output and errors.
+    About 70 MB/s per core on Breath of the Wild's files, twice the item-by-item loop (M5 Pro, Python 3.13; 79% of their items are literals, 31% of their headers 0xff)"""
+    n = int.from_bytes(s[4:8], 'big'); out = bytearray(); si = 16; slen = len(s)
     try:
         while len(out) < n:
+            o = len(out)
+            if o >= 0x1000 and (g := min((slen - si) // 25, (n - o) // 0x888)) > 0:
+                for _ in range(g):
+                    k, rest = YAZ0_RUNS[s[si]]; si += 1
+                    if k: out += s[si:si + k]; si += k; o += k
+                    for k in rest:
+                        ln, dist = YAZ0_REF[s[si]]; dist += s[si + 1]
+                        if ln: si += 2
+                        else: ln = s[si + 2] + 0x12; si += 3
+                        st = o - dist; o += ln
+                        out += out[st:st + ln] if dist >= ln else (out[st:] * (ln // dist + 1))[:ln]
+                        if k: out += s[si:si + k]; si += k; o += k
+                continue
             h = s[si]; si += 1
             for _ in range(8):
                 if h & 0x80:
@@ -3450,13 +3475,17 @@ def pooled(ex, jobs, total, start=0, chunk=1):
 
 def main():
     if sys.argv[1:2] == ['--glslc-keys']: return glslc_keys_main(sys.argv[2:])
-    romfs_l, main_l, pkg, mapout, factsout = sys.argv[1:6]
-    pairsout = sys.argv[6] if len(sys.argv) > 6 else None
-    psopairsout = sys.argv[7] if len(sys.argv) > 7 else None   # pso_pairs.tsv: supplemental BAHS program variations and legacy Unity pass-input covers
-    dlc_v = sys.argv[8].split(',') if len(sys.argv) > 8 and sys.argv[8] else []   # extra content has no ExeFS; each root is the extracted DLC index
-    # Several versions (base game + update): the RomFS and main arguments are comma-separated and paired one to one; the output is their union (keys are content hashes, shaders shared by versions appear once).
+    args = sys.argv[1:]
+    json_paths = args[:1] == ['--json-paths']   # the NSP script's form: the RomFS, main and DLC lists as JSON arrays, so a path with a comma survives (upstream NXNative 58c30cd37)
+    if json_paths: args = args[1:]
+    romfs_l, main_l, pkg, mapout, factsout = args[:5]
+    pairsout = args[5] if len(args) > 5 else None
+    psopairsout = args[6] if len(args) > 6 else None   # pso_pairs.tsv: supplemental BAHS program variations and legacy Unity pass-input covers
+    dlc_l = args[7] if len(args) > 7 else ''   # extra content has no ExeFS; each root is the extracted DLC index
+    # Several versions (base game + update): the RomFS and main lists (comma-separated, or JSON arrays with --json-paths) pair one to one; the output is their union (keys are content hashes, shaders shared by versions appear once).
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
-    romfs_v, main_v = romfs_l.split(','), main_l.split(',')
+    if json_paths: romfs_v, main_v, dlc_v = json.loads(romfs_l), json.loads(main_l), json.loads(dlc_l) if dlc_l else []
+    else: romfs_v, main_v, dlc_v = romfs_l.split(','), main_l.split(','), dlc_l.split(',') if dlc_l else []
     if len(romfs_v) != len(main_v): red(f'{len(romfs_v)} RomFS and {len(main_v)} main: they must pair one to one')
     files, results, common, played = [], [], None, []
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):

@@ -44,8 +44,6 @@ KNOWN = {
     # NX 18: upstream 50bdfe879's signed-zero min/max not taken (four or five more ALU operations on every f32/f16 min or max, for a zero sign rarely seen)
     'fmax': 'FMNMX: Ampere orders -0 below +0 (max(+0, -0) is +0); Metal returns either (upstream 50bdfe879, not taken)', 'hmax2': '(as fmax, HMNMX2)',
     'hmma_16816_f32': 'HMMA.16816.F32: the f32 accumulator does not add the products as the tensor core does (about 1 ULP)',
-    # NX 18: the pinned spirv-cross writes OpFOrdNotEqual as MSL's unordered != (upstream bd0727334's ordered-ne.patch, which needs a spirv-cross rebuild)
-    'fsetp': 'FSETP.NE with a NaN operand: spirv-cross lowers ordered not-equal to an unordered != (upstream bd0727334, not ported)', 'fsetp_ftz': '(as fsetp)',
     # the translator refuses these
     'fdiv_rn': 'FCHK (0x302) is not implemented; its slow path calls the CUDA driver',
     'f2i_s64': 'F2I.S64 (0x311) is not implemented',

@@ -199,6 +199,8 @@ On this Mac the background prewarm also ends before the save loads, so the step 
 - **What the top-up changes:** a fresh install also prepares the 235 rows, so that start's in-play compiles move into the prepare step and, at the next build, into the app's archive, whose layout bases `pso_offline.py` then also makes for the 197 new `R` rows; its plan for this list has not been run. Cost on a fresh install (estimated): about 3 s, as the X1.0 start, with those bases from the app; up to about 1.5-4 s more if that archive does not serve them (at most 197 bases at 7.6 to 20 ms a base on 6 workers).
 - **The settings:** the frame step, Picture Stretch and edge smoothing change no row, as above (edge smoothing is the host's own present pass). This start was docked; the 0.5 notes do not give the mode. The list keeps whatever each start drew.
 
+**Upstream's top-up (2026-11-27).** After the X2.0 blocks and the 2026-11-24 sessions, the list takes the 213 rows (179 `S`, 34 `R`) of NXNative `0a57ea236` (inbox captures of 1.9.0 and 1.8.2 from upstream's players, not recorded on NX 18's devices) that it lacked: 4,008 of that commit's 4,221 rows were here already. Every row checks clean against this 1.9.0 map (`pso_seed.py check`). The list is now 8,483 rows (6,227 `S`, 2,237 `R`, 19 `C`). A start with them is not measured; 34 `R` rows add few bases.
+
 ## Mac routes
 
 ### The regression route (2026-10-29, current)
@@ -307,6 +309,7 @@ General host changes first needed here; each applies to every game:
 - **Resolved in synthetic profiling review checks:** [Periodic GPU profiles close at frame boundaries](../../../docs/reference/rendering.md#periodic-gpu-profiles-close-at-frame-boundaries). No new gameplay or iPhone validation.
 - **Hitch dumps and guest thread names** (`DM_HITCH_DUMP`), **heap probes** (`DM_PROBE_HEAP*`), **autorelease leaks**: [05, Scripted input and thread scheduling](../../../docs/agents/05-debugging.md#scripted-input-and-thread-scheduling), [05, Memory growth](../../../docs/agents/05-debugging.md#memory-growth).
 - **Resolved: type-compatible views read as not resident** (`tex_fit`): [Compatible views made from the texture under a view](../../../docs/reference/rendering.md#compatible-views-made-from-the-texture-under-a-view). Found by replaying the outdoors frame under shader validation; validation is clean after it, and the replayed digest without validation is unchanged.
+- [The shader split takes over a minute on a RomFS of Yaz0 files](../../../docs/reference/packing.md#the-shader-split-takes-over-a-minute-on-a-romfs-of-yaz0-files): the cold split on an M5 Pro (`J=18`, 2026-11-23, against `002724b8`, [PR #3295](https://github.com/seedds/nxnative/pull/3295)) took 75.7 to 78.8 s before and 41.2 to 44.0 s after, package and tables byte-identical (measured upstream, upstream NXNative `fed937db8`; not timed here).
 
 ## Open
 

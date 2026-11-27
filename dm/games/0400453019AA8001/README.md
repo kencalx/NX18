@@ -77,6 +77,12 @@ null destination. Device bring-up is open.
 - All 24,815 Mac shader libraries built on chain `343aa69bfb7a`. The Mac host
   prebuilt all 19,058 variation bases without a failure. The Mac app bundles
   an `applegpu_g18g` archive with 19,058 render bases and 36 compute pipelines.
+- [`pso_manifest.tsv`](pso_manifest.tsv), the prewarm list the app ships, held no rows until
+  2026-11-27. It now holds upstream's list (NXNative `a2412f2a8`): 5,353 rows, 4,801 shaders
+  (`S`) and 552 render pipelines (`R`), captured by upstream's players on game 2.0.0, not on
+  NX 18's devices. Every row checks clean against this shader map (`pso_seed.py check`). Its
+  effect on a first start's prepare step on the iPhone is not measured yet: the 552 `R` rows
+  give the next build's archive its layout bases, and most `S` rows load after the first frame.
 
 ## Found on this game
 

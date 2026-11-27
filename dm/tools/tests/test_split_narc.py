@@ -112,6 +112,26 @@ class LooseNarc(unittest.TestCase):
                     ss.scan_blob(data, '/court.narc', [])
                 fz.check(data)
 
+    def test_damaged_members_keep_the_reader_diagnosis(self):   # upstream 715a9403b: a member's own damage, a red line naming the archive, which the fuzz harness accepts
+        for member, message in ((b'\x60\0\0\0\x01', 'an LZ stream cut inside a token'), (b'\x94\0\0\0\x10\0\0\0\xff\xff', 'a damaged LZ4 member'),
+                                (b'Z\0\0\0\x10\0\0\0\0\0\0\0', 'a damaged zstd member'), (b'MMMM\0\0', 'MMMM header cut'),
+                                (b'MMMM' + struct.pack('<II', 0, 9), 'MMMM table of 9 chunks')):
+            data = archive([member])
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(SystemExit, r'\[RED\] /court.narc.*' + message):
+                    ss.scan_blob(data, '/court.narc', [])
+                fz.check(data)
+
+    def test_cra_shaders_reports_member_errors_through_red(self):   # upstream 715a9403b: a damaged CRA member names its entry, not a cra.py traceback
+        import cra
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as directory:
+            arc = Path(directory) / '42'; arc.write_bytes(bytes(16))
+            entry = (1, 'shader/bad.bin', 12, 0, 0)
+            with mock.patch.object(cra, 'head', return_value=b'\x94\0\0\0'), mock.patch.object(cra, 'read', return_value=b'\x94\0\0\0\xff\xff\xff\xff\0\0\0\0'):
+                with self.assertRaisesRegex(SystemExit, r'\[RED\] /42/shader/bad\.bin: an LZ4 member'):
+                    ss.cra_shaders(str(arc), '42', (entry,), [])
+
     def test_cli_matches_a_plain_archive(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); rom = root / 'RomFS'; rom.mkdir()

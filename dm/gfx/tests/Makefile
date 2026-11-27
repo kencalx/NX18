@@ -272,6 +272,8 @@ check_t_perf_order: t_perf_order
 	MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_FAST_WAKE=0 DM_NVN_SLICE_MERGE=0 DM_NVN_CS_HOIST=0 MTL_DEBUG_LAYER=1 ./t_perf_order
+	DM_NVN_SLICE_MRT=0 DM_NVN_LEVEL_GROUP=0 MTL_DEBUG_LAYER=1 ./t_perf_order
+	DM_NVN_RT_SUBSET=0 MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_FACE_MERGE=0 MTL_DEBUG_LAYER=1 ./t_perf_order
 t_link_ticks: t_link_ticks.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_link_ticks.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
@@ -626,7 +628,10 @@ t_rt_lifetime: t_rt_lifetime.m $(MTL_T_DEP)
 check_t_rt_lifetime: t_rt_lifetime
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_rt_lifetime
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_rt_lifetime
-check_t_rast_discard: RUN_ENV = MTL_DEBUG_LAYER=1
+.PHONY: check_t_rast_discard
+check_t_rast_discard: t_rast_discard
+	MTL_DEBUG_LAYER=1 ./t_rast_discard
+	MTL_DEBUG_LAYER=1 DM_NVN_VBAR_PASS=0 ./t_rast_discard
 t_cpu_storage: t_cpu_storage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_cpu_storage.m $(MTL_T_SRC) $(FW)
 check_t_cpu_storage: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -909,6 +914,10 @@ check_t_border: t_border
 t_view_levels: t_view_levels.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_view_levels.m $(MTL_T_SRC) $(FW)
 check_t_view_levels: RUN_ENV = MTL_DEBUG_LAYER=1
+# Texture views with a level / layer range (mtl_view): a range past the source is nil and a red line, not a Metal abort (after S2Arm a6ba2b665)
+t_view_range: t_view_range.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_view_range.m $(MTL_T_SRC) $(FW)
+check_t_view_range: RUN_ENV = MTL_DEBUG_LAYER=1
 # The freeze detector's graphics dump (mtl_stall_dump): returns at once with the locks, a feedback handler and a fence wait it describes held, and names them
 t_stall_dump: t_stall_dump.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_stall_dump.m $(MTL_T_SRC) $(FW)
@@ -1269,6 +1278,7 @@ check_t_args_stats: t_args_stats
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_args_stats
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_args_stats
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_ARGS_STATS=1 ./t_args_stats
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_PUSH_DEDUP=0 ./t_args_stats
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_ARGS_STATS=1 ./t_args_stats
 # Slot tables, stage 1 (DM_NVN_BINDLESS): the table path reads what the slot path does, pixel readback; off by default (nothing built), on with and without the encode thread and the stats
 t_bindless_slots: t_bindless_slots.m $(MTL_T_DEP)
@@ -1336,11 +1346,11 @@ t_blend_zero: t_blend_zero.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_blend_zero.m $(MTL_T_SRC) $(FW)
 check_t_blend_zero: t_blend_zero
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_blend_zero.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_blend_zero "$$work"; DM_NVN_BLEND_ZERO=0 MTL_DEBUG_LAYER=1 ./t_blend_zero "$$work"
-# NVIDIA's rounding of a float colour into a normalized target through the replay (t_rop_round.m; upstream a4b590976), with its shader from test_dmsh_blend_zero.py; then Apple's conversion as it is
+# NVIDIA's rounding of a float colour into normalized and 16-bit float targets through the replay (t_rop_round.m; upstream a4b590976), with its shader from test_dmsh_blend_zero.py; probed, the forced F16 shader guard, then Apple's conversion as it is
 t_rop_round: t_rop_round.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rop_round.m $(MTL_T_SRC) $(FW)
 check_t_rop_round: t_rop_round
-	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_blend_zero.py --fixture-rop "$$work"; MTL_DEBUG_LAYER=1 ./t_rop_round "$$work"; DM_NVN_ROP_ROUND=0 MTL_DEBUG_LAYER=1 ./t_rop_round "$$work"
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_blend_zero.py --fixture-rop "$$work"; MTL_DEBUG_LAYER=1 ./t_rop_round "$$work"; DM_NVN_ROP_F16=1 MTL_DEBUG_LAYER=1 ./t_rop_round "$$work"; DM_NVN_ROP_ROUND=0 MTL_DEBUG_LAYER=1 ./t_rop_round "$$work"
 # Typed outputs through the pipeline path (t_typed_outputs.m), with its libraries from test_dmsh_typed.py (Metal 4, NX 18's only pipeline path)
 t_typed_outputs: t_typed_outputs.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_typed_outputs.m $(MTL_T_SRC) $(FW)

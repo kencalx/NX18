@@ -197,24 +197,27 @@ def narc_members(d, where='NARC'):
 
 def lz_undo(d, at):   # kinds 0x50 and 0x60 (nro0+0x1237f04): flag bytes, each negated and read from its high bit (1 a match, 0 a literal); a flag byte 0 is 8 literals; a distance 0 ends
     out = bytearray(); n = len(d)
-    while at < n:
-        f = d[at]; at += 1
-        if not f:
-            out += d[at:at + 8]; at += 8; continue
-        f = -f & 0xff
-        for bit in range(7, -1, -1):
-            if not f >> bit & 1:
-                out.append(d[at]); at += 1; continue
-            lo, hi = d[at], d[at + 1]
-            dist = lo >> 4 | hi << 4
-            if not dist: return bytes(out)
-            ln = lo & 0xf
-            if ln > 1: at += 2
-            elif ln == 1: ln = d[at + 2] + 0x11 + (d[at + 3] << 8) + 0xff; at += 4
-            else: ln = d[at + 2] + 0x10; at += 3
-            s = len(out) - dist
-            if s < 0: raise Error('an LZ distance before the start')
-            for k in range(ln): out.append(out[s + k])
+    try:   # a token cut by the end of the member (upstream NXNative 715a9403b)
+        while at < n:
+            f = d[at]; at += 1
+            if not f:
+                out += d[at:at + 8]; at += 8; continue
+            f = -f & 0xff
+            for bit in range(7, -1, -1):
+                if not f >> bit & 1:
+                    out.append(d[at]); at += 1; continue
+                lo, hi = d[at], d[at + 1]
+                dist = lo >> 4 | hi << 4
+                if not dist: return bytes(out)
+                ln = lo & 0xf
+                if ln > 1: at += 2
+                elif ln == 1: ln = d[at + 2] + 0x11 + (d[at + 3] << 8) + 0xff; at += 4
+                else: ln = d[at + 2] + 0x10; at += 3
+                s = len(out) - dist
+                if s < 0: raise Error('an LZ distance before the start')
+                for k in range(ln): out.append(out[s + k])
+    except IndexError:
+        raise Error('an LZ stream cut inside a token') from None
     return bytes(out)
 
 
@@ -230,11 +233,14 @@ def undo(d, depth=0):
     k = d[0]
     if k == 0x4d and d[:4] == b'MMMM':   # chunks of any kind: u32 total, u32 count, u32 length of each, 16-aligned
         if depth >= 32: raise Error("MMMM chunks nested more than 32 deep (a damaged member)")
+        if len(d) < 12: raise Error(f'an MMMM header cut at {len(d)} of 12 bytes (a damaged member)')
         total, n = struct.unpack_from('<II', d, 4)
+        if 12 + 4 * n > len(d): raise Error(f'an MMMM table of {n} chunks past the end of its {len(d)}-byte member (a damaged member)')
         at = (12 + 4 * n + 15) & ~15
         out = []
         for i in range(n):
             s = struct.unpack_from('<I', d, 12 + 4 * i)[0]
+            if at + s > len(d): raise Error(f'MMMM chunk {i} past the end of its member (a damaged member)')
             out.append(undo(d[at:at + s], depth + 1)); at += (s + 15) & ~15
         return b''.join(out)
     if k == 0x94 and len(d) >= 8:
@@ -243,6 +249,7 @@ def undo(d, depth=0):
         try: return lz4.block.decompress(d[8:], uncompressed_size=want)
         except lz4.block.LZ4BlockError as e: raise Error(f'a damaged LZ4 member ({e})') from None
     if k == 0x5a and d[:4] == b'Z\0\0\0':
+        if len(d) < 8: raise Error(f'a zstd member header cut at {len(d)} of 8 bytes (a damaged member)')
         z = zstd_mod()
         try: return z.decompress(d[8:])
         except z.ZstdError as e: raise Error(f'a damaged zstd member ({e})') from None

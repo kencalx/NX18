@@ -2759,7 +2759,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     tmp = pkg.with_name(pkg.name + '.partial'); rmtree(tmp); (tmp / 'tables').mkdir(parents=True)
     def counted(ln):   # shader_split.py's 'progress: <done>/<total>'
         if m := re.fullmatch(r'progress: (\d+)/(\d+)', ln): PROG.set(done=int(m[1]), total=int(m[2]), unit='files')
-    run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in names + ('pso_pairs.tsv',)] + ([','.join(map(str, dlc_roms))] if dlc_roms else []),
+    run([py, repo / 'dm/gfx/tools/shader_split.py', '--json-paths', json.dumps(list(map(str, roms))), json.dumps(list(map(str, mains))), tmp / 'pkg'] + [tmp / 'tables' / n for n in names + ('pso_pairs.tsv',)] + ([json.dumps(list(map(str, dlc_roms)))] if dlc_roms else []),   # JSON lists: a comma in the build path survives (upstream NXNative 58c30cd37)
         logs / 'shader_split.log', env={k: v for k, v in env.items() if k != 'DM_GLSLC_PLAY'}, on_line=counted)   # the shaders captured in play: <version dir>/glslc_play (gather_glslc_play), the folder the inputs name
     text = (logs / 'shader_split.log').read_text(errors='replace')
     m = re.search(r'shaders: (\d+) \(', text)

@@ -242,7 +242,7 @@ class FrontEnd(unittest.TestCase):   # frames made while the in-game menu (or a 
         src = (REPO / 'dm/host/hle_fctl.c').read_text() + (REPO / 'dm/gfx/nvn/hle_nvn.c').read_text()
         for text in ('frame-rate controller: probe back to interval 1 at frame', 'frame-rate controller: interval %d → 1 at frame %llu by the probe', 'frame-rate controller: interval 1 held',
                      'frame-rate controller: the probe failed', 'frame-rate controller: no return within', 'frame-rate controller up to frame %llu: probes %llu (%llu on a light scene), back at interval 1 %llu, held 8 s %llu, failed %llu, dropped %llu',
-                     'the game sets present interval %d → %d (from %s+%#llx)',
+                     'the game sets present interval %d → %d (from %s+%#llx%s)', '", change %llu"',
                      # the probes' numbers and the time at each interval (X2.0): each probe's line, the summary's tail, the game's own rule's summary
                      'frame-rate controller: probe of frame %llu %s (frame %llu): %d frames%s%s; late %d, %.0f ms over%s', '"; grace %d: %.1f ms mean, %.1f max"', '"; after it %d: %.1f ms mean"',
                      '[FCTL_EV_HELD] = "held 8 s", [FCTL_EV_FAILED] = "failed", [FCTL_EV_ABORTED] = "dropped", [FCTL_EV_UP] = "cut short"', '"time at interval 1 %.1f s, 2 %.1f s, 3+ %.1f s"',
@@ -266,6 +266,9 @@ class FrontEnd(unittest.TestCase):   # frames made while the in-game menu (or a 
                   '[dm] [nvn] frame-rate controller up to frame 7200: probes 3 (0 on a light scene), back at interval 1 2, held 8 s 0, failed 2, dropped 1; frames whose return the host held 4'])
         self.assertEqual({k: s['frame_rate'][k] for k in ('probes', 'down', 'held', 'failed', 'dropped')}, {'probes': 10, 'down': 9, 'held': 2, 'failed': 7, 'dropped': 1})
         self.assertIsNone(s['frame_rate']['at1_pct'])   # older summary lines: no time
+        # past the 8th change the host writes only the powers of two, with their count (upstream 5cf87e305): the count is the total, the caller stays one
+        s = read([itv(1, 2), itv(2, 1), '[dm] [nvn] the game sets present interval 1 → 2 (from main+0x204c20, change 16)', '[dm] [nvn] the game sets present interval 1 → 2 (from main+0x204c20, change 32)'])
+        self.assertEqual((s['frame_rate']['game_changes'], s['frame_rate']['from']), (32, ['main+0x204c20']))
 
     def test_frame_rate_failed_cost_from_an_older_build(self):   # a log from before the probes' numbers (X2.0) has no failed probes' cost: none, not 0, also against a newer log
         ctl = '[dm] [nvn] frame-rate controller'

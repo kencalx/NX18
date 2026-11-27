@@ -59,6 +59,7 @@ Compute-loop containment, upstream's run (2026-11-17, Apple M6, macOS 27.2; not 
 - [Subword task and mesh payload accesses](../../../docs/reference/shaders.md#subword-task-and-mesh-payload-accesses).
 - [Indexed texture handles in NVN2 compute c0](../../../docs/reference/shaders.md#indexed-texture-handles-in-nvn2-compute-c0).
 - [DLSS scalers released under their encoders](../../../docs/reference/rendering.md#dlss-scalers-released-under-their-encoders): already fixed before this bring-up; the earlier report reached its eighth network after about nine minutes.
+- [A cached sparse texture ID missed in-place CPU writes](../../../docs/reference/nvn-objects.md#a-cached-sparse-texture-id-missed-in-place-cpu-writes): found upstream on this game (NXNative 6896c0c50), ported; not run here.
 - [Compute loops that outlive the process](../../../docs/reference/shaders.md#compute-loops-that-outlive-the-process): containment on its race's guarded kernels, with no cap hit upstream; see [Validation](#validation).
 
 ## Open

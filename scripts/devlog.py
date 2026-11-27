@@ -128,7 +128,7 @@ RX = {k: re.compile(v) for k, v in {
                  r'([\d.]+) ms in all; texture uploads (\d+) first \+ (\d+) re-uploads, ([\d.]+) MB / ([\d.]+) ms(?:.*?; hold (\d+) × ([\d.]+) ms)?'
                  r'(?:.*?; ([\d.]+) ms of it in the background)?',   # the hold part since the hold-aware long-frame log; the background part since X1.0's field logging
     'fstep': r'^\[nvn\] frame step: hold (\d+) → (\d+) (vsyncs|ticks of 1/120 s) at present (\d+)',
-    'game_itv': r'^\[nvn\] the game sets present interval (\d+) → (\d+) \(from ([^)]*)\)',
+    'game_itv': r'^\[nvn\] the game sets present interval (\d+) → (\d+) \(from ([^),]*)(?:, change (\d+))?\)',   # past the 8th, only powers of two are written, with their count
     'fctl': r'^\[nvn\] frame-rate controller: (probe back to interval 1|interval \d+ → 1 at frame \d+ by the probe|interval 1 held|the probe failed|no return within)',
     'fctl_end': r'^\[nvn\] frame-rate controller: probe of frame \d+ (held 8 s|failed|dropped|cut short) \(frame \d+\): (\d+) frames(?:; grace (\d+): ([\d.]+) ms mean, ([\d.]+) max)?'
                 r'(?:; after it (\d+): ([\d.]+) ms mean)?; late (\d+), ([\d.]+) ms over',   # hle_fctl.c fctl_probe_end: one line a probe, how it ended and its numbers
@@ -622,7 +622,8 @@ def read(text: str, top: int = 5) -> Rec:
     ends = {w: {'n': len(xs), 'grace_mean_ms': med([float(m.group(4)) for m in xs if m.group(4)]), 'grace_max_ms': med([float(m.group(5)) for m in xs if m.group(5)]),
                 'after_mean_ms': med([float(m.group(7)) for m in xs if m.group(7)]), 'frames': med([float(m.group(2)) for m in xs])}
             for w in ('held 8 s', 'failed', 'dropped', 'cut short') for xs in [[m for m in fx if m.group(1) == w]] if xs}
-    out['frame_rate'] = {'game_changes': len(gi), 'up': sum(1 for _, m, _ in gi if int(m.group(2)) > int(m.group(1))), 'to_1': sum(1 for _, m, _ in gi if m.group(2) == '1'),
+    # game_changes: past the 8th change the host writes only the powers of two, each with its count, so the highest count is the total
+    out['frame_rate'] = {'game_changes': max([len(gi)] + [int(m.group(4)) for _, m, _ in gi if m.group(4)]), 'up': sum(1 for _, m, _ in gi if int(m.group(2)) > int(m.group(1))), 'to_1': sum(1 for _, m, _ in gi if m.group(2) == '1'),
                          'from': sorted({m.group(3) for _, m, _ in gi}), **{k: max(fe[k if k != 'probes' else 'probe'], v) for k, v in sums.items()},
                          **{f'at{k + 1}_s': at[k] if itv else None for k in range(3)}, 'at1_pct': round(100 * at[0] / tt, 1) if tt else None,
                          'failed_late': max(sum(int(m.group(11)) for _, m, _ in fs if m.group(11)), sum(int(m.group(8)) for m in fxf)) if cost else None,
