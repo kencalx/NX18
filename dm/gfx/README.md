@@ -132,6 +132,7 @@ The host and the tests draw through Metal 4 only. A fixture's command buffers an
 | `t_builtin` | The 4 embedded compute shaders |
 | `t_refl`, `t_hmap`, `t_pace`, `t_pso_skey`, `t_dirty_slots` | Reflection parsing, hash table, pacer, pipeline manifest key, dirty page tracking |
 | `t_pso_warm` | Historical manifest normalization and deduplication, draw-time cache reuse and GPU pixels for normal and merged passes, and one preparation per shader key across concurrent warm tasks with unrelated keys left free, through the Metal 4 compiler |
+| `t_pso_later` | A later start's prepare step: seven starts in processes of their own over one archive folder (the first waits and writes `prepared.tsv`, the next hands its list to the background while its first library load is held and takes every base from the archive, a changed list, `DM_PSO_LATER_START=0` and a refused archive file each wait), and the stamp's inputs |
 | `t_deswz_gpu` | GPU deswizzling |
 | `t_present_crop` | Presentation cropping |
 | `t_pso_capture`, `t_pso_depth_only` | The GPU capture profile (no pipeline archive opened or written, pipelines still built and specialized); depth-only draws through the host's empty fragment, with and without that profile (`make check_t_pso_capture`, `check_t_pso_depth_only`, under `MTL_DEBUG_LAYER=1`) |

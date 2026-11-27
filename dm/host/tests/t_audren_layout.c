@@ -41,6 +41,12 @@ static struct {
     uint64_t now, last_exec, min_spacing;
     aout_buf *output[NBUF];
     pthread_t catchup;
+    // test_render_drain (S2Arm 2ff6e1c37's case): the device clock slow by slow_pm per mille, its callbacks stopped for stall_ns at stall_at (hitch: the render thread stalls there
+    // instead, the device underruns and zero-fills), or (wall) the output releasing on the nominal clock whatever the device plays, as a renderer paced by its own clock would refill.
+    // queued: samples appended and not yet played, read at each device callback; pre before stall_at, post from 100 ms after the stall ends
+    int slow_pm, hitch, hitched, wall, wall_callbacks, wall_played, stall_renders, zero_fill;
+    uint64_t stall_at, stall_ns;
+    int queued_pre, queued_post;
 } pace;
 static _Alignas(8) uint8_t pace_sys[0x300];
 static void *pace_sym(const char *name);
@@ -87,25 +93,51 @@ int dm_pcmout_append(void *k, void *b) {
 }
 // Advance by whole device callbacks. Fractional resampling is carried across callbacks,
 // so 44.1 kHz consumes alternating counts of 48 kHz samples as CoreAudio does.
-static uint64_t next_callback(void) { return (uint64_t)(pace.callbacks + 1) * pace.device_frames * 1000000000ull / pace.rate; }
+static uint64_t nominal_callback(int n) { return (uint64_t)n * pace.device_frames * 1000000000ull / pace.rate; }
+static int device_samples(int n) { return (int)((uint64_t)n * pace.device_frames * 48000 / pace.rate); }
+static uint64_t next_callback(void) {
+    uint64_t t = nominal_callback(pace.callbacks + 1) * (uint64_t)(1000 + pace.slow_pm) / 1000;
+    return !pace.hitch && pace.stall_ns && t >= pace.stall_at ? t + pace.stall_ns : t;
+}
+static uint64_t next_wall(void) { return nominal_callback(pace.wall_callbacks + 1); }
 static void pace_advance(uint64_t until) {
-    while (next_callback() <= until) {
+    for (;;) {
+        uint64_t dev = next_callback(), wall = pace.wall ? next_wall() : UINT64_MAX;
+        if (dev > until && wall > until) break;
+        if (wall < dev) {   // the negative control's release clock: every block "played" on time, so the renderer refills as if the device had not stopped
+            pace.wall_callbacks++;
+            int want = pace.wall_played + device_samples(pace.wall_callbacks) - device_samples(pace.wall_callbacks - 1);
+            pace.wall_played = want < pace.appended * SAMPLES ? want : pace.appended * SAMPLES;
+            continue;
+        }
         int before = pace.played / SAMPLES;
-        pace.played = (int)((uint64_t)++pace.callbacks * pace.device_frames * 48000 / pace.rate);
-        assert(pace.played <= pace.appended * SAMPLES);   // no zero-fill needed
+        ++pace.callbacks;
+        if (pace.hitch || pace.wall) {   // the queue position: an empty queue is zero-filled (pull_pcm), what was not queued in time is not owed later
+            int want = pace.played + device_samples(pace.callbacks) - device_samples(pace.callbacks - 1);
+            if (want > pace.appended * SAMPLES) { pace.zero_fill += want - pace.appended * SAMPLES; want = pace.appended * SAMPLES; }
+            pace.played = want;
+        } else {
+            pace.played = device_samples(pace.callbacks);
+            assert(pace.played <= pace.appended * SAMPLES);   // no zero-fill needed
+        }
         if (pace.played / SAMPLES - before > 1) pace.bursts++;
+        if (pace.stall_at) {
+            int queued = pace.appended * SAMPLES - pace.played;
+            if (dev < pace.stall_at) { if (queued > pace.queued_pre) pace.queued_pre = queued; }
+            else if (dev >= pace.stall_at + pace.stall_ns + 100000000 && queued > pace.queued_post) pace.queued_post = queued;
+        }
     }
     pace.now = until;
 }
 void *dm_pcmout_released(void *k) {
     (void)k;
-    return pace.released < pace.played / SAMPLES ? pace.output[pace.released++ % NBUF] : NULL;
+    return pace.released < (pace.wall ? pace.wall_played : pace.played) / SAMPLES ? pace.output[pace.released++ % NBUF] : NULL;
 }
 void dm_pcmout_wait(void *k, int ms) {
     (void)k;
     if (pace.rate) {
         uint64_t timeout = pace.now + (uint64_t)ms * 1000000;
-        uint64_t callback = next_callback();
+        uint64_t callback = pace.wall ? next_wall() : next_callback();
         pace_advance(callback < timeout ? callback : timeout);
     }
 }
@@ -434,7 +466,9 @@ static void pace_exec(void *sys, void *state) {
         if (gap < pace.min_spacing) pace.min_spacing = gap;
     }
     pace.last_exec = pace.now;
+    if (pace.stall_at && pace.now >= pace.stall_at && pace.now < pace.stall_at + pace.stall_ns) pace.stall_renders++;
     assert(h_ars_Exec(sys) == RES_OK);
+    if (pace.hitch && !pace.hitched && pace.now >= pace.stall_at) { pace.hitched = 1; pace_advance(pace.now + pace.stall_ns); }   // a load hitch on the render thread
 }
 static void *pace_sym(const char *name) {
     if (strstr(name, "ExecuteAudioRendererRendering")) return pace_exec;
@@ -467,11 +501,11 @@ static int wait_for_render(pthread_cond_t *cv, pthread_mutex_t *mu, const struct
     pace_advance(pace.now + (uint64_t)delay->tv_nsec);
     return ETIMEDOUT;
 }
-// io_frames: DM_AUDIO_IO_MS's granted frames (NX 18, audio_io.h): 0 unset (4 blocks in flight), 1024 a 21.33 ms device buffer (7 blocks)
-static void test_render_cadence(int rate, int frames, uint32_t io_frames) {
+// The real render_main against the virtual output above, pace set up by the caller; 2000 blocks (10 s) in order, no catch-up left queued
+static void pace_run(void) {
     ar_t *a = &g_ar[0];
     memset(a, 0, sizeof *a);
-    pace.rate = rate; pace.device_frames = frames; pace.io_frames = io_frames; pace.min_spacing = UINT64_MAX;
+    pace.min_spacing = UINT64_MAX;
     *(int32_t *)(pace_sys + 0x48) = *(int32_t *)(pace_sys + 0x4c) = 1;
     a->sys = pace_sys; a->handle[0] = pace_sys;
     lock_plt_stub();
@@ -486,9 +520,41 @@ static void test_render_cadence(int rate, int frames, uint32_t io_frames) {
     assert(pace.waits > 1 && pace.bursts > 1);
     assert(atomic_load(&a->catchups) == 1 && a->cq_head == a->cq_tail);
     assert(pace.appended == PACE_BLOCKS && pace.rendered == PACE_BLOCKS);
+    pthread_cond_destroy(&a->cq_cv); pthread_mutex_destroy(&a->cq_mu);
+}
+// io_frames: DM_AUDIO_IO_MS's granted frames (NX 18, audio_io.h): 0 unset (4 blocks in flight), 1024 a 21.33 ms device buffer (7 blocks)
+static void test_render_cadence(int rate, int frames, uint32_t io_frames) {
+    pace.rate = rate; pace.device_frames = frames; pace.io_frames = io_frames;
+    pace_run();
     printf("audren cadence: %d Hz/%d device frames, %d blocks in flight, %d callbacks (%d burst releases), %d PCM blocks in order, min exec spacing %.2f ms, no underruns\n",
            rate, frames, audio_io_blocks(io_frames), pace.callbacks, pace.bursts, pace.appended, pace.min_spacing / 1e6);
-    pthread_cond_destroy(&a->cq_cv); pthread_mutex_destroy(&a->cq_mu);
+    memset(&pace, 0, sizeof pace);
+}
+// S2Arm 2ff6e1c37 / f87c71562: a render pace that only caught up kept the extra queued by a late device or a load stall (sound up to 683 ms behind the picture), fixed there
+// by a back-off that drains it. NX 18's render thread renders only into a block the output has handed back (render_main: in flight at most audio_io_blocks), and the output
+// hands a block back only as the device plays it (pull_pcm), so the queue ahead of the device cannot grow past the blocks in flight and needs no drain. Checked on the real
+// render_main at the iPhone's 256-frame callbacks, 2 s in: the device stopped 100 ms, the render thread stalled 100 ms (the device zero-fills, nothing is owed later),
+// the device clock 2% slow; queued audio after the stall (from 100 ms after it) is no more than before it. Negative control: the device stall and the slow clock with the output
+// releasing on the nominal clock instead (wall), a renderer paced by its own clock: the device's lag stays at least 60 ms above the steady queue, so the check sees growth when
+// there is some (a render thread's own stall leaves none either way: the device zero-fills it)
+enum { DRAIN_STALL, DRAIN_HITCH, DRAIN_SLOW };
+static void test_render_drain(int kind, int wall) {
+    static const char *const name[] = {"device stalled 100 ms", "render thread stalled 100 ms", "device clock 2% slow"};
+    pace.rate = 48000; pace.device_frames = 256; pace.wall = wall;
+    pace.stall_at = 2000000000;
+    if (kind != DRAIN_SLOW) pace.stall_ns = 100000000;
+    pace.hitch = kind == DRAIN_HITCH; pace.slow_pm = kind == DRAIN_SLOW ? 20 : 0;
+    pace_run();
+    int target = audio_io_blocks(0) * SAMPLES, lag = pace.queued_post - pace.queued_pre;
+    printf("audren drain (%s%s): queued at most %.2f ms before, %.2f ms after (blocks in flight %.0f ms), %d renders during the stall, %.2f ms zero-filled\n",
+           name[kind], wall ? ", negative control: release on the nominal clock" : "", pace.queued_pre / 48.0, pace.queued_post / 48.0, target / 48.0, pace.stall_renders, pace.zero_fill / 48.0);
+    assert(pace.queued_pre > 0 && pace.queued_post > 0);
+    if (wall) assert(lag >= 60 * 48);
+    else {
+        assert(pace.queued_post <= pace.queued_pre && pace.queued_post <= target);
+        if (kind == DRAIN_STALL) assert(pace.stall_renders < audio_io_blocks(0) && !pace.zero_fill);   // a stopped device stops the renderer: nothing is rendered ahead of it
+        if (kind == DRAIN_HITCH) assert(pace.zero_fill >= 80 * 48);   // the device played what was queued (at most 20 ms), then zero-filled the rest of the stall; the late blocks were not queued behind it
+    }
     memset(&pace, 0, sizeof pace);
 }
 
@@ -533,6 +599,10 @@ int main(int argc, char **argv) {
         test_render_cadence(48000, 1024, 1024);
         return 0;
     }
+    if (argc == 2 && !strcmp(argv[1], "--drain")) {
+        for (int kind = DRAIN_STALL; kind <= DRAIN_SLOW; kind++) { test_render_drain(kind, 0); if (kind != DRAIN_HITCH) test_render_drain(kind, 1); }
+        return 0;
+    }
     test_update_lock();
     test_two_renderers();
     test_render_policy();
@@ -558,6 +628,7 @@ int main(int argc, char **argv) {
     test_render_cadence(44100, 256, 0);
     test_render_cadence(48000, 512, 0);
     test_render_cadence(48000, 1024, 1024);   // DM_AUDIO_IO_MS=20 as granted: 7 blocks in flight
+    for (int kind = DRAIN_STALL; kind <= DRAIN_SLOW; kind++) { test_render_drain(kind, 0); if (kind != DRAIN_HITCH) test_render_drain(kind, 1); }   // S2Arm 2ff6e1c37's cases: no lag left after a stall
     puts("audren layout: update lock read off Update or UpdateImpl, renderers' own blocks, bounded histograms, malformed-list rejection, unaligned and truncated headers, SDK 4/5/6/16/21 stereo PCM and empty/incomplete startup recovery passed");
     return 0;
 }

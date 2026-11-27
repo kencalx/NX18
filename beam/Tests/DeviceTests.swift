@@ -63,6 +63,10 @@ import Testing
         #expect(!a.joined(separator: " ").contains("NxNative.xcworkspace"), "never the workspace beside the player's game folder")
         let b = XcodeSigning.buildArguments(project: URL(fileURLWithPath: "/p.xcodeproj"), scheme: "Z (X)", device: "UDID", team: paid, derived: URL(fileURLWithPath: "/d"))
         #expect(b.contains("-allowProvisioningUpdates") && b.contains("DEVELOPMENT_TEAM=ABCDE12345") && b.contains("id=UDID"))
+        #expect(!b.contains { $0.hasPrefix("DM_PROFILE_SEED=") }, "no Profile: no seed setting")
+        let seeded = XcodeSigning.buildArguments(project: URL(fileURLWithPath: "/p.xcodeproj"), scheme: "Z (X)", device: "UDID", team: paid, derived: URL(fileURLWithPath: "/d"),
+                                                 profileSeed: URL(fileURLWithPath: "/t/s/NX18ProfileSeed"))
+        #expect(seeded.contains("DM_PROFILE_SEED=/t/s/NX18ProfileSeed") && seeded.last == "build", "the Profile seed, a build setting the resource phase reads (stage_resources.sh)")
     }
 }
 

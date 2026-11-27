@@ -74,3 +74,7 @@ From `save_ref`: at 72 s `A`, 8 s later `A`, 14 s later the book is open at Chap
 - [Layer entry points with the point size passed by reference](../../../docs/reference/shaders.md#layer-entry-points-with-the-point-size-passed-by-reference): 38 vertex shaders without them.
 - [Handles built under a guard the read's guard cannot be tied to](../../../docs/reference/shaders.md#handles-built-under-a-guard-the-reads-guard-cannot-be-tied-to): the water on Chapter 1's page.
 - [VOTEU writes the uniform predicate](../../../docs/reference/shaders.md#voteu-writes-the-uniform-predicate): 7,560 of its shaders change, no picture does so far; in the keys asked in play only `cbd80cb96ad38a61`, whose uniform registers under the vote are unused.
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 1,728 rows (995 `S`, 617 `R`, 116 `C`) of upstream NXNative's list at `1a54371cf` (its seed commits `504a7c627` since the last check, and older rows; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 1,728 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

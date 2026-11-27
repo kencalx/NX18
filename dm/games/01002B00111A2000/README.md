@@ -101,3 +101,7 @@ General host changes first needed here; each applies to every game:
 - The 3D texture mismatch on slots 8 and 9 above.
 - Sources disagree on small counts: `game.tsv` says 118 shaders in `main`, the shader notes 117; `game.tsv` puts the dispatches after the first cutscene at 1,000 to 2,800 a frame and the iPhone battle's GPU at 10 → 41 ms, the development notes at 900–1,500 a frame (Mac) and 15 → 51 ms (iPhone log); `patches.py` speaks of "two 30 fps values" before describing the third.
 - The memory layout is Link's Awakening's, not measured for this game (`game.tsv`).
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 9,069 rows (8,834 `S`, 207 `R`, 28 `C`) of upstream NXNative's list at `1a54371cf` (its seed commits `66bd371b5` since the last check, and older rows; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 9,069 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

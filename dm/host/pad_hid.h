@@ -36,6 +36,12 @@ static enum pad_hid_layout pad_hid_layout_for(int vid, int pid, const uint8_t ha
     return PAD_HID_DEFAULT;
 }
 
+// Betop Kunpeng 20 (BTP-KP20E) in its NS mode over USB, wired or on its receiver (idea from S2Arm 0d4e4c702): it takes the Pro Controller's ID (057e:2009) and GameController lists
+// it as one, but its sticks read nothing there (the four half-axes are missing). Its report 0x30 has them in the Pro Controller's layout, so pad_hid_mac.h takes the sticks from
+// it (hidpad_kp20_pair). Matched by the two product names seen on it, exactly and over USB only, so a Pro Controller, or another pad with that ID or a similar name, is not
+static inline int pad_hid_kp20(int vid, int pid, const char *transport, const char *name) {
+    return vid == 0x057e && pid == 0x2009 && transport && !strcasecmp(transport, "USB") && name && (!strcasecmp(name, "BTP-KP20E NS WIRED") || !strcasecmp(name, "BTP-KP20E NS DONGLE"));
+}
 // Identical pads (front_mac.m, DM_PAD_IDENTICAL): whether every pad of one model is read as a player of its own, instead of through GameController.
 // n: the pads of the model IOKit has; listed: GameController's controllers of it; read: whether they are read that way already; due: a wait after the last change is over.
 // 1 read them, 0 do not, -1 not yet: a pad connected a moment ago may simply not be listed yet, so a model starts only after the wait, and stops at once

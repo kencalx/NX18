@@ -122,18 +122,22 @@ extension Library {
             await runScript(job, req, py: py, checkout: checkout)
             guard job.state == .done else { return }
             job.state = .running
+            // the player's Profile as it is now (a renewal takes the then-current one): in the app before it is signed, as <App>.app/NX18ProfileSeed (ProfileSetup.swift)
+            let seed = await ProfileSetup.seed()
+            defer { if let seed { try? FileManager.default.removeItem(at: seed.deletingLastPathComponent()) } }
             do {
                 // 2. signed: by Xcode with the player's account, or by Beam with the player's certificate and profile; both memory entitlements or no install
                 let app: URL, prov: ProvisioningInfo?
                 switch signer {
                 case .xcode(let t):
                     job.stageName = "Signing with your Apple account"; job.step = t.label; job.fraction = nil
-                    app = try await XcodeSigning.sign(work: work, titleID: ident.titleId, device: device, team: t)
+                    app = try await XcodeSigning.sign(work: work, titleID: ident.titleId, device: device, team: t, profileSeed: seed)   // the project's resource phase copies it
                     prov = await ProvisioningInfo.of(app: app)
                 case .certificate(let identity, let profile):
                     guard let ipa = job.game?.out.map(URL.init(fileURLWithPath:)), FileManager.default.fileExists(atPath: ipa.path) else { throw DeviceError.noApp }
                     job.stageName = "Signing with your certificate"; job.step = identity.shownName; job.fraction = nil
                     app = try await Resigner.unpack(ipa: ipa, into: work.appending(path: "resign"))
+                    if let seed { ProfileSetup.writeSeed(from: seed, to: app.appending(path: NX18Profile.seedFolder)) }   // into the unpacked app, sealed by the signature below
                     try await Resigner.sign(app: app, identity: identity, profile: profile, bundleID: bundleID)
                     prov = ProvisioningInfo(expires: profile.expires, increasedMemoryLimit: profile.memory, extendedVirtualAddressing: profile.memory)
                 }
@@ -168,7 +172,7 @@ extension Library {
         }
     }
 
-    /// Renew: the same build signed and installed again (fast: CoreDevice sends only what changed)
+    /// Renew: the same build signed and installed again (fast: CoreDevice sends only what changed), with the Profile as it is now
     func renew(_ r: InstallRecord) {
         guard let d = devices.first(where: { $0.id == r.deviceID }) else { lastError = DeviceError.notConnected(r.deviceName).errorDescription; return }
         install(r.gameID, on: d)

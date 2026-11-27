@@ -30,6 +30,7 @@ Update 1.5.12620 (v589824) over the base game, SDK 20.5.21. Unity 6000.0.61f1 IL
 - 1,812 shaders from the `Shader` objects of `data.unity3d` and the UnityFS bundles, read by `unityfs.py`; `main` also holds 11 GLSLC outputs of Unity's player.
 - The prebuild makes 858 pipeline bases from 873 shader pairs on the Mac: none fail, 15 are left to the draws.
 - `pso_manifest.tsv` has 110 lines, recorded along the route below and through a save load.
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 30 rows (20 `S`, 10 `R`, 0 `C`) of upstream NXNative's list at `1a54371cf` (its seed commits `21d90a869` since the last check, and older rows; inbox captures and recordings from upstream's players) that it lacked, below its rows; the list is now 140 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.
 
 ## Mac routes
 

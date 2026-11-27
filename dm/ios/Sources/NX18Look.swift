@@ -133,3 +133,19 @@ struct NX18PressStyle: ButtonStyle {
         configuration.label.opacity(configuration.isPressed ? 0.82 : 1).scaleEffect(configuration.isPressed ? 0.97 : 1)
     }
 }
+
+// The Profile's default picture (two rings and a wave in the NX 18 colours), drawn when the player chose none: the phone's card and Beam Home's top bar
+struct NX18DefaultPicture: View {
+    var body: some View {
+        Canvas { ctx, size in
+            let w = size.width
+            ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.12, green: 0.12, blue: 0.14)))
+            ctx.stroke(Path(ellipseIn: CGRect(x: w * 0.18, y: w * 0.2, width: w * 0.42, height: w * 0.42)), with: .color(NX18Palette.cyan), lineWidth: w * 0.07)
+            ctx.stroke(Path(ellipseIn: CGRect(x: w * 0.4, y: w * 0.32, width: w * 0.42, height: w * 0.42)), with: .color(NX18Palette.coral), lineWidth: w * 0.07)
+            var wave = Path(); wave.move(to: CGPoint(x: w * 0.12, y: w * 0.82))
+            wave.addCurve(to: CGPoint(x: w * 0.88, y: w * 0.8), control1: CGPoint(x: w * 0.38, y: w * 0.66), control2: CGPoint(x: w * 0.6, y: w * 0.96))
+            ctx.stroke(wave, with: .color(NX18Palette.cyan.opacity(0.8)), style: StrokeStyle(lineWidth: w * 0.045, lineCap: .round))
+        }
+        .accessibilityHidden(true)
+    }
+}

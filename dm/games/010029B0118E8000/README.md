@@ -46,3 +46,7 @@ General changes first needed here; each applies to every game:
 - [GLSLC outputs in Criterion's Bundle 2 resources](../../../docs/reference/shaders.md#glslc-outputs-in-criterions-bundle-2-resources) (`shader_split.py`)
 - [A texture upgrade while a draw binds its arguments ends the pass](../../../docs/reference/rendering.md#a-texture-upgrade-while-a-draw-binds-its-arguments-ends-the-pass) (`nvn_mtl.m`)
 - `hle_fpslock.c`: frame times in system ticks, frame steps in seconds and a mode switch as frame-limit fields; the profile key `enc_thread`
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 1,286 rows (782 `S`, 504 `R`, 0 `C`) of upstream NXNative's list at `1a54371cf` (rows from before the last check; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 1,286 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

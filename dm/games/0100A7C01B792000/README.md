@@ -45,5 +45,6 @@ No host or rewriter rule is specific to this game.
 ## Open
 
 - iPhone: no IPA built; the guest block needs measuring for a phone ([What it needs](#what-it-needs)).
-- The prewarm list (`pso_manifest.tsv`) is empty.
+- The prewarm list (`pso_manifest.tsv`) was empty until upstream's rows (below).
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 772 rows (433 `S`, 303 `R`, 36 `C`) of upstream NXNative's list at `1a54371cf` (rows from before the last check; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 772 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.
 - Only the start of the first level was played: later levels, couch co-op (more controllers), saves across boots and the other languages are untested.

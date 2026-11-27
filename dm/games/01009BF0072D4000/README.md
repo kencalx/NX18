@@ -46,3 +46,7 @@ General host changes first needed here; each applies to every game:
 ## Open
 
 - The fin fur geometry shader does not build.
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 5,435 rows (5,428 `S`, 7 `R`, 0 `C`) of upstream NXNative's list at `1a54371cf` (rows from before the last check; inbox captures and recordings from upstream's players) that it lacked, below its rows; the list is now 5,961 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

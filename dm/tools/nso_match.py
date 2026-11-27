@@ -16,6 +16,8 @@ Its others may name a short callee the same way ({size, fingerprints, called_by}
 An anchored frame-step rule ({name, calls, find, stub, reviewed}) locates instead the one function that
 calls an imported symbol, whatever else changed in it, and its find(fn) reads that function
 and returns the site it checked (its own assumptions included) or raises MatchError.
+An observation-gate rule ({name, size, fingerprints, gates}; patch_nso.py MATCH_OBS) locates
+its function the same way and gives the OBS rows of its gates there, each original word checked.
 No fuzzy matching or guessed function boundaries; every locator finds exactly one place
 with its assumptions checked, or none.
 """
@@ -181,7 +183,7 @@ class Image:
                     cuts=[(offset - start, old, new, name)])
         validate(rule)
         if self.image[offset:offset + len(bytes.fromhex(old))] != bytes.fromhex(old): raise MatchError('original bytes do not match')
-        self.match(rule)  # an authoring tool must reject an ambiguous reference too
+        _same_cuts(self.match(rule), [(offset, old, new)])  # an authoring tool must reject an ambiguous reference too, and the rule must give back the cut on its own build
         return rule
 
     def patch_recipe(self, cuts, name) -> dict:
@@ -195,7 +197,22 @@ class Image:
         fns = [dict(size=self.functions[s] - s, fingerprints=[self.fingerprint(s)], cuts=c) for s, c in sorted(functions.items())]
         rule = dict(name=name, **fns[0]) if len(fns) == 1 else dict(name=name, functions=fns)
         validate(rule)
-        self.match_patch(rule)
+        _same_cuts(self.match_patch(rule), [c[:3] for c in cuts])
+        return rule
+
+    def gate_recipe(self, gates, name) -> dict:
+        """One MATCH_OBS rule from a build's reviewed OBS rows [(offset, number, original word, reason)], grouped by function; the caller must validate another build"""
+        functions = {}
+        for offset, number, word, reason in gates:
+            starts = [s for s, e in self.functions.items() if s <= offset and offset + 4 <= e]
+            if len(starts) != 1: raise MatchError(f'gate at {offset:#x} must belong to exactly one complete unwind function')
+            if f'{struct.unpack_from("<I", self.image, offset)[0]:08x}' != word.lower(): raise MatchError(f'original word does not match at {offset:#x}')
+            functions.setdefault(starts[0], []).append((offset - starts[0], number, word.lower(), reason))
+        fns = [dict(size=self.functions[s] - s, fingerprints=[self.fingerprint(s)], gates=g) for s, g in sorted(functions.items())]
+        rule = dict(name=name, **fns[0]) if len(fns) == 1 else dict(name=name, functions=fns)
+        got = self.match_gates(rule)
+        if sorted(g[:3] for g in got) != sorted((o, n, w.lower()) for o, n, w, _ in gates):
+            raise MatchError('the rule does not give back the registered gates on their own build')
         return rule
 
     def locate(self, size, fingerprints):
@@ -251,6 +268,12 @@ class Image:
             starts.add(start); cuts += got
         if misses: raise MatchError('; '.join(misses) + (f'; the other {n - len(misses)} matched' if len(misses) < n else ''))
         return cuts
+
+    def match_gates(self, rule):
+        """The OBS rows (offset, number, original word, reason) of an observation-gate rule, located as a cut rule is (every function exactly once, original words checked), or MatchError"""
+        validate_gates(rule)
+        numbers = [g[1] for fn in rule.get('functions', [rule]) for g in fn['gates']]
+        return [(off, n, f'{struct.unpack("<I", bytes.fromhex(old))[0]:08x}', why) for (off, old, _, why), n in zip(self.match_patch(_gates_as_cuts(rule)), numbers)]
 
 
 def validate_called_by(caller, name):
@@ -431,12 +454,71 @@ def resolve(image, text_end, rules, report=print, outcomes=None, red=True):
     return cuts
 
 
-def registered_cuts(build_id):
-    """The CUTS the patch files register for a build ID (dm/tools/sdk_patches.py, dm/games/*/patches.py), or None"""
+def _same_cuts(got, want):
+    """An authoring tool's self-check: the rule it made, matched on the build it came from, gives back exactly the cuts it was made from (offset, original, new)"""
+    if sorted((o, a.lower(), b.lower()) for o, a, b, *_ in got) != sorted((o, a.lower(), b.lower()) for o, a, b in want):
+        raise MatchError('the rule does not give back its cuts on their own build')
+
+
+def _gate_bytes(word):
+    """An OBS original word ('7100013f', the u32 as patch_nso.py reads it) as the bytes of a cut"""
+    return struct.pack('<I', int(word, 16)).hex()
+
+
+def _gates_as_cuts(rule):
+    """A gate rule as the cut rule of its sites, each keeping its original word: the matcher's checks with nothing written"""
+    if 'functions' in rule: return dict(name=rule['name'], functions=[_gates_as_cuts(fn) for fn in rule['functions']])
+    return {**{k: v for k, v in rule.items() if k != 'gates'}, 'cuts': [(d, _gate_bytes(w), _gate_bytes(w), why) for d, _, w, why in rule['gates']]}
+
+
+def validate_gates(rule):
+    """A MATCH_OBS rule: {name, size, fingerprints, gates[, called_by]} or {name, functions: [{size, fingerprints, gates[, called_by]}, ...]}, gates = [(function-relative
+    offset, observation number (OBS_* in dm/host/dm.h), original instruction word, reason)]. The word must be one an observation gate can run elsewhere (patch_nso.py site_obs):
+    nothing PC-relative and no indirect branch or return"""
+    if not isinstance(rule, dict): raise ValueError('an observation-gate rule is a dict')
+    for fn in rule.get('functions', [rule]):
+        if not isinstance(fn, dict) or 'cuts' in fn or not isinstance(fn.get('gates'), (list, tuple)) or not fn['gates']: raise ValueError('an observation-gate rule needs gates (and no cuts)')
+        for g in fn['gates']:
+            if not isinstance(g, (list, tuple)) or len(g) != 4: raise ValueError('a gate is (offset, number, original word, reason)')
+            delta, number, word, reason = g
+            if not isinstance(delta, int) or not isinstance(number, int) or not 0 < number < 1 << 32 or not reason or not isinstance(word, str) or len(word) != 8 \
+                    or any(c not in '0123456789abcdefABCDEF' for c in word): raise ValueError('invalid gate')
+            w = int(word, 16)
+            if _pc_relative(w) or w & 0xff9ffc1f == 0xd61f0000: raise ValueError('a gate\'s original instruction must not be PC-relative, an indirect branch or a return')
+    validate(_gates_as_cuts(rule))
+
+
+def resolve_gates(image, text_end, rules, report=print):
+    """The OBS rows of a module's MATCH_OBS rules, found before any cut changes the image: rules of one name are one patch's reviewed implementations (exactly one must
+    match, all its gates or none); a miss is a red line and no gate. Two patches gating one instruction stop the rewrite"""
+    if not rules: return []
+    groups = {}
+    for rule in rules: groups.setdefault(rule['name'], []).append(rule)
+    try: module = Image(image, text_end)
+    except MatchError as e:
+        for name in groups: report(f'[RED] observation gates {name!r} skipped: {e}')
+        return []
+    rows = []
+    for name, alternatives in groups.items():
+        found, misses = [], []
+        for rule in alternatives:
+            try: found.append(module.match_gates(rule))
+            except MatchError as e: misses.append(str(e))
+        if len(found) != 1:
+            report(f'[RED] observation gates {name!r} skipped: ' + (f'{len(found)} implementations match (need exactly one)' if found else '; '.join(misses)))
+            continue
+        rows += found[0]
+        report(f'observation gates {name!r}: matched at {", ".join(f"{g[0]:#x}" for g in found[0])}')
+    if len({g[0] for g in rows}) != len(rows): raise MatchError('observation gates overlap')
+    return rows
+
+
+def registered_cuts(build_id, kind='CUTS'):
+    """The CUTS (or OBS) the patch files register for a build ID (dm/tools/sdk_patches.py, dm/games/*/patches.py), or None"""
     import glob, os, runpy
     here = os.path.dirname(os.path.abspath(__file__))
     for path in [os.path.join(here, 'sdk_patches.py')] + sorted(glob.glob(os.path.join(glob.escape(here), '../games/*/patches.py'))):   # escaped: brackets in a parent folder are a glob pattern
-        cuts = runpy.run_path(path).get('CUTS', {})
+        cuts = runpy.run_path(path).get(kind, {})
         if build_id in cuts: return cuts[build_id]
     return None
 
@@ -444,14 +526,22 @@ def registered_cuts(build_id):
 if __name__ == '__main__':
     import argparse, os
     from nso_syms import load
-    ap = argparse.ArgumentParser(description='Prepare an opt-in function patch from a reviewed NSO cut, or from all of a registered build\'s cuts as one patch (--registered); '
-                                 'verify its match on another build before registering it.')
+    ap = argparse.ArgumentParser(description='Prepare an opt-in function patch from a reviewed NSO cut, or from all of a registered build\'s cuts as one patch (--registered), or a MATCH_OBS rule '
+                                 'from its registered observation gates (--gates); verify its match on another build before registering it.')
     ap.add_argument('nso'); ap.add_argument('cut', nargs='*', metavar='offset old new name', help='one reviewed cut')
     ap.add_argument('--registered', metavar='NAME', help='every cut the patch files register for this NSO\'s build ID, as one patch NAME that applies whole or not at all')
+    ap.add_argument('--gates', metavar='NAME', help='every observation gate (OBS) the patch files register for this NSO\'s build ID, as one MATCH_OBS rule NAME')
     args = ap.parse_args()
     with open(args.nso, 'rb') as f: header = f.read(0x50)
     module = Image(load(args.nso), struct.unpack_from('<I', header, 0x18)[0])
-    if args.registered:
+    if args.gates:
+        if args.cut or args.registered: ap.error('--gates takes no cut and no --registered')
+        bid = header[0x40:0x50].hex()
+        gates = registered_cuts(bid, 'OBS')
+        if not gates: ap.error(f'no OBS registered for build {bid}')
+        where = f'{os.path.basename(args.nso)} {bid[:8]}'
+        rule = module.gate_recipe([(off, n, word, f'{why} (as {where} +{off:#x})') for off, n, word, why in gates], args.gates)
+    elif args.registered:
         if args.cut: ap.error('--registered takes no cut')
         bid = header[0x40:0x50].hex()
         cuts = registered_cuts(bid)

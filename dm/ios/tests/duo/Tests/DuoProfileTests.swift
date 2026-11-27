@@ -1,6 +1,6 @@
 // F10 (NX18-X2.0 gate-ui.md §20-§21): the Profile's name rule (GW21), its storage and the stamp rules with the NX 18 folder (a temporary folder standing in for iCloud
 // Drive: the owner's real one is never touched), what the games are given (DM_NICK, DM_PROFILE_IMAGE), the picture the host accepts (256 x 256 baseline JPEG), the card
-// with its Profile rows, and the welcome's rule and its place before the Gate
+// with its Profile rows, the seed NX 18 Beam puts in an app, and the welcome's rule and its place before the Gate
 import ImageIO
 import SwiftUI
 import UIKit
@@ -50,6 +50,39 @@ import XCTest
         NX18ProfileSync.lastSeen = nil
         XCTAssertTrue(NX18ProfileSync.pull(local: a, folder: folder))
         XCTAssertEqual(name(at: a), "Tombo")
+    }
+
+    // The seed NX 18 Beam puts in an app it installs (<App>.app/NX18ProfileSeed): a fresh install takes it, a newer seed replaces an older one, an older or equal seed is ignored,
+    // and an edit made on the phone since (a higher stamp) stays
+    func testSeedFromBeam() throws {
+        let seed = try temp("seed"), root = try temp("seed-local").appendingPathComponent("Profile")
+        try "Kiki\n".write(to: seed.appendingPathComponent("name.txt"), atomically: true, encoding: .utf8)
+        try Data([0xFF, 0xD8, 0xFF, 0xD9]).write(to: seed.appendingPathComponent("picture.jpg"))
+        try "5 beammac\n".write(to: seed.appendingPathComponent("profile.stamp"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(NX18Profile.applySeed(seed, to: root), "a fresh install (no stamp) takes the seed")
+        XCTAssertEqual(name(at: root), "Kiki")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("picture.jpg").path))
+        XCTAssertEqual(NX18ProfileSync.readStamp(root.appendingPathComponent("profile.stamp")), NX18Stamp(generation: 5, device: "beammac"), "the seed's stamp, last")
+        XCTAssertFalse(NX18Profile.applySeed(seed, to: root), "the same seed again (a reinstall): nothing changes")
+        // a newer Profile on the Mac, installed again: it replaces the older one, picture removal included
+        try "Tombo\n".write(to: seed.appendingPathComponent("name.txt"), atomically: true, encoding: .utf8)
+        try FileManager.default.removeItem(at: seed.appendingPathComponent("picture.jpg"))
+        try "6 beammac\n".write(to: seed.appendingPathComponent("profile.stamp"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(NX18Profile.applySeed(seed, to: root))
+        XCTAssertEqual(name(at: root), "Tombo")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("picture.jpg").path), "no picture in the seed, none here")
+        // an older seed (an earlier build installed again) is ignored
+        try "Old\n".write(to: seed.appendingPathComponent("name.txt"), atomically: true, encoding: .utf8)
+        try "4 beammac\n".write(to: seed.appendingPathComponent("profile.stamp"), atomically: true, encoding: .utf8)
+        XCTAssertFalse(NX18Profile.applySeed(seed, to: root))
+        XCTAssertEqual(name(at: root), "Tombo")
+        // the phone's own edit (generation 7) wins over the seed it came from (6)
+        NX18Profile.writeLocal(at: root, name: "Jiji", picture: nil, appearance: nil)
+        try "Tombo\n".write(to: seed.appendingPathComponent("name.txt"), atomically: true, encoding: .utf8)
+        try "6 beammac\n".write(to: seed.appendingPathComponent("profile.stamp"), atomically: true, encoding: .utf8)
+        XCTAssertFalse(NX18Profile.applySeed(seed, to: root), "a phone edit is never overwritten by an older seed")
+        XCTAssertEqual(name(at: root), "Jiji")
+        XCTAssertFalse(NX18Profile.applySeed(try temp("no-seed"), to: root), "an app without a seed: nothing")
     }
 
     // Appearance with the Profile (§20.5b): with the switch on and a folder, a change writes appearance.txt and a higher stamp there; off, or with no folder, it stays per app

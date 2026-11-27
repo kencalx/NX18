@@ -676,6 +676,30 @@ class PrepareLine(unittest.TestCase):   # nvn_mtl.m's prepare line, with the bun
         self.assertEqual((pr['lines'], pr['bundle_layout']), (120, None))
 
 
+class PrepareLater(unittest.TestCase):   # nvn_mtl.m's later start (warm_later_bg): the lists handed to the background and the line at their end; a waiting start has neither
+    SRC = (REPO / 'dm/gfx/nvn/nvn_mtl.m').read_text(errors='replace')
+
+    def fill(self, name: str, vals: list[str]) -> str:   # the producer's format string, filled in
+        m = re.search(r'MLOG\("(pipeline prepare' + name + r'[^"]*)"\s*\n?\s*"([^"]*)"', self.SRC) or re.search(r'MLOG\("(pipeline prepare' + name + r'[^"]*)"()', self.SRC)
+        self.assertIsNotNone(m, name)
+        assert m
+        it = iter(vals)
+        return '[dm] [nvn-mtl] ' + re.sub(r'%(?:\.\d+f|llu|ld|d|s)', lambda _: next(it), m.group(1) + m.group(2))
+
+    def test_line_format_matches_the_producer(self):
+        later = self.fill(': a later start: ', ['30357', '3', ''])
+        bg = self.fill(' in the background: ', ['30357', '12.50', '3', '2', '29000', '40', '900'])
+        pl = devlog.read(later + '\n' + bg + '\n')['pipelines']['prepare_later']
+        self.assertEqual(pl, {'lines': 30357, 'workers': 3, 'background_s': 12.5, 'bases_compiled': 2, 'bases_from_archive': 29000})
+        pl = devlog.read(later + '\n')['pipelines']['prepare_later']   # a run that ended first
+        self.assertEqual((pl['lines'], pl['background_s']), (30357, None))
+
+    def test_a_waiting_start_has_none(self):
+        pr = devlog.read(PrepareLine.HEAD + '\n')['pipelines']
+        self.assertIsNone(pr['prepare_later'])
+        self.assertEqual(pr['prepare']['lines'], 120)   # and the waiting line reads as before
+
+
 class MipDrop(unittest.TestCase):   # nvn_mtl.m's DM_NVN_MIP_DROP start line and its line after the memory line, read for the phone's A/B (memory.md, Top mip levels left out on the phone)
     def test_line_format_matches_the_producer(self):   # the formats md_k and mtl_mem_stat print, filled in, are what the patterns read
         src = (REPO / 'dm/gfx/nvn/nvn_mtl.m').read_text(errors='replace')

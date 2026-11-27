@@ -878,6 +878,11 @@ t_pso_warm: t_pso_warm.m $(MTL_T_DEP)
 .PHONY: check_t_pso_warm
 check_t_pso_warm: t_pso_warm
 	MTL_DEBUG_LAYER=1 ./t_pso_warm
+t_pso_later: t_pso_later.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_later.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_later
+check_t_pso_later: t_pso_later
+	MTL_DEBUG_LAYER=1 ./t_pso_later
 # The GPU capture profile: a folder seeded by a run without Metal's capture layer, which a run with it (loaded by MTL_CAPTURE_ENABLED=1 or by METAL_CAPTURE_ENABLED=1), or
 # with DM_GPU_CAPTURE, must not open or write, and a run without it again opens (MTL_CAPTURE_ENABLED=0 loads no layer; DM_PSO_MTL4=0 is ignored). The runs with the layer go
 # without MTL_DEBUG_LAYER, which loads the validation layer in its place (no capture: archives work). The last run removes the folder (one a failed run leaves stays in /tmp)

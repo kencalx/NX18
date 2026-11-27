@@ -56,3 +56,7 @@ General host changes first needed here; each applies to every game:
 - The iPhone: not built or tested yet (no iOS shader libraries).
 - The sound was not listened to.
 - The memory layout is the provisional profile's guess (it boots and plays; about 3.4 GB resident and 1.9 GB of Metal allocations on the Mac in the first battle).
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 721 rows (683 `S`, 38 `R`, 0 `C`) of upstream NXNative's list at `1a54371cf` (rows from before the last check; inbox captures and recordings from upstream's players) that it lacked, below its rows; the list is now 1,062 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

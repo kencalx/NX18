@@ -255,5 +255,8 @@ int main(void) {
     t_now += 10 * FRONT_MENU_TAIL_NS; CHECK(dm_front_menu_now(), "opened again within the tail: open however long it stays open");
     dm_front_menu_set(0, ""); t_now += FRONT_MENU_TAIL_NS; CHECK(!dm_front_menu_now(), "and shut a tail after that close");
     dm_focus_set(2); pop_is(15); CHECK(!dm_front_menu_now() && dm_focus_now() == 2, "focus is its own state: losing it opens no menu");
+    {   unsigned char work[64]; memset(work, 0xA5, sizeof work); h_oe_EnableRecBuf(work, sizeof work); int same = 1;   // upstream a383253ae: no applet to hand the buffer to
+        for (size_t i = 0; i < sizeof work; i++) same &= work[i] == 0xA5;
+        CHECK(same && empty(), "EnableGamePlayRecording(work, size): returns, the buffer untouched, no message queued"); }
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

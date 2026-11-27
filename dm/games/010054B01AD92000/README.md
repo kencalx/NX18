@@ -12,6 +12,7 @@ No `patches.py`, no `pad_layout` (the iPhone pad starts in the 2D layout).
 
 - The data is in 5 CRI CPK archives: `Unicorn.CPK` (the `romfs_marker`), `UnicornPatch.CPK`, `Unicorn_KO.CPK`, `Unicorn_CN.CPK` and `Unicorn_TW.CPK`. The game's languages are ko, zh-Hant and zh-Hans (no en-US); the NSP script picks ko.
 - Shaders: GLSLC outputs in `main`, with the same keys as the western release's: 1,725 shaders, and the data rows of `shader_map.tsv`, `shader_pairs.tsv` and `shader_facts.tsv` are identical to the western profile's. `shader_map.tsv.conflicts.tsv`, `bf_want.tsv` and `pso_manifest.tsv` are the western ones (empty).
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 1,989 rows (1,725 `S`, 264 `R`, 0 `C`) of upstream NXNative's list at `1a54371cf` (rows from before the last check; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 1,989 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.
 - Both DLC NSPs (`010054B01AD93001`, `010054B01AD93002`) are licences only: their RomFS holds just the SDK's placeholder file, as in the western release.
 
 ## Mac routes

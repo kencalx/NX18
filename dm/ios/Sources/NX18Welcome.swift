@@ -138,7 +138,7 @@ struct NX18AcknowledgeView: View {
 }
 
 // ---- The welcome (gate-ui §21.1-§21.3, G14): on the first Gate of each game app, before the Gate is built ----
-// Three choices: Connect to my NX 18 folder, Create a profile, Not now. Any of them sets nx18.welcome; quitting without a choice shows it again next time. Not shown when the
+// Three choices: Connect to my NX 18 folder, Create a profile (Keep my profile when this app has one already, as NX 18 Beam's seed gives it), Not now. Any of them sets nx18.welcome; quitting without a choice shows it again next time. Not shown when the
 // Gate is skipped (it waits for the next Gate) or with DM_WELCOME=0; DM_WELCOME=1 forces it. The acknowledgement keeps its own rule (it shows on its own, before, when due)
 enum NX18WelcomeGate {
     static let key = "nx18.welcome"
@@ -222,7 +222,11 @@ struct NX18WelcomeView: View {
         let layout = portrait ? AnyLayout(VStackLayout(spacing: 10)) : AnyLayout(HStackLayout(spacing: 10))
         layout {
             tile(0, "Connect to my NX 18 folder", "Find your profile and cloud saves") { connect() }
-            tile(1, "Create a profile", "A name and a picture for your games") { NX18WelcomeGate.record("create"); focus = 1; step = .createName }
+            if profile.isSet {   // a Profile is here already (the one NX 18 Beam put in this app): keep it, no create step
+                tile(1, "Keep my profile", "\(profile.name) is set. Change it later from the NX 18 mark.") { keep() }
+            } else {
+                tile(1, "Create a profile", "A name and a picture for your games") { create() }
+            }
             tile(2, "Not now", "Go to the Gate. You can do this later from the NX 18 mark.") { NX18WelcomeGate.record("not now"); finished() }
         }
     }
@@ -281,6 +285,8 @@ struct NX18WelcomeView: View {
         .buttonStyle(NX18PressStyle())
     }
 
+    private func create() { NX18WelcomeGate.record("create"); focus = 1; step = .createName }
+    private func keep() { NX18WelcomeGate.record("keep"); finished() }
     private func connect() {
         NX18WelcomeGate.record("connect")
         flow.connecting = true
@@ -300,7 +306,7 @@ struct NX18WelcomeView: View {
             switch e {
             case .left, .up: focus = max(0, focus - 1)
             case .right, .down: focus = min(2, focus + 1)
-            case .a: [connect, { NX18WelcomeGate.record("create"); focus = 1; step = .createName }, { NX18WelcomeGate.record("not now"); finished() }][focus]()
+            case .a: [connect, profile.isSet ? keep : create, { NX18WelcomeGate.record("not now"); finished() }][focus]()
             default: break
             }
         case .createName, .createFolder:

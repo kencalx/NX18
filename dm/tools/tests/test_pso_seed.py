@@ -124,7 +124,7 @@ class Committed(unittest.TestCase):
         rows = pso_seed.rows_of((g / 'pso_manifest.tsv').read_bytes().decode('utf-8'), strip_cr=False)
         keep, bad = pso_seed.collect(rows, shmap)
         self.assertEqual((bad, len(keep), len(rows)), ([], len(rows), len(rows)))
-        self.assertEqual(pso_seed.counts(keep), {'S': 30357, 'R': 1954, 'C': 3, 'M': 0, 'rows': 32314})
+        self.assertEqual(pso_seed.counts(keep), {'S': 30357, 'R': 1956, 'C': 3, 'M': 0, 'rows': 32316})
 
     def grown(self, gid, counts, notes):
         """A list grown from iPhone sessions: every row checks clean against the map in the counts given, none repeated, and each
@@ -166,20 +166,23 @@ class Committed(unittest.TestCase):
                    [('# Grown on 2026-11-15 from an iPhone 18 Pro Max play session (about 4 min, build 431d5d18', (444, 246, 198, 0))])
 
     def test_donkey_kong_bananza_grown_from_the_phone(self):   # its README, Files
-        rows = self.grown('040074A01BF12000', {'S': 8159, 'R': 7019, 'C': 46, 'M': 0, 'G': 1, 'rows': 15225},
+        rows = self.grown('040074A01BF12000', {'S': 8159, 'R': 7049, 'C': 46, 'M': 0, 'G': 1, 'rows': 15255},
                           [('# Grown on 2026-11-15 from an iPhone 18 Pro Max\'s Documents/pso_user.tsv after three play sessions', (4657, 4412, 245, 0)),
                            ('# Added on 2026-11-15 from an earlier iPhone 18 Pro Max Documents/pso_user.tsv (X1.0, build 6448f757', (8, 0, 8, 0)),
                            ('# Grown on 2026-11-17 from the same iPhone 18 Pro Max\'s Documents/pso_user.tsv after runs on chain ae1dd68dc11c', (283, 1, 282, 0)),
                            ('# Grown on 2026-11-19 from the same iPhone 18 Pro Max\'s Documents/pso_user.tsv after the X2.0 runs of 2026-11-17 to 19 on chain ae1dd68dc11c', (5566, 1677, 3880, 9)),
-                           ('# Added on 2026-11-27 from upstream NXNative c48caaea6, ce02afbf2, b1ef1be1c', (234, 16, 218, 0))])   # 3.2.0 inbox rows; 8bd55038c (1.0) left out
-        self.assertEqual(pso_seed.counts(rows[-234:]), {'S': 16, 'R': 218, 'C': 0, 'M': 0, 'rows': 234})
+                           ('# Added on 2026-11-27 from upstream NXNative c48caaea6, ce02afbf2, b1ef1be1c', (234, 16, 218, 0)),   # 3.2.0 inbox rows
+                           ('# Added on 2026-11-27 from upstream NXNative\'s list at 1a54371cf', (30, 0, 30, 0))])   # upstream's rows since the last check; 8bd55038c (1.0) still left out
+        self.assertEqual(pso_seed.counts(rows[-30 - 234:-30]), {'S': 16, 'R': 218, 'C': 0, 'M': 0, 'rows': 234})
+        self.assertEqual(pso_seed.counts(rows[-30:]), {'S': 0, 'R': 30, 'C': 0, 'M': 0, 'rows': 30})
         self.assertFalse([r for r in rows if '_bg' in r or '_bl' in r or '5f626776' in r], 'the geometry path\'s rows are left out')
 
     def test_super_mario_bros_wonder_recorded_on_the_phone(self):   # its README, Pipelines on a first start
-        self.grown('010015100B514000', {'S': 5957, 'R': 1093, 'C': 15, 'M': 0, 'rows': 7065},
+        self.grown('010015100B514000', {'S': 6242, 'R': 1409, 'C': 18, 'M': 0, 'rows': 7669},
                    [('# Recorded on an iPhone 18 Pro Max from the owner\'s play (build 431d5d18', (6162, 5509, 642, 11)),
                     ('# Grown on 2026-11-16 from a second iPhone 18 Pro Max session (about 4.5 min, build 29dcbb4d', (468, 291, 176, 1)),
-                    ('# Grown on 2026-11-17 from the same iPhone 18 Pro Max\'s Documents/pso_user.tsv after runs on chain ae1dd68dc11c', (435, 157, 275, 3))])
+                    ('# Grown on 2026-11-17 from the same iPhone 18 Pro Max\'s Documents/pso_user.tsv after runs on chain ae1dd68dc11c', (435, 157, 275, 3)),
+                    ('# Added on 2026-11-27 from upstream NXNative\'s list at 1a54371cf', (604, 285, 316, 3))])
 
     def test_star_fox_grown_from_the_phone(self):   # its README, Pipelines on a first start
         self.grown('0400E88025B1A000', {'S': 700, 'R': 608, 'C': 15, 'M': 0, 'rows': 1323},

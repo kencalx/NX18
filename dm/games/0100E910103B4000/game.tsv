@@ -1,0 +1,45 @@
+# Game profile of Thronebreaker: The Witcher Tales (Switch, update 1.0.2 = v131072 over the base NSP). Upstream NXNative's provisional profile (ffe0d357b, 84731b379): its Mac run
+# reached the menus, the subtitled opening and an autosave reload; not run on NX 18. Notes and what is open: README.md.
+# Format: see dm/games/README.md
+# Unity 2018.4.2f1 IL2CPP with Wwise, SDK 8.2.1, NVN; subsdk0 is NintendoSDK_movie. The four ThreadedStreamBuffer functions are fixed by the engine-wide rule
+# (dm/tools/engine_patches.py: this main's writer-sleep function adds the fourth fingerprint), no patches.py.
+
+# ---- Identity ----
+title_id	0100E910103B4000
+program_id	0100E910103B4000
+
+# ---- App ----
+name	Thronebreaker: The Witcher Tales
+ipa	ThronebreakerTheWitcherTales.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=1bd046113635234d85f43dafb297fe8b	subsdk0=60c6edbbfcebd4176cc301d5d9cb5a6f	sdk=5fd4f531c1195e9e5510c9e73f22cd39
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/audio/campaign_mahakam.pck
+zip_store	.assets:.dat:.mp4:.pck:.ress:.metallib
+
+# ---- Memory ----
+# the NPDM declares 8 MB of system resource; at boot the game maps through the alias region and sets no heap (upstream's 15 s region check reserved up to 3.21 GB into the
+# alias region, 3.14 GB of it the standard allocator's): FINAL FANTASY CRYSTAL CHRONICLES' layout, the same Unity and SDK
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x800000
+
+# ---- Frame rate ----
+# 60 fps: the rewriter finds Unity's Application.targetFrameRate (-1 on 1.0.2) and QualitySettings.vSyncCount (2 at start) through the internal-call table (dm/tools/unity_fps.py),
+# the host sets the count to 1 and presents at this target (upstream 84731b379: 33.15 -> 16.52 ms median in Lyria's opening dialogue, Unity's clock with wall time at both)
+fps_target	60
+
+# ---- Shader split ----
+# the game calls nvnDeviceSetDepthMode with near = 0
+depth_mode	zero
+shader_groups	/Data/=data
+shader_note	Thronebreaker: The Witcher Tales shaders

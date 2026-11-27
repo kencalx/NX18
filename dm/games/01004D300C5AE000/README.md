@@ -68,3 +68,7 @@ No code of the game is cut, and no run-time key is set. The game asks for presen
 - [A host lock held across a same-core handoff](../../../docs/reference/threads.md#a-host-lock-held-across-a-same-core-handoff).
 - [Typed outputs for every pixel shader](../../../docs/reference/shaders.md#typed-outputs-for-every-pixel-shader): its 76 shaders writing an R8Uint colour 5 in Waddle Dee Town ([#2760](https://github.com/seedds/nxnative/issues/2760)).
 - [Built-in fonts and the audio device notification of SDK 21](../../../docs/reference/services.md#built-in-fonts-and-the-audio-device-notification-of-sdk-21): its Nintendo Switch 2 Edition (program `04004D300C5AE001`) asks for its fonts with `GetBuiltInFontDataSet` at boot.
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 6,271 rows (4,683 `S`, 1,574 `R`, 14 `C`) of upstream NXNative's list at `1a54371cf` (its seed commits `7894f0e24` since the last check, and older rows; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 6,271 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

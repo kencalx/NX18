@@ -62,7 +62,7 @@ struct AlbumSection: View {
         }
     }
 
-    private var nx18: URL? { Album.nx18Folder(chosen: library.settings.icloudNX18Folder) }
+    private var nx18: URL? { Album.nx18Folder(chosen: nil) }
     private var summary: String {
         let shots = items.filter { $0.kind == .screenshot }.count, vids = items.filter { $0.kind == .recording }.count, docs = items.filter { $0.kind == .document }.count
         let parts = [shots > 0 ? "\(shots) screenshot\(shots == 1 ? "" : "s")" : nil, vids > 0 ? "\(vids) recording\(vids == 1 ? "" : "s")" : nil, docs > 0 ? "\(docs) document\(docs == 1 ? "" : "s")" : nil].compactMap { $0 }

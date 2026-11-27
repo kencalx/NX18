@@ -97,3 +97,7 @@ General host changes first needed here; each applies to every game:
 
 - The 4 domain shaders of `shaders/tessellation.bfsha` have no Metal stage and the host does not run them; nothing seen so far draws with them.
 - One boot in 66 on the Mac (2026-11-03, no shader libraries, another run alongside) crashed 0.8 s in: `CRASH sig=11 addr=0x8 pc=main+0x7eadfc`, on the main thread, called from `main+0x3c23d8` with a null member at `+0x240`, while `data_param_*` files loaded. Cause unknown; it did not recur in 40 more boots under the same load.
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 3,413 rows (3,384 `S`, 28 `R`, 1 `C`) of upstream NXNative's list at `1a54371cf` (rows from before the last check; inbox captures and recordings from upstream's players) that it lacked, below its rows; the list is now 4,185 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

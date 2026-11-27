@@ -42,6 +42,7 @@ struct HomeView: View {
     @State private var edges = PadEdges()
     @State private var note: String?
     @State private var clock = Date()
+    @State private var profile = BeamProfile(name: "Player", picture: nil)
 
     private let columns = 4
 
@@ -95,6 +96,9 @@ struct HomeView: View {
             }
         }
         .task { while !Task.isCancelled { clock = .now; try? await Task.sleep(for: .seconds(15)) } }
+        .task { await readProfile() }   // when Home opens, and again whenever Beam comes back to the front (the player may have changed it on the phone or in a game)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in Task { await readProfile() } }
+        .onReceive(NotificationCenter.default.publisher(for: NX18Profile.changed)) { _ in Task { await readProfile() } }   // an edit in Beam's Welcome or Settings
         .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidConnect)) { n in   // a console's toast: which controller came and went
             flash("\((n.object as? GCController)?.vendorName ?? "A controller") connected")
         }
@@ -119,10 +123,31 @@ struct HomeView: View {
             Text("System X2.0").font(.callout.weight(.medium)).foregroundStyle(NX18Palette.muted)
             Spacer()
             if let note { Text(note).font(.callout).foregroundStyle(NX18Palette.text).transition(.opacity) }
-            Text(clock.formatted(date: .omitted, time: .shortened)).font(.title3.monospacedDigit()).foregroundStyle(NX18Palette.text)
+            profileChip
+            Text(clock.formatted(date: .omitted, time: .shortened)).font(.body.weight(.medium).monospacedDigit()).foregroundStyle(NX18Palette.text)
         }
         .padding(.horizontal, 28).padding(.vertical, 14)
         .background(alignment: .leading) { NX18MarkShade().offset(x: 60) }   // no bar of its own: it floats over the art; the phone's soft shade keeps the mark readable on a bright one
+    }
+
+    private var profileChip: some View {   // the player's NX 18 Profile, as the games see it: picture, then name, left of the clock
+        HStack(spacing: 8) {
+            ZStack {
+                if let img = profile.picture { Image(decorative: img, scale: 1).resizable().scaledToFill() } else { NX18DefaultPicture() }
+            }
+            .frame(width: 28, height: 28)
+            .clipShape(Circle())
+            .overlay(Circle().strokeBorder(GateColor.hairline, lineWidth: 1))
+            Text(profile.name).font(.callout.weight(.semibold)).foregroundStyle(NX18Palette.text).lineLimit(1)
+        }
+        .padding(.trailing, 6)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Profile: \(profile.name)")
+    }
+
+    private func readProfile() async {
+        let p = await Task.detached(priority: .utility) { BeamProfile.load(nx18: Album.nx18Folder(chosen: nil)) }.value   // off the main thread: it may list iCloud Drive
+        if p != profile { profile = p }
     }
 
     private var hints: some View {

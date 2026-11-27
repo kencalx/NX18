@@ -14,5 +14,5 @@ BINDING = [
     {'what': "frame-rate controller's measure judged with the host's clocks", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'checked': "v458752's main: the controller main+0x204a18, its one caller main+0x203718 (the controller is the frame object's +0x218), its settings in its first 0x14 bytes and the interval at +0x40 (2026-11-15)",
      'why': "the game's own controller and its registers at one instruction; a fingerprint of the function would carry it to updates that keep it",
-     'blocked': "observation gates are placed by build ID only: patch_nso.py has no function-matched form of OBS (MATCH_CUTS and MATCH_FRAME_STEP only)"},
+     'blocked': "its MATCH_OBS rule needs the fingerprint of v458752's main (nso_match.py --gates on it), and an update's main to check it on"},
 ]

@@ -14870,6 +14870,7 @@ static nvn_hmap g_arch_probe_ix = {.klen = sizeof(void *)};   // an unstamped fi
 static arch_probe *g_arch_probe; static int g_arch_probe_n; static _Atomic int g_arch_probe_done;
 static NSMutableArray<NSString *> *g_arch_probe_path; static NSMutableArray *g_arch_probe_keys;   // per probe: the file's path, its keys (NSData) or NSNull when it has no index
 static int g_arch_old_n; static unsigned long long g_arch_old_bytes;   // files of another chain removed at the open (the archive line)
+static int g_arch_lost;   // pso4_init removed a file (another chain's, one Metal refused) or kept one it could not read: its pipelines are not there, so prepared.tsv goes (pso4_init) and no later start (warm_later_ready)
 static int arch_keep_old(void) { const char *e = getenv("DM_PSO_KEEP_OLD"); return e && !strcmp(e, "1"); }
 static void arch_probe_note(id<MTL4Archive> a, int hit, int named) {   // a lookup asked a: count it when a is an unstamped file
     if (!g_arch_probe_n) return;
@@ -15911,7 +15912,7 @@ static void pso4_init_once(void) {
                 g_arch_seq = MAX(g_arch_seq, [n substringFromIndex:pf].intValue + 1);
                 if (stamps && stamps[i] == 2 && !keep_old) {   // written under another shader chain: none of its pipelines can serve this one
                     unsigned long long sz = [[NSFileManager.defaultManager attributesOfItemAtPath:p error:nil] fileSize];
-                    if (!unlink(p.fileSystemRepresentation)) { g_arch_old_n++; g_arch_old_bytes += sz; }
+                    if (!unlink(p.fileSystemRepresentation)) { g_arch_old_n++; g_arch_old_bytes += sz; g_arch_lost = 1; }
                     unlink(arch_keys_path(p).fileSystemRepresentation);
                     continue;
                 }
@@ -15923,9 +15924,10 @@ static void pso4_init_once(void) {
                     int rm = refused && refused[i];
                     MLOG("[RED] pipeline archive file %s not usable (%s): %sits bases are built again", p.UTF8String, why[i] != NSNull.null ? [why[i] UTF8String] : rm ? "not a pipeline archive" : "could not be read",
                          rm ? "removed, " : "");
-                    if (rm) { unlink(p.fileSystemRepresentation); unlink(arch_keys_path(p).fileSystemRepresentation);
+                    if (rm) { unlink(p.fileSystemRepresentation); unlink(arch_keys_path(p).fileSystemRepresentation); g_arch_lost = 1;
                         if (pf) unlink([g_arch_dir stringByAppendingPathComponent:@"prebuilt.tsv"].fileSystemRepresentation); }
                     else if (!pf) [g_arch_unusable ?: (g_arch_unusable = [NSMutableSet set]) addObject:n];   // kept: left out of compact_failed.tsv (arch_compact_fail_note)
+                    g_arch_lost = 1;   // removed or not, its bases are built again this start: not a later start's archive hits
                     continue;
                 }
                 id<MTL4Archive> a = opened[i]; NSArray *ix = ixs[i] != NSNull.null ? ixs[i] : nil;
@@ -15940,6 +15942,9 @@ static void pso4_init_once(void) {
                 if ([ix[1] intValue]) [ixf addObject:a]; else [pf ? archp : arch addObject:a];   // an incomplete index: its pipelines with no key are looked for in it
             }
             g_arch_ixf = ixf; g_arch_run = run; free(stamps); free(refused); g_arch_dev_bytes = bytes;
+            // here, not at the prepare step: also a start that does not reach it (no window, DM_PSO_LATER_START=0, a quit before it) leaves no prepared.tsv the files no longer hold
+            if (g_arch_lost && !unlink([g_arch_dir stringByAppendingPathComponent:@"prepared.tsv"].fileSystemRepresentation))
+                MLOG("pipeline prepare: the archive's open dropped files, so this device's prepared.tsv is removed: the next prepare step waits");
             arch_compact_pick(runf);
             MLOG("pipeline archive %s: %d files (%d of bases without a vertex layout, %d with an index of %lu pipelines), %.1f MB, opened in %.1f ms", g_arch_dir.UTF8String,
                  nopen, np, nidx, nkeys, bytes / 1048576.0, (bp_now() - t0) / 1e6);   // scripts/devlog.py reads this line: the chain counts are lines of their own
@@ -16042,6 +16047,7 @@ static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e) { ret
 // Writes one flush period's captures as the next file of the archive, on g_arch_q once every compile in the period has returned
 static void arch_compact_finish(void);
 static void arch_write_file(ArchEpoch *ep, int gate_held);
+static _Atomic int g_arch_write_lost;   // periods not written (the compiler service died in one, a failed write): a prepare step it falls in writes no prepared.tsv (warm_later_mark)
 static void arch_write(ArchEpoch *ep, int gate_held) {   // gate_held: the windowed timer took the gate already (ser_try_begin); the write lets it go
     arch_write_file(ep, gate_held);
     if (ep->compacting && atomic_fetch_sub(&g_compact_periods, 1) == 1 && atomic_load(&g_compact_closed)) arch_compact_finish();   // the compaction's last period to be written
@@ -16051,7 +16057,7 @@ static void arch_write_file(ArchEpoch *ep, int gate_held) {
     if (!n) { if (gate_held) ser_end(); return; }
     if (atomic_load(&ep->crashed) || ep->deaths != atomic_load(&g_arch_deaths)) {   // the compiler service died in it or after it was made: its serializer may miss functions
         if (gate_held) ser_end();
-        atomic_fetch_sub(&g_arch_new, n); atomic_fetch_sub(&g_arch_new_vd, vd);
+        atomic_fetch_sub(&g_arch_new, n); atomic_fetch_sub(&g_arch_new_vd, vd); atomic_fetch_add(&g_arch_write_lost, 1);
         if (ep->compacting) g_compact_bad = 1;   // the old files keep the bases this period would have held
         MLOG("[RED] pipeline archive: a flush period the compiler service died in is not written (%d pipelines: %d bases, %d compute, %d task / mesh); they are captured again at a later start",
              n, n - cs - ms, cs, ms);
@@ -16074,7 +16080,7 @@ static void arch_write_file(ArchEpoch *ep, int gate_held) {
     NSString *kp = arch_keys_path(path); int keyed = ok && arch_keys_write(kp, ep->keys, !atomic_load(&ep->unkeyed));
     ok = ok && !rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation);
     if (!ok && keyed) unlink(kp.fileSystemRepresentation);
-    if (!ok) { MLOG("[RED] pipeline archive: writing %s failed", path.UTF8String); unlink(tmp.fileSystemRepresentation); if (ep->compacting) g_compact_bad = 1; }
+    if (!ok) { MLOG("[RED] pipeline archive: writing %s failed", path.UTF8String); unlink(tmp.fileSystemRepresentation); atomic_fetch_add(&g_arch_write_lost, 1); if (ep->compacting) g_compact_bad = 1; }
     else {
         MLOG("pipeline archive: %d new pipeline bases%s%s written to %s (%.1f MB, %.0f ms; compiles held back by the writes so far: %llu, %.0f ms in all)", n - cs - ms,
              cs ? [NSString stringWithFormat:@" and %d compute pipelines", cs].UTF8String : "", ms ? [NSString stringWithFormat:@" and %d task / mesh pipelines", ms].UTF8String : "",
@@ -17367,15 +17373,18 @@ static void warm_enqueue(WarmItem *item) {
     atomic_store_explicit(&g_warm_ready, 1, memory_order_release);
     os_unfair_lock_unlock(&g_warm_lock);
 }
-// The lists' lines as tasks; *lines: the lines they hold
-static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) {
+// The lists' lines as tasks; *lines: the lines they hold. h: when not NULL, each list's name, length and bytes go into it as read (the later start's stamp, warm_later_stamp)
+static NSArray<WarmTask *> *warm_parse_h(NSArray<NSString *> *paths, long *lines, CC_SHA256_CTX *h) {
     NSMutableArray<WarmTask *> *tasks = [NSMutableArray array]; NSMutableDictionary<NSString *, WarmTask *> *pairs = [NSMutableDictionary dictionary];
     NSMutableSet<NSString *> *seen = [NSMutableSet set], *stale = [NSMutableSet set]; long n = 0;
     NSMutableSet<NSData *> *seen_k = [NSMutableSet set];   // rows recorded before pso_key_norm that are one pipeline now
     NSMutableSet<NSString *> *seen_shader = [NSMutableSet set];
     NSMutableSet<NSArray *> *seen_mesh = [NSMutableSet set];
     for (NSString *path in paths) {
-        NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+        NSData *raw = [NSData dataWithContentsOfFile:path];
+        NSString *txt = raw ? [[NSString alloc] initWithData:raw encoding:NSUTF8StringEncoding] : nil;
+        if (h) { NSString *id_ = [NSString stringWithFormat:@"%@\t%ld\n", path.lastPathComponent, txt ? (long)raw.length : -1L]; const char *c = id_.UTF8String; CC_SHA256_Update(h, c, (CC_LONG)strlen(c));
+                 if (txt) CC_SHA256_Update(h, raw.bytes, (CC_LONG)raw.length); }
         if (!txt) { MLOG("[RED] cannot read prewarm list: %s", path.UTF8String); continue; }
         { unsigned long nl = 0; for (NSString *l in [txt componentsSeparatedByString:@"\n"]) nl += l.length && ![l hasPrefix:@"#"];
           MLOG("pipeline prewarm list %s: %lu lines", path.UTF8String, nl); }   // Diagnostics: how many lines each manifest gave (when a device warms up 0, shows which one was missing)
@@ -17425,6 +17434,7 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
     }
     *lines = n; return tasks;
 }
+static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) { return warm_parse_h(paths, lines, NULL); }
 static void warm_task_(WarmTask *t);
 static void warm_task(WarmTask *t) { warm_task_(t); }
 static void warm_task_(WarmTask *t) {
@@ -17771,7 +17781,8 @@ int mtl_warm_wait(int timeout_ms) {
 // submission and not before the game starts because the vertex entry every pipeline is built with follows the game's depth mode (nvnDeviceSetDepthMode), which is known only by then.
 // Each start runs it: when everything is in the Metal shader cache and the pipeline archive it takes well under a second, and only past 0.5 s (with 0.3 s or more still to go) does the front end show its screen
 // ("Preparing shaders", a bar and a count: front_progress). A stamp that says the step ran would skip it exactly when the system dropped the Metal cache (an OS update, storage
-// pressure on iOS), which is when it is needed. DM_PSO_PREPARE=0: the prewarm runs in the background as before (as it does without a window); DM_PSO_PREPARE_THREADS=<n> sets the workers
+// pressure on iOS), which is when it is needed; a later start (warm_later_ready) runs every line still, in the background, so the first frame no longer waits for the lookups of
+// lists this device has prepared before. DM_PSO_PREPARE=0: the prewarm runs in the background as before (as it does without a window); DM_PSO_PREPARE_THREADS=<n> sets the workers
 void front_progress(const char *title, long done, long total);
 __attribute__((weak)) void front_progress(const char *title, long done, long total) { (void)title; (void)done; (void)total; }   // the front ends' (front.h); none in the unit tests
 static int prepare_on(void) {
@@ -17786,6 +17797,20 @@ static int prepare_workers(void) {
     if (n <= 0) { size_t sz = sizeof n; if (sysctlbyname("hw.activecpu", &n, &sz, NULL, 0) || n < 2) n = 2; }
     return n;
 }
+// The pipelines compiled so far, not taken from an archive (pso_build_ex's bases, cps_new_b's compute pipelines, mtk_build's task / mesh pipelines), every thread's
+static uint64_t warm_compiled(void) { return atomic_load(&g_pb_built) + atomic_load(&g_cps_built) + atomic_load(&g_mtk_built); }
+// The time left in the prepare step (ns), for whether its screen shows (idea from S2Arm 98fc203eb). The lines' rate alone said a cold start's rest was quick: archive hits run
+// thousands of lines a second at the front, and the real compiles behind them take minutes. So once PREPARE_EST_COMPILES pipelines have really compiled (warm_compiled), the
+// rest is the lines left at the compile rate so far (compiles over the whole step's time, hits included: the estimate errs long, toward showing the screen). Before that the real
+// compiles give no number (*from_lines = 1) and the lines' rate decides, as before: a later start whose every line is an archive hit has no compile to time, and the decision is
+// taken again every 50 ms, so a screen held back by the hits at the front shows once the compiles behind them have a rate. No time left is shown anywhere: the screen has a bar and
+// a count (front_progress), so this is the show decision and the log's estimate alone
+enum { PREPARE_EST_COMPILES = 32 };
+static double prepare_rest(uint64_t el, long done, long lines, uint64_t compiled, int *from_lines) {
+    *from_lines = compiled < PREPARE_EST_COMPILES;
+    if (!*from_lines) return (double)el * (double)(lines - done) / (double)compiled;
+    return done ? (double)el * (double)(lines - done) / (double)done : 1e18;
+}
 static void warm_prepare(NSArray<WarmTask *> *tasks, long lines, long later) {   // later: the shader-only lines left to after the first frame (warm_split_late)
     int workers = prepare_workers(); long n = (long)tasks.count;
     uint64_t t0 = bp_now(), built0 = g_pb_built, arch0 = g_pb_archived, reused0 = g_pb_reused, spec0 = g_pb_spec, bvd0 = g_pb_bundle_vd;
@@ -17794,11 +17819,14 @@ static void warm_prepare(NSArray<WarmTask *> *tasks, long lines, long later) {  
     for (int w = 0; w < workers; w++) dispatch_group_async(g, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         for (;;) { long i = atomic_fetch_add(&next, 1); if (i >= n || atomic_load(&g_warm_stop)) break; warm_task(tasks[(NSUInteger)i]); }
     });
-    int shown = 0;
+    int shown = 0; uint64_t comp0 = warm_compiled();
     while (dispatch_group_wait(g, dispatch_time(DISPATCH_TIME_NOW, 50 * (int64_t)NSEC_PER_MSEC))) {
-        // the screen shows past 0.5 s, unless the rate so far says the rest takes less than 0.3 s more (no screen that flashes up and goes)
-        uint64_t el = bp_now() - t0; long done = g_warm_done; double rest = done ? (double)el * (double)(lines - done) / (double)done : 1e18;
-        if (!shown && el >= 500000000ull && rest >= 3e8) { shown = 1; MLOG("pipeline prepare: %ld of %ld lines done after %.1f s, the progress screen shows", done, lines, el / 1e9); }
+        // the screen shows past 0.5 s, unless the estimate says the rest takes less than 0.3 s more (no screen that flashes up and goes); from the real compiles once there are
+        // PREPARE_EST_COMPILES of them (prepare_rest)
+        uint64_t el = bp_now() - t0, comp = warm_compiled() - comp0; long done = g_warm_done; int from_lines = 0; double rest = prepare_rest(el, done, lines, comp, &from_lines);
+        if (!shown && el >= 500000000ull && rest >= 3e8) { shown = 1;
+            MLOG("pipeline prepare: %ld of %ld lines done after %.1f s, %llu really compiled (%s %.1f s more), the progress screen shows", done, lines, el / 1e9, (unsigned long long)comp,
+                 from_lines ? "too few compiles for a rate: the lines' rate says" : "at that compile rate", rest / 1e9); }
         if (shown) front_progress("Preparing shaders", g_warm_done, lines);
     }
     if (shown) front_progress(NULL, lines, lines);
@@ -17812,6 +17840,85 @@ static void warm_prepare(NSArray<WarmTask *> *tasks, long lines, long later) {  
          "bases %llu compiled, %llu from the archive%s, %llu reused; %llu specializations%s",
          lines, (unsigned long long)g_warm_shaders, (unsigned long long)g_warm_rps, (unsigned long long)g_warm_cps, (bp_now() - t0) / 1e9, workers, shown ? "shown" : "not shown",
          (unsigned long long)(g_pb_built - built0), (unsigned long long)(g_pb_archived - arch0), again, (unsigned long long)(g_pb_reused - reused0), (unsigned long long)(g_pb_spec - spec0), bvd);
+}
+// ---- Later starts: the lists to the background, the first frame not waiting (idea from S2Arm e899d98a1) ----
+// The prepare step ran every line of the lists before the first frame at every start. On a later start each line is an archive hit, but a hit is still a lookup and a library
+// load, so a large list held the first frame for seconds each time (Ocarina of Time's bundled archive: about 50 ms a lookup on the iPhone). Now a start whose lists this device
+// has prepared to the end before, in this archive, hands them all to the background instead (warm_later_bg): half the performance cores at utility QoS, below the game's own start
+// work, and the first frame goes on. A first start, and any start after the lists, the shader chain, the app, the system or the archive changed, waits as before.
+// What 'prepared before' means is prepared.tsv in the device's archive folder (pso_archive/, beside pso_user.tsv in the game's save folder; never in the game's files), written
+// once a prepare step that waited ran every line and the archive wrote every period it captured (warm_later_mark). It holds warm_later_stamp: the shader chain, the app's build
+// (its LC_UUID: a new build may carry new shaders, a new bundled archive or a new compiler path), the system build (an OS update drops the archive's binaries: pso4_init removes
+// the files Metal refuses), the depth mode (every pipeline's vertex entry follows it), the bundled archive (opened, its size; none when its crash guard left it out), and the
+// lists' names, lengths and SHA-256 (a line the device recorded since, pso_user.tsv, makes it wait once more). Any file pso4_init removed or could not read (another chain's, one Metal refused:
+// g_arch_lost) removes prepared.tsv too, there. A line that failed to build counts as run: it fails again either way. Unlike a stamp that skipped the step, the step still runs every
+// line at every start, so a pipeline the system dropped is built again, only not before the first frame.
+// A draw that needs a pipeline the background has not reached builds it as without the prepare step (DM_PSO_PREPARE=0): a base one worker looks up or compiles is shared
+// (g_pbase_pending: a draw takes the base the lookup found, or waits for that one compile, never compiles it again; the wait does not raise the worker's QoS, which is why this
+// is only for lists already in the archive, where the waits are lookups), a library is shared (shader_acquire), and a pipeline the background made later is dropped at the claim
+// when the draw's is in the cache (warm_claim). The process's end stops the workers between lines (g_warm_stop, mtl_warm_stop's line) and leaves prepared.tsv as it was.
+// DM_PSO_LATER_START=0 makes every start wait, as before
+static int later_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_PSO_LATER_START"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_PSO_LATER_START=0: every start waits for the prepare step, as the first does"); }
+    return v;
+}
+static NSString *warm_later_path(void) { return g_arch_dir ? [g_arch_dir stringByAppendingPathComponent:@"prepared.tsv"] : nil; }
+// What the lists' pipelines on this device depend on; h: the lists as warm_parse_h read them (finished here). nil when the app's build cannot be told (no LC_UUID)
+static NSString *warm_later_stamp(CC_SHA256_CTX *h, long lines) {
+    uint8_t d[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_Final(d, h); char app[33]; exe_uuid(app);
+    if (!*app) return nil;
+    return [NSString stringWithFormat:@"chain\t%s\napp\t%s\n%@depth\t%s\nbundle\t%@\nlists\t%ld\t%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n", DMSH_CHAIN, app,
+            arch_os_build(), atomic_load(&g_depth_zero) ? "near=0" : "near=-w", g_arch_bundle ? [NSString stringWithFormat:@"%llu", (unsigned long long)g_bundle_bytes] : @"none", lines,
+            d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]];
+}
+// Whether this start hands the lists to the background: the switch, an archive that captures, and prepared.tsv the same as this start's stamp
+static int warm_later_ready(NSString *stamp) {
+    NSString *p = warm_later_path();
+    if (!stamp || !p || !g_arch_cap || !later_on()) return 0;
+    if (g_arch_lost) return 0;   // pso4_init removed prepared.tsv with the files
+    NSString *have = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
+    if (!have) return 0;   // a first start: no line said so before
+    if ([have isEqualToString:stamp]) return 1;
+    MLOG("pipeline prepare: this device prepared the lists for %s; this start has %s: it waits for the step", stamp_line(have), stamp_line(stamp));
+    return 0;
+}
+// After a prepare step that waited ran every line (warm_finish's flush handed the period over): prepared.tsv is written once every period handed over so far is written, unless
+// one was not (lost0: g_arch_write_lost when the step began) or the process is ending
+static void warm_later_mark(NSString *stamp, int lost0) {
+    NSString *p = warm_later_path();
+    if (!stamp || !p || !g_arch_cap || !g_arch_pending || atomic_load(&g_warm_stop)) return;
+    dispatch_group_notify(g_arch_pending, g_arch_q, ^{ @autoreleasepool {
+        if (atomic_load(&g_warm_stop)) return;
+        if (atomic_load(&g_arch_write_lost) != lost0) { MLOG("pipeline prepare: a period of the archive was not written: no prepared.tsv, the next start waits for the step again"); return; }
+        if ([[NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil] isEqualToString:stamp]) return;
+        if ([stamp writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil])
+            MLOG("pipeline prepare: every line of the lists is in this device's archive: a later start with the same lists hands them to the background (%s)", p.UTF8String);
+    } });
+}
+static _Atomic int g_warm_later;   // this start handed its lists to the background (the tests read it)
+static int later_workers(void) {   // half the performance cores, 2 at least, as the background prebuild (pso_prebuild_bg)
+    int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc <= 1) pc = 4;
+    return pc > 4 ? pc / 2 : 2;
+}
+static void warm_later_bg(NSArray<WarmTask *> *tasks, long lines, long left) {   // left: the shader-only lines after the first frame (warm_split_late)
+    int workers = later_workers(); long n = (long)tasks.count;
+    uint64_t t0 = bp_now(), built0 = g_pb_built, arch0 = g_pb_archived, reused0 = g_pb_reused, spec0 = g_pb_spec;
+    atomic_store(&g_warm_bg, 1); atomic_store(&g_warm_later, 1);   // the archive's timer flushes as for a prewarm the game plays through (arch_warm_flush_due)
+    MLOG("pipeline prepare: a later start: %ld lines this device prepared before go to the background on %d workers at utility QoS, the first frame does not wait for them%s "
+         "(DM_PSO_LATER_START=0 waits)", lines, workers, left ? [NSString stringWithFormat:@"; %ld shader-only lines after the first frame", left].UTF8String : "");
+    __block _Atomic long next = 0;
+    dispatch_group_t g = dispatch_group_create(); dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
+    for (int w = 0; w < workers; w++) dispatch_group_async(g, q, ^{
+        for (;;) { long i = atomic_fetch_add(&next, 1); if (i >= n || atomic_load(&g_warm_stop)) break; warm_task(tasks[(NSUInteger)i]); }
+    });
+    dispatch_group_notify(g, q, ^{ @autoreleasepool {
+        if (atomic_load(&g_warm_stop)) return;   // the process is ending (mtl_warm_stop's line): what is left is built at the next start
+        MLOG("pipeline prepare in the background: %ld lines in %.2f s on %d workers; bases %llu compiled, %llu from the archive, %llu reused; %llu specializations (the draws' meanwhile included)",
+             lines, (bp_now() - t0) / 1e9, workers, (unsigned long long)(g_pb_built - built0), (unsigned long long)(g_pb_archived - arch0), (unsigned long long)(g_pb_reused - reused0),
+             (unsigned long long)(g_pb_spec - spec0));
+        warm_finish();
+    } });
 }
 // The files the prepare step's prebuild just wrote, opened before the first frame (upstream NXNative 4add5fbb4, MIT). pso4_init opens the archive folder once, before the
 // prebuild, so its bases went into files this run never looked in: every hybrid draw of a first start found no pulling base ("pulling base not made yet") and built it again in
@@ -17964,14 +18071,23 @@ static void warm_start(void) {
     g_warm_t0 = bp_now();
     atomic_store(&g_warm_running, 1);
     if (prepare_on()) {
-        long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(paths, &lines);
+        long lines = 0; CC_SHA256_CTX lh; CC_SHA256_Init(&lh); NSArray<WarmTask *> *tasks = warm_parse_h(paths, &lines, &lh);
+        NSString *stamp = warm_later_stamp(&lh, lines); int lost0 = atomic_load(&g_arch_write_lost);   // the lists as read, before the split
         NSMutableArray<WarmTask *> *late = [NSMutableArray array];
         if (late_s_on()) tasks = warm_split_late(tasks, late, &lines);   // the shader-only lines no pipeline line uses load after the first frame
+        if (lines && warm_later_ready(stamp)) {   // a later start: the shader-only lines and the prebuild as before, then the lists to the background (warm_later_bg)
+            warm_late_arm(late);
+            @autoreleasepool { prepare_prebuild(); } dm_start_prepared(now_ns() - prep0);   // before the workers start: arch_adopt_prebuilt changes the archive's tables with no lookup under way
+            pso_guard_prepared();
+            if (!atomic_load(&g_warm_stop)) warm_later_bg(tasks, lines, (long)late.count);
+            return;
+        }
         if (lines) warm_prepare(tasks, lines, (long)late.count);
         else if (late.count) MLOG("pipeline prepare: nothing to build before the first frame; %lu shader-only lines left to after it", (unsigned long)late.count);
         else MLOG("pipeline prepare: the prewarm lists hold nothing to build");
         if (atomic_load(&g_warm_stop)) return;   // the process is ending: what is left is built at the next start
         warm_finish();
+        if (lines) warm_later_mark(stamp, lost0);   // every line ran: prepared.tsv once the archive has written them
         warm_late_arm(late);   // the shader-only lines wait for the first frame
         @autoreleasepool { prepare_prebuild(); } dm_start_prepared(now_ns() - prep0);   // then the bases every shader pair's hybrid draws need, before the first frame too (once); the step's time to the start's timeline
         pso_guard_prepared();   // the bundled archive's crash guard: its window ends PSG_FRAMES frames from here, or from the end of the prebuild's compiles still under way
@@ -27543,6 +27659,14 @@ static const char *lk_line(const double late[300], const double cw[300], const d
              nl, known, pl[0], pl[1], pl[2], nc, pc[0], pc[1], pc[2], nw, pw[0], pw[1], pw[2]);
     return out;
 }
+// A drawable taken whose present pass then fails to encode is never presented: present_now returns 0 and its caller counts the ticket as not submitted, so nothing was said and the
+// drawable's presented handler never runs, which reads from outside as a stuck present (S2Arm 22988d434's idea). One red line naming the ticket, the first 8 times; the step that
+// failed says why in its own line just above (present_crop_rect, the render encoder)
+static _Atomic int g_present_dropped;
+static void present_dropped(uint64_t ticket) {
+    if (atomic_fetch_add_explicit(&g_present_dropped, 1, memory_order_relaxed) < 8)
+        MLOG("[RED] present ticket %llu: drawable taken but not presented (its present pass failed to encode: the line above says why)", (unsigned long long)ticket);
+}
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
@@ -27652,7 +27776,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     id<MTL4CommandBuffer> cb = g_present_cb[alloc_i];
     [cb beginCommandBufferWithAllocator:g_present_alloc4[alloc_i]];
     int kind = present_encode_m4(cb, src, dr.texture, crop, g_present_uv[alloc_i], &g_fx_present, &g_aa_present);
-    if (!kind) { [cb endCommandBuffer]; [g_q4 signalDrawable:dr]; return 0; }
+    if (!kind) { [cb endCommandBuffer]; [g_q4 signalDrawable:dr]; present_dropped(ticket); return 0; }
     [cb endCommandBuffer];
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     id<MTLBuffer> aa_ctl = kind & PRESENT_AA ? g_aa_present.ctl : nil;   // its counts, read when this present completes (a later present may have run by then: a log line's figures only)

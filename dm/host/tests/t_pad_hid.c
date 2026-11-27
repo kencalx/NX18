@@ -66,6 +66,12 @@ int main(void) {
     CHECK(pad_dupes_want(3, 1, 1, 0) == 1);   // a third pad of a model read already joins it without a wait
     CHECK(pad_dupes_want(1, 1, 1, 0) == 0);   // one unplugged: back to GameController
 
+    // Betop Kunpeng 20 in NS mode over USB (S2Arm 0d4e4c702's idea): its two names over USB with the Pro Controller's ID, and nothing else
+    CHECK(pad_hid_kp20(0x057e, 0x2009, "USB", "BTP-KP20E NS WIRED") && pad_hid_kp20(0x057e, 0x2009, "USB", "BTP-KP20E NS DONGLE") && pad_hid_kp20(0x057e, 0x2009, "usb", "btp-kp20e ns wired"));
+    CHECK(!pad_hid_kp20(0x057e, 0x2009, "USB", "Pro Controller") && !pad_hid_kp20(0x057e, 0x2009, "USB", "BTP-KP20E NS"));     // a Pro Controller; no prefix match
+    CHECK(!pad_hid_kp20(0x057e, 0x2009, "Bluetooth", "BTP-KP20E NS DONGLE"));                                                   // not over Bluetooth
+    CHECK(!pad_hid_kp20(0x045e, 0x2009, "USB", "BTP-KP20E NS WIRED") && !pad_hid_kp20(0x057e, 0x2007, "USB", "BTP-KP20E NS WIRED"));   // another ID
+    CHECK(!pad_hid_kp20(0x057e, 0x2009, NULL, "BTP-KP20E NS WIRED") && !pad_hid_kp20(0x057e, 0x2009, "USB", NULL));
     printf("t_pad_hid: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

@@ -21,8 +21,8 @@ enum Album {
     static let pictures: Set<String> = ["png", "jpg", "jpeg", "heic"]
     static let movies: Set<String> = ["mov", "mp4", "m4v"]
 
-    /// The iCloud NX 18 folder: Beam's own choice, else the one the Mac game apps use (nxnative/nx18-folder, NX18Profile.folderURL on the Mac), else the iCloud Drive folder holding
-    /// an NX 18 Profile, else iCloud Drive › NX 18 when it exists
+    /// The iCloud NX 18 folder: `chosen` when given, else the one connected on this Mac (nxnative/nx18-folder: Beam's Profile settings and the Mac game apps share it, NX18Profile.folderURL
+    /// on the Mac), else the iCloud Drive folder holding an NX 18 Profile, else iCloud Drive › NX 18 when it exists (captures still show with no folder connected)
     static func nx18Folder(chosen: URL?, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL? {
         if let chosen { return chosen }
         let line = home.appending(path: "Library/Application Support/nxnative/nx18-folder")

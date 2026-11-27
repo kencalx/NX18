@@ -1860,6 +1860,22 @@ HLE_FORCE("_ZN2nn3hid17GetDebugPadStatesEPNS0_13DebugPadStateEi", "debug pad sta
 HLE_FORCE("_ZN2nn3hid20FinalizeSensorFusionEv", "end of sensor fusion (SDK 22): the host keeps no IMU state to disable", void, h_hid_FusionFin, void) {}
 HLE_FORCE("_ZN2nn3hid25EnableSixAxisSensorFusionERKNS0_19SixAxisSensorHandleEb", "six-axis sensor fusion; ignored by the host", void, h_hid_SixFusionOn, const uint32_t *h, uint32_t on) { (void)h; (void)on; }
 HLE_FORCE("_ZN2nn3hid28IsSixAxisSensorFusionEnabledERKNS0_19SixAxisSensorHandleE", "six-axis sensor fusion: off", unsigned, h_hid_SixFusionQ, const uint32_t *h) { (void)h; return 0; }
+// Unaltered six-axis passthrough (SDK 13+, upstream NXNative 1a636be90): the SDK sends both to the hid service (IHidServer EnableSixAxisSensorUnalteredPassthrough /
+// IsSixAxisSensorUnalteredPassthroughEnabled), which the host does not serve, and reads its null service object (Nintendo Switch Sports 1.5.0 at boot, upstream #3378: sig=11 addr=0 in
+// hid::detail::EnableSixAxisSensorPassthrough). Passthrough leaves out the user calibration; the host has none to leave out (the rest offset taken off a GameController's gyro stays),
+// so its values do not change. The setting is kept per sensor (device 2's under device 0, as six_cal_dev keeps the calibration) and answered back; bad handles get the SDK's codes
+static _Atomic unsigned char g_six_pass[SIX_NPADS][SIX_DEVICES];
+HLE_FORCE("_ZN2nn3hid30EnableSixAxisSensorPassthroughERKNS0_19SixAxisSensorHandleEb", "six-axis unaltered passthrough: kept; the host has no user calibration to leave out",
+          Result, h_hid_SixPassOn, const uint32_t *h, uint32_t on) {
+    int slot, dev; Result r = six_handle_slot("EnableSixAxisSensorPassthrough", *h, &slot, &dev);
+    if (r == RES_OK) atomic_store_explicit(&g_six_pass[slot][six_cal_dev(dev)], (unsigned char)(on & 1), memory_order_relaxed);
+    return r;
+}
+HLE_FORCE("_ZN2nn3hid33IsSixAxisSensorPassthroughEnabledERKNS0_19SixAxisSensorHandleE", "six-axis unaltered passthrough: as the game last set it",
+          unsigned, h_hid_SixPassQ, const uint32_t *h) {
+    int slot, dev; if (six_handle_slot("IsSixAxisSensorPassthroughEnabled", *h, &slot, &dev) != RES_OK) return 0;
+    return atomic_load_explicit(&g_six_pass[slot][six_cal_dev(dev)], memory_order_relaxed);
+}
 HLE_FORCE("_ZN2nn3hid25GetGyroscopeZeroDriftModeERKNS0_19SixAxisSensorHandleE", "gyroscope zero-drift mode: standard", int, h_hid_GyroGet, const uint32_t *h) { (void)h; return 1; }
 HLE_FORCE("_ZN2nn3hid25SetGyroscopeZeroDriftModeERKNS0_19SixAxisSensorHandleERKNS0_22GyroscopeZeroDriftModeE", "gyroscope zero-drift mode; ignored by the host", void, h_hid_GyroSet, const uint32_t *h, const int *m) { (void)h; (void)m; }
 HLE_FORCE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSensorHandleE", "six-axis sensor fusion parameters: 0", void, h_hid_FusionGet, float *a, float *b, const uint32_t *h) { (void)h; *a = 0; *b = 0; }

@@ -80,3 +80,7 @@ General host changes first needed here; each applies to every game:
 - **Two pixel shaders do not translate** (`9d8f6b8543355374`, `9338e3f1b597fe7c`: variants 0 and 1 of one program in `postprocess.bfsha` @0x252000; SPIRV-Cross throws on a null pointer). No run so far has loaded either.
 - development.md calls SDK 8.2.0 "the oldest so far"; Mario Kart 8 Deluxe (SDK 4.4.0) is older now.
 - `game.tsv` still says "In bring-up" and its memory values "until measured".
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 568 rows (443 `S`, 122 `R`, 3 `C`) of upstream NXNative's list at `1a54371cf` (rows from before the last check; inbox captures and recordings from upstream's players) that it lacked, below its rows; the list is now 738 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

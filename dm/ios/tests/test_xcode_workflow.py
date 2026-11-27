@@ -235,6 +235,35 @@ class ResourceStagingTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((app / 'pso').exists())
 
+    def test_profile_seed(self):   # NX 18 Beam's Profile seed (DM_PROFILE_SEED) goes to <App>/NX18ProfileSeed, and leaves with a build that names none
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            ios, romfs, shader, seed = root / 'xcode', root / 'romfs', root / 'shaders/b-fixture', root / 'seed dir/NX18ProfileSeed'
+            for folder in (ios / 'Gen', romfs, shader, seed):
+                folder.mkdir(parents=True)
+            (ios / 'Gen/dm.xcconfig').touch(); (romfs / 'marker').write_text('game'); (shader / 'k_bp.metallib').write_text('lib')
+            (seed / 'name.txt').write_text('Kiki\n'); (seed / 'profile.stamp').write_text('5 beammac\n')
+            chain_h = root / 'dmsh_chain.h'; chain_h.write_text('#define DMSH_CHAIN "fixture"\n')
+            app = root / 'products/DmIOS.app'
+            environment = dict(os.environ, SRCROOT=str(ios), TARGET_BUILD_DIR=str(app.parent), UNLOCALIZED_RESOURCES_FOLDER_PATH=app.name, PLATFORM_NAME='iphoneos')
+            environment.pop('DM_PROFILE_SEED', None)
+            with patch.object(sys, 'argv', ['gen_resources.py', str(ios), str(romfs), 'marker', str(shader), 'b-fixture', '', str(root / 'dd'), str(chain_h)]):
+                gen_resources.main()
+            def stage(**extra):
+                return subprocess.run(['bash', str(REPO / 'dm/ios/tools/stage_resources.sh')], env=dict(environment, **extra), capture_output=True, text=True)
+            result = stage(DM_PROFILE_SEED=str(seed))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((app / 'NX18ProfileSeed/name.txt').read_text(), 'Kiki\n')
+            self.assertEqual((app / 'NX18ProfileSeed/profile.stamp').read_text(), '5 beammac\n')
+            (seed / 'profile.stamp').unlink()   # a folder without a stamp is no Profile
+            self.assertEqual(stage(DM_PROFILE_SEED=str(seed)).returncode, 0)
+            self.assertFalse((app / 'NX18ProfileSeed').exists())
+            (seed / 'profile.stamp').write_text('6 beammac\n')
+            self.assertEqual(stage(DM_PROFILE_SEED=str(seed)).returncode, 0)
+            result = stage()   # a build from Xcode or another tool afterwards: no seed left from Beam's
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((app / 'NX18ProfileSeed').exists())
+
 
 class ImageStaging(unittest.TestCase):
     def test_prepared_tools_symlink_stages_image_without_expanding_it(self):

@@ -22,7 +22,8 @@ On the Mac (2026-10-29, a short gameplay check): splash, title menu, the opening
 ## Shaders
 
 - **Current:** 120 GLSLC outputs in `Assets.dat`, each a whole program (a vertex and a pixel shader, then a reflection section), give 131 distinct shaders (15 vertex, 116 pixel), all translated for the Mac. Read by the multi-stage GLSLC reader: [GLSLC outputs holding several stages](../../../docs/reference/shaders.md#glslc-outputs-holding-several-stages).
-- The prewarm list (`pso_manifest.tsv`) is empty: with about 200 draws a frame and a handful of pipelines, the first frames built theirs in the background without a draw waiting.
+- The prewarm list (`pso_manifest.tsv`) was empty until upstream's rows (below): with about 200 draws a frame and a handful of pipelines, the first frames built theirs in the background without a draw waiting.
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 4 rows (2 `S`, 2 `R`, 0 `C`) of upstream NXNative's list at `1a54371cf` (its seed commits `6633c7851` since the last check, and older rows; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 4 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.
 
 ## Memory
 

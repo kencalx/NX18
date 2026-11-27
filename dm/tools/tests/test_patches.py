@@ -67,7 +67,7 @@ class Registry(unittest.TestCase):
                 self.assertRegex(bid, r'^[0-9a-f]{32}$')
                 self.assertEqual(len(names), len(set(names)))
                 for name in names: self.assertRegex(name, r'^[A-Z][A-Z0-9_]*$')
-            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'CAPABILITIES', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'BINDING')} - set(dir(__import__('nso_asm'))),
+            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'CAPABILITIES', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'MATCH_OBS', 'BINDING')} - set(dir(__import__('nso_asm'))),
                              f'{p}: a table patch_nso.py does not read')
             # every patch file states each patch's binding (docs_patches.py "Binding"), and no goal is tighter than the binding now
             self.assertTrue(getattr(m, 'BINDING', None), f'{p}: no BINDING (docs/agents/game-patches.md, "Binding")')
@@ -96,6 +96,16 @@ class Registry(unittest.TestCase):
                 self.assertTrue(rules)
                 for rule in rules: validate(rule)
 
+    def test_function_matched_gates(self):
+        # observation gates placed by function (MATCH_OBS), in a game's own patches.py: each rule valid (nso_match.validate_gates)
+        from nso_match import validate_gates
+        for p, m in MODS.items():
+            for module, rules in getattr(m, 'MATCH_OBS', {}).items():
+                self.assertEqual(p.name, 'patches.py', f'{p}: gates placed by function belong to a game')
+                self.assertIn(module, game.load(p.parent.name).words('modules'), f'{p}: MATCH_OBS of {module!r}, a module the profile lacks (patch_nso.py would never read it)')
+                self.assertTrue(rules)
+                for rule in rules: validate_gates(rule)
+
     def test_engine_rules(self):
         # engine-wide rules (engine_patches.py): function-matched cuts of a game's own modules, never of Nintendo's sdk, whatever the profile
         from nso_match import validate
@@ -105,6 +115,18 @@ class Registry(unittest.TestCase):
         for module, rules in m['MATCH_CUTS'].items():
             self.assertNotEqual(module, 'sdk', "Nintendo's SDK fixes belong in sdk_patches.py")
             for rule in rules: validate(rule)
+
+    def test_unity_stream_buffer_writer_sleep_fingerprints(self):
+        # the writer-sleep function's fingerprints: FFCC 1.0.3, Raging Loop / FFCC 1.0.0's log helper, a third body, and Thronebreaker 1.0.2's (upstream ffe0d357b); one cut, the same
+        # ldr -> ldar at +0x168 for all of them (a fingerprint is a whole function, so one of another body never reaches the cut's check bytes)
+        m = runpy.run_path(str(REPO / 'dm/tools/engine_patches.py'))
+        rule = next(r for r in m['MATCH_CUTS']['main'] if r['name'].startswith('Unity 2018 ThreadedStreamBuffer'))
+        sleep = next(f for f in rule['functions'] if f['size'] == 576)
+        self.assertEqual(len(sleep['fingerprints']), 4)
+        self.assertEqual(len(set(sleep['fingerprints'])), 4, 'no fingerprint twice')
+        self.assertIn('e1bff2e6d23005e70825edfaa2b79abb67f475c3615a6d364cebc76befd49815', sleep['fingerprints'])   # Thronebreaker 1.0.2 main+0x2ba7290
+        self.assertEqual([c[:3] for c in sleep['cuts']], [(0x168, '290140b9', '29fddf88')])
+        self.assertEqual(sum(len(f['cuts']) for f in rule['functions']), 8, 'eight sites in four functions')
 
     def test_function_matched_frame_steps(self):
         # one frame step per main, in a game's own patches.py; its stub writes only inside the function it was matched by and the other functions it names (docs_patches.frame_step_sites

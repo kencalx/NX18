@@ -1,4 +1,4 @@
-// Beam's Settings window: the NX 18 folder, the keys file (its path only) and where builds go
+// Beam's Settings window: the NX 18 folder, the keys file (its path only), where builds go, and the player's Profile with the iCloud NX 18 folder
 import SwiftUI
 
 struct SettingsView: View {
@@ -8,7 +8,6 @@ struct SettingsView: View {
     @State private var pickProfile = false
     @State private var pickKeys = false
     @State private var pickSpace = false
-    @State private var pickNX18 = false
     var body: some View {
         Form {
             Section("NX 18") { CheckoutStatus(); SetupPanel() }
@@ -34,18 +33,7 @@ struct SettingsView: View {
             } footer: {
                 Text("Builds take several gigabytes per game. By default each game's build folder is a \"build\" folder beside its files.")
             }
-            Section {
-                LabeledContent("iCloud NX 18 folder") {
-                    HStack {
-                        Text(Album.nx18Folder(chosen: settings.icloudNX18Folder)?.path ?? "Not found").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                        Button("Choose…") { pickNX18 = true }
-                        if settings.icloudNX18Folder != nil { Button("Reset") { settings.icloudNX18Folder = nil } }
-                    }
-                }
-            } footer: {
-                Text("The folder your iPhone and iPad games use for the Profile, cloud saves and captures. Beam shows each game's captures from it in the game's Album. By default Beam uses the folder your Mac game apps use, or iCloud Drive › NX 18.")
-            }
-            .fileImporter(isPresented: $pickNX18, allowedContentTypes: [.folder]) { r in if case .success(let u) = r { settings.icloudNX18Folder = u } }
+            ProfileSettingsSection()   // the picture, the name and the NX 18 folder (one folder: the Mac games' and the Album's)
             Section("Beam") {
                 Toggle("Check for Beam updates once a day", isOn: Binding(get: { settings.updateChecks }, set: { settings.updateChecks = $0 }))
                 Toggle("Menu sounds in Beam Home", isOn: Binding(get: { UserDefaults.standard.bool(forKey: "homeSounds") }, set: { UserDefaults.standard.set($0, forKey: "homeSounds") }))

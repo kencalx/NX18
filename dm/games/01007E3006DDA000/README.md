@@ -64,3 +64,7 @@ No code of the game is cut, and no run-time key is set. The game asks for presen
 - [H.264 packets are Annex B, not NAL lengths](../../../docs/reference/movies.md#h264-packets-are-annex-b-not-nal-lengths): its `ImageMovie.mp4` has 167 samples whose first NAL length begins `00 00 01`, and plays in full, so its packets come as Annex B.
 - [Integer outputs told by the pipeline's targets](../../../docs/reference/shaders.md#integer-outputs-told-by-the-pipelines-targets).
 - [A pipeline archive on an external drive is read into memory](../../../docs/reference/memory.md#a-pipeline-archive-on-an-external-drive-is-read-into-memory).
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 7,997 rows (6,518 `S`, 1,459 `R`, 20 `C`) of upstream NXNative's list at `1a54371cf` (rows from before the last check; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 7,997 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

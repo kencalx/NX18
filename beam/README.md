@@ -48,6 +48,12 @@ From B3 (rest):
 - **Bring your NX Play library** (on the welcome screen, and File > Bring Your NX Play Library): Beam reads NX Play's games folder and keys path from its settings, adds each game folder where it is (nothing moved, copied or deleted; NX Play keeps working), and reads them one at a time. A game NX Play installed on a device keeps its bundle ID, so installing it from Beam replaces that app and keeps its save.
 - **Step by step for other tools** (next to Show IPA): SideStore, AltStore Classic and Sideloadly, from Developer Mode to the Increased Memory Limit with GetMoreRam, the 7-day refresh and "never delete the game first". LiveContainer is not offered until NX 18's LiveContainer check passes on a device.
 
+The Profile:
+
+- **Profile** (on the welcome screen, and Settings > Profile): create the name and picture the games show, or use the one in the NX 18 folder in iCloud Drive. Beam edits the Mac's own Profile (`~/Library/Application Support/nxnative/Profile`), which every NX 18 Mac game reads at its start (`dm/mac/launcher.c`), so a Mac game Beam builds or plays has it with nothing passed. Connecting a folder writes the Mac games' `nxnative/nx18-folder`, then brings the folder's Profile here when it is newer, else sends this Mac's there. It is the one NX 18 folder: the Album reads captures from it too (an earlier Beam's own Album folder becomes it, when the Mac had none).
+- **Every iPhone and iPad install carries the Profile:** before signing, Beam puts a copy in `<App>.app/NX18ProfileSeed` (Xcode signing: the `DM_PROFILE_SEED` build setting, which the project's Copy game resources phase reads; a certificate: the unpacked app). The app takes it on its first start, or when Beam's is newer; a change made on the device since is kept (`NX18Profile.applySeed`). It is not the NX 18 folder: each game app still asks for that once. Renew carries the Profile as it is then. The IPA for other tools does not carry it.
+- The name and picture are never logged (`profile in the install: on` / `off` only) and go nowhere but your own devices and iCloud Drive.
+
 Still to come: polish and the showcase (B5).
 
 ## Building Beam

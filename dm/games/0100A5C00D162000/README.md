@@ -53,3 +53,7 @@ General host changes first needed here; each applies to every game:
 - "SDK 5.5.0 (the oldest so far)" in `game.tsv` and docs/development.md is stale: DARK SOULS: REMASTERED (4.5.0) and Mario Kart 8 Deluxe (4.4.0) are older.
 - The tracing text in [nvn-objects.md](../../../docs/reference/nvn-objects.md#sizes-the-hardware-never-reports-as-0-zcull-save-area) names observation gates "in its `patches.py`"; the profile has no `patches.py` now.
 - `game.tsv` has no `sys_resource` row, so the host reports its default, 32 MB (`game.py`, `hle_svc.c`), although the NPDM declares none and the notes describe the game as having no virtual address memory. Not checked against the game's behaviour.
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 126 rows (126 `S`, 0 `R`, 0 `C`) of upstream NXNative's list at `1a54371cf` (its seed commits `573838976`, `7d1a744e1`, `46ba619a5` since the last check, and older rows; inbox captures and recordings from upstream's players) that it lacked, below its rows; the list is now 214 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

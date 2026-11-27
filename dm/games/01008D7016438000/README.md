@@ -25,6 +25,7 @@ Nothing: no host change was needed.
 ## Open
 
 - Not tested on the iPhone.
-- `pso_manifest.tsv` is not recorded yet (no prewarm).
+- `pso_manifest.tsv` is not recorded on NX 18's devices; it holds upstream's rows (below).
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 947 rows (751 `S`, 196 `R`, 0 `C`) of upstream NXNative's list at `1a54371cf` (its seed commits `732f50193` since the last check, and older rows; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 947 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.
 - Only the base game was packed; no update is known.
 - Whether the western base game's own `main` (v0) is this build was not checked; the western profile registers only its 1.10.

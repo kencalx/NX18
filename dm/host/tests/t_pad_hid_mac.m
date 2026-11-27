@@ -86,7 +86,9 @@ static void hidpad_attach(hid_pad *d) { (void)d; attached++; }
 static void hidpad_detach(hid_pad *d) { (void)d; attached--; }
 static void hidpad_read(hid_pad *d) { reads++; buttons = pad_hid_buttons(&d->st); }
 static void hidpad_motion(hid_pad *d, const pro_motion_sample *s, int n) { (void)d; (void)s; (void)n; }
-static void hidpad_models_changed(void) { changes++; hidpad_twins_eval(nil); hidpad_twins_release(); hidpad_twins_take(nil); }   // front_mac.m's pads_changed, without its slots
+static void hidpad_models_changed(void) { changes++; hidpad_twins_eval(nil); hidpad_twins_release(); hidpad_twins_take(nil); hidpad_kp20_pair(nil); }   // front_mac.m's pads_changed, without its slots
+static int moved;
+static void hidpad_kp20_moved(void) { moved++; }
 
 static IOHIDDeviceRef ref(TestDev *d) { return (__bridge IOHIDDeviceRef)d; }
 static TestDev *pro(long loc, uint64_t entry, NSString *transport) { TestDev *d = [TestDev new]; d.vid = 0x057e; d.pid = 0x2009; d.loc = loc; d.entry = entry; d.transport = transport; return d; }
@@ -136,9 +138,71 @@ static void hid_layouts(void) {
     puts("t_pad_hid_mac: Xbox 360 axis matching passed");
 }
 
+// A 0x30 report with these raw 12-bit sticks (left x, y, right x, y; 0x800 the middle)
+static void report_sticks(TestDev *d, const int raw[4]) {
+    assert(d.callback && d.buffer); memset(d.buffer, 0, 49); d.buffer[0] = 0x30;
+    for (int k = 0; k < 2; k++) { uint8_t *b = d.buffer + 6 + 3 * k; int x = raw[2 * k], y = raw[2 * k + 1]; b[0] = x & 0xff; b[1] = (x >> 8 & 0x0f) | (y & 0x0f) << 4; b[2] = y >> 4; }
+    d.callback(d.context, kIOReturnSuccess, ref(d), kIOHIDReportTypeInput, 0x30, d.buffer, 49);
+    tick += 15000000; drain();
+}
+// Betop Kunpeng 20 in NS mode over USB (S2Arm 0d4e4c702's idea): GameController lists it as a Pro Controller with dead sticks; alone, its sticks come from its 0x30 for that
+// controller, and a stick change reads the controller again. A Pro Controller is never paired (the negative control), nor a Kunpeng 20 beside one, nor one over Bluetooth
+static void kp20(void) {
+    TestGC *gc = [TestGC new]; gc.productCategory = @"Switch Pro Controller"; gc.vendorName = @"Pro Controller"; gc.extendedGamepad = @1;
+    [g_gc addObject:gc];
+    static const int rest[4] = {0x800, 0x800, 0x800, 0x800}, push[4] = {0xe00, 0x800, 0x800, 0x200};
+    int32_t s[4] = {7, 7, 7, 7};
+    // a Pro Controller alone: nothing paired, its GameController sticks stay
+    TestDev *real = pro(0x01300000, 31, @"USB"); hidpad_found(NULL, kIOReturnSuccess, NULL, ref(real));
+    assert(find(real) && !find(real)->kp20 && real.callback);
+    report_sticks(real, rest); report_sticks(real, push);
+    assert(!g_kp20_pad && !hidpad_kp20_sticks(gc, s) && s[0] == 7 && moved == 0);
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(real));
+    // the Kunpeng 20 on its receiver: paired at its first report, its sticks for its controller only
+    TestDev *kp = pro(0x01400000, 41, @"USB"); kp.name = @"BTP-KP20E NS DONGLE";
+    g_twins_off = 1;   // listened to even with DM_PAD_IDENTICAL=0
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(kp));
+    g_twins_off = 0;
+    assert(find(kp) && find(kp)->kp20 && kp.callback && !g_kp20_pad);
+    report_sticks(kp, rest);
+    assert(g_kp20_pad == find(kp) && g_kp20_gc == gc && attached == 0 && twins() == 0 && !hidpad_gc_unread(gc));   // GameController keeps its buttons
+    assert(hidpad_kp20_sticks(gc, s) && !s[0] && !s[1] && !s[2] && !s[3]);
+    int before = moved; report_sticks(kp, push);
+    assert(moved == before + 1 && hidpad_kp20_sticks(gc, s) && s[0] == DM_STICK_MAX && s[1] == 0 && s[2] == 0 && s[3] == -DM_STICK_MAX);
+    report_sticks(kp, push); assert(moved == before + 1);   // unchanged: no read
+    TestGC *other = [TestGC new]; other.productCategory = @"Xbox One"; other.extendedGamepad = @1;
+    s[0] = 7; assert(!hidpad_kp20_sticks(other, s) && s[0] == 7);   // another controller keeps its own
+    tick += PRO_SILENT_NS; assert(!hidpad_kp20_sticks(gc, s));         // silent: GameController's again
+    report_sticks(kp, rest);
+    // a Pro Controller beside it: two entries send 0x30, so no pair; its going pairs again
+    TestDev *real2 = pro(0x01500000, 51, @"USB"); hidpad_found(NULL, kIOReturnSuccess, NULL, ref(real2));
+    report_sticks(real2, rest);
+    hidpad_models_changed();
+    assert(!g_kp20_pad && !g_kp20_gc && !hidpad_kp20_sticks(gc, s));
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(real2)); report_sticks(kp, rest); hidpad_models_changed();
+    assert(g_kp20_pad == find(kp));
+    // GameController listing a second Pro Controller (one IOKit has no live entry for): which one is the Kunpeng 20 is not known, so no pair; with it gone, the pair again
+    TestGC *gc2 = [TestGC new]; gc2.productCategory = @"Switch Pro Controller"; gc2.vendorName = @"Pro Controller"; gc2.extendedGamepad = @1;
+    [g_gc addObject:gc2]; report_sticks(kp, rest); hidpad_models_changed();
+    assert(!g_kp20_pad && !g_kp20_gc && !hidpad_kp20_sticks(gc, s) && !hidpad_kp20_sticks(gc2, s));
+    [g_gc removeObject:gc2]; hidpad_models_changed();
+    assert(g_kp20_pad == find(kp) && g_kp20_gc == gc);
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(kp));
+    assert(!g_kp20_pad && !g_kp20_gc);
+    // the same name over Bluetooth is not taken for one
+    TestDev *bt = pro(0x69aabbdd, 61, @"Bluetooth"); bt.name = @"BTP-KP20E NS DONGLE";
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(bt)); assert(!find(bt)->kp20);
+    report_sticks(bt, rest); assert(!g_kp20_pad);
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(bt));
+    [g_gc removeObject:gc];
+    assert(!g_hidpads && !g_hidpads_gc && attached == 0);
+    puts("t_pad_hid_mac: Betop Kunpeng 20 sticks passed");
+}
+
 int main(void) { @autoreleasepool {
     g_gc = [NSMutableArray new];
     hid_layouts();
+    kp20();
     TestGC *gc = [TestGC new]; gc.productCategory = @"Switch Pro Controller"; gc.vendorName = @"Pro Controller"; gc.extendedGamepad = @1;
     // issue #2237: one Pro Controller over Bluetooth, which GameController lists, and a second entry of its model at location 0 that sends nothing
     [g_gc addObject:gc];

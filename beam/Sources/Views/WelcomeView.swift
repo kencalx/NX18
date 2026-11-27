@@ -1,4 +1,4 @@
-// The first screen (beam-design §3.1, step 1): what Beam does, with the legal framing first, and where NX 18 is
+// The first screen (beam-design §3.1, step 1): what Beam does, with the legal framing first, where NX 18 is, and the player's Profile
 import SwiftUI
 
 struct WelcomeView: View {
@@ -13,6 +13,7 @@ struct WelcomeView: View {
                 .font(.title3).multilineTextAlignment(.center).foregroundStyle(.secondary)
             CheckoutStatus().frame(maxWidth: 560)
             SetupPanel().frame(maxWidth: 560)
+            ProfileWelcomePanel().frame(maxWidth: 560)   // create a profile, or use the one in the NX 18 folder, or later (ProfileViews.swift)
             Toggle("Check for Beam updates once a day", isOn: Binding(get: { settings.updateChecks }, set: { settings.updateChecks = $0 }))
                 .toggleStyle(.checkbox)
                 .help("Beam's only network call you did not start. It reads NX 18's releases on GitHub and sends nothing about you. Settings turns it off.")

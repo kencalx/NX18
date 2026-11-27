@@ -31,8 +31,8 @@ class Committed(unittest.TestCase):
         rows = [ln for ln in self.lines if not ln.startswith('#')]   # as the host splits them: a '\r' would stay in the row
         keep, bad = pso_seed.collect(rows, self.shmap)
         self.assertEqual((bad, len(keep)), ([], len(rows)))
-        self.assertEqual(pso_seed.counts(keep), {'S': 6524, 'R': 7324, 'C': 211, 'M': 14, 'rows': 14073})
-        self.assertEqual(len({pso_seed.identity(r) for r in rows}), 14073)
+        self.assertEqual(pso_seed.counts(keep), {'S': 6552, 'R': 7441, 'C': 211, 'M': 14, 'rows': 14218})
+        self.assertEqual(len({pso_seed.identity(r) for r in rows}), 14218)
         self.assertEqual(pso_seed.counts(keep[:6563]), {'S': 4900, 'R': 1526, 'C': 125, 'M': 12, 'rows': 6563})   # the X1.0 recording first
         grown = next(ln for ln in self.lines if ln.startswith('# Grown on 2026-11-16'))
         self.assertIn('2404 rows (652 S, 1733 R, 19 C)', grown)
@@ -42,8 +42,12 @@ class Committed(unittest.TestCase):
         self.assertEqual(pso_seed.counts(keep[:9927]), {'S': 5755, 'R': 4004, 'C': 156, 'M': 12, 'rows': 9927})   # NX 18's own rows, before upstream's
         up = next(ln for ln in self.lines if ln.startswith('# Added on 2026-11-27 from upstream NXNative'))   # upstream's inbox captures, last
         self.assertIn('4146 rows (769 S, 3320 R, 55 C), 2 M', up)
-        self.assertEqual(pso_seed.counts(keep[9927:]), {'S': 769, 'R': 3320, 'C': 55, 'M': 2, 'rows': 4146})
+        self.assertEqual(pso_seed.counts(keep[9927:14073]), {'S': 769, 'R': 3320, 'C': 55, 'M': 2, 'rows': 4146})
         for c in ('d2a2a43d7', 'fc2a15d03', 'c4e3ef3a1', '044805078', '2bc609e00', 'the 35 rows'): self.assertIn(c, up)
+        up2 = next(ln for ln in self.lines if ln.startswith("# Added on 2026-11-27 from upstream NXNative's list at 1a54371cf"))   # the second check's rows, last
+        self.assertIn('145 rows (28 S, 117 R, 0 C), 0 M', up2)
+        self.assertIn('35 of upstream\'s rows refused', up2)
+        self.assertEqual(pso_seed.counts(keep[14073:]), {'S': 28, 'R': 117, 'C': 0, 'M': 0, 'rows': 145})
 
     def test_header_counts_and_source(self):
         head = [ln for ln in self.lines if ln.startswith('#')]

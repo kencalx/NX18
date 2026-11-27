@@ -227,5 +227,19 @@ int main(void) { @autoreleasepool {
     // not run for g_fx_idle_presents presents and the last present that ran them has completed, their textures and buffers leave the residency set and GPU allocated falls by them;
     // turned on again they are made again. DM_PRESENT_FX_KEEP=1 keeps them, as before
     fx_case();
+    // A taken drawable whose present pass fails to encode (here a crop past the texture: present_crop_rect refuses it) is not presented: present_now returns 0 and says so in a red line
+    // naming the ticket, after the failing step's own (S2Arm 22988d434's idea); a good present the same way says nothing of the kind (the negative control)
+    { static const int past[4] = {4, 4, 8, 8}; __block int r = -1;
+      const char *e = stderr_of(^{ @autoreleasepool { r = present_now(&a, 0, 0, 1001, past, drawable(), 0); } });
+      const char *crop = strstr(e, "[RED] present crop out of bounds"), *drop = strstr(e, "[RED] present ticket 1001: drawable taken but not presented");
+      CHECK("encode failed: not submitted, one line naming the ticket, after the crop's own", r == 0 && crop && drop && crop < drop && atomic_load(&g_present_dropped) == 1);
+      __block int ok = -1; e = stderr_of(^{ @autoreleasepool { ok = present_now(&a, 0, 0, 1002, NULL, drawable(), 0); } });
+      CHECK("a good present: submitted, no such line", ok == 1 && !strstr(e, "drawable taken but not presented") && atomic_load(&g_present_dropped) == 1);
+      pthread_mutex_lock(&g_pq_mu); struct timespec ts2; clock_gettime(CLOCK_REALTIME, &ts2); ts2.tv_sec += 5;
+      while (g_pq_inflight && pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts2) != ETIMEDOUT) {}
+      pthread_mutex_unlock(&g_pq_mu);
+      atomic_store(&g_present_dropped, 8);
+      e = stderr_of(^{ @autoreleasepool { r = present_now(&a, 0, 0, 1003, past, drawable(), 0); } });
+      CHECK("past the first 8: still not submitted, no more lines", r == 0 && !strstr(e, "drawable taken but not presented")); }
     printf("present allocators: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

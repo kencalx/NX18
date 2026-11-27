@@ -582,6 +582,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Open:** NX 18 still leaves a Microsoft-vendor pad that `+[GCController supportsHIDDevice:]` answers YES for to GameController (`hidpad_gc_native`), so Steam Link's pad, which GameController never lists, does not reach the raw HID reader yet; upstream's virtual-pad fallback (`b2e52b37`) is not ported. The layout applies to such a pad read as HID. The button map comes from one-at-a-time presses through Steam Link (upstream [PR #2958](https://github.com/seedds/nxnative/pull/2958)); live Steam Link verification is pending upstream too.
 - **Check:** `t_pad_hid` checks the layout choice, each button, the triggers, the right stick and a `DM_HID_MAP` override. `t_pad_hid_mac` drives discovery and value callbacks with fake devices: the matching pad's face button, triggers and right stick, and a pad of the same ID with dedicated triggers that keeps the default layout.
 
+### Betop Kunpeng 20's sticks in NS mode over USB on the Mac
+
+- **Symptom:** on the Mac, a Betop Kunpeng 20 (北通鲲鹏20) in its NS mode, wired or on its receiver (`BTP-KP20E NS WIRED` / `BTP-KP20E NS DONGLE`, `057e:2009` over USB), connects as a Pro Controller and its buttons work, but neither stick moves.
+- **Cause:** it takes the Pro Controller's ID, so GameController reads it with its Pro Controller support, and there its four stick half-axes are missing. Its report 0x30 carries the sticks in the Pro Controller's layout (S2Arm `0d4e4c702`'s report; S2Arm reads them through GameController's private HID identity).
+- **Fix:** `pad_hid_mac.h`, which listens to every `057e:2009` entry's reports already, decodes a Kunpeng 20's 0x30 sticks (`pad_pro_decode`; matched by those two names over USB, exactly: `pad_hid_kp20` in `pad_hid.h`) and hands them to front_mac.m's `pad_read` for its GameController controller in place of GameController's, which keeps its buttons, rumble and Home. GameController gives a controller no HID identity and NX 18 uses no private API for one, so the pair is made only when it is unambiguous (`hidpad_kp20_pair`): one entry of that ID sends 0x30, it is the Kunpeng 20, and GameController lists one Switch Pro Controller. Beside a Pro Controller, or two of them, nothing is paired and a line says so; every other controller reads as before. A stick change reads the controller again (GameController sends none), with no extra wakeup: the report callback runs for these entries anyway. Its sticks measure their own reach, as a Pro Controller's that gives no calibration does. NX 18's own code, from S2Arm's idea; S2Arm's earlier Bluetooth Betop Zeus (宙斯) left-stick fix (`5afaf341b`) is not ported.
+- **Open:** not run on NX 18 with the controller (the owner has none); whether GameController names it a Switch Pro Controller (`productCategory`) is taken from S2Arm's code.
+- **Check:** `t_pad_hid` (the two names over USB, a Pro Controller's name, a prefix, Bluetooth and other IDs refused) and `t_pad_hid_mac` (with fake devices: a Pro Controller alone is never paired; the Kunpeng 20 pairs at its first report, also with `DM_PAD_IDENTICAL=0`, its sticks reach its controller only, a change reads it again and an unchanged report does not; silent, GameController's sticks again; beside a Pro Controller, no pair until that one goes; the same name over Bluetooth is not taken for one).
+
 ### SDK 20 six-axis sensor and amiibo (`nfp`) calls
 
 - **Symptom:** SDK 20 calls that reach a service; `nfp`'s `AttachActivateEvent` / `AttachDeactivateEvent` crashed in the SDK at `sdk+0x3f2a78`.
@@ -623,6 +631,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `GetNpadImuSamples` adds fixed Gaussian noise to the host's own samples (gyro 0.1 deg/s, acceleration 0.05 mG, a hash of the tick, device and axis, so a tick read again reads the same; `DM_IMU_NOISE=0` removes it, `=<deg/s>,<mG>` sets other spreads, also through `DM_CTL`'s `env`). A live controller carries its own noise: its interpolated ticks are left as they are, and only a tick with no change of its own (a held sample, or between two that read alike) gets a tenth of the host's noise. `LoadSixAxisSensorCalibrationParameter` answers a device with nothing stored this run with the ideal sensor's calibration (zeros, a zero bias) when the sensor's gyro offset is taken off (`six_offset_known`: the host's own sensor, a HID or Joy-Con 2 stream, the phone, a GameController once its offset is learned), else `0xd8ca` as before. The host learns a GameController's rest offset and takes it off (`motion_rest`, `motion_fusion.h`: a first offset from two agreeing still seconds, at most 2 deg/s so a slow steady turn is not taken for one, later ones only within 1.25 deg/s of it, ramped in over 0.75 s; forgotten when the stream goes stale or another controller takes the player), and drops a stream's first all-zero sample (a Joy-Con 2's first report; later zeros can be a free fall).
 - **Check:** `t_hid` (`t_imu_noise`: spread, whiteness and the stillness criterion; `t_live_rest`, `t_live_still_dither`, `t_six_ic_info`, the calibration load and store) and `t_motion` (`rest_checks`). With a DualSense, over 1,876 still answers the game got a mean gyro of 0.00, −0.04, −0.00 deg/s after its offset (0.6, 0.1, −0.7 deg/s) was learned.
 - **Found on:** Nintendo Switch Sports Resort (`04008E001F098000`, v65536; no profile in the repository yet).
+
+### Unaltered six-axis passthrough
+
+- **Symptom:** at boot, `[RED] sf: the game connects to service hid itself, which the host does not serve`, then `CRASH sig=11 addr=0` in `hid::detail::EnableSixAxisSensorPassthrough` (`sdk+0x244fac` in SDK 13.3.4), under `hid::EnableSixAxisSensorPassthrough`.
+- **Cause:** the SDK sends the setter and its getter to the hid service (IHidServer `EnableSixAxisSensorUnalteredPassthrough` and `IsSixAxisSensorUnalteredPassthroughEnabled`), which sm refuses, and reads the null service object.
+- **Fix:** `hle_hid.c` answers `EnableSixAxisSensorPassthrough` and `IsSixAxisSensorPassthroughEnabled`. The setting is kept per sensor, as the game last set it, with device 2's under device 0 as for its calibration; a handle that is no npad or names a device past 2 is refused with the SDK's codes (0x58aca, 0xd6ca). The host's values do not change with it: it has no user calibration to leave out, and the rest offset it takes off a GameController's gyro stays. Ported from upstream NXNative `1a636be90`.
+- **Open:** what passthrough leaves out on a console is taken from its name (the user calibration); no game is known to read the difference.
+- **Check:** `t_hid` (`t_six_ic_info`): off before it is set, then as set; per device; on and off through device 2 read through device 0, and the other way, on a sensor nothing else set; the two invalid handles refused.
+- **Found on:** Nintendo Switch Sports 1.5.0 (`0100D2F00D5C0000`, no profile here), upstream issue #3378: it crashed about 2.8 s after boot, before the title screen. Not run on NX 18.
 
 ### `nfp`'s extended application area
 
@@ -950,6 +967,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** both reach the applet proxy: `FinishStartupLogo` through `am::GetApplicationFunctions`, the SDK 21 registration through `am::GetCommonStateGetter`.
 - **Fix:** the host has no startup logo (`hle_oe.c`): `FinishStartupLogo` is a no-op, and `EnableStartupLogoDisappearedMessage` queues message 95 (startup logo disappeared) at once through the notification queue and its event, since the logo is already gone. The number comes from the PR's run (the game popped it and went on); it was not found in the SDK's code.
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md); Fit Boxing 3 (`0100AC101BFA2000`, provisional profile, no note; [PR #1973](https://github.com/seedds/nxnative/pull/1973)).
+
+### System gameplay recording with a work buffer
+
+- **Symptom:** a null read in `oe::EnableGamePlayRecording` before the first frame.
+- **Cause:** the SDK 3 overload `EnableGamePlayRecording(void *, size_t)` makes transfer memory of the game's work buffer for the capture applet, then reads the application proxy (`am::GetApplicationFunctions`), which the host never opens (`sdk+0x14f778` in Splatoon 2 5.5.2, which calls it unconditionally with a 96 MiB buffer).
+- **Fix:** `hle_oe.c` takes the overload over with the other recording switches as a no-op: the host has no system recorder, so the buffer is left as the game gave it. Ported from upstream NXNative `a383253ae`.
+- **Check:** `t_oe`: the call returns, the buffer is untouched and no message is queued.
+- **Found on:** Splatoon 2 5.5.2 (upstream's Mac startup probe passed the call and reached frame 1,200). Not run on NX 18.
 
 ### Copyright frame buffer overlay
 

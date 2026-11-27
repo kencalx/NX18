@@ -88,17 +88,19 @@ enum XcodeSigning {
         return s
     }
 
-    static func buildArguments(project: URL, scheme: String, device: String, team: XcodeTeam, derived: URL) -> [String] {
+    /// `profileSeed`: the player's Profile for the app (ProfileSetup.seed), which the project's Copy game resources phase puts in <App>/NX18ProfileSeed before Xcode signs it
+    static func buildArguments(project: URL, scheme: String, device: String, team: XcodeTeam, derived: URL, profileSeed: URL? = nil) -> [String] {
         ["xcodebuild", "-project", project.path, "-scheme", scheme, "-configuration", "Release", "-destination", "id=\(device)", "-derivedDataPath", derived.path,
-         "-allowProvisioningUpdates", "-allowProvisioningDeviceRegistration", "DEVELOPMENT_TEAM=\(team.id)", "CODE_SIGN_STYLE=Automatic", "build"]
+         "-allowProvisioningUpdates", "-allowProvisioningDeviceRegistration", "DEVELOPMENT_TEAM=\(team.id)", "CODE_SIGN_STYLE=Automatic"]
+            + (profileSeed.map { ["DM_PROFILE_SEED=\($0.path)"] } ?? []) + ["build"]
     }
 
     /// Builds and signs the prepared project for one device; returns the signed app. The log goes to `<build folder>/logs/xcodebuild.log`
-    static func sign(work: URL, titleID: String, device: DeviceInfo, team: XcodeTeam) async throws -> URL {
+    static func sign(work: URL, titleID: String, device: DeviceInfo, team: XcodeTeam, profileSeed: URL? = nil) async throws -> URL {
         let project = work.appending(path: "xcode/DmIOS.xcodeproj"), derived = work.appending(path: "xcode-derived-data")
         let logs = work.appending(path: "logs"); try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
         let scheme = try await scheme(project: project, titleID: titleID)
-        let r = try await Tool.run("/usr/bin/xcrun", buildArguments(project: project, scheme: scheme, device: device.udid ?? device.id, team: team, derived: derived),
+        let r = try await Tool.run("/usr/bin/xcrun", buildArguments(project: project, scheme: scheme, device: device.udid ?? device.id, team: team, derived: derived, profileSeed: profileSeed),
                                    log: logs.appending(path: "xcodebuild.log"))
         if r.code != 0 { throw DeviceError.signing(signingMessage(r.out + r.err, teamID: team.id)) }
         let products = derived.appending(path: "Build/Products/Release-iphoneos")

@@ -10,7 +10,9 @@ import SwiftUI
     /// Application Support (the domain is cleared at each such launch)
     static func makeLibrary() -> Library {
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil else {
-            return Library(settings: BeamSettings())
+            let settings = BeamSettings()
+            ProfileSetup.unify(settings)   // one NX 18 folder: an earlier Beam's Album choice becomes the Mac's connected folder
+            return Library(settings: settings)
         }
         let suite = "org.nx18.beam.testhost"
         UserDefaults.standard.removePersistentDomain(forName: suite)

@@ -2,6 +2,8 @@
 // folder, shared by every game app on every device. Plain files, so the Mac's launcher.c reads the same layout with no JSON parser:
 //   iOS:  Library/Application Support/Profile/{name.txt, picture.jpg, profile.stamp, appearance.txt}; the per-app switch is nx18.profile in the app's defaults
 //   Mac:  ~/Library/Application Support/nxnative/Profile/ (shared by all NX 18 Mac apps); the NX 18 folder's path in nxnative/nx18-folder (one line)
+//   seed: <App>.app/NX18ProfileSeed/ with the same files, put there by NX 18 Beam before it signs an iPhone or iPad game (beam/Sources/Model/ProfileSetup.swift): this app's
+//   Profile takes it when it has none yet or the seed's stamp is higher (applySeed), so a game Beam installs starts with the player's name and picture. It is not the folder.
 //   folder: <NX 18>/Profile/ with the same files. profile.stamp is one line, "<generation> <device id>": an edit writes the picture and the name first and the stamp last,
 //   with the highest generation seen + 1. The higher stamp wins, never the newer date (device clocks differ); the device id breaks a tie.
 // Reads and writes of the folder are coordinated (NSFileCoordinator) and off the main thread. A look at the folder is cheap first (the stamp's resource values: date, size,
@@ -70,7 +72,13 @@ final class NX18Profile: ObservableObject {
         #endif
     }
     init(root: URL = NX18Profile.localRoot()) {
-        local = root; reload()
+        local = root
+        if root == Self.localRoot(), Self.bundledSeed,   // the Profile Beam put in this app (before the first read)
+           let a = (try? String(contentsOf: root.appendingPathComponent("appearance.txt"), encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let look = NX18Appearance(rawValue: a), look != NX18Appearance.current {
+            NX18Appearance.store(look, fromFolder: true)   // as a pull from the folder brings it: nothing is written back
+        }
+        reload()
         if root == Self.localRoot() { NX18Appearance.share = { Self.shareAppearance($0, root: root) } }
     }
 
@@ -133,6 +141,33 @@ final class NX18Profile: ObservableObject {
         bumpLocal(at: root)   // the stamp last
     }
 
+    // ---- the seed from Beam ----
+    nonisolated static let seedFolder = "NX18ProfileSeed"
+    // Once per run, before the first read (init) or the games' env (applyEnv), whichever comes first: true when the app's bundled seed went into this app's Profile
+    nonisolated static let bundledSeed: Bool = {
+        #if os(iOS)
+        return applySeed(Bundle.main.bundleURL.appendingPathComponent(seedFolder, isDirectory: true), to: localRoot())
+        #else
+        return false   // the Mac game apps share the Mac's Profile, which Beam edits in place
+        #endif
+    }()
+    // A seed's Profile into `root` when `root` has no stamp yet (never set on this install) or the seed's stamp is higher (a reinstall from Beam after a newer edit). An edit made
+    // here since (a higher stamp) is never overwritten by an older seed. The picture and the name first, the stamp last, as writeLocal; the folder is not touched
+    @discardableResult nonisolated static func applySeed(_ seed: URL, to root: URL) -> Bool {
+        guard let theirs = NX18ProfileSync.readStamp(seed.appendingPathComponent("profile.stamp")) else { return false }
+        if let mine = NX18ProfileSync.readStamp(root.appendingPathComponent("profile.stamp")), mine >= theirs { return false }
+        let fm = FileManager.default
+        try? fm.createDirectory(at: root, withIntermediateDirectories: true)
+        for f in NX18ProfileSync.files {
+            let src = seed.appendingPathComponent(f), dst = root.appendingPathComponent(f)
+            if fm.fileExists(atPath: src.path) { try? fm.removeItem(at: dst); try? fm.copyItem(at: src, to: dst) }
+            else if f == "picture.jpg" { try? fm.removeItem(at: dst) }   // the seed is the whole Profile: no picture there, none here
+        }
+        guard (try? (theirs.line + "\n").write(to: root.appendingPathComponent("profile.stamp"), atomically: true, encoding: .utf8)) != nil else { return false }
+        fputs("profile: the profile from Beam is in this app\n", stderr)   // never the name
+        return true
+    }
+
     // ---- the NX 18 folder ----
     nonisolated static func folderURL() -> URL? {
         #if os(iOS)
@@ -174,6 +209,7 @@ final class NX18Profile: ObservableObject {
 
     // The name and picture the games see (gate-ui §20.5 "To the games"), beside dm_cloud_saves_env. An env.txt or launch value wins; with the switch off neither is set
     nonisolated static func applyEnv(root: URL = localRoot(), defaults: UserDefaults = .standard) {
+        if root == localRoot() { _ = bundledSeed }   // a start that skips the Gate off the main thread: the seed before the name is read
         let fromFile = Set((getenv("DM_ENV_FILE_KEYS").map { String(cString: $0) } ?? "").split(separator: " ").map(String.init))   // getenv: main.m sets it after ProcessInfo's snapshot
         let on = defaults.object(forKey: switchKey) as? Bool ?? true
         let raw = (try? String(contentsOf: root.appendingPathComponent("name.txt"), encoding: .utf8))?.split(separator: "\n").first.map(String.init) ?? ""

@@ -12,7 +12,7 @@
 #   spin wait loops     → a copy whose back-edges pass a spin gate (the host yields there; a busy poll costs nothing on the Switch, see "Spin waits")
 #   Registered cuts (CUTS of the patch files, restricted by NSO build ID, see "Registered patches"): before rewriting, the original bytes are asserted one by one and any mismatch aborts; results are listed in <name>.cuts.tsv
 #   Function-matched cuts (MATCH_CUTS of the selected game's patches.py): unknown builds only, unique complete-function and direct-callee fingerprints, then original-byte assertions
-#   Registered observation gates (OBS of the patch files, restricted by build ID): one instruction at the entry is replaced with "enter the host observation callback → execute the original instruction → jump back", so diagnostics modify zero code at runtime; listed in <name>.obs.tsv
+#   Registered observation gates (OBS of the patch files, restricted by build ID; MATCH_OBS of the selected game's patches.py places them by function on other builds): one instruction at the entry is replaced with "enter the host observation callback → execute the original instruction → jump back", so diagnostics modify zero code at runtime; listed in <name>.obs.tsv
 # The key page only stores "actual key number × 8" at the end of the data segment, and patch code fetches thread slots indirectly through the key page: the loader may use any key number.
 # Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF; when that would start beyond 112 MB the patch area sits before the base, see FAR; a text longer than a B reaches adds a second one after the image, see TWO), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv, <name>.changed.tsv (the text words whose instructions no longer run as the file has them)
 import struct, re, sys, os, glob, shlex, types, importlib.util, multiprocessing, signal, hashlib
@@ -92,6 +92,10 @@ else:
 #     at all leaves the main without a state page, so the host keeps the game's own present interval (below)
 #     An anchored rule {name, calls, find, stub, reviewed} is found instead as the one function that calls the imported symbol calls; find(fn) (nso_match.Function) checks the code there
 #     and returns what the stub needs (ctx.found: its sites, registers), or raises MatchError (a red line, no stubs); reviewed lists what find returned on the builds checked by hand. It holds over updates that change the function elsewhere
+#   MATCH_OBS = {module name: [{name, size, fingerprints, gates}, ...]}: the observation gates of a module without OBS of its build, placed by the function they observe
+#     (nso_match.resolve_gates: gates = [(function-relative offset, number, original word, reason)], found before any cut changes the image, as MATCH_CUTS: one unique complete
+#     unwind function, a rule of several functions whole or not at all, rules of one name as reviewed implementations, each original word checked; a miss is a red line and no gate).
+#     Only the profile selected by DM_GAME participates; a build's OBS keeps its exact rows. nso_match.py --gates NAME makes the rule from a registered build's OBS
 #   MATCH_CUTS = {module name: [nso_match rule, ...]}: fallback for modules without registered CUTS. Only the profile selected by DM_GAME participates; a derived profile uses
 #     the repository's rules, an external-only provisional profile its own. Missing or ambiguous matches are reported and skipped; known builds retain their exact CUTS.
 #     A rule of several functions applies whole or not at all. For such a module <name>.match.tsv lists the cuts of the profile's registered builds of it and each patch's result,
@@ -112,7 +116,7 @@ patch_paths = {}
 for path in PATCH_FILES: patch_paths.setdefault(os.path.realpath(path), path)   # repeated roots and symlinks name the same file, not competing build claims
 PATCH_FILES = list(patch_paths.values())
 def load_patches():
-    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'STUBS': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
+    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'STUBS': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'MATCH_OBS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
     for n, path in enumerate(PATCH_FILES):
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
@@ -120,7 +124,7 @@ def load_patches():
             if kind == 'MATCH_CUTS' and os.path.basename(path) in SHARED:   # SDK-wide and engine-wide
                 for mod, rules in getattr(m, kind, {}).items(): tables['SDK_MATCH_CUTS'].setdefault(mod, []).extend(rules)
                 continue
-            if kind in ('MATCH_CUTS', 'MATCH_FRAME_STEP'):
+            if kind in ('MATCH_CUTS', 'MATCH_FRAME_STEP', 'MATCH_OBS'):
                 if os.path.basename(path) in SHARED: continue
                 profile = os.path.basename(os.path.dirname(path))
                 roots = [os.path.join(os.path.dirname(os.path.abspath(__file__)), '../games')] + [d for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d]
@@ -165,6 +169,11 @@ FS_MATCH = None
 if NAME == 'main' and BUILD_ID not in PATCHES['FRAME_STEP']:
     from nso_match import locate_stub
     FS_MATCH = locate_stub(IMG, TEXT_END, PATCHES['MATCH_FRAME_STEP'].get(os.path.basename(os.environ.get('DM_GAME', '').rstrip('/')), {}).get(NAME, []))
+# the observation gates of a module with no OBS of its build, placed by the function they observe (MATCH_OBS), found before any cut changes the image
+OBS_MATCH = []
+if BUILD_ID not in PATCHES['OBS'] and PATCHES['MATCH_OBS'].get(os.path.basename(os.environ.get('DM_GAME', '').rstrip('/')), {}).get(NAME):
+    from nso_match import resolve_gates
+    OBS_MATCH = resolve_gates(IMG, TEXT_END, PATCHES['MATCH_OBS'][os.path.basename(os.environ.get('DM_GAME', '').rstrip('/'))][NAME])
 # The frame step state page is the page after the key page. An appended patch area starts on the first 64 KB boundary after the key page, which is that page itself when the key
 # page ends on such a boundary (Hades II's v0 main): a main that gets the state page then starts its patch area 64 KB later. Nothing has been written to the patch area yet, and
 # every other module keeps its layout
@@ -1681,7 +1690,7 @@ for a in sorted(kinds):
         else: struct.pack_into('<I', IMG, a, 0xD2A00080 | arg); stat(k); continue
     put_branch(a, st)
 
-obs = list(PATCHES['OBS'].get(BUILD_ID, []))
+obs = list(PATCHES['OBS'].get(BUILD_ID, OBS_MATCH))   # a build's own OBS, else the gates its function matched (MATCH_OBS)
 for off, oid, ow, why in obs:
     w = struct.unpack_from('<I', IMG, off)[0]
     assert f'{w:08x}' == ow, f'observation gate original instruction mismatch {off:#x}: {w:08x}'

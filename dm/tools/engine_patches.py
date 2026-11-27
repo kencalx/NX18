@@ -17,6 +17,8 @@ MATCH_CUTS = {'main': [
     # same eight sites 0x25380 earlier, which no cut covered), and Raging Loop 1.0.0 (Unity 2018.3.10f1): the same four functions, instruction for instruction; the fourth calls a log
     # helper of another body in the other two builds, hence its three fingerprints. Unity 2017.4 (Cuphead,
     # AI: THE SOMNIUM FILES) has other code there, not reviewed.
+    # Thronebreaker: The Witcher Tales 1.0.2 (Unity 2018.4.2f1, upstream NXNative ffe0d357b): the first three functions match; its writer-sleep function (main+0x2ba7290) keeps the
+    # stlr of +0xd8 at +0x160 and the plain ldr of +0x40 at +0x168 with another body around them, hence a fourth fingerprint there (its game note: upstream's ordering test).
     {'name': 'Unity 2018 ThreadedStreamBuffer: load-acquires after its store-releases', 'functions': [
         # the reader going to sleep (FINAL FANTASY CRYSTAL CHRONICLES 1.0.3 main+0x1e67930)
         {'size': 528, 'fingerprints': ['6b48e9a19281a61d041d534127efd9514bcfd37c971463d342ed1ffe3bde0630'], 'cuts': [
@@ -33,7 +35,7 @@ MATCH_CUTS = {'main': [
             (0x2bc, '080140b9', '08fddf88', 'stream writer: ldr w8,[x8] → ldar ("reader sleeping" after the store-release of the write position)')]},
         # the writer going to sleep (main+0x1e68660; Raging Loop's and FINAL FANTASY CRYSTAL CHRONICLES 1.0.0's call a log helper of another body)
         {'size': 576, 'fingerprints': ['aa8a3dc16b30ea6c510161b632162019a41a95b81a71ccf909d439a08691b1b6', '57a283d159be07dc3178d4158ddecd7c4ebb34e6631a7965111c38c02724b2f2',
-                                     'eb41f41ceeffc7e1428740e81625bc7b8aa12aa6823cf1fd4152e50e752e2d4f'], 'cuts': [
+                                     'eb41f41ceeffc7e1428740e81625bc7b8aa12aa6823cf1fd4152e50e752e2d4f', 'e1bff2e6d23005e70825edfaa2b79abb67f475c3615a6d364cebc76befd49815'], 'cuts': [
             (0x168, '290140b9', '29fddf88', 'stream writer going to sleep: ldr w9,[x9] → ldar (read position after the store-release of "writer sleeping")')]},
     ]},
 ]}

@@ -121,3 +121,7 @@ General host changes first needed here; each applies to every game:
 - `c85de3713170e519` ORs bit fields into output 0 and has not been seen with an integer attachment (no row).
 - The development notes list "the render condition the host does not evaluate" among the Mac route's red lines; `render_cond` changes nothing here and stays off.
 - `game.tsv`'s header says "Plays on the Mac"; AGENTS.md and the development notes say it is playable on the iPhone.
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 19,210 rows (14,894 `S`, 4,250 `R`, 66 `C`) of upstream NXNative's list at `1a54371cf` (its seed commits `e644d15ee`, `442c4409f` since the last check, and older rows; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 19,210 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

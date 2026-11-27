@@ -469,6 +469,27 @@ static void shared_paths(NSString *dir) {
     for (NSString *ext in @[@"json", @"metallib"]) [NSFileManager.defaultManager removeItemAtPath:[dir stringByAppendingPathComponent:[@"share-bad." stringByAppendingString:ext]] error:nil];
 }
 
+// The prepare screen's show decision (prepare_rest; idea from S2Arm 98fc203eb): no compile rate before PREPARE_EST_COMPILES real compiles (the lines' rate decides, so a start of
+// archive hits alone shows no screen that flashes), the compile rate after, where the lines' rate alone said the rest was quick (negative control: the old rule)
+static void estimate(void) {
+    // 8,000 archive hits in the first 0.5 s of a 47,000-line list, then real compiles
+    {
+        int lines_rate = 0; uint64_t ms = 1000000ull;
+        double rest = prepare_rest(500 * ms, 8000, 47000, 10, &lines_rate);
+        EXPECT("estimate: fewer than 32 compiles give no compile rate", 1, lines_rate);
+        EXPECT("estimate: the lines' rate stands in", 1, rest > 2.4e9 && rest < 2.5e9);
+        rest = prepare_rest(3000 * ms, 8100, 47000, 100, &lines_rate);
+        EXPECT("estimate: 32 compiles or more give the compile rate", 0, lines_rate);
+        EXPECT("estimate: the rest at that rate is minutes", 1, rest > 1000e9);
+        double old = 3000.0 * ms * (47000 - 8100) / 8100;   // the old rule: lines done over time
+        EXPECT("estimate: the old rule said seconds (negative control)", 1, old < 20e9);
+        rest = prepare_rest(600 * ms, 9900, 10000, 0, &lines_rate);
+        EXPECT("estimate: a start of archive hits only: no screen that flashes", 1, lines_rate && rest < 3e8);
+        rest = prepare_rest(600 * ms, 9900, 10000, 40, &lines_rate);
+        EXPECT("estimate: 100 lines left at 40 compiles in 0.6 s: the screen shows", 1, !lines_rate && rest >= 3e8);
+    }
+}
+
 int main(void) { @autoreleasepool {
     alarm(60);   // A regression in owner/waiter progress must fail rather than hang the suite.
     setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_NVN_PREDICT", "0", 1);
@@ -483,6 +504,7 @@ int main(void) { @autoreleasepool {
     native_mesh(@(dir));
     late_lines(@(dir));
     shared_paths(@(dir));
+    estimate();
     EXPECT("pipelines are built through the Metal 4 compiler", 1, g_comp4 != nil && g_pb_spec > 0);
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
     printf("t_pso_warm: %d checks, %d failed\n", checks, failed);

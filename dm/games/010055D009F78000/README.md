@@ -87,3 +87,7 @@ General host changes first needed here; each applies to every game:
 - Deferred binds are not remapped to the pool base (red line).
 - `game.tsv` still describes the game as "In bring-up" and the memory layout as Link's Awakening's, not measured; the development notes call SDK 6.5.0 "the oldest so far", though DARK SOULS: REMASTERED (SDK 4.5.0) and Mario Kart 8 Deluxe (SDK 4.4.0) are older.
 - The capture boot's time: the development notes give "about 10 s in all" for the NSP script's stage and "about a second after launch" for the 9 files.
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 1,294 rows (1,261 `S`, 31 `R`, 2 `C`) of upstream NXNative's list at `1a54371cf` (rows from before the last check; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 1,294 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

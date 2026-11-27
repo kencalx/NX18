@@ -372,7 +372,7 @@ def page():
         m = mods.get(g.id)
         if not m and g.id not in host_games: continue
         text = files[g.id].read_text() if m else ''
-        cuts, obs, fs, st, mc, mfs, caps = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'CAPABILITIES'))
+        cuts, obs, fs, st, mc, mfs, mob, caps = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'MATCH_OBS', 'CAPABILITIES'))
         bids = list(dict.fromkeys([*cuts, *obs, *fs, *st, *caps, *sorted(host_games.get(g.id, ()))]))
         n_fs = 0; lines = [f'### {name(g)}', '', f'{note(g)}, `{g.id}`' + (f', {link(files[g.id])}' if m else '') + '.', '']
         es = list(bound(m, rel(files[g.id]), own=True)) if m else []
@@ -405,6 +405,11 @@ def page():
             for r in rules:
                 fns = r.get('functions', [r]); ncut = sum(len(f['cuts']) for f in fns)
                 lines.append(f'- **function-matched** (`{module}` of builds without CUTS): {r["name"]}: {len(fns)} function{"s" * (len(fns) > 1)}, {ncut} cut{"s" * (ncut > 1)}')
+        for module, rules in mob.items():
+            for r in rules:
+                fns = r.get('functions', [r])
+                lines.append(f'- **function-matched gates** (`{module}` of builds without OBS): {r["name"]}: ' + '; '.join(
+                    f'a function of {f["size"]:#x} bytes, ' + ', '.join(f'gate {n} at `+{d:#x}`' for d, n, _, _ in f['gates']) + ' in it' for f in fns))
         for module, rules in mfs.items():
             for i, r in enumerate(rules):
                 if 'calls' in r:   # anchored: its sites on the reviewed builds

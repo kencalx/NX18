@@ -12,8 +12,9 @@ Beam runs NX 18's own build script and relies only on what [docs/frontends.md](f
    - its versions with their build IDs;
    - its DLC;
    - whether NX 18 has tested it.
-3. **Coming from NX Play?** "Bring Your NX Play Library" adds NX Play's games where they are. Nothing is moved or deleted.
-4. **Keys:** for games in NSP or XCI form, choose your keys file in Settings. Use the keys dumped from your own console. Beam keeps only the file's location.
+3. **Profile:** create the name and picture your games show, or use your profile from the NX 18 folder in iCloud Drive (Beam finds the folder; you can choose another), or do it later in Settings › **Profile**. Beam keeps it on this Mac for the games you play here, and puts it in every game it installs on your iPhone or iPad. Connect the same NX 18 folder in Beam and in your games on iPhone or iPad (each game asks once) to share your profile, cloud saves and captures: change your profile on one, and the others pick it up.
+4. **Coming from NX Play?** "Bring Your NX Play Library" adds NX Play's games where they are. Nothing is moved or deleted.
+5. **Keys:** for games in NSP or XCI form, choose your keys file in Settings. Use the keys dumped from your own console. Beam keeps only the file's location.
 
 ## Building and playing
 
@@ -31,6 +32,7 @@ Beam runs NX 18's own build script and relies only on what [docs/frontends.md](f
 - **With your own certificate:** add your Apple Developer certificate (`.p12`) and a profile made for it in Settings. macOS asks for the certificate's password in its own window.
 - **Memory limits:** every game is installed with the Increased Memory Limit and Extended Virtual Addressing, or not at all. A free Apple account (Personal Team) cannot have them. With a free account, install the IPA with another tool and add the limit with GetMoreRam; Beam's Step by Step shows how.
 - **On the game's page:** each install shows its days left and a Renew button.
+- **Your profile goes with every install:** the game starts with your name and picture. Installing again after you change your profile on the Mac brings the new one; a change you made on the device since is kept. Each game still asks once for the NX 18 folder, to share it from then on.
 
 ## Mods, cheats, art and guides
 
@@ -41,7 +43,7 @@ Beam runs NX 18's own build script and relies only on what [docs/frontends.md](f
 - **Cheats:** your own cheat files, named after the game's build. Beam never downloads cheats.
 - **Art:** with a SteamGridDB key, which is kept in the Keychain and never given to the build, choose key art, a logo and an icon.
 - **Manual and My files:** add the game's manual to the app. Keep your own guides on the Mac and send them to a device Beam installed on. Keep apps with a manual to your own devices.
-- **Album:** each game's screenshots and recordings, with your own guides and maps (Add Files…), newest first. Captures come from the Mac app's own folder and, for iPhone and iPad, from the iCloud NX 18 folder once **This game's captures** is set to **NX 18 folder** on the game's NX 18 card ([Screenshots](playing.md#screenshots)). Click one to look at it in Quick Look; right-click to open it, show it in Finder, share it or move it to the Trash. Beam finds the iCloud NX 18 folder by itself (the one your Mac game apps use, else iCloud Drive › NX 18); Settings › **iCloud NX 18 folder** chooses another.
+- **Album:** each game's screenshots and recordings, with your own guides and maps (Add Files…), newest first. Captures come from the Mac app's own folder and, for iPhone and iPad, from the iCloud NX 18 folder once **This game's captures** is set to **NX 18 folder** on the game's NX 18 card ([Screenshots](playing.md#screenshots)). Click one to look at it in Quick Look; right-click to open it, show it in Finder, share it or move it to the Trash. Beam reads the NX 18 folder connected in Settings › **Profile** (the one your Mac game apps use); with none connected it finds the iCloud Drive folder that holds a Profile, else iCloud Drive › NX 18.
 
 ## Privacy
 

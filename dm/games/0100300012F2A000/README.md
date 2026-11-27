@@ -57,3 +57,7 @@ On the Mac: the boot, the Bink opening movie, the title, Nell's introduction, a 
 - **The heap check's 1 GB pool is too small here**: [dm/games/README.md, Adding a game](../README.md#adding-a-game).
 - **A called recording recorded over before its caller is submitted** (the rendering plugin's three command buffers): [A called recording recorded over before its caller is submitted](../../../docs/reference/nvn-objects.md#a-called-recording-recorded-over-before-its-caller-is-submitted).
 - The spin-wait search's store rule takes one wider loop in its `main`: [development.md, Power](../../../docs/development.md#power).
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 177 rows (124 `S`, 53 `R`, 0 `C`) of upstream NXNative's list at `1a54371cf` (rows from before the last check; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 177 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

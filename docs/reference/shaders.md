@@ -3050,6 +3050,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game), [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game).
 - **Check:** `test_dmsh_vsunit.py` (the unit's text, its cut libraries on both compilers, `main0_gs` byte for byte the plain source's, the build step with its fallbacks), `test_shader_toolchain_cache.py` (the Metal cache's fill), `test_pso_offline.py`; `make -C dm/gfx/tests GAME=<id> check_t_vs_unit` (every entry point of a unit against the three compiles on the GPU, with a control), `check_t_pso_bundle` (the reflection's names in the host and the offline archive), `check_t_pull_inv check_t_vin`.
 
+### A later start waited for prewarm lists it had prepared before
+
+- **Symptom:** every start, not only the first, holds the first frame for the prepare step: `pipeline prepare: N lines … in … s … before the first frame` with nearly every base `from the archive` and none compiled. A large list costs seconds at each start (on the iPhone one lookup in Ocarina of Time's bundled archive takes about 50 ms).
+- **Cause:** the step ran every line of the lists before the first frame at every start, on purpose: a stamp that skipped it would skip it exactly when the system had dropped the Metal cache. An archive hit is still a lookup and a library load per line.
+- **Fix:** the step is not skipped but moved: a start whose lists this device prepared to the end before, in this archive, hands every line to the background on half the performance cores at utility QoS and the first frame goes on (`warm_later_ready`, `warm_later_bg`, `warm_later_mark` in `dm/gfx/nvn/nvn_mtl.m`; [the prepare step](../development.md#the-prepare-step) has the stamp, `pso_archive/prepared.tsv`, and what makes a start wait). Idea from S2Arm `e899d98a1`, NX 18's own code. `DM_PSO_LATER_START=0` waits as before.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pso_later`: a first start waits and writes the stamp, the next hands its list on while its first library load is held at the device, takes every base from the archive and claims the pipeline at the next submission; a changed list, `DM_PSO_LATER_START=0` and a refused archive file each wait.
+- **Open:** not measured on a device: the first frame's time on a second start (the start line's `prepare` part, and `pipeline prepare in the background: …` for how long the lines take behind it), and whether the first seconds of play wait on a pipeline the background has not reached (`DM_PSO_WAITLOG=1`).
+
 ### Concurrent warm tasks prepare each shader once
 
 - **Symptom:** startup tasks can prepare the same shader more than once, even though only one object enters the warm dictionary. A measured Tears of the Kingdom startup avoided 320 duplicate preparations; this is not a steady-frame-rate claim.

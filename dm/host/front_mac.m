@@ -253,7 +253,9 @@ static void pad_read(GCExtendedGamepad *g) {
     if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
     if (m) merge_rumble_to(NULL);   // DM_PAD_MERGE: a button on this controller takes player 1's rumble back from a Switch 2 pad or Joy-Cons read from HID
     dm_haptics_apple_controller(p, g.controller);
-    pad_set(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
+    int32_t s[4] = {pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value)};
+    hidpad_kp20_sticks(g.controller, s);   // a Betop Kunpeng 20 in NS mode over USB: GameController's sticks read nothing, its report 0x30's do (pad_hid_mac.h)
+    pad_set(p, m, s[0], s[1], s[2], s[3]);
 }
 // The player's screenshot (captures-album.md): Capture on a controller, or the app menu's Take Screenshot (⇧⌘S). front_capture.h names the file in DM_ROOT/Captures (the
 // game's Application Support folder, which Beam's Album reads) and the graphics side draws the game picture into it. A small notice shows at the window's top left for two seconds
@@ -342,6 +344,7 @@ static void pads_changed(GCController *gone) {
         }
         if (gone) dm_motion_detach(gone, 0);
         if (!any) { if (!g_hidpads && !g_jc1_pads && !dm_switch2_pads()) dm_pad_set(0, 0, 0, 0, 0); dm_haptics_apple_controller(0, nil); }   // a raw HID pad still plays player 1 (pad_hid_mac.h)
+        hidpad_kp20_pair(gone);   // a Betop Kunpeng 20's sticks from its HID reports (pad_hid_mac.h)
         pads_motion_changed(gone);
         return;
     }
@@ -374,6 +377,7 @@ static void pads_changed(GCController *gone) {
     }
     hidpad_twins_take(gone);   // the pads of a model GameController lists fewer of, a player each
     dm_pad_players(pad_slot_mask(&g_slots));
+    hidpad_kp20_pair(gone);   // a Betop Kunpeng 20's sticks from its HID reports (pad_hid_mac.h)
     pads_motion_changed(gone);
     cp_poll();   // a controller came or went while the controller applet's prompt is up
 }
@@ -458,6 +462,7 @@ static void hidpad_motion(hid_pad *d, const pro_motion_sample *s, int n) {
     for (int i = 0; i < n; i++) dm_motion_set_hid(p, s[i].acc, s[i].rot, s[i].ns);
 }
 static void hidpad_models_changed(void) { pads_changed(nil); }
+static void hidpad_kp20_moved(void) { if (g_kp20_gc.extendedGamepad) pad_read(g_kp20_gc.extendedGamepad); }   // GameController sends no change for sticks it does not read
 static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
     if (g_merge) {   // as pads_changed: released when the last controller goes away
         LOG("controller '%s' (HID) disconnected", d->name);

@@ -97,3 +97,7 @@ General host changes first needed here; each applies to every game (or every Unr
 - Battles are not tested yet.
 - Shader decode counts and times differ between sources: `docs/development.md` says 10,324 shaders decoded in about 10 s; `dm/games/README.md` says 10,596 shaders in 2 s (10,596 is the two archives' total, 1,219 + 9,377; 10,324 the unique count).
 - Touches as a mouse would suit Romance of the Three Kingdoms 8 Remake, but this game, Tears of the Kingdom and Unicorn Overlord also read a mouse and no touch screen, so such a rule needs testing here first.
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 85 rows (49 `S`, 31 `R`, 5 `C`) of upstream NXNative's list at `1a54371cf` (rows from before the last check; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 85 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

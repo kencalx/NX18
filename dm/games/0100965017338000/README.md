@@ -58,3 +58,7 @@ General changes first needed here; each applies to every game:
 - Only one board and one minigame were played; the other boards, modes (Koopathlon, Bowser Kaboom Squad, Rhythm Kitchen, …) and most minigame NROs were not loaded. Motion minigames were turned off at the prompt.
 - Only the 2.3.0 build (`v458752`) is registered.
 - iPhone: not built, not installed, not tested.
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 781 rows (781 `S`, 0 `R`, 0 `C`) of upstream NXNative's list at `1a54371cf` (rows from before the last check; inbox captures and recordings from upstream's players) that it lacked, below its rows; the list is now 3,446 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

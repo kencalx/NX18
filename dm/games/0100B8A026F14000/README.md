@@ -23,6 +23,8 @@ The profile retains #126's package/index ordering. All three submissions contain
 
 The shader libraries are the same engine-global and game-material libraries described in the JP note's [files section](../0100606026F12000/README.md#files): 3,542 + 70,702 shaders, extracted from IoStore through the game's own Oodle service. #289 records two type-8 library chunks and 5,919 type-9 shader groups. Its [`pso_manifest.tsv`](pso_manifest.tsv) contributes 191 shader, 111 render-pipeline and 47 compute-pipeline seeds from its Mac route. The serialized render keys still have the current 432-byte layout; shader keys refer to the retained map. These are recorded seeds, not a claim of newly measured prepare time.
 
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 16 rows (8 `S`, 8 `R`, 0 `C`) of upstream NXNative's list at `1a54371cf` (its seed commits `9a763d973` since the last check, and older rows; inbox captures and recordings from upstream's players) that it lacked, below its rows; the list is now 365 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.
+
 The update tag is normalized to `v65536`, as used by the NSP script and #289. #126/#304 called this same module build `v1`; the display version remains 1.0.1. The earlier 73,488-shader figure in #126's description is superseded by the complete map's 73,496 entries.
 
 ## Reported testing

@@ -83,3 +83,7 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 ## GPU headroom
 
 - Current, not yet run on a device: the GPU headroom controller through the GPU-time stretch (`drs_gpu_scale on`), Balanced and Battery Saver; Quality off (`DM_DRS_GPU_SCALE=0`): [GPU headroom for the games whose dynamic resolution reads the GPU time](../../../docs/reference/frame-rate.md#gpu-headroom-for-the-games-whose-dynamic-resolution-reads-the-gpu-time).
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 15,670 rows (11,432 `S`, 4,189 `R`, 49 `C`) of upstream NXNative's list at `1a54371cf` (its seed commits `883bdf0fd`, `00ef88cd0`, `61ba3350d` since the last check, and older rows; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 15,670 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

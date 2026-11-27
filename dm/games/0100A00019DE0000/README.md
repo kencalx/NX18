@@ -60,3 +60,7 @@ General host changes first needed here; each applies to every game:
 - `game.tsv` says values marked "Mario's" are not measured for this game; none of its rows is marked so.
 - The iPhone retest of the movie backgrounds (#1956). The game is on this Mac since 2026-11-10 (v0 and 1.0.141667), but only a Mac run was made then.
 - Render size: no iPhone run above 1.0 yet (GPU time and heat there), no play past the first Erebus room at a raised size, the anchored rule not run on 1.0.131248 or 1.0.137848 (no copies here).
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 91 rows (53 `S`, 38 `R`, 0 `C`) of upstream NXNative's list at `1a54371cf` (its seed commits `7b2344db1`, `e9cbda1d4`, `c5cb0d883` since the last check, and older rows; inbox captures and recordings from upstream's players); NX 18 had no rows for this game, so they are the whole list, 91 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

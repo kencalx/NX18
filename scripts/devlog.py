@@ -12,7 +12,7 @@ What it reads (docs/development.md, Reading a device log):
                      and those changed in the in-game menu); controller … connected
   start              start: Play at … (when the player pressed Play, local time) and start: first frame N s after Play: host load, prepare, first frame (hle_lifecycle.c,
                      start_line.h): the time from Play to the first frame on screen and its three parts
-  pipelines          pipeline prepare and prebuild (read by scripts/regress.py's read_log, as in its Mac runs); pipeline archive … files, MB; the bundled archive's probe (pairs
+  pipelines          pipeline prepare and prebuild (read by scripts/regress.py's read_log, as in its Mac runs), a later start's lists in the background; pipeline archive … files, MB; the bundled archive's probe (pairs
                      found, cover pairs only, stand-ins and how many of them found, from their lookups' own line); the bundled archive's open and the first submission's wait for it; bases written; bases compiled while playing and the pulling base builds hybrid lookups kicked ([nvn] pipelines up to frame);
                      a Vulkan game's [vk] pipelines lines, an OpenGL game's [gl] pipeline builds
   frames, power      [nvn] timing, on-screen and power up to frame N (one each per 300 frames): frame-time percentiles, dropped frames, frame rate, CPU watts, mJ per frame,
@@ -115,6 +115,9 @@ RX = {k: re.compile(v) for k, v in {
     'written': r'^\[nvn-mtl\] pipeline archive: (\d+) new pipeline bases(?: and \d+ compute pipelines)?(?: and \d+ task / mesh pipelines)? written to \S+ \(([\d.]+) MB, (\d+) ms\)',   # the compute part since NXNative's 30fb2136, the task / mesh part since bf420fda
     'prepare': r'^\[nvn-mtl\] pipeline prepare: (\d+) lines .*?progress screen (shown|not shown); bases (\d+) compiled, (\d+) from the archive, (\d+) reused'
                r'(?:.*?; (\d+) layout bases from the archive bundled with the app)?',   # the layout bases' part since X1.0 (with an archive bundled with the app)
+    # a later start (warm_later_bg): the lists handed to the background, the first frame not waiting, and the line at their end
+    'prepare_later': r'^\[nvn-mtl\] pipeline prepare: a later start: (\d+) lines this device prepared before go to the background on (\d+) workers',
+    'prepare_bg': r'^\[nvn-mtl\] pipeline prepare in the background: (\d+) lines in ([\d.]+) s on \d+ workers; bases (\d+) compiled, (\d+) from the archive, (\d+) reused',
     'ghost_cap': r'^\[nvn-mtl\] finalized-texture table: up to (\d+) textures .*\((.+)\)$',
     'mipdrop_on': r'^\[nvn-mtl\] DM_NVN_MIP_DROP=(\d): .*, (\d+) texels or larger',
     'mipdrop': r'^\[nvn-mtl\] mip drop up to frame (\d+): (\d+) textures held without their top (\d) levels? now \((\d+) MB not allocated\); (\d+) such uploads in total '
@@ -475,6 +478,7 @@ def read(text: str, top: int = 5) -> Rec:
                     'prepare_s': float(sf.group(3)) if sf else None, 'rest_s': float(sf.group(4)) if sf else None} if sp or sf else None
     # pipelines
     pp, ar, bu, bp = one.get('prepare'), one.get('archive'), one.get('bundled'), one.get('bundle_probe')
+    pl, pg = one.get('prepare_later'), one.get('prepare_bg')   # a later start's lists in the background (warm_later_bg)
     wr = [(int(m.group(1)), float(m.group(2))) for _, m, _ in g['written']]
     play = [(int(m.group(2)), float(m.group(3))) for _, m, _ in g['psoline'] if int(m.group(1)) > 300]   # the first window holds the prepare step's
     kicks = [(int(m.group(4)), int(m.group(5) or 0)) for _, m, _ in g['psoline'] if m.group(4) is not None]
@@ -484,6 +488,8 @@ def read(text: str, top: int = 5) -> Rec:
         'prepare_s': prepare_s, 'prebuild': prebuild,
         'prepare': {'lines': int(pp.group(1)), 'progress_screen': pp.group(2) == 'shown', 'bases_compiled': int(pp.group(3)), 'bases_from_archive': int(pp.group(4)),
                     'reused': int(pp.group(5)), 'bundle_layout': int(pp.group(6)) if pp.group(6) else None} if pp else None,
+        'prepare_later': {'lines': int(pl.group(1)), 'workers': int(pl.group(2)), 'background_s': float(pg.group(2)) if pg else None,
+                          'bases_compiled': int(pg.group(3)) if pg else None, 'bases_from_archive': int(pg.group(4)) if pg else None} if pl else None,
         'archive': {'files': int(ar.group(1)), 'mb': float(ar.group(3)), 'open_ms': float(ar.group(4))} if ar else None,
         'bundled': bundled_of(bu) if bu else 'left out' if 'bundle_out' in one else None,
         'bundle_probe': {'taken': bp.group(1) == 'holds the bases', 'found': int(bp.group(2)), 'probed': int(bp.group(3)), 'cover_only': 'cover pairs only' in bp.group(4),
@@ -778,6 +784,9 @@ def render(s: Rec, top: int) -> list[str]:
         f"prepare {p['prepare_s']:g} s" + (f" ({pr['lines']} lines, progress screen {'shown' if pr['progress_screen'] else 'not shown'}; bases {pr['bases_compiled']} compiled, "
                                           f"{pr['bases_from_archive']} from the archive" + (f" ({pr['bundle_layout']} layout bases from the app's)" if pr['bundle_layout'] is not None else '')
                                           + f", {pr['reused']} reused)" if pr else '') if p['prepare_s'] is not None else '',
+        (lambda pl: f"a later start: {pl['lines']} lines to the background on {pl['workers']} workers, the first frame not waiting"
+                    + (f"; done in {pl['background_s']:g} s, bases {pl['bases_compiled']} compiled, {pl['bases_from_archive']} from the archive" if pl['background_s'] is not None
+                       else '; not done in the log') if pl else '')(p.get('prepare_later')),
         f"prebuild {done}: {pb['pairs']:.0f} pairs, {pb['built']:.0f} built, {pb['archived']:.0f} already archived, {pb['failed']:.0f} failed, "
         f"{pb['secs']:g} s" if pb else '',
         ', '.join(x for x in (f"archive {ar['files']} files, {ar['mb']:g} MB (opened in {ar['open_ms']:g} ms)" if ar else '',

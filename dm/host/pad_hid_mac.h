@@ -32,6 +32,7 @@ typedef struct hid_pad {
     int twin, twin_want;   // twin: read here although GameController lists its model; twin_want: hidpad_twins_eval's choice for it
     uint64_t heard; int streams, shown;   // heard: its last input report; streams: it sends a Pro Controller's 0x30 (hidpad_live); shown: 1 / 2 logged as not counted / counted
     pad_pro pro; uint64_t pro_m; int32_t pro_s[4]; pro_motion motion; uint8_t pro_counter; int pro_logged;   // a twin Pro Controller, from its report 0x30, not from st
+    int kp20;   // a Betop Kunpeng 20 in NS mode over USB (pad_hid_kp20): GameController reads it with dead sticks, so its sticks come from its 0x30 (pro, pro_s; hidpad_kp20_pair)
     uint8_t report[512];   // its report buffer
 } hid_pad;
 static IOHIDManagerRef g_hidpad_manager;
@@ -45,6 +46,8 @@ static void hidpad_detach(hid_pad *d);
 static void hidpad_read(hid_pad *d);
 static void hidpad_motion(hid_pad *d, const pro_motion_sample *s, int n);   // a twin Pro Controller's gyro
 static void hidpad_models_changed(void);   // the pads of a model changed: front_mac.m runs hidpad_twins_eval / _release / _take again
+static void hidpad_kp20_moved(void);       // the paired Kunpeng 20's sticks moved: front_mac.m reads its GameController controller again (GameController sends no stick change)
+static hid_pad *g_kp20_pad; static GCController *g_kp20_gc;   // hidpad_kp20_pair's pair, or none
 
 static int hidpad_is_pro(const hid_pad *d) { return d->vid == 0x057e && d->pid == 0x2009; }
 static void hidpad_value(void *ctx, IOReturn result, void *sender, IOHIDValueRef v) {
@@ -95,6 +98,11 @@ static void hidpad_report(void *ctx, IOReturn result, void *sender, IOHIDReportT
     hid_pad *d = ctx;
     if (result != kIOReturnSuccess || type != kIOHIDReportTypeInput || len < 1) return;
     hidpad_heard(d, r[0]);
+    if (!d->twin && d->kp20) {   // GameController reads its buttons; its sticks from here, when paired (no calibration asked: GameController's device, so its sticks measure themselves)
+        int32_t was[4]; memcpy(was, d->pro_s, sizeof was); uint64_t m;
+        if (pad_pro_decode(&d->pro, r, (size_t)len, &m, d->pro_s) && d == g_kp20_pad && memcmp(was, d->pro_s, sizeof was)) hidpad_kp20_moved();
+        return;
+    }
     if (!d->twin || !hidpad_is_pro(d)) return;
     if (r[0] == 0x21) {
         int set = pad_pro_spi_reply(&d->pro, r, (size_t)len);
@@ -127,7 +135,7 @@ static void hidpad_stop(hid_pad *d) {
 }
 // Its reports stamp heard while it may still be counted as one of its model: always for a Pro Controller (its 0x30 says it is there), another model until its first
 static void hidpad_listen(hid_pad *d) {
-    if (!g_twins_off && hidpad_twin_able(d) && (hidpad_is_pro(d) || !d->heard)) IOHIDDeviceRegisterInputReportCallback(d->hid, d->report, sizeof d->report, hidpad_report, d);
+    if (d->kp20 || (!g_twins_off && hidpad_twin_able(d) && (hidpad_is_pro(d) || !d->heard))) IOHIDDeviceRegisterInputReportCallback(d->hid, d->report, sizeof d->report, hidpad_report, d);
 }
 static void hidpad_drop(hid_pad *d) { hidpad_stop(d); CFRelease(d->hid); free(d); }
 static void hidpad_keep_gc(hid_pad *d) { hidpad_stop(d); d->twin = d->twin_want = 0; d->next = g_hidpads_gc; g_hidpads_gc = d; hidpad_listen(d); }
@@ -158,6 +166,8 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
     snprintf(d->name, sizeof d->name, "%s", name.UTF8String ?: "HID gamepad");
     d->vid = [(__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDVendorIDKey)) intValue];
     d->pid = [(__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDProductIDKey)) intValue];
+    NSString *transport = (__bridge NSString *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDTransportKey));
+    d->kp20 = pad_hid_kp20(d->vid, d->pid, [transport isKindOfClass:NSString.class] ? transport.UTF8String : NULL, d->name);
     NSArray *els = CFBridgingRelease(IOHIDDeviceCopyMatchingElements(hid, NULL, kIOHIDOptionsTypeNone));
     uint8_t has[PH_AXES] = {0};
     for (id o in els) { IOHIDElementRef e = (__bridge IOHIDElementRef)o; int a = pad_hid_axis_of(IOHIDElementGetUsagePage(e), IOHIDElementGetUsage(e)); if (a >= 0) has[a] = 1; }
@@ -181,6 +191,7 @@ static void hidpad_removed(void *ctx, IOReturn result, void *sender, IOHIDDevice
     hid_pad *d = hidpad_unlink(&g_hidpads, hid); int counted = d && d->twin;
     if (d) hidpad_detach(d); else d = hidpad_unlink(&g_hidpads_waiting, hid);
     if (!d && (d = hidpad_unlink(&g_hidpads_gc, hid))) counted = 1;
+    if (d && d == g_kp20_pad) { g_kp20_pad = NULL; g_kp20_gc = nil; }   // until pads_changed pairs again
     if (d) hidpad_drop(d);
     if (counted) hidpad_models_changed();   // one pad fewer of its model
 }
@@ -248,6 +259,32 @@ static int hidpad_gc_unread(GCController *c) {
     for (int pass = 0; pass < 2; pass++) for (hid_pad *d = pass ? g_hidpads : g_hidpads_gc; d; d = d->next)
         if (d->twin_want && (!pass || d->twin) && hidpad_gc_is_model(c, d)) return 1;
     return 0;
+}
+// A Betop Kunpeng 20 in NS mode over USB (pad_hid_kp20): its GameController controller's sticks come from its report 0x30, which this file already listens to for every
+// 057e:2009 entry. GameController gives a controller no HID identity, so the pair is made only when it is the one: one entry of that ID sends 0x30, it is a Kunpeng 20 that
+// GameController reads (not a twin), and GameController lists one Switch Pro Controller. Otherwise (a Pro Controller beside it, two of them) nothing is paired and every
+// controller reads as before, with a line saying so. From front_mac.m's pads_changed (gone: the controller just removed, not counted)
+static void hidpad_kp20_pair(GCController *gone) {
+    hid_pad *pad = NULL, *kp = NULL; GCController *gc = nil; int n = 0, listed = 0; uint64_t now = now_ns();
+    for (int pass = 0; pass < 2; pass++) for (hid_pad *d = pass ? g_hidpads : g_hidpads_gc; d; d = d->next)
+        if (hidpad_is_pro(d) && (!pass || d->twin) && pro_live(d->heard, now)) { n++; pad = d; if (d->kp20) kp = d; }
+    for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad && [c.productCategory isEqualToString:@"Switch Pro Controller"]) { listed++; gc = c; }
+    static int said_n = -1, said_listed = -1;   // the counts last said unpairable: said again only when they change
+    int ok = kp && n == 1 && listed == 1 && !pad->twin;
+    if (!ok) { pad = NULL; gc = nil; }
+    if (kp && !ok && !kp->twin && (n != said_n || listed != said_listed)) {
+        said_n = n; said_listed = listed;
+        LOG("controller '%s' (Betop Kunpeng 20, NS mode over USB): %d entries of its ID send reports, GameController's Pro Controllers: %d, so its sticks cannot be paired: "
+            "GameController's are read", kp->name, n, listed);
+    }
+    if (pad == g_kp20_pad && gc == g_kp20_gc) return;
+    if (pad) { said_n = said_listed = -1; LOG("controller '%s' (Betop Kunpeng 20, NS mode over USB): its sticks are read from its report 0x30, as GameController gives none", pad->name); }
+    g_kp20_pad = pad; g_kp20_gc = gc;
+}
+// The paired Kunpeng 20's sticks (left x, y, right x, y) in place of GameController's for its controller c; 0 for any other controller, or one silent past pro_live
+static int hidpad_kp20_sticks(GCController *c, int32_t s[4]) {
+    if (!g_kp20_pad || c != g_kp20_gc || !g_kp20_pad->pro.seen || !pro_live(g_kp20_pad->heard, now_ns())) return 0;
+    memcpy(s, g_kp20_pad->pro_s, sizeof g_kp20_pad->pro_s); return 1;
 }
 // The twins of a model GameController lists them all of again go back to it
 static void hidpad_twins_release(void) {

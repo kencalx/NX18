@@ -59,3 +59,7 @@ General host changes first needed here; each applies to every game:
 - The pad layout disagrees: the profile has no `pad_layout` (the default `simple`, 2D) and the notes say 2D, but README.md's touch-controls paragraph does not list this game among those that start in 2D.
 - Whether it reads touch in handheld mode has not been tried.
 - The one geometry shader does not build.
+
+## Prewarm list
+
+- **Upstream's seed rows (2026-11-27, second check):** [`pso_manifest.tsv`](pso_manifest.tsv) takes the 11 rows (11 `S`, 0 `R`, 0 `C`) of upstream NXNative's list at `1a54371cf` (its seed commits `ca4b49393` since the last check, and older rows; inbox captures and recordings from upstream's players) that it lacked, below its rows; the list is now 160 rows. Every row checks clean against this shader map. Not recorded on NX 18's devices; a first start with them on the iPhone (prepare time, footprint) is not measured.

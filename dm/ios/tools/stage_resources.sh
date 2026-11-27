@@ -103,3 +103,10 @@ if [ -n "$DM_RESOURCE_PSO" ]; then
 else
     rm -rf "$APP/pso"
 fi
+# The player's NX 18 Profile, which NX 18 Beam puts in every game it installs (DM_PROFILE_SEED, a build setting on its xcodebuild line; NX18Profile.swift applySeed): a folder with
+# profile.stamp goes to <App>/NX18ProfileSeed; without one the app has none (a build after Beam's leaves no older seed behind)
+if [ -n "${DM_PROFILE_SEED:-}" ] && [ -f "$DM_PROFILE_SEED/profile.stamp" ]; then
+    mkdir -p "$APP/NX18ProfileSeed"; /usr/bin/rsync -a --delete -- "$DM_PROFILE_SEED/" "$APP/NX18ProfileSeed/" || die "copy the profile seed"
+else
+    rm -rf "$APP/NX18ProfileSeed"
+fi

@@ -2,7 +2,9 @@
 No game files. Relocation is accepted; changed logic, callees, ambiguity and wrong
 profile/module selection are refused through the rewriter's actual registry code.
 A patch of several functions applies whole or not at all; the rewriter lists what an
-unregistered build kept, and the NSP script reports it.
+unregistered build kept, and the NSP script reports it. Observation gates (MATCH_OBS) are
+placed by the same rules, and every authoring tool checks that its rule gives back the
+registered rows on their own build.
 """
 import ast
 import contextlib
@@ -22,7 +24,7 @@ from unittest.mock import patch
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
 from nso_asm import ADRP, ADDI, B, NOP
-from nso_match import Image, MatchError, resolve, validate
+from nso_match import Image, MatchError, resolve, resolve_gates, validate, validate_gates
 
 MOV = 0xaa1703e0  # mov x0, x23
 ADD = 0x914012e0  # add x0, x23, #0x4000
@@ -496,6 +498,89 @@ class Patches(unittest.TestCase):
         self.assertTrue(said[0].startswith('[RED] main: no function patch') and '13.0.5 (abababab…) has 11 cuts' in said[0], said[0])
         self.assertTrue(said[1].startswith('[RED] sdk: function patches not applied') and "'region' (function 1 of 4" in said[1], said[1])
         self.assertEqual(said[2], "sdk: function patches applied: 'node area'")
+
+
+
+class Gates(unittest.TestCase):
+    """Observation gates placed by function (patch_nso.py MATCH_OBS): an update that moves the function keeps the gate; none, two, a changed word or one changed function of
+    several give no gate and a red line; a build's own OBS wins"""
+    def setUp(self):
+        self.original = image({0x100: caller(0x100, 0x500), 0x500: [0xd2800020, RET], 0x800: [MOV, NOP, RET]})
+        self.rule = Image(self.original, 0x2000).gate_recipe([(0x108, 27, 'aa1703e0', 'controller measure')], 'controller')
+
+    def test_recipe_and_its_rows(self):
+        self.assertEqual(set(self.rule), {'name', 'size', 'fingerprints', 'gates'})
+        self.assertEqual(self.rule['gates'], [(8, 27, 'aa1703e0', 'controller measure')])
+        self.assertEqual(Image(self.original, 0x2000).match_gates(self.rule), [(0x108, 27, 'aa1703e0', 'controller measure [function match]')])
+
+    def test_moved_function_keeps_its_gate(self):
+        moved = image({0x900: caller(0x900, 0x1200, 0x2980), 0x1200: [0xd2800020, RET], 0x300: [MOV, NOP, RET]})
+        before, messages = bytes(moved), []
+        self.assertEqual([g[:3] for g in resolve_gates(moved, 0x2000, [self.rule], messages.append)], [(0x908, 27, 'aa1703e0')])
+        self.assertEqual(bytes(moved), before)   # nothing written: patch_nso.py places the gate
+        self.assertFalse([m for m in messages if m.startswith('[RED]')], messages)
+
+    def test_none_two_or_a_changed_word_give_no_gate(self):
+        changed = image({0x100: caller(0x100, 0x500), 0x500: [0xd2800040, RET]})   # the callee changed: another fingerprint
+        two = image({0x100: caller(0x100, 0x500), 0x800: caller(0x800, 0x500), 0x500: [0xd2800020, RET]})
+        for img, why in ((changed, '0 matching'), (two, '2 matching'), (bytearray(0x40), 'function boundaries')):
+            with self.subTest(why=why):
+                messages = []
+                self.assertEqual(resolve_gates(img, len(img), [self.rule], messages.append), [])
+                self.assertTrue(messages[0].startswith('[RED] ') and why in messages[0], messages)
+        wrong = copy.deepcopy(self.rule); wrong['gates'] = [(8, 27, 'aa1603e0', 'controller measure')]   # the same function, another word where the gate goes
+        with self.assertRaisesRegex(MatchError, 'original bytes differ'): Image(self.original, 0x2000).match_gates(wrong)
+        self.assertEqual(resolve_gates(self.original, 0x2000, [wrong], lambda _: None), [])
+
+    def test_gates_of_several_functions_apply_together(self):
+        rule = Image(self.original, 0x2000).gate_recipe([(0x108, 27, 'aa1703e0', 'a'), (0x800, 28, 'aa1703e0', 'b')], 'pair')
+        self.assertEqual(set(rule), {'name', 'functions'})
+        self.assertEqual([g[:2] for g in resolve_gates(self.original, 0x2000, [rule], lambda _: None)], [(0x108, 27), (0x800, 28)])
+        one_changed = image({0x100: caller(0x100, 0x500), 0x500: [0xd2800020, RET], 0x800: [MOV, MOV, RET]})
+        messages = []
+        self.assertEqual(resolve_gates(one_changed, 0x2000, [rule], messages.append), [])
+        self.assertIn('function 2 of 2', messages[0])
+
+    def test_malformed_gate_rules_are_rejected(self):
+        g = self.rule['gates'][0]
+        for bad in (dict(self.rule, gates=[]), dict(self.rule, gates=[g[:3]]), dict(self.rule, gates=[(8, 0, g[2], g[3])]), dict(self.rule, gates=[(8, 27, 'xyz', g[3])]),
+                    dict(self.rule, cuts=[(8, 'e00317aa', 'e00317aa', 'x')]), dict(self.rule, gates=[g, g]), dict(self.rule, gates=[(28, 27, g[2], g[3])]),
+                    dict(self.rule, gates=[(8, 27, f'{RET:08x}', 'ret')]), dict(self.rule, gates=[(8, 27, f'{ADRP(0, 0, 0x1000):08x}', 'adrp')])):
+            with self.subTest(bad=bad), self.assertRaises(ValueError): validate_gates(bad)
+        validate_gates(self.rule)
+
+    def test_recipes_refuse_what_they_cannot_give_back(self):
+        with self.assertRaisesRegex(MatchError, 'original word'): Image(self.original, 0x2000).gate_recipe([(0x108, 27, 'aa1603e0', 'x')], 'x')
+        two = image({0x100: caller(0x100, 0x500), 0x800: caller(0x800, 0x500), 0x500: [0xd2800020, RET]})
+        with self.assertRaisesRegex(MatchError, '2 matching'): Image(two, 0x2000).gate_recipe([(0x108, 27, 'aa1703e0', 'x')], 'x')
+        # the self-check itself: a rule that located elsewhere on its own build is refused, for cuts and gates alike
+        shifted = lambda real: lambda self, rule: [(c[0] + 4, *c[1:]) for c in real(self, rule)]
+        with patch.object(Image, 'match_patch', shifted(Image.match_patch)):
+            with self.assertRaisesRegex(MatchError, 'give back'): Image(self.original, 0x2000).patch_recipe([(0x108, 'e00317aa', 'e0124091', 'x')], 'x')
+            with self.assertRaisesRegex(MatchError, 'give back'): Image(self.original, 0x2000).gate_recipe([(0x108, 27, 'aa1703e0', 'x')], 'x')
+        with patch.object(Image, 'match', shifted(Image.match)):
+            with self.assertRaisesRegex(MatchError, 'give back'): Image(self.original, 0x2000).recipe(0x108, 'e00317aa', 'e0124091', 'x')
+
+    def test_registry_places_gates_for_the_selected_profile_only(self):
+        source = TOOLS / 'patch_nso.py'; tree = ast.parse(source.read_text())
+        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'SHARED')
+        end = next(i for i, n in enumerate(tree.body[start:], start) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'KEYS')
+        code = compile(ast.Module(body=tree.body[start:end], type_ignores=[]), str(source), 'exec')
+        known = 'ab' * 16
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / 'tools').mkdir(); (root / 'tools/sdk_patches.py').write_text(''); (root / 'tools/engine_patches.py').write_text('')
+            g = root / 'games' / '0100000000000001'; g.mkdir(parents=True)
+            (g / 'patches.py').write_text(f'MATCH_OBS = {{"main": [{self.rule!r}]}}\nOBS = {{{known!r}: [(0x10c, 27, "d503201f", "known")]}}\n')
+            for gid, name, bid, expected in (('0100000000000001', 'main', '00' * 16, [(0x108, 27, 'aa1703e0')]),
+                                             ('0100000000000001', 'main', known, []),     # the build's own OBS wins (patch_nso.py reads it, not OBS_MATCH)
+                                             ('0100000000000001', 'sdk', '00' * 16, []),   # another module
+                                             ('0100000000000002', 'main', '00' * 16, [])):  # another game
+                with self.subTest(game=gid, module=name, build=bid):
+                    ns: dict[str, object] = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib,
+                                                 MOD=SimpleNamespace(build_id=bytes.fromhex(bid)), IMG=bytearray(self.original), TEXT_END=0x2000, NAME=name, outdir=str(root / 'out'))
+                    with patch.dict(os.environ, DM_GAME=gid), contextlib.redirect_stdout(io.StringIO()): exec(code, ns)
+                    got: list[tuple] = ns['OBS_MATCH']  # type: ignore[assignment]
+                    self.assertEqual([r[:3] for r in got], expected)
 
 
 if __name__ == '__main__': unittest.main()
