@@ -31,7 +31,9 @@ srcs += sorted(os.path.join(ios_src, f) for f in os.listdir(ios_src) if f.endswi
 dirs = list(dict.fromkeys(os.path.dirname(s) for s in srcs))
 warn = re.search(r'^\s*WARNING_CFLAGS:\s*([^#\n]+)', open(f'{ios}/project.yml', encoding='utf-8').read(), re.M)
 assert warn, 'no WARNING_CFLAGS in dm/ios/project.yml'
-flags = ['-arch', 'arm64', '-miphoneos-version-min=27.3', '-mcpu=apple-a20', '-fobjc-arc', '-O1'] + shlex.split(warn.group(1)) + defs + [f'-I{d}' for d in incs + dirs]
+target = re.search(r'^\s*deploymentTarget:[^\n]*\n\s*iOS:\s*["\']?(\d+(?:\.\d+)*)', open(f'{ios}/project.yml', encoding='utf-8').read(), re.M)   # the app's deployment target, as the Xcode build takes it
+assert target, 'no deploymentTarget iOS in dm/ios/project.yml'
+flags = ['-arch', 'arm64', f'-miphoneos-version-min={target.group(1)}', '-mcpu=apple-a20', '-fobjc-arc', '-O1'] + shlex.split(warn.group(1)) + defs + [f'-I{d}' for d in incs + dirs]
 def one(s):
     c = ['xcrun', '-sdk', 'iphoneos', 'clang'] + flags + (['-Dmain=dm_main'] if s == os.path.join(host, 'main.c') else []) + ['-c', s, '-o', '/dev/null']
     if s.endswith('.c'): c[4:4] = ['-std=gnu11']

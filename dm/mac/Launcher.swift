@@ -1066,7 +1066,7 @@ enum LauncherWindowLayout {
 public func dmMacMetal4Missing(_ assumeMissing: Int32) -> UnsafeMutablePointer<CChar>? {
     let dev = MTLCreateSystemDefaultDevice()
     if assumeMissing == 0, let dev, dev.supportsFamily(.metal4) { return nil }
-    return strdup("This Mac's GPU (\(dev?.name ?? "no Metal device")) does not support Metal 4, which the game is drawn with. It needs a Mac with Apple silicon on macOS 27.3 or later; a virtual Mac's GPU does not have it.")
+    return strdup("This Mac's GPU (\(dev?.name ?? "no Metal device")) does not support Metal 4, which the game is drawn with. It needs a Mac with Apple silicon on macOS 27.2 or later; a virtual Mac's GPU does not have it.")
 }
 
 // Saved choices this build retired (LauncherModel.forgetRetired), forgotten before the saved choices are read: launcher.c calls it, with the window or without

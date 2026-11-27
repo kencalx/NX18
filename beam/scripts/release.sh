@@ -23,7 +23,7 @@ check() {
     [ -f "$LOCAL" ] || fail "no $LOCAL: copy Config/Local.xcconfig.example and set DEVELOPMENT_TEAM"
     [ -n "$(team)" ] || fail "$LOCAL has no 10-character DEVELOPMENT_TEAM"
     security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application" || fail "no Developer ID Application certificate in the keychain"
-    xcrun notarytool --help >/dev/null 2>&1 || fail "notarytool is missing (Xcode 27.3)"
+    xcrun notarytool --help >/dev/null 2>&1 || fail "notarytool is missing (Xcode 27.2 or 27.3)"
     printf 'release: setup found (team ID set, Developer ID certificate present). Notarization uses the keychain profile "%s".\n' "$PROFILE"
 }
 

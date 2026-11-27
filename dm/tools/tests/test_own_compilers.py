@@ -19,15 +19,57 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
 import dmsh_chain  # noqa: E402
 import own_compilers  # noqa: E402
+import tool_lock  # noqa: E402
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
 assert spec and spec.loader
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 
-with open(dmsh_chain.LOCK) as _f: LOCKED = dict(l.rstrip('\n').split('\t', 1) for l in _f if '\t' in l and not l.startswith('#'))
+LOCK = tool_lock.read_lock()
+LOCKED = {k: tool_lock.tested(LOCK, k) for k in LOCK}   # as the messages name the lock's entries: 'A (Xcode 27.3) or B (Xcode 27.2)' for a Metal compiler
 OTHER = 'Apple metal version 32023.850 (metalfe-32023.850.10)'   # Xcode 26's, say
 
 
 def mismatch(key, actual): return f'{key}: lock {LOCKED[key]} / actual {actual}'
+
+
+class Lock(unittest.TestCase):
+    def test_two_tested_xcodes(self):   # Xcode 27.2's and 27.3's compilers, for macOS and iOS, named by the Xcode they come with; own_compilers.py names the same Xcodes
+        for key in tool_lock.METAL_KEYS:
+            xcodes = [x for _, x in LOCK[key]]
+            self.assertEqual(xcodes, [f'Xcode {v}' for v in own_compilers.XCODE_VERSIONS], key)
+            self.assertTrue(all(v.startswith('Apple metal version ') for v in tool_lock.accepted(LOCK, key)), key)
+        self.assertEqual(own_compilers.XCODE_VERSION, own_compilers.XCODE_VERSIONS[0])
+        for v in ('27.2', '27.3'): self.assertIn(f'Xcode {v} (macOS {v} or later)', own_compilers.XCODE)
+
+    def test_suggested_xcode_runs_on_this_macos(self):   # Xcode 27.3 does not run on macOS 27.2
+        for macos, want in (('27.2', '27.2'), ('27.2.1', '27.2'), ('27.3', '27.3'), ('27.4', '27.3'), ('28.0', '27.3'), ('', '27.3')):
+            self.assertEqual(own_compilers.suggested_xcode(macos), want, macos)
+
+    def test_either_compiler_passes_the_check(self):
+        for key in tool_lock.METAL_KEYS:
+            for v in tool_lock.accepted(LOCK, key):
+                now = {k: e[0][0] for k, e in LOCK.items()}; now[key] = v
+                with mock.patch.object(tool_lock, 'tools_now', lambda n=now: n), mock.patch.object(tool_lock, 'xlate_source_sha', lambda s=now['xlate_source']: s):
+                    self.assertEqual(tool_lock.check_tools(), [], (key, v))
+            now = {k: e[0][0] for k, e in LOCK.items()}; now[key] = OTHER
+            with mock.patch.object(tool_lock, 'tools_now', lambda n=now: n), mock.patch.object(tool_lock, 'xlate_source_sha', lambda s=now['xlate_source']: s):
+                self.assertEqual(tool_lock.check_tools(), [mismatch(key, OTHER)])
+
+    def test_update_lock_keeps_the_other_xcode(self):   # --update-lock records the selected Xcode's compiler and keeps the other one's line
+        with tempfile.TemporaryDirectory() as d:
+            lock = Path(d) / 'dmsh_chain.lock'; shutil.copyfile(dmsh_chain.LOCK, lock)
+            now = {k: e[0][0] for k, e in LOCK.items()}; now.update(metal_macosx=OTHER, metal_iphoneos=OTHER)
+            with mock.patch.object(tool_lock, 'LOCK', str(lock)), mock.patch.object(tool_lock, 'tools_now', lambda: now), mock.patch.object(tool_lock, 'xlate_source_sha', lambda: now['xlate_source']), \
+                    mock.patch.object(tool_lock, 'selected_xcode_version', lambda: 'Xcode 27.2'), redirect_stdout(io.StringIO()):
+                tool_lock.update_lock()
+            got = tool_lock.read_lock(str(lock))
+            for key in tool_lock.METAL_KEYS:
+                self.assertEqual(got[key], [(LOCK[key][0][0], 'Xcode 27.3'), (OTHER, 'Xcode 27.2')], key)
+            with mock.patch.object(tool_lock, 'LOCK', str(lock)), mock.patch.object(tool_lock, 'tools_now', lambda: now), mock.patch.object(tool_lock, 'xlate_source_sha', lambda: now['xlate_source']), \
+                    mock.patch.object(tool_lock, 'selected_xcode_version', lambda: 'Xcode 27.4'), redirect_stdout(io.StringIO()):
+                tool_lock.update_lock()   # a third Xcode: added first, the others kept
+            self.assertEqual([x for _, x in tool_lock.read_lock(str(lock))['metal_macosx']], ['Xcode 27.4', 'Xcode 27.3', 'Xcode 27.2'])
+            self.assertEqual(got['spirv-cross'], LOCK['spirv-cross'])
 
 
 class CheckTools(unittest.TestCase):
@@ -83,7 +125,8 @@ class CheckTools(unittest.TestCase):
         with mock.patch.dict(os.environ, {'DMSH_TARGETS': 'mac'}): self.assertEqual(self.check([mismatch('metal_macosx', 'missing')])[0], [mismatch('metal_macosx', 'missing')])
 
     def test_check_metal(self):   # --check-metal, as the NSP script runs it: the message when it would stop, '' otherwise
-        for actual, allow, stops in ((LOCKED['metal_macosx'], False, False), (OTHER, False, True), (OTHER, True, False), ('missing', False, False)):
+        tested = [(v, False, False) for v in tool_lock.accepted(LOCK, 'metal_macosx')]   # Xcode 27.3's and 27.2's (the same for iOS)
+        for actual, allow, stops in (*tested, (OTHER, False, True), (OTHER, True, False), ('missing', False, False)):
             env = {k: v for k, v in os.environ.items() if k != own_compilers.ALLOW}
             if allow: env[own_compilers.ALLOW] = '1'
             with mock.patch.object(own_compilers, 'metal_version', lambda sdk, a=actual: a), mock.patch.dict(os.environ, env, clear=True):

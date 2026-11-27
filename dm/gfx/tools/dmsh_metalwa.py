@@ -6,9 +6,10 @@ around them in src/kosmickrisp/compiler/nir_to_msl.c. The numbers below are thei
 
 Where the bugs live: the offline front end (metal -O1) keeps ballots inside their branches in the AIR; the GPU back end of the running OS (the compiler service that turns AIR into
 GPU code when a pipeline is made) miscompiles them. So KK3 depends on the OS the game runs on. Upstream puts KK3 behind a bool function constant the host sets per OS (upstream
-b89b2feed: off on macOS 27+, on below it and on iOS). NX 18's libraries run on macOS 27.3 and iOS 27.3 only, and one MSL text goes to both compiles, so the gate is the compile's
+b89b2feed: off on macOS 27+, on below it and on iOS). NX 18's libraries run on macOS 27.2 and iOS 27.2 and later only, and one MSL text goes to both compiles, so the gate is the compile's
 deployment target instead (gate='target', the default): dm_mwa3 is false where __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ is defined (dmsh_build.py MAC_METAL; KK3 is fixed in
-macOS 27, checked on macOS 27.3 with an M4 Max: t_metalwa's ballot kernels right as built) and true otherwise (the iPhone library: Apple's fix is not shown for iOS 27, so the
+macOS 27, checked on macOS 27.3 with an M4 Max: t_metalwa's ballot kernels right as built; macOS 27.2 is within KosmicKrisp's
+fixed range and upstream's macOS 27+ gate, not run here) and true otherwise (the iPhone library: Apple's fix is not shown for iOS 27, so the
 rewrite stays on there, as upstream keeps it). A compile-time constant: no host specialization, no pipeline archive key, and the Mac's code is the plain ballot. KK9 has no Apple fix
 (reproduced on macOS 27.2.1, M4 Pro, and 27.3, M4 Max) and is written unconditionally.
 
@@ -105,7 +106,7 @@ MAC_TARGET = '__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__'   # defined by a co
 def _gate3(gate):
     if gate == 'static': return 'constant bool dm_mwa3 = true;\n'
     if gate != 'target': raise ValueError(f'dmsh_metalwa: gate {gate!r} (target or static)')
-    return (f'#ifdef {MAC_TARGET}\nconstant bool dm_mwa3 = false;   // macOS 27.3 and later: Apple fixed KK3 in macOS 27\n'
+    return (f'#ifdef {MAC_TARGET}\nconstant bool dm_mwa3 = false;   // macOS 27.2 and later: Apple fixed KK3 in macOS 27\n'
             '#else\nconstant bool dm_mwa3 = true;   // iOS: not shown fixed\n#endif\n')
 
 

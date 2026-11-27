@@ -11,7 +11,7 @@ body:
     id: ios
     attributes:
       label: iOS version on the Duo
-      placeholder: "27.3"
+      placeholder: "27.2"
     validations:
       required: true
   - type: input

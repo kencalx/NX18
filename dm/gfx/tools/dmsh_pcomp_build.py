@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../
 import dmsh_pcomp
 import shader_lib
 
-METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-O1', '-mmacosx-version-min=27.3', '-std=metal4.1', '-fpreserve-invariance', '-fwrapv']
+METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-O1', '-mmacosx-version-min=27.2', '-std=metal4.1', '-fpreserve-invariance', '-fwrapv']
 
 
 def source(lib, name):

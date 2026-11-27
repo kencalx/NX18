@@ -33,7 +33,7 @@ FILES += ['../mac/min_os.mk']   # MAC_MIN below
 MAC_MIN = open(os.path.join(GFX, '../mac/min_os.mk')).read().split('MACOS_MIN := ')[1].split()[0]
 MAC_MIN_FLAG = f'-mmacosx-version-min={MAC_MIN}'
 # The MSL that spirv-cross writes for every shader of the chain (dmsh_build.py XC, dmsh_dryrun.py; tests convert with MSL_VERSION too). 3.2 is within what both compile lines take (-std=metal4.1 for
-# macOS 27.3 and iOS 27.3: dmsh_build.py MAC_METAL, ios_metal.py METAL) and the first version in which spirv-cross writes a memory barrier as the fence it is: OpMemoryBarrier (MEMBAR.CTA,
+# macOS 27.2 and iOS 27.2: dmsh_build.py MAC_METAL, ios_metal.py METAL) and the first version in which spirv-cross writes a memory barrier as the fence it is: OpMemoryBarrier (MEMBAR.CTA,
 # .GL / .SYS) becomes atomic_thread_fence at threadgroup or device scope, with no execution barrier, and OpControlBarrier (BAR.SYNC) is always written. Below 3.2 it wrote both MEMBARs as one
 # threadgroup_barrier, an execution barrier, and left out a BAR.SYNC that directly followed one (spirv_msl.cpp, OpControlBarrier): the membar_fence text rule made that line a fence, so the
 # group no longer waited for its other threads (upstream 6dad34067ce, GitHub issue #2786). 3.1's texture atomics (dmsh_atomic.py) are part of it. 3.2 changes images too: one the translator

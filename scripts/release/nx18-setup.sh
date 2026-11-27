@@ -25,10 +25,13 @@ set -euo pipefail
 REPO_URL="https://github.com/kencalx/NX18.git"
 REPO_SLUG="kencalx/nx18"            # lower case, for comparing remote URLs
 DEFAULT_REF="main"
-NEED_MACOS="27.3"
-NEED_XCODE="27.3"                   # read again from the checkout's dm/gfx/tools/own_compilers.py when there is one
-# The Metal compiler the shaders were tested with, as dm/gfx/tools/dmsh_chain.lock records it (read from the checkout when there is one).
-FALLBACK_METAL="Apple metal version 32023.925 (metalfe-32023.925.6)"
+NEED_MACOS="27.2"
+NEED_XCODES="27.3 27.2"             # the tested Xcodes, newest first; read again from the checkout's dm/gfx/tools/own_compilers.py (XCODE_VERSIONS) when there is one
+# The Metal compilers the shaders were tested with, one line per Xcode, as dm/gfx/tools/dmsh_chain.lock records them (read from the checkout when there is one).
+FALLBACK_METAL="Apple metal version 32023.925 (metalfe-32023.925.10)
+Apple metal version 32023.922 (metalfe-32023.922.4)"
+xcodes_text() { printf '%s\n' $NEED_XCODES | sort -t. -k1,1n -k2,2n | paste -sd ' ' - | sed 's/ / or /g'; }   # "27.2 or 27.3"
+NEED_XCODE="$(xcodes_text)"
 PY_MODULES_PIP=(lz4 "capstone>=5,<6" fonttools nsz zbic 'backports.zstd; python_version < "3.14"')   # shown in single quotes: no single quote inside
 BREW_TOOLS="xcodegen zstd"
 
@@ -156,6 +159,7 @@ ver_ge() {   # ver_ge 27.3.1 27.3: numeric, dot by dot
     return 0
 }
 same_series() { case "$1" in "$2"|"$2".*) return 0 ;; *) return 1 ;; esac; }   # 27.3.1 is a 27.3
+in_list() { [ -n "$1" ] && printf '%s\n' "$2" | grep -qxF -- "$1"; }   # in_list <line> <lines>
 
 export HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 git_ro() { git -C "$DIR" --no-optional-locks "$@"; }    # read-only git: does not even refresh the index
@@ -192,11 +196,13 @@ read_requirements() {
         LOCK_FROM="dm/gfx/tools/dmsh_chain.lock"
     fi
     if [ -f "$g" ]; then
-        v="$(sed -n "s/^XCODE_VERSION = '\([0-9.]*\)'.*/\1/p" "$g" | head -n 1)"; [ -n "$v" ] && NEED_XCODE="$v"
+        v="$(sed -n "s/^XCODE_VERSIONS = (\([^)]*\)).*/\1/p" "$g" | head -n 1 | tr -d "',")"; [ -n "$v" ] && NEED_XCODES="$v" && NEED_XCODE="$(xcodes_text)"
     fi
     return 0
 }
 read_requirements
+suggest_xcode() {   # the newest tested Xcode this Mac's macOS runs (Xcode 27.3 needs macOS 27.3; on 27.2, Xcode 27.2), the newest when none does
+    local n; for n in $NEED_XCODES; do ver_ge "$MACOS" "$n" && { printf '%s\n' "$n"; return; }; done; printf '%s\n' "${NEED_XCODES%% *}"; }
 
 # ---- 2. Xcode ----------------------------------------------------------------------------------
 section "Xcode $NEED_XCODE"
@@ -215,18 +221,20 @@ $1
 "; }
 if [ -n "${DEVELOPER_DIR:-}" ]; then add_candidate "$(app_of_devdir "$DEVELOPER_DIR")"; fi
 if [ -n "$SELECTED_APP" ]; then add_candidate "$SELECTED_APP"; fi
-for a in "/Applications/Xcode-$NEED_XCODE.app" /Applications/Xcode.app /Applications/Xcode-beta.app /Applications/Xcode*.app "$HOME"/Applications/Xcode*.app; do
+for n in $NEED_XCODES; do add_candidate "/Applications/Xcode-$n.app"; done
+for a in /Applications/Xcode.app /Applications/Xcode-beta.app /Applications/Xcode*.app "$HOME"/Applications/Xcode*.app; do
     add_candidate "$a"
 done
 
-XCODE_APP=""     # the Xcode NEED_XCODE to build with: the one whose Metal compiler matches the lock first
+XCODE_APP=""     # a tested Xcode (NEED_XCODES) to build with that runs on this macOS: the first whose Metal compiler is one the lock lists
 XCODE_ANY=""
 while IFS= read -r a; do
     [ -n "$a" ] || continue
-    v="$(xcode_version "$a")"
-    same_series "$v" "$NEED_XCODE" || continue
+    v="$(xcode_version "$a")"; s=""
+    for n in $NEED_XCODES; do same_series "$v" "$n" && s="$n" && break; done
+    [ -n "$s" ] && ver_ge "$MACOS" "$s" || continue   # Xcode 27.3 does not run on macOS 27.2
     [ -n "$XCODE_ANY" ] || XCODE_ANY="$a"
-    if [ "$(metal_of "$a/Contents/Developer" macosx)" = "$LOCK_METAL_MAC" ]; then XCODE_APP="$a"; break; fi
+    if in_list "$(metal_of "$a/Contents/Developer" macosx)" "$LOCK_METAL_MAC"; then XCODE_APP="$a"; break; fi
 done <<EOF
 $CANDIDATES
 EOF
@@ -243,8 +251,9 @@ DEV=""
 NEED_DEVELOPER_DIR=0
 if [ -z "$XCODE_APP" ]; then
     missing "Xcode $NEED_XCODE${OTHER_XCODES:+ (found:$OTHER_XCODES)}"
-    info "Download Xcode $NEED_XCODE from https://developer.apple.com/download/all/?q=Xcode%20$NEED_XCODE (free Apple account),"
-    info "unpack it and move it to /Applications. Beside another Xcode, rename it Xcode-$NEED_XCODE.app."
+    SX="$(suggest_xcode)"
+    info "Download Xcode $SX (for macOS $MACOS; Xcode 27.3 needs macOS 27.3) from https://developer.apple.com/download/all/?q=Xcode%20$SX (free Apple account),"
+    info "unpack it and move it to /Applications. Beside another Xcode, rename it Xcode-$SX.app."
     info "Open it once to finish installing. A script cannot download Xcode for you."
 else
     DEV="$XCODE_APP/Contents/Developer"
@@ -445,10 +454,10 @@ if [ -n "$DEV" ]; then
     fi
     if [ -z "$m" ]; then
         missing "the Metal toolchain: DEVELOPER_DIR=\"$DEV\" xcodebuild -downloadComponent MetalToolchain"
-    elif [ "$m" = "$LOCK_METAL_MAC" ]; then
+    elif in_list "$m" "$LOCK_METAL_MAC"; then
         ok "Metal compiler for macOS: $m (matches $LOCK_FROM)"
     else
-        missing "Metal compiler $m: the shaders were tested with $LOCK_METAL_MAC ($LOCK_FROM)"
+        missing "Metal compiler $m: the shaders were tested with $(printf '%s\n' "$LOCK_METAL_MAC" | paste -sd '|' - | sed 's/|/ or /g') ($LOCK_FROM)"
         info "Install the Xcode $NEED_XCODE build named in README.md (Requirements) and its Metal toolchain,"
         info "or build anyway with --allow-other-metal in nx18-build.sh's EXTRA_ARGS (untested shaders can render wrong pictures)."
     fi
@@ -466,8 +475,8 @@ if [ -n "$DEV" ]; then
         fi
     fi
     mi="$(metal_of "$DEV" iphoneos)"
-    if [ -n "$mi" ] && [ "$mi" != "$LOCK_METAL_IOS" ]; then
-        missing "Metal compiler for iOS $mi: the shaders were tested with $LOCK_METAL_IOS ($LOCK_FROM)"
+    if [ -n "$mi" ] && ! in_list "$mi" "$LOCK_METAL_IOS"; then
+        missing "Metal compiler for iOS $mi: the shaders were tested with $(printf '%s\n' "$LOCK_METAL_IOS" | paste -sd '|' - | sed 's/|/ or /g') ($LOCK_FROM)"
     fi
 else
     missing "the Metal toolchain (install Xcode $NEED_XCODE first)"

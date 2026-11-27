@@ -49,8 +49,8 @@ Power figures are CPU power: the game's own process, not the GPU or the display.
 ## What you need
 
 - **Your legally owned and acquired games**, dumped from your own Switch or Switch 2, and your own `prod.keys` for `.nsp` and `.xci` games. NX 18 includes no games, keys or firmware.
-- **A Mac** with Apple silicon (M-series) and Metal 4, on macOS 27.3 or later. To build: Xcode 27.3, [Homebrew](https://brew.sh) and Python 3.12 or newer.
-- **To play on iPhone or iPad:** a device with an Apple A20 chip, on iOS or iPadOS 27.3 or later. NX 18 is built for the A20 and tested on the iPhone 18 Pro Max. The iPhone 18 Pro, iPhone Duo and iPad mini 8 should work too, but aren't tested yet.
+- **A Mac** with Apple silicon (M-series) and Metal 4, on macOS 27.2 or later. To build: Xcode 27.2 or 27.3, [Homebrew](https://brew.sh) and Python 3.12 or newer.
+- **To play on iPhone or iPad:** a device with an Apple A20 chip, on iOS or iPadOS 27.2 or later. NX 18 is built for the A20 and tested on the iPhone 18 Pro Max. The iPhone 18 Pro, iPhone Duo and iPad mini 8 should work too, but aren't tested yet.
 - **A sideloading tool** for iPhone and iPad, such as AltStore, SideStore, Sideloadly or LiveContainer. A paid Apple Developer account is recommended, not required.
 
 Every detail, down to the Metal compiler: [Requirements](#requirements).
@@ -113,16 +113,16 @@ Every setting: [Settings](docs/settings.md). Controls and saves: [Playing](docs/
 
 ## Requirements
 
-- **Mac:** Apple silicon with Metal 4, macOS 27.3 or later (NX 18 draws through Metal 4 only; a virtual Mac, whose GPU has no Metal 4, is not supported). Building games requires Xcode 27.3.
-- **iPhone:** A20 chip (iPhone 18 family, iPhone Duo, iPad mini 8) or later, with iOS 27 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iOS 27.3 or later (below).
-- **iPad:** M4 chip or later, with iPadOS 27 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iPadOS 27.3 or later (below).
+- **Mac:** Apple silicon with Metal 4, macOS 27.2 or later (NX 18 draws through Metal 4 only; a virtual Mac, whose GPU has no Metal 4, is not supported). Building games requires Xcode 27.2 or 27.3.
+- **iPhone:** A20 chip (iPhone 18 family, iPhone Duo, iPad mini 8) or later, with iOS 27 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iOS 27.2 or later (below).
+- **iPad:** M4 chip or later, with iPadOS 27 or later, for upstream's builds; this fork's is built for the A20 Pro and needs iPadOS 27.2 or later (below).
 
-NX 18's iPhone and iPad builds are made for the Apple A20 chip and need iOS or iPadOS 27.3 or later. They don't run on older chips or older systems.
+NX 18's iPhone and iPad builds are made for the Apple A20 chip and need iOS or iPadOS 27.2 or later. They don't run on older chips or older systems.
 
 - **Tested** on the iPhone 18 Pro Max.
 - **Should work, not tested yet:** the iPhone 18 Pro, iPhone Duo and iPad mini 8.
 - **Switch 2 games:** all were tested on the Mac, and five were also played on the iPhone 18 Pro Max. iPad builds are untested. Each game's note lists the devices it was tested on.
-- **To build:** [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.3) 27.3, the beta build 27C5020n with Metal Toolchain 27C5020k (Metal compiler 32023.925.6). The shaders were tested with that compiler, and the build check refuses another one unless you allow it: [Xcode and the Metal compiler](docs/building.md#xcode-and-the-metal-compiler).
+- **To build:** [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027) 27.2 or 27.3: Xcode 27.2 (build 27B52, Metal Toolchain 27B47, Metal compiler 32023.922.4), which runs on macOS 27.2, or the Xcode 27.3 beta (Metal compiler 32023.925.10), which needs macOS 27.3. The shaders are built with either compiler, and the build check refuses any other one unless you allow it: [Xcode and the Metal compiler](docs/building.md#xcode-and-the-metal-compiler).
 
 ## Increased Memory Limit
 

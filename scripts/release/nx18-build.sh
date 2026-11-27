@@ -35,7 +35,7 @@ GAME="/Users/YOUR-NAME/Games/YOUR-GAME"
 KEYS="$HOME/keys/prod.keys"
 
 # What to build: iphone, ipad or mac-app                                       (env NX18_TARGET)
-#   iphone and ipad make the same IPA, made for the iPhone 18 Pro Max's chip (iOS / iPadOS 27.3 or later).
+#   iphone and ipad make the same IPA, made for the iPhone 18 Pro Max's chip (iOS / iPadOS 27.2 or later).
 #   Its ready-made shader pipelines are for that iPhone; another device builds its own at first start,
 #   and its log names its GPU, which EXTRA_ARGS=(--gpu <name>) adds to the next build.
 TARGET="iphone"
@@ -80,7 +80,7 @@ trap - ERR
 set -euo pipefail
 set +x   # never trace: the command line names the keys file
 
-NEED_XCODE="27.3"   # read again from the checkout's dm/gfx/tools/own_compilers.py
+NEED_XCODES="27.3 27.2"   # the tested Xcodes, newest first; read again from the checkout's dm/gfx/tools/own_compilers.py (XCODE_VERSIONS)
 
 die()  { printf '\nnx18-build: %s\n' "$1" >&2; shift; for l in "$@"; do printf '  %s\n' "$l" >&2; done; exit 1; }
 note() { printf 'nx18-build: %s\n' "$1"; }
@@ -252,11 +252,14 @@ if [ -x /opt/homebrew/bin/brew ]; then
     case ":$PATH:" in *:/opt/homebrew/bin:*) ;; *) export PATH="/opt/homebrew/bin:$PATH" ;; esac   # xcodegen, zstd
 fi
 
-v="$(sed -n "s/^XCODE_VERSION = '\([0-9.]*\)'.*/\1/p" "$CHECKOUT/dm/gfx/tools/own_compilers.py" 2>/dev/null | head -n 1 || true)"
-[ -n "$v" ] && NEED_XCODE="$v"
-LOCK_METAL="$(awk -F'\t' '$1=="metal_macosx"{print $2}' "$CHECKOUT/dm/gfx/tools/dmsh_chain.lock" 2>/dev/null || true)"
+v="$(sed -n "s/^XCODE_VERSIONS = (\([^)]*\)).*/\1/p" "$CHECKOUT/dm/gfx/tools/own_compilers.py" 2>/dev/null | head -n 1 | tr -d "'," || true)"
+[ -n "$v" ] && NEED_XCODES="$v"
+NEED_XCODE="$(printf '%s\n' $NEED_XCODES | sort -t. -k1,1n -k2,2n | paste -sd ' ' - | sed 's/ / or /g')"   # for the messages: "27.2 or 27.3"
+LOCK_METAL="$(awk -F'\t' '$1=="metal_macosx"{print $2}' "$CHECKOUT/dm/gfx/tools/dmsh_chain.lock" 2>/dev/null || true)"   # one line per tested Xcode
+in_lock() { [ -n "$1" ] && printf '%s\n' "$LOCK_METAL" | grep -qxF -- "$1"; }
 xcode_version() { /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null || true; }
-is_need_xcode() { case "$(xcode_version "$1")" in "$NEED_XCODE"|"$NEED_XCODE".*) return 0 ;; *) return 1 ;; esac; }
+is_need_xcode() { local v n; v="$(xcode_version "$1")"; for n in $NEED_XCODES; do case "$v" in "$n"|"$n".*) return 0 ;; esac; done; return 1; }
+NAMED_APPS=(); for n in $NEED_XCODES; do NAMED_APPS+=("/Applications/Xcode-$n.app"); done
 app_of_devdir() { case "$1" in *.app/Contents/Developer|*.app/Contents/Developer/) local d="${1%/}"; printf '%s\n' "${d%/Contents/Developer}" ;; *) printf '\n' ;; esac; }
 
 if [ -n "${DEVELOPER_DIR:-}" ]; then
@@ -277,10 +280,10 @@ if [ -z "${DEVELOPER_DIR:-}" ]; then
         :   # the selected Xcode is the one
     else
         pick=""; first=""
-        for a in "/Applications/Xcode-$NEED_XCODE.app" /Applications/Xcode.app /Applications/Xcode-beta.app /Applications/Xcode*.app "$HOME"/Applications/Xcode*.app; do
+        for a in "${NAMED_APPS[@]}" /Applications/Xcode.app /Applications/Xcode-beta.app /Applications/Xcode*.app "$HOME"/Applications/Xcode*.app; do
             [ -d "$a/Contents/Developer" ] && is_need_xcode "$a" || continue
             [ -n "$first" ] || first="$a"
-            if [ -n "$LOCK_METAL" ] && [ "$(DEVELOPER_DIR="$a/Contents/Developer" xcrun -sdk macosx metal --version 2>/dev/null | head -n 1 || true)" = "$LOCK_METAL" ]; then pick="$a"; break; fi
+            if in_lock "$(DEVELOPER_DIR="$a/Contents/Developer" xcrun -sdk macosx metal --version 2>/dev/null | head -n 1 || true)"; then pick="$a"; break; fi
         done
         [ -n "$pick" ] || pick="$first"
         if [ -n "$pick" ]; then

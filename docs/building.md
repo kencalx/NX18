@@ -17,7 +17,7 @@ Each [release](https://github.com/kencalx/NX18/releases) comes with two scripts.
 
 **`nx18-setup.sh` readies your Mac.**
 
-- It checks macOS, Xcode 27.3 and its Metal toolchain. You download Xcode from Apple yourself; the script names the build and says how to select it.
+- It checks macOS, Xcode 27.2 or 27.3 and its Metal toolchain. You download Xcode from Apple yourself; the script names the build and says how to select it.
 - It installs xcodegen, zstd and the Python modules. The modules go into a virtualenv, `.venv` in the NX 18 folder.
 - It clones NX 18 into `~/NX18`, or updates it.
 - It asks before every install or download, and never runs `sudo`. A folder with your own changes in it is left alone.
@@ -28,7 +28,7 @@ Each [release](https://github.com/kencalx/NX18/releases) comes with two scripts.
 - Set three things at its top: your game, your `prod.keys` and the target (`iphone`, `ipad` or `mac-app`). Then run it.
 - The game is your legally owned and acquired game files: a folder of NSPs, a dump folder, or a `.nup` or `.nx` file.
 - The keys are the ones dumped from your own Switch. Only NSPs and XCIs need them.
-- It checks the settings, selects Xcode 27.3 by itself, builds, and says where the IPA or app is. It never prints or copies your keys.
+- It checks the settings, selects Xcode 27.2 or 27.3 by itself, builds, and says where the IPA or app is. It never prints or copies your keys.
 
 ```
 bash ~/Downloads/nx18-setup.sh
@@ -45,11 +45,11 @@ Keep your copy of `nx18-build.sh` outside the NX 18 folder. `nx18-setup.sh` won'
 **You need:**
 
 - your legally owned and acquired game files;
-- an Apple silicon Mac on macOS 27.3 or later;
-- [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.3) 27.3 ([which build](#xcode-and-the-metal-compiler)), with its iOS platform for an iPhone or iPad build (Xcode → Settings → Components);
+- an Apple silicon Mac on macOS 27.2 or later;
+- [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027) 27.2 or 27.3 ([which build](#xcode-and-the-metal-compiler); Xcode 27.3 needs macOS 27.3, Xcode 27.2 runs on macOS 27.2), with its iOS platform for an iPhone or iPad build (Xcode → Settings → Components);
 - [Homebrew](https://brew.sh), and an arm64 Python, 3.12 or later (not one from an Intel Homebrew).
 
-The shaders need Xcode 27.3's Metal compiler, so select that Xcode first: `sudo xcode-select -s /Applications/Xcode.app`. If you keep several Xcodes, give this one the name `Xcode-27.3.app`, then run `sudo xcode-select -s /Applications/Xcode-27.3.app`.
+The shaders need the Metal compiler of Xcode 27.2 or Xcode 27.3, so select that Xcode first: `sudo xcode-select -s /Applications/Xcode.app`. If you keep several Xcodes, give this one the name `Xcode-27.2.app` or `Xcode-27.3.app`, then run `sudo xcode-select -s /Applications/Xcode-27.2.app` (or `Xcode-27.3.app`).
 
 **1. Install the tools.** Once, in Terminal:
 
@@ -189,12 +189,12 @@ Controls and saves: [Playing](playing.md). Every setting: [Settings](settings.md
 
 ## Xcode and the Metal compiler
 
-- **The chip.** NX 18's iOS app is built for the Apple A20 chip, on iOS 27.3: `dm/ios/project.yml` sets deployment target 27.3 and `-mcpu=apple-a20`. The app still declares the iPad family.
-- **The system.** An IPA from this tree needs iOS or iPadOS 27.3 or later. It doesn't run on older systems or on chips before the A20.
+- **The chip.** NX 18's iOS app is built for the Apple A20 chip, on iOS 27.2: `dm/ios/project.yml` sets deployment target 27.2 and `-mcpu=apple-a20`. The app still declares the iPad family.
+- **The system.** An IPA from this tree needs iOS or iPadOS 27.2 or later. A Mac app needs macOS 27.2 or later. It doesn't run on older systems or on chips before the A20.
 - **Textures.** Switch games use BC-compressed textures, and older iPhones can't read them.
-- **The compiler.** Xcode 27.3's Metal compiler (32023.925) is the one `dm/gfx/tools/dmsh_chain.lock` records, so `--allow-other-metal` isn't needed.
-- **The exact build.** The lock names compiler 32023.925.6: the Xcode 27.3 beta's (build 27C5020n, Metal Toolchain 27C5020k). The shaders were tested with it.
-- **Another compiler.** A released Xcode 27.3 whose Metal compiler reports another version is refused by the build check until the lock is raised. `--allow-other-metal` builds anyway, but untested shaders can render wrong pictures.
+- **The compilers.** `dm/gfx/tools/dmsh_chain.lock` records two Metal compilers, one line for each Xcode: Xcode 27.2's and Xcode 27.3's. With either one selected, `--allow-other-metal` isn't needed. Xcode 27.3 needs macOS 27.3; on macOS 27.2, take Xcode 27.2.
+- **The exact builds.** Xcode 27.2: build 27B52, Metal Toolchain 27B47, compiler 32023.922.4. Xcode 27.3 beta: compiler 32023.925.10. Each compiler's shaders get their own cache entries, so switching Xcodes rebuilds the shaders once and doesn't mix them.
+- **Another compiler.** An Xcode whose Metal compiler reports another version is refused by the build check until the lock records it (`tool_lock.py --update-lock` with that Xcode selected, which keeps the other Xcode's line). `--allow-other-metal` builds anyway, but untested shaders can render wrong pictures.
 - **Shader language.** The game shaders are MSL 4.1 on both platforms (`-std=metal4.1`).
 
 ## A game without a profile

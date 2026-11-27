@@ -94,8 +94,8 @@ class RawNoinline(unittest.TestCase):
     @unittest.skipUnless(shutil.which('xcrun'), 'no xcrun')
     def test_the_deployment_target_chooses(self):
         out = raw_noinline(SRC, stage='ms')
-        mac = self.preprocessed('macosx', '-mmacosx-version-min=27.3', out)
-        ios = self.preprocessed('iphoneos', '-mios-version-min=27.3', out)
+        mac = self.preprocessed('macosx', '-mmacosx-version-min=27.2', out)
+        ios = self.preprocessed('iphoneos', '-mios-version-min=27.2', out)
         self.assertRegex(mac, r'static inline __attribute__\(\(always_inline\)\)\s*int dmsh_raw_find\(')
         self.assertRegex(ios, r'static __attribute__\(\(noinline\)\)\s*int dmsh_raw_find\(')
 
@@ -120,7 +120,7 @@ class RawNoinline(unittest.TestCase):
     @unittest.skipUnless(shutil.which('xcrun'), 'no xcrun')
     def test_compiles(self):
         for stage in ('cs', 'ms'):
-            for sdk, flag in (('macosx', '-mmacosx-version-min=27.3'), ('iphoneos', '-mios-version-min=27.3')):
+            for sdk, flag in (('macosx', '-mmacosx-version-min=27.2'), ('iphoneos', '-mios-version-min=27.2')):
                 with self.subTest(stage=stage, sdk=sdk), tempfile.TemporaryDirectory() as d:
                     p = Path(d) / 'raw.metal'; p.write_text(raw_noinline(SRC, stage))
                     r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', flag, '-std=metal4.1', '-c', str(p), '-o', str(Path(d) / 'raw.air')], capture_output=True, text=True)

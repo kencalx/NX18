@@ -4,9 +4,9 @@ This page takes you from nothing to playing one of your legally owned and acquir
 
 ## 1. What you need
 
-- **A device with an Apple A20 chip** (iPhone 18 Pro, iPhone 18 Pro Max, iPhone Duo or iPad mini 8) on iOS or iPadOS 27.3 or later. NX 18 is tested on an iPhone 18 Pro Max; the others should work, but haven't been tested yet. Older devices and older iOS versions are not supported.
-- **An M-series Mac** (Apple silicon, M1 or later) on macOS 27.3 or later. A virtual Mac isn't supported: its GPU has no Metal 4.
-- **Xcode 27.3**, which you download from Apple yourself (step 2 says where).
+- **A device with an Apple A20 chip** (iPhone 18 Pro, iPhone 18 Pro Max, iPhone Duo or iPad mini 8) on iOS or iPadOS 27.2 or later. NX 18 is tested on an iPhone 18 Pro Max; the others should work, but haven't been tested yet. Older devices and older iOS versions are not supported.
+- **An M-series Mac** (Apple silicon, M1 or later) on macOS 27.2 or later. A virtual Mac isn't supported: its GPU has no Metal 4.
+- **Xcode 27.2 or 27.3**, which you download from Apple yourself (step 2 says where). Xcode 27.3 needs macOS 27.3; on macOS 27.2, take Xcode 27.2.
 - **Your legally owned and acquired games**, dumped from your own Switch or Switch 2, and the `prod.keys` dumped from your own Switch for games in `.nsp`, `.xci`, `.nsz` or `.xcz` files. A `.nup` or `.nx` file or a dump folder needs no keys.
 
 NX 18 includes no games, keys or firmware. Everything it builds from comes from your own console and your own purchases.
@@ -15,7 +15,7 @@ NX 18 includes no games, keys or firmware. Everything it builds from comes from 
 
 Download `nx18-setup.sh` and `nx18-build.sh` from the **Assets** of the newest [release](https://github.com/kencalx/NX18/releases). They are also in [`scripts/release`](../scripts/release).
 
-Install Xcode 27.3 first. Download it from [Apple's downloads page](https://developer.apple.com/download/all/?q=Xcode%2027.3) (a free Apple account works), move it to `/Applications`, and open it once. If you already have another Xcode, rename this one `Xcode-27.3.app`. You also need [Homebrew](https://brew.sh); install it yourself, since its installer asks for your password.
+Install Xcode 27.2 or 27.3 first (27.3 if your Mac runs macOS 27.3 or later, else 27.2). Download it from [Apple's downloads page](https://developer.apple.com/download/all/?q=Xcode%2027) (a free Apple account works), move it to `/Applications`, and open it once. If you already have another Xcode, rename this one `Xcode-27.2.app` or `Xcode-27.3.app`. You also need [Homebrew](https://brew.sh); install it yourself, since its installer asks for your password.
 
 Then, in Terminal:
 
@@ -23,7 +23,7 @@ Then, in Terminal:
 bash ~/Downloads/nx18-setup.sh
 ```
 
-The script checks your Mac, Xcode 27.3 and its Metal toolchain. It installs xcodegen, zstd and the Python modules NX 18 needs, and downloads NX 18 into `~/NX18`. It asks before every install or download, and it never uses `sudo`.
+The script checks your Mac, Xcode 27.2 or 27.3 and its Metal toolchain. It installs xcodegen, zstd and the Python modules NX 18 needs, and downloads NX 18 into `~/NX18`. It asks before every install or download, and it never uses `sudo`.
 
 - It ends with **Ready to build.** when everything is in place.
 - If something is missing, it says what and how to fix it. Fix it and run the script again: it only does what is still missing.
@@ -51,7 +51,7 @@ Keep the quotes around each path. Spaces in folder names are fine. Then run it:
 bash ~/nx18-build.sh
 ```
 
-The script checks every setting and names the one that's wrong. It picks Xcode 27.3 by itself and keeps your Mac awake while it builds. Your keys stay on your Mac: the script never prints, copies or sends them.
+The script checks every setting and names the one that's wrong. It picks Xcode 27.2 or 27.3 by itself and keeps your Mac awake while it builds. Your keys stay on your Mac: the script never prints, copies or sends them.
 
 A first build takes 30 to 60 minutes and needs free space of about twice the game's size plus 10 GB. Building again is much faster. When it's done, it says `done in … min:` and where the IPA is (in the game's folder, unless you set `OUTPUT`).
 
@@ -66,7 +66,7 @@ By default NX Play builds upstream nxnative, not NX 18. To build with NX 18:
 1. Do [step 2](#2-set-up-your-mac). It puts NX 18 in `~/NX18`. You can also clone it yourself: `git clone https://github.com/kencalx/NX18.git ~/NX18`.
 2. Download NX Play from its [releases](https://github.com/varyform/nx-native-wrapper/releases), drag it to Applications and open it. Its **Setup** window opens by itself: don't click **Install Missing** yet.
 3. Open **Settings › General**. At **nxnative repository**, click **Choose…** and pick your `NX18` folder. A green check means it found NX 18's build script. Then go back to Setup (**NX Play › Setup…**) and click **Install Missing**. It installs the tools and Python packages NX Play's builds use, and it finds NX 18 in your folder instead of downloading upstream nxnative.
-4. NX Play uses the Xcode your Mac has selected. If you have more than one Xcode, select 27.3: `sudo xcode-select -s /Applications/Xcode-27.3.app`. Leave **Allow a Metal compiler nxnative didn't test** off (it's the build's `--allow-other-metal`). If a build stops because the Metal compiler is not the one the shaders were tested with, install the Xcode 27.3 build named in the README's [Requirements](../README.md#requirements). Turning the setting on builds anyway, but untested shaders can render wrong pictures.
+4. NX Play uses the Xcode your Mac has selected. If you have more than one Xcode, select 27.2 or 27.3: for example `sudo xcode-select -s /Applications/Xcode-27.3.app`. Leave **Allow a Metal compiler nxnative didn't test** off (it's the build's `--allow-other-metal`). If a build stops because the Metal compiler is not one the shaders were tested with, install the Xcode 27.2 or 27.3 build named in the README's [Requirements](../README.md#requirements). Turning the setting on builds anyway, but untested shaders can render wrong pictures.
 5. Add your legally owned and acquired games and your `prod.keys` from your own Switch, as NX Play's own guide describes.
 
 Before it builds, NX Play brings that folder up to date with NX 18 on GitHub. A release checked out with `nx18-setup.sh --ref <tag>` has nothing to follow, so it stays as it is. Keep your own changes to NX 18 in another folder. NX Play doesn't use `nx18-build.sh`, so the settings above don't apply to it. Questions and bugs about NX Play go to [its own page](https://github.com/varyform/nx-native-wrapper/issues).

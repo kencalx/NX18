@@ -3,7 +3,7 @@
 name: Beam
 options:
   deploymentTarget:
-    macOS: "27.3"
+    macOS: "27.2"
   createIntermediateGroups: true
 configFiles:
   Debug: Config/Beam.xcconfig
@@ -49,7 +49,7 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSApplicationCategoryType: public.app-category.utilities
-        LSMinimumSystemVersion: "27.3"
+        LSMinimumSystemVersion: "27.2"
         CFBundleDocumentTypes:   # a game's files dropped on the Dock icon: a NUP, an NX, or a folder of NSPs or a dump
           - CFBundleTypeName: Game files
             CFBundleTypeRole: Viewer

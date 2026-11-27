@@ -52,7 +52,7 @@ Still to come: polish and the showcase (B5).
 
 ## Building Beam
 
-You need Xcode 27.3 and XcodeGen (`brew install xcodegen`).
+You need Xcode 27.2 or 27.3 and XcodeGen (`brew install xcodegen`).
 
 ```bash
 cd beam
@@ -66,7 +66,7 @@ Or from the command line:
 xcodebuild -project Beam.xcodeproj -scheme Beam -derivedDataPath build/dd build
 ```
 
-A local build is signed ad hoc. Beam needs macOS 27.3 and Apple silicon.
+A local build is signed ad hoc. Beam needs macOS 27.2 or later and Apple silicon.
 
 ### Tests
 

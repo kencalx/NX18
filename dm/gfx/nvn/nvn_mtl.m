@@ -2128,7 +2128,7 @@ static void mtl_init_once(void) {
     if (no4) {
         const char *why = re ? re.localizedDescription.UTF8String : "";
         MDIE("the Metal device %s has no Metal 4 (%s%s%s), the only way the host draws: it needs an iPhone 15 Pro or newer (A17 Pro chip or later), an iPad with an M1 chip or later, "
-             "or a Mac with Apple silicon on macOS 27.3 or later; a virtual Mac's GPU has none", g_dev.name.UTF8String, no4, *why ? ": " : "", why);
+             "or a Mac with Apple silicon on macOS 27.2 or later; a virtual Mac's GPU has none", g_dev.name.UTF8String, no4, *why ? ": " : "", why);
     }
     // BC textures are created and uploaded as BC, with no decompression path (dm/gfx/tex/README.md); without BC the first one aborts in Metal's descriptor validation mid-game
     // (GitHub issue #704: an iPhone 15, A16). The iOS front end refuses such a device before the launcher (main.m); this stops every other route at the device, with the reason
@@ -15124,7 +15124,7 @@ static void pso_guard_idle(int on) {
 static NSString *pso_bundle_file(id<MTLDevice> dev, NSString **dir) {
     const char *e = getenv("DM_PSO_BUNDLE");
     if (!e || !*e || !strcmp(e, "off")) return nil;
-    NSString *d = @(e), *gpu = dev.architecture.name;   // every device of macOS 27.3 / iOS 27.3 has it; a test with a fake device leaves DM_PSO_BUNDLE unset
+    NSString *d = @(e), *gpu = dev.architecture.name;   // every device of macOS 27.2 / iOS 27.2 has it (MTLDevice.architecture: macOS 14, iOS 17); a test with a fake device leaves DM_PSO_BUNDLE unset
     NSString *p = gpu ? [d stringByAppendingPathComponent:[gpu stringByAppendingPathExtension:@"mtl4a"]] : nil;
     if (!p || ![NSFileManager.defaultManager fileExistsAtPath:p]) {
         NSArray<NSString *> *have = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:d error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]];
@@ -16357,7 +16357,7 @@ static int pp_bg_count(void) {
     static int n; static dispatch_once_t once;
     dispatch_once(&once, ^{
         int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc < 2) pc = 2;
-        NSUInteger mc = g_dev.maximumConcurrentCompilationTaskCount;   // every device of macOS 27.3 / iOS 27.3 has it (as compile_tasks)
+        NSUInteger mc = g_dev.maximumConcurrentCompilationTaskCount;   // every device of macOS 27.2 / iOS 27.2 has it (macOS 13.3, iOS 26; as compile_tasks)
         int share = (int)(mc / 2 > 3 ? 3 : mc / 2);
         n = pc / 2 > share ? pc / 2 : share;
         const char *e = getenv("DM_PSO_BG_QUEUES"); int v = e ? atoi(e) : 0;
@@ -16920,7 +16920,7 @@ static int pso_bundle_covers(NSArray<NSArray<NSString *> *> *pairs, NSString *wa
 // (docs/reference/shaders.md, A prebuild pool sized from the Super cores). The prepare step keeps the active cores (prepare_workers) until a device run reports Metal's count there: pp_bg_count reads it on the iPhone too and logs it in its
 // 'pipeline builds in the background' line. The background pools take a share of level 0, raised by that count (pp_bg_count)
 static int compile_tasks(void) {
-    NSUInteger n = g_dev.maximumConcurrentCompilationTaskCount;   // every device of macOS 27.3 / iOS 27.3 has it
+    NSUInteger n = g_dev.maximumConcurrentCompilationTaskCount;   // every device of macOS 27.2 / iOS 27.2 has it (macOS 13.3, iOS 26)
     if (n >= 2) return (int)n;
     int c = 0; size_t sz = sizeof c; if (sysctlbyname("hw.activecpu", &c, &sz, NULL, 0) || c < 2) c = 2;
     return c;

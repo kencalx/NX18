@@ -31,8 +31,8 @@ struct SetupPanel: View {
                 }
                 if setup.xcodeMissing {
                     HStack {
-                        Text("Xcode 27.3 is your download from Apple (free with an Apple Account). Install it, open it once, then Check Again.").font(.callout)
-                        Link("Apple's downloads", destination: URL(string: "https://developer.apple.com/download/all/?q=Xcode%2027.3")!)
+                        Text("Xcode 27.2 or 27.3 is your download from Apple (free with an Apple Account): Xcode 27.3 needs macOS 27.3, Xcode 27.2 runs on macOS 27.2. Install it, open it once, then Check Again.").font(.callout)
+                        Link("Apple's downloads", destination: URL(string: "https://developer.apple.com/download/all/?q=Xcode%2027")!)
                     }
                 }
                 ForEach(setup.fixes) { f in

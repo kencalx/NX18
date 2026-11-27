@@ -269,7 +269,7 @@ Without it the GPU idles between frames, and iOS reads that idle time as room to
 
 ### How pipelines are built
 
-This is not a setting: it explains what [Pipeline prebuild](#pipeline-prebuild) and the **Preparing pipelines** screen are for. Before the GPU can draw something, the app has to build a *pipeline* for it: the game's shaders compiled for the iPhone's GPU, with the drawing settings. Building one takes tens of milliseconds, so a scene full of new ones stutters. The app builds every pipeline through Metal 4's compiler, keeps what it built in a pipeline archive on the phone, and builds most pipelines in a few microseconds from a shared base. There is no option to turn this off: the older way of building pipelines, and the devices that only had that way, are gone. An iPhone 15 Pro or newer, an iPad with M1 or later, or an Apple silicon Mac on macOS 27.3 or later is needed.
+This is not a setting: it explains what [Pipeline prebuild](#pipeline-prebuild) and the **Preparing pipelines** screen are for. Before the GPU can draw something, the app has to build a *pipeline* for it: the game's shaders compiled for the iPhone's GPU, with the drawing settings. Building one takes tens of milliseconds, so a scene full of new ones stutters. The app builds every pipeline through Metal 4's compiler, keeps what it built in a pipeline archive on the phone, and builds most pipelines in a few microseconds from a shared base. There is no option to turn this off: the older way of building pipelines, and the devices that only had that way, are gone. An iPhone 15 Pro or newer, an iPad with M1 or later, or an Apple silicon Mac on macOS 27.2 or later is needed.
 
 ```mermaid
 flowchart TD

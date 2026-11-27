@@ -65,14 +65,14 @@
 # With compute pipelines, they and the bases are separate groups (batches.<arch>/c<index>/ and <index>/) merged the same way, so new pairs leave the compute pipelines compiled, and the
 # reverse. The compute groups are small (COMPUTE_BATCH) and run --jobs at a time: one metal-tt keeps about three cores busy.
 # Usage: pso_offline.py --msl <b-<chain> folder> --out <folder> --work <folder> [--game <id>] [--pairs <shader_pairs.tsv> [--pairs <pso_pairs.tsv>]] [--gpu g18p[,g17p]]
-#          [--depth gl|zero] [--platform ios|macos] [--os-min 27.3] [--script-only] [--batch-size N] [--shader-map <shader_map.tsv>] [--manifest <pso_manifest.tsv>] [--no-compute] [--no-mesh] [--no-layout] [--no-standins] [--jobs N]
+#          [--depth gl|zero] [--platform ios|macos] [--os-min 27.2] [--script-only] [--batch-size N] [--shader-map <shader_map.tsv>] [--manifest <pso_manifest.tsv>] [--no-compute] [--no-mesh] [--no-layout] [--no-standins] [--jobs N]
 #   --game: the profile (DM_GAMES_DIR as for game.py) whose shader_pairs.tsv and pso_pairs.tsv are the pairs, whose shader_map.tsv and pso_manifest.tsv name the compute shaders and the
 #   task / mesh pipelines and layout bases, and whose depth_mode key the depth mode, unless --pairs / --shader-map / --manifest / --depth say; --no-compute: no compute pipelines;
 #   --no-mesh: no task / mesh pipelines; --no-layout: no layout bases (the R rows); --no-standins: no stand-ins (the R rows' pulling bases); --jobs: metal-tt runs at a time for
 #   the compute, task / mesh, layout and stand-in groups;
 #   --gpu: architectures, with or without the applegpu_ prefix (default g19p); --depth: the game's NVN depth mode (gl = near -w, NVN's default; zero = near 0, which the game sets
 #   with nvnDeviceSetDepthMode: the host knows it only at run time, so the profile says it; a wrong one costs the device its own prebuild, as without the archive);
-#   --os-min: the archives' system (default: for iOS the app's deployment target, deploymentTarget in dm/ios/project.yml (27.3), or the SDK's major version without it; for macOS
+#   --os-min: the archives' system (default: for iOS the app's deployment target, deploymentTarget in dm/ios/project.yml (27.2), or the SDK's major version without it; for macOS
 #   the major version this Mac runs, since the Mac app is built for the Mac that builds it).
 #   A device opens only an archive of its own major version (macOS 27.2 refused archives made for 26.0 and 26.6 and opened those for 27.0 and 27.2), and builds the bases itself
 #   otherwise: the SDK's version on a Mac whose system is older than its Xcode's SDK (macOS 26.6 with Xcode 27.1) left that Mac without them (GitHub issue #673)
@@ -1056,8 +1056,8 @@ def ios_deployment_target(project=IOS_PROJECT):
 
 
 def os_min_default(platform):
-    # iOS: the app's deployment target (27.3), the system every device that runs the app has at least and the one its libraries are built for (ios_metal.py, host_msl.py),
-    # so the archives open on all of them; the SDK's major version only without the project. It was the SDK's major version (27.0), which a device on 27.3 opens as well
+    # iOS: the app's deployment target (27.2), the system every device that runs the app has at least and the one its libraries are built for (ios_metal.py, host_msl.py),
+    # so the archives open on all of them; the SDK's major version only without the project. It was the SDK's major version (27.0), which a device on 27.2 or 27.3 opens as well
     # (same major version), but which no longer matched what the app is built for. A changed minimum is in each archive's key: the archives are made again once
     if platform != 'macos' and (v := ios_deployment_target()): return v
     cmd = ['sw_vers', '-productVersion'] if platform == 'macos' else ['xcrun', '-sdk', sdk(platform), '--show-sdk-version']

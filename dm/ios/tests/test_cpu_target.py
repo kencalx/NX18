@@ -2,7 +2,7 @@
 
 dav1d (dm/third_party/dav1d/src/cpu.h) adds every CPU feature the compiler's target promises to the features it detects at run time, so a target newer than
 the device runs instructions the device lacks: with -mcpu=apple-a18, Ocarina of Time's title movie stopped an M1 iPad Pro (no I8MM) with SIGILL in
-put_8tap_neon_i8mm. This build keeps no older device or iOS version (iOS 27.3, the A20 Pro only), so the target may promise what the A20 has (I8MM, BF16,
+put_8tap_neon_i8mm. This build keeps no older device or iOS version (iOS 27.2, the A20 Pro only), so the target may promise what the A20 has (I8MM, BF16,
 SME among them) and nothing beyond it; the host's assembly needs LSE atomics (ARMv8.1), which it has."""
 import re
 import shutil
@@ -16,7 +16,7 @@ NEEDED = ('__ARM_FEATURE_ATOMICS',)
 
 
 def macros(mcpu):
-    out = subprocess.run(['xcrun', '-sdk', 'iphoneos', 'clang', '-target', 'arm64-apple-ios27.3', f'-mcpu={mcpu}', '-dM', '-E', '-x', 'c', '/dev/null'],
+    out = subprocess.run(['xcrun', '-sdk', 'iphoneos', 'clang', '-target', 'arm64-apple-ios27.2', f'-mcpu={mcpu}', '-dM', '-E', '-x', 'c', '/dev/null'],
                          capture_output=True, text=True, check=True).stdout
     return {line.split()[1] for line in out.splitlines() if line.startswith('#define ')}
 

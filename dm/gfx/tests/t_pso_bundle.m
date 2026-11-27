@@ -40,9 +40,17 @@ static int checks, failed;
 
 static int sh(NSString *cmd) { int r = system(cmd.UTF8String); return WIFEXITED(r) ? WEXITSTATUS(r) : -1; }
 static void put(NSString *path, NSString *text) { [NSFileManager.defaultManager createDirectoryAtPath:path.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil]; [text writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil]; }
-static int lib(NSString *dir, NSString *name, NSString *src) {   // <dir>/<name>.metallib from MSL, with the SDK's compiler
+// The Mac host's minimum macOS (MACOS_MIN of dm/mac/min_os.mk), which the game libraries (dmsh_build.py MAC_METAL) and the host's own (host_msl.py, pso_offline.py host_libraries)
+// are compiled for: a base whose functions name different minimums is not found in the archive (a layout base with the host's empty fragment, once the minimum went below the SDK's)
+static NSString *mac_min(void) {
+    NSString *mk = [NSString stringWithContentsOfFile:[[@(__FILE__) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"../../mac/min_os.mk"] encoding:NSUTF8StringEncoding error:nil];
+    NSRange r = [mk rangeOfString:@"MACOS_MIN := "];
+    if (r.location == NSNotFound) { fprintf(stderr, "t_pso_bundle: no MACOS_MIN in dm/mac/min_os.mk\n"); exit(1); }
+    return [[mk substringFromIndex:NSMaxRange(r)] componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet][0];
+}
+static int lib(NSString *dir, NSString *name, NSString *src) {   // <dir>/<name>.metallib from MSL, with the SDK's compiler for the Mac host's minimum, as the build makes them
     put([NSString stringWithFormat:@"%@/%@.metal", dir, name], src);
-    return sh([NSString stringWithFormat:@"cd %@ && xcrun -sdk macosx metal -c %@.metal -o %@.air && xcrun -sdk macosx metallib %@.air -o %@.metallib && rm %@.metal %@.air", dir, name, name, name, name, name, name]);
+    return sh([NSString stringWithFormat:@"cd %@ && xcrun -sdk macosx metal -c -mmacosx-version-min=%@ %@.metal -o %@.air && xcrun -sdk macosx metallib %@.air -o %@.metallib && rm %@.metal %@.air", dir, mac_min(), name, name, name, name, name, name]);
 }
 // What run writes to stderr (the host's log lines), through a file in dir
 static NSString *stderr_of(NSString *dir, void (^run)(void)) {

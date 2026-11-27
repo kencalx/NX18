@@ -2,9 +2,9 @@
 # OpenGL layers, and their tests with them), so every test that goes through mtl_init (t_nvn, t_mip_extent, t_feedback and the rest of dm/gfx/tests' run list) stays local:
 # run `make -C dm/gfx/tests GAME=<id> run` on an Apple-silicon Mac. Here the graphics tests are compiled, and only the CPU-only ones run.
 # `profile_guess.py --check` stays local too: it compares the guesses with the extractions of the games (it needs their files).
-# Manual-only (workflow_dispatch) until GitHub's xcode-27 image ships Xcode 27.3 (env below says why every job stops at its first xcrun until then); no self-hosted runner for
-# this public repo. Until then the local gates stand in (docs/development.md), with dm/tools/lint_python.py's ratchet run before a push by .githooks/pre-push. When the image
-# has 27.3 at DEVELOPER_DIR's path and its Metal toolchain reports dmsh_chain.lock's 32023.925.6, put back the triggers above workflow_dispatch, here and in lint-c.yml:
+# Manual-only (workflow_dispatch) until GitHub's xcode-27 image has the Xcode DEVELOPER_DIR names (env below says why every job stops at its first xcrun until then); no
+# self-hosted runner for this public repo. Until then the local gates stand in (docs/development.md), with dm/tools/lint_python.py's ratchet run before a push by .githooks/pre-push.
+# When the image has that Xcode at DEVELOPER_DIR's path and its Metal toolchain reports one of dmsh_chain.lock's compilers, put back the triggers above workflow_dispatch, here and in lint-c.yml:
 #   pull_request:
 #   push:
 #     branches: [main]
@@ -23,15 +23,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # The toolchain the project supports (README: Xcode 27.3; dm/gfx/tools/dmsh_chain.lock: its Metal compiler, 32023.925), on GitHub's xcode-27 image (macOS 27, a preview image),
-  # named by path so the image's default moving to another Xcode does not move CI. The build check checks the Metal compiler against the lock first.
-  # dm/tools/tests/test_ci_toolchain.py keeps this version, the image and README's in step
-  # The pin moved from 27.2 with the lock, README, own_compilers.py and the NSP script, after the NieR:Automata and Ocarina of Time shader regression pass, which ran locally
-  # on the Xcode 27.3 beta (build 27C5020n; Metal Toolchain 27C5020k, 32023.925.6, the lock's compiler). GitHub's xcode-27 image has no Xcode 27.3: its newest release
-  # (xcode-27-arm64/20261104.0337, checked 2026-11-11) lists Xcode 27.2 (27B52) only, so every macOS job here and in lint-c.yml stops at its first xcrun until the image ships
-  # 27.3 at this path. Pinning 27.2 again is no way round: the iOS deployment target 27.3 is above its SDK, and its Metal compiler (32023.922) fails the build check. Until then
-  # green CI is no release gate (docs/development.md): the macOS jobs need the image's 27.3 (no self-hosted runner for this public repo), and then a check that its Metal
-  # toolchain reports the lock's 32023.925.6 (a released 27.3 may ship another build). This line and lint-c.yml's change together
+  # A toolchain the project supports (README: Xcode 27.2 or 27.3; dm/gfx/tools/dmsh_chain.lock: their Metal compilers, 32023.922.4 and 32023.925.10), on GitHub's xcode-27 image
+  # (macOS 27, a preview image), named by path so the image's default moving to another Xcode does not move CI. The build check checks the Metal compiler against the lock first
+  # (the Toolchain step's own_compilers.py --check-metal). dm/tools/tests/test_ci_toolchain.py keeps this version among the supported ones (own_compilers.py XCODE_VERSIONS) and the image's in step.
+  # GitHub's xcode-27 image has no Xcode 27.3: its newest release (xcode-27-arm64/20261104.0337, checked 2026-11-11) lists Xcode 27.2 (27B52) only, so every macOS job here and
+  # in lint-c.yml stops at its first xcrun while this names 27.3. Before NX 18 targeted 27.2, pinning 27.2 was no way round (the iOS deployment target 27.3 was above its SDK, and
+  # its Metal compiler, 32023.922, failed that --check-metal step). Now the targets are macOS 27.2 / iOS 27.2 and the lock lists Xcode 27.2's compiler (27B52, Metal Toolchain
+  # 27B47), so pinning the image's Xcode 27.2 here and in lint-c.yml would let the jobs run, after a check that the image's Metal toolchain reports 32023.922.4; that switch and
+  # the triggers wait for the owner. Until then green CI is no release gate (docs/development.md; no self-hosted runner for this public repo). This line and lint-c.yml's change together
   DEVELOPER_DIR: /Applications/Xcode_27.3.app/Contents/Developer
   GAME: 010015100B514000   # Super Mario Bros. Wonder: the profile the host and gfx tests are built for (any profile does; the tests are about code, not the game)
 

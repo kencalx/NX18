@@ -72,7 +72,7 @@ def gpu_compile(msl, flags, arch='applegpu_g16s'):
         if r.returncode: raise AssertionError('metallib: ' + r.stderr)
         Path(d, 'p.mtlp-json').write_text(json.dumps({'libraries': {'paths': [{'path': 'k.metallib', 'label': 'L'}]}, 'pipelines': {'render_pipelines': [
             {'vertex_function': 'alias:L#dm_vs', 'fragment_function': 'alias:L#main0', 'color_attachments': [{'pixel_format': 'RGBA32Float'}]}]}}))
-        r = subprocess.run([str(toolchain() / 'applegpu-nt'), '-arch', arch, '-platform_version', 'macos', '27.3', '27.3', '-N', 'p.mtlp-json', 'k.metallib', '-o', 'k.bin'],
+        r = subprocess.run([str(toolchain() / 'applegpu-nt'), '-arch', arch, '-platform_version', 'macos', '27.2', '27.2', '-N', 'p.mtlp-json', 'k.metallib', '-o', 'k.bin'],
                            capture_output=True, text=True, cwd=d, env=env)
         return r.returncode == 0, r.stdout + r.stderr
 

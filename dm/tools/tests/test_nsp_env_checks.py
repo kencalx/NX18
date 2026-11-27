@@ -138,7 +138,7 @@ class ChainCheck(unittest.TestCase):   # dmsh_build.py run directly (tool_lock.c
             with self.subTest(exc=exc): self.assertTrue(self.embedded(exc).startswith('does not run ('))
 
     def check(self, xlate_source):
-        with open(dmsh_chain.LOCK) as f: lock = dict(l.rstrip('\n').split('\t', 1) for l in f if '\t' in l and not l.startswith('#'))
+        lock = {k: v[0][0] for k, v in tool_lock.read_lock().items()}   # each tool as the lock's first entry records it
         with mock.patch.object(tool_lock, 'tools_now', lambda: {**lock, 'xlate_source': xlate_source}): return tool_lock.check_tools()
 
     def test_checks_are_outside_the_chain(self):   # a fix to a check changes neither V nor any shader's cache key (dmsh_build.py CODE_FP takes dmsh_chain.py's code form)

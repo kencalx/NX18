@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """dmsh_metalwa.py: automatic Metal GPU compiler workarounds after KosmicKrisp.
-KK3 rewrites spvSubgroupBallot as simd_or(uint(value) << lane) behind dm_mwa3, false in the Mac library (macOS 27.3+, fixed) and true in the iPhone's (by the compile's deployment target),
+KK3 rewrites spvSubgroupBallot as simd_or(uint(value) << lane) behind dm_mwa3, false in the Mac library (macOS 27.2+, fixed in macOS 27) and true in the iPhone's (by the compile's deployment target),
 threading the lane ID by value (uint, never thread uint&, avoiding Apple's #2825 out-of-line scalarization bug). KK9 guards loop breaks in subgroup functions unconditionally.
 With DMSH_TEST_METAL=1, compiles and runs t_metalwa.metal's bounded kernels on the GPU."""
 from pathlib import Path
@@ -195,9 +195,9 @@ class MetalWa(unittest.TestCase):
     @unittest.skipUnless(shutil.which('xcrun'), 'no xcrun')
     def test_the_deployment_target_chooses(self):   # the Mac library's compile (dmsh_build.py MAC_METAL) and the iPhone's (ios_metal.py METAL)
         out = W.apply(QUEUE, {3, 9})[0]
-        self.assertIn('constant bool dm_mwa3 = false;', self.preprocessed('macosx', '-mmacosx-version-min=27.3', out))
-        self.assertNotIn('dm_mwa3 = true', self.preprocessed('macosx', '-mmacosx-version-min=27.3', out))
-        ios = self.preprocessed('iphoneos', '-mios-version-min=27.3', out)
+        self.assertIn('constant bool dm_mwa3 = false;', self.preprocessed('macosx', '-mmacosx-version-min=27.2', out))
+        self.assertNotIn('dm_mwa3 = true', self.preprocessed('macosx', '-mmacosx-version-min=27.2', out))
+        ios = self.preprocessed('iphoneos', '-mios-version-min=27.2', out)
         self.assertIn('constant bool dm_mwa3 = true;', ios)
         self.assertNotIn('dm_mwa3 = false', ios)
 
@@ -322,7 +322,7 @@ class Repro(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             run = Path(d) / 't_metalwa'
             subprocess.run(['clang', '-O1', '-fobjc-arc', '-o', str(run), str(here / 't_metalwa.m'), '-framework', 'Metal', '-framework', 'Foundation'], check=True)
-            mac = ['-mmacosx-version-min=27.3', '-std=metal4.1']   # the Mac library's target: KK3 compiled out (gate='target')
+            mac = ['-mmacosx-version-min=27.2', '-std=metal4.1']   # the Mac library's target: KK3 compiled out (gate='target')
             cases = [('as built', REPRO, '-O1', []), ('KK3 + KK9 Mac', W.apply(REPRO, {3, 9})[0], '-O1', mac),
                      ('KK3 + KK9 static', W.apply(REPRO, {3, 9}, 'static')[0], '-O1', []),
                      ('KK9 only', W.apply(REPRO, {9})[0], '-O1', [])]
@@ -342,7 +342,7 @@ class Repro(unittest.TestCase):
                 self.assertEqual(len(res[name]), 9, r.stdout)
             bad = lambda n: sorted(k for k, v in res[n].items() if v)
             print(f"\nt_metalwa on this OS ({'offline' if offline else 'online'}): as built failing {bad('as built') or 'none'}", file=sys.stderr)
-            self.assertEqual(bad('KK3 + KK9 Mac'), [])   # macOS 27.3: the plain ballot is right, KK9 still needed
+            self.assertEqual(bad('KK3 + KK9 Mac'), [])   # macOS 27 (27.2 and later): the plain ballot is right, KK9 still needed
             self.assertEqual(bad('KK3 + KK9 static'), [])
             self.assertNotIn('kk9_break', bad('KK9 only'))
 

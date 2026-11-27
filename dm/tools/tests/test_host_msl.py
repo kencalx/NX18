@@ -82,7 +82,7 @@ class HostMSL(unittest.TestCase):
         self.assertIn(f'-mmacosx-version-min={minimum}', self.compiles()[-1])
         self.assertIn('-std=metal4.1', self.compiles()[-1])   # the newest MSL on both, whatever the minimum would pick
         self.make('MSL_SDK=iphoneos')
-        self.assertIn('-mios-version-min=27.3', self.compiles()[-1])
+        self.assertIn('-mios-version-min=27.2', self.compiles()[-1])
         self.assertIn('-std=metal4.1', self.compiles()[-1])
         self.assertIn('iphoneos', self.compiles()[-1])
 
