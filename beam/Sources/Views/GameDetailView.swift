@@ -28,6 +28,10 @@ struct GameDetailView: View {
                 if let s = settingsSource { GameSettingsView(title: game.title, source: s) }
             }
             .toolbar {
+                ToolbarItem {   // Beam's title beside the game's buttons: a mark, not a control (no glass behind it)
+                    Image("BeamTitle").resizable().scaledToFit().frame(height: 20).accessibilityLabel("NX 18 Beam")
+                }
+                .sharedBackgroundVisibility(.hidden)
                 ToolbarItem {
                     Button("Read Again", systemImage: "arrow.clockwise") { library.identify(gameID) }.disabled(library.identifying.contains(gameID))
                 }
