@@ -208,6 +208,17 @@ class PackReuse(unittest.TestCase):
         self.assert_reused()
         self.assertEqual((partial / 'leave').read_text(), 'untouched')
 
+    def test_source_identity_invalidates_reuse_and_matches_metadata(self):   # upstream NXNative 5572329f3
+        # The same runtime files, another checkout: the reuse must not keep an earlier DMCommit, clean, dirty or outside Git
+        info = Path(self.args.out) / 'Contents/Info.plist'
+        with mock.patch.object(pack_app, 'source_commit') as commit:
+            for identity in ('a' * 12, 'b' * 12, 'b' * 12 + '+dirty', None):
+                with self.subTest(identity=identity):
+                    commit.return_value = identity; commit.reset_mock()
+                    self.assert_repacked(); commit.assert_called_once_with()
+                    self.assertEqual(plistlib.loads(info.read_bytes()).get('DMCommit'), identity)
+                    commit.reset_mock(); self.assert_reused(); commit.assert_called_once_with()
+
     def test_each_selected_file_content_invalidates_even_with_same_stat(self):
         self.pack()
         names = ['dmhost', 'patched/main.patched.bin', 'patched/main.fixups.tsv', 'patched/main.gates.tsv', 'patched/main.cuts.tsv',

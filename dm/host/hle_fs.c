@@ -714,23 +714,170 @@ HLE_FORCE("_ZN2nn2fs18DeleteCacheStorageEi", "fsp-srv; cache storage → deletes
     char b[1100]; rm_tree(cache_dir(index, b, sizeof b)); return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs17MountCacheStorageEPKc", "fsp-srv; cache storage 0 → host directory (SDK 11 one-argument form, Monster Hunter Rise)", Result, h_fs_MountCache0, const char *name) { return h_fs_MountCache(name, 0); }
-// Save data size (Monster Hunter Rise, SDK 11): the save directory has no size of its own, so it reports 256 MB of data and journal, more than a game asks for; extending succeeds without doing anything
-HLE_FORCE("_ZN2nn2fs15GetSaveDataSizeEPlS1_RKNS_7account3UidE", "fsp-srv; save data size: 256 MB data + 256 MB journal", Result, h_fs_SaveSize, int64_t *size, int64_t *journal, const void *uid) {
-    (void)uid; if (size) *size = 256 << 20; if (journal) *journal = 256 << 20; return RES_OK;
+// Save data size and extension (upstream 325b9973a). The application's control data (control.nacp, nn::ns::ApplicationControlProperty, 0x4000 bytes, little-endian) names the
+// sizes: DM_CONTROL_NACP, else control.nacp beside DM_ROMFS (the NSP script's extraction folder <version>/{RomFS,control.nacp}). The packed apps carry no control.nacp, so there
+// the host falls back to 256 MB data and 16 MB journal (not equal: Little Busters! Converted Edition computes usable space as size - journal, which was 0 MB when both were 256 MB).
+// 0: len bytes read at off; -1: no file; -2: too short. path_out: the file it looked for, for the log
+static int control_nacp_read(off_t off, void *out, size_t len, char *path_out, size_t path_cap) {
+    char p[1100], b[1024]; const char *e = getenv("DM_CONTROL_NACP");
+    if (e && *e) snprintf(p, sizeof p, "%s", e);
+    else {
+        snprintf(p, sizeof p, "%s", envdir("DM_ROMFS", "romfs", b, sizeof b));
+        size_t k = strlen(p); while (k > 1 && p[k - 1] == '/') p[--k] = 0;
+        char *sl = strrchr(p, '/'); if (sl) sl[1] = 0; else p[0] = 0;
+        strlcat(p, "control.nacp", sizeof p);
+    }
+    if (path_out && path_cap) strlcpy(path_out, p, path_cap);
+    int fd = open(p, O_RDONLY); ssize_t r = fd < 0 ? -1 : pread(fd, out, len, off);
+    if (fd >= 0) close(fd);
+    return r == (ssize_t)len ? 0 : fd < 0 ? -1 : -2;
 }
-// The largest save data the game may extend to (Octopath Traveler 0, SDK 19: Unreal's save system asks before its first save, about 13 minutes in; the SDK's version read the fsp-srv
-// object the host never made, SIGSEGV at GetSaveDataSizeMax+0xbc), the size of a cache storage and the free space of a mount: the same 256 MB the save data size reports, more than a game asks for
-HLE_FORCE("_ZN2nn2fs18GetSaveDataSizeMaxEPlS1_", "fsp-srv; largest save data size: 256 MB data + 256 MB journal", Result, h_fs_SaveSizeMax, int64_t *size, int64_t *journal) {
-    if (size) *size = 256 << 20; if (journal) *journal = 256 << 20; return RES_OK;
+#define RES_INVALID_SIZE       0x2F5C02u   // fs module 2, description 6062: ResultInvalidSize
+#define RES_EXT_SIZE_TOO_LARGE 0x2F6402u   // fs module 2, description 6066: ResultExtensionSizeTooLarge
+#define RES_EXT_SIZE_INVALID   0x2F6602u   // fs module 2, description 6067: ResultExtensionSizeInvalid
+#define SAVE_FALLBACK_SIZE    ((int64_t)256 << 20)
+#define SAVE_FALLBACK_JOURNAL ((int64_t)16 << 20)
+#define SAVE_EXT_UNIT         ((int64_t)1 << 20)   // nn::fs::SaveDataExtensionUnitSize (1 MiB)
+static int nacp_size_pair(off_t off, int64_t *size, int64_t *journal) {
+    int64_t c[2] = {0, 0}; char p[1100];
+    int r = control_nacp_read(off, c, sizeof c, p, sizeof p);
+    if (r == -2) LOG("[RED] control data: %s is too short", p);
+    if (r || c[0] <= 0 || c[1] < 0) return -1;
+    *size = c[0]; *journal = c[1]; return 0;
 }
+// The largest save the control data allows (0x3148/0x3150 account, 0x3158/0x3160 device): 1 an explicit max (never below the base, so a partial one cannot put the max under it),
+// 0 the base size when it declares no max (no extension past it), -1 neither
+static int save_size_nacp_max(int device, int64_t *size, int64_t *journal) {
+    int64_t bs = 0, bj = 0, ms = 0, mj = 0;
+    int have_base = !nacp_size_pair(device ? 0x3090 : 0x3080, &bs, &bj);
+    int have_max = !nacp_size_pair(device ? 0x3158 : 0x3148, &ms, &mj);
+    if (!have_base && !have_max) return -1;
+    if (have_max) { *size = have_base && bs > ms ? bs : ms; *journal = have_base && bj > mj ? bj : mj; return 1; }
+    *size = bs; *journal = bj; return 0;
+}
+// The one limit GetSaveDataSizeMax reports and ExtendSaveData / ExtendDeviceSaveData keep to (upstream 60f0fe506): the control data's max, else its base, else 256 MB / 16 MB
+static void save_size_max_limit(int device, int64_t *size, int64_t *journal, const char **from) {
+    int m = save_size_nacp_max(device, size, journal);
+    if (m < 0) { *size = SAVE_FALLBACK_SIZE; *journal = SAVE_FALLBACK_JOURNAL; }
+    if (from) *from = m == 1 ? "the control data's max" : m == 0 ? "the control data's base size" : "no control data: 256 MB / 16 MB";
+}
+// A save's size record, beside its folder: <DM_SAVE>.size (the account save) and <DM_SAVE>_device.size (the device save, also when it shares the account save's folder). The host
+// has one player, so every user's account save is DM_SAVE's (h_fs_MountSave) and has its one record. Outside the save's transaction (a refused Commit does not undo an extension);
+// the cloud's copy of the save carries both (save_sync.c SIZE_FILES)
+static int save_size_path(char *out, size_t cap, int device) {
+    const char *d = getenv("DM_SAVE");
+    if (!d || !*d) return -1;
+    size_t n = strlen(d); while (n > 1 && d[n - 1] == '/') n--;   // as h_fs_MountSave strips them
+    int len = snprintf(out, cap, "%.*s%s.size", (int)n, d, device ? "_device" : "");
+    return len < 0 || (size_t)len >= cap ? -1 : 0;
+}
+static int save_size_read_locked(const char *p, int64_t *size, int64_t *journal) {   // "<size> <journal>\n", size > 0, journal >= 0
+    FILE *f = fopen(p, "r");
+    long long s = 0, j = 0; char extra = 0;
+    int ok = f && fscanf(f, "%lld %lld %c", &s, &j, &extra) == 2 && s > 0 && j >= 0 && !ferror(f);
+    if (f) fclose(f);
+    if (!ok) return -1;
+    *size = (int64_t)s; *journal = (int64_t)j; return 0;
+}
+static int save_size_put_locked(const char *p, int device, int64_t size, int64_t journal) {   // written beside it, synced and renamed over it: a cut-off write never reads as a size
+    char t[1200];
+    if (snprintf(t, sizeof t, "%s.tmp", p) >= (int)sizeof t) { LOG("[RED] fs %s save: size record path is too long (%s)", device ? "device" : "account", p); return -1; }
+    FILE *f = fopen(t, "w"); int bad = 0, err = 0;
+    if (!f || fprintf(f, "%lld %lld\n", (long long)size, (long long)journal) < 0 || fflush(f) || fsync(fileno(f))) { bad = 1; err = errno; }
+    if (f && fclose(f) && !bad) { bad = 1; err = errno; }
+    if (!bad && rename(t, p)) { bad = 1; err = errno; }
+    if (bad) { LOG("[RED] fs %s save: cannot record its size in %s (%s)", device ? "device" : "account", p, strerror(err)); unlink(t); return -1; }
+    return 0;
+}
+// The save's size now, under g_lock: the control data's base (else 256 MB / 16 MB), grown per dimension by a valid record
+static void save_size_current_locked(const char *p, int device, int64_t *size, int64_t *journal, const char **from) {
+    int64_t bs = 0, bj = 0, rs = 0, rj = 0;
+    int have_base = !nacp_size_pair(device ? 0x3090 : 0x3080, &bs, &bj);
+    if (!have_base) { bs = SAVE_FALLBACK_SIZE; bj = SAVE_FALLBACK_JOURNAL; }
+    int have_rec = p && !save_size_read_locked(p, &rs, &rj);
+    if (have_rec && (rs > bs || rj > bj || (rs == bs && rj == bj))) {
+        *size = rs > bs ? rs : bs; *journal = rj > bj ? rj : bj;
+        if (from) *from = "its record";
+    } else {
+        *size = bs; *journal = bj;
+        if (from) *from = have_base ? "the control data" : "no record and no control data: 256 MB / 16 MB";
+    }
+}
+static Result save_size_get(int64_t *size, int64_t *journal, int device) {
+    char p[1100]; const char *path = save_size_path(p, sizeof p, device) ? NULL : p;
+    int64_t s = 0, j = 0; const char *from = NULL;
+    pthread_mutex_lock(&g_lock);
+    save_size_current_locked(path, device, &s, &j, &from);
+    pthread_mutex_unlock(&g_lock);
+    if (size) *size = s;
+    if (journal) *journal = j;
+    LOG("fs %s save data size: %lld bytes, journal %lld (%s)", device ? "device" : "account", (long long)s, (long long)j, from);
+    return RES_OK;
+}
+// As Horizon's ExtendApplicationSaveData and ExtendSaveDataIfNeeded: a negative size is ResultInvalidSize, a dimension growing past the limit GetSaveDataSizeMax reports
+// (save_size_max_limit; only with control data, see below) ResultExtensionSizeTooLarge, a growing dimension not a multiple of 1 MiB ResultExtensionSizeInvalid; each dimension only grows
+// (journal 0 keeps the journal), a record already past the limit (an older build's) stays and answers what it holds as a success, and a record that cannot be written is a
+// failure. A new record wakes the cloud sender, which carries it (save_sync.c)
+static Result save_size_extend(int device, int64_t size, int64_t journal) {
+    if (size < 0 || journal < 0) return RES_INVALID_SIZE;
+    char p[1100];
+    if (save_size_path(p, sizeof p, device)) { LOG("[RED] fs extend %s save data: DM_SAVE is unset or too long, cannot record size", device ? "device" : "account"); return RES_FAIL; }
+    int64_t max_s = 0, max_j = 0;
+    save_size_max_limit(device, &max_s, &max_j, NULL);
+    // NX 18's packed apps carry no control.nacp, so without control data there is no limit: an extension succeeds and is recorded, as the host's no-op did before
+    // (upstream caps it at 256 MB / 16 MB, which would refuse extensions every game used to get)
+    if (save_size_nacp_max(device, &(int64_t){0}, &(int64_t){0}) < 0) max_s = max_j = INT64_MAX;
+    pthread_mutex_lock(&g_lock);
+    int64_t cur_s = 0, cur_j = 0;
+    save_size_current_locked(p, device, &cur_s, &cur_j, NULL);
+    if (size <= cur_s && journal <= cur_j) {
+        pthread_mutex_unlock(&g_lock);
+        LOG("fs extend %s save data to %lld bytes (journal %lld): already %lld / %lld", device ? "device" : "account", (long long)size, (long long)journal, (long long)cur_s, (long long)cur_j);
+        return RES_OK;
+    }
+    if ((size > cur_s && size > max_s) || (journal > cur_j && journal > max_j)) {
+        pthread_mutex_unlock(&g_lock);
+        LOG("fs extend %s save data (%lld bytes, journal %lld) exceeds max (%lld, %lld)", device ? "device" : "account", (long long)size, (long long)journal, (long long)max_s, (long long)max_j);
+        return RES_EXT_SIZE_TOO_LARGE;
+    }
+    if ((size > cur_s && size % SAVE_EXT_UNIT) || (journal > cur_j && journal % SAVE_EXT_UNIT)) {
+        pthread_mutex_unlock(&g_lock);
+        LOG("fs extend %s save data to %lld bytes (journal %lld): not aligned to 1 MiB", device ? "device" : "account", (long long)size, (long long)journal);
+        return RES_EXT_SIZE_INVALID;
+    }
+    int64_t new_s = size > cur_s ? size : cur_s, new_j = journal > cur_j ? journal : cur_j;
+    int bad = save_size_put_locked(p, device, new_s, new_j);
+    pthread_mutex_unlock(&g_lock);
+    if (bad) return RES_FAIL;
+    save_sync_committed();   // the cloud's copy of the save carries the record: sent as a Commit is (save_sync.h)
+    LOG("fs extend %s save data to %lld bytes (journal %lld)", device ? "device" : "account", (long long)new_s, (long long)new_j);
+    return RES_OK;
+}
+// Save data size (Monster Hunter Rise, SDK 11; Little Busters! Converted Edition, SDK 8): an extended size recorded by ExtendSaveData, else the control data's
+// UserAccountSaveDataSize / JournalSize (s64 at 0x3080 / 0x3088), else 256 MB data + 16 MB journal. One player: every user is DM_SAVE's save
+HLE_FORCE("_ZN2nn2fs15GetSaveDataSizeEPlS1_RKNS_7account3UidE", "fsp-srv; save data size from the ExtendSaveData record or control.nacp", Result, h_fs_SaveSize, int64_t *size, int64_t *journal, const void *uid) {
+    (void)uid; return save_size_get(size, journal, 0);
+}
+// The largest account save the game may extend to (Octopath Traveler 0, SDK 19: Unreal's save system asks before its first save, about 13 minutes in; the SDK's version read the fsp-srv
+// object the host never made, SIGSEGV at GetSaveDataSizeMax+0xbc): UserAccountSaveDataSizeMax / JournalSizeMax (s64 at 0x3148 / 0x3150, never below the base), else the base size
+// (0x3080 / 0x3088) when the title declares no max, else 256 MB data + 16 MB journal
+HLE_FORCE("_ZN2nn2fs18GetSaveDataSizeMaxEPlS1_", "fsp-srv; largest save data size from control.nacp", Result, h_fs_SaveSizeMax, int64_t *size, int64_t *journal) {
+    int64_t s = 0, j = 0; const char *from = NULL;
+    save_size_max_limit(0, &s, &j, &from);
+    if (size) *size = s;
+    if (journal) *journal = j;
+    LOG("fs save data size max: %lld bytes, journal %lld (%s)", (long long)s, (long long)j, from);
+    return RES_OK;
+}
+// The size of a cache storage and the free space of a mount (Octopath Traveler 0 asks for both with the save size max): 256 MB, more than a game asks for
 HLE_FORCE("_ZN2nn2fs19GetCacheStorageSizeEPlS1_i", "fsp-srv; cache storage size: 256 MB data + 256 MB journal", Result, h_fs_CacheSize, int64_t *size, int64_t *journal, int index) {
     (void)index; if (size) *size = 256 << 20; if (journal) *journal = 256 << 20; return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs16GetFreeSpaceSizeEPlPKc", "fsp-srv; free space of a mount: 256 MB (the host directory has no size limit of its own)", Result, h_fs_FreeSpace, int64_t *out, const char *path) {
     (void)path; if (out) *out = 256 << 20; return RES_OK;
 }
-HLE_FORCE("_ZN2nn2fs14ExtendSaveDataERKNS_7account3UidEll", "fsp-srv; extend save data: the host directory has no size limit", Result, h_fs_ExtendSave, const void *uid, int64_t size, int64_t journal) {
-    (void)uid; LOG("fs extend save data to %lld bytes (journal %lld): nothing to do", (long long)size, (long long)journal); return RES_OK;
+HLE_FORCE("_ZN2nn2fs14ExtendSaveDataERKNS_7account3UidEll", "fsp-srv; extend save data: record the new size beside DM_SAVE", Result, h_fs_ExtendSave, const void *uid, int64_t size, int64_t journal) {
+    (void)uid; return save_size_extend(0, size, journal);
 }
 HLE_FORCE("_ZN2nn2fs14EnsureSaveDataERKNS_7account3UidE", "fsp-srv; the save directory is created at mount time", Result, h_fs_EnsureSave, const void *uid) { (void)uid; return RES_OK; }
 // Another application's save data (Tears of the Kingdom asks by application ID and would mount it read-only): the host keeps only this game's own save, which exists once mounted
@@ -765,7 +912,7 @@ HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv; save data 
     return mount_ex(name, dd, 0, 1);
 }
 // Device save data: one save for the console instead of one per user. Animal Crossing: New Horizons keeps its island there (3.0.3's main mounts no account save data at all); the host
-// has one player, so it is the host save directory with its transaction, as the account save. Its size and extension follow the account save's.
+// has one player, so it is the host save directory with its transaction, as the account save. Its size and extension are its own (<DM_SAVE>_device.size, h_fs_DeviceSaveSize).
 // A game that mounts both is given two saves, as on Horizon: the device save is <DM_SAVE>_device, a transaction of its own. Mario Kart 8 Deluxe mounts CommonSave (device) and then
 // UserSave (account, main+0x8b0c84), and at boot its save manager deletes CommonSave:/userdata.dat (main+0x8b1910, through its file device's DeleteFile); in one shared directory that
 // was UserSave's own userdata.dat, so every boot started a new save. Decided by main's imports: of the games on hand only this one imports both, and ACNH's islands stay where they are
@@ -778,8 +925,9 @@ HLE_FORCE("_ZN2nn2fs19MountDeviceSaveDataEPKc", "fsp-srv; device save data → t
     strlcat(dd, "_device", sizeof dd);
     return mount_ex(name, dd, 0, 1);
 }
-HLE_FORCE("_ZN2nn2fs21GetDeviceSaveDataSizeEPlS1_", "fsp-srv; device save data size: 256 MB data + 256 MB journal", Result, h_fs_DeviceSaveSize, int64_t *size, int64_t *journal) { return h_fs_SaveSize(size, journal, NULL); }
-HLE_FORCE("_ZN2nn2fs20ExtendDeviceSaveDataEll", "fsp-srv; extend device save data: the host directory has no size limit", Result, h_fs_ExtendDeviceSave, int64_t size, int64_t journal) { return h_fs_ExtendSave(NULL, size, journal); }
+// The device save's size: its own record (<DM_SAVE>_device.size), else the control data's DeviceSaveDataSize / JournalSize (0x3090 / 0x3098), else 256 MB / 16 MB; max 0x3158 / 0x3160
+HLE_FORCE("_ZN2nn2fs21GetDeviceSaveDataSizeEPlS1_", "fsp-srv; device save data size from the ExtendDeviceSaveData record or control.nacp", Result, h_fs_DeviceSaveSize, int64_t *size, int64_t *journal) { return save_size_get(size, journal, 1); }
+HLE_FORCE("_ZN2nn2fs20ExtendDeviceSaveDataEll", "fsp-srv; extend device save data: record the new size beside DM_SAVE", Result, h_fs_ExtendDeviceSave, int64_t size, int64_t journal) { return save_size_extend(1, size, journal); }
 // The restore flag marks save data the system restored from a backup (cloud save data backup), which a game may check once and then clear with the commit option below; the host never restores
 HLE_FORCE("_ZN2nn2fs22GetSaveDataRestoreFlagEPbPKc", "fsp-srv; save data restored from a backup: never", Result, h_fs_RestoreFlag, uint8_t *out, const char *name) { (void)name; *out = 0; return RES_OK; }
 static _Atomic uint64_t g_save_commits;   // number of successful commits (used by the front end when going to background to wait for "the game's current save has been committed")

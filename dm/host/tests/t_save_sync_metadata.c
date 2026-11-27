@@ -6,7 +6,7 @@
 // the next one finishes it. A recovery that fails refuses the mount and keeps the journal, and the start after it recovers; an unreadable journal refuses the mount; a
 // second mount gets the first's answer. Older backups are pruned only when a pull completes, and nothing is sent after the host while a journal is pending.
 // The metadata file's format both ways: what an older build reads of a file this one writes (its reader, copied below), and what this one reads of an older build's
-// file (no cloud line).
+// file (no cloud line). The save size records (upstream 60f0fe506) through the pull, its journal and the recovery (size_record_cases).
 #include <errno.h>
 #include <setjmp.h>
 #include <fcntl.h>
@@ -476,6 +476,101 @@ static void xattr_failure_cases(const char *folder) {
     CHECK(is(p, "alias-content") && gl == 5 && !strcmp(g, "Plain"), "the .dm-case-1 alias comes back with its guest name and contents");
     rm_tree(root);
 }
+// The save size records (<save>.size, <save>_device.size: hle_fs.c's ExtendSaveData, upstream 60f0fe506) through a pull: killed after every step, with and without records here
+// and in the cloud's save, and killed again in the recovery; an older cloud save without records takes this device's out into the backup; a swap that fails is undone, and
+// one whose undo fails too keeps the journal for the next start; a journal from before the size lines leaves the records as they are, and a damaged size line refuses the mount
+static void size_record_cases(const char *folder) {
+    static const char *TID = "0100000000010000";
+    const char *name = "size records through a pull";
+    char root[PATH_MAX], save[PATH_MAX], dev[PATH_MAX], s0[PATH_MAX], s1[PATH_MAX], backups[PATH_MAX], kept[PATH_MAX], p[PATH_MAX];
+    char b_with[PATH_MAX], b_old[PATH_MAX], src_with[PATH_MAX], src_old[PATH_MAX];
+    ss_meta m; struct fault none = {0};
+    snprintf(root, sizeof root, "%s/size-rec", folder);
+    snprintf(save, sizeof save, "%s/save", root); snprintf(dev, sizeof dev, "%s/save_device", root);
+    snprintf(s0, sizeof s0, "%s.size", save); snprintf(s1, sizeof s1, "%s_device.size", save);
+    snprintf(backups, sizeof backups, "%s-backups", save);
+    rm_tree(root); mkdirs(root);
+    unsetenv("DM_SAVE_SYNC");
+    snprintf(src_with, sizeof src_with, "%s/c-with/save", root); mkdirs(src_with);   // the cloud's save with both records
+    snprintf(p, sizeof p, "%s/a", src_with); put(p, "cloud 0");
+    snprintf(p, sizeof p, "%s_device", src_with); mkdirs(p); snprintf(p, sizeof p, "%s_device/b", src_with); put(p, "cloud 1");
+    snprintf(p, sizeof p, "%s.size", src_with); put(p, "117440512 8388608\n");
+    snprintf(p, sizeof p, "%s_device.size", src_with); put(p, "67108864 4194304\n");
+    snprintf(b_with, sizeof b_with, "%s/with.dmsync", root);
+    CHECK(!ss_pack(src_with, TID, b_with, &m), "a cloud save with size records packs");
+    snprintf(src_old, sizeof src_old, "%s/c-old/save", root); mkdirs(src_old);   // and an older one with none
+    snprintf(p, sizeof p, "%s/a", src_old); put(p, "cloud 0");
+    snprintf(b_old, sizeof b_old, "%s/old.dmsync", root);
+    CHECK(!ss_pack(src_old, TID, b_old, &m), "an older cloud save without them packs");
+    for (int local_sz = 0; local_sz < 2; local_sz++)
+        for (int cloud_sz = 0; cloud_sz < 2; cloud_sz++) {
+            int steps = 0;
+            for (int k = 1; k < 20; k++) {
+                rm_tree(save); rm_tree(dev); rm_tree(backups); unlink(s0); unlink(s1);
+                snprintf(p, sizeof p, "%s.pull", save); unlink(p);
+                mkdirs(save); snprintf(p, sizeof p, "%s/a", save); put(p, "original 0");
+                mkdirs(dev); snprintf(p, sizeof p, "%s/b", dev); put(p, "original 1");
+                if (local_sz) { put(s0, "100663296 4194304\n"); put(s1, "50331648 4194304\n"); }
+                faults[0] = faults[1] = none; crash_after = k;
+                if (!setjmp(crash_jmp)) {
+                    int r = pull(save, cloud_sz ? b_with : b_old, &m, kept, sizeof kept); crash_after = -1;
+                    CHECK(!r, "an uninterrupted pull completes"); steps = k - 1;
+                    CHECK(cloud_sz ? is(s0, "117440512 8388608\n") && is(s1, "67108864 4194304\n") : access(s0, F_OK) == -1 && access(s1, F_OK) == -1, "the cloud's records, or none, in place");
+                    if (local_sz) { snprintf(p, sizeof p, "%s/save.size", kept); CHECK(is(p, "100663296 4194304\n"), "this device's records are kept in the backup");
+                                    snprintf(p, sizeof p, "%s/save_device.size", kept); CHECK(is(p, "50331648 4194304\n"), "both of them"); }
+                    break;
+                }
+                snprintf(p, sizeof p, "%s.pull", save); CHECK(!access(p, F_OK), "the journal is there after the kill");
+                if (k == 6) {   // killed again in the recovery, while it puts the records back
+                    crash_after = 1; pull_journal j;
+                    if (!setjmp(crash_jmp)) { CHECK(journal_read(save, &j) == 1, "the journal reads back"); recover(save, &j); }
+                    crash_after = -1;
+                }
+                CHECK(mount_once(save, TID) == 0, "the next start's mount puts the save and its records back");
+                snprintf(p, sizeof p, "%s/a", save); CHECK(is(p, "original 0"), "the account save is back");
+                snprintf(p, sizeof p, "%s/b", dev); CHECK(is(p, "original 1"), "the device save is back");
+                if (local_sz) CHECK(is(s0, "100663296 4194304\n") && is(s1, "50331648 4194304\n"), "this device's records are back, whole");
+                else CHECK(access(s0, F_OK) == -1 && access(s1, F_OK) == -1, "the cloud's records are gone where this device had none");
+                snprintf(p, sizeof p, "%s.pull", save); CHECK(access(p, F_OK) == -1, "the journal is removed");
+            }
+            CHECK(steps >= 3, "a pull with records has steps to be killed after");
+        }
+    name = "an older cloud save over records";
+    rm_tree(save); rm_tree(dev); rm_tree(backups); unlink(s0); unlink(s1);
+    mkdirs(save); snprintf(p, sizeof p, "%s/a", save); put(p, "original 0");
+    put(s0, "100663296 4194304\n"); put(s1, "50331648 4194304\n");
+    faults[0] = faults[1] = none;
+    CHECK(pull(save, b_old, &m, kept, sizeof kept) == 0 && access(s0, F_OK) == -1 && access(s1, F_OK) == -1, "the pull takes this device's records out");
+    snprintf(p, sizeof p, "%s/save.size", kept); CHECK(is(p, "100663296 4194304\n"), "save.size is kept in the backup");
+    snprintf(p, sizeof p, "%s/save_device.size", kept); CHECK(is(p, "50331648 4194304\n"), "save_device.size too");
+    name = "a size record's swap fails";
+    rm_tree(save); rm_tree(dev); rm_tree(backups); unlink(s0); unlink(s1);
+    mkdirs(save); snprintf(p, sizeof p, "%s/a", save); put(p, "original 0");
+    put(s0, "100663296 4194304\n"); put(s1, "50331648 4194304\n");
+    snprintf(staging, sizeof staging, "%s.sync-tmp", save); staging_held = 0;
+    faults[0] = (struct fault){2, "local/save_device.size", "/save_device.size", 0}; faults[1] = none;
+    CHECK(pull(save, b_with, &m, kept, sizeof kept) == -1 && !faults[0].op && !staging_held, "the pull is undone");
+    *staging = 0;
+    snprintf(p, sizeof p, "%s/a", save); CHECK(is(p, "original 0") && is(s0, "100663296 4194304\n") && is(s1, "50331648 4194304\n"), "the save and both records are as they were");
+    faults[0] = (struct fault){2, "local/save_device.size", "/save_device.size", 0}; faults[1] = (struct fault){2, "local/save.size", "/save.size", 1};
+    CHECK(pull(save, b_with, &m, kept, sizeof kept) == -2 && !faults[0].op && !faults[1].op, "and when save.size's swap back fails too: -2");
+    snprintf(p, sizeof p, "%s.pull", save); CHECK(!access(p, F_OK), "the journal is kept");
+    CHECK(mount_once(save, TID) == 0 && is(s0, "100663296 4194304\n") && is(s1, "50331648 4194304\n"), "the next start puts both records back");
+    name = "journals and size lines";
+    rm_tree(save); rm_tree(dev); rm_tree(backups); unlink(s0); unlink(s1);
+    mkdirs(save); snprintf(p, sizeof p, "%s/a", save); put(p, "original 0");
+    put(s0, "100663296 4194304\n");
+    struct stat st; stat(save, &st);
+    snprintf(p, sizeof p, "%s.pull", save);
+    { FILE *jf = fopen(p, "w"); fprintf(jf, "kept\t\nfolder\t0\t2\t%llu\t%llu\nfolder\t1\t0\t0\t0\n", (unsigned long long)st.st_dev, (unsigned long long)st.st_ino); fclose(jf); }
+    CHECK(mount_once(save, TID) == 0 && is(s0, "100663296 4194304\n"), "a journal from before the size lines leaves save.size as it is");
+    put(p, "kept\t\nfolder\t0\t1\t0\t0\nfolder\t1\t0\t0\t0\nsize\t0\t99\t0\t0\n");
+    CHECK(mount_once(save, TID) == -1 && !access(p, F_OK), "a damaged size line refuses the mount, the journal left");
+    put(p, "kept\t\nfolder\t0\t1\t0\t0\nfolder\t1\t0\t0\t0\nsize\t0\t0\t0\t0\n");
+    CHECK(mount_once(save, TID) == -1, "one size line of two refuses it too");
+    unlink(p);
+    rm_tree(root);
+}
 int main(void) {
     char folder[] = "/tmp/dm-save-sync-metadata-XXXXXX", save[PATH_MAX], path[PATH_MAX];
     if (!mkdtemp(folder)) return 1;
@@ -512,6 +607,7 @@ int main(void) {
     fetch_cases(folder);
     cloud_backup_cases(folder);
     xattr_failure_cases(folder);
+    size_record_cases(folder);
     rmdir(folder);
     printf("save-sync metadata: %d checks, %d failed\n", checks, failures);
     return failures != 0;

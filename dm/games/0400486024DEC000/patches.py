@@ -1,5 +1,7 @@
 # The Legend of Zelda: Ocarina of Time (0400486024DEC000): the rewriter's patches of this game's own code. dm/tools/patch_nso.py loads every profile's patches.py;
 # MATCH_FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
+import struct
+
 from nso_asm import ADRP, B
 
 # The game's frame ratio. Once a frame the function at main+0x6e6be0 (v131072) divides its base rate (60.0, or 30.0 while bit 0 of [x21+0x24f] is set) by the int frame rate at
@@ -79,10 +81,50 @@ MATCH_FRAME_STEP = {'main': [
                 'dynamic resolution update': {'size': 0xb24, 'fingerprints': ['5a423697838976baf286cffa5e2ceef0d4e037abbcd9d371e90e9e702d61b3d4']}}},   # main+0x805aa0
 ]}
 
+
+# The water surface's substeps (MacNativeGames c13d32f2, Takagivegeta). The water simulation's dispatcher (main+0x472e0, v131072) truncates the frame ratio to an int (fcvtzs w9,s0
+# at main+0x475f8) and multiplies the base substeps per 60 Hz frame (6, w8) by it (mul w8,w8,w9 at main+0x4760c). A ratio under 1 truncates to 0 and the loop at main+0x47618 skips
+# the compute simulation, so the ripples froze in the ping-pong heightfields: above 60 fps, or at a fractional ratio (upstream's measured VFR ratio jitters around 1 at 60). The
+# multiply goes to a stub that scales in float: round-to-nearest-even(w8 x s0), at least 1 when the product is positive, 0 when it is not (pause, a ratio of 0 or below, NaN).
+# The host's ratio here is step x base / 60 (frame_step above), a whole number at base 60 up to NX 18's 60 fps (fps_max 60), where the stub gives what the game did; it differs at a
+# fractional ratio (base 30 at one vsync: 3 substeps where the game ran none) and above 60. s16 and w9 are not read after the site, s0 is kept, and main+0x47614 (cmp w8,#1) sets
+# the flags again. A STUBS entry of the v131072 main (no state page of its own: the frame step's pacing is unchanged), its words around the site asserted first
+water_site, water_back = 0x4760c, 0x47610
+water_context = ((0x475f4, 0xb9404e68),     # ldr w8,[x19,#0x4c]      base substeps (6)
+                 (0x475f8, 0x1e380009),     # fcvtzs w9,s0            the ratio, truncated
+                 (0x47604, 0xf946b37b),     # ldr x27,[x27,#0xd60]
+                 (0x47608, 0xf9455718),     # ldr x24,[x24,#0xaa8]
+                 (water_site, 0x1b097d08),  # mul w8,w8,w9            the site
+                 (water_back, 0xb90037e8),  # str w8,[sp,#0x34]
+                 (0x47614, 0x7100051f),     # cmp w8,#1               flags set again
+                 (0x47618, 0x5400f94b))     # b.lt                    no substep: the loop skipped
+water_stub = (0x1e220110,   # scvtf s16,w8
+              0x1e200a10,   # fmul s16,s16,s0          base x ratio
+              0x1e200208,   # fcvtns w8,s16            rounded to nearest, ties to even (NaN: 0)
+              0x1e202208,   # fcmp s16,#0.0
+              0x1a9fd7e9,   # cset w9,gt               1 when the product is positive
+              0x6b09011f,   # cmp w8,w9
+              0x1a89c108)   # csel w8,w8,w9,gt         at least that
+
+
+def water_substeps(ctx):
+    for at, w in water_context: ctx.site(at, struct.pack('<I', w).hex())
+    start = ctx.here()
+    for w in water_stub: ctx.emit(w)
+    ctx.emit(B(ctx.here(), water_back))
+    ctx.put(water_site, [B(water_site, start)], 'water surface: substeps = round(base x frame ratio), at least 1 when positive, instead of base x the ratio truncated (frozen ripples under a ratio of 1)')
+
+
+STUBS = {'e0f3ccfaf50065ae4ea01eb5aeb13b1a': water_substeps}   # v131072 main
+
+
 BINDING = [
     {'what': 'frame ratio from the host\'s step', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function",
      'checked': 'v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08)'},
+    {'what': 'water surface substeps rounded from base × frame ratio instead of truncated (the water simulation dispatcher)', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "the game's water dispatcher at a fixed site in the v131072 main, ported from MacNativeGames c13d32f2; it only matters at a fractional frame ratio or above 60 fps",
+     'kept': 'one site in a build that may not be updated (v131072), eight words asserted around it; convert with the frame step when a new build appears'},
     {'what': 'dynamic resolution: full size, or a climb on the load measured at each level under the host\'s GPU headroom floor', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)",
      'checked': 'v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09); the floor clamp run natively on a Mac (dm/gfx/tests t_drs_gpu, 2026-11-21)'},

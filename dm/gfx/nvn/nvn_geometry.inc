@@ -747,16 +747,22 @@ static void mesh_scratch_bind(id<MTL4RenderCommandEncoder> en) {
     if (over) RED_ONCE(173, "mesh scratch: %u mesh groups found none of the %u slices free and drew nothing (dmsh_abi.h DMSH_MESH_SCRATCH_*: the GPU ran more groups at once than the pool was sized for)", over, head[DMSH_MESH_SCRATCH_MASK] + 1);
     enc_r_vbuf(en, DMSH_MESH_SCRATCH_SLOT, gpu);   // the mesh function's stage array (the table persists; enc_r_vbuf skips an unchanged address)
 }
-static void mtk_encode(id<MTL4RenderCommandEncoder> en_) {
-    id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;
+// The task and mesh stages' arguments, bound by draw() before its check that binding left the render pass open: encode_args can end the pass (a texture view's tex_upgrade copies
+//   through blit(), a texel buffer's aligned copy too), and mtk_encode used to bind them after that check, so drawMeshThreadgroups went to an ended encoder (or, on Metal 4, to the
+//   compute encoder blit() opened). The draw is then encoded again in a new pass, as for the vertex and pixel stages. Ported from S2Arm e1a06ced1 (Apache-2.0)
+static void mtk_bind(id<MTL4RenderCommandEncoder> en) {
+    NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
+    [en setArgumentTable:g_ot atStages:MTLRenderStageObject];
+    if (ts) { args_dirty(3); encode_args(en, ts, 3, 0); }
+    if (g_enc == en) { args_dirty(4); encode_args(en, ms, 4, 1); }
+}
+static void mtk_encode(id<MTL4RenderCommandEncoder> en_) {
+    id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; NvShader *ms = g_mtk.ms, *ts = g_mtk.ts;   // the stages' arguments: mtk_bind, from draw()
     if (ms->rf.mesh_spill) mesh_scratch_bind(en);
     uint64_t draw_gpu = g_mtk.ind_rec;
     if (!g_mtk.ind) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); uint32_t rec[2] = {g_mtk.count, g_mtk.first}; memcpy((uint8_t *)b.contents + o, rec, 8); draw_gpu = b.gpuAddress + o; }
-    [en setArgumentTable:g_ot atStages:MTLRenderStageObject];
-    if (ts) { args_dirty(3); encode_args(en, ts, 3, 0); }
     if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, draw_gpu, DMSH_MESH_DRAW_SLOT); else [g_ot setAddress:draw_gpu atIndex:DMSH_MESH_DRAW_SLOT];
-    args_dirty(4); encode_args(en, ms, 4, 1);
     // A task shader's threadgroups are the draw's workgroups; with no task, the object function's are blocks of DMSH_MESH_GRID of them (mdx_mask writes their count at +16)
     MTLSize to = MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1), tm = MTLSizeMake(ms->mesh_threads, 1, 1);
     if (g_mtk.ind) [en drawMeshThreadgroupsWithIndirectBuffer:g_mtk.ind + (ts ? 0 : 16) threadsPerObjectThreadgroup:to threadsPerMeshThreadgroup:tm];

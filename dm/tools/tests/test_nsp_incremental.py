@@ -720,6 +720,23 @@ class SplitShaders(Base):
         self.go(g, dlc_roms=[dlc]); self.assertEqual(self.splits, 3)
         self.go(g); self.assertEqual(self.splits, 4)   # removing the DLC removes its shaders from the union
 
+    def test_replacing_a_packed_dlc_image_with_equal_length_shaders_splits_again(self):   # upstream NXNative e8f9c8381 (its GL / Vulkan case; NX 18 has the split alone)
+        import romfs_image
+        g = self.own(); self.go(g); self.assertEqual(self.splits, 1)
+        src = self.tmp / 'dlc_src'; (src / 'shaders').mkdir(parents=True)
+        (src / 'shaders/dlc.bin').write_bytes(b'AAAA')
+        img = self.tmp / 'work/aoc/1.img'; img.parent.mkdir(parents=True)
+        romfs_image.pack(src, img)
+        self.go(g, dlc_roms=[img]); self.assertEqual(self.splits, 2)
+        self.go(g, dlc_roms=[img]); self.assertEqual(self.splits, 2)   # the same image is reused
+        (src / 'shaders/dlc.bin').write_bytes(b'BBBB')
+        was = img.stat(); romfs_image.pack(src, img)
+        os.utime(img, ns=(was.st_atime_ns, was.st_mtime_ns))   # a copy that kept the old image's time: its entries' stats are as before, its inode and ctime are not
+        self.go(g, dlc_roms=[img]); self.assertEqual(self.splits, 3)   # equal-length replacement splits once
+        self.go(g, dlc_roms=[img]); self.assertEqual(self.splits, 3)
+        moved = img.with_name('2.img'); img.rename(moved)
+        self.go(g, dlc_roms=[moved]); self.assertEqual(self.splits, 4)   # its index counts though the bytes are the same
+
     def own(self):   # a derived profile with the empty tables, as main makes it
         self.derive(); g = game.Game(self.pdir); nsp.provisional_prep(sys.executable, self.repo, {}, self.logs, g); return g
 

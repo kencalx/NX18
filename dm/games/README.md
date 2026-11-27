@@ -53,6 +53,7 @@ One row per profile; the notes are each profile's `README.md`. A game marked **u
 | [AI: THE SOMNIUM FILES](010089B00D09C000/README.md) | `010089B00D09C000` | 1.0.1 | 6.4.2 | Unity 2017.4.17f1 IL2CPP | NVN |
 | [ASTRAL CHAIN](01007300020FA000/README.md) | `01007300020FA000` | 1.0.1 | 6.4.0 | PlatinumGames' engine | NVN |
 | [AI: THE SOMNIUM FILES - nirvanA Initiative](0100713016CCC000/README.md) | `0100713016CCC000` | 1.0.2 | 13.3.5 | Unity 2020.3.30f1 IL2CPP | NVN |
+| [Alien: Isolation](010075D00E8BA000/README.md) | `010075D00E8BA000` | 1.1.5_64113 | 8.2.0 | Creative Assembly's Cathode, Havok, Wwise | NVN |
 | [ANIMAL WELL](010020D01AD24000/README.md) | `010020D01AD24000` | 1.0.10 | 20.5.7 | its own (not named) | NVN |
 | [Animal Crossing: New Horizons](01006F8002326000/README.md) | `01006F8002326000` | 3.0.3 | 20.5.4 | Nintendo EPD (sead / agl / gsys) | NVN |
 | [Atelier Ryza: Ever Darkness & the Secret Hideout DX](0100199023B2E000/README.md) | `0100199023B2E000` | 1.2.0 | 18.3.2 | Gust's engine on Koei Tecmo's KTGL | NVN |

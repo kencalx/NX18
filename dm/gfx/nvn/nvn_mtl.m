@@ -6290,11 +6290,37 @@ static int tex_names_move(id<MTLTexture> from, id<MTLTexture> to, uint64_t seria
 // Count: across the 4 screens character select / camp / wilderness / combat, 17473 textures needed a different-format view 0 times, so this is a fallback and does not rely on predicting which textures need it
 // The same upgrade adds render-target usage for a whole-level clear (clear_tex) of a texture made without it: Monster Hunter Rise clears a 32x80 packaged one
 static void tex_zero_fill(id<MTLTexture> mt);
+// The same texture upgraded again and again (S2Arm D-67FG / D-6A9G / D-XJNP: one serial upgraded 30,000 to 50,000 times a run, a new texture and a whole copy each time, with
+//   hitches and bad-pointer crashes beside it): by serial, the texture the last upgrade left under it, and at the third upgrade one red line naming the path that lost it. The serial
+//   table still holds that one, so the caller kept an older one from another cache; a packaged texture (NvPkg) re-uploaded into one without the usage; another texture holds the serial
+//   (made again, or an alias moved); or nothing does (the serial was dropped and made again). At most 16 serials a run; 64 slots by serial, pointer values only, nothing retained.
+//   Ported from S2Arm 048214892 (Apache-2.0). NX 18's buffer textures already carry every usage from creation (tbuf_usage), which was S2Arm 70dd12655's fix for its case
+static struct { uint64_t ser, n; uintptr_t up; } g_tupd[64]; static pthread_mutex_t g_tupd_mu = PTHREAD_MUTEX_INITIALIZER; static int g_tupd_red;
+static uintptr_t upd_under(id h, int *pkg) {   // what the serial table holds: a package's texture, else the texture (or its sRGB / linear view) itself
+    *pkg = [h isKindOfClass:[NvPkg class]];
+    return (uintptr_t)(__bridge void *)(*pkg ? ((NvPkg *)h)->tex : h);
+}
+static void tex_upgrade_diag(const tex_t *t, id holder, uintptr_t pre, int pkg, id<MTLTexture> asked, MTLTextureUsage add, uintptr_t post) {   // pre / post: under the serial before and after the upgrade
+    pthread_mutex_lock(&g_tupd_mu);
+    unsigned i = (unsigned)(t->serial % 64); uintptr_t last = g_tupd[i].ser == t->serial ? g_tupd[i].up : 0;
+    if (g_tupd[i].ser != t->serial) { g_tupd[i].ser = t->serial; g_tupd[i].n = 0; }
+    uint64_t n = ++g_tupd[i].n; g_tupd[i].up = post;
+    int say = n == 3 && last && g_tupd_red < 16; if (say) g_tupd_red++;
+    pthread_mutex_unlock(&g_tupd_mu);
+    if (!say) return;
+    const char *why = !holder ? "the serial table no longer holds this serial (dropped, then made again)"
+                    : pre == last ? "the serial table still holds the last upgrade's texture, but the caller asked with an older one (another cache did not follow)"
+                    : pkg ? "a packaged texture (NvPkg) was re-uploaded into one without the upgraded usage"
+                    : "another texture holds the serial now (made again, or an alias moved)";
+    MLOG("[RED] the same texture upgraded %llu times ser=%llu: %s; holder %s, asked usage %#lx, adding %#lx, Metal format %lu %ux%u flags %#x",
+         (unsigned long long)n, (unsigned long long)t->serial, why, pkg ? "NvPkg" : holder ? (obj_is_tex(holder) && ((id<MTLTexture>)holder).parentTexture ? "view" : "texture") : "none",
+         (unsigned long)asked.usage, (unsigned long)add, (unsigned long)asked.pixelFormat, t->d.width, t->d.height, t->d.flags);
+}
 static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextureUsage add, MTLPixelFormat view_pf) {
     // The texture's memory pool may have been finalized since the caller resolved it (a pin still hands out its texture): read as gone (its magic cleared), the upgrade puts nothing,
     // a reading of 0 finding any Finalize of the pool since (pool_fin_since); read as live, a Finalize after this reading refuses its puts, as for any resolution
     uint64_t fs = fin_snap(); if (t->pool && t->pool->magic != MAGIC('P', 'O', 'O', 'L')) fs = 0; else if (g_pool_read_after) g_pool_read_after(t->pool);
-    id holder = tex_get(t->serial);
+    id holder = tex_get(t->serial); int upd_pkg; uintptr_t upd_pre = upd_under(holder, &upd_pkg);   // repeated-upgrade diagnostic (tex_upgrade_diag)
     // The serial holds an sRGB / linear view (tex_mtl_) of the asked texture, or the asked texture is that view: the parent is upgraded and the view made again on it, so the pair keeps sharing its bytes
     id<MTLTexture> view = ![holder isKindOfClass:[NvPkg class]] && obj_is_tex(holder) && ((id<MTLTexture>)holder).parentTexture
         && (holder == asked || ((id<MTLTexture>)holder).parentTexture == asked) ? holder : nil;
@@ -6349,6 +6375,7 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
     MLOG("texture upgraded to allow %s ser=%llu %lux%lu base format %lu → view format %lu%s (upgrades=%llu)", add & MTLTextureUsageShaderWrite ? "image writes" : add & MTLTextureUsageRenderTarget ? "render-target use" : "format views",
          t->serial, (unsigned long)base.width, (unsigned long)base.height, (unsigned long)base.pixelFormat, (unsigned long)view_pf,
          objc_getAssociatedObject(base, &g_image_heap_owner_key) ? ", out of its resolution family's shared heap" : "", ++g_pfv_upgrades);
+    { int pk2; uintptr_t post = upd_under(tex_get(t->serial), &pk2); tex_upgrade_diag(t, holder, upd_pre, upd_pkg, asked, add, post); }
     return upgraded_view ? upgraded_view : upgraded;
 }
 static id<MTLTexture> tex_upgrade_pfv(const tex_t *t, id<MTLTexture> base, MTLPixelFormat view_pf) { return tex_upgrade(t, base, MTLTextureUsagePixelFormatView, view_pf); }
@@ -8208,7 +8235,8 @@ static int storage_float_size(MTLPixelFormat pf) {   // element size in bytes, 0
         default: return 0;
     }
 }
-static int storage_has_nonfinite_(const uint8_t *p, uint64_t n, MTLPixelFormat pf, int size) {
+static int span_has_nonfinite(const uint8_t *p, size_t n, void *ctx) {
+    MTLPixelFormat pf = *(const MTLPixelFormat *)ctx;
     if (pf == MTLPixelFormatRG11B10Float) {
         for (size_t i = 0; i + 4 <= n; i += 4) {
             uint32_t v; memcpy(&v, p + i, 4);
@@ -8216,7 +8244,7 @@ static int storage_has_nonfinite_(const uint8_t *p, uint64_t n, MTLPixelFormat p
         }
         return 0;
     }
-    if (size == 2) {
+    if (storage_float_size(pf) == 2) {
         for (size_t i = 0; i + 2 <= n; i += 2) {
             uint16_t v; memcpy(&v, p + i, 2);
             if ((v & 0x7c00) == 0x7c00) return 1;
@@ -8229,10 +8257,35 @@ static int storage_has_nonfinite_(const uint8_t *p, uint64_t n, MTLPixelFormat p
     }
     return 0;
 }
-static int storage_has_nonfinite(const tex_t *t, MTLPixelFormat pf) {   // through tex_src, as tex_mem_any reads the storage (an unmapped page reads as 0)
-    int size = storage_float_size(pf);
-    if (!size) return 0;
-    int pf_ = pf_enter(PF_SCAN); uint8_t *pp; int r = storage_has_nonfinite_(tex_src(t, t->L.size, &pp), t->L.size, pf, size); free(pp); pf_leave(pf_); return r;
+// Only the texels the texture can address are scanned (upstream NXNative 401c7b09c): a NaN in block-linear GOB, block, mip or layer padding, or past a linear row's pixels in its
+// stride, no longer zeroes a finite texture. Levels, layers and slices of block-linear storage go through nvn_deswizzle_visit, a linear texture's one 2D level row by row; a layout
+// neither can read is left to the fill. NX 18 reads the storage through tex_src, as tex_mem_any does (an unmapped page reads as 0)
+static int storage_has_nonfinite_(const tex_t *t, id<MTLTexture> mt, const uint8_t *p, MTLPixelFormat pf) {
+    if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) {
+        int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
+        if (!bpb || bw != 1 || bh != 1) return 0;
+        uint32_t w, h, z; tex_lsize(t, 0, &w, &h, &z);
+        size_t pitch = (size_t)w * (size_t)bpb, srow = tex_linear_row(t);
+        if (z != 1 || srow < pitch || (uint64_t)srow * h > t->L.size) return 0;
+        for (uint32_t r = 0; r < h; r++)
+            if (span_has_nonfinite(p + (size_t)r * srow, pitch, &pf)) return 1;
+        return 0;
+    }
+    unsigned levels = (unsigned)mt.mipmapLevelCount, max_levels = t->d.levels ? t->d.levels : 1;
+    if (levels > max_levels) levels = max_levels;
+    unsigned layers = t->L.layers ? t->L.layers : 1;
+    for (unsigned l = 0; l < levels; l++)
+        for (unsigned y = 0; y < layers; y++) {
+            int rc = nvn_deswizzle_visit(&t->d, l, y, p, span_has_nonfinite, &pf);
+            if (rc > 0) return 1;
+            if (rc < 0) return 0;
+        }
+    return 0;
+}
+static int storage_has_nonfinite(const tex_t *t, id<MTLTexture> mt) {
+    MTLPixelFormat pf = mt.pixelFormat;
+    if (!storage_float_size(pf)) return 0;
+    int pf_ = pf_enter(PF_SCAN); uint8_t *pp; int r = storage_has_nonfinite_(t, mt, tex_src(t, t->L.size, &pp), pf); free(pp); pf_leave(pf_); return r;
 }
 static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
     if (!t->mem || !t->pool || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) || t->has_layout) return 0;
@@ -8246,7 +8299,7 @@ static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
     if (!no_cpu && !uncached && (!flush_fill || !nvn_flushed(t->mem, t->L.size))) return 0;
     if (!atomic_load(&g_sub_thread_set) || !on_sub_thread() || !tex_mem_any(t)) return 0;   // the upload batch belongs to the submit thread
     static int stale_keep = -1; if (stale_keep < 0) { const char *e = getenv("DM_NVN_STALE_FLOAT"); stale_keep = e && atoi(e) == 1; }
-    if (no_cpu && !stale_keep && storage_has_nonfinite(t, mt.pixelFormat)) {
+    if (no_cpu && !stale_keep && storage_has_nonfinite(t, mt)) {
         static uint64_t ns;
         if (ns++ < 8 || !(ns & (ns - 1))) MLOG("initial content: ser=%llu %ux%ux%u format %#x: its storage holds non-finite float texels; starts from zeros (%llu so far; DM_NVN_STALE_FLOAT=1 keeps it)",
                                                (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, (unsigned long long)ns);
@@ -12581,6 +12634,13 @@ static id<MTLTexture> tex_fit_elem(int tid, id<MTLTexture> t, MTLTextureType wan
 // pool buffer is from the alignment a linear texture there needs. The total goes on the memory stats line. Caller holds g_rmu
 static uint64_t g_tex_mis_n, g_tex_mis_shown;
 uint64_t mtl_tex_mis_count(void) { return g_tex_mis_n; }
+// A 3D texture in a slot the shader declares 2D: the game left another draw's 3D texture bound (a layout UI shader keeps an 8x8x8 R11G11B10F colour-grading lookup table in a 2D slot,
+//   S2Arm 1b229450c; the dialog it draws is whole on screen). Ryujinx binds nothing there (Texture.GetTargetTexture: IsSameDimensionsTarget is false for 3D against 2D) and the slot
+//   reads 0. NX 18 keeps the texture bound in a 2D slot for a size query's sake (tex_fit) and zero-binds a 2D array, cube or cube array slot, so only the 2D case reaches here: a plain
+//   line, so red stays for what needs looking at. The other way round (2D in 3D), buffer textures and the rest stay red. Pure; t_cube_placeholder tests it
+static int tex_mis_3d_in_2d(unsigned long want, unsigned long have) {
+    return have == MTLTextureType3D && (want == MTLTextureType2D || want == MTLTextureType2DArray);
+}
 static void tex_mis_note(NvShader *sh, int stage, int slot, int tid, id<MTLTexture> t, MTLTextureType want, const char *outcome) {
     g_tex_mis_n++;
     if (slot < 0 || slot >= 256 || (sh->mis[slot >> 6] >> (slot & 63) & 1)) return;
@@ -12590,8 +12650,10 @@ static void tex_mis_note(NvShader *sh, int stage, int slot, int tid, id<MTLTextu
     char bt[96] = "";
     if (t.textureType == MTLTextureTypeTextureBuffer) snprintf(bt, sizeof bt, ", %lu elements at pool offset %lu, %lu past the linear-texture alignment", (unsigned long)t.width, (unsigned long)t.bufferOffset,
                                                                 (unsigned long)(t.bufferOffset % [g_dev minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat]));
-    MLOG("[RED] texture type mismatch: shader %s (stage %d) declares slot %d as Metal type %lu, texture ID %d is type %lu (NVN target %d, format %#x, Metal format %lu%s); %s", sh->key, stage, slot,
-         (unsigned long)want, tid, (unsigned long)t.textureType, tt ? (int)tt->d.target : -1, tt ? (unsigned)tt->d.format : 0u, (unsigned long)t.pixelFormat, bt, outcome);
+    int d3 = tex_mis_3d_in_2d((unsigned long)want, (unsigned long)t.textureType);
+    MLOG("%stexture type mismatch: shader %s (stage %d) declares slot %d as Metal type %lu, texture ID %d is type %lu (NVN target %d, format %#x, Metal format %lu%s); %s%s", d3 ? "" : "[RED] ", sh->key, stage, slot,
+         (unsigned long)want, tid, (unsigned long)t.textureType, tt ? (int)tt->d.target : -1, tt ? (unsigned)tt->d.format : 0u, (unsigned long)t.pixelFormat, bt, outcome,
+         d3 ? " (a 3D texture left in a 2D slot: another draw's texture of another dimension; Ryujinx binds nothing there and reads 0)" : "");
 }
 // Pixel class of a Metal format as a shader's texture type sees it (NVN_DPF_*): the Uint / Sint formats, everything else reads as float
 static int mtl_pf_dpf(MTLPixelFormat pf) {
@@ -23465,6 +23527,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     pfm(PFM_D_ARGS);
     if (pr->sh[0]) encode_args(en, pr->sh[0], 0, 1);
     if (pr->sh[1] && !S.rast_discard) encode_args(en, pr->sh[1], 1, 0);
+    if (g_mtk.on && !g_fsp_pass && g_enc == en) mtk_bind(en);   // the task / mesh stages' arguments, before the check below (S2Arm e1a06ced1)
     // Binding a texture view can upgrade its texture first (tex_upgrade: a format view of a texture made without PixelFormatView), and the upgrade's copy goes through blit(),
     // which ends the render pass: en is then an ended encoder, and drawing on it crashed in the driver (AGX reads its released context: Need for Speed: Hot Pursuit Remastered,
     // a 4096x1024 texture sampled through another format's view at its first loading screen). The texture is upgraded now, so the draw is encoded again in a new pass
@@ -24149,6 +24212,7 @@ static size_t mtl_pf_block_bytes(MTLPixelFormat pf) {   // bytes per texel, or p
     return mtl_pf_bytes(pf);
 }
 static void copy_b2t(const p_copy_b2t *c, uint32_t size) {
+    if (!c->tex) return;   // no recorded target: nothing to resolve, and the pass dump's line below read its serial (upstream NXNative 6c3f27a1d)
     id<MTLTexture> t = tex_mtl(c->tex); sparse_gpu_wrote(c->tex); tu_wrote(t); if (t && mtl_fmt_depth(t.pixelFormat)) g_fb_dclr++; lz_wrote(t, "a buffer-to-texture copy");
     if (!t) { PD("C ser=%llu (no host texture)", c->tex->serial); return; }
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
@@ -24433,12 +24497,13 @@ static int bc_alias_copy(const p_copy_t2t *c, id<MTLTexture> s, unsigned sl, uns
 }
 // GPU: texture -> texture (previously mislisted as a no-op, 3 times per frame on the character select page). Same size, not mirrored, same format -> blit layer by layer; the other semantics (scaling with filtering, mirroring, format change) cannot be expressed by blit: report a failure, to be implemented
 static id<MTLTexture> copy_t2t_enc(const p_copy_t2t *c) {
+    // Either texture may be NULL (tex_snap records a copy with one): such a copy is refused before it flushes a pass, resolves a texture or reads a serial for the pass dump, which
+    // crashed with DM_NVN_PASSDUMP on (upstream NXNative 6c3f27a1d; NX 18 had printed serial 0 instead)
+    if (!c->src || !c->dst) return nil;
     rp_flush();   // Land the pending pure-clear render pass first; the blit() below would end the render pass anyway
     id<MTLTexture> s = tex_mtl(c->src);
-    // Either texture may be NULL here (the checks above test both; tex_snap records a copy with one), and the null return below comes after this line: with DM_NVN_PASSDUMP on, reading
-    // their serials crashed the dump, so a missing texture prints serial 0
-    PD("T src=%llu dst=%llu %dx%dx%d→%dx%dx%d flags=%#x", c->src ? c->src->serial : 0ull, c->dst ? c->dst->serial : 0ull, c->sr.width, c->sr.height, c->sr.depth, c->dr.width, c->dr.height, c->dr.depth, c->flags);
-    if (!s || !c->dst) return nil;
+    PD("T src=%llu dst=%llu %dx%dx%d→%dx%dx%d flags=%#x", c->src->serial, c->dst->serial, c->sr.width, c->sr.height, c->sr.depth, c->dr.width, c->dr.height, c->dr.depth, c->flags);
+    if (!s) return nil;
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
     if (!tex_level_ok(s, sl, "texture copy source")) return nil;
@@ -25869,8 +25934,8 @@ void mtl_present_stretch(int on) {
 // full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels. With Picture Stretch (mtl_present_stretch) the whole canvas always
 static MTLViewport present_viewport(double pw, double ph, double dw, double dh) {
     if (atomic_load_explicit(&g_present_stretch, memory_order_relaxed)) return (MTLViewport){0, 0, dw, dh, 0, 1};
-    double s = fmin(dw / pw, dh / ph);
-    MTLViewport vp = {floor((dw - pw * s) / 2), floor((dh - ph * s) / 2), round(pw * s), round(ph * s), 0, 1};
+    double s = fmin(dw / pw, dh / ph), w = round(pw * s), h = round(ph * s);   // the size first: pw * s can land a hair over the canvas (1600 * 1710 / 1600 = 1710.0000000000002) and floor of half the negative rest put the picture at x = -1, its first column off the left edge (upstream NXNative 396441a92)
+    MTLViewport vp = {floor((dw - w) / 2), floor((dh - h) / 2), w, h, 0, 1};
     if (fabs((dw / dh) / (pw / ph) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
     return vp;
 }

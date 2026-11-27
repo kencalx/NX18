@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include "dm.h"
 #include <errno.h>
+#include <ctype.h>
 #include <sched.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -1028,7 +1029,7 @@ static int svc_thread_impl(int num, uint64_t *regs);
 // Mac frame p95 34.5 → 41 ms with 7 drops per 300 frames; on the iPhone the threads also looked idle to the performance controller, which kept them on efficiency cores at 1.5 GHz.
 // Waits under 2 ms are handoffs between threads that do work; waits beyond it are limiters and idle polls. Returns the sleep for a yield whose run started `run_ns` ago (0 = plain yield);
 // a clock wait (`clock`, thr_yield) has no start: it waits for a time, not for another thread, and sleeps from its first yield on.
-// DM_YIELD_BACKOFF=0 turns it off; DM_YIELD_BACKOFF=<cap µs>[:<start µs>] sets the cap and the run length after which it starts (default 250:2000)
+// DM_YIELD_BACKOFF=0 turns it off; DM_YIELD_BACKOFF=<cap µs>[:<start µs>] sets the cap and the run length after which it starts (default 250:2000; a malformed value takes the whole default)
 // Read once in svc_thread_main_init (yield_spin_init), before any other guest thread exists, with DM_YIELD_CLOCK, DM_SPIN and DM_SPIN_POLL: read lazily on the yield and spin paths, with
 // no lock, the first yields of threads starting together raced on them (TSan), and backoff_init published its default cap before the environment's cap and start were parsed.
 // The defaults hold if it is never called (the host tests that do not start the main thread)
@@ -1037,11 +1038,29 @@ static int g_yield_clock = 2;   // DM_YIELD_CLOCK: 0 = clock waits are yields as
 static int g_spin_on = 1;   // DM_SPIN=0: spin waits do not yield or sleep
 static uint64_t g_spin_poll_ns = 2000000;   // DM_SPIN_POLL (µs): how long a spin wait polls before it yields
 static int ystorm_mode(void); static int park_mode(void);
+// Nonnegative microseconds, as nanoseconds that cannot overflow (upstream NXNative dbfe1d814): atoll(...) * 1000 took a negative cap (which yield_backoff_cap made a huge one, so a
+// long SleepThread counted as a poll), trailing junk, and overflowed. Whitespace around it is allowed; the caller checks the separator and the end
+static int backoff_us(const char *text, const char **end, int64_t *ns) {
+    const char *p = text;
+    while (isspace((unsigned char)*p)) p++;
+    if (*p == '-') return 0;
+    char *tail; int saved_errno = errno; errno = 0;
+    long long us = strtoll(p, &tail, 10); int err = errno; errno = saved_errno;
+    if (tail == p || err || us < 0 || us > INT64_MAX / 1000) return 0;
+    while (isspace((unsigned char)*tail)) tail++;
+    *end = tail; *ns = (int64_t)us * 1000; return 1;
+}
 static void yield_spin_init(void) {
-    const char *e = getenv("DM_YIELD_BACKOFF"); g_bo_cap = 250000; g_bo_start = 2000000;
-    if (e && *e) { g_bo_cap = atoll(e) * 1000; const char *c = strchr(e, ':'); if (c) g_bo_start = atoll(c + 1) * 1000; }
+    const char *e = getenv("DM_YIELD_BACKOFF"); g_bo_cap = 250000; g_bo_start = 2000000; int bo_custom = 0;
+    if (e && *e) {   // <cap>[:<start>] whole, else the whole default 250:2000
+        int64_t cap, start = 2000000; const char *end;
+        int valid = backoff_us(e, &end, &cap);
+        if (valid && *end == ':') valid = backoff_us(end + 1, &end, &start);
+        if (valid && !*end) { g_bo_cap = cap; g_bo_start = start; bo_custom = 1; }
+        else LOG("DM_YIELD_BACKOFF: invalid value; using default 250:2000 microseconds");
+    }
     if (!g_bo_cap) LOG("DM_YIELD_BACKOFF=0: no back-off on repeated yields (plain sched_yield spin)");
-    else if (e && *e) LOG("DM_YIELD_BACKOFF: back off after %lld µs of repeated yields, sleeping at most %lld µs at a time", (long long)(g_bo_start / 1000), (long long)(g_bo_cap / 1000));
+    else if (bo_custom) LOG("DM_YIELD_BACKOFF: back off after %lld µs of repeated yields, sleeping at most %lld µs at a time", (long long)(g_bo_start / 1000), (long long)(g_bo_cap / 1000));
     e = getenv("DM_YIELD_CLOCK"); g_yield_clock = e && *e ? atoi(e) : 2;
     if (g_yield_clock != 2) LOG("DM_YIELD_CLOCK=%d: yield loops that read the clock %s", g_yield_clock, g_yield_clock ? "back off from their start, with no sleep to a predicted end" : "back off after the start, as other yields");
     e = getenv("DM_SPIN"); const char *p = getenv("DM_SPIN_POLL");
@@ -1082,7 +1101,7 @@ static void sp_mode_init(void) {
 static int sp_mode(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, sp_mode_init); return g_sp_mode; }
 static int sp_on(void) { return g_sp_mode == 1 || mtl_sw_on(g_sp_mode); }
 // One back-off sleep of bo ns, counted for the power line
-static void backoff_sleep(thr_t *me, uint64_t bo) { me->nbackoff++; me->sleeping = 1; struct timespec ts = {0, (long)bo}; nanosleep(&ts, 0); me->sleeping = 0; }
+static void backoff_sleep(thr_t *me, uint64_t bo) { me->nbackoff++; me->sleeping = 1; struct timespec ts = {(time_t)(bo / 1000000000ull), (long)(bo % 1000000000ull)}; nanosleep(&ts, 0); me->sleeping = 0; }
 // sched_yield, or a short sleep once the wait has lasted run_ns past the back-off's start
 static void yield_for(thr_t *me, uint64_t run_ns, int clock) {
     uint64_t bo = yield_backoff_ns(run_ns, clock);

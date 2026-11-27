@@ -455,6 +455,99 @@ int main(void) {
         g_nmnt = 0;
     }
 
+    printf("⑪ save data size from control.nacp, ExtendSaveData records (upstream 325b9973a)\n");
+    {   char sroot[1100], sdir[1200], nacp_path[1200], rec[1300], drec[1300], tmp[1300], rom2[1200];
+        snprintf(sroot, sizeof sroot, "%s/savesize", root); mkdir(sroot, 0755);
+        snprintf(sdir, sizeof sdir, "%s/save", sroot);
+        snprintf(nacp_path, sizeof nacp_path, "%s/control.nacp", sroot);
+        snprintf(rec, sizeof rec, "%s.size", sdir); snprintf(drec, sizeof drec, "%s_device.size", sdir);
+        const uint64_t uid1[2] = {1, 2}, uid2[2] = {3, 4};   // one player: any user's account save is DM_SAVE's
+        int64_t size = -1, journal = -1;
+        setenv("DM_SAVE", sdir, 1); setenv("DM_CONTROL_NACP", nacp_path, 1);
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (256 << 20) && journal == (16 << 20), "no control.nacp and no record: 256 MB / 16 MB");
+        size = journal = -1;
+        CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20), "device save: no control.nacp and no record: 256 MB / 16 MB");
+        size = journal = -1;
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20), "size max without control.nacp: 256 MB / 16 MB");
+        // without control.nacp there is no extension limit (NX 18's packed apps carry none; upstream caps at 256 MB / 16 MB): a growth succeeds and is recorded
+        CHECK(h_fs_ExtendSave(uid1, 256 << 20, 16 << 20) == RES_OK && access(rec, F_OK) != 0, "no control.nacp: an extension to the current size succeeds, no record written");
+        CHECK(h_fs_ExtendSave(uid1, (int64_t)512 << 20, 32 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == ((int64_t)512 << 20) && journal == (32 << 20),
+              "no control.nacp: growth past 256 MB / 16 MB succeeds and is recorded");
+        CHECK(h_fs_ExtendDeviceSave((int64_t)512 << 20, 32 << 20) == RES_OK && h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == ((int64_t)512 << 20) && journal == (32 << 20),
+              "device, no control.nacp: the same");
+        unlink(rec); unlink(drec);
+        // records past the limit an older build wrote: the max stays the title's, the record answers and takes what it holds, and grows no further past the limit
+        put(rec, "536870912 33554432\n"); put(drec, "536870912 8388608\n");   // 512 / 32 MiB account, 512 / 8 MiB device (its journal under the limit)
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20), "a record past the limit: the size max is still 256 MB / 16 MB");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == ((int64_t)512 << 20) && journal == (32 << 20), "and the record's 512 / 32 MiB is the save's size");
+        CHECK(h_fs_ExtendSave(uid1, (int64_t)512 << 20, 32 << 20) == RES_OK && h_fs_ExtendSave(uid1, (int64_t)300 << 20, 16 << 20) == RES_OK, "extensions within the record succeed");
+        CHECK(h_fs_ExtendSave(uid1, (int64_t)600 << 20, 32 << 20) == RES_OK && h_fs_ExtendSave(uid1, (int64_t)600 << 20, 48 << 20) == RES_OK, "without control.nacp, growth past it succeeds too");
+        CHECK(h_fs_ExtendDeviceSave((int64_t)512 << 20, 16 << 20) == RES_OK && h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == ((int64_t)512 << 20) && journal == (16 << 20),
+              "a journal under the limit still grows to it, the data size kept");
+        CHECK(h_fs_ExtendDeviceSave((int64_t)512 << 20, 20 << 20) == RES_OK, "and further");
+        unlink(rec); unlink(drec);
+        put(nacp_path, "short");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (256 << 20) && journal == (16 << 20), "a short control.nacp: 256 MB / 16 MB");
+        // account 62 MB / 1 MB, device 32 MB / 2 MB, no max
+        static uint8_t snacp[0x4000]; memset(snacp, 0, sizeof snacp);
+        const int64_t acc[2] = {62 << 20, 1 << 20}, dev[2] = {32 << 20, 2 << 20};
+        memcpy(snacp + 0x3080, acc, sizeof acc); memcpy(snacp + 0x3090, dev, sizeof dev);
+        FILE *f = fopen(nacp_path, "wb"); fwrite(snacp, 1, sizeof snacp, f); fclose(f);
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (62 << 20) && journal == (1 << 20), "UserAccountSaveDataSize / JournalSize from control.nacp");
+        CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (32 << 20) && journal == (2 << 20), "DeviceSaveDataSize / JournalSize from control.nacp");
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (62 << 20) && journal == (1 << 20), "size max: the base size when control.nacp declares no max");
+        {   // DM_CONTROL_NACP unset: control.nacp beside the game files (DM_ROMFS), as the NSP script extracts them
+            char romfs[1300]; snprintf(rom2, sizeof rom2, "%s/v0", sroot); mkdir(rom2, 0755); snprintf(romfs, sizeof romfs, "%s/RomFS", rom2); mkdir(romfs, 0755);
+            char beside[1300]; snprintf(beside, sizeof beside, "%s/control.nacp", rom2); f = fopen(beside, "wb"); fwrite(snacp, 1, sizeof snacp, f); fclose(f);
+            const char *was = getenv("DM_ROMFS"); char keep[1200]; snprintf(keep, sizeof keep, "%s", was ? was : "");
+            unsetenv("DM_CONTROL_NACP"); strlcat(romfs, "/", sizeof romfs); setenv("DM_ROMFS", romfs, 1);
+            CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (62 << 20) && journal == (1 << 20), "control.nacp found beside DM_ROMFS (trailing slash)");
+            if (*keep) setenv("DM_ROMFS", keep, 1); else unsetenv("DM_ROMFS");
+            setenv("DM_CONTROL_NACP", nacp_path, 1);
+        }
+        CHECK(h_fs_ExtendSave(uid1, 64 << 20, 1 << 20) == RES_EXT_SIZE_TOO_LARGE && access(rec, F_OK) != 0, "no max: growth past the base is ResultExtensionSizeTooLarge");
+        CHECK(h_fs_ExtendDeviceSave(48 << 20, 2 << 20) == RES_EXT_SIZE_TOO_LARGE, "device, no max: growth past the base is ResultExtensionSizeTooLarge");
+        CHECK(h_fs_ExtendSave(uid1, 62 << 20, 1 << 20) == RES_OK && access(rec, F_OK) != 0, "within the base: success, no record written");
+        const int64_t partial_mx[2] = {128 << 20, 0}; memcpy(snacp + 0x3148, partial_mx, sizeof partial_mx);
+        f = fopen(nacp_path, "wb"); fwrite(snacp, 1, sizeof snacp, f); fclose(f);
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (128 << 20) && journal == (1 << 20), "a partial max (journal 0) is never below the base journal");
+        const int64_t mx[2] = {128 << 20, 8 << 20}, dmx[2] = {64 << 20, 4 << 20};
+        memcpy(snacp + 0x3148, mx, sizeof mx); memcpy(snacp + 0x3158, dmx, sizeof dmx);
+        f = fopen(nacp_path, "wb"); fwrite(snacp, 1, sizeof snacp, f); fclose(f);
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (128 << 20) && journal == (8 << 20), "UserAccountSaveDataSizeMax / JournalSizeMax from control.nacp");
+        CHECK(h_fs_ExtendSave(uid1, -1, 0) == RES_INVALID_SIZE && h_fs_ExtendSave(uid1, 64 << 20, -1) == RES_INVALID_SIZE, "a negative size or journal is ResultInvalidSize");
+        CHECK(h_fs_ExtendDeviceSave(-1, 0) == RES_INVALID_SIZE && h_fs_ExtendDeviceSave(48 << 20, -1) == RES_INVALID_SIZE, "device: a negative size or journal is ResultInvalidSize");
+        CHECK(h_fs_ExtendSave(uid1, 129 << 20, 4 << 20) == RES_EXT_SIZE_TOO_LARGE && h_fs_ExtendSave(uid1, 96 << 20, 9 << 20) == RES_EXT_SIZE_TOO_LARGE, "past the max: ResultExtensionSizeTooLarge");
+        CHECK(h_fs_ExtendDeviceSave(65 << 20, 4 << 20) == RES_EXT_SIZE_TOO_LARGE && h_fs_ExtendDeviceSave(48 << 20, 5 << 20) == RES_EXT_SIZE_TOO_LARGE, "device, past the max: ResultExtensionSizeTooLarge");
+        CHECK(h_fs_ExtendSave(uid1, (96 << 20) + 1, 4 << 20) == RES_EXT_SIZE_INVALID && h_fs_ExtendSave(uid1, 96 << 20, (4 << 20) + 1) == RES_EXT_SIZE_INVALID, "growth not a multiple of 1 MiB: ResultExtensionSizeInvalid");
+        CHECK(access(rec, F_OK) != 0, "refused extensions write no record");
+        CHECK(h_fs_ExtendSave(uid1, 96 << 20, 4 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (96 << 20) && journal == (4 << 20), "the size after an extension is the extended one");
+        CHECK(same(rec, "100663296 4194304\n"), "the record beside DM_SAVE: <save>.size");
+        CHECK(h_fs_ExtendSave(uid1, 112 << 20, 0) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (4 << 20), "journal 0 grows the data and keeps the journal");
+        CHECK(h_fs_ExtendSave(uid1, 0, 8 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "size 0 grows the journal and keeps the data");
+        CHECK(h_fs_ExtendSave(uid1, 80 << 20, 2 << 20) == RES_OK && h_fs_ExtendSave(uid1, (80 << 20) + 1, (2 << 20) + 1) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "smaller sizes succeed and never shrink it");
+        CHECK(h_fs_SaveSize(&size, &journal, uid2) == RES_OK && size == (112 << 20) && journal == (8 << 20) && h_fs_SaveSize(&size, &journal, NULL) == RES_OK && size == (112 << 20), "one player: any user's account save size is DM_SAVE's");
+        CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (32 << 20) && journal == (2 << 20), "the device save's size is not the account save's extension");
+        CHECK(h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_OK && h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (48 << 20) && journal == (4 << 20) && same(drec, "50331648 4194304\n"), "the device save's own record: <save>_device.size");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "the account save's size is not the device save's extension");
+        {   char slash[1300]; snprintf(slash, sizeof slash, "%s//", sdir); setenv("DM_SAVE", slash, 1);
+            CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20), "DM_SAVE with trailing slashes: the same record"); setenv("DM_SAVE", sdir, 1); }
+        put(rec, "garbage\n");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (62 << 20) && journal == (1 << 20), "a damaged record: the control data's base");
+        char bad_save[1200]; snprintf(bad_save, sizeof bad_save, "%s/missing_dir/save", sroot); setenv("DM_SAVE", bad_save, 1);
+        CHECK(h_fs_ExtendSave(uid1, 96 << 20, 4 << 20) == RES_FAIL, "a record that cannot be written: failure (no folder)");
+        char blk_save[1200], brec[1300]; snprintf(blk_save, sizeof blk_save, "%s/blocked", sroot);
+        snprintf(brec, sizeof brec, "%s.size", blk_save); mkdir(brec, 0755); snprintf(tmp, sizeof tmp, "%s.tmp", brec);
+        setenv("DM_SAVE", blk_save, 1);
+        CHECK(h_fs_ExtendSave(uid1, 96 << 20, 4 << 20) == RES_FAIL && access(tmp, F_OK) != 0, "a record that cannot be renamed into place: failure, no .tmp left");
+        rmdir(brec); setenv("DM_SAVE", sdir, 1);
+        CHECK(h_fs_SaveSize(&size, NULL, uid1) == RES_OK && h_fs_SaveSize(NULL, &journal, uid1) == RES_OK && h_fs_DeviceSaveSize(NULL, NULL) == RES_OK && h_fs_SaveSizeMax(NULL, NULL) == RES_OK, "null outputs are taken");
+        unsetenv("DM_SAVE");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (62 << 20) && journal == (1 << 20), "DM_SAVE unset: the control data's size");
+        CHECK(h_fs_ExtendSave(uid1, 64 << 20, 1 << 20) == RES_FAIL && h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_FAIL, "DM_SAVE unset: an extension fails");
+        unsetenv("DM_CONTROL_NACP");
+    }
+
     char cmd[1200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); system(cmd);
     printf("== %d checks, %d failed ==\n", checks, fails);
     return fails != 0;

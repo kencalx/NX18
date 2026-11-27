@@ -630,6 +630,15 @@ check_t_rast_discard: RUN_ENV = MTL_DEBUG_LAYER=1
 t_cpu_storage: t_cpu_storage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_cpu_storage.m $(MTL_T_SRC) $(FW)
 check_t_cpu_storage: RUN_ENV = MTL_DEBUG_LAYER=1
+# A texture copy with a missing recorded texture object is refused before the pass dump reads its serial (upstream NXNative 6c3f27a1d): modes 0-2 texture to texture, 3 buffer to texture
+t_copy_missing: t_copy_missing.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_copy_missing.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_copy_missing
+check_t_copy_missing: t_copy_missing
+	MTL_DEBUG_LAYER=1 ./t_copy_missing 0
+	MTL_DEBUG_LAYER=1 ./t_copy_missing 1
+	MTL_DEBUG_LAYER=1 ./t_copy_missing 2
+	MTL_DEBUG_LAYER=1 ./t_copy_missing 3
 t_initial_uncached: t_initial_uncached.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_initial_uncached.m $(MTL_T_SRC) $(FW)
 check_t_initial_uncached: RUN_ENV = MTL_DEBUG_LAYER=1

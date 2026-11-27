@@ -203,8 +203,14 @@ HLE_FORCE("_ZN2nn4time39ClaimPeriodicBenefitWithUserSystemClockEPNS0_27PeriodicB
           "periodic benefit claim (time service session check); the SDK's detail implementation compares the snapshots", uint64_t, h_time_ClaimBenefit,
           void *ctx, const uint8_t *snap, const int64_t *max_penalty, const int64_t *acceptable, const void *callback) {
     static uint64_t (*impl)(void *, const uint8_t *, const int64_t *, const int64_t *, const void *);
-    if (!impl && !(impl = guest_sym("_ZN2nn4time6detail39ClaimPeriodicBenefitWithUserSystemClockEPNS0_27PeriodicBenefitClaimContextERKNS0_13ClockSnapshotERKNS_8TimeSpanES9_PKNS0_25CheckCalendarTimeCallbackE")))
-        die("time: the sdk has ClaimPeriodicBenefitWithUserSystemClock but not its detail:: implementation");
+    // Without a detail:: symbol to call (an SDK whose public entry has it inlined), the claim answers 1, "nothing claimed", and leaves the context untouched, as the SDK's failure
+    // paths do: the state of a save whose benefit was already claimed on a console. Xenoblade Chronicles X DE claims its daily bonus at Continue and skips it on any failure
+    // (MacNativeGames 8831b5d2, which answers 1 there)
+    if (!impl && !(impl = guest_sym("_ZN2nn4time6detail39ClaimPeriodicBenefitWithUserSystemClockEPNS0_27PeriodicBenefitClaimContextERKNS0_13ClockSnapshotERKNS_8TimeSpanES9_PKNS0_25CheckCalendarTimeCallbackE"))) {
+        (void)ctx; (void)snap; (void)max_penalty; (void)acceptable; (void)callback;
+        LOG("time: periodic benefit claim → 1 (nothing claimed: the sdk has no detail:: implementation to call)");
+        return 1;
+    }
     uint64_t r = impl(ctx, snap, max_penalty, acceptable, callback);
     LOG("time: periodic benefit claim → %u", (unsigned)r);
     return r;

@@ -456,6 +456,14 @@
 - **Fix:** `finish` sets the window's `animationBehavior` to `.none` before the order-out, and `dm_mac_launcher` calls `CATransaction.flush()` after `run()` returns, before it hands back to `launcher.c`. Neither alone was enough. Check: a copy of the window with a timed Play and a `CGWindowListCopyWindowInfo` probe while the thread then blocks; the window was still listed 2 and 4 s after Play before the fix, and gone 3 times in 3 after it. `test_launcher_storage.py` and `test_nsp_mac_app.py` pass.
 - **Found on:** the Mac app of [Breath of the Wild](../../dm/games/01007EF00011E000/README.md); applies to every Mac app.
 
+### A reused Mac app reports an earlier source commit
+
+- **Symptom:** packing after a checkout-only change reports `reused (inputs unchanged)`, but `Info.plist` still names the earlier `DMCommit`; build-provenance checks reject the app.
+- **Cause:** `pack_app.py` included selected runtime files, options and tools in its reuse key, but not the checkout identity it writes into the bundle. Identical runtime files can belong to different commits, or to clean, dirty and non-Git source states.
+- **Fix:** `source_commit()` is read once, before the key; the key holds it (`source_commit`) and `DMCommit` is written from the same snapshot. An unchanged identity still reuses the complete app; a changed one packs and signs the app again. This does not prove that the source tree stayed unchanged throughout packaging.
+- **Check:** `PackReuse.test_source_identity_invalidates_reuse_and_matches_metadata` in `test_nsp_mac_app.py`: a changed commit, dirty state or missing Git provenance packs again with matching `DMCommit`; each unchanged state is reused without compiling or signing.
+- **Found on:** upstream's Ocarina of Time candidate packaging after a documentation-only commit ([PR #2232](https://github.com/seedds/nxnative/pull/2232)); applies to every Mac app.
+
 ### The iPhone app's crash reports go into another file when log.txt cannot be created
 
 - **Symptom:** after a run on a device whose storage is full (or whose Documents folder cannot be written), `Documents/log.txt` is missing or empty, and a `CRASH` report or NSLog output is written into the next file the app opened, at that file's current position; that file can be a save: the game may then find that save damaged.

@@ -63,7 +63,9 @@ static const void *claim_args[5];
 static uint64_t fake_claim(void *ctx, const uint8_t *snap, const int64_t *max_penalty, const int64_t *acceptable, const void *callback) {
     claim_args[0] = ctx; claim_args[1] = snap; claim_args[2] = max_penalty; claim_args[3] = acceptable; claim_args[4] = callback; return 7;
 }
+static int claim_detail_missing;   // an sdk without the detail:: symbol
 void *guest_sym(const char *name) {
+    if (claim_detail_missing) return NULL;
     return !strcmp(name, "_ZN2nn4time6detail39ClaimPeriodicBenefitWithUserSystemClockEPNS0_27PeriodicBenefitClaimContextERKNS0_13ClockSnapshotERKNS_8TimeSpanES9_PKNS0_25CheckCalendarTimeCallbackE") ? (void *)fake_claim : NULL;
 }
 static void put64(uint8_t *s, int off, int64_t v) { memcpy(s + off, &v, 8); }
@@ -174,6 +176,9 @@ int main(void) {
     uint64_t (*claim)(void *, const uint8_t *, const int64_t *, const int64_t *, const void *) =
         hook("_ZN2nn4time39ClaimPeriodicBenefitWithUserSystemClockEPNS0_27PeriodicBenefitClaimContextERKNS0_13ClockSnapshotERKNS_8TimeSpanES8_PKNS0_25CheckCalendarTimeCallbackE");
     uint8_t ctx[0x100] = {0}; int64_t pen = 1, acc = 2; int cbk = 0;
+    claim_detail_missing = 1;   // no detail:: to call: 1, nothing claimed, the context untouched (MacNativeGames 8831b5d2)
+    { uint8_t zero[0x100] = {0}; CHECK(claim && claim(ctx, a, &pen, &acc, &cbk) == 1 && !memcmp(ctx, zero, sizeof zero), "periodic benefit claim without a detail:: implementation: nothing claimed"); }
+    claim_detail_missing = 0;
     CHECK(claim && claim(ctx, a, &pen, &acc, &cbk) == 7, "periodic benefit claim returns the SDK implementation's answer");
     CHECK(claim_args[0] == ctx && claim_args[1] == a && claim_args[2] == &pen && claim_args[3] == &acc && claim_args[4] == &cbk, "periodic benefit claim passes every argument on");
     // Its two service questions: the location the host's snapshots carry, and time points of no clock (a source ID no snapshot has)

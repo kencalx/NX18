@@ -51,6 +51,10 @@
 //        send fails, the flush sends once more of its own
 //   (34) another device's file put at the cloud path right after this device's store renamed its own there (iCloud between the rename and the identity's note): not
 //        taken for this device's own, so the next send reads it and does not replace it
+//   (35) moving this game's cloud save between two folders (save_sync_move)
+//   (36) the save size records ExtendSaveData / ExtendDeviceSaveData write (upstream 60f0fe506): packed with the save and in its hash, unpacked whole; packed saves with a
+//        record no build writes are refused; an extension with no Commit is sent, the other device brings it in; an older cloud save without records takes them out,
+//        into the backup
 #include "../hle_fs.c"
 #include <ctype.h>
 #include <sys/wait.h>
@@ -981,6 +985,100 @@ int main(void) {
     snprintf(p, sizeof p, "%s/Empty", root); mkd(p);
     CHECK(save_sync_move(M35, p, NXF, DM_GAME_ID, SS_MOVE_ASK_FIRST, 0, mout, sizeof mout) == SS_MOVE_DONE && cloud_has(cnx, root, "game.dat", "m1"),
           "a folder it leaves with no save: only the folder changes");
+
+    printf("(36) the save size records (ExtendSaveData, upstream 60f0fe506): packed, brought in, sent on an extension alone, and taken out by an older cloud save\n");
+    {   char croot[1200], nacp_path[1300], src[1300], dst1[1300], dst2[1300], devonly[1300], dst3[1300], bnd[1400];
+        snprintf(croot, sizeof croot, "%s/cap", root); mkd(croot);
+        snprintf(nacp_path, sizeof nacp_path, "%s/control.nacp", croot);
+        static uint8_t cnacp[0x4000]; memset(cnacp, 0, sizeof cnacp);
+        const int64_t acc_base[2] = {62 << 20, 1 << 20}, dev_base[2] = {32 << 20, 2 << 20}, acc_max[2] = {128 << 20, 8 << 20}, dev_max[2] = {64 << 20, 4 << 20};
+        memcpy(cnacp + 0x3080, acc_base, sizeof acc_base); memcpy(cnacp + 0x3090, dev_base, sizeof dev_base);
+        memcpy(cnacp + 0x3148, acc_max, sizeof acc_max); memcpy(cnacp + 0x3158, dev_max, sizeof dev_max);
+        FILE *nf = fopen(nacp_path, "wb"); fwrite(cnacp, 1, sizeof cnacp, nf); fclose(nf);
+        setenv("DM_CONTROL_NACP", nacp_path, 1);
+        const uint64_t uid1[2] = {1, 2}; int64_t sz = -1, jrn = -1;
+        ss_meta m0, m1, mdev;
+        snprintf(src, sizeof src, "%s/src/save", croot); mkd(src);
+        snprintf(p, sizeof p, "%s/progress.dat", src); put(p, "slot1"); set_mtime(p, 1000000100);
+        setenv("DM_SAVE", src, 1);
+        CHECK(!ss_scan(src, &m0) && m0.files == 1, "a save of one file");
+        CHECK(h_fs_ExtendSave(uid1, 96 << 20, 4 << 20) == RES_OK, "its account save extended to 96 / 4 MiB");
+        CHECK(!ss_scan(src, &m1) && m1.files == 1 && m1.bytes == m0.bytes && strcmp(m1.hash, m0.hash), "the extension alone changes the hash, not the files or bytes");
+        snprintf(bnd, sizeof bnd, "%s/acc.dmsync", croot);
+        CHECK(!ss_pack(src, DM_GAME_ID, bnd, &m2) && !strcmp(m2.hash, m1.hash), "packed with its size record");
+        snprintf(dst1, sizeof dst1, "%s/dst1", croot); mkd(dst1);
+        CHECK(!ss_read(bnd, dst1, &m2) && !strcmp(m2.hash, m1.hash) && m2.files == 1, "unpacked whole");
+        snprintf(p, sizeof p, "%s/save", dst1); setenv("DM_SAVE", p, 1); snprintf(q, sizeof q, "%s/save/progress.dat", dst1);
+        CHECK(same(q, "slot1") && h_fs_SaveSize(&sz, &jrn, uid1) == RES_OK && sz == (96 << 20) && jrn == (4 << 20), "the unpacked save has its file and its 96 / 4 MiB");
+        CHECK(h_fs_DeviceSaveSize(&sz, &jrn) == RES_OK && sz == (32 << 20) && jrn == (2 << 20), "and no device record it did not have: the device save's 32 / 2 MiB base");
+        CHECK(!ss_scan(p, &m2) && !strcmp(m2.hash, m1.hash), "it scans to the same hash");
+        setenv("DM_SAVE", src, 1);   // the device save extended with no save_device folder (Animal Crossing's layout: the device save is DM_SAVE)
+        CHECK(h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_OK && !ss_scan(src, &mdev) && mdev.files == 1 && strcmp(mdev.hash, m1.hash), "a device extension changes the hash on its own");
+        snprintf(bnd, sizeof bnd, "%s/both.dmsync", croot);
+        snprintf(dst2, sizeof dst2, "%s/dst2", croot); mkd(dst2);
+        CHECK(!ss_pack(src, DM_GAME_ID, bnd, &m2) && !strcmp(m2.hash, mdev.hash) && !ss_read(bnd, dst2, &m2) && !strcmp(m2.hash, mdev.hash), "both records packed and unpacked");
+        snprintf(p, sizeof p, "%s/save", dst2); setenv("DM_SAVE", p, 1);
+        CHECK(h_fs_SaveSize(&sz, &jrn, uid1) == RES_OK && sz == (96 << 20) && jrn == (4 << 20) && h_fs_DeviceSaveSize(&sz, &jrn) == RES_OK && sz == (48 << 20) && jrn == (4 << 20),
+              "each save's size comes back on its own (96 / 4 and 48 / 4 MiB)");
+        snprintf(devonly, sizeof devonly, "%s/devonly/save", croot); mkd(devonly);
+        snprintf(p, sizeof p, "%s/island.dat", devonly); put(p, "island"); setenv("DM_SAVE", devonly, 1);
+        snprintf(bnd, sizeof bnd, "%s/devonly.dmsync", croot); snprintf(dst3, sizeof dst3, "%s/dst3", croot); mkd(dst3);
+        CHECK(h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_OK && !ss_pack(devonly, DM_GAME_ID, bnd, &m2) && !ss_read(bnd, dst3, &m2), "a device record alone packed and unpacked");
+        snprintf(p, sizeof p, "%s/save", dst3); setenv("DM_SAVE", p, 1);
+        CHECK(h_fs_SaveSize(&sz, &jrn, uid1) == RES_OK && sz == (62 << 20) && jrn == (1 << 20) && h_fs_DeviceSaveSize(&sz, &jrn) == RES_OK && sz == (48 << 20) && jrn == (4 << 20),
+              "the account save keeps its 62 / 1 MiB base, the device save its 48 / 4 MiB");
+        {   // packed saves no build writes: a size record with no save file, a size record of another name, a second one of a name, a damaged one
+            uint8_t hdr[144] = {0}, h[24] = {3}; uint32_t ver = 1, n = 1; uint16_t pl = 9; uint64_t esz = 18;
+            memcpy(hdr, "DMSYNC1\n", 8); memcpy(hdr + 8, &ver, 4); memcpy(hdr + 12, &n, 4); memcpy(h + 2, &pl, 2); memcpy(h + 8, &esz, 8);
+            snprintf(p, sizeof p, "%s/bad-size-only.dmsync", croot);
+            FILE *bf = fopen(p, "wb"); fwrite(hdr, 1, sizeof hdr, bf); fwrite(h, 1, sizeof h, bf); fwrite("save.size", 1, 9, bf); fwrite("100663296 4194304\n", 1, 18, bf); fwrite("DMSYNCE\n", 1, 8, bf); fclose(bf);
+            CHECK(ss_read(p, NULL, &m2) != 0, "a size record with no save file is refused");
+            snprintf(p, sizeof p, "%s/bad-size-path.dmsync", croot); pl = 10; memcpy(h + 2, &pl, 2);
+            bf = fopen(p, "wb"); fwrite(hdr, 1, sizeof hdr, bf); fwrite(h, 1, sizeof h, bf); fwrite("other.size", 1, 10, bf); fwrite("100663296 4194304\n", 1, 18, bf); fwrite("DMSYNCE\n", 1, 8, bf); fclose(bf);
+            CHECK(ss_read(p, NULL, &m2) != 0, "a size record of another name is refused");
+            // acc.dmsync with its record's text damaged in place (same length): refused as the host would not read it either
+            snprintf(bnd, sizeof bnd, "%s/acc.dmsync", croot); snprintf(p, sizeof p, "%s/bad-size-text.dmsync", croot);
+            FILE *in = fopen(bnd, "rb"); static char raw[1 << 16]; size_t k = in ? fread(raw, 1, sizeof raw, in) : 0; if (in) fclose(in);
+            char *at = memmem(raw, k, "100663296 4194304\n", 18); if (at) memcpy(at, "100663296 x194304\n", 18);
+            bf = fopen(p, "wb"); fwrite(raw, 1, k, bf); fclose(bf);
+            CHECK(at && ss_read(p, NULL, &m2) != 0, "a size record the host could not read is refused");
+        }
+        // Two devices through the cloud: an extension with no Commit is sent; the other device brings it in; an older cloud save without records takes them out
+        char CA[1200], CB[1200], ccloud[1200], ccf[1400], older[1300];
+        snprintf(CA, sizeof CA, "%s/devA/save", croot); snprintf(CB, sizeof CB, "%s/devB/save", croot); snprintf(ccloud, sizeof ccloud, "%s/cloud", croot);
+        snprintf(ccf, sizeof ccf, "%s/%s/save.dmsync", ccloud, id);
+        mkd(CA); mkd(CB); mkd(ccloud);
+        snprintf(p, sizeof p, "%s/progress.dat", CA); put(p, "v1");
+        CHECK(session(CA, ccloud, NULL, NULL) == 0 && session(CB, ccloud, NULL, NULL) == 0, "both devices in step, nothing extended");
+        fflush(stdout); fflush(stderr);
+        pid_t cp = fork();
+        if (!cp) {
+            setenv("DM_SAVE", CA, 1); setenv("DM_SAVE_SYNC", ccloud, 1); unsetenv("DM_SAVE_SYNC_CHOICE");
+            int bad = h_fs_MountSave("save", NULL) != RES_OK;
+            bad += h_fs_ExtendSave(uid1, 96 << 20, 4 << 20) != RES_OK;
+            if (save_sync_flush(10000) != 1) bad += NOT_SENT;
+            fflush(stdout); fflush(stderr); _exit(bad);
+        }
+        int cst = 0; waitpid(cp, &cst, 0);
+        CHECK(WIFEXITED(cst) && WEXITSTATUS(cst) == 0, "device A: an ExtendSaveData with no Commit wakes the sender, and the flush sends it");
+        CHECK(session(CB, ccloud, NULL, NULL) == 0, "device B's start brings it in");
+        setenv("DM_SAVE", CB, 1);
+        snprintf(p, sizeof p, "%s.size", CB);
+        CHECK(exists(p) && h_fs_SaveSize(&sz, &jrn, uid1) == RES_OK && sz == (96 << 20) && jrn == (4 << 20), "device B's account save is 96 / 4 MiB, its record beside its save");
+        CHECK(h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_OK && session(CB, ccloud, NULL, NULL) == 0, "device B extends its device save offline; its next start sends it");
+        ss_meta mc; CHECK(!ss_read(ccf, NULL, &mc) && !ss_scan(CB, &m2) && !strcmp(mc.hash, m2.hash), "the cloud holds device B's save with both records");
+        snprintf(older, sizeof older, "%s/older/save", croot); mkd(older);
+        snprintf(p, sizeof p, "%s/progress.dat", older); put(p, "older-v0");
+        ss_meta mo; CHECK(!ss_pack(older, DM_GAME_ID, ccf, &mo), "an older save with no records put in the cloud (another device's build from before them)");
+        CHECK(run(CB, ccloud, NULL, NULL, choice_of("cloud", ccf), NULL, READABLE) == 0, "device B chooses the cloud's");
+        setenv("DM_SAVE", CB, 1);
+        snprintf(p, sizeof p, "%s.size", CB); snprintf(q, sizeof q, "%s_device.size", CB);
+        CHECK(!exists(p) && !exists(q) && h_fs_SaveSize(&sz, &jrn, uid1) == RES_OK && sz == (62 << 20) && jrn == (1 << 20) && h_fs_DeviceSaveSize(&sz, &jrn) == RES_OK && sz == (32 << 20) && jrn == (2 << 20),
+              "its records went with its save: the sizes are the control data's again");
+        CHECK(kept_at(CB, "local", "save.size", "100663296 4194304\n") && kept_at(CB, "local", "save_device.size", "50331648 4194304\n"), "both are kept in its backup (\"local\")");
+        CHECK(!ss_scan(CB, &m2) && !strcmp(m2.hash, mo.hash), "and the save in place is the cloud's, hash for hash");
+        unsetenv("DM_SAVE"); unsetenv("DM_CONTROL_NACP");
+    }
 
     printf("== save sync: %d checks, %d failed ==\n", checks, fails);
     if (!fails) { char c[1200]; snprintf(c, sizeof c, "rm -rf '%s'", root); system(c); }

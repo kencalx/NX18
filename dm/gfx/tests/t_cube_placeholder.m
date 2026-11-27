@@ -92,5 +92,11 @@ int main(void) { @autoreleasepool {
     // In a 2D slot no fallback: the caller binds the 3D texture as is and reports it
     if (lut) { uint64_t rid = 0; os_unfair_lock_lock(&g_rmu); id<MTLTexture> fitted = tex_fit(272, lut, MTLTextureType2D, &rid); os_unfair_lock_unlock(&g_rmu);
         CHECK(fitted == nil, "a 3D texture in a 2D slot keeps its size for a size query (no zero texture)"); }
+    // Its report is a plain line, not a red one (tex_mis_3d_in_2d, S2Arm 1b229450c); expected values by the rule, written out: MTLTextureType 2D = 2, 2D array = 3, cube = 5, 3D = 7, buffer = 9
+    CHECK(tex_mis_3d_in_2d(2, 7), "a 3D texture in a 2D slot: a plain line");
+    CHECK(tex_mis_3d_in_2d(3, 7), "a 3D texture in a 2D array slot: a plain line");
+    CHECK(!tex_mis_3d_in_2d(7, 2), "a 2D texture in a 3D slot stays red");
+    CHECK(!tex_mis_3d_in_2d(2, 9), "a buffer texture in a 2D slot stays red");
+    CHECK(!tex_mis_3d_in_2d(5, 7), "a 3D texture in a cube slot stays red");
     printf("cube, 3D and layered placeholders: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }
