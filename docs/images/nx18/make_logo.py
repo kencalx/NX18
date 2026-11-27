@@ -90,7 +90,7 @@ def beam_title(v):
     x1 = x0 + 3 * 96 + 82 + gap
     body += dashes(x1, 1)
     w = x1 + dl + W / 2                                    # W / 2: the last dash's round end
-    return place(body, (-W / 2, -26, w + W / 2, 130), round((w + W) * 1.3 + 40), 200, 1.3), round((w + W) * 1.3 + 40)
+    return place(body, (-W / 2, -26, w + W / 2, 130), round((w + W) * 1.2 + 40), 200, 1.2), round((w + W) * 1.2 + 40)   # 156 units tall: 187 of the 200
 def svg(w, h, body, title): return f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><title>{title}</title>{body}</svg>\n'
 def write(n, s): open(os.path.join(OUT, n), 'w').write(s)
 if __name__ == '__main__':

@@ -113,7 +113,8 @@ struct HomeView: View {
             }
             .buttonStyle(.plain)
             .help("Back to the library (B)")
-            NX18Mark(height: 30)   // the official NX 18 mark, drawn as the phone draws it (LauncherRow.swift)
+            Image("BeamTitle").resizable().scaledToFit().frame(height: 34)   // Beam's title (the NX 18 mark, BEAM between the beam's dashes); Home is always dark
+                .accessibilityLabel("NX 18 Beam")
                 .padding(.leading, 6)
             Text("System X2.0").font(.callout.weight(.medium)).foregroundStyle(NX18Palette.muted)
             Spacer()
