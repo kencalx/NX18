@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The NX 18 logo: a monoline NX (cyan N, an X whose coral stroke passes under the cyan one) with a small 18 in a coral pill as an exponent.
 Colours from the Switch 2 Joy-Con: charcoal body, cyan left rail, coral right rail. Every letter is drawn, no fonts.
-python3 docs/images/nx18/make_logo.py writes the SVGs beside it. nx18-icon-square-1024.png (the app icon the NSP script gives an app whose game
+python3 docs/images/nx18/make_logo.py writes the SVGs beside it, Beam's too (beam-icon*.svg, beam-title-*.svg). nx18-icon-square-1024.png (the app icon the NSP script gives an app whose game
 has no icon) is nx18-icon-square.svg rendered at 1024 px and flattened, as Xcode wants an icon without alpha:
   qlmanage -t -s 1024 -o /tmp nx18-icon-square.svg; sips -s format jpeg -s formatOptions 100 /tmp/nx18-icon-square.svg.png --out /tmp/i.jpg; sips -s format png /tmp/i.jpg --out nx18-icon-square-1024.png"""
 import math, os
@@ -60,8 +60,43 @@ def icon():
 def icon_square():   # full-bleed square for App Store / Xcode asset catalogues (iOS rounds the corners itself)
     body, bb = mark(CYAN, CYAN, CORAL, CORAL, CHAR, True, S2=0.5, PADX=18, PADY=12)
     return f'<rect width="1024" height="1024" fill="{CHAR}"/>' + place(body, bb, 1024, 1024, 2.6)
+# Beam (the Mac app, beam/): the NX 18 mark over a B whose lower bowl is a coral stroke passing under the stem, as the X's does, with three coral dashes either side (the beam).
+# BEAM in the title: capitals drawn in the NX's grammar (cap height T..B, stroke W, round ends), 96 apart
+def B_(c, c2=None, split=False):
+    lo = f'M{9 + W + GAP} 52 H44 A21.5 21.5 0 0 1 44 95 H{9 + W + GAP}' if split else 'M9 52 H44 A21.5 21.5 0 0 1 44 95 H9'
+    return f'<path d="M9 95 V9 H40 A21.5 21.5 0 0 1 40 52 H9" stroke="{c}"/><path d="{lo}" stroke="{c2 or c}"/>'
+def E_(c): return f'<path d="M70 9 H9 V95 H70 M9 52 H58" stroke="{c}"/>'
+def A_(c): return f'<path d="M9 95 L41 9 L73 95 M23 62 H59" stroke="{c}"/>'
+def M_(c): return f'<path d="M9 95 V9 L41 58 L73 9 V95" stroke="{c}"/>'
+def dashes(x0, side):   # three strokes on one side of the B, the middle one longest; side -1 ends at x0, +1 starts there
+    d = ''.join(f'<path d="M{f(x0 - L if side < 0 else x0)} {y} H{f(x0 if side < 0 else x0 + L)}" stroke="{CORAL}"/>' for y, L in ((18, 34), (52, 58), (86, 34)))
+    return f'<g fill="none" stroke-width="{W}" stroke-linecap="round">{d}</g>'
+def beam_icon(rounded):
+    body, bb = mark(CYAN, CYAN, CORAL, CORAL, CHAR, True, S2=0.5, PADX=18, PADY=12)
+    dl, gap, bw, s = 58, 40, 66, 0.9                       # dash length, dash-to-B gap, the B's drawn width, the row's scale
+    roww = 2 * (dl + gap) + bw
+    row = dashes(dl, -1) + g(dl + gap - 9, 0, 1, B_(CYAN, CORAL, True)) + dashes(dl + gap + bw + gap, 1)
+    rx, ry = bb[2] / 2 - roww * s / 2, 104 + 70
+    body += f'<g transform="translate({f(rx)} {f(ry)}) scale({f(s)})">{row}</g>'
+    bg = f'<rect width="1024" height="1024"{" rx=\"230\"" if rounded else ""} fill="{CHAR}"/>'
+    return bg + place(body, (0, -26, bb[2], ry + 104 * s), 1024, 1024, 2.3)
+BEAM_V = {'dark': (CYAN, CYAN, CORAL, CHAR, WHITE), 'light': (CHAR, CHAR, CHAR, WHITE, CHAR)}   # N, X over, X under, the 18's digits, BEAM; on no background
+def beam_title(v):
+    cN, cXo, cXu, dg, cw = BEAM_V[v]
+    body, bb = mark(cN, cXo, cXu, CORAL, dg, True)
+    dl, gap = 58, 40                                       # the icon's dashes either side of BEAM
+    x0 = bb[2] + 64 + dl + gap
+    body += dashes(bb[2] + 64 + dl, -1) + ''.join(g(x0 + i * 96, 0, 1, fn(cw)) for i, fn in enumerate((B_, E_, A_, M_)))
+    x1 = x0 + 3 * 96 + 82 + gap
+    body += dashes(x1, 1)
+    w = x1 + dl + W / 2                                    # W / 2: the last dash's round end
+    return place(body, (-W / 2, -26, w + W / 2, 130), round((w + W) * 1.3 + 40), 200, 1.3), round((w + W) * 1.3 + 40)
 def svg(w, h, body, title): return f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><title>{title}</title>{body}</svg>\n'
 def write(n, s): open(os.path.join(OUT, n), 'w').write(s)
-for v in V: write(f'nx18-lockup-{v}.svg', svg(433, 200, lockup(v), f'NX18 ({v})'))
-write('nx18-icon.svg', svg(1024, 1024, icon(), 'NX18 app icon'))
-write('nx18-icon-square.svg', svg(1024, 1024, icon_square(), 'NX18 app icon, full bleed'))
+if __name__ == '__main__':
+    for v in V: write(f'nx18-lockup-{v}.svg', svg(433, 200, lockup(v), f'NX18 ({v})'))
+    write('nx18-icon.svg', svg(1024, 1024, icon(), 'NX18 app icon'))
+    write('nx18-icon-square.svg', svg(1024, 1024, icon_square(), 'NX18 app icon, full bleed'))
+    write('beam-icon.svg', svg(1024, 1024, beam_icon(True), 'NX 18 Beam app icon'))
+    write('beam-icon-square.svg', svg(1024, 1024, beam_icon(False), 'NX 18 Beam app icon, full bleed (beam/scripts/make_icons.swift renders the app icon set from it)'))
+    for v in BEAM_V: body, tw = beam_title(v); write(f'beam-title-{v}.svg', svg(tw, 200, body, f'NX 18 Beam ({v})'))

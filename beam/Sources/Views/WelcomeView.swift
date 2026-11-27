@@ -7,7 +7,8 @@ struct WelcomeView: View {
     @State private var importing = false
     var body: some View {
         ScrollView { VStack(spacing: 22) {
-            Text("NX 18 Beam").font(.system(size: 40, weight: .bold))
+            Image("BeamTitle").resizable().scaledToFit().frame(height: 72)   // the NX 18 mark and BEAM between the beam's dashes (make_logo.py, beam/scripts/make_icons.swift)
+                .accessibilityLabel("NX 18 Beam").accessibilityAddTraits(.isHeader)
             Text("Beam builds your legally owned and acquired games into apps for your iPhone, iPad and Mac.\nIt includes no games, keys or firmware.")
                 .font(.title3).multilineTextAlignment(.center).foregroundStyle(.secondary)
             CheckoutStatus().frame(maxWidth: 560)
