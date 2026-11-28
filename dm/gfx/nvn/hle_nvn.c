@@ -3233,10 +3233,12 @@ static void power_line(uint64_t frame) {
             (unsigned long long)(cut - pcut), (unsigned long long)(ccut - pccut), (unsigned long long)(bsp - pbsp), (unsigned long long)(ud - pud), (unsigned long long)(uc - puc), (unsigned long long)(pm - ppm), (unsigned long long)(pr - ppr), (unsigned long long)(pf_ - ppf), (unsigned long long)(w5[1] - pw5[1]), (unsigned long long)(w5[2] - pw5[2]), (unsigned long long)(w5[5] - pw5[5]), (unsigned long long)(w5[3] - pw5[3]), (unsigned long long)(w5[0] - pw5[0]), (unsigned long long)(w5[4] - pw5[4]), (unsigned long long)(lt - plt), (unsigned long long)(ll - pll), (unsigned long long)(smp - psmp), (unsigned long long)(smc - psmc), (unsigned long long)(smw - psmw), (unsigned long long)(chm - pchm), (unsigned long long)(chd - pchd),
             (unsigned long long)(chs[1] - pchs[1]), (unsigned long long)(chs[2] - pchs[2]), (unsigned long long)(chs[3] - pchs[3]), (unsigned long long)(chs[7] - pchs[7]), (unsigned long long)(chs[5] - pchs[5]),
             (ld - pld) / 1048576.0 / nf, (st - pst) / 1048576.0 / nf, (fu - pfu) / nf, (udc - pudc) / 1048576.0 / nf, (sca - psca) / nf, (scb - pscb) / 1048576.0 / nf, (scp - pscp) / nf, (sctp - psctp) / nf, (sctb - psctb) / 1048576.0 / nf, (ds[0] - pds[0]) / nf, (ds[1] - pds[1]) / 1048576.0 / nf, (ds[2] - pds[2]) / nf, (ds[3] - pds[3]) / nf, (ds[4] - pds[4]) / 1048576.0 / nf, (ldn - pldn) / nf, (ldb - pldb) / 1048576.0 / nf, (lds - plds) / nf, (dc - pdc) / nf, atomic_load_explicit(&g_discard_cmask, memory_order_relaxed), (dd - pdd) / nf); psca = sca; pscp = scp; pscb = scb; psctp = sctp; psctb = sctb; memcpy(pds, ds, sizeof pds); pldn = ldn; pldb = ldb; plds = lds; pdc = dc; pdd = dd; pbs = bs; pbf = bf; pcut = cut; pccut = ccut; pbsp = bsp; pud = ud; puc = uc; ppm = pm; ppr = pr; ppf = pf_; memcpy(pw5, w5, sizeof pw5); plt = lt; pll = ll; psmp = smp; psmc = smc; psmw = smw; pchm = chm; pchd = chd; memcpy(pchs, chs, sizeof pchs);
-        { void mtl_lsr_stats(uint64_t v[9]); static uint64_t plr[9]; uint64_t lr[9]; mtl_lsr_stats(lr);   // attachment traffic the replay proves unneeded (nvn_mtl.m: DM_NVN_CLEARED_LOAD, DM_NVN_DS_DEAD_STORE, DM_NVN_MSAA_RESOLVE_ONLY; DM_NVN_HOST_BARRIER)
-          if (memcmp(lr, plr, sizeof lr)) LOG("[nvn] attachment traffic proven unneeded up to frame %llu, per frame: colour loads of targets cleared whole %.2f (%.2f MB), depth / stencil stores %.2f (%.2f MB; scans %.1f over %.0f ops), multisample sample stores %.2f (%.2f MB); host encoders with narrowed barriers %.1f",
-              frame, (lr[0] - plr[0]) / nf, (lr[1] - plr[1]) / 1048576.0 / nf, (lr[2] - plr[2]) / nf, (lr[3] - plr[3]) / 1048576.0 / nf, (lr[6] - plr[6]) / nf, (lr[7] - plr[7]) / nf, (lr[4] - plr[4]) / nf, (lr[5] - plr[5]) / 1048576.0 / nf, (lr[8] - plr[8]) / nf);
-          memcpy(plr, lr, sizeof plr); }
+        { void mtl_lsr_stats(uint64_t v[9]); static uint64_t plr[9]; uint64_t lr[9]; mtl_lsr_stats(lr);   // attachment traffic the replay proves unneeded (nvn_mtl.m: DM_NVN_CLEARED_LOAD, DM_NVN_COVERED_LOAD, DM_NVN_DS_DEAD_STORE, DM_NVN_MSAA_RESOLVE_ONLY; DM_NVN_HOST_BARRIER)
+          void mtl_lcv_stats(uint64_t v[4]); static uint64_t plc[4]; uint64_t lc[4]; mtl_lcv_stats(lc);   // colour loads the pass's first draw covers whole (nvn_mtl.m lcv_confirm): attachments, bytes, passes, planned but not confirmed
+          if (memcmp(lr, plr, sizeof lr) || memcmp(lc, plc, sizeof lc)) LOG("[nvn] attachment traffic proven unneeded up to frame %llu, per frame: colour loads of targets cleared whole %.2f (%.2f MB), colour loads the first draw covers whole %.2f (%.2f MB, in %.2f passes; planned, not confirmed at the draw %.2f), depth / stencil stores %.2f (%.2f MB; scans %.1f over %.0f ops), multisample sample stores %.2f (%.2f MB); host encoders with narrowed barriers %.1f",
+              frame, (lr[0] - plr[0]) / nf, (lr[1] - plr[1]) / 1048576.0 / nf, (lc[0] - plc[0]) / nf, (lc[1] - plc[1]) / 1048576.0 / nf, (lc[2] - plc[2]) / nf, (lc[3] - plc[3]) / nf,
+              (lr[2] - plr[2]) / nf, (lr[3] - plr[3]) / 1048576.0 / nf, (lr[6] - plr[6]) / nf, (lr[7] - plr[7]) / nf, (lr[4] - plr[4]) / nf, (lr[5] - plr[5]) / 1048576.0 / nf, (lr[8] - plr[8]) / nf);
+          memcpy(plr, lr, sizeof plr); memcpy(plc, lc, sizeof plc); }
         { void mtl_cut_stats(uint64_t v[4]); static uint64_t pcs[4]; uint64_t cs[4]; mtl_cut_stats(cs);   // segment cuts (nvn_mtl.m sub_cut, DM_NVN_CUT_EVENT, DM_NVN_CUT_HOLD)
           if (cs[0] != pcs[0] || cs[2] != pcs[2]) LOG("[nvn] segment cuts up to frame %llu, per frame: made %.2f (%.2f of them with earlier work running, handed to the encode thread to hold: DM_NVN_CUT_HOLD; %.2f while the commit feedback still counted work and the GPU's event said it had run out: DM_NVN_CUT_EVENT), boundaries kept open with work running %.2f",
               frame, (cs[0] - pcs[0]) / nf, (cs[3] - pcs[3]) / nf, (cs[1] - pcs[1]) / nf, (cs[2] - pcs[2]) / nf);
@@ -3261,6 +3263,10 @@ static void power_line(uint64_t frame) {
         if (fs_ != pfs || fr != pfr || ft != pft) LOG("[nvn] same-pass feedback up to frame %llu, per frame: %.1f snapshots taken, %.1f draws reused one, %.1f read the tile (%.1f waited for their pipeline)",
             frame, (fs_ - pfs) / nf, (fr - pfr) / nf, (ft - pft) / nf, (fw - pfw) / nf);
         pfs = fs_; pfr = fr; pft = ft; pfw = fw;
+        { void mtl_rfp_stats(uint64_t v[5]); static uint64_t prf[5]; uint64_t rf[5]; mtl_rfp_stats(rf);   // the replay's per-draw fast paths (nvn_mtl.m: DM_NVN_FB_STOR, DM_NVN_PSO_MEMO, DM_NVN_MTK_KEEP), both sides of each A/B
+          if (memcmp(rf, prf, sizeof rf)) LOG("[nvn] replay fast paths up to frame %llu, per frame: feedback storage checks lock-free %.1f, under the lock %.1f (DM_NVN_FB_STOR); pipeline lookups from the program's slot %.1f, hashed %.1f (DM_NVN_PSO_MEMO); task / mesh draws that kept their fragment block %.1f (DM_NVN_MTK_KEEP)",
+              frame, (rf[0] - prf[0]) / nf, (rf[1] - prf[1]) / nf, (rf[2] - prf[2]) / nf, (rf[3] - prf[3]) / nf, (rf[4] - prf[4]) / nf);
+          memcpy(prf, rf, sizeof prf); }
         static uint64_t pps[POOL_STATS]; uint64_t ps[POOL_STATS]; mtl_pool_stats(ps);   // the tables of handles traced to no slot (nvn_mtl.m pool_gpu)
         void mtl_pool_spare_stats(uint64_t s[5]); static uint64_t pss[5]; uint64_t ss[5] = {0}; char psp[160] = "";   // the tables made and reused, the spares (nvn_mtl.m pool_table_give), for a profile with replay_spares (on or turned off, so both sides of the A/B have it) or DM_REPLAY_SPARES=1; every other game's line as before
         if (DM_GAME_REPLAY_SPARES || nvn_replay_spares()) { mtl_pool_spare_stats(ss); snprintf(psp, sizeof psp, "; tables made %.2f, reused %.2f (spares kept %llu of %llu, let go %llu)", (ss[0] - pss[0]) / nf, (ss[1] - pss[1]) / nf,
@@ -4108,6 +4114,16 @@ static int drs_gpu_on(void) {
     }
     return g_drs_on;
 }
+// Battery Saver's lowest-resolution hold (nvn_drs_gpu.h hold; DM_DRS_LOWEST=1, which the launcher puts into the environment for the Battery Saver preset from a profile's
+// preset battery line and clears for the others, unless env.txt sets it): read again each window, so the in-game menu's preset change applies within 250 ms. Only where
+// the controller runs: the level stub with the game's dynamic resolution on (Ocarina of Time), or the stretch family's scale path (drs_gpu_scale on, DM_DRS_GPU_SCALE not 0)
+static int drs_lowest(void) {
+    char e[8]; static int red;
+    if (!front_env_copy("DM_DRS_LOWEST", e, sizeof e)) return 0;
+    const int v = nvn_drs_lowest_parse(e);
+    if (v < 0) { if (!red) { red = 1; LOG("[RED] DM_DRS_LOWEST=%s: not 0, off, 1 or on; no hold", e); } return 0; }
+    return v;
+}
 static void drs_gpu_summary(char *out, size_t n) {
     if (!n) return;
     out[0] = 0;
@@ -4145,11 +4161,14 @@ static void drs_gpu_tick(uint64_t frame) {
     if (t0 && t - t0 < NVN_DRS_WIN_NS) return;
     const int sc = !stub && drs_scale_on();
     if (!stub && !sc) {
+        g_drs.hold = g_drs.held = 0;
         if (sc_was && g_drs.floor) { int was = g_drs.floor; g_drs.floor = 0; scale_set(NVN_SCALE_HEADROOM, 1, "GPU headroom off");
             LOG("[nvn] GPU headroom scale floor %d → 0 at frame %llu: off (DM_DRS_GPU_SCALE=0)", was, (unsigned long long)frame); }
         sc_was = 0; t0 = 0; return;
     }
-    if (!drs_gpu_on()) return;
+    const int hold = drs_lowest();
+    if (!drs_gpu_on() && !hold && !g_drs.held) return;   // headroom off (DM_DRS_GPU_TARGET=0): the hold still runs, and its end still takes the floor back
+    g_drs.hold = hold;
     if (sc && !sc_was) { g_drs.settle_n = 4; sc_was = 1; t0 = 0;
         LOG("[nvn] GPU headroom through the render scale (%s): levels 0-%d at 1.0 to %.1f of the picture's side; each step checked 1 s after it",
             scale_lever() == SCALE_STRETCH ? "the GPU time the game's dynamic resolution reads, stretched" : "the 3D views' factor at state +0x14", DRS_SCALE_LEVELS - 1, drs_scale_f(DRS_SCALE_LEVELS - 1)); }

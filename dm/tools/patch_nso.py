@@ -100,6 +100,8 @@ else:
 #     the repository's rules, an external-only provisional profile its own. Missing or ambiguous matches are reported and skipped; known builds retain their exact CUTS.
 #     A rule of several functions applies whole or not at all. For such a module <name>.match.tsv lists the cuts of the profile's registered builds of it and each patch's result,
 #     which the NSP script reports with the build (what an unregistered build lost)
+#   MATCH_SURVEY = {module name: [nso_match survey, ...]}: read only. When one of the profile's MATCH_CUTS rules misses a module, the complete functions of this build that hold the
+#     survey's instruction patterns are listed in the rewrite log with their offsets, sizes and fingerprints (nso_match.survey), so the log alone can enroll the rule for the build
 #   sdk_patches.py's MATCH_CUTS are SDK-wide: every game's module of that name whose build has no CUTS, whatever the profile (a build that must keep Nintendo's code registers an
 #     empty CUTS list). They are fixes of Nintendo's code that hold for any game on a platform with a small address space; a build without a reviewed implementation of one keeps
 #     the original code, logged but not red (games without virtual address memory never reach it). engine_patches.py's MATCH_CUTS are engine-wide in the same way: fixes of
@@ -116,7 +118,7 @@ patch_paths = {}
 for path in PATCH_FILES: patch_paths.setdefault(os.path.realpath(path), path)   # repeated roots and symlinks name the same file, not competing build claims
 PATCH_FILES = list(patch_paths.values())
 def load_patches():
-    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'STUBS': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'MATCH_OBS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
+    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'STUBS': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'MATCH_OBS': {}, 'MATCH_SURVEY': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
     for n, path in enumerate(PATCH_FILES):
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
@@ -124,7 +126,7 @@ def load_patches():
             if kind == 'MATCH_CUTS' and os.path.basename(path) in SHARED:   # SDK-wide and engine-wide
                 for mod, rules in getattr(m, kind, {}).items(): tables['SDK_MATCH_CUTS'].setdefault(mod, []).extend(rules)
                 continue
-            if kind in ('MATCH_CUTS', 'MATCH_FRAME_STEP', 'MATCH_OBS'):
+            if kind in ('MATCH_CUTS', 'MATCH_FRAME_STEP', 'MATCH_OBS', 'MATCH_SURVEY'):
                 if os.path.basename(path) in SHARED: continue
                 profile = os.path.basename(os.path.dirname(path))
                 roots = [os.path.join(os.path.dirname(os.path.abspath(__file__)), '../games')] + [d for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d]
@@ -156,6 +158,9 @@ if BUILD_ID not in PATCHES['CUTS']:
             if bid and bid != BUILD_ID and PATCHES['CUTS'].get(bid): known.append((bid, c[2], len(PATCHES['CUTS'][bid])))
     outcomes, sdk_outcomes = [], []
     cuts += resolve(IMG, TEXT_END, PATCHES['MATCH_CUTS'].get(profile, {}).get(NAME, []), outcomes=outcomes)
+    if any(offs is None for _, offs, _ in outcomes):   # a profile rule missed: its survey names the candidate functions of this build (nothing is changed)
+        from nso_match import survey
+        survey(IMG, TEXT_END, PATCHES['MATCH_SURVEY'].get(profile, {}).get(NAME, []))
     cuts += resolve(IMG, TEXT_END, PATCHES['SDK_MATCH_CUTS'].get(NAME, []), outcomes=sdk_outcomes, red=False)
     if BUILD_ID not in own and (known or outcomes or sdk_outcomes):   # a build the game was brought up on lost nothing
         os.makedirs(outdir, exist_ok=True)

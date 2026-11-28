@@ -681,7 +681,7 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     k.border |= border_need(ts, 3);
     memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);
     mtk_bind_key(&k, ts, ms, fs);
-    id ps = hm_get_id(&g_pso_mtk, &k);
+    id ps = pso_tab_get(&g_pso_mtk, &k, &raster->mk_hint);   // DM_NVN_PSO_MEMO: the pixel program's last slot first (one per game program: geo_lean_raster)
     if (ps) return ps == NSNull.null ? nil : ps;
     NSError *error = nil; uint64_t start = bp_now(); int archived = 0;
     ps = mtk_build(&k, ts, ms, fs, &error, &archived);
@@ -798,7 +798,10 @@ static void mesh_tasks_draw(const p_draw *dw) {
     g_geo_program = raster;
     p_draw triangle = {.prim = 4, .count = 3, .instances = 1};
     draw_(&triangle, NULL);
-    g_geo_program = nil; g_mtk.on = 0; args_dirty_all();
+    // DM_NVN_MTK_KEEP (on by default): the draw bound the task and mesh stages' arguments in the object and vertex tables, so those stages encode again; its pixel stage's block is the one
+    // the game program's fragment shader has, from the same bindings, as for a geometry mesh draw (geo_mesh_draw), so the fragment generation it was written at stays. Marked changed,
+    // each draw of a run of task / mesh draws (Ocarina of Time's foliage, shadows and enemies) wrote its pixel shader's block again. Only such a run gains: another program's draw of that shader still writes it (a program change, and the hard generation this moves)
+    { uint64_t f = g_args_gen[1]; g_geo_program = nil; g_mtk.on = 0; args_dirty_all(); if (g_mtk_keep > 0 && !g_mtk.miss) { g_args_gen[1] = f; g_mtk_kept++; } }
     if (g_mtk.miss) { g_mtk_wait++; return; }
     swrite_note(pr); g_wr_epoch++;
     if (!g_mtk_n++) MLOG("task / mesh: first draw, task %s mesh %s fragment %s, %u workgroups from %u%s", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", g_mtk.count, g_mtk.first, ind ? " (indirect)" : "");

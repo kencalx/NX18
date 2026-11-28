@@ -34,7 +34,8 @@ DRAWN = ('battery', 'quality')
 # Switches a preset may give the host that no row sets (a profile's "preset<TAB><preset><TAB><VAR>=<value>" naming one), each with the values it may take: launcher.json's
 # preset_env, which a front end puts into the environment for that preset and clears ("", the host's default) for any other, unless an env file or the launch set it; the preset
 # counts as moving the game then (its chip is drawn). DM_FPS_CTL=hold30: the Battery Saver hold of a game's own 60/30 frame-rate controller at 30 (hle_fctl.c; Donkey Kong Bananza)
-PRESET_ENV = {'DM_FPS_CTL': {'hold30'}, 'DM_NVN_PASS_ALT': {'0'}, 'DM_NVN_CUBE_ALT': {'0'}, 'DM_NVN_UP_BILINEAR': {'0'}, 'DM_DRS_GPU_SCALE': {'0'}}   # =0: Quality draws a profile's pass_alternate passes (sized, cube) every frame, and lets MetalFX draw the game's upscaler a profile's upscaler_bilinear stretches (the owner's preset plan)
+# DM_DRS_LOWEST=1: Battery Saver's lowest resolution, the GPU headroom floor held at the game's lowest dynamic-resolution level (nvn_drs_gpu.h hold; Bananza, Ocarina of Time)
+PRESET_ENV = {'DM_FPS_CTL': {'hold30'}, 'DM_NVN_PASS_ALT': {'0'}, 'DM_NVN_CUBE_ALT': {'0'}, 'DM_NVN_UP_BILINEAR': {'0'}, 'DM_DRS_GPU_SCALE': {'0'}, 'DM_DRS_LOWEST': {'1'}}   # =0: Quality draws a profile's pass_alternate passes (sized, cube) every frame, and lets MetalFX draw the game's upscaler a profile's upscaler_bilinear stretches (the owner's preset plan)
 # A rule is [<option>:]<when>~<why>, and <when> is terms joined by &, all of which must hold. A front end evaluates two kinds of term on the device:
 # - <VAR>=<v>/<v> or <VAR>!=<v>/<v>: another row's current value (a range compares as a number), or the environment for a switch no row sets (ENV_ONLY); false when neither has it
 # - DEVICE_TERMS: what the device, its screen or the app has

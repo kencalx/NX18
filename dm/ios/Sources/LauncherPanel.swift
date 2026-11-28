@@ -112,6 +112,9 @@ enum GateText {
             }
         }
         if m.presetEnv[p.rawValue]?["DM_FPS_CTL"] == "hold30" { parts.insert("steady 30 fps", at: 0) }   // a switch no row sets (preset_env): the game's own controller held at 30
+        if m.presetEnv[p.rawValue]?["DM_DRS_LOWEST"] == "1" {   // a switch no row sets: Battery Saver's floor held at the game's lowest dynamic-resolution level (nvn_drs_gpu.h hold)
+            parts.removeAll { $0 == "dynamic resolution" || $0 == "lower resolution" }; parts.append("lowest resolution")
+        }
         if m.presetEnv[p.rawValue]?["DM_NVN_PASS_ALT"] == "0" { parts.append("full detail") }   // a switch no row sets: the profile's pass_alternate view drawn every frame (Donkey Kong Bananza's Quality)
         if m.presetEnv[p.rawValue]?["DM_NVN_CUBE_ALT"] == "0" { parts.append("full detail") }   // the profile's cube passes drawn every frame (Donkey Kong Bananza's environment cube)
         if m.presetEnv[p.rawValue]?["DM_NVN_UP_BILINEAR"] == "0" { parts.append("full detail") }   // the game's upscaler by MetalFX, not a bilinear stretch (Donkey Kong Bananza's Quality; the same words, listed once)

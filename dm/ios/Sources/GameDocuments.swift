@@ -185,4 +185,27 @@ enum GameDocuments {
         let i = docs.firstIndex { $0.id == id } ?? 0
         return docs[((i + step) % docs.count + docs.count) % docs.count]
     }
+
+    /// A Markdown heading line ("# Title" to "###### Title", or a lone "#"): one to six #, then a space or the line's end, after at most three spaces
+    static func heading(_ line: Substring) -> (level: Int, text: String)? {
+        let t = line.drop { $0 == " " }
+        guard line.count - t.count <= 3 else { return nil }
+        let level = t.prefix { $0 == "#" }.count, rest = t.dropFirst(level)
+        guard (1...6).contains(level), rest.isEmpty || rest.first == " " || rest.first == "\t" else { return nil }
+        return (level, rest.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: #"\s+#+$"#, with: "", options: .regularExpression))
+    }
+    /// A text file's paragraphs for the viewer (GameDocText): blocks split at blank lines; in Markdown a heading line is a block of its own too, so "# Title" with its text on the
+    /// next line is a heading and a paragraph, not a heading made of both (not inside a ``` or ~~~ code block, where # is a comment)
+    static func blocks(_ text: String, markdown: Bool) -> [String] {
+        var out: [String] = [], cur: [Substring] = [], fenced = false
+        func end() { let b = cur.joined(separator: "\n").trimmingCharacters(in: .newlines); if !b.trimmingCharacters(in: .whitespaces).isEmpty { out.append(b) }; cur = [] }
+        for line in text.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.allSatisfy({ $0 == " " || $0 == "\t" }) { end(); continue }
+            if markdown, line.drop(while: { $0 == " " }).hasPrefix("```") || line.drop(while: { $0 == " " }).hasPrefix("~~~") { fenced.toggle() }
+            else if markdown, !fenced, heading(line) != nil { end(); cur = [line]; end(); continue }
+            cur.append(line)
+        }
+        end()
+        return out
+    }
 }

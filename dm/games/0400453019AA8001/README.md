@@ -5,9 +5,10 @@ Program `0400453019AA8001`, version 2.0.0 (`v0` in the supplied NUP), SDK
 audio. The loaded modules are `main` and `sdk`. The host supplies the imports
 from the shipped NintendoSDK_movie module (`subsdk0`).
 
-**Not yet run on NX 18.** The profile and everything below except this paragraph and
-[On NX 18](#on-nx-18) are upstream's (NXNative `0834cb6ae`, by seedds, made from a
-legally owned and acquired copy).
+**Crashes at boot on the iPhone** (NX 18 `904d2c01a`, two runs on an iPhone 18 Pro Max, 2026-11-27);
+not yet run on NX 18's Mac. The profile and everything below except this paragraph,
+[On NX 18](#on-nx-18) and [On the iPhone](#on-the-iphone) are upstream's (NXNative `0834cb6ae`, by
+seedds, made from a legally owned and acquired copy).
 
 ## On NX 18
 
@@ -16,8 +17,8 @@ legally owned and acquired copy).
   alone (program 1 of the application), which NX 18 builds only with the development
   switch on (`NX18_DEV`, [docs/development.md](../../../docs/development.md)); without
   it the build stops with `This program isn't supported yet`.
-- The Mac only, as upstream: Monolith's 60 GiB reservation fits the Mac's 64 GB
-  alias region, not an iPhone's 4.375 GiB (see [Address space](#address-space)).
+- Monolith's 60 GiB reservation fits the Mac's 64 GB alias region, not an iPhone's: see
+  [On the iPhone](#on-the-iphone) for what the profile tries there.
 - `mem_map_limit on` is in [`game.tsv`](game.tsv): upstream's host turns the pool
   limit on for every Switch 2 game (NXNative `a694f1799`), and it ran this game so.
 - Upstream's `geo_pairs.tsv` (four vertex/geometry pairs, for its mesh libraries of
@@ -36,6 +37,40 @@ legally owned and acquired copy).
   the next build's split should find upstream's 24,815 keys (this profile's `shader_map.tsv`).
   The `skipped` lines in `rewrite_main.log` and `rewrite_sdk.log` are function patches that do not
   apply to this build and are expected.
+
+## On the iPhone
+
+Both runs of NX 18 `904d2c01a` on the owner's iPhone 18 Pro Max (5 GB block, 4.375 GB alias
+region) stopped right after `>>> nninitStartup` with `CRASH sig=11 addr=0 pc=sdk+0x6d6448
+lr=main+0xae38d0`: `memset` (the PLT target in `x16`) of `0x20000` bytes to null, from the
+function that clears the first arena's 128 KB of bookkeeping. That is the stop upstream's Mac
+run with the iPhone's alias region reached (below), so the cause is the 60 GiB reservation
+the alias region cannot hold: the SDK refuses it, Monolith does not check, and its first
+arena comes from a region that does not exist. The Switch 1 program had the same stop, and
+upstream fixed it there in Monolith's own code (`0100453019AA8000`, NXNative `b32d0bf3b`):
+the SDK's StandardAllocator gate cannot size a region the game asks for with
+`nn::os::AllocateAddressRegion` itself.
+
+What the profile does now (2026-11-27), without this program's `main` at hand to check:
+
+- [`patches.py`](patches.py) carries upstream's Switch 1 rule, matched by its two complete
+  function fingerprints: it applies only if this build's functions and their callees are the
+  same code, word for word. The first arena becomes 512 MB + 128 KB, as upstream's, and the
+  outer region 12 GB rather than upstream's 4 GB, since this program opened pages up to
+  8.01 GiB into its region within 15 seconds on the Mac, beside the 4 GB first arena.
+- [`game.tsv`](game.tsv) gives the iPhone a 16 GB alias region (`mem_alias 0x400000000`,
+  `mem_reserve 0x428000000`), Fire Emblem Fortune's Weave's, which plays on this phone; the heap
+  and stack regions are as before, and the Mac's block is unchanged.
+- If the rule does not match, `rewrite_main.log` says so in a red line
+  (`function patch 'Monolith malloc region and first arena' skipped: …`) and the survey after
+  it lists this build's candidate functions with offsets, sizes and fingerprints
+  (`function survey 'Monolith malloc region size (60 GB)': …`, `function survey 'Monolith first
+  arena (4 GB + 128 KB)': …`), which is what enrolling the rule for this build needs. The game
+  then still stops at boot.
+- The run's log names a refused reservation in every game now:
+  `[RED] [mem] address region of 60.000 GB asked, returning to main+0x…: the alias region (…) has
+  … GB free in all, so it cannot hold it`, and, at a crash before any address was given,
+  `[RED] [mem] the last address region asked, … got no address before the crash`.
 
 ## Current status
 

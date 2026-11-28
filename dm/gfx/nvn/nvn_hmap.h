@@ -31,6 +31,18 @@ static inline void *nvn_hm_get(const nvn_hmap *m, const void *k) {
         if (!memcmp(m->keys + (size_t)i * m->klen, k, m->klen)) return m->vals[i];
     }
 }
+// nvn_hm_get with a remembered slot (*hint, the caller's: 0 at first): the slot is tried first, and the entry there is k's only when its key is k (keys are unique), so the answer is
+// nvn_hm_get's whatever the table did since (a put, a grow, a delete's shift, a clear: the slot then holds another key or none, and the lookup goes the usual way and notes the new slot).
+// A hit costs one key compare and no hash: for long keys (the render pipelines' pso_key, 424 bytes on arm64) the hash is most of a lookup. *hint is slot + 1 (0: none)
+static inline void *nvn_hm_get_hint(const nvn_hmap *m, const void *k, uint32_t *hint) {
+    if (!m->n) return NULL;
+    uint32_t h = *hint;
+    if (h && h <= m->cap && m->vals[h - 1] && !memcmp(m->keys + (size_t)(h - 1) * m->klen, k, m->klen)) return m->vals[h - 1];
+    for (uint32_t i = (uint32_t)nvn_hm_hash(k, m->klen) & (m->cap - 1);; i = (i + 1) & (m->cap - 1)) {
+        if (!m->vals[i]) return NULL;
+        if (!memcmp(m->keys + (size_t)i * m->klen, k, m->klen)) { *hint = i + 1; return m->vals[i]; }
+    }
+}
 static inline void *nvn_hm_put(nvn_hmap *m, const void *k, void *v);
 static inline void nvn_hm_grow(nvn_hmap *m) {
     nvn_hmap o = *m;

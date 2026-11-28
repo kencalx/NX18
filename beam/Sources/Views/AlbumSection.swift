@@ -66,12 +66,12 @@ struct AlbumSection: View {
             }
             .fileImporter(isPresented: $adding, allowedContentTypes: [.item], allowsMultipleSelection: true) { r in
                 guard let mine, case .success(let urls) = r else { return }
-                let library = library.folder
+                let library = library.folder, into = self.library.myFilesNX18   // the NX 18 folder My files are in now (nil: Beam's), which the ledger notes the name under
                 Task {
                     await Task.detached(priority: .userInitiated) {   // never over a file already there: a name taken gets " 2" (MyFilesPlace.add); coordinated, as the NX 18 folder is in iCloud Drive
                         for u in urls {
                             let ok = u.startAccessingSecurityScopedResource()
-                            if let name = MyFilesPlace.add(u, into: mine), inNX18 { MyFilesPlace.noteAdded(name, titleID: tid, library: library) }
+                            if let name = MyFilesPlace.add(u, into: mine), let into { MyFilesPlace.noteAdded(name, titleID: tid, library: library, nx18: into) }
                             if ok { u.stopAccessingSecurityScopedResource() }
                         }
                     }.value

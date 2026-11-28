@@ -48,6 +48,15 @@
 //                      60 fps with the probe at 2.4x, four steps down, each undone for no gain). Late frames at a low clock still count (a clock that collapsed and
 //                      stays down: Breath of the Wild, gpu-clock-collapse.md)
 // Each step moves one level; the floor never passes the game's lowest level (its level count less one, which the level stub writes at state +0x294).
+// Battery Saver's lowest-resolution hold (DM_DRS_LOWEST=1, the profile's preset battery line; open-optimizations.md item 7): while the caller sets hold, the floor sits at
+// the game's lowest level and none of the rules above runs: no step, no check, no no-gain verdict. Battery Saver is 30 fps at the lowest resolution: a smaller picture there is
+// not judged by the frames it lets through (at 30 there are none to win) but by the GPU work it takes away, which iOS turns into a lower GPU clock even where the GPU time per
+// frame hardly moves (Ocarina of Time's scene passes cost about the same at 854x480 and 1440x810, so the no-gain rule would undo every step). Ocarina of Time: the level stub's
+// lowest level (its level count less one, +0x294: level 9, 0.333 of 2048x1152, the main scene passes 854x480), where the game's own controller sat for minutes on the Mac and
+// the iPhone 18 Pro Max ran most of a Balanced run (b8a67e1d7, 59.8 fps, no red line); the stretch
+// family: level DRS_SCALE_LEVELS - 1, 0.5 of the picture's side, the render scale's own floor (nvn_heat.h nvn_heat_scale), the GPU time its dynamic resolution reads x4, which takes
+// Donkey Kong Bananza's own controller to its lowest step (1152x648 with its upscaler). The level count unknown (0): nothing moves until it is. When the caller clears hold (the
+// in-game menu's preset change, or DM_DRS_LOWEST=0) the floor goes back to full size at once and the rules start again from there.
 #pragma once
 #include <stdint.h>
 #include <stdio.h>
@@ -80,7 +89,7 @@
 #define NVN_DRS_LATE_BUSY   0.75 // a late window counts only with the GPU busy at least this share of it: late with the GPU idle a quarter of the time is the CPU's
 #define NVN_DRS_ROOM_RATIO  1.5 // the GPU probe against the session's fastest at or over which the GPU runs well under its top clock
 
-enum { NVN_DRS_NONE, NVN_DRS_DOWN_BUSY, NVN_DRS_DOWN_CLOCK, NVN_DRS_UP, NVN_DRS_UNDO };
+enum { NVN_DRS_NONE, NVN_DRS_DOWN_BUSY, NVN_DRS_DOWN_CLOCK, NVN_DRS_UP, NVN_DRS_UNDO, NVN_DRS_HOLD, NVN_DRS_RELEASE };
 
 typedef struct {
     int target_pm;                  // busy target, per mille (0: off)
@@ -98,8 +107,9 @@ typedef struct {
     int gpu_room;                   // set by the caller before each window: the GPU runs well under its top clock with the frames on time (above: clock room)
     int settle_n;                   // windows skipped after a step before its check measures (1: the stub's game follows within its first window; the stretch family 4)
     uint64_t nogain_at[2][NVN_DRS_LEVELS], nogain_hold[2][NVN_DRS_LEVELS];   // per kind (0 GPU busy, 1 clock floor): the last no-gain verdict from each level, and its hold
+    int hold, held;                 // hold: set by the caller before each window, Battery Saver's lowest-resolution hold (DM_DRS_LOWEST=1); held: the floor sits there now
     // the summary since the last nvn_drs_gpu_summary
-    uint32_t s_win, s_room, s_down_busy, s_down_clock, s_up, s_undo, s_floor_lo, s_floor_hi;
+    uint32_t s_win, s_room, s_down_busy, s_down_clock, s_up, s_undo, s_floor_lo, s_floor_hi, s_held;
     double s_busy_sum, s_busy_max, s_clk_min;
     char last_why[128];
 } nvn_drs_gpu;
@@ -111,6 +121,12 @@ static inline int nvn_drs_gpu_parse(const char *e) {
     char *end; long v = strtol(e, &end, 10);
     if (*end || v < 50 || v > 95) return -1;
     return (int)v;
+}
+// DM_DRS_LOWEST: unset, empty, 0 or off: no hold; 1 or on: the floor held at the game's lowest level (Battery Saver's preset line); anything else -> -1 (the caller says so, no hold)
+static inline int nvn_drs_lowest_parse(const char *e) {
+    if (!e || !*e || !strcmp(e, "0") || !strcmp(e, "off")) return 0;
+    if (!strcmp(e, "1") || !strcmp(e, "on")) return 1;
+    return -1;
 }
 static inline void nvn_drs_gpu_init(nvn_drs_gpu *c, int target_pct) {
     memset(c, 0, sizeof *c);
@@ -134,10 +150,44 @@ static inline double nvn_drs_gpu_load(nvn_drs_gpu *c, double share, double fps, 
     c->gpu_room = !held && probe_ratio >= NVN_DRS_ROOM_RATIO;
     return load > 2 ? 2 : load;
 }
+// The hold's window (nvn_drs_gpu_window while hold or held): the summary's figures, then the floor to the lowest level (NVN_DRS_HOLD, once) or, the hold cleared, back to
+// full size (NVN_DRS_RELEASE); every rule's count and running check dropped either way, so the rules start fresh when the hold ends
+static inline int nvn_drs_gpu_hold_window(nvn_drs_gpu *c, uint64_t now, double busy, double pclk, int nlevels, char *w, size_t n) {
+    c->s_win++; c->s_busy_sum += busy; if (busy > c->s_busy_max) c->s_busy_max = busy;
+    if (pclk > 0 && pclk < c->s_clk_min) c->s_clk_min = pclk;
+    if (pclk > c->clk_max) c->clk_max = pclk;
+    c->prev_bpm = (int)(busy * 1000 + 0.5);
+    int kind = NVN_DRS_NONE;
+    if (c->hold) {
+        c->s_held++;
+        if (nlevels > 0) {
+            const int lowest = nlevels - 1 < NVN_DRS_LEVELS - 1 ? nlevels - 1 : NVN_DRS_LEVELS - 1;
+            if (!c->held || c->floor != lowest) {
+                c->floor = lowest; c->held = 1; kind = NVN_DRS_HOLD;
+                snprintf(w, n, "held at the lowest level %d of %d (DM_DRS_LOWEST, Battery Saver)", lowest, nlevels);
+            }
+        }
+    } else if (c->held) {
+        c->floor = 0; c->held = 0; kind = NVN_DRS_RELEASE;
+        snprintf(w, n, "lowest-resolution hold off (DM_DRS_LOWEST): back to full size, the GPU headroom rules again");
+    }
+    if (kind) {
+        c->chk_level = -1; c->over_n = c->clock_n = c->under_n = c->clock_steps = 0; c->last_change = now;
+        snprintf(c->last_why, sizeof c->last_why, "%s", w);
+    }
+    if ((uint32_t)c->floor < c->s_floor_lo) c->s_floor_lo = (uint32_t)c->floor;
+    if ((uint32_t)c->floor > c->s_floor_hi) c->s_floor_hi = (uint32_t)c->floor;
+    return kind;
+}
 // One window ending at now (ns): busy the GPU's load (above: the busy share times target / fps, 0..2), pclk the performance cores' clock in GHz (<= 0: no figure), level the level the game runs at (0 = full size),
 // nlevels its level count (0: unknown, nothing moves). Returns NVN_DRS_NONE or the kind of step taken; c->floor is the new floor and why (if not NULL) the reason
 static inline int nvn_drs_gpu_window(nvn_drs_gpu *c, uint64_t now, double busy, double pclk, int level, int nlevels, char *why, size_t n) {
     if (why && n) why[0] = 0;
+    if (c->hold || c->held) {   // Battery Saver's lowest-resolution hold, or the window that ends it: no rule runs
+        char hw[128] = ""; int k = nvn_drs_gpu_hold_window(c, now, busy, pclk, nlevels, hw, sizeof hw);
+        if (k && why && n) snprintf(why, n, "%s", hw);
+        return k;
+    }
     if (!c->target_pm) return NVN_DRS_NONE;
     int bpm = (int)(busy * 1000 + 0.5);
     if (pclk > c->clk_max) c->clk_max = pclk;
@@ -214,7 +264,12 @@ static inline int nvn_drs_gpu_window(nvn_drs_gpu *c, uint64_t now, double busy, 
 static inline size_t nvn_drs_gpu_summary(nvn_drs_gpu *c, char *out, size_t n) {
     if (!n) return 0;
     size_t o;
-    if (!c->target_pm) o = (size_t)snprintf(out, n, "GPU headroom off (DM_DRS_GPU_TARGET=0)");
+    if (c->s_held && c->s_win) {   // the lowest-resolution hold for some of the window
+        o = (size_t)snprintf(out, n, "GPU headroom %s at the lowest level (DM_DRS_LOWEST, Battery Saver) for %u of %u windows: floor %d (%u–%u), GPU load mean %.0f%% max %.0f%%",
+                             c->held ? "held" : "was held", c->s_held, c->s_win, c->floor, c->s_floor_lo, c->s_floor_hi, 100 * c->s_busy_sum / c->s_win, 100 * c->s_busy_max);
+        if (o < n && c->s_clk_min < 1e8) o += (size_t)snprintf(out + o, n - o, ", performance cores down to %.2f GHz", c->s_clk_min);
+    }
+    else if (!c->target_pm) o = (size_t)snprintf(out, n, "GPU headroom off (DM_DRS_GPU_TARGET=0)");
     else if (!c->s_win) o = (size_t)snprintf(out, n, "GPU headroom (target %d%%): floor %d, no window measured", c->target_pm / 10, c->floor);
     else {
         o = (size_t)snprintf(out, n, "GPU headroom (target %d%%): floor %d (%u–%u), GPU load mean %.0f%% max %.0f%%", c->target_pm / 10, c->floor, c->s_floor_lo, c->s_floor_hi,
@@ -224,6 +279,6 @@ static inline size_t nvn_drs_gpu_summary(nvn_drs_gpu *c, char *out, size_t n) {
         if (o < n && c->s_room) o += (size_t)snprintf(out + o, n - o, "; %u windows over the target left alone with the GPU clock low and the frames on time", c->s_room);
         if (o < n && c->last_why[0]) o += (size_t)snprintf(out + o, n - o, "; last: %s", c->last_why);
     }
-    c->s_win = c->s_room = c->s_down_busy = c->s_down_clock = c->s_up = c->s_undo = 0; c->s_floor_lo = ~0u; c->s_floor_hi = 0; c->s_busy_sum = c->s_busy_max = 0; c->s_clk_min = 1e9;
+    c->s_win = c->s_room = c->s_down_busy = c->s_down_clock = c->s_up = c->s_undo = c->s_held = 0; c->s_floor_lo = ~0u; c->s_floor_hi = 0; c->s_busy_sum = c->s_busy_max = 0; c->s_clk_min = 1e9;
     return o < n ? o : n - 1;
 }

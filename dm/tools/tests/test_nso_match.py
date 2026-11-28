@@ -24,7 +24,7 @@ from unittest.mock import patch
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
 from nso_asm import ADRP, ADDI, B, NOP
-from nso_match import Image, MatchError, resolve, resolve_gates, validate, validate_gates
+from nso_match import Image, MatchError, resolve, resolve_gates, survey, validate, validate_gates, validate_survey
 
 MOV = 0xaa1703e0  # mov x0, x23
 ADD = 0x914012e0  # add x0, x23, #0x4000
@@ -399,6 +399,57 @@ class Matching(unittest.TestCase):
                 with patch.dict(os.environ, DM_GAME=gid): exec(code, ns)
             self.assertIn("function patch 'heap' skipped", printed.getvalue())
             self.assertNotIn('[RED]', printed.getvalue())
+
+
+class Survey(unittest.TestCase):
+    """A read-only survey (patch_nso.py MATCH_SURVEY): the complete functions holding every pattern, any register where the mask leaves it free, with their fingerprints,
+    shortest first; a word outside any function, or one pattern missing, names nothing; nothing is written. After a profile rule misses, the rewriter runs the profile's surveys"""
+    SIXTY = (0xd2c001e0, 0xffffffe0, 'mov xN,#0xf00000000')
+    KEEP = (0xf2c00020, 0xffffffe0, 'movk xN,#0x1,lsl#32')
+
+    def setUp(self):
+        self.img = image({0x100: [0xd2c001e0, RET], 0x200: [NOP, 0xd2c001e9, 0xf2c00028, RET], 0x300: [0xf2c00028, RET], 0x500: [NOP, RET]})
+        struct.pack_into('<I', self.img, 0x480, 0xd2c001e0)   # outside every function
+
+    def test_functions_holding_every_pattern(self):
+        before, said = bytes(self.img), []
+        (name, rows), = survey(self.img, 0x2000, [{'name': 'region', 'all': [self.SIXTY]}], said.append)
+        self.assertEqual(bytes(self.img), before)
+        module = Image(before, 0x2000)
+        self.assertEqual(rows, [(0x100, 8, module.fingerprint(0x100), {self.SIXTY[2]: [0]}), (0x200, 16, module.fingerprint(0x200), {self.SIXTY[2]: [4]})])
+        self.assertIn("function survey 'region': 2 functions hold mov xN,#0xf00000000, the 2 shortest: +0x100 (8 bytes, fingerprint " + module.fingerprint(0x100), said[0])
+        (_, rows), = survey(self.img, 0x2000, [{'name': 'arena', 'all': [self.SIXTY, self.KEEP], 'show': [(NOP, 0xffffffff, 'nop')]}], said.append)
+        self.assertEqual([(r[0], r[3]) for r in rows], [(0x200, {self.SIXTY[2]: [4], self.KEEP[2]: [8], 'nop': [0]})])
+        (_, rows), = survey(self.img, 0x2000, [{'name': 'one', 'all': [self.SIXTY], 'most': 1}], said.append)
+        self.assertEqual([r[0] for r in rows], [0x100])
+        (_, rows), = survey(self.img, 0x2000, [{'name': 'none', 'all': [(0xd2c00060, 0xffffffff, 'mov x0,#0x300000000')]}], said.append)
+        self.assertEqual(rows, []); self.assertEqual(said[-1], "function survey 'none': 0 functions hold mov x0,#0x300000000")
+
+    def test_malformed_surveys_are_rejected(self):
+        for bad in ({'name': 'x'}, {'all': [self.SIXTY]}, {'name': 'x', 'all': [(0xd2c001e1, 0xffffffe0, 'off the mask')]}, {'name': 'x', 'all': [(0, 0xffff0000, 'too free')]},
+                    {'name': 'x', 'all': [self.SIXTY], 'most': 0}, {'name': 'x', 'all': [self.SIXTY], 'other': 1}, {'name': 'x', 'all': [(0xd2c001e0, 0xffffffe0, '')]}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError): validate_survey(bad)
+
+    def test_rewriter_surveys_after_a_profile_rule_misses(self):
+        source = TOOLS / 'patch_nso.py'; tree = ast.parse(source.read_text())
+        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'SHARED')
+        end = next(i for i, n in enumerate(tree.body[start:], start) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'KEYS')
+        code = compile(ast.Module(body=tree.body[start:end], type_ignores=[]), str(source), 'exec')
+        original = image({0x100: caller(0x100, 0x500), 0x500: [0xd2800020, RET]})
+        rule = Image(original, 0x2000).recipe(0x108, 'e00317aa', 'e0124091', 'heap')
+        gid = '0100000000000001'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / 'tools').mkdir(); (root / 'tools/sdk_patches.py').write_text(''); (root / 'tools/engine_patches.py').write_text('')
+            g = root / 'games' / gid; g.mkdir(parents=True)
+            (g / 'patches.py').write_text(f'MATCH_CUTS = {{"main": [{rule!r}]}}\nMATCH_SURVEY = {{"main": [{{"name": "region", "all": [{self.SIXTY!r}]}}]}}\n')
+            for img, surveyed in ((bytearray(original), False), (bytearray(self.img), True)):
+                with self.subTest(surveyed=surveyed):
+                    printed = io.StringIO()
+                    ns = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib,
+                              MOD=SimpleNamespace(build_id=bytes(16)), IMG=img, TEXT_END=0x2000, NAME='main', outdir=str(root / 'out'))
+                    with contextlib.redirect_stdout(printed), patch.dict(os.environ, DM_GAME=gid): exec(code, ns)
+                    self.assertEqual("function survey 'region': 2 functions hold" in printed.getvalue(), surveyed, printed.getvalue())
+                    self.assertEqual("[RED] function patch 'heap' skipped" in printed.getvalue(), surveyed)
 
 
 class RegionGates(unittest.TestCase):

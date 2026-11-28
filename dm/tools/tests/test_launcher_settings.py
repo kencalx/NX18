@@ -507,14 +507,39 @@ class LauncherSettingsTests(unittest.TestCase):
                 return settings.build(gid, tmp, Path(tmp) / 'control.nacp')
         bz = listed('040074A01BF12000')
         self.assertIn('battery', bz['presets'])
-        self.assertEqual(bz['preset_env'], {'battery': {'DM_FPS_CTL': 'hold30'}, 'quality': {'DM_NVN_PASS_ALT': '0', 'DM_NVN_CUBE_ALT': '0', 'DM_NVN_UP_BILINEAR': '0', 'DM_DRS_GPU_SCALE': '0'}})   # Battery Saver holds 30; Quality draws the visibility view and the environment cube every frame (no stale-depth keep) and its upscaler by MetalFX (no bilinear stretch)
+        self.assertEqual(bz['preset_env'], {'battery': {'DM_FPS_CTL': 'hold30', 'DM_DRS_LOWEST': '1'}, 'quality': {'DM_NVN_PASS_ALT': '0', 'DM_NVN_CUBE_ALT': '0', 'DM_NVN_UP_BILINEAR': '0', 'DM_DRS_GPU_SCALE': '0'}})   # Battery Saver holds 30; Quality draws the visibility view and the environment cube every frame (no stale-depth keep) and its upscaler by MetalFX (no bilinear stretch)
         for sw in ('DM_NVN_UP_BILINEAR', 'DM_NVN_CUBE_ALT'): self.assertNotIn(sw, {r['env'] for r in bz['settings']})   # no new row: the profile key turns it on, the Quality preset off
-        self.assertEqual([e for e in bz['moves']['battery'] if not any(r['env'] == e for r in bz['settings'])], ['DM_FPS_CTL'])   # it moves only that switch beside the rows
-        self.assertNotIn('DM_FPS_CTL', {r['env'] for r in bz['settings']})   # no new row
-        self.assertNotIn('DM_FPS_CTL', bz['moves'].get('quality', []))
+        self.assertEqual(sorted(e for e in bz['moves']['battery'] if not any(r['env'] == e for r in bz['settings'])), ['DM_DRS_LOWEST', 'DM_FPS_CTL'])   # it moves only those switches beside the rows
+        for sw in ('DM_FPS_CTL', 'DM_DRS_LOWEST'):
+            self.assertNotIn(sw, {r['env'] for r in bz['settings']})   # no new row
+            self.assertNotIn(sw, bz['moves'].get('quality', []))
         self.assertEqual(conforms(bz, schema, schema), [])
+        self.assertNotIn('balanced', bz['preset_env'])   # Balanced is the tested defaults: the headroom rules, no hold
         self.assertNotIn('preset_env', listed(WONDER))   # a game without it: the list as before
         self.assertNotIn('preset_env', listed(BOTW))   # Breath of the Wild: GPU headroom off (2026-11-23), so no Quality line either
+
+    def test_battery_saver_holds_the_lowest_resolution(self):   # open list item 7: Battery Saver = 30 fps + the lowest resolution (nvn_drs_gpu.h hold, DM_DRS_LOWEST=1)
+        schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
+        def listed(gid, fixups=()):
+            with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn'}):
+                os.environ.pop('SETTINGS_PLATFORM', None)
+                (Path(tmp) / 'main.fixups.tsv').write_text(''.join(f'# {k}\t1\n' for k in fixups))
+                return settings.build(gid, tmp, Path(tmp) / 'control.nacp')
+        oot = listed('0400486024DEC000', ('DYNAMIC_RESOLUTION',))
+        self.assertEqual(oot['preset_env'], {'battery': {'DM_DRS_LOWEST': '1'}, 'quality': {'DM_NVN_CUBE_ALT': '0'}})   # Battery Saver holds the lowest level; Quality as before
+        self.assertIn('battery', oot['presets'])
+        self.assertIn('DM_DRS_LOWEST', oot['moves']['battery'])
+        for p in ('quality', 'performance', 'balanced'): self.assertNotIn('DM_DRS_LOWEST', oot['moves'].get(p, []))
+        self.assertNotIn('DM_DRS_LOWEST', {r['env'] for r in oot['settings']})   # no new row (few settings)
+        dr = next(r for r in oot['settings'] if r['env'] == 'DM_DYNAMIC_RESOLUTION')   # the hold needs the game's dynamic resolution, which Battery Saver keeps on
+        self.assertEqual((dr['default'], dr['preset']['battery']), ('1', '1'))
+        self.assertEqual(conforms(oot, schema, schema), [])
+        bz = listed('040074A01BF12000')
+        self.assertEqual(bz['preset_env']['battery'].get('DM_DRS_LOWEST'), '1')
+        self.assertEqual(bz['preset_env']['quality'].get('DM_DRS_GPU_SCALE'), '0')   # Quality: the controller off, so no hold either
+        # negative controls: games without the line give no hold; a profile may not ask the hold off (only 1), nor give it to another preset's value set
+        for gid in (WONDER, BOTW): self.assertNotIn('DM_DRS_LOWEST', str(listed(gid).get('preset_env', {})))
+        self.assertEqual(settings.PRESET_ENV['DM_DRS_LOWEST'], {'1'})
 
     def test_render_base_goes_into_the_render_scale_row(self):
         schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))

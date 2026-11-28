@@ -737,7 +737,7 @@ class GhostTable(unittest.TestCase):   # nvn_mtl.m's finalized-texture table: it
         line = re.search(r'MLOG\("(finalized-texture table up to frame %llu [^"]*)"', src); start = re.search(r'MLOG\("(finalized-texture table: up to %u [^"]*)"', src)
         self.assertTrue(line and start, 'the finalized-texture table\'s format strings in nvn_mtl.m')
         assert line and start
-        vals = iter(['3600', '64', '64', '0.33', '0.02', '4', '0.12', '0.010', '0.250', '0.07', '32', '56'])
+        vals = iter(['3600', '64', '64', '0.33', '0.02', '4', '0.12', '0.010', '0.250', '0.07', '32', '56', '0.07 sparse mappings changed; 0.00 syncs kept by their notes with sparse mappings unchanged (DM_NVN_SPARSE_EPOCH on)'])
         x = devlog.RX['ghost'].search('[nvn-mtl] ' + re.sub(r'%(?:llu|u|d|s)', lambda _: next(vals), line.group(1)))
         self.assertIsNotNone(x)
         assert x

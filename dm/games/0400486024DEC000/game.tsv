@@ -110,6 +110,12 @@ tex_dirty_upload	on
 # default, on (owner, 2026-11-21: Balanced is 60 fps with dynamic resolution; an iPhone run on 7c56558b1 had the game step down to level 7 in heavy stretches with the GPU
 # still 86% busy, so the levels it takes do lighten the GPU even though the main scene passes are under half of its time)
 preset	performance	DM_DYNAMIC_RESOLUTION=0
+# Battery Saver at the lowest resolution (owner's preset plan: 30 fps, the lowest resolution, the cuts): the GPU headroom floor held at the level stub's lowest level, level 9
+# (0.333 of 2048x1152 in its level list, the main scene passes 854x480: the game's own floor, where its controller sat for minutes on the Mac, and where the iPhone 18 Pro Max
+# run on b8a67e1d7 spent most of its Balanced run at 59.8 fps with no red line: NX18-X2.0 open-optimizations.md), nvn_drs_gpu.h hold, DM_DRS_LOWEST=1. No step is checked for gain there: the scene passes cost about the same at 854x480 and 1440x810
+# (phone, 2026-11-23), but at 30 fps the gain sought is the GPU work and clock, not frames. Balanced keeps the headroom rules; Quality and Performance hold full size.
+# DM_DRS_LOWEST=0 in env.txt is the A/B's other arm (Battery Saver as before)
+preset	battery	DM_DRS_LOWEST=1
 # The environment cube's mip chain and filters at half rate, as Donkey Kong Bananza's (pass_alternate cube:<colour>, nvn_pass_alt.h; since 2026-11-23 per visit: the game redraws two faces a frame over three frames, docs/reference/rendering.md Cubes spread over several frames): gpuprof on the iPhone (8f17ac43, heavy frames) put the RG11B10Float cube chain (64x64 down to 4x4, six faces) at ~1.0 ms of a 16.4 ms GPU frame. Reflections and the cube's ambient light follow the scene a frame later on alternate frames. A picture trade for Balanced and Battery Saver (owner, 2026-11-20); Quality draws it every frame (DM_NVN_CUBE_ALT=0). NX18-X2.0 open-optimizations.md
 pass_alternate	cube:92
 preset	quality	DM_NVN_CUBE_ALT=0

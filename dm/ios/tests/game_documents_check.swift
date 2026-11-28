@@ -65,6 +65,14 @@ import Foundation
         expect(GameDocuments.step(from: docs[2].id, by: 1, in: docs)?.id == docs[3].id && GameDocuments.step(from: docs[0].id, by: 1, in: manualOnly) == nil, "the next one; none with one document")
         expect(!notes.joined().contains(root.path), "no paths in the notes")
 
+        // A text or Markdown file's paragraphs (GameDocText): blank lines split them; in Markdown a heading line ends its block, so its text on the next line stays a paragraph
+        let md = "# Walkthrough\nThe first area.\nStill the first.\n\n## Boss\r\nUse fire.\n  \n```\n# not a heading\n```\n#hashtag line\n### End ###"
+        let b = GameDocuments.blocks(md, markdown: true)
+        expect(b == ["# Walkthrough", "The first area.\nStill the first.", "## Boss", "Use fire.", "```\n# not a heading\n```\n#hashtag line", "### End ###"], "Markdown blocks: \(b)")
+        expect(GameDocuments.blocks(md, markdown: false).first == "# Walkthrough\nThe first area.\nStill the first.", "plain text splits at blank lines only")
+        expect(GameDocuments.heading("## Boss")! == (2, "Boss") && GameDocuments.heading("### End ###")! == (3, "End") && GameDocuments.heading("#")! == (1, ""), "heading levels and text")
+        expect(GameDocuments.heading("#hashtag") == nil && GameDocuments.heading("    # code") == nil && GameDocuments.heading("####### seven") == nil, "not headings")
+
         #if os(macOS)
         let support = root.appendingPathComponent("support")
         expect(GameDocuments.macNX18Folder(support: support) == nil, "the Mac: no folder connected")

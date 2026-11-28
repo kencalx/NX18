@@ -60,6 +60,12 @@ gpu_time_scale	0.6144
 # Battery Saver holds the game's own frame-rate controller at 30 fps for good (hle_fctl.c DM_FPS_CTL=hold30): no probes back to 60, and its counter reports read their true
 # times (gpu_time_scale off), so its dynamic resolution has the whole 33 ms. Balanced and Quality keep the host's rule and the scale (settings.py PRESET_ENV)
 preset	battery	DM_FPS_CTL=hold30
+# Battery Saver at the lowest resolution (owner's preset plan: 30 fps, the lowest resolution, the cuts): the GPU headroom floor held at its lowest level, 0.5 of the picture's
+# side (nvn_drs_gpu.h hold, DM_DRS_LOWEST=1), the render scale's own floor: the GPU time its dynamic resolution reads x4, so at 30 fps with true times it reads about 40 ms for
+# 10 ms and takes its own lowest step (1152x648 with its upscaler, its floor in the heavy areas). The notes give no phone number under 0.6 (the headroom floor reached 0.6 on
+# c2bfbce88 with no red line), so this is the game's own lowest step, not a measured one. Balanced keeps the headroom rules; Quality has the controller off.
+# DM_DRS_LOWEST=0 in env.txt is the A/B's other arm (Battery Saver as before: the rules at 30)
+preset	battery	DM_DRS_LOWEST=1
 # Its 128x128 view (RG11B10Float colour + Depth32Float, up to 1,700 draws; 1.35 ms a frame at the lower GPU clock) is drawn every other frame, keeping the previous frame's picture in between (nvn_pass_alt.h; the owner's Balanced and Battery Saver trade, the Quality preset turns it off: NX18-X2.0 gpu-clock-collapse.md)
 # On as a picture trade (owner, 2026-11-18: a little pop-in is fine on the phone's screen). The view is the game's visibility test (every draw counts an occlusion query, none is
 # dropped): in a kept frame its depth is loaded, not cleared, so its queries test this frame's objects against last frame's depth too and the game judges more of them hidden.

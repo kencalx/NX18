@@ -26,7 +26,7 @@ int main(void) { @autoreleasepool {
     CHECK(tex_mtl(&a) == old && tex_mtl(&b) == old && tex_mtl(&ghost) == old, "IMAGE usage does not split storage across existing descriptors");
     // Exercise replacement at the hash table's growth threshold: reinserting while iterating would resize and reshuffle it.
     uint64_t extra = 99400;
-    while ((g_by_serial.n + 1) * 4 <= g_by_serial.cap * 3) { hm_put_id(&g_by_serial, &extra, old); extra++; }
+    while ((g_by_serial.n + 1) * 2 <= g_by_serial.cap) { hm_put_id(&g_by_serial, &extra, old); extra++; }   // nvn_hm_put grows past half full (17cda6fa0): stop where the next new key would grow it
     uint32_t capacity = g_by_serial.cap, count = g_by_serial.n;
     id<MTLTexture> upgraded = tex_upgrade_pfv(&a, old, MTLPixelFormatR32Uint);
     CHECK(upgraded && upgraded != old, "usage upgrade creates a replacement");

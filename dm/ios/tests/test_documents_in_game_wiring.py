@@ -86,6 +86,22 @@ class DocumentsInGameWiring(unittest.TestCase):
         for line in re.findall(r'fputs\((.*)\)', self.viewer + block(self.panel, 'func openDocument(')):
             self.assertNotRegex(line, r'\\\((url|u|d\.title|d\.url|open\.doc\.title|.*\.path)', line)
 
+    def test_player_page_end_logs_no_path(self):
+        files = read('dm/ios/Sources/LauncherGuideFiles.swift')
+        nav = files[files.index('static func navigation('):files.index('let root: URL')]
+        self.assertIn('quiet ? "launcher: the page ended\\n"', nav, 'a page of the player\'s: the localhost link\'s path is not logged')
+        self.assertIn('LauncherGuideFiles.navigation(action.request.url, quiet: files.quiet)', self.viewer)
+        self.assertIn('model: nil, quiet: true', self.viewer, 'the player\'s pages are quiet, the guide is not')
+
+    def test_uimenu_refreshes_when_the_listing_returns(self):
+        menu = read('dm/ios/Sources/GameMenu.swift')
+        self.assertIn('void *dm_game_menu(void *button);', read('dm/ios/Sources/DmGameMenu.h'))
+        self.assertIn('dm_game_menu((__bridge void *)_menu)', read('dm/ios/Sources/DmGamepad.m'))
+        self.assertIn('GameDocumentsStore.shared.menuChanged = refreshVisibleSystemMenu', menu)
+        self.assertIn('updateVisibleMenu { m in m.identifier == systemMenuRoot ? m.replacingChildren(gameMenuItems()) : m }', menu, 'only the top level is rebuilt')
+        store = block(self.viewer, 'final class GameDocumentsStore {')
+        self.assertLess(store.index('self.changed?()'), store.index('self.menuChanged?()'))
+
     def test_mac_host_builds_it(self):
         make = read('dm/host/Makefile')
         files = re.search(r'MENU_SWIFT = (.*?)\nMENU_H', make, re.S).group(1)

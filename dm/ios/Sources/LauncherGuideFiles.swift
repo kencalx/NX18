@@ -314,9 +314,10 @@ import WebKit
         return url.host?.trimmingCharacters(in: .whitespaces).lowercased() == "localhost"
     }
     enum Navigation: Equatable { case allow, refuse, end }
-    // What the viewer does with a navigation: the guide's own pages load, the end closes the viewer, anything else is refused
-    static func navigation(_ url: URL?) -> Navigation {
-        if isEnd(url) { fputs("launcher: the guide ended (\(url?.path ?? "/"))\n", stderr); return .end }
+    // What the viewer does with a navigation: the guide's own pages load, the end closes the viewer, anything else is refused. quiet: a page of the player's own, whose
+    // localhost link may carry a file or place name in its path: the end is logged without it
+    static func navigation(_ url: URL?, quiet: Bool = false) -> Navigation {
+        if isEnd(url) { fputs(quiet ? "launcher: the page ended\n" : "launcher: the guide ended (\(url?.path ?? "/"))\n", stderr); return .end }
         return allows(url) ? .allow : .refuse
     }
     let root: URL

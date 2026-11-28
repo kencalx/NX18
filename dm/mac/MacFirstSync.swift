@@ -34,6 +34,7 @@ protocol FirstSyncCloud: AnyObject, Sendable {
     func startDownload(_ url: URL)              // the file's own URL, also for a placeholder
     func coordinatedRead(_ url: URL, done: @escaping @Sendable (FirstSyncRead) -> Void)   // asynchronous: a download it starts may take longer than the wait
     func online() -> Bool                       // a network path (only asked for a folder in iCloud)
+    func end()                                  // the check has ended: reads still in flight are cancelled, nothing of it runs on
 }
 
 /// The bounds of the wait, in seconds: settle (nothing listed, the folder's own iCloud state current: no save anywhere), list (nothing listed at all), download (a file listed)
@@ -184,6 +185,7 @@ final class FirstSyncCheck: @unchecked Sendable {
     }
     /// With the test's clock: `pause` stands for the bounded wait's step
     func run(now: () -> Double, pause: (Double) -> Void) -> FirstSyncOutcome {
+        defer { cloud.end() }   // however it ends (ready, nothing there, held, cancelled): iCloud's reads still waiting are cancelled
         let start = now()
         read(paths.root)   // iCloud lists the folder (and downloads what a read asks for)
         var asked = false
@@ -208,9 +210,17 @@ final class ICloudLayer: FirstSyncCloud, @unchecked Sendable {
     private let lock = NSLock(), queue = DispatchQueue(label: "nx18.firstsync")
     private var monitor: NWPathMonitor?, path: Bool?
     private let coordinators = OperationQueue()
-    private var held: [NSFileCoordinator] = []   // kept until the layer goes (the check's end): a coordinated read in flight keeps its coordinator
+    private var held: [NSFileCoordinator] = []   // kept until the check's end (end()): a coordinated read in flight keeps its coordinator
 
     deinit { monitor?.cancel() }
+
+    /// The check's end: every coordinated read still waiting on iCloud is cancelled (its accessor gets a cancel error, which the check, ended, no longer reads) and the
+    /// network watch stops, so nothing of the check runs on into the game
+    func end() {
+        lock.lock(); let readers = held, m = monitor; held = []; monitor = nil; lock.unlock()
+        for fc in readers { fc.cancel() }
+        m?.cancel()
+    }
 
     func names(in dir: URL) -> [String]? {
         var isDir: ObjCBool = false

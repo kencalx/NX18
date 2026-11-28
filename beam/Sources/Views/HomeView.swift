@@ -298,8 +298,13 @@ struct HomeBackdrop: View {
     @Environment(\.colorSchemeContrast) private var contrast
 
     static func art(for g: LibraryGame) -> NSImage? {
+        packedArt(for: g) ?? g.identity.flatMap { NXPlayPicture.image(.banner, titleID: $0.titleId) }
+    }
+    /// The key art the next build packs: the player's pick, else the one the last build used. Not NX Play's cached banner, which the build may not use: Adjust Framing
+    /// frames only this, so the framing is made on the picture the game will show
+    static func packedArt(for g: LibraryGame) -> NSImage? {
         for case let p? in [g.art?.path, g.builtArt] { if let i = NSImage(contentsOfFile: p) { return i } }
-        return g.identity.flatMap { NXPlayPicture.image(.banner, titleID: $0.titleId) }
+        return nil
     }
 
     var body: some View {

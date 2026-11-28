@@ -83,7 +83,8 @@ struct GameDocumentPlaces: Sendable {
     private(set) var listed = false
     private var task: Task<Void, Never>?
     private var last: ContinuousClock.Instant?
-    var changed: (() -> Void)?
+    var changed: (() -> Void)?       // the panel's refresh (GameMenuPanel.swift)
+    var menuChanged: (() -> Void)?   // DM_GAME_MENU=system: the open UIMenu's (GameMenu.swift refreshVisibleSystemMenu)
 
     func refresh() {
         if task != nil { return }
@@ -101,6 +102,7 @@ struct GameDocumentPlaces: Sendable {
             self.docs = found
             fputs(GameDocuments.summary(found) + "\n", stderr)
             self.changed?()
+            self.menuChanged?()
         }
     }
 }
@@ -478,12 +480,11 @@ struct GameDocText: View {
     @State private var height: CGFloat = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    nonisolated static func read(_ url: URL) -> [String]? {
+    nonisolated static func read(_ url: URL, markdown: Bool) -> [String]? {
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
         let cut = data.prefix(4 << 20)
         let text = String(data: cut, encoding: .utf8) ?? String(decoding: cut, as: UTF8.self)
-        return text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n\n")
-            .map { $0.trimmingCharacters(in: .newlines) }.filter { !$0.isEmpty }
+        return GameDocuments.blocks(text, markdown: markdown)   // a heading line ends its block (GameDocuments.blocks)
     }
     private var markdown: Bool { ["md", "markdown"].contains(url.pathExtension.lowercased()) }
 
@@ -501,8 +502,8 @@ struct GameDocText: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
         .overlay { if blocks == nil { ProgressView().tint(MenuColor.line) } }
         .task {
-            let u = url
-            blocks = await Task.detached(priority: .userInitiated) { Self.read(u) }.value ?? ["This file cannot be read."]
+            let u = url, md = markdown
+            blocks = await Task.detached(priority: .userInitiated) { Self.read(u, markdown: md) }.value ?? ["This file cannot be read."]
         }
         .onAppear {
             control.move = { dx, dy in scroll(dy != 0 ? dy * 120 : dx * Swift.max(height - 60, 60)) }
@@ -518,9 +519,9 @@ struct GameDocText: View {
     }
 
     @ViewBuilder private func paragraph(_ b: String) -> some View {
-        if markdown, b.hasPrefix("#") {
-            let level = b.prefix { $0 == "#" }.count
-            Text(b.dropFirst(level).trimmingCharacters(in: .whitespaces))
+        if markdown, !b.contains("\n"), let h = GameDocuments.heading(Substring(b)) {
+            let level = h.level
+            Text(h.text)
                 .nxFont(size: size * (level <= 1 ? 1.45 : level == 2 ? 1.25 : 1.1), weight: .bold).foregroundStyle(MenuColor.text)
                 .accessibilityAddTraits(.isHeader)
         } else if markdown, let a = try? AttributedString(markdown: b, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
@@ -580,7 +581,7 @@ struct GameDocText: View {
         close()   // nx.endApplet, window.close
     }
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
-        switch LauncherGuideFiles.navigation(action.request.url) {
+        switch LauncherGuideFiles.navigation(action.request.url, quiet: files.quiet) {   // a page of the player's: its end logged without the link's path
         case .allow: return .allow
         case .refuse: return .cancel
         case .end: close(); return .cancel

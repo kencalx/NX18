@@ -284,7 +284,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         __weak DmGamepad *weakSelf = self;
         if (_systemMenu) {   // the UIMenu, which UIKit opens from the button and closes itself
             LOG("front end: in-game menu: the system's menu (DM_GAME_MENU=system)");
-            _menu.menu = CFBridgingRelease(dm_game_menu()); _menu.showsMenuAsPrimaryAction = YES;
+            _menu.menu = CFBridgingRelease(dm_game_menu((__bridge void *)_menu)); _menu.showsMenuAsPrimaryAction = YES;
             [_menu addAction:[UIAction actionWithHandler:^(UIAction *a) { (void)a; [weakSelf menuOpened]; [weakSelf reset]; }] forControlEvents:UIControlEventMenuActionTriggered];   // the menu opens: release every key and touch first
         } else {
             if (gm && *gm) LOG("[RED] front end: DM_GAME_MENU=%s: only system is known; NX 18's menu", gm);

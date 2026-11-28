@@ -756,13 +756,47 @@ static void guest_caller(const uint64_t *r, char *buf, size_t n, uint64_t *via) 
     if (m) snprintf(buf, n, "%s+%#llx", m->name, (unsigned long long)(lr - (uint64_t)(uintptr_t)m->base));
     else snprintf(buf, n, "%#llx", (unsigned long long)lr);
 }
+// A request the alias region cannot hold: a [RED] line when it is asked (more than the alias region has free in all, past the SDK's node area: no hole can fit it), and one when a
+// request got no address (the next request on its thread came, or the game crashed, before its address was stored). A game that does not check gets a null region and writes to
+// it later, far from the cause: Xenoblade Chronicles X Switch 2 Edition's 60 GB reservation in a 4.375 GB alias region ended in a memset to null in nninitStartup. At most 8 of each
+#define RGN_NODE_AREA 0x3e00000ull   // the SDK's node area with the SDK-wide cut (sdk_patches.py), at the start of the alias region
+static _Atomic int g_rgn_refused, g_rgn_unanswered;
+static struct { _Atomic uint64_t size; _Atomic uintptr_t thread; char who[40]; } g_rgn_open;   // the last request not yet given an address (size 0: none); read by the crash handler
+// What the alias region has free in all: its size less the node area and every live region (holes included, so a request above it cannot fit anywhere)
+static uint64_t alias_free_total(void) {
+    uint64_t used = RGN_NODE_AREA;
+    pthread_mutex_lock(&g_rgn_lock);
+    for (int i = 0; i < g_nrgn; i++) used += g_rgn[i].size;
+    pthread_mutex_unlock(&g_rgn_lock);
+    return g_alias_cap > used ? g_alias_cap - used : 0;
+}
+static void region_unanswered(uint64_t size, const char *who, const char *when) {
+    if (atomic_fetch_add(&g_rgn_unanswered, 1) < 8)
+        LOG("[RED] [mem] address region of %.3f GB asked, returning to %s, got no address (%s): the SDK refused it; a game that does not check it uses a null region",
+            size / 1073741824.0, who, when);
+}
 static void region_ask(uint64_t *r, int param) {
     (void)param;
+    mem_init();
+    uintptr_t me = (uintptr_t)pthread_self();
+    uint64_t open = atomic_load(&g_rgn_open.size);
+    if (open && atomic_load(&g_rgn_open.thread) == me) region_unanswered(open, g_rgn_open.who, "the next request on its thread came first");
     t_rgn_size = r[2]; guest_caller(r, t_rgn_who, sizeof t_rgn_who, &t_rgn_via);
+    atomic_store(&g_rgn_open.size, 0); memcpy(g_rgn_open.who, t_rgn_who, sizeof t_rgn_who); atomic_store(&g_rgn_open.thread, me); atomic_store(&g_rgn_open.size, t_rgn_size);
+    uint64_t room = alias_free_total();
+    if (t_rgn_size > room && atomic_fetch_add(&g_rgn_refused, 1) < 8)
+        LOG("[RED] [mem] address region of %.3f GB asked, returning to %s: the alias region (%.3f GB, profile mem_alias on an iPhone; a Switch's is 64 GB) has %.3f GB free in all, so it cannot hold it",
+            t_rgn_size / 1073741824.0, t_rgn_who, g_alias_cap / 1073741824.0, room / 1073741824.0);
+}
+// For the crash handler (crash.c): the request the crash may come from. Only atomics and fprintf
+void dm_region_crash_note(FILE *f) {
+    uint64_t open = atomic_load(&g_rgn_open.size);
+    if (open) fprintf(f, "[dm] [RED] [mem] the last address region asked, %.3f GB returning to %.40s, got no address before the crash\n", open / 1073741824.0, g_rgn_open.who);
 }
 static void region_got(uint64_t *r, int param) {
     mem_init();
     uint64_t a = param >= 0 && param < 31 ? r[param] : 0, ab = (uint64_t)(uintptr_t)g_alias;
+    if (a && atomic_load(&g_rgn_open.thread) == (uintptr_t)pthread_self()) atomic_store(&g_rgn_open.size, 0);   // answered (a null stored through the out pointer is no address)
     if (a < ab || a - ab >= g_alias_cap) return;
     pthread_mutex_lock(&g_rgn_lock);
     if (g_nrgn == g_rgn_cap) {

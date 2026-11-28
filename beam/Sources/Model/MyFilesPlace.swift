@@ -3,8 +3,8 @@
 //   · on, with an NX 18 folder connected: <NX 18 folder>/<TITLE ID>/Documents (GameDocuments.folderName), beside the game's Captures, so the game apps on every device that
 //     connected the folder list them in the game (GameDocuments.swift), and so does Beam on another Mac
 // settle() brings the files to where the switch says, for every game or one, and is safe to run again at any time:
-//   · on: every file in Beam's folder for a game moves into the NX 18 folder's, and Beam notes its name (the ledger: My Files/.in-nx18-folder.json, per title ID)
-//   · off: only the files the ledger names move back. The rest of <TITLE ID>/Documents is not Beam's to take: another Mac's Beam put it there, or the player did in the Files app,
+//   · on: every file in Beam's folder for a game moves into the NX 18 folder's, and Beam notes its name (the ledger: My Files/.in-nx18-folders.json, per folder and title ID)
+//   · off: only the files the ledger names move back, from the connected folder and from any folder connected before it that is still there. The rest of <TITLE ID>/Documents is not Beam's to take: another Mac's Beam put it there, or the player did in the Files app,
 //     and other devices still use it; it stays, and the game page says where to find it. A file still in iCloud (a placeholder) is asked for and waits for the next settle
 // Moves are coordinated (NSFileCoordinator, for moving and replacing) and never overwrite: a name already taken gets " 2" ("map.pdf" → "map 2.pdf", then " 3" and so on).
 // Nothing is ever deleted. A file the ledger names that is gone from the folder (removed or renamed on another device) is dropped from the ledger. Logs give counts only
@@ -32,20 +32,54 @@ enum MyFilesPlace {
         return FileManager.default.fileExists(atPath: nx18.path, isDirectory: &dir) && dir.boolValue
     }
 
-    // ---- the ledger: the names Beam put in the NX 18 folder, per title ID ----
-    static func ledgerURL(library: URL) -> URL { library.appending(path: "My Files/.in-nx18-folder.json") }
+    // ---- the ledger: the names Beam put in an NX 18 folder, per folder and title ID ----
+    /// { NX 18 folder path: { TITLE ID: [names] } }. The folder is part of the key: a player who connects another NX 18 folder while the switch is on still gets the first
+    /// folder's files back when they turn it off (while that folder is still there). Kept in Beam's library on this Mac only; logs never name it
+    typealias Ledger = [String: [String: [String]]]
+    static func ledgerURL(library: URL) -> URL { library.appending(path: "My Files/.in-nx18-folders.json") }
+    /// Beam before the folder key: My Files/.in-nx18-folder.json, title ID → names. Read as the folder connected now (the only one it can have been, short of a change of
+    /// folder it could not tell), and folded into the new ledger at its next write, which removes it
+    static func legacyLedgerURL(library: URL) -> URL { library.appending(path: "My Files/.in-nx18-folder.json") }
+    /// The ledger's key for a folder: its standardized path
+    static func folderKey(_ nx18: URL) -> String { nx18.standardizedFileURL.path }
     /// Every read-change-write of the ledger holds this: a settle (a background task) and Add Files (another) both change it
     private static let ledgerLock = NSLock()
-    static func ledger(library: URL) -> [String: [String]] {
-        (try? JSONDecoder().decode([String: [String]].self, from: Data(contentsOf: ledgerURL(library: library)))) ?? [:]
+    /// The ledger, with an old one's entries under nx18 (nil: left out)
+    static func ledger(library: URL, nx18: URL?) -> Ledger {
+        var l = (try? JSONDecoder().decode(Ledger.self, from: Data(contentsOf: ledgerURL(library: library)))) ?? [:]
+        if let nx18, let old = try? JSONDecoder().decode([String: [String]].self, from: Data(contentsOf: legacyLedgerURL(library: library))) {
+            let k = folderKey(nx18)
+            for (tid, names) in old { for n in names where !(l[k]?[tid] ?? []).contains(n) { l[k, default: [:]][tid, default: []].append(n) } }
+        }
+        return l
     }
-    static func saveLedger(_ l: [String: [String]], library: URL) {
+    /// The names Beam put in one folder, per title ID
+    static func ledger(library: URL, folder nx18: URL) -> [String: [String]] { ledger(library: library, nx18: nx18)[folderKey(nx18)] ?? [:] }
+    static func saveLedger(_ l: Ledger, library: URL) {
         let u = ledgerURL(library: library)
-        let kept = l.filter { !$0.value.isEmpty }
+        try? FileManager.default.removeItem(at: legacyLedgerURL(library: library))   // its entries are in l (ledger(library:nx18:) read them)
+        let kept = l.mapValues { $0.filter { !$0.value.isEmpty } }.filter { !$0.value.isEmpty }
         if kept.isEmpty { try? FileManager.default.removeItem(at: u); return }
         try? FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
         let e = JSONEncoder(); e.outputFormatting = [.prettyPrinted, .sortedKeys]
         try? e.encode(kept).write(to: u, options: .atomic)
+    }
+
+    /// What Send My Files copies from a game's My files: the folder listed under a coordinated read (the NX 18 folder is in iCloud Drive, where another device may be
+    /// writing), its files only (no folders, hidden or partly written ones), and how many are still in iCloud, which are asked for so a later send has them. Blocks: run it
+    /// off the main thread
+    static func toSend(_ dir: URL) -> (files: [URL], inICloud: Int) {
+        let fm = FileManager.default
+        var files: [URL] = [], inICloud = 0, err: NSError?
+        NSFileCoordinator(filePresenter: nil).coordinate(readingItemAt: dir, options: .immediatelyAvailableMetadataOnly, error: &err) { d in
+            for u in (try? fm.contentsOfDirectory(at: d, includingPropertiesForKeys: [.isDirectoryKey])) ?? [] {
+                guard let e = GameDocuments.placeholder(u.lastPathComponent) else { continue }
+                if e.placeholder { inICloud += 1; try? fm.startDownloadingUbiquitousItem(at: d.appending(path: e.name)); continue }
+                if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { continue }
+                files.append(dir.appending(path: e.name))
+            }
+        }
+        return (files.sorted { $0.lastPathComponent < $1.lastPathComponent }, inICloud)
     }
 
     /// The files to settle in a folder: every entry but hidden ones and iCloud placeholders (GameDocuments.placeholder)
@@ -53,6 +87,14 @@ enum MyFilesPlace {
         ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
             .filter { GameDocuments.placeholder($0.lastPathComponent)?.placeholder == false }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    /// What Send My Files tells the player when some files stayed behind (nil: everything went, which the game shows)
+    static func sendNote(sent: Int, inICloud: Int, device: String) -> String? {
+        guard inICloud > 0 else { return nil }
+        let left = inICloud == 1 ? "1 file wasn't sent because it's still in iCloud" : "\(inICloud) files weren't sent because they're still in iCloud"
+        let start = sent == 0 ? "" : "\(sent) file\(sent == 1 ? "" : "s") sent to \(device). "
+        return start + left + ". Beam asked iCloud for \(inICloud == 1 ? "it" : "them"): send again once \(inICloud == 1 ? "it has" : "they have") downloaded."
     }
 
     /// A free name in dir for name: name itself, else "name 2.ext", "name 3.ext"… (a name iCloud holds as a placeholder counts as taken)
@@ -101,17 +143,18 @@ enum MyFilesPlace {
         }
         return done ? name : nil
     }
-    /// Notes a name Beam put in a game's NX 18 Documents (Add Files with the switch on), so turning the switch off brings it back
-    static func noteAdded(_ name: String, titleID: String, library: URL) {
-        changeLedger(library: library) { l in
+    /// Notes a name Beam put in a game's Documents in the NX 18 folder nx18 (Add Files with the switch on), so turning the switch off brings it back
+    static func noteAdded(_ name: String, titleID: String, library: URL, nx18: URL) {
+        let k = folderKey(nx18)
+        changeLedger(library: library, nx18: nx18) { l in
             let tid = titleID.uppercased()
-            if !(l[tid] ?? []).contains(name) { l[tid, default: []].append(name) }
+            if !(l[k]?[tid] ?? []).contains(name) { l[k, default: [:]][tid, default: []].append(name) }
         }
     }
     /// Reads, changes and writes the ledger under its lock, so a change made meanwhile by another task is never written over
-    static func changeLedger(library: URL, _ change: (inout [String: [String]]) -> Void) {
+    static func changeLedger(library: URL, nx18: URL, _ change: (inout Ledger) -> Void) {
         ledgerLock.lock(); defer { ledgerLock.unlock() }
-        var l = ledger(library: library)
+        var l = ledger(library: library, nx18: nx18)
         change(&l)
         saveLedger(l, library: library)
     }
@@ -121,8 +164,9 @@ enum MyFilesPlace {
         var report = Report()
         // no folder connected, or the connected one is gone: nothing moves either way (the files stay where they are until one is there)
         guard let nx18, reachable(nx18) else { return report }
-        let l = ledger(library: library)
-        var added: [String: [String]] = [:], done: [String: Set<String>] = [:]   // what this settle changes, written over the ledger as it is then (Add Files may have noted a name)
+        let l = ledger(library: library, nx18: nx18), here = folderKey(nx18)
+        // what this settle changes, written over the ledger as it is then (Add Files may have noted a name): per folder key, per title ID
+        var added: [String: [String]] = [:], done: [String: [String: Set<String>]] = [:]
         let fm = FileManager.default
         if keepInNX18 {
             let all = ((try? fm.contentsOfDirectory(atPath: library.appending(path: "My Files").path)) ?? []).filter { !$0.hasPrefix(".") }
@@ -134,22 +178,28 @@ enum MyFilesPlace {
                 }
             }
         } else {
-            for (tid, names) in l where titleIDs.map({ $0.map { $0.uppercased() }.contains(tid) }) ?? true {
-                let from = GameDocuments.nx18Folder(titleID: tid, nx18: nx18), to = local(library: library, titleID: tid)
-                for name in names {
-                    let f = from.appending(path: name)
-                    if fm.fileExists(atPath: from.appending(path: ".\(name).icloud").path) {   // still in iCloud: asked for, moved next time
-                        try? fm.startDownloadingUbiquitousItem(at: f); report.waiting += 1; continue
+            // every folder Beam put files in that is still there, the connected one and any connected before it; a folder gone (renamed, removed, signed out) keeps its
+            // entries for when it is back
+            for (key, tids) in l.sorted(by: { $0.key < $1.key }) {
+                let folder = key == here ? nx18 : URL(fileURLWithPath: key, isDirectory: true)
+                guard reachable(folder) else { continue }
+                for (tid, names) in tids where titleIDs.map({ $0.map { $0.uppercased() }.contains(tid) }) ?? true {
+                    let from = GameDocuments.nx18Folder(titleID: tid, nx18: folder), to = local(library: library, titleID: tid)
+                    for name in names {
+                        let f = from.appending(path: name)
+                        if fm.fileExists(atPath: from.appending(path: ".\(name).icloud").path) {   // still in iCloud: asked for, moved next time
+                            try? fm.startDownloadingUbiquitousItem(at: f); report.waiting += 1; continue
+                        }
+                        guard fm.fileExists(atPath: f.path) else { done[key, default: [:]][tid, default: []].insert(name); continue }   // removed or renamed elsewhere: no longer Beam's to bring back
+                        if move(f, into: to) != nil { done[key, default: [:]][tid, default: []].insert(name); report.moved += 1 } else { report.failed += 1 }
                     }
-                    guard fm.fileExists(atPath: f.path) else { done[tid, default: []].insert(name); continue }   // removed or renamed elsewhere: no longer Beam's to bring back
-                    if move(f, into: to) != nil { done[tid, default: []].insert(name); report.moved += 1 } else { report.failed += 1 }
                 }
             }
         }
-        if !added.isEmpty || !done.isEmpty {
-            changeLedger(library: library) { l in
-                for (tid, names) in added { for n in names where !(l[tid] ?? []).contains(n) { l[tid, default: []].append(n) } }
-                for (tid, names) in done { l[tid] = l[tid]?.filter { !names.contains($0) } }
+        if !added.isEmpty || !done.isEmpty || fm.fileExists(atPath: legacyLedgerURL(library: library).path) {
+            changeLedger(library: library, nx18: nx18) { l in
+                for (tid, names) in added { for n in names where !(l[here]?[tid] ?? []).contains(n) { l[here, default: [:]][tid, default: []].append(n) } }
+                for (key, tids) in done { for (tid, names) in tids { if let kept = l[key]?[tid]?.filter({ !names.contains($0) }) { l[key]?[tid] = kept } } }
             }
         }
         if report != Report() { fputs("beam: My files: \(report.moved) moved \(keepInNX18 ? "to" : "from") the NX 18 folder, \(report.waiting) waiting on iCloud, \(report.failed) not moved\n", stderr) }

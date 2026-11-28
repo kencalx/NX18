@@ -51,6 +51,7 @@ static int pending_cond_wait(pthread_cond_t *cv, pthread_mutex_t *mu) {
 @implementation TestFunction
 - (NSString *)name { return @"pending-fake"; }
 - (MTLFunctionType)functionType { return type; }
+- (NSDictionary<NSString *, MTLFunctionConstant *> *)functionConstantsDictionary { return @{}; }   // none: fn4_note asks since 441247175 (a function with constants is noted with its defaults)
 @end
 @interface TestLibrary : NSObject @end
 @implementation TestLibrary

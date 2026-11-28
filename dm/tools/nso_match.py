@@ -513,6 +513,74 @@ def resolve_gates(image, text_end, rules, report=print):
     return rows
 
 
+def validate_survey(entry):
+    """A survey (patch_nso.py MATCH_SURVEY): {name, all: [(word, mask, label), ...][, show: [...]][, most: n]}, the complete unwind functions holding an instruction of every
+    all pattern (word & mask equal), with the offsets of each all and show pattern in them. It changes nothing: a build a rule missed names its candidate functions in the rewrite
+    log (offset, size, fingerprint), what a reviewer needs to enroll a rule for it without the game files at hand. A mask leaves at most 8 bits free"""
+    if set(entry) - {'name', 'all', 'show', 'most'} or not entry.get('name') or not entry.get('all'): raise ValueError('a survey needs name and all, and may have show and most')
+    for word, mask, label in list(entry['all']) + list(entry.get('show', [])):
+        if not (isinstance(word, int) and isinstance(mask, int) and 0 <= word <= 0xffffffff and 0 <= mask <= 0xffffffff and word & ~mask == 0 and label):
+            raise ValueError('a survey pattern is (word, mask, label), the word within the mask')
+        if bin(~mask & 0xffffffff).count('1') > 8: raise ValueError('a survey mask leaves at most 8 bits free')
+    if not isinstance(entry.get('most', 8), int) or not 1 <= entry.get('most', 8) <= 32: raise ValueError('most is 1 to 32')
+
+
+def _word_hits(image, text_end, word, mask):
+    """Word-aligned offsets below text_end of every instruction w with w & mask == word"""
+    free = [b for b in range(32) if not mask >> b & 1]
+    code, out = bytes(image[:min(text_end, len(image)) // 4 * 4]), []
+    for n in range(1 << len(free)):
+        value = word | sum(1 << b for i, b in enumerate(free) if n >> i & 1)
+        needle, at = struct.pack('<I', value), 0
+        while (at := code.find(needle, at)) >= 0:
+            if at % 4 == 0: out.append(at)
+            at += 1
+    return sorted(out)
+
+
+def survey(image, text_end, entries, report=print):
+    """Report, for each survey entry, the complete functions holding every all pattern (see validate_survey); returns [(name, [(start, size, fingerprint or why, {label: [function-relative offsets]})])]"""
+    import bisect
+    if not entries: return []
+    try: module = Image(image, text_end)
+    except MatchError as e:
+        for entry in entries: report(f'function survey {entry["name"]!r}: {e}')
+        return []
+    starts = sorted(module.functions)
+    def owner(off):
+        i = bisect.bisect_right(starts, off) - 1
+        return starts[i] if i >= 0 and off < module.functions[starts[i]] else None
+    results = []
+    for entry in entries:
+        validate_survey(entry)
+        def holding(word, mask, label):
+            fns: dict = {}
+            for off in _word_hits(image, text_end, word, mask):
+                s = owner(off)
+                if s is not None: fns.setdefault(s, {}).setdefault(label, []).append(off - s)
+            return fns
+        first, *rest = entry['all']
+        found = holding(*first)
+        for pattern in rest:
+            fns = holding(*pattern)
+            found = {s: {**found[s], **fns[s]} for s in found if s in fns}
+        for word, mask, label in entry.get('show', []):
+            for off in _word_hits(image, text_end, word, mask):
+                s = owner(off)
+                if s in found: found[s].setdefault(label, []).append(off - s)
+        rows = []
+        for s in sorted(found, key=lambda s: (module.functions[s] - s, s))[:entry.get('most', 8)]:
+            try: fp = module.fingerprint(s)
+            except MatchError as e: fp = f'no fingerprint ({e})'
+            rows.append((s, module.functions[s] - s, fp, found[s]))
+        shown = '; '.join(f'+{s:#x} ({size} bytes, fingerprint {fp}: ' + ', '.join(f'{label} at {"/".join(f"+{o:#x}" for o in offs)}' for label, offs in hits.items()) + ')'
+                          for s, size, fp, hits in rows)
+        report(f'function survey {entry["name"]!r}: {len(found)} functions hold {" and ".join(label for _, _, label in entry["all"])}'
+               + (f', the {len(rows)} shortest: {shown}' if rows else ''))
+        results.append((entry['name'], rows))
+    return results
+
+
 def registered_cuts(build_id, kind='CUTS'):
     """The CUTS (or OBS) the patch files register for a build ID (dm/tools/sdk_patches.py, dm/games/*/patches.py), or None"""
     import glob, os, runpy

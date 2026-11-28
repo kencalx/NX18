@@ -266,6 +266,8 @@ struct LauncherView: View {
         .onChange(of: sheet) {          // a button held as a sheet opens or closes (A held while B closes the guide) is no press on what is under it
             pad.holdUntilReleased()
             if sheet != nil { stopAutoStart("the guide, About this game or Acknowledgements opened") }
+            // a sheet over the framing (a Guide or About shortcut): the pad goes to the sheet, so the framing ends as Cancel ends it, never left half made under it
+            if sheet != nil, framing != nil { endFraming(save: false) }
         }
         .onChange(of: cloudPicking) { pad.holdUntilReleased(); if cloudPicking { stopAutoStart("the cloud-save folder picker opened") } }
         .onChange(of: asking) { pad.holdUntilReleased() }        // the press that answered a save question is no press on the settings
@@ -389,7 +391,11 @@ struct LauncherView: View {
                         FramedArt(image: Image(uiImage: art), natural: art.size, focus: artFocus)
                             .contentShape(Rectangle())
                             .onLongPressGesture(minimumDuration: 0.6) { beginFraming() }   // a long press on the art: the framing mode, as Adjust art on the card
-                            .accessibilityHidden(true)
+                            // VoiceOver's way to the long press: the art is one element with an Adjust art action (the card's row is the other way in)
+                            .accessibilityElement()
+                            .accessibilityLabel("Key art")
+                            .accessibilityAddTraits(.isImage)
+                            .accessibilityAction(named: "Adjust art") { beginFraming() }
                     }
                 }
                 else if let icon = artwork.icon { Image(uiImage: icon).resizable().scaledToFill().blur(radius: 60, opaque: true).opacity(0.55).scaleEffect(1.15).accessibilityHidden(true) }

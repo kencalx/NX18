@@ -48,9 +48,12 @@ class Wiring(unittest.TestCase):
             self.assertIn(f, dm)
 
     def test_the_graceful_exit_tells_it_first(self):   # before the fallback timer and the steps that can take long (file writes, audio, the graphics drain)
-        exit_ = body(read('dm/host/hle_lifecycle.c'), 'void dm_host_shutdown_then(')
+        lifecycle = read('dm/host/hle_lifecycle.c')
+        exit_ = body(lifecycle, 'void dm_host_shutdown_then(')
         at = exit_.index('dm_gfx_exiting();')
-        for later in ('dispatch_after(', 'hlecount_flush();', 'dm_rec_finish();', 'dm_cheats_exit();', 'dm_audio_suspend(1);', 'dm_gfx_suspend(1);', '_exit(0);'):
+        # the process ends in exit_end (the hand-over's continuation, then _exit) since 0c04fafc0 made the exit one routine (its first call, the fallback timer's, is already after the guard is told)
+        self.assertIn('_exit(0);', body(lifecycle, 'static void exit_end('))
+        for later in ('dispatch_after(', 'hlecount_flush();', 'dm_rec_finish();', 'dm_cheats_exit();', 'dm_audio_suspend(1);', 'dm_gfx_suspend(1);', 'exit_end(then, arg);'):
             self.assertLess(at, exit_.index(later), later)
         self.assertLess(exit_.index('atomic_exchange(&once, 1)'), at)   # once
 

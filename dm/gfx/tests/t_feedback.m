@@ -12,6 +12,9 @@ module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
+// How long a case waits for the tile-reading pipelines the background builds (fb_tile_ready, at utility QoS): 1000 sleeps of 10 ms ran out once in about 1,000 runs under the full
+// gate's load (16 compiles beside the test) and the second tile case took a snapshot instead; a minute of wall time, then the check says it
+#define TP_WAIT_NS 60000000000ull
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
 
 static id<MTLTexture> target_format(tex_t *t, uint64_t serial, int format, int levels) {
@@ -409,7 +412,7 @@ static void tile_case(const char *dir) {
     clear(MTLClearColorMake(1, 0, 0, 1));
     fb_prepare(pr);
     CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 1 && g_fb_tile_wait == waits + 1 && g_fb_tseq != g_draw_seq, "while its pipeline builds, the draw takes a snapshot");
-    for (int i = 0; i < 1000; i++) { os_unfair_lock_lock(&g_fb_tp_lock); int done = g_fb_tp_n && g_fb_tp[0].done; os_unfair_lock_unlock(&g_fb_tp_lock); if (done) break; usleep(10000); }
+    for (uint64_t t0 = bp_now(); bp_now() - t0 < TP_WAIT_NS;) { os_unfair_lock_lock(&g_fb_tp_lock); int done = g_fb_tp_n && g_fb_tp[0].done; os_unfair_lock_unlock(&g_fb_tp_lock); if (done) break; usleep(10000); }
     CHECK(g_fb_tp_n == 1 && g_fb_tp[0].done && g_fb_tp[0].ps, "the tile-reading pipeline is built in the background");
     g_fb_bar++;   // a game barrier: a snapshot would have to be taken again
     clear(MTLClearColorMake(1, 0, 0, 1));
@@ -632,7 +635,9 @@ static void fpos_case(const char *dir) {
     float quarter[2] = {0.25f, 0.25f}; mtl_sub_update(quarter, (uint64_t)(mem + 24), 8);
     g_fb_bar++; clear(MTLClearColorMake(1, 0, 0, 1)); fb_prepare(pr);
     CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 2 && g_fb_tile_wait == waits + 1, "the inline update's 1/4 proves it; while the pipeline builds, a snapshot");
-    for (int i = 0; i < 1000; i++) { os_unfair_lock_lock(&g_fb_tp_lock); int done = 1; for (int k = 0; k < g_fb_tp_n; k++) done &= g_fb_tp[k].done; os_unfair_lock_unlock(&g_fb_tp_lock); if (done) break; usleep(10000); }
+    int tp_done = 0;
+    for (uint64_t t0 = bp_now(); !tp_done && bp_now() - t0 < TP_WAIT_NS;) { os_unfair_lock_lock(&g_fb_tp_lock); tp_done = 1; for (int k = 0; k < g_fb_tp_n; k++) tp_done &= g_fb_tp[k].done; os_unfair_lock_unlock(&g_fb_tp_lock); if (!tp_done) usleep(10000); }
+    CHECK(tp_done, "the tile-reading pipelines are built in the background");
     g_fb_bar++;
     clear(MTLClearColorMake(1, 0, 0, 1));
     id first = g_enc;
@@ -747,8 +752,20 @@ static void pool_depth_case(void) {
     CHECK(!g_enc, "and the next draw writing depth ends it, as a tile-based store would show it the write");
     rp_end(); CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "that submission completed");
 }
+// The two cases below move g_done and g_fence by hand. A feedback handler that ran meanwhile read the moved g_done: post_complete raised the fence event to it (fence_ev_raise),
+// one past the last real fence, and kept it there after the restore, so a later case's wait for its next submission woke at once on the event and post_early wrote that
+// submission's reports before the GPU had run it (cut_boundary_case: both reports read the same time; merge_case: its submissions found the GPU idle and were not held).
+// The handler of an earlier submission comes late under load (2 of 4 full gates). So everything submitted runs and reports first, and g_mu is held while the counters are
+// moved: a handler still to come waits at post_complete's lock and reads them restored (all records are claimed by then, so its unlocked look at g_done skips nothing)
+static void fences_hold(void) {
+    rec_drain(); CHECK(mtl_wait(g_fence, 5000000000ull), "the earlier submissions completed");
+    for (int i = 0; i < 50000 && (atomic_load(&g_seg_inflight) || atomic_load(&g_rx_fly)); i++) usleep(100);
+    mu_lock();
+}
+static void fences_release(uint64_t done0, uint64_t fence0) { g_done = done0; g_fence = fence0; pthread_mutex_unlock(&g_mu); CHECK(g_ev.signaledValue <= g_fence, "the fence event is not past the last fence"); }
 // A replaced pool table comes back only once the submission that may read it has completed, and only at its own size; the readback cache makes room with its oldest buffers instead of turning new sizes away
 static void reuse_tables_case(void) {
+    fences_hold();
     uint64_t done0 = g_done, fence0 = g_fence, made0 = g_pool_made, reused0 = g_pool_reused;
     id<MTLBuffer> a = pool_table_take(1000);
     CHECK(a && a.length == 0x10000 && g_pool_made == made0 + 1, "a new table, its size rounded up to 64 KB");
@@ -761,11 +778,12 @@ static void reuse_tables_case(void) {
     id<MTLBuffer> d = pool_table_take(0x10001);
     CHECK(d != a && d.length == 0x20000, "a larger table is its own buffer");
     pool_table_give(b, -1, 0); pool_table_give(c, -1, 0); pool_table_give(d, -1, 0);
-    g_done = done0; g_fence = fence0;
+    fences_release(done0, fence0);
 }
 // The spare tables when full (pool_table_give): 16 kept, the lowest fence going even while it is in flight (X1.0); with replay_spares 64, and when every spare is in flight the table
 // given then goes instead, while a full set with one completed still lets that one go
 static void spare_tables_case(void) {
+    fences_hold();
     uint64_t done0 = g_done, fence0 = g_fence; int saved = g_pool_spares;
     for (int round = 0; round < 2; round++) {
         int cap = round ? POOL_SPARES_MAX : POOL_SPARES; g_pool_spares = cap;
@@ -805,7 +823,7 @@ static void spare_tables_case(void) {
     id<MTLBuffer> t4 = pool_table_take((4u << 20) - 100);
     CHECK(t4 && g_npool_spare == 5 && g_pool_spare_bytes == 20u << 20, "taking one back lowers the spares' bytes");
     while (g_npool_spare) { g_pool_spare[--g_npool_spare].buf = nil; } g_pool_spare_bytes = 0;
-    g_pool_spares = saved; g_done = done0; g_fence = fence0;
+    g_pool_spares = saved; fences_release(done0, fence0);
 }
 // A cut with earlier work still running stays a boundary for the game's timestamps, and commits only when the GPU has run out; a report after it takes that boundary's time.
 // Run with and without the encode thread, so both the direct and the recorded timestamp writes are gated

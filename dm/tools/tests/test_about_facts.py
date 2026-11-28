@@ -62,7 +62,7 @@ class Packers(unittest.TestCase):
         self.assertIn('Gen/dm/facts.json', (REPO / 'dm/ios/tools/build_ipa.sh').read_text())
         pk = (REPO / 'dm/mac/pack_app.py').read_text(); self.assertIn("'--facts'", pk); self.assertIn("dm / 'facts.json'", pk)
         src = (REPO / 'scripts/build_ipa_from_nsp.py').read_text()
-        self.assertIn("('DM_FACTS', facts)", src); self.assertIn('facts=facts)', src)
+        self.assertIn("('DM_FACTS', facts)", src); self.assertIn('facts=facts,', src)
         body = src[src.index('def about_facts'):src.index('def launcher_art')]
         for never in ('urlopen', 'requests', 'http'): self.assertNotIn(never, body, 'nothing is looked up online')
 

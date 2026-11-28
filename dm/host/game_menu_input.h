@@ -47,7 +47,8 @@ static inline uint32_t gm_bits(uint64_t m, int32_t lx, int32_t ly) {
 }
 
 // A key (macOS virtual key code) while the panel is open: the arrows and WASD move, Return, Space and J choose (A), Escape, Delete and K go back or close (B), U is X (Undo, or Back
-// to the preset), Q and E step the preset (L, R) as on the game's key map (front_mac.m key_bit). 0 for any other key
+// to the preset; zoom in, in a document), Q and E step the preset (L, R), and I, Z and C are Y, ZL and ZR, all as on the game's key map (front_mac.m key_bit). In a document,
+// also - zooms out (Y) and [ and ] go to the previous and next one (ZL, ZR): keys the game's key map leaves free. 0 for any other key
 static inline uint32_t gm_key(unsigned short code) {
     switch (code) {
     case 126: case 13: return GM_UP;      // ↑ W
@@ -59,6 +60,9 @@ static inline uint32_t gm_key(unsigned short code) {
     case 32: return GM_X;                 // U
     case 12: return GM_L;                 // Q
     case 14: return GM_R;                 // E
+    case 34: case 27: return GM_Y;        // I, -
+    case 6: case 33: return GM_ZL;        // Z, [
+    case 8: case 30: return GM_ZR;        // C, ]
     }
     return 0;
 }

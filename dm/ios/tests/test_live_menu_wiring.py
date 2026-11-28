@@ -154,6 +154,9 @@ class LiveMenu(unittest.TestCase):
         fctl = read('dm/host/hle_fctl.c')
         self.assertIn('front_env_copy("DM_FPS_CTL", e, sizeof e)', body(fctl, 'static void fctl_mode_poll(uint64_t now) {'))   # under the menu's lock, once a second
         self.assertNotIn('getenv("DM_FPS_CTL")', fctl)
+        nvn = read('dm/gfx/nvn/hle_nvn.c')   # Battery Saver's lowest resolution (DM_DRS_LOWEST=1): read under the menu's lock each 250 ms window, so a preset change applies live
+        self.assertIn('front_env_copy("DM_DRS_LOWEST", e, sizeof e)', body(nvn, 'static int drs_lowest(void) {'))
+        self.assertNotIn('getenv("DM_DRS_LOWEST")', nvn)
 
     def test_a_pick_reaches_the_environment_under_the_lock_the_present_thread_reads_it_under(self):   # setenv rewrites or reallocates a value another thread's getenv points at
         swift = read('dm/ios/Sources/LauncherSettings.swift'); menu = read('dm/ios/Sources/GameMenu.swift')
@@ -182,8 +185,13 @@ class LiveMenu(unittest.TestCase):
         self.assertNotIn('DM_PRESENT_SHARPEN', readers)   # the present thread's copy above alone; the drawable does not follow it, so startGame has no reason to read it
         self.assertNotIn('DM_POST_AA', readers)   # the same for Anti-aliasing
         self.assertEqual(readers, {'DM_PICTURE_FIT': {'front_ios.m'}, 'DM_SHOW_FPS': {'front_ios.m'}, 'DM_TOUCH_HAPTICS': {'DmGamepad.m'}, 'DM_TOUCH_SIZE': {'DmGamepad.m'},
-                                   'DM_TOUCH_OPACITY': {'DmGamepad.m'}, 'DM_RUMBLE': {'haptics_apple.m'}, 'DM_OPMODE': {'hle_oe.c'}})
+                                   'DM_TOUCH_OPACITY': {'DmGamepad.m'}, 'DM_RUMBLE': {'haptics_apple.m'}, 'DM_OPMODE': {'hle_oe.c'}, 'DM_CAPTURE_SYSTEM': {'DmCapture.m'}})
         self.assertIn('if (m < 0) { const char *e = getenv("DM_OPMODE");', read('dm/host/hle_oe.c'))   # once, then kept; the menu's opening asks it first (dm_pad_layout_offered)
+        # Save screenshots to Captures (bcb761db9): read once, on the main thread as startGame makes the game view, before the in-game menu exists, then kept; the menu's pick sets the kept value
+        capture = read('dm/ios/Sources/DmCapture.m')
+        self.assertIn('if (g_follow < 0) { const char *e = getenv("DM_CAPTURE_SYSTEM");', body(capture, 'void dm_capture_follow_system(UIView *over) {'))
+        self.assertIn('dm_capture_follow_system(self.game);', body(self.front, '- (void)startGame {'))
+        self.assertIn('if (!strcmp(env, "DM_CAPTURE_SYSTEM")) { if (value) dm_capture_follow_set(atoi(value) != 0); return true; }', self.live)
         self.assertIn('dm_opmode() == 0', body(self.pad, 'bool dm_pad_layout_offered(int layout) {'))
 
     def test_a_row_that_does_nothing_says_why(self):   # GameMenu.swift greys a held or inactive row and gives every row its reason; front_ios.m knows the running game's

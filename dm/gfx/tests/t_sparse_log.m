@@ -151,6 +151,23 @@ int main(void) { @autoreleasepool {
         CHECK("a write after the submission's check: the texture is kept in that submission, and marked for the next", i3 == i2 && kept);
         mtl_sub_begin(); id<MTLTexture> i4 = BY_ID(); finish();
         CHECK("the next submission uploads the write through the cached ID", i4 && i4 != i3 && holds(i4, T, exp, W));
+        // 7. A mapping over the texture after the submission's check, and a change that syncs the ID cache in that submission: the epoch the request starts finds the texture checked
+        // already (sparse_checked) and keeps it there. A later submission must still see the mapping, with a change, as the old rule's next epoch did (DM_NVN_SPARSE_EPOCH)
+        mtl_sub_begin(); ser_note(T->serial); id<MTLTexture> k0 = BY_ID();   // checked in this submission
+        map_at(&g_sparse, 0, PG, B, 1); memcpy(exp, g_pm + B, PG);
+        ser_note(1ull << 60); id<MTLTexture> k1 = BY_ID(); finish();
+        CHECK("a mapping after the submission's check: kept in that submission", k0 && k1 == k0);
+        mtl_sub_begin(); ser_note((1ull << 60) + 1); id<MTLTexture> k2 = BY_ID(); finish();
+        CHECK("the next submission's change: the cached ID takes the newly mapped page", k2 && k2 != k0 && holds(k2, T, exp, W));
+        // The same with no change at all in the next submission: the mapping is still taken (that submission starts an epoch, counted as its own cause). The old rule waited for a change
+        mtl_sub_begin(); ser_note(T->serial); id<MTLTexture> k3 = BY_ID();
+        map_at(&g_sparse, 0, PG, A, 1); memcpy(exp, g_pm + A, PG);   /* A page 0 holds section 6's writes */
+        ser_note((1ull << 60) + 2); id<MTLTexture> k4 = BY_ID(); finish();
+        CHECK("again kept in its submission", k3 && k4 == k3);
+        uint64_t late = atomic_load(&g_epr[EPR_SPARSE_LATE]); mtl_sub_begin(); id<MTLTexture> k5 = BY_ID(); finish();
+        CHECK("counted as a mapping after a texture's check in its submission", atomic_load(&g_epr[EPR_SPARSE_LATE]) == late + (sparse_epoch_on() ? 1 : 0));
+        if (sparse_epoch_on()) { CHECK("the next submission, no change: a new texture", k5 && k5 != k3); CHECK("the next submission, no change: the cached ID still takes the mapping", holds(k5, T, exp, W)); }
+        else CHECK("DM_NVN_SPARSE_EPOCH=0, as before: kept until a change starts an epoch", k5 == k3);
         #undef BY_ID
         mtl_reg_tex(5, NULL, NULL); }
     h_nvnTextureFinalize(&tx);

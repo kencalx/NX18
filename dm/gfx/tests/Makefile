@@ -98,6 +98,9 @@ t_win_area: t_win_area.c ../nvn/nvn_win_area.h
 # Ultrawide's camera: the final picture and the HUD squeeze (../nvn/nvn_aspect.h, nvn_mtl.m rp_begin_ex_ and draw_)
 t_aspect: t_aspect.c ../nvn/nvn_aspect.h
 	clang -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ t_aspect.c
+# Whether a draw's triangles cover every pixel of its target (../nvn/nvn_cover.h, nvn_mtl.m lcv_check, DM_NVN_COVERED_LOAD): shapes, negative controls, a soundness sweep, the cost
+t_cover: t_cover.c ../nvn/nvn_cover.h
+	clang -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ t_cover.c
 # The frame workgroup's calls from hle_nvn.c, counted by t_framewg_count.c's stand-ins in place of the weak ones: armed, with DM_RT=0, and off
 t_nvn_framewg: t_nvn_framewg.c t_framewg_count.c ../../host/frame_wg.h ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn_framewg.c t_framewg_count.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
@@ -446,12 +449,20 @@ check_t_sparse_tiles: t_sparse_tiles
 	./t_sparse_tiles
 	DM_NVN_SPARSE_HEAP_MB=256 ./t_sparse_tiles
 # A whole sparse texture's check through its pool's change log (nvn_mtl.m pkg_sparse_clean, S2Arm de791716's port), and the full walk of before with DM_NVN_SPARSE_LOG=0
+# Texture ID epochs by cause (nvn_mtl.m ser_sync, g_epr) and DM_NVN_SPARSE_EPOCH: with a sparse mapping, only a mapping request since the last sync starts an epoch; =0 the old rule
+t_tex_epochs: t_tex_epochs.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tex_epochs.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_tex_epochs
+check_t_tex_epochs: t_tex_epochs
+	MTL_DEBUG_LAYER=1 ./t_tex_epochs
+	MTL_DEBUG_LAYER=1 DM_NVN_SPARSE_EPOCH=0 ./t_tex_epochs --off
 t_sparse_log: t_sparse_log.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_log.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_sparse_log
 check_t_sparse_log: t_sparse_log
 	MTL_DEBUG_LAYER=1 ./t_sparse_log
 	MTL_DEBUG_LAYER=1 DM_NVN_SPARSE_LOG=0 ./t_sparse_log
+	MTL_DEBUG_LAYER=1 DM_NVN_SPARSE_EPOCH=0 ./t_sparse_log
 t_readback: t_readback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_readback.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_readback
@@ -611,6 +622,9 @@ t_geometry: t_geometry.m $(MTL_T_DEP)
 check_t_geometry: RUN_ENV = MTL_DEBUG_LAYER=1
 t_feedback: t_feedback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_feedback.m $(MTL_T_SRC) $(FW)
+# The replay's per-draw fast paths (DM_NVN_FB_STOR, DM_NVN_PSO_MEMO) against the paths they replace, with their benchmarks (reference/frame-rate.md)
+t_replay_fast: t_replay_fast.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_replay_fast.m $(MTL_T_SRC) $(FW)
 t_gpu_timing: t_gpu_timing.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gpu_timing.m $(MTL_T_SRC) $(FW)
 t_rast_discard: t_rast_discard.m $(MTL_T_DEP)
@@ -690,6 +704,15 @@ check_t_cache_volatile: t_cache_volatile
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_cache_volatile
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_cache_volatile
 	DM_NVN_CACHE_VOLATILE=0 MTL_DEBUG_LAYER=1 ./t_cache_volatile --off
+# Empty sparse tile heaps marked volatile (nvn_mtl.m sp_vol_sweep_at / spv_take, DM_NVN_SPARSE_VOLATILE): marked only when every tile is free past the fence for SPV_IDLE_NS, taken
+# back non-volatile, an emptied one replaced at its index; the tiles taken again read 0 and then what is drawn; with the encode thread, and off
+t_sparse_volatile: t_sparse_volatile.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_volatile.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_sparse_volatile
+check_t_sparse_volatile: t_sparse_volatile
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_sparse_volatile
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_sparse_volatile
+	DM_NVN_SPARSE_VOLATILE=0 MTL_DEBUG_LAYER=1 ./t_sparse_volatile --off
 t_stage_pool: t_stage_pool.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_stage_pool.m $(MTL_T_SRC) $(FW)
 t_up_slot_count: t_up_slot_count.m $(MTL_T_DEP)
@@ -1056,6 +1079,14 @@ t_unwritten_load: t_unwritten_load.m $(MTL_T_DEP)
 check_t_unwritten_load: t_unwritten_load
 	MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1 DM_NVN_ENC_THREAD=0 ./t_unwritten_load
 	MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1 DM_NVN_ENC_THREAD=1 ./t_unwritten_load
+# Colour attachments the pass's opening draw covers whole load as DontCare (nvn_mtl.m lcv_plan / lcv_check / lcv_confirm, DM_NVN_COVERED_LOAD), on and off in one run, with the
+# negative controls; the validation layer fills DontCare loads with its pattern, so a converted attachment the draw did not cover whole would show
+t_covered_load: t_covered_load.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_covered_load.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_covered_load
+check_t_covered_load: t_covered_load
+	MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1 DM_NVN_ENC_THREAD=0 ./t_covered_load
+	MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1 DM_NVN_ENC_THREAD=1 ./t_covered_load
 # A clear-only pass leaves out the attachments that already hold its clear (nvn_mtl.m sc_note, DM_NVN_SAME_CLEAR), on and off in one run
 t_same_clear: t_same_clear.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_same_clear.m $(MTL_T_SRC) $(FW)
@@ -1297,7 +1328,9 @@ check_t_bindless_slots: t_bindless_slots
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_BINDLESS=1 DM_NVN_ARGS_PARTIAL=0 ./t_bindless_slots
 t_image_usage: t_image_usage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_usage.m $(MTL_T_SRC) $(FW)
-check_t_image_usage: RUN_ENV = MTL_DEBUG_LAYER=1
+# DM_NVN_PCM_MAXPX=0: its render target is an ordinary one, made without image usage and upgraded at its first image write. Since pass-as-compute went on for every game (287c79c06)
+# a colour target up to DM_NVN_PCM_MAXPX pixels is made shader-writable from the start (pcm_usage), so its 8x8 target would have had nothing to upgrade; past the cap (here every size) it still does
+check_t_image_usage: RUN_ENV = MTL_DEBUG_LAYER=1 DM_NVN_PCM_MAXPX=0
 t_image_type: t_image_type.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_type.m $(MTL_T_SRC) $(FW)
 check_t_image_type: RUN_ENV = MTL_DEBUG_LAYER=1

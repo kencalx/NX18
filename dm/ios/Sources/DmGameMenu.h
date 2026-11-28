@@ -7,7 +7,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-void *dm_game_menu(void);   // GameMenu.swift: a retained UIMenu, rebuilt each time it opens (DM_GAME_MENU=system)
+void *dm_game_menu(void *button);   // GameMenu.swift: a retained UIMenu, rebuilt each time it opens (DM_GAME_MENU=system); button: the UIButton showing it (unretained), whose open menu is updated when the documents' listing returns
 bool dm_game_panel_open(void *anchor);   // GameMenuPanel.swift: NX 18's panel over the view controller the menu button (anchor, a UIView) is in; false when it cannot show
 void dm_game_panel_close(void);   // closes it: dm_gamepad_panel_closed at once, then a short fade (it takes no touch meanwhile)
 bool dm_game_panel_shown(void);

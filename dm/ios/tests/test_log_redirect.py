@@ -57,11 +57,17 @@ class Wiring(unittest.TestCase):
 class CloudScope(unittest.TestCase):
     def test_each_started_scope_is_stopped_once(self):
         m = read('dm/ios/Sources/CloudSaves.m')
-        hold = body(m, 'static void scope_hold(NSURL *url) {')
+        # since 2556487de (the NX 18 folder, a second bookmark) a scope is held per slot (0 this game's folder, 1 the NX 18 folder): scope_slot does what scope_hold did, and
+        # scope_hold is slot 0's
+        self.assertIn('static void scope_hold(NSURL *url) { scope_slot(0, url); }', m)
+        hold = body(m, 'static void scope_slot(int slot, NSURL *url) {')
         self.assertLess(hold.index('stopAccessingSecurityScopedResource'), hold.index('startAccessingSecurityScopedResource'))   # the old folder's stopped before the new one's starts
-        self.assertIn('[opened.path isEqualToString:url.path]) return;', hold)   # the same folder keeps the URL that started it
+        self.assertIn('[held[slot].path isEqualToString:url.path]) return;', hold)   # the same folder keeps the URL that started it
+        code = re.sub(r'//.*', '', m)
+        self.assertEqual(code.count('startAccessingSecurityScopedResource'), 2)   # scope_slot's and fresh_bookmark's (checked below), no other start
+        self.assertEqual(len(re.findall(r'held\[[^]]*\] = ', code)), 2)   # set only in scope_slot: nil after its stop, the URL after a start that succeeded
         path = body(m, 'NSString *dm_cloud_saves_path(BOOL *stale) {')
-        self.assertNotIn('startAccessingSecurityScopedResource', path); self.assertNotIn('opened =', path)   # only through scope_hold
+        self.assertNotIn('startAccessingSecurityScopedResource', path); self.assertNotIn('held[', path)   # only through scope_hold
         self.assertIn('scope_hold(url);', path)
         unresolved = path[path.index('if (!url) {'):path.index('scope_hold(url);')]
         self.assertIn('scope_hold(nil);', unresolved)   # a bookmark that no longer resolves: cloud saves are off, the scope is stopped

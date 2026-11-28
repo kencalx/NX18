@@ -31,6 +31,7 @@ struct GameSettingsView: View {
     @StateObject private var m: LauncherModel
     @State private var pages: [GatePage] = []
     @State private var asking: Ask?
+    @State private var shown: Ask = .reset   // the question last presented: the alert's title while it shows and while it closes
     @Environment(\.dismiss) private var dismiss
 
     init(title: String, source: GameSettingsSource) {
@@ -54,7 +55,9 @@ struct GameSettingsView: View {
         .frame(width: 620, height: 640)
         .background { ZStack { NX18Palette.background; NX18Glow() } }
         .environment(\.colorScheme, .dark)
-        .alert(asking?.title ?? "", isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } }), presenting: asking) { a in
+        .escapeCloses { if pages.isEmpty { dismiss() } else { pages.removeLast() } }   // on a page, Escape goes back a page first, as B and the ‹ button do
+        // the title from the presented question, kept while the alert closes: asking is nil by then, and a title read from it would flicker empty
+        .alert(shown.title, isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } }), presenting: asking) { a in
             // the system's alert on the sheet (window modal), Cancel beside the action as macOS 27 draws it; Reset loses choices, so it is marked destructive
             Button(a.button, role: a == .reset ? .destructive : nil) { confirmed(a) }
             Button("Cancel", role: .cancel) {}
@@ -76,8 +79,8 @@ struct GameSettingsView: View {
             // In the NX 18 folder: the chosen folder becomes the game's own (nx18.cloud = own). Nothing moves here: the game compares the two saves at its next start, and the
             // NX 18 folder's copy stays (the game's own card moves the save first: This game's saves)
             if p.runModal() == .OK, let u = p.url { source.defaults.set(u.path, forKey: NX18CloudSaves.folderKey); if place.inNX18 { source.defaults.set("own", forKey: NX18CloudSaves.choiceKey) } }
-        case .confirmCloudOff: asking = .cloudOff
-        case .confirmReset: asking = .reset
+        case .confirmCloudOff: shown = .cloudOff; asking = .cloudOff
+        case .confirmReset: shown = .reset; asking = .reset
         case .acknowledgements: break   // the game's own window shows them (Beam's About has Beam's)
         }
         readPlace()

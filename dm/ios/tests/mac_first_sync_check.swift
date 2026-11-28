@@ -22,6 +22,8 @@ final class FakeCloud: FirstSyncCloud, @unchecked Sendable {
     func startDownload(_ url: URL) { downloads.append(url.lastPathComponent) }
     func coordinatedRead(_ url: URL, done: @escaping @Sendable (FirstSyncRead) -> Void) { reads.append(url.lastPathComponent); if slowReads { later.append(done) } else { done(read) } }
     func online() -> Bool { isOnline }
+    var ends = 0
+    func end() { ends += 1 }
 }
 
 nonisolated(unsafe) var failed = 0, checks = 0
@@ -162,6 +164,10 @@ func runCheck(_ folder: String, _ cloud: FakeCloud, limits: FirstSyncLimits = .s
         c = FakeCloud(); reset(); c.states[nx] = .downloading
         (o, t) = runCheck(nx, c, cancelAt: 2)
         check(o == .cancelled && t == 2, "Cancel ends the wait at once")
+        check(c.ends == 1, "and ends the layer's reads once")
+        c = FakeCloud(); reset(); c.slowReads = true; make(game); put(file)
+        (o, _) = runCheck(nx, c)
+        check(o == .ready && c.ends == 1 && !c.later.isEmpty, "a check that ends with a read still in flight ends the layer (its reads cancelled)")
 
         print("mac first sync: \(checks) checks, \(failed) failed")
         exit(failed == 0 ? 0 : 1)

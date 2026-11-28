@@ -71,14 +71,15 @@ struct ArtSection: View {
                                 HStack(spacing: 6) {
                                     Button("Choose…") { picking = k }.disabled(!SteamGridKey.isSet)
                                     if u != nil { Button("Reset") { library.setArt(nil, k, for: g.id) } }
-                                    // the part of the key art the Gate shows: the pick, else the art the last build used
-                                    if k == .keyArt, HomeBackdrop.art(for: g) != nil { Button("Adjust Framing…") { framing = true } }
+                                    // the part of the key art the Gate shows: the pick, else the art the last build used (never a banner only NX Play has: the build may pack another)
+                                    if k == .keyArt, HomeBackdrop.packedArt(for: g) != nil { Button("Adjust Framing…") { framing = true } }
                                 }
                                 .controlSize(.small)
                             }
                         }
                     }
                     Text("Without a pick, the build finds the game's banner in the public title list. Picks apply at the next build.").font(.caption).foregroundStyle(.secondary)
+                    if HomeBackdrop.packedArt(for: g) == nil { Text("To frame the key art, choose one or build the game once: framing is made on the picture the game will show.").font(.caption).foregroundStyle(.secondary) }
                     if g.artFocus != nil { Text("Key art framed: Beam Home shows it now, a Mac app at its next start, an iPhone or iPad from its next build.").font(.caption).foregroundStyle(.secondary) }
                 }
                 .padding(6)
@@ -87,7 +88,7 @@ struct ArtSection: View {
                 ArtPicker(kind: k, name: g.title, titleID: ident.titleId) { url in library.setArt(url, k, for: g.id); if k == .keyArt { pickedKeyArt = true } }
             }
             .sheet(isPresented: $framing) {
-                if let img = HomeBackdrop.art(for: g) { ArtFramingSheet(image: img, start: g.artFocus ?? .centre) { library.setArtFocus($0, for: g.id) } }
+                if let img = HomeBackdrop.packedArt(for: g) { ArtFramingSheet(image: img, start: g.artFocus ?? .centre) { library.setArtFocus($0, for: g.id) } }
             }
         }
     }

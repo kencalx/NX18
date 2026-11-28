@@ -59,11 +59,22 @@ struct GameMenuSection: Identifiable {
 
 #if os(iOS)
 @_cdecl("dm_game_menu")
-public func dmGameMenu() -> UnsafeMutableRawPointer {
+public func dmGameMenu(_ button: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer {
+    let bits = UInt(bitPattern: button)   // the pointer as a number into the main actor's closure (a raw pointer is not Sendable)
     let menu = MainActor.assumeIsolated {   // DmGamepad.m asks for the menu on the main thread (UIKit); a call from any other thread stops here instead of racing gameMenuModel
-        return UIMenu(title: gameMenuTitle(), children: [UIDeferredMenuElement.uncached { done in done(gameMenuItems()) }])   // built each time it opens, so it shows the current choices
+        systemMenuButton = UnsafeMutableRawPointer(bitPattern: bits).map { Unmanaged<UIButton>.fromOpaque($0).takeUnretainedValue() }
+        GameDocumentsStore.shared.menuChanged = refreshVisibleSystemMenu
+        return UIMenu(title: gameMenuTitle(), identifier: systemMenuRoot,
+                      children: [UIDeferredMenuElement.uncached { done in done(gameMenuItems()) }])   // built each time it opens, so it shows the current choices
     }
     return Unmanaged.passRetained(menu).toOpaque()
+}
+private let systemMenuRoot = UIMenu.Identifier("org.nx18.game-menu")
+@MainActor private weak var systemMenuButton: UIButton?   // the menu button holding the UIMenu (DmGamepad.m), not retained here
+// The documents' listing came back while the UIMenu shows (its first open lists them): its top level is built again, so Manual & documents appears without closing and opening
+// it. Only the top level: a submenu the player went into is left as it is (they see the row when they go back). Nothing when no menu is up
+@MainActor private func refreshVisibleSystemMenu() {
+    systemMenuButton?.contextMenuInteraction?.updateVisibleMenu { m in m.identifier == systemMenuRoot ? m.replacingChildren(gameMenuItems()) : m }
 }
 
 

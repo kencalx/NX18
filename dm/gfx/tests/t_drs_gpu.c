@@ -8,6 +8,10 @@
 //     per-second GPU time from the cooler run (60-140 s, taken as the demand at full size). Checked: the first step down within 1 s of saturation, no change in steady load
 //     (no oscillation), the floor back to 0 after the load, and with the controller fewer seconds capped and more frames than without it.
 //  3. The same phone seconds open loop (the logged clock, the GPU busy as logged): the clock-floor rule's steps in the capped stretch.
+//  4. Battery Saver's lowest-resolution hold (DM_DRS_LOWEST=1, nvn_drs_gpu.h hold): the stub's game walks to its lowest level and stays there, through a GPU whose time does not
+//     follow the picture (where the no-gain rule takes every step back: the negative control) and a light load (where the rules climb to full size); clearing it takes the floor
+//     back to full size at once and the game climbs again. The stretch family's levels go to 0.5 at once. It runs with the headroom target off too; with no level count nothing
+//     moves. A micro-benchmark of the window with and without it.
 #include "../nvn/nvn_drs_gpu.h"
 #include <assert.h>
 #include <math.h>
@@ -15,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #if defined(__arm64__)
 #include <libkern/OSCacheControl.h>
 #include <pthread.h>
@@ -98,6 +103,7 @@ typedef struct { int changes, downs, ups, undos, floor_hi, capped_win, frames; d
 static uint64_t g_rng = 88172645463325252ull;
 static double noise(void) { g_rng ^= g_rng << 13; g_rng ^= g_rng >> 7; g_rng ^= g_rng << 17; return ((g_rng >> 11) * (1.0 / 9007199254740992.0) - 0.5) * 0.04; }   // ±2 points
 static int g_verbose;
+static double g_hold_from = -1, g_hold_to = 1e9;   // the lowest-resolution hold (c.hold) from .. to, in seconds of the trace; g_hold_from < 0: never
 static result run(const trace *tr, double onset, const double *after, int nafter) {
     nvn_drs_gpu c; nvn_drs_gpu_init(&c, tr->target);
     state_reset(); game g = {0};
@@ -120,10 +126,11 @@ static result run(const trace *tr, double onset, const double *after, int nafter
             r.capped_win += capped; busy_sum += busy; nwin++; if (busy > r.busy_hi && t > 5) r.busy_hi = busy;
             double pclk = (capped ? 1.44 : 4.40) + noise();
             int was = c.floor; char why[160];
+            c.hold = g_hold_from >= 0 && t >= g_hold_from && t < g_hold_to;
             int kind = nvn_drs_gpu_window(&c, (uint64_t)(t * 1e9), busy, pclk, g.level, NLEVELS, why, sizeof why);
             st32w(0x290, (uint32_t)c.floor); if (c.floor > r.floor_hi) r.floor_hi = c.floor;
             if (kind) {
-                r.changes++; if (kind == NVN_DRS_UP || kind == NVN_DRS_UNDO) r.ups++; else r.downs++;
+                r.changes++; if (kind == NVN_DRS_UP || kind == NVN_DRS_UNDO || kind == NVN_DRS_RELEASE) r.ups++; else r.downs++;
                 if (kind == NVN_DRS_UNDO) r.undos++;
                 if ((kind == NVN_DRS_DOWN_BUSY || kind == NVN_DRS_DOWN_CLOCK) && r.first_down < 0 && t >= onset) r.first_down = t - onset;
                 for (int k = 0; k < nafter; k++) if (t >= after[k]) r.changes_after[k]++;
@@ -151,6 +158,82 @@ static const float k_oot_clk[] = {4.34,4.45,4.40,4.39,4.41,4.51,4.62,4.40,4.30,4
 // The phone's demand: the logged GPU time is what the capped stretches drew at 44-60 fps and at the levels the game was at, so the capped seconds (clock under 2 GHz) are taken at
 // the 60 fps share of the stretch before (0.80): the demand that put the SoC there
 static double d_oot(double t) { int i = (int)t; if (i >= OOT_N) i = OOT_N - 1; return k_oot_clk[i] < 2 ? 0.80 : k_oot[i] / 1000.0; }
+
+// Battery Saver's lowest-resolution hold (DM_DRS_LOWEST=1)
+static double d_light(double t) { (void)t; return 0.40; }
+static int g_level_seen[NLEVELS];
+static void test_hold(void) {
+    assert(nvn_drs_lowest_parse(NULL) == 0 && nvn_drs_lowest_parse("") == 0 && nvn_drs_lowest_parse("0") == 0 && nvn_drs_lowest_parse("off") == 0);
+    assert(nvn_drs_lowest_parse("1") == 1 && nvn_drs_lowest_parse("on") == 1 && nvn_drs_lowest_parse("2") == -1 && nvn_drs_lowest_parse("lowest") == -1);
+    puts("PASS: DM_DRS_LOWEST: unset, empty, 0 / off no hold, 1 / on the hold, the rest refused");
+    // the stub's game with a GPU whose time does not follow the picture, 80% busy at every level: negative control first (no hold: every step taken back, full size at the end),
+    // then the hold for the whole trace: one change, the floor at the lowest level, the game there within a few seconds and never above it after
+    { g_flat = 1; trace on = {"flat", flat80, 60, 75}; result a = run(&on, 0, NULL, 0);
+      g_hold_from = 0; g_hold_to = 1e9; double af[] = {0.3}; result b = run(&on, 0, af, 1); g_hold_from = -1; g_flat = 0;
+      printf("  80%% at every level for 60 s: without the hold end floor %.0f (%d downs, %d back for no gain); with it %d change, end floor %.0f, highest floor %d\n",
+             a.end_floor, a.downs, a.undos, b.changes, b.end_floor, b.floor_hi);
+      assert(a.end_floor == 0 && a.undos == a.downs);
+      assert(b.changes == 1 && b.end_floor == NLEVELS - 1 && b.undos == 0 && b.changes_after[0] == 0); }
+    // where the game's level is: the hold from 5 s to 30 s on a light load (40% at full size, where the rules alone stay at full size): the game reaches the lowest level, stays,
+    // and after the hold climbs back to full size. A GPU whose time follows the pixels: the mean busy over the held stretch is lower (the work a smaller picture takes away)
+    { trace on = {"light", d_light, 60, 75}; result base = run(&on, 0, NULL, 0);
+      g_hold_from = 5; g_hold_to = 30; nvn_drs_gpu c; nvn_drs_gpu_init(&c, 75); state_reset(); game g = {0};
+      double t = 0, wt0 = 0, wbusy = 0, held_busy = 0, free_busy = 0, reach = -1, back = -1; int held_n = 0, free_n = 0, kinds[8] = {0}, above = 0;
+      memset(g_level_seen, 0, sizeof g_level_seen);
+      while (t < 60) {
+          double gshare = cost(0.40, g.level), gpu_ms = gshare * 1000 / 60;
+          game_frame(&g, (float)(gpu_ms / 0.2)); wbusy += gpu_ms / 1000; t += 1 / 60.0; g_level_seen[g.level]++;
+          if (t >= 15 && t < 30 && g.level != NLEVELS - 1) above++;
+          if (reach < 0 && g.level == NLEVELS - 1) reach = t - 5;
+          if (back < 0 && t > 30 && g.level == 0) back = t - 30;
+          if (t - wt0 >= 0.25) {
+              double busy = wbusy / (t - wt0); c.hold = t >= g_hold_from && t < g_hold_to;
+              int k = nvn_drs_gpu_window(&c, (uint64_t)(t * 1e9), busy, 4.4, g.level, NLEVELS, NULL, 0); kinds[k]++;
+              st32w(0x290, (uint32_t)c.floor);
+              if (t >= 15 && t < 30) { held_busy += busy; held_n++; } else if (t >= 45) { free_busy += busy; free_n++; }
+              wt0 = t; wbusy = 0;
+          }
+      }
+      g_hold_from = -1;
+      printf("  40%% at full size, the hold from 5 to 30 s: without it end floor %.0f, %d changes; with it the game at its lowest level %.2f s after the hold, %d frames above it in 15-30 s,"
+             " back at full size %.2f s after the hold ended; GPU busy %.1f%% held against %.1f%% at full size; %d hold, %d release, %d other changes\n",
+             base.end_floor, base.changes, reach, above, back, 100 * held_busy / held_n, 100 * free_busy / free_n, kinds[NVN_DRS_HOLD], kinds[NVN_DRS_RELEASE],
+             kinds[NVN_DRS_DOWN_BUSY] + kinds[NVN_DRS_DOWN_CLOCK] + kinds[NVN_DRS_UP] + kinds[NVN_DRS_UNDO]);
+      assert(base.end_floor == 0 && base.changes == 0);   // negative control: the rules alone leave a light load at full size
+      assert(reach >= 0 && reach < 5 && above == 0 && back >= 0 && back < 10 && kinds[NVN_DRS_HOLD] == 1 && kinds[NVN_DRS_RELEASE] == 1);
+      assert(kinds[NVN_DRS_DOWN_BUSY] + kinds[NVN_DRS_DOWN_CLOCK] + kinds[NVN_DRS_UNDO] == 0);
+      assert(held_busy / held_n < 0.75 * free_busy / free_n);
+      assert(c.floor == 0 && !c.held); }
+    puts("PASS: the hold takes the stub's game to its lowest level and keeps it there (no no-gain undo), and its end gives full size back at once");
+    // the stretch family's own levels (6, factor 1 - 0.1 L): 0.5 at once; the summary says so; clearing it gives 0; no steps while held at 92% busy (the rules alone would step)
+    { nvn_drs_gpu c; nvn_drs_gpu_init(&c, 75); c.settle_n = 4; int kinds[8] = {0};
+      for (int w = 0; w < 160; w++) { c.hold = w < 120; char why[160];
+          int k = nvn_drs_gpu_window(&c, 1000000000ull + (uint64_t)w * 250000000ull, 0.92 + noise(), 4.4, c.floor, 6, why, sizeof why); if (w <= 120) kinds[k]++;   // after it the rules again
+          if (w == 0) { assert(k == NVN_DRS_HOLD && c.floor == 5 && strstr(why, "lowest level 5 of 6")); printf("  stretch family, first window: floor %d (%.1f of the side): %s\n", c.floor, 1 - 0.1 * c.floor, why); }
+          if (w > 0 && w < 120) assert(c.floor == 5);
+          if (w == 119) { char sm[400]; nvn_drs_gpu_summary(&c, sm, sizeof sm); printf("  summary: %s\n", sm); assert(strstr(sm, "held at the lowest level") && strstr(sm, "for 120 of 120 windows")); }
+          if (w == 120) assert(k == NVN_DRS_RELEASE && c.floor == 0);
+      }
+      assert(kinds[NVN_DRS_HOLD] == 1 && kinds[NVN_DRS_RELEASE] == 1 && kinds[NVN_DRS_UNDO] == 0); }
+    // headroom off (DM_DRS_GPU_TARGET=0): the hold still holds and still ends; no level count: nothing moves
+    { nvn_drs_gpu c; nvn_drs_gpu_init(&c, 0); c.hold = 1;
+      assert(nvn_drs_gpu_window(&c, 1000000000ull, 0.9, 4.4, 0, 6, NULL, 0) == NVN_DRS_HOLD && c.floor == 5);
+      c.hold = 0; assert(nvn_drs_gpu_window(&c, 1250000000ull, 0.9, 4.4, 5, 6, NULL, 0) == NVN_DRS_RELEASE && c.floor == 0);
+      assert(nvn_drs_gpu_window(&c, 1500000000ull, 0.99, 4.4, 0, 6, NULL, 0) == NVN_DRS_NONE && c.floor == 0);
+      nvn_drs_gpu d; nvn_drs_gpu_init(&d, 75); d.hold = 1;
+      for (int w = 0; w < 8; w++) assert(nvn_drs_gpu_window(&d, 1000000000ull + (uint64_t)w * 250000000ull, 0.99, 4.4, 0, 0, NULL, 0) == NVN_DRS_NONE && d.floor == 0 && !d.held);
+      assert(nvn_drs_gpu_window(&d, 3000000000ull, 0.99, 4.4, 0, NLEVELS, NULL, 0) == NVN_DRS_HOLD && d.floor == NLEVELS - 1);
+      // a level count over the controller's 16: the lowest it can hold
+      nvn_drs_gpu e; nvn_drs_gpu_init(&e, 75); e.hold = 1; assert(nvn_drs_gpu_window(&e, 1000000000ull, 0.5, 4.4, 0, 40, NULL, 0) == NVN_DRS_HOLD && e.floor == NVN_DRS_LEVELS - 1); }
+    puts("PASS: the hold runs with the headroom target off, waits for the level count, and caps at the controller's levels");
+    // micro-benchmark: one window with the hold against the rules (the GPU headroom path at 92% busy), ns a window
+    { enum { N = 4000000 }; volatile int sink = 0; struct timespec a, b; double ns[2];
+      for (int h = 0; h < 2; h++) { nvn_drs_gpu c; nvn_drs_gpu_init(&c, 75); c.hold = h;
+          clock_gettime(CLOCK_MONOTONIC, &a);
+          for (int w = 0; w < N; w++) sink += nvn_drs_gpu_window(&c, 1000000000ull + (uint64_t)w * 250000000ull, (w & 7) ? 0.92 : 0.5, 4.4, c.floor, NLEVELS, NULL, 0);
+          clock_gettime(CLOCK_MONOTONIC, &b); ns[h] = ((b.tv_sec - a.tv_sec) * 1e9 + (b.tv_nsec - a.tv_nsec)) / N; }
+      printf("  bench: a controller window %.1f ns with the rules, %.1f ns with the hold (4 windows a second; %d)\n", ns[0], ns[1], sink & 1); }
+}
 
 static void report(const char *what, const result *on, const result *off) {
     printf("  %s: with the controller %d changes (%d down, %d up), end floor %.0f, first step %.2f s after the onset, capped %.1f s, %d frames, GPU busy mean %.0f%% (highest window %.0f%%);"
@@ -318,6 +401,7 @@ int main(void) {
       printf("  CPU-bound at 50 fps with the GPU 57%% busy for 30 s: %d downs, late windows counted %d\n", downs, c.late_n);
       assert(downs == 0 && c.late_n == 0); }
     puts("PASS: late frames with the GPU idle a quarter of the time or more are the CPU's: no step");
+    test_hold();
     char s[400]; nvn_drs_gpu c; nvn_drs_gpu_init(&c, 75); nvn_drs_gpu_window(&c, 1000000000ull, 0.9, 4.4, 0, NLEVELS, 0, 0); nvn_drs_gpu_window(&c, 1250000000ull, 0.9, 4.4, 0, NLEVELS, 0, 0);
     nvn_drs_gpu_summary(&c, s, sizeof s); printf("  summary: %s\n", s); assert(strstr(s, "floor 1") && strstr(s, "GPU load 90% > 75%"));
     puts("PASS: the summary names the floor and the last reason");

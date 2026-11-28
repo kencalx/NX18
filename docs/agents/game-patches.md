@@ -111,6 +111,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 3 | 0 | 0 | `game` ×2, `build` → `game` |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 1 | `game`, `build` → `game`, `build` → `host` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Xenoblade Chronicles X: Definitive Edition – Nintendo Switch 2 Edition](#xenoblade-chronicles-x-definitive-edition--nintendo-switch-2-edition) | 0 | 0 | 0 | 1 | 0 | `game` |
 
 ## Games
 
@@ -653,6 +654,14 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x12418d8`: first arena subtraction, sign extension
   - cut `+0x12418dc`: first arena subtraction: -(512 MB + 128 KB)
   - cut `+0x12418e8`: first arena stored capacity: 512 MB + 128 KB
+
+### Xenoblade Chronicles X: Definitive Edition – Nintendo Switch 2 Edition
+
+[Xenoblade Chronicles X: Definitive Edition – Nintendo Switch 2 Edition](../../dm/games/0400453019AA8001/README.md), `0400453019AA8001`, [patches.py](../../dm/games/0400453019AA8001/patches.py).
+
+- **`game`**, address space, at goal, judgement: malloc region 60 GB → 12 GB and its first arena. Monolith's allocator calls nn::os directly, so the SDK's StandardAllocator gate cannot size it; its sizes span two functions matched atomically. The rule is the Switch 1 program's (upstream b32d0bf3b) with a 12 GB outer region for this program's larger reach; it applies only if this build's functions are that code
+
+- **function-matched** (`main` of builds without CUTS): Monolith malloc region and first arena: 2 functions, 6 cuts
 
 ## SDK cuts
 

@@ -23,7 +23,9 @@ int main(void) {
     CHECK(gm_key(36) == GM_A && gm_key(49) == GM_A && gm_key(38) == GM_A, "Return, Space and J choose");
     CHECK(gm_key(53) == GM_B && gm_key(51) == GM_B && gm_key(40) == GM_B, "Escape, Delete and K go back");
     CHECK(gm_key(32) == GM_X && gm_key(12) == GM_L && gm_key(14) == GM_R, "U, Q and E as on the game's key map");
-    CHECK(gm_key(3) == 0, "a key the panel has no use for");
+    CHECK(gm_key(34) == GM_Y && gm_key(6) == GM_ZL && gm_key(8) == GM_ZR, "I, Z and C as on the game's key map (Y, ZL, ZR)");
+    CHECK(gm_key(27) == GM_Y && gm_key(33) == GM_ZL && gm_key(30) == GM_ZR, "- zooms out, [ and ] step the documents");
+    CHECK(gm_key(3) == 0 && gm_key(24) == 0, "keys the panel has no use for (F, =)");
     CHECK(GM_OPEN_KEY == 53, "Escape opens it");
 
     CHECK(!gm_blocks_input(GM_CLOSED) && gm_blocks_input(GM_OPEN) && gm_blocks_input(GM_SETTLE), "the game's input waits while open and settling");

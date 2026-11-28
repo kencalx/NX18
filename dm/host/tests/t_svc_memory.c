@@ -639,6 +639,34 @@ static void guest_helper(void) {
     assert(resize(0) == BAD);
     dm_guest_thread_join(tt); assert(helper_freed && !g_nmap && !g_heap_cur);
 }
+// A request the alias region cannot hold is a [RED] line when asked, and one with no address is named at the next request on its thread and in the crash dump
+// (Xenoblade Chronicles X Switch 2 Edition: a 60 GB reservation in a 4.375 GB alias region, then a memset to null in nninitStartup)
+static void region_refusal(void) {
+    uint64_t frame[2] = {0, 0x1234}, r[100] = {0}; r[99] = (uint64_t)(uintptr_t)frame;
+    assert(!g_nrgn && alias_free_total() == g_alias_cap - RGN_NODE_AREA);
+    r[2] = 0x1000000; region_ask(r, 0);
+    assert(atomic_load(&g_rgn_open.size) == 0x1000000 && !atomic_load(&g_rgn_refused) && !strcmp(g_rgn_open.who, "0x1234"));
+    r[0] = alias + RGN_NODE_AREA; region_got(r, 0);   // answered: in the table, nothing open
+    assert(!atomic_load(&g_rgn_open.size) && g_nrgn == 1 && alias_free_total() == g_alias_cap - RGN_NODE_AREA - 0x1000000);
+    char *text = NULL; size_t len = 0; FILE *f = open_memstream(&text, &len);
+    dm_region_crash_note(f); fflush(f); assert(!len);   // nothing open: no crash line
+    r[2] = g_alias_cap - RGN_NODE_AREA; region_ask(r, 0);   // more than is free in all: refused when asked
+    assert(atomic_load(&g_rgn_refused) == 1 && atomic_load(&g_rgn_open.size) == g_alias_cap - RGN_NODE_AREA);
+    dm_region_crash_note(f); fclose(f);
+    assert(text && strstr(text, "[RED] [mem] the last address region asked") && strstr(text, "returning to 0x1234, got no address before the crash")); free(text);
+    r[2] = 0x1000000; region_ask(r, 0);   // the next request on the thread: the refused one got no address
+    assert(atomic_load(&g_rgn_unanswered) == 1 && atomic_load(&g_rgn_refused) == 1);
+    r[0] = alias + RGN_NODE_AREA + 0x1000000; region_got(r, 0);
+    assert(!atomic_load(&g_rgn_open.size) && g_nrgn == 2);
+    r[1] = alias + RGN_NODE_AREA; region_free(r, 0); r[1] = alias + RGN_NODE_AREA + 0x1000000; region_free(r, 0);
+    assert(!g_nrgn && alias_free_total() == g_alias_cap - RGN_NODE_AREA);
+    r[2] = 0x1000000; region_ask(r, 0); r[0] = 0x10; region_got(r, 0);   // an address outside the alias region: answered, not kept
+    assert(!atomic_load(&g_rgn_open.size) && !g_nrgn && atomic_load(&g_rgn_unanswered) == 1);
+    r[2] = 0x1000000; region_ask(r, 0); r[0] = 0; region_got(r, 0);   // a null stored through the out pointer: still no address, open for the crash dump
+    assert(atomic_load(&g_rgn_open.size) == 0x1000000 && !g_nrgn);
+    r[0] = alias + RGN_NODE_AREA; region_got(r, 0); r[1] = r[0]; region_free(r, 0);
+    assert(!atomic_load(&g_rgn_open.size) && !g_nrgn);
+}
 static void *init_worker(void *arg) { *(uint64_t *)arg = info(I_AliasAddr); return NULL; }
 // The block: 256 MB in front, the heap region, the stack region, the alias region up to its end. The heap and stack sizes are the profile's, whatever the alias region's size
 // The guest-file watcher starts only once the layout and the alias bitmaps are set (upstream NXNative 71a9a829d): checked at its creation, so the result does not depend on when it first runs
@@ -687,7 +715,7 @@ int main(int argc, char **argv) {
 #endif
     layout_order();
     lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); file_sweep(); file_advise(); file_backed(); heap_regrow(); concurrency(); fragmented_queries();
-    guest_helper();
+    guest_helper(); region_refusal();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY
     dirty_integration();

@@ -214,15 +214,14 @@ extension Library {
         let text = parts.compactMap { $0 }.joined(separator: " ")
         myFilesNote = text.isEmpty ? nil : text
     }
-    func myFiles(_ g: LibraryGame) -> [URL] {
-        guard let f = myFilesFolder(g) else { return [] }
-        return ((try? FileManager.default.contentsOfDirectory(at: f, includingPropertiesForKeys: nil)) ?? []).filter { !$0.lastPathComponent.hasPrefix(".") }.sorted { $0.lastPathComponent < $1.lastPathComponent }
-    }
-    /// Every file in My files copied into a Beam install's Documents/Companion with devicectl
+    /// Every file in My files copied into a Beam install's Documents/Companion with devicectl. The folder is listed off the main thread under a coordinated read (with the
+    /// switch on it is in iCloud Drive); a file still in iCloud cannot be copied yet: it is asked for, and the player is told how many stayed behind
     func sendMyFiles(_ g: LibraryGame, to r: InstallRecord) async {
-        let files = myFiles(g).filter { !$0.hasDirectoryPath }
-        guard !files.isEmpty else { return }
-        do { for f in files { try await DeviceCtl.copyFile(f, of: r.bundleID, on: r.deviceID, to: "Documents/Companion/\(f.lastPathComponent)") } }
-        catch { lastError = "Could not send the files to \(r.deviceName): \(error.localizedDescription)" }
+        guard let dir = myFilesFolder(g) else { return }
+        let (files, inICloud) = await Task.detached(priority: .userInitiated) { MyFilesPlace.toSend(dir) }.value
+        var sent = 0
+        do { for f in files { try await DeviceCtl.copyFile(f, of: r.bundleID, on: r.deviceID, to: "Documents/Companion/\(f.lastPathComponent)"); sent += 1 } }
+        catch { lastError = "Could not send the files to \(r.deviceName): \(error.localizedDescription)"; return }
+        if let note = MyFilesPlace.sendNote(sent: sent, inICloud: inICloud, device: r.deviceName) { lastError = note }
     }
 }

@@ -436,21 +436,27 @@ int main(void) { @autoreleasepool {
       g_fwire_advise_hook = NULL; }
 
     // Page-ins by part of the replay's work (DM_NVN_PF_PARTS): pages of a file dropped from memory, read inside a named part and outside it, go to that part and to 'other'; off,
-    // nothing is counted
+    // nothing is counted. A file of its own, which no Metal buffer covers: with the no-copy buffers made over m above still alive (taken out of the residency set or not), an
+    // MS_INVALIDATE of m left all 256 of its pages in core, so its reads paged nothing in and both checks failed in every run
     { uint64_t pf[PF_N]; mtl_pf_take(pf);
-      g_pf_on = 1; msync(m, n, MS_INVALIDATE);
+      char fpath[] = "/tmp/t_file_wire_pf.XXXXXX"; int ffd = mkstemp(fpath); if (ffd < 0) abort(); unlink(fpath);
+      if (ftruncate(ffd, (off_t)n)) abort();
+      uint8_t *fm = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_SHARED, ffd, 0); if (fm == MAP_FAILED) abort();
+      memset(fm, 0x5a, n / 2); msync(fm, n, MS_SYNC);   // the half the reads below touch is written out, so dropping it leaves a page-in for each touch
+      g_pf_on = 1; msync(fm, n, MS_INVALIDATE);
       volatile uint8_t sink = 0;
       mtl_pf_scope(1);
-      int k = pf_enter(PF_SCAN); for (size_t o = 0; o < n / 4; o += pg) sink += m[o]; pf_leave(k);
-      for (size_t o = n / 4; o < n / 2; o += pg) sink += m[o];
+      int k = pf_enter(PF_SCAN); for (size_t o = 0; o < n / 4; o += pg) sink += fm[o]; pf_leave(k);
+      for (size_t o = n / 4; o < n / 2; o += pg) sink += fm[o];
       mtl_pf_scope(0); (void)sink;
       mtl_pf_take(pf); printf("page-ins by part: scan %llu, other %llu\n", (unsigned long long)pf[PF_SCAN], (unsigned long long)pf[PF_OTHER]);
       CHECK("page-ins inside a part go to it, the rest of the scope to 'other'", pf[PF_SCAN] > 0 && pf[PF_OTHER] > 0 && !pf[PF_TEX] && !pf[PF_POOL]);
       char t[160]; nvn_pf_text(t, sizeof t, pf);
       CHECK("the long-frame line's part", !strncmp(t, "; replay page-ins by part: other ", 33) && strstr(t, ", storage scans "));
-      g_pf_on = 0; msync(m, n, MS_INVALIDATE); mtl_pf_scope(1); k = pf_enter(PF_SCAN); for (size_t o = 0; o < n / 2; o += pg) sink += m[o]; pf_leave(k); mtl_pf_scope(0);
+      g_pf_on = 0; msync(fm, n, MS_INVALIDATE); mtl_pf_scope(1); k = pf_enter(PF_SCAN); for (size_t o = 0; o < n / 2; o += pg) sink += fm[o]; pf_leave(k); mtl_pf_scope(0);
       mtl_pf_take(pf); uint64_t sum = 0; for (int i = 0; i < PF_N; i++) sum += pf[i];
-      CHECK("off (the default), nothing is counted", sum == 0); }
+      CHECK("off (the default), nothing is counted", sum == 0);
+      munmap(fm, n); close(ffd); }
     // The slow commands (DM_NVN_PF_PARTS): a command of 1 ms counts to its type, one of a few microseconds does not, nor a call; off, nothing is timed
     { char t[200]; mtl_sop_text(t, sizeof t); g_pf_on = 1; mtl_pf_scope(1);
       sop_tick(OP_DRAW_IDX); usleep(1000); sop_tick(OP_BIND_TEX); sop_tick(OP_CALL); usleep(1000); sop_tick(OP_END);

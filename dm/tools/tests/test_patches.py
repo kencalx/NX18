@@ -67,7 +67,7 @@ class Registry(unittest.TestCase):
                 self.assertRegex(bid, r'^[0-9a-f]{32}$')
                 self.assertEqual(len(names), len(set(names)))
                 for name in names: self.assertRegex(name, r'^[A-Z][A-Z0-9_]*$')
-            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'CAPABILITIES', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'MATCH_OBS', 'BINDING')} - set(dir(__import__('nso_asm'))),
+            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'CAPABILITIES', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'MATCH_OBS', 'MATCH_SURVEY', 'BINDING')} - set(dir(__import__('nso_asm'))),
                              f'{p}: a table patch_nso.py does not read')
             # every patch file states each patch's binding (docs_patches.py "Binding"), and no goal is tighter than the binding now
             self.assertTrue(getattr(m, 'BINDING', None), f'{p}: no BINDING (docs/agents/game-patches.md, "Binding")')
@@ -115,6 +115,38 @@ class Registry(unittest.TestCase):
         for module, rules in m['MATCH_CUTS'].items():
             self.assertNotEqual(module, 'sdk', "Nintendo's SDK fixes belong in sdk_patches.py")
             for rule in rules: validate(rule)
+
+    def test_function_surveys(self):
+        # read-only surveys (MATCH_SURVEY), in a game's own patches.py, of a module its profile loads, each valid (nso_match.validate_survey), beside a MATCH_CUTS rule they serve
+        from nso_match import validate_survey
+        for p, m in MODS.items():
+            for module, entries in getattr(m, 'MATCH_SURVEY', {}).items():
+                self.assertEqual(p.name, 'patches.py', f'{p}: surveys belong to a game')
+                self.assertIn(module, game.load(p.parent.name).words('modules'))
+                self.assertTrue(getattr(m, 'MATCH_CUTS', {}).get(module), f'{p}: a survey of {module!r} runs only after a MATCH_CUTS rule of it misses')
+                for entry in entries: validate_survey(entry)
+
+    def test_xenoblade_x_switch_2_takes_the_switch_1_allocator_rule(self):
+        # Xenoblade Chronicles X Switch 2 Edition: upstream's rule for the Switch 1 program (NXNative b32d0bf3b, dm/games/0100453019AA8000/patches.py), its fingerprints and arena
+        # cuts unchanged; only the outer region is 12 GB (movz x0,#0x3,lsl#32), which the profile's alias region holds beside the SDK's node area and the game's 64 MB region
+        m = MODS[REPO / 'dm/games/0400453019AA8001/patches.py']
+        (rule,) = m.MATCH_CUTS['main']
+        arena, outer = rule['functions']
+        self.assertEqual((arena['size'], arena['fingerprints']), (696, ['b00403a9284d46d15659fc765ce9c0d0474170eb6b9fe2369a4fb69f5458bba2']))
+        self.assertEqual([c[:3] for c in arena['cuts']], [(0x10, 'e98340b2', 'e9ff9fd2'), (0x20, '4900a0f2', '4900a4f2'), (0xa4, 'ea7b5fb2', 'ea8361b2'),
+                                                          (0xac, 'caffbff2', 'caffbbf2'), (0xbc, '2800c0f2', '4800a4f2')])
+        self.assertEqual((outer['size'], outer['fingerprints']), (16, ['df6920c64d84efc7c01f51f9b17e9bd252f9058ed5903bfe6fd5a7ff1a7f4ca3']))
+        (off, old, new, _), = outer['cuts']
+        word = struct.unpack('<I', bytes.fromhex(new))[0]
+        self.assertEqual((off, old), (0, 'e001c0d2'))
+        self.assertEqual(word & 0xffe0001f, 0xd2c00000, 'movz x0, #imm, lsl #32')
+        region = ((word >> 5) & 0xffff) << 32
+        self.assertEqual(region, 12 << 30)
+        g = game.load('0400453019AA8001')
+        alias, reserve, stack = g.int('mem_alias'), g.int('mem_reserve'), g.int('mem_stack')
+        self.assertLessEqual(0x3e00000 + region + (64 << 20) + (256 << 20), alias, 'node area, the 12 GB region, the 64 MB region and room for later ones')
+        self.assertEqual(reserve - alias - stack - 0x10000000, 128 << 20, 'the heap region as before the larger alias region')
+        self.assertLessEqual(reserve, 0x550000000, "no larger than Fire Emblem Fortune's Weave's block, which plays on the iPhone 18 Pro Max")
 
     def test_unity_stream_buffer_writer_sleep_fingerprints(self):
         # the writer-sleep function's fingerprints: FFCC 1.0.3, Raging Loop / FFCC 1.0.0's log helper, a third body, and Thronebreaker 1.0.2's (upstream ffe0d357b); one cut, the same

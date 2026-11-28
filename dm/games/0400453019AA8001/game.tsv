@@ -22,9 +22,11 @@ romfs_marker	sts.ard
 zip_store	.ard:.pck:.webm:.metallib
 
 # ---- Memory ----
-# The Mac's alias region (64 GB, a Switch's) holds Monolith's 60 GiB reservation (reach +60.13 GiB upstream); an iPhone's 4.375 GiB does not (README.md).
-mem_reserve	0x140000000
-mem_alias	0x118000000
+# The Mac's alias region (64 GB, a Switch's) holds Monolith's 60 GiB reservation (reach +60.13 GiB upstream); an iPhone's cannot. A 16 GB alias region (Fire Emblem
+# Fortune's Weave's split, played on the iPhone 18 Pro Max) holds the 12 GB region patches.py makes of it where its rule matches (README.md "Address space"); the heap
+# and stacks are as before (128 MB, 256 MB), and the Mac's block is unchanged
+mem_reserve	0x428000000
+mem_alias	0x400000000
 mem_stack	0x10000000
 app_pool	0x240000000
 sys_resource	0x6000000

@@ -47,7 +47,9 @@ int main(void) { @autoreleasepool {
         "  m.set_vertex(2, V{float4(c.x - 0.25f * dx, c.y - 0.75f * dy, z, 1)}); m.set_index(0,0); m.set_index(1,1); m.set_index(2,2); m.set_primitive_count(1); }\n"
         "[[mesh]] void tasked(Mesh m, const object_data Payload& p [[payload]], uint tid [[thread_index_in_threadgroup]]) { if (!tid) triangle(m, p.first); }\n"
         "vertex float4 vertex_only(uint vid [[vertex_id]]) { const float2 p[] = {float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[vid % 3], float(vid / 3 + 1) * 0.125f, 1); }\n"
-        "fragment float4 color() { return float4(0,1,0,1); }\n", nil, &error);
+        "fragment float4 color() { return float4(0,1,0,1); }\n"
+        "struct UA { constant float4 *c; };\n"
+        "fragment float4 ucolor(constant UA &a [[buffer(0)]]) { return a.c[0]; }\n", nil, &error);
     if (!library) fprintf(stderr, "%s\n", error.localizedDescription.UTF8String);
     require(library != nil, "synthetic task and mesh shaders compile");
     NvShader *ms = shader(library, @"direct", 4), *tasked = shader(library, @"tasked", 4), *ts = shader(library, @"task", 3), *fs = shader(library, @"color", 1);
@@ -146,6 +148,56 @@ int main(void) { @autoreleasepool {
             res_remove(pixels);
         }
         P(nvnQueueFinish)(&queue); mtl_drain(); mtl_tex_release(&bc); mtl_tex_release(&bd); P(nvnMemoryPoolFinalize)(&rp); free(rec);
+    }
+    // DM_NVN_MTK_KEEP (nvn_geometry.inc mesh_tasks_draw): a task / mesh draw keeps the fragment stage's binding generation, so the next draw of its pixel shader, with nothing bound
+    // since, reuses the block the draw wrote; a uniform bound between the two draws moves it (the block is patched or written again) and the second draw takes the new colour. Both
+    // sides of the switch, in one run: with it off the second draw writes its block again (as before), and the picture is the same
+    {
+        NvShader *uf = shader(library, @"ucolor", 1); uf->rf.color_mask = 1;
+        uf->arg_len = [uf->fn newArgumentEncoderWithBufferIndex:0].encodedLength; uf->rf.nb = 1; uf->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0};
+        prog_t up = {0}; NvProg *upr = [NvProg new]; upr->sh[4] = ms; upr->sh[1] = uf;
+        up.magic = MAGIC('P','R','O','G'); up.serial = nvn_new_serial(); serial_put(up.serial, upr);
+        float *colors_mem = NULL; require(!posix_memalign((void **)&colors_mem, getpagesize(), 65536), "uniform storage allocated"); memset(colors_mem, 0, 65536);
+        const float red[4] = {1, 0, 0, 1}, white[4] = {1, 1, 1, 1}; memcpy(colors_mem, red, 16); memcpy(colors_mem + 64, white, 16);   // offsets 0 and 256
+        NVNmemoryPool up_pool; NVNmemoryPoolBuilder ub = {0}; P(nvnMemoryPoolBuilderSetDefaults)(&ub); P(nvnMemoryPoolBuilderSetDevice)(&ub, &device);
+        P(nvnMemoryPoolBuilderSetStorage)(&ub, colors_mem, 65536); P(nvnMemoryPoolBuilderSetFlags)(&ub, 0x24);
+        require(P(nvnMemoryPoolInitialize)(&up_pool, &ub), "uniform memory pool initialized");
+        NVNbufferAddress ua = P(nvnMemoryPoolGetBufferAddress)(&up_pool);
+        typedef void (*BindUbo)(NVNcommandBuffer *, NVNshaderStage, int, NVNbufferAddress, size_t);
+        BindUbo bind_ubo = (BindUbo)nvn_lookup("nvnCommandBufferBindUniformBuffer"); require(bind_ubo != NULL, "BindUniformBuffer entry point exists");
+        for (int keep = 1; keep >= 0; keep--) for (int change = 0; change < 2; change++) {
+            g_mtk_keep = keep;
+            printf("fragment block across two mesh draws, DM_NVN_MTK_KEEP=%d, %s\n", keep, change ? "a uniform bound between them" : "nothing bound between them");
+            uint64_t e0, r0, p0, e1, r1, p1, k0 = g_mtk_kept; mtl_args_stats(&e0, &r0, &p0);
+            P(nvnCommandBufferBeginRecording)(&command);
+            P(nvnCommandBufferSetRenderTargets)(&command, 1, colors, NULL, (const NVNtexture *)&depth, NULL);
+            P(nvnCommandBufferSetViewports)(&command, 0, 1, viewport); P(nvnCommandBufferSetScissor)(&command, 0, 0, W, H);
+            P(nvnCommandBufferSetDepthRange)(&command, 0, 1); P(nvnCommandBufferBindDepthStencilState)(&command, &ds);
+            P(nvnCommandBufferClearDepthStencil)(&command, 1, 1, 0, 0); P(nvnCommandBufferClearColor)(&command, 0, blue, 15);
+            P(nvnCommandBufferBindProgram)(&command, (const NVNprogram *)&up, 0xc3);
+            bind_ubo(&command, NVN_SHADER_STAGE_FRAGMENT, 0, ua, 16);
+            draw(&command, 2, 1);   // depth 0.25, red
+            if (change) bind_ubo(&command, NVN_SHADER_STAGE_FRAGMENT, 0, ua + 256, 16);
+            draw(&command, 1, 1);   // depth 0.125 over it: red again, or white after the new binding
+            NVNcommandHandle handle = P(nvnCommandBufferEndRecording)(&command);
+            P(nvnQueueSubmitCommands)(&queue, 1, &handle); P(nvnQueueFinish)(&queue);
+            mtl_args_stats(&e1, &r1, &p1);
+            id<MTLBuffer> pixels = [g_dev newBufferWithLength:W * H * 4 options:MTLResourceStorageModeShared]; res_add(pixels);
+            mtl_sub_begin();
+            enc_b_copy_texture_buffer(blit(), tex_mtl(&color), 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(W,H,1), pixels, 0, W * 4, W * H * 4);
+            require(mtl_wait(mtl_sub_commit(), 5000000000ull), "readback finishes"); CHECK(!mtl_last_commit_error(), "Metal reports no execution error");
+            const uint8_t want_red[] = {255, 0, 0, 255}, want_white[] = {255, 255, 255, 255}; int good = 1;
+            for (int i = 0; i < W * H; i++) good &= !memcmp((const uint8_t *)pixels.contents + i * 4, change ? want_white : want_red, 4);
+            CHECK(good, change ? "the second mesh draw takes the uniform bound before it" : "both mesh draws read the bound uniform");
+            CHECK(g_mtk_kept - k0 == (keep ? 2u : 0u), keep ? "each mesh draw kept the fragment generation" : "off: no mesh draw kept it");
+            printf("  fragment blocks: %llu encoded, %llu reused, %llu patched\n", (unsigned long long)(e1 - e0), (unsigned long long)(r1 - r0), (unsigned long long)(p1 - p0));
+            if (!change) CHECK(keep ? e1 - e0 == 1 && r1 - r0 == 1 : e1 - e0 == 2 && r1 - r0 == 0,
+                               keep ? "on: the second draw reuses the first draw's fragment block" : "off (negative control): the second draw writes its fragment block again");
+            else CHECK(r1 - r0 == 0 && (e1 - e0) + (p1 - p0) == 2, "a uniform bound between the draws: the second block is patched or written, never reused");
+            res_remove(pixels);
+        }
+        g_mtk_keep = 1;
+        P(nvnQueueFinish)(&queue); mtl_drain(); P(nvnMemoryPoolFinalize)(&up_pool); free(colors_mem);
     }
     P(nvnQueueFinish)(&queue); mtl_drain();
     P(nvnCommandBufferFinalize)(&command); mtl_tex_release(&color); mtl_tex_release(&depth);

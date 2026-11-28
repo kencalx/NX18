@@ -119,5 +119,6 @@ struct SideloadGuide: View {
         }
         .padding(24)
         .frame(width: 600, height: 560)
+        .escapeCloses { dismiss() }
     }
 }

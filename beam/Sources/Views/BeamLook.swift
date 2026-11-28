@@ -57,6 +57,14 @@ struct HomeCapsule<S: InsettableShape>: ViewModifier {
 extension View {
     func homeCapsule(tint: Color? = nil) -> some View { modifier(HomeCapsule(shape: Capsule(), tint: tint)) }
     func homeSurface<S: InsettableShape>(_ shape: S, interactive: Bool = true) -> some View { modifier(HomeCapsule(shape: shape, interactive: interactive)) }
+    /// Escape closes a sheet whose only button is Done (Return, .defaultAction): one button holds one shortcut, so an unseen one holds Escape (.cancelAction).
+    /// Kept out of VoiceOver, which already has Done and its own escape gesture
+    func escapeCloses(_ close: @escaping () -> Void) -> some View {
+        background {
+            Button("Close", action: close).keyboardShortcut(.cancelAction)
+                .opacity(0).frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true)
+        }
+    }
 }
 /// One button the hints bar names: one of the pad's face buttons (drawn as that pad's own glyph), −, or the D-pad's directions
 enum BeamHintKey: Hashable {

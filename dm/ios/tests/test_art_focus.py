@@ -38,6 +38,15 @@ class ArtFocusWiring(unittest.TestCase):
         mac = (REPO / 'dm/mac/Launcher.swift').read_text()
         self.assertIn('x.focus = ArtFocus.resolve(saved: ArtFocus.saved(), packed: x.packedFocus)', mac)   # the Mac app's own preferences, which NX 18 Beam may write, then Resources/dm/art_focus.json
 
+    def test_framing_reaches_voiceover_and_ends_under_a_sheet(self):
+        gate = (SOURCES / 'Launcher.swift').read_text()
+        art = gate[gate.index('FramedArt(image: Image(uiImage: art), natural: art.size, focus: artFocus)'):gate.index('else if let icon = artwork.icon')]
+        self.assertIn('.onLongPressGesture(minimumDuration: 0.6) { beginFraming() }', art)
+        self.assertIn('.accessibilityAction(named: "Adjust art") { beginFraming() }', art, 'the long press has a VoiceOver equivalent on the art itself')
+        self.assertNotIn('.accessibilityHidden(true)', art)
+        sheet = gate[gate.index('.onChange(of: sheet) {'):gate.index('.onChange(of: cloudPicking)')]
+        self.assertIn('if sheet != nil, framing != nil { endFraming(save: false) }', sheet, 'a Guide or About sheet over the framing ends it, as Cancel')
+
     def test_the_shared_file_is_compiled_wherever_the_gate_is(self):
         self.assertIn("ios/Sources/ArtFocus.swift", (REPO / 'dm/mac/pack_app.py').read_text())
         self.assertIn('../dm/ios/Sources/ArtFocus.swift', (REPO / 'beam/project.yml').read_text())

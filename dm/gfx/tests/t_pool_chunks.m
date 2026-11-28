@@ -103,7 +103,7 @@ int main(void) { @autoreleasepool {
         uint64_t r[2]; memcpy(r, map + (size_t)entry * DMSH_GMEM_MAP_ENTRY, sizeof r);
         CHECK("the entry holds the whole chunk", r[0] <= chunk << DMSH_GMEM_HINT_SHIFT && r[1] >= (chunk + 1) << DMSH_GMEM_HINT_SHIFT);
     }
-    // A texture a shader read is made, and goes into the table in place: no new table, and the budget does not apply. One nobody read is not made: its entry is its stand-in (pool_stand; the
+    // A texture a shader read is made, and goes into the table via copy-on-write (a new buffer; the one draws already encoded read keeps its entry, 1b507ef2c), and the budget does not apply. One nobody read is not made: its entry is its stand-in (pool_stand; the
     // dummy with DM_NVN_POOL_STANDIN=0). A render target no pass has written stays the dummy
     {
         tex_t rd = {.magic = MAGIC('T', 'E', 'X', 0), .has_layout = 1, .serial = 99801}, un = rd, rt = rd;
@@ -128,7 +128,7 @@ int main(void) { @autoreleasepool {
         pool_gpu(0, MTLTextureType2D, 0, 0, &tb2);
         const uint64_t *e2 = (const uint64_t *)((const uint8_t *)tb2.contents + DMSH_POOL_HEAD);
         CHECK("a read texture goes in, past the budget", g_treg[301].view && e2[301] == g_treg[301].view_rid && e2[301] != dummy);
-        CHECK("and into the table a draw already encoded reads", e[301] != dummy && e[301] != was && !g_treg[301].stand);
+        CHECK("but not into the table a draw already encoded reads: copy-on-write leaves it as it was", tb2 != tb && e[301] == was && !g_treg[301].stand);
         CHECK("an unread one is still not made", UNREAD(e2, 302));
         CHECK("a read render target no pass wrote stays the dummy", e2[303] == dummy);
         os_unfair_lock_unlock(&g_rmu); finish();
